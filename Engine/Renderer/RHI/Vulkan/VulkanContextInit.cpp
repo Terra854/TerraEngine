@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstring>
 #include <map>
+#include <utility>
 
 bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 	// Spin up instance, device, swapchain, and default resources so rendering can begin.
@@ -98,6 +99,9 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 	if (!CreateRenderPass()) return false;
 	if (!CreateFramebuffers()) return false;
 	if (!CreateSyncObjects()) return false;
+	if (!presentationLifecycle.Configure(MAX_FRAMES_IN_FLIGHT, surfaceMinimumImageCount,
+		requestedSwapchainImageCount, static_cast<std::uint32_t>(swapchainImages.size()))) return false;
+	editorCompletionTracker.SetPresentationGeneration(presentationLifecycle.Generation());
 	if (!CreateGpuTimestampQueries()) return false;
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!CreateDescriptorPool()) return false;
@@ -247,25 +251,13 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 	}
 	textureCache.clear();
 
-	auto DestroyOffscreenResources = [&](OffscreenResources& res) {
-		if (device) {
-			if (res.sampler != VK_NULL_HANDLE) vkDestroySampler(device, res.sampler, nullptr);
-			if (res.framebuffer != VK_NULL_HANDLE) vkDestroyFramebuffer(device, res.framebuffer, nullptr);
-			if (res.view != VK_NULL_HANDLE) vkDestroyImageView(device, res.view, nullptr);
-			if (res.depthView != VK_NULL_HANDLE) vkDestroyImageView(device, res.depthView, nullptr);
-		}
-		if (res.image != VK_NULL_HANDLE && res.allocation != VK_NULL_HANDLE) {
-			vmaDestroyImage(allocator, res.image, res.allocation);
-		}
-		if (res.depthImage != VK_NULL_HANDLE && res.depthAllocation != VK_NULL_HANDLE) {
-			vmaDestroyImage(allocator, res.depthImage, res.depthAllocation);
-		}
-		res = {};
-	};
-
-	DestroyOffscreenResources(sceneView);
-	DestroyOffscreenResources(gameView);
-	DestroyOffscreenResources(captureView);
+	DestroyOffscreenResourceSet(sceneView);
+	DestroyOffscreenResourceSet(gameView);
+	DestroyOffscreenResourceSet(captureView);
+	for (RetiredOffscreenResourceSet& retired : retiredOffscreenResources) {
+		DestroyOffscreenResourceSet(retired.resources);
+	}
+	retiredOffscreenResources.clear();
 	
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (device && offscreenRenderPass != VK_NULL_HANDLE) {
@@ -609,19 +601,8 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 	}
 	vrs.Destroy(device, allocator);
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (size_t i = 0; i < renderFinishedSemaphores.size(); i++) {
-		if (device) {
-			vkDestroySemaphore(device, renderFinishedSemaphores[i], nullptr);
-			vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);
-			vkDestroySemaphore(device, uiSemaphores[i], nullptr);
-			vkDestroyFence(device, inFlightFences[i], nullptr);
-		}
-	}
-	renderFinishedSemaphores.clear();
-	imageAvailableSemaphores.clear();
-	uiSemaphores.clear();
-	inFlightFences.clear();
+	DestroyFrameSyncObjects();
+	DestroyPresentationImageSyncObjects();
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (device) {
@@ -989,19 +970,29 @@ bool VulkanContext::Impl::CreateLogicalDevice() {
 }
 
 // VulkanContext::Impl::CreateSwapChain is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-bool VulkanContext::Impl::CreateSwapChain(WindowSystem& windowSystem) {
+bool VulkanContext::Impl::CreateSwapChain(WindowSystem& windowSystem, VkSwapchainKHR oldSwapchain) {
 	// Assemble swapchain matching the current surface capabilities.
 	SwapChainSupportDetails swapChainSupport = QuerySwapChainSupport(physicalDevice);
 
 	VkSurfaceFormatKHR surfaceFormat = ChooseSwapSurfaceFormat(swapChainSupport.formats);
 	VkPresentModeKHR presentMode = ChooseSwapPresentMode(swapChainSupport.presentModes);
 	VkExtent2D extent = ChooseSwapExtent(swapChainSupport.capabilities, windowSystem);
+	if (extent.width == 0 || extent.height == 0) {
+		// Minimized windows are a normal presentation state. Return to the frame
+		// loop and retry after a later resize event instead of blocking in GLFW.
+		presentationLifecycle.PublishRecreation(
+			TerraEngine::Renderer::Vulkan::PresentationRecreationOutcome::DeferredZeroExtent,
+			0u, 0u, 0u);
+		return false;
+	}
 
 	uint32_t imageCount = swapChainSupport.capabilities.minImageCount + 1;
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (swapChainSupport.capabilities.maxImageCount > 0 && imageCount > swapChainSupport.capabilities.maxImageCount) {
 		imageCount = swapChainSupport.capabilities.maxImageCount;
 	}
+	surfaceMinimumImageCount = swapChainSupport.capabilities.minImageCount;
+	requestedSwapchainImageCount = imageCount;
 
 	VkSwapchainCreateInfoKHR createInfo{};
 	createInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
@@ -1030,16 +1021,39 @@ bool VulkanContext::Impl::CreateSwapChain(WindowSystem& windowSystem) {
 	createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
 	createInfo.presentMode = presentMode;
 	createInfo.clipped = VK_TRUE;
+	createInfo.oldSwapchain = oldSwapchain;
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (vkCreateSwapchainKHR(device, &createInfo, nullptr, &swapchain) != VK_SUCCESS) {
+	VkSwapchainKHR candidateSwapchain = VK_NULL_HANDLE;
+	const VkResult createResult = vkCreateSwapchainKHR(device, &createInfo, nullptr, &candidateSwapchain);
+	if (createResult != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "failed to create swap chain!");
 		return false;
 	}
 
-	vkGetSwapchainImagesKHR(device, swapchain, &imageCount, nullptr);
-	swapchainImages.resize(imageCount);
-	vkGetSwapchainImagesKHR(device, swapchain, &imageCount, swapchainImages.data());
+	std::uint32_t actualImageCount = 0;
+	VkResult enumerateResult = vkGetSwapchainImagesKHR(device, candidateSwapchain, &actualImageCount, nullptr);
+	if (enumerateResult != VK_SUCCESS || actualImageCount < requestedSwapchainImageCount) {
+		vkDestroySwapchainKHR(device, candidateSwapchain, nullptr);
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to enumerate swapchain image count: " << enumerateResult);
+		return false;
+	}
+	std::vector<VkImage> candidateImages(actualImageCount);
+	enumerateResult = vkGetSwapchainImagesKHR(device, candidateSwapchain, &actualImageCount, candidateImages.data());
+	if ((enumerateResult != VK_SUCCESS && enumerateResult != VK_INCOMPLETE)
+		|| actualImageCount < requestedSwapchainImageCount) {
+		vkDestroySwapchainKHR(device, candidateSwapchain, nullptr);
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to enumerate swapchain images: " << enumerateResult);
+		return false;
+	}
+	if (enumerateResult == VK_INCOMPLETE) {
+		candidateImages.resize(actualImageCount);
+		TERRAENGINE_LOG(LogLevel::Warning, "Swapchain image enumeration returned VK_INCOMPLETE; using the complete prefix and requesting recreation if acquisition exceeds it.");
+	}
+
+	// Publish the candidate only after both enumeration calls and ownership
+	// validation succeeded. Callers can keep the prior bundle on any failure.
+	swapchain = candidateSwapchain;
+	swapchainImages = std::move(candidateImages);
 
 	swapchainImageFormat = surfaceFormat.format;
 	swapchainExtent = extent;
@@ -1410,38 +1424,121 @@ bool VulkanContext::Impl::CreateCommandPool() {
 
 // VulkanContext::Impl::CreateSyncObjects is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool VulkanContext::Impl::CreateSyncObjects() {
-	// Create semaphores and fences for every frame-in-flight slot.
+	// Frame-owned synchronization is independent from swapchain image ownership.
 	imageAvailableSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
 	renderFinishedSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
-	uiSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
 	inFlightFences.resize(MAX_FRAMES_IN_FLIGHT);
-	extraPrimaryCommandBuffers.clear();
-	extraPrimaryCommandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
-	pendingPrimaryCommandBuffers.clear();
-	pendingPrimaryCommandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
-	pendingPrimaryCommandBuffersSubmitted.clear();
-	pendingPrimaryCommandBuffersSubmitted.resize(MAX_FRAMES_IN_FLIGHT, 0u);
-	retiredBuffersByFrame.clear();
-	retiredBuffersByFrame.resize(MAX_FRAMES_IN_FLIGHT);
+	uiSemaphores.resize(swapchainImages.size());
+	InitializeFrameTracking();
 
 	VkSemaphoreCreateInfo semaphoreInfo{};
 	semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-
 	VkFenceCreateInfo fenceInfo{};
 	fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
 	fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-		if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphores[i]) != VK_SUCCESS ||
-			vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphores[i]) != VK_SUCCESS ||
-			vkCreateSemaphore(device, &semaphoreInfo, nullptr, &uiSemaphores[i]) != VK_SUCCESS ||
-			vkCreateFence(device, &fenceInfo, nullptr, &inFlightFences[i]) != VK_SUCCESS) {
-			TERRAENGINE_LOG(LogLevel::Error, "failed to create synchronization objects for a frame!");
+	for (std::size_t index = 0; index < MAX_FRAMES_IN_FLIGHT; ++index) {
+		if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphores[index]) != VK_SUCCESS
+			|| vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphores[index]) != VK_SUCCESS
+			|| vkCreateFence(device, &fenceInfo, nullptr, &inFlightFences[index]) != VK_SUCCESS) {
+			DestroyFrameSyncObjects();
+			DestroyPresentationImageSyncObjects();
+			TERRAENGINE_LOG(LogLevel::Error, "failed to create frame-owned synchronization objects!");
+			return false;
+		}
+	}
+	for (std::size_t imageIndex = 0; imageIndex < uiSemaphores.size(); ++imageIndex) {
+		if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &uiSemaphores[imageIndex]) != VK_SUCCESS) {
+			DestroyFrameSyncObjects();
+			DestroyPresentationImageSyncObjects();
+			TERRAENGINE_LOG(LogLevel::Error, "failed to create image-owned present synchronization objects!");
 			return false;
 		}
 	}
 	return true;
+}
+
+void VulkanContext::Impl::InitializeFrameTracking() {
+	// Startup tracking owns command-buffer and deferred-retirement containers.
+	// Swapchain recreation must not clear them before their fences complete.
+	if (extraPrimaryCommandBuffers.empty()) extraPrimaryCommandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+	if (pendingPrimaryCommandBuffers.empty()) pendingPrimaryCommandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+	if (pendingPrimaryCommandBuffersSubmitted.empty()) pendingPrimaryCommandBuffersSubmitted.resize(MAX_FRAMES_IN_FLIGHT, 0u);
+	if (retiredBuffersByFrame.empty()) retiredBuffersByFrame.resize(MAX_FRAMES_IN_FLIGHT);
+	editorCompletionTracker.ResetFrameCount(MAX_FRAMES_IN_FLIGHT);
+}
+
+void VulkanContext::Impl::DestroyFrameSyncObjects() {
+	if (device != VK_NULL_HANDLE) {
+		for (VkSemaphore semaphore : imageAvailableSemaphores) if (semaphore != VK_NULL_HANDLE) vkDestroySemaphore(device, semaphore, nullptr);
+		for (VkSemaphore semaphore : renderFinishedSemaphores) if (semaphore != VK_NULL_HANDLE) vkDestroySemaphore(device, semaphore, nullptr);
+		for (VkFence fence : inFlightFences) if (fence != VK_NULL_HANDLE) vkDestroyFence(device, fence, nullptr);
+	}
+	imageAvailableSemaphores.clear();
+	renderFinishedSemaphores.clear();
+	inFlightFences.clear();
+}
+
+void VulkanContext::Impl::DestroyPresentationImageSyncObjects() {
+	if (device != VK_NULL_HANDLE) {
+		for (VkSemaphore semaphore : uiSemaphores) if (semaphore != VK_NULL_HANDLE) vkDestroySemaphore(device, semaphore, nullptr);
+	}
+	uiSemaphores.clear();
+	acquiredPresentationImage.reset();
+}
+
+VulkanContext::Impl::PresentationResourceBundle VulkanContext::Impl::TakePresentationResourceBundle() {
+	PresentationResourceBundle bundle;
+	bundle.swapchain = std::exchange(swapchain, VK_NULL_HANDLE);
+	bundle.images = std::move(swapchainImages);
+	bundle.imageFormat = std::exchange(swapchainImageFormat, VK_FORMAT_UNDEFINED);
+	bundle.extent = std::exchange(swapchainExtent, VkExtent2D{});
+	bundle.imageViews = std::move(swapchainImageViews);
+	bundle.renderPass = std::exchange(renderPass, VK_NULL_HANDLE);
+	bundle.framebuffers = std::move(framebuffers);
+	bundle.depthImage = std::exchange(depthImage, VK_NULL_HANDLE);
+	bundle.depthAllocation = std::exchange(depthImageAllocation, VK_NULL_HANDLE);
+	bundle.depthView = std::exchange(depthImageView, VK_NULL_HANDLE);
+	bundle.acquireByFrame = std::move(imageAvailableSemaphores);
+	bundle.editorOffscreenReadyByFrame = std::move(renderFinishedSemaphores);
+	bundle.presentReadyByImage = std::move(uiSemaphores);
+	bundle.frameFences = std::move(inFlightFences);
+	return bundle;
+}
+
+void VulkanContext::Impl::RestorePresentationResourceBundle(PresentationResourceBundle&& bundle) {
+	swapchain = std::exchange(bundle.swapchain, VK_NULL_HANDLE);
+	swapchainImages = std::move(bundle.images);
+	swapchainImageFormat = std::exchange(bundle.imageFormat, VK_FORMAT_UNDEFINED);
+	swapchainExtent = std::exchange(bundle.extent, VkExtent2D{});
+	swapchainImageViews = std::move(bundle.imageViews);
+	renderPass = std::exchange(bundle.renderPass, VK_NULL_HANDLE);
+	framebuffers = std::move(bundle.framebuffers);
+	depthImage = std::exchange(bundle.depthImage, VK_NULL_HANDLE);
+	depthImageAllocation = std::exchange(bundle.depthAllocation, VK_NULL_HANDLE);
+	depthImageView = std::exchange(bundle.depthView, VK_NULL_HANDLE);
+	imageAvailableSemaphores = std::move(bundle.acquireByFrame);
+	renderFinishedSemaphores = std::move(bundle.editorOffscreenReadyByFrame);
+	uiSemaphores = std::move(bundle.presentReadyByImage);
+	inFlightFences = std::move(bundle.frameFences);
+}
+
+void VulkanContext::Impl::DestroyPresentationResourceBundle(PresentationResourceBundle& bundle) {
+	if (device != VK_NULL_HANDLE) {
+		for (VkFramebuffer framebuffer : bundle.framebuffers) if (framebuffer != VK_NULL_HANDLE) vkDestroyFramebuffer(device, framebuffer, nullptr);
+		if (bundle.renderPass != VK_NULL_HANDLE) vkDestroyRenderPass(device, bundle.renderPass, nullptr);
+		for (VkImageView view : bundle.imageViews) if (view != VK_NULL_HANDLE) vkDestroyImageView(device, view, nullptr);
+		if (bundle.depthView != VK_NULL_HANDLE) vkDestroyImageView(device, bundle.depthView, nullptr);
+		for (VkSemaphore semaphore : bundle.acquireByFrame) if (semaphore != VK_NULL_HANDLE) vkDestroySemaphore(device, semaphore, nullptr);
+		for (VkSemaphore semaphore : bundle.editorOffscreenReadyByFrame) if (semaphore != VK_NULL_HANDLE) vkDestroySemaphore(device, semaphore, nullptr);
+		for (VkSemaphore semaphore : bundle.presentReadyByImage) if (semaphore != VK_NULL_HANDLE) vkDestroySemaphore(device, semaphore, nullptr);
+		for (VkFence fence : bundle.frameFences) if (fence != VK_NULL_HANDLE) vkDestroyFence(device, fence, nullptr);
+		if (bundle.swapchain != VK_NULL_HANDLE) vkDestroySwapchainKHR(device, bundle.swapchain, nullptr);
+	}
+	if (bundle.depthImage != VK_NULL_HANDLE && bundle.depthAllocation != VK_NULL_HANDLE) {
+		vmaDestroyImage(allocator, bundle.depthImage, bundle.depthAllocation);
+	}
+	bundle = {};
 }
 
 // VulkanContext::Impl::CreateDescriptorPool is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1734,222 +1831,133 @@ void VulkanContext::Impl::CleanupSwapChain() {
 // VulkanContext::Impl::RecreateSwapChain is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::RecreateSwapChain() {
 	if (deviceLost) {
+		presentationLifecycle.MarkDeviceLost();
 		return;
 	}
-	// Block until a valid framebuffer size is available (e.g., when resizing).
-	int width = 0, height = 0;
+
+	int width = 0;
+	int height = 0;
 	auto* window = static_cast<GLFWwindow*>(windowSystem->GetNativeHandle());
 	glfwGetFramebufferSize(window, &width, &height);
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	while (width == 0 || height == 0) {
-		glfwGetFramebufferSize(window, &width, &height);
-		glfwWaitEvents();
+	if (width <= 0 || height <= 0) {
+		framebufferResized = true;
+		presentationLifecycle.PublishRecreation(
+			TerraEngine::Renderer::Vulkan::PresentationRecreationOutcome::DeferredZeroExtent,
+			surfaceMinimumImageCount, requestedSwapchainImageCount,
+			static_cast<std::uint32_t>(swapchainImages.size()));
+		return;
 	}
+
+	presentationLifecycle.RequestRecreation();
 	const VkResult idleResult = WaitDeviceIdle();
 	if (MarkDeviceLost(idleResult, "swapchain recreation device idle")) {
+		presentationLifecycle.MarkDeviceLost();
 		return;
 	}
 	if (idleResult != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "Skipping swapchain recreation because the device did not become idle: " << idleResult);
 		return;
 	}
+	editorCompletionTracker.RecordProtectedIdle();
 
-	if (editorMode) {
-		// The native editor window presents ImGui only. Its Scene/Game targets,
-		// Hi-Z pyramids, shadow maps, pipelines, and global buffers are independent
-		// offscreen resources whose sizes are managed by RenderFrame. Rebuilding all
-		// of them for every OS resize notification creates unnecessary destruction,
-		// descriptor churn, and driver pressure. Recreate only objects that directly
-		// reference the editor swapchain and keep the renderer's project state alive.
-		CleanupSwapChain();
-		for (std::size_t index = 0u; index < renderFinishedSemaphores.size(); ++index) {
-			vkDestroySemaphore(device, renderFinishedSemaphores[index], nullptr);
-			vkDestroySemaphore(device, imageAvailableSemaphores[index], nullptr);
-			vkDestroySemaphore(device, uiSemaphores[index], nullptr);
-			vkDestroyFence(device, inFlightFences[index], nullptr);
-		}
-		renderFinishedSemaphores.clear();
-		imageAvailableSemaphores.clear();
-		uiSemaphores.clear();
-		inFlightFences.clear();
+	// Keep the complete old presentation bundle alive while the candidate is
+	// built. oldSwapchain lets the presentation engine migrate efficiently, and
+	// any failure restores the exact active bundle without touching gameplay.
+	PresentationResourceBundle activeBundle = TakePresentationResourceBundle();
+	VulkanVRS activeVrs = vrs;
+	vrs = {};
+	bool candidateVrsCreated = false;
 
-		if (!CreateSwapChain(*windowSystem)
-			|| !CreateImageViews()
-			|| !CreateRenderPass()
-			|| !CreateFramebuffers()
-			|| !CreateSyncObjects()) {
-			TERRAENGINE_LOG(LogLevel::Error, "Failed to recreate the editor presentation swapchain.");
-			return;
+	const bool swapchainCreated = CreateSwapChain(*windowSystem, activeBundle.swapchain);
+	bool candidateCreated = swapchainCreated && CreateImageViews();
+	if (candidateCreated && !editorMode) {
+		candidateCreated = CreateDepthResources();
+		if (candidateCreated && vrsFeatures.pipelineFragmentShadingRate) {
+			vrs.Create(device, physicalDevice, allocator, swapchainExtent.width, swapchainExtent.height);
+			candidateVrsCreated = vrs.view != VK_NULL_HANDLE;
+			if (candidateVrsCreated) {
+				candidateCreated = TransitionImageLayout(vrs.image, VK_FORMAT_R8_UINT,
+					VK_IMAGE_LAYOUT_UNDEFINED,
+					VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR);
+			}
 		}
-		editorRenderSubmitted = false;
-		swapchainImageAcquired = false;
+	}
+	candidateCreated = candidateCreated && CreateRenderPass()
+		&& CreateFramebuffers() && CreateSyncObjects();
+	if (candidateCreated) {
+		candidateCreated = presentationLifecycle.Configure(
+			MAX_FRAMES_IN_FLIGHT, surfaceMinimumImageCount,
+			requestedSwapchainImageCount,
+			static_cast<std::uint32_t>(swapchainImages.size()));
+	}
+
+	if (!candidateCreated) {
+		PresentationResourceBundle failedCandidate = TakePresentationResourceBundle();
+		DestroyPresentationResourceBundle(failedCandidate);
+		if (candidateVrsCreated || vrs.view != VK_NULL_HANDLE) vrs.Destroy(device, allocator);
+		vrs = activeVrs;
+		RestorePresentationResourceBundle(std::move(activeBundle));
+		framebufferResized = true;
+		presentationLifecycle.RequestRecreation();
+		TERRAENGINE_LOG(LogLevel::Error, "Presentation candidate creation failed; the previous bundle remains active and retry stays pending.");
 		return;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (device) {
-		auto DestroyShadowFramebuffer = [&](VkFramebuffer& framebuffer) {
-			if (framebuffer != VK_NULL_HANDLE) {
-				vkDestroyFramebuffer(device, framebuffer, nullptr);
-				framebuffer = VK_NULL_HANDLE;
-			}
-		};
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (VkFramebuffer& framebuffer : directionalShadowFramebuffers) {
-			DestroyShadowFramebuffer(framebuffer);
-		}
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (VkFramebuffer& framebuffer : spotShadowFramebuffers) {
-			DestroyShadowFramebuffer(framebuffer);
-		}
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (VkFramebuffer& framebuffer : areaShadowFramebuffers) {
-			DestroyShadowFramebuffer(framebuffer);
-		}
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (std::array<VkFramebuffer, 6>& faceFramebuffers : pointShadowFaceFramebuffersBySlot) {
-			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-			for (VkFramebuffer& framebuffer : faceFramebuffers) {
-				DestroyShadowFramebuffer(framebuffer);
-			}
-		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (shadowRenderPass != VK_NULL_HANDLE) {
-			vkDestroyRenderPass(device, shadowRenderPass, nullptr);
-			shadowRenderPass = VK_NULL_HANDLE;
-		}
-		activeShadowResourceRequest = {};
-		shadowStorageRegions.fill({});
-		shadowCacheEntries.clear();
-	}
-	previousClusterValidationSnapshotValid = false;
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (ViewDepthHistoryState& depthHistory : depthHistoryByView) {
-		depthHistory.valid = false;
-		depthHistory.ambientOcclusionDepthValidByFrame.fill(false);
-	}
+	editorCompletionTracker.SetPresentationGeneration(presentationLifecycle.Generation());
+	DestroyPresentationResourceBundle(activeBundle);
+	if (activeVrs.view != VK_NULL_HANDLE) activeVrs.Destroy(device, allocator);
 
-	DestroyPipelines();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (device) {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+	if (!editorMode) {
+		// These objects depend on extent or render-pass compatibility, while
+		// shadows, global buffers, descriptors, caches, scenes, and CPU assets do not.
+		DestroyAmbientOcclusionResources();
+		if (hiZDescriptorPool != VK_NULL_HANDLE) {
+			vkDestroyDescriptorPool(device, hiZDescriptorPool, nullptr);
+			hiZDescriptorPool = VK_NULL_HANDLE;
+			hiZDescriptorSets.clear();
+		}
+		if (aoDescriptorPool != VK_NULL_HANDLE) {
+			vkDestroyDescriptorPool(device, aoDescriptorPool, nullptr);
+			aoDescriptorPool = VK_NULL_HANDLE;
+			aoDescriptorSets.clear();
+		}
+		for (std::array<std::array<VulkanHiZ, 2>, MAX_FRAMES_IN_FLIGHT>& viewHiZFrames : hiZByViewFrame) {
+			for (std::array<VulkanHiZ, 2>& frameHiZPair : viewHiZFrames) {
+				for (VulkanHiZ& frameHiZ : frameHiZPair) frameHiZ.Destroy(device, allocator);
+			}
+		}
+		DestroyPipelines();
 		if (staticUiPipeline != VK_NULL_HANDLE) {
 			vkDestroyPipeline(device, staticUiPipeline, nullptr);
 			staticUiPipeline = VK_NULL_HANDLE;
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (sdfTextPipeline != VK_NULL_HANDLE) {
 			vkDestroyPipeline(device, sdfTextPipeline, nullptr);
 			sdfTextPipeline = VK_NULL_HANDLE;
 		}
-	}
-	// Do NOT reset descriptor pool here. ImGui uses it and its font texture lives there.
-	// if (descriptorPool) {
-	// 	VkResult resetResult = vkResetDescriptorPool(device, descriptorPool, 0);
-	// 	if (resetResult != VK_SUCCESS) {
-	// 		TERRAENGINE_LOG(LogLevel::Warning, "Failed to reset descriptor pool during swapchain recreation");
-	// 	}
-	// }
 
-	CleanupSwapChain();
-
-	auto DestroyBufferVector = [&](std::vector<VulkanBuffer>& buffers) {
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (auto& buffer : buffers) {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (buffer.buffer != VK_NULL_HANDLE) {
-				vmaDestroyBuffer(allocator, buffer.buffer, buffer.allocation);
+		const VkFormat depthFmt = FindDepthFormat();
+		for (std::array<std::array<VulkanHiZ, 2>, MAX_FRAMES_IN_FLIGHT>& viewHiZFrames : hiZByViewFrame) {
+			for (std::array<VulkanHiZ, 2>& frameHiZPair : viewHiZFrames) {
+				for (VulkanHiZ& frameHiZ : frameHiZPair) {
+					frameHiZ.Create(device, allocator, swapchainExtent.width, swapchainExtent.height, depthFmt);
+				}
 			}
 		}
-		buffers.clear();
-	};
-
-	DestroyBufferVector(globalFrameCullingSSBOs);
-	DestroyBufferVector(globalMeshletCountersSSBOs);
-	DestroyBufferVector(globalLightSSBOs);
-	DestroyBufferVector(lightAnalysisInputSSBOs);
-	DestroyBufferVector(clusterGridSSBOs);
-	DestroyBufferVector(lightIndexSSBOs);
-	DestroyBufferVector(clusterDepthSSBOs);
-	DestroyBufferVector(lightAnalysisSSBOs);
-	DestroyBufferVector(indirectDrawBuffers);
-
-	if (hiZDescriptorPool != VK_NULL_HANDLE) {
-		vkDestroyDescriptorPool(device, hiZDescriptorPool, nullptr);
-		hiZDescriptorPool = VK_NULL_HANDLE;
-		hiZDescriptorSets.clear();
-	}
-	if (aoDescriptorPool != VK_NULL_HANDLE) {
-		vkDestroyDescriptorPool(device, aoDescriptorPool, nullptr);
-		aoDescriptorPool = VK_NULL_HANDLE;
-		aoDescriptorSets.clear();
-	}
-	for (std::array<std::array<VulkanHiZ, 2>, MAX_FRAMES_IN_FLIGHT>& viewHiZFrames : hiZByViewFrame) {
-		for (std::array<VulkanHiZ, 2>& frameHiZPair : viewHiZFrames) {
-			for (VulkanHiZ& frameHiZ : frameHiZPair) {
-				frameHiZ.Destroy(device, allocator);
-			}
+		for (std::array<std::uint32_t, MAX_FRAMES_IN_FLIGHT>& indices : hiZReadIndexByViewFrame) indices.fill(0u);
+		for (std::array<bool, MAX_FRAMES_IN_FLIGHT>& swaps : hiZWritePendingSwapByViewFrame) swaps.fill(false);
+		CreateAmbientOcclusionResources();
+		for (std::uint32_t frameIndex = 0; frameIndex < MAX_FRAMES_IN_FLIGHT; ++frameIndex) {
+			UpdateGlobalHiZ(frameIndex);
 		}
 	}
-	vrs.Destroy(device, allocator);
 
-	vkDestroyImageView(device, depthImageView, nullptr);
-	vmaDestroyImage(allocator, depthImage, depthImageAllocation);
-
-	depthImage = VK_NULL_HANDLE;
-	depthImageAllocation = VK_NULL_HANDLE;
-	depthImageView = VK_NULL_HANDLE;
-
-	// Destroy sync objects to reset their state (e.g. clear signaled semaphores from failed frames)
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (size_t i = 0; i < renderFinishedSemaphores.size(); i++) {
-		vkDestroySemaphore(device, renderFinishedSemaphores[i], nullptr);
-		vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);
-		vkDestroySemaphore(device, uiSemaphores[i], nullptr);
-		vkDestroyFence(device, inFlightFences[i], nullptr);
-	}
-	renderFinishedSemaphores.clear();
-	imageAvailableSemaphores.clear();
-	uiSemaphores.clear();
-	inFlightFences.clear();
-
-	CreateSwapChain(*windowSystem);
-	CreateImageViews();
-	CreateDepthResources();
-
-	VkFormat depthFmt = FindDepthFormat();
-	for (std::array<std::array<VulkanHiZ, 2>, MAX_FRAMES_IN_FLIGHT>& viewHiZFrames : hiZByViewFrame) {
-		for (std::array<VulkanHiZ, 2>& frameHiZPair : viewHiZFrames) {
-			for (VulkanHiZ& frameHiZ : frameHiZPair) {
-				frameHiZ.Create(device, allocator, swapchainExtent.width, swapchainExtent.height, depthFmt);
-			}
-		}
-	}
-	for (std::array<uint32_t, MAX_FRAMES_IN_FLIGHT>& readIndices : hiZReadIndexByViewFrame) {
-		readIndices.fill(0u);
-	}
-	for (std::array<bool, MAX_FRAMES_IN_FLIGHT>& pendingSwaps : hiZWritePendingSwapByViewFrame) {
-		pendingSwaps.fill(false);
-	}
-
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (vrsFeatures.pipelineFragmentShadingRate) {
-		vrs.Create(device, physicalDevice, allocator, swapchainExtent.width, swapchainExtent.height);
-		TransitionImageLayout(vrs.image, VK_FORMAT_R8_UINT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR);
-	}
-
-	CreateRenderPass();
-	CreateFramebuffers();
-	CreateSyncObjects(); // Recreate fresh sync objects
-	workerCommandPools.resize(MAX_FRAMES_IN_FLIGHT);
-
-	CreateCullingBufferResources();
-	CreateLightingBufferResources();
-	CreateAmbientOcclusionResources();
-	CreateIndirectDrawResources();
-	for (uint32_t frameIndex = 0u; frameIndex < MAX_FRAMES_IN_FLIGHT; ++frameIndex) {
-		UpdateGlobalHiZ(frameIndex);
-	}
+	editorRenderSubmitted = false;
+	swapchainImageAcquired = false;
+	acquiredPresentationImage.reset();
+	framebufferResized = false;
+	TERRAENGINE_LOG(LogLevel::Info, "Presentation candidate published atomically. generation="
+		<< presentationLifecycle.Generation() << ", images=" << swapchainImages.size());
 }
 
 // VulkanContext::Impl::DebugCallback is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

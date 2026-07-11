@@ -2,6 +2,9 @@
 #include "EditorCommandLine.h"
 
 #include <array>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 
 namespace TerraEngine::EditorTests
 {
@@ -36,6 +39,18 @@ namespace TerraEngine::EditorTests
 		registry.Add("Editor.CommandLine.MissingProjectValueFallsBackToHub", [](TestContext& context) {
 			const EditorCommandLineOptions options = Parse({"TerraEngine-Editor.exe", "--project"});
 			context.Expect(!options.startupProjectPath.has_value(), "Missing --project value should leave the startup project unset.");
+		});
+
+		registry.Add("Editor.CommandLine.RendererBootstrapPrecedesEngineRun", [](TestContext& context) {
+			std::ifstream input(std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Editor/TerraEngine-Editor/Core/EditorMain.cpp");
+			std::ostringstream source;
+			source << input.rdbuf();
+			const std::string text = source.str();
+			const auto resolve = text.find("ResolveEditorStartupRendererConfiguration");
+			const auto configure = text.find("ConfigureEditorStartupProfile");
+			const auto run = text.find("engine.Run()");
+			context.Expect(resolve < configure && configure < run, "Direct-project settings must be applied before Engine::Run initializes ResourceManager, RenderSystem, or Vulkan.");
 		});
 	}
 }

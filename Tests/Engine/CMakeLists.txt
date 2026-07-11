@@ -19,6 +19,8 @@ add_executable(TerraEngine-EngineTests
 	Runtime/SceneRuntimeParityTests.cpp
 	Runtime/ThreadPoolSingletonTests.cpp
 	Runtime/WorkerPoolTests.cpp
+	Runtime/ExportRuntimePresentationTests.cpp
+	Runtime/RendererStabilitySmokeToolTests.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackagingRequest.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackPlanner.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackWriter.cpp
@@ -120,6 +122,9 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderWorkSchedulingTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanFrameDiagnosticsTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanImageReadbackTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanPresentationLifecycleTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanUiSubmissionFailureTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/EditorFrameCompletionTrackerTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanRecordingSchedulingTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanThreadLocalContextTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanStaleBatchTests.cpp

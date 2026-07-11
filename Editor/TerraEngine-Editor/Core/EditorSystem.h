@@ -23,6 +23,7 @@ public:
 	void Update(float deltaTime) override;
 	void Shutdown() override;
 	std::string SystemName() override;
+	TerraEngine::Scheduling::SystemDeclaration SchedulerDeclaration() override;
 
 	void SaveWorkspaceLayout();
 	void LoadWorkspaceLayout();
@@ -56,6 +57,7 @@ private:
 	bool pendingLoadLayout = false;
 	bool pendingSaveLayout = false;
 	bool startupProjectOpenAttempted = false;
+	std::uint64_t imguiPresentationGeneration = 0;
 	void HandleProjectLoaded();
 	void ProcessStartupProjectOpen();
 public:

@@ -82,6 +82,8 @@ void WindowSystem::Configure(std::unique_ptr<IWindowBackend> backendInstance, Wi
 	latestWorkerSnapshot.width = windowConfig.width;
 	latestWorkerSnapshot.height = windowConfig.height;
 	latestWorkerSnapshot.resizable = windowConfig.resizable;
+	TERRAENGINE_LOG(LogLevel::Info, "Window presentation configuration: resizable="
+		<< (windowConfig.resizable ? "true" : "false"));
 	latestWorkerSnapshot.title = windowConfig.title;
 	latestWorkerSnapshot.boundarySummary = pollingDiagnostics.workerSafeSubwork;
 	// Debug log makes backend selection visible before initialization runs.

@@ -224,9 +224,37 @@ struct VulkanContext::Impl {
 	VkDescriptorPool editorDescriptorPool = VK_NULL_HANDLE;
 
 	std::vector<VkSemaphore> imageAvailableSemaphores;
+	// renderFinishedSemaphores are frame-owned offscreen dependencies consumed
+	// by the editor UI submit. They are never used directly for presentation.
 	std::vector<VkSemaphore> renderFinishedSemaphores;
+	// uiSemaphores are present-ready semaphores owned by swapchain image index,
+	// so this collection always matches swapchainImages rather than frame slots.
 	std::vector<VkSemaphore> uiSemaphores;
 	std::vector<VkFence> inFlightFences;
+	// PresentationResourceBundle is movable ownership used during recreation.
+	// Candidate construction can fail without destroying the last active bundle.
+	struct PresentationResourceBundle
+	{
+		VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+		std::vector<VkImage> images;
+		VkFormat imageFormat = VK_FORMAT_UNDEFINED;
+		VkExtent2D extent{};
+		std::vector<VkImageView> imageViews;
+		VkRenderPass renderPass = VK_NULL_HANDLE;
+		std::vector<VkFramebuffer> framebuffers;
+		VkImage depthImage = VK_NULL_HANDLE;
+		VmaAllocation depthAllocation = VK_NULL_HANDLE;
+		VkImageView depthView = VK_NULL_HANDLE;
+		std::vector<VkSemaphore> acquireByFrame;
+		std::vector<VkSemaphore> editorOffscreenReadyByFrame;
+		std::vector<VkSemaphore> presentReadyByImage;
+		std::vector<VkFence> frameFences;
+	};
+	TerraEngine::Renderer::Vulkan::PresentationLifecycle presentationLifecycle;
+	TerraEngine::Renderer::Vulkan::EditorFrameCompletionTracker editorCompletionTracker{3u};
+	std::optional<TerraEngine::Renderer::Vulkan::AcquiredPresentationImage> acquiredPresentationImage;
+	std::uint32_t surfaceMinimumImageCount = 0;
+	std::uint32_t requestedSwapchainImageCount = 0;
 
 	VmaAllocator allocator = VK_NULL_HANDLE;
 	WindowSystem* windowSystem = nullptr;
@@ -844,6 +872,15 @@ struct VulkanContext::Impl {
 	OffscreenResources sceneView;
 	OffscreenResources gameView;
 	OffscreenResources captureView;
+	struct RetiredOffscreenResourceSet
+	{
+		OffscreenResources resources;
+		std::optional<VulkanContext::ViewType> editorView;
+		std::uint64_t replacementGeneration = 0;
+		std::uint64_t retireAfterSerial = 0;
+		bool editorDescriptorAcknowledged = false;
+	};
+	std::deque<RetiredOffscreenResourceSet> retiredOffscreenResources;
 
 	VkDescriptorSet offscreenDescriptorSet = VK_NULL_HANDLE;
 	VkRenderPass offscreenRenderPass = VK_NULL_HANDLE;
@@ -913,6 +950,8 @@ struct VulkanContext::Impl {
 
 	void InitEditorMode();
 	void CreateOffscreenResources(OffscreenResources& res, VkExtent2D requestedExtent = {});
+	void DestroyOffscreenResourceSet(OffscreenResources& resources);
+	void DrainRetiredOffscreenResources();
 	void RecreateOffscreenResources(); // Handle resize
 	void ClearResources();
 	bool MarkDeviceLost(VkResult result, std::string_view operation);
@@ -976,7 +1015,7 @@ struct VulkanContext::Impl {
 	bool PickPhysicalDevice();
 	bool CreateLogicalDevice();
 
-	bool CreateSwapChain(WindowSystem& windowSystem);
+	bool CreateSwapChain(WindowSystem& windowSystem, VkSwapchainKHR oldSwapchain = VK_NULL_HANDLE);
 	bool CreateImageViews();
 	VkFormat FindDepthFormat();
 	VkFormat FindSupportedFormat(const std::vector<VkFormat>& candidates, VkImageTiling tiling, VkFormatFeatureFlags features);
@@ -985,6 +1024,12 @@ struct VulkanContext::Impl {
 	bool CreateFramebuffers();
 	bool CreateCommandPool();
 	bool CreateSyncObjects();
+	void InitializeFrameTracking();
+	void DestroyFrameSyncObjects();
+	void DestroyPresentationImageSyncObjects();
+	PresentationResourceBundle TakePresentationResourceBundle();
+	void RestorePresentationResourceBundle(PresentationResourceBundle&& bundle);
+	void DestroyPresentationResourceBundle(PresentationResourceBundle& bundle);
 	bool CreateGpuTimestampQueries();
 	void DestroyGpuTimestampQueries();
 	void ResolveCompletedGpuTimestamps(uint32_t frameIndex);

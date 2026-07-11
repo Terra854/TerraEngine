@@ -7,6 +7,7 @@
 #include "ProjectManager.h"
 #include "AssetDatabase.h"
 #include "EditorSystem.h"
+#include "../Core/CheckedImGuiVulkanBridge.h"
 #include "ScriptCompilationSubsystem.h"
 #include "UndoRedoSystem.h"
 #include "../Profiling/EditorProfilerService.h"
@@ -54,53 +55,6 @@
 namespace
 {
 	MainEditorSubsystem* g_ActiveMainEditorSubsystem = nullptr;
-
-	void RefreshViewportTexture(
-		void*& textureId,
-		void*& cachedImageView,
-		std::uint64_t& cachedGeneration,
-		void* imageView,
-		void* sampler,
-		std::uint64_t generation,
-		std::string_view viewportName)
-	{
-		if (imageView == cachedImageView && generation == cachedGeneration)
-		{
-			return;
-		}
-
-		// A descriptor returned by AddTexture owns one allocation in ImGui's
-		// Vulkan pool. Free the descriptor before replacing it so repeated panel
-		// or application-window resizes keep descriptor usage constant.
-		if (textureId != nullptr)
-		{
-			ImGui_ImplVulkan_RemoveTexture(reinterpret_cast<VkDescriptorSet>(textureId));
-			textureId = nullptr;
-		}
-		cachedImageView = nullptr;
-		cachedGeneration = generation;
-
-		if (imageView == nullptr || sampler == nullptr)
-		{
-			return;
-		}
-
-		const VkDescriptorSet descriptorSet = ImGui_ImplVulkan_AddTexture(
-			reinterpret_cast<VkSampler>(sampler),
-			reinterpret_cast<VkImageView>(imageView),
-			VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-		if (descriptorSet == VK_NULL_HANDLE)
-		{
-			// Keep the cached view empty so the next frame retries after a transient
-			// allocation failure instead of sending a null texture to ImGui draw data.
-			TERRAENGINE_LOG(LogLevel::Error, "Failed to register the " << viewportName << " viewport texture with ImGui.");
-			cachedGeneration = 0u;
-			return;
-		}
-
-		textureId = reinterpret_cast<void*>(descriptorSet);
-		cachedImageView = imageView;
-	}
 
 	struct WindowMenuNode
 	{
@@ -1507,6 +1461,85 @@ void MainEditorSubsystem::StopPlayMode()
 	RestorePlayModeSceneState();
 }
 
+void MainEditorSubsystem::RefreshViewportTextures(VulkanContext& vulkan)
+{
+	VulkanContext::EditorHandles handles;
+	vulkan.GetEditorHandles(handles);
+	const auto progress = vulkan.GetEditorSubmissionProgress();
+	const auto registerTexture = [](void* imageView, void* sampler) -> void* {
+		void* descriptor = nullptr;
+		const auto result = TerraEngine::Editor::CheckedImGuiVulkanBridge::Execute(
+			TerraEngine::Renderer::Vulkan::EditorUiFrameStage::RecordDrawData,
+			[&]() {
+				const VkDescriptorSet set = ImGui_ImplVulkan_AddTexture(
+					reinterpret_cast<VkSampler>(sampler),
+					reinterpret_cast<VkImageView>(imageView),
+					VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+				descriptor = reinterpret_cast<void*>(set);
+			});
+		return result.success ? descriptor : nullptr;
+	};
+	if (!viewportTextures.Refresh(TerraEngine::Editor::ViewportTextureKind::Scene,
+		handles.sceneImageView, handles.sceneSampler, handles.sceneImageGeneration,
+		progress.lastSubmittedSerial, registerTexture)) {
+		TERRAENGINE_LOG(LogLevel::Warning, "Scene viewport texture registration is pending; retaining the previous valid generation.");
+	} else {
+		vulkan.AcknowledgeViewportTextureGeneration(VulkanContext::ViewType::Scene,
+			handles.sceneImageGeneration, progress.lastSubmittedSerial);
+	}
+	if (!viewportTextures.Refresh(TerraEngine::Editor::ViewportTextureKind::Game,
+		handles.gameImageView, handles.gameSampler, handles.gameImageGeneration,
+		progress.lastSubmittedSerial, registerTexture)) {
+		TERRAENGINE_LOG(LogLevel::Warning, "Game viewport texture registration is pending; retaining the previous valid generation.");
+	} else {
+		vulkan.AcknowledgeViewportTextureGeneration(VulkanContext::ViewType::Game,
+			handles.gameImageGeneration, progress.lastSubmittedSerial);
+	}
+	ReleaseCompletedViewportTextures(progress.completedSerial);
+}
+
+void MainEditorSubsystem::CaptureViewportDrawDataUses()
+{
+	viewportTextures.BeginDrawDataUsage();
+	const ImDrawData* drawData = ImGui::GetDrawData();
+	if (drawData == nullptr) return;
+	for (int listIndex = 0; listIndex < drawData->CmdListsCount; ++listIndex) {
+		const ImDrawList* list = drawData->CmdLists[listIndex];
+		for (const ImDrawCmd& command : list->CmdBuffer) {
+			viewportTextures.MarkDrawDataUse(reinterpret_cast<void*>(command.GetTexID()));
+		}
+	}
+}
+
+void MainEditorSubsystem::CommitViewportDrawDataUses(std::uint64_t submittedSerial)
+{
+	viewportTextures.CommitDrawDataUsage(submittedSerial);
+}
+
+void MainEditorSubsystem::AbandonViewportDrawDataUses()
+{
+	viewportTextures.AbandonDrawDataUsage();
+}
+
+void MainEditorSubsystem::ReleaseCompletedViewportTextures(std::uint64_t completedSerial)
+{
+	RenderSystem* renderSystem = ctx && ctx->engine ? ctx->engine->GetSystem<RenderSystem>() : nullptr;
+	auto* vulkan = renderSystem ? dynamic_cast<VulkanContext*>(renderSystem->GetContext()) : nullptr;
+	if (!vulkan) return;
+	viewportTextures.ReleaseCompleted(completedSerial,
+		[&](void* descriptor) { return vulkan->FreeEditorDescriptorSet(descriptor); });
+}
+
+void MainEditorSubsystem::ShutdownViewportTextures(bool deviceLost)
+{
+	RenderSystem* renderSystem = ctx && ctx->engine ? ctx->engine->GetSystem<RenderSystem>() : nullptr;
+	auto* vulkan = renderSystem ? dynamic_cast<VulkanContext*>(renderSystem->GetContext()) : nullptr;
+	viewportTextures.Shutdown(deviceLost, vulkan
+		? TerraEngine::Editor::ViewportTextureRegistry::ReleaseCallback(
+			[&](void* descriptor) { return vulkan->FreeEditorDescriptorSet(descriptor); })
+		: TerraEngine::Editor::ViewportTextureRegistry::ReleaseCallback{});
+}
+
 // MainEditorSubsystem::OnBackendReady is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::OnBackendReady() {
 	if (!ctx || !ctx->engine) return;
@@ -1520,11 +1553,7 @@ void MainEditorSubsystem::OnBackendReady() {
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!vulkan) return;
 
-	VulkanContext::EditorHandles handles;
-	vulkan->GetEditorHandles(handles);
-
-	RefreshViewportTexture(sceneTextureID, cachedSceneImageView, cachedSceneImageGeneration, handles.sceneImageView, handles.sceneSampler, handles.sceneImageGeneration, "Scene View");
-	RefreshViewportTexture(gameTextureID, cachedGameImageView, cachedGameImageGeneration, handles.gameImageView, handles.gameSampler, handles.gameImageGeneration, "Game View");
+	RefreshViewportTextures(*vulkan);
 }
 
 // MainEditorSubsystem::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1779,10 +1808,7 @@ void MainEditorSubsystem::DrawUI() {
 			VulkanContext* vulkan = dynamic_cast<VulkanContext*>(renderSystem->GetContext());
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (vulkan) {
-				VulkanContext::EditorHandles handles;
-				vulkan->GetEditorHandles(handles);
-				RefreshViewportTexture(sceneTextureID, cachedSceneImageView, cachedSceneImageGeneration, handles.sceneImageView, handles.sceneSampler, handles.sceneImageGeneration, "Scene View");
-				RefreshViewportTexture(gameTextureID, cachedGameImageView, cachedGameImageGeneration, handles.gameImageView, handles.gameSampler, handles.gameImageGeneration, "Game View");
+				RefreshViewportTextures(*vulkan);
 			}
 		}
 	}

@@ -2238,7 +2238,13 @@ CompactedVisibilitySet RenderSystem::CompactVirtualGeometryClusterPackets(
 void RenderSystem::Initialize()
 {
 	TERRAENGINE_LOG(LogLevel::Info, "Initializing RenderSystem...");
-	LoadSettings();
+	if (const auto startupSettings = ResourceManager::Instance().GetConfiguredRenderSettings()) {
+		// Editor direct-project and export profiles are resolved before system
+		// initialization. Do not rediscover settings from the process cwd here.
+		SetRenderSettings(*startupSettings);
+	} else {
+		LoadSettings();
+	}
 	
 	auto vulkanContext = std::make_unique<VulkanContext>();
 	// Vulkan validation is controlled by project/export render settings rather
@@ -4827,6 +4833,7 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 	declaration.phase = "Render";
 	declaration.reads = {
 		"Window",
+		"ActivePresentationState",
 		"SceneGraph",
 		"ObjectManager",
 		"UI",
@@ -4850,6 +4857,10 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 	};
 	declaration.writes = {
 		"Renderer",
+		"PresentationState",
+		"PresentationGeneration",
+		"EditorSubmissionCompletion",
+		"RendererDiagnostics",
 		TerraEngine::Scheduling::kResourceVirtualGeometryClusterPackets,
 		TerraEngine::Scheduling::kResourceVirtualGeometryBatchPlans,
 		TerraEngine::Scheduling::kResourceVirtualGeometryGpuPacketFrameSets,
@@ -4888,8 +4899,8 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 	declaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::WorkerPrepare;
 	declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::PartiallyWorkerSafe;
 	declaration.hardBoundary = true;
-	declaration.safeSubwork = "Render snapshots, visible-command cache lookup, deduplicated visible streaming touch-set preparation, virtual geometry LOD/page preparation, adaptive virtual geometry cluster/page need preparation, page payload source planning, page request planning, GPU packet frame set planning, GPU compaction dispatch planning, generated-submission validation labels, per-view Hi-Z validation labels, page need packets, resource readiness, draw packets, secondary command buffers, and submit descriptions.";
-	declaration.protectedCommit = "Swapchain acquire, queue submit, present, frame fence/semaphore ownership, ResourceManager visible streaming touch publication, virtual geometry page payload publication, page retirement draining, virtual geometry GPU packet buffer publication, generated submission publication, visibility/counter snapshot publication, virtual geometry page diagnostics publication, virtual geometry diagnostics publication, adaptive virtual geometry diagnostics publication, renderer device-loss incident publication, editor present, and recovery containment.";
+	declaration.safeSubwork = "Immutable render snapshots, visible-command cache lookup, draw packets, culling and lighting preparation, generation-tagged submission plans, virtual geometry LOD/page preparation, page request planning, page payload source planning, resource readiness, secondary command buffers, and submit descriptions.";
+	declaration.protectedCommit = "Swapchain acquire, acquired-image generation validation, command/fence ownership, queue submit/present, presentation recreation, completion publication, ResourceManager visible streaming touch publication, virtual geometry page payload publication, page retirement draining, virtual geometry GPU publication, virtual geometry diagnostics publication, renderer diagnostics, and device-loss containment.";
 	declaration.protectedReason = "Live GPU queue and presentation ownership remain protected after worker preparation.";
 	declaration.profilingLabel = declaration.name;
 	declaration.usesDefaultMetadata = false;

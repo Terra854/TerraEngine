@@ -174,7 +174,9 @@ void Engine::Initialize()
 	// The window system is initialized first so other systems can depend on
 	// a valid window context if they need one later.
 	WindowConfig windowConfig{};
-	windowConfig.resizable = editorMode;
+	// Both editor and exported desktop runtimes support presentation-only
+	// recreation, so ordinary resize/minimize/restore must remain available.
+	windowConfig.resizable = true;
 	WindowSystem& windowSystem = WindowSystem::Instance();
 	windowSystem.Configure(std::make_unique<GlfwWindowBackend>(), windowConfig, [this]() {
 		SignalShutdown();
@@ -224,6 +226,12 @@ void Engine::Initialize()
 		renderSystem.SetRenderSettings(*configuredRenderSettings);
 	}
 	RegisterEngineSystem(systems, systemScheduler, renderSystem, renderSystem.SchedulerDeclaration());
+	if (editorMode && editorSystem != nullptr) {
+		// Editor UI owns the real protected PostFrame boundary. It remains outside
+		// the lifecycle vector because setup/teardown have editor-specific ordering,
+		// but frame execution is scheduler-owned rather than manually duplicated.
+		systemScheduler.RegisterSystem(*editorSystem, editorSystem->SchedulerDeclaration());
+	}
 
 	const TerraEngine::Scheduling::ScheduleSummary& schedulerSummary = systemScheduler.BuildSchedule();
 	TERRAENGINE_LOG(LogLevel::Info, schedulerSummary.formatted);
@@ -410,11 +418,6 @@ bool Engine::Update(float deltaTime)
 			running = false;
 			return false;
 		}
-	}
-
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (editorMode) {
-		editorSystem->Update(deltaTime);
 	}
 
 	// If a system requested shutdown (e.g., the window was closed),

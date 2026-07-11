@@ -13,6 +13,8 @@
 #include <functional>
 #include <string_view>
 
+#include "VulkanPresentationLifecycle.h"
+
 class TERRAENGINE_API VulkanContext : public RHIContext
 {
 public:
@@ -99,7 +101,15 @@ public:
 	void EnableEditorMode();
 	
 	// callback takes VkCommandBuffer (cast to void*)
-	void PresentEditor(std::function<void(void*)> renderUI);
+	// PresentEditor reports whether draw data reached the queue. Editor-owned
+	// descriptor retirement must never infer submission from a void callback.
+	[[nodiscard]] TerraEngine::Renderer::Vulkan::EditorPresentResult PresentEditor(std::function<void(void*)> renderUI);
+	[[nodiscard]] TerraEngine::Renderer::Vulkan::EditorSubmissionProgress GetEditorSubmissionProgress() const;
+	// Frees one editor-owned descriptor through TerraEngine's checked and
+	// externally synchronized descriptor-pool boundary.
+	[[nodiscard]] std::int32_t FreeEditorDescriptorSet(void* descriptorSet);
+	void AcknowledgeViewportTextureGeneration(ViewType view, std::uint64_t generation,
+		std::uint64_t finalUseSerial);
 
 private:
 	// struct Impl groups related state and operations so callers have one documented contract.

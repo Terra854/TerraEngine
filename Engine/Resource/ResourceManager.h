@@ -139,6 +139,11 @@ public:
 	void SetRenderDebugEnabled(bool enabled);
 	TerraEngine::Renderer::RendererRecoveryPolicy GetRendererRecoveryPolicy() const;
 	std::optional<RenderSettings> GetConfiguredRenderSettings() const;
+	// Editor bootstrap resolves this read-only profile before Engine::Run. It is
+	// reapplied by Initialize instead of being erased by session-default resets.
+	void ConfigureEditorStartupProfile(const RenderSettings& settings, bool validationEnabled,
+		bool debugEnabled, std::optional<std::filesystem::path> projectRoot, std::string origin);
+	[[nodiscard]] bool HasEditorStartupProfile() const noexcept { return m_EditorStartupProfileConfigured; }
 
 	// Lets runtime systems distinguish packaged export sessions from editor
 	// project sessions so exported builds can keep their writable files in a
@@ -456,6 +461,12 @@ private:
 	std::optional<std::filesystem::path> m_ConfiguredExportArchivePath;
 	std::optional<std::string> m_LastStartupError;
 	std::optional<RenderSettings> m_ConfiguredRenderSettings;
+	bool m_EditorStartupProfileConfigured = false;
+	RenderSettings m_EditorStartupRenderSettings{};
+	bool m_EditorStartupValidationEnabled = false;
+	bool m_EditorStartupDebugEnabled = false;
+	std::optional<std::filesystem::path> m_EditorStartupProjectRoot;
+	std::string m_EditorStartupOrigin = "HubDefaults";
 	std::string m_RenderProfileSummary = "profile=Default";
 	bool m_RenderValidationEnabled = false;
 	bool m_RenderDebugEnabled = false;

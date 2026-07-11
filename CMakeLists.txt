@@ -113,6 +113,7 @@ set(ENGINE_SOURCES
 	Engine/Renderer/Graph/RenderWorkerTaskGroup.cpp
 	Engine/Renderer/Graph/RenderWorkPacket.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanContext.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPresentationLifecycle.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanCommandRecording.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanDescriptorPlanning.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanFrameDiagnostics.cpp
@@ -956,6 +957,9 @@ add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Core/EditorMain.cpp
 	Editor/TerraEngine-Editor/Core/EditorCommandLine.cpp
 	Editor/TerraEngine-Editor/Core/EditorSystem.cpp
+	Editor/TerraEngine-Editor/Core/EditorStartupRendererConfiguration.cpp
+	Editor/TerraEngine-Editor/Core/CheckedImGuiVulkanBridge.cpp
+	Editor/TerraEngine-Editor/Core/ViewportTextureRegistry.cpp
 	Editor/TerraEngine-Editor/Automation/EditorAutomationService.cpp
 	Editor/TerraEngine-Editor/Automation/EditorMcpBridge.cpp
 	Editor/TerraEngine-Editor/Automation/EditorMcpTransport.cpp

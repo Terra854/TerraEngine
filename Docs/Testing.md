@@ -718,6 +718,21 @@ The install target also runs managed `dotnet` publish/build targets. If
 `dotnet` is not available on PATH, native test targets can still validate but
 install will fail at managed publish.
 
+### Renderer Stability Hardening
+
+Feature 040 adds deterministic filters for `VulkanPresentationLifecycle`,
+`VulkanUiSubmissionFailure`, `EditorFrameCompletionTracker`,
+`Editor.StartupRenderer`, `Editor.PostFrameBoundary`,
+`Editor.CheckedImGuiVulkanBridge`, and `Editor.ViewportTextureRetirement`.
+Run both test executables with those filters before live GPU work.
+
+Live resize/minimize validation is deliberately opt-in and paced. Use
+`Tools/RendererStability/RunLiveSmoke.ps1` with `-AllowLiveGpuStress`, at most
+50 operations per batch, and inspect its process/driver evidence after each
+batch. Stop immediately on a new display-driver event or device loss. Do not
+inject device loss on the primary display adapter; the engine's policy for a
+genuine driver/hardware loss remains terminal containment.
+
 ### Linux Editor Script Smoke Checks
 
 After installing, start the editor from the installed/staged Linux editor

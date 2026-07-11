@@ -39,6 +39,8 @@ add_executable(TerraEngine-EditorTests
 	Project/ProjectSettingsMenuInventoryTests.cpp
 	Project/ProjectSettingsPersistenceTests.cpp
 	Core/EditorCommandLineTests.cpp
+	Core/EditorStartupRendererConfigurationTests.cpp
+	Core/EditorPostFrameBoundaryTests.cpp
 	Core/MainEditorToolbarTests.cpp
 	Automation/EditorAutomationServiceTests.cpp
 	Automation/EditorReflectionWorkerBoundaryTests.cpp
@@ -74,6 +76,8 @@ add_executable(TerraEngine-EditorTests
 	AssetPipeline/VirtualGeometryMeshCompilerTests.cpp
 	AssetPipeline/VirtualGeometryPackageImportTests.cpp
 	Renderer/GameViewStatsOverlayTests.cpp
+	Renderer/CheckedImGuiVulkanBridgeTests.cpp
+	Renderer/ViewportTextureRetirementTests.cpp
 	Renderer/RendererRecoveryEditorTests.cpp
 	Renderer/RendererRecoveryWindowTests.cpp
 	Renderer/ResourceResidencyWindowTests.cpp
@@ -107,6 +111,9 @@ add_executable(TerraEngine-EditorTests
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Subsystems/ScriptCompilationSubsystem.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Subsystems/UndoRedoSystem.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Core/EditorCommandLine.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Core/EditorStartupRendererConfiguration.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Core/CheckedImGuiVulkanBridge.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Core/ViewportTextureRegistry.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Project/ProjectManager.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Project/ScriptWorkspaceService.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Assets/AssetDatabase.cpp

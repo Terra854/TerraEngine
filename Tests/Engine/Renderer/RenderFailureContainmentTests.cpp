@@ -52,6 +52,7 @@ namespace TerraEngine::Tests {
 			const std::string resourcesSource = ReadSourceFile(root / "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContextResources.cpp");
 			const std::string editorSource = ReadSourceFile(root / "Editor" / "TerraEngine-Editor" / "Core" / "EditorSystem.cpp");
 			const std::string mainEditorSource = ReadSourceFile(root / "Editor" / "TerraEngine-Editor" / "Subsystems" / "MainEditorSubsystem.cpp");
+			const std::string viewportRegistrySource = ReadSourceFile(root / "Editor" / "TerraEngine-Editor" / "Core" / "ViewportTextureRegistry.cpp");
 
 			context.Expect(implHeader.find("bool deviceLost = false;") != std::string::npos, "Vulkan backend should retain a device-lost latch in private state.");
 			context.Expect(implHeader.find("bool MarkDeviceLost(VkResult result, std::string_view operation);") != std::string::npos, "Vulkan backend should expose one helper for detecting device-loss results.");
@@ -61,7 +62,7 @@ namespace TerraEngine::Tests {
 			context.Expect(contextSource.find("latestRendererRecoverySnapshot = TerraEngine::Renderer::RecordDeviceLossIncident") != std::string::npos, "Device-loss helper should publish a structured recovery snapshot.");
 			context.Expect(contextSource.find("if (!impl->initialized || impl->deviceLost) return;") != std::string::npos, "BeginFrame should stop immediately after device loss.");
 			context.Expect(contextSource.find("if (!impl->initialized || impl->skipFrame || impl->deviceLost) return;") != std::string::npos, "RenderFrame and EndFrame should stop immediately after device loss.");
-			context.Expect(contextSource.find("if (!impl->editorMode || !impl->initialized || impl->deviceLost) return;") != std::string::npos, "PresentEditor should stop immediately after device loss.");
+			context.Expect(contextSource.find("result.outcome = impl->deviceLost ? EditorPresentOutcome::DeviceLost") != std::string::npos, "PresentEditor should return a typed terminal result after device loss.");
 			context.Expect(contextSource.find("impl->MarkDeviceLost(submitResult, \"editor render queue submit\")") != std::string::npos, "Editor render submit failures should latch device loss before recovery.");
 			context.Expect(contextSource.find("impl->MarkDeviceLost(idleResult, \"editor render recovery queue idle\")") != std::string::npos, "Editor render recovery should not loop when the queue cannot prove idle.");
 			context.Expect(initSource.find("void VulkanContext::Impl::RecreateSwapChain()") != std::string::npos && initSource.find("if (deviceLost)") != std::string::npos, "Swapchain recreation should not run after the device-lost latch is set.");
@@ -78,8 +79,9 @@ namespace TerraEngine::Tests {
 			context.Expect(editorSource.find("vulkan->RunWithQueueAccess") != std::string::npos, "ImGui-owned texture upload submissions should join the renderer queue synchronization boundary.");
 			context.Expect(implHeader.find("VkDescriptorPool editorDescriptorPool") != std::string::npos, "ImGui should own a descriptor pool that is isolated from asset-loading descriptor allocations.");
 			context.Expect(contextSource.find("h.descriptorPool = impl->editorDescriptorPool") != std::string::npos, "Editor handles should publish the dedicated ImGui descriptor pool.");
-			context.Expect(mainEditorSource.find("ImGui_ImplVulkan_RemoveTexture") != std::string::npos, "Viewport resize should free the replaced ImGui descriptor instead of leaking pool capacity.");
-			context.Expect(mainEditorSource.find("if (descriptorSet == VK_NULL_HANDLE)") != std::string::npos, "Viewport registration should reject a failed ImGui descriptor allocation.");
+			context.Expect(mainEditorSource.find("ImGui_ImplVulkan_RemoveTexture") == std::string::npos, "Viewport resize must not immediately free a descriptor still referenced by in-flight UI work.");
+			context.Expect(viewportRegistrySource.find("retireAfterSerial > completedSerial") != std::string::npos, "Viewport descriptors should retire only after fence-backed completion.");
+			context.Expect(viewportRegistrySource.find("if (descriptor == nullptr) return false;") != std::string::npos, "Viewport registration should reject a failed ImGui descriptor allocation while keeping the active pair.");
 			context.Expect(contextSource.find("depthAttachment.initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL") != std::string::npos, "Persistent editor depth images should enter each render pass in their restored attachment layout.");
 			context.Expect(contextSource.find("VK_ACCESS_SHADER_READ_BIT\n\t\t\t\t| VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT") != std::string::npos, "Editor render-pass dependencies should order prior depth restoration before the next clear.");
 			context.Expect(contextSource.find("Shadow images persist across frames") != std::string::npos, "Shadow render passes should document their cross-frame attachment synchronization contract.");
@@ -91,15 +93,15 @@ namespace TerraEngine::Tests {
 			context.Expect(initSource.find("depthAttachment.initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL") != std::string::npos, "The shared swapchain depth image should preserve its initialized layout across frames.");
 			context.Expect(contextSource.find("Editor UI Present Command Buffer") != std::string::npos, "Temporary UI submissions should remain identifiable in Vulkan validation diagnostics.");
 			context.Expect(initSource.find("Keep editor\n\t\t// presentation color-only") != std::string::npos, "Editor presentation should not share a writable depth attachment across swapchain frames in flight.");
-			context.Expect(contextSource.find("renderPassInfo.clearValueCount = 1u;") != std::string::npos, "The ImGui swapchain pass should clear only its color attachment.");
+			context.Expect(contextSource.find("renderPass.clearValueCount = 1;") != std::string::npos, "The ImGui swapchain pass should clear only its color attachment.");
 			context.Expect(implHeader.find("FRAMEBUFFER_RESIZE_DEBOUNCE{500}") != std::string::npos, "Rapid native resize callbacks should be coalesced before rebuilding Vulkan resources.");
 			context.Expect(contextSource.find("if (!impl->IsFramebufferResizeSettled())") != std::string::npos, "Editor resize handling should pause stale rendering until the requested extent settles.");
 			context.Expect(contextSource.find("recording here\n\t\t// would only resize Scene/Game targets") != std::string::npos, "Editor view recording should pause while a native resize is pending instead of reallocating targets for discarded frames.");
-			context.Expect(contextSource.find("Drop this UI frame after rebuilding the presentation swapchain") != std::string::npos, "PresentEditor should drop ImGui draw data assembled for the previous native framebuffer size.");
-			context.Expect(initSource.find("Recreate only objects that directly\n\t\t// reference the editor swapchain") != std::string::npos, "Native editor resize should preserve offscreen renderer resources instead of running the runtime-grade teardown.");
+			context.Expect(contextSource.find("result.outcome = EditorPresentOutcome::RecreationRequested") != std::string::npos, "PresentEditor should return a typed stale-draw-data result after recreation.");
+			context.Expect(initSource.find("shadows, global buffers, descriptors, caches, scenes, and CPU assets do not") != std::string::npos, "Native and runtime resize should preserve loaded renderer resources.");
 			context.Expect(contextSource.find("impl->RecreateSwapChain();\n\t\timpl->RecreateOffscreenResources();") == std::string::npos, "Editor resize paths should not immediately destroy independent Scene/Game targets after rebuilding the native swapchain.");
 			context.Expect(implHeader.find("std::uint64_t generation = 0u;") != std::string::npos, "Offscreen targets should expose a logical identity that changes even when Vulkan recycles a raw image-view handle.");
-			context.Expect(mainEditorSource.find("imageView == cachedImageView && generation == cachedGeneration") != std::string::npos, "ImGui viewport descriptors should compare resource generation as well as the raw Vulkan handle.");
+			context.Expect(viewportRegistrySource.find("current->resourceGeneration == generation") != std::string::npos, "ImGui viewport descriptors should compare resource generation as well as raw Vulkan handles.");
 			context.Expect(resourcesSource.find("Hi-Z atomic initialization") == std::string::npos, "Hi-Z creation should not perform synchronous startup submissions.");
 			context.Expect(contextSource.find("const VkImageLayout hiZOldLayout = hiZHasPriorRecordedLayout") != std::string::npos, "The first normal Hi-Z generation pass should own the UNDEFINED image transition.");
 			context.Expect(implHeader.find("void ConfirmHiZWritesSubmitted(uint32_t frameIndex)") != std::string::npos, "Hi-Z images should become readable only after their frame command buffers are submitted.");

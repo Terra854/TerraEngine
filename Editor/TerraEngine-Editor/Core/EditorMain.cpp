@@ -7,10 +7,24 @@
 
 #include "Engine/Core/MainEngine.h"
 #include "EditorCommandLine.h"
+#include "EditorStartupRendererConfiguration.h"
 #include "EditorSystem.h"
+#include "Engine/Resource/ResourceManager.h"
 
 int main(int argc, char** argv) {
 	const EditorCommandLineOptions commandLine = ParseEditorCommandLine(argc, argv);
+	const TerraEngine::Editor::EditorStartupRendererConfiguration startupRenderer =
+		TerraEngine::Editor::ResolveEditorStartupRendererConfiguration(commandLine.startupProjectPath);
+	ResourceManager::Instance().ConfigureEditorStartupProfile(
+		startupRenderer.renderSettings,
+		startupRenderer.validationEnabled,
+		startupRenderer.debugEnabled,
+		startupRenderer.projectRoot,
+		startupRenderer.origin == TerraEngine::Editor::StartupRendererOrigin::DirectProject
+			? "DirectProject" : "HubDefaults");
+	for (const std::string& diagnostic : startupRenderer.diagnostics) {
+		std::cerr << "[Editor startup renderer] " << diagnostic << '\n';
+	}
 	Engine engine;
 	
 	EditorSystem editorSystem;

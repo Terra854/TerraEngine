@@ -22,8 +22,10 @@
 #include "../Project/ProjectSettingsMetadata.h"
 #include "Engine/Renderer/RenderTypes.h"
 #include "Engine/Utilities/UUID.h"
+#include "../Core/ViewportTextureRegistry.h"
 
 class Object;
+class VulkanContext;
 
 // class MainEditorSubsystem groups related state and operations so callers have one documented contract.
 class MainEditorSubsystem : public IEditorSubsystem {
@@ -93,8 +95,13 @@ public:
 	bool RebuildAssetFromInspector(const std::filesystem::path& path, std::string* outError = nullptr);
 
 	// GetSceneTextureID is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	void* GetSceneTextureID() const { return sceneTextureID; }
-	void* GetGameTextureID() const { return gameTextureID; }
+	void* GetSceneTextureID() const { return viewportTextures.ActiveDescriptor(TerraEngine::Editor::ViewportTextureKind::Scene); }
+	void* GetGameTextureID() const { return viewportTextures.ActiveDescriptor(TerraEngine::Editor::ViewportTextureKind::Game); }
+	void CaptureViewportDrawDataUses();
+	void CommitViewportDrawDataUses(std::uint64_t submittedSerial);
+	void AbandonViewportDrawDataUses();
+	void ReleaseCompletedViewportTextures(std::uint64_t completedSerial);
+	void ShutdownViewportTextures(bool deviceLost);
 	bool TryGetGameViewRenderStats(RenderStatsSnapshot& outStats) const;
 
 	template<typename T>
@@ -131,6 +138,7 @@ private:
 	bool LoadPrefabIntoIsolatedObjectManager(const std::filesystem::path& path);
 	bool OpenPrefabAssetInternal(const std::filesystem::path& path, bool openedFromSceneObject);
 	void PublishEditorStreamingNeeds();
+	void RefreshViewportTextures(VulkanContext& vulkan);
 	void DrawMainMenuBar();
 	void CloseCurrentProject();
 	
@@ -172,12 +180,7 @@ private:
 	};
 	std::vector<PrefabReturnGameViewCamera> m_PrefabReturnGameViewCameras;
 
-	void* sceneTextureID = nullptr;
-	void* cachedSceneImageView = nullptr;
-	std::uint64_t cachedSceneImageGeneration = 0u;
-	void* gameTextureID = nullptr;
-	void* cachedGameImageView = nullptr;
-	std::uint64_t cachedGameImageGeneration = 0u;
+	TerraEngine::Editor::ViewportTextureRegistry viewportTextures;
 	bool sceneLoaded = false;
 	
 	std::optional<entt::entity> selectedEntity;

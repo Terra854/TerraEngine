@@ -488,8 +488,8 @@ namespace TerraEngine::Tests
 		registry.Add("VirtualGeometry.ShaderLayout.EditorCommandPoolsResetOnlyAfterQueueIdle", [](TestContext& context) {
 			const std::string vulkanSource = ReadVulkanContextSource();
 
-			context.Expect(ShaderContains(vulkanSource, "PresentEditor could not prove the command pool idle before reset"), "PresentEditor should prove queue idle before resetting a frame command pool outside the normal render-submit path.");
-			context.Expect(ShaderContains(vulkanSource, "PresentEditor kept failed UI command buffer alive because the queue did not prove idle"), "Failed UI submits should not free command buffers unless the graphics queue is known idle.");
+			context.Expect(ShaderContains(vulkanSource, "editorCompletionTracker.RecordFenceCompletion"), "PresentEditor should prove frame command-pool ownership through its completed UI fence.");
+			context.Expect(ShaderContains(vulkanSource, "const VkResult poolResetResult = vkResetCommandPool"), "Command-pool reset failures must stop the UI frame.");
 			context.Expect(ShaderContains(vulkanSource, "Skipping editor render recovery because the graphics queue did not prove idle"), "Editor render recovery should not recreate swapchain resources while submitted work may still reference them.");
 			context.Expect(ShaderContains(vulkanSource, "fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT"), "Failed UI submits should restore a signaled frame fence after the pre-submit reset.");
 		});
@@ -526,12 +526,11 @@ namespace TerraEngine::Tests
 		registry.Add("VirtualGeometry.ShaderLayout.EditorPresentDrainsSubmittedRenderSemaphoreOnRecovery", [](TestContext& context) {
 			const std::string vulkanSource = ReadVulkanContextSource();
 
-			context.Expect(ShaderContains(vulkanSource, "drainSubmittedEditorRender"), "Editor present recovery should keep a helper that consumes submitted scene/game render semaphores.");
-			context.Expect(ShaderContains(vulkanSource, "waitSubmitInfo.waitSemaphoreCount = 1;"), "The recovery submit must wait on the render-finished semaphore so the binary semaphore becomes reusable.");
-			context.Expect(ShaderContains(vulkanSource, "waitSubmitInfo.commandBufferCount"), "The recovery path should remain a wait-only submit instead of recording throwaway rendering work.");
-			context.Expect(ShaderContains(vulkanSource, "drainSubmittedEditorRender(\"resize\")"), "Resize recovery should drain a submitted render pass before rebuilding swapchain or offscreen resources.");
-			context.Expect(ShaderContains(vulkanSource, "drainSubmittedEditorRender(\"out-of-date acquire\")"), "Out-of-date image acquire should drain a submitted render pass before swapchain recovery.");
-			context.Expect(ShaderContains(vulkanSource, "drainSubmittedEditorRender(\"failed acquire\")"), "Failed image acquire should drain a submitted render pass instead of leaving renderFinished signaled.");
+			context.Expect(ShaderContains(vulkanSource, "consumeOutstandingSemaphores"), "Editor present recovery should keep one helper that consumes acquire and offscreen semaphore obligations.");
+			context.Expect(ShaderContains(vulkanSource, "drain.waitSemaphoreCount = waitCount"), "The recovery submit must wait on every outstanding binary semaphore before reuse.");
+			context.Expect(ShaderContains(vulkanSource, "drain.commandBufferCount") == false, "The recovery path should remain a wait-only submit instead of recording throwaway rendering work.");
+			context.Expect(ShaderContains(vulkanSource, "consumeOutstandingSemaphores(false)"), "Resize and out-of-date recovery should drain submitted offscreen work.");
+			context.Expect(ShaderContains(vulkanSource, "consumeOutstandingSemaphores(true)"), "Post-acquire failures should consume both acquire and offscreen obligations.");
 			context.Expect(ShaderContains(vulkanSource, "BeginFrame failed to drain stranded editor render semaphore"), "BeginFrame should not clear a stranded editor render submission without consuming its binary semaphore.");
 		});
 

@@ -148,6 +148,11 @@ namespace TerraEngine::Tests {
 	void RegisterUIStyleTests(TestRegistry& registry);
 	void RegisterThreadPoolSingletonTests(TestRegistry& registry);
 	void RegisterWorkerPoolTests(TestRegistry& registry);
+	void RegisterExportRuntimePresentationTests(TestRegistry& registry);
+	void RegisterRendererStabilitySmokeToolTests(TestRegistry& registry);
+	void RegisterVulkanPresentationLifecycleTests(TestRegistry& registry);
+	void RegisterVulkanUiSubmissionFailureTests(TestRegistry& registry);
+	void RegisterEditorFrameCompletionTrackerTests(TestRegistry& registry);
 }
 
 int main() {
@@ -185,6 +190,11 @@ int main() {
 	TerraEngine::Tests::RegisterWorkerHardBoundaryTests(registry);
 	TerraEngine::Tests::RegisterObjectFacadeRemovalValidationTests(registry);
 	TerraEngine::Tests::RegisterWorkerPoolTests(registry);
+	TerraEngine::Tests::RegisterExportRuntimePresentationTests(registry);
+	TerraEngine::Tests::RegisterRendererStabilitySmokeToolTests(registry);
+	TerraEngine::Tests::RegisterVulkanPresentationLifecycleTests(registry);
+	TerraEngine::Tests::RegisterVulkanUiSubmissionFailureTests(registry);
+	TerraEngine::Tests::RegisterEditorFrameCompletionTrackerTests(registry);
 	TerraEngine::Tests::RegisterThreadPoolSingletonTests(registry);
 	TerraEngine::Tests::RegisterObjectManagerTests(registry);
 	TerraEngine::Tests::RegisterInputSystemTests(registry);

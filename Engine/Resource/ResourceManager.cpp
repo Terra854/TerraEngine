@@ -560,6 +560,17 @@ void ResourceManager::Initialize()
 	m_RendererRecoveryPolicy = TerraEngine::Renderer::MakeEditorRendererRecoveryPolicy();
 	m_LastStartupError.reset();
 	ResetManifestMetadata();
+	if (m_EditorStartupProfileConfigured && !m_ConfiguredExportArchivePath.has_value()) {
+		m_ConfiguredRenderSettings = m_EditorStartupRenderSettings;
+		m_RenderValidationEnabled = m_EditorStartupValidationEnabled;
+		m_RenderDebugEnabled = m_EditorStartupDebugEnabled;
+		TERRAENGINE_LOG(LogLevel::Info, "Editor startup renderer profile applied before system initialization. origin="
+			<< m_EditorStartupOrigin << ", project="
+			<< (m_EditorStartupProjectRoot ? m_EditorStartupProjectRoot->string() : std::string("<hub-defaults>"))
+			<< ", validation=" << (m_RenderValidationEnabled ? "on" : "off")
+			<< ", debug=" << (m_RenderDebugEnabled ? "on" : "off"));
+		return;
+	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!m_ConfiguredExportArchivePath.has_value()) {
@@ -750,6 +761,12 @@ std::filesystem::path ResourceManager::GetProjectRoot() const
 	{
 		return assetRoot;
 	}
+	if (m_EditorStartupProjectRoot.has_value())
+	{
+		// Direct-project bootstrap is explicit and independent of the process
+		// working directory. Full project activation may later update assetRoot.
+		return *m_EditorStartupProjectRoot;
+	}
 
 	// Prefer explicit project markers so custom asset-folder names still resolve
 	// correctly when the editor is pointed somewhere inside a project checkout.
@@ -858,6 +875,20 @@ TerraEngine::Renderer::RendererRecoveryPolicy ResourceManager::GetRendererRecove
 std::optional<RenderSettings> ResourceManager::GetConfiguredRenderSettings() const
 {
 	return m_ConfiguredRenderSettings;
+}
+
+void ResourceManager::ConfigureEditorStartupProfile(const RenderSettings& settings,
+	bool validationEnabled, bool debugEnabled,
+	std::optional<std::filesystem::path> projectRoot, std::string origin)
+{
+	m_EditorStartupProfileConfigured = true;
+	m_EditorStartupRenderSettings = settings;
+	m_EditorStartupValidationEnabled = validationEnabled;
+	m_EditorStartupDebugEnabled = debugEnabled;
+	m_EditorStartupProjectRoot = projectRoot
+		? std::optional<std::filesystem::path>(projectRoot->lexically_normal())
+		: std::nullopt;
+	m_EditorStartupOrigin = std::move(origin);
 }
 
 // ResourceManager::IsExportRuntime is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

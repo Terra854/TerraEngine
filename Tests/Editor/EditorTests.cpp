@@ -43,6 +43,10 @@ namespace TerraEngine::EditorTests {
 	void RegisterProjectSettingsMenuInventoryTests(TestRegistry& registry);
 	void RegisterProjectSettingsPersistenceTests(TestRegistry& registry);
 	void RegisterEditorCommandLineTests(TestRegistry& registry);
+	void RegisterEditorStartupRendererConfigurationTests(TestRegistry& registry);
+	void RegisterEditorPostFrameBoundaryTests(TestRegistry& registry);
+	void RegisterCheckedImGuiVulkanBridgeTests(TestRegistry& registry);
+	void RegisterViewportTextureRetirementTests(TestRegistry& registry);
 	void RegisterMainEditorToolbarTests(TestRegistry& registry);
 	void RegisterEditorAutomationServiceTests(TestRegistry& registry);
 	void RegisterEditorReflectionWorkerBoundaryTests(TestRegistry& registry);
@@ -151,6 +155,10 @@ int main() {
 	TerraEngine::EditorTests::RegisterProjectSettingsMenuInventoryTests(registry);
 	TerraEngine::EditorTests::RegisterProjectSettingsPersistenceTests(registry);
 	TerraEngine::EditorTests::RegisterEditorCommandLineTests(registry);
+	TerraEngine::EditorTests::RegisterEditorStartupRendererConfigurationTests(registry);
+	TerraEngine::EditorTests::RegisterEditorPostFrameBoundaryTests(registry);
+	TerraEngine::EditorTests::RegisterCheckedImGuiVulkanBridgeTests(registry);
+	TerraEngine::EditorTests::RegisterViewportTextureRetirementTests(registry);
 	TerraEngine::EditorTests::RegisterMainEditorToolbarTests(registry);
 	TerraEngine::EditorTests::RegisterEditorAutomationServiceTests(registry);
 	TerraEngine::EditorTests::RegisterEditorReflectionWorkerBoundaryTests(registry);

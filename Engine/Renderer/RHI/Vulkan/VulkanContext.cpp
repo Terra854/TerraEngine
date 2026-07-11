@@ -1731,6 +1731,18 @@ void VulkanContext::BeginFrame() {
 			return;
 		}
 		impl->swapchainImageAcquired = true;
+		impl->acquiredPresentationImage = TerraEngine::Renderer::Vulkan::AcquiredPresentationImage{
+			impl->currentFrame,
+			impl->acquiredImageIndex,
+			impl->presentationLifecycle.Generation()
+		};
+		if (!impl->presentationLifecycle.Validate(*impl->acquiredPresentationImage)
+			|| impl->acquiredImageIndex >= impl->uiSemaphores.size()) {
+			TERRAENGINE_LOG(LogLevel::Error, "Rejected an acquired image whose index or presentation generation is stale.");
+			impl->presentationLifecycle.RequestRecreation();
+			impl->skipFrame = true;
+			return;
+		}
 	}
 	TerraEngine::Renderer::Vulkan::RecordVulkanFrameCost(
 		impl->pendingBackendFrameBreakdown,
@@ -3012,30 +3024,12 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (impl->editorMode) {
 		const auto ensureOffscreenResources = [&](VulkanContext::Impl::OffscreenResources& resources, VkExtent2D targetExtent) {
-			const bool hasResources = resources.image != VK_NULL_HANDLE
-				|| resources.depthImage != VK_NULL_HANDLE
-				|| resources.framebuffer != VK_NULL_HANDLE;
 			const bool extentMismatch = resources.extent.width != targetExtent.width
 				|| resources.extent.height != targetExtent.height;
 			if (resources.framebuffer == VK_NULL_HANDLE || extentMismatch)
 			{
-				// Editor viewport images are sampled by ImGui on the same GPU
-				// timeline. On panel-size changes, wait before destroying the old
-				// target so a resize cannot leave ImGui sampling stale regions from
-				// an image that was still referenced by the previous frame.
-				if (hasResources && extentMismatch)
-				{
-					const VkResult idleResult = impl->WaitDeviceIdle();
-					if (impl->MarkDeviceLost(idleResult, "editor offscreen resize device idle"))
-					{
-						return;
-					}
-					if (idleResult != VK_SUCCESS)
-					{
-						TERRAENGINE_LOG(LogLevel::Error, "Skipping editor offscreen resize because the device did not become idle: " << idleResult);
-						return;
-					}
-				}
+				// Replacement is transactional. The old target moves to the shared
+				// editor submission/readback retirement domain after publication.
 				impl->CreateOffscreenResources(resources, targetExtent);
 			}
 		};
@@ -6329,7 +6323,7 @@ void VulkanContext::EndFrame() {
 			// while the presentation engine still owns pending work.
 			VkSemaphore waitSemaphores[] = {impl->imageAvailableSemaphores[impl->currentFrame]};
 			VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
-			VkSemaphore signalSemaphore = impl->renderFinishedSemaphores[impl->currentFrame];
+			VkSemaphore signalSemaphore = impl->uiSemaphores[impl->acquiredImageIndex];
 
 			VkSubmitInfo emptySubmitInfo{};
 			emptySubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -6340,7 +6334,13 @@ void VulkanContext::EndFrame() {
 			emptySubmitInfo.pSignalSemaphores = &signalSemaphore;
 
 			const auto resetFenceStart = BackendClock::now();
-			vkResetFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame]);
+			const VkResult resetResult = vkResetFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame]);
+			if (resetResult != VK_SUCCESS) {
+				if (impl->MarkDeviceLost(resetResult, "empty runtime frame fence reset")) return;
+				TERRAENGINE_LOG(LogLevel::Error, "Empty runtime frame fence reset failed: " << resetResult);
+				impl->RecreateSwapChain();
+				return;
+			}
 			TerraEngine::Renderer::Vulkan::RecordVulkanFrameStage(
 				impl->pendingBackendFrameBreakdown,
 				{ TerraEngine::Renderer::BackendFrameCostCategory::RhiEndFrame, TerraEngine::Renderer::BackendSubmitStage::FrameAllocatorReset, RenderViewType::Game, 0u, "Reset frame fence for empty runtime submit", true, false },
@@ -6414,9 +6414,9 @@ void VulkanContext::EndFrame() {
 	submitInfo.commandBufferCount = static_cast<uint32_t>(cmds.size());
 	submitInfo.pCommandBuffers = cmds.data();
 
-	VkSemaphore signalSemaphore = impl->editorMode 
-		? impl->renderFinishedSemaphores[impl->currentFrame] 
-		: impl->renderFinishedSemaphores[impl->currentFrame];
+	VkSemaphore signalSemaphore = impl->editorMode
+		? impl->renderFinishedSemaphores[impl->currentFrame]
+		: impl->uiSemaphores[impl->acquiredImageIndex];
 
 	VkSemaphore signalSemaphores[] = {signalSemaphore};
 	// Signal render finished only when command buffers are submitted; PresentEditor
@@ -6472,7 +6472,13 @@ void VulkanContext::EndFrame() {
 		}
 	} else {
 		const auto resetFenceStart = BackendClock::now();
-		vkResetFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame]);
+		const VkResult resetResult = vkResetFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame]);
+		if (resetResult != VK_SUCCESS) {
+			if (impl->MarkDeviceLost(resetResult, "runtime frame fence reset")) return;
+			TERRAENGINE_LOG(LogLevel::Error, "Runtime frame fence reset failed: " << resetResult);
+			impl->RecreateSwapChain();
+			return;
+		}
 		TerraEngine::Renderer::Vulkan::RecordVulkanFrameStage(
 			impl->pendingBackendFrameBreakdown,
 			{ TerraEngine::Renderer::BackendFrameCostCategory::RhiEndFrame, TerraEngine::Renderer::BackendSubmitStage::FrameAllocatorReset, RenderViewType::Game, 0u, "Reset frame fence", true, false },
@@ -7267,7 +7273,7 @@ void VulkanContext::GetEditorHandles(EditorHandles& h) {
 	// pool because asset loading and viewport refresh can occur in one frame.
 	h.descriptorPool = impl->editorDescriptorPool;
 	h.renderPass = impl->renderPass;
-	h.minImageCount = impl->MAX_FRAMES_IN_FLIGHT;
+	h.minImageCount = impl->requestedSwapchainImageCount;
 	h.imageCount = static_cast<uint32_t>(impl->swapchainImages.size());
 	h.sceneImageView = (void*)impl->sceneView.view;
 	h.sceneSampler = (void*)impl->sceneView.sampler;
@@ -7298,340 +7304,302 @@ void VulkanContext::EnableEditorMode() {
 }
 
 // VulkanContext::PresentEditor is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
-	if (!impl->editorMode || !impl->initialized || impl->deviceLost) return;
-
-	// The editor can present UI on the project hub before RenderSystem has any
-	// scene/game output to drive BeginFrame. In that mode PresentEditor owns the
-	// frame slot lifecycle, so it must wait for the slot fence before reusing
-	// binary semaphores, command buffers, and the fence itself.
-	const VkResult waitResult = vkWaitForFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame], VK_TRUE, UINT64_MAX);
-	if (impl->MarkDeviceLost(waitResult, "editor frame fence wait")) {
-		return;
-	}
-	if (waitResult != VK_SUCCESS) {
-		TERRAENGINE_LOG(LogLevel::Error, "PresentEditor failed while waiting for frame fence: " << waitResult);
-		return;
-	}
-	if (!impl->editorRenderSubmitted) {
-		// Some recovery paths can submit editor view command buffers outside the
-		// normal EndFrame -> PresentEditor semaphore chain. The frame fence only
-		// tracks UI submits, so prove the graphics queue is idle before resetting
-		// or freeing from the shared per-frame command pool.
-		const VkResult idleResult = impl->WaitGraphicsQueueIdle();
-		if (idleResult != VK_SUCCESS) {
-			if (impl->MarkDeviceLost(idleResult, "editor command pool idle before reset")) {
-				return;
-			}
-			TERRAENGINE_LOG(LogLevel::Error, "PresentEditor could not prove the command pool idle before reset: " << idleResult);
-			return;
-		}
-		if (impl->currentFrame < impl->extraPrimaryCommandBuffers.size()) {
-			auto& extras = impl->extraPrimaryCommandBuffers[impl->currentFrame];
-			if (!extras.empty()) {
-				vkFreeCommandBuffers(impl->device, impl->commandPools[impl->currentFrame], static_cast<uint32_t>(extras.size()), extras.data());
-				extras.clear();
-			}
-		}
-		if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
-			impl->pendingPrimaryCommandBuffers[impl->currentFrame].clear();
-		}
-		if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
-			impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 0u;
-		}
-		vkResetCommandPool(impl->device, impl->commandPools[impl->currentFrame], 0);
+TerraEngine::Renderer::Vulkan::EditorPresentResult VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
+	using namespace TerraEngine::Renderer::Vulkan;
+	EditorPresentResult result{};
+	if (!impl->editorMode || !impl->initialized || impl->deviceLost) {
+		result.outcome = impl->deviceLost ? EditorPresentOutcome::DeviceLost : EditorPresentOutcome::Skipped;
+		return result;
 	}
 
-	const auto drainSubmittedEditorRender = [&](const char* reason) -> bool {
-		if (!impl->editorRenderSubmitted) {
-			return true;
+	auto fail = [&](EditorUiFrameStage stage, VkResult nativeResult, std::string_view operation) {
+		result.stage = stage;
+		result.nativeResult = static_cast<std::int32_t>(nativeResult);
+		if (impl->MarkDeviceLost(nativeResult, operation)) {
+			impl->presentationLifecycle.MarkDeviceLost();
+			impl->editorCompletionTracker.MarkDeviceLost();
+			result.outcome = EditorPresentOutcome::DeviceLost;
+		} else {
+			result.outcome = EditorPresentOutcome::RecoverableFailure;
+			TERRAENGINE_LOG(LogLevel::Error, "Editor UI frame stopped at "
+				<< EditorUiFrameStageName(stage) << ": " << nativeResult);
 		}
-
-		// Editor scene/game rendering is submitted before the ImGui swapchain
-		// pass, and that submit signals renderFinishedSemaphores[currentFrame].
-		// If resize or acquire recovery prevents the UI submit from waiting on
-		// that semaphore, Vulkan still considers it signaled. Submit a tiny
-		// wait-only operation and wait for it so the binary semaphore is
-		// consumed before this frame slot can be reused.
-		VkSemaphore waitSemaphore = impl->renderFinishedSemaphores[impl->currentFrame];
-		VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-		VkSubmitInfo waitSubmitInfo{};
-		waitSubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-		waitSubmitInfo.waitSemaphoreCount = 1;
-		waitSubmitInfo.pWaitSemaphores = &waitSemaphore;
-		waitSubmitInfo.pWaitDstStageMask = &waitStage;
-		waitSubmitInfo.commandBufferCount = 0;
-
-		const VkResult submitResult = impl->SubmitGraphicsQueue(1, &waitSubmitInfo, VK_NULL_HANDLE);
-		if (submitResult != VK_SUCCESS) {
-			if (impl->MarkDeviceLost(submitResult, "editor render semaphore drain submit")) {
-				return false;
-			}
-			TERRAENGINE_LOG(LogLevel::Error, "PresentEditor failed to drain submitted render semaphore after " << reason << ": " << submitResult);
-			return false;
-		}
-
-		const VkResult idleResult = impl->WaitGraphicsQueueIdle();
-		if (impl->MarkDeviceLost(idleResult, "editor render semaphore drain idle")) {
-			return false;
-		}
-		if (idleResult != VK_SUCCESS) {
-			TERRAENGINE_LOG(LogLevel::Error, "PresentEditor could not prove drained render semaphore idle after " << reason << ": " << idleResult);
-			return false;
-		}
-		impl->editorRenderSubmitted = false;
-		if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
-			impl->pendingPrimaryCommandBuffers[impl->currentFrame].clear();
-		}
-		if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
-			impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 0u;
-		}
-		return true;
+		return result;
 	};
 
+	auto consumeOutstandingSemaphores = [&](bool acquired) -> VkResult {
+		std::array<VkSemaphore, 2> waits{};
+		std::array<VkPipelineStageFlags, 2> stages{
+			VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+			VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+		};
+		std::uint32_t waitCount = 0;
+		if (acquired) waits[waitCount++] = impl->imageAvailableSemaphores[impl->currentFrame];
+		if (impl->editorRenderSubmitted) waits[waitCount++] = impl->renderFinishedSemaphores[impl->currentFrame];
+		if (waitCount == 0) return VK_SUCCESS;
+
+		VkSubmitInfo drain{};
+		drain.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		drain.waitSemaphoreCount = waitCount;
+		drain.pWaitSemaphores = waits.data();
+		drain.pWaitDstStageMask = stages.data();
+		VkResult drainResult = impl->SubmitGraphicsQueue(1, &drain, VK_NULL_HANDLE);
+		if (drainResult == VK_SUCCESS) drainResult = impl->WaitGraphicsQueueIdle();
+		if (drainResult == VK_SUCCESS) impl->editorRenderSubmitted = false;
+		return drainResult;
+	};
+
+	const VkResult waitResult = vkWaitForFences(
+		impl->device, 1, &impl->inFlightFences[impl->currentFrame], VK_TRUE, UINT64_MAX);
+	if (waitResult != VK_SUCCESS) {
+		return fail(EditorUiFrameStage::WaitFrameFence, waitResult, "editor frame fence wait");
+	}
+	impl->editorCompletionTracker.RecordFenceCompletion(impl->currentFrame);
+	impl->DrainRetiredOffscreenResources();
+
+	// The completed UI fence covers its acquire wait, optional offscreen wait,
+	// command buffers, and descriptor use. Reclaim temporary buffers before
+	// resetting the frame-owned pool; no queue-wide idle is needed here.
+	if (impl->currentFrame < impl->extraPrimaryCommandBuffers.size()) {
+		auto& extras = impl->extraPrimaryCommandBuffers[impl->currentFrame];
+		if (!extras.empty()) {
+			vkFreeCommandBuffers(impl->device, impl->commandPools[impl->currentFrame],
+				static_cast<std::uint32_t>(extras.size()), extras.data());
+			extras.clear();
+		}
+	}
+	if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
+		impl->pendingPrimaryCommandBuffers[impl->currentFrame].clear();
+	}
+	if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
+		impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 0u;
+	}
+	const VkResult poolResetResult = vkResetCommandPool(
+		impl->device, impl->commandPools[impl->currentFrame], 0);
+	if (poolResetResult != VK_SUCCESS) {
+		return fail(EditorUiFrameStage::ResetCommandPool, poolResetResult, "editor UI command pool reset");
+	}
+
 	if (impl->framebufferResized) {
-		// While a native resize drag is active, EndFrame has already dropped any
-		// command buffers recorded for obsolete extents. Avoid acquire/present and
-		// rebuild only once the final size has remained stable for a short interval.
 		if (!impl->IsFramebufferResizeSettled()) {
-			return;
+			result.outcome = EditorPresentOutcome::Skipped;
+			return result;
 		}
-		if (!drainSubmittedEditorRender("resize")) {
-			const VkResult idleResult = impl->WaitGraphicsQueueIdle();
-			if (impl->MarkDeviceLost(idleResult, "editor resize fallback queue idle")) {
-				return;
-			}
-			if (idleResult == VK_SUCCESS) {
-				if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
-					impl->pendingPrimaryCommandBuffers[impl->currentFrame].clear();
-				}
-				if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
-					impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 0u;
-				}
-			}
-			impl->editorRenderSubmitted = false;
-		}
-		// Project hub and menu-only frames can resize without a preceding
-		// RenderSystem EndFrame. Rebuild before acquiring so the acquire
-		// semaphore and framebuffers belong to the current swapchain.
-		impl->framebufferResized = false;
-		impl->RecreateSwapChain();
-		// ImGui draw data was assembled for the previous native framebuffer size.
-		// Drop this UI frame after rebuilding the presentation swapchain; the next
-		// EditorSystem update will generate matching viewport and clip rectangles.
-		return;
-	}
-	
-	uint32_t imageIndex;
-	VkResult result = vkAcquireNextImageKHR(impl->device, impl->swapchain, UINT64_MAX, impl->imageAvailableSemaphores[impl->currentFrame], VK_NULL_HANDLE, &imageIndex);
-
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (result == VK_ERROR_OUT_OF_DATE_KHR) {
-		if (!drainSubmittedEditorRender("out-of-date acquire")) {
-			const VkResult idleResult = impl->WaitGraphicsQueueIdle();
-			if (impl->MarkDeviceLost(idleResult, "editor out-of-date acquire fallback queue idle")) {
-				return;
-			}
-			if (idleResult == VK_SUCCESS) {
-				if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
-					impl->pendingPrimaryCommandBuffers[impl->currentFrame].clear();
-				}
-				if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
-					impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 0u;
-				}
-			}
-			impl->editorRenderSubmitted = false;
+		const VkResult drainResult = consumeOutstandingSemaphores(false);
+		if (drainResult != VK_SUCCESS) {
+			return fail(EditorUiFrameStage::DrainSemaphore, drainResult, "editor resize semaphore drain");
 		}
 		impl->RecreateSwapChain();
-		return;
-	} else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
-		if (impl->MarkDeviceLost(result, "editor swapchain image acquire")) {
-			return;
-		}
-		if (!drainSubmittedEditorRender("failed acquire")) {
-			const VkResult idleResult = impl->WaitGraphicsQueueIdle();
-			if (impl->MarkDeviceLost(idleResult, "editor failed acquire fallback queue idle")) {
-				return;
-			}
-			if (idleResult == VK_SUCCESS) {
-				if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
-					impl->pendingPrimaryCommandBuffers[impl->currentFrame].clear();
-				}
-				if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
-					impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 0u;
-				}
-			}
-			impl->editorRenderSubmitted = false;
-		}
-		TERRAENGINE_LOG(LogLevel::Error, "failed to acquire swap chain image for Editor!");
-		return;
+		result.outcome = EditorPresentOutcome::RecreationRequested;
+		return result;
 	}
 
-	VkCommandBuffer uiCmd;
-	VkCommandBufferAllocateInfo allocInfo{};
-	allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-	allocInfo.commandPool = impl->commandPools[impl->currentFrame];
-	allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-	allocInfo.commandBufferCount = 1;
-	vkAllocateCommandBuffers(impl->device, &allocInfo, &uiCmd);
-
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (impl->currentFrame >= impl->extraPrimaryCommandBuffers.size()) {
-		impl->extraPrimaryCommandBuffers.resize(impl->MAX_FRAMES_IN_FLIGHT);
+	std::uint32_t imageIndex = 0;
+	const VkResult acquireResult = vkAcquireNextImageKHR(
+		impl->device, impl->swapchain, UINT64_MAX,
+		impl->imageAvailableSemaphores[impl->currentFrame], VK_NULL_HANDLE, &imageIndex);
+	if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR) {
+		const VkResult drainResult = consumeOutstandingSemaphores(false);
+		if (drainResult != VK_SUCCESS) {
+			return fail(EditorUiFrameStage::DrainSemaphore, drainResult, "editor outdated acquire semaphore drain");
+		}
+		impl->RecreateSwapChain();
+		result.outcome = EditorPresentOutcome::RecreationRequested;
+		result.stage = EditorUiFrameStage::AcquireImage;
+		result.nativeResult = static_cast<std::int32_t>(acquireResult);
+		return result;
 	}
-	impl->extraPrimaryCommandBuffers[impl->currentFrame].push_back(uiCmd);
+	if (acquireResult != VK_SUCCESS && acquireResult != VK_SUBOPTIMAL_KHR) {
+		return fail(EditorUiFrameStage::AcquireImage, acquireResult, "editor swapchain image acquire");
+	}
 
-	VkCommandBufferBeginInfo beginInfo{};
-	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-	vkBeginCommandBuffer(uiCmd, &beginInfo);
-	impl->RecordDiagnosticCheckpoint(uiCmd, "editor.ui.begin");
+	AcquiredPresentationImage acquired{
+		impl->currentFrame,
+		imageIndex,
+		impl->presentationLifecycle.Generation()
+	};
+	impl->acquiredPresentationImage = acquired;
+	result.acquiredImage = acquired;
+	if (!impl->presentationLifecycle.Validate(acquired)
+		|| imageIndex >= impl->framebuffers.size()
+		|| imageIndex >= impl->uiSemaphores.size()) {
+		const VkResult drainResult = consumeOutstandingSemaphores(true);
+		if (drainResult != VK_SUCCESS) {
+			return fail(EditorUiFrameStage::DrainSemaphore, drainResult, "invalid editor image semaphore drain");
+		}
+		impl->presentationLifecycle.RequestRecreation();
+		result.outcome = EditorPresentOutcome::RecreationRequested;
+		result.stage = EditorUiFrameStage::AcquireImage;
+		return result;
+	}
+
+	VkCommandBuffer uiCommandBuffer = VK_NULL_HANDLE;
+	VkCommandBufferAllocateInfo allocation{};
+	allocation.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+	allocation.commandPool = impl->commandPools[impl->currentFrame];
+	allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	allocation.commandBufferCount = 1;
+	const VkResult allocationResult = vkAllocateCommandBuffers(impl->device, &allocation, &uiCommandBuffer);
+	if (allocationResult != VK_SUCCESS) {
+		consumeOutstandingSemaphores(true);
+		return fail(EditorUiFrameStage::AllocateCommandBuffer, allocationResult, "editor UI command buffer allocation");
+	}
+	impl->extraPrimaryCommandBuffers[impl->currentFrame].push_back(uiCommandBuffer);
+
+	VkCommandBufferBeginInfo begin{};
+	begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	const VkResult beginResult = vkBeginCommandBuffer(uiCommandBuffer, &begin);
+	if (beginResult != VK_SUCCESS) {
+		consumeOutstandingSemaphores(true);
+		return fail(EditorUiFrameStage::BeginCommandBuffer, beginResult, "editor UI command buffer begin");
+	}
+	impl->RecordDiagnosticCheckpoint(uiCommandBuffer, "editor.ui.begin");
 	if (impl->validationLayersEnabled && vkSetDebugUtilsObjectNameEXT != nullptr) {
-		// Keep the UI submission identifiable in validation reports; these command
-		// buffers are temporary and otherwise appear as unnamed destroyed handles.
-		VkDebugUtilsObjectNameInfoEXT nameInfo{};
-		nameInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
-		nameInfo.objectType = VK_OBJECT_TYPE_COMMAND_BUFFER;
-		nameInfo.objectHandle = reinterpret_cast<uint64_t>(uiCmd);
-		nameInfo.pObjectName = "Editor UI Present Command Buffer";
-		vkSetDebugUtilsObjectNameEXT(impl->device, &nameInfo);
+		VkDebugUtilsObjectNameInfoEXT name{};
+		name.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
+		name.objectType = VK_OBJECT_TYPE_COMMAND_BUFFER;
+		name.objectHandle = reinterpret_cast<std::uint64_t>(uiCommandBuffer);
+		name.pObjectName = "Editor UI Present Command Buffer";
+		const VkResult namingResult = vkSetDebugUtilsObjectNameEXT(impl->device, &name);
+		if (namingResult != VK_SUCCESS) {
+			consumeOutstandingSemaphores(true);
+			return fail(EditorUiFrameStage::DiagnosticNaming, namingResult, "editor UI diagnostic naming");
+		}
 	}
 
-	VkRenderPassBeginInfo renderPassInfo{};
-	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-	renderPassInfo.renderPass = impl->renderPass;
-	renderPassInfo.framebuffer = impl->framebuffers[imageIndex];
-	renderPassInfo.renderArea.offset = {0, 0};
-	renderPassInfo.renderArea.extent = impl->swapchainExtent;
+	VkRenderPassBeginInfo renderPass{};
+	renderPass.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+	renderPass.renderPass = impl->renderPass;
+	renderPass.framebuffer = impl->framebuffers[imageIndex];
+	renderPass.renderArea.extent = impl->swapchainExtent;
+	VkClearValue clear{};
+	clear.color = {{ 0.0f, 0.0f, 0.0f, 1.0f }};
+	renderPass.clearValueCount = 1;
+	renderPass.pClearValues = &clear;
 
-	std::array<VkClearValue, 3> clearValues{};
-	clearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
-	clearValues[1].depthStencil = {1.0f, 0};
-	clearValues[2].color = {{0, 0, 0, 0}};
+	try {
+		vkCmdBeginRenderPass(uiCommandBuffer, &renderPass, VK_SUBPASS_CONTENTS_INLINE);
+		{
+			// Dear ImGui records descriptor-backed draw calls here. The queue
+			// mutex is also the editor's protected descriptor/presentation boundary.
+			std::lock_guard<std::mutex> queueLock(impl->queueAccessMutex);
+			if (renderUI) renderUI(uiCommandBuffer);
+		}
+		vkCmdEndRenderPass(uiCommandBuffer);
+	} catch (...) {
+		consumeOutstandingSemaphores(true);
+		return fail(EditorUiFrameStage::RecordDrawData, VK_ERROR_INITIALIZATION_FAILED,
+			"editor UI backend draw recording");
+	}
+	impl->RecordDiagnosticCheckpoint(uiCommandBuffer, "editor.ui.end");
+	const VkResult endResult = vkEndCommandBuffer(uiCommandBuffer);
+	if (endResult != VK_SUCCESS) {
+		consumeOutstandingSemaphores(true);
+		return fail(EditorUiFrameStage::EndCommandBuffer, endResult, "editor UI command buffer end");
+	}
 
-	// PresentEditor always uses the editor-mode color-only render pass. Scene and
-	// Game depth are cleared inside their independent offscreen render passes.
-	renderPassInfo.clearValueCount = 1u;
-	renderPassInfo.pClearValues = clearValues.data();
-
-	vkCmdBeginRenderPass(uiCmd, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (renderUI) renderUI(uiCmd);
-	vkCmdEndRenderPass(uiCmd);
-	impl->RecordDiagnosticCheckpoint(uiCmd, "editor.ui.end");
-	vkEndCommandBuffer(uiCmd);
-
-	VkSubmitInfo submitInfo{};
-	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-	
-	std::array<VkSemaphore, 2> waitSemaphores = {impl->imageAvailableSemaphores[impl->currentFrame], VK_NULL_HANDLE};
-	std::array<VkPipelineStageFlags, 2> waitStages = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT};
-	uint32_t waitSemaphoreCount = 1;
+	std::array<VkSemaphore, 2> waits{
+		impl->imageAvailableSemaphores[impl->currentFrame],
+		VK_NULL_HANDLE
+	};
+	std::array<VkPipelineStageFlags, 2> waitStages{
+		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+	};
+	std::uint32_t waitCount = 1;
 	if (impl->editorRenderSubmitted) {
-		// Scene/Game View textures are sampled by ImGui, so wait for their offscreen pass only when one ran this frame.
-		waitSemaphores[waitSemaphoreCount] = impl->renderFinishedSemaphores[impl->currentFrame];
-		++waitSemaphoreCount;
+		waits[waitCount++] = impl->renderFinishedSemaphores[impl->currentFrame];
 	}
+	VkSemaphore presentReady = impl->uiSemaphores[imageIndex];
+	VkSubmitInfo submit{};
+	submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	submit.waitSemaphoreCount = waitCount;
+	submit.pWaitSemaphores = waits.data();
+	submit.pWaitDstStageMask = waitStages.data();
+	submit.commandBufferCount = 1;
+	submit.pCommandBuffers = &uiCommandBuffer;
+	submit.signalSemaphoreCount = 1;
+	submit.pSignalSemaphores = &presentReady;
 
-	submitInfo.waitSemaphoreCount = waitSemaphoreCount;
-	submitInfo.pWaitSemaphores = waitSemaphores.data();
-	submitInfo.pWaitDstStageMask = waitStages.data();
-
-	submitInfo.commandBufferCount = 1;
-	submitInfo.pCommandBuffers = &uiCmd;
-
-	VkSemaphore uiSemaphore = impl->uiSemaphores[imageIndex];
-	
-	submitInfo.signalSemaphoreCount = 1;
-	submitInfo.pSignalSemaphores = &uiSemaphore;
-
-	// Reset and use the main frame fence here, so BeginFrame waits for UI completion too.
-	vkResetFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame]);
-
-	VkResult uiSubmitResult = impl->SubmitGraphicsQueue(1, &submitInfo, impl->inFlightFences[impl->currentFrame]);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (uiSubmitResult != VK_SUCCESS) {
-		if (impl->MarkDeviceLost(uiSubmitResult, "editor UI queue submit")) {
-			return;
-		}
-		TERRAENGINE_LOG(LogLevel::Error, "PresentEditor QueueSubmit failed: " << uiSubmitResult);
-		if (!drainSubmittedEditorRender("failed UI submit")) {
-			const VkResult fallbackIdleResult = impl->WaitGraphicsQueueIdle();
-			if (impl->MarkDeviceLost(fallbackIdleResult, "editor failed UI submit fallback queue idle")) {
-				return;
-			}
-			if (fallbackIdleResult == VK_SUCCESS) {
-				if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
-					impl->pendingPrimaryCommandBuffers[impl->currentFrame].clear();
-				}
-				if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
-					impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 0u;
-				}
-			}
-			impl->editorRenderSubmitted = false;
-		}
-		const VkResult idleResult = impl->WaitGraphicsQueueIdle();
-		if (idleResult == VK_SUCCESS) {
-			vkFreeCommandBuffers(impl->device, impl->commandPools[impl->currentFrame], 1, &uiCmd);
-			if (impl->currentFrame < impl->extraPrimaryCommandBuffers.size()) {
-				auto& extras = impl->extraPrimaryCommandBuffers[impl->currentFrame];
-				extras.erase(std::remove(extras.begin(), extras.end(), uiCmd), extras.end());
-			}
-			// The UI submit path reset this fence immediately before vkQueueSubmit.
-			// If submission fails, no queue operation will signal it, so replace it
-			// with a signaled fence to keep the editor from deadlocking on the next
-			// BeginFrame/PresentEditor wait for the same frame slot.
+	const VkResult resetFenceResult = vkResetFences(
+		impl->device, 1, &impl->inFlightFences[impl->currentFrame]);
+	if (resetFenceResult != VK_SUCCESS) {
+		consumeOutstandingSemaphores(true);
+		return fail(EditorUiFrameStage::ResetFrameFence, resetFenceResult, "editor UI frame fence reset");
+	}
+	const VkResult submitResult = impl->SubmitGraphicsQueue(
+		1, &submit, impl->inFlightFences[impl->currentFrame]);
+	if (submitResult != VK_SUCCESS) {
+		// Failed submission consumes no waits. Drain them, then replace the now
+		// unsignaled fence so the frame slot remains reusable.
+		const VkResult drainResult = consumeOutstandingSemaphores(true);
+		if (drainResult == VK_SUCCESS) {
 			VkFenceCreateInfo fenceInfo{};
 			fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
 			fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-			VkFence replacementFence = VK_NULL_HANDLE;
-			if (vkCreateFence(impl->device, &fenceInfo, nullptr, &replacementFence) == VK_SUCCESS) {
+			VkFence replacement = VK_NULL_HANDLE;
+			const VkResult repairResult = vkCreateFence(impl->device, &fenceInfo, nullptr, &replacement);
+			if (repairResult == VK_SUCCESS) {
 				vkDestroyFence(impl->device, impl->inFlightFences[impl->currentFrame], nullptr);
-				impl->inFlightFences[impl->currentFrame] = replacementFence;
+				impl->inFlightFences[impl->currentFrame] = replacement;
+			} else {
+				return fail(EditorUiFrameStage::RepairFence, repairResult, "editor UI frame fence repair");
 			}
 		}
-		else {
-			if (impl->MarkDeviceLost(idleResult, "editor failed UI submit queue idle")) {
-				return;
-			}
-			TERRAENGINE_LOG(LogLevel::Error, "PresentEditor kept failed UI command buffer alive because the queue did not prove idle: " << idleResult);
-			return;
-		}
-		impl->RecreateSwapChain();
-		return;
+		return fail(EditorUiFrameStage::Submit, submitResult, "editor UI queue submit");
 	}
 
-	VkPresentInfoKHR presentInfo{};
-	presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-	presentInfo.waitSemaphoreCount = 1;
-	presentInfo.pWaitSemaphores = &uiSemaphore;
-	
-	VkSwapchainKHR swapChains[] = {impl->swapchain};
-	presentInfo.swapchainCount = 1;
-	presentInfo.pSwapchains = swapChains;
-	presentInfo.pImageIndices = &imageIndex;
-
-	VkResult presentResult = impl->PresentSwapchain(&presentInfo);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR || impl->framebufferResized) {
-		// A present racing the latest resize callback may become out of date before
-		// the debounce interval expires. Leave the resize pending; the next editor
-		// frame will perform one rebuild after the size settles.
-		if (!impl->framebufferResized || impl->IsFramebufferResizeSettled()) {
-			impl->framebufferResized = false;
-			impl->RecreateSwapChain();
-		}
-	} else if (presentResult != VK_SUCCESS) {
-		if (impl->MarkDeviceLost(presentResult, "editor queue present")) {
-			return;
-		}
-		TERRAENGINE_LOG(LogLevel::Error, "PresentEditor failed to present swap chain image: " << presentResult);
-	}
-
-	// Removed End-of-Frame Block. We proceed optimistically.
-	
+	result.submissionSerial = impl->editorCompletionTracker.RecordSubmission(impl->currentFrame);
+	result.outcome = EditorPresentOutcome::Submitted;
+	result.stage = EditorUiFrameStage::Submit;
 	impl->editorRenderSubmitted = false;
+
+	VkPresentInfoKHR present{};
+	present.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+	present.waitSemaphoreCount = 1;
+	present.pWaitSemaphores = &presentReady;
+	present.swapchainCount = 1;
+	present.pSwapchains = &impl->swapchain;
+	present.pImageIndices = &imageIndex;
+	const VkResult presentResult = impl->PresentSwapchain(&present);
+	result.stage = EditorUiFrameStage::Present;
+	result.nativeResult = static_cast<std::int32_t>(presentResult);
+	if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR || impl->framebufferResized) {
+		impl->RecreateSwapChain();
+		result.outcome = EditorPresentOutcome::RecreationRequested;
+	} else if (presentResult != VK_SUCCESS) {
+		return fail(EditorUiFrameStage::Present, presentResult, "editor queue present");
+	}
+
 	impl->currentFrame = (impl->currentFrame + 1) % impl->MAX_FRAMES_IN_FLIGHT;
+	return result;
+}
+
+TerraEngine::Renderer::Vulkan::EditorSubmissionProgress VulkanContext::GetEditorSubmissionProgress() const {
+	if (!impl) return {};
+	return impl->editorCompletionTracker.Snapshot();
+}
+
+std::int32_t VulkanContext::FreeEditorDescriptorSet(void* descriptorSet) {
+	if (!impl || descriptorSet == nullptr) return static_cast<std::int32_t>(VK_SUCCESS);
+	if (impl->deviceLost) return static_cast<std::int32_t>(VK_ERROR_DEVICE_LOST);
+	std::lock_guard<std::recursive_mutex> descriptorLock(impl->descriptorHostAccessMutex);
+	VkDescriptorSet descriptor = reinterpret_cast<VkDescriptorSet>(descriptorSet);
+	return static_cast<std::int32_t>(vkFreeDescriptorSets(
+		impl->device, impl->editorDescriptorPool, 1, &descriptor));
+}
+
+void VulkanContext::AcknowledgeViewportTextureGeneration(
+	ViewType view, std::uint64_t generation, std::uint64_t finalUseSerial) {
+	if (!impl) return;
+	for (auto& retired : impl->retiredOffscreenResources) {
+		if (retired.editorView == view && retired.replacementGeneration == generation) {
+			retired.editorDescriptorAcknowledged = true;
+			retired.retireAfterSerial = std::max(retired.retireAfterSerial, finalUseSerial);
+		}
+	}
+	impl->DrainRetiredOffscreenResources();
 }
 
 // Impl Extensions
@@ -7648,45 +7616,48 @@ void VulkanContext::Impl::InitEditorMode() {
 }
 
 // VulkanContext::Impl::CreateOffscreenResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+void VulkanContext::Impl::DestroyOffscreenResourceSet(OffscreenResources& resources)
+{
+	if (resources.sampler != VK_NULL_HANDLE) vkDestroySampler(device, resources.sampler, nullptr);
+	if (resources.framebuffer != VK_NULL_HANDLE) vkDestroyFramebuffer(device, resources.framebuffer, nullptr);
+	if (resources.view != VK_NULL_HANDLE) vkDestroyImageView(device, resources.view, nullptr);
+	if (resources.depthView != VK_NULL_HANDLE) vkDestroyImageView(device, resources.depthView, nullptr);
+	if (resources.image != VK_NULL_HANDLE && resources.allocation != VK_NULL_HANDLE) {
+		vmaDestroyImage(allocator, resources.image, resources.allocation);
+	}
+	if (resources.depthImage != VK_NULL_HANDLE && resources.depthAllocation != VK_NULL_HANDLE) {
+		vmaDestroyImage(allocator, resources.depthImage, resources.depthAllocation);
+	}
+	resources = {};
+}
+
+void VulkanContext::Impl::DrainRetiredOffscreenResources()
+{
+	const std::uint64_t completedSerial = editorCompletionTracker.Snapshot().completedSerial;
+	auto iterator = retiredOffscreenResources.begin();
+	while (iterator != retiredOffscreenResources.end()) {
+		const bool readbackComplete = !HasInFlightReadbackForImage(iterator->resources.image);
+		if (!iterator->editorDescriptorAcknowledged
+			|| iterator->retireAfterSerial > completedSerial || !readbackComplete) {
+			++iterator;
+			continue;
+		}
+		DestroyOffscreenResourceSet(iterator->resources);
+		iterator = retiredOffscreenResources.erase(iterator);
+	}
+}
+
+// VulkanContext::Impl::CreateOffscreenResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res, VkExtent2D requestedExtent) {
 	const std::uint64_t replacementGeneration = res.generation + 1u;
+	OffscreenResources candidate{};
+	candidate.generation = replacementGeneration;
 	auto DestroyOffscreenResourceSet = [&]() {
-		if (res.sampler != VK_NULL_HANDLE) vkDestroySampler(device, res.sampler, nullptr);
-		if (res.framebuffer != VK_NULL_HANDLE) vkDestroyFramebuffer(device, res.framebuffer, nullptr);
-		if (res.view != VK_NULL_HANDLE) vkDestroyImageView(device, res.view, nullptr);
-		if (res.depthView != VK_NULL_HANDLE) vkDestroyImageView(device, res.depthView, nullptr);
-		if (res.image != VK_NULL_HANDLE && res.allocation != VK_NULL_HANDLE) vmaDestroyImage(allocator, res.image, res.allocation);
-		if (res.depthImage != VK_NULL_HANDLE && res.depthAllocation != VK_NULL_HANDLE) vmaDestroyImage(allocator, res.depthImage, res.depthAllocation);
-		res = {};
-		// Preserve the new logical identity after clearing Vulkan handles. The
-		// editor must invalidate its descriptor even if creation later fails.
-		res.generation = replacementGeneration;
+		this->DestroyOffscreenResourceSet(candidate);
+		// Preserve the logical identity only in the temporary candidate. The
+		// previously published target remains untouched on creation failure.
+		candidate.generation = replacementGeneration;
 	};
-
-	if (HasInFlightReadbackForImage(res.image))
-	{
-		// A resize may replace the exact image referenced by an asynchronous copy.
-		// Wait only on this rare resize boundary so the old image is never
-		// destroyed while the graphics queue still owns it. The next poll detects
-		// the image identity change and reports a resize cancellation.
-		const VkResult idleResult = WaitDeviceIdle();
-		if (MarkDeviceLost(idleResult, "capture source resize device idle"))
-		{
-			return;
-		}
-		if (idleResult != VK_SUCCESS)
-		{
-			TERRAENGINE_LOG(LogLevel::Error, "Skipping offscreen resize because pending capture work could not become idle: " << idleResult);
-			return;
-		}
-	}
-	if (res.image != VK_NULL_HANDLE || res.depthImage != VK_NULL_HANDLE || res.framebuffer != VK_NULL_HANDLE) {
-		DestroyOffscreenResourceSet();
-	}
-	else {
-		res.generation = replacementGeneration;
-	}
-
 	VkExtent2D targetExtent = requestedExtent;
 	if (targetExtent.width == 0u)
 	{
@@ -7936,21 +7907,21 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res, VkEx
 	VmaAllocationCreateInfo allocInfo{};
 	allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 
-	if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &res.image, &res.allocation, nullptr) != VK_SUCCESS) {
+	if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &candidate.image, &candidate.allocation, nullptr) != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "failed to create editor offscreen color image!");
 		DestroyOffscreenResourceSet();
 		return;
 	}
-	vmaSetAllocationName(allocator, res.allocation, "Offscreen Render Target Image");
+	vmaSetAllocationName(allocator, candidate.allocation, "Offscreen Render Target Image");
 	// Editor scene/game views are registered with ImGui as shader-readable
 	// textures immediately after creation. Transition the image up front so a
 	// skipped or delayed first scene render cannot leave ImGui sampling an
 	// image that still has Vulkan's UNDEFINED layout.
-	TransitionImageLayout(res.image, offscreenColorFormat, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+	TransitionImageLayout(candidate.image, offscreenColorFormat, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
 	// Create View
-	res.view = CreateImageView(res.image, offscreenColorFormat, VK_IMAGE_ASPECT_COLOR_BIT);
-	if (res.view == VK_NULL_HANDLE) {
+	candidate.view = CreateImageView(candidate.image, offscreenColorFormat, VK_IMAGE_ASPECT_COLOR_BIT);
+	if (candidate.view == VK_NULL_HANDLE) {
 		TERRAENGINE_LOG(LogLevel::Error, "failed to create editor offscreen color view!");
 		DestroyOffscreenResourceSet();
 		return;
@@ -7979,24 +7950,24 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res, VkEx
 
 	VmaAllocationCreateInfo depthAllocInfo{};
 	depthAllocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-	if (vmaCreateImage(allocator, &depthImageInfo, &depthAllocInfo, &res.depthImage, &res.depthAllocation, nullptr) != VK_SUCCESS) {
+	if (vmaCreateImage(allocator, &depthImageInfo, &depthAllocInfo, &candidate.depthImage, &candidate.depthAllocation, nullptr) != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "failed to create editor offscreen depth image!");
 		DestroyOffscreenResourceSet();
 		return;
 	}
-	vmaSetAllocationName(allocator, res.depthAllocation, "Editor Offscreen Depth Image");
-	res.depthView = CreateImageView(res.depthImage, offscreenDepthFormat, VK_IMAGE_ASPECT_DEPTH_BIT);
-	if (res.depthView == VK_NULL_HANDLE) {
+	vmaSetAllocationName(allocator, candidate.depthAllocation, "Editor Offscreen Depth Image");
+	candidate.depthView = CreateImageView(candidate.depthImage, offscreenDepthFormat, VK_IMAGE_ASPECT_DEPTH_BIT);
+	if (candidate.depthView == VK_NULL_HANDLE) {
 		TERRAENGINE_LOG(LogLevel::Error, "failed to create editor offscreen depth view!");
 		DestroyOffscreenResourceSet();
 		return;
 	}
-	TransitionImageLayout(res.depthImage, offscreenDepthFormat, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+	TransitionImageLayout(candidate.depthImage, offscreenDepthFormat, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 
 	// Create Framebuffer
 	std::vector<VkImageView> fbAttachments = {
-		res.view,
-		res.depthView
+		candidate.view,
+		candidate.depthView
 	};
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (UsesVrsAttachment()) {
@@ -8012,7 +7983,7 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res, VkEx
 	framebufferInfo.height = targetExtent.height;
 	framebufferInfo.layers = 1;
 
-	if (vkCreateFramebuffer(device, &framebufferInfo, nullptr, &res.framebuffer) != VK_SUCCESS) {
+	if (vkCreateFramebuffer(device, &framebufferInfo, nullptr, &candidate.framebuffer) != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "failed to create editor offscreen framebuffer!");
 		DestroyOffscreenResourceSet();
 		return;
@@ -8034,12 +8005,27 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res, VkEx
 	samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
 	samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
 
-	if (vkCreateSampler(device, &samplerInfo, nullptr, &res.sampler) != VK_SUCCESS) {
+	if (vkCreateSampler(device, &samplerInfo, nullptr, &candidate.sampler) != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "failed to create editor offscreen sampler!");
 		DestroyOffscreenResourceSet();
 		return;
 	}
-	res.extent = targetExtent;
+	candidate.extent = targetExtent;
+	OffscreenResources previous = std::move(res);
+	res = std::move(candidate);
+	const bool previousWasAllocated = previous.image != VK_NULL_HANDLE
+		|| previous.depthImage != VK_NULL_HANDLE || previous.framebuffer != VK_NULL_HANDLE;
+	if (previousWasAllocated) {
+		RetiredOffscreenResourceSet retired{};
+		retired.resources = std::move(previous);
+		retired.replacementGeneration = replacementGeneration;
+		retired.retireAfterSerial = editorCompletionTracker.Snapshot().lastSubmittedSerial;
+		if (&res == &sceneView) retired.editorView = VulkanContext::ViewType::Scene;
+		else if (&res == &gameView) retired.editorView = VulkanContext::ViewType::Game;
+		retired.editorDescriptorAcknowledged = !retired.editorView.has_value();
+		retiredOffscreenResources.push_back(std::move(retired));
+	}
+	DrainRetiredOffscreenResources();
 }
 
 // VulkanContext::Impl::RecreateOffscreenResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -8047,14 +8033,8 @@ void VulkanContext::Impl::RecreateOffscreenResources() {
 	if (deviceLost) {
 		return;
 	}
-	const VkResult idleResult = WaitDeviceIdle();
-	if (MarkDeviceLost(idleResult, "editor offscreen recreation device idle")) {
-		return;
-	}
-	if (idleResult != VK_SUCCESS) {
-		TERRAENGINE_LOG(LogLevel::Error, "Skipping editor offscreen recreation because the device did not become idle: " << idleResult);
-		return;
-	}
+	// Each target publishes transactionally and retires through completed UI
+	// serials/readback fences, so ordinary viewport recreation never idles the device.
 	CreateOffscreenResources(sceneView);
 	CreateOffscreenResources(gameView);
 	if (captureView.image != VK_NULL_HANDLE || captureView.framebuffer != VK_NULL_HANDLE)

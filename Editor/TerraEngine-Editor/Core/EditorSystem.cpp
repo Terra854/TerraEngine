@@ -3,6 +3,7 @@
 // Implements the editor's core logic, including ImGui initialization, workspace layout management, and event callback chaining. It manages the loading of the managed editor assembly and provides the bridge between native engine events and C# UI windows.
 
 #include "EditorSystem.h"
+#include "CheckedImGuiVulkanBridge.h"
 #include "ProjectHubSubsystem.h"
 #include "MainEditorSubsystem.h"
 #include "ProjectManager.h"
@@ -448,7 +449,9 @@ void EditorSystem::Initialize() {
 	init_info.MinImageCount = handles.minImageCount;
 	init_info.ImageCount = handles.imageCount;
 	init_info.Allocator = nullptr;
-	init_info.CheckVkResultFn = nullptr;
+	init_info.CheckVkResultFn = [](VkResult result) {
+		TerraEngine::Editor::CheckedImGuiVulkanBridge::CheckVkResult(result);
+	};
 	init_info.PipelineInfoMain.RenderPass = (VkRenderPass)handles.renderPass;
 	init_info.PipelineInfoMain.Subpass = 0;
 	init_info.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
@@ -463,7 +466,14 @@ void EditorSystem::Initialize() {
 		return p->first(p->second, function_name);
 	}, &loaderParams);
 	
-	ImGui_ImplVulkan_Init(&init_info);
+	const auto backendInit = TerraEngine::Editor::CheckedImGuiVulkanBridge::Execute(
+		TerraEngine::Renderer::Vulkan::EditorUiFrameStage::RecordDrawData,
+		[&]() { ImGui_ImplVulkan_Init(&init_info); });
+	if (!backendInit.success) {
+		throw std::runtime_error("Dear ImGui Vulkan backend initialization failed with result "
+			+ std::to_string(backendInit.nativeResult));
+	}
+	imguiPresentationGeneration = vulkan->GetEditorSubmissionProgress().presentationGeneration;
 	
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (projectHub) projectHub->OnBackendReady();
@@ -558,11 +568,31 @@ void EditorSystem::Update(float deltaTime) {
 	auto* rhi = renderSystem.GetContext();
 	auto* vulkan = dynamic_cast<VulkanContext*>(rhi);
 	if (vulkan) {
+		VulkanContext::EditorHandles currentHandles;
+		vulkan->GetEditorHandles(currentHandles);
+		const auto progress = vulkan->GetEditorSubmissionProgress();
+		if (progress.presentationGeneration != imguiPresentationGeneration
+			&& currentHandles.minImageCount > 0) {
+			const auto refreshResult = TerraEngine::Editor::CheckedImGuiVulkanBridge::Execute(
+				TerraEngine::Renderer::Vulkan::EditorUiFrameStage::RecordDrawData,
+				[&]() { vulkan->RunWithQueueAccess([&]() {
+					ImGui_ImplVulkan_SetMinImageCount(currentHandles.minImageCount);
+				}); });
+			if (!refreshResult.success) {
+				TERRAENGINE_LOG(LogLevel::Error, "Dear ImGui swapchain image-count refresh failed: " << refreshResult.nativeResult);
+				return;
+			}
+			imguiPresentationGeneration = progress.presentationGeneration;
+		}
 		// The ImGui Vulkan backend may submit font/texture uploads from NewFrame.
 		// Serialize that hidden queue access with renderer and asset-upload work.
-		vulkan->RunWithQueueAccess([]() {
-			ImGui_ImplVulkan_NewFrame();
-		});
+		const auto newFrameResult = TerraEngine::Editor::CheckedImGuiVulkanBridge::Execute(
+			TerraEngine::Renderer::Vulkan::EditorUiFrameStage::RecordDrawData,
+			[&]() { vulkan->RunWithQueueAccess([]() { ImGui_ImplVulkan_NewFrame(); }); });
+		if (!newFrameResult.success) {
+			TERRAENGINE_LOG(LogLevel::Error, "Dear ImGui Vulkan NewFrame failed: " << newFrameResult.nativeResult);
+			return;
+		}
 	} else {
 		ImGui_ImplVulkan_NewFrame();
 	}
@@ -595,12 +625,33 @@ void EditorSystem::Update(float deltaTime) {
 	}
 	
 	ImGui::Render();
+	if (mainEditor) mainEditor->CaptureViewportDrawDataUses();
 	
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vulkan) {
-		vulkan->PresentEditor([](void* cmd){
-			ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)cmd);
+		const auto presentResult = vulkan->PresentEditor([](void* cmd){
+			const auto bridgeResult = TerraEngine::Editor::CheckedImGuiVulkanBridge::Execute(
+				TerraEngine::Renderer::Vulkan::EditorUiFrameStage::RecordDrawData,
+				[&]() { ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)cmd); });
+			if (!bridgeResult.success) {
+				throw std::runtime_error("Dear ImGui Vulkan draw recording failed with result "
+					+ std::to_string(bridgeResult.nativeResult));
+			}
 		});
+		if (presentResult.outcome == TerraEngine::Renderer::Vulkan::EditorPresentOutcome::RecoverableFailure) {
+			TERRAENGINE_LOG(LogLevel::Error, "Editor UI presentation stopped safely at "
+				<< TerraEngine::Renderer::Vulkan::EditorUiFrameStageName(presentResult.stage)
+				<< " with result " << presentResult.nativeResult);
+		}
+		if (mainEditor) {
+			if (presentResult.submissionSerial != 0) {
+				mainEditor->CommitViewportDrawDataUses(presentResult.submissionSerial);
+			} else {
+				mainEditor->AbandonViewportDrawDataUses();
+			}
+			mainEditor->ReleaseCompletedViewportTextures(
+				vulkan->GetEditorSubmissionProgress().completedSerial);
+		}
 	}
 }
 
@@ -616,13 +667,18 @@ void EditorSystem::Shutdown() {
 	if (auto* rhi = renderSystem.GetContext()) {
 		rhi->WaitIdle();
 	}
-	
+	if (mainEditor) {
+		const auto recovery = renderSystem.GetLatestRendererRecoverySnapshot();
+		mainEditor->ShutdownViewportTextures(
+			recovery.state != TerraEngine::Renderer::RendererRecoveryStateKind::Active);
+		mainEditor->Shutdown();
+	}
+
 	ImGui_ImplVulkan_Shutdown();
 	ImGui_ImplGlfw_Shutdown();
 	ImGui::DestroyContext();
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (mainEditor) mainEditor->Shutdown();
 	if (projectHub) projectHub->Shutdown();
 	if (context.editorMcpBridge) context.editorMcpBridge->Shutdown();
 	
@@ -637,6 +693,30 @@ void EditorSystem::Shutdown() {
 // EditorSystem::SystemName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string EditorSystem::SystemName() {
 	return "EditorSystem";
+}
+
+TerraEngine::Scheduling::SystemDeclaration EditorSystem::SchedulerDeclaration() {
+	TerraEngine::Scheduling::SystemDeclaration declaration;
+	declaration.name = SystemName();
+	declaration.phase = "PostFrame";
+	declaration.reads = {
+		"RendererOutput", "PresentationState", "WindowSnapshot", "InputSnapshot",
+		"ProjectState", "EditorState", "ImGuiDrawData"
+	};
+	declaration.writes = {
+		"EditorUiPresentation", "ViewportTextureRegistry", "EditorSubmissionCompletion",
+		"EditorDiagnostics", "EditorAutomationState"
+	};
+	declaration.mainThread = true;
+	declaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::ProtectedCommit;
+	declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::Protected;
+	declaration.hardBoundary = true;
+	declaration.safeSubwork = "No ImGui context mutation is worker-safe; editor subsystems may prepare immutable snapshots independently.";
+	declaration.protectedCommit = "ImGui frame mutation, checked Vulkan backend recording, descriptor mutation, acquire, submit, present, and retirement publication.";
+	declaration.protectedReason = declaration.protectedCommit;
+	declaration.profilingLabel = declaration.name;
+	declaration.usesDefaultMetadata = false;
+	return declaration;
 }
 
 // EditorSystem::DrawWindowMenu is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
