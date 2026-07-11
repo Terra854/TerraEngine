@@ -23,7 +23,7 @@ jobs:
   export-baseline:
     name: Debug build, install, and export
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     defaults:
       run:
         shell: pwsh
@@ -35,6 +35,9 @@ jobs:
       LOG_ROOT: out/ci/logs
 
     steps:
+      - name: Enable Git long paths
+        run: git config --global core.longpaths true
+
       - name: Checkout repository and submodules
         uses: actions/checkout@v4
         with:
