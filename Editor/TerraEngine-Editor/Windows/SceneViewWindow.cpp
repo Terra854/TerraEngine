@@ -1254,8 +1254,46 @@ void SceneViewWindow::OnGui() {
 		ImGui::Text("Scene rendering not available.");
 	}
 	RenderStatsSnapshot sceneStats = RenderSystem::Instance().GetLatestRenderStats(RenderViewType::Scene);
-	if (m_ShowVirtualGeometryDiagnostics && sceneStats.valid && (sceneStats.virtualGeometryClusterPackets > 0u || sceneStats.virtualGeometrySubmittedBatches > 0u || sceneStats.virtualGeometryResidentPagePayloads > 0u || sceneStats.virtualGeometryEmittedHighDetailPages > 0u || sceneStats.virtualGeometryEmittedFallbackPages > 0u))
+	if (m_ShowVirtualGeometryDiagnostics && sceneStats.valid && (sceneStats.meshletsTotal > 0u || sceneStats.virtualGeometryClusterPackets > 0u || sceneStats.virtualGeometrySubmittedBatches > 0u || sceneStats.virtualGeometryResidentPagePayloads > 0u || sceneStats.virtualGeometryEmittedHighDetailPages > 0u || sceneStats.virtualGeometryEmittedFallbackPages > 0u))
 	{
+		// Meshlet counters are resolved from the completed Scene View frame slot.
+		// Keep the source label on the primary rows so delayed or unavailable GPU
+		// readback can never look like an authoritative zero in the overlay.
+		const std::string meshletsConsideredText = TerraEngine::Renderer::FormatVirtualGeometryCounterOverlayValue(
+			"Meshlets Considered",
+			sceneStats.meshletsTotal,
+			sceneStats.meshletCounterSource,
+			sceneStats.meshletCounterReason);
+		const std::string meshletsSentText = TerraEngine::Renderer::FormatVirtualGeometryCounterOverlayValue(
+			"Meshlets Sent",
+			sceneStats.meshletsDispatched,
+			sceneStats.meshletCounterSource,
+			sceneStats.meshletCounterReason);
+		const std::string meshletsCulledText = TerraEngine::Renderer::FormatVirtualGeometryCounterOverlayValue(
+			"Meshlets Culled",
+			sceneStats.meshletsCulled,
+			sceneStats.meshletCounterSource,
+			sceneStats.meshletCounterReason);
+		const std::string meshletsCulledHiZText = TerraEngine::Renderer::FormatVirtualGeometryCounterOverlayValue(
+			"Meshlets Culled by Hi-Z",
+			sceneStats.meshletsCulledHiZ,
+			sceneStats.meshletCounterSource,
+			sceneStats.meshletCounterReason);
+		const std::string hiZOutcomeText = "Hi-Z Tests/Culled/No Proof: "
+			+ std::to_string(sceneStats.hiZTests)
+			+ "/"
+			+ std::to_string(sceneStats.meshletsCulledHiZ)
+			+ "/"
+			+ std::to_string(sceneStats.hiZNoOcclusionProof);
+		const std::string hiZProofText = "Hi-Z Proofs Full/Grid/Center/Vertex: "
+			+ std::to_string(sceneStats.hiZFullRectCulled)
+			+ "/"
+			+ std::to_string(sceneStats.hiZRectCoverageCulled)
+			+ "/"
+			+ std::to_string(sceneStats.hiZCenterCulled)
+			+ "/"
+			+ std::to_string(sceneStats.hiZVertexCoverageCulled);
+		const std::string hiZProjectionText = "Hi-Z Projection Failed: " + std::to_string(sceneStats.hiZProjectionFailed);
 		const std::string packetText = TerraEngine::Renderer::FormatVirtualGeometryCounterOverlayValue(
 			"VG Cluster Packets",
 			sceneStats.virtualGeometryClusterPackets,
@@ -1316,7 +1354,7 @@ void SceneViewWindow::OnGui() {
 			+ std::to_string(sceneStats.virtualGeometryPageSourceRequests)
 			+ "/"
 			+ std::to_string(sceneStats.virtualGeometryPageSourceRetirements);
-		const char* lines[] = { packetText.c_str(), batchText.c_str(), gpuPacketText.c_str(), generatedText.c_str(), dispatchText.c_str(), gpuFallbackText.c_str(), compactText.c_str(), rejectedText.c_str(), fallbackText.c_str(), pageSourceText.c_str(), pagePayloadText.c_str(), pageRequestText.c_str(), reuseText.c_str(), hiZBaselineText.c_str() };
+		const char* lines[] = { meshletsConsideredText.c_str(), meshletsSentText.c_str(), meshletsCulledText.c_str(), meshletsCulledHiZText.c_str(), hiZOutcomeText.c_str(), hiZProofText.c_str(), hiZProjectionText.c_str(), packetText.c_str(), batchText.c_str(), gpuPacketText.c_str(), generatedText.c_str(), dispatchText.c_str(), gpuFallbackText.c_str(), compactText.c_str(), rejectedText.c_str(), fallbackText.c_str(), pageSourceText.c_str(), pagePayloadText.c_str(), pageRequestText.c_str(), reuseText.c_str(), hiZBaselineText.c_str() };
 		float textWidth = 0.0f;
 		for (const char* line : lines)
 		{

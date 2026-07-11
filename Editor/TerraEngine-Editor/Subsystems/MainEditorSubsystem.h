@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <entt/entity/entity.hpp>
@@ -173,8 +174,10 @@ private:
 
 	void* sceneTextureID = nullptr;
 	void* cachedSceneImageView = nullptr;
+	std::uint64_t cachedSceneImageGeneration = 0u;
 	void* gameTextureID = nullptr;
 	void* cachedGameImageView = nullptr;
+	std::uint64_t cachedGameImageGeneration = 0u;
 	bool sceneLoaded = false;
 	
 	std::optional<entt::entity> selectedEntity;

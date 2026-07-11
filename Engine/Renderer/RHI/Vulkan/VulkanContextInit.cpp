@@ -78,7 +78,6 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 		for (std::array<VulkanHiZ, 2>& frameHiZPair : viewHiZFrames) {
 			for (VulkanHiZ& frameHiZ : frameHiZPair) {
 				frameHiZ.Create(device, allocator, swapchainExtent.width, swapchainExtent.height, depthFmt);
-				InitializeHiZPyramidToFarDepth(frameHiZ);
 			}
 		}
 	}
@@ -133,7 +132,7 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 // VulkanContext::Impl::Cleanup is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 	if (device && !skipDeviceIdle) {
-		const VkResult idleResult = vkDeviceWaitIdle(device);
+		const VkResult idleResult = WaitDeviceIdle();
 		if (idleResult != VK_SUCCESS)
 		{
 			TERRAENGINE_LOG(LogLevel::Warning, "Vulkan cleanup could not prove the device idle before teardown: " << idleResult);
@@ -651,9 +650,11 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 			vkDestroySampler(device, fallbackPointShadowSampler, nullptr);
 			fallbackPointShadowSampler = VK_NULL_HANDLE;
 		}
+		vkDestroyDescriptorPool(device, editorDescriptorPool, nullptr);
 		vkDestroyDescriptorPool(device, descriptorPool, nullptr);
 		vkDestroyDescriptorPool(device, globalDescriptorPool, nullptr);
 		vkDestroyDescriptorSetLayout(device, globalDescriptorSetLayout, nullptr);
+		editorDescriptorPool = VK_NULL_HANDLE;
 		descriptorPool = VK_NULL_HANDLE;
 		globalDescriptorPool = VK_NULL_HANDLE;
 		globalDescriptorSetLayout = VK_NULL_HANDLE;
@@ -714,13 +715,21 @@ bool VulkanContext::Impl::CreateInstance() {
 	createInfo.ppEnabledExtensionNames = extensions.data();
 
 	VkDebugUtilsMessengerCreateInfoEXT debugCreateInfo{};
+	VkValidationFeatureEnableEXT validationFeature = VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT;
+	VkValidationFeaturesEXT validationFeatures{};
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (validationLayersEnabled) {
 		createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
 		createInfo.ppEnabledLayerNames = validationLayers.data();
 
 		PopulateDebugMessengerCreateInfo(debugCreateInfo);
-		createInfo.pNext = (VkDebugUtilsMessengerCreateInfoEXT*)&debugCreateInfo;
+		// Synchronization validation catches cross-submit image/layout hazards that
+		// core validation cannot diagnose before they become a driver fault.
+		validationFeatures.sType = VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT;
+		validationFeatures.pNext = &debugCreateInfo;
+		validationFeatures.enabledValidationFeatureCount = 1u;
+		validationFeatures.pEnabledValidationFeatures = &validationFeature;
+		createInfo.pNext = &validationFeatures;
 	} else {
 		createInfo.enabledLayerCount = 0;
 		createInfo.pNext = nullptr;
@@ -927,6 +936,25 @@ bool VulkanContext::Impl::CreateLogicalDevice() {
 	features2.features = deviceFeatures;
 	features2.pNext = &vulkan12Features;
 
+	// Diagnostic checkpoints are optional and must not make NVIDIA-specific
+	// functionality a portability requirement for AMD, Intel, or software GPUs.
+	std::vector<VkExtensionProperties> availableDeviceExtensions;
+	uint32_t availableDeviceExtensionCount = 0u;
+	vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &availableDeviceExtensionCount, nullptr);
+	availableDeviceExtensions.resize(availableDeviceExtensionCount);
+	vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &availableDeviceExtensionCount, availableDeviceExtensions.data());
+	std::vector<const char*> enabledDeviceExtensions = deviceExtensions;
+	diagnosticCheckpointsEnabled = std::any_of(
+		availableDeviceExtensions.begin(),
+		availableDeviceExtensions.end(),
+		[](const VkExtensionProperties& extension) {
+			return std::strcmp(extension.extensionName, VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME) == 0;
+		});
+	if (diagnosticCheckpointsEnabled)
+	{
+		enabledDeviceExtensions.push_back(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+	}
+
 	VkDeviceCreateInfo createInfo{};
 	createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
 	createInfo.pNext = &features2; // Chain features here
@@ -936,8 +964,8 @@ bool VulkanContext::Impl::CreateLogicalDevice() {
 
 	createInfo.pEnabledFeatures = nullptr; // Must be null when using pNext for features
 
-	createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
-	createInfo.ppEnabledExtensionNames = deviceExtensions.data();
+	createInfo.enabledExtensionCount = static_cast<uint32_t>(enabledDeviceExtensions.size());
+	createInfo.ppEnabledExtensionNames = enabledDeviceExtensions.data();
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	// Device layers are deprecated; instance-level validation layers cover device calls.
@@ -951,6 +979,9 @@ bool VulkanContext::Impl::CreateLogicalDevice() {
 	}
 
 	volkLoadDevice(device);
+	diagnosticCheckpointsEnabled = diagnosticCheckpointsEnabled
+		&& vkCmdSetCheckpointNV != nullptr
+		&& vkGetQueueCheckpointDataNV != nullptr;
 
 	vkGetDeviceQueue(device, indices.graphicsFamily.value(), 0, &graphicsQueue);
 	vkGetDeviceQueue(device, indices.presentFamily.value(), 0, &presentQueue);
@@ -1093,6 +1124,55 @@ bool VulkanContext::Impl::CreateDepthResources() {
 
 // VulkanContext::Impl::CreateRenderPass is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool VulkanContext::Impl::CreateRenderPass() {
+	if (editorMode) {
+		// The swapchain pass only presents ImGui. Scene View and Game View render
+		// into separate offscreen targets with their own depth images, so attaching
+		// the runtime depth image here adds no visual result. More importantly, one
+		// shared depth attachment across several swapchain images permits UI frames
+		// in flight to clear/write the same image during resize churn. Keep editor
+		// presentation color-only and remove that cross-frame GPU hazard entirely.
+		VkAttachmentDescription colorAttachment{};
+		colorAttachment.format = swapchainImageFormat;
+		colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+		colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+		colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+		colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+		VkAttachmentReference colorAttachmentRef{};
+		colorAttachmentRef.attachment = 0u;
+		colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+		VkSubpassDescription subpass{};
+		subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+		subpass.colorAttachmentCount = 1u;
+		subpass.pColorAttachments = &colorAttachmentRef;
+
+		VkSubpassDependency dependency{};
+		dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+		dependency.dstSubpass = 0u;
+		dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+		dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+		dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+		VkRenderPassCreateInfo renderPassInfo{};
+		renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+		renderPassInfo.attachmentCount = 1u;
+		renderPassInfo.pAttachments = &colorAttachment;
+		renderPassInfo.subpassCount = 1u;
+		renderPassInfo.pSubpasses = &subpass;
+		renderPassInfo.dependencyCount = 1u;
+		renderPassInfo.pDependencies = &dependency;
+
+		if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS) {
+			TERRAENGINE_LOG(LogLevel::Error, "failed to create editor presentation render pass!");
+			return false;
+		}
+		return true;
+	}
+
 	if (UsesVrsAttachment()) {
 		// Use RenderPass2 to support VRS attachment
 		VkAttachmentDescription2 colorAttachment{};
@@ -1119,7 +1199,10 @@ bool VulkanContext::Impl::CreateRenderPass() {
 		depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 		depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 		depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-		depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		// CreateDepthResources initializes this shared image once. Preserve its
+		// attachment layout so each frame does not race the prior frame through an
+		// implicit UNDEFINED discard transition.
+		depthAttachment.initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 		depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
 		VkAttachmentReference2 depthAttachmentRef{};
@@ -1201,7 +1284,9 @@ bool VulkanContext::Impl::CreateRenderPass() {
 		depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 		depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 		depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-		depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		// The swapchain framebuffers share one depth image. Its cross-frame barrier
+		// expects the render pass to enter and leave attachment layout unchanged.
+		depthAttachment.initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 		depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
 		VkAttachmentReference depthAttachmentRef{};
@@ -1243,14 +1328,17 @@ bool VulkanContext::Impl::CreateRenderPass() {
 
 // VulkanContext::Impl::CreateFramebuffers is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool VulkanContext::Impl::CreateFramebuffers() {
-	// Pair each swapchain view with the shared depth buffer and optional VRS image.
+	// Editor presentation is color-only. Runtime framebuffers retain depth and
+	// optional VRS because those attachments are consumed by the game render pass.
 	framebuffers.resize(swapchainImageViews.size());
 
 	for (size_t i = 0; i < swapchainImageViews.size(); i++) {
 		std::vector<VkImageView> attachments = {
-			swapchainImageViews[i],
-			depthImageView
+			swapchainImageViews[i]
 		};
+		if (!editorMode) {
+			attachments.push_back(depthImageView);
+		}
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (UsesVrsAttachment()) {
@@ -1385,6 +1473,26 @@ bool VulkanContext::Impl::CreateDescriptorPool() {
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "failed to create descriptor pool!");
+		return false;
+	}
+
+	// ImGui needs only combined image samplers for its font atlas and the Scene
+	// and Game viewport images. Keep these short-lived editor descriptors out of
+	// the engine pool so asset imports cannot race or starve the UI allocation.
+	VkDescriptorPoolSize editorPoolSize{};
+	editorPoolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	editorPoolSize.descriptorCount = 64u;
+
+	VkDescriptorPoolCreateInfo editorPoolInfo{};
+	editorPoolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+	editorPoolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+	editorPoolInfo.poolSizeCount = 1u;
+	editorPoolInfo.pPoolSizes = &editorPoolSize;
+	editorPoolInfo.maxSets = 64u;
+	if (vkCreateDescriptorPool(device, &editorPoolInfo, nullptr, &editorDescriptorPool) != VK_SUCCESS) {
+		TERRAENGINE_LOG(LogLevel::Error, "failed to create editor descriptor pool!");
+		vkDestroyDescriptorPool(device, descriptorPool, nullptr);
+		descriptorPool = VK_NULL_HANDLE;
 		return false;
 	}
 	return true;
@@ -1618,6 +1726,9 @@ void VulkanContext::Impl::CleanupSwapChain() {
 	}
 	framebuffers.clear();
 	swapchainImageViews.clear();
+	swapchainImages.clear();
+	renderPass = VK_NULL_HANDLE;
+	swapchain = VK_NULL_HANDLE;
 }
 
 // VulkanContext::Impl::RecreateSwapChain is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1634,12 +1745,44 @@ void VulkanContext::Impl::RecreateSwapChain() {
 		glfwGetFramebufferSize(window, &width, &height);
 		glfwWaitEvents();
 	}
-	const VkResult idleResult = vkDeviceWaitIdle(device);
+	const VkResult idleResult = WaitDeviceIdle();
 	if (MarkDeviceLost(idleResult, "swapchain recreation device idle")) {
 		return;
 	}
 	if (idleResult != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "Skipping swapchain recreation because the device did not become idle: " << idleResult);
+		return;
+	}
+
+	if (editorMode) {
+		// The native editor window presents ImGui only. Its Scene/Game targets,
+		// Hi-Z pyramids, shadow maps, pipelines, and global buffers are independent
+		// offscreen resources whose sizes are managed by RenderFrame. Rebuilding all
+		// of them for every OS resize notification creates unnecessary destruction,
+		// descriptor churn, and driver pressure. Recreate only objects that directly
+		// reference the editor swapchain and keep the renderer's project state alive.
+		CleanupSwapChain();
+		for (std::size_t index = 0u; index < renderFinishedSemaphores.size(); ++index) {
+			vkDestroySemaphore(device, renderFinishedSemaphores[index], nullptr);
+			vkDestroySemaphore(device, imageAvailableSemaphores[index], nullptr);
+			vkDestroySemaphore(device, uiSemaphores[index], nullptr);
+			vkDestroyFence(device, inFlightFences[index], nullptr);
+		}
+		renderFinishedSemaphores.clear();
+		imageAvailableSemaphores.clear();
+		uiSemaphores.clear();
+		inFlightFences.clear();
+
+		if (!CreateSwapChain(*windowSystem)
+			|| !CreateImageViews()
+			|| !CreateRenderPass()
+			|| !CreateFramebuffers()
+			|| !CreateSyncObjects()) {
+			TERRAENGINE_LOG(LogLevel::Error, "Failed to recreate the editor presentation swapchain.");
+			return;
+		}
+		editorRenderSubmitted = false;
+		swapchainImageAcquired = false;
 		return;
 	}
 
@@ -1779,7 +1922,6 @@ void VulkanContext::Impl::RecreateSwapChain() {
 		for (std::array<VulkanHiZ, 2>& frameHiZPair : viewHiZFrames) {
 			for (VulkanHiZ& frameHiZ : frameHiZPair) {
 				frameHiZ.Create(device, allocator, swapchainExtent.width, swapchainExtent.height, depthFmt);
-				InitializeHiZPyramidToFarDepth(frameHiZ);
 			}
 		}
 	}

@@ -8,6 +8,7 @@
 
 #include "../RHIContext.h"
 #include "Core/Export.h"
+#include <cstdint>
 #include <memory>
 #include <functional>
 #include <string_view>
@@ -83,11 +84,17 @@ public:
 		uint32_t imageCount = 0;
 		void* sceneImageView = nullptr;
 		void* sceneSampler = nullptr;
+		std::uint64_t sceneImageGeneration = 0u;
 		void* gameImageView = nullptr;
 		void* gameSampler = nullptr;
+		std::uint64_t gameImageGeneration = 0u;
 		void* vkGetInstanceProcAddr = nullptr;
 	};
 	void GetEditorHandles(EditorHandles& outHandles);
+	// ImGui owns a few internal Vulkan queue submissions for font/texture
+	// uploads. Run those calls inside the same queue-wide synchronization used
+	// by engine frames and background asset uploads.
+	void RunWithQueueAccess(const std::function<void()>& operation);
 	
 	void EnableEditorMode();
 	

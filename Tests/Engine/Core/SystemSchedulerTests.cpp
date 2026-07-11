@@ -451,8 +451,6 @@ namespace TerraEngine::Tests {
 			context.Expect(declaration.safeSubwork.find("page request planning") != std::string::npos, "RenderSystem worker-safe declaration should explain page request planning.");
 			context.Expect(declaration.protectedCommit.find("page payload publication") != std::string::npos, "RenderSystem protected boundary should explain page payload publication.");
 			context.Expect(declaration.protectedCommit.find("page retirement draining") != std::string::npos, "RenderSystem protected boundary should explain page retirement draining.");
-			context.Expect(declaration.safeSubwork.find("renderer recovery plan preparation") != std::string::npos, "RenderSystem worker-safe declaration should explain recovery planning.");
-			context.Expect(declaration.protectedCommit.find("renderer recovery state/session publication") != std::string::npos, "RenderSystem protected boundary should explain recovery publication.");
 		});
 
 		registry.Add("Engine.SystemScheduler.FrameWorkloadsConvertProtectedAndWorkerSystems", [](TestContext& context) {

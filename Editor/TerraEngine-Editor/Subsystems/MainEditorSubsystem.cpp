@@ -55,6 +55,53 @@ namespace
 {
 	MainEditorSubsystem* g_ActiveMainEditorSubsystem = nullptr;
 
+	void RefreshViewportTexture(
+		void*& textureId,
+		void*& cachedImageView,
+		std::uint64_t& cachedGeneration,
+		void* imageView,
+		void* sampler,
+		std::uint64_t generation,
+		std::string_view viewportName)
+	{
+		if (imageView == cachedImageView && generation == cachedGeneration)
+		{
+			return;
+		}
+
+		// A descriptor returned by AddTexture owns one allocation in ImGui's
+		// Vulkan pool. Free the descriptor before replacing it so repeated panel
+		// or application-window resizes keep descriptor usage constant.
+		if (textureId != nullptr)
+		{
+			ImGui_ImplVulkan_RemoveTexture(reinterpret_cast<VkDescriptorSet>(textureId));
+			textureId = nullptr;
+		}
+		cachedImageView = nullptr;
+		cachedGeneration = generation;
+
+		if (imageView == nullptr || sampler == nullptr)
+		{
+			return;
+		}
+
+		const VkDescriptorSet descriptorSet = ImGui_ImplVulkan_AddTexture(
+			reinterpret_cast<VkSampler>(sampler),
+			reinterpret_cast<VkImageView>(imageView),
+			VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+		if (descriptorSet == VK_NULL_HANDLE)
+		{
+			// Keep the cached view empty so the next frame retries after a transient
+			// allocation failure instead of sending a null texture to ImGui draw data.
+			TERRAENGINE_LOG(LogLevel::Error, "Failed to register the " << viewportName << " viewport texture with ImGui.");
+			cachedGeneration = 0u;
+			return;
+		}
+
+		textureId = reinterpret_cast<void*>(descriptorSet);
+		cachedImageView = imageView;
+	}
+
 	struct WindowMenuNode
 	{
 		std::string label;
@@ -1476,25 +1523,8 @@ void MainEditorSubsystem::OnBackendReady() {
 	VulkanContext::EditorHandles handles;
 	vulkan->GetEditorHandles(handles);
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (handles.sceneImageView && handles.sceneSampler) {
-		sceneTextureID = (void*)ImGui_ImplVulkan_AddTexture(
-			(VkSampler)handles.sceneSampler,
-			(VkImageView)handles.sceneImageView,
-			VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-		);
-		cachedSceneImageView = handles.sceneImageView;
-	}
-
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (handles.gameImageView && handles.gameSampler) {
-		gameTextureID = (void*)ImGui_ImplVulkan_AddTexture(
-			(VkSampler)handles.gameSampler,
-			(VkImageView)handles.gameImageView,
-			VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-		);
-		cachedGameImageView = handles.gameImageView;
-	}
+	RefreshViewportTexture(sceneTextureID, cachedSceneImageView, cachedSceneImageGeneration, handles.sceneImageView, handles.sceneSampler, handles.sceneImageGeneration, "Scene View");
+	RefreshViewportTexture(gameTextureID, cachedGameImageView, cachedGameImageGeneration, handles.gameImageView, handles.gameSampler, handles.gameImageGeneration, "Game View");
 }
 
 // MainEditorSubsystem::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1751,30 +1781,8 @@ void MainEditorSubsystem::DrawUI() {
 			if (vulkan) {
 				VulkanContext::EditorHandles handles;
 				vulkan->GetEditorHandles(handles);
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (handles.sceneImageView != cachedSceneImageView) {
-					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-					if (handles.sceneImageView && handles.sceneSampler) {
-						sceneTextureID = (void*)ImGui_ImplVulkan_AddTexture(
-							(VkSampler)handles.sceneSampler,
-							(VkImageView)handles.sceneImageView,
-							VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-						);
-						cachedSceneImageView = handles.sceneImageView;
-					}
-				}
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (handles.gameImageView != cachedGameImageView) {
-					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-					if (handles.gameImageView && handles.gameSampler) {
-						gameTextureID = (void*)ImGui_ImplVulkan_AddTexture(
-							(VkSampler)handles.gameSampler,
-							(VkImageView)handles.gameImageView,
-							VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-						);
-						cachedGameImageView = handles.gameImageView;
-					}
-				}
+				RefreshViewportTexture(sceneTextureID, cachedSceneImageView, cachedSceneImageGeneration, handles.sceneImageView, handles.sceneSampler, handles.sceneImageGeneration, "Scene View");
+				RefreshViewportTexture(gameTextureID, cachedGameImageView, cachedGameImageGeneration, handles.gameImageView, handles.gameSampler, handles.gameImageGeneration, "Game View");
 			}
 		}
 	}

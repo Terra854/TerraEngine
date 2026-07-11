@@ -281,6 +281,11 @@ struct VulkanHiZ {
 	VulkanHiZInvalidReason latestInvalidReason = VulkanHiZInvalidReason::FirstFrame;
 	VulkanHiZValidationResult latestValidation{};
 	bool latestOcclusionAllowed = false;
+	// A new allocation starts in VK_IMAGE_LAYOUT_UNDEFINED. Keep submitted and
+	// recorded state separate so a resize-cancelled command buffer never makes
+	// an image appear readable or changes the oldLayout used by its next write.
+	bool layoutInitialized = false;
+	bool layoutTransitionRecorded = false;
 
 	void Create(VkDevice device, VmaAllocator allocator, uint32_t screenWidth, uint32_t screenHeight, VkFormat format);
 	void Destroy(VkDevice device, VmaAllocator allocator);

@@ -103,7 +103,7 @@ namespace TerraEngine::Tests
 
 			context.Expect(contextSource.find("vkCmdCopyImageToBuffer") != std::string::npos, "Vulkan readback should record a real image-to-staging-buffer copy.");
 			context.Expect(contextSource.find("const VkResult endResult = vkEndCommandBuffer") != std::string::npos, "Readback should check command-buffer finalization before submission.");
-			context.Expect(contextSource.find("submitResult = vkQueueSubmit") != std::string::npos, "Readback should retain and check the queue submission result.");
+			context.Expect(contextSource.find("submitResult = impl->SubmitGraphicsQueue") != std::string::npos, "Readback should retain and check the synchronized queue submission result.");
 			context.Expect(contextSource.find("vkGetFenceStatus") != std::string::npos, "Readback completion should use non-blocking fence polling.");
 			context.Expect(contextSource.find("A timeout is a client-visible cancellation, not proof that Vulkan") != std::string::npos, "Timeout handling should retain GPU-owned resources until completion is proven.");
 			context.Expect(contextSource.find("request.sourceImage != target.image") != std::string::npos, "Resize validation should compare source image identity as well as dimensions.");

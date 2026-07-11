@@ -33,6 +33,8 @@ void VulkanHiZ::Create(VkDevice device, VmaAllocator allocator, uint32_t screenW
 	// diagnostic once a current pyramid exists.
 	latestValidation.failOpen = true;
 	latestOcclusionAllowed = false;
+	layoutInitialized = false;
+	layoutTransitionRecorded = false;
 
 	VkImageCreateInfo imageInfo{};
 	imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -147,4 +149,6 @@ void VulkanHiZ::Destroy(VkDevice device, VmaAllocator allocator) {
 	// geometry visible until a fresh pyramid is published.
 	latestValidation.failOpen = true;
 	latestOcclusionAllowed = false;
+	layoutInitialized = false;
+	layoutTransitionRecorded = false;
 }

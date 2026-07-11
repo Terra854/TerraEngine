@@ -181,6 +181,16 @@ struct VulkanContext::Impl {
 	VkDevice device = VK_NULL_HANDLE;
 	VkQueue graphicsQueue = VK_NULL_HANDLE;
 	VkQueue presentQueue = VK_NULL_HANDLE;
+	// Vulkan queue handles are externally synchronized objects. Asset uploads
+	// can submit from worker threads while the coordinator submits/presents an
+	// editor frame, so every queue operation and device-wide idle boundary must
+	// share this mutex instead of using unrelated per-feature locks.
+	std::mutex queueAccessMutex;
+	// Vulkan descriptor sets and their pools require external host
+	// synchronization. Project-open asset workers can publish textures while the
+	// render thread updates depth/Hi-Z bindings, so serialize the whole mutation
+	// transaction rather than only individual vkUpdateDescriptorSets calls.
+	std::recursive_mutex descriptorHostAccessMutex;
 	// These strings are copied into recovery snapshots when the backend first
 	// fails. Keeping them CPU-side means diagnostics can still name the GPU
 	// after Vulkan handles have become unsafe to query.
@@ -208,6 +218,10 @@ struct VulkanContext::Impl {
 	std::mutex immediateCommandMutex;
 
 	VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
+	// ImGui owns and frees viewport texture descriptors independently from mesh
+	// resources. A dedicated pool prevents editor resize churn from contending
+	// with asset-loading descriptor allocations on worker/coordinator paths.
+	VkDescriptorPool editorDescriptorPool = VK_NULL_HANDLE;
 
 	std::vector<VkSemaphore> imageAvailableSemaphores;
 	std::vector<VkSemaphore> renderFinishedSemaphores;
@@ -219,6 +233,16 @@ struct VulkanContext::Impl {
 
 	uint32_t currentFrame = 0;
 	bool framebufferResized = false;
+	// Native window managers can emit hundreds of size notifications during one
+	// drag. Remember the latest event so swapchain/offscreen resources are rebuilt
+	// once after the drag settles instead of being destroyed every notification.
+	std::chrono::steady_clock::time_point framebufferResizeLastEvent{};
+	static constexpr std::chrono::milliseconds FRAMEBUFFER_RESIZE_DEBOUNCE{500};
+	bool IsFramebufferResizeSettled() const
+	{
+		return !framebufferResized
+			|| std::chrono::steady_clock::now() - framebufferResizeLastEvent >= FRAMEBUFFER_RESIZE_DEBOUNCE;
+	}
 	static constexpr int MAX_FRAMES_IN_FLIGHT = 3;
 	bool initialized = false;
 	bool editorMode = false;
@@ -473,6 +497,34 @@ struct VulkanContext::Impl {
 					hiZWritePendingSwapByViewFrame[viewSlot][slot] = true;
 				}
 
+				void ConfirmHiZWritesSubmitted(uint32_t frameIndex)
+				{
+					const uint32_t slot = std::min(frameIndex, static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT - 1));
+					for (uint32_t viewSlot = 0u; viewSlot < kHiZViewCount; ++viewSlot)
+					{
+						if (!hiZWritePendingSwapByViewFrame[viewSlot][slot])
+						{
+							continue;
+						}
+						// Submission preserves command-buffer order, so the recorded
+						// UNDEFINED-to-GENERAL transition now owns the physical layout.
+						VulkanHiZ& submittedHiZ = WritableHiZForFrame(viewSlot, slot);
+						submittedHiZ.layoutInitialized = true;
+						submittedHiZ.layoutTransitionRecorded = false;
+					}
+				}
+
+				void DiscardRecordedHiZWrites(uint32_t frameIndex)
+				{
+					const uint32_t slot = std::min(frameIndex, static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT - 1));
+					for (uint32_t viewSlot = 0u; viewSlot < kHiZViewCount; ++viewSlot)
+					{
+						VulkanHiZ& discardedHiZ = WritableHiZForFrame(viewSlot, slot);
+						discardedHiZ.layoutTransitionRecorded = false;
+						hiZWritePendingSwapByViewFrame[viewSlot][slot] = false;
+					}
+				}
+
 				bool PromoteCompletedHiZWrite(uint32_t viewIndex, uint32_t frameIndex)
 				{
 					const uint32_t viewSlot = std::min(viewIndex, kHiZViewCount - 1u);
@@ -641,6 +693,10 @@ struct VulkanContext::Impl {
 	TerraEngine::Renderer::BackendFrameBreakdown pendingBackendFrameBreakdown{};
 	TerraEngine::Renderer::BackendFrameBreakdown latestBackendFrameBreakdown{};
 	TerraEngine::Renderer::RendererRecoverySnapshot latestRendererRecoverySnapshot{};
+	// NVIDIA diagnostic checkpoints are optional. When available they identify
+	// the last GPU stage reached before a device loss; other vendors continue
+	// through the same renderer path with this capability disabled.
+	bool diagnosticCheckpointsEnabled = false;
 	std::uint64_t backendFrameSerial = 0u;
 	std::uint64_t rendererRecoveryFrameSerial = 0u;
 	std::uint64_t renderSessionGeneration = 1u;
@@ -680,8 +736,7 @@ struct VulkanContext::Impl {
 			bool PrepareDepthForCompute(VkCommandBuffer cmd, VkImage sourceDepthImage, VkImageView depthView, bool updateGlobalDepthDescriptor);
 			void RestoreDepthForAttachment(VkCommandBuffer cmd, VkImage sourceDepthImage);
 			void StoreAmbientOcclusionDepthHistory(VkCommandBuffer cmd, VkImage sourceDepthImage, uint32_t viewIndex, const glm::mat4& viewProjection);
-			void InitializeHiZPyramidToFarDepth(VulkanHiZ& hiZ);
-			bool GenerateHiZPyramid(VulkanHiZ& hiZ, VkCommandBuffer cmd, VkImage sourceDepthImage, VkImageView depthView, uint32_t snapshotSlotIndex, const VulkanHiZHistoryMetadata& completedHistory);
+			bool GenerateHiZPyramid(VulkanHiZ& hiZ, VkCommandBuffer cmd, VkImage sourceDepthImage, VkImageView depthView, VkExtent2D sourceDepthExtent, uint32_t snapshotSlotIndex, const VulkanHiZHistoryMetadata& completedHistory);
 			bool GenerateAmbientOcclusion(VkCommandBuffer cmd, const FrameCullingDataGPU& frameData, uint32_t snapshotSlotIndex, VkImageView sampledDepthView);
 		void GenerateVRSImage(VkCommandBuffer cmd, VkImageView colorView);
 	
@@ -781,6 +836,10 @@ struct VulkanContext::Impl {
 	// targets can differ from the editor swapchain, so readback must consult
 	// this field instead of assuming every target is swapchain-sized.
 	VkExtent2D extent{0u, 0u};
+	// Vulkan may recycle the same numeric VkImageView/VkSampler handles after a
+	// resize. The editor uses this monotonic identity to refresh its ImGui
+	// descriptor even when comparing the raw handles would report no change.
+	std::uint64_t generation = 0u;
 	};
 	OffscreenResources sceneView;
 	OffscreenResources gameView;
@@ -857,7 +916,13 @@ struct VulkanContext::Impl {
 	void RecreateOffscreenResources(); // Handle resize
 	void ClearResources();
 	bool MarkDeviceLost(VkResult result, std::string_view operation);
+	void RecordDiagnosticCheckpoint(VkCommandBuffer commandBuffer, const char* marker) const;
+	std::string CollectDiagnosticCheckpointSummary();
 	void RecordInitializationFailure(std::string_view result, std::string_view operation);
+	VkResult SubmitGraphicsQueue(std::uint32_t submitCount, const VkSubmitInfo* submits, VkFence fence);
+	VkResult PresentSwapchain(const VkPresentInfoKHR* presentInfo);
+	VkResult WaitGraphicsQueueIdle();
+	VkResult WaitDeviceIdle();
 
 	// Grid Renderer
 	VkPipeline sceneViewGridPipeline = VK_NULL_HANDLE;
@@ -934,8 +999,8 @@ struct VulkanContext::Impl {
 	void RetireBuffer(VulkanBuffer& buffer);
 	void CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size);
 	VkCommandBuffer BeginSingleTimeCommands();
-	bool EndSingleTimeCommands(VkCommandBuffer commandBuffer);
-	bool TransitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t mipLevels = VK_REMAINING_MIP_LEVELS);
+	bool EndSingleTimeCommands(VkCommandBuffer commandBuffer, std::string_view operation = "immediate command");
+	bool TransitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t mipLevels = VK_REMAINING_MIP_LEVELS, uint32_t arrayLayers = 1u);
 	bool CopyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height);
 	VkImageView CreateImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags, uint32_t mipLevels = 1u);
 

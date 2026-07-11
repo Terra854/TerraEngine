@@ -31,6 +31,7 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <sstream>
 #include <thread>
 #include <utility>
 #include <glm/gtc/matrix_transform.hpp>
@@ -1219,6 +1220,7 @@ bool VulkanContext::Impl::MarkDeviceLost(VkResult result, std::string_view opera
 		return false;
 	}
 
+	const std::string checkpointSummary = CollectDiagnosticCheckpointSummary();
 	deviceLost = true;
 	skipFrame = true;
 	editorRenderSubmitted = false;
@@ -1239,6 +1241,7 @@ bool VulkanContext::Impl::MarkDeviceLost(VkResult result, std::string_view opera
 				selectedPhysicalDeviceName,
 				selectedDriverVersionString,
 				selectedApiVersionString));
+		latestRendererRecoverySnapshot.lastError = checkpointSummary;
 	}
 	if (currentFrame < pendingPrimaryCommandBuffersSubmitted.size())
 	{
@@ -1246,10 +1249,105 @@ bool VulkanContext::Impl::MarkDeviceLost(VkResult result, std::string_view opera
 	}
 	if (!deviceLostLogged)
 	{
-		TERRAENGINE_LOG(LogLevel::Critical, "Vulkan device lost during " << operation << ". Rendering is disabled for this Vulkan context to avoid a submit/reset recovery loop.");
+		TERRAENGINE_LOG(LogLevel::Critical, "Vulkan device lost during " << operation << ". " << checkpointSummary << " Rendering is disabled for this Vulkan context to avoid a submit/reset recovery loop.");
 		deviceLostLogged = true;
 	}
 	return true;
+}
+
+void VulkanContext::Impl::RecordDiagnosticCheckpoint(VkCommandBuffer commandBuffer, const char* marker) const
+{
+	if (!diagnosticCheckpointsEnabled || commandBuffer == VK_NULL_HANDLE || marker == nullptr)
+	{
+		return;
+	}
+	// The extension returns this exact pointer after device loss. Callers pass
+	// process-lifetime string literals so the marker remains valid until query.
+	vkCmdSetCheckpointNV(commandBuffer, const_cast<char*>(marker));
+}
+
+std::string VulkanContext::Impl::CollectDiagnosticCheckpointSummary()
+{
+	if (!diagnosticCheckpointsEnabled || graphicsQueue == VK_NULL_HANDLE || vkGetQueueCheckpointDataNV == nullptr)
+	{
+		return "GPU checkpoints unavailable.";
+	}
+
+	auto StageName = [](VkPipelineStageFlagBits stage) -> const char* {
+		switch (stage)
+		{
+		case VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT: return "TopOfPipe";
+		case VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT: return "DrawIndirect";
+		case VK_PIPELINE_STAGE_TASK_SHADER_BIT_EXT: return "TaskShader";
+		case VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT: return "MeshShader";
+		case VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT: return "FragmentShader";
+		case VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT: return "EarlyFragmentTests";
+		case VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT: return "LateFragmentTests";
+		case VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT: return "ColorAttachmentOutput";
+		case VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT: return "ComputeShader";
+		case VK_PIPELINE_STAGE_TRANSFER_BIT: return "Transfer";
+		case VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT: return "BottomOfPipe";
+		default: return "Other";
+		}
+	};
+
+	std::lock_guard<std::mutex> queueLock(queueAccessMutex);
+	uint32_t checkpointCount = 0u;
+	vkGetQueueCheckpointDataNV(graphicsQueue, &checkpointCount, nullptr);
+	if (checkpointCount == 0u)
+	{
+		return "GPU checkpoints enabled, but the driver returned no completed marker.";
+	}
+	std::vector<VkCheckpointDataNV> checkpoints(checkpointCount);
+	for (VkCheckpointDataNV& checkpoint : checkpoints)
+	{
+		checkpoint.sType = VK_STRUCTURE_TYPE_CHECKPOINT_DATA_NV;
+	}
+	vkGetQueueCheckpointDataNV(graphicsQueue, &checkpointCount, checkpoints.data());
+
+	std::ostringstream summary;
+	summary << "GPU checkpoints:";
+	for (uint32_t index = 0u; index < checkpointCount; ++index)
+	{
+		const VkCheckpointDataNV& checkpoint = checkpoints[index];
+		const char* marker = static_cast<const char*>(checkpoint.pCheckpointMarker);
+		summary << " [stage=" << StageName(checkpoint.stage)
+			<< ", marker=" << (marker != nullptr ? marker : "<none>") << "]";
+	}
+	return summary.str();
+}
+
+VkResult VulkanContext::Impl::SubmitGraphicsQueue(std::uint32_t submitCount, const VkSubmitInfo* submits, VkFence fence)
+{
+	// The same VkQueue is used by frame presentation and background resource
+	// uploads. Vulkan requires host access to a queue handle to be externally
+	// synchronized, even when the submitted command buffers are independent.
+	std::lock_guard<std::mutex> lock(queueAccessMutex);
+	return vkQueueSubmit(graphicsQueue, submitCount, submits, fence);
+}
+
+VkResult VulkanContext::Impl::PresentSwapchain(const VkPresentInfoKHR* presentInfo)
+{
+	// Use the graphics-queue mutex for presentation too. On the common queue
+	// family path graphicsQueue and presentQueue are the same native handle.
+	std::lock_guard<std::mutex> lock(queueAccessMutex);
+	return vkQueuePresentKHR(presentQueue, presentInfo);
+}
+
+VkResult VulkanContext::Impl::WaitGraphicsQueueIdle()
+{
+	// Keep worker uploads from entering the queue while a resize/recovery path
+	// is proving that all previously submitted graphics work has completed.
+	std::lock_guard<std::mutex> lock(queueAccessMutex);
+	return vkQueueWaitIdle(graphicsQueue);
+}
+
+VkResult VulkanContext::Impl::WaitDeviceIdle()
+{
+	// Device-idle boundaries destroy or replace queue-owned resources. Block all
+	// host queue access until that lifetime transition has completed.
+	std::lock_guard<std::mutex> lock(queueAccessMutex);
+	return vkDeviceWaitIdle(device);
 }
 
 void VulkanContext::Impl::RecordInitializationFailure(std::string_view result, std::string_view operation)
@@ -1335,6 +1433,9 @@ void VulkanContext::Initialize(WindowSystem& windowSystem) {
 void VulkanContext::Resize(int width, int height, ViewType view) {
 	if (impl) {
 		impl->framebufferResized = true;
+		// Coalesce the burst of callbacks generated while the user is dragging a
+		// window edge. Width/height are queried again when the final rebuild runs.
+		impl->framebufferResizeLastEvent = BackendClock::now();
 	}
 }
 
@@ -1397,18 +1498,18 @@ void VulkanContext::BeginFrame() {
 		waitSubmitInfo.pWaitDstStageMask = &waitStage;
 		waitSubmitInfo.commandBufferCount = 0;
 
-		const VkResult drainResult = vkQueueSubmit(impl->graphicsQueue, 1, &waitSubmitInfo, VK_NULL_HANDLE);
+		const VkResult drainResult = impl->SubmitGraphicsQueue(1, &waitSubmitInfo, VK_NULL_HANDLE);
 		if (impl->MarkDeviceLost(drainResult, "stranded editor render semaphore drain submit")) {
 			return;
 		}
 		if (drainResult == VK_SUCCESS) {
-			const VkResult idleResult = vkQueueWaitIdle(impl->graphicsQueue);
+			const VkResult idleResult = impl->WaitGraphicsQueueIdle();
 			if (impl->MarkDeviceLost(idleResult, "stranded editor render semaphore drain idle")) {
 				return;
 			}
 		} else {
 			TERRAENGINE_LOG(LogLevel::Error, "BeginFrame failed to drain stranded editor render semaphore: " << drainResult);
-			const VkResult idleResult = vkQueueWaitIdle(impl->graphicsQueue);
+			const VkResult idleResult = impl->WaitGraphicsQueueIdle();
 			if (impl->MarkDeviceLost(idleResult, "stranded editor render semaphore failure idle")) {
 				return;
 			}
@@ -1471,7 +1572,6 @@ void VulkanContext::BeginFrame() {
 		{
 			hiZ.Destroy(impl->device, impl->allocator);
 			hiZ.Create(impl->device, impl->allocator, desiredExtent.x, desiredExtent.y, depthFmt);
-			impl->InitializeHiZPyramidToFarDepth(hiZ);
 		}
 		impl->hiZReadIndexByViewFrame[hiZViewIndex][impl->currentFrame] = 0u;
 		impl->hiZWritePendingSwapByViewFrame[hiZViewIndex][impl->currentFrame] = false;
@@ -2785,6 +2885,14 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view, const RenderOutputRequest& outputRequest) {
 	// Skip rendering if initialization failed so we do not spam validation errors.
 	if (!impl->initialized || impl->skipFrame || impl->deviceLost) return;
+	if (impl->editorMode && impl->framebufferResized) {
+		// Native resize callbacks change both the swapchain and the docked viewport
+		// dimensions. EndFrame owns the settled swapchain rebuild; recording here
+		// would only resize Scene/Game targets and then discard their command
+		// buffers. Pause view recording until that protected boundary completes so
+		// one resize drag produces one set of offscreen allocations and descriptors.
+		return;
+	}
 
 	const auto renderFrameStart = BackendClock::now();
 	const uint32_t currentFrame = impl->currentFrame;
@@ -2831,7 +2939,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		pendingSubmitInfo.commandBufferCount = static_cast<uint32_t>(pendingCmdsForSnapshot.size());
 		pendingSubmitInfo.pCommandBuffers = pendingCmdsForSnapshot.data();
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		const VkResult submitResult = vkQueueSubmit(impl->graphicsQueue, 1, &pendingSubmitInfo, VK_NULL_HANDLE);
+		const VkResult submitResult = impl->SubmitGraphicsQueue(1, &pendingSubmitInfo, VK_NULL_HANDLE);
 		if (impl->MarkDeviceLost(submitResult, "intermediate editor view submit after snapshot budget exhaustion")) {
 			return;
 		}
@@ -2842,8 +2950,9 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		if (currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
 			impl->pendingPrimaryCommandBuffersSubmitted[currentFrame] = 1u;
 		}
+		impl->ConfirmHiZWritesSubmitted(currentFrame);
 		const auto forcedIdleStart = BackendClock::now();
-		const VkResult forcedIdleResult = vkQueueWaitIdle(impl->graphicsQueue);
+		const VkResult forcedIdleResult = impl->WaitGraphicsQueueIdle();
 		TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
 			impl->pendingBackendFrameBreakdown,
 			{ TerraEngine::Renderer::BackendFrameCostCategory::QueueIdleWait, TerraEngine::Renderer::BackendSubmitStage::ForcedIdle, renderViewType, diagnosticViewId, "Queue idle after snapshot budget exhaustion", false, true },
@@ -2916,7 +3025,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 				// an image that was still referenced by the previous frame.
 				if (hasResources && extentMismatch)
 				{
-					const VkResult idleResult = vkDeviceWaitIdle(impl->device);
+					const VkResult idleResult = impl->WaitDeviceIdle();
 					if (impl->MarkDeviceLost(idleResult, "editor offscreen resize device idle"))
 					{
 						return;
@@ -3096,6 +3205,25 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	if (vkBeginCommandBuffer(cmd, &beginInfo) != VK_SUCCESS) {
 		return;
 	}
+	impl->RecordDiagnosticCheckpoint(
+		cmd,
+		renderingDedicatedCaptureTarget
+			? "capture.primary.begin"
+			: (view == ViewType::Scene ? "scene.primary.begin" : "game.primary.begin"));
+	if (impl->validationLayersEnabled && vkSetDebugUtilsObjectNameEXT != nullptr) {
+		// Validation messages otherwise print only an opaque command-buffer handle,
+		// which makes a cross-submit fault impossible to associate with Scene, Game,
+		// capture, or runtime rendering after a temporary buffer has been freed.
+		const std::string commandBufferName = std::string(impl->editorMode ? "Editor " : "Runtime ")
+			+ (renderingDedicatedCaptureTarget ? "Capture" : (view == ViewType::Scene ? "Scene" : "Game"))
+			+ " Primary Render Command Buffer";
+		VkDebugUtilsObjectNameInfoEXT nameInfo{};
+		nameInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
+		nameInfo.objectType = VK_OBJECT_TYPE_COMMAND_BUFFER;
+		nameInfo.objectHandle = reinterpret_cast<uint64_t>(cmd);
+		nameInfo.pObjectName = commandBufferName.c_str();
+		vkSetDebugUtilsObjectNameEXT(impl->device, &nameInfo);
+	}
 	impl->MarkGpuTimestampBegin(cmd, impl->currentFrame, view, impl->backendFrameSerial);
 
 	uint32_t imageIndex = impl->acquiredImageIndex;
@@ -3244,7 +3372,9 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
 			colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 			colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-			colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+			// Shadow images are explicitly initialized and persist across frames.
+			// Preserve their real attachment layout instead of discarding it again.
+			colorAttachment.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 			colorAttachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
 			VkAttachmentDescription depthAttachment{};
@@ -3254,7 +3384,10 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 			depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 			depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-			depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+			// RecordShadowPass explicitly transitions the reused depth layer back to
+			// attachment layout. Keeping both layouts equal prevents an implicit
+			// begin-pass transition from racing a write in an earlier queue submit.
+			depthAttachment.initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 			depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
 
 			VkAttachmentReference colorAttachmentRef{};
@@ -3274,16 +3407,29 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			std::array<VkSubpassDependency, 2> dependencies{};
 			dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
 			dependencies[0].dstSubpass = 0;
-			dependencies[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-			dependencies[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-			dependencies[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-			dependencies[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+			// Shadow images persist across frames. Order the previous render-pass
+			// writes and fragment sampling before clearing the same attachments again;
+			// queue submission order alone is not a memory dependency for these accesses.
+			dependencies[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+				| VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+				| VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+			dependencies[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT
+				| VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+				| VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+			dependencies[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+				| VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+				| VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+			dependencies[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+				| VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT
+				| VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+			dependencies[0].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
 			dependencies[1].srcSubpass = 0;
 			dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
 			dependencies[1].srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
 			dependencies[1].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 			dependencies[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
 			dependencies[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+			dependencies[1].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
 
 			std::array<VkAttachmentDescription, 2> attachments = { colorAttachment, depthAttachment };
 			VkRenderPassCreateInfo renderPassInfo{};
@@ -3790,6 +3936,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	// binds the global descriptor set. Updating the depth descriptor after a
 	// global-set bind can invalidate optimized/export command buffers even when
 	// the draw command itself has not reached submission yet.
+	impl->RecordDiagnosticCheckpoint(cmd, view == ViewType::Scene ? "scene.precompute.begin" : "game.precompute.begin");
 	const bool needsPreSceneDepthCompute = clusteredLightingAvailable;
 	const bool depthPreparedForPreSceneCompute = needsPreSceneDepthCompute
 		&& impl->PrepareDepthForCompute(cmd, activeDepthImage, activeDepthView, true);
@@ -3949,6 +4096,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		// the shared depth image back to graphics before vkCmdBeginRenderPass.
 		impl->RestoreDepthForAttachment(cmd, activeDepthImage);
 	}
+	impl->RecordDiagnosticCheckpoint(cmd, view == ViewType::Scene ? "scene.precompute.end" : "game.precompute.end");
 
 	// Prepared draws keep resource validation and command recording separate:
 	// the expensive lookups happen once, then worker command buffers consume a
@@ -4701,11 +4849,54 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		return recordedDrawCount;
 	};
 
-	auto RecordShadowPass = [&](VkFramebuffer framebuffer, uint32_t width, uint32_t height, const ShadowLightRecord& record, const glm::mat4& lightViewProjection) -> bool {
+	impl->RecordDiagnosticCheckpoint(cmd, view == ViewType::Scene ? "scene.shadows.begin" : "game.shadows.begin");
+	auto RecordShadowPass = [&](VkFramebuffer framebuffer, VkImage colorImage, VkImage depthImage, uint32_t arrayLayer, uint32_t width, uint32_t height, const ShadowLightRecord& record, const glm::mat4& lightViewProjection) -> bool {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (framebuffer == VK_NULL_HANDLE || impl->shadowRenderPass == VK_NULL_HANDLE) {
+		if (framebuffer == VK_NULL_HANDLE || colorImage == VK_NULL_HANDLE || depthImage == VK_NULL_HANDLE || impl->shadowRenderPass == VK_NULL_HANDLE) {
 			return false;
 		}
+
+		// A shadow attachment can be written in one queue submission and reused in
+		// another. Use explicit per-image barriers because a render-pass external
+		// dependency does not provide that cross-submit memory dependency on every
+		// driver. The depth transition also orders any cached shader reads before
+		// the next clear and write.
+		std::array<VkImageMemoryBarrier, 2> attachmentBarriers{};
+		attachmentBarriers[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		attachmentBarriers[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+		attachmentBarriers[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+		attachmentBarriers[0].oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		attachmentBarriers[0].newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		attachmentBarriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		attachmentBarriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		attachmentBarriers[0].image = colorImage;
+		attachmentBarriers[0].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		attachmentBarriers[0].subresourceRange.baseMipLevel = 0u;
+		attachmentBarriers[0].subresourceRange.levelCount = 1u;
+		attachmentBarriers[0].subresourceRange.baseArrayLayer = arrayLayer;
+		attachmentBarriers[0].subresourceRange.layerCount = 1u;
+
+		attachmentBarriers[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		attachmentBarriers[1].srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+		attachmentBarriers[1].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+		attachmentBarriers[1].oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+		attachmentBarriers[1].newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+		attachmentBarriers[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		attachmentBarriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		attachmentBarriers[1].image = depthImage;
+		attachmentBarriers[1].subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+		attachmentBarriers[1].subresourceRange.baseMipLevel = 0u;
+		attachmentBarriers[1].subresourceRange.levelCount = 1u;
+		attachmentBarriers[1].subresourceRange.baseArrayLayer = arrayLayer;
+		attachmentBarriers[1].subresourceRange.layerCount = 1u;
+		vkCmdPipelineBarrier(
+			cmd,
+			VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+			VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+			VK_DEPENDENCY_BY_REGION_BIT,
+			0u, nullptr,
+			0u, nullptr,
+			static_cast<uint32_t>(attachmentBarriers.size()), attachmentBarriers.data());
 
 		VkRenderPassBeginInfo shadowPassInfo{};
 		shadowPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -4760,22 +4951,22 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (record.type == 0u) {
 				const glm::mat4 lightViewProjection = LoadShadowViewProjection(*record.light);
-				recordedAnyShadowPass = RecordShadowPass(impl->directionalShadowFramebuffers[record.slot], record.regionWidth, record.regionHeight, record, lightViewProjection) || recordedAnyShadowPass;
+				recordedAnyShadowPass = RecordShadowPass(impl->directionalShadowFramebuffers[record.slot], impl->directionalShadowColors[record.slot].image, impl->directionalShadowDepths[record.slot].image, 0u, record.regionWidth, record.regionHeight, record, lightViewProjection) || recordedAnyShadowPass;
 			}
 			else if (record.type == 1u) {
 				// Point lights render one atlas face per cubemap direction.
 				for (uint32_t faceIndex = 0u; faceIndex < 6u; ++faceIndex) {
 					const glm::mat4 lightViewProjection = BuildPointShadowViewProjection(*record.light, faceIndex);
-					recordedAnyShadowPass = RecordShadowPass(impl->pointShadowFaceFramebuffersBySlot[record.slot][faceIndex], pointShadowSize, pointShadowSize, record, lightViewProjection) || recordedAnyShadowPass;
+					recordedAnyShadowPass = RecordShadowPass(impl->pointShadowFaceFramebuffersBySlot[record.slot][faceIndex], impl->pointShadowCubeColors[record.slot].image, impl->pointShadowCubeDepths[record.slot].image, faceIndex, pointShadowSize, pointShadowSize, record, lightViewProjection) || recordedAnyShadowPass;
 				}
 			}
 			else if (record.type == 2u) {
 				const glm::mat4 lightViewProjection = LoadShadowViewProjection(*record.light);
-				recordedAnyShadowPass = RecordShadowPass(impl->spotShadowFramebuffers[record.slot], record.regionWidth, record.regionHeight, record, lightViewProjection) || recordedAnyShadowPass;
+				recordedAnyShadowPass = RecordShadowPass(impl->spotShadowFramebuffers[record.slot], impl->spotShadowColors[record.slot].image, impl->spotShadowDepths[record.slot].image, 0u, record.regionWidth, record.regionHeight, record, lightViewProjection) || recordedAnyShadowPass;
 			}
 			else if (record.type == 3u) {
 				const glm::mat4 lightViewProjection = LoadShadowViewProjection(*record.light);
-				recordedAnyShadowPass = RecordShadowPass(impl->areaShadowFramebuffers[record.slot], record.regionWidth, record.regionHeight, record, lightViewProjection) || recordedAnyShadowPass;
+				recordedAnyShadowPass = RecordShadowPass(impl->areaShadowFramebuffers[record.slot], impl->areaShadowColors[record.slot].image, impl->areaShadowDepths[record.slot].image, 0u, record.regionWidth, record.regionHeight, record, lightViewProjection) || recordedAnyShadowPass;
 			}
 		}
 	}
@@ -4798,6 +4989,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	}
 	pendingBudgetDiagnostics.shadowPassRecorded = recordedAnyShadowPass;
 	impl->RecordPendingBudgetDiagnostics(statsSlotIndex, pendingBudgetDiagnostics);
+	impl->RecordDiagnosticCheckpoint(cmd, view == ViewType::Scene ? "scene.shadows.end" : "game.shadows.end");
 	
 	std::vector<VkCommandBuffer> secondaryBuffers;
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -5000,6 +5192,34 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	}
 
 	VkSubpassContents contents = secondaryBuffers.empty() ? VK_SUBPASS_CONTENTS_INLINE : VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS;
+	if (!impl->editorMode && impl->depthImage != VK_NULL_HANDLE) {
+		// Every swapchain framebuffer references the same depth image. Order its
+		// previous frame write before this frame clears it, even when a different
+		// frame-in-flight fence owns the earlier command buffer.
+		VkImageMemoryBarrier depthReuseBarrier{};
+		depthReuseBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		depthReuseBarrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+		depthReuseBarrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+		depthReuseBarrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+		depthReuseBarrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+		depthReuseBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		depthReuseBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		depthReuseBarrier.image = impl->depthImage;
+		depthReuseBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+		depthReuseBarrier.subresourceRange.baseMipLevel = 0u;
+		depthReuseBarrier.subresourceRange.levelCount = 1u;
+		depthReuseBarrier.subresourceRange.baseArrayLayer = 0u;
+		depthReuseBarrier.subresourceRange.layerCount = 1u;
+		vkCmdPipelineBarrier(
+			cmd,
+			VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+			VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+			VK_DEPENDENCY_BY_REGION_BIT,
+			0u, nullptr,
+			0u, nullptr,
+			1u, &depthReuseBarrier);
+	}
+	impl->RecordDiagnosticCheckpoint(cmd, view == ViewType::Scene ? "scene.mainpass.begin" : "game.mainpass.begin");
 	vkCmdBeginRenderPass(cmd, &renderPassInfo, contents);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!secondaryBuffers.empty()) {
@@ -5007,6 +5227,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	}
 
 	vkCmdEndRenderPass(cmd);
+	impl->RecordDiagnosticCheckpoint(cmd, view == ViewType::Scene ? "scene.mainpass.end" : "game.mainpass.end");
 			
 	// VRS Generation for next frame
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -5023,18 +5244,21 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		&& frameData.settings.ambientOcclusionQuality > 0u) {
 		impl->StoreAmbientOcclusionDepthHistory(cmd, activeDepthImage, viewIndex, currentViewProjection);
 	}
-	// Hi-Z generation is safe to keep warm even while meshlet occlusion culling
-	// is fail-open: the pyramid is written after the scene depth pass and is not
-	// consumed until a later frame decides the occlusion path is enabled.
+	// Generate the pyramid after scene depth is complete. Its task-shader
+	// consumer has a fixed four-load proof budget, so enabling Hi-Z cannot create
+	// the unbounded startup workload that previously triggered driver watchdogs.
 	constexpr bool kEnableHiZMipGeneration = true;
 	if (kEnableHiZMipGeneration) {
+		impl->RecordDiagnosticCheckpoint(cmd, view == ViewType::Scene ? "scene.hiz.begin" : "game.hiz.begin");
 		// Build Hi-Z after the depth attachment contains the final scene depth.
 		// The next frame can then use this stable pyramid for conservative occlusion.
-		if (impl->GenerateHiZPyramid(writableFrameHiZ, cmd, activeDepthImage, activeDepthView, snapshotSlotIndex, currentHiZHistory)) {
+		if (impl->GenerateHiZPyramid(writableFrameHiZ, cmd, activeDepthImage, activeDepthView, activeRenderExtent, snapshotSlotIndex, currentHiZHistory)) {
 			impl->MarkHiZWritePending(hiZViewIndex, impl->currentFrame);
 		}
+		impl->RecordDiagnosticCheckpoint(cmd, view == ViewType::Scene ? "scene.hiz.end" : "game.hiz.end");
 	}
 	impl->MarkGpuTimestampEnd(cmd, impl->currentFrame, view);
+	impl->RecordDiagnosticCheckpoint(cmd, view == ViewType::Scene ? "scene.primary.end" : "game.primary.end");
 
 	vkEndCommandBuffer(cmd);
 	const float commandRecordingMs = ElapsedMilliseconds(commandRecordingStart);
@@ -5113,6 +5337,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 
 // VulkanContext::Impl::PrepareDepthForCompute is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool VulkanContext::Impl::PrepareDepthForCompute(VkCommandBuffer cmd, VkImage sourceDepthImage, VkImageView depthView, bool updateGlobalDepthDescriptor) {
+	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
 	if (cmd == VK_NULL_HANDLE
 		|| sourceDepthImage == VK_NULL_HANDLE
 		|| currentFrame >= globalDescriptorSets.size()
@@ -5312,7 +5537,29 @@ void VulkanContext::Impl::StoreAmbientOcclusionDepthHistory(VkCommandBuffer cmd,
 }
 
 // VulkanContext::Impl::GenerateHiZPyramid is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-bool VulkanContext::Impl::GenerateHiZPyramid(VulkanHiZ& hiZ, VkCommandBuffer cmd, VkImage sourceDepthImage, VkImageView depthView, uint32_t snapshotSlotIndex, const VulkanHiZHistoryMetadata& completedHistory) {
+bool VulkanContext::Impl::GenerateHiZPyramid(VulkanHiZ& hiZ, VkCommandBuffer cmd, VkImage sourceDepthImage, VkImageView depthView, VkExtent2D sourceDepthExtent, uint32_t snapshotSlotIndex, const VulkanHiZHistoryMetadata& completedHistory) {
+	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
+	// Viewport dimensions can change between RenderFrame discovering the desired
+	// size and BeginFrame reaching a fence-safe resource recreation boundary.
+	// Never dispatch the old pyramid over the new depth image: Texture2D.Load is
+	// not guaranteed to make out-of-range coordinates harmless on every driver.
+	// Skipping this one generation keeps all geometry visible, and BeginFrame
+	// recreates both ping-pong images at the requested extent before retrying.
+	if (sourceDepthExtent.width == 0u
+		|| sourceDepthExtent.height == 0u
+		|| hiZ.width != sourceDepthExtent.width
+		|| hiZ.height != sourceDepthExtent.height) {
+		hiZ.latestInvalidReason = VulkanHiZInvalidReason::Resize;
+		hiZ.latestOcclusionAllowed = false;
+		hiZ.latestValidation = {};
+		hiZ.latestValidation.width = sourceDepthExtent.width;
+		hiZ.latestValidation.height = sourceDepthExtent.height;
+		hiZ.latestValidation.pyramidReady = false;
+		hiZ.latestValidation.failOpen = true;
+		hiZ.latestValidation.invalidReason = VulkanHiZInvalidReason::Resize;
+		return false;
+	}
+
 	if (cmd == VK_NULL_HANDLE
 		|| sourceDepthImage == VK_NULL_HANDLE
 		|| depthView == VK_NULL_HANDLE
@@ -5368,7 +5615,7 @@ bool VulkanContext::Impl::GenerateHiZPyramid(VulkanHiZ& hiZ, VkCommandBuffer cmd
 			// This path is normally hit only after a resize. Wait before
 			// destroying the old per-frame sets so no pending frame can still
 			// reference them.
-			const VkResult idleResult = vkDeviceWaitIdle(device);
+			const VkResult idleResult = WaitDeviceIdle();
 			if (MarkDeviceLost(idleResult, "Hi-Z descriptor pool resize device idle")) {
 				return false;
 			}
@@ -5506,13 +5753,25 @@ bool VulkanContext::Impl::GenerateHiZPyramid(VulkanHiZ& hiZ, VkCommandBuffer cmd
 
 	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, hiZComputePipeline);
 
+	// First use initializes the allocation inside the normal frame submission.
+	// Later writes preserve the submitted shader-read layout. A second snapshot
+	// recorded into the same queue batch also observes the first recorded write.
+	const bool hiZHasPriorRecordedLayout = hiZ.layoutInitialized || hiZ.layoutTransitionRecorded;
+	const VkImageLayout hiZOldLayout = hiZHasPriorRecordedLayout
+		? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+		: VK_IMAGE_LAYOUT_UNDEFINED;
+	const VkAccessFlags hiZSourceAccess = hiZHasPriorRecordedLayout ? VK_ACCESS_SHADER_READ_BIT : 0u;
+	const VkPipelineStageFlags hiZSourceStage = hiZHasPriorRecordedLayout
+		? (VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TASK_SHADER_BIT_EXT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT)
+		: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+
 	TransitionHiZMip(
 		0u,
-		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		hiZOldLayout,
 		VK_IMAGE_LAYOUT_GENERAL,
-		VK_ACCESS_SHADER_READ_BIT,
+		hiZSourceAccess,
 		VK_ACCESS_SHADER_WRITE_BIT,
-		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TASK_SHADER_BIT_EXT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+		hiZSourceStage,
 		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
 	VkDescriptorSet levelZeroSet = WriteHiZDescriptorSet(0u, depthView, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, hiZ.mipViews[0]);
@@ -5544,11 +5803,11 @@ bool VulkanContext::Impl::GenerateHiZPyramid(VulkanHiZ& hiZ, VkCommandBuffer cmd
 
 		TransitionHiZMip(
 			mipIndex,
-			VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			hiZOldLayout,
 			VK_IMAGE_LAYOUT_GENERAL,
-			VK_ACCESS_SHADER_READ_BIT,
+			hiZSourceAccess,
 			VK_ACCESS_SHADER_WRITE_BIT,
-			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TASK_SHADER_BIT_EXT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+			hiZSourceStage,
 			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
 		VkDescriptorSet mipSet = WriteHiZDescriptorSet(
@@ -5608,11 +5867,15 @@ bool VulkanContext::Impl::GenerateHiZPyramid(VulkanHiZ& hiZ, VkCommandBuffer cmd
 	hiZ.history.valid = true;
 	hiZ.history.warmupFrames = std::max(hiZ.history.warmupFrames, 1u);
 	hiZ.history.invalidReason = VulkanHiZInvalidReason::None;
+	// This is only a recording promise. EndFrame promotes it to submitted state;
+	// resize cancellation clears it so the next command uses UNDEFINED again.
+	hiZ.layoutTransitionRecorded = true;
 	return true;
 }
 
 // VulkanContext::Impl::GenerateAmbientOcclusion is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const FrameCullingDataGPU& frameData, uint32_t snapshotSlotIndex, VkImageView sampledDepthView) {
+	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
 	const bool aoEnabled = frameData.renderSettings2.y > 0.001f && frameData.renderSettings2.z > 0.5f;
 	if (!aoEnabled
 		|| cmd == VK_NULL_HANDLE
@@ -5653,7 +5916,7 @@ bool VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const Fr
 			// AO descriptors are recorded into primary command buffers. Wait
 			// before recreating the pool during resize so no pending frame can
 			// still reference sets from the old pool.
-			const VkResult idleResult = vkDeviceWaitIdle(device);
+			const VkResult idleResult = WaitDeviceIdle();
 			if (MarkDeviceLost(idleResult, "ambient occlusion descriptor pool resize device idle")) {
 				return false;
 			}
@@ -5933,6 +6196,7 @@ bool VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const Fr
 
 // VulkanContext::Impl::GenerateVRSImage is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::GenerateVRSImage(VkCommandBuffer cmd, VkImageView colorView) {
+	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
 	if (cmd == VK_NULL_HANDLE
 		|| lightingComputePipelineLayout == VK_NULL_HANDLE
 		|| currentFrame >= globalDescriptorSets.size()
@@ -6032,15 +6296,21 @@ void VulkanContext::EndFrame() {
 		// sized attachments, so submitting them can device-lost the queue on
 		// some drivers. Drop this frame and rebuild the resized targets before
 		// the editor UI pass acquires the next swapchain image.
-		impl->framebufferResized = false;
+		impl->DiscardRecordedHiZWrites(impl->currentFrame);
 		cmds.clear();
 		if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
 			impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 0u;
 		}
 		impl->editorRenderSubmitted = false;
+		// Do not churn device-idle waits, swapchains, image views, pipelines, and
+		// offscreen targets for every intermediate OS resize notification. The UI
+		// presentation path also pauses until this same quiet period has elapsed.
+		if (!impl->IsFramebufferResizeSettled()) {
+			return;
+		}
+		impl->framebufferResized = false;
 		const auto recoveryStart = BackendClock::now();
 		impl->RecreateSwapChain();
-		impl->RecreateOffscreenResources();
 		TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
 			impl->pendingBackendFrameBreakdown,
 			{ TerraEngine::Renderer::BackendFrameCostCategory::ResizeRecreateWait, TerraEngine::Renderer::BackendSubmitStage::SwapchainRecovery, RenderViewType::Game, 0u, "Recreate editor swapchain before submit", true, false },
@@ -6077,7 +6347,7 @@ void VulkanContext::EndFrame() {
 				ElapsedMilliseconds(resetFenceStart));
 
 			const auto submitStart = BackendClock::now();
-			const VkResult submitResult = vkQueueSubmit(impl->graphicsQueue, 1, &emptySubmitInfo, impl->inFlightFences[impl->currentFrame]);
+			const VkResult submitResult = impl->SubmitGraphicsQueue(1, &emptySubmitInfo, impl->inFlightFences[impl->currentFrame]);
 			TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
 				impl->pendingBackendFrameBreakdown,
 				{ TerraEngine::Renderer::BackendFrameCostCategory::QueueSubmission, TerraEngine::Renderer::BackendSubmitStage::QueueSubmit, RenderViewType::Game, 0u, "Empty runtime queue submit", true, false },
@@ -6103,7 +6373,7 @@ void VulkanContext::EndFrame() {
 			presentInfo.pImageIndices = &impl->acquiredImageIndex;
 
 			const auto presentStart = BackendClock::now();
-			const VkResult presentResult = vkQueuePresentKHR(impl->presentQueue, &presentInfo);
+			const VkResult presentResult = impl->PresentSwapchain(&presentInfo);
 			TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
 				impl->pendingBackendFrameBreakdown,
 				{ TerraEngine::Renderer::BackendFrameCostCategory::Presentation, TerraEngine::Renderer::BackendSubmitStage::Present, RenderViewType::Game, 0u, "Empty runtime queue present", true, false },
@@ -6159,7 +6429,7 @@ void VulkanContext::EndFrame() {
 		// In Editor Mode, we defer the frame fence signal to the UI pass (PresentEditor)
 		// so the frame is considered "in flight" until the UI is also done.
 		const auto submitStart = BackendClock::now();
-		VkResult submitResult = vkQueueSubmit(impl->graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+		VkResult submitResult = impl->SubmitGraphicsQueue(1, &submitInfo, VK_NULL_HANDLE);
 		TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
 			impl->pendingBackendFrameBreakdown,
 			{ TerraEngine::Renderer::BackendFrameCostCategory::QueueSubmission, TerraEngine::Renderer::BackendSubmitStage::QueueSubmit, RenderViewType::Game, 0u, "Editor render queue submit", true, false },
@@ -6171,7 +6441,7 @@ void VulkanContext::EndFrame() {
 				return;
 			}
 			TERRAENGINE_LOG(LogLevel::Error, "failed to submit draw command buffers! Result: " << submitResult);
-			const VkResult idleResult = vkQueueWaitIdle(impl->graphicsQueue);
+			const VkResult idleResult = impl->WaitGraphicsQueueIdle();
 			if (idleResult != VK_SUCCESS) {
 				if (impl->MarkDeviceLost(idleResult, "editor render recovery queue idle")) {
 					return;
@@ -6179,6 +6449,7 @@ void VulkanContext::EndFrame() {
 				TERRAENGINE_LOG(LogLevel::Error, "Skipping editor render recovery because the graphics queue did not prove idle: " << idleResult);
 				return;
 			}
+			impl->DiscardRecordedHiZWrites(impl->currentFrame);
 			cmds.clear();
 			if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
 				impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 0u;
@@ -6195,6 +6466,7 @@ void VulkanContext::EndFrame() {
 			return;
 		}
 		impl->editorRenderSubmitted = true;
+		impl->ConfirmHiZWritesSubmitted(impl->currentFrame);
 		if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
 			impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 1u;
 		}
@@ -6206,7 +6478,7 @@ void VulkanContext::EndFrame() {
 			{ TerraEngine::Renderer::BackendFrameCostCategory::RhiEndFrame, TerraEngine::Renderer::BackendSubmitStage::FrameAllocatorReset, RenderViewType::Game, 0u, "Reset frame fence", true, false },
 			ElapsedMilliseconds(resetFenceStart));
 		const auto submitStart = BackendClock::now();
-		VkResult submitResult = vkQueueSubmit(impl->graphicsQueue, 1, &submitInfo, impl->inFlightFences[impl->currentFrame]);
+		VkResult submitResult = impl->SubmitGraphicsQueue(1, &submitInfo, impl->inFlightFences[impl->currentFrame]);
 		TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
 			impl->pendingBackendFrameBreakdown,
 			{ TerraEngine::Renderer::BackendFrameCostCategory::QueueSubmission, TerraEngine::Renderer::BackendSubmitStage::QueueSubmit, RenderViewType::Game, 0u, "Runtime render queue submit", true, false },
@@ -6217,6 +6489,7 @@ void VulkanContext::EndFrame() {
 			if (impl->MarkDeviceLost(submitResult, "runtime render queue submit")) {
 				return;
 			}
+			impl->DiscardRecordedHiZWrites(impl->currentFrame);
 			TERRAENGINE_LOG(LogLevel::Error, "[Vulkan] QueueSubmit failed! Result: " << submitResult << ". Recreating swapchain to recover state.");
 			const auto recoveryStart = BackendClock::now();
 			impl->RecreateSwapChain();
@@ -6228,6 +6501,7 @@ void VulkanContext::EndFrame() {
 				"Queue submit failed during runtime rendering; swapchain recovery was required.");
 			return;
 		}
+		impl->ConfirmHiZWritesSubmitted(impl->currentFrame);
 		if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
 			impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 1u;
 		}
@@ -6253,7 +6527,7 @@ void VulkanContext::EndFrame() {
 		presentInfo.pImageIndices = &impl->acquiredImageIndex;
 
 		const auto presentStart = BackendClock::now();
-		VkResult result = vkQueuePresentKHR(impl->presentQueue, &presentInfo);
+		VkResult result = impl->PresentSwapchain(&presentInfo);
 		TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
 			impl->pendingBackendFrameBreakdown,
 			{ TerraEngine::Renderer::BackendFrameCostCategory::Presentation, TerraEngine::Renderer::BackendSubmitStage::Present, RenderViewType::Game, 0u, "Queue present", true, false },
@@ -6564,7 +6838,7 @@ TerraEngine::Renderer::RenderCaptureResult VulkanContext::ReadbackCapture(const 
 	VkResult submitResult = VK_SUCCESS;
 	{
 		std::lock_guard<std::mutex> lock(impl->immediateCommandMutex);
-		submitResult = vkQueueSubmit(impl->graphicsQueue, 1u, &submitInfo, readbackFence);
+		submitResult = impl->SubmitGraphicsQueue(1u, &submitInfo, readbackFence);
 	}
 	if (submitResult != VK_SUCCESS)
 	{
@@ -6955,7 +7229,7 @@ void VulkanContext::RetireLoadedResource(const TerraEngine::UUID& id, std::uint6
 void VulkanContext::WaitIdle() {
 	if (impl && impl->device) {
 		const auto waitStart = BackendClock::now();
-		const VkResult idleResult = vkDeviceWaitIdle(impl->device);
+		const VkResult idleResult = impl->WaitDeviceIdle();
 		if (impl->MarkDeviceLost(idleResult, "explicit Vulkan WaitIdle")) {
 			return;
 		}
@@ -6989,15 +7263,33 @@ void VulkanContext::GetEditorHandles(EditorHandles& h) {
 	h.device = impl->device;
 	h.queue = impl->graphicsQueue;
 	h.queueFamily = impl->FindQueueFamilies(impl->physicalDevice).graphicsFamily.value();
-	h.descriptorPool = impl->descriptorPool;
+	// The editor backend must not allocate from the engine's mesh descriptor
+	// pool because asset loading and viewport refresh can occur in one frame.
+	h.descriptorPool = impl->editorDescriptorPool;
 	h.renderPass = impl->renderPass;
 	h.minImageCount = impl->MAX_FRAMES_IN_FLIGHT;
 	h.imageCount = static_cast<uint32_t>(impl->swapchainImages.size());
 	h.sceneImageView = (void*)impl->sceneView.view;
 	h.sceneSampler = (void*)impl->sceneView.sampler;
+	h.sceneImageGeneration = impl->sceneView.generation;
 	h.gameImageView = (void*)impl->gameView.view;
 	h.gameSampler = (void*)impl->gameView.sampler;
+	h.gameImageGeneration = impl->gameView.generation;
 	h.vkGetInstanceProcAddr = (void*)vkGetInstanceProcAddr;
+}
+
+void VulkanContext::RunWithQueueAccess(const std::function<void()>& operation)
+{
+	if (!impl || !operation)
+	{
+		return;
+	}
+
+	// ImGui's Vulkan backend performs font/texture upload submits internally,
+	// outside VulkanContext's normal wrappers. Share the exact same mutex so
+	// those submits cannot race worker-driven mesh or texture uploads.
+	std::lock_guard<std::mutex> lock(impl->queueAccessMutex);
+	operation();
 }
 
 // VulkanContext::EnableEditorMode is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -7026,7 +7318,7 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 		// normal EndFrame -> PresentEditor semaphore chain. The frame fence only
 		// tracks UI submits, so prove the graphics queue is idle before resetting
 		// or freeing from the shared per-frame command pool.
-		const VkResult idleResult = vkQueueWaitIdle(impl->graphicsQueue);
+		const VkResult idleResult = impl->WaitGraphicsQueueIdle();
 		if (idleResult != VK_SUCCESS) {
 			if (impl->MarkDeviceLost(idleResult, "editor command pool idle before reset")) {
 				return;
@@ -7070,7 +7362,7 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 		waitSubmitInfo.pWaitDstStageMask = &waitStage;
 		waitSubmitInfo.commandBufferCount = 0;
 
-		const VkResult submitResult = vkQueueSubmit(impl->graphicsQueue, 1, &waitSubmitInfo, VK_NULL_HANDLE);
+		const VkResult submitResult = impl->SubmitGraphicsQueue(1, &waitSubmitInfo, VK_NULL_HANDLE);
 		if (submitResult != VK_SUCCESS) {
 			if (impl->MarkDeviceLost(submitResult, "editor render semaphore drain submit")) {
 				return false;
@@ -7079,7 +7371,7 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 			return false;
 		}
 
-		const VkResult idleResult = vkQueueWaitIdle(impl->graphicsQueue);
+		const VkResult idleResult = impl->WaitGraphicsQueueIdle();
 		if (impl->MarkDeviceLost(idleResult, "editor render semaphore drain idle")) {
 			return false;
 		}
@@ -7098,8 +7390,14 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 	};
 
 	if (impl->framebufferResized) {
+		// While a native resize drag is active, EndFrame has already dropped any
+		// command buffers recorded for obsolete extents. Avoid acquire/present and
+		// rebuild only once the final size has remained stable for a short interval.
+		if (!impl->IsFramebufferResizeSettled()) {
+			return;
+		}
 		if (!drainSubmittedEditorRender("resize")) {
-			const VkResult idleResult = vkQueueWaitIdle(impl->graphicsQueue);
+			const VkResult idleResult = impl->WaitGraphicsQueueIdle();
 			if (impl->MarkDeviceLost(idleResult, "editor resize fallback queue idle")) {
 				return;
 			}
@@ -7118,7 +7416,10 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 		// semaphore and framebuffers belong to the current swapchain.
 		impl->framebufferResized = false;
 		impl->RecreateSwapChain();
-		impl->RecreateOffscreenResources();
+		// ImGui draw data was assembled for the previous native framebuffer size.
+		// Drop this UI frame after rebuilding the presentation swapchain; the next
+		// EditorSystem update will generate matching viewport and clip rectangles.
+		return;
 	}
 	
 	uint32_t imageIndex;
@@ -7127,7 +7428,7 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (result == VK_ERROR_OUT_OF_DATE_KHR) {
 		if (!drainSubmittedEditorRender("out-of-date acquire")) {
-			const VkResult idleResult = vkQueueWaitIdle(impl->graphicsQueue);
+			const VkResult idleResult = impl->WaitGraphicsQueueIdle();
 			if (impl->MarkDeviceLost(idleResult, "editor out-of-date acquire fallback queue idle")) {
 				return;
 			}
@@ -7142,14 +7443,13 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 			impl->editorRenderSubmitted = false;
 		}
 		impl->RecreateSwapChain();
-		impl->RecreateOffscreenResources();
 		return;
 	} else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
 		if (impl->MarkDeviceLost(result, "editor swapchain image acquire")) {
 			return;
 		}
 		if (!drainSubmittedEditorRender("failed acquire")) {
-			const VkResult idleResult = vkQueueWaitIdle(impl->graphicsQueue);
+			const VkResult idleResult = impl->WaitGraphicsQueueIdle();
 			if (impl->MarkDeviceLost(idleResult, "editor failed acquire fallback queue idle")) {
 				return;
 			}
@@ -7185,6 +7485,17 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 	vkBeginCommandBuffer(uiCmd, &beginInfo);
+	impl->RecordDiagnosticCheckpoint(uiCmd, "editor.ui.begin");
+	if (impl->validationLayersEnabled && vkSetDebugUtilsObjectNameEXT != nullptr) {
+		// Keep the UI submission identifiable in validation reports; these command
+		// buffers are temporary and otherwise appear as unnamed destroyed handles.
+		VkDebugUtilsObjectNameInfoEXT nameInfo{};
+		nameInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
+		nameInfo.objectType = VK_OBJECT_TYPE_COMMAND_BUFFER;
+		nameInfo.objectHandle = reinterpret_cast<uint64_t>(uiCmd);
+		nameInfo.pObjectName = "Editor UI Present Command Buffer";
+		vkSetDebugUtilsObjectNameEXT(impl->device, &nameInfo);
+	}
 
 	VkRenderPassBeginInfo renderPassInfo{};
 	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -7198,13 +7509,16 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 	clearValues[1].depthStencil = {1.0f, 0};
 	clearValues[2].color = {{0, 0, 0, 0}};
 
-	renderPassInfo.clearValueCount = impl->UsesVrsAttachment() ? 3 : 2;
+	// PresentEditor always uses the editor-mode color-only render pass. Scene and
+	// Game depth are cleared inside their independent offscreen render passes.
+	renderPassInfo.clearValueCount = 1u;
 	renderPassInfo.pClearValues = clearValues.data();
 
 	vkCmdBeginRenderPass(uiCmd, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (renderUI) renderUI(uiCmd);
 	vkCmdEndRenderPass(uiCmd);
+	impl->RecordDiagnosticCheckpoint(uiCmd, "editor.ui.end");
 	vkEndCommandBuffer(uiCmd);
 
 	VkSubmitInfo submitInfo{};
@@ -7234,7 +7548,7 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 	// Reset and use the main frame fence here, so BeginFrame waits for UI completion too.
 	vkResetFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame]);
 
-	VkResult uiSubmitResult = vkQueueSubmit(impl->graphicsQueue, 1, &submitInfo, impl->inFlightFences[impl->currentFrame]);
+	VkResult uiSubmitResult = impl->SubmitGraphicsQueue(1, &submitInfo, impl->inFlightFences[impl->currentFrame]);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (uiSubmitResult != VK_SUCCESS) {
 		if (impl->MarkDeviceLost(uiSubmitResult, "editor UI queue submit")) {
@@ -7242,7 +7556,7 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 		}
 		TERRAENGINE_LOG(LogLevel::Error, "PresentEditor QueueSubmit failed: " << uiSubmitResult);
 		if (!drainSubmittedEditorRender("failed UI submit")) {
-			const VkResult fallbackIdleResult = vkQueueWaitIdle(impl->graphicsQueue);
+			const VkResult fallbackIdleResult = impl->WaitGraphicsQueueIdle();
 			if (impl->MarkDeviceLost(fallbackIdleResult, "editor failed UI submit fallback queue idle")) {
 				return;
 			}
@@ -7256,7 +7570,7 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 			}
 			impl->editorRenderSubmitted = false;
 		}
-		const VkResult idleResult = vkQueueWaitIdle(impl->graphicsQueue);
+		const VkResult idleResult = impl->WaitGraphicsQueueIdle();
 		if (idleResult == VK_SUCCESS) {
 			vkFreeCommandBuffers(impl->device, impl->commandPools[impl->currentFrame], 1, &uiCmd);
 			if (impl->currentFrame < impl->extraPrimaryCommandBuffers.size()) {
@@ -7297,12 +7611,16 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 	presentInfo.pSwapchains = swapChains;
 	presentInfo.pImageIndices = &imageIndex;
 
-	VkResult presentResult = vkQueuePresentKHR(impl->presentQueue, &presentInfo);
+	VkResult presentResult = impl->PresentSwapchain(&presentInfo);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR || impl->framebufferResized) {
-		impl->framebufferResized = false;
-		impl->RecreateSwapChain();
-		impl->RecreateOffscreenResources();
+		// A present racing the latest resize callback may become out of date before
+		// the debounce interval expires. Leave the resize pending; the next editor
+		// frame will perform one rebuild after the size settles.
+		if (!impl->framebufferResized || impl->IsFramebufferResizeSettled()) {
+			impl->framebufferResized = false;
+			impl->RecreateSwapChain();
+		}
 	} else if (presentResult != VK_SUCCESS) {
 		if (impl->MarkDeviceLost(presentResult, "editor queue present")) {
 			return;
@@ -7331,6 +7649,7 @@ void VulkanContext::Impl::InitEditorMode() {
 
 // VulkanContext::Impl::CreateOffscreenResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res, VkExtent2D requestedExtent) {
+	const std::uint64_t replacementGeneration = res.generation + 1u;
 	auto DestroyOffscreenResourceSet = [&]() {
 		if (res.sampler != VK_NULL_HANDLE) vkDestroySampler(device, res.sampler, nullptr);
 		if (res.framebuffer != VK_NULL_HANDLE) vkDestroyFramebuffer(device, res.framebuffer, nullptr);
@@ -7339,6 +7658,9 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res, VkEx
 		if (res.image != VK_NULL_HANDLE && res.allocation != VK_NULL_HANDLE) vmaDestroyImage(allocator, res.image, res.allocation);
 		if (res.depthImage != VK_NULL_HANDLE && res.depthAllocation != VK_NULL_HANDLE) vmaDestroyImage(allocator, res.depthImage, res.depthAllocation);
 		res = {};
+		// Preserve the new logical identity after clearing Vulkan handles. The
+		// editor must invalidate its descriptor even if creation later fails.
+		res.generation = replacementGeneration;
 	};
 
 	if (HasInFlightReadbackForImage(res.image))
@@ -7347,7 +7669,7 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res, VkEx
 		// Wait only on this rare resize boundary so the old image is never
 		// destroyed while the graphics queue still owns it. The next poll detects
 		// the image identity change and reports a resize cancellation.
-		const VkResult idleResult = vkDeviceWaitIdle(device);
+		const VkResult idleResult = WaitDeviceIdle();
 		if (MarkDeviceLost(idleResult, "capture source resize device idle"))
 		{
 			return;
@@ -7360,6 +7682,9 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res, VkEx
 	}
 	if (res.image != VK_NULL_HANDLE || res.depthImage != VK_NULL_HANDLE || res.framebuffer != VK_NULL_HANDLE) {
 		DestroyOffscreenResourceSet();
+	}
+	else {
+		res.generation = replacementGeneration;
 	}
 
 	VkExtent2D targetExtent = requestedExtent;
@@ -7437,7 +7762,10 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res, VkEx
 			depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 			depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 			depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-			depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+			// Offscreen depth is explicitly initialized and restored to attachment
+			// layout after Hi-Z/AO reads. Preserve that real layout here so a new
+			// frame does not introduce an unnecessary UNDEFINED layout transition.
+			depthAttachment.initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 			depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
 			VkAttachmentReference2 depthAttachmentRef{};
@@ -7521,7 +7849,10 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res, VkEx
 			depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 			depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 			depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-			depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+			// The editor restores this persistent image after compute reads. Match
+			// that layout so loadOp=CLEAR is ordered without an implicit discard
+			// transition racing the prior frame's depth write.
+			depthAttachment.initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 			depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
 			VkAttachmentReference depthAttachmentRef{};
@@ -7537,18 +7868,35 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res, VkEx
 			std::array<VkSubpassDependency, 2> dependencies{};
 			dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
 			dependencies[0].dstSubpass = 0;
-			dependencies[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-			dependencies[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-			dependencies[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-			dependencies[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+			// Scene/Game targets are sampled by ImGui and their depth images are read
+			// by compute before being restored. Cover both prior consumers and the
+			// previous depth restore before this frame clears either attachment.
+			dependencies[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+				| VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+				| VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+			dependencies[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+				| VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+				| VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+			dependencies[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT
+				| VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+			dependencies[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+				| VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT
+				| VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 			dependencies[0].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
 
 			dependencies[1].srcSubpass = 0;
 			dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
-			dependencies[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-			dependencies[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-			dependencies[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-			dependencies[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+			// Publish color for ImGui and depth for Hi-Z/AO/capture operations that
+			// immediately follow the render pass in the recorded command buffer.
+			dependencies[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+				| VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+			dependencies[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+				| VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+				| VK_PIPELINE_STAGE_TRANSFER_BIT;
+			dependencies[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+				| VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+			dependencies[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT
+				| VK_ACCESS_TRANSFER_READ_BIT;
 			dependencies[1].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
 
 			std::array<VkAttachmentDescription, 2> attachments = { colorAttachment, depthAttachment };
@@ -7699,7 +8047,7 @@ void VulkanContext::Impl::RecreateOffscreenResources() {
 	if (deviceLost) {
 		return;
 	}
-	const VkResult idleResult = vkDeviceWaitIdle(device);
+	const VkResult idleResult = WaitDeviceIdle();
 	if (MarkDeviceLost(idleResult, "editor offscreen recreation device idle")) {
 		return;
 	}
@@ -7720,7 +8068,7 @@ void VulkanContext::Impl::RecreateOffscreenResources() {
 // VulkanContext::Impl::ClearResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::ClearResources() {
 	if (!device) return;
-	const VkResult idleResult = vkDeviceWaitIdle(device);
+	const VkResult idleResult = WaitDeviceIdle();
 	if (MarkDeviceLost(idleResult, "clear Vulkan resources device idle")) {
 		return;
 	}

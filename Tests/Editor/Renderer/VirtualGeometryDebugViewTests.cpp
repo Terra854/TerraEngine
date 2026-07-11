@@ -4,6 +4,9 @@
 
 #include <algorithm>
 #include <array>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <string>
 
 namespace TerraEngine::EditorTests
@@ -22,6 +25,19 @@ namespace TerraEngine::EditorTests
 		{
 			const auto& modes = GetVirtualGeometryDebugVisualizationModes();
 			return std::find(modes.begin(), modes.end(), mode) != modes.end();
+		}
+
+		std::string ReadSceneViewWindowSource()
+		{
+			// Scene View owns the detailed diagnostics overlay. Source-level checks
+			// keep its user-facing rows covered without linking the ImGui runtime into
+			// the deterministic editor unit-test executable.
+			const std::filesystem::path sourcePath =
+				std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp";
+			std::ifstream input(sourcePath, std::ios::binary);
+			std::ostringstream buffer;
+			buffer << input.rdbuf();
+			return buffer.str();
 		}
 	}
 
@@ -119,6 +135,18 @@ namespace TerraEngine::EditorTests
 			context.Expect(LegendMentions(GetVirtualGeometryDebugVisualizationLegend(VirtualGeometryDebugVisualizationMode::HiZ), "gray"), "Hi-Z mode should document inactive history color.");
 			context.Expect(LegendMentions(GetVirtualGeometryDebugVisualizationLegend(VirtualGeometryDebugVisualizationMode::Culling), "frustum"), "Culling mode should explain frustum rejection color.");
 			context.Expect(LegendMentions(GetVirtualGeometryDebugVisualizationLegend(VirtualGeometryDebugVisualizationMode::Culling), "cone culling is disabled"), "Culling mode should explain why cone rejection is unavailable for imported mesh safety.");
+		});
+
+		registry.Add("VirtualGeometry.Editor.DebugView.SceneOverlayShowsMeshletReadback", [](TestContext& context) {
+			const std::string source = ReadSceneViewWindowSource();
+
+			context.Expect(source.find("sceneStats.meshletsTotal > 0u") != std::string::npos, "Meshlet activity alone should make the Scene View diagnostics panel visible.");
+			context.Expect(source.find("\"Meshlets Considered\"") != std::string::npos, "Scene View should show how many meshlets the task shader considered.");
+			context.Expect(source.find("\"Meshlets Sent\"") != std::string::npos, "Scene View should show how many meshlets were sent to the mesh shader.");
+			context.Expect(source.find("\"Meshlets Culled\"") != std::string::npos, "Scene View should show the total rejected meshlet count.");
+			context.Expect(source.find("\"Meshlets Culled by Hi-Z\"") != std::string::npos, "Scene View should separate Hi-Z rejections from other culling.");
+			context.Expect(source.find("Hi-Z Tests/Culled/No Proof") != std::string::npos, "Scene View should summarize Hi-Z test outcomes.");
+			context.Expect(source.find("Hi-Z Proofs Full/Grid/Center/Vertex") != std::string::npos, "Scene View should expose which conservative Hi-Z proof accepted each rejection.");
 		});
 	}
 }

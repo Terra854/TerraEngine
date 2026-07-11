@@ -554,7 +554,18 @@ void EditorSystem::Update(float deltaTime) {
 		pendingSaveLayout = false;
 	}
 
-	ImGui_ImplVulkan_NewFrame();
+	auto& renderSystem = RenderSystem::Instance();
+	auto* rhi = renderSystem.GetContext();
+	auto* vulkan = dynamic_cast<VulkanContext*>(rhi);
+	if (vulkan) {
+		// The ImGui Vulkan backend may submit font/texture uploads from NewFrame.
+		// Serialize that hidden queue access with renderer and asset-upload work.
+		vulkan->RunWithQueueAccess([]() {
+			ImGui_ImplVulkan_NewFrame();
+		});
+	} else {
+		ImGui_ImplVulkan_NewFrame();
+	}
 	ImGui_ImplGlfw_NewFrame();
 	ImGui::NewFrame();
 	
@@ -585,9 +596,6 @@ void EditorSystem::Update(float deltaTime) {
 	
 	ImGui::Render();
 	
-	auto& renderSystem = RenderSystem::Instance();
-	auto* rhi = renderSystem.GetContext();
-	auto* vulkan = dynamic_cast<VulkanContext*>(rhi);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vulkan) {
 		vulkan->PresentEditor([](void* cmd){

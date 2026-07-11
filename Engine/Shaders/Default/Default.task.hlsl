@@ -958,17 +958,13 @@ bool IsOccluded(const uint meshletIndex, const uint meshletCount, const MeshDeco
 		return false;
 	}
 
-	// Query the full projected rectangle, not a fixed 3x3 pattern. We choose
-	// the finest mip whose covered texel range fits in a bounded loop. Because
-	// the pyramid stores max depth, sampling extra/coarser texels is conservative:
-	// background or holes inside/near the rect increase furthestDepth and keep
-	// the meshlet visible instead of producing a false occlusion. Keep the cap
-	// explicit so Hi-Z cannot turn a large projected meshlet into thousands of
-	// task-shader texture loads; when the cap forces a coarser mip, the culler
-	// may reject fewer meshlets, but it still fails open instead of cutting
-	// visible geometry.
-	static const uint kMaxHiZRectAxisSamples = 32u;
-	static const uint kMaxHiZRectTexelSamples = kMaxHiZRectAxisSamples * kMaxHiZRectAxisSamples;
+	// Select a mip where the projected rectangle covers at most two texels per
+	// axis. The pyramid stores the maximum depth for every coarse region, so the
+	// extra pixels included by a coarser mip only make culling more conservative.
+	// This caps the proof at four texture loads per meshlet; the old 32x32 loop
+	// could issue 32,768 loads in one task group and trigger a Windows GPU TDR.
+	static const uint kMaxHiZRectAxisSamples = 2u;
+	static const uint kMaxHiZRectTexelSamples = 4u;
 	uint baseWidth = 1u;
 	uint baseHeight = 1u;
 	uint mipLevels = 1u;
@@ -978,57 +974,44 @@ bool IsOccluded(const uint meshletIndex, const uint meshletCount, const MeshDeco
 		return false;
 	}
 
-	uint mipIndex = 0u;
-	uint2 selectedMinTexel = uint2(0u, 0u);
-	uint2 selectedMaxTexel = uint2(0u, 0u);
-	uint selectedWidth = 1u;
-	uint selectedHeight = 1u;
 	const uint maxMipIndex = mipLevels - 1u;
-	[loop]
-	for (uint candidateMip = 0u; candidateMip <= maxMipIndex; ++candidateMip)
+	const float requestedMip = ceil(log2(max(rectExtentPixels, 1.0f)));
+	const uint mipIndex = min((uint)max(requestedMip, 0.0f), maxMipIndex);
+	uint mipWidth = 1u;
+	uint mipHeight = 1u;
+	uint ignoredMipLevels = 1u;
+	hiZPyramids[hiZViewIndex].GetDimensions(mipIndex, mipWidth, mipHeight, ignoredMipLevels);
+	mipWidth = max(mipWidth, 1u);
+	mipHeight = max(mipHeight, 1u);
+
+	const float2 mipSize = float2(mipWidth, mipHeight);
+	const uint2 selectedMinTexel = min((uint2)floor(uvMin * mipSize), uint2(mipWidth - 1u, mipHeight - 1u));
+	const uint2 selectedMaxTexel = min((uint2)floor(uvMax * mipSize), uint2(mipWidth - 1u, mipHeight - 1u));
+	if (any(selectedMaxTexel < selectedMinTexel))
 	{
-		uint mipWidth = 1u;
-		uint mipHeight = 1u;
-		uint ignoredMipLevels = 1u;
-		hiZPyramids[hiZViewIndex].GetDimensions(candidateMip, mipWidth, mipHeight, ignoredMipLevels);
-		mipWidth = max(mipWidth, 1u);
-		mipHeight = max(mipHeight, 1u);
-
-		const float2 mipSize = float2(mipWidth, mipHeight);
-		uint2 minTexel = min((uint2)floor(uvMin * mipSize), uint2(mipWidth - 1u, mipHeight - 1u));
-		uint2 maxTexel = min((uint2)floor(uvMax * mipSize), uint2(mipWidth - 1u, mipHeight - 1u));
-		if (any(maxTexel < minTexel))
-		{
-			return false;
-		}
-
-		const uint sampleWidth = maxTexel.x - minTexel.x + 1u;
-		const uint sampleHeight = maxTexel.y - minTexel.y + 1u;
-		const uint sampleCount = sampleWidth * sampleHeight;
-		const bool fitsBoundedLoop =
-			sampleWidth <= kMaxHiZRectAxisSamples
-			&& sampleHeight <= kMaxHiZRectAxisSamples
-			&& sampleCount <= kMaxHiZRectTexelSamples;
-		if (fitsBoundedLoop || candidateMip == maxMipIndex)
-		{
-			mipIndex = candidateMip;
-			selectedMinTexel = minTexel;
-			selectedMaxTexel = maxTexel;
-			selectedWidth = sampleWidth;
-			selectedHeight = sampleHeight;
-			break;
-		}
+		return false;
+	}
+	const uint selectedWidth = selectedMaxTexel.x - selectedMinTexel.x + 1u;
+	const uint selectedHeight = selectedMaxTexel.y - selectedMinTexel.y + 1u;
+	const uint selectedSampleCount = selectedWidth * selectedHeight;
+	if (selectedWidth > kMaxHiZRectAxisSamples
+		|| selectedHeight > kMaxHiZRectAxisSamples
+		|| selectedSampleCount > kMaxHiZRectTexelSamples)
+	{
+		// Floating-point edge rounding can very occasionally span an extra
+		// texel. Keep that meshlet visible instead of exceeding the hard budget.
+		return false;
 	}
 
 	float furthestDepth = 0.0f;
-	[loop]
+	[unroll]
 	for (uint sampleY = 0u; sampleY < kMaxHiZRectAxisSamples; ++sampleY)
 	{
 		if (sampleY >= selectedHeight)
 		{
 			break;
 		}
-		[loop]
+		[unroll]
 		for (uint sampleX = 0u; sampleX < kMaxHiZRectAxisSamples; ++sampleX)
 		{
 			if (sampleX >= selectedWidth)

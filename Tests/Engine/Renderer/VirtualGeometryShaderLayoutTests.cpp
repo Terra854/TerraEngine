@@ -374,7 +374,7 @@ namespace TerraEngine::Tests
 			context.Expect(ShaderContains(vulkanResources, "publication.buffer == buffer.buffer"), "View-local VG bindless descriptors should skip redundant descriptor-set updates when the published buffer did not change.");
 			context.Expect(ShaderContains(vulkanResources, "WaitForDescriptorMutationIdle();"), "Changing a VG bindless descriptor should route through the shared descriptor-idle helper.");
 			context.Expect(ShaderContains(vulkanResources, "pendingCommandBuffers.clear();"), "Unsubmitted recorded editor views should be discarded before a shared descriptor set is updated.");
-			context.Expect(ShaderContains(vulkanResources, "vkQueueWaitIdle(graphicsQueue);"), "The descriptor mutation path should still drain already-submitted view work before mutating the shared bindless set.");
+			context.Expect(ShaderContains(vulkanResources, "WaitGraphicsQueueIdle();"), "The descriptor mutation path should still drain already-submitted view work through the synchronized queue boundary before mutating the shared bindless set.");
 			context.Expect(ShaderContains(vulkanResources, "if (currentFrame < pendingPrimaryCommandBuffers.size())"), "The central descriptor mutation idle helper should drain recorded view command buffers in editor and exported runtime builds.");
 			context.Expect(ShaderContains(vulkanResources, "pendingPrimaryCommandBuffersSubmitted[currentFrame] != 0u"), "Already-submitted view command buffers should be tracked independently from the UI semaphore state.");
 			context.Expect(ShaderContains(vulkanResources, "if (alreadySubmitted)"), "Already-submitted view command buffers should be waited on, not submitted a second time.");
@@ -477,12 +477,12 @@ namespace TerraEngine::Tests
 			context.Expect(ShaderContains(vulkanResources, "vkCreateFence(device, &fenceInfo, nullptr, &immediateFence)"), "EndSingleTimeCommands should use a fence so command buffers are complete before they are freed.");
 			context.Expect(ShaderContains(vulkanResources, "vkWaitForFences(device, 1, &immediateFence, VK_TRUE, UINT64_MAX)"), "Immediate command buffers must wait on their own submit fence before vkFreeCommandBuffers.");
 			context.Expect(ShaderContains(vulkanResources, "bool VulkanContext::Impl::EndSingleTimeCommands"), "Immediate submits should return success so callers can stop after failed layout/copy work.");
-			context.Expect(ShaderContains(vulkanResources, "const VkResult idleResult = vkQueueWaitIdle(graphicsQueue);"), "Failed immediate submits should check whether the queue proved idle before freeing the command buffer.");
+			context.Expect(ShaderContains(vulkanResources, "const VkResult idleResult = WaitGraphicsQueueIdle();"), "Failed immediate submits should check through the synchronized queue boundary whether the queue proved idle before freeing the command buffer.");
 			context.Expect(ShaderContains(vulkanResources, "vkDestroyFence(device, immediateFence, nullptr);\n\t\tif (idleResult == VK_SUCCESS)"), "Temporary immediate fences must be destroyed even when command-buffer freeing remains gated by queue-idle success.");
 			context.Expect(ShaderContains(vulkanResources, "uploadBarrier.subresourceRange.levelCount = residentMipCount"), "Texture upload should transition every resident mip in the same command buffer as the copy.");
 			context.Expect(ShaderContains(vulkanResources, "vkCmdCopyBufferToImage(commandBuffer, stagingBuffer.buffer, vImage.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL"), "Texture upload should copy all resident mip regions after the in-buffer transfer transition.");
 			context.Expect(ShaderContains(vulkanResources, "shaderReadBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL"), "Texture upload should transition resident mips to shader-read before publishing descriptors.");
-			context.Expect(ShaderContains(vulkanResources, "if (!EndSingleTimeCommands(commandBuffer))"), "Texture upload should not cache or publish an image whose immediate command did not finish.");
+			context.Expect(ShaderContains(vulkanResources, "if (!EndSingleTimeCommands(commandBuffer, \"texture upload\"))"), "Texture upload should not cache or publish an image whose labeled immediate command did not finish.");
 		});
 
 		registry.Add("VirtualGeometry.ShaderLayout.EditorCommandPoolsResetOnlyAfterQueueIdle", [](TestContext& context) {
@@ -559,7 +559,8 @@ namespace TerraEngine::Tests
 			context.Expect(ShaderContains(vulkanSource, "currentFrameHiZ.width == hiZTargetWidth"), "Hi-Z readiness should compare against the current render target width, not just the swapchain width.");
 			context.Expect(ShaderContains(vulkanSource, "currentFrameHiZ.height == hiZTargetHeight"), "Hi-Z readiness should compare against the current render target height, not just the swapchain height.");
 			context.Expect(ShaderContains(vulkanSource, "hiZ.Create(impl->device, impl->allocator, desiredExtent.x, desiredExtent.y"), "Recreated Hi-Z pyramids should use the queued view render area extent.");
-			context.Expect(ShaderContains(vulkanSource, "impl->InitializeHiZPyramidToFarDepth(hiZ);"), "Freshly resized Hi-Z pyramids should start with far depth so the first frame fails open instead of producing false occlusion.");
+			context.Expect(ShaderContains(vulkanSource, "const VkImageLayout hiZOldLayout = hiZHasPriorRecordedLayout"), "Freshly resized Hi-Z pyramids should transition from UNDEFINED inside their first normal generation pass.");
+			context.Expect(ShaderContains(vulkanImplSource, "void ConfirmHiZWritesSubmitted(uint32_t frameIndex)"), "Fresh Hi-Z images should not become readable until their generation command buffer is submitted.");
 			context.Expect(ShaderContains(vulkanSource, "impl->readableHiZHistoryByViewFrame[hiZViewIndex][impl->currentFrame] = impl->CurrentHiZ(hiZViewIndex).history;"), "Readable Hi-Z history should be refreshed after resize before the validation gate is evaluated.");
 			context.Expect(ShaderContains(vulkanResourcesSource, "const auto hasReadableCompletedHiZ"), "Completed stats should verify the readable Hi-Z resource, not only a raw image handle.");
 			context.Expect(ShaderContains(vulkanResourcesSource, "hiZ.width == stats.renderSize.x && hiZ.height == stats.renderSize.y"), "Completed stats should mark Hi-Z active only when the backend pyramid matches the completed view size.");
@@ -575,9 +576,10 @@ namespace TerraEngine::Tests
 		registry.Add("VirtualGeometry.ShaderLayout.HiZUsesBoundedRectSampleBudget", [](TestContext& context) {
 			const std::string shader = ReadDefaultTaskShader();
 			context.Expect(!shader.empty(), "The default task shader should be readable for Hi-Z sampler contract validation.");
-			context.Expect(ShaderContains(shader, "static const uint kMaxHiZRectAxisSamples = 32u;"), "The Hi-Z rectangle sampler should keep its bounded per-axis loop limit explicit and affordable for task shaders.");
-			context.Expect(ShaderContains(shader, "static const uint kMaxHiZRectTexelSamples = kMaxHiZRectAxisSamples * kMaxHiZRectAxisSamples;"), "The Hi-Z rectangle sampler should derive the total budget from the axis cap so the loop bound and mip picker stay in sync.");
-			context.Expect(ShaderContains(shader, "when the cap forces a coarser mip"), "The shader should document that coarse-mip fallback is conservative and may cull fewer meshlets rather than hiding visible geometry.");
+			context.Expect(ShaderContains(shader, "static const uint kMaxHiZRectAxisSamples = 2u;"), "The Hi-Z rectangle sampler should cap each axis at two coarse-mip texels.");
+			context.Expect(ShaderContains(shader, "static const uint kMaxHiZRectTexelSamples = 4u;"), "The Hi-Z occlusion proof should issue no more than four texture loads per meshlet.");
+			context.Expect(ShaderContains(shader, "const float requestedMip = ceil(log2(max(rectExtentPixels, 1.0f)));"), "The shader should choose a conservative coarse mip directly from projected size instead of scanning and sampling a large rectangle.");
+			context.Expect(ShaderContains(shader, "Floating-point edge rounding can very occasionally span an extra"), "Unexpected coarse-mip coverage should fail open instead of exceeding the hard sample budget.");
 		});
 
 		registry.Add("VirtualGeometry.ShaderLayout.TaskShaderAggregatesCountersPerTaskGroup", [](TestContext& context) {

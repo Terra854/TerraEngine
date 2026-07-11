@@ -1014,7 +1014,7 @@ void VulkanContext::Impl::CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkD
 	copyRegion.size = size;
 	vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
 
-	(void)EndSingleTimeCommands(commandBuffer);
+	(void)EndSingleTimeCommands(commandBuffer, "buffer copy");
 }
 
 // VulkanContext::Impl::BeginSingleTimeCommands is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1043,18 +1043,20 @@ VkCommandBuffer VulkanContext::Impl::BeginSingleTimeCommands() {
 		vkFreeCommandBuffers(device, allocInfo.commandPool, 1, &commandBuffer);
 		return VK_NULL_HANDLE;
 	}
+	RecordDiagnosticCheckpoint(commandBuffer, "immediate.begin");
 
 	return commandBuffer;
 }
 
 // VulkanContext::Impl::EndSingleTimeCommands is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-bool VulkanContext::Impl::EndSingleTimeCommands(VkCommandBuffer commandBuffer) {
+bool VulkanContext::Impl::EndSingleTimeCommands(VkCommandBuffer commandBuffer, std::string_view operation) {
 	if (commandBuffer == VK_NULL_HANDLE)
 	{
 		return false;
 	}
 
 	std::lock_guard<std::mutex> lock(immediateCommandMutex);
+	RecordDiagnosticCheckpoint(commandBuffer, "immediate.end");
 	const VkCommandPool owningPool = immediateCommandPool != VK_NULL_HANDLE ? immediateCommandPool : commandPools[currentFrame];
 	if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS)
 	{
@@ -1078,10 +1080,11 @@ bool VulkanContext::Impl::EndSingleTimeCommands(VkCommandBuffer commandBuffer) {
 		return false;
 	}
 
-	const VkResult submitResult = vkQueueSubmit(graphicsQueue, 1, &submitInfo, immediateFence);
+	const VkResult submitResult = SubmitGraphicsQueue(1, &submitInfo, immediateFence);
 	if (submitResult != VK_SUCCESS)
 	{
-		if (MarkDeviceLost(submitResult, "immediate command buffer submit"))
+		const std::string submitOperation = std::string(operation) + " submit";
+		if (MarkDeviceLost(submitResult, submitOperation))
 		{
 			vkDestroyFence(device, immediateFence, nullptr);
 			return false;
@@ -1091,7 +1094,7 @@ bool VulkanContext::Impl::EndSingleTimeCommands(VkCommandBuffer commandBuffer) {
 		// paths. Do not free the command buffer unless the queue proves idle;
 		// freeing a possibly-pending upload buffer creates the secondary
 		// vkFreeCommandBuffers validation error seen after editor asset removal.
-		const VkResult idleResult = vkQueueWaitIdle(graphicsQueue);
+		const VkResult idleResult = WaitGraphicsQueueIdle();
 		vkDestroyFence(device, immediateFence, nullptr);
 		if (idleResult == VK_SUCCESS)
 		{
@@ -1107,7 +1110,11 @@ bool VulkanContext::Impl::EndSingleTimeCommands(VkCommandBuffer commandBuffer) {
 	const VkResult waitResult = vkWaitForFences(device, 1, &immediateFence, VK_TRUE, UINT64_MAX);
 	if (waitResult != VK_SUCCESS)
 	{
-		if (MarkDeviceLost(waitResult, "immediate command fence wait"))
+		// Preserve the caller's purpose in terminal diagnostics. A device loss is
+		// often reported by this fence after an earlier queue command caused the
+		// fault, so a generic "immediate command" label hides the useful boundary.
+		const std::string waitOperation = std::string(operation) + " fence wait";
+		if (MarkDeviceLost(waitResult, waitOperation))
 		{
 			vkDestroyFence(device, immediateFence, nullptr);
 			return false;
@@ -1116,7 +1123,7 @@ bool VulkanContext::Impl::EndSingleTimeCommands(VkCommandBuffer commandBuffer) {
 		// The fence is a temporary ownership marker for this helper. Destroy it
 		// even on a wait failure so shutdown does not leak child objects; command
 		// buffer freeing still stays gated on the queue proving idle/completed.
-		const VkResult idleResult = vkQueueWaitIdle(graphicsQueue);
+		const VkResult idleResult = WaitGraphicsQueueIdle();
 		vkDestroyFence(device, immediateFence, nullptr);
 		if (idleResult == VK_SUCCESS)
 		{
@@ -1136,7 +1143,7 @@ bool VulkanContext::Impl::EndSingleTimeCommands(VkCommandBuffer commandBuffer) {
 }
 
 // VulkanContext::Impl::TransitionImageLayout is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-bool VulkanContext::Impl::TransitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t mipLevels) {
+bool VulkanContext::Impl::TransitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t mipLevels, uint32_t arrayLayers) {
 	VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
 	if (commandBuffer == VK_NULL_HANDLE)
 	{
@@ -1168,7 +1175,9 @@ bool VulkanContext::Impl::TransitionImageLayout(VkImage image, VkFormat format, 
 	barrier.subresourceRange.baseMipLevel = 0;
 	barrier.subresourceRange.levelCount = mipLevels == 0u ? VK_REMAINING_MIP_LEVELS : mipLevels;
 	barrier.subresourceRange.baseArrayLayer = 0;
-	barrier.subresourceRange.layerCount = 1;
+	// Cubemap resources contain six array layers. Let callers transition the
+	// complete resource so every framebuffer face starts from the declared layout.
+	barrier.subresourceRange.layerCount = std::max(arrayLayers, 1u);
 
 	VkPipelineStageFlags sourceStage;
 	VkPipelineStageFlags destinationStage;
@@ -1204,6 +1213,18 @@ bool VulkanContext::Impl::TransitionImageLayout(VkImage image, VkFormat format, 
 
 		sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
 		destinationStage = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+	} else if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+		barrier.srcAccessMask = 0;
+		barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+		sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+		destinationStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+	} else if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) {
+		barrier.srcAccessMask = 0;
+		barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+		sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+		destinationStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
 	} else {
 		throw std::invalid_argument("unsupported layout transition!");
 	}
@@ -1217,69 +1238,15 @@ bool VulkanContext::Impl::TransitionImageLayout(VkImage image, VkFormat format, 
 		1, &barrier
 	);
 
-	return EndSingleTimeCommands(commandBuffer);
-}
-
-// VulkanContext::Impl::InitializeHiZPyramidToFarDepth prepares a new Hi-Z image for always-on sampling.
-void VulkanContext::Impl::InitializeHiZPyramidToFarDepth(VulkanHiZ& hiZ)
-{
-	if (hiZ.image == VK_NULL_HANDLE || hiZ.mipLevels == 0u)
-	{
-		return;
-	}
-
-	// Clear all mips to standard-Z far depth. A freshly created pyramid can then
-	// be sampled immediately without false occlusion; every meshlet fails open
-	// until GenerateHiZPyramid writes real scene depth.
-	if (!TransitionImageLayout(hiZ.image, VK_FORMAT_R32_SFLOAT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, hiZ.mipLevels))
-	{
-		return;
-	}
-
-	VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
-	if (commandBuffer == VK_NULL_HANDLE)
-	{
-		return;
-	}
-	VkClearColorValue clearValue{};
-	clearValue.float32[0] = 1.0f;
-	clearValue.float32[1] = 1.0f;
-	clearValue.float32[2] = 1.0f;
-	clearValue.float32[3] = 1.0f;
-
-	VkImageSubresourceRange clearRange{};
-	clearRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	clearRange.baseMipLevel = 0u;
-	clearRange.levelCount = hiZ.mipLevels;
-	clearRange.baseArrayLayer = 0u;
-	clearRange.layerCount = 1u;
-	vkCmdClearColorImage(commandBuffer, hiZ.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clearValue, 1u, &clearRange);
-	if (!EndSingleTimeCommands(commandBuffer))
-	{
-		return;
-	}
-
-	if (!TransitionImageLayout(hiZ.image, VK_FORMAT_R32_SFLOAT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, hiZ.mipLevels))
-	{
-		return;
-	}
-
-	hiZ.history.valid = true;
-	hiZ.history.width = hiZ.width;
-	hiZ.history.height = hiZ.height;
-	hiZ.history.warmupFrames = 1u;
-	hiZ.history.invalidReason = VulkanHiZInvalidReason::None;
-	hiZ.latestInvalidReason = VulkanHiZInvalidReason::None;
-	hiZ.latestValidation = {};
-	hiZ.latestValidation.historyValid = true;
-	hiZ.latestValidation.occlusionAllowed = true;
-	hiZ.latestValidation.width = hiZ.width;
-	hiZ.latestValidation.height = hiZ.height;
-	hiZ.latestValidation.warmupFrames = 1u;
-	hiZ.latestValidation.pyramidReady = true;
-	hiZ.latestValidation.invalidReason = VulkanHiZInvalidReason::None;
-	hiZ.latestValidation.failOpen = false;
-	hiZ.latestOcclusionAllowed = true;
+	const std::string transitionOperation = "image layout transition "
+		+ std::to_string(static_cast<int>(oldLayout))
+		+ "->"
+		+ std::to_string(static_cast<int>(newLayout))
+		+ " format="
+		+ std::to_string(static_cast<int>(format))
+		+ " layers="
+		+ std::to_string(arrayLayers);
+	return EndSingleTimeCommands(commandBuffer, transitionOperation);
 }
 
 // VulkanContext::Impl::CopyBufferToImage is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1307,7 +1274,7 @@ bool VulkanContext::Impl::CopyBufferToImage(VkBuffer buffer, VkImage image, uint
 
 	vkCmdCopyBufferToImage(commandBuffer, buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-	return EndSingleTimeCommands(commandBuffer);
+	return EndSingleTimeCommands(commandBuffer, "buffer-to-image copy");
 }
 
 // VulkanContext::Impl::CreateImageView is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1683,7 +1650,7 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 		0u, nullptr,
 		1u, &shaderReadBarrier);
 
-	if (!EndSingleTimeCommands(commandBuffer))
+	if (!EndSingleTimeCommands(commandBuffer, "texture upload"))
 	{
 		// If the queue did not prove completion, leave the upload allocations
 		// alone instead of destroying resources a possibly-pending command
@@ -1833,7 +1800,7 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 		for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
 			vkCmdCopyBuffer(commandBuffer, stagingBuffer.buffer, globalMaterialSSBOs[i].buffer, 1, &copyRegion);
 		}
-		EndSingleTimeCommands(commandBuffer);
+		EndSingleTimeCommands(commandBuffer, "material data upload");
 	}
 	
 	vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
@@ -1858,6 +1825,7 @@ void VulkanContext::Impl::InvalidateMaterial(TerraEngine::UUID materialId) {
 
 // VulkanContext::Impl::InvalidateMesh is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::InvalidateMesh(TerraEngine::UUID meshId) {
+	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
 	// Mesh edits change caster geometry. Clear every cache entry rather than
 	// trying to prove which light was affected.
 	shadowCacheEntries.clear();
@@ -1913,6 +1881,7 @@ void VulkanContext::Impl::InvalidateMesh(TerraEngine::UUID meshId) {
 
 // VulkanContext::Impl::InvalidateTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::InvalidateTexture(TerraEngine::UUID textureId, bool reloadAfterInvalidate) {
+	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
 	// Texture edits may affect alpha-tested caster silhouettes, so shadow cache
 	// reuse falls back to refresh after the texture changes.
 	shadowCacheEntries.clear();
@@ -2217,6 +2186,7 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 
 // VulkanContext::Impl::EnsureMeshDescriptorSet is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 VkDescriptorSet VulkanContext::Impl::EnsureMeshDescriptorSet(TerraEngine::UUID meshId, const VulkanPipeline& pipeline) {
+	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
 	auto meshIt = meshCache.find(meshId);
 	if (meshIt == meshCache.end()) {
 		return VK_NULL_HANDLE;
@@ -3220,7 +3190,7 @@ void VulkanContext::Impl::CreateMaterialBufferResources() {
 			for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
 				vkCmdCopyBuffer(commandBuffer, stagingBuffer.buffer, globalMaterialSSBOs[i].buffer, 1, &copyRegion);
 			}
-			EndSingleTimeCommands(commandBuffer);
+			EndSingleTimeCommands(commandBuffer, "fallback material upload");
 		}
 	}
 	else {
@@ -3732,7 +3702,7 @@ void VulkanContext::Impl::CreateAmbientOcclusionResources()
 			clearValue.float32[2] = 1.0f;
 			clearValue.float32[3] = 1.0f;
 			vkCmdClearColorImage(clearCommandBuffer, image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clearValue, 1u, &clearRange);
-			EndSingleTimeCommands(clearCommandBuffer);
+			EndSingleTimeCommands(clearCommandBuffer, "ambient occlusion initialization clear");
 		}
 		TransitionImageLayout(image.image, imageInfo.format, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 	};
@@ -3797,7 +3767,7 @@ void VulkanContext::Impl::CreateAmbientOcclusionResources()
 			0, nullptr,
 			0, nullptr,
 			1, &barrier);
-		EndSingleTimeCommands(transitionCommandBuffer);
+		EndSingleTimeCommands(transitionCommandBuffer, "ambient occlusion depth-history transition");
 	};
 
 	bool allImagesReady = true;
@@ -3853,7 +3823,7 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 	targetRequest.spotCount = std::min(request.spotCount, MAX_SHADOW_RESOURCE_SLOTS);
 	targetRequest.areaCount = std::min(request.areaCount, MAX_SHADOW_RESOURCE_SLOTS);
 	targetRequest.pointCount = std::min(request.pointCount, MAX_SHADOW_RESOURCE_SLOTS);
-	const VkResult idleResult = vkDeviceWaitIdle(device);
+	const VkResult idleResult = WaitDeviceIdle();
 	if (MarkDeviceLost(idleResult, "shadow render resource rebuild device idle")) {
 		return false;
 	}
@@ -4007,6 +3977,14 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 			return;
 		}
 		vmaSetAllocationName(allocator, image.allocation, "Shadow/Attachment Color Image");
+		// Shadow color is reused as an attachment every frame. Initialize it once
+		// instead of asking each render pass to discard an unknown prior layout.
+		if (!TransitionImageLayout(image.image, imageInfo.format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 1u, layers)) {
+			vmaDestroyImage(allocator, image.image, image.allocation);
+			image.image = VK_NULL_HANDLE;
+			image.allocation = VK_NULL_HANDLE;
+			return;
+		}
 
 		VkImageViewCreateInfo viewInfo{};
 		viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -4051,7 +4029,16 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 			image.allocation = VK_NULL_HANDLE;
 			return;
 		}
-		vmaSetAllocationName(allocator, image.allocation, "Shadow/Attachment Color Image");
+		vmaSetAllocationName(allocator, image.allocation, "Shadow/Attachment Depth Image");
+		// The shadow pass finishes in read-only layout for material sampling. Start
+		// the first frame in that same persistent layout so first and later uses
+		// follow one render-pass contract.
+		if (!TransitionImageLayout(image.image, imageInfo.format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL)) {
+			vmaDestroyImage(allocator, image.image, image.allocation);
+			image.image = VK_NULL_HANDLE;
+			image.allocation = VK_NULL_HANDLE;
+			return;
+		}
 		image.view = CreateImageView(image.image, imageInfo.format, VK_IMAGE_ASPECT_DEPTH_BIT);
 	};
 
@@ -4080,7 +4067,15 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 			image.allocation = VK_NULL_HANDLE;
 			return;
 		}
-		vmaSetAllocationName(allocator, image.allocation, "Shadow/Attachment Color Image");
+		vmaSetAllocationName(allocator, image.allocation, "Shadow/Attachment Cube Depth Image");
+		// Transition every cubemap face. Each face has its own framebuffer, but all
+		// six layers must agree with the shadow render pass before any face is used.
+		if (!TransitionImageLayout(image.image, imageInfo.format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, 1u, 6u)) {
+			vmaDestroyImage(allocator, image.image, image.allocation);
+			image.image = VK_NULL_HANDLE;
+			image.allocation = VK_NULL_HANDLE;
+			return;
+		}
 
 		VkImageViewCreateInfo viewInfo{};
 		viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -4586,7 +4581,7 @@ bool VulkanContext::Impl::CreateGpuTimestampQueries() {
 		return true;
 	}
 	vkCmdResetQueryPool(resetCommandBuffer, gpuTimestampQueryPool, 0u, queryCount);
-	if (!EndSingleTimeCommands(resetCommandBuffer))
+	if (!EndSingleTimeCommands(resetCommandBuffer, "GPU timestamp query reset"))
 	{
 		vkDestroyQueryPool(device, gpuTimestampQueryPool, nullptr);
 		gpuTimestampQueryPool = VK_NULL_HANDLE;
@@ -4821,6 +4816,8 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 			&& hiZ.fullView != VK_NULL_HANDLE
 			&& hiZ.sampler != VK_NULL_HANDLE
 			&& hiZ.mipLevels > 0u
+			&& hiZ.layoutInitialized
+			&& hiZ.history.valid
 			&& sizeMatchesStats;
 	};
 
@@ -5471,6 +5468,7 @@ uint32_t VulkanContext::Impl::AllocateMaterialIndex() {
 
 // VulkanContext::Impl::UpdateGlobalTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::UpdateGlobalTexture(uint32_t index, const VulkanImage& image) {
+	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
 	WaitForDescriptorMutationIdle();
 
 	VkDescriptorImageInfo imageInfo{};
@@ -5509,6 +5507,7 @@ uint32_t VulkanContext::Impl::AllocateBufferIndex() {
 
 // VulkanContext::Impl::UpdateGlobalBuffer is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::UpdateGlobalBuffer(uint32_t index, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize range) {
+	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
 	if (index >= MAX_BINDLESS_BUFFERS
 		|| buffer == VK_NULL_HANDLE
 		|| range == 0u)
@@ -5540,6 +5539,7 @@ void VulkanContext::Impl::UpdateGlobalBuffer(uint32_t index, VkBuffer buffer, Vk
 
 void VulkanContext::Impl::UpdateGlobalBufferForFrame(uint32_t frameIndex, uint32_t index, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize range)
 {
+	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
 	if (frameIndex >= globalDescriptorSets.size()
 		|| index >= MAX_BINDLESS_BUFFERS
 		|| globalDescriptorSets[frameIndex] == VK_NULL_HANDLE
@@ -5577,25 +5577,50 @@ void VulkanContext::Impl::UpdateGlobalBufferForFrame(uint32_t frameIndex, uint32
 
 // VulkanContext::Impl::UpdateGlobalHiZ is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::UpdateGlobalHiZ(uint32_t frameIndex) {
+	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
 	if (frameIndex >= globalDescriptorSets.size()) return;
 
 	std::array<VkDescriptorImageInfo, kHiZViewCount> imageInfos{};
 	const auto isReadableHiZ = [](const VulkanHiZ& hiZ) {
-		return hiZ.fullView != VK_NULL_HANDLE && hiZ.sampler != VK_NULL_HANDLE;
+		return hiZ.fullView != VK_NULL_HANDLE
+			&& hiZ.sampler != VK_NULL_HANDLE
+			&& hiZ.layoutInitialized
+			&& hiZ.history.valid;
 	};
+	const VulkanHiZ* samplerOwner = nullptr;
 	const VulkanHiZ* fallbackHiZ = nullptr;
 	for (uint32_t hiZViewIndex = 0u; hiZViewIndex < kHiZViewCount; ++hiZViewIndex) {
 		const VulkanHiZ& hiZ = HiZForFrame(hiZViewIndex, frameIndex);
+		if (samplerOwner == nullptr && hiZ.sampler != VK_NULL_HANDLE) {
+			samplerOwner = &hiZ;
+		}
 		if (isReadableHiZ(hiZ)) {
 			fallbackHiZ = &hiZ;
 			break;
 		}
 	}
-	if (fallbackHiZ == nullptr) {
+	if (samplerOwner == nullptr) {
 		return;
 	}
 
 	WaitForDescriptorMutationIdle();
+	VkDescriptorImageInfo samplerInfo{};
+	samplerInfo.sampler = samplerOwner->sampler;
+
+	// The sampler is safe before the image has a layout. Binding 10 is partially
+	// bound and frame data keeps sampling disabled until a completed write is
+	// promoted, so do not publish an UNDEFINED image merely to fill the slot.
+	if (fallbackHiZ == nullptr) {
+		VkWriteDescriptorSet samplerWrite{};
+		samplerWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		samplerWrite.dstSet = globalDescriptorSets[frameIndex];
+		samplerWrite.dstBinding = 11;
+		samplerWrite.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+		samplerWrite.descriptorCount = 1;
+		samplerWrite.pImageInfo = &samplerInfo;
+		vkUpdateDescriptorSets(device, 1, &samplerWrite, 0, nullptr);
+		return;
+	}
 
 	for (uint32_t hiZViewIndex = 0u; hiZViewIndex < kHiZViewCount; ++hiZViewIndex) {
 		const VulkanHiZ& hiZ = HiZForFrame(hiZViewIndex, frameIndex);
@@ -5610,7 +5635,6 @@ void VulkanContext::Impl::UpdateGlobalHiZ(uint32_t frameIndex) {
 		imageInfos[hiZViewIndex].sampler = VK_NULL_HANDLE;
 	}
 
-	VkDescriptorImageInfo samplerInfo{};
 	samplerInfo.sampler = fallbackHiZ->sampler;
 
 	VkWriteDescriptorSet writes[2]{};
@@ -5656,7 +5680,7 @@ void VulkanContext::Impl::WaitForDescriptorMutationIdle() {
 				// UI recovery, and export/runtime builds use the same tracking for
 				// swapchain submits. Use the per-frame command-buffer state instead
 				// of editorRenderSubmitted when deciding whether submit is legal.
-				const VkResult idleResult = vkQueueWaitIdle(graphicsQueue);
+				const VkResult idleResult = WaitGraphicsQueueIdle();
 				if (idleResult != VK_SUCCESS)
 				{
 					if (MarkDeviceLost(idleResult, "submitted render command buffer idle before descriptor mutation"))
@@ -5676,6 +5700,7 @@ void VulkanContext::Impl::WaitForDescriptorMutationIdle() {
 				// them instead of submitting one-time command buffers from a
 				// descriptor update path. The next RenderFrame/BeginFrame reset can
 				// reuse the pool because the buffers were never pending on the GPU.
+				DiscardRecordedHiZWrites(currentFrame);
 				pendingCommandBuffers.clear();
 				if (currentFrame < pendingPrimaryCommandBuffersSubmitted.size())
 				{
@@ -5696,7 +5721,7 @@ void VulkanContext::Impl::WaitForDescriptorMutationIdle() {
 		}
 	}
 
-	const VkResult idleResult = vkQueueWaitIdle(graphicsQueue);
+	const VkResult idleResult = WaitGraphicsQueueIdle();
 	if (MarkDeviceLost(idleResult, "descriptor mutation queue idle"))
 	{
 		return;
