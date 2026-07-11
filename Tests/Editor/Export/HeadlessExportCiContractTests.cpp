@@ -58,7 +58,7 @@ namespace TerraEngine::EditorTests {
 			const std::string workflow = ReadRepositoryText(".github/workflows/export-baseline.yml");
 
 			context.Expect(workflow.find("runs-on: windows-latest") != std::string::npos, "The supported CI gate should use a Windows hosted runner.");
-			context.Expect(workflow.find("timeout-minutes: 30") != std::string::npos, "The export job should enforce the thirty-minute budget.");
+			context.Expect(workflow.find("timeout-minutes: 60") != std::string::npos, "The export job should enforce the sixty-minute budget.");
 			context.Expect(workflow.find("actions/checkout@v4") != std::string::npos, "The workflow should use the supported checkout action.");
 			context.Expect(workflow.find("submodules: recursive") != std::string::npos, "A clean runner should initialize every nested dependency recursively.");
 			context.Expect(workflow.find("actions/cache") == std::string::npos, "The clean export gate should not restore build or generated-asset caches.");

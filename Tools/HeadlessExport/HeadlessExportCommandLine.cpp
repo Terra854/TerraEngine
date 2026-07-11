@@ -43,9 +43,12 @@ namespace {
 			? suppliedPath
 			: launchDirectory / suppliedPath;
 		std::error_code errorCode;
+		// Existing inputs use their canonical identity. New output/evidence paths
+		// preserve the caller's absolute spelling so Windows does not unexpectedly
+		// rewrite a short-path component (RUNNER~1) into its long-path alias.
 		const std::filesystem::path resolved = mustExist
 			? std::filesystem::canonical(absolutePath, errorCode)
-			: std::filesystem::weakly_canonical(absolutePath, errorCode);
+			: std::filesystem::absolute(absolutePath, errorCode).lexically_normal();
 		if(errorCode) {
 			outError = "Could not resolve path '" + suppliedText + "': " + errorCode.message();
 			return {};
@@ -53,9 +56,19 @@ namespace {
 		return resolved;
 	}
 
+	std::filesystem::path NormalizePathForComparison(const std::filesystem::path& path) {
+		// Safety checks compare filesystem identity, independently from the stable
+		// user-facing spelling retained in the export request and evidence.
+		std::error_code errorCode;
+		const std::filesystem::path canonical = std::filesystem::weakly_canonical(path, errorCode);
+		return (errorCode ? std::filesystem::absolute(path) : canonical).lexically_normal();
+	}
+
 	bool IsSameOrDescendant(const std::filesystem::path& candidate, const std::filesystem::path& parent) {
-		const std::filesystem::path relative = candidate.lexically_relative(parent);
-		if(relative.empty()) return candidate == parent;
+		const std::filesystem::path normalizedCandidate = NormalizePathForComparison(candidate);
+		const std::filesystem::path normalizedParent = NormalizePathForComparison(parent);
+		const std::filesystem::path relative = normalizedCandidate.lexically_relative(normalizedParent);
+		if(relative.empty()) return normalizedCandidate == normalizedParent;
 		const auto first = relative.begin();
 		return first == relative.end() || *first != "..";
 	}

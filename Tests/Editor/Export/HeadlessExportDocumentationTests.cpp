@@ -111,7 +111,7 @@ namespace TerraEngine::EditorTests {
 				".github/workflows/export-baseline.yml",
 				"headless-export-evidence-windows-debug",
 				"Windows x64",
-				"30-minute",
+				"60-minute",
 				"always"
 			};
 

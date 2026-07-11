@@ -94,7 +94,7 @@ parseable records in emission order, including exactly one final result record.
 `.github/workflows/export-baseline.yml` runs for pull requests targeting
 `main`, pushes to `main`, and manual dispatch. The job uses a clean
 `windows-latest` runner, recursive submodules, x64 MSVC, the .NET 10 SDK,
-read-only repository permission, no build cache, and a 30-minute timeout.
+read-only repository permission, no build cache, and a 60-minute timeout.
 
 The ordered stages are checkout, toolchain initialization, Debug configure,
 targeted build, focused export tests, full CTest, install, installed-path

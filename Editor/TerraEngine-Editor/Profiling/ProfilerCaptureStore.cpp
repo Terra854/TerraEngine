@@ -54,7 +54,12 @@ void ProfilerCaptureStore::SetProjectRoot(const std::filesystem::path& projectRo
 		root.clear();
 		return;
 	}
-	root = WeaklyCanonicalOrAbsolute(projectRoot);
+	// Keep the caller's absolute spelling for persisted metadata. Containment
+	// checks canonicalize separately, so aliases remain safe without turning a
+	// RUNNER~1 input into runneradmin in the saved capture document.
+	std::error_code absoluteError;
+	const std::filesystem::path absoluteRoot = std::filesystem::absolute(projectRoot, absoluteError);
+	root = (absoluteError ? projectRoot : absoluteRoot).lexically_normal();
 }
 
 // ProfilerCaptureStore::ClearProjectRoot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
