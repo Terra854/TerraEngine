@@ -23,6 +23,21 @@ namespace TerraEngine::Editor::Automation
 		{
 			return name == "game_view.capture" || name == "camera.capture_object" || name == "camera.capture_custom";
 		}
+
+		const char* JobStateJson(AutomationJobState state)
+		{
+			switch (state)
+			{
+			case AutomationJobState::Queued: return "queued";
+			case AutomationJobState::Preparing: return "preparing";
+			case AutomationJobState::Running: return "running";
+			case AutomationJobState::CancelRequested: return "cancel_requested";
+			case AutomationJobState::Succeeded: return "succeeded";
+			case AutomationJobState::Failed: return "failed";
+			case AutomationJobState::Canceled: return "canceled";
+			}
+			return "failed";
+		}
 	}
 
 	EditorMcpBridge::EditorMcpBridge()
@@ -54,6 +69,7 @@ namespace TerraEngine::Editor::Automation
 		editorContext = context;
 		mainEditor = editor;
 		service.SetEditorContext(context);
+		service.SetMainEditor(editor);
 		transport = std::make_unique<EditorMcpTransport>(*this);
 		session.sessionId = "terraengine-editor-local";
 		session.clientName.clear();
@@ -117,6 +133,7 @@ namespace TerraEngine::Editor::Automation
 	void EditorMcpBridge::SetMainEditor(MainEditorSubsystem* editor)
 	{
 		mainEditor = editor;
+		service.SetMainEditor(editor);
 	}
 
 	void EditorMcpBridge::SetSelectionCallbacks(std::function<std::optional<entt::entity>()> getter, std::function<void(std::optional<entt::entity>)> setter)
@@ -268,15 +285,18 @@ namespace TerraEngine::Editor::Automation
 		}
 
 		const std::string requestId = NextRequestId();
-		const AssistantCapability* capability = service.FindCapability(name);
-		if (capability != nullptr && RequiresWritePermission(*capability) && writeMode != WriteMode::WritesEnabled)
+		// Policy follows the same provider-owned descriptor used by discovery and
+		// dispatch. This also covers component/subsystem declarations registered
+		// after startup without adding them to a legacy bridge capability list.
+		const auto capability = service.GetRegistry().Find(name, 1, service.BuildAutomationStateSnapshot());
+		if (capability && RequiresWritePermission(capability->descriptor) && writeMode != WriteMode::WritesEnabled)
 		{
 			RecordActivity(ActivityEventType::Rejection, requestId, std::string(name), "Blocked write while bridge is read-only.", "rejected");
 			return service.BuildError(requestId, ErrorCategory::Permission, "The bridge is in read-only mode.");
 		}
-		if (capability != nullptr && RequiresApproval(*capability))
+		if (capability && RequiresApproval(capability->descriptor))
 		{
-			return BuildApprovalResponse(*capability, arguments, requestId);
+			return BuildApprovalResponse(capability->descriptor, arguments, requestId);
 		}
 
 		const bool captureTool = IsCaptureTool(name);
@@ -345,6 +365,30 @@ namespace TerraEngine::Editor::Automation
 		}
 		if (resource == "terraengine://capture/availability") return BuildCaptureAvailabilityJson();
 		if (resource == "terraengine://activity/recent") return service.BuildActivityList(GetRecentActivity());
+		if (resource == "terraengine://jobs/recent")
+		{
+			nlohmann::json jobs = nlohmann::json::array();
+			for (const AutomationJobSnapshot& job : service.GetJobService().List(100u))
+			{
+				jobs.push_back({{"jobId", job.jobId}, {"kind", job.kind}, {"capability", job.capability}, {"state", JobStateJson(job.state)}, {"progress", job.progress}, {"stage", job.stage}, {"cancellable", job.cancellable}, {"cancelRequested", job.cancelRequested}, {"correlationId", job.correlationId}, {"artifacts", job.artifacts.size()}, {"result", job.result}});
+			}
+			return {{"ok", true}, {"jobs", jobs}, {"oldestRetainedSequence", service.GetJobService().OldestRetainedSequence()}};
+		}
+		if (resource == "terraengine://logs/recent")
+		{
+			StructuredLogQuery query;
+			query.pageSize = 100u;
+			const StructuredLogPage page = service.GetLogStore().Query(query);
+			nlohmann::json records = nlohmann::json::array();
+			for (const StructuredLogRecord& record : page.records) records.push_back({{"sequence", record.sequence}, {"category", record.category}, {"source", record.source}, {"message", record.message}, {"correlationId", record.correlationId}, {"requestId", record.requestId}, {"jobId", record.jobId}});
+			return {{"ok", page.valid}, {"records", records}, {"nextCursor", page.nextCursor}, {"droppedBeforeCursor", page.droppedBeforeCursor}};
+		}
+		if (resource == "terraengine://approvals/pending")
+		{
+			nlohmann::json pending = nlohmann::json::array();
+			for (const ApprovalPrompt& approval : GetPendingApprovals()) pending.push_back({{"approvalId", approval.approvalId}, {"requestId", approval.requestId}, {"capability", approval.capability}, {"summary", approval.summary}, {"state", approval.resolved ? (approval.approved ? "approved" : "rejected") : "pending"}});
+			return {{"ok", true}, {"approvals", pending}};
+		}
 		return {{"ok", false}, {"error", {{"category", ToString(ErrorCategory::UnsupportedCapability)}, {"details", "Unknown resource URI."}}}};
 	}
 
@@ -358,7 +402,10 @@ namespace TerraEngine::Editor::Automation
 			{{"uri", "terraengine://diagnostics/summary"}, {"name", "Diagnostics Summary"}},
 			{{"uri", "terraengine://renderer/recovery"}, {"name", "Renderer Recovery"}},
 			{{"uri", "terraengine://capture/availability"}, {"name", "Capture Availability"}},
-			{{"uri", "terraengine://activity/recent"}, {"name", "Recent Activity"}}
+			{{"uri", "terraengine://activity/recent"}, {"name", "Recent Activity"}},
+			{{"uri", "terraengine://jobs/recent"}, {"name", "Recent Jobs"}},
+			{{"uri", "terraengine://logs/recent"}, {"name", "Recent Structured Logs"}},
+			{{"uri", "terraengine://approvals/pending"}, {"name", "Pending Approvals"}}
 		});
 	}
 
@@ -497,17 +544,17 @@ namespace TerraEngine::Editor::Automation
 		return pending;
 	}
 
-	bool EditorMcpBridge::RequiresWritePermission(const AssistantCapability& capability) const
+	bool EditorMcpBridge::RequiresWritePermission(const AutomationCapabilityDescriptor& capability) const
 	{
-		return capability.mutatesState;
+		return capability.mutationMode != MutationMode::ReadOnly;
 	}
 
-	bool EditorMcpBridge::RequiresApproval(const AssistantCapability& capability) const
+	bool EditorMcpBridge::RequiresApproval(const AutomationCapabilityDescriptor& capability) const
 	{
 		// Destructive/high-impact actions stop at an explicit approval prompt
 		// before execution so the editor user remains in control of data loss,
 		// file deletion, export overwrite, or bridge exposure changes.
-		return capability.requiresApproval;
+		return capability.approvalPolicy != AutomationApprovalPolicy::None;
 	}
 
 	void EditorMcpBridge::PersistPreferences() const
@@ -521,7 +568,7 @@ namespace TerraEngine::Editor::Automation
 		editorContext->projectManager->SetEditorMcpPreferences(IsEnabled(), std::string(ToString(writeMode)), GetListenEndpoint(), configuredListenPort);
 	}
 
-	nlohmann::json EditorMcpBridge::BuildApprovalResponse(const AssistantCapability& capability, const nlohmann::json& arguments, const std::string& requestId)
+	nlohmann::json EditorMcpBridge::BuildApprovalResponse(const AutomationCapabilityDescriptor& capability, const nlohmann::json& arguments, const std::string& requestId)
 	{
 		ApprovalPrompt prompt = CreateApprovalPrompt(requestId, capability.name, "Approval required for " + capability.name, arguments);
 		nlohmann::json result;

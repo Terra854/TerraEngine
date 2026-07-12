@@ -11,6 +11,8 @@
 #include "Core/Object/Reflection.h"
 #include "Utilities/UUID.h"
 
+#include <nlohmann/json.hpp>
+
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -121,10 +123,24 @@ namespace TerraEngine::Scene {
 		TransactionConflictReason reason = TransactionConflictReason::None;
 		TerraEngine::UUID targetObject = TerraEngine::EMPTY_UUID;
 		std::string componentType;
+		std::string propertyName;
+		TransactionWriteKind writeKind = TransactionWriteKind::CreateObject;
 		std::uint64_t expectedRevision = 0;
 		std::uint64_t actualRevision = 0;
 		std::size_t operationIndex = 0;
 		std::string humanMessage;
+	};
+
+	// A committed write publishes the exact typed operation needed to restore its
+	// prior value. Serialized snapshots are used only for object/component removal,
+	// where a scalar operation cannot represent the complete authored state.
+	struct TransactionInverseDelta {
+		std::size_t sourceOperationIndex = 0;
+		TransactionWriteOperation operation;
+		nlohmann::json serializedObject = nlohmann::json::object();
+		nlohmann::json serializedComponent = nlohmann::json::object();
+		bool restoresSerializedObject = false;
+		bool restoresSerializedComponent = false;
 	};
 
 	struct Transaction {
@@ -147,6 +163,7 @@ namespace TerraEngine::Scene {
 		std::uint64_t validationCostNs = 0;
 		std::uint64_t commitCostNs = 0;
 		std::vector<TransactionConflictRecord> conflicts;
+		std::vector<TransactionInverseDelta> inverseDeltas;
 		std::unordered_map<std::int32_t, TerraEngine::UUID> createdObjects;
 		std::string message;
 
@@ -178,15 +195,25 @@ namespace TerraEngine::Scene {
 		TransactionalMutationBuilder& ObserveScene(ObjectManager& objects);
 		TransactionalMutationBuilder& CreateObject(std::int32_t localObjectId, std::string displayName, TransactionObjectRef parent = {});
 		TransactionalMutationBuilder& DeleteObject(TerraEngine::UUID objectId);
+		TransactionalMutationBuilder& DeleteObject(TransactionObjectRef object);
 		TransactionalMutationBuilder& ReparentObject(TerraEngine::UUID objectId, TransactionObjectRef parent);
+		TransactionalMutationBuilder& ReparentObject(TransactionObjectRef object, TransactionObjectRef parent);
 		TransactionalMutationBuilder& SetName(TerraEngine::UUID objectId, std::string name);
+		TransactionalMutationBuilder& SetName(TransactionObjectRef object, std::string name);
 		TransactionalMutationBuilder& SetTag(TerraEngine::UUID objectId, std::string tag);
+		TransactionalMutationBuilder& SetTag(TransactionObjectRef object, std::string tag);
 		TransactionalMutationBuilder& SetLayer(TerraEngine::UUID objectId, std::string layer);
+		TransactionalMutationBuilder& SetLayer(TransactionObjectRef object, std::string layer);
 		TransactionalMutationBuilder& SetActive(TerraEngine::UUID objectId, bool active);
+		TransactionalMutationBuilder& SetActive(TransactionObjectRef object, bool active);
 		TransactionalMutationBuilder& SetStatic(TerraEngine::UUID objectId, bool isStatic);
+		TransactionalMutationBuilder& SetStatic(TransactionObjectRef object, bool isStatic);
 		TransactionalMutationBuilder& AddComponent(TerraEngine::UUID objectId, std::string componentName);
+		TransactionalMutationBuilder& AddComponent(TransactionObjectRef object, std::string componentName);
 		TransactionalMutationBuilder& RemoveComponent(TerraEngine::UUID objectId, std::string componentName);
+		TransactionalMutationBuilder& RemoveComponent(TransactionObjectRef object, std::string componentName);
 		TransactionalMutationBuilder& UpdateComponentProperty(TerraEngine::UUID objectId, std::string componentName, std::string propertyName, TerraEngine::Reflection::Variant value);
+		TransactionalMutationBuilder& UpdateComponentProperty(TransactionObjectRef object, std::string componentName, std::string propertyName, TerraEngine::Reflection::Variant value);
 		Transaction Build() const;
 
 	private:
@@ -199,6 +226,7 @@ namespace TerraEngine::Scene {
 	TERRAENGINE_API TransactionObjectRef LocalObject(std::int32_t localObjectId);
 	TERRAENGINE_API TransactionResult PreflightTransaction(ObjectManager& objects, const Transaction& transaction);
 	TERRAENGINE_API TransactionResult CommitTransaction(ObjectManager& objects, const Transaction& transaction);
+	TERRAENGINE_API bool ApplyTransactionInverseDeltas(ObjectManager& objects, const std::vector<TransactionInverseDelta>& inverseDeltas);
 	TERRAENGINE_API void AccumulateTransactionDiagnostics(TransactionDiagnostics& diagnostics, const Transaction& transaction, const TransactionResult& result);
 	TERRAENGINE_API TransactionDiagnostics MergeTransactionDiagnostics(const TransactionDiagnostics& left, const TransactionDiagnostics& right);
 

@@ -192,7 +192,9 @@ namespace TerraEngine::EditorTests
 			const std::filesystem::path scenes = editorContext.projectManager->GetProjectRoot() / "Assets" / "Scenes";
 			WriteTextFile(scenes / "Automation.tescene", MakeSceneJson("Automation").dump(4));
 			SceneManager::Instance().UnloadAll();
-			SceneManager::Instance().SetSceneRoot(editorContext.projectManager->GetProjectRoot());
+			// Match MainEditorSubsystem: live scene paths resolve from Assets even
+			// though MCP clients use project-relative Assets/... spelling.
+			SceneManager::Instance().SetSceneRoot(editorContext.projectManager->GetProjectRoot() / "Assets");
 			EditorAutomationService service;
 			service.SetEditorContext(&editorContext);
 			const nlohmann::json open = service.HandleTool("scene.open", {{"path", "Assets/Scenes/Automation.tescene"}}, WriteMode::WritesEnabled, "scene-1");

@@ -121,6 +121,34 @@ struct AssetImportProgress {
 	double elapsedSeconds = 0.0;
 };
 
+// AssetOrganizationImpact is the editor-owned preflight for an asset move,
+// rename, or duplication. Keeping canonical paths and the repair inventory in
+// AssetDatabase ensures UI and automation callers apply the same safety rules.
+struct AssetOrganizationImpact {
+	bool valid = false;
+	std::string errorCategory;
+	std::string error;
+	std::string source;
+	std::string destination;
+	std::string fingerprint;
+	std::vector<std::string> dependents;
+	std::vector<std::string> generatedChildren;
+	std::vector<std::string> repairPlan;
+	std::size_t rollbackJournalEstimate = 0u;
+};
+
+// AssetOrganizationResult describes protected publication without exposing
+// filesystem implementation details to MCP or future editor surfaces.
+struct AssetOrganizationResult {
+	bool published = false;
+	std::string errorCategory;
+	std::string error;
+	std::string path;
+	std::string assetId;
+	std::vector<std::string> repairedReferences;
+	std::string rollback = "not_started";
+};
+
 enum class GeneratedModelPackageChildKind {
 	Mesh,
 	Material,
@@ -176,6 +204,20 @@ public:
 	const AssetMetadata* FindScriptAssetByFullName(std::string_view fullName) const;
 	std::string GetScriptFullName(const TerraEngine::UUID& guid) const;
 	void SetScriptCompileState(const std::string& compileState, const std::string& summary);
+
+	// Preflight and publication are main-thread protected operations. Expensive
+	// reference discovery may be prepared earlier, but callers must publish at
+	// the editor automation boundary so file and index state become visible
+	// together.
+	AssetOrganizationImpact PrepareAssetOrganization(
+		const std::filesystem::path& sourceProjectRelative,
+		std::string_view operation,
+		const std::filesystem::path& destinationProjectRelative = {}) const;
+	AssetOrganizationResult PublishAssetOrganization(
+		const std::filesystem::path& sourceProjectRelative,
+		const std::filesystem::path& destinationProjectRelative,
+		std::string_view operation,
+		std::string_view approvedImpactFingerprint = {});
 
 	// IsCompiling is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool IsCompiling() const;

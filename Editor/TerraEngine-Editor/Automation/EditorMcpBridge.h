@@ -85,9 +85,9 @@ namespace TerraEngine::Editor::Automation
 			std::condition_variable completedSignal;
 		};
 
-		bool RequiresWritePermission(const AssistantCapability& capability) const;
-		bool RequiresApproval(const AssistantCapability& capability) const;
-		nlohmann::json BuildApprovalResponse(const AssistantCapability& capability, const nlohmann::json& arguments, const std::string& requestId);
+		bool RequiresWritePermission(const AutomationCapabilityDescriptor& capability) const;
+		bool RequiresApproval(const AutomationCapabilityDescriptor& capability) const;
+		nlohmann::json BuildApprovalResponse(const AutomationCapabilityDescriptor& capability, const nlohmann::json& arguments, const std::string& requestId);
 		void PersistPreferences() const;
 		void ProcessPendingToolCalls();
 		void ExpirePendingApprovals();

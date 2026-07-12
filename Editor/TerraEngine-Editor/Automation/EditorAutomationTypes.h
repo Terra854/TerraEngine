@@ -10,8 +10,10 @@
 #include <cstdint>
 #include <deque>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include <entt/entt.hpp>
@@ -60,6 +62,7 @@ namespace TerraEngine::Editor::Automation
 	{
 		Validation,
 		Permission,
+		ApprovalRequired,
 		MissingTarget,
 		InvalidCameraObject,
 		UnsupportedCapability,
@@ -67,9 +70,58 @@ namespace TerraEngine::Editor::Automation
 		QueueFull,
 		OverBudget,
 		Conflict,
+		StaleTarget,
+		Unavailable,
 		Transport,
 		Internal,
+		Canceled,
+		Timeout
+	};
+
+	// Permissions are separate from the bridge's current write mode. A
+	// capability describes what it needs, while the bridge decides whether the
+	// current local client is allowed to satisfy that need.
+	enum class AutomationPermission
+	{
+		Read,
+		ProjectWrite,
+		GlobalWrite
+	};
+
+	enum class AutomationApprovalPolicy
+	{
+		None,
+		Destructive,
+		HighImpact
+	};
+
+	enum class AutomationJobState
+	{
+		Queued,
+		Preparing,
+		Running,
+		CancelRequested,
+		Succeeded,
+		Failed,
 		Canceled
+	};
+
+	enum class AutomationLogSeverity
+	{
+		Trace,
+		Debug,
+		Info,
+		Warning,
+		Error,
+		Critical
+	};
+
+	enum class IdempotencyDisposition
+	{
+		NewRequest,
+		Replay,
+		Conflict,
+		CapacityExceeded
 	};
 
 	enum class ActivityEventType
@@ -191,6 +243,188 @@ namespace TerraEngine::Editor::Automation
 		bool requiresProject = false;
 		bool requiresScene = false;
 		bool requiresApproval = false;
+	};
+
+	// Discovery evaluates these conditions against an immutable snapshot. The
+	// optional predicate in a provider may narrow availability further without
+	// reading mutable editor state from a worker.
+	struct AutomationStateSnapshot
+	{
+		bool projectAvailable = false;
+		bool sceneAvailable = false;
+		bool rendererAvailable = false;
+		std::string playState = "stopped";
+		std::uint64_t projectGeneration = 0;
+		std::uint64_t sceneGeneration = 0;
+		std::set<std::string> availableServices;
+	};
+
+	struct AutomationAvailability
+	{
+		bool available = true;
+		std::string reason;
+		bool requiresProject = false;
+		bool requiresScene = false;
+		bool requiresRenderer = false;
+		std::vector<std::string> allowedPlayStates;
+	};
+
+	// Scheduler declarations are data, not behavior. Diagnostics can therefore
+	// expose the exact worker/protected split without invoking a provider.
+	struct ExecutionBoundaryDeclaration
+	{
+		bool workerPreparation = false;
+		bool protectedCommit = false;
+		std::string visibilityBoundary;
+		std::vector<std::string> preparationReads;
+		std::vector<std::string> commitReads;
+		std::vector<std::string> commitWrites;
+	};
+
+	struct AutomationCapabilityDescriptor
+	{
+		std::string name;
+		std::uint32_t version = 1;
+		std::string category;
+		std::string description;
+		nlohmann::json inputSchema = nlohmann::json{{"type", "object"}};
+		nlohmann::json resultSchema = nlohmann::json{{"type", "object"}};
+		AutomationPermission permission = AutomationPermission::Read;
+		AutomationApprovalPolicy approvalPolicy = AutomationApprovalPolicy::None;
+		MutationMode mutationMode = MutationMode::ReadOnly;
+		AutomationAvailability availability;
+		ExecutionBoundaryDeclaration execution;
+		std::string replacement;
+		bool deprecated = false;
+	};
+
+	struct AutomationRequestContext
+	{
+		std::string requestId;
+		std::string clientId;
+		std::string correlationId;
+		std::string idempotencyKey;
+		nlohmann::json arguments = nlohmann::json::object();
+		AutomationStateSnapshot state;
+		AutomationPermission grantedPermission = AutomationPermission::Read;
+		// Version-one compatibility handlers retain their own detailed availability
+		// and fallback validation. Discovery still reports current availability,
+		// but dispatch must not replace established error categories prematurely.
+		bool preserveLegacyAvailability = false;
+	};
+
+	struct AutomationDispatchResult
+	{
+		bool ok = false;
+		ErrorCategory error = ErrorCategory::Internal;
+		std::string message;
+		nlohmann::json data = nlohmann::json::object();
+	};
+
+	struct AutomationArtifact
+	{
+		std::string artifactId;
+		std::string kind;
+		std::string displayPath;
+		std::string mimeType;
+		nlohmann::json metadata = nlohmann::json::object();
+	};
+
+	struct AutomationJobDiagnostic
+	{
+		AutomationLogSeverity severity = AutomationLogSeverity::Info;
+		std::string category;
+		std::string message;
+		nlohmann::json details = nlohmann::json::object();
+	};
+
+	struct AutomationJobSnapshot
+	{
+		std::string jobId;
+		std::string kind;
+		std::string capability;
+		std::string requestId;
+		std::string correlationId;
+		std::string idempotencyKey;
+		AutomationJobState state = AutomationJobState::Queued;
+		double progress = 0.0;
+		std::string stage = "queued";
+		bool cancellable = false;
+		bool cancelRequested = false;
+		std::chrono::system_clock::time_point createdAt = std::chrono::system_clock::now();
+		std::optional<std::chrono::system_clock::time_point> startedAt;
+		std::chrono::system_clock::time_point updatedAt = createdAt;
+		std::optional<std::chrono::system_clock::time_point> completedAt;
+		std::vector<AutomationJobDiagnostic> diagnostics;
+		std::vector<AutomationArtifact> artifacts;
+		nlohmann::json result;
+		std::uint64_t retentionSequence = 0;
+	};
+
+	struct AutomationJobCreateRequest
+	{
+		std::string kind;
+		std::string capability;
+		std::string requestId;
+		std::string correlationId;
+		std::string idempotencyKey;
+		bool cancellable = false;
+	};
+
+	struct StructuredLogRecord
+	{
+		std::uint64_t sequence = 0;
+		std::chrono::system_clock::time_point timestamp = std::chrono::system_clock::now();
+		AutomationLogSeverity severity = AutomationLogSeverity::Info;
+		std::string category;
+		std::string source;
+		std::string correlationId;
+		std::string requestId;
+		std::string jobId;
+		std::string message;
+		nlohmann::json details = nlohmann::json::object();
+	};
+
+	struct StructuredLogQuery
+	{
+		std::optional<AutomationLogSeverity> minimumSeverity;
+		std::string category;
+		std::string source;
+		std::string text;
+		std::string correlationId;
+		std::string requestId;
+		std::string jobId;
+		std::optional<std::chrono::system_clock::time_point> from;
+		std::optional<std::chrono::system_clock::time_point> to;
+		std::string cursor;
+		std::size_t pageSize = 100;
+	};
+
+	struct StructuredLogPage
+	{
+		bool valid = true;
+		std::string error;
+		std::vector<StructuredLogRecord> records;
+		std::string nextCursor;
+		std::uint64_t oldestRetainedSequence = 0;
+		bool droppedBeforeCursor = false;
+		bool hasMore = false;
+	};
+
+	struct IdempotencyRequest
+	{
+		std::string clientScope;
+		std::string capability;
+		std::string key;
+		std::string fingerprint;
+		nlohmann::json initialResult;
+	};
+
+	struct IdempotencyDecision
+	{
+		IdempotencyDisposition disposition = IdempotencyDisposition::NewRequest;
+		nlohmann::json result;
+		bool terminal = false;
 	};
 
 	struct AssistantRequest

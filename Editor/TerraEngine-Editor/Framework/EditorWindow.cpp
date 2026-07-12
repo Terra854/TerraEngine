@@ -20,6 +20,10 @@ EditorWindow::EditorWindow(const std::string& title, bool startVisible, std::str
 void EditorWindow::Draw() {
 	if (!m_IsVisible) return;
 
+	// ImGui placement constraints must be submitted before Begin. Keeping this
+	// hook in the common wrapper lets transient windows provide safe first-use
+	// dimensions without reimplementing visibility and close handling.
+	OnBeforeBegin();
 	bool nextVisible = m_IsVisible;
 	bool expanded = ImGui::Begin(m_Title.c_str(), &nextVisible, m_Flags);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.

@@ -1477,6 +1477,7 @@ VkFormat VulkanContext::Impl::MapTextureFormat(uint32_t vkFormat) {
 
 // VulkanContext::Impl::EnsureTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
+	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
 	if (textureCache.contains(textureId)) {
 		const VulkanImage& cachedTexture = textureCache[textureId];
 		const TerraEngine::Resource::TextureMipResidency desiredMipResidency =
@@ -1709,6 +1710,7 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 
 // VulkanContext::Impl::EnsureMaterialDescriptorSets is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(TerraEngine::UUID shaderCollectionId, TerraEngine::UUID materialId) {
+	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
 	// No longer returns descriptor sets, but acts as an upload mechanism for material data.
 	// The return value is kept for now to minimize API breakage, but it will be empty besides the global set.
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -1810,6 +1812,7 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 
 // VulkanContext::Impl::InvalidateMaterial is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::InvalidateMaterial(TerraEngine::UUID materialId) {
+	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
 	// Material edits can change alpha clipping or shadow behavior, so cached
 	// shadow results are conservatively invalidated before the material is
 	// rebound.
@@ -1825,6 +1828,7 @@ void VulkanContext::Impl::InvalidateMaterial(TerraEngine::UUID materialId) {
 
 // VulkanContext::Impl::InvalidateMesh is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::InvalidateMesh(TerraEngine::UUID meshId) {
+	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
 	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
 	// Mesh edits change caster geometry. Clear every cache entry rather than
 	// trying to prove which light was affected.
@@ -1881,6 +1885,7 @@ void VulkanContext::Impl::InvalidateMesh(TerraEngine::UUID meshId) {
 
 // VulkanContext::Impl::InvalidateTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::InvalidateTexture(TerraEngine::UUID textureId, bool reloadAfterInvalidate) {
+	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
 	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
 	// Texture edits may affect alpha-tested caster silhouettes, so shadow cache
 	// reuse falls back to refresh after the texture changes.
@@ -1943,6 +1948,7 @@ void VulkanContext::Impl::InvalidateTexture(TerraEngine::UUID textureId, bool re
 
 // VulkanContext::Impl::InvalidateResource is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::InvalidateResource(TerraEngine::UUID id, bool reloadTexturesAfterInvalidate) {
+	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
 	InvalidateMesh(id);
 	InvalidateTexture(id, reloadTexturesAfterInvalidate);
 	InvalidateMaterial(id);
@@ -1950,6 +1956,7 @@ void VulkanContext::Impl::InvalidateResource(TerraEngine::UUID id, bool reloadTe
 
 // VulkanContext::Impl::EnsureMesh is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
+	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
 	auto existingMeshIt = meshCache.find(meshId);
 	if (existingMeshIt != meshCache.end())
 	{
@@ -3818,11 +3825,19 @@ void VulkanContext::Impl::CreateAmbientOcclusionResources()
 
 // VulkanContext::Impl::EnsureShadowRenderResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceRequest& request) {
+	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
 	ShadowResourceRequest targetRequest{};
 	targetRequest.directionalCount = std::min(request.directionalCount, MAX_SHADOW_RESOURCE_SLOTS);
 	targetRequest.spotCount = std::min(request.spotCount, MAX_SHADOW_RESOURCE_SLOTS);
 	targetRequest.areaCount = std::min(request.areaCount, MAX_SHADOW_RESOURCE_SLOTS);
 	targetRequest.pointCount = std::min(request.pointCount, MAX_SHADOW_RESOURCE_SLOTS);
+	// Scene and Game views can request different shadow capacities in one CPU
+	// frame. Publish and complete every earlier recorded view before replacing
+	// framebuffers, image views, or descriptor bindings that those views own.
+	WaitForDescriptorMutationIdle();
+	if (deviceLost) {
+		return false;
+	}
 	const VkResult idleResult = WaitDeviceIdle();
 	if (MarkDeviceLost(idleResult, "shadow render resource rebuild device idle")) {
 		return false;
@@ -5656,15 +5671,16 @@ void VulkanContext::Impl::UpdateGlobalHiZ(uint32_t frameIndex) {
 }
 
 void VulkanContext::Impl::WaitForDescriptorMutationIdle() {
+	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
 	if (!initialized || device == VK_NULL_HANDLE || graphicsQueue == VK_NULL_HANDLE) {
 		return;
 	}
 
 	// Global bindless sets and mesh-local descriptor sets are persistent across
 	// frame slots. Asset reloads and export-runtime streaming can update or free
-	// them after a view command buffer has recorded/bound descriptors. Queue
-	// idle covers already-submitted work; unsubmitted buffers must be dropped
-	// because they can no longer be submitted safely after descriptor mutation.
+	// them after a view command buffer has recorded/bound descriptors. Queue idle
+	// covers already-submitted work. Recorded view prefixes are submitted first,
+	// then proven idle, so descriptor safety never silently drops Scene/Game work.
 	if (currentFrame < pendingPrimaryCommandBuffers.size())
 	{
 		std::vector<VkCommandBuffer>& pendingCommandBuffers = pendingPrimaryCommandBuffers[currentFrame];
@@ -5672,51 +5688,61 @@ void VulkanContext::Impl::WaitForDescriptorMutationIdle() {
 		{
 			const bool alreadySubmitted = currentFrame < pendingPrimaryCommandBuffersSubmitted.size()
 				&& pendingPrimaryCommandBuffersSubmitted[currentFrame] != 0u;
-			if (alreadySubmitted)
+			if (!alreadySubmitted)
 			{
-				// EndFrame already submitted these command buffers and left them
-				// tracked only so the frame slot knows what is still in flight.
-				// The editor render semaphore may already be consumed/cleared by
-				// UI recovery, and export/runtime builds use the same tracking for
-				// swapchain submits. Use the per-frame command-buffer state instead
-				// of editorRenderSubmitted when deciding whether submit is legal.
-				const VkResult idleResult = WaitGraphicsQueueIdle();
-				if (idleResult != VK_SUCCESS)
+				VkSubmitInfo prefixSubmit{};
+				prefixSubmit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+				prefixSubmit.commandBufferCount = static_cast<std::uint32_t>(pendingCommandBuffers.size());
+				prefixSubmit.pCommandBuffers = pendingCommandBuffers.data();
+
+				VkSemaphore acquireSemaphore = VK_NULL_HANDLE;
+				VkPipelineStageFlags acquireStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+				const bool consumesRuntimeAcquire = !editorMode
+					&& swapchainImageAcquired
+					&& !swapchainAcquireWaitConsumed;
+				if (consumesRuntimeAcquire)
 				{
-					if (MarkDeviceLost(idleResult, "submitted render command buffer idle before descriptor mutation"))
-					{
-						return;
-					}
-					TERRAENGINE_LOG(LogLevel::Error, "failed to wait for submitted render command buffers before descriptor mutation: " << idleResult);
+					acquireSemaphore = imageAvailableSemaphores[currentFrame];
+					prefixSubmit.waitSemaphoreCount = 1u;
+					prefixSubmit.pWaitSemaphores = &acquireSemaphore;
+					prefixSubmit.pWaitDstStageMask = &acquireStage;
+				}
+
+				const VkResult submitResult = SubmitGraphicsQueue(1u, &prefixSubmit, VK_NULL_HANDLE);
+				if (MarkDeviceLost(submitResult, "recorded view prefix submit before descriptor mutation"))
+				{
 					return;
 				}
-				pendingCommandBuffers.clear();
-				pendingPrimaryCommandBuffersSubmitted[currentFrame] = 0u;
-			}
-			else
-			{
-				// These command buffers have recorded descriptor bindings but have
-				// not entered the queue. Treat them as stale snapshots and skip
-				// them instead of submitting one-time command buffers from a
-				// descriptor update path. The next RenderFrame/BeginFrame reset can
-				// reuse the pool because the buffers were never pending on the GPU.
-				DiscardRecordedHiZWrites(currentFrame);
-				pendingCommandBuffers.clear();
-				if (currentFrame < pendingPrimaryCommandBuffersSubmitted.size())
+				if (submitResult != VK_SUCCESS)
 				{
-					pendingPrimaryCommandBuffersSubmitted[currentFrame] = 0u;
+					TERRAENGINE_LOG(LogLevel::Error, "failed to submit recorded views before descriptor mutation: " << submitResult);
+					return;
 				}
-				if (activeRenderSnapshot.state == RenderSnapshotState::Recorded)
-				{
-					activeRenderSnapshot.state = RenderSnapshotState::Fallback;
-				}
+				if (consumesRuntimeAcquire) swapchainAcquireWaitConsumed = true;
+				ConfirmHiZWritesSubmitted(currentFrame);
 				for (RenderSnapshotOwnerSummary& owner : pendingRenderSnapshotDiagnostics.ownerSummaries)
 				{
 					if (owner.state == RenderSnapshotState::Recorded)
 					{
-						owner.state = RenderSnapshotState::Fallback;
+						owner.state = RenderSnapshotState::Submitted;
 					}
 				}
+			}
+
+			const VkResult prefixIdleResult = WaitGraphicsQueueIdle();
+			if (MarkDeviceLost(prefixIdleResult, "render command buffer idle before descriptor mutation"))
+			{
+				return;
+			}
+			if (prefixIdleResult != VK_SUCCESS)
+			{
+				TERRAENGINE_LOG(LogLevel::Error, "failed to wait for render command buffers before descriptor mutation: " << prefixIdleResult);
+				return;
+			}
+			pendingCommandBuffers.clear();
+			if (currentFrame < pendingPrimaryCommandBuffersSubmitted.size())
+			{
+				pendingPrimaryCommandBuffersSubmitted[currentFrame] = 0u;
 			}
 		}
 	}

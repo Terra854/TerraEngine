@@ -590,6 +590,193 @@ SceneViewWindow::SceneViewWindow(MainEditorSubsystem* owner)
 	m_IconDefinitions = SceneOverlay::BuildDefaultIconDefinitions();
 }
 
+nlohmann::json SceneViewWindow::GetAutomationState() const
+{
+	const auto vector = [](const glm::vec3& value) {
+		return nlohmann::json::array({value.x, value.y, value.z});
+	};
+	const auto toolName = [this]() -> const char* {
+		switch (m_ToolState.activeTool)
+		{
+		case SceneOverlay::SceneViewTool::Hand: return "hand";
+		case SceneOverlay::SceneViewTool::Move: return "move";
+		case SceneOverlay::SceneViewTool::Rotate: return "rotate";
+		case SceneOverlay::SceneViewTool::Scale: return "scale";
+		case SceneOverlay::SceneViewTool::None: return "none";
+		}
+		return "none";
+	};
+
+	nlohmann::json state{
+		{"camera", {
+			{"position", vector(m_CameraPos)},
+			{"focus", vector(m_CameraFocusInitialized ? m_CameraFocus : ResolveSceneViewFocus(m_CameraFocusDistance))},
+			{"forward", vector(GetCameraForward())},
+			{"up", vector(GetCameraUp())},
+			{"fieldOfViewDegrees", m_Fov}
+		}},
+		{"tool", toolName()},
+		{"orientation", m_ToolState.orientationMode == SceneOverlay::OrientationMode::Local ? "local" : "global"},
+		{"projection", m_ToolState.projectionMode == SceneOverlay::ProjectionMode::Perspective ? "perspective" : "orthographic"},
+		{"snapping", {
+			{"enabled", m_ToolState.snapEnabled},
+			{"translation", m_SnapValue[0]},
+			{"rotationDegrees", m_RotationSnapValue[0]},
+			{"scale", m_ScaleSnapValue[0]}
+		}},
+		{"visualization", ToString(m_VirtualGeometryDebugMode)},
+		{"visible", IsVisible()}
+	};
+	if (m_Owner != nullptr && m_Owner->GetSelectedEntity().has_value())
+	{
+		const auto object = ObjectManager::instance().getObject(*m_Owner->GetSelectedEntity());
+		if (object.has_value())
+		{
+			state["selectedObjectId"] = TerraEngine::ToHexString(ObjectManager::instance().getUUID(*object));
+		}
+	}
+	else
+	{
+		state["selectedObjectId"] = nullptr;
+	}
+	return state;
+}
+
+bool SceneViewWindow::SetAutomationCamera(const glm::vec3& position, const glm::vec3& focus, std::string& outError)
+{
+	if (!std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z)
+		|| !std::isfinite(focus.x) || !std::isfinite(focus.y) || !std::isfinite(focus.z))
+	{
+		outError = "Camera position and focus must contain finite numbers.";
+		return false;
+	}
+	const glm::vec3 direction = focus - position;
+	if (glm::length(direction) <= 0.0001f)
+	{
+		outError = "Camera position and focus must not be the same point.";
+		return false;
+	}
+	const glm::vec2 euler = CameraEulerFromForward(direction);
+	m_CameraRot = glm::vec3(euler.x, euler.y, 0.0f);
+	m_CameraPos = position;
+	m_CameraFocus = focus;
+	m_CameraFocusDistance = std::clamp(glm::length(direction), 1.0f, 1000.0f);
+	m_CameraFocusInitialized = true;
+	return true;
+}
+
+bool SceneViewWindow::FrameAutomationObject(entt::entity entity, std::string& outError)
+{
+	const std::optional<glm::vec3> worldPosition = ComputeEntityWorldPosition(entity);
+	if (!worldPosition.has_value())
+	{
+		outError = "The requested Scene View target is stale or has no live transform context.";
+		return false;
+	}
+	if (m_Owner != nullptr)
+	{
+		m_Owner->SetSelectedEntity(entity);
+	}
+	const float distance = ResolveSceneViewFocusDistance(*worldPosition, m_CameraFocusDistance);
+	RepositionCameraAroundFocus(*worldPosition, distance);
+	return true;
+}
+
+bool SceneViewWindow::SetAutomationTool(std::string_view tool, std::string& outError)
+{
+	if (tool == "hand") { m_ToolState.activeTool = SceneOverlay::SceneViewTool::Hand; m_CurrentGizmoOperation = -1; }
+	else if (tool == "move") { m_ToolState.activeTool = SceneOverlay::SceneViewTool::Move; m_CurrentGizmoOperation = ImGuizmo::TRANSLATE; }
+	else if (tool == "rotate") { m_ToolState.activeTool = SceneOverlay::SceneViewTool::Rotate; m_CurrentGizmoOperation = ImGuizmo::ROTATE; }
+	else if (tool == "scale") { m_ToolState.activeTool = SceneOverlay::SceneViewTool::Scale; m_CurrentGizmoOperation = ImGuizmo::SCALE; }
+	else if (tool == "none") { m_ToolState.activeTool = SceneOverlay::SceneViewTool::None; m_CurrentGizmoOperation = -1; }
+	else { outError = "Tool must be one of: hand, move, rotate, scale, none."; return false; }
+	m_ToolState.lastChangedBy = SceneOverlay::LastChangedBy::AutomationDiagnosticReplay;
+	return true;
+}
+
+bool SceneViewWindow::SetAutomationOrientation(std::string_view orientation, std::string& outError)
+{
+	if (orientation == "local" || orientation == "global")
+	{
+		m_ToolState.orientationMode = orientation == "local" ? SceneOverlay::OrientationMode::Local : SceneOverlay::OrientationMode::Global;
+		m_ToolState.lastChangedBy = SceneOverlay::LastChangedBy::AutomationDiagnosticReplay;
+		return true;
+	}
+	if (orientation == "perspective" || orientation == "orthographic")
+	{
+		m_ToolState.projectionMode = orientation == "perspective" ? SceneOverlay::ProjectionMode::Perspective : SceneOverlay::ProjectionMode::Orthographic;
+		m_OverlayPreference.projectionMode = m_ToolState.projectionMode;
+		m_OverlayPreferenceDirty = true;
+		PersistOverlayPreferences();
+		return true;
+	}
+
+	SceneOverlay::OrientationAxis axis = SceneOverlay::OrientationAxis::None;
+	if (orientation == "right" || orientation == "+x") axis = SceneOverlay::OrientationAxis::PositiveX;
+	else if (orientation == "left" || orientation == "-x") axis = SceneOverlay::OrientationAxis::NegativeX;
+	else if (orientation == "top" || orientation == "+y") axis = SceneOverlay::OrientationAxis::PositiveY;
+	else if (orientation == "bottom" || orientation == "-y") axis = SceneOverlay::OrientationAxis::NegativeY;
+	else if (orientation == "back" || orientation == "+z") axis = SceneOverlay::OrientationAxis::PositiveZ;
+	else if (orientation == "front" || orientation == "-z") axis = SceneOverlay::OrientationAxis::NegativeZ;
+	if (axis == SceneOverlay::OrientationAxis::None)
+	{
+		outError = "Orientation must be local, global, perspective, orthographic, front, back, left, right, top, or bottom.";
+		return false;
+	}
+	const glm::vec3 focus = ResolveSceneViewFocus(m_CameraFocusDistance);
+	const float distance = ResolveSceneViewFocusDistance(focus, m_CameraFocusDistance);
+	const SceneOverlay::OrientationSnapEuler snapped = SceneOverlay::SnapEulerForAxis(axis);
+	m_CameraRot = glm::vec3(snapped.pitchRadians, snapped.yawRadians, 0.0f);
+	RepositionCameraAroundFocus(focus, distance);
+	m_OrientationWidgetState.activeAxis = SceneOverlay::ToString(axis);
+	return true;
+}
+
+bool SceneViewWindow::SetAutomationSnapping(bool enabled, const std::optional<glm::vec3>& values, std::string& outError)
+{
+	if (values.has_value() && (!std::isfinite(values->x) || !std::isfinite(values->y) || !std::isfinite(values->z)
+		|| values->x <= 0.0f || values->y <= 0.0f || values->z <= 0.0f))
+	{
+		outError = "Snap values must be finite positive translation, rotation-degree, and scale increments.";
+		return false;
+	}
+	m_ToolState.snapEnabled = enabled;
+	m_UsingSnap = enabled;
+	m_OverlayPreference.snapEnabled = enabled;
+	if (values.has_value())
+	{
+		m_SnapValue[0] = m_SnapValue[1] = m_SnapValue[2] = values->x;
+		m_RotationSnapValue[0] = m_RotationSnapValue[1] = m_RotationSnapValue[2] = values->y;
+		m_ScaleSnapValue[0] = m_ScaleSnapValue[1] = m_ScaleSnapValue[2] = values->z;
+		m_ToolState.snapValues = {values->x, values->y, values->z};
+		m_OverlayPreference.translationSnap = values->x;
+		m_OverlayPreference.rotationSnapDegrees = values->y;
+		m_OverlayPreference.scaleSnap = values->z;
+	}
+	m_OverlayPreferenceDirty = true;
+	PersistOverlayPreferences();
+	return true;
+}
+
+bool SceneViewWindow::SetAutomationVisualization(std::string_view mode, std::string& outError)
+{
+	VirtualGeometryDebugVisualizationMode resolved = VirtualGeometryDebugVisualizationMode::None;
+	if (mode == "off" || mode == "none") resolved = VirtualGeometryDebugVisualizationMode::None;
+	else if (mode == "lod") resolved = VirtualGeometryDebugVisualizationMode::LOD;
+	else if (mode == "cluster") resolved = VirtualGeometryDebugVisualizationMode::Cluster;
+	else if (mode == "meshlet_id" || mode == "meshlet-id") resolved = VirtualGeometryDebugVisualizationMode::MeshletId;
+	else if (mode == "bounds") resolved = VirtualGeometryDebugVisualizationMode::Bounds;
+	else if (mode == "culling") resolved = VirtualGeometryDebugVisualizationMode::Culling;
+	else if (mode == "residency") resolved = VirtualGeometryDebugVisualizationMode::Residency;
+	else if (mode == "hiz" || mode == "hi-z") resolved = VirtualGeometryDebugVisualizationMode::HiZ;
+	else if (mode == "error") resolved = VirtualGeometryDebugVisualizationMode::Error;
+	else { outError = "Visualization mode is not allowlisted."; return false; }
+	m_VirtualGeometryDebugMode = resolved;
+	m_VirtualGeometryDebugModeInitialized = true;
+	RenderSystem::Instance().SetVirtualGeometryDebugVisualizationMode(RenderViewType::Scene, 1u, resolved);
+	return true;
+}
+
 glm::vec3 SceneViewWindow::GetCameraForward() const
 {
 	return CameraForwardFromEuler(m_CameraRot);

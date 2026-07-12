@@ -22,6 +22,9 @@ public:
 
 	// Callback to notify the system that a project has been loaded
 	void SetOnProjectLoadedCallback(std::function<void()> callback);
+	// Editor-wide Preferences must remain reachable before a project is open so
+	// users can resolve project lifecycle approvals owned by the local editor.
+	void SetOpenPreferencesCallback(std::function<void()> callback);
 
 private:
 	enum class PendingProjectActionType {
@@ -45,6 +48,7 @@ private:
 
 	EditorContext* ctx = nullptr;
 	std::function<void()> onProjectLoaded;
+	std::function<void()> openPreferences;
 	std::optional<PendingProjectAction> pendingProjectAction;
 	
 	// Page names the supported states explicitly so serialization and switches stay readable.

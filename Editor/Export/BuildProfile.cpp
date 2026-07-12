@@ -6,12 +6,28 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <random>
 #include <sstream>
+
+namespace {
+	bool IsBlank(std::string_view value) {
+		return std::all_of(value.begin(), value.end(), [](unsigned char character) {
+			return std::isspace(character) != 0;
+		});
+	}
+
+	bool IsSafeProfileId(std::string_view value) {
+		return !value.empty() && std::all_of(value.begin(), value.end(), [](unsigned char character) {
+			return std::isalnum(character) != 0 || character == '-' || character == '_';
+		});
+	}
+}
 
 namespace {
 	std::string PathToUtf8(const std::filesystem::path& path) {
@@ -285,4 +301,94 @@ std::vector<BuildProfile> LoadAllBuildProfiles(const std::filesystem::path& dire
 	}
 
 	return profiles;
+}
+
+BuildProfileCollectionResult CreateBuildProfileDraft(std::string name, ExportPlatform platform) {
+	if (name.empty() || IsBlank(name)) {
+		return { false, "Build profile name must contain a visible character.", std::nullopt };
+	}
+
+	BuildProfile profile;
+	profile.id = GenerateBuildProfileId();
+	profile.name = std::move(name);
+	profile.platform = platform;
+	profile.isDirty = true;
+	return { true, {}, std::move(profile) };
+}
+
+BuildProfileCollectionResult DuplicateBuildProfileDraft(const BuildProfile& source, std::string name) {
+	if (source.id.empty()) {
+		return { false, "A persisted profile identity is required before duplication.", std::nullopt };
+	}
+	if (name.empty()) {
+		name = source.name + " (Copy)";
+	}
+	if (IsBlank(name)) {
+		return { false, "Build profile name must contain a visible character.", std::nullopt };
+	}
+
+	BuildProfile duplicate = source;
+	duplicate.id = GenerateBuildProfileId();
+	duplicate.name = std::move(name);
+	duplicate.filePath.clear();
+	duplicate.isDirty = true;
+	return { true, {}, std::move(duplicate) };
+}
+
+BuildProfileCollectionResult FindBuildProfileInCollection(
+	const std::filesystem::path& directory,
+	std::string_view selector) {
+	if (selector.empty()) {
+		return { false, "Build profile selector is required.", std::nullopt };
+	}
+
+	for (BuildProfile profile : LoadAllBuildProfiles(directory)) {
+		if (profile.id == selector || profile.name == selector || profile.filePath.filename().string() == selector) {
+			return { true, {}, std::move(profile) };
+		}
+	}
+	return { false, "Build profile was not found.", std::nullopt };
+}
+
+BuildProfileCollectionResult SaveBuildProfileToCollection(
+	const std::filesystem::path& directory,
+	BuildProfile profile) {
+	if (profile.name.empty() || IsBlank(profile.name)) {
+		return { false, "Build profile name must contain a visible character.", std::nullopt };
+	}
+	if (profile.id.empty()) {
+		profile.id = GenerateBuildProfileId();
+	}
+	if (!IsSafeProfileId(profile.id)) {
+		return { false, "Build profile identity contains unsafe path characters.", std::nullopt };
+	}
+
+	const std::filesystem::path path = directory / (profile.id + ".json");
+	if (!SaveBuildProfile(profile, path)) {
+		return { false, "Build profile could not be persisted.", std::nullopt };
+	}
+	profile.filePath = path;
+	profile.isDirty = false;
+	return { true, {}, std::move(profile) };
+}
+
+BuildProfileCollectionResult RemoveBuildProfileFromCollection(
+	const std::filesystem::path& directory,
+	std::string_view profileId) {
+	if (!IsSafeProfileId(profileId)) {
+		return { false, "A safe build profile identity is required.", std::nullopt };
+	}
+
+	BuildProfileCollectionResult found = FindBuildProfileInCollection(directory, profileId);
+	if (!found.succeeded || !found.profile.has_value()) {
+		return found;
+	}
+	std::error_code error;
+	// Legacy profiles may have a filename that differs from their stable ID, so
+	// remove the path discovered by collection loading rather than guessing it.
+	const bool removed = std::filesystem::remove(found.profile->filePath, error);
+	if (error || !removed) {
+		return { false, error ? error.message() : "Build profile file was not found.", std::nullopt };
+	}
+	return { true, {}, std::move(found.profile) };
 }

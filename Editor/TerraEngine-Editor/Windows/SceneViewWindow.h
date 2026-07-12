@@ -24,6 +24,17 @@ class SceneViewWindow : public EditorWindow {
 public:
 	SceneViewWindow(MainEditorSubsystem* owner);
 
+	// Scene View automation uses semantic values instead of screen coordinates.
+	// These methods run on the editor's protected update boundary, so they may
+	// safely share the same state and validation rules as the visible toolbar.
+	[[nodiscard]] nlohmann::json GetAutomationState() const;
+	bool SetAutomationCamera(const glm::vec3& position, const glm::vec3& focus, std::string& outError);
+	bool FrameAutomationObject(entt::entity entity, std::string& outError);
+	bool SetAutomationTool(std::string_view tool, std::string& outError);
+	bool SetAutomationOrientation(std::string_view orientation, std::string& outError);
+	bool SetAutomationSnapping(bool enabled, const std::optional<glm::vec3>& values, std::string& outError);
+	bool SetAutomationVisualization(std::string_view mode, std::string& outError);
+
 protected:
 	virtual void OnGui() override;
 

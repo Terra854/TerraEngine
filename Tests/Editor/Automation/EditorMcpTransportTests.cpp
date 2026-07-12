@@ -10,6 +10,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <string_view>
 
 #if defined(_WIN32)
 	#ifndef WIN32_LEAN_AND_MEAN
@@ -103,6 +104,29 @@ namespace TerraEngine::EditorTests
 #endif
 			return response;
 		}
+
+		constexpr std::array<std::string_view, 30> kLegacyToolNames = {
+			"activity.list",
+			"scene.open", "scene.save", "scene.list_objects",
+			"object.create", "object.delete", "object.select", "object.set_metadata", "object.set_parent",
+			"component.add", "component.remove", "component.get", "component.set_property",
+			"asset.list", "asset.import", "asset.virtualGeometry.settings.get", "asset.virtualGeometry.settings.set",
+			"asset.virtualGeometry.settings.reset", "asset.virtualGeometry.rebuild", "asset.virtualGeometry.inspect", "asset.prepare_delete",
+			"export.validate", "export.start", "export.cancel",
+			"game_view.capture", "camera.capture_object", "camera.capture_custom",
+			"renderer.virtualGeometry.stats", "renderer.recovery.safe_save_project", "diagnostics.get_summary"
+		};
+
+		constexpr std::array<std::string_view, 8> kLegacyResourceUris = {
+			"terraengine://bridge/status",
+			"terraengine://bridge/capabilities",
+			"terraengine://project/state",
+			"terraengine://scene/summary",
+			"terraengine://diagnostics/summary",
+			"terraengine://renderer/recovery",
+			"terraengine://capture/availability",
+			"terraengine://activity/recent"
+		};
 	}
 
 	void RegisterEditorMcpTransportTests(TestRegistry& registry)
@@ -179,6 +203,80 @@ namespace TerraEngine::EditorTests
 			context.Expect(!resources["result"]["resources"].empty(), "resources/list should return resource metadata.");
 			const nlohmann::json status = transport.HandleMessage({{"jsonrpc", "2.0"}, {"id", 4}, {"method", "resources/read"}, {"params", {{"uri", "terraengine://bridge/status"}}}});
 			context.Expect(status["result"].contains("contents"), "resources/read should return JSON text content.");
+		});
+
+		registry.Add("Editor.MCP.Transport.RoutesEveryLegacyResource", [](TestContext& context) {
+			EditorMcpBridge bridge;
+			bridge.Initialize(nullptr);
+			bridge.SetEnabled(true);
+			EditorMcpTransport transport(bridge);
+			context.Expect(transport.AcceptPeer("127.0.0.1", "legacy-resource-test"), "Local client should connect before reading legacy resources.");
+
+			for (std::size_t index = 0; index < kLegacyResourceUris.size(); ++index)
+			{
+				const std::string uri(kLegacyResourceUris[index]);
+				const nlohmann::json response = transport.HandleMessage({
+					{"jsonrpc", "2.0"},
+					{"id", 100 + index},
+					{"method", "resources/read"},
+					{"params", {{"uri", uri}}}
+				});
+				context.Expect(response.contains("result"), std::string("Legacy resource should keep its JSON-RPC route: ") + uri);
+				const nlohmann::json contents = response["result"].value("contents", nlohmann::json::array());
+				context.ExpectEqual(static_cast<std::size_t>(1), contents.size(), std::string("Legacy resource should keep one JSON text content item: ") + uri);
+				context.ExpectEqual(uri, contents[0].value("uri", std::string()), "Resource content should echo the requested legacy URI.");
+				context.ExpectEqual(std::string("application/json"), contents[0].value("mimeType", std::string()), "Legacy resources should remain JSON text.");
+				const nlohmann::json payload = nlohmann::json::parse(contents[0].value("text", std::string("null")), nullptr, false);
+				context.Expect(!payload.is_discarded(), std::string("Legacy resource text should remain valid JSON: ") + uri);
+			}
+			bridge.Shutdown();
+		});
+
+		registry.Add("Editor.MCP.Transport.RoutesEveryLegacyToolWithTextEnvelope", [](TestContext& context) {
+			EditorMcpBridge bridge;
+			bridge.Initialize(nullptr);
+			bridge.SetEnabled(true);
+			EditorMcpTransport transport(bridge);
+			context.Expect(transport.AcceptPeer("127.0.0.1", "legacy-tool-test"), "Local client should connect before calling legacy tools.");
+
+			std::jthread pump([&](std::stop_token stopToken) {
+				while (!stopToken.stop_requested())
+				{
+					bridge.Update(0.0f);
+					std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				}
+			});
+
+			for (std::size_t index = 0; index < kLegacyToolNames.size(); ++index)
+			{
+				const std::string name(kLegacyToolNames[index]);
+				nlohmann::json arguments = nlohmann::json::object();
+				// Invalid capture dimensions keep this compatibility test independent
+				// of a live renderer while still exercising the registered handler.
+				if (name == "game_view.capture")
+				{
+					arguments["width"] = 0;
+				}
+				const nlohmann::json response = transport.HandleMessage({
+					{"jsonrpc", "2.0"},
+					{"id", 200 + index},
+					{"method", "tools/call"},
+					{"params", {{"name", name}, {"arguments", arguments}}}
+				});
+				context.Expect(response.contains("result"), std::string("Legacy tool should keep its JSON-RPC route: ") + name);
+				const nlohmann::json content = response["result"].value("content", nlohmann::json::array());
+				context.Expect(!content.empty(), std::string("Legacy tool should return MCP content: ") + name);
+				context.ExpectEqual(std::string("text"), content[0].value("type", std::string()), "Legacy tool responses should retain the JSON text envelope first.");
+				const nlohmann::json envelope = nlohmann::json::parse(content[0].value("text", std::string("null")), nullptr, false);
+				context.Expect(!envelope.is_discarded(), std::string("Legacy tool text should remain valid JSON: ") + name);
+				const nlohmann::json error = envelope.value("error", nlohmann::json());
+				const std::string errorCategory = error.is_object() ? error.value("category", "") : std::string();
+				context.Expect(errorCategory != "unsupported_capability", std::string("Legacy tool should still resolve to a handler: ") + name);
+			}
+
+			pump.request_stop();
+			pump.join();
+			bridge.Shutdown();
 		});
 
 		registry.Add("Editor.MCP.Transport.CancellationNotificationCancelsQueuedRequest", [](TestContext& context) {

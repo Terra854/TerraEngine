@@ -685,6 +685,78 @@ namespace
 		return true;
 	}
 #endif
+	bool IsValidCSharpNamespace(const std::string& namespaceName)
+	{
+		if (namespaceName.empty() || namespaceName.front() == '.' || namespaceName.back() == '.')
+		{
+			return false;
+		}
+
+		std::size_t start = 0u;
+		while (start < namespaceName.size())
+		{
+			const std::size_t separator = namespaceName.find('.', start);
+			const std::size_t length = (separator == std::string::npos ? namespaceName.size() : separator) - start;
+			if (length == 0u || !IsValidCSharpIdentifier(namespaceName.substr(start, length)))
+			{
+				return false;
+			}
+			if (separator == std::string::npos)
+			{
+				break;
+			}
+			start = separator + 1u;
+		}
+		return true;
+	}
+
+	void SetScriptWorkspaceError(std::string* outError, const std::string& message)
+	{
+		if (outError != nullptr)
+		{
+			*outError = message;
+		}
+	}
+
+	std::filesystem::path CanonicalizeForContainment(const std::filesystem::path& path, std::error_code& error)
+	{
+		// weakly_canonical resolves every existing ancestor, including directory
+		// symlinks, while still accepting the not-yet-created script filename.
+		return std::filesystem::weakly_canonical(std::filesystem::absolute(path, error), error);
+	}
+
+	bool IsPathContainedBy(const std::filesystem::path& candidate, const std::filesystem::path& root)
+	{
+		std::error_code candidateError;
+		std::error_code rootError;
+		std::filesystem::path normalizedCandidate = CanonicalizeForContainment(candidate, candidateError);
+		std::filesystem::path normalizedRoot = CanonicalizeForContainment(root, rootError);
+		if (candidateError || rootError)
+		{
+			return false;
+		}
+
+#if defined(_WIN32)
+		std::wstring candidateText = normalizedCandidate.native();
+		std::wstring rootText = normalizedRoot.native();
+		std::transform(candidateText.begin(), candidateText.end(), candidateText.begin(), [](wchar_t value) { return static_cast<wchar_t>(std::towlower(value)); });
+		std::transform(rootText.begin(), rootText.end(), rootText.begin(), [](wchar_t value) { return static_cast<wchar_t>(std::towlower(value)); });
+		normalizedCandidate = candidateText;
+		normalizedRoot = rootText;
+#endif
+
+		auto rootPart = normalizedRoot.begin();
+		auto candidatePart = normalizedCandidate.begin();
+		for (; rootPart != normalizedRoot.end(); ++rootPart, ++candidatePart)
+		{
+			if (candidatePart == normalizedCandidate.end() || *candidatePart != *rootPart)
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
 }
 
 void ScriptWorkspaceService::SetProjectRoot(const std::filesystem::path& projectRoot)
@@ -807,63 +879,134 @@ bool ScriptWorkspaceService::RegenerateWorkspace(std::string* outError)
 	return EnsureWorkspace(outError);
 }
 
-// ScriptWorkspaceService::CreateScriptFromTemplate is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-bool ScriptWorkspaceService::CreateScriptFromTemplate(const std::filesystem::path& destinationDirectory, const std::string& className, std::filesystem::path& outCreatedPath, std::string* outError)
+std::vector<ScriptTemplateDescriptor> ScriptWorkspaceService::ListApprovedTemplates() const
 {
-	if (!IsValidCSharpIdentifier(className))
+	// The allowlist is intentionally compiled into the owning editor service.
+	// Adding a template therefore requires an editor change and cannot be
+	// redirected to an arbitrary client-selected file.
+	return {{"component", "Component", "Creates an attachable TerraEngine Script component."}};
+}
+
+bool ScriptWorkspaceService::CreateApprovedScript(const ScriptCreationRequest& request, ScriptCreationResult& outResult, std::string* outError)
+{
+	outResult = ScriptCreationResult{};
+	if (!HasProjectRoot())
 	{
-		const std::string message = "Script names must be valid C# identifiers that start with a letter or underscore.";
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (outError)
-		{
-			*outError = message;
-		}
+		SetScriptWorkspaceError(outError, "Open a project before creating a managed script.");
+		return false;
+	}
+	if (request.templateId != "component")
+	{
+		SetScriptWorkspaceError(outError, "The requested script template is not approved by this editor build.");
+		return false;
+	}
+	if (!IsValidCSharpIdentifier(request.typeName))
+	{
+		SetScriptWorkspaceError(outError, "Script type names must be valid C# identifiers that start with a letter or underscore.");
+		return false;
+	}
+	if (!request.namespaceName.empty() && !IsValidCSharpNamespace(request.namespaceName))
+	{
+		SetScriptWorkspaceError(outError, "Script namespaces must contain only dot-separated C# identifiers.");
+		return false;
+	}
+	if (request.destination.empty() || request.destination.is_absolute() || request.destination.has_root_name())
+	{
+		SetScriptWorkspaceError(outError, "Script destinations must be project-relative paths beneath Assets.");
+		return false;
+	}
+
+	const std::filesystem::path relativeDestination = request.destination.lexically_normal();
+	if (relativeDestination.empty() || relativeDestination.extension() != ".cs"
+		|| relativeDestination.filename() != request.typeName + ".cs")
+	{
+		SetScriptWorkspaceError(outError, "The script destination must be a .cs file named after the requested type.");
+		return false;
+	}
+	const std::filesystem::path assetRoot = m_ProjectRoot / "Assets";
+	const std::filesystem::path outputPath = (m_ProjectRoot / relativeDestination).lexically_normal();
+	if (!IsPathContainedBy(outputPath, assetRoot))
+	{
+		SetScriptWorkspaceError(outError, "The script destination escapes the project's Assets directory.");
+		return false;
+	}
+	if (std::filesystem::exists(outputPath))
+	{
+		SetScriptWorkspaceError(outError, "A script already exists at the requested destination.");
 		return false;
 	}
 
 	const std::filesystem::path templatePath = ResolveTemplateRoot() / "DefaultScript.cs.txt";
-	std::string templateText = LoadTemplate(templatePath);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (templateText.empty())
+	std::string source = LoadTemplate(templatePath);
+	if (source.empty())
 	{
-		const std::string message = "The default C# script template could not be found at " + templatePath.string() + ".";
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (outError)
+		SetScriptWorkspaceError(outError, "The approved component template is unavailable at " + templatePath.string() + ".");
+		return false;
+	}
+	ReplaceAll(source, "__SCRIPT_NAME__", request.typeName);
+	if (!request.namespaceName.empty())
+	{
+		// Keep the generated source readable by indenting every template line into
+		// the namespace body instead of emitting a dense one-line wrapper.
+		std::stringstream indented;
+		std::istringstream lines(source);
+		std::string line;
+		while (std::getline(lines, line))
 		{
-			*outError = message;
+			indented << '\t' << line << '\n';
+		}
+		source = "namespace " + request.namespaceName + "\n{\n" + indented.str() + "}\n";
+	}
+
+	std::error_code directoryError;
+	std::filesystem::create_directories(outputPath.parent_path(), directoryError);
+	if (directoryError)
+	{
+		SetScriptWorkspaceError(outError, "Failed to create the script destination directory: " + directoryError.message());
+		return false;
+	}
+	// Revalidate after directory creation so a concurrently introduced alias
+	// cannot redirect publication between preflight and the protected write.
+	if (!IsPathContainedBy(outputPath, assetRoot) || !WriteTextIfChanged(outputPath, source, outError))
+	{
+		if (outError != nullptr && outError->empty())
+		{
+			*outError = "The script destination changed during publication.";
 		}
 		return false;
 	}
 
-	std::filesystem::path outputDirectory = destinationDirectory.empty() ? (m_ProjectRoot / "Assets") : destinationDirectory;
-	outputDirectory = std::filesystem::absolute(outputDirectory).lexically_normal();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!std::filesystem::exists(outputDirectory))
-	{
-		std::filesystem::create_directories(outputDirectory);
-	}
+	outResult.projectRelativePath = relativeDestination;
+	outResult.absolutePath = outputPath;
+	outResult.qualifiedTypeName = request.namespaceName.empty() ? request.typeName : request.namespaceName + "." + request.typeName;
+	return true;
+}
 
-	const std::filesystem::path outputPath = outputDirectory / (className + ".cs");
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (std::filesystem::exists(outputPath))
+bool ScriptWorkspaceService::SynchronizeWorkspace(ScriptWorkspaceStatus& outStatus, std::string* outError)
+{
+	const bool synchronized = EnsureWorkspace(outError);
+	outStatus = m_Status;
+	return synchronized;
+}
+
+// ScriptWorkspaceService::CreateScriptFromTemplate is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+bool ScriptWorkspaceService::CreateScriptFromTemplate(const std::filesystem::path& destinationDirectory, const std::string& className, std::filesystem::path& outCreatedPath, std::string* outError)
+{
+	const std::filesystem::path directory = destinationDirectory.empty() ? (m_ProjectRoot / "Assets") : destinationDirectory;
+	std::error_code relativeError;
+	const std::filesystem::path relativeDirectory = std::filesystem::relative(directory, m_ProjectRoot, relativeError);
+	if (relativeError)
 	{
-		const std::string message = "A C# script named " + outputPath.filename().string() + " already exists in this folder.";
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (outError)
-		{
-			*outError = message;
-		}
+		SetScriptWorkspaceError(outError, "The script destination could not be resolved relative to the active project.");
 		return false;
 	}
 
-	ReplaceAll(templateText, "__SCRIPT_NAME__", className);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!WriteTextIfChanged(outputPath, templateText, outError))
+	ScriptCreationResult result;
+	if (!CreateApprovedScript({"component", className, {}, relativeDirectory / (className + ".cs")}, result, outError))
 	{
 		return false;
 	}
-
-	outCreatedPath = outputPath;
+	outCreatedPath = result.absolutePath;
 	return true;
 }
 
@@ -1083,6 +1226,17 @@ bool ScriptWorkspaceService::WriteTextIfChanged(const std::filesystem::path& pat
 // ScriptWorkspaceService::ResolveTemplateRoot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::filesystem::path ScriptWorkspaceService::ResolveTemplateRoot() const
 {
+	// Test and developer targets may run far below the repository root. When
+	// CMake supplies the source root, prefer the same committed templates that
+	// are later copied into the installed editor tree.
+#ifdef TERRAENGINE_SOURCE_DIR
+	const std::filesystem::path sourceTemplates = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+		/ "Editor" / "TerraEngine-Editor" / "Project" / "Templates";
+	if (std::filesystem::exists(sourceTemplates / "DefaultScript.cs.txt"))
+	{
+		return sourceTemplates;
+	}
+#endif
 	std::filesystem::path editorDir;
 #ifdef _WIN32
 	wchar_t path[MAX_PATH];

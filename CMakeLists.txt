@@ -961,8 +961,20 @@ add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Core/CheckedImGuiVulkanBridge.cpp
 	Editor/TerraEngine-Editor/Core/ViewportTextureRegistry.cpp
 	Editor/TerraEngine-Editor/Automation/EditorAutomationService.cpp
+	Editor/TerraEngine-Editor/Automation/EditorAutomationRegistry.cpp
+	Editor/TerraEngine-Editor/Automation/EditorAutomationTransaction.cpp
+	Editor/TerraEngine-Editor/Automation/EditorAutomationJobService.cpp
+	Editor/TerraEngine-Editor/Automation/EditorAutomationLogStore.cpp
+	Editor/TerraEngine-Editor/Automation/EditorAutomationIdempotencyStore.cpp
 	Editor/TerraEngine-Editor/Automation/EditorMcpBridge.cpp
 	Editor/TerraEngine-Editor/Automation/EditorMcpTransport.cpp
+	Editor/TerraEngine-Editor/Automation/Providers/AutomationProvider.cpp
+	Editor/TerraEngine-Editor/Automation/Providers/ProjectSceneAutomationProvider.cpp
+	Editor/TerraEngine-Editor/Automation/Providers/AssetPrefabAutomationProvider.cpp
+	Editor/TerraEngine-Editor/Automation/Providers/ScriptBuildAutomationProvider.cpp
+	Editor/TerraEngine-Editor/Automation/Providers/EditorDiagnosticsAutomationProvider.cpp
+	Editor/TerraEngine-Editor/Automation/Providers/HistoryPlayModeAutomationProvider.cpp
+	Editor/TerraEngine-Editor/Automation/Providers/AuthoringAutomationProvider.cpp
 	Editor/TerraEngine-Editor/Subsystems/ProjectHubSubsystem.cpp
 	Editor/TerraEngine-Editor/Subsystems/MainEditorSubsystem.cpp
 	Editor/TerraEngine-Editor/Subsystems/PrefabAuthoringSubsystem.cpp
@@ -1537,6 +1549,7 @@ endif()
 		"${CMAKE_CURRENT_SOURCE_DIR}/Docs/Renderer/VirtualGeometry.md"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Docs/TerraEngineMeshFile.md"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Docs/Testing.md"
+		"${CMAKE_CURRENT_SOURCE_DIR}/Docs/EditorMcpBridge.md"
 		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Docs"
 	)
 	install(FILES

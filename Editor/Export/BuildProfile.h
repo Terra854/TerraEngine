@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -124,6 +125,35 @@ BuildProfile LoadBuildProfile(const std::filesystem::path& path);
 /// Load all profiles from a directory (e.g. <ProjectRoot>/BuildProfiles/).
 std::vector<BuildProfile> LoadAllBuildProfiles(const std::filesystem::path& directory);
 
+/// Returns the export platform that can be NativeAOT-published on the current host.
+ExportPlatform GetHostExportPlatform();
+
+// Build-profile collection operations live beside profile persistence so the
+// editor window, MCP bridge, and headless tools all apply the same identity and
+// validation rules. Draft creation does not write files; Save and Remove are
+// the explicit persistence boundaries.
+struct BuildProfileCollectionResult {
+	bool succeeded = false;
+	std::string error;
+	std::optional<BuildProfile> profile;
+};
+
+BuildProfileCollectionResult CreateBuildProfileDraft(
+	std::string name,
+	ExportPlatform platform = GetHostExportPlatform());
+BuildProfileCollectionResult DuplicateBuildProfileDraft(
+	const BuildProfile& source,
+	std::string name = {});
+BuildProfileCollectionResult FindBuildProfileInCollection(
+	const std::filesystem::path& directory,
+	std::string_view selector);
+BuildProfileCollectionResult SaveBuildProfileToCollection(
+	const std::filesystem::path& directory,
+	BuildProfile profile);
+BuildProfileCollectionResult RemoveBuildProfileFromCollection(
+	const std::filesystem::path& directory,
+	std::string_view profileId);
+
 /// Converts an export platform to the stable lowercase string stored in JSON.
 std::string ExportPlatformToString(ExportPlatform platform);
 
@@ -132,9 +162,6 @@ ExportPlatform ExportPlatformFromString(const std::string& value);
 
 /// Returns the .NET runtime identifier used when publishing managed export payloads.
 std::string GetExportRuntimeIdentifier(ExportPlatform platform);
-
-/// Returns the export platform that can be NativeAOT-published on the current host.
-ExportPlatform GetHostExportPlatform();
 
 /// Returns true when the selected export platform can be NativeAOT-published on this host OS.
 bool IsExportPlatformNativeToHost(ExportPlatform platform);

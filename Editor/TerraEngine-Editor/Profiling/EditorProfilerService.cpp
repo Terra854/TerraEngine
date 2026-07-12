@@ -10,6 +10,10 @@
 #include "Engine/ThreadPool/ThreadPool.h"
 
 #include <future>
+#include <algorithm>
+#include <iomanip>
+#include <numeric>
+#include <sstream>
 
 using TerraEngine::Profiling::Profiler;
 using TerraEngine::Profiling::ProfilerCaptureDocument;
@@ -378,6 +382,122 @@ std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> EditorProfilerServi
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	return captures;
+}
+
+std::vector<EditorProfilerCaptureArtifact> EditorProfilerService::GetAutomationCaptureList() const
+{
+	std::lock_guard<std::mutex> lock(mutex);
+	std::vector<EditorProfilerCaptureArtifact> result;
+	result.reserve(captures.size());
+	for (const auto& capture : captures)
+	{
+		result.push_back({MakeArtifactId(capture.fileName), capture});
+	}
+	return result;
+}
+
+bool EditorProfilerService::ReadCaptureDocumentById(
+	std::string_view artifactId,
+	ProfilerCaptureDocument& outDocument,
+	std::string& outError) const
+{
+	ProfilerCaptureStore storeSnapshot;
+	std::optional<std::filesystem::path> capturePath;
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		capturePath = FindCapturePathLocked(artifactId);
+		storeSnapshot = captureStore;
+	}
+	if (!capturePath)
+	{
+		outError = "Profiler artifact identifier is stale or unknown for the active project.";
+		return false;
+	}
+	// The store revalidates project containment immediately before reading, so a
+	// stale list entry cannot be redirected outside the project's Profiler folder.
+	return storeSnapshot.LoadCapture(*capturePath, outDocument, outError);
+}
+
+bool EditorProfilerService::RequestLoadCaptureById(std::string_view artifactId, std::string& outError)
+{
+	std::optional<std::filesystem::path> capturePath;
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		capturePath = FindCapturePathLocked(artifactId);
+	}
+	if (!capturePath)
+	{
+		outError = "Profiler artifact identifier is stale or unknown for the active project.";
+		return false;
+	}
+	LoadCapture(*capturePath);
+	outError.clear();
+	return true;
+}
+
+bool EditorProfilerService::SummarizeCaptureById(
+	std::string_view artifactId,
+	EditorProfilerCaptureSummary& outSummary,
+	std::string& outError) const
+{
+	ProfilerCaptureDocument document;
+	if (!ReadCaptureDocumentById(artifactId, document, outError))
+		return false;
+	outSummary = SummarizeDocument(std::string(artifactId), document);
+	outError.clear();
+	return true;
+}
+
+EditorProfilerCaptureSummary EditorProfilerService::SummarizeDocument(
+	std::string artifactId,
+	const ProfilerCaptureDocument& document)
+{
+	EditorProfilerCaptureSummary summary;
+	summary.artifactId = std::move(artifactId);
+	summary.frameCount = document.frames.size();
+	if (document.frames.empty())
+		return summary;
+
+	summary.minimumFrameMs = document.frames.front().durationMs;
+	for (const auto& frame : document.frames)
+	{
+		summary.totalDurationMs += frame.durationMs;
+		summary.minimumFrameMs = std::min(summary.minimumFrameMs, frame.durationMs);
+		summary.maximumFrameMs = std::max(summary.maximumFrameMs, frame.durationMs);
+		if (frame.complete)
+			++summary.completeFrameCount;
+		else
+			++summary.incompleteFrameCount;
+	}
+	summary.averageFrameMs = summary.totalDurationMs / static_cast<double>(summary.frameCount);
+	summary.timingStreams = TerraEngine::Profiling::BuildTimingStreamAggregates(document.frames);
+	return summary;
+}
+
+std::string EditorProfilerService::MakeArtifactId(std::string_view fileName)
+{
+	// FNV-1a produces a stable opaque identifier from the project-owned filename.
+	// It is an identity token, not a security primitive; containment is still
+	// revalidated by ProfilerCaptureStore before every read.
+	std::uint64_t hash = 14695981039346656037ull;
+	for (const unsigned char character : fileName)
+	{
+		hash ^= character;
+		hash *= 1099511628211ull;
+	}
+	std::ostringstream stream;
+	stream << "profiler-" << std::hex << std::setw(16) << std::setfill('0') << hash;
+	return stream.str();
+}
+
+std::optional<std::filesystem::path> EditorProfilerService::FindCapturePathLocked(std::string_view artifactId) const
+{
+	for (const auto& capture : captures)
+	{
+		if (MakeArtifactId(capture.fileName) == artifactId)
+			return capture.absolutePath;
+	}
+	return std::nullopt;
 }
 
 // EditorProfilerService::HasActiveProject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

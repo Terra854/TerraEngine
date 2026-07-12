@@ -6,6 +6,7 @@
 
 #include "IEditorSubsystem.h"
 #include <deque>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -23,6 +24,7 @@ struct ICommand {
 	virtual void Undo() = 0;
 	virtual void Redo() = 0;
 	virtual std::string GetName() const = 0;
+	virtual std::string GetHistoryId() const { return {}; }
 };
 
 // Records the creation of a new object. Undo destroys the entity, while Redo
@@ -177,7 +179,7 @@ public:
 	// Adds a new action to the history. This clears any currently available 
 	// redo steps and marks the active scene as dirty.
 	void PushCommand(std::unique_ptr<ICommand> command);
-	void PushTransactionGroup(std::string groupName, std::vector<std::unique_ptr<ICommand>> commands);
+	void PushTransactionGroup(std::string groupName, std::vector<std::unique_ptr<ICommand>> commands, std::string historyId = {});
 	
 	// Reverses the most recent command on the undo stack and moves it to the 
 	// redo stack.
@@ -189,6 +191,13 @@ public:
 	
 	bool CanUndo() const;
 	bool CanRedo() const;
+	std::size_t GetUndoDepth() const;
+	std::size_t GetRedoDepth() const;
+	std::string GetUndoLabel() const;
+	std::string GetRedoLabel() const;
+	std::string GetUndoHistoryId() const;
+	std::string GetRedoHistoryId() const;
+	std::uint64_t GetSequence() const;
 
 	// Marks the current point in history as the 'Saved' state.
 	void SetSavePoint();
@@ -207,6 +216,7 @@ private:
 	ICommand* m_SavedCommand = nullptr;
 	// Tracks if the saved state is currently reachable (not pruned by MaxHistory).
 	bool m_SavedStateIsReachable = true;
+	std::uint64_t historySequence = 0u;
 
 	// Limits history depth to prevent unbounded memory growth during long 
 	// editing sessions.

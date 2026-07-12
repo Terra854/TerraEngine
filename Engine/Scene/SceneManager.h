@@ -103,6 +103,14 @@ public:
 	// is omitted, the document's original source location is overwritten. This 
 	// triggers a dirty flag reset upon successful write.
 	bool SaveScene(std::optional<std::filesystem::path> path = std::nullopt);
+	// Editor automation uses these filesystem-only helpers during preflight and
+	// protected lifecycle commits. Callers must pass canonical project-contained
+	// paths; the manager preserves source files unless the requested operation is
+	// explicitly a rename.
+	std::vector<std::filesystem::path> ListSceneFiles(const std::filesystem::path& projectRoot) const;
+	bool CreateSceneFile(const std::filesystem::path& path, std::string_view name, std::string* outError = nullptr);
+	bool DuplicateSceneFile(const std::filesystem::path& source, const std::filesystem::path& destination, std::string* outError = nullptr);
+	bool RenameSceneFile(const std::filesystem::path& source, const std::filesystem::path& destination, std::string* outError = nullptr);
 
 	// Scene render settings now cover only non-sky scene metadata. Sky authoring
 	// lives on SkyComponent and is resolved from the active object graph.

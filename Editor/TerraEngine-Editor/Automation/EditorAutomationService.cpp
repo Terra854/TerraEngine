@@ -5,17 +5,31 @@
 // editor validation/action work against TerraEngine's existing systems.
 
 #include "EditorAutomationService.h"
+#include "EditorAutomationTransaction.h"
+
+#include "Providers/AssetPrefabAutomationProvider.h"
+#include "Providers/AuthoringAutomationProvider.h"
+#include "Providers/EditorDiagnosticsAutomationProvider.h"
+#include "Providers/HistoryPlayModeAutomationProvider.h"
+#include "Providers/ProjectSceneAutomationProvider.h"
+#include "Providers/ScriptBuildAutomationProvider.h"
 
 #include "../Assets/AssetImportResult.h"
 #include "../Assets/AssetDatabase.h"
 #include "../Core/EditorContext.h"
 #include "../Project/ProjectManager.h"
 #include "../Subsystems/UndoRedoSystem.h"
+#include "../Subsystems/MainEditorSubsystem.h"
+#include "../Subsystems/ScriptCompilationSubsystem.h"
+#include "../Windows/SceneViewWindow.h"
 #include "../Windows/SceneViewOverlayTypes.h"
+#include "../Profiling/EditorProfilerService.h"
 #include "../../Export/BuildProfile.h"
+#include "../../Export/ExportPipeline.h"
 #include "../../Export/ExportValidator.h"
 #include "../../AssetCompilers/ModelPackageImporter.h"
 #include "Engine/Core/MainEngine.h"
+#include "Engine/Core/Logger/Logger.h"
 #include "Engine/Core/Object/Component.h"
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Components/CameraComponent.h"
@@ -30,8 +44,10 @@
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Scripting/ScriptingSystem.h"
 #include "Utilities/UUID.h"
+#include "ThreadPool/ThreadPool.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <filesystem>
@@ -39,8 +55,10 @@
 #include <map>
 #include <mutex>
 #include <fstream>
+#include <initializer_list>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <chrono>
 #include <unordered_set>
 #include <glm/ext/matrix_clip_space.hpp>
@@ -48,10 +66,78 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 
+#ifdef _WIN32
+	#ifndef NOMINMAX
+		#define NOMINMAX
+	#endif
+	#define WIN32_LEAN_AND_MEAN
+	#include <Windows.h>
+#elif defined(__linux__)
+	#include <unistd.h>
+#endif
+
 namespace TerraEngine::Editor::Automation
 {
 	namespace
 	{
+		using AutomationOperationId = std::uint64_t;
+
+		constexpr AutomationOperationId AutomationOperation(std::string_view name)
+		{
+			// FNV-1a provides a stable process-independent operation token. Provider
+			// registration checks collisions before any handler becomes discoverable.
+			AutomationOperationId hash = 14695981039346656037ull;
+			for (const unsigned char character : name)
+			{
+				hash ^= character;
+				hash *= 1099511628211ull;
+			}
+			return hash;
+		}
+
+		bool IsOperationOneOf(AutomationOperationId operation, std::initializer_list<AutomationOperationId> candidates)
+		{
+			return std::find(candidates.begin(), candidates.end(), operation) != candidates.end();
+		}
+
+		std::filesystem::path ResolveAutomationEditorExecutable()
+		{
+			// Export runtime discovery is based on the installed executable rather
+			// than the process working directory, which may be the user's project.
+#ifdef _WIN32
+			std::wstring buffer(32768, L'\0');
+			const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+			if (length > 0 && length < buffer.size())
+			{
+				buffer.resize(length);
+				return std::filesystem::path(buffer);
+			}
+#elif defined(__linux__)
+			std::array<char, 4096> buffer{};
+			const ssize_t length = readlink("/proc/self/exe", buffer.data(), buffer.size() - 1);
+			if (length > 0)
+				return std::filesystem::path(std::string(buffer.data(), static_cast<std::size_t>(length)));
+#endif
+			return std::filesystem::absolute("TerraEngine-Editor");
+		}
+
+		std::string GenerateAutomationExportRunId()
+		{
+			const auto ticks = std::chrono::duration_cast<std::chrono::microseconds>(
+				std::chrono::system_clock::now().time_since_epoch()).count();
+			return "mcp-editor-" + std::to_string(ticks);
+		}
+
+		AutomationLogSeverity ExportAutomationSeverity(ExportDiagnosticSeverity severity)
+		{
+			switch (severity)
+			{
+			case ExportDiagnosticSeverity::Warning: return AutomationLogSeverity::Warning;
+			case ExportDiagnosticSeverity::Error: return AutomationLogSeverity::Error;
+			default: return AutomationLogSeverity::Info;
+			}
+		}
+
 		std::string EntityToString(entt::entity entity)
 		{
 			return std::to_string(static_cast<std::uint32_t>(entity));
@@ -114,6 +200,94 @@ namespace TerraEngine::Editor::Automation
 		{
 			std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 			return value;
+		}
+
+		bool IsManagedQualifiedName(std::string_view value, bool allowDots)
+		{
+			if (value.empty()) return false;
+			bool segmentStart = true;
+			for (unsigned char character : value)
+			{
+				if (allowDots && character == '.')
+				{
+					if (segmentStart) return false;
+					segmentStart = true;
+					continue;
+				}
+				if (segmentStart ? !(std::isalpha(character) || character == '_') : !(std::isalnum(character) || character == '_')) return false;
+				segmentStart = false;
+			}
+			return !segmentStart;
+		}
+
+		std::string StableFingerprint(std::string_view value)
+		{
+			std::uint64_t hash = 1469598103934665603ull;
+			for (unsigned char byte : value) { hash ^= byte; hash *= 1099511628211ull; }
+			std::ostringstream stream;
+			stream << std::hex << hash;
+			return stream.str();
+		}
+
+		std::string ValidateRequiredSchemaFields(const nlohmann::json& arguments, const nlohmann::json& schema)
+		{
+			if (!arguments.is_object()) return "Tool arguments must be a JSON object.";
+			if (!schema.is_object() || !schema.contains("required") || !schema["required"].is_array()) return {};
+			for (const nlohmann::json& required : schema["required"])
+			{
+				if (required.is_string() && !arguments.contains(required.get<std::string>())) return "Missing required argument: " + required.get<std::string>();
+			}
+			return {};
+		}
+
+		const char* PermissionJson(AutomationPermission permission)
+		{
+			switch (permission)
+			{
+			case AutomationPermission::Read: return "read";
+			case AutomationPermission::ProjectWrite: return "project_write";
+			case AutomationPermission::GlobalWrite: return "global_write";
+			}
+			return "read";
+		}
+
+		const char* ApprovalPolicyJson(AutomationApprovalPolicy policy)
+		{
+			switch (policy)
+			{
+			case AutomationApprovalPolicy::None: return "none";
+			case AutomationApprovalPolicy::Destructive: return "destructive";
+			case AutomationApprovalPolicy::HighImpact: return "high_impact";
+			}
+			return "none";
+		}
+
+		const char* JobStateJson(AutomationJobState state)
+		{
+			switch (state)
+			{
+			case AutomationJobState::Queued: return "queued";
+			case AutomationJobState::Preparing: return "preparing";
+			case AutomationJobState::Running: return "running";
+			case AutomationJobState::CancelRequested: return "cancel_requested";
+			case AutomationJobState::Succeeded: return "succeeded";
+			case AutomationJobState::Failed: return "failed";
+			case AutomationJobState::Canceled: return "canceled";
+			}
+			return "failed";
+		}
+
+		nlohmann::json SerializeAutomationJob(const AutomationJobSnapshot& job)
+		{
+			nlohmann::json artifacts = nlohmann::json::array();
+			for (const AutomationArtifact& artifact : job.artifacts)
+				artifacts.push_back({{"artifactId", artifact.artifactId}, {"kind", artifact.kind}, {"displayPath", artifact.displayPath}, {"mimeType", artifact.mimeType}, {"metadata", artifact.metadata}});
+			nlohmann::json diagnostics = nlohmann::json::array();
+			for (const AutomationJobDiagnostic& diagnostic : job.diagnostics)
+				diagnostics.push_back({{"category", diagnostic.category}, {"message", diagnostic.message}, {"details", diagnostic.details}});
+			return {{"jobId", job.jobId}, {"kind", job.kind}, {"capability", job.capability}, {"requestId", job.requestId},
+				{"correlationId", job.correlationId}, {"state", JobStateJson(job.state)}, {"progress", job.progress}, {"stage", job.stage},
+				{"cancellable", job.cancellable}, {"cancelRequested", job.cancelRequested}, {"artifacts", artifacts}, {"diagnostics", diagnostics}, {"result", job.result}};
 		}
 
 		const char* CaptureSourceKindJson(TerraEngine::Renderer::RenderCaptureSourceKind sourceKind)
@@ -1123,6 +1297,7 @@ namespace TerraEngine::Editor::Automation
 		{
 			case ErrorCategory::Validation: return "validation";
 			case ErrorCategory::Permission: return "permission";
+			case ErrorCategory::ApprovalRequired: return "approval_required";
 			case ErrorCategory::MissingTarget: return "missing_target";
 			case ErrorCategory::InvalidCameraObject: return "invalid_camera_object";
 			case ErrorCategory::UnsupportedCapability: return "unsupported_capability";
@@ -1130,9 +1305,12 @@ namespace TerraEngine::Editor::Automation
 			case ErrorCategory::QueueFull: return "queue_full";
 			case ErrorCategory::OverBudget: return "over_budget";
 			case ErrorCategory::Conflict: return "conflict";
+			case ErrorCategory::StaleTarget: return "stale_target";
+			case ErrorCategory::Unavailable: return "unavailable";
 			case ErrorCategory::Transport: return "transport";
 			case ErrorCategory::Internal: return "internal";
 			case ErrorCategory::Canceled: return "canceled";
+			case ErrorCategory::Timeout: return "timeout";
 		}
 		return "internal";
 	}
@@ -1169,12 +1347,53 @@ namespace TerraEngine::Editor::Automation
 
 	EditorAutomationService::EditorAutomationService()
 	{
+		const AutomationHandlerResolver resolveHandler = [this](std::string_view name) {
+			// Bind the stable operation name once during provider registration. The
+			// registry thereafter calls this typed handler directly, so adding a new
+			// provider never extends the request-time dispatch path.
+			const AutomationOperationId operation = AutomationOperation(name);
+			const std::string operationName(name);
+			const auto [existing, inserted] = boundProviderOperationNames.emplace(operation, operationName);
+			if (!inserted && existing->second != operationName)
+			{
+				throw std::logic_error("Automation provider operation ID collision between " + existing->second + " and " + operationName + ".");
+			}
+			return AutomationHandler{[this, operation, operationName](const AutomationRequestContext& request) {
+				const WriteMode mode = request.grantedPermission == AutomationPermission::Read
+					? WriteMode::ReadOnly
+					: WriteMode::WritesEnabled;
+				nlohmann::json response = ExecuteProviderHandler(operation, operationName, request.arguments, mode, request.requestId);
+				AutomationDispatchResult result;
+				result.ok = response.value("ok", false);
+				result.error = ErrorCategory::Internal;
+				result.message = response.value("message", std::string{});
+				result.data = std::move(response);
+				return result;
+			}};
+		};
+
+		// Registration is all-or-nothing per provider. Constructor-time failures
+		// leave the corresponding tools undiscoverable instead of publishing
+		// metadata without executable handlers.
+		(void)capabilityRegistry.RegisterProvider(std::make_shared<ProjectSceneAutomationProvider>(resolveHandler));
+		(void)capabilityRegistry.RegisterProvider(std::make_shared<AssetPrefabAutomationProvider>(resolveHandler));
+		(void)capabilityRegistry.RegisterProvider(std::make_shared<ScriptBuildAutomationProvider>(resolveHandler));
+		(void)capabilityRegistry.RegisterProvider(std::make_shared<EditorDiagnosticsAutomationProvider>(resolveHandler));
+		(void)capabilityRegistry.RegisterProvider(std::make_shared<HistoryPlayModeAutomationProvider>(resolveHandler));
+		(void)capabilityRegistry.RegisterProvider(std::make_shared<AuthoringAutomationProvider>(resolveHandler));
 		RegisterDefaultCapabilities();
 	}
 
 	void EditorAutomationService::SetEditorContext(EditorContext* context)
 	{
 		editorContext = context;
+	}
+
+	void EditorAutomationService::SetMainEditor(MainEditorSubsystem* editor)
+	{
+		// The bridge owns no windows. It receives this non-owning editor pointer so
+		// semantic automation always reaches the same Scene View the user sees.
+		mainEditor = editor;
 	}
 
 	void EditorAutomationService::SetSelectionCallbacks(std::function<std::optional<entt::entity>()> getter, std::function<void(std::optional<entt::entity>)> setter)
@@ -1210,6 +1429,27 @@ namespace TerraEngine::Editor::Automation
 		{
 			return;
 		}
+		if (capabilityRegistry.CapabilityCount() > 0u)
+		{
+			// Compatibility callers still consume AssistantCapability, but the
+			// provider registry is now the only built-in source of tool identity and
+			// policy. Do not maintain a second central capability list in parallel.
+			for (const AutomationCapabilitySnapshot& snapshot : capabilityRegistry.Snapshot())
+			{
+				const AutomationCapabilityDescriptor& descriptor = snapshot.descriptor;
+				AssistantCapability capability;
+				capability.name = descriptor.name;
+				capability.category = descriptor.category;
+				capability.mutationMode = descriptor.mutationMode;
+				capability.mutatesState = descriptor.mutationMode != MutationMode::ReadOnly;
+				capability.requiresProject = descriptor.availability.requiresProject;
+				capability.requiresScene = descriptor.availability.requiresScene;
+				capability.requiresApproval = descriptor.approvalPolicy != AutomationApprovalPolicy::None;
+				capability.inputSummary = descriptor.description;
+				(void)RegisterCapability(capability);
+			}
+			return;
+		}
 
 		const auto add = [this](std::string name, std::string category, MutationMode mode, bool requiresProject, bool requiresScene, bool requiresApproval, std::string inputSummary) {
 			AssistantCapability capability;
@@ -1228,6 +1468,60 @@ namespace TerraEngine::Editor::Automation
 		// clients may inspect status and activity, but they cannot grant or
 		// revoke their own write permissions.
 		add("activity.list", "activity", MutationMode::ReadOnly, false, false, false, "limit?: integer, filter?: string");
+		add("project.templates.list", "project", MutationMode::ReadOnly, false, false, false, "no arguments");
+		add("project.state", "project", MutationMode::ReadOnly, false, false, false, "no arguments");
+		add("scene.list", "scene", MutationMode::ReadOnly, true, false, false, "no arguments");
+		add("scene.create", "scene", MutationMode::SceneMutation, true, false, false, "path: project-relative .tescene, name?: string, open?: bool");
+		add("scene.save_as", "scene", MutationMode::SceneMutation, true, true, false, "path: project-relative .tescene");
+		add("scene.rename", "scene", MutationMode::SceneMutation, true, false, true, "source/destination: project-relative .tescene paths");
+		add("scene.duplicate", "scene", MutationMode::SceneMutation, true, false, false, "source/destination: project-relative .tescene paths");
+		add("scene.prepare_delete", "scene", MutationMode::Destructive, true, false, true, "path: project-relative .tescene");
+		add("transaction.execute", "transaction", MutationMode::SceneMutation, true, true, false, "operations: typed array, expectedSceneGeneration?: integer, label?: string");
+		add("history.state", "history", MutationMode::ReadOnly, true, true, false, "no arguments");
+		add("history.undo", "history", MutationMode::SceneMutation, true, true, false, "expectedSequence: integer");
+		add("history.redo", "history", MutationMode::SceneMutation, true, true, false, "expectedSequence: integer");
+		add("play.state", "play", MutationMode::ReadOnly, false, false, false, "no arguments");
+		add("play.enter", "play", MutationMode::ProjectMutation, false, false, false, "expectedState: stopped");
+		add("play.pause", "play", MutationMode::ProjectMutation, false, false, false, "expectedState: playing");
+		add("play.resume", "play", MutationMode::ProjectMutation, false, false, false, "expectedState: paused");
+		add("play.step", "play", MutationMode::ProjectMutation, false, false, false, "expectedState: paused");
+		add("play.exit", "play", MutationMode::ProjectMutation, false, false, false, "expectedState: playing|paused");
+		add("jobs.list", "jobs", MutationMode::ReadOnly, false, false, false, "limit?: integer");
+		add("jobs.get", "jobs", MutationMode::ReadOnly, false, false, false, "jobId: string");
+		add("jobs.cancel", "jobs", MutationMode::ProjectMutation, false, false, false, "jobId: string");
+		add("logs.query", "logs", MutationMode::ReadOnly, false, false, false, "severity/category/source/text/correlationId/requestId/jobId/cursor/pageSize");
+		add("asset.inspect", "asset", MutationMode::ReadOnly, true, false, false, "asset, operation, destination");
+		add("asset.move", "asset", MutationMode::AssetMutation, true, false, false, "source, destination");
+		add("asset.rename", "asset", MutationMode::AssetMutation, true, false, false, "asset, name|destination");
+		add("asset.duplicate", "asset", MutationMode::AssetMutation, true, false, false, "source, destination");
+		add("prefab.create", "prefab", MutationMode::AssetMutation, true, true, false, "object, path");
+		add("prefab.instantiate", "prefab", MutationMode::SceneMutation, true, true, false, "prefab, name?");
+		add("prefab.overrides.inspect", "prefab", MutationMode::ReadOnly, true, true, false, "instance");
+		add("prefab.overrides.apply", "prefab", MutationMode::AssetMutation, true, true, false, "instance, expectedPrefabGeneration");
+		add("prefab.overrides.revert", "prefab", MutationMode::SceneMutation, true, true, false, "instance");
+		add("prefab.edit.open", "prefab", MutationMode::ProjectMutation, true, false, false, "prefab, dirtyPolicy");
+		add("prefab.edit.close", "prefab", MutationMode::ProjectMutation, true, false, false, "contextId, dirtyPolicy");
+		add("script.templates.list", "script", MutationMode::ReadOnly, true, false, false, "no arguments");
+		add("script.create", "script", MutationMode::AssetMutation, true, false, false, "template, typeName, namespace?, destination");
+		add("script.types.list", "script", MutationMode::ReadOnly, true, false, false, "no arguments");
+		add("script.workspace.sync", "script", MutationMode::ProjectMutation, true, false, false, "no arguments");
+		add("script.compile", "script", MutationMode::ProjectMutation, true, false, false, "profile?, correlationId?");
+		add("build_profile.list", "build_profile", MutationMode::ReadOnly, true, false, false, "no arguments");
+		add("build_profile.get", "build_profile", MutationMode::ReadOnly, true, false, false, "profileId");
+		add("build_profile.create", "build_profile", MutationMode::ProjectMutation, true, false, false, "name");
+		add("build_profile.update", "build_profile", MutationMode::ProjectMutation, true, false, false, "profileId, changes");
+		add("build_profile.duplicate", "build_profile", MutationMode::ProjectMutation, true, false, false, "profileId, name");
+		add("build_profile.prepare_delete", "build_profile", MutationMode::Destructive, true, false, true, "profileId");
+		add("settings.project.get", "settings", MutationMode::ReadOnly, true, false, false, "key");
+		add("settings.project.set", "settings", MutationMode::ProjectMutation, true, false, false, "key, value");
+		add("settings.editor.get", "settings", MutationMode::ReadOnly, false, false, false, "key");
+		add("settings.editor.set", "settings", MutationMode::ProjectMutation, false, false, true, "key, value");
+		for (const std::string& name : {"scene_view.state", "scene_view.camera.set", "scene_view.frame_object", "scene_view.tool.set", "scene_view.orientation.set", "scene_view.snapping.set", "scene_view.visualization.set"})
+			add(name, "scene_view", name == "scene_view.state" ? MutationMode::ReadOnly : MutationMode::EditorSelection, false, false, false, "semantic Scene View arguments");
+		for (const std::string& name : {"profiler.capture.start", "profiler.capture.stop", "profiler.capture.list", "profiler.capture.load", "profiler.capture.summary"})
+			add(name, "profiler", name.ends_with("list") || name.ends_with("summary") ? MutationMode::ReadOnly : MutationMode::ProjectMutation, true, false, false, "artifactId?");
+		add("editor.commands.list", "editor_commands", MutationMode::ReadOnly, false, false, false, "no arguments");
+		add("editor.commands.invoke", "editor_commands", MutationMode::ProjectMutation, false, false, false, "commandId");
 		add("scene.open", "scene", MutationMode::SceneMutation, true, false, true, "path: project-relative scene path");
 		add("scene.save", "scene", MutationMode::SceneMutation, true, true, false, "path?: project-relative scene path");
 		add("scene.list_objects", "scene", MutationMode::ReadOnly, false, false, false, "includeComponents?: bool, search?: string");
@@ -1295,12 +1589,94 @@ namespace TerraEngine::Editor::Automation
 
 	nlohmann::json EditorAutomationService::HandleTool(std::string_view name, const nlohmann::json& arguments, WriteMode writeMode, const std::string& requestId)
 	{
-		const AssistantCapability* capability = FindCapability(name);
+		if (!arguments.is_object())
+		{
+			return BuildError(requestId, ErrorCategory::Validation, "Tool arguments must be a JSON object.");
+		}
+		const auto capability = capabilityRegistry.Find(name, 1, BuildAutomationStateSnapshot());
+		if (!capability)
+		{
+			return BuildError(requestId, ErrorCategory::UnsupportedCapability, "Capability version is not registered.");
+		}
+		std::string schemaError;
+		if (capability->descriptor.execution.workerPreparation && ThreadPool::instance().getThreadCount() > 0u)
+		{
+			// JSON and descriptor copies are immutable, so worker preparation cannot
+			// race the editor state revalidation performed by the handler later.
+			auto task = ThreadPool::instance().createTask([arguments, schema = capability->descriptor.inputSchema]() {
+				return ValidateRequiredSchemaFields(arguments, schema);
+			});
+			auto future = task->getFuture();
+			ThreadPool::instance().enqueue(task);
+			schemaError = future.get();
+		}
+		else schemaError = ValidateRequiredSchemaFields(arguments, capability->descriptor.inputSchema);
+		if (!schemaError.empty()) return BuildError(requestId, ErrorCategory::Validation, schemaError);
+
+		AutomationRequestContext request;
+		request.requestId = requestId;
+		request.clientId = "local-mcp";
+		request.correlationId = arguments.value("correlationId", requestId);
+		request.idempotencyKey = arguments.value("idempotencyKey", std::string{});
+		request.arguments = arguments;
+		request.state = BuildAutomationStateSnapshot();
+		request.preserveLegacyAvailability = true;
+		request.grantedPermission = writeMode == WriteMode::WritesEnabled
+			? AutomationPermission::ProjectWrite
+			: AutomationPermission::Read;
+
+		// Native logs emitted while a protected handler runs inherit stable MCP
+		// identities without requiring every subsystem to format correlation data.
+		// Worker jobs establish their own scope when they execute because this
+		// context is intentionally thread-local.
+		Logger::ScopedContext logContext({
+			capability->descriptor.category,
+			"editor.mcp",
+			request.correlationId,
+			request.requestId,
+			{}
+		});
+		const AutomationDispatchResult dispatched = capabilityRegistry.Dispatch(name, 1, request);
+		nlohmann::json response;
+		if (dispatched.data.is_object() && dispatched.data.contains("ok"))
+		{
+			response = dispatched.data;
+			response["correlationId"] = request.correlationId;
+		}
+		else
+		{
+			response = dispatched.ok
+				? BuildSuccess(requestId, dispatched.message, dispatched.data)
+				: BuildError(requestId, dispatched.error, dispatched.message);
+			response["correlationId"] = request.correlationId;
+		}
+
+		// Record a structured completion even when the called subsystem emits no
+		// native log line. This guarantees that correlation-based MCP diagnostics
+		// can always find the semantic operation which started a workflow.
+		StructuredLogRecord completion;
+		completion.severity = response.value("ok", false) ? AutomationLogSeverity::Info : AutomationLogSeverity::Warning;
+		completion.category = capability->descriptor.category;
+		completion.source = "editor.mcp";
+		completion.correlationId = request.correlationId;
+		completion.requestId = request.requestId;
+		completion.message = response.value("message", dispatched.message);
+		completion.details = {
+			{"capability", std::string(name)},
+			{"ok", response.value("ok", false)},
+			{"status", response.value("status", std::string{})}
+		};
+		(void)logStore.Append(std::move(completion));
+		return response;
+	}
+
+	nlohmann::json EditorAutomationService::ExecuteProviderHandler(AutomationOperationId operation, std::string_view operationName, const nlohmann::json& arguments, WriteMode writeMode, const std::string& requestId)
+	{
+		const AssistantCapability* capability = FindCapability(operationName);
 		if (capability == nullptr)
 		{
 			return BuildError(requestId, ErrorCategory::UnsupportedCapability, "Unknown editor automation capability.");
 		}
-		const std::string toolName(name);
 		if (capability->mutatesState && writeMode != WriteMode::WritesEnabled)
 		{
 			return BuildError(requestId, ErrorCategory::Permission, "The bridge is in read-only mode.");
@@ -1309,55 +1685,60 @@ namespace TerraEngine::Editor::Automation
 		{
 			return BuildError(requestId, ErrorCategory::Validation, "Tool arguments must be a JSON object.");
 		}
-		if (capability->requiresProject && (editorContext == nullptr || editorContext->projectManager == nullptr || !editorContext->projectManager->HasActiveProject()))
+		if (operation == AutomationOperation("activity.list") && bridgeToolCallback)
 		{
-			return BuildError(requestId, ErrorCategory::MissingTarget, "Open a project before running this capability.");
+			return bridgeToolCallback(nlohmann::json{{"name", operationName}, {"arguments", arguments}, {"requestId", requestId}});
 		}
-
-		if (toolName == "activity.list" && bridgeToolCallback)
-		{
-			return bridgeToolCallback(nlohmann::json{{"name", toolName}, {"arguments", arguments}, {"requestId", requestId}});
-		}
-		if (toolName == "scene.list_objects") return HandleSceneListObjects(arguments, requestId);
-		if (toolName == "scene.open")
+		if (operation == AutomationOperation("scene.list_objects")) return HandleSceneListObjects(arguments, requestId);
+		if (operation == AutomationOperation("scene.open"))
 		{
 			nlohmann::json validation = ValidateProjectRelativePath(arguments, "path", requestId);
 			if (!validation.value("ok", false)) return validation;
-			const std::filesystem::path relativeScenePath = validation["path"].get<std::string>();
-			const TerraEngine::UUID sceneId = SceneManager::Instance().LoadScene(relativeScenePath);
+			const std::filesystem::path projectRelativePath = validation["path"].get<std::string>();
+			if (projectRelativePath.empty() || projectRelativePath.begin()->string() != "Assets"
+				|| projectRelativePath.extension() != ".tescene")
+			{
+				return BuildError(requestId, ErrorCategory::Validation,
+					"Scene path must name a .tescene file under Assets.", projectRelativePath.generic_string());
+			}
+			// The live editor configures SceneManager with the Assets directory as
+			// its root. MCP paths are project-relative, so remove that one boundary
+			// component before loading instead of accidentally resolving Assets/Assets.
+			const std::filesystem::path assetRelativePath = projectRelativePath.lexically_relative("Assets");
+			const TerraEngine::UUID sceneId = SceneManager::Instance().LoadScene(assetRelativePath);
 			if (sceneId == TerraEngine::EMPTY_UUID || !SceneManager::Instance().SetActiveScene(sceneId))
 			{
-				return BuildError(requestId, ErrorCategory::MissingTarget, "Scene could not be loaded.", relativeScenePath.generic_string());
+				return BuildError(requestId, ErrorCategory::MissingTarget, "Scene could not be loaded.", projectRelativePath.generic_string());
 			}
 			UndoRedoSystem::Instance().Clear();
-			return BuildSuccess(requestId, "Opened scene.", {{"path", relativeScenePath.generic_string()}});
+			return BuildSuccess(requestId, "Opened scene.", {{"path", projectRelativePath.generic_string()}});
 		}
-		if (toolName == "scene.save") return HandleSceneSave(arguments, requestId);
-		if (toolName == "object.create") return HandleObjectCreate(arguments, requestId);
-		if (toolName == "object.delete") return HandleObjectDelete(arguments, requestId);
-		if (toolName == "object.select") return HandleObjectSelect(arguments, requestId);
-		if (toolName == "object.set_metadata") return HandleObjectSetMetadata(arguments, requestId);
-		if (toolName == "object.set_parent") return HandleObjectSetParent(arguments, requestId);
-		if (toolName == "component.add") return HandleComponentAdd(arguments, requestId);
-		if (toolName == "component.remove") return HandleComponentRemove(arguments, requestId);
-		if (toolName == "component.get") return HandleComponentGet(arguments, requestId);
-		if (toolName == "component.set_property") return HandleComponentSetProperty(arguments, requestId);
-		if (toolName == "asset.list") return HandleAssetList(arguments, requestId);
-		if (toolName == "asset.import") return HandleAssetImport(arguments, requestId);
-		if (toolName == "asset.virtualGeometry.settings.get") return HandleVirtualGeometrySettingsGet(arguments, requestId);
-		if (toolName == "asset.virtualGeometry.settings.set") return HandleVirtualGeometrySettingsSet(arguments, requestId);
-		if (toolName == "asset.virtualGeometry.settings.reset") return HandleVirtualGeometrySettingsReset(arguments, requestId);
-		if (toolName == "asset.virtualGeometry.rebuild") return HandleVirtualGeometryRebuild(arguments, requestId);
-		if (toolName == "asset.virtualGeometry.inspect") return HandleVirtualGeometryInspect(arguments, requestId);
-		if (toolName == "asset.prepare_delete") return HandleAssetPrepareDelete(arguments, requestId);
-		if (toolName == "export.validate") return HandleExportValidate(arguments, requestId);
-		if (toolName == "export.start") return HandleExportStart(arguments, requestId);
-		if (toolName == "export.cancel") return HandleExportCancel(arguments, requestId);
-		if (toolName == "game_view.capture") return HandleGameViewCapture(arguments, requestId);
-		if (toolName == "camera.capture_object") return HandleCameraObjectCapture(arguments, requestId);
-		if (toolName == "camera.capture_custom") return HandleCustomCameraCapture(arguments, requestId);
-		if (toolName == "renderer.virtualGeometry.stats") return HandleRendererVirtualGeometryStats(arguments, requestId);
-		if (toolName == "renderer.recovery.safe_save_project")
+		if (operation == AutomationOperation("scene.save")) return HandleSceneSave(arguments, requestId);
+		if (operation == AutomationOperation("object.create")) return HandleObjectCreate(arguments, requestId);
+		if (operation == AutomationOperation("object.delete")) return HandleObjectDelete(arguments, requestId);
+		if (operation == AutomationOperation("object.select")) return HandleObjectSelect(arguments, requestId);
+		if (operation == AutomationOperation("object.set_metadata")) return HandleObjectSetMetadata(arguments, requestId);
+		if (operation == AutomationOperation("object.set_parent")) return HandleObjectSetParent(arguments, requestId);
+		if (operation == AutomationOperation("component.add")) return HandleComponentAdd(arguments, requestId);
+		if (operation == AutomationOperation("component.remove")) return HandleComponentRemove(arguments, requestId);
+		if (operation == AutomationOperation("component.get")) return HandleComponentGet(arguments, requestId);
+		if (operation == AutomationOperation("component.set_property")) return HandleComponentSetProperty(arguments, requestId);
+		if (operation == AutomationOperation("asset.list")) return HandleAssetList(arguments, requestId);
+		if (operation == AutomationOperation("asset.import")) return HandleAssetImport(arguments, requestId);
+		if (operation == AutomationOperation("asset.virtualGeometry.settings.get")) return HandleVirtualGeometrySettingsGet(arguments, requestId);
+		if (operation == AutomationOperation("asset.virtualGeometry.settings.set")) return HandleVirtualGeometrySettingsSet(arguments, requestId);
+		if (operation == AutomationOperation("asset.virtualGeometry.settings.reset")) return HandleVirtualGeometrySettingsReset(arguments, requestId);
+		if (operation == AutomationOperation("asset.virtualGeometry.rebuild")) return HandleVirtualGeometryRebuild(arguments, requestId);
+		if (operation == AutomationOperation("asset.virtualGeometry.inspect")) return HandleVirtualGeometryInspect(arguments, requestId);
+		if (operation == AutomationOperation("asset.prepare_delete")) return HandleAssetPrepareDelete(arguments, requestId);
+		if (operation == AutomationOperation("export.validate")) return HandleExportValidate(arguments, requestId);
+		if (operation == AutomationOperation("export.start")) return HandleExportStart(arguments, requestId);
+		if (operation == AutomationOperation("export.cancel")) return HandleExportCancel(arguments, requestId);
+		if (operation == AutomationOperation("game_view.capture")) return HandleGameViewCapture(arguments, requestId);
+		if (operation == AutomationOperation("camera.capture_object")) return HandleCameraObjectCapture(arguments, requestId);
+		if (operation == AutomationOperation("camera.capture_custom")) return HandleCustomCameraCapture(arguments, requestId);
+		if (operation == AutomationOperation("renderer.virtualGeometry.stats")) return HandleRendererVirtualGeometryStats(arguments, requestId);
+		if (operation == AutomationOperation("renderer.recovery.safe_save_project"))
 		{
 			std::string error;
 			if (editorContext == nullptr || editorContext->projectManager == nullptr
@@ -1372,26 +1753,984 @@ namespace TerraEngine::Editor::Automation
 				{"rendererStateUsed", false}
 			});
 		}
-		if (toolName == "diagnostics.get_summary") return HandleDiagnosticsGetSummary(arguments, requestId);
+		if (operation == AutomationOperation("project.templates.list"))
+		{
+			return BuildSuccess(requestId, "Listed project templates.", {{"templates", nlohmann::json::array({
+				{{"id", "blank"}, {"displayName", "Blank"}},
+				{{"id", "2d"}, {"displayName", "2D"}},
+				{{"id", "3d"}, {"displayName", "3D"}}
+			})}});
+		}
+		if (operation == AutomationOperation("project.state"))
+		{
+			nlohmann::json state = BuildProjectState();
+			const AutomationStateSnapshot snapshot = BuildAutomationStateSnapshot();
+			state["projectGeneration"] = snapshot.projectGeneration;
+			state["sceneGeneration"] = snapshot.sceneGeneration;
+			return BuildSuccess(requestId, "Read project state.", std::move(state));
+		}
+		const auto playStateData = []() {
+			const ScriptingSystem& scripting = ScriptingSystem::Instance();
+			const std::string currentState = !scripting.IsRunning() ? "stopped" : (scripting.IsPaused() ? "paused" : "playing");
+			return nlohmann::json{{"currentState", currentState}, {"pendingTransition", nullptr}};
+		};
+		if (operation == AutomationOperation("play.state"))
+			return BuildSuccess(requestId, "Read Play Mode state.", playStateData());
+		if (IsOperationOneOf(operation, {
+			AutomationOperation("play.enter"), AutomationOperation("play.pause"),
+			AutomationOperation("play.resume"), AutomationOperation("play.step"),
+			AutomationOperation("play.exit")}))
+		{
+			nlohmann::json state = playStateData();
+			const std::string current = state["currentState"].get<std::string>();
+			const std::string expected = arguments.value("expectedState", current);
+			const auto playError = [this, &requestId, &state](ErrorCategory category, std::string_view message) {
+				nlohmann::json error = BuildError(requestId, category, message);
+				error["data"] = state;
+				return error;
+			};
+			if (expected != current) return playError(ErrorCategory::Conflict, "Play Mode state changed after request preparation.");
+			if (operation == AutomationOperation("play.enter"))
+			{
+				if (current != "stopped") return playError(ErrorCategory::Conflict, "Play Mode is already running.");
+				if (editorContext == nullptr || editorContext->projectManager == nullptr || !editorContext->projectManager->HasActiveProject() || SceneManager::Instance().GetActiveScene() == nullptr)
+					return playError(ErrorCategory::Unavailable, "A project with an active saved scene is required.");
+				ScriptingSystem::Instance().SetRunning(true);
+			}
+			else if (operation == AutomationOperation("play.pause"))
+			{
+				if (current != "playing") return playError(ErrorCategory::Conflict, "Only active Play Mode can be paused.");
+				ScriptingSystem::Instance().SetPaused(true);
+			}
+			else if (operation == AutomationOperation("play.resume"))
+			{
+				if (current != "paused") return playError(ErrorCategory::Conflict, "Only paused Play Mode can be resumed.");
+				ScriptingSystem::Instance().SetPaused(false);
+			}
+			else if (operation == AutomationOperation("play.step"))
+			{
+				if (current != "paused") return playError(ErrorCategory::Conflict, "Single-step requires paused Play Mode.");
+				ScriptingSystem::Instance().Step(1);
+				state = playStateData();
+				state["stepsCompleted"] = 1;
+				return BuildSuccess(requestId, "Scheduled exactly one simulation frame.", std::move(state));
+			}
+			else if (operation == AutomationOperation("play.exit"))
+			{
+				if (current == "stopped") return playError(ErrorCategory::Conflict, "Play Mode is not running.");
+				ScriptingSystem::Instance().SetPaused(false);
+				ScriptingSystem::Instance().SetRunning(false);
+				state = playStateData();
+				state["restoration"] = {{"completed", true}, {"partialFailures", nlohmann::json::array()}};
+				return BuildSuccess(requestId, "Exited Play Mode and restored authored state.", std::move(state));
+			}
+			return BuildSuccess(requestId, "Changed Play Mode state.", playStateData());
+		}
+		if (operation == AutomationOperation("jobs.list"))
+		{
+			nlohmann::json jobs = nlohmann::json::array();
+			for (const AutomationJobSnapshot& job : jobService.List(arguments.value("limit", 100u))) jobs.push_back(SerializeAutomationJob(job));
+			return BuildSuccess(requestId, "Listed retained automation jobs.", {{"jobs", jobs}, {"oldestRetainedSequence", jobService.OldestRetainedSequence()}});
+		}
+		if (operation == AutomationOperation("jobs.get"))
+		{
+			const std::string jobId = arguments.value("jobId", std::string{});
+			if (jobId == activeScriptCompilationJobId)
+			{
+				const ScriptCompilationStatus& status = ScriptCompilationSubsystem::Instance().GetStatus();
+				if (status.state == ScriptCoordinatorState::Queued)
+				{
+					(void)jobService.PublishProgress(jobId, status.progress, "queued");
+				}
+				else if (status.state == ScriptCoordinatorState::Building || status.state == ScriptCoordinatorState::Reloading)
+				{
+					(void)jobService.SetState(jobId, AutomationJobState::Running, status.state == ScriptCoordinatorState::Building ? "compiling" : "reloading");
+					(void)jobService.PublishProgress(jobId, status.progress, status.state == ScriptCoordinatorState::Building ? "compiling" : "reloading");
+				}
+				else if (status.state == ScriptCoordinatorState::Ready)
+				{
+					(void)jobService.CompleteSucceeded(jobId, {{"assemblyPath", status.activeAssemblyPath.generic_string()}, {"attachableTypeCount", status.attachableTypes.size()}});
+				}
+				else if (status.state == ScriptCoordinatorState::Failed)
+				{
+					for (const ScriptCompilerDiagnostic& diagnostic : status.diagnostics)
+					{
+						(void)jobService.AddDiagnostic(jobId, {diagnostic.severity == "error" ? AutomationLogSeverity::Error : AutomationLogSeverity::Warning, "compiler", diagnostic.message,
+							{{"code", diagnostic.code}, {"file", diagnostic.file.generic_string()}, {"line", diagnostic.line}, {"column", diagnostic.column}}});
+					}
+					(void)jobService.CompleteFailed(jobId, {{"summary", status.lastSummary}});
+				}
+				else if (status.state == ScriptCoordinatorState::Canceled)
+				{
+					(void)jobService.CompleteCanceled(jobId, {{"boundary", "before_assembly_publication"}});
+				}
+			}
+			if (jobId == activeProfilerCaptureJobId && editorContext != nullptr && editorContext->editorProfiler)
+			{
+				EditorProfilerService& profiler = *editorContext->editorProfiler;
+				if (profiler.IsBusy())
+				{
+					(void)jobService.SetState(jobId, AutomationJobState::Running, "saving_capture");
+					(void)jobService.PublishProgress(jobId, 0.75, "saving_capture");
+				}
+				else
+				{
+					const std::vector<EditorProfilerCaptureArtifact> artifacts = profiler.GetAutomationCaptureList();
+					const auto created = std::find_if(artifacts.begin(), artifacts.end(), [this](const EditorProfilerCaptureArtifact& artifact) {
+						return !profilerArtifactIdsBeforeStop.contains(artifact.artifactId);
+					});
+					if (created != artifacts.end())
+					{
+						(void)jobService.AddArtifact(jobId, {created->artifactId, "profiler_capture", {}, "application/json", {
+							{"name", created->artifact.fileName},
+							{"frameCount", created->artifact.frameCount},
+							{"status", created->artifact.status}
+						}});
+						(void)jobService.CompleteSucceeded(jobId, {{"artifactId", created->artifactId}});
+						activeProfilerCaptureJobId.clear();
+						profilerArtifactIdsBeforeStop.clear();
+					}
+					else if (!profiler.GetLastError().empty())
+					{
+						(void)jobService.CompleteFailed(jobId, {{"error", profiler.GetLastError()}});
+						activeProfilerCaptureJobId.clear();
+						profilerArtifactIdsBeforeStop.clear();
+					}
+				}
+			}
+			if (jobId == activeProfilerLoadJobId && editorContext != nullptr && editorContext->editorProfiler)
+			{
+				EditorProfilerService& profiler = *editorContext->editorProfiler;
+				if (profiler.IsBusy())
+				{
+					(void)jobService.SetState(jobId, AutomationJobState::Running, "loading_capture");
+					(void)jobService.PublishProgress(jobId, 0.75, "loading_capture");
+				}
+				else if (!profiler.GetLastError().empty())
+				{
+					(void)jobService.CompleteFailed(jobId, {{"error", profiler.GetLastError()}});
+					activeProfilerLoadJobId.clear();
+					activeProfilerLoadArtifactId.clear();
+				}
+				else
+				{
+					(void)jobService.CompleteSucceeded(jobId, {{"artifactId", activeProfilerLoadArtifactId}});
+					activeProfilerLoadJobId.clear();
+					activeProfilerLoadArtifactId.clear();
+				}
+			}
+			const auto job = jobService.Get(jobId);
+			return job ? BuildSuccess(requestId, "Read automation job.", {{"job", SerializeAutomationJob(*job)}})
+				: BuildError(requestId, ErrorCategory::MissingTarget, "Automation job was not found.");
+		}
+		if (operation == AutomationOperation("jobs.cancel"))
+		{
+			const std::string jobId = arguments.value("jobId", std::string{});
+			if (!jobService.RequestCancellation(jobId)) return BuildError(requestId, ErrorCategory::Conflict, "Job cannot be canceled.", jobId);
+			if (jobId == activeScriptCompilationJobId)
+			{
+				(void)ScriptCompilationSubsystem::Instance().RequestCancellation();
+			}
+			return BuildSuccess(requestId, "Requested cooperative job cancellation.", {{"job", SerializeAutomationJob(*jobService.Get(jobId))}});
+		}
+		if (operation == AutomationOperation("logs.query"))
+		{
+			StructuredLogQuery query;
+			query.category = arguments.value("category", std::string{});
+			query.source = arguments.value("source", std::string{});
+			query.text = arguments.value("text", std::string{});
+			query.correlationId = arguments.value("correlationId", std::string{});
+			query.requestId = arguments.value("requestId", std::string{});
+			query.jobId = arguments.value("jobId", std::string{});
+			query.cursor = arguments.value("cursor", std::string{});
+			query.pageSize = arguments.value("pageSize", 100u);
+			const StructuredLogPage page = logStore.Query(query);
+			if (!page.valid) return BuildError(requestId, ErrorCategory::Validation, page.error);
+			nlohmann::json records = nlohmann::json::array();
+			for (const StructuredLogRecord& record : page.records)
+				records.push_back({{"sequence", record.sequence}, {"category", record.category}, {"source", record.source}, {"correlationId", record.correlationId}, {"requestId", record.requestId}, {"jobId", record.jobId}, {"message", record.message}, {"details", record.details}});
+			return BuildSuccess(requestId, "Queried structured logs.", {{"records", records}, {"nextCursor", page.nextCursor}, {"hasMore", page.hasMore}, {"droppedBeforeCursor", page.droppedBeforeCursor}, {"oldestRetainedSequence", page.oldestRetainedSequence}});
+		}
+		if (operation == AutomationOperation("history.state"))
+		{
+			const UndoRedoSystem& history = UndoRedoSystem::Instance();
+			return BuildSuccess(requestId, "Read editor history state.", {
+				{"canUndo", history.CanUndo()}, {"canRedo", history.CanRedo()},
+				{"undoDepth", history.GetUndoDepth()}, {"redoDepth", history.GetRedoDepth()},
+				{"undoLabel", history.GetUndoLabel()}, {"redoLabel", history.GetRedoLabel()},
+				{"sequence", history.GetSequence()}
+			});
+		}
+		if (operation == AutomationOperation("history.undo") || operation == AutomationOperation("history.redo"))
+		{
+			UndoRedoSystem& history = UndoRedoSystem::Instance();
+			if (!arguments.contains("expectedSequence") || !arguments["expectedSequence"].is_number_unsigned())
+				return BuildError(requestId, ErrorCategory::Validation, "expectedSequence is required.");
+			if (arguments["expectedSequence"].get<std::uint64_t>() != history.GetSequence())
+				return BuildError(requestId, ErrorCategory::StaleTarget, "Editor history changed after the request was prepared.");
+			const bool undo = operation == AutomationOperation("history.undo");
+			if ((undo && !history.CanUndo()) || (!undo && !history.CanRedo()))
+				return BuildError(requestId, ErrorCategory::Conflict, undo ? "Nothing is available to undo." : "Nothing is available to redo.");
+			const std::string historyId = undo ? history.GetUndoHistoryId() : history.GetRedoHistoryId();
+			if (undo) history.Undo(); else history.Redo();
+			return BuildSuccess(requestId, undo ? "Undid editor transaction." : "Redid editor transaction.", {
+				{"historyId", historyId}, {"sequence", history.GetSequence()}, {"visibilityBoundary", "post_editor_automation_flush"}
+			});
+		}
+		if (operation == AutomationOperation("transaction.execute"))
+		{
+			if (arguments.value("cancelRequested", false))
+			{
+				nlohmann::json canceled = BuildError(requestId, ErrorCategory::Canceled, "Transaction was canceled before protected commit.");
+				canceled["data"] = {{"cancellationBoundary", "before_commit"}};
+				return canceled;
+			}
+			if (arguments.contains("expectedSceneGeneration")
+				&& arguments["expectedSceneGeneration"].get<std::uint64_t>() != BuildAutomationStateSnapshot().sceneGeneration)
+				return BuildError(requestId, ErrorCategory::StaleTarget, "Scene generation changed after transaction preparation.");
+			ObjectManager& objects = ObjectManager::instance();
+			const std::string transactionId = "transaction-" + std::to_string(nextTransactionId++);
+			PreparedAutomationTransaction prepared = PrepareAutomationTransaction(arguments, objects, transactionId);
+			if (!prepared.valid) return BuildError(requestId, prepared.error, prepared.message);
+
+			// History commands capture before-state while the transaction is still
+			// wholly unapplied. They are published only after the engine commit succeeds.
+			std::vector<std::unique_ptr<ICommand>> commands;
+			std::unordered_map<std::size_t, std::optional<TerraEngine::UUID>> oldParents;
+			std::unordered_map<std::size_t, nlohmann::json> oldComponentPayloads;
+			std::vector<std::string> affectedTargets;
+			for (std::size_t index = 0; index < arguments["operations"].size(); ++index)
+			{
+				const nlohmann::json& operation = arguments["operations"][index];
+				const std::string kind = operation["kind"].get<std::string>();
+				if (kind == "object.create" || kind == "selection.set") continue;
+				const nlohmann::json& targetValue = operation["target"];
+				if (targetValue.is_object() && targetValue.contains("localId")) continue;
+				const EditorTarget target = ResolveTarget(targetValue);
+				if (!target.resolved || !target.entity) continue;
+				const std::optional<Object> targetObject = objects.getObject(*target.entity);
+				if (!targetObject) continue;
+
+				const TerraEngine::UUID targetId = objects.getUUID(*targetObject);
+				const std::string targetText = TerraEngine::ToHexString(targetId);
+				if (std::find(affectedTargets.begin(), affectedTargets.end(), targetText) == affectedTargets.end()) affectedTargets.push_back(targetText);
+				if (kind == "object.delete")
+				{
+					commands.push_back(std::make_unique<DeleteObjectCommand>(*target.entity));
+				}
+				else if (kind == "object.set_metadata")
+				{
+					// Store only fields written by this operation. Capturing every metadata
+					// field would let a later command overwrite an earlier command during redo.
+					nlohmann::json oldMetadata = nlohmann::json::object();
+					nlohmann::json newMetadata = nlohmann::json::object();
+					if (operation.contains("name")) { oldMetadata["name"] = objects.getObjectName(*targetObject); newMetadata["name"] = operation["name"]; }
+					if (operation.contains("tag")) { oldMetadata["tag"] = objects.getObjectTag(*targetObject); newMetadata["tag"] = operation["tag"]; }
+					if (operation.contains("layer")) { oldMetadata["layer"] = objects.getObjectLayer(*targetObject); newMetadata["layer"] = operation["layer"]; }
+					if (operation.contains("active")) { oldMetadata["active"] = objects.isObjectActive(*targetObject); newMetadata["active"] = operation["active"]; }
+					if (operation.contains("static")) { oldMetadata["static"] = objects.isObjectStatic(*targetObject); newMetadata["static"] = operation["static"]; }
+					commands.push_back(std::make_unique<SetObjectMetadataCommand>(*target.entity, std::move(oldMetadata), std::move(newMetadata)));
+				}
+				else if (kind == "object.set_parent")
+				{
+					const std::optional<Object> oldParent = objects.getParent(*targetObject);
+					oldParents[index] = oldParent ? std::optional<TerraEngine::UUID>(objects.getUUID(*oldParent)) : std::nullopt;
+				}
+				else if (kind == "component.remove")
+				{
+					commands.push_back(std::make_unique<RemoveComponentCommand>(*target.entity, operation.value("component", std::string{})));
+				}
+				else if (kind == "component.set_property")
+				{
+					std::lock_guard registryLock(ComponentAccessRegistryMutex());
+					const auto component = ComponentAccessRegistry().find(operation.value("component", std::string{}));
+					if (component != ComponentAccessRegistry().end())
+					{
+						oldComponentPayloads[index] = component->second.entitySerialize(objects.getRegistry(), *target.entity);
+					}
+				}
+			}
+
+			const TerraEngine::Scene::TransactionResult commit = TerraEngine::Scene::CommitTransaction(objects, prepared.transaction);
+			if (commit.status != TerraEngine::Scene::TransactionStatus::Committed)
+			{
+				nlohmann::json error = BuildError(
+					requestId,
+					commit.status == TerraEngine::Scene::TransactionStatus::Conflicted ? ErrorCategory::Conflict : ErrorCategory::Validation,
+					commit.message);
+				error["data"]["transactionId"] = transactionId;
+				error["data"]["conflicts"] = nlohmann::json::array();
+				for (const TerraEngine::Scene::TransactionConflictRecord& conflict : commit.conflicts)
+				{
+					error["data"]["conflicts"].push_back({
+						{"reason", TerraEngine::Scene::ToString(conflict.reason)},
+						{"operationIndex", conflict.operationIndex},
+						{"target", TerraEngine::ToHexString(conflict.targetObject)},
+						{"component", conflict.componentType},
+						{"property", conflict.propertyName},
+						{"message", conflict.humanMessage}
+					});
+				}
+				return error;
+			}
+
+			const auto resolveCommittedRef = [&](const TerraEngine::Scene::TransactionObjectRef& ref) -> std::optional<Object> {
+				TerraEngine::UUID id = ref.objectId;
+				if (ref.UsesLocalObject())
+				{
+					const auto created = commit.createdObjects.find(ref.localObjectId);
+					if (created == commit.createdObjects.end()) return std::nullopt;
+					id = created->second;
+				}
+				return objects.getObject(id);
+			};
+
+			// One recursive creation command owns each newly created hierarchy root.
+			// The final parent relationship must be inspected after commit because a
+			// transaction may create an object first and parent it in a later operation.
+			// Looking only at CreateObject::parent would then snapshot the child twice:
+			// once recursively under its parent and once as an independent command.
+			std::unordered_set<TerraEngine::UUID> createdObjectIds;
+			for (const auto& [localId, objectId] : commit.createdObjects)
+			{
+				(void)localId;
+				createdObjectIds.insert(objectId);
+			}
+			for (const TerraEngine::Scene::TransactionWriteOperation& operation : prepared.transaction.writeSet.operations)
+			{
+				if (operation.kind != TerraEngine::Scene::TransactionWriteKind::CreateObject) continue;
+				const auto created = commit.createdObjects.find(operation.createdLocalObjectId);
+				if (created == commit.createdObjects.end()) continue;
+				const std::optional<Object> object = objects.getObject(created->second);
+				if (!object) continue;
+				const std::optional<Object> finalParent = objects.getParent(*object);
+				const std::optional<TerraEngine::UUID> finalParentId = finalParent
+					? std::optional<TerraEngine::UUID>(objects.getUUID(*finalParent))
+					: std::nullopt;
+				const std::string id = TerraEngine::ToHexString(created->second);
+				if (std::find(affectedTargets.begin(), affectedTargets.end(), id) == affectedTargets.end()) affectedTargets.push_back(id);
+				if (finalParentId && createdObjectIds.contains(*finalParentId))
+				{
+					// A recursively serialized created ancestor owns this child and all of
+					// its authored state for undo/redo replay.
+					continue;
+				}
+				commands.push_back(std::make_unique<CreateObjectCommand>(object->EntityId()));
+				if (finalParentId)
+				{
+					// SerializeObject intentionally records descendants, not an object's
+					// external parent, so retain that relationship as a separate command.
+					commands.push_back(std::make_unique<SetParentCommand>(object->EntityId(), std::nullopt, finalParentId));
+				}
+			}
+
+			for (std::size_t index = 0; index < arguments["operations"].size(); ++index)
+			{
+				const nlohmann::json& operation = arguments["operations"][index];
+				const std::string kind = operation["kind"].get<std::string>();
+				if (kind != "object.set_parent" && kind != "component.add" && kind != "component.set_property") continue;
+				const auto local = operation["target"].is_object() ? prepared.localObjectIds.find(operation["target"].value("localId", std::string{})) : prepared.localObjectIds.end();
+				if (local != prepared.localObjectIds.end()) continue;
+				const EditorTarget target = ResolveTarget(operation["target"]);
+				if (!target.resolved || !target.entity) continue;
+				if (kind == "object.set_parent")
+				{
+					std::optional<TerraEngine::UUID> newParent;
+					if (operation.contains("parent") && !operation["parent"].is_null())
+					{
+						std::optional<Object> parent;
+						if (operation["parent"].is_object())
+						{
+							parent = resolveCommittedRef(TerraEngine::Scene::LocalObject(prepared.localObjectIds.at(operation["parent"].value("localId", std::string{}))));
+						}
+						else
+						{
+							const EditorTarget parentTarget = ResolveTarget(operation["parent"]);
+							if (parentTarget.resolved && parentTarget.entity) parent = objects.getObject(*parentTarget.entity);
+						}
+						if (parent) newParent = objects.getUUID(*parent);
+					}
+					commands.push_back(std::make_unique<SetParentCommand>(*target.entity, oldParents[index], newParent));
+				}
+				else if (kind == "component.add")
+				{
+					commands.push_back(std::make_unique<AddComponentCommand>(*target.entity, operation.value("component", std::string{})));
+				}
+				else
+				{
+					std::lock_guard registryLock(ComponentAccessRegistryMutex());
+					const std::string componentName = operation.value("component", std::string{});
+					const auto component = ComponentAccessRegistry().find(componentName);
+					if (component != ComponentAccessRegistry().end())
+					{
+						commands.push_back(std::make_unique<SetComponentPayloadCommand>(*target.entity, componentName, oldComponentPayloads[index], component->second.entitySerialize(objects.getRegistry(), *target.entity)));
+					}
+				}
+			}
+
+			const std::string historyId = "history-" + transactionId;
+			UndoRedoSystem::Instance().PushTransactionGroup(arguments.value("label", std::string("Automation transaction")), std::move(commands), historyId);
+			if (prepared.selectionTarget && setSelectedEntity)
+			{
+				if (const std::optional<Object> selection = resolveCommittedRef(*prepared.selectionTarget)) setSelectedEntity(selection->EntityId());
+			}
+			SceneManager::Instance().ForceMarkActiveSceneDirty();
+			return BuildSuccess(requestId, "Committed automation transaction.", {
+				{"transactionId", transactionId}, {"historyId", historyId}, {"visibilityBoundary", "post_editor_automation_flush"},
+				{"affectedTargets", affectedTargets}, {"appliedOperationCount", arguments["operations"].size()}, {"inverseDeltaCount", commit.inverseDeltas.size()}
+			});
+		}
+		const auto projectAssetPath = [this](const std::string& value) -> std::optional<std::pair<std::string, std::filesystem::path>> {
+			if (editorContext == nullptr || editorContext->projectManager == nullptr || !editorContext->projectManager->HasActiveProject()) return std::nullopt;
+			const std::filesystem::path relative(value);
+			if (relative.empty() || relative.is_absolute() || relative.extension().empty() || relative.string().find("..") != std::string::npos || relative.begin()->string() != "Assets") return std::nullopt;
+			const std::filesystem::path root = editorContext->projectManager->GetProjectRoot();
+			const std::filesystem::path absolute = (root / relative).lexically_normal();
+			const std::filesystem::path assetRoot = (root / "Assets").lexically_normal();
+			const std::string absoluteText = LowerAscii(absolute.generic_string());
+			std::string assetRootText = LowerAscii(assetRoot.generic_string());
+			if (!assetRootText.ends_with('/')) assetRootText.push_back('/');
+			if (absoluteText.rfind(assetRootText, 0) != 0) return std::nullopt;
+			return std::pair(relative.lexically_normal().generic_string(), absolute);
+		};
+		if (operation == AutomationOperation("asset.inspect"))
+		{
+			if (editorContext == nullptr || editorContext->assetDatabase == nullptr)
+				return BuildError(requestId, ErrorCategory::Unavailable, "Asset database is unavailable.");
+			const AssetOrganizationImpact impact = editorContext->assetDatabase->PrepareAssetOrganization(
+				arguments.value("asset", std::string{}),
+				arguments.value("operation", std::string("inspect")),
+				arguments.value("destination", std::string{}));
+			if (!impact.valid) return BuildError(requestId, ErrorCategory::Validation, impact.error);
+			return BuildSuccess(requestId, "Prepared asset impact report.", {{"impact", {
+				{"fingerprint", impact.fingerprint}, {"dependents", impact.dependents}, {"generatedChildren", impact.generatedChildren},
+				{"repairPlan", impact.repairPlan}, {"rollbackJournalEstimate", impact.rollbackJournalEstimate}
+			}}});
+		}
+		if (operation == AutomationOperation("asset.move") || operation == AutomationOperation("asset.rename") || operation == AutomationOperation("asset.duplicate"))
+		{
+			if (editorContext == nullptr || editorContext->assetDatabase == nullptr)
+				return BuildError(requestId, ErrorCategory::Unavailable, "Asset database is unavailable.");
+			const std::string sourceValue = operation == AutomationOperation("asset.rename") ? arguments.value("asset", std::string{}) : arguments.value("source", std::string{});
+			std::string destinationValue;
+			if (operation == AutomationOperation("asset.rename") && arguments.contains("name"))
+				destinationValue = (std::filesystem::path(sourceValue).parent_path() / arguments["name"].get<std::string>()).generic_string();
+			else destinationValue = arguments.value("destination", std::string{});
+			const std::string assetOperation(operationName.substr(std::string("asset.").size()));
+			const AssetOrganizationResult published = editorContext->assetDatabase->PublishAssetOrganization(
+				sourceValue, destinationValue, assetOperation, arguments.value("approvedImpactFingerprint", std::string{}));
+			if (!published.published)
+			{
+				const ErrorCategory category = published.errorCategory == "conflict" ? ErrorCategory::Conflict
+					: published.errorCategory == "validation" ? ErrorCategory::Validation : ErrorCategory::Internal;
+				nlohmann::json error = BuildError(requestId, category, published.error);
+				error["data"] = {{"rollback", published.rollback}};
+				return error;
+			}
+			return BuildSuccess(requestId, "Published asset organization operation.", {
+				{"assetId", published.assetId}, {"path", published.path},
+				{"repairedReferences", published.repairedReferences}, {"rollback", published.rollback}});
+		}
+		if (operation == AutomationOperation("prefab.create"))
+		{
+			const EditorTarget target = ResolveTarget(arguments.value("object", nlohmann::json{}));
+			const auto path = projectAssetPath(arguments.value("path", std::string{}));
+			if (!target.resolved || !path) return BuildError(requestId, ErrorCategory::Validation, "Prefab source or destination is invalid.");
+			const PrefabAuthoringService::Result result = prefabAuthoringService.Create(*target.entity, path->first, path->second);
+			if (!result.ok) return BuildError(requestId, ErrorCategory::Validation, result.message);
+			return BuildSuccess(requestId, result.message, result.data);
+		}
+		if (IsOperationOneOf(operation, {
+			AutomationOperation("prefab.instantiate"), AutomationOperation("prefab.overrides.inspect"),
+			AutomationOperation("prefab.overrides.apply"), AutomationOperation("prefab.overrides.revert"),
+			AutomationOperation("prefab.edit.open"), AutomationOperation("prefab.edit.close")}))
+		{
+			PrefabAuthoringService::Result result;
+			if (operation == AutomationOperation("prefab.instantiate"))
+				result = prefabAuthoringService.Instantiate(arguments.value("prefab", std::string{}), arguments.value("name", std::string{}));
+			else if (operation == AutomationOperation("prefab.overrides.inspect"))
+				result = prefabAuthoringService.InspectOverrides(arguments.value("instance", std::string{}));
+			else if (operation == AutomationOperation("prefab.overrides.apply"))
+				result = prefabAuthoringService.ApplyOverrides(arguments.value("instance", std::string{}),
+					arguments.contains("expectedPrefabGeneration") ? std::optional<std::uint64_t>(arguments["expectedPrefabGeneration"].get<std::uint64_t>()) : std::nullopt);
+			else if (operation == AutomationOperation("prefab.overrides.revert"))
+				result = prefabAuthoringService.RevertOverrides(arguments.value("instance", std::string{}));
+			else if (operation == AutomationOperation("prefab.edit.open"))
+				result = prefabAuthoringService.OpenEditContext(arguments.value("prefab", std::string{}));
+			else result = prefabAuthoringService.CloseEditContext(arguments.value("contextId", std::string{}));
+			if (!result.ok)
+			{
+				const ErrorCategory category = result.errorCategory == "missing_target" ? ErrorCategory::MissingTarget
+					: result.errorCategory == "conflict" ? ErrorCategory::Conflict
+					: result.errorCategory == "stale_target" ? ErrorCategory::StaleTarget
+					: result.errorCategory == "internal" ? ErrorCategory::Internal : ErrorCategory::Validation;
+				nlohmann::json error = BuildError(requestId, category, result.message);
+				if (!result.data.empty()) error["data"] = result.data;
+				return error;
+			}
+			return BuildSuccess(requestId, result.message, result.data);
+		}
+		if (operation == AutomationOperation("script.templates.list"))
+		{
+			ScriptWorkspaceService workspace;
+			nlohmann::json templates = nlohmann::json::array();
+			for (const ScriptTemplateDescriptor& descriptor : workspace.ListApprovedTemplates())
+			{
+				templates.push_back({{"id", descriptor.id}, {"displayName", descriptor.displayName}, {"description", descriptor.description}});
+			}
+			return BuildSuccess(requestId, "Listed approved script templates.", {{"templates", std::move(templates)}});
+		}
+		if (operation == AutomationOperation("script.create"))
+		{
+			if (arguments.contains("contents") || arguments.contains("command"))
+				return BuildError(requestId, ErrorCategory::Validation, "Script creation does not accept raw contents or process commands.");
+			const ScriptCreationRequest creation{
+				arguments.value("template", std::string{}), arguments.value("typeName", std::string{}),
+				arguments.value("namespace", std::string{}), arguments.value("destination", std::string{})};
+			ScriptCreationResult result;
+			std::string error;
+			ScriptCompilationSubsystem& compilation = ScriptCompilationSubsystem::Instance();
+			if (compilation.GetWorkspaceService().GetProjectRoot() == editorContext->projectManager->GetProjectRoot())
+			{
+				if (!compilation.CreateApprovedScript(creation, result, &error))
+					return BuildError(requestId, ErrorCategory::Validation, error);
+			}
+			else
+			{
+				ScriptWorkspaceService workspace;
+				workspace.SetProjectRoot(editorContext->projectManager->GetProjectRoot());
+				if (!workspace.CreateApprovedScript(creation, result, &error))
+					return BuildError(requestId, ErrorCategory::Validation, error);
+			}
+			return BuildSuccess(requestId, "Created managed script.", {{"path", result.projectRelativePath.generic_string()}, {"qualifiedTypeName", result.qualifiedTypeName}});
+		}
+		if (operation == AutomationOperation("script.workspace.sync"))
+		{
+			ScriptWorkspaceService workspace;
+			workspace.SetProjectRoot(editorContext->projectManager->GetProjectRoot());
+			ScriptWorkspaceStatus status;
+			std::string error;
+			if (!workspace.SynchronizeWorkspace(status, &error)) return BuildError(requestId, ErrorCategory::Internal, error);
+			return BuildSuccess(requestId, "Synchronized managed workspace.", {{"health", "healthy"}, {"projectPath", std::filesystem::relative(status.projectPath, editorContext->projectManager->GetProjectRoot()).generic_string()}});
+		}
+		if (operation == AutomationOperation("script.types.list"))
+		{
+			nlohmann::json types = nlohmann::json::array();
+			for (const AttachableScriptType& type : ScriptCompilationSubsystem::Instance().GetStatus().attachableTypes)
+				types.push_back({{"qualifiedName", type.qualifiedName}, {"sourcePath", type.sourcePath.generic_string()}});
+			return BuildSuccess(requestId, "Listed attachable script types.", {{"types", std::move(types)}});
+		}
+		if (operation == AutomationOperation("script.compile"))
+		{
+			const AutomationJobSnapshot job = jobService.Create({"script_compile", "script.compile", requestId, arguments.value("correlationId", requestId), arguments.value("idempotencyKey", std::string{}), true});
+			if (job.jobId.empty()) return BuildError(requestId, ErrorCategory::QueueFull, "Script compilation queue is full.");
+			activeScriptCompilationJobId = job.jobId;
+			ScriptCompilationSubsystem::Instance().RequestBuild(ScriptBuildReason::ManualRefresh);
+			nlohmann::json accepted = BuildSuccess(requestId, "Accepted script compilation.", {{"jobId", job.jobId}, {"state", "queued"}, {"pollTool", "jobs.get"}, {"cancelTool", "jobs.cancel"}});
+			accepted["status"] = "accepted";
+			return accepted;
+		}
+		if (IsOperationOneOf(operation, {
+			AutomationOperation("build_profile.list"), AutomationOperation("build_profile.get"),
+			AutomationOperation("build_profile.create"), AutomationOperation("build_profile.update"),
+			AutomationOperation("build_profile.duplicate"), AutomationOperation("build_profile.prepare_delete")}))
+		{
+			const std::filesystem::path root = editorContext->projectManager->GetProjectRoot();
+			const std::filesystem::path directory = root / "BuildProfiles";
+			const auto serializeProfile = [](const BuildProfile& profile) {
+				return nlohmann::json{{"profileId", profile.id}, {"name", profile.name}, {"startupScene", profile.startupScene}, {"outputDirectory", profile.outputDirectory.generic_string()}, {"platform", ExportPlatformToString(profile.platform)}, {"enableManagedCompilation", profile.enableManagedCompilation}};
+			};
+			if (operation == AutomationOperation("build_profile.list"))
+			{
+				nlohmann::json profiles = nlohmann::json::array();
+				for (const BuildProfile& profile : LoadAllBuildProfiles(directory)) profiles.push_back(serializeProfile(profile));
+				return BuildSuccess(requestId, "Listed build profiles.", {{"profiles", profiles}});
+			}
+			const std::string profileId = arguments.value("profileId", std::string{});
+			const BuildProfileCollectionResult found = FindBuildProfileInCollection(directory, profileId);
+			std::optional<BuildProfile> existing = found.profile;
+			if (operation == AutomationOperation("build_profile.get")) return existing ? BuildSuccess(requestId, "Read build profile.", {{"profile", serializeProfile(*existing)}}) : BuildError(requestId, ErrorCategory::MissingTarget, "Build profile was not found.");
+			if (operation == AutomationOperation("build_profile.prepare_delete")) return existing ? BuildSuccess(requestId, "Prepared build-profile deletion.", {{"profileId", existing->id}, {"impact", {{"startupScene", existing->startupScene}}}, {"approvalId", "approval-build-profile-" + existing->id}}) : BuildError(requestId, ErrorCategory::MissingTarget, "Build profile was not found.");
+			BuildProfile profile;
+			if (operation == AutomationOperation("build_profile.create"))
+			{
+				const BuildProfileCollectionResult created = CreateBuildProfileDraft(arguments.value("name", std::string{}));
+				if (!created.succeeded || !created.profile.has_value()) return BuildError(requestId, ErrorCategory::Validation, created.error);
+				profile = *created.profile;
+				profile.outputDirectory = root / "Builds" / profile.name;
+			}
+			else if (!existing) return BuildError(requestId, ErrorCategory::MissingTarget, "Build profile was not found.");
+			else
+			{
+				profile = *existing;
+				if (operation == AutomationOperation("build_profile.duplicate"))
+				{
+					const BuildProfileCollectionResult duplicated = DuplicateBuildProfileDraft(profile, arguments.value("name", profile.name + " Copy"));
+					if (!duplicated.succeeded || !duplicated.profile.has_value()) return BuildError(requestId, ErrorCategory::Validation, duplicated.error);
+					profile = *duplicated.profile;
+				}
+				else
+				{
+					const nlohmann::json changes = arguments.value("changes", nlohmann::json::object());
+					if (changes.contains("name")) profile.name = changes["name"].get<std::string>();
+					if (changes.contains("startupScene"))
+					{
+						// Native build profiles store scene paths relative to Assets (for
+						// example, Scenes/Main.tescene). Accept the scene-tool spelling too,
+						// but normalize it before validation and packaging so the manifest
+						// cannot name a path that does not exist inside the TEPAK archive.
+						std::string startupScene = changes["startupScene"].get<std::string>();
+						std::replace(startupScene.begin(), startupScene.end(), '\\', '/');
+						if (LowerAscii(startupScene).rfind("assets/", 0) == 0)
+							startupScene.erase(0, std::string("Assets/").size());
+						const std::filesystem::path scenePath(startupScene);
+						if (scenePath.empty() || scenePath.is_absolute() || scenePath.extension() != ".tescene"
+							|| startupScene.find("..") != std::string::npos
+							|| !std::filesystem::exists(root / "Assets" / scenePath))
+						{
+							return BuildError(requestId, ErrorCategory::Validation,
+								"Build profile startup scene must resolve to an existing .tescene file under Assets.", startupScene);
+						}
+						profile.startupScene = scenePath.lexically_normal().generic_string();
+					}
+					if (changes.contains("enableManagedCompilation")) profile.enableManagedCompilation = changes["enableManagedCompilation"].get<bool>();
+				}
+			}
+			const BuildProfileCollectionResult saved = SaveBuildProfileToCollection(directory, std::move(profile));
+			if (!saved.succeeded || !saved.profile.has_value()) return BuildError(requestId, ErrorCategory::Validation, saved.error);
+			profile = *saved.profile;
+			return BuildSuccess(requestId, "Persisted build profile.", {{"profileId", profile.id}, {"profile", serializeProfile(profile)}, {"validation", {{"valid", true}, {"errors", nlohmann::json::array()}}}});
+		}
+		if (IsOperationOneOf(operation, {
+			AutomationOperation("settings.project.get"), AutomationOperation("settings.project.set"),
+			AutomationOperation("settings.editor.get"), AutomationOperation("settings.editor.set")}))
+		{
+			const bool projectScope = IsOperationOneOf(operation, {
+				AutomationOperation("settings.project.get"), AutomationOperation("settings.project.set")});
+			const bool write = IsOperationOneOf(operation, {
+				AutomationOperation("settings.project.set"), AutomationOperation("settings.editor.set")});
+			const std::string key = arguments.value("key", std::string{});
+			nlohmann::json allowedKeys = nlohmann::json::array();
+			if (projectScope)
+				for (const std::string_view allowed : TerraEngine::Editor::Settings::kProjectAutomationSettingKeys) allowedKeys.push_back(allowed);
+			else
+				for (const std::string_view allowed : TerraEngine::Editor::Settings::kEditorAutomationSettingKeys) allowedKeys.push_back(allowed);
+			if (std::find(allowedKeys.begin(), allowedKeys.end(), key) == allowedKeys.end()) return BuildError(requestId, ErrorCategory::Validation, "Setting key is not allowlisted.", key);
+			ProjectManager& projects = *editorContext->projectManager;
+			if (write)
+			{
+				if (!arguments.contains("value")) return BuildError(requestId, ErrorCategory::Validation, "Setting value is required.");
+				std::string settingError;
+				if (!projects.WriteAutomationSetting(projectScope, key, arguments["value"], settingError)) return BuildError(requestId, ErrorCategory::Validation, settingError);
+			}
+			nlohmann::json value;
+			std::string settingError;
+			if (!projects.ReadAutomationSetting(projectScope, key, value, settingError)) return BuildError(requestId, ErrorCategory::Validation, settingError);
+			return BuildSuccess(requestId, write ? "Persisted allowlisted setting." : "Read allowlisted setting.", {{"key", key}, {"value", value}, {"allowedKeys", allowedKeys}, {"persisted", write}});
+		}
+		if (IsOperationOneOf(operation, {
+			AutomationOperation("scene_view.state"), AutomationOperation("scene_view.camera.set"),
+			AutomationOperation("scene_view.frame_object"), AutomationOperation("scene_view.tool.set"),
+			AutomationOperation("scene_view.orientation.set"), AutomationOperation("scene_view.snapping.set"),
+			AutomationOperation("scene_view.visualization.set")}))
+		{
+			const std::shared_ptr<SceneViewWindow> sceneView = mainEditor != nullptr ? mainEditor->GetWindow<SceneViewWindow>() : nullptr;
+			if (sceneView == nullptr)
+				return BuildError(requestId, ErrorCategory::Unavailable, "Scene View semantic control is unavailable without a registered Scene View service.");
+			if (operation == AutomationOperation("scene_view.state"))
+				return BuildSuccess(requestId, "Read Scene View state.", {{"state", sceneView->GetAutomationState()}});
+
+			std::string error;
+			bool changed = false;
+			if (operation == AutomationOperation("scene_view.camera.set"))
+			{
+				const auto position = arguments.contains("position") ? ReadVec3(arguments["position"]) : std::nullopt;
+				const auto focus = arguments.contains("focus") ? ReadVec3(arguments["focus"]) : std::nullopt;
+				if (!position.has_value() || !focus.has_value())
+					return BuildError(requestId, ErrorCategory::Validation, "Camera position and focus must each be a three-number array.");
+				changed = sceneView->SetAutomationCamera(*position, *focus, error);
+			}
+			else if (operation == AutomationOperation("scene_view.frame_object"))
+			{
+				const EditorTarget target = ResolveTarget(arguments.value("target", nlohmann::json{}));
+				if (!target.resolved || !target.entity.has_value())
+					return BuildError(requestId, ErrorCategory::StaleTarget, "Scene View frame target could not be resolved.");
+				changed = sceneView->FrameAutomationObject(*target.entity, error);
+			}
+			else if (operation == AutomationOperation("scene_view.tool.set"))
+			{
+				if (!arguments.contains("tool") || !arguments["tool"].is_string())
+					return BuildError(requestId, ErrorCategory::Validation, "Scene View tool must be a string.");
+				changed = sceneView->SetAutomationTool(arguments["tool"].get<std::string>(), error);
+			}
+			else if (operation == AutomationOperation("scene_view.orientation.set"))
+			{
+				if (!arguments.contains("orientation") || !arguments["orientation"].is_string())
+					return BuildError(requestId, ErrorCategory::Validation, "Scene View orientation must be a string.");
+				changed = sceneView->SetAutomationOrientation(arguments["orientation"].get<std::string>(), error);
+			}
+			else if (operation == AutomationOperation("scene_view.snapping.set"))
+			{
+				if (!arguments.contains("enabled") || !arguments["enabled"].is_boolean())
+					return BuildError(requestId, ErrorCategory::Validation, "Scene View snapping requires a Boolean enabled value.");
+				std::optional<glm::vec3> values;
+				if (arguments.contains("values"))
+				{
+					values = ReadVec3(arguments["values"]);
+					if (!values.has_value()) return BuildError(requestId, ErrorCategory::Validation, "Snap values must contain translation, rotation-degree, and scale increments.");
+				}
+				changed = sceneView->SetAutomationSnapping(arguments["enabled"].get<bool>(), values, error);
+			}
+			else if (operation == AutomationOperation("scene_view.visualization.set"))
+			{
+				if (!arguments.contains("mode") || !arguments["mode"].is_string())
+					return BuildError(requestId, ErrorCategory::Validation, "Scene View visualization mode must be a string.");
+				changed = sceneView->SetAutomationVisualization(arguments["mode"].get<std::string>(), error);
+			}
+			if (!changed)
+				return BuildError(requestId, ErrorCategory::Validation, error.empty() ? "Unsupported Scene View operation." : error);
+			return BuildSuccess(requestId, "Updated Scene View state.", {{"state", sceneView->GetAutomationState()}});
+		}
+		if (IsOperationOneOf(operation, {
+			AutomationOperation("profiler.capture.start"), AutomationOperation("profiler.capture.stop"),
+			AutomationOperation("profiler.capture.list"), AutomationOperation("profiler.capture.load"),
+			AutomationOperation("profiler.capture.summary")}))
+		{
+			if (editorContext == nullptr || !editorContext->editorProfiler) return BuildError(requestId, ErrorCategory::Unavailable, "Editor profiler service is unavailable.");
+			if (operation == AutomationOperation("profiler.capture.list"))
+			{
+				nlohmann::json artifacts = nlohmann::json::array();
+				for (const auto& item : editorContext->editorProfiler->GetAutomationCaptureList())
+				{
+					artifacts.push_back({{"artifactId", item.artifactId}, {"name", item.artifact.fileName}, {"frameCount", item.artifact.frameCount}, {"status", item.artifact.status}});
+				}
+				return BuildSuccess(requestId, "Listed profiler captures.", {{"artifacts", artifacts}});
+			}
+			if (operation == AutomationOperation("profiler.capture.load"))
+			{
+				std::string error;
+				const std::string artifactId = arguments.value("artifactId", std::string{});
+				if (!editorContext->editorProfiler->RequestLoadCaptureById(artifactId, error))
+					return BuildError(requestId, ErrorCategory::MissingTarget, error, artifactId);
+				const AutomationJobSnapshot job = jobService.Create({"profiler-load", std::string(operationName), requestId, arguments.value("correlationId", requestId), {}, false});
+				if (job.jobId.empty()) return BuildError(requestId, ErrorCategory::QueueFull, "Profiler job queue is full.");
+				activeProfilerLoadJobId = job.jobId;
+				activeProfilerLoadArtifactId = artifactId;
+				return BuildSuccess(requestId, "Accepted profiler capture load.", {{"jobId", job.jobId}, {"state", "queued"}, {"artifactId", artifactId}});
+			}
+			if (operation == AutomationOperation("profiler.capture.summary"))
+			{
+				EditorProfilerCaptureSummary summary;
+				std::string error;
+				const std::string artifactId = arguments.value("artifactId", std::string{});
+				if (!editorContext->editorProfiler->SummarizeCaptureById(artifactId, summary, error))
+					return BuildError(requestId, ErrorCategory::MissingTarget, error, artifactId);
+				nlohmann::json streams = nlohmann::json::array();
+				for (const auto& stream : summary.timingStreams)
+				{
+					streams.push_back({{"id", stream.id}, {"label", stream.label}, {"samples", stream.sampleCount}, {"missing", stream.missingCount}, {"meanMs", stream.meanMs}, {"p95Ms", stream.p95Ms}, {"maxMs", stream.maxMs}});
+				}
+				return BuildSuccess(requestId, "Summarized profiler capture.", {{"summary", {{"artifactId", summary.artifactId}, {"frameCount", summary.frameCount}, {"completeFrameCount", summary.completeFrameCount}, {"incompleteFrameCount", summary.incompleteFrameCount}, {"totalDurationMs", summary.totalDurationMs}, {"minimumFrameMs", summary.minimumFrameMs}, {"maximumFrameMs", summary.maximumFrameMs}, {"averageFrameMs", summary.averageFrameMs}, {"timingStreams", streams}}}});
+			}
+			if (operation == AutomationOperation("profiler.capture.start"))
+			{
+				editorContext->editorProfiler->StartRecording();
+				if (editorContext->editorProfiler->GetState() != TerraEngine::Profiling::ProfilerSessionState::Recording)
+					return BuildError(requestId, ErrorCategory::Unavailable, editorContext->editorProfiler->GetLastError());
+				const AutomationJobSnapshot job = jobService.Create({"profiler", std::string(operationName), requestId, arguments.value("correlationId", requestId), {}, false});
+				if (job.jobId.empty()) return BuildError(requestId, ErrorCategory::QueueFull, "Profiler job queue is full.");
+				(void)jobService.CompleteSucceeded(job.jobId, {{"state", "recording"}});
+				return BuildSuccess(requestId, "Started profiler capture.", {{"jobId", job.jobId}, {"state", "succeeded"}});
+			}
+			if (operation == AutomationOperation("profiler.capture.stop"))
+			{
+				profilerArtifactIdsBeforeStop.clear();
+				for (const EditorProfilerCaptureArtifact& artifact : editorContext->editorProfiler->GetAutomationCaptureList())
+					profilerArtifactIdsBeforeStop.insert(artifact.artifactId);
+				const AutomationJobSnapshot job = jobService.Create({"profiler", std::string(operationName), requestId, arguments.value("correlationId", requestId), {}, false});
+				if (job.jobId.empty()) return BuildError(requestId, ErrorCategory::QueueFull, "Profiler job queue is full.");
+				activeProfilerCaptureJobId = job.jobId;
+				editorContext->editorProfiler->FinishCapture();
+				return BuildSuccess(requestId, "Accepted profiler capture persistence.", {{"jobId", job.jobId}, {"state", "queued"}, {"pollTool", "jobs.get"}});
+			}
+			return BuildError(requestId, ErrorCategory::UnsupportedCapability, "Profiler operation is not registered.");
+		}
+		if (operation == AutomationOperation("editor.commands.list"))
+			return BuildSuccess(requestId, "Listed semantic editor commands.", {{"commands", nlohmann::json::array({
+				{{"commandId", "scene.save"}, {"displayName", "Save Scene"}, {"requiresProject", true}, {"requiresScene", true}},
+				{{"commandId", "scene_view.frame_selected"}, {"displayName", "Frame Selected Object"}, {"requiresProject", true}, {"requiresScene", true}},
+				{{"commandId", "scene_view.tool.move"}, {"displayName", "Select Move Tool"}, {"requiresProject", true}, {"requiresScene", true}},
+				{{"commandId", "scene_view.tool.rotate"}, {"displayName", "Select Rotate Tool"}, {"requiresProject", true}, {"requiresScene", true}},
+				{{"commandId", "scene_view.tool.scale"}, {"displayName", "Select Scale Tool"}, {"requiresProject", true}, {"requiresScene", true}}
+			})}});
+		if (operation == AutomationOperation("editor.commands.invoke"))
+		{
+			const std::string commandId = arguments.value("commandId", std::string{});
+			if (commandId == "scene.save")
+			{
+				const nlohmann::json result = HandleSceneSave(nlohmann::json::object(), requestId);
+				if (!result.value("ok", false)) return result;
+			}
+			else if (commandId == "scene_view.frame_selected")
+			{
+				if (!getSelectedEntity || !getSelectedEntity().has_value()) return BuildError(requestId, ErrorCategory::Unavailable, "No selected object is available to frame.");
+				const std::shared_ptr<SceneViewWindow> sceneView = mainEditor != nullptr ? mainEditor->GetWindow<SceneViewWindow>() : nullptr;
+				if (sceneView == nullptr) return BuildError(requestId, ErrorCategory::Unavailable, "Scene View is unavailable.");
+				std::string error;
+				if (!sceneView->FrameAutomationObject(*getSelectedEntity(), error)) return BuildError(requestId, ErrorCategory::StaleTarget, error);
+			}
+			else if (commandId == "scene_view.tool.move" || commandId == "scene_view.tool.rotate" || commandId == "scene_view.tool.scale")
+			{
+				const std::string tool = commandId.substr(std::string("scene_view.tool.").size());
+				const std::shared_ptr<SceneViewWindow> sceneView = mainEditor != nullptr ? mainEditor->GetWindow<SceneViewWindow>() : nullptr;
+				if (sceneView == nullptr) return BuildError(requestId, ErrorCategory::Unavailable, "Scene View is unavailable.");
+				std::string error;
+				if (!sceneView->SetAutomationTool(tool, error)) return BuildError(requestId, ErrorCategory::Validation, error);
+			}
+			else return BuildError(requestId, ErrorCategory::Validation, "Command ID is not allowlisted.");
+			return BuildSuccess(requestId, "Invoked semantic editor command.", {{"commandId", commandId}, {"completed", true}});
+		}
+		const auto resolveScenePath = [this, &requestId](const nlohmann::json& source, std::string_view key) -> std::optional<std::filesystem::path> {
+			if (editorContext == nullptr || editorContext->projectManager == nullptr || !editorContext->projectManager->HasActiveProject())
+			{
+				return std::nullopt;
+			}
+			const nlohmann::json validation = ValidateProjectRelativePath(source, key, requestId);
+			if (!validation.value("ok", false))
+			{
+				return std::nullopt;
+			}
+			const std::filesystem::path relative(validation["path"].get<std::string>());
+			if (relative.extension() != ".tescene" || relative.empty() || relative.begin()->string() != "Assets")
+			{
+				return std::nullopt;
+			}
+			return (editorContext->projectManager->GetProjectRoot() / relative).lexically_normal();
+		};
+		if (operation == AutomationOperation("scene.list"))
+		{
+			const std::filesystem::path root = editorContext->projectManager->GetProjectRoot();
+			nlohmann::json scenes = nlohmann::json::array();
+			const SceneDocument* active = SceneManager::Instance().GetActiveScene();
+			for (const std::filesystem::path& relative : SceneManager::Instance().ListSceneFiles(root))
+			{
+				const std::filesystem::path absolute = (root / relative).lexically_normal();
+				std::error_code comparisonError;
+				const bool isActive = active != nullptr && std::filesystem::equivalent(active->sourcePath, absolute, comparisonError) && !comparisonError;
+				scenes.push_back({
+					{"path", relative.generic_string()},
+					{"name", relative.stem().string()},
+					{"active", isActive}
+				});
+			}
+			return BuildSuccess(requestId, "Listed project scenes.", {{"scenes", scenes}, {"dirty", SceneManager::Instance().IsActiveSceneDirty()}});
+		}
+		if (operation == AutomationOperation("scene.create"))
+		{
+			const auto path = resolveScenePath(arguments, "path");
+			if (!path) return BuildError(requestId, ErrorCategory::Validation, "Scene path must name a .tescene file under Assets.");
+			std::string error;
+			if (!SceneManager::Instance().CreateSceneFile(*path, arguments.value("name", path->stem().string()), &error))
+				return BuildError(requestId, ErrorCategory::Conflict, error, path->generic_string());
+			if (arguments.value("open", false))
+			{
+				const TerraEngine::UUID sceneId = SceneManager::Instance().LoadScene(*path);
+				if (sceneId == TerraEngine::EMPTY_UUID || !SceneManager::Instance().SetActiveScene(sceneId))
+					return BuildError(requestId, ErrorCategory::Internal, "Scene was created but could not be opened.");
+			}
+			return BuildSuccess(requestId, "Created scene.", {{"path", std::filesystem::relative(*path, editorContext->projectManager->GetProjectRoot()).generic_string()}});
+		}
+		if (operation == AutomationOperation("scene.save_as"))
+		{
+			const auto path = resolveScenePath(arguments, "path");
+			if (!path) return BuildError(requestId, ErrorCategory::Validation, "Scene path must name a .tescene file under Assets.");
+			if (std::filesystem::exists(*path)) return BuildError(requestId, ErrorCategory::Conflict, "Scene destination already exists.");
+			if (!SceneManager::Instance().SaveScene(*path)) return BuildError(requestId, ErrorCategory::Internal, "Scene save-as failed.");
+			return BuildSuccess(requestId, "Saved scene as a new file.", {{"path", std::filesystem::relative(*path, editorContext->projectManager->GetProjectRoot()).generic_string()}});
+		}
+		if (operation == AutomationOperation("scene.duplicate") || operation == AutomationOperation("scene.rename"))
+		{
+			const auto source = resolveScenePath(arguments, "source");
+			const auto destination = resolveScenePath(arguments, "destination");
+			if (!source || !destination) return BuildError(requestId, ErrorCategory::Validation, "Source and destination must be .tescene files under Assets.");
+			std::string error;
+			const bool succeeded = operation == AutomationOperation("scene.duplicate")
+				? SceneManager::Instance().DuplicateSceneFile(*source, *destination, &error)
+				: SceneManager::Instance().RenameSceneFile(*source, *destination, &error);
+			if (!succeeded) return BuildError(requestId, ErrorCategory::Conflict, error);
+			return BuildSuccess(requestId, operation == AutomationOperation("scene.duplicate") ? "Duplicated scene." : "Renamed scene.", {
+				{"source", std::filesystem::relative(*source, editorContext->projectManager->GetProjectRoot()).generic_string()},
+				{"destination", std::filesystem::relative(*destination, editorContext->projectManager->GetProjectRoot()).generic_string()}
+			});
+		}
+		if (operation == AutomationOperation("scene.prepare_delete"))
+		{
+			const auto path = resolveScenePath(arguments, "path");
+			if (!path || !std::filesystem::exists(*path)) return BuildError(requestId, ErrorCategory::MissingTarget, "Scene does not exist.");
+			const std::string relative = std::filesystem::relative(*path, editorContext->projectManager->GetProjectRoot()).generic_string();
+			nlohmann::json dependents = nlohmann::json::array();
+			const std::filesystem::path profiles = editorContext->projectManager->GetProjectRoot() / "BuildProfiles";
+			std::error_code scanError;
+			if (std::filesystem::exists(profiles, scanError))
+			{
+				for (std::filesystem::recursive_directory_iterator iterator(profiles, scanError), end; iterator != end && !scanError; iterator.increment(scanError))
+				{
+					if (!iterator->is_regular_file()) continue;
+					std::ifstream input(iterator->path(), std::ios::binary);
+					const std::string contents((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+					if (contents.find(relative) != std::string::npos)
+						dependents.push_back(std::filesystem::relative(iterator->path(), editorContext->projectManager->GetProjectRoot()).generic_string());
+				}
+			}
+			return BuildSuccess(requestId, "Prepared scene deletion impact report.", {{"path", relative}, {"requiresApproval", true}, {"dependents", dependents}});
+		}
+		if (operation == AutomationOperation("diagnostics.get_summary")) return HandleDiagnosticsGetSummary(arguments, requestId);
 		return BuildError(requestId, ErrorCategory::UnsupportedCapability, "Capability metadata exists but no handler is registered.");
 	}
 
 	nlohmann::json EditorAutomationService::BuildCapabilityList() const
 	{
 		nlohmann::json items = nlohmann::json::array();
-		for (const AssistantCapability& capability : capabilities)
+		const AutomationStateSnapshot state = BuildAutomationStateSnapshot();
+		for (const AutomationCapabilitySnapshot& capability : capabilityRegistry.Snapshot(state))
 		{
-			items.push_back({
-				{"name", capability.name},
-				{"kind", capability.kind},
-				{"category", capability.category},
-				{"mutationMode", ToString(capability.mutationMode)},
-				{"mutatesState", capability.mutatesState},
-				{"requiresProject", capability.requiresProject},
-				{"requiresScene", capability.requiresScene},
-				{"requiresApproval", capability.requiresApproval},
-				{"inputSummary", capability.inputSummary}
-			});
+			const AutomationCapabilityDescriptor& descriptor = capability.descriptor;
+			const AssistantCapability* legacy = FindCapability(descriptor.name);
+			nlohmann::json item = {
+				{"name", descriptor.name},
+				{"kind", legacy != nullptr ? legacy->kind : "tool"},
+				{"category", descriptor.category},
+				{"mutationMode", ToString(descriptor.mutationMode)},
+				{"mutatesState", descriptor.mutationMode != MutationMode::ReadOnly},
+				{"requiresProject", capability.availability.requiresProject},
+				{"requiresScene", capability.availability.requiresScene},
+				{"requiresApproval", descriptor.approvalPolicy != AutomationApprovalPolicy::None},
+				{"inputSummary", legacy != nullptr ? legacy->inputSummary : descriptor.description},
+				{"version", descriptor.version},
+				{"description", descriptor.description},
+				{"inputSchema", descriptor.inputSchema},
+				{"resultSchema", descriptor.resultSchema},
+				{"permission", PermissionJson(descriptor.permission)},
+				{"approvalPolicy", ApprovalPolicyJson(descriptor.approvalPolicy)},
+				{"provider", capability.providerId},
+				{"deprecated", descriptor.deprecated},
+				{"replacement", descriptor.replacement},
+				{"availability", {
+					{"available", capability.availability.available},
+					{"reason", capability.availability.reason},
+					{"requiresRenderer", capability.availability.requiresRenderer},
+					{"allowedPlayStates", capability.availability.allowedPlayStates}
+				}},
+				{"execution", {
+					{"workerPreparation", descriptor.execution.workerPreparation},
+					{"protectedCommit", descriptor.execution.protectedCommit},
+					{"visibilityBoundary", descriptor.execution.visibilityBoundary},
+					{"preparationReads", descriptor.execution.preparationReads},
+					{"commitReads", descriptor.execution.commitReads},
+					{"commitWrites", descriptor.execution.commitWrites}
+				}}
+			};
+			items.push_back(std::move(item));
 		}
 		return {{"capabilities", items}, {"count", items.size()}};
 	}
@@ -1402,10 +2741,22 @@ namespace TerraEngine::Editor::Automation
 		const bool hasProject = editorContext != nullptr && editorContext->projectManager != nullptr && editorContext->projectManager->HasActiveProject();
 		data["hasProject"] = hasProject;
 		data["projectRoot"] = hasProject ? editorContext->projectManager->GetProjectRoot().string() : "";
+		if (hasProject)
+		{
+			std::error_code identityError;
+			const std::filesystem::path identity = std::filesystem::weakly_canonical(editorContext->projectManager->GetProjectRoot(), identityError);
+			data["canonicalIdentity"] = identityError ? editorContext->projectManager->GetProjectRoot().lexically_normal().generic_string() : identity.generic_string();
+		}
+		else data["canonicalIdentity"] = "";
 		const auto* scene = SceneManager::Instance().GetActiveScene();
 		data["activeScene"] = scene != nullptr ? scene->name : "";
 		data["sceneDirty"] = SceneManager::Instance().IsActiveSceneDirty();
 		data["playMode"] = ScriptingSystem::Instance().IsRunning();
+		const AutomationStateSnapshot automationState = BuildAutomationStateSnapshot();
+		data["playState"] = automationState.playState;
+		data["projectGeneration"] = automationState.projectGeneration;
+		data["sceneGeneration"] = automationState.sceneGeneration;
+		data["availableServices"] = automationState.availableServices;
 		data["selectedObject"] = nullptr;
 		if (getSelectedEntity)
 		{
@@ -1533,6 +2884,83 @@ namespace TerraEngine::Editor::Automation
 		data["virtualGeometryUnsupportedGates"] = virtualGeometryGateUnsupported;
 		data["emptyStateSafe"] = true;
 		return data;
+	}
+
+	EditorAutomationRegistry& EditorAutomationService::GetRegistry()
+	{
+		return capabilityRegistry;
+	}
+
+	const EditorAutomationRegistry& EditorAutomationService::GetRegistry() const
+	{
+		return capabilityRegistry;
+	}
+
+	EditorAutomationJobService& EditorAutomationService::GetJobService()
+	{
+		return jobService;
+	}
+
+	const EditorAutomationJobService& EditorAutomationService::GetJobService() const
+	{
+		return jobService;
+	}
+
+	EditorAutomationLogStore& EditorAutomationService::GetLogStore()
+	{
+		return logStore;
+	}
+
+	const EditorAutomationLogStore& EditorAutomationService::GetLogStore() const
+	{
+		return logStore;
+	}
+
+	EditorAutomationIdempotencyStore& EditorAutomationService::GetIdempotencyStore()
+	{
+		return idempotencyStore;
+	}
+
+	const EditorAutomationIdempotencyStore& EditorAutomationService::GetIdempotencyStore() const
+	{
+		return idempotencyStore;
+	}
+
+	AutomationStateSnapshot EditorAutomationService::BuildAutomationStateSnapshot() const
+	{
+		AutomationStateSnapshot snapshot;
+		snapshot.projectAvailable = editorContext != nullptr
+			&& editorContext->projectManager != nullptr
+			&& editorContext->projectManager->HasActiveProject();
+		snapshot.sceneAvailable = SceneManager::Instance().GetActiveScene() != nullptr;
+		snapshot.rendererAvailable = RenderSystem::Instance().GetContext() != nullptr;
+		snapshot.playState = !ScriptingSystem::Instance().IsRunning() ? "stopped" : (ScriptingSystem::Instance().IsPaused() ? "paused" : "playing");
+		if (snapshot.projectAvailable)
+		{
+			snapshot.projectGeneration = std::hash<std::string>{}(editorContext->projectManager->GetProjectRoot().generic_string());
+		}
+		if (const SceneDocument* activeScene = SceneManager::Instance().GetActiveScene())
+		{
+			snapshot.sceneGeneration = std::hash<std::string>{}(activeScene->sourcePath.generic_string());
+		}
+		if (snapshot.projectAvailable)
+		{
+			snapshot.availableServices.insert("project");
+			snapshot.availableServices.insert("assets");
+		}
+		if (snapshot.sceneAvailable)
+		{
+			snapshot.availableServices.insert("scene");
+		}
+		if (snapshot.rendererAvailable)
+		{
+			snapshot.availableServices.insert("renderer");
+		}
+		if (mainEditor != nullptr && mainEditor->GetWindow<SceneViewWindow>() != nullptr)
+		{
+			snapshot.availableServices.insert("SceneView");
+		}
+		return snapshot;
 	}
 
 	nlohmann::json EditorAutomationService::BuildCaptureAvailability() const
@@ -2803,11 +4231,23 @@ namespace TerraEngine::Editor::Automation
 		{
 			return validation;
 		}
+		AutomationJobSnapshot durableJob = jobService.Create({
+			"export",
+			"export.start",
+			requestId,
+			arguments.value("correlationId", requestId),
+			arguments.value("idempotencyKey", std::string{}),
+			true
+		});
+		if (durableJob.jobId.empty())
+		{
+			return BuildError(requestId, ErrorCategory::QueueFull, "Automation job retention is full.");
+		}
 		ExportJob job;
-		job.jobId = requestId + "-export";
+		job.jobId = durableJob.jobId;
 		job.profile = validation["data"].value("profile", profile);
-		job.state = validation["data"].value("canExport", false) ? "queued" : "blocked";
-		job.progress = job.state == "queued" ? 0.05f : 0.0f;
+		job.state = "queued";
+		job.progress = 0.0f;
 		exportJobs.insert(exportJobs.begin(), job);
 		if (exportJobs.size() > 16)
 		{
@@ -2817,7 +4257,114 @@ namespace TerraEngine::Editor::Automation
 		{
 			activityCallback(ActivityEventType::Export, requestId, "export.start", "Created export job " + job.jobId + ".");
 		}
-		return BuildSuccess(requestId, "Started export job.", {{"jobId", job.jobId}, {"profile", job.profile}, {"progress", job.progress}, {"state", job.state}});
+
+		// Unit-level service fixtures do not own an Engine or installed runtime
+		// layout; they drive terminal publication explicitly. A live editor does,
+		// so enqueue the shared headless/editor pipeline and publish its progress to
+		// the durable session job rather than leaving an accepted job queued forever.
+		if (editorContext != nullptr && editorContext->engine != nullptr)
+		{
+			const std::filesystem::path projectRoot = editorContext->projectManager->GetProjectRoot();
+			const std::optional<BuildProfile> profileSnapshot = FindBuildProfile(projectRoot, job.profile);
+			if (!profileSnapshot.has_value())
+			{
+				(void)jobService.CompleteFailed(job.jobId, {{"error", "Build profile disappeared before export scheduling."}});
+				return BuildError(requestId, ErrorCategory::StaleTarget, "Build profile disappeared before export scheduling.", job.profile);
+			}
+
+			ExportRequest exportRequest;
+			exportRequest.projectRoot = std::filesystem::absolute(projectRoot).lexically_normal();
+			exportRequest.profile = *profileSnapshot;
+			exportRequest.profilePath = profileSnapshot->filePath.empty()
+				? std::filesystem::path{}
+				: std::filesystem::absolute(profileSnapshot->filePath).lexically_normal();
+			const std::filesystem::path configuredOutput = profileSnapshot->outputDirectory.empty()
+				? projectRoot / "Builds" / profileSnapshot->name
+				: (profileSnapshot->outputDirectory.is_absolute() ? profileSnapshot->outputDirectory : projectRoot / profileSnapshot->outputDirectory);
+			exportRequest.finalOutputDirectory = std::filesystem::absolute(configuredOutput).lexically_normal();
+			exportRequest.runId = GenerateAutomationExportRunId();
+			exportRequest.evidenceDirectory = exportRequest.finalOutputDirectory.parent_path()
+				/ "ExportEvidence" / exportRequest.runId;
+			exportRequest.invocationKind = ExportInvocationKind::Editor;
+			std::string layoutError;
+			(void)DiscoverExportRuntimeLayout(ResolveAutomationEditorExecutable(), exportRequest.runtimeLayout, layoutError);
+			if (!layoutError.empty())
+			{
+				(void)jobService.AddDiagnostic(job.jobId, {
+					AutomationLogSeverity::Warning,
+					"export.runtime_layout",
+					layoutError,
+					{{"stage", "runtime_layout"}}
+				});
+			}
+			(void)jobService.SetState(job.jobId, AutomationJobState::Preparing, "preparing");
+
+			const std::string durableJobId = job.jobId;
+			auto exportTask = ThreadPool::instance().createTask([this, exportRequest = std::move(exportRequest), durableJobId]() mutable {
+				if (jobService.IsCancellationRequested(durableJobId))
+				{
+					(void)jobService.CompleteCanceled(durableJobId, {{"cancellationBoundary", "before_pipeline"}});
+					return;
+				}
+				(void)jobService.SetState(durableJobId, AutomationJobState::Running, "validation");
+				ExportPipeline pipeline;
+				const ExportResult result = pipeline.Execute(exportRequest, [this, durableJobId](const ExportProgress& progress) {
+					// The job service serializes worker publication internally. Progress
+					// remains monotonic and reconnect-safe while the editor UI stays live.
+					(void)jobService.PublishProgress(durableJobId, progress.overallProgress, std::string(ToString(progress.stage)));
+				});
+
+				for (const ExportDiagnostic& diagnostic : result.diagnostics)
+				{
+					(void)jobService.AddDiagnostic(durableJobId, {
+						ExportAutomationSeverity(diagnostic.severity),
+						diagnostic.category,
+						diagnostic.message,
+						{{"stage", diagnostic.stage}, {"code", diagnostic.code}, {"file", diagnostic.filePath}, {"line", diagnostic.line}, {"suggestion", diagnostic.suggestion}}
+					});
+				}
+				if (!result.outputDirectory.empty())
+				{
+					(void)jobService.AddArtifact(durableJobId, {
+						"export-output-" + result.runId,
+						"export_output",
+						result.outputDirectory.generic_string(),
+						"application/vnd.terraengine.export",
+						{{"profileId", result.profileId}, {"runId", result.runId}}
+					});
+				}
+				if (!result.evidenceDirectory.empty())
+				{
+					(void)jobService.AddArtifact(durableJobId, {
+						"export-evidence-" + result.runId,
+						"export_evidence",
+						result.evidenceDirectory.generic_string(),
+						"application/json",
+						{{"runId", result.runId}}
+					});
+				}
+				const nlohmann::json terminalResult{
+					{"success", result.success},
+					{"runId", result.runId},
+					{"stage", ToString(result.stage)},
+					{"failureCategory", ToString(result.failureCategory)},
+					{"exitCode", result.exitCode},
+					{"message", result.message},
+					{"outputDirectory", result.outputDirectory.generic_string()},
+					{"evidenceDirectory", result.evidenceDirectory.generic_string()}
+				};
+				if (jobService.IsCancellationRequested(durableJobId))
+					(void)jobService.CompleteCanceled(durableJobId, terminalResult);
+				else if (result.success)
+					(void)jobService.CompleteSucceeded(durableJobId, terminalResult);
+				else
+					(void)jobService.CompleteFailed(durableJobId, terminalResult);
+			});
+			ThreadPool::instance().enqueue(exportTask);
+		}
+		nlohmann::json accepted = BuildSuccess(requestId, "Accepted export job.", {{"jobId", job.jobId}, {"profile", job.profile}, {"progress", job.progress}, {"state", job.state}, {"pollTool", "jobs.get"}, {"cancelTool", "jobs.cancel"}});
+		accepted["status"] = "accepted";
+		return accepted;
 	}
 
 	nlohmann::json EditorAutomationService::HandleExportCancel(const nlohmann::json& arguments, const std::string& requestId)
@@ -2831,6 +4378,7 @@ namespace TerraEngine::Editor::Automation
 		{
 			if (job.jobId == jobId)
 			{
+				(void)jobService.RequestCancellation(jobId);
 				job.cancelRequested = true;
 				job.state = "canceled";
 				job.progress = 0.0f;
@@ -2977,23 +4525,32 @@ namespace TerraEngine::Editor::Automation
 		{
 			return validation;
 		}
-		const std::optional<glm::vec3> position = ReadVec3(arguments.value("position", nlohmann::json()));
+		// The public MCP contract groups authored camera values under `camera` so
+		// capture transport options remain distinct. Accept legacy top-level camera
+		// values as a compatibility fallback for older clients.
+		const nlohmann::json& camera = arguments.contains("camera") && arguments["camera"].is_object()
+			? arguments["camera"]
+			: arguments;
+		const std::optional<glm::vec3> position = ReadVec3(camera.value("position", nlohmann::json()));
 		if (!position)
 		{
 			return BuildError(requestId, ErrorCategory::Validation, "camera.capture_custom requires position: [x, y, z].");
 		}
 
-		glm::vec3 up = ReadVec3(arguments.value("up", nlohmann::json())).value_or(glm::vec3(0.0f, 1.0f, 0.0f));
+		glm::vec3 up = ReadVec3(camera.value("up", nlohmann::json())).value_or(glm::vec3(0.0f, 1.0f, 0.0f));
 		if (glm::length(up) < 0.0001f)
 		{
 			return BuildError(requestId, ErrorCategory::Validation, "Custom camera up vector must be non-zero.");
 		}
 		glm::vec3 forward(0.0f, 0.0f, -1.0f);
-		if (const std::optional<glm::vec3> targetPoint = ReadVec3(arguments.value("target", nlohmann::json())))
+		const nlohmann::json targetValue = camera.contains("lookAt")
+			? camera["lookAt"]
+			: camera.value("target", nlohmann::json());
+		if (const std::optional<glm::vec3> targetPoint = ReadVec3(targetValue))
 		{
 			forward = *targetPoint - *position;
 		}
-		else if (const std::optional<glm::vec3> requestedForward = ReadVec3(arguments.value("forward", nlohmann::json())))
+		else if (const std::optional<glm::vec3> requestedForward = ReadVec3(camera.value("forward", nlohmann::json())))
 		{
 			forward = *requestedForward;
 		}
@@ -3011,12 +4568,12 @@ namespace TerraEngine::Editor::Automation
 		float farPlane = 1000.0f;
 		try
 		{
-			projection = arguments.value("projection", projection);
-			fov = arguments.value("verticalFovDegrees", fov);
-			aspect = arguments.value("aspectRatio", aspect);
-			orthographicHeight = arguments.value("orthographicHeight", orthographicHeight);
-			nearPlane = arguments.value("nearPlane", nearPlane);
-			farPlane = arguments.value("farPlane", farPlane);
+			projection = camera.value("projection", projection);
+			fov = camera.value("verticalFovDegrees", fov);
+			aspect = camera.value("aspectRatio", aspect);
+			orthographicHeight = camera.value("orthographicHeight", orthographicHeight);
+			nearPlane = camera.value("nearPlane", nearPlane);
+			farPlane = camera.value("farPlane", farPlane);
 		}
 		catch (const nlohmann::json::exception&)
 		{

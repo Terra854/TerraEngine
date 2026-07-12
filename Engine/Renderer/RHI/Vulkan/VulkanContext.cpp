@@ -1219,12 +1219,20 @@ bool VulkanContext::Impl::MarkDeviceLost(VkResult result, std::string_view opera
 	{
 		return false;
 	}
+	bool expectedActive = false;
+	if (!deviceLost.compare_exchange_strong(expectedActive, true))
+	{
+		// Another queue boundary already published the first failure. Returning
+		// true still tells this caller to stop, without racing frame containers or
+		// replacing the diagnostic that identifies the original fault.
+		return true;
+	}
 
 	const std::string checkpointSummary = CollectDiagnosticCheckpointSummary();
-	deviceLost = true;
 	skipFrame = true;
 	editorRenderSubmitted = false;
 	swapchainImageAcquired = false;
+	swapchainAcquireWaitConsumed = false;
 	{
 		std::lock_guard<std::mutex> lock(statsMutex);
 		latestRendererRecoverySnapshot = TerraEngine::Renderer::RecordDeviceLossIncident(
@@ -1243,14 +1251,9 @@ bool VulkanContext::Impl::MarkDeviceLost(VkResult result, std::string_view opera
 				selectedApiVersionString));
 		latestRendererRecoverySnapshot.lastError = checkpointSummary;
 	}
-	if (currentFrame < pendingPrimaryCommandBuffersSubmitted.size())
-	{
-		pendingPrimaryCommandBuffersSubmitted[currentFrame] = 0u;
-	}
-	if (!deviceLostLogged)
+	if (!deviceLostLogged.exchange(true))
 	{
 		TERRAENGINE_LOG(LogLevel::Critical, "Vulkan device lost during " << operation << ". " << checkpointSummary << " Rendering is disabled for this Vulkan context to avoid a submit/reset recovery loop.");
-		deviceLostLogged = true;
 	}
 	return true;
 }
@@ -1352,7 +1355,7 @@ VkResult VulkanContext::Impl::WaitDeviceIdle()
 
 void VulkanContext::Impl::RecordInitializationFailure(std::string_view result, std::string_view operation)
 {
-	deviceLost = true;
+	deviceLost.store(true);
 	skipFrame = true;
 	{
 		std::lock_guard<std::mutex> lock(statsMutex);
@@ -1372,10 +1375,9 @@ void VulkanContext::Impl::RecordInitializationFailure(std::string_view result, s
 				selectedApiVersionString));
 		latestRendererRecoverySnapshot.message = "Renderer initialization failed before a usable Vulkan session was available.";
 	}
-	if (!deviceLostLogged)
+	if (!deviceLostLogged.exchange(true))
 	{
 		TERRAENGINE_LOG(LogLevel::Critical, "Vulkan renderer initialization failed during " << operation << " (" << result << "). Rendering is disabled until recovery can create a fresh renderer session.");
-		deviceLostLogged = true;
 	}
 }
 
@@ -1392,6 +1394,7 @@ VulkanContext::~VulkanContext() = default;
 
 void VulkanContext::SetValidationLayersRequested(bool enabled)
 {
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 	// Validation layers must be decided before vkCreateInstance because the
 	// layer list and debug-utils extension are instance creation inputs. Export
 	// and editor settings call this during RenderSystem startup.
@@ -1409,6 +1412,7 @@ void VulkanContext::SetValidationLayersRequested(bool enabled)
 
 void VulkanContext::SetVariableRateShadingEnabled(bool enabled)
 {
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 	// The VRS attachment is baked into render passes and framebuffers. Allow
 	// callers to choose it before initialization, but reject late changes until
 	// the backend grows a dedicated render-pass recreation path.
@@ -1425,6 +1429,7 @@ void VulkanContext::SetVariableRateShadingEnabled(bool enabled)
 
 // VulkanContext::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Initialize(WindowSystem& windowSystem) {
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 	// Build the Vulkan instance/device chain and prime per-frame resources.
 	impl->InitVulkan(windowSystem);
 }
@@ -1432,15 +1437,17 @@ void VulkanContext::Initialize(WindowSystem& windowSystem) {
 // VulkanContext::Resize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Resize(int width, int height, ViewType view) {
 	if (impl) {
+		std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 		impl->framebufferResized = true;
-		// Coalesce the burst of callbacks generated while the user is dragging a
-		// window edge. Width/height are queried again when the final rebuild runs.
-		impl->framebufferResizeLastEvent = BackendClock::now();
+		// The protected frame boundary reads the latest native extent. Do not start
+		// a trailing timer here: that made the editor intentionally unresponsive
+		// after the user released the window edge.
 	}
 }
 
 // VulkanContext::BeginFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::BeginFrame() {
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 	// Wait until the GPU is done with the resources for this frame before reusing them.
 	if (!impl->initialized || impl->deviceLost) return;
 
@@ -1476,6 +1483,14 @@ void VulkanContext::BeginFrame() {
 		TERRAENGINE_LOG(LogLevel::Error, "BeginFrame failed while waiting for frame fence: " << fenceWaitResult);
 		impl->skipFrame = true;
 		return;
+	}
+	if (impl->editorMode) {
+		// This is the only point where the current frame slot's UI fence is
+		// known complete before any new Scene/Game command buffers are recorded.
+		// Publish completion and retire resources here; PresentEditor runs after
+		// EndFrame has already submitted new work for this same slot.
+		impl->editorCompletionTracker.RecordFenceCompletion(impl->currentFrame);
+		impl->DrainRetiredOffscreenResources();
 	}
 	TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
 		impl->pendingBackendFrameBreakdown,
@@ -1652,7 +1667,16 @@ void VulkanContext::BeginFrame() {
 	{
 		TERRAENGINE_PROFILE_SCOPE("Vulkan: BeginFrame Reset Command Pools", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		const auto resetStart = BackendClock::now();
-		vkResetCommandPool(impl->device, impl->commandPools[impl->currentFrame], 0);
+		const VkResult poolResetResult = vkResetCommandPool(
+			impl->device, impl->commandPools[impl->currentFrame], 0);
+		if (impl->MarkDeviceLost(poolResetResult, "begin frame command pool reset")) {
+			return;
+		}
+		if (poolResetResult != VK_SUCCESS) {
+			TERRAENGINE_LOG(LogLevel::Error, "BeginFrame could not reset the completed frame command pool: " << poolResetResult);
+			impl->skipFrame = true;
+			return;
+		}
 		TerraEngine::Renderer::Vulkan::RecordVulkanFrameStage(
 			impl->pendingBackendFrameBreakdown,
 			{ TerraEngine::Renderer::BackendFrameCostCategory::RhiBeginFrame, TerraEngine::Renderer::BackendSubmitStage::CommandBufferReset, RenderViewType::Game, 0u, "Reset primary command pool", true, false },
@@ -1682,6 +1706,7 @@ void VulkanContext::BeginFrame() {
 	}
 
 	impl->swapchainImageAcquired = false;
+	impl->swapchainAcquireWaitConsumed = false;
 	impl->skipFrame = false;
 	impl->editorRenderSubmitted = false;
 
@@ -1731,6 +1756,7 @@ void VulkanContext::BeginFrame() {
 			return;
 		}
 		impl->swapchainImageAcquired = true;
+		impl->swapchainAcquireWaitConsumed = false;
 		impl->acquiredPresentationImage = TerraEngine::Renderer::Vulkan::AcquiredPresentationImage{
 			impl->currentFrame,
 			impl->acquiredImageIndex,
@@ -2532,6 +2558,16 @@ struct UIStaticPushConstants
 // VulkanContext::Impl::RenderUI is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& batch) {
 	if (batch.staticQuads.empty() && batch.immediateQuads.empty() && batch.textRuns.empty() && batch.imageRuns.empty()) return;
+	if (uiStaticVertexBuffers.size() < MAX_FRAMES_IN_FLIGHT) {
+		uiStaticVertexBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+	}
+	if (uiSdfVertexBuffers.size() < MAX_FRAMES_IN_FLIGHT) {
+		uiSdfVertexBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+	}
+	// BeginFrame has waited this exact slot's fence. Writing only the slot-owned
+	// buffers prevents CPU UI generation from racing a different in-flight slot.
+	VulkanBuffer& uiStaticVertexBuffer = uiStaticVertexBuffers[currentFrame];
+	VulkanBuffer& uiSdfVertexBuffer = uiSdfVertexBuffers[currentFrame];
 
 	auto appendQuadVertices = [](std::vector<float>& vertices, const glm::vec2& position, const glm::vec2& size, const glm::vec4& color, const glm::vec2& uvMin, const glm::vec2& uvMax) {
 		const float x = position.x;
@@ -2895,6 +2931,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 
 // VulkanContext::RenderFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view, const RenderOutputRequest& outputRequest) {
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 	// Skip rendering if initialization failed so we do not spam validation errors.
 	if (!impl->initialized || impl->skipFrame || impl->deviceLost) return;
 	if (impl->editorMode && impl->framebufferResized) {
@@ -6273,6 +6310,7 @@ void VulkanContext::Impl::GenerateVRSImage(VkCommandBuffer cmd, VkImageView colo
 
 // VulkanContext::EndFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::EndFrame() {
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 	if (!impl->initialized || impl->skipFrame || impl->deviceLost) return;
 
 	const auto endFrameStart = BackendClock::now();
@@ -6296,10 +6334,9 @@ void VulkanContext::EndFrame() {
 			impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 0u;
 		}
 		impl->editorRenderSubmitted = false;
-		// Do not churn device-idle waits, swapchains, image views, pipelines, and
-		// offscreen targets for every intermediate OS resize notification. The UI
-		// presentation path also pauses until this same quiet period has elapsed.
-		if (!impl->IsFramebufferResizeSettled()) {
+		// Rebuild promptly on the leading edge, then cap repeated device-idle work
+		// while the OS continues sending resize notifications during a drag.
+		if (!impl->ClaimFramebufferResizeRebuild()) {
 			return;
 		}
 		impl->framebufferResized = false;
@@ -6327,9 +6364,11 @@ void VulkanContext::EndFrame() {
 
 			VkSubmitInfo emptySubmitInfo{};
 			emptySubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-			emptySubmitInfo.waitSemaphoreCount = 1;
-			emptySubmitInfo.pWaitSemaphores = waitSemaphores;
-			emptySubmitInfo.pWaitDstStageMask = waitStages;
+			if (!impl->swapchainAcquireWaitConsumed) {
+				emptySubmitInfo.waitSemaphoreCount = 1;
+				emptySubmitInfo.pWaitSemaphores = waitSemaphores;
+				emptySubmitInfo.pWaitDstStageMask = waitStages;
+			}
 			emptySubmitInfo.signalSemaphoreCount = 1;
 			emptySubmitInfo.pSignalSemaphores = &signalSemaphore;
 
@@ -6389,6 +6428,8 @@ void VulkanContext::EndFrame() {
 				TERRAENGINE_LOG(LogLevel::Error, "failed to present empty swap chain image! Result: " << presentResult);
 			}
 
+			impl->swapchainImageAcquired = false;
+			impl->swapchainAcquireWaitConsumed = false;
 			impl->currentFrame = (impl->currentFrame + 1) % impl->MAX_FRAMES_IN_FLIGHT;
 			TerraEngine::Renderer::Vulkan::RecordVulkanFrameCost(
 				impl->pendingBackendFrameBreakdown,
@@ -6405,7 +6446,7 @@ void VulkanContext::EndFrame() {
 	VkSemaphore waitSemaphores[] = {impl->imageAvailableSemaphores[impl->currentFrame]};
 	VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!impl->editorMode && impl->swapchainImageAcquired) {
+	if (!impl->editorMode && impl->swapchainImageAcquired && !impl->swapchainAcquireWaitConsumed) {
 		submitInfo.waitSemaphoreCount = 1;
 		submitInfo.pWaitSemaphores = waitSemaphores;
 		submitInfo.pWaitDstStageMask = waitStages;
@@ -6557,6 +6598,8 @@ void VulkanContext::EndFrame() {
 			TERRAENGINE_LOG(LogLevel::Error, "failed to present swap chain image! Result: " << result);
 		}
 
+		impl->swapchainImageAcquired = false;
+		impl->swapchainAcquireWaitConsumed = false;
 		impl->currentFrame = (impl->currentFrame + 1) % impl->MAX_FRAMES_IN_FLIGHT;
 	}
 	TerraEngine::Renderer::Vulkan::RecordVulkanFrameCost(
@@ -6572,17 +6615,20 @@ void VulkanContext::EndFrame() {
 // VulkanContext::SetGlobalTaskShaderCullingEnabled is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::SetGlobalTaskShaderCullingEnabled(bool enabled) {
 	if (impl) {
+		std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 		impl->globalTaskShaderCullingEnabled = enabled;
 	}
 }
 
 // VulkanContext::IsTaskShaderSupported is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool VulkanContext::IsTaskShaderSupported() const {
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 	return impl != nullptr && impl->taskShaderSupported;
 }
 
 bool VulkanContext::SupportsVirtualGeometryMeshShaderRoute() const
 {
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 	return impl != nullptr && impl->meshShaderSupported;
 }
 
@@ -6618,6 +6664,7 @@ LightingDiagnosticsSnapshot VulkanContext::GetLatestLightingDiagnostics(RenderVi
 
 TerraEngine::Renderer::BackendCapabilityProfile VulkanContext::GetBackendCapabilityProfile() const
 {
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 	TerraEngine::Renderer::BackendCapabilityProfile profile;
 	profile.backendId = "vulkan";
 	// Vulkan supports recording independent command preparation on workers, but
@@ -6678,6 +6725,7 @@ bool VulkanContext::ConsumeRenderSubmissionPlan(const TerraEngine::Renderer::Ren
 
 TerraEngine::Renderer::RenderCaptureResult VulkanContext::ReadbackCapture(const TerraEngine::Renderer::RenderCaptureRequest& request)
 {
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 	TerraEngine::Renderer::RenderCaptureResult result;
 	result.requestId = request.requestId;
 	result.sourceKind = request.sourceKind;
@@ -7129,6 +7177,7 @@ void VulkanContext::Impl::ProcessReadbackRequests()
 
 std::vector<TerraEngine::Renderer::RenderCaptureResult> VulkanContext::PollCaptureReadbacks()
 {
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 	std::vector<TerraEngine::Renderer::RenderCaptureResult> results;
 	if (!impl || !impl->initialized || impl->device == VK_NULL_HANDLE)
 	{
@@ -7195,6 +7244,7 @@ VulkanContext::LiveGpuSubmissionBoundary VulkanContext::GetLiveGpuSubmissionBoun
 // VulkanContext::InvalidateMaterial is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::InvalidateMaterial(const TerraEngine::UUID& materialId) {
 	if (impl) {
+		std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 		impl->InvalidateMaterial(materialId);
 	}
 }
@@ -7202,6 +7252,7 @@ void VulkanContext::InvalidateMaterial(const TerraEngine::UUID& materialId) {
 // VulkanContext::InvalidateMesh is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::InvalidateMesh(const TerraEngine::UUID& meshId) {
 	if (impl) {
+		std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 		impl->InvalidateMesh(meshId);
 	}
 }
@@ -7209,6 +7260,7 @@ void VulkanContext::InvalidateMesh(const TerraEngine::UUID& meshId) {
 // VulkanContext::InvalidateTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::InvalidateTexture(const TerraEngine::UUID& textureId) {
 	if (impl) {
+		std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 		impl->InvalidateTexture(textureId);
 	}
 }
@@ -7216,6 +7268,7 @@ void VulkanContext::InvalidateTexture(const TerraEngine::UUID& textureId) {
 // VulkanContext::InvalidateResource is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::InvalidateResource(const TerraEngine::UUID& id) {
 	if (impl) {
+		std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 		impl->InvalidateResource(id, false);
 	}
 }
@@ -7224,6 +7277,7 @@ void VulkanContext::RetireLoadedResource(const TerraEngine::UUID& id, std::uint6
 	(void)frameId;
 	(void)debugName;
 	if (impl) {
+		std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 		// Vulkan resource residency currently shares the descriptor-safe
 		// invalidation path. Keeping this behind the RHI hook means the engine
 		// can swap in true fence-delayed destruction without changing callers.
@@ -7234,6 +7288,7 @@ void VulkanContext::RetireLoadedResource(const TerraEngine::UUID& id, std::uint6
 // VulkanContext::WaitIdle is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::WaitIdle() {
 	if (impl && impl->device) {
+		std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 		const auto waitStart = BackendClock::now();
 		const VkResult idleResult = impl->WaitDeviceIdle();
 		if (impl->MarkDeviceLost(idleResult, "explicit Vulkan WaitIdle")) {
@@ -7254,16 +7309,19 @@ void VulkanContext::WaitIdle() {
 
 // VulkanContext::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Shutdown() {
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 	impl->Cleanup();
 }
 
 // VulkanContext::ClearResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::ClearResources() {
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 	impl->ClearResources();
 }
 
 // VulkanContext::GetEditorHandles is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::GetEditorHandles(EditorHandles& h) {
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 	h.instance = impl->instance;
 	h.physicalDevice = impl->physicalDevice;
 	h.device = impl->device;
@@ -7291,6 +7349,7 @@ void VulkanContext::RunWithQueueAccess(const std::function<void()>& operation)
 		return;
 	}
 
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 	// ImGui's Vulkan backend performs font/texture upload submits internally,
 	// outside VulkanContext's normal wrappers. Share the exact same mutex so
 	// those submits cannot race worker-driven mesh or texture uploads.
@@ -7300,11 +7359,15 @@ void VulkanContext::RunWithQueueAccess(const std::function<void()>& operation)
 
 // VulkanContext::EnableEditorMode is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::EnableEditorMode() {
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 	impl->InitEditorMode();
 }
 
 // VulkanContext::PresentEditor is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-TerraEngine::Renderer::Vulkan::EditorPresentResult VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
+TerraEngine::Renderer::Vulkan::EditorPresentResult VulkanContext::PresentEditor(
+	std::function<void()> prepareUI,
+	std::function<void(void*)> renderUI) {
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 	using namespace TerraEngine::Renderer::Vulkan;
 	EditorPresentResult result{};
 	if (!impl->editorMode || !impl->initialized || impl->deviceLost) {
@@ -7349,39 +7412,13 @@ TerraEngine::Renderer::Vulkan::EditorPresentResult VulkanContext::PresentEditor(
 		return drainResult;
 	};
 
-	const VkResult waitResult = vkWaitForFences(
-		impl->device, 1, &impl->inFlightFences[impl->currentFrame], VK_TRUE, UINT64_MAX);
-	if (waitResult != VK_SUCCESS) {
-		return fail(EditorUiFrameStage::WaitFrameFence, waitResult, "editor frame fence wait");
-	}
-	impl->editorCompletionTracker.RecordFenceCompletion(impl->currentFrame);
-	impl->DrainRetiredOffscreenResources();
-
-	// The completed UI fence covers its acquire wait, optional offscreen wait,
-	// command buffers, and descriptor use. Reclaim temporary buffers before
-	// resetting the frame-owned pool; no queue-wide idle is needed here.
-	if (impl->currentFrame < impl->extraPrimaryCommandBuffers.size()) {
-		auto& extras = impl->extraPrimaryCommandBuffers[impl->currentFrame];
-		if (!extras.empty()) {
-			vkFreeCommandBuffers(impl->device, impl->commandPools[impl->currentFrame],
-				static_cast<std::uint32_t>(extras.size()), extras.data());
-			extras.clear();
-		}
-	}
-	if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
-		impl->pendingPrimaryCommandBuffers[impl->currentFrame].clear();
-	}
-	if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
-		impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 0u;
-	}
-	const VkResult poolResetResult = vkResetCommandPool(
-		impl->device, impl->commandPools[impl->currentFrame], 0);
-	if (poolResetResult != VK_SUCCESS) {
-		return fail(EditorUiFrameStage::ResetCommandPool, poolResetResult, "editor UI command pool reset");
-	}
+	// BeginFrame waited this slot's previous UI fence before recording began.
+	// Do not reset or free the pool here: EndFrame may have just submitted
+	// Scene/Game command buffers from it, and the UI submission below extends
+	// their semaphore chain to the fence that the next BeginFrame will wait.
 
 	if (impl->framebufferResized) {
-		if (!impl->IsFramebufferResizeSettled()) {
+		if (!impl->ClaimFramebufferResizeRebuild()) {
 			result.outcome = EditorPresentOutcome::Skipped;
 			return result;
 		}
@@ -7445,6 +7482,20 @@ TerraEngine::Renderer::Vulkan::EditorPresentResult VulkanContext::PresentEditor(
 		return fail(EditorUiFrameStage::AllocateCommandBuffer, allocationResult, "editor UI command buffer allocation");
 	}
 	impl->extraPrimaryCommandBuffers[impl->currentFrame].push_back(uiCommandBuffer);
+
+	try {
+		// Dynamic ImGui font textures use a backend-owned transfer command pool
+		// and hidden queue submit/wait calls. Process those operations only after
+		// this frame slot's fence completed, and before beginning the swapchain UI
+		// command buffer, so mouse-triggered glyph uploads cannot overlap an active
+		// render pass or retire descriptors still referenced by this frame slot.
+		std::lock_guard<std::mutex> queueLock(impl->queueAccessMutex);
+		if (prepareUI) prepareUI();
+	} catch (...) {
+		consumeOutstandingSemaphores(true);
+		return fail(EditorUiFrameStage::RecordDrawData, VK_ERROR_INITIALIZATION_FAILED,
+			"editor UI backend texture preparation");
+	}
 
 	VkCommandBufferBeginInfo begin{};
 	begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -7578,11 +7629,13 @@ TerraEngine::Renderer::Vulkan::EditorPresentResult VulkanContext::PresentEditor(
 
 TerraEngine::Renderer::Vulkan::EditorSubmissionProgress VulkanContext::GetEditorSubmissionProgress() const {
 	if (!impl) return {};
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 	return impl->editorCompletionTracker.Snapshot();
 }
 
 std::int32_t VulkanContext::FreeEditorDescriptorSet(void* descriptorSet) {
 	if (!impl || descriptorSet == nullptr) return static_cast<std::int32_t>(VK_SUCCESS);
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 	if (impl->deviceLost) return static_cast<std::int32_t>(VK_ERROR_DEVICE_LOST);
 	std::lock_guard<std::recursive_mutex> descriptorLock(impl->descriptorHostAccessMutex);
 	VkDescriptorSet descriptor = reinterpret_cast<VkDescriptorSet>(descriptorSet);
@@ -7593,6 +7646,7 @@ std::int32_t VulkanContext::FreeEditorDescriptorSet(void* descriptorSet) {
 void VulkanContext::AcknowledgeViewportTextureGeneration(
 	ViewType view, std::uint64_t generation, std::uint64_t finalUseSerial) {
 	if (!impl) return;
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
 	for (auto& retired : impl->retiredOffscreenResources) {
 		if (retired.editorView == view && retired.replacementGeneration == generation) {
 			retired.editorDescriptorAcknowledged = true;
@@ -8047,6 +8101,7 @@ void VulkanContext::Impl::RecreateOffscreenResources() {
 
 // VulkanContext::Impl::ClearResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::ClearResources() {
+	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
 	if (!device) return;
 	const VkResult idleResult = WaitDeviceIdle();
 	if (MarkDeviceLost(idleResult, "clear Vulkan resources device idle")) {

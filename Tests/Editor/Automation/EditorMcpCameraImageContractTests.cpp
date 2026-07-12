@@ -4,6 +4,7 @@
 #include "Engine/Components/CameraComponent.h"
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Renderer/RenderSystem.h"
+#include "Engine/Scripting/ScriptingSystem.h"
 
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/glm.hpp>
@@ -14,6 +15,10 @@ namespace TerraEngine::EditorTests
 	using TerraEngine::Editor::Automation::EditorAutomationService;
 	using TerraEngine::Editor::Automation::EditorMcpBridge;
 	using TerraEngine::Editor::Automation::MutationMode;
+	using TerraEngine::Editor::Automation::AutomationDispatchResult;
+	using TerraEngine::Editor::Automation::AutomationPermission;
+	using TerraEngine::Editor::Automation::AutomationRequestContext;
+	using TerraEngine::Editor::Automation::ErrorCategory;
 	using TerraEngine::Editor::Automation::WriteMode;
 
 	void RegisterEditorMcpCameraImageContractTests(TestRegistry& registry)
@@ -152,6 +157,26 @@ namespace TerraEngine::EditorTests
 
 		registry.Add("Editor.MCP.CameraImages.CustomCameraValidationContracts", [](TestContext& context) {
 			EditorAutomationService service;
+			const nlohmann::json nestedContract = service.HandleTool(
+				"camera.capture_custom",
+				{
+					{"camera", {
+						{"position", nlohmann::json::array({0.0f, 2.0f, 6.0f})},
+						{"lookAt", nlohmann::json::array({0.0f, 1.0f, 0.0f})},
+						{"up", nlohmann::json::array({0.0f, 1.0f, 0.0f})},
+						{"projection", "perspective"},
+						{"verticalFovDegrees", 60.0f},
+						{"nearPlane", 0.1f},
+						{"farPlane", 1000.0f}
+					}},
+					{"width", 64u},
+					{"height", 64u}
+				},
+				WriteMode::ReadOnly,
+				"custom-nested-contract");
+			context.Expect(nestedContract.value("ok", false), "Custom camera capture should accept the documented nested camera descriptor.");
+			context.ExpectEqual(std::string("customCamera"), nestedContract["data"]["source"].value("kind", std::string()), "Nested custom capture should retain its semantic source kind.");
+
 			const nlohmann::json valid = service.HandleTool(
 				"camera.capture_custom",
 				{{"position", nlohmann::json::array({0.0f, 1.0f, 5.0f})}, {"target", nlohmann::json::array({0.0f, 0.0f, 0.0f})}, {"projection", "orthographic"}, {"orthographicHeight", 8.0f}, {"width", 64u}, {"height", 64u}},
@@ -180,6 +205,44 @@ namespace TerraEngine::EditorTests
 				WriteMode::ReadOnly,
 				"custom-unsupported-projection");
 			context.Expect(!unsupportedProjection.value("ok", true), "Custom camera should reject unsupported projection modes.");
+		});
+
+		registry.Add("Editor.MCP.CameraImages.CaptureRemainsCompatibleAcrossPlayStates", [](TestContext& context) {
+			EditorAutomationService service;
+			ScriptingSystem& scripting = ScriptingSystem::Instance();
+			const auto capture = [&service, &context](std::string_view state, bool running, bool paused) {
+				ScriptingSystem::Instance().SetRunning(running);
+				ScriptingSystem::Instance().SetPaused(paused);
+				const std::string correlationId = "capture-" + std::string(state);
+				const nlohmann::json result = service.HandleTool(
+					"camera.capture_custom",
+					{{"position", nlohmann::json::array({0.0f, 0.0f, 5.0f})}, {"width", 32u}, {"height", 32u}, {"correlationId", correlationId}},
+					WriteMode::ReadOnly,
+					"request-" + std::string(state));
+				context.Expect(result.value("ok", false), "Read-only camera capture should remain available while " + std::string(state) + ".");
+				context.ExpectEqual(correlationId, result.value("correlationId", std::string()), "Capture results should preserve the diagnostic correlation identifier.");
+			};
+
+			capture("stopped", false, false);
+			capture("playing", true, false);
+			capture("paused", true, true);
+			scripting.SetPaused(false);
+			scripting.SetRunning(false);
+		});
+
+		registry.Add("Editor.MCP.CameraImages.RendererUnavailableIsRejectedBeforeHandler", [](TestContext& context) {
+			EditorAutomationService service;
+			AutomationRequestContext request;
+			request.requestId = "capture-renderer-unavailable";
+			request.correlationId = "renderer-down";
+			request.arguments = {{"position", nlohmann::json::array({0.0f, 0.0f, 5.0f})}, {"width", 32u}, {"height", 32u}};
+			request.state.rendererAvailable = false;
+			request.grantedPermission = AutomationPermission::Read;
+
+			const AutomationDispatchResult result = service.GetRegistry().Dispatch("camera.capture_custom", 1, request);
+			context.Expect(!result.ok, "A renderer-dependent capture must not run when discovery reports the renderer unavailable.");
+			context.Expect(result.error == ErrorCategory::Unavailable, "Renderer unavailability should use the typed unavailable category.");
+			context.Expect(!result.message.empty(), "Unavailable capture should explain which prerequisite is missing.");
 		});
 	}
 }

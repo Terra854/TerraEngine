@@ -11,6 +11,7 @@
 #include <chrono>
 #include <algorithm>
 #include <cmath>
+#include <cctype>
 #include <cstring>
 #include <cstdlib>
 #include <regex>
@@ -39,6 +40,63 @@ namespace {
 	constexpr const char* kMeshCompilerName = "TerraEngineMeshCompiler.exe";
 	constexpr const char* kTextureCompilerName = "TerraEngineTextureCompiler.exe";
 	constexpr const char* kShaderCompilerName = "TerraEngineShaderCompiler.exe";
+
+	std::string StableAssetOrganizationFingerprint(std::string_view value) {
+		// FNV-1a is deterministic across editor launches, unlike std::hash whose
+		// persistence guarantees are implementation-defined.
+		std::uint64_t hash = 1469598103934665603ull;
+		for (const unsigned char byte : value) {
+			hash ^= byte;
+			hash *= 1099511628211ull;
+		}
+		std::ostringstream stream;
+		stream << std::hex << std::setw(16) << std::setfill('0') << hash;
+		return stream.str();
+	}
+
+	bool HasParentTraversal(const std::filesystem::path& path) {
+		return std::find(path.begin(), path.end(), std::filesystem::path("..")) != path.end();
+	}
+
+	std::string LowerPath(std::filesystem::path path) {
+		std::string text = path.lexically_normal().generic_string();
+		std::transform(text.begin(), text.end(), text.begin(), [](unsigned char value) {
+			return static_cast<char>(std::tolower(value));
+		});
+		return text;
+	}
+
+	bool PathIsWithin(const std::filesystem::path& path, const std::filesystem::path& root) {
+		std::string candidate = LowerPath(path);
+		std::string boundary = LowerPath(root);
+		if (!boundary.ends_with('/')) {
+			boundary.push_back('/');
+		}
+		return candidate == boundary.substr(0u, boundary.size() - 1u) || candidate.rfind(boundary, 0u) == 0u;
+	}
+
+	std::optional<std::pair<std::string, std::filesystem::path>> ResolveContainedProjectAsset(
+		const std::filesystem::path& projectRoot,
+		const std::filesystem::path& assetRoot,
+		const std::filesystem::path& relative) {
+		if (relative.empty() || relative.is_absolute() || HasParentTraversal(relative)
+			|| relative.begin() == relative.end() || relative.begin()->generic_string() != "Assets"
+			|| relative.extension().empty()) {
+			return std::nullopt;
+		}
+
+		std::error_code canonicalError;
+		const std::filesystem::path canonicalRoot = std::filesystem::weakly_canonical(assetRoot, canonicalError);
+		if (canonicalError) {
+			return std::nullopt;
+		}
+		const std::filesystem::path absolute = (projectRoot / relative).lexically_normal();
+		const std::filesystem::path canonical = std::filesystem::weakly_canonical(absolute, canonicalError);
+		if (canonicalError || !PathIsWithin(canonical, canonicalRoot)) {
+			return std::nullopt;
+		}
+		return std::pair(relative.lexically_normal().generic_string(), absolute);
+	}
 
 	struct AssetImportCancelledException : std::runtime_error {
 		AssetImportCancelledException()
@@ -3055,4 +3113,202 @@ void AssetDatabase::SetScriptCompileState(const std::string& compileState, const
 		metadata.settings["lastBuildSummary"] = summary;
 		SaveMetadata(metadata);
 	}
+}
+
+AssetOrganizationImpact AssetDatabase::PrepareAssetOrganization(
+	const std::filesystem::path& sourceProjectRelative,
+	std::string_view operation,
+	const std::filesystem::path& destinationProjectRelative) const {
+	AssetOrganizationImpact impact;
+	const auto source = ResolveContainedProjectAsset(projectRoot, assetRoot, sourceProjectRelative);
+	if (!source || !std::filesystem::is_regular_file(source->second)) {
+		impact.errorCategory = "validation";
+		impact.error = "Asset source must identify an existing project-contained file.";
+		return impact;
+	}
+
+	impact.source = source->first;
+	if (!destinationProjectRelative.empty()) {
+		const auto destination = ResolveContainedProjectAsset(projectRoot, assetRoot, destinationProjectRelative);
+		if (!destination) {
+			impact.errorCategory = "validation";
+			impact.error = "Asset destination must remain canonically contained under Assets.";
+			return impact;
+		}
+		impact.destination = destination->first;
+	}
+	impact.fingerprint = StableAssetOrganizationFingerprint(
+		impact.source + "|" + std::string(operation) + "|" + impact.destination);
+
+	const std::filesystem::path generatedRoot = source->second.parent_path() / (source->second.stem().string() + "_Generated");
+	std::error_code iteratorError;
+	if (std::filesystem::exists(generatedRoot, iteratorError)) {
+		for (std::filesystem::recursive_directory_iterator iterator(generatedRoot, iteratorError), end;
+			iterator != end && !iteratorError; iterator.increment(iteratorError)) {
+			if (iterator->is_regular_file()) {
+				impact.generatedChildren.push_back(std::filesystem::relative(iterator->path(), projectRoot).generic_string());
+			}
+		}
+	}
+
+	// Reference discovery intentionally reads only modest text-like project
+	// files. Binary assets are repaired by their importers/index metadata and
+	// must never be rewritten by a string replacement pass.
+	for (std::filesystem::recursive_directory_iterator iterator(assetRoot, iteratorError), end;
+		iterator != end && !iteratorError; iterator.increment(iteratorError)) {
+		if (!iterator->is_regular_file() || iterator->path() == source->second
+			|| iterator->path().extension() == ".meta" || iterator->file_size() > 4u * 1024u * 1024u) {
+			continue;
+		}
+		std::ifstream input(iterator->path(), std::ios::binary);
+		const std::string contents((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+		if (contents.find(impact.source) != std::string::npos) {
+			const std::string dependent = std::filesystem::relative(iterator->path(), projectRoot).generic_string();
+			impact.dependents.push_back(dependent);
+			impact.repairPlan.push_back("replace " + impact.source + " in " + dependent);
+		}
+	}
+	impact.rollbackJournalEstimate = 1u + impact.generatedChildren.size() + impact.dependents.size();
+	impact.valid = true;
+	return impact;
+}
+
+AssetOrganizationResult AssetDatabase::PublishAssetOrganization(
+	const std::filesystem::path& sourceProjectRelative,
+	const std::filesystem::path& destinationProjectRelative,
+	std::string_view operation,
+	std::string_view approvedImpactFingerprint) {
+	AssetOrganizationResult result;
+	const bool duplicate = operation == "duplicate";
+	if (!duplicate && operation != "move" && operation != "rename") {
+		result.errorCategory = "validation";
+		result.error = "Unsupported asset organization operation.";
+		return result;
+	}
+	const AssetOrganizationImpact impact = PrepareAssetOrganization(sourceProjectRelative, operation, destinationProjectRelative);
+	if (!impact.valid) {
+		result.errorCategory = impact.errorCategory;
+		result.error = impact.error;
+		return result;
+	}
+	if (!approvedImpactFingerprint.empty() && approvedImpactFingerprint != impact.fingerprint) {
+		result.errorCategory = "conflict";
+		result.error = "Approved asset impact no longer matches the normalized request.";
+		return result;
+	}
+
+	const auto source = ResolveContainedProjectAsset(projectRoot, assetRoot, impact.source);
+	const auto destination = ResolveContainedProjectAsset(projectRoot, assetRoot, impact.destination);
+	if (!source || !destination) {
+		result.errorCategory = "validation";
+		result.error = "Asset source and destination must remain under Assets.";
+		return result;
+	}
+	if (std::filesystem::exists(destination->second)) {
+		result.errorCategory = "conflict";
+		result.error = "Asset destination already exists.";
+		return result;
+	}
+
+	std::string stableId = StableAssetOrganizationFingerprint(impact.source);
+	if (const auto metadata = assets.find(source->second); metadata != assets.end()) {
+		stableId = UuidToString(metadata->second.guid);
+	}
+	if (duplicate) {
+		stableId = StableAssetOrganizationFingerprint(impact.destination + "|duplicate");
+	}
+
+	struct ReferenceJournalEntry {
+		std::filesystem::path path;
+		std::string original;
+	};
+	std::vector<ReferenceJournalEntry> references;
+	for (const std::string& dependent : impact.dependents) {
+		const std::filesystem::path path = projectRoot / dependent;
+		std::ifstream input(path, std::ios::binary);
+		references.push_back({path, std::string((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>())});
+	}
+
+	const std::filesystem::path sourceMeta = source->second.string() + ".meta";
+	const std::filesystem::path destinationMeta = destination->second.string() + ".meta";
+	const std::filesystem::path sourceGenerated = source->second.parent_path() / (source->second.stem().string() + "_Generated");
+	const std::filesystem::path destinationGenerated = destination->second.parent_path() / (destination->second.stem().string() + "_Generated");
+	bool primaryPublished = false;
+	bool metaPublished = false;
+	bool generatedPublished = false;
+	std::error_code fileError;
+	std::filesystem::create_directories(destination->second.parent_path(), fileError);
+	if (!fileError) {
+		if (duplicate) {
+			std::filesystem::copy_file(source->second, destination->second, std::filesystem::copy_options::none, fileError);
+		} else {
+			std::filesystem::rename(source->second, destination->second, fileError);
+		}
+		primaryPublished = !fileError;
+	}
+	if (!fileError && std::filesystem::exists(sourceMeta)) {
+		if (duplicate) {
+			// A duplicate receives fresh metadata during ScanProject so its GUID
+			// cannot alias the original asset identity.
+		} else {
+			std::filesystem::rename(sourceMeta, destinationMeta, fileError);
+			metaPublished = !fileError;
+		}
+	}
+	if (!fileError && std::filesystem::exists(sourceGenerated)) {
+		if (duplicate) {
+			std::filesystem::copy(sourceGenerated, destinationGenerated, std::filesystem::copy_options::recursive, fileError);
+		} else {
+			std::filesystem::rename(sourceGenerated, destinationGenerated, fileError);
+		}
+		generatedPublished = !fileError;
+	}
+	if (!fileError) {
+		for (ReferenceJournalEntry& entry : references) {
+			std::string updated = entry.original;
+			std::size_t cursor = 0u;
+			while ((cursor = updated.find(impact.source, cursor)) != std::string::npos) {
+				updated.replace(cursor, impact.source.size(), impact.destination);
+				cursor += impact.destination.size();
+			}
+			std::ofstream output(entry.path, std::ios::binary | std::ios::trunc);
+			output << updated;
+			if (!output.good()) {
+				fileError = std::make_error_code(std::errc::io_error);
+				break;
+			}
+			result.repairedReferences.push_back(std::filesystem::relative(entry.path, projectRoot).generic_string());
+		}
+	}
+
+	if (fileError) {
+		for (const ReferenceJournalEntry& entry : references) {
+			std::ofstream output(entry.path, std::ios::binary | std::ios::trunc);
+			output << entry.original;
+		}
+		std::error_code rollbackError;
+		if (generatedPublished) {
+			if (duplicate) std::filesystem::remove_all(destinationGenerated, rollbackError);
+			else std::filesystem::rename(destinationGenerated, sourceGenerated, rollbackError);
+		}
+		if (metaPublished) std::filesystem::rename(destinationMeta, sourceMeta, rollbackError);
+		if (primaryPublished) {
+			if (duplicate) std::filesystem::remove(destination->second, rollbackError);
+			else std::filesystem::rename(destination->second, source->second, rollbackError);
+		}
+		result.errorCategory = "internal";
+		result.error = "Asset publication failed: " + fileError.message();
+		result.rollback = rollbackError ? "failed" : "completed";
+		return result;
+	}
+
+	// Publication is protected and complete before the editor index is
+	// refreshed, so observers never receive an index pointing at half-moved
+	// source/generated files.
+	ScanProject();
+	result.published = true;
+	result.path = impact.destination;
+	result.assetId = stableId;
+	result.rollback = "not_required";
+	return result;
 }

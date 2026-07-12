@@ -209,6 +209,8 @@ namespace TerraEngine::Scheduling {
 			{ "ViewportTextureRegistry", "Scene and Game descriptor registration and retirement ownership.", "" },
 			{ "EditorDiagnostics", "Editor-facing UI submission and presentation diagnostics.", "" },
 			{ "EditorAutomationState", "Editor automation and MCP-visible UI state.", "" },
+			{ "EditorAutomationQueue", "Immutable queued MCP/editor automation requests awaiting worker preparation or protected commit.", "Prepared without mutating live editor or scene state." },
+			{ "EditorAutomationSession", "Capability, job, idempotency, approval, activity, and structured-log state retained for the current editor session.", "Worker readers consume immutable snapshots; publication remains protected." },
 			{ kResourceVirtualGeometryQualityProfile, "Renderer-owned virtual geometry quality, LOD, Hi-Z, debug visualization, and budget settings.", "Read by render preparation when choosing cluster packet detail and page request pressure." },
 			{ kResourceVirtualGeometryResidencySnapshots, "Compatibility alias for immutable virtual geometry page residency state prepared before render selection.", "Kept while older RenderSystem declarations migrate to the explicit page-residency resource name." },
 			{ kResourceVirtualGeometryPageResidencySnapshots, "Immutable virtual geometry page residency state prepared before render selection.", "Read by render preparation; publication remains protected by ResourceManager/resource residency boundaries." },

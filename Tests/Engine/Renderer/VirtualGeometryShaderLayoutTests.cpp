@@ -373,13 +373,14 @@ namespace TerraEngine::Tests
 
 			context.Expect(ShaderContains(vulkanResources, "publication.buffer == buffer.buffer"), "View-local VG bindless descriptors should skip redundant descriptor-set updates when the published buffer did not change.");
 			context.Expect(ShaderContains(vulkanResources, "WaitForDescriptorMutationIdle();"), "Changing a VG bindless descriptor should route through the shared descriptor-idle helper.");
-			context.Expect(ShaderContains(vulkanResources, "pendingCommandBuffers.clear();"), "Unsubmitted recorded editor views should be discarded before a shared descriptor set is updated.");
+			context.Expect(ShaderContains(vulkanResources, "prefixSubmit.pCommandBuffers = pendingCommandBuffers.data();"), "Recorded views should be submitted before a shared descriptor set is updated.");
 			context.Expect(ShaderContains(vulkanResources, "WaitGraphicsQueueIdle();"), "The descriptor mutation path should still drain already-submitted view work through the synchronized queue boundary before mutating the shared bindless set.");
 			context.Expect(ShaderContains(vulkanResources, "if (currentFrame < pendingPrimaryCommandBuffers.size())"), "The central descriptor mutation idle helper should drain recorded view command buffers in editor and exported runtime builds.");
 			context.Expect(ShaderContains(vulkanResources, "pendingPrimaryCommandBuffersSubmitted[currentFrame] != 0u"), "Already-submitted view command buffers should be tracked independently from the UI semaphore state.");
-			context.Expect(ShaderContains(vulkanResources, "if (alreadySubmitted)"), "Already-submitted view command buffers should be waited on, not submitted a second time.");
-			context.Expect(ShaderContains(vulkanResources, "failed to wait for submitted render command buffers before descriptor mutation"), "The submitted-view branch should report queue-idle failures before mutating descriptors.");
-			context.Expect(ShaderContains(vulkanResources, "activeRenderSnapshot.state = RenderSnapshotState::Fallback"), "Dropped view command buffers should mark their render snapshot as a fallback instead of reporting submitted work.");
+			context.Expect(ShaderContains(vulkanResources, "if (!alreadySubmitted)"), "Only unsubmitted view command buffers should enter the protected prefix-submit path.");
+			context.Expect(ShaderContains(vulkanResources, "failed to wait for render command buffers before descriptor mutation"), "The descriptor boundary should report queue-idle failures before mutating descriptors.");
+			context.Expect(ShaderContains(vulkanResources, "owner.state = RenderSnapshotState::Submitted"), "Flushed view command buffers should remain truthful submitted work instead of becoming a fallback.");
+			context.Expect(!ShaderContains(vulkanResources, "Treat them as stale snapshots and skip"), "Descriptor safety must not silently discard a recorded Scene or Game view.");
 		});
 
 		registry.Add("VirtualGeometry.ShaderLayout.ClusterDepthDescriptorPublishesBeforeComputeBind", [](TestContext& context) {
@@ -488,8 +489,9 @@ namespace TerraEngine::Tests
 		registry.Add("VirtualGeometry.ShaderLayout.EditorCommandPoolsResetOnlyAfterQueueIdle", [](TestContext& context) {
 			const std::string vulkanSource = ReadVulkanContextSource();
 
-			context.Expect(ShaderContains(vulkanSource, "editorCompletionTracker.RecordFenceCompletion"), "PresentEditor should prove frame command-pool ownership through its completed UI fence.");
-			context.Expect(ShaderContains(vulkanSource, "const VkResult poolResetResult = vkResetCommandPool"), "Command-pool reset failures must stop the UI frame.");
+			context.Expect(ShaderContains(vulkanSource, "editorCompletionTracker.RecordFenceCompletion"), "BeginFrame should publish frame-slot completion from the completed UI fence.");
+			context.Expect(ShaderContains(vulkanSource, "const VkResult poolResetResult = vkResetCommandPool"), "BeginFrame command-pool reset failures must stop recording for that slot.");
+			context.Expect(ShaderContains(vulkanSource, "Do not reset or free the pool here: EndFrame may have just submitted"), "PresentEditor must preserve command buffers submitted earlier in the same frame.");
 			context.Expect(ShaderContains(vulkanSource, "Skipping editor render recovery because the graphics queue did not prove idle"), "Editor render recovery should not recreate swapchain resources while submitted work may still reference them.");
 			context.Expect(ShaderContains(vulkanSource, "fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT"), "Failed UI submits should restore a signaled frame fence after the pre-submit reset.");
 		});

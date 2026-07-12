@@ -6,6 +6,7 @@
 
 #include <filesystem>
 #include <string>
+#include <vector>
 
 enum class ScriptWorkspaceHealth
 {
@@ -26,6 +27,34 @@ struct ScriptWorkspaceStatus
 	std::filesystem::path outputRoot;
 	std::filesystem::path referenceRoot;
 	std::string lastMessage;
+};
+
+// ScriptTemplateDescriptor is the complete allowlist exposed to automation.
+// Callers receive semantic IDs only; template source paths and raw contents
+// remain editor-owned so this API cannot become an arbitrary file writer.
+struct ScriptTemplateDescriptor
+{
+	std::string id;
+	std::string displayName;
+	std::string description;
+};
+
+// ScriptCreationRequest describes the constrained inputs accepted by the
+// editor-owned script publisher. destination is always project-relative and
+// must resolve beneath Assets, including after symlink resolution.
+struct ScriptCreationRequest
+{
+	std::string templateId;
+	std::string typeName;
+	std::string namespaceName;
+	std::filesystem::path destination;
+};
+
+struct ScriptCreationResult
+{
+	std::filesystem::path projectRelativePath;
+	std::filesystem::path absolutePath;
+	std::string qualifiedTypeName;
 };
 
 // Owns the on-disk Assembly-CSharp workspace that the editor regenerates for
@@ -57,6 +86,9 @@ public:
 
 	bool EnsureWorkspace(std::string* outError = nullptr);
 	bool RegenerateWorkspace(std::string* outError = nullptr);
+	[[nodiscard]] std::vector<ScriptTemplateDescriptor> ListApprovedTemplates() const;
+	bool CreateApprovedScript(const ScriptCreationRequest& request, ScriptCreationResult& outResult, std::string* outError = nullptr);
+	bool SynchronizeWorkspace(ScriptWorkspaceStatus& outStatus, std::string* outError = nullptr);
 	bool CreateScriptFromTemplate(const std::filesystem::path& destinationDirectory, const std::string& className, std::filesystem::path& outCreatedPath, std::string* outError = nullptr);
 	bool OpenScriptInExternalEditor(const std::filesystem::path& scriptPath, const std::string& commandTemplate, std::string* outError = nullptr);
 	bool SyncManagedReferences(std::string* outError = nullptr);

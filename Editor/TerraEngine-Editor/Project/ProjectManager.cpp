@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <string>
 #include "Engine/Core/Logger/Logger.h"
+#include "Engine/Scene/SceneManager.h"
 #include "Resource/ResourceStreaming.h"
 
 #ifdef _WIN32
@@ -473,6 +474,55 @@ const std::vector<RecentProjectEntry>& ProjectManager::GetRecentProjects() const
 // ProjectManager::GetEditorPreferences is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 const EditorPreferences& ProjectManager::GetEditorPreferences() const {
 	return editorPrefs;
+}
+
+bool ProjectManager::ReadAutomationSetting(
+	bool projectScope,
+	std::string_view key,
+	nlohmann::json& value,
+	std::string& error) const {
+	if (projectScope) {
+		if (!currentSettings.has_value()) {
+			error = "A project must be open before reading project settings.";
+			return false;
+		}
+		value = TerraEngine::Editor::Settings::ReadProjectAutomationSetting(*currentSettings, key);
+	} else {
+		value = TerraEngine::Editor::Settings::ReadEditorAutomationSetting(editorPrefs, key);
+	}
+	if (value.is_null()) {
+		error = "Setting key is not allowlisted.";
+		return false;
+	}
+	return true;
+}
+
+bool ProjectManager::WriteAutomationSetting(
+	bool projectScope,
+	std::string_view key,
+	const nlohmann::json& value,
+	std::string& error) {
+	if (projectScope) {
+		if (!currentSettings.has_value()) {
+			error = "A project must be open before writing project settings.";
+			return false;
+		}
+		ProjectSettings candidate = *currentSettings;
+		if (!TerraEngine::Editor::Settings::WriteProjectAutomationSetting(candidate, key, value, error)) {
+			return false;
+		}
+		currentSettings = std::move(candidate);
+		SaveProjectSettings();
+		return true;
+	}
+
+	EditorPreferences candidate = editorPrefs;
+	if (!TerraEngine::Editor::Settings::WriteEditorAutomationSetting(candidate, key, value, error)) {
+		return false;
+	}
+	editorPrefs = std::move(candidate);
+	SaveEditorPreferences();
+	return true;
 }
 
 const RendererRecoveryProjectActionState& ProjectManager::GetRendererRecoveryActionState() const {

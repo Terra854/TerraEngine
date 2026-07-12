@@ -7,6 +7,19 @@
 
 #include "Logger.h"
 
+thread_local LogContext Logger::currentContext{};
+
+Logger::ScopedContext::ScopedContext(LogContext context)
+	: previous(Logger::currentContext)
+{
+	Logger::currentContext = std::move(context);
+}
+
+Logger::ScopedContext::~ScopedContext()
+{
+	Logger::currentContext = std::move(previous);
+}
+
 void Logger::Log(LogLevel level, const std::string& file, int line, const std::string& functionSignature, const std::string& message, bool isManaged)
 {
 	LogEntry entry;
@@ -95,12 +108,53 @@ void Logger::Log(LogLevel level, const std::string& file, int line, const std::s
 	entry.functionSignature = cleanedSignature;
 	entry.message = message;
 	entry.isManaged = isManaged;
+	const LogContext context = GetCurrentContext();
+	entry.category = context.category;
+	entry.source = context.source;
+	entry.correlationId = context.correlationId;
+	entry.requestId = context.requestId;
+	entry.jobId = context.jobId;
+
+	{
+		// Holding the sink lock through callbacks gives RemoveSink a strict lifetime
+		// boundary. Sinks must only copy/queue the entry and must not log recursively.
+		std::lock_guard<std::mutex> lock(sinkMutex);
+		for (const auto& [sinkId, sink] : sinks)
+		{
+			(void)sinkId;
+			if (sink)
+				sink(entry);
+		}
+	}
 
 	{
 		std::lock_guard<std::mutex> lock(m);
 		q.push(std::move(entry));
 	}
 	cv.notify_one();
+}
+
+Logger::SinkId Logger::AddSink(Sink sink)
+{
+	if (!sink)
+		return 0u;
+	const SinkId sinkId = nextSinkId.fetch_add(1u, std::memory_order_relaxed);
+	std::lock_guard<std::mutex> lock(sinkMutex);
+	sinks.emplace(sinkId, std::move(sink));
+	return sinkId;
+}
+
+void Logger::RemoveSink(SinkId sinkId)
+{
+	if (sinkId == 0u)
+		return;
+	std::lock_guard<std::mutex> lock(sinkMutex);
+	sinks.erase(sinkId);
+}
+
+LogContext Logger::GetCurrentContext()
+{
+	return currentContext;
 }
 
 // Logger::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

@@ -24,6 +24,9 @@ public:
 	const std::string& GetWindowMenuCategoryPath() const { return m_WindowMenuCategoryPath; }
 
 protected:
+	// Derived windows may publish first-frame placement constraints before ImGui
+	// begins the window. The default keeps existing docking/layout behavior.
+	virtual void OnBeforeBegin() {}
 	virtual void OnGui() = 0;
 	// OnContextMenu is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	virtual void OnContextMenu() {}

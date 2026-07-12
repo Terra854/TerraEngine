@@ -503,6 +503,93 @@ bool SceneManager::SaveScene(std::optional<std::filesystem::path> path)
 	return true;
 }
 
+std::vector<std::filesystem::path> SceneManager::ListSceneFiles(const std::filesystem::path& projectRoot) const
+{
+	std::vector<std::filesystem::path> scenes;
+	const std::filesystem::path assetsRoot = projectRoot / "Assets";
+	std::error_code errorCode;
+	if (!std::filesystem::exists(assetsRoot, errorCode))
+	{
+		return scenes;
+	}
+	for (std::filesystem::recursive_directory_iterator iterator(assetsRoot, errorCode), end; iterator != end && !errorCode; iterator.increment(errorCode))
+	{
+		if (iterator->is_regular_file(errorCode) && iterator->path().extension() == ".tescene")
+		{
+			scenes.push_back(std::filesystem::relative(iterator->path(), projectRoot, errorCode).lexically_normal());
+		}
+	}
+	std::sort(scenes.begin(), scenes.end());
+	return scenes;
+}
+
+bool SceneManager::CreateSceneFile(const std::filesystem::path& path, std::string_view name, std::string* outError)
+{
+	if (path.extension() != ".tescene" || std::filesystem::exists(path))
+	{
+		if (outError) *outError = "Scene destination must be a new .tescene file.";
+		return false;
+	}
+	std::error_code errorCode;
+	std::filesystem::create_directories(path.parent_path(), errorCode);
+	if (errorCode)
+	{
+		if (outError) *outError = "Scene destination directory could not be created.";
+		return false;
+	}
+	std::ofstream output(path, std::ios::binary | std::ios::trunc);
+	if (!output)
+	{
+		if (outError) *outError = "Scene destination could not be opened.";
+		return false;
+	}
+	output << nlohmann::json{
+		{"name", name.empty() ? path.stem().string() : std::string(name)},
+		{"sceneSettings", nlohmann::json::object()},
+		{"objects", nlohmann::json::array()}
+	}.dump(4);
+	return output.good();
+}
+
+bool SceneManager::DuplicateSceneFile(const std::filesystem::path& source, const std::filesystem::path& destination, std::string* outError)
+{
+	if (source.extension() != ".tescene" || destination.extension() != ".tescene"
+		|| !std::filesystem::is_regular_file(source) || std::filesystem::exists(destination))
+	{
+		if (outError) *outError = "Scene source must exist and destination must be a new .tescene file.";
+		return false;
+	}
+	std::error_code errorCode;
+	std::filesystem::create_directories(destination.parent_path(), errorCode);
+	const bool copied = !errorCode && std::filesystem::copy_file(source, destination, std::filesystem::copy_options::none, errorCode);
+	if (!copied || errorCode)
+	{
+		if (outError) *outError = "Scene file could not be duplicated.";
+		return false;
+	}
+	return true;
+}
+
+bool SceneManager::RenameSceneFile(const std::filesystem::path& source, const std::filesystem::path& destination, std::string* outError)
+{
+	if (!DuplicateSceneFile(source, destination, outError))
+	{
+		return false;
+	}
+	std::error_code errorCode;
+	std::filesystem::remove(source, errorCode);
+	if (errorCode)
+	{
+		// Roll back the copied destination so a failed rename never leaves two
+		// identities that look like a successful protected commit.
+		std::error_code rollbackError;
+		std::filesystem::remove(destination, rollbackError);
+		if (outError) *outError = "Scene source could not be removed; rename was rolled back.";
+		return false;
+	}
+	return true;
+}
+
 // SceneManager::UnloadAll is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SceneManager::UnloadAll()
 {

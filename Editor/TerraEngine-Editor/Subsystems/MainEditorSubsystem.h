@@ -14,6 +14,8 @@
 #include <string_view>
 #include <filesystem>
 #include <memory>
+#include <unordered_map>
+#include <nlohmann/json.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/vec3.hpp>
 #include "IEditorSubsystem.h"
@@ -26,6 +28,48 @@
 
 class Object;
 class VulkanContext;
+
+// PrefabAuthoringService owns the semantic prefab operations shared by the
+// native editor and automation. Its session state is independent from MCP, so
+// future UI callers can use the same stable identities and conflict rules.
+class PrefabAuthoringService {
+public:
+	struct Result {
+		bool ok = false;
+		std::string errorCategory;
+		std::string message;
+		nlohmann::json data = nlohmann::json::object();
+	};
+
+	Result Create(entt::entity sourceEntity, const std::filesystem::path& projectRelativePath, const std::filesystem::path& absolutePath);
+	Result Instantiate(std::string_view prefabIdentity, std::string_view requestedName);
+	Result InspectOverrides(std::string_view instanceIdentity) const;
+	Result ApplyOverrides(std::string_view instanceIdentity, std::optional<std::uint64_t> expectedGeneration);
+	Result RevertOverrides(std::string_view instanceIdentity);
+	Result OpenEditContext(std::string_view prefabIdentity);
+	Result CloseEditContext(std::string_view contextIdentity);
+
+private:
+	struct PrefabState {
+		std::string prefabId;
+		std::string relativePath;
+		std::string sourceObjectId;
+		std::string sourceName;
+		std::uint64_t generation = 1u;
+	};
+	struct InstanceState {
+		std::string prefabId;
+		std::string sourceName;
+	};
+
+	std::string ResolvePrefabId(std::string_view identity) const;
+	std::unordered_map<std::string, PrefabState> prefabsById;
+	std::unordered_map<std::string, std::string> prefabIdByPath;
+	std::unordered_map<std::string, InstanceState> instances;
+	std::string activeContextId;
+	std::string activeContextPrefabId;
+	std::uint64_t nextPrefabId = 1u;
+};
 
 // class MainEditorSubsystem groups related state and operations so callers have one documented contract.
 class MainEditorSubsystem : public IEditorSubsystem {
@@ -86,6 +130,7 @@ public:
 	std::filesystem::path GetPrefabEditingPath() const { return m_PrefabEditingPath; }
 	bool IsPrefabEditingDirty() const { return m_PrefabEditingDirty; }
 	bool TryApplyPrefabModeGameViewCameras(float aspect) const;
+	PrefabAuthoringService& GetPrefabAuthoringService() { return prefabAuthoringService; }
 	bool ShouldSceneViewUseSceneContextForPrefabEdit() const { return m_IsPrefabEditingMode && m_PrefabEditOpenedFromSceneObject; }
 	
 	// Request actions with dirty check
@@ -123,6 +168,9 @@ public:
 		TerraEngine::Editor::ProjectSettings::ProjectSettingsCategoryId::Project);
 	void OpenPreferences(TerraEngine::Editor::Preferences::PreferencesCategoryId categoryId =
 		TerraEngine::Editor::Preferences::PreferencesCategoryId::Diagnostics);
+	// The project hub renders only editor-wide windows. Project-dependent windows
+	// remain hidden until an active project owns their underlying state.
+	void DrawProjectHubWindows();
 
 private:
 	void CapturePlayModeSceneState();
@@ -186,6 +234,7 @@ private:
 	std::optional<entt::entity> selectedEntity;
 	std::optional<std::filesystem::path> selectedAsset;
 	std::optional<SelectedPackageChildAsset> selectedPackageChildAsset;
+	PrefabAuthoringService prefabAuthoringService;
 	std::filesystem::path m_CurrentScenePath;
 
 	// PendingAction names the supported states explicitly so serialization and switches stay readable.

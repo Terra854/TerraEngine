@@ -126,6 +126,7 @@ namespace TerraEngine::Tests {
 	void RegisterTransactionalMutationDiagnosticsTests(TestRegistry& registry);
 	void RegisterTransactionalMutationPolicyTests(TestRegistry& registry);
 	void RegisterTransactionalMutationSerializationTests(TestRegistry& registry);
+	void RegisterAutomationTransactionVisibilityTests(TestRegistry& registry);
 	void RegisterParallelMutationBufferTests(TestRegistry& registry);
 	void RegisterSkyComponentSerializationTests(TestRegistry& registry);
 	void RegisterSceneStreamingDeferredLoadTests(TestRegistry& registry);
@@ -292,6 +293,7 @@ int main() {
 	TerraEngine::Tests::RegisterTransactionalMutationDiagnosticsTests(registry);
 	TerraEngine::Tests::RegisterTransactionalMutationPolicyTests(registry);
 	TerraEngine::Tests::RegisterTransactionalMutationSerializationTests(registry);
+	TerraEngine::Tests::RegisterAutomationTransactionVisibilityTests(registry);
 	TerraEngine::Tests::RegisterParallelMutationBufferTests(registry);
 	TerraEngine::Tests::RegisterSkyComponentSerializationTests(registry);
 	TerraEngine::Tests::RegisterSceneStreamingDeferredLoadTests(registry);

@@ -22,6 +22,7 @@ public:
 	void ApplyStoredPreferencesToRenderSystem();
 
 protected:
+	void OnBeforeBegin() override;
 	void OnGui() override;
 
 private:

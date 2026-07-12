@@ -15,6 +15,9 @@
 #include <sstream>
 #include <iomanip>
 #include <atomic>
+#include <cstdint>
+#include <functional>
+#include <map>
 #include <string>
 
 // Define the log severity levels.
@@ -36,11 +39,47 @@ struct LogEntry {
 	std::string functionSignature;                   // Function signature of the caller for richer context.
 	std::string message;                             // Human-readable message payload.
 	bool isManaged = false;                          // Whether the log originated from managed code (C#).
+	// Automation context is optional. Ordinary engine logging remains unchanged,
+	// while request and job scopes can attach stable identities without encoding
+	// machine-readable data into the human-facing message.
+	std::string category;
+	std::string source;
+	std::string correlationId;
+	std::string requestId;
+	std::string jobId;
+};
+
+// LogContext carries diagnostic identity across a synchronous request or one
+// explicitly scoped worker task. Context is thread-local so concurrent MCP jobs
+// cannot overwrite each other's correlation identifiers.
+struct LogContext {
+	std::string category;
+	std::string source;
+	std::string correlationId;
+	std::string requestId;
+	std::string jobId;
 };
 
 // class Logger groups related state and operations so callers have one documented contract.
 class Logger {
 public:
+	using SinkId = std::uint64_t;
+	using Sink = std::function<void(const LogEntry&)>;
+
+	// ScopedContext restores the caller's previous context at scope exit. Worker
+	// jobs must create their own scope because thread-local state is intentionally
+	// not inherited implicitly by unrelated thread-pool work.
+	class ScopedContext {
+	public:
+		explicit ScopedContext(LogContext context);
+		~ScopedContext();
+		ScopedContext(const ScopedContext&) = delete;
+		ScopedContext& operator=(const ScopedContext&) = delete;
+
+	private:
+		LogContext previous;
+	};
+
 	// Retrieve the singleton instance.
 	// Instance is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	static Logger& Instance() {
@@ -54,6 +93,13 @@ public:
 
 	// Thread-safe log function that records the call-site file, line, and function signature.
 	void Log(LogLevel level, const std::string& file, int line, const std::string& functionSignature, const std::string& message, bool isManaged = false);
+
+	// Sinks receive immutable entries synchronously before console publication.
+	// RemoveSink waits for an in-flight callback, which makes it safe for an
+	// editor-owned store to detach during shutdown without a dangling callback.
+	[[nodiscard]] SinkId AddSink(Sink sink);
+	void RemoveSink(SinkId sinkId);
+	[[nodiscard]] static LogContext GetCurrentContext();
 
 	void SetMinLogLevel(LogLevel level) { minLevel = level; }
 	// GetMinLogLevel is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -82,6 +128,10 @@ private:
 	std::thread t; // Seperate thread for logging outside of the main thread and threadpool
 	std::atomic<bool> done;
 	std::atomic<LogLevel> minLevel{LogLevel::Debug};
+	std::mutex sinkMutex;
+	std::map<SinkId, Sink> sinks;
+	std::atomic<SinkId> nextSinkId{1u};
+	static thread_local LogContext currentContext;
 };
 
 // Macro to simplify logging while capturing source file, line, and function signature.

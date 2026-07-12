@@ -8,6 +8,8 @@
 #include "../Windows/SceneViewOverlayTypes.h"
 
 #include <string>
+#include <array>
+#include <string_view>
 #include <vector>
 #include <nlohmann/json.hpp>
 
@@ -102,3 +104,49 @@ struct EditorPreferences {
 		preferences.sceneViewOverlay = TerraEngine::Editor::SceneViewOverlay::SanitizePreference(preferences.sceneViewOverlay);
 	}
 };
+
+namespace TerraEngine::Editor::Settings
+{
+	inline constexpr std::array<std::string_view, 3> kEditorAutomationSettingKeys{
+		"autoBuildScripts",
+		"vulkanValidationLayers",
+		"renderDebugDiagnostics"
+	};
+
+	inline nlohmann::json ReadEditorAutomationSetting(const ::EditorPreferences& preferences, std::string_view key)
+	{
+		if (key == "autoBuildScripts")
+			return preferences.autoBuildScripts;
+		if (key == "vulkanValidationLayers")
+			return preferences.vulkanValidationLayers;
+		if (key == "renderDebugDiagnostics")
+			return preferences.renderDebugDiagnostics;
+		return nullptr;
+	}
+
+	inline bool WriteEditorAutomationSetting(
+		::EditorPreferences& preferences,
+		std::string_view key,
+		const nlohmann::json& value,
+		std::string& error)
+	{
+		if (key != "autoBuildScripts" && key != "vulkanValidationLayers" && key != "renderDebugDiagnostics")
+		{
+			error = "Editor setting key is not allowlisted.";
+			return false;
+		}
+		if (!value.is_boolean())
+		{
+			error = std::string(key) + " must be a boolean.";
+			return false;
+		}
+		const bool enabled = value.get<bool>();
+		if (key == "autoBuildScripts")
+			preferences.autoBuildScripts = enabled;
+		else if (key == "vulkanValidationLayers")
+			preferences.vulkanValidationLayers = enabled;
+		else
+			preferences.renderDebugDiagnostics = enabled;
+		return true;
+	}
+}

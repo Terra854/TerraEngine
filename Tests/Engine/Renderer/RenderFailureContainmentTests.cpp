@@ -54,7 +54,8 @@ namespace TerraEngine::Tests {
 			const std::string mainEditorSource = ReadSourceFile(root / "Editor" / "TerraEngine-Editor" / "Subsystems" / "MainEditorSubsystem.cpp");
 			const std::string viewportRegistrySource = ReadSourceFile(root / "Editor" / "TerraEngine-Editor" / "Core" / "ViewportTextureRegistry.cpp");
 
-			context.Expect(implHeader.find("bool deviceLost = false;") != std::string::npos, "Vulkan backend should retain a device-lost latch in private state.");
+			context.Expect(implHeader.find("std::atomic_bool deviceLost = false;") != std::string::npos, "Vulkan backend should retain a thread-safe device-lost latch in private state.");
+			context.Expect(contextSource.find("deviceLost.compare_exchange_strong") != std::string::npos, "Concurrent Vulkan failures should publish only the first device-loss incident.");
 			context.Expect(implHeader.find("bool MarkDeviceLost(VkResult result, std::string_view operation);") != std::string::npos, "Vulkan backend should expose one helper for detecting device-loss results.");
 			context.Expect(contextSource.find("result != VK_ERROR_DEVICE_LOST") != std::string::npos, "Device-loss helper should test the Vulkan device-lost result explicitly.");
 			context.Expect(contextSource.find("Rendering is disabled for this Vulkan context") != std::string::npos, "Device-loss helper should log a clear one-time disabled-rendering message.");
@@ -69,6 +70,9 @@ namespace TerraEngine::Tests {
 			context.Expect(initSource.find("MakeActiveRecoverySnapshot(renderSessionGeneration)") != std::string::npos, "Fresh Vulkan initialization should reset the CPU recovery snapshot.");
 			context.Expect(resourcesSource.find("MarkDeviceLost(submitResult, submitOperation)") != std::string::npos, "Immediate GPU upload submits should respect the same device-lost latch while preserving their operation label.");
 			context.Expect(implHeader.find("std::mutex queueAccessMutex;") != std::string::npos, "All Vulkan queue handles should share an external-synchronization mutex.");
+			context.Expect(implHeader.find("mutable std::recursive_mutex deviceStateMutex;") != std::string::npos, "Vulkan lifetime and cache ownership should share one recursive protected-boundary gate.");
+			context.Expect(contextSource.find("void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view, const RenderOutputRequest& outputRequest) {\n\tstd::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);") != std::string::npos, "RenderFrame should retain renderer ownership until worker recording has joined and live Vulkan work is published.");
+			context.Expect(initSource.find("void VulkanContext::Impl::RecreateSwapChain() {\n\tstd::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);") != std::string::npos, "Swapchain replacement should hold the renderer-state gate across idle, destruction, and candidate publication.");
 			context.Expect(implHeader.find("std::recursive_mutex descriptorHostAccessMutex;") != std::string::npos, "Project workers and the render thread should share one descriptor host-synchronization boundary.");
 			context.Expect(resourcesSource.find("UpdateGlobalTexture(uint32_t index, const VulkanImage& image) {\n\tstd::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);") != std::string::npos, "Bindless texture publication should hold the descriptor boundary across its idle wait and all frame-set writes.");
 			context.Expect(contextSource.find("PrepareDepthForCompute(VkCommandBuffer cmd, VkImage sourceDepthImage, VkImageView depthView, bool updateGlobalDepthDescriptor) {\n\tstd::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);") != std::string::npos, "Depth descriptor publication should not race project-open asset descriptor updates.");
@@ -76,7 +80,24 @@ namespace TerraEngine::Tests {
 			context.Expect(contextSource.find("vkQueueSubmit(impl->graphicsQueue") == std::string::npos, "Frame and UI paths should not bypass the synchronized queue wrapper.");
 			context.Expect(contextSource.find("vkQueuePresentKHR(impl->presentQueue") == std::string::npos, "Presentation should share queue synchronization with graphics submissions.");
 			context.Expect(resourcesSource.find("vkQueueWaitIdle(graphicsQueue)") == std::string::npos, "Resource lifetime waits should not race other host queue access.");
+			context.Expect(implHeader.find("std::vector<VulkanBuffer> uiStaticVertexBuffers;") != std::string::npos && implHeader.find("std::vector<VulkanBuffer> uiSdfVertexBuffers;") != std::string::npos, "CPU-written runtime UI vertices should be owned per frame-fence slot.");
+			context.Expect(contextSource.find("VulkanBuffer& uiStaticVertexBuffer = uiStaticVertexBuffers[currentFrame];") != std::string::npos && contextSource.find("VulkanBuffer& uiSdfVertexBuffer = uiSdfVertexBuffers[currentFrame];") != std::string::npos, "Runtime UI recording should write only the completed current frame slot.");
+			const std::size_t prefixSubmit = resourcesSource.find("recorded view prefix submit before descriptor mutation");
+			const std::size_t prefixClear = resourcesSource.find("pendingCommandBuffers.clear();", prefixSubmit);
+			context.Expect(prefixSubmit != std::string::npos && prefixClear != std::string::npos && prefixSubmit < prefixClear, "Descriptor mutation should submit and complete recorded views before clearing their ownership records.");
+			context.Expect(resourcesSource.find("Treat them as stale snapshots and skip") == std::string::npos, "Descriptor safety must not silently discard an earlier Scene or Game view.");
+			const std::size_t shadowSafetyWait = resourcesSource.find("WaitForDescriptorMutationIdle();", resourcesSource.find("bool VulkanContext::Impl::EnsureShadowRenderResources"));
+			const std::size_t shadowDeviceIdle = resourcesSource.find("const VkResult idleResult = WaitDeviceIdle();", shadowSafetyWait);
+			context.Expect(shadowSafetyWait != std::string::npos && shadowDeviceIdle != std::string::npos && shadowSafetyWait < shadowDeviceIdle, "Shadow replacement should complete unsubmitted view references before destroying GPU objects.");
 			context.Expect(editorSource.find("vulkan->RunWithQueueAccess") != std::string::npos, "ImGui-owned texture upload submissions should join the renderer queue synchronization boundary.");
+			const std::size_t updateTexture = editorSource.find("ImGui_ImplVulkan_UpdateTexture");
+			const std::size_t renderDrawData = editorSource.find("ImGui_ImplVulkan_RenderDrawData");
+			const std::size_t captureDrawData = editorSource.find("mainEditor->CaptureViewportDrawDataUses()", updateTexture);
+			context.Expect(updateTexture != std::string::npos && captureDrawData != std::string::npos && renderDrawData != std::string::npos && updateTexture < captureDrawData && captureDrawData < renderDrawData, "ImGui glyph upload and viewport descriptor capture should finish before swapchain UI draw recording.");
+			context.Expect(contextSource.find("std::lock_guard<std::mutex> queueLock(impl->queueAccessMutex);") != std::string::npos, "PresentEditor must serialize ImGui's hidden texture upload submits with renderer queue access.");
+			const std::size_t prepareUi = contextSource.find("if (prepareUI) prepareUI();");
+			const std::size_t beginUiCommandBuffer = contextSource.find("VkCommandBufferBeginInfo begin{};", prepareUi);
+			context.Expect(prepareUi != std::string::npos && beginUiCommandBuffer != std::string::npos && prepareUi < beginUiCommandBuffer, "Mouse-triggered glyph uploads must run after the frame fence and before beginning the UI command buffer/render pass.");
 			context.Expect(implHeader.find("VkDescriptorPool editorDescriptorPool") != std::string::npos, "ImGui should own a descriptor pool that is isolated from asset-loading descriptor allocations.");
 			context.Expect(contextSource.find("h.descriptorPool = impl->editorDescriptorPool") != std::string::npos, "Editor handles should publish the dedicated ImGui descriptor pool.");
 			context.Expect(mainEditorSource.find("ImGui_ImplVulkan_RemoveTexture") == std::string::npos, "Viewport resize must not immediately free a descriptor still referenced by in-flight UI work.");
@@ -94,8 +115,8 @@ namespace TerraEngine::Tests {
 			context.Expect(contextSource.find("Editor UI Present Command Buffer") != std::string::npos, "Temporary UI submissions should remain identifiable in Vulkan validation diagnostics.");
 			context.Expect(initSource.find("Keep editor\n\t\t// presentation color-only") != std::string::npos, "Editor presentation should not share a writable depth attachment across swapchain frames in flight.");
 			context.Expect(contextSource.find("renderPass.clearValueCount = 1;") != std::string::npos, "The ImGui swapchain pass should clear only its color attachment.");
-			context.Expect(implHeader.find("FRAMEBUFFER_RESIZE_DEBOUNCE{500}") != std::string::npos, "Rapid native resize callbacks should be coalesced before rebuilding Vulkan resources.");
-			context.Expect(contextSource.find("if (!impl->IsFramebufferResizeSettled())") != std::string::npos, "Editor resize handling should pause stale rendering until the requested extent settles.");
+			context.Expect(implHeader.find("FRAMEBUFFER_RESIZE_REBUILD_INTERVAL{32}") != std::string::npos, "Rapid native resize callbacks should throttle rebuilds without adding a visible trailing delay.");
+			context.Expect(contextSource.find("if (!impl->ClaimFramebufferResizeRebuild())") != std::string::npos, "Editor resize handling should rebuild promptly at a protected frame boundary.");
 			context.Expect(contextSource.find("recording here\n\t\t// would only resize Scene/Game targets") != std::string::npos, "Editor view recording should pause while a native resize is pending instead of reallocating targets for discarded frames.");
 			context.Expect(contextSource.find("result.outcome = EditorPresentOutcome::RecreationRequested") != std::string::npos, "PresentEditor should return a typed stale-draw-data result after recreation.");
 			context.Expect(initSource.find("shadows, global buffers, descriptors, caches, scenes, and CPU assets do not") != std::string::npos, "Native and runtime resize should preserve loaded renderer resources.");

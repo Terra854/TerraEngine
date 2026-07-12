@@ -100,10 +100,14 @@ public:
 	
 	void EnableEditorMode();
 	
-	// callback takes VkCommandBuffer (cast to void*)
-	// PresentEditor reports whether draw data reached the queue. Editor-owned
+	// prepareUI runs after the frame fence but before Vulkan begins the UI command
+	// buffer/render pass. renderUI then receives VkCommandBuffer (cast to void*).
+	// Both callbacks share the graphics queue synchronization boundary.
+	// PresentEditor reports whether draw data reached the queue; editor-owned
 	// descriptor retirement must never infer submission from a void callback.
-	[[nodiscard]] TerraEngine::Renderer::Vulkan::EditorPresentResult PresentEditor(std::function<void(void*)> renderUI);
+	[[nodiscard]] TerraEngine::Renderer::Vulkan::EditorPresentResult PresentEditor(
+		std::function<void()> prepareUI,
+		std::function<void(void*)> renderUI);
 	[[nodiscard]] TerraEngine::Renderer::Vulkan::EditorSubmissionProgress GetEditorSubmissionProgress() const;
 	// Frees one editor-owned descriptor through TerraEngine's checked and
 	// externally synchronized descriptor-pool boundary.

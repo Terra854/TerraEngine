@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 enum class ProjectTemplate {
@@ -42,6 +43,8 @@ public:
 	bool HasActiveProject() const;
 	const ProjectSettings& GetSettings() const;
 	bool SetProjectDisplayName(const std::string& displayName);
+	bool ReadAutomationSetting(bool projectScope, std::string_view key, nlohmann::json& value, std::string& error) const;
+	bool WriteAutomationSetting(bool projectScope, std::string_view key, const nlohmann::json& value, std::string& error);
 	std::filesystem::path GetProjectRoot() const;
 	const std::vector<RecentProjectEntry>& GetRecentProjects() const;
 	const EditorPreferences& GetEditorPreferences() const;

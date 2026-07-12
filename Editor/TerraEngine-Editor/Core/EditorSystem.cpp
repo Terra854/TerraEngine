@@ -172,6 +172,13 @@ void EditorSystem::Setup(Engine* enginePtr) {
 	projectHub->SetOnProjectLoadedCallback([this]() {
 		HandleProjectLoaded();
 	});
+	projectHub->SetOpenPreferencesCallback([this]() {
+		// Preferences is editor-wide and remains safe while the project hub is
+		// active; lifecycle approvals depend on this access path.
+		if (mainEditor) {
+			mainEditor->OpenPreferences();
+		}
+	});
 
 	mainEditor->SetOnProjectClosedCallback([this]() {
 		SaveWorkspaceLayout();
@@ -599,12 +606,17 @@ void EditorSystem::Update(float deltaTime) {
 	ImGui_ImplGlfw_NewFrame();
 	ImGui::NewFrame();
 	
+	// MCP must keep processing while the project hub is visible so clients can
+	// read status and finish retained jobs after a native project close. The
+	// bridge prepares immutable requests off-thread and commits editor-owned work
+	// only from this protected editor update boundary.
+	if (context.editorMcpBridge) {
+		context.editorMcpBridge->Update(deltaTime);
+	}
+
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (context.projectManager->HasActiveProject()) {
 		AssetDatabase::Instance().Update();
-		if (context.editorMcpBridge) {
-			context.editorMcpBridge->Update(deltaTime);
-		}
 		mainEditor->Update(deltaTime);
 		mainEditor->DrawUI();
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -617,6 +629,9 @@ void EditorSystem::Update(float deltaTime) {
 		ScriptingSystem::Instance().UpdateInspectorWatch(std::nullopt, context.scripting.selectionVersion);
 		projectHub->Update(deltaTime);
 		projectHub->DrawUI();
+		if (mainEditor) {
+			mainEditor->DrawProjectHubWindows();
+		}
 	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -625,14 +640,42 @@ void EditorSystem::Update(float deltaTime) {
 	}
 	
 	ImGui::Render();
-	if (mainEditor) mainEditor->CaptureViewportDrawDataUses();
 	
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vulkan) {
-		const auto presentResult = vulkan->PresentEditor([](void* cmd){
+		const auto presentResult = vulkan->PresentEditor([&](){
 			const auto bridgeResult = TerraEngine::Editor::CheckedImGuiVulkanBridge::Execute(
 				TerraEngine::Renderer::Vulkan::EditorUiFrameStage::RecordDrawData,
-				[&]() { ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)cmd); });
+				[&]() {
+					// PresentEditor has already waited this frame slot and holds queue
+					// access here. Upload hover/tooltip glyphs before beginning the UI
+					// command buffer rather than from inside its active render pass.
+					if (ImDrawData* drawData = ImGui::GetDrawData(); drawData != nullptr && drawData->Textures != nullptr)
+					{
+						for (ImTextureData* texture : *drawData->Textures)
+						{
+							if (texture != nullptr && texture->Status != ImTextureStatus_OK)
+							{
+								ImGui_ImplVulkan_UpdateTexture(texture);
+							}
+						}
+					}
+					// GetTexID becomes valid after the backend publishes newly-created
+					// glyph descriptors. Associate those uses with the submission below.
+					if (mainEditor) mainEditor->CaptureViewportDrawDataUses();
+				});
+			if (!bridgeResult.success) {
+				throw std::runtime_error("Dear ImGui Vulkan texture preparation failed with result "
+					+ std::to_string(bridgeResult.nativeResult));
+			}
+		}, [&](void* cmd){
+			const auto bridgeResult = TerraEngine::Editor::CheckedImGuiVulkanBridge::Execute(
+				TerraEngine::Renderer::Vulkan::EditorUiFrameStage::RecordDrawData,
+				[&]() {
+					// Texture preparation has already completed outside the render pass,
+					// so this callback only records descriptor-backed UI draw commands.
+					ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)cmd);
+				});
 			if (!bridgeResult.success) {
 				throw std::runtime_error("Dear ImGui Vulkan draw recording failed with result "
 					+ std::to_string(bridgeResult.nativeResult));
@@ -701,18 +744,20 @@ TerraEngine::Scheduling::SystemDeclaration EditorSystem::SchedulerDeclaration() 
 	declaration.phase = "PostFrame";
 	declaration.reads = {
 		"RendererOutput", "PresentationState", "WindowSnapshot", "InputSnapshot",
-		"ProjectState", "EditorState", "ImGuiDrawData"
+		"ProjectState", "EditorState", "ImGuiDrawData", "EditorAutomationQueue",
+		"EditorAutomationSession"
 	};
 	declaration.writes = {
 		"EditorUiPresentation", "ViewportTextureRegistry", "EditorSubmissionCompletion",
-		"EditorDiagnostics", "EditorAutomationState"
+		"EditorDiagnostics", "EditorAutomationState", "EditorAutomationSession",
+		"SceneMutationQueue"
 	};
 	declaration.mainThread = true;
 	declaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::ProtectedCommit;
 	declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::Protected;
 	declaration.hardBoundary = true;
-	declaration.safeSubwork = "No ImGui context mutation is worker-safe; editor subsystems may prepare immutable snapshots independently.";
-	declaration.protectedCommit = "ImGui frame mutation, checked Vulkan backend recording, descriptor mutation, acquire, submit, present, and retirement publication.";
+	declaration.safeSubwork = "Automation schema validation, immutable request preparation, reference-impact scans, log filtering, and editor subsystem snapshots may run on workers; ImGui context mutation remains protected.";
+	declaration.protectedCommit = "Prepared automation request commit at post_editor_automation_flush, SceneMutationQueue publication, project and Play Mode transitions, ImGui frame mutation, checked Vulkan backend recording, descriptor mutation, acquire, submit, present, and retirement publication.";
 	declaration.protectedReason = declaration.protectedCommit;
 	declaration.profilingLabel = declaration.name;
 	declaration.usesDefaultMetadata = false;

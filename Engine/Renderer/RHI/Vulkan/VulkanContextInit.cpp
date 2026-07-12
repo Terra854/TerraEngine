@@ -135,6 +135,7 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 
 // VulkanContext::Impl::Cleanup is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
+	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
 	if (device && !skipDeviceIdle) {
 		const VkResult idleResult = WaitDeviceIdle();
 		if (idleResult != VK_SUCCESS)
@@ -360,21 +361,25 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 	uiFontDescriptorSet = VK_NULL_HANDLE;
 	uiFontAtlasWidth = 0;
 	uiFontAtlasHeight = 0;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (uiStaticVertexBuffer.buffer != VK_NULL_HANDLE) {
-		vmaDestroyBuffer(allocator, uiStaticVertexBuffer.buffer, uiStaticVertexBuffer.allocation);
-		uiStaticVertexBuffer.buffer = VK_NULL_HANDLE;
+	// Each runtime UI buffer belongs to one fence slot. Cleanup runs after the
+	// device-idle lifetime gate, so every slot can now be destroyed together.
+	for (VulkanBuffer& buffer : uiStaticVertexBuffers) {
+		if (buffer.buffer != VK_NULL_HANDLE) {
+			vmaDestroyBuffer(allocator, buffer.buffer, buffer.allocation);
+		}
 	}
+	uiStaticVertexBuffers.clear();
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (uiInstanceBuffer.buffer != VK_NULL_HANDLE) {
 		vmaDestroyBuffer(allocator, uiInstanceBuffer.buffer, uiInstanceBuffer.allocation);
 		uiInstanceBuffer.buffer = VK_NULL_HANDLE;
 	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (uiSdfVertexBuffer.buffer != VK_NULL_HANDLE) {
-		vmaDestroyBuffer(allocator, uiSdfVertexBuffer.buffer, uiSdfVertexBuffer.allocation);
-		uiSdfVertexBuffer.buffer = VK_NULL_HANDLE;
+	for (VulkanBuffer& buffer : uiSdfVertexBuffers) {
+		if (buffer.buffer != VK_NULL_HANDLE) {
+			vmaDestroyBuffer(allocator, buffer.buffer, buffer.allocation);
+		}
 	}
+	uiSdfVertexBuffers.clear();
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (device) {
@@ -1830,6 +1835,7 @@ void VulkanContext::Impl::CleanupSwapChain() {
 
 // VulkanContext::Impl::RecreateSwapChain is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::RecreateSwapChain() {
+	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
 	if (deviceLost) {
 		presentationLifecycle.MarkDeviceLost();
 		return;
@@ -1954,6 +1960,7 @@ void VulkanContext::Impl::RecreateSwapChain() {
 
 	editorRenderSubmitted = false;
 	swapchainImageAcquired = false;
+	swapchainAcquireWaitConsumed = false;
 	acquiredPresentationImage.reset();
 	framebufferResized = false;
 	TERRAENGINE_LOG(LogLevel::Info, "Presentation candidate published atomically. generation="

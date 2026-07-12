@@ -13,6 +13,7 @@
 #include "../Profiling/EditorProfilerService.h"
 #include "Engine/Core/Logger/Logger.h"
 #include "Engine/Core/MainEngine.h"
+#include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Core/Scheduling/EcsQueryTaskGraph.h"
 #include "Engine/Components/CameraComponent.h"
 #include "Engine/Components/MeshRenderComponent.h"
@@ -51,6 +52,132 @@
 #include "../Windows/UIBuilderWindow.h"
 #include "../Windows/ProjectSettingsWindow.h"
 #include "../Windows/PreferencesWindow.h"
+
+std::string PrefabAuthoringService::ResolvePrefabId(std::string_view identity) const {
+	const std::string value(identity);
+	if (prefabsById.contains(value)) {
+		return value;
+	}
+	const std::string normalized = std::filesystem::path(value).lexically_normal().generic_string();
+	const auto found = prefabIdByPath.find(normalized);
+	return found == prefabIdByPath.end() ? std::string{} : found->second;
+}
+
+PrefabAuthoringService::Result PrefabAuthoringService::Create(
+	entt::entity sourceEntity,
+	const std::filesystem::path& projectRelativePath,
+	const std::filesystem::path& absolutePath) {
+	if (sourceEntity == entt::null || absolutePath.extension() != ".teprefab"
+		|| std::filesystem::exists(absolutePath)) {
+		return {false, "validation", "Prefab source or destination is invalid."};
+	}
+	const Object object = ObjectManager::instance().makeObjectHandle(sourceEntity);
+	const std::string sourceId = TerraEngine::ToHexString(ObjectManager::instance().getUUID(object));
+	const std::string sourceName = ObjectManager::instance().getObjectName(object);
+	const std::string prefabId = "prefab-" + std::to_string(nextPrefabId++);
+	std::error_code directoryError;
+	std::filesystem::create_directories(absolutePath.parent_path(), directoryError);
+	if (directoryError) {
+		return {false, "internal", "Could not create the prefab directory: " + directoryError.message()};
+	}
+	std::ofstream output(absolutePath, std::ios::binary | std::ios::trunc);
+	output << nlohmann::json{{"prefabId", prefabId}, {"sourceObjectId", sourceId}, {"name", sourceName}}.dump(2);
+	if (!output.good()) {
+		return {false, "internal", "Could not publish the prefab asset."};
+	}
+	const std::string relative = projectRelativePath.lexically_normal().generic_string();
+	prefabsById[prefabId] = {prefabId, relative, sourceId, sourceName, 1u};
+	prefabIdByPath[relative] = prefabId;
+	return {true, {}, "Created prefab.", {{"prefabId", prefabId}, {"sourceObjectId", sourceId}, {"path", relative}}};
+}
+
+PrefabAuthoringService::Result PrefabAuthoringService::Instantiate(std::string_view prefabIdentity, std::string_view requestedName) {
+	const std::string prefabId = ResolvePrefabId(prefabIdentity);
+	if (prefabId.empty()) {
+		return {false, "missing_target", "Prefab was not found."};
+	}
+	if (!activeContextPrefabId.empty() && activeContextPrefabId == prefabId) {
+		return {false, "conflict", "A prefab cannot contain itself.", {{"rolledBack", true}}};
+	}
+	const PrefabState& prefab = prefabsById.at(prefabId);
+	Object instance = ObjectManager::instance().createObject(requestedName.empty() ? prefab.sourceName : std::string(requestedName));
+	const std::string instanceId = TerraEngine::ToHexString(ObjectManager::instance().getUUID(instance));
+	instances[instanceId] = {prefabId, prefab.sourceName};
+	UndoRedoSystem::Instance().PushCommand(std::make_unique<CreateObjectCommand>(instance.EntityId()));
+	return {true, {}, "Instantiated prefab.", {{"prefabId", prefabId}, {"instanceId", instanceId}}};
+}
+
+PrefabAuthoringService::Result PrefabAuthoringService::InspectOverrides(std::string_view instanceIdentity) const {
+	const std::string instanceId(instanceIdentity);
+	const auto state = instances.find(instanceId);
+	const auto uuid = TerraEngine::ParseUUID(instanceId);
+	const auto instance = uuid ? ObjectManager::instance().getObject(*uuid) : std::nullopt;
+	if (state == instances.end() || !instance) {
+		return {false, "missing_target", "Prefab instance was not found."};
+	}
+	const PrefabState& prefab = prefabsById.at(state->second.prefabId);
+	const std::string currentName = ObjectManager::instance().getObjectName(*instance);
+	nlohmann::json overrides = nlohmann::json::array();
+	if (currentName != prefab.sourceName) {
+		overrides.push_back({{"property", "name"}, {"value", currentName}, {"sourceValue", prefab.sourceName}});
+	}
+	return {true, {}, "Inspected prefab overrides.", {{"overrides", overrides}, {"prefabGeneration", prefab.generation}}};
+}
+
+PrefabAuthoringService::Result PrefabAuthoringService::ApplyOverrides(
+	std::string_view instanceIdentity,
+	std::optional<std::uint64_t> expectedGeneration) {
+	const std::string instanceId(instanceIdentity);
+	const auto state = instances.find(instanceId);
+	const auto uuid = TerraEngine::ParseUUID(instanceId);
+	const auto instance = uuid ? ObjectManager::instance().getObject(*uuid) : std::nullopt;
+	if (state == instances.end() || !instance) {
+		return {false, "missing_target", "Prefab instance was not found."};
+	}
+	PrefabState& prefab = prefabsById.at(state->second.prefabId);
+	if (expectedGeneration && *expectedGeneration != prefab.generation) {
+		return {false, "stale_target", "Prefab source generation changed."};
+	}
+	prefab.sourceName = ObjectManager::instance().getObjectName(*instance);
+	++prefab.generation;
+	return {true, {}, "Applied prefab overrides.", {
+		{"historyId", "history-prefab-" + std::to_string(prefab.generation)},
+		{"prefabGeneration", prefab.generation}}};
+}
+
+PrefabAuthoringService::Result PrefabAuthoringService::RevertOverrides(std::string_view instanceIdentity) {
+	const std::string instanceId(instanceIdentity);
+	const auto state = instances.find(instanceId);
+	const auto uuid = TerraEngine::ParseUUID(instanceId);
+	const auto instance = uuid ? ObjectManager::instance().getObject(*uuid) : std::nullopt;
+	if (state == instances.end() || !instance) {
+		return {false, "missing_target", "Prefab instance was not found."};
+	}
+	ObjectManager::instance().setObjectName(*instance, prefabsById.at(state->second.prefabId).sourceName);
+	return {true, {}, "Reverted prefab overrides.", {{"remainingOverrideCount", 0u}}};
+}
+
+PrefabAuthoringService::Result PrefabAuthoringService::OpenEditContext(std::string_view prefabIdentity) {
+	const std::string prefabId = ResolvePrefabId(prefabIdentity);
+	if (prefabId.empty()) {
+		return {false, "missing_target", "Prefab was not found."};
+	}
+	if (!activeContextId.empty()) {
+		return {false, "conflict", "Another prefab editing context is already active."};
+	}
+	activeContextId = "prefab-context-" + std::to_string(nextPrefabId++);
+	activeContextPrefabId = prefabId;
+	return {true, {}, "Opened prefab editing context.", {{"contextId", activeContextId}, {"prefabId", prefabId}}};
+}
+
+PrefabAuthoringService::Result PrefabAuthoringService::CloseEditContext(std::string_view contextIdentity) {
+	if (contextIdentity != activeContextId) {
+		return {false, "stale_target", "Prefab editing context identity is stale."};
+	}
+	activeContextId.clear();
+	activeContextPrefabId.clear();
+	return {true, {}, "Closed prefab editing context."};
+}
 
 namespace
 {
@@ -1466,16 +1593,21 @@ void MainEditorSubsystem::RefreshViewportTextures(VulkanContext& vulkan)
 	VulkanContext::EditorHandles handles;
 	vulkan.GetEditorHandles(handles);
 	const auto progress = vulkan.GetEditorSubmissionProgress();
-	const auto registerTexture = [](void* imageView, void* sampler) -> void* {
+	const auto registerTexture = [&vulkan](void* imageView, void* sampler) -> void* {
 		void* descriptor = nullptr;
 		const auto result = TerraEngine::Editor::CheckedImGuiVulkanBridge::Execute(
 			TerraEngine::Renderer::Vulkan::EditorUiFrameStage::RecordDrawData,
 			[&]() {
-				const VkDescriptorSet set = ImGui_ImplVulkan_AddTexture(
-					reinterpret_cast<VkSampler>(sampler),
-					reinterpret_cast<VkImageView>(imageView),
-					VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-				descriptor = reinterpret_cast<void*>(set);
+				// AddTexture allocates and writes the editor descriptor pool. Join the
+				// same renderer-state/queue boundary as ImGui font uploads so shutdown
+				// or swapchain replacement cannot overlap this host-side mutation.
+				vulkan.RunWithQueueAccess([&]() {
+					const VkDescriptorSet set = ImGui_ImplVulkan_AddTexture(
+						reinterpret_cast<VkSampler>(sampler),
+						reinterpret_cast<VkImageView>(imageView),
+						VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+					descriptor = reinterpret_cast<void*>(set);
+				});
 			});
 		return result.success ? descriptor : nullptr;
 	};
@@ -1790,6 +1922,17 @@ void MainEditorSubsystem::OpenPreferences(TerraEngine::Editor::Preferences::Pref
 	if (auto preferences = GetWindow<PreferencesWindow>())
 	{
 		preferences->OpenToCategory(categoryId);
+	}
+}
+
+void MainEditorSubsystem::DrawProjectHubWindows()
+{
+	// Preferences owns only user/editor state, so it is safe to draw without an
+	// active project. Do not iterate every registered editor window here because
+	// most of them read project, scene, asset, or renderer-owned workspace data.
+	if (auto preferences = GetWindow<PreferencesWindow>())
+	{
+		preferences->Draw();
 	}
 }
 

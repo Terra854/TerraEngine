@@ -4,6 +4,7 @@
 
 #include "ProjectHubSubsystem.h"
 #include "ProjectManager.h"
+#include "../Project/EditorPreferencesMetadata.h"
 #include <imgui.h>
 #include "Engine/Core/Logger/Logger.h"
 #include <utility>
@@ -17,6 +18,7 @@ void ProjectHubSubsystem::Initialize(EditorContext& context) {
 // ProjectHubSubsystem::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ProjectHubSubsystem::Shutdown() {
 	pendingProjectAction.reset();
+	openPreferences = {};
 	ctx = nullptr;
 }
 
@@ -29,6 +31,10 @@ void ProjectHubSubsystem::SetOnProjectLoadedCallback(std::function<void()> callb
 	onProjectLoaded = callback;
 }
 
+void ProjectHubSubsystem::SetOpenPreferencesCallback(std::function<void()> callback) {
+	openPreferences = std::move(callback);
+}
+
 // ProjectHubSubsystem::DrawUI is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ProjectHubSubsystem::DrawUI() {
 	ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -36,7 +42,7 @@ void ProjectHubSubsystem::DrawUI() {
 	ImGui::SetNextWindowSize(viewport->Size);
 	ImGui::SetNextWindowViewport(viewport->ID);
 
-	ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDocking;
+	ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_MenuBar;
 	window_flags |= ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove;
 	window_flags |= ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus;
 
@@ -46,6 +52,19 @@ void ProjectHubSubsystem::DrawUI() {
 
 	ImGui::Begin("ProjectHubDockSpace", nullptr, window_flags);
 	ImGui::PopStyleVar(3);
+
+	// Keep the normal editor-owned Preferences command available at the hub.
+	// Project create/open approvals can otherwise wait forever because no project
+	// workspace exists yet to expose the main editor menu bar.
+	if (ImGui::BeginMenuBar()) {
+		if (ImGui::BeginMenu(TerraEngine::Editor::Preferences::kPreferencesMenuName.data())) {
+			if (ImGui::MenuItem(TerraEngine::Editor::Preferences::kPreferencesMenuLabel.data()) && openPreferences) {
+				openPreferences();
+			}
+			ImGui::EndMenu();
+		}
+		ImGui::EndMenuBar();
+	}
 
 	// Split window into Sidebar (Left) and Content (Right)
 	ImGui::Columns(2, "HubColumns", false);

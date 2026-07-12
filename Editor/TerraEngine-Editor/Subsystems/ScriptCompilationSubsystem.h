@@ -9,7 +9,11 @@
 
 #include <filesystem>
 #include <future>
+#include <atomic>
+#include <cstdint>
 #include <string>
+#include <string_view>
+#include <vector>
 
 enum class ScriptBuildProfile
 {
@@ -25,7 +29,24 @@ enum class ScriptCoordinatorState
 	Building,
 	Reloading,
 	Ready,
-	Failed
+	Failed,
+	Canceled
+};
+
+struct ScriptCompilerDiagnostic
+{
+	std::string severity;
+	std::string code;
+	std::filesystem::path file;
+	std::uint32_t line = 0u;
+	std::uint32_t column = 0u;
+	std::string message;
+};
+
+struct AttachableScriptType
+{
+	std::string qualifiedName;
+	std::filesystem::path sourcePath;
 };
 
 // ScriptBuildReason names the supported states explicitly so serialization and switches stay readable.
@@ -45,9 +66,13 @@ struct ScriptCompilationStatus
 	ScriptBuildProfile activeProfile = ScriptBuildProfile::Release;
 	bool gameplayAssemblyLoaded = false;
 	bool queuedBuild = false;
+	bool cancellationRequested = false;
+	double progress = 0.0;
 	std::filesystem::path activeAssemblyPath;
 	std::string lastSummary;
 	std::string lastBuildOutput;
+	std::vector<ScriptCompilerDiagnostic> diagnostics;
+	std::vector<AttachableScriptType> attachableTypes;
 };
 
 // Centralizes project-script workspace generation, dotnet builds, and hot
@@ -68,12 +93,15 @@ public:
 	void OnProjectClosed();
 
 	void RequestBuild(ScriptBuildReason reason);
+	bool RequestCancellation();
 	void NotifyScriptSourceChanged(const std::filesystem::path& scriptPath);
 
 	bool CreateScriptAsset(const std::filesystem::path& destinationDirectory, const std::string& className, std::filesystem::path& outCreatedPath, std::string* outError = nullptr);
 	bool OpenScript(const std::filesystem::path& scriptPath, std::string* outError = nullptr);
 	bool OpenWorkspace(std::string* outError = nullptr);
 	bool RegenerateWorkspace(std::string* outError = nullptr);
+	bool CreateApprovedScript(const ScriptCreationRequest& request, ScriptCreationResult& outResult, std::string* outError = nullptr);
+	bool SynchronizeWorkspace(ScriptWorkspaceStatus& outStatus, std::string* outError = nullptr);
 
 	[[nodiscard]] const ScriptCompilationStatus& GetStatus() const;
 	[[nodiscard]] const ScriptWorkspaceService& GetWorkspaceService() const;
@@ -91,6 +119,7 @@ private:
 		std::filesystem::path assemblyPath;
 		std::string buildOutput;
 		std::string failureMessage;
+		bool canceled = false;
 	};
 
 	ScriptCompilationSubsystem() = default;
@@ -99,6 +128,8 @@ private:
 	void RestorePausedGameplayState();
 	bool TryReloadWorkspaceAssembly(std::string* outError);
 	void SynchronizeBoundScriptTypesFromAssets();
+	void PublishAttachableScriptTypes();
+	void PublishCompilerDiagnostics(std::string_view buildOutput);
 
 	void BeginBuild();
 	void HandleCompletedBuild(ScriptBuildResult result);
@@ -120,4 +151,7 @@ private:
 	bool m_ShouldRestorePausedGameplayState = false;
 	bool m_WasRunningBeforeBuild = false;
 	bool m_WasPausedBeforeBuild = false;
+	// The worker only reads this atomic flag. State publication remains on the
+	// editor thread when Update consumes the completed future.
+	std::atomic_bool m_CancelRequested = false;
 };

@@ -18,8 +18,8 @@ namespace
 class TransactionCommandGroup final : public ICommand
 {
 public:
-	TransactionCommandGroup(std::string groupName, std::vector<std::unique_ptr<ICommand>> commands)
-		: m_GroupName(std::move(groupName)), m_Commands(std::move(commands))
+	TransactionCommandGroup(std::string groupName, std::string historyId, std::vector<std::unique_ptr<ICommand>> commands)
+		: m_GroupName(std::move(groupName)), m_HistoryId(std::move(historyId)), m_Commands(std::move(commands))
 	{
 	}
 
@@ -48,8 +48,14 @@ public:
 		return m_GroupName.empty() ? "Scene Transaction" : m_GroupName;
 	}
 
+	std::string GetHistoryId() const override
+	{
+		return m_HistoryId;
+	}
+
 private:
 	std::string m_GroupName;
+	std::string m_HistoryId;
 	std::vector<std::unique_ptr<ICommand>> m_Commands;
 };
 
@@ -393,6 +399,7 @@ void UndoRedoSystem::PushCommand(std::unique_ptr<ICommand> command) {
 	TERRAENGINE_LOG(LogLevel::Debug, "Pushing command: " << command->GetName());
 
 	undoStack.push_back(std::move(command));
+	++historySequence;
 	// New actions invalidate the redo branch as the scene state has branched 
 	// from the previous history.
 	redoStack.clear();
@@ -409,7 +416,7 @@ void UndoRedoSystem::PushCommand(std::unique_ptr<ICommand> command) {
 	UpdateDirtyState();
 }
 
-void UndoRedoSystem::PushTransactionGroup(std::string groupName, std::vector<std::unique_ptr<ICommand>> commands)
+void UndoRedoSystem::PushTransactionGroup(std::string groupName, std::vector<std::unique_ptr<ICommand>> commands, std::string historyId)
 {
 	// Empty transaction groups are intentionally ignored; callers can submit a
 	// preflight-only transaction without creating a confusing undo history item.
@@ -417,12 +424,12 @@ void UndoRedoSystem::PushTransactionGroup(std::string groupName, std::vector<std
 	{
 		return;
 	}
-	if (commands.size() == 1)
+	if (commands.size() == 1 && historyId.empty())
 	{
 		PushCommand(std::move(commands.front()));
 		return;
 	}
-	PushCommand(std::make_unique<TransactionCommandGroup>(std::move(groupName), std::move(commands)));
+	PushCommand(std::make_unique<TransactionCommandGroup>(std::move(groupName), std::move(historyId), std::move(commands)));
 }
 
 // UndoRedoSystem::Undo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -437,6 +444,7 @@ void UndoRedoSystem::Undo() {
 	command->Undo();
 
 	redoStack.push_back(std::move(command));
+	++historySequence;
 	UpdateDirtyState();
 }
 
@@ -454,6 +462,7 @@ void UndoRedoSystem::Redo() {
 	command->Redo();
 
 	undoStack.push_back(std::move(command));
+	++historySequence;
 	UpdateDirtyState();
 }
 
@@ -467,6 +476,14 @@ bool UndoRedoSystem::CanRedo() const {
 	return !ScriptingSystem::Instance().IsRunning() && !redoStack.empty();
 }
 
+std::size_t UndoRedoSystem::GetUndoDepth() const { return undoStack.size(); }
+std::size_t UndoRedoSystem::GetRedoDepth() const { return redoStack.size(); }
+std::string UndoRedoSystem::GetUndoLabel() const { return undoStack.empty() ? std::string{} : undoStack.back()->GetName(); }
+std::string UndoRedoSystem::GetRedoLabel() const { return redoStack.empty() ? std::string{} : redoStack.back()->GetName(); }
+std::string UndoRedoSystem::GetUndoHistoryId() const { return undoStack.empty() ? std::string{} : undoStack.back()->GetHistoryId(); }
+std::string UndoRedoSystem::GetRedoHistoryId() const { return redoStack.empty() ? std::string{} : redoStack.back()->GetHistoryId(); }
+std::uint64_t UndoRedoSystem::GetSequence() const { return historySequence; }
+
 // UndoRedoSystem::SetSavePoint is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UndoRedoSystem::SetSavePoint() {
 	m_SavedCommand = undoStack.empty() ? nullptr : undoStack.back().get();
@@ -478,6 +495,7 @@ void UndoRedoSystem::SetSavePoint() {
 void UndoRedoSystem::Clear() {
 	undoStack.clear();
 	redoStack.clear();
+	++historySequence;
 	m_SavedCommand = nullptr;
 	m_SavedStateIsReachable = true;
 	UpdateDirtyState();

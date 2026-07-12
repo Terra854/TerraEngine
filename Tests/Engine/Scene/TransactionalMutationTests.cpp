@@ -44,5 +44,46 @@ namespace TerraEngine::Tests {
 			context.Expect(childObject.has_value(), "Child object should exist.");
 			context.Expect(childObject && fixture.objects.getParent(*childObject).has_value(), "Child should be parented to transaction-local parent.");
 		});
+
+		registry.Add("Engine.TransactionalMutation.CapturesTypedInverseDeltasForCommittedWrites", [](TestContext& context) {
+			TransactionalMutationFixture fixture = MakeTransactionalMutationFixture();
+			TerraEngine::Scene::TransactionalMutationBuilder builder("tx-inverse", TerraEngine::Scene::TransactionOrigin::Test, "test");
+			builder.ObserveObject(fixture.objects, fixture.rootId)
+				.SetName(fixture.rootId, "Inverse Target")
+				.SetActive(fixture.rootId, false);
+
+			const TerraEngine::Scene::TransactionResult result = TerraEngine::Scene::CommitTransaction(fixture.objects, builder.Build());
+
+			context.Expect(result.status == TerraEngine::Scene::TransactionStatus::Committed, "The inverse-delta fixture should commit.");
+			context.ExpectEqual(static_cast<std::size_t>(2), result.inverseDeltas.size(), "Every applied scalar write should publish one typed inverse delta.");
+			context.Expect(result.inverseDeltas[0].operation.kind == TerraEngine::Scene::TransactionWriteKind::SetName, "The first inverse should restore object name.");
+			context.ExpectEqual(std::string("TransactionRoot"), result.inverseDeltas[0].operation.stringValue, "The name inverse should contain the exact prior value.");
+			context.Expect(result.inverseDeltas[1].operation.kind == TerraEngine::Scene::TransactionWriteKind::SetActive, "The second inverse should restore active state.");
+			context.Expect(result.inverseDeltas[1].operation.boolValue, "The active-state inverse should contain the exact prior value.");
+		});
+
+		registry.Add("Engine.TransactionalMutation.InvalidReflectedWriteRejectsBeforeAnyPublication", [](TestContext& context) {
+			TransactionalMutationFixture fixture = MakeTransactionalMutationFixture();
+			TerraEngine::Scene::TransactionalMutationBuilder builder("tx-invalid-property", TerraEngine::Scene::TransactionOrigin::Test, "test");
+			builder.ObserveObject(fixture.objects, fixture.rootId)
+				.SetName(fixture.rootId, "Must Not Publish")
+				.UpdateComponentProperty(
+					fixture.rootId,
+					std::string(Transform::kComponentName),
+					"PropertyThatDoesNotExist",
+					TerraEngine::Reflection::Variant{glm::vec3(1.0f)});
+
+			const TerraEngine::Scene::TransactionResult result = TerraEngine::Scene::CommitTransaction(fixture.objects, builder.Build());
+
+			context.Expect(result.status == TerraEngine::Scene::TransactionStatus::Rejected, "An invalid reflected write should reject during preflight.");
+			context.ExpectEqual(std::string("TransactionRoot"), fixture.objects.getObjectName(fixture.root), "A rejected later write must leave earlier valid writes unapplied.");
+			context.ExpectEqual(static_cast<std::size_t>(0), result.inverseDeltas.size(), "Preflight rejection should not publish rollback deltas for unapplied work.");
+			context.Expect(!result.conflicts.empty(), "Rejection should include machine-readable conflict evidence.");
+			if (!result.conflicts.empty())
+			{
+				context.ExpectEqual(static_cast<std::size_t>(1), result.conflicts.front().operationIndex, "Conflict diagnostics should identify the rejected operation.");
+				context.ExpectEqual(std::string("PropertyThatDoesNotExist"), result.conflicts.front().propertyName, "Conflict diagnostics should identify the rejected property.");
+			}
+		});
 	}
 }

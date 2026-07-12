@@ -462,12 +462,11 @@ void BuildProfilesWindow::DrawExportPanel() {
 // --- Actions ---
 
 void BuildProfilesWindow::CreateNewProfile() {
-	BuildProfile profile;
-	profile.id = GenerateBuildProfileId();
-	profile.name = "New Profile";
-	profile.platform = GetHostExportPlatform();
-	profile.isDirty = true;
-	m_Profiles.push_back(std::move(profile));
+	const BuildProfileCollectionResult created = CreateBuildProfileDraft("New Profile");
+	if (!created.succeeded || !created.profile.has_value()) {
+		return;
+	}
+	m_Profiles.push_back(*created.profile);
 	m_SelectedProfileIndex = static_cast<int>(m_Profiles.size()) - 1;
 }
 
@@ -477,12 +476,11 @@ void BuildProfilesWindow::DuplicateSelectedProfile() {
 		return;
 	}
 	
-	BuildProfile duplicated = m_Profiles[m_SelectedProfileIndex];
-	duplicated.id = GenerateBuildProfileId();
-	duplicated.name += " (Copy)";
-	duplicated.isDirty = true;
-	duplicated.filePath = ""; // Must be re-saved
-	m_Profiles.push_back(std::move(duplicated));
+	const BuildProfileCollectionResult duplicated = DuplicateBuildProfileDraft(m_Profiles[m_SelectedProfileIndex]);
+	if (!duplicated.succeeded || !duplicated.profile.has_value()) {
+		return;
+	}
+	m_Profiles.push_back(*duplicated.profile);
 	m_SelectedProfileIndex = static_cast<int>(m_Profiles.size()) - 1;
 }
 
@@ -492,10 +490,12 @@ void BuildProfilesWindow::DeleteSelectedProfile() {
 		return;
 	}
 
-	const auto& profile = m_Profiles[m_SelectedProfileIndex];
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!profile.filePath.empty() && std::filesystem::exists(profile.filePath)) {
-		std::filesystem::remove(profile.filePath);
+	const BuildProfile& profile = m_Profiles[m_SelectedProfileIndex];
+	if (!profile.filePath.empty()) {
+		const BuildProfileCollectionResult removed = RemoveBuildProfileFromCollection(m_ProfileDirectory, profile.id);
+		if (!removed.succeeded) {
+			return;
+		}
 	}
 
 	m_Profiles.erase(m_Profiles.begin() + m_SelectedProfileIndex);
@@ -511,17 +511,9 @@ void BuildProfilesWindow::SaveSelectedProfile() {
 		return;
 	}
 
-	auto& profile = m_Profiles[m_SelectedProfileIndex];
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (profile.id.empty()) {
-		profile.id = GenerateBuildProfileId();
-	}
-
-	const auto path = m_ProfileDirectory / (profile.id + ".json");
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (SaveBuildProfile(profile, path)) {
-		profile.filePath = path;
-		profile.isDirty = false;
+	BuildProfileCollectionResult saved = SaveBuildProfileToCollection(m_ProfileDirectory, m_Profiles[m_SelectedProfileIndex]);
+	if (saved.succeeded && saved.profile.has_value()) {
+		m_Profiles[m_SelectedProfileIndex] = std::move(*saved.profile);
 	}
 }
 

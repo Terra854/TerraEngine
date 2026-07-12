@@ -10,10 +10,36 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 struct EditorContext;
+
+// EditorProfilerCaptureArtifact pairs project-contained capture metadata with
+// an opaque identifier. Automation clients never receive or submit an
+// arbitrary filesystem path.
+struct EditorProfilerCaptureArtifact
+{
+	std::string artifactId;
+	TerraEngine::Profiling::ProfilerCaptureArtifact artifact;
+};
+
+// EditorProfilerCaptureSummary is intentionally bounded: it exposes aggregate
+// frame and timing-stream evidence without returning every recorded sample.
+struct EditorProfilerCaptureSummary
+{
+	std::string artifactId;
+	std::uint64_t frameCount = 0u;
+	std::uint64_t completeFrameCount = 0u;
+	std::uint64_t incompleteFrameCount = 0u;
+	double totalDurationMs = 0.0;
+	double minimumFrameMs = 0.0;
+	double maximumFrameMs = 0.0;
+	double averageFrameMs = 0.0;
+	std::vector<TerraEngine::Profiling::ProfilerTimingStreamAggregate> timingStreams;
+};
 
 // class EditorProfilerService groups related state and operations so callers have one documented contract.
 class EditorProfilerService : public std::enable_shared_from_this<EditorProfilerService>
@@ -37,6 +63,18 @@ public:
 	std::string GetStatusText() const;
 	std::string GetLastError() const;
 	std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> GetCaptureList() const;
+	std::vector<EditorProfilerCaptureArtifact> GetAutomationCaptureList() const;
+	// ReadCaptureDocumentById is a blocking worker API used by durable jobs. UI
+	// callers should use RequestLoadCaptureById, which retains asynchronous load.
+	bool ReadCaptureDocumentById(
+		std::string_view artifactId,
+		TerraEngine::Profiling::ProfilerCaptureDocument& outDocument,
+		std::string& outError) const;
+	bool RequestLoadCaptureById(std::string_view artifactId, std::string& outError);
+	bool SummarizeCaptureById(std::string_view artifactId, EditorProfilerCaptureSummary& outSummary, std::string& outError) const;
+	[[nodiscard]] static EditorProfilerCaptureSummary SummarizeDocument(
+		std::string artifactId,
+		const TerraEngine::Profiling::ProfilerCaptureDocument& document);
 	bool HasActiveProject() const;
 	bool IsBusy() const;
 	std::filesystem::path GetProfilerDirectory() const;
@@ -44,6 +82,8 @@ public:
 private:
 	TerraEngine::Profiling::ProfilerCaptureMetadata MakeMetadata() const;
 	void SetBusyStatus(bool busy, std::string status);
+	[[nodiscard]] static std::string MakeArtifactId(std::string_view fileName);
+	[[nodiscard]] std::optional<std::filesystem::path> FindCapturePathLocked(std::string_view artifactId) const;
 
 	EditorContext* ctx = nullptr;
 	ProfilerCaptureStore captureStore;

@@ -7,6 +7,11 @@
 #pragma once
 
 #include "EditorAutomationTypes.h"
+#include "EditorAutomationIdempotencyStore.h"
+#include "EditorAutomationJobService.h"
+#include "EditorAutomationLogStore.h"
+#include "EditorAutomationRegistry.h"
+#include "../Subsystems/MainEditorSubsystem.h"
 
 #include "Engine/Core/Object/Object.h"
 
@@ -16,10 +21,10 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 struct EditorContext;
-class MainEditorSubsystem;
 
 namespace TerraEngine::Editor::Automation
 {
@@ -32,6 +37,7 @@ namespace TerraEngine::Editor::Automation
 		EditorAutomationService();
 
 		void SetEditorContext(EditorContext* context);
+		void SetMainEditor(MainEditorSubsystem* editor);
 		void SetSelectionCallbacks(std::function<std::optional<entt::entity>()> getter, std::function<void(std::optional<entt::entity>)> setter);
 		void SetBridgeToolCallback(BridgeToolCallback callback);
 		void SetActivityCallback(ActivityCallback callback);
@@ -40,6 +46,15 @@ namespace TerraEngine::Editor::Automation
 		void RegisterDefaultCapabilities();
 		const std::vector<AssistantCapability>& GetCapabilities() const;
 		const AssistantCapability* FindCapability(std::string_view name) const;
+		EditorAutomationRegistry& GetRegistry();
+		const EditorAutomationRegistry& GetRegistry() const;
+		EditorAutomationJobService& GetJobService();
+		const EditorAutomationJobService& GetJobService() const;
+		EditorAutomationLogStore& GetLogStore();
+		const EditorAutomationLogStore& GetLogStore() const;
+		EditorAutomationIdempotencyStore& GetIdempotencyStore();
+		const EditorAutomationIdempotencyStore& GetIdempotencyStore() const;
+		[[nodiscard]] AutomationStateSnapshot BuildAutomationStateSnapshot() const;
 
 		nlohmann::json HandleTool(std::string_view name, const nlohmann::json& arguments, WriteMode writeMode, const std::string& requestId);
 		nlohmann::json BuildSuccess(std::string_view requestId, std::string_view message, nlohmann::json data = nlohmann::json::object()) const;
@@ -122,6 +137,7 @@ namespace TerraEngine::Editor::Automation
 		nlohmann::json HandleCustomCameraCapture(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleRendererVirtualGeometryStats(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleDiagnosticsGetSummary(const nlohmann::json& arguments, const std::string& requestId);
+		nlohmann::json ExecuteProviderHandler(std::uint64_t operation, std::string_view operationName, const nlohmann::json& arguments, WriteMode writeMode, const std::string& requestId);
 		nlohmann::json ValidateCaptureArguments(const nlohmann::json& arguments, const std::string& requestId) const;
 		ErrorCategory MapCaptureFailureCategory(std::string_view category) const;
 		nlohmann::json ValidateProjectRelativePath(const nlohmann::json& arguments, std::string_view key, const std::string& requestId) const;
@@ -129,6 +145,7 @@ namespace TerraEngine::Editor::Automation
 		void MarkSceneMutated(ActivityEventType type, const std::string& requestId, const std::string& capability, const std::string& message) const;
 
 		EditorContext* editorContext = nullptr;
+		MainEditorSubsystem* mainEditor = nullptr;
 		BridgeToolCallback bridgeToolCallback;
 		ActivityCallback activityCallback;
 		std::function<std::optional<entt::entity>()> getSelectedEntity;
@@ -136,5 +153,25 @@ namespace TerraEngine::Editor::Automation
 		std::vector<AssistantCapability> capabilities;
 		std::vector<ExportJob> exportJobs;
 		std::unordered_map<std::string, std::size_t> capabilityIndexByName;
+		// Provider names are bound to stable operation IDs once during registry
+		// construction. Retaining the reverse map detects the otherwise extremely
+		// unlikely case of two provider names hashing to the same ID.
+		std::unordered_map<std::uint64_t, std::string> boundProviderOperationNames;
+		EditorAutomationRegistry capabilityRegistry;
+		EditorAutomationJobService jobService;
+		EditorAutomationLogStore logStore;
+		EditorAutomationIdempotencyStore idempotencyStore;
+		// Script compilation is single-flight in the owning subsystem. Retaining
+		// its durable job ID lets polling mirror native progress and diagnostics.
+		std::string activeScriptCompilationJobId;
+		// Profiler capture persistence completes asynchronously after stop. The
+		// baseline IDs let jobs.get identify the new project-contained artifact
+		// without exposing or accepting an arbitrary filesystem path.
+		std::string activeProfilerCaptureJobId;
+		std::unordered_set<std::string> profilerArtifactIdsBeforeStop;
+		std::string activeProfilerLoadJobId;
+		std::string activeProfilerLoadArtifactId;
+		std::uint64_t nextTransactionId = 1u;
+		PrefabAuthoringService prefabAuthoringService;
 	};
 }

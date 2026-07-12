@@ -34,6 +34,7 @@
 #include <map>
 #include <unordered_map>
 #include <mutex>
+#include <atomic>
 #include <limits>
 #include <stdexcept>
 #include <filesystem>
@@ -181,6 +182,11 @@ struct VulkanContext::Impl {
 	VkDevice device = VK_NULL_HANDLE;
 	VkQueue graphicsQueue = VK_NULL_HANDLE;
 	VkQueue presentQueue = VK_NULL_HANDLE;
+	// Every public operation that reads or mutates live Vulkan ownership holds
+	// this recursive gate. Renderer methods call one another while preserving the
+	// same protected boundary, so recursion is intentional; external resource
+	// invalidation and editor callbacks wait until the complete transition ends.
+	mutable std::recursive_mutex deviceStateMutex;
 	// Vulkan queue handles are externally synchronized objects. Asset uploads
 	// can submit from worker threads while the coordinator submits/presents an
 	// editor frame, so every queue operation and device-wide idle boundary must
@@ -262,14 +268,28 @@ struct VulkanContext::Impl {
 	uint32_t currentFrame = 0;
 	bool framebufferResized = false;
 	// Native window managers can emit hundreds of size notifications during one
-	// drag. Remember the latest event so swapchain/offscreen resources are rebuilt
-	// once after the drag settles instead of being destroyed every notification.
-	std::chrono::steady_clock::time_point framebufferResizeLastEvent{};
-	static constexpr std::chrono::milliseconds FRAMEBUFFER_RESIZE_DEBOUNCE{500};
-	bool IsFramebufferResizeSettled() const
+	// drag. Rebuild at most once per short interval so the editor stays interactive
+	// without performing a device-idle swapchain replacement for every callback.
+	std::chrono::steady_clock::time_point framebufferResizeLastRebuild{};
+	static constexpr std::chrono::milliseconds FRAMEBUFFER_RESIZE_REBUILD_INTERVAL{32};
+	bool ClaimFramebufferResizeRebuild()
 	{
-		return !framebufferResized
-			|| std::chrono::steady_clock::now() - framebufferResizeLastEvent >= FRAMEBUFFER_RESIZE_DEBOUNCE;
+		if (!framebufferResized)
+		{
+			return false;
+		}
+
+		const auto now = std::chrono::steady_clock::now();
+		if (framebufferResizeLastRebuild != std::chrono::steady_clock::time_point{}
+			&& now - framebufferResizeLastRebuild < FRAMEBUFFER_RESIZE_REBUILD_INTERVAL)
+		{
+			return false;
+		}
+
+		// Claim the protected rebuild before waiting on the device. Any callbacks
+		// received during that work remain pending for the next throttled rebuild.
+		framebufferResizeLastRebuild = now;
+		return true;
 	}
 	static constexpr int MAX_FRAMES_IN_FLIGHT = 3;
 	bool initialized = false;
@@ -909,14 +929,18 @@ struct VulkanContext::Impl {
 	std::vector<std::uint8_t> pendingPrimaryCommandBuffersSubmitted;
 	std::vector<std::vector<VulkanBuffer>> retiredBuffersByFrame;
 	std::vector<std::vector<size_t>> workerBufferUsage; // Tracks next available secondary buffer index per worker per frame
-	bool swapchainImageAcquired = false;
-	bool skipFrame = false;
+	std::atomic_bool swapchainImageAcquired = false;
+	// A descriptor-safety flush may submit a runtime prefix and consume the
+	// acquire semaphore before EndFrame. Image ownership remains active, while
+	// this flag prevents the final submit from waiting the binary semaphore twice.
+	std::atomic_bool swapchainAcquireWaitConsumed = false;
+	std::atomic_bool skipFrame = false;
 	// Vulkan device loss invalidates the live device and its queues. Swapchain
 	// recreation cannot repair that state, so latch it once and make frame
 	// entry points return quietly instead of retrying failed queue work.
-	bool deviceLost = false;
-	bool deviceLostLogged = false;
-	bool editorRenderSubmitted = false;
+	std::atomic_bool deviceLost = false;
+	std::atomic_bool deviceLostLogged = false;
+	std::atomic_bool editorRenderSubmitted = false;
 	uint32_t acquiredImageIndex = 0;
 
 	// Each record owns every Vulkan object needed by one asynchronous copy. GPU
@@ -1002,9 +1026,12 @@ struct VulkanContext::Impl {
 	UIRenderer uiTextRenderer;
 
 	// Re-usable UI buffers (resized dynamically)
-	VulkanBuffer uiStaticVertexBuffer{};
+	// Runtime UI vertices are rewritten by the CPU. Keep one allocation per
+	// frame-fence slot so a later CPU frame cannot overwrite memory still being
+	// consumed by an earlier GPU submission.
+	std::vector<VulkanBuffer> uiStaticVertexBuffers;
 	VulkanBuffer uiInstanceBuffer{};
-	VulkanBuffer uiSdfVertexBuffer{};
+	std::vector<VulkanBuffer> uiSdfVertexBuffers;
 
 	void CreateUIPipelines(VkRenderPass renderPass);
 	void RenderUI(VkCommandBuffer cmd, const UIRenderBatch& batch);

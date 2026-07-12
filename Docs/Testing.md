@@ -687,6 +687,44 @@ always-run `headless-export-evidence-windows-debug` workflow artifact retains
 configure, build, focused/full test, install, and baseline logs plus any partial
 or complete evidence after failure.
 
+## MCP Editor Completeness
+
+Feature `041` expands the loopback-only editor bridge with typed capability
+providers, atomic automation transactions, durable session jobs, structured
+logs, project and scene lifecycle, Play Mode, asset and prefab workflows,
+scripting, build profiles, Scene View commands, and profiler captures. The
+bridge remains disabled and read-only by default, and clients cannot enable it,
+elevate write access, execute arbitrary processes, or access paths outside
+approved project roots.
+
+Build and run the focused native coverage from an x64 Visual Studio developer
+environment:
+
+```powershell
+cmake --preset Debug
+cmake --build --preset Debug --target TerraEngine-EngineTests TerraEngine-EditorTests TerraEngine-Editor TerraEngine-Export
+$env:TERRAENGINE_TEST_FILTER="Editor.MCP;Editor.Automation;AutomationTransaction;AutomationJob;AutomationLog;PlayMode;Prefab;ScriptCompilation;BuildProfile;SceneView;Profiler"
+.\out\build\Debug\TerraEngine-EditorTests.exe
+Remove-Item Env:TERRAENGINE_TEST_FILTER
+ctest --test-dir out/build/Debug -C Debug -R "Editor\.Automation|Editor\.RendererRecovery|Editor\.Export|Engine\.TransactionalMutation|Engine\.SystemScheduler" --output-on-failure
+ctest --test-dir out/build/Debug -C Debug --output-on-failure
+cmake --build --preset Debug --target install
+```
+
+Installed-editor validation uses
+`out/build/Debug/Build/Editor/TerraEngine-Editor.exe`. Start at the project hub
+with isolated preferences, enable the bridge and writes from
+`Edit > Preferences... > MCP Bridge`, and run the end-to-end scenario in
+`specs/041-mcp-editor-completeness/quickstart.md`. Validation must cover one
+successful atomic batch and one rejected batch, undo/redo, disconnect and job
+reconnect, Play Mode single-step, image capture, correlated logs, script
+compilation, export evidence, profiler capture, approval binding, project
+reload, and final bridge disablement.
+
+Disposable MCP projects must not enter recent-project history. Remove them only
+after the installed editor exits so file watchers and background jobs have
+released their handles.
+
 ## Renderer Performance Baseline
 
 Renderer threading fixtures live at `Tests/Fixtures/RendererPerformanceBaseline`.

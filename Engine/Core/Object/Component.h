@@ -13,6 +13,7 @@
 #include <type_traits>
 #include <utility>
 #include <unordered_map>
+#include <vector>
 #include <functional>
 #include <string_view>
 #include <mutex>
@@ -53,6 +54,61 @@ struct component_has_reflect<T, std::void_t<decltype(T::reflect(std::declval<ent
 template <typename T>
 inline constexpr bool component_has_reflect_v = component_has_reflect<T>::value;
 
+// Engine components declare automation without depending on editor headers.
+// The editor registry translates these typed engine enums into its transport
+// descriptors when the owning subsystem elects to publish the declarations.
+enum class ComponentAutomationPermission
+{
+	Read,
+	ProjectWrite,
+	GlobalWrite
+};
+
+enum class ComponentAutomationApproval
+{
+	None,
+	Destructive,
+	HighImpact
+};
+
+enum class ComponentAutomationMutation
+{
+	ReadOnly,
+	Project,
+	Scene,
+	Asset,
+	Destructive
+};
+
+struct ComponentAutomationDeclaration
+{
+	std::string name;
+	std::string category;
+	std::string description;
+	nlohmann::json inputSchema = {{"type", "object"}};
+	nlohmann::json resultSchema = {{"type", "object"}};
+	ComponentAutomationPermission permission = ComponentAutomationPermission::Read;
+	ComponentAutomationApproval approval = ComponentAutomationApproval::None;
+	ComponentAutomationMutation mutation = ComponentAutomationMutation::ReadOnly;
+	bool requiresProject = false;
+	bool requiresScene = false;
+	bool requiresRenderer = false;
+	bool workerPreparation = true;
+	bool protectedCommit = false;
+	std::string visibilityBoundary = "immutable_snapshot";
+	std::function<nlohmann::json(const nlohmann::json&)> handler;
+};
+
+template <typename T, typename = void>
+struct component_has_automation_declarations : std::false_type
+{
+};
+
+template <typename T>
+struct component_has_automation_declarations<T, std::void_t<decltype(T::automation())>> : std::true_type
+{
+};
+
 template <typename T>
 // component_name_for is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 inline std::string component_name_for()
@@ -88,6 +144,9 @@ struct ComponentAccessFunctions
 	std::function<void(entt::registry&, entt::entity)> entityRemoveComponent;
 	std::function<nlohmann::json(entt::registry&, entt::entity)> entitySerialize;
 	std::function<void(entt::registry&, entt::entity, const nlohmann::json&)> entityDeserialize;
+	// Declarations are copied during component type registration. The editor can
+	// publish them later without naming this component in a central dispatcher.
+	std::vector<ComponentAutomationDeclaration> automationDeclarations;
 };
 
 struct ComponentAccessObservation
@@ -118,6 +177,10 @@ void RegisterComponentAccess(const std::string& name)
 
 	ComponentAccessFunctions functions;
 	functions.reflectionType = TerraEngine::Reflection::ResolveType<ComponentType>();
+	if constexpr (component_has_automation_declarations<ComponentType>::value)
+	{
+		functions.automationDeclarations = ComponentType::automation();
+	}
 	functions.entityGetter = [](entt::registry& registry, entt::entity entity, std::string_view property) -> TerraEngine::Reflection::Variant
 	{
 		// Fetch the concrete component by type-safe API, then take a shared

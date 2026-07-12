@@ -13,9 +13,12 @@
 #include "Engine/Scripting/ScriptingSystem.h"
 
 #include <array>
+#include <algorithm>
 #include <cerrno>
+#include <cctype>
 #include <chrono>
 #include <cstring>
+#include <regex>
 
 #if defined(_WIN32)
 #include <Windows.h>
@@ -54,14 +57,17 @@ namespace
 			return "Ready";
 		case ScriptCoordinatorState::Failed:
 			return "Failed";
+		case ScriptCoordinatorState::Canceled:
+			return "Canceled";
 		}
 
 		return "Unknown";
 	}
 
 	// RunProcessCapture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	bool RunProcessCapture(const std::filesystem::path& workingDirectory, const std::string& commandLine, std::string& output, int& exitCode)
+	bool RunProcessCapture(const std::filesystem::path& workingDirectory, const std::string& commandLine, const std::atomic_bool& cancellationRequested, std::string& output, int& exitCode, bool& canceled)
 	{
+		canceled = false;
 #if defined(_WIN32)
 		SECURITY_ATTRIBUTES securityAttributes{};
 		securityAttributes.nLength = sizeof(securityAttributes);
@@ -108,14 +114,46 @@ namespace
 		}
 
 		std::array<char, 4096> buffer{};
-		DWORD bytesRead = 0;
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		while (ReadFile(readHandle, buffer.data(), static_cast<DWORD>(buffer.size()), &bytesRead, nullptr) && bytesRead > 0)
+		bool processExited = false;
+		while (!processExited)
 		{
+			DWORD available = 0u;
+			if (PeekNamedPipe(readHandle, nullptr, 0u, nullptr, &available, nullptr) && available > 0u)
+			{
+				DWORD bytesRead = 0u;
+				const DWORD requested = std::min<DWORD>(available, static_cast<DWORD>(buffer.size()));
+				if (ReadFile(readHandle, buffer.data(), requested, &bytesRead, nullptr) && bytesRead > 0u)
+				{
+					output.append(buffer.data(), bytesRead);
+				}
+			}
+
+			if (cancellationRequested.load(std::memory_order_relaxed))
+			{
+				// dotnet is the directly launched process for generated build
+				// invocations, so termination stops uncommitted compilation work.
+				TerminateProcess(processInfo.hProcess, ERROR_CANCELLED);
+				canceled = true;
+			}
+			processExited = WaitForSingleObject(processInfo.hProcess, 50u) == WAIT_OBJECT_0;
+		}
+
+		// Drain output already written before process termination/completion.
+		while (true)
+		{
+			DWORD available = 0u;
+			if (!PeekNamedPipe(readHandle, nullptr, 0u, nullptr, &available, nullptr) || available == 0u)
+			{
+				break;
+			}
+			DWORD bytesRead = 0u;
+			if (!ReadFile(readHandle, buffer.data(), std::min<DWORD>(available, static_cast<DWORD>(buffer.size())), &bytesRead, nullptr) || bytesRead == 0u)
+			{
+				break;
+			}
 			output.append(buffer.data(), bytesRead);
 		}
 
-		WaitForSingleObject(processInfo.hProcess, INFINITE);
 		DWORD processExitCode = 0;
 		GetExitCodeProcess(processInfo.hProcess, &processExitCode);
 		exitCode = static_cast<int>(processExitCode);
@@ -228,6 +266,16 @@ namespace
 			}
 
 			const auto now = std::chrono::steady_clock::now();
+			if (!childExited && cancellationRequested.load(std::memory_order_relaxed))
+			{
+				canceled = true;
+				kill(-childProcess, SIGTERM);
+				std::this_thread::sleep_for(std::chrono::milliseconds(100));
+				kill(-childProcess, SIGKILL);
+				waitpid(childProcess, &status, 0);
+				childExited = true;
+				break;
+			}
 			if (!childExited && now - startedAt > kBuildTimeout)
 			{
 				timedOut = true;
@@ -350,6 +398,7 @@ void ScriptCompilationSubsystem::Shutdown()
 	m_ShouldRestorePausedGameplayState = false;
 	m_WasRunningBeforeBuild = false;
 	m_WasPausedBeforeBuild = false;
+	m_CancelRequested.store(false, std::memory_order_relaxed);
 }
 
 // ScriptCompilationSubsystem::GetName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -371,6 +420,7 @@ void ScriptCompilationSubsystem::OnProjectOpened()
 	m_ShouldRestorePausedGameplayState = false;
 	m_WasRunningBeforeBuild = false;
 	m_WasPausedBeforeBuild = false;
+	m_CancelRequested.store(false, std::memory_order_relaxed);
 	ScriptingSystem::Instance().ClearGameplayAssembly();
 
 	std::string workspaceError;
@@ -384,6 +434,7 @@ void ScriptCompilationSubsystem::OnProjectOpened()
 	}
 
 	RequestBuild(ScriptBuildReason::ProjectOpen);
+	PublishAttachableScriptTypes();
 }
 
 // ScriptCompilationSubsystem::OnProjectClosed is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -393,6 +444,7 @@ void ScriptCompilationSubsystem::OnProjectClosed()
 	m_ShouldRestorePausedGameplayState = false;
 	m_WasRunningBeforeBuild = false;
 	m_WasPausedBeforeBuild = false;
+	m_CancelRequested.store(false, std::memory_order_relaxed);
 	m_WorkspaceService.SetProjectRoot({});
 	ScriptingSystem::Instance().ClearGameplayAssembly();
 	UpdateSharedState();
@@ -408,6 +460,10 @@ void ScriptCompilationSubsystem::RequestBuild(ScriptBuildReason reason)
 
 	m_LastQueuedReason = reason;
 	m_Status.queuedBuild = true;
+	m_Status.cancellationRequested = false;
+	m_Status.progress = 0.05;
+	m_Status.diagnostics.clear();
+	m_CancelRequested.store(false, std::memory_order_relaxed);
 	m_Status.state = ScriptCoordinatorState::Queued;
 	m_Status.lastSummary = "A project script build is queued for " + BuildProfileToString(m_Status.activeProfile) + ".";
 	m_DebounceTimer = reason == ScriptBuildReason::ProjectOpen ? 0.0f : kScriptBuildDebounceSeconds;
@@ -423,6 +479,28 @@ void ScriptCompilationSubsystem::RequestBuild(ScriptBuildReason reason)
 	}
 
 	UpdateSharedState();
+}
+
+bool ScriptCompilationSubsystem::RequestCancellation()
+{
+	if (!m_Status.queuedBuild && !m_BuildInFlight)
+	{
+		return false;
+	}
+
+	m_Status.cancellationRequested = true;
+	m_CancelRequested.store(true, std::memory_order_relaxed);
+	if (!m_BuildInFlight)
+	{
+		// A queued build has not crossed the worker boundary, so cancellation
+		// leaves no compilation output or assembly publication to roll back.
+		m_Status.queuedBuild = false;
+		m_Status.state = ScriptCoordinatorState::Canceled;
+		m_Status.progress = 1.0;
+		m_Status.lastSummary = "Assembly-CSharp compilation was canceled before launch.";
+		UpdateSharedState();
+	}
+	return true;
 }
 
 // ScriptCompilationSubsystem::NotifyScriptSourceChanged is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -452,6 +530,23 @@ bool ScriptCompilationSubsystem::CreateScriptAsset(const std::filesystem::path& 
 	AssetDatabase::Instance().ImportAsset(outCreatedPath, true);
 	RequestBuild(ScriptBuildReason::FileChange);
 	return true;
+}
+
+bool ScriptCompilationSubsystem::CreateApprovedScript(const ScriptCreationRequest& request, ScriptCreationResult& outResult, std::string* outError)
+{
+	if (!m_WorkspaceService.CreateApprovedScript(request, outResult, outError))
+	{
+		return false;
+	}
+	AssetDatabase::Instance().ImportAsset(outResult.absolutePath, true);
+	PublishAttachableScriptTypes();
+	RequestBuild(ScriptBuildReason::FileChange);
+	return true;
+}
+
+bool ScriptCompilationSubsystem::SynchronizeWorkspace(ScriptWorkspaceStatus& outStatus, std::string* outError)
+{
+	return m_WorkspaceService.SynchronizeWorkspace(outStatus, outError);
 }
 
 // ScriptCompilationSubsystem::OpenScript is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -663,6 +758,67 @@ void ScriptCompilationSubsystem::SynchronizeBoundScriptTypesFromAssets()
 	}
 }
 
+void ScriptCompilationSubsystem::PublishAttachableScriptTypes()
+{
+	std::vector<AttachableScriptType> types;
+	const std::filesystem::path projectRoot = m_WorkspaceService.GetProjectRoot();
+	for (const auto& [path, metadata] : AssetDatabase::Instance().GetAssets())
+	{
+		const auto attachable = metadata.settings.find("isAttachable");
+		const auto qualifiedName = metadata.settings.find("scriptFullName");
+		if (attachable == metadata.settings.end() || !attachable->is_boolean() || !attachable->get<bool>()
+			|| qualifiedName == metadata.settings.end() || !qualifiedName->is_string() || qualifiedName->get<std::string>().empty())
+		{
+			continue;
+		}
+
+		std::error_code relativeError;
+		const std::filesystem::path sourcePath = projectRoot.empty()
+			? path
+			: std::filesystem::relative(path, projectRoot, relativeError);
+		types.push_back({qualifiedName->get<std::string>(), relativeError ? path : sourcePath});
+	}
+	std::sort(types.begin(), types.end(), [](const AttachableScriptType& left, const AttachableScriptType& right) {
+		return left.qualifiedName < right.qualifiedName;
+	});
+	types.erase(std::unique(types.begin(), types.end(), [](const AttachableScriptType& left, const AttachableScriptType& right) {
+		return left.qualifiedName == right.qualifiedName;
+	}), types.end());
+	m_Status.attachableTypes = std::move(types);
+}
+
+void ScriptCompilationSubsystem::PublishCompilerDiagnostics(std::string_view buildOutput)
+{
+	m_Status.diagnostics.clear();
+	// MSBuild emits one stable diagnostic per line in this form on every
+	// supported platform. Unmatched informational output remains available in
+	// lastBuildOutput but is not misrepresented as a compiler diagnostic.
+	static const std::regex diagnosticPattern(
+		R"(^(.+)\(([0-9]+),([0-9]+)\):\s+(warning|error)\s+([A-Za-z]+[0-9]+):\s+(.+?)(?:\s+\[.*\])?$)",
+		std::regex::icase);
+	std::istringstream lines{std::string(buildOutput)};
+	std::string line;
+	while (std::getline(lines, line))
+	{
+		std::smatch match;
+		if (!std::regex_match(line, match, diagnosticPattern))
+		{
+			continue;
+		}
+		ScriptCompilerDiagnostic diagnostic;
+		diagnostic.file = match[1].str();
+		diagnostic.line = static_cast<std::uint32_t>(std::stoul(match[2].str()));
+		diagnostic.column = static_cast<std::uint32_t>(std::stoul(match[3].str()));
+		diagnostic.severity = match[4].str();
+		std::transform(diagnostic.severity.begin(), diagnostic.severity.end(), diagnostic.severity.begin(), [](unsigned char value) {
+			return static_cast<char>(std::tolower(value));
+		});
+		diagnostic.code = match[5].str();
+		diagnostic.message = match[6].str();
+		m_Status.diagnostics.push_back(std::move(diagnostic));
+	}
+}
+
 // ScriptCompilationSubsystem::BeginBuild is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptCompilationSubsystem::BeginBuild()
 {
@@ -677,6 +833,9 @@ void ScriptCompilationSubsystem::BeginBuild()
 	PrepareForBuild();
 	m_Status.queuedBuild = false;
 	m_Status.state = ScriptCoordinatorState::Building;
+	m_Status.progress = 0.2;
+	m_Status.cancellationRequested = false;
+	m_CancelRequested.store(false, std::memory_order_relaxed);
 	m_Status.lastSummary = "Building Assembly-CSharp (" + BuildProfileToString(m_Status.activeProfile) + ").";
 	m_Status.gameplayAssemblyLoaded = false;
 	m_Status.activeAssemblyPath.clear();
@@ -693,7 +852,22 @@ void ScriptCompilationSubsystem::BeginBuild()
 // ScriptCompilationSubsystem::HandleCompletedBuild is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptCompilationSubsystem::HandleCompletedBuild(ScriptBuildResult result)
 {
+	m_CancelRequested.store(false, std::memory_order_relaxed);
+	m_Status.cancellationRequested = result.canceled;
 	m_Status.lastBuildOutput = result.buildOutput;
+	PublishCompilerDiagnostics(result.buildOutput);
+	if (result.canceled)
+	{
+		m_Status.state = ScriptCoordinatorState::Canceled;
+		m_Status.queuedBuild = false;
+		m_Status.cancellationRequested = true;
+		m_Status.progress = 1.0;
+		m_Status.lastSummary = "Assembly-CSharp compilation was canceled before assembly publication.";
+		RestorePausedGameplayState();
+		AssetDatabase::Instance().SetScriptCompileState("Canceled", m_Status.lastSummary);
+		UpdateSharedState();
+		return;
+	}
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!result.buildOutput.empty())
 	{
@@ -706,6 +880,7 @@ void ScriptCompilationSubsystem::HandleCompletedBuild(ScriptBuildResult result)
 	if (!result.success)
 	{
 		m_Status.state = ScriptCoordinatorState::Failed;
+		m_Status.progress = 1.0;
 		m_Status.lastSummary = result.failureMessage;
 		TERRAENGINE_LOG(LogLevel::Error, "Assembly-CSharp build failed: " << result.failureMessage);
 		std::string reloadError;
@@ -729,6 +904,7 @@ void ScriptCompilationSubsystem::HandleCompletedBuild(ScriptBuildResult result)
 	}
 
 	m_Status.state = ScriptCoordinatorState::Reloading;
+	m_Status.progress = 0.85;
 	m_Status.lastSummary = "Reloading the newly built Assembly-CSharp runtime into the current session.";
 	UpdateSharedState();
 
@@ -739,6 +915,7 @@ void ScriptCompilationSubsystem::HandleCompletedBuild(ScriptBuildResult result)
 	if (!ScriptingSystem::Instance().LoadGameplayAssembly(result.assemblyPath, &reloadError))
 	{
 		m_Status.state = ScriptCoordinatorState::Failed;
+		m_Status.progress = 1.0;
 		m_Status.lastSummary = reloadError;
 		TERRAENGINE_LOG(LogLevel::Error, "Assembly-CSharp build completed but the gameplay assembly reload failed: " << reloadError);
 		m_Status.lastSummary += " TerraEngine keeps only the project managed Assembly-CSharp output, so no separate rollback copy is available.";
@@ -750,12 +927,14 @@ void ScriptCompilationSubsystem::HandleCompletedBuild(ScriptBuildResult result)
 	}
 
 	m_Status.state = ScriptCoordinatorState::Ready;
+	m_Status.progress = 1.0;
 	m_Status.gameplayAssemblyLoaded = true;
 	m_Status.activeAssemblyPath = result.assemblyPath;
 	m_Status.lastSummary = "Assembly-CSharp built and reloaded successfully.";
 	TERRAENGINE_LOG(LogLevel::Info, "Assembly-CSharp built successfully and reloaded from " << result.assemblyPath << ".");
 	RestorePausedGameplayState();
 	AssetDatabase::Instance().SetScriptCompileState("Ready", m_Status.lastSummary);
+	PublishAttachableScriptTypes();
 	UpdateSharedState();
 }
 
@@ -811,13 +990,18 @@ ScriptCompilationSubsystem::ScriptBuildResult ScriptCompilationSubsystem::RunBui
 		BuildProfileToString(profile));
 
 	int exitCode = 0;
-	if (!RunProcessCapture(invocation.workingDirectory, invocation.commandLine, result.buildOutput, exitCode))
+	if (!RunProcessCapture(invocation.workingDirectory, invocation.commandLine, m_CancelRequested, result.buildOutput, exitCode, result.canceled))
 	{
 		result.failureMessage = TerraEngine::Editor::Scripting::DescribeScriptBuildLaunchFailure(invocation);
 		if (!result.buildOutput.empty())
 		{
 			result.failureMessage += " " + result.buildOutput;
 		}
+		return result;
+	}
+	if (result.canceled)
+	{
+		result.failureMessage = "Assembly-CSharp compilation was canceled.";
 		return result;
 	}
 

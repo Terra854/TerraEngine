@@ -43,11 +43,34 @@ add_executable(TerraEngine-EditorTests
 	Core/EditorPostFrameBoundaryTests.cpp
 	Core/MainEditorToolbarTests.cpp
 	Automation/EditorAutomationServiceTests.cpp
+	Automation/EditorAutomationRegistryTests.cpp
+	Automation/EditorAutomationJobTests.cpp
+	Automation/EditorAutomationLogTests.cpp
+	Automation/EditorAutomationIdempotencyTests.cpp
+	Automation/EditorAutomationSchedulerTests.cpp
+	Automation/EditorAutomationTransactionTests.cpp
+	Automation/EditorMcpHistoryTests.cpp
 	Automation/EditorReflectionWorkerBoundaryTests.cpp
 	Automation/EditorMcpBridgeContractTests.cpp
 	Automation/EditorMcpBridgeSafetyTests.cpp
 	Automation/EditorMcpCameraImageContractTests.cpp
 	Automation/EditorMcpCameraImageSafetyTests.cpp
+	Automation/EditorMcpProjectLifecycleTests.cpp
+	Automation/EditorMcpSceneLifecycleTests.cpp
+	Automation/EditorMcpExportJobTests.cpp
+	Automation/EditorMcpEndToEndTests.cpp
+	Automation/EditorMcpPlayModeTests.cpp
+	Automation/EditorMcpStructuredLogTests.cpp
+	Automation/EditorMcpAssetOrganizationTests.cpp
+	Automation/EditorMcpPrefabTests.cpp
+	Automation/EditorMcpScriptTests.cpp
+	Automation/EditorMcpBuildProfileTests.cpp
+	Automation/EditorMcpSettingsTests.cpp
+	Automation/EditorMcpSceneViewTests.cpp
+	Automation/SceneViewAutomationLinkStubs.cpp
+	Automation/PrefabAuthoringServiceLinkStubs.cpp
+	Automation/EditorMcpProfilerTests.cpp
+	Automation/EditorAutomationExtensibilityTests.cpp
 	Automation/EditorMcpTransportTests.cpp
 	Automation/EditorMcpAssetImportTests.cpp
 	Automation/EditorMcpAssetImportSafetyTests.cpp
@@ -119,8 +142,20 @@ add_executable(TerraEngine-EditorTests
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Assets/AssetDatabase.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Assets/FileWatcher.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/EditorAutomationService.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/EditorAutomationRegistry.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/EditorAutomationTransaction.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/EditorAutomationJobService.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/EditorAutomationLogStore.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/EditorAutomationIdempotencyStore.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/EditorMcpBridge.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/EditorMcpTransport.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/Providers/AutomationProvider.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/Providers/ProjectSceneAutomationProvider.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/Providers/AssetPrefabAutomationProvider.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/Providers/ScriptBuildAutomationProvider.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/Providers/EditorDiagnosticsAutomationProvider.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/Providers/HistoryPlayModeAutomationProvider.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/Providers/AuthoringAutomationProvider.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/SceneViewOrientationWidget.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/SceneViewOverlayIcons.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/SceneViewOverlayMarkers.cpp
@@ -136,6 +171,7 @@ add_executable(TerraEngine-EditorTests
 	${CMAKE_SOURCE_DIR}/Engine/Resource/MaterialRuntimeContract.cpp
 	${CMAKE_SOURCE_DIR}/Tools/HeadlessExport/HeadlessExportCommandLine.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Profiling/ProfilerCaptureStore.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Profiling/EditorProfilerService.cpp
 	${CMAKE_SOURCE_DIR}/Engine/Profiling/ProfilerCapture.cpp
 )
 

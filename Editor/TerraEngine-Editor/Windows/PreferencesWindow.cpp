@@ -84,6 +84,22 @@ void PreferencesWindow::ApplyStoredPreferencesToRenderSystem()
 	ApplyRendererDiagnosticsToRenderSystem(preferences.vulkanValidationLayers, preferences.renderDebugDiagnostics);
 }
 
+void PreferencesWindow::OnBeforeBegin()
+{
+	// Preferences is a transient editor-owned surface rather than a docked
+	// workspace panel. Give every new appearance a usable centered rectangle so
+	// a first open cannot collapse to the table's zero-content startup size.
+	const ImGuiViewport* viewport = ImGui::GetMainViewport();
+	const ImVec2 preferredSize(
+		std::min(900.0f, viewport->WorkSize.x * 0.75f),
+		std::min(650.0f, viewport->WorkSize.y * 0.75f));
+	const ImVec2 center(
+		viewport->WorkPos.x + viewport->WorkSize.x * 0.5f,
+		viewport->WorkPos.y + viewport->WorkSize.y * 0.5f);
+	ImGui::SetNextWindowSize(preferredSize, ImGuiCond_Appearing);
+	ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+}
+
 void PreferencesWindow::OnGui()
 {
 	constexpr ImGuiTableFlags layoutFlags =
@@ -219,99 +235,154 @@ void PreferencesWindow::DrawMcpBridgeCategory()
 		ImGui::TextDisabled("Disable the bridge before changing its listen port.");
 	}
 
-	// Status is read from a single bridge snapshot so all counters describe the
-	// same point in the editor update loop.
+	// The management surface remains in Preferences. Tabs keep typed runtime
+	// state readable without reintroducing a dedicated MCP editor window.
 	const nlohmann::json status = bridge->BuildStatusJson();
-	ImGui::SeparatorText("Status");
-	ImGui::Text("State: %s", status.value("state", "unknown").c_str());
-	const std::string endpoint = status.value("endpoint", "");
-	if (!endpoint.empty())
+	if (ImGui::BeginTabBar("McpBridgeManagementTabs"))
 	{
-		ImGui::Text("Endpoint: %s", endpoint.c_str());
-	}
-	else if (!bridge->GetTransportLastError().empty())
-	{
-		ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.25f, 1.0f), "%s", bridge->GetTransportLastError().c_str());
-	}
-	ImGui::Text("Clients: %llu", static_cast<unsigned long long>(status.value("connectedClientCount", 0ull)));
-	ImGui::Text("Pending requests: %llu", static_cast<unsigned long long>(status.value("pendingRequestCount", 0ull)));
-	ImGui::Text("Pending approvals: %llu", static_cast<unsigned long long>(status.value("pendingApprovalCount", 0ull)));
-	ImGui::TextWrapped("Last diagnostics: %s", status.value("lastDiagnosticRequest", "never").c_str());
-
-	ImGui::SeparatorText("Resources");
-	for (const auto& resource : bridge->ListResources())
-	{
-		ImGui::BulletText("%s", resource.value("name", "").c_str());
-	}
-
-	ImGui::SeparatorText("Approvals");
-	const auto approvals = bridge->GetPendingApprovals();
-	if (approvals.empty())
-	{
-		ImGui::TextDisabled("No pending approvals.");
-	}
-	for (const auto& approval : approvals)
-	{
-		ImGui::PushID(approval.approvalId.c_str());
-		ImGui::TextWrapped("%s", approval.summary.c_str());
-		if (ImGui::Button("Approve"))
+		if (ImGui::BeginTabItem("Status"))
 		{
-			bridge->ResolveApproval(approval.approvalId, true);
-		}
-		ImGui::SameLine();
-		if (ImGui::Button("Deny"))
-		{
-			bridge->ResolveApproval(approval.approvalId, false);
-		}
-		ImGui::SameLine();
-		if (ImGui::Button("Cancel"))
-		{
-			bridge->CancelApproval(approval.approvalId);
-		}
-		ImGui::Separator();
-		ImGui::PopID();
-	}
-
-	ImGui::SeparatorText("Export");
-	const nlohmann::json diagnostics = bridge->ReadResource("terraengine://diagnostics/summary");
-	for (const auto& surface : diagnostics.value("surfaces", nlohmann::json::array()))
-	{
-		if (surface.value("surface", "") != "export")
-		{
-			continue;
-		}
-		const auto jobs = surface.value("details", nlohmann::json::object()).value("jobs", nlohmann::json::array());
-		if (jobs.empty())
-		{
-			ImGui::TextDisabled("No export jobs.");
-		}
-		for (const auto& job : jobs)
-		{
-			ImGui::PushID(job.value("jobId", "").c_str());
-			ImGui::TextWrapped("%s [%s]", job.value("profile", "").c_str(), job.value("state", "").c_str());
-			const float progress = job.value("progress", 0.0f);
-			ImGui::ProgressBar(progress);
-			if (job.value("state", "") != "canceled" && ImGui::Button("Cancel export"))
+			ImGui::Text("State: %s", status.value("state", "unknown").c_str());
+			ImGui::Text("Permission: %s", status.value("writeMode", "read_only").c_str());
+			const std::string endpoint = status.value("endpoint", "");
+			if (!endpoint.empty())
 			{
-				bridge->CallTool("export.cancel", {{"jobId", job.value("jobId", "")}});
+				ImGui::Text("Endpoint: %s", endpoint.c_str());
 			}
-			ImGui::PopID();
+			else if (!bridge->GetTransportLastError().empty())
+			{
+				ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.25f, 1.0f), "%s", bridge->GetTransportLastError().c_str());
+			}
+			ImGui::Text("Clients: %llu", static_cast<unsigned long long>(status.value("connectedClientCount", 0ull)));
+			ImGui::Text("Pending requests: %llu", static_cast<unsigned long long>(status.value("pendingRequestCount", 0ull)));
+			ImGui::Text("Pending approvals: %llu", static_cast<unsigned long long>(status.value("pendingApprovalCount", 0ull)));
+			ImGui::Text("Recent activity: %llu", static_cast<unsigned long long>(status.value("recentActivityCount", 0ull)));
+			ImGui::TextWrapped("Last diagnostics: %s", status.value("lastDiagnosticRequest", "never").c_str());
+			ImGui::EndTabItem();
 		}
-	}
 
-	ImGui::SeparatorText("Activity");
-	const auto activity = bridge->GetRecentActivity(32);
-	if (activity.empty())
-	{
-		ImGui::TextDisabled("No activity yet.");
-	}
-	for (const auto& record : activity)
-	{
-		ImGui::TextWrapped("#%llu %s [%s] %s",
-			static_cast<unsigned long long>(record.sequence),
-			record.capability.c_str(),
-			record.outcome.c_str(),
-			record.message.c_str());
+		if (ImGui::BeginTabItem("Jobs"))
+		{
+			// Jobs are presented from the typed session resource, so imports,
+			// compilation, exports, and profiler captures share one lifecycle UI.
+			const nlohmann::json jobResource = bridge->ReadResource("terraengine://jobs/recent");
+			const bool typedJobsAvailable = jobResource.value("ok", true);
+			nlohmann::json jobs = jobResource.value("jobs", nlohmann::json::array());
+			if (!typedJobsAvailable)
+			{
+				// Older version-one bridges exposed export work through diagnostics.
+				// Retain that presentation while the typed job resource is absent.
+				const nlohmann::json diagnostics = bridge->ReadResource("terraengine://diagnostics/summary");
+				for (const auto& surface : diagnostics.value("surfaces", nlohmann::json::array()))
+				{
+					if (surface.value("surface", "") != "export")
+					{
+						continue;
+					}
+					jobs = surface.value("details", nlohmann::json::object()).value("jobs", nlohmann::json::array());
+					for (auto& job : jobs)
+					{
+						job["kind"] = "export";
+						job["cancellable"] = job.value("state", "") != "canceled";
+					}
+				}
+			}
+			if (jobs.empty())
+			{
+				ImGui::TextDisabled("No retained automation jobs.");
+			}
+			for (const auto& job : jobs)
+			{
+				const std::string jobId = job.value("jobId", "unknown-job");
+				const std::string state = job.value("state", "unknown");
+				const std::string jobLabel = job.value("profile", job.value("kind", "automation"));
+				ImGui::PushID(jobId.c_str());
+				ImGui::TextWrapped("%s - %s [%s]",
+					jobId.c_str(),
+					jobLabel.c_str(),
+					state.c_str());
+				ImGui::ProgressBar(static_cast<float>(job.value("progress", 0.0)), ImVec2(-1.0f, 0.0f), job.value("stage", "").c_str());
+				const std::string correlationId = job.value("correlationId", "");
+				if (!correlationId.empty())
+				{
+					ImGui::TextDisabled("Correlation: %s", correlationId.c_str());
+				}
+				const bool terminal = state == "succeeded" || state == "failed" || state == "canceled";
+				if (!terminal && job.value("cancellable", false) && ImGui::Button("Request cancellation"))
+				{
+					bridge->CallTool(typedJobsAvailable ? "jobs.cancel" : "export.cancel", {{"jobId", jobId}});
+				}
+				ImGui::Separator();
+				ImGui::PopID();
+			}
+			ImGui::EndTabItem();
+		}
+
+		if (ImGui::BeginTabItem("Approvals"))
+		{
+			const auto approvals = bridge->GetPendingApprovals();
+			if (approvals.empty())
+			{
+				ImGui::TextDisabled("No pending approvals.");
+			}
+			for (const auto& approval : approvals)
+			{
+				ImGui::PushID(approval.approvalId.c_str());
+				ImGui::Text("%s", approval.capability.c_str());
+				ImGui::TextDisabled("Approval %s | Request %s", approval.approvalId.c_str(), approval.requestId.c_str());
+				ImGui::TextWrapped("%s", approval.summary.c_str());
+				if (ImGui::Button("Approve"))
+				{
+					bridge->ResolveApproval(approval.approvalId, true);
+				}
+				ImGui::SameLine();
+				if (ImGui::Button("Deny"))
+				{
+					bridge->ResolveApproval(approval.approvalId, false);
+				}
+				ImGui::SameLine();
+				if (ImGui::Button("Cancel"))
+				{
+					bridge->CancelApproval(approval.approvalId);
+				}
+				ImGui::Separator();
+				ImGui::PopID();
+			}
+			ImGui::EndTabItem();
+		}
+
+		if (ImGui::BeginTabItem("Resources"))
+		{
+			for (const auto& resource : bridge->ListResources())
+			{
+				ImGui::TextUnformatted(resource.value("name", "Unnamed resource").c_str());
+				ImGui::TextDisabled("%s", resource.value("uri", "").c_str());
+			}
+			ImGui::EndTabItem();
+		}
+
+		if (ImGui::BeginTabItem("Activity"))
+		{
+			const auto activity = bridge->GetRecentActivity(32);
+			if (activity.empty())
+			{
+				ImGui::TextDisabled("No activity yet.");
+			}
+			for (const auto& record : activity)
+			{
+				ImGui::TextWrapped("#%llu %s [%s] %s",
+					static_cast<unsigned long long>(record.sequence),
+					record.capability.c_str(),
+					record.outcome.c_str(),
+					record.message.c_str());
+				if (!record.requestId.empty())
+				{
+					ImGui::TextDisabled("Request: %s", record.requestId.c_str());
+				}
+			}
+			ImGui::EndTabItem();
+		}
+		ImGui::EndTabBar();
 	}
 }
 

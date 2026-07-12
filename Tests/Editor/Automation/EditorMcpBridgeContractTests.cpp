@@ -1,10 +1,40 @@
 #include "../TestHarness.h"
 #include "EditorMcpBridge.h"
 
+#include <array>
+#include <string_view>
+#include <unordered_set>
+
 namespace TerraEngine::EditorTests
 {
 	using TerraEngine::Editor::Automation::EditorMcpBridge;
 	using TerraEngine::Editor::Automation::WriteMode;
+
+	namespace
+	{
+		constexpr std::array<std::string_view, 30> kLegacyToolNames = {
+			"activity.list",
+			"scene.open", "scene.save", "scene.list_objects",
+			"object.create", "object.delete", "object.select", "object.set_metadata", "object.set_parent",
+			"component.add", "component.remove", "component.get", "component.set_property",
+			"asset.list", "asset.import", "asset.virtualGeometry.settings.get", "asset.virtualGeometry.settings.set",
+			"asset.virtualGeometry.settings.reset", "asset.virtualGeometry.rebuild", "asset.virtualGeometry.inspect", "asset.prepare_delete",
+			"export.validate", "export.start", "export.cancel",
+			"game_view.capture", "camera.capture_object", "camera.capture_custom",
+			"renderer.virtualGeometry.stats", "renderer.recovery.safe_save_project", "diagnostics.get_summary"
+		};
+
+		constexpr std::array<std::string_view, 8> kLegacyResourceUris = {
+			"terraengine://bridge/status",
+			"terraengine://bridge/capabilities",
+			"terraengine://project/state",
+			"terraengine://scene/summary",
+			"terraengine://diagnostics/summary",
+			"terraengine://renderer/recovery",
+			"terraengine://capture/availability",
+			"terraengine://activity/recent"
+		};
+	}
 
 	void RegisterEditorMcpBridgeContractTests(TestRegistry& registry)
 	{
@@ -80,6 +110,46 @@ namespace TerraEngine::EditorTests
 			context.Expect(sawExportStart, "export.start should advertise approval-gated export mutation behavior.");
 			context.Expect(sawAssetDeleteApproval, "asset.prepare_delete should advertise destructive approval behavior.");
 			context.Expect(!sawWriteModeTool, "MCP discovery should not advertise editor-owned write-mode changes.");
+		});
+
+		registry.Add("Editor.MCP.Contract.PreservesEveryLegacyToolName", [](TestContext& context) {
+			EditorMcpBridge bridge;
+			bridge.Initialize(nullptr);
+			const nlohmann::json capabilities = bridge.BuildCapabilityListJson()["capabilities"];
+			std::unordered_set<std::string> discovered;
+			for (const auto& capability : capabilities)
+			{
+				const std::string name = capability.value("name", "");
+				context.Expect(!name.empty(), "Every discovered MCP capability should retain a stable name.");
+				context.Expect(discovered.insert(name).second, "MCP discovery should not publish duplicate capability names.");
+			}
+
+			for (const std::string_view legacyName : kLegacyToolNames)
+			{
+				context.Expect(discovered.contains(std::string(legacyName)), std::string("Legacy MCP discovery should preserve ") + std::string(legacyName) + ".");
+			}
+			bridge.Shutdown();
+		});
+
+		registry.Add("Editor.MCP.Contract.PreservesEveryLegacyResource", [](TestContext& context) {
+			EditorMcpBridge bridge;
+			bridge.Initialize(nullptr);
+			const nlohmann::json resources = bridge.ListResources();
+			std::unordered_set<std::string> discovered;
+			for (const auto& resource : resources)
+			{
+				const std::string uri = resource.value("uri", "");
+				context.Expect(!uri.empty(), "Every MCP resource should retain a stable URI.");
+				context.Expect(discovered.insert(uri).second, "MCP discovery should not publish duplicate resource URIs.");
+			}
+
+			for (const std::string_view legacyUri : kLegacyResourceUris)
+			{
+				context.Expect(discovered.contains(std::string(legacyUri)), std::string("Legacy MCP discovery should preserve ") + std::string(legacyUri) + ".");
+				const nlohmann::json value = bridge.ReadResource(legacyUri);
+				context.Expect(!(value.contains("ok") && !value.value("ok", true)), std::string("Legacy resource should remain readable: ") + std::string(legacyUri));
+			}
+			bridge.Shutdown();
 		});
 	}
 }
