@@ -44,3 +44,256 @@ Welcome to TerraEngine! Please follow these repo-wide guidelines whenever you ad
 2. Call out any deviations (e.g., temporary system dependency) and supply a plan/timeline for remediation.
 
 Thank you for helping keep TerraEngine portable, performant, and approachable!
+
+<!-- SPECKIT START -->
+## Active Spec Kit Plan
+
+- Current feature plan: `specs/042-physics-system/plan.md`
+- Technology context: C++20 native engine/editor code, C#/.NET 10 managed gameplay bindings, provider-gate-approved Jolt Physics v5.6.0 commit `e77f175595e64cb44218cc9d9d56fc365ad0e36a`, `ThreadPool`, the scheduler/job graph, `SceneMutationQueue`, `TransactionalMutation`, scene/prefab serialization, asset cooking, editor automation, TEPAK export/runtime mounting, CTest, provider benchmarks, stress/soak validation, and installed-editor loopback testing.
+
+## GPT-5 Delegation Policy for Spec Kit
+
+Apply the **Model and execution-mode recommendation** subsection during `/speckit.plan` and `/speckit.tasks` when the active parent model belongs to the GPT-5 family.
+
+Apply all remaining subsections only when:
+
+- the active workflow is `/speckit.implement`;
+- the active parent model belongs to the GPT-5 family;
+- the `terra` and `luna` custom agents are available.
+
+For other models or Spec Kit commands, ignore the inapplicable parts of this section and follow the normal workflow without assuming Terra or Luna exist.
+
+### Model and execution-mode recommendation
+
+During `/speckit.plan`, record a provisional warning when the proposed architecture appears unusually ambiguous, tightly coupled, high-risk, or unsuitable for parallel implementation.
+
+During `/speckit.tasks`, after `plan.md` and the task graph are complete, produce or confirm the final execution-mode recommendation for the later `/speckit.implement` run.
+
+The recommendation must consider:
+
+- task count and dependency structure;
+- critical-path length and available parallelism;
+- coupling among affected systems;
+- clarity of file and subsystem boundaries;
+- likely overlap in files, interfaces, generated artifacts, or test fixtures;
+- the amount of repetitive, mechanical, or read-heavy work;
+- architectural ambiguity and implementation risk;
+- expected integration and validation cost;
+- prior failed implementation attempts, when applicable.
+
+Recommend one of:
+
+- **Mixed GPT-5.6 delegation** — use a Sol orchestrator with Terra and Luna workers when the task list contains several bounded, independent, or safely parallelizable assignments.
+- **Sol-only** — use one coherent Sol session when the work is small, tightly coupled, difficult to partition, or dominated by one complex implementation or debugging problem.
+- **Higher Sol reasoning effort** — recommend `xhigh` when the work involves substantial ambiguity, architecture, concurrency, security, transactional correctness, difficult integration, or repeated failed attempts.
+- **Ultra** — recommend Ultra only when the task is exceptionally large or difficult, maximum quality is preferred over cost, and broad proactive delegation is likely to provide meaningful benefit.
+
+The final recommendation must state:
+
+1. The recommended execution mode.
+2. Why it fits the completed plan and task graph.
+3. The main cost, accuracy, and coordination tradeoffs.
+
+Record the final recommendation in `tasks.md` under an `Execution Recommendation` section so it is available when `/speckit.implement` begins.
+
+The recommendation is advisory. During `/speckit.implement`, follow the active configuration unless the user explicitly wants a different mode.
+
+If the active execution mode appears materially unsuitable when `/speckit.implement` begins, report the concern before making substantial changes.
+
+### Orchestrator ownership
+
+The parent GPT-5 session is the implementation orchestrator. It owns:
+
+- interpreting `spec.md`, `plan.md`, `tasks.md`, and related artifacts;
+- selecting ready tasks and resolving dependencies;
+- deciding what to delegate;
+- resolving ambiguous, conflicting, cross-cutting, or high-impact decisions;
+- coordinating overlapping systems and integrating worker changes;
+- updating task status;
+- performing final integrated compilation and validation;
+- determining whether the implementation satisfies the specification.
+
+The orchestrator exclusively performs:
+
+- the full project or solution build;
+- the complete CTest and regression suites;
+- integration and installed-editor loopback validation;
+- final acceptance checks;
+- final task completion decisions.
+
+Worker-local validation is supporting evidence only. It does not replace the orchestrator's integrated validation.
+
+### Delegation workflow
+
+Before delegating, the orchestrator must:
+
+1. Read the current feature's `spec.md`, `plan.md`, and `tasks.md`.
+2. Identify ready tasks and their dependencies.
+3. Define each assignment's scope, expected files, constraints, and acceptance criteria.
+4. Define the smallest useful local build and test scope.
+5. Avoid concurrent assignments that may edit overlapping files, symbols, interfaces, generated artifacts, or test fixtures.
+6. Keep materially ambiguous tasks in the parent session.
+
+Each worker assignment must include:
+
+- applicable Spec Kit task IDs;
+- the exact deliverable and definition of done;
+- relevant requirements and plan constraints;
+- expected files or subsystem boundaries;
+- prohibited or unrelated areas;
+- dependencies on other tasks;
+- permitted local compilation and test scope;
+- validation reserved for the orchestrator.
+
+Workers may read Spec Kit artifacts, but must not modify `spec.md`, `plan.md`, or `tasks.md`. Required planning changes must be reported to the orchestrator.
+
+### Delegation budget and agent reuse
+
+Delegation must remain selective. Do not create a new worker for every Spec Kit task.
+
+For each implementation phase:
+
+- begin with no more than three concurrent workers;
+- group related tasks that share a subsystem and stable context into one worker   assignment;
+- prefer reusing an existing worker for follow-up work in the same subsystem;
+- do not spawn a replacement worker merely because a task boundary was crossed;
+- spawn additional workers only when there is substantial independent work that can proceed concurrently without overlapping ownership;
+- do not exceed four active workers without first explaining why the additional parallelism outweighs coordination cost.
+
+Before spawning a worker, the orchestrator must determine that the assignment contains enough substantial work to justify repository orientation and handoff overhead.
+
+Prefer parent execution when:
+
+- the assignment is small;
+- it modifies a central integration file;
+- it depends immediately on another active assignment;
+- it requires the same context already held by the orchestrator;
+- the orchestrator would need to repeat most of the worker's investigation;
+- no meaningful wall-clock parallelism would result.
+
+A worker may handle multiple sequential task IDs within the same subsystem when their requirements, files, and validation scope are closely related.
+
+### Agent lifecycle
+
+Keep a worker assigned to the same subsystem across related tasks when possible.
+Use follow-up instructions in the existing worker context instead of spawning a new worker.
+
+Conclude a worker only when:
+
+- its subsystem assignment is complete;
+- its remaining tasks are blocked;
+- continued work would cross into another worker's ownership;
+- the worker has become unreliable or its context is no longer useful.
+
+### Use `luna` for
+
+- targeted repository search and evidence gathering;
+- locating files, symbols, call paths, dependencies, and conventions;
+- extracting requirements from Spec Kit artifacts;
+- inspecting logs and build or test output;
+- mechanical, repetitive, and low-risk edits;
+- documentation and straightforward structured transformations;
+- checklist-based inspection;
+- lightweight, narrowly scoped validation.
+
+Suitable Luna validation includes:
+
+- formatters and linters;
+- static checks;
+- a narrowly named unit test;
+- a filtered test case;
+- a small validation script;
+- the smallest practical compilation target for a simple change.
+
+Luna must escalate unexpected complexity, architectural decisions, plan conflicts, broad scope, or failures outside its assignment.
+
+### Use `terra` for
+
+- substantial but bounded tasks from `tasks.md`;
+- implementation within a clearly defined subsystem;
+- debugging through code inspection and task-local execution;
+- synthesizing Luna findings;
+- reviewing changes against the specification and plan;
+- identifying correctness, ownership, lifetime, concurrency, compatibility, and regression risks;
+- proposing solutions for underspecified implementation details, subject to orchestrator approval.
+
+Terra may compile the directly affected target, run task-specific tests, and fix failures caused by its own changes.
+
+Terra must not redefine requirements, override plan decisions, or expand into unrelated tasks.
+
+### Worker validation
+
+Workers may perform only the task-local validation needed for their assignments.
+
+Workers may:
+
+- compile the directly affected target or smallest practical build scope;
+- run relevant unit tests or filtered CTest cases;
+- run formatters, linters, static analysis, or local validation scripts;
+- diagnose and fix failures caused by their own changes;
+- repeat local validation until the work is ready for integration;
+- report exact commands and outcomes.
+
+Workers must not, unless explicitly authorized for a specific assignment:
+
+- run the full project or solution build;
+- run the complete CTest or regression suite;
+- run installed-editor loopback validation;
+- perform final integration or acceptance testing;
+- declare the overall feature complete;
+- mark Spec Kit tasks complete.
+
+Use the narrowest validation scope that provides meaningful confidence. Do not duplicate full-project validation across workers.
+
+### Worker rules
+
+All workers must:
+
+- stay within assigned task IDs and boundaries;
+- avoid unrelated cleanup, refactoring, or feature additions;
+- inspect existing architecture and conventions before editing;
+- avoid overlapping concurrent edits;
+- distinguish evidence from inference;
+- report contradictions among the implementation, specification, plan, and task list;
+- leave unresolved architectural and requirement decisions to the orchestrator;
+- report exact local validation commands and results;
+- clearly distinguish local validation from integrated validation.
+
+Workers must not:
+
+- modify Spec Kit planning artifacts;
+- mark tasks complete;
+- commit, merge, revert, or discard another worker's changes unless directed;
+- broaden build or test scope without clear need or authorization;
+- perform destructive, irreversible, externally visible, or high-impact actions without explicit authorization.
+
+### Worker handoff
+
+Each worker must return:
+
+1. Spec Kit task IDs addressed
+2. Result and changes made
+3. Files and symbols inspected or modified
+4. Requirements and plan constraints applied
+5. Local compilation, tests, and checks, including exact commands and outcomes
+6. Failures fixed or still present
+7. Assumptions, unresolved issues, and integration risks
+8. Recommended integrated validation
+
+### Integration and validation
+
+After collecting worker results, the orchestrator must:
+
+1. Inspect and reconcile all changes.
+2. Resolve overlapping edits and conflicting assumptions.
+3. Verify conformance with `spec.md`, `plan.md`, and `tasks.md`.
+4. Review worker-local validation and identify missing coverage.
+5. Compile the fully integrated implementation.
+6. Run the applicable full CTest, regression, integration, and installed-editor loopback validation.
+7. Diagnose cross-cutting failures directly or delegate bounded investigation and repair.
+8. Rerun the necessary integrated validation after fixes.
+9. Repeat until acceptance criteria pass or a blocker is documented.
+10. Update task status only after successful integrated validation.
+
+Use subagents only when delegation is likely to improve quality, preserve context, enable safe parallelism, or reduce cost. Do not delegate trivial work when coordination overhead would exceed the benefit.
+<!-- SPECKIT END -->

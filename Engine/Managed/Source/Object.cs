@@ -128,6 +128,7 @@ namespace TerraEngine
 			if (InternalCalls.Native_AddComponent(ID, nativeTypeName))
 			{
 				T component = new() { Object = this };
+				Physics.BindComponent(component, this);
 				RefreshKnownGenerations();
 				StoreCachedComponent(componentType, component);
 				StoreCachedPresence(componentType, true, scriptBinding: false);
@@ -170,6 +171,7 @@ namespace TerraEngine
 			if (InternalCalls.Native_HasComponent(ID, nativeTypeName))
 			{
 				T component = new() { Object = this };
+				Physics.BindComponent(component, this);
 				StoreCachedComponent(componentType, component);
 				StoreCachedPresence(componentType, true, scriptBinding: false);
 				return component;

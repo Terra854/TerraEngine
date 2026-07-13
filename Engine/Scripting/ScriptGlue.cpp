@@ -14,11 +14,15 @@
 #include "UI/UIElement.h"
 #include "UI/UISystem.h"
 #include "Input/InputSystem.h"
+#include "Physics/PhysicsSystem.h"
 #include "Scene/SceneManager.h"
 #include "Scene/SceneMutationQueue.h"
 #include "Utilities/PlatformUtils.h"
 
 #include <array>
+#include <algorithm>
+#include <cstring>
+#include <cmath>
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
@@ -46,6 +50,428 @@ thread_local std::string g_SceneBridgeReturnBuffer;
 static std::optional<Object> ResolveManagedObject(uint32_t objectId)
 {
 	return ObjectManager::instance().getObject(static_cast<entt::entity>(objectId));
+}
+
+namespace {
+	using namespace TerraEngine::Physics;
+
+	// ABI validation happens before the bridge reads any caller-owned field. This
+	// prevents an older or malformed managed packet from changing a live world.
+	template<typename T>
+	bool HasPhysicsAbiHeader(const T* value) {
+		return value != nullptr
+			&& value->header.abiVersion == kNativePhysicsAbiVersion
+			&& value->header.structSize >= sizeof(T);
+	}
+
+	NativePhysicsStatus ToNativeStatus(PhysicsResultStatus status) {
+		switch(status) {
+		case PhysicsResultStatus::Success: return NativePhysicsStatus::Success;
+		case PhysicsResultStatus::Accepted: return NativePhysicsStatus::Accepted;
+		case PhysicsResultStatus::Cancelled: return NativePhysicsStatus::Cancelled;
+		case PhysicsResultStatus::StaleTarget: return NativePhysicsStatus::StaleTarget;
+		case PhysicsResultStatus::Expired: return NativePhysicsStatus::Expired;
+		case PhysicsResultStatus::LimitExceeded: return NativePhysicsStatus::LimitExceeded;
+		case PhysicsResultStatus::Conflict: return NativePhysicsStatus::Conflict;
+		case PhysicsResultStatus::ProviderFailure: return NativePhysicsStatus::ProviderFailure;
+		default: return NativePhysicsStatus::InvalidState;
+		}
+	}
+
+	NativePhysicsStatus ToNativeStatus(PhysicsCommandRejectionReason reason) {
+		switch(reason) {
+		case PhysicsCommandRejectionReason::None: return NativePhysicsStatus::Accepted;
+		case PhysicsCommandRejectionReason::GlobalCapacity:
+		case PhysicsCommandRejectionReason::ProducerCapacity: return NativePhysicsStatus::LimitExceeded;
+		case PhysicsCommandRejectionReason::IdempotencyConflict: return NativePhysicsStatus::Conflict;
+		case PhysicsCommandRejectionReason::QueueStopped: return NativePhysicsStatus::InvalidState;
+		default: return NativePhysicsStatus::InvalidArgument;
+		}
+	}
+
+	NativePhysicsStatus ToNativeStatus(PhysicsQueryRejectionReason reason) {
+		switch(reason) {
+		case PhysicsQueryRejectionReason::None: return NativePhysicsStatus::Accepted;
+		case PhysicsQueryRejectionReason::BatchLimit: return NativePhysicsStatus::LimitExceeded;
+		case PhysicsQueryRejectionReason::StaleWorld:
+		case PhysicsQueryRejectionReason::StaleHandle: return NativePhysicsStatus::StaleTarget;
+		case PhysicsQueryRejectionReason::Cancelled: return NativePhysicsStatus::Cancelled;
+		case PhysicsQueryRejectionReason::Expired: return NativePhysicsStatus::Expired;
+		case PhysicsQueryRejectionReason::ResultUnavailable: return NativePhysicsStatus::InvalidState;
+		default: return NativePhysicsStatus::InvalidArgument;
+		}
+	}
+
+	void WriteDiagnostic(char (&destination)[kNativePhysicsDiagnosticBytes], std::string_view text) {
+		std::memset(destination, 0, sizeof(destination));
+		const std::size_t count = std::min(text.size(), sizeof(destination) - 1U);
+		std::memcpy(destination, text.data(), count);
+	}
+
+	TerraEngine::UUID ToUuid(NativePhysicsUuid value) {
+		TerraEngine::UUID result{};
+		std::memcpy(result.data(), &value.first, sizeof(value.first));
+		std::memcpy(result.data() + sizeof(value.first), &value.second, sizeof(value.second));
+		return result;
+	}
+
+	NativePhysicsUuid FromUuid(const TerraEngine::UUID& value) {
+		NativePhysicsUuid result{};
+		std::memcpy(&result.first, value.data(), sizeof(result.first));
+		std::memcpy(&result.second, value.data() + sizeof(result.first), sizeof(result.second));
+		return result;
+	}
+
+	PhysicsWorldHandle ToWorld(NativePhysicsWorldHandle value) { return {{value.worldId}, value.worldGeneration}; }
+	NativePhysicsWorldHandle FromWorld(PhysicsWorldHandle value) { return {value.worldId.value, value.worldGeneration, 0U}; }
+	template<typename NativeHandle, typename Handle>
+	Handle ToHandle(const NativeHandle& value) { return {{value.world.worldId}, value.world.worldGeneration, value.slotIndex, value.slotGeneration}; }
+	template<typename Handle>
+	NativePhysicsHandle FromHandle(Handle value) { return {FromWorld({value.worldId, value.worldGeneration}), value.slotIndex, value.slotGeneration}; }
+	PhysicsQueryHandle ToQueryHandle(const NativePhysicsQueryHandle& value) { return {{value.world.worldId}, value.world.worldGeneration, value.resultSlot, value.resultGeneration, value.submittedTick, value.expiryTick}; }
+	NativePhysicsQueryHandle FromQueryHandle(PhysicsQueryHandle value) { return {FromWorld({value.worldId, value.worldGeneration}), value.resultSlot, value.resultGeneration, value.submittedTick, value.expiryTick}; }
+	PhysicsVector3 ToVector(NativePhysicsVector3 value) { return {value.x, value.y, value.z}; }
+	NativePhysicsVector3 FromVector(PhysicsVector3 value) { return {value.x, value.y, value.z}; }
+	PhysicsPose ToPose(NativePhysicsPose value) { return {ToVector(value.position), {value.rotation.x, value.rotation.y, value.rotation.z, value.rotation.w}}; }
+	NativePhysicsPose FromPose(PhysicsPose value) { return {FromVector(value.position), {value.rotation.x, value.rotation.y, value.rotation.z, value.rotation.w}}; }
+
+	bool IsFinite(NativePhysicsVector3 value) { return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z); }
+	bool IsFinite(NativePhysicsPose value) { return IsFinite(value.position) && std::isfinite(value.rotation.x) && std::isfinite(value.rotation.y) && std::isfinite(value.rotation.z) && std::isfinite(value.rotation.w); }
+	bool SameWorld(NativePhysicsWorldHandle received, PhysicsWorldHandle active) { return ToWorld(received) == active && active.IsValid(); }
+	NativePhysicsIdentity NativeIdentity(
+		const TerraEngine::UUID& objectId,
+		PhysicsGeneration objectGeneration,
+		PhysicsGeneration componentGeneration,
+		const TerraEngine::UUID& recordId = TerraEngine::EMPTY_UUID,
+		PhysicsGeneration recordGeneration = 0U) {
+		std::uint32_t bindingGeneration = 0U;
+		if(const std::optional<Object> object = ObjectManager::instance().getObject(objectId)) {
+			bindingGeneration = TerraEngine::CompressObjectGeneration(
+				ObjectManager::instance().getObjectBindingGeneration(*object));
+		}
+		return {FromUuid(objectId), objectGeneration, componentGeneration, FromUuid(recordId), recordGeneration, bindingGeneration};
+	}
+	bool HasCurrentManagedIdentity(const NativePhysicsIdentity& identity) {
+		// Resolve all generations from the authoritative live object. A wrapper
+		// created before component recreation or managed assembly reload cannot
+		// accidentally address a replacement with the same UUID.
+		if((identity.objectId.first == 0U && identity.objectId.second == 0U)
+			|| identity.objectGeneration == 0U || identity.componentGeneration == 0U
+			|| identity.bindingGeneration == 0U) return false;
+		const std::optional<Object> object = ObjectManager::instance().getObject(ToUuid(identity.objectId));
+		if(!object) return false;
+		ObjectManager& objects = ObjectManager::instance();
+		return TerraEngine::CompressObjectGeneration(objects.getObjectLifetimeGeneration(*object)) == identity.objectGeneration
+			&& TerraEngine::CompressObjectGeneration(objects.getObjectComponentGeneration(*object)) == identity.componentGeneration
+			&& TerraEngine::CompressObjectGeneration(objects.getObjectBindingGeneration(*object)) == identity.bindingGeneration;
+	}
+
+	PhysicsCommandMetadata Metadata(std::uint64_t tick, std::uint64_t producer, std::uint64_t sequence, std::uint64_t correlation) {
+		PhysicsCommandMetadata result;
+		result.effectiveTick = tick;
+		result.producerId = producer == 0U ? 1U : producer;
+		result.producerSequence = sequence == 0U ? 1U : sequence;
+		result.correlationId = "managed-" + std::to_string(correlation);
+		return result;
+	}
+
+	PhysicsBodyCommandTarget BodyTarget(const NativePhysicsBodyCommandRequest& request) {
+		return {ToWorld(request.body.world), ToUuid(request.identity.objectId), request.identity.objectGeneration, request.identity.componentGeneration};
+	}
+	PhysicsCharacterCommandTarget CharacterTarget(const NativePhysicsCharacterCommandRequest& request) {
+		return {ToWorld(request.character.world), ToHandle<NativePhysicsHandle, PhysicsCharacterHandle>(request.character), ToUuid(request.identity.objectId), request.identity.objectGeneration, request.identity.componentGeneration};
+	}
+
+	void FillReceipt(NativePhysicsCommandReceipt& destination, NativePhysicsStatus status, const PhysicsCommandReceipt& receipt, std::string_view diagnostic = {}) {
+		destination.header = {kNativePhysicsAbiVersion, sizeof(destination)};
+		destination.status = status;
+		destination.reserved = 0U;
+		destination.commandId = receipt.commandId;
+		destination.effectiveTick = receipt.effectiveTick;
+		destination.correlationId = 0U;
+		WriteDiagnostic(destination.diagnostic, diagnostic.empty() ? std::string_view(ToString(receipt.rejectionReason)) : diagnostic);
+	}
+}
+
+extern "C" {
+	std::uint32_t Native_Physics_GetAbiVersion() { return kNativePhysicsAbiVersion; }
+
+	NativePhysicsStatus Native_Physics_SubmitBodyCommand(const NativePhysicsBodyCommandRequest* request, NativePhysicsCommandReceipt* receipt) {
+		if(!HasPhysicsAbiHeader(request) || !HasPhysicsAbiHeader(receipt)) return NativePhysicsStatus::VersionMismatch;
+		const PhysicsWorldHandle active = PhysicsSystem::Instance().WorldHandle();
+		if(!SameWorld(request->body.world, active) || !ToHandle<NativePhysicsHandle, PhysicsBodyHandle>(request->body).IsValid() || !HasCurrentManagedIdentity(request->identity)) {
+			FillReceipt(*receipt, NativePhysicsStatus::StaleTarget, {}, "Body handle or world generation is stale.");
+			return receipt->status;
+		}
+		if(!IsFinite(request->value) || !IsFinite(request->point) || !IsFinite(request->pose) || !IsFinite(request->angularValue) || !std::isfinite(request->duration)) {
+			FillReceipt(*receipt, NativePhysicsStatus::InvalidArgument, {}, "Physics command contains a non-finite value.");
+			return receipt->status;
+		}
+		const PhysicsCommandMetadata metadata = Metadata(request->effectiveTick, request->producerId, request->producerSequence, request->correlationId);
+		const PhysicsBodyCommandTarget target = BodyTarget(*request);
+		PhysicsCommand command;
+		switch(request->kind) {
+		case NativePhysicsBodyCommandKind::Force: command = PhysicsCommand::MakeContinuousForce(target, ToVector(request->value), metadata); break;
+		case NativePhysicsBodyCommandKind::Acceleration: command = PhysicsCommand::MakeAcceleration(target, ToVector(request->value), metadata); break;
+		case NativePhysicsBodyCommandKind::Impulse: command = PhysicsCommand::MakeImpulse(target, ToVector(request->value), metadata); break;
+		case NativePhysicsBodyCommandKind::PointImpulse: command = PhysicsCommand::MakePointImpulse(target, ToVector(request->value), ToVector(request->point), metadata); break;
+		case NativePhysicsBodyCommandKind::VelocityChange: command = PhysicsCommand::MakeVelocityChange(target, ToVector(request->value), metadata); break;
+		case NativePhysicsBodyCommandKind::SetVelocity: command = PhysicsCommand::MakeSetVelocity(target, ToVector(request->value), ToVector(request->angularValue), metadata); break;
+		case NativePhysicsBodyCommandKind::Teleport: command = PhysicsCommand::MakeTeleport(target, ToPose(request->pose), ToVector(request->value), ToVector(request->angularValue), metadata); break;
+		case NativePhysicsBodyCommandKind::KinematicTarget: command = PhysicsCommand::MakeKinematicTarget(target, ToPose(request->pose), request->duration, metadata); break;
+		case NativePhysicsBodyCommandKind::Wake: command = PhysicsCommand::MakeWake(target, metadata); break;
+		case NativePhysicsBodyCommandKind::Sleep: command = PhysicsCommand::MakeSleep(target, metadata); break;
+		default: FillReceipt(*receipt, NativePhysicsStatus::InvalidArgument, {}, "Unknown body command kind."); return receipt->status;
+		}
+		const PhysicsCommandReceipt nativeReceipt = PhysicsSystem::Instance().SubmitCommand(std::move(command));
+		const NativePhysicsStatus status = nativeReceipt.accepted ? NativePhysicsStatus::Accepted : ToNativeStatus(nativeReceipt.rejectionReason);
+		FillReceipt(*receipt, status, nativeReceipt);
+		return status;
+	}
+
+	NativePhysicsStatus Native_Physics_SubmitCharacterCommand(const NativePhysicsCharacterCommandRequest* request, NativePhysicsCommandReceipt* receipt) {
+		if(!HasPhysicsAbiHeader(request) || !HasPhysicsAbiHeader(receipt)) return NativePhysicsStatus::VersionMismatch;
+		const PhysicsWorldHandle active = PhysicsSystem::Instance().WorldHandle();
+		if(!SameWorld(request->character.world, active) || !ToHandle<NativePhysicsHandle, PhysicsCharacterHandle>(request->character).IsValid() || !HasCurrentManagedIdentity(request->identity)) {
+			FillReceipt(*receipt, NativePhysicsStatus::StaleTarget, {}, "Character handle or world generation is stale."); return receipt->status;
+		}
+		if(!IsFinite(request->desiredVelocity) || !IsFinite(request->pose) || !std::isfinite(request->scalar)) { FillReceipt(*receipt, NativePhysicsStatus::InvalidArgument, {}, "Character command contains a non-finite value."); return receipt->status; }
+		const PhysicsCommandMetadata metadata = Metadata(request->effectiveTick, request->producerId, request->producerSequence, request->correlationId);
+		const PhysicsCharacterCommandTarget target = CharacterTarget(*request);
+		PhysicsCommand command;
+		switch(request->kind) {
+		case NativePhysicsCharacterCommandKind::Move: command = PhysicsCommand::MakeCharacterMove(target, ToVector(request->desiredVelocity), metadata); break;
+		case NativePhysicsCharacterCommandKind::Jump: command = PhysicsCommand::MakeCharacterJump(target, request->scalar, metadata); break;
+		case NativePhysicsCharacterCommandKind::Resize: command = PhysicsCommand::MakeCharacterResize(target, request->scalar, metadata); break;
+		case NativePhysicsCharacterCommandKind::Teleport: command = PhysicsCommand::MakeCharacterTeleport(target, ToPose(request->pose), metadata); break;
+		case NativePhysicsCharacterCommandKind::RefreshConfiguration: command = PhysicsCommand::MakeCharacterConfigurationUpdate(target, metadata); break;
+		default: FillReceipt(*receipt, NativePhysicsStatus::InvalidArgument, {}, "Unknown character command kind."); return receipt->status;
+		}
+		const PhysicsCommandReceipt nativeReceipt = PhysicsSystem::Instance().SubmitCommand(std::move(command));
+		const NativePhysicsStatus status = nativeReceipt.accepted ? NativePhysicsStatus::Accepted : ToNativeStatus(nativeReceipt.rejectionReason);
+		FillReceipt(*receipt, status, nativeReceipt);
+		return status;
+	}
+
+	NativePhysicsStatus Native_Physics_SubmitQuery(const NativePhysicsQueryRequest* request, NativePhysicsQueryReceipt* receipt) {
+		if(!HasPhysicsAbiHeader(request) || !HasPhysicsAbiHeader(receipt)) return NativePhysicsStatus::VersionMismatch;
+		const PhysicsWorldHandle active = PhysicsSystem::Instance().WorldHandle();
+		if(!SameWorld(request->world, active)) return NativePhysicsStatus::StaleTarget;
+		if(request->kind > NativePhysicsQueryKind::Point || request->hitMode > static_cast<std::uint32_t>(PhysicsQueryHitMode::All)
+			|| !IsFinite(request->pose) || !IsFinite(request->direction) || !IsFinite(request->shapeExtent) || !std::isfinite(request->distance)) return NativePhysicsStatus::InvalidArgument;
+		PhysicsQueryRequest nativeRequest;
+		nativeRequest.world = active;
+		nativeRequest.kind = static_cast<PhysicsQueryKind>(request->kind);
+		nativeRequest.hitMode = static_cast<PhysicsQueryHitMode>(request->hitMode);
+		nativeRequest.pose = ToPose(request->pose);
+		nativeRequest.direction = ToVector(request->direction);
+		nativeRequest.shapeExtent = ToVector(request->shapeExtent);
+		nativeRequest.distance = request->distance;
+		nativeRequest.maximumHits = request->maximumHits;
+		nativeRequest.filter.collisionMask = request->collisionMask;
+		nativeRequest.filter.bodyTypes = static_cast<PhysicsQueryBodyTypeMask>(request->bodyTypeMask);
+		nativeRequest.filter.includeSensors = request->includeSensors != 0U;
+		nativeRequest.submittedTick = request->submittedTick;
+		nativeRequest.expiryTick = request->expiryTick;
+		nativeRequest.correlationId = "managed-" + std::to_string(request->correlationId);
+		const PhysicsQueryReceipt nativeReceipt = PhysicsSystem::Instance().SubmitQuery(std::move(nativeRequest));
+		receipt->header = {kNativePhysicsAbiVersion, sizeof(*receipt)};
+		receipt->status = nativeReceipt.accepted ? NativePhysicsStatus::Accepted : ToNativeStatus(nativeReceipt.rejectionReason);
+		receipt->reserved = 0U;
+		receipt->handle = FromQueryHandle(nativeReceipt.handle);
+		receipt->correlationId = request->correlationId;
+		WriteDiagnostic(receipt->diagnostic, nativeReceipt.diagnostic);
+		return receipt->status;
+	}
+
+	NativePhysicsStatus Native_Physics_SubmitQueryBatch(const NativePhysicsQueryRequest* requests, std::uint32_t requestCount, NativePhysicsQueryReceipt* receipts, std::uint32_t receiptCapacity, std::uint32_t* requiredReceiptCount) {
+		if(requiredReceiptCount == nullptr) return NativePhysicsStatus::InvalidArgument;
+		*requiredReceiptCount = requestCount;
+		if((requestCount != 0U && requests == nullptr) || (requestCount != 0U && (receipts == nullptr || receiptCapacity < requestCount))) return NativePhysicsStatus::LimitExceeded;
+		NativePhysicsStatus firstFailure = NativePhysicsStatus::Accepted;
+		for(std::uint32_t index = 0U; index < requestCount; ++index) {
+			receipts[index].header = {kNativePhysicsAbiVersion, sizeof(NativePhysicsQueryReceipt)};
+			const NativePhysicsStatus status = Native_Physics_SubmitQuery(&requests[index], &receipts[index]);
+			if(status != NativePhysicsStatus::Accepted && firstFailure == NativePhysicsStatus::Accepted) firstFailure = status;
+		}
+		return firstFailure;
+	}
+
+	NativePhysicsStatus Native_Physics_ReadQuery(const NativePhysicsQueryHandle* handle, NativePhysicsQueryResultInfo* info, NativePhysicsQueryHit* hits, std::uint32_t hitCapacity, std::uint32_t* requiredHitCount) {
+		if(handle == nullptr || !HasPhysicsAbiHeader(info) || requiredHitCount == nullptr) return NativePhysicsStatus::VersionMismatch;
+		const PhysicsQueryResult result = PhysicsSystem::Instance().ReadQuery(ToQueryHandle(*handle));
+		const std::size_t count = result.hits ? result.hits->size() : 0U;
+		*requiredHitCount = static_cast<std::uint32_t>(count);
+		info->header = {kNativePhysicsAbiVersion, sizeof(*info)};
+		info->status = ToNativeStatus(result.status);
+		info->hitCount = static_cast<std::uint32_t>(count);
+		info->truncated = result.truncated ? 1U : 0U;
+		info->tick = result.tick;
+		info->correlationId = 0U;
+		WriteDiagnostic(info->diagnostic, result.diagnostic);
+		if(count > hitCapacity || (count != 0U && hits == nullptr)) return NativePhysicsStatus::LimitExceeded;
+		for(std::size_t index = 0U; index < count; ++index) {
+			const PhysicsQueryHit& source = result.hits->at(index);
+			NativePhysicsQueryHit& destination = hits[index];
+			destination.body = FromHandle(source.body);
+			destination.objectId = FromUuid(source.objectId);
+			destination.objectGeneration = source.objectGeneration;
+			destination.componentGeneration = source.componentGeneration;
+			destination.materialId = FromUuid(source.materialId);
+			destination.position = FromVector(source.position);
+			destination.normal = FromVector(source.normal);
+			destination.distance = source.distance;
+			destination.fraction = source.fraction;
+			destination.subShapeKey = source.subShapeKey;
+			destination.collisionLayer = source.collisionLayer;
+			destination.motionType = static_cast<std::uint8_t>(source.motionType);
+			destination.sensor = source.sensor ? 1U : 0U;
+			destination.reserved = 0U;
+		}
+		return info->status;
+	}
+
+	NativePhysicsStatus Native_Physics_CancelQuery(const NativePhysicsQueryHandle* handle) {
+		return handle != nullptr && PhysicsSystem::Instance().CancelQuery(ToQueryHandle(*handle)) ? NativePhysicsStatus::Success : NativePhysicsStatus::StaleTarget;
+	}
+
+	NativePhysicsStatus Native_Physics_CopyBodyStates(NativePhysicsBodyState* states, std::uint32_t capacity, std::uint32_t* required) {
+		if(required == nullptr) return NativePhysicsStatus::InvalidArgument;
+		const auto snapshot = PhysicsSystem::Instance().LatestBodySnapshot();
+		const std::size_t count = snapshot && snapshot->bodies ? snapshot->bodies->size() : 0U;
+		*required = static_cast<std::uint32_t>(count);
+		if(count > capacity || (count != 0U && states == nullptr)) return NativePhysicsStatus::LimitExceeded;
+		for(std::size_t index = 0U; index < count; ++index) {
+			const PhysicsBodyState& source = snapshot->bodies->at(index);
+			states[index] = {{kNativePhysicsAbiVersion, sizeof(NativePhysicsBodyState)}, FromHandle(source.handle), NativeIdentity(source.objectId, source.objectGeneration, source.componentGeneration), FromPose(source.worldPose), FromVector(source.linearVelocity), FromVector(source.angularVelocity), snapshot->tick, source.awake ? 0U : 1U, {}};
+		}
+		return NativePhysicsStatus::Success;
+	}
+
+	NativePhysicsStatus Native_Physics_CopyCharacterStates(NativePhysicsCharacterState* states, std::uint32_t capacity, std::uint32_t* required) {
+		if(required == nullptr) return NativePhysicsStatus::InvalidArgument;
+		const auto snapshot = PhysicsSystem::Instance().LatestCharacterStatePacket();
+		const std::size_t count = snapshot && snapshot->states ? snapshot->states->size() : 0U;
+		*required = static_cast<std::uint32_t>(count);
+		if(count > capacity || (count != 0U && states == nullptr)) return NativePhysicsStatus::LimitExceeded;
+		for(std::size_t index = 0U; index < count; ++index) {
+			const PhysicsCharacterState& source = snapshot->states->at(index);
+			states[index] = {{kNativePhysicsAbiVersion, sizeof(NativePhysicsCharacterState)}, FromHandle(source.handle), NativeIdentity(source.objectId, source.objectGeneration, source.componentGeneration), FromPose(source.pose), FromVector(source.linearVelocity), FromVector(source.groundNormal), FromVector(source.supportVelocity), FromHandle(source.supportBody), source.tick, static_cast<std::uint32_t>(source.groundState), source.contactCount, source.supported ? 1U : 0U, {}};
+		}
+		return NativePhysicsStatus::Success;
+	}
+
+	NativePhysicsStatus Native_Physics_SubscribeEvents(const NativePhysicsEventSubscriptionRequest* request, NativePhysicsEventSubscription* subscription) {
+		if(!HasPhysicsAbiHeader(request) || !HasPhysicsAbiHeader(subscription)) return NativePhysicsStatus::VersionMismatch;
+		PhysicsEventSubscriptionPolicy policy;
+		policy.categories = static_cast<PhysicsEventCategory>(request->categoryMask);
+		policy.collisionLayerMask = request->collisionLayerMask;
+		policy.includeSensors = request->includeSensors != 0U;
+		policy.includeContactDetails = request->includeContactDetails != 0U;
+		const PhysicsEventSubscription nativeSubscription = PhysicsSystem::Instance().SubscribeEvents(std::move(policy));
+		subscription->header = {kNativePhysicsAbiVersion, sizeof(*subscription)};
+		subscription->status = nativeSubscription.id != 0U ? NativePhysicsStatus::Success : NativePhysicsStatus::InvalidState;
+		subscription->generation = nativeSubscription.generation;
+		subscription->id = nativeSubscription.id;
+		WriteDiagnostic(subscription->diagnostic, nativeSubscription.id != 0U ? "" : "No active physics world is available.");
+		return subscription->status;
+	}
+
+	NativePhysicsStatus Native_Physics_UnsubscribeEvents(const NativePhysicsEventSubscription* subscription) {
+		if(!HasPhysicsAbiHeader(subscription)) return NativePhysicsStatus::VersionMismatch;
+		return PhysicsSystem::Instance().UnsubscribeEvents(subscription->id, subscription->generation) ? NativePhysicsStatus::Success : NativePhysicsStatus::StaleTarget;
+	}
+
+	NativePhysicsStatus Native_Physics_CopyEvents(NativePhysicsEvent* events, std::uint32_t capacity, std::uint32_t* required, std::uint64_t* sourceTick) {
+		if(required == nullptr || sourceTick == nullptr) return NativePhysicsStatus::InvalidArgument;
+		const auto packet = PhysicsSystem::Instance().LatestEventPacket();
+		const std::size_t count = packet && packet->events ? packet->events->size() : 0U;
+		*required = static_cast<std::uint32_t>(count);
+		*sourceTick = packet ? packet->tick : 0U;
+		if(count > capacity || (count != 0U && events == nullptr)) return NativePhysicsStatus::LimitExceeded;
+		for(std::size_t index = 0U; index < count; ++index) {
+			const PhysicsEvent& source = packet->events->at(index);
+			NativePhysicsEvent& destination = events[index];
+			destination.header = {kNativePhysicsAbiVersion, sizeof(destination)};
+			destination.type = static_cast<std::uint32_t>(source.type);
+			destination.hasSecondParticipant = source.hasSecondParticipant ? 1U : 0U;
+			destination.world = FromWorld(source.world);
+			destination.tick = source.tick;
+			destination.first = NativeIdentity(source.first.objectId, source.first.objectGeneration, source.first.componentGeneration, source.first.colliderRecordId, source.first.recordGeneration);
+			destination.second = NativeIdentity(source.second.objectId, source.second.objectGeneration, source.second.componentGeneration, source.second.colliderRecordId, source.second.recordGeneration);
+			destination.point = FromVector(source.point); destination.normal = FromVector(source.normal); destination.relativeVelocity = FromVector(source.relativeVelocity);
+			destination.penetration = source.penetration; destination.impulse = source.impulse; destination.correlationId = source.causalCommandSequence;
+		}
+		return NativePhysicsStatus::Success;
+	}
+
+	NativePhysicsStatus Native_Physics_ReadSettings(NativePhysicsSettingsSnapshot* settings) {
+		if(!HasPhysicsAbiHeader(settings)) return NativePhysicsStatus::VersionMismatch;
+		const PhysicsSettings nativeSettings = PhysicsSystem::Instance().ConfiguredSettings();
+		const PhysicsWorldHandle world = PhysicsSystem::Instance().WorldHandle();
+		settings->header = {kNativePhysicsAbiVersion, sizeof(*settings)};
+		settings->status = NativePhysicsStatus::Success;
+		settings->settingsGeneration = static_cast<std::uint32_t>(PhysicsSystem::Instance().SettingsGeneration());
+		settings->gravity = FromVector(nativeSettings.gravity);
+		settings->fixedTimeStep = nativeSettings.fixedTimeStep;
+		settings->maxSubsteps = nativeSettings.maxSubsteps;
+		settings->maxQueryBatchSize = nativeSettings.maxRequestsPerBatch;
+		settings->maxHitsPerQuery = nativeSettings.maxHitsPerQuery;
+		settings->maxEventHistory = nativeSettings.retainedResultTicks;
+		settings->worldId = world.worldId.value; settings->worldGeneration = world.worldGeneration; settings->reserved = 0U;
+		WriteDiagnostic(settings->diagnostic, world.IsValid() ? "" : "Physics settings are configured but no world is active.");
+		return settings->status;
+	}
+
+	NativePhysicsStatus Native_Physics_ResolveIdentity(std::uint32_t objectEntity, NativePhysicsIdentitySnapshot* identity) {
+		if(!HasPhysicsAbiHeader(identity)) return NativePhysicsStatus::VersionMismatch;
+		identity->header = {kNativePhysicsAbiVersion, sizeof(*identity)};
+		identity->status = NativePhysicsStatus::StaleTarget;
+		identity->reserved = 0U;
+		identity->identity = {};
+		const std::optional<Object> object = ObjectManager::instance().getObject(static_cast<entt::entity>(objectEntity));
+		if(!object) {
+			WriteDiagnostic(identity->diagnostic, "The object no longer exists.");
+			return identity->status;
+		}
+		ObjectManager& objects = ObjectManager::instance();
+		const TerraEngine::UUID objectId = objects.getUUID(*object);
+		identity->identity = NativeIdentity(
+			objectId,
+			TerraEngine::CompressObjectGeneration(objects.getObjectLifetimeGeneration(*object)),
+			TerraEngine::CompressObjectGeneration(objects.getObjectComponentGeneration(*object)));
+		identity->status = NativePhysicsStatus::Success;
+		WriteDiagnostic(identity->diagnostic, "");
+		return identity->status;
+	}
+
+	NativePhysicsStatus Native_Physics_ResolveBody(std::uint32_t objectEntity, NativePhysicsBodyState* state) {
+		if(!HasPhysicsAbiHeader(state)) return NativePhysicsStatus::VersionMismatch;
+		const std::optional<Object> object = ObjectManager::instance().getObject(static_cast<entt::entity>(objectEntity));
+		const auto snapshot = PhysicsSystem::Instance().LatestBodySnapshot();
+		if(!object || !snapshot || !snapshot->bodies) return NativePhysicsStatus::StaleTarget;
+		const TerraEngine::UUID objectId = ObjectManager::instance().getUUID(*object);
+		const auto found = std::find_if(snapshot->bodies->begin(), snapshot->bodies->end(), [&objectId](const PhysicsBodyState& candidate) {
+			return candidate.objectId == objectId;
+		});
+		if(found == snapshot->bodies->end()) return NativePhysicsStatus::StaleTarget;
+		*state = {{kNativePhysicsAbiVersion, sizeof(*state)}, FromHandle(found->handle), NativeIdentity(found->objectId, found->objectGeneration, found->componentGeneration), FromPose(found->worldPose), FromVector(found->linearVelocity), FromVector(found->angularVelocity), snapshot->tick, found->awake ? 0U : 1U, {}};
+		return NativePhysicsStatus::Success;
+	}
+
+	NativePhysicsStatus Native_Physics_ResolveCharacter(std::uint32_t objectEntity, NativePhysicsCharacterState* state) {
+		if(!HasPhysicsAbiHeader(state)) return NativePhysicsStatus::VersionMismatch;
+		const std::optional<Object> object = ObjectManager::instance().getObject(static_cast<entt::entity>(objectEntity));
+		const auto snapshot = PhysicsSystem::Instance().LatestCharacterStatePacket();
+		if(!object || !snapshot || !snapshot->states) return NativePhysicsStatus::StaleTarget;
+		const TerraEngine::UUID objectId = ObjectManager::instance().getUUID(*object);
+		const auto found = std::find_if(snapshot->states->begin(), snapshot->states->end(), [&objectId](const PhysicsCharacterState& candidate) {
+			return candidate.objectId == objectId;
+		});
+		if(found == snapshot->states->end()) return NativePhysicsStatus::StaleTarget;
+		*state = {{kNativePhysicsAbiVersion, sizeof(*state)}, FromHandle(found->handle), NativeIdentity(found->objectId, found->objectGeneration, found->componentGeneration), FromPose(found->pose), FromVector(found->linearVelocity), FromVector(found->groundNormal), FromVector(found->supportVelocity), FromHandle(found->supportBody), found->tick, static_cast<std::uint32_t>(found->groundState), found->contactCount, found->supported ? 1U : 0U, {}};
+		return NativePhysicsStatus::Success;
+	}
 }
 
 // ManagedUIStyleProperty names the supported states explicitly so serialization and switches stay readable.

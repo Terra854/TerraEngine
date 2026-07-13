@@ -222,6 +222,29 @@ bool DotNetHost::InitializeExportRuntime(const std::filesystem::path& nativeAotL
 		return false;
 	}
 
+	// The tail is append-only. Never read its function pointers until both the
+	// advertised version and byte size prove the NativeAOT producer wrote them.
+	if (outTable->version >= kManagedVTablePhysicsVersion) {
+		if (outTable->tableSize < kManagedVTableV2Size) {
+			SetNativeError("ManagedVTable v" + std::to_string(outTable->version)
+				+ " reported only " + std::to_string(outTable->tableSize)
+				+ " bytes; the physics-enabled host requires " + std::to_string(kManagedVTableV2Size) + ".");
+			TERRAENGINE_LOG(LogLevel::Error, m_LastNativeError);
+			FreeNativeLibrary(nativeAotLibraryHandle);
+			nativeAotLibraryHandle = nullptr;
+			return false;
+		}
+		if (outTable->getPhysicsAbiVersion == nullptr
+			|| outTable->dispatchPhysicsEventBatch == nullptr
+			|| outTable->getPhysicsAbiVersion() != kManagedPhysicsAbiVersion) {
+			SetNativeError("ManagedVTable physics ABI validation failed. Rebuild the gameplay NativeAOT library with the current TerraEngine managed SDK.");
+			TERRAENGINE_LOG(LogLevel::Error, m_LastNativeError);
+			FreeNativeLibrary(nativeAotLibraryHandle);
+			nativeAotLibraryHandle = nullptr;
+			return false;
+		}
+	}
+
 	initialized = true;
 	exportMode = true;
 	TERRAENGINE_LOG(LogLevel::Info, "NativeAOT export runtime initialized (VTable v" << outTable->version << ").");

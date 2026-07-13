@@ -22,6 +22,12 @@ namespace TerraEngine.Export
 		private const string EngineDll = "TerraEngine";
 		public const int MaxExportStringBytes = 256;
 
+		// NativeAOT uses the same fixed-width physics ABI as editor-hosted scripts.
+		// The vtable advertises this version before the protected event dispatcher
+		// is used, preventing a mixed engine/gameplay build from exchanging packets.
+		[LibraryImport(EngineDll, EntryPoint = "Native_Physics_GetAbiVersion")]
+		public static partial uint GetPhysicsAbiVersion();
+
 		/// <summary>
 		/// Writes a message to the engine's log stream.
 		/// </summary>

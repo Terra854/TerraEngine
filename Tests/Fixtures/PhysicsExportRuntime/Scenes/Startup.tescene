@@ -1,0 +1,17 @@
+{
+	"name": "Physics Export Startup",
+	"objects": [
+		{
+			"name": "Physics Export Ground",
+			"components": [
+				{ "type": "Transform", "position": [0.0, -0.5, 0.0], "rotation": [0.0, 0.0, 0.0], "scale": [10.0, 1.0, 10.0] }
+			]
+		},
+		{
+			"name": "Physics Export Body",
+			"components": [
+				{ "type": "Transform", "position": [0.0, 2.0, 0.0], "rotation": [0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0] }
+			]
+		}
+	]
+}

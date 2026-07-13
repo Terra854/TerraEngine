@@ -94,6 +94,10 @@ public:
 	// Notify systems and managed wrapper caches that component membership or
 	// other object-local structure changed without changing transform values.
 	void notifyObjectStructureChanged(const Object& obj);
+	// Managed assembly reloads invalidate wrapper lifetimes without changing
+	// native component membership. This protected helper advances only binding
+	// generations so stale C# physics/component facades fail validation.
+	void notifyManagedBindingsReloaded();
 	// Mark a transform-affecting edit. This is separate from generic component
 	// structure changes so transform propagation can expand only affected
 	// hierarchy branches while spatial refresh still sees the object as dirty.

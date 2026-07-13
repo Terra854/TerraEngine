@@ -45,11 +45,16 @@ struct Texture;
 // ShaderStage names the supported states explicitly so serialization and switches stay readable.
 enum class ShaderStage : std::uint32_t;
 
-enum class AssetType {
-	Mesh,
-	Texture,
-	Material,
-	ShaderCollection
+enum class AssetType : std::uint32_t {
+	Mesh = 0U,
+	Texture = 1U,
+	Material = 2U,
+	ShaderCollection = 3U,
+	// Append-only serialized identities for physics project assets. These have
+	// no generic render-resource cache because physics owns their typed runtime
+	// loading; the values still let paths and tooling preserve asset identity.
+	PhysicsMaterial = 4U,
+	CookedCollider = 5U
 };
 
 #include "Resource/ResourceResidency.h"
@@ -264,6 +269,10 @@ public:
 	// Register a mapping between a UUID and a filesystem path so that GetMesh/GetTexture
 	// can trigger on-demand loading if the resource is not yet in the cache.
 	void RegisterAssetPath(const TerraEngine::UUID& id, const std::filesystem::path& path, AssetType type);
+	// Physics owns typed decoding and immutable publication, but still needs the
+	// central GUID registry to resolve a cooked/material asset without a path in
+	// scene data. The returned path is the exact registered runtime artifact.
+	std::filesystem::path GetRegisteredAssetPath(const TerraEngine::UUID& id, AssetType type) const;
 	// Resolve a script-facing asset reference into the UUID the renderer uses
 	// internally. The lookup accepts either an exact relative path or a simple
 	// asset name/stem so gameplay code does not need to memorize UUIDs.
@@ -336,6 +345,13 @@ private:
 		// type without each format-specific loader duplicating registration code.
 		AssetType assetType = AssetType::Material;
 		bool tracksResidency = false;
+		mutable std::shared_mutex mutex;
+	};
+
+	struct AssetPathRegistry
+	{
+		std::unordered_map<std::string, TerraEngine::UUID> pathToId;
+		std::unordered_map<TerraEngine::UUID, std::string> idToPath;
 		mutable std::shared_mutex mutex;
 	};
 
@@ -494,6 +510,8 @@ private:
 	ResourceCache<Shader> shaderCache;
 	ResourceCache<ShaderCollection> shaderCollectionCache;
 	ResourceCache<Texture> textureCache;
+	AssetPathRegistry physicsMaterialPaths;
+	AssetPathRegistry cookedColliderPaths;
 };
 
 // Render a UUID as a hex string for readable debug logging without adding a

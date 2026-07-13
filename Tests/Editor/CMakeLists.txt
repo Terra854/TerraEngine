@@ -15,6 +15,9 @@ add_executable(TerraEngine-EditorTests
 	Export/ExportValidatorManagedSourceTests.cpp
 	Export/ExportValidatorTests.cpp
 	Export/ExportParityTests.cpp
+	Export/PhysicsExportManifestTests.cpp
+	Export/PhysicsExportValidationTests.cpp
+	Export/PhysicsExportParityTests.cpp
 	Export/HeadlessExportBaselineTests.cpp
 	Export/HeadlessExportCiContractTests.cpp
 	Export/HeadlessExportContractTests.cpp
@@ -71,6 +74,8 @@ add_executable(TerraEngine-EditorTests
 	Automation/PrefabAuthoringServiceLinkStubs.cpp
 	Automation/EditorMcpProfilerTests.cpp
 	Automation/EditorAutomationExtensibilityTests.cpp
+	Automation/EditorMcpPhysicsContractTests.cpp
+	Automation/EditorMcpPhysicsSafetyTests.cpp
 	Automation/EditorMcpTransportTests.cpp
 	Automation/EditorMcpAssetImportTests.cpp
 	Automation/EditorMcpAssetImportSafetyTests.cpp
@@ -126,6 +131,15 @@ add_executable(TerraEngine-EditorTests
 	Scene/PrefabAuthoringWorkflowTests.cpp
 	Project/RendererRecoveryProjectSaveTests.cpp
 	Project/SceneViewOverlayPreferenceTests.cpp
+	Physics/PhysicsPlayModeTests.cpp
+	Physics/PhysicsColliderCompilerTests.cpp
+	Physics/PhysicsMaterialAssetTests.cpp
+	Physics/PhysicsInspectorTests.cpp
+	Physics/PhysicsPrefabUndoTests.cpp
+	Physics/PhysicsProjectSettingsTests.cpp
+	Physics/PhysicsSceneViewTests.cpp
+	Physics/PhysicsPlayModeSoakTests.cpp
+	Physics/PhysicsDiagnosticsWindowTests.cpp
 	Profiling/RendererRecoveryProfilerTests.cpp
 	Scene/SchedulerPlayModeGraphTests.cpp
 	Scene/SceneRuntimeParityTests.cpp
@@ -156,6 +170,7 @@ add_executable(TerraEngine-EditorTests
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/Providers/EditorDiagnosticsAutomationProvider.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/Providers/HistoryPlayModeAutomationProvider.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/Providers/AuthoringAutomationProvider.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/Providers/PhysicsAutomationProvider.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/SceneViewOrientationWidget.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/SceneViewOverlayIcons.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/SceneViewOverlayMarkers.cpp
@@ -168,6 +183,8 @@ add_executable(TerraEngine-EditorTests
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/GltfImportTypes.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/GltfPackageImporter.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/MaterialAssetWriter.cpp
+	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/PhysicsColliderCompiler.cpp
+	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/PhysicsMaterialAssetWriter.cpp
 	${CMAKE_SOURCE_DIR}/Engine/Resource/MaterialRuntimeContract.cpp
 	${CMAKE_SOURCE_DIR}/Tools/HeadlessExport/HeadlessExportCommandLine.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Profiling/ProfilerCaptureStore.cpp
@@ -319,4 +336,40 @@ add_test(NAME Editor.AdaptiveVirtualGeometry COMMAND $<TARGET_FILE:TerraEngine-E
 set_tests_properties(Editor.AdaptiveVirtualGeometry PROPERTIES
 	LABELS "Editor;VirtualGeometry;AdaptiveVirtualGeometry"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=AdaptiveVirtualGeometry;Editor.AssetPipeline.VirtualGeometry;VirtualGeometry.Editor.Inspector;VirtualGeometry.Editor.Automation;VirtualGeometry.Editor.Export;VirtualGeometry.Editor.DebugView"
+)
+
+add_test(NAME Editor.PhysicsUS1 COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.PhysicsUS1 PROPERTIES
+	LABELS "Editor;Physics;US1"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Physics.Editor"
+)
+
+add_test(NAME Editor.PhysicsUS2 COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.PhysicsUS2 PROPERTIES
+	LABELS "Editor;Physics;US2"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Physics.ColliderCompiler,Physics.MaterialAsset"
+)
+
+add_test(NAME Editor.PhysicsUS5 COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.PhysicsUS5 PROPERTIES
+	LABELS "Editor;Physics;US5"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Editor.PhysicsInspector,Editor.PhysicsPrefabUndo,Editor.PhysicsProjectSettings,Physics.SceneView,Physics.Diagnostics"
+)
+
+add_test(NAME Editor.PhysicsUS6 COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.PhysicsUS6 PROPERTIES
+	LABELS "Editor;Physics;US6;Automation"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Editor.MCP.Physics"
+)
+
+add_test(NAME Editor.PhysicsUS7 COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.PhysicsUS7 PROPERTIES
+	LABELS "Editor;Physics;US7;Export"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=PhysicsExport"
+)
+
+add_test(NAME Editor.PhysicsSoak COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.PhysicsSoak PROPERTIES
+	LABELS "Editor;Physics;Stress;Soak"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Physics.Editor.Soak"
 )

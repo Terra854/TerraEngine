@@ -330,6 +330,7 @@ namespace TerraEngine
 				var nextAssembly = nextLoadContext.LoadFromAssemblyPath(assemblyPath);
 				var nextCatalog = ScriptReflection.BuildAttachableTypeCatalog(nextAssembly);
 				DisposeScriptInstances();
+				PhysicsEvents.ResetManagedSubscriptions();
 
 				lock (s_bridgeSync)
 				{
@@ -367,6 +368,7 @@ namespace TerraEngine
 		public static void UnloadGameplayAssembly()
 		{
 			DisposeScriptInstances();
+			PhysicsEvents.ResetManagedSubscriptions();
 
 			lock (s_bridgeSync)
 			{
@@ -397,6 +399,7 @@ namespace TerraEngine
 			// Stop should discard every managed runtime instance while keeping the
 			// reflected type catalog warm for the next Play press.
 			DisposeScriptInstances();
+			PhysicsEvents.ResetManagedSubscriptions();
 		}
 
 		[UnmanagedCallersOnly]
@@ -1948,5 +1951,53 @@ namespace TerraEngine
 		[DllImport("TerraEngine")]
 		// Native_Time_GetDeltaTime bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern float Native_Time_GetDeltaTime();
+
+		[DllImport("TerraEngine")]
+		internal static extern uint Native_Physics_GetAbiVersion();
+
+		[DllImport("TerraEngine")]
+		internal static extern PhysicsStatus Native_Physics_SubmitBodyCommand(ref NativePhysicsBodyCommandRequest request, ref NativePhysicsCommandReceipt receipt);
+
+		[DllImport("TerraEngine")]
+		internal static extern PhysicsStatus Native_Physics_SubmitCharacterCommand(ref NativePhysicsCharacterCommandRequest request, ref NativePhysicsCommandReceipt receipt);
+
+		[DllImport("TerraEngine")]
+		internal static extern PhysicsStatus Native_Physics_SubmitQuery(ref NativePhysicsQueryRequest request, ref NativePhysicsQueryReceipt receipt);
+
+		[DllImport("TerraEngine")]
+		internal static extern unsafe PhysicsStatus Native_Physics_SubmitQueryBatch(NativePhysicsQueryRequest* requests, uint requestCount, NativePhysicsQueryReceipt* receipts, uint receiptCapacity, out uint requiredReceiptCount);
+
+		[DllImport("TerraEngine")]
+		internal static extern unsafe PhysicsStatus Native_Physics_ReadQuery(ref PhysicsQueryHandle handle, ref NativePhysicsQueryResultInfo result, NativePhysicsQueryHit* hits, uint hitCapacity, out uint requiredHitCount);
+
+		[DllImport("TerraEngine")]
+		internal static extern PhysicsStatus Native_Physics_CancelQuery(ref PhysicsQueryHandle handle);
+
+		[DllImport("TerraEngine")]
+		internal static extern unsafe PhysicsStatus Native_Physics_CopyBodyStates(NativePhysicsBodyState* states, uint capacity, out uint requiredCount);
+
+		[DllImport("TerraEngine")]
+		internal static extern unsafe PhysicsStatus Native_Physics_CopyCharacterStates(NativePhysicsCharacterState* states, uint capacity, out uint requiredCount);
+
+		[DllImport("TerraEngine")]
+		internal static extern PhysicsStatus Native_Physics_SubscribeEvents(ref NativePhysicsEventSubscriptionRequest request, ref NativePhysicsEventSubscription subscription);
+
+		[DllImport("TerraEngine")]
+		internal static extern PhysicsStatus Native_Physics_UnsubscribeEvents(ref NativePhysicsEventSubscription subscription);
+
+		[DllImport("TerraEngine")]
+		internal static extern unsafe PhysicsStatus Native_Physics_CopyEvents(NativePhysicsEvent* events, uint capacity, out uint requiredCount, out ulong sourceTick);
+
+		[DllImport("TerraEngine")]
+		internal static extern PhysicsStatus Native_Physics_ReadSettings(ref NativePhysicsSettingsSnapshot settings);
+
+		[DllImport("TerraEngine")]
+		internal static extern PhysicsStatus Native_Physics_ResolveIdentity(uint objectEntity, ref NativePhysicsIdentitySnapshot identity);
+
+		[DllImport("TerraEngine")]
+		internal static extern PhysicsStatus Native_Physics_ResolveBody(uint objectEntity, ref NativePhysicsBodyState state);
+
+		[DllImport("TerraEngine")]
+		internal static extern PhysicsStatus Native_Physics_ResolveCharacter(uint objectEntity, ref NativePhysicsCharacterState state);
 	}
 }

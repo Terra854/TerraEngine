@@ -4,6 +4,28 @@
 
 #include <fstream>
 
+// The automation service now delegates Play Mode lifecycle to the native main
+// editor. Unit tests intentionally do not link that ImGui/Vulkan workspace, so
+// these unavailable-state doubles satisfy linkage without simulating a world.
+bool MainEditorSubsystem::StartPlayMode()
+{
+	return false;
+}
+
+bool MainEditorSubsystem::SetPlayModePaused(bool)
+{
+	return false;
+}
+
+bool MainEditorSubsystem::StepPlayMode()
+{
+	return false;
+}
+
+void MainEditorSubsystem::StopPlayMode()
+{
+}
+
 // The editor-test target links automation services without the complete main
 // workspace/UI graph. This test-side implementation mirrors the owning prefab
 // service contract; the installed editor links the production implementation

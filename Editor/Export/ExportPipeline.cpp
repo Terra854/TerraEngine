@@ -8,6 +8,9 @@
 #include "ExportPackageValidator.h"
 #include "ExportScriptBindingRewriter.h"
 #include "AssetImportResult.h"
+#include "Physics/Assets/CookedColliderAsset.h"
+#include "Physics/Assets/PhysicsMaterial.h"
+#include "Physics/PhysicsSettings.h"
 #include "Resource/ResourceResidency.h"
 #include "Resource/ResourceStreaming.h"
 
@@ -15,11 +18,14 @@
 #include <array>
 #include <chrono>
 #include <cctype>
+#include <cstddef>
 #include <cstdlib>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <iterator>
 #include <optional>
+#include <sstream>
 #include <unordered_set>
 #include <nlohmann/json.hpp>
 
@@ -33,6 +39,143 @@
 static std::string PathToUtf8(const std::filesystem::path& path) {
 	const std::u8string encoded = path.generic_u8string();
 	return std::string(reinterpret_cast<const char*>(encoded.data()), encoded.size());
+}
+
+// Export provenance hashes are deterministic identifiers for package auditing,
+// not cryptographic signatures. The same FNV-1a representation is used by
+// ExportEvidence so manifest and inventory comparisons remain straightforward.
+static std::string HashBytesForExport(const std::vector<std::byte>& bytes) {
+	std::uint64_t hash = 14695981039346656037ULL;
+	for(const std::byte byte : bytes) {
+		hash ^= static_cast<std::uint8_t>(byte);
+		hash *= 1099511628211ULL;
+	}
+	std::ostringstream output;
+	output << std::hex << std::setfill('0') << std::setw(16) << hash;
+	return output.str();
+}
+
+static bool ReadExportBytes(const std::filesystem::path& path, std::vector<std::byte>& bytes) {
+	std::ifstream input(path, std::ios::binary);
+	if(!input) return false;
+	std::vector<char> rawBytes{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+	bytes.resize(rawBytes.size());
+	for(std::size_t index = 0U; index < rawBytes.size(); ++index) {
+		bytes[index] = static_cast<std::byte>(static_cast<unsigned char>(rawBytes[index]));
+	}
+	return input.eof() || !input.fail();
+}
+
+static std::string HashPhysicsValue(std::uint64_t value) {
+	std::ostringstream output;
+	output << std::hex << std::setfill('0') << std::setw(16) << value;
+	return output.str();
+}
+
+static nlohmann::json SerializePhysicsSettings(const TerraEngine::Physics::PhysicsSettings& settings) {
+	nlohmann::json layers = nlohmann::json::array();
+	for(const TerraEngine::Physics::CollisionLayer& layer : settings.layers) {
+		layers.push_back({
+			{"id", layer.id}, {"name", layer.name}, {"collisionMask", layer.collisionMask},
+			{"broadPhaseGroup", layer.broadPhaseGroup}, {"enabled", layer.enabled}
+		});
+	}
+	return {
+		{"schemaVersion", settings.schemaVersion},
+		{"gravity", {settings.gravity.x, settings.gravity.y, settings.gravity.z}},
+		{"fixedTimeStep", settings.fixedTimeStep}, {"maxSubsteps", settings.maxSubsteps},
+		{"maxAccumulatedTime", settings.maxAccumulatedTime}, {"velocityIterations", settings.velocityIterations},
+		{"positionIterations", settings.positionIterations}, {"layers", std::move(layers)},
+		{"maxCastDistance", settings.maxCastDistance}, {"maxShapeExtent", settings.maxShapeExtent},
+		{"maxHitsPerQuery", settings.maxHitsPerQuery}, {"maxRequestsPerBatch", settings.maxRequestsPerBatch},
+		{"retainedResultTicks", settings.retainedResultTicks},
+		{"debugVisualizationEnabled", settings.debugVisualizationEnabled},
+		{"retainedDebugTicks", settings.retainedDebugTicks}, {"maxDebugPrimitives", settings.maxDebugPrimitives}
+	};
+}
+
+static bool LoadValidatedPhysicsSettings(
+	const std::filesystem::path& settingsPath,
+	TerraEngine::Physics::PhysicsSettings& settings,
+	nlohmann::json& resolvedDocument,
+	std::string& error)
+{
+	settings = TerraEngine::Physics::PhysicsSettings::Defaults();
+	if(!std::filesystem::exists(settingsPath)) {
+		// Projects created before Physics Settings existed still export the
+		// provider-neutral defaults as an explicit runtime payload.
+		resolvedDocument = SerializePhysicsSettings(settings);
+		return true;
+	}
+
+	try {
+		std::ifstream input(settingsPath);
+		if(!input) { error = "Physics Settings could not be opened: " + PathToUtf8(settingsPath); return false; }
+		nlohmann::json document;
+		input >> document;
+		if(!document.is_object() || !document.contains("layers") || !document["layers"].is_array()
+			|| document["layers"].size() != settings.layers.size()) {
+			error = "Physics Settings must provide exactly 32 stable collision layers.";
+			return false;
+		}
+		settings.schemaVersion = document.value("schemaVersion", settings.schemaVersion);
+		if(!document.contains("gravity") || !document["gravity"].is_array() || document["gravity"].size() != 3U) {
+			error = "Physics Settings must provide a three-value gravity vector.";
+			return false;
+		}
+		settings.gravity = {document["gravity"][0].get<float>(), document["gravity"][1].get<float>(), document["gravity"][2].get<float>()};
+		settings.fixedTimeStep = document.value("fixedTimeStep", settings.fixedTimeStep);
+		settings.maxSubsteps = document.value("maxSubsteps", settings.maxSubsteps);
+		settings.maxAccumulatedTime = document.value("maxAccumulatedTime", settings.maxAccumulatedTime);
+		settings.velocityIterations = document.value("velocityIterations", settings.velocityIterations);
+		settings.positionIterations = document.value("positionIterations", settings.positionIterations);
+		settings.maxCastDistance = document.value("maxCastDistance", settings.maxCastDistance);
+		settings.maxShapeExtent = document.value("maxShapeExtent", settings.maxShapeExtent);
+		settings.maxHitsPerQuery = document.value("maxHitsPerQuery", settings.maxHitsPerQuery);
+		settings.maxRequestsPerBatch = document.value("maxRequestsPerBatch", settings.maxRequestsPerBatch);
+		settings.retainedResultTicks = document.value("retainedResultTicks", settings.retainedResultTicks);
+		settings.debugVisualizationEnabled = document.value("debugVisualizationEnabled", settings.debugVisualizationEnabled);
+		settings.retainedDebugTicks = document.value("retainedDebugTicks", settings.retainedDebugTicks);
+		settings.maxDebugPrimitives = document.value("maxDebugPrimitives", settings.maxDebugPrimitives);
+		for(std::size_t index = 0U; index < settings.layers.size(); ++index) {
+			const nlohmann::json& source = document["layers"][index];
+			if(!source.is_object()) { error = "Physics Settings layer " + std::to_string(index) + " is not an object."; return false; }
+			auto& destination = settings.layers[index];
+			destination.id = source.value("id", destination.id);
+			destination.name = source.value("name", destination.name);
+			destination.collisionMask = source.value("collisionMask", destination.collisionMask);
+			destination.broadPhaseGroup = source.value("broadPhaseGroup", destination.broadPhaseGroup);
+			destination.enabled = source.value("enabled", destination.enabled);
+		}
+		const TerraEngine::Physics::PhysicsSettingsValidationResult validation = settings.Validate();
+		if(!validation.accepted) { error = "Physics Settings are invalid: " + validation.message; return false; }
+		resolvedDocument = SerializePhysicsSettings(settings);
+		return true;
+	}
+	catch(const std::exception& exception) {
+		error = std::string("Physics Settings JSON is invalid: ") + exception.what();
+		return false;
+	}
+}
+
+static nlohmann::json BuildPhysicsManifestJson(const PhysicsExportManifest& physics) {
+	auto assetToJson = [](const PhysicsExportAssetRecord& asset) {
+		return nlohmann::json{{"guid", asset.guid}, {"packagePath", asset.packagePath}, {"checksum", asset.checksum},
+			{"size", asset.byteSize}, {"sourceProvenanceHash", asset.sourceProvenanceHash}, {"recipeHash", asset.recipeHash}};
+	};
+	nlohmann::json materials = nlohmann::json::array();
+	for(const PhysicsExportAssetRecord& material : physics.materials) materials.push_back(assetToJson(material));
+	nlohmann::json colliders = nlohmann::json::array();
+	for(const PhysicsExportAssetRecord& collider : physics.colliders) colliders.push_back(assetToJson(collider));
+	return {
+		{"schemaVersion", physics.schemaVersion},
+		{"provider", {{"identifier", physics.providerIdentifier}, {"version", physics.providerVersion}, {"revision", physics.providerRevision}}},
+		{"cookFormatVersion", physics.cookFormatVersion},
+		{"settings", {{"packagePath", physics.settingsPackagePath}, {"schemaVersion", physics.settingsSchemaVersion}, {"contentHash", physics.settingsHash}}},
+		{"layersHash", physics.layersHash}, {"defaultMaterialGuid", physics.defaultMaterialGuid},
+		{"materials", std::move(materials)}, {"colliders", std::move(colliders)},
+		{"validation", {{"fixtureSchemaVersion", physics.validationFixtureSchemaVersion}, {"status", physics.validationStatus}}}
+	};
 }
 
 static void EmitProgress(ExportProgressCallback& cb, ExportPhase phase, float progress, const std::string& message, bool finished = false) {
@@ -437,6 +580,7 @@ ExportResult ExportPipeline::Execute(
 	result.outputDirectory = request.finalOutputDirectory;
 	result.evidenceDirectory = request.evidenceDirectory;
 	m_StagedAssets.clear();
+	m_PhysicsManifest = PhysicsExportManifest{};
 
 	std::vector<std::string> progressRecords;
 	ExportProgressCallback capturedProgress = [&](const ExportProgress& progress) {
@@ -858,6 +1002,9 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 				// Exclude .meta files from the exported build.
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (entry.path().extension() == ".meta") continue;
+				// Collider recipes are editor/compiler input. A shipped runtime may
+				// consume only the validated .tepcoll envelope referenced below.
+				if(entry.path().extension() == ".tecollider") continue;
 
 				auto relative = std::filesystem::relative(entry.path(), rawAssets);
 				auto dest = stagingDir / relative;
@@ -879,6 +1026,40 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 				std::filesystem::copy_file(entry.path(), dest, std::filesystem::copy_options::overwrite_existing);
 			}
 		}
+
+		// Resolve Physics Settings into the package instead of relying on an
+		// editor-local ProjectSettings path. Older projects receive an explicit
+		// validated default document, keeping runtime behavior deterministic.
+		TerraEngine::Physics::PhysicsSettings physicsSettings;
+		nlohmann::json resolvedPhysicsSettings;
+		std::string physicsSettingsError;
+		if(!LoadValidatedPhysicsSettings(projectRoot / "ProjectSettings" / "PhysicsSettings.json",
+			physicsSettings, resolvedPhysicsSettings, physicsSettingsError)) {
+			result.errorMessage = physicsSettingsError;
+			return false;
+		}
+		const std::string physicsSettingsText = resolvedPhysicsSettings.dump(2);
+		const std::filesystem::path stagedPhysicsSettingsPath = stagingDir / "ProjectSettings" / "PhysicsSettings.json";
+		std::filesystem::create_directories(stagedPhysicsSettingsPath.parent_path());
+		{
+			std::ofstream output(stagedPhysicsSettingsPath, std::ios::binary | std::ios::trunc);
+			if(!output) { result.errorMessage = "Could not stage resolved Physics Settings."; return false; }
+			output << physicsSettingsText;
+			if(!output.good()) { result.errorMessage = "Could not finish staging resolved Physics Settings."; return false; }
+		}
+		std::vector<std::byte> physicsSettingsBytes;
+		if(!ReadExportBytes(stagedPhysicsSettingsPath, physicsSettingsBytes)) {
+			result.errorMessage = "Could not read staged Physics Settings for hashing.";
+			return false;
+		}
+		m_PhysicsManifest.settingsPackagePath = "ProjectSettings/PhysicsSettings.json";
+		m_PhysicsManifest.settingsSchemaVersion = physicsSettings.schemaVersion;
+		m_PhysicsManifest.settingsHash = HashBytesForExport(physicsSettingsBytes);
+		const nlohmann::json layersOnly = resolvedPhysicsSettings.at("layers");
+		const std::string layersText = layersOnly.dump();
+		std::vector<std::byte> layersBytes(layersText.size());
+		for(std::size_t index = 0U; index < layersText.size(); ++index) layersBytes[index] = static_cast<std::byte>(static_cast<unsigned char>(layersText[index]));
+		m_PhysicsManifest.layersHash = HashBytesForExport(layersBytes);
 
 		// Engine-owned runtime payloads are packed with project content so the
 		// standalone launcher can resolve them entirely through ContentMount.
@@ -919,6 +1100,59 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 			asset.virtualGeometryRequired = asset.type == AssetType::Mesh
 				&& IsCompiledVirtualGeometryMeshPath(asset.path);
 			m_StagedAssets.push_back(std::move(asset));
+			return true;
+		};
+		auto addValidatedPhysicsAsset = [this, &addStagedAsset, &stagingDir](
+			const std::string& guid, AssetType type, const std::filesystem::path& packagePath, std::string& error) -> bool {
+			const std::filesystem::path stagedPath = stagingDir / packagePath;
+			std::vector<std::byte> bytes;
+			if(!ReadExportBytes(stagedPath, bytes)) {
+				error = "Validated physics output is missing from export staging: " + PathToUtf8(packagePath);
+				return false;
+			}
+
+			PhysicsExportAssetRecord record;
+			record.guid = guid;
+			record.packagePath = packagePath.generic_string();
+			record.byteSize = bytes.size();
+			record.checksum = HashBytesForExport(bytes);
+			const std::optional<TerraEngine::UUID> parsedGuid = TerraEngine::ParseUUID(guid);
+			if(!parsedGuid) { error = "Physics asset metadata has an invalid GUID: " + guid; return false; }
+
+			if(type == AssetType::PhysicsMaterial) {
+				try {
+					const nlohmann::json document = nlohmann::json::parse(bytes.begin(), bytes.end());
+					TerraEngine::Physics::PhysicsMaterial material;
+					TerraEngine::Physics::PhysicsMaterialDiagnostics diagnostics;
+					if(!TerraEngine::Physics::PhysicsMaterial::LoadJson(document, material, diagnostics)
+						|| material.assetId != *parsedGuid) {
+						error = "Physics material is invalid or does not match its metadata GUID: " + PathToUtf8(packagePath);
+						return false;
+					}
+				}
+				catch(const std::exception&) {
+					error = "Physics material could not be parsed: " + PathToUtf8(packagePath);
+					return false;
+				}
+				if(!addStagedAsset(guid, type, packagePath)) { error = "Physics material GUID is duplicated in export staging: " + guid; return false; }
+				m_PhysicsManifest.materials.push_back(std::move(record));
+				return true;
+			}
+
+			TerraEngine::Physics::CookedColliderDiagnostics diagnostics;
+			const auto collider = TerraEngine::Physics::CookedColliderAsset::Deserialize(bytes, diagnostics);
+			if(!collider || collider->Envelope().assetId != *parsedGuid
+				|| !collider->CheckCompatibility(TerraEngine::Physics::CookedColliderAsset::HostPlatform(),
+					TerraEngine::Physics::CookedColliderProviderFamily::Jolt,
+					TerraEngine::Physics::kJoltCookProviderVersion, TerraEngine::Physics::kJoltCookRevision).compatible) {
+				error = "Cooked collider is invalid, incompatible, or does not match its metadata GUID: " + PathToUtf8(packagePath);
+				return false;
+			}
+			const auto& envelope = collider->Envelope();
+			record.sourceProvenanceHash = HashPhysicsValue(envelope.sourceContentHash);
+			record.recipeHash = HashPhysicsValue(envelope.recipeHash);
+			if(!addStagedAsset(guid, type, packagePath)) { error = "Cooked collider GUID is duplicated in export staging: " + guid; return false; }
+			m_PhysicsManifest.colliders.push_back(std::move(record));
 			return true;
 		};
 		auto resolveSourceAssetPath = [&rawAssets](const std::filesystem::path& metaPath, const std::string& sourcePathText) {
@@ -1002,6 +1236,8 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 					}
 					else if (importer == "TextureImporter") type = AssetType::Texture;
 					else if (importer == "MaterialImporter") type = AssetType::Material;
+					else if(importer == "PhysicsMaterialImporter") type = AssetType::PhysicsMaterial;
+					else if(importer == "PhysicsColliderRecipeImporter" || importer == "CookedColliderImporter") type = AssetType::CookedCollider;
 					else supported = false;
 
 					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -1019,13 +1255,38 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 							auto rel = std::filesystem::relative(entry.path().parent_path() / meta.value("sourcePath", ""), rawAssets);
 							manifestPath = rel;
 						}
-						addStagedAsset(std::move(guid), type, manifestPath);
+						if(type == AssetType::PhysicsMaterial || type == AssetType::CookedCollider) {
+							std::string physicsAssetError;
+							if(!addValidatedPhysicsAsset(guid, type, manifestPath, physicsAssetError)) {
+								result.errorMessage = physicsAssetError;
+								return false;
+							}
+						}
+						else {
+							addStagedAsset(std::move(guid), type, manifestPath);
+						}
 					}
 				}
 				catch (...) {
 					// Skip malformed or unreadable meta files.
 				}
 			}
+		}
+
+		// Directory iteration order is platform-dependent. Sort durable records
+		// before serializing so editor/headless exports produce the same manifest.
+		auto sortPhysicsAssets = [](std::vector<PhysicsExportAssetRecord>& assets) {
+			std::sort(assets.begin(), assets.end(), [](const auto& left, const auto& right) {
+				return std::tie(left.guid, left.packagePath) < std::tie(right.guid, right.packagePath);
+			});
+		};
+		sortPhysicsAssets(m_PhysicsManifest.materials);
+		sortPhysicsAssets(m_PhysicsManifest.colliders);
+		if(!m_PhysicsManifest.materials.empty()) {
+			// The first GUID in canonical order is the deterministic fallback. A
+			// future explicit project default can replace this without changing the
+			// append-only manifest schema.
+			m_PhysicsManifest.defaultMaterialGuid = m_PhysicsManifest.materials.front().guid;
 		}
 
 		// 4. Stage the export manifest directly into the TEPAK input root so the
@@ -1221,11 +1482,16 @@ bool ExportPipeline::WriteExportManifest(const BuildProfile& profile,
 		manifest["streamingPolicy"] = BuildStreamingPolicyManifest();
 		manifest["rendererRecovery"] = BuildRendererRecoveryManifest(profile);
 		manifest["virtualGeometry"] = BuildVirtualGeometryExportManifest(profile);
+		manifest["physics"] = BuildPhysicsManifestJson(m_PhysicsManifest);
 
 		// Include the asset GUID map so the engine runtime can resolve 
 		// cross-resource references (UUIDs) back to filenames in the archive.
 		manifest["assets"] = nlohmann::json::array();
-		for (const auto& asset : m_StagedAssets) {
+		std::vector<StagedAsset> sortedAssets = m_StagedAssets;
+		std::sort(sortedAssets.begin(), sortedAssets.end(), [](const StagedAsset& left, const StagedAsset& right) {
+			return std::tie(left.guid, left.path, left.type) < std::tie(right.guid, right.path, right.type);
+		});
+		for (const auto& asset : sortedAssets) {
 			nlohmann::json entry;
 			entry["guid"] = asset.guid;
 			entry["path"] = asset.path;

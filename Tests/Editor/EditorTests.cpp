@@ -75,6 +75,8 @@ namespace TerraEngine::EditorTests {
 	void RegisterEditorMcpSceneViewTests(TestRegistry& registry);
 	void RegisterEditorMcpProfilerTests(TestRegistry& registry);
 	void RegisterEditorAutomationExtensibilityTests(TestRegistry& registry);
+	void RegisterEditorMcpPhysicsContractTests(TestRegistry& registry);
+	void RegisterEditorMcpPhysicsSafetyTests(TestRegistry& registry);
 	void RegisterEditorMcpTransportTests(TestRegistry& registry);
 	void RegisterEditorMcpAssetImportTests(TestRegistry& registry);
 	void RegisterEditorMcpAssetImportSafetyTests(TestRegistry& registry);
@@ -127,6 +129,18 @@ namespace TerraEngine::EditorTests {
 	void RegisterRendererRecoveryProjectSaveTests(TestRegistry& registry);
 	void RegisterSceneRuntimeParityTests(TestRegistry& registry);
 	void RegisterStreamingEditorWorkflowTests(TestRegistry& registry);
+	void RegisterPhysicsPlayModeTests(TestRegistry& registry);
+	void RegisterPhysicsColliderCompilerTests(TestRegistry& registry);
+	void RegisterPhysicsMaterialAssetTests(TestRegistry& registry);
+	void RegisterPhysicsInspectorTests(TestRegistry& registry);
+	void RegisterPhysicsPrefabUndoTests(TestRegistry& registry);
+	void RegisterPhysicsProjectSettingsTests(TestRegistry& registry);
+	void RegisterPhysicsSceneViewTests(TestRegistry& registry);
+	void RegisterPhysicsDiagnosticsWindowTests(TestRegistry& registry);
+	void RegisterPhysicsExportManifestTests(TestRegistry& registry);
+	void RegisterPhysicsExportValidationTests(TestRegistry& registry);
+	void RegisterPhysicsExportParityTests(TestRegistry& registry);
+	void RegisterPhysicsPlayModeSoakTests(TestRegistry& registry);
 }
 
 int main() {
@@ -208,6 +222,8 @@ int main() {
 	TerraEngine::EditorTests::RegisterEditorMcpSceneViewTests(registry);
 	TerraEngine::EditorTests::RegisterEditorMcpProfilerTests(registry);
 	TerraEngine::EditorTests::RegisterEditorAutomationExtensibilityTests(registry);
+	TerraEngine::EditorTests::RegisterEditorMcpPhysicsContractTests(registry);
+	TerraEngine::EditorTests::RegisterEditorMcpPhysicsSafetyTests(registry);
 	TerraEngine::EditorTests::RegisterEditorMcpTransportTests(registry);
 	TerraEngine::EditorTests::RegisterEditorMcpAssetImportTests(registry);
 	TerraEngine::EditorTests::RegisterEditorMcpAssetImportSafetyTests(registry);
@@ -260,6 +276,18 @@ int main() {
 	TerraEngine::EditorTests::RegisterRendererRecoveryProjectSaveTests(registry);
 	TerraEngine::EditorTests::RegisterSceneRuntimeParityTests(registry);
 	TerraEngine::EditorTests::RegisterStreamingEditorWorkflowTests(registry);
+	TerraEngine::EditorTests::RegisterPhysicsPlayModeTests(registry);
+	TerraEngine::EditorTests::RegisterPhysicsColliderCompilerTests(registry);
+	TerraEngine::EditorTests::RegisterPhysicsMaterialAssetTests(registry);
+	TerraEngine::EditorTests::RegisterPhysicsInspectorTests(registry);
+	TerraEngine::EditorTests::RegisterPhysicsPrefabUndoTests(registry);
+	TerraEngine::EditorTests::RegisterPhysicsProjectSettingsTests(registry);
+	TerraEngine::EditorTests::RegisterPhysicsSceneViewTests(registry);
+	TerraEngine::EditorTests::RegisterPhysicsDiagnosticsWindowTests(registry);
+	TerraEngine::EditorTests::RegisterPhysicsExportManifestTests(registry);
+	TerraEngine::EditorTests::RegisterPhysicsExportValidationTests(registry);
+	TerraEngine::EditorTests::RegisterPhysicsExportParityTests(registry);
+	TerraEngine::EditorTests::RegisterPhysicsPlayModeSoakTests(registry);
 
 	return registry.RunAll(std::cout);
 }

@@ -28,12 +28,14 @@
 #include "Scene/SceneGraphRuntime.h"
 #include "Scene/RuntimeLayout.h"
 #include "Scripting/ScriptingSystem.h"
+#include "Physics/PhysicsSystem.h"
 #include "Scripting/ScriptGlue.h"
 #include "UI/UISystem.h"
 #include "Utilities/PlatformUtils.h"
 
 #include <chrono>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -212,6 +214,12 @@ void Engine::Initialize()
 	ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
 	RegisterEngineSystem(systems, systemScheduler, scriptingSystem, scriptingSystem.SchedulerDeclaration());
 
+	// Editor Play Mode owns world creation/restoration, while exported games
+	// start the same shared system during ordinary engine initialization.
+	TerraEngine::Physics::PhysicsSystem& physicsSystem = TerraEngine::Physics::PhysicsSystem::Instance();
+	physicsSystem.SetEditorLifecycleControlled(editorMode);
+	RegisterEngineSystem(systems, systemScheduler, physicsSystem, physicsSystem.SchedulerDeclaration());
+
 	// UISystem parses `.tuiml`/`.tuss` assets and builds CPU-side UI batches
 	// after gameplay and scene state have been updated for the current frame.
 	UISystem& uiSystem = UISystem::Instance();
@@ -254,6 +262,7 @@ void Engine::Initialize()
 	std::size_t initializedSystemCount = 0;
 	bool editorSystemInitialized = false;
 	bool resourceManagerInitialized = false;
+	std::optional<TerraEngine::Runtime::PackagedPhysicsRuntime> packagedPhysics;
 	try {
 		resourceManager.Initialize();
 		resourceManagerInitialized = true;
@@ -263,6 +272,19 @@ void Engine::Initialize()
 			renderSystem.SetRenderSettings(*configuredRenderSettings);
 		}
 		renderSystem.SetRendererRecoveryPolicy(resourceManager.GetRendererRecoveryPolicy());
+
+		// Exported physics content is validated and copied from the mounted archive
+		// before any system initializes. This prevents a corrupt collider, material,
+		// managed binding, or provider revision from creating a live Jolt world.
+		if(resourceManager.IsExportRuntime() && ContentMount::Instance().IsMounted()) {
+			packagedPhysics = TerraEngine::Runtime::LoadPackagedPhysicsRuntime(ContentMount::Instance());
+			if(packagedPhysics->declared && !packagedPhysics->loaded) {
+				throw std::runtime_error(packagedPhysics->diagnostic);
+			}
+			if(packagedPhysics->declared && !physicsSystem.QueueSettingsUpdate(packagedPhysics->settings)) {
+				throw std::runtime_error("Packaged Physics Settings could not be queued before provider initialization.");
+			}
+		}
 
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (auto* system : systems) {
@@ -314,6 +336,7 @@ void Engine::Initialize()
 	startupInput.renderProfile = resourceManager.GetRenderProfileSummary();
 	startupInput.validationEnabled = resourceManager.IsRenderValidationEnabled();
 	startupInput.debugEnabled = resourceManager.IsRenderDebugEnabled();
+	startupInput.packagedPhysics = std::move(packagedPhysics);
 	if (sceneManager.GetActiveScene() != nullptr) {
 		auto graph = TerraEngine::Scene::BuildSceneGraphFromObjectManager(ObjectManager::instance());
 		auto summary = TerraEngine::Scene::BuildSceneRuntimeSummary(graph);
@@ -363,15 +386,24 @@ bool Engine::Update(float deltaTime)
 			TerraEngine::Scheduling::ClearPublishedEcsGraphFrameSummaries();
 		}
 
-		const TerraEngine::Scheduling::ScheduleSummary& schedulerSummary = systemScheduler.ExecuteFrame(deltaTime, [](const TerraEngine::Scheduling::MutationFlushPoint&) {
+		const TerraEngine::Scheduling::ScheduleSummary& schedulerSummary = systemScheduler.ExecuteFrame(deltaTime, [](const TerraEngine::Scheduling::MutationFlushPoint& flushPoint) {
 			TerraEngine::Scheduling::MutationFlushRuntimeState state;
 			TerraEngine::Scene::SceneMutationQueue& queue = TerraEngine::Scene::SceneMutationQueue::Instance();
+			TerraEngine::Scene::SceneMutationBatchResult result;
 			if (!queue.Empty()) {
 				// Structural scene mutations are applied only at declared flush
 				// points so systems that iterate hierarchy/component data never
 				// observe the ObjectManager changing midway through their update.
-				const TerraEngine::Scene::SceneMutationBatchResult result = SceneManager::Instance().ApplySceneMutations("system-scheduler-flush");
+				result = SceneManager::Instance().ApplySceneMutations("system-scheduler-flush");
 				state.message = result.applied ? "Scene mutation queue flushed." : "Scene mutation queue rejected one or more requests.";
+			}
+			if (flushPoint.name == "After Physics") {
+				// A physics step becomes publication-complete only after this protected
+				// boundary returns the receipts for its typed Transform transactions.
+				TerraEngine::Physics::PhysicsSystem::Instance().OnAfterPhysicsFlush(result.transactionResults);
+				// Managed subscribers observe the immutable packet only after physics
+				// transform transactions are visible and provider callbacks have ended.
+				ScriptingSystem::Instance().DeliverPhysicsEventsAfterFlush();
 			}
 			state.pendingAfterFlush = queue.Size();
 			return state;

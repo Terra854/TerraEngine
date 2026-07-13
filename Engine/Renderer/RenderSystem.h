@@ -28,6 +28,7 @@
 #include "Renderer/Graph/RenderDiagnostics.h"
 #include "Renderer/Graph/RenderFrameSnapshot.h"
 #include "Renderer/RendererRecoveryPolicy.h"
+#include "Physics/PhysicsDiagnostics.h"
 #include "Scene/RuntimeLayout.h"
 #include "Scene/SpatialDiagnostics.h"
 #include "Scene/SpatialIndex.h"
@@ -35,6 +36,14 @@
 class RenderSystem : public SystemsBase
 {
 public:
+	// This summary proves diagnostics submission without exposing RHI/provider
+	// pointers. CPU Scene View overlays can remain useful when no GPU exists.
+	struct SceneViewPhysicsDebugSubmissionSummary
+	{
+		bool rendererAvailable = false;
+		std::size_t packetCount = 0U;
+		std::size_t primitiveCount = 0U;
+	};
 	static RenderSystem& Instance();
 
 	RenderSystem(const RenderSystem&) = delete;
@@ -152,6 +161,12 @@ public:
 	void SetSceneViewGridVisible(bool visible) {
 		sceneViewGridVisible = visible;
 	}
+	// Records immutable debug packets for the Scene View render boundary. A
+	// missing RHI returns false and deliberately leaves prior diagnostics alone.
+	bool SubmitSceneViewPhysicsDebugPackets(
+		const std::vector<std::shared_ptr<const TerraEngine::Physics::PhysicsDebugPacket>>& packets,
+		const TerraEngine::Physics::PhysicsDebugDisplaySelection& selection);
+	[[nodiscard]] SceneViewPhysicsDebugSubmissionSummary GetLatestSceneViewPhysicsDebugSubmission() const;
 	void SetSceneViewContextTint(const std::unordered_set<TerraEngine::UUID>& focusedObjectIds);
 	// SetEditorModeEnabled is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void SetEditorModeEnabled(bool enabled) { editorModeEnabled = enabled; }
@@ -203,6 +218,7 @@ private:
 	bool taskShaderCullingEnabled = true;
 	bool editorModeEnabled = false;
 	bool sceneViewGridVisible = true;
+	SceneViewPhysicsDebugSubmissionSummary latestSceneViewPhysicsDebugSubmission{};
 	bool renderGraphDiagnosticsRequestedByUi = false;
 	std::optional<bool> transientRenderValidationOverride;
 	std::optional<bool> transientRenderDebugDiagnosticsOverride;

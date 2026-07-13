@@ -28,6 +28,9 @@ namespace {
 	std::string InferAssetType(const std::filesystem::path& path) {
 		const std::string extension = path.extension().string();
 		if(path.filename() == "game.json") return "manifest";
+		if(path.filename() == "PhysicsSettings.json") return "physics_settings";
+		if(extension == ".tephysmat") return "physics_material";
+		if(extension == ".tepcoll") return "cooked_collider";
 		if(extension == ".tescene") return "scene";
 		if(extension == ".temf") return "mesh";
 		if(extension == ".tmat") return "material";
@@ -41,8 +44,10 @@ namespace {
 
 	std::string InferSourceKind(const std::filesystem::path& path) {
 		if(path.filename() == "game.json") return "generated_manifest";
+		if(path.filename() == "PhysicsSettings.json") return "generated_runtime_settings";
 		const std::string extension = path.extension().string();
-		if(extension == ".temf" || extension == ".tmat" || extension == ".tetf" || extension == ".tspf" || extension == ".spv") {
+		if(extension == ".temf" || extension == ".tmat" || extension == ".tetf" || extension == ".tspf" || extension == ".spv"
+			|| extension == ".tephysmat" || extension == ".tepcoll") {
 			return "compiled";
 		}
 		if(InferAssetType(path) == "shader" || InferAssetType(path) == "font") return "engine_runtime";
@@ -130,6 +135,45 @@ namespace {
 			{"package", {{"archivePath", PathToUtf8(result.packageResult.outputPath)}, {"byteSize", result.packageResult.archiveSize}, {"entryCount", result.packageResult.entryCount}}},
 			{"diagnostics", std::move(diagnostics)}
 		};
+	}
+
+	// Pull the portable provenance fields from game.json once, then reuse the
+	// compact summary in every durable evidence document. This prevents a later
+	// evidence reader from needing build-machine paths or a provider SDK.
+	Json PhysicsEvidenceSummary(const std::string& manifestText) {
+		try {
+			const Json manifest = Json::parse(manifestText);
+			const auto physicsIt = manifest.find("physics");
+			if(physicsIt == manifest.end() || !physicsIt->is_object()) return {{"present", false}};
+			const Json& physics = *physicsIt;
+			const Json provider = physics.value("provider", Json::object());
+			const Json settings = physics.value("settings", Json::object());
+			return {
+				{"present", true}, {"schemaVersion", physics.value("schemaVersion", 0U)},
+				{"provider", provider}, {"cookFormatVersion", physics.value("cookFormatVersion", 0U)},
+				{"settingsHash", settings.value("contentHash", std::string{})},
+				{"layersHash", physics.value("layersHash", std::string{})},
+				{"defaultMaterialGuid", physics.value("defaultMaterialGuid", std::string{})},
+				{"materialGuids", [&physics]() { Json values = Json::array(); for(const Json& asset : physics.value("materials", Json::array())) values.push_back(asset.value("guid", std::string{})); return values; }()},
+				{"colliderGuids", [&physics]() { Json values = Json::array(); for(const Json& asset : physics.value("colliders", Json::array())) values.push_back(asset.value("guid", std::string{})); return values; }()},
+				{"validation", physics.value("validation", Json::object())}
+			};
+		}
+		catch(...) { return {{"present", false}, {"parseError", true}}; }
+	}
+
+	std::string PhysicsPackageSummaryText(const Json& physics) {
+		if(!physics.value("present", false)) return "Physics: no resolved physics manifest section\n";
+		const Json provider = physics.value("provider", Json::object());
+		std::ostringstream output;
+		output << "Physics provider: " << provider.value("identifier", std::string("unknown"))
+			<< ' ' << provider.value("version", std::string("unknown"))
+			<< " revision " << provider.value("revision", std::string("unknown")) << '\n';
+		output << "Physics settings hash: " << physics.value("settingsHash", std::string{})
+			<< ", layers hash: " << physics.value("layersHash", std::string{}) << '\n';
+		output << "Physics assets: " << physics.value("materialGuids", Json::array()).size() << " materials, "
+			<< physics.value("colliderGuids", Json::array()).size() << " cooked colliders\n";
+		return output.str();
 	}
 
 	bool WriteTextFile(const std::filesystem::path& path, const std::string& contents, std::string& outError) {
@@ -259,6 +303,7 @@ bool WriteExportEvidenceBundle(
 
 	std::vector<ExportContentInventoryEntry> inventory = inputs.inventory;
 	NormalizeExportContentInventory(inventory);
+	const Json physics = PhysicsEvidenceSummary(inputs.resolvedManifestJson);
 	Json inventoryEntries = Json::array();
 	for(const ExportContentInventoryEntry& entry : inventory) {
 		inventoryEntries.push_back({
@@ -284,14 +329,19 @@ bool WriteExportEvidenceBundle(
 		{"passed", result.success && result.validationResult.passed},
 		{"errorCount", errorCount},
 		{"warningCount", warningCount},
-		{"diagnostics", std::move(validationDiagnostics)}
+		{"diagnostics", std::move(validationDiagnostics)},
+		{"physics", physics}
 	};
 	const Json inventoryDocument = {
-		{"schemaVersion", 1}, {"runId", request.runId}, {"entryCount", inventory.size()}, {"entries", std::move(inventoryEntries)}
+		{"schemaVersion", 1}, {"runId", request.runId}, {"entryCount", inventory.size()}, {"entries", std::move(inventoryEntries)}, {"physics", physics}
 	};
 
 	std::string progressText;
 	for(const std::string& line : inputs.progressJsonLines) progressText += line + "\n";
+	if(physics.value("present", false)) {
+		progressText += Json({{"type", "physics_provenance"}, {"schemaVersion", 1}, {"runId", request.runId},
+			{"stage", "asset_staging"}, {"physics", physics}}).dump() + "\n";
+	}
 	const std::string finalRecord = SerializeExportResultRecord(result);
 	if(inputs.progressJsonLines.empty() || inputs.progressJsonLines.back() != finalRecord) progressText += finalRecord + "\n";
 
@@ -299,11 +349,15 @@ bool WriteExportEvidenceBundle(
 	// directly with archived game.json. Only the explicit partial placeholder
 	// uses a trailing newline for readability.
 	const std::string manifestText = inputs.resolvedManifestJson.empty() ? "{}\n" : inputs.resolvedManifestJson;
-	const std::string packageText = inputs.packageValidationReport.empty()
+	std::string packageText = inputs.packageValidationReport.empty()
 		? "Package validation did not run.\nFinal: FAIL\n"
 		: inputs.packageValidationReport;
+	if(!packageText.empty() && packageText.back() != '\n') packageText += '\n';
+	packageText += PhysicsPackageSummaryText(physics);
+	Json resultDocument = ResultToJson(result);
+	resultDocument["physics"] = physics;
 
-	return WriteTextFile(request.evidenceDirectory / "export-result.json", ResultToJson(result).dump(2) + "\n", outError)
+	return WriteTextFile(request.evidenceDirectory / "export-result.json", resultDocument.dump(2) + "\n", outError)
 		&& WriteTextFile(request.evidenceDirectory / "resolved-manifest.json", manifestText, outError)
 		&& WriteTextFile(request.evidenceDirectory / "content-inventory.json", inventoryDocument.dump(2) + "\n", outError)
 		&& WriteTextFile(request.evidenceDirectory / "validation-report.json", validation.dump(2) + "\n", outError)

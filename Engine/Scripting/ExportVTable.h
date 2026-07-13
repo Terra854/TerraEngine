@@ -95,6 +95,11 @@ struct ManagedVTable {
 	// Write one field's blittable value into a live script instance.
 	void     (__cdecl* setFieldValue)(void* handle, int32_t fieldIndex, const void* inValue, int32_t valueSize);
 	void     (__cdecl* invokeUpdateBatch)(const ExportScriptBatchItem* items, int32_t itemCount);
+	// v2 tail: appended so v1 offsets remain ABI-compatible. tableSize lets the
+	// host reject a truncated table before it reads these optional physics hooks.
+	uint64_t tableSize;
+	uint32_t (__cdecl* getPhysicsAbiVersion)();
+	void     (__cdecl* dispatchPhysicsEventBatch)(const void* events, uint32_t eventCount, uint64_t worldId, uint32_t worldGeneration, uint64_t tick);
 #else
 	int32_t  (*getScriptCount)();
 	void     (*getScriptIds)(uint64_t* outBuffer, int32_t capacity);
@@ -109,6 +114,9 @@ struct ManagedVTable {
 	void     (*getFieldValue)(void* handle, int32_t fieldIndex, void* outValue, int32_t valueSize);
 	void     (*setFieldValue)(void* handle, int32_t fieldIndex, const void* inValue, int32_t valueSize);
 	void     (*invokeUpdateBatch)(const ExportScriptBatchItem* items, int32_t itemCount);
+	uint64_t tableSize;
+	uint32_t (*getPhysicsAbiVersion)();
+	void     (*dispatchPhysicsEventBatch)(const void* events, uint32_t eventCount, uint64_t worldId, uint32_t worldGeneration, uint64_t tick);
 #endif
 };
 
@@ -123,5 +131,10 @@ using InitManagedRuntimeFn = int32_t(__cdecl*)(ManagedVTable* outTable);
 using InitManagedRuntimeFn = int32_t(*)(ManagedVTable* outTable);
 #endif
 
-// Minimum VTable version the engine requires for correct operation.
+// V1 remains readable for older exports. V2 appends the fixed-width physics
+// event bridge, and tableSize guards every tail access before dereferencing it.
 inline constexpr uint32_t kManagedVTableMinVersion = 1;
+inline constexpr uint32_t kManagedVTablePhysicsVersion = 2;
+inline constexpr uint32_t kManagedPhysicsAbiVersion = 1;
+inline constexpr uint64_t kManagedVTableV1Size = 112;
+inline constexpr uint64_t kManagedVTableV2Size = sizeof(ManagedVTable);

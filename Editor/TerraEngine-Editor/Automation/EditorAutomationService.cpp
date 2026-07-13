@@ -12,6 +12,7 @@
 #include "Providers/EditorDiagnosticsAutomationProvider.h"
 #include "Providers/HistoryPlayModeAutomationProvider.h"
 #include "Providers/ProjectSceneAutomationProvider.h"
+#include "Providers/PhysicsAutomationProvider.h"
 #include "Providers/ScriptBuildAutomationProvider.h"
 
 #include "../Assets/AssetImportResult.h"
@@ -28,12 +29,14 @@
 #include "../../Export/ExportPipeline.h"
 #include "../../Export/ExportValidator.h"
 #include "../../AssetCompilers/ModelPackageImporter.h"
+#include "../../AssetCompilers/PhysicsMaterialAssetWriter.h"
 #include "Engine/Core/MainEngine.h"
 #include "Engine/Core/Logger/Logger.h"
 #include "Engine/Core/Object/Component.h"
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Components/CameraComponent.h"
 #include "Engine/Components/Transform.h"
+#include "Engine/Components/Physics/CharacterControllerComponent.h"
 #include "Engine/Scene/SceneManager.h"
 #include "Engine/Scene/SceneMutationQueue.h"
 #include "Engine/Scene/RuntimeLayout.h"
@@ -42,6 +45,10 @@
 #include "Engine/Profiling/Profiler.h"
 #include "Engine/Renderer/RendererRecovery.h"
 #include "Engine/Renderer/RenderSystem.h"
+#include "Engine/Physics/PhysicsSystem.h"
+#include "Engine/Physics/Assets/ColliderRecipe.h"
+#include "Engine/Physics/Assets/CookedColliderAsset.h"
+#include "Engine/Physics/Assets/PhysicsMaterial.h"
 #include "Engine/Scripting/ScriptingSystem.h"
 #include "Utilities/UUID.h"
 #include "ThreadPool/ThreadPool.h"
@@ -227,6 +234,162 @@ namespace TerraEngine::Editor::Automation
 			std::ostringstream stream;
 			stream << std::hex << hash;
 			return stream.str();
+		}
+
+		std::string PhysicsImpactScope(std::string_view capability)
+		{
+			if (capability.starts_with("physics.settings.")) return "physics.settings";
+			if (capability.starts_with("physics.layer.")) return "physics.layer";
+			if (capability.starts_with("physics.material.")) return "physics.material";
+			if (capability.starts_with("physics.collider.")) return "physics.collider";
+			return std::string(capability);
+		}
+
+		nlohmann::json PhysicsImpactPayload(nlohmann::json arguments)
+		{
+			for (const char* field : {"approval", "correlationId", "idempotencyKey", "worldGeneration", "projectGeneration", "sceneGeneration"})
+			{
+				arguments.erase(field);
+			}
+			return arguments;
+		}
+
+		nlohmann::json PhysicsIdempotencyPayload(nlohmann::json arguments)
+		{
+			// Approval tokens and correlation IDs identify a transport attempt, not
+			// the physical operation. Keep all generations so a retry can never
+			// replay work into a recreated project, scene, or physics world.
+			for (const char* field : {"approval", "correlationId", "idempotencyKey"})
+			{
+				arguments.erase(field);
+			}
+			return arguments;
+		}
+
+		std::string PhysicsImpactFingerprint(
+			std::string_view capability,
+			const nlohmann::json& arguments,
+			const AutomationStateSnapshot& state)
+		{
+			return StableFingerprint(
+				PhysicsImpactScope(capability) + "|" + PhysicsImpactPayload(arguments).dump()
+				+ "|" + std::to_string(state.projectGeneration) + "|" + std::to_string(state.sceneGeneration));
+		}
+
+		nlohmann::json PhysicsVectorJson(TerraEngine::Physics::PhysicsVector3 value)
+		{
+			return nlohmann::json::array({value.x, value.y, value.z});
+		}
+
+		std::optional<TerraEngine::Physics::PhysicsVector3> ReadPhysicsVector(const nlohmann::json& value)
+		{
+			if (!value.is_array() || value.size() != 3 || !value[0].is_number() || !value[1].is_number() || !value[2].is_number())
+			{
+				return std::nullopt;
+			}
+			const TerraEngine::Physics::PhysicsVector3 result{
+				value[0].get<float>(), value[1].get<float>(), value[2].get<float>()};
+			if (!std::isfinite(result.x) || !std::isfinite(result.y) || !std::isfinite(result.z))
+			{
+				return std::nullopt;
+			}
+			return result;
+		}
+
+		std::optional<float> ReadBoundedPhysicsNumber(const nlohmann::json& value, float minimum, float maximum)
+		{
+			if (!value.is_number()) return std::nullopt;
+			const double parsed = value.get<double>();
+			if (!std::isfinite(parsed) || parsed < static_cast<double>(minimum) || parsed > static_cast<double>(maximum))
+				return std::nullopt;
+			return static_cast<float>(parsed);
+		}
+
+		nlohmann::json PhysicsSettingsJson(const TerraEngine::Physics::PhysicsSettings& settings)
+		{
+			nlohmann::json layers = nlohmann::json::array();
+			for (const TerraEngine::Physics::CollisionLayer& layer : settings.layers)
+			{
+				layers.push_back({
+					{"id", layer.id}, {"name", layer.name}, {"collisionMask", layer.collisionMask},
+					{"broadPhaseGroup", layer.broadPhaseGroup}, {"enabled", layer.enabled}
+				});
+			}
+			return {
+				{"schemaVersion", settings.schemaVersion}, {"gravity", PhysicsVectorJson(settings.gravity)},
+				{"fixedTimeStep", settings.fixedTimeStep}, {"maxSubsteps", settings.maxSubsteps},
+				{"maxAccumulatedTime", settings.maxAccumulatedTime}, {"velocityIterations", settings.velocityIterations},
+				{"positionIterations", settings.positionIterations}, {"layers", std::move(layers)},
+				{"maxCastDistance", settings.maxCastDistance}, {"maxShapeExtent", settings.maxShapeExtent},
+				{"maxHitsPerQuery", settings.maxHitsPerQuery}, {"maxRequestsPerBatch", settings.maxRequestsPerBatch},
+				{"retainedResultTicks", settings.retainedResultTicks}, {"debugVisualizationEnabled", settings.debugVisualizationEnabled},
+				{"retainedDebugTicks", settings.retainedDebugTicks}, {"maxDebugPrimitives", settings.maxDebugPrimitives}
+			};
+		}
+
+		bool ApplyPhysicsSettingsPatch(
+			const nlohmann::json& patch,
+			TerraEngine::Physics::PhysicsSettings& settings,
+			std::string& error)
+		{
+			if (!patch.is_object())
+			{
+				error = "Physics settings patch must be an object.";
+				return false;
+			}
+			if (patch.contains("gravity"))
+			{
+				const auto value = ReadPhysicsVector(patch["gravity"]);
+				if (!value) { error = "gravity must contain three finite numbers."; return false; }
+				settings.gravity = *value;
+			}
+			if (patch.contains("fixedTimeStep"))
+			{
+				const auto value = ReadBoundedPhysicsNumber(patch["fixedTimeStep"], 0.0001F, 1.0F);
+				if (!value) { error = "fixedTimeStep must be a finite number between 0.0001 and 1.0."; return false; }
+				settings.fixedTimeStep = *value;
+			}
+			const auto readBoundedUnsigned = [&patch, &error](std::string_view key, std::uint32_t minimum, std::uint32_t maximum, std::uint32_t& output) {
+				if (!patch.contains(std::string(key))) return true;
+				const nlohmann::json& value = patch[std::string(key)];
+				if (!value.is_number_unsigned() || value.get<std::uint64_t>() < minimum || value.get<std::uint64_t>() > maximum)
+				{
+					error = std::string(key) + " is outside its supported unsigned range.";
+					return false;
+				}
+				output = value.get<std::uint32_t>();
+				return true;
+			};
+			if (!readBoundedUnsigned("maxSubsteps", 1U, 16U, settings.maxSubsteps)
+				|| !readBoundedUnsigned("retainedDebugTicks", 1U, 32U, settings.retainedDebugTicks)
+				|| !readBoundedUnsigned("maxDebugPrimitives", 1U, 100000U, settings.maxDebugPrimitives)) return false;
+			if (patch.contains("debugVisualizationEnabled"))
+			{
+				if (!patch["debugVisualizationEnabled"].is_boolean()) { error = "debugVisualizationEnabled must be boolean."; return false; }
+				settings.debugVisualizationEnabled = patch["debugVisualizationEnabled"].get<bool>();
+			}
+			const auto validation = settings.Validate();
+			if (!validation.accepted)
+			{
+				error = validation.message;
+				return false;
+			}
+			return true;
+		}
+
+		nlohmann::json PhysicsSnapshotResult(
+			const AutomationRequestContext& request,
+			TerraEngine::Physics::PhysicsWorldHandle world,
+			TerraEngine::Physics::PhysicsTick tick,
+			nlohmann::json data,
+			bool truncated = false,
+			bool overflow = false)
+		{
+			return {
+				{"correlationId", request.correlationId}, {"worldGeneration", world.worldGeneration}, {"tick", tick},
+				{"truncated", truncated}, {"overflow", overflow}, {"diagnostics", nlohmann::json::array()},
+				{"data", std::move(data)}
+			};
 		}
 
 		std::string ValidateRequiredSchemaFields(const nlohmann::json& arguments, const nlohmann::json& schema)
@@ -1381,12 +1544,142 @@ namespace TerraEngine::Editor::Automation
 		(void)capabilityRegistry.RegisterProvider(std::make_shared<EditorDiagnosticsAutomationProvider>(resolveHandler));
 		(void)capabilityRegistry.RegisterProvider(std::make_shared<HistoryPlayModeAutomationProvider>(resolveHandler));
 		(void)capabilityRegistry.RegisterProvider(std::make_shared<AuthoringAutomationProvider>(resolveHandler));
+		// Physics names are resolved once into domain-specific typed handlers. They
+		// never enter the legacy request-time central string dispatcher above.
+		const AutomationHandlerResolver resolvePhysicsHandler = [this](std::string_view name) {
+			return ResolvePhysicsAutomationHandler(name);
+		};
+		(void)capabilityRegistry.RegisterProvider(std::make_shared<PhysicsAutomationProvider>(resolvePhysicsHandler));
 		RegisterDefaultCapabilities();
+	}
+
+	AutomationHandler EditorAutomationService::ResolvePhysicsAutomationHandler(std::string_view name)
+	{
+		const AutomationOperationId operation = AutomationOperation(name);
+		const std::string operationName(name);
+		const auto [existing, inserted] = boundProviderOperationNames.emplace(operation, operationName);
+		if (!inserted && existing->second != operationName)
+		{
+			throw std::logic_error("Physics automation operation ID collision between " + existing->second + " and " + operationName + ".");
+		}
+		return [this, operation, operationName](const AutomationRequestContext& request) {
+			return ExecutePhysicsAutomationHandler(operation, operationName, request);
+		};
 	}
 
 	void EditorAutomationService::SetEditorContext(EditorContext* context)
 	{
 		editorContext = context;
+	}
+
+	void EditorAutomationService::RefreshPhysicsCookJob(std::string_view jobId)
+	{
+		const auto active = activePhysicsCookJobs.find(std::string(jobId));
+		if(active == activePhysicsCookJobs.end())
+			return;
+		const ActivePhysicsCookJob cook = active->second;
+		const auto finishIdempotency = [this, &cook, jobId](bool accepted, std::string_view status) {
+			(void)idempotencyStore.PublishResult(cook.clientId, cook.capability, cook.idempotencyKey, {
+				{"correlationId", cook.correlationId}, {"accepted", accepted},
+				{"idempotencyDisposition", "new"}, {"jobId", std::string(jobId)},
+				{"status", status}, {"diagnostics", nlohmann::json::array()}
+			}, true);
+		};
+		const auto retained = jobService.Get(jobId);
+		if(!retained || retained->state == AutomationJobState::Succeeded
+			|| retained->state == AutomationJobState::Failed || retained->state == AutomationJobState::Canceled)
+		{
+			activePhysicsCookJobs.erase(active);
+			return;
+		}
+
+		AssetDatabase& assets = AssetDatabase::Instance();
+		if(BuildAutomationStateSnapshot().projectGeneration != cook.projectGeneration)
+		{
+			if(assets.IsAssetCompiling(cook.sourcePath))
+				(void)assets.CancelImport(cook.sourcePath, false);
+			(void)jobService.CompleteFailed(jobId, {{"message", "Project generation changed before collider publication."}});
+			finishIdempotency(false, "stale_project");
+			activePhysicsCookJobs.erase(active);
+			return;
+		}
+
+		if(jobService.IsCancellationRequested(jobId))
+		{
+			if(assets.IsAssetCompiling(cook.sourcePath))
+			{
+				(void)assets.CancelImport(cook.sourcePath, false);
+				return;
+			}
+			(void)jobService.CompleteCanceled(jobId, {{"cancellationBoundary", "before_atomic_publication"}});
+			finishIdempotency(false, "canceled");
+			activePhysicsCookJobs.erase(active);
+			return;
+		}
+
+		if(const std::optional<AssetImportProgress> progress = assets.GetImportProgress(cook.sourcePath))
+		{
+			(void)jobService.SetState(jobId, AutomationJobState::Running, progress->stage.empty() ? "cooking" : progress->stage);
+			(void)jobService.PublishProgress(jobId, std::clamp(static_cast<double>(progress->progress), 0.0, 0.99), progress->stage);
+			if(progress->failed)
+			{
+				(void)jobService.CompleteFailed(jobId, {{"message", progress->message.empty() ? "Collider compiler rejected the recipe." : progress->message}});
+				finishIdempotency(false, "failed");
+				activePhysicsCookJobs.erase(active);
+			}
+			return;
+		}
+		if(assets.IsAssetCompiling(cook.sourcePath))
+			return;
+
+		const std::filesystem::path normalizedSource = std::filesystem::absolute(cook.sourcePath).lexically_normal();
+		const auto metadata = assets.GetAssets().find(normalizedSource);
+		if(metadata == assets.GetAssets().end() || metadata->second.importerName != "PhysicsColliderRecipeImporter")
+		{
+			(void)jobService.CompleteFailed(jobId, {{"message", "Collider recipe metadata was not published by AssetDatabase."}});
+			finishIdempotency(false, "failed");
+			activePhysicsCookJobs.erase(active);
+			return;
+		}
+		const std::filesystem::path outputPath = assets.GetBuildRoot() / metadata->second.compiledPath;
+		std::ifstream stream(outputPath, std::ios::binary | std::ios::ate);
+		std::vector<std::byte> bytes;
+		if(stream)
+		{
+			const std::streamsize size = stream.tellg();
+			if(size >= 0)
+			{
+				bytes.resize(static_cast<std::size_t>(size));
+				stream.seekg(0, std::ios::beg);
+				if(size > 0 && !stream.read(reinterpret_cast<char*>(bytes.data()), size))
+					bytes.clear();
+			}
+		}
+		TerraEngine::Physics::CookedColliderDiagnostics diagnostics;
+		const auto collider = TerraEngine::Physics::CookedColliderAsset::Deserialize(bytes, diagnostics);
+		const bool compatible = collider && collider->CheckCompatibility(
+			TerraEngine::Physics::CookedColliderAsset::HostPlatform(),
+			TerraEngine::Physics::CookedColliderProviderFamily::Jolt,
+			TerraEngine::Physics::kJoltCookProviderVersion,
+			TerraEngine::Physics::kJoltCookRevision).compatible;
+		if(!compatible)
+		{
+			(void)jobService.CompleteFailed(jobId, {{"message", "Published collider failed the Jolt 5.6 compatibility envelope check."}});
+			finishIdempotency(false, "failed");
+			activePhysicsCookJobs.erase(active);
+			return;
+		}
+
+		const std::filesystem::path projectRoot = editorContext->projectManager->GetProjectRoot();
+		const std::string displayPath = std::filesystem::relative(outputPath, projectRoot).generic_string();
+		(void)jobService.AddArtifact(jobId, {TerraEngine::ToHexString(collider->Envelope().assetId), "cooked_collider", displayPath, "application/x-terraengine-cooked-collider", {
+			{"provider", "Jolt"}, {"providerVersion", "5.6.0"},
+			{"providerRevision", TerraEngine::Physics::kJoltCookRevision},
+			{"recipeHash", collider->Envelope().recipeHash}, {"size", bytes.size()}
+		}});
+		(void)jobService.CompleteSucceeded(jobId, {{"outputAsset", displayPath}, {"assetId", TerraEngine::ToHexString(collider->Envelope().assetId)}, {"size", bytes.size()}});
+		finishIdempotency(true, "succeeded");
+		activePhysicsCookJobs.erase(active);
 	}
 
 	void EditorAutomationService::SetMainEditor(MainEditorSubsystem* editor)
@@ -1670,6 +1963,529 @@ namespace TerraEngine::Editor::Automation
 		return response;
 	}
 
+	AutomationDispatchResult EditorAutomationService::ExecutePhysicsAutomationHandler(
+		AutomationOperationId operation,
+		std::string_view operationName,
+		const AutomationRequestContext& request)
+	{
+		using namespace TerraEngine::Physics;
+		const auto reject = [](ErrorCategory category, std::string message) {
+			return AutomationDispatchResult{false, category, std::move(message), nlohmann::json::object()};
+		};
+		const auto succeed = [](std::string message, nlohmann::json data) {
+			return AutomationDispatchResult{true, ErrorCategory::Internal, std::move(message), std::move(data)};
+		};
+		if (!request.state.projectAvailable)
+		{
+			return reject(ErrorCategory::Unavailable, "Physics automation requires an already-open project.");
+		}
+
+		PhysicsSystem& physics = PhysicsSystem::Instance();
+		const PhysicsWorldHandle world = physics.WorldHandle();
+		const auto diagnostics = physics.LatestDiagnostics();
+		const PhysicsTick tick = diagnostics ? diagnostics->tick : 0U;
+		const auto snapshot = [&request, world, tick](nlohmann::json data, bool truncated = false, bool overflow = false) {
+			return PhysicsSnapshotResult(request, world, tick, std::move(data), truncated, overflow);
+		};
+
+		if (operation == AutomationOperation("physics.state"))
+		{
+			return succeed("Read the immutable physics world state.", snapshot({
+				{"worldId", world.worldId.value}, {"worldGeneration", world.worldGeneration},
+				{"state", diagnostics ? std::string(ToString(diagnostics->state)) : "Absent"},
+				{"settingsGeneration", physics.SettingsGeneration()},
+				{"bodyCount", diagnostics ? diagnostics->counters.bodyCount : 0U},
+				{"constraintCount", diagnostics ? diagnostics->counters.constraintCount : 0U},
+				{"characterCount", diagnostics ? diagnostics->counters.characterCount : 0U}
+			}));
+		}
+		if (operation == AutomationOperation("physics.settings.get"))
+		{
+			return succeed("Read the resolved physics settings.", snapshot(PhysicsSettingsJson(physics.ConfiguredSettings())));
+		}
+		if (operation == AutomationOperation("physics.layers.list"))
+		{
+			nlohmann::json layers = nlohmann::json::array();
+			for (const CollisionLayer& layer : physics.ConfiguredSettings().layers)
+			{
+				layers.push_back({{"id", layer.id}, {"name", layer.name}, {"collisionMask", layer.collisionMask}, {"broadPhaseGroup", layer.broadPhaseGroup}, {"enabled", layer.enabled}});
+			}
+			return succeed("Listed collision layers from the immutable settings snapshot.", snapshot({{"layers", std::move(layers)}}));
+		}
+		if (operation == AutomationOperation("physics.diagnostics.get"))
+		{
+			if (!diagnostics) return succeed("Physics diagnostics are not published yet.", snapshot(nlohmann::json::object()));
+			return succeed("Read immutable physics diagnostics.", snapshot({
+				{"counters", {{"bodies", diagnostics->counters.bodyCount}, {"shapes", diagnostics->counters.shapeCount}, {"constraints", diagnostics->counters.constraintCount}, {"characters", diagnostics->counters.characterCount}, {"contacts", diagnostics->counters.contactCount}, {"rejected", diagnostics->counters.rejectedCount}, {"stale", diagnostics->counters.staleCount}}},
+				{"queues", {{"commands", diagnostics->queues.commandDepth}, {"queries", diagnostics->queues.queryDepth}, {"events", diagnostics->queues.eventDepth}}},
+				{"memory", {{"snapshots", diagnostics->memory.snapshotBytes}, {"highWater", diagnostics->memory.highWaterBytes}, {"providerAllocations", diagnostics->memory.outstandingProviderAllocations}, {"providerAllocationHighWater", diagnostics->memory.highWaterProviderAllocations}}},
+				{"cache", {{"shapes", diagnostics->cache.sharedShapeCount}, {"assets", diagnostics->cache.assetCount}, {"bytes", diagnostics->cache.payloadBytes}, {"hits", diagnostics->cache.hitCount}, {"misses", diagnostics->cache.missCount}}}
+			}));
+		}
+
+		const auto parseTarget = [&request, &world, &reject](const nlohmann::json& target, TerraEngine::UUID& objectId, std::uint32_t& componentGeneration) -> std::optional<AutomationDispatchResult> {
+			if (!target.is_object() || !target.contains("objectId") || !target["objectId"].is_string()
+				|| !target.contains("componentGeneration") || !target["componentGeneration"].is_number_unsigned()
+				|| !target.contains("worldGeneration") || !target["worldGeneration"].is_number_unsigned())
+			{
+				return reject(ErrorCategory::Validation, "Physics target must contain objectId, componentGeneration, and worldGeneration.");
+			}
+			const auto parsed = TerraEngine::ParseUUID(target["objectId"].get<std::string>());
+			if (!parsed) return reject(ErrorCategory::Validation, "Physics target objectId must be a 32-character UUID.");
+			if (target["worldGeneration"].get<std::uint32_t>() != world.worldGeneration)
+			{
+				return reject(ErrorCategory::Conflict, "Physics target world generation is stale.");
+			}
+			objectId = *parsed;
+			componentGeneration = target["componentGeneration"].get<std::uint32_t>();
+			return std::nullopt;
+		};
+
+		if (operation == AutomationOperation("physics.body.inspect"))
+		{
+			TerraEngine::UUID objectId{};
+			std::uint32_t componentGeneration = 0U;
+			if (const auto error = parseTarget(request.arguments["target"], objectId, componentGeneration)) return *error;
+			const auto bodies = physics.LatestBodySnapshot();
+			if (!bodies || !bodies->bodies) return reject(ErrorCategory::MissingTarget, "No physics body snapshot is available.");
+			const auto found = std::find_if(bodies->bodies->begin(), bodies->bodies->end(), [&](const PhysicsBodyState& body) { return body.objectId == objectId && body.componentGeneration == componentGeneration; });
+			if (found == bodies->bodies->end()) return reject(ErrorCategory::MissingTarget, "The body identity or component generation is not present in the published snapshot.");
+			return succeed("Read immutable body state.", PhysicsSnapshotResult(request, bodies->world, bodies->tick, {
+				{"objectId", TerraEngine::ToHexString(found->objectId)}, {"objectGeneration", found->objectGeneration}, {"componentGeneration", found->componentGeneration},
+				{"position", PhysicsVectorJson(found->worldPose.position)}, {"rotation", {found->worldPose.rotation.x, found->worldPose.rotation.y, found->worldPose.rotation.z, found->worldPose.rotation.w}},
+				{"linearVelocity", PhysicsVectorJson(found->linearVelocity)}, {"angularVelocity", PhysicsVectorJson(found->angularVelocity)}, {"awake", found->awake}
+			}));
+		}
+		if (operation == AutomationOperation("physics.character.inspect"))
+		{
+			TerraEngine::UUID objectId{};
+			std::uint32_t componentGeneration = 0U;
+			if (const auto error = parseTarget(request.arguments["target"], objectId, componentGeneration)) return *error;
+			const auto characters = physics.LatestCharacterStatePacket();
+			if (!characters || !characters->states) return reject(ErrorCategory::MissingTarget, "No character snapshot is available.");
+			const auto found = std::find_if(characters->states->begin(), characters->states->end(), [&](const PhysicsCharacterState& state) { return state.objectId == objectId && state.componentGeneration == componentGeneration; });
+			if (found == characters->states->end()) return reject(ErrorCategory::MissingTarget, "The character identity or component generation is not present in the published snapshot.");
+			return succeed("Read immutable character state.", PhysicsSnapshotResult(request, characters->world, characters->tick, {
+				{"objectId", TerraEngine::ToHexString(found->objectId)}, {"componentGeneration", found->componentGeneration}, {"position", PhysicsVectorJson(found->pose.position)},
+				{"linearVelocity", PhysicsVectorJson(found->linearVelocity)}, {"groundState", static_cast<std::uint32_t>(found->groundState)}, {"groundNormal", PhysicsVectorJson(found->groundNormal)},
+				{"supportVelocity", PhysicsVectorJson(found->supportVelocity)}, {"contactCount", found->contactCount}, {"supported", found->supported}
+			}));
+		}
+		if (operation == AutomationOperation("physics.contacts.list"))
+		{
+			if (!request.arguments["worldGeneration"].is_number_unsigned()
+				|| request.arguments["worldGeneration"].get<std::uint32_t>() != world.worldGeneration)
+				return reject(ErrorCategory::Conflict, "Contact request world generation is stale.");
+			if (!request.arguments["maximumContacts"].is_number_unsigned()
+				|| request.arguments["maximumContacts"].get<std::uint32_t>() == 0U
+				|| request.arguments["maximumContacts"].get<std::uint32_t>() > 64U)
+			{
+				return reject(ErrorCategory::Validation, "maximumContacts must be an unsigned value between 1 and 64.");
+			}
+			const std::uint32_t limit = request.arguments["maximumContacts"].get<std::uint32_t>();
+			const auto packet = physics.LatestEventPacket();
+			nlohmann::json events = nlohmann::json::array();
+			bool truncated = false;
+			if (packet && packet->events)
+			{
+				for (const PhysicsEvent& event : *packet->events)
+				{
+					if (event.type != PhysicsEventType::Contact) continue;
+					if (events.size() >= limit) { truncated = true; break; }
+					events.push_back({{"tick", event.tick}, {"first", TerraEngine::ToHexString(event.first.objectId)}, {"second", TerraEngine::ToHexString(event.second.objectId)}, {"point", PhysicsVectorJson(event.point)}, {"normal", PhysicsVectorJson(event.normal)}, {"impulse", event.impulse}});
+				}
+			}
+			return succeed("Listed ordered published contacts.", PhysicsSnapshotResult(request, world, packet ? packet->tick : tick, {{"contacts", std::move(events)}}, truncated, packet ? packet->overflowed : false));
+		}
+
+		if (IsOperationOneOf(operation, {AutomationOperation("physics.raycast"), AutomationOperation("physics.shape_cast"), AutomationOperation("physics.overlap")}))
+		{
+			if (!world.IsValid()) return reject(ErrorCategory::Unavailable, "No active physics world is available for queries.");
+			if (!request.arguments["worldGeneration"].is_number_unsigned() || request.arguments["worldGeneration"].get<std::uint32_t>() != world.worldGeneration)
+				return reject(ErrorCategory::Conflict, "Query world generation is stale.");
+			const auto origin = ReadPhysicsVector(request.arguments["origin"]);
+			if (!origin) return reject(ErrorCategory::Validation, "Query origin must contain three finite numbers.");
+			if (!request.arguments["maximumHits"].is_number_unsigned())
+				return reject(ErrorCategory::Validation, "maximumHits must be an unsigned value between 1 and 64.");
+			const std::uint32_t maximumHits = request.arguments["maximumHits"].get<std::uint32_t>();
+			if (maximumHits == 0U || maximumHits > 64U)
+				return reject(ErrorCategory::Validation, "maximumHits must be an unsigned value between 1 and 64.");
+			if (request.arguments.contains("batchSize")
+				&& (!request.arguments["batchSize"].is_number_unsigned()
+					|| request.arguments["batchSize"].get<std::uint32_t>() == 0U
+					|| request.arguments["batchSize"].get<std::uint32_t>() > 1024U))
+			{
+				return reject(ErrorCategory::Validation, "batchSize must be an unsigned value between 1 and 1024.");
+			}
+			if (request.arguments.contains("layerMask") && !request.arguments["layerMask"].is_number_unsigned())
+				return reject(ErrorCategory::Validation, "layerMask must be an unsigned collision mask.");
+			if (request.arguments.contains("includeTriggers") && !request.arguments["includeTriggers"].is_boolean())
+				return reject(ErrorCategory::Validation, "includeTriggers must be boolean.");
+			PhysicsQueryRequest query;
+			query.world = world;
+			query.pose.position = *origin;
+			query.maximumHits = maximumHits;
+			query.filter.collisionMask = request.arguments.value("layerMask", 0xFFFFFFFFU);
+			query.filter.includeSensors = request.arguments.value("includeTriggers", false);
+			query.correlationId = request.correlationId;
+			if (operation == AutomationOperation("physics.raycast")) query.kind = PhysicsQueryKind::RayCast;
+			else if (operation == AutomationOperation("physics.shape_cast")) query.kind = PhysicsQueryKind::ShapeCast;
+			else query.kind = PhysicsQueryKind::Overlap;
+			if (query.kind != PhysicsQueryKind::Overlap)
+			{
+				const auto direction = request.arguments.contains("direction") ? ReadPhysicsVector(request.arguments["direction"]) : std::optional<PhysicsVector3>{PhysicsVector3{1.0F, 0.0F, 0.0F}};
+				if (!direction) return reject(ErrorCategory::Validation, "Query direction must contain three finite numbers.");
+				query.direction = *direction;
+				const auto distance = ReadBoundedPhysicsNumber(request.arguments.value("distance", nlohmann::json(0.0)), 0.0F, 100000.0F);
+				if (!distance) return reject(ErrorCategory::Validation, "distance must be a finite number between 0 and 100000.");
+				query.distance = *distance;
+			}
+			if (query.kind != PhysicsQueryKind::RayCast)
+			{
+				const auto extent = request.arguments.contains("halfExtents") ? ReadPhysicsVector(request.arguments["halfExtents"]) : std::nullopt;
+				if (!extent || extent->x <= 0.0F || extent->y <= 0.0F || extent->z <= 0.0F
+					|| extent->x > 10000.0F || extent->y > 10000.0F || extent->z > 10000.0F)
+					return reject(ErrorCategory::Validation, "Shape query halfExtents must contain three finite values between 0 and 10000.");
+				query.shapeExtent = *extent;
+			}
+			const AutomationJobSnapshot job = jobService.Create({"physics_query", std::string(operationName), request.requestId, request.correlationId, request.idempotencyKey, true});
+			if (job.jobId.empty()) return reject(ErrorCategory::QueueFull, "Physics query job retention is full.");
+			(void)jobService.SetState(job.jobId, AutomationJobState::Running, "querying");
+			const PhysicsQueryResult result = physics.QueryImmediate(std::move(query));
+			nlohmann::json hits = nlohmann::json::array();
+			if (result.hits)
+			{
+				for (const PhysicsQueryHit& hit : *result.hits)
+				{
+					hits.push_back({{"objectId", TerraEngine::ToHexString(hit.objectId)}, {"objectGeneration", hit.objectGeneration}, {"componentGeneration", hit.componentGeneration}, {"position", PhysicsVectorJson(hit.position)}, {"normal", PhysicsVectorJson(hit.normal)}, {"distance", hit.distance}, {"fraction", hit.fraction}, {"collisionLayer", hit.collisionLayer}, {"sensor", hit.sensor}});
+				}
+			}
+			nlohmann::json jobResult = {{"status", std::string(ToString(result.status))}, {"tick", result.tick}, {"truncated", result.truncated}, {"hits", std::move(hits)}, {"diagnostic", result.diagnostic}};
+			if (result.status == PhysicsResultStatus::Success) (void)jobService.CompleteSucceeded(job.jobId, jobResult);
+			else (void)jobService.CompleteFailed(job.jobId, jobResult);
+			return succeed("Completed bounded physics query.", {{"correlationId", request.correlationId}, {"worldGeneration", world.worldGeneration}, {"tick", result.tick}, {"accepted", result.status == PhysicsResultStatus::Success}, {"idempotencyDisposition", "new"}, {"jobId", job.jobId}, {"diagnostics", nlohmann::json::array({{{"message", result.diagnostic}}})}});
+		}
+		if (operation == AutomationOperation("physics.query_job.get"))
+		{
+			const std::string jobId = request.arguments.value("jobId", std::string{});
+			RefreshPhysicsCookJob(jobId);
+			const auto job = jobService.Get(jobId);
+			if (!job) return reject(ErrorCategory::MissingTarget, "Physics query/cook job was not found or expired.");
+			return succeed("Read retained physics job receipt.", snapshot({{"job", SerializeAutomationJob(*job)}}));
+		}
+
+		const auto projectGenerationMatches = [&request]() {
+			return request.arguments.contains("projectGeneration")
+				&& request.arguments["projectGeneration"].is_number_unsigned()
+				&& request.arguments["projectGeneration"].get<std::uint64_t>() == request.state.projectGeneration;
+		};
+		const auto approvalMatches = [&request, operationName]() {
+			if (!request.arguments.contains("approval") || !request.arguments["approval"].is_object()) return false;
+			const nlohmann::json& approval = request.arguments["approval"];
+			return approval.value("projectGeneration", std::numeric_limits<std::uint64_t>::max()) == request.state.projectGeneration
+				&& approval.value("sceneGeneration", request.state.sceneGeneration) == request.state.sceneGeneration
+				&& approval.value("impactFingerprint", std::string{}) == PhysicsImpactFingerprint(operationName, request.arguments, request.state)
+				&& !approval.value("approvalId", std::string{}).empty();
+		};
+		const auto beginIdempotency = [this, &request, operationName]() {
+			return idempotencyStore.Begin({
+				request.clientId, std::string(operationName), request.idempotencyKey,
+				StableFingerprint(PhysicsIdempotencyPayload(request.arguments).dump()),
+				{{"correlationId", request.correlationId}, {"accepted", false}, {"idempotencyDisposition", "new"}}
+			});
+		};
+		const auto abandonIdempotency = [this, &request, operationName]() {
+			// Validation happens after reservation because replay/conflict must be
+			// decided before an operation can enter a typed queue. A rejected local
+			// validation must release that reservation, otherwise a typo can leave a
+			// permanently non-terminal idempotency record until the session ends.
+			(void)idempotencyStore.Erase(request.clientId, operationName, request.idempotencyKey);
+		};
+		const auto rejectAfterReservation = [&abandonIdempotency, &reject](ErrorCategory category, std::string message) {
+			abandonIdempotency();
+			return reject(category, std::move(message));
+		};
+		const auto replayOrConflict = [&succeed, &reject](const IdempotencyDecision& decision) -> std::optional<AutomationDispatchResult> {
+			if (decision.disposition == IdempotencyDisposition::Replay)
+			{
+				nlohmann::json replay = decision.result;
+				replay["idempotencyDisposition"] = "replay";
+				return succeed("Replayed the retained physics receipt.", std::move(replay));
+			}
+			if (decision.disposition == IdempotencyDisposition::Conflict)
+				return reject(ErrorCategory::Conflict, "The idempotency key was already used for a different physics request.");
+			if (decision.disposition == IdempotencyDisposition::CapacityExceeded)
+				return reject(ErrorCategory::QueueFull, "The bounded physics idempotency store is full.");
+			return std::nullopt;
+		};
+
+		if (operation == AutomationOperation("physics.settings.preflight"))
+		{
+			if (!projectGenerationMatches()) return reject(ErrorCategory::Conflict, "Project generation changed before physics settings preflight.");
+			PhysicsSettings candidate = physics.ConfiguredSettings();
+			std::string error;
+			if (!ApplyPhysicsSettingsPatch(request.arguments["settings"], candidate, error)) return reject(ErrorCategory::Validation, error);
+			return succeed("Prepared physics settings reference impact.", {
+				{"impactFingerprint", PhysicsImpactFingerprint("physics.settings.set", request.arguments, request.state)},
+				{"projectGeneration", request.state.projectGeneration}, {"sceneGeneration", request.state.sceneGeneration},
+				{"referenceCount", 0U}, {"affectedObjects", nlohmann::json::array()}, {"requiresApproval", true}, {"expirySeconds", 300U}
+			});
+		}
+		if (operation == AutomationOperation("physics.settings.set"))
+		{
+			if (!projectGenerationMatches() || !approvalMatches()) return reject(ErrorCategory::Conflict, "Physics settings approval fingerprint or project/scene generation is stale.");
+			const IdempotencyDecision decision = beginIdempotency();
+			if (const auto prior = replayOrConflict(decision)) return *prior;
+			PhysicsSettings candidate = physics.ConfiguredSettings();
+			std::string error;
+			if (!ApplyPhysicsSettingsPatch(request.arguments["settings"], candidate, error)) return rejectAfterReservation(ErrorCategory::Validation, error);
+			const bool accepted = physics.QueueSettingsUpdate(candidate);
+			nlohmann::json receipt = {{"correlationId", request.correlationId}, {"worldGeneration", world.worldGeneration}, {"tick", tick}, {"accepted", accepted}, {"idempotencyDisposition", "new"}, {"diagnostics", nlohmann::json::array()}};
+			(void)idempotencyStore.PublishResult(request.clientId, operationName, request.idempotencyKey, receipt, true);
+			return accepted ? succeed("Queued physics settings for the protected snapshot boundary.", receipt) : reject(ErrorCategory::Validation, "Physics settings queue rejected the validated update.");
+		}
+
+		if (IsOperationOneOf(operation, {AutomationOperation("physics.layer.create"), AutomationOperation("physics.layer.update")}))
+		{
+			if (!projectGenerationMatches() || !approvalMatches()) return reject(ErrorCategory::Conflict, "Collision-layer approval fingerprint or project/scene generation is stale.");
+			if (!request.arguments["layer"].is_object()) return reject(ErrorCategory::Validation, "layer must be an object.");
+			const IdempotencyDecision decision = beginIdempotency();
+			if (const auto prior = replayOrConflict(decision)) return *prior;
+			const nlohmann::json& patch = request.arguments["layer"];
+			if (!patch.contains("id") || !patch["id"].is_number_unsigned()) return rejectAfterReservation(ErrorCategory::Validation, "layer.id is required.");
+			const std::uint32_t id = patch["id"].get<std::uint32_t>();
+			if (id >= kPhysicsCollisionLayerCount) return rejectAfterReservation(ErrorCategory::Validation, "layer.id exceeds the 32-layer limit.");
+			if (patch.contains("name") && (!patch["name"].is_string() || patch["name"].get<std::string>().empty()))
+				return rejectAfterReservation(ErrorCategory::Validation, "layer.name must be a non-empty string.");
+			if (patch.contains("collisionMask") && !patch["collisionMask"].is_number_unsigned())
+				return rejectAfterReservation(ErrorCategory::Validation, "layer.collisionMask must be unsigned.");
+			if (patch.contains("broadPhaseGroup") && (!patch["broadPhaseGroup"].is_number_unsigned() || patch["broadPhaseGroup"].get<std::uint64_t>() > std::numeric_limits<std::uint8_t>::max()))
+				return rejectAfterReservation(ErrorCategory::Validation, "layer.broadPhaseGroup must fit in an unsigned byte.");
+			if (patch.contains("enabled") && !patch["enabled"].is_boolean())
+				return rejectAfterReservation(ErrorCategory::Validation, "layer.enabled must be boolean.");
+			PhysicsSettings candidate = physics.ConfiguredSettings();
+			CollisionLayer& layer = candidate.layers[id];
+			if (patch.contains("name") && patch["name"].is_string()) layer.name = patch["name"].get<std::string>();
+			if (patch.contains("collisionMask") && patch["collisionMask"].is_number_unsigned()) layer.collisionMask = patch["collisionMask"].get<std::uint32_t>();
+			if (patch.contains("broadPhaseGroup") && patch["broadPhaseGroup"].is_number_unsigned()) layer.broadPhaseGroup = patch["broadPhaseGroup"].get<std::uint8_t>();
+			if (patch.contains("enabled") && patch["enabled"].is_boolean()) layer.enabled = patch["enabled"].get<bool>();
+			const auto validation = candidate.Validate();
+			if (!validation.accepted) return rejectAfterReservation(ErrorCategory::Validation, validation.message);
+			const bool accepted = physics.QueueSettingsUpdate(candidate);
+			nlohmann::json receipt = {{"correlationId", request.correlationId}, {"worldGeneration", world.worldGeneration}, {"tick", tick}, {"accepted", accepted}, {"idempotencyDisposition", "new"}, {"diagnostics", nlohmann::json::array()}};
+			(void)idempotencyStore.PublishResult(request.clientId, operationName, request.idempotencyKey, receipt, true);
+			return accepted ? succeed("Queued the collision-layer update for the protected settings boundary.", receipt) : reject(ErrorCategory::Validation, "Collision-layer update was rejected.");
+		}
+
+		const auto findMaterialPath = [this](const TerraEngine::UUID& id) -> std::optional<std::filesystem::path> {
+			if (editorContext == nullptr || editorContext->projectManager == nullptr) return std::nullopt;
+			const std::filesystem::path assets = editorContext->projectManager->GetProjectRoot() / "Assets";
+			std::error_code error;
+			std::size_t inspected = 0;
+			for (std::filesystem::recursive_directory_iterator iterator(assets, error), end; !error && iterator != end && inspected < 4096U; iterator.increment(error), ++inspected)
+			{
+				if (!iterator->is_regular_file(error) || iterator->path().extension() != Physics::kPhysicsMaterialExtension) continue;
+				PhysicsMaterial candidate;
+				PhysicsMaterialDiagnostics loadDiagnostics;
+				if (TerraEngine::AssetPipeline::LoadPhysicsMaterialAsset(iterator->path(), candidate, loadDiagnostics) && candidate.assetId == id) return iterator->path();
+			}
+			return std::nullopt;
+		};
+		if (operation == AutomationOperation("physics.material.inspect"))
+		{
+			const auto id = TerraEngine::ParseUUID(request.arguments.value("materialId", std::string{}));
+			if (!id) return reject(ErrorCategory::Validation, "materialId must be a 32-character UUID.");
+			const auto path = findMaterialPath(*id);
+			if (!path) return reject(ErrorCategory::MissingTarget, "Physics material was not found in the project Assets tree.");
+			PhysicsMaterial material;
+			PhysicsMaterialDiagnostics materialDiagnostics;
+			if (!TerraEngine::AssetPipeline::LoadPhysicsMaterialAsset(*path, material, materialDiagnostics)) return reject(ErrorCategory::Validation, "Physics material failed validation.");
+			return succeed("Inspected the validated physics material.", snapshot({{"material", material.ToJson()}, {"path", std::filesystem::relative(*path, editorContext->projectManager->GetProjectRoot()).generic_string()}}));
+		}
+		if (IsOperationOneOf(operation, {AutomationOperation("physics.material.create"), AutomationOperation("physics.material.update")}))
+		{
+			if (!projectGenerationMatches()) return reject(ErrorCategory::Conflict, "Project generation changed before material publication.");
+			if (operation == AutomationOperation("physics.material.update") && !approvalMatches()) return reject(ErrorCategory::Conflict, "Material approval fingerprint is stale.");
+			if (!request.arguments["material"].is_object()) return reject(ErrorCategory::Validation, "material must be an object.");
+			const IdempotencyDecision decision = beginIdempotency();
+			if (const auto prior = replayOrConflict(decision)) return *prior;
+			const nlohmann::json& patch = request.arguments["material"];
+			const auto id = TerraEngine::ParseUUID(patch.value("materialId", std::string{}));
+			if (!id) return rejectAfterReservation(ErrorCategory::Validation, "material.materialId must be a 32-character UUID.");
+			PhysicsMaterial material = PhysicsMaterial::Defaults(*id);
+			std::optional<std::filesystem::path> existing = findMaterialPath(*id);
+			if (operation == AutomationOperation("physics.material.create") && existing)
+			{
+				return rejectAfterReservation(ErrorCategory::Conflict, "A physics material with this ID already exists; use the approval-gated update capability.");
+			}
+			if (existing)
+			{
+				PhysicsMaterialDiagnostics loadDiagnostics;
+				if (!TerraEngine::AssetPipeline::LoadPhysicsMaterialAsset(*existing, material, loadDiagnostics)) return rejectAfterReservation(ErrorCategory::Validation, "Existing physics material is invalid and was preserved.");
+			}
+			const auto assignMaterialNumber = [&patch, &rejectAfterReservation](std::string_view key, float minimum, float maximum, float& output) -> std::optional<AutomationDispatchResult> {
+				if (!patch.contains(std::string(key))) return std::nullopt;
+				const auto value = ReadBoundedPhysicsNumber(patch[std::string(key)], minimum, maximum);
+				if (!value) return rejectAfterReservation(ErrorCategory::Validation, std::string(key) + " is outside its supported finite range.");
+				output = *value;
+				return std::nullopt;
+			};
+			if (const auto error = assignMaterialNumber("staticFriction", 0.0F, 100.0F, material.staticFriction)) return *error;
+			if (const auto error = assignMaterialNumber("dynamicFriction", 0.0F, 100.0F, material.dynamicFriction)) return *error;
+			if (const auto error = assignMaterialNumber("restitution", 0.0F, 1.0F, material.restitution)) return *error;
+			if (const auto error = assignMaterialNumber("density", 0.0001F, 100000.0F, material.density)) return *error;
+			const std::filesystem::path path = existing.value_or(editorContext->projectManager->GetProjectRoot() / "Assets" / "Physics" / "Materials" / (TerraEngine::ToHexString(*id) + std::string(kPhysicsMaterialExtension)));
+			const auto write = TerraEngine::AssetPipeline::WritePhysicsMaterialAsset(path, material);
+			nlohmann::json receipt = {{"correlationId", request.correlationId}, {"worldGeneration", world.worldGeneration}, {"tick", tick}, {"accepted", write.published}, {"idempotencyDisposition", "new"}, {"diagnostics", nlohmann::json::array({{{"message", write.message}}})}};
+			(void)idempotencyStore.PublishResult(request.clientId, operationName, request.idempotencyKey, receipt, true);
+			return write.published ? succeed("Published the validated physics material atomically.", receipt) : reject(ErrorCategory::Validation, write.message);
+		}
+
+		if (operation == AutomationOperation("physics.collider.cook"))
+		{
+			if (!projectGenerationMatches() || !approvalMatches()) return reject(ErrorCategory::Conflict, "Collider-cook approval fingerprint or project generation is stale.");
+			const IdempotencyDecision decision = beginIdempotency();
+			if (const auto prior = replayOrConflict(decision)) return *prior;
+			const nlohmann::json sourceValidation = ValidateProjectRelativePath(
+				nlohmann::json{{"sourceAsset", request.arguments.value("sourceAsset", std::string{})}},
+				"sourceAsset", request.requestId);
+			if (!sourceValidation.value("ok", false))
+			{
+				return rejectAfterReservation(ErrorCategory::Validation,
+					sourceValidation.value("message", "Collider source path must stay inside the active project."));
+			}
+			const std::filesystem::path relativeSource = sourceValidation["path"].get<std::string>();
+			if (relativeSource.empty() || relativeSource.begin()->string() != "Assets")
+			{
+				return rejectAfterReservation(ErrorCategory::Validation,
+					"Collider cooking requires a project-relative source asset under Assets.");
+			}
+			const std::filesystem::path source = editorContext->projectManager->GetProjectRoot() / relativeSource;
+			if(!std::filesystem::exists(source) || !std::filesystem::is_regular_file(source)
+				|| source.extension() != TerraEngine::Physics::kColliderRecipeExtension)
+			{
+				return rejectAfterReservation(ErrorCategory::Validation, "sourceAsset must name an existing .tecollider recipe under project Assets.");
+			}
+			TerraEngine::Physics::ColliderRecipe recipe;
+			TerraEngine::Physics::ColliderRecipeValidationResult recipeValidation;
+			try
+			{
+				std::ifstream recipeStream(source);
+				nlohmann::json recipeDocument;
+				recipeStream >> recipeDocument;
+				if(!TerraEngine::Physics::ColliderRecipe::LoadJson(recipeDocument, recipe, recipeValidation))
+					return rejectAfterReservation(ErrorCategory::Validation, recipeValidation.message);
+			}
+			catch(const std::exception& exception)
+			{
+				return rejectAfterReservation(ErrorCategory::Validation, std::string("Collider recipe JSON is invalid: ") + exception.what());
+			}
+			const std::string requestedShape = request.arguments["recipe"].value("shape", std::string{});
+			if(requestedShape != TerraEngine::Physics::ToString(recipe.kind))
+				return rejectAfterReservation(ErrorCategory::Conflict, "Requested cook shape no longer matches the authored collider recipe.");
+			const auto countVertices = [&](const auto& self, const TerraEngine::Physics::ColliderRecipe& value) -> std::size_t {
+				std::size_t count = value.vertices.size();
+				for(const TerraEngine::Physics::ColliderRecipeCompoundChild& child : value.compoundChildren)
+					if(child.recipe) count += self(self, *child.recipe);
+				return count;
+			};
+			const std::size_t maximumVertices = request.arguments["recipe"].value("maxVertices", 1'000'000U);
+			if(countVertices(countVertices, recipe) > maximumVertices)
+				return rejectAfterReservation(ErrorCategory::OverBudget, "Collider recipe exceeds the approved maximum vertex count.");
+			const AutomationJobSnapshot job = jobService.Create({"physics_cook", std::string(operationName), request.requestId, request.correlationId, request.idempotencyKey, true});
+			if(job.jobId.empty()) return rejectAfterReservation(ErrorCategory::QueueFull, "Physics cook job retention is full.");
+			(void)jobService.SetState(job.jobId, AutomationJobState::Preparing, "validating_source");
+
+			// AssetDatabase owns the task, child compiler process, cancellation token,
+			// last-known-good preservation, and main-thread publication boundary.
+			AssetDatabase::Instance().ImportAssetWithProgress(source, true);
+			activePhysicsCookJobs[job.jobId] = {
+				std::filesystem::absolute(source).lexically_normal(), request.state.projectGeneration,
+				request.clientId, std::string(operationName), request.idempotencyKey, request.correlationId
+			};
+			(void)jobService.SetState(job.jobId, AutomationJobState::Running, "cooking");
+			nlohmann::json receipt = {{"correlationId", request.correlationId}, {"worldGeneration", world.worldGeneration}, {"tick", tick}, {"accepted", true}, {"idempotencyDisposition", "new"}, {"jobId", job.jobId}, {"diagnostics", nlohmann::json::array()}};
+			// The first receipt is replayable but non-terminal. Atomic asset
+			// publication promotes the same record to terminal during job polling.
+			(void)idempotencyStore.PublishResult(request.clientId, operationName, request.idempotencyKey, receipt, false);
+			return succeed("Created a durable cancellable collider-cook receipt.", receipt);
+		}
+
+		if (IsOperationOneOf(operation, {
+			AutomationOperation("physics.body.apply_force"), AutomationOperation("physics.body.apply_impulse"),
+			AutomationOperation("physics.body.set_velocity"), AutomationOperation("physics.body.teleport"),
+			AutomationOperation("physics.character.move"), AutomationOperation("physics.character.jump")}))
+		{
+			if (!world.IsValid()) return reject(ErrorCategory::Unavailable, "No active physics world is available for runtime commands.");
+			if (!request.arguments["worldGeneration"].is_number_unsigned() || request.arguments["worldGeneration"].get<std::uint32_t>() != world.worldGeneration)
+				return reject(ErrorCategory::Conflict, "Runtime command world generation is stale.");
+			const IdempotencyDecision decision = beginIdempotency();
+			if (const auto prior = replayOrConflict(decision)) return *prior;
+			TerraEngine::UUID objectId{};
+			std::uint32_t componentGeneration = 0U;
+			if (const auto error = parseTarget(request.arguments["target"], objectId, componentGeneration))
+			{
+				abandonIdempotency();
+				return *error;
+			}
+			const auto object = ObjectManager::instance().getObject(objectId);
+			if (!object) return rejectAfterReservation(ErrorCategory::MissingTarget, "Runtime command target object does not exist.");
+			const std::uint32_t currentComponentGeneration = TerraEngine::CompressObjectGeneration(ObjectManager::instance().getObjectComponentGeneration(*object));
+			if (currentComponentGeneration != componentGeneration) return rejectAfterReservation(ErrorCategory::Conflict, "Runtime command component generation is stale.");
+			PhysicsCommandMetadata metadata;
+			metadata.producerId = 0x4D435050485953ull;
+			metadata.producerSequence = nextTransactionId++;
+			metadata.correlationId = request.correlationId;
+			metadata.idempotencyKey = request.idempotencyKey;
+			metadata.requestFingerprint = StableFingerprint(request.arguments.dump());
+			PhysicsCommand command;
+			if (operation == AutomationOperation("physics.character.move") || operation == AutomationOperation("physics.character.jump"))
+			{
+				const auto characters = physics.LatestCharacterStatePacket();
+				if (!characters || !characters->states) return rejectAfterReservation(ErrorCategory::MissingTarget, "No character snapshot is available.");
+				const auto found = std::find_if(characters->states->begin(), characters->states->end(), [&](const PhysicsCharacterState& state) { return state.objectId == objectId && state.componentGeneration == componentGeneration; });
+				if (found == characters->states->end()) return rejectAfterReservation(ErrorCategory::MissingTarget, "Character target is not present in the immutable snapshot.");
+				const PhysicsCharacterCommandTarget target{world, found->handle, objectId, found->objectGeneration, componentGeneration};
+				if (operation == AutomationOperation("physics.character.move"))
+				{
+					const auto velocity = ReadPhysicsVector(request.arguments["desiredVelocity"]);
+					if (!velocity) return rejectAfterReservation(ErrorCategory::Validation, "desiredVelocity must contain three finite numbers.");
+					command = PhysicsCommand::MakeCharacterMove(target, *velocity, metadata);
+				}
+				else
+				{
+					const CharacterControllerComponent* authored = ObjectManager::instance().GetComponent<CharacterControllerComponent>(*object);
+					command = PhysicsCommand::MakeCharacterJump(target, authored ? authored->jumpSpeed : 5.0F, metadata);
+				}
+			}
+			else
+			{
+				const std::uint32_t objectGeneration = TerraEngine::CompressObjectGeneration(ObjectManager::instance().getObjectLifetimeGeneration(*object));
+				const PhysicsBodyCommandTarget target{world, objectId, objectGeneration, componentGeneration};
+				if (operation == AutomationOperation("physics.body.teleport"))
+				{
+					const auto position = ReadPhysicsVector(request.arguments["position"]);
+					if (!position) return rejectAfterReservation(ErrorCategory::Validation, "position must contain three finite numbers.");
+					command = PhysicsCommand::MakeTeleport(target, PhysicsPose{*position, {0.0F, 0.0F, 0.0F, 1.0F}}, {}, {}, metadata);
+				}
+				else
+				{
+					const auto value = ReadPhysicsVector(request.arguments["vector"]);
+					if (!value) return rejectAfterReservation(ErrorCategory::Validation, "vector must contain three finite numbers.");
+					if (operation == AutomationOperation("physics.body.apply_force")) command = PhysicsCommand::MakeContinuousForce(target, *value, metadata);
+					else if (operation == AutomationOperation("physics.body.apply_impulse")) command = PhysicsCommand::MakeImpulse(target, *value, metadata);
+					else command = PhysicsCommand::MakeSetVelocity(target, *value, {}, metadata);
+				}
+			}
+			const PhysicsCommandReceipt commandReceipt = physics.SubmitCommand(std::move(command));
+			nlohmann::json receipt = {{"correlationId", request.correlationId}, {"worldGeneration", world.worldGeneration}, {"tick", commandReceipt.effectiveTick}, {"accepted", commandReceipt.accepted}, {"commandId", commandReceipt.commandId}, {"idempotencyDisposition", commandReceipt.duplicateIdempotency ? "replay" : "new"}, {"diagnostics", nlohmann::json::array({{{"reason", std::string(ToString(commandReceipt.rejectionReason))}}})}};
+			(void)idempotencyStore.PublishResult(request.clientId, operationName, request.idempotencyKey, receipt, true);
+			return commandReceipt.accepted ? succeed("Queued typed physics command for fixed-step commit.", receipt) : reject(commandReceipt.idempotencyConflict ? ErrorCategory::Conflict : ErrorCategory::QueueFull, "Physics command queue rejected the request.");
+		}
+
+		return reject(ErrorCategory::UnsupportedCapability, "Physics capability has no bound implementation.");
+	}
+
 	nlohmann::json EditorAutomationService::ExecuteProviderHandler(AutomationOperationId operation, std::string_view operationName, const nlohmann::json& arguments, WriteMode writeMode, const std::string& requestId)
 	{
 		const AssistantCapability* capability = FindCapability(operationName);
@@ -1795,22 +2611,23 @@ namespace TerraEngine::Editor::Automation
 				if (current != "stopped") return playError(ErrorCategory::Conflict, "Play Mode is already running.");
 				if (editorContext == nullptr || editorContext->projectManager == nullptr || !editorContext->projectManager->HasActiveProject() || SceneManager::Instance().GetActiveScene() == nullptr)
 					return playError(ErrorCategory::Unavailable, "A project with an active saved scene is required.");
-				ScriptingSystem::Instance().SetRunning(true);
+				if(mainEditor == nullptr || !mainEditor->StartPlayMode())
+					return playError(ErrorCategory::Unavailable, "Play Mode could not create its fresh Jolt 5.6 physics world.");
 			}
 			else if (operation == AutomationOperation("play.pause"))
 			{
 				if (current != "playing") return playError(ErrorCategory::Conflict, "Only active Play Mode can be paused.");
-				ScriptingSystem::Instance().SetPaused(true);
+				if(mainEditor == nullptr || !mainEditor->SetPlayModePaused(true)) return playError(ErrorCategory::Conflict, "Physics and scripting could not enter the same paused boundary.");
 			}
 			else if (operation == AutomationOperation("play.resume"))
 			{
 				if (current != "paused") return playError(ErrorCategory::Conflict, "Only paused Play Mode can be resumed.");
-				ScriptingSystem::Instance().SetPaused(false);
+				if(mainEditor == nullptr || !mainEditor->SetPlayModePaused(false)) return playError(ErrorCategory::Conflict, "Physics and scripting could not resume together.");
 			}
 			else if (operation == AutomationOperation("play.step"))
 			{
 				if (current != "paused") return playError(ErrorCategory::Conflict, "Single-step requires paused Play Mode.");
-				ScriptingSystem::Instance().Step(1);
+				if(mainEditor == nullptr || !mainEditor->StepPlayMode()) return playError(ErrorCategory::Conflict, "The fixed-step queue rejected this Next request.");
 				state = playStateData();
 				state["stepsCompleted"] = 1;
 				return BuildSuccess(requestId, "Scheduled exactly one simulation frame.", std::move(state));
@@ -1818,8 +2635,8 @@ namespace TerraEngine::Editor::Automation
 			else if (operation == AutomationOperation("play.exit"))
 			{
 				if (current == "stopped") return playError(ErrorCategory::Conflict, "Play Mode is not running.");
-				ScriptingSystem::Instance().SetPaused(false);
-				ScriptingSystem::Instance().SetRunning(false);
+				if(mainEditor == nullptr) return playError(ErrorCategory::Unavailable, "The native editor lifecycle coordinator is unavailable.");
+				mainEditor->StopPlayMode();
 				state = playStateData();
 				state["restoration"] = {{"completed", true}, {"partialFailures", nlohmann::json::array()}};
 				return BuildSuccess(requestId, "Exited Play Mode and restored authored state.", std::move(state));
@@ -1835,6 +2652,7 @@ namespace TerraEngine::Editor::Automation
 		if (operation == AutomationOperation("jobs.get"))
 		{
 			const std::string jobId = arguments.value("jobId", std::string{});
+			RefreshPhysicsCookJob(jobId);
 			if (jobId == activeScriptCompilationJobId)
 			{
 				const ScriptCompilationStatus& status = ScriptCompilationSubsystem::Instance().GetStatus();
@@ -1927,6 +2745,12 @@ namespace TerraEngine::Editor::Automation
 		{
 			const std::string jobId = arguments.value("jobId", std::string{});
 			if (!jobService.RequestCancellation(jobId)) return BuildError(requestId, ErrorCategory::Conflict, "Job cannot be canceled.", jobId);
+			if(const auto cook = activePhysicsCookJobs.find(jobId); cook != activePhysicsCookJobs.end())
+			{
+				// AssetDatabase owns the process handle. Forwarding cancellation there
+				// guarantees the compiler cannot publish a staged collider afterward.
+				(void)AssetDatabase::Instance().CancelImport(cook->second.sourcePath, false);
+			}
 			if (jobId == activeScriptCompilationJobId)
 			{
 				(void)ScriptCompilationSubsystem::Instance().RequestCancellation();

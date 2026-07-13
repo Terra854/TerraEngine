@@ -56,6 +56,12 @@ private:
 	bool HandleSceneViewPan(const ImVec2& viewportSize);
 	void HandleCameraInput(float deltaTime, const ImVec2& viewportSize);
 	void DrawGizmos(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize);
+	void DrawPhysicsColliderEditHandles(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize);
+	void BeginPhysicsColliderPreview(entt::entity entity, const TerraEngine::UUID& recordId);
+	void RequestPhysicsColliderFitToRenderMesh(entt::entity entity);
+	void CommitPhysicsColliderPreview();
+	void CancelPhysicsColliderPreview();
+	void DrawPhysicsDebugOverlay(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize);
 	void ApplyPrefabContextTintForNextRender();
 	void CollectFocusedPrefabObjectIds(entt::entity entity, std::unordered_set<TerraEngine::UUID>& objectIds);
 
@@ -103,6 +109,20 @@ private:
 	TerraEngine::Editor::SceneViewOverlay::OrientationWidgetState m_OrientationWidgetState;
 	std::vector<TerraEngine::Editor::SceneViewOverlay::OverlayIconDefinition> m_IconDefinitions;
 	std::vector<TerraEngine::Editor::SceneViewOverlay::SceneObjectMarker> m_ObjectMarkers;
+	TerraEngine::Physics::PhysicsDebugDisplaySelection m_PhysicsDebugSelection;
+	std::size_t m_PhysicsDebugPacketCount = 0U;
+	std::size_t m_PhysicsDebugPrimitiveCount = 0U;
+	bool m_PhysicsDebugVisible = false;
+	// Collider handles edit this copy only. It deliberately outlives mouse
+	// movement but never aliases a live ColliderSetComponent record.
+	std::optional<TerraEngine::Editor::SceneViewOverlay::PhysicsShapeEditPreview> m_PhysicsShapePreview;
+	TerraEngine::UUID m_SelectedColliderRecordId = TerraEngine::EMPTY_UUID;
+	int m_PhysicsActiveHandle = -1;
+	ImVec2 m_PhysicsHandleDragStart{};
+	glm::vec3 m_PhysicsPreviewDragStartCenter{0.0f};
+	glm::vec3 m_PhysicsPreviewDragStartExtents{0.5f};
+	std::string m_PhysicsPreviewStatus;
+	std::uint64_t m_PhysicsShapeCommitSequence = 0U;
 
 	void HandlePicking(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize);
 };

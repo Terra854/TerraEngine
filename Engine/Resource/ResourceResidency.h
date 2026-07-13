@@ -16,7 +16,9 @@
 #include "Core/Export.h"
 #include "Utilities/UUID.h"
 
-enum class AssetType;
+// Keep the forward declaration's storage width aligned with ResourceManager.
+// Physics appended IDs are serialized through the same stable enum contract.
+enum class AssetType : std::uint32_t;
 
 namespace TerraEngine::Resource
 {

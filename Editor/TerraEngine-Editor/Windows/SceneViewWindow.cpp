@@ -13,6 +13,7 @@
 #include "Engine/Resource/ResourceManager.h"
 #include "Engine/File Formats/TerraEngineMeshFile.h"
 #include "Engine/Components/MeshRenderComponent.h"
+#include "Engine/Components/Physics/ColliderSetComponent.h"
 #include "Engine/Input/InputSystem.h"
 #include "Engine/Input/InputCodes.h"
 #include "Engine/Window/WindowSystem.h"
@@ -21,10 +22,13 @@
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Components/CameraComponent.h"
 #include "Engine/Components/LightComponent.h"
+#include "Engine/Scene/SceneMutationQueue.h"
+#include "Engine/Scene/TransactionalMutation.h"
 #include <imgui.h>
 #include <ImGuizmo.h>
 #include <entt/entt.hpp>
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cmath>
 #include <cstdio>
@@ -32,6 +36,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <memory>
 #include <utility>
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -663,6 +668,116 @@ bool SceneViewWindow::SetAutomationCamera(const glm::vec3& position, const glm::
 	m_CameraFocusDistance = std::clamp(glm::length(direction), 1.0f, 1000.0f);
 	m_CameraFocusInitialized = true;
 	return true;
+}
+
+// Resolve the same parent-composed model matrix used by Scene View gizmos so
+// collider handles remain attached to nested objects instead of world origin.
+std::optional<glm::mat4> ComputeEntityWorldMatrix(entt::entity entity)
+{
+	auto& objectManager = ObjectManager::instance();
+	auto& registry = objectManager.getRegistry();
+	if (!registry.valid(entity))
+	{
+		return std::nullopt;
+	}
+
+	glm::mat4 world(1.0f);
+	entt::entity current = entity;
+	while (current != entt::null && registry.valid(current))
+	{
+		if (const Transform* transform = registry.try_get<Transform>(current))
+		{
+			glm::mat4 local(1.0f);
+			local = glm::translate(local, transform->position);
+			local = local * glm::mat4_cast(transform->rotation);
+			local = glm::scale(local, transform->scale);
+			world = local * world;
+		}
+		const std::optional<Object> object = objectManager.getObject(current);
+		const std::optional<Object> parent = object ? objectManager.getParent(*object) : std::nullopt;
+		current = parent ? parent->EntityId() : entt::null;
+	}
+	return world;
+}
+
+glm::vec3 ToGlm(const TerraEngine::Physics::PhysicsVector3& value)
+{
+	return {value.x, value.y, value.z};
+}
+
+TerraEngine::Physics::PhysicsVector3 ToPhysics(const glm::vec3& value)
+{
+	return {value.x, value.y, value.z};
+}
+
+// Primitive authoring has different stored dimensions, but the Scene View
+// exposes a common local half-extent box for intuitive resize handles.
+glm::vec3 ColliderHalfExtents(const TerraEngine::Physics::ColliderRecord& record)
+{
+	return std::visit([](const auto& shape) -> glm::vec3 {
+		using Shape = std::decay_t<decltype(shape)>;
+		if constexpr (std::is_same_v<Shape, TerraEngine::Physics::BoxColliderShape>)
+		{
+			return ToGlm(shape.halfExtents);
+		}
+		else if constexpr (std::is_same_v<Shape, TerraEngine::Physics::SphereColliderShape>)
+		{
+			return glm::vec3(shape.radius);
+		}
+		else if constexpr (std::is_same_v<Shape, TerraEngine::Physics::CapsuleColliderShape>
+			|| std::is_same_v<Shape, TerraEngine::Physics::CylinderColliderShape>)
+		{
+			return {shape.radius, shape.height * 0.5f, shape.radius};
+		}
+		else if constexpr (std::is_same_v<Shape, TerraEngine::Physics::TaperedCapsuleColliderShape>)
+		{
+			return {std::max(shape.topRadius, shape.bottomRadius), shape.height * 0.5f, std::max(shape.topRadius, shape.bottomRadius)};
+		}
+		else
+		{
+			return glm::vec3(0.5f);
+		}
+	}, record.shape);
+}
+
+bool ApplyColliderHalfExtents(TerraEngine::Physics::ColliderRecord& record, const glm::vec3& extents)
+{
+	return std::visit([&](auto& shape) -> bool {
+		using Shape = std::decay_t<decltype(shape)>;
+		if constexpr (std::is_same_v<Shape, TerraEngine::Physics::BoxColliderShape>)
+		{
+			shape.halfExtents = ToPhysics(extents);
+			return true;
+		}
+		else if constexpr (std::is_same_v<Shape, TerraEngine::Physics::SphereColliderShape>)
+		{
+			shape.radius = std::max({extents.x, extents.y, extents.z});
+			return true;
+		}
+		else if constexpr (std::is_same_v<Shape, TerraEngine::Physics::CapsuleColliderShape>)
+		{
+			shape.radius = std::max(extents.x, extents.z);
+			shape.height = std::max(extents.y * 2.0f, shape.radius * 2.0f);
+			return true;
+		}
+		else if constexpr (std::is_same_v<Shape, TerraEngine::Physics::CylinderColliderShape>)
+		{
+			shape.radius = std::max(extents.x, extents.z);
+			shape.height = extents.y * 2.0f;
+			return true;
+		}
+		else if constexpr (std::is_same_v<Shape, TerraEngine::Physics::TaperedCapsuleColliderShape>)
+		{
+			shape.topRadius = std::max(extents.x, extents.z);
+			shape.bottomRadius = shape.topRadius;
+			shape.height = std::max(extents.y * 2.0f, shape.topRadius * 2.0f);
+			return true;
+		}
+		else
+		{
+			return false;
+		}
+	}, record.shape);
 }
 
 bool SceneViewWindow::FrameAutomationObject(entt::entity entity, std::string& outError)
@@ -1324,6 +1439,9 @@ void SceneViewWindow::PublishSceneViewDiagnostics(bool rendererAvailable, const 
 		: m_InteractionContext.hoveredRegion;
 	snapshot.rendererAvailable = rendererAvailable;
 	snapshot.disabledOverlayReason = disabledOverlayReason;
+	snapshot.physicsDebugPacketCount = m_PhysicsDebugPacketCount;
+	snapshot.physicsDebugPrimitiveCount = m_PhysicsDebugPrimitiveCount;
+	snapshot.physicsDebugVisible = m_PhysicsDebugVisible;
 	snapshot.gameViewAffected = false;
 	for (const SceneOverlay::SceneObjectMarker& marker : m_ObjectMarkers)
 	{
@@ -1430,6 +1548,11 @@ void SceneViewWindow::OnGui() {
 		ImGui::TextUnformatted(status.c_str());
 		ImGui::PopTextWrapPos();
 		m_OrientationWidgetState.visible = false;
+		// Do not report the prior frame's physics overlay as visible while the
+		// renderer is unavailable; no packet is submitted on this early return.
+		m_PhysicsDebugPacketCount = 0U;
+		m_PhysicsDebugPrimitiveCount = 0U;
+		m_PhysicsDebugVisible = false;
 		PublishSceneViewDiagnostics(false, status);
 		return;
 	}
@@ -1644,7 +1767,433 @@ void SceneViewWindow::OnGui() {
 	HandlePicking(view, projNoFlip, cursorPos, contentSize);
 
 	DrawGizmos(view, projNoFlip, cursorPos, contentSize);
+	DrawPhysicsDebugOverlay(view, projNoFlip, cursorPos, contentSize);
 	PublishSceneViewDiagnostics(true);
+}
+
+void SceneViewWindow::BeginPhysicsColliderPreview(entt::entity entity, const TerraEngine::UUID& recordId)
+{
+	auto& objects = ObjectManager::instance();
+	const std::optional<Object> object = objects.getObject(entity);
+	ColliderSetComponent* set = object ? objects.GetComponent<ColliderSetComponent>(*object) : nullptr;
+	if (!object || set == nullptr || recordId == TerraEngine::EMPTY_UUID)
+	{
+		m_PhysicsPreviewStatus = "Collider target is unavailable.";
+		return;
+	}
+
+	auto lock = set->acquireReadLock();
+	const auto record = std::find_if(set->colliders.begin(), set->colliders.end(), [&](const TerraEngine::Physics::ColliderRecord& candidate) {
+		return candidate.recordId == recordId;
+	});
+	if (record == set->colliders.end())
+	{
+		m_PhysicsPreviewStatus = "Collider record changed before it could be selected.";
+		return;
+	}
+
+	m_SelectedColliderRecordId = recordId;
+	SceneOverlay::PhysicsShapeEditPreview preview;
+	preview.objectId = objects.getUUID(*object);
+	preview.colliderRecordId = recordId;
+	preview.localCenter = ToGlm(record->localCenter);
+	preview.localExtents = ColliderHalfExtents(*record);
+	preview.active = true;
+	m_PhysicsShapePreview = std::move(preview);
+	m_PhysicsPreviewStatus = "Editing a local preview; Apply publishes one queued transaction.";
+}
+
+void SceneViewWindow::RequestPhysicsColliderFitToRenderMesh(entt::entity entity)
+{
+	if (!m_PhysicsShapePreview || !m_PhysicsShapePreview->active)
+	{
+		m_PhysicsPreviewStatus = "Select a collider before fitting it to a render mesh.";
+		return;
+	}
+
+	auto& registry = ObjectManager::instance().getRegistry();
+	const MeshRenderComponent* renderable = registry.valid(entity) ? registry.try_get<MeshRenderComponent>(entity) : nullptr;
+	Mesh* mesh = renderable ? ResourceManager::Instance().GetMesh(renderable->meshId) : nullptr;
+	if (mesh == nullptr)
+	{
+		m_PhysicsPreviewStatus = "Fit rejected: the selected object has no loaded render mesh bounds.";
+		return;
+	}
+
+	// TEMF quantization stores an AABB as center plus half extents. Copy those
+	// values into preview state only; the live collider stays untouched until
+	// the explicit Apply action creates a protected transaction.
+	m_PhysicsShapePreview->localCenter = {
+		mesh->header.quantization.positionOffset[0],
+		mesh->header.quantization.positionOffset[1],
+		mesh->header.quantization.positionOffset[2]
+	};
+	m_PhysicsShapePreview->localExtents = glm::max(glm::abs(glm::vec3(
+		mesh->header.quantization.positionScale[0],
+		mesh->header.quantization.positionScale[1],
+		mesh->header.quantization.positionScale[2])), glm::vec3(0.001f));
+	m_PhysicsShapePreview->fitToRenderMeshRequested = true;
+	m_PhysicsPreviewStatus = "Render-mesh bounds are staged in the local collider preview.";
+}
+
+void SceneViewWindow::CancelPhysicsColliderPreview()
+{
+	m_PhysicsShapePreview.reset();
+	m_PhysicsActiveHandle = -1;
+	m_PhysicsPreviewStatus = "Collider preview canceled; no scene or physics state changed.";
+}
+
+void SceneViewWindow::CommitPhysicsColliderPreview()
+{
+	if (!m_PhysicsShapePreview)
+	{
+		m_PhysicsPreviewStatus = "No collider preview is ready to apply.";
+		return;
+	}
+
+	const SceneOverlay::PhysicsShapeAuthoringCommit commit = SceneOverlay::FinalizePhysicsShapeEdit(*m_PhysicsShapePreview);
+	if (!commit.valid)
+	{
+		m_PhysicsPreviewStatus = "Collider preview is invalid and was rejected without mutation.";
+		return;
+	}
+
+	auto& objects = ObjectManager::instance();
+	const std::optional<Object> object = objects.getObject(commit.preview.objectId);
+	ColliderSetComponent* set = object ? objects.GetComponent<ColliderSetComponent>(*object) : nullptr;
+	if (!object || set == nullptr)
+	{
+		m_PhysicsPreviewStatus = "Collider target is stale; no transaction was queued.";
+		return;
+	}
+
+	std::vector<TerraEngine::Physics::ColliderRecord> updatedRecords;
+	std::uint32_t schemaVersion = TerraEngine::Physics::kColliderSetComponentSchemaVersion;
+	bool componentActive = true;
+	{
+		auto lock = set->acquireReadLock();
+		updatedRecords = set->colliders;
+		schemaVersion = set->schemaVersion;
+		componentActive = set->active;
+	}
+	const auto record = std::find_if(updatedRecords.begin(), updatedRecords.end(), [&](const TerraEngine::Physics::ColliderRecord& candidate) {
+		return candidate.recordId == commit.preview.colliderRecordId;
+	});
+	if (record == updatedRecords.end())
+	{
+		m_PhysicsPreviewStatus = "Collider record is stale; transaction rejected atomically.";
+		return;
+	}
+
+	// Revalidate a detached copy before publishing. The stable record UUID is
+	// preserved, and asset-backed colliders reject dimension edits instead of
+	// inventing a primitive that would silently change authored intent.
+	record->localCenter = ToPhysics(commit.preview.localCenter);
+	if (!ApplyColliderHalfExtents(*record, commit.preview.localExtents))
+	{
+		m_PhysicsPreviewStatus = "Asset-backed collider dimensions cannot be edited with primitive handles.";
+		return;
+	}
+	ColliderSetComponent candidate;
+	candidate.schemaVersion = schemaVersion;
+	candidate.active = componentActive;
+	candidate.colliders = updatedRecords;
+	const TerraEngine::Physics::ColliderSetValidationResult validation = candidate.Validate();
+	if (!validation.accepted)
+	{
+		m_PhysicsPreviewStatus = "Collider preview rejected: " + validation.message;
+		return;
+	}
+
+	// This is the sole durable mutation for a completed drag or fit. The read
+	// set makes a stale object or intervening component edit reject the complete
+	// update at the queue's protected flush boundary rather than partially
+	// changing ObjectManager or the provider during UI interaction.
+	TerraEngine::Scene::TransactionalMutationBuilder builder(
+		"scene-view-physics-shape-" + TerraEngine::ToHexString(commit.preview.objectId) + "-"
+			+ TerraEngine::ToHexString(commit.preview.colliderRecordId) + "-" + std::to_string(++m_PhysicsShapeCommitSequence),
+		TerraEngine::Scene::TransactionOrigin::Editor,
+		"SceneViewPhysicsColliderHandles");
+	builder.ObserveScene(objects)
+		.ObserveObject(objects, commit.preview.objectId)
+		.SetUndoGroup(commit.transactionLabel)
+		.UpdateComponentProperty(
+			commit.preview.objectId,
+			std::string(ColliderSetComponent::kComponentName),
+			"colliders",
+			TerraEngine::Reflection::Variant{std::move(updatedRecords)});
+	TerraEngine::Scene::SceneMutationQueue::Instance().EnqueueTransaction(builder.Build());
+	m_PhysicsShapePreview.reset();
+	m_PhysicsActiveHandle = -1;
+	m_PhysicsPreviewStatus = "Collider edit queued for the protected transactional flush.";
+}
+
+void SceneViewWindow::DrawPhysicsColliderEditHandles(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize)
+{
+	if (m_Owner == nullptr)
+	{
+		return;
+	}
+
+	const std::optional<entt::entity> selectedEntity = m_Owner->GetSelectedEntity();
+	auto& objects = ObjectManager::instance();
+	auto& registry = objects.getRegistry();
+	if (!selectedEntity || !registry.valid(*selectedEntity))
+	{
+		if (m_PhysicsShapePreview) CancelPhysicsColliderPreview();
+		return;
+	}
+	const std::optional<Object> object = objects.getObject(*selectedEntity);
+	ColliderSetComponent* set = object ? objects.GetComponent<ColliderSetComponent>(*object) : nullptr;
+	if (!object || set == nullptr)
+	{
+		if (m_PhysicsShapePreview) CancelPhysicsColliderPreview();
+		return;
+	}
+
+	std::vector<TerraEngine::Physics::ColliderRecord> records;
+	{
+		auto lock = set->acquireReadLock();
+		records = set->colliders;
+	}
+	if (records.empty())
+	{
+		return;
+	}
+	const TerraEngine::UUID selectedObjectId = objects.getUUID(*object);
+	const bool selectedRecordStillExists = std::any_of(records.begin(), records.end(), [&](const TerraEngine::Physics::ColliderRecord& record) {
+		return record.recordId == m_SelectedColliderRecordId;
+	});
+	if ((m_PhysicsShapePreview && m_PhysicsShapePreview->objectId != selectedObjectId) || !selectedRecordStillExists)
+	{
+		// Selection and record identity are both stable UUIDs. Clearing preview on
+		// either mismatch prevents an Apply click in a newly selected object from
+		// publishing an edit prepared for a stale object or removed record.
+		m_PhysicsShapePreview.reset();
+		m_SelectedColliderRecordId = TerraEngine::EMPTY_UUID;
+		m_PhysicsActiveHandle = -1;
+	}
+	if (m_SelectedColliderRecordId == TerraEngine::EMPTY_UUID)
+	{
+		BeginPhysicsColliderPreview(*selectedEntity, records.front().recordId);
+	}
+
+	// This compact panel exposes stable record selection and precision controls.
+	// The colored in-viewport handles below are the direct-manipulation path.
+	ImGui::SetCursorScreenPos(ImVec2(viewportPos.x + 12.0f, viewportPos.y + 12.0f));
+	ImGui::BeginChild("PhysicsColliderAuthoring", ImVec2(280.0f, 0.0f), true, ImGuiWindowFlags_AlwaysAutoResize);
+	ImGui::TextUnformatted("Physics Collider Handles");
+	for (const TerraEngine::Physics::ColliderRecord& record : records)
+	{
+		const std::string label = std::string("Collider ") + TerraEngine::ToHexString(record.recordId).substr(0U, 8U);
+		if (ImGui::Selectable(label.c_str(), record.recordId == m_SelectedColliderRecordId))
+		{
+			BeginPhysicsColliderPreview(*selectedEntity, record.recordId);
+		}
+	}
+	if (m_PhysicsShapePreview && m_PhysicsShapePreview->active)
+	{
+		ImGui::Separator();
+		ImGui::DragFloat3("Center (preview)", &m_PhysicsShapePreview->localCenter.x, 0.01f);
+		ImGui::DragFloat3("Half extents (preview)", &m_PhysicsShapePreview->localExtents.x, 0.01f, 0.001f, 1000.0f);
+		if (ImGui::Button("Fit to Render Mesh")) RequestPhysicsColliderFitToRenderMesh(*selectedEntity);
+		ImGui::SameLine();
+		if (ImGui::Button("Apply Collider Edit")) CommitPhysicsColliderPreview();
+		ImGui::SameLine();
+		if (ImGui::Button("Cancel")) CancelPhysicsColliderPreview();
+	}
+	if (!m_PhysicsPreviewStatus.empty())
+	{
+		ImGui::TextWrapped("%s", m_PhysicsPreviewStatus.c_str());
+	}
+	ImGui::EndChild();
+
+	if (!m_PhysicsShapePreview || !m_PhysicsShapePreview->active)
+	{
+		return;
+	}
+	const std::optional<glm::mat4> model = ComputeEntityWorldMatrix(*selectedEntity);
+	if (!model)
+	{
+		return;
+	}
+
+	const glm::mat4 viewProjection = proj * view;
+	const glm::vec3 localCenter = m_PhysicsShapePreview->localCenter;
+	const glm::vec3 extents = glm::max(m_PhysicsShapePreview->localExtents, glm::vec3(0.001f));
+	const glm::vec3 center = glm::vec3(*model * glm::vec4(localCenter, 1.0f));
+	const std::array<ImU32, 3> colors = { IM_COL32(245, 78, 78, 255), IM_COL32(88, 225, 112, 255), IM_COL32(84, 152, 255, 255) };
+	ImDrawList* drawList = ImGui::GetWindowDrawList();
+	std::array<glm::vec3, 8> corners{};
+	for (int index = 0; index < 8; ++index)
+	{
+		const glm::vec3 signedExtent(
+			(index & 1) == 0 ? -extents.x : extents.x,
+			(index & 2) == 0 ? -extents.y : extents.y,
+			(index & 4) == 0 ? -extents.z : extents.z);
+		corners[static_cast<std::size_t>(index)] = glm::vec3(*model * glm::vec4(localCenter + signedExtent, 1.0f));
+	}
+	constexpr std::array<std::array<int, 2>, 12> edges = {{{0, 1}, {0, 2}, {0, 4}, {1, 3}, {1, 5}, {2, 3}, {2, 6}, {3, 7}, {4, 5}, {4, 6}, {5, 7}, {6, 7}}};
+	for (const auto& edge : edges)
+	{
+		DrawWorldLine(drawList, corners[static_cast<std::size_t>(edge[0])], corners[static_cast<std::size_t>(edge[1])], viewProjection, viewportPos, viewportSize, IM_COL32(255, 206, 72, 235), 1.5f);
+	}
+
+	ImVec2 centerScreen{};
+	const bool centerVisible = ProjectWorldPoint(center, viewProjection, viewportPos, viewportSize, centerScreen);
+	const auto drawHandle = [&](int handle, const ImVec2& position, ImU32 color, const glm::vec2& screenAxis) {
+		drawList->AddCircleFilled(position, 7.0f, color);
+		ImGui::SetCursorScreenPos(ImVec2(position.x - 9.0f, position.y - 9.0f));
+		ImGui::PushID(handle + 9000);
+		ImGui::InvisibleButton("PhysicsColliderHandle", ImVec2(18.0f, 18.0f));
+		if (ImGui::IsItemActivated())
+		{
+			m_PhysicsActiveHandle = handle;
+			m_PhysicsHandleDragStart = ImGui::GetMousePos();
+			m_PhysicsPreviewDragStartCenter = m_PhysicsShapePreview->localCenter;
+			m_PhysicsPreviewDragStartExtents = m_PhysicsShapePreview->localExtents;
+			m_InteractionContext.activeRegion = SceneOverlay::InteractionRegion::Gizmo;
+		}
+		if (m_PhysicsActiveHandle == handle && ImGui::IsMouseDown(ImGuiMouseButton_Left))
+		{
+			const ImVec2 mousePosition = ImGui::GetMousePos();
+			const ImVec2 delta(mousePosition.x - m_PhysicsHandleDragStart.x, mousePosition.y - m_PhysicsHandleDragStart.y);
+			if (handle == 0)
+			{
+				// The center handle moves in Scene View's visible local X/Y plane;
+				// precision fields retain full XYZ control for depth-only edits.
+				m_PhysicsShapePreview->localCenter = m_PhysicsPreviewDragStartCenter + glm::vec3(delta.x * 0.01f, -delta.y * 0.01f, 0.0f);
+			}
+			else
+			{
+				const float screenLength = std::max(glm::length(screenAxis), 1.0f);
+				const float deltaMetres = glm::dot(glm::vec2(delta.x, delta.y), screenAxis / screenLength) * (extents[handle - 1] / screenLength);
+				m_PhysicsShapePreview->localExtents = m_PhysicsPreviewDragStartExtents;
+				m_PhysicsShapePreview->localExtents[handle - 1] = std::max(0.001f, m_PhysicsPreviewDragStartExtents[handle - 1] + deltaMetres);
+			}
+		}
+		ImGui::PopID();
+	};
+	if (centerVisible)
+	{
+		drawHandle(0, centerScreen, IM_COL32(255, 206, 72, 255), glm::vec2(1.0f, 0.0f));
+	}
+	for (int axis = 0; axis < 3; ++axis)
+	{
+		const glm::vec3 endpoint = glm::vec3(*model * glm::vec4(localCenter + glm::vec3(axis == 0 ? extents.x : 0.0f, axis == 1 ? extents.y : 0.0f, axis == 2 ? extents.z : 0.0f), 1.0f));
+		ImVec2 endpointScreen{};
+		if (!centerVisible || !ProjectWorldPoint(endpoint, viewProjection, viewportPos, viewportSize, endpointScreen))
+		{
+			continue;
+		}
+		drawList->AddLine(centerScreen, endpointScreen, colors[static_cast<std::size_t>(axis)], 2.0f);
+		drawHandle(axis + 1, endpointScreen, colors[static_cast<std::size_t>(axis)], glm::vec2(endpointScreen.x - centerScreen.x, endpointScreen.y - centerScreen.y));
+	}
+	if (!ImGui::IsMouseDown(ImGuiMouseButton_Left))
+	{
+		m_PhysicsActiveHandle = -1;
+	}
+}
+
+void SceneViewWindow::DrawPhysicsDebugOverlay(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize)
+{
+	m_PhysicsDebugPacketCount = 0U;
+	m_PhysicsDebugPrimitiveCount = 0U;
+	m_PhysicsDebugVisible = false;
+	// Physics overlay is opt-in and no producer work is requested here. Opening
+	// this Scene View merely reads packets that physics already published.
+	if (!m_OverlayPreference.diagnosticsVisible)
+	{
+		return;
+	}
+
+	const std::shared_ptr<const TerraEngine::Physics::PhysicsDiagnosticsSnapshot> diagnostics =
+		TerraEngine::Physics::AcquirePhysicsDiagnosticsSnapshot();
+	if (!diagnostics || !diagnostics->world.IsValid())
+	{
+		return;
+	}
+	const std::vector<std::shared_ptr<const TerraEngine::Physics::PhysicsDebugPacket>> packets =
+		TerraEngine::Physics::PublishedPhysicsDebugPackets().Select(diagnostics->world, diagnostics->tick, m_PhysicsDebugSelection);
+	m_PhysicsDebugPacketCount = packets.size();
+	m_PhysicsDebugPrimitiveCount = SceneOverlay::CountPhysicsDebugPrimitives(packets, m_PhysicsDebugSelection);
+	if (packets.empty())
+	{
+		return;
+	}
+
+	// The renderer records the immutable submission only when its RHI exists.
+	// CPU drawing below intentionally remains a no-op when the caller returned
+	// through the renderer-unavailable branch earlier in OnGui.
+	if (!RenderSystem::Instance().SubmitSceneViewPhysicsDebugPackets(packets, m_PhysicsDebugSelection))
+	{
+		return;
+	}
+	m_PhysicsDebugVisible = true;
+	ImDrawList* drawList = ImGui::GetWindowDrawList();
+	const auto project = [&](const TerraEngine::Physics::PhysicsVector3& point, ImVec2& screen) {
+		const glm::vec4 clip = proj * view * glm::vec4(point.x, point.y, point.z, 1.0f);
+		if (clip.w <= 0.0001f)
+		{
+			return false;
+		}
+		const glm::vec3 ndc = glm::vec3(clip) / clip.w;
+		screen = ImVec2(viewportPos.x + (ndc.x * 0.5f + 0.5f) * viewportSize.x, viewportPos.y + (-ndc.y * 0.5f + 0.5f) * viewportSize.y);
+		return std::isfinite(screen.x) && std::isfinite(screen.y);
+	};
+	const auto drawSegment = [&](const TerraEngine::Physics::PhysicsVector3& first, const TerraEngine::Physics::PhysicsVector3& second, ImU32 color, float thickness = 1.5f) {
+		ImVec2 start;
+		ImVec2 end;
+		if (project(first, start) && project(second, end))
+		{
+			drawList->AddLine(start, end, color, thickness);
+		}
+	};
+	for (const std::shared_ptr<const TerraEngine::Physics::PhysicsDebugPacket>& packet : packets)
+	{
+		if (!packet) { continue; }
+		if (m_PhysicsDebugSelection.showLines && packet->lines)
+		{
+			for (const auto& line : *packet->lines) { drawSegment(line.start, line.end, line.color); }
+		}
+		if (m_PhysicsDebugSelection.showTriangles && packet->triangles)
+		{
+			for (const auto& triangle : *packet->triangles)
+			{
+				drawSegment(triangle.a, triangle.b, triangle.color);
+				drawSegment(triangle.b, triangle.c, triangle.color);
+				drawSegment(triangle.c, triangle.a, triangle.color);
+			}
+		}
+		if (m_PhysicsDebugSelection.showContacts && packet->contacts)
+		{
+			for (const auto& contact : *packet->contacts)
+			{
+				const TerraEngine::Physics::PhysicsVector3 end{contact.position.x + contact.normal.x * 0.25F, contact.position.y + contact.normal.y * 0.25F, contact.position.z + contact.normal.z * 0.25F};
+				drawSegment(contact.position, end, IM_COL32(255, 208, 64, 255), 2.0f);
+			}
+		}
+		if (m_PhysicsDebugSelection.showConstraints && packet->constraints)
+		{
+			for (const auto& constraint : *packet->constraints) { drawSegment(constraint.firstAnchor, constraint.secondAnchor, constraint.broken ? IM_COL32(255, 64, 64, 255) : IM_COL32(96, 220, 255, 255), 2.0f); }
+		}
+		if (m_PhysicsDebugSelection.showCharacterSupport && packet->characters)
+		{
+			for (const auto& character : *packet->characters)
+			{
+				const TerraEngine::Physics::PhysicsVector3 end{character.position.x + character.up.x * character.height, character.position.y + character.up.y * character.height, character.position.z + character.up.z * character.height};
+				drawSegment(character.position, end, IM_COL32(128, 255, 128, 255), 2.0f);
+			}
+		}
+		if (m_PhysicsDebugSelection.showRecentQueries && packet->queries)
+		{
+			for (const auto& query : *packet->queries)
+			{
+				const TerraEngine::Physics::PhysicsVector3 end{query.origin.x + query.direction.x * query.distance, query.origin.y + query.direction.y * query.distance, query.origin.z + query.direction.z * query.distance};
+				drawSegment(query.origin, end, IM_COL32(180, 128, 255, 255));
+			}
+		}
+	}
 }
 
 // RayAABB is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1949,7 +2498,14 @@ void SceneViewWindow::ApplyPrefabContextTintForNextRender()
 
 // SceneViewWindow::DrawGizmos is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize) {
-	if (!m_ToolState.gizmosVisible || m_CurrentGizmoOperation < 0)
+	if (!m_ToolState.gizmosVisible)
+	{
+		return;
+	}
+	// Collider manipulation is independent of the transform-tool selection, so
+	// its handles remain available when the normal transform gizmo is disabled.
+	DrawPhysicsColliderEditHandles(view, proj, viewportPos, viewportSize);
+	if (m_CurrentGizmoOperation < 0)
 	{
 		return;
 	}

@@ -71,3 +71,6 @@
 [submodule "External/simdjson"]
 	path = External/simdjson
 	url = https://github.com/simdjson/simdjson.git
+[submodule "External/JoltPhysics"]
+	path = External/JoltPhysics
+	url = https://github.com/jrouwe/JoltPhysics.git

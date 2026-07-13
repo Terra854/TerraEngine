@@ -684,6 +684,7 @@ void ProfilerWindow::DrawFrameDetails()
 	}
 
 	DrawFrameOverview(*selectedFrame);
+	DrawPhysicsSummary(*selectedFrame);
 
 	const ScriptingSystem::ScriptingFrameResult& scriptingResult = ScriptingSystem::Instance().GetLatestScriptingFrameResult();
 	if (scriptingResult.frameId != 0 && ImGui::TreeNode("Scripting Dispatch Counters"))
@@ -773,6 +774,50 @@ void ProfilerWindow::DrawFrameDetails()
 		}
 		ImGui::EndTabBar();
 	}
+}
+
+void ProfilerWindow::DrawPhysicsSummary(const TerraEngine::Profiling::ProfilerFrameRecord& frame)
+{
+	// Read captured fields instead of a live snapshot so replay works after the
+	// world stops and never depends on the dedicated diagnostics window.
+	if (!frame.physics.has_value())
+	{
+		ImGui::TextDisabled("No physics counters were recorded for this frame.");
+		return;
+	}
+	const TerraEngine::Profiling::ProfilerPhysicsFrameCounters& physics = *frame.physics;
+	if (!ImGui::TreeNode("Physics Counters"))
+	{
+		return;
+	}
+	ImGui::Text("Tick %llu  Bodies %llu  Contacts %llu  Queries %llu  Events %llu",
+		static_cast<unsigned long long>(physics.tick), static_cast<unsigned long long>(physics.bodyCount),
+		static_cast<unsigned long long>(physics.contactCount), static_cast<unsigned long long>(physics.queryCount),
+		static_cast<unsigned long long>(physics.eventCount));
+	ImGui::Text("Rejected %llu  Stale %llu  Command queue %llu",
+		static_cast<unsigned long long>(physics.rejectedCount), static_cast<unsigned long long>(physics.staleCount),
+		static_cast<unsigned long long>(physics.commandQueueDepth));
+	ImGui::Text("Shape cache %llu B (hits %llu / misses %llu)",
+		static_cast<unsigned long long>(physics.shapeCacheBytes),
+		static_cast<unsigned long long>(physics.shapeCacheHits),
+		static_cast<unsigned long long>(physics.shapeCacheMisses));
+	ImGui::Text("Snapshots %llu B / %llu B high-water; provider allocations %llu / %llu high-water",
+		static_cast<unsigned long long>(physics.snapshotBytes),
+		static_cast<unsigned long long>(physics.snapshotHighWaterBytes),
+		static_cast<unsigned long long>(physics.providerAllocations),
+		static_cast<unsigned long long>(physics.providerAllocationHighWater));
+	if (ImGui::BeginTable("ProfilerPhysicsTiming", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	{
+		ImGui::TableSetupColumn("Prepare"); ImGui::TableSetupColumn("Commit"); ImGui::TableSetupColumn("Simulate");
+		ImGui::TableSetupColumn("Queries"); ImGui::TableSetupColumn("Publish"); ImGui::TableHeadersRow(); ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0); ImGui::Text("%.3f ms", physics.prepareMs);
+		ImGui::TableSetColumnIndex(1); ImGui::Text("%.3f ms", physics.commitMs);
+		ImGui::TableSetColumnIndex(2); ImGui::Text("%.3f ms", physics.simulateMs);
+		ImGui::TableSetColumnIndex(3); ImGui::Text("%.3f ms", physics.queryMs);
+		ImGui::TableSetColumnIndex(4); ImGui::Text("%.3f ms", physics.publishMs);
+		ImGui::EndTable();
+	}
+	ImGui::TreePop();
 }
 
 void ProfilerWindow::DrawRendererRecoverySummary()

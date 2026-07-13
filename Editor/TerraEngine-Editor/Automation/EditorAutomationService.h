@@ -138,6 +138,12 @@ namespace TerraEngine::Editor::Automation
 		nlohmann::json HandleRendererVirtualGeometryStats(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleDiagnosticsGetSummary(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json ExecuteProviderHandler(std::uint64_t operation, std::string_view operationName, const nlohmann::json& arguments, WriteMode writeMode, const std::string& requestId);
+		void RefreshPhysicsCookJob(std::string_view jobId);
+		AutomationHandler ResolvePhysicsAutomationHandler(std::string_view name);
+		AutomationDispatchResult ExecutePhysicsAutomationHandler(
+			std::uint64_t operation,
+			std::string_view operationName,
+			const AutomationRequestContext& request);
 		nlohmann::json ValidateCaptureArguments(const nlohmann::json& arguments, const std::string& requestId) const;
 		ErrorCategory MapCaptureFailureCategory(std::string_view category) const;
 		nlohmann::json ValidateProjectRelativePath(const nlohmann::json& arguments, std::string_view key, const std::string& requestId) const;
@@ -171,6 +177,18 @@ namespace TerraEngine::Editor::Automation
 		std::unordered_set<std::string> profilerArtifactIdsBeforeStop;
 		std::string activeProfilerLoadJobId;
 		std::string activeProfilerLoadArtifactId;
+		struct ActivePhysicsCookJob
+		{
+			std::filesystem::path sourcePath;
+			std::uint64_t projectGeneration = 0U;
+			std::string clientId;
+			std::string capability;
+			std::string idempotencyKey;
+			std::string correlationId;
+		};
+		// AssetDatabase owns the worker process and atomic publication. This map
+		// only connects its bounded progress snapshots to reconnectable MCP jobs.
+		std::unordered_map<std::string, ActivePhysicsCookJob> activePhysicsCookJobs;
 		std::uint64_t nextTransactionId = 1u;
 		PrefabAuthoringService prefabAuthoringService;
 	};

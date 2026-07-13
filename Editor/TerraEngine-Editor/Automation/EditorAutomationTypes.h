@@ -454,6 +454,13 @@ namespace TerraEngine::Editor::Automation
 		std::string capability;
 		std::string summary;
 		nlohmann::json arguments = nlohmann::json::object();
+		std::string argumentsFingerprint;
+		std::string impactFingerprint;
+		std::string sessionId;
+		std::string clientName;
+		std::uint64_t projectGeneration = 0;
+		std::uint64_t sceneGeneration = 0;
+		std::uint32_t worldGeneration = 0;
 		bool resolved = false;
 		bool approved = false;
 		std::chrono::system_clock::time_point expiresAt = std::chrono::system_clock::now();

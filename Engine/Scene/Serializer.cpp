@@ -7,8 +7,608 @@
 #include "Scene/Serializer.h"
 #include "Core/Object/ObjectManager.h"
 #include "Core/Object/Component.h"
+#include "Components/Physics/CharacterControllerComponent.h"
+#include "Components/Physics/ColliderSetComponent.h"
+#include "Components/Physics/ConstraintSetComponent.h"
+#include "Components/Physics/RigidBodyComponent.h"
 #include <glm/vec3.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <cmath>
+#include <limits>
+
+namespace {
+	using namespace TerraEngine::Physics;
+
+	nlohmann::json PhysicsVectorJson(const PhysicsVector3& value) {
+		return {value.x, value.y, value.z};
+	}
+
+	nlohmann::json PhysicsRotationJson(const PhysicsQuaternion& value) {
+		return {value.w, value.x, value.y, value.z};
+	}
+
+	bool ReadPhysicsVector(const nlohmann::json& value, PhysicsVector3& result) {
+		if(!value.is_array() || value.size() != 3U) return false;
+		try {
+			result = {value[0].get<float>(), value[1].get<float>(), value[2].get<float>()};
+			return result.IsFinite();
+		} catch(...) {
+			return false;
+		}
+	}
+
+	bool ReadPhysicsRotation(const nlohmann::json& value, PhysicsQuaternion& result) {
+		if(!value.is_array() || value.size() != 4U) return false;
+		try {
+			result = {value[1].get<float>(), value[2].get<float>(), value[3].get<float>(), value[0].get<float>()};
+			return result.IsFinite();
+		} catch(...) {
+			return false;
+		}
+	}
+
+	std::string_view MassModeName(PhysicsMassMode mode) {
+		return mode == PhysicsMassMode::ExplicitMass ? "ExplicitMass" : "AutomaticFromDensity";
+	}
+
+	std::string_view InterpolationName(PhysicsInterpolationMode mode) {
+		switch(mode) {
+		case PhysicsInterpolationMode::None: return "None";
+		case PhysicsInterpolationMode::Interpolate: return "Interpolate";
+		case PhysicsInterpolationMode::Extrapolate: return "Extrapolate";
+		}
+		return "None";
+	}
+
+	nlohmann::json SerializeRigidBody(const RigidBodyComponent& body) {
+		return {
+			{"active", body.active},
+			{"schemaVersion", body.schemaVersion},
+			{"motionType", ToString(body.motionType)},
+			{"massMode", MassModeName(body.massMode)},
+			{"mass", body.mass},
+			{"linearDamping", body.linearDamping},
+			{"angularDamping", body.angularDamping},
+			{"useGravity", body.useGravity},
+			{"allowSleeping", body.allowSleeping},
+			{"startAwake", body.startAwake},
+			{"continuousCollisionMode", ToString(body.continuousCollisionMode)},
+			{"initialLinearVelocity", PhysicsVectorJson(body.initialLinearVelocity)},
+			{"initialAngularVelocity", PhysicsVectorJson(body.initialAngularVelocity)},
+			{"maxLinearVelocity", body.maxLinearVelocity},
+			{"maxAngularVelocity", body.maxAngularVelocity},
+			{"allowedDegreesOfFreedom", body.allowedDegreesOfFreedom},
+			{"interpolationMode", InterpolationName(body.interpolationMode)},
+			{"collisionLayerId", body.collisionLayerId},
+			{"useCollisionMaskOverride", body.useCollisionMaskOverride},
+			{"collisionMaskOverride", body.collisionMaskOverride},
+			{"enabled", body.enabled}
+		};
+	}
+
+	bool DeserializeRigidBody(const nlohmann::json& json, RigidBodyComponent& destination) {
+		if(!json.is_object()) return false;
+		RigidBodyComponent body;
+		try {
+			body.active = json.value("active", body.active);
+			body.schemaVersion = json.value("schemaVersion", body.schemaVersion);
+			const std::string motion = json.value("motionType", std::string("Dynamic"));
+			if(motion == "Static") body.motionType = PhysicsMotionType::Static;
+			else if(motion == "Dynamic") body.motionType = PhysicsMotionType::Dynamic;
+			else if(motion == "Kinematic") body.motionType = PhysicsMotionType::Kinematic;
+			else return false;
+			const std::string massMode = json.value("massMode", std::string("AutomaticFromDensity"));
+			if(massMode == "AutomaticFromDensity") body.massMode = PhysicsMassMode::AutomaticFromDensity;
+			else if(massMode == "ExplicitMass") body.massMode = PhysicsMassMode::ExplicitMass;
+			else return false;
+			body.mass = json.value("mass", body.mass);
+			body.linearDamping = json.value("linearDamping", body.linearDamping);
+			body.angularDamping = json.value("angularDamping", body.angularDamping);
+			body.useGravity = json.value("useGravity", body.useGravity);
+			body.allowSleeping = json.value("allowSleeping", body.allowSleeping);
+			body.startAwake = json.value("startAwake", body.startAwake);
+			const std::string quality = json.value("continuousCollisionMode", std::string("Discrete"));
+			if(quality == "Discrete") body.continuousCollisionMode = PhysicsMotionQuality::Discrete;
+			else if(quality == "LinearCast") body.continuousCollisionMode = PhysicsMotionQuality::LinearCast;
+			else return false;
+			if(const auto found = json.find("initialLinearVelocity"); found != json.end()
+				&& !ReadPhysicsVector(*found, body.initialLinearVelocity)) return false;
+			if(const auto found = json.find("initialAngularVelocity"); found != json.end()
+				&& !ReadPhysicsVector(*found, body.initialAngularVelocity)) return false;
+			body.maxLinearVelocity = json.value("maxLinearVelocity", body.maxLinearVelocity);
+			body.maxAngularVelocity = json.value("maxAngularVelocity", body.maxAngularVelocity);
+			body.allowedDegreesOfFreedom = json.value("allowedDegreesOfFreedom", body.allowedDegreesOfFreedom);
+			const std::string interpolation = json.value("interpolationMode", std::string("Interpolate"));
+			if(interpolation == "None") body.interpolationMode = PhysicsInterpolationMode::None;
+			else if(interpolation == "Interpolate") body.interpolationMode = PhysicsInterpolationMode::Interpolate;
+			else if(interpolation == "Extrapolate") body.interpolationMode = PhysicsInterpolationMode::Extrapolate;
+			else return false;
+			body.collisionLayerId = json.value("collisionLayerId", body.collisionLayerId);
+			body.useCollisionMaskOverride = json.value("useCollisionMaskOverride", body.useCollisionMaskOverride);
+			body.collisionMaskOverride = json.value("collisionMaskOverride", body.collisionMaskOverride);
+			body.enabled = json.value("enabled", body.enabled);
+		} catch(...) {
+			return false;
+		}
+		if(!body.Validate().accepted) return false;
+		destination = body;
+		return true;
+	}
+
+	std::string_view EventPolicyName(PhysicsColliderEventPolicy policy) {
+		switch(policy) {
+		case PhysicsColliderEventPolicy::None: return "None";
+		case PhysicsColliderEventPolicy::Collision: return "Collision";
+		case PhysicsColliderEventPolicy::Trigger: return "Trigger";
+		case PhysicsColliderEventPolicy::All: return "All";
+		}
+		return "None";
+	}
+
+	nlohmann::json SerializeColliderShape(const PrimitiveColliderShape& shape) {
+		return std::visit([](const auto& payload) -> nlohmann::json {
+			using Payload = std::decay_t<decltype(payload)>;
+			if constexpr(std::is_same_v<Payload, BoxColliderShape>)
+				return {{"type", "Box"}, {"halfExtents", PhysicsVectorJson(payload.halfExtents)}};
+			else if constexpr(std::is_same_v<Payload, SphereColliderShape>)
+				return {{"type", "Sphere"}, {"radius", payload.radius}};
+			else if constexpr(std::is_same_v<Payload, CapsuleColliderShape>)
+				return {{"type", "Capsule"}, {"radius", payload.radius}, {"height", payload.height}};
+			else if constexpr(std::is_same_v<Payload, CylinderColliderShape>)
+				return {{"type", "Cylinder"}, {"radius", payload.radius}, {"height", payload.height}};
+			else if constexpr(std::is_same_v<Payload, TaperedCapsuleColliderShape>)
+				return {{"type", "TaperedCapsule"}, {"topRadius", payload.topRadius},
+					{"bottomRadius", payload.bottomRadius}, {"height", payload.height}};
+			else if constexpr(std::is_same_v<Payload, ConvexHullColliderShape>)
+				return {{"type", "ConvexHull"}, {"colliderAssetId", TerraEngine::ToHexString(payload.colliderAssetId)}};
+			else if constexpr(std::is_same_v<Payload, TriangleMeshColliderShape>)
+				return {{"type", "TriangleMesh"}, {"colliderAssetId", TerraEngine::ToHexString(payload.colliderAssetId)}};
+			else
+				return {{"type", "Compound"}, {"colliderAssetId", TerraEngine::ToHexString(payload.colliderAssetId)}};
+		}, shape);
+	}
+
+	bool DeserializeColliderShape(const nlohmann::json& json, PrimitiveColliderShape& shape) {
+		if(!json.is_object()) return false;
+		try {
+			const std::string type = json.value("type", std::string());
+			if(type == "Box") {
+				BoxColliderShape value;
+				const auto found = json.find("halfExtents");
+				if(found == json.end() || !ReadPhysicsVector(*found, value.halfExtents)) return false;
+				shape = value;
+			} else if(type == "Sphere") {
+				shape = SphereColliderShape{json.at("radius").get<float>()};
+			} else if(type == "Capsule") {
+				shape = CapsuleColliderShape{json.at("radius").get<float>(), json.at("height").get<float>()};
+			} else if(type == "Cylinder") {
+				shape = CylinderColliderShape{json.at("radius").get<float>(), json.at("height").get<float>()};
+			} else if(type == "TaperedCapsule") {
+				shape = TaperedCapsuleColliderShape{
+					json.at("topRadius").get<float>(), json.at("bottomRadius").get<float>(), json.at("height").get<float>()};
+			} else if(type == "ConvexHull" || type == "TriangleMesh" || type == "Compound") {
+				const auto assetId = TerraEngine::ParseUUID(json.at("colliderAssetId").get<std::string>());
+				if(!assetId || *assetId == TerraEngine::EMPTY_UUID) return false;
+				if(type == "ConvexHull") shape = ConvexHullColliderShape{*assetId};
+				else if(type == "TriangleMesh") shape = TriangleMeshColliderShape{*assetId};
+				else shape = CompoundColliderShape{*assetId};
+			} else return false;
+			return true;
+		} catch(...) {
+			return false;
+		}
+	}
+
+	nlohmann::json SerializeColliderSet(const ColliderSetComponent& set) {
+		nlohmann::json colliders = nlohmann::json::array();
+		for(const ColliderRecord& record : set.colliders) {
+			nlohmann::json json{
+				{"recordId", TerraEngine::ToHexString(record.recordId)},
+				{"recordVersion", record.recordVersion},
+				{"localCenter", PhysicsVectorJson(record.localCenter)},
+				{"localRotation", PhysicsRotationJson(record.localRotation)},
+				{"shape", SerializeColliderShape(record.shape)},
+				{"materialId", TerraEngine::ToHexString(record.materialId)},
+				{"useDefaultMaterial", record.useDefaultMaterial},
+				{"isTrigger", record.isTrigger},
+				{"useLayerOverride", record.useLayerOverride},
+				{"collisionLayerId", record.collisionLayerId},
+				{"eventPolicy", EventPolicyName(record.eventPolicy)},
+				{"queryFlags", record.queryFlags},
+				{"enabled", record.enabled},
+				{"hasDebugColorOverride", record.hasDebugColorOverride}
+			};
+			if(record.hasDebugColorOverride) {
+				json["debugColor"] = {record.debugColor.red, record.debugColor.green,
+					record.debugColor.blue, record.debugColor.alpha};
+			}
+			colliders.push_back(std::move(json));
+		}
+		return {{"active", set.active}, {"schemaVersion", set.schemaVersion}, {"colliders", std::move(colliders)}};
+	}
+
+	bool DeserializeColliderSet(const nlohmann::json& json, ColliderSetComponent& destination) {
+		if(!json.is_object() || !json.contains("colliders") || !json["colliders"].is_array()) return false;
+		ColliderSetComponent set;
+		try {
+			set.active = json.value("active", set.active);
+			set.schemaVersion = json.value("schemaVersion", set.schemaVersion);
+			for(const nlohmann::json& source : json["colliders"]) {
+				ColliderRecord record;
+				const auto recordId = TerraEngine::ParseUUID(source.value("recordId", std::string()));
+				const auto materialId = TerraEngine::ParseUUID(source.value("materialId", std::string(32U, '0')));
+				if(!recordId || !materialId) return false;
+				record.recordId = *recordId;
+				record.materialId = *materialId;
+				record.recordVersion = source.value("recordVersion", record.recordVersion);
+				if(const auto found = source.find("localCenter"); found == source.end()
+					|| !ReadPhysicsVector(*found, record.localCenter)) return false;
+				if(const auto found = source.find("localRotation"); found == source.end()
+					|| !ReadPhysicsRotation(*found, record.localRotation)) return false;
+				if(const auto found = source.find("shape"); found == source.end()
+					|| !DeserializeColliderShape(*found, record.shape)) return false;
+				record.useDefaultMaterial = source.value("useDefaultMaterial", record.useDefaultMaterial);
+				record.isTrigger = source.value("isTrigger", record.isTrigger);
+				record.useLayerOverride = source.value("useLayerOverride", record.useLayerOverride);
+				record.collisionLayerId = source.value("collisionLayerId", record.collisionLayerId);
+				const std::string eventPolicy = source.value("eventPolicy", std::string("All"));
+				if(eventPolicy == "None") record.eventPolicy = PhysicsColliderEventPolicy::None;
+				else if(eventPolicy == "Collision") record.eventPolicy = PhysicsColliderEventPolicy::Collision;
+				else if(eventPolicy == "Trigger") record.eventPolicy = PhysicsColliderEventPolicy::Trigger;
+				else if(eventPolicy == "All") record.eventPolicy = PhysicsColliderEventPolicy::All;
+				else return false;
+				record.queryFlags = source.value("queryFlags", record.queryFlags);
+				record.enabled = source.value("enabled", record.enabled);
+				record.hasDebugColorOverride = source.value("hasDebugColorOverride", false);
+				if(record.hasDebugColorOverride) {
+					const auto color = source.find("debugColor");
+					if(color == source.end() || !color->is_array() || color->size() != 4U) return false;
+					record.debugColor = {(*color)[0].get<float>(), (*color)[1].get<float>(),
+						(*color)[2].get<float>(), (*color)[3].get<float>()};
+				}
+				set.colliders.push_back(std::move(record));
+			}
+		} catch(...) {
+			return false;
+		}
+		if(!set.Validate().accepted) return false;
+		destination = set;
+		return true;
+	}
+
+	// Poses always use an explicit object so position and rotation cannot be
+	// confused when future schemas add more constraint-frame settings.
+	nlohmann::json PhysicsPoseJson(const PhysicsPose& value) {
+		return {{"position", PhysicsVectorJson(value.position)}, {"rotation", PhysicsRotationJson(value.rotation)}};
+	}
+
+	bool ReadPhysicsPose(const nlohmann::json& value, PhysicsPose& result) {
+		if(!value.is_object()) return false;
+		const auto position = value.find("position");
+		const auto rotation = value.find("rotation");
+		return position != value.end() && rotation != value.end()
+			&& ReadPhysicsVector(*position, result.position) && ReadPhysicsRotation(*rotation, result.rotation);
+	}
+
+	std::string_view ConstraintKindName(PhysicsConstraintKind kind) {
+		switch(kind) {
+		case PhysicsConstraintKind::Fixed: return "Fixed";
+		case PhysicsConstraintKind::Point: return "Point";
+		case PhysicsConstraintKind::Distance: return "Distance";
+		case PhysicsConstraintKind::Hinge: return "Hinge";
+		case PhysicsConstraintKind::Slider: return "Slider";
+		case PhysicsConstraintKind::Cone: return "Cone";
+		case PhysicsConstraintKind::SwingTwist: return "SwingTwist";
+		case PhysicsConstraintKind::SixDegreesOfFreedom: return "SixDegreesOfFreedom";
+		case PhysicsConstraintKind::Gear: return "Gear";
+		}
+		return "Unknown";
+	}
+
+	bool ReadConstraintKind(const nlohmann::json& value, PhysicsConstraintKind& result) {
+		if(!value.is_string()) return false;
+		const std::string name = value.get<std::string>();
+		if(name == "Fixed") result = PhysicsConstraintKind::Fixed;
+		else if(name == "Point") result = PhysicsConstraintKind::Point;
+		else if(name == "Distance") result = PhysicsConstraintKind::Distance;
+		else if(name == "Hinge") result = PhysicsConstraintKind::Hinge;
+		else if(name == "Slider") result = PhysicsConstraintKind::Slider;
+		else if(name == "Cone") result = PhysicsConstraintKind::Cone;
+		else if(name == "SwingTwist") result = PhysicsConstraintKind::SwingTwist;
+		else if(name == "SixDegreesOfFreedom") result = PhysicsConstraintKind::SixDegreesOfFreedom;
+		else if(name == "Gear") result = PhysicsConstraintKind::Gear;
+		else return false;
+		return true;
+	}
+
+	std::string_view EndpointKindName(PhysicsConstraintEndpointKind kind) {
+		switch(kind) {
+		case PhysicsConstraintEndpointKind::ConnectedObject: return "ConnectedObject";
+		case PhysicsConstraintEndpointKind::WorldAnchor: return "WorldAnchor";
+		}
+		return "Unknown";
+	}
+
+	bool ReadEndpointKind(const nlohmann::json& value, PhysicsConstraintEndpointKind& result) {
+		if(!value.is_string()) return false;
+		const std::string name = value.get<std::string>();
+		if(name == "ConnectedObject") result = PhysicsConstraintEndpointKind::ConnectedObject;
+		else if(name == "WorldAnchor") result = PhysicsConstraintEndpointKind::WorldAnchor;
+		else return false;
+		return true;
+	}
+
+	std::string_view MotorModeName(PhysicsConstraintMotorMode mode) {
+		switch(mode) {
+		case PhysicsConstraintMotorMode::Disabled: return "Disabled";
+		case PhysicsConstraintMotorMode::Position: return "Position";
+		case PhysicsConstraintMotorMode::Velocity: return "Velocity";
+		}
+		return "Unknown";
+	}
+
+	bool ReadMotorMode(const nlohmann::json& value, PhysicsConstraintMotorMode& result) {
+		if(!value.is_string()) return false;
+		const std::string name = value.get<std::string>();
+		if(name == "Disabled") result = PhysicsConstraintMotorMode::Disabled;
+		else if(name == "Position") result = PhysicsConstraintMotorMode::Position;
+		else if(name == "Velocity") result = PhysicsConstraintMotorMode::Velocity;
+		else return false;
+		return true;
+	}
+
+	// These compact helpers keep scalar joints and the six ordered SixDOF axes
+	// on the same versioned schema without duplicating field spelling rules.
+	nlohmann::json ConstraintLimitsJson(const PhysicsConstraintLimits& value) {
+		return {{"enabled", value.enabled}, {"minimum", value.minimum}, {"maximum", value.maximum}};
+	}
+
+	bool ReadConstraintLimits(const nlohmann::json& value, PhysicsConstraintLimits& result) {
+		if(!value.is_object()) return false;
+		try {
+			result.enabled = value.at("enabled").get<bool>();
+			result.minimum = value.at("minimum").get<float>();
+			result.maximum = value.at("maximum").get<float>();
+			return true;
+		} catch(...) {
+			return false;
+		}
+	}
+
+	nlohmann::json ConstraintSpringJson(const PhysicsConstraintSpring& value) {
+		return {{"enabled", value.enabled}, {"stiffness", value.stiffness}, {"damping", value.damping}};
+	}
+
+	bool ReadConstraintSpring(const nlohmann::json& value, PhysicsConstraintSpring& result) {
+		if(!value.is_object()) return false;
+		try {
+			result.enabled = value.at("enabled").get<bool>();
+			result.stiffness = value.at("stiffness").get<float>();
+			result.damping = value.at("damping").get<float>();
+			return true;
+		} catch(...) {
+			return false;
+		}
+	}
+
+	nlohmann::json ConstraintMotorJson(const PhysicsConstraintMotor& value) {
+		return {{"mode", MotorModeName(value.mode)}, {"targetPosition", value.targetPosition},
+			{"targetVelocity", value.targetVelocity}, {"maximumForce", value.maximumForce}};
+	}
+
+	bool ReadConstraintMotor(const nlohmann::json& value, PhysicsConstraintMotor& result) {
+		if(!value.is_object()) return false;
+		try {
+			if(!ReadMotorMode(value.at("mode"), result.mode)) return false;
+			result.targetPosition = value.at("targetPosition").get<float>();
+			result.targetVelocity = value.at("targetVelocity").get<float>();
+			result.maximumForce = value.at("maximumForce").get<float>();
+			return true;
+		} catch(...) {
+			return false;
+		}
+	}
+
+	// JSON has no infinity literal. The engine-owned spelling preserves the
+	// documented unbreakable threshold without relying on a provider sentinel.
+	nlohmann::json BreakThresholdJson(float value) {
+		return std::isinf(value) ? nlohmann::json("Infinity") : nlohmann::json(value);
+	}
+
+	bool ReadBreakThreshold(const nlohmann::json& value, float& result) {
+		if(value.is_string()) {
+			if(value.get<std::string>() != "Infinity") return false;
+			result = std::numeric_limits<float>::infinity();
+			return true;
+		}
+		if(!value.is_number()) return false;
+		result = value.get<float>();
+		return std::isfinite(result);
+	}
+
+	nlohmann::json SerializeConstraintSet(const ConstraintSetComponent& set) {
+		nlohmann::json constraints = nlohmann::json::array();
+		for(const ConstraintRecord& record : set.constraints) {
+			nlohmann::json axisLimits = nlohmann::json::array();
+			nlohmann::json axisSprings = nlohmann::json::array();
+			nlohmann::json axisMotors = nlohmann::json::array();
+			for(std::size_t axisIndex = 0U; axisIndex < record.axisLimits.size(); ++axisIndex) {
+				axisLimits.push_back(ConstraintLimitsJson(record.axisLimits[axisIndex]));
+				axisSprings.push_back(ConstraintSpringJson(record.axisSprings[axisIndex]));
+				axisMotors.push_back(ConstraintMotorJson(record.axisMotors[axisIndex]));
+			}
+			constraints.push_back({
+				{"recordId", TerraEngine::ToHexString(record.recordId)},
+				{"recordVersion", record.recordVersion},
+				{"kind", ConstraintKindName(record.kind)},
+				{"firstEndpointKind", EndpointKindName(record.firstEndpointKind)},
+				{"firstObjectId", TerraEngine::ToHexString(record.firstObjectId)},
+				{"secondEndpointKind", EndpointKindName(record.secondEndpointKind)},
+				{"secondObjectId", TerraEngine::ToHexString(record.secondObjectId)},
+				{"firstFrame", PhysicsPoseJson(record.firstFrame)},
+				{"secondFrame", PhysicsPoseJson(record.secondFrame)},
+				{"firstAxis", PhysicsVectorJson(record.firstAxis)},
+				{"secondAxis", PhysicsVectorJson(record.secondAxis)},
+				{"limits", ConstraintLimitsJson(record.limits)},
+				{"spring", ConstraintSpringJson(record.spring)},
+				{"motor", ConstraintMotorJson(record.motor)},
+				{"axisLimits", std::move(axisLimits)},
+				{"axisSprings", std::move(axisSprings)},
+				{"axisMotors", std::move(axisMotors)},
+				{"firstGearConstraintId", TerraEngine::ToHexString(record.firstGearConstraintId)},
+				{"secondGearConstraintId", TerraEngine::ToHexString(record.secondGearConstraintId)},
+				{"gearRatio", record.gearRatio},
+				{"collideConnected", record.collideConnected},
+				{"breakForce", BreakThresholdJson(record.breakForce)},
+				{"breakTorque", BreakThresholdJson(record.breakTorque)},
+				{"enabled", record.enabled},
+				{"resetGeneration", record.resetGeneration}
+			});
+		}
+		return {{"active", set.active}, {"schemaVersion", set.schemaVersion}, {"constraints", std::move(constraints)}};
+	}
+
+	bool DeserializeConstraintSet(const nlohmann::json& json, ConstraintSetComponent& destination) {
+		if(!json.is_object() || !json.contains("constraints") || !json["constraints"].is_array()) return false;
+		ConstraintSetComponent set;
+		try {
+			set.active = json.value("active", set.active);
+			set.schemaVersion = json.value("schemaVersion", set.schemaVersion);
+			for(const nlohmann::json& source : json["constraints"]) {
+				if(!source.is_object()) return false;
+				ConstraintRecord record;
+				const auto recordId = TerraEngine::ParseUUID(source.at("recordId").get<std::string>());
+				const auto firstObjectId = TerraEngine::ParseUUID(source.at("firstObjectId").get<std::string>());
+				const auto secondObjectId = TerraEngine::ParseUUID(source.at("secondObjectId").get<std::string>());
+				const auto firstGearConstraintId = TerraEngine::ParseUUID(source.at("firstGearConstraintId").get<std::string>());
+				const auto secondGearConstraintId = TerraEngine::ParseUUID(source.at("secondGearConstraintId").get<std::string>());
+				if(!recordId || !firstObjectId || !secondObjectId || !firstGearConstraintId || !secondGearConstraintId) return false;
+				record.recordId = *recordId;
+				record.firstObjectId = *firstObjectId;
+				record.secondObjectId = *secondObjectId;
+				record.firstGearConstraintId = *firstGearConstraintId;
+				record.secondGearConstraintId = *secondGearConstraintId;
+				record.recordVersion = source.value("recordVersion", record.recordVersion);
+				if(!ReadConstraintKind(source.at("kind"), record.kind)
+					|| !ReadEndpointKind(source.at("firstEndpointKind"), record.firstEndpointKind)
+					|| !ReadEndpointKind(source.at("secondEndpointKind"), record.secondEndpointKind)
+					|| !ReadPhysicsPose(source.at("firstFrame"), record.firstFrame)
+					|| !ReadPhysicsPose(source.at("secondFrame"), record.secondFrame)
+					|| !ReadPhysicsVector(source.at("firstAxis"), record.firstAxis)
+					|| !ReadPhysicsVector(source.at("secondAxis"), record.secondAxis)) return false;
+				if(!ReadConstraintLimits(source.at("limits"), record.limits)
+					|| !ReadConstraintSpring(source.at("spring"), record.spring)
+					|| !ReadConstraintMotor(source.at("motor"), record.motor)) return false;
+				const nlohmann::json& axisLimits = source.at("axisLimits");
+				const nlohmann::json& axisSprings = source.at("axisSprings");
+				const nlohmann::json& axisMotors = source.at("axisMotors");
+				if(!axisLimits.is_array() || !axisSprings.is_array() || !axisMotors.is_array()
+					|| axisLimits.size() != record.axisLimits.size() || axisSprings.size() != record.axisSprings.size()
+					|| axisMotors.size() != record.axisMotors.size()) return false;
+				for(std::size_t axisIndex = 0U; axisIndex < record.axisLimits.size(); ++axisIndex) {
+					if(!ReadConstraintLimits(axisLimits[axisIndex], record.axisLimits[axisIndex])
+						|| !ReadConstraintSpring(axisSprings[axisIndex], record.axisSprings[axisIndex])
+						|| !ReadConstraintMotor(axisMotors[axisIndex], record.axisMotors[axisIndex])) return false;
+				}
+				record.gearRatio = source.at("gearRatio").get<float>();
+				record.collideConnected = source.at("collideConnected").get<bool>();
+				if(!ReadBreakThreshold(source.at("breakForce"), record.breakForce)
+					|| !ReadBreakThreshold(source.at("breakTorque"), record.breakTorque)) return false;
+				record.enabled = source.at("enabled").get<bool>();
+				record.resetGeneration = source.at("resetGeneration").get<std::uint32_t>();
+				set.constraints.push_back(std::move(record));
+			}
+		} catch(...) {
+			return false;
+		}
+		if(!set.Validate().accepted) return false;
+		destination = set;
+		return true;
+	}
+
+	std::string_view CharacterShapeName(PhysicsCharacterShapeKind kind) {
+		return kind == PhysicsCharacterShapeKind::Capsule ? "Capsule"
+			: kind == PhysicsCharacterShapeKind::Cylinder ? "Cylinder" : "Unknown";
+	}
+
+	bool ReadCharacterShape(const nlohmann::json& value, PhysicsCharacterShapeKind& result) {
+		if(!value.is_string()) return false;
+		const std::string name = value.get<std::string>();
+		if(name == "Capsule") result = PhysicsCharacterShapeKind::Capsule;
+		else if(name == "Cylinder") result = PhysicsCharacterShapeKind::Cylinder;
+		else return false;
+		return true;
+	}
+
+	std::string_view RotationPolicyName(PhysicsCharacterRotationPolicy policy) {
+		switch(policy) {
+		case PhysicsCharacterRotationPolicy::Free: return "Free";
+		case PhysicsCharacterRotationPolicy::AlignToUp: return "AlignToUp";
+		case PhysicsCharacterRotationPolicy::Locked: return "Locked";
+		}
+		return "Unknown";
+	}
+
+	bool ReadRotationPolicy(const nlohmann::json& value, PhysicsCharacterRotationPolicy& result) {
+		if(!value.is_string()) return false;
+		const std::string name = value.get<std::string>();
+		if(name == "Free") result = PhysicsCharacterRotationPolicy::Free;
+		else if(name == "AlignToUp") result = PhysicsCharacterRotationPolicy::AlignToUp;
+		else if(name == "Locked") result = PhysicsCharacterRotationPolicy::Locked;
+		else return false;
+		return true;
+	}
+
+	nlohmann::json SerializeCharacterController(const CharacterControllerComponent& character) {
+		return {
+			{"active", character.active}, {"schemaVersion", character.schemaVersion},
+			{"shapeKind", CharacterShapeName(character.shapeKind)}, {"radius", character.radius}, {"height", character.height},
+			{"localCenter", PhysicsVectorJson(character.localCenter)}, {"upDirection", PhysicsVectorJson(character.upDirection)},
+			{"stepHeight", character.stepHeight}, {"supportVolumeRadius", character.supportVolumeRadius},
+			{"supportVolumeHeight", character.supportVolumeHeight}, {"maximumSlopeAngleDegrees", character.maximumSlopeAngleDegrees},
+			{"contactPadding", character.contactPadding}, {"mass", character.mass}, {"maximumStrength", character.maximumStrength},
+			{"collisionLayerId", character.collisionLayerId}, {"collisionMask", character.collisionMask},
+			{"groundAdhesion", character.groundAdhesion}, {"allowStairWalking", character.allowStairWalking},
+			{"useGravity", character.useGravity}, {"gravityScale", character.gravityScale}, {"jumpSpeed", character.jumpSpeed},
+			{"rotationPolicy", RotationPolicyName(character.rotationPolicy)}, {"enabled", character.enabled}
+		};
+	}
+
+	bool DeserializeCharacterController(const nlohmann::json& json, CharacterControllerComponent& destination) {
+		if(!json.is_object()) return false;
+		CharacterControllerComponent character;
+		try {
+			character.active = json.value("active", character.active);
+			character.schemaVersion = json.value("schemaVersion", character.schemaVersion);
+			if(!ReadCharacterShape(json.at("shapeKind"), character.shapeKind)
+				|| !ReadPhysicsVector(json.at("localCenter"), character.localCenter)
+				|| !ReadPhysicsVector(json.at("upDirection"), character.upDirection)
+				|| !ReadRotationPolicy(json.at("rotationPolicy"), character.rotationPolicy)) return false;
+			character.radius = json.at("radius").get<float>();
+			character.height = json.at("height").get<float>();
+			character.stepHeight = json.at("stepHeight").get<float>();
+			character.supportVolumeRadius = json.at("supportVolumeRadius").get<float>();
+			character.supportVolumeHeight = json.at("supportVolumeHeight").get<float>();
+			character.maximumSlopeAngleDegrees = json.at("maximumSlopeAngleDegrees").get<float>();
+			character.contactPadding = json.at("contactPadding").get<float>();
+			character.mass = json.at("mass").get<float>();
+			character.maximumStrength = json.at("maximumStrength").get<float>();
+			character.collisionLayerId = json.at("collisionLayerId").get<std::uint8_t>();
+			character.collisionMask = json.at("collisionMask").get<std::uint32_t>();
+			character.groundAdhesion = json.at("groundAdhesion").get<float>();
+			character.allowStairWalking = json.at("allowStairWalking").get<bool>();
+			character.useGravity = json.at("useGravity").get<bool>();
+			character.gravityScale = json.at("gravityScale").get<float>();
+			character.jumpSpeed = json.at("jumpSpeed").get<float>();
+			character.enabled = json.at("enabled").get<bool>();
+		} catch(...) {
+			return false;
+		}
+		if(!character.Validate().accepted) return false;
+		destination = character;
+		return true;
+	}
+}
 
 // SerializeObjectRecursive snapshots authored scene state through the canonical
 // Object handle path while still letting reflection read the underlying EnTT
@@ -40,6 +640,37 @@ nlohmann::json SerializeObjectRecursive(Object object) {
 
 		if (functions.entityHasComponent && functions.entityHasComponent(enttRegistry, entity))
 		{
+			// Collection components need a typed serializer because reflection does
+			// not flatten variants or vectors. Keep this special case at the protected
+			// scene boundary; worker snapshots consume only the decoded typed values.
+			if(compName == RigidBodyComponent::kComponentName) {
+				if(const RigidBodyComponent* body = enttRegistry.try_get<RigidBodyComponent>(entity)) {
+					auto guard = body->acquireReadLock();
+					objJson["components"][compName] = SerializeRigidBody(*body);
+				}
+				continue;
+			}
+			if(compName == ColliderSetComponent::kComponentName) {
+				if(const ColliderSetComponent* colliders = enttRegistry.try_get<ColliderSetComponent>(entity)) {
+					auto guard = colliders->acquireReadLock();
+					objJson["components"][compName] = SerializeColliderSet(*colliders);
+				}
+				continue;
+			}
+			if(compName == ConstraintSetComponent::kComponentName) {
+				if(const ConstraintSetComponent* constraints = enttRegistry.try_get<ConstraintSetComponent>(entity)) {
+					auto guard = constraints->acquireReadLock();
+					objJson["components"][compName] = SerializeConstraintSet(*constraints);
+				}
+				continue;
+			}
+			if(compName == CharacterControllerComponent::kComponentName) {
+				if(const CharacterControllerComponent* character = enttRegistry.try_get<CharacterControllerComponent>(entity)) {
+					auto guard = character->acquireReadLock();
+					objJson["components"][compName] = SerializeCharacterController(*character);
+				}
+				continue;
+			}
 			nlohmann::json compJson = nlohmann::json::object();
 			TerraEngine::Reflection::Type type = functions.reflectionType;
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -209,6 +840,35 @@ entt::entity Serializer::DeserializeObjectEntity(const nlohmann::json& json, std
 				{
 					functions.entityAddComponent(enttRegistry, entity);
 					objManager.notifyObjectStructureChanged(obj);
+				}
+
+				if(compName == RigidBodyComponent::kComponentName) {
+					RigidBodyComponent* body = enttRegistry.try_get<RigidBodyComponent>(entity);
+					if(body == nullptr || !DeserializeRigidBody(compData, *body)) {
+						if(functions.entityRemoveComponent) functions.entityRemoveComponent(enttRegistry, entity);
+					}
+					continue;
+				}
+				if(compName == ColliderSetComponent::kComponentName) {
+					ColliderSetComponent* colliders = enttRegistry.try_get<ColliderSetComponent>(entity);
+					if(colliders == nullptr || !DeserializeColliderSet(compData, *colliders)) {
+						if(functions.entityRemoveComponent) functions.entityRemoveComponent(enttRegistry, entity);
+					}
+					continue;
+				}
+				if(compName == ConstraintSetComponent::kComponentName) {
+					ConstraintSetComponent* constraints = enttRegistry.try_get<ConstraintSetComponent>(entity);
+					if(constraints == nullptr || !DeserializeConstraintSet(compData, *constraints)) {
+						if(functions.entityRemoveComponent) functions.entityRemoveComponent(enttRegistry, entity);
+					}
+					continue;
+				}
+				if(compName == CharacterControllerComponent::kComponentName) {
+					CharacterControllerComponent* character = enttRegistry.try_get<CharacterControllerComponent>(entity);
+					if(character == nullptr || !DeserializeCharacterController(compData, *character)) {
+						if(functions.entityRemoveComponent) functions.entityRemoveComponent(enttRegistry, entity);
+					}
+					continue;
 				}
 
 					TerraEngine::Reflection::Type type = functions.reflectionType;

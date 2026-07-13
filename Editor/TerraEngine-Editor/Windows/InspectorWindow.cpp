@@ -14,9 +14,16 @@
 #include "Engine/Resource/ResourceManager.h"
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Scene/SceneManager.h"
+#include "Engine/Scene/SceneMutationQueue.h"
+#include "Engine/Scene/TransactionalMutation.h"
 #include "Engine/Components/LightComponent.h"
 #include "Engine/Components/UIComponent.h"
 #include "Engine/Components/ScriptComponent.h"
+#include "Engine/Components/Physics/RigidBodyComponent.h"
+#include "Engine/Components/Physics/ColliderSetComponent.h"
+#include "Engine/Components/Physics/ConstraintSetComponent.h"
+#include "Engine/Components/Physics/CharacterControllerComponent.h"
+#include "Engine/Physics/PhysicsSystem.h"
 #include "Engine/Scripting/ScriptingSystem.h"
 #include "AssetDatabase.h"
 #include "AssetImportResult.h"
@@ -44,6 +51,7 @@
 #include <limits>
 #include <optional>
 #include <sstream>
+#include <utility>
 
 using ReflectionProperty = TerraEngine::Reflection::Property;
 using ReflectionType = TerraEngine::Reflection::Type;
@@ -74,6 +82,124 @@ bool IsGeneratedPackageSubAssetPath(const std::filesystem::path& path)
 		}
 	}
 	return false;
+}
+
+template<typename ComponentType>
+struct PhysicsEditCandidate
+{
+	PhysicsEditCandidate(TerraEngine::UUID id, const ComponentType& source)
+		: objectId(id), value(source) {}
+	PhysicsEditCandidate(const PhysicsEditCandidate&) = default;
+	PhysicsEditCandidate& operator=(const PhysicsEditCandidate&) = default;
+	// Component mutexes are intentionally non-movable; copying authored data
+	// creates a fresh lock and is safe for detached transaction preparation.
+	PhysicsEditCandidate(PhysicsEditCandidate&& other) noexcept
+		: objectId(other.objectId), value(other.value) {}
+	PhysicsEditCandidate& operator=(PhysicsEditCandidate&& other) noexcept
+	{
+		objectId = other.objectId;
+		value = other.value;
+		return *this;
+	}
+	TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+	ComponentType value;
+};
+
+std::uint64_t g_PhysicsInspectorTransactionSequence = 0U;
+
+template<typename ComponentType>
+std::vector<PhysicsEditCandidate<ComponentType>> CopyPhysicsCandidates(const std::vector<entt::entity>& entities)
+{
+	std::vector<PhysicsEditCandidate<ComponentType>> candidates;
+	candidates.reserve(entities.size());
+	ObjectManager& objects = ObjectManager::instance();
+	for (const entt::entity entity : entities)
+	{
+		const std::optional<Object> object = objects.getObject(entity);
+		ComponentType* component = object ? objects.GetComponent<ComponentType>(*object) : nullptr;
+		if (!object || component == nullptr)
+		{
+			return {};
+		}
+		auto lock = component->acquireReadLock();
+		candidates.emplace_back(objects.getUUID(*object), *component);
+	}
+	return candidates;
+}
+
+template<typename ValueType>
+std::vector<TerraEngine::UUID> SubmitPhysicsPropertyBatch(
+	const std::vector<std::pair<TerraEngine::UUID, ValueType>>& values,
+	std::string componentName,
+	std::string propertyName,
+	std::string undoLabel,
+	std::string transactionPrefix)
+{
+	if (values.empty())
+	{
+		return {};
+	}
+	ObjectManager& objects = ObjectManager::instance();
+	TerraEngine::Scene::TransactionalMutationBuilder builder(
+		std::move(transactionPrefix) + "-" + std::to_string(++g_PhysicsInspectorTransactionSequence),
+		TerraEngine::Scene::TransactionOrigin::Editor,
+		"InspectorPhysicsMultiEdit");
+	builder.ObserveScene(objects).SetUndoGroup(std::move(undoLabel));
+	std::vector<TerraEngine::UUID> changedObjects;
+	changedObjects.reserve(values.size());
+	for (const auto& [objectId, value] : values)
+	{
+		builder.ObserveObject(objects, objectId)
+			.UpdateComponentProperty(objectId, componentName, propertyName, TerraEngine::Reflection::Variant{value});
+		changedObjects.push_back(objectId);
+	}
+	TerraEngine::Scene::SceneMutationQueue::Instance().EnqueueTransaction(builder.Build());
+	return changedObjects;
+}
+
+template<typename ValueType>
+bool HasMixedValues(const std::vector<ValueType>& values)
+{
+	for (std::size_t index = 1U; index < values.size(); ++index)
+	{
+		if (values[index] != values.front()) return true;
+	}
+	return false;
+}
+
+bool DrawMixedCheckbox(const char* label, bool& value, bool mixed)
+{
+	if (mixed) ImGui::PushItemFlag(ImGuiItemFlags_MixedValue, true);
+	const bool changed = ImGui::Checkbox(label, &value);
+	if (mixed) ImGui::PopItemFlag();
+	return changed;
+}
+
+bool DrawMixedDragFloat(const char* label, float& value, bool mixed, float speed, float minimum, float maximum, const char* format)
+{
+	if (mixed) ImGui::PushItemFlag(ImGuiItemFlags_MixedValue, true);
+	const bool changed = ImGui::DragFloat(label, &value, speed, minimum, maximum, format);
+	if (mixed) ImGui::PopItemFlag();
+	return changed;
+}
+
+bool DrawMixedCombo(const char* label, int& value, bool mixed, const char* const* labels, int count)
+{
+	if (mixed) ImGui::PushItemFlag(ImGuiItemFlags_MixedValue, true);
+	const bool changed = ImGui::Combo(label, &value, labels, count);
+	if (mixed) ImGui::PopItemFlag();
+	return changed;
+}
+
+bool SameVector3(const TerraEngine::Physics::PhysicsVector3& left, const TerraEngine::Physics::PhysicsVector3& right)
+{
+	return left.x == right.x && left.y == right.y && left.z == right.z;
+}
+
+bool IsPhysicsAuthoringComponent(std::string_view componentName)
+{
+	return componentName == "RigidBodyComponent" || componentName == "ColliderSetComponent"
+		|| componentName == "ConstraintSetComponent" || componentName == "CharacterControllerComponent";
 }
 
 bool TryResolveGeneratedPackageTextureName(const TerraEngine::UUID& textureGuid, std::string& outName)
@@ -2879,6 +3005,383 @@ void InspectorWindow::DrawUIComponentInspector(const std::string& compName, entt
 }
 
 // InspectorWindow::OnGui is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+void InspectorWindow::QueuePhysicsRebuildIntentsForChangedObjects(
+	const std::vector<TerraEngine::UUID>& objectIds, std::string reason)
+{
+	m_PhysicsRebuildIntents.Queue(objectIds, std::move(reason));
+}
+
+std::vector<InspectorWindow::PhysicsRebuildIntent> InspectorWindow::DrainPhysicsRebuildIntentsForProtectedBoundary()
+{
+	// Moving the completed UI batch gives the lifecycle coordinator one explicit
+	// protected-boundary handoff and prevents a provider rebuild during OnGui.
+	return m_PhysicsRebuildIntents.Drain();
+}
+
+void InspectorWindow::DrawPhysicsRuntimeState(entt::entity obj)
+{
+	ImGui::SeparatorText("Runtime State (read-only)");
+	const auto snapshot = TerraEngine::Physics::PhysicsSystem::Instance().LatestBodySnapshot();
+	const TerraEngine::UUID objectId = GetObjectUuid(obj);
+	if (!snapshot || !snapshot->bodies)
+	{
+		ImGui::TextDisabled("No published physics state.");
+		return;
+	}
+	for (const TerraEngine::Physics::PhysicsBodyState& state : *snapshot->bodies)
+	{
+		if (state.objectId != objectId)
+		{
+			continue;
+		}
+		ImGui::Text("World tick: %llu", static_cast<unsigned long long>(snapshot->tick));
+		ImGui::Text("Linear velocity: %.3f, %.3f, %.3f m/s", state.linearVelocity.x, state.linearVelocity.y, state.linearVelocity.z);
+		ImGui::Text("Angular velocity: %.3f, %.3f, %.3f rad/s", state.angularVelocity.x, state.angularVelocity.y, state.angularVelocity.z);
+		ImGui::Text("Awake: %s", state.awake ? "yes" : "no");
+		return;
+	}
+	ImGui::TextDisabled("This object has no published runtime body.");
+}
+
+void InspectorWindow::DrawRigidBodyInspector(const std::vector<entt::entity>& entities)
+{
+	auto candidates = CopyPhysicsCandidates<RigidBodyComponent>(entities);
+	if (candidates.empty()) return;
+	auto submit = [&](const char* propertyName, auto value, auto setValue, const char* label) {
+		for (auto& candidate : candidates) setValue(candidate.value, value);
+		for (const auto& candidate : candidates)
+		{
+			const auto validation = candidate.value.Validate();
+			if (!validation.accepted)
+			{
+				ImGui::TextColored(ImVec4(1, .45F, .25F, 1), "%s", validation.message.c_str());
+				return;
+			}
+		}
+		std::vector<std::pair<TerraEngine::UUID, decltype(value)>> values;
+		for (const auto& candidate : candidates) values.emplace_back(candidate.objectId, value);
+		QueuePhysicsRebuildIntentsForChangedObjects(
+			SubmitPhysicsPropertyBatch(values, "RigidBodyComponent", propertyName, label, "inspector-rigidbody"), label);
+	};
+
+	std::vector<int> motions;
+	for (const auto& candidate : candidates) motions.push_back(static_cast<int>(candidate.value.motionType));
+	int motion = motions.front();
+	const char* motionLabels[] = {"Static", "Dynamic", "Kinematic"};
+	if (DrawMixedCombo("Motion Type", motion, HasMixedValues(motions), motionLabels, IM_ARRAYSIZE(motionLabels)))
+		submit("motionType", static_cast<TerraEngine::Physics::PhysicsMotionType>(motion), [](auto& body, auto value) { body.motionType = value; }, "Edit Rigid Body Motion Type");
+
+	std::vector<bool> gravities;
+	for (const auto& candidate : candidates) gravities.push_back(candidate.value.useGravity);
+	bool useGravity = gravities.front();
+	if (DrawMixedCheckbox("Use World Gravity", useGravity, HasMixedValues(gravities)))
+		submit("useGravity", useGravity, [](auto& body, bool value) { body.useGravity = value; }, "Edit Rigid Body Gravity");
+	ImGui::SameLine(); ImGui::TextDisabled("(m/s^2)");
+
+	std::vector<bool> sleepingValues;
+	for (const auto& candidate : candidates) sleepingValues.push_back(candidate.value.allowSleeping);
+	bool allowSleeping = sleepingValues.front();
+	if (DrawMixedCheckbox("Allow Sleeping", allowSleeping, HasMixedValues(sleepingValues)))
+		submit("allowSleeping", allowSleeping, [](auto& body, bool value) { body.allowSleeping = value; }, "Edit Rigid Body Sleeping");
+
+	auto drawFloat = [&](const char* widgetLabel, const char* propertyName, auto member, float speed, float minimum, float maximum, const char* format, const char* historyLabel) {
+		std::vector<float> values;
+		for (const auto& candidate : candidates) values.push_back(candidate.value.*member);
+		float value = values.front();
+		if (DrawMixedDragFloat(widgetLabel, value, HasMixedValues(values), speed, minimum, maximum, format))
+			submit(propertyName, value, [member](auto& body, float updated) { body.*member = updated; }, historyLabel);
+	};
+	if (std::any_of(candidates.begin(), candidates.end(), [](const auto& candidate) { return candidate.value.massMode == TerraEngine::Physics::PhysicsMassMode::ExplicitMass; }))
+		drawFloat("Mass (kg)", "mass", &RigidBodyComponent::mass, .05F, .001F, 100000.0F, "%.3f", "Edit Rigid Body Mass");
+	drawFloat("Linear Damping", "linearDamping", &RigidBodyComponent::linearDamping, .01F, 0.0F, 100.0F, "%.3f", "Edit Rigid Body Linear Damping");
+	drawFloat("Angular Damping", "angularDamping", &RigidBodyComponent::angularDamping, .01F, 0.0F, 100.0F, "%.3f", "Edit Rigid Body Angular Damping");
+	drawFloat("Max Linear Velocity (m/s)", "maxLinearVelocity", &RigidBodyComponent::maxLinearVelocity, 1.0F, .001F, 100000.0F, "%.2f", "Edit Rigid Body Velocity Limit");
+	DrawPhysicsRuntimeState(entities.front());
+}
+
+void InspectorWindow::DrawColliderSetInspector(const std::vector<entt::entity>& entities)
+{
+	auto candidates = CopyPhysicsCandidates<ColliderSetComponent>(entities);
+	if (candidates.empty()) return;
+	auto commit = [&](const char* label) {
+		std::vector<std::pair<TerraEngine::UUID, std::vector<TerraEngine::Physics::ColliderRecord>>> values;
+		for (const auto& candidate : candidates)
+		{
+			const auto validation = candidate.value.Validate();
+			if (!validation.accepted)
+			{
+				ImGui::TextColored(ImVec4(1, .45F, .25F, 1), "Collider validation: %s", validation.message.c_str());
+				return;
+			}
+			values.emplace_back(candidate.objectId, candidate.value.colliders);
+		}
+		QueuePhysicsRebuildIntentsForChangedObjects(
+			SubmitPhysicsPropertyBatch(values, "ColliderSetComponent", "colliders", label, "inspector-colliders"), label);
+	};
+
+	if (ImGui::Button("Add Collider"))
+	{
+		for (auto& candidate : candidates) candidate.value.Add();
+		commit("Add Collider Records");
+	}
+
+	// Only stable IDs present on every selected object are editable as one group.
+	// This avoids accidentally pairing records merely because their vector indices
+	// happen to match after independent prefab overrides or reordering.
+	std::vector<TerraEngine::UUID> commonRecordIds;
+	for (const auto& record : candidates.front().value.colliders)
+	{
+		const bool presentEverywhere = std::all_of(candidates.begin() + 1, candidates.end(), [&](const auto& candidate) {
+			return std::any_of(candidate.value.colliders.begin(), candidate.value.colliders.end(), [&](const auto& other) { return other.recordId == record.recordId; });
+		});
+		if (presentEverywhere) commonRecordIds.push_back(record.recordId);
+	}
+	if (candidates.size() > 1U && commonRecordIds.empty() && !candidates.front().value.colliders.empty())
+	{
+		ImGui::TextDisabled("No collider record IDs are shared by every selected object.");
+	}
+
+	for (std::size_t displayIndex = 0; displayIndex < commonRecordIds.size(); ++displayIndex)
+	{
+		const TerraEngine::UUID recordId = commonRecordIds[displayIndex];
+		std::vector<TerraEngine::Physics::ColliderRecord*> records;
+		for (auto& candidate : candidates)
+		{
+			auto record = std::find_if(candidate.value.colliders.begin(), candidate.value.colliders.end(), [&](const auto& value) { return value.recordId == recordId; });
+			records.push_back(&*record);
+		}
+		ImGui::PushID(TerraEngine::ToHexString(recordId).c_str());
+		ImGui::SeparatorText(("Collider " + std::to_string(displayIndex + 1U)).c_str());
+		ImGui::TextDisabled("Stable record ID: %s", TerraEngine::ToHexString(recordId).c_str());
+
+		std::vector<bool> enabledValues;
+		for (const auto* record : records) enabledValues.push_back(record->enabled);
+		bool enabled = enabledValues.front();
+		if (DrawMixedCheckbox("Enabled", enabled, HasMixedValues(enabledValues)))
+		{
+			for (auto* record : records) record->enabled = enabled;
+			commit("Edit Collider Enabled State");
+		}
+		std::vector<bool> triggerValues;
+		for (const auto* record : records) triggerValues.push_back(record->isTrigger);
+		bool trigger = triggerValues.front();
+		if (DrawMixedCheckbox("Trigger", trigger, HasMixedValues(triggerValues)))
+		{
+			for (auto* record : records) record->isTrigger = trigger;
+			commit("Edit Collider Trigger State");
+		}
+		TerraEngine::Physics::PhysicsVector3 center = records.front()->localCenter;
+		const bool mixedCenter = std::any_of(records.begin() + 1, records.end(), [&](const auto* record) { return !SameVector3(record->localCenter, center); });
+		if (mixedCenter) ImGui::PushItemFlag(ImGuiItemFlags_MixedValue, true);
+		const bool centerChanged = ImGui::DragFloat3("Center (m)", &center.x, .01F, -100000.0F, 100000.0F, "%.3f");
+		if (mixedCenter) ImGui::PopItemFlag();
+		if (centerChanged)
+		{
+			for (auto* record : records) record->localCenter = center;
+			commit("Edit Collider Center");
+		}
+
+		if (ImGui::Button("Duplicate"))
+		{
+			for (auto& candidate : candidates)
+			{
+				auto source = std::find_if(candidate.value.colliders.begin(), candidate.value.colliders.end(), [&](const auto& value) { return value.recordId == recordId; });
+				auto duplicate = *source;
+				duplicate.recordId = TerraEngine::GenerateUUID();
+				candidate.value.colliders.insert(source + 1, duplicate);
+			}
+			commit("Duplicate Collider Records");
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Remove"))
+		{
+			for (auto& candidate : candidates) (void)candidate.value.Remove(recordId);
+			commit("Remove Collider Records");
+			ImGui::PopID();
+			break;
+		}
+		ImGui::SameLine();
+		if (ImGui::SmallButton("Move Up"))
+		{
+			for (auto& candidate : candidates)
+			{
+				auto record = std::find_if(candidate.value.colliders.begin(), candidate.value.colliders.end(), [&](const auto& value) { return value.recordId == recordId; });
+				if (record != candidate.value.colliders.begin()) std::iter_swap(record, record - 1);
+			}
+			commit("Reorder Collider Records");
+		}
+		ImGui::SameLine();
+		if (ImGui::SmallButton("Move Down"))
+		{
+			for (auto& candidate : candidates)
+			{
+				auto record = std::find_if(candidate.value.colliders.begin(), candidate.value.colliders.end(), [&](const auto& value) { return value.recordId == recordId; });
+				if (record + 1 != candidate.value.colliders.end()) std::iter_swap(record, record + 1);
+			}
+			commit("Reorder Collider Records");
+		}
+		ImGui::PopID();
+	}
+}
+
+void InspectorWindow::DrawConstraintSetInspector(const std::vector<entt::entity>& entities)
+{
+	auto candidates = CopyPhysicsCandidates<ConstraintSetComponent>(entities);
+	if (candidates.empty()) return;
+	auto commit = [&](const char* label) {
+		std::vector<std::pair<TerraEngine::UUID, std::vector<TerraEngine::Physics::ConstraintRecord>>> values;
+		for (const auto& candidate : candidates)
+		{
+			const auto validation = candidate.value.Validate();
+			if (!validation.accepted)
+			{
+				ImGui::TextColored(ImVec4(1, .45F, .25F, 1), "Constraint validation: %s", validation.message.c_str());
+				return;
+			}
+			values.emplace_back(candidate.objectId, candidate.value.constraints);
+		}
+		QueuePhysicsRebuildIntentsForChangedObjects(
+			SubmitPhysicsPropertyBatch(values, "ConstraintSetComponent", "constraints", label, "inspector-constraints"), label);
+	};
+	if (ImGui::Button("Add Constraint"))
+	{
+		for (auto& candidate : candidates) candidate.value.Add();
+		commit("Add Constraint Records");
+	}
+
+	std::vector<TerraEngine::UUID> commonRecordIds;
+	for (const auto& record : candidates.front().value.constraints)
+	{
+		if (std::all_of(candidates.begin() + 1, candidates.end(), [&](const auto& candidate) {
+			return std::any_of(candidate.value.constraints.begin(), candidate.value.constraints.end(), [&](const auto& other) { return other.recordId == record.recordId; });
+		})) commonRecordIds.push_back(record.recordId);
+	}
+	if (candidates.size() > 1U && commonRecordIds.empty() && !candidates.front().value.constraints.empty())
+		ImGui::TextDisabled("No constraint record IDs are shared by every selected object.");
+
+	for (std::size_t displayIndex = 0; displayIndex < commonRecordIds.size(); ++displayIndex)
+	{
+		const TerraEngine::UUID recordId = commonRecordIds[displayIndex];
+		std::vector<TerraEngine::Physics::ConstraintRecord*> records;
+		for (auto& candidate : candidates)
+		{
+			auto record = std::find_if(candidate.value.constraints.begin(), candidate.value.constraints.end(), [&](const auto& value) { return value.recordId == recordId; });
+			records.push_back(&*record);
+		}
+		ImGui::PushID(TerraEngine::ToHexString(recordId).c_str());
+		ImGui::SeparatorText(("Constraint " + std::to_string(displayIndex + 1U)).c_str());
+		ImGui::TextDisabled("Stable record ID: %s", TerraEngine::ToHexString(recordId).c_str());
+		std::vector<bool> enabledValues;
+		for (const auto* record : records) enabledValues.push_back(record->enabled);
+		bool enabled = enabledValues.front();
+		if (DrawMixedCheckbox("Enabled", enabled, HasMixedValues(enabledValues)))
+		{
+			for (auto* record : records) record->enabled = enabled;
+			commit("Edit Constraint Enabled State");
+		}
+		std::vector<bool> collideValues;
+		for (const auto* record : records) collideValues.push_back(record->collideConnected);
+		bool collideConnected = collideValues.front();
+		if (DrawMixedCheckbox("Collide Connected", collideConnected, HasMixedValues(collideValues)))
+		{
+			for (auto* record : records) record->collideConnected = collideConnected;
+			commit("Edit Constraint Collision");
+		}
+		std::vector<float> forceValues;
+		for (const auto* record : records) forceValues.push_back(record->breakForce);
+		float breakForce = forceValues.front();
+		if (DrawMixedDragFloat("Break Force (N)", breakForce, HasMixedValues(forceValues), 1.0F, 0.0F, 10000000.0F, "%.1f"))
+		{
+			for (auto* record : records) record->breakForce = breakForce;
+			commit("Edit Constraint Break Force");
+		}
+
+		if (ImGui::Button("Duplicate"))
+		{
+			for (auto& candidate : candidates)
+			{
+				auto source = std::find_if(candidate.value.constraints.begin(), candidate.value.constraints.end(), [&](const auto& value) { return value.recordId == recordId; });
+				auto duplicate = *source;
+				duplicate.recordId = TerraEngine::GenerateUUID();
+				candidate.value.constraints.insert(source + 1, duplicate);
+			}
+			commit("Duplicate Constraint Records");
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Remove"))
+		{
+			for (auto& candidate : candidates) (void)candidate.value.Remove(recordId);
+			commit("Remove Constraint Records");
+			ImGui::PopID();
+			break;
+		}
+		ImGui::SameLine();
+		if (ImGui::SmallButton("Move Up"))
+		{
+			for (auto& candidate : candidates)
+			{
+				auto record = std::find_if(candidate.value.constraints.begin(), candidate.value.constraints.end(), [&](const auto& value) { return value.recordId == recordId; });
+				if (record != candidate.value.constraints.begin()) std::iter_swap(record, record - 1);
+			}
+			commit("Reorder Constraint Records");
+		}
+		ImGui::SameLine();
+		if (ImGui::SmallButton("Move Down"))
+		{
+			for (auto& candidate : candidates)
+			{
+				auto record = std::find_if(candidate.value.constraints.begin(), candidate.value.constraints.end(), [&](const auto& value) { return value.recordId == recordId; });
+				if (record + 1 != candidate.value.constraints.end()) std::iter_swap(record, record + 1);
+			}
+			commit("Reorder Constraint Records");
+		}
+		ImGui::PopID();
+	}
+}
+
+void InspectorWindow::DrawCharacterControllerInspector(const std::vector<entt::entity>& entities)
+{
+	auto candidates = CopyPhysicsCandidates<CharacterControllerComponent>(entities);
+	if (candidates.empty()) return;
+	auto submit = [&](const char* propertyName, auto value, auto setValue, const char* label) {
+		for (auto& candidate : candidates) setValue(candidate.value, value);
+		for (const auto& candidate : candidates)
+		{
+			const auto validation = candidate.value.Validate();
+			if (!validation.accepted)
+			{
+				ImGui::TextColored(ImVec4(1, .45F, .25F, 1), "%s", validation.message.c_str());
+				return;
+			}
+		}
+		std::vector<std::pair<TerraEngine::UUID, decltype(value)>> values;
+		for (const auto& candidate : candidates) values.emplace_back(candidate.objectId, value);
+		QueuePhysicsRebuildIntentsForChangedObjects(
+			SubmitPhysicsPropertyBatch(values, "CharacterControllerComponent", propertyName, label, "inspector-character"), label);
+	};
+	auto drawFloat = [&](const char* widgetLabel, const char* propertyName, auto member, float minimum, float maximum, const char* historyLabel) {
+		std::vector<float> values;
+		for (const auto& candidate : candidates) values.push_back(candidate.value.*member);
+		float value = values.front();
+		if (DrawMixedDragFloat(widgetLabel, value, HasMixedValues(values), .01F, minimum, maximum, "%.3f"))
+			submit(propertyName, value, [member](auto& character, float updated) { character.*member = updated; }, historyLabel);
+	};
+	drawFloat("Radius (m)", "radius", &CharacterControllerComponent::radius, .01F, 1000.0F, "Edit Character Radius");
+	drawFloat("Height (m)", "height", &CharacterControllerComponent::height, .02F, 2000.0F, "Edit Character Height");
+	drawFloat("Step Height (m)", "stepHeight", &CharacterControllerComponent::stepHeight, 0.0F, 100.0F, "Edit Character Step Height");
+	drawFloat("Maximum Slope (degrees)", "maximumSlopeAngleDegrees", &CharacterControllerComponent::maximumSlopeAngleDegrees, 0.0F, 89.9F, "Edit Character Slope Limit");
+	std::vector<bool> stairValues;
+	for (const auto& candidate : candidates) stairValues.push_back(candidate.value.allowStairWalking);
+	bool stairWalking = stairValues.front();
+	if (DrawMixedCheckbox("Allow Stair Walking", stairWalking, HasMixedValues(stairValues)))
+		submit("allowStairWalking", stairWalking, [](auto& character, bool value) { character.allowStairWalking = value; }, "Edit Character Stair Walking");
+	std::vector<bool> gravityValues;
+	for (const auto& candidate : candidates) gravityValues.push_back(candidate.value.useGravity);
+	bool useGravity = gravityValues.front();
+	if (DrawMixedCheckbox("Use World Gravity", useGravity, HasMixedValues(gravityValues)))
+		submit("useGravity", useGravity, [](auto& character, bool value) { character.useGravity = value; }, "Edit Character Gravity");
+}
+
 void InspectorWindow::OnGui() {
 	m_InspectorValueDragging = false;
 	
@@ -2913,6 +3416,7 @@ void InspectorWindow::OnGui() {
 		return;
 	}
 
+	std::vector<entt::entity> selectedEntities = m_Owner->GetSelectedEntities();
 	auto selectedEntity = m_Owner->GetSelectedEntity();
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (selectedEntity) {
@@ -3115,6 +3619,13 @@ void InspectorWindow::OnGui() {
 				}
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (access.entityHasComponent(ObjectManager::instance().getRegistry(), obj)) {
+					if (IsPhysicsAuthoringComponent(compName)
+						&& !std::all_of(selectedEntities.begin(), selectedEntities.end(), [&](entt::entity selectedObject) {
+							return access.entityHasComponent(ObjectManager::instance().getRegistry(), selectedObject);
+						}))
+					{
+						continue;
+					}
 					activeComponents.insert(compName);
 					if (compName == "Transform") hasTransform = true;
 				}
@@ -3292,6 +3803,22 @@ void InspectorWindow::OnGui() {
 					else if (compName == "UIComponent")
 					{
 						DrawUIComponentInspector(compName, obj, access);
+					}
+					else if (compName == "RigidBodyComponent")
+					{
+						DrawRigidBodyInspector(selectedEntities);
+					}
+					else if (compName == "ColliderSetComponent")
+					{
+						DrawColliderSetInspector(selectedEntities);
+					}
+					else if (compName == "ConstraintSetComponent")
+					{
+						DrawConstraintSetInspector(selectedEntities);
+					}
+					else if (compName == "CharacterControllerComponent")
+					{
+						DrawCharacterControllerInspector(selectedEntities);
 					}
 					// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 					else if (compName == "Script")

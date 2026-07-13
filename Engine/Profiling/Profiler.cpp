@@ -2,6 +2,7 @@
 
 #include "Profiling/Profiler.h"
 
+#include "Physics/PhysicsDiagnostics.h"
 #include "Renderer/RenderTypes.h"
 
 #include <algorithm>
@@ -300,6 +301,34 @@ void Profiler::EndFrame()
 			ProfilerTimingStreamSource::ProfilerClock,
 			ProfilerTimingStreamStatus::Valid,
 			viewportCpuMs));
+	}
+	// Capture compact immutable physics diagnostics at the ordinary profiler
+	// frame boundary. This producer is independent of whether the optional
+	// Physics Diagnostics editor window has ever been opened.
+	if (const auto physics = TerraEngine::Physics::AcquirePhysicsDiagnosticsSnapshot())
+	{
+		ProfilerPhysicsFrameCounters counters;
+		counters.tick = physics->tick;
+		counters.bodyCount = physics->counters.bodyCount;
+		counters.contactCount = physics->counters.contactCount;
+		counters.queryCount = physics->counters.queryCount;
+		counters.eventCount = physics->counters.eventCount;
+		counters.rejectedCount = physics->counters.rejectedCount;
+		counters.staleCount = physics->counters.staleCount;
+		counters.commandQueueDepth = physics->queues.commandDepth;
+		counters.shapeCacheBytes = physics->cache.payloadBytes;
+		counters.shapeCacheHits = physics->cache.hitCount;
+		counters.shapeCacheMisses = physics->cache.missCount;
+		counters.snapshotBytes = physics->memory.snapshotBytes;
+		counters.snapshotHighWaterBytes = physics->memory.highWaterBytes;
+		counters.providerAllocations = physics->memory.outstandingProviderAllocations;
+		counters.providerAllocationHighWater = physics->memory.highWaterProviderAllocations;
+		counters.prepareMs = physics->timings.prepareMs;
+		counters.commitMs = physics->timings.commitMs;
+		counters.simulateMs = physics->timings.simulateMs;
+		counters.queryMs = physics->timings.queryMs;
+		counters.publishMs = physics->timings.publishMs;
+		currentFrame->physics = counters;
 	}
 	AggregateSamplesForFrame(*currentFrame);
 	document.frames.push_back(*currentFrame);

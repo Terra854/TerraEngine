@@ -261,12 +261,15 @@ void HierarchyWindow::OnGui() {
 				return;
 			}
 			if (ImGui::MenuItem("Delete")) {
+				std::vector<entt::entity> remainingSelection = m_Owner->GetSelectedEntities();
+				const auto removedSelection = std::remove(remainingSelection.begin(), remainingSelection.end(), m_ContextEntityId);
+				const bool deletedObjectWasSelected = removedSelection != remainingSelection.end();
+				remainingSelection.erase(removedSelection, remainingSelection.end());
 				UndoRedoSystem::Instance().PushCommand(std::make_unique<DeleteObjectCommand>(m_ContextEntityId));
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				objManager.removeObject(*contextObject);
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (auto selected = m_Owner->GetSelectedEntity(); selected && *selected == m_ContextEntityId) {
-					m_Owner->SetSelectedEntity(std::nullopt);
+				if (deletedObjectWasSelected) {
+					m_Owner->SetSelectedEntities(remainingSelection);
 				}
 				m_ContextEntityId = entt::null;
 			}
@@ -406,9 +409,9 @@ void HierarchyWindow::DrawEntityNode(entt::entity obj, const std::unordered_set<
 
 	ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick | ImGuiTreeNodeFlags_SpanAvailWidth;
 	
-	auto selected = m_Owner->GetSelectedEntity();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (selected && *selected == obj) {
+	// Selection highlighting resolves the stable UUID collection each frame, so
+	// Ctrl-selected rows survive prefab-context entity-handle replacement.
+	if (m_Owner->IsEntitySelected(obj)) {
 		flags |= ImGuiTreeNodeFlags_Selected;
 	}
 	
@@ -449,7 +452,15 @@ void HierarchyWindow::DrawEntityNode(entt::entity obj, const std::unordered_set<
 	
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::IsItemClicked()) {
-		m_Owner->SetSelectedEntity(obj);
+		const ImGuiIO& io = ImGui::GetIO();
+		if (io.KeyCtrl)
+		{
+			m_Owner->ToggleSelectedEntity(obj);
+		}
+		else
+		{
+			m_Owner->SetSelectedEntity(obj);
+		}
 	}
 	if (prefabLink != nullptr && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
 		m_Owner->OpenPrefabFromObject(obj);

@@ -11,9 +11,11 @@
 #include "EditorMcpTransport.h"
 #include "../Core/EditorContext.h"
 #include "../Project/ProjectManager.h"
+#include "Engine/Physics/PhysicsSystem.h"
 
 #include <algorithm>
 #include <chrono>
+#include <sstream>
 
 namespace TerraEngine::Editor::Automation
 {
@@ -22,6 +24,50 @@ namespace TerraEngine::Editor::Automation
 		bool IsCaptureTool(std::string_view name)
 		{
 			return name == "game_view.capture" || name == "camera.capture_object" || name == "camera.capture_custom";
+		}
+
+		std::string StableApprovalFingerprint(std::string_view value)
+		{
+			std::uint64_t hash = 1469598103934665603ull;
+			for (unsigned char byte : value)
+			{
+				hash ^= byte;
+				hash *= 1099511628211ull;
+			}
+			std::ostringstream stream;
+			stream << std::hex << hash;
+			return stream.str();
+		}
+
+		std::string PhysicsImpactScope(std::string_view capability)
+		{
+			if (capability.starts_with("physics.settings.")) return "physics.settings";
+			if (capability.starts_with("physics.layer.")) return "physics.layer";
+			if (capability.starts_with("physics.material.")) return "physics.material";
+			if (capability.starts_with("physics.collider.")) return "physics.collider";
+			return std::string(capability);
+		}
+
+		nlohmann::json ApprovalImpactPayload(nlohmann::json arguments)
+		{
+			// Transport-only and replay-control fields are not part of the authored
+			// reference impact. The semantic patch and target identities remain.
+			for (const char* field : {"approval", "correlationId", "idempotencyKey", "worldGeneration", "projectGeneration", "sceneGeneration"})
+			{
+				arguments.erase(field);
+			}
+			return arguments;
+		}
+
+		std::string BuildImpactFingerprint(
+			std::string_view capability,
+			const nlohmann::json& arguments,
+			std::uint64_t projectGeneration,
+			std::uint64_t sceneGeneration)
+		{
+			return StableApprovalFingerprint(
+				PhysicsImpactScope(capability) + "|" + ApprovalImpactPayload(arguments).dump()
+				+ "|" + std::to_string(projectGeneration) + "|" + std::to_string(sceneGeneration));
 		}
 
 		const char* JobStateJson(AutomationJobState state)
@@ -71,7 +117,7 @@ namespace TerraEngine::Editor::Automation
 		service.SetEditorContext(context);
 		service.SetMainEditor(editor);
 		transport = std::make_unique<EditorMcpTransport>(*this);
-		session.sessionId = "terraengine-editor-local";
+		session.sessionId = "terraengine-editor-local-" + std::to_string(nextSessionSequence++);
 		session.clientName.clear();
 		session.connectedClientCount = 0;
 		session.state = BridgeState::Disabled;
@@ -226,6 +272,7 @@ namespace TerraEngine::Editor::Automation
 
 	void EditorMcpBridge::OnLocalClientConnected(std::string clientName, std::string peerAddress)
 	{
+		session.sessionId = "terraengine-editor-local-" + std::to_string(nextSessionSequence++);
 		session.clientName = std::move(clientName);
 		session.peerAddress = std::move(peerAddress);
 		session.connectedClientCount = 1;
@@ -235,6 +282,9 @@ namespace TerraEngine::Editor::Automation
 
 	void EditorMcpBridge::OnLocalClientDisconnected(std::string reason)
 	{
+		// Advance the identity immediately so a reconnect cannot approve a prompt
+		// created by the client that just disconnected.
+		session.sessionId = "terraengine-editor-local-" + std::to_string(nextSessionSequence++);
 		session.connectedClientCount = 0;
 		session.clientName.clear();
 		session.state = IsEnabled() ? BridgeState::Listening : BridgeState::Disabled;
@@ -482,12 +532,20 @@ namespace TerraEngine::Editor::Automation
 
 	ApprovalPrompt EditorMcpBridge::CreateApprovalPrompt(std::string requestId, std::string capability, std::string summary, nlohmann::json arguments, std::chrono::system_clock::time_point expiresAt)
 	{
+		const AutomationStateSnapshot state = service.BuildAutomationStateSnapshot();
 		ApprovalPrompt prompt;
 		prompt.approvalId = "approval-" + std::to_string(nextApprovalSequence++);
 		prompt.requestId = std::move(requestId);
 		prompt.capability = std::move(capability);
 		prompt.summary = std::move(summary);
 		prompt.arguments = std::move(arguments);
+		prompt.argumentsFingerprint = StableApprovalFingerprint(prompt.arguments.dump());
+		prompt.impactFingerprint = BuildImpactFingerprint(prompt.capability, prompt.arguments, state.projectGeneration, state.sceneGeneration);
+		prompt.sessionId = session.sessionId;
+		prompt.clientName = session.clientName;
+		prompt.projectGeneration = state.projectGeneration;
+		prompt.sceneGeneration = state.sceneGeneration;
+		prompt.worldGeneration = prompt.arguments.value("worldGeneration", TerraEngine::Physics::PhysicsSystem::Instance().WorldHandle().worldGeneration);
 		prompt.expiresAt = expiresAt == std::chrono::system_clock::time_point{}
 			? std::chrono::system_clock::now() + std::chrono::minutes(5)
 			: expiresAt;
@@ -502,11 +560,40 @@ namespace TerraEngine::Editor::Automation
 		{
 			if (prompt.approvalId == approvalId && !prompt.resolved)
 			{
+				const AutomationStateSnapshot state = service.BuildAutomationStateSnapshot();
+				const std::uint32_t currentWorldGeneration = TerraEngine::Physics::PhysicsSystem::Instance().WorldHandle().worldGeneration;
+				// Generation checks catch lifecycle changes. Rebuild the semantic
+				// fingerprint before injecting the approval so the retained token cannot
+				// be reused if its request payload was modified in memory.
+				const std::string currentImpactFingerprint = BuildImpactFingerprint(
+					prompt.capability, prompt.arguments, state.projectGeneration, state.sceneGeneration);
+				const bool bindingStillValid = prompt.expiresAt > std::chrono::system_clock::now()
+					&& prompt.sessionId == session.sessionId
+					&& prompt.clientName == session.clientName
+					&& prompt.argumentsFingerprint == StableApprovalFingerprint(prompt.arguments.dump())
+					&& prompt.impactFingerprint == currentImpactFingerprint
+					&& prompt.projectGeneration == state.projectGeneration
+					&& prompt.sceneGeneration == state.sceneGeneration
+					&& (prompt.worldGeneration == 0U || prompt.worldGeneration == currentWorldGeneration);
 				prompt.resolved = true;
-				prompt.approved = approved;
+				prompt.approved = approved && bindingStillValid;
+				if (approved && !bindingStillValid)
+				{
+					RecordActivity(ActivityEventType::Rejection, prompt.requestId, prompt.capability, "Approval binding expired or its session/generation/fingerprint changed.", "rejected");
+					return true;
+				}
 				RecordActivity(ActivityEventType::Approval, prompt.requestId, prompt.capability, approved ? "Approved request." : "Denied request.", approved ? "completed" : "rejected");
 				if (approved)
 				{
+					if (prompt.capability.starts_with("physics."))
+					{
+						prompt.arguments["approval"] = {
+							{"approvalId", prompt.approvalId},
+							{"impactFingerprint", prompt.impactFingerprint},
+							{"projectGeneration", prompt.projectGeneration},
+							{"sceneGeneration", prompt.sceneGeneration}
+						};
+					}
 					nlohmann::json result = service.HandleTool(prompt.capability, prompt.arguments, writeMode, prompt.requestId);
 					RecordActivity(result.value("ok", false) ? ActivityEventType::Request : ActivityEventType::Rejection, prompt.requestId, prompt.capability, result.value("message", ""), result.value("status", "completed"));
 				}
@@ -576,7 +663,14 @@ namespace TerraEngine::Editor::Automation
 		result["requestId"] = requestId;
 		result["status"] = ToString(RequestStatus::WaitingApproval);
 		result["message"] = "Approval is required before this request can run.";
-		result["data"] = {{"approvalId", prompt.approvalId}, {"capability", prompt.capability}};
+		result["data"] = {
+			{"approvalId", prompt.approvalId},
+			{"capability", prompt.capability},
+			{"impactFingerprint", prompt.impactFingerprint},
+			{"projectGeneration", prompt.projectGeneration},
+			{"sceneGeneration", prompt.sceneGeneration},
+			{"worldGeneration", prompt.worldGeneration}
+		};
 		result["error"] = nullptr;
 		return result;
 	}

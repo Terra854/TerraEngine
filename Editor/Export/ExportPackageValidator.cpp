@@ -3,6 +3,7 @@
 #include "ExportPackageValidator.h"
 
 #include "File Formats/TerraEngineMeshFile.h"
+#include "Physics/Assets/CookedColliderAsset.h"
 #include "TEPAK/PackReader.h"
 
 #include <array>
@@ -10,6 +11,7 @@
 #include <cctype>
 #include <cstring>
 #include <filesystem>
+#include <iomanip>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -268,6 +270,186 @@ bool ValidateVirtualGeometryTemfPayload(const tepak::ByteBuffer& bytes, std::str
 
 	return true;
 }
+
+std::string HashPhysicsPackageBytes(const tepak::ByteBuffer& bytes)
+{
+	// This intentionally matches the deterministic FNV-1a export provenance
+	// hash. It is an integrity cross-check, not a replacement for TEPAK hashes.
+	std::uint64_t hash = 14695981039346656037ULL;
+	for(const std::uint8_t byte : bytes) {
+		hash ^= byte;
+		hash *= 1099511628211ULL;
+	}
+	std::ostringstream output;
+	output << std::hex << std::setfill('0') << std::setw(16) << hash;
+	return output.str();
+}
+
+bool ContainsPlaceholderMarker(const tepak::ByteBuffer& bytes)
+{
+	static constexpr std::string_view kMarker = "placeholder";
+	return std::search(bytes.begin(), bytes.end(), kMarker.begin(), kMarker.end(),
+		[](std::uint8_t left, char right) {
+			return static_cast<char>(std::tolower(left)) == right;
+		}) != bytes.end();
+}
+
+bool ValidatePhysicsManifestAsset(
+	const tepak::PackReader& reader,
+	const std::unordered_set<std::string>& entries,
+	const nlohmann::json& asset,
+	std::string_view assetKind,
+	std::unordered_set<std::string>& packagePaths,
+	std::string& outError)
+{
+	if(!asset.is_object()) {
+		outError = "Physics manifest " + std::string(assetKind) + " entry must be an object.";
+		return false;
+	}
+	const std::string path = asset.value("packagePath", std::string{});
+	const std::string checksum = asset.value("checksum", std::string{});
+	const std::string guid = asset.value("guid", std::string{});
+	const std::uint64_t expectedSize = asset.value("size", 0ULL);
+	const std::string expectedExtension = assetKind == "collider" ? ".tepcoll" : ".tephysmat";
+	if(guid.empty() || path.empty() || checksum.empty() || expectedSize == 0U) {
+		outError = "Physics manifest " + std::string(assetKind) + " is missing its GUID, package path, checksum, or non-zero size.";
+		return false;
+	}
+	if(NormalizePackagePath(path).ends_with(".tecollider")) {
+		outError = "Physics manifest references source-only collider recipe '" + NormalizePackagePath(path) + "'. Re-cook it to a .tepcoll envelope before exporting.";
+		return false;
+	}
+	if(!NormalizePackagePath(path).ends_with(expectedExtension)) {
+		outError = "Physics manifest " + std::string(assetKind) + " has the wrong runtime extension: " + NormalizePackagePath(path);
+		return false;
+	}
+	if(!packagePaths.insert(NormalizePackagePath(path)).second) {
+		outError = "Physics manifest references the same runtime payload more than once: " + NormalizePackagePath(path);
+		return false;
+	}
+	if(!RequireEntry(entries, path, outError)) {
+		outError = "Physics manifest references a missing runtime " + std::string(assetKind) + ": " + NormalizePackagePath(path);
+		return false;
+	}
+
+	const tepak::ByteBuffer bytes = reader.ReadAll(path);
+	if(bytes.empty()) {
+		outError = "Physics runtime " + std::string(assetKind) + " payload is empty: " + NormalizePackagePath(path) + ". Re-cook or republish it before exporting.";
+		return false;
+	}
+	if(ContainsPlaceholderMarker(bytes)) {
+		outError = "Physics runtime " + std::string(assetKind) + " payload contains a forbidden placeholder marker: " + NormalizePackagePath(path);
+		return false;
+	}
+	if(bytes.size() != expectedSize || HashPhysicsPackageBytes(bytes) != checksum) {
+		outError = "Physics runtime " + std::string(assetKind) + " payload checksum or size does not match the manifest: " + NormalizePackagePath(path) + ". Re-export after recooking the asset.";
+		return false;
+	}
+
+	if(assetKind == "collider") {
+		TerraEngine::Physics::CookedColliderDiagnostics diagnostics;
+		const std::span<const std::byte> colliderBytes(
+			reinterpret_cast<const std::byte*>(bytes.data()), bytes.size());
+		const auto collider = TerraEngine::Physics::CookedColliderAsset::Deserialize(colliderBytes, diagnostics);
+		if(!collider) {
+			const std::string detail = diagnostics.entries.empty() ? "The envelope is malformed." : diagnostics.entries.front().message;
+			outError = "Physics cooked collider is corrupt: " + NormalizePackagePath(path) + ". " + detail + " Re-cook it before exporting.";
+			return false;
+		}
+		const auto compatibility = collider->CheckCompatibility(
+			TerraEngine::Physics::CookedColliderAsset::HostPlatform(),
+			TerraEngine::Physics::CookedColliderProviderFamily::Jolt,
+			TerraEngine::Physics::kJoltCookProviderVersion,
+			TerraEngine::Physics::kJoltCookRevision);
+		if(!compatibility.compatible) {
+			outError = "Physics cooked collider provider mismatch: " + NormalizePackagePath(path) + ". " + compatibility.message + " Re-cook with Jolt 5.6.0 revision e77f175595e64cb44218cc9d9d56fc365ad0e36a.";
+			return false;
+		}
+	}
+	return true;
+}
+
+bool ValidatePhysicsManifestBlock(
+	const nlohmann::json& physics,
+	const tepak::PackReader& reader,
+	const std::unordered_set<std::string>& entries,
+	std::string& outError)
+{
+	if(!physics.is_object() || physics.value("schemaVersion", 0U) != 1U) {
+		outError = "Physics export manifest is missing supported schemaVersion 1.";
+		return false;
+	}
+	if(!physics.contains("provider") || !physics["provider"].is_object()
+		|| physics["provider"].value("identifier", std::string{}) != "Jolt"
+		|| physics["provider"].value("version", std::string{}) != "5.6.0"
+		|| physics["provider"].value("revision", std::string{}) != "e77f175595e64cb44218cc9d9d56fc365ad0e36a") {
+		outError = "Physics export manifest must require Jolt 5.6.0 revision e77f175595e64cb44218cc9d9d56fc365ad0e36a.";
+		return false;
+	}
+	if(physics.value("cookFormatVersion", 0U) != TerraEngine::Physics::kJoltCookPayloadFormatVersion) {
+		outError = "Physics export manifest cookFormatVersion is unsupported. Re-cook all colliders with the current project provider.";
+		return false;
+	}
+	if(!physics.contains("settings") || !physics["settings"].is_object()) {
+		outError = "Physics export manifest is missing its runtime settings dependency.";
+		return false;
+	}
+	const nlohmann::json& settings = physics["settings"];
+	const std::string settingsPath = settings.value("packagePath", std::string{});
+	const std::string settingsHash = settings.value("contentHash", std::string{});
+	if(settingsPath.empty() || settingsHash.empty() || settings.value("schemaVersion", 0U) == 0U || physics.value("layersHash", std::string{}).empty()) {
+		outError = "Physics export manifest settings, schema, content hash, or layers hash is missing.";
+		return false;
+	}
+	if(!RequireEntry(entries, settingsPath, outError)) {
+		outError = "Physics runtime settings payload is missing: " + NormalizePackagePath(settingsPath);
+		return false;
+	}
+	const tepak::ByteBuffer settingsBytes = reader.ReadAll(settingsPath);
+	if(settingsBytes.empty() || ContainsPlaceholderMarker(settingsBytes) || HashPhysicsPackageBytes(settingsBytes) != settingsHash) {
+		outError = "Physics runtime settings payload is empty, placeholder, or checksum-mismatched: " + NormalizePackagePath(settingsPath);
+		return false;
+	}
+	try {
+		const nlohmann::json settingsDocument = nlohmann::json::parse(settingsBytes.begin(), settingsBytes.end());
+		if(!settingsDocument.is_object() || settingsDocument.value("schemaVersion", 0U) != settings.value("schemaVersion", 0U)
+			|| !settingsDocument.contains("layers") || !settingsDocument["layers"].is_array() || settingsDocument["layers"].size() != 32U) {
+			outError = "Physics runtime settings payload is invalid or does not contain 32 collision layers.";
+			return false;
+		}
+		const std::string serializedLayers = settingsDocument["layers"].dump();
+		tepak::ByteBuffer layerBytes;
+		layerBytes.reserve(serializedLayers.size());
+		for(const char value : serializedLayers) layerBytes.push_back(static_cast<std::uint8_t>(value));
+		if(HashPhysicsPackageBytes(layerBytes) != physics.value("layersHash", std::string{})) {
+			outError = "Physics runtime collision-layer hash does not match the manifest. Re-export after saving Physics Settings.";
+			return false;
+		}
+	}
+	catch(const std::exception&) {
+		outError = "Physics runtime settings payload is not valid JSON.";
+		return false;
+	}
+
+	if(!physics.contains("materials") || !physics["materials"].is_array()
+		|| !physics.contains("colliders") || !physics["colliders"].is_array()
+		|| !physics.contains("validation") || physics["validation"].value("status", std::string{}) != "validated") {
+		outError = "Physics export manifest is missing validated material, collider, or validation records.";
+		return false;
+	}
+	std::unordered_set<std::string> packagePaths;
+	for(const nlohmann::json& material : physics["materials"]) {
+		if(!ValidatePhysicsManifestAsset(reader, entries, material, "material", packagePaths, outError)) return false;
+	}
+	for(const nlohmann::json& collider : physics["colliders"]) {
+		if(collider.value("sourceProvenanceHash", std::string{}).empty() || collider.value("recipeHash", std::string{}).empty()) {
+			outError = "Physics cooked collider manifest record is missing source or recipe provenance. Re-cook it before exporting.";
+			return false;
+		}
+		if(!ValidatePhysicsManifestAsset(reader, entries, collider, "collider", packagePaths, outError)) return false;
+	}
+	return true;
+}
 }
 
 bool ValidateExportPackage(const std::filesystem::path& packagePath, ExportPlatform platform, std::string& outError)
@@ -318,6 +500,16 @@ bool ValidateExportPackage(const std::filesystem::path& packagePath, ExportPlatf
 			}
 		}
 
+		// Recipes are intentionally editor-only. Reject them even if a manifest
+		// forgets to list the file, because a standalone runtime must not depend on
+		// source geometry or a machine-installed cook tool.
+		for(const std::string& entry : entries) {
+			if(entry.ends_with(".tecollider")) {
+				outError = "Export package contains source-only collider recipe: " + entry + ". Package the cooked .tepcoll output instead.";
+				return false;
+			}
+		}
+
 		const tepak::ByteBuffer manifestBytes = reader.ReadAll("game.json");
 		if (manifestBytes.empty()) {
 			outError = "Export package contains an empty game.json.";
@@ -350,12 +542,21 @@ bool ValidateExportPackage(const std::filesystem::path& packagePath, ExportPlatf
 			return false;
 		}
 
-		if (auto startupIt = manifest.find("startupScene"); startupIt != manifest.end() && startupIt->is_string()) {
-			const std::string startupScene = startupIt->get<std::string>();
-			if (!startupScene.empty() && !RequireEntry(entries, startupScene, outError)) {
-				outError = "Export package startup scene is missing from TEPAK: " + NormalizePackagePath(startupScene);
-				return false;
-			}
+		if(!manifest.contains("startupScene") || !manifest["startupScene"].is_string() || manifest["startupScene"].get<std::string>().empty()) {
+			outError = "Export package is missing a startup scene. Select and stage a startup scene before exporting.";
+			return false;
+		}
+		const std::string startupScene = manifest["startupScene"].get<std::string>();
+		if(!RequireEntry(entries, startupScene, outError)) {
+			outError = "Export package startup scene is missing from TEPAK: " + NormalizePackagePath(startupScene);
+			return false;
+		}
+
+		// Physics is optional for legacy non-physics packages. Once present, the
+		// complete block is mandatory and is validated before startup so corrupt
+		// provider bytes can never reach a newly created runtime physics world.
+		if(manifest.contains("physics") && !ValidatePhysicsManifestBlock(manifest["physics"], reader, entries, outError)) {
+			return false;
 		}
 
 		if (auto assetsIt = manifest.find("assets"); assetsIt != manifest.end() && assetsIt->is_array()) {

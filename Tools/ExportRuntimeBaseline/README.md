@@ -12,7 +12,7 @@ Debug tree before running the baseline:
 
 ```powershell
 cmake --preset Debug
-cmake --build out/build/Debug --target TerraEngine-Export TerraEngineModelPackageCompiler TerraEngine-EditorTests
+cmake --build out/build/Debug --target TerraEngine-Export TerraEngineModelPackageCompiler TerraEnginePhysicsColliderCompiler TerraEngine-EditorTests
 cmake --build out/build/Debug --target install
 ```
 
@@ -20,6 +20,7 @@ The install must contain:
 
 - `out/build/Debug/Build/Editor/TerraEngine-Export.exe`
 - `out/build/Debug/Build/Editor/TerraEngineModelPackageCompiler.exe`
+- `out/build/Debug/Build/Editor/TerraEnginePhysicsColliderCompiler.exe`
 - `out/build/Debug/Build/Editor/Managed/TerraEngine.CSharp.dll`
 - `out/build/Debug/Build/Editor/Managed/Analyzers/TerraEngine.Export.Generator.dll`
 
@@ -62,6 +63,13 @@ The compiler must generate nonempty TEMF, TMAT, and TETF children below
 `Build/Assets/Models/Baseline_Generated`. Those generated binaries, the model
 import sidecar, NativeAOT output, runtime export, and evidence are disposable;
 none belongs in source control.
+
+The helper also copies the source-only physics recipe from
+`Tests/Fixtures/PhysicsExportRuntime` into its disposable project and invokes
+the installed `TerraEnginePhysicsColliderCompiler`. It requires a published
+`Build/Assets/Colliders/Startup.tepcoll` envelope with the repository-pinned
+Jolt 5.6.0 revision before export. The archive must contain that cooked
+envelope and Physics Settings, while excluding the `.tecollider` source recipe.
 
 ## Expected signals and diagnosis
 

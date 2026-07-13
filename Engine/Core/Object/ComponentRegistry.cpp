@@ -13,6 +13,11 @@
 #include "Components/MeshRenderComponent.h"
 #include "Components/PrefabLinkComponent.h"
 #include "Components/UIComponent.h"
+#include "Components/Physics/CharacterControllerComponent.h"
+#include "Components/Physics/ColliderSetComponent.h"
+#include "Components/Physics/ConstraintSetComponent.h"
+#include "Components/Physics/RigidBodyComponent.h"
+#include "Physics/PhysicsTypes.h"
 
 void ComponentRegistry::RegisterAllComponents() {
 	// Register common GLM types so InspectorWindow can identify them by type
@@ -36,6 +41,30 @@ void ComponentRegistry::RegisterAllComponents() {
 	TerraEngine::Reflection::ConfigureTypeMetadata(uuidFactory, "TerraEngine::UUID");
 	uuidFactory.template ctor<>();
 
+	// Physics enums are reflected under engine-owned names. Serialized files use
+	// symbolic strings, so neither editor metadata nor scene JSON exposes Jolt IDs.
+	entt::meta_factory<TerraEngine::Physics::PhysicsMotionType> motionTypeFactory{};
+	TerraEngine::Reflection::ConfigureTypeMetadata(motionTypeFactory, "PhysicsMotionType");
+	entt::meta_factory<TerraEngine::Physics::PhysicsMotionQuality> motionQualityFactory{};
+	TerraEngine::Reflection::ConfigureTypeMetadata(motionQualityFactory, "PhysicsMotionQuality");
+	entt::meta_factory<TerraEngine::Physics::PhysicsMassMode> massModeFactory{};
+	TerraEngine::Reflection::ConfigureTypeMetadata(massModeFactory, "PhysicsMassMode");
+	entt::meta_factory<TerraEngine::Physics::PhysicsInterpolationMode> interpolationFactory{};
+	TerraEngine::Reflection::ConfigureTypeMetadata(interpolationFactory, "PhysicsInterpolationMode");
+	// Constraint and character choices are engine-owned reflection types. Their
+	// symbolic scene representations are defined by Serializer.cpp, keeping the
+	// provider's integer values and headers out of durable authoring data.
+	entt::meta_factory<TerraEngine::Physics::PhysicsConstraintKind> constraintKindFactory{};
+	TerraEngine::Reflection::ConfigureTypeMetadata(constraintKindFactory, "PhysicsConstraintKind");
+	entt::meta_factory<TerraEngine::Physics::PhysicsConstraintEndpointKind> endpointKindFactory{};
+	TerraEngine::Reflection::ConfigureTypeMetadata(endpointKindFactory, "PhysicsConstraintEndpointKind");
+	entt::meta_factory<TerraEngine::Physics::PhysicsConstraintMotorMode> motorModeFactory{};
+	TerraEngine::Reflection::ConfigureTypeMetadata(motorModeFactory, "PhysicsConstraintMotorMode");
+	entt::meta_factory<TerraEngine::Physics::PhysicsCharacterShapeKind> characterShapeFactory{};
+	TerraEngine::Reflection::ConfigureTypeMetadata(characterShapeFactory, "PhysicsCharacterShapeKind");
+	entt::meta_factory<TerraEngine::Physics::PhysicsCharacterRotationPolicy> rotationPolicyFactory{};
+	TerraEngine::Reflection::ConfigureTypeMetadata(rotationPolicyFactory, "PhysicsCharacterRotationPolicy");
+
 	Transform::registerType();
 	ScriptComponent::registerType();
 	CameraComponent::registerType();
@@ -43,4 +72,8 @@ void ComponentRegistry::RegisterAllComponents() {
 	MeshRenderComponent::registerType();
 	PrefabLinkComponent::registerType();
 	UIComponent::registerType();
+	RigidBodyComponent::registerType();
+	ColliderSetComponent::registerType();
+	ConstraintSetComponent::registerType();
+	CharacterControllerComponent::registerType();
 }

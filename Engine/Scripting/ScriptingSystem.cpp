@@ -1,6 +1,7 @@
 // ScriptingSystem.cpp — Contains the Scripting System system state, startup/shutdown hooks, and per-frame work implementation for native script glue, exported C# vtables, and scripting system lifecycle state.
 
 #include "ScriptingSystem.h"
+#include "ScriptGlue.h"
 
 #include "Core/Logger/Logger.h"
 #include "Core/Object/ObjectManager.h"
@@ -698,7 +699,7 @@ ScriptingSystem::ScriptUpdateWorkload ScriptingSystem::BuildScriptUpdateWorkload
 	workload.deltaTime = deltaTime;
 	workload.running = m_Running;
 	workload.paused = m_Paused;
-	workload.stepping = m_StepFrames > 0;
+	workload.stepping = m_ExecutingStep;
 	workload.exportMode = exportMode;
 	workload.diagnosticsRequested = ScriptingDiagnosticsRequested();
 	workload.readViewVersion = m_NextScriptingReadViewVersion++;
@@ -1298,6 +1299,10 @@ void ScriptingSystem::Initialize() {
 		bridgeAssemblyPath,
 		L"TerraEngine.InternalCalls, TerraEngine.CSharp",
 		L"MigrateBindingAuthoredState"));
+	managedDispatchPhysicsEvents = reinterpret_cast<PhysicsEventDispatchFn>(DotNetHost::Instance().GetManagedFunction(
+		bridgeAssemblyPath,
+		L"TerraEngine.PhysicsEvents, TerraEngine.CSharp",
+		L"DispatchProtectedNative"));
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (managedInit != nullptr) {
@@ -1329,8 +1334,39 @@ void ScriptingSystem::SetRunning(bool running)
 		}
 		m_Paused = false;
 		m_StepFrames = 0;
+		m_ExplicitStepDeltaTime.reset();
+		m_ExecutingStep = false;
 		ClearRuntimeInspectorState();
 	}
+}
+
+void ScriptingSystem::SetPaused(bool paused)
+{
+	m_Paused = paused;
+	if (!paused)
+	{
+		// Resuming cancels an unconsumed one-frame token. This prevents a stale
+		// toolbar click from unexpectedly stepping after a later pause.
+		m_StepFrames = 0;
+		m_ExplicitStepDeltaTime.reset();
+		m_ExecutingStep = false;
+	}
+}
+
+void ScriptingSystem::Step(int frames)
+{
+	m_StepFrames = std::max(0, frames);
+	m_ExplicitStepDeltaTime.reset();
+}
+
+void ScriptingSystem::StepExplicit(float deltaTime, int frames)
+{
+	if (!std::isfinite(deltaTime) || deltaTime <= 0.0f)
+	{
+		return;
+	}
+	m_StepFrames = std::max(0, frames);
+	m_ExplicitStepDeltaTime = deltaTime;
 }
 
 // ScriptingSystem::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1350,20 +1386,24 @@ void ScriptingSystem::Update(float deltaTime) {
 	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+	float callbackDeltaTime = deltaTime;
 	if (m_Paused) {
 		TERRAENGINE_PROFILE_SCOPE("ScriptingSystem: Pause/Step Handling", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		if (m_StepFrames > 0) {
+			m_ExecutingStep = true;
+			callbackDeltaTime = m_ExplicitStepDeltaTime.value_or(deltaTime);
 			m_StepFrames--;
 		} else {
 			RefreshWatchedBindingSnapshots(deltaTime);
 			return;
 		}
 	}
+	m_LastDeltaTime = callbackDeltaTime;
 
 	ScriptUpdateWorkload workload;
 	{
 		TERRAENGINE_PROFILE_SCOPE("ScriptingSystem: Build Script Workload", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		workload = BuildScriptUpdateWorkload(deltaTime, false);
+		workload = BuildScriptUpdateWorkload(callbackDeltaTime, false);
 	}
 
 	if (managedPumpFrameEvents != nullptr && workload.items.empty())
@@ -1379,7 +1419,12 @@ void ScriptingSystem::Update(float deltaTime) {
 
 	{
 		TERRAENGINE_PROFILE_SCOPE("ScriptingSystem: Refresh Watched Bindings", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		RefreshWatchedBindingSnapshots(deltaTime);
+		RefreshWatchedBindingSnapshots(callbackDeltaTime);
+	}
+	m_ExecutingStep = false;
+	if (m_StepFrames == 0)
+	{
+		m_ExplicitStepDeltaTime.reset();
 	}
 }
 
@@ -1409,8 +1454,55 @@ void ScriptingSystem::Shutdown() {
 	}
 	m_ExportVTable = {};
 	m_ExportMode = false;
+	managedDispatchPhysicsEvents = nullptr;
+	m_LastDeliveredPhysicsWorldGeneration = 0;
+	m_LastDeliveredPhysicsTick = 0;
 
 	DotNetHost::Instance().Shutdown();
+}
+
+void ScriptingSystem::DeliverPhysicsEventsAfterFlush()
+{
+	if (!m_Running)
+	{
+		return;
+	}
+
+	std::uint32_t requiredCount = 0;
+	std::uint64_t sourceTick = 0;
+	const NativePhysicsStatus probe = Native_Physics_CopyEvents(nullptr, 0, &requiredCount, &sourceTick);
+	if (requiredCount == 0 || (probe != NativePhysicsStatus::Success && probe != NativePhysicsStatus::LimitExceeded))
+	{
+		return;
+	}
+
+	std::vector<NativePhysicsEvent> copiedEvents(requiredCount);
+	if (Native_Physics_CopyEvents(copiedEvents.data(), requiredCount, &requiredCount, &sourceTick) != NativePhysicsStatus::Success
+		|| copiedEvents.empty())
+	{
+		return;
+	}
+
+	const NativePhysicsWorldHandle world = copiedEvents.front().world;
+	if (world.worldGeneration == m_LastDeliveredPhysicsWorldGeneration && sourceTick == m_LastDeliveredPhysicsTick)
+	{
+		return;
+	}
+
+	// Mark before invoking managed code so a re-entrant editor pump cannot deliver
+	// the same immutable packet twice. Callback failures are isolated in C#.
+	m_LastDeliveredPhysicsWorldGeneration = world.worldGeneration;
+	m_LastDeliveredPhysicsTick = sourceTick;
+	if (m_ExportMode && m_ExportVTable.version >= kManagedVTablePhysicsVersion
+		&& m_ExportVTable.tableSize >= kManagedVTableV2Size
+		&& m_ExportVTable.dispatchPhysicsEventBatch != nullptr)
+	{
+		m_ExportVTable.dispatchPhysicsEventBatch(copiedEvents.data(), requiredCount, world.worldId, world.worldGeneration, sourceTick);
+	}
+	else if (managedDispatchPhysicsEvents != nullptr)
+	{
+		managedDispatchPhysicsEvents(copiedEvents.data(), requiredCount, world.worldId, world.worldGeneration, sourceTick);
+	}
 }
 
 // ScriptingSystem::SystemName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1461,6 +1553,7 @@ TerraEngine::Scheduling::HardBoundary ScriptingSystem::GetManagedCallbackBoundar
 
 // ScriptingSystem::LoadGameplayAssembly is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool ScriptingSystem::LoadGameplayAssembly(const std::filesystem::path& assemblyPath, std::string* outError) {
+	const bool replacingAssembly = m_GameplayAssemblyLoaded;
 	if (managedLoadGameplayAssembly == nullptr) {
 		const std::string message = "The managed gameplay assembly loader is unavailable because TerraEngine.CSharp did not expose LoadGameplayAssembly.";
 		m_LastGameplayDiagnostic = message;
@@ -1495,6 +1588,12 @@ bool ScriptingSystem::LoadGameplayAssembly(const std::filesystem::path& assembly
 	}
 
 	m_GameplayAssemblyLoaded = true;
+	if (replacingAssembly)
+	{
+		ObjectManager::instance().notifyManagedBindingsReloaded();
+	}
+	m_LastDeliveredPhysicsWorldGeneration = 0;
+	m_LastDeliveredPhysicsTick = 0;
 	m_LoadedGameplayAssemblyPath = assemblyPathString;
 	m_LastGameplayDiagnostic = "Loaded gameplay assembly " + m_LoadedGameplayAssemblyPath.string();
 	RefreshBindingStatuses();
@@ -1503,11 +1602,18 @@ bool ScriptingSystem::LoadGameplayAssembly(const std::filesystem::path& assembly
 
 // ScriptingSystem::ClearGameplayAssembly is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptingSystem::ClearGameplayAssembly() {
+	const bool invalidatesManagedWrappers = m_GameplayAssemblyLoaded;
 	if (managedUnloadGameplayAssembly != nullptr) {
 		managedUnloadGameplayAssembly();
 	}
 
 	m_GameplayAssemblyLoaded = false;
+	if (invalidatesManagedWrappers)
+	{
+		ObjectManager::instance().notifyManagedBindingsReloaded();
+	}
+	m_LastDeliveredPhysicsWorldGeneration = 0;
+	m_LastDeliveredPhysicsTick = 0;
 	m_LoadedGameplayAssemblyPath.clear();
 	m_LastGameplayDiagnostic.clear();
 	SetAllBindingStatuses({});
@@ -2091,15 +2197,19 @@ void ScriptingSystem::UpdateExportMode(float deltaTime) {
 	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+	float callbackDeltaTime = deltaTime;
 	if (m_Paused) {
 		if (m_StepFrames > 0) {
+			m_ExecutingStep = true;
+			callbackDeltaTime = m_ExplicitStepDeltaTime.value_or(deltaTime);
 			m_StepFrames--;
 		} else {
 			return;
 		}
 	}
+	m_LastDeltaTime = callbackDeltaTime;
 
-	ScriptUpdateWorkload workload = BuildScriptUpdateWorkload(deltaTime, true);
+	ScriptUpdateWorkload workload = BuildScriptUpdateWorkload(callbackDeltaTime, true);
 
 	std::vector<ExportScriptInstance> staleInstances;
 	{
@@ -2136,6 +2246,11 @@ void ScriptingSystem::UpdateExportMode(float deltaTime) {
 
 	if (workload.items.empty()) {
 		DispatchScriptWorkload(workload);
+		m_ExecutingStep = false;
+		if (m_StepFrames == 0)
+		{
+			m_ExplicitStepDeltaTime.reset();
+		}
 		return;
 	}
 
@@ -2217,4 +2332,9 @@ void ScriptingSystem::UpdateExportMode(float deltaTime) {
 	}
 
 	DispatchScriptWorkload(workload);
+	m_ExecutingStep = false;
+	if (m_StepFrames == 0)
+	{
+		m_ExplicitStepDeltaTime.reset();
+	}
 }

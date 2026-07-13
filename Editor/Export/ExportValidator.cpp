@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstddef>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -17,6 +18,7 @@
 #include <nlohmann/json.hpp>
 
 #include "File Formats/TerraEngineMaterialFile.h"
+#include "Physics/Assets/CookedColliderAsset.h"
 #include "Resource/MaterialRuntimeContract.h"
 
 // --- Helpers ---
@@ -475,6 +477,92 @@ static ExportValidationResult ValidateMaterialAssets(const std::filesystem::path
 	return result;
 }
 
+// Physics collider recipes are editor input, whereas .tepcoll files are the
+// immutable runtime envelopes.  Validate the latter before export staging so a
+// creator can recook a bad asset without first producing a partial package.
+static bool ContainsPlaceholderMarker(const std::vector<std::byte>& bytes)
+{
+	static constexpr std::string_view kMarker = "placeholder";
+	return std::search(bytes.begin(), bytes.end(), kMarker.begin(), kMarker.end(),
+		[](std::byte left, char right) {
+			return static_cast<char>(std::tolower(static_cast<unsigned char>(std::to_integer<unsigned char>(left)))) == right;
+		}) != bytes.end();
+}
+
+static void ValidateCookedColliderFile(const std::filesystem::path& colliderPath, ExportValidationResult& result)
+{
+	std::ifstream input(colliderPath, std::ios::binary);
+	if(!input) {
+		AddDiagnostic(result, ExportDiagnosticSeverity::Error, "PhysicsCollider",
+			"Cooked collider could not be read. Re-cook the collider before exporting.", colliderPath.string());
+		return;
+	}
+
+	const std::vector<char> rawBytes((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+	std::vector<std::byte> bytes;
+	bytes.reserve(rawBytes.size());
+	for(const char value : rawBytes) bytes.push_back(static_cast<std::byte>(static_cast<unsigned char>(value)));
+	if(bytes.empty()) {
+		AddDiagnostic(result, ExportDiagnosticSeverity::Error, "PhysicsCollider",
+			"Cooked collider payload is empty. Re-cook the collider before exporting.", colliderPath.string());
+		return;
+	}
+	if(ContainsPlaceholderMarker(bytes)) {
+		AddDiagnostic(result, ExportDiagnosticSeverity::Error, "PhysicsCollider",
+			"Cooked collider contains a placeholder payload. Replace it with a completed Jolt cook before exporting.", colliderPath.string());
+		return;
+	}
+
+	TerraEngine::Physics::CookedColliderDiagnostics diagnostics;
+	const auto collider = TerraEngine::Physics::CookedColliderAsset::Deserialize(bytes, diagnostics);
+	if(!collider) {
+		const std::string detail = diagnostics.entries.empty() ? "The envelope is malformed." : diagnostics.entries.front().message;
+		AddDiagnostic(result, ExportDiagnosticSeverity::Error, "PhysicsCollider",
+			"Cooked collider is corrupt or incomplete: " + detail + " Re-cook the collider before exporting.", colliderPath.string());
+		return;
+	}
+
+	const auto compatibility = collider->CheckCompatibility(
+		TerraEngine::Physics::CookedColliderAsset::HostPlatform(),
+		TerraEngine::Physics::CookedColliderProviderFamily::Jolt,
+		TerraEngine::Physics::kJoltCookProviderVersion,
+		TerraEngine::Physics::kJoltCookRevision);
+	if(!compatibility.compatible) {
+		AddDiagnostic(result, ExportDiagnosticSeverity::Error, "PhysicsCollider",
+			"Cooked collider does not match Jolt 5.6.0 revision e77f175595e64cb44218cc9d9d56fc365ad0e36a: " + compatibility.message + " Re-cook the collider with this project version.",
+			colliderPath.string());
+	}
+}
+
+static ExportValidationResult ValidatePhysicsColliderAssets(const std::filesystem::path& projectRoot)
+{
+	ExportValidationResult result;
+	const std::filesystem::path assetsRoot = projectRoot / "Assets";
+	const std::filesystem::path compiledRoot = projectRoot / "Build" / "Assets";
+	if(!std::filesystem::exists(assetsRoot)) return result;
+
+	// A recipe without its matching cooked envelope is a source-only dependency.
+	// It cannot be shipped because the exported runtime intentionally has no cook
+	// compiler or source-model dependency.
+	for(const auto& entry : std::filesystem::recursive_directory_iterator(assetsRoot)) {
+		if(!entry.is_regular_file() || entry.path().extension() != ".tecollider") continue;
+		std::filesystem::path expectedCooked = std::filesystem::relative(entry.path(), assetsRoot);
+		expectedCooked.replace_extension(".tepcoll");
+		if(!std::filesystem::exists(compiledRoot / expectedCooked)) {
+			AddDiagnostic(result, ExportDiagnosticSeverity::Error, "PhysicsCollider",
+				"Source-only collider recipe has no cooked .tepcoll dependency. Run the physics collider cooker before exporting.", entry.path().string());
+		}
+	}
+
+	if(!std::filesystem::exists(compiledRoot)) return result;
+	for(const auto& entry : std::filesystem::recursive_directory_iterator(compiledRoot)) {
+		if(entry.is_regular_file() && entry.path().extension() == ".tepcoll") {
+			ValidateCookedColliderFile(entry.path(), result);
+		}
+	}
+	return result;
+}
+
 // --- Managed source validation ---
 
 ExportValidationResult ExportValidator::ValidateManagedSource(const std::filesystem::path& projectRoot) const {
@@ -777,6 +865,19 @@ ExportValidationResult ExportValidator::ValidateAll(
 	result.diagnostics.insert(result.diagnostics.end(),
 		materialResult.diagnostics.begin(),
 		materialResult.diagnostics.end());
+
+	// Physics is validated against its cooked runtime representation here, before
+	// staging excludes editor-only recipes. This keeps export failures actionable
+	// and guarantees the package validator receives only loadable dependencies.
+	auto physicsResult = ValidatePhysicsColliderAssets(projectRoot);
+	result.errorCount += physicsResult.errorCount;
+	result.warningCount += physicsResult.warningCount;
+	if(!physicsResult.passed) {
+		result.passed = false;
+	}
+	result.diagnostics.insert(result.diagnostics.end(),
+		physicsResult.diagnostics.begin(),
+		physicsResult.diagnostics.end());
 
 	// Run shader, asset and .meta mismatch validations
 	auto additionalResult = ValidateAssetsAndShaders(projectRoot, runtimeShaderDirectory);

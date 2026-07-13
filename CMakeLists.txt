@@ -73,6 +73,10 @@ set(ENGINE_SOURCES
 	Engine/Core/Object/Object.cpp
 	Engine/Core/Object/ObjectManager.cpp
 	Engine/Core/Object/ComponentRegistry.cpp
+	Engine/Components/Physics/RigidBodyComponent.cpp
+	Engine/Components/Physics/ColliderSetComponent.cpp
+	Engine/Components/Physics/ConstraintSetComponent.cpp
+	Engine/Components/Physics/CharacterControllerComponent.cpp
 	Engine/Resource/ResourceManager.cpp
 	Engine/Resource/MaterialRuntimeContract.cpp
 	Engine/Resource/ResourceResidency.cpp
@@ -90,6 +94,18 @@ set(ENGINE_SOURCES
 	Engine/Scene/PrefabComposition.cpp
 	Engine/Scene/SceneMutationQueue.cpp
 	Engine/Scene/TransactionalMutation.cpp
+	Engine/Physics/PhysicsTypes.cpp
+	Engine/Physics/PhysicsSettings.cpp
+	Engine/Physics/PhysicsCommands.cpp
+	Engine/Physics/PhysicsQueries.cpp
+	Engine/Physics/PhysicsEvents.cpp
+	Engine/Physics/PhysicsTransactions.cpp
+	Engine/Physics/PhysicsWorld.cpp
+	Engine/Physics/PhysicsAuthoringSnapshot.cpp
+	Engine/Physics/PhysicsDiagnostics.cpp
+	Engine/Physics/Assets/PhysicsMaterial.cpp
+	Engine/Physics/Assets/ColliderRecipe.cpp
+	Engine/Physics/Assets/CookedColliderAsset.cpp
 	Engine/Scene/SceneManager.cpp
 	Engine/Scene/Serializer.cpp
 	Engine/Scene/SpatialIndex.cpp
@@ -179,6 +195,23 @@ set(ENGINE_HEADERS
 	Engine/Scene/PrefabComposition.h
 	Engine/Scene/SceneMutationQueue.h
 	Engine/Scene/TransactionalMutation.h
+	Engine/Physics/PhysicsTypes.h
+	Engine/Physics/PhysicsSettings.h
+	Engine/Physics/PhysicsCommands.h
+	Engine/Physics/PhysicsQueries.h
+	Engine/Physics/PhysicsEvents.h
+	Engine/Physics/PhysicsTransactions.h
+	Engine/Physics/PhysicsWorld.h
+	Engine/Physics/PhysicsAuthoringSnapshot.h
+	Engine/Physics/PhysicsDiagnostics.h
+	Engine/Physics/PhysicsSystem.h
+	Engine/Physics/Assets/PhysicsMaterial.h
+	Engine/Physics/Assets/ColliderRecipe.h
+	Engine/Physics/Assets/CookedColliderAsset.h
+	Engine/Physics/Backend/IPhysicsBackend.h
+	Engine/Physics/Backend/PhysicsAllocatorAdapter.h
+	Engine/Physics/Backend/PhysicsJobAdapter.h
+	Engine/Physics/Backend/JoltPhysicsBackend.h
 	Engine/Scene/SceneManager.h
 	Engine/Components/LightComponent.h
 	Engine/Components/UIComponent.h
@@ -302,6 +335,61 @@ add_subdirectory("${TEPAK_EXTERNAL_DIR}/xxhash/build/cmake" "${CMAKE_BINARY_DIR}
 # enabled, so turn those off before adding the vendored dependency.
 set(ZSTD_BUILD_TESTS OFF CACHE BOOL "Disable vendored zstd tests" FORCE)
 add_subdirectory("${TEPAK_EXTERNAL_DIR}/zstd/build/cmake" "${CMAKE_BINARY_DIR}/zstd")
+
+# Configure production third-party targets before declaring the engine target
+# that consumes them. Provider headers and usage requirements remain private to
+# TerraEngine-Engine through the private link boundary below.
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/TerraEngineDependencies.cmake")
+terraengine_configure_dependencies()
+
+# Keep the provider-heavy implementation in a private static archive. CMake's
+# Windows auto-export scanner otherwise turns tens of thousands of Jolt inline
+# symbols into import-library members and exceeds LINK's 65,535-member limit.
+# `JoltPhysicsBackend` itself is explicitly TERRAENGINE_API-exported, so engine
+# tests and installed diagnostic tools retain the intended public boundary.
+add_library(TerraEnginePhysicsJoltRuntime STATIC
+	Engine/Physics/Backend/PhysicsAllocatorAdapter.cpp
+	Engine/Physics/Backend/PhysicsJobAdapter.cpp
+	Engine/Physics/Backend/JoltPhysicsBackend.cpp
+)
+target_include_directories(TerraEnginePhysicsJoltRuntime
+	PRIVATE
+		${CMAKE_CURRENT_SOURCE_DIR}/Engine
+		${CMAKE_CURRENT_SOURCE_DIR}/Engine/Core/Object
+)
+target_compile_definitions(TerraEnginePhysicsJoltRuntime
+	PRIVATE
+		TERRAENGINE_SHARED
+		TERRAENGINE_ENGINE_BUILD
+)
+target_link_libraries(TerraEnginePhysicsJoltRuntime PRIVATE Jolt)
+if(MSVC)
+	target_compile_options(TerraEnginePhysicsJoltRuntime PRIVATE /FS /bigobj)
+endif()
+
+# PhysicsSystem is explicitly exported through TERRAENGINE_API. Keeping its
+# implementation in a private archive prevents Windows auto-export from turning
+# its internal transaction lambdas and STL types into thousands of accidental
+# import-library members while retaining the exact public DLL ABI.
+add_library(TerraEnginePhysicsRuntime STATIC
+	Engine/Physics/PhysicsSystem.cpp
+)
+target_include_directories(TerraEnginePhysicsRuntime
+	PRIVATE
+		${CMAKE_CURRENT_SOURCE_DIR}/Engine
+		${CMAKE_CURRENT_SOURCE_DIR}/Engine/Core/Object
+		${CMAKE_CURRENT_SOURCE_DIR}/External/entt/src
+		${CMAKE_CURRENT_SOURCE_DIR}/External/glm
+		${CMAKE_CURRENT_SOURCE_DIR}/External/json/single_include
+)
+target_compile_definitions(TerraEnginePhysicsRuntime
+	PRIVATE
+		TERRAENGINE_SHARED
+		TERRAENGINE_ENGINE_BUILD
+)
+if(MSVC)
+	target_compile_options(TerraEnginePhysicsRuntime PRIVATE /FS /bigobj)
+endif()
 
 # Target boundary: this declaration defines one buildable unit and its install/runtime behavior.
 add_library(TerraEngine-Engine SHARED
@@ -470,6 +558,8 @@ target_link_libraries(TerraEngine-Engine
 		yogacore
 		pugixml::pugixml
 	PRIVATE
+		TerraEnginePhysicsRuntime
+		TerraEnginePhysicsJoltRuntime
 		# TEPAK reader dependencies (zstd for decompression, xxhash for hashing)
 		libzstd_static
 		xxhash
@@ -510,7 +600,15 @@ if(WIN32)
 	# not manually decorated; this pairs with the TERRAENGINE_API macro so the
 	# launcher can link against the DLL reliably.
 	set_target_properties(TerraEngine-Engine PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
-	target_compile_options(TerraEngine-Engine PRIVATE /FS /bigobj)
+	target_compile_options(TerraEngine-Engine PRIVATE
+		/FS
+		/bigobj
+		# Command-line MSVC builds leave /Zc:inline disabled by default. Enabling it
+		# for optimized builds prevents unused standard-library COMDAT helpers from
+		# being added to the automatic DLL export list and exceeding its 65,535-entry
+		# import-library limit without removing any referenced engine API.
+		$<$<CONFIG:RelWithDebInfo>:/Zc:inline>
+	)
 endif()
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine PREFIX "TerraEngine-Engine" FILES ${ENGINE_SOURCES} ${ENGINE_HEADERS})
@@ -738,6 +836,53 @@ add_executable(TerraEngineShaderCompiler
 	Editor/TerraEngineShaderCompiler.cpp
 	Editor/AssetCompilers/ShaderCompiler.cpp
 )
+
+# The collider compiler is deliberately headless. It links the same engine and
+# pinned Jolt 5.6 backend used at runtime, so editor and CI cooks cannot drift.
+add_executable(TerraEnginePhysicsColliderCompiler
+	Editor/TerraEnginePhysicsColliderCompiler.cpp
+	Editor/AssetCompilers/PhysicsColliderCompiler.cpp
+)
+target_include_directories(TerraEnginePhysicsColliderCompiler
+	PRIVATE
+		${CMAKE_CURRENT_SOURCE_DIR}
+		${CMAKE_CURRENT_SOURCE_DIR}/Engine
+		${CMAKE_CURRENT_SOURCE_DIR}/Editor/AssetCompilers
+)
+target_link_libraries(TerraEnginePhysicsColliderCompiler PRIVATE TerraEngine-Engine)
+if(MSVC)
+	target_compile_options(TerraEnginePhysicsColliderCompiler PRIVATE /FS)
+endif()
+
+# This installed-runtime probe exercises the public physics boundary with the
+# exact 10,000-query batch limit and a dense command workload. Keeping it as a
+# normal engine-linked executable also proves the installed DLL layout works.
+add_executable(TerraEnginePhysicsGameplayStress
+	Tools/Physics/PhysicsGameplayStress.cpp
+)
+target_include_directories(TerraEnginePhysicsGameplayStress
+	PRIVATE
+		${CMAKE_CURRENT_SOURCE_DIR}/Engine
+)
+target_link_libraries(TerraEnginePhysicsGameplayStress PRIVATE TerraEngine-Engine)
+if(MSVC)
+	target_compile_options(TerraEnginePhysicsGameplayStress PRIVATE /FS)
+endif()
+
+# This installed-runtime fixture covers the constraint and virtual-character
+# contracts through the provider-neutral backend request boundary. It remains a
+# small engine-linked executable so the installed DLL layout is exercised too.
+add_executable(TerraEnginePhysicsConstraintCharacterStress
+	Tools/Physics/PhysicsConstraintCharacterStress.cpp
+)
+target_include_directories(TerraEnginePhysicsConstraintCharacterStress
+	PRIVATE
+		${CMAKE_CURRENT_SOURCE_DIR}/Engine
+)
+target_link_libraries(TerraEnginePhysicsConstraintCharacterStress PRIVATE TerraEngine-Engine)
+if(MSVC)
+	target_compile_options(TerraEnginePhysicsConstraintCharacterStress PRIVATE /FS)
+endif()
 
 # Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
 target_include_directories(TerraEngineMeshCompiler
@@ -975,6 +1120,7 @@ add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Automation/Providers/EditorDiagnosticsAutomationProvider.cpp
 	Editor/TerraEngine-Editor/Automation/Providers/HistoryPlayModeAutomationProvider.cpp
 	Editor/TerraEngine-Editor/Automation/Providers/AuthoringAutomationProvider.cpp
+	Editor/TerraEngine-Editor/Automation/Providers/PhysicsAutomationProvider.cpp
 	Editor/TerraEngine-Editor/Subsystems/ProjectHubSubsystem.cpp
 	Editor/TerraEngine-Editor/Subsystems/MainEditorSubsystem.cpp
 	Editor/TerraEngine-Editor/Subsystems/PrefabAuthoringSubsystem.cpp
@@ -998,6 +1144,7 @@ add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp
 	Editor/TerraEngine-Editor/Windows/BuildProfilesWindow.cpp
 	Editor/TerraEngine-Editor/Windows/ProfilerWindow.cpp
+	Editor/TerraEngine-Editor/Windows/PhysicsDiagnosticsWindow.cpp
 	Editor/TerraEngine-Editor/Windows/SchedulerDiagnosticsWindow.cpp
 	Editor/TerraEngine-Editor/Windows/ResourceResidencyWindow.cpp
 	Editor/TerraEngine-Editor/Windows/UIBuilderWindow.cpp
@@ -1011,6 +1158,8 @@ add_executable(TerraEngine-Editor
 	Editor/AssetCompilers/GltfImportTypes.cpp
 	Editor/AssetCompilers/GltfPackageImporter.cpp
 	Editor/AssetCompilers/MaterialAssetWriter.cpp
+	Editor/AssetCompilers/PhysicsColliderCompiler.cpp
+	Editor/AssetCompilers/PhysicsMaterialAssetWriter.cpp
 	${IMGUI_FILE_DIALOG_DIR}/ImGuiFileDialog.cpp
 )
 set_target_properties(TerraEngine-Editor PROPERTIES
@@ -1090,7 +1239,7 @@ if(WIN32)
 	target_link_libraries(TerraEngine-Editor PRIVATE ws2_32)
 endif()
 
-add_dependencies(TerraEngine-Editor TerraEngineModelPackageCompiler TerraEngineMeshCompiler TerraEngineTextureCompiler TerraEngineShaderCompiler)
+add_dependencies(TerraEngine-Editor TerraEngineModelPackageCompiler TerraEngineMeshCompiler TerraEngineTextureCompiler TerraEngineShaderCompiler TerraEnginePhysicsColliderCompiler)
 
 if(BUILD_TESTING)
 	# Test targets live under one repository-level Tests tree while preserving
@@ -1136,6 +1285,19 @@ else()
 endif()
 
 set(ENGINE_INSTALL_DESTINATION ${CMAKE_BINARY_DIR}/Build)
+
+# Install only provider-neutral physics contracts. The Jolt job and allocator
+# adapters remain private implementation details of the engine DLL.
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/TerraEngineInstall.cmake")
+terraengine_install_physics_foundation("${ENGINE_INSTALL_DESTINATION}")
+
+# Jolt is statically linked into TerraEngine-Engine, so its upstream MIT notice
+# must accompany every runtime installation even though no standalone Jolt
+# library, headers, samples, or tools are installed.
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/External/JoltPhysics/LICENSE"
+	DESTINATION "${ENGINE_INSTALL_DESTINATION}/ThirdPartyNotices"
+	RENAME "JoltPhysics-LICENSE.txt"
+)
 
 set(DEFAULT_SHADER_SRC_DIR "${CMAKE_SOURCE_DIR}/Engine/Shaders/Default")
 	# Configure-time guard: select platform or option behavior before generating build files.
@@ -1550,6 +1712,9 @@ endif()
 		"${CMAKE_CURRENT_SOURCE_DIR}/Docs/TerraEngineMeshFile.md"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Docs/Testing.md"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Docs/EditorMcpBridge.md"
+		"${CMAKE_CURRENT_SOURCE_DIR}/Docs/PhysicsColliderAssets.md"
+		"${CMAKE_CURRENT_SOURCE_DIR}/Docs/PhysicsGameplay.md"
+		"${CMAKE_CURRENT_SOURCE_DIR}/Docs/PhysicsConstraintsAndCharacters.md"
 		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Docs"
 	)
 	install(FILES
@@ -1625,6 +1790,23 @@ install(TARGETS TerraEngineModelPackageCompiler
 install(TARGETS TerraEngineShaderCompiler
 	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 	BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
+)
+# Install rule: exported projects and CI can cook physics assets without the UI.
+install(TARGETS TerraEnginePhysicsColliderCompiler
+	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
+	BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
+)
+# Install the stress executable beside TerraEngine.dll so it can validate a
+# clean installed tree without relying on build-tree paths or system packages.
+install(TARGETS TerraEnginePhysicsGameplayStress
+	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
+	BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
+)
+# Install this fixture beside the gameplay stress executable and TerraEngine.dll
+# so validation can run entirely from the deterministic installed runtime tree.
+install(TARGETS TerraEnginePhysicsConstraintCharacterStress
+	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
+	BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
 )
 
 # Configure-time guard: select platform or option behavior before generating build files.

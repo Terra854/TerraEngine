@@ -13,6 +13,10 @@
 #include "Engine/Resource/ResourceManager.h"
 #include "Engine/Resource/ResourceResidency.h"
 #include "Engine/Resource/ResourceStreaming.h"
+#include "Engine/Core/Object/ObjectManager.h"
+#include "Engine/Components/Physics/RigidBodyComponent.h"
+#include "Engine/Components/Physics/ColliderSetComponent.h"
+#include "Engine/Components/Physics/CharacterControllerComponent.h"
 
 #include <algorithm>
 #include <cctype>
@@ -199,6 +203,129 @@ namespace
 			output << manifest.dump(4);
 		}
 	}
+
+	std::filesystem::path PhysicsSettingsPath(const std::filesystem::path& projectRoot)
+	{
+		return projectRoot / "ProjectSettings" / "PhysicsSettings.json";
+	}
+
+	nlohmann::json BuildPhysicsSettingsJson(const TerraEngine::Physics::PhysicsSettings& settings)
+	{
+		nlohmann::json layers = nlohmann::json::array();
+		for (const TerraEngine::Physics::CollisionLayer& layer : settings.layers)
+		{
+			layers.push_back({ { "id", layer.id }, { "name", layer.name }, { "collisionMask", layer.collisionMask },
+				{ "broadPhaseGroup", layer.broadPhaseGroup }, { "enabled", layer.enabled } });
+		}
+		return {
+			{ "schemaVersion", settings.schemaVersion },
+			{ "gravity", { settings.gravity.x, settings.gravity.y, settings.gravity.z } },
+			{ "fixedTimeStep", settings.fixedTimeStep }, { "maxSubsteps", settings.maxSubsteps },
+			{ "maxAccumulatedTime", settings.maxAccumulatedTime }, { "velocityIterations", settings.velocityIterations },
+			{ "positionIterations", settings.positionIterations }, { "layers", std::move(layers) },
+			{ "maxCastDistance", settings.maxCastDistance }, { "maxShapeExtent", settings.maxShapeExtent },
+			{ "maxHitsPerQuery", settings.maxHitsPerQuery }, { "maxRequestsPerBatch", settings.maxRequestsPerBatch },
+			{ "retainedResultTicks", settings.retainedResultTicks },
+			{ "debugVisualizationEnabled", settings.debugVisualizationEnabled },
+			{ "retainedDebugTicks", settings.retainedDebugTicks },
+			{ "maxDebugPrimitives", settings.maxDebugPrimitives }
+		};
+	}
+
+	bool TryReadPhysicsSettings(const std::filesystem::path& path, TerraEngine::Physics::PhysicsSettings& output, std::string& error)
+	{
+		if (!std::filesystem::exists(path)) return true;
+		std::ifstream input(path);
+		if (!input) { error = "Physics Settings could not be opened."; return false; }
+		try
+		{
+			nlohmann::json document;
+			input >> document;
+			TerraEngine::Physics::PhysicsSettings candidate = TerraEngine::Physics::PhysicsSettings::Defaults();
+			candidate.schemaVersion = document.value("schemaVersion", candidate.schemaVersion);
+			if (document.contains("gravity") && document["gravity"].is_array() && document["gravity"].size() == 3U)
+			{
+				candidate.gravity = { document["gravity"][0].get<float>(), document["gravity"][1].get<float>(), document["gravity"][2].get<float>() };
+			}
+			candidate.fixedTimeStep = document.value("fixedTimeStep", candidate.fixedTimeStep);
+			candidate.maxSubsteps = document.value("maxSubsteps", candidate.maxSubsteps);
+			candidate.maxAccumulatedTime = document.value("maxAccumulatedTime", candidate.maxAccumulatedTime);
+			candidate.velocityIterations = document.value("velocityIterations", candidate.velocityIterations);
+			candidate.positionIterations = document.value("positionIterations", candidate.positionIterations);
+			candidate.maxCastDistance = document.value("maxCastDistance", candidate.maxCastDistance);
+			candidate.maxShapeExtent = document.value("maxShapeExtent", candidate.maxShapeExtent);
+			candidate.maxHitsPerQuery = document.value("maxHitsPerQuery", candidate.maxHitsPerQuery);
+			candidate.maxRequestsPerBatch = document.value("maxRequestsPerBatch", candidate.maxRequestsPerBatch);
+			candidate.retainedResultTicks = document.value("retainedResultTicks", candidate.retainedResultTicks);
+			candidate.debugVisualizationEnabled = document.value("debugVisualizationEnabled", candidate.debugVisualizationEnabled);
+			candidate.retainedDebugTicks = document.value("retainedDebugTicks", candidate.retainedDebugTicks);
+			candidate.maxDebugPrimitives = document.value("maxDebugPrimitives", candidate.maxDebugPrimitives);
+			if (document.contains("layers") && document["layers"].is_array() && document["layers"].size() == candidate.layers.size())
+			{
+				for (std::size_t index = 0; index < candidate.layers.size(); ++index)
+				{
+					const nlohmann::json& source = document["layers"][index];
+					auto& destination = candidate.layers[index];
+					destination.id = source.value("id", destination.id);
+					destination.name = source.value("name", destination.name);
+					destination.collisionMask = source.value("collisionMask", destination.collisionMask);
+					destination.broadPhaseGroup = source.value("broadPhaseGroup", destination.broadPhaseGroup);
+					destination.enabled = source.value("enabled", destination.enabled);
+				}
+			}
+			const auto validation = candidate.Validate();
+			if (!validation.accepted) { error = validation.message; return false; }
+			output = candidate;
+			return true;
+		}
+		catch (const std::exception& exception) { error = std::string("Physics Settings JSON is invalid: ") + exception.what(); return false; }
+	}
+
+	bool PersistPhysicsSettingsAtomically(const std::filesystem::path& projectRoot, const TerraEngine::Physics::PhysicsSettings& settings, std::string& error)
+	{
+		const std::filesystem::path path = PhysicsSettingsPath(projectRoot);
+		std::error_code directoryError;
+		std::filesystem::create_directories(path.parent_path(), directoryError);
+		if (directoryError) { error = "Physics Settings directory could not be created."; return false; }
+		const std::filesystem::path temporaryPath = path.string() + ".tmp";
+		{
+			std::ofstream output(temporaryPath, std::ios::trunc);
+			if (!output) { error = "Physics Settings temporary file could not be written."; return false; }
+			output << BuildPhysicsSettingsJson(settings).dump(2);
+		}
+		std::error_code replaceError;
+		std::filesystem::rename(temporaryPath, path, replaceError);
+		if (replaceError)
+		{
+			std::filesystem::remove(path, replaceError);
+			replaceError.clear();
+			std::filesystem::rename(temporaryPath, path, replaceError);
+		}
+		if (replaceError) { std::filesystem::remove(temporaryPath); error = "Physics Settings could not be atomically published."; return false; }
+		return true;
+	}
+
+	std::size_t CountPhysicsLayerReferences(std::uint8_t layerId)
+	{
+		std::size_t count = 0;
+		entt::registry& registry = ObjectManager::instance().getRegistry();
+		for (const auto entity : registry.view<RigidBodyComponent>())
+		{
+			if (registry.get<RigidBodyComponent>(entity).collisionLayerId == layerId) ++count;
+		}
+		for (const auto entity : registry.view<CharacterControllerComponent>())
+		{
+			if (registry.get<CharacterControllerComponent>(entity).collisionLayerId == layerId) ++count;
+		}
+		for (const auto entity : registry.view<ColliderSetComponent>())
+		{
+			for (const TerraEngine::Physics::ColliderRecord& collider : registry.get<ColliderSetComponent>(entity).colliders)
+			{
+				if (collider.useLayerOverride && collider.collisionLayerId == layerId) ++count;
+			}
+		}
+		return count;
+	}
 }
 
 ProjectSettingsWindow::ProjectSettingsWindow(MainEditorSubsystem* owner)
@@ -290,6 +417,9 @@ void ProjectSettingsWindow::DrawSelectedCategory()
 		break;
 	case TerraEngine::Editor::ProjectSettings::ProjectSettingsCategoryId::Resources:
 		DrawResourcesCategory();
+		break;
+	case TerraEngine::Editor::ProjectSettings::ProjectSettingsCategoryId::Physics:
+		DrawPhysicsCategory();
 		break;
 	default:
 		DrawUnavailableState("This Project Settings category is no longer available.");
@@ -481,6 +611,101 @@ void ProjectSettingsWindow::DrawGraphicsCategory()
 	{
 		renderSystem.SetRenderSettings(settings);
 	}
+}
+
+void ProjectSettingsWindow::DrawPhysicsCategory()
+{
+	ImGui::TextUnformatted("Physics");
+	ImGui::Separator();
+	if (m_Owner == nullptr || m_Owner->GetContext() == nullptr || m_Owner->GetContext()->projectManager == nullptr)
+	{
+		DrawUnavailableState("Physics settings are unavailable until the editor project manager is ready.");
+		return;
+	}
+	ProjectManager* projectManager = m_Owner->GetContext()->projectManager.get();
+	if (!projectManager->HasActiveProject())
+	{
+		DrawUnavailableState("Open a project to edit physics settings.");
+		return;
+	}
+	const std::filesystem::path projectRoot = projectManager->GetProjectRoot();
+	if (!m_PhysicsSettingsLoaded)
+	{
+		std::string loadError;
+		if (!TryReadPhysicsSettings(PhysicsSettingsPath(projectRoot), m_PhysicsSettings, loadError))
+		{
+			m_ValidationMessage = loadError;
+		}
+		m_PhysicsSettingsLoaded = true;
+	}
+
+	TerraEngine::Physics::PhysicsSettings candidate = m_PhysicsSettings;
+	bool changed = false;
+	ImGui::SeparatorText("World and Solver");
+	changed |= ImGui::DragFloat3("Gravity (m/s²)", &candidate.gravity.x, 0.01F, -1000.0F, 1000.0F, "%.3f");
+	changed |= ImGui::DragFloat("Fixed Timestep (seconds)", &candidate.fixedTimeStep, 0.0001F, 0.001F, 0.1F, "%.5f");
+	int maxSubsteps = static_cast<int>(candidate.maxSubsteps);
+	if (ImGui::SliderInt("Maximum Substeps", &maxSubsteps, 1, 16)) { candidate.maxSubsteps = static_cast<std::uint32_t>(maxSubsteps); changed = true; }
+	int velocityIterations = static_cast<int>(candidate.velocityIterations);
+	if (ImGui::SliderInt("Velocity Iterations", &velocityIterations, 1, 64)) { candidate.velocityIterations = static_cast<std::uint32_t>(velocityIterations); changed = true; }
+	int positionIterations = static_cast<int>(candidate.positionIterations);
+	if (ImGui::SliderInt("Position Iterations", &positionIterations, 1, 64)) { candidate.positionIterations = static_cast<std::uint32_t>(positionIterations); changed = true; }
+
+	ImGui::SeparatorText("Collision Layers");
+	for (std::size_t index = 0; index < candidate.layers.size(); ++index)
+	{
+		auto& layer = candidate.layers[index];
+		ImGui::PushID(static_cast<int>(index));
+		char name[128]{};
+		CopyStringToBuffer(layer.name, name, sizeof(name));
+		if (ImGui::InputText("Name", name, sizeof(name)))
+		{
+			const auto impact = TerraEngine::Editor::ProjectSettings::PreflightPhysicsLayerRename(m_PhysicsSettings, index, name, CountPhysicsLayerReferences(layer.id));
+			if (impact.accepted) { layer.name = name; changed = true; }
+			else { m_ValidationMessage = impact.message; }
+		}
+		ImGui::SameLine(); ImGui::TextDisabled("ID %u (stable)", static_cast<unsigned>(layer.id));
+		changed |= ImGui::Checkbox("Enabled", &layer.enabled);
+		int broadPhase = static_cast<int>(layer.broadPhaseGroup);
+		if (ImGui::SliderInt("Broad Phase Group", &broadPhase, 0, 31)) { layer.broadPhaseGroup = static_cast<std::uint8_t>(broadPhase); changed = true; }
+		ImGui::PopID();
+	}
+
+	ImGui::SeparatorText("Queries and Debug");
+	int maximumHits = static_cast<int>(candidate.maxHitsPerQuery);
+	if (ImGui::SliderInt("Maximum Hits Per Query", &maximumHits, 1, static_cast<int>(TerraEngine::Physics::kPhysicsMaximumHitsPerQuery))) { candidate.maxHitsPerQuery = static_cast<std::uint32_t>(maximumHits); changed = true; }
+	changed |= ImGui::DragFloat("Maximum Cast Distance (m)", &candidate.maxCastDistance, 1.0F, 0.01F, TerraEngine::Physics::kPhysicsMaximumCastDistance);
+	int maximumRequests = static_cast<int>(candidate.maxRequestsPerBatch);
+	if (ImGui::SliderInt("Maximum Requests Per Batch", &maximumRequests, 1, static_cast<int>(TerraEngine::Physics::kPhysicsMaximumRequestsPerBatch))) { candidate.maxRequestsPerBatch = static_cast<std::uint32_t>(maximumRequests); changed = true; }
+	ImGui::TextDisabled("Physics materials are GUID-addressed assets; select them from Collider records so asset moves and renames preserve references.");
+	changed |= ImGui::Checkbox("Enable Physics Debug Visualization", &candidate.debugVisualizationEnabled);
+	int debugHistory = static_cast<int>(candidate.retainedDebugTicks);
+	if (ImGui::SliderInt("Debug History (ticks)", &debugHistory, 1, 32)) { candidate.retainedDebugTicks = static_cast<std::uint32_t>(debugHistory); changed = true; }
+	int debugPrimitives = static_cast<int>(candidate.maxDebugPrimitives);
+	if (ImGui::SliderInt("Maximum Debug Primitives", &debugPrimitives, 1, 100000)) { candidate.maxDebugPrimitives = static_cast<std::uint32_t>(debugPrimitives); changed = true; }
+	ImGui::TextDisabled("Debug capture is opt-in and remains bounded even while paused.");
+
+	if (changed)
+	{
+		const auto validation = candidate.Validate();
+		if (!validation.accepted)
+		{
+			m_ValidationMessage = validation.message;
+		}
+		else
+		{
+			std::string persistError;
+			if (PersistPhysicsSettingsAtomically(projectRoot, candidate, persistError))
+			{
+				m_PhysicsSettings = candidate;
+				m_PendingPhysicsSettingsRequest = TerraEngine::Editor::ProjectSettings::PhysicsSettingsPublicationRequest{
+					candidate, ++m_NextPhysicsSettingsRequestSequence, true, "Project Physics Settings changed" };
+				m_ValidationMessage = "Saved. Runtime publication is queued for the protected physics boundary.";
+			}
+			else { m_ValidationMessage = persistError; }
+		}
+	}
+	DrawValidationMessage();
 }
 
 void ProjectSettingsWindow::DrawResourcesCategory()

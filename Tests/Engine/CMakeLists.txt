@@ -47,6 +47,39 @@ add_executable(TerraEngine-EngineTests
 	Input/WindowInputWorkerBoundaryTests.cpp
 	Platform/PlatformUtilsTests.cpp
 	Platform/FatalErrorDialogTests.cpp
+	Physics/PhysicsDependencyContractTests.cpp
+	Physics/PhysicsHandleTests.cpp
+	Physics/PhysicsSettingsTests.cpp
+	Physics/PhysicsBackendBoundaryTests.cpp
+	Physics/PhysicsJobAdapterTests.cpp
+	Physics/PhysicsCommandQueueTests.cpp
+	Physics/PhysicsGameplayCommandTests.cpp
+	Physics/PhysicsQueryTests.cpp
+	Physics/PhysicsEventTests.cpp
+	Physics/PhysicsStalePublicationTests.cpp
+	Physics/PhysicsProviderQueryEventTests.cpp
+	Physics/PhysicsTransactionTests.cpp
+	Physics/PhysicsComponentTests.cpp
+	Physics/PhysicsConstraintComponentTests.cpp
+	Physics/PhysicsCharacterComponentTests.cpp
+	Physics/PhysicsConstraintSimulationTests.cpp
+	Physics/PhysicsCharacterSimulationTests.cpp
+	Physics/PhysicsConstraintWorldTests.cpp
+	Physics/PhysicsCharacterContractTests.cpp
+	Physics/PhysicsSerializationTests.cpp
+	Physics/PhysicsMaterialAssetTests.cpp
+	Physics/ColliderRecipeTests.cpp
+	Physics/CookedColliderAssetTests.cpp
+	Physics/PhysicsCookedShapeSimulationTests.cpp
+	Physics/PhysicsFixedStepTests.cpp
+	Physics/PhysicsRigidBodyTransactionTests.cpp
+	Physics/PhysicsRigidBodySimulationTests.cpp
+	Physics/PhysicsSchedulerTests.cpp
+	Physics/PhysicsManagedAbiTests.cpp
+	Physics/PhysicsManagedIntegrationTests.cpp
+	Physics/PhysicsDeterminismStressTests.cpp
+	Physics/PhysicsLifecycleStressTests.cpp
+	Runtime/PhysicsExportRuntimeTests.cpp
 	Profiling/ProfilerCaptureTests.cpp
 	Resource/ResourceResidencyBudgetTests.cpp
 	Resource/ResourceResidencyDiagnosticsTests.cpp
@@ -178,6 +211,10 @@ target_include_directories(TerraEngine-EngineTests
 target_link_libraries(TerraEngine-EngineTests
 	PRIVATE
 		TerraEngine-Engine
+		# PhysicsJobAdapterTests exercises the provider-private bridge directly.
+		# Keep Jolt private to this test target so gameplay consumers still see no
+		# provider headers or link requirements.
+		Jolt
 		libzstd_static
 		xxhash
 )
@@ -210,6 +247,66 @@ endif()
 
 add_test(NAME Engine.SpatialUnitTests COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
 set_tests_properties(Engine.SpatialUnitTests PROPERTIES LABELS "Engine")
+
+add_test(NAME Engine.PhysicsDependencyContract COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.PhysicsDependencyContract PROPERTIES
+	LABELS "Engine;Physics;Dependency"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Physics.DependencyContract"
+)
+
+add_test(NAME Engine.PhysicsFoundation COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.PhysicsFoundation PROPERTIES
+	LABELS "Engine;Physics;Foundation"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Physics.Handle,Physics.Settings,Physics.BackendBoundary,Physics.JobAdapter,Physics.CommandQueue,Physics.Transaction"
+)
+
+add_test(NAME Engine.PhysicsUS1 COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.PhysicsUS1 PROPERTIES
+	LABELS "Engine;Physics;US1"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Physics.Components,Physics.Serialization,Physics.Material,Physics.FixedStep,Physics.RigidBody,Physics.Scheduler"
+)
+
+add_test(NAME Engine.PhysicsUS2 COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.PhysicsUS2 PROPERTIES
+	LABELS "Engine;Physics;US2"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Physics.ColliderRecipe,Physics.CookedColliderAsset,Physics.CookedShapeSimulation,Physics.CookedShapeCache"
+)
+
+add_test(NAME Engine.PhysicsUS3 COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.PhysicsUS3 PROPERTIES
+	LABELS "Engine;Physics;US3"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Physics.GameplayCommand,Physics.Query,Physics.Event,Physics.StalePublication,Physics.Provider"
+)
+
+add_test(NAME Engine.PhysicsUS4 COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.PhysicsUS4 PROPERTIES
+	LABELS "Engine;Physics;US4"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Physics.ConstraintComponent,Physics.CharacterComponent,Physics.Serialization.ConstraintAndCharacter,Physics.ConstraintSimulation,Physics.CharacterSimulation,Physics.ConstraintWorld,Physics.CharacterWorld"
+)
+
+add_test(NAME Engine.PhysicsUS5 COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.PhysicsUS5 PROPERTIES
+	LABELS "Engine;Physics;US5;Diagnostics;Profiler"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Physics.Scheduler,Engine.Profiler"
+)
+
+add_test(NAME Engine.PhysicsUS6 COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.PhysicsUS6 PROPERTIES
+	LABELS "Engine;Physics;US6;Managed"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=PhysicsManaged"
+)
+
+add_test(NAME Engine.PhysicsUS7 COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.PhysicsUS7 PROPERTIES
+	LABELS "Engine;Physics;US7;Export"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=PhysicsExportRuntime"
+)
+
+add_test(NAME Engine.PhysicsStress COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.PhysicsStress PROPERTIES
+	LABELS "Engine;Physics;Stress;Determinism;Lifecycle"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Physics.DeterminismStress,Physics.LifecycleStress"
+)
 
 add_test(NAME Engine.VirtualGeometryFoundation COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
 set_tests_properties(Engine.VirtualGeometryFoundation PROPERTIES

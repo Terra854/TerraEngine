@@ -62,10 +62,18 @@ private:
 		std::string guid;
 		std::string path;
 		AssetType type;
+		std::string checksum;
+		std::uint64_t byteSize = 0U;
+		std::string sourceProvenanceHash;
+		std::string recipeHash;
 		bool virtualGeometryRequired = false;
 	};
 
 	ExportValidator m_Validator;
 	TepakPackager m_Packager;
 	std::vector<StagedAsset> m_StagedAssets;
+	// Built from validated staged physics files only. Keeping this separate from
+	// the generic asset map makes source-only collider recipes impossible to
+	// accidentally advertise as runtime dependencies.
+	PhysicsExportManifest m_PhysicsManifest;
 };

@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include "Engine/Physics/PhysicsSettings.h"
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -30,6 +32,7 @@ namespace TerraEngine::Editor::ProjectSettings
 		Project,
 		Graphics,
 		Resources,
+		Physics,
 		Sky
 	};
 
@@ -42,7 +45,7 @@ namespace TerraEngine::Editor::ProjectSettings
 		std::array<std::string_view, 8> keywords;
 	};
 
-	inline constexpr std::array<ProjectSettingsCategoryDescriptor, 3> kProjectSettingsCategories = {{
+	inline constexpr std::array<ProjectSettingsCategoryDescriptor, 4> kProjectSettingsCategories = {{
 		{
 			ProjectSettingsCategoryId::Project,
 			"project",
@@ -63,8 +66,60 @@ namespace TerraEngine::Editor::ProjectSettings
 			"Resources",
 			"Loaded resource cleanup, RAM/VRAM residency, texture mip streaming, and virtual geometry page budgets.",
 			{ "resources", "residency", "memory", "ram", "vram", "streaming", "mip", "virtual geometry" }
+		},
+		{
+			ProjectSettingsCategoryId::Physics,
+			"physics",
+			"Physics",
+			"World gravity, fixed stepping, collision layers, solver, query, and debug limits.",
+			{ "physics", "gravity", "timestep", "layer", "collision", "solver", "query", "debug" }
 		}
 	}};
+
+	// A UI edit produces this plain request rather than changing a live world.
+	// The editor lifecycle owner must publish it at PhysicsSnapshot (or another
+	// declared protected boundary) after persisting and validating the settings.
+	struct PhysicsSettingsPublicationRequest
+	{
+		TerraEngine::Physics::PhysicsSettings settings = TerraEngine::Physics::PhysicsSettings::Defaults();
+		std::uint64_t requestSequence = 0;
+		bool requiresWorldRebuild = true;
+		std::string reason;
+	};
+
+	// Layer IDs, rather than names, are stored by physics components.  Rename is
+	// therefore safe, but this preflight gives creators the visible reference
+	// impact before the durable display-name change is accepted.
+	struct PhysicsLayerRenameImpact
+	{
+		bool accepted = false;
+		std::size_t layerIndex = TerraEngine::Physics::kPhysicsCollisionLayerCount;
+		std::size_t directReferenceCount = 0;
+		std::string message;
+	};
+
+	inline PhysicsLayerRenameImpact PreflightPhysicsLayerRename(
+		const TerraEngine::Physics::PhysicsSettings& settings,
+		std::size_t layerIndex,
+		std::string_view requestedName,
+		std::size_t directReferenceCount)
+	{
+		if (layerIndex >= settings.layers.size())
+		{
+			return { false, layerIndex, directReferenceCount, "The selected collision layer does not exist." };
+		}
+		TerraEngine::Physics::PhysicsSettings candidate = settings;
+		candidate.layers[layerIndex].name = std::string(requestedName);
+		const auto validation = candidate.Validate();
+		if (!validation.accepted)
+		{
+			return { false, layerIndex, directReferenceCount, validation.message };
+		}
+		return { true, layerIndex, directReferenceCount,
+			directReferenceCount == 0U
+				? "The layer display name has no currently known component references."
+				: "The layer ID remains stable; existing component references continue to target this layer." };
+	}
 
 	inline std::string NormalizeSearchText(std::string_view text)
 	{

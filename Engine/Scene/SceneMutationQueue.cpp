@@ -506,6 +506,7 @@ namespace TerraEngine::Scene {
 
 		batch.applied = true;
 		const std::vector<TransactionResult> transactionResults = DrainTransactions(objects);
+		batch.transactionResults = transactionResults;
 		for (const TransactionResult& transactionResult : transactionResults)
 		{
 			if (transactionResult.status == TransactionStatus::Committed)

@@ -8,11 +8,13 @@
 #include "AssetDatabase.h"
 #include "Engine/Core/Object/Reflection.h"
 #include "Engine/Utilities/UUID.h"
+#include "../Subsystems/PhysicsEditorAuthoringState.h"
 #include <entt/entity/entity.hpp>
 #include <map>
 #include <vector>
 #include <string>
 #include <filesystem>
+#include <cstdint>
 
 class MainEditorSubsystem;
 // struct ComponentAccessFunctions groups related state and operations so callers have one documented contract.
@@ -20,11 +22,17 @@ struct ComponentAccessFunctions;
 
 class InspectorWindow : public EditorWindow {
 public:
+	// Editor-only DTO consumed by MainEditorSubsystem at its protected authoring
+	// boundary; it deliberately has no provider or live-world pointer.
+	using PhysicsRebuildIntent = TerraEngine::Editor::PhysicsRebuildIntent;
+
 	InspectorWindow(MainEditorSubsystem* owner);
 	
 	// Reports whether a drag control in the inspector is active this frame for cursor wrapping.
 	// IsInspectorValueDragging is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool IsInspectorValueDragging() const { return m_InspectorValueDragging; }
+	std::vector<PhysicsRebuildIntent> DrainPhysicsRebuildIntentsForProtectedBoundary();
+	void QueuePhysicsRebuildIntentsForChangedObjects(const std::vector<TerraEngine::UUID>& objectIds, std::string reason);
 
 protected:
 	virtual void OnGui() override;
@@ -38,6 +46,13 @@ private:
 	void DrawScriptDropTarget(entt::entity obj);
 	void DrawLightComponentInspector(const std::string& compName, entt::entity obj, ComponentAccessFunctions& access);
 	void DrawUIComponentInspector(const std::string& compName, entt::entity obj, ComponentAccessFunctions& access);
+	// Physics components own nested authored records that reflection intentionally
+	// does not flatten.  These editors keep record identity and units visible.
+	void DrawRigidBodyInspector(const std::vector<entt::entity>& objects);
+	void DrawColliderSetInspector(const std::vector<entt::entity>& objects);
+	void DrawConstraintSetInspector(const std::vector<entt::entity>& objects);
+	void DrawCharacterControllerInspector(const std::vector<entt::entity>& objects);
+	void DrawPhysicsRuntimeState(entt::entity obj);
 	void DrawModelPackageInspector(const std::filesystem::path& path);
 	void DrawModelPackageChildInspector(const std::filesystem::path& packagePath, TerraEngine::UUID guid, const std::string& kind, const std::string& displayName);
 	void DrawVirtualGeometryOverrideControls(const AssetMetadata& metadata);
@@ -59,6 +74,9 @@ private:
 	std::vector<uint8_t> m_MaterialDataBuffer;
 	std::string m_LastScriptMessage;
 	bool m_LastScriptMessageIsError = false;
+	// The editor owns intent, not a provider/world pointer.  The editor lifecycle
+	// coordinator drains these at its declared protected authoring boundary.
+	TerraEngine::Editor::PhysicsRebuildIntentQueue m_PhysicsRebuildIntents;
 	VirtualGeometryAdaptiveSettingsMetadata m_VirtualGeometryEditSettings;
 	std::string m_VirtualGeometryEditKey;
 	std::string m_VirtualGeometrySettingsMessage;

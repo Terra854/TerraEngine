@@ -6254,6 +6254,45 @@ VirtualGeometryDebugVisualizationMode RenderSystem::GetVirtualGeometryDebugVisua
 	return NormalizeVirtualGeometryDebugVisualizationMode(currentSettings.virtualGeometry.debugVisualizationMode);
 }
 
+bool RenderSystem::SubmitSceneViewPhysicsDebugPackets(
+	const std::vector<std::shared_ptr<const TerraEngine::Physics::PhysicsDebugPacket>>& packets,
+	const TerraEngine::Physics::PhysicsDebugDisplaySelection& selection)
+{
+	// Renderer recovery and headless/editor shutdown paths must not force an RHI
+	// allocation merely because physics published a safe diagnostic packet.
+	if (rhi == nullptr)
+	{
+		return false;
+	}
+
+	SceneViewPhysicsDebugSubmissionSummary summary;
+	summary.rendererAvailable = true;
+	summary.packetCount = packets.size();
+	for (const std::shared_ptr<const TerraEngine::Physics::PhysicsDebugPacket>& packet : packets)
+	{
+		if (!packet)
+		{
+			continue;
+		}
+		if (selection.showLines && packet->lines) { summary.primitiveCount += packet->lines->size(); }
+		if (selection.showTriangles && packet->triangles) { summary.primitiveCount += packet->triangles->size(); }
+		if (selection.showContacts && packet->contacts) { summary.primitiveCount += packet->contacts->size(); }
+		if (selection.showConstraints && packet->constraints) { summary.primitiveCount += packet->constraints->size(); }
+		if (selection.showCharacterSupport && packet->characters) { summary.primitiveCount += packet->characters->size(); }
+		if (selection.showRecentQueries && packet->queries) { summary.primitiveCount += packet->queries->size(); }
+	}
+
+	std::lock_guard<std::mutex> lock(statsMutex);
+	latestSceneViewPhysicsDebugSubmission = summary;
+	return true;
+}
+
+RenderSystem::SceneViewPhysicsDebugSubmissionSummary RenderSystem::GetLatestSceneViewPhysicsDebugSubmission() const
+{
+	std::lock_guard<std::mutex> lock(statsMutex);
+	return latestSceneViewPhysicsDebugSubmission;
+}
+
 void RenderSystem::ClearVirtualGeometryDebugVisualizationModes()
 {
 	std::lock_guard<std::mutex> lock(statsMutex);

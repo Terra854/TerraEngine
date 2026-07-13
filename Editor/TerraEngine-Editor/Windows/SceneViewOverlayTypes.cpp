@@ -150,17 +150,57 @@ namespace TerraEngine::Editor::SceneViewOverlay
 			"TransformSnapshot",
 			"CameraComponentSnapshot",
 			"LightComponentSnapshot",
-			"RendererRecoveryStateSnapshot"
+			"ColliderSetComponentSnapshot",
+			"MeshBoundsSnapshot",
+			"RendererRecoveryStateSnapshot",
+			"PhysicsDebugPacketHistory",
+			"PhysicsDiagnosticsSnapshot"
 		};
 		declaration.writeResources = {
 			"EditorPreferences.SceneView",
 			"SceneViewDiagnosticsSnapshot",
-			"UndoRedoTransformCommand"
+			"UndoRedoTransformCommand",
+			"PhysicsShapeAuthoringTransaction",
+			"SceneMutationQueue"
 		};
-		declaration.workerSafePreparation = "Prepare immutable marker, toolbar, and orientation snapshots from editor-owned read state.";
-		declaration.protectedBoundary = "Draw ImGui overlays, own pointer input, and commit undoable transform edits on the editor UI boundary.";
-		declaration.visibilityBoundary = "Display-only state is visible immediately in Scene View; durable scene mutations are visible after protected editor commit or the declared transactional flush.";
+		declaration.workerSafePreparation = "Prepare immutable marker, toolbar, orientation, physics debug packet, collider-record, and mesh-bound selections from editor-owned read state.";
+		declaration.protectedBoundary = "Draw ImGui overlays, own pointer input, keep collider drags local, and enqueue one observed typed physics authoring transaction only when Apply is pressed on the editor UI boundary.";
+		declaration.visibilityBoundary = "Display-only state is visible immediately in Scene View; durable transform and collider mutations become visible after the declared SceneMutationQueue transactional flush.";
 		return declaration;
+	}
+
+	PhysicsShapeAuthoringCommit FinalizePhysicsShapeEdit(const PhysicsShapeEditPreview& preview)
+	{
+		PhysicsShapeAuthoringCommit commit;
+		commit.preview = preview;
+		// A zero UUID or non-positive extent cannot become a transaction because it
+		// would make a rejected edit look partially applied in the Scene View.
+		commit.valid = preview.active
+			&& preview.objectId != TerraEngine::EMPTY_UUID
+			&& preview.colliderRecordId != TerraEngine::EMPTY_UUID
+			&& IsPositiveFinite(preview.localExtents.x)
+			&& IsPositiveFinite(preview.localExtents.y)
+			&& IsPositiveFinite(preview.localExtents.z);
+		return commit;
+	}
+
+	std::size_t CountPhysicsDebugPrimitives(const std::vector<std::shared_ptr<const TerraEngine::Physics::PhysicsDebugPacket>>& packets, const TerraEngine::Physics::PhysicsDebugDisplaySelection& selection)
+	{
+		std::size_t count = 0U;
+		for (const std::shared_ptr<const TerraEngine::Physics::PhysicsDebugPacket>& packet : packets)
+		{
+			if (!packet)
+			{
+				continue;
+			}
+			if (selection.showLines && packet->lines) { count += packet->lines->size(); }
+			if (selection.showTriangles && packet->triangles) { count += packet->triangles->size(); }
+			if (selection.showContacts && packet->contacts) { count += packet->contacts->size(); }
+			if (selection.showConstraints && packet->constraints) { count += packet->constraints->size(); }
+			if (selection.showCharacterSupport && packet->characters) { count += packet->characters->size(); }
+			if (selection.showRecentQueries && packet->queries) { count += packet->queries->size(); }
+		}
+		return count;
 	}
 
 	void to_json(nlohmann::json& json, const SceneOverlayPreference& preference)
@@ -235,6 +275,9 @@ namespace TerraEngine::Editor::SceneViewOverlay
 			{"lastInteractionOwner", ToString(snapshot.lastInteractionOwner)},
 			{"lastRejectedMutationReason", snapshot.lastRejectedMutationReason},
 			{"disabledOverlayReason", snapshot.disabledOverlayReason},
+			{"physicsDebugPacketCount", snapshot.physicsDebugPacketCount},
+			{"physicsDebugPrimitiveCount", snapshot.physicsDebugPrimitiveCount},
+			{"physicsDebugVisible", snapshot.physicsDebugVisible},
 			{"gameViewAffected", snapshot.gameViewAffected}
 		};
 	}
