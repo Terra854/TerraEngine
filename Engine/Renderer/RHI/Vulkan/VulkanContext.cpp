@@ -31,6 +31,7 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <thread>
 #include <utility>
@@ -2931,7 +2932,13 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 
 // VulkanContext::RenderFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view, const RenderOutputRequest& outputRequest) {
-	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
+	// Measure lock contention separately from backend work. A long RenderFrame
+	// sample can otherwise make a blocked caller look like expensive rendering.
+	std::unique_lock<std::recursive_mutex> stateLock(impl->deviceStateMutex, std::defer_lock);
+	{
+		TERRAENGINE_PROFILE_SCOPE("Vulkan: RenderFrame State Lock Wait", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		stateLock.lock();
+	}
 	// Skip rendering if initialization failed so we do not spam validation errors.
 	if (!impl->initialized || impl->skipFrame || impl->deviceLost) return;
 	if (impl->editorMode && impl->framebufferResized) {
@@ -2959,6 +2966,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	uint32_t snapshotSlotIndex = static_cast<uint32_t>(pendingCmdsForSnapshot.size());
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (snapshotSlotIndex >= VulkanContext::Impl::MAX_RENDER_SNAPSHOTS_PER_FRAME) {
+		TERRAENGINE_PROFILE_SCOPE("Vulkan: RenderFrame Snapshot Budget Recovery", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		RenderSnapshotFallbackEvent fallback{};
 		fallback.kind = outputRequest.kind;
 		fallback.reason = RenderSnapshotFallbackReason::BudgetExhausted;
@@ -3060,6 +3068,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	// Handle Editor Mode resizing (lazy).
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (impl->editorMode) {
+		TERRAENGINE_PROFILE_SCOPE("Vulkan: RenderFrame Ensure Offscreen Targets", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		const auto ensureOffscreenResources = [&](VulkanContext::Impl::OffscreenResources& resources, VkExtent2D targetExtent) {
 			const bool extentMismatch = resources.extent.width != targetExtent.width
 				|| resources.extent.height != targetExtent.height;
@@ -3163,68 +3172,73 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		}
 	};
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	const auto descriptorStart = BackendClock::now();
-	for (const auto& command : frameData.commands) {
-		PrepareDrawResources(command);
-	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (const ShadowDrawList& shadowDrawList : frameData.shadowDrawLists) {
+	{
+		TERRAENGINE_PROFILE_SCOPE("Vulkan: RenderFrame Prepare Draw Resources", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (const DrawCommand& command : shadowDrawList.commands) {
-			// Shadow virtual geometry arrives as light-view draw commands with
-			// virtualMeshletOffset/Count already selected by RenderSystem. The
-			// backend prepares the same mesh-shader resources as the camera path,
-			// but shadow visibility never reuses camera Hi-Z decisions.
+		const auto descriptorStart = BackendClock::now();
+		for (const auto& command : frameData.commands) {
 			PrepareDrawResources(command);
 		}
-	}
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+		for (const ShadowDrawList& shadowDrawList : frameData.shadowDrawLists) {
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+			for (const DrawCommand& command : shadowDrawList.commands) {
+				// Shadow virtual geometry arrives as light-view draw commands with
+				// virtualMeshletOffset/Count already selected by RenderSystem. The
+				// backend prepares the same mesh-shader resources as the camera path,
+				// but shadow visibility never reuses camera Hi-Z decisions.
+				PrepareDrawResources(command);
+			}
+		}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (frameData.sky.hasTexture && frameData.sky.textureId != TerraEngine::EMPTY_UUID)
-	{
-		impl->EnsureTexture(frameData.sky.textureId);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+		if (frameData.sky.hasTexture && frameData.sky.textureId != TerraEngine::EMPTY_UUID)
+		{
+			impl->EnsureTexture(frameData.sky.textureId);
+		}
+		TerraEngine::Renderer::Vulkan::RecordVulkanFrameStage(
+			impl->pendingBackendFrameBreakdown,
+			{ TerraEngine::Renderer::BackendFrameCostCategory::DescriptorUpdate, TerraEngine::Renderer::BackendSubmitStage::DescriptorUpdate, renderViewType, diagnosticViewId, "Prepare descriptors/pipelines/resources", false, true },
+			ElapsedMilliseconds(descriptorStart));
 	}
-	TerraEngine::Renderer::Vulkan::RecordVulkanFrameStage(
-		impl->pendingBackendFrameBreakdown,
-		{ TerraEngine::Renderer::BackendFrameCostCategory::DescriptorUpdate, TerraEngine::Renderer::BackendSubmitStage::DescriptorUpdate, renderViewType, diagnosticViewId, "Prepare descriptors/pipelines/resources", false, true },
-		ElapsedMilliseconds(descriptorStart));
 
 	VkCommandBuffer cmd = VK_NULL_HANDLE;
 	const bool useMainCommandBuffer = impl->currentFrame >= impl->pendingPrimaryCommandBuffers.size()
 		|| impl->pendingPrimaryCommandBuffers[impl->currentFrame].empty();
-
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (useMainCommandBuffer) {
-		cmd = impl->commandBuffers[impl->currentFrame];
-		const auto resetCommandStart = BackendClock::now();
-		vkResetCommandBuffer(cmd, 0);
-		TerraEngine::Renderer::Vulkan::RecordVulkanFrameStage(
-			impl->pendingBackendFrameBreakdown,
-			{ TerraEngine::Renderer::BackendFrameCostCategory::RhiBeginFrame, TerraEngine::Renderer::BackendSubmitStage::CommandBufferReset, renderViewType, diagnosticViewId, "Reset primary command buffer", false, true },
-			ElapsedMilliseconds(resetCommandStart));
-	} else {
-		VkCommandBufferAllocateInfo allocInfo{};
-		allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-		allocInfo.commandPool = impl->commandPools[impl->currentFrame];
-		allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-		allocInfo.commandBufferCount = 1;
+	{
+		TERRAENGINE_PROFILE_SCOPE("Vulkan: RenderFrame Acquire Command Buffer", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		const auto allocateCommandStart = BackendClock::now();
-		if (vkAllocateCommandBuffers(impl->device, &allocInfo, &cmd) != VK_SUCCESS) {
-			TERRAENGINE_LOG(LogLevel::Error, "failed to allocate command buffer for additional camera pass");
-			return;
+		if (useMainCommandBuffer) {
+			cmd = impl->commandBuffers[impl->currentFrame];
+			const auto resetCommandStart = BackendClock::now();
+			vkResetCommandBuffer(cmd, 0);
+			TerraEngine::Renderer::Vulkan::RecordVulkanFrameStage(
+				impl->pendingBackendFrameBreakdown,
+				{ TerraEngine::Renderer::BackendFrameCostCategory::RhiBeginFrame, TerraEngine::Renderer::BackendSubmitStage::CommandBufferReset, renderViewType, diagnosticViewId, "Reset primary command buffer", false, true },
+				ElapsedMilliseconds(resetCommandStart));
+		} else {
+			VkCommandBufferAllocateInfo allocInfo{};
+			allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+			allocInfo.commandPool = impl->commandPools[impl->currentFrame];
+			allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+			allocInfo.commandBufferCount = 1;
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+			const auto allocateCommandStart = BackendClock::now();
+			if (vkAllocateCommandBuffers(impl->device, &allocInfo, &cmd) != VK_SUCCESS) {
+				TERRAENGINE_LOG(LogLevel::Error, "failed to allocate command buffer for additional camera pass");
+				return;
+			}
+			TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
+				impl->pendingBackendFrameBreakdown,
+				{ TerraEngine::Renderer::BackendFrameCostCategory::QueueIdleWait, TerraEngine::Renderer::BackendSubmitStage::CommandBufferLifetime, renderViewType, diagnosticViewId, "Allocate additional camera command buffer", false, true },
+				ElapsedMilliseconds(allocateCommandStart),
+				0.25f);
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+			if (impl->currentFrame >= impl->extraPrimaryCommandBuffers.size()) {
+				impl->extraPrimaryCommandBuffers.resize(impl->MAX_FRAMES_IN_FLIGHT);
+			}
+			impl->extraPrimaryCommandBuffers[impl->currentFrame].push_back(cmd);
 		}
-		TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
-			impl->pendingBackendFrameBreakdown,
-			{ TerraEngine::Renderer::BackendFrameCostCategory::QueueIdleWait, TerraEngine::Renderer::BackendSubmitStage::CommandBufferLifetime, renderViewType, diagnosticViewId, "Allocate additional camera command buffer", false, true },
-			ElapsedMilliseconds(allocateCommandStart),
-			0.25f);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (impl->currentFrame >= impl->extraPrimaryCommandBuffers.size()) {
-			impl->extraPrimaryCommandBuffers.resize(impl->MAX_FRAMES_IN_FLIGHT);
-		}
-		impl->extraPrimaryCommandBuffers[impl->currentFrame].push_back(cmd);
 	}
 
 	VkCommandBufferBeginInfo beginInfo{};
@@ -3233,6 +3247,12 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	const auto commandRecordingStart = BackendClock::now();
+	// This scope intentionally spans the complete primary command recording
+	// interval. Resetting the optional immediately after vkEndCommandBuffer keeps
+	// later submission bookkeeping out of the measurement without reindenting
+	// the large Vulkan recording routine.
+	std::optional<TerraEngine::Profiling::ProfilerScope> commandRecordingProfile;
+	commandRecordingProfile.emplace("Vulkan: RenderFrame Record Primary Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 	if (vkBeginCommandBuffer(cmd, &beginInfo) != VK_SUCCESS) {
 		return;
 	}
@@ -5292,11 +5312,13 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	impl->RecordDiagnosticCheckpoint(cmd, view == ViewType::Scene ? "scene.primary.end" : "game.primary.end");
 
 	vkEndCommandBuffer(cmd);
+	commandRecordingProfile.reset();
 	const float commandRecordingMs = ElapsedMilliseconds(commandRecordingStart);
 	TerraEngine::Renderer::Vulkan::RecordVulkanFrameStage(
 		impl->pendingBackendFrameBreakdown,
 		{ TerraEngine::Renderer::BackendFrameCostCategory::PrimaryCommandRecording, TerraEngine::Renderer::BackendSubmitStage::CommandRecording, renderViewType, diagnosticViewId, "Primary command recording", false, true },
 		commandRecordingMs);
+	TERRAENGINE_PROFILE_SCOPE("Vulkan: RenderFrame Finalize View Submission", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 	TerraEngine::Renderer::Vulkan::RecordVulkanFrameCost(
 		impl->pendingBackendFrameBreakdown,
 		{ TerraEngine::Renderer::BackendFrameCostCategory::ViewSubmission, TerraEngine::Renderer::BackendSubmitStage::ViewSubmit, renderViewType, diagnosticViewId, "View Submission", false, true },
@@ -7732,6 +7754,10 @@ void VulkanContext::Impl::DrainRetiredOffscreenResources()
 
 // VulkanContext::Impl::CreateOffscreenResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res, VkExtent2D requestedExtent) {
+	// Keep the allocation/replacement cost visible beneath the caller's broader
+	// target-check marker. Driver allocation stalls can otherwise be mistaken for
+	// ordinary per-frame command recording.
+	TERRAENGINE_PROFILE_SCOPE("Vulkan: Create Offscreen Resources", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 	const std::uint64_t replacementGeneration = res.generation + 1u;
 	OffscreenResources candidate{};
 	candidate.generation = replacementGeneration;

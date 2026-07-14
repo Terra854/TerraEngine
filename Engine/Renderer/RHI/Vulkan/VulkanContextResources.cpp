@@ -5,6 +5,7 @@
 // It provides specialized caches for meshes, textures, and materials to optimize GPU resource utilization and performance.
 
 #include "VulkanContextImpl.h"
+#include "Profiling/ProfilerScope.h"
 
 #include <algorithm>
 #include <cctype>
@@ -2544,6 +2545,11 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 			passIt->second.erase(cachedPipelineIt);
 		}
 	}
+
+	// Cache hits return above. This marker therefore reports only an actual
+	// graphics-pipeline build or rebuild, which is the expensive driver path a
+	// broad resource-preparation sample cannot distinguish.
+	TERRAENGINE_PROFILE_SCOPE("Vulkan: Build Graphics Pipeline", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 	
 	ShaderCollection* collection = ResourceManager::Instance().GetShaderCollection(shaderCollectionId);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
