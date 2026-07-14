@@ -1,4 +1,5 @@
 #include "TestHarness.h"
+#include "Scene/SceneManager.h"
 #include "Scene/TransactionalMutation.h"
 
 #include "Engine/Scripting/ScriptingSystem.h"
@@ -64,6 +65,53 @@ namespace TerraEngine::EditorTests {
 			context.ExpectEqual(20, second, "The same redo should restore the second command's after state.");
 			context.Expect(!UndoRedoSystem::Instance().CanRedo(), "Reapplying the composite group should consume its one redo entry.");
 			UndoRedoSystem::Instance().Clear();
+		});
+
+		registry.Add("Editor.UndoRedo.SavePointTracksExactHistoryState", [](TestContext& context) {
+			ScriptingSystem::Instance().SetRunning(false);
+			UndoRedoSystem& history = UndoRedoSystem::Instance();
+			history.Clear();
+			int value = 1;
+			history.PushCommand(std::make_unique<IntegerDeltaCommand>(value, 0, 1));
+			history.SetSavePoint();
+			context.Expect(!SceneManager::Instance().IsActiveSceneDirty(), "Saving should mark the current history revision clean.");
+
+			value = 2;
+			history.PushCommand(std::make_unique<IntegerDeltaCommand>(value, 1, 2));
+			context.Expect(SceneManager::Instance().IsActiveSceneDirty(), "Editing after save should make the scene dirty.");
+			history.Undo();
+			context.ExpectEqual(1, value, "Undo should restore the saved value.");
+			context.Expect(!SceneManager::Instance().IsActiveSceneDirty(), "Undoing to the saved revision should make the scene clean.");
+			history.Undo();
+			context.Expect(SceneManager::Instance().IsActiveSceneDirty(), "Undoing before the saved revision should make the scene dirty.");
+			history.Redo();
+			context.Expect(!SceneManager::Instance().IsActiveSceneDirty(), "Redoing to the saved revision should make the scene clean again.");
+			history.Redo();
+			context.Expect(SceneManager::Instance().IsActiveSceneDirty(), "Redoing past the saved revision should make the scene dirty.");
+			history.Clear();
+		});
+
+		registry.Add("Editor.UndoRedo.PrunedSavedStateNeverAppearsClean", [](TestContext& context) {
+			ScriptingSystem::Instance().SetRunning(false);
+			UndoRedoSystem& history = UndoRedoSystem::Instance();
+			history.Clear();
+			int value = 0;
+			// The history retains 100 commands. Pushing one extra command makes the
+			// original clean state unreachable, so undoing everything retained must
+			// not falsely claim that the unsaved first edit is on disk.
+			for (int next = 1; next <= 101; ++next)
+			{
+				const int before = value;
+				value = next;
+				history.PushCommand(std::make_unique<IntegerDeltaCommand>(value, before, value));
+			}
+			while (history.CanUndo())
+			{
+				history.Undo();
+			}
+			context.ExpectEqual(1, value, "Pruning should leave the oldest retained edited state.");
+			context.Expect(SceneManager::Instance().IsActiveSceneDirty(), "An unreachable saved revision must remain dirty after all retained undo steps.");
+			history.Clear();
 		});
 	}
 }

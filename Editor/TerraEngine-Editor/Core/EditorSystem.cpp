@@ -606,6 +606,10 @@ void EditorSystem::Initialize() {
 // EditorSystem::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void EditorSystem::Update(float deltaTime) {
 	if (!initialized) return;
+	// Editor UI runs as a protected PostFrame system, but it must not appear in
+	// the CPU Engine sample tree. This outer boundary measures the complete editor
+	// interval separately and suppresses every nested editor-only profiler marker.
+	TerraEngine::Profiling::ProfilerEditorWorkScope editorProfilerBoundary;
 
 	// Keep this idempotent fallback so future delayed-startup paths still open
 	// the requested project before the editor chooses between hub and workspace UI.

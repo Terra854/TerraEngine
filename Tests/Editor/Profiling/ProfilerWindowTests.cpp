@@ -105,6 +105,11 @@ namespace TerraEngine::EditorTests
 			context.Expect(source.find("BuildTimingStreamAggregates") != std::string::npos, "Profiler UI should use capture-level timing aggregate helpers.");
 			context.Expect(source.find("TimingAggregateValue") != std::string::npos && source.find("return \"n/a\"") != std::string::npos, "Unavailable timing aggregates should display n/a instead of fake zeroes.");
 			context.Expect(profilerSource.find("Viewport GPU") != std::string::npos && profilerSource.find("viewport_gpu") != std::string::npos, "GPU timing streams should be consolidated into one viewport row.");
+			context.Expect(source.find("only Play Mode frames are captured") != std::string::npos, "Frame overview should state that armed recording ignores editor-preview frames.");
+			context.Expect(source.find("Frame = Engine CPU") != std::string::npos, "Frame overview should state that profiler frame timing is game-facing Engine CPU time.");
+			context.Expect(source.find("Frame = Engine CPU + Editor Wall") == std::string::npos, "Frame overview must not present editor cost as part of game profiling.");
+			context.Expect(source.find("Inclusive timings are nested") != std::string::npos, "Top Offenders should warn that inclusive scope values overlap.");
+			context.Expect(profilerSource.find("\"Game frame time\"") == std::string::npos && profilerSource.find("\"Scene frame time\"") == std::string::npos, "Delayed renderer input deltas must not appear as selected-frame profiler timing metrics.");
 			context.Expect(source.find("ProfilerVirtualGeometryPacketRows") == std::string::npos, "Profiler should not duplicate VG packet tables owned by Resource Residency.");
 			context.Expect(source.find("ProfilerVirtualGeometryPageSourceRows") == std::string::npos, "Profiler should not duplicate VG page-source tables owned by Resource Residency.");
 		});

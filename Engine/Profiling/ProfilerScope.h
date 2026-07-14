@@ -33,6 +33,30 @@ public:
 private:
 	bool active = false;
 };
+
+// ProfilerEditorWorkScope keeps editor-only UI work out of the game-facing frame
+// duration and CPU-engine samples. It belongs at the outer EditorSystem update
+// boundary, not around individual windows, so every native, managed, and Vulkan
+// editor call follows one exclusion rule without publishing editor diagnostics.
+class ProfilerEditorWorkScope
+{
+public:
+	ProfilerEditorWorkScope()
+		: active(Profiler::Instance().BeginEditorWork())
+	{
+	}
+
+	~ProfilerEditorWorkScope()
+	{
+		Profiler::Instance().EndEditorWork(active);
+	}
+
+	ProfilerEditorWorkScope(const ProfilerEditorWorkScope&) = delete;
+	ProfilerEditorWorkScope& operator=(const ProfilerEditorWorkScope&) = delete;
+
+private:
+	bool active = false;
+};
 }
 
 #define TERRAENGINE_PROFILE_CONCAT_INNER(a, b) a##b

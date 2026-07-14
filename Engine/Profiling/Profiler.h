@@ -28,8 +28,16 @@ public:
 	void Clear();
 	void LoadDocument(const ProfilerCaptureDocument& document);
 
-	void BeginFrame();
+	// A recording can remain armed while Play Mode is stopped. Passing false
+	// keeps the session active but prevents editor-preview frames from entering it.
+	void BeginFrame(bool playModeActive = true);
 	void EndFrame();
+	// EditorSystem runs inside the protected scheduler frame, but its ImGui and
+	// presentation work is editor overhead rather than exported engine CPU work.
+	// This paired boundary removes the interval from enclosing CPU samples and
+	// from the compressed game-only frame clock.
+	bool BeginEditorWork();
+	void EndEditorWork(bool active);
 	bool BeginSample(const char* name, ProfilerModuleId moduleId, const char* taskLabel = nullptr);
 	void EndSample();
 	void RecordRenderStats(const RenderStatsSnapshot& gameStats, const RenderStatsSnapshot& sceneStats);
@@ -70,11 +78,15 @@ private:
 	std::uint64_t queuedTaskCount = 0u;
 	std::uint64_t startedTaskCount = 0u;
 	std::uint64_t finishedTaskCount = 0u;
+	// Editor time is tracked only long enough to subtract it from the game-facing
+	// frame duration. It is never published as a profiler timing stream.
+	double currentExcludedEditorMs = 0.0;
 	std::string statusText = "Idle";
 	std::string lastError;
 	// These atomics are read by hot instrumentation sites before they touch the
 	// profiler mutex. The locked state remains authoritative; the flags only
 	// keep idle frames from paying synchronization costs for skipped samples.
+	std::atomic_bool frameRecordingActive = false;
 	std::atomic_bool markerRecordingActive = false;
 	std::atomic_bool taskRecordingActive = false;
 };

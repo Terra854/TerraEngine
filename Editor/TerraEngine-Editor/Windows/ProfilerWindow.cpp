@@ -925,6 +925,9 @@ void ProfilerWindow::DrawFrameOverview(const ProfilerFrameRecord& frame)
 		}
 		ImGui::EndTable();
 	}
+	// Explain the accounting boundary beside the values it governs. The frame
+	// duration excludes editor work; viewport CPU is nested and GPU can overlap.
+	ImGui::TextDisabled("Game profiling: only Play Mode frames are captured. Frame = Engine CPU; Viewport CPU is included and GPU is independent.");
 
 	if (ImGui::BeginTable("ProfilerFrameStats", 5, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_BordersInnerV))
 	{
@@ -997,6 +1000,9 @@ void ProfilerWindow::DrawHotSamples(const ProfilerFrameRecord& frame)
 		ImGui::TextDisabled("No hot samples for this module.");
 		return;
 	}
+	// Inclusive rows contain their child scopes, so adding rows would count the
+	// same execution interval more than once. Self time is the non-overlapping cost.
+	ImGui::TextDisabled("Inclusive timings are nested and must not be added together; Self excludes child scopes.");
 
 	const std::size_t rowLimit = std::min<std::size_t>(rows.size(), 12u);
 	if (ImGui::BeginTable("ProfilerHotSamples", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))

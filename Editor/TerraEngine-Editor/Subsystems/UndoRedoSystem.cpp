@@ -77,12 +77,15 @@ public:
 	void Redo() override { Enqueue(m_Forward, "redo"); }
 	std::string GetName() const override { return m_Name; }
 	std::string GetHistoryId() const override { return m_HistoryId; }
+	std::string GetPendingReplayTransactionId() const override { return m_PendingReplayTransactionId; }
 
 private:
 	void Enqueue(const std::vector<TerraEngine::Scene::TransactionWriteOperation>& operations, const char* direction)
 	{
 		TerraEngine::Scene::Transaction replay;
-		replay.id = "editor-transaction-replay-" + std::to_string(++m_ReplaySequence) + "-" + direction;
+		// The source transaction identity keeps replay receipts unique even when
+		// several history entries each perform their first undo or redo.
+		replay.id = m_HistoryId + "-replay-" + std::to_string(++m_ReplaySequence) + "-" + direction;
 		replay.origin = TerraEngine::Scene::TransactionOrigin::Editor;
 		replay.originName = "UndoRedoReplay";
 		replay.writeSet.operations = operations;
@@ -110,6 +113,7 @@ private:
 				});
 			}
 		}
+		m_PendingReplayTransactionId = replay.id;
 		TerraEngine::Scene::SceneMutationQueue::Instance().EnqueueTransaction(std::move(replay));
 	}
 
@@ -117,6 +121,7 @@ private:
 	std::string m_HistoryId;
 	std::vector<TerraEngine::Scene::TransactionWriteOperation> m_Forward;
 	std::vector<TerraEngine::Scene::TransactionWriteOperation> m_Inverse;
+	std::string m_PendingReplayTransactionId;
 	std::uint64_t m_ReplaySequence = 0U;
 };
 
@@ -447,6 +452,11 @@ void UndoRedoSystem::DrawUI() {
 void UndoRedoSystem::Shutdown() {
 	undoStack.clear();
 	redoStack.clear();
+	m_DeferredReplay.reset();
+	// Shutdown abandons the current document history. Give any later editor
+	// session a fresh identity without reaching into SceneManager during teardown.
+	m_CurrentStateId = m_NextStateId++;
+	m_SavedStateId = m_CurrentStateId;
 }
 
 // UndoRedoSystem::PushCommand is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -459,18 +469,20 @@ void UndoRedoSystem::PushCommand(std::unique_ptr<ICommand> command) {
 
 	TERRAENGINE_LOG(LogLevel::Debug, "Pushing command: " << command->GetName());
 
-	undoStack.push_back(std::move(command));
+	HistoryEntry entry;
+	entry.command = std::move(command);
+	entry.beforeStateId = m_CurrentStateId;
+	entry.afterStateId = m_NextStateId++;
+	m_CurrentStateId = entry.afterStateId;
+	undoStack.push_back(std::move(entry));
 	++historySequence;
 	// New actions invalidate the redo branch as the scene state has branched 
 	// from the previous history.
 	redoStack.clear();
 
 	if (undoStack.size() > MaxHistory) {
-		auto& first = undoStack.front();
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (first.get() == m_SavedCommand) {
-			m_SavedStateIsReachable = false;
-		}
+		// State identifiers remain valid after pruning. If the saved state falls
+		// outside the retained history it simply cannot be reached by later undo.
 		undoStack.pop_front();
 	}
 
@@ -528,18 +540,68 @@ bool UndoRedoSystem::RecordCommittedTransaction(const TerraEngine::Scene::Transa
 	return true;
 }
 
+bool UndoRedoSystem::CompleteDeferredReplay(const TerraEngine::Scene::TransactionResult& result)
+{
+	using TerraEngine::Scene::TransactionStatus;
+	if (!m_DeferredReplay || m_DeferredReplay->transactionId != result.transactionId)
+	{
+		return false;
+	}
+
+	const DeferredReplay replay = *m_DeferredReplay;
+	m_DeferredReplay.reset();
+	if (result.status == TransactionStatus::Committed)
+	{
+		// SceneManager correctly marks every protected mutation flush dirty. Once
+		// this particular flush is known to be a history replay, restore the dirty
+		// flag from the exact saved history state selected by Undo or Redo.
+		UpdateDirtyState();
+		return true;
+	}
+
+	// A rejected replay changed no live scene data, so put its history entry back
+	// where it started. This keeps the stack, state identity, and dirty flag atomic
+	// with the protected transaction result.
+	if (replay.direction == DeferredReplayDirection::Undo && !redoStack.empty())
+	{
+		HistoryEntry entry = std::move(redoStack.back());
+		redoStack.pop_back();
+		m_CurrentStateId = entry.afterStateId;
+		undoStack.push_back(std::move(entry));
+	}
+	else if (replay.direction == DeferredReplayDirection::Redo && !undoStack.empty())
+	{
+		HistoryEntry entry = std::move(undoStack.back());
+		undoStack.pop_back();
+		m_CurrentStateId = entry.beforeStateId;
+		redoStack.push_back(std::move(entry));
+	}
+	++historySequence;
+	UpdateDirtyState();
+	TERRAENGINE_LOG(LogLevel::Warning, "History replay '" << result.transactionId
+		<< "' was rejected; the undo/redo cursor was restored.");
+	return true;
+}
+
 // UndoRedoSystem::Undo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UndoRedoSystem::Undo() {
 	if (undoStack.empty()) return;
 	if (ScriptingSystem::Instance().IsRunning()) return;
+	if (m_DeferredReplay) return;
 
-	auto command = std::move(undoStack.back());
+	HistoryEntry entry = std::move(undoStack.back());
 	undoStack.pop_back();
 
-	TERRAENGINE_LOG(LogLevel::Debug, "Undoing command: " << command->GetName());
-	command->Undo();
+	TERRAENGINE_LOG(LogLevel::Debug, "Undoing command: " << entry.command->GetName());
+	entry.command->Undo();
+	const std::string replayTransactionId = entry.command->GetPendingReplayTransactionId();
 
-	redoStack.push_back(std::move(command));
+	m_CurrentStateId = entry.beforeStateId;
+	redoStack.push_back(std::move(entry));
+	if (!replayTransactionId.empty())
+	{
+		m_DeferredReplay = DeferredReplay{replayTransactionId, DeferredReplayDirection::Undo};
+	}
 	++historySequence;
 	UpdateDirtyState();
 }
@@ -548,42 +610,48 @@ void UndoRedoSystem::Undo() {
 void UndoRedoSystem::Redo() {
 	if (redoStack.empty()) return;
 	if (ScriptingSystem::Instance().IsRunning()) return;
+	if (m_DeferredReplay) return;
 
 	// Redo stack entries are pulled from the back to maintain chronological 
 	// order when reapplying multiple Undone steps.
-	auto command = std::move(redoStack.back());
+	HistoryEntry entry = std::move(redoStack.back());
 	redoStack.pop_back();
 
-	TERRAENGINE_LOG(LogLevel::Debug, "Redoing command: " << command->GetName());
-	command->Redo();
+	TERRAENGINE_LOG(LogLevel::Debug, "Redoing command: " << entry.command->GetName());
+	entry.command->Redo();
+	const std::string replayTransactionId = entry.command->GetPendingReplayTransactionId();
 
-	undoStack.push_back(std::move(command));
+	m_CurrentStateId = entry.afterStateId;
+	undoStack.push_back(std::move(entry));
+	if (!replayTransactionId.empty())
+	{
+		m_DeferredReplay = DeferredReplay{replayTransactionId, DeferredReplayDirection::Redo};
+	}
 	++historySequence;
 	UpdateDirtyState();
 }
 
 // UndoRedoSystem::CanUndo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool UndoRedoSystem::CanUndo() const {
-	return !ScriptingSystem::Instance().IsRunning() && !undoStack.empty();
+	return !ScriptingSystem::Instance().IsRunning() && !m_DeferredReplay && !undoStack.empty();
 }
 
 // UndoRedoSystem::CanRedo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool UndoRedoSystem::CanRedo() const {
-	return !ScriptingSystem::Instance().IsRunning() && !redoStack.empty();
+	return !ScriptingSystem::Instance().IsRunning() && !m_DeferredReplay && !redoStack.empty();
 }
 
 std::size_t UndoRedoSystem::GetUndoDepth() const { return undoStack.size(); }
 std::size_t UndoRedoSystem::GetRedoDepth() const { return redoStack.size(); }
-std::string UndoRedoSystem::GetUndoLabel() const { return undoStack.empty() ? std::string{} : undoStack.back()->GetName(); }
-std::string UndoRedoSystem::GetRedoLabel() const { return redoStack.empty() ? std::string{} : redoStack.back()->GetName(); }
-std::string UndoRedoSystem::GetUndoHistoryId() const { return undoStack.empty() ? std::string{} : undoStack.back()->GetHistoryId(); }
-std::string UndoRedoSystem::GetRedoHistoryId() const { return redoStack.empty() ? std::string{} : redoStack.back()->GetHistoryId(); }
+std::string UndoRedoSystem::GetUndoLabel() const { return undoStack.empty() ? std::string{} : undoStack.back().command->GetName(); }
+std::string UndoRedoSystem::GetRedoLabel() const { return redoStack.empty() ? std::string{} : redoStack.back().command->GetName(); }
+std::string UndoRedoSystem::GetUndoHistoryId() const { return undoStack.empty() ? std::string{} : undoStack.back().command->GetHistoryId(); }
+std::string UndoRedoSystem::GetRedoHistoryId() const { return redoStack.empty() ? std::string{} : redoStack.back().command->GetHistoryId(); }
 std::uint64_t UndoRedoSystem::GetSequence() const { return historySequence; }
 
 // UndoRedoSystem::SetSavePoint is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UndoRedoSystem::SetSavePoint() {
-	m_SavedCommand = undoStack.empty() ? nullptr : undoStack.back().get();
-	m_SavedStateIsReachable = true;
+	m_SavedStateId = m_CurrentStateId;
 	UpdateDirtyState();
 }
 
@@ -591,22 +659,20 @@ void UndoRedoSystem::SetSavePoint() {
 void UndoRedoSystem::Clear() {
 	undoStack.clear();
 	redoStack.clear();
+	m_DeferredReplay.reset();
 	++historySequence;
-	m_SavedCommand = nullptr;
-	m_SavedStateIsReachable = true;
+	// A cleared history represents a newly loaded document. Allocate a fresh
+	// state so stale revisions from the previous document can never compare equal.
+	m_CurrentStateId = m_NextStateId++;
+	m_SavedStateId = m_CurrentStateId;
 	UpdateDirtyState();
 }
 
 // UndoRedoSystem::UpdateDirtyState is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UndoRedoSystem::UpdateDirtyState() {
-	if (!m_SavedStateIsReachable) {
-		SceneManager::Instance().ForceMarkActiveSceneDirty();
-		return;
-	}
-
-	ICommand* currentTop = undoStack.empty() ? nullptr : undoStack.back().get();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (currentTop == m_SavedCommand) {
+	// The scene is clean only at the exact state persisted by the latest save.
+	// This remains correct across undo, redo, branch replacement, and pruning.
+	if (m_CurrentStateId == m_SavedStateId) {
 		SceneManager::Instance().ClearActiveSceneDirty();
 	} else {
 		SceneManager::Instance().ForceMarkActiveSceneDirty();

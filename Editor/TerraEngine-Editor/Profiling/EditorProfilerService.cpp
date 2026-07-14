@@ -366,6 +366,13 @@ ProfilerSessionState EditorProfilerService::GetState() const
 // EditorProfilerService::GetStatusText is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string EditorProfilerService::GetStatusText() const
 {
+	const ProfilerSessionState profilerState = Profiler::Instance().GetState();
+	if (profilerState == ProfilerSessionState::Recording || profilerState == ProfilerSessionState::Paused)
+	{
+		// Live status is owned by the engine profiler because it knows whether a
+		// session is capturing Play Mode or merely armed and waiting for it.
+		return Profiler::Instance().GetStatusText();
+	}
 	std::lock_guard<std::mutex> lock(mutex);
 	return statusText;
 }

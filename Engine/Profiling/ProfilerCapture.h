@@ -50,12 +50,11 @@ enum class ProfilerTimingStreamStatus : std::uint8_t
 };
 
 // ProfilerTimingStreamScope names the user-facing lane that produced a timing
-// sample. The profiler UI groups by this instead of mixing CPU, wall, and GPU
-// values into one frame-duration number.
+// sample. The game-facing profiler exposes engine CPU plus independent viewport
+// timings and intentionally has no editor timing category.
 enum class ProfilerTimingStreamScope : std::uint8_t
 {
 	EngineCpu,
-	EditorWall,
 	ViewportCpu,
 	ViewportGpu
 };

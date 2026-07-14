@@ -3549,6 +3549,9 @@ namespace TerraEngine::Editor::Automation
 			if (!path) return BuildError(requestId, ErrorCategory::Validation, "Scene path must name a .tescene file under Assets.");
 			if (std::filesystem::exists(*path)) return BuildError(requestId, ErrorCategory::Conflict, "Scene destination already exists.");
 			if (!SceneManager::Instance().SaveScene(*path)) return BuildError(requestId, ErrorCategory::Internal, "Scene save-as failed.");
+			// Automation saves participate in the same revision-aware dirty state as
+			// Ctrl+S, so subsequent undo/redo reports the persisted version correctly.
+			UndoRedoSystem::Instance().SetSavePoint();
 			return BuildSuccess(requestId, "Saved scene as a new file.", {{"path", std::filesystem::relative(*path, editorContext->projectManager->GetProjectRoot()).generic_string()}});
 		}
 		if (operation == AutomationOperation("scene.duplicate") || operation == AutomationOperation("scene.rename"))
@@ -4210,6 +4213,9 @@ namespace TerraEngine::Editor::Automation
 		{
 			return BuildError(requestId, ErrorCategory::Internal, "Scene save failed.");
 		}
+		// Store the exact history state that reached disk rather than relying on
+		// SceneManager's temporary dirty-flag clear.
+		UndoRedoSystem::Instance().SetSavePoint();
 		if (activityCallback)
 		{
 			activityCallback(ActivityEventType::Mutation, requestId, "scene.save", "Saved active scene.");

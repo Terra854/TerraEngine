@@ -18,13 +18,13 @@ namespace TerraEngine::EditorTests
 {
 	namespace
 	{
-		std::string ReadSceneViewSource()
+		std::string ReadEditorSource(const std::filesystem::path& relativePath)
 		{
 			// The deterministic editor test target does not link the interactive
-			// ImGui window. Reading the maintained source still guards the exact API
-			// contract that otherwise asserts only when a collider is selected live.
+			// ImGui windows. Reading their maintained sources still guards which
+			// window owns the collider controls without requiring a Vulkan editor.
 			const std::filesystem::path sourcePath =
-				std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp";
+				std::filesystem::path(TERRAENGINE_SOURCE_DIR) / relativePath;
 			std::ifstream input(sourcePath, std::ios::binary);
 			std::ostringstream buffer;
 			buffer << input.rdbuf();
@@ -34,14 +34,32 @@ namespace TerraEngine::EditorTests
 
 	void RegisterPhysicsSceneViewTests(TestRegistry& registry)
 	{
-		registry.Add("Physics.SceneView.ColliderAuthoringUsesChildResizeFlags", [](TestContext& context) {
-			const std::string source = ReadSceneViewSource();
+		registry.Add("Physics.SceneView.ColliderAuthoringControlsLiveInColliderInspector", [](TestContext& context) {
+			const std::string sceneViewSource = ReadEditorSource("Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp");
+			const std::string inspectorSource = ReadEditorSource("Editor/TerraEngine-Editor/Windows/InspectorWindow.cpp");
 			context.Expect(
-				source.find("ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY") != std::string::npos,
-				"Collider authoring must use the supported ImGui child border and vertical auto-size flags.");
+				sceneViewSource.find("PhysicsColliderAuthoring") == std::string::npos,
+				"Scene View must not draw an automatically opened collider control panel over its toolbar.");
 			context.Expect(
-				source.find("ImGuiWindowFlags_AlwaysAutoResize") == std::string::npos,
-				"Scene View must not pass the rejected AlwaysAutoResize window flag to BeginChild.");
+				sceneViewSource.find("Collider preview handles own viewport manipulation until Apply or Cancel") != std::string::npos,
+				"An active collider preview must suppress the overlapping object transform gizmo until editing ends.");
+			context.Expect(
+				sceneViewSource.find("Empty-space and object clicks inside Scene View must not silently abandon") != std::string::npos,
+				"Scene View picking must preserve an active collider preview until explicit Apply or Cancel.");
+			context.Expect(
+				sceneViewSource.find("MarkObjectTransformDirty(*selectedObject)") != std::string::npos,
+				"Scene View transform gizmos must invalidate propagated child world transforms after moving a parent.");
+			context.Expect(
+				sceneViewSource.find("Collider shape refreshed from the restored undo/redo state") != std::string::npos,
+				"An active collider preview must follow exact ColliderSet values restored by undo and redo without leaving edit mode.");
+			context.Expect(
+				inspectorSource.find("Edit Shape in Scene View") != std::string::npos
+					&& inspectorSource.find("Half Extents (m)") != std::string::npos
+					&& inspectorSource.find("Preview Center (m)") == std::string::npos
+					&& inspectorSource.find("Scene View Shape Preview") == std::string::npos
+					&& inspectorSource.find("ImGui::BeginDisabled(!editActive)") != std::string::npos
+					&& inspectorSource.find("Apply Collider Edit") != std::string::npos,
+				"ColliderSet Inspector must show one plainly named shape control set, enabling it only for explicit editing and Apply.");
 		});
 
 		registry.Add("Physics.SceneView.DebugPacketsRemainValidWhilePaused", [](TestContext& context) {

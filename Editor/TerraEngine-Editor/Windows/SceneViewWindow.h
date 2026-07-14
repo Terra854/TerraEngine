@@ -37,6 +37,26 @@ public:
 	bool SetAutomationSnapping(bool enabled, const std::optional<glm::vec3>& values, std::string& outError);
 	bool SetAutomationVisualization(std::string_view mode, std::string& outError);
 
+	// The ColliderSet Inspector owns the visible authoring controls. Scene View
+	// owns only the detached 3D preview and its transactional Apply boundary so
+	// viewport handles never mutate a live component while the user is dragging.
+	void BeginPhysicsColliderPreview(entt::entity entity, const TerraEngine::UUID& recordId);
+	void RequestPhysicsColliderFitToRenderMesh(entt::entity entity);
+	void CommitPhysicsColliderPreview();
+	void CancelPhysicsColliderPreview();
+	[[nodiscard]] bool ReadPhysicsColliderPreview(
+		const TerraEngine::UUID& objectId,
+		const TerraEngine::UUID& recordId,
+		glm::vec3& outCenter,
+		glm::vec3& outHalfExtents) const;
+	void UpdatePhysicsColliderPreview(
+		const TerraEngine::UUID& objectId,
+		const TerraEngine::UUID& recordId,
+		const glm::vec3& center,
+		const glm::vec3& halfExtents);
+	[[nodiscard]] bool IsPhysicsColliderPreviewSelection(const TerraEngine::UUID& recordId) const;
+	[[nodiscard]] const std::string& PhysicsColliderPreviewStatus() const { return m_PhysicsPreviewStatus; }
+
 protected:
 	virtual void OnGui() override;
 
@@ -59,10 +79,6 @@ private:
 	void HandleCameraInput(float deltaTime, const ImVec2& viewportSize);
 	void DrawGizmos(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize);
 	void DrawPhysicsColliderEditHandles(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize);
-	void BeginPhysicsColliderPreview(entt::entity entity, const TerraEngine::UUID& recordId);
-	void RequestPhysicsColliderFitToRenderMesh(entt::entity entity);
-	void CommitPhysicsColliderPreview();
-	void CancelPhysicsColliderPreview();
 	void DrawPhysicsDebugOverlay(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize);
 	void ApplyPrefabContextTintForNextRender();
 	void CollectFocusedPrefabObjectIds(entt::entity entity, std::unordered_set<TerraEngine::UUID>& objectIds);
@@ -131,6 +147,11 @@ private:
 	ImVec2 m_PhysicsHandleDragStart{};
 	glm::vec3 m_PhysicsPreviewDragStartCenter{0.0f};
 	glm::vec3 m_PhysicsPreviewDragStartExtents{0.5f};
+	// These values track only the last live authored collider state. Undo, redo,
+	// or another Inspector transaction can therefore refresh the detached preview
+	// without mistaking the user's uncommitted handle drag for an external edit.
+	glm::vec3 m_PhysicsLastAuthoredCenter{0.0f};
+	glm::vec3 m_PhysicsLastAuthoredExtents{0.5f};
 	std::string m_PhysicsPreviewStatus;
 	std::uint64_t m_PhysicsShapeCommitSequence = 0U;
 

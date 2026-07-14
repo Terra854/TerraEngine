@@ -1399,7 +1399,8 @@ void SceneViewWindow::DrawSceneObjectMarkers()
 	{
 		const SceneOverlay::SceneObjectMarker& marker = m_ObjectMarkers[*hovered];
 		ImGui::SetTooltip("%s", marker.tooltip.c_str());
-		if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && m_Owner != nullptr)
+		if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && m_Owner != nullptr
+			&& (!m_PhysicsShapePreview || !m_PhysicsShapePreview->active))
 		{
 			m_Owner->SetSelectedEntity(marker.entity);
 			m_InteractionContext.activeRegion = SceneOverlay::InteractionRegion::Marker;
@@ -1846,8 +1847,52 @@ void SceneViewWindow::BeginPhysicsColliderPreview(entt::entity entity, const Ter
 	preview.localCenter = ToGlm(record->localCenter);
 	preview.localExtents = ColliderHalfExtents(*record);
 	preview.active = true;
+	m_PhysicsLastAuthoredCenter = preview.localCenter;
+	m_PhysicsLastAuthoredExtents = preview.localExtents;
 	m_PhysicsShapePreview = std::move(preview);
-	m_PhysicsPreviewStatus = "Editing a local preview; Apply publishes one queued transaction.";
+	m_PhysicsPreviewStatus = "Editing collider shape; Apply publishes one queued transaction.";
+}
+
+bool SceneViewWindow::ReadPhysicsColliderPreview(
+	const TerraEngine::UUID& objectId,
+	const TerraEngine::UUID& recordId,
+	glm::vec3& outCenter,
+	glm::vec3& outHalfExtents) const
+{
+	if (!m_PhysicsShapePreview || !m_PhysicsShapePreview->active
+		|| m_PhysicsShapePreview->objectId != objectId
+		|| m_PhysicsShapePreview->colliderRecordId != recordId)
+	{
+		return false;
+	}
+	outCenter = m_PhysicsShapePreview->localCenter;
+	outHalfExtents = m_PhysicsShapePreview->localExtents;
+	return true;
+}
+
+void SceneViewWindow::UpdatePhysicsColliderPreview(
+	const TerraEngine::UUID& objectId,
+	const TerraEngine::UUID& recordId,
+	const glm::vec3& center,
+	const glm::vec3& halfExtents)
+{
+	if (!m_PhysicsShapePreview || !m_PhysicsShapePreview->active
+		|| m_PhysicsShapePreview->objectId != objectId
+		|| m_PhysicsShapePreview->colliderRecordId != recordId)
+	{
+		return;
+	}
+
+	// Numeric Inspector edits update the same detached values as viewport drags.
+	// Clamping here keeps every input path within the primitive validation bound.
+	m_PhysicsShapePreview->localCenter = center;
+	m_PhysicsShapePreview->localExtents = glm::max(halfExtents, glm::vec3(0.001f));
+	m_PhysicsPreviewStatus = "Editing collider shape; Apply publishes one queued transaction.";
+}
+
+bool SceneViewWindow::IsPhysicsColliderPreviewSelection(const TerraEngine::UUID& recordId) const
+{
+	return recordId != TerraEngine::EMPTY_UUID && m_SelectedColliderRecordId == recordId;
 }
 
 void SceneViewWindow::RequestPhysicsColliderFitToRenderMesh(entt::entity entity)
@@ -1880,28 +1925,28 @@ void SceneViewWindow::RequestPhysicsColliderFitToRenderMesh(entt::entity entity)
 		mesh->header.quantization.positionScale[1],
 		mesh->header.quantization.positionScale[2])), glm::vec3(0.001f));
 	m_PhysicsShapePreview->fitToRenderMeshRequested = true;
-	m_PhysicsPreviewStatus = "Render-mesh bounds are staged in the local collider preview.";
+	m_PhysicsPreviewStatus = "Render-mesh bounds are staged for the collider edit.";
 }
 
 void SceneViewWindow::CancelPhysicsColliderPreview()
 {
 	m_PhysicsShapePreview.reset();
 	m_PhysicsActiveHandle = -1;
-	m_PhysicsPreviewStatus = "Collider preview canceled; no scene or physics state changed.";
+	m_PhysicsPreviewStatus = "Collider edit canceled; no scene or physics state changed.";
 }
 
 void SceneViewWindow::CommitPhysicsColliderPreview()
 {
 	if (!m_PhysicsShapePreview)
 	{
-		m_PhysicsPreviewStatus = "No collider preview is ready to apply.";
+		m_PhysicsPreviewStatus = "No collider edit is ready to apply.";
 		return;
 	}
 
 	const SceneOverlay::PhysicsShapeAuthoringCommit commit = SceneOverlay::FinalizePhysicsShapeEdit(*m_PhysicsShapePreview);
 	if (!commit.valid)
 	{
-		m_PhysicsPreviewStatus = "Collider preview is invalid and was rejected without mutation.";
+		m_PhysicsPreviewStatus = "Collider edit is invalid and was rejected without mutation.";
 		return;
 	}
 
@@ -1948,7 +1993,7 @@ void SceneViewWindow::CommitPhysicsColliderPreview()
 	const TerraEngine::Physics::ColliderSetValidationResult validation = candidate.Validate();
 	if (!validation.accepted)
 	{
-		m_PhysicsPreviewStatus = "Collider preview rejected: " + validation.message;
+		m_PhysicsPreviewStatus = "Collider edit rejected: " + validation.message;
 		return;
 	}
 
@@ -1997,21 +2042,21 @@ void SceneViewWindow::DrawPhysicsColliderEditHandles(const glm::mat4& view, cons
 		if (m_PhysicsShapePreview) CancelPhysicsColliderPreview();
 		return;
 	}
-
-	std::vector<TerraEngine::Physics::ColliderRecord> records;
-	{
-		auto lock = set->acquireReadLock();
-		records = set->colliders;
-	}
-	if (records.empty())
+	if (!m_PhysicsShapePreview || !m_PhysicsShapePreview->active)
 	{
 		return;
 	}
+
+	std::optional<TerraEngine::Physics::ColliderRecord> authoredRecord;
+	{
+		auto lock = set->acquireReadLock();
+		const auto record = std::find_if(set->colliders.begin(), set->colliders.end(), [&](const TerraEngine::Physics::ColliderRecord& candidate) {
+			return candidate.recordId == m_PhysicsShapePreview->colliderRecordId;
+		});
+		if (record != set->colliders.end()) authoredRecord = *record;
+	}
 	const TerraEngine::UUID selectedObjectId = objects.getUUID(*object);
-	const bool selectedRecordStillExists = std::any_of(records.begin(), records.end(), [&](const TerraEngine::Physics::ColliderRecord& record) {
-		return record.recordId == m_SelectedColliderRecordId;
-	});
-	if ((m_PhysicsShapePreview && m_PhysicsShapePreview->objectId != selectedObjectId) || !selectedRecordStillExists)
+	if (m_PhysicsShapePreview->objectId != selectedObjectId || !authoredRecord)
 	{
 		// Selection and record identity are both stable UUIDs. Clearing preview on
 		// either mismatch prevents an Apply click in a newly selected object from
@@ -2019,51 +2064,22 @@ void SceneViewWindow::DrawPhysicsColliderEditHandles(const glm::mat4& view, cons
 		m_PhysicsShapePreview.reset();
 		m_SelectedColliderRecordId = TerraEngine::EMPTY_UUID;
 		m_PhysicsActiveHandle = -1;
-	}
-	if (m_SelectedColliderRecordId == TerraEngine::EMPTY_UUID)
-	{
-		BeginPhysicsColliderPreview(*selectedEntity, records.front().recordId);
-	}
-
-	// This compact panel exposes stable record selection and precision controls.
-	// The colored in-viewport handles below are the direct-manipulation path.
-	ImGui::SetCursorScreenPos(ImVec2(viewportPos.x + 12.0f, viewportPos.y + 12.0f));
-	// ImGui 1.90 moved child sizing into ImGuiChildFlags. Auto-resizing only the
-	// panel height keeps its fixed overlay width and preserves child clipping;
-	// AlwaysAutoResize would force hidden content to be measured every frame.
-	ImGui::BeginChild(
-		"PhysicsColliderAuthoring",
-		ImVec2(280.0f, 0.0f),
-		ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY);
-	ImGui::TextUnformatted("Physics Collider Handles");
-	for (const TerraEngine::Physics::ColliderRecord& record : records)
-	{
-		const std::string label = std::string("Collider ") + TerraEngine::ToHexString(record.recordId).substr(0U, 8U);
-		if (ImGui::Selectable(label.c_str(), record.recordId == m_SelectedColliderRecordId))
-		{
-			BeginPhysicsColliderPreview(*selectedEntity, record.recordId);
-		}
-	}
-	if (m_PhysicsShapePreview && m_PhysicsShapePreview->active)
-	{
-		ImGui::Separator();
-		ImGui::DragFloat3("Center (preview)", &m_PhysicsShapePreview->localCenter.x, 0.01f);
-		ImGui::DragFloat3("Half extents (preview)", &m_PhysicsShapePreview->localExtents.x, 0.01f, 0.001f, 1000.0f);
-		if (ImGui::Button("Fit to Render Mesh")) RequestPhysicsColliderFitToRenderMesh(*selectedEntity);
-		ImGui::SameLine();
-		if (ImGui::Button("Apply Collider Edit")) CommitPhysicsColliderPreview();
-		ImGui::SameLine();
-		if (ImGui::Button("Cancel")) CancelPhysicsColliderPreview();
-	}
-	if (!m_PhysicsPreviewStatus.empty())
-	{
-		ImGui::TextWrapped("%s", m_PhysicsPreviewStatus.c_str());
-	}
-	ImGui::EndChild();
-
-	if (!m_PhysicsShapePreview || !m_PhysicsShapePreview->active)
-	{
 		return;
+	}
+
+	const glm::vec3 authoredCenter = ToGlm(authoredRecord->localCenter);
+	const glm::vec3 authoredExtents = ColliderHalfExtents(*authoredRecord);
+	if (authoredCenter != m_PhysicsLastAuthoredCenter || authoredExtents != m_PhysicsLastAuthoredExtents)
+	{
+		// Undo/redo publishes a new live ColliderSet value at the protected flush.
+		// Keep edit mode active, but replace the detached visual state so handles
+		// and Inspector preview fields show the exact restored collider immediately.
+		m_PhysicsShapePreview->localCenter = authoredCenter;
+		m_PhysicsShapePreview->localExtents = authoredExtents;
+		m_PhysicsLastAuthoredCenter = authoredCenter;
+		m_PhysicsLastAuthoredExtents = authoredExtents;
+		m_PhysicsActiveHandle = -1;
+		m_PhysicsPreviewStatus = "Collider shape refreshed from the restored undo/redo state.";
 	}
 	const std::optional<glm::mat4> model = ComputeEntityWorldMatrix(*selectedEntity);
 	if (!model)
@@ -2287,6 +2303,13 @@ bool RayAABB(const glm::vec3& rayOrigin, const glm::vec3& rayDir, const glm::vec
 // SceneViewWindow::HandlePicking is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SceneViewWindow::HandlePicking(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize) {
 	if (!ImGui::IsMouseClicked(0) || ImGuizmo::IsOver() || m_IsFlyCamActive || !ImGui::IsWindowHovered()) return;
+	if (m_PhysicsShapePreview && m_PhysicsShapePreview->active)
+	{
+		// Empty-space and object clicks inside Scene View must not silently abandon
+		// a detached collider edit. Apply or Cancel in the Inspector owns the edit
+		// decision; stale object/record validation remains the only automatic exit.
+		return;
+	}
 	if (m_ToolState.activeTool == SceneOverlay::SceneViewTool::Hand || m_IsSceneViewPanning)
 	{
 		return;
@@ -2558,6 +2581,13 @@ void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj, c
 	// Collider manipulation is independent of the transform-tool selection, so
 	// its handles remain available when the normal transform gizmo is disabled.
 	DrawPhysicsColliderEditHandles(view, proj, viewportPos, viewportSize);
+	if (m_PhysicsShapePreview && m_PhysicsShapePreview->active)
+	{
+		// Collider preview handles own viewport manipulation until Apply or Cancel.
+		// Suppressing the object transform gizmo prevents two overlapping control
+		// sets from competing for the same pointer input and visual position.
+		return;
+	}
 	if (m_CurrentGizmoOperation < 0)
 	{
 		return;
@@ -2643,6 +2673,13 @@ void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj, c
 						transform->position = translation;
 						transform->rotation = rotation;
 						transform->scale = scale;
+						if (selectedObject)
+						{
+							// The renderer caches propagated world transforms by ObjectManager
+							// revision. Notify it for every preview update so moving a parent
+							// invalidates and recomputes the complete descendant branch.
+							ObjectManager::instance().MarkObjectTransformDirty(*selectedObject);
+						}
 					}
 
 					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.

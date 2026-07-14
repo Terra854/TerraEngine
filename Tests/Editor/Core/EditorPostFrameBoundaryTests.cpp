@@ -19,6 +19,12 @@ namespace TerraEngine::EditorTests
 			context.Expect(editor.find("HardBoundaryClassification::Protected") != std::string::npos, "ImGui/Vulkan work must remain protected.");
 			context.Expect(engine.find("systemScheduler.RegisterSystem(*editorSystem") != std::string::npos, "The scheduler must own editor frame execution.");
 			context.Expect(engine.find("editorSystem->Update(deltaTime)") == std::string::npos, "Manual post-scheduler editor execution must be removed.");
+			// An armed capture must use the runtime lifecycle state at the engine
+			// boundary instead of relying on editor-window visibility or button state.
+			context.Expect(engine.find("const bool playModeFrame = ScriptingSystem::Instance().IsRunning()") != std::string::npos,
+				"Engine profiling must derive capture eligibility from active Play Mode.");
+			context.Expect(engine.find("profiler.BeginFrame(playModeFrame)") != std::string::npos,
+				"The main loop must pass Play Mode eligibility into every armed profiler frame boundary.");
 		});
 	}
 }

@@ -399,10 +399,12 @@ bool Engine::Update(float deltaTime)
 		return false;
 	}
 
-	// The profiler UI is editor-only, but captures measure engine systems only.
-	// Editor UI/update work runs after EndFrame so editor overhead is not mixed
-	// into engine frame analysis.
-	TerraEngine::Profiling::Profiler::Instance().BeginFrame();
+	// A profiler session may be armed before Play Mode begins. Sample only frames
+	// whose runtime world was active at frame start; editor-preview updates never
+	// enter game performance captures.
+	TerraEngine::Profiling::Profiler& profiler = TerraEngine::Profiling::Profiler::Instance();
+	const bool playModeFrame = ScriptingSystem::Instance().IsRunning();
+	profiler.BeginFrame(playModeFrame);
 	{
 		TERRAENGINE_PROFILE_SCOPE("Engine::Update", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 
@@ -465,7 +467,10 @@ bool Engine::Update(float deltaTime)
 			systemScheduler.SetLatestEcsGraphSummary(TerraEngine::Scheduling::FormatPublishedEcsGraphFrameSummaries());
 		}
 	}
-	TerraEngine::Profiling::Profiler::Instance().EndFrame();
+	if (playModeFrame)
+	{
+		profiler.EndFrame();
+	}
 
 	if (!headlessPhysicsValidation && ResourceManager::Instance().IsExportRuntime()) {
 		const TerraEngine::Renderer::RendererRecoverySnapshot recovery = RenderSystem::Instance().GetLatestRendererRecoverySnapshot();

@@ -77,6 +77,18 @@ namespace TerraEngine::Tests {
 				context.Expect(changedChild->second.position.x == 14.0f, "The cached child world transform must refresh after its authored local value changes.");
 			}
 
+			parentTransform->position.x = 20.0f;
+			objects.MarkObjectTransformDirty(parent);
+			const auto& parentChangedWorldTransforms = cache.Refresh(objects, diagnostics);
+			const auto descendantAfterParentMove = parentChangedWorldTransforms.find(child.EntityId());
+			context.Expect(diagnostics.changedObjectCount == 1U,
+				"A parent-only local edit must identify the parent as the single dirty branch root.");
+			context.Expect(diagnostics.propagatedObjectCount >= 2U,
+				"A parent local edit must propagate through both the parent and its child.");
+			context.Expect(descendantAfterParentMove != parentChangedWorldTransforms.end()
+				&& descendantAfterParentMove->second.position.x == 24.0f,
+				"Moving a parent must update the cached world transform of its child while preserving the child's local offset.");
+
 			Object newRoot = objects.createObject("Transform Cache New Root");
 			cache.Refresh(objects, diagnostics);
 			context.Expect(diagnostics.rebuiltForHierarchy, "A structural change must rebuild the protected hierarchy snapshot.");

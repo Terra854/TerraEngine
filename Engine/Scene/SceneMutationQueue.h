@@ -114,6 +114,10 @@ namespace TerraEngine::Scene {
 		std::size_t Size() const;
 		std::vector<SceneMutationRequest> PendingRequests() const;
 		std::vector<Transaction> PendingTransactions() const;
+		// Editor undo needs the complete inverse payload produced at commit time.
+		// Diagnostics intentionally discard that payload, so the editor drains this
+		// short-lived receipt channel at the beginning of its following frame.
+		std::vector<TransactionResult> DrainCompletedEditorTransactionResults();
 		TransactionDiagnostics GetTransactionDiagnostics() const;
 		void Clear();
 		SceneMutationBatchResult Validate(const SceneGraph& graph) const;
@@ -125,6 +129,7 @@ namespace TerraEngine::Scene {
 		std::vector<SceneMutationRequest> requests;
 		std::vector<SceneMutationWorkerBuffer> workerBuffers;
 		std::vector<Transaction> transactions;
+		std::vector<TransactionResult> completedEditorTransactionResults;
 		TransactionDiagnostics transactionDiagnostics;
 		mutable std::mutex requestsMutex;
 	};

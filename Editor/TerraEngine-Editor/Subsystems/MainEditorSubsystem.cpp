@@ -1898,7 +1898,12 @@ void MainEditorSubsystem::Update(float deltaTime) {
 			if (m_IsPrefabEditingMode) {
 				SaveOpenPrefab();
 			} else {
-				SceneManager::Instance().SaveScene();
+				// The disk write and undo save point form one editor action. Recording
+				// the state only after a successful write lets undo return to the exact
+				// revision represented by the file on disk.
+				if (SceneManager::Instance().SaveScene()) {
+					UndoRedoSystem::Instance().SetSavePoint();
+				}
 			}
 		}
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -2097,10 +2102,20 @@ void MainEditorSubsystem::CapturePendingEditorTransactionsForUndo()
 
 void MainEditorSubsystem::PublishCommittedEditorTransactionsToUndo()
 {
-	const TerraEngine::Scene::TransactionDiagnostics diagnostics =
-		TerraEngine::Scene::SceneMutationQueue::Instance().GetTransactionDiagnostics();
-	for (const TerraEngine::Scene::TransactionResult& result : diagnostics.recentResults)
+	// Full editor receipts are retained separately from diagnostics because the
+	// diagnostic ring intentionally strips inverse payloads. Consuming the full
+	// receipt is what makes ColliderSet and other physics edits enter history.
+	const std::vector<TerraEngine::Scene::TransactionResult> completedResults =
+		TerraEngine::Scene::SceneMutationQueue::Instance().DrainCompletedEditorTransactionResults();
+	for (const TerraEngine::Scene::TransactionResult& result : completedResults)
 	{
+		// Undo/redo transactions already own a history entry. Their receipt only
+		// finalizes that entry and restores the dirty flag after SceneManager's
+		// protected flush marked the scene changed.
+		if (UndoRedoSystem::Instance().CompleteDeferredReplay(result))
+		{
+			continue;
+		}
 		const auto pending = pendingEditorUndoTransactions.find(result.transactionId);
 		if (pending == pendingEditorUndoTransactions.end())
 		{
@@ -2569,12 +2584,14 @@ void MainEditorSubsystem::DrawSaveConfirmationModal() {
 				SaveOpenPrefab();
 				ClosePrefabMode();
 				if (restoreSceneNeedsSave) {
-					SceneManager::Instance().SaveScene(m_CurrentScenePath);
-					UndoRedoSystem::Instance().SetSavePoint();
+					if (SceneManager::Instance().SaveScene(m_CurrentScenePath)) {
+						UndoRedoSystem::Instance().SetSavePoint();
+					}
 				}
 			} else {
-				SceneManager::Instance().SaveScene();
-				UndoRedoSystem::Instance().SetSavePoint();
+				if (SceneManager::Instance().SaveScene()) {
+					UndoRedoSystem::Instance().SetSavePoint();
+				}
 			}
 			ExecutePendingAction();
 			ImGui::CloseCurrentPopup();

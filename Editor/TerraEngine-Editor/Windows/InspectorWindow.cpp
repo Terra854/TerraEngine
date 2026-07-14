@@ -7,6 +7,7 @@
 #include "../Subsystems/MainEditorSubsystem.h"
 #include "../Subsystems/ScriptCompilationSubsystem.h"
 #include "../Subsystems/UndoRedoSystem.h"
+#include "SceneViewWindow.h"
 #include "Engine/Core/Logger/Logger.h"
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Core/Object/Component.h"
@@ -51,6 +52,7 @@
 #include <limits>
 #include <optional>
 #include <sstream>
+#include <type_traits>
 #include <utility>
 
 using ReflectionProperty = TerraEngine::Reflection::Property;
@@ -194,6 +196,40 @@ bool DrawMixedCombo(const char* label, int& value, bool mixed, const char* const
 bool SameVector3(const TerraEngine::Physics::PhysicsVector3& left, const TerraEngine::Physics::PhysicsVector3& right)
 {
 	return left.x == right.x && left.y == right.y && left.z == right.z;
+}
+
+glm::vec3 ColliderPreviewHalfExtents(const TerraEngine::Physics::ColliderRecord& record)
+{
+	// The disabled preview fields must describe the authored primitive before an
+	// edit begins. Convert each stored shape convention into the same half-extent
+	// box used by Scene View handles so activating the preview causes no value jump.
+	return std::visit([](const auto& shape) -> glm::vec3 {
+		using Shape = std::decay_t<decltype(shape)>;
+		if constexpr (std::is_same_v<Shape, TerraEngine::Physics::BoxColliderShape>)
+		{
+			return {shape.halfExtents.x, shape.halfExtents.y, shape.halfExtents.z};
+		}
+		else if constexpr (std::is_same_v<Shape, TerraEngine::Physics::SphereColliderShape>)
+		{
+			return glm::vec3(shape.radius);
+		}
+		else if constexpr (std::is_same_v<Shape, TerraEngine::Physics::CapsuleColliderShape>
+			|| std::is_same_v<Shape, TerraEngine::Physics::CylinderColliderShape>)
+		{
+			return {shape.radius, shape.height * 0.5F, shape.radius};
+		}
+		else if constexpr (std::is_same_v<Shape, TerraEngine::Physics::TaperedCapsuleColliderShape>)
+		{
+			const float radius = std::max(shape.topRadius, shape.bottomRadius);
+			return {radius, shape.height * 0.5F, radius};
+		}
+		else
+		{
+			// Asset-backed shapes do not expose editable primitive dimensions. The
+			// neutral box keeps the read-only preview bounded until mesh fitting runs.
+			return glm::vec3(0.5F);
+		}
+	}, record.shape);
 }
 
 bool IsPhysicsAuthoringComponent(std::string_view componentName)
@@ -3170,15 +3206,69 @@ void InspectorWindow::DrawColliderSetInspector(const std::vector<entt::entity>& 
 			for (auto* record : records) record->isTrigger = trigger;
 			commit("Edit Collider Trigger State");
 		}
-		TerraEngine::Physics::PhysicsVector3 center = records.front()->localCenter;
-		const bool mixedCenter = std::any_of(records.begin() + 1, records.end(), [&](const auto* record) { return !SameVector3(record->localCenter, center); });
-		if (mixedCenter) ImGui::PushItemFlag(ImGuiItemFlags_MixedValue, true);
-		const bool centerChanged = ImGui::DragFloat3("Center (m)", &center.x, .01F, -100000.0F, 100000.0F, "%.3f");
-		if (mixedCenter) ImGui::PopItemFlag();
-		if (centerChanged)
+
+		// Shape handles are meaningful only for one concrete object. Multi-edit
+		// remains available above, but it must not ambiguously target one viewport
+		// preview while changing several independently authored collider records.
+		const std::shared_ptr<SceneViewWindow> sceneView = candidates.size() == 1U && m_Owner != nullptr
+			? m_Owner->GetWindow<SceneViewWindow>() : nullptr;
+		if (sceneView)
 		{
-			for (auto* record : records) record->localCenter = center;
-			commit("Edit Collider Center");
+			glm::vec3 editCenter(
+				records.front()->localCenter.x,
+				records.front()->localCenter.y,
+				records.front()->localCenter.z);
+			glm::vec3 editHalfExtents = ColliderPreviewHalfExtents(*records.front());
+			const bool editActive = sceneView->ReadPhysicsColliderPreview(
+				candidates.front().objectId, recordId, editCenter, editHalfExtents);
+			ImGui::SeparatorText("Shape");
+			ImGui::BeginDisabled(!editActive);
+			bool shapeChanged = ImGui::DragFloat3("Center (m)", &editCenter.x, .01F, -100000.0F, 100000.0F, "%.3f");
+			UpdateInspectorDragState();
+			shapeChanged = ImGui::DragFloat3("Half Extents (m)", &editHalfExtents.x, .01F, .001F, 1000.0F, "%.3f") || shapeChanged;
+			UpdateInspectorDragState();
+			ImGui::EndDisabled();
+			if (shapeChanged)
+			{
+				sceneView->UpdatePhysicsColliderPreview(
+					candidates.front().objectId, recordId, editCenter, editHalfExtents);
+			}
+			if (!editActive)
+			{
+				if (ImGui::Button("Edit Shape in Scene View"))
+				{
+					sceneView->BeginPhysicsColliderPreview(entities.front(), recordId);
+				}
+			}
+			else
+			{
+				if (ImGui::Button("Fit to Render Mesh")) sceneView->RequestPhysicsColliderFitToRenderMesh(entities.front());
+				ImGui::SameLine();
+				if (ImGui::Button("Apply Collider Edit")) sceneView->CommitPhysicsColliderPreview();
+				ImGui::SameLine();
+				if (ImGui::Button("Cancel")) sceneView->CancelPhysicsColliderPreview();
+			}
+			if (sceneView->IsPhysicsColliderPreviewSelection(recordId)
+				&& !sceneView->PhysicsColliderPreviewStatus().empty())
+			{
+				ImGui::TextWrapped("%s", sceneView->PhysicsColliderPreviewStatus().c_str());
+			}
+		}
+		else
+		{
+			// Multi-object editing has no unambiguous Scene View target, so retain one
+			// direct center field here. A single-object Inspector uses the shape field
+			// above and therefore never displays the same center twice.
+			TerraEngine::Physics::PhysicsVector3 center = records.front()->localCenter;
+			const bool mixedCenter = std::any_of(records.begin() + 1, records.end(), [&](const auto* record) { return !SameVector3(record->localCenter, center); });
+			if (mixedCenter) ImGui::PushItemFlag(ImGuiItemFlags_MixedValue, true);
+			const bool centerChanged = ImGui::DragFloat3("Center (m)", &center.x, .01F, -100000.0F, 100000.0F, "%.3f");
+			if (mixedCenter) ImGui::PopItemFlag();
+			if (centerChanged)
+			{
+				for (auto* record : records) record->localCenter = center;
+				commit("Edit Collider Center");
+			}
 		}
 
 		if (ImGui::Button("Duplicate"))

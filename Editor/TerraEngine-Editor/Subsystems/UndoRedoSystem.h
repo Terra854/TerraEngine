@@ -8,6 +8,7 @@
 #include <deque>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 #include <entt/entity/entity.hpp>
@@ -26,6 +27,9 @@ struct ICommand {
 	virtual void Redo() = 0;
 	virtual std::string GetName() const = 0;
 	virtual std::string GetHistoryId() const { return {}; }
+	// Deferred commands return the transaction they queued so the history owner
+	// can wait for the protected scene flush before finalizing dirty-state tracking.
+	virtual std::string GetPendingReplayTransactionId() const { return {}; }
 };
 
 // Records the creation of a new object. Undo destroys the entity, while Redo
@@ -185,6 +189,9 @@ public:
 	// Undo and redo enqueue inverse/forward typed writes for a later boundary.
 	bool RecordCommittedTransaction(const TerraEngine::Scene::Transaction& transaction,
 		const TerraEngine::Scene::TransactionResult& result);
+	// Completes an undo/redo command that published through SceneMutationQueue.
+	// Returning true means the receipt belonged to the active history replay.
+	bool CompleteDeferredReplay(const TerraEngine::Scene::TransactionResult& result);
 	
 	// Reverses the most recent command on the undo stack and moves it to the 
 	// redo stack.
@@ -211,16 +218,43 @@ public:
 	void Clear();
 
 private:
+	// Each history entry names both scene states surrounding its command. Stable
+	// state identifiers let dirty tracking follow the exact saved revision even
+	// when commands move between the undo and redo stacks or a branch is replaced.
+	struct HistoryEntry
+	{
+		std::unique_ptr<ICommand> command;
+		std::uint64_t beforeStateId = 0u;
+		std::uint64_t afterStateId = 0u;
+	};
+
+	enum class DeferredReplayDirection
+	{
+		Undo,
+		Redo
+	};
+
+	struct DeferredReplay
+	{
+		std::string transactionId;
+		DeferredReplayDirection direction = DeferredReplayDirection::Undo;
+	};
+
 	void UpdateDirtyState();
 
-	std::deque<std::unique_ptr<ICommand>> undoStack;
-	std::deque<std::unique_ptr<ICommand>> redoStack;
-	
-	// Points to the command that was at the top of the undo stack when last saved.
-	// If null, the saved state is the empty undo stack.
-	ICommand* m_SavedCommand = nullptr;
-	// Tracks if the saved state is currently reachable (not pruned by MaxHistory).
-	bool m_SavedStateIsReachable = true;
+	std::deque<HistoryEntry> undoStack;
+	std::deque<HistoryEntry> redoStack;
+	// At most one deferred replay may be in flight. Serializing replay requests
+	// prevents a second command from observing live component data that the first
+	// protected transaction has not published yet.
+	std::optional<DeferredReplay> m_DeferredReplay;
+
+	// Saving records the current logical state rather than merely clearing a
+	// boolean. Undoing back to this identifier makes the scene clean again, while
+	// redoing past it makes the scene dirty.
+	std::uint64_t m_CurrentStateId = 0u;
+	std::uint64_t m_SavedStateId = 0u;
+	std::uint64_t m_NextStateId = 1u;
 	std::uint64_t historySequence = 0u;
 
 	// Limits history depth to prevent unbounded memory growth during long 

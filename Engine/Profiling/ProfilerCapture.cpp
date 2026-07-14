@@ -92,8 +92,6 @@ std::string TimingScopeToStableName(ProfilerTimingStreamScope scope)
 	{
 	case ProfilerTimingStreamScope::EngineCpu:
 		return "engine_cpu";
-	case ProfilerTimingStreamScope::EditorWall:
-		return "editor_wall";
 	case ProfilerTimingStreamScope::ViewportCpu:
 		return "viewport_cpu";
 	case ProfilerTimingStreamScope::ViewportGpu:
@@ -107,10 +105,6 @@ std::optional<ProfilerTimingStreamScope> TryTimingScopeFromStableName(const std:
 	if (value == "engine_cpu")
 	{
 		return ProfilerTimingStreamScope::EngineCpu;
-	}
-	if (value == "editor_wall")
-	{
-		return ProfilerTimingStreamScope::EditorWall;
 	}
 	if (value == "viewport_cpu")
 	{
@@ -593,8 +587,6 @@ const char* ToString(ProfilerTimingStreamScope scope)
 	{
 	case ProfilerTimingStreamScope::EngineCpu:
 		return "Engine CPU";
-	case ProfilerTimingStreamScope::EditorWall:
-		return "Editor Wall";
 	case ProfilerTimingStreamScope::ViewportCpu:
 		return "Viewport CPU";
 	case ProfilerTimingStreamScope::ViewportGpu:

@@ -9,7 +9,7 @@
 #include <numeric>
 #include <sstream>
 #include <thread>
-#include <unordered_map>
+#include <unordered_set>
 
 namespace TerraEngine::Profiling
 {
@@ -19,6 +19,9 @@ namespace
 struct ThreadSampleState
 {
 	std::vector<ProfilerSample> openSamples;
+	std::unordered_set<std::uint64_t> fullyExcludedSamples;
+	std::chrono::steady_clock::time_point editorWorkStart{};
+	std::uint32_t editorWorkDepth = 0u;
 };
 
 thread_local ThreadSampleState t_sampleState;
@@ -141,6 +144,7 @@ void Profiler::StartRecording(const ProfilerCaptureMetadata& metadata, const Pro
 	selectedFrameIndex.reset();
 	sessionStart = std::chrono::steady_clock::now();
 	currentFrameStart = sessionStart;
+	currentExcludedEditorMs = 0.0;
 	nextFrameIndex = 0u;
 	nextSampleId = 1u;
 	queuedTaskCount = 0u;
@@ -208,6 +212,9 @@ void Profiler::Clear()
 	currentFrame.reset();
 	selectedFrameIndex.reset();
 	t_sampleState.openSamples.clear();
+	t_sampleState.fullyExcludedSamples.clear();
+	t_sampleState.editorWorkDepth = 0u;
+	currentExcludedEditorMs = 0.0;
 	state = ProfilerSessionState::Idle;
 	statusText = "Idle";
 	lastError.clear();
@@ -230,12 +237,25 @@ void Profiler::LoadDocument(const ProfilerCaptureDocument& loadedDocument)
 }
 
 // Profiler::BeginFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void Profiler::BeginFrame()
+void Profiler::BeginFrame(bool playModeActive)
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (state != ProfilerSessionState::Recording)
 	{
+		return;
+	}
+	if (!playModeActive)
+	{
+		// Record remains armed outside Play Mode, but no partial editor-preview
+		// frame or hot-path instrumentation is allowed to survive this boundary.
+		currentFrame.reset();
+		t_sampleState.openSamples.clear();
+		t_sampleState.fullyExcludedSamples.clear();
+		t_sampleState.editorWorkDepth = 0u;
+		currentExcludedEditorMs = 0.0;
+		statusText = "Recording (waiting for Play Mode)";
+		UpdateFastRecordingFlagsLocked();
 		return;
 	}
 
@@ -248,6 +268,7 @@ void Profiler::BeginFrame()
 	}
 
 	currentFrameStart = std::chrono::steady_clock::now();
+	currentExcludedEditorMs = 0.0;
 	ProfilerFrameRecord frame;
 	frame.frameIndex = nextFrameIndex++;
 	frame.frameStartMs = NowMs();
@@ -255,6 +276,10 @@ void Profiler::BeginFrame()
 	frame.moduleSummaries = MakeDefaultModuleSummaries(settings);
 	currentFrame = std::move(frame);
 	t_sampleState.openSamples.clear();
+	t_sampleState.fullyExcludedSamples.clear();
+	t_sampleState.editorWorkDepth = 0u;
+	statusText = "Recording";
+	UpdateFastRecordingFlagsLocked();
 }
 
 // Profiler::EndFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -267,18 +292,16 @@ void Profiler::EndFrame()
 		return;
 	}
 
-	currentFrame->durationMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - currentFrameStart).count();
+	const double wallDurationMs = std::chrono::duration<double, std::milli>(
+		std::chrono::steady_clock::now() - currentFrameStart).count();
+	const double excludedEditorMs = std::clamp(currentExcludedEditorMs, 0.0, wallDurationMs);
+	// Profiler frame statistics intentionally describe the runnable game/engine
+	// portion of the frame. Editor UI time is internal subtraction bookkeeping.
+	currentFrame->durationMs = std::max(0.0, wallDurationMs - excludedEditorMs);
 	AddOrReplaceTimingStreamSample(*currentFrame, MakeTimingSample(
 		"engine_cpu",
 		"Engine CPU",
 		ProfilerTimingStreamScope::EngineCpu,
-		ProfilerTimingStreamSource::ProfilerClock,
-		ProfilerTimingStreamStatus::Valid,
-		currentFrame->durationMs));
-	AddOrReplaceTimingStreamSample(*currentFrame, MakeTimingSample(
-		"editor_wall",
-		"Editor Wall",
-		ProfilerTimingStreamScope::EditorWall,
 		ProfilerTimingStreamSource::ProfilerClock,
 		ProfilerTimingStreamStatus::Valid,
 		currentFrame->durationMs));
@@ -288,7 +311,14 @@ void Profiler::EndFrame()
 		ProfilerSample sample = t_sampleState.openSamples.back();
 		t_sampleState.openSamples.pop_back();
 		sample.complete = false;
+		const bool fullyExcluded = t_sampleState.fullyExcludedSamples.erase(sample.sampleId) != 0u;
+		// Sample starts use the same compressed, editor-excluded clock as the
+		// frame duration, so incomplete samples cannot extend past the frame.
 		sample.durationMs = std::max(0.0, currentFrame->durationMs - sample.startMs);
+		if (fullyExcluded)
+		{
+			continue;
+		}
 		currentFrame->samples.push_back(std::move(sample));
 	}
 	double viewportCpuMs = 0.0;
@@ -334,6 +364,59 @@ void Profiler::EndFrame()
 	document.frames.push_back(*currentFrame);
 	TrimFrameBuffer(document.frames, settings);
 	currentFrame.reset();
+	UpdateFastRecordingFlagsLocked();
+}
+
+bool Profiler::BeginEditorWork()
+{
+	// The atomic check keeps the normal non-recording editor path lock-free.
+	if (!frameRecordingActive.load(std::memory_order_acquire))
+	{
+		return false;
+	}
+
+	std::lock_guard<std::mutex> lock(mutex);
+	if (state != ProfilerSessionState::Recording || !currentFrame.has_value())
+	{
+		return false;
+	}
+	if (t_sampleState.editorWorkDepth++ == 0u)
+	{
+		t_sampleState.editorWorkStart = std::chrono::steady_clock::now();
+		if (!t_sampleState.openSamples.empty()
+			&& t_sampleState.openSamples.back().taskLabel == "EditorSystem")
+		{
+			// The immediate enclosing scheduler scope represents EditorSystem itself.
+			// Drop that wrapper completely; its parent remains an engine sample whose
+			// duration is reduced by the excluded editor interval below.
+			t_sampleState.fullyExcludedSamples.insert(t_sampleState.openSamples.back().sampleId);
+		}
+	}
+	return true;
+}
+
+void Profiler::EndEditorWork(bool active)
+{
+	if (!active)
+	{
+		return;
+	}
+
+	std::lock_guard<std::mutex> lock(mutex);
+	if (t_sampleState.editorWorkDepth == 0u)
+	{
+		return;
+	}
+	if (--t_sampleState.editorWorkDepth != 0u)
+	{
+		return;
+	}
+	const double durationMs = std::chrono::duration<double, std::milli>(
+		std::chrono::steady_clock::now() - t_sampleState.editorWorkStart).count();
+	if (state == ProfilerSessionState::Recording && currentFrame.has_value())
+	{
+		currentExcludedEditorMs += std::max(0.0, durationMs);
+	}
 }
 
 // Profiler::BeginSample is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -344,6 +427,12 @@ bool Profiler::BeginSample(const char* name, ProfilerModuleId moduleId, const ch
 	// trip until a real capture is recording.
 	if (!markerRecordingActive.load(std::memory_order_acquire))
 	{
+		return false;
+	}
+	if (t_sampleState.editorWorkDepth != 0u)
+	{
+		// Editor work is outside the game profiler. Do not let nested ImGui,
+		// managed editor, or editor-presentation scopes enter CPU Engine tables.
 		return false;
 	}
 
@@ -361,7 +450,11 @@ bool Profiler::BeginSample(const char* name, ProfilerModuleId moduleId, const ch
 	sample.name = name != nullptr ? name : "Unnamed Sample";
 	sample.threadLabel = CurrentThreadLabel();
 	sample.taskLabel = taskLabel != nullptr ? taskLabel : "";
-	sample.startMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - currentFrameStart).count();
+	const double wallStartMs = std::chrono::duration<double, std::milli>(
+		std::chrono::steady_clock::now() - currentFrameStart).count();
+	// Compress the timeline by editor time already completed this frame. Every
+	// sample start and duration then shares the same game-only frame clock.
+	sample.startMs = std::max(0.0, wallStartMs - currentExcludedEditorMs);
 	sample.depth = static_cast<std::uint32_t>(t_sampleState.openSamples.size());
 	t_sampleState.openSamples.push_back(std::move(sample));
 	return true;
@@ -379,6 +472,7 @@ void Profiler::EndSample()
 
 	ProfilerSample sample = t_sampleState.openSamples.back();
 	t_sampleState.openSamples.pop_back();
+	const bool fullyExcluded = t_sampleState.fullyExcludedSamples.erase(sample.sampleId) != 0u;
 	// If recording stopped while a worker-owned scope was open, discard that
 	// unfinished sample after popping it so thread-local stacks do not leak
 	// stale parent ids into a later capture.
@@ -386,7 +480,14 @@ void Profiler::EndSample()
 	{
 		return;
 	}
-	sample.durationMs = std::max(0.0, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - currentFrameStart).count() - sample.startMs);
+	const double wallEndMs = std::chrono::duration<double, std::milli>(
+		std::chrono::steady_clock::now() - currentFrameStart).count();
+	const double gameEndMs = std::max(0.0, wallEndMs - currentExcludedEditorMs);
+	sample.durationMs = std::max(0.0, gameEndMs - sample.startMs);
+	if (fullyExcluded)
+	{
+		return;
+	}
 	currentFrame->samples.push_back(std::move(sample));
 }
 
@@ -407,8 +508,10 @@ void Profiler::RecordRenderStats(const RenderStatsSnapshot& gameStats, const Ren
 		return;
 	}
 	engineCpu->available = gameStats.valid || sceneStats.valid || engineCpu->available;
-	AddOrReplaceMetric(*engineCpu, "Game frame time", gameStats.frameTimeMs, "ms");
-	AddOrReplaceMetric(*engineCpu, "Scene frame time", sceneStats.frameTimeMs, "ms");
+	// RenderStatsSnapshot::frameTimeMs is the input delta copied into a delayed,
+	// completed renderer snapshot. It does not measure CPU work in this profiler
+	// frame, so exposing it here would create two unrelated "frame time" values.
+	// The immediate viewport overlays remain the owner of that renderer diagnostic.
 	AddOrReplaceMetric(*engineCpu, "Game draw calls", static_cast<double>(gameStats.drawCalls), "count");
 	AddOrReplaceMetric(*engineCpu, "Scene draw calls", static_cast<double>(sceneStats.drawCalls), "count");
 	AddOrReplaceMetric(*engineCpu, "Game triangles", static_cast<double>(gameStats.triangleCount), "count");
@@ -689,8 +792,12 @@ void Profiler::AggregateSamplesForFrame(ProfilerFrameRecord& frame) const
 // Profiler::UpdateFastRecordingFlagsLocked is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Profiler::UpdateFastRecordingFlagsLocked()
 {
-	const bool recording = state == ProfilerSessionState::Recording;
-	markerRecordingActive.store(recording && settings.recordMarkers, std::memory_order_release);
-	taskRecordingActive.store(recording && settings.taskExecutionEnabled, std::memory_order_release);
+	// An armed recording outside Play Mode owns no current frame. Keeping all
+	// fast flags false there prevents editor-preview instrumentation from paying
+	// profiler synchronization costs or leaking counters into the next play frame.
+	const bool frameActive = state == ProfilerSessionState::Recording && currentFrame.has_value();
+	frameRecordingActive.store(frameActive, std::memory_order_release);
+	markerRecordingActive.store(frameActive && settings.recordMarkers, std::memory_order_release);
+	taskRecordingActive.store(frameActive && settings.taskExecutionEnabled, std::memory_order_release);
 }
 }

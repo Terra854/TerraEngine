@@ -5,11 +5,14 @@
 #include "Renderer/RenderTypes.h"
 
 #include <algorithm>
+#include <cmath>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace TerraEngine::Tests {
@@ -211,6 +214,21 @@ namespace TerraEngine::Tests {
 			context.Expect(!LoadCaptureDocument(workspace.Path("wrong-format.teprof"), loaded, error), "Profiler loading should reject files with the wrong format marker.");
 			context.Expect(error.find("not a TerraEngine profiler capture") != std::string::npos, "Wrong-format failures should report a clear diagnostic.");
 
+			workspace.WriteTextFile("editor-wall.teprof", R"({
+				"format": "TerraEngineProfilerCapture",
+				"payloadVersion": 1,
+				"metadata": {"settings": {}},
+				"frames": [{
+					"frameIndex": 0,
+					"frameStartMs": 0.0,
+					"durationMs": 1.0,
+					"complete": true,
+					"timingStreams": [{"id":"editor_wall", "scope":"editor_wall"}]
+				}]
+			})");
+			context.Expect(!LoadCaptureDocument(workspace.Path("editor-wall.teprof"), loaded, error), "Profiler loading should reject captures containing the removed Editor Wall scope.");
+			context.Expect(error.find("unknown timing stream scope: editor_wall") != std::string::npos, "Removed editor timing should fail with a clear scope diagnostic.");
+
 			workspace.WriteTextFile("unknown-module.teprof", R"({
 				"format": "TerraEngineProfilerCapture",
 				"payloadVersion": 1,
@@ -303,6 +321,15 @@ namespace TerraEngine::Tests {
 				context.Expect(gameGpu != frames.front().timingStreams.end(), "Consolidated Viewport GPU timing stream should be present.");
 				context.Expect(gameGpu != frames.front().timingStreams.end() && gameGpu->source == ProfilerTimingStreamSource::BackendGpuTimestamp, "Valid renderer GPU timestamps should be marked as backend GPU timestamp samples.");
 				context.Expect(gameGpu != frames.front().timingStreams.end() && gameGpu->status == ProfilerTimingStreamStatus::Valid && gameGpu->milliseconds == 2.5, "Valid renderer GPU timestamps should preserve the measured duration.");
+
+				const ProfilerModuleSummary* cpuModule = FindModule(frames.front().moduleSummaries, ProfilerModuleId::CpuEngine);
+				context.Expect(cpuModule != nullptr, "Render statistics should retain the CPU/Pipeline diagnostic module.");
+				if (cpuModule != nullptr) {
+					context.Expect(FindMetric(*cpuModule, "Frame duration") != nullptr, "CPU/Pipeline should expose the selected profiler frame duration.");
+					context.Expect(FindMetric(*cpuModule, "Game frame time") == nullptr, "A delayed Game View input delta must not be presented as selected-frame profiler timing.");
+					context.Expect(FindMetric(*cpuModule, "Scene frame time") == nullptr, "A delayed Scene View input delta must not be presented as selected-frame profiler timing.");
+					context.Expect(FindMetric(*cpuModule, "Game draw calls") != nullptr, "Non-timing renderer diagnostics should remain available.");
+				}
 			}
 
 			profiler.Clear();
@@ -347,6 +374,64 @@ namespace TerraEngine::Tests {
 			profiler.Clear();
 		});
 
+		registry.Add("Engine.Profiler.EditorWorkIsExcludedFromGameProfiler", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+
+			Profiler& profiler = Profiler::Instance();
+			profiler.Clear();
+			ProfilerCaptureMetadata metadata;
+			metadata.projectName = "Editor exclusion";
+			ProfilerCaptureSettings settings;
+			settings.maxFrames = 2U;
+
+			profiler.StartRecording(metadata, settings);
+			const auto rawFrameStarted = std::chrono::steady_clock::now();
+			profiler.BeginFrame();
+			const bool engineSample = profiler.BeginSample("Engine::Update", ProfilerModuleId::CpuEngine);
+			const bool editorWrapper = profiler.BeginSample("JobGraph::ProtectedJob", ProfilerModuleId::CpuEngine, "EditorSystem");
+			const bool editorBoundary = profiler.BeginEditorWork();
+			context.Expect(!profiler.BeginSample("EditorWindow::Draw", ProfilerModuleId::CpuEngine, "Profiler"),
+				"Editor markers must be suppressed while the editor exclusion interval is active.");
+			std::this_thread::sleep_for(std::chrono::milliseconds(20));
+			profiler.EndEditorWork(editorBoundary);
+			if (editorWrapper) profiler.EndSample();
+			if (engineSample) profiler.EndSample();
+			profiler.EndFrame();
+			const double rawFrameMs = std::chrono::duration<double, std::milli>(
+				std::chrono::steady_clock::now() - rawFrameStarted).count();
+
+			const std::vector<ProfilerFrameRecord> frames = profiler.GetFramesSnapshot();
+			context.ExpectEqual(1U, static_cast<unsigned int>(frames.size()),
+				"The separated editor interval must still publish one complete profiler frame.");
+			if (!frames.empty())
+			{
+				const ProfilerFrameRecord& frame = frames.front();
+				context.Expect(!HasSampleNamed(frame, "EditorWindow::Draw"),
+					"Editor windows must never appear in CPU Engine samples or Top Offenders.");
+				context.Expect(!HasSampleNamed(frame, "JobGraph::ProtectedJob"),
+					"The scheduler wrapper dedicated to EditorSystem must be removed with the editor interval.");
+				const auto engineTiming = std::find_if(frame.timingStreams.begin(), frame.timingStreams.end(), [](const ProfilerTimingStreamSample& sample) {
+					return sample.id == "engine_cpu";
+				});
+				const auto editorTiming = std::find_if(frame.timingStreams.begin(), frame.timingStreams.end(), [](const ProfilerTimingStreamSample& sample) {
+					return sample.id == "editor_wall";
+				});
+				context.Expect(engineTiming != frame.timingStreams.end(),
+					"The game-facing Engine CPU timing stream must remain available.");
+				context.Expect(editorTiming == frame.timingStreams.end(),
+					"Editor Wall must not be published by the game-facing profiler.");
+				context.Expect(engineTiming != frame.timingStreams.end()
+					&& std::abs(engineTiming->milliseconds - frame.durationMs) <= 0.000001,
+					"Profiler frame duration must equal editor-excluded Engine CPU time.");
+				context.Expect(frame.durationMs + 10.0 < rawFrameMs,
+					"Profiler frame duration must remove the measured editor interval from raw wall time.");
+				context.Expect(std::all_of(frame.samples.begin(), frame.samples.end(), [&frame](const ProfilerSample& sample) {
+					return sample.startMs + sample.durationMs <= frame.durationMs + 0.000001;
+				}), "Editor-excluded sample timelines must remain inside the game-facing frame duration.");
+			}
+			profiler.Clear();
+		});
+
 		registry.Add("Engine.Profiler.RecordingAggregatesSamplesAndTaskCounters", [](TestContext& context) {
 			using namespace TerraEngine::Profiling;
 
@@ -359,8 +444,8 @@ namespace TerraEngine::Tests {
 			settings.maxFrames = 4U;
 
 			profiler.StartRecording(metadata, settings);
-			profiler.RecordTaskQueued();
 			profiler.BeginFrame();
+			profiler.RecordTaskQueued();
 			const bool outerSampleActive = profiler.BeginSample("Outer", ProfilerModuleId::CpuEngine);
 			context.Expect(outerSampleActive, "Profiler scopes should report that a sample was opened while recording.");
 			const bool taskSampleActive = profiler.RecordTaskStarted("UnitTask");
@@ -392,6 +477,46 @@ namespace TerraEngine::Tests {
 			ProfilerCaptureDocument finishedDocument = profiler.FinishRecording();
 			context.ExpectEqual(1u, static_cast<unsigned int>(finishedDocument.frames.size()), "Finishing after a complete frame should preserve recorded frames.");
 			context.Expect(profiler.GetState() == ProfilerSessionState::Finalizing, "Finishing a capture should transition the profiler to finalizing.");
+			profiler.Clear();
+		});
+
+		registry.Add("Engine.Profiler.RecordingArmsOutsidePlayModeAndCapturesOnlyPlayFrames", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+
+			Profiler& profiler = Profiler::Instance();
+			profiler.Clear();
+			ProfilerCaptureMetadata metadata;
+			metadata.projectName = "Play-only profiling";
+			ProfilerCaptureSettings settings;
+			settings.maxFrames = 4U;
+
+			profiler.StartRecording(metadata, settings);
+			profiler.BeginFrame(false);
+			context.Expect(profiler.GetState() == ProfilerSessionState::Recording,
+				"Recording should remain armed while Play Mode is stopped.");
+			context.Expect(profiler.GetStatusText().find("waiting for Play Mode") != std::string::npos,
+				"An armed recording should explain that it is waiting for Play Mode.");
+			context.Expect(!profiler.BeginSample("Editor Preview", ProfilerModuleId::CpuEngine),
+				"Armed recording must keep editor-preview profiler markers disabled.");
+			context.Expect(!profiler.RecordTaskStarted("Editor Preview Task"),
+				"Armed recording must keep editor-preview task instrumentation disabled.");
+			profiler.EndFrame();
+			context.Expect(profiler.GetFramesSnapshot().empty(),
+				"No frame should be captured before Play Mode starts.");
+
+			profiler.BeginFrame(true);
+			const bool playSample = profiler.BeginSample("Play Frame", ProfilerModuleId::CpuEngine);
+			context.Expect(playSample, "Profiler markers should activate when a Play Mode frame begins.");
+			if (playSample) profiler.EndSample();
+			profiler.EndFrame();
+			context.ExpectEqual(1U, static_cast<unsigned int>(profiler.GetFramesSnapshot().size()),
+				"Exactly one frame should be captured during the Play Mode interval.");
+
+			profiler.BeginFrame(false);
+			context.ExpectEqual(1U, static_cast<unsigned int>(profiler.GetFramesSnapshot().size()),
+				"Leaving Play Mode should keep the recording armed without appending editor frames.");
+			context.Expect(profiler.GetState() == ProfilerSessionState::Recording,
+				"Leaving Play Mode should not finish the armed recording session.");
 			profiler.Clear();
 		});
 
