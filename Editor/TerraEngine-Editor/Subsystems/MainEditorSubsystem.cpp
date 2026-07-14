@@ -274,7 +274,9 @@ namespace
 				continue;
 			}
 
-			if (node.window && ImGui::MenuItem(node.label.c_str(), nullptr, node.window->IsVisible()))
+			// Window visibility is already obvious from the dockspace itself, so the
+			// menu entry remains a plain open/focus command without a checkmark.
+			if (node.window && ImGui::MenuItem(node.label.c_str()))
 			{
 				// Preserve the previous native menu behavior: selecting an entry opens
 				// or focuses its window rather than using the menu as a close action.

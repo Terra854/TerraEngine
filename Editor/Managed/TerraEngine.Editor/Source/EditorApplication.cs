@@ -163,10 +163,11 @@ namespace TerraEngine.Editor
 
 				if (node.Window != null)
 				{
-					bool visible = node.Window.IsVisible;
-					if (ImGui.MenuItem(node.Label, "", ref visible))
+					// Keep the existing toggle behavior, but do not pass the visibility
+					// state to ImGui because that state renders an unnecessary checkmark.
+					if (ImGui.MenuItem(node.Label))
 					{
-						node.Window.IsVisible = visible;
+						node.Window.IsVisible = !node.Window.IsVisible;
 					}
 				}
 			}
