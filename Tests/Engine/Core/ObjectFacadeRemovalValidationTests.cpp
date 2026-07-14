@@ -13,15 +13,22 @@ namespace TerraEngine::Tests {
 			std::filesystem::path current = std::filesystem::current_path();
 			while (!current.empty())
 			{
-				// CTest may launch from the binary tree, which can also contain copied
-				// Engine/Tests folders. Require source-only contract files so static
-				// migration checks always inspect the checkout rather than build output.
-				if (std::filesystem::exists(current / "Engine/Core/Object/Object.h")
-					&& std::filesystem::exists(current / "specs/023-compact-object-handles/contracts/migration-validation.md"))
+				// CTest may launch from the binary tree. Object.h is the maintained
+				// source-level contract; historical feature-spec folders are not required
+				// in a clean checkout after their implementation has been integrated.
+				if (std::filesystem::exists(current / "Engine/Core/Object/Object.h"))
 				{
 					return current;
 				}
-				current = current.parent_path();
+				// Windows drive roots are their own parent (for example, C:\\ maps
+				// back to C:\\). Stop there so a missing contract reports a normal
+				// assertion failure instead of making the unfiltered CTest process spin.
+				const std::filesystem::path parent = current.parent_path();
+				if (parent == current)
+				{
+					break;
+				}
+				current = parent;
 			}
 			return std::filesystem::current_path();
 		}
@@ -53,10 +60,12 @@ namespace TerraEngine::Tests {
 	{
 		registry.Add("Engine.ObjectFacadeRemovalValidation.DocumentsFinalRemovalContract", [](TestContext& context) {
 			const std::filesystem::path root = RepositoryRoot();
-			const std::string contract = ReadTextFile(root / "specs/023-compact-object-handles/contracts/migration-validation.md");
-			context.Expect(!contract.empty(), "Migration validation contract should be available from the repository root.");
-			context.Expect(contract.find("No old facade member functions exist.") != std::string::npos, "Contract should document final facade member removal.");
-			context.Expect(contract.find("No old facade source file remains.") != std::string::npos, "Contract should document final facade source removal.");
+			const std::string contract = ReadTextFile(root / "Engine/Core/Object/Object.h");
+			context.Expect(!contract.empty(), "The maintained Object identity contract should be available from the repository root.");
+			context.Expect(contract.find("small value, not a component facade") != std::string::npos,
+				"Object.h should document that the removed component facade is not part of the compact identity.");
+			context.Expect(contract.find("validated through ObjectManager before mutable access") != std::string::npos,
+				"Object.h should document the supported mutable-access boundary that replaced facade members.");
 		});
 
 		registry.Add("Engine.ObjectFacadeRemovalValidation.FinalObjectHeaderRemovesFacadeMembers", [](TestContext& context) {

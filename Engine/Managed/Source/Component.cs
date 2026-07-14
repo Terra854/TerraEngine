@@ -71,6 +71,10 @@ namespace TerraEngine
 				nameof(Camera) => "CameraComponent",
 				nameof(Light) => "LightComponent",
 				nameof(MeshRenderer) => "MeshRenderComponent",
+				nameof(Rigidbody) => "RigidBodyComponent",
+				nameof(ColliderSet) => "ColliderSetComponent",
+				nameof(ConstraintSet) => "ConstraintSetComponent",
+				nameof(CharacterController) => "CharacterControllerComponent",
 				_ => managedType.Name
 			};
 		}

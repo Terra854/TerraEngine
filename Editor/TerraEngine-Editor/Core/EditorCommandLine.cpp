@@ -25,6 +25,14 @@ EditorCommandLineOptions ParseEditorCommandLine(int argc, char** argv)
 			}
 			continue;
 		}
+		if (argument == "--validate-editor-physics-invariants")
+		{
+			if (index + 1 < argc && argv[index + 1] != nullptr)
+			{
+				options.physicsInvariantOutputPath = std::filesystem::path(argv[++index]);
+			}
+			continue;
+		}
 
 		constexpr std::string_view projectEqualsPrefix = "--project=";
 		if (argument.rfind(projectEqualsPrefix, 0) == 0)
@@ -33,6 +41,17 @@ EditorCommandLineOptions ParseEditorCommandLine(int argc, char** argv)
 			if (!value.empty())
 			{
 				options.startupProjectPath = std::filesystem::path(value);
+			}
+			continue;
+		}
+
+		constexpr std::string_view invariantEqualsPrefix = "--validate-editor-physics-invariants=";
+		if (argument.rfind(invariantEqualsPrefix, 0) == 0)
+		{
+			const std::string_view value = argument.substr(invariantEqualsPrefix.size());
+			if (!value.empty())
+			{
+				options.physicsInvariantOutputPath = std::filesystem::path(value);
 			}
 		}
 	}

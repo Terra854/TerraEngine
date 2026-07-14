@@ -28,12 +28,16 @@
 #include "Scene/SceneGraphRuntime.h"
 #include "Scene/RuntimeLayout.h"
 #include "Scripting/ScriptingSystem.h"
+#include "Physics/PhysicsSystem.h"
 #include "Scripting/ScriptGlue.h"
 #include "UI/UISystem.h"
 #include "Utilities/PlatformUtils.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -151,6 +155,13 @@ void Engine::SetEditorMode(SystemsBase* system)
 	editorMode = true;
 }
 
+void Engine::ConfigureHeadlessPhysicsValidation()
+{
+	// This flag is intentionally set before Initialize(). The normal Engine
+	// lifecycle still owns resource and worker teardown after the validation.
+	headlessPhysicsValidation = true;
+}
+
 // Engine::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Engine::Initialize()
 {
@@ -171,37 +182,35 @@ void Engine::Initialize()
 	// startup scene is discovered before SceneManager begins loading content.
 	ResourceManager& resourceManager = ResourceManager::Instance();
 
-	// The window system is initialized first so other systems can depend on
-	// a valid window context if they need one later.
-	WindowConfig windowConfig{};
-	// Both editor and exported desktop runtimes support presentation-only
-	// recreation, so ordinary resize/minimize/restore must remain available.
-	windowConfig.resizable = true;
-	WindowSystem& windowSystem = WindowSystem::Instance();
-	windowSystem.Configure(std::make_unique<GlfwWindowBackend>(), windowConfig, [this]() {
-		SignalShutdown();
-		});
-	auto windowDeclaration = MakeEngineSystemDeclaration("WindowSystem", "PreFrame", {}, { "Window" });
-	windowDeclaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::ProtectedCommit;
-	windowDeclaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::Protected;
-	windowDeclaration.hardBoundary = true;
-	windowDeclaration.safeSubwork = "Immutable window state snapshots for worker readers after protected event polling.";
-	windowDeclaration.protectedCommit = "Platform event polling, close/resize handling, backend callback ingestion, cursor mutation, and swap-buffer calls.";
-	windowDeclaration.protectedReason = windowDeclaration.protectedCommit;
-	RegisterEngineSystem(systems, systemScheduler, windowSystem, std::move(windowDeclaration));
+	if (!headlessPhysicsValidation) {
+		// Interactive runtimes require a window and input before any system that
+		// consumes platform state. The headless parity mode deliberately omits both.
+		WindowConfig windowConfig{};
+		windowConfig.resizable = true;
+		WindowSystem& windowSystem = WindowSystem::Instance();
+		windowSystem.Configure(std::make_unique<GlfwWindowBackend>(), windowConfig, [this]() {
+			SignalShutdown();
+			});
+		auto windowDeclaration = MakeEngineSystemDeclaration("WindowSystem", "PreFrame", {}, { "Window" });
+		windowDeclaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::ProtectedCommit;
+		windowDeclaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::Protected;
+		windowDeclaration.hardBoundary = true;
+		windowDeclaration.safeSubwork = "Immutable window state snapshots for worker readers after protected event polling.";
+		windowDeclaration.protectedCommit = "Platform event polling, close/resize handling, backend callback ingestion, cursor mutation, and swap-buffer calls.";
+		windowDeclaration.protectedReason = windowDeclaration.protectedCommit;
+		RegisterEngineSystem(systems, systemScheduler, windowSystem, std::move(windowDeclaration));
 
-	// Set up the input system after the window so the backend can attach to the
-	// native window handle without duplicating platform specific code here.
-	InputSystem& inputSystem = InputSystem::Instance();
-	inputSystem.Configure(std::make_unique<GlfwInputBackend>());
-	auto inputDeclaration = MakeEngineSystemDeclaration("InputSystem", "Input", { "Window" }, { "Input" });
-	inputDeclaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::ProtectedCommit;
-	inputDeclaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::Protected;
-	inputDeclaration.hardBoundary = true;
-	inputDeclaration.safeSubwork = "Immutable post-poll input/window snapshots for worker readers.";
-	inputDeclaration.protectedCommit = "Platform event polling, backend callback ingestion, close/resize handling, cursor mutation, and swap-buffer calls.";
-	inputDeclaration.protectedReason = inputDeclaration.protectedCommit;
-	RegisterEngineSystem(systems, systemScheduler, inputSystem, std::move(inputDeclaration));
+		InputSystem& inputSystem = InputSystem::Instance();
+		inputSystem.Configure(std::make_unique<GlfwInputBackend>());
+		auto inputDeclaration = MakeEngineSystemDeclaration("InputSystem", "Input", { "Window" }, { "Input" });
+		inputDeclaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::ProtectedCommit;
+		inputDeclaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::Protected;
+		inputDeclaration.hardBoundary = true;
+		inputDeclaration.safeSubwork = "Immutable post-poll input/window snapshots for worker readers.";
+		inputDeclaration.protectedCommit = "Platform event polling, backend callback ingestion, close/resize handling, cursor mutation, and swap-buffer calls.";
+		inputDeclaration.protectedReason = inputDeclaration.protectedCommit;
+		RegisterEngineSystem(systems, systemScheduler, inputSystem, std::move(inputDeclaration));
+	}
 
 	// The scene manager owns authored .tescene and .teprefab JSON documents so
 	// gameplay code can request them without re-reading disk on every access.
@@ -212,20 +221,32 @@ void Engine::Initialize()
 	ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
 	RegisterEngineSystem(systems, systemScheduler, scriptingSystem, scriptingSystem.SchedulerDeclaration());
 
-	// UISystem parses `.tuiml`/`.tuss` assets and builds CPU-side UI batches
-	// after gameplay and scene state have been updated for the current frame.
-	UISystem& uiSystem = UISystem::Instance();
-	RegisterEngineSystem(systems, systemScheduler, uiSystem, uiSystem.SchedulerDeclaration());
-
-	// RenderSystem consumes scene data and produces frames.
-	RenderSystem& renderSystem = RenderSystem::Instance();
-	renderSystem.SetEditorModeEnabled(editorMode);
-	if (const auto configuredRenderSettings = resourceManager.GetConfiguredRenderSettings()) {
-		// Export profiles are resolved before runtime starts, so applying them
-		// here gives the renderer one stable quality contract for the session.
-		renderSystem.SetRenderSettings(*configuredRenderSettings);
+	// Editor Play Mode owns world creation/restoration, while exported games
+	// start the same shared system during ordinary engine initialization.
+	TerraEngine::Physics::PhysicsSystem& physicsSystem = TerraEngine::Physics::PhysicsSystem::Instance();
+	physicsSystem.SetEditorLifecycleControlled(editorMode);
+	auto physicsDeclaration = physicsSystem.SchedulerDeclaration();
+	if (headlessPhysicsValidation) {
+		// The normal declaration orders physics before presentation. Headless parity
+		// deliberately has no UISystem, so remove only that absent optional edge while
+		// retaining every Physics phase/resource/boundary declaration.
+		std::erase(physicsDeclaration.before, "UISystem");
 	}
-	RegisterEngineSystem(systems, systemScheduler, renderSystem, renderSystem.SchedulerDeclaration());
+	RegisterEngineSystem(systems, systemScheduler, physicsSystem, std::move(physicsDeclaration));
+
+	if (!headlessPhysicsValidation) {
+		// UISystem and RenderSystem are presentation-only. Omitting them keeps the
+		// installed parity run independent of a graphics driver and window server.
+		UISystem& uiSystem = UISystem::Instance();
+		RegisterEngineSystem(systems, systemScheduler, uiSystem, uiSystem.SchedulerDeclaration());
+
+		RenderSystem& renderSystem = RenderSystem::Instance();
+		renderSystem.SetEditorModeEnabled(editorMode);
+		if (const auto configuredRenderSettings = resourceManager.GetConfiguredRenderSettings()) {
+			renderSystem.SetRenderSettings(*configuredRenderSettings);
+		}
+		RegisterEngineSystem(systems, systemScheduler, renderSystem, renderSystem.SchedulerDeclaration());
+	}
 	if (editorMode && editorSystem != nullptr) {
 		// Editor UI owns the real protected PostFrame boundary. It remains outside
 		// the lifecycle vector because setup/teardown have editor-specific ordering,
@@ -254,15 +275,45 @@ void Engine::Initialize()
 	std::size_t initializedSystemCount = 0;
 	bool editorSystemInitialized = false;
 	bool resourceManagerInitialized = false;
+	std::optional<TerraEngine::Runtime::PackagedPhysicsRuntime> packagedPhysics;
 	try {
 		resourceManager.Initialize();
 		resourceManagerInitialized = true;
 		sceneManager.SetSceneRoot(resourceManager.GetAssetRoot());
 		sceneManager.SetStartupScene(resourceManager.GetConfiguredStartupScene().value_or(std::filesystem::path{}));
-		if (const auto configuredRenderSettings = resourceManager.GetConfiguredRenderSettings()) {
-			renderSystem.SetRenderSettings(*configuredRenderSettings);
+		if (!headlessPhysicsValidation) {
+			RenderSystem& renderSystem = RenderSystem::Instance();
+			if (const auto configuredRenderSettings = resourceManager.GetConfiguredRenderSettings()) {
+				renderSystem.SetRenderSettings(*configuredRenderSettings);
+			}
+			renderSystem.SetRendererRecoveryPolicy(resourceManager.GetRendererRecoveryPolicy());
 		}
-		renderSystem.SetRendererRecoveryPolicy(resourceManager.GetRendererRecoveryPolicy());
+
+		// Exported physics content is validated and copied from the mounted archive
+		// before any system initializes. This prevents a corrupt collider, material,
+		// managed binding, or provider revision from creating a live Jolt world.
+		if(resourceManager.IsExportRuntime() && ContentMount::Instance().IsMounted()) {
+			packagedPhysics = TerraEngine::Runtime::LoadPackagedPhysicsRuntime(
+				ContentMount::Instance(), true,
+				resourceManager.GetEngineRoot() / "Managed" / "Assembly-CSharp.dll");
+			if(packagedPhysics->declared && !packagedPhysics->loaded) {
+				throw std::runtime_error(packagedPhysics->diagnostic);
+			}
+			if(packagedPhysics->declared && !physicsSystem.QueueSettingsUpdate(packagedPhysics->settings)) {
+				throw std::runtime_error("Packaged Physics Settings could not be queued before provider initialization.");
+			}
+			if(packagedPhysics->loaded) {
+				// The loader already verified every mounted payload and GUID. Register
+				// their logical paths before PhysicsSystem captures the startup scene so
+				// normal asset resolution can read them through ContentMount.
+				for(const auto& material : packagedPhysics->materials) {
+					resourceManager.RegisterAssetPath(material.assetId, material.packagePath, AssetType::PhysicsMaterial);
+				}
+				for(const auto& collider : packagedPhysics->colliders) {
+					resourceManager.RegisterAssetPath(collider.assetId, collider.packagePath, AssetType::CookedCollider);
+				}
+			}
+		}
 
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (auto* system : systems) {
@@ -314,6 +365,7 @@ void Engine::Initialize()
 	startupInput.renderProfile = resourceManager.GetRenderProfileSummary();
 	startupInput.validationEnabled = resourceManager.IsRenderValidationEnabled();
 	startupInput.debugEnabled = resourceManager.IsRenderDebugEnabled();
+	startupInput.packagedPhysics = std::move(packagedPhysics);
 	if (sceneManager.GetActiveScene() != nullptr) {
 		auto graph = TerraEngine::Scene::BuildSceneGraphFromObjectManager(ObjectManager::instance());
 		auto summary = TerraEngine::Scene::BuildSceneRuntimeSummary(graph);
@@ -363,15 +415,24 @@ bool Engine::Update(float deltaTime)
 			TerraEngine::Scheduling::ClearPublishedEcsGraphFrameSummaries();
 		}
 
-		const TerraEngine::Scheduling::ScheduleSummary& schedulerSummary = systemScheduler.ExecuteFrame(deltaTime, [](const TerraEngine::Scheduling::MutationFlushPoint&) {
+		const TerraEngine::Scheduling::ScheduleSummary& schedulerSummary = systemScheduler.ExecuteFrame(deltaTime, [](const TerraEngine::Scheduling::MutationFlushPoint& flushPoint) {
 			TerraEngine::Scheduling::MutationFlushRuntimeState state;
 			TerraEngine::Scene::SceneMutationQueue& queue = TerraEngine::Scene::SceneMutationQueue::Instance();
+			TerraEngine::Scene::SceneMutationBatchResult result;
 			if (!queue.Empty()) {
 				// Structural scene mutations are applied only at declared flush
 				// points so systems that iterate hierarchy/component data never
 				// observe the ObjectManager changing midway through their update.
-				const TerraEngine::Scene::SceneMutationBatchResult result = SceneManager::Instance().ApplySceneMutations("system-scheduler-flush");
+				result = SceneManager::Instance().ApplySceneMutations("system-scheduler-flush");
 				state.message = result.applied ? "Scene mutation queue flushed." : "Scene mutation queue rejected one or more requests.";
+			}
+			if (flushPoint.name == "After Physics") {
+				// A physics step becomes publication-complete only after this protected
+				// boundary returns the receipts for its typed Transform transactions.
+				TerraEngine::Physics::PhysicsSystem::Instance().OnAfterPhysicsFlush(result.transactionResults);
+				// Managed subscribers observe the immutable packet only after physics
+				// transform transactions are visible and provider callbacks have ended.
+				ScriptingSystem::Instance().DeliverPhysicsEventsAfterFlush();
 			}
 			state.pendingAfterFlush = queue.Size();
 			return state;
@@ -406,7 +467,7 @@ bool Engine::Update(float deltaTime)
 	}
 	TerraEngine::Profiling::Profiler::Instance().EndFrame();
 
-	if (ResourceManager::Instance().IsExportRuntime()) {
+	if (!headlessPhysicsValidation && ResourceManager::Instance().IsExportRuntime()) {
 		const TerraEngine::Renderer::RendererRecoverySnapshot recovery = RenderSystem::Instance().GetLatestRendererRecoverySnapshot();
 		if (recovery.state == TerraEngine::Renderer::RendererRecoveryStateKind::FatalExportFailure) {
 			TERRAENGINE_LOG(LogLevel::Critical, "Export runtime stopping after graphics device loss. incident="
@@ -435,6 +496,156 @@ bool Engine::Update(float deltaTime)
 	}
 
 	return true;
+}
+
+TerraEngine::Runtime::PhysicsInvariantReport Engine::RunPhysicsInvariantFixture()
+{
+	using namespace TerraEngine;
+	using namespace TerraEngine::Physics;
+	Runtime::PhysicsInvariantReport report;
+	PhysicsSystem& physics = PhysicsSystem::Instance();
+	ScriptingSystem& scripting = ScriptingSystem::Instance();
+	SceneManager& scene = SceneManager::Instance();
+
+	// The fixture must be a real activated scene. This keeps both editor and
+	// exported validation on the same Serializer/SceneManager component path.
+	if (scene.GetActiveScene() == nullptr) {
+		report.diagnostic = "Physics parity requires an activated serialized startup scene.";
+		return report;
+	}
+
+	const auto executeFrame = [this]() {
+		return systemScheduler.ExecuteFrame(0.0F, [](const TerraEngine::Scheduling::MutationFlushPoint& flushPoint) {
+			TerraEngine::Scheduling::MutationFlushRuntimeState state;
+			TerraEngine::Scene::SceneMutationQueue& queue = TerraEngine::Scene::SceneMutationQueue::Instance();
+			TerraEngine::Scene::SceneMutationBatchResult result;
+			if (!queue.Empty()) {
+				result = SceneManager::Instance().ApplySceneMutations("physics-parity-scheduler-flush");
+				state.message = result.applied ? "Scene mutation queue flushed." : "Scene mutation queue rejected one or more requests.";
+			}
+			if (flushPoint.name == "After Physics") {
+				PhysicsSystem::Instance().OnAfterPhysicsFlush(result.transactionResults);
+				ScriptingSystem::Instance().DeliverPhysicsEventsAfterFlush();
+			}
+			state.pendingAfterFlush = queue.Size();
+			return state;
+		});
+	};
+
+	const auto stopFixture = [&]() {
+		(void)physics.StopWorld();
+		scripting.SetRunning(false);
+		scripting.SetPaused(false);
+	};
+	const auto fail = [&](std::string diagnostic) {
+		stopFixture();
+		report.diagnostic = std::move(diagnostic);
+		return report;
+	};
+
+	try {
+		if (!physics.WorldHandle().IsValid() && !physics.StartWorld()) {
+			return fail("The serialized parity scene could not start PhysicsSystem.");
+		}
+		const PhysicsSettings activeSettings = physics.ConfiguredSettings();
+		// Store authored values in integer units so evidence comparison remains exact
+		// across JSON parsing and avoids provider-specific float representations.
+		report.gravityYMilliMetresPerSecondSquared = static_cast<std::int32_t>(std::lround(activeSettings.gravity.y * 1000.0F));
+		report.fixedTimeStepMicroseconds = static_cast<std::uint32_t>(std::lround(activeSettings.fixedTimeStep * 1000000.0F));
+		report.parityLayerBroadPhaseGroup = activeSettings.layers[1U].broadPhaseGroup;
+		scripting.SetRunning(true);
+		scripting.SetPaused(true);
+		if (!physics.SetPaused(true)) return fail("The parity world could not enter paused explicit-step mode.");
+		report.managedBindingsReady = true;
+
+		const std::uint64_t publicationsBefore = physics.ExplicitStepPublicationCount();
+		const PhysicsEventSubscription subscription = physics.SubscribeEvents({});
+		std::uint64_t observedEvents = 0U;
+		for (std::uint32_t step = 0U; step < 90U; ++step) {
+			if (!physics.RequestExplicitStep()) return fail("PhysicsSystem rejected a serialized-fixture explicit step.");
+			scripting.StepExplicit(physics.FixedTimeStep(), 1);
+			const auto& summary = executeFrame();
+			if (!summary.valid) return fail("The scheduler rejected a serialized-fixture physics frame.");
+			if (const auto events = physics.LatestEventPacket(); events && events->events) {
+				observedEvents += events->events->size();
+			}
+		}
+
+		const auto bodies = physics.LatestBodySnapshot();
+		const auto characters = physics.LatestCharacterStatePacket();
+		const auto diagnostics = physics.LatestDiagnostics();
+		if (!bodies || !bodies->bodies || !characters || !characters->states || !diagnostics) {
+			std::string diagnostic = "PhysicsSystem did not publish the serialized fixture snapshots.";
+			if (diagnostics) {
+				diagnostic += " state=" + std::to_string(static_cast<unsigned>(diagnostics->state));
+				diagnostic += " bodies=" + std::to_string(diagnostics->counters.bodyCount);
+				diagnostic += " characters=" + std::to_string(diagnostics->counters.characterCount);
+				diagnostic += " rejected=" + std::to_string(diagnostics->counters.rejectedCount) + ".";
+			}
+			if (const auto commands = physics.LatestCommandResults(); commands && commands->results
+				&& !commands->results->empty()) {
+				diagnostic += " Last physics result: " + commands->results->back().diagnostic;
+			}
+			return fail(std::move(diagnostic));
+		}
+		report.bodiesCreated = static_cast<std::uint32_t>(bodies->bodies->size());
+		report.charactersCreated = static_cast<std::uint32_t>(characters->states->size());
+		report.constraintsCreated = static_cast<std::uint32_t>(diagnostics->counters.constraintCount);
+		report.fixedStepsCompleted = static_cast<std::uint32_t>(physics.ExplicitStepPublicationCount() - publicationsBefore);
+		report.publishedEvents = observedEvents > 0U ? 1U : 0U;
+		// The cooked ground is accepted only after PhysicsSystem has published the
+		// engine-owned cache observation, not merely because four bodies exist.
+		report.cookedColliderUsed = diagnostics->cache.assetCount >= 1U
+			&& diagnostics->cache.publicationCount >= 1U && diagnostics->cache.payloadBytes > 0U;
+
+		PhysicsQueryRequest query;
+		query.world = physics.WorldHandle();
+		query.kind = PhysicsQueryKind::RayCast;
+		query.hitMode = PhysicsQueryHitMode::Closest;
+		query.pose.position = {0.0F, 8.0F, 0.0F};
+		query.direction = {0.0F, -1.0F, 0.0F};
+		query.distance = 16.0F;
+		query.maximumHits = 1U;
+		query.filter.bodyTypes = PhysicsQueryBodyTypeMask::Static;
+		const PhysicsQueryResult queryResult = physics.QueryImmediate(query);
+		if (queryResult.status != PhysicsResultStatus::Success || !queryResult.hits || queryResult.hits->empty()) {
+			return fail("The serialized fixture's static layer-filtered ray query returned no hit.");
+		}
+		report.filteredQueryHits = static_cast<std::uint32_t>(queryResult.hits->size());
+		(void)physics.UnsubscribeEvents(subscription.id, subscription.generation);
+
+		// Restarting the same loaded scene validates world teardown/recreation while
+		// preserving the authored serialized component data in ObjectManager.
+		stopFixture();
+		++report.completedTransitions;
+		if (!physics.StartWorld() || !physics.SetPaused(true) || !physics.RequestExplicitStep()) {
+			return fail("The serialized fixture could not recreate its PhysicsSystem world.");
+		}
+		scripting.SetRunning(true);
+		scripting.SetPaused(true);
+		scripting.StepExplicit(physics.FixedTimeStep(), 1);
+		if (!executeFrame().valid) return fail("The scheduler rejected the recreated parity world frame.");
+		stopFixture();
+		++report.completedTransitions;
+
+		const PhysicsSystemJobDrainDiagnostics jobs = physics.JobDrainDiagnostics();
+		report.activePhysicsJobsAfterDrain = jobs.activePumps;
+		report.queuedPhysicsJobsAfterDrain = jobs.queued;
+		report.orderlyShutdown = !physics.WorldHandle().IsValid() && jobs.activePumps == 0U && jobs.queued == 0U;
+		report.succeeded = report.managedBindingsReady && report.cookedColliderUsed
+			&& report.bodiesCreated == 4U && report.fixedStepsCompleted == 90U
+			&& report.filteredQueryHits == 1U && report.publishedEvents == 1U
+			&& report.constraintsCreated == 1U && report.charactersCreated == 1U
+			&& report.completedTransitions == 2U && report.orderlyShutdown
+			&& report.gravityYMilliMetresPerSecondSquared == -15500
+			&& report.fixedTimeStepMicroseconds == 20000U
+			&& report.parityLayerBroadPhaseGroup == 7U;
+		if (!report.succeeded) report.diagnostic = "The serialized PhysicsSystem fixture did not satisfy every invariant.";
+		return report;
+	}
+	catch (const std::exception& exception) {
+		return fail(std::string("Serialized PhysicsSystem fixture failed: ") + exception.what());
+	}
 }
 
 // Engine::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

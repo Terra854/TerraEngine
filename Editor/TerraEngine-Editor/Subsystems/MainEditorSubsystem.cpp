@@ -3,6 +3,7 @@
 // Implements the primary editor workspace logic, including the main menu bar, toolbars, and global hotkey handling. It manages the lifecycle of all native editor windows and provides the necessary hooks for scene state capture and restoration during play mode.
 
 #include "MainEditorSubsystem.h"
+#include "PhysicsEditorAuthoringState.h"
 #include "Editor/AssetCompilers/ModelPackageImporter.h"
 #include "ProjectManager.h"
 #include "AssetDatabase.h"
@@ -11,6 +12,7 @@
 #include "ScriptCompilationSubsystem.h"
 #include "UndoRedoSystem.h"
 #include "../Profiling/EditorProfilerService.h"
+#include "Engine/Profiling/ProfilerScope.h"
 #include "Engine/Core/Logger/Logger.h"
 #include "Engine/Core/MainEngine.h"
 #include "Engine/Core/Object/ObjectManager.h"
@@ -28,12 +30,21 @@
 #include "Engine/UI/UISystem.h"
 #include "Engine/Scripting/ScriptGlue.h"
 #include "Engine/Scripting/ScriptingSystem.h"
+#include "Engine/Components/Physics/CharacterControllerComponent.h"
+#include "Engine/Components/Physics/ColliderSetComponent.h"
+#include "Engine/Components/Physics/ConstraintSetComponent.h"
+#include "Engine/Components/Physics/RigidBodyComponent.h"
+#include "Engine/Physics/Assets/CookedColliderAsset.h"
+#include "Engine/Physics/PhysicsSystem.h"
+#include "Engine/Runtime/ExportStartupCoordinator.h"
+#include "Engine/Scene/SceneMutationQueue.h"
 #include "Engine/Utilities/PlatformUtils.h"
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <backends/imgui_impl_vulkan.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
+#include <cstring>
 #include <fstream>
 #include <string_view>
 #include <unordered_map>
@@ -47,6 +58,7 @@
 #include "../Windows/SceneViewWindow.h"
 #include "../Windows/BuildProfilesWindow.h"
 #include "../Windows/ProfilerWindow.h"
+#include "../Windows/PhysicsDiagnosticsWindow.h"
 #include "../Windows/SchedulerDiagnosticsWindow.h"
 #include "../Windows/ResourceResidencyWindow.h"
 #include "../Windows/UIBuilderWindow.h"
@@ -658,6 +670,7 @@ void MainEditorSubsystem::Initialize(EditorContext& context) {
 	m_Windows.push_back(std::make_shared<PreferencesWindow>(this));
 	m_Windows.push_back(std::make_shared<BuildProfilesWindow>(this));
 	m_Windows.push_back(std::make_shared<ProfilerWindow>(this));
+	m_Windows.push_back(std::make_shared<PhysicsDiagnosticsWindow>(this));
 	m_Windows.push_back(std::make_shared<SchedulerDiagnosticsWindow>(this));
 	m_Windows.push_back(std::make_shared<ResourceResidencyWindow>(this));
 	m_Windows.push_back(std::make_shared<UIBuilderWindow>(this));
@@ -1555,6 +1568,9 @@ void MainEditorSubsystem::ClosePrefabMode()
 
 // MainEditorSubsystem::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::Shutdown() {
+	// Provider-owned bodies must be gone before editor teardown can release the
+	// authored ObjectManager state referenced by the current physics snapshot.
+	TerraEngine::Physics::PhysicsSystem::Instance().StopWorld();
 	ClearPlayModeSceneState();
 	m_PrefabReturnGameViewCameras.clear();
 	if (g_ActiveMainEditorSubsystem == this)
@@ -1573,19 +1589,140 @@ void MainEditorSubsystem::Shutdown() {
 	m_Windows.clear();
 }
 
+bool MainEditorSubsystem::StartPlayMode()
+{
+	if(ScriptingSystem::Instance().IsRunning())
+		return false;
+	// Commit pending authoring transactions before capturing the exact pre-play
+	// snapshot consumed and later restored by both scripting and physics.
+	SceneManager::Instance().ApplySceneMutations("play-mode-entry");
+	CapturePlayModeSceneState();
+	if(!TerraEngine::Physics::PhysicsSystem::Instance().StartWorld())
+	{
+		ClearPlayModeSceneState();
+		return false;
+	}
+	if(ctx != nullptr && ctx->engine != nullptr)
+		ctx->engine->ResetFrameTimer();
+	ScriptingSystem::Instance().SetRunning(true);
+	ScriptingSystem::Instance().SetPaused(false);
+	(void)TerraEngine::Physics::PhysicsSystem::Instance().SetPaused(false);
+	return true;
+}
+
+bool MainEditorSubsystem::SetPlayModePaused(bool paused)
+{
+	if(!ScriptingSystem::Instance().IsRunning())
+		return false;
+	if(!TerraEngine::Physics::PhysicsSystem::Instance().SetPaused(paused))
+		return false;
+	ScriptingSystem::Instance().SetPaused(paused);
+	return true;
+}
+
+bool MainEditorSubsystem::StepPlayMode()
+{
+	if(!ScriptingSystem::Instance().IsRunning() || !ScriptingSystem::Instance().IsPaused())
+		return false;
+	auto& physics = TerraEngine::Physics::PhysicsSystem::Instance();
+	if(!physics.RequestExplicitStep())
+		return false;
+	ScriptingSystem::Instance().StepExplicit(physics.FixedTimeStep(), 1);
+	return true;
+}
+
 // MainEditorSubsystem::StopPlayMode is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::StopPlayMode()
 {
-	if (!ScriptingSystem::Instance().IsRunning())
+	if (!ScriptingSystem::Instance().IsRunning()
+		&& !TerraEngine::Physics::PhysicsSystem::Instance().WorldHandle().IsValid()
+		&& !m_HasPlayModeSceneSnapshot)
 	{
 		return;
 	}
 
 	// Route every stop request through one helper so toolbar clicks and
 	// Application.Quit() both restore the same cached pre-play scene snapshot.
+	// Stop and drain provider work before restoring or destroying authored
+	// objects. Runtime body handles never survive across editor play sessions.
+	TerraEngine::Physics::PhysicsSystem::Instance().StopWorld();
 	ScriptingSystem::Instance().SetRunning(false);
 	ScriptingSystem::Instance().SetPaused(false);
 	RestorePlayModeSceneState();
+}
+
+TerraEngine::Runtime::PhysicsInvariantReport MainEditorSubsystem::RunPhysicsExportInvariantFixture()
+{
+	// The installed editor executes the real serialized startup scene through
+	// the same Engine scheduler and PhysicsSystem path as the export launcher.
+	using namespace TerraEngine::Physics;
+	TerraEngine::Runtime::PhysicsInvariantReport serializedReport;
+	if (ctx == nullptr || ctx->engine == nullptr || ctx->projectManager == nullptr
+		|| !ctx->projectManager->HasActiveProject()) {
+		serializedReport.diagnostic = "The installed editor physics invariant run requires an already-open project.";
+		return serializedReport;
+	}
+
+	try {
+		const std::filesystem::path projectRoot = ctx->projectManager->GetProjectRoot();
+		const std::filesystem::path settingsPath = projectRoot / "ProjectSettings" / "PhysicsSettings.json";
+		const std::vector<std::uint8_t> settingsBytes = ResourceManager::Instance().ReadFileBytes(settingsPath);
+		const nlohmann::json settingsJson = nlohmann::json::parse(settingsBytes.begin(), settingsBytes.end());
+		PhysicsSettings settings = PhysicsSettings::Defaults();
+		settings.schemaVersion = settingsJson.value("schemaVersion", settings.schemaVersion);
+		if (!settingsJson.contains("gravity") || !settingsJson["gravity"].is_array() || settingsJson["gravity"].size() != 3U
+			|| !settingsJson.contains("layers") || !settingsJson["layers"].is_array() || settingsJson["layers"].size() != settings.layers.size()) {
+			serializedReport.diagnostic = "The serialized fixture PhysicsSettings.json is missing gravity or the complete layer table.";
+			return serializedReport;
+		}
+		settings.gravity = {settingsJson["gravity"][0].get<float>(), settingsJson["gravity"][1].get<float>(), settingsJson["gravity"][2].get<float>()};
+		settings.fixedTimeStep = settingsJson.value("fixedTimeStep", settings.fixedTimeStep);
+		for (std::size_t index = 0U; index < settings.layers.size(); ++index) {
+			const nlohmann::json& source = settingsJson["layers"][index];
+			settings.layers[index].id = source.value("id", settings.layers[index].id);
+			settings.layers[index].name = source.value("name", settings.layers[index].name);
+			settings.layers[index].collisionMask = source.value("collisionMask", settings.layers[index].collisionMask);
+			settings.layers[index].broadPhaseGroup = source.value("broadPhaseGroup", settings.layers[index].broadPhaseGroup);
+			settings.layers[index].enabled = source.value("enabled", settings.layers[index].enabled);
+		}
+		if (!settings.Validate().accepted) {
+			serializedReport.diagnostic = "The serialized fixture PhysicsSettings.json is invalid.";
+			return serializedReport;
+		}
+
+		const std::filesystem::path cookedPath = projectRoot / "Build" / "Assets" / "Colliders" / "Startup.tepcoll";
+		const std::vector<std::uint8_t> rawCooked = ResourceManager::Instance().ReadFileBytes(cookedPath);
+		std::vector<std::byte> cookedBytes(rawCooked.size());
+		if (!rawCooked.empty()) std::memcpy(cookedBytes.data(), rawCooked.data(), rawCooked.size());
+		CookedColliderDiagnostics cookedDiagnostics;
+		const std::optional<CookedColliderAsset> cooked = CookedColliderAsset::Deserialize(cookedBytes, cookedDiagnostics);
+		if (!cooked) {
+			serializedReport.diagnostic = "The serialized fixture could not load its installed cooked collider envelope.";
+			return serializedReport;
+		}
+		ResourceManager::Instance().RegisterAssetPath(cooked->Envelope().assetId, cookedPath, AssetType::CookedCollider);
+
+		auto& physics = PhysicsSystem::Instance();
+		// Queue settings before Play Mode captures authored state. StartPlayMode
+		// performs the normal lifecycle start, which applies this validated update
+		// at its protected world-creation boundary.
+		if (!physics.QueueSettingsUpdate(settings) || !StartPlayMode()) {
+			serializedReport.diagnostic = "The serialized fixture could not start editor Play Mode with its project settings.";
+			return serializedReport;
+		}
+		serializedReport = ctx->engine->RunPhysicsInvariantFixture();
+		// The common runner stops provider work. This second stop is intentional:
+		// it restores the editor's captured pre-play scene snapshot through the
+		// normal lifecycle rather than manually clearing ObjectManager state.
+		StopPlayMode();
+		return serializedReport;
+	}
+	catch (const std::exception& exception) {
+		serializedReport.diagnostic = std::string("Serialized editor physics fixture failed: ") + exception.what();
+		StopPlayMode();
+		return serializedReport;
+	}
+
 }
 
 void MainEditorSubsystem::RefreshViewportTextures(VulkanContext& vulkan)
@@ -1690,10 +1827,38 @@ void MainEditorSubsystem::OnBackendReady() {
 
 // MainEditorSubsystem::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::Update(float deltaTime) {
+	PublishCommittedEditorTransactionsToUndo();
 	// Advance the scripting coordinator after asset watcher events have been
 	// processed so queued C# rebuilds can start and completed async builds can
 	// clear their in-flight state during the same editor frame.
 	ScriptCompilationSubsystem::Instance().Update(deltaTime);
+
+	// Physics authoring widgets publish value-only requests. This editor update is
+	// the protected main-thread handoff: the physics scheduler consumes settings
+	// from its one-item queue at the next PhysicsSnapshot boundary, while component
+	// edits are rediscovered through the immutable authoring snapshot. No ImGui
+	// callback is allowed to rebuild or touch the live provider world directly.
+	if (auto projectSettings = GetWindow<ProjectSettingsWindow>())
+	{
+		const auto& request = projectSettings->GetPendingPhysicsSettingsRequestForTests();
+		if (request && TerraEngine::Physics::PhysicsSystem::Instance().QueueSettingsUpdate(request->settings))
+		{
+			projectSettings->AcknowledgePhysicsSettingsRequest(request->requestSequence);
+		}
+	}
+	if (auto inspector = GetWindow<InspectorWindow>())
+	{
+		const std::vector<InspectorWindow::PhysicsRebuildIntent> intents =
+			inspector->DrainPhysicsRebuildIntentsForProtectedBoundary();
+		if (!intents.empty())
+		{
+			// Capturing all affected component generations in PhysicsSnapshot makes
+			// these stable IDs visible atomically; draining merely closes the editor
+			// ownership boundary and prevents per-widget requests from accumulating.
+			TERRAENGINE_LOG(LogLevel::Debug, "Queued " << intents.size()
+				<< " physics authoring rebuild intent(s) for the protected snapshot boundary.");
+		}
+	}
 
 	// Ensure UI system updates even when the game is not playing so we get live previews.
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -1813,9 +1978,18 @@ void MainEditorSubsystem::SetOnProjectClosedCallback(std::function<void()> callb
 // MainEditorSubsystem::SetSelectedEntity is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::SetSelectedEntity(std::optional<entt::entity> entity)
 {
-	selectedEntity = entity;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+	selectedEntity = std::nullopt;
+	selectedEntityUuids.clear();
 	if (entity)
+	{
+		if (const std::optional<Object> object = ObjectManager::instance().getObject(*entity))
+		{
+			selectedEntity = entity;
+			selectedEntityUuids.push_back(ObjectManager::instance().getUUID(*object));
+		}
+	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+	if (selectedEntity)
 	{
 		selectedAsset = std::nullopt;
 		selectedPackageChildAsset = std::nullopt;
@@ -1825,8 +1999,123 @@ void MainEditorSubsystem::SetSelectedEntity(std::optional<entt::entity> entity)
 	if (ctx != nullptr)
 	{
 		ctx->scripting.selectionVersion++;
-		ctx->scripting.hasWatchedObject = entity.has_value();
-		ctx->scripting.watchedObjectId = entity.has_value() ? static_cast<std::uint32_t>(*entity) : 0;
+		ctx->scripting.hasWatchedObject = selectedEntity.has_value();
+		ctx->scripting.watchedObjectId = selectedEntity.has_value() ? static_cast<std::uint32_t>(*selectedEntity) : 0;
+	}
+}
+
+std::vector<entt::entity> MainEditorSubsystem::GetSelectedEntities() const
+{
+	std::vector<entt::entity> entities;
+	entities.reserve(selectedEntityUuids.size());
+	for (const TerraEngine::UUID objectId : selectedEntityUuids)
+	{
+		if (const std::optional<Object> object = ObjectManager::instance().getObject(objectId))
+		{
+			entities.push_back(object->EntityId());
+		}
+	}
+	return entities;
+}
+
+std::optional<entt::entity> MainEditorSubsystem::GetSelectedEntity() const
+{
+	if (selectedEntityUuids.empty()) return std::nullopt;
+	if (const std::optional<Object> object = ObjectManager::instance().getObject(selectedEntityUuids.back()))
+	{
+		return object->EntityId();
+	}
+	return std::nullopt;
+}
+
+bool MainEditorSubsystem::IsEntitySelected(entt::entity entity) const
+{
+	const std::optional<Object> object = ObjectManager::instance().getObject(entity);
+	if (!object)
+	{
+		return false;
+	}
+	const TerraEngine::UUID objectId = ObjectManager::instance().getUUID(*object);
+	return std::find(selectedEntityUuids.begin(), selectedEntityUuids.end(), objectId) != selectedEntityUuids.end();
+}
+
+void MainEditorSubsystem::SetSelectedEntities(const std::vector<entt::entity>& entities)
+{
+	TerraEngine::Editor::StableEditorSelection selection = TerraEngine::Editor::BuildStableEditorSelection(entities);
+	selectedEntityUuids = std::move(selection.objectIds);
+	selectedEntity = selection.primaryEntity;
+	if (selectedEntity)
+	{
+		selectedAsset = std::nullopt;
+		selectedPackageChildAsset = std::nullopt;
+	}
+	if (ctx != nullptr)
+	{
+		ctx->scripting.selectionVersion++;
+		ctx->scripting.hasWatchedObject = selectedEntity.has_value();
+		ctx->scripting.watchedObjectId = selectedEntity ? static_cast<std::uint32_t>(*selectedEntity) : 0U;
+	}
+}
+
+void MainEditorSubsystem::ToggleSelectedEntity(entt::entity entity)
+{
+	std::vector<entt::entity> entities = GetSelectedEntities();
+	const auto existing = std::find(entities.begin(), entities.end(), entity);
+	if (existing == entities.end())
+	{
+		entities.push_back(entity);
+	}
+	else
+	{
+		entities.erase(existing);
+	}
+	SetSelectedEntities(entities);
+}
+
+void MainEditorSubsystem::CapturePendingEditorTransactionsForUndo()
+{
+	for (const TerraEngine::Scene::Transaction& transaction : TerraEngine::Scene::SceneMutationQueue::Instance().PendingTransactions())
+	{
+		if (transaction.origin != TerraEngine::Scene::TransactionOrigin::Editor || transaction.undoGroupName.empty())
+		{
+			continue;
+		}
+		const bool physicsPropertyBatch = !transaction.writeSet.operations.empty()
+			&& std::all_of(transaction.writeSet.operations.begin(), transaction.writeSet.operations.end(), [](const TerraEngine::Scene::TransactionWriteOperation& operation) {
+				return operation.kind == TerraEngine::Scene::TransactionWriteKind::UpdateComponentProperty
+					&& (operation.componentName == "RigidBodyComponent"
+						|| operation.componentName == "ColliderSetComponent"
+						|| operation.componentName == "ConstraintSetComponent"
+						|| operation.componentName == "CharacterControllerComponent");
+			});
+		if (physicsPropertyBatch)
+		{
+			pendingEditorUndoTransactions.try_emplace(transaction.id, transaction);
+		}
+	}
+}
+
+void MainEditorSubsystem::PublishCommittedEditorTransactionsToUndo()
+{
+	const TerraEngine::Scene::TransactionDiagnostics diagnostics =
+		TerraEngine::Scene::SceneMutationQueue::Instance().GetTransactionDiagnostics();
+	for (const TerraEngine::Scene::TransactionResult& result : diagnostics.recentResults)
+	{
+		const auto pending = pendingEditorUndoTransactions.find(result.transactionId);
+		if (pending == pendingEditorUndoTransactions.end())
+		{
+			continue;
+		}
+		if (result.status == TerraEngine::Scene::TransactionStatus::Committed)
+		{
+			UndoRedoSystem::Instance().RecordCommittedTransaction(pending->second, result);
+		}
+		else
+		{
+			TERRAENGINE_LOG(LogLevel::Warning, "Editor physics transaction '" << result.transactionId
+				<< "' was rejected; no undo history entry was created.");
+		}
+		pendingEditorUndoTransactions.erase(pending);
 	}
 }
 
@@ -1839,6 +2128,7 @@ void MainEditorSubsystem::SetSelectedAsset(std::optional<std::filesystem::path> 
 	if (asset)
 	{
 		selectedEntity = std::nullopt;
+		selectedEntityUuids.clear();
 	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -1875,6 +2165,7 @@ void MainEditorSubsystem::SetSelectedPackageChildAsset(std::optional<SelectedPac
 	if (asset)
 	{
 		selectedEntity = std::nullopt;
+		selectedEntityUuids.clear();
 	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -1998,12 +2289,9 @@ void MainEditorSubsystem::DrawUI() {
 			isRunning ? "Stop" : "Play",
 			buttonSize)) {
 			if (!isRunning) {
-				CapturePlayModeSceneState();
-				if (ctx != nullptr && ctx->engine != nullptr) {
-					ctx->engine->ResetFrameTimer();
+				if (!StartPlayMode()) {
+					TERRAENGINE_LOG(LogLevel::Error, "Play Mode did not start because the Jolt 5.6 physics world could not be created.");
 				}
-				ScriptingSystem::Instance().SetRunning(true);
-				ScriptingSystem::Instance().SetPaused(false);
 			} else {
 				StopPlayMode();
 			}
@@ -2016,15 +2304,13 @@ void MainEditorSubsystem::DrawUI() {
 			isPaused,
 			isPaused ? "Resume" : "Pause",
 			buttonSize)) {
-			ScriptingSystem::Instance().SetPaused(!isPaused);
+			(void)SetPlayModePaused(!isPaused);
 		}
 		ImGui::SameLine();
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (DrawPlayModeToolbarIconButton("play_mode_next", PlayModeToolbarIcon::Next, false, "Next", buttonSize)) {
-			if (ScriptingSystem::Instance().IsRunning() && ScriptingSystem::Instance().IsPaused()) {
-				ScriptingSystem::Instance().Step(1);
-			}
+			(void)StepPlayMode();
 		}
 
 		ImGui::PopStyleVar(2);
@@ -2055,7 +2341,10 @@ void MainEditorSubsystem::DrawUI() {
 			CaptureCurrentPrefabEditingState();
 			LoadPrefabReturnSceneSnapshotIntoObjectManager(true);
 			m_PrefabObjectsLoadedForEditor = false;
-			win->Draw();
+			{
+				TERRAENGINE_PROFILE_TASK_SCOPE("EditorWindow::Draw", TerraEngine::Profiling::ProfilerModuleId::CpuEngine, win->GetTitle().c_str());
+				win->Draw();
+			}
 			EnsurePrefabObjectsLoadedForEditor();
 		}
 		else
@@ -2064,9 +2353,13 @@ void MainEditorSubsystem::DrawUI() {
 			{
 				EnsurePrefabObjectsLoadedForEditor();
 			}
+			TERRAENGINE_PROFILE_TASK_SCOPE("EditorWindow::Draw", TerraEngine::Profiling::ProfilerModuleId::CpuEngine, win->GetTitle().c_str());
 			win->Draw();
 		}
 	}
+	// Windows enqueue editor transactions during ImGui. Capture their immutable
+	// forward payload now, before the scheduler consumes them next frame.
+	CapturePendingEditorTransactionsForUndo();
 
 	DrawSaveConfirmationModal();
 	DrawImportCloseConfirmationModal();
@@ -2375,6 +2668,8 @@ void MainEditorSubsystem::DrawScriptCompilationModal() {
 
 // MainEditorSubsystem::CloseCurrentProject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::CloseCurrentProject() {
+	// Tear down provider state before scene unload and ObjectManager clearing.
+	TerraEngine::Physics::PhysicsSystem::Instance().StopWorld();
 	ScriptingSystem::Instance().SetRunning(false);
 	ScriptingSystem::SetScriptingDiagnosticsRequested(false);
 	TerraEngine::Scheduling::SetEcsGraphFrameDiagnosticsRequested(false);
@@ -2416,6 +2711,8 @@ void MainEditorSubsystem::CloseCurrentProject() {
 
 	// Clear Selection
 	selectedEntity = std::nullopt;
+	selectedEntityUuids.clear();
+	pendingEditorUndoTransactions.clear();
 	selectedAsset = std::nullopt;
 	if (ctx != nullptr)
 	{

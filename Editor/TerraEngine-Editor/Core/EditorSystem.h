@@ -18,6 +18,10 @@ class Engine;
 class EditorSystem : public SystemsBase {
 public:
 	void SetStartupProjectPath(const std::filesystem::path& projectPath);
+	// Configures the opt-in installed-editor acceptance run. The normal editor
+	// path leaves this unset and therefore never writes validation evidence.
+	void SetPhysicsInvariantOutputPath(const std::filesystem::path& outputPath);
+	int RequestedProcessExitCode() const noexcept;
 	void Setup(Engine* engine);
 	void Initialize() override;
 	void Update(float deltaTime) override;
@@ -35,6 +39,7 @@ private:
 	std::shared_ptr<ProjectHubSubsystem> projectHub;
 	std::shared_ptr<MainEditorSubsystem> mainEditor;
 	std::optional<std::filesystem::path> startupProjectPath;
+	std::optional<std::filesystem::path> physicsInvariantOutputPath;
 
 	// Managed Editor Hooks
 	typedef void (*ManagedInitFn)(void*);
@@ -57,6 +62,8 @@ private:
 	bool pendingLoadLayout = false;
 	bool pendingSaveLayout = false;
 	bool startupProjectOpenAttempted = false;
+	bool physicsInvariantRunAttempted = false;
+	int requestedProcessExitCode = 0;
 	std::uint64_t imguiPresentationGeneration = 0;
 	void HandleProjectLoaded();
 	void ProcessStartupProjectOpen();

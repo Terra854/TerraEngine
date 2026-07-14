@@ -8,9 +8,12 @@
 #pragma once
 
 #include "Engine/Utilities/UUID.h"
+#include "Engine/Physics/PhysicsDiagnostics.h"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -224,6 +227,9 @@ namespace TerraEngine::Editor::SceneViewOverlay
 		std::string lastRejectedMutationReason;
 		bool rendererAvailable = true;
 		std::string disabledOverlayReason;
+		std::size_t physicsDebugPacketCount = 0U;
+		std::size_t physicsDebugPrimitiveCount = 0U;
+		bool physicsDebugVisible = false;
 	};
 
 	struct TransformEditCommit
@@ -242,6 +248,26 @@ namespace TerraEngine::Editor::SceneViewOverlay
 		std::string source = "SceneView";
 		TransformEditStatus status = TransformEditStatus::Previewing;
 		std::string rejectionReason;
+	};
+
+	// Physics handle edits stay local to the Scene View while dragging. The
+	// caller converts the finished value into one typed authoring transaction;
+	// preview data must never mutate the live component or physics world.
+	struct PhysicsShapeEditPreview
+	{
+		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		TerraEngine::UUID colliderRecordId = TerraEngine::EMPTY_UUID;
+		glm::vec3 localCenter = glm::vec3(0.0f);
+		glm::vec3 localExtents = glm::vec3(0.5f);
+		bool fitToRenderMeshRequested = false;
+		bool active = false;
+	};
+
+	struct PhysicsShapeAuthoringCommit
+	{
+		PhysicsShapeEditPreview preview;
+		std::string transactionLabel = "Scene View physics shape edit";
+		bool valid = false;
 	};
 
 	struct SceneViewSchedulerDeclaration
@@ -268,6 +294,8 @@ namespace TerraEngine::Editor::SceneViewOverlay
 	[[nodiscard]] SceneOverlayPreference SanitizePreference(SceneOverlayPreference preference);
 	[[nodiscard]] SceneViewToolState BuildToolStateFromPreference(const SceneOverlayPreference& preference, SceneViewTool activeTool, PivotMode pivotMode, OrientationMode orientationMode);
 	[[nodiscard]] SceneViewSchedulerDeclaration BuildSceneViewOverlaySchedulerDeclaration();
+	[[nodiscard]] PhysicsShapeAuthoringCommit FinalizePhysicsShapeEdit(const PhysicsShapeEditPreview& preview);
+	[[nodiscard]] std::size_t CountPhysicsDebugPrimitives(const std::vector<std::shared_ptr<const TerraEngine::Physics::PhysicsDebugPacket>>& packets, const TerraEngine::Physics::PhysicsDebugDisplaySelection& selection);
 	[[nodiscard]] nlohmann::json SerializeDiagnosticsSnapshot(const SceneViewDiagnosticsSnapshot& snapshot);
 
 	void to_json(nlohmann::json& json, const SceneOverlayPreference& preference);

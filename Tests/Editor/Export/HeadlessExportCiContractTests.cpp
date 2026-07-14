@@ -73,11 +73,11 @@ namespace TerraEngine::EditorTests {
 				"Checkout repository and submodules",
 				"Initialize x64 MSVC",
 				"Install .NET 10 SDK",
-				"Configure Debug",
+				"Configure RelWithDebInfo",
 				"Build export gate targets",
 				"Run focused export tests",
 				"Run full CTest suite",
-				"Install Debug tools and runtime",
+				"Install RelWithDebInfo tools and runtime",
 				"Verify installed tool layout",
 				"Run clean headless export baseline",
 				"Validate headless export evidence",
@@ -101,7 +101,7 @@ namespace TerraEngine::EditorTests {
 			context.Expect(workflow.find("|| true") == std::string::npos, "The workflow should not mask a failed command through shell fallback syntax.");
 			context.Expect(CountOccurrences(workflow, "if: ${{ always() }}") >= 2U, "Artifact staging and upload should run after both success and failure.");
 			context.Expect(workflow.find("actions/upload-artifact@v4") != std::string::npos, "The workflow should use the supported artifact action.");
-			context.Expect(workflow.find("name: headless-export-evidence-windows-debug") != std::string::npos, "The diagnostic artifact should keep its stable automation name.");
+			context.Expect(workflow.find("name: headless-export-evidence-windows-relwithdebinfo") != std::string::npos, "The diagnostic artifact should identify the supported RelWithDebInfo gate.");
 			context.Expect(workflow.find("configure.log") != std::string::npos && workflow.find("build.log") != std::string::npos && workflow.find("ctest.log") != std::string::npos && workflow.find("install.log") != std::string::npos && workflow.find("baseline-prepare.log") != std::string::npos, "The always-run artifact should retain logs from every required native stage.");
 		});
 

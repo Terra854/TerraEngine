@@ -33,10 +33,16 @@ public:
 	void ConfigureExportRuntime(const std::filesystem::path& nativeAotLibraryPath);
 
 	void SetRunning(bool running);
-	// SetPaused is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	void SetPaused(bool paused) { m_Paused = paused; }
-	// Step is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	void Step(int frames = 1) { m_StepFrames = frames; }
+	void SetPaused(bool paused);
+	// Step preserves the ordinary editor stepping contract for callers that do
+	// not need a deterministic timestep. Physics-coordinated Next uses
+	// StepExplicit so managed callbacks observe the same captured fixed delta.
+	void Step(int frames = 1);
+	void StepExplicit(float deltaTime, int frames = 1);
+	// Called only by the scheduler's protected After Physics flush. It copies the
+	// immutable packet before invoking managed callbacks and never holds a world,
+	// ObjectManager, or physics-system lock across the managed boundary.
+	void DeliverPhysicsEventsAfterFlush();
 
 	[[nodiscard]] bool IsRunning() const { return m_Running; }
 	[[nodiscard]] bool IsPaused() const { return m_Paused; }
@@ -238,6 +244,8 @@ private:
 	bool m_Running = true;
 	bool m_Paused = false;
 	int m_StepFrames = 0;
+	std::optional<float> m_ExplicitStepDeltaTime;
+	bool m_ExecutingStep = false;
 	bool m_GameplayAssemblyLoaded = false;
 	std::filesystem::path m_LoadedGameplayAssemblyPath;
 	std::string m_LastGameplayDiagnostic;
@@ -286,6 +294,7 @@ private:
 	using ReadLiveBindingValuesFn = const char* (*)(uint32_t, const char*, const char*);
 	using WriteLiveBindingValueFn = const char* (*)(uint32_t, const char*, const char*, const char*);
 	using MigrateBindingAuthoredStateFn = const char* (*)(const char*, const char*);
+	using PhysicsEventDispatchFn = void (*)(void*, std::uint32_t, std::uint64_t, std::uint32_t, std::uint64_t);
 
 	InitFn managedInit = nullptr;
 	UpdateScriptFn managedUpdateScript = nullptr;
@@ -299,6 +308,9 @@ private:
 	ReadLiveBindingValuesFn managedReadLiveBindingValues = nullptr;
 	WriteLiveBindingValueFn managedWriteLiveBindingValue = nullptr;
 	MigrateBindingAuthoredStateFn managedMigrateBindingAuthoredState = nullptr;
+	PhysicsEventDispatchFn managedDispatchPhysicsEvents = nullptr;
+	std::uint32_t m_LastDeliveredPhysicsWorldGeneration = 0;
+	std::uint64_t m_LastDeliveredPhysicsTick = 0;
 
 	void InitializeExportMode(const ManagedVTable& vtable);
 

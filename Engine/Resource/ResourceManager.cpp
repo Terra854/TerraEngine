@@ -49,6 +49,10 @@ namespace
 			return { ".tmat" };
 		case AssetType::ShaderCollection:
 			return { ".tspf" };
+		case AssetType::PhysicsMaterial:
+			return { ".tephysmat" };
+		case AssetType::CookedCollider:
+			return { ".tepcoll" };
 		}
 
 		return {};
@@ -1153,6 +1157,16 @@ void ResourceManager::ClearCaches()
 		textureCache.resources.clear();
 		textureCache.inFlight.clear();
 	}
+	{
+		std::unique_lock lock(physicsMaterialPaths.mutex);
+		physicsMaterialPaths.pathToId.clear();
+		physicsMaterialPaths.idToPath.clear();
+	}
+	{
+		std::unique_lock lock(cookedColliderPaths.mutex);
+		cookedColliderPaths.pathToId.clear();
+		cookedColliderPaths.idToPath.clear();
+	}
 	ClearResidencyState();
 	ClearStreamingState();
 }
@@ -1182,6 +1196,17 @@ void ResourceManager::DeleteResource(const TerraEngine::UUID& id, AssetType type
 	case AssetType::Texture: removeFromCache(textureCache); break;
 	case AssetType::Material: removeFromCache(materialCache); break;
 	case AssetType::ShaderCollection: removeFromCache(shaderCollectionCache); break;
+	case AssetType::PhysicsMaterial:
+	case AssetType::CookedCollider: {
+		AssetPathRegistry& registry = type == AssetType::PhysicsMaterial
+			? physicsMaterialPaths : cookedColliderPaths;
+		std::unique_lock lock(registry.mutex);
+		for(auto iterator = registry.pathToId.begin(); iterator != registry.pathToId.end();) {
+			iterator = iterator->second == id ? registry.pathToId.erase(iterator) : std::next(iterator);
+		}
+		registry.idToPath.erase(id);
+		break;
+	}
 	}
 
 	if (type == AssetType::Mesh)
@@ -1190,8 +1215,9 @@ void ResourceManager::DeleteResource(const TerraEngine::UUID& id, AssetType type
 		m_MeshLocalBoundsCache.erase(id);
 	}
 
-	// Notify renderer to purge any GPU-side references/buffers
-	RenderSystem::Instance().DeleteResource(id);
+	// Physics assets have no renderer-owned object or descriptor to retire.
+	if(type != AssetType::PhysicsMaterial && type != AssetType::CookedCollider)
+		RenderSystem::Instance().DeleteResource(id);
 	{
 		std::unique_lock lock(m_ResidencyMutex);
 		m_ResidentAssets.erase(id);
@@ -2490,8 +2516,13 @@ bool ResourceManager::HasResource(const TerraEngine::UUID& id) const
 		return cache.resources.find(id) != cache.resources.end() || cache.idToPath.find(id) != cache.idToPath.end();
 	};
 
+	const auto hasRegisteredPath = [&](const AssetPathRegistry& registry) {
+		std::shared_lock lock(registry.mutex);
+		return registry.idToPath.contains(id);
+	};
 	return isAvailable(meshCache) || isAvailable(textureCache) || isAvailable(materialCache) ||
-		isAvailable(shaderCollectionCache) || isAvailable(shaderCache);
+		isAvailable(shaderCollectionCache) || isAvailable(shaderCache)
+		|| hasRegisteredPath(physicsMaterialPaths) || hasRegisteredPath(cookedColliderPaths);
 }
 
 // ResourceManager::RegisterAssetPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -2500,6 +2531,14 @@ void ResourceManager::RegisterAssetPath(const TerraEngine::UUID& id, const std::
 	const std::filesystem::path resolvedPath = ResolveAssetPath(path);
 	const std::string key = NormalizeKey(resolvedPath);
 	const bool canBePreferredLoadPath = HasNativeExtensionForAssetType(resolvedPath, type);
+	if(type == AssetType::PhysicsMaterial || type == AssetType::CookedCollider) {
+		AssetPathRegistry& registry = type == AssetType::PhysicsMaterial
+			? physicsMaterialPaths : cookedColliderPaths;
+		std::unique_lock lock(registry.mutex);
+		registry.pathToId[key] = id;
+		if(canBePreferredLoadPath) registry.idToPath[id] = key;
+		return;
+	}
 
 	VisitAssetCache(type, [&](auto& cache) {
 		std::unique_lock lock(cache.mutex);
@@ -2515,6 +2554,33 @@ void ResourceManager::RegisterAssetPath(const TerraEngine::UUID& id, const std::
 		}
 	});
 	RegisterStreamableAsset(id, type, path, true);
+}
+
+std::filesystem::path ResourceManager::GetRegisteredAssetPath(const TerraEngine::UUID& id, AssetType type) const
+{
+	if(id == TerraEngine::EMPTY_UUID) return {};
+	if(type == AssetType::PhysicsMaterial || type == AssetType::CookedCollider) {
+		const AssetPathRegistry& registry = type == AssetType::PhysicsMaterial
+			? physicsMaterialPaths : cookedColliderPaths;
+		std::shared_lock lock(registry.mutex);
+		const auto found = registry.idToPath.find(id);
+		return found != registry.idToPath.end() ? std::filesystem::path(found->second) : std::filesystem::path{};
+	}
+	std::filesystem::path path;
+	const auto capture = [&](const auto& cache) {
+		std::shared_lock lock(cache.mutex);
+		const auto found = cache.idToPath.find(id);
+		if(found != cache.idToPath.end()) path = found->second;
+	};
+	switch(type) {
+	case AssetType::Mesh: capture(meshCache); break;
+	case AssetType::Texture: capture(textureCache); break;
+	case AssetType::Material: capture(materialCache); break;
+	case AssetType::ShaderCollection: capture(shaderCollectionCache); break;
+	case AssetType::PhysicsMaterial:
+	case AssetType::CookedCollider: break;
+	}
+	return path;
 }
 
 // ResourceManager::ResolveAssetReference is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -2630,6 +2696,12 @@ TerraEngine::UUID ResourceManager::ResolveAssetReference(std::string_view assetR
 	};
 
 	TerraEngine::UUID resolvedId = TerraEngine::EMPTY_UUID;
+	if(type == AssetType::PhysicsMaterial || type == AssetType::CookedCollider) {
+		const AssetPathRegistry& registry = type == AssetType::PhysicsMaterial
+			? physicsMaterialPaths : cookedColliderPaths;
+		resolvedId = tryFindRegisteredMatch(registry);
+		return resolvedId;
+	}
 	VisitAssetCache(type, [&](auto& cache) {
 		resolvedId = tryFindRegisteredMatch(cache);
 	});
@@ -2686,6 +2758,18 @@ std::filesystem::path ResourceManager::DescribeAssetReference(const TerraEngine:
 	case AssetType::ShaderCollection:
 		capturePath(shaderCollectionCache);
 		break;
+	case AssetType::PhysicsMaterial: {
+		std::shared_lock lock(physicsMaterialPaths.mutex);
+		const auto found = physicsMaterialPaths.idToPath.find(id);
+		if(found != physicsMaterialPaths.idToPath.end()) result = found->second;
+		break;
+	}
+	case AssetType::CookedCollider: {
+		std::shared_lock lock(cookedColliderPaths.mutex);
+		const auto found = cookedColliderPaths.idToPath.find(id);
+		if(found != cookedColliderPaths.idToPath.end()) result = found->second;
+		break;
+	}
 	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.

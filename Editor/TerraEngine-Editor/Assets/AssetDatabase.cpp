@@ -16,15 +16,22 @@
 #include <cstdlib>
 #include <regex>
 #include <stdexcept>
+#include <thread>
 #ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
+#else
+#include <csignal>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #endif
 
 #include "Editor/AssetCompilers/MeshCompiler.h"
 #include "Editor/AssetCompilers/TextureCompiler.h"
 #include "Editor/AssetCompilers/ShaderCompiler.h"
 #include "Editor/AssetCompilers/ModelPackageImporter.h"
+#include "Editor/AssetCompilers/PhysicsColliderCompiler.h"
 #include "AssetImportResult.h"
 #include "Engine/File Formats/TerraEngineTextureFile.h"
 #include "Engine/Resource/ResourceManager.h"
@@ -40,6 +47,11 @@ namespace {
 	constexpr const char* kMeshCompilerName = "TerraEngineMeshCompiler.exe";
 	constexpr const char* kTextureCompilerName = "TerraEngineTextureCompiler.exe";
 	constexpr const char* kShaderCompilerName = "TerraEngineShaderCompiler.exe";
+#ifdef _WIN32
+	constexpr const char* kPhysicsColliderCompilerName = "TerraEnginePhysicsColliderCompiler.exe";
+#else
+	constexpr const char* kPhysicsColliderCompilerName = "TerraEnginePhysicsColliderCompiler";
+#endif
 
 	std::string StableAssetOrganizationFingerprint(std::string_view value) {
 		// FNV-1a is deterministic across editor launches, unlike std::hash whose
@@ -947,6 +959,7 @@ bool AssetDatabase::ShouldCompileAssetAsync(const std::string& importerName) con
 	return importerName == "TextureImporter"
 		|| importerName == "MeshImporter"
 		|| importerName == "ShaderImporter"
+		|| importerName == "PhysicsColliderRecipeImporter"
 		|| TerraEngine::AssetPipeline::IsModelPackageImporterName(importerName);
 }
 
@@ -990,7 +1003,14 @@ void AssetDatabase::TerminateCompilerProcess(const std::shared_ptr<AsyncImportPr
 		TerminateProcess(static_cast<HANDLE>(progressState->compilerProcessHandle), 1u);
 	}
 #else
-	(void)progressState;
+	if (!progressState) {
+		return;
+	}
+	std::lock_guard<std::mutex> lock(progressState->processMutex);
+	if (progressState->compilerProcessHandle != nullptr) {
+		const pid_t processId = static_cast<pid_t>(reinterpret_cast<std::intptr_t>(progressState->compilerProcessHandle));
+		(void)kill(processId, SIGTERM);
+	}
 #endif
 }
 
@@ -1148,6 +1168,7 @@ void AssetDatabase::ImportAssetInternal(const std::filesystem::path& sourcePath,
 	else if (metadata.importerName == "TextureImporter") compiledRelativePath.replace_extension(".tetf");
 	else if (metadata.importerName == "ShaderImporter") compiledRelativePath.replace_extension(".tspf");
 	else if (metadata.importerName == "MaterialImporter") compiledRelativePath.replace_extension(".tmat");
+	else if (metadata.importerName == "PhysicsColliderRecipeImporter") compiledRelativePath.replace_extension(".tepcoll");
 	else if (metadata.importerName == "ScriptImporter") compiledRelativePath.clear();
 	else if (metadata.importerName == "GenericImporter") compiledRelativePath.clear(); 
 	
@@ -1249,6 +1270,9 @@ void AssetDatabase::RegisterImportedAsset(const AssetMetadata& metadata, const s
 		else if (metadata.importerName == "MaterialImporter") { type = AssetType::Material; known = true; }
 		// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 		else if (metadata.importerName == "ShaderImporter") { type = AssetType::ShaderCollection; known = true; }
+		else if (metadata.importerName == "PhysicsMaterialImporter") { type = AssetType::PhysicsMaterial; known = true; }
+		else if (metadata.importerName == "PhysicsColliderRecipeImporter"
+			|| metadata.importerName == "CookedColliderImporter") { type = AssetType::CookedCollider; known = true; }
 
 		if (known) {
 			// Register source path as an alias so the engine can resolve things like "viking_room.png" to the same GUID.
@@ -1700,6 +1724,12 @@ void AssetDatabase::GenerateDefaultMetadata(const std::filesystem::path& sourceP
 		outMetadata.settings["quality"] = 1;
 		outMetadata.settings["semantic"] = "color";
 	}
+	if (outMetadata.importerName == "PhysicsColliderRecipeImporter") {
+		// Recipes compile beside their source using the engine-owned envelope
+		// extension; the GUID remains in the source .meta through later moves.
+		outMetadata.compiledPath = outMetadata.sourcePath;
+		outMetadata.compiledPath.replace_extension(".tepcoll");
+	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (outMetadata.importerName == "ScriptImporter") {
@@ -1723,6 +1753,11 @@ std::string AssetDatabase::GetImporterName(const std::filesystem::path& filePath
 	if (ext == ".hlsl" || ext == ".glsl") return "ShaderImporter";
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ext == ".tmat") return "MaterialImporter";
+	// Physics material JSON, authored collider recipes, and compiled collider
+	// envelopes use distinct importers so a move/rename retains their .meta GUID.
+	if (ext == ".tephysmat") return "PhysicsMaterialImporter";
+	if (ext == ".tecollider") return "PhysicsColliderRecipeImporter";
+	if (ext == ".tepcoll") return "CookedColliderImporter";
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ext == ".cs") return "ScriptImporter";
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -1875,7 +1910,6 @@ bool AssetDatabase::CompileModelPackageWithProcess(const AssetMetadata& metadata
 		TERRAENGINE_LOG(LogLevel::Error, "Model package compiler executable is missing: " << compilerPath);
 		return false;
 	}
-
 	const std::wstring commandLine = QuoteCommandLineArgument(compilerPath)
 		+ L" --source " + QuoteCommandLineArgument(fullSourcePath)
 		+ L" --asset-root " + QuoteCommandLineArgument(assetRoot)
@@ -2249,6 +2283,93 @@ bool AssetDatabase::CompileShaderWithProcess(const AssetMetadata& metadata, cons
 #endif
 }
 
+bool AssetDatabase::CompilePhysicsColliderWithProcess(const AssetMetadata& metadata, const std::shared_ptr<AsyncImportProgressState>& progressState) {
+	const std::filesystem::path fullSourcePath = assetRoot / metadata.sourcePath;
+	const std::filesystem::path fullCompiledPath = buildRoot / metadata.compiledPath;
+	// The headless compiler validates the output extension before it cooks. Keep
+	// the editor-owned staging filename unique while retaining `.tepcoll`.
+	const std::filesystem::path stagedCompiledPath = fullCompiledPath.parent_path()
+		/ (fullCompiledPath.stem().string() + "." + UuidToString(metadata.guid) + ".tepcoll");
+	std::error_code cleanupError;
+	std::filesystem::remove(stagedCompiledPath, cleanupError);
+	const std::filesystem::path settingsPath = projectRoot / "ProjectSettings" / "PhysicsSettings.json";
+
+#ifdef _WIN32
+	const std::filesystem::path compilerPath = GetEditorExecutableDirectory() / kPhysicsColliderCompilerName;
+	if(!std::filesystem::exists(compilerPath)) {
+		TERRAENGINE_LOG(LogLevel::Error, "Physics collider compiler executable is missing: " << compilerPath);
+		return false;
+	}
+	std::wstring commandLine = QuoteCommandLineArgument(compilerPath)
+		+ L" --input " + QuoteCommandLineArgument(fullSourcePath)
+		+ L" --output " + QuoteCommandLineArgument(stagedCompiledPath)
+		+ L" --asset-id " + QuoteCommandLineArgument(UuidToString(metadata.guid));
+	if(std::filesystem::exists(settingsPath)) {
+		commandLine += L" --settings " + QuoteCommandLineArgument(settingsPath);
+	}
+	if(!RunCompilerProcess(compilerPath, commandLine, progressState, "Physics collider compiler", stagedCompiledPath)) {
+		std::filesystem::remove(stagedCompiledPath, cleanupError);
+		return false;
+	}
+	if(!PublishCompiledAssetAtomically(stagedCompiledPath, fullCompiledPath)) {
+		std::filesystem::remove(stagedCompiledPath, cleanupError);
+		return false;
+	}
+	return true;
+#else
+	const std::filesystem::path compilerPath = GetEditorExecutableDirectory() / kPhysicsColliderCompilerName;
+	if(!std::filesystem::exists(compilerPath)) {
+		TERRAENGINE_LOG(LogLevel::Error, "Physics collider compiler executable is missing: " << compilerPath);
+		return false;
+	}
+	const std::string compiler = compilerPath.string();
+	const std::string input = fullSourcePath.string();
+	const std::string output = stagedCompiledPath.string();
+	const std::string assetId = UuidToString(metadata.guid);
+	const std::string settings = settingsPath.string();
+	const bool hasSettings = std::filesystem::exists(settingsPath);
+	const pid_t processId = fork();
+	if(processId == 0) {
+		if(hasSettings) {
+			execl(compiler.c_str(), compiler.c_str(), "--input", input.c_str(), "--output", output.c_str(),
+				"--asset-id", assetId.c_str(), "--settings", settings.c_str(), static_cast<char*>(nullptr));
+		} else {
+			execl(compiler.c_str(), compiler.c_str(), "--input", input.c_str(), "--output", output.c_str(),
+				"--asset-id", assetId.c_str(), static_cast<char*>(nullptr));
+		}
+		_exit(127);
+	}
+	if(processId < 0) {
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to launch physics collider compiler: " << compilerPath);
+		return false;
+	}
+	if(progressState) {
+		std::lock_guard<std::mutex> lock(progressState->processMutex);
+		progressState->compilerProcessHandle = reinterpret_cast<void*>(static_cast<std::intptr_t>(processId));
+	}
+	int processStatus = 0;
+	while(waitpid(processId, &processStatus, WNOHANG) == 0) {
+		if(progressState && progressState->cancelRequested.load()) {
+			(void)kill(processId, SIGTERM);
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+	if(progressState) {
+		std::lock_guard<std::mutex> lock(progressState->processMutex);
+		progressState->compilerProcessHandle = nullptr;
+	}
+	if(!WIFEXITED(processStatus) || WEXITSTATUS(processStatus) != 0 || !std::filesystem::exists(stagedCompiledPath)) {
+		std::filesystem::remove(stagedCompiledPath, cleanupError);
+		return false;
+	}
+	if(!PublishCompiledAssetAtomically(stagedCompiledPath, fullCompiledPath)) {
+		std::filesystem::remove(stagedCompiledPath, cleanupError);
+		return false;
+	}
+	return true;
+#endif
+}
+
 // AssetDatabase::CompileAsset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool AssetDatabase::CompileAsset(const AssetMetadata& metadata, const std::shared_ptr<AsyncImportProgressState>& progressState, std::optional<VirtualGeometryAdaptiveSettingsMetadata> resolvedMeshSettings) {
 	if (metadata.compiledPath.empty()) return true;
@@ -2277,6 +2398,21 @@ bool AssetDatabase::CompileAsset(const AssetMetadata& metadata, const std::share
 	else if (metadata.importerName == "ShaderImporter") {
 		return CompileShaderWithProcess(metadata, progressState);
 	} 
+	else if(metadata.importerName == "PhysicsColliderRecipeImporter") {
+		return CompilePhysicsColliderWithProcess(metadata, progressState);
+	}
+	else if(metadata.importerName == "PhysicsMaterialImporter" || metadata.importerName == "CookedColliderImporter") {
+		const std::filesystem::path stagedPath = fullCompiledPath.string() + ".staged";
+		std::error_code error;
+		std::filesystem::create_directories(fullCompiledPath.parent_path(), error);
+		if(error) return false;
+		std::filesystem::copy_file(fullSourcePath, stagedPath, std::filesystem::copy_options::overwrite_existing, error);
+		if(error || !PublishCompiledAssetAtomically(stagedPath, fullCompiledPath)) {
+			std::filesystem::remove(stagedPath, error);
+			return false;
+		}
+		return true;
+	}
 	else if (metadata.importerName == "MaterialImporter") {
 		std::error_code ec;
 		std::filesystem::copy_file(fullSourcePath, fullCompiledPath, std::filesystem::copy_options::overwrite_existing, ec);
@@ -2312,6 +2448,9 @@ void AssetDatabase::RemoveAsset(const std::filesystem::path& sourcePath) {
 		else if (metadata.importerName == "MaterialImporter") { type = AssetType::Material; knownResource = true; }
 		// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 		else if (metadata.importerName == "ShaderImporter") { type = AssetType::ShaderCollection; knownResource = true; }
+		else if (metadata.importerName == "PhysicsMaterialImporter") { type = AssetType::PhysicsMaterial; knownResource = true; }
+		else if (metadata.importerName == "PhysicsColliderRecipeImporter"
+			|| metadata.importerName == "CookedColliderImporter") { type = AssetType::CookedCollider; knownResource = true; }
 
 		if (knownResource) {
 			ResourceManager::Instance().DeleteResource(metadata.guid, type);

@@ -31,6 +31,9 @@ int main(int argc, char** argv) {
 	if (commandLine.startupProjectPath.has_value()) {
 		editorSystem.SetStartupProjectPath(*commandLine.startupProjectPath);
 	}
+	if (commandLine.physicsInvariantOutputPath.has_value()) {
+		editorSystem.SetPhysicsInvariantOutputPath(*commandLine.physicsInvariantOutputPath);
+	}
 	// Pass the engine pointer to the editor system so it can access engine state/systems
 	editorSystem.Setup(&engine);
 	
@@ -39,5 +42,5 @@ int main(int argc, char** argv) {
 
 	engine.Run();
 
-	return 0;
+	return editorSystem.RequestedProcessExitCode();
 }

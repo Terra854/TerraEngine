@@ -46,6 +46,21 @@ PackageResult TepakPackager::Package(
 		return result;
 	}
 
+	// Collider recipes describe editor-side source geometry and cook settings.
+	// They must never enter an archive: exported runtime resolves only validated
+	// .tepcoll envelopes, whose provider/version checks occur before staging.
+	std::error_code inventoryError;
+	for(const std::filesystem::directory_entry& entry : std::filesystem::recursive_directory_iterator(assetDirectory, inventoryError)) {
+		if(inventoryError) {
+			result.errorMessage = "Could not inspect staged assets for source-only collider inputs: " + inventoryError.message();
+			return result;
+		}
+		if(entry.is_regular_file() && entry.path().extension() == ".tecollider") {
+			result.errorMessage = "Source-only collider recipe is not valid export content: " + entry.path().string();
+			return result;
+		}
+	}
+
 	// Build the TEPAK PackagingRequest from the profile settings.
 	tepak::PackagingRequest request;
 	request.inputRoot = assetDirectory;

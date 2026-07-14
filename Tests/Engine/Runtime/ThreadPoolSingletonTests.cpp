@@ -3,6 +3,7 @@
 #include "ThreadPool/ThreadPool.h"
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <future>
 #include <memory>
@@ -62,6 +63,18 @@ namespace TerraEngine::Tests {
 	}
 
 	void RegisterThreadPoolSingletonTests(TestRegistry& registry) {
+		registry.Add("Engine.ThreadPool.ExplicitWorkerCountIsBounded", [](TestContext& context) {
+			ThreadPool& pool = ThreadPool::instance();
+			pool.shutdown();
+			pool.initialize(1);
+			context.ExpectEqual(1ULL, static_cast<unsigned long long>(pool.getThreadCount()), "An explicit one-worker request should start exactly one worker.");
+			pool.shutdown();
+			pool.initialize(2);
+			const std::size_t expected = std::min<std::size_t>(2U, std::max<std::size_t>(1U, std::thread::hardware_concurrency()));
+			context.ExpectEqual(static_cast<unsigned long long>(expected), static_cast<unsigned long long>(pool.getThreadCount()), "Explicit worker requests should be clamped to available hardware.");
+			pool.shutdown();
+		});
+
 		registry.Add("Engine.ThreadPool.InitializeShutdownAndReinitializeExecutesTasks", [](TestContext& context) {
 			ThreadPoolSession session;
 			ThreadPool& pool = ThreadPool::instance();

@@ -452,3 +452,5 @@ obj/
 
 # The export baseline's package recipe is authored source, not an editor cache.
 !Tests/Fixtures/ExportRuntimeBaseline/Assets/Models/Baseline.gltf.meta
+
+!Tests/Fixtures/PhysicsExportRuntime/Assets/Colliders/Startup.tecollider.meta

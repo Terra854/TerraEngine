@@ -173,6 +173,7 @@ namespace TerraEngine::Scheduling {
 			{ "Input", 20, true, false, false, false, "Input device polling and state updates." },
 			{ "Scene", 30, true, false, false, true, "Scene loading, hierarchy state, and authored scene data." },
 			{ "Scripting", 40, true, false, false, true, "Gameplay script execution and managed runtime updates." },
+			{ "Physics", 45, true, true, false, true, "Fixed-step physics snapshot, preparation, simulation, and protected publication." },
 			{ "UI", 50, true, false, false, false, "Runtime UI layout and CPU-side UI data." },
 			{ "Render", 60, true, false, false, false, "Renderer submission and presentation." },
 			{ "PostFrame", 70, true, false, false, false, "Frame-end cleanup and compatibility defaults." }
@@ -192,6 +193,20 @@ namespace TerraEngine::Scheduling {
 			{ "ObjectManager", "Entity/object storage and component ownership.", "Refined by component read/write query declarations in Part 3." },
 			{ "SceneMutationQueue", "Deferred structural scene mutation requests.", "Feeds deferred entity/component mutation in Part 3." },
 			{ "Scripting", "Managed runtime, script assemblies, and script component state.", "May later expose script component query resources." },
+			{ "PhysicsSettingsUpdateQueue", "Validated project or packaged-runtime physics settings awaiting protected application.", "Read only at a declared physics boundary before a world is created or rebuilt." },
+			{ "PhysicsSettings", "The active immutable gravity, fixed-step, layer, solver, query, and diagnostic configuration.", "Published through a protected settings boundary and read by physics workloads." },
+			{ "PhysicsAuthoringSnapshot", "Immutable hierarchy-resolved physics component and project-settings input.", "Written at PhysicsSnapshot and read by worker preparation." },
+			{ "PhysicsPreparedWork", "Typed body, collider, command, and query preparation packets.", "Worker-written and committed only at the protected physics boundary." },
+			{ "PhysicsQueryQueue", "Bounded generation-validated scheduled query submissions.", "Read by PhysicsPrepare; submissions never expose provider state." },
+			{ "PhysicsPreparedQueries", "Immutable validated query batches ready for provider execution.", "Written by PhysicsPrepare and consumed after the provider simulation barrier." },
+			{ "PhysicsWorld", "Generation-validated runtime world, registries, and provider state.", "Provider writes occur through declared commit/simulate boundaries." },
+			{ "PhysicsBackendQueryResults", "Bounded provider-neutral hit candidates awaiting protected publication.", "Produced by shared-pool query jobs after simulation joins." },
+			{ "PhysicsQueryResults", "Immutable ordered query result history.", "Published only after target generation revalidation." },
+			{ "PhysicsRawEvents", "Engine-owned contact and activation records collected after provider jobs join.", "Callback order is never directly observable." },
+			{ "PhysicsEventSubscriptions", "Data-only event subscription snapshot and filters.", "Snapshotted before protected event publication." },
+			{ "PhysicsEventPackets", "Immutable ordered bounded event packet history.", "Published only after participant generation revalidation." },
+			{ "PhysicsPublishedSnapshots", "Immutable body, command, event, query, debug, and diagnostic publications.", "Swapped only after sorted publication completes." },
+			{ "PhysicsTransformTransactions", "Typed transform updates awaiting After Physics scene publication.", "Worker extraction cannot mutate live Transform storage." },
 			{ "UI", "Runtime UI document, style, and generated geometry state.", "" },
 			{ "Renderer", "Renderer frame graph, GPU submission, and render backend state.", "" },
 			{ "ActivePresentationState", "Read-only active swapchain state and presentation generation.", "" },
@@ -252,6 +267,7 @@ namespace TerraEngine::Scheduling {
 		return {
 			{ "After Scene", MutationFlushPosition::AfterPhase, "Scene", {}, true, false },
 			{ "After Scripting", MutationFlushPosition::AfterPhase, "Scripting", {}, true, false },
+			{ "After Physics", MutationFlushPosition::AfterPhase, "Physics", { "PhysicsSystem" }, true, false },
 			{ "Frame End", MutationFlushPosition::FrameEnd, "", {}, true, true }
 		};
 	}
@@ -479,8 +495,10 @@ namespace TerraEngine::Scheduling {
 		std::vector<FrameWorkloadDeclaration> declaredWorkloads = system.DeclareFrameWorkloads(deltaTime);
 		if (!declaredWorkloads.empty())
 		{
-			for (FrameWorkloadDeclaration& workload : declaredWorkloads)
+			const std::size_t systemOrderBase = executionOrder * 1024U;
+			for (std::size_t localIndex = 0; localIndex < declaredWorkloads.size(); ++localIndex)
 			{
+				FrameWorkloadDeclaration& workload = declaredWorkloads[localIndex];
 				// System-owned phases inherit the stable scheduler identity when
 				// the declaring system omits repeated metadata. Keeping the fill-in
 				// deterministic makes diagnostics readable without hiding bad access
@@ -499,7 +517,10 @@ namespace TerraEngine::Scheduling {
 				}
 				if (workload.executionOrder == 0)
 				{
-					workload.executionOrder = executionOrder;
+					// Reserve an order range per system so a converted system's
+					// snapshot/prepare/commit chain cannot be interleaved with another
+					// system merely because every local workload inherited one order.
+					workload.executionOrder = systemOrderBase + localIndex + 1U;
 				}
 			}
 			return declaredWorkloads;
@@ -511,7 +532,7 @@ namespace TerraEngine::Scheduling {
 		workload.phase = declaration.phase;
 		workload.reads = declaration.reads;
 		workload.writes = declaration.writes;
-		workload.executionOrder = executionOrder;
+		workload.executionOrder = executionOrder * 1024U;
 		const bool wholeUpdateWorkerSafe = CanRunWholeSystemUpdateOnWorker(declaration);
 		workload.workerEligible = wholeUpdateWorkerSafe;
 		workload.mainThreadRequired = !wholeUpdateWorkerSafe;
@@ -890,7 +911,9 @@ namespace TerraEngine::Scheduling {
 			workload.phase = point.phaseName.empty() ? "FrameEnd" : point.phaseName;
 			workload.reads = { "SceneMutationQueue" };
 			workload.writes = { "SceneMutationQueue" };
-			workload.executionOrder = executionOrder;
+			// Flushes use the same reserved global order blocks as system workloads.
+			// This keeps an After-Phase flush after every local workload in that phase.
+			workload.executionOrder = executionOrder * 1024U;
 			workload.workerEligible = false;
 			workload.mainThreadRequired = true;
 			workload.mutationPolicy = FrameWorkloadMutationPolicy::DeferredOnly;
@@ -916,13 +939,14 @@ namespace TerraEngine::Scheduling {
 				}
 			}
 
-			const std::size_t phaseExecutionOrder = nextExecutionOrder++;
 			for (std::size_t orderedIndex : orderedIndices)
 			{
 				RegisteredSystem& registeredSystem = systems[orderedIndex];
 				if (registeredSystem.declaration.phase == phase.name)
 				{
-					appendSystemWorkload(registeredSystem, phaseExecutionOrder);
+					// Give each system a distinct order block. Converted systems can use
+					// local offsets within that block without interleaving another owner.
+					appendSystemWorkload(registeredSystem, nextExecutionOrder++);
 				}
 			}
 

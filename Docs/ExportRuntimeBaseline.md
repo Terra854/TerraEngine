@@ -30,12 +30,12 @@ environment. They are the authoritative local equivalent of
 `.github/workflows/export-baseline.yml`.
 
 ```powershell
-cmake --preset Debug
-cmake --build --preset Debug --target TerraEngine-EngineTests TerraEngine-EditorTests TerraEngineModelPackageCompiler TerraEngine-Export TerraEngine-Editor
-ctest --test-dir out/build/Debug -R "Editor.ExportUnitTests|Editor.HeadlessExport" --output-on-failure
-ctest --test-dir out/build/Debug --output-on-failure
-cmake --build --preset Debug --target install
-pwsh -NoProfile -File Tools/ExportRuntimeBaseline/RunBaseline.ps1 -InstallRoot out/build/Debug/Build -WorkRoot out/ci/export-runtime-baseline
+cmake --preset RelWithDebInfo
+cmake --build --preset RelWithDebInfo --target TerraEngine-EngineTests TerraEngine-EditorTests TerraEngineModelPackageCompiler TerraEngine-Export TerraEngine-Editor
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R "Editor.ExportUnitTests|Editor.HeadlessExport" --output-on-failure
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
+cmake --build --preset RelWithDebInfo --target install
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/ExportRuntimeBaseline/RunBaseline.ps1 -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/ci/export-runtime-baseline
 ```
 
 The compatibility script at
@@ -45,18 +45,18 @@ authoritative helper. It does not contain a second export implementation.
 After installation, the gate requires these files:
 
 ```text
-out/build/Debug/Build/Editor/TerraEngine-Export.exe
-out/build/Debug/Build/Editor/TerraEngineModelPackageCompiler.exe
-out/build/Debug/Build/Editor/Managed/TerraEngine.CSharp.dll
-out/build/Debug/Build/Editor/Managed/Analyzers/TerraEngine.Export.Generator.dll
-out/build/Debug/Build/Launcher/TerraEngine-Launcher.exe
+out/build/RelWithDebInfo/Build/Editor/TerraEngine-Export.exe
+out/build/RelWithDebInfo/Build/Editor/TerraEngineModelPackageCompiler.exe
+out/build/RelWithDebInfo/Build/Editor/Managed/TerraEngine.CSharp.dll
+out/build/RelWithDebInfo/Build/Editor/Managed/Analyzers/TerraEngine.Export.Generator.dll
+out/build/RelWithDebInfo/Build/Launcher/TerraEngine-Launcher.exe
 ```
 
 To invoke the installed CLI directly after the disposable project has been
 prepared, use explicit project, profile, output, and evidence paths:
 
 ```powershell
-& out/build/Debug/Build/Editor/TerraEngine-Export.exe `
+& out/build/RelWithDebInfo/Build/Editor/TerraEngine-Export.exe `
   --project out/ci/export-runtime-baseline/project `
   --profile out/ci/export-runtime-baseline/project/BuildProfiles/baseline.json `
   --output out/ci/export-runtime-baseline/project/Builds/Baseline `
@@ -96,14 +96,14 @@ parseable records in emission order, including exactly one final result record.
 `windows-latest` runner, recursive submodules, x64 MSVC, the .NET 10 SDK,
 read-only repository permission, no build cache, and a 60-minute timeout.
 
-The ordered stages are checkout, toolchain initialization, Debug configure,
+The ordered stages are checkout, toolchain initialization, RelWithDebInfo configure,
 targeted build, focused export tests, full CTest, install, installed-path
 verification, clean baseline preparation and export, evidence validation, and
 artifact upload. Commands retain their native exit codes; no failed stage is
 converted into a successful result.
 
 The always-run artifact is named
-`headless-export-evidence-windows-debug`. It contains:
+`headless-export-evidence-windows-relwithdebinfo`. It contains:
 
 ```text
 configure.log

@@ -89,6 +89,9 @@ namespace TerraEngine::Scene {
 		std::size_t jsonMutationFallbackCount = 0;
 		std::size_t coalescedMutationCount = 0;
 		std::vector<SceneMutationResult> results;
+		// Transaction receipts let the protected producer acknowledge publication
+		// only after this flush has actually accepted or rejected its full batch.
+		std::vector<TransactionResult> transactionResults;
 		std::vector<SceneDiagnostic> diagnostics;
 		std::string formattedCommitSummary;
 	};

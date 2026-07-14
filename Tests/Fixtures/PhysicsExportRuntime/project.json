@@ -1,0 +1,10 @@
+{
+	"name": "Physics Export Runtime",
+	"version": "1.0.0",
+	"startupScene": "Scenes/Startup.tescene",
+	"physicsExportInvariantSchemaVersion": 1,
+	"physicsExportInvariants": [
+		"bodies", "stepping", "filtering", "queries", "events",
+		"constraints", "characters", "transitions", "shutdown"
+	]
+}

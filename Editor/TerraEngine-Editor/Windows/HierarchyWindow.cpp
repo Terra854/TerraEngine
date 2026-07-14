@@ -9,7 +9,6 @@
 #include "Engine/Core/Logger/Logger.h"
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Components/PrefabLinkComponent.h"
-#include "Engine/Scene/SceneGraphRuntime.h"
 #include "Engine/Scene/SceneManager.h"
 #include "Engine/Scene/Serializer.h"
 #include <imgui.h>
@@ -137,6 +136,72 @@ HierarchyWindow::HierarchyWindow(MainEditorSubsystem* owner)
 	: EditorWindow("Scene Hierarchy", true, "General"), m_Owner(owner) {
 }
 
+void HierarchyWindow::RefreshRootEntityCache(ObjectManager& objectManager, bool prefabEditingMode)
+{
+	const std::uint64_t hierarchyRevision = objectManager.GetHierarchyRevision();
+	bool cacheIsUsable = hierarchyRevision == m_CachedHierarchyRevision
+		&& prefabEditingMode == m_CachedPrefabEditingMode;
+	if (cacheIsUsable)
+	{
+		// Prefab context swaps can replace EnTT handles without changing this
+		// window's state. Checking the stable endpoints avoids turning a flat
+		// ten-thousand-body cache hit back into a full per-frame root traversal.
+		if (!m_CachedRootEntities.empty()
+			&& (!objectManager.getObject(m_CachedRootEntities.front())
+				|| !objectManager.getObject(m_CachedRootEntities.back())))
+		{
+			cacheIsUsable = false;
+		}
+	}
+	if (cacheIsUsable)
+	{
+		return;
+	}
+
+	m_CachedRootEntities.clear();
+	std::vector<Object> roots = objectManager.getRootObjects();
+	m_CachedRootEntities.reserve(roots.size());
+	m_CachedRootsAreLeaves = true;
+	for (const Object& root : roots)
+	{
+		m_CachedRootEntities.push_back(root.EntityId());
+		// This one-time revision check makes flat scenes eligible for clipping.
+		// Nested scenes retain the established recursive TreeNode behavior.
+		if (!objectManager.getChildren(root).empty())
+		{
+			m_CachedRootsAreLeaves = false;
+		}
+	}
+
+	m_CachedHierarchyRevision = hierarchyRevision;
+	m_CachedPrefabEditingMode = prefabEditingMode;
+}
+
+void HierarchyWindow::DrawCachedRootNodes()
+{
+	// A ten-thousand-body stress scene is normally a flat root list. ImGui's
+	// clipper limits row construction to the visible portion while DrawEntityNode
+	// continues to own every selection, drag/drop, prefab, and context action.
+	if (m_CachedRootsAreLeaves && m_SearchFilter.empty())
+	{
+		ImGuiListClipper clipper;
+		clipper.Begin(static_cast<int>(m_CachedRootEntities.size()));
+		while (clipper.Step())
+		{
+			for (int index = clipper.DisplayStart; index < clipper.DisplayEnd; ++index)
+			{
+				DrawEntityNode(m_CachedRootEntities[static_cast<std::size_t>(index)]);
+			}
+		}
+		return;
+	}
+
+	for (const entt::entity root : m_CachedRootEntities)
+	{
+		DrawEntityNode(root);
+	}
+}
+
 // HierarchyWindow::OnGui is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void HierarchyWindow::OnGui() {
 	auto& objManager = ObjectManager::instance();
@@ -171,10 +236,10 @@ void HierarchyWindow::OnGui() {
 				// Prefab assets must remain a single authored object tree. The
 				// hierarchy add button therefore creates a child of the current
 				// prefab root instead of introducing a second root beside it.
-				auto graph = TerraEngine::Scene::BuildSceneGraphFromObjectManager(objManager);
-				for (const TerraEngine::UUID& rootId : graph.rootObjects) {
-					if (auto rootObject = objManager.getObject(rootId); rootObject && *rootObject != obj) {
-						objManager.setParent(obj, *rootObject);
+				const std::vector<Object> roots = objManager.getRootObjects();
+				for (const Object& rootObject : roots) {
+					if (rootObject != obj) {
+						objManager.setParent(obj, rootObject);
 						break;
 					}
 				}
@@ -195,14 +260,11 @@ void HierarchyWindow::OnGui() {
 	}
 
 	ImGui::Separator();
+	const bool prefabEditingMode = m_Owner->IsPrefabEditingMode();
+	RefreshRootEntityCache(objManager, prefabEditingMode);
 
-	if (m_Owner->IsPrefabEditingMode()) {
-		auto graph = TerraEngine::Scene::BuildSceneGraphFromObjectManager(objManager);
-		for (const TerraEngine::UUID& rootId : graph.rootObjects) {
-			if (auto obj = objManager.getObject(rootId)) {
-				DrawEntityNode(obj->EntityId());
-			}
-		}
+	if (prefabEditingMode) {
+		DrawCachedRootNodes();
 	} else {
 		const SceneDocument* activeScene = SceneManager::Instance().GetActiveScene();
 		std::string sceneName = activeScene ? activeScene->name : "No Active Scene";
@@ -234,12 +296,7 @@ void HierarchyWindow::OnGui() {
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (sceneOpened) {
-			auto graph = TerraEngine::Scene::BuildSceneGraphFromObjectManager(objManager);
-			for (const TerraEngine::UUID& rootId : graph.rootObjects) {
-				if (auto obj = objManager.getObject(rootId)) {
-					DrawEntityNode(obj->EntityId());
-				}
-			}
+			DrawCachedRootNodes();
 			ImGui::TreePop(); // Pop for scene name node
 		}
 	}
@@ -261,12 +318,15 @@ void HierarchyWindow::OnGui() {
 				return;
 			}
 			if (ImGui::MenuItem("Delete")) {
+				std::vector<entt::entity> remainingSelection = m_Owner->GetSelectedEntities();
+				const auto removedSelection = std::remove(remainingSelection.begin(), remainingSelection.end(), m_ContextEntityId);
+				const bool deletedObjectWasSelected = removedSelection != remainingSelection.end();
+				remainingSelection.erase(removedSelection, remainingSelection.end());
 				UndoRedoSystem::Instance().PushCommand(std::make_unique<DeleteObjectCommand>(m_ContextEntityId));
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				objManager.removeObject(*contextObject);
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (auto selected = m_Owner->GetSelectedEntity(); selected && *selected == m_ContextEntityId) {
-					m_Owner->SetSelectedEntity(std::nullopt);
+				if (deletedObjectWasSelected) {
+					m_Owner->SetSelectedEntities(remainingSelection);
 				}
 				m_ContextEntityId = entt::null;
 			}
@@ -406,9 +466,9 @@ void HierarchyWindow::DrawEntityNode(entt::entity obj, const std::unordered_set<
 
 	ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick | ImGuiTreeNodeFlags_SpanAvailWidth;
 	
-	auto selected = m_Owner->GetSelectedEntity();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (selected && *selected == obj) {
+	// Selection highlighting resolves the stable UUID collection each frame, so
+	// Ctrl-selected rows survive prefab-context entity-handle replacement.
+	if (m_Owner->IsEntitySelected(obj)) {
 		flags |= ImGuiTreeNodeFlags_Selected;
 	}
 	
@@ -449,7 +509,15 @@ void HierarchyWindow::DrawEntityNode(entt::entity obj, const std::unordered_set<
 	
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::IsItemClicked()) {
-		m_Owner->SetSelectedEntity(obj);
+		const ImGuiIO& io = ImGui::GetIO();
+		if (io.KeyCtrl)
+		{
+			m_Owner->ToggleSelectedEntity(obj);
+		}
+		else
+		{
+			m_Owner->SetSelectedEntity(obj);
+		}
 	}
 	if (prefabLink != nullptr && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
 		m_Owner->OpenPrefabFromObject(obj);

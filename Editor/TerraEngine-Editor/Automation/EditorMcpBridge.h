@@ -108,6 +108,7 @@ namespace TerraEngine::Editor::Automation
 		std::uint64_t nextActivitySequence = 1;
 		std::uint64_t nextRequestSequence = 1;
 		std::uint64_t nextApprovalSequence = 1;
+		std::uint64_t nextSessionSequence = 1;
 		std::size_t maxActivityRecords = 256;
 		std::string lastDiagnosticRequest = "never";
 	};

@@ -9,6 +9,7 @@
 #include "../Project/ProjectSettingsMetadata.h"
 
 #include <string>
+#include <optional>
 
 class MainEditorSubsystem;
 
@@ -22,6 +23,18 @@ public:
 	void SetSearchTextForTests(std::string searchText) { m_SearchText = std::move(searchText); }
 	std::size_t GetFilteredCategoryCountForTests() const;
 	bool HasCategoryForTests(TerraEngine::Editor::ProjectSettings::ProjectSettingsCategoryId categoryId) const;
+	const std::optional<TerraEngine::Editor::ProjectSettings::PhysicsSettingsPublicationRequest>& GetPendingPhysicsSettingsRequestForTests() const { return m_PendingPhysicsSettingsRequest; }
+	// MainEditorSubsystem acknowledges only the sequence it successfully queued.
+	// A newer UI edit therefore cannot be erased by a delayed boundary response.
+	bool AcknowledgePhysicsSettingsRequest(std::uint64_t sequence)
+	{
+		if (!m_PendingPhysicsSettingsRequest || m_PendingPhysicsSettingsRequest->requestSequence != sequence)
+		{
+			return false;
+		}
+		m_PendingPhysicsSettingsRequest.reset();
+		return true;
+	}
 
 protected:
 	void OnGui() override;
@@ -32,6 +45,7 @@ private:
 	void DrawProjectCategory();
 	void DrawGraphicsCategory();
 	void DrawResourcesCategory();
+	void DrawPhysicsCategory();
 	void DrawUnavailableState(const char* message);
 	void DrawValidationMessage();
 
@@ -40,4 +54,10 @@ private:
 		TerraEngine::Editor::ProjectSettings::ProjectSettingsCategoryId::Project;
 	std::string m_SearchText;
 	std::string m_ValidationMessage;
+	// The settings window persists validated authoring values, then exposes this
+	// request for the editor lifecycle coordinator's protected publication step.
+	std::optional<TerraEngine::Editor::ProjectSettings::PhysicsSettingsPublicationRequest> m_PendingPhysicsSettingsRequest;
+	std::uint64_t m_NextPhysicsSettingsRequestSequence = 0;
+	bool m_PhysicsSettingsLoaded = false;
+	TerraEngine::Physics::PhysicsSettings m_PhysicsSettings = TerraEngine::Physics::PhysicsSettings::Defaults();
 };

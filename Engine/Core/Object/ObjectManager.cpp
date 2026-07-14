@@ -680,6 +680,24 @@ void ObjectManager::notifyObjectStructureChanged(const Object& obj)
 	if (onModified) onModified();
 }
 
+void ObjectManager::notifyManagedBindingsReloaded()
+{
+	// ScriptingSystem calls this from its protected reload/unload boundary after
+	// managed callbacks have stopped. Component generations deliberately remain
+	// unchanged because the authored scene structure did not change.
+	for (auto& [entity, metadata] : metadataMap)
+	{
+		if (registry.valid(entity))
+		{
+			++metadata.bindingGeneration;
+		}
+	}
+	if (onModified)
+	{
+		onModified();
+	}
+}
+
 std::uint64_t ObjectManager::GetObjectTransformRevision(const Object& object) const
 {
 	const entt::entity entityId = object.EntityId();

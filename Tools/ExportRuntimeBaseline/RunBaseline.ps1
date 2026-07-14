@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
 	[ValidateNotNullOrEmpty()]
-	[string]$BuildDir = "out/build/Debug",
+	[string]$BuildDir = "out/build/RelWithDebInfo",
 
 	[string]$InstallRoot = "",
 
@@ -10,6 +10,9 @@ param(
 
 	[ValidateNotNullOrEmpty()]
 	[string]$FixtureRoot = "Tests/Fixtures/ExportRuntimeBaseline",
+
+	[ValidateNotNullOrEmpty()]
+	[string]$PhysicsFixtureRoot = "Tests/Fixtures/PhysicsExportRuntime",
 
 	[ValidatePattern("^[0-9A-Fa-f]{32}$")]
 	[string]$PackageGuid = "11111111222222223333333344444444",
@@ -117,7 +120,10 @@ function Invoke-LoggedNative {
 		& $FilePath @Arguments 2>&1 |
 			ForEach-Object {
 				$line = $_.ToString()
-				$line | Tee-Object -FilePath $LogPath -Append
+				Write-Host $line
+				# Windows PowerShell's Tee-Object may append native strings as
+				# UTF-16 to an existing UTF-8 log. Keep the evidence parseable.
+				Add-Content -LiteralPath $LogPath -Value $line -Encoding utf8
 			}
 		$nativeExitCode = $LASTEXITCODE
 	}
@@ -195,7 +201,7 @@ function Assert-CompiledAsset {
 		[string]$Path,
 
 		[Parameter(Mandatory = $true)]
-		[ValidateSet("TEMF", "TETF", "TMAT")]
+	[ValidateSet("TEMF", "TETF", "TMAT", "TEPC")]
 		[string]$Format
 	)
 
@@ -209,6 +215,7 @@ function Assert-CompiledAsset {
 
 	$hasExpectedHeader = switch ($Format) {
 		"TETF" { [System.BitConverter]::ToUInt32($bytes, 0) -eq [uint32]0x54455446 }
+		"TEPC" { [System.BitConverter]::ToUInt32($bytes, 0) -eq [uint32]0x54455043 }
 		default { [System.Text.Encoding]::ASCII.GetString($bytes, 0, 4) -eq $Format }
 	}
 	if (-not $hasExpectedHeader) {
@@ -223,21 +230,68 @@ function Assert-CompiledAsset {
 	}
 }
 
+function Assert-PhysicsInvariantReport {
+	param(
+		[Parameter(Mandatory = $true)][object]$Report,
+		[Parameter(Mandatory = $true)][string]$Mode
+	)
+
+	# Exact counts make parity evidence sensitive to skipped fixture work while
+	# normalized event presence avoids coupling the contract to contact-pair count.
+	if ($Report.schemaVersion -ne 1 -or -not $Report.succeeded -or -not $Report.managedBindingsReady -or
+		-not $Report.cookedColliderUsed -or -not $Report.orderlyShutdown -or
+		$Report.bodiesCreated -ne 4 -or $Report.fixedStepsCompleted -ne 90 -or
+		$Report.filteredQueryHits -ne 1 -or $Report.publishedEvents -ne 1 -or
+		$Report.constraintsCreated -ne 1 -or $Report.charactersCreated -ne 1 -or
+		$Report.completedTransitions -ne 2 -or $Report.activePhysicsJobsAfterDrain -ne 0 -or
+		$Report.queuedPhysicsJobsAfterDrain -ne 0 -or $Report.gravityYMilliMetresPerSecondSquared -ne -15500 -or
+		$Report.fixedTimeStepMicroseconds -ne 20000 -or $Report.parityLayerBroadPhaseGroup -ne 7 -or
+		-not [string]::IsNullOrEmpty($Report.diagnostic)) {
+		throw "$Mode physics invariant report is incomplete or failed: $($Report | ConvertTo-Json -Compress)."
+	}
+}
+
+function Assert-PhysicsInvariantParity {
+	param(
+		[Parameter(Mandatory = $true)][object]$Editor,
+		[Parameter(Mandatory = $true)][object]$Exported
+	)
+
+	$fields = @(
+		"schemaVersion", "succeeded", "bodiesCreated", "fixedStepsCompleted", "filteredQueryHits",
+		"publishedEvents", "constraintsCreated", "charactersCreated", "completedTransitions",
+		"activePhysicsJobsAfterDrain", "queuedPhysicsJobsAfterDrain", "managedBindingsReady",
+		"gravityYMilliMetresPerSecondSquared", "fixedTimeStepMicroseconds", "parityLayerBroadPhaseGroup",
+		"cookedColliderUsed", "orderlyShutdown", "diagnostic"
+	)
+	foreach ($field in $fields) {
+		if ($Editor.$field -ne $Exported.$field) {
+			throw "Editor Play Mode/export physics parity differs at '$field': editor='$($Editor.$field)', export='$($Exported.$field)'."
+		}
+	}
+}
+
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "../.."))
 $outRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "out"))
 $buildRoot = Get-AbsolutePath -Path $BuildDir -BasePath $repoRoot
 $resolvedInstallRoot = if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
+	# Project runtime artifacts intentionally stage into the configuration's
+	# self-contained Build tree; dependency CMake packages use install prefix.
 	Join-Path $buildRoot "Build"
 }
 else {
 	Get-AbsolutePath -Path $InstallRoot -BasePath $repoRoot
 }
 $fixtureSource = Get-AbsolutePath -Path $FixtureRoot -BasePath $repoRoot
+$physicsFixtureSource = Get-AbsolutePath -Path $PhysicsFixtureRoot -BasePath $repoRoot
 $workDirectory = Get-AbsolutePath -Path $WorkRoot -BasePath $repoRoot
 Assert-PathIsBelow -Parent $outRoot -Child $workDirectory -Description "Disposable baseline work root"
 
 if (-not (Test-Path -LiteralPath $fixtureSource -PathType Container)) {
 	throw "Baseline source fixture was not found: '$fixtureSource'."
+}
+if (-not (Test-Path -LiteralPath $physicsFixtureSource -PathType Container)) {
+	throw "Physics export parity fixture was not found: '$physicsFixtureSource'."
 }
 if (Test-Path -LiteralPath $workDirectory) {
 	# The checked boundary above makes this recursive cleanup safe and prevents
@@ -249,7 +303,7 @@ $projectRoot = Join-Path $workDirectory "project"
 $logRoot = Join-Path $workDirectory "logs"
 $evidenceRoot = Join-Path $workDirectory "evidence"
 $outputRoot = Join-Path $projectRoot "Builds/Baseline"
-New-Item -ItemType Directory -Force -Path $projectRoot, $logRoot | Out-Null
+New-Item -ItemType Directory -Force -Path $projectRoot, $logRoot, $evidenceRoot | Out-Null
 
 # Copy only authored input directories. Ignored Build/obj folders that a local
 # editor may have left beside the fixture are deliberately not copied.
@@ -265,9 +319,19 @@ foreach ($directoryName in @("Assets", "BuildProfiles", "ProjectSettings")) {
 foreach ($directoryName in @("Scenes", "Scripts", "UI")) {
 	Copy-Item -LiteralPath (Join-Path $fixtureSource $directoryName) -Destination (Join-Path $projectRoot "Assets") -Recurse
 }
+# The physics fixture stays source-only in the repository. Its serialized scene
+# replaces the generic disposable startup scene so both installed Editor Play
+# Mode and the packaged launcher deserialize the exact same authored bodies,
+# colliders, constraint, and character. The installed compiler remains the sole
+# producer of the runtime .tepcoll envelope used below.
+Copy-Item -LiteralPath (Join-Path $physicsFixtureSource "Assets/Colliders") -Destination (Join-Path $projectRoot "Assets") -Recurse
+Copy-Item -LiteralPath (Join-Path $physicsFixtureSource "ProjectSettings/PhysicsSettings.json") -Destination (Join-Path $projectRoot "ProjectSettings/PhysicsSettings.json") -Force
+Copy-Item -LiteralPath (Join-Path $physicsFixtureSource "Scenes/Startup.tescene") -Destination (Join-Path $projectRoot "Assets/Scenes/Startup.tescene") -Force
 
 $installedEditor = Join-Path $resolvedInstallRoot "Editor"
+$editorExecutable = Resolve-InstalledExecutable -Directory $installedEditor -BaseName "TerraEngine-Editor"
 $modelCompiler = Resolve-InstalledExecutable -Directory $installedEditor -BaseName "TerraEngineModelPackageCompiler"
+$physicsColliderCompiler = Resolve-InstalledExecutable -Directory $installedEditor -BaseName "TerraEnginePhysicsColliderCompiler"
 $exportCommand = Resolve-InstalledExecutable -Directory $installedEditor -BaseName "TerraEngine-Export"
 
 $managedReferenceRoot = Join-Path $projectRoot "Build/Assembly-CSharp/References"
@@ -332,6 +396,36 @@ foreach ($child in @($importResult.generatedTextures)) {
 	Assert-CompiledAsset -Path (Join-Path $compiledAssetRoot $child.compiledPath) -Format "TETF"
 }
 
+# Execute a real installed Jolt cook before export. The generated envelope is
+# deliberately written only to the disposable compiled-assets directory: the
+# source-controlled fixture must remain recipe-only, while the runtime package
+# must contain the compatible .tepcoll payload rather than source geometry.
+$physicsRecipe = Join-Path $projectRoot "Assets/Colliders/Startup.tecollider"
+$physicsCookedCollider = Join-Path $compiledAssetRoot "Colliders/Startup.tepcoll"
+$physicsCookLog = Join-Path $logRoot "physics-collider-compiler.log"
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $physicsCookedCollider) | Out-Null
+Invoke-LoggedNative -Stage "physics-collider-cook" -FilePath $physicsColliderCompiler `
+	-Arguments @("--input", $physicsRecipe, "--output", $physicsCookedCollider, "--asset-id", "22222222222222223333333344444444", "--settings", (Join-Path $projectRoot "ProjectSettings/PhysicsSettings.json")) `
+	-LogPath $physicsCookLog
+Assert-CompiledAsset -Path $physicsCookedCollider -Format "TEPC"
+# This disposable output did not exist before the successful compiler process,
+# so a valid TEPC envelope proves atomic publication. Export validation below
+# independently checks its Jolt provider version and revision from binary data.
+
+# Produce the editor-side record with the installed executable, its renderer,
+# managed editor host, real Play Mode lifecycle, and shared PhysicsSystem.
+$editorInvariantPath = Join-Path $evidenceRoot "physics-editor-invariants.json"
+$editorPhysicsLog = Join-Path $logRoot "physics-editor-invariants.log"
+Invoke-LoggedNative -Stage "physics-editor-invariants" -FilePath $editorExecutable `
+	-Arguments @("--project", $projectRoot, "--validate-editor-physics-invariants", $editorInvariantPath) `
+	-LogPath $editorPhysicsLog
+if (-not (Test-Path -LiteralPath $editorInvariantPath -PathType Leaf)) {
+	throw "Installed editor did not persist its physics invariant report: '$editorInvariantPath'."
+}
+$editorInvariantJson = Get-Content -LiteralPath $editorInvariantPath -Raw
+$editorInvariant = $editorInvariantJson | ConvertFrom-Json
+Assert-PhysicsInvariantReport -Report $editorInvariant -Mode "Editor Play Mode"
+
 $prepareLog = Join-Path $workDirectory "baseline-prepare.log"
 @(
 	"projectRoot=$projectRoot",
@@ -340,6 +434,8 @@ $prepareLog = Join-Path $workDirectory "baseline-prepare.log"
 	"generatedMeshes=$(@($importResult.generatedMeshes).Count)",
 	"generatedMaterials=$(@($importResult.generatedMaterials).Count)",
 	"generatedTextures=$(@($importResult.generatedTextures).Count)",
+	"physicsCookedCollider=$physicsCookedCollider",
+	"physicsCookLog=$physicsCookLog",
 	"modelCompilerLog=$compilerLog"
 ) | Set-Content -LiteralPath $prepareLog -Encoding utf8
 
@@ -381,7 +477,11 @@ foreach ($evidenceName in $requiredEvidence) {
 }
 
 $stdoutRecords = @(Get-Content -LiteralPath $exportStdoutLog | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-$evidenceRecords = @(Get-Content -LiteralPath (Join-Path $evidenceRoot "progress.jsonl") | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+$evidenceRecords = @(Get-Content -LiteralPath (Join-Path $evidenceRoot "progress.jsonl") |
+	Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $_ -notmatch '"type":"physics_provenance"' })
+# Physics provenance is an evidence-only post-run record assembled from the
+# resolved manifest. Compare every live progress/result line byte-for-byte,
+# then validate the provenance through the manifest and inventory gates below.
 if ($stdoutRecords.Count -ne $evidenceRecords.Count) {
 	throw "CLI stdout and progress evidence contain different record counts."
 }
@@ -428,13 +528,86 @@ if ($packageValidation -notmatch "(?im)^Final:\s*PASS\s*$") {
 	throw "Package validation evidence does not contain a final pass signal."
 }
 
+# Physics has a separate source-only fixture because its recipe must never ship.
+# The export above exercises the installed cook/export path; this inspection
+# compares the fixture's durable invariant names to the packaged runtime
+# contract without requiring a graphics device in CI.
+$physicsFixture = Get-Content -LiteralPath (Join-Path $physicsFixtureSource "project.json") -Raw | ConvertFrom-Json
+$expectedPhysicsInvariants = @($physicsFixture.physicsExportInvariants)
+if ($expectedPhysicsInvariants.Count -ne 9) {
+	throw "Physics parity fixture must declare all nine runtime invariants."
+}
+if (-not (Test-Path -LiteralPath (Join-Path $physicsFixtureSource "Assets/Colliders/Startup.tecollider") -PathType Leaf)) {
+	throw "Physics parity fixture must retain a source-only collider recipe for installed cooking."
+}
+if ($manifest.physics.provider.identifier -ne "Jolt" -or
+	$manifest.physics.provider.version -ne "5.6.0" -or
+	$manifest.physics.provider.revision -ne "e77f175595e64cb44218cc9d9d56fc365ad0e36a") {
+	throw "Exported physics provider contract must remain Jolt 5.6.0 revision e77f175595e64cb44218cc9d9d56fc365ad0e36a."
+}
+$physicsInventory = @($inventory.entries | Where-Object { $_.assetType -in @("physics_settings", "physics_material", "cooked_collider") })
+if (@($physicsInventory | Where-Object { $_.assetType -eq "physics_settings" }).Count -ne 1) {
+	throw "Exported runtime must contain exactly one packaged Physics Settings payload."
+}
+if (@($physicsInventory | Where-Object { $_.assetType -eq "cooked_collider" -and $_.logicalPath -eq "Colliders/Startup.tepcoll" }).Count -ne 1) {
+	throw "Exported runtime must contain the installed Jolt-cooked Startup.tepcoll envelope."
+}
+if (@($inventory.entries | Where-Object { $_.logicalPath -like "*.tecollider" }).Count -ne 0) {
+	throw "Exported runtime retained a source-only collider recipe instead of cooked physics data."
+}
+$physicsBaselineLog = Join-Path $logRoot "physics-headless-baseline.log"
+# The launcher validation switch mounts the published archive, creates no
+# renderer window, and returns only after ResourceManager shutdown. It is the
+# installed headless launch/shutdown check for this baseline.
+$publishedLauncher = Resolve-InstalledExecutable -Directory $outputRoot -BaseName (Split-Path -Leaf $projectRoot)
+Invoke-LoggedNative -Stage "physics-headless-launch" -FilePath $publishedLauncher `
+	-Arguments @("--validate-export-bootstrap") -LogPath $physicsBaselineLog
+$headlessLaunchLog = Get-Content -LiteralPath $physicsBaselineLog -Raw
+if ($headlessLaunchLog -notmatch "\[Launcher\] Export bootstrap validation succeeded\.") {
+	throw "Published headless physics launcher did not report a successful mount and orderly shutdown."
+}
+# Execute the installed package through its real headless physics path and
+# archive the measured record. Editor Play Mode must generate its own separate
+# record before a later orchestrator-owned acceptance step compares the modes.
+$physicsExportLog = Join-Path $logRoot "physics-export-invariants.log"
+Invoke-LoggedNative -Stage "physics-export-invariants" -FilePath $publishedLauncher `
+	-Arguments @("--validate-export-physics-invariants") -LogPath $physicsExportLog
+function Get-PhysicsInvariantJson {
+	param([Parameter(Mandatory = $true)][string]$LogPath)
+	$prefix = "[Launcher] Physics invariant report: "
+	$line = @(Get-Content -LiteralPath $LogPath | Where-Object { $_.StartsWith($prefix, [System.StringComparison]::Ordinal) }) | Select-Object -Last 1
+	if ($null -eq $line) {
+		throw "Physics invariant launcher output did not contain its durable JSON report: '$LogPath'."
+	}
+	return $line.Substring($prefix.Length)
+}
+$exportInvariantJson = Get-PhysicsInvariantJson -LogPath $physicsExportLog
+$exportInvariant = $exportInvariantJson | ConvertFrom-Json
+Assert-PhysicsInvariantReport -Report $exportInvariant -Mode "Exported runtime"
+Assert-PhysicsInvariantParity -Editor $editorInvariant -Exported $exportInvariant
+Set-Content -LiteralPath (Join-Path $evidenceRoot "physics-export-invariants.json") -Value $exportInvariantJson -Encoding utf8
+"Physics editor/export parity: PASS" | Add-Content -LiteralPath (Join-Path $evidenceRoot "package-validation.txt") -Encoding utf8
+@(
+	"physicsFixture=source-only-verified",
+	"export=headless",
+	"launch=$publishedLauncher --validate-export-bootstrap",
+	"invariantEditor=$editorPhysicsLog",
+	"invariantExport=$physicsExportLog",
+	"parity=editor-play-mode-vs-export-pass",
+	"invariants=$($expectedPhysicsInvariants -join ',')",
+	"provider=Jolt 5.6.0 e77f175595e64cb44218cc9d9d56fc365ad0e36a",
+	"shutdown=package-validation-final-pass"
+) | Add-Content -LiteralPath $physicsBaselineLog -Encoding utf8
+
 @(
 	"result=passed",
 	"outputRoot=$outputRoot",
 	"evidenceRoot=$evidenceRoot",
 	"entryCount=$($inventory.entryCount)",
 	"placeholderEntries=0",
-	"startupScene=$($manifest.startupScene)"
+	"startupScene=$($manifest.startupScene)",
+	"physicsInvariants=$($expectedPhysicsInvariants -join ',')",
+	"physicsShutdown=verified"
 ) | Set-Content -LiteralPath (Join-Path $logRoot "archive-inspection.log") -Encoding utf8
 
 Write-Host "Export runtime baseline passed."

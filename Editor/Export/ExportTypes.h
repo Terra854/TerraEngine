@@ -74,6 +74,38 @@ struct ExportProgress {
 	bool finished = false;
 };
 
+// The physics subsection is versioned independently because it is consumed by
+// the runtime before a scene can create a physics world.  These records contain
+// only durable package identities; provider handles and editor-only recipes
+// deliberately stay outside the export format.
+struct PhysicsExportAssetRecord {
+	std::string guid;
+	std::string packagePath;
+	std::string checksum;
+	std::uint64_t byteSize = 0U;
+	std::string sourceProvenanceHash;
+	std::string recipeHash;
+};
+
+struct PhysicsExportManifest {
+	static constexpr std::uint32_t kSchemaVersion = 1U;
+
+	std::uint32_t schemaVersion = kSchemaVersion;
+	std::string providerIdentifier = "Jolt";
+	std::string providerVersion = "5.6.0";
+	std::string providerRevision = "e77f175595e64cb44218cc9d9d56fc365ad0e36a";
+	std::uint32_t cookFormatVersion = 1U;
+	std::string settingsPackagePath;
+	std::uint32_t settingsSchemaVersion = 1U;
+	std::string settingsHash;
+	std::string layersHash;
+	std::string defaultMaterialGuid;
+	std::vector<PhysicsExportAssetRecord> materials;
+	std::vector<PhysicsExportAssetRecord> colliders;
+	std::uint32_t validationFixtureSchemaVersion = 1U;
+	std::string validationStatus = "validated";
+};
+
 using ExportProgressCallback = std::function<void(const ExportProgress&)>;
 
 struct ExportRequest {

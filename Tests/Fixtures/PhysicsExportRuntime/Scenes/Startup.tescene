@@ -1,0 +1,70 @@
+{
+	"name": "Physics Export Startup",
+	"physicsExportFixture": {
+		"sourceCollider": "Assets/Colliders/Startup.tecollider",
+		"requiresManagedBinding": true,
+		"headlessSupported": true,
+		"shutdownExpectedActiveJobs": 0,
+		"expectedInvariants": [
+			"bodies", "stepping", "filtering", "queries", "events",
+			"constraints", "characters", "transitions", "shutdown"
+		]
+	},
+	"objects": [
+		{
+			"uuid": "00000000000000000000000000000001",
+			"name": "Physics Export Ground",
+			"components": {
+				"Transform": { "Position": [0.0, -0.5, 0.0], "Rotation": [1.0, 0.0, 0.0, 0.0], "Scale": [1.0, 1.0, 1.0] },
+				"RigidBodyComponent": { "motionType": "Static", "useGravity": false },
+				"ColliderSetComponent": { "colliders": [
+					{ "recordId": "10000000000000000000000000000001", "recordVersion": 1, "localCenter": [0.0, 0.0, 0.0], "localRotation": [1.0, 0.0, 0.0, 0.0], "shape": { "type": "ConvexHull", "colliderAssetId": "22222222222222223333333344444444" }, "materialId": "00000000000000000000000000000000", "useDefaultMaterial": true, "isTrigger": false, "useLayerOverride": false, "collisionLayerId": 0, "eventPolicy": "All", "queryFlags": 15, "enabled": true, "hasDebugColorOverride": false }
+				] }
+			}
+		},
+		{
+			"uuid": "00000000000000000000000000000002",
+			"name": "Physics Export Falling Body",
+			"components": {
+				"Transform": { "Position": [0.0, 2.0, 0.0], "Rotation": [1.0, 0.0, 0.0, 0.0], "Scale": [1.0, 1.0, 1.0] },
+				"RigidBodyComponent": { "motionType": "Dynamic" },
+				"ColliderSetComponent": { "colliders": [
+					{ "recordId": "10000000000000000000000000000002", "recordVersion": 1, "localCenter": [0.0, 0.0, 0.0], "localRotation": [1.0, 0.0, 0.0, 0.0], "shape": { "type": "Box", "halfExtents": [0.5, 0.5, 0.5] }, "materialId": "00000000000000000000000000000000", "useDefaultMaterial": true, "isTrigger": false, "useLayerOverride": false, "collisionLayerId": 0, "eventPolicy": "All", "queryFlags": 15, "enabled": true, "hasDebugColorOverride": false }
+				] }
+			}
+		},
+		{
+			"uuid": "00000000000000000000000000000003",
+			"name": "Physics Export Kinematic Body",
+			"components": {
+				"Transform": { "Position": [3.0, 1.0, 0.0], "Rotation": [1.0, 0.0, 0.0, 0.0], "Scale": [1.0, 1.0, 1.0] },
+				"RigidBodyComponent": { "motionType": "Kinematic", "useGravity": false },
+				"ColliderSetComponent": { "colliders": [
+					{ "recordId": "10000000000000000000000000000003", "recordVersion": 1, "localCenter": [0.0, 0.0, 0.0], "localRotation": [1.0, 0.0, 0.0, 0.0], "shape": { "type": "Box", "halfExtents": [0.5, 0.5, 0.5] }, "materialId": "00000000000000000000000000000000", "useDefaultMaterial": true, "isTrigger": false, "useLayerOverride": false, "collisionLayerId": 1, "eventPolicy": "All", "queryFlags": 15, "enabled": true, "hasDebugColorOverride": false }
+				] }
+			}
+		},
+		{
+			"uuid": "00000000000000000000000000000004",
+			"name": "Physics Export Constrained Body",
+			"components": {
+				"Transform": { "Position": [5.0, 1.0, 0.0], "Rotation": [1.0, 0.0, 0.0, 0.0], "Scale": [1.0, 1.0, 1.0] },
+				"RigidBodyComponent": { "motionType": "Dynamic" },
+				"ColliderSetComponent": { "colliders": [
+					{ "recordId": "10000000000000000000000000000004", "recordVersion": 1, "localCenter": [0.0, 0.0, 0.0], "localRotation": [1.0, 0.0, 0.0, 0.0], "shape": { "type": "Box", "halfExtents": [0.5, 0.5, 0.5] }, "materialId": "00000000000000000000000000000000", "useDefaultMaterial": true, "isTrigger": false, "useLayerOverride": false, "collisionLayerId": 0, "eventPolicy": "All", "queryFlags": 15, "enabled": true, "hasDebugColorOverride": false }
+				] },
+				"ConstraintSetComponent": { "constraints": [
+					{ "recordId": "30000000000000000000000000000001", "recordVersion": 1, "kind": "Fixed", "firstEndpointKind": "ConnectedObject", "firstObjectId": "00000000000000000000000000000003", "secondEndpointKind": "ConnectedObject", "secondObjectId": "00000000000000000000000000000004", "firstFrame": { "position": [0.0, 0.0, 0.0], "rotation": [1.0, 0.0, 0.0, 0.0] }, "secondFrame": { "position": [0.0, 0.0, 0.0], "rotation": [1.0, 0.0, 0.0, 0.0] }, "firstAxis": [0.0, 1.0, 0.0], "secondAxis": [0.0, 1.0, 0.0], "limits": { "enabled": false, "minimum": 0.0, "maximum": 0.0 }, "spring": { "enabled": false, "stiffness": 0.0, "damping": 0.0 }, "motor": { "mode": "Disabled", "targetPosition": 0.0, "targetVelocity": 0.0, "maximumForce": 0.0 }, "axisLimits": [{ "enabled": false, "minimum": 0.0, "maximum": 0.0 }, { "enabled": false, "minimum": 0.0, "maximum": 0.0 }, { "enabled": false, "minimum": 0.0, "maximum": 0.0 }, { "enabled": false, "minimum": 0.0, "maximum": 0.0 }, { "enabled": false, "minimum": 0.0, "maximum": 0.0 }, { "enabled": false, "minimum": 0.0, "maximum": 0.0 }], "axisSprings": [{ "enabled": false, "stiffness": 0.0, "damping": 0.0 }, { "enabled": false, "stiffness": 0.0, "damping": 0.0 }, { "enabled": false, "stiffness": 0.0, "damping": 0.0 }, { "enabled": false, "stiffness": 0.0, "damping": 0.0 }, { "enabled": false, "stiffness": 0.0, "damping": 0.0 }, { "enabled": false, "stiffness": 0.0, "damping": 0.0 }], "axisMotors": [{ "mode": "Disabled", "targetPosition": 0.0, "targetVelocity": 0.0, "maximumForce": 0.0 }, { "mode": "Disabled", "targetPosition": 0.0, "targetVelocity": 0.0, "maximumForce": 0.0 }, { "mode": "Disabled", "targetPosition": 0.0, "targetVelocity": 0.0, "maximumForce": 0.0 }, { "mode": "Disabled", "targetPosition": 0.0, "targetVelocity": 0.0, "maximumForce": 0.0 }, { "mode": "Disabled", "targetPosition": 0.0, "targetVelocity": 0.0, "maximumForce": 0.0 }, { "mode": "Disabled", "targetPosition": 0.0, "targetVelocity": 0.0, "maximumForce": 0.0 }], "firstGearConstraintId": "00000000000000000000000000000000", "secondGearConstraintId": "00000000000000000000000000000000", "gearRatio": 1.0, "collideConnected": false, "breakForce": "Infinity", "breakTorque": "Infinity", "enabled": true, "resetGeneration": 1 }
+				] }
+			}
+		},
+		{
+			"uuid": "00000000000000000000000000000005",
+			"name": "Physics Export Character",
+			"components": {
+				"Transform": { "Position": [0.0, 1.5, 2.0], "Rotation": [1.0, 0.0, 0.0, 0.0], "Scale": [1.0, 1.0, 1.0] },
+				"CharacterControllerComponent": { "shapeKind": "Capsule", "radius": 0.5, "height": 2.0, "localCenter": [0.0, 0.0, 0.0], "upDirection": [0.0, 1.0, 0.0], "stepHeight": 0.4, "supportVolumeRadius": 0.5, "supportVolumeHeight": 0.2, "maximumSlopeAngleDegrees": 50.0, "contactPadding": 0.02, "mass": 75.0, "maximumStrength": 1000.0, "collisionLayerId": 1, "collisionMask": 4294967295, "groundAdhesion": 0.0, "allowStairWalking": true, "useGravity": true, "gravityScale": 1.0, "jumpSpeed": 5.0, "rotationPolicy": "AlignToUp", "enabled": true }
+			}
+		}
+	]
+}

@@ -44,7 +44,7 @@ namespace TerraEngine::EditorTests
 
 		registry.Add("Editor.ProjectSettings.CategorySearchContract", [](TestContext& context) {
 			const auto allCategories = TerraEngine::Editor::ProjectSettings::FilterProjectSettingsCategories("");
-			context.ExpectEqual(static_cast<std::size_t>(3), allCategories.size(), "Empty search should show the current Project Settings categories.");
+			context.ExpectEqual(static_cast<std::size_t>(4), allCategories.size(), "Empty search should show Project, Graphics, Resources, and Physics categories.");
 
 			const auto shadowMatches = TerraEngine::Editor::ProjectSettings::FilterProjectSettingsCategories("shadow");
 			context.ExpectEqual(static_cast<std::size_t>(1), shadowMatches.size(), "Shadow search should find the graphics category.");

@@ -45,7 +45,7 @@ namespace TerraEngine.Export
 		public int WorkerDispatch;
 	}
 
-	[StructLayout(LayoutKind.Explicit, Size = 112)]
+	[StructLayout(LayoutKind.Explicit, Size = 136)]
 	public unsafe struct ManagedVTable
 	{
 		[FieldOffset(0)]  public ulong Version;
@@ -62,5 +62,9 @@ namespace TerraEngine.Export
 		[FieldOffset(88)] public delegate* unmanaged[Cdecl]<IntPtr, int, void*, int, void>                GetFieldValue;
 		[FieldOffset(96)] public delegate* unmanaged[Cdecl]<IntPtr, int, void*, int, void>                SetFieldValue;
 		[FieldOffset(104)] public delegate* unmanaged[Cdecl]<ExportScriptBatchItem*, int, void>          InvokeUpdateBatch;
+		// Appended v2 tail. Existing v1 offsets above are never shifted.
+		[FieldOffset(112)] public ulong TableSize;
+		[FieldOffset(120)] public delegate* unmanaged[Cdecl]<uint> GetPhysicsAbiVersion;
+		[FieldOffset(128)] public delegate* unmanaged[Cdecl]<void*, uint, ulong, uint, ulong, void> DispatchPhysicsEventBatch;
 	}
 }

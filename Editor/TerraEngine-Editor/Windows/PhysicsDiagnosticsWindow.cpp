@@ -1,0 +1,136 @@
+// PhysicsDiagnosticsWindow.cpp - immutable physics snapshot presentation.
+
+#include "PhysicsDiagnosticsWindow.h"
+
+#include "Engine/Physics/PhysicsDiagnostics.h"
+
+#include <imgui.h>
+#include <memory>
+
+namespace
+{
+	std::shared_ptr<const TerraEngine::Physics::PhysicsDiagnosticsSnapshot> AcquireSnapshot()
+	{
+		return TerraEngine::Physics::AcquirePhysicsDiagnosticsSnapshot();
+	}
+}
+
+PhysicsDiagnosticsWindow::PhysicsDiagnosticsWindow(MainEditorSubsystem* windowOwner)
+	: EditorWindow("Physics Diagnostics", false, "Diagnostics"), owner(windowOwner)
+{
+}
+
+void PhysicsDiagnosticsWindow::OnGui()
+{
+	// Do not request producer diagnostics here: physics owns its own opt-in
+	// settings and this panel must add zero simulation work while merely open.
+	if (!m_IsVisible)
+	{
+		return;
+	}
+	const std::shared_ptr<const TerraEngine::Physics::PhysicsDiagnosticsSnapshot> snapshot = AcquireSnapshot();
+	if (!snapshot)
+	{
+		ImGui::TextDisabled("Waiting for an immutable physics diagnostics snapshot.");
+		return;
+	}
+	ImGui::Text("World %llu / generation %llu  Tick %llu  State %u",
+		static_cast<unsigned long long>(snapshot->world.worldId.value),
+		static_cast<unsigned long long>(snapshot->world.worldGeneration),
+		static_cast<unsigned long long>(snapshot->tick),
+		static_cast<unsigned>(snapshot->state));
+	DrawCounters();
+	DrawTimings();
+	DrawSchedulerDeclarations();
+}
+
+void PhysicsDiagnosticsWindow::DrawCounters()
+{
+	const auto snapshot = AcquireSnapshot();
+	if (!snapshot || !ImGui::BeginTable("PhysicsDiagnosticsCounters", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	{
+		return;
+	}
+	ImGui::TableSetupColumn("Bodies");
+	ImGui::TableSetupColumn("Shapes");
+	ImGui::TableSetupColumn("Constraints");
+	ImGui::TableSetupColumn("Characters");
+	ImGui::TableSetupColumn("Queries / Hits");
+	ImGui::TableSetupColumn("Events / Dropped");
+	ImGui::TableHeadersRow();
+	ImGui::TableNextRow();
+	ImGui::TableSetColumnIndex(0); ImGui::Text("%llu", static_cast<unsigned long long>(snapshot->counters.bodyCount));
+	ImGui::TableSetColumnIndex(1); ImGui::Text("%llu", static_cast<unsigned long long>(snapshot->counters.shapeCount));
+	ImGui::TableSetColumnIndex(2); ImGui::Text("%llu", static_cast<unsigned long long>(snapshot->counters.constraintCount));
+	ImGui::TableSetColumnIndex(3); ImGui::Text("%llu", static_cast<unsigned long long>(snapshot->counters.characterCount));
+	ImGui::TableSetColumnIndex(4); ImGui::Text("%llu / %llu", static_cast<unsigned long long>(snapshot->counters.queryCount), static_cast<unsigned long long>(snapshot->counters.queryHitCount));
+	ImGui::TableSetColumnIndex(5); ImGui::Text("%llu / %llu", static_cast<unsigned long long>(snapshot->counters.eventCount), static_cast<unsigned long long>(snapshot->counters.eventDroppedCount));
+	ImGui::EndTable();
+	ImGui::Text("Queues: commands %llu, queries %llu, events %llu. Rejected %llu, stale %llu.",
+		static_cast<unsigned long long>(snapshot->queues.commandDepth),
+		static_cast<unsigned long long>(snapshot->queues.queryDepth),
+		static_cast<unsigned long long>(snapshot->queues.eventDepth),
+		static_cast<unsigned long long>(snapshot->counters.rejectedCount),
+		static_cast<unsigned long long>(snapshot->counters.staleCount));
+	ImGui::Text("Contacts %llu. Shape cache: %llu shared / %llu assets / %llu B; hits %llu, misses %llu.",
+		static_cast<unsigned long long>(snapshot->counters.contactCount),
+		static_cast<unsigned long long>(snapshot->cache.sharedShapeCount),
+		static_cast<unsigned long long>(snapshot->cache.assetCount),
+		static_cast<unsigned long long>(snapshot->cache.payloadBytes),
+		static_cast<unsigned long long>(snapshot->cache.hitCount),
+		static_cast<unsigned long long>(snapshot->cache.missCount));
+}
+
+void PhysicsDiagnosticsWindow::DrawTimings()
+{
+	const auto snapshot = AcquireSnapshot();
+	if (!snapshot || !ImGui::BeginTable("PhysicsDiagnosticsTimings", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	{
+		return;
+	}
+	ImGui::TableSetupColumn("Prepare"); ImGui::TableSetupColumn("Commit"); ImGui::TableSetupColumn("Simulate");
+	ImGui::TableSetupColumn("Queries"); ImGui::TableSetupColumn("Events"); ImGui::TableSetupColumn("Publish");
+	ImGui::TableHeadersRow(); ImGui::TableNextRow();
+	ImGui::TableSetColumnIndex(0); ImGui::Text("%.3f ms", snapshot->timings.prepareMs);
+	ImGui::TableSetColumnIndex(1); ImGui::Text("%.3f ms", snapshot->timings.commitMs);
+	ImGui::TableSetColumnIndex(2); ImGui::Text("%.3f ms", snapshot->timings.simulateMs);
+	ImGui::TableSetColumnIndex(3); ImGui::Text("%.3f ms", snapshot->timings.queryMs);
+	ImGui::TableSetColumnIndex(4); ImGui::Text("%.3f ms", snapshot->timings.eventPublishMs);
+	ImGui::TableSetColumnIndex(5); ImGui::Text("%.3f ms", snapshot->timings.publishMs);
+	ImGui::EndTable();
+	ImGui::Text("Memory: provider %llu B, snapshots %llu B, high-water %llu B.",
+		static_cast<unsigned long long>(snapshot->memory.providerBytes),
+		static_cast<unsigned long long>(snapshot->memory.snapshotBytes),
+		static_cast<unsigned long long>(snapshot->memory.highWaterBytes));
+	ImGui::Text("Provider allocations: %llu outstanding, %llu high-water (provider byte totals unavailable).",
+		static_cast<unsigned long long>(snapshot->memory.outstandingProviderAllocations),
+		static_cast<unsigned long long>(snapshot->memory.highWaterProviderAllocations));
+}
+
+void PhysicsDiagnosticsWindow::DrawSchedulerDeclarations()
+{
+	const auto snapshot = AcquireSnapshot();
+	if (!snapshot || !snapshot->scheduler || snapshot->scheduler->empty())
+	{
+		ImGui::TextDisabled("No published physics scheduler declarations.");
+		return;
+	}
+	ImGui::SeparatorText("Scheduler Declarations");
+	if (!ImGui::BeginTable("PhysicsDiagnosticsScheduler", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable))
+	{
+		return;
+	}
+	ImGui::TableSetupColumn("Workload"); ImGui::TableSetupColumn("Phase"); ImGui::TableSetupColumn("Reads");
+	ImGui::TableSetupColumn("Writes"); ImGui::TableSetupColumn("Worker"); ImGui::TableSetupColumn("Boundary"); ImGui::TableHeadersRow();
+	for (const auto& declaration : *snapshot->scheduler)
+	{
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(declaration.workload.c_str());
+		ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(declaration.phase.c_str());
+		ImGui::TableSetColumnIndex(2); ImGui::TextWrapped("%s", declaration.reads.c_str());
+		ImGui::TableSetColumnIndex(3); ImGui::TextWrapped("%s", declaration.writes.c_str());
+		ImGui::TableSetColumnIndex(4); ImGui::TextUnformatted(declaration.workerSafe ? "yes" : "protected");
+		ImGui::TableSetColumnIndex(5); ImGui::TextWrapped("%s", declaration.boundary.c_str());
+	}
+	ImGui::EndTable();
+}

@@ -136,6 +136,9 @@ TerraEngine::Runtime::ExportStartupCoordinatorInput BuildLauncherValidationInput
 	input.requiredSystems.push_back({ "Renderer", true, true, "Deferred until normal runtime startup" });
 	input.requiredSystems.push_back({ "UI", true, true, "Deferred until normal runtime startup" });
 	input.requiredSystems.push_back({ "Scripting", true, true, "NativeAOT path configured" });
+	input.packagedPhysics = TerraEngine::Runtime::LoadPackagedPhysicsRuntime(
+		ContentMount::Instance(), true,
+		resources.GetEngineRoot() / "Managed" / "Assembly-CSharp.dll");
 	return input;
 }
 } // namespace
@@ -179,6 +182,29 @@ int main(int argc, char *argv[])
 				return 1;
 			}
 			std::cout << "[Launcher] Export bootstrap validation succeeded." << std::endl;
+			return 0;
+		}
+
+		if (HasArgument(argc, argv, "--validate-export-physics-invariants")) {
+			// Use the normal Engine resource/scene/scripting/PhysicsSystem/scheduler
+			// path, with presentation systems omitted before initialization. This is
+			// intentionally not a direct provider smoke test: it validates the same
+			// serialized startup scene and After Physics publication boundary shipped
+			// to players without requiring a window or graphics device.
+			Engine headlessEngine;
+			headlessEngine.ConfigureHeadlessPhysicsValidation();
+			headlessEngine.Initialize();
+			const TerraEngine::Runtime::PhysicsInvariantReport report =
+				headlessEngine.RunPhysicsInvariantFixture();
+			std::cout << "[Launcher] Physics invariant report: "
+				<< TerraEngine::Runtime::SerializePhysicsInvariantReport(report) << std::endl;
+			headlessEngine.Shutdown();
+			if (!report.succeeded || !report.orderlyShutdown
+				|| report.activePhysicsJobsAfterDrain != 0U || report.queuedPhysicsJobsAfterDrain != 0U) {
+				std::cerr << "[Launcher] Physics invariant validation failed: " << report.diagnostic << std::endl;
+				return 1;
+			}
+			std::cout << "[Launcher] Export physics invariant validation succeeded." << std::endl;
 			return 0;
 		}
 

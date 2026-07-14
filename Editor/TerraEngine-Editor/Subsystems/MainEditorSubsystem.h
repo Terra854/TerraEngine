@@ -23,11 +23,13 @@
 #include "../Project/EditorPreferencesMetadata.h"
 #include "../Project/ProjectSettingsMetadata.h"
 #include "Engine/Renderer/RenderTypes.h"
+#include "Engine/Scene/TransactionalMutation.h"
 #include "Engine/Utilities/UUID.h"
 #include "../Core/ViewportTextureRegistry.h"
 
 class Object;
 class VulkanContext;
+namespace TerraEngine::Runtime { struct PhysicsInvariantReport; }
 
 // PrefabAuthoringService owns the semantic prefab operations shared by the
 // native editor and automation. Its session state is independent from MCP, so
@@ -92,7 +94,17 @@ public:
 
 	void OnProjectOpened();
 	void SetOnProjectClosedCallback(std::function<void()> callback);
+	// Native toolbar and loopback automation share these lifecycle methods so
+	// scene snapshots, Jolt world ownership, scripting, and fixed-step controls
+	// cannot drift into two different Play Mode implementations.
+	bool StartPlayMode();
+	bool SetPlayModePaused(bool paused);
+	bool StepPlayMode();
 	void StopPlayMode();
+	// The installed acceptance CLI uses the same Play Mode entry, fixed-step,
+	// publication, and stop methods as the toolbar. It returns engine-owned
+	// invariant counts for comparison with the exported runtime report.
+	TerraEngine::Runtime::PhysicsInvariantReport RunPhysicsExportInvariantFixture();
 	// Reports whether a drag control in the inspector is active this frame for cursor wrapping.
 	bool IsInspectorValueDragging() const;
 
@@ -100,8 +112,15 @@ public:
 	// GetContext is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	EditorContext* GetContext() const { return ctx; }
 
-	std::optional<entt::entity> GetSelectedEntity() const { return selectedEntity; }
+	std::optional<entt::entity> GetSelectedEntity() const;
+	// Multi-selection stores authored UUIDs instead of transient EnTT handles, so
+	// scene reloads and prefab-context swaps cannot silently retarget an edit.
+	std::vector<entt::entity> GetSelectedEntities() const;
+	const std::vector<TerraEngine::UUID>& GetSelectedEntityUuids() const { return selectedEntityUuids; }
+	bool IsEntitySelected(entt::entity entity) const;
 	void SetSelectedEntity(std::optional<entt::entity> entity);
+	void SetSelectedEntities(const std::vector<entt::entity>& entities);
+	void ToggleSelectedEntity(entt::entity entity);
 
 	// GetSelectedAsset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::optional<std::filesystem::path> GetSelectedAsset() const { return selectedAsset; }
@@ -186,6 +205,8 @@ private:
 	bool LoadPrefabIntoIsolatedObjectManager(const std::filesystem::path& path);
 	bool OpenPrefabAssetInternal(const std::filesystem::path& path, bool openedFromSceneObject);
 	void PublishEditorStreamingNeeds();
+	void CapturePendingEditorTransactionsForUndo();
+	void PublishCommittedEditorTransactionsToUndo();
 	void RefreshViewportTextures(VulkanContext& vulkan);
 	void DrawMainMenuBar();
 	void CloseCurrentProject();
@@ -232,10 +253,14 @@ private:
 	bool sceneLoaded = false;
 	
 	std::optional<entt::entity> selectedEntity;
+	std::vector<TerraEngine::UUID> selectedEntityUuids;
 	std::optional<std::filesystem::path> selectedAsset;
 	std::optional<SelectedPackageChildAsset> selectedPackageChildAsset;
 	PrefabAuthoringService prefabAuthoringService;
 	std::filesystem::path m_CurrentScenePath;
+	// Receipts intentionally omit their forward payload, so editor transactions
+	// are cached before the next protected flush and paired by stable ID later.
+	std::unordered_map<std::string, TerraEngine::Scene::Transaction> pendingEditorUndoTransactions;
 
 	// PendingAction names the supported states explicitly so serialization and switches stay readable.
 	enum class PendingAction {

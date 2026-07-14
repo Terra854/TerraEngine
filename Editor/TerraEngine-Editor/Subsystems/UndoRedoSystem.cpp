@@ -9,9 +9,12 @@
 #include "Engine/Components/Transform.h"
 #include "Engine/Core/Object/Component.h"
 #include "Engine/Scene/Serializer.h"
+#include "Engine/Scene/SceneMutationQueue.h"
 #include "Engine/Scripting/ScriptingSystem.h"
 
+#include <algorithm>
 #include <utility>
+#include <unordered_set>
 
 namespace
 {
@@ -57,6 +60,64 @@ private:
 	std::string m_GroupName;
 	std::string m_HistoryId;
 	std::vector<std::unique_ptr<ICommand>> m_Commands;
+};
+
+class CommittedTransactionCommand final : public ICommand
+{
+public:
+	CommittedTransactionCommand(std::string name, std::string historyId,
+		std::vector<TerraEngine::Scene::TransactionWriteOperation> forward,
+		std::vector<TerraEngine::Scene::TransactionWriteOperation> inverse)
+		: m_Name(std::move(name)), m_HistoryId(std::move(historyId)),
+		m_Forward(std::move(forward)), m_Inverse(std::move(inverse))
+	{
+	}
+
+	void Undo() override { Enqueue(m_Inverse, "undo"); }
+	void Redo() override { Enqueue(m_Forward, "redo"); }
+	std::string GetName() const override { return m_Name; }
+	std::string GetHistoryId() const override { return m_HistoryId; }
+
+private:
+	void Enqueue(const std::vector<TerraEngine::Scene::TransactionWriteOperation>& operations, const char* direction)
+	{
+		TerraEngine::Scene::Transaction replay;
+		replay.id = "editor-transaction-replay-" + std::to_string(++m_ReplaySequence) + "-" + direction;
+		replay.origin = TerraEngine::Scene::TransactionOrigin::Editor;
+		replay.originName = "UndoRedoReplay";
+		replay.writeSet.operations = operations;
+		replay.budget.maxWriteCount = std::max<std::size_t>(replay.budget.maxWriteCount, operations.size());
+
+		// Read observations are captured when the user asks for undo/redo. A stale
+		// object generation therefore rejects the complete replay at publication.
+		ObjectManager& objects = ObjectManager::instance();
+		replay.readSet.sceneRevision = objects.GetHierarchyRevision();
+		std::unordered_set<TerraEngine::UUID> observed;
+		for (const TerraEngine::Scene::TransactionWriteOperation& operation : operations)
+		{
+			if (operation.target.objectId == TerraEngine::EMPTY_UUID || !observed.insert(operation.target.objectId).second)
+			{
+				continue;
+			}
+			if (const std::optional<Object> object = objects.getObject(operation.target.objectId))
+			{
+				replay.readSet.objects.push_back({
+					operation.target.objectId,
+					objects.getObjectLifetimeGeneration(*object),
+					objects.getObjectMetadataGeneration(*object),
+					objects.getObjectComponentGeneration(*object),
+					objects.GetHierarchyRevision()
+				});
+			}
+		}
+		TerraEngine::Scene::SceneMutationQueue::Instance().EnqueueTransaction(std::move(replay));
+	}
+
+	std::string m_Name;
+	std::string m_HistoryId;
+	std::vector<TerraEngine::Scene::TransactionWriteOperation> m_Forward;
+	std::vector<TerraEngine::Scene::TransactionWriteOperation> m_Inverse;
+	std::uint64_t m_ReplaySequence = 0U;
 };
 
 // ResolveObject keeps undo/redo replay on the explicit ObjectManager service
@@ -430,6 +491,41 @@ void UndoRedoSystem::PushTransactionGroup(std::string groupName, std::vector<std
 		return;
 	}
 	PushCommand(std::make_unique<TransactionCommandGroup>(std::move(groupName), std::move(historyId), std::move(commands)));
+}
+
+bool UndoRedoSystem::RecordCommittedTransaction(const TerraEngine::Scene::Transaction& transaction,
+	const TerraEngine::Scene::TransactionResult& result)
+{
+	using namespace TerraEngine::Scene;
+	if (transaction.origin != TransactionOrigin::Editor || transaction.undoGroupName.empty()
+		|| result.status != TransactionStatus::Committed || result.inverseDeltas.empty())
+	{
+		return false;
+	}
+
+	// The editor bridge deliberately accepts reflected property writes only.
+	// Structural/object snapshots need a richer asynchronous replay protocol and
+	// must not be guessed from a receipt that omitted serialized forward state.
+	if (!std::all_of(transaction.writeSet.operations.begin(), transaction.writeSet.operations.end(), [](const TransactionWriteOperation& operation) {
+		return operation.kind == TransactionWriteKind::UpdateComponentProperty;
+	}))
+	{
+		return false;
+	}
+
+	std::vector<TransactionWriteOperation> inverse;
+	inverse.reserve(result.inverseDeltas.size());
+	for (auto delta = result.inverseDeltas.rbegin(); delta != result.inverseDeltas.rend(); ++delta)
+	{
+		if (delta->restoresSerializedObject || delta->restoresSerializedComponent)
+		{
+			return false;
+		}
+		inverse.push_back(delta->operation);
+	}
+	PushCommand(std::make_unique<CommittedTransactionCommand>(transaction.undoGroupName,
+		transaction.id, transaction.writeSet.operations, std::move(inverse)));
+	return true;
 }
 
 // UndoRedoSystem::Undo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

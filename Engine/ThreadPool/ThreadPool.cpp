@@ -4,13 +4,17 @@
 #include "Core/Logger/Logger.h"
 #include "Profiling/Profiler.h"
 
+#include <cstdlib>
+#include <algorithm>
+#include <limits>
+
 ThreadPool& ThreadPool::instance() {
 	static ThreadPool instance;
 	return instance;
 }
 
 // ThreadPool::initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void ThreadPool::initialize() {
+void ThreadPool::initialize(std::size_t requestedWorkerCount) {
 	{
 		std::lock_guard<std::mutex> lock(queue_mutex);
 		// Treat initialization as idempotent so callers can safely guard startup
@@ -22,10 +26,30 @@ void ThreadPool::initialize() {
 	}
 
 	const size_t hardwareThreads = std::thread::hardware_concurrency();
+	const size_t detectedHardwareThreads = hardwareThreads > 0 ? hardwareThreads : 4;
+	if (requestedWorkerCount == 0) {
+		// The environment override is intentionally opt-in so existing launches
+		// retain the hardware-concurrency behavior unless a baseline requests a
+		// deterministic worker count.
+		if (const char* overrideText = std::getenv("TERRAENGINE_THREADPOOL_WORKERS"); overrideText != nullptr && *overrideText != '\0') {
+			char* end = nullptr;
+			const unsigned long parsed = std::strtoul(overrideText, &end, 10);
+			const bool valid = overrideText[0] != '-' && end != overrideText && *end == '\0' && parsed <= static_cast<unsigned long>(std::numeric_limits<std::size_t>::max());
+			if (valid && parsed > 0) {
+				requestedWorkerCount = static_cast<std::size_t>(parsed);
+			}
+			else if (valid && parsed == 0) {
+				requestedWorkerCount = detectedHardwareThreads;
+			}
+			else {
+				TERRAENGINE_LOG(LogLevel::Warning, "Ignoring invalid TERRAENGINE_THREADPOOL_WORKERS='" << overrideText << "'; using hardware concurrency.");
+			}
+		}
+	}
 
-	// specific hardware threads or default to 4 if detection fails.
-	// Ensure at least one worker is created to process tasks.
-	const size_t numThreads = hardwareThreads > 0 ? hardwareThreads : 4;
+	// Clamp explicit requests so a stale machine-specific setting cannot create
+	// more workers than the host can report. At least one worker always runs.
+	const size_t numThreads = std::max<std::size_t>(1, std::min(requestedWorkerCount == 0 ? detectedHardwareThreads : requestedWorkerCount, detectedHardwareThreads));
 
 	for (size_t i = 0; i < numThreads; ++i) {
 		workers.emplace_back([this, i] { this->workerThread((int)i); });

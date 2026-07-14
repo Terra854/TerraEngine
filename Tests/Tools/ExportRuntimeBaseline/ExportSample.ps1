@@ -1,5 +1,5 @@
 param(
-	[string]$BuildDir = "out/build/Debug",
+	[string]$BuildDir = "out/build/RelWithDebInfo",
 	[string]$Profile = "baseline",
 	[string]$WorkRoot = "out/ci/export-runtime-baseline"
 )

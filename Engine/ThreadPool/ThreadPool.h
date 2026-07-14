@@ -125,7 +125,9 @@ public:
 	ThreadPool(const ThreadPool&) = delete;
 	ThreadPool& operator=(const ThreadPool&) = delete;
 
-	void initialize();
+	// requestedWorkerCount==0 preserves the historical hardware-concurrency
+	// default. Explicit counts are used by deterministic performance runs.
+	void initialize(std::size_t requestedWorkerCount = 0);
 	void shutdown();
 
 	// This function needs to be in the header file or else you'll get linker errors

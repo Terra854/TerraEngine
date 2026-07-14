@@ -15,6 +15,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include "Engine/Utilities/UUID.h"
+#include "Engine/Scene/TransactionalMutation.h"
 
 // Interface for atomic editor operations that can be reversed and reapplied.
 // Concrete implementations must capture all state necessary to restore the 
@@ -180,6 +181,10 @@ public:
 	// redo steps and marks the active scene as dirty.
 	void PushCommand(std::unique_ptr<ICommand> command);
 	void PushTransactionGroup(std::string groupName, std::vector<std::unique_ptr<ICommand>> commands, std::string historyId = {});
+	// Records a transaction only after its protected flush committed atomically.
+	// Undo and redo enqueue inverse/forward typed writes for a later boundary.
+	bool RecordCommittedTransaction(const TerraEngine::Scene::Transaction& transaction,
+		const TerraEngine::Scene::TransactionResult& result);
 	
 	// Reverses the most recent command on the undo stack and moves it to the 
 	// redo stack.

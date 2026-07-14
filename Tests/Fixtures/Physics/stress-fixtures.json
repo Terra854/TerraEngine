@@ -1,0 +1,45 @@
+{
+	"version": 1,
+	"provider": {
+		"name": "Jolt Physics",
+		"version": "5.6.0",
+		"revision": "e77f175595e64cb44218cc9d9d56fc365ad0e36a"
+	},
+	"determinism": {
+		"seed": 137903421,
+		"processLaunchMode": "test-executable-self-reexec",
+		"workerCounts": [1, 2, 4, "max"],
+		"requiredHashes": ["backendState", "sortedPackets"],
+		"deduplicateAliasedWorkerCounts": true
+	},
+	"workloads": {
+		"mixedBodies": 10000,
+		"activeDynamicBodies": 1000,
+		"batchedRays": 10000,
+		"identicalRayRepetitions": 100,
+		"peakAllocationGrowthAllowanceAfterWarmup": 32,
+		"denseContactBodies": 256,
+		"constraintChainLinks": 32,
+		"characterPlatform": {
+			"platformBodies": 1,
+			"characters": 1
+		},
+		"boundedHistory": {
+			"queryResultTicks": 8,
+			"eventPacketTicks": 8,
+			"debugPacketCapacity": 32
+		}
+	},
+	"lifecycle": {
+		"staleRaceRepetitions": 100,
+		"playModeCycles": 1000,
+		"cases": [
+			"scene-unload",
+			"remove-recreate",
+			"script-reload",
+			"renderer-unavailable",
+			"project-close",
+			"shutdown"
+		]
+	}
+}

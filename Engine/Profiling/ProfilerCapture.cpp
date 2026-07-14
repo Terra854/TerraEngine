@@ -832,6 +832,21 @@ bool SaveCaptureDocument(const ProfilerCaptureDocument& document, const std::fil
 			frameJson["frameStartMs"] = frame.frameStartMs;
 			frameJson["durationMs"] = frame.durationMs;
 			frameJson["complete"] = frame.complete;
+			if (frame.physics.has_value())
+			{
+				const ProfilerPhysicsFrameCounters& physics = *frame.physics;
+				frameJson["physics"] = {
+					{"tick", physics.tick}, {"bodyCount", physics.bodyCount}, {"contactCount", physics.contactCount},
+					{"queryCount", physics.queryCount}, {"eventCount", physics.eventCount}, {"rejectedCount", physics.rejectedCount},
+					{"staleCount", physics.staleCount}, {"commandQueueDepth", physics.commandQueueDepth},
+					{"shapeCacheBytes", physics.shapeCacheBytes}, {"shapeCacheHits", physics.shapeCacheHits},
+					{"shapeCacheMisses", physics.shapeCacheMisses}, {"snapshotBytes", physics.snapshotBytes},
+					{"snapshotHighWaterBytes", physics.snapshotHighWaterBytes}, {"providerAllocations", physics.providerAllocations},
+					{"providerAllocationHighWater", physics.providerAllocationHighWater},
+					{"prepareMs", physics.prepareMs}, {"commitMs", physics.commitMs}, {"simulateMs", physics.simulateMs},
+					{"queryMs", physics.queryMs}, {"publishMs", physics.publishMs}
+				};
+			}
 			frameJson["timingStreams"] = nlohmann::json::array();
 			// Timing streams are stored beside modules because they answer a
 			// different question: "which clock measured this frame?" rather than
@@ -950,6 +965,32 @@ bool LoadCaptureDocument(const std::filesystem::path& path, ProfilerCaptureDocum
 			frame.frameStartMs = frameJson.value("frameStartMs", 0.0);
 			frame.durationMs = frameJson.value("durationMs", 0.0);
 			frame.complete = frameJson.value("complete", true);
+			if (frameJson.contains("physics") && frameJson["physics"].is_object())
+			{
+				const nlohmann::json& physicsJson = frameJson["physics"];
+				ProfilerPhysicsFrameCounters physics;
+				physics.tick = physicsJson.value("tick", 0ull);
+				physics.bodyCount = physicsJson.value("bodyCount", 0ull);
+				physics.contactCount = physicsJson.value("contactCount", 0ull);
+				physics.queryCount = physicsJson.value("queryCount", 0ull);
+				physics.eventCount = physicsJson.value("eventCount", 0ull);
+				physics.rejectedCount = physicsJson.value("rejectedCount", 0ull);
+				physics.staleCount = physicsJson.value("staleCount", 0ull);
+				physics.commandQueueDepth = physicsJson.value("commandQueueDepth", 0ull);
+				physics.shapeCacheBytes = physicsJson.value("shapeCacheBytes", 0ull);
+				physics.shapeCacheHits = physicsJson.value("shapeCacheHits", 0ull);
+				physics.shapeCacheMisses = physicsJson.value("shapeCacheMisses", 0ull);
+				physics.snapshotBytes = physicsJson.value("snapshotBytes", 0ull);
+				physics.snapshotHighWaterBytes = physicsJson.value("snapshotHighWaterBytes", 0ull);
+				physics.providerAllocations = physicsJson.value("providerAllocations", 0ull);
+				physics.providerAllocationHighWater = physicsJson.value("providerAllocationHighWater", 0ull);
+				physics.prepareMs = physicsJson.value("prepareMs", 0.0);
+				physics.commitMs = physicsJson.value("commitMs", 0.0);
+				physics.simulateMs = physicsJson.value("simulateMs", 0.0);
+				physics.queryMs = physicsJson.value("queryMs", 0.0);
+				physics.publishMs = physicsJson.value("publishMs", 0.0);
+				frame.physics = physics;
+			}
 			for (const nlohmann::json& streamJson : frameJson.value("timingStreams", nlohmann::json::array()))
 			{
 				ProfilerTimingStreamSample stream;

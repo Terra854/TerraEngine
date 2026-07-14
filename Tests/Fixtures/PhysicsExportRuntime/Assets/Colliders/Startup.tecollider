@@ -1,0 +1,28 @@
+{
+	"schemaVersion": 1,
+	"kind": "ConvexHull",
+	"provenance": {
+		"sourceAssetId": "11111111111111111111111111111111",
+		"sourceContentHash": 17,
+		"settingsHash": 23,
+		"selectedSubmesh": "Startup",
+		"platformProfile": "WindowsX64"
+	},
+	"cookSettings": {
+		"weldTolerance": 0.0001,
+		"simplificationRatio": 1.0,
+		"maximumConvexVertices": 8,
+		"weldVertices": true
+	},
+	"sourceScale": [1.0, 1.0, 1.0],
+	"vertices": [
+		[-5.0, -0.5, -5.0], [5.0, -0.5, -5.0],
+		[-5.0, 0.5, -5.0], [5.0, 0.5, -5.0],
+		[-5.0, -0.5, 5.0], [5.0, -0.5, 5.0],
+		[-5.0, 0.5, 5.0], [5.0, 0.5, 5.0]
+	],
+	"indices": [],
+	"materialSlots": [],
+	"triangleMaterialSlots": [],
+	"compoundChildren": []
+}

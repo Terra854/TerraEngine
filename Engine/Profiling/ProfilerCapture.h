@@ -151,6 +151,32 @@ struct ProfilerSample
 	bool complete = true;
 };
 
+// Physics fields are copied at the profiler frame boundary. Saved captures and
+// display code therefore need neither a live physics world nor a diagnostics UI.
+struct ProfilerPhysicsFrameCounters
+{
+	std::uint64_t tick = 0U;
+	std::uint64_t bodyCount = 0U;
+	std::uint64_t contactCount = 0U;
+	std::uint64_t queryCount = 0U;
+	std::uint64_t eventCount = 0U;
+	std::uint64_t rejectedCount = 0U;
+	std::uint64_t staleCount = 0U;
+	std::uint64_t commandQueueDepth = 0U;
+	std::uint64_t shapeCacheBytes = 0U;
+	std::uint64_t shapeCacheHits = 0U;
+	std::uint64_t shapeCacheMisses = 0U;
+	std::uint64_t snapshotBytes = 0U;
+	std::uint64_t snapshotHighWaterBytes = 0U;
+	std::uint64_t providerAllocations = 0U;
+	std::uint64_t providerAllocationHighWater = 0U;
+	double prepareMs = 0.0;
+	double commitMs = 0.0;
+	double simulateMs = 0.0;
+	double queryMs = 0.0;
+	double publishMs = 0.0;
+};
+
 // struct ProfilerFrameRecord groups related state and operations so callers have one documented contract.
 struct ProfilerFrameRecord
 {
@@ -161,6 +187,7 @@ struct ProfilerFrameRecord
 	std::vector<ProfilerTimingStreamSample> timingStreams;
 	std::vector<ProfilerModuleSummary> moduleSummaries;
 	std::vector<ProfilerSample> samples;
+	std::optional<ProfilerPhysicsFrameCounters> physics;
 };
 
 // struct ProfilerFrameListItem keeps the editor frame list cheap to redraw.
