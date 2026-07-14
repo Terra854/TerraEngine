@@ -298,7 +298,9 @@ set(BASISU_SOURCES
 	External/basisu/encoder/jpgd.cpp
 	External/basisu/encoder/pvpngreader.cpp
 	External/basisu/encoder/3rdparty/android_astc_decomp.cpp
-	External/basisu/encoder/3rdparty/tinyexr.cpp
+	# basis_universal 2.10 moved its TinyEXR implementation beside the encoder
+	# sources while retaining the third-party header directory below.
+	External/basisu/encoder/basisu_tinyexr.cpp
 	External/basisu/transcoder/basisu_transcoder.cpp
 	External/basisu/zstd/zstd.c
 )
@@ -329,7 +331,9 @@ set(LAUNCHER_SOURCES
 # engine dependencies under External/ instead of inside the standalone TEPAK/
 # project folder.
 set(TEPAK_EXTERNAL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/External")
-add_subdirectory("${TEPAK_EXTERNAL_DIR}/xxhash/build/cmake" "${CMAKE_BINARY_DIR}/xxhash")
+# xxHash 0.8.3 moved its supported bundled CMake entry point from
+# build/cmake to cmake_unofficial. Keep using the vendored source directly.
+add_subdirectory("${TEPAK_EXTERNAL_DIR}/xxhash/cmake_unofficial" "${CMAKE_BINARY_DIR}/xxhash")
 # TerraEngine's CTest surface should stay limited to project-owned engine and
 # editor suites. zstd defaults its upstream tests on when BUILD_TESTING is
 # enabled, so turn those off before adding the vendored dependency.
@@ -517,7 +521,10 @@ set_target_properties(assimp PROPERTIES CXX_SCAN_FOR_MODULES OFF)
 # Terra routes glTF/GLB package imports through fastgltf so the editor can read
 # package-level mesh, material, texture, and embedded-data relationships instead
 # of flattening glTF through the legacy Assimp mesh-only path.
-set(SIMDJSON_INSTALL OFF CACHE BOOL "Disable simdjson install target" FORCE)
+# fastgltf 0.9 exports its target unconditionally and declares simdjson as a
+# public dependency. Export simdjson too so CMake can generate a valid install
+# graph for the fully vendored pair.
+set(SIMDJSON_INSTALL ON CACHE BOOL "Export the vendored fastgltf dependency" FORCE)
 set(SIMDJSON_DEVELOPER_MODE OFF CACHE BOOL "Disable simdjson developer targets" FORCE)
 set(SIMDJSON_SINGLEHEADER ON CACHE BOOL "Use vendored simdjson single header output mode" FORCE)
 add_subdirectory(External/simdjson)
@@ -526,7 +533,6 @@ set_target_properties(simdjson PROPERTIES CXX_SCAN_FOR_MODULES OFF)
 set(FASTGLTF_ENABLE_TESTS OFF CACHE BOOL "Disable fastgltf tests" FORCE)
 set(FASTGLTF_ENABLE_EXAMPLES OFF CACHE BOOL "Disable fastgltf examples" FORCE)
 set(FASTGLTF_ENABLE_DOCS OFF CACHE BOOL "Disable fastgltf docs" FORCE)
-set(FASTGLTF_ENABLE_INSTALL OFF CACHE BOOL "Disable fastgltf install target" FORCE)
 set(FASTGLTF_COMPILE_AS_CPP20 ON CACHE BOOL "Compile fastgltf as C++20" FORCE)
 add_subdirectory(External/fastgltf)
 set_target_properties(fastgltf PROPERTIES CXX_SCAN_FOR_MODULES OFF)
@@ -966,7 +972,8 @@ set_target_properties(cimgui PROPERTIES
 set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/External/cimgui/imgui)
 
 target_sources(cimgui PRIVATE
-	External/ImGuizmo/ImGuizmo.cpp
+	# ImGuizmo 1.10 groups the library sources under src/.
+	External/ImGuizmo/src/ImGuizmo.cpp
 	${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
 	${IMGUI_DIR}/backends/imgui_impl_vulkan.cpp
 )
@@ -974,7 +981,7 @@ target_sources(cimgui PRIVATE
 # Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
 target_include_directories(cimgui PRIVATE
 	${CMAKE_CURRENT_SOURCE_DIR}
-	External/ImGuizmo
+	External/ImGuizmo/src
 	${IMGUI_DIR}/backends
 )
 
@@ -1178,7 +1185,7 @@ target_include_directories(TerraEngine-Editor
 		${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation
 		${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Profiling
 		${CMAKE_CURRENT_SOURCE_DIR}/Editor/AssetCompilers
-		${CMAKE_CURRENT_SOURCE_DIR}/External/ImGuizmo
+		${CMAKE_CURRENT_SOURCE_DIR}/External/ImGuizmo/src
 		${IMGUI_FILE_DIALOG_DIR}
 		${IMGUI_DIR}/backends
 		${CMAKE_CURRENT_SOURCE_DIR}/External/basisu/encoder
