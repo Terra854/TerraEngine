@@ -17,7 +17,6 @@ namespace TerraEngine::EditorTests {
 	void RegisterExportValidatorTests(TestRegistry& registry);
 	void RegisterExportParityTests(TestRegistry& registry);
 	void RegisterHeadlessExportBaselineTests(TestRegistry& registry);
-	void RegisterHeadlessExportCiContractTests(TestRegistry& registry);
 	void RegisterHeadlessExportContractTests(TestRegistry& registry);
 	void RegisterHeadlessExportDocumentationTests(TestRegistry& registry);
 	void RegisterHeadlessExportPipelineTests(TestRegistry& registry);
@@ -165,7 +164,6 @@ int main() {
 	TerraEngine::EditorTests::RegisterExportValidatorTests(registry);
 	TerraEngine::EditorTests::RegisterExportParityTests(registry);
 	TerraEngine::EditorTests::RegisterHeadlessExportBaselineTests(registry);
-	TerraEngine::EditorTests::RegisterHeadlessExportCiContractTests(registry);
 	TerraEngine::EditorTests::RegisterHeadlessExportContractTests(registry);
 	TerraEngine::EditorTests::RegisterHeadlessExportDocumentationTests(registry);
 	TerraEngine::EditorTests::RegisterHeadlessExportPipelineTests(registry);

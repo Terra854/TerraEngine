@@ -1,0 +1,61 @@
+{
+    "windows": [
+        {
+            "title": "Scene Hierarchy",
+            "visible": true
+        },
+        {
+            "title": "Inspector",
+            "visible": true
+        },
+        {
+            "title": "Project Browser",
+            "visible": true
+        },
+        {
+            "title": "Game View",
+            "visible": true
+        },
+        {
+            "title": "Scene View",
+            "visible": true
+        },
+        {
+            "title": "Project Settings",
+            "visible": false
+        },
+        {
+            "title": "Preferences",
+            "visible": false
+        },
+        {
+            "title": "Build Profiles",
+            "visible": false
+        },
+        {
+            "title": "Profiler",
+            "visible": false
+        },
+        {
+            "title": "Physics Diagnostics",
+            "visible": false
+        },
+        {
+            "title": "Scheduler Diagnostics",
+            "visible": false
+        },
+        {
+            "title": "Resource Residency",
+            "visible": false
+        },
+        {
+            "title": "UI Builder",
+            "visible": false
+        },
+        {
+            "managed": true,
+            "title": "Engine Status",
+            "visible": false
+        }
+    ]
+}

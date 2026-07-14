@@ -4,6 +4,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <cstdlib>
 #include <optional>
 #include <nlohmann/json.hpp>
@@ -12,6 +13,14 @@ namespace TerraEngine::EditorTests
 {
 	namespace
 	{
+		std::string ReadFileBytes(const std::filesystem::path& path)
+		{
+			// Layout tests compare raw bytes because ImGui docking identifiers and
+			// formatting are part of the approved new-project workspace contract.
+			std::ifstream input(path, std::ios::binary);
+			return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+		}
+
 		class ScopedEditorPreferenceFile
 		{
 		public:
@@ -121,6 +130,31 @@ namespace TerraEngine::EditorTests
 				context.ExpectEqual(300.0, streamingPolicy.value("streamingDistance", 0.0), "New project manifests should use conservative texture streaming distance.");
 				context.ExpectEqual(std::uint32_t{0u}, streamingPolicy.value("textureMinStreamMip", 99u), "New project near texture mip should default to full resolution.");
 				context.ExpectEqual(std::uint32_t{8u}, streamingPolicy.value("textureMaxStreamMip", 0u), "New project far texture mip should default to mip 8.");
+			}
+
+			std::filesystem::remove_all(root, ignored);
+		});
+
+		registry.Add("Editor.ProjectSettings.NewProjectsCopyDefaultEditorLayout", [](TestContext& context) {
+			const std::filesystem::path root =
+				std::filesystem::temp_directory_path() / "TerraEngineProjectSettings" / "DefaultEditorLayout";
+			const std::filesystem::path templateRoot = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Editor" / "TerraEngine-Editor" / "Project" / "Templates" / "UserSettings";
+			std::error_code ignored;
+			std::filesystem::remove_all(root, ignored);
+			std::filesystem::create_directories(root.parent_path(), ignored);
+
+			{
+				::ProjectManager manager;
+				std::string error;
+				context.Expect(manager.CreateProject(root, "Default Editor Layout", ::ProjectTemplate::Blank, &error), error.empty() ? "New project creation should install the default editor layout." : error);
+				for (const std::string_view fileName : { "EditorLayout.terra", "EditorLayout.ini" })
+				{
+					const std::filesystem::path source = templateRoot / fileName;
+					const std::filesystem::path generated = root / "UserSettings" / fileName;
+					context.Expect(std::filesystem::exists(generated), "New projects should contain both default layout files.");
+					context.ExpectEqual(ReadFileBytes(source), ReadFileBytes(generated), "New-project layouts should match the approved templates byte-for-byte.");
+				}
 			}
 
 			std::filesystem::remove_all(root, ignored);

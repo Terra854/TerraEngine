@@ -25,9 +25,8 @@ The baseline helper performs the complete preparation flow:
 
 ## Local reproduction
 
-Run these commands from the repository root in an x64 Visual Studio developer
-environment. They are the authoritative local equivalent of
-`.github/workflows/export-baseline.yml`.
+Run these commands from the repository root in a Windows x64 Visual Studio
+developer environment. They are the authoritative local validation gate.
 
 ```powershell
 cmake --preset RelWithDebInfo
@@ -89,41 +88,18 @@ schema version 1, `success=true`, `failureCategory=none`, and exit code 0.
 set `placeholderDetected=true`. `progress.jsonl` contains independently
 parseable records in emission order, including exactly one final result record.
 
-## GitHub Actions gate
+## Local validation gate
 
-`.github/workflows/export-baseline.yml` runs for pull requests targeting
-`main`, pushes to `main`, and manual dispatch. The job uses a clean
-`windows-latest` runner, recursive submodules, x64 MSVC, the .NET 10 SDK,
-read-only repository permission, no build cache, and a 60-minute timeout.
+The supported gate is the ordered Windows x64 command sequence above. It uses
+the RelWithDebInfo preset, builds the focused targets, runs focused and full
+CTest passes, installs the product, verifies installed paths, and exercises a
+clean prepared export. Commands retain their native exit codes so a failed
+stage cannot be mistaken for a successful result.
 
-The ordered stages are checkout, toolchain initialization, RelWithDebInfo configure,
-targeted build, focused export tests, full CTest, install, installed-path
-verification, clean baseline preparation and export, evidence validation, and
-artifact upload. Commands retain their native exit codes; no failed stage is
-converted into a successful result.
-
-The always-run artifact is named
-`headless-export-evidence-windows-relwithdebinfo`. It contains:
-
-```text
-configure.log
-build.log
-focused-ctest.log
-ctest.log
-install.log
-baseline-prepare.log
-headless-export/
-|-- export-result.json
-|-- resolved-manifest.json
-|-- content-inventory.json
-|-- validation-report.json
-|-- progress.jsonl
-`-- package-validation.txt
-```
-
-The supported automated gate is Windows x64. The export implementation may
-contain Linux behavior, but this workflow does not claim Linux hosted-runner
-coverage or GPU/runtime launch coverage.
+Keep `out/ci/export-runtime-baseline` until diagnosis is complete. The work
+root contains the disposable project and the `headless-export` evidence files
+produced before a failure. There is no hosted workflow for this gate; run it
+locally whenever export, packaging, installation, or runtime staging changes.
 
 ## Failure diagnosis
 
@@ -143,11 +119,11 @@ is stable and can be used without parsing human text:
 | 9 | `publication_failed` | Final, staging, and backup paths in the result |
 | 10 | `unexpected_failure` | Final result and the complete baseline log |
 
-If the job fails before `export-result.json` exists, inspect the earliest
-available configure, build, test, install, or baseline log in the artifact.
-Because artifact staging always runs, partial evidence remains available after
-early failures. Re-run the local command sequence above from a clean
-`out/ci/export-runtime-baseline` work root; opening the editor is not required.
+If the gate fails before `export-result.json` exists, inspect the earliest
+failing configure, build, test, install, or baseline command. Preserve partial
+evidence in the work root before cleaning it. Re-run the local command sequence
+above from a clean `out/ci/export-runtime-baseline` work root; opening the
+editor is not required.
 
 ## Expected runtime signals
 

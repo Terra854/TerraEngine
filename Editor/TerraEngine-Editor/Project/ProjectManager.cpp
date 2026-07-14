@@ -3,6 +3,7 @@
 // Implements the project management logic, including project creation from templates and project loading from disk. It manages the cleanup of legacy interop scripts and ensures that project manifests are correctly synchronized with the active editor state.
 
 #include "ProjectManager.h"
+#include <array>
 #include <fstream>
 #include <chrono>
 #include <algorithm>
@@ -24,6 +25,90 @@ namespace
 {
 	constexpr std::string_view kDefaultProjectVersion = "1.0.0";
 	constexpr std::string_view kEditorPreferencesFileName = ".terra_editor_prefs.json";
+	constexpr std::array<std::string_view, 2> kDefaultEditorLayoutFiles = {
+		"EditorLayout.terra",
+		"EditorLayout.ini"
+	};
+
+	fs::path ResolveProjectTemplateRoot()
+	{
+		// Developer and test builds should use the committed source templates.
+		// Installed editors fall back to templates beside the editor executable so
+		// project creation remains self-contained after the source tree is removed.
+#ifdef TERRAENGINE_SOURCE_DIR
+		const fs::path sourceTemplates = fs::path(TERRAENGINE_SOURCE_DIR)
+			/ "Editor" / "TerraEngine-Editor" / "Project" / "Templates";
+		if (fs::exists(sourceTemplates / "UserSettings" / kDefaultEditorLayoutFiles.front()))
+		{
+			return sourceTemplates;
+		}
+#endif
+
+		fs::path editorDirectory;
+#ifdef _WIN32
+		wchar_t executablePath[MAX_PATH];
+		if (GetModuleFileNameW(nullptr, executablePath, MAX_PATH) != 0)
+		{
+			editorDirectory = fs::path(executablePath).parent_path();
+		}
+		else
+		{
+			editorDirectory = fs::current_path();
+		}
+#else
+		editorDirectory = fs::current_path();
+#endif
+
+		const std::array<fs::path, 4> candidates = {
+			editorDirectory / "Project" / "Templates",
+			editorDirectory / "Editor" / "TerraEngine-Editor" / "Project" / "Templates",
+			editorDirectory / "Templates",
+			editorDirectory.parent_path() / "Project" / "Templates"
+		};
+		for (const fs::path& candidate : candidates)
+		{
+			if (fs::exists(candidate / "UserSettings" / kDefaultEditorLayoutFiles.front()))
+			{
+				return candidate;
+			}
+		}
+		return {};
+	}
+
+	bool CopyDefaultEditorLayout(const fs::path& projectRoot, std::string* outError)
+	{
+		const fs::path resolvedTemplateRoot = ResolveProjectTemplateRoot();
+		if (resolvedTemplateRoot.empty())
+		{
+			const std::string message = "Default editor layout templates are missing from the editor installation.";
+			if (outError != nullptr)
+			{
+				*outError = message;
+			}
+			return false;
+		}
+		const fs::path templateRoot = resolvedTemplateRoot / "UserSettings";
+
+		// Copy instead of parsing and reserializing so ImGui docking identifiers,
+		// table widths, and window visibility remain exactly as the approved layout.
+		for (const std::string_view fileName : kDefaultEditorLayoutFiles)
+		{
+			const fs::path source = templateRoot / fileName;
+			const fs::path destination = projectRoot / "UserSettings" / fileName;
+			std::error_code errorCode;
+			fs::copy_file(source, destination, fs::copy_options::overwrite_existing, errorCode);
+			if (errorCode)
+			{
+				const std::string message = "Failed to copy default editor layout '" + source.string() + "': " + errorCode.message();
+				if (outError != nullptr)
+				{
+					*outError = message;
+				}
+				return false;
+			}
+		}
+		return true;
+	}
 
 	fs::path ResolveEditorPreferencesPath()
 	{
@@ -284,6 +369,11 @@ bool ProjectManager::CreateProject(const fs::path& location, const std::string& 
 		fs::create_directories(location / "Temp");
 		fs::create_directories(location / "ProjectSettings");
 		fs::create_directories(location / "UserSettings");
+		// Every new project starts from the approved editor workspace while keeping
+		// subsequent layout changes isolated to that project's UserSettings folder.
+		if (!CopyDefaultEditorLayout(location, outError)) {
+			return false;
+		}
 
 		// Create Default Scene
 		{

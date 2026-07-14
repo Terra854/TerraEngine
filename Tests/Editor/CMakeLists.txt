@@ -19,7 +19,6 @@ add_executable(TerraEngine-EditorTests
 	Export/PhysicsExportValidationTests.cpp
 	Export/PhysicsExportParityTests.cpp
 	Export/HeadlessExportBaselineTests.cpp
-	Export/HeadlessExportCiContractTests.cpp
 	Export/HeadlessExportContractTests.cpp
 	Export/HeadlessExportDocumentationTests.cpp
 	Export/HeadlessExportPipelineTests.cpp
@@ -285,10 +284,10 @@ set_tests_properties(Editor.ExportBaseline PROPERTIES
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=ExportRuntimeBaseline,HeadlessExport.Baseline"
 )
 
-add_test(NAME Editor.ExportCiContracts COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
-set_tests_properties(Editor.ExportCiContracts PROPERTIES
-	LABELS "Editor;Export;HeadlessExport;CI"
-	ENVIRONMENT "TERRAENGINE_TEST_FILTER=HeadlessExport.CI,HeadlessExport.Documentation"
+add_test(NAME Editor.ExportDocumentation COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.ExportDocumentation PROPERTIES
+	LABELS "Editor;Export;HeadlessExport;Documentation"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=HeadlessExport.Documentation"
 )
 
 add_test(NAME Editor.VirtualGeometryFoundation COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)

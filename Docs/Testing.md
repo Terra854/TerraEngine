@@ -632,9 +632,8 @@ the installed model package compiler creates real TEMF, TMAT, and TETF child
 assets only inside a disposable copy below `out/`. Placeholder compiled assets
 are rejected by both the helper and export evidence inventory.
 
-Run the same ordered gate locally that
-`.github/workflows/export-baseline.yml` runs on a clean Windows x64 hosted
-runner:
+Run the authoritative local gate from a Windows x64 Visual Studio developer
+environment:
 
 ```powershell
 cmake --preset RelWithDebInfo
@@ -645,9 +644,19 @@ cmake --build --preset RelWithDebInfo --target install
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/ExportRuntimeBaseline/RunBaseline.ps1 -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/ci/export-runtime-baseline
 ```
 
-The installed tools are read from `out/build/RelWithDebInfo/Build`; callers do not run
-an executable from the intermediate target directory. The direct headless CLI
-contract is:
+The installed tools are read from `out/build/RelWithDebInfo/Build`; callers do
+not run an executable from the intermediate target directory. Verify these
+installed dependencies before running the baseline:
+
+```text
+out/build/RelWithDebInfo/Build/Editor/TerraEngine-Export.exe
+out/build/RelWithDebInfo/Build/Editor/TerraEngineModelPackageCompiler.exe
+out/build/RelWithDebInfo/Build/Editor/Managed/TerraEngine.CSharp.dll
+out/build/RelWithDebInfo/Build/Editor/Managed/Analyzers/TerraEngine.Export.Generator.dll
+out/build/RelWithDebInfo/Build/Launcher/TerraEngine-Launcher.exe
+```
+
+The direct headless CLI contract is:
 
 ```powershell
 & out/build/RelWithDebInfo/Build/Editor/TerraEngine-Export.exe `
@@ -681,11 +690,10 @@ and ordered diagnostics before using the associated validation, inventory, or
 package report. See `Docs/ExportRuntimeBaseline.md` for the complete diagnostic
 table.
 
-CI and local commands deliberately share the same preset, targets, CTest
-filters, install tree, baseline helper, and disposable work-root layout. The
-always-run `headless-export-evidence-windows-relwithdebinfo` workflow artifact retains
-configure, build, focused/full test, install, and baseline logs plus any partial
-or complete evidence after failure.
+The local command sequence is the supported validation gate. Keep the
+`out/ci/export-runtime-baseline` work root until diagnosis is complete because
+it retains the disposable project and any partial or complete export evidence
+after failure.
 
 ## Spec 042 physics hardening workflow
 

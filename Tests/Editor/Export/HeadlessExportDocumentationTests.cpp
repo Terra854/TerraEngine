@@ -10,8 +10,8 @@
 namespace TerraEngine::EditorTests {
 	namespace {
 		std::string ReadDocumentationText(const std::filesystem::path& relativePath) {
-			// Documentation is an executable contract for contributors and CI. Read
-			// from the source tree so stale commands fail in the normal editor suite.
+			// Documentation is an executable contract for contributors. Reading it
+			// from the source tree makes stale local commands fail in the editor suite.
 			const std::filesystem::path sourcePath = std::filesystem::path(TERRAENGINE_SOURCE_DIR) / relativePath;
 			std::ifstream stream(sourcePath, std::ios::binary);
 			return std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
@@ -28,8 +28,7 @@ namespace TerraEngine::EditorTests {
 	}
 
 	void RegisterHeadlessExportDocumentationTests(TestRegistry& registry) {
-		registry.Add("Editor.HeadlessExport.Documentation.LocalCommandsMatchCiGate", [](TestContext& context) {
-			const std::string workflow = ReadDocumentationText(".github/workflows/export-baseline.yml");
+		registry.Add("Editor.HeadlessExport.Documentation.LocalCommandsRemainReproducible", [](TestContext& context) {
 			const std::string quickstart = ReadDocumentationText("specs/042-physics-system/quickstart.md");
 			const std::string baselineGuide = ReadDocumentationText("Docs/ExportRuntimeBaseline.md");
 			const std::string testingGuide = ReadDocumentationText("Docs/Testing.md");
@@ -48,16 +47,15 @@ namespace TerraEngine::EditorTests {
 				"out/ci/export-runtime-baseline"
 			};
 
-			context.Expect(ContainsEvery(workflow, sharedCommandTokens), "The workflow should contain every authoritative configure, build, test, install, and baseline token.");
-			context.Expect(ContainsEvery(quickstart, sharedCommandTokens), "The feature quickstart should reproduce the workflow command surface.");
-			context.Expect(ContainsEvery(baselineGuide, sharedCommandTokens), "The baseline guide should reproduce the workflow command surface.");
-			context.Expect(ContainsEvery(testingGuide, sharedCommandTokens), "The testing guide should reproduce the workflow command surface.");
+			context.Expect(ContainsEvery(quickstart, sharedCommandTokens), "The feature quickstart should reproduce the local validation command surface.");
+			context.Expect(ContainsEvery(baselineGuide, sharedCommandTokens), "The baseline guide should reproduce the local validation command surface.");
+			context.Expect(ContainsEvery(testingGuide, sharedCommandTokens), "The testing guide should reproduce the local validation command surface.");
 		});
 
 		registry.Add("Editor.HeadlessExport.Documentation.InstalledPathsStayAuthoritative", [](TestContext& context) {
 			const std::string quickstart = ReadDocumentationText("specs/042-physics-system/quickstart.md");
 			const std::string baselineGuide = ReadDocumentationText("Docs/ExportRuntimeBaseline.md");
-			const std::string workflow = ReadDocumentationText(".github/workflows/export-baseline.yml");
+			const std::string testingGuide = ReadDocumentationText("Docs/Testing.md");
 			const std::vector<std::string_view> installedPaths = {
 				"out/build/RelWithDebInfo/Build/Editor/TerraEngine-Export.exe",
 				"out/build/RelWithDebInfo/Build/Editor/TerraEngineModelPackageCompiler.exe",
@@ -68,8 +66,7 @@ namespace TerraEngine::EditorTests {
 
 			context.Expect(ContainsEvery(quickstart, installedPaths), "The quickstart should list every installed export dependency.");
 			context.Expect(ContainsEvery(baselineGuide, installedPaths), "The baseline guide should list every installed export dependency.");
-			context.Expect(workflow.find("INSTALL_ROOT: out/build/RelWithDebInfo/Build") != std::string::npos, "The workflow should verify the documented install root.");
-			context.Expect(ContainsEvery(workflow, {"Editor/TerraEngine-Export.exe", "Editor/TerraEngineModelPackageCompiler.exe", "Editor/Managed/TerraEngine.CSharp.dll", "Editor/Managed/Analyzers/TerraEngine.Export.Generator.dll", "Launcher/TerraEngine-Launcher.exe"}), "The workflow should verify every documented installed dependency before export.");
+			context.Expect(ContainsEvery(testingGuide, installedPaths), "The testing guide should list every installed export dependency.");
 		});
 
 		registry.Add("Editor.HeadlessExport.Documentation.EvidenceAndFailureCategoriesAreComplete", [](TestContext& context) {
@@ -104,20 +101,20 @@ namespace TerraEngine::EditorTests {
 			context.Expect(ContainsEvery(testingGuide, failureCategories), "The testing guide should keep the same stable failure categories as the baseline guide.");
 		});
 
-		registry.Add("Editor.HeadlessExport.Documentation.WorkflowScopeAndArtifactAreDiscoverable", [](TestContext& context) {
+		registry.Add("Editor.HeadlessExport.Documentation.LocalGateScopeIsDiscoverable", [](TestContext& context) {
 			const std::string baselineGuide = ReadDocumentationText("Docs/ExportRuntimeBaseline.md");
 			const std::string testingGuide = ReadDocumentationText("Docs/Testing.md");
 			const std::vector<std::string_view> discoveryTokens = {
-				".github/workflows/export-baseline.yml",
-				"headless-export-evidence-windows-relwithdebinfo",
 				"Windows x64",
-				"60-minute",
-				"always"
+				"local",
+				"RelWithDebInfo",
+				"out/ci/export-runtime-baseline"
 			};
 
-			context.Expect(ContainsEvery(baselineGuide, discoveryTokens), "The baseline guide should document the supported workflow scope and retained artifact.");
-			context.Expect(testingGuide.find(".github/workflows/export-baseline.yml") != std::string::npos, "The testing guide should link contributors to the authoritative workflow path.");
-			context.Expect(testingGuide.find("headless-export-evidence-windows-relwithdebinfo") != std::string::npos, "The testing guide should name the retained CI artifact.");
+			context.Expect(ContainsEvery(baselineGuide, discoveryTokens), "The baseline guide should document the supported local validation scope and retained work root.");
+			context.Expect(ContainsEvery(testingGuide, discoveryTokens), "The testing guide should document the supported local validation scope and retained work root.");
+			context.Expect(baselineGuide.find(".github/workflows/export-baseline.yml") == std::string::npos, "The baseline guide should not advertise the removed hosted workflow.");
+			context.Expect(testingGuide.find(".github/workflows/export-baseline.yml") == std::string::npos, "The testing guide should not advertise the removed hosted workflow.");
 		});
 	}
 }

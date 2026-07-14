@@ -86,8 +86,21 @@ namespace TerraEngine::Tests {
 			context.Expect(resourcesSource.find("MarkDeviceLost(submitResult, submitOperation)") != std::string::npos, "Immediate GPU upload submits should respect the same device-lost latch while preserving their operation label.");
 			context.Expect(implHeader.find("std::mutex queueAccessMutex;") != std::string::npos, "All Vulkan queue handles should share an external-synchronization mutex.");
 			context.Expect(implHeader.find("mutable std::recursive_mutex deviceStateMutex;") != std::string::npos, "Vulkan lifetime and cache ownership should share one recursive protected-boundary gate.");
-			context.Expect(contextSource.find("void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view, const RenderOutputRequest& outputRequest) {\r\n\tstd::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);") != std::string::npos
-				|| contextSource.find("void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view, const RenderOutputRequest& outputRequest) {\n\tstd::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);") != std::string::npos,
+			// RenderFrame profiles time spent waiting for the state gate, so it now
+			// declares a deferred unique lock and acquires it explicitly. Verify the
+			// acquisition still happens before any early return; the stack-owned lock
+			// then remains held until all worker recording and publication completes.
+			const std::size_t renderFrame = contextSource.find("void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view, const RenderOutputRequest& outputRequest) {");
+			const std::size_t stateLockDeclaration = contextSource.find("std::unique_lock<std::recursive_mutex> stateLock(impl->deviceStateMutex, std::defer_lock);", renderFrame);
+			const std::size_t stateLockAcquisition = contextSource.find("stateLock.lock();", stateLockDeclaration);
+			const std::size_t renderFrameEarlyExit = contextSource.find("if (!impl->initialized || impl->skipFrame || impl->deviceLost) return;", stateLockAcquisition);
+			context.Expect(renderFrame != std::string::npos
+				&& stateLockDeclaration != std::string::npos
+				&& stateLockAcquisition != std::string::npos
+				&& renderFrameEarlyExit != std::string::npos
+				&& renderFrame < stateLockDeclaration
+				&& stateLockDeclaration < stateLockAcquisition
+				&& stateLockAcquisition < renderFrameEarlyExit,
 				"RenderFrame should retain renderer ownership until worker recording has joined and live Vulkan work is published.");
 			context.Expect(initSource.find("void VulkanContext::Impl::RecreateSwapChain() {\n\tstd::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);") != std::string::npos, "Swapchain replacement should hold the renderer-state gate across idle, destruction, and candidate publication.");
 			context.Expect(implHeader.find("std::recursive_mutex descriptorHostAccessMutex;") != std::string::npos, "Project workers and the render thread should share one descriptor host-synchronization boundary.");
