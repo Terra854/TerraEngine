@@ -11,11 +11,14 @@ backend values only; Jolt headers, IDs, and worker pools must not enter fixture
 or test contracts.
 
 The deterministic stress lane creates 10,000 mixed bodies, including 1,000
-active dynamic bodies. It runs the same seeded scene from fresh backend
-lifetimes at 1, 2, 4, and the host's maximum shared-pool worker limit, then
-compares a backend-state hash and a sorted query-packet hash. The query lane
-issues 10,000 rays from the identical state 100 times and checks that peak
-provider allocation count stops growing after the warm-up pass.
+active dynamic bodies. The parent test self-reexecutes the engine test binary
+for each unique worker setting at 1, 2, 4, and the host's maximum shared-pool
+worker limit, then compares a backend-state hash and a sorted query-packet
+hash returned by each child process. The query lane issues 10,000 rays from
+the identical state 100 times in every unique worker child and checks that
+peak provider allocation count grows by no more than 32 allocations after the
+warm-up pass. If a small host aliases `max` to 1, 2, or 4, the duplicate
+million-ray replay is intentionally skipped without weakening the matrix.
 
 The remaining fixture records dense contacts, a 32-link constraint chain, one
 character/platform support case, and the bounded query, event, and debug
@@ -31,9 +34,10 @@ replacement.
 To run these focused tests after they are registered by the shared test target:
 
 ```powershell
-$env:TERRAENGINE_TEST_FILTER = 'Physics.DeterminismStress;Physics.LifecycleStress;Physics.Editor.Soak'
-& .\out\build\Debug\Tests\Engine\TerraEngine-EngineTests.exe
-& .\out\build\Debug\Tests\Editor\TerraEngine-EditorTests.exe
+$env:TERRAENGINE_TEST_FILTER = 'Physics.DeterminismStress;Physics.LifecycleStress'
+& .\out\build\RelWithDebInfo\TerraEngine-EngineTests.exe
+$env:TERRAENGINE_TEST_FILTER = 'Physics.Editor.Soak'
+& .\out\build\RelWithDebInfo\TerraEngine-EditorTests.exe
 ```
 
 The final integrated build, CTest run, install-tree verification, and

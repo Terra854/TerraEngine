@@ -76,6 +76,10 @@ namespace TerraEngine::Physics::Backend {
 		[[nodiscard]] bool IsInstalled() const noexcept;
 		[[nodiscard]] PhysicsAllocationDiagnostics Diagnostics() const noexcept;
 		[[nodiscard]] PhysicsProviderError LastError() const;
+		// Acceptance tests use the real translated provider-health path without
+		// forcing the process allocator to fail unpredictably. This records the same
+		// bounded failure counter and report consumed by JoltPhysicsBackend.
+		void ReportAllocationFailureForValidation(std::size_t requestedBytes) noexcept;
 
 	private:
 		bool installed = false;

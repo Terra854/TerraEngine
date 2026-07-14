@@ -637,20 +637,20 @@ Run the same ordered gate locally that
 runner:
 
 ```powershell
-cmake --preset Debug
-cmake --build --preset Debug --target TerraEngine-EngineTests TerraEngine-EditorTests TerraEngineModelPackageCompiler TerraEngine-Export TerraEngine-Editor
-ctest --test-dir out/build/Debug -R "Editor.ExportUnitTests|Editor.HeadlessExport" --output-on-failure
-ctest --test-dir out/build/Debug --output-on-failure
-cmake --build --preset Debug --target install
-pwsh -NoProfile -File Tools/ExportRuntimeBaseline/RunBaseline.ps1 -InstallRoot out/build/Debug/Build -WorkRoot out/ci/export-runtime-baseline
+cmake --preset RelWithDebInfo
+cmake --build --preset RelWithDebInfo --target TerraEngine-EngineTests TerraEngine-EditorTests TerraEngineModelPackageCompiler TerraEnginePhysicsColliderCompiler TerraEngine-Export TerraEngine-Editor
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R "Editor.ExportUnitTests|Editor.HeadlessExport|Editor.PhysicsUS7|Engine.PhysicsUS7" --output-on-failure
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
+cmake --build --preset RelWithDebInfo --target install
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/ExportRuntimeBaseline/RunBaseline.ps1 -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/ci/export-runtime-baseline
 ```
 
-The installed tools are read from `out/build/Debug/Build`; callers do not run
+The installed tools are read from `out/build/RelWithDebInfo/Build`; callers do not run
 an executable from the intermediate target directory. The direct headless CLI
 contract is:
 
 ```powershell
-& out/build/Debug/Build/Editor/TerraEngine-Export.exe `
+& out/build/RelWithDebInfo/Build/Editor/TerraEngine-Export.exe `
   --project out/ci/export-runtime-baseline/project `
   --profile out/ci/export-runtime-baseline/project/BuildProfiles/baseline.json `
   --output out/ci/export-runtime-baseline/project/Builds/Baseline `
@@ -683,9 +683,54 @@ table.
 
 CI and local commands deliberately share the same preset, targets, CTest
 filters, install tree, baseline helper, and disposable work-root layout. The
-always-run `headless-export-evidence-windows-debug` workflow artifact retains
+always-run `headless-export-evidence-windows-relwithdebinfo` workflow artifact retains
 configure, build, focused/full test, install, and baseline logs plus any partial
 or complete evidence after failure.
+
+## Spec 042 physics hardening workflow
+
+The complete physics gate uses RelWithDebInfo on Windows x64. From a Visual
+Studio developer PowerShell, run the following in order:
+
+```powershell
+cmake --preset RelWithDebInfo
+cmake --build --preset RelWithDebInfo --target TerraEngine TerraEngine-Editor TerraEnginePhysicsColliderCompiler TerraEngineModelPackageCompiler TerraEngine-EngineTests TerraEngine-EditorTests TerraEngine-Export
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R "Physics|TransactionalMutation|SystemScheduler|Editor\.Automation|Editor\.Export|SceneRuntimeParity" --output-on-failure
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
+cmake --build --preset RelWithDebInfo --target install
+```
+
+Run the focused stress and soak slices before live validation:
+
+```powershell
+$env:TERRAENGINE_TEST_FILTER = "Physics.DeterminismStress;Physics.LifecycleStress"
+& .\out\build\RelWithDebInfo\TerraEngine-EngineTests.exe
+Remove-Item Env:TERRAENGINE_TEST_FILTER
+$env:TERRAENGINE_TEST_FILTER = "Physics.Editor.Soak"
+& .\out\build\RelWithDebInfo\TerraEngine-EditorTests.exe
+Remove-Item Env:TERRAENGINE_TEST_FILTER
+```
+
+Then use the installed-editor harness and export baseline:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Physics/RunInstalledEditorPhysicsStress.ps1 -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/validation/physics-live -ObjectCount 10000 -ActiveDynamicCount 1000 -ExplicitStepCount 100 -WorkerCount max -AllowLiveStress
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/ExportRuntimeBaseline/RunBaseline.ps1 -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/ci/physics-export-baseline
+```
+
+The live harness accepts `-RunUs6Loopback` for managed/automation checks and
+`-RunAuthoringWalkthrough` for authoring checks. The export baseline must retain
+the six evidence files and must not copy `.tecollider` source recipes into the
+published package. Troubleshoot stale binaries by reinstalling; troubleshoot a
+failed export by reading `validation-report.json`, `content-inventory.json`,
+and `package-validation.txt` before changing the fixture.
+
+Spec 042's Windows/MSVC sanitizer support is limited to the provider-only
+`ReleaseASAN` BackendSpike. There is no supported full-engine TSan lane on this
+toolchain, and provider-spike results do not cover engine/editor/Vulkan/managed
+runtime lifecycle behavior. Record commands, toolchain, exclusions, and results
+in the sanitizer evidence file; do not claim a lane was run unless its output
+is archived.
 
 ## MCP Editor Completeness
 

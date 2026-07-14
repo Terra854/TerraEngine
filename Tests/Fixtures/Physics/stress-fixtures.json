@@ -7,15 +7,17 @@
 	},
 	"determinism": {
 		"seed": 137903421,
-		"processLaunchCompatible": true,
+		"processLaunchMode": "test-executable-self-reexec",
 		"workerCounts": [1, 2, 4, "max"],
-		"requiredHashes": ["backendState", "sortedPackets"]
+		"requiredHashes": ["backendState", "sortedPackets"],
+		"deduplicateAliasedWorkerCounts": true
 	},
 	"workloads": {
 		"mixedBodies": 10000,
 		"activeDynamicBodies": 1000,
 		"batchedRays": 10000,
 		"identicalRayRepetitions": 100,
+		"peakAllocationGrowthAllowanceAfterWarmup": 32,
 		"denseContactBodies": 256,
 		"constraintChainLinks": 32,
 		"characterPlatform": {

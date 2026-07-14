@@ -25,6 +25,10 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(static_cast<std::uint64_t>(1), diagnostics.committedCount, "Diagnostics should count committed transactions.");
 			context.ExpectEqual(static_cast<std::uint64_t>(1), diagnostics.rejectedCount, "Diagnostics should count rejected transactions.");
 			context.Expect(!diagnostics.recentResults.empty(), "Recent results should be retained.");
+			context.Expect(diagnostics.recentResults.front().inverseDeltas.empty(),
+				"Bounded diagnostics must not retain heavyweight undo payloads after the caller receives the full result.");
+			context.ExpectEqual(static_cast<std::size_t>(1), acceptedResult.inverseDeltas.size(),
+				"Discarding diagnostic payload copies must not remove the caller-owned inverse used by undo and rollback.");
 		});
 	}
 }

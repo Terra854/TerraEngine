@@ -5,6 +5,9 @@
 #include "Core/Object/ComponentRegistry.h"
 #include "Core/Object/ObjectManager.h"
 #include "Components/Transform.h"
+#include "Components/Physics/ColliderSetComponent.h"
+#include "Components/Physics/RigidBodyComponent.h"
+#include "Physics/PhysicsAuthoringSnapshot.h"
 #include "Physics/PhysicsSystem.h"
 #include "Scene/SceneMutationQueue.h"
 #include "Scene/TransactionalMutation.h"
@@ -222,6 +225,48 @@ namespace TerraEngine::Tests {
 			context.Expect(ui.observedPublishedTransform,
 				"UI must observe the queued physics Transform only after the protected After Physics flush.");
 			TerraEngine::Scene::SceneMutationQueue::Instance().Clear();
+			objects.clear();
+		});
+
+		registry.Add("Physics.Scheduler.ColliderOnlyObjectsBecomeStaticAndBodiesWithoutCollidersAreExcluded", [](TestContext& context) {
+			using namespace TerraEngine::Physics;
+
+			// Capture is the public worker-safe authoring boundary.  It must translate a
+			// collider-only object into the implicit static body promised to creators.
+			ComponentRegistry::RegisterAllComponents();
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+			const Object colliderOnly = objects.createObject("Static Collider");
+			const Object unsupportedBody = objects.createObject("Body Without Collider");
+			context.Expect(objects.AddComponent<Transform>(colliderOnly) != nullptr
+				&& objects.AddComponent<Transform>(unsupportedBody) != nullptr,
+				"Both authoring objects need Transforms before the immutable physics snapshot is captured.");
+			ColliderSetComponent* colliders = objects.AddComponent<ColliderSetComponent>(colliderOnly);
+			context.Expect(colliders != nullptr, "The collider-only fixture must own a valid collider collection.");
+			colliders->Add();
+			context.Expect(objects.AddComponent<RigidBodyComponent>(unsupportedBody) != nullptr,
+				"The exclusion fixture must contain an explicit rigid body without a collider.");
+
+			const PhysicsWorldHandle world{{1U}, 1U};
+			const auto snapshot = PhysicsAuthoringSnapshot::Capture(objects, world, PhysicsSettings::Defaults(), 1U);
+			context.Expect(snapshot.has_value(), "Valid collider-only authoring must produce an immutable physics snapshot.");
+			context.ExpectEqual(static_cast<std::size_t>(1), snapshot->Data().bodies.size(),
+				"Only collider-backed objects may reach physics-body preparation.");
+			context.Expect(snapshot->Data().bodies.front().objectId == objects.getUUID(colliderOnly)
+				&& snapshot->Data().bodies.front().motionType == PhysicsMotionType::Static,
+				"A valid collider without an explicit RigidBodyComponent must become static geometry.");
+			context.ExpectEqual(static_cast<std::size_t>(1), snapshot->Data().colliders.size(),
+				"The implicit static body must retain its authored collider record.");
+			context.ExpectEqual(static_cast<std::size_t>(1), snapshot->Data().diagnostics.size(),
+				"The excluded rigid body must publish one bounded authoring diagnostic.");
+			if(!snapshot->Data().diagnostics.empty()) {
+				const PhysicsAuthoringDiagnostic& diagnostic = snapshot->Data().diagnostics.front();
+				context.Expect(diagnostic.objectId == objects.getUUID(unsupportedBody),
+					"The diagnostic must identify the exact excluded object.");
+				context.Expect(diagnostic.code == "RigidBodyMissingValidCollider"
+					&& diagnostic.message.find("Add or enable a ColliderSetComponent record") != std::string::npos,
+					"The diagnostic must use a stable code and tell the creator how to repair the object.");
+			}
 			objects.clear();
 		});
 	}

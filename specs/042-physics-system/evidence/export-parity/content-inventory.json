@@ -1,0 +1,370 @@
+{
+  "entries": [
+    {
+      "assetType": "cooked_collider",
+      "byteSize": 827,
+      "contentHash": "8030bfa4cfff2ce3",
+      "logicalPath": "Colliders/Startup.tepcoll",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "compiled"
+    },
+    {
+      "assetType": "font",
+      "byteSize": 162588,
+      "contentHash": "1f8ba6398bcb283d",
+      "logicalPath": "Fonts/Roboto-Medium.ttf",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "engine_runtime"
+    },
+    {
+      "assetType": "other",
+      "byteSize": 20199,
+      "contentHash": "fc60d731aa43d049",
+      "logicalPath": "Models/Baseline.gltf",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "raw"
+    },
+    {
+      "assetType": "other",
+      "byteSize": 12312,
+      "contentHash": "395b5aa1409940b7",
+      "logicalPath": "Models/Baseline.gltf.import.json",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "raw"
+    },
+    {
+      "assetType": "other",
+      "byteSize": 2313,
+      "contentHash": "8fb4fe65839fbeaa",
+      "logicalPath": "Models/Baseline_Generated/Baseline.teprefab",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "raw"
+    },
+    {
+      "assetType": "material",
+      "byteSize": 156,
+      "contentHash": "d67789acb09aa96e",
+      "logicalPath": "Models/Baseline_Generated/BaselineMaterial.tmat",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "compiled"
+    },
+    {
+      "assetType": "texture",
+      "byteSize": 176,
+      "contentHash": "9f96cf2d52955733",
+      "logicalPath": "Models/Baseline_Generated/BaselineTexture.tetf",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "compiled"
+    },
+    {
+      "assetType": "mesh",
+      "byteSize": 41314,
+      "contentHash": "c14fa0a4181321f2",
+      "logicalPath": "Models/Baseline_Generated/BaselineTriangle.temf",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "compiled"
+    },
+    {
+      "assetType": "physics_settings",
+      "byteSize": 4921,
+      "contentHash": "c4e5c61992b533cf",
+      "logicalPath": "ProjectSettings/PhysicsSettings.json",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "generated_runtime_settings"
+    },
+    {
+      "assetType": "scene",
+      "byteSize": 20013,
+      "contentHash": "b5352528b4ee5cad",
+      "logicalPath": "Scenes/Startup.tescene",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "raw"
+    },
+    {
+      "assetType": "script",
+      "byteSize": 304,
+      "contentHash": "2457cb34d9f73af3",
+      "logicalPath": "Scripts/BaselineScript.cs",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "raw"
+    },
+    {
+      "assetType": "shader",
+      "byteSize": 94766,
+      "contentHash": "b10d54522bfbdca1",
+      "logicalPath": "Shaders/Default.frag.tspf",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "compiled"
+    },
+    {
+      "assetType": "shader",
+      "byteSize": 46143,
+      "contentHash": "7594b8ee86adc7fe",
+      "logicalPath": "Shaders/Default.mesh.tspf",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "compiled"
+    },
+    {
+      "assetType": "shader",
+      "byteSize": 40747,
+      "contentHash": "22c47ac4fb2ecc20",
+      "logicalPath": "Shaders/Default.task.tspf",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "compiled"
+    },
+    {
+      "assetType": "shader",
+      "byteSize": 6348,
+      "contentHash": "9da16a6a644d8e5a",
+      "logicalPath": "Shaders/Editor/SceneViewGrid.frag.spv",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "compiled"
+    },
+    {
+      "assetType": "shader",
+      "byteSize": 1772,
+      "contentHash": "41930b1c19ef5575",
+      "logicalPath": "Shaders/Editor/SceneViewGrid.vert.spv",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "compiled"
+    },
+    {
+      "assetType": "shader",
+      "byteSize": 4948,
+      "contentHash": "24faf11a79519c3e",
+      "logicalPath": "Shaders/Lighting/ClusterDepthMask.comp.spv",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "compiled"
+    },
+    {
+      "assetType": "shader",
+      "byteSize": 5428,
+      "contentHash": "078ed5dab6130198",
+      "logicalPath": "Shaders/Lighting/ClusterGrid.comp.spv",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "compiled"
+    },
+    {
+      "assetType": "shader",
+      "byteSize": 6524,
+      "contentHash": "dd73f52c87c34140",
+      "logicalPath": "Shaders/Lighting/ClusterLightCount.comp.spv",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "compiled"
+    },
+    {
+      "assetType": "shader",
+      "byteSize": 6824,
+      "contentHash": "88a2d1c57ec35c92",
+      "logicalPath": "Shaders/Lighting/ClusterLightFill.comp.spv",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "compiled"
+    },
+    {
+      "assetType": "shader",
+      "byteSize": 4036,
+      "contentHash": "f7968b6831f0ee3a",
+      "logicalPath": "Shaders/Lighting/ClusterLightPrefix.comp.spv",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "compiled"
+    },
+    {
+      "assetType": "shader",
+      "byteSize": 5816,
+      "contentHash": "8caf3bc4a286b998",
+      "logicalPath": "Shaders/Lighting/LightCull.comp.spv",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "compiled"
+    },
+    {
+      "assetType": "shader",
+      "byteSize": 4004,
+      "contentHash": "daa26d26d72a4d3e",
+      "logicalPath": "Shaders/PostProcess/GTAO.comp.spv",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "compiled"
+    },
+    {
+      "assetType": "shader",
+      "byteSize": 4892,
+      "contentHash": "fd90b5893a213097",
+      "logicalPath": "Shaders/PostProcess/GTAOBlur.comp.spv",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "compiled"
+    },
+    {
+      "assetType": "shader",
+      "byteSize": 2912,
+      "contentHash": "ac91758686e4320b",
+      "logicalPath": "Shaders/PostProcess/HiZGenerate.comp.spv",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "compiled"
+    },
+    {
+      "assetType": "shader",
+      "byteSize": 2492,
+      "contentHash": "292d7bea7111b8e3",
+      "logicalPath": "Shaders/PostProcess/VRSGenerate.comp.spv",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "compiled"
+    },
+    {
+      "assetType": "shader",
+      "byteSize": 9524,
+      "contentHash": "567346c6649cad7b",
+      "logicalPath": "Shaders/Sky/SkyBackground.frag.tspf",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "compiled"
+    },
+    {
+      "assetType": "shader",
+      "byteSize": 1422,
+      "contentHash": "b5ef29e766bf1bbc",
+      "logicalPath": "Shaders/Sky/SkyBackground.mesh.tspf",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "compiled"
+    },
+    {
+      "assetType": "shader",
+      "byteSize": 856,
+      "contentHash": "edd218735a80c77a",
+      "logicalPath": "Shaders/Sky/SkyBackground.task.tspf",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "compiled"
+    },
+    {
+      "assetType": "shader",
+      "byteSize": 368,
+      "contentHash": "164539520834dc6c",
+      "logicalPath": "Shaders/UI/UI_Instanced.frag.spv",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "compiled"
+    },
+    {
+      "assetType": "shader",
+      "byteSize": 1536,
+      "contentHash": "ed51b7473f7311a5",
+      "logicalPath": "Shaders/UI/UI_Instanced.vert.spv",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "compiled"
+    },
+    {
+      "assetType": "shader",
+      "byteSize": 1272,
+      "contentHash": "6c7355689ab2e583",
+      "logicalPath": "Shaders/UI/UI_SDF_Text.frag.spv",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "compiled"
+    },
+    {
+      "assetType": "shader",
+      "byteSize": 1276,
+      "contentHash": "09275fa00bb88012",
+      "logicalPath": "Shaders/UI/UI_SDF_Text.vert.spv",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "compiled"
+    },
+    {
+      "assetType": "shader",
+      "byteSize": 1600,
+      "contentHash": "eef5300e170d763b",
+      "logicalPath": "Shaders/UI/UI_Static.frag.spv",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "compiled"
+    },
+    {
+      "assetType": "shader",
+      "byteSize": 1432,
+      "contentHash": "2845297e77d5fb57",
+      "logicalPath": "Shaders/UI/UI_Static.vert.spv",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "compiled"
+    },
+    {
+      "assetType": "shader",
+      "byteSize": 5424,
+      "contentHash": "15663d065c77256f",
+      "logicalPath": "Shaders/VirtualGeometry/VirtualGeometryPacketCompaction.comp.spv",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "compiled"
+    },
+    {
+      "assetType": "ui",
+      "byteSize": 112,
+      "contentHash": "16be547ba533f506",
+      "logicalPath": "UI/Baseline.ui",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "raw"
+    },
+    {
+      "assetType": "manifest",
+      "byteSize": 6023,
+      "contentHash": "ced776679c472983",
+      "logicalPath": "game.json",
+      "placeholderDetected": false,
+      "required": true,
+      "sourceKind": "generated_manifest"
+    }
+  ],
+  "entryCount": 38,
+  "physics": {
+    "colliderGuids": [
+      "22222222222222223333333344444444"
+    ],
+    "cookFormatVersion": 1,
+    "defaultMaterialGuid": "",
+    "layersHash": "de8eae8235446d4a",
+    "materialGuids": [],
+    "present": true,
+    "provider": {
+      "identifier": "Jolt",
+      "revision": "e77f175595e64cb44218cc9d9d56fc365ad0e36a",
+      "version": "5.6.0"
+    },
+    "schemaVersion": 1,
+    "settingsHash": "c4e5c61992b533cf",
+    "validation": {
+      "fixtureSchemaVersion": 1,
+      "status": "validated"
+    }
+  },
+  "runId": "t153-final-export-parity-5",
+  "schemaVersion": 1
+}

@@ -1199,108 +1199,155 @@ void SceneViewWindow::DrawSceneToolbar()
 
 void SceneViewWindow::BuildSceneObjectMarkers(const glm::mat4& viewProjection, const ImVec2& viewportPos, const ImVec2& viewportSize)
 {
-	m_ObjectMarkers.clear();
 	if (!m_ToolState.iconsVisible)
 	{
+		// Forget the source token when icons are hidden so re-enabling them
+		// rebuilds from the current protected scene state rather than an empty list.
+		m_ObjectMarkers.clear();
+		m_MarkerSpatialRevision = std::numeric_limits<std::uint64_t>::max();
+		m_MarkerHierarchyRevision = std::numeric_limits<std::uint64_t>::max();
+		m_MarkerMetadataSignature = std::numeric_limits<std::uint64_t>::max();
+		m_MarkerPreferenceSignature = 0U;
+		m_MarkerSelection.reset();
 		return;
 	}
 
 	auto& objectManager = ObjectManager::instance();
-	auto& registry = objectManager.getRegistry();
 	const std::optional<entt::entity> selectedEntity = m_Owner != nullptr ? m_Owner->GetSelectedEntity() : std::nullopt;
-	auto computeWorldMatrix = [&](entt::entity entity) -> glm::mat4 {
-		glm::mat4 world(1.0f);
-		entt::entity current = entity;
-		// Markers read an immutable transform snapshot for this UI frame. They
-		// never mutate hierarchy or component storage while walking parents.
-		while (current != entt::null && registry.valid(current))
+	const std::uint64_t spatialRevision = objectManager.GetSpatialRevision();
+	const std::uint64_t hierarchyRevision = objectManager.GetHierarchyRevision();
+	const std::uint8_t markerPreferenceSignature = (m_OverlayPreference.cameraIconsVisible ? 1U : 0U)
+		| (m_OverlayPreference.lightIconsVisible ? 2U : 0U)
+		| (m_OverlayPreference.emptyObjectIconsVisible ? 4U : 0U);
+	auto buildMarkerMetadataSignature = [&objectManager, this]() {
+		std::uint64_t signature = 0U;
+		for (const SceneOverlay::SceneObjectMarker& marker : m_ObjectMarkers)
 		{
-			if (const Transform* transform = registry.try_get<Transform>(current))
+			const std::optional<Object> object = objectManager.getObject(marker.entity);
+			if (!object)
 			{
-				glm::mat4 local(1.0f);
-				local = glm::translate(local, transform->position);
-				local = local * glm::mat4_cast(transform->rotation);
-				local = glm::scale(local, transform->scale);
-				world = local * world;
+				return std::numeric_limits<std::uint64_t>::max();
 			}
-			if (const std::optional<Object> object = objectManager.getObject(current))
+			const std::uint64_t entityValue = static_cast<std::uint32_t>(marker.entity);
+			const std::uint64_t metadataGeneration = objectManager.getObjectMetadataGeneration(*object);
+			signature ^= (entityValue + 0x9e3779b97f4a7c15ULL) * (metadataGeneration + 0xc2b2ae3d27d4eb4fULL);
+		}
+		return signature;
+	};
+	const std::uint64_t markerMetadataSignature = buildMarkerMetadataSignature();
+	const bool markerSourcesDirty = spatialRevision != m_MarkerSpatialRevision
+		|| hierarchyRevision != m_MarkerHierarchyRevision
+		|| markerMetadataSignature != m_MarkerMetadataSignature
+		|| markerPreferenceSignature != m_MarkerPreferenceSignature
+		|| selectedEntity != m_MarkerSelection;
+	if (markerSourcesDirty)
+	{
+		m_ObjectMarkers.clear();
+		auto& registry = objectManager.getRegistry();
+		auto computeWorldMatrix = [&](entt::entity entity) -> glm::mat4 {
+			glm::mat4 world(1.0f);
+			entt::entity current = entity;
+			// Markers read an immutable transform snapshot for this UI frame. They
+			// never mutate hierarchy or component storage while walking parents.
+			while (current != entt::null && registry.valid(current))
 			{
-				const std::optional<Object> parent = objectManager.getParent(*object);
-				current = parent ? parent->EntityId() : entt::null;
+				if (const Transform* transform = registry.try_get<Transform>(current))
+				{
+					glm::mat4 local(1.0f);
+					local = glm::translate(local, transform->position);
+					local = local * glm::mat4_cast(transform->rotation);
+					local = glm::scale(local, transform->scale);
+					world = local * world;
+				}
+				if (const std::optional<Object> object = objectManager.getObject(current))
+				{
+					const std::optional<Object> parent = objectManager.getParent(*object);
+					current = parent ? parent->EntityId() : entt::null;
+				}
+				else
+				{
+					current = entt::null;
+				}
+			}
+			return world;
+		};
+
+		auto transforms = registry.view<Transform>();
+		for (entt::entity entity : transforms)
+		{
+			const bool hasCamera = registry.any_of<CameraComponent>(entity);
+			const LightComponent* light = registry.try_get<LightComponent>(entity);
+			const bool hasMesh = registry.any_of<MeshRenderComponent>(entity);
+			const bool selected = selectedEntity.has_value() && *selectedEntity == entity;
+
+			SceneOverlay::MarkerCategory category = SceneOverlay::MarkerCategory::Unsupported;
+			if (selected)
+			{
+				category = SceneOverlay::MarkerCategory::SelectedObject;
+			}
+			else if (hasCamera)
+			{
+				category = SceneOverlay::MarkerCategory::Camera;
+			}
+			else if (light != nullptr && light->type == LightType::Directional)
+			{
+				category = SceneOverlay::MarkerCategory::DirectionalLight;
+			}
+			else if (light != nullptr && light->type == LightType::Spot)
+			{
+				category = SceneOverlay::MarkerCategory::SpotLight;
+			}
+			else if (light != nullptr)
+			{
+				category = SceneOverlay::MarkerCategory::PointLight;
+			}
+			else if (!hasMesh)
+			{
+				category = SceneOverlay::MarkerCategory::EmptyObject;
+			}
+
+			const bool lightVisible = category == SceneOverlay::MarkerCategory::DirectionalLight || category == SceneOverlay::MarkerCategory::PointLight || category == SceneOverlay::MarkerCategory::SpotLight;
+			if (category == SceneOverlay::MarkerCategory::Unsupported
+				|| (category == SceneOverlay::MarkerCategory::Camera && !m_OverlayPreference.cameraIconsVisible)
+				|| (lightVisible && !m_OverlayPreference.lightIconsVisible)
+				|| (category == SceneOverlay::MarkerCategory::EmptyObject && !m_OverlayPreference.emptyObjectIconsVisible))
+			{
+				continue;
+			}
+
+			SceneOverlay::SceneObjectMarker marker;
+			marker.entity = entity;
+			marker.category = category;
+			marker.selected = selected;
+			marker.worldPosition = glm::vec3(computeWorldMatrix(entity)[3]);
+			if (const std::optional<Object> object = objectManager.getObject(entity))
+			{
+				marker.objectId = objectManager.getUUID(*object);
+				marker.displayName = objectManager.getObjectName(*object);
+				marker.markerId = TerraEngine::ToHexString(marker.objectId);
 			}
 			else
 			{
-				current = entt::null;
+				marker.displayName = "Entity " + std::to_string(static_cast<std::uint32_t>(entity));
+				marker.markerId = marker.displayName;
 			}
+			marker.tooltip = marker.displayName + " (" + SceneOverlay::ToString(marker.category) + ")";
+			m_ObjectMarkers.push_back(std::move(marker));
 		}
-		return world;
-	};
+		m_MarkerSpatialRevision = spatialRevision;
+		m_MarkerHierarchyRevision = hierarchyRevision;
+		m_MarkerMetadataSignature = buildMarkerMetadataSignature();
+		m_MarkerPreferenceSignature = markerPreferenceSignature;
+		m_MarkerSelection = selectedEntity;
+	}
 
-	auto transforms = registry.view<Transform>();
-	for (entt::entity entity : transforms)
+	for (SceneOverlay::SceneObjectMarker& marker : m_ObjectMarkers)
 	{
-		const bool hasCamera = registry.any_of<CameraComponent>(entity);
-		const LightComponent* light = registry.try_get<LightComponent>(entity);
-		const bool hasMesh = registry.any_of<MeshRenderComponent>(entity);
-		const bool selected = selectedEntity.has_value() && *selectedEntity == entity;
-
-		SceneOverlay::MarkerCategory category = SceneOverlay::MarkerCategory::Unsupported;
-		if (selected)
-		{
-			category = SceneOverlay::MarkerCategory::SelectedObject;
-		}
-		else if (hasCamera)
-		{
-			category = SceneOverlay::MarkerCategory::Camera;
-		}
-		else if (light != nullptr && light->type == LightType::Directional)
-		{
-			category = SceneOverlay::MarkerCategory::DirectionalLight;
-		}
-		else if (light != nullptr && light->type == LightType::Spot)
-		{
-			category = SceneOverlay::MarkerCategory::SpotLight;
-		}
-		else if (light != nullptr)
-		{
-			category = SceneOverlay::MarkerCategory::PointLight;
-		}
-		else if (!hasMesh)
-		{
-			category = SceneOverlay::MarkerCategory::EmptyObject;
-		}
-
-		const bool lightVisible = category == SceneOverlay::MarkerCategory::DirectionalLight || category == SceneOverlay::MarkerCategory::PointLight || category == SceneOverlay::MarkerCategory::SpotLight;
-		if (category == SceneOverlay::MarkerCategory::Unsupported
-			|| (category == SceneOverlay::MarkerCategory::Camera && !m_OverlayPreference.cameraIconsVisible)
-			|| (lightVisible && !m_OverlayPreference.lightIconsVisible)
-			|| (category == SceneOverlay::MarkerCategory::EmptyObject && !m_OverlayPreference.emptyObjectIconsVisible))
-		{
-			continue;
-		}
-
-		SceneOverlay::SceneObjectMarker marker;
-		marker.entity = entity;
-		marker.category = category;
-		marker.selected = selected;
-		marker.worldPosition = glm::vec3(computeWorldMatrix(entity)[3]);
-		if (const std::optional<Object> object = objectManager.getObject(entity))
-		{
-			marker.objectId = objectManager.getUUID(*object);
-			marker.displayName = objectManager.getObjectName(*object);
-			marker.markerId = TerraEngine::ToHexString(marker.objectId);
-		}
-		else
-		{
-			marker.displayName = "Entity " + std::to_string(static_cast<std::uint32_t>(entity));
-			marker.markerId = marker.displayName;
-		}
-		marker.tooltip = marker.displayName + " (" + SceneOverlay::ToString(marker.category) + ")";
-		// Projection marks offscreen/behind-camera markers as hidden; we still
-		// keep the marker in the snapshot so diagnostics can reason from one list.
+		// Projection is camera-dependent and intentionally remains per frame;
+		// only expensive scene enumeration and parent-chain composition are cached.
+		marker.hovered = false;
 		const bool projected = SceneOverlay::ProjectMarkerToScreen(marker, viewProjection, glm::vec2(viewportPos.x, viewportPos.y), glm::vec2(viewportSize.x, viewportSize.y));
 		(void)projected;
-		m_ObjectMarkers.push_back(std::move(marker));
 	}
 	SceneOverlay::ResolveMarkerOverlapGroups(m_ObjectMarkers, 18.0f);
 }
@@ -1981,7 +2028,13 @@ void SceneViewWindow::DrawPhysicsColliderEditHandles(const glm::mat4& view, cons
 	// This compact panel exposes stable record selection and precision controls.
 	// The colored in-viewport handles below are the direct-manipulation path.
 	ImGui::SetCursorScreenPos(ImVec2(viewportPos.x + 12.0f, viewportPos.y + 12.0f));
-	ImGui::BeginChild("PhysicsColliderAuthoring", ImVec2(280.0f, 0.0f), true, ImGuiWindowFlags_AlwaysAutoResize);
+	// ImGui 1.90 moved child sizing into ImGuiChildFlags. Auto-resizing only the
+	// panel height keeps its fixed overlay width and preserves child clipping;
+	// AlwaysAutoResize would force hidden content to be measured every frame.
+	ImGui::BeginChild(
+		"PhysicsColliderAuthoring",
+		ImVec2(280.0f, 0.0f),
+		ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY);
 	ImGui::TextUnformatted("Physics Collider Handles");
 	for (const TerraEngine::Physics::ColliderRecord& record : records)
 	{

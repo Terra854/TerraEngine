@@ -479,7 +479,14 @@ namespace TerraEngine::Tests
 			context.Expect(ShaderContains(vulkanResources, "vkWaitForFences(device, 1, &immediateFence, VK_TRUE, UINT64_MAX)"), "Immediate command buffers must wait on their own submit fence before vkFreeCommandBuffers.");
 			context.Expect(ShaderContains(vulkanResources, "bool VulkanContext::Impl::EndSingleTimeCommands"), "Immediate submits should return success so callers can stop after failed layout/copy work.");
 			context.Expect(ShaderContains(vulkanResources, "const VkResult idleResult = WaitGraphicsQueueIdle();"), "Failed immediate submits should check through the synchronized queue boundary whether the queue proved idle before freeing the command buffer.");
-			context.Expect(ShaderContains(vulkanResources, "vkDestroyFence(device, immediateFence, nullptr);\n\t\tif (idleResult == VK_SUCCESS)"), "Temporary immediate fences must be destroyed even when command-buffer freeing remains gated by queue-idle success.");
+			// Compare semantic token order instead of a newline/indentation byte pattern.
+			// Source checkouts may use CRLF on Windows while preserving identical C++.
+			const std::size_t idleCheck = vulkanResources.find("const VkResult idleResult = WaitGraphicsQueueIdle();");
+			const std::size_t fenceDestroy = vulkanResources.find("vkDestroyFence(device, immediateFence, nullptr);", idleCheck);
+			const std::size_t guardedFree = vulkanResources.find("if (idleResult == VK_SUCCESS)", fenceDestroy);
+			context.Expect(idleCheck != std::string::npos && fenceDestroy != std::string::npos
+				&& guardedFree != std::string::npos && idleCheck < fenceDestroy && fenceDestroy < guardedFree,
+				"Temporary immediate fences must be destroyed even when command-buffer freeing remains gated by queue-idle success.");
 			context.Expect(ShaderContains(vulkanResources, "uploadBarrier.subresourceRange.levelCount = residentMipCount"), "Texture upload should transition every resident mip in the same command buffer as the copy.");
 			context.Expect(ShaderContains(vulkanResources, "vkCmdCopyBufferToImage(commandBuffer, stagingBuffer.buffer, vImage.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL"), "Texture upload should copy all resident mip regions after the in-buffer transfer transition.");
 			context.Expect(ShaderContains(vulkanResources, "shaderReadBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL"), "Texture upload should transition resident mips to shader-read before publishing descriptors.");

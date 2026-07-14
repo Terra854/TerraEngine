@@ -10,8 +10,10 @@
 #include "SceneViewOverlayMarkers.h"
 #include "Engine/Renderer/RenderTypes.h"
 #include "Engine/Utilities/UUID.h"
+#include <cstdint>
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
+#include <limits>
 #include <glm/gtc/quaternion.hpp>
 #include <string>
 #include <unordered_set>
@@ -109,6 +111,14 @@ private:
 	TerraEngine::Editor::SceneViewOverlay::OrientationWidgetState m_OrientationWidgetState;
 	std::vector<TerraEngine::Editor::SceneViewOverlay::OverlayIconDefinition> m_IconDefinitions;
 	std::vector<TerraEngine::Editor::SceneViewOverlay::SceneObjectMarker> m_ObjectMarkers;
+	// Marker source data changes with scene structure, transforms, metadata,
+	// selection, or icon preferences. Projection still runs per frame so camera
+	// movement and viewport resize remain immediately visible without rescanning.
+	std::uint64_t m_MarkerSpatialRevision = std::numeric_limits<std::uint64_t>::max();
+	std::uint64_t m_MarkerHierarchyRevision = std::numeric_limits<std::uint64_t>::max();
+	std::uint64_t m_MarkerMetadataSignature = std::numeric_limits<std::uint64_t>::max();
+	std::uint8_t m_MarkerPreferenceSignature = 0U;
+	std::optional<entt::entity> m_MarkerSelection;
 	TerraEngine::Physics::PhysicsDebugDisplaySelection m_PhysicsDebugSelection;
 	std::size_t m_PhysicsDebugPacketCount = 0U;
 	std::size_t m_PhysicsDebugPrimitiveCount = 0U;

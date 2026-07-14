@@ -4,9 +4,13 @@
 #include "../TestHarness.h"
 
 #include "Components/Physics/CharacterControllerComponent.h"
+#include "Components/Physics/ColliderSetComponent.h"
 #include "Components/Physics/ConstraintSetComponent.h"
+#include "Components/Physics/RigidBodyComponent.h"
 #include "Core/Object/ComponentRegistry.h"
 #include "Core/Object/ObjectManager.h"
+#include "Physics/Assets/PhysicsMaterial.h"
+#include "Scene/PrefabComposition.h"
 #include "Scene/Serializer.h"
 
 #include <limits>
@@ -167,6 +171,110 @@ namespace TerraEngine::Tests
 			ResetSerializationFixture();
 			Object invalidFiniteCharacter = Serializer::DeserializeObject(nonfiniteCharacter);
 			context.Expect(ObjectManager::instance().GetComponent<CharacterControllerComponent>(invalidFiniteCharacter) == nullptr, "Nonfinite character configuration must fail validation before replacing component state.");
+		});
+
+		registry.Add("Physics.Serialization.AcceptanceFixturePreservesPhysicsAndPrefabApplyRevertParity", [](TestContext& context) {
+			// This fixture deliberately uses non-default values in every required
+			// physics authoring category so save/reload cannot pass by retaining defaults.
+			ResetSerializationFixture();
+			ObjectManager& objects = ObjectManager::instance();
+			Object object = objects.createObject("Physics Acceptance Fixture");
+			const TerraEngine::UUID materialId = TerraEngine::GenerateUUID();
+			RigidBodyComponent& body = *objects.AddComponent<RigidBodyComponent>(object);
+			body.massMode = PhysicsMassMode::ExplicitMass;
+			body.mass = 3.5F;
+			body.motionType = PhysicsMotionType::Kinematic;
+			body.collisionLayerId = 4U;
+			body.useCollisionMaskOverride = true;
+			body.collisionMaskOverride = 0x00000030U;
+			body.useGravity = false;
+			body.continuousCollisionMode = PhysicsMotionQuality::LinearCast;
+			ColliderSetComponent& colliders = *objects.AddComponent<ColliderSetComponent>(object);
+			ColliderRecord& collider = colliders.Add();
+			collider.shape = TaperedCapsuleColliderShape{0.25F, 0.5F, 2.5F};
+			collider.materialId = materialId;
+			collider.useDefaultMaterial = false;
+			collider.useLayerOverride = true;
+			collider.collisionLayerId = 6U;
+			collider.isTrigger = true;
+			collider.queryFlags = PhysicsColliderQueryRay | PhysicsColliderQueryOverlap;
+			const TerraEngine::UUID colliderRecordId = collider.recordId;
+			ConstraintSetComponent& constraints = *objects.AddComponent<ConstraintSetComponent>(object);
+			constraints.Add(MakeConstraint(TerraEngine::GenerateUUID(), TerraEngine::GenerateUUID()));
+			const TerraEngine::UUID constraintRecordId = constraints.constraints.front().recordId;
+			CharacterControllerComponent& character = *objects.AddComponent<CharacterControllerComponent>(object);
+			character.shapeKind = PhysicsCharacterShapeKind::Cylinder;
+			character.collisionLayerId = 7U;
+			character.collisionMask = 0x00000081U;
+			character.jumpSpeed = 8.5F;
+			character.rotationPolicy = PhysicsCharacterRotationPolicy::Locked;
+
+			const nlohmann::json saved = Serializer::SerializeObject(object);
+			PhysicsMaterial material = PhysicsMaterial::Defaults(materialId);
+			material.staticFriction = 0.9F;
+			material.dynamicFriction = 0.4F;
+			material.restitution = 0.35F;
+			material.surfaceTag = "acceptance-stone";
+			PhysicsMaterialDiagnostics materialDiagnostics;
+			PhysicsMaterial reloadedMaterial;
+			context.Expect(PhysicsMaterial::LoadJson(material.ToJson(), reloadedMaterial, materialDiagnostics),
+				"The acceptance material must reload through its public provider-neutral schema.");
+			context.Expect(material.ToJson() == reloadedMaterial.ToJson(),
+				"All physics-material values must survive asset serialization exactly.");
+
+			ResetSerializationFixture();
+			Object reloadedObject = Serializer::DeserializeObject(saved);
+			const nlohmann::json reloaded = Serializer::SerializeObject(reloadedObject);
+			context.Expect(saved == reloaded,
+				"Rigid-body, collider, material GUID, layer, constraint, and character authoring must survive scene save/reload with full parity.");
+
+			// Resolve applies instance values to a copy, while Reset removes the instance
+			// edits and therefore exposes the immutable prefab defaults again.
+			const TerraEngine::UUID sourceObjectId = TerraEngine::GenerateUUID();
+			TerraEngine::Scene::PrefabSource source;
+			source.sourceId = TerraEngine::GenerateUUID();
+			TerraEngine::Scene::SceneGraphObject sourceObject;
+			sourceObject.objectId = sourceObjectId;
+			sourceObject.name = "Physics Prefab Source";
+			source.sourceGraph.rootObjects.push_back(sourceObjectId);
+			source.sourceGraph.objects.emplace(sourceObjectId, sourceObject);
+			for(const auto& [componentName, componentDefault] : saved["components"].items()) {
+				// Preserve the typed scene payload verbatim so prefab composition is
+				// checked against the same durable defaults used by scene reload.
+				source.componentDefaults[sourceObjectId][componentName] = componentDefault;
+			}
+			TerraEngine::Scene::PrefabInstance instance;
+			instance.instanceId = TerraEngine::GenerateUUID();
+			instance.sourceId = source.sourceId;
+			instance.rootObjectId = TerraEngine::GenerateUUID();
+			instance.sourceToInstanceObjectIds.emplace(sourceObjectId, instance.rootObjectId);
+			instance.overrides = {
+				{sourceObjectId, std::string(RigidBodyComponent::kComponentName), "mass", "7.5"},
+				{sourceObjectId, std::string(ColliderSetComponent::kComponentName), "isTrigger", "false", TerraEngine::Scene::PrefabOverrideKind::Property, false, colliderRecordId},
+				{sourceObjectId, std::string(ConstraintSetComponent::kComponentName), "breakForce", "12.0", TerraEngine::Scene::PrefabOverrideKind::Property, false, constraintRecordId},
+				{sourceObjectId, std::string(CharacterControllerComponent::kComponentName), "jumpSpeed", "9.0"}};
+			const auto appliedToInstance = TerraEngine::Scene::ResolvePrefabInstance(source, instance);
+			context.Expect(appliedToInstance.success, "A valid complete physics prefab override set must resolve atomically.");
+			const auto& resolved = appliedToInstance.resolvedComponentDefaults.at(instance.rootObjectId);
+			context.Expect(resolved.at("RigidBodyComponent").at("mass") == 7.5F
+				&& !resolved.at("ColliderSetComponent").at("colliders")[0].at("isTrigger").get<bool>()
+				&& resolved.at("ConstraintSetComponent").at("constraints")[0].at("breakForce") == 12.0F
+				&& resolved.at("CharacterControllerComponent").at("jumpSpeed") == 9.0F,
+				"Prefab resolution must apply body, collider, constraint, and character overrides to the correct stable records.");
+			TerraEngine::Scene::ResetOverridesToDefaults(instance);
+			const auto revertedInstance = TerraEngine::Scene::ResolvePrefabInstance(source, instance);
+			context.Expect(revertedInstance.success
+				&& revertedInstance.resolvedComponentDefaults.at(instance.rootObjectId) == source.componentDefaults.at(sourceObjectId),
+				"Prefab revert must restore every saved physics default without leaving a partial override.");
+
+			std::vector<TerraEngine::Scene::SceneDiagnostic> applyDiagnostics;
+			TerraEngine::Scene::PrefabSource appliedSource = source;
+			context.Expect(TerraEngine::Scene::TryApplyOverridesToDefaults(appliedSource, appliedToInstance.instance,
+				appliedToInstance.instance.overrides, applyDiagnostics),
+				"Applying the validated physics override batch back to prefab defaults must succeed atomically.");
+			context.Expect(appliedSource.componentDefaults.at(sourceObjectId).at("RigidBodyComponent").at("mass") == 7.5F,
+				"Prefab apply must publish the validated rigid-body property into durable source defaults.");
+			objects.clear();
 		});
 	}
 }

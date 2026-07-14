@@ -353,8 +353,15 @@ namespace TerraEngine::Scene {
 	SceneMutationBatchResult SceneMutationQueue::Apply(ObjectManager& objects, std::string commitName)
 	{
 		const std::vector<SceneMutationRequest> requestSnapshot = PendingRequests();
-		SceneGraph graph = BuildSceneGraphFromObjectManager(objects);
-		SceneMutationBatchResult batch = Validate(graph);
+		SceneMutationBatchResult batch;
+		if (!requestSnapshot.empty())
+		{
+			// Request mutations need a graph-wide preflight. Typed transactions carry
+			// their own read sets, so avoiding this traversal keeps a physics-only
+			// After Physics flush proportional to the bodies that actually moved.
+			SceneGraph graph = BuildSceneGraphFromObjectManager(objects);
+			batch = Validate(graph);
+		}
 		batch.commitName = commitName.empty() ? "SceneMutationQueue.Apply" : std::move(commitName);
 		for (const SceneMutationRequest& request : requestSnapshot)
 		{

@@ -13,7 +13,10 @@
 #include "Scene/Serializer.h"
 #include "ThreadPool/ThreadPool.h"
 
+#include <array>
 #include <cstdint>
+#include <string>
+#include <string_view>
 
 #include <nlohmann/json.hpp>
 
@@ -31,6 +34,37 @@ namespace TerraEngine::EditorTests {
 			}
 		};
 
+		enum class PlayModeBoundary : std::uint8_t {
+			RendererUnavailable,
+			SceneUnload,
+			RemoveRecreate,
+			ScriptReload,
+			ProjectClose,
+			Shutdown
+		};
+
+		// Round-robin boundaries cover every lifecycle trigger while keeping this
+		// installed-editor-equivalent soak at its required 1,000 total cycles.
+		constexpr std::array<PlayModeBoundary, 6U> kPlayModeBoundaries{
+			PlayModeBoundary::RendererUnavailable,
+			PlayModeBoundary::SceneUnload,
+			PlayModeBoundary::RemoveRecreate,
+			PlayModeBoundary::ScriptReload,
+			PlayModeBoundary::ProjectClose,
+			PlayModeBoundary::Shutdown};
+
+		std::string_view BoundaryName(PlayModeBoundary boundary) {
+			switch(boundary) {
+				case PlayModeBoundary::RendererUnavailable: return "renderer-unavailable";
+				case PlayModeBoundary::SceneUnload: return "scene-unload";
+				case PlayModeBoundary::RemoveRecreate: return "remove-recreate";
+				case PlayModeBoundary::ScriptReload: return "script-reload";
+				case PlayModeBoundary::ProjectClose: return "project-close";
+				case PlayModeBoundary::Shutdown: return "shutdown";
+			}
+			return "unknown";
+		}
+
 		nlohmann::json MakeAuthoredSnapshot(TestContext& context, ObjectManager& objects) {
 			Object object = objects.createObject("Physics Soak Body");
 			Transform* transform = objects.AddComponent<Transform>(object);
@@ -43,6 +77,20 @@ namespace TerraEngine::EditorTests {
 			colliders->Add();
 			objects.MarkObjectTransformDirty(object);
 			return Serializer::SerializeObject(object);
+		}
+
+		void RestoreAuthoredSnapshot(TestContext& context, ObjectManager& objects,
+			TerraEngine::Scene::SceneMutationQueue& mutations, const nlohmann::json& authoredSnapshot, PlayModeBoundary boundary) {
+			// Restoring from the serialized payload makes every boundary prove that
+			// runtime-only provider state did not mutate the creator's authored scene.
+			objects.clear();
+			mutations.Clear();
+			Serializer::DeserializeObjectEntity(authoredSnapshot);
+			const auto roots = objects.getRootObjects();
+			Object restoredRoot;
+			if(!roots.empty()) restoredRoot = roots.front();
+			context.Expect(roots.size() == 1U && Serializer::SerializeObject(restoredRoot) == authoredSnapshot,
+				"The " + std::string(BoundaryName(boundary)) + " boundary must restore the exact authored payload.");
 		}
 	}
 
@@ -63,33 +111,44 @@ namespace TerraEngine::EditorTests {
 			TerraEngine::Physics::PublishedPhysicsDebugPackets().Clear();
 
 			for(std::uint32_t cycle = 0U; cycle < 1000U; ++cycle) {
+				const PlayModeBoundary boundary = kPlayModeBoundaries[cycle % kPlayModeBoundaries.size()];
 				context.Expect(physics.StartWorld(), "Entering Play Mode must create a fresh physics world for every soak cycle.");
+				const TerraEngine::Physics::PhysicsWorldHandle liveWorld = physics.WorldHandle();
 				context.Expect(physics.SetPaused(true) && physics.RequestExplicitStep(),
-					"The soak must exercise one paused Next publication before every unload/recreate.");
+					"The soak must exercise one paused Next publication before every lifecycle boundary.");
 				physics.Update(0.0F);
 				const auto flush = mutations.Apply(objects, "physics-play-mode-soak");
 				physics.OnAfterPhysicsFlush(flush.transactionResults);
 
-				// The debug read has no renderer dependency, deliberately covering an
-				// unavailable renderer while Play Mode remains safe and inspectable.
-				(void)TerraEngine::Physics::PublishedPhysicsDebugPackets().Select(physics.WorldHandle(), cycle + 1U);
-				context.Expect(physics.StopWorld(), "Play Mode stop must drain physics before scene unload or script reload.");
+				if(boundary == PlayModeBoundary::RendererUnavailable) {
+					// No renderer is initialized in this headless test. Selecting immutable
+					// packets proves a failed or unavailable presentation consumer cannot
+					// access the live provider or stop the current Play Mode world.
+					(void)TerraEngine::Physics::PublishedPhysicsDebugPackets().Select(liveWorld, cycle + 1U);
+					context.Expect(physics.WorldHandle() == liveWorld,
+						"An unavailable renderer must not invalidate the active physics world.");
+				}
 
-				// Clear and deserialize after every stop to model unload plus remove/recreate.
-				// The exact JSON comparison also catches runtime transforms dirtying authored state.
-				objects.clear();
-				mutations.Clear();
-				Serializer::DeserializeObjectEntity(authoredSnapshot);
-				auto roots = objects.getRootObjects();
-				context.Expect(roots.size() == 1U && Serializer::SerializeObject(roots.front()) == authoredSnapshot,
-					"Scene reload and script reload must restore the exact authored payload after every cycle.");
+				context.Expect(physics.StopWorld() && !physics.WorldHandle().IsValid(),
+					"Every Play Mode boundary must drain the world before authored objects change.");
+				if(boundary == PlayModeBoundary::RemoveRecreate) {
+					const auto roots = objects.getRootObjects();
+					context.Expect(roots.size() == 1U, "The remove/recreate lane needs one live authored object to remove.");
+					if(!roots.empty()) {
+						objects.RemoveComponent<ColliderSetComponent>(roots.front());
+						context.Expect(objects.GetComponent<ColliderSetComponent>(roots.front()) == nullptr,
+							"The remove/recreate lane must actually remove the physics component before recreation.");
+					}
+				}
 
-				if((cycle + 1U) % 100U == 0U) {
-					// A project close/shutdown boundary destroys the backend, then initializes
-					// a new editor-hosted session without retaining old scene identities.
+				if(boundary == PlayModeBoundary::ProjectClose || boundary == PlayModeBoundary::Shutdown) {
+					// These two host transitions share a clean backend restart in a soak
+					// loop. Keeping them distinct in the manifest preserves both evidence rows.
 					physics.Shutdown();
+					context.Expect(!physics.WorldHandle().IsValid(), "Project close and shutdown must release the active provider world.");
 					physics.Initialize();
 				}
+				RestoreAuthoredSnapshot(context, objects, mutations, authoredSnapshot, boundary);
 			}
 			physics.Shutdown();
 			TerraEngine::Physics::PublishedPhysicsDebugPackets().Clear();

@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-	[string]$BuildDir = "out/build/Debug",
+	[string]$BuildDir = "out/build/RelWithDebInfo",
 	[string]$InstallRoot = "",
 	[string]$WorkRoot = "out/ci/export-runtime-baseline",
 	[string]$FixtureRoot = "Tests/Fixtures/ExportRuntimeBaseline",

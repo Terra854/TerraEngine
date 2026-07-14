@@ -260,6 +260,12 @@ namespace TerraEngine::Physics {
 		std::shared_ptr<const PhysicsEventPacket> AcquireEventPacket(
 			PhysicsTick requestedTick,
 			PhysicsTick currentTick) const;
+		// Diagnostics and automation inspect this separately retained canonical raw
+		// history. It intentionally does not participate in gameplay subscription
+		// delivery, so observing contacts cannot change managed event behavior.
+		std::shared_ptr<const PhysicsEventPacket> AcquireDiagnosticEventPacket(
+			PhysicsTick requestedTick,
+			PhysicsTick currentTick) const;
 
 		// Constraint lifetime and break policy are evaluated only at a protected
 		// completed-tick boundary. A rejected input batch changes no record.
@@ -334,6 +340,7 @@ namespace TerraEngine::Physics {
 		std::unique_ptr<PhysicsQueryManager> queryManager;
 		std::unique_ptr<PhysicsEventSubscriptionRegistry> eventSubscriptions;
 		std::unique_ptr<PhysicsEventHistory> eventHistory;
+		std::unique_ptr<PhysicsEventHistory> diagnosticEventHistory;
 		PhysicsHandleAllocator<PhysicsBodyHandle> bodyRegistry;
 		PhysicsHandleAllocator<PhysicsShapeHandle> shapeRegistry;
 		PhysicsHandleAllocator<PhysicsConstraintHandle> constraintRegistry;

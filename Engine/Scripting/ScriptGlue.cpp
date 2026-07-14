@@ -21,6 +21,7 @@
 
 #include <array>
 #include <algorithm>
+#include <charconv>
 #include <cstring>
 #include <cmath>
 #include <mutex>
@@ -191,6 +192,108 @@ namespace {
 		destination.correlationId = 0U;
 		WriteDiagnostic(destination.diagnostic, diagnostic.empty() ? std::string_view(ToString(receipt.rejectionReason)) : diagnostic);
 	}
+
+	// Query submission has its own receipt shape, but it follows the same rule
+	// as commands: callers receive a fully initialized copied result even when
+	// validation rejects the request before it reaches the deferred queue.
+	void FillQueryReceipt(NativePhysicsQueryReceipt& destination, NativePhysicsStatus status, std::uint64_t correlationId, std::string_view diagnostic) {
+		destination.header = {kNativePhysicsAbiVersion, sizeof(destination)};
+		destination.status = status;
+		destination.reserved = 0U;
+		destination.handle = {};
+		destination.correlationId = correlationId;
+		WriteDiagnostic(destination.diagnostic, diagnostic);
+	}
+
+	bool MatchesPublishedBody(const NativePhysicsBodyCommandRequest& request) {
+		const auto snapshot = PhysicsSystem::Instance().LatestBodySnapshot();
+		if(!snapshot || !snapshot->bodies) return false;
+		const PhysicsBodyHandle requested = ToHandle<NativePhysicsHandle, PhysicsBodyHandle>(request.body);
+		const TerraEngine::UUID objectId = ToUuid(request.identity.objectId);
+		return std::any_of(snapshot->bodies->begin(), snapshot->bodies->end(), [&](const PhysicsBodyState& candidate) {
+			return candidate.handle == requested
+				&& candidate.objectId == objectId
+				&& candidate.objectGeneration == request.identity.objectGeneration
+				&& candidate.componentGeneration == request.identity.componentGeneration;
+		});
+	}
+
+	bool MatchesPublishedCharacter(const NativePhysicsCharacterCommandRequest& request) {
+		const auto snapshot = PhysicsSystem::Instance().LatestCharacterStatePacket();
+		if(!snapshot || !snapshot->states) return false;
+		const PhysicsCharacterHandle requested = ToHandle<NativePhysicsHandle, PhysicsCharacterHandle>(request.character);
+		const TerraEngine::UUID objectId = ToUuid(request.identity.objectId);
+		return std::any_of(snapshot->states->begin(), snapshot->states->end(), [&](const PhysicsCharacterState& candidate) {
+			return candidate.handle == requested
+				&& candidate.objectId == objectId
+				&& candidate.objectGeneration == request.identity.objectGeneration
+				&& candidate.componentGeneration == request.identity.componentGeneration;
+		});
+	}
+
+	PhysicsQueryRequest ToQueryRequest(const NativePhysicsQueryRequest& request, PhysicsWorldHandle activeWorld) {
+		PhysicsQueryRequest result;
+		result.world = activeWorld;
+		result.kind = static_cast<PhysicsQueryKind>(request.kind);
+		result.hitMode = static_cast<PhysicsQueryHitMode>(request.hitMode);
+		result.pose = ToPose(request.pose);
+		result.direction = ToVector(request.direction);
+		result.shapeExtent = ToVector(request.shapeExtent);
+		result.distance = request.distance;
+		result.maximumHits = request.maximumHits;
+		result.filter.collisionMask = request.collisionMask;
+		result.filter.bodyTypes = static_cast<PhysicsQueryBodyTypeMask>(request.bodyTypeMask);
+		result.filter.includeSensors = request.includeSensors != 0U;
+		result.submittedTick = request.submittedTick;
+		result.expiryTick = request.expiryTick;
+		result.correlationId = "managed-" + std::to_string(request.correlationId);
+		return result;
+	}
+
+	std::uint64_t ManagedCorrelationId(std::string_view correlation) {
+		constexpr std::string_view prefix = "managed-";
+		if(!correlation.starts_with(prefix)) return 0U;
+		std::uint64_t value = 0U;
+		const char* begin = correlation.data() + prefix.size();
+		const char* end = correlation.data() + correlation.size();
+		const auto [parsed, error] = std::from_chars(begin, end, value);
+		return error == std::errc{} && parsed == end ? value : 0U;
+	}
+
+	NativePhysicsStatus CopyQueryResult(const PhysicsQueryResult& result, NativePhysicsQueryResultInfo& info, NativePhysicsQueryHit* hits, std::uint32_t hitCapacity, std::uint32_t& requiredHitCount) {
+		const std::size_t count = result.hits ? result.hits->size() : 0U;
+		requiredHitCount = static_cast<std::uint32_t>(count);
+		info.header = {kNativePhysicsAbiVersion, sizeof(info)};
+		info.status = ToNativeStatus(result.status);
+		info.hitCount = requiredHitCount;
+		info.truncated = result.truncated ? 1U : 0U;
+		info.tick = result.tick;
+		// Physics owns a stable string correlation for producer ordering. Convert
+		// only the bridge's documented numeric form back to the fixed-width ABI
+		// field so immediate and scheduled managed results preserve correlation.
+		info.correlationId = ManagedCorrelationId(result.correlationId);
+		WriteDiagnostic(info.diagnostic, result.diagnostic);
+		if(count > hitCapacity || (count != 0U && hits == nullptr)) return NativePhysicsStatus::LimitExceeded;
+		for(std::size_t index = 0U; index < count; ++index) {
+			const PhysicsQueryHit& source = result.hits->at(index);
+			NativePhysicsQueryHit& destination = hits[index];
+			destination.body = FromHandle(source.body);
+			destination.objectId = FromUuid(source.objectId);
+			destination.objectGeneration = source.objectGeneration;
+			destination.componentGeneration = source.componentGeneration;
+			destination.materialId = FromUuid(source.materialId);
+			destination.position = FromVector(source.position);
+			destination.normal = FromVector(source.normal);
+			destination.distance = source.distance;
+			destination.fraction = source.fraction;
+			destination.subShapeKey = source.subShapeKey;
+			destination.collisionLayer = source.collisionLayer;
+			destination.motionType = static_cast<std::uint8_t>(source.motionType);
+			destination.sensor = source.sensor ? 1U : 0U;
+			destination.reserved = 0U;
+		}
+		return info.status;
+	}
 }
 
 extern "C" {
@@ -199,7 +302,7 @@ extern "C" {
 	NativePhysicsStatus Native_Physics_SubmitBodyCommand(const NativePhysicsBodyCommandRequest* request, NativePhysicsCommandReceipt* receipt) {
 		if(!HasPhysicsAbiHeader(request) || !HasPhysicsAbiHeader(receipt)) return NativePhysicsStatus::VersionMismatch;
 		const PhysicsWorldHandle active = PhysicsSystem::Instance().WorldHandle();
-		if(!SameWorld(request->body.world, active) || !ToHandle<NativePhysicsHandle, PhysicsBodyHandle>(request->body).IsValid() || !HasCurrentManagedIdentity(request->identity)) {
+		if(!SameWorld(request->body.world, active) || !ToHandle<NativePhysicsHandle, PhysicsBodyHandle>(request->body).IsValid() || !HasCurrentManagedIdentity(request->identity) || !MatchesPublishedBody(*request)) {
 			FillReceipt(*receipt, NativePhysicsStatus::StaleTarget, {}, "Body handle or world generation is stale.");
 			return receipt->status;
 		}
@@ -232,7 +335,7 @@ extern "C" {
 	NativePhysicsStatus Native_Physics_SubmitCharacterCommand(const NativePhysicsCharacterCommandRequest* request, NativePhysicsCommandReceipt* receipt) {
 		if(!HasPhysicsAbiHeader(request) || !HasPhysicsAbiHeader(receipt)) return NativePhysicsStatus::VersionMismatch;
 		const PhysicsWorldHandle active = PhysicsSystem::Instance().WorldHandle();
-		if(!SameWorld(request->character.world, active) || !ToHandle<NativePhysicsHandle, PhysicsCharacterHandle>(request->character).IsValid() || !HasCurrentManagedIdentity(request->identity)) {
+		if(!SameWorld(request->character.world, active) || !ToHandle<NativePhysicsHandle, PhysicsCharacterHandle>(request->character).IsValid() || !HasCurrentManagedIdentity(request->identity) || !MatchesPublishedCharacter(*request)) {
 			FillReceipt(*receipt, NativePhysicsStatus::StaleTarget, {}, "Character handle or world generation is stale."); return receipt->status;
 		}
 		if(!IsFinite(request->desiredVelocity) || !IsFinite(request->pose) || !std::isfinite(request->scalar)) { FillReceipt(*receipt, NativePhysicsStatus::InvalidArgument, {}, "Character command contains a non-finite value."); return receipt->status; }
@@ -253,28 +356,49 @@ extern "C" {
 		return status;
 	}
 
+	NativePhysicsStatus Native_Physics_QueryImmediate(const NativePhysicsQueryRequest* request, NativePhysicsQueryResultInfo* info, NativePhysicsQueryHit* hits, std::uint32_t hitCapacity, std::uint32_t* requiredHitCount) {
+		if(!HasPhysicsAbiHeader(request) || !HasPhysicsAbiHeader(info) || requiredHitCount == nullptr) return NativePhysicsStatus::VersionMismatch;
+		const PhysicsWorldHandle active = PhysicsSystem::Instance().WorldHandle();
+		if(!SameWorld(request->world, active)) {
+			*requiredHitCount = 0U;
+			info->header = {kNativePhysicsAbiVersion, sizeof(*info)};
+			info->status = NativePhysicsStatus::StaleTarget;
+			info->hitCount = 0U;
+			info->truncated = 0U;
+			info->tick = 0U;
+			info->correlationId = request->correlationId;
+			WriteDiagnostic(info->diagnostic, "Query world generation is stale.");
+			return info->status;
+		}
+		if(request->kind > NativePhysicsQueryKind::Point || request->hitMode > static_cast<std::uint32_t>(PhysicsQueryHitMode::All)
+			|| !IsFinite(request->pose) || !IsFinite(request->direction) || !IsFinite(request->shapeExtent) || !std::isfinite(request->distance)) {
+			*requiredHitCount = 0U;
+			info->header = {kNativePhysicsAbiVersion, sizeof(*info)};
+			info->status = NativePhysicsStatus::InvalidArgument;
+			info->hitCount = 0U;
+			info->truncated = 0U;
+			info->tick = 0U;
+			info->correlationId = request->correlationId;
+			WriteDiagnostic(info->diagnostic, "Query contains an unsupported or non-finite value.");
+			return info->status;
+		}
+		const PhysicsQueryResult result = PhysicsSystem::Instance().QueryImmediate(ToQueryRequest(*request, active));
+		return CopyQueryResult(result, *info, hits, hitCapacity, *requiredHitCount);
+	}
+
 	NativePhysicsStatus Native_Physics_SubmitQuery(const NativePhysicsQueryRequest* request, NativePhysicsQueryReceipt* receipt) {
 		if(!HasPhysicsAbiHeader(request) || !HasPhysicsAbiHeader(receipt)) return NativePhysicsStatus::VersionMismatch;
 		const PhysicsWorldHandle active = PhysicsSystem::Instance().WorldHandle();
-		if(!SameWorld(request->world, active)) return NativePhysicsStatus::StaleTarget;
+		if(!SameWorld(request->world, active)) {
+			FillQueryReceipt(*receipt, NativePhysicsStatus::StaleTarget, request->correlationId, "Query world generation is stale.");
+			return receipt->status;
+		}
 		if(request->kind > NativePhysicsQueryKind::Point || request->hitMode > static_cast<std::uint32_t>(PhysicsQueryHitMode::All)
-			|| !IsFinite(request->pose) || !IsFinite(request->direction) || !IsFinite(request->shapeExtent) || !std::isfinite(request->distance)) return NativePhysicsStatus::InvalidArgument;
-		PhysicsQueryRequest nativeRequest;
-		nativeRequest.world = active;
-		nativeRequest.kind = static_cast<PhysicsQueryKind>(request->kind);
-		nativeRequest.hitMode = static_cast<PhysicsQueryHitMode>(request->hitMode);
-		nativeRequest.pose = ToPose(request->pose);
-		nativeRequest.direction = ToVector(request->direction);
-		nativeRequest.shapeExtent = ToVector(request->shapeExtent);
-		nativeRequest.distance = request->distance;
-		nativeRequest.maximumHits = request->maximumHits;
-		nativeRequest.filter.collisionMask = request->collisionMask;
-		nativeRequest.filter.bodyTypes = static_cast<PhysicsQueryBodyTypeMask>(request->bodyTypeMask);
-		nativeRequest.filter.includeSensors = request->includeSensors != 0U;
-		nativeRequest.submittedTick = request->submittedTick;
-		nativeRequest.expiryTick = request->expiryTick;
-		nativeRequest.correlationId = "managed-" + std::to_string(request->correlationId);
-		const PhysicsQueryReceipt nativeReceipt = PhysicsSystem::Instance().SubmitQuery(std::move(nativeRequest));
+			|| !IsFinite(request->pose) || !IsFinite(request->direction) || !IsFinite(request->shapeExtent) || !std::isfinite(request->distance)) {
+			FillQueryReceipt(*receipt, NativePhysicsStatus::InvalidArgument, request->correlationId, "Query contains an unsupported or non-finite value.");
+			return receipt->status;
+		}
+		const PhysicsQueryReceipt nativeReceipt = PhysicsSystem::Instance().SubmitQuery(ToQueryRequest(*request, active));
 		receipt->header = {kNativePhysicsAbiVersion, sizeof(*receipt)};
 		receipt->status = nativeReceipt.accepted ? NativePhysicsStatus::Accepted : ToNativeStatus(nativeReceipt.rejectionReason);
 		receipt->reserved = 0U;
@@ -300,35 +424,7 @@ extern "C" {
 	NativePhysicsStatus Native_Physics_ReadQuery(const NativePhysicsQueryHandle* handle, NativePhysicsQueryResultInfo* info, NativePhysicsQueryHit* hits, std::uint32_t hitCapacity, std::uint32_t* requiredHitCount) {
 		if(handle == nullptr || !HasPhysicsAbiHeader(info) || requiredHitCount == nullptr) return NativePhysicsStatus::VersionMismatch;
 		const PhysicsQueryResult result = PhysicsSystem::Instance().ReadQuery(ToQueryHandle(*handle));
-		const std::size_t count = result.hits ? result.hits->size() : 0U;
-		*requiredHitCount = static_cast<std::uint32_t>(count);
-		info->header = {kNativePhysicsAbiVersion, sizeof(*info)};
-		info->status = ToNativeStatus(result.status);
-		info->hitCount = static_cast<std::uint32_t>(count);
-		info->truncated = result.truncated ? 1U : 0U;
-		info->tick = result.tick;
-		info->correlationId = 0U;
-		WriteDiagnostic(info->diagnostic, result.diagnostic);
-		if(count > hitCapacity || (count != 0U && hits == nullptr)) return NativePhysicsStatus::LimitExceeded;
-		for(std::size_t index = 0U; index < count; ++index) {
-			const PhysicsQueryHit& source = result.hits->at(index);
-			NativePhysicsQueryHit& destination = hits[index];
-			destination.body = FromHandle(source.body);
-			destination.objectId = FromUuid(source.objectId);
-			destination.objectGeneration = source.objectGeneration;
-			destination.componentGeneration = source.componentGeneration;
-			destination.materialId = FromUuid(source.materialId);
-			destination.position = FromVector(source.position);
-			destination.normal = FromVector(source.normal);
-			destination.distance = source.distance;
-			destination.fraction = source.fraction;
-			destination.subShapeKey = source.subShapeKey;
-			destination.collisionLayer = source.collisionLayer;
-			destination.motionType = static_cast<std::uint8_t>(source.motionType);
-			destination.sensor = source.sensor ? 1U : 0U;
-			destination.reserved = 0U;
-		}
-		return info->status;
+		return CopyQueryResult(result, *info, hits, hitCapacity, *requiredHitCount);
 	}
 
 	NativePhysicsStatus Native_Physics_CancelQuery(const NativePhysicsQueryHandle* handle) {

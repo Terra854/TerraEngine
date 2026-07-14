@@ -21,15 +21,15 @@ concurrency:
 
 jobs:
   export-baseline:
-    name: Debug build, install, and export
+    name: RelWithDebInfo build, install, and export
     runs-on: windows-latest
     timeout-minutes: 60
     defaults:
       run:
         shell: pwsh
     env:
-      BUILD_DIR: out/build/Debug
-      INSTALL_ROOT: out/build/Debug/Build
+      BUILD_DIR: out/build/RelWithDebInfo
+      INSTALL_ROOT: out/build/RelWithDebInfo/Build
       CI_ROOT: out/ci
       BASELINE_ROOT: out/ci/export-runtime-baseline
       LOG_ROOT: out/ci/logs
@@ -61,10 +61,10 @@ jobs:
           }
           New-Item -ItemType Directory -Path $env:LOG_ROOT -Force | Out-Null
 
-      - name: Configure Debug
+      - name: Configure RelWithDebInfo
         run: |
           $logPath = Join-Path $env:LOG_ROOT 'configure.log'
-          & cmake --preset Debug 2>&1 | Tee-Object -FilePath $logPath
+          & cmake --preset RelWithDebInfo 2>&1 | Tee-Object -FilePath $logPath
           $exitCode = $LASTEXITCODE
           if ($exitCode -ne 0) {
             exit $exitCode
@@ -73,7 +73,7 @@ jobs:
       - name: Build export gate targets
         run: |
           $logPath = Join-Path $env:LOG_ROOT 'build.log'
-          & cmake --build --preset Debug --parallel --target `
+          & cmake --build --preset RelWithDebInfo --parallel --target `
             TerraEngine-EngineTests `
             TerraEngine-EditorTests `
             TerraEngineModelPackageCompiler `
@@ -102,10 +102,10 @@ jobs:
             exit $exitCode
           }
 
-      - name: Install Debug tools and runtime
+      - name: Install RelWithDebInfo tools and runtime
         run: |
           $logPath = Join-Path $env:LOG_ROOT 'install.log'
-          & cmake --build --preset Debug --target install 2>&1 | Tee-Object -FilePath $logPath
+          & cmake --build --preset RelWithDebInfo --target install 2>&1 | Tee-Object -FilePath $logPath
           $exitCode = $LASTEXITCODE
           if ($exitCode -ne 0) {
             exit $exitCode
@@ -211,7 +211,7 @@ jobs:
       - name: Stage export evidence artifact
         if: ${{ always() }}
         run: |
-          $artifactRoot = Join-Path $env:CI_ROOT 'artifacts/headless-export-evidence-windows-debug'
+          $artifactRoot = Join-Path $env:CI_ROOT 'artifacts/headless-export-evidence-windows-relwithdebinfo'
           $artifactEvidence = Join-Path $artifactRoot 'headless-export'
           New-Item -ItemType Directory -Path $artifactEvidence -Force | Out-Null
 
@@ -232,7 +232,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: headless-export-evidence-windows-debug
-          path: out/ci/artifacts/headless-export-evidence-windows-debug
+          name: headless-export-evidence-windows-relwithdebinfo
+          path: out/ci/artifacts/headless-export-evidence-windows-relwithdebinfo
           if-no-files-found: warn
           retention-days: 14

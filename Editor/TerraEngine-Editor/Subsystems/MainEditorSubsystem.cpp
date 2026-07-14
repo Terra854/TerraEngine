@@ -12,6 +12,7 @@
 #include "ScriptCompilationSubsystem.h"
 #include "UndoRedoSystem.h"
 #include "../Profiling/EditorProfilerService.h"
+#include "Engine/Profiling/ProfilerScope.h"
 #include "Engine/Core/Logger/Logger.h"
 #include "Engine/Core/MainEngine.h"
 #include "Engine/Core/Object/ObjectManager.h"
@@ -29,7 +30,13 @@
 #include "Engine/UI/UISystem.h"
 #include "Engine/Scripting/ScriptGlue.h"
 #include "Engine/Scripting/ScriptingSystem.h"
+#include "Engine/Components/Physics/CharacterControllerComponent.h"
+#include "Engine/Components/Physics/ColliderSetComponent.h"
+#include "Engine/Components/Physics/ConstraintSetComponent.h"
+#include "Engine/Components/Physics/RigidBodyComponent.h"
+#include "Engine/Physics/Assets/CookedColliderAsset.h"
 #include "Engine/Physics/PhysicsSystem.h"
+#include "Engine/Runtime/ExportStartupCoordinator.h"
 #include "Engine/Scene/SceneMutationQueue.h"
 #include "Engine/Utilities/PlatformUtils.h"
 #include <imgui.h>
@@ -37,6 +44,7 @@
 #include <backends/imgui_impl_vulkan.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
+#include <cstring>
 #include <fstream>
 #include <string_view>
 #include <unordered_map>
@@ -1627,7 +1635,8 @@ bool MainEditorSubsystem::StepPlayMode()
 void MainEditorSubsystem::StopPlayMode()
 {
 	if (!ScriptingSystem::Instance().IsRunning()
-		&& !TerraEngine::Physics::PhysicsSystem::Instance().WorldHandle().IsValid())
+		&& !TerraEngine::Physics::PhysicsSystem::Instance().WorldHandle().IsValid()
+		&& !m_HasPlayModeSceneSnapshot)
 	{
 		return;
 	}
@@ -1640,6 +1649,80 @@ void MainEditorSubsystem::StopPlayMode()
 	ScriptingSystem::Instance().SetRunning(false);
 	ScriptingSystem::Instance().SetPaused(false);
 	RestorePlayModeSceneState();
+}
+
+TerraEngine::Runtime::PhysicsInvariantReport MainEditorSubsystem::RunPhysicsExportInvariantFixture()
+{
+	// The installed editor executes the real serialized startup scene through
+	// the same Engine scheduler and PhysicsSystem path as the export launcher.
+	using namespace TerraEngine::Physics;
+	TerraEngine::Runtime::PhysicsInvariantReport serializedReport;
+	if (ctx == nullptr || ctx->engine == nullptr || ctx->projectManager == nullptr
+		|| !ctx->projectManager->HasActiveProject()) {
+		serializedReport.diagnostic = "The installed editor physics invariant run requires an already-open project.";
+		return serializedReport;
+	}
+
+	try {
+		const std::filesystem::path projectRoot = ctx->projectManager->GetProjectRoot();
+		const std::filesystem::path settingsPath = projectRoot / "ProjectSettings" / "PhysicsSettings.json";
+		const std::vector<std::uint8_t> settingsBytes = ResourceManager::Instance().ReadFileBytes(settingsPath);
+		const nlohmann::json settingsJson = nlohmann::json::parse(settingsBytes.begin(), settingsBytes.end());
+		PhysicsSettings settings = PhysicsSettings::Defaults();
+		settings.schemaVersion = settingsJson.value("schemaVersion", settings.schemaVersion);
+		if (!settingsJson.contains("gravity") || !settingsJson["gravity"].is_array() || settingsJson["gravity"].size() != 3U
+			|| !settingsJson.contains("layers") || !settingsJson["layers"].is_array() || settingsJson["layers"].size() != settings.layers.size()) {
+			serializedReport.diagnostic = "The serialized fixture PhysicsSettings.json is missing gravity or the complete layer table.";
+			return serializedReport;
+		}
+		settings.gravity = {settingsJson["gravity"][0].get<float>(), settingsJson["gravity"][1].get<float>(), settingsJson["gravity"][2].get<float>()};
+		settings.fixedTimeStep = settingsJson.value("fixedTimeStep", settings.fixedTimeStep);
+		for (std::size_t index = 0U; index < settings.layers.size(); ++index) {
+			const nlohmann::json& source = settingsJson["layers"][index];
+			settings.layers[index].id = source.value("id", settings.layers[index].id);
+			settings.layers[index].name = source.value("name", settings.layers[index].name);
+			settings.layers[index].collisionMask = source.value("collisionMask", settings.layers[index].collisionMask);
+			settings.layers[index].broadPhaseGroup = source.value("broadPhaseGroup", settings.layers[index].broadPhaseGroup);
+			settings.layers[index].enabled = source.value("enabled", settings.layers[index].enabled);
+		}
+		if (!settings.Validate().accepted) {
+			serializedReport.diagnostic = "The serialized fixture PhysicsSettings.json is invalid.";
+			return serializedReport;
+		}
+
+		const std::filesystem::path cookedPath = projectRoot / "Build" / "Assets" / "Colliders" / "Startup.tepcoll";
+		const std::vector<std::uint8_t> rawCooked = ResourceManager::Instance().ReadFileBytes(cookedPath);
+		std::vector<std::byte> cookedBytes(rawCooked.size());
+		if (!rawCooked.empty()) std::memcpy(cookedBytes.data(), rawCooked.data(), rawCooked.size());
+		CookedColliderDiagnostics cookedDiagnostics;
+		const std::optional<CookedColliderAsset> cooked = CookedColliderAsset::Deserialize(cookedBytes, cookedDiagnostics);
+		if (!cooked) {
+			serializedReport.diagnostic = "The serialized fixture could not load its installed cooked collider envelope.";
+			return serializedReport;
+		}
+		ResourceManager::Instance().RegisterAssetPath(cooked->Envelope().assetId, cookedPath, AssetType::CookedCollider);
+
+		auto& physics = PhysicsSystem::Instance();
+		// Queue settings before Play Mode captures authored state. StartPlayMode
+		// performs the normal lifecycle start, which applies this validated update
+		// at its protected world-creation boundary.
+		if (!physics.QueueSettingsUpdate(settings) || !StartPlayMode()) {
+			serializedReport.diagnostic = "The serialized fixture could not start editor Play Mode with its project settings.";
+			return serializedReport;
+		}
+		serializedReport = ctx->engine->RunPhysicsInvariantFixture();
+		// The common runner stops provider work. This second stop is intentional:
+		// it restores the editor's captured pre-play scene snapshot through the
+		// normal lifecycle rather than manually clearing ObjectManager state.
+		StopPlayMode();
+		return serializedReport;
+	}
+	catch (const std::exception& exception) {
+		serializedReport.diagnostic = std::string("Serialized editor physics fixture failed: ") + exception.what();
+		StopPlayMode();
+		return serializedReport;
+	}
+
 }
 
 void MainEditorSubsystem::RefreshViewportTextures(VulkanContext& vulkan)
@@ -2258,7 +2341,10 @@ void MainEditorSubsystem::DrawUI() {
 			CaptureCurrentPrefabEditingState();
 			LoadPrefabReturnSceneSnapshotIntoObjectManager(true);
 			m_PrefabObjectsLoadedForEditor = false;
-			win->Draw();
+			{
+				TERRAENGINE_PROFILE_TASK_SCOPE("EditorWindow::Draw", TerraEngine::Profiling::ProfilerModuleId::CpuEngine, win->GetTitle().c_str());
+				win->Draw();
+			}
 			EnsurePrefabObjectsLoadedForEditor();
 		}
 		else
@@ -2267,6 +2353,7 @@ void MainEditorSubsystem::DrawUI() {
 			{
 				EnsurePrefabObjectsLoadedForEditor();
 			}
+			TERRAENGINE_PROFILE_TASK_SCOPE("EditorWindow::Draw", TerraEngine::Profiling::ProfilerModuleId::CpuEngine, win->GetTitle().c_str());
 			win->Draw();
 		}
 	}

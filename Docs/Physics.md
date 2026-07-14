@@ -52,19 +52,89 @@ it must never be used as the runtime baseline.
 From a clean checkout with the repository-bundled dependencies:
 
 ```powershell
-cmake --preset Debug
-cmake --build --preset Debug --target TerraEngine TerraEngine-Editor TerraEngine-EngineTests
-cmake --build --preset Debug --target install
+cmake --preset RelWithDebInfo
+cmake --build --preset RelWithDebInfo --target TerraEngine TerraEngine-Editor TerraEnginePhysicsColliderCompiler TerraEngine-Export TerraEngine-EngineTests TerraEngine-EditorTests
+cmake --build --preset RelWithDebInfo --target install
 ```
+
+Spec 042 accepts RelWithDebInfo exclusively for compile, test, install, and live-validation completion gates.
 
 Run the focused engine slice:
 
 ```powershell
 $env:TERRAENGINE_TEST_FILTER = "Physics;Physics.FixedStep;Physics.RigidBody;Physics.Serialization"
-./out/build/Debug/TerraEngine-EngineTests.exe
+./out/build/RelWithDebInfo/TerraEngine-EngineTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
 ```
 
-The canonical installed tree is `out/build/Debug/Build`. No globally installed
+The canonical installed tree is `out/build/RelWithDebInfo/Build`. No globally installed
 physics SDK is required or permitted. See [Docs/Testing.md](Testing.md) for
 CTest filters and full regression workflows.
+
+## Spec 042 stress, export, and troubleshooting
+
+Run the committed deterministic and lifecycle fixtures from the RelWithDebInfo
+test binaries. These tests create the full 10,000-body/1,000-active workload,
+repeat 10,000-ray batches, and exercise stale-world and Play Mode cycles.
+
+```powershell
+$env:TERRAENGINE_TEST_FILTER = "Physics.DeterminismStress;Physics.LifecycleStress"
+& .\out\build\RelWithDebInfo\TerraEngine-EngineTests.exe
+Remove-Item Env:TERRAENGINE_TEST_FILTER
+
+$env:TERRAENGINE_TEST_FILTER = "Physics.Editor.Soak"
+& .\out\build\RelWithDebInfo\TerraEngine-EditorTests.exe
+Remove-Item Env:TERRAENGINE_TEST_FILTER
+```
+
+The installed-editor loopback stress harness is the live performance and
+authoring check. It records body counts, exact paused `Next` ticks, profiler
+data, authored-scene hashes, and shutdown status:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Physics/RunInstalledEditorPhysicsStress.ps1 `
+  -InstallRoot out/build/RelWithDebInfo/Build `
+  -WorkRoot out/validation/installed-editor-physics-stress `
+  -ObjectCount 10000 -ActiveDynamicCount 1000 -ExplicitStepCount 100 -WorkerCount max `
+  -AllowLiveStress
+```
+
+Add `-RunUs6Loopback` for managed/automation reload and idempotency checks, or
+`-RunAuthoringWalkthrough` for the editor authoring workflow. Keep each run in
+its own disposable `out/validation` directory and use a free `-McpPort`.
+
+The headless export parity gate cooks source-only collider recipes, exports the
+package, validates the six evidence files, launches the published runtime, and
+checks orderly shutdown:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/ExportRuntimeBaseline/RunBaseline.ps1 `
+  -InstallRoot out/build/RelWithDebInfo/Build `
+  -WorkRoot out/ci/physics-export-baseline
+```
+
+If a focused test fails, preserve its output before rerunning. Common causes
+are a stale install tree (rerun the install target), a busy MCP port, a missing
+Visual Studio developer environment, or a source-only collider without its
+cooked `.tepcoll` envelope. Do not substitute Debug or a globally installed
+physics SDK for the RelWithDebInfo gate.
+
+### Sanitizer support on Windows
+
+The Windows/MSVC project does not provide a full-engine ThreadSanitizer lane.
+The supported sanitizer evidence is the repository's provider-only Jolt spike:
+
+```powershell
+pwsh -NoProfile -File Tools/Physics/BackendSpike/RunBackendSpike.ps1 `
+  -Candidate Jolt56 `
+  -Jolt56Source out/physics-spike/sources/JoltPhysics-5.6.0 `
+  -WorkRoot out/physics-backend-spike `
+  -RunId jolt56-windows-asan `
+  -Configuration ReleaseASAN `
+  -FixtureRepeats 3
+```
+
+That lane instruments the provider fixture only; TerraEngine engine/editor,
+Vulkan presentation, managed NativeAOT, and full lifecycle CTest binaries are
+excluded. The orchestrator must record the exact toolchain, outcome, and any
+unsupported lanes in `specs/042-physics-system/evidence/sanitizer-validation.md`.

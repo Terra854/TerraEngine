@@ -21,6 +21,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <iterator>
@@ -176,6 +177,80 @@ static nlohmann::json BuildPhysicsManifestJson(const PhysicsExportManifest& phys
 		{"materials", std::move(materials)}, {"colliders", std::move(colliders)},
 		{"validation", {{"fixtureSchemaVersion", physics.validationFixtureSchemaVersion}, {"status", physics.validationStatus}}}
 	};
+}
+
+// Staged scenes and prefabs must point at immutable runtime envelopes, never
+// at authoring recipes.  The export path deliberately performs this rewrite
+// after every cooked payload has been discovered so metadata-less headless
+// cooks are handled exactly like editor-imported assets.
+static bool RewriteStagedPhysicsColliderReferences(
+	const std::filesystem::path& stagingDirectory,
+	std::string& error)
+{
+	for(const auto& entry : std::filesystem::recursive_directory_iterator(stagingDirectory)) {
+		if(!entry.is_regular_file()) continue;
+		const std::filesystem::path extension = entry.path().extension();
+		if(extension != ".tescene" && extension != ".teprefab") continue;
+
+		std::ifstream input(entry.path());
+		if(!input) {
+			error = "Could not open staged scene while resolving physics collider references: " + PathToUtf8(entry.path());
+			return false;
+		}
+		nlohmann::json document = nlohmann::json::parse(input, nullptr, false);
+		if(document.is_discarded()) {
+			error = "Could not parse staged scene while resolving physics collider references: " + PathToUtf8(entry.path());
+			return false;
+		}
+
+		bool changed = false;
+		std::function<bool(nlohmann::json&)> rewrite = [&](nlohmann::json& node) {
+			if(node.is_object()) {
+				for(auto& [_, child] : node.items()) {
+					if(!rewrite(child)) return false;
+				}
+				return true;
+			}
+			if(node.is_array()) {
+				for(nlohmann::json& child : node) {
+					if(!rewrite(child)) return false;
+				}
+				return true;
+			}
+			if(!node.is_string()) return true;
+
+			const std::filesystem::path sourcePath = node.get<std::string>();
+			if(sourcePath.extension() != ".tecollider") return true;
+			std::filesystem::path runtimePath = sourcePath;
+			const auto firstPart = runtimePath.begin();
+			if(firstPart != runtimePath.end() && firstPart->generic_string() == "Assets") {
+				runtimePath = runtimePath.lexically_relative("Assets");
+			}
+			runtimePath.replace_extension(".tepcoll");
+			if(runtimePath.empty() || !std::filesystem::exists(stagingDirectory / runtimePath)) {
+				error = "Staged scene references source-only collider '" + sourcePath.generic_string()
+					+ "' without a cooked runtime envelope. Run the collider cooker before exporting.";
+				return false;
+			}
+			node = runtimePath.generic_string();
+			changed = true;
+			return true;
+		};
+
+		if(!rewrite(document)) return false;
+		if(!changed) continue;
+		std::ofstream output(entry.path(), std::ios::trunc);
+		if(!output) {
+			error = "Could not write staged scene after resolving physics collider references: " + PathToUtf8(entry.path());
+			return false;
+		}
+		output << document.dump(4);
+		if(!output.good()) {
+			error = "Could not finish staged scene physics collider rewrite: " + PathToUtf8(entry.path());
+			return false;
+		}
+	}
+	return true;
 }
 
 static void EmitProgress(ExportProgressCallback& cb, ExportPhase phase, float progress, const std::string& message, bool finished = false) {
@@ -1019,6 +1094,11 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 		if (std::filesystem::exists(compiledAssets)) {
 			for (const auto& entry : std::filesystem::recursive_directory_iterator(compiledAssets)) {
 				if (!entry.is_regular_file()) continue;
+				// A malformed or stale build directory must not reintroduce authoring
+				// recipes after the raw-asset pass deliberately excluded them. The
+				// standalone runtime has only cooked collider support, so it must never
+				// receive source geometry that would require the editor cooker.
+				if(entry.path().extension() == ".tecollider") continue;
 
 				auto relative = std::filesystem::relative(entry.path(), compiledAssets);
 				auto dest = stagingDir / relative;
@@ -1271,6 +1351,73 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 					// Skip malformed or unreadable meta files.
 				}
 			}
+		}
+
+		// Headless and CI cooks write immutable output directly into Build/Assets
+		// and intentionally do not need editor sidecar metadata. Discover those
+		// files from the staged tree as a second, typed pass so every runtime
+		// material and collider still receives an identity, checksum, and manifest
+		// record. Metadata-discovered records are skipped by package path.
+		auto hasPhysicsRecord = [this](AssetType type, const std::filesystem::path& packagePath) {
+			const std::string normalizedPath = packagePath.generic_string();
+			const std::vector<PhysicsExportAssetRecord>& records = type == AssetType::PhysicsMaterial
+				? m_PhysicsManifest.materials : m_PhysicsManifest.colliders;
+			return std::any_of(records.begin(), records.end(), [&normalizedPath](const PhysicsExportAssetRecord& record) {
+				return record.packagePath == normalizedPath;
+			});
+		};
+		for(const auto& entry : std::filesystem::recursive_directory_iterator(stagingDir)) {
+			if(!entry.is_regular_file()) continue;
+			const std::filesystem::path extension = entry.path().extension();
+			const AssetType type = extension == ".tephysmat" ? AssetType::PhysicsMaterial
+				: extension == ".tepcoll" ? AssetType::CookedCollider : AssetType::ShaderCollection;
+			if(type != AssetType::PhysicsMaterial && type != AssetType::CookedCollider) continue;
+			const std::filesystem::path packagePath = std::filesystem::relative(entry.path(), stagingDir);
+			if(hasPhysicsRecord(type, packagePath)) continue;
+
+			std::vector<std::byte> bytes;
+			if(!ReadExportBytes(entry.path(), bytes)) {
+				result.errorMessage = "Could not read staged physics payload for manifest discovery: " + PathToUtf8(packagePath);
+				return false;
+			}
+			std::string guid;
+			if(type == AssetType::PhysicsMaterial) {
+				try {
+					const nlohmann::json materialDocument = nlohmann::json::parse(bytes.begin(), bytes.end());
+					TerraEngine::Physics::PhysicsMaterial material;
+					TerraEngine::Physics::PhysicsMaterialDiagnostics diagnostics;
+					if(!TerraEngine::Physics::PhysicsMaterial::LoadJson(materialDocument, material, diagnostics)) {
+						result.errorMessage = "Staged physics material is invalid during manifest discovery: " + PathToUtf8(packagePath);
+						return false;
+					}
+					guid = TerraEngine::ToHexString(material.assetId);
+				}
+				catch(const std::exception&) {
+					result.errorMessage = "Staged physics material is not valid JSON during manifest discovery: " + PathToUtf8(packagePath);
+					return false;
+				}
+			}
+			else {
+				TerraEngine::Physics::CookedColliderDiagnostics diagnostics;
+				const auto collider = TerraEngine::Physics::CookedColliderAsset::Deserialize(bytes, diagnostics);
+				if(!collider) {
+					result.errorMessage = "Staged cooked collider is invalid during manifest discovery: " + PathToUtf8(packagePath);
+					return false;
+				}
+				guid = TerraEngine::ToHexString(collider->Envelope().assetId);
+			}
+
+			std::string physicsAssetError;
+			if(!addValidatedPhysicsAsset(guid, type, packagePath, physicsAssetError)) {
+				result.errorMessage = physicsAssetError;
+				return false;
+			}
+		}
+
+		std::string physicsReferenceError;
+		if(!RewriteStagedPhysicsColliderReferences(stagingDir, physicsReferenceError)) {
+			result.errorMessage = physicsReferenceError;
+			return false;
 		}
 
 		// Directory iteration order is platform-dependent. Sort durable records

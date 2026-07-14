@@ -27,6 +27,7 @@
 #include "Scene/RuntimeLayout.h"
 #include "ThreadPool/ThreadPool.h"
 #include "Timer.h"
+#include "Runtime/ExportStartupCoordinator.h"
 
 // Primary engine facade exposed to the launcher and other executables. The
 // TERRAENGINE_API macro ensures the class is exported from the shared library
@@ -51,6 +52,15 @@ class TERRAENGINE_API Engine {
 		bool Update(float deltaTime);
 		void Shutdown();
 		void ResetFrameTimer();
+		// Configures a process-scoped validation session that initializes only the
+		// scene, scripting, physics, resource, and scheduler path. The launcher
+		// uses this before Initialize() so parity validation never creates a window
+		// or render device merely to run a deterministic physics fixture.
+		void ConfigureHeadlessPhysicsValidation();
+		// Executes the already-loaded startup scene through the same PhysicsSystem
+		// and scheduler/flush boundary used by ordinary frames. Callers own normal
+		// engine shutdown after this bounded validation operation returns.
+		TerraEngine::Runtime::PhysicsInvariantReport RunPhysicsInvariantFixture();
 
 		template <typename T>
 		// GetSystem is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -90,6 +100,7 @@ class TERRAENGINE_API Engine {
 
 		SystemsBase* editorSystem = nullptr;
 		bool editorMode = false;
+		bool headlessPhysicsValidation = false;
 
 		ObjectManager& objManager = ObjectManager::instance();
 		ThreadPool& pool = ThreadPool::instance();

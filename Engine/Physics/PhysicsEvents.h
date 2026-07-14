@@ -203,7 +203,8 @@ namespace TerraEngine::Physics {
 			PhysicsTick tick,
 			std::span<const PhysicsEventThreadLocalCollector* const> collectors,
 			const PhysicsEventSubscriptionSnapshot& subscriptions,
-			PhysicsEventPacketLimits limits = {});
+			PhysicsEventPacketLimits limits = {},
+			bool applySubscriptionFilters = true);
 	};
 
 	// Retention owns only bounded packet references. Callers retain a shared

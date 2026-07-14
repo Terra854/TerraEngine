@@ -82,6 +82,20 @@ namespace TerraEngine::Scene {
 				|| kind == TransactionWriteKind::UpdateComponentProperty;
 		}
 
+		std::size_t LogicalWriteCount(const Transaction& transaction)
+		{
+			std::size_t count = 0U;
+			for (const TransactionWriteOperation& operation : transaction.writeSet.operations)
+			{
+				// Each transform pair is one authored-object write even though it
+				// stores position and rotation together for atomic publication.
+				count += operation.kind == TransactionWriteKind::UpdateTransformBatch
+					? operation.transformUpdates.size()
+					: 1U;
+			}
+			return count;
+		}
+
 		bool SameObjectRef(const TransactionObjectRef& left, const TransactionObjectRef& right)
 		{
 			return left.objectId == right.objectId && left.localObjectId == right.localObjectId;
@@ -162,7 +176,7 @@ namespace TerraEngine::Scene {
 						continue;
 					}
 				}
-				reversed.push_back(*operation);
+				reversed.push_back(std::move(*operation));
 			}
 			std::reverse(reversed.begin(), reversed.end());
 			std::vector<TransactionWriteOperation> normalized = std::move(reversed);
@@ -207,10 +221,11 @@ namespace TerraEngine::Scene {
 				return result;
 			}
 
-			if (transaction.writeSet.operations.size() > transaction.budget.maxWriteCount)
+			const std::size_t logicalWriteCount = LogicalWriteCount(transaction);
+			if (logicalWriteCount > transaction.budget.maxWriteCount)
 			{
 				result.status = TransactionStatus::Rejected;
-				AddConflict(result, TransactionConflictReason::CommitBudgetRejection, TerraEngine::EMPTY_UUID, 0, "Transaction exceeds its configured write budget.", transaction.budget.maxWriteCount, transaction.writeSet.operations.size());
+				AddConflict(result, TransactionConflictReason::CommitBudgetRejection, TerraEngine::EMPTY_UUID, 0, "Transaction exceeds its configured write budget.", transaction.budget.maxWriteCount, logicalWriteCount);
 				return result;
 			}
 
@@ -272,6 +287,34 @@ namespace TerraEngine::Scene {
 					{
 						result.status = TransactionStatus::Conflicted;
 						AddConflict(result, TransactionConflictReason::MissingTarget, operation.parent.objectId, index, "Created-object parent no longer exists.", 0, 0, {}, {}, operation.kind);
+					}
+					continue;
+				}
+
+				if (operation.kind == TransactionWriteKind::UpdateTransformBatch)
+				{
+					if (operation.transformUpdates.empty())
+					{
+						result.status = TransactionStatus::Rejected;
+						AddConflict(result, TransactionConflictReason::InvalidPayload, TerraEngine::EMPTY_UUID, index, "Transform publication batch contains no updates.", 0, 0, {}, {}, operation.kind);
+						continue;
+					}
+					std::unordered_set<TerraEngine::UUID> batchTargets;
+					batchTargets.reserve(operation.transformUpdates.size());
+					for (const TransactionTransformUpdate& update : operation.transformUpdates)
+					{
+						if (update.objectId == TerraEngine::EMPTY_UUID || !batchTargets.insert(update.objectId).second)
+						{
+							result.status = TransactionStatus::Rejected;
+							AddConflict(result, TransactionConflictReason::InvalidPayload, update.objectId, index, "Transform publication batch has an empty or duplicate target.", 0, 0, std::string(Transform::kComponentName), {}, operation.kind);
+							continue;
+						}
+						const std::optional<Object> target = objects.getObject(update.objectId);
+						if (!target || !objects.GetComponent<Transform>(*target))
+						{
+							result.status = TransactionStatus::Conflicted;
+							AddConflict(result, TransactionConflictReason::MissingTarget, update.objectId, index, "Transform publication target no longer has a Transform component.", 0, 0, std::string(Transform::kComponentName), {}, operation.kind);
+						}
 					}
 					continue;
 				}
@@ -395,7 +438,7 @@ namespace TerraEngine::Scene {
 			{
 				result.status = TransactionStatus::Conflicted;
 			}
-			result.rejectedWriteCount = result.conflicts.empty() ? 0 : transaction.writeSet.operations.size();
+			result.rejectedWriteCount = result.conflicts.empty() ? 0 : LogicalWriteCount(transaction);
 			return result;
 		}
 	}
@@ -608,9 +651,30 @@ namespace TerraEngine::Scene {
 		return *this;
 	}
 
-	Transaction TransactionalMutationBuilder::Build() const
+	TransactionalMutationBuilder& TransactionalMutationBuilder::UpdateTransformBatch(ObjectManager& objects, std::vector<TransactionTransformUpdate> updates)
+	{
+		// Reserve once before capturing observations. Physics can publish thousands
+		// of bodies, and repeated read-set growth would otherwise defeat batching.
+		transaction.readSet.objects.reserve(transaction.readSet.objects.size() + updates.size());
+		for (const TransactionTransformUpdate& update : updates)
+		{
+			ObserveObject(objects, update.objectId);
+		}
+		TransactionWriteOperation operation;
+		operation.kind = TransactionWriteKind::UpdateTransformBatch;
+		operation.transformUpdates = std::move(updates);
+		transaction.writeSet.operations.push_back(std::move(operation));
+		return *this;
+	}
+
+	Transaction TransactionalMutationBuilder::Build() &
 	{
 		return NormalizeTransaction(transaction);
+	}
+
+	Transaction TransactionalMutationBuilder::Build() &&
+	{
+		return NormalizeTransaction(std::move(transaction));
 	}
 
 	std::string_view ToString(TransactionStatus status)
@@ -724,6 +788,45 @@ namespace TerraEngine::Scene {
 						break;
 					}
 				}
+				continue;
+			}
+
+			if (operation.kind == TransactionWriteKind::UpdateTransformBatch)
+			{
+				// Resolve every target before the first write. This retains all-or-nothing
+				// semantics even though the fast path deliberately bypasses reflection.
+				std::vector<std::pair<Object, Transform*>> targets;
+				targets.reserve(operation.transformUpdates.size());
+				for (const TransactionTransformUpdate& update : operation.transformUpdates)
+				{
+					const std::optional<Object> target = objects.getObject(update.objectId);
+					Transform* transform = target ? objects.GetComponent<Transform>(*target) : nullptr;
+					if (!target || !transform)
+					{
+						AddConflict(result, TransactionConflictReason::MissingTarget, update.objectId, index, "Transform publication target disappeared before publication.", 0, 0, std::string(Transform::kComponentName), {}, operation.kind);
+						break;
+					}
+					targets.emplace_back(*target, transform);
+				}
+				if (!result.conflicts.empty()) break;
+
+				inverse.operation.kind = TransactionWriteKind::UpdateTransformBatch;
+				inverse.operation.transformUpdates.reserve(operation.transformUpdates.size());
+				for (std::size_t updateIndex = 0U; updateIndex < operation.transformUpdates.size(); ++updateIndex)
+				{
+					const TransactionTransformUpdate& update = operation.transformUpdates[updateIndex];
+					const Transform& previous = *targets[updateIndex].second;
+					inverse.operation.transformUpdates.push_back({update.objectId, previous.position, previous.rotation});
+				}
+				for (std::size_t updateIndex = 0U; updateIndex < operation.transformUpdates.size(); ++updateIndex)
+				{
+					const TransactionTransformUpdate& update = operation.transformUpdates[updateIndex];
+					Transform& transform = *targets[updateIndex].second;
+					transform.position = update.position;
+					transform.rotation = update.rotation;
+					objects.MarkObjectTransformDirty(targets[updateIndex].first);
+				}
+				result.inverseDeltas.push_back(std::move(inverse));
 				continue;
 			}
 
@@ -864,7 +967,7 @@ namespace TerraEngine::Scene {
 			const bool rollbackSucceeded = ApplyTransactionInverseDeltas(objects, result.inverseDeltas);
 			result.status = TransactionStatus::Rejected;
 			result.appliedWriteCount = 0;
-			result.rejectedWriteCount = transaction.writeSet.operations.size();
+			result.rejectedWriteCount = LogicalWriteCount(transaction);
 			result.message = rollbackSucceeded
 				? "Transaction publication failed and all applied writes were rolled back."
 				: "Transaction publication failed and rollback could not restore every write.";
@@ -873,7 +976,7 @@ namespace TerraEngine::Scene {
 			return result;
 		}
 		result.status = TransactionStatus::Committed;
-		result.appliedWriteCount = transaction.writeSet.operations.size();
+		result.appliedWriteCount = LogicalWriteCount(transaction);
 		result.message = "Transaction committed.";
 		return result;
 	}
@@ -903,6 +1006,24 @@ namespace TerraEngine::Scene {
 				{
 					const std::optional<Object> parent = ResolveRef(objects, operation.parent, noLocalObjects);
 					restoredEveryDelta = parent && objects.setParent(*restored, parent) && restoredEveryDelta;
+				}
+				continue;
+			}
+
+			if (operation.kind == TransactionWriteKind::UpdateTransformBatch)
+			{
+				for (const TransactionTransformUpdate& update : operation.transformUpdates)
+				{
+					const std::optional<Object> target = objects.getObject(update.objectId);
+					Transform* transform = target ? objects.GetComponent<Transform>(*target) : nullptr;
+					if (!target || !transform)
+					{
+						restoredEveryDelta = false;
+						continue;
+					}
+					transform->position = update.position;
+					transform->rotation = update.rotation;
+					objects.MarkObjectTransformDirty(*target);
 				}
 				continue;
 			}
@@ -992,7 +1113,7 @@ namespace TerraEngine::Scene {
 	void AccumulateTransactionDiagnostics(TransactionDiagnostics& diagnostics, const Transaction& transaction, const TransactionResult& result)
 	{
 		++diagnostics.submittedCount;
-		diagnostics.largestSubmittedBatchSize = std::max(diagnostics.largestSubmittedBatchSize, transaction.writeSet.operations.size());
+		diagnostics.largestSubmittedBatchSize = std::max(diagnostics.largestSubmittedBatchSize, LogicalWriteCount(transaction));
 		switch (result.status)
 		{
 		case TransactionStatus::Committed:
@@ -1018,7 +1139,16 @@ namespace TerraEngine::Scene {
 		const std::uint64_t validationSamples = std::max<std::uint64_t>(1, diagnostics.submittedCount);
 		diagnostics.averageValidationCostNs = ((diagnostics.averageValidationCostNs * (validationSamples - 1)) + result.validationCostNs) / validationSamples;
 		diagnostics.averageCommitCostNs = ((diagnostics.averageCommitCostNs * (validationSamples - 1)) + result.commitCostNs) / validationSamples;
-		diagnostics.recentResults.push_back(result);
+		// Diagnostics retain receipt metadata for inspection, not executable undo
+		// payloads. A physics transform publication can carry thousands of inverse
+		// poses, so copying those vectors into each of the 64 history entries would
+		// turn a bounded receipt list into a large recurring allocation hot path.
+		// The caller still receives the complete TransactionResult for rollback and
+		// editor undo; only this diagnostic copy discards heavyweight payloads.
+		TransactionResult diagnosticResult = result;
+		diagnosticResult.inverseDeltas.clear();
+		diagnosticResult.createdObjects.clear();
+		diagnostics.recentResults.push_back(std::move(diagnosticResult));
 		if (diagnostics.recentResults.size() > 64)
 		{
 			diagnostics.recentResults.erase(diagnostics.recentResults.begin());

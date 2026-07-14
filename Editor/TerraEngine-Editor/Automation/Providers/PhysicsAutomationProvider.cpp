@@ -200,6 +200,22 @@ namespace TerraEngine::Editor::Automation
 		return "physics";
 	}
 
+	std::optional<TerraEngine::Physics::PhysicsCommand> PhysicsAutomationProvider::TryCreateApplyForceCommand(
+		std::string_view applicationMode,
+		const TerraEngine::Physics::PhysicsBodyCommandTarget& target,
+		TerraEngine::Physics::PhysicsVector3 value,
+		TerraEngine::Physics::PhysicsCommandMetadata metadata)
+	{
+		// Automation exposes only force and mass-independent acceleration here.
+		// Impulse and velocity changes have dedicated capabilities, so accepting
+		// their spellings would silently change the fixed-step command semantics.
+		if (applicationMode == "Force")
+			return TerraEngine::Physics::PhysicsCommand::MakeContinuousForce(target, value, std::move(metadata));
+		if (applicationMode == "Acceleration")
+			return TerraEngine::Physics::PhysicsCommand::MakeAcceleration(target, value, std::move(metadata));
+		return std::nullopt;
+	}
+
 	std::vector<AutomationCapabilityRegistration> PhysicsAutomationProvider::GetCapabilities()
 	{
 		std::vector<AutomationCapabilityRegistration> capabilities;
@@ -215,7 +231,7 @@ namespace TerraEngine::Editor::Automation
 		capabilities.push_back(MakeRegistration(resolveHandler, "physics.material.inspect", "physics", "Inspect one project-owned physics material and its safe reference summary.", ObjectSchema({{"materialId", IdentifierSchema()}} , {"materialId"}), snapshotResult, MutationMode::ReadOnly, AutomationApprovalPolicy::None, false, {}, "immutable_physics_snapshot", {"AssetDatabaseSnapshot", "PhysicsMaterialIndex"}));
 		capabilities.push_back(MakeRegistration(resolveHandler, "physics.body.inspect", "physics", "Inspect authored identity and immutable runtime body state using exact generations.", ObjectSchema({{"target", TargetSchema()}} , {"target"}), snapshotResult, MutationMode::ReadOnly, AutomationApprovalPolicy::None, true, worldStates, "immutable_physics_snapshot", {"PhysicsBodySnapshot", "ObjectStorage"}));
 		capabilities.push_back(MakeRegistration(resolveHandler, "physics.character.inspect", "physics", "Inspect immutable character grounding, support, and contact state using exact generations.", ObjectSchema({{"target", TargetSchema()}} , {"target"}), snapshotResult, MutationMode::ReadOnly, AutomationApprovalPolicy::None, true, worldStates, "immutable_physics_snapshot", {"PhysicsCharacterSnapshot", "ObjectStorage"}));
-		capabilities.push_back(MakeRegistration(resolveHandler, "physics.contacts.list", "physics", "List ordered published contacts with an explicit bounded range.", ObjectSchema({{"worldGeneration", UIntSchema()}, {"target", TargetSchema()}, {"maximumContacts", {{"type", "integer"}, {"minimum", 1}, {"maximum", kMaximumQueryHits}}}, {"fromTick", UIntSchema()}, {"toTick", UIntSchema()}} , {"worldGeneration", "maximumContacts"}), snapshotResult, MutationMode::ReadOnly, AutomationApprovalPolicy::None, true, worldStates, "immutable_physics_snapshot", {"PhysicsEventSnapshot"}));
+		capabilities.push_back(MakeRegistration(resolveHandler, "physics.contacts.list", "physics", "List ordered published contacts with an explicit bounded target, layer, and tick range.", ObjectSchema({{"worldGeneration", UIntSchema()}, {"target", TargetSchema()}, {"collisionLayer", {{"type", "integer"}, {"minimum", 0}, {"maximum", 31}}}, {"maximumContacts", {{"type", "integer"}, {"minimum", 1}, {"maximum", kMaximumQueryHits}}}, {"fromTick", UIntSchema()}, {"toTick", UIntSchema()}} , {"worldGeneration", "maximumContacts"}), snapshotResult, MutationMode::ReadOnly, AutomationApprovalPolicy::None, true, worldStates, "immutable_physics_snapshot", {"PhysicsEventSnapshot"}));
 		capabilities.push_back(MakeRegistration(resolveHandler, "physics.diagnostics.get", "physics", "Read bounded physics diagnostics and scheduler declarations without renderer access.", ObjectSchema({{"includeFailures", {{"type", "boolean"}}}}), snapshotResult, MutationMode::ReadOnly, AutomationApprovalPolicy::None, false, {}, "immutable_physics_snapshot", {"PhysicsDiagnostics"}));
 
 		capabilities.push_back(MakeRegistration(resolveHandler, "physics.raycast", "physics_query", "Run a bounded ray query against a published/protected physics boundary.", QuerySchema("ray"), MutationReceiptSchema(true), MutationMode::ReadOnly, AutomationApprovalPolicy::None, true, worldStates, "immutable_physics_snapshot", {"PhysicsQuerySnapshot", "PhysicsSettings"}));
@@ -249,7 +265,8 @@ namespace TerraEngine::Editor::Automation
 		capabilities.push_back(MakeRegistration(resolveHandler, "physics.collider.cook", "physics_authoring", "Queue a cancellable durable collider cook; cancellation before publication leaves no partial asset.", CommandEnvelope({{"sourceAsset", IdentifierSchema()}, {"recipe", ObjectSchema({{"shape", IdentifierSchema()}, {"maxVertices", {{"type", "integer"}, {"minimum", 4}, {"maximum", 1000000}}}} , {"shape"})}, {"approval", ApprovalSchema()}, {"projectGeneration", UIntSchema()}}, {"sourceAsset", "recipe", "approval", "projectGeneration"}), MutationReceiptSchema(true), MutationMode::AssetMutation, AutomationApprovalPolicy::HighImpact, false, {}, "post_editor_automation_flush", {"AssetDatabaseSnapshot", "PhysicsCookSettings", "PhysicsReferenceIndex"}, {"PhysicsCookJobQueue", "EditorAutomationJobs", "EditorAutomationSession"}));
 
 		const Json bodyCommand = CommandEnvelope({{"target", TargetSchema()}, {"vector", Vector3Schema()}, {"applyOnNextStep", {{"type", "boolean"}}}}, {"target", "vector"});
-		capabilities.push_back(MakeRegistration(resolveHandler, "physics.body.apply_force", "physics_runtime", "Enqueue a typed fixed-step force command; duplicate keys return the original receipt.", bodyCommand, MutationReceiptSchema(), MutationMode::SceneMutation, AutomationApprovalPolicy::None, true, worldStates, "physics_command_commit", {"PhysicsSnapshot", "ObjectStorage"}, {"PhysicsCommandQueue", "EditorAutomationSession"}));
+		const Json forceCommand = CommandEnvelope({{"target", TargetSchema()}, {"vector", Vector3Schema()}, {"applicationMode", {{"type", "string"}, {"enum", {"Force", "Acceleration"}}, {"default", "Force"}}}, {"applyOnNextStep", {{"type", "boolean"}}}}, {"target", "vector"});
+		capabilities.push_back(MakeRegistration(resolveHandler, "physics.body.apply_force", "physics_runtime", "Enqueue a typed fixed-step Force (default) or mass-independent Acceleration command; duplicate keys return the original receipt.", forceCommand, MutationReceiptSchema(), MutationMode::SceneMutation, AutomationApprovalPolicy::None, true, worldStates, "physics_command_commit", {"PhysicsSnapshot", "ObjectStorage"}, {"PhysicsCommandQueue", "EditorAutomationSession"}));
 		capabilities.push_back(MakeRegistration(resolveHandler, "physics.body.apply_impulse", "physics_runtime", "Enqueue a typed fixed-step impulse command; it never mutates a live body directly.", bodyCommand, MutationReceiptSchema(), MutationMode::SceneMutation, AutomationApprovalPolicy::None, true, worldStates, "physics_command_commit", {"PhysicsSnapshot", "ObjectStorage"}, {"PhysicsCommandQueue", "EditorAutomationSession"}));
 		capabilities.push_back(MakeRegistration(resolveHandler, "physics.body.set_velocity", "physics_runtime", "Enqueue a typed velocity command guarded by object, component, and world generations.", bodyCommand, MutationReceiptSchema(), MutationMode::SceneMutation, AutomationApprovalPolicy::None, true, worldStates, "physics_command_commit", {"PhysicsSnapshot", "ObjectStorage"}, {"PhysicsCommandQueue", "EditorAutomationSession"}));
 		capabilities.push_back(MakeRegistration(resolveHandler, "physics.body.teleport", "physics_runtime", "Enqueue a typed teleport command at the declared protected physics boundary.", CommandEnvelope({{"target", TargetSchema()}, {"position", Vector3Schema()}, {"applyOnNextStep", {{"type", "boolean"}}}}, {"target", "position"}), MutationReceiptSchema(), MutationMode::SceneMutation, AutomationApprovalPolicy::None, true, worldStates, "physics_command_commit", {"PhysicsSnapshot", "ObjectStorage"}, {"PhysicsCommandQueue", "EditorAutomationSession"}));

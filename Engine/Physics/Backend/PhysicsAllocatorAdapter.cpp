@@ -385,4 +385,8 @@ namespace TerraEngine::Physics::Backend {
 		std::lock_guard<std::mutex> lock(state.mutex);
 		return state.lastError;
 	}
+
+	void PhysicsAllocatorAdapter::ReportAllocationFailureForValidation(std::size_t requestedBytes) noexcept {
+		RecordAllocationFailure(requestedBytes);
+	}
 }

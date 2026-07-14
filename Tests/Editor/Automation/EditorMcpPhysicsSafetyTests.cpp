@@ -6,7 +6,12 @@
 #include "EditorAutomationJobService.h"
 #include "EditorAutomationLogStore.h"
 #include "EditorAutomationRegistry.h"
+#include "EditorAutomationService.h"
 #include "Providers/PhysicsAutomationProvider.h"
+#include "Physics/PhysicsEvents.h"
+#include "Physics/PhysicsSystem.h"
+#include "Physics/PhysicsWorld.h"
+#include "ThreadPool/ThreadPool.h"
 
 #include <memory>
 #include <string>
@@ -57,6 +62,49 @@ namespace TerraEngine::EditorTests
 			}
 			return false;
 		}
+
+		class ThreadPoolSession final
+		{
+		public:
+			ThreadPoolSession()
+			{
+				// The protected immediate-query and command paths use the shared pool.
+				// Isolating this fixture prevents a prior editor test from leaking workers.
+				ThreadPool::instance().shutdown();
+				ThreadPool::instance().initialize();
+			}
+
+			~ThreadPoolSession()
+			{
+				ThreadPool::instance().shutdown();
+			}
+		};
+
+		TerraEngine::Physics::PhysicsEvent MakeRetainedContact(
+			TerraEngine::Physics::PhysicsWorld& world,
+			TerraEngine::Physics::PhysicsTick tick)
+		{
+			using namespace TerraEngine::Physics;
+			PhysicsEvent event;
+			event.type = PhysicsEventType::Contact;
+			event.world = world.Handle();
+			event.tick = tick;
+			event.first.objectId = TerraEngine::GenerateUUID();
+			event.first.objectGeneration = 1U;
+			event.first.componentGeneration = 1U;
+			event.first.colliderRecordId = TerraEngine::GenerateUUID();
+			event.first.recordGeneration = 1U;
+			event.first.body = world.AllocateBody();
+			event.first.collisionLayer = 2U;
+			event.second.objectId = TerraEngine::GenerateUUID();
+			event.second.objectGeneration = 1U;
+			event.second.componentGeneration = 1U;
+			event.second.colliderRecordId = TerraEngine::GenerateUUID();
+			event.second.recordGeneration = 1U;
+			event.second.body = world.AllocateBody();
+			event.second.collisionLayer = 4U;
+			return event;
+		}
 	}
 
 	void RegisterEditorMcpPhysicsSafetyTests(TestRegistry& registry)
@@ -74,6 +122,7 @@ namespace TerraEngine::EditorTests
 				context.Expect(properties.contains("worldGeneration"), "Every runtime mutation must name its expected world generation.");
 				context.Expect(Requires(schema, "idempotencyKey"), "Idempotency keys must be mandatory, not advisory.");
 				context.ExpectEqual(std::string("physics_command_commit"), capability.descriptor.execution.visibilityBoundary, "Runtime commands must use the typed physics commit boundary.");
+				context.Expect(capability.descriptor.availability.allowedPlayStates == std::vector<std::string>{"playing", "paused"}, "Runtime command discovery must name the only Play Mode states where the handler can apply its explicit-step safety gate.");
 				context.Expect(capability.descriptor.execution.commitWrites == std::vector<std::string>{"PhysicsCommandQueue", "EditorAutomationSession"}, "Runtime commands must never write ObjectManager or provider state directly.");
 				if (properties.contains("target"))
 				{
@@ -137,6 +186,45 @@ namespace TerraEngine::EditorTests
 			context.Expect(result.error == ErrorCategory::Permission, "Permission denial should be structured rather than a handler failure.");
 		});
 
+		registry.Add("Editor.MCP.Physics.PausedCommandsRequireExplicitNextStepConsent", [](TestContext& context) {
+			ThreadPoolSession pool;
+			auto& physics = TerraEngine::Physics::PhysicsSystem::Instance();
+			physics.Shutdown();
+			physics.SetEditorLifecycleControlled(true);
+			physics.Initialize();
+			context.Expect(physics.StartWorld(), "The paused-command safety fixture needs a fresh generation-safe physics world.");
+			context.Expect(physics.SetPaused(true), "The safety fixture must enter the shared paused physics state.");
+
+			EditorAutomationService service;
+			AutomationRequestContext request;
+			request.requestId = "paused-command-request";
+			request.clientId = "physics-test";
+			request.correlationId = "paused-command-correlation";
+			request.idempotencyKey = "paused-command-key";
+			request.grantedPermission = AutomationPermission::ProjectWrite;
+			request.state.projectAvailable = true;
+			request.state.sceneAvailable = true;
+			request.state.playState = "paused";
+			request.arguments = {
+				{"worldGeneration", physics.WorldHandle().worldGeneration},
+				{"idempotencyKey", request.idempotencyKey},
+				{"vector", {0.0F, 1.0F, 0.0F}},
+				{"target", {{"objectId", "00000000000000000000000000000001"}, {"componentGeneration", 1U}, {"worldGeneration", physics.WorldHandle().worldGeneration}}}
+			};
+
+			const AutomationDispatchResult blocked = service.GetRegistry().Dispatch("physics.body.apply_impulse", 1, request);
+			context.Expect(!blocked.ok && blocked.error == ErrorCategory::Conflict,
+				"A paused command without explicit Next-step consent must be rejected before object lookup or queue mutation.");
+
+			request.arguments["applyOnNextStep"] = true;
+			const AutomationDispatchResult admittedPastPauseGate = service.GetRegistry().Dispatch("physics.body.apply_impulse", 1, request);
+			context.Expect(!admittedPastPauseGate.ok && admittedPastPauseGate.error == ErrorCategory::MissingTarget,
+				"Explicit Next-step consent should pass the pause gate, then reject the intentionally stale target without enqueuing a command.");
+
+			context.Expect(physics.StopWorld(), "The paused-command fixture must drain the provider world before test teardown.");
+			physics.Shutdown();
+		});
+
 		registry.Add("Editor.MCP.Physics.ImpulseRetriesAndDurableCookReceiptsRemainCorrelated", [](TestContext& context) {
 			EditorAutomationIdempotencyStore idempotency;
 			const IdempotencyRequest impulse{
@@ -170,6 +258,47 @@ namespace TerraEngine::EditorTests
 			query.correlationId = "physics-correlation";
 			const StructuredLogPage page = logs.Query(query);
 			context.Expect(page.valid && page.records.size() == 1, "Physics receipts and diagnostics must remain correlated for reconnect and troubleshooting.");
+		});
+
+		registry.Add("Editor.MCP.Physics.ForceApplicationModeBuildsTypedForceOrAccelerationCommands", [](TestContext& context) {
+			const TerraEngine::Physics::PhysicsBodyCommandTarget target{
+				{TerraEngine::Physics::kPrimaryPhysicsWorldId, 7U}, TerraEngine::GenerateUUID(), 3U, 5U};
+			TerraEngine::Physics::PhysicsCommandMetadata metadata;
+			metadata.producerId = 99U;
+			metadata.producerSequence = 1U;
+
+			const auto force = PhysicsAutomationProvider::TryCreateApplyForceCommand("Force", target, {1.0F, 2.0F, 3.0F}, metadata);
+			const auto acceleration = PhysicsAutomationProvider::TryCreateApplyForceCommand("Acceleration", target, {4.0F, 5.0F, 6.0F}, metadata);
+			const auto invalid = PhysicsAutomationProvider::TryCreateApplyForceCommand("Impulse", target, {0.0F, 0.0F, 0.0F}, metadata);
+			const auto forcePayload = force ? std::get_if<TerraEngine::Physics::PhysicsForcePayload>(&force->payload) : nullptr;
+			const auto accelerationPayload = acceleration ? std::get_if<TerraEngine::Physics::PhysicsForcePayload>(&acceleration->payload) : nullptr;
+			context.Expect(force && force->type == TerraEngine::Physics::PhysicsCommandType::ApplyForce
+				&& forcePayload != nullptr && forcePayload->mode == TerraEngine::Physics::PhysicsForceMode::Force,
+				"A missing applicationMode defaults to the typed ordinary force command.");
+			context.Expect(acceleration && acceleration->type == TerraEngine::Physics::PhysicsCommandType::ApplyAcceleration
+				&& accelerationPayload != nullptr && accelerationPayload->mode == TerraEngine::Physics::PhysicsForceMode::Acceleration,
+				"Acceleration must route to the mass-independent typed acceleration command.");
+			context.Expect(!invalid.has_value(), "Unsupported force application modes must be rejected before queue admission.");
+		});
+
+		registry.Add("Editor.MCP.Physics.RetainedContactsSurviveAQuietLatestPacket", [](TestContext& context) {
+			TerraEngine::Physics::PhysicsWorld world;
+			context.Expect(world.Create(TerraEngine::Physics::PhysicsSettings::Defaults()), "The retained-contact fixture must create an isolated physics world.");
+			const TerraEngine::Physics::PhysicsEvent earlierContact = MakeRetainedContact(world, 1U);
+			const auto firstPacket = world.PublishEvents(1U, {&earlierContact, 1U});
+			const auto quietLatestPacket = world.PublishEvents(2U, {});
+			context.Expect(firstPacket && firstPacket->events && firstPacket->events->empty(),
+				"With zero gameplay subscribers, the gameplay event packet must remain empty.");
+			context.Expect(quietLatestPacket && quietLatestPacket->events && quietLatestPacket->events->empty(),
+				"The latest packet intentionally contains no contact events.");
+
+			const auto retainedEarlierPacket = world.AcquireDiagnosticEventPacket(1U, 2U);
+			context.Expect(retainedEarlierPacket && retainedEarlierPacket->events && retainedEarlierPacket->events->size() == 1U
+				&& retainedEarlierPacket->events->front().type == TerraEngine::Physics::PhysicsEventType::Contact,
+				"A bounded requested history range must retain the earlier contact even when the latest packet is quiet.");
+			context.Expect(world.BeginStopping(), "The retained-contact fixture must stop new work before teardown.");
+			(void)world.BeginDraining();
+			context.Expect(world.CompleteTeardown(), "The retained-contact fixture must release its immutable history cleanly.");
 		});
 	}
 }

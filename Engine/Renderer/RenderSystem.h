@@ -30,8 +30,49 @@
 #include "Renderer/RendererRecoveryPolicy.h"
 #include "Physics/PhysicsDiagnostics.h"
 #include "Scene/RuntimeLayout.h"
+#include "Scene/SceneGraphRuntime.h"
 #include "Scene/SpatialDiagnostics.h"
 #include "Scene/SpatialIndex.h"
+
+namespace TerraEngine::Renderer
+{
+	// RenderTransformCacheDiagnostics makes cache reuse observable without exposing
+	// mutable scene data to the renderer's callers or diagnostics windows.
+	struct RenderTransformCacheDiagnostics
+	{
+		bool rebuiltForHierarchy = false;
+		bool reusedWithoutPropagation = false;
+		bool usedFlatHierarchyFastPath = false;
+		std::uint32_t scannedObjectCount = 0U;
+		std::uint32_t changedObjectCount = 0U;
+		std::uint32_t propagatedObjectCount = 0U;
+		std::uint32_t hierarchyLevelCount = 0U;
+		std::uint64_t hierarchyRevision = 0U;
+	};
+
+	// RenderWorldTransformCache owns copied world transforms for the protected
+	// render boundary. It rebuilds the hierarchy only when its revision changes,
+	// then propagates only locally changed branches on later frames.
+	class RenderWorldTransformCache
+	{
+	public:
+		const std::unordered_map<entt::entity, Transform>& Refresh(
+			ObjectManager& objects,
+			RenderTransformCacheDiagnostics& diagnostics);
+		[[nodiscard]] const TerraEngine::Scene::SceneTransformPropagationResult& LatestPropagation() const;
+		void Clear();
+
+	private:
+		TerraEngine::Scene::SceneGraph graph;
+		std::unordered_map<entt::entity, Transform> worldTransforms;
+		bool initialized = false;
+		std::uint64_t hierarchyRevision = 0U;
+		std::uint64_t spatialRevision = 0U;
+		std::uint32_t hierarchyLevelCount = 0U;
+		bool flatHierarchy = false;
+		TerraEngine::Scene::SceneTransformPropagationResult latestPropagation;
+	};
+}
 
 class RenderSystem : public SystemsBase
 {
@@ -289,8 +330,16 @@ private:
 	std::deque<TerraEngine::Renderer::RenderCaptureRequest> pendingCaptureRequests;
 	std::deque<TerraEngine::Renderer::RenderCaptureRequest> submittedCaptureReadbackRequests;
 	std::deque<TerraEngine::Renderer::RenderCaptureResult> completedCaptureResults;
+	// The cache contains copied transforms and is touched only by RenderSystem's
+	// protected frame work, so render preparation never aliases live components.
+	TerraEngine::Renderer::RenderWorldTransformCache worldTransformCache;
+	TerraEngine::Renderer::RenderTransformCacheDiagnostics latestTransformCacheDiagnostics{};
 	SkyRuntimeState latestSkyRuntimeState{};
 	bool skyStateDirty = true;
+	bool hasCachedSkyObjectResolution = false;
+	std::optional<entt::entity> cachedSkyObject;
+	std::uint64_t cachedSkyHierarchyRevision = 0U;
+	std::uint64_t cachedSkyCandidateSignature = 0U;
 	std::string lastLoggedSkyIssueKey;
 	std::uint64_t nextRenderFrameId = 1u;
 	std::uint64_t activeRenderFrameId = 0u;

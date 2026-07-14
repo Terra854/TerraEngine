@@ -137,6 +137,7 @@ namespace TerraEngine::EditorTests {
 	void RegisterPhysicsProjectSettingsTests(TestRegistry& registry);
 	void RegisterPhysicsSceneViewTests(TestRegistry& registry);
 	void RegisterPhysicsDiagnosticsWindowTests(TestRegistry& registry);
+	void RegisterPhysicsEditorPerformanceTests(TestRegistry& registry);
 	void RegisterPhysicsExportManifestTests(TestRegistry& registry);
 	void RegisterPhysicsExportValidationTests(TestRegistry& registry);
 	void RegisterPhysicsExportParityTests(TestRegistry& registry);
@@ -288,6 +289,7 @@ int main() {
 	TerraEngine::EditorTests::RegisterPhysicsExportValidationTests(registry);
 	TerraEngine::EditorTests::RegisterPhysicsExportParityTests(registry);
 	TerraEngine::EditorTests::RegisterPhysicsPlayModeSoakTests(registry);
+	TerraEngine::EditorTests::RegisterPhysicsEditorPerformanceTests(registry);
 
 	return registry.RunAll(std::cout);
 }

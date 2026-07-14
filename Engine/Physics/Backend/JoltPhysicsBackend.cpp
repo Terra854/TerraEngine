@@ -1565,6 +1565,8 @@ namespace TerraEngine::Physics::Backend {
 		const PhysicsShapeRecipe& recipe,
 		PhysicsBackendStagingToken& staging) {
 		std::lock_guard lock(impl->mutex);
+		const PhysicsBackendResult ready = impl->CheckReady();
+		if(!ready.Succeeded()) return ready;
 		if(impl->physicsSystem == nullptr || !HandleMatchesWorld(world, impl->worldConfiguration.world)
 			|| !HandleMatchesWorld(handle, world)
 			|| !ValidShapeDimensions(recipe, impl->worldConfiguration.settings.maxShapeExtent)) {
@@ -1621,6 +1623,8 @@ namespace TerraEngine::Physics::Backend {
 		const PhysicsBodyCreateRequest& request,
 		PhysicsBackendStagingToken& staging) {
 		std::lock_guard lock(impl->mutex);
+		const PhysicsBackendResult ready = impl->CheckReady();
+		if(!ready.Succeeded()) return ready;
 		if(impl->physicsSystem == nullptr || !HandleMatchesWorld(request.handle, impl->worldConfiguration.world)
 			|| !HandleMatchesWorld(request.shape, impl->worldConfiguration.world)
 			|| request.objectId == TerraEngine::EMPTY_UUID
@@ -1717,6 +1721,8 @@ namespace TerraEngine::Physics::Backend {
 
 	PhysicsBackendResult JoltPhysicsBackend::UpdateBody(const PhysicsBodyUpdateRequest& request) {
 		std::lock_guard lock(impl->mutex);
+		const PhysicsBackendResult ready = impl->CheckReady();
+		if(!ready.Succeeded()) return ready;
 		if(impl->physicsSystem == nullptr || !HandleMatchesWorld(request.handle, impl->worldConfiguration.world)
 			|| !request.pose.IsFinite() || !IsUsableRotation(request.pose.rotation)
 			|| !request.linearVelocity.IsFinite()
@@ -1783,6 +1789,8 @@ namespace TerraEngine::Physics::Backend {
 		const PhysicsConstraintCreateRequest& request,
 		PhysicsBackendStagingToken& staging) {
 		std::lock_guard lock(impl->mutex);
+		const PhysicsBackendResult ready = impl->CheckReady();
+		if(!ready.Succeeded()) return ready;
 		if(impl->physicsSystem == nullptr || !HandleMatchesWorld(request.handle, impl->worldConfiguration.world)) {
 			return Rejected(PhysicsBackendErrorCode::StaleHandle, "The constraint handle targets a stale Jolt world.");
 		}
@@ -1804,6 +1812,8 @@ namespace TerraEngine::Physics::Backend {
 
 	PhysicsBackendResult JoltPhysicsBackend::UpdateConstraint(const PhysicsConstraintCreateRequest& request) {
 		std::lock_guard lock(impl->mutex);
+		const PhysicsBackendResult ready = impl->CheckReady();
+		if(!ready.Succeeded()) return ready;
 		if(impl->physicsSystem == nullptr || !HandleMatchesWorld(request.handle, impl->worldConfiguration.world)) {
 			return Rejected(PhysicsBackendErrorCode::StaleHandle, "The constraint handle targets a stale Jolt world.");
 		}
@@ -1869,6 +1879,8 @@ namespace TerraEngine::Physics::Backend {
 		const PhysicsCharacterCreateRequest& request,
 		PhysicsBackendStagingToken& staging) {
 		std::lock_guard lock(impl->mutex);
+		const PhysicsBackendResult ready = impl->CheckReady();
+		if(!ready.Succeeded()) return ready;
 		if(impl->physicsSystem == nullptr || !HandleMatchesWorld(request.handle, impl->worldConfiguration.world)
 			|| request.objectId == TerraEngine::EMPTY_UUID || request.objectGeneration == 0U || request.componentGeneration == 0U
 			|| !request.pose.IsFinite() || !IsUsableRotation(request.pose.rotation) || !request.localCenter.IsFinite()
@@ -1913,6 +1925,8 @@ namespace TerraEngine::Physics::Backend {
 
 	PhysicsBackendResult JoltPhysicsBackend::UpdateCharacter(const PhysicsCharacterUpdateRequest& request) {
 		std::lock_guard lock(impl->mutex);
+		const PhysicsBackendResult ready = impl->CheckReady();
+		if(!ready.Succeeded()) return ready;
 		if(impl->physicsSystem == nullptr || !HandleMatchesWorld(request.handle, impl->worldConfiguration.world)
 			|| !request.desiredVelocity.IsFinite() || !request.pose.IsFinite() || !IsUsableRotation(request.pose.rotation)
 			|| !std::isfinite(request.fixedDeltaTime) || request.fixedDeltaTime <= 0.0F) return Rejected(PhysicsBackendErrorCode::InvalidArgument, "The virtual-character update is invalid or stale.");
@@ -1977,6 +1991,8 @@ namespace TerraEngine::Physics::Backend {
 
 	PhysicsBackendResult JoltPhysicsBackend::ApplyCommand(const PhysicsCommand& command) {
 		std::unique_lock lock(impl->mutex);
+		const PhysicsBackendResult ready = impl->CheckReady();
+		if(!ready.Succeeded()) return ready;
 		if(impl->physicsSystem == nullptr || command.worldId != impl->worldConfiguration.world.worldId
 			|| command.worldGeneration != impl->worldConfiguration.world.worldGeneration) {
 			return Rejected(PhysicsBackendErrorCode::StaleWorld, "The command targets a stale Jolt world.");
@@ -2099,6 +2115,8 @@ namespace TerraEngine::Physics::Backend {
 
 	PhysicsBackendResult JoltPhysicsBackend::Step(const PhysicsBackendStepRequest& request) {
 		std::lock_guard lock(impl->mutex);
+		const PhysicsBackendResult ready = impl->CheckReady();
+		if(!ready.Succeeded()) return ready;
 		if(impl->physicsSystem == nullptr || !HandleMatchesWorld(request.world, impl->worldConfiguration.world)
 			|| request.tick == 0U || !std::isfinite(request.deltaTime) || request.deltaTime <= 0.0F
 			|| request.collisionSteps == 0U) {
@@ -2133,6 +2151,11 @@ namespace TerraEngine::Physics::Backend {
 	PhysicsBackendQueryResult JoltPhysicsBackend::Query(const PhysicsBackendQueryRequest& request) const {
 		std::shared_lock lock(impl->mutex);
 		PhysicsBackendQueryResult result;
+		const PhysicsBackendResult ready = impl->CheckReady();
+		if(!ready.Succeeded()) {
+			result.result = ready;
+			return result;
+		}
 		if(impl->physicsSystem == nullptr || !HandleMatchesWorld(request.world, impl->worldConfiguration.world)
 			|| !request.pose.IsFinite() || !request.direction.IsFinite()
 			|| !IsUsableRotation(request.pose.rotation)
@@ -2338,6 +2361,8 @@ namespace TerraEngine::Physics::Backend {
 
 	PhysicsBackendResult JoltPhysicsBackend::Extract(PhysicsBackendExtraction& extraction) const {
 		std::shared_lock lock(impl->mutex);
+		const PhysicsBackendResult ready = impl->CheckReady();
+		if(!ready.Succeeded()) return ready;
 		if(impl->physicsSystem == nullptr || !HandleMatchesWorld(extraction.world, impl->worldConfiguration.world)) {
 			return Rejected(PhysicsBackendErrorCode::StaleWorld, "Extraction targets a stale Jolt world.");
 		}
@@ -2444,6 +2469,8 @@ namespace TerraEngine::Physics::Backend {
 
 	PhysicsBackendResult JoltPhysicsBackend::CommitStaging(PhysicsBackendStagingToken staging) {
 		std::lock_guard lock(impl->mutex);
+		const PhysicsBackendResult ready = impl->CheckReady();
+		if(!ready.Succeeded()) return ready;
 		if(impl->physicsSystem == nullptr || !HandleMatchesWorld(staging.world, impl->worldConfiguration.world)) {
 			return Rejected(PhysicsBackendErrorCode::StaleWorld, "The staging token targets a stale world.");
 		}
@@ -2582,7 +2609,22 @@ namespace TerraEngine::Physics::Backend {
 		return impl->allocator != nullptr ? impl->allocator->Diagnostics() : PhysicsAllocationDiagnostics{};
 	}
 
+	PhysicsBackendJobDrainDiagnostics JoltPhysicsBackend::JobDiagnostics() const noexcept {
+		if(impl->jobAdapter == nullptr) return {};
+		const PhysicsJobAdapterDiagnostics diagnostics = impl->jobAdapter->Diagnostics();
+		return {diagnostics.queued, diagnostics.activePumps};
+	}
+
 	PhysicsProviderError JoltPhysicsBackend::LastProviderError() const {
 		return impl->allocator != nullptr ? impl->allocator->LastError() : PhysicsProviderError{};
+	}
+
+	void JoltPhysicsBackend::ReportFatalProviderFailureForValidation() noexcept {
+		std::lock_guard lock(impl->mutex);
+		if(impl->allocator == nullptr) return;
+		// Recording a translated failure keeps this validation representative of an
+		// actual callback failure while avoiding undefined behavior from a real OOM.
+		impl->allocator->ReportAllocationFailureForValidation(4096U);
+		(void)impl->CheckProviderHealth();
 	}
 }

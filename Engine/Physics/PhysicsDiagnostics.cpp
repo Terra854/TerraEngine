@@ -27,7 +27,19 @@ namespace TerraEngine::Physics {
 		{
 			return;
 		}
+		const PhysicsWorldHandle publishedWorld = packet->world;
+		const PhysicsTick publishedTick = packet->producedTick;
 		std::lock_guard<std::mutex> lock(mutex);
+		// Selection used to hide expired or replaced-world packets without releasing
+		// their shared primitive vectors. A busy debug view could therefore retain up
+		// to 32 packets of 100,000 primitives even when settings requested two ticks.
+		// Publication is the monotonic protected boundary, so it can release entries
+		// that can never become visible again before accepting the new immutable data.
+		std::erase_if(packets, [&](const std::shared_ptr<const PhysicsDebugPacket>& retained) {
+			return !retained
+				|| retained->world != publishedWorld
+				|| retained->expiryTick < publishedTick;
+		});
 		packets.push_back(std::move(packet));
 		if (packets.size() > capacity)
 		{

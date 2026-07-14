@@ -1,0 +1,13 @@
+Archive: C:/Users/benti/Desktop/TerraEngine/out/validation/t153-final-export-parity-5/project/Builds/Baseline/project.tepak
+Archive size: 206491 bytes
+Entry count: 38
+Startup scene: PASS
+Required runtime entries: PASS
+Manifest asset references: PASS
+Placeholder scan: PASS
+Manifest evidence match: PASS
+Final: PASS
+Physics provider: Jolt 5.6.0 revision e77f175595e64cb44218cc9d9d56fc365ad0e36a
+Physics settings hash: c4e5c61992b533cf, layers hash: de8eae8235446d4a
+Physics assets: 0 materials, 1 cooked colliders
+Physics editor/export parity: PASS

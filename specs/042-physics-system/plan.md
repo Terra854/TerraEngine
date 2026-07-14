@@ -17,7 +17,7 @@ The implementation proceeds through independently compiling and installable slic
 **Testing**: Project-owned CTest harnesses (`TerraEngine-EngineTests`, `TerraEngine-EditorTests`), focused executable filters, scheduler/transaction regressions, headless export baseline, installed-editor loopback validation, provider spike benchmarks, stress/soak and supported sanitizer lanes  
 **Target Platform**: Windows x64 first-release acceptance; Linux x64 build compatibility and provider spike coverage; architecture retains a path to other existing TerraEngine targets  
 **Project Type**: Native game engine, desktop editor, managed scripting SDK, headless asset compiler/export tools, and exported runtime  
-**Performance Goals**: At least 10,000 mixed bodies; 1,000 active dynamic bodies at 60 fixed updates/second on recorded reference hardware; 10,000 batched rays with bounded memory and stable engine-owned ordering; no per-body hot-path heap allocation  
+**Performance Goals**: At least 10,000 mixed bodies; 1,000 active dynamic bodies at 60 fixed updates/second on recorded reference hardware; 10,000 batched rays with bounded memory and stable engine-owned ordering; no per-body hot-path heap allocation; a responsive installed editor whose 10,000-object creation/load, Play Mode entry, 100 paused Next operations, diagnostics, and shutdown meet recorded RelWithDebInfo budgets no weaker than SC-001, SC-003, SC-004, and SC-007
 **Constraints**: Same-build/platform repeatable command/event/query order; protected mutation visibility; atomic rejection across scene and physics domains; no provider types in public or serialized contracts; no system/global runtime dependencies; no backend-private worker pool; safe teardown under active work; installed tree required after every code slice  
 **Scale/Scope**: One primary gameplay world initially; 32 stable collision layers; rigid bodies, eight collider families, materials, constraints, character foundation, queries/events, editor, C#, automation, cooking, export parity, diagnostics, and lifecycle hardening
 
@@ -120,7 +120,7 @@ The initial public motion-quality contract contains `Discrete` and `LinearCast`.
 
 ### Install completion
 
-TerraEngine's CMake install rules intentionally publish to the absolute build-tree destination `out/build/<Preset>/Build` (for example `out/build/Debug/Build`), even though CMake presets also define a conventional prefix under `out/install/`. The build-tree `Build` directory is the canonical installed runtime tree for this feature. Every code-changing task remains incomplete until its applicable compile and install gate succeeds; when a phase shares one gate, preceding code-task checkboxes remain open and are completed together only after that gate passes.
+Spec 042 configures, builds, tests, installs, and performs live validation with `RelWithDebInfo` exclusively. TerraEngine's CMake install rules intentionally publish to the absolute build-tree destination `out/build/RelWithDebInfo/Build`, even though CMake presets also define a conventional prefix under `out/install/RelWithDebInfo`. That build-tree `Build` directory is the canonical installed runtime tree for this feature. Every code-changing task remains incomplete until its applicable RelWithDebInfo compile and install gate succeeds; when a phase shares one gate, preceding code-task checkboxes remain open and are completed together only after that gate passes. Debug, Release, and MinSizeRel results may not be substituted for a spec 042 gate.
 
 ## Project Structure
 
@@ -215,15 +215,16 @@ Docs/
 4. **Events and queries**: thread-local collectors, sorting, bounded histories, native query APIs, batch jobs.
 5. **Cooked geometry**: convex/mesh/compound recipes, headless compiler, GUID cache, atomic publication, export staging.
 6. **Constraints and characters**: required joint records, break policy, character movement/support behavior.
-7. **Editor and diagnostics**: inspectors, settings, debug drawing, diagnostics window, profiler scopes/counters, Play Mode lifecycle.
-8. **Managed and automation**: typed C ABI, managed wrappers/events, dedicated provider, approvals/idempotency/jobs/logging.
-9. **Export parity and hardening**: manifests/validation/evidence, installed runtime fixture, stress/soak, lifecycle/failure containment, full validation.
+7. **Editor and diagnostics implementation**: inspectors, settings, debug drawing, diagnostics window, profiler scopes/counters, Play Mode lifecycle.
+8. **Blocking RelWithDebInfo performance stabilization**: add regression coverage, capture the installed-editor baseline, define budgets from the existing success criteria, assign the measured critical path, fix scene/runtime/editor/scheduler bottlenecks, and pass the focused compile/test/install/live gate. No later user story begins until this gate and US5 acceptance pass.
+9. **Managed and automation**: typed C ABI, managed wrappers/events, dedicated provider, approvals/idempotency/jobs/logging.
+10. **Export parity and hardening**: manifests/validation/evidence, installed runtime fixture, stress/soak, lifecycle/failure containment, full validation.
 
-Every slice has a demonstrable checkpoint and ends with affected-target compilation, focused tests, and install verification. Full builds and complete suites remain orchestrator-owned during implementation.
+Every slice has a demonstrable checkpoint and ends with affected-target compilation, focused tests, and install verification. The performance slice additionally requires before/after profiler evidence and installed-editor proof; perceived slowness alone does not select a fix, and benchmark improvement cannot weaken scheduling, transaction, lifecycle, or visibility guarantees. Full builds and complete suites remain orchestrator-owned during implementation.
 
 ## Execution-Mode Warning
 
-This feature is unusually large, cross-cutting, and high-risk. It combines a new vendored dependency, job-system adaptation, deterministic concurrency, two-domain transactional atomicity, complex lifecycle teardown, versioned assets, editor authoring, managed ABI, automation safety, and export parity. It also has several independent file/subsystem boundaries after foundation contracts stabilize.
+This feature is unusually large, cross-cutting, and high-risk. It combines a new vendored dependency, job-system adaptation, deterministic concurrency, two-domain transactional atomicity, complex lifecycle teardown, versioned assets, editor authoring, a blocking measured-performance recovery, managed ABI, automation safety, and export parity. It also has several independent file/subsystem boundaries after foundation contracts stabilize.
 
 **Provisional recommendation for `/speckit.implement`**: Mixed GPT-5.6 delegation with a Sol orchestrator and bounded Terra/Luna workers, using higher Sol reasoning effort (`xhigh`). Parallel work should begin only after provider, data model, scheduler resources, and transaction contracts land. Keep provider foundation, cross-domain atomic commit, scheduler integration, and final integration in Sol; delegate non-overlapping component/assets, editor surface, managed/automation, documentation, and focused test slices. `/speckit.tasks` must reassess the completed task graph and record the final recommendation, costs, accuracy benefits, and coordination risks in `tasks.md`.
 

@@ -11,13 +11,20 @@ namespace TerraEngine
 		public static unsafe PhysicsQueryResult Query(PhysicsQueryRequest request)
 		{
 			NativePhysicsQueryRequest nativeRequest = ToNative(request);
-			NativePhysicsQueryReceipt receipt = new() { Header = PhysicsAbiHeader.For<NativePhysicsQueryReceipt>() };
-			PhysicsStatus submitStatus = InternalCalls.Native_Physics_SubmitQuery(ref nativeRequest, ref receipt);
-			if (submitStatus != PhysicsStatus.Accepted)
+			NativePhysicsQueryResultInfo info = new() { Header = PhysicsAbiHeader.For<NativePhysicsQueryResultInfo>() };
+			PhysicsStatus status = InternalCalls.Native_Physics_QueryImmediate(ref nativeRequest, ref info, null, 0, out uint count);
+			if (status != PhysicsStatus.Success && status != PhysicsStatus.LimitExceeded)
 			{
-				return new PhysicsQueryResult { Status = receipt.Status, CorrelationId = request.CorrelationId, Diagnostic = receipt.Diagnostic };
+				return new PhysicsQueryResult { Status = status, Tick = info.Tick, CorrelationId = request.CorrelationId, Diagnostic = info.Diagnostic };
 			}
-			return ReadQuery(receipt.Handle);
+			NativePhysicsQueryHit[] hits = new NativePhysicsQueryHit[count];
+			fixed (NativePhysicsQueryHit* pointer = hits)
+			{
+				status = InternalCalls.Native_Physics_QueryImmediate(ref nativeRequest, ref info, pointer, count, out _);
+			}
+			PhysicsQueryHit[] publicHits = new PhysicsQueryHit[hits.Length];
+			for (int i = 0; i < hits.Length; ++i) publicHits[i] = hits[i].ToPublic();
+			return new PhysicsQueryResult { Status = status, Tick = info.Tick, CorrelationId = info.CorrelationId, Truncated = info.Truncated != 0, Diagnostic = info.Diagnostic, Hits = publicHits };
 		}
 
 		public static unsafe PhysicsQueryHandle ScheduleQuery(PhysicsQueryRequest request, out PhysicsStatus status)

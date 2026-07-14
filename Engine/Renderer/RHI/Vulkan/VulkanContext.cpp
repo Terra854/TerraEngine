@@ -7432,9 +7432,26 @@ TerraEngine::Renderer::Vulkan::EditorPresentResult VulkanContext::PresentEditor(
 	}
 
 	std::uint32_t imageIndex = 0;
-	const VkResult acquireResult = vkAcquireNextImageKHR(
-		impl->device, impl->swapchain, UINT64_MAX,
-		impl->imageAvailableSemaphores[impl->currentFrame], VK_NULL_HANDLE, &imageIndex);
+	VkResult acquireResult = VK_SUCCESS;
+	{
+		// Swapchain acquisition can wait for the presentation engine to release an
+		// image. Editor interaction must not inherit an unbounded compositor wait:
+		// allow one millisecond, then retry on a later frame. BeginFrame already
+		// drains a stranded editor-render semaphore when this UI pass is skipped.
+		TERRAENGINE_PROFILE_SCOPE("Editor Present: Acquire Image", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		acquireResult = vkAcquireNextImageKHR(
+			impl->device, impl->swapchain, 1'000'000ULL,
+			impl->imageAvailableSemaphores[impl->currentFrame], VK_NULL_HANDLE, &imageIndex);
+	}
+	if (acquireResult == VK_TIMEOUT || acquireResult == VK_NOT_READY) {
+		// No image or acquire semaphore was published. Leave currentFrame unchanged
+		// so its protected BeginFrame cleanup can consume any offscreen render signal
+		// before another acquisition attempt reuses the slot.
+		result.outcome = EditorPresentOutcome::Skipped;
+		result.stage = EditorUiFrameStage::AcquireImage;
+		result.nativeResult = static_cast<std::int32_t>(acquireResult);
+		return result;
+	}
 	if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR) {
 		const VkResult drainResult = consumeOutstandingSemaphores(false);
 		if (drainResult != VK_SUCCESS) {
@@ -7489,6 +7506,7 @@ TerraEngine::Renderer::Vulkan::EditorPresentResult VulkanContext::PresentEditor(
 		// this frame slot's fence completed, and before beginning the swapchain UI
 		// command buffer, so mouse-triggered glyph uploads cannot overlap an active
 		// render pass or retire descriptors still referenced by this frame slot.
+		TERRAENGINE_PROFILE_SCOPE("Editor Present: Prepare UI Textures", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		std::lock_guard<std::mutex> queueLock(impl->queueAccessMutex);
 		if (prepareUI) prepareUI();
 	} catch (...) {
@@ -7530,6 +7548,7 @@ TerraEngine::Renderer::Vulkan::EditorPresentResult VulkanContext::PresentEditor(
 	renderPass.pClearValues = &clear;
 
 	try {
+		TERRAENGINE_PROFILE_SCOPE("Editor Present: Record UI Draw Data", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		vkCmdBeginRenderPass(uiCommandBuffer, &renderPass, VK_SUBPASS_CONTENTS_INLINE);
 		{
 			// Dear ImGui records descriptor-backed draw calls here. The queue
@@ -7579,8 +7598,12 @@ TerraEngine::Renderer::Vulkan::EditorPresentResult VulkanContext::PresentEditor(
 		consumeOutstandingSemaphores(true);
 		return fail(EditorUiFrameStage::ResetFrameFence, resetFenceResult, "editor UI frame fence reset");
 	}
-	const VkResult submitResult = impl->SubmitGraphicsQueue(
-		1, &submit, impl->inFlightFences[impl->currentFrame]);
+	VkResult submitResult = VK_SUCCESS;
+	{
+		TERRAENGINE_PROFILE_SCOPE("Editor Present: Submit UI", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		submitResult = impl->SubmitGraphicsQueue(
+			1, &submit, impl->inFlightFences[impl->currentFrame]);
+	}
 	if (submitResult != VK_SUCCESS) {
 		// Failed submission consumes no waits. Drain them, then replace the now
 		// unsignaled fence so the frame slot remains reusable.
@@ -7613,7 +7636,13 @@ TerraEngine::Renderer::Vulkan::EditorPresentResult VulkanContext::PresentEditor(
 	present.swapchainCount = 1;
 	present.pSwapchains = &impl->swapchain;
 	present.pImageIndices = &imageIndex;
-	const VkResult presentResult = impl->PresentSwapchain(&present);
+	VkResult presentResult = VK_SUCCESS;
+	{
+		// FIFO presentation may apply back-pressure independently of image acquire;
+		// record it separately so responsiveness gates can diagnose the exact wait.
+		TERRAENGINE_PROFILE_SCOPE("Editor Present: Queue Present", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		presentResult = impl->PresentSwapchain(&present);
+	}
 	result.stage = EditorUiFrameStage::Present;
 	result.nativeResult = static_cast<std::int32_t>(presentResult);
 	if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR || impl->framebufferResized) {

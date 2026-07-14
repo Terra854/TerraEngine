@@ -1,0 +1,109 @@
+{
+  "affectedPath": "",
+  "diagnostics": [
+    {
+      "category": "ManagedSource",
+      "code": "export.validation.managedsource",
+      "line": 0,
+      "message": "Scanned 1 C# source file(s).",
+      "path": "",
+      "severity": "info",
+      "stage": "validation",
+      "suggestion": ""
+    },
+    {
+      "category": "Profile",
+      "code": "export.validation.profile",
+      "line": 0,
+      "message": "Export platform 'windows' expects Managed/Assembly-CSharp.dll, TerraEngine.dll, glfw3.dll, and Game.tepak to be staged with the launcher.",
+      "path": "",
+      "severity": "info",
+      "stage": "validation",
+      "suggestion": ""
+    },
+    {
+      "category": "Material",
+      "code": "export.validation.material",
+      "line": 0,
+      "message": "Material fallback: normal uses fallback flat normal",
+      "path": "C:\\Users\\benti\\Desktop\\TerraEngine\\out\\validation\\t153-final-export-parity-5\\project\\Assets\\Models\\Baseline_Generated\\BaselineMaterial.tmat",
+      "severity": "warning",
+      "stage": "validation",
+      "suggestion": ""
+    },
+    {
+      "category": "Material",
+      "code": "export.validation.material",
+      "line": 0,
+      "message": "Material fallback: roughness uses fallback roughnessFactor",
+      "path": "C:\\Users\\benti\\Desktop\\TerraEngine\\out\\validation\\t153-final-export-parity-5\\project\\Assets\\Models\\Baseline_Generated\\BaselineMaterial.tmat",
+      "severity": "warning",
+      "stage": "validation",
+      "suggestion": ""
+    },
+    {
+      "category": "Material",
+      "code": "export.validation.material",
+      "line": 0,
+      "message": "Material fallback: metallic uses fallback metallicFactor",
+      "path": "C:\\Users\\benti\\Desktop\\TerraEngine\\out\\validation\\t153-final-export-parity-5\\project\\Assets\\Models\\Baseline_Generated\\BaselineMaterial.tmat",
+      "severity": "warning",
+      "stage": "validation",
+      "suggestion": ""
+    },
+    {
+      "category": "Material",
+      "code": "export.validation.material",
+      "line": 0,
+      "message": "Material fallback: emissive uses fallback emissiveFactor",
+      "path": "C:\\Users\\benti\\Desktop\\TerraEngine\\out\\validation\\t153-final-export-parity-5\\project\\Assets\\Models\\Baseline_Generated\\BaselineMaterial.tmat",
+      "severity": "warning",
+      "stage": "validation",
+      "suggestion": ""
+    }
+  ],
+  "elapsedSeconds": 5.7028012,
+  "evidenceDirectory": "C:/Users/benti/Desktop/TerraEngine/out/validation/t153-final-export-parity-5/evidence",
+  "exitCode": 0,
+  "failureCategory": "none",
+  "invocationKind": "headless_cli",
+  "message": "Export completed successfully.",
+  "outputDirectory": "C:/Users/benti/Desktop/TerraEngine/out/validation/t153-final-export-parity-5/project/Builds/Baseline",
+  "package": {
+    "archivePath": "C:/Users/benti/Desktop/TerraEngine/out/validation/t153-final-export-parity-5/project/Builds/Baseline/project.tepak",
+    "byteSize": 206491,
+    "entryCount": 38
+  },
+  "physics": {
+    "colliderGuids": [
+      "22222222222222223333333344444444"
+    ],
+    "cookFormatVersion": 1,
+    "defaultMaterialGuid": "",
+    "layersHash": "de8eae8235446d4a",
+    "materialGuids": [],
+    "present": true,
+    "provider": {
+      "identifier": "Jolt",
+      "revision": "e77f175595e64cb44218cc9d9d56fc365ad0e36a",
+      "version": "5.6.0"
+    },
+    "schemaVersion": 1,
+    "settingsHash": "c4e5c61992b533cf",
+    "validation": {
+      "fixtureSchemaVersion": 1,
+      "status": "validated"
+    }
+  },
+  "profileId": "baseline",
+  "projectRoot": "C:/Users/benti/Desktop/TerraEngine/out/validation/t153-final-export-parity-5/project",
+  "runId": "t153-final-export-parity-5",
+  "schemaVersion": 1,
+  "stage": "complete",
+  "success": true,
+  "type": "result",
+  "validation": {
+    "errorCount": 0,
+    "warningCount": 4
+  }
+}

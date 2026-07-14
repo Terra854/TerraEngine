@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <unordered_map>
 
 namespace TerraEngine::Editor::SceneViewOverlay
 {
@@ -53,30 +55,98 @@ namespace TerraEngine::Editor::SceneViewOverlay
 
 	void ResolveMarkerOverlapGroups(std::vector<SceneObjectMarker>& markers, float radiusPixels)
 	{
-		std::uint32_t nextGroup = 1u;
+		// A uniform screen-space grid compares only nearby markers. The previous
+		// all-pairs loop made a dense ten-thousand-body Scene View quadratic even
+		// though markers farther than one radius can never share an overlap group.
+		// A cell diagonal is no wider than the overlap radius, so every marker in
+		// one cell belongs to the same connected overlap group. This avoids the
+		// pathological all-pairs case when thousands of bodies project together.
+		const float cellSize = std::max(radiusPixels * 0.70710678f, 1.0f);
+		const int neighborRange = static_cast<int>(std::ceil(radiusPixels / cellSize));
 		const float radiusSquared = radiusPixels * radiusPixels;
+		std::vector<std::size_t> parents(markers.size());
+		std::unordered_map<std::uint64_t, std::vector<std::size_t>> cells;
+		cells.reserve(markers.size());
+		for (std::size_t index = 0u; index < markers.size(); ++index)
+		{
+			parents[index] = index;
+			markers[index].overlapGroup = 0u;
+		}
+
+		auto findRoot = [&parents](std::size_t index) {
+			while (parents[index] != index)
+			{
+				parents[index] = parents[parents[index]];
+				index = parents[index];
+			}
+			return index;
+		};
+		auto mergeRoots = [&findRoot, &parents](std::size_t left, std::size_t right) {
+			const std::size_t leftRoot = findRoot(left);
+			const std::size_t rightRoot = findRoot(right);
+			if (leftRoot != rightRoot)
+			{
+				// Attach the later marker to the earlier root so group numbering stays
+				// deterministic in the same order as the visible marker list.
+				parents[rightRoot] = leftRoot;
+			}
+		};
+		auto cellKey = [](int x, int y) -> std::uint64_t {
+			return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(x)) << 32U)
+				| static_cast<std::uint32_t>(y);
+		};
 		for (std::size_t index = 0u; index < markers.size(); ++index)
 		{
 			if (!markers[index].visible)
 			{
 				continue;
 			}
-			if (markers[index].overlapGroup == 0u)
+
+			const int cellX = static_cast<int>(std::floor(markers[index].screenPosition.x / cellSize));
+			const int cellY = static_cast<int>(std::floor(markers[index].screenPosition.y / cellSize));
+			for (int offsetY = -neighborRange; offsetY <= neighborRange; ++offsetY)
 			{
-				markers[index].overlapGroup = nextGroup++;
+				for (int offsetX = -neighborRange; offsetX <= neighborRange; ++offsetX)
+				{
+					const auto cell = cells.find(cellKey(cellX + offsetX, cellY + offsetY));
+					if (cell == cells.end())
+					{
+						continue;
+					}
+					if (offsetX == 0 && offsetY == 0 && !cell->second.empty())
+					{
+						mergeRoots(cell->second.front(), index);
+						continue;
+					}
+					for (const std::size_t other : cell->second)
+					{
+						const glm::vec2 delta = markers[index].screenPosition - markers[other].screenPosition;
+						if (glm::dot(delta, delta) <= radiusSquared)
+						{
+							mergeRoots(other, index);
+						}
+					}
+				}
 			}
-			for (std::size_t other = index + 1u; other < markers.size(); ++other)
+			cells[cellKey(cellX, cellY)].push_back(index);
+		}
+
+		std::unordered_map<std::size_t, std::uint32_t> groupIdsByRoot;
+		groupIdsByRoot.reserve(markers.size());
+		std::uint32_t nextGroup = 1u;
+		for (std::size_t index = 0u; index < markers.size(); ++index)
+		{
+			if (!markers[index].visible)
 			{
-				if (!markers[other].visible)
-				{
-					continue;
-				}
-				const glm::vec2 delta = markers[index].screenPosition - markers[other].screenPosition;
-				if (glm::dot(delta, delta) <= radiusSquared)
-				{
-					markers[other].overlapGroup = markers[index].overlapGroup;
-				}
+				continue;
 			}
+			const std::size_t root = findRoot(index);
+			auto [group, inserted] = groupIdsByRoot.emplace(root, nextGroup);
+			if (inserted)
+			{
+				++nextGroup;
+			}
+			markers[index].overlapGroup = group->second;
 		}
 	}
 

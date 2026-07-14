@@ -19,6 +19,8 @@
 #include "Engine/Resource/ResourceManager.h"
 #include "Engine/Core/Logger/Logger.h"
 #include "Engine/Core/Scheduling/EcsQueryTaskGraph.h"
+#include "Engine/Profiling/ProfilerScope.h"
+#include "Engine/Runtime/ExportStartupCoordinator.h"
 #include "Engine/Utilities/PlatformUtils.h"
 
 // ImGui
@@ -30,6 +32,8 @@
 #include <GLFW/glfw3.h>
 #include <utility>
 #include <fstream>
+#include <iostream>
+#include <stdexcept>
 #include <unordered_map>
 
 // Static storage for callback chaining
@@ -71,6 +75,14 @@ static std::filesystem::path ResolveManagedEditorDirectory() {
 
 void EditorSystem::SetStartupProjectPath(const std::filesystem::path& projectPath) {
 	startupProjectPath = projectPath;
+}
+
+void EditorSystem::SetPhysicsInvariantOutputPath(const std::filesystem::path& outputPath) {
+	physicsInvariantOutputPath = outputPath;
+}
+
+int EditorSystem::RequestedProcessExitCode() const noexcept {
+	return requestedProcessExitCode;
 }
 
 // Wraps the OS cursor to the opposite edge while dragging inspector values.
@@ -549,6 +561,46 @@ void EditorSystem::Initialize() {
 	// editor, managed, and callback setup, which keeps it aligned with normal
 	// project-hub opens without waiting for the first frame update.
 	ProcessStartupProjectOpen();
+
+	if (physicsInvariantOutputPath.has_value() && !physicsInvariantRunAttempted) {
+		physicsInvariantRunAttempted = true;
+		TerraEngine::Runtime::PhysicsInvariantReport report;
+		try {
+			if (!context.projectManager->HasActiveProject()) {
+				report.diagnostic = "The requested startup project could not be opened for editor physics validation.";
+			} else if (!mainEditor) {
+				report.diagnostic = "The main editor subsystem is unavailable for physics validation.";
+			} else {
+				// This calls the same Play Mode lifecycle and PhysicsSystem used by
+				// an interactive editor session after renderer and managed startup.
+				report = mainEditor->RunPhysicsExportInvariantFixture();
+			}
+
+			const std::filesystem::path outputPath = std::filesystem::absolute(*physicsInvariantOutputPath);
+			if (!outputPath.parent_path().empty()) {
+				std::filesystem::create_directories(outputPath.parent_path());
+			}
+			const std::string serialized = TerraEngine::Runtime::SerializePhysicsInvariantReport(report);
+			std::ofstream output(outputPath, std::ios::binary | std::ios::trunc);
+			if (!output) {
+				throw std::runtime_error("Could not open the editor physics invariant output path.");
+			}
+			output.write(serialized.data(), static_cast<std::streamsize>(serialized.size()));
+			output.flush();
+			if (!output) {
+				throw std::runtime_error("Could not persist the complete editor physics invariant report.");
+			}
+			std::cout << "[Editor] Physics invariant report: " << serialized << '\n';
+			requestedProcessExitCode = report.succeeded && report.orderlyShutdown
+				&& report.activePhysicsJobsAfterDrain == 0U && report.queuedPhysicsJobsAfterDrain == 0U ? 0 : 1;
+		} catch (const std::exception& exception) {
+			requestedProcessExitCode = 1;
+			TERRAENGINE_LOG(LogLevel::Error, "[EditorSystem] Physics invariant validation failed: " << exception.what());
+		}
+		// The engine owns shutdown ordering, so request a normal loop exit after
+		// the evidence file is closed instead of tearing systems down in-place.
+		context.engine->SignalShutdown();
+	}
 }
 
 // EditorSystem::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -611,14 +663,24 @@ void EditorSystem::Update(float deltaTime) {
 	// bridge prepares immutable requests off-thread and commits editor-owned work
 	// only from this protected editor update boundary.
 	if (context.editorMcpBridge) {
+		TERRAENGINE_PROFILE_SCOPE("EditorSystem: MCP Bridge", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		context.editorMcpBridge->Update(deltaTime);
 	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (context.projectManager->HasActiveProject()) {
-		AssetDatabase::Instance().Update();
-		mainEditor->Update(deltaTime);
-		mainEditor->DrawUI();
+		{
+			TERRAENGINE_PROFILE_SCOPE("EditorSystem: Asset Database", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			AssetDatabase::Instance().Update();
+		}
+		{
+			TERRAENGINE_PROFILE_SCOPE("EditorSystem: Main Editor Update", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			mainEditor->Update(deltaTime);
+		}
+		{
+			TERRAENGINE_PROFILE_SCOPE("EditorSystem: Main Editor Draw", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			mainEditor->DrawUI();
+		}
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (mainEditor && mainEditor->IsInspectorValueDragging()) {
 			auto& windowSystem = WindowSystem::Instance();
@@ -636,13 +698,18 @@ void EditorSystem::Update(float deltaTime) {
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (managedUpdate) {
+		TERRAENGINE_PROFILE_SCOPE("EditorSystem: Managed Update", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		managedUpdate(deltaTime);
 	}
-	
-	ImGui::Render();
+
+	{
+		TERRAENGINE_PROFILE_SCOPE("EditorSystem: ImGui Build Draw Data", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		ImGui::Render();
+	}
 	
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vulkan) {
+		TERRAENGINE_PROFILE_SCOPE("EditorSystem: Present Editor UI", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		const auto presentResult = vulkan->PresentEditor([&](){
 			const auto bridgeResult = TerraEngine::Editor::CheckedImGuiVulkanBridge::Execute(
 				TerraEngine::Renderer::Vulkan::EditorUiFrameStage::RecordDrawData,

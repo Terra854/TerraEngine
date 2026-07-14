@@ -1,0 +1,177 @@
+{
+    "assets": [
+        {
+            "guid": "22222222222222223333333344444444",
+            "path": "Colliders/Startup.tepcoll",
+            "type": 5
+        },
+        {
+            "guid": "5cb8d797dc72ae521a7dd2fa784b0f9f",
+            "path": "Models/Baseline_Generated/BaselineMaterial.tmat",
+            "type": 2
+        },
+        {
+            "guid": "803d94e355222334826da82c660ecda8",
+            "path": "Models/Baseline_Generated/BaselineTexture.tetf",
+            "type": 1
+        },
+        {
+            "guid": "c8ff317261139cf962f2cedc60952f64",
+            "path": "Models/Baseline_Generated/BaselineTriangle.temf",
+            "type": 0,
+            "virtualGeometry": {
+                "compiledPayload": "Models/Baseline_Generated/BaselineTriangle.temf",
+                "diagnosticsEnabled": true,
+                "required": true,
+                "requiresAdaptiveCookData": true,
+                "requiresClusterFallback": true,
+                "requiresPageData": true
+            }
+        }
+    ],
+    "name": "project",
+    "physics": {
+        "colliders": [
+            {
+                "checksum": "8030bfa4cfff2ce3",
+                "guid": "22222222222222223333333344444444",
+                "packagePath": "Colliders/Startup.tepcoll",
+                "recipeHash": "b0265c720a77c717",
+                "size": 827,
+                "sourceProvenanceHash": "0000000000000011"
+            }
+        ],
+        "cookFormatVersion": 1,
+        "defaultMaterialGuid": "",
+        "layersHash": "de8eae8235446d4a",
+        "materials": [],
+        "provider": {
+            "identifier": "Jolt",
+            "revision": "e77f175595e64cb44218cc9d9d56fc365ad0e36a",
+            "version": "5.6.0"
+        },
+        "schemaVersion": 1,
+        "settings": {
+            "contentHash": "c4e5c61992b533cf",
+            "packagePath": "ProjectSettings/PhysicsSettings.json",
+            "schemaVersion": 1
+        },
+        "validation": {
+            "fixtureSchemaVersion": 1,
+            "status": "validated"
+        }
+    },
+    "renderProfile": {
+        "ambientOcclusion": "medium",
+        "debugEnabled": true,
+        "profileName": "Project Render Settings",
+        "resolutionScale": 1.0,
+        "shadows": "medium",
+        "textureBudgetMb": 512,
+        "validationEnabled": true,
+        "variableRateShading": "disabled"
+    },
+    "renderSettings": {
+        "debugEnabled": true,
+        "preset": 4,
+        "settings": {
+            "ambientOcclusionQuality": 2,
+            "ambientOcclusionStrength": 1.0,
+            "anisotropicFiltering": 8,
+            "enableIBL": 1,
+            "enableLTC": 1,
+            "indirectStrength": 1.0,
+            "maxAreaLights": 2,
+            "maxDynamicLights": 64,
+            "maxShadowLights": 4,
+            "maxUploadedLights": 128,
+            "shadowFilteringSize": 5,
+            "shadowResolution": 1536,
+            "variableRateShading": 0,
+            "virtualGeometry": {
+                "debugVisualizationMode": 0,
+                "geometryBudgetBytes": 0,
+                "hiZNearPlaneGuardEnabled": true,
+                "hiZOcclusionEnabled": true,
+                "hiZSelfOcclusionGuardEnabled": true,
+                "hiZThinGeometryGuardEnabled": true,
+                "lodErrorScale": 1.0,
+                "lodTransitionHysteresisPixels": 0.3499999940395355,
+                "lodTransitionStableFrames": 3,
+                "maxLodDrop": 0,
+                "preloadBias": 1.0
+            }
+        },
+        "validationEnabled": true
+    },
+    "rendererRecovery": {
+        "diagnosticsEnabled": true,
+        "fatalMessage": "Graphics device lost. Restart the application to restore rendering.",
+        "fullApplicationRestart": false,
+        "mode": "failClosed",
+        "validationEnabled": true
+    },
+    "residencyPolicy": {
+        "cleanupIntervalSeconds": 1.0,
+        "cpu": {
+            "idleSecondsThreshold": 30.0,
+            "memoryBudgetBytes": 0,
+            "reloadGraceSeconds": 5.0
+        },
+        "enabled": true,
+        "gpu": {
+            "idleSecondsThreshold": 10.0,
+            "memoryBudgetBytes": 0,
+            "reloadGraceSeconds": 0.5,
+            "strictBudgetMode": false
+        }
+    },
+    "startupScene": "Scenes/Startup.tescene",
+    "streamingPolicy": {
+        "deferScenePayloadsOnLoad": true,
+        "enabled": true,
+        "maxLoadsPerUpdate": 0,
+        "memoryBudgetInteraction": "use-residency-policy",
+        "neededRetentionSeconds": 5.0,
+        "streamingDistance": 300.0,
+        "textureMaxStreamMip": 8,
+        "textureMinStreamMip": 0,
+        "textureMipStreamingEnabled": true,
+        "virtualGeometryPageMemoryBudgetBytes": 0,
+        "virtualGeometryPageRetirementBudgetBytes": 0,
+        "virtualGeometryPageUploadBudgetBytes": 0,
+        "visibleRetentionSeconds": 2.0
+    },
+    "version": "1.0.0",
+    "virtualGeometry": {
+        "coverage": {
+            "fixtureManifest": "Tests/Fixtures/VirtualGeometry/hardening-fixtures.json",
+            "requiredCategories": [
+                "export",
+                "streaming-pressure",
+                "multi-view"
+            ]
+        },
+        "diagnosticsEnabled": true,
+        "geometryBudgetBytes": 67108864,
+        "hiZOcclusionEnabled": true,
+        "lodErrorScale": 1.0,
+        "maxLodDrop": 1,
+        "preloadBias": 1.0,
+        "quality": "medium",
+        "qualityLevel": 2,
+        "requiredMetadata": [
+            "adaptiveTargets",
+            "fallbackCoverage",
+            "clusterHierarchy",
+            "pageLinks",
+            "coneSafety"
+        ],
+        "requiredShaders": [
+            "Shaders/Default.task.tspf",
+            "Shaders/Default.mesh.tspf",
+            "Shaders/Default.frag.tspf",
+            "Shaders/PostProcess/HiZGenerate.comp.spv"
+        ]
+    }
+}

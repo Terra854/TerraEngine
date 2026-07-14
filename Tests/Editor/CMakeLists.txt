@@ -140,6 +140,7 @@ add_executable(TerraEngine-EditorTests
 	Physics/PhysicsSceneViewTests.cpp
 	Physics/PhysicsPlayModeSoakTests.cpp
 	Physics/PhysicsDiagnosticsWindowTests.cpp
+	Physics/PhysicsEditorPerformanceTests.cpp
 	Profiling/RendererRecoveryProfilerTests.cpp
 	Scene/SchedulerPlayModeGraphTests.cpp
 	Scene/SceneRuntimeParityTests.cpp
@@ -354,6 +355,12 @@ add_test(NAME Editor.PhysicsUS5 COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
 set_tests_properties(Editor.PhysicsUS5 PROPERTIES
 	LABELS "Editor;Physics;US5"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Editor.PhysicsInspector,Editor.PhysicsPrefabUndo,Editor.PhysicsProjectSettings,Physics.SceneView,Physics.Diagnostics"
+)
+
+add_test(NAME Editor.PhysicsPerformance COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.PhysicsPerformance PROPERTIES
+	LABELS "Editor;Physics;US5;Performance"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Physics.Editor.Performance"
 )
 
 add_test(NAME Editor.PhysicsUS6 COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)

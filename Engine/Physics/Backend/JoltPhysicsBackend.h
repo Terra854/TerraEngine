@@ -14,6 +14,13 @@
 class ThreadPool;
 
 namespace TerraEngine::Physics::Backend {
+	// Shutdown validation needs only the provider adapter's live queue state.
+	// Keeping this provider-neutral snapshot here avoids leaking Jolt headers
+	// through the public backend header into engine and editor compilation units.
+	struct PhysicsBackendJobDrainDiagnostics {
+		std::uint32_t queued = 0U;
+		std::uint32_t activePumps = 0U;
+	};
 	struct JoltPhysicsBackendConfiguration {
 		std::uint32_t maximumPhysicsWorkers = 0U;
 		std::uint32_t maximumBarriers = 8U;
@@ -77,7 +84,13 @@ namespace TerraEngine::Physics::Backend {
 		bool IsHealthy() const noexcept override;
 
 		PhysicsAllocationDiagnostics AllocationDiagnostics() const noexcept;
+		// This is the narrow lifecycle diagnostic exposed to shutdown validators.
+		// It reports adapter-owned queues and pumps, never provider job objects.
+		PhysicsBackendJobDrainDiagnostics JobDiagnostics() const noexcept;
 		PhysicsProviderError LastProviderError() const;
+		// Exercises fatal containment through the same allocator diagnostic observed
+		// in production, without depending on an unsafe process-wide OOM condition.
+		void ReportFatalProviderFailureForValidation() noexcept;
 
 	private:
 		struct Impl;

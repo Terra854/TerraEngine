@@ -112,6 +112,12 @@ namespace TerraEngine::EditorTests
 			{
 				workspace.WriteText(file, "required runtime payload");
 			}
+
+			// Package validation requires every export fixture to name and stage a
+			// startup scene, even when this test exercises virtual-geometry data only.
+			// The empty object list is a valid minimal serialized-scene payload and
+			// deliberately keeps physics optional for these focused tests.
+			workspace.WriteText("Scenes/Startup.tescene", R"({"objects":[]})");
 		}
 
 		std::string ReadTextFile(const std::filesystem::path& path)
@@ -288,6 +294,7 @@ namespace TerraEngine::EditorTests
 			const std::string manifest =
 				std::string("{\n") +
 				"\t\"name\": \"Virtual Geometry Export Test\",\n"
+				"\t\"startupScene\": \"Scenes/Startup.tescene\",\n"
 				"\t\"rendererRecovery\": {\n"
 				"\t\t\"validationEnabled\": false,\n"
 				"\t\t\"diagnosticsEnabled\": true,\n"

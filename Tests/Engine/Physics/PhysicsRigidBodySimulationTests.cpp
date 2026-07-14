@@ -371,5 +371,36 @@ namespace TerraEngine::Tests {
 			context.Expect(bouncyPeakUpwardVelocity > deadPeakUpwardVelocity + 2.0F,
 				"High restitution must create a measurably stronger rebound than a zero-restitution material.");
 		});
+
+		registry.Add("Physics.RigidBodySimulation.FatalProviderFailureContainsSimulationAndStillAllowsCleanup", [](TestContext& context) {
+			Fixture fixture;
+			fixture.backend.ReportFatalProviderFailureForValidation();
+			context.Expect(!fixture.backend.IsHealthy(),
+				"A translated fatal allocation report must contain the backend immediately.");
+
+			const PhysicsBackendResult step = fixture.backend.Step({fixture.world, 1U, 1.0F / 60.0F, 1U});
+			context.Expect(step.status == PhysicsResultStatus::InternalFailure
+				&& step.error == PhysicsBackendErrorCode::FatalProviderFailure
+				&& step.message.find("contained after a fatal provider failure") != std::string::npos,
+				"Contained simulation must return one controlled critical report without entering Jolt again.");
+			const PhysicsProviderError provider = fixture.backend.LastProviderError();
+			context.Expect(provider.code == PhysicsProviderErrorCode::AllocationFailure
+				&& provider.message.find("4096 bytes") != std::string::npos,
+				"The translated provider report must retain a bounded, actionable failure description.");
+
+			const PhysicsBackendResult command = fixture.backend.ApplyCommand(
+				PhysicsCommand::MakeWake(fixture.bodyObjectId, 1U, 1U));
+			context.Expect(command.error == PhysicsBackendErrorCode::FatalProviderFailure,
+				"Commands must stop at the contained boundary after a fatal provider failure.");
+			PhysicsBackendExtraction extraction;
+			extraction.world = fixture.world;
+			context.Expect(fixture.backend.Extract(extraction).error == PhysicsBackendErrorCode::FatalProviderFailure,
+				"Readback must not re-enter a provider whose state is fatally contained.");
+			context.Expect(fixture.backend.JobDiagnostics().queued == 0U
+				&& fixture.backend.JobDiagnostics().activePumps == 0U,
+				"Fatal containment must leave no queued or active provider jobs before teardown.");
+			// Fixture destruction deliberately exercises DestroyWorld and Shutdown:
+			// cleanup remains available even though all simulation work is rejected.
+		});
 	}
 }

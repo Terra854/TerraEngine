@@ -64,6 +64,7 @@ namespace TerraEngine::Tests {
 	void RegisterPhysicsRigidBodyTransactionTests(TestRegistry& registry);
 	void RegisterPhysicsRigidBodySimulationTests(TestRegistry& registry);
 	void RegisterPhysicsSchedulerTests(TestRegistry& registry);
+	void RegisterPhysicsPerformanceTests(TestRegistry& registry);
 	void RegisterPhysicsManagedAbiTests(TestRegistry& registry);
 	void RegisterPhysicsManagedIntegrationTests(TestRegistry& registry);
 	void RegisterPhysicsDeterminismStressTests(TestRegistry& registry);
@@ -264,6 +265,7 @@ int main() {
 	TerraEngine::Tests::RegisterPhysicsRigidBodyTransactionTests(registry);
 	TerraEngine::Tests::RegisterPhysicsRigidBodySimulationTests(registry);
 	TerraEngine::Tests::RegisterPhysicsSchedulerTests(registry);
+	TerraEngine::Tests::RegisterPhysicsPerformanceTests(registry);
 	TerraEngine::Tests::RegisterPhysicsManagedAbiTests(registry);
 	TerraEngine::Tests::RegisterPhysicsManagedIntegrationTests(registry);
 	TerraEngine::Tests::RegisterPhysicsDeterminismStressTests(registry);

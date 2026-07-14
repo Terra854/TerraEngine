@@ -30,11 +30,11 @@ namespace TerraEngine::EditorTests {
 	void RegisterHeadlessExportDocumentationTests(TestRegistry& registry) {
 		registry.Add("Editor.HeadlessExport.Documentation.LocalCommandsMatchCiGate", [](TestContext& context) {
 			const std::string workflow = ReadDocumentationText(".github/workflows/export-baseline.yml");
-			const std::string quickstart = ReadDocumentationText("specs/038-headless-export-ci/quickstart.md");
+			const std::string quickstart = ReadDocumentationText("specs/042-physics-system/quickstart.md");
 			const std::string baselineGuide = ReadDocumentationText("Docs/ExportRuntimeBaseline.md");
 			const std::string testingGuide = ReadDocumentationText("Docs/Testing.md");
 			const std::vector<std::string_view> sharedCommandTokens = {
-				"cmake --preset Debug",
+				"cmake --preset RelWithDebInfo",
 				"TerraEngine-EngineTests",
 				"TerraEngine-EditorTests",
 				"TerraEngineModelPackageCompiler",
@@ -55,20 +55,20 @@ namespace TerraEngine::EditorTests {
 		});
 
 		registry.Add("Editor.HeadlessExport.Documentation.InstalledPathsStayAuthoritative", [](TestContext& context) {
-			const std::string quickstart = ReadDocumentationText("specs/038-headless-export-ci/quickstart.md");
+			const std::string quickstart = ReadDocumentationText("specs/042-physics-system/quickstart.md");
 			const std::string baselineGuide = ReadDocumentationText("Docs/ExportRuntimeBaseline.md");
 			const std::string workflow = ReadDocumentationText(".github/workflows/export-baseline.yml");
 			const std::vector<std::string_view> installedPaths = {
-				"out/build/Debug/Build/Editor/TerraEngine-Export.exe",
-				"out/build/Debug/Build/Editor/TerraEngineModelPackageCompiler.exe",
-				"out/build/Debug/Build/Editor/Managed/TerraEngine.CSharp.dll",
-				"out/build/Debug/Build/Editor/Managed/Analyzers/TerraEngine.Export.Generator.dll",
-				"out/build/Debug/Build/Launcher/TerraEngine-Launcher.exe"
+				"out/build/RelWithDebInfo/Build/Editor/TerraEngine-Export.exe",
+				"out/build/RelWithDebInfo/Build/Editor/TerraEngineModelPackageCompiler.exe",
+				"out/build/RelWithDebInfo/Build/Editor/Managed/TerraEngine.CSharp.dll",
+				"out/build/RelWithDebInfo/Build/Editor/Managed/Analyzers/TerraEngine.Export.Generator.dll",
+				"out/build/RelWithDebInfo/Build/Launcher/TerraEngine-Launcher.exe"
 			};
 
 			context.Expect(ContainsEvery(quickstart, installedPaths), "The quickstart should list every installed export dependency.");
 			context.Expect(ContainsEvery(baselineGuide, installedPaths), "The baseline guide should list every installed export dependency.");
-			context.Expect(workflow.find("INSTALL_ROOT: out/build/Debug/Build") != std::string::npos, "The workflow should verify the documented install root.");
+			context.Expect(workflow.find("INSTALL_ROOT: out/build/RelWithDebInfo/Build") != std::string::npos, "The workflow should verify the documented install root.");
 			context.Expect(ContainsEvery(workflow, {"Editor/TerraEngine-Export.exe", "Editor/TerraEngineModelPackageCompiler.exe", "Editor/Managed/TerraEngine.CSharp.dll", "Editor/Managed/Analyzers/TerraEngine.Export.Generator.dll", "Launcher/TerraEngine-Launcher.exe"}), "The workflow should verify every documented installed dependency before export.");
 		});
 
@@ -109,7 +109,7 @@ namespace TerraEngine::EditorTests {
 			const std::string testingGuide = ReadDocumentationText("Docs/Testing.md");
 			const std::vector<std::string_view> discoveryTokens = {
 				".github/workflows/export-baseline.yml",
-				"headless-export-evidence-windows-debug",
+				"headless-export-evidence-windows-relwithdebinfo",
 				"Windows x64",
 				"60-minute",
 				"always"
@@ -117,7 +117,7 @@ namespace TerraEngine::EditorTests {
 
 			context.Expect(ContainsEvery(baselineGuide, discoveryTokens), "The baseline guide should document the supported workflow scope and retained artifact.");
 			context.Expect(testingGuide.find(".github/workflows/export-baseline.yml") != std::string::npos, "The testing guide should link contributors to the authoritative workflow path.");
-			context.Expect(testingGuide.find("headless-export-evidence-windows-debug") != std::string::npos, "The testing guide should name the retained CI artifact.");
+			context.Expect(testingGuide.find("headless-export-evidence-windows-relwithdebinfo") != std::string::npos, "The testing guide should name the retained CI artifact.");
 		});
 	}
 }

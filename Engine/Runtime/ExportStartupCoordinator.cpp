@@ -1,8 +1,10 @@
 #include "Runtime/ExportStartupCoordinator.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstring>
+#include <fstream>
 #include <nlohmann/json.hpp>
 #include <utility>
 
@@ -93,9 +95,13 @@ namespace TerraEngine::Runtime {
 			const auto parsed = TerraEngine::ParseUUID(record.value("guid", std::string{}));
 			return parsed.has_value() && *parsed == id;
 		}
+
 	}
 
-	PackagedPhysicsRuntime LoadPackagedPhysicsRuntime(const ContentMount& mount, bool requireManagedBindings) {
+	PackagedPhysicsRuntime LoadPackagedPhysicsRuntime(
+		const ContentMount& mount,
+		bool requireManagedBindings,
+		const std::filesystem::path& externalManagedBindingsPath) {
 		PackagedPhysicsRuntime result;
 		if(!mount.IsMounted() || !mount.Exists("game.json")) {
 			result.diagnostic = "Mounted export content does not provide game.json.";
@@ -160,7 +166,7 @@ namespace TerraEngine::Runtime {
 					result.diagnostic = "A packaged physics material is malformed or has a GUID mismatch.";
 					return result;
 				}
-				result.materials.push_back(material.BuildRuntime());
+				result.materials.push_back({material.assetId, path, material.BuildRuntime()});
 			}
 
 			for(const nlohmann::json& record : physics.value("colliders", nlohmann::json::array())) {
@@ -193,7 +199,24 @@ namespace TerraEngine::Runtime {
 				result.colliders.push_back({collider->Envelope().assetId, path, collider->Envelope(), std::vector<std::byte>(collider->Payload().begin(), collider->Payload().end())});
 			}
 
-			const std::vector<uint8_t> managedBytes = mount.ReadAll("Managed/Assembly-CSharp.dll");
+			std::vector<uint8_t> managedBytes;
+			if(mount.Exists("Managed/Assembly-CSharp.dll")) {
+				managedBytes = mount.ReadAll("Managed/Assembly-CSharp.dll");
+			} else if(!externalManagedBindingsPath.empty()) {
+				// NativeAOT gameplay code is a loadable library staged beside TEPAK,
+				// not an asset entry. Validate the same file ScriptingSystem loads.
+				std::ifstream managedInput(externalManagedBindingsPath, std::ios::binary);
+				if(managedInput) {
+					managedInput.seekg(0, std::ios::end);
+					const std::streamoff size = managedInput.tellg();
+					managedInput.seekg(0, std::ios::beg);
+					if(size > 0) {
+						managedBytes.resize(static_cast<std::size_t>(size));
+						managedInput.read(reinterpret_cast<char*>(managedBytes.data()), size);
+						if(!managedInput) managedBytes.clear();
+					}
+				}
+			}
 			result.managedBindingsLoaded = !managedBytes.empty() && !ContainsPlaceholderMarker(managedBytes);
 			if(requireManagedBindings && !result.managedBindingsLoaded) {
 				result.diagnostic = "Physics export requires a non-placeholder Managed/Assembly-CSharp.dll binding payload.";
@@ -272,5 +295,36 @@ namespace TerraEngine::Runtime {
 			? "All startup gates passed."
 			: "One or more startup gates failed.";
 		return result;
+	}
+
+	std::string SerializePhysicsInvariantReport(const PhysicsInvariantReport& report) {
+		return nlohmann::json{{"schemaVersion", report.schemaVersion}, {"succeeded", report.succeeded},
+			{"bodiesCreated", report.bodiesCreated}, {"fixedStepsCompleted", report.fixedStepsCompleted},
+			{"filteredQueryHits", report.filteredQueryHits}, {"publishedEvents", report.publishedEvents},
+			{"constraintsCreated", report.constraintsCreated}, {"charactersCreated", report.charactersCreated},
+			{"completedTransitions", report.completedTransitions}, {"activePhysicsJobsAfterDrain", report.activePhysicsJobsAfterDrain},
+			{"queuedPhysicsJobsAfterDrain", report.queuedPhysicsJobsAfterDrain}, {"gravityYMilliMetresPerSecondSquared", report.gravityYMilliMetresPerSecondSquared},
+			{"fixedTimeStepMicroseconds", report.fixedTimeStepMicroseconds}, {"parityLayerBroadPhaseGroup", report.parityLayerBroadPhaseGroup},
+			{"managedBindingsReady", report.managedBindingsReady},
+			{"cookedColliderUsed", report.cookedColliderUsed}, {"orderlyShutdown", report.orderlyShutdown}, {"diagnostic", report.diagnostic}}.dump();
+	}
+
+	bool EquivalentPhysicsInvariantReports(const PhysicsInvariantReport& editor, const PhysicsInvariantReport& exported, std::string& diagnostic) {
+		if(editor.schemaVersion != PhysicsInvariantReport::kSchemaVersion || exported.schemaVersion != PhysicsInvariantReport::kSchemaVersion) {
+			diagnostic = "Physics invariant report schema version is unsupported.";
+			return false;
+		}
+		if(!editor.succeeded || !exported.succeeded || !editor.orderlyShutdown || !exported.orderlyShutdown
+			|| editor.activePhysicsJobsAfterDrain != 0U || exported.activePhysicsJobsAfterDrain != 0U
+			|| editor.queuedPhysicsJobsAfterDrain != 0U || exported.queuedPhysicsJobsAfterDrain != 0U) {
+			diagnostic = "Physics invariant reports must both pass, shut down orderly, and drain all provider work.";
+			return false;
+		}
+		if(SerializePhysicsInvariantReport(editor) != SerializePhysicsInvariantReport(exported)) {
+			diagnostic = "Editor Play Mode and exported runtime physics invariant reports differ.";
+			return false;
+		}
+		diagnostic.clear();
+		return true;
 	}
 }

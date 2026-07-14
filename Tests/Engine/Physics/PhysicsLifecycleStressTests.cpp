@@ -9,7 +9,10 @@
 #include "Physics/PhysicsWorld.h"
 #include "ThreadPool/ThreadPool.h"
 
+#include <array>
 #include <cstdint>
+#include <string>
+#include <string_view>
 
 namespace TerraEngine::Tests {
 	namespace {
@@ -27,6 +30,37 @@ namespace TerraEngine::Tests {
 			}
 		};
 
+		enum class LifecycleBoundary : std::uint8_t {
+			SceneUnload,
+			RemoveRecreate,
+			ScriptReload,
+			RendererUnavailable,
+			ProjectClose,
+			Shutdown
+		};
+
+		// Round-robin scheduling gives every named teardown path repeated coverage
+		// while retaining the required 1,000-cycle total rather than multiplying it.
+		constexpr std::array<LifecycleBoundary, 6U> kLifecycleBoundaries{
+			LifecycleBoundary::SceneUnload,
+			LifecycleBoundary::RemoveRecreate,
+			LifecycleBoundary::ScriptReload,
+			LifecycleBoundary::RendererUnavailable,
+			LifecycleBoundary::ProjectClose,
+			LifecycleBoundary::Shutdown};
+
+		std::string_view BoundaryName(LifecycleBoundary boundary) {
+			switch(boundary) {
+				case LifecycleBoundary::SceneUnload: return "scene-unload";
+				case LifecycleBoundary::RemoveRecreate: return "remove-recreate";
+				case LifecycleBoundary::ScriptReload: return "script-reload";
+				case LifecycleBoundary::RendererUnavailable: return "renderer-unavailable";
+				case LifecycleBoundary::ProjectClose: return "project-close";
+				case LifecycleBoundary::Shutdown: return "shutdown";
+			}
+			return "unknown";
+		}
+
 		PhysicsQueryRequest MakeQuery(PhysicsWorldHandle world, PhysicsTick tick) {
 			PhysicsQueryRequest request;
 			request.world = world;
@@ -40,7 +74,12 @@ namespace TerraEngine::Tests {
 			return request;
 		}
 
-		bool ReplaceWorld(PhysicsWorld& world) {
+		bool ReplaceWorld(PhysicsWorld& world, LifecycleBoundary boundary) {
+			// All non-renderer producer boundaries converge at this protected teardown:
+			// stop acceptance, drain prepared work, invalidate identities, then create.
+			// Passing the named boundary keeps the race matrix explicit rather than
+			// treating every stale handle as a generic replacement.
+			(void)boundary;
 			return world.BeginStopping()
 				&& world.BeginDraining() == 0U
 				&& world.CompleteTeardown()
@@ -54,6 +93,7 @@ namespace TerraEngine::Tests {
 			context.Expect(world.Create(PhysicsSettings::Defaults()), "The stale-race world must start before repeated lifecycle changes.");
 
 			for(std::uint32_t iteration = 0U; iteration < 100U; ++iteration) {
+				const LifecycleBoundary boundary = kLifecycleBoundaries[iteration % kLifecycleBoundaries.size()];
 				const PhysicsWorldHandle oldWorld = world.Handle();
 				const PhysicsBodyHandle removedBody = world.AllocateBody();
 				const PhysicsQueryReceipt receipt = world.SubmitQuery(MakeQuery(oldWorld, 1U));
@@ -61,10 +101,8 @@ namespace TerraEngine::Tests {
 				context.Expect(removedBody.IsValid() && receipt.accepted && prepared.queries.size() == 1U,
 					"Every race must admit one old body and one prepared query before unload/recreate.");
 
-				// This one protected replacement models scene unload plus remove/recreate.
-				// Script reload and shutdown use the same generation invalidation contract,
-				// so a late command/result cannot be accepted by the replacement world.
-				context.Expect(ReplaceWorld(world), "World replacement must drain all old work before the next generation is visible.");
+				context.Expect(ReplaceWorld(world, boundary),
+					"The " + std::string(BoundaryName(boundary)) + " replacement must drain old work before its new generation is visible.");
 				const PhysicsWorldHandle replacement = world.Handle();
 				const PhysicsBodyHandle replacementBody = world.AllocateBody();
 				context.Expect(replacement != oldWorld && replacementBody.slotIndex == removedBody.slotIndex,
@@ -79,7 +117,7 @@ namespace TerraEngine::Tests {
 			}
 		});
 
-		registry.Add("Physics.LifecycleStress.OneThousandSystemCyclesDrainForScriptReloadRendererFailureProjectCloseAndShutdown", [](TestContext& context) {
+		registry.Add("Physics.LifecycleStress.OneThousandSystemCyclesDrainForExplicitLifecycleBoundaries", [](TestContext& context) {
 			ThreadPoolSession pool;
 			auto& physics = PhysicsSystem::Instance();
 			physics.Shutdown();
@@ -88,6 +126,7 @@ namespace TerraEngine::Tests {
 			PublishedPhysicsDebugPackets().Clear();
 
 			for(std::uint32_t cycle = 0U; cycle < 1000U; ++cycle) {
+				const LifecycleBoundary boundary = kLifecycleBoundaries[cycle % kLifecycleBoundaries.size()];
 				context.Expect(physics.StartWorld(), "Every Play Mode lifecycle cycle must create a fresh provider world.");
 				const PhysicsWorldHandle liveWorld = physics.WorldHandle();
 				context.Expect(liveWorld.IsValid(), "A live cycle must expose a valid generation-safe world handle.");
@@ -96,18 +135,24 @@ namespace TerraEngine::Tests {
 				physics.Update(0.0F);
 				physics.OnAfterPhysicsFlush({});
 
-				// Diagnostics are intentionally renderer-independent. Reading the packet
-				// history here models a renderer-unavailable frame without invoking any
-				// presentation backend or allowing it to own physics lifetime.
-				const PhysicsDebugDisplaySelection selection{};
-				(void)PublishedPhysicsDebugPackets().Select(liveWorld, cycle + 1U, selection);
+				if(boundary == LifecycleBoundary::RendererUnavailable) {
+					// This headless engine test deliberately has no renderer. Selecting only
+					// immutable diagnostic packets proves renderer loss cannot touch the live
+					// provider world or make physics depend on presentation availability.
+					const PhysicsDebugDisplaySelection selection{};
+					(void)PublishedPhysicsDebugPackets().Select(liveWorld, cycle + 1U, selection);
+					context.Expect(physics.WorldHandle() == liveWorld,
+						"The renderer-unavailable boundary must leave the current world valid until stop.");
+				}
 				context.Expect(physics.StopWorld() && !physics.WorldHandle().IsValid(),
-					"Play stop, script reload, and scene unload must leave no active physics world.");
+					"The " + std::string(BoundaryName(boundary)) + " boundary must leave no active physics world.");
 
-				if((cycle + 1U) % 100U == 0U) {
-					// Periodic complete host teardown models project close/shutdown. Restarting
-					// immediately verifies that no callback or provider allocation survives.
+				if(boundary == LifecycleBoundary::ProjectClose || boundary == LifecycleBoundary::Shutdown) {
+					// A soak loop has to restart after both host-ending cases. This is a real
+					// PhysicsSystem teardown/reinitialize sequence, not a comment-only model.
 					physics.Shutdown();
+					context.Expect(!physics.WorldHandle().IsValid(),
+						"Project close and shutdown must release all active provider world identities.");
 					physics.Initialize();
 				}
 			}

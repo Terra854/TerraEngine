@@ -1962,6 +1962,9 @@ namespace TerraEngine
 		internal static extern PhysicsStatus Native_Physics_SubmitCharacterCommand(ref NativePhysicsCharacterCommandRequest request, ref NativePhysicsCommandReceipt receipt);
 
 		[DllImport("TerraEngine")]
+		internal static extern unsafe PhysicsStatus Native_Physics_QueryImmediate(ref NativePhysicsQueryRequest request, ref NativePhysicsQueryResultInfo result, NativePhysicsQueryHit* hits, uint hitCapacity, out uint requiredHitCount);
+
+		[DllImport("TerraEngine")]
 		internal static extern PhysicsStatus Native_Physics_SubmitQuery(ref NativePhysicsQueryRequest request, ref NativePhysicsQueryReceipt receipt);
 
 		[DllImport("TerraEngine")]

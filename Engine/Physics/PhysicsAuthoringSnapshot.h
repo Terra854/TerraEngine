@@ -43,6 +43,10 @@ namespace TerraEngine::Physics {
 		bool startAwake = true;
 		bool enabled = true;
 		std::uint8_t collisionLayer = 0;
+		// This is an engine-owned dependency revision for the resolved world pose.
+		// It includes ancestor transforms, so authored parent edits cannot be hidden
+		// by an unchanged component generation on a child rigid body.
+		std::uint64_t sourceTransformRevision = 0;
 	};
 
 	struct PhysicsColliderDescriptor {
@@ -129,6 +133,16 @@ namespace TerraEngine::Physics {
 		PhysicsGeneration recordGeneration = 0;
 	};
 
+	// Authoring diagnostics explain why one object was safely omitted from an
+	// otherwise valid snapshot. They are provider-neutral values so editor tools,
+	// automation, and tests can present an actionable fix without reading Jolt
+	// state or turning a local authoring problem into a world-wide failure.
+	struct PhysicsAuthoringDiagnostic {
+		TerraEngine::UUID objectId{};
+		std::string code;
+		std::string message;
+	};
+
 	struct PhysicsAuthoringData {
 		PhysicsWorldHandle world;
 		PhysicsSettings settings;
@@ -140,6 +154,7 @@ namespace TerraEngine::Physics {
 		std::vector<PhysicsConstraintDescriptor> constraints;
 		std::vector<PhysicsCharacterDescriptor> characters;
 		std::vector<PhysicsDirtyObjectGeneration> dirtyObjects;
+		std::vector<PhysicsAuthoringDiagnostic> diagnostics;
 	};
 
 	class PhysicsAuthoringSnapshot final {

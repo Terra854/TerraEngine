@@ -6,7 +6,7 @@ canonical installed-tree gate:
 
 ```powershell
 pwsh -NoProfile -File Tests/Tools/ExportRuntimeBaseline/ExportSample.ps1 `
-	-BuildDir out/build/Debug `
+	-BuildDir out/build/RelWithDebInfo `
 	-WorkRoot out/ci/export-runtime-baseline
 ```
 

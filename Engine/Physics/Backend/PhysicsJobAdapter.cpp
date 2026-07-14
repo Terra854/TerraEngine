@@ -33,6 +33,11 @@ namespace TerraEngine::Physics::Backend {
 	}
 
 	int PhysicsJobAdapter::GetMaxConcurrency() const {
+		if(sharedPool.getThreadCount() == 1U) {
+			// Serial mode runs ready provider jobs directly in QueueOne, so Jolt must
+			// not expect an additional worker or barrier-waiter execution lane.
+			return 1;
+		}
 		// Jolt's barrier waiter can execute a ready job while it waits. Report that
 		// caller lane in addition to the bounded number of shared worker pumps.
 		return static_cast<int>(EffectiveWorkerLimit() + 1U);
@@ -196,6 +201,13 @@ namespace TerraEngine::Physics::Backend {
 	void PhysicsJobAdapter::SubmitPump() {
 		// One engine task drains multiple provider jobs, bounding scheduler overhead
 		// and preserving workers for unrelated frame systems.
+		if(sharedPool.getThreadCount() == 1U) {
+			// The scheduler can run PhysicsSimulate on this same sole worker. Queueing
+			// its provider pump behind the caller would self-starve WaitForIdle, so
+			// serial mode executes the ready bounded queue immediately instead.
+			PumpJobs();
+			return;
+		}
 		auto task = sharedPool.createTask([this] {
 			PumpJobs();
 		});

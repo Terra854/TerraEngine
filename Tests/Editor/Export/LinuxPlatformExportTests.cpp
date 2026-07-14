@@ -90,9 +90,14 @@ namespace TerraEngine::EditorTests {
 
 			for (const std::string& file : requiredFiles) {
 				workspace.WriteText(file, file == "game.json"
-					? "{ \"name\": \"Linux Export\", \"rendererRecovery\": { \"validationEnabled\": false, \"diagnosticsEnabled\": true, \"mode\": \"failClosed\", \"fatalMessage\": \"Graphics device lost. Restart the application to restore rendering.\", \"fullApplicationRestart\": false } }"
+					? "{ \"name\": \"Linux Export\", \"startupScene\": \"Scenes/Startup.tescene\", \"rendererRecovery\": { \"validationEnabled\": false, \"diagnosticsEnabled\": true, \"mode\": \"failClosed\", \"fatalMessage\": \"Graphics device lost. Restart the application to restore rendering.\", \"fullApplicationRestart\": false } }"
 					: "payload");
 			}
+
+			// Keep the platform-neutral package fixture valid under the same startup
+			// scene contract as production exports. With no physics manifest, this
+			// intentionally minimal serialized scene needs no additional payloads.
+			workspace.WriteText("Scenes/Startup.tescene", R"({"objects":[]})");
 		}
 	}
 

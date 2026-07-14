@@ -2015,11 +2015,26 @@ namespace TerraEngine::Editor::Automation
 		if (operation == AutomationOperation("physics.diagnostics.get"))
 		{
 			if (!diagnostics) return succeed("Physics diagnostics are not published yet.", snapshot(nlohmann::json::object()));
+			nlohmann::json scheduler = nlohmann::json::array();
+			if (diagnostics->scheduler)
+			{
+				// Diagnostics are published data, so copying their scheduler declaration
+				// here cannot expose a mutable scheduler or provider-owned work item.
+				for (const PhysicsSchedulerDeclaration& declaration : *diagnostics->scheduler)
+				{
+					scheduler.push_back({
+						{"workload", declaration.workload}, {"phase", declaration.phase},
+						{"reads", declaration.reads}, {"writes", declaration.writes},
+						{"boundary", declaration.boundary}, {"workerSafe", declaration.workerSafe}
+					});
+				}
+			}
 			return succeed("Read immutable physics diagnostics.", snapshot({
 				{"counters", {{"bodies", diagnostics->counters.bodyCount}, {"shapes", diagnostics->counters.shapeCount}, {"constraints", diagnostics->counters.constraintCount}, {"characters", diagnostics->counters.characterCount}, {"contacts", diagnostics->counters.contactCount}, {"rejected", diagnostics->counters.rejectedCount}, {"stale", diagnostics->counters.staleCount}}},
 				{"queues", {{"commands", diagnostics->queues.commandDepth}, {"queries", diagnostics->queues.queryDepth}, {"events", diagnostics->queues.eventDepth}}},
 				{"memory", {{"snapshots", diagnostics->memory.snapshotBytes}, {"highWater", diagnostics->memory.highWaterBytes}, {"providerAllocations", diagnostics->memory.outstandingProviderAllocations}, {"providerAllocationHighWater", diagnostics->memory.highWaterProviderAllocations}}},
-				{"cache", {{"shapes", diagnostics->cache.sharedShapeCount}, {"assets", diagnostics->cache.assetCount}, {"bytes", diagnostics->cache.payloadBytes}, {"hits", diagnostics->cache.hitCount}, {"misses", diagnostics->cache.missCount}}}
+				{"cache", {{"shapes", diagnostics->cache.sharedShapeCount}, {"assets", diagnostics->cache.assetCount}, {"bytes", diagnostics->cache.payloadBytes}, {"hits", diagnostics->cache.hitCount}, {"misses", diagnostics->cache.missCount}}},
+				{"scheduler", std::move(scheduler)}
 			}));
 		}
 
@@ -2083,19 +2098,62 @@ namespace TerraEngine::Editor::Automation
 				return reject(ErrorCategory::Validation, "maximumContacts must be an unsigned value between 1 and 64.");
 			}
 			const std::uint32_t limit = request.arguments["maximumContacts"].get<std::uint32_t>();
-			const auto packet = physics.LatestEventPacket();
-			nlohmann::json events = nlohmann::json::array();
-			bool truncated = false;
-			if (packet && packet->events)
+			std::optional<TerraEngine::UUID> targetId;
+			if (request.arguments.contains("target"))
 			{
-				for (const PhysicsEvent& event : *packet->events)
+				std::uint32_t ignoredComponentGeneration = 0U;
+				if (const auto error = parseTarget(request.arguments["target"], targetId.emplace(), ignoredComponentGeneration)) return *error;
+			}
+			if ((request.arguments.contains("fromTick") && !request.arguments["fromTick"].is_number_unsigned())
+				|| (request.arguments.contains("toTick") && !request.arguments["toTick"].is_number_unsigned()))
+			{
+				return reject(ErrorCategory::Validation, "fromTick and toTick must be unsigned tick values.");
+			}
+			const std::uint32_t fromTick = request.arguments.value("fromTick", 0U);
+			const std::uint32_t toTick = request.arguments.value("toTick", std::numeric_limits<std::uint32_t>::max());
+			if (fromTick > toTick) return reject(ErrorCategory::Validation, "fromTick must not be greater than toTick.");
+			std::optional<std::uint8_t> collisionLayer;
+			if (request.arguments.contains("collisionLayer"))
+			{
+				if (!request.arguments["collisionLayer"].is_number_unsigned()
+					|| request.arguments["collisionLayer"].get<std::uint64_t>() >= kPhysicsCollisionLayerCount)
 				{
-					if (event.type != PhysicsEventType::Contact) continue;
-					if (events.size() >= limit) { truncated = true; break; }
-					events.push_back({{"tick", event.tick}, {"first", TerraEngine::ToHexString(event.first.objectId)}, {"second", TerraEngine::ToHexString(event.second.objectId)}, {"point", PhysicsVectorJson(event.point)}, {"normal", PhysicsVectorJson(event.normal)}, {"impulse", event.impulse}});
+					return reject(ErrorCategory::Validation, "collisionLayer must be between 0 and 31.");
+				}
+				collisionLayer = static_cast<std::uint8_t>(request.arguments["collisionLayer"].get<std::uint32_t>());
+			}
+			const PhysicsTick currentTick = tick;
+			const PhysicsTick retainedTicks = physics.ConfiguredSettings().retainedResultTicks;
+			const PhysicsTick firstRetainedTick = currentTick > retainedTicks ? currentTick - retainedTicks : 1U;
+			// Only retained packets may be examined. This bounds a hostile 0..MAX
+			// request to the same short history window configured for the world.
+			const PhysicsTick effectiveFromTick = std::max<PhysicsTick>(fromTick, firstRetainedTick);
+			const PhysicsTick effectiveToTick = std::min<PhysicsTick>(toTick, currentTick);
+			const bool rangeBounded = effectiveFromTick != fromTick || effectiveToTick != toTick;
+			nlohmann::json events = nlohmann::json::array();
+			bool truncated = rangeBounded;
+			bool overflow = false;
+			if (effectiveFromTick <= effectiveToTick)
+			{
+				// Ascending ticks preserve publication order across packets; each packet
+				// is already deterministically sorted at the protected publish boundary.
+				for (PhysicsTick requestedTick = effectiveFromTick; requestedTick <= effectiveToTick; ++requestedTick)
+				{
+					const std::shared_ptr<const PhysicsEventPacket> packet = physics.ReadRetainedEventPacket(requestedTick);
+					if (!packet || !packet->events) continue;
+					overflow = overflow || packet->overflowed;
+					for (const PhysicsEvent& event : *packet->events)
+					{
+						if (event.type != PhysicsEventType::Contact) continue;
+						if (targetId && event.first.objectId != *targetId && event.second.objectId != *targetId) continue;
+						if (collisionLayer && event.first.collisionLayer != *collisionLayer && event.second.collisionLayer != *collisionLayer) continue;
+						if (events.size() >= limit) { truncated = true; break; }
+						events.push_back({{"tick", event.tick}, {"first", TerraEngine::ToHexString(event.first.objectId)}, {"second", TerraEngine::ToHexString(event.second.objectId)}, {"point", PhysicsVectorJson(event.point)}, {"normal", PhysicsVectorJson(event.normal)}, {"impulse", event.impulse}});
+					}
+					if ((truncated && events.size() >= limit) || requestedTick == effectiveToTick) break;
 				}
 			}
-			return succeed("Listed ordered published contacts.", PhysicsSnapshotResult(request, world, packet ? packet->tick : tick, {{"contacts", std::move(events)}}, truncated, packet ? packet->overflowed : false));
+			return succeed("Listed ordered published contacts.", PhysicsSnapshotResult(request, world, currentTick, {{"contacts", std::move(events)}, {"effectiveFromTick", effectiveFromTick}, {"effectiveToTick", effectiveToTick}}, truncated, overflow));
 		}
 
 		if (IsOperationOneOf(operation, {AutomationOperation("physics.raycast"), AutomationOperation("physics.shape_cast"), AutomationOperation("physics.overlap")}))
@@ -2419,6 +2477,17 @@ namespace TerraEngine::Editor::Automation
 			if (!world.IsValid()) return reject(ErrorCategory::Unavailable, "No active physics world is available for runtime commands.");
 			if (!request.arguments["worldGeneration"].is_number_unsigned() || request.arguments["worldGeneration"].get<std::uint32_t>() != world.worldGeneration)
 				return reject(ErrorCategory::Conflict, "Runtime command world generation is stale.");
+			// Paused simulation consumes commands only with the next explicit step.
+			// Requiring the caller to say so prevents a request from appearing to have
+			// changed the world while the editor is deliberately paused.
+			const bool hasApplyOnNextStep = request.arguments.contains("applyOnNextStep");
+			if (hasApplyOnNextStep && !request.arguments["applyOnNextStep"].is_boolean())
+				return reject(ErrorCategory::Validation, "applyOnNextStep must be boolean when provided.");
+			const bool applyOnNextStep = hasApplyOnNextStep && request.arguments["applyOnNextStep"].get<bool>();
+			if (request.state.playState == "paused" && !applyOnNextStep)
+				return reject(ErrorCategory::Conflict, "Paused physics commands require applyOnNextStep=true.");
+			if (request.state.playState != "playing" && request.state.playState != "paused")
+				return reject(ErrorCategory::Unavailable, "Runtime physics commands require playing or a paused explicit Next step.");
 			const IdempotencyDecision decision = beginIdempotency();
 			if (const auto prior = replayOrConflict(decision)) return *prior;
 			TerraEngine::UUID objectId{};
@@ -2472,7 +2541,17 @@ namespace TerraEngine::Editor::Automation
 				{
 					const auto value = ReadPhysicsVector(request.arguments["vector"]);
 					if (!value) return rejectAfterReservation(ErrorCategory::Validation, "vector must contain three finite numbers.");
-					if (operation == AutomationOperation("physics.body.apply_force")) command = PhysicsCommand::MakeContinuousForce(target, *value, metadata);
+					if (operation == AutomationOperation("physics.body.apply_force"))
+					{
+						if (request.arguments.contains("applicationMode") && !request.arguments["applicationMode"].is_string())
+							return rejectAfterReservation(ErrorCategory::Validation, "applicationMode must be Force or Acceleration.");
+						const std::string applicationMode = request.arguments.value("applicationMode", std::string("Force"));
+						const std::optional<PhysicsCommand> forceCommand = PhysicsAutomationProvider::TryCreateApplyForceCommand(
+							applicationMode, target, *value, metadata);
+						if (!forceCommand)
+							return rejectAfterReservation(ErrorCategory::Validation, "applicationMode must be Force or Acceleration.");
+						command = *forceCommand;
+					}
 					else if (operation == AutomationOperation("physics.body.apply_impulse")) command = PhysicsCommand::MakeImpulse(target, *value, metadata);
 					else command = PhysicsCommand::MakeSetVelocity(target, *value, {}, metadata);
 				}

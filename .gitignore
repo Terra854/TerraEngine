@@ -100,6 +100,7 @@ StyleCopReport.xml
 *_h.h
 *.ilk
 *.meta
+!Tests/Fixtures/PhysicsExportRuntime/Assets/Colliders/Startup.tecollider.meta
 *.obj
 *.iobj
 *.pch

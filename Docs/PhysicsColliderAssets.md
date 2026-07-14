@@ -27,13 +27,13 @@ Primitive colliders retain their documented runtime scaling rules.
 ## Headless cooking
 
 The collider compiler runs without a renderer or interactive editor. From a
-clean checkout, build and install the Debug preset, then invoke:
+clean checkout, build and install the RelWithDebInfo preset, then invoke:
 
 ```powershell
-cmake --preset Debug
-cmake --build --preset Debug
-cmake --build --preset Debug --target install
-out\build\Debug\Build\Editor\TerraEnginePhysicsColliderCompiler.exe `
+cmake --preset RelWithDebInfo
+cmake --build --preset RelWithDebInfo
+cmake --build --preset RelWithDebInfo --target install
+out\build\RelWithDebInfo\Build\Editor\TerraEnginePhysicsColliderCompiler.exe `
   --input <recipe.tecollider> `
   --output <collider.tepcoll> `
   --asset-id <32-character-guid> `

@@ -8,6 +8,9 @@
 #pragma once
 
 #include "AutomationProvider.h"
+#include "Physics/PhysicsCommands.h"
+
+#include <optional>
 
 namespace TerraEngine::Editor::Automation
 {
@@ -18,6 +21,15 @@ namespace TerraEngine::Editor::Automation
 
 		[[nodiscard]] std::string_view GetProviderId() const override;
 		[[nodiscard]] std::vector<AutomationCapabilityRegistration> GetCapabilities() override;
+		// This small typed factory keeps the public application-mode spelling and
+		// the engine command kind inseparable.  The service still owns validation
+		// and queue admission, while tests can prove that automation never turns an
+		// acceleration request into an ordinary force by accident.
+		[[nodiscard]] static std::optional<TerraEngine::Physics::PhysicsCommand> TryCreateApplyForceCommand(
+			std::string_view applicationMode,
+			const TerraEngine::Physics::PhysicsBodyCommandTarget& target,
+			TerraEngine::Physics::PhysicsVector3 value,
+			TerraEngine::Physics::PhysicsCommandMetadata metadata);
 
 	private:
 		AutomationHandlerResolver resolveHandler;

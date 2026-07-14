@@ -15,6 +15,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <glm/gtc/quaternion.hpp>
+#include <glm/vec3.hpp>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -74,7 +76,19 @@ namespace TerraEngine::Scene {
 		SetStatic,
 		AddComponent,
 		RemoveComponent,
-		UpdateComponentProperty
+		UpdateComponentProperty,
+		// A physics publication changes both fields together. Keeping the pair
+		// typed avoids reflection and per-property allocations at a hot boundary.
+		UpdateTransformBatch
+	};
+
+	// A transform batch carries local-space values for existing objects. The
+	// transaction layer observes every target before it accepts the batch, then
+	// applies all entries or rolls the complete batch back at the flush boundary.
+	struct TransactionTransformUpdate {
+		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		glm::vec3 position{0.0F, 0.0F, 0.0F};
+		glm::quat rotation{1.0F, 0.0F, 0.0F, 0.0F};
 	};
 
 	struct TransactionBudget {
@@ -113,6 +127,7 @@ namespace TerraEngine::Scene {
 		std::string componentName;
 		std::string propertyName;
 		TerraEngine::Reflection::Variant propertyValue;
+		std::vector<TransactionTransformUpdate> transformUpdates;
 	};
 
 	struct TransactionWriteSet {
@@ -214,7 +229,11 @@ namespace TerraEngine::Scene {
 		TransactionalMutationBuilder& RemoveComponent(TransactionObjectRef object, std::string componentName);
 		TransactionalMutationBuilder& UpdateComponentProperty(TerraEngine::UUID objectId, std::string componentName, std::string propertyName, TerraEngine::Reflection::Variant value);
 		TransactionalMutationBuilder& UpdateComponentProperty(TransactionObjectRef object, std::string componentName, std::string propertyName, TerraEngine::Reflection::Variant value);
-		Transaction Build() const;
+		// Snapshot every target while the protected producer owns ObjectManager,
+		// so the later protected flush can reject the whole batch if it went stale.
+		TransactionalMutationBuilder& UpdateTransformBatch(ObjectManager& objects, std::vector<TransactionTransformUpdate> updates);
+		Transaction Build() &;
+		Transaction Build() &&;
 
 	private:
 		Transaction transaction;

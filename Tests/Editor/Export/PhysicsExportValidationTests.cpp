@@ -194,6 +194,42 @@ namespace TerraEngine::EditorTests {
 				std::string error;
 				context.Expect(!ValidateExportPackage(workspace.PackPath(), error) && error.find("source-only") != std::string::npos, "Source-only recipes must never be accepted by a runtime package.");
 			}
+			{
+				PhysicsValidationWorkspace workspace;
+				const nlohmann::json physics = MakePhysicsManifest(settings, validCollider);
+				WritePhysicsPackage(workspace, physics, settings, validCollider);
+				// A scene reference is a dependency even when the recipe file itself
+				// was omitted from the archive. This guards the staging rewrite path.
+				workspace.WriteText("Scenes/Startup.tescene", R"({"physicsExportFixture":{"sourceCollider":"Assets/Colliders/Startup.tecollider"}})");
+				workspace.CreatePack();
+				std::string error;
+				context.Expect(!ValidateExportPackage(workspace.PackPath(), error) && error.find("source-only") != std::string::npos, "Startup scenes must not retain source-only collider dependencies.");
+			}
+			{
+				PhysicsValidationWorkspace workspace;
+				nlohmann::json physics = MakePhysicsManifest(settings, validCollider);
+				physics["colliders"] = nlohmann::json::array();
+				WritePhysicsPackage(workspace, physics, settings, validCollider);
+				workspace.WriteText("Scenes/Startup.tescene", R"({"physicsExportFixture":{}})");
+				workspace.CreatePack();
+				std::string error;
+				context.Expect(!ValidateExportPackage(workspace.PackPath(), error) && error.find("cooked collider") != std::string::npos, "A physics parity fixture must declare at least one cooked collider dependency.");
+			}
+		});
+
+		registry.Add("Editor.PhysicsExport.ValidationRejectsUnresolvedDefaultMaterial", [](TestContext& context) {
+			PhysicsValidationWorkspace workspace;
+			const std::vector<std::byte> settings = MakeSettings();
+			const std::vector<std::byte> validCollider = MakeCookedCollider();
+			nlohmann::json physics = MakePhysicsManifest(settings, validCollider);
+			// No material is staged in this fixture, so a nonempty default GUID is
+			// an actionable unresolved dependency rather than an optional fallback.
+			physics["defaultMaterialGuid"] = "missing-default-material";
+			WritePhysicsPackage(workspace, physics, settings, validCollider);
+			std::string error;
+			context.Expect(!ValidateExportPackage(workspace.PackPath(), error)
+				&& error.find("defaultMaterialGuid") != std::string::npos,
+				"An exported default material identity must resolve to the packaged material inventory.");
 		});
 
 		registry.Add("Editor.PhysicsExport.ValidationRejectsSourceOnlyRecipeBeforeStaging", [](TestContext& context) {

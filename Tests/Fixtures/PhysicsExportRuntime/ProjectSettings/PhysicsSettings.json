@@ -1,10 +1,10 @@
 {
 	"schemaVersion": 1,
-	"gravity": [0.0, -9.81, 0.0],
-	"fixedTimeStep": 0.016666667,
+	"gravity": [0.0, -15.5, 0.0],
+	"fixedTimeStep": 0.02,
 	"layers": [
 		{ "id": 0, "name": "Default", "collisionMask": 4294967295, "broadPhaseGroup": 0, "enabled": true },
-		{ "id": 1, "name": "Layer01", "collisionMask": 4294967295, "broadPhaseGroup": 0, "enabled": true },
+		{ "id": 1, "name": "ParityDynamic", "collisionMask": 4294967295, "broadPhaseGroup": 7, "enabled": true },
 		{ "id": 2, "name": "Layer02", "collisionMask": 4294967295, "broadPhaseGroup": 0, "enabled": true },
 		{ "id": 3, "name": "Layer03", "collisionMask": 4294967295, "broadPhaseGroup": 0, "enabled": true },
 		{ "id": 4, "name": "Layer04", "collisionMask": 4294967295, "broadPhaseGroup": 0, "enabled": true },

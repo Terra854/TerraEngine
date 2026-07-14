@@ -36,7 +36,16 @@ namespace TerraEngine::Tests {
 			std::ifstream input(path, std::ios::binary);
 			std::ostringstream buffer;
 			buffer << input.rdbuf();
-			return buffer.str();
+			std::string source = buffer.str();
+			// Git may materialize these files with CRLF on Windows. Normalize source
+			// contracts once so their structural checks remain checkout-independent.
+			std::size_t position = 0u;
+			while ((position = source.find("\r\n", position)) != std::string::npos)
+			{
+				source.replace(position, 2u, "\n");
+				++position;
+			}
+			return source;
 		}
 	}
 
@@ -64,6 +73,12 @@ namespace TerraEngine::Tests {
 			context.Expect(contextSource.find("if (!impl->initialized || impl->deviceLost) return;") != std::string::npos, "BeginFrame should stop immediately after device loss.");
 			context.Expect(contextSource.find("if (!impl->initialized || impl->skipFrame || impl->deviceLost) return;") != std::string::npos, "RenderFrame and EndFrame should stop immediately after device loss.");
 			context.Expect(contextSource.find("result.outcome = impl->deviceLost ? EditorPresentOutcome::DeviceLost") != std::string::npos, "PresentEditor should return a typed terminal result after device loss.");
+			const std::size_t boundedEditorAcquire = contextSource.find("impl->device, impl->swapchain, 1'000'000ULL");
+			const std::size_t retryableEditorAcquire = contextSource.find("acquireResult == VK_TIMEOUT || acquireResult == VK_NOT_READY", boundedEditorAcquire);
+			const std::size_t skippedEditorAcquire = contextSource.find("result.outcome = EditorPresentOutcome::Skipped;", retryableEditorAcquire);
+			context.Expect(boundedEditorAcquire != std::string::npos && retryableEditorAcquire != std::string::npos
+				&& skippedEditorAcquire != std::string::npos,
+				"Editor presentation must bound swapchain acquisition and retry later instead of blocking protected editor work behind the compositor.");
 			context.Expect(contextSource.find("impl->MarkDeviceLost(submitResult, \"editor render queue submit\")") != std::string::npos, "Editor render submit failures should latch device loss before recovery.");
 			context.Expect(contextSource.find("impl->MarkDeviceLost(idleResult, \"editor render recovery queue idle\")") != std::string::npos, "Editor render recovery should not loop when the queue cannot prove idle.");
 			context.Expect(initSource.find("void VulkanContext::Impl::RecreateSwapChain()") != std::string::npos && initSource.find("if (deviceLost)") != std::string::npos, "Swapchain recreation should not run after the device-lost latch is set.");
@@ -71,7 +86,9 @@ namespace TerraEngine::Tests {
 			context.Expect(resourcesSource.find("MarkDeviceLost(submitResult, submitOperation)") != std::string::npos, "Immediate GPU upload submits should respect the same device-lost latch while preserving their operation label.");
 			context.Expect(implHeader.find("std::mutex queueAccessMutex;") != std::string::npos, "All Vulkan queue handles should share an external-synchronization mutex.");
 			context.Expect(implHeader.find("mutable std::recursive_mutex deviceStateMutex;") != std::string::npos, "Vulkan lifetime and cache ownership should share one recursive protected-boundary gate.");
-			context.Expect(contextSource.find("void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view, const RenderOutputRequest& outputRequest) {\n\tstd::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);") != std::string::npos, "RenderFrame should retain renderer ownership until worker recording has joined and live Vulkan work is published.");
+			context.Expect(contextSource.find("void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view, const RenderOutputRequest& outputRequest) {\r\n\tstd::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);") != std::string::npos
+				|| contextSource.find("void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view, const RenderOutputRequest& outputRequest) {\n\tstd::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);") != std::string::npos,
+				"RenderFrame should retain renderer ownership until worker recording has joined and live Vulkan work is published.");
 			context.Expect(initSource.find("void VulkanContext::Impl::RecreateSwapChain() {\n\tstd::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);") != std::string::npos, "Swapchain replacement should hold the renderer-state gate across idle, destruction, and candidate publication.");
 			context.Expect(implHeader.find("std::recursive_mutex descriptorHostAccessMutex;") != std::string::npos, "Project workers and the render thread should share one descriptor host-synchronization boundary.");
 			context.Expect(resourcesSource.find("UpdateGlobalTexture(uint32_t index, const VulkanImage& image) {\n\tstd::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);") != std::string::npos, "Bindless texture publication should hold the descriptor boundary across its idle wait and all frame-set writes.");

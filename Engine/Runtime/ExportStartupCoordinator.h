@@ -15,6 +15,8 @@
 #include "Runtime/ContentMount/ContentMount.h"
 
 #include <cstddef>
+#include <cstdint>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <vector>
@@ -41,6 +43,13 @@ struct PackagedPhysicsCollider
 	std::vector<std::byte> payload;
 };
 
+struct PackagedPhysicsMaterial
+{
+	TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+	std::string packagePath;
+	TerraEngine::Physics::PhysicsMaterialRuntime runtime;
+};
+
 struct PackagedPhysicsRuntime
 {
 	bool declared = false;
@@ -48,8 +57,36 @@ struct PackagedPhysicsRuntime
 	bool providerRuntimeReady = false;
 	bool managedBindingsLoaded = false;
 	TerraEngine::Physics::PhysicsSettings settings = TerraEngine::Physics::PhysicsSettings::Defaults();
-	std::vector<TerraEngine::Physics::PhysicsMaterialRuntime> materials;
+	std::vector<PackagedPhysicsMaterial> materials;
 	std::vector<PackagedPhysicsCollider> colliders;
+	std::string diagnostic;
+};
+
+// This compact record is shared by Play Mode, the exported validation launcher,
+// and the baseline script. It retains only engine-owned observations, so parity
+// never depends on a Jolt pointer, enum value, callback object, or byte layout.
+struct PhysicsInvariantReport
+{
+	static constexpr std::uint32_t kSchemaVersion = 1U;
+	std::uint32_t schemaVersion = kSchemaVersion;
+	bool succeeded = false;
+	std::uint32_t bodiesCreated = 0U;
+	std::uint32_t fixedStepsCompleted = 0U;
+	std::uint32_t filteredQueryHits = 0U;
+	std::uint32_t publishedEvents = 0U;
+	std::uint32_t constraintsCreated = 0U;
+	std::uint32_t charactersCreated = 0U;
+	std::uint32_t completedTransitions = 0U;
+	std::uint32_t activePhysicsJobsAfterDrain = 0U;
+	std::uint32_t queuedPhysicsJobsAfterDrain = 0U;
+	// Quantized authored settings make the parity report reject a runtime that
+	// silently falls back to default gravity, tick duration, or layer routing.
+	std::int32_t gravityYMilliMetresPerSecondSquared = 0;
+	std::uint32_t fixedTimeStepMicroseconds = 0U;
+	std::uint32_t parityLayerBroadPhaseGroup = 0U;
+	bool managedBindingsReady = false;
+	bool cookedColliderUsed = false;
+	bool orderlyShutdown = false;
 	std::string diagnostic;
 };
 
@@ -90,6 +127,15 @@ TERRAENGINE_API ExportStartupCoordinatorResult CoordinateExportStartup(const Exp
 // declared startup boundary, preserving transactional visibility rules.
 TERRAENGINE_API PackagedPhysicsRuntime LoadPackagedPhysicsRuntime(
 	const ContentMount& mount,
-	bool requireManagedBindings = true);
+	bool requireManagedBindings = true,
+	const std::filesystem::path& externalManagedBindingsPath = {});
+
+// Stable JSON is used as a durable evidence record by the installed baseline.
+// The comparator rejects any schema, field, or observed-value drift.
+TERRAENGINE_API std::string SerializePhysicsInvariantReport(const PhysicsInvariantReport& report);
+TERRAENGINE_API bool EquivalentPhysicsInvariantReports(
+	const PhysicsInvariantReport& editor,
+	const PhysicsInvariantReport& exported,
+	std::string& diagnostic);
 
 }

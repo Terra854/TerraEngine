@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 
@@ -13,11 +14,11 @@ namespace TerraEngine::Tests {
 	namespace {
 		class ThreadPoolSession final {
 		public:
-			ThreadPoolSession() {
+			explicit ThreadPoolSession(std::size_t workerCount = 0U) {
 				// The shared engine pool is a singleton. Restart it for every test so
 				// queued jobs from one case cannot hide a lifecycle regression in another.
 				ThreadPool::instance().shutdown();
-				ThreadPool::instance().initialize();
+				ThreadPool::instance().initialize(workerCount);
 			}
 
 			~ThreadPoolSession() {
@@ -64,6 +65,50 @@ namespace TerraEngine::Tests {
 	}
 
 	void RegisterPhysicsJobAdapterTests(TestRegistry& registry) {
+		registry.Add("Engine.Physics.JobAdapter.OneWorkerNestedPumpRunsInline", [](TestContext& context) {
+			ThreadPoolSession session(1U);
+			ThreadPool& sharedPool = ThreadPool::instance();
+			TerraEngine::Physics::Backend::PhysicsJobAdapterConfig configuration{
+				.maxPhysicsWorkers = 1U,
+				.maxBarriers = 1U,
+				.maxJobs = 8U
+			};
+			TerraEngine::Physics::Backend::PhysicsAllocatorAdapter allocator;
+			TerraEngine::Physics::Backend::PhysicsJobAdapter adapter(sharedPool, configuration);
+			std::atomic<bool> jobRanInline = false;
+			std::atomic<int> executionCount = 0;
+			auto* barrier = adapter.CreateBarrier();
+
+			// Run the provider submission from the only engine worker. Before the
+			// serial fallback, this job was merely queued behind its own caller.
+			auto outerTask = sharedPool.createTask([&]() {
+				auto job = adapter.CreateJob("one-worker nested pump", JPH::Color::sWhite, [&]() {
+					executionCount.fetch_add(1, std::memory_order_acq_rel);
+				}, 1U);
+				barrier->AddJob(job);
+				job.RemoveDependency();
+				jobRanInline.store(executionCount.load(std::memory_order_acquire) == 1,
+					std::memory_order_release);
+			});
+			auto outerFuture = outerTask->getFuture();
+			sharedPool.enqueue(std::move(outerTask));
+			context.Expect(outerFuture.wait_for(std::chrono::seconds(2)) == std::future_status::ready,
+				"One-worker nested provider submission must complete without waiting behind its own pool task.");
+			outerFuture.get();
+
+			context.Expect(jobRanInline.load(std::memory_order_acquire),
+				"A one-worker provider submission must make progress before its enclosing worker task returns.");
+			context.ExpectEqual(1, adapter.GetMaxConcurrency(),
+				"A one-worker shared pool must expose serial Jolt concurrency rather than a nonexistent helper lane.");
+			adapter.WaitForJobs(barrier);
+			adapter.WaitForIdle();
+			adapter.DestroyBarrier(barrier);
+			context.ExpectEqual(1, executionCount.load(std::memory_order_acquire),
+				"The inline nested pump must still execute the Jolt job exactly once.");
+			context.ExpectEqual(0U, adapter.Diagnostics().activePumps,
+				"The one-worker inline pump must drain before the enclosing physics task completes.");
+		});
+
 		registry.Add("Engine.Physics.JobAdapter.UsesSharedThreadPoolAcrossWorkerConfigurations", [](TestContext& context) {
 			ThreadPoolSession session;
 			ThreadPool& sharedPool = ThreadPool::instance();

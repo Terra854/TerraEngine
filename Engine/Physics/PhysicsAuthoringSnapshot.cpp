@@ -50,6 +50,19 @@ namespace TerraEngine::Physics {
 			return hash == 0U ? 1U : hash;
 		}
 
+		std::uint64_t CombineTransformRevision(
+			std::uint64_t parentRevision,
+			std::uint64_t localRevision) noexcept {
+			// FNV-style mixing keeps parent-before-child dependencies deterministic
+			// without treating the revision as a provider-facing identity.
+			std::uint64_t combined = 14695981039346656037ULL;
+			combined ^= parentRevision;
+			combined *= 1099511628211ULL;
+			combined ^= localRevision;
+			combined *= 1099511628211ULL;
+			return combined;
+		}
+
 		PhysicsVector3 ToPhysicsVector(const glm::vec3& value) {
 			return {value.x, value.y, value.z};
 		}
@@ -183,6 +196,7 @@ namespace TerraEngine::Physics {
 			glm::vec3 position{0.0F};
 			glm::quat rotation{1.0F, 0.0F, 0.0F, 0.0F};
 			glm::vec3 scale{1.0F};
+			std::uint64_t dependencyRevision = 0U;
 		};
 		std::vector<ResolvedTransform> transforms(hierarchy.orderedObjects.size());
 
@@ -197,10 +211,12 @@ namespace TerraEngine::Physics {
 		data.hierarchyGeneration = hierarchy.revision;
 
 		std::unordered_map<TerraEngine::UUID, PhysicsGeneration> previousGenerations;
+		std::unordered_map<TerraEngine::UUID, std::uint64_t> previousTransformRevisions;
 		std::unordered_map<TerraEngine::UUID, std::uint64_t> previousHashes;
 		if(previous != nullptr) {
 			for(const PhysicsBodyDescriptor& body : previous->Data().bodies) {
 				previousGenerations[body.objectId] = body.componentGeneration;
+				previousTransformRevisions[body.objectId] = body.sourceTransformRevision;
 			}
 			for(const PhysicsColliderDescriptor& collider : previous->Data().colliders) {
 				previousHashes[collider.objectId] ^= collider.stableRecipeHash;
@@ -214,14 +230,17 @@ namespace TerraEngine::Physics {
 			const glm::vec3 localPosition = local->position;
 			const glm::quat localRotation = glm::normalize(local->rotation);
 			const glm::vec3 localScale = local->scale;
+			const std::uint64_t localTransformRevision = objects.GetObjectTransformRevision(entry.object);
 			ResolvedTransform resolved;
 			if(entry.parentIndex >= 0) {
 				const ResolvedTransform& parent = transforms[static_cast<std::size_t>(entry.parentIndex)];
 				resolved.position = parent.position + parent.rotation * (parent.scale * localPosition);
 				resolved.rotation = glm::normalize(parent.rotation * localRotation);
 				resolved.scale = parent.scale * localScale;
+				resolved.dependencyRevision = CombineTransformRevision(parent.dependencyRevision, localTransformRevision);
 			} else {
-				resolved = {localPosition, localRotation, localScale};
+				resolved = {localPosition, localRotation, localScale,
+					CombineTransformRevision(0U, localTransformRevision)};
 			}
 			transforms[index] = resolved;
 			if(!objects.isObjectActive(entry.object)) continue;
@@ -303,13 +322,23 @@ namespace TerraEngine::Physics {
 					character->enabled});
 			}
 
+			RigidBodyComponent* authoredBody = objects.GetComponent<RigidBodyComponent>(entry.object);
 			ColliderSetComponent* colliderSet = objects.GetComponent<ColliderSetComponent>(entry.object);
+			const ColliderSetValidationResult colliderValidation = colliderSet != nullptr
+				? colliderSet->Validate()
+				: ColliderSetValidationResult{};
 			if(colliderSet == nullptr || !colliderSet->active || colliderSet->colliders.empty()
-				|| !colliderSet->Validate().accepted) {
+				|| !colliderValidation.accepted) {
+				if(authoredBody != nullptr && authoredBody->active) {
+					std::string message = "RigidBodyComponent was excluded because it requires at least one enabled, valid collider. ";
+					message += colliderValidation.message.empty()
+						? "Add or enable a ColliderSetComponent record."
+						: "Fix the ColliderSetComponent: " + colliderValidation.message;
+					data.diagnostics.push_back({entry.objectId, "RigidBodyMissingValidCollider", std::move(message)});
+				}
 				continue;
 			}
 
-			RigidBodyComponent* authoredBody = objects.GetComponent<RigidBodyComponent>(entry.object);
 			const bool hasAuthoredBody = authoredBody != nullptr && authoredBody->active
 				&& authoredBody->Validate().accepted;
 			if(authoredBody != nullptr && authoredBody->active && !hasAuthoredBody) return std::nullopt;
@@ -319,6 +348,7 @@ namespace TerraEngine::Physics {
 			body.objectGeneration = objectGeneration;
 			body.componentGeneration = componentGeneration;
 			body.worldPose = {ToPhysicsVector(resolved.position), ToPhysicsRotation(resolved.rotation)};
+			body.sourceTransformRevision = resolved.dependencyRevision;
 			if(entry.parentIndex >= 0) {
 				const ResolvedTransform& parent = transforms[static_cast<std::size_t>(entry.parentIndex)];
 				body.parentWorldPose = {ToPhysicsVector(parent.position), ToPhysicsRotation(parent.rotation)};
@@ -394,6 +424,7 @@ namespace TerraEngine::Physics {
 			const bool hierarchyChanged = previous == nullptr
 				|| previous->Data().hierarchyGeneration != data.hierarchyGeneration;
 			if(hierarchyChanged || previousGenerations[entry.objectId] != componentGeneration
+				|| previousTransformRevisions[entry.objectId] != body.sourceTransformRevision
 				|| previousHashes[entry.objectId] != objectRecipeHash) {
 				data.dirtyObjects.push_back({
 					entry.objectId, objectGeneration, componentGeneration, componentGeneration});

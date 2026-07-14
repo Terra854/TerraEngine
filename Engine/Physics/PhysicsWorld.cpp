@@ -91,6 +91,12 @@ namespace TerraEngine::Physics {
 		eventHistory = std::make_unique<PhysicsEventHistory>(PhysicsEventPacketLimits{
 			4096U, 1024U, static_cast<std::size_t>(settings.retainedResultTicks) + 1U,
 			settings.retainedResultTicks});
+		// Automation must be able to inspect canonical contacts even when gameplay
+		// has no subscriber. Keep its bounded immutable history distinct so this
+		// observational path cannot broaden managed event delivery.
+		diagnosticEventHistory = std::make_unique<PhysicsEventHistory>(PhysicsEventPacketLimits{
+			4096U, 1024U, static_cast<std::size_t>(settings.retainedResultTicks) + 1U,
+			settings.retainedResultTicks});
 		constraintRuntime.clear();
 		characterStateHistory.clear();
 		state = PhysicsWorldState::Active;
@@ -251,19 +257,27 @@ namespace TerraEngine::Physics {
 		std::span<const PhysicsEvent> events,
 		std::uint64_t providerDroppedCount) {
 		std::lock_guard<std::mutex> lock(mutex);
-		if(!CanAccessRegistriesLocked() || eventSubscriptions == nullptr || eventHistory == nullptr
+		if(!CanAccessRegistriesLocked() || eventSubscriptions == nullptr || eventHistory == nullptr || diagnosticEventHistory == nullptr
 			|| tick == 0U) return nullptr;
 		PhysicsEventThreadLocalCollector collector(std::max<std::size_t>(events.size(), 1U));
 		for(const PhysicsEvent& event : events) collector.Record(event);
 		const PhysicsEventThreadLocalCollector* collectors[] = {&collector};
+		const PhysicsEventPacketLimits limits{4096U, 4096U,
+			static_cast<std::size_t>(settings.retainedResultTicks) + 1U,
+			settings.retainedResultTicks};
+		const PhysicsEventSubscriptionSnapshot subscriptions = eventSubscriptions->Snapshot();
 		PhysicsEventPacket packet = PhysicsEventPacketBuilder::MergeCollectors(
-			ActiveHandleLocked(), tick, collectors, eventSubscriptions->Snapshot(),
-			PhysicsEventPacketLimits{4096U, 4096U,
-				static_cast<std::size_t>(settings.retainedResultTicks) + 1U,
-				settings.retainedResultTicks});
+			ActiveHandleLocked(), tick, collectors, subscriptions,
+			limits);
+		PhysicsEventPacket diagnosticPacket = PhysicsEventPacketBuilder::MergeCollectors(
+			ActiveHandleLocked(), tick, collectors, subscriptions, limits, false);
 		packet.droppedCount += providerDroppedCount;
 		packet.overflowed = packet.overflowed || providerDroppedCount != 0U;
-		if(!eventHistory->Publish(std::move(packet))) return nullptr;
+		diagnosticPacket.droppedCount += providerDroppedCount;
+		diagnosticPacket.overflowed = diagnosticPacket.overflowed || providerDroppedCount != 0U;
+		// Both histories contain immutable packets built from the same validated
+		// collector. No synthetic subscription is added to the gameplay registry.
+		if(!eventHistory->Publish(std::move(packet)) || !diagnosticEventHistory->Publish(std::move(diagnosticPacket))) return nullptr;
 		return eventHistory->Acquire(ActiveHandleLocked(), tick, tick);
 	}
 
@@ -273,6 +287,14 @@ namespace TerraEngine::Physics {
 		std::lock_guard<std::mutex> lock(mutex);
 		return CanAccessRegistriesLocked() && eventHistory != nullptr
 			? eventHistory->Acquire(ActiveHandleLocked(), requestedTick, currentTick) : nullptr;
+	}
+
+	std::shared_ptr<const PhysicsEventPacket> PhysicsWorld::AcquireDiagnosticEventPacket(
+		PhysicsTick requestedTick,
+		PhysicsTick currentTick) const {
+		std::lock_guard<std::mutex> lock(mutex);
+		return CanAccessRegistriesLocked() && diagnosticEventHistory != nullptr
+			? diagnosticEventHistory->Acquire(ActiveHandleLocked(), requestedTick, currentTick) : nullptr;
 	}
 
 	bool PhysicsWorld::RegisterConstraint(PhysicsConstraintRuntimeRegistration registration) {
@@ -788,6 +810,7 @@ namespace TerraEngine::Physics {
 		if(queryManager != nullptr) queryManager->ResetForWorld({});
 		queryManager.reset();
 		eventHistory.reset();
+		diagnosticEventHistory.reset();
 		eventSubscriptions.reset();
 		ResetTimingLocked();
 		activeGeneration = 0U;

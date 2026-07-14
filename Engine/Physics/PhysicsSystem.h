@@ -14,6 +14,14 @@
 #include <string>
 
 namespace TerraEngine::Physics {
+	// This snapshot is intentionally smaller than provider job diagnostics. It is
+	// safe to expose at lifecycle boundaries because it contains only counts and
+	// cannot leak Jolt job objects or scheduler-owned task pointers.
+	struct PhysicsSystemJobDrainDiagnostics {
+		std::uint32_t queued = 0U;
+		std::uint32_t activePumps = 0U;
+	};
+
 	class TERRAENGINE_API PhysicsSystem final : public SystemsBase {
 	public:
 		static PhysicsSystem& Instance();
@@ -59,8 +67,13 @@ namespace TerraEngine::Physics {
 		std::shared_ptr<const PhysicsBodyStateSnapshot> LatestBodySnapshot() const;
 		std::shared_ptr<const PhysicsCommandResultSnapshot> LatestCommandResults() const;
 		std::shared_ptr<const PhysicsEventPacket> LatestEventPacket() const;
+		// Returns one immutable retained event packet for the active world. Callers
+		// provide a tick rather than receiving the mutable world/history object, so
+		// editor automation can inspect bounded history without racing publication.
+		std::shared_ptr<const PhysicsEventPacket> ReadRetainedEventPacket(PhysicsTick requestedTick) const;
 		std::shared_ptr<const PhysicsCharacterStatePacket> LatestCharacterStatePacket() const;
 		std::shared_ptr<const PhysicsDiagnosticsSnapshot> LatestDiagnostics() const;
+		PhysicsSystemJobDrainDiagnostics JobDrainDiagnostics() const;
 		std::uint64_t ExplicitStepPublicationCount() const;
 		// The scheduler calls this only after the protected After Physics scene
 		// mutation flush, carrying receipts for generation-validated Transform writes.

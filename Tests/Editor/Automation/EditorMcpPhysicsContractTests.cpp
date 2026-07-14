@@ -125,6 +125,26 @@ namespace TerraEngine::EditorTests
 			context.ExpectEqual(100000.0, properties["distance"].value("maximum", 0.0), "Raycast distance must be bounded before a provider query is scheduled.");
 			context.Expect(raycast->descriptor.resultSchema["properties"].contains("jobId"), "A query result must reserve a durable-job receipt for over-budget work.");
 			context.ExpectEqual(std::string("immutable_physics_snapshot"), raycast->descriptor.execution.visibilityBoundary, "Read queries must not mutate the live provider world.");
+
+			const auto contacts = capabilityRegistry.Find("physics.contacts.list", 1, state);
+			context.Expect(contacts.has_value(), "Contacts should expose the immutable event-packet contract.");
+			if (contacts.has_value())
+			{
+				const nlohmann::json& properties = contacts->descriptor.inputSchema["properties"];
+				context.ExpectEqual(31, properties["collisionLayer"].value("maximum", -1), "Contact layer filters must stay inside the stable 32-layer project range.");
+				context.Expect(properties.contains("fromTick") && properties.contains("toTick"), "Contact history requests must bound their published tick interval.");
+			}
+
+			const auto force = capabilityRegistry.Find("physics.body.apply_force", 1, state);
+			context.Expect(force.has_value(), "Force application should have a typed runtime descriptor.");
+			if (force.has_value())
+			{
+				const nlohmann::json& mode = force->descriptor.inputSchema["properties"]["applicationMode"];
+				context.Expect(mode.value("type", std::string()) == "string", "Force application mode must be a closed string enum.");
+				context.Expect(mode.contains("enum") && mode["enum"] == nlohmann::json::array({"Force", "Acceleration"}),
+					"Force application must expose the exact Force and mass-independent Acceleration modes.");
+				context.ExpectEqual(std::string("Force"), mode.value("default", std::string()), "Omitting applicationMode must retain ordinary Force behavior.");
+			}
 		});
 	}
 }

@@ -28,7 +28,6 @@
 #include "Profiling/Profiler.h"
 #include "Profiling/ProfilerScope.h"
 #include "Core/Memory/FrameArena.h"
-#include "Core/Memory/FlatMap.h"
 #include "File Formats/TerraEngineMaterialFile.h"
 #include "File Formats/TerraEngineMeshFile.h"
 #include "UI/UISystem.h"
@@ -2234,6 +2233,188 @@ CompactedVisibilitySet RenderSystem::CompactVirtualGeometryClusterPackets(
 	return result;
 }
 
+const std::unordered_map<entt::entity, Transform>& TerraEngine::Renderer::RenderWorldTransformCache::Refresh(
+	ObjectManager& objects,
+	TerraEngine::Renderer::RenderTransformCacheDiagnostics& diagnostics)
+{
+	// The render system owns this copied snapshot at its protected boundary. It
+	// must never retain pointers into live component storage because worker and
+	// editor mutations can replace that storage after the snapshot is prepared.
+	diagnostics = {};
+	const std::uint64_t observedHierarchyRevision = objects.GetHierarchyRevision();
+	const std::uint64_t observedSpatialRevision = objects.GetSpatialRevision();
+	if (!initialized || hierarchyRevision != observedHierarchyRevision)
+	{
+		graph = TerraEngine::Scene::BuildSceneGraphFromObjectManager(objects, false);
+		graph.revision = observedSpatialRevision;
+		flatHierarchy = std::all_of(graph.objects.begin(), graph.objects.end(), [](const auto& entry) {
+			const TerraEngine::Scene::SceneGraphObject& object = entry.second;
+			return object.parentId == TerraEngine::EMPTY_UUID && object.children.empty();
+		});
+		latestPropagation = TerraEngine::Scene::PropagateWorldTransforms(
+			graph,
+			TerraEngine::Scene::BuildDirtyTransformState(graph));
+
+		worldTransforms.clear();
+		worldTransforms.reserve(latestPropagation.worldTransformsByEntity.size());
+		for (const auto& [entity, transform] : latestPropagation.worldTransformsByEntity)
+		{
+			worldTransforms.emplace(entity, transform);
+		}
+
+		initialized = true;
+		hierarchyRevision = observedHierarchyRevision;
+		spatialRevision = observedSpatialRevision;
+		hierarchyLevelCount = latestPropagation.hierarchyLevelCount;
+		diagnostics.rebuiltForHierarchy = true;
+		diagnostics.scannedObjectCount = static_cast<std::uint32_t>(graph.objects.size());
+		diagnostics.changedObjectCount = static_cast<std::uint32_t>(graph.objects.size());
+		diagnostics.propagatedObjectCount = latestPropagation.processedObjectCount;
+		diagnostics.hierarchyLevelCount = hierarchyLevelCount;
+		diagnostics.hierarchyRevision = hierarchyRevision;
+		return worldTransforms;
+	}
+	if (spatialRevision == observedSpatialRevision)
+	{
+		// No spatial mutation can have changed a local Transform revision, so
+		// avoid even the compact revision scan on a completely unchanged frame.
+		latestPropagation = {};
+		latestPropagation.graphRevision = graph.revision;
+		latestPropagation.hierarchyLevelCount = hierarchyLevelCount;
+		latestPropagation.skippedCleanObjectCount = static_cast<std::uint32_t>(graph.objects.size());
+		diagnostics.reusedWithoutPropagation = true;
+		diagnostics.hierarchyLevelCount = hierarchyLevelCount;
+		diagnostics.hierarchyRevision = hierarchyRevision;
+		return worldTransforms;
+	}
+
+	// A stable hierarchy lets the protected render path inspect only compact
+	// per-object transform revisions instead of rebuilding every parent/child
+	// edge. Children of a changed object are expanded by the shared propagator.
+	std::vector<TerraEngine::Scene::SceneObjectId> changedObjectIds;
+	changedObjectIds.reserve(graph.objects.size());
+	for (auto& [objectId, graphObject] : graph.objects)
+	{
+		const std::optional<Object> object = objects.getObject(graphObject.entity);
+		if (!object)
+		{
+			// A removed entity without a hierarchy revision is inconsistent state.
+			// Rebuild defensively so the renderer fails closed to a fresh snapshot.
+			initialized = false;
+			return Refresh(objects, diagnostics);
+		}
+
+		const std::uint64_t transformRevision = objects.GetObjectTransformRevision(*object);
+		if (transformRevision == graphObject.transformRevision)
+		{
+			continue;
+		}
+
+		// Copy the current authored local transform into the immutable graph before
+		// scheduling the dependency-aware world transform propagation.
+		const Transform* localTransform = objects.GetComponent<Transform>(*object);
+		const Transform local = localTransform != nullptr ? *localTransform : Transform{};
+		graphObject.localPosition = local.position;
+		graphObject.localRotation = local.rotation;
+		graphObject.localScale = local.scale;
+		graphObject.transformRevision = transformRevision;
+		graphObject.spatialRevision = objects.GetObjectSpatialRevision(*object);
+		changedObjectIds.push_back(objectId);
+	}
+
+	graph.revision = observedSpatialRevision;
+	spatialRevision = observedSpatialRevision;
+	diagnostics.scannedObjectCount = static_cast<std::uint32_t>(graph.objects.size());
+	diagnostics.changedObjectCount = static_cast<std::uint32_t>(changedObjectIds.size());
+	diagnostics.hierarchyLevelCount = hierarchyLevelCount;
+	diagnostics.hierarchyRevision = hierarchyRevision;
+	if (changedObjectIds.empty())
+	{
+		// Preserve explicit zero-work diagnostics so profiler and editor tools can
+		// distinguish an intentional cache hit from a skipped render update.
+		latestPropagation = {};
+		latestPropagation.graphRevision = graph.revision;
+		latestPropagation.hierarchyLevelCount = hierarchyLevelCount;
+		latestPropagation.skippedCleanObjectCount = static_cast<std::uint32_t>(graph.objects.size());
+		diagnostics.reusedWithoutPropagation = true;
+		return worldTransforms;
+	}
+	if (flatHierarchy)
+	{
+		// Physics stress fixtures commonly contain independent root bodies. Their
+		// world transform is exactly the authored local transform, so rebuilding
+		// generic traversal plans, UUID sort keys, and worker graphs per body adds
+		// latency without adding correctness. Cache-map writes stay on this
+		// protected coordinator thread to keep the published snapshot coherent.
+		latestPropagation = {};
+		latestPropagation.graphRevision = graph.revision;
+		latestPropagation.hierarchyLevelCount = graph.objects.empty() ? 0U : 1U;
+		latestPropagation.dirtyRootCount = static_cast<std::uint32_t>(changedObjectIds.size());
+		latestPropagation.expandedDirtyObjectCount = static_cast<std::uint32_t>(changedObjectIds.size());
+		latestPropagation.processedObjectCount = static_cast<std::uint32_t>(changedObjectIds.size());
+		latestPropagation.skippedCleanObjectCount = static_cast<std::uint32_t>(graph.objects.size() - changedObjectIds.size());
+		for (const TerraEngine::Scene::SceneObjectId& objectId : changedObjectIds)
+		{
+			const auto graphObject = graph.objects.find(objectId);
+			if (graphObject == graph.objects.end())
+			{
+				continue;
+			}
+
+			TerraEngine::Scene::SceneGraphObject& object = graphObject->second;
+			Transform worldTransform{};
+			worldTransform.position = object.localPosition;
+			worldTransform.rotation = object.localRotation;
+			worldTransform.scale = object.localScale;
+			object.worldPosition = worldTransform.position;
+			object.worldRotation = worldTransform.rotation;
+			object.worldScale = worldTransform.scale;
+			worldTransforms[object.entity] = worldTransform;
+		}
+
+		hierarchyLevelCount = latestPropagation.hierarchyLevelCount;
+		diagnostics.usedFlatHierarchyFastPath = true;
+		diagnostics.propagatedObjectCount = latestPropagation.processedObjectCount;
+		diagnostics.hierarchyLevelCount = hierarchyLevelCount;
+		return worldTransforms;
+	}
+
+	latestPropagation = TerraEngine::Scene::PropagateWorldTransforms(
+		graph,
+		TerraEngine::Scene::BuildDirtyTransformState(
+			graph,
+			changedObjectIds,
+			TerraEngine::Scene::SceneTransformDirtyReason::LocalTransform));
+	for (const auto& [entity, transform] : latestPropagation.worldTransformsByEntity)
+	{
+		worldTransforms[entity] = transform;
+	}
+
+	diagnostics.propagatedObjectCount = latestPropagation.processedObjectCount;
+	diagnostics.hierarchyLevelCount = latestPropagation.hierarchyLevelCount;
+	hierarchyLevelCount = latestPropagation.hierarchyLevelCount;
+	return worldTransforms;
+}
+
+const TerraEngine::Scene::SceneTransformPropagationResult& TerraEngine::Renderer::RenderWorldTransformCache::LatestPropagation() const
+{
+	return latestPropagation;
+}
+
+void TerraEngine::Renderer::RenderWorldTransformCache::Clear()
+{
+	// Scene loads and play-mode restoration can replace every entity at once, so
+	// discard both the copied graph and transforms before the next protected frame.
+	graph = {};
+	worldTransforms.clear();
+	latestPropagation = {};
+	initialized = false;
+	hierarchyRevision = 0U;
+	spatialRevision = 0U;
+	hierarchyLevelCount = 0U;
+	flatHierarchy = false;
+}
+
 // RenderSystem::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void RenderSystem::Initialize()
 {
@@ -2279,9 +2460,6 @@ void RenderSystem::Initialize()
 
 template<typename T>
 using FrameVector = std::vector<T, FrameAllocator<T>>;
-
-template<typename K, typename V>
-using FrameMap = FlatMap<K, V, FrameAllocator<std::pair<K, V>>>;
 
 // RenderSystem::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void RenderSystem::Update(float deltaTime)
@@ -2482,19 +2660,13 @@ void RenderSystem::Update(float deltaTime)
 		loggedMissingCamera = false;
 	}
 
-	TerraEngine::Scene::SceneTransformPropagationResult transformPropagation;
-	FrameMap<entt::entity, Transform> worldTransforms;
+	const std::unordered_map<entt::entity, Transform>* worldTransforms = nullptr;
+	const TerraEngine::Scene::SceneTransformPropagationResult* transformPropagation = nullptr;
 	{
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Resolve World Transforms", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		TerraEngine::Scene::SceneGraph sceneGraph = TerraEngine::Scene::BuildSceneGraphFromObjectManager(objManager, false);
-		TerraEngine::Scene::SceneDirtyTransformState dirtyTransforms = TerraEngine::Scene::BuildDirtyTransformState(sceneGraph);
-		transformPropagation = TerraEngine::Scene::PropagateWorldTransforms(sceneGraph, dirtyTransforms);
-		worldTransforms.reserve(transformPropagation.worldTransformsByEntity.size());
-		for (const auto& [entity, transform] : transformPropagation.worldTransformsByEntity)
-		{
-			worldTransforms.emplace(entity, transform);
-		}
-		if (!transformPropagation.valid)
+		worldTransforms = &worldTransformCache.Refresh(objManager, latestTransformCacheDiagnostics);
+		transformPropagation = &worldTransformCache.LatestPropagation();
+		if (!transformPropagation->valid)
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "RenderSystem received an invalid scene transform propagation result.");
 		}
@@ -2509,9 +2681,9 @@ void RenderSystem::Update(float deltaTime)
 	};
 	const Transform fallbackWorldTransform{};
 	auto getWorldTransform = [&](entt::entity entity) -> const Transform& {
-		if (const Transform* transform = worldTransforms.find(entity))
+		if (const auto transform = worldTransforms->find(entity); transform != worldTransforms->end())
 		{
-			return *transform;
+			return transform->second;
 		}
 		return fallbackWorldTransform;
 	};
@@ -2605,7 +2777,8 @@ void RenderSystem::Update(float deltaTime)
 	renderFrameSnapshot.materials.reserve(renderables.size());
 	for (const RenderableEntry& entry : renderables)
 	{
-		const Transform* transform = worldTransforms.find(entry.entity);
+		const auto transformIt = worldTransforms->find(entry.entity);
+		const Transform* transform = transformIt != worldTransforms->end() ? &transformIt->second : nullptr;
 		TerraEngine::Renderer::VirtualGeometryDrawRange virtualRange{};
 		if (const Mesh* mesh = ResourceManager::Instance().GetMesh(entry.mesh.meshId); mesh != nullptr && mesh->hasVirtualGeometry)
 		{
@@ -2731,11 +2904,11 @@ void RenderSystem::Update(float deltaTime)
 		spatialIndex.Refresh(spatialRecords);
 	}
 	TerraEngine::Scene::SpatialDiagnosticsSnapshot latestSpatialRefreshDiagnostics = spatialIndex.GetDiagnosticsSnapshot();
-	latestSpatialRefreshDiagnostics.transformDirtyRootCount = transformPropagation.dirtyRootCount;
-	latestSpatialRefreshDiagnostics.transformExpandedObjectCount = transformPropagation.expandedDirtyObjectCount;
-	latestSpatialRefreshDiagnostics.transformProcessedObjectCount = transformPropagation.processedObjectCount;
-	latestSpatialRefreshDiagnostics.transformSkippedCleanObjectCount = transformPropagation.skippedCleanObjectCount;
-	latestSpatialRefreshDiagnostics.transformHierarchyLevelCount = transformPropagation.hierarchyLevelCount;
+	latestSpatialRefreshDiagnostics.transformDirtyRootCount = transformPropagation->dirtyRootCount;
+	latestSpatialRefreshDiagnostics.transformExpandedObjectCount = transformPropagation->expandedDirtyObjectCount;
+	latestSpatialRefreshDiagnostics.transformProcessedObjectCount = transformPropagation->processedObjectCount;
+	latestSpatialRefreshDiagnostics.transformSkippedCleanObjectCount = transformPropagation->skippedCleanObjectCount;
+	latestSpatialRefreshDiagnostics.transformHierarchyLevelCount = transformPropagation->hierarchyLevelCount;
 	latestSpatialRefreshDiagnostics.boundsRecomputedObjectCount = static_cast<std::uint32_t>(spatialRecords.size());
 
 	std::vector<DrawCommand> renderableDrawCommands(renderables.size());
@@ -4092,8 +4265,52 @@ void RenderSystem::Update(float deltaTime)
 	const LightEntry* activeSkyDirectionalLight = nullptr;
 	{
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Resolve Sky State", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		ObjectManager& objectManager = ObjectManager::instance();
-		std::optional<entt::entity> activeSkyObject = SceneManager::Instance().GetActiveSkyObject();
+		ObjectManager& objectManager = objManager;
+		const std::uint64_t skyHierarchyRevision = objectManager.GetHierarchyRevision();
+		std::uint64_t skyCandidateSignature = 0U;
+		const bool observeSkyCandidates = skyStateDirty
+			|| !hasCachedSkyObjectResolution
+			|| cachedSkyHierarchyRevision != skyHierarchyRevision;
+		if (observeSkyCandidates)
+		{
+			// Sky edits are uncommon, so inspect only the typed SkyComponent view
+			// before considering an expensive deterministic hierarchy traversal.
+			// This signature includes the flags that decide whether a candidate can
+			// become the active sky; source and lighting values are refreshed below.
+			const auto skyCandidates = objectManager.getRegistry().view<SkyComponent>();
+			for (const entt::entity entity : skyCandidates)
+			{
+				const std::optional<Object> object = objectManager.getObject(entity);
+				const SkyComponent* component = object ? objectManager.GetComponent<SkyComponent>(*object) : nullptr;
+				if (component == nullptr)
+				{
+					continue;
+				}
+
+				const bool objectActive = objectManager.isObjectActive(*object);
+				const std::uint64_t entityValue = static_cast<std::uint32_t>(entity);
+				const std::uint64_t candidateBits = entityValue
+					^ (component->active ? 0x9e3779b97f4a7c15ULL : 0ULL)
+					^ (objectActive ? 0xc2b2ae3d27d4eb4fULL : 0ULL);
+				skyCandidateSignature ^= candidateBits + 0x9e3779b97f4a7c15ULL + (skyCandidateSignature << 6U) + (skyCandidateSignature >> 2U);
+			}
+		}
+
+		const bool skyCandidatesChanged = skyStateDirty && skyCandidateSignature != cachedSkyCandidateSignature;
+		if (!hasCachedSkyObjectResolution
+			|| cachedSkyHierarchyRevision != skyHierarchyRevision
+			|| skyCandidatesChanged)
+		{
+			// SceneManager retains the canonical traversal rule. Cache only its
+			// selected entity, never a component pointer, so scene replacement and
+			// storage relocation cannot leave renderer state dangling.
+			cachedSkyObject = SceneManager::Instance().GetActiveSkyObject();
+			hasCachedSkyObjectResolution = true;
+			cachedSkyHierarchyRevision = skyHierarchyRevision;
+			cachedSkyCandidateSignature = skyCandidateSignature;
+		}
+
+		const std::optional<entt::entity> activeSkyObject = cachedSkyObject;
 		std::optional<Object> activeSkyObjectHandle = activeSkyObject.has_value() ? objectManager.getObject(*activeSkyObject) : std::nullopt;
 		activeSkyComponent = activeSkyObjectHandle ? objectManager.GetComponent<SkyComponent>(*activeSkyObjectHandle) : nullptr;
 		const bool hasActiveSkyComponent = activeSkyComponent != nullptr;
@@ -4137,9 +4354,9 @@ void RenderSystem::Update(float deltaTime)
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (resolvedDirectionalLight != nullptr)
 		{
-			if (const Transform* lightTransform = worldTransforms.find(resolvedDirectionalLight->entity))
+			if (const auto lightTransform = worldTransforms->find(resolvedDirectionalLight->entity); lightTransform != worldTransforms->end())
 			{
-				const glm::quat lightRotation = glm::normalize(lightTransform->rotation);
+				const glm::quat lightRotation = glm::normalize(lightTransform->second.rotation);
 				const glm::vec3 lightForward = lightRotation * glm::vec3(0.0f, 0.0f, -1.0f);
 				baseSunDirection = SafeNormalizeDirection(-lightForward, baseSunDirection);
 			}
@@ -4376,8 +4593,8 @@ void RenderSystem::Update(float deltaTime)
 		{
 			const entt::entity cameraEntity = cameras[cameraIndex].entity;
 			const auto& camera = cameras[cameraIndex].camera;
-			const Transform* propagatedCameraTransform = worldTransforms.find(cameraEntity);
-			Transform cameraTransform = propagatedCameraTransform != nullptr ? *propagatedCameraTransform : Transform{};
+			const auto propagatedCameraTransform = worldTransforms->find(cameraEntity);
+			Transform cameraTransform = propagatedCameraTransform != worldTransforms->end() ? propagatedCameraTransform->second : Transform{};
 
 			// Normalize the rotation so derived direction vectors remain unit length
 			// even if authoring data drifts slightly off the identity quaternion.
@@ -4814,6 +5031,13 @@ void RenderSystem::Update(float deltaTime)
 // RenderSystem::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void RenderSystem::Shutdown()
 {
+	// Drop copied scene data before backend teardown so a later editor restart
+	// cannot reuse transforms or sky entities from the previous scene session.
+	worldTransformCache.Clear();
+	hasCachedSkyObjectResolution = false;
+	cachedSkyObject.reset();
+	cachedSkyHierarchyRevision = 0U;
+	cachedSkyCandidateSignature = 0U;
 	if (rhi) {
 		rhi->Shutdown();
 		rhi.reset();
@@ -5608,7 +5832,13 @@ void RenderSystem::Clear()
 	latestGameViewTargetSize = glm::uvec2(0u);
 	latestGameViewFrameId = 0u;
 	virtualGeometryTransitionCache.clear();
+	worldTransformCache.Clear();
+	latestTransformCacheDiagnostics = {};
 	skyStateDirty = true;
+	hasCachedSkyObjectResolution = false;
+	cachedSkyObject.reset();
+	cachedSkyHierarchyRevision = 0U;
+	cachedSkyCandidateSignature = 0U;
 	lastLoggedSkyIssueKey.clear();
 	ClearOverrideCameras();
 }

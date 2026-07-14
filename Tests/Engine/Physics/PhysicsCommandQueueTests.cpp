@@ -106,9 +106,17 @@ namespace TerraEngine::Tests {
 			const auto receipt = queue.Enqueue(command);
 			context.Expect(receipt.accepted, "The idempotent command should initially be accepted.");
 			context.Expect(queue.Cancel(receipt.commandId), "Queued commands should be cancellable before publication.");
-			context.Expect(queue.Enqueue(command).duplicateIdempotency, "A duplicate idempotency key must not enqueue a second action.");
+			const auto duplicate = queue.Enqueue(command);
+			context.Expect(duplicate.duplicateIdempotency && !duplicate.accepted,
+				"A duplicate idempotency key must return a rejected receipt instead of enqueueing a second action.");
+			context.ExpectEqual(receipt.commandId, duplicate.commandId,
+				"Duplicate idempotency receipts must correlate to the original command rather than minting another identity.");
+			context.ExpectEqual(receipt.correlationId, duplicate.correlationId,
+				"Duplicate receipts must retain the original correlation identifier for automation and rollback diagnostics.");
 			const auto merged = queue.MergeForProtectedBoundary(2, 9);
 			context.Expect(merged.commands.empty(), "Cancelled commands must not reach the protected boundary.");
+			context.ExpectEqual(static_cast<std::uint64_t>(1), queue.GetDiagnostics().duplicateIdempotencyCount,
+				"The queue must diagnose the rejected duplicate exactly once without replaying the cancelled action.");
 		});
 
 		registry.Add("Physics.CommandQueue.RejectsStaleWorldGenerationWithoutPublication", [](TestContext& context) {

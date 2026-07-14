@@ -1,166 +1,131 @@
-# Physics editor automation
+# Physics editor automation (MCP)
 
-Physics automation is available only from the already-open project in the
-native TerraEngine editor. It is a bounded semantic API: it does not create,
-open, close, select, or otherwise control projects; it does not expose a
-physics-provider pointer; and it never accepts an arbitrary file path or shell
-command.
+The self-registering `physics` provider is available only in the already-open
+native TerraEngine editor project. It cannot create/open/close/select projects,
+run shells, accept arbitrary paths, or expose a provider/Jolt pointer. Every
+tool is version 1 with a closed JSON schema, bounded diagnostics, correlation
+ID, and an explicit scheduler visibility boundary.
 
-## Discovery and lifecycle
+## Capabilities, permissions, and availability
 
-The `physics` automation provider self-registers its tools. Each tool is
-version `1`, has a closed JSON-object schema, and describes its required
-project, scene, Play Mode, permission, and scheduler boundary in discovery.
-All responses are correlated with the request and include bounded diagnostics.
-Runtime reads also include their source `worldGeneration` and physics `tick`.
+Read permission is used by `physics.state`, `physics.settings.get`,
+`physics.layers.list`, `physics.material.inspect`, body/character inspection,
+contacts, diagnostics, bounded `raycast`/`shape_cast`/`overlap`, and
+`physics.query_job.get`. Scene reads and queries require an active scene and a
+playing or paused world; settings/layers/material metadata can be read with an
+open project and no scene. Renderer availability is never required.
 
-The provider exposes the following groups:
-
-- World reads: `physics.state`, `physics.settings.get`,
-  `physics.layers.list`, `physics.material.inspect`, `physics.body.inspect`,
-  `physics.character.inspect`, `physics.contacts.list`, and
-  `physics.diagnostics.get`.
-- Bounded queries: `physics.raycast`, `physics.shape_cast`,
-  `physics.overlap`, and `physics.query_job.get`.
-- Project authoring: `physics.settings.preflight`, `physics.settings.set`,
-  `physics.layer.create`, `physics.layer.update`, `physics.material.create`,
-  `physics.material.update`, and `physics.collider.cook`.
-- Play Mode commands: `physics.body.apply_force`,
-  `physics.body.apply_impulse`, `physics.body.set_velocity`,
-  `physics.body.teleport`, `physics.character.move`, and
-  `physics.character.jump`.
-
-All physics tools require a project that is already open. Body, character,
-contact, and query tools also require an active scene and an active or paused
-physics world. A renderer is never required for diagnostics or physics
-automation.
+Project-write permission is required for settings/layer changes and collider
+cooking. Runtime body/character commands are typed scene mutations and also
+require project-write permission, an active scene/world, and Play Mode
+(`playing` or `paused`). Material creation is an atomic asset mutation without
+approval; material updates, settings, layer create/update, and collider cooking
+are `HighImpact` approval-gated operations.
 
 ## Reads and bounded queries
 
-Reads use immutable published physics snapshots. They never lock or traverse a
-live Jolt world. `physics.contacts.list` requires `maximumContacts`; query
-requests require `maximumHits`, and query schemas bound results to 256 hits,
-batches to 1,024 requests, ray distance to 100,000 units, and shape extents to
-10,000 units. Invalid, non-finite, negative, or over-limit values are rejected
-instead of being silently clamped.
+Reads consume immutable published snapshots (`immutable_physics_snapshot`),
+not a live provider world. Query inputs reject non-finite, negative, or
+out-of-range values. Limits are **64 hits per query/contact list**, **1,024
+requests per batch**, **100,000 units ray distance**, and **10,000 units shape
+extent**. Results are bounded and report `truncated`/`overflow` diagnostics.
+Over-budget queries may return a durable `jobId`; poll it with
+`physics.query_job.get` (or the general jobs API). Terminal receipts survive a
+reconnect and support cooperative cancellation.
 
-Small queries run at the declared protected query boundary. Over-budget query
-or cooking work returns a durable receipt:
+`physics.contacts.list` reads the engine-owned bounded diagnostics history,
+not a managed gameplay subscription. Its inclusive `fromTick`/`toTick` range
+is clamped to retained ticks and returned in stable tick order, so a quiet
+latest tick does not hide an earlier retained contact and automation cannot
+broaden or interfere with managed event filters.
 
 ```json
 {
-  "correlationId": "query-42",
-  "accepted": true,
-  "idempotencyDisposition": "new",
-  "jobId": "physics-job-17",
-  "diagnostics": []
+  "worldGeneration": 12,
+  "origin": [0, 2, 0],
+  "direction": [0, -1, 0],
+  "distance": 200,
+  "maximumHits": 8,
+  "batchSize": 1,
+  "correlationId": "ray-42"
 }
 ```
 
-Poll `physics.query_job.get` (or the general `jobs.get`) with the job ID.
-Jobs retain a bounded terminal result across reconnects and support cooperative
-cancellation. A cancelled cook is discarded before publication; it cannot
-replace a previously valid collider asset with a partial result.
+## Identity, idempotency, and stale targets
 
-## Identity, retries, and stale targets
-
-Every runtime command contains a target identity and exact generation data:
-
-```json
-{
-  "target": {
-    "objectId": "object-uuid",
-    "componentGeneration": 7,
-    "worldGeneration": 12
-  },
-  "worldGeneration": 12,
-  "idempotencyKey": "client-retry-001",
-  "correlationId": "jump-request-001"
-}
-```
-
-Collider and constraint-record operations additionally carry `recordId` and
-`recordGeneration`. If an object, component, record, scene, or world was
-recreated after the request was prepared, the command is rejected as stale and
-cannot affect the replacement.
-
-All runtime commands, cooking requests, and asset-publication mutations require
-a nonempty `idempotencyKey`. The service begins the shared idempotency record
-using the capability, target generations, payload, and requested tick policy as
-the fingerprint. An exact retry returns its original receipt; reusing a key for
-different work is rejected; completion occurs only after a protected command
-acceptance or atomic asset publication. A duplicate never applies a second
-impulse, force, teleport, jump, or asset publication.
-
-## Settings, layers, materials, and approvals
-
-Use `physics.settings.preflight` before changing settings which can rebuild a
-world or affect referenced bodies. It returns a bounded reference-impact
-summary and an `impactFingerprint` tied to the active project and scene
-generations. Submit the result to the editor approval flow, then pass the
-approved token back to `physics.settings.set`:
+Runtime commands carry `target.objectId`, `componentGeneration`, and
+`worldGeneration`; collider/constraint records additionally carry
+`recordId`/`recordGeneration`. Every command envelope also requires the
+expected top-level `worldGeneration`, a non-empty `idempotencyKey`, and a
+`correlationId`:
 
 ```json
 {
-  "settings": {
-    "gravity": [0.0, -9.81, 0.0],
-    "fixedTimeStep": 0.016666667,
-    "debugVisualizationEnabled": true,
-    "retainedDebugTicks": 2,
-    "maxDebugPrimitives": 100000
-  },
+  "target": {"objectId": "crate-uuid", "componentGeneration": 4, "worldGeneration": 12},
   "worldGeneration": 12,
-  "projectGeneration": 55,
-  "idempotencyKey": "settings-55-1",
-  "approval": {
-    "approvalId": "approval-123",
-    "impactFingerprint": "impact-abc",
-    "projectGeneration": 55
-  }
-}
-```
-
-Settings, layer updates, material updates, and cooking revalidate the
-fingerprint, approval/session binding, payload, and target generations at the
-protected commit boundary. Any change after preflight invalidates the approval
-and requires a new one. Layer and material writes use atomic project-owned
-publication; reference-impact failures leave live settings and assets unchanged.
-
-`physics.settings.set` is constrained to engine-owned settings, including
-gravity, fixed time step, substeps, and bounded debug retention. Provider
-private values and Jolt enums are intentionally absent.
-
-## Runtime command example
-
-The following queues one impulse for the next eligible physics boundary. It
-does not write an object transform or provider body from the automation thread.
-
-```json
-{
-  "target": {
-    "objectId": "crate-uuid",
-    "componentGeneration": 4,
-    "worldGeneration": 12
-  },
-  "worldGeneration": 12,
-  "vector": [0.0, 5.0, 0.0],
+  "vector": [0, 5, 0],
   "applyOnNextStep": true,
   "idempotencyKey": "crate-impulse-1",
   "correlationId": "tutorial-crate"
 }
 ```
 
-Force, impulse, velocity, teleport, move, and jump commands publish through
-`physics_command_commit`; authoring changes use
-`post_editor_automation_flush`; snapshot reads use
-`immutable_physics_snapshot`. This makes queueing, visibility, and retry
-behavior visible in diagnostics without exposing provider internals.
+The service fingerprints capability, payload, target generations, and tick
+policy. An exact retry returns the retained receipt (`idempotencyDisposition:
+"replay"`); changing any fingerprint with the same key returns `"conflict"`.
+Duplicates never apply a second force, impulse, teleport, move, or jump.
+Stale object/component/record/world generations are rejected atomically.
 
-## Errors and diagnostics
+`physics.body.apply_force` accepts `applicationMode: "Force"` (the default) or
+`"Acceleration"`. Acceleration is mass-independent and is the automation
+equivalent of managed `ForceMode.Acceleration`; use it each fixed tick for
+custom gravity after disabling the body's authored built-in gravity:
 
-Callers should handle structured categories such as `validation`, `permission`,
+```json
+{
+  "target": {"objectId": "crate-uuid", "componentGeneration": 4, "worldGeneration": 12},
+  "worldGeneration": 12,
+  "vector": [0, -9.81, 0],
+  "applicationMode": "Acceleration",
+  "applyOnNextStep": true,
+  "idempotencyKey": "crate-custom-gravity-42",
+  "correlationId": "gravity-tick-42"
+}
+```
+
+## Approvals, fingerprints, and durable cooking
+
+Call `physics.settings.preflight` before a settings change; for layer, material,
+or cook writes, obtain the equivalent editor approval preflight for that
+capability. The bounded result includes
+`impactFingerprint`, `projectGeneration`, `sceneGeneration`, `referenceCount`,
+affected object IDs, approval requirement, and expiry. Submit that fingerprint
+to the editor approval flow, then pass this envelope to the mutation:
+
+```json
+{
+  "settings": {"gravity": [0, -9.81, 0], "fixedTimeStep": 0.016666667,
+    "maxSubsteps": 4, "retainedDebugTicks": 2, "maxDebugPrimitives": 100000},
+  "projectGeneration": 55,
+  "approval": {"approvalId": "approval-123", "impactFingerprint": "impact-abc",
+    "projectGeneration": 55, "sceneGeneration": 8},
+  "worldGeneration": 12,
+  "idempotencyKey": "settings-55-1",
+  "correlationId": "settings-change"
+}
+```
+
+The commit boundary (`post_editor_automation_flush`) revalidates approval,
+fingerprint, payload, session, and generations. Any intervening project/scene
+change invalidates approval; rejected writes leave settings, layers, materials,
+and assets unchanged. Collider cooking is durable and cancellable: cancellation
+before publication discards the result and cannot replace a valid cooked asset
+with partial data. Runtime commands publish at `physics_command_commit`; reads
+remain snapshot-only. All receipts/logs include correlation and (for durable
+work) job IDs, bounded diagnostics, tick/world generation, and truncation or
+overflow context.
+
+Structured errors use categories such as `validation`, `permission`,
 `approval_required`, `stale_target`, `unavailable`, `conflict`, `canceled`,
-`timeout`, and `internal`. Diagnostics are bounded and carry correlation,
-world/tick, truncation, overflow, target-generation, and durable-job context
-where applicable. Provider-native errors, machine paths, and unapproved source
-data are not part of this public contract.
+`timeout`, and `internal`. Provider-native errors, machine paths, and arbitrary
+source/process access are not part of the contract.

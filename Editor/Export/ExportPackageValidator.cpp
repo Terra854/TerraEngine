@@ -4,7 +4,9 @@
 
 #include "File Formats/TerraEngineMeshFile.h"
 #include "Physics/Assets/CookedColliderAsset.h"
+#include "Physics/Assets/PhysicsMaterial.h"
 #include "TEPAK/PackReader.h"
+#include "Utilities/UUID.h"
 
 #include <array>
 #include <algorithm>
@@ -12,6 +14,7 @@
 #include <cstring>
 #include <filesystem>
 #include <iomanip>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -433,13 +436,47 @@ bool ValidatePhysicsManifestBlock(
 
 	if(!physics.contains("materials") || !physics["materials"].is_array()
 		|| !physics.contains("colliders") || !physics["colliders"].is_array()
-		|| !physics.contains("validation") || physics["validation"].value("status", std::string{}) != "validated") {
+		|| !physics.contains("validation") || physics["validation"].value("status", std::string{}) != "validated"
+		|| physics["validation"].value("fixtureSchemaVersion", 0U) == 0U) {
 		outError = "Physics export manifest is missing validated material, collider, or validation records.";
 		return false;
 	}
 	std::unordered_set<std::string> packagePaths;
+	std::unordered_set<std::string> materialGuids;
+	std::unordered_set<std::string> colliderGuids;
 	for(const nlohmann::json& material : physics["materials"]) {
 		if(!ValidatePhysicsManifestAsset(reader, entries, material, "material", packagePaths, outError)) return false;
+		const std::string materialGuid = material.value("guid", std::string{});
+		if(!materialGuids.insert(materialGuid).second) {
+			outError = "Physics export manifest repeats material GUID '" + materialGuid + "'. Keep each runtime material identity unique.";
+			return false;
+		}
+
+		// Checksums prove transport integrity, while this typed decode proves the
+		// referenced bytes are still an engine-owned physics material instead of
+		// arbitrary JSON with a copied checksum.
+		const tepak::ByteBuffer materialBytes = reader.ReadAll(material.value("packagePath", std::string{}));
+		try {
+			const nlohmann::json materialDocument = nlohmann::json::parse(materialBytes.begin(), materialBytes.end());
+			const std::optional<TerraEngine::UUID> parsedGuid = TerraEngine::ParseUUID(materialGuid);
+			TerraEngine::Physics::PhysicsMaterial decodedMaterial;
+			TerraEngine::Physics::PhysicsMaterialDiagnostics diagnostics;
+			if(!parsedGuid || !TerraEngine::Physics::PhysicsMaterial::LoadJson(materialDocument, decodedMaterial, diagnostics)
+				|| decodedMaterial.assetId != *parsedGuid) {
+				outError = "Physics runtime material payload is malformed or does not match manifest GUID '" + materialGuid + "'. Rebuild the material before exporting.";
+				return false;
+			}
+		}
+		catch(const std::exception&) {
+			outError = "Physics runtime material payload is not valid JSON for manifest GUID '" + materialGuid + "'. Rebuild the material before exporting.";
+			return false;
+		}
+	}
+	const std::string defaultMaterialGuid = physics.value("defaultMaterialGuid", std::string{});
+	if((!materialGuids.empty() && defaultMaterialGuid.empty())
+		|| (!defaultMaterialGuid.empty() && !materialGuids.contains(defaultMaterialGuid))) {
+		outError = "Physics export manifest defaultMaterialGuid does not resolve to a packaged physics material. Select a staged material or clear the optional default.";
+		return false;
 	}
 	for(const nlohmann::json& collider : physics["colliders"]) {
 		if(collider.value("sourceProvenanceHash", std::string{}).empty() || collider.value("recipeHash", std::string{}).empty()) {
@@ -447,6 +484,39 @@ bool ValidatePhysicsManifestBlock(
 			return false;
 		}
 		if(!ValidatePhysicsManifestAsset(reader, entries, collider, "collider", packagePaths, outError)) return false;
+		const std::string colliderGuid = collider.value("guid", std::string{});
+		if(!colliderGuids.insert(colliderGuid).second) {
+			outError = "Physics export manifest repeats cooked collider GUID '" + colliderGuid + "'. Keep each runtime collider identity unique.";
+			return false;
+		}
+	}
+	return true;
+}
+
+bool ValidatePhysicsStartupScene(
+	const tepak::PackReader& reader,
+	std::string_view startupScenePath,
+	const nlohmann::json& physics,
+	std::string& outError)
+{
+	// Physics data may be represented by component records or by the portable
+	// parity-fixture metadata. A text scan keeps this package gate compatible
+	// with legacy scene encodings while still blocking a source-only dependency
+	// before a runtime world can be created.
+	const tepak::ByteBuffer sceneBytes = reader.ReadAll(startupScenePath);
+	if(sceneBytes.empty()) {
+		outError = "Physics export package startup scene is empty, so physics dependencies cannot be validated before launch.";
+		return false;
+	}
+	const std::string sceneText(reinterpret_cast<const char*>(sceneBytes.data()), sceneBytes.size());
+	if(sceneText.find(".tecollider") != std::string::npos) {
+		outError = "Export package startup scene still references a source-only .tecollider recipe. Cook and stage its .tepcoll envelope before exporting.";
+		return false;
+	}
+	if(sceneText.find("\"physicsExportFixture\"") != std::string::npos
+		&& physics.value("colliders", nlohmann::json::array()).empty()) {
+		outError = "Physics startup fixture requires at least one packaged cooked collider. Run the collider cooker before exporting.";
+		return false;
 	}
 	return true;
 }
@@ -556,6 +626,9 @@ bool ValidateExportPackage(const std::filesystem::path& packagePath, ExportPlatf
 		// complete block is mandatory and is validated before startup so corrupt
 		// provider bytes can never reach a newly created runtime physics world.
 		if(manifest.contains("physics") && !ValidatePhysicsManifestBlock(manifest["physics"], reader, entries, outError)) {
+			return false;
+		}
+		if(manifest.contains("physics") && !ValidatePhysicsStartupScene(reader, startupScene, manifest["physics"], outError)) {
 			return false;
 		}
 

@@ -153,5 +153,31 @@ namespace TerraEngine::EditorTests {
 			context.Expect(!valid, "A package missing the required runtime font should fail validation.");
 			context.Expect(error.find("fonts/roboto-medium.ttf") != std::string::npos, "The validation error should name the missing font path.");
 		});
+
+		registry.Add("Editor.ExportPackageValidator.RejectsMissingStartupScene", [](TestContext& context) {
+			TempExportPackageWorkspace workspace;
+			WriteRequiredExportRuntimeEntries(workspace);
+			// Stage every unrelated runtime prerequisite so this assertion proves the
+			// startup-scene declaration itself remains a fail-closed export contract.
+			workspace.WriteText(
+				"game.json",
+				"{\n"
+				"\t\"name\": \"Missing Startup Scene\",\n"
+				"\t\"rendererRecovery\": {\n"
+				"\t\t\"validationEnabled\": false,\n"
+				"\t\t\"diagnosticsEnabled\": true,\n"
+				"\t\t\"mode\": \"failClosed\",\n"
+				"\t\t\"fatalMessage\": \"Graphics device lost. Restart the application to restore rendering.\",\n"
+				"\t\t\"fullApplicationRestart\": false\n"
+				"\t}\n"
+				"}\n");
+			workspace.CreatePack();
+
+			std::string error;
+			const bool valid = ValidateExportPackage(workspace.PackPath(), error);
+
+			context.Expect(!valid, "A package without a startup scene must fail before export.");
+			context.Expect(error.find("startup scene") != std::string::npos, "The validation error should identify the missing startup scene.");
+		});
 	}
 }

@@ -41,6 +41,23 @@ namespace TerraEngine::EditorTests
 			context.Expect(!options.startupProjectPath.has_value(), "Missing --project value should leave the startup project unset.");
 		});
 
+		registry.Add("Editor.CommandLine.PhysicsInvariantOutputIsOptInAndPathSafe", [](TestContext& context) {
+			const EditorCommandLineOptions separate = Parse({"TerraEngine-Editor.exe", "--project", "C:/Fixture Project/project.json",
+				"--validate-editor-physics-invariants", "C:/Evidence Root/editor-physics.json"});
+			context.Expect(separate.startupProjectPath == std::filesystem::path("C:/Fixture Project/project.json")
+				&& separate.physicsInvariantOutputPath == std::filesystem::path("C:/Evidence Root/editor-physics.json"),
+				"The parity command must preserve quoted project and evidence paths without changing normal startup parsing.");
+
+			const EditorCommandLineOptions equals = Parse({"TerraEngine-Editor.exe",
+				"--validate-editor-physics-invariants=C:/Evidence/editor-physics.json"});
+			context.Expect(equals.physicsInvariantOutputPath == std::filesystem::path("C:/Evidence/editor-physics.json"),
+				"The equals form must support process launchers that cannot safely split option values.");
+
+			const EditorCommandLineOptions missing = Parse({"TerraEngine-Editor.exe", "--validate-editor-physics-invariants"});
+			context.Expect(!missing.physicsInvariantOutputPath.has_value(),
+				"A missing output path must not enable evidence generation or overwrite an implicit location.");
+		});
+
 		registry.Add("Editor.CommandLine.RendererBootstrapPrecedesEngineRun", [](TestContext& context) {
 			std::ifstream input(std::filesystem::path(TERRAENGINE_SOURCE_DIR)
 				/ "Editor/TerraEngine-Editor/Core/EditorMain.cpp");

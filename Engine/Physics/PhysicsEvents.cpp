@@ -165,7 +165,8 @@ namespace TerraEngine::Physics {
 		PhysicsTick tick,
 		std::span<const PhysicsEventThreadLocalCollector* const> collectors,
 		const PhysicsEventSubscriptionSnapshot& subscriptions,
-		PhysicsEventPacketLimits limits)
+		PhysicsEventPacketLimits limits,
+		bool applySubscriptionFilters)
 	{
 		PhysicsEventPacket packet;
 		packet.world = world;
@@ -192,7 +193,7 @@ namespace TerraEngine::Physics {
 					++packet.droppedCount;
 					continue;
 				}
-				if(!AnySubscriptionMatches(source, subscriptions)) {
+				if(applySubscriptionFilters && !AnySubscriptionMatches(source, subscriptions)) {
 					++packet.filteredCount;
 					continue;
 				}

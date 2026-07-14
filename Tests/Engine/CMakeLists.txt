@@ -75,6 +75,7 @@ add_executable(TerraEngine-EngineTests
 	Physics/PhysicsRigidBodyTransactionTests.cpp
 	Physics/PhysicsRigidBodySimulationTests.cpp
 	Physics/PhysicsSchedulerTests.cpp
+	Physics/PhysicsPerformanceTests.cpp
 	Physics/PhysicsManagedAbiTests.cpp
 	Physics/PhysicsManagedIntegrationTests.cpp
 	Physics/PhysicsDeterminismStressTests.cpp
@@ -288,6 +289,12 @@ add_test(NAME Engine.PhysicsUS5 COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
 set_tests_properties(Engine.PhysicsUS5 PROPERTIES
 	LABELS "Engine;Physics;US5;Diagnostics;Profiler"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Physics.Scheduler,Engine.Profiler"
+)
+
+add_test(NAME Engine.PhysicsPerformance COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.PhysicsPerformance PROPERTIES
+	LABELS "Engine;Physics;US5;Performance"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Physics.Performance"
 )
 
 add_test(NAME Engine.PhysicsUS6 COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)

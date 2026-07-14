@@ -3,6 +3,7 @@
 #pragma once
 
 #include "Core/Export.h"
+#include <cstddef>
 #include <cstdint>
 
 // The physics bridge deliberately uses fixed-width C records. Managed and
@@ -150,6 +151,16 @@ struct NativePhysicsSettingsSnapshot { NativePhysicsAbiHeader header; NativePhys
 struct NativePhysicsIdentitySnapshot { NativePhysicsAbiHeader header; NativePhysicsStatus status; std::uint32_t reserved; NativePhysicsIdentity identity; char diagnostic[kNativePhysicsDiagnosticBytes]; };
 #pragma pack(pop)
 
+// These assertions turn accidental ABI drift into a compile error. The managed
+// mirrors use the same Pack=8 layout, so pointer-free identity packets remain
+// safe to copy between a NativeAOT game and the engine DLL.
+static_assert(sizeof(NativePhysicsAbiHeader) == 8U);
+static_assert(sizeof(NativePhysicsUuid) == 16U);
+static_assert(sizeof(NativePhysicsWorldHandle) == 16U);
+static_assert(offsetof(NativePhysicsBodyCommandRequest, header) == 0U);
+static_assert(offsetof(NativePhysicsCharacterCommandRequest, header) == 0U);
+static_assert(offsetof(NativePhysicsQueryRequest, header) == 0U);
+
 class Engine;
 
 // The editor executable registers a plain function pointer so gameplay code can
@@ -244,6 +255,7 @@ extern "C" {
 	TERRAENGINE_API std::uint32_t Native_Physics_GetAbiVersion();
 	TERRAENGINE_API NativePhysicsStatus Native_Physics_SubmitBodyCommand(const NativePhysicsBodyCommandRequest* request, NativePhysicsCommandReceipt* receipt);
 	TERRAENGINE_API NativePhysicsStatus Native_Physics_SubmitCharacterCommand(const NativePhysicsCharacterCommandRequest* request, NativePhysicsCommandReceipt* receipt);
+	TERRAENGINE_API NativePhysicsStatus Native_Physics_QueryImmediate(const NativePhysicsQueryRequest* request, NativePhysicsQueryResultInfo* resultInfo, NativePhysicsQueryHit* hits, std::uint32_t hitCapacity, std::uint32_t* requiredHitCount);
 	TERRAENGINE_API NativePhysicsStatus Native_Physics_SubmitQuery(const NativePhysicsQueryRequest* request, NativePhysicsQueryReceipt* receipt);
 	TERRAENGINE_API NativePhysicsStatus Native_Physics_SubmitQueryBatch(const NativePhysicsQueryRequest* requests, std::uint32_t requestCount, NativePhysicsQueryReceipt* receipts, std::uint32_t receiptCapacity, std::uint32_t* requiredReceiptCount);
 	TERRAENGINE_API NativePhysicsStatus Native_Physics_ReadQuery(const NativePhysicsQueryHandle* handle, NativePhysicsQueryResultInfo* resultInfo, NativePhysicsQueryHit* hits, std::uint32_t hitCapacity, std::uint32_t* requiredHitCount);

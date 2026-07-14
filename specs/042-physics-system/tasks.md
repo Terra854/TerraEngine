@@ -6,7 +6,7 @@
 
 **Organization**: Tasks are grouped by user story. Every code task must follow the repository's C++20, CRTP, `SystemsBase`, task-scheduling, transactional-mutation, single-tab indentation, beginner-friendly comment, self-contained dependency, shader-separation, and install-tree rules.
 
-**Completion rule**: A code-changing task remains unchecked until its applicable phase compile and `cmake --build --preset Debug --target install` gate succeeds. Implementation work may be prepared earlier, but the phase validation task completes the preceding code-task group only after the canonical `out/build/Debug/Build` tree is verified.
+**Completion rule**: Spec 042 uses `RelWithDebInfo` exclusively. A code-changing task remains unchecked until its applicable phase compile and `cmake --build --preset RelWithDebInfo --target install` gate succeeds. Implementation work may be prepared earlier, but the phase validation task completes the preceding code-task group only after the canonical `out/build/RelWithDebInfo/Build` tree is verified. Debug, Release, and MinSizeRel builds do not satisfy this feature's completion gates.
 
 **Dependency approval**: T004 may add only Jolt Physics v5.6.0 commit `e77f175595e64cb44218cc9d9d56fc365ad0e36a` at `External/JoltPhysics` with the documented core-only integration scope explicitly approved on 2026-07-13. Jolt 5.5 remains comparison evidence only. Any failure requiring a different revision, patch, upgrade, or provider stops implementation and returns to planning for approval.
 
@@ -101,7 +101,7 @@
 - [X] T045 [US1] Build and destroy a fresh physics world around editor Play Mode capture/restore, scene reload, and project/application shutdown boundaries in `Editor/TerraEngine-Editor/Subsystems/MainEditorSubsystem.cpp` and `Engine/Physics/PhysicsSystem.cpp`
 - [X] T046 [P] [US1] Document rigid-body authoring, units, gravity/custom acceleration, fixed stepping, hierarchy/scale limits, and native usage in `Docs/Physics.md`
 - [X] T047 [US1] Run all US1 tests first as failing then passing, compile affected engine/editor targets, run install, and record results in `specs/042-physics-system/evidence/us1-validation.md`
-- [ ] T048 [US1] Demonstrate the standalone MVP fixture from the installed editor and record gravity, collision, Next, visibility, and restoration evidence in `specs/042-physics-system/evidence/us1-mvp-demo.md`
+- [X] T048 [US1] Demonstrate the standalone MVP fixture from the installed editor and record gravity, collision, Next, visibility, and restoration evidence in `specs/042-physics-system/evidence/us1-mvp-demo.md`
 
 **Checkpoint**: The installed editor can independently author and simulate primitive rigid bodies with deterministic fixed-step behavior and safe restoration.
 
@@ -205,24 +205,37 @@
 
 ### Tests for User Story 5
 
-- [ ] T091 [P] [US5] Add failing Inspector record add/remove/reorder/duplicate, units, validation, multi-edit, and deferred rebuild tests in `Tests/Editor/Physics/PhysicsInspectorTests.cpp`
-- [ ] T092 [P] [US5] Add failing grouped undo/redo, stable record ID, prefab apply/revert, connected UUID remap, and atomic invalid-cycle tests in `Tests/Editor/Physics/PhysicsPrefabUndoTests.cpp`
-- [ ] T093 [P] [US5] Add failing Physics Project Settings, layer rename/reference, impact preflight, serialization, and runtime rebuild tests in `Tests/Editor/Physics/PhysicsProjectSettingsTests.cpp`
-- [ ] T094 [P] [US5] Add failing immutable debug packet, pause, renderer-unavailable, bounded history, and Scene View display tests in `Tests/Editor/Physics/PhysicsSceneViewTests.cpp`
-- [ ] T095 [P] [US5] Add failing diagnostics window/menu, scheduler declaration, profiler scope/counter, and zero-extra-work tests in `Tests/Editor/Physics/PhysicsDiagnosticsWindowTests.cpp`
+- [X] T091 [P] [US5] Add failing Inspector record add/remove/reorder/duplicate, units, validation, multi-edit, and deferred rebuild tests in `Tests/Editor/Physics/PhysicsInspectorTests.cpp`
+- [X] T092 [P] [US5] Add failing grouped undo/redo, stable record ID, prefab apply/revert, connected UUID remap, and atomic invalid-cycle tests in `Tests/Editor/Physics/PhysicsPrefabUndoTests.cpp`
+- [X] T093 [P] [US5] Add failing Physics Project Settings, layer rename/reference, impact preflight, serialization, and runtime rebuild tests in `Tests/Editor/Physics/PhysicsProjectSettingsTests.cpp`
+- [X] T094 [P] [US5] Add failing immutable debug packet, pause, renderer-unavailable, bounded history, and Scene View display tests in `Tests/Editor/Physics/PhysicsSceneViewTests.cpp`
+- [X] T095 [P] [US5] Add failing diagnostics window/menu, scheduler declaration, profiler scope/counter, and zero-extra-work tests in `Tests/Editor/Physics/PhysicsDiagnosticsWindowTests.cpp`
 
 ### Implementation for User Story 5
 
-- [ ] T096 [US5] Add Rigidbody, ColliderSet, ConstraintSet, CharacterController, and runtime read-only Inspector editors with units, ranges, contextual controls, stable record operations, handles, and deferred transactional rebuilds in `Editor/TerraEngine-Editor/Windows/InspectorWindow.cpp`
-- [ ] T097 [US5] Add shape edit handles, fit-to-render-mesh actions, local preview, and one final protected authoring transaction in `Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp` and `Editor/TerraEngine-Editor/Windows/SceneViewOverlayTypes.cpp`
-- [ ] T098 [US5] Extend grouped component payload undo/redo and prefab record/property overrides with stable child IDs and connected-object UUID remapping in `Editor/TerraEngine-Editor/Subsystems/UndoRedoSystem.cpp` and `Engine/Scene/PrefabComposition.cpp`
-- [ ] T099 [US5] Add PhysicsSettings metadata, category UI, gravity/timestep/layer/material/solver/query/debug controls, impact preflight, and protected publication in `Editor/TerraEngine-Editor/Project/ProjectSettingsMetadata.h` and `Editor/TerraEngine-Editor/Windows/ProjectSettingsWindow.cpp`
-- [ ] T100 [P] [US5] Implement immutable physics debug lines/triangles/contacts/constraints/character/query primitives and bounded lifetime selection in `Engine/Physics/PhysicsDiagnostics.cpp` and `Editor/TerraEngine-Editor/Windows/SceneViewOverlayTypes.cpp`
-- [ ] T101 [US5] Render physics debug packets through existing Scene View overlay paths with renderer-unavailable no-op behavior in `Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp` and `Engine/Renderer/RenderSystem.cpp`
-- [ ] T102 [P] [US5] Implement the opt-in Window-menu Physics Diagnostics view over immutable snapshots in `Editor/TerraEngine-Editor/Windows/PhysicsDiagnosticsWindow.h` and `Editor/TerraEngine-Editor/Windows/PhysicsDiagnosticsWindow.cpp`
-- [ ] T103 [US5] Add named Physics CPU/task scopes, counters, capture serialization, and profiler display integration without requiring the diagnostics window in `Engine/Profiling/ProfilerCapture.cpp` and `Editor/TerraEngine-Editor/Windows/ProfilerWindow.cpp`
-- [ ] T104 [US5] Run all US5 tests first as failing then passing, compile affected targets, run install, and record results in `specs/042-physics-system/evidence/us5-validation.md`
-- [ ] T105 [US5] Complete and time a clean-project installed-editor workflow that creates and runs the required static/dynamic/kinematic falling-body scene in under 10 minutes, then perform the undo/prefab/Next/debug/renderer-unavailable walkthrough and record timing and results in `specs/042-physics-system/evidence/us5-editor-demo.md`
+- [X] T096 [US5] Add Rigidbody, ColliderSet, ConstraintSet, CharacterController, and runtime read-only Inspector editors with units, ranges, contextual controls, stable record operations, handles, and deferred transactional rebuilds in `Editor/TerraEngine-Editor/Windows/InspectorWindow.cpp`
+- [X] T097 [US5] Add shape edit handles, fit-to-render-mesh actions, local preview, and one final protected authoring transaction in `Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp` and `Editor/TerraEngine-Editor/Windows/SceneViewOverlayTypes.cpp`
+- [X] T098 [US5] Extend grouped component payload undo/redo and prefab record/property overrides with stable child IDs and connected-object UUID remapping in `Editor/TerraEngine-Editor/Subsystems/UndoRedoSystem.cpp` and `Engine/Scene/PrefabComposition.cpp`
+- [X] T099 [US5] Add PhysicsSettings metadata, category UI, gravity/timestep/layer/material/solver/query/debug controls, impact preflight, and protected publication in `Editor/TerraEngine-Editor/Project/ProjectSettingsMetadata.h` and `Editor/TerraEngine-Editor/Windows/ProjectSettingsWindow.cpp`
+- [X] T100 [P] [US5] Implement immutable physics debug lines/triangles/contacts/constraints/character/query primitives and bounded lifetime selection in `Engine/Physics/PhysicsDiagnostics.cpp` and `Editor/TerraEngine-Editor/Windows/SceneViewOverlayTypes.cpp`
+- [X] T101 [US5] Render physics debug packets through existing Scene View overlay paths with renderer-unavailable no-op behavior in `Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp` and `Engine/Renderer/RenderSystem.cpp`
+- [X] T102 [P] [US5] Implement the opt-in Window-menu Physics Diagnostics view over immutable snapshots in `Editor/TerraEngine-Editor/Windows/PhysicsDiagnosticsWindow.h` and `Editor/TerraEngine-Editor/Windows/PhysicsDiagnosticsWindow.cpp`
+- [X] T103 [US5] Add named Physics CPU/task scopes, counters, capture serialization, and profiler display integration without requiring the diagnostics window in `Engine/Profiling/ProfilerCapture.cpp` and `Editor/TerraEngine-Editor/Windows/ProfilerWindow.cpp`
+
+### Blocking RelWithDebInfo performance stabilization
+
+**BLOCKING GATE**: The installed editor is too slow to continue safely into US6 or later stories. Complete T104–T111 before US5 acceptance and before any further user-story implementation. Optimize only measured bottlenecks, preserve scheduler and transactional correctness, and use RelWithDebInfo exclusively.
+
+- [X] T104 [P] [US5] Add failing editor/runtime performance regression coverage for 10,000-object creation and load, Play Mode entry, fixed-tick throughput, 100 paused Next requests, scheduler barriers, allocations, diagnostic publication, and renderer-unavailable operation in `Tests/Editor/Physics/PhysicsEditorPerformanceTests.cpp` and `Tests/Engine/Physics/PhysicsPerformanceTests.cpp`
+- [X] T105 [US5] Capture a reproducible installed-editor RelWithDebInfo baseline with p50/p95/p99 timings, end-to-end stage timings, worker utilization, protected-boundary stalls, allocation and memory high-water marks, automation latency, frame responsiveness, hardware, and profiler artifacts in `specs/042-physics-system/evidence/editor-performance-baseline.md`
+- [X] T106 [US5] Derive and record explicit pass/fail budgets no weaker than SC-001, SC-003, SC-004, and SC-007, rank the measured critical path, and map each selected bottleneck to an owning subsystem in `specs/042-physics-system/evidence/editor-performance-baseline.md`
+- [X] T107 [US5] Resolve baseline-proven scene creation, object/component registration, serialization, hierarchy, and Play Mode capture/restore bottlenecks without weakening transactional visibility in `Engine/Core/Object/ObjectManager.cpp`, `Engine/Scene/Serializer.cpp`, and `Editor/TerraEngine-Editor/Subsystems/MainEditorSubsystem.cpp`
+- [X] T108 [US5] Resolve baseline-proven authoring snapshot, body synchronization, simulation, extraction, and localized rebuild bottlenecks without per-body hot-path allocation or full-world rebuilds in `Engine/Physics/PhysicsAuthoringSnapshot.cpp`, `Engine/Physics/PhysicsSystem.cpp`, `Engine/Physics/PhysicsWorld.cpp`, and `Engine/Physics/Backend/JoltPhysicsBackend.cpp`
+- [X] T109 [US5] Resolve baseline-proven Inspector, Scene View, diagnostics, profiler, renderer-unavailable, and automation polling overhead without activating extra simulation work in `Editor/TerraEngine-Editor/Windows/InspectorWindow.cpp`, `Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp`, `Engine/Physics/PhysicsDiagnostics.cpp`, and `Editor/TerraEngine-Editor/Automation/EditorAutomationService.cpp`
+- [X] T110 [US5] Resolve baseline-proven scheduler barrier, task granularity, queue contention, temporary allocation, and publication costs while preserving declared resources and protected boundaries in `Engine/Core/Scheduling/SystemScheduler.cpp`, `Engine/Physics/Backend/PhysicsJobAdapter.cpp`, and `Engine/Physics/Backend/PhysicsAllocatorAdapter.cpp`
+- [X] T111 [US5] Rerun the performance regressions and installed-editor fixture across supported worker counts, prove the recorded budgets and correctness invariants pass, compile all affected targets, run the RelWithDebInfo install gate, and record commands, before/after results, remaining limits, and profiler artifacts in `specs/042-physics-system/evidence/performance-stabilization.md`
+- [X] T112 [US5] Run all US5 tests first as failing then passing, compile affected targets, run the RelWithDebInfo install gate, and record results in `specs/042-physics-system/evidence/us5-validation.md`
+- [X] T113 [US5] Complete and time a clean-project installed-editor workflow that creates and runs the required static/dynamic/kinematic falling-body scene in under 10 minutes, then perform the undo/prefab/Next/debug/renderer-unavailable walkthrough and record timing and results in `specs/042-physics-system/evidence/us5-editor-demo.md`
 
 **Checkpoint**: Creators can independently author and diagnose physics without unsafe provider access or authored-state corruption.
 
@@ -236,25 +249,25 @@
 
 ### Tests for User Story 6
 
-- [ ] T106 [P] [US6] Add failing C ABI version/size, handle generation, command receipt, query buffer, snapshot, event packet, and NativeAOT parity tests in `Tests/Engine/Physics/PhysicsManagedAbiTests.cpp`
-- [ ] T107 [P] [US6] Add failing managed Rigidbody `UseGravity`, force modes/custom gravity, query, event ordering, callback exception, and stale wrapper tests in `Tests/Engine/Physics/PhysicsManagedIntegrationTests.cpp`
-- [ ] T108 [P] [US6] Add failing capability discovery, project/scene/Play state, bounds, generation, and absence-of-project-lifecycle tests in `Tests/Editor/Automation/EditorMcpPhysicsContractTests.cpp`
-- [ ] T109 [P] [US6] Add failing approval fingerprint, permission denial, idempotent impulse, durable cook/query job, cancellation, reconnect, and correlated log tests in `Tests/Editor/Automation/EditorMcpPhysicsSafetyTests.cpp`
+- [X] T114 [P] [US6] Add failing C ABI version/size, handle generation, command receipt, query buffer, snapshot, event packet, and NativeAOT parity tests in `Tests/Engine/Physics/PhysicsManagedAbiTests.cpp`
+- [X] T115 [P] [US6] Add failing managed Rigidbody `UseGravity`, force modes/custom gravity, query, event ordering, callback exception, and stale wrapper tests in `Tests/Engine/Physics/PhysicsManagedIntegrationTests.cpp`
+- [X] T116 [P] [US6] Add failing capability discovery, project/scene/Play state, bounds, generation, and absence-of-project-lifecycle tests in `Tests/Editor/Automation/EditorMcpPhysicsContractTests.cpp`
+- [X] T117 [P] [US6] Add failing approval fingerprint, permission denial, idempotent impulse, durable cook/query job, cancellation, reconnect, and correlated log tests in `Tests/Editor/Automation/EditorMcpPhysicsSafetyTests.cpp`
 
 ### Implementation for User Story 6
 
-- [ ] T110 [US6] Add versioned fixed-width native physics ABI functions for handle validation, commands, queries, snapshots, subscriptions, and packet copying in `Engine/Scripting/ScriptGlue.h` and `Engine/Scripting/ScriptGlue.cpp`
-- [ ] T111 [US6] Mirror the physics ABI through exported NativeAOT vtables and startup validation in `Engine/Scripting/ExportVTable.h`, `Engine/Managed/Source/Export/ExportVTable.cs`, and `Engine/Managed/Source/Export/ExportBridge.cs`
-- [ ] T112 [P] [US6] Implement managed physics handles, force modes, query/event/body/character DTOs, and typed status values in `Engine/Managed/Source/Physics/PhysicsTypes.cs`
-- [ ] T113 [P] [US6] Implement managed Rigidbody/ColliderSet/ConstraintSet/CharacterController wrappers with UUID and object/component/record/world/binding generation validation in `Engine/Managed/Source/Physics/Rigidbody.cs`, `Engine/Managed/Source/Physics/ColliderSet.cs`, `Engine/Managed/Source/Physics/ConstraintSet.cs`, and `Engine/Managed/Source/Physics/CharacterController.cs`
-- [ ] T114 [US6] Implement managed Physics commands, `AddForce(..., ForceMode.Acceleration)` custom gravity, immediate/scheduled/batch queries, result lifetime, and immutable state reads in `Engine/Managed/Source/Physics/Physics.cs`
-- [ ] T115 [US6] Implement protected ordered managed event delivery, subscription snapshots, reload invalidation, and per-callback exception isolation in `Engine/Scripting/ScriptingSystem.cpp` and `Engine/Managed/Source/Physics/PhysicsEvents.cs`
-- [ ] T116 [P] [US6] Implement self-registering read/query/body/character/settings/layer/material/cook capabilities and schemas in `Editor/TerraEngine-Editor/Automation/Providers/PhysicsAutomationProvider.h` and `Editor/TerraEngine-Editor/Automation/Providers/PhysicsAutomationProvider.cpp`
-- [ ] T117 [US6] Register PhysicsAutomationProvider without central string dispatch and bind immutable-snapshot, command-commit, and authoring-flush boundaries in `Editor/TerraEngine-Editor/Automation/EditorAutomationService.cpp`
-- [ ] T118 [US6] Enforce reference-impact fingerprints, approval binding, Play Mode/generation checks, explicit idempotency Begin/Complete, durable jobs, bounds, cancellation, and structured logs in `Editor/TerraEngine-Editor/Automation/Providers/PhysicsAutomationProvider.cpp`
-- [ ] T119 [P] [US6] Document C# and automation APIs, custom gravity, status/error contracts, permissions, approvals, idempotency, and job examples in `Docs/PhysicsScripting.md` and `Docs/EditorMcpPhysics.md`
-- [ ] T120 [US6] Run all US6 tests first as failing then passing, compile managed/native/editor/export targets, run install, and record results in `specs/042-physics-system/evidence/us6-validation.md`
-- [ ] T121 [US6] Complete installed-editor loopback plus managed reload/event/custom-gravity scenarios and record results in `specs/042-physics-system/evidence/us6-loopback-demo.md`
+- [X] T118 [US6] Add versioned fixed-width native physics ABI functions for handle validation, commands, queries, snapshots, subscriptions, and packet copying in `Engine/Scripting/ScriptGlue.h` and `Engine/Scripting/ScriptGlue.cpp`
+- [X] T119 [US6] Mirror the physics ABI through exported NativeAOT vtables and startup validation in `Engine/Scripting/ExportVTable.h`, `Engine/Managed/Source/Export/ExportVTable.cs`, and `Engine/Managed/Source/Export/ExportBridge.cs`
+- [X] T120 [P] [US6] Implement managed physics handles, force modes, query/event/body/character DTOs, and typed status values in `Engine/Managed/Source/Physics/PhysicsTypes.cs`
+- [X] T121 [P] [US6] Implement managed Rigidbody/ColliderSet/ConstraintSet/CharacterController wrappers with UUID and object/component/record/world/binding generation validation in `Engine/Managed/Source/Physics/Rigidbody.cs`, `Engine/Managed/Source/Physics/ColliderSet.cs`, `Engine/Managed/Source/Physics/ConstraintSet.cs`, and `Engine/Managed/Source/Physics/CharacterController.cs`
+- [X] T122 [US6] Implement managed Physics commands, `AddForce(..., ForceMode.Acceleration)` custom gravity, immediate/scheduled/batch queries, result lifetime, and immutable state reads in `Engine/Managed/Source/Physics/Physics.cs`
+- [X] T123 [US6] Implement protected ordered managed event delivery, subscription snapshots, reload invalidation, and per-callback exception isolation in `Engine/Scripting/ScriptingSystem.cpp` and `Engine/Managed/Source/Physics/PhysicsEvents.cs`
+- [X] T124 [P] [US6] Implement self-registering read/query/body/character/settings/layer/material/cook capabilities and schemas in `Editor/TerraEngine-Editor/Automation/Providers/PhysicsAutomationProvider.h` and `Editor/TerraEngine-Editor/Automation/Providers/PhysicsAutomationProvider.cpp`
+- [X] T125 [US6] Register PhysicsAutomationProvider without central string dispatch and bind immutable-snapshot, command-commit, and authoring-flush boundaries in `Editor/TerraEngine-Editor/Automation/EditorAutomationService.cpp`
+- [X] T126 [US6] Enforce reference-impact fingerprints, approval binding, Play Mode/generation checks, explicit idempotency Begin/Complete, durable jobs, bounds, cancellation, and structured logs in `Editor/TerraEngine-Editor/Automation/Providers/PhysicsAutomationProvider.cpp`
+- [X] T127 [P] [US6] Document C# and automation APIs, custom gravity, status/error contracts, permissions, approvals, idempotency, and job examples in `Docs/PhysicsScripting.md` and `Docs/EditorMcpPhysics.md`
+- [X] T128 [US6] Run all US6 tests first as failing then passing, compile managed/native/editor/export targets, run the RelWithDebInfo install gate, and record results in `specs/042-physics-system/evidence/us6-validation.md`
+- [X] T129 [US6] Complete installed-editor loopback plus managed reload/event/custom-gravity scenarios and record results in `specs/042-physics-system/evidence/us6-loopback-demo.md`
 
 **Checkpoint**: Managed gameplay and editor automation independently use the same safe runtime behavior without provider pointers or arbitrary project/process access.
 
@@ -268,22 +281,22 @@
 
 ### Tests for User Story 7
 
-- [ ] T122 [P] [US7] Add failing physics manifest, append-only asset type, settings/layer hash, provider/cook revision, inventory, and six-evidence-file tests in `Tests/Editor/Export/PhysicsExportManifestTests.cpp`
-- [ ] T123 [P] [US7] Add failing missing/corrupt/empty/placeholder/provider-mismatch/source-only collider validation tests in `Tests/Editor/Export/PhysicsExportValidationTests.cpp`
-- [ ] T124 [P] [US7] Add failing Play Mode/export invariant comparison for bodies, stepping, filtering, queries, events, constraints, characters, transitions, and shutdown in `Tests/Editor/Export/PhysicsExportParityTests.cpp`
-- [ ] T125 [P] [US7] Add failing exported runtime startup, cooked asset load, managed binding, headless operation, and zero-active-job shutdown tests in `Tests/Engine/Runtime/PhysicsExportRuntimeTests.cpp`
+- [X] T130 [P] [US7] Add failing physics manifest, append-only asset type, settings/layer hash, provider/cook revision, inventory, and six-evidence-file tests in `Tests/Editor/Export/PhysicsExportManifestTests.cpp`
+- [X] T131 [P] [US7] Add failing missing/corrupt/empty/placeholder/provider-mismatch/source-only collider validation tests in `Tests/Editor/Export/PhysicsExportValidationTests.cpp`
+- [X] T132 [P] [US7] Add failing Play Mode/export invariant comparison for bodies, stepping, filtering, queries, events, constraints, characters, transitions, and shutdown in `Tests/Editor/Export/PhysicsExportParityTests.cpp`
+- [X] T133 [P] [US7] Add failing exported runtime startup, cooked asset load, managed binding, headless operation, and zero-active-job shutdown tests in `Tests/Engine/Runtime/PhysicsExportRuntimeTests.cpp`
 
 ### Implementation for User Story 7
 
-- [ ] T126 [US7] Extend staged asset and resolved manifest models with physics settings, layers hash, provider revision, cook version, materials, colliders, checksums, and invariant version in `Editor/Export/ExportTypes.h` and `Editor/Export/ExportPipeline.cpp`
-- [ ] T127 [US7] Stage only validated runtime physics settings/materials/cooked colliders and exclude source-only collider dependencies in `Editor/Export/ExportPipeline.cpp` and `Editor/Export/TepakPackager.cpp`
-- [ ] T128 [US7] Add physics dependency, payload, version, checksum, placeholder, and startup-scene validation with actionable diagnostics in `Editor/Export/ExportValidator.cpp` and `Editor/Export/ExportPackageValidator.cpp`
-- [ ] T129 [US7] Extend inventory classification and all six durable evidence outputs with physics provenance and validation data in `Editor/Export/ExportEvidence.cpp`
-- [ ] T130 [US7] Load packaged PhysicsSettings, layers, materials, cooked colliders, provider runtime, and managed physics bindings from the runtime content mount in `Engine/Runtime/ExportStartupCoordinator.cpp` and `Engine/Runtime/ContentMount/ContentMount.cpp`
-- [ ] T131 [US7] Add the source-only editor/export parity fixture, expected invariants, and corruption seeds in `Tests/Fixtures/PhysicsExportRuntime/README.md`, `Tests/Fixtures/PhysicsExportRuntime/project.json`, and `Tests/Fixtures/PhysicsExportRuntime/Scenes/Startup.tescene`
-- [ ] T132 [US7] Extend the installed headless baseline runner to cook, export, launch, compare invariants, and verify shutdown for the physics fixture in `Tools/ExportRuntimeBaseline/RunBaseline.ps1`
-- [ ] T133 [US7] Run all US7 tests first as failing then passing, compile runtime/editor/export/compiler targets, run install, and record results in `specs/042-physics-system/evidence/us7-validation.md`
-- [ ] T134 [US7] Run the installed editor/exported-runtime parity workflow without source assets or global physics dependencies and archive the six evidence files under `specs/042-physics-system/evidence/export-parity/`
+- [X] T134 [US7] Extend staged asset and resolved manifest models with physics settings, layers hash, provider revision, cook version, materials, colliders, checksums, and invariant version in `Editor/Export/ExportTypes.h` and `Editor/Export/ExportPipeline.cpp`
+- [X] T135 [US7] Stage only validated runtime physics settings/materials/cooked colliders and exclude source-only collider dependencies in `Editor/Export/ExportPipeline.cpp` and `Editor/Export/TepakPackager.cpp`
+- [X] T136 [US7] Add physics dependency, payload, version, checksum, placeholder, and startup-scene validation with actionable diagnostics in `Editor/Export/ExportValidator.cpp` and `Editor/Export/ExportPackageValidator.cpp`
+- [X] T137 [US7] Extend inventory classification and all six durable evidence outputs with physics provenance and validation data in `Editor/Export/ExportEvidence.cpp`
+- [X] T138 [US7] Load packaged PhysicsSettings, layers, materials, cooked colliders, provider runtime, and managed physics bindings from the runtime content mount in `Engine/Runtime/ExportStartupCoordinator.cpp` and `Engine/Runtime/ContentMount/ContentMount.cpp`
+- [X] T139 [US7] Add the source-only editor/export parity fixture, expected invariants, and corruption seeds in `Tests/Fixtures/PhysicsExportRuntime/README.md`, `Tests/Fixtures/PhysicsExportRuntime/project.json`, and `Tests/Fixtures/PhysicsExportRuntime/Scenes/Startup.tescene`
+- [X] T140 [US7] Extend the installed headless baseline runner to cook, export, launch, compare invariants, and verify shutdown for the physics fixture in `Tools/ExportRuntimeBaseline/RunBaseline.ps1`
+- [X] T141 [US7] Run all US7 tests first as failing then passing, compile runtime/editor/export/compiler targets, run the RelWithDebInfo install gate, and record results in `specs/042-physics-system/evidence/us7-validation.md`
+- [X] T142 [US7] Run the installed editor/exported-runtime parity workflow without source assets or global physics dependencies and archive the six evidence files under `specs/042-physics-system/evidence/export-parity/`
 
 **Checkpoint**: Exported games independently load and run the same physics behavior and fail safely before launch when packaged physics data is invalid.
 
@@ -293,17 +306,17 @@
 
 **Purpose**: Close full-scope performance, lifecycle, documentation, platform, regression, install, and live acceptance gates after all desired stories are integrated.
 
-- [ ] T135 [P] Add the committed 10,000-body, 1,000-active, 10,000-ray, dense-contact, constraint-chain, character-platform, and bounded-history fixture manifest in `Tests/Fixtures/Physics/stress-fixtures.json` and `Tests/Fixtures/Physics/README.md`
-- [ ] T136 [P] Add deterministic replay across process launches and 1/2/4/max worker counts with backend-state and sorted-packet hashes, including 100 identical 10,000-ray repetitions with bounded peak memory, in `Tests/Engine/Physics/PhysicsDeterminismStressTests.cpp`
-- [ ] T137 [P] Add 100 stale-race repetitions and 1,000 scene/Play Mode lifecycle cycles covering unload, remove/recreate, script reload, renderer failure, project close, and shutdown in `Tests/Engine/Physics/PhysicsLifecycleStressTests.cpp` and `Tests/Editor/Physics/PhysicsPlayModeSoakTests.cpp`
-- [ ] T138 Run supported ASan/TSan lifecycle and callback-collector lanes and record toolchain, exclusions, and results in `specs/042-physics-system/evidence/sanitizer-validation.md`
-- [ ] T139 Measure p50/p95/p99 fixed-tick time, worker utilization, barrier stalls, allocations, temporary/provider memory, cache behavior, binary size, and hardware/build context in `specs/042-physics-system/evidence/performance-validation.md`
-- [ ] T140 Resolve measured bottlenecks without per-body hot-path allocation or single-thread world rebuilds in `Engine/Physics/PhysicsSystem.cpp`, `Engine/Physics/PhysicsWorld.cpp`, and `Engine/Physics/Backend/JoltPhysicsBackend.cpp`
-- [ ] T141 Update clean-checkout configure/build/test/install, focused filters, stress, installed-editor, automation, cooking, export, and troubleshooting instructions in `Docs/Testing.md`, `Docs/Physics.md`, and `specs/042-physics-system/quickstart.md`
-- [ ] T142 Run the complete integrated compile of all affected engine/editor/managed/compiler/export/test targets and fix introduced failures in `CMakeLists.txt`, `Tests/Engine/CMakeLists.txt`, and `Tests/Editor/CMakeLists.txt`
-- [ ] T143 Run the complete applicable CTest and regression suites and record exact commands/results in `specs/042-physics-system/evidence/full-regression.md`
-- [ ] T144 Run `cmake --build --preset Debug --target install`, verify canonical `out/build/Debug/Build` contains required physics binaries/assets/docs and excludes provider samples/source dependencies, and record results in `specs/042-physics-system/evidence/install-validation.md`
-- [ ] T145 Execute the full installed-editor loopback and exported-runtime quickstart acceptance, map FR-001 through FR-040 and SC-001 through SC-013 to passing evidence in a final traceability matrix, and record results in `specs/042-physics-system/evidence/final-acceptance.md`
+- [X] T143 [P] Add the committed 10,000-body, 1,000-active, 10,000-ray, dense-contact, constraint-chain, character-platform, and bounded-history fixture manifest in `Tests/Fixtures/Physics/stress-fixtures.json` and `Tests/Fixtures/Physics/README.md`
+- [X] T144 [P] Add deterministic replay across process launches and 1/2/4/max worker counts with backend-state and sorted-packet hashes, including 100 identical 10,000-ray repetitions with bounded peak memory, in `Tests/Engine/Physics/PhysicsDeterminismStressTests.cpp`
+- [X] T145 [P] Add 100 stale-race repetitions and 1,000 scene/Play Mode lifecycle cycles covering unload, remove/recreate, script reload, renderer failure, project close, and shutdown in `Tests/Engine/Physics/PhysicsLifecycleStressTests.cpp` and `Tests/Editor/Physics/PhysicsPlayModeSoakTests.cpp`
+- [X] T146 Run supported ASan/TSan lifecycle and callback-collector lanes and record toolchain, exclusions, and results in `specs/042-physics-system/evidence/sanitizer-validation.md`
+- [X] T147 Re-measure the fully integrated system against the T106 budgets, including p50/p95/p99 fixed-tick and editor-stage time, worker utilization, barrier stalls, allocations, temporary/provider memory, cache behavior, binary size, and hardware/build context in `specs/042-physics-system/evidence/performance-validation.md`
+- [X] T148 Resolve performance regressions introduced after the T111 stabilization gate without weakening correctness or reintroducing per-body hot-path allocation, main-thread bottlenecks, or full-world rebuilds in `Engine/Physics/PhysicsSystem.cpp`, `Engine/Physics/PhysicsWorld.cpp`, `Engine/Physics/Backend/JoltPhysicsBackend.cpp`, and `Editor/TerraEngine-Editor/Subsystems/MainEditorSubsystem.cpp`
+- [X] T149 Update clean-checkout RelWithDebInfo configure/build/test/install, focused filters, stress, installed-editor, automation, cooking, export, performance-budget, and troubleshooting instructions in `Docs/Testing.md`, `Docs/Physics.md`, and `specs/042-physics-system/quickstart.md`
+- [X] T150 Run the complete RelWithDebInfo integrated compile of all affected engine/editor/managed/compiler/export/test targets and fix introduced failures in `CMakeLists.txt`, `Tests/Engine/CMakeLists.txt`, and `Tests/Editor/CMakeLists.txt`
+- [X] T151 Run the complete applicable RelWithDebInfo CTest and regression suites and record exact commands/results in `specs/042-physics-system/evidence/full-regression.md`
+- [X] T152 Run `cmake --build --preset RelWithDebInfo --target install`, verify canonical `out/build/RelWithDebInfo/Build` contains required physics binaries/assets/docs and excludes provider samples/source dependencies, and record results in `specs/042-physics-system/evidence/install-validation.md`
+- [X] T153 Execute the full installed-editor loopback and exported-runtime quickstart acceptance, map FR-001 through FR-042 and SC-001 through SC-013 to passing evidence, explicitly confirm FR-043 remains out of scope, and record results in `specs/042-physics-system/evidence/final-acceptance.md`
 
 ---
 
@@ -317,8 +330,8 @@
 - **US2 — Rich Geometry**: Can begin after Foundation for asset contracts, but cooked-shape simulation and its checkpoint depend on US1 body/world integration.
 - **US3 — Queries and Events**: Depends on US1 body simulation and publication boundaries.
 - **US4 — Constraints and Characters**: Depends on US1; break events and character query/support integration depend on the relevant US3 contracts.
-- **US5 — Editor**: Can begin its isolated UI/test work after Foundation, but its checkpoint depends on US1, US2, and US4 runtime authoring surfaces.
-- **US6 — C#/Automation**: ABI/provider scaffolding can begin after Foundation; full checkpoint depends on US1–US4 contracts and US5 project/editor seams.
+- **US5 — Editor**: Can begin its isolated UI/test work after Foundation, but its checkpoint depends on US1, US2, and US4 runtime authoring surfaces. T104–T111 form a blocking measured-performance gate before T112–T113 may close US5.
+- **US6 — C#/Automation**: No US6 task may begin until the open T048 installed MVP demonstration and all of US5, including the T104–T111 performance stabilization and T112–T113 acceptance, are complete.
 - **US7 — Export**: Manifest/validator tests can begin after Foundation; full parity depends on US1–US6.
 - **Phase 10 — Acceptance**: Depends on all selected user stories.
 
@@ -327,22 +340,26 @@
 ```text
 Setup -> Foundation -> US1 (MVP)
                        |---> US2 ---------|
-                       |---> US3 ---> US4 |---> US5 ---> US6 ---> US7
-                       |-------------------|
-All completed stories -------------------------------------------> Acceptance
+                       |---> US3 ---> US4 |---> US5 implementation
+                       |-------------------|              |
+                                              Performance stabilization
+                                                        |
+                                                US5 acceptance -> US6 -> US7
+All completed stories -------------------------------------------------> Acceptance
 ```
 
-US2 and US3 are the main parallel branches after US1. US4 may start its component/test work alongside them but needs US3 event/query seams for completion. US5 editor work can overlap late US2/US4 work in non-overlapping files. US6 managed and automation halves can run concurrently after their native contracts stabilize. US7 validator/evidence work can overlap late US6 work but parity waits for all surfaces.
+US2 and US3 are the main parallel branches after US1. US4 may start its component/test work alongside them but needs US3 event/query seams for completion. US5 editor work can overlap late US2/US4 work in non-overlapping files. The T104–T111 performance gate is serialized after the US5 implementation exists because profiling must select the actual critical path; its bounded fixes may be delegated only after file ownership is partitioned from baseline evidence. US6 managed and automation halves can run concurrently only after the performance gate and US5 acceptance pass. US7 validator/evidence work can overlap late US6 work but parity waits for all surfaces.
 
 ### Within each story
 
 1. Write the listed tests and confirm the intended missing behavior fails.
 2. Implement data/component models before runtime services.
 3. Implement provider/runtime services before editor, managed, automation, or export integrations.
-4. Run the story's focused tests and smallest affected builds.
-5. Run the install target and demonstrate the story through installed outputs.
-6. Keep every code-changing checkbox in the story open until step 5 passes, then complete the validated task group together.
-7. Treat worker-local validation as supporting evidence; integrated acceptance remains orchestrator-owned.
+4. For US5, capture the RelWithDebInfo baseline, fix only measured bottlenecks, and pass T104–T111 before acceptance or later stories.
+5. Run the story's focused tests and smallest affected builds.
+6. Run the RelWithDebInfo install target and demonstrate the story through installed outputs.
+7. Keep every code-changing checkbox in the story open until step 6 passes, then complete the validated task group together.
+8. Treat worker-local validation as supporting evidence; integrated acceptance remains orchestrator-owned.
 
 ---
 
@@ -372,16 +389,17 @@ US2 and US3 are the main parallel branches after US1. US4 may start its componen
 
 - Inspector/prefab/settings tests T091–T093 and Scene View/diagnostic tests T094–T095 target independent files.
 - T100 debug packet production and T102 diagnostics window can proceed in parallel before final editor integration.
+- T104 performance regression coverage can be prepared independently, but T105–T111 follow the measured critical path. Do not parallelize performance fixes until T106 assigns non-overlapping subsystem ownership from evidence.
 
 ### User Story 6
 
-- T112 managed value types, T113 wrappers, and T116 automation provider scaffolding target separate files.
-- Managed tests T106–T107 and automation tests T108–T109 can be authored concurrently.
+- T120 managed value types, T121 wrappers, and T124 automation provider scaffolding target separate files.
+- Managed tests T114–T115 and automation tests T116–T117 can be authored concurrently after US5 acceptance.
 
 ### User Story 7
 
-- Manifest, validation, parity, and runtime tests T122–T125 can be authored concurrently.
-- Fixture construction T131 can overlap manifest/evidence implementation after contract fields are fixed.
+- Manifest, validation, parity, and runtime tests T130–T133 can be authored concurrently.
+- Fixture construction T139 can overlap manifest/evidence implementation after contract fields are fixed.
 
 ---
 
@@ -401,10 +419,12 @@ US2 and US3 are the main parallel branches after US1. US4 may start its componen
 2. **Production geometry**: US2 cooking/assets.
 3. **Gameplay API**: US3 commands/queries/events.
 4. **Mechanics**: US4 constraints/characters.
-5. **Creator experience**: US5 editor/diagnostics.
-6. **Integration surfaces**: US6 managed/automation.
-7. **Shipping**: US7 export parity.
-8. **Acceptance**: stress, regression, install, live loopback, and export evidence.
+5. **Creator experience implementation**: US5 editor/diagnostics.
+6. **Blocking performance stabilization**: T104–T111 baseline, budgets, measured fixes, regressions, RelWithDebInfo install, and installed-editor proof.
+7. **Creator experience acceptance**: T112–T113 focused validation and installed-editor demonstration.
+8. **Integration surfaces**: US6 managed/automation.
+9. **Shipping**: US7 export parity.
+10. **Acceptance**: stress, regression, install, live loopback, and export evidence.
 
 Every increment must compile and install; no story may defer its rollback, visibility, stale-generation, or lifecycle tests to the final phase.
 
@@ -416,14 +436,14 @@ Every increment must compile and install; no story may defer its rollback, visib
 
 Use no more than three workers concurrently by default. Group related tasks by subsystem rather than spawning one worker per task. Reuse workers for follow-up tasks within the same subsystem. Increase concurrency only when assignments are substantial, independent, and have clearly non-overlapping ownership.
 
-**Why it fits**: The graph contains 145 tasks across provider integration, runtime concurrency, transactions, assets, editor, managed ABI, automation, export, tests, and documentation. After the shared foundation and public contracts stabilize, US2 asset work, US3 query/event records, US4 component models, US5 editor surfaces, US6 managed/automation halves, US7 validators/fixtures, documentation, and focused tests offer substantial non-overlapping parallelism. The critical path remains tightly coupled around the provider adapter, scheduler workloads, coordinated two-domain commit, fixed-step/Next semantics, lifecycle, and final integration; these stay with Sol.
+**Why it fits**: The graph contains 153 tasks across provider integration, runtime concurrency, transactions, assets, editor, a new blocking performance-stabilization gate, managed ABI, automation, export, tests, and documentation. After the shared foundation and public contracts stabilize, US2 asset work, US3 query/event records, US4 component models, US5 editor surfaces, US6 managed/automation halves, US7 validators/fixtures, documentation, and focused tests offer substantial non-overlapping parallelism. The critical path remains tightly coupled around the provider adapter, scheduler workloads, coordinated two-domain commit, fixed-step/Next semantics, measured editor performance, lifecycle, and final integration; these stay with Sol.
 
 **Tradeoffs**:
 
 - **Cost**: Mixed delegation uses more total model calls and local validation than Sol-only, but avoids spending highest-cost orchestration context on repetitive test, DTO, documentation, and isolated editor work.
-- **Accuracy**: `xhigh` Sol reasoning is justified by concurrency, transactional rollback, stale-generation safety, ABI stability, and teardown correctness. Terra review is valuable for bounded subsystem implementation; Luna is appropriate for repository searches, mechanical schemas/docs, and narrow tests.
+- **Accuracy**: `xhigh` Sol reasoning is justified by concurrency, transactional rollback, stale-generation safety, ABI stability, performance critical-path analysis, and teardown correctness. Luna is appropriate for baseline evidence and profile/log extraction; Terra is appropriate for bounded hotspot fixes after the orchestrator partitions ownership from T106 evidence.
 - **Coordination**: Parallelism must wait for stable interfaces, assignments must name non-overlapping files/task IDs, and workers must not modify planning artifacts or run full builds/suites. Overlapping central files such as `CMakeLists.txt`, `ComponentRegistry.cpp`, `MainEngine.cpp`, `PhysicsSystem.cpp`, `JoltPhysicsBackend.cpp`, and export registries require serialized ownership and orchestrator integration.
-- **Alternative**: Sol-only would reduce coordination risk but lengthen the implementation and consume more expensive context on 145 tasks. Ultra is not recommended by default because the work is large but already decomposed; use it only if maximum quality is explicitly preferred over cost or repeated integration failures make broader proactive delegation worthwhile.
+- **Alternative**: Sol-only would reduce coordination risk but lengthen the implementation and consume more expensive context on 153 tasks. Ultra is not recommended by default because the work is large but already decomposed; use it only if maximum quality is explicitly preferred over cost or repeated integration failures make broader proactive delegation worthwhile.
 
 ---
 
@@ -431,7 +451,7 @@ Use no more than three workers concurrently by default. Group related tasks by s
 
 - The exact Jolt v5.6.0 revision and `External/JoltPhysics` addition were explicitly approved by the user on 2026-07-13 and may be executed by T004 under constitution v1.3.1 after T003 passes. Jolt 5.5 is comparison evidence only.
 - If Jolt fails T003, stop and return to planning; PhysX is a research candidate, not an implementation-approved substitution.
-- Code-changing task checkboxes remain open until their applicable phase compile/install gate verifies `out/build/Debug/Build`.
+- Code-changing task checkboxes remain open until their applicable RelWithDebInfo phase compile/install gate verifies `out/build/RelWithDebInfo/Build`; no other configuration satisfies spec 042 completion.
 - Never modify provider source inside `External/JoltPhysics`; adapters and build options live in TerraEngine-owned files.
 - All provider callbacks publish only to thread-local collectors.
 - All scene/object/component writes from worker, managed, editor, or automation producers use typed deferred/transactional paths.

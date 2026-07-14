@@ -1,4 +1,4 @@
-// PhysicsExportRuntimeTests.cpp - unregistered runtime-content contracts for US7.
+// PhysicsExportRuntimeTests.cpp - US7 exported runtime-content contracts.
 
 #include "TestHarness.h"
 
@@ -7,11 +7,17 @@
 #include "Runtime/ContentMount/ContentMount.h"
 #include "Runtime/ExportStartupCoordinator.h"
 #include "TEPAK/PackWriter.h"
+#include "ThreadPool/ThreadPool.h"
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <nlohmann/json.hpp>
 #include <string_view>
 #include <vector>
@@ -48,6 +54,12 @@ namespace TerraEngine::Tests {
 
 		nlohmann::json SettingsDocument() {
 			TerraEngine::Physics::PhysicsSettings settings = TerraEngine::Physics::PhysicsSettings::Defaults();
+			// Exercise the runtime parser with the same intentionally non-default
+			// values that the installed editor/export parity fixture records.
+			settings.gravity.y = -15.5F;
+			settings.fixedTimeStep = 0.02F;
+			settings.layers[1U].name = "ParityDynamic";
+			settings.layers[1U].broadPhaseGroup = 7U;
 			nlohmann::json layers = nlohmann::json::array();
 			for(const auto& layer : settings.layers) layers.push_back({{"id", layer.id}, {"name", layer.name}, {"collisionMask", layer.collisionMask}, {"broadPhaseGroup", layer.broadPhaseGroup}, {"enabled", layer.enabled}});
 			return {{"schemaVersion", settings.schemaVersion}, {"gravity", {settings.gravity.x, settings.gravity.y, settings.gravity.z}}, {"fixedTimeStep", settings.fixedTimeStep}, {"layers", layers}};
@@ -61,6 +73,26 @@ namespace TerraEngine::Tests {
 			std::string text(bytes.size(), '\0');
 			for(std::size_t index = 0U; index < bytes.size(); ++index) text[index] = static_cast<char>(std::to_integer<unsigned char>(bytes[index]));
 			return Hash(text);
+		}
+
+		Runtime::ExportStartupCoordinatorInput MakeHeadlessStartupInput(const Runtime::PackagedPhysicsRuntime& packagedPhysics) {
+			Runtime::ExportStartupCoordinatorInput input;
+			input.exportRuntime = true;
+			input.contentMounted = true;
+			input.metadataLoaded = true;
+			input.startupSceneConfigured = true;
+			input.startupSceneLoaded = true;
+			input.projectName = "Physics Export Runtime";
+			input.startupScene = "Scenes/Startup.tescene";
+			input.renderProfile = "headless";
+			input.packagedPhysics = packagedPhysics;
+			// A headless export deliberately has no Renderer gate. Physics, scene,
+			// and managed scripting must still become ready before entering frames.
+			input.requiredSystems = {
+				{"Scene", true, true, "Headless startup scene loaded"},
+				{"Scripting", true, true, "Managed physics binding loaded"}
+			};
+			return input;
 		}
 	}
 
@@ -85,7 +117,15 @@ namespace TerraEngine::Tests {
 			const auto loaded = Runtime::LoadPackagedPhysicsRuntime(ContentMount::Instance());
 			context.Expect(loaded.loaded && loaded.providerRuntimeReady && loaded.managedBindingsLoaded, "Mounted export content must load the approved Jolt contract and managed physics binding.");
 			context.ExpectEqual(32U, static_cast<unsigned int>(loaded.settings.layers.size()), "Physics Settings must preserve all 32 collision layers at runtime.");
+			context.Expect(loaded.settings.gravity.y == -15.5F && loaded.settings.fixedTimeStep == 0.02F
+				&& loaded.settings.layers[1U].broadPhaseGroup == 7U,
+				"Mounted runtime settings must preserve the fixture's non-default gravity, timestep, and layer routing.");
 			context.ExpectEqual(static_cast<std::size_t>(1U), loaded.colliders.size(), "A valid cooked collider must load from the content mount before scene simulation uses it.");
+			const Runtime::ExportStartupCoordinatorResult startup = Runtime::CoordinateExportStartup(MakeHeadlessStartupInput(loaded));
+			context.Expect(startup.CanEnterRuntime(), "A valid physics package must enter a headless runtime without requiring a renderer or source asset access.");
+			context.Expect(std::none_of(startup.summary.requiredSystems.begin(), startup.summary.requiredSystems.end(), [](const Runtime::BootSystemResult& gate) {
+				return gate.name == "Renderer";
+			}), "Headless startup must not synthesize a graphics dependency while validating packaged physics.");
 		});
 
 		registry.Add("Engine.PhysicsExportRuntime.RejectsManagedPlaceholderAndPreventsRuntimeEntry", [](TestContext& context) {
@@ -114,6 +154,29 @@ namespace TerraEngine::Tests {
 			context.Expect(packaged.declared && !packaged.loaded, "A corrupt cooked collider must be rejected before a physics provider or world can initialize.");
 			Runtime::ExportStartupCoordinatorInput input; input.exportRuntime = true; input.contentMounted = true; input.metadataLoaded = true; input.packagedPhysics = packaged;
 			context.Expect(!Runtime::CoordinateExportStartup(input).CanEnterRuntime(), "The export startup coordinator must fail closed when the mounted cooked collider is corrupt.");
+		});
+
+		registry.Add("Engine.PhysicsExportRuntime.ShutdownDrainsHeadlessPhysicsWorkBeforeWorkersExit", [](TestContext& context) {
+			ThreadPool& pool = ThreadPool::instance();
+			pool.shutdown();
+			pool.initialize(1U);
+			std::atomic<bool> physicsPreparationCompleted = false;
+			auto preparation = pool.createTask([&physicsPreparationCompleted]() {
+				// This represents worker-safe packaged-physics preparation. The
+				// protected runtime boundary may only tear down after it finishes.
+				physicsPreparationCompleted.store(true, std::memory_order_release);
+				return true;
+			});
+			std::future<bool> completion = preparation->getFuture();
+			pool.enqueue(preparation);
+			pool.shutdown();
+
+			context.Expect(completion.wait_for(std::chrono::seconds(1)) == std::future_status::ready,
+				"Headless shutdown must drain an admitted physics preparation job before joining workers.");
+			context.Expect(completion.get() && physicsPreparationCompleted.load(std::memory_order_acquire),
+				"A drained physics preparation job must finish its engine-owned publication work before shutdown returns.");
+			context.ExpectEqual(0ULL, static_cast<unsigned long long>(pool.getThreadCount()),
+				"After headless shutdown returns, no worker can retain an active physics job.");
 		});
 	}
 }

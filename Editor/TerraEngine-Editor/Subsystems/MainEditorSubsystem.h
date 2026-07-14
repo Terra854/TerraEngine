@@ -29,6 +29,7 @@
 
 class Object;
 class VulkanContext;
+namespace TerraEngine::Runtime { struct PhysicsInvariantReport; }
 
 // PrefabAuthoringService owns the semantic prefab operations shared by the
 // native editor and automation. Its session state is independent from MCP, so
@@ -100,6 +101,10 @@ public:
 	bool SetPlayModePaused(bool paused);
 	bool StepPlayMode();
 	void StopPlayMode();
+	// The installed acceptance CLI uses the same Play Mode entry, fixed-step,
+	// publication, and stop methods as the toolbar. It returns engine-owned
+	// invariant counts for comparison with the exported runtime report.
+	TerraEngine::Runtime::PhysicsInvariantReport RunPhysicsExportInvariantFixture();
 	// Reports whether a drag control in the inspector is active this frame for cursor wrapping.
 	bool IsInspectorValueDragging() const;
 
