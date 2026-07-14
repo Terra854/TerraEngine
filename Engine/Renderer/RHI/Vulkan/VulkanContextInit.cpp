@@ -623,8 +623,13 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 		for (VkCommandPool pool : commandPools) {
 			vkDestroyCommandPool(device, pool, nullptr);
 		}
+		for (VkCommandPool pool : editorCommandPools) {
+			vkDestroyCommandPool(device, pool, nullptr);
+		}
 	}
 	commandPools.clear();
+	editorCommandPools.clear();
+	editorCommandBuffers.clear();
 	if (device && immediateCommandPool != VK_NULL_HANDLE) {
 		vkDestroyCommandPool(device, immediateCommandPool, nullptr);
 		immediateCommandPool = VK_NULL_HANDLE;
@@ -1404,11 +1409,28 @@ bool VulkanContext::Impl::CreateCommandPool() {
 
 	commandPools.resize(MAX_FRAMES_IN_FLIGHT);
 	commandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+	editorCommandPools.resize(MAX_FRAMES_IN_FLIGHT);
+	editorCommandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
 
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
 		if (vkCreateCommandPool(device, &poolInfo, nullptr, &commandPools[i]) != VK_SUCCESS) {
 			TERRAENGINE_LOG(LogLevel::Error, "failed to create command pool!");
+			return false;
+		}
+		// UI command buffers must be reset even on project-hub frames where no
+		// render camera exists and the scene command pool never reaches BeginFrame.
+		if (vkCreateCommandPool(device, &poolInfo, nullptr, &editorCommandPools[i]) != VK_SUCCESS) {
+			TERRAENGINE_LOG(LogLevel::Error, "failed to create editor command pool!");
+			return false;
+		}
+		VkCommandBufferAllocateInfo editorAllocInfo{};
+		editorAllocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+		editorAllocInfo.commandPool = editorCommandPools[i];
+		editorAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		editorAllocInfo.commandBufferCount = 1;
+		if (vkAllocateCommandBuffers(device, &editorAllocInfo, &editorCommandBuffers[i]) != VK_SUCCESS) {
+			TERRAENGINE_LOG(LogLevel::Error, "failed to allocate editor command buffer!");
 			return false;
 		}
 

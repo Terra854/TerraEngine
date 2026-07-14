@@ -7396,6 +7396,42 @@ TerraEngine::Renderer::Vulkan::EditorPresentResult VulkanContext::PresentEditor(
 		result.outcome = impl->deviceLost ? EditorPresentOutcome::DeviceLost : EditorPresentOutcome::Skipped;
 		return result;
 	}
+	if (impl->currentFrame >= impl->editorCommandPools.size()
+		|| impl->currentFrame >= impl->editorCommandBuffers.size()
+		|| impl->editorCommandBuffers[impl->currentFrame] == VK_NULL_HANDLE) {
+		result.outcome = EditorPresentOutcome::RecoverableFailure;
+		result.stage = EditorUiFrameStage::AllocateCommandBuffer;
+		result.nativeResult = static_cast<std::int32_t>(VK_ERROR_INITIALIZATION_FAILED);
+		return result;
+	}
+
+	// PresentEditor can run without RenderSystem::BeginFrame while the project
+	// hub is open or a scene has no camera. Wait for this UI frame slot directly,
+	// then reset its dedicated pool so command-buffer storage remains bounded.
+	const VkResult uiFenceWaitResult = vkWaitForFences(
+		impl->device, 1, &impl->inFlightFences[impl->currentFrame], VK_TRUE, UINT64_MAX);
+	if (impl->MarkDeviceLost(uiFenceWaitResult, "editor UI command pool fence wait")) {
+		result.outcome = EditorPresentOutcome::DeviceLost;
+		return result;
+	}
+	if (uiFenceWaitResult != VK_SUCCESS) {
+		result.outcome = EditorPresentOutcome::RecoverableFailure;
+		result.stage = EditorUiFrameStage::AllocateCommandBuffer;
+		result.nativeResult = static_cast<std::int32_t>(uiFenceWaitResult);
+		return result;
+	}
+	const VkResult uiPoolResetResult = vkResetCommandPool(
+		impl->device, impl->editorCommandPools[impl->currentFrame], 0);
+	if (impl->MarkDeviceLost(uiPoolResetResult, "editor UI command pool reset")) {
+		result.outcome = EditorPresentOutcome::DeviceLost;
+		return result;
+	}
+	if (uiPoolResetResult != VK_SUCCESS) {
+		result.outcome = EditorPresentOutcome::RecoverableFailure;
+		result.stage = EditorUiFrameStage::AllocateCommandBuffer;
+		result.nativeResult = static_cast<std::int32_t>(uiPoolResetResult);
+		return result;
+	}
 
 	auto fail = [&](EditorUiFrameStage stage, VkResult nativeResult, std::string_view operation) {
 		result.stage = stage;
@@ -7509,18 +7545,10 @@ TerraEngine::Renderer::Vulkan::EditorPresentResult VulkanContext::PresentEditor(
 		return result;
 	}
 
-	VkCommandBuffer uiCommandBuffer = VK_NULL_HANDLE;
-	VkCommandBufferAllocateInfo allocation{};
-	allocation.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-	allocation.commandPool = impl->commandPools[impl->currentFrame];
-	allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-	allocation.commandBufferCount = 1;
-	const VkResult allocationResult = vkAllocateCommandBuffers(impl->device, &allocation, &uiCommandBuffer);
-	if (allocationResult != VK_SUCCESS) {
-		consumeOutstandingSemaphores(true);
-		return fail(EditorUiFrameStage::AllocateCommandBuffer, allocationResult, "editor UI command buffer allocation");
-	}
-	impl->extraPrimaryCommandBuffers[impl->currentFrame].push_back(uiCommandBuffer);
+	// Each frame slot owns one command buffer for the lifetime of its pool. Reuse
+	// it after the fence and pool reset above instead of asking the Vulkan driver
+	// for a fresh allocation on every editor frame.
+	VkCommandBuffer uiCommandBuffer = impl->editorCommandBuffers[impl->currentFrame];
 
 	try {
 		// Dynamic ImGui font textures use a backend-owned transfer command pool

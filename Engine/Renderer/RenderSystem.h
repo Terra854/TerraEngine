@@ -96,6 +96,7 @@ public:
 	void Initialize() override;
 	void Update(float deltaTime) override;
 	void Shutdown() override;
+	bool RequestsEngineShutdown() const override;
 	std::string SystemName() override;
 	TerraEngine::Scheduling::SystemDeclaration SchedulerDeclaration() override;
 

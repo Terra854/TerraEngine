@@ -30,6 +30,13 @@ public:
 	// System freeing resources
 	virtual void Shutdown() = 0;
 
+	// Systems can report a terminal condition without teaching MainEngine about
+	// subsystem-specific states. The engine checks this only after the protected
+	// frame has completed, so implementations must not mutate shared frame data.
+	virtual bool RequestsEngineShutdown() const {
+		return false;
+	}
+
 	// For debugging, getting System Name
 	// SystemName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	virtual std::string SystemName() {

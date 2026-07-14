@@ -220,6 +220,12 @@ struct VulkanContext::Impl {
 
 	std::vector<VkCommandPool> commandPools;
 	std::vector<VkCommandBuffer> commandBuffers;
+	// Editor UI recording uses pools that are independent from scene rendering.
+	// Project-hub frames have no camera and therefore never enter the renderer's
+	// BeginFrame cleanup, so sharing its pools would retain one UI command buffer
+	// on every frame until a scene render eventually occurred.
+	std::vector<VkCommandPool> editorCommandPools;
+	std::vector<VkCommandBuffer> editorCommandBuffers;
 	VkCommandPool immediateCommandPool = VK_NULL_HANDLE;
 	std::mutex immediateCommandMutex;
 

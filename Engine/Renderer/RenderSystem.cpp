@@ -1502,6 +1502,31 @@ void RenderSystem::ReportFatalRendererRecoveryFailure(TerraEngine::Renderer::Ren
 	WindowSystem::Instance().ShowFatalErrorDialog(report);
 }
 
+bool RenderSystem::RequestsEngineShutdown() const
+{
+	// Editors keep their process alive so their renderer-recovery UI can remain
+	// available. A packaged game instead terminates after its fatal dialog has
+	// published the final incident report and crash-dump paths.
+	if (!initialized || !ResourceManager::Instance().IsExportRuntime())
+	{
+		return false;
+	}
+
+	const TerraEngine::Renderer::RendererRecoverySnapshot recovery = GetLatestRendererRecoverySnapshot();
+	if (recovery.state != TerraEngine::Renderer::RendererRecoveryStateKind::FatalExportFailure)
+	{
+		return false;
+	}
+
+	TERRAENGINE_LOG(LogLevel::Critical, "Export runtime stopping after graphics device loss. incident="
+		<< recovery.incidentId
+		<< " report="
+		<< recovery.fatalDialogReportId
+		<< " dump="
+		<< recovery.crashDumpPath);
+	return true;
+}
+
 std::vector<VirtualGeometryClusterPacket> RenderSystem::BuildVirtualGeometryClusterPackets(
 	const VirtualGeometryAssetRuntime& asset,
 	const std::vector<TerraEngine::Renderer::VirtualGeometrySelectedClusterRecord>& selectedClusters,

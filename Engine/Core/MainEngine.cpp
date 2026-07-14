@@ -242,9 +242,6 @@ void Engine::Initialize()
 
 		RenderSystem& renderSystem = RenderSystem::Instance();
 		renderSystem.SetEditorModeEnabled(editorMode);
-		if (const auto configuredRenderSettings = resourceManager.GetConfiguredRenderSettings()) {
-			renderSystem.SetRenderSettings(*configuredRenderSettings);
-		}
 		RegisterEngineSystem(systems, systemScheduler, renderSystem, renderSystem.SchedulerDeclaration());
 	}
 	if (editorMode && editorSystem != nullptr) {
@@ -281,14 +278,6 @@ void Engine::Initialize()
 		resourceManagerInitialized = true;
 		sceneManager.SetSceneRoot(resourceManager.GetAssetRoot());
 		sceneManager.SetStartupScene(resourceManager.GetConfiguredStartupScene().value_or(std::filesystem::path{}));
-		if (!headlessPhysicsValidation) {
-			RenderSystem& renderSystem = RenderSystem::Instance();
-			if (const auto configuredRenderSettings = resourceManager.GetConfiguredRenderSettings()) {
-				renderSystem.SetRenderSettings(*configuredRenderSettings);
-			}
-			renderSystem.SetRendererRecoveryPolicy(resourceManager.GetRendererRecoveryPolicy());
-		}
-
 		// Exported physics content is validated and copied from the mounted archive
 		// before any system initializes. This prevents a corrupt collider, material,
 		// managed binding, or provider revision from creating a live Jolt world.
@@ -472,15 +461,11 @@ bool Engine::Update(float deltaTime)
 		profiler.EndFrame();
 	}
 
-	if (!headlessPhysicsValidation && ResourceManager::Instance().IsExportRuntime()) {
-		const TerraEngine::Renderer::RendererRecoverySnapshot recovery = RenderSystem::Instance().GetLatestRendererRecoverySnapshot();
-		if (recovery.state == TerraEngine::Renderer::RendererRecoveryStateKind::FatalExportFailure) {
-			TERRAENGINE_LOG(LogLevel::Critical, "Export runtime stopping after graphics device loss. incident="
-				<< recovery.incidentId
-				<< " report="
-				<< recovery.fatalDialogReportId
-				<< " dump="
-				<< recovery.crashDumpPath);
+	// Subsystems own the interpretation of their terminal states. MainEngine
+	// only coordinates the common lifecycle decision after all frame work and
+	// profiling boundaries have completed.
+	for (const SystemsBase* system : systems) {
+		if (system != nullptr && system->RequestsEngineShutdown()) {
 			running = false;
 			return false;
 		}
