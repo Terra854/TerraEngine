@@ -162,12 +162,128 @@ void PreferencesWindow::DrawSelectedCategory()
 	case TerraEngine::Editor::Preferences::PreferencesCategoryId::Diagnostics:
 		DrawRendererDiagnosticsCategory();
 		break;
+	case TerraEngine::Editor::Preferences::PreferencesCategoryId::SceneView:
+		DrawSceneViewCategory();
+		break;
 	case TerraEngine::Editor::Preferences::PreferencesCategoryId::McpBridge:
 		DrawMcpBridgeCategory();
 		break;
 	default:
 		DrawUnavailableState("This Preferences category is no longer available.");
 		break;
+	}
+}
+
+void PreferencesWindow::DrawSceneViewCategory()
+{
+	ImGui::TextUnformatted("Scene View");
+	ImGui::Separator();
+
+	if (m_Owner == nullptr || m_Owner->GetContext() == nullptr || m_Owner->GetContext()->projectManager == nullptr)
+	{
+		DrawUnavailableState("Scene View preferences are unavailable until the editor project manager is ready.");
+		return;
+	}
+
+	ProjectManager* projectManager = m_Owner->GetContext()->projectManager.get();
+	auto candidate = projectManager->GetEditorPreferences().sceneViewOverlay;
+	bool changed = false;
+
+	ImGui::SeparatorText("Large Scene Safeguards");
+	int largeSceneMode = candidate.largeSceneMode == TerraEngine::Editor::SceneViewOverlay::LargeSceneMode::On
+		? 1
+		: candidate.largeSceneMode == TerraEngine::Editor::SceneViewOverlay::LargeSceneMode::Off ? 2 : 0;
+	const char* largeSceneModes[] = { "Automatic", "On", "Off" };
+	if (ImGui::Combo("Large scene mode", &largeSceneMode, largeSceneModes, 3))
+	{
+		candidate.largeSceneMode = largeSceneMode == 1
+			? TerraEngine::Editor::SceneViewOverlay::LargeSceneMode::On
+			: largeSceneMode == 2
+				? TerraEngine::Editor::SceneViewOverlay::LargeSceneMode::Off
+				: TerraEngine::Editor::SceneViewOverlay::LargeSceneMode::Automatic;
+		changed = true;
+	}
+	ShowOptionTooltip("Automatic enables reductions when the current scene reaches the configured object threshold. The Scene View reports the effective state separately.");
+
+	int objectThreshold = static_cast<int>(candidate.largeSceneObjectThreshold);
+	if (ImGui::InputInt("Object threshold", &objectThreshold))
+	{
+		candidate.largeSceneObjectThreshold = static_cast<std::uint32_t>(std::clamp(objectThreshold, 1, 10000000));
+		changed = true;
+	}
+	int markerBudget = static_cast<int>(candidate.visibleMarkerBudget);
+	if (ImGui::InputInt("Visible marker budget", &markerBudget))
+	{
+		candidate.visibleMarkerBudget = static_cast<std::uint32_t>(std::clamp(markerBudget, 64, 100000));
+		changed = true;
+	}
+	ShowOptionTooltip("Selected objects, cameras, and lights are reserved before this general marker budget is applied.");
+	int presentationBatchSize = static_cast<int>(candidate.markerPresentationBatchSize);
+	if (ImGui::InputInt("Presentation batch size", &presentationBatchSize))
+	{
+		candidate.markerPresentationBatchSize = static_cast<std::uint32_t>(std::clamp(presentationBatchSize, 32, 8192));
+		changed = true;
+	}
+
+	ImGui::SeparatorText("Marker Relevance and Density");
+	if (ImGui::SliderFloat("Density radius (pixels)", &candidate.densityRadiusPixels, 4.0f, 128.0f, "%.1f"))
+	{
+		changed = true;
+	}
+	int densityThreshold = static_cast<int>(candidate.densityThreshold);
+	if (ImGui::InputInt("Density threshold", &densityThreshold))
+	{
+		candidate.densityThreshold = static_cast<std::uint32_t>(std::clamp(densityThreshold, 2, 256));
+		changed = true;
+	}
+	if (ImGui::InputFloat("Maximum marker distance", &candidate.maximumMarkerDistance, 1.0f, 100.0f, "%.1f"))
+	{
+		candidate.maximumMarkerDistance = std::clamp(candidate.maximumMarkerDistance, 0.0f, 1000000000.0f);
+		changed = true;
+	}
+	ShowOptionTooltip("Zero keeps the viewport query's normal distance limit.");
+	if (ImGui::SliderFloat("Minimum projected size", &candidate.minimumProjectedSizePixels, 0.0f, 64.0f, "%.1f px"))
+	{
+		changed = true;
+	}
+
+	ImGui::SeparatorText("Dense Presentation");
+	int physicsMarkerMode = candidate.physicsMarkerMode == TerraEngine::Editor::SceneViewOverlay::PhysicsMarkerMode::SelectedOnly
+		? 0
+		: candidate.physicsMarkerMode == TerraEngine::Editor::SceneViewOverlay::PhysicsMarkerMode::All ? 2 : 1;
+	const char* physicsMarkerModes[] = { "Selected only", "Clustered", "All" };
+	if (ImGui::Combo("Physics markers", &physicsMarkerMode, physicsMarkerModes, 3))
+	{
+		candidate.physicsMarkerMode = physicsMarkerMode == 0
+			? TerraEngine::Editor::SceneViewOverlay::PhysicsMarkerMode::SelectedOnly
+			: physicsMarkerMode == 2
+				? TerraEngine::Editor::SceneViewOverlay::PhysicsMarkerMode::All
+				: TerraEngine::Editor::SceneViewOverlay::PhysicsMarkerMode::Clustered;
+		changed = true;
+	}
+	int denseTier = candidate.densePrimitiveTier == TerraEngine::Editor::SceneViewOverlay::DensePrimitiveTier::Full
+		? 0
+		: candidate.densePrimitiveTier == TerraEngine::Editor::SceneViewOverlay::DensePrimitiveTier::Point ? 2 : 1;
+	const char* denseTiers[] = { "Full", "Simple", "Point" };
+	if (ImGui::Combo("Dense primitive tier", &denseTier, denseTiers, 3))
+	{
+		candidate.densePrimitiveTier = denseTier == 0
+			? TerraEngine::Editor::SceneViewOverlay::DensePrimitiveTier::Full
+			: denseTier == 2
+				? TerraEngine::Editor::SceneViewOverlay::DensePrimitiveTier::Point
+				: TerraEngine::Editor::SceneViewOverlay::DensePrimitiveTier::Simple;
+		changed = true;
+	}
+
+	if (changed)
+	{
+		// ProjectManager validates and atomically publishes the complete candidate;
+		// a failed edit leaves both memory and the saved file unchanged.
+		projectManager->SetSceneViewOverlayPreference(candidate, &m_SceneViewPreferenceError);
+	}
+	if (!m_SceneViewPreferenceError.empty())
+	{
+		ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.25f, 1.0f), "%s", m_SceneViewPreferenceError.c_str());
 	}
 }
 

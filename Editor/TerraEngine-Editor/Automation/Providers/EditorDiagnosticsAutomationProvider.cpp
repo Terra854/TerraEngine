@@ -37,6 +37,19 @@ namespace TerraEngine::Editor::Automation
 				? "immutable_snapshot"
 				: "editor_protected_commit";
 			descriptor.execution.preparationReads = {"EditorAutomationSession", "EditorDiagnostics"};
+			if (descriptor.name == "diagnostics.get_summary")
+			{
+				// The summary reads published scheduler and worker snapshots only. Keeping
+				// these declarations explicit lets automation diagnostics explain why this
+				// operation remains safe during a running frame.
+				descriptor.description = "Read immutable scheduler decisions, conditional flush state, and bounded worker telemetry; includeDetails adds retained histories.";
+				descriptor.inputSchema = {{"type", "object"}, {"properties", {{"includeDetails", {{"type", "boolean"}, {"description", "Include bounded workload records, dependency edges, worker histories, and profiler v2 evidence."}}}}}, {"additionalProperties", true}};
+				descriptor.resultSchema = {{"type", "object"}, {"properties", {
+					{"profilerTimingStreams", {{"description", "Legacy status-aware timing stream summaries."}}},
+					{"profilerCaptureEvidence", {{"description", "Additive v2 stage, boundary, responsiveness, and work-volume summaries."}}}
+				}}};
+				descriptor.execution.preparationReads.insert(descriptor.execution.preparationReads.end(), {"FrameExecutionPlan", "SystemScheduler", "ThreadPoolTelemetry"});
+			}
 			if (requiresRenderer)
 			{
 				descriptor.execution.preparationReads.push_back("RendererDiagnostics");

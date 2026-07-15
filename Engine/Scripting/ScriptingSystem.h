@@ -241,7 +241,10 @@ private:
 	void PublishLatestScriptingDiagnostics();
 	void FlushScriptMutationsIntoResult(ScriptingFrameResult& result);
 
-	bool m_Running = true;
+	// Authoring and automation begin stopped. MainEditorSubsystem explicitly
+	// starts Play Mode, while InitializeExportRuntime explicitly enables runtime
+	// execution; a default playing state made fresh editor state order-dependent.
+	bool m_Running = false;
 	bool m_Paused = false;
 	int m_StepFrames = 0;
 	std::optional<float> m_ExplicitStepDeltaTime;

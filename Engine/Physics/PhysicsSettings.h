@@ -25,6 +25,10 @@ namespace TerraEngine::Physics {
 	inline constexpr std::uint32_t kPhysicsRetainedResultTicks = 2U;
 	inline constexpr std::uint32_t kPhysicsMaximumDebugHistoryTicks = 32U;
 	inline constexpr std::uint32_t kPhysicsMaximumDebugPrimitives = 100000U;
+	inline constexpr std::uint32_t kPhysicsMinimumPublicationBatchSize = 64U;
+	inline constexpr std::uint32_t kPhysicsMaximumPublicationBatchSize = 8192U;
+	inline constexpr std::uint32_t kPhysicsMaximumParallelThreshold = 1000000U;
+	inline constexpr std::uint32_t kPhysicsMaximumDiagnosticsIntervalFrames = 600U;
 
 	enum class PhysicsSettingsValidationCode : std::uint8_t {
 		None,
@@ -40,7 +44,10 @@ namespace TerraEngine::Physics {
 		InvalidBroadPhaseGroup,
 		InvalidQueryLimit,
 		InvalidHistoryLimit,
-		InvalidDebugLimit
+		InvalidDebugLimit,
+		InvalidPublicationBatchSize,
+		InvalidParallelThreshold,
+		InvalidDiagnosticsInterval
 	};
 
 	struct PhysicsSettingsValidationResult {
@@ -78,10 +85,37 @@ namespace TerraEngine::Physics {
 		bool debugVisualizationEnabled = false;
 		std::uint32_t retainedDebugTicks = 2U;
 		std::uint32_t maxDebugPrimitives = kPhysicsMaximumDebugPrimitives;
+		// These project-owned thresholds control how typed work is partitioned.
+		// Chunking never weakens tick-wide transaction atomicity.
+		std::uint32_t transformPublicationChunkSize = 1024U;
+		std::uint32_t providerExtractionBatchSize = 1024U;
+		std::uint32_t parallelPreparationThreshold = 512U;
+		std::uint32_t parallelExtractionThreshold = 512U;
+		std::uint32_t aggregateDiagnosticsIntervalFrames = 30U;
+		// Continuous collision is a project opt-in and is still selected per body
+		// through PhysicsMotionQuality::LinearCast when this policy allows it.
+		bool continuousCollisionEnabled = false;
 
 		static PhysicsSettings Defaults();
 		static constexpr bool IsValidLayerMask(std::uint64_t rawMask) noexcept {
 			return rawMask <= 0xFFFFFFFFULL;
+		}
+		static constexpr bool LayersCanCollide(
+			std::uint8_t firstLayer,
+			std::uint32_t firstMask,
+			std::uint8_t secondLayer,
+			std::uint32_t secondMask) noexcept {
+			// Collision policy is symmetric: both project/body masks must opt into
+			// the opposite stable layer before provider contacts are accepted.
+			return firstLayer < kPhysicsCollisionLayerCount
+				&& secondLayer < kPhysicsCollisionLayerCount
+				&& (firstMask & (1U << secondLayer)) != 0U
+				&& (secondMask & (1U << firstLayer)) != 0U;
+		}
+		static constexpr PhysicsMotionQuality ResolveMotionQuality(
+			bool continuousCollisionEnabled,
+			PhysicsMotionQuality requested) noexcept {
+			return continuousCollisionEnabled ? requested : PhysicsMotionQuality::Discrete;
 		}
 
 		PhysicsSettingsValidationResult Validate() const;

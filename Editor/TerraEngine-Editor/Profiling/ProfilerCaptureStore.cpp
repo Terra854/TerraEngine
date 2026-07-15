@@ -206,6 +206,22 @@ std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> ProfilerCaptureStor
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (artifact.supported)
 		{
+			// The engine codec owns chunk validation and recovery.  The editor store
+			// preserves that verdict as metadata so listing a capture never hides a
+			// recovered final tail behind an apparently normal artifact.
+			if (artifact.status == "Ready (metadata)")
+			{
+				// "Ready (metadata)" describes the codec's fast metadata-only scan,
+				// not a distinct durable artifact state. Preserve the established editor
+				// listing contract while complete/recovery/checksum fields carry detail.
+				artifact.status = "Ready";
+			}
+			if (artifact.status.empty())
+			{
+				artifact.status = artifact.recoveredIncompleteTail
+					? "recovered_incomplete_tail"
+					: (artifact.complete ? "complete" : "incomplete");
+			}
 			captures.push_back(std::move(artifact));
 		}
 	}

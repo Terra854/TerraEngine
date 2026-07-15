@@ -9,6 +9,7 @@
 #include "EditorAutomationService.h"
 #include "Providers/PhysicsAutomationProvider.h"
 #include "Physics/PhysicsEvents.h"
+#include "Physics/PhysicsDiagnostics.h"
 #include "Physics/PhysicsSystem.h"
 #include "Physics/PhysicsWorld.h"
 #include "ThreadPool/ThreadPool.h"
@@ -109,6 +110,19 @@ namespace TerraEngine::EditorTests
 
 	void RegisterEditorMcpPhysicsSafetyTests(TestRegistry& registry)
 	{
+		registry.Add("Editor.MCP.Physics.DiagnosticsRateLimitPreservesHealth", [](TestContext& context) {
+			TerraEngine::Physics::PhysicsDiagnosticsSnapshot snapshot;
+			snapshot.rate.aggregateIntervalFrames = 30U;
+			snapshot.rate.aggregateRefreshed = false;
+			snapshot.rate.currentHealthPublished = true;
+			snapshot.publication.rejectedPackets = 1U;
+			snapshot.publication.lastFailure = "stale transform";
+			context.Expect(snapshot.rate.currentHealthPublished && !snapshot.publication.lastFailure.empty(),
+				"Rate-limited aggregates must never suppress the current publication failure.");
+			context.Expect(TerraEngine::Physics::ShouldRefreshPhysicsAggregateDiagnostics(31U, 30U, 30U, true),
+				"A current failure must force an aggregate refresh for automation readers.");
+		});
+
 		registry.Add("Editor.MCP.Physics.RuntimeCommandsRequireIdempotencyAndExactGenerations", [](TestContext& context) {
 			EditorAutomationRegistry capabilityRegistry;
 			context.Expect(capabilityRegistry.RegisterProvider(MakeProvider()).registered, "Physics provider registration should succeed.");

@@ -432,6 +432,20 @@ void ScriptCompilationSubsystem::OnProjectOpened()
 		TERRAENGINE_LOG(LogLevel::Warning, "Assembly-CSharp workspace generation reported an issue during project open: " << workspaceError);
 		m_Status.lastSummary = workspaceError;
 	}
+	else
+	{
+		std::string readinessError;
+		if (TryLoadManagedReadiness(&readinessError))
+		{
+			PublishAttachableScriptTypes();
+			UpdateSharedState();
+			return;
+		}
+		// A readiness miss is expected on a clean checkout. Keep the reason in
+		// the status so project-opening diagnostics can distinguish a cold build
+		// from recovery after stale or corrupt derived managed output.
+		m_Status.lastSummary = readinessError;
+	}
 
 	RequestBuild(ScriptBuildReason::ProjectOpen);
 	PublishAttachableScriptTypes();
@@ -459,6 +473,9 @@ void ScriptCompilationSubsystem::RequestBuild(ScriptBuildReason reason)
 	}
 
 	m_LastQueuedReason = reason;
+	const std::string priorReadinessSummary = m_Status.lastSummary;
+	m_Status.reusedReadyOutput = false;
+	m_Status.forcedBuild = reason == ScriptBuildReason::ManualRefresh || reason == ScriptBuildReason::ExplicitRebuild;
 	m_Status.queuedBuild = true;
 	m_Status.cancellationRequested = false;
 	m_Status.progress = 0.05;
@@ -466,6 +483,10 @@ void ScriptCompilationSubsystem::RequestBuild(ScriptBuildReason reason)
 	m_CancelRequested.store(false, std::memory_order_relaxed);
 	m_Status.state = ScriptCoordinatorState::Queued;
 	m_Status.lastSummary = "A project script build is queued for " + BuildProfileToString(m_Status.activeProfile) + ".";
+	if (reason == ScriptBuildReason::ProjectOpen && !priorReadinessSummary.empty())
+	{
+		m_Status.lastSummary += " Readiness fallback: " + priorReadinessSummary;
+	}
 	m_DebounceTimer = reason == ScriptBuildReason::ProjectOpen ? 0.0f : kScriptBuildDebounceSeconds;
 
 	// Script file saves should kick off compilation immediately so the active
@@ -579,7 +600,7 @@ bool ScriptCompilationSubsystem::RegenerateWorkspace(std::string* outError)
 		return false;
 	}
 
-	RequestBuild(ScriptBuildReason::ManualRefresh);
+	RequestBuild(ScriptBuildReason::ExplicitRebuild);
 	return true;
 }
 
@@ -644,6 +665,52 @@ void ScriptCompilationSubsystem::RestorePausedGameplayState()
 	m_ShouldRestorePausedGameplayState = false;
 	m_WasRunningBeforeBuild = false;
 	m_WasPausedBeforeBuild = false;
+}
+
+bool ScriptCompilationSubsystem::TryLoadManagedReadiness(std::string* outError)
+{
+	const std::string profile = BuildProfileToString(m_Status.activeProfile);
+	std::string validationError;
+	const ManagedReadinessValidation validation = m_WorkspaceService.ValidateManagedReadiness(profile, nullptr, &validationError);
+	m_Status.readinessValidation = validation;
+	if (validation != ManagedReadinessValidation::Valid)
+	{
+		if (outError != nullptr)
+		{
+			*outError = validationError;
+		}
+		return false;
+	}
+
+	// The manifest only proves that bytes and inputs match. The managed runtime
+	// still owns load validation; failure here deliberately falls back to an
+	// explicit rebuild instead of treating a cache record as executable truth.
+	std::string loadError;
+	const std::filesystem::path assemblyPath = m_WorkspaceService.GetAssemblyPath();
+	if (!ScriptingSystem::Instance().LoadGameplayAssembly(assemblyPath, &loadError))
+	{
+		m_Status.readinessValidation = ManagedReadinessValidation::OutputHashMismatch;
+		if (outError != nullptr)
+		{
+			*outError = "The manifest-validated managed output could not be loaded: " + loadError;
+		}
+		return false;
+	}
+
+	m_Status.state = ScriptCoordinatorState::Ready;
+	m_Status.progress = 1.0;
+	m_Status.gameplayAssemblyLoaded = true;
+	m_Status.reusedReadyOutput = true;
+	m_Status.forcedBuild = false;
+	m_Status.activeAssemblyPath = assemblyPath;
+	m_Status.lastSummary = "Assembly-CSharp readiness manifest matched and the existing managed output was loaded without rebuilding.";
+	AssetDatabase::Instance().SetScriptCompileState("Ready", m_Status.lastSummary);
+	TERRAENGINE_LOG(LogLevel::Info, "Reused manifest-validated Assembly-CSharp output from " << assemblyPath << ".");
+	if (outError != nullptr)
+	{
+		outError->clear();
+	}
+	return true;
 }
 
 // ScriptCompilationSubsystem::TryReloadWorkspaceAssembly is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -929,8 +996,23 @@ void ScriptCompilationSubsystem::HandleCompletedBuild(ScriptBuildResult result)
 	m_Status.state = ScriptCoordinatorState::Ready;
 	m_Status.progress = 1.0;
 	m_Status.gameplayAssemblyLoaded = true;
+	m_Status.reusedReadyOutput = false;
 	m_Status.activeAssemblyPath = result.assemblyPath;
-	m_Status.lastSummary = "Assembly-CSharp built and reloaded successfully.";
+	std::string manifestError;
+	if (!m_WorkspaceService.PublishManagedReadiness(BuildProfileToString(result.profile), &manifestError))
+	{
+		// The freshly loaded assembly is still correct for this session. Do not
+		// publish a partial readiness claim: the next project open will rebuild
+		// rather than trusting incomplete cache metadata.
+		m_Status.readinessValidation = ManagedReadinessValidation::Corrupt;
+		m_Status.lastSummary = "Assembly-CSharp built and reloaded successfully, but managed readiness was not persisted: " + manifestError;
+		TERRAENGINE_LOG(LogLevel::Warning, m_Status.lastSummary);
+	}
+	else
+	{
+		m_Status.readinessValidation = ManagedReadinessValidation::Valid;
+		m_Status.lastSummary = "Assembly-CSharp built, reloaded, and atomically published as managed-ready output.";
+	}
 	TERRAENGINE_LOG(LogLevel::Info, "Assembly-CSharp built successfully and reloaded from " << result.assemblyPath << ".");
 	RestorePausedGameplayState();
 	AssetDatabase::Instance().SetScriptCompileState("Ready", m_Status.lastSummary);

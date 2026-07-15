@@ -9,6 +9,9 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <map>
+#include <set>
+#include <tuple>
 #include <unordered_map>
 #include <variant>
 
@@ -43,11 +46,215 @@ namespace TerraEngine::Physics {
 			hash = HashValue(hash, collider.localPose.position);
 			hash = HashValue(hash, collider.localPose.rotation);
 			hash = HashBytes(hash, collider.cookedColliderAssetId.data(), collider.cookedColliderAssetId.size());
-			hash = HashBytes(hash, collider.materialId.data(), collider.materialId.size());
+			// Material, collision layer, query flags, and component generations belong
+			// to the body/subshape instance, not immutable geometry. Leaving them out
+			// lets equivalent primitives share a backend shape without sharing their
+			// per-body behavior or lifetime.
 			hash = HashValue(hash, collider.trigger);
+			return hash == 0U ? 1U : hash;
+		}
+
+		std::uint64_t HashSettings(const PhysicsSettings& settings) {
+			std::uint64_t hash = 14695981039346656037ULL;
+			hash = HashValue(hash, settings.schemaVersion);
+			hash = HashValue(hash, settings.gravity);
+			hash = HashValue(hash, settings.fixedTimeStep);
+			hash = HashValue(hash, settings.maxSubsteps);
+			hash = HashValue(hash, settings.maxAccumulatedTime);
+			hash = HashValue(hash, settings.velocityIterations);
+			hash = HashValue(hash, settings.positionIterations);
+			for(const CollisionLayer& layer : settings.layers) {
+				hash = HashValue(hash, layer.id);
+				hash = HashBytes(hash, layer.name.data(), layer.name.size());
+				hash = HashValue(hash, layer.collisionMask);
+				hash = HashValue(hash, layer.broadPhaseGroup);
+				hash = HashValue(hash, layer.enabled);
+			}
+			hash = HashValue(hash, settings.maxCastDistance);
+			hash = HashValue(hash, settings.maxShapeExtent);
+			hash = HashValue(hash, settings.maxHitsPerQuery);
+			hash = HashValue(hash, settings.maxRequestsPerBatch);
+			hash = HashValue(hash, settings.retainedResultTicks);
+			hash = HashValue(hash, settings.debugVisualizationEnabled);
+			hash = HashValue(hash, settings.retainedDebugTicks);
+			hash = HashValue(hash, settings.maxDebugPrimitives);
+			return hash == 0U ? 1U : hash;
+		}
+
+		std::uint64_t HashBodyProperties(const PhysicsBodyDescriptor& body) {
+			std::uint64_t hash = 14695981039346656037ULL;
+			hash = HashValue(hash, body.motionType);
+			hash = HashValue(hash, body.motionQuality);
+			hash = HashValue(hash, body.initialLinearVelocity);
+			hash = HashValue(hash, body.initialAngularVelocity);
+			hash = HashValue(hash, body.mass);
+			hash = HashValue(hash, body.linearDamping);
+			hash = HashValue(hash, body.angularDamping);
+			hash = HashValue(hash, body.maximumLinearVelocity);
+			hash = HashValue(hash, body.maximumAngularVelocity);
+			hash = HashValue(hash, body.allowedDegreesOfFreedom);
+			hash = HashValue(hash, body.collisionMask);
+			hash = HashValue(hash, body.useGravity);
+			hash = HashValue(hash, body.allowSleeping);
+			hash = HashValue(hash, body.startAwake);
+			hash = HashValue(hash, body.enabled);
+			hash = HashValue(hash, body.collisionLayer);
+			return hash == 0U ? 1U : hash;
+		}
+
+		std::uint64_t HashColliderProperties(const PhysicsColliderDescriptor& collider) {
+			std::uint64_t hash = collider.stableRecipeHash == 0U
+				? 14695981039346656037ULL
+				: collider.stableRecipeHash;
+			hash = HashBytes(hash, collider.recordId.data(), collider.recordId.size());
+			// ObjectManager currently exposes a coarse object component generation.
+			// Hashing it here would misclassify a rigid-body-only edit as a collider
+			// rebuild. The value fields below identify actual collider changes.
+			hash = HashBytes(hash, collider.materialId.data(), collider.materialId.size());
+			hash = HashValue(hash, collider.subShapeKey);
 			hash = HashValue(hash, collider.collisionLayer);
 			hash = HashValue(hash, collider.queryFlags);
+			hash = HashValue(hash, collider.trigger);
+			hash = HashValue(hash, collider.enabled);
 			return hash == 0U ? 1U : hash;
+		}
+
+		std::unordered_map<TerraEngine::UUID, std::uint64_t> BuildColliderHashes(
+			const PhysicsAuthoringData& data) {
+			std::unordered_map<TerraEngine::UUID, std::uint64_t> hashes;
+			for(const PhysicsColliderDescriptor& collider : data.colliders) {
+				std::uint64_t& hash = hashes[collider.objectId];
+				if(hash == 0U) hash = 14695981039346656037ULL;
+				hash ^= HashColliderProperties(collider) + 0x9e3779b97f4a7c15ULL
+					+ (hash << 6U) + (hash >> 2U);
+			}
+			return hashes;
+		}
+
+		void BuildSnapshotIndexes(
+			PhysicsAuthoringData& data,
+			const PhysicsAuthoringSnapshot* previous) {
+			// Group collider records by body while preserving authored order within
+			// each body. Descriptor ranges can then be consumed without hash lookups.
+			std::stable_sort(data.colliders.begin(), data.colliders.end(),
+				[](const PhysicsColliderDescriptor& left, const PhysicsColliderDescriptor& right) {
+					return left.objectId < right.objectId;
+				});
+			std::unordered_map<TerraEngine::UUID, PhysicsDescriptorIndex> previousIndices;
+			PhysicsDescriptorIndex nextIndex = 0U;
+			if(previous != nullptr) {
+				nextIndex = previous->Data().nextStableBodyDescriptorIndex;
+				for(const PhysicsBodyDescriptorIndexRecord& record : previous->Data().bodyDescriptorIndices) {
+					previousIndices.emplace(record.objectId, record.stableIndex);
+				}
+			}
+
+			std::unordered_map<TerraEngine::UUID, std::pair<std::uint32_t, std::uint32_t>> colliderRanges;
+			for(std::uint32_t index = 0U; index < data.colliders.size(); ++index) {
+				auto [found, inserted] = colliderRanges.try_emplace(
+					data.colliders[index].objectId, std::pair{index, 0U});
+				(void)inserted;
+				++found->second.second;
+			}
+
+			data.bodyPresence.clear();
+			data.bodyDescriptorIndices.clear();
+			data.bodyPresence.reserve(data.bodies.size());
+			data.bodyDescriptorIndices.reserve(data.bodies.size());
+			for(std::uint32_t vectorIndex = 0U; vectorIndex < data.bodies.size(); ++vectorIndex) {
+				const PhysicsBodyDescriptor& body = data.bodies[vectorIndex];
+				PhysicsDescriptorIndex stableIndex = kInvalidPhysicsDescriptorIndex;
+				if(const auto retained = previousIndices.find(body.objectId); retained != previousIndices.end()) {
+					stableIndex = retained->second;
+				} else {
+					stableIndex = nextIndex++;
+				}
+				const auto range = colliderRanges.find(body.objectId);
+				data.bodyPresence.push_back(body.objectId);
+				data.bodyDescriptorIndices.push_back({
+					body.objectId,
+					stableIndex,
+					vectorIndex,
+					range != colliderRanges.end() ? range->second.first : 0U,
+					range != colliderRanges.end() ? range->second.second : 0U});
+			}
+			std::sort(data.bodyPresence.begin(), data.bodyPresence.end());
+			std::sort(data.bodyDescriptorIndices.begin(), data.bodyDescriptorIndices.end(),
+				[](const PhysicsBodyDescriptorIndexRecord& left,
+					const PhysicsBodyDescriptorIndexRecord& right) {
+					return left.objectId < right.objectId;
+				});
+			data.nextStableBodyDescriptorIndex = nextIndex;
+
+			struct Dependency {
+				PhysicsAssetKind kind;
+				TerraEngine::UUID assetId;
+				TerraEngine::UUID objectId;
+			};
+			std::vector<Dependency> dependencies;
+			for(const PhysicsColliderDescriptor& collider : data.colliders) {
+				if(collider.cookedColliderAssetId != TerraEngine::EMPTY_UUID) {
+					dependencies.push_back({PhysicsAssetKind::CookedCollider,
+						collider.cookedColliderAssetId, collider.objectId});
+				}
+				if(collider.materialId != TerraEngine::EMPTY_UUID) {
+					dependencies.push_back({PhysicsAssetKind::Material,
+						collider.materialId, collider.objectId});
+				}
+			}
+			std::sort(dependencies.begin(), dependencies.end(),
+				[](const Dependency& left, const Dependency& right) {
+					return std::tie(left.kind, left.assetId, left.objectId)
+						< std::tie(right.kind, right.assetId, right.objectId);
+				});
+			dependencies.erase(std::unique(dependencies.begin(), dependencies.end(),
+				[](const Dependency& left, const Dependency& right) {
+					return left.kind == right.kind && left.assetId == right.assetId
+						&& left.objectId == right.objectId;
+				}), dependencies.end());
+			data.assetDependencies.clear();
+			data.assetDependentObjects.clear();
+			for(std::size_t begin = 0U; begin < dependencies.size();) {
+				std::size_t end = begin + 1U;
+				while(end < dependencies.size() && dependencies[end].kind == dependencies[begin].kind
+					&& dependencies[end].assetId == dependencies[begin].assetId) ++end;
+				const std::uint32_t objectBegin = static_cast<std::uint32_t>(data.assetDependentObjects.size());
+				for(std::size_t index = begin; index < end; ++index) {
+					data.assetDependentObjects.push_back(dependencies[index].objectId);
+				}
+				data.assetDependencies.push_back({
+					dependencies[begin].assetId,
+					dependencies[begin].kind,
+					objectBegin,
+					static_cast<std::uint32_t>(end - begin)});
+				begin = end;
+			}
+
+			std::vector<std::pair<std::uint64_t, std::uint32_t>> primitiveColliders;
+			for(std::uint32_t index = 0U; index < data.colliders.size(); ++index) {
+				const PhysicsColliderDescriptor& collider = data.colliders[index];
+				if(collider.cookedColliderAssetId == TerraEngine::EMPTY_UUID) {
+					primitiveColliders.emplace_back(collider.stableRecipeHash, index);
+				}
+			}
+			std::sort(primitiveColliders.begin(), primitiveColliders.end());
+			data.primitiveShapeShares.clear();
+			data.primitiveShapeColliderIndices.clear();
+			for(std::size_t begin = 0U; begin < primitiveColliders.size();) {
+				std::size_t end = begin + 1U;
+				while(end < primitiveColliders.size()
+					&& primitiveColliders[end].first == primitiveColliders[begin].first) ++end;
+				const std::uint32_t colliderBegin =
+					static_cast<std::uint32_t>(data.primitiveShapeColliderIndices.size());
+				for(std::size_t index = begin; index < end; ++index) {
+					data.primitiveShapeColliderIndices.push_back(primitiveColliders[index].second);
+				}
+				data.primitiveShapeShares.push_back({
+					primitiveColliders[begin].first,
+					colliderBegin,
+					static_cast<std::uint32_t>(end - begin)});
+				begin = end;
+			}
 		}
 
 		std::uint64_t CombineTransformRevision(
@@ -121,9 +328,14 @@ namespace TerraEngine::Physics {
 		}
 	}
 
-	std::optional<PhysicsAuthoringSnapshot> PhysicsAuthoringSnapshot::Create(PhysicsAuthoringData data) {
+	std::optional<PhysicsAuthoringSnapshot> PhysicsAuthoringSnapshot::Create(
+		PhysicsAuthoringData data,
+		const PhysicsAuthoringSnapshot* previous) {
 		if(!data.world.IsValid() || data.snapshotGeneration == 0 || !data.settings.Validate().accepted) {
 			return std::nullopt;
+		}
+		if(data.bodyDescriptorIndices.empty() && !data.bodies.empty()) {
+			BuildSnapshotIndexes(data, previous);
 		}
 		for(const PhysicsBodyDescriptor& body : data.bodies) {
 			if(!ValidObjectId(body.objectId) || body.objectGeneration == 0
@@ -177,6 +389,88 @@ namespace TerraEngine::Physics {
 				return std::nullopt;
 			}
 		}
+		if(data.bodyPresence.size() != data.bodies.size()
+			|| data.bodyDescriptorIndices.size() != data.bodies.size()) {
+			return std::nullopt;
+		}
+		std::set<PhysicsDescriptorIndex> stableIndices;
+		std::uint32_t expectedColliderBegin = 0U;
+		for(std::size_t index = 0U; index < data.bodyDescriptorIndices.size(); ++index) {
+			const PhysicsBodyDescriptorIndexRecord& record = data.bodyDescriptorIndices[index];
+			if(record.objectId == TerraEngine::EMPTY_UUID
+				|| record.stableIndex == kInvalidPhysicsDescriptorIndex
+				|| record.stableIndex >= data.nextStableBodyDescriptorIndex
+				|| record.bodyVectorIndex >= data.bodies.size()
+				|| data.bodies[record.bodyVectorIndex].objectId != record.objectId
+				|| data.bodyPresence[index] != record.objectId
+				|| record.colliderBegin + record.colliderCount > data.colliders.size()
+				|| (record.colliderCount > 0U && record.colliderBegin != expectedColliderBegin)
+				|| (index > 0U && data.bodyDescriptorIndices[index - 1U].objectId >= record.objectId)
+				|| !stableIndices.insert(record.stableIndex).second) {
+				return std::nullopt;
+			}
+			for(std::uint32_t colliderIndex = record.colliderBegin;
+				colliderIndex < record.colliderBegin + record.colliderCount;
+				++colliderIndex) {
+				if(data.colliders[colliderIndex].objectId != record.objectId) return std::nullopt;
+			}
+			expectedColliderBegin += record.colliderCount;
+		}
+		if(expectedColliderBegin != data.colliders.size()) return std::nullopt;
+		if(!std::is_sorted(data.bodyPresence.begin(), data.bodyPresence.end())
+			|| std::adjacent_find(data.bodyPresence.begin(), data.bodyPresence.end()) != data.bodyPresence.end()) {
+			return std::nullopt;
+		}
+		std::uint32_t expectedDependentObjectBegin = 0U;
+		for(std::size_t index = 0U; index < data.assetDependencies.size(); ++index) {
+			const PhysicsAssetDependencyRange& dependency = data.assetDependencies[index];
+			if(dependency.assetId == TerraEngine::EMPTY_UUID || dependency.objectCount == 0U
+				|| dependency.objectBegin != expectedDependentObjectBegin
+				|| dependency.objectBegin + dependency.objectCount > data.assetDependentObjects.size()
+				|| (index > 0U
+					&& std::tie(data.assetDependencies[index - 1U].assetKind,
+						data.assetDependencies[index - 1U].assetId)
+						>= std::tie(dependency.assetKind, dependency.assetId))) {
+				return std::nullopt;
+			}
+			for(std::uint32_t objectIndex = dependency.objectBegin;
+				objectIndex < dependency.objectBegin + dependency.objectCount;
+				++objectIndex) {
+				const TerraEngine::UUID& objectId = data.assetDependentObjects[objectIndex];
+				if(!std::binary_search(data.bodyPresence.begin(), data.bodyPresence.end(), objectId)
+					|| (objectIndex > dependency.objectBegin
+						&& data.assetDependentObjects[objectIndex - 1U] >= objectId)) {
+					return std::nullopt;
+				}
+			}
+			expectedDependentObjectBegin += dependency.objectCount;
+		}
+		if(expectedDependentObjectBegin != data.assetDependentObjects.size()) return std::nullopt;
+		std::uint32_t expectedPrimitiveColliderBegin = 0U;
+		for(std::size_t index = 0U; index < data.primitiveShapeShares.size(); ++index) {
+			const PhysicsPrimitiveShapeShareRange& share = data.primitiveShapeShares[index];
+			if(share.stableRecipeHash == 0U || share.colliderCount == 0U
+				|| share.colliderBegin != expectedPrimitiveColliderBegin
+				|| share.colliderBegin + share.colliderCount > data.primitiveShapeColliderIndices.size()
+				|| (index > 0U
+					&& data.primitiveShapeShares[index - 1U].stableRecipeHash >= share.stableRecipeHash)) {
+				return std::nullopt;
+			}
+			for(std::uint32_t colliderOffset = share.colliderBegin;
+				colliderOffset < share.colliderBegin + share.colliderCount;
+				++colliderOffset) {
+				const std::uint32_t colliderIndex = data.primitiveShapeColliderIndices[colliderOffset];
+				if(colliderIndex >= data.colliders.size()
+					|| data.colliders[colliderIndex].cookedColliderAssetId != TerraEngine::EMPTY_UUID
+					|| data.colliders[colliderIndex].stableRecipeHash != share.stableRecipeHash) {
+					return std::nullopt;
+				}
+			}
+			expectedPrimitiveColliderBegin += share.colliderCount;
+		}
+		if(expectedPrimitiveColliderBegin != data.primitiveShapeColliderIndices.size()) {
+			return std::nullopt;
+		}
 
 		return PhysicsAuthoringSnapshot(std::make_shared<const PhysicsAuthoringData>(std::move(data)));
 	}
@@ -208,6 +502,7 @@ namespace TerraEngine::Physics {
 			? previous->Data().snapshotGeneration + 1U
 			: 1U;
 		if(data.snapshotGeneration == 0U) data.snapshotGeneration = 1U;
+		data.sceneGeneration = objects.GetSceneGeneration();
 		data.hierarchyGeneration = hierarchy.revision;
 
 		std::unordered_map<TerraEngine::UUID, PhysicsGeneration> previousGenerations;
@@ -347,10 +642,16 @@ namespace TerraEngine::Physics {
 			body.objectId = entry.objectId;
 			body.objectGeneration = objectGeneration;
 			body.componentGeneration = componentGeneration;
+			body.objectTransformRevision = localTransformRevision;
 			body.worldPose = {ToPhysicsVector(resolved.position), ToPhysicsRotation(resolved.rotation)};
 			body.sourceTransformRevision = resolved.dependencyRevision;
 			if(entry.parentIndex >= 0) {
+				const Scene::HierarchySnapshotEntry& parentEntry =
+					hierarchy.orderedObjects[static_cast<std::size_t>(entry.parentIndex)];
 				const ResolvedTransform& parent = transforms[static_cast<std::size_t>(entry.parentIndex)];
+				body.parentObjectId = parentEntry.objectId;
+				body.parentObjectGeneration = objects.getObjectLifetimeGeneration(parentEntry.object);
+				body.parentTransformRevision = objects.GetObjectTransformRevision(parentEntry.object);
 				body.parentWorldPose = {ToPhysicsVector(parent.position), ToPhysicsRotation(parent.rotation)};
 				body.parentWorldScale = ToPhysicsVector(parent.scale);
 				body.hasParent = true;
@@ -431,6 +732,212 @@ namespace TerraEngine::Physics {
 			}
 		}
 
+		BuildSnapshotIndexes(data, previous);
+		for(PhysicsDirtyObjectGeneration& dirty : data.dirtyObjects) {
+			const auto index = std::lower_bound(data.bodyDescriptorIndices.begin(),
+				data.bodyDescriptorIndices.end(), dirty.objectId,
+				[](const PhysicsBodyDescriptorIndexRecord& record, const TerraEngine::UUID& id) {
+					return record.objectId < id;
+				});
+			const bool descriptorFound = index != data.bodyDescriptorIndices.end()
+				&& index->objectId == dirty.objectId;
+			if(descriptorFound) {
+				dirty.descriptorIndex = index->stableIndex;
+			}
+			dirty.reasons = previous == nullptr
+				? PhysicsAuthoringChangeReason::Added | PhysicsAuthoringChangeReason::Lifecycle
+					| PhysicsAuthoringChangeReason::BodyComponent
+					| PhysicsAuthoringChangeReason::ColliderComponent
+				: PhysicsAuthoringChangeReason::BodyComponent
+					| PhysicsAuthoringChangeReason::ColliderComponent;
+			if(previous != nullptr && descriptorFound
+				&& previousTransformRevisions[dirty.objectId] != 0U
+				&& previousTransformRevisions[dirty.objectId]
+					!= data.bodies[index->bodyVectorIndex].sourceTransformRevision) {
+				dirty.reasons |= PhysicsAuthoringChangeReason::Transform;
+				if(previous->Data().hierarchyGeneration != data.hierarchyGeneration) {
+					dirty.reasons |= PhysicsAuthoringChangeReason::HierarchyDependency;
+				}
+			}
+		}
 		return Create(std::move(data));
+	}
+
+	const PhysicsBodyDescriptorIndexRecord* PhysicsAuthoringSnapshot::FindBodyDescriptorIndex(
+		const TerraEngine::UUID& objectId) const noexcept {
+		if(data_ == nullptr) return nullptr;
+		const auto found = std::lower_bound(data_->bodyDescriptorIndices.begin(),
+			data_->bodyDescriptorIndices.end(), objectId,
+			[](const PhysicsBodyDescriptorIndexRecord& record, const TerraEngine::UUID& id) {
+				return record.objectId < id;
+			});
+		return found != data_->bodyDescriptorIndices.end() && found->objectId == objectId
+			? &*found
+			: nullptr;
+	}
+
+	std::vector<TerraEngine::UUID> PhysicsAuthoringSnapshot::ObjectsDependingOn(
+		const TerraEngine::UUID& assetId,
+		PhysicsAssetKind assetKind) const {
+		std::vector<TerraEngine::UUID> objects;
+		if(data_ == nullptr || assetId == TerraEngine::EMPTY_UUID) return objects;
+		const auto found = std::lower_bound(data_->assetDependencies.begin(),
+			data_->assetDependencies.end(), std::pair{assetKind, assetId},
+			[](const PhysicsAssetDependencyRange& range,
+				const std::pair<PhysicsAssetKind, TerraEngine::UUID>& key) {
+				return std::tie(range.assetKind, range.assetId) < std::tie(key.first, key.second);
+			});
+		if(found == data_->assetDependencies.end() || found->assetKind != assetKind
+			|| found->assetId != assetId) return objects;
+		objects.assign(data_->assetDependentObjects.begin() + found->objectBegin,
+			data_->assetDependentObjects.begin() + found->objectBegin + found->objectCount);
+		return objects;
+	}
+
+	std::optional<PhysicsAuthoringGeneration> PhysicsAuthoringSnapshot::BuildGeneration(
+		const PhysicsAuthoringSnapshot* previous,
+		const PhysicsAuthoringSnapshot& current,
+		const PhysicsAssetChangeSnapshot& assetChanges) {
+		if(!current.IsValid()) return std::nullopt;
+		if((assetChanges.toGenerationInclusive != 0U || !assetChanges.changes.empty()
+			|| assetChanges.requiresFullRefresh) && !assetChanges.IsValid()) {
+			return std::nullopt;
+		}
+
+		const PhysicsAuthoringSnapshot* retainedPrevious = previous;
+		if(retainedPrevious != nullptr
+			&& retainedPrevious->Data().world != current.Data().world) {
+			// Provider membership belongs to one concrete world lifetime. A new world
+			// must recreate current descriptors even when authored values are equal.
+			retainedPrevious = nullptr;
+		}
+
+		PhysicsAuthoringGenerationData generation;
+		generation.world = current.Data().world;
+		generation.generation = current.Data().snapshotGeneration;
+		generation.snapshotGeneration = current.Data().snapshotGeneration;
+		generation.hierarchyGeneration = current.Data().hierarchyGeneration;
+		generation.settingsHash = HashSettings(current.Data().settings);
+		generation.assetJournalGeneration = assetChanges.toGenerationInclusive;
+		generation.fullAssetRefresh = assetChanges.requiresFullRefresh;
+
+		std::unordered_map<TerraEngine::UUID, const PhysicsBodyDescriptor*> previousBodies;
+		std::unordered_map<TerraEngine::UUID, const PhysicsBodyDescriptor*> currentBodies;
+		if(retainedPrevious != nullptr) {
+			for(const PhysicsBodyDescriptor& body : retainedPrevious->Data().bodies) {
+				previousBodies.emplace(body.objectId, &body);
+			}
+		}
+		for(const PhysicsBodyDescriptor& body : current.Data().bodies) {
+			currentBodies.emplace(body.objectId, &body);
+		}
+		const std::unordered_map<TerraEngine::UUID, std::uint64_t> previousColliderHashes =
+			retainedPrevious != nullptr ? BuildColliderHashes(retainedPrevious->Data())
+				: std::unordered_map<TerraEngine::UUID, std::uint64_t>{};
+		const std::unordered_map<TerraEngine::UUID, std::uint64_t> currentColliderHashes =
+			BuildColliderHashes(current.Data());
+
+		std::map<TerraEngine::UUID, PhysicsAuthoringChange> changes;
+		auto ensureCurrentChange = [&](const PhysicsBodyDescriptor& body) -> PhysicsAuthoringChange& {
+			PhysicsAuthoringChange& change = changes[body.objectId];
+			change.objectId = body.objectId;
+			change.objectGeneration = body.objectGeneration;
+			if(const PhysicsBodyDescriptorIndexRecord* index = current.FindBodyDescriptorIndex(body.objectId)) {
+				change.descriptorIndex = index->stableIndex;
+			}
+			return change;
+		};
+
+		for(const PhysicsBodyDescriptor& body : current.Data().bodies) {
+			const auto old = previousBodies.find(body.objectId);
+			if(old == previousBodies.end()) {
+				PhysicsAuthoringChange& change = ensureCurrentChange(body);
+				change.reasons |= PhysicsAuthoringChangeReason::Added
+					| PhysicsAuthoringChangeReason::Lifecycle
+					| PhysicsAuthoringChangeReason::BodyComponent
+					| PhysicsAuthoringChangeReason::ColliderComponent;
+				continue;
+			}
+
+			PhysicsAuthoringChangeReason reasons = PhysicsAuthoringChangeReason::None;
+			const PhysicsBodyDescriptor& oldBody = *old->second;
+			if(oldBody.objectGeneration != body.objectGeneration) {
+				reasons |= PhysicsAuthoringChangeReason::Lifecycle
+					| PhysicsAuthoringChangeReason::BodyComponent
+					| PhysicsAuthoringChangeReason::ColliderComponent;
+			}
+			if(oldBody.sourceTransformRevision != body.sourceTransformRevision) {
+				reasons |= PhysicsAuthoringChangeReason::Transform;
+				if(retainedPrevious != nullptr
+					&& retainedPrevious->Data().hierarchyGeneration != current.Data().hierarchyGeneration) {
+					reasons |= PhysicsAuthoringChangeReason::HierarchyDependency;
+				}
+			}
+			if(HashBodyProperties(oldBody) != HashBodyProperties(body)) {
+				reasons |= PhysicsAuthoringChangeReason::BodyComponent;
+			}
+			const auto oldColliderHash = previousColliderHashes.find(body.objectId);
+			const auto newColliderHash = currentColliderHashes.find(body.objectId);
+			if(oldColliderHash == previousColliderHashes.end()
+				|| newColliderHash == currentColliderHashes.end()
+				|| oldColliderHash->second != newColliderHash->second) {
+				reasons |= PhysicsAuthoringChangeReason::ColliderComponent;
+			}
+			if(reasons != PhysicsAuthoringChangeReason::None) {
+				ensureCurrentChange(body).reasons |= reasons;
+			}
+		}
+
+		if(retainedPrevious != nullptr) {
+			for(const PhysicsBodyDescriptor& body : retainedPrevious->Data().bodies) {
+				if(currentBodies.contains(body.objectId)) continue;
+				changes[body.objectId] = {
+					body.objectId,
+					body.objectGeneration,
+					kInvalidPhysicsDescriptorIndex,
+					PhysicsAuthoringChangeReason::Removed | PhysicsAuthoringChangeReason::Lifecycle};
+			}
+			if(HashSettings(retainedPrevious->Data().settings) != generation.settingsHash) {
+				for(const PhysicsBodyDescriptor& body : current.Data().bodies) {
+					ensureCurrentChange(body).reasons |= PhysicsAuthoringChangeReason::Settings;
+				}
+			}
+		}
+
+		auto addAssetReason = [&](const TerraEngine::UUID& objectId, PhysicsAssetKind kind) {
+			const auto body = currentBodies.find(objectId);
+			if(body == currentBodies.end()) return;
+			ensureCurrentChange(*body->second).reasons |= kind == PhysicsAssetKind::CookedCollider
+				? PhysicsAuthoringChangeReason::ColliderAsset
+				: PhysicsAuthoringChangeReason::MaterialAsset;
+		};
+		if(assetChanges.requiresFullRefresh) {
+			for(const PhysicsAssetDependencyRange& dependency : current.Data().assetDependencies) {
+				for(std::uint32_t index = 0U; index < dependency.objectCount; ++index) {
+					addAssetReason(current.Data().assetDependentObjects[dependency.objectBegin + index],
+						dependency.assetKind);
+				}
+			}
+		} else {
+			for(const PhysicsAssetChangeRecord& assetChange : assetChanges.changes) {
+				for(const TerraEngine::UUID& objectId : current.ObjectsDependingOn(
+					assetChange.assetId, assetChange.assetKind)) {
+					addAssetReason(objectId, assetChange.assetKind);
+				}
+			}
+		}
+		for(const PhysicsAssetChangeRecord& assetChange : assetChanges.changes) {
+			generation.assetObservations.push_back({
+				assetChange.assetId,
+				assetChange.assetKind,
+				assetChange.generation});
+		}
+
+		generation.changes.reserve(changes.size());
+		for(auto& [objectId, change] : changes) {
+			(void)objectId;
+			generation.changes.push_back(change);
+		}
+		return PhysicsAuthoringGeneration::Create(std::move(generation));
 	}
 }

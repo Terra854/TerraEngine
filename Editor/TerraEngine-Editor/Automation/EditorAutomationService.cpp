@@ -107,6 +107,69 @@ namespace TerraEngine::Editor::Automation
 			return std::find(candidates.begin(), candidates.end(), operation) != candidates.end();
 		}
 
+		std::string ScriptCoordinatorStateName(ScriptCoordinatorState state)
+		{
+			switch (state)
+			{
+			case ScriptCoordinatorState::Idle:
+				return "idle";
+			case ScriptCoordinatorState::Queued:
+				return "queued";
+			case ScriptCoordinatorState::Building:
+				return "building";
+			case ScriptCoordinatorState::Reloading:
+				return "reloading";
+			case ScriptCoordinatorState::Ready:
+				return "ready";
+			case ScriptCoordinatorState::Failed:
+				return "failed";
+			case ScriptCoordinatorState::Canceled:
+				return "canceled";
+			}
+			return "unknown";
+		}
+
+		std::string ManagedReadinessValidationName(ManagedReadinessValidation validation)
+		{
+			switch (validation)
+			{
+			case ManagedReadinessValidation::Valid:
+				return "valid";
+			case ManagedReadinessValidation::Missing:
+				return "missing";
+			case ManagedReadinessValidation::Corrupt:
+				return "corrupt";
+			case ManagedReadinessValidation::Stale:
+				return "stale";
+			case ManagedReadinessValidation::OutputMissing:
+				return "output_missing";
+			case ManagedReadinessValidation::OutputHashMismatch:
+				return "output_hash_mismatch";
+			}
+			return "unknown";
+		}
+
+		nlohmann::json BuildManagedReadinessEvidence(const ScriptCompilationStatus& status, bool forcedBuild)
+		{
+			// This is a read-only summary of the coordinator's published state. It
+			// deliberately names a cache miss for explicit compilation instead of
+			// exposing implementation paths or mutable manifest contents.
+			return {
+				{"state", ScriptCoordinatorStateName(status.state)},
+				{"gameplayAssemblyLoaded", status.gameplayAssemblyLoaded},
+				{"queuedBuild", status.queuedBuild},
+				{"forcedBuild", forcedBuild || status.forcedBuild},
+				{"cache", {
+					{"hit", status.reusedReadyOutput},
+					{"reason", forcedBuild || status.forcedBuild
+						? "explicit_compile_requested"
+						: ManagedReadinessValidationName(status.readinessValidation)}
+				}},
+				{"validation", ManagedReadinessValidationName(status.readinessValidation)},
+				{"assemblyPublished", !status.activeAssemblyPath.empty()}
+			};
+		}
+
 		std::filesystem::path ResolveAutomationEditorExecutable()
 		{
 			// Export runtime discovery is based on the installed executable rather
@@ -499,6 +562,133 @@ namespace TerraEngine::Editor::Automation
 		nlohmann::json SerializeVec3(const glm::vec3& value)
 		{
 			return nlohmann::json::array({ value.x, value.y, value.z });
+		}
+
+		nlohmann::json SerializeSceneViewPerformancePreference(
+			const TerraEngine::Editor::SceneViewOverlay::SceneOverlayPreference& preference)
+		{
+			using namespace TerraEngine::Editor::SceneViewOverlay;
+			return {
+				{"largeSceneMode", ToString(preference.largeSceneMode)},
+				{"largeSceneObjectThreshold", preference.largeSceneObjectThreshold},
+				{"visibleMarkerBudget", preference.visibleMarkerBudget},
+				{"markerPresentationBatchSize", preference.markerPresentationBatchSize},
+				{"densityRadiusPixels", preference.densityRadiusPixels},
+				{"densityThreshold", preference.densityThreshold},
+				{"maximumMarkerDistance", preference.maximumMarkerDistance},
+				{"minimumProjectedSizePixels", preference.minimumProjectedSizePixels},
+				{"physicsMarkerMode", ToString(preference.physicsMarkerMode)},
+				{"densePrimitiveTier", ToString(preference.densePrimitiveTier)}
+			};
+		}
+
+		nlohmann::json SerializeSceneViewPerformanceState(
+			const TerraEngine::Editor::SceneViewOverlay::SceneViewDiagnosticsSnapshot& snapshot)
+		{
+			const nlohmann::json serialized = TerraEngine::Editor::SceneViewOverlay::SerializeDiagnosticsSnapshot(snapshot);
+			// Keep these additive field names explicit at the automation boundary so
+			// older clients can ignore them while performance clients validate the
+			// complete configured/effective and exemption evidence contract.
+			return {
+				{"largeScene", serialized.value("largeScene", nlohmann::json{
+					{"configuredMode", "auto"}, {"effective", false}, {"reason", "unavailable"}, {"reductions", nlohmann::json::array()}})},
+				{"markers", serialized.value("markers", nlohmann::json{
+					{"source", 0u}, {"candidates", 0u}, {"viewRejected", 0u}, {"densityConsolidated", 0u},
+					{"budgetRejected", 0u}, {"presented", 0u}, {"presentationBatches", 0u},
+					{"selectedExemptions", 0u}, {"cameraExemptions", 0u}, {"lightExemptions", 0u}})},
+				{"stageTimings", serialized.value("stageTimings", nlohmann::json::array())}
+			};
+		}
+
+		bool ParseSceneViewPerformancePreference(
+			const nlohmann::json& value,
+			TerraEngine::Editor::SceneViewOverlay::SceneOverlayPreference& candidate,
+			std::string& error)
+		{
+			using namespace TerraEngine::Editor::SceneViewOverlay;
+			const std::array<std::string_view, 10> required{
+				"largeSceneMode", "largeSceneObjectThreshold", "visibleMarkerBudget",
+				"markerPresentationBatchSize", "densityRadiusPixels", "densityThreshold",
+				"maximumMarkerDistance", "minimumProjectedSizePixels", "physicsMarkerMode",
+				"densePrimitiveTier"
+			};
+			if (!value.is_object() || value.size() != required.size())
+			{
+				error = "Scene View settings must be one complete document with no unknown fields.";
+				return false;
+			}
+			for (const std::string_view field : required)
+			{
+				if (!value.contains(std::string(field)))
+				{
+					error = "Scene View settings are missing required field: " + std::string(field);
+					return false;
+				}
+			}
+
+			auto readUnsigned = [&](std::string_view field, std::uint32_t minimum, std::uint32_t maximum, std::uint32_t& output) {
+				const nlohmann::json& input = value[std::string(field)];
+				if (!input.is_number_unsigned() && !input.is_number_integer())
+				{
+					error = std::string(field) + " must be an integer.";
+					return false;
+				}
+				const std::int64_t parsed = input.get<std::int64_t>();
+				if (parsed < minimum || parsed > maximum)
+				{
+					error = std::string(field) + " is outside its supported range.";
+					return false;
+				}
+				output = static_cast<std::uint32_t>(parsed);
+				return true;
+			};
+			auto readFloat = [&](std::string_view field, float minimum, float maximum, float& output) {
+				const nlohmann::json& input = value[std::string(field)];
+				if (!input.is_number())
+				{
+					error = std::string(field) + " must be numeric.";
+					return false;
+				}
+				const double parsed = input.get<double>();
+				if (!std::isfinite(parsed) || parsed < minimum || parsed > maximum)
+				{
+					error = std::string(field) + " is outside its supported range.";
+					return false;
+				}
+				output = static_cast<float>(parsed);
+				return true;
+			};
+			if (!readUnsigned("largeSceneObjectThreshold", 1u, 10000000u, candidate.largeSceneObjectThreshold)
+				|| !readUnsigned("visibleMarkerBudget", 64u, 100000u, candidate.visibleMarkerBudget)
+				|| !readUnsigned("markerPresentationBatchSize", 32u, 8192u, candidate.markerPresentationBatchSize)
+				|| !readUnsigned("densityThreshold", 2u, 256u, candidate.densityThreshold)
+				|| !readFloat("densityRadiusPixels", 4.0f, 128.0f, candidate.densityRadiusPixels)
+				|| !readFloat("maximumMarkerDistance", 0.0f, 1000000000.0f, candidate.maximumMarkerDistance)
+				|| !readFloat("minimumProjectedSizePixels", 0.0f, 64.0f, candidate.minimumProjectedSizePixels))
+			{
+				return false;
+			}
+			if (!value["largeSceneMode"].is_string() || !value["physicsMarkerMode"].is_string() || !value["densePrimitiveTier"].is_string())
+			{
+				error = "Scene View mode fields must be strings.";
+				return false;
+			}
+			const std::string largeMode = value["largeSceneMode"].get<std::string>();
+			const std::string physicsMode = value["physicsMarkerMode"].get<std::string>();
+			const std::string denseTier = value["densePrimitiveTier"].get<std::string>();
+			if (largeMode == "auto") candidate.largeSceneMode = LargeSceneMode::Automatic;
+			else if (largeMode == "on") candidate.largeSceneMode = LargeSceneMode::On;
+			else if (largeMode == "off") candidate.largeSceneMode = LargeSceneMode::Off;
+			else { error = "largeSceneMode must be auto, on, or off."; return false; }
+			if (physicsMode == "selected_only") candidate.physicsMarkerMode = PhysicsMarkerMode::SelectedOnly;
+			else if (physicsMode == "clustered") candidate.physicsMarkerMode = PhysicsMarkerMode::Clustered;
+			else if (physicsMode == "all") candidate.physicsMarkerMode = PhysicsMarkerMode::All;
+			else { error = "physicsMarkerMode must be selected_only, clustered, or all."; return false; }
+			if (denseTier == "full") candidate.densePrimitiveTier = DensePrimitiveTier::Full;
+			else if (denseTier == "simple") candidate.densePrimitiveTier = DensePrimitiveTier::Simple;
+			else if (denseTier == "point") candidate.densePrimitiveTier = DensePrimitiveTier::Point;
+			else { error = "densePrimitiveTier must be full, simple, or point."; return false; }
+			return ValidatePreference(candidate, &error);
 		}
 
 		struct AuthoredCameraCaptureSnapshot
@@ -1195,6 +1385,35 @@ namespace TerraEngine::Editor::Automation
 			return streams;
 		}
 
+		// SerializeProfilerCaptureEvidence intentionally reads the retained
+		// profiler document rather than live subsystem state.  Diagnostics
+		// automation can therefore compare a saved/recovered capture with the
+		// same availability semantics shown in the Profiler window.
+		nlohmann::json SerializeProfilerCaptureEvidence()
+		{
+			const EditorProfilerCaptureSummary summary = EditorProfilerService::SummarizeDocument(
+				"live", TerraEngine::Profiling::Profiler::Instance().GetDocumentSnapshot());
+			const auto metrics = [](const std::vector<EditorProfilerMetricSummary>& values) {
+				nlohmann::json result = nlohmann::json::array();
+				for (const EditorProfilerMetricSummary& value : values)
+				{
+					result.push_back({{"id", value.id}, {"unit", value.unit}, {"available", value.available},
+						{"unavailableReason", value.unavailableReason}, {"median", value.median}, {"p95", value.p95},
+						{"p99", value.p99}, {"maximum", value.maximum}, {"sampleCount", value.sampleCount},
+						{"unavailableCount", value.unavailableCount}});
+				}
+				return result;
+			};
+			return {
+				{"payloadVersion", summary.payloadVersion}, {"committedFrameCount", summary.committedFrameCount},
+				{"complete", summary.captureComplete}, {"recoveredIncompleteTail", summary.recoveredIncompleteTail},
+				{"stageTimings", metrics(summary.stageTimings)}, {"protectedBoundaryTimings", metrics(summary.protectedBoundaryTimings)},
+				{"presentationWaitTimings", metrics(summary.presentationWaitTimings)}, {"responsivenessTimings", metrics(summary.responsivenessTimings)},
+				{"workVolumes", {{"totalBodies", summary.workVolumes.totalBodies}, {"examinedBodies", summary.workVolumes.examinedBodies},
+					{"extractedBodies", summary.workVolumes.extractedBodies}, {"changedBodies", summary.workVolumes.changedBodies}, {"publishedBodies", summary.workVolumes.publishedBodies}}}
+			};
+		}
+
 		nlohmann::json SerializeVirtualGeometryClusterSummary(const VirtualGeometryClusterSummaryMetadata& summary)
 		{
 			return {
@@ -1334,7 +1553,57 @@ namespace TerraEngine::Editor::Automation
 			};
 		}
 
-		nlohmann::json SerializeParallelFrameDiagnostics(const ::Engine* engine)
+		const char* WorkloadPathText(TerraEngine::Profiling::WorkloadExecutionPath path)
+		{
+			switch (path)
+			{
+			case TerraEngine::Profiling::WorkloadExecutionPath::Inline: return "inline";
+			case TerraEngine::Profiling::WorkloadExecutionPath::Worker: return "worker";
+			case TerraEngine::Profiling::WorkloadExecutionPath::Protected: return "protected";
+			case TerraEngine::Profiling::WorkloadExecutionPath::Rejected: return "rejected";
+			case TerraEngine::Profiling::WorkloadExecutionPath::None:
+			default: return "omitted";
+			}
+		}
+
+		const char* WorkloadStatusText(TerraEngine::Profiling::WorkloadExecutionStatus status)
+		{
+			switch (status)
+			{
+			case TerraEngine::Profiling::WorkloadExecutionStatus::NotReady: return "notReady";
+			case TerraEngine::Profiling::WorkloadExecutionStatus::Inline: return "inline";
+			case TerraEngine::Profiling::WorkloadExecutionStatus::Queued: return "queued";
+			case TerraEngine::Profiling::WorkloadExecutionStatus::Running: return "running";
+			case TerraEngine::Profiling::WorkloadExecutionStatus::Completed: return "completed";
+			case TerraEngine::Profiling::WorkloadExecutionStatus::Rejected: return "rejected";
+			case TerraEngine::Profiling::WorkloadExecutionStatus::Cancelled: return "cancelled";
+			case TerraEngine::Profiling::WorkloadExecutionStatus::Inactive:
+			default: return "inactive";
+			}
+		}
+
+		const char* WorkerActivityText(ThreadPoolWorkerActivity activity)
+		{
+			switch (activity)
+			{
+			case ThreadPoolWorkerActivity::Idle: return "idle";
+			case ThreadPoolWorkerActivity::Running: return "running";
+			case ThreadPoolWorkerActivity::Stopped: return "stopped";
+			case ThreadPoolWorkerActivity::Starting:
+			default: return "starting";
+			}
+		}
+
+		nlohmann::json SerializeDuration(const TerraEngine::Profiling::TelemetryDuration& duration)
+		{
+			return {
+				{"available", duration.availability == TerraEngine::Profiling::TelemetryAvailability::Available},
+				{"nanoseconds", duration.nanoseconds},
+				{"unavailableReason", duration.unavailableReason}
+			};
+		}
+
+		nlohmann::json SerializeParallelFrameDiagnostics(const ::Engine* engine, bool includeDetails)
 		{
 			if (engine == nullptr)
 			{
@@ -1355,6 +1624,51 @@ namespace TerraEngine::Editor::Automation
 					{"recommendedAction", diagnostic.recommendedAction}
 				});
 			}
+			nlohmann::json executionRecords = nlohmann::json::array();
+			nlohmann::json dependencyEdges = nlohmann::json::array();
+			nlohmann::json workers = nlohmann::json::array();
+			const std::shared_ptr<const ThreadPoolTelemetrySnapshot> telemetry = ThreadPool::instance().GetTelemetrySnapshot();
+			// Retained per-dispatch histories can be large, so compact callers receive
+			// the stable envelope and aggregate sampling facts without copying arrays.
+			if (includeDetails)
+			{
+				for (const TerraEngine::Profiling::WorkloadExecutionRecord& record : plan.executionRecords)
+				{
+					executionRecords.push_back({
+						{"descriptorId", record.descriptorId}, {"descriptorGeneration", record.descriptorGeneration},
+						{"ownerSystem", record.ownerSystem}, {"phase", record.phase}, {"workloadName", record.workloadName},
+						{"activationPredicate", record.activationPredicateKey}, {"active", record.active}, {"ready", record.ready},
+						{"path", WorkloadPathText(record.selectedPath)}, {"status", WorkloadStatusText(record.status)},
+						{"workerIdentityAvailable", record.workerIdentityAvailable}, {"workerId", record.workerId},
+						{"queueDepthAtEnqueue", record.queueDepthAtEnqueue}, {"queueDepthAtStart", record.queueDepthAtStart},
+						{"dispatchCount", record.dispatchCount}, {"usefulWorkItemCount", record.usefulWorkItemCount},
+						{"partitionIndex", record.partitionIndex}, {"partitionCount", record.partitionCount},
+						{"itemBegin", record.itemBegin}, {"itemEnd", record.itemEnd},
+						{"sameFrameVisibilityRequired", record.sameFrameVisibilityRequired},
+						{"queueDuration", SerializeDuration(record.queueDuration)}, {"runDuration", SerializeDuration(record.runDuration)},
+						{"coordinatorWaitDuration", SerializeDuration(record.coordinatorWaitDuration)},
+						{"ownershipWaitDuration", SerializeDuration(record.ownershipWaitDuration)},
+						{"flushDuration", SerializeDuration(record.flushDuration)}, {"publicationDuration", SerializeDuration(record.publicationDuration)}
+					});
+				}
+				for (const TerraEngine::Scheduling::FrameWorkloadDeclaration& workload : plan.workloads)
+				{
+					for (const std::string& dependency : workload.explicitDependencies)
+					{
+						dependencyEdges.push_back({{"beforeDescriptorId", dependency}, {"afterDescriptorId", workload.stableDescriptorId}, {"afterWorkload", workload.workloadName}});
+					}
+				}
+				for (const ThreadPoolWorkerTelemetry& worker : telemetry->workers)
+				{
+					nlohmann::json history = nlohmann::json::array();
+					for (const ThreadPoolWorkerTelemetrySample& sample : worker.history)
+					{
+						history.push_back({{"sequence", sample.sequence}, {"queueDepthAtEnqueue", sample.queueDepthAtEnqueue}, {"queueDepthAtStart", sample.queueDepthAtStart}, {"usefulItemCount", sample.usefulItemCount}, {"waitNanoseconds", sample.waitNanoseconds}, {"runNanoseconds", sample.runNanoseconds}, {"idleNanoseconds", sample.idleNanoseconds}});
+					}
+					workers.push_back({{"workerId", worker.workerIndex}, {"activity", WorkerActivityText(worker.activity)}, {"latestQueueDepthAtEnqueue", worker.latestQueueDepthAtEnqueue}, {"latestQueueDepthAtStart", worker.latestQueueDepthAtStart}, {"dispatchCount", worker.dispatchCount}, {"usefulItemCount", worker.usefulItemCount}, {"waitNanoseconds", worker.waitNanoseconds}, {"runNanoseconds", worker.runNanoseconds}, {"idleNanoseconds", worker.idleNanoseconds}, {"droppedHistorySampleCount", worker.droppedHistorySampleCount}, {"history", history}});
+				}
+			}
+			const TerraEngine::Scheduling::ScheduleSummary& schedule = engine->GetSchedulerSummary();
 
 			return {
 				{"available", true},
@@ -1366,6 +1680,8 @@ namespace TerraEngine::Editor::Automation
 				{"workloadCount", plan.workloads.size()},
 				{"resultCount", plan.results.size()},
 				{"diagnostics", diagnostics},
+				{"droppedExecutionRecordCount", plan.droppedExecutionRecordCount},
+				{"executionTelemetry", nlohmann::json{{"detailIncluded", includeDetails}, {"executionRecords", executionRecords}, {"dependencyEdges", dependencyEdges}, {"workerTelemetryGeneration", telemetry->generation}, {"workerTelemetrySamplingIntervalDispatches", telemetry->samplingIntervalDispatches}, {"workerHistoryCapacityPerWorker", telemetry->historyCapacityPerWorker}, {"droppedWorkerHistorySampleCount", telemetry->droppedHistorySampleCount}, {"workers", workers}, {"conditionalFlush", nlohmann::json{{"afterPhysicsActive", schedule.afterPhysicsFlushActive}, {"consumer", schedule.afterPhysicsConsumer}, {"reason", schedule.afterPhysicsReason}}}}},
 				{"migrationSummary", SerializeArchitectureMigrationSummary(engine->GetArchitectureMigrationSummary())},
 				{"workerCoverage", SerializeWorkerCoverage(engine->GetWorkerCoverageReport())},
 				{"runtimeLayout", nlohmann::json{
@@ -1794,6 +2110,7 @@ namespace TerraEngine::Editor::Automation
 		add("prefab.overrides.revert", "prefab", MutationMode::SceneMutation, true, true, false, "instance");
 		add("prefab.edit.open", "prefab", MutationMode::ProjectMutation, true, false, false, "prefab, dirtyPolicy");
 		add("prefab.edit.close", "prefab", MutationMode::ProjectMutation, true, false, false, "contextId, dirtyPolicy");
+		add("script.status", "script", MutationMode::ReadOnly, true, false, false, "no arguments");
 		add("script.templates.list", "script", MutationMode::ReadOnly, true, false, false, "no arguments");
 		add("script.create", "script", MutationMode::AssetMutation, true, false, false, "template, typeName, namespace?, destination");
 		add("script.types.list", "script", MutationMode::ReadOnly, true, false, false, "no arguments");
@@ -1811,6 +2128,8 @@ namespace TerraEngine::Editor::Automation
 		add("settings.editor.set", "settings", MutationMode::ProjectMutation, false, false, true, "key, value");
 		for (const std::string& name : {"scene_view.state", "scene_view.camera.set", "scene_view.frame_object", "scene_view.tool.set", "scene_view.orientation.set", "scene_view.snapping.set", "scene_view.visualization.set"})
 			add(name, "scene_view", name == "scene_view.state" ? MutationMode::ReadOnly : MutationMode::EditorSelection, false, false, false, "semantic Scene View arguments");
+		add("scene_view.settings.get", "scene_view", MutationMode::ReadOnly, false, false, false, "no arguments");
+		add("scene_view.settings.set", "scene_view", MutationMode::EditorSelection, false, false, true, "settings: complete validated Scene View performance document");
 		for (const std::string& name : {"profiler.capture.start", "profiler.capture.stop", "profiler.capture.list", "profiler.capture.load", "profiler.capture.summary"})
 			add(name, "profiler", name.ends_with("list") || name.ends_with("summary") ? MutationMode::ReadOnly : MutationMode::ProjectMutation, true, false, false, "artifactId?");
 		add("editor.commands.list", "editor_commands", MutationMode::ReadOnly, false, false, false, "no arguments");
@@ -2034,6 +2353,45 @@ namespace TerraEngine::Editor::Automation
 				{"queues", {{"commands", diagnostics->queues.commandDepth}, {"queries", diagnostics->queues.queryDepth}, {"events", diagnostics->queues.eventDepth}}},
 				{"memory", {{"snapshots", diagnostics->memory.snapshotBytes}, {"highWater", diagnostics->memory.highWaterBytes}, {"providerAllocations", diagnostics->memory.outstandingProviderAllocations}, {"providerAllocationHighWater", diagnostics->memory.highWaterProviderAllocations}}},
 				{"cache", {{"shapes", diagnostics->cache.sharedShapeCount}, {"assets", diagnostics->cache.assetCount}, {"bytes", diagnostics->cache.payloadBytes}, {"hits", diagnostics->cache.hitCount}, {"misses", diagnostics->cache.missCount}}},
+				{"authoring", {
+					{"generation", diagnostics->authoring.authoringGeneration}, {"snapshotGeneration", diagnostics->authoring.snapshotGeneration},
+					{"assetJournalGeneration", diagnostics->authoring.assetJournalGeneration}, {"changedObjects", diagnostics->authoring.changedObjects},
+					{"added", diagnostics->authoring.added}, {"removed", diagnostics->authoring.removed}, {"transforms", diagnostics->authoring.transforms},
+					{"bodyComponents", diagnostics->authoring.bodyComponents}, {"colliderComponents", diagnostics->authoring.colliderComponents},
+					{"hierarchyDependencies", diagnostics->authoring.hierarchyDependencies}, {"colliderAssets", diagnostics->authoring.colliderAssets},
+					{"materialAssets", diagnostics->authoring.materialAssets}, {"settings", diagnostics->authoring.settings},
+					{"assetObservations", diagnostics->authoring.assetObservations}, {"snapshotReused", diagnostics->authoring.snapshotReused},
+					{"fullAssetRefresh", diagnostics->authoring.fullAssetRefresh}}},
+				{"preparation", {
+					{"executionPath", diagnostics->preparation.executionPath}, {"estimatedWorkItems", diagnostics->preparation.estimatedWorkItems},
+					{"ranges", diagnostics->preparation.rangeCount}, {"creates", diagnostics->preparation.creates}, {"removals", diagnostics->preparation.removals},
+					{"updates", diagnostics->preparation.updates}, {"dependencyRebuilds", diagnostics->preparation.dependencyRebuilds},
+					{"scratchActiveItems", diagnostics->preparation.scratchActiveItems}, {"scratchHighWatermark", diagnostics->preparation.scratchHighWatermark},
+					{"scratchAllocations", diagnostics->preparation.scratchAllocations}, {"scratchReuses", diagnostics->preparation.scratchReuses},
+					{"rejected", diagnostics->preparation.rejected}, {"failure", diagnostics->preparation.failure}}},
+				{"extraction", {
+					{"providerOrderGeneration", diagnostics->extraction.providerOrderGeneration}, {"totalBodies", diagnostics->extraction.totalBodies},
+					{"activeBodies", diagnostics->extraction.activeBodies}, {"examinedBodies", diagnostics->extraction.examinedBodies},
+					{"extractedBodies", diagnostics->extraction.extractedBodies}, {"convertedBodies", diagnostics->extraction.convertedBodies},
+					{"changedBodies", diagnostics->extraction.changedBodies}, {"removedBodies", diagnostics->extraction.removedBodies},
+					{"ranges", diagnostics->extraction.rangeCount}, {"fieldMask", diagnostics->extraction.fieldMask}, {"fullState", diagnostics->extraction.fullState},
+					{"parallelReads", diagnostics->extraction.parallelReads}, {"serialFallback", diagnostics->extraction.serialFallback},
+					{"eventDrain", diagnostics->extraction.eventDrain}}},
+				{"stateStore", {
+					{"generation", diagnostics->stateStore.storeGeneration}, {"providerOrderGeneration", diagnostics->stateStore.providerOrderGeneration},
+					{"publications", diagnostics->stateStore.publicationCount}, {"rejectedBatches", diagnostics->stateStore.rejectedBatchCount},
+					{"pages", diagnostics->stateStore.pageCount}, {"pagesReused", diagnostics->stateStore.pagesReused},
+					{"pagesCopied", diagnostics->stateStore.pagesCopied}, {"bodies", diagnostics->stateStore.bodyCount},
+					{"retainedBytes", diagnostics->stateStore.retainedBytes}}},
+				{"publication", {
+					{"preparedPackets", diagnostics->publication.preparedPackets}, {"acceptedPackets", diagnostics->publication.acceptedPackets},
+					{"rejectedPackets", diagnostics->publication.rejectedPackets}, {"acknowledgedEntries", diagnostics->publication.acknowledgedEntries},
+					{"emptyPacketsSkipped", diagnostics->publication.emptyPacketsSkipped}, {"entries", diagnostics->publication.currentEntries},
+					{"chunks", diagnostics->publication.currentChunks}, {"pendingGroups", diagnostics->publication.pendingGroups},
+					{"targetBoundary", diagnostics->publication.targetBoundary}, {"lastFailure", diagnostics->publication.lastFailure}}},
+				{"rate", {
+					{"aggregateIntervalFrames", diagnostics->rate.aggregateIntervalFrames}, {"lastAggregateTick", diagnostics->rate.lastAggregateTick},
+					{"aggregateRefreshed", diagnostics->rate.aggregateRefreshed}, {"currentHealthPublished", diagnostics->rate.currentHealthPublished}}},
 				{"scheduler", std::move(scheduler)}
 			}));
 		}
@@ -2692,6 +3050,14 @@ namespace TerraEngine::Editor::Automation
 					return playError(ErrorCategory::Unavailable, "A project with an active saved scene is required.");
 				if(mainEditor == nullptr || !mainEditor->StartPlayMode())
 					return playError(ErrorCategory::Unavailable, "Play Mode could not create its fresh Jolt 5.6 physics world.");
+				state = playStateData();
+				const ProjectReadinessState readiness = editorContext->projectManager->GetReadinessState();
+				state["readiness"] = {
+					{"simulationEssentialReady", readiness.simulationEssentialReady},
+					{"editorMetadataDeferred", readiness.editorMetadataDeferred},
+					{"sceneSource", readiness.sceneReadinessSource}
+				};
+				return BuildSuccess(requestId, "Entered Play Mode with a complete authored scene.", std::move(state));
 			}
 			else if (operation == AutomationOperation("play.pause"))
 			{
@@ -2717,7 +3083,28 @@ namespace TerraEngine::Editor::Automation
 				if(mainEditor == nullptr) return playError(ErrorCategory::Unavailable, "The native editor lifecycle coordinator is unavailable.");
 				mainEditor->StopPlayMode();
 				state = playStateData();
-				state["restoration"] = {{"completed", true}, {"partialFailures", nlohmann::json::array()}};
+				const MainEditorSubsystem::PlayModeRestorationResult& restoration = mainEditor->GetLastPlayModeRestorationResult();
+				nlohmann::json partialFailures = nlohmann::json::array();
+				if (!restoration.completed)
+				{
+					partialFailures.push_back(restoration.reason.empty() ? "authored_restore_incomplete" : restoration.reason);
+				}
+				// Preserve the original completed/partialFailures fields and append
+				// protected-boundary, generation, and authored-state facts for clients
+				// that need to distinguish a stale packet from a successful restore.
+				state["restoration"] = {
+					{"completed", restoration.completed},
+					{"partialFailures", std::move(partialFailures)},
+					{"boundary", restoration.boundary},
+					{"preparedGeneration", restoration.preparedGeneration},
+					{"publishedGeneration", restoration.publishedGeneration},
+					{"stale", restoration.stale},
+					{"cancelled", restoration.cancelled},
+					{"selectionRestored", restoration.selectionRestored},
+					{"dirtyStateRestored", restoration.dirtyStateRestored},
+					{"prefabStatePreserved", restoration.prefabStatePreserved}
+				};
+				state["readiness"] = {{"source", "authored_bulk_packet"}, {"snapshotCaptured", restoration.snapshotCaptured}};
 				return BuildSuccess(requestId, "Exited Play Mode and restored authored state.", std::move(state));
 			}
 			return BuildSuccess(requestId, "Changed Play Mode state.", playStateData());
@@ -2746,7 +3133,12 @@ namespace TerraEngine::Editor::Automation
 				}
 				else if (status.state == ScriptCoordinatorState::Ready)
 				{
-					(void)jobService.CompleteSucceeded(jobId, {{"assemblyPath", status.activeAssemblyPath.generic_string()}, {"attachableTypeCount", status.attachableTypes.size()}});
+					(void)jobService.CompleteSucceeded(jobId, {
+						{"assemblyPath", status.activeAssemblyPath.generic_string()},
+						{"attachableTypeCount", status.attachableTypes.size()},
+						{"forcedBuild", true},
+						{"readiness", BuildManagedReadinessEvidence(status, true)}
+					});
 				}
 				else if (status.state == ScriptCoordinatorState::Failed)
 				{
@@ -3173,6 +3565,39 @@ namespace TerraEngine::Editor::Automation
 			}
 			return BuildSuccess(requestId, result.message, result.data);
 		}
+		if (operation == AutomationOperation("script.status"))
+		{
+			const ScriptCompilationSubsystem& compiler = ScriptCompilationSubsystem::Instance();
+			const ScriptCompilationStatus& status = compiler.GetStatus();
+			const ScriptWorkspaceService& workspace = compiler.GetWorkspaceService();
+			const std::string profile = status.activeProfile == ScriptBuildProfile::Debug ? "Debug" : "Release";
+			const ManagedReadinessInputs fingerprints = workspace.BuildManagedReadinessInputs(profile);
+			const std::filesystem::path assemblyPath = workspace.GetAssemblyPath();
+			std::error_code relativeError;
+			const std::filesystem::path projectRoot = editorContext != nullptr && editorContext->projectManager != nullptr
+				? editorContext->projectManager->GetProjectRoot()
+				: std::filesystem::path{};
+			const std::filesystem::path relativeAssembly = projectRoot.empty()
+				? assemblyPath
+				: std::filesystem::relative(assemblyPath, projectRoot, relativeError);
+			return BuildSuccess(requestId, "Read managed scripting readiness.", {
+				{"coordinatorState", ScriptCoordinatorStateName(status.state)},
+				{"readiness", BuildManagedReadinessEvidence(status, false)},
+				{"fingerprint", {
+					{"source", fingerprints.sourceFingerprint},
+					{"workspace", fingerprints.workspaceFingerprint},
+					{"profile", fingerprints.buildProfile},
+					{"bridge", fingerprints.bridgeFingerprint},
+					{"analyzer", fingerprints.analyzerFingerprint},
+					{"runtimeAbi", fingerprints.runtimeAbiFingerprint}
+				}},
+				{"loadedOutput", {
+					{"identity", relativeError ? assemblyPath.filename().generic_string() : relativeAssembly.generic_string()},
+					{"fingerprint", ManagedReadinessManifest::FingerprintFile(assemblyPath)},
+					{"published", status.gameplayAssemblyLoaded && !assemblyPath.empty()}
+				}}
+			});
+		}
 		if (operation == AutomationOperation("script.templates.list"))
 		{
 			ScriptWorkspaceService workspace;
@@ -3228,8 +3653,19 @@ namespace TerraEngine::Editor::Automation
 			const AutomationJobSnapshot job = jobService.Create({"script_compile", "script.compile", requestId, arguments.value("correlationId", requestId), arguments.value("idempotencyKey", std::string{}), true});
 			if (job.jobId.empty()) return BuildError(requestId, ErrorCategory::QueueFull, "Script compilation queue is full.");
 			activeScriptCompilationJobId = job.jobId;
-			ScriptCompilationSubsystem::Instance().RequestBuild(ScriptBuildReason::ManualRefresh);
-			nlohmann::json accepted = BuildSuccess(requestId, "Accepted script compilation.", {{"jobId", job.jobId}, {"state", "queued"}, {"pollTool", "jobs.get"}, {"cancelTool", "jobs.cancel"}});
+			ScriptCompilationSubsystem::Instance().RequestBuild(ScriptBuildReason::ExplicitRebuild);
+			// Manual compile is intentionally a cache-bypassing user request. Keep
+			// the established durable-job fields and append explicit evidence rather
+			// than asking MCP clients to infer that behavior from the queue state.
+			const ScriptCompilationStatus& status = ScriptCompilationSubsystem::Instance().GetStatus();
+			nlohmann::json accepted = BuildSuccess(requestId, "Accepted script compilation.", {
+				{"jobId", job.jobId},
+				{"state", "queued"},
+				{"pollTool", "jobs.get"},
+				{"cancelTool", "jobs.cancel"},
+				{"forcedBuild", true},
+				{"readiness", BuildManagedReadinessEvidence(status, true)}
+			});
 			accepted["status"] = "accepted";
 			return accepted;
 		}
@@ -3332,16 +3768,61 @@ namespace TerraEngine::Editor::Automation
 			return BuildSuccess(requestId, write ? "Persisted allowlisted setting." : "Read allowlisted setting.", {{"key", key}, {"value", value}, {"allowedKeys", allowedKeys}, {"persisted", write}});
 		}
 		if (IsOperationOneOf(operation, {
-			AutomationOperation("scene_view.state"), AutomationOperation("scene_view.camera.set"),
+			AutomationOperation("scene_view.state"), AutomationOperation("scene_view.settings.get"),
+			AutomationOperation("scene_view.settings.set"), AutomationOperation("scene_view.camera.set"),
 			AutomationOperation("scene_view.frame_object"), AutomationOperation("scene_view.tool.set"),
 			AutomationOperation("scene_view.orientation.set"), AutomationOperation("scene_view.snapping.set"),
 			AutomationOperation("scene_view.visualization.set")}))
 		{
+			if (operation == AutomationOperation("scene_view.settings.get")
+				|| operation == AutomationOperation("scene_view.settings.set"))
+			{
+				if (editorContext == nullptr || editorContext->projectManager == nullptr)
+				{
+					return BuildError(requestId, ErrorCategory::Unavailable, "Editor preferences are unavailable.");
+				}
+				ProjectManager& projects = *editorContext->projectManager;
+				if (operation == AutomationOperation("scene_view.settings.set"))
+				{
+					if (!arguments.contains("settings"))
+					{
+						return BuildError(requestId, ErrorCategory::Validation, "A complete Scene View settings document is required.");
+					}
+					SceneViewOverlay::SceneOverlayPreference candidate = projects.GetEditorPreferences().sceneViewOverlay;
+					std::string settingsError;
+					if (!ParseSceneViewPerformancePreference(arguments["settings"], candidate, settingsError)
+						|| !projects.SetSceneViewOverlayPreference(candidate, &settingsError))
+					{
+						return BuildError(requestId, ErrorCategory::Validation, settingsError);
+					}
+				}
+				const SceneViewOverlay::SceneOverlayPreference& configured = projects.GetEditorPreferences().sceneViewOverlay;
+				const std::uint32_t objectCount = static_cast<std::uint32_t>(std::min<std::size_t>(
+					ObjectManager::instance().getRegistry().storage<entt::entity>().size(),
+					std::numeric_limits<std::uint32_t>::max()));
+				const SceneViewOverlay::SceneViewLargeSceneState effective = SceneViewOverlay::ResolveLargeSceneState(configured, objectCount);
+				nlohmann::json effectiveSettings = SerializeSceneViewPerformancePreference(configured);
+				effectiveSettings["largeSceneEffective"] = effective.effective;
+				effectiveSettings["effectiveReason"] = effective.effective ? "object_threshold" : "below_threshold";
+				return BuildSuccess(
+					requestId,
+					operation == AutomationOperation("scene_view.settings.set") ? "Persisted Scene View performance settings." : "Read Scene View performance settings.",
+					{{"configured", SerializeSceneViewPerformancePreference(configured)},
+					 {"effective", std::move(effectiveSettings)},
+					 {"persisted", operation == AutomationOperation("scene_view.settings.set")}});
+			}
 			const std::shared_ptr<SceneViewWindow> sceneView = mainEditor != nullptr ? mainEditor->GetWindow<SceneViewWindow>() : nullptr;
 			if (sceneView == nullptr)
 				return BuildError(requestId, ErrorCategory::Unavailable, "Scene View semantic control is unavailable without a registered Scene View service.");
 			if (operation == AutomationOperation("scene_view.state"))
-				return BuildSuccess(requestId, "Read Scene View state.", {{"state", sceneView->GetAutomationState()}});
+			{
+				nlohmann::json state = sceneView->GetAutomationState();
+				const nlohmann::json performance = SerializeSceneViewPerformanceState(SceneViewOverlay::GetLatestDiagnosticsSnapshot());
+				state["largeScene"] = performance["largeScene"];
+				state["markers"] = performance["markers"];
+				state["stageTimings"] = performance["stageTimings"];
+				return BuildSuccess(requestId, "Read Scene View state.", {{"state", std::move(state)}});
+			}
 
 			std::string error;
 			bool changed = false;
@@ -3405,7 +3886,18 @@ namespace TerraEngine::Editor::Automation
 				nlohmann::json artifacts = nlohmann::json::array();
 				for (const auto& item : editorContext->editorProfiler->GetAutomationCaptureList())
 				{
-					artifacts.push_back({{"artifactId", item.artifactId}, {"name", item.artifact.fileName}, {"frameCount", item.artifact.frameCount}, {"status", item.artifact.status}});
+					// Artifact facts are additive.  Existing clients may continue to
+					// use name/frameCount/status while v2-aware clients can distinguish
+					// a recovered tail from a complete capture without reading files.
+					artifacts.push_back({
+						{"artifactId", item.artifactId}, {"name", item.artifact.fileName},
+						{"frameCount", item.artifact.frameCount}, {"status", item.artifact.status},
+						{"payloadVersion", item.artifact.payloadVersion}, {"committedFrameCount", item.artifact.committedFrameCount},
+						{"complete", item.artifact.complete}, {"recoveredIncompleteTail", item.artifact.recoveredIncompleteTail},
+						{"captureLevel", TerraEngine::Profiling::ToString(item.artifact.metadata.settings.detailLevel)},
+						{"maximumChunkFrames", item.artifact.metadata.settings.maximumChunkFrames},
+						{"maximumChunkBytes", item.artifact.metadata.settings.maximumChunkBytes}
+					});
 				}
 				return BuildSuccess(requestId, "Listed profiler captures.", {{"artifacts", artifacts}});
 			}
@@ -3433,17 +3925,71 @@ namespace TerraEngine::Editor::Automation
 				{
 					streams.push_back({{"id", stream.id}, {"label", stream.label}, {"samples", stream.sampleCount}, {"missing", stream.missingCount}, {"meanMs", stream.meanMs}, {"p95Ms", stream.p95Ms}, {"maxMs", stream.maxMs}});
 				}
-				return BuildSuccess(requestId, "Summarized profiler capture.", {{"summary", {{"artifactId", summary.artifactId}, {"frameCount", summary.frameCount}, {"completeFrameCount", summary.completeFrameCount}, {"incompleteFrameCount", summary.incompleteFrameCount}, {"totalDurationMs", summary.totalDurationMs}, {"minimumFrameMs", summary.minimumFrameMs}, {"maximumFrameMs", summary.maximumFrameMs}, {"averageFrameMs", summary.averageFrameMs}, {"timingStreams", streams}}}});
+				const auto serializeMetrics = [](const std::vector<EditorProfilerMetricSummary>& metrics) {
+					nlohmann::json result = nlohmann::json::array();
+					for (const EditorProfilerMetricSummary& metric : metrics)
+					{
+						result.push_back({{"id", metric.id}, {"label", metric.label}, {"unit", metric.unit},
+							{"available", metric.available}, {"unavailableReason", metric.unavailableReason},
+							{"sampleCount", metric.sampleCount}, {"unavailableCount", metric.unavailableCount},
+							{"median", metric.median}, {"p95", metric.p95}, {"p99", metric.p99}, {"maximum", metric.maximum}});
+					}
+					return result;
+				};
+				nlohmann::json workers = nlohmann::json::array();
+				for (const EditorProfilerWorkerSummary& worker : summary.workerHistories)
+				{
+					workers.push_back({{"workerId", worker.workerId}, {"sampleCount", worker.sampleCount}, {"maximumQueueDepth", worker.maximumQueueDepth},
+						{"totalDispatchCount", worker.totalDispatchCount}, {"totalUsefulWorkItems", worker.totalUsefulWorkItems},
+						{"run", serializeMetrics({worker.runDuration})}, {"wait", serializeMetrics({worker.waitDuration})}, {"idle", serializeMetrics({worker.idleDuration})}});
+				}
+				return BuildSuccess(requestId, "Summarized profiler capture.", {{"summary", {
+					{"artifactId", summary.artifactId}, {"frameCount", summary.frameCount}, {"completeFrameCount", summary.completeFrameCount},
+					{"incompleteFrameCount", summary.incompleteFrameCount}, {"totalDurationMs", summary.totalDurationMs},
+					{"minimumFrameMs", summary.minimumFrameMs}, {"maximumFrameMs", summary.maximumFrameMs}, {"averageFrameMs", summary.averageFrameMs},
+					{"payloadVersion", summary.payloadVersion}, {"committedFrameCount", summary.committedFrameCount},
+					{"artifactSizeBytes", summary.artifactSizeBytes}, {"complete", summary.captureComplete},
+					{"recoveredIncompleteTail", summary.recoveredIncompleteTail}, {"timingStreams", streams},
+					{"stageTimings", serializeMetrics(summary.stageTimings)}, {"protectedBoundaryTimings", serializeMetrics(summary.protectedBoundaryTimings)},
+					{"presentationWaitTimings", serializeMetrics(summary.presentationWaitTimings)}, {"responsivenessTimings", serializeMetrics(summary.responsivenessTimings)},
+					{"workerHistories", workers}, {"workVolumes", {{"measuredTickCount", summary.workVolumes.measuredTickCount}, {"totalBodies", summary.workVolumes.totalBodies},
+						{"activeBodies", summary.workVolumes.activeBodies}, {"examinedBodies", summary.workVolumes.examinedBodies}, {"extractedBodies", summary.workVolumes.extractedBodies},
+						{"convertedBodies", summary.workVolumes.convertedBodies}, {"changedBodies", summary.workVolumes.changedBodies}, {"publishedBodies", summary.workVolumes.publishedBodies}}}
+				}}});
 			}
 			if (operation == AutomationOperation("profiler.capture.start"))
 			{
-				editorContext->editorProfiler->StartRecording();
+				TerraEngine::Profiling::ProfilerCaptureSettings settings{};
+				settings.maxFrames = 10000u;
+				settings.maxDurationSeconds = 0.0;
+				try
+				{
+					const std::string captureLevel = arguments.value("captureLevel", std::string("detailed"));
+					if (captureLevel == "detailed") settings.detailLevel = TerraEngine::Profiling::ProfilerCaptureDetailLevel::Detailed;
+					else if (captureLevel == "sampled") settings.detailLevel = TerraEngine::Profiling::ProfilerCaptureDetailLevel::Sampled;
+					else if (captureLevel == "aggregate") settings.detailLevel = TerraEngine::Profiling::ProfilerCaptureDetailLevel::Aggregate;
+					else return BuildError(requestId, ErrorCategory::Validation, "captureLevel must be detailed, sampled, or aggregate.");
+					if (arguments.value("payloadVersion", 2u) != 2u)
+						return BuildError(requestId, ErrorCategory::Validation, "New recording produces v2 captures; v1 remains load-compatible only.");
+					settings.maximumChunkFrames = arguments.value("maximumChunkFrames", settings.maximumChunkFrames);
+					settings.maximumChunkBytes = arguments.value("maximumChunkBytes", settings.maximumChunkBytes);
+					settings.sampleIntervalFrames = arguments.value("sampleIntervalFrames", settings.sampleIntervalFrames);
+				}
+				catch (const nlohmann::json::exception&)
+				{
+					return BuildError(requestId, ErrorCategory::Validation, "Profiler capture options have invalid types.");
+				}
+				if (settings.maximumChunkFrames == 0u || settings.maximumChunkFrames > 4096u || settings.maximumChunkBytes < 1024u || settings.maximumChunkBytes > 8388608u || settings.sampleIntervalFrames == 0u || settings.sampleIntervalFrames > 1024u)
+					return BuildError(requestId, ErrorCategory::Validation, "Profiler capture bounds are outside the supported range.");
+				editorContext->editorProfiler->StartRecording(settings);
 				if (editorContext->editorProfiler->GetState() != TerraEngine::Profiling::ProfilerSessionState::Recording)
 					return BuildError(requestId, ErrorCategory::Unavailable, editorContext->editorProfiler->GetLastError());
 				const AutomationJobSnapshot job = jobService.Create({"profiler", std::string(operationName), requestId, arguments.value("correlationId", requestId), {}, false});
 				if (job.jobId.empty()) return BuildError(requestId, ErrorCategory::QueueFull, "Profiler job queue is full.");
 				(void)jobService.CompleteSucceeded(job.jobId, {{"state", "recording"}});
-				return BuildSuccess(requestId, "Started profiler capture.", {{"jobId", job.jobId}, {"state", "succeeded"}});
+				return BuildSuccess(requestId, "Started profiler capture.", {{"jobId", job.jobId}, {"state", "succeeded"},
+					{"captureLevel", TerraEngine::Profiling::ToString(settings.detailLevel)}, {"payloadVersion", 2u},
+					{"bounds", {{"maximumChunkFrames", settings.maximumChunkFrames}, {"maximumChunkBytes", settings.maximumChunkBytes}, {"sampleIntervalFrames", settings.sampleIntervalFrames}}}});
 			}
 			if (operation == AutomationOperation("profiler.capture.stop"))
 			{
@@ -3663,6 +4209,29 @@ namespace TerraEngine::Editor::Automation
 		data["projectGeneration"] = automationState.projectGeneration;
 		data["sceneGeneration"] = automationState.sceneGeneration;
 		data["availableServices"] = automationState.availableServices;
+		if (hasProject)
+		{
+			const ProjectSceneLoadDecision decision = editorContext->projectManager->GetLastSceneLoadDecision();
+			const ProjectReadinessState readiness = editorContext->projectManager->GetReadinessState();
+			data["derivedScene"] = {
+				{"state", decision.cacheState},
+				{"cacheHit", decision.cacheHit},
+				{"usedAuthoritativeSource", decision.usedAuthoritativeSource},
+				{"regenerationPublished", decision.regenerationPublished},
+				{"cancelled", decision.cancelled},
+				{"sourcePath", decision.sourcePath.generic_string()},
+				{"derivedPath", decision.derivedPath.generic_string()},
+				{"reason", decision.reason}
+			};
+			data["readiness"] = {
+				{"projectSettingsReady", readiness.projectSettingsReady},
+				{"simulationEssentialReady", readiness.simulationEssentialReady},
+				{"editorMetadataDeferred", readiness.editorMetadataDeferred},
+				{"editorMetadataReady", readiness.editorMetadataReady},
+				{"sceneSource", readiness.sceneReadinessSource},
+				{"reason", readiness.sceneReadinessReason}
+			};
+		}
 		data["selectedObject"] = nullptr;
 		if (getSelectedEntity)
 		{
@@ -3717,10 +4286,11 @@ namespace TerraEngine::Editor::Automation
 			boundaryFindings.push_back(SerializeHardBoundary(boundary));
 		}
 		const ::Engine* engine = editorContext != nullptr ? editorContext->engine : nullptr;
-		const nlohmann::json parallelFrame = SerializeParallelFrameDiagnostics(engine);
+		const nlohmann::json parallelFrame = SerializeParallelFrameDiagnostics(engine, includeDetails);
 		const nlohmann::json mutationDiagnostics = SerializeMutationDiagnostics();
 		const TerraEngine::Renderer::RenderDiagnosticsSummary renderDiagnostics = RenderSystem::Instance().GetLatestRenderGraphDiagnostics();
 		const nlohmann::json profilerTimingStreams = includeDetails ? SerializeProfilerTimingStreams() : nlohmann::json::array();
+		const nlohmann::json profilerCaptureEvidence = includeDetails ? SerializeProfilerCaptureEvidence() : nlohmann::json::object();
 		nlohmann::json virtualGeometryGateJson = nlohmann::json::array();
 		std::uint32_t virtualGeometryGateFailures = 0u;
 		std::uint32_t virtualGeometryGateUnsupported = 0u;
@@ -3783,6 +4353,7 @@ namespace TerraEngine::Editor::Automation
 		data["sceneView"] = sceneViewDiagnostics;
 		data["rendererRecovery"] = SerializeRendererRecoverySnapshot(renderDiagnostics.rendererRecovery);
 		data["profilerTimingStreams"] = profilerTimingStreams;
+		data["profilerCaptureEvidence"] = profilerCaptureEvidence;
 		data["hardBoundaries"] = boundaryFindings;
 		data["mutationDiagnostics"] = mutationDiagnostics;
 		data["virtualGeometryPerformanceGates"] = includeDetails ? virtualGeometryGateJson : nlohmann::json::array();
@@ -3843,7 +4414,7 @@ namespace TerraEngine::Editor::Automation
 		snapshot.playState = !ScriptingSystem::Instance().IsRunning() ? "stopped" : (ScriptingSystem::Instance().IsPaused() ? "paused" : "playing");
 		if (snapshot.projectAvailable)
 		{
-			snapshot.projectGeneration = std::hash<std::string>{}(editorContext->projectManager->GetProjectRoot().generic_string());
+			snapshot.projectGeneration = editorContext->projectManager->GetProjectLoadGeneration();
 		}
 		if (const SceneDocument* activeScene = SceneManager::Instance().GetActiveScene())
 		{

@@ -110,6 +110,13 @@ void ObjectManager::removeFromLookupBucket(std::unordered_map<std::string, std::
 // ObjectManager::notifySpatialObjectDirty is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ObjectManager::notifySpatialObjectDirty(entt::entity entityId)
 {
+	if (bulkPublicationActive)
+	{
+		// Per-object bounds are intentionally invisible until the complete
+		// packet is published.  The final boundary advances one shared revision.
+		bulkPublicationChanged = true;
+		return;
+	}
 	// Spatial indexes consume this monotonically increasing revision to decide
 	// when their cached world bounds may be stale. The callback carries the
 	// specific entity for systems that want incremental refreshes.
@@ -123,14 +130,216 @@ void ObjectManager::notifySpatialObjectDirty(entt::entity entityId)
 
 void ObjectManager::notifyHierarchyDirty()
 {
+	if (bulkPublicationActive)
+	{
+		bulkPublicationChanged = true;
+		return;
+	}
 	// Hierarchy snapshots depend only on parent/child identity and ordering.
 	// Keeping this revision separate from transform edits lets runtime systems
 	// reuse flattened traversal when only local transform values changed.
 	++hierarchyRevision;
 }
 
+TerraEngine::Scene::SceneObjectRevisionSnapshot ObjectManager::captureSceneObjectRevision(const Object& object) const
+{
+	TerraEngine::Scene::SceneObjectRevisionSnapshot snapshot;
+	const entt::entity entityId = object.EntityId();
+	if (!registry.valid(entityId))
+	{
+		return snapshot;
+	}
+
+	// Copy every consumer-facing revision while the protected path owns the
+	// registry. The resulting record can then be read by workers without a
+	// live ObjectManager lookup or a race with later transactional mutations.
+	snapshot.object = object;
+	snapshot.objectId = getEntityUUID(entityId);
+	snapshot.lifetimeGeneration = getObjectLifetimeGeneration(object);
+	snapshot.metadataGeneration = getObjectMetadataGeneration(object);
+	snapshot.componentGeneration = getObjectComponentGeneration(object);
+	snapshot.transformRevision = GetObjectTransformRevision(object);
+	snapshot.hierarchyRevision = hierarchyRevision;
+	snapshot.spatialRevision = GetObjectSpatialRevision(object);
+	if (const auto metadata = metadataMap.find(entityId); metadata != metadataMap.end())
+	{
+		snapshot.isStatic = metadata->second.isStatic;
+	}
+	if (const auto parent = parentMap.find(entityId); parent != parentMap.end() && parent->second != entt::null)
+	{
+		snapshot.parentObjectId = getEntityUUID(parent->second);
+	}
+	for (entt::entity cursor = entityId; cursor != entt::null; cursor = getParentEntityInternal(cursor))
+	{
+		if (getParentEntityInternal(cursor) != entt::null)
+		{
+			++snapshot.hierarchyDepth;
+		}
+	}
+	return snapshot;
+}
+
+void ObjectManager::recordSceneChange(TerraEngine::Scene::SceneChangeKind kind, const TerraEngine::Scene::SceneObjectRevisionSnapshot& snapshot)
+{
+	if (bulkPublicationActive)
+	{
+		// The caller will publish a complete replacement, not thousands of
+		// incremental records that no consumer may observe independently.
+		bulkPublicationChanged = true;
+		return;
+	}
+	if (snapshot.objectId == TerraEngine::EMPTY_UUID)
+	{
+		return;
+	}
+
+	// Multiple edits to one object coalesce into one exact record per category.
+	// The newest revision evidence is retained so a consumer never validates an
+	// earlier transform or metadata version after the protected boundary.
+	PendingSceneChange& pending = pendingSceneChanges[snapshot.objectId];
+	pending.snapshot = snapshot;
+	pending.kinds |= 1u << static_cast<std::uint32_t>(kind);
+}
+
+TerraEngine::Scene::SceneChangePacket ObjectManager::PublishSceneChangePacket()
+{
+	if (TerraEngine::Scheduling::IsWorkerSafetyScopeActive())
+	{
+		TerraEngine::Scheduling::ReportWorkerSafetyViolation(
+			TerraEngine::Scheduling::WorkerSafetySeverity::Error,
+			"ObjectManager.PublishSceneChangePacket",
+			"Worker code attempted to publish live scene changes directly.",
+			"Publish the immutable packet at a protected scheduler boundary, then pass it to worker preparation.");
+		return {};
+	}
+	const auto hasKind = [](const PendingSceneChange& pending, TerraEngine::Scene::SceneChangeKind kind) {
+		return (pending.kinds & (1u << static_cast<std::uint32_t>(kind))) != 0;
+	};
+
+	// World transforms and world bounds of every descendant depend on an edited
+	// ancestor. Capture those exact identities while protected ownership still
+	// has a coherent hierarchy, without marking unrelated objects dirty.
+	std::unordered_set<TerraEngine::UUID> directDirtyIds;
+	std::vector<entt::entity> descendantStack;
+	for (const auto& [objectId, pending] : pendingSceneChanges)
+	{
+		if (hasKind(pending, TerraEngine::Scene::SceneChangeKind::Removed)
+			|| (!hasKind(pending, TerraEngine::Scene::SceneChangeKind::Transform)
+				&& !hasKind(pending, TerraEngine::Scene::SceneChangeKind::Hierarchy)))
+		{
+			continue;
+		}
+		directDirtyIds.insert(objectId);
+		if (const auto entity = uuidToEntity.find(objectId); entity != uuidToEntity.end())
+		{
+			if (const auto children = childrenMap.find(entity->second); children != childrenMap.end())
+			{
+				descendantStack.insert(descendantStack.end(), children->second.begin(), children->second.end());
+			}
+		}
+	}
+
+	std::unordered_map<TerraEngine::UUID, TerraEngine::Scene::SceneObjectRevisionSnapshot> propagatedDescendants;
+	std::unordered_set<entt::entity> visitedDescendants;
+	while (!descendantStack.empty())
+	{
+		const entt::entity entityId = descendantStack.back();
+		descendantStack.pop_back();
+		if (!registry.valid(entityId) || !visitedDescendants.insert(entityId).second)
+		{
+			continue;
+		}
+		const TerraEngine::UUID objectId = getEntityUUID(entityId);
+		if (objectId != TerraEngine::EMPTY_UUID)
+		{
+			if (directDirtyIds.find(objectId) == directDirtyIds.end())
+			{
+				// A descendant's local transform revision remains authoritative and
+				// unchanged, while its world bounds receive a new spatial revision.
+				notifySpatialObjectDirty(entityId);
+			}
+			propagatedDescendants[objectId] = captureSceneObjectRevision(makeObjectHandle(entityId));
+		}
+		if (const auto children = childrenMap.find(entityId); children != childrenMap.end())
+		{
+			descendantStack.insert(descendantStack.end(), children->second.begin(), children->second.end());
+		}
+	}
+
+	std::vector<TerraEngine::Scene::SceneObjectRevisionSnapshot> added;
+	std::vector<TerraEngine::Scene::SceneObjectRevisionSnapshot> removed;
+	std::vector<TerraEngine::Scene::SceneObjectRevisionSnapshot> metadataChanged;
+	std::vector<TerraEngine::Scene::SceneObjectRevisionSnapshot> componentChanged;
+	std::vector<TerraEngine::Scene::SceneObjectRevisionSnapshot> transformChanged;
+	std::vector<TerraEngine::Scene::SceneObjectRevisionSnapshot> hierarchyChanged;
+	std::vector<TerraEngine::Scene::SceneObjectRevisionSnapshot> boundsChanged;
+	for (const auto& [objectId, pending] : pendingSceneChanges)
+	{
+		(void)objectId;
+		// An object created and removed before publication was never observable,
+		// so publishing it would make consumers perform useless create/delete work.
+		if (hasKind(pending, TerraEngine::Scene::SceneChangeKind::Added)
+			&& hasKind(pending, TerraEngine::Scene::SceneChangeKind::Removed))
+		{
+			continue;
+		}
+		if (hasKind(pending, TerraEngine::Scene::SceneChangeKind::Removed))
+		{
+			removed.push_back(pending.snapshot);
+			continue;
+		}
+		if (hasKind(pending, TerraEngine::Scene::SceneChangeKind::Added)) { added.push_back(pending.snapshot); }
+		if (hasKind(pending, TerraEngine::Scene::SceneChangeKind::Metadata)) { metadataChanged.push_back(pending.snapshot); }
+		if (hasKind(pending, TerraEngine::Scene::SceneChangeKind::Component)) { componentChanged.push_back(pending.snapshot); }
+		if (hasKind(pending, TerraEngine::Scene::SceneChangeKind::Transform)) { transformChanged.push_back(pending.snapshot); }
+		if (hasKind(pending, TerraEngine::Scene::SceneChangeKind::Hierarchy)) { hierarchyChanged.push_back(pending.snapshot); }
+		if (hasKind(pending, TerraEngine::Scene::SceneChangeKind::Bounds)) { boundsChanged.push_back(pending.snapshot); }
+	}
+	for (const auto& [objectId, snapshot] : propagatedDescendants)
+	{
+		const auto pending = pendingSceneChanges.find(objectId);
+		if (pending == pendingSceneChanges.end() || !hasKind(pending->second, TerraEngine::Scene::SceneChangeKind::Transform))
+		{
+			transformChanged.push_back(snapshot);
+		}
+		if (pending == pendingSceneChanges.end() || !hasKind(pending->second, TerraEngine::Scene::SceneChangeKind::Bounds))
+		{
+			boundsChanged.push_back(snapshot);
+		}
+	}
+
+	const auto sortByObjectId = [](std::vector<TerraEngine::Scene::SceneObjectRevisionSnapshot>& snapshots) {
+		std::sort(snapshots.begin(), snapshots.end(), [](const auto& left, const auto& right) {
+			return TerraEngine::ToHexString(left.objectId) < TerraEngine::ToHexString(right.objectId);
+		});
+	};
+	const auto sortHierarchy = [](std::vector<TerraEngine::Scene::SceneObjectRevisionSnapshot>& snapshots) {
+		std::sort(snapshots.begin(), snapshots.end(), [](const auto& left, const auto& right) {
+			return left.hierarchyDepth == right.hierarchyDepth
+				? TerraEngine::ToHexString(left.objectId) < TerraEngine::ToHexString(right.objectId)
+				: left.hierarchyDepth < right.hierarchyDepth;
+		});
+	};
+	sortByObjectId(added); sortByObjectId(removed); sortByObjectId(metadataChanged); sortByObjectId(componentChanged);
+	// Transform and bounds packet validation uses stable identity order; the
+	// separate hierarchy category retains parent-before-child dependency order.
+	sortByObjectId(transformChanged); sortHierarchy(hierarchyChanged); sortByObjectId(boundsChanged);
+	pendingSceneChanges.clear();
+
+	return TerraEngine::Scene::SceneChangePacket::Create(
+		sceneGeneration,
+		++sceneChangePublicationRevision,
+		std::move(added), std::move(removed), std::move(metadataChanged), std::move(componentChanged),
+		std::move(transformChanged), std::move(hierarchyChanged), std::move(boundsChanged));
+}
+
 void ObjectManager::invalidateRuntimeActiveMembership()
 {
+	if (bulkPublicationActive)
+	{
+		bulkPublicationChanged = true;
+		return;
+	}
 	// Runtime membership changes whenever hot systems must rebuild their
 	// active-only entity list. Authored metadata remains in metadataMap so
 	// editor and serialization callers can still inspect inactive objects.
@@ -185,6 +394,10 @@ const std::vector<TerraEngine::Scene::RuntimeActiveMembership>& ObjectManager::G
 
 void ObjectManager::MarkObjectTransformDirty(const Object& obj)
 {
+	if (ReportWorkerObjectMutation("ObjectManager.MarkObjectTransformDirty", "Worker code attempted to mark a live transform dirty directly."))
+	{
+		return;
+	}
 	const entt::entity entityId = obj.EntityId();
 	if (!registry.valid(entityId))
 	{
@@ -197,6 +410,9 @@ void ObjectManager::MarkObjectTransformDirty(const Object& obj)
 	++transformRevision;
 	transformRevisionByEntity[entityId] = transformRevision;
 	notifySpatialObjectDirty(entityId);
+	const TerraEngine::Scene::SceneObjectRevisionSnapshot snapshot = captureSceneObjectRevision(obj);
+	recordSceneChange(TerraEngine::Scene::SceneChangeKind::Transform, snapshot);
+	recordSceneChange(TerraEngine::Scene::SceneChangeKind::Bounds, snapshot);
 }
 
 // Create a new Object
@@ -231,12 +447,13 @@ Object ObjectManager::createObject(const std::string& name) {
 	addLookupIndex(entityId, metadata);
 	parentMap.emplace(entityId, entt::null);
 	childrenMap.emplace(entityId, std::vector<entt::entity>{});
+	recordSceneChange(TerraEngine::Scene::SceneChangeKind::Added, captureSceneObjectRevision(object));
 	
 	// Structured modifications trigger the observer callback to sync dirty state.
 	invalidateRuntimeActiveMembership();
 	notifySpatialObjectDirty(entityId);
 	notifyHierarchyDirty();
-	if (onModified) onModified();
+	if (onModified && !bulkPublicationActive) onModified();
 	
 	return object;
 }
@@ -253,6 +470,7 @@ void ObjectManager::removeObject(Object obj) {
 	if (registry.valid(entityId))
 	{
 		MarkObjectTransformDirty(obj);
+		recordSceneChange(TerraEngine::Scene::SceneChangeKind::Removed, captureSceneObjectRevision(obj));
 	}
 	if (auto metadataIter = metadataMap.find(entityId); metadataIter != metadataMap.end())
 	{
@@ -306,7 +524,7 @@ void ObjectManager::removeObject(Object obj) {
 	invalidateRuntimeActiveMembership();
 	notifyHierarchyDirty();
 
-	if (onModified) onModified();
+	if (onModified && !bulkPublicationActive) onModified();
 }
 
 // ObjectManager::setParent is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -419,9 +637,10 @@ bool ObjectManager::setParent(Object child, std::optional<Object> parent)
 	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (onModified) onModified();
+	if (onModified && !bulkPublicationActive) onModified();
 	notifyHierarchyDirty();
 	MarkObjectTransformDirty(child);
+	recordSceneChange(TerraEngine::Scene::SceneChangeKind::Hierarchy, captureSceneObjectRevision(child));
 
 	return true;
 }
@@ -506,6 +725,10 @@ std::string ObjectManager::getObjectName(const Object& obj) const
 // ObjectManager::setObjectName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ObjectManager::setObjectName(const Object& obj, const std::string& name)
 {
+	if (ReportWorkerObjectMutation("ObjectManager.setObjectName", "Worker code attempted to update live object metadata directly."))
+	{
+		return;
+	}
 	const entt::entity entityId = obj.EntityId();
 	if (!registry.valid(entityId))
 	{
@@ -521,7 +744,8 @@ void ObjectManager::setObjectName(const Object& obj, const std::string& name)
 		it->second.name = name;
 		++it->second.metadataGeneration;
 		nameIndex[name].push_back(entityId);
-		if (onModified) onModified();
+		recordSceneChange(TerraEngine::Scene::SceneChangeKind::Metadata, captureSceneObjectRevision(obj));
+		if (onModified && !bulkPublicationActive) onModified();
 	}
 }
 
@@ -539,6 +763,10 @@ std::string ObjectManager::getObjectTag(const Object& obj) const
 
 void ObjectManager::setObjectTag(const Object& obj, const std::string& tag)
 {
+	if (ReportWorkerObjectMutation("ObjectManager.setObjectTag", "Worker code attempted to update live object metadata directly."))
+	{
+		return;
+	}
 	const entt::entity entityId = obj.EntityId();
 	if (!registry.valid(entityId))
 	{
@@ -554,7 +782,8 @@ void ObjectManager::setObjectTag(const Object& obj, const std::string& tag)
 		it->second.tag = tag;
 		++it->second.metadataGeneration;
 		tagIndex[tag].push_back(entityId);
-		if (onModified) onModified();
+		recordSceneChange(TerraEngine::Scene::SceneChangeKind::Metadata, captureSceneObjectRevision(obj));
+		if (onModified && !bulkPublicationActive) onModified();
 	}
 }
 
@@ -571,6 +800,10 @@ std::string ObjectManager::getObjectLayer(const Object& obj) const
 
 void ObjectManager::setObjectLayer(const Object& obj, const std::string& layer)
 {
+	if (ReportWorkerObjectMutation("ObjectManager.setObjectLayer", "Worker code attempted to update live object metadata directly."))
+	{
+		return;
+	}
 	const entt::entity entityId = obj.EntityId();
 	if (!registry.valid(entityId))
 	{
@@ -584,7 +817,8 @@ void ObjectManager::setObjectLayer(const Object& obj, const std::string& layer)
 		}
 		it->second.layer = layer;
 		++it->second.metadataGeneration;
-		if (onModified) onModified();
+		recordSceneChange(TerraEngine::Scene::SceneChangeKind::Metadata, captureSceneObjectRevision(obj));
+		if (onModified && !bulkPublicationActive) onModified();
 	}
 }
 
@@ -601,6 +835,10 @@ bool ObjectManager::isObjectActive(const Object& obj) const
 
 void ObjectManager::setObjectActive(const Object& obj, bool active)
 {
+	if (ReportWorkerObjectMutation("ObjectManager.setObjectActive", "Worker code attempted to update live object activity directly."))
+	{
+		return;
+	}
 	const entt::entity entityId = obj.EntityId();
 	if (auto it = metadataMap.find(entityId); it != metadataMap.end())
 	{
@@ -626,8 +864,13 @@ void ObjectManager::setObjectActive(const Object& obj, bool active)
 		invalidateRuntimeActiveMembership();
 		notifySpatialObjectDirty(entityId);
 		notifyHierarchyDirty();
+		const TerraEngine::Scene::SceneObjectRevisionSnapshot snapshot = captureSceneObjectRevision(obj);
+		recordSceneChange(TerraEngine::Scene::SceneChangeKind::Metadata, snapshot);
+		recordSceneChange(TerraEngine::Scene::SceneChangeKind::Component, snapshot);
+		recordSceneChange(TerraEngine::Scene::SceneChangeKind::Hierarchy, snapshot);
+		recordSceneChange(TerraEngine::Scene::SceneChangeKind::Bounds, snapshot);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (onModified) onModified();
+		if (onModified && !bulkPublicationActive) onModified();
 	}
 }
 
@@ -646,6 +889,10 @@ bool ObjectManager::isObjectStatic(const Object& obj) const
 // ObjectManager::setObjectStatic is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ObjectManager::setObjectStatic(const Object& obj, bool isStatic)
 {
+	if (ReportWorkerObjectMutation("ObjectManager.setObjectStatic", "Worker code attempted to update live object metadata directly."))
+	{
+		return;
+	}
 	const entt::entity entityId = obj.EntityId();
 	if (auto it = metadataMap.find(entityId); it != metadataMap.end())
 	{
@@ -656,13 +903,20 @@ void ObjectManager::setObjectStatic(const Object& obj, bool isStatic)
 		it->second.isStatic = isStatic;
 		++it->second.metadataGeneration;
 		notifySpatialObjectDirty(entityId);
+		const TerraEngine::Scene::SceneObjectRevisionSnapshot snapshot = captureSceneObjectRevision(obj);
+		recordSceneChange(TerraEngine::Scene::SceneChangeKind::Metadata, snapshot);
+		recordSceneChange(TerraEngine::Scene::SceneChangeKind::Bounds, snapshot);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (onModified) onModified();
+		if (onModified && !bulkPublicationActive) onModified();
 	}
 }
 
 void ObjectManager::notifyObjectStructureChanged(const Object& obj)
 {
+	if (ReportWorkerObjectMutation("ObjectManager.notifyObjectStructureChanged", "Worker code attempted to alter live component structure directly."))
+	{
+		return;
+	}
 	if (!registry.valid(obj.EntityId()))
 	{
 		return;
@@ -677,7 +931,10 @@ void ObjectManager::notifyObjectStructureChanged(const Object& obj)
 	}
 	invalidateRuntimeActiveMembership();
 	notifySpatialObjectDirty(obj.EntityId());
-	if (onModified) onModified();
+	const TerraEngine::Scene::SceneObjectRevisionSnapshot snapshot = captureSceneObjectRevision(obj);
+	recordSceneChange(TerraEngine::Scene::SceneChangeKind::Component, snapshot);
+	recordSceneChange(TerraEngine::Scene::SceneChangeKind::Bounds, snapshot);
+	if (onModified && !bulkPublicationActive) onModified();
 }
 
 void ObjectManager::notifyManagedBindingsReloaded()
@@ -692,10 +949,10 @@ void ObjectManager::notifyManagedBindingsReloaded()
 			++metadata.bindingGeneration;
 		}
 	}
-	if (onModified)
-	{
-		onModified();
-	}
+	// Do not invoke the authored-object modification callback here. Reloading a
+	// managed assembly invalidates runtime wrapper identities only; marking the
+	// scene dirty would create a false save prompt and can block unattended editor
+	// shutdown after an explicit compile even though no serialized bytes changed.
 }
 
 std::uint64_t ObjectManager::GetObjectTransformRevision(const Object& object) const
@@ -917,8 +1174,13 @@ void ObjectManager::SortObjectsByStableId(std::vector<Object>& objects)
 // ObjectManager::UpdateObjectUUID is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ObjectManager::UpdateObjectUUID(const Object& object, const TerraEngine::UUID& newId)
 {
+	if (ReportWorkerObjectMutation("ObjectManager.UpdateObjectUUID", "Worker code attempted to replace a live object identity directly."))
+	{
+		return;
+	}
 	const entt::entity entity = object.EntityId();
 	if (!registry.valid(entity)) return;
+	const TerraEngine::Scene::SceneObjectRevisionSnapshot oldSnapshot = captureSceneObjectRevision(object);
 
 	// Allows the identity of an existing entity to be swapped. Primarily used
 	// during scene deserialization to restore authored or undo-session IDs
@@ -938,6 +1200,22 @@ void ObjectManager::UpdateObjectUUID(const Object& object, const TerraEngine::UU
 	invalidateRuntimeActiveMembership();
 	notifySpatialObjectDirty(entity);
 	notifyHierarchyDirty();
+	const TerraEngine::Scene::SceneObjectRevisionSnapshot newSnapshot = captureSceneObjectRevision(makeHandle(entity));
+	if (auto pending = pendingSceneChanges.find(oldSnapshot.objectId); pending != pendingSceneChanges.end())
+	{
+		// Deserialization commonly replaces a temporary creation UUID before the
+		// first publication. Preserve its pending categories under the authored
+		// identity so no transient UUID escapes an immutable packet.
+		PendingSceneChange moved = std::move(pending->second);
+		pendingSceneChanges.erase(pending);
+		moved.snapshot = newSnapshot;
+		pendingSceneChanges[newSnapshot.objectId] = std::move(moved);
+	}
+	else
+	{
+		recordSceneChange(TerraEngine::Scene::SceneChangeKind::Removed, oldSnapshot);
+		recordSceneChange(TerraEngine::Scene::SceneChangeKind::Added, newSnapshot);
+	}
 }
 
 // ObjectManager::detachFromParent is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1010,6 +1288,26 @@ TerraEngine::UUID ObjectManager::getEntityUUID(entt::entity entity) const
 // ObjectManager::clear is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ObjectManager::clear()
 {
+	if (ReportWorkerObjectMutation("ObjectManager.clear", "Worker code attempted to clear live scene state directly."))
+	{
+		return;
+	}
+	if (bulkPublicationActive)
+	{
+		// An empty prepared scene is still a complete replacement and must cross
+		// the same visibility boundary as a populated packet.
+		bulkPublicationChanged = true;
+	}
+
+	// A clear is a scene-lifetime boundary, not an ordinary collection edit.
+	// Advancing this generation invalidates every packet prepared for the old
+	// scene even when EnTT later reuses an entity slot and compact generation.
+	++sceneGeneration;
+	if (sceneGeneration == 0)
+	{
+		sceneGeneration = 1;
+	}
+	pendingSceneChanges.clear();
 	registry.clear();
 	metadataMap.clear();
 	parentMap.clear();
@@ -1028,4 +1326,62 @@ void ObjectManager::clear()
 	nextObjectGeneration = 1;
 	nameIndex.clear();
 	tagIndex.clear();
+}
+
+void ObjectManager::BeginBulkPublication(const BulkObjectStorageReservation& reservation)
+{
+	if (ReportWorkerObjectMutation("ObjectManager.BeginBulkPublication", "Worker code attempted to begin a live bulk publication directly."))
+	{
+		return;
+	}
+	if (bulkPublicationActive)
+	{
+		throw std::logic_error("Nested bulk scene publication is not supported.");
+	}
+
+	// Reserve every manager-owned table from the validated count before any
+	// object is created. EnTT components are reserved by their typed producer;
+	// this manager owns identity, metadata, hierarchy, and lookup storage.
+	metadataMap.reserve(reservation.objectCount);
+	registry.storage<Transform>().reserve(reservation.objectCount);
+	registry.storage<TerraEngine::ActiveObjectTag>().reserve(reservation.objectCount);
+	parentMap.reserve(reservation.objectCount);
+	childrenMap.reserve(reservation.objectCount);
+	uuidToEntity.reserve(reservation.objectCount);
+	entityToUuid.reserve(reservation.objectCount);
+	generationByEntity.reserve(reservation.objectCount);
+	transformRevisionByEntity.reserve(reservation.objectCount);
+	spatialRevisionByEntity.reserve(reservation.objectCount);
+	nameIndex.reserve(reservation.objectCount);
+	tagIndex.reserve(reservation.objectCount);
+	pendingSceneChanges.reserve(reservation.objectCount);
+	bulkPublicationActive = true;
+	bulkPublicationChanged = false;
+}
+
+void ObjectManager::FinishBulkPublication(bool published)
+{
+	if (!bulkPublicationActive)
+	{
+		return;
+	}
+	bulkPublicationActive = false;
+	const bool changed = bulkPublicationChanged;
+	bulkPublicationChanged = false;
+	if (!published || !changed)
+	{
+		return;
+	}
+
+	// One revision and one observer callback are the protected visibility point
+	// for the whole replacement. Consumers cannot observe partial object/index
+	// construction because every per-object notification was suppressed above.
+	++spatialRevision;
+	++hierarchyRevision;
+	++runtimeActiveMembershipRevision;
+	cachedRuntimeActiveMembershipRevision = static_cast<std::uint64_t>(-1);
+	if (onModified)
+	{
+		onModified();
+	}
 }

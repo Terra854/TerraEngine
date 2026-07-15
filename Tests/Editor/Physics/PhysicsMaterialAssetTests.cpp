@@ -94,5 +94,43 @@ namespace TerraEngine::EditorTests
 			context.Expect(*id == restored.assetId, "Move/rename and migration must preserve the stable GUID.");
 			context.Expect(!diagnostics.entries.empty(), "Legacy migration must leave an auditable diagnostic.");
 		});
+
+		registry.Add("Physics.Editor.Material.ReloadPreservesSelectionAndLastKnownAuthoredBytes", [](TestContext& context) {
+			MaterialFixture fixture;
+			const auto id = TerraEngine::ParseUUID("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+			context.Expect(id.has_value(), "Fixture GUID must parse.");
+			auto authored = TerraEngine::Physics::PhysicsMaterial::Defaults(*id);
+			authored.dynamicFriction = 0.25F;
+			authored.surfaceTag = "before-reload";
+			context.Expect(TerraEngine::AssetPipeline::WritePhysicsMaterialAsset(fixture.path, authored).published,
+				"The authored material must publish before a reload can be exercised.");
+			const std::string firstAuthoredBytes = ReadMaterialFile(fixture.path);
+
+			// Selection is stored as the durable asset identity, not as a transient
+			// loaded object address, so a valid reload must leave it unchanged.
+			const TerraEngine::UUID selectedAssetId = *id;
+			auto replacement = authored;
+			replacement.dynamicFriction = 0.75F;
+			replacement.surfaceTag = "after-reload";
+			context.Expect(TerraEngine::AssetPipeline::WritePhysicsMaterialAsset(fixture.path, replacement).published,
+				"A changed valid material must atomically replace its authored bytes.");
+			const std::string replacementAuthoredBytes = ReadMaterialFile(fixture.path);
+			context.Expect(firstAuthoredBytes != replacementAuthoredBytes, "A real authored material edit must produce new source bytes.");
+
+			TerraEngine::Physics::PhysicsMaterial reloaded;
+			TerraEngine::Physics::PhysicsMaterialDiagnostics reloadDiagnostics;
+			context.Expect(TerraEngine::AssetPipeline::LoadPhysicsMaterialAsset(fixture.path, reloaded, reloadDiagnostics),
+				"The replacement bytes must reload through the editor adapter.");
+			context.Expect(reloaded.assetId == selectedAssetId, "Reloading must preserve the selected material's stable identity.");
+			context.ExpectEqual(0.75F, reloaded.dynamicFriction, "Reloading must expose the updated authored value.");
+
+			auto invalid = replacement;
+			invalid.restitution = 2.0F;
+			context.Expect(!TerraEngine::AssetPipeline::WritePhysicsMaterialAsset(fixture.path, invalid).published,
+				"Invalid replacement data must be rejected rather than partially reloaded.");
+			context.ExpectEqual(replacementAuthoredBytes, ReadMaterialFile(fixture.path), "A failed reload write must retain the last known good authored bytes.");
+			context.Expect(reloaded.assetId == selectedAssetId && reloaded.surfaceTag == "after-reload",
+				"A failed replacement must not disturb the selected, already loaded material state.");
+		});
 	}
 }

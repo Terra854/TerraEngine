@@ -4,9 +4,27 @@
 #include "Core/Logger/Logger.h"
 #include "Profiling/Profiler.h"
 
-#include <cstdlib>
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <limits>
+
+namespace {
+	using TelemetryClock = std::chrono::steady_clock;
+
+	// Steady-clock nanoseconds are meaningful only as differences, which is
+	// exactly what worker telemetry needs. They are never serialized as wall time.
+	std::uint64_t MonotonicNanoseconds()
+	{
+		return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+			TelemetryClock::now().time_since_epoch()).count());
+	}
+
+	std::uint64_t ElapsedNanoseconds(std::uint64_t start, std::uint64_t finish)
+	{
+		return finish >= start ? finish - start : 0;
+	}
+}
 
 ThreadPool& ThreadPool::instance() {
 	static ThreadPool instance;
@@ -47,9 +65,11 @@ void ThreadPool::initialize(std::size_t requestedWorkerCount) {
 		}
 	}
 
-	// Clamp explicit requests so a stale machine-specific setting cannot create
-	// more workers than the host can report. At least one worker always runs.
-	const size_t numThreads = std::max<std::size_t>(1, std::min(requestedWorkerCount == 0 ? detectedHardwareThreads : requestedWorkerCount, detectedHardwareThreads));
+	// Zero keeps the true hardware default. Explicit API and environment values
+	// are intentionally not capped at hardware concurrency: deterministic stress
+	// matrices must be able to request the exact worker count they are measuring.
+	const size_t numThreads = std::max<std::size_t>(1, requestedWorkerCount == 0 ? detectedHardwareThreads : requestedWorkerCount);
+	ResetTelemetryForWorkers(numThreads);
 
 	for (size_t i = 0; i < numThreads; ++i) {
 		workers.emplace_back([this, i] { this->workerThread((int)i); });
@@ -80,7 +100,7 @@ void ThreadPool::shutdown()
 		// A normal shutdown drains queued work before workers exit. This cleanup
 		// keeps repeated shutdown calls safe if a caller queued work before
 		// starting workers or if startup failed partway through.
-		std::queue<std::function<void()>> emptyTasks;
+		std::queue<QueuedTask> emptyTasks;
 		tasks.swap(emptyTasks);
 	}
 
@@ -96,7 +116,7 @@ void ThreadPool::shutdown()
 
 // Enqueue a task; handle its dependencies automatically
 // ThreadPool::enqueue is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void ThreadPool::enqueue(std::shared_ptr<ITask> task) {
+void ThreadPool::enqueue(std::shared_ptr<ITask> task, std::uint64_t usefulItemCount) {
 	if (task->unresolvedDependencies == -1) {
 		task->unresolvedDependencies = static_cast<int>(task->dependenciesList.size());
 	}
@@ -107,7 +127,8 @@ void ThreadPool::enqueue(std::shared_ptr<ITask> task) {
 			// Lock the queue mutex to ensure exclusive access to the task queue
 			{
 				std::unique_lock<std::mutex> lock(queue_mutex);
-				tasks.emplace([task]() {
+				const std::size_t queueDepthAtEnqueue = tasks.size() + 1;
+				tasks.emplace(QueuedTask{[task]() {
 					// The profiler returns whether a task sample was actually
 					// opened. Carry that through to completion so idle profiler
 					// sessions do not pay an unmatched EndSample call.
@@ -115,7 +136,7 @@ void ThreadPool::enqueue(std::shared_ptr<ITask> task) {
 					task->run();
 					ThreadPool::instance().completeTask(task);
 					TerraEngine::Profiling::Profiler::Instance().RecordTaskFinished(profilerSampleActive);
-				});
+				}, queueDepthAtEnqueue, usefulItemCount, MonotonicNanoseconds()});
 			} // Release the lock asap when done to minimize the chances of deadlocks
 
 			TerraEngine::Profiling::Profiler::Instance().RecordTaskQueued();
@@ -183,26 +204,184 @@ void ThreadPool::completeTask(std::shared_ptr<ITask> completedTask) {
 	// Optionally handle any other post-task logic here
 }
 
+void ThreadPool::ConfigureTelemetrySampling(std::uint32_t dispatchInterval, std::size_t historyCapacityPerWorker)
+{
+	std::lock_guard<std::mutex> lock(telemetryMutex);
+	telemetrySamplingIntervalDispatches = std::max<std::uint32_t>(1, dispatchInterval);
+	telemetryHistoryCapacityPerWorker = std::min(
+		std::max<std::size_t>(1, historyCapacityPerWorker),
+		kMaximumTelemetryHistoryCapacityPerWorker);
+
+	// If a caller lowers the bound, discard oldest detail first and account for
+	// every removed sample. Cumulative counters remain complete and unchanged.
+	for (MutableWorkerTelemetry& worker : workerTelemetry) {
+		while (worker.history.size() > telemetryHistoryCapacityPerWorker) {
+			worker.history.pop_front();
+			++worker.counters.droppedHistorySampleCount;
+			++droppedTelemetryHistorySamples;
+		}
+	}
+	++telemetryGeneration;
+}
+
+void ThreadPool::ResetTelemetry()
+{
+	std::lock_guard<std::mutex> lock(telemetryMutex);
+	telemetrySequence = 0;
+	droppedTelemetryHistorySamples = 0;
+	for (std::size_t workerIndex = 0; workerIndex < workerTelemetry.size(); ++workerIndex) {
+		const ThreadPoolWorkerActivity activity = workerTelemetry[workerIndex].counters.activity;
+		workerTelemetry[workerIndex] = MutableWorkerTelemetry{};
+		workerTelemetry[workerIndex].counters.workerIndex = workerIndex;
+		workerTelemetry[workerIndex].counters.activity = activity;
+	}
+	++telemetryGeneration;
+}
+
+std::shared_ptr<const ThreadPoolTelemetrySnapshot> ThreadPool::GetTelemetrySnapshot() const
+{
+	auto snapshot = std::make_shared<ThreadPoolTelemetrySnapshot>();
+	std::lock_guard<std::mutex> lock(telemetryMutex);
+	snapshot->generation = telemetryGeneration;
+	snapshot->samplingIntervalDispatches = telemetrySamplingIntervalDispatches;
+	snapshot->historyCapacityPerWorker = telemetryHistoryCapacityPerWorker;
+	snapshot->droppedHistorySampleCount = droppedTelemetryHistorySamples;
+	snapshot->workers.reserve(workerTelemetry.size());
+	for (const MutableWorkerTelemetry& source : workerTelemetry) {
+		ThreadPoolWorkerTelemetry worker = source.counters;
+		worker.history.assign(source.history.begin(), source.history.end());
+		snapshot->workers.push_back(std::move(worker));
+	}
+	return snapshot;
+}
+
+void ThreadPool::ResetTelemetryForWorkers(std::size_t workerCount)
+{
+	std::lock_guard<std::mutex> lock(telemetryMutex);
+	workerTelemetry.clear();
+	workerTelemetry.resize(workerCount);
+	for (std::size_t workerIndex = 0; workerIndex < workerCount; ++workerIndex) {
+		workerTelemetry[workerIndex].counters.workerIndex = workerIndex;
+	}
+	telemetrySequence = 0;
+	droppedTelemetryHistorySamples = 0;
+	++telemetryGeneration;
+}
+
+void ThreadPool::RecordWorkerActivity(std::size_t workerIndex, ThreadPoolWorkerActivity activity, std::uint64_t idleNanoseconds)
+{
+	std::lock_guard<std::mutex> lock(telemetryMutex);
+	if (workerIndex >= workerTelemetry.size()) {
+		return;
+	}
+	MutableWorkerTelemetry& worker = workerTelemetry[workerIndex];
+	worker.counters.activity = activity;
+	worker.counters.idleNanoseconds += idleNanoseconds;
+	++telemetryGeneration;
+}
+
+void ThreadPool::RecordWorkerTaskStarted(
+	std::size_t workerIndex,
+	std::size_t queueDepthAtEnqueue,
+	std::size_t queueDepthAtStart,
+	std::uint64_t usefulItemCount,
+	std::uint64_t waitNanoseconds,
+	std::uint64_t idleNanoseconds)
+{
+	std::lock_guard<std::mutex> lock(telemetryMutex);
+	if (workerIndex >= workerTelemetry.size()) {
+		return;
+	}
+	ThreadPoolWorkerTelemetry& worker = workerTelemetry[workerIndex].counters;
+	worker.activity = ThreadPoolWorkerActivity::Running;
+	worker.latestQueueDepthAtEnqueue = queueDepthAtEnqueue;
+	worker.latestQueueDepthAtStart = queueDepthAtStart;
+	++worker.dispatchCount;
+	worker.usefulItemCount += usefulItemCount;
+	worker.waitNanoseconds += waitNanoseconds;
+	worker.idleNanoseconds += idleNanoseconds;
+	++telemetryGeneration;
+}
+
+void ThreadPool::RecordWorkerTaskFinished(
+	std::size_t workerIndex,
+	std::size_t queueDepthAtEnqueue,
+	std::size_t queueDepthAtStart,
+	std::uint64_t usefulItemCount,
+	std::uint64_t waitNanoseconds,
+	std::uint64_t idleNanoseconds,
+	std::uint64_t runNanoseconds)
+{
+	std::lock_guard<std::mutex> lock(telemetryMutex);
+	if (workerIndex >= workerTelemetry.size()) {
+		return;
+	}
+	MutableWorkerTelemetry& worker = workerTelemetry[workerIndex];
+	worker.counters.activity = ThreadPoolWorkerActivity::Idle;
+	worker.counters.runNanoseconds += runNanoseconds;
+
+	// Sampling is deterministic by the worker's completed dispatch number. A
+	// skipped interval is intentional sampling, while overwritten ring entries
+	// are counted separately as dropped history.
+	if (worker.counters.dispatchCount % telemetrySamplingIntervalDispatches == 0) {
+		if (worker.history.size() == telemetryHistoryCapacityPerWorker) {
+			worker.history.pop_front();
+			++worker.counters.droppedHistorySampleCount;
+			++droppedTelemetryHistorySamples;
+		}
+		worker.history.push_back(ThreadPoolWorkerTelemetrySample{
+			++telemetrySequence,
+			workerIndex,
+			queueDepthAtEnqueue,
+			queueDepthAtStart,
+			usefulItemCount,
+			waitNanoseconds,
+			runNanoseconds,
+			idleNanoseconds});
+	}
+	++telemetryGeneration;
+}
+
 void ThreadPool::workerThread(int threadNum)
 {
 	// Log that the worker thread is live so we can trace thread lifecycle events.
 	TERRAENGINE_LOG(LogLevel::Info, "Worker thread no. " << threadNum << " initialized and running.");
-	std::function<void()> task;
+	const std::size_t workerIndex = static_cast<std::size_t>(threadNum);
+	QueuedTask task;
 	while (true) {
+		const std::uint64_t idleStartedNanoseconds = MonotonicNanoseconds();
+		std::size_t queueDepthAtStart = 0;
+		std::uint64_t waitNanoseconds = 0;
+		std::uint64_t idleNanoseconds = 0;
+		RecordWorkerActivity(workerIndex, ThreadPoolWorkerActivity::Idle);
 		{
 			std::unique_lock<std::mutex> lock(this->queue_mutex);
 			this->condition.wait(lock,
 				[this] { return this->stop || !this->tasks.empty(); });
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (this->stop && this->tasks.empty()) {
+				const std::uint64_t stoppedNanoseconds = MonotonicNanoseconds();
+				RecordWorkerActivity(workerIndex, ThreadPoolWorkerActivity::Stopped,
+					ElapsedNanoseconds(idleStartedNanoseconds, stoppedNanoseconds));
 				// Record that the worker is exiting after processing its last job.
 				TERRAENGINE_LOG(LogLevel::Info, "Worker thread no. " << threadNum << " shutting down.");
 				return;
 			}
+			queueDepthAtStart = this->tasks.size();
 			task = std::move(this->tasks.front());
 			this->tasks.pop();
+			const std::uint64_t startedNanoseconds = MonotonicNanoseconds();
+			idleNanoseconds = ElapsedNanoseconds(idleStartedNanoseconds, startedNanoseconds);
+			waitNanoseconds = ElapsedNanoseconds(task.enqueueNanoseconds, startedNanoseconds);
+			RecordWorkerTaskStarted(workerIndex, task.queueDepthAtEnqueue, queueDepthAtStart,
+				task.usefulItemCount, waitNanoseconds, idleNanoseconds);
 		}
-		task();
+		const std::uint64_t runStartedNanoseconds = MonotonicNanoseconds();
+		task.execute();
+		const std::uint64_t finishedNanoseconds = MonotonicNanoseconds();
+		RecordWorkerTaskFinished(workerIndex, task.queueDepthAtEnqueue, queueDepthAtStart,
+			task.usefulItemCount, waitNanoseconds, idleNanoseconds,
+			ElapsedNanoseconds(runStartedNanoseconds, finishedNanoseconds));
 		// Drop captures held by the completed callable before waiting for the
 		// next job so pooled Task<void> objects can return to the reuse cache
 		// immediately after their futures become ready.

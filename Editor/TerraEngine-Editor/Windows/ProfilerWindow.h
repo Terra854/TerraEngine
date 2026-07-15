@@ -25,6 +25,7 @@ private:
 	void DrawCaptureList();
 	void DrawFrameList();
 	void DrawFrameDetails();
+	void DrawCaptureEvidenceSummary();
 	void DrawRendererRecoverySummary();
 	void DrawPhysicsSummary(const TerraEngine::Profiling::ProfilerFrameRecord& frame);
 	void DrawFrameOverview(const TerraEngine::Profiling::ProfilerFrameRecord& frame);

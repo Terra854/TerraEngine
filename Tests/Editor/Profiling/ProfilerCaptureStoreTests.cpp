@@ -56,6 +56,9 @@ namespace TerraEngine::EditorTests {
 			using namespace TerraEngine::Profiling;
 
 			ProfilerCaptureDocument document;
+			document.payloadVersion = 2u;
+			document.committedFrameCount = 1u;
+			document.complete = true;
 			document.metadata.terraEngineVersion = "unit-test";
 			document.metadata.projectName = projectName;
 			document.metadata.scenePath = "Scenes/Test.tescene";
@@ -177,6 +180,10 @@ namespace TerraEngine::EditorTests {
 			context.Expect(HasArtifactNamed(captures, "a-first.teprof") && HasArtifactNamed(captures, "z-second.teprof"), "Listing should include every valid capture artifact.");
 			context.Expect(!HasArtifactNamed(captures, "broken.teprof"), "Listing should ignore unsupported .teprof files.");
 			context.ExpectEqual(1ULL, captures[0].frameCount, "Listed artifacts should expose their capture frame count.");
+			context.ExpectEqual(2u, captures[0].payloadVersion, "Capture listing should expose v2 metadata without loading all frame samples.");
+			context.ExpectEqual(1ULL, captures[0].committedFrameCount, "Capture listing should expose the recoverable committed-frame boundary.");
+			context.Expect(captures[0].complete && !captures[0].recoveredIncompleteTail, "A complete capture should not be presented as a recovered tail.");
+			context.ExpectEqual(std::string("Ready"), captures[0].status, "Capture listing should retain the codec's stable ready status when no recovery warning is present.");
 			context.ExpectEqual(std::string("Second"), captures[0].metadata.projectName, "Listed artifacts should expose project metadata without fully loading frames.");
 		});
 

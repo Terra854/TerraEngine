@@ -38,11 +38,15 @@ namespace TerraEngine::Editor::Automation
 			const std::string toolName = descriptor.name;
 			if (descriptor.category == "play")
 			{
+				// The original state fields remain available. Restoration is expanded
+				// only with optional evidence so older MCP clients retain their exact
+				// response contract while newer clients can diagnose a stale restore.
 				descriptor.resultSchema = {{"type", "object"}, {"properties", {
 					{"currentState", {{"type", "string"}}},
 					{"pendingTransition", {{"type", nlohmann::json::array({"string", "null"})}}},
 					{"stepsCompleted", {{"type", "integer"}}},
-					{"restoration", {{"type", "object"}}}
+					{"restoration", {{"type", "object"}}},
+					{"readiness", {{"type", "object"}}}
 				}}};
 			}
 			return {std::move(descriptor), resolver(toolName), {}};

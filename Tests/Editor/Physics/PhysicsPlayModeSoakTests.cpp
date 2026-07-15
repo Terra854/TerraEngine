@@ -8,6 +8,7 @@
 #include "Core/Object/ComponentRegistry.h"
 #include "Core/Object/ObjectManager.h"
 #include "Physics/PhysicsDiagnostics.h"
+#include "Physics/PhysicsQueries.h"
 #include "Physics/PhysicsSystem.h"
 #include "Scene/SceneMutationQueue.h"
 #include "Scene/Serializer.h"
@@ -114,11 +115,27 @@ namespace TerraEngine::EditorTests {
 				const PlayModeBoundary boundary = kPlayModeBoundaries[cycle % kPlayModeBoundaries.size()];
 				context.Expect(physics.StartWorld(), "Entering Play Mode must create a fresh physics world for every soak cycle.");
 				const TerraEngine::Physics::PhysicsWorldHandle liveWorld = physics.WorldHandle();
+				TerraEngine::Physics::PhysicsQueryRequest cancelledRequest;
+				cancelledRequest.world = liveWorld;
+				cancelledRequest.kind = TerraEngine::Physics::PhysicsQueryKind::RayCast;
+				cancelledRequest.pose.position = {-1.0F, 0.0F, 0.0F};
+				cancelledRequest.direction = {1.0F, 0.0F, 0.0F};
+				cancelledRequest.distance = 2.0F;
+				cancelledRequest.maximumHits = 1U;
+				cancelledRequest.correlationId = "play-mode-cancelled-query";
+				const TerraEngine::Physics::PhysicsQueryReceipt cancelledReceipt = physics.SubmitQuery(cancelledRequest);
+				context.Expect(cancelledReceipt.accepted && physics.CancelQuery(cancelledReceipt.handle),
+					"Every Play Mode cycle must cancel one queued receipt before provider work can escape its generation.");
+				context.Expect(physics.ReadQuery(cancelledReceipt.handle).status == TerraEngine::Physics::PhysicsResultStatus::Cancelled,
+					"A cancelled Play Mode query must remain terminal rather than turning into a later success.");
+				cancelledRequest.correlationId = "play-mode-stale-query";
+				const TerraEngine::Physics::PhysicsQueryReceipt staleReceipt = physics.SubmitQuery(cancelledRequest);
+				context.Expect(staleReceipt.accepted, "Every lifecycle boundary needs one receipt that becomes stale after world teardown.");
 				context.Expect(physics.SetPaused(true) && physics.RequestExplicitStep(),
 					"The soak must exercise one paused Next publication before every lifecycle boundary.");
 				physics.Update(0.0F);
 				const auto flush = mutations.Apply(objects, "physics-play-mode-soak");
-				physics.OnAfterPhysicsFlush(flush.transactionResults);
+				physics.OnAfterPhysicsFlush(flush.transactionResults, flush.publicationGroupResults);
 
 				if(boundary == PlayModeBoundary::RendererUnavailable) {
 					// No renderer is initialized in this headless test. Selecting immutable
@@ -131,6 +148,8 @@ namespace TerraEngine::EditorTests {
 
 				context.Expect(physics.StopWorld() && !physics.WorldHandle().IsValid(),
 					"Every Play Mode boundary must drain the world before authored objects change.");
+				context.Expect(physics.ReadQuery(staleReceipt.handle).status == TerraEngine::Physics::PhysicsResultStatus::StaleTarget,
+					"An old Play Mode receipt must not address the next world after exit, unload, close, or shutdown.");
 				if(boundary == PlayModeBoundary::RemoveRecreate) {
 					const auto roots = objects.getRootObjects();
 					context.Expect(roots.size() == 1U, "The remove/recreate lane needs one live authored object to remove.");
@@ -149,6 +168,12 @@ namespace TerraEngine::EditorTests {
 					physics.Initialize();
 				}
 				RestoreAuthoredSnapshot(context, objects, mutations, authoredSnapshot, boundary);
+				const auto restoredRoots = objects.getRootObjects();
+				// Serializer restore may reconstruct the same authored UUID, so the
+				// protected physics-world generation—not a transient editor handle—is
+				// the authority that rejects the stale receipt checked above.
+				context.Expect(!restoredRoots.empty() && objects.getObjectLifetimeGeneration(restoredRoots.front()) != 0U,
+					"Restored authored objects must retain a valid lifetime identity after every Play Mode boundary.");
 			}
 			physics.Shutdown();
 			TerraEngine::Physics::PublishedPhysicsDebugPackets().Clear();

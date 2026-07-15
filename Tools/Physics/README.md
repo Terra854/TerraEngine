@@ -1,6 +1,9 @@
 # Installed Editor Physics Stress Harness
 
-`RunInstalledEditorPhysicsStress.ps1` supports the deferred T048 MVP demonstration, T105 baseline, T111 performance gate, T113 US5 demonstration, T129 managed/automation loopback, T150 integrated validation, and T153 final acceptance.
+`RunInstalledEditorPhysicsStress.ps1` is the shared installed-editor performance,
+correctness, project-readiness, and managed/automation validation harness. Story
+names are used below instead of stale task numbers so its evidence remains
+unambiguous when the active Spec Kit task graph changes.
 It creates a disposable project below `out/`, writes 10,000 physics objects
 (1,000 active dynamic, 1,000 kinematic, and 8,000 static by default), starts
 the installed editor with isolated MCP preferences, and drives Play Mode
@@ -16,19 +19,46 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Physics/RunInstall
 The repository's custom install target stages the runnable tree under
 `out/build/RelWithDebInfo/Build`; use that staged tree as `-InstallRoot`.
 Use `-WorkerCount 1`, `2`, `4`, or `max` (default) to select the shared native
-ThreadPool size for a run. `max` preserves hardware-concurrency behavior; the
-selected request and resolved worker count are recorded in `summary.json`.
+ThreadPool size for a run. `max` preserves hardware-concurrency behavior and
+removes `TERRAENGINE_THREADPOOL_WORKERS` from the child environment; the
+selected request, resolved worker identity, and threshold settings are recorded
+in `summary.json`. The default preparation and extraction thresholds are 512
+items each. Explicit 1/2/4 values are matrix overrides only; the native pool
+does not cap explicit environment/API requests, and the harness/build scripts
+do not pass a `--parallel` argument.
+
+For the US3 acceptance matrix, run one isolated command:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Physics/RunInstalledEditorPhysicsStress.ps1 `
+	-InstallRoot out/build/RelWithDebInfo/Build `
+	-WorkRoot out/validation/043-us3 `
+	-RunUs3WorkerMatrix -AllowLiveStress
+```
+
+This executes paused, unchanged, small, and large scenarios at 1/2/4/max
+workers, compares deterministic observation hashes and scaling coverage, and
+reports the fastest successful correctness-gated configuration in
+`us3-matrix-summary.json`. Override `-ParallelPreparationThreshold` or
+`-ParallelExtractionThreshold` to capture a reproducible threshold comparison.
 `-ActiveDynamicCount` may raise the dynamic-body count for an explicitly named
 overload run; the acceptance default matches `stress-fixtures.json` exactly.
-For the T113 installed-editor acceptance, add `-RunAuthoringWalkthrough`. That
+For the installed authoring acceptance, add `-RunAuthoringWalkthrough`. That
 mode uses the advertised public MCP contract to create and edit an object,
 verify exact undo/redo, create and instantiate a prefab, apply and revert real
 overrides, then unwind and save the temporary edits so normal editor shutdown
 remains part of the evidence. It is optional because those authoring calls must
 not contaminate the T105/T111 performance baseline.
 
-For the T129 installed managed/automation proof, add `-RunUs6Loopback`. The
-harness performs a second durable RelWithDebInfo managed reload, discovers a
+For the US6 installed managed/automation proof, add both `-RunUs6Loopback` and
+`-RunUs2IncrementalMatrix`. US6 evidence completeness requires the US2 matrix in
+the same installed-editor run so rejected-batch rollback and protected-boundary
+visibility cannot be inferred from a separate artifact. The final gate also
+requires exact one-tick measured step deltas, a deterministic state-evidence
+hash, normal non-forced shutdown, explicit unavailable-metric records, and a
+nonempty project artifact inventory; a missing item changes `summary.json` to
+`success: false` and is detailed under `us6EvidenceCompleteness`. The harness
+performs a second durable RelWithDebInfo managed reload, discovers a
 generation-safe body through a bounded raycast job, inspects scheduler/body
 snapshots, replays one idempotent mass-independent acceleration receipt, and
 verifies exactly one custom-gravity velocity change on a separate paused step.
@@ -46,6 +76,34 @@ excludes the intentionally growing live capture document so the counters isolate
 physics/editor ownership. These switches are opt-in so Windows process queries
 and debug rendering do not alter the canonical performance baseline.
 
+For the US4 project-readiness acceptance, run the isolated matrix after the
+install target succeeds:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Physics/RunInstalledEditorPhysicsStress.ps1 `
+	-InstallRoot out/build/RelWithDebInfo/Build `
+	-WorkRoot out/validation/043-us4 `
+	-RunUs4ReadinessMatrix -AllowLiveStress
+```
+
+The matrix executes cold, warm, stale, corrupt, and forced-build scenarios in
+fresh editor processes while reusing only the matrix's disposable project and
+`Library/` artifacts where a warm comparison requires it. Cold removes derived
+scene and managed-readiness cache data; warm reopens unchanged output; stale
+changes the disposable authored source identity; corrupt damages only the
+disposable derived envelope; forced-build invokes public `script.compile` even
+after a valid warm state. Authored `.tescene` bytes remain the authority and are
+never replaced with derived output.
+
+Each scenario retains `project.state` derived-scene/readiness evidence,
+`script.status` managed readiness, any durable forced-compile job, monotonic
+stage timings, authored hashes, artifact inventory, MCP JSONL, and normal versus
+forced shutdown. Accept the matrix only when warm managed readiness is at most
+2.5 seconds, stale/corrupt runs fall back without partial scene visibility,
+regeneration is reported, forced compile reports a real forced build, the
+authored hash changes only in the intentional stale disposable case, and every
+editor exits normally.
+
 The script requires a free explicit MCP port (default `43127`) and writes its
 disposable project plus JSON evidence below
 `out/validation/installed-editor-physics-stress`. It verifies live tick/body
@@ -60,3 +118,26 @@ cannot expose (for example native worker utilization, protected-boundary stall
 histories, or frame responsiveness) are listed explicitly under
 `unavailableMetrics`; the run fails if the required profiler capture cannot be
 persisted and summarized.
+
+## US5 profiler capture matrix
+
+Run the opt-in profiler evidence mode for each detail level and reader version:
+
+```powershell
+foreach ($level in @("detailed", "sampled", "aggregate")) {
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Physics/RunInstalledEditorPhysicsStress.ps1 `
+        -InstallRoot out/build/RelWithDebInfo/Build `
+        -WorkRoot ("out/validation/043-us5/{0}-v2" -f $level) `
+        -CaptureLevel $level -CaptureVersion v2 -RunUs5ProfilerChecks -AllowLiveStress
+}
+```
+
+New recordings accept `-CaptureVersion v2`; v1 is a load-only compatibility
+fixture and is never rewritten in place. The harness passes additive v2
+selection fields to `profiler.capture.start`, holds the recording open for five
+wall-clock seconds, loads the committed artifact as a recovery probe, and retains
+`summary.json` plus MCP JSONL. Each summary reports
+physics, Scene View, scheduler, protected-boundary, responsiveness, presentation,
+and work-volume metric availability and applies the 10 MiB five-second size
+gate. Keep the installed tree, workload, worker request, and duration constant
+when comparing detailed, sampled, and aggregate captures.

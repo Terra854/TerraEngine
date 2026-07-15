@@ -12,8 +12,10 @@
 #include "Scene/SceneMutationQueue.h"
 
 #include <algorithm>
+#include <atomic>
 #include <iterator>
 #include <map>
+#include <mutex>
 #include <queue>
 #include <set>
 #include <sstream>
@@ -24,6 +26,10 @@
 
 namespace TerraEngine::Scheduling {
 	namespace {
+		std::atomic_bool g_SameFramePhysicsPublicationConsumerActive = false;
+		std::mutex g_SameFramePhysicsPublicationStateMutex;
+		SameFramePhysicsPublicationState g_SameFramePhysicsPublicationState;
+
 		bool IsError(const ScheduleDiagnostic& diagnostic)
 		{
 			return diagnostic.severity == DiagnosticSeverity::Error;
@@ -163,6 +169,36 @@ namespace TerraEngine::Scheduling {
 			return !declaration.mainThread
 				&& declaration.boundaryClassification == HardBoundaryClassification::WorkerSafe;
 		}
+	}
+
+	void SetSameFramePhysicsPublicationConsumerActive(bool active) noexcept
+	{
+		g_SameFramePhysicsPublicationConsumerActive.store(active, std::memory_order_release);
+		std::lock_guard<std::mutex> lock(g_SameFramePhysicsPublicationStateMutex);
+		g_SameFramePhysicsPublicationState.active = active;
+		if (!active)
+		{
+			g_SameFramePhysicsPublicationState.consumerSystem.clear();
+			g_SameFramePhysicsPublicationState.reason = "No later system requires same-frame physics scene visibility; publication is deferred to Frame End.";
+		}
+	}
+
+	void SetSameFramePhysicsPublicationState(SameFramePhysicsPublicationState state)
+	{
+		g_SameFramePhysicsPublicationConsumerActive.store(state.active, std::memory_order_release);
+		std::lock_guard<std::mutex> lock(g_SameFramePhysicsPublicationStateMutex);
+		g_SameFramePhysicsPublicationState = std::move(state);
+	}
+
+	bool SameFramePhysicsPublicationConsumerActive() noexcept
+	{
+		return g_SameFramePhysicsPublicationConsumerActive.load(std::memory_order_acquire);
+	}
+
+	SameFramePhysicsPublicationState SameFramePhysicsPublicationStateSnapshot()
+	{
+		std::lock_guard<std::mutex> lock(g_SameFramePhysicsPublicationStateMutex);
+		return g_SameFramePhysicsPublicationState;
 	}
 
 	std::vector<SchedulerPhaseDefinition> DefaultSchedulerPhases()
@@ -351,6 +387,9 @@ namespace TerraEngine::Scheduling {
 			stream << " [" << point << ']';
 		}
 		stream << '\n';
+		stream << "After Physics visibility: active=" << (summary.afterPhysicsFlushActive ? "true" : "false")
+			<< " consumer='" << summary.afterPhysicsConsumer
+			<< "' reason='" << summary.afterPhysicsReason << "'\n";
 		stream << "Main-thread systems:";
 		for (const std::string& system : summary.mainThreadSystems)
 		{
@@ -422,6 +461,7 @@ namespace TerraEngine::Scheduling {
 		latestComponentQueryGroups.clear();
 		latestEcsGraphSummary.clear();
 		latestSummary = {};
+		SetSameFramePhysicsPublicationState({false, {}, "Scheduler was cleared; no same-frame physics consumer is active."});
 		dirty = true;
 	}
 
@@ -490,77 +530,173 @@ namespace TerraEngine::Scheduling {
 		return frameWorkloadCompatibilityFallbackEnabled;
 	}
 
-	std::vector<FrameWorkloadDeclaration> SystemScheduler::BuildSystemOwnedWorkloadDeclarations(SystemsBase& system, const SystemDeclaration& declaration, float deltaTime, std::size_t executionOrder) const
+	std::vector<FrameWorkloadDeclaration> SystemScheduler::BuildSystemOwnedWorkloadDeclarations(RegisteredSystem& registeredSystem, float deltaTime, std::size_t executionOrder)
 	{
-		std::vector<FrameWorkloadDeclaration> declaredWorkloads = system.DeclareFrameWorkloads(deltaTime);
-		if (!declaredWorkloads.empty())
+		SystemsBase& system = *registeredSystem.system;
+		const SystemDeclaration& declaration = registeredSystem.declaration;
+		std::vector<FrameWorkloadDeclaration> current = system.DeclareFrameWorkloads(deltaTime);
+		if (current.empty())
 		{
-			const std::size_t systemOrderBase = executionOrder * 1024U;
-			for (std::size_t localIndex = 0; localIndex < declaredWorkloads.size(); ++localIndex)
-			{
-				FrameWorkloadDeclaration& workload = declaredWorkloads[localIndex];
-				// System-owned phases inherit the stable scheduler identity when
-				// the declaring system omits repeated metadata. Keeping the fill-in
-				// deterministic makes diagnostics readable without hiding bad access
-				// declarations from validation.
-				if (workload.ownerSystem.empty())
-				{
-					workload.ownerSystem = declaration.name;
-				}
-				if (workload.phase.empty())
-				{
-					workload.phase = declaration.phase;
-				}
-				if (workload.profilingLabel.empty())
-				{
-					workload.profilingLabel = workload.workloadName.empty() ? declaration.name : workload.workloadName;
-				}
-				if (workload.executionOrder == 0)
-				{
-					// Reserve an order range per system so a converted system's
-					// snapshot/prepare/commit chain cannot be interleaved with another
-					// system merely because every local workload inherited one order.
-					workload.executionOrder = systemOrderBase + localIndex + 1U;
-				}
-			}
-			return declaredWorkloads;
+			FrameWorkloadDeclaration workload;
+			workload.workloadName = declaration.name;
+			workload.ownerSystem = declaration.name;
+			workload.phase = declaration.phase;
+			workload.reads = declaration.reads;
+			workload.writes = declaration.writes;
+			const bool wholeUpdateWorkerSafe = CanRunWholeSystemUpdateOnWorker(declaration);
+			workload.workerEligible = wholeUpdateWorkerSafe;
+			workload.mainThreadRequired = !wholeUpdateWorkerSafe;
+			workload.mutationPolicy = declaration.requiresFlushedSceneMutations
+				? FrameWorkloadMutationPolicy::DeferredOnly
+				: FrameWorkloadMutationPolicy::None;
+			workload.phaseKind = declaration.phaseKind;
+			workload.boundaryClassification = declaration.boundaryClassification;
+			workload.hardBoundary = declaration.hardBoundary;
+			workload.safeSubwork = declaration.safeSubwork;
+			workload.protectedCommit = declaration.protectedCommit;
+			workload.profilingLabel = declaration.profilingLabel.empty() ? declaration.name : declaration.profilingLabel;
+			workload.protectedReason = !declaration.protectedReason.empty()
+				? declaration.protectedReason
+				: !wholeUpdateWorkerSafe && !declaration.mainThread
+				? "Full SystemsBase::Update remains protected until the entire system boundary is worker-safe."
+				: declaration.mainThread
+				? "System declaration still requires the main thread."
+				: "System is eligible for worker execution after scheduler validation.";
+			workload.fallbackReason = declaration.fallbackReason;
+			workload.work = [&system, deltaTime](JobGraphContext&) {
+				// The default workload preserves the existing system entry point for
+				// unconverted systems. Converted systems should override
+				// DeclareFrameWorkloads() so only proven worker-safe phases run away
+				// from the protected coordinator path.
+				system.Update(deltaTime);
+			};
+			current.push_back(std::move(workload));
 		}
 
-		FrameWorkloadDeclaration workload;
-		workload.workloadName = declaration.name;
-		workload.ownerSystem = declaration.name;
-		workload.phase = declaration.phase;
-		workload.reads = declaration.reads;
-		workload.writes = declaration.writes;
-		workload.executionOrder = executionOrder * 1024U;
-		const bool wholeUpdateWorkerSafe = CanRunWholeSystemUpdateOnWorker(declaration);
-		workload.workerEligible = wholeUpdateWorkerSafe;
-		workload.mainThreadRequired = !wholeUpdateWorkerSafe;
-		workload.mutationPolicy = declaration.requiresFlushedSceneMutations
-			? FrameWorkloadMutationPolicy::DeferredOnly
-			: FrameWorkloadMutationPolicy::None;
-		workload.phaseKind = declaration.phaseKind;
-		workload.boundaryClassification = declaration.boundaryClassification;
-		workload.hardBoundary = declaration.hardBoundary;
-		workload.safeSubwork = declaration.safeSubwork;
-		workload.protectedCommit = declaration.protectedCommit;
-		workload.profilingLabel = declaration.profilingLabel.empty() ? declaration.name : declaration.profilingLabel;
-		workload.protectedReason = !declaration.protectedReason.empty()
-			? declaration.protectedReason
-			: !wholeUpdateWorkerSafe && !declaration.mainThread
-			? "Full SystemsBase::Update remains protected until the entire system boundary is worker-safe."
-			: declaration.mainThread
-			? "System declaration still requires the main thread."
-			: "System is eligible for worker execution after scheduler validation.";
-		workload.fallbackReason = declaration.fallbackReason;
-		workload.work = [&system, deltaTime](JobGraphContext&) {
-			// The default workload preserves the existing system entry point for
-			// unconverted systems. Converted systems should override
-			// DeclareFrameWorkloads() so only proven worker-safe phases run away
-			// from the protected coordinator path.
-			system.Update(deltaTime);
+		const std::size_t systemOrderBase = executionOrder * 1024U;
+		for (std::size_t localIndex = 0; localIndex < current.size(); ++localIndex)
+		{
+			FrameWorkloadDeclaration& workload = current[localIndex];
+			if (workload.ownerSystem.empty()) workload.ownerSystem = declaration.name;
+			if (workload.phase.empty()) workload.phase = declaration.phase;
+			if (workload.profilingLabel.empty())
+			{
+				workload.profilingLabel = workload.workloadName.empty() ? declaration.name : workload.workloadName;
+			}
+			if (workload.stableDescriptorId.empty())
+			{
+				workload.stableDescriptorId = workload.ownerSystem + "/" + workload.phase + "/" + workload.workloadName;
+			}
+			if (workload.executionOrder == 0)
+			{
+				workload.executionOrder = systemOrderBase + localIndex + 1U;
+			}
+		}
+
+		auto stableMetadataMatches = [](const FrameWorkloadDeclaration& left, const FrameWorkloadDeclaration& right) {
+			return left.workloadName == right.workloadName
+				&& left.ownerSystem == right.ownerSystem
+				&& left.phase == right.phase
+				&& left.stableDescriptorId == right.stableDescriptorId
+				&& left.activationPredicateKey == right.activationPredicateKey
+				&& left.reads == right.reads
+				&& left.writes == right.writes
+				&& left.explicitDependencies == right.explicitDependencies
+				&& left.inlineWorkItemThreshold == right.inlineWorkItemThreshold
+				&& left.partitionPolicy == right.partitionPolicy
+				&& left.partitionWorkItemCount == right.partitionWorkItemCount
+				&& left.maximumPartitionCount == right.maximumPartitionCount
+				&& left.workerEligible == right.workerEligible
+				&& left.mainThreadRequired == right.mainThreadRequired
+				&& left.mutationPolicy == right.mutationPolicy
+				&& left.phaseKind == right.phaseKind
+				&& left.boundaryClassification == right.boundaryClassification
+				&& left.hardBoundary == right.hardBoundary
+				&& left.safeSubwork == right.safeSubwork
+				&& left.protectedCommit == right.protectedCommit
+				&& left.protectedReason == right.protectedReason
+				&& left.fallbackReason == right.fallbackReason
+				&& left.profilingLabel == right.profilingLabel;
 		};
-		return { std::move(workload) };
+
+		bool cacheChanged = registeredSystem.stableWorkloadDescriptors.size() != current.size();
+		if (!cacheChanged)
+		{
+			for (std::size_t index = 0; index < current.size(); ++index)
+			{
+				if (!stableMetadataMatches(registeredSystem.stableWorkloadDescriptors[index], current[index]))
+				{
+					cacheChanged = true;
+					break;
+				}
+			}
+		}
+
+		if (cacheChanged || registeredSystem.stableDescriptorGeneration == 0)
+		{
+			++registeredSystem.stableDescriptorGeneration;
+			if (registeredSystem.stableDescriptorGeneration == 0) registeredSystem.stableDescriptorGeneration = 1;
+			registeredSystem.stableWorkloadDescriptors = current;
+			for (FrameWorkloadDeclaration& cached : registeredSystem.stableWorkloadDescriptors)
+			{
+				cached.stableDescriptorGeneration = registeredSystem.stableDescriptorGeneration;
+				// Stable scheduling state must not retain closures or immutable frame
+				// inputs beyond the frame that supplied them.
+				cached.work = {};
+				cached.rangeWork = {};
+				cached.active = true;
+				cached.ready = true;
+				cached.readinessReason.clear();
+				cached.estimatedWorkItemCount = 0;
+				cached.sameFrameVisibilityRequired = false;
+			}
+		}
+
+		std::vector<FrameWorkloadDeclaration> bound;
+		bound.reserve(current.size());
+		for (std::size_t index = 0; index < current.size(); ++index)
+		{
+			FrameWorkloadDeclaration workload = registeredSystem.stableWorkloadDescriptors[index];
+			workload.executionOrder = current[index].executionOrder;
+			workload.active = current[index].active;
+			workload.ready = current[index].ready;
+			workload.readinessReason = std::move(current[index].readinessReason);
+			workload.estimatedWorkItemCount = current[index].estimatedWorkItemCount;
+			workload.sameFrameVisibilityRequired = current[index].sameFrameVisibilityRequired;
+			workload.work = std::move(current[index].work);
+			workload.rangeWork = std::move(current[index].rangeWork);
+			bound.push_back(std::move(workload));
+		}
+		return bound;
+	}
+
+	SameFramePhysicsPublicationState SystemScheduler::ResolveSameFramePhysicsPublicationState() const
+	{
+		SameFramePhysicsPublicationState state;
+		const auto physicsPhase = std::find_if(phases.begin(), phases.end(), [](const SchedulerPhaseDefinition& phase) {
+			return phase.name == "Physics";
+		});
+		const int physicsOrder = physicsPhase == phases.end() ? 0 : physicsPhase->order;
+		for (const SystemDeclaration& declaration : orderedDeclarations)
+		{
+			const auto phase = std::find_if(phases.begin(), phases.end(), [&](const SchedulerPhaseDefinition& candidate) {
+				return candidate.name == declaration.phase;
+			});
+			if (phase == phases.end() || phase->order <= physicsOrder || !declaration.requiresFlushedSceneMutations)
+			{
+				continue;
+			}
+			const bool readsPublishedScene = std::find(declaration.reads.begin(), declaration.reads.end(), "SceneGraph") != declaration.reads.end()
+				|| std::find(declaration.reads.begin(), declaration.reads.end(), "ObjectManager") != declaration.reads.end();
+			if (!readsPublishedScene) continue;
+			state.active = true;
+			if (!state.consumerSystem.empty()) state.consumerSystem += ",";
+			state.consumerSystem += declaration.name;
+		}
+		state.reason = state.active
+			? "Later declared consumer requires flushed SceneGraph/ObjectManager state after Physics."
+			: "No later system requires same-frame physics scene visibility; publication is deferred to Frame End.";
+		return state;
 	}
 
 	const ScheduleSummary& SystemScheduler::BuildSchedule()
@@ -894,21 +1030,42 @@ namespace TerraEngine::Scheduling {
 			return workloads;
 		}
 
+		// Resolve conditional visibility before asking PhysicsSystem to bind its
+		// per-frame activation. This prevents the physics packet and flush
+		// descriptor from observing the previous frame's consumer state.
+		const SameFramePhysicsPublicationState physicsPublicationState = ResolveSameFramePhysicsPublicationState();
+		SetSameFramePhysicsPublicationState(physicsPublicationState);
+		latestSummary.afterPhysicsFlushActive = physicsPublicationState.active;
+		latestSummary.afterPhysicsConsumer = physicsPublicationState.consumerSystem;
+		latestSummary.afterPhysicsReason = physicsPublicationState.reason;
+
 		std::size_t nextExecutionOrder = 1;
 		auto appendSystemWorkload = [&](RegisteredSystem& registeredSystem, std::size_t executionOrder) {
 			if (registeredSystem.system == nullptr)
 			{
 				return;
 			}
-			std::vector<FrameWorkloadDeclaration> systemWorkloads = BuildSystemOwnedWorkloadDeclarations(*registeredSystem.system, registeredSystem.declaration, deltaTime, executionOrder);
+			std::vector<FrameWorkloadDeclaration> systemWorkloads = BuildSystemOwnedWorkloadDeclarations(registeredSystem, deltaTime, executionOrder);
 			workloads.insert(workloads.end(), std::make_move_iterator(systemWorkloads.begin()), std::make_move_iterator(systemWorkloads.end()));
 		};
 
 		auto appendFlushWorkload = [&](const MutationFlushPoint& point, std::size_t executionOrder) {
+			const bool physicsPublicationPending = std::any_of(workloads.begin(), workloads.end(), [](const FrameWorkloadDeclaration& declared) {
+				return declared.ownerSystem == "PhysicsSystem"
+					&& declared.sameFrameVisibilityRequired
+					&& declared.active
+					&& declared.ready;
+			});
 			FrameWorkloadDeclaration workload;
 			workload.workloadName = "Flush:" + point.name;
 			workload.ownerSystem = "SystemScheduler";
 			workload.phase = point.phaseName.empty() ? "FrameEnd" : point.phaseName;
+			workload.stableDescriptorId = "SystemScheduler/MutationFlush/" + point.name;
+			workload.activationPredicateKey = point.name == "After Physics"
+				? "same-frame-physics-publication-consumer"
+				: "mutation-flush-point-configured";
+			workload.active = point.name != "After Physics"
+				|| (physicsPublicationState.active && physicsPublicationPending);
 			workload.reads = { "SceneMutationQueue" };
 			workload.writes = { "SceneMutationQueue" };
 			// Flushes use the same reserved global order blocks as system workloads.
@@ -918,8 +1075,17 @@ namespace TerraEngine::Scheduling {
 			workload.mainThreadRequired = true;
 			workload.mutationPolicy = FrameWorkloadMutationPolicy::DeferredOnly;
 			workload.phaseKind = WorkerSystemPhaseKind::Barrier;
+			workload.sameFrameVisibilityRequired = point.name == "After Physics" && physicsPublicationState.active;
 			workload.protectedReason = "Mutation flushes remain protected barriers until deferred mutation batches are proven worker-safe.";
 			workload.profilingLabel = workload.workloadName;
+			if (point.name == "After Physics")
+			{
+				latestSummary.afterPhysicsFlushActive = workload.active;
+				if (!physicsPublicationPending)
+				{
+					latestSummary.afterPhysicsReason = "A later consumer exists, but physics has no publication work; the protected flush is omitted.";
+				}
+			}
 			workloads.push_back(std::move(workload));
 		};
 
@@ -965,6 +1131,126 @@ namespace TerraEngine::Scheduling {
 			{
 				appendFlushWorkload(point, nextExecutionOrder++);
 			}
+		}
+
+		// Lower phase and system ordering into explicit descriptor edges. The
+		// numeric executionOrder remains a deterministic display/tie-break value;
+		// it no longer serializes unrelated work in FrameWorkload execution.
+		auto addDependency = [&workloads](std::size_t dependentIndex, std::size_t prerequisiteIndex) {
+			if (dependentIndex == prerequisiteIndex) return;
+			const std::string& prerequisite = workloads[prerequisiteIndex].stableDescriptorId;
+			auto& dependencies = workloads[dependentIndex].explicitDependencies;
+			if (!prerequisite.empty() && std::find(dependencies.begin(), dependencies.end(), prerequisite) == dependencies.end())
+			{
+				dependencies.push_back(prerequisite);
+			}
+		};
+		auto activeIndices = [&workloads](const std::string& phase, bool schedulerOwned) {
+			std::vector<std::size_t> indices;
+			for (std::size_t index = 0; index < workloads.size(); ++index)
+			{
+				const FrameWorkloadDeclaration& workload = workloads[index];
+				if (workload.phase == phase && workload.active && workload.ready
+					&& (workload.ownerSystem == "SystemScheduler") == schedulerOwned)
+				{
+					indices.push_back(index);
+				}
+			}
+			return indices;
+		};
+		auto flushPositionFor = [this, &workloads](std::size_t index) {
+			const std::string prefix = "Flush:";
+			const std::string name = workloads[index].workloadName.starts_with(prefix)
+				? workloads[index].workloadName.substr(prefix.size())
+				: std::string{};
+			const auto found = std::find_if(flushPoints.begin(), flushPoints.end(), [&name](const MutationFlushPoint& point) {
+				return point.name == name;
+			});
+			return found == flushPoints.end() ? MutationFlushPosition::FrameEnd : found->position;
+		};
+
+		std::unordered_map<std::string, std::vector<std::size_t>> descriptorsByOwner;
+		for (std::size_t index = 0; index < workloads.size(); ++index)
+		{
+			if (workloads[index].ownerSystem != "SystemScheduler" && workloads[index].active && workloads[index].ready)
+			{
+				descriptorsByOwner[workloads[index].ownerSystem].push_back(index);
+			}
+		}
+		for (const SystemDeclaration& declaration : orderedDeclarations)
+		{
+			const auto current = descriptorsByOwner.find(declaration.name);
+			if (current == descriptorsByOwner.end() || current->second.empty()) continue;
+			for (const std::string& afterSystem : declaration.after)
+			{
+				const auto prerequisite = descriptorsByOwner.find(afterSystem);
+				if (prerequisite != descriptorsByOwner.end() && !prerequisite->second.empty())
+				{
+					addDependency(current->second.front(), prerequisite->second.back());
+				}
+			}
+			for (const std::string& beforeSystem : declaration.before)
+			{
+				const auto dependent = descriptorsByOwner.find(beforeSystem);
+				if (dependent != descriptorsByOwner.end() && !dependent->second.empty())
+				{
+					addDependency(dependent->second.front(), current->second.back());
+				}
+			}
+		}
+
+		std::vector<std::size_t> previousPhaseTerminals;
+		for (const SchedulerPhaseDefinition& phase : orderedPhases)
+		{
+			const std::vector<std::size_t> systemNodes = activeIndices(phase.name, false);
+			const std::vector<std::size_t> flushNodes = activeIndices(phase.name, true);
+			std::vector<std::size_t> beforeFlushes;
+			std::vector<std::size_t> afterFlushes;
+			for (const std::size_t flushIndex : flushNodes)
+			{
+				if (flushPositionFor(flushIndex) == MutationFlushPosition::BeforePhase) beforeFlushes.push_back(flushIndex);
+				else if (flushPositionFor(flushIndex) == MutationFlushPosition::AfterPhase) afterFlushes.push_back(flushIndex);
+			}
+			for (std::size_t index = 0; index < beforeFlushes.size(); ++index)
+			{
+				for (const std::size_t prerequisite : index == 0U ? previousPhaseTerminals : std::vector<std::size_t>{beforeFlushes[index - 1U]})
+				{
+					addDependency(beforeFlushes[index], prerequisite);
+				}
+			}
+			const std::vector<std::size_t>& phasePrerequisites = beforeFlushes.empty() ? previousPhaseTerminals : beforeFlushes;
+			std::unordered_map<std::string, std::size_t> firstByOwner;
+			std::unordered_map<std::string, std::size_t> lastByOwner;
+			for (const std::size_t index : systemNodes)
+			{
+				firstByOwner.try_emplace(workloads[index].ownerSystem, index);
+				lastByOwner[workloads[index].ownerSystem] = index;
+			}
+			for (const auto& [owner, first] : firstByOwner)
+			{
+				(void)owner;
+				for (const std::size_t prerequisite : phasePrerequisites) addDependency(first, prerequisite);
+			}
+			std::vector<std::size_t> systemTerminals;
+			for (const auto& [owner, last] : lastByOwner)
+			{
+				(void)owner;
+				systemTerminals.push_back(last);
+			}
+			if (systemTerminals.empty()) systemTerminals = phasePrerequisites;
+			for (std::size_t index = 0; index < afterFlushes.size(); ++index)
+			{
+				const std::vector<std::size_t>& prerequisites = index == 0U ? systemTerminals : std::vector<std::size_t>{afterFlushes[index - 1U]};
+				for (const std::size_t prerequisite : prerequisites) addDependency(afterFlushes[index], prerequisite);
+			}
+			previousPhaseTerminals = afterFlushes.empty() ? systemTerminals : std::vector<std::size_t>{afterFlushes.back()};
+		}
+		for (std::size_t index = 0; index < workloads.size(); ++index)
+		{
+			if (workloads[index].ownerSystem != "SystemScheduler" || !workloads[index].active
+				|| flushPositionFor(index) != MutationFlushPosition::FrameEnd) continue;
+			for (const std::size_t prerequisite : previousPhaseTerminals) addDependency(index, prerequisite);
+			previousPhaseTerminals = {index};
 		}
 
 		return workloads;

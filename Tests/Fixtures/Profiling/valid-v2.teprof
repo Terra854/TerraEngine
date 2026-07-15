@@ -1,0 +1,24 @@
+{
+	"format": "TerraEngineProfilerCapture",
+	"payloadVersion": 2,
+	"metadata": {
+		"captureId": "feature-043-valid-v2",
+		"engineBuild": "fixture",
+		"platform": "fixture",
+		"clock": "monotonic_nanoseconds",
+		"startedAtUtc": "2026-07-15T00:00:00Z"
+	},
+	"settings": {
+		"detailLevel": "detailed",
+		"sampleIntervalFrames": 1
+	},
+	"stringTable": ["Physics.Step"],
+	"chunks": [],
+	"finalIndex": {
+		"complete": true,
+		"committedFrames": 0,
+		"chunkCount": 0,
+		"artifactBytes": 0,
+		"recoveredIncompleteTail": false
+	}
+}

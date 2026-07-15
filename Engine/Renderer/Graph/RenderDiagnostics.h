@@ -8,10 +8,12 @@
 #include "Core/Export.h"
 #include "Renderer/RenderTypes.h"
 #include "Renderer/RendererRecovery.h"
+#include "Profiling/PerformanceTelemetry.h"
 
 #include <atomic>
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -361,6 +363,10 @@ namespace TerraEngine::Renderer {
 		// viewSubmitWork explains whether scene and game views reused prepared
 		// backend work or had to stay separate because state differed.
 		std::vector<ViewSubmitWorkItem> viewSubmitWork;
+		// presentationWaits contains typed, unavoidable platform/GPU waits. It is
+		// separate from preventable forced-idle and recovery work so profiling
+		// does not present synchronization mistakes as normal presentation cost.
+		std::vector<TerraEngine::Profiling::PresentationWaitRecord> presentationWaits;
 		std::vector<std::string> serializedReasons;
 		std::vector<std::string> resourceWarnings;
 		std::vector<std::string> backendFallbacks;
@@ -397,6 +403,8 @@ namespace TerraEngine::Renderer {
 	TERRAENGINE_API VirtualGeometrySchedulerDiagnostics BuildVirtualGeometrySchedulerDiagnostics(std::string owningSystem, std::string schedulerPhase, std::vector<std::string> readResources, std::vector<std::string> writeResources, std::string workerSafePreparation, std::string protectedBoundary, std::string visibilityBoundary);
 	TERRAENGINE_API void ApplyVirtualGeometryDiagnostics(RenderDiagnosticsSummary& summary, std::vector<VirtualGeometryViewDiagnosticsSnapshot> viewSnapshots, std::vector<VirtualGeometrySchedulerDiagnostics> schedulerSnapshots);
 	TERRAENGINE_API RenderCaptureSchedulerDiagnostics BuildRenderCaptureSchedulerDiagnostics(std::string owningSystem, std::string schedulerPhase, std::string sourceKind, bool backendReadback, bool deterministicFallback);
+	TERRAENGINE_API std::optional<TerraEngine::Profiling::PresentationWaitKind> ClassifyUnavoidablePresentationWait(BackendSubmitStage stage);
+	TERRAENGINE_API std::vector<TerraEngine::Profiling::PresentationWaitRecord> BuildPresentationWaitRecords(const BackendFrameBreakdown& breakdown);
 	TERRAENGINE_API void ApplyBackendBreakdownToRenderDiagnostics(RenderDiagnosticsSummary& summary, const BackendFrameBreakdown& breakdown);
 	TERRAENGINE_API void ApplyRendererRecoveryDiagnostics(RenderDiagnosticsSummary& summary, RendererRecoverySnapshot snapshot);
 	TERRAENGINE_API bool RenderDiagnosticsRequested();

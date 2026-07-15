@@ -105,6 +105,83 @@ namespace TerraEngine::Editor::Automation
 			}
 			return registration;
 		}
+
+		nlohmann::json SceneViewPerformanceSettingsSchema()
+		{
+			// Keep the automation schema aligned with the versioned performance
+			// settings contract. The handler validates the complete candidate again
+			// before persistence, so schema-aware and legacy clients receive the
+			// same atomic behavior.
+			return {
+				{"type", "object"},
+				{"additionalProperties", false},
+				{"required", nlohmann::json::array({
+					"largeSceneMode", "largeSceneObjectThreshold", "visibleMarkerBudget",
+					"markerPresentationBatchSize", "densityRadiusPixels", "densityThreshold",
+					"maximumMarkerDistance", "minimumProjectedSizePixels", "physicsMarkerMode",
+					"densePrimitiveTier"})},
+				{"properties", {
+					{"largeSceneMode", {{"type", "string"}, {"enum", nlohmann::json::array({"auto", "on", "off"})}}},
+					{"largeSceneObjectThreshold", {{"type", "integer"}, {"minimum", 1}, {"maximum", 10000000}}},
+					{"visibleMarkerBudget", {{"type", "integer"}, {"minimum", 64}, {"maximum", 100000}}},
+					{"markerPresentationBatchSize", {{"type", "integer"}, {"minimum", 32}, {"maximum", 8192}}},
+					{"densityRadiusPixels", {{"type", "number"}, {"minimum", 4.0}, {"maximum", 128.0}}},
+					{"densityThreshold", {{"type", "integer"}, {"minimum", 2}, {"maximum", 256}}},
+					{"maximumMarkerDistance", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 1000000000.0}}},
+					{"minimumProjectedSizePixels", {{"type", "number"}, {"minimum", 0.0}, {"maximum", 64.0}}},
+					{"physicsMarkerMode", {{"type", "string"}, {"enum", nlohmann::json::array({"selected_only", "clustered", "all"})}}},
+					{"densePrimitiveTier", {{"type", "string"}, {"enum", nlohmann::json::array({"full", "simple", "point"})}}}
+				}}
+			};
+		}
+
+		AutomationCapabilityRegistration MakeSceneViewSettings(
+			const AutomationHandlerResolver& resolver,
+			bool write)
+		{
+			auto registration = Make(
+				resolver,
+				write ? "scene_view.settings.set" : "scene_view.settings.get",
+				"scene_view",
+				write ? std::vector<std::string>{"settings"} : std::vector<std::string>{},
+				{"configured", "effective", "persisted"},
+				write ? AutomationPermission::GlobalWrite : AutomationPermission::Read,
+				write ? AutomationApprovalPolicy::HighImpact : AutomationApprovalPolicy::None,
+				false);
+			if (write)
+			{
+				registration.descriptor.inputSchema["required"] = nlohmann::json::array({"settings"});
+				registration.descriptor.inputSchema["properties"]["settings"] = SceneViewPerformanceSettingsSchema();
+				registration.descriptor.mutationMode = MutationMode::EditorSelection;
+				registration.descriptor.execution.visibilityBoundary = "editor_preferences_atomic_replace";
+				registration.descriptor.execution.commitWrites = {"EditorPreferences", "SceneViewPerformanceState"};
+			}
+			return registration;
+		}
+
+		// MakeProfilerCaptureStart retains the legacy empty start request while
+		// documenting optional v2 controls.  Bounds are validated again by the
+		// service so old clients and schema-aware clients share one safe path.
+		AutomationCapabilityRegistration MakeProfilerCaptureStart(const AutomationHandlerResolver& resolver)
+		{
+			auto registration = Make(
+				resolver,
+				"profiler.capture.start",
+				"profiler",
+				{"captureLevel", "payloadVersion", "maximumChunkFrames", "maximumChunkBytes", "sampleIntervalFrames"},
+				{"jobId", "state", "captureLevel", "payloadVersion", "bounds"},
+				AutomationPermission::ProjectWrite,
+				AutomationApprovalPolicy::None,
+				true);
+			registration.descriptor.inputSchema["properties"]["captureLevel"] = {{"type", "string"}, {"enum", nlohmann::json::array({"detailed", "sampled", "aggregate"})}};
+			// The writer emits v2 only.  V1 remains readable but is never rewritten
+			// in place, avoiding a surprising format upgrade for legacy artifacts.
+			registration.descriptor.inputSchema["properties"]["payloadVersion"] = {{"type", "integer"}, {"enum", nlohmann::json::array({2})}};
+			registration.descriptor.inputSchema["properties"]["maximumChunkFrames"] = {{"type", "integer"}, {"minimum", 1}, {"maximum", 4096}};
+			registration.descriptor.inputSchema["properties"]["maximumChunkBytes"] = {{"type", "integer"}, {"minimum", 1024}, {"maximum", 8388608}};
+			registration.descriptor.inputSchema["properties"]["sampleIntervalFrames"] = {{"type", "integer"}, {"minimum", 1}, {"maximum", 1024}};
+			return registration;
+		}
 	}
 
 	AuthoringAutomationProvider::AuthoringAutomationProvider(AutomationHandlerResolver resolver) : resolveHandler(std::move(resolver)) {}
@@ -126,6 +203,8 @@ namespace TerraEngine::Editor::Automation
 		result.push_back(MakeSetting(resolveHandler, "settings.editor.set", false, true));
 
 		result.push_back(Make(resolveHandler, "scene_view.state", "scene_view", {}, {"state"}, AutomationPermission::Read, AutomationApprovalPolicy::None, true, true, true));
+		result.push_back(MakeSceneViewSettings(resolveHandler, false));
+		result.push_back(MakeSceneViewSettings(resolveHandler, true));
 		result.push_back(Make(resolveHandler, "scene_view.camera.set", "scene_view", {"position", "focus"}, {"state"}, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, true, true, true));
 		result.push_back(Make(resolveHandler, "scene_view.frame_object", "scene_view", {"target"}, {"state"}, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, true, true, true));
 		result.push_back(Make(resolveHandler, "scene_view.tool.set", "scene_view", {"tool"}, {"state"}, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, true, true, true));
@@ -133,7 +212,7 @@ namespace TerraEngine::Editor::Automation
 		result.push_back(Make(resolveHandler, "scene_view.snapping.set", "scene_view", {"enabled"}, {"state"}, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, true, true, true));
 		result.push_back(Make(resolveHandler, "scene_view.visualization.set", "scene_view", {"mode"}, {"state"}, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, true, true, true));
 
-		result.push_back(Make(resolveHandler, "profiler.capture.start", "profiler", {}, {"jobId", "state"}, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, true));
+		result.push_back(MakeProfilerCaptureStart(resolveHandler));
 		result.push_back(Make(resolveHandler, "profiler.capture.stop", "profiler", {}, {"jobId", "state"}, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, true));
 		result.push_back(Make(resolveHandler, "profiler.capture.list", "profiler", {}, {"artifacts"}, AutomationPermission::Read, AutomationApprovalPolicy::None, true));
 		result.push_back(Make(resolveHandler, "profiler.capture.load", "profiler", {"artifactId"}, {"jobId", "state"}, AutomationPermission::Read, AutomationApprovalPolicy::None, true));

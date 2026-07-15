@@ -40,6 +40,8 @@ add_executable(TerraEngine-EditorTests
 	Project/ProjectSettingsWindowTests.cpp
 	Project/ProjectSettingsMenuInventoryTests.cpp
 	Project/ProjectSettingsPersistenceTests.cpp
+	Project/ManagedReadinessTests.cpp
+	Project/ProjectReadinessPerformanceTests.cpp
 	Core/EditorCommandLineTests.cpp
 	Core/EditorStartupRendererConfigurationTests.cpp
 	Core/EditorPostFrameBoundaryTests.cpp
@@ -110,6 +112,7 @@ add_executable(TerraEngine-EditorTests
 	Renderer/ResourceResidencyWindowTests.cpp
 	Renderer/SceneViewDisplayToggleTests.cpp
 	Renderer/SceneViewMarkerOverlayTests.cpp
+	Renderer/SceneViewMarkerPerformanceTests.cpp
 	Renderer/SceneViewOrientationWidgetTests.cpp
 	Renderer/SceneViewOverlayAccessibilityTests.cpp
 	Renderer/SceneViewOverlayRendererUnavailableTests.cpp
@@ -140,6 +143,7 @@ add_executable(TerraEngine-EditorTests
 	Physics/PhysicsPlayModeSoakTests.cpp
 	Physics/PhysicsDiagnosticsWindowTests.cpp
 	Physics/PhysicsEditorPerformanceTests.cpp
+	Performance/PerformanceTestFixtures.cpp
 	Profiling/RendererRecoveryProfilerTests.cpp
 	Scene/SchedulerPlayModeGraphTests.cpp
 	Scene/SceneRuntimeParityTests.cpp
@@ -152,6 +156,7 @@ add_executable(TerraEngine-EditorTests
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Core/CheckedImGuiVulkanBridge.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Core/ViewportTextureRegistry.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Project/ProjectManager.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Project/ManagedReadinessManifest.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Project/ScriptWorkspaceService.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Assets/AssetDatabase.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Assets/FileWatcher.cpp
@@ -172,6 +177,7 @@ add_executable(TerraEngine-EditorTests
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/Providers/AuthoringAutomationProvider.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/Providers/PhysicsAutomationProvider.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/SceneViewOrientationWidget.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/SceneViewMarkerPipeline.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/SceneViewOverlayIcons.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/SceneViewOverlayMarkers.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/SceneViewOverlayTypes.cpp
@@ -190,6 +196,7 @@ add_executable(TerraEngine-EditorTests
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Profiling/ProfilerCaptureStore.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Profiling/EditorProfilerService.cpp
 	${CMAKE_SOURCE_DIR}/Engine/Profiling/ProfilerCapture.cpp
+	${CMAKE_SOURCE_DIR}/Engine/Profiling/ProfilerCaptureV2.cpp
 )
 
 target_include_directories(TerraEngine-EditorTests

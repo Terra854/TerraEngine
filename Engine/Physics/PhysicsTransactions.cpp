@@ -2,6 +2,7 @@
 
 #include "PhysicsTransactions.h"
 
+#include "Components/Transform.h"
 #include "Core/Object/ObjectManager.h"
 
 #include <algorithm>
@@ -11,6 +12,7 @@ namespace TerraEngine::Scene {
 		ObjectManager& objects,
 		std::initializer_list<TerraEngine::UUID> objectIds) {
 		TransactionReadSet readSet;
+		readSet.sceneGeneration = objects.GetSceneGeneration();
 		readSet.sceneRevision = objects.GetHierarchyRevision();
 		readSet.objects.reserve(objectIds.size());
 		for(const TerraEngine::UUID& objectId : objectIds) {
@@ -21,12 +23,17 @@ namespace TerraEngine::Scene {
 				readSet.objects.push_back(TransactionObjectObservation{.objectId = objectId});
 				continue;
 			}
+			const std::optional<Object> parent = objects.getParent(*object);
 			readSet.objects.push_back(TransactionObjectObservation{
 				.objectId = objectId,
 				.lifetimeGeneration = objects.getObjectLifetimeGeneration(*object),
 				.metadataGeneration = objects.getObjectMetadataGeneration(*object),
 				.componentGeneration = objects.getObjectComponentGeneration(*object),
-				.hierarchyRevision = objects.GetHierarchyRevision()});
+				.hierarchyRevision = objects.GetHierarchyRevision(),
+				.transformRevision = objects.GetObjectTransformRevision(*object),
+				.parentObjectId = parent ? objects.getUUID(*parent) : TerraEngine::EMPTY_UUID,
+				.parentLifetimeGeneration = parent ? objects.getObjectLifetimeGeneration(*parent) : 0,
+				.parentTransformRevision = parent ? objects.GetObjectTransformRevision(*parent) : 0});
 		}
 		return readSet;
 	}
@@ -282,7 +289,8 @@ namespace TerraEngine::Physics {
 			return result;
 		}
 
-		const bool hasSceneReadSet = transaction.sceneReadSet.sceneRevision != 0U
+		const bool hasSceneReadSet = transaction.sceneReadSet.sceneGeneration != 0U
+			|| transaction.sceneReadSet.sceneRevision != 0U
 			|| !transaction.sceneReadSet.objects.empty();
 		if(hasSceneReadSet || !transaction.sceneWrites.empty()) {
 			result.sceneResult = TerraEngine::Scene::PreflightTransaction(
@@ -447,6 +455,102 @@ namespace TerraEngine::Physics {
 		result.publishedWriteCount = transaction.sceneWrites.size() + transaction.physicsCommands.size();
 		result.message = "Scene and physics generations published atomically.";
 		return result;
+	}
+
+	TransformPublicationValidationResult ValidatePhysicsTransformPublication(
+		ObjectManager& objects,
+		const PhysicsTransactionRuntimeState& runtime,
+		const TransformPublicationPacket& packet)
+	{
+		TransformPublicationValidationResult validation = ValidateTransformPublicationPacket(packet);
+		if (!validation.accepted)
+		{
+			return validation;
+		}
+		if (packet.snapshot.world != runtime.world)
+		{
+			validation.accepted = false;
+			validation.reason = TransformPublicationValidationReason::StaleBody;
+			validation.message = "Transform publication targets a stale physics world.";
+			return validation;
+		}
+		for (std::size_t index = 0U; index < packet.entries.size(); ++index)
+		{
+			const TransformPublicationEntry& entry = packet.entries[index];
+			const auto liveHandle = runtime.bodyHandles.find(entry.objectId);
+			const auto liveBody = runtime.bodyGenerations.find(entry.objectId);
+			if (liveHandle == runtime.bodyHandles.end() || liveHandle->second != entry.body
+				|| liveBody == runtime.bodyGenerations.end()
+				|| liveBody->second != entry.bodyGeneration)
+			{
+				validation.accepted = false;
+				validation.reason = TransformPublicationValidationReason::StaleBody;
+				validation.entryIndex = index;
+				validation.objectId = entry.objectId;
+				validation.message = "A body generation changed after state extraction.";
+				return validation;
+			}
+		}
+
+		const Scene::TransactionPublicationGroup group = BuildTransformPublicationGroup(packet);
+		const Scene::TransactionPublicationGroupResult scenePreflight = Scene::PreflightTransactionPublicationGroup(objects, group);
+		if (scenePreflight.status == Scene::TransactionStatus::PreflightAccepted)
+		{
+			return validation;
+		}
+
+		validation.accepted = false;
+		validation.reason = TransformPublicationValidationReason::StaleObject;
+		validation.message = scenePreflight.message;
+		if (!scenePreflight.aggregateResult.conflicts.empty())
+		{
+			const Scene::TransactionConflictRecord& conflict = scenePreflight.aggregateResult.conflicts.front();
+			validation.objectId = conflict.targetObject;
+			switch (conflict.reason)
+			{
+			case Scene::TransactionConflictReason::SceneUnloadedOrSwitched:
+				validation.reason = TransformPublicationValidationReason::StaleScene;
+				break;
+			case Scene::TransactionConflictReason::HierarchyConflict:
+				validation.reason = conflict.targetObject == TerraEngine::EMPTY_UUID
+					? TransformPublicationValidationReason::StaleHierarchy
+					: TransformPublicationValidationReason::StaleParent;
+				break;
+			case Scene::TransactionConflictReason::ComponentVersionMismatch:
+				validation.reason = conflict.componentType == Transform::kComponentName
+					? TransformPublicationValidationReason::StaleTransform
+					: TransformPublicationValidationReason::StaleBody;
+				break;
+			case Scene::TransactionConflictReason::StaleObjectIdentity:
+			case Scene::TransactionConflictReason::MissingTarget:
+				validation.reason = TransformPublicationValidationReason::StaleObject;
+				break;
+			default:
+				break;
+			}
+		}
+		return validation;
+	}
+
+	TerraEngine::Scene::TransactionPublicationGroupResult CommitPhysicsTransformPublication(
+		ObjectManager& objects,
+		const PhysicsTransactionRuntimeState& runtime,
+		const TransformPublicationPacket& packet)
+	{
+		const TransformPublicationValidationResult validation = ValidatePhysicsTransformPublication(objects, runtime, packet);
+		if (!validation.accepted)
+		{
+			Scene::TransactionPublicationGroupResult result;
+			result.groupId = "physics-transform-group-" + std::to_string(packet.publicationGroupId);
+			result.status = Scene::TransactionStatus::Conflicted;
+			result.rejectedWriteCount = packet.entries.size();
+			result.aggregateResult.transactionId = result.groupId;
+			result.aggregateResult.status = result.status;
+			result.aggregateResult.rejectedWriteCount = packet.entries.size();
+			result.message = validation.message;
+			return result;
+		}
+		return Scene::CommitTransactionPublicationGroup(objects, BuildTransformPublicationGroup(packet));
 	}
 
 	std::string_view ToString(PhysicsTransactionState state) {

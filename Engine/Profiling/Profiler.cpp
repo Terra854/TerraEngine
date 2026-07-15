@@ -2,8 +2,11 @@
 
 #include "Profiling/Profiler.h"
 
+#include "Core/Scheduling/FrameWorkload.h"
 #include "Physics/PhysicsDiagnostics.h"
+#include "Renderer/Graph/RenderDiagnostics.h"
 #include "Renderer/RenderTypes.h"
+#include "ThreadPool/ThreadPool.h"
 
 #include <algorithm>
 #include <numeric>
@@ -82,6 +85,21 @@ ProfilerTimingStreamSample MakeTimingSample(
 	sample.milliseconds = status == ProfilerTimingStreamStatus::Valid ? milliseconds : 0.0;
 	sample.statusReason = std::move(reason);
 	return sample;
+}
+
+TelemetryDuration AvailableTelemetryDuration(std::uint64_t nanoseconds)
+{
+	return {TelemetryAvailability::Available, nanoseconds, {}};
+}
+
+TelemetryDuration UnavailableTelemetryDuration(std::string reason)
+{
+	return {TelemetryAvailability::Unavailable, 0u, std::move(reason)};
+}
+
+std::uint64_t MillisecondsToNanoseconds(double milliseconds)
+{
+	return static_cast<std::uint64_t>(std::max(0.0, milliseconds) * 1000000.0 + 0.5);
 }
 
 // Viewport CPU timing must come from profiler scopes instead of renderer frame
@@ -359,12 +377,114 @@ void Profiler::EndFrame()
 		counters.queryMs = physics->timings.queryMs;
 		counters.publishMs = physics->timings.publishMs;
 		currentFrame->physics = counters;
+
+		const auto appendPhysicsStage = [this](const char* name, double milliseconds, std::uint64_t items) {
+			PerformanceStageRecord stage;
+			stage.domain = PerformanceStageDomain::Physics;
+			stage.stageName = name;
+			stage.workloadName = "PhysicsSystem";
+			stage.workItemCount = items;
+			stage.duration = AvailableTelemetryDuration(MillisecondsToNanoseconds(milliseconds));
+			currentFrame->performanceStages.push_back(std::move(stage));
+		};
+		// These independently named records preserve the physics-pipeline shape
+		// even when a backend cannot expose a finer clock for one substage.
+		appendPhysicsStage("Physics.Preparation", physics->timings.prepareMs, physics->preparation.estimatedWorkItems);
+		appendPhysicsStage("Physics.ProviderRead", physics->timings.simulateMs, physics->extraction.extractedBodies);
+		appendPhysicsStage("Physics.StateValidation", physics->timings.commitMs, physics->extraction.convertedBodies);
+		appendPhysicsStage("Physics.SnapshotConstruction", physics->timings.queryMs, physics->extraction.changedBodies);
+		appendPhysicsStage("Physics.TransactionConstruction", physics->timings.publishMs, physics->publication.currentEntries);
+		currentFrame->physicsWorkVolume = PhysicsWorkVolumeRecord{
+			physics->tick, physics->extraction.totalBodies, physics->extraction.activeBodies,
+			physics->extraction.examinedBodies, physics->extraction.extractedBodies,
+			physics->extraction.convertedBodies, physics->extraction.changedBodies,
+			std::min(physics->extraction.changedBodies, physics->publication.currentEntries)};
 	}
+
+	// Scheduler records are published only after a completed frame-workload pass.
+	// The copy keeps profiler storage independent of workload callbacks and live
+	// system state while preserving queue/worker/boundary diagnostics.
+	currentFrame->workloadExecutions = TerraEngine::Scheduling::LatestFrameWorkloadExecutionRecordsForProfiling();
+	for (const WorkloadExecutionRecord& execution : currentFrame->workloadExecutions)
+	{
+		ProtectedBoundaryRecord boundary;
+		boundary.boundaryName = execution.phase.empty() ? execution.workloadName : execution.phase;
+		boundary.queueDuration = execution.queueDuration;
+		boundary.ownershipWaitDuration = execution.ownershipWaitDuration;
+		boundary.executionDuration = execution.runDuration;
+		boundary.flushDuration = execution.flushDuration;
+		boundary.publicationDuration = execution.publicationDuration;
+		if (ValidateProtectedBoundaryRecord(boundary).valid)
+		{
+			currentFrame->protectedBoundaries.push_back(std::move(boundary));
+		}
+	}
+	if (const auto workerSnapshot = ThreadPool::instance().GetTelemetrySnapshot())
+	{
+		for (const ThreadPoolWorkerTelemetry& worker : workerSnapshot->workers)
+		{
+			currentFrame->workerTelemetry.push_back({
+				static_cast<std::uint32_t>(worker.workerIndex), worker.latestQueueDepthAtStart,
+				worker.dispatchCount, worker.usefulItemCount, AvailableTelemetryDuration(worker.runNanoseconds),
+				AvailableTelemetryDuration(worker.waitNanoseconds), AvailableTelemetryDuration(worker.idleNanoseconds)});
+		}
+	}
+	const TerraEngine::Renderer::RenderDiagnosticsSummary renderDiagnostics = TerraEngine::Renderer::LatestRenderDiagnostics();
+	currentFrame->presentationWaits = renderDiagnostics.presentationWaits;
+	if (currentFrame->presentationWaits.empty())
+	{
+		// Preserve explicit availability when this frame reported no unavoidable
+		// presentation wait. An absent vector cannot distinguish "not measured"
+		// from a genuine zero-wait observation in later summaries.
+		PresentationWaitRecord unavailable;
+		unavailable.kind = PresentationWaitKind::UiComposition;
+		unavailable.duration.availability = TelemetryAvailability::Unavailable;
+		unavailable.duration.unavailableReason = "No presentation-wait timing was published for this frame.";
+		unavailable.detail = "renderer presentation telemetry unavailable";
+		currentFrame->presentationWaits.push_back(std::move(unavailable));
+	}
+	currentFrame->responsiveness = FrameResponsivenessRecord{
+		currentFrame->frameIndex,
+		UnavailableTelemetryDuration("Input timestamp was not supplied by the active platform backend."),
+		AvailableTelemetryDuration(MillisecondsToNanoseconds(currentFrame->durationMs)),
+		renderDiagnostics.frameId};
 	AggregateSamplesForFrame(*currentFrame);
 	document.frames.push_back(*currentFrame);
 	TrimFrameBuffer(document.frames, settings);
 	currentFrame.reset();
 	UpdateFastRecordingFlagsLocked();
+}
+
+void Profiler::RecordSceneViewStages(std::span<const PerformanceStageRecord> stages)
+{
+	if (!frameRecordingActive.load(std::memory_order_acquire) || stages.empty())
+	{
+		return;
+	}
+
+	std::lock_guard<std::mutex> lock(mutex);
+	if (state != ProfilerSessionState::Recording || !currentFrame.has_value())
+	{
+		return;
+	}
+
+	// The marker pipeline has five stable preparation stages plus an optional
+	// hit-test record. Keep a defensive per-frame bound for malformed producers.
+	constexpr std::size_t kMaximumSceneViewStageRecordsPerFrame = 16u;
+	std::size_t published = 0u;
+	for (const PerformanceStageRecord& stage : stages)
+	{
+		if (published >= kMaximumSceneViewStageRecordsPerFrame)
+		{
+			break;
+		}
+		if (stage.domain != PerformanceStageDomain::SceneView || !ValidatePerformanceStageRecord(stage).valid)
+		{
+			continue;
+		}
+		currentFrame->performanceStages.push_back(stage);
+		++published;
+	}
 }
 
 bool Profiler::BeginEditorWork()

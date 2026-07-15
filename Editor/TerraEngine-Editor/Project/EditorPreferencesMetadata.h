@@ -21,6 +21,7 @@ namespace TerraEngine::Editor::Preferences
 	enum class PreferencesCategoryId
 	{
 		Diagnostics,
+		SceneView,
 		McpBridge
 	};
 
@@ -33,13 +34,20 @@ namespace TerraEngine::Editor::Preferences
 		std::array<std::string_view, 8> keywords;
 	};
 
-	inline constexpr std::array<PreferencesCategoryDescriptor, 2> kPreferencesCategories = {{
+	inline constexpr std::array<PreferencesCategoryDescriptor, 3> kPreferencesCategories = {{
 		{
 			PreferencesCategoryId::Diagnostics,
 			"diagnostics",
 			"Diagnostics",
 			"Local editor renderer diagnostics and validation preferences.",
 			{ "diagnostics", "renderer", "render", "vulkan", "validation", "debug", "layers", "preferences" }
+		},
+		{
+			PreferencesCategoryId::SceneView,
+			"scene-view",
+			"Scene View",
+			"Local large-scene marker budgets, density, and presentation safeguards.",
+			{ "scene", "view", "large", "markers", "physics", "density", "budget", "performance" }
 		},
 		{
 			PreferencesCategoryId::McpBridge,

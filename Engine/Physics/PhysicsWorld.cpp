@@ -2,6 +2,8 @@
 
 #include "PhysicsWorld.h"
 
+#include "Backend/IPhysicsBackend.h"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -99,6 +101,7 @@ namespace TerraEngine::Physics {
 			settings.retainedResultTicks});
 		constraintRuntime.clear();
 		characterStateHistory.clear();
+		bodyStateStore.Reset(ActiveHandleLocked());
 		state = PhysicsWorldState::Active;
 		return true;
 	}
@@ -494,6 +497,89 @@ namespace TerraEngine::Physics {
 		return found == characterStateHistory.end() ? std::shared_ptr<const PhysicsCharacterStatePacket>{} : *found;
 	}
 
+	std::optional<IncrementalBodyStateUpdateBatch> PhysicsWorld::ConvertExtractedBodyStates(
+		const Backend::PhysicsBackendExtraction& extraction) {
+		if(!extraction.world.IsValid() || extraction.tick == 0U
+			|| extraction.providerOrderGeneration == 0U
+			|| (extraction.fullState && extraction.bodies.size() != extraction.totalBodyCount)) return std::nullopt;
+		IncrementalBodyStateUpdateBatch batch;
+		batch.world = extraction.world;
+		batch.tick = extraction.tick;
+		batch.providerOrderGeneration = extraction.providerOrderGeneration;
+		batch.expectedCompleteBodyCount = extraction.fullState
+			? static_cast<std::size_t>(extraction.totalBodyCount) : 0U;
+		batch.fullState = extraction.fullState;
+		batch.updates.reserve(extraction.bodies.size()
+			+ (extraction.fullState ? 0U : extraction.removedBodies.size()));
+		std::unordered_set<std::uint64_t> ownership;
+		std::unordered_set<std::uint32_t> stableIndices;
+		ownership.reserve(extraction.bodies.size());
+		stableIndices.reserve(extraction.bodies.size());
+		for(const Backend::PhysicsBackendBodyState& provider : extraction.bodies) {
+			const std::uint64_t ownershipKey = (static_cast<std::uint64_t>(provider.handle.slotIndex) << 32U)
+				| provider.handle.slotGeneration;
+			if(!provider.handle.IsValid() || provider.objectId == TerraEngine::EMPTY_UUID
+				|| provider.objectGeneration == 0U || provider.componentGeneration == 0U
+				|| provider.fields == PhysicsBodyStateFieldMask::None
+				|| !ownership.insert(ownershipKey).second || !stableIndices.insert(provider.stableIndex).second
+				|| (HasPhysicsBodyStateFields(provider.fields, PhysicsBodyStateFieldMask::Pose)
+					&& !provider.pose.IsFinite())
+				|| (HasPhysicsBodyStateFields(provider.fields, PhysicsBodyStateFieldMask::LinearVelocity)
+					&& !provider.linearVelocity.IsFinite())
+				|| (HasPhysicsBodyStateFields(provider.fields, PhysicsBodyStateFieldMask::AngularVelocity)
+					&& !provider.angularVelocity.IsFinite())) return std::nullopt;
+			PhysicsBodyState stateValue;
+			stateValue.handle = provider.handle;
+			stateValue.objectId = provider.objectId;
+			stateValue.objectGeneration = provider.objectGeneration;
+			stateValue.componentGeneration = provider.componentGeneration;
+			stateValue.worldPose = provider.pose;
+			stateValue.linearVelocity = provider.linearVelocity;
+			stateValue.angularVelocity = provider.angularVelocity;
+			stateValue.awake = provider.awake;
+			batch.updates.push_back({std::move(stateValue), {}, provider.fields, provider.change, false});
+		}
+		if(extraction.fullState) {
+			constexpr PhysicsBodyStateFieldMask completeFields = PhysicsBodyStateFieldMask::Pose
+				| PhysicsBodyStateFieldMask::LinearVelocity
+				| PhysicsBodyStateFieldMask::AngularVelocity
+				| PhysicsBodyStateFieldMask::Awake;
+			for(std::uint32_t index = 0U; index < extraction.bodies.size(); ++index) {
+				if(!stableIndices.contains(index)
+					|| !HasPhysicsBodyStateFields(extraction.bodies[index].fields, completeFields)) return std::nullopt;
+			}
+		}
+		if(!extraction.fullState) {
+			for(const PhysicsBodyHandle removed : extraction.removedBodies) {
+				batch.updates.push_back({{}, removed, PhysicsBodyStateFieldMask::None,
+					PhysicsBodyStateChangeMask::Removed, true});
+			}
+		}
+		return batch;
+	}
+
+	std::optional<IncrementalBodyStatePublication> PhysicsWorld::PublishPreparedBodyStates(
+		const IncrementalBodyStateUpdateBatch& batch) {
+		std::lock_guard<std::mutex> lock(mutex);
+		if(!CanAccessRegistriesLocked() || batch.world != ActiveHandleLocked()) return std::nullopt;
+		for(const IncrementalBodyStateUpdate& update : batch.updates) {
+			const PhysicsBodyHandle handle = update.removed ? update.removedHandle : update.state.handle;
+			const PhysicsHandleStatus status = bodyRegistry.Status(handle, ActiveHandleLocked());
+			if((!update.removed && status != PhysicsHandleStatus::Alive)
+				|| (update.removed && status != PhysicsHandleStatus::Alive
+					&& status != PhysicsHandleStatus::Destroyed)) return std::nullopt;
+		}
+		return bodyStateStore.Apply(batch);
+	}
+
+	std::shared_ptr<const IncrementalBodyStateSnapshot> PhysicsWorld::AcquireCompleteBodyState() const {
+		return bodyStateStore.AcquireComplete();
+	}
+
+	std::shared_ptr<const ChangedBodyStatePacket> PhysicsWorld::AcquireChangedBodyState() const {
+		return bodyStateStore.AcquireChanged();
+	}
+
 	bool PhysicsWorld::PublishCookedShape(PhysicsCookedShapePublication publication) {
 		constexpr std::size_t kMaximumRuntimeCookedPayloadBytes = 64U * 1024U * 1024U;
 		if(publication.assetId == TerraEngine::EMPTY_UUID
@@ -802,6 +888,7 @@ namespace TerraEngine::Physics {
 		characterRegistry.Clear();
 		constraintRuntime.clear();
 		characterStateHistory.clear();
+		bodyStateStore.Reset();
 		// Cache owners retire at world teardown. Any worker or immutable published
 		// snapshot still holding a lease keeps its bytes alive until it finishes.
 		cookedShapeAssets.clear();

@@ -5,6 +5,7 @@
 #include "Core/Object/ObjectManager.h"
 #include "Scene/HierarchySnapshot.h"
 #include "Scene/SceneGraphRuntime.h"
+#include "Scene/SceneChangePacket.h"
 
 #include <algorithm>
 #include <sstream>
@@ -12,6 +13,16 @@
 #include <unordered_set>
 
 namespace TerraEngine::Scene {
+	namespace {
+		std::uint64_t CombineRuntimeGeneration(std::uint64_t seed, std::uint64_t value)
+		{
+			// This deterministic hash-combine is cheap enough for every transform
+			// record. Zero remains reserved for unavailable dependency state.
+			seed ^= value + 0x9e3779b97f4a7c15ull + (seed << 6u) + (seed >> 2u);
+			return seed == 0u ? 1u : seed;
+		}
+	}
+
 	const char* ToString(RuntimeLayoutRecordKind kind)
 	{
 		switch (kind)
@@ -161,6 +172,8 @@ namespace TerraEngine::Scene {
 			FlatHierarchyEntry entry;
 			entry.entity = static_cast<entt::entity>(source.object.entityValue);
 			entry.objectId = source.objectId;
+			entry.parentObjectId = source.parentId;
+			entry.parentLinkGeneration = source.parentLinkGeneration;
 			if (const auto compact = objectHandleByObjectId.find(source.objectId); compact != objectHandleByObjectId.end())
 			{
 				entry.objectHandle = compact->second;
@@ -182,6 +195,7 @@ namespace TerraEngine::Scene {
 			entry.runtimeActive = activeByObjectId.contains(source.objectId) ? activeByObjectId[source.objectId] : true;
 			entry.transformRevision = objects.GetObjectTransformRevision(entry.objectHandle);
 			entry.spatialRevision = objects.GetObjectSpatialRevision(entry.objectHandle);
+			entry.isStatic = objects.isObjectStatic(entry.objectHandle);
 			if (entry.runtimeActive)
 			{
 				++layout.activeObjectCount;
@@ -207,7 +221,7 @@ namespace TerraEngine::Scene {
 			dirtyObjects.insert(dirtyRoot);
 		}
 
-		const bool includeAll = dirtyState.fullRefreshRequested || dirtyObjects.empty();
+		const bool includeAll = dirtyState.fullRefreshRequested;
 		std::vector<bool> parentOrSelfDirty(layout.entries.size(), false);
 		for (std::size_t index = 0; index < layout.entries.size(); ++index)
 		{
@@ -249,6 +263,7 @@ namespace TerraEngine::Scene {
 			record.layoutIndex = index;
 			record.parentIndex = entry.parentIndex;
 			record.sourceRevision = entry.transformRevision;
+			record.isStatic = entry.isStatic;
 			if (const auto propagated = propagatedByObject.find(entry.objectId); propagated != propagatedByObject.end())
 			{
 				record.worldTransform = propagated->second.worldTransform;
@@ -269,6 +284,143 @@ namespace TerraEngine::Scene {
 			return dirtyIndexSet.find(record.layoutIndex) == dirtyIndexSet.end();
 		}), records.end());
 		return records;
+	}
+
+	CompactTransformRuntimeSnapshot BuildCompactTransformRuntimeSnapshot(const FlatHierarchyLayout& layout, const SceneGraph& graph, const CompactTransformRuntimeSnapshot* previousSnapshot)
+	{
+		CompactTransformRuntimeSnapshot snapshot;
+		snapshot.valid = layout.valid;
+		snapshot.sourceGraphRevision = graph.revision;
+		snapshot.sourceHierarchyRevision = layout.sourceHierarchyRevision;
+		snapshot.parentWorldStates.reserve(layout.entries.size());
+		snapshot.records.reserve(layout.activeObjectCount);
+
+		std::unordered_map<TerraEngine::UUID, const ParentWorldRuntimeState*> previousByObject;
+		if (previousSnapshot != nullptr && previousSnapshot->valid)
+		{
+			for (const ParentWorldRuntimeState& state : previousSnapshot->parentWorldStates)
+			{
+				previousByObject[state.objectId] = &state;
+			}
+		}
+
+		for (std::size_t index = 0; index < layout.entries.size(); ++index)
+		{
+			const FlatHierarchyEntry& entry = layout.entries[index];
+			const auto graphObject = graph.objects.find(entry.objectId);
+			if (graphObject == graph.objects.end())
+			{
+				snapshot.valid = false;
+				break;
+			}
+
+			const SceneGraphObject& source = graphObject->second;
+			ParentWorldRuntimeState parentState;
+			parentState.objectId = entry.objectId;
+			parentState.parentObjectId = entry.parentObjectId;
+			parentState.parentIndex = entry.parentIndex;
+			parentState.generation = CombineRuntimeGeneration(1u, entry.parentLinkGeneration);
+			if (entry.parentIndex.has_value())
+			{
+				if (*entry.parentIndex >= index || *entry.parentIndex >= layout.entries.size())
+				{
+					snapshot.valid = false;
+					break;
+				}
+				const FlatHierarchyEntry& parentEntry = layout.entries[*entry.parentIndex];
+				const auto parentObject = graph.objects.find(parentEntry.objectId);
+				if (parentObject == graph.objects.end())
+				{
+					snapshot.valid = false;
+					break;
+				}
+				const std::uint64_t ancestorGeneration = snapshot.parentWorldStates[*entry.parentIndex].generation;
+				parentState.generation = CombineRuntimeGeneration(parentState.generation, parentObject->second.transformRevision);
+				parentState.generation = CombineRuntimeGeneration(parentState.generation, ancestorGeneration);
+				parentState.parentWorldTransform.position = parentObject->second.worldPosition;
+				parentState.parentWorldTransform.rotation = parentObject->second.worldRotation;
+				parentState.parentWorldTransform.scale = parentObject->second.worldScale;
+			}
+
+			if (const auto previous = previousByObject.find(entry.objectId);
+				previous != previousByObject.end()
+				&& previous->second->parentObjectId == parentState.parentObjectId
+				&& previous->second->generation == parentState.generation)
+			{
+				// Retain the already-normalized parent pose when its exact dependency
+				// generation is unchanged.
+				parentState = *previous->second;
+				parentState.reused = true;
+				++snapshot.reusedParentStateCount;
+			}
+			snapshot.parentWorldStates.push_back(parentState);
+
+			if (!entry.runtimeActive)
+			{
+				continue;
+			}
+			CompactTransformRuntimeRecord record;
+			record.objectId = entry.objectId;
+			record.layoutIndex = index;
+			record.parentIndex = entry.parentIndex;
+			record.localPosition = source.localPosition;
+			record.localRotation = source.localRotation;
+			record.localScale = source.localScale;
+			record.worldPosition = source.worldPosition;
+			record.worldRotation = source.worldRotation;
+			record.worldScale = source.worldScale;
+			record.transformRevision = source.transformRevision;
+			record.parentWorldGeneration = parentState.generation;
+			record.isStatic = entry.isStatic;
+			snapshot.records.push_back(record);
+		}
+
+		if (!snapshot.valid || snapshot.parentWorldStates.size() != layout.entries.size())
+		{
+			// Reject the complete immutable snapshot if any parent index or graph
+			// record is stale; workers must never observe partial indexed state.
+			snapshot.valid = false;
+			snapshot.records.clear();
+			snapshot.parentWorldStates.clear();
+			snapshot.reusedParentStateCount = 0;
+		}
+		return snapshot;
+	}
+
+	RuntimeLayoutChangeBatch BuildRuntimeLayoutChangeBatch(const FlatHierarchyLayout& layout, const SceneTransformPropagationResult& propagation, const SceneDirtyTransformState& dirtyState, const SceneChangePacket& changes)
+	{
+		RuntimeLayoutChangeBatch batch;
+		batch.sourceSceneGeneration = changes.SceneGeneration();
+		batch.sourceLayoutRevision = layout.layoutRevision;
+		const SceneChangePacketValidationResult validation = changes.Validate();
+		if (!layout.valid || !propagation.valid || !dirtyState.valid || !validation.valid)
+		{
+			// A caller may safely discard this batch: no partial runtime record
+			// publication is produced from stale generations or failed propagation.
+			batch.valid = false;
+			return batch;
+		}
+
+		batch.transformChanges = BuildDirtyTransformRuntimeRecords(layout, propagation, dirtyState);
+		for (const TransformRuntimeRecord& transform : batch.transformChanges)
+		{
+			if (transform.layoutIndex >= layout.entries.size())
+			{
+				batch.valid = false;
+				batch.transformChanges.clear();
+				batch.staticSpatialChanges.clear();
+				batch.movableSpatialChanges.clear();
+				return batch;
+			}
+			const FlatHierarchyEntry& entry = layout.entries[transform.layoutIndex];
+			RuntimeSpatialRecordChange spatial;
+			spatial.objectId = transform.objectId;
+			spatial.layoutIndex = transform.layoutIndex;
+			spatial.spatialRevision = entry.spatialRevision;
+			spatial.isStatic = entry.isStatic;
+			(entry.isStatic ? batch.staticSpatialChanges : batch.movableSpatialChanges).push_back(spatial);
+		}
+		return batch;
 	}
 
 	LayoutDiagnosticsSummary BuildLayoutDiagnosticsSummary(const FlatHierarchyLayout& layout, std::size_t transformRecordCount, std::size_t renderRecordCount, std::uint64_t frameId)

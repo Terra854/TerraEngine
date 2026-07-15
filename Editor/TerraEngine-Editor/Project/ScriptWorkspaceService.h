@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "ManagedReadinessManifest.h"
+
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -83,6 +85,16 @@ public:
 	[[nodiscard]] std::filesystem::path GetOutputRoot() const;
 	[[nodiscard]] std::filesystem::path GetReferenceRoot() const;
 	[[nodiscard]] std::filesystem::path GetAssemblyPath() const;
+	[[nodiscard]] std::filesystem::path GetManagedReadinessManifestPath() const;
+
+	// Computes the deterministic cache key for one requested build profile.
+	// Callers validate this key before direct-loading a prior Assembly-CSharp DLL.
+	[[nodiscard]] ManagedReadinessInputs BuildManagedReadinessInputs(const std::string& buildProfile) const;
+	[[nodiscard]] ManagedReadinessValidation ValidateManagedReadiness(
+		const std::string& buildProfile,
+		ManagedReadinessManifest* outManifest = nullptr,
+		std::string* outError = nullptr) const;
+	bool PublishManagedReadiness(const std::string& buildProfile, std::string* outError = nullptr) const;
 
 	bool EnsureWorkspace(std::string* outError = nullptr);
 	bool RegenerateWorkspace(std::string* outError = nullptr);
@@ -96,12 +108,17 @@ public:
 	[[nodiscard]] static std::string QuoteCommandArgument(const std::filesystem::path& path);
 	[[nodiscard]] static std::string ExpandEditorCommandTemplate(std::string commandTemplate, const EditorCommandContext& context);
 	[[nodiscard]] static std::string BuildDefaultEditorCommand(const std::filesystem::path& targetPath);
+	// Returns true only when a readable source DLL/PDB/analyzer differs from
+	// the project copy. This lets validation prove repeated warm opens avoid
+	// redundant reference writes without trusting file timestamps.
+	[[nodiscard]] static bool RequiresManagedReferenceCopy(const std::filesystem::path& source, const std::filesystem::path& target);
 
 private:
 	// These helpers are kept private so every caller goes through
 	// EnsureWorkspace/RegenerateWorkspace and gets one consistent validation path.
 	bool WriteWorkspaceFiles(std::string* outError);
 	bool WriteTextIfChanged(const std::filesystem::path& path, const std::string& contents, std::string* outError) const;
+	bool CopyManagedReferenceIfChanged(const std::filesystem::path& source, const std::filesystem::path& target, std::string* outError) const;
 
 	[[nodiscard]] std::filesystem::path ResolveTemplateRoot() const;
 	[[nodiscard]] std::filesystem::path ResolveManagedBridgePath() const;

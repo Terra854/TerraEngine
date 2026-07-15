@@ -70,7 +70,13 @@ namespace TerraEngine::Tests {
 			context.Expect(fixture.backend.Step({fixture.world, 1U, 1.0F / 60.0F, 1U}).Succeeded(), "Constraint fixture must step.");
 			PhysicsBackendExtraction extraction; extraction.world = fixture.world; fixture.backend.Extract(extraction);
 			context.Expect(extraction.constraints.size() == families.size(), "Every committed constraint must publish a provider-neutral state.");
-			for(const PhysicsBackendConstraintState& state : extraction.constraints) context.Expect(std::isfinite(state.linearImpulseMagnitude) && std::isfinite(state.angularImpulseMagnitude), "Jolt solver lambdas must extract as finite impulses.");
+			for(const PhysicsBackendConstraintState& state : extraction.constraints) {
+				context.Expect(std::isfinite(state.linearImpulseMagnitude) && std::isfinite(state.angularImpulseMagnitude), "Jolt solver lambdas must extract as finite impulses.");
+				context.Expect(state.handle.IsValid() && state.ownerObjectId != TerraEngine::EMPTY_UUID
+					&& state.recordId != TerraEngine::EMPTY_UUID && state.ownerObjectGeneration == 1U
+					&& state.componentGeneration == 1U && state.recordGeneration == 1U,
+					"Constraint extraction must preserve complete generation-bearing ownership metadata instead of provider-local references.");
+			}
 
 			PhysicsBackendStagingToken rollback; PhysicsConstraintCreateRequest stale = fixture.Request({{41U}, 1U, 20U, 1U}, PhysicsConstraintKind::Fixed);
 			context.Expect(fixture.backend.CreateConstraint(stale, rollback).Succeeded() && fixture.backend.RollbackStaging(rollback).Succeeded(), "A staged constraint must roll back without live solver state.");

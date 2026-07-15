@@ -117,6 +117,47 @@ namespace TerraEngine::Tests {
 			}
 		});
 
+		registry.Add("Physics.LifecycleStress.CancellationProviderFailureStaleReceiptsAndReusedGenerationsStayContained", [](TestContext& context) {
+			PhysicsWorld world;
+			context.Expect(world.Create(PhysicsSettings::Defaults()), "The lifecycle containment fixture must create a live world.");
+			const PhysicsWorldHandle liveWorld = world.Handle();
+			const PhysicsBodyHandle retiredBody = world.AllocateBody();
+			context.Expect(retiredBody.IsValid() && world.Release(retiredBody),
+				"The fixture must retire one object-generation-bearing body handle before reallocation.");
+			const PhysicsBodyHandle replacementBody = world.AllocateBody();
+			context.Expect(replacementBody.slotIndex == retiredBody.slotIndex && replacementBody.slotGeneration != retiredBody.slotGeneration,
+				"Reused compact slots must advance generation so a stale object/body identity cannot revive.");
+			context.Expect(world.Status(retiredBody) == PhysicsHandleStatus::StaleSlot,
+				"The stale pre-replacement handle must be rejected before any lifecycle boundary runs.");
+
+			const PhysicsQueryReceipt queryReceipt = world.SubmitQuery(MakeQuery(liveWorld, 1U));
+			context.Expect(queryReceipt.accepted && world.CancelQuery(queryReceipt.handle),
+				"A queued query must be cancellable while the original world is live.");
+			context.Expect(world.ReadQuery(queryReceipt.handle).status == PhysicsResultStatus::Cancelled,
+				"A cancelled receipt must never become a successful late result.");
+
+			const PhysicsBodyCommandTarget commandTarget{liveWorld, TerraEngine::GenerateUUID(), 1U, 1U};
+			const PhysicsCommandMetadata commandMetadata{.producerId = 1U, .producerSequence = 1U};
+			const PhysicsCommandReceipt commandReceipt = world.EnqueueCommand(PhysicsCommand::MakeWake(commandTarget, commandMetadata));
+			context.Expect(commandReceipt.accepted && world.CancelCommand(commandReceipt.commandId),
+				"A deferred command must be removable before provider work reaches a protected boundary.");
+			context.Expect(world.CommandQueueDiagnostics().queuedDepth == 0U,
+				"Command cancellation must leave no work that could outlive the world.");
+
+			// MarkFailed is the provider/orchestration failure transition. It stops new
+			// producers, yet still requires the ordinary drain and teardown sequence.
+			context.Expect(world.MarkFailed() && world.State() == PhysicsWorldState::Failed,
+				"A provider failure must enter the contained Failed state before teardown.");
+			context.Expect(!world.EnqueueCommand(PhysicsCommand::MakeWake(commandTarget,
+				PhysicsCommandMetadata{.producerId = 1U, .producerSequence = 2U})).accepted,
+				"A failed provider world must reject new work rather than retaining a dangerous stale command.");
+			context.Expect(world.BeginStopping() && world.BeginDraining() == 0U && world.CompleteTeardown(),
+				"Provider failure cleanup must use the same complete draining boundary as project close.");
+			context.Expect(world.ReadQuery(queryReceipt.handle).status == PhysicsResultStatus::StaleTarget
+				&& world.Status(replacementBody) == PhysicsHandleStatus::StaleWorld,
+				"Teardown must leave both cancelled receipts and replacement-generation handles unable to address a new world.");
+		});
+
 		registry.Add("Physics.LifecycleStress.OneThousandSystemCyclesDrainForExplicitLifecycleBoundaries", [](TestContext& context) {
 			ThreadPoolSession pool;
 			auto& physics = PhysicsSystem::Instance();

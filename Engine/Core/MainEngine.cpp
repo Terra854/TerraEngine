@@ -410,17 +410,22 @@ bool Engine::Update(float deltaTime)
 			TerraEngine::Scheduling::MutationFlushRuntimeState state;
 			TerraEngine::Scene::SceneMutationQueue& queue = TerraEngine::Scene::SceneMutationQueue::Instance();
 			TerraEngine::Scene::SceneMutationBatchResult result;
-			if (!queue.Empty()) {
+			const bool sameFramePhysicsConsumer = TerraEngine::Scheduling::SameFramePhysicsPublicationConsumerActive();
+			const bool deferredAfterPhysics = flushPoint.name == "After Physics" && !sameFramePhysicsConsumer;
+			if (!deferredAfterPhysics && !queue.Empty()) {
 				// Structural scene mutations are applied only at declared flush
 				// points so systems that iterate hierarchy/component data never
 				// observe the ObjectManager changing midway through their update.
 				result = SceneManager::Instance().ApplySceneMutations("system-scheduler-flush");
 				state.message = result.applied ? "Scene mutation queue flushed." : "Scene mutation queue rejected one or more requests.";
 			}
-			if (flushPoint.name == "After Physics") {
+			const bool physicsPublicationBoundary = (flushPoint.name == "After Physics" && sameFramePhysicsConsumer)
+				|| (flushPoint.name == "Frame End" && !sameFramePhysicsConsumer);
+			if (physicsPublicationBoundary) {
 				// A physics step becomes publication-complete only after this protected
 				// boundary returns the receipts for its typed Transform transactions.
-				TerraEngine::Physics::PhysicsSystem::Instance().OnAfterPhysicsFlush(result.transactionResults);
+				TerraEngine::Physics::PhysicsSystem::Instance().OnAfterPhysicsFlush(
+					result.transactionResults, result.publicationGroupResults);
 				// Managed subscribers observe the immutable packet only after physics
 				// transform transactions are visible and provider callbacks have ended.
 				ScriptingSystem::Instance().DeliverPhysicsEventsAfterFlush();
@@ -504,17 +509,22 @@ TerraEngine::Runtime::PhysicsInvariantReport Engine::RunPhysicsInvariantFixture(
 		return report;
 	}
 
-	const auto executeFrame = [this]() {
+		const auto executeFrame = [this]() {
 		return systemScheduler.ExecuteFrame(0.0F, [](const TerraEngine::Scheduling::MutationFlushPoint& flushPoint) {
 			TerraEngine::Scheduling::MutationFlushRuntimeState state;
 			TerraEngine::Scene::SceneMutationQueue& queue = TerraEngine::Scene::SceneMutationQueue::Instance();
 			TerraEngine::Scene::SceneMutationBatchResult result;
-			if (!queue.Empty()) {
+			const bool sameFramePhysicsConsumer = TerraEngine::Scheduling::SameFramePhysicsPublicationConsumerActive();
+			const bool deferredAfterPhysics = flushPoint.name == "After Physics" && !sameFramePhysicsConsumer;
+			if (!deferredAfterPhysics && !queue.Empty()) {
 				result = SceneManager::Instance().ApplySceneMutations("physics-parity-scheduler-flush");
 				state.message = result.applied ? "Scene mutation queue flushed." : "Scene mutation queue rejected one or more requests.";
 			}
-			if (flushPoint.name == "After Physics") {
-				PhysicsSystem::Instance().OnAfterPhysicsFlush(result.transactionResults);
+			const bool physicsPublicationBoundary = (flushPoint.name == "After Physics" && sameFramePhysicsConsumer)
+				|| (flushPoint.name == "Frame End" && !sameFramePhysicsConsumer);
+			if (physicsPublicationBoundary) {
+				PhysicsSystem::Instance().OnAfterPhysicsFlush(
+					result.transactionResults, result.publicationGroupResults);
 				ScriptingSystem::Instance().DeliverPhysicsEventsAfterFlush();
 			}
 			state.pendingAfterFlush = queue.Size();

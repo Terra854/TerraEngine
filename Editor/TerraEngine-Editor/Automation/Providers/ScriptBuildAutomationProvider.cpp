@@ -23,7 +23,18 @@ namespace TerraEngine::Editor::Automation
 			descriptor.category = "export";
 			descriptor.description = std::move(description);
 			descriptor.inputSchema = std::move(inputSchema);
-			descriptor.resultSchema = {{"type", "object"}};
+			// Keep the historic open result envelope, but document the additive
+			// readiness/cache fields so callers can distinguish a forced rebuild
+			// from a reusable managed output without parsing status prose.
+			descriptor.resultSchema = {
+				{"type", "object"},
+				{"properties", {
+					{"ok", {{"type", "boolean"}}},
+					{"message", {{"type", "string"}}},
+					{"data", {{"type", "object"}}}
+				}},
+				{"additionalProperties", true}
+			};
 			descriptor.permission = permission;
 			descriptor.approvalPolicy = approvalPolicy;
 			descriptor.mutationMode = mutationMode;
@@ -87,7 +98,7 @@ namespace TerraEngine::Editor::Automation
 	std::vector<AutomationCapabilityRegistration> ScriptBuildAutomationProvider::GetCapabilities()
 	{
 		std::vector<AutomationCapabilityRegistration> capabilities;
-		capabilities.reserve(8);
+		capabilities.reserve(9);
 		capabilities.push_back(MakeExportRegistration(
 			resolveHandler,
 			"export.validate",
@@ -118,7 +129,7 @@ namespace TerraEngine::Editor::Automation
 				{"additionalProperties", true}
 			}));
 		for (const auto& [name, mode] : std::vector<std::pair<std::string, MutationMode>>{
-			{"script.templates.list", MutationMode::ReadOnly}, {"script.create", MutationMode::AssetMutation},
+			{"script.status", MutationMode::ReadOnly}, {"script.templates.list", MutationMode::ReadOnly}, {"script.create", MutationMode::AssetMutation},
 			{"script.types.list", MutationMode::ReadOnly}, {"script.workspace.sync", MutationMode::ProjectMutation},
 			{"script.compile", MutationMode::ProjectMutation}})
 		{
@@ -127,6 +138,18 @@ namespace TerraEngine::Editor::Automation
 				mode == MutationMode::ReadOnly ? AutomationPermission::Read : AutomationPermission::ProjectWrite,
 				AutomationApprovalPolicy::None, {{"type", "object"}, {"additionalProperties", true}});
 			registration.descriptor.category = "script";
+			if (name == "script.status")
+			{
+				registration.descriptor.description = "Read managed coordinator, readiness-manifest, fingerprint, and loaded-output identity evidence.";
+				registration.descriptor.execution.preparationReads.push_back("ManagedReadinessManifest");
+			}
+			if (name == "script.compile")
+			{
+				registration.descriptor.description = "Force a managed build and report additive readiness/cache evidence while preserving the durable-job result contract.";
+				registration.descriptor.execution.preparationReads.push_back("ManagedReadinessManifest");
+				registration.descriptor.execution.commitReads.push_back("ManagedReadinessManifest");
+				registration.descriptor.execution.commitWrites.push_back("ManagedReadinessManifest");
+			}
 			capabilities.push_back(std::move(registration));
 		}
 		return capabilities;

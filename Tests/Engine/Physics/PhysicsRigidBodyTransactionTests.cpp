@@ -6,7 +6,13 @@
 #include "Core/Object/ComponentRegistry.h"
 #include "Core/Object/ObjectManager.h"
 #include "Physics/PhysicsTransactions.h"
+#include "Physics/TransformPublicationPacket.h"
+#include "Scene/SceneMutationQueue.h"
 #include "Scene/TransactionalMutation.h"
+
+#include <array>
+#include <cmath>
+#include <vector>
 
 namespace TerraEngine::Tests {
 	using namespace TerraEngine::Physics;
@@ -90,6 +96,62 @@ namespace TerraEngine::Tests {
 			context.Expect(!result.sceneGenerationPublished && !result.physicsGenerationPublished,
 				"A Transform version conflict must expose no new scene or physics generation.");
 			objects.clear();
+		});
+
+		registry.Add("Physics.RigidBodyTransaction.TickWidePublicationRejectsAtEveryDeclaredVisibilityBoundary", [](TestContext& context) {
+			// AfterPhysics and FrameEnd are the only two public visibility boundaries.
+			// Both must keep every preparation chunk invisible if one target goes stale.
+			for(const Physics::TransformPublicationVisibilityBoundary boundary :
+				std::array<Physics::TransformPublicationVisibilityBoundary, 2U>{
+					Physics::TransformPublicationVisibilityBoundary::AfterPhysics,
+					Physics::TransformPublicationVisibilityBoundary::FrameEnd}) {
+				ComponentRegistry::RegisterAllComponents();
+				ObjectManager& objects = ObjectManager::instance();
+				objects.clear();
+				TerraEngine::Scene::SceneMutationQueue queue;
+				const Physics::PhysicsWorldHandle world{{401U}, 9U};
+				std::vector<Object> targets{
+					objects.createObject("Boundary A"), objects.createObject("Boundary B"), objects.createObject("Boundary C")};
+				std::vector<Physics::TransformPublicationSourceRecord> records;
+				records.reserve(targets.size());
+				for(std::size_t index = 0U; index < targets.size(); ++index) {
+					Transform* transform = objects.AddComponent<Transform>(targets[index]);
+					context.Expect(transform != nullptr, "Each boundary fixture target needs a Transform component.");
+					objects.MarkObjectTransformDirty(targets[index]);
+					records.push_back({
+						.objectId = objects.getUUID(targets[index]),
+						.body = {world.worldId, world.worldGeneration, static_cast<Physics::PhysicsSlotIndex>(index), 1U},
+						.objectLifetimeGeneration = objects.getObjectLifetimeGeneration(targets[index]),
+						.bodyGeneration = 1U,
+						.componentGeneration = objects.getObjectComponentGeneration(targets[index]),
+						.expectedTransformRevision = objects.GetObjectTransformRevision(targets[index]),
+						.expectedHierarchyGeneration = objects.GetHierarchyRevision(),
+						.localPose = {{static_cast<float>(index + 1U), 0.0F, 0.0F}, {0.0F, 0.0F, 0.0F, 1.0F}},
+						.worldPoseReceipt = {{static_cast<float>(index + 1U), 0.0F, 0.0F}, {0.0F, 0.0F, 0.0F, 1.0F}},
+						.poseChanged = true});
+				}
+
+				const Physics::TransformPublicationPacket packet = Physics::PrepareTransformPublicationPacket(
+					{world, 33U, 5U, 7U}, objects.GetSceneGeneration(), objects.GetHierarchyRevision(),
+					static_cast<std::uint64_t>(boundary) + 1U, 77U, records, 1U, boundary);
+				context.Expect(packet.targetBoundary == boundary && packet.chunks.size() == targets.size(),
+					"The test must prepare a distinct one-entry chunk for every declared boundary.");
+				queue.EnqueuePublicationGroup(Physics::BuildTransformPublicationGroup(packet));
+				objects.removeObject(targets.back());
+
+				const auto flushed = queue.Apply(objects,
+					boundary == Physics::TransformPublicationVisibilityBoundary::AfterPhysics ? "After Physics" : "Frame End");
+				context.Expect(flushed.publicationGroupResults.size() == 1U && !flushed.publicationGroupResults.front().Committed(),
+					"A missing late chunk must reject the entire packet at its declared flush boundary.");
+				context.Expect(flushed.publicationGroupResults.front().appliedWriteCount == 0U,
+					"Neither boundary may expose an early transform before the group-wide preflight succeeds.");
+				for(std::size_t index = 0U; index + 1U < targets.size(); ++index) {
+					const Transform* transform = objects.GetComponent<Transform>(targets[index]);
+					context.Expect(transform != nullptr && std::abs(transform->position.x) < 0.001F,
+						"A rejected packet must leave every surviving target at its authored transform.");
+				}
+				objects.clear();
+			}
 		});
 	}
 }

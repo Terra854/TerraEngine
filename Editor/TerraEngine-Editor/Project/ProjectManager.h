@@ -6,7 +6,11 @@
 
 #include "ProjectSettings.h"
 #include "EditorPreferences.h"
+#include "Scene/Serializer.h"
+#include <atomic>
+#include <cstdint>
 #include <filesystem>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -28,6 +32,40 @@ struct RendererRecoveryProjectActionState
 	std::string lastSafeSaveMessage;
 };
 
+// ProjectSceneLoadDecision describes how one authoritative scene became a
+// worker-prepared publication packet. The parsed document remains value-only;
+// ObjectManager is not touched until MainEditorSubsystem reaches its protected
+// scene activation boundary.
+struct ProjectSceneLoadDecision
+{
+	bool prepared = false;
+	bool cacheHit = false;
+	bool usedAuthoritativeSource = false;
+	bool regenerationPublished = false;
+	bool cancelled = false;
+	std::uint64_t projectGeneration = 0U;
+	std::filesystem::path sourcePath;
+	std::filesystem::path derivedPath;
+	std::string cacheState;
+	std::string reason;
+	nlohmann::json sceneDocument;
+	TerraEngine::Scene::PreparedSceneDecode preparedScene;
+};
+
+// ProjectReadinessState separates gameplay-critical publication from editor
+// metadata refresh. Callers may enable simulation only after the complete
+// prepared scene is visible; editor-only panels can refresh afterward.
+struct ProjectReadinessState
+{
+	std::uint64_t projectGeneration = 0U;
+	bool projectSettingsReady = false;
+	bool simulationEssentialReady = false;
+	bool editorMetadataDeferred = false;
+	bool editorMetadataReady = false;
+	std::string sceneReadinessSource;
+	std::string sceneReadinessReason;
+};
+
 // class ProjectManager groups related state and operations so callers have one documented contract.
 class ProjectManager {
 public:
@@ -38,6 +76,13 @@ public:
 	bool CreateProject(const std::filesystem::path& location, const std::string& name, ProjectTemplate tmpl, std::string* outError = nullptr);
 	bool LoadProject(const std::filesystem::path& location, std::string* outError = nullptr);
 	void CloseProject();
+	bool PrepareSceneForLoading(const std::filesystem::path& scenePath, ProjectSceneLoadDecision& outDecision, std::string* outError = nullptr);
+	std::uint64_t GetProjectLoadGeneration() const;
+	bool IsProjectLoadGenerationCurrent(std::uint64_t generation) const;
+	ProjectSceneLoadDecision GetLastSceneLoadDecision() const;
+	ProjectReadinessState GetReadinessState() const;
+	void MarkSimulationEssentialReady(const ProjectSceneLoadDecision& decision);
+	void MarkEditorMetadataReady();
 	
 	// Accessors
 	bool HasActiveProject() const;
@@ -55,11 +100,11 @@ public:
 	void SetAutoBuildScripts(bool enabled);
 	void SetEditorMcpPreferences(bool enabled, const std::string& writeModeDefault, const std::string& recentSession, std::uint16_t listenPort);
 	void SetRendererDiagnosticPreferences(bool vulkanValidationLayers, bool renderDebugDiagnostics);
-	void SetSceneViewOverlayPreference(const TerraEngine::Editor::SceneViewOverlay::SceneOverlayPreference& preference);
+	bool SetSceneViewOverlayPreference(const TerraEngine::Editor::SceneViewOverlay::SceneOverlayPreference& preference, std::string* outError = nullptr);
 
 	// Persist changes
 	void SaveProjectSettings();
-	void SaveEditorPreferences();
+	bool SaveEditorPreferences(std::string* outError = nullptr);
 	bool SaveProjectDataForRendererRecovery(std::string* outError = nullptr);
 
 private:
@@ -70,5 +115,12 @@ private:
 	std::optional<ProjectSettings> currentSettings;
 	EditorPreferences editorPrefs;
 	RendererRecoveryProjectActionState rendererRecoveryActionState;
+	// Generation and closing are atomic because worker decode/regeneration jobs
+	// sample them without taking ownership of editor lifecycle state.
+	std::atomic_uint64_t projectLoadGeneration{1U};
+	std::atomic_bool projectClosing{true};
+	mutable std::mutex readinessMutex;
+	ProjectSceneLoadDecision lastSceneLoadDecision;
+	ProjectReadinessState readinessState;
 	bool isProjectLoaded = false;
 };

@@ -38,8 +38,10 @@ namespace TerraEngine::EditorTests
 			state.sceneAvailable = true;
 			state.rendererAvailable = true;
 			state.availableServices.insert("SceneView");
-			const std::array<std::string_view, 7> operations{
+			const std::array<std::string_view, 9> operations{
 				"scene_view.state",
+				"scene_view.settings.get",
+				"scene_view.settings.set",
 				"scene_view.camera.set",
 				"scene_view.frame_object",
 				"scene_view.tool.set",
@@ -58,6 +60,44 @@ namespace TerraEngine::EditorTests
 					context.Expect(capability->availability.available, std::string(operation) + " should be available when the Scene View service, scene, and renderer are ready.");
 				}
 			}
+		});
+
+		registry.Add("Editor.MCP.SceneView.PerformanceSettingsUseTypedAtomicContracts", [](TestContext& context) {
+			EditorAutomationService service;
+			AutomationStateSnapshot state;
+			const auto get = FindSceneViewCapability(service, "scene_view.settings.get", state);
+			const auto set = FindSceneViewCapability(service, "scene_view.settings.set", state);
+
+			context.Expect(get.has_value() && set.has_value(), "Scene View performance settings should be additively discoverable.");
+			if (get.has_value())
+			{
+				context.Expect(get->descriptor.permission == AutomationPermission::Read, "Reading user-local Scene View settings should remain read-only.");
+				context.Expect(!get->descriptor.execution.protectedCommit, "A settings snapshot read must not schedule a protected mutation.");
+			}
+			if (set.has_value())
+			{
+				context.Expect(set->descriptor.permission == AutomationPermission::GlobalWrite, "User-local Scene View settings require explicit global-write permission.");
+				context.Expect(set->descriptor.execution.protectedCommit, "A settings replacement should publish only at the editor preference boundary.");
+				context.ExpectEqual(std::string("editor_preferences_atomic_replace"), set->descriptor.execution.visibilityBoundary, "The contract should advertise atomic preference visibility.");
+				context.Expect(SchemaHasProperty(set->descriptor.inputSchema, "settings"), "Settings replacement should accept one complete typed candidate document.");
+				const nlohmann::json& settingsSchema = set->descriptor.inputSchema["properties"]["settings"];
+				context.Expect(SchemaHasProperty(settingsSchema, "visibleMarkerBudget"), "The candidate schema should expose the general marker budget.");
+				context.Expect(SchemaHasProperty(settingsSchema, "physicsMarkerMode"), "The candidate schema should expose physics marker behavior.");
+			}
+		});
+
+		registry.Add("Editor.MCP.SceneView.LegacyStateAndControlsRemainCompatible", [](TestContext& context) {
+			EditorAutomationService service;
+			AutomationStateSnapshot state;
+			state.projectAvailable = true;
+			state.sceneAvailable = true;
+			state.rendererAvailable = true;
+			state.availableServices.insert("SceneView");
+			const auto legacyState = FindSceneViewCapability(service, "scene_view.state", state);
+			const auto legacyCamera = FindSceneViewCapability(service, "scene_view.camera.set", state);
+
+			context.Expect(legacyState.has_value() && legacyState->availability.available, "The additive settings contract must not replace legacy scene_view.state.");
+			context.Expect(legacyCamera.has_value() && SchemaHasProperty(legacyCamera->descriptor.inputSchema, "position"), "Existing semantic camera clients should retain their v1 schema.");
 		});
 
 		registry.Add("Editor.MCP.SceneView.ControlSchemasAreSemantic", [](TestContext& context) {

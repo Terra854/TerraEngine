@@ -45,6 +45,11 @@ namespace TerraEngine::Tests {
 	void RegisterPhysicsGameplayCommandTests(TestRegistry& registry);
 	void RegisterPhysicsQueryTests(TestRegistry& registry);
 	void RegisterPhysicsEventTests(TestRegistry& registry);
+	void RegisterPhysicsAuthoringIncrementalTests(TestRegistry& registry);
+	void RegisterPhysicsPreparationPlanTests(TestRegistry& registry);
+	void RegisterPhysicsBackendExtractionTests(TestRegistry& registry);
+	void RegisterIncrementalBodyStateStoreTests(TestRegistry& registry);
+	void RegisterPhysicsPublicationPacketTests(TestRegistry& registry);
 	void RegisterPhysicsStalePublicationTests(TestRegistry& registry);
 	void RegisterPhysicsProviderQueryEventTests(TestRegistry& registry);
 	void RegisterPhysicsTransactionTests(TestRegistry& registry);
@@ -71,7 +76,15 @@ namespace TerraEngine::Tests {
 	void RegisterPhysicsLifecycleStressTests(TestRegistry& registry);
 	void RegisterPhysicsExportRuntimeTests(TestRegistry& registry);
 	void RegisterPrefabCompositionTests(TestRegistry& registry);
+	void RegisterDerivedSceneCacheTests(TestRegistry& registry);
+	void RegisterBulkScenePublicationTests(TestRegistry& registry);
 	void RegisterProfilerCaptureTests(TestRegistry& registry);
+	void RegisterProfilerCaptureV2Tests(TestRegistry& registry);
+	void RegisterProfilerCaptureLevelTests(TestRegistry& registry);
+	void RegisterProfilerCapturePerformanceTests(TestRegistry& registry);
+	void RegisterProfilerPerformanceSummaryTests(TestRegistry& registry);
+	void RegisterPerformanceBaselineTests(TestRegistry& registry);
+	void RegisterPerformanceTelemetryTests(TestRegistry& registry);
 	void RegisterResourceResidencyBudgetTests(TestRegistry& registry);
 	void RegisterResourceResidencyDiagnosticsTests(TestRegistry& registry);
 	void RegisterResourceResidencyPolicyTests(TestRegistry& registry);
@@ -153,6 +166,7 @@ namespace TerraEngine::Tests {
 	void RegisterRuntimeLayoutCompatibilityTests(TestRegistry& registry);
 	void RegisterSceneSerializationTests(TestRegistry& registry);
 	void RegisterSceneGraphRuntimeTests(TestRegistry& registry);
+	void RegisterSceneChangePacketTests(TestRegistry& registry);
 	void RegisterSceneMutationQueueTests(TestRegistry& registry);
 	void RegisterTransactionalMutationTests(TestRegistry& registry);
 	void RegisterTransactionalMutationConflictTests(TestRegistry& registry);
@@ -183,6 +197,7 @@ namespace TerraEngine::Tests {
 	void RegisterUIStyleTests(TestRegistry& registry);
 	void RegisterThreadPoolSingletonTests(TestRegistry& registry);
 	void RegisterWorkerPoolTests(TestRegistry& registry);
+	void RegisterWorkerPoolTelemetryTests(TestRegistry& registry);
 	void RegisterExportRuntimePresentationTests(TestRegistry& registry);
 	void RegisterRendererStabilitySmokeToolTests(TestRegistry& registry);
 	void RegisterVulkanPresentationLifecycleTests(TestRegistry& registry);
@@ -225,6 +240,7 @@ int main() {
 	TerraEngine::Tests::RegisterWorkerHardBoundaryTests(registry);
 	TerraEngine::Tests::RegisterObjectFacadeRemovalValidationTests(registry);
 	TerraEngine::Tests::RegisterWorkerPoolTests(registry);
+	TerraEngine::Tests::RegisterWorkerPoolTelemetryTests(registry);
 	TerraEngine::Tests::RegisterExportRuntimePresentationTests(registry);
 	TerraEngine::Tests::RegisterRendererStabilitySmokeToolTests(registry);
 	TerraEngine::Tests::RegisterVulkanPresentationLifecycleTests(registry);
@@ -246,6 +262,11 @@ int main() {
 	TerraEngine::Tests::RegisterPhysicsGameplayCommandTests(registry);
 	TerraEngine::Tests::RegisterPhysicsQueryTests(registry);
 	TerraEngine::Tests::RegisterPhysicsEventTests(registry);
+	TerraEngine::Tests::RegisterPhysicsAuthoringIncrementalTests(registry);
+	TerraEngine::Tests::RegisterPhysicsPreparationPlanTests(registry);
+	TerraEngine::Tests::RegisterPhysicsBackendExtractionTests(registry);
+	TerraEngine::Tests::RegisterIncrementalBodyStateStoreTests(registry);
+	TerraEngine::Tests::RegisterPhysicsPublicationPacketTests(registry);
 	TerraEngine::Tests::RegisterPhysicsStalePublicationTests(registry);
 	TerraEngine::Tests::RegisterPhysicsProviderQueryEventTests(registry);
 	TerraEngine::Tests::RegisterPhysicsTransactionTests(registry);
@@ -272,7 +293,15 @@ int main() {
 	TerraEngine::Tests::RegisterPhysicsLifecycleStressTests(registry);
 	TerraEngine::Tests::RegisterPhysicsExportRuntimeTests(registry);
 	TerraEngine::Tests::RegisterPrefabCompositionTests(registry);
+	TerraEngine::Tests::RegisterDerivedSceneCacheTests(registry);
+	TerraEngine::Tests::RegisterBulkScenePublicationTests(registry);
 	TerraEngine::Tests::RegisterProfilerCaptureTests(registry);
+	TerraEngine::Tests::RegisterProfilerCaptureV2Tests(registry);
+	TerraEngine::Tests::RegisterProfilerCaptureLevelTests(registry);
+	TerraEngine::Tests::RegisterProfilerCapturePerformanceTests(registry);
+	TerraEngine::Tests::RegisterProfilerPerformanceSummaryTests(registry);
+	TerraEngine::Tests::RegisterPerformanceBaselineTests(registry);
+	TerraEngine::Tests::RegisterPerformanceTelemetryTests(registry);
 	TerraEngine::Tests::RegisterResourceResidencyBudgetTests(registry);
 	TerraEngine::Tests::RegisterResourceResidencyDiagnosticsTests(registry);
 	TerraEngine::Tests::RegisterResourceResidencyPolicyTests(registry);
@@ -354,6 +383,7 @@ int main() {
 	TerraEngine::Tests::RegisterRuntimeLayoutCompatibilityTests(registry);
 	TerraEngine::Tests::RegisterSceneSerializationTests(registry);
 	TerraEngine::Tests::RegisterSceneGraphRuntimeTests(registry);
+	TerraEngine::Tests::RegisterSceneChangePacketTests(registry);
 	TerraEngine::Tests::RegisterSceneMutationQueueTests(registry);
 	TerraEngine::Tests::RegisterTransactionalMutationTests(registry);
 	TerraEngine::Tests::RegisterTransactionalMutationConflictTests(registry);

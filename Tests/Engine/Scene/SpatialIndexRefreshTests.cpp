@@ -13,11 +13,12 @@ namespace TerraEngine::Tests {
 			return id;
 		}
 
-		TerraEngine::Scene::SpatialObjectRecord MakeRecord(uint8_t idValue, const glm::vec3& minimum, const glm::vec3& maximum, uint64_t revision = 1) {
+		TerraEngine::Scene::SpatialObjectRecord MakeRecord(uint8_t idValue, const glm::vec3& minimum, const glm::vec3& maximum, uint64_t revision = 1, bool isStatic = false) {
 			TerraEngine::Scene::SpatialObjectRecord record{};
 			record.objectId = MakeUuid(idValue);
 			record.entity = static_cast<entt::entity>(idValue);
 			record.categoryMask = TerraEngine::Scene::SpatialCategoryRenderable;
+			record.isStatic = isStatic;
 			record.worldBounds = TerraEngine::Scene::MakeAABB(minimum, maximum, TerraEngine::Scene::SpatialBoundsSource::Authored);
 			record.revision = revision;
 			return record;
@@ -112,6 +113,59 @@ namespace TerraEngine::Tests {
 			context.Expect(diagnostics.refreshMode == TerraEngine::Scene::SpatialRefreshMode::Incremental, "Contained 1% dirty movement should stay incremental.");
 			context.ExpectEqual(100u, diagnostics.updatedObjectCount, "Exactly the dirty 1% should be updated.");
 			context.ExpectEqual(9900u, diagnostics.unchangedObjectCount, "The mostly static scene should keep unchanged entries out of update work.");
+		});
+
+		registry.Add("Engine.SpatialIndex.BoundsBatchUpdatesOnlyTheAffectedPartitionDeterministically", [](TestContext& context) {
+			TerraEngine::Scene::SpatialIndex index;
+			const std::vector<TerraEngine::Scene::SpatialObjectRecord> records{
+				MakeRecord(1, {-2.0f, -1.0f, -1.0f}, {0.0f, 1.0f, 1.0f}, 1, true),
+				MakeRecord(2, {2.0f, -1.0f, -1.0f}, {4.0f, 1.0f, 1.0f}, 1, false),
+				MakeRecord(3, {6.0f, -1.0f, -1.0f}, {8.0f, 1.0f, 1.0f}, 1, false)
+			};
+			index.Rebuild(records);
+			const TerraEngine::Scene::SpatialPartitionRevisionSnapshot before = index.GetPartitionRevisionSnapshot();
+
+			TerraEngine::Scene::SpatialBoundsPublicationBatch batch;
+			batch.sceneGeneration = 7;
+			batch.publicationGeneration = 11;
+			batch.changes.push_back({TerraEngine::Scene::SpatialBoundsChangeKind::Update, MakeRecord(3, {7.0f, -1.0f, -1.0f}, {9.0f, 1.0f, 1.0f}, 2, false)});
+			batch.changes.push_back({TerraEngine::Scene::SpatialBoundsChangeKind::Update, MakeRecord(2, {3.0f, -1.0f, -1.0f}, {5.0f, 1.0f, 1.0f}, 2, false)});
+
+			context.Expect(index.ApplyBoundsPublicationBatch(batch), "A generation-valid movable changed-bounds batch should commit at the protected boundary.");
+			const TerraEngine::Scene::SpatialPartitionRevisionSnapshot after = index.GetPartitionRevisionSnapshot();
+			const std::vector<TerraEngine::UUID> order = index.GetLastBoundsPublicationOrder();
+			context.ExpectEqual(before.staticRevision, after.staticRevision, "Movable changes must preserve the unrelated static partition cache.");
+			context.Expect(after.movableRevision > before.movableRevision, "Movable changed bounds should advance only the movable partition.");
+			context.ExpectEqual(static_cast<std::size_t>(2), order.size(), "The exact batch should retain both changed identities.");
+			context.Expect(order[0] == MakeUuid(2) && order[1] == MakeUuid(3), "Publication order should be canonical by stable object identity regardless of input order.");
+			context.ExpectEqual(3u, static_cast<unsigned int>(index.QueryRay({{-5.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f}, 20.0f}).hits.size()), "The existing query API should merge static and movable partition hits.");
+		});
+
+		registry.Add("Engine.SpatialIndex.BoundsBatchClassificationChangeTouchesBothPartitionsAndRejectsAtomically", [](TestContext& context) {
+			TerraEngine::Scene::SpatialIndex index;
+			index.Rebuild({
+				MakeRecord(1, {-2.0f, -1.0f, -1.0f}, {0.0f, 1.0f, 1.0f}, 1, true),
+				MakeRecord(2, {2.0f, -1.0f, -1.0f}, {4.0f, 1.0f, 1.0f}, 1, false)
+			});
+			const TerraEngine::Scene::SpatialPartitionRevisionSnapshot beforeClassChange = index.GetPartitionRevisionSnapshot();
+			TerraEngine::Scene::SpatialBoundsPublicationBatch classChange;
+			classChange.sceneGeneration = 4;
+			classChange.publicationGeneration = 8;
+			classChange.changes.push_back({TerraEngine::Scene::SpatialBoundsChangeKind::Update, MakeRecord(2, {3.0f, -1.0f, -1.0f}, {5.0f, 1.0f, 1.0f}, 2, true)});
+			context.Expect(index.ApplyBoundsPublicationBatch(classChange), "A movable-to-static classification change should commit as one publication.");
+			const TerraEngine::Scene::SpatialPartitionRevisionSnapshot afterClassChange = index.GetPartitionRevisionSnapshot();
+			context.Expect(afterClassChange.staticRevision > beforeClassChange.staticRevision, "Classification change should update the destination static partition.");
+			context.Expect(afterClassChange.movableRevision > beforeClassChange.movableRevision, "Classification change should update the source movable partition.");
+
+			TerraEngine::Scene::SpatialBoundsPublicationBatch duplicate;
+			duplicate.sceneGeneration = 4;
+			duplicate.publicationGeneration = 9;
+			duplicate.changes.push_back({TerraEngine::Scene::SpatialBoundsChangeKind::Update, MakeRecord(1, glm::vec3{-1.0f}, glm::vec3{1.0f}, 2, true)});
+			duplicate.changes.push_back({TerraEngine::Scene::SpatialBoundsChangeKind::Remove, MakeRecord(1, glm::vec3{-1.0f}, glm::vec3{1.0f}, 2, true)});
+			context.Expect(!index.ApplyBoundsPublicationBatch(duplicate), "Duplicate targets should reject the entire changed-bounds batch.");
+			const TerraEngine::Scene::SpatialPartitionRevisionSnapshot afterReject = index.GetPartitionRevisionSnapshot();
+			context.ExpectEqual(afterClassChange.staticRevision, afterReject.staticRevision, "Rejected work must leave the static partition untouched.");
+			context.ExpectEqual(afterClassChange.movableRevision, afterReject.movableRevision, "Rejected work must leave the movable partition untouched.");
 		});
 	}
 }

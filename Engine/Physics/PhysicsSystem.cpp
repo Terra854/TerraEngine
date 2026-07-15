@@ -5,13 +5,19 @@
 #include "Backend/JoltPhysicsBackend.h"
 #include "Components/Transform.h"
 #include "Core/Object/ObjectManager.h"
+#include "Physics/Assets/PhysicsAssetChangeJournal.h"
 #include "Physics/Assets/CookedColliderAsset.h"
 #include "Physics/Assets/PhysicsMaterial.h"
+#include "Physics/PhysicsAuthoringGeneration.h"
+#include "Physics/PhysicsPreparationPlan.h"
+#include "Physics/PhysicsTransactions.h"
+#include "Physics/TransformPublicationPacket.h"
 #include "Resource/ResourceManager.h"
 #include "Scene/TransactionalMutation.h"
 #include "ThreadPool/ThreadPool.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -72,9 +78,32 @@ namespace TerraEngine::Physics {
 				axis.z * reference.x - axis.x * reference.z,
 				axis.x * reference.y - axis.y * reference.x}, {0.0F, 0.0F, 1.0F});
 		}
+
+		std::string_view ToDiagnosticsPath(PhysicsPreparationExecutionPath path) {
+			switch(path) {
+			case PhysicsPreparationExecutionPath::Fast: return "fast";
+			case PhysicsPreparationExecutionPath::Inline: return "inline";
+			case PhysicsPreparationExecutionPath::WorkerRanges: return "worker_ranges";
+			case PhysicsPreparationExecutionPath::Rejected: return "rejected";
+			}
+			return "rejected";
+		}
 	}
 
 	struct PhysicsSystem::Impl {
+		struct FrameWorkloadActivation {
+			bool snapshot = false;
+			bool prepare = false;
+			bool commandCommit = false;
+			bool simulate = false;
+			bool extract = false;
+			bool publish = false;
+			bool publicationBarrier = false;
+			std::size_t authoringItems = 0U;
+			std::size_t providerItems = 0U;
+			std::size_t commandItems = 0U;
+			std::size_t queryItems = 0U;
+		};
 		struct RuntimeBody {
 			TerraEngine::UUID objectId{};
 			PhysicsGeneration objectGeneration = 0U;
@@ -85,6 +114,11 @@ namespace TerraEngine::Physics {
 			PhysicsPose parentWorldPose;
 			PhysicsVector3 parentWorldScale{1.0F, 1.0F, 1.0F};
 			bool hasParent = false;
+			std::uint64_t objectTransformRevision = 0U;
+			std::uint64_t hierarchyGeneration = 0U;
+			TerraEngine::UUID parentObjectId = TerraEngine::EMPTY_UUID;
+			std::uint64_t parentObjectGeneration = 0U;
+			std::uint64_t parentTransformRevision = 0U;
 			bool hasPublishedPose = false;
 			PhysicsPose lastPublishedPose;
 		};
@@ -116,12 +150,51 @@ namespace TerraEngine::Physics {
 		};
 
 		struct PendingTransformPublication {
-			std::string transactionId;
-			std::vector<std::pair<TerraEngine::UUID, PhysicsPose>> poses;
+			TransformPublicationPacket packet;
+			std::string groupId;
 		};
 
 		Impl()
 			: backend(std::make_unique<Backend::JoltPhysicsBackend>(ThreadPool::instance())) {
+		}
+
+		FrameWorkloadActivation InspectFrameWorkloadActivationLocked(float deltaTime) const {
+			FrameWorkloadActivation activation;
+			const bool worldActive = world.Handle().IsValid();
+			const PhysicsCommandQueueDiagnostics commands = world.CommandQueueDiagnostics();
+			const PhysicsQueryDiagnostics queries = world.QueryDiagnostics();
+			activation.commandItems = commands.queuedDepth;
+			activation.queryItems = queries.queuedDepth;
+			activation.providerItems = world.RegistryStatistics().bodyCount;
+			activation.authoringItems = authoring ? authoring->Data().bodies.size() : activation.providerItems;
+
+			bool authoringChanged = pendingSettings.has_value() || !authoring || !authoringSceneRevisionValid;
+			if (worldActive && !authoringChanged)
+			{
+				authoringChanged = ObjectManager::instance().GetSpatialRevision() != authoringEquivalentSceneSpatialRevision
+					|| !PhysicsAssetChangeJournal::Instance().SnapshotSince(observedPhysicsAssetGeneration).Empty();
+			}
+
+			const PhysicsWorldTimingState timing = world.Timing();
+			const PhysicsSettings settings = worldActive ? world.Settings() : configuredSettings;
+			const bool explicitStep = timing.pendingExplicitStepCount > 0U;
+			const bool accumulating = worldActive && !world.IsPaused() && deltaTime > 0.0F;
+			const bool predictedStep = explicitStep || (accumulating
+				&& timing.accumulator + deltaTime >= settings.fixedTimeStep);
+			const bool preparationWork = worldActive
+				&& (authoringChanged || accumulating || explicitStep || activation.commandItems > 0U);
+
+			// Snapshot remains protected because it observes live scene generations.
+			// Every later phase is activated only when its prerequisite can produce
+			// data, so paused unchanged worlds lower to omitted descriptors.
+			activation.snapshot = worldActive && preparationWork;
+			activation.prepare = preparationWork;
+			activation.commandCommit = preparationWork;
+			activation.simulate = worldActive && predictedStep;
+			activation.extract = activation.simulate;
+			activation.publish = activation.extract;
+			activation.publicationBarrier = activation.publish;
+			return activation;
 		}
 
 		bool ApplyPendingSettingsLocked() {
@@ -156,6 +229,12 @@ namespace TerraEngine::Physics {
 				diagnosticCounters = {};
 				diagnosticTimings = {};
 				diagnosticQueues = {};
+				publicationDiagnostics = {};
+				stateStorePublicationCount = 0U;
+				stateStoreRejectedBatchCount = 0U;
+				lastStatePagesReused = 0U;
+				lastStatePagesCopied = 0U;
+				lastAggregateDiagnosticsTick = 0U;
 				return true;
 			}
 			world.MarkFailed();
@@ -169,7 +248,7 @@ namespace TerraEngine::Physics {
 			const PhysicsWorldHandle handle = world.Handle();
 			if(!handle.IsValid()) return true;
 			for(const PendingTransformPublication& publication : pendingTransformPublications) {
-				Scene::SceneMutationQueue::Instance().CancelTransaction(publication.transactionId);
+				Scene::SceneMutationQueue::Instance().CancelPublicationGroup(publication.groupId);
 			}
 			world.BeginStopping();
 			world.BeginDraining();
@@ -191,16 +270,22 @@ namespace TerraEngine::Physics {
 			pendingFlushSteps.clear();
 			pendingTransformPublications.clear();
 			authoring.reset();
+			authoringGeneration.reset();
+			preparationPlan.reset();
+			observedPhysicsAssetGeneration = 0U;
 			authoringEquivalentSceneSpatialRevision = 0U;
 			authoringSceneRevisionValid = false;
 			lastPreparedAuthoringSnapshotGeneration = 0U;
 			extraction = {};
+			preparedBodyStateBatch.reset();
+			preparedTransformSources.clear();
 			cookedAssetWriteTimes.clear();
 			cookedAssetsNeedingReload.clear();
 			materialAssetWriteTimes.clear();
 			materialAssetsNeedingReload.clear();
 			materialAssets.clear();
 			latestBodies.reset();
+			latestIncrementalBodies.reset();
 			latestCommands.reset();
 			latestEvents.reset();
 			latestCharacters.reset();
@@ -212,6 +297,7 @@ namespace TerraEngine::Physics {
 		}
 
 		void SnapshotLocked() {
+			authoringSnapshotReused = false;
 			if(!ApplyPendingSettingsLocked()) {
 				++diagnosticCounters.rejectedCount;
 				return;
@@ -220,22 +306,47 @@ namespace TerraEngine::Physics {
 			const Clock::time_point start = Clock::now();
 			ObjectManager& objects = ObjectManager::instance();
 			const std::uint64_t sceneSpatialRevision = objects.GetSpatialRevision();
+			const PhysicsAssetChangeSnapshot assetChanges =
+				PhysicsAssetChangeJournal::Instance().SnapshotSince(observedPhysicsAssetGeneration);
 			if(authoring && authoringSceneRevisionValid
-				&& authoringEquivalentSceneSpatialRevision == sceneSpatialRevision) {
+				&& authoringEquivalentSceneSpatialRevision == sceneSpatialRevision
+				&& assetChanges.Empty()) {
 				// A prior protected flush proved that the only intervening scene writes
 				// were this system's dynamic-body publications. Those transforms are
 				// physics-authoritative, so the immutable authoring snapshot remains valid.
 				// The prior frame already consumed its dirty list during preparation;
 				// requiring that stored list to be empty would rebuild the same bodies after
 				// every physics-authored Transform revision.
+				authoringSnapshotReused = true;
 				diagnosticTimings.prepareMs = MillisecondsSince(start);
 				return;
 			}
-			const auto captured = PhysicsAuthoringSnapshot::Capture(
-				objects, world.Handle(), world.Settings(), world.Timing().tick,
-				authoring ? &*authoring : nullptr);
+
+			const PhysicsAuthoringSnapshot* previous = authoring ? &*authoring : nullptr;
+			std::optional<PhysicsAuthoringSnapshot> captured;
+			if(authoring && authoringSceneRevisionValid
+				&& authoringEquivalentSceneSpatialRevision == sceneSpatialRevision) {
+				// An asset-only change reuses the immutable component snapshot. The exact
+				// dependency ranges identify which retained descriptors need rebuilding.
+				PhysicsAuthoringData retained = authoring->Data();
+				++retained.snapshotGeneration;
+				if(retained.snapshotGeneration == 0U) retained.snapshotGeneration = 1U;
+				captured = PhysicsAuthoringSnapshot::Create(std::move(retained), previous);
+			} else {
+				captured = PhysicsAuthoringSnapshot::Capture(
+					objects, world.Handle(), world.Settings(), world.Timing().tick, previous);
+			}
 			if(captured) {
+				const auto generation = PhysicsAuthoringSnapshot::BuildGeneration(
+					previous, *captured, assetChanges);
+				if(!generation) {
+					++diagnosticCounters.rejectedCount;
+					diagnosticTimings.prepareMs = MillisecondsSince(start);
+					return;
+				}
 				authoring = std::move(*captured);
+				authoringGeneration = std::move(*generation);
+				observedPhysicsAssetGeneration = assetChanges.toGenerationInclusive;
 				authoringEquivalentSceneSpatialRevision = sceneSpatialRevision;
 				authoringSceneRevisionValid = true;
 			}
@@ -459,6 +570,8 @@ namespace TerraEngine::Physics {
 
 		void PrepareLocked(float deltaTime) {
 			const Clock::time_point start = Clock::now();
+			lastPreparationRejected = false;
+			preparationPlanExecutedThisFrame = false;
 			preparedBodies.clear();
 			preparedRemovals.clear();
 			preparedConstraints.clear();
@@ -475,36 +588,59 @@ namespace TerraEngine::Physics {
 				return;
 			}
 
-			std::unordered_set<TerraEngine::UUID> dirtyObjects;
-			const bool isNewAuthoringSnapshot = lastPreparedAuthoringSnapshotGeneration
-				!= authoring->Data().snapshotGeneration;
-			if(isNewAuthoringSnapshot) {
-				dirtyObjects.reserve(authoring->Data().dirtyObjects.size());
-				for(const PhysicsDirtyObjectGeneration& dirty : authoring->Data().dirtyObjects) {
-					dirtyObjects.insert(dirty.objectId);
-				}
-			}
-			std::unordered_set<TerraEngine::UUID> objectsWithChangedAssets;
-			for(const PhysicsColliderDescriptor& collider : authoring->Data().colliders) {
-				if(!collider.enabled) continue;
-				if(collider.cookedColliderAssetId != TerraEngine::EMPTY_UUID
-					&& CookedAssetChangedLocked(collider.cookedColliderAssetId)) {
-					objectsWithChangedAssets.insert(collider.objectId);
-				}
-				if(collider.materialId != TerraEngine::EMPTY_UUID
-					&& MaterialAssetChangedLocked(collider.materialId)) {
-					objectsWithChangedAssets.insert(collider.objectId);
-				}
-			}
-			std::unordered_set<TerraEngine::UUID> present;
-			present.reserve(authoring->Data().bodies.size());
 			std::unordered_set<TerraEngine::UUID> bodiesToPrepare;
-			bodiesToPrepare.reserve(dirtyObjects.size() + objectsWithChangedAssets.size());
-			for(const PhysicsBodyDescriptor& body : authoring->Data().bodies) {
-				present.insert(body.objectId);
-				if(dirtyObjects.contains(body.objectId) || !runtimeBodies.contains(body.objectId)
-					|| objectsWithChangedAssets.contains(body.objectId)) {
-					bodiesToPrepare.insert(body.objectId);
+			const bool isNewAuthoringGeneration = authoringGeneration
+				&& lastPreparedAuthoringSnapshotGeneration != authoringGeneration->Data().snapshotGeneration;
+			if(isNewAuthoringGeneration) {
+				PhysicsPreparationPlanOptions options;
+				options.parallelThreshold = configuredSettings.parallelPreparationThreshold;
+				options.rangeSize = configuredSettings.providerExtractionBatchSize;
+				options.availableWorkerCount = std::max<std::size_t>(1U, ThreadPool::instance().getThreadCount());
+				preparationPlan = PhysicsPreparationPlan::Build(
+					*authoringGeneration,
+					plannedSteps.requests.empty() ? world.Timing().tick + 1U : plannedSteps.requests.back().tick,
+					std::move(options));
+				if(!preparationPlan || !ExecutePhysicsPreparationPlan(
+					*preparationPlan, ThreadPool::instance(), preparationScratch,
+					[](const PhysicsPreparationWorkItem& item) {
+						// Worker validation is deliberately value-only. Provider shapes and
+						// live scene state remain owned by the following protected commit.
+						return item.kind == PhysicsPreparationWorkKind::RemoveBody
+							|| item.operation.descriptorIndex != kInvalidPhysicsDescriptorIndex;
+					})) {
+					preparationPlan.reset();
+					lastPreparationRejected = true;
+					++diagnosticCounters.rejectedCount;
+					diagnosticTimings.prepareMs += MillisecondsSince(start);
+					return;
+				}
+				preparationPlanExecutedThisFrame = true;
+
+				const PhysicsPreparationPlanData& plan = preparationPlan->Data();
+				bodiesToPrepare.reserve(plan.creates.size() + plan.updates.size()
+					+ plan.dependencyRebuilds.size());
+				const auto appendObjects = [&bodiesToPrepare](
+					const std::vector<PhysicsPreparationOperation>& operations) {
+					for(const PhysicsPreparationOperation& operation : operations) {
+						bodiesToPrepare.insert(operation.objectId);
+					}
+				};
+				appendObjects(plan.creates);
+				appendObjects(plan.updates);
+				appendObjects(plan.dependencyRebuilds);
+				for(const PhysicsPreparationOperation& removal : plan.removals) {
+					preparedRemovals.push_back(removal.objectId);
+				}
+
+				// Asset generations are explicit. Primitive recipes never poll the file
+				// system; only journaled cooked/material dependencies request reload.
+				for(const PhysicsAuthoringAssetObservation& observation :
+					authoringGeneration->Data().assetObservations) {
+					if(observation.assetKind == PhysicsAssetKind::CookedCollider) {
+						cookedAssetsNeedingReload.insert(observation.assetId);
+					} else {
+						materialAssetsNeedingReload.insert(observation.assetId);
+					}
 				}
 			}
 			std::unordered_map<TerraEngine::UUID, std::vector<PhysicsColliderDescriptor>> collidersByObject;
@@ -526,11 +662,6 @@ namespace TerraEngine::Physics {
 					preparedBodies.push_back(std::move(prepared));
 				}
 			}
-			for(const auto& [objectId, record] : runtimeBodies) {
-				(void)record;
-				if(!present.contains(objectId)) preparedRemovals.push_back(objectId);
-			}
-
 			std::unordered_set<TerraEngine::UUID> rebuildingBodies;
 			for(const PreparedBody& prepared : preparedBodies) rebuildingBodies.insert(prepared.body.objectId);
 			for(const TerraEngine::UUID& objectId : preparedRemovals) rebuildingBodies.insert(objectId);
@@ -750,7 +881,8 @@ namespace TerraEngine::Physics {
 					request.componentGeneration = prepared.body.componentGeneration;
 					request.shape = newShape;
 					request.motionType = prepared.body.motionType;
-					request.motionQuality = prepared.body.motionQuality;
+					request.motionQuality = PhysicsSettings::ResolveMotionQuality(
+						configuredSettings.continuousCollisionEnabled, prepared.body.motionQuality);
 					request.pose = prepared.body.worldPose;
 					request.linearVelocity = prepared.body.initialLinearVelocity;
 					request.angularVelocity = prepared.body.initialAngularVelocity;
@@ -780,11 +912,17 @@ namespace TerraEngine::Physics {
 				if(!result.Succeeded()) {
 					// Track both handles before rolling back so provider and engine handle
 					// ownership remain paired even when body creation rejects after shape staging.
-					stagedBodies.push_back({prepared.body.objectId, RuntimeBody{
+					RuntimeBody failedRuntime{
 						prepared.body.objectId, prepared.body.objectGeneration,
 						prepared.body.componentGeneration, newBody, newShape,
 						prepared.body.motionType, prepared.body.parentWorldPose,
-						prepared.body.parentWorldScale, prepared.body.hasParent}});
+						prepared.body.parentWorldScale, prepared.body.hasParent};
+					failedRuntime.objectTransformRevision = prepared.body.objectTransformRevision;
+					failedRuntime.hierarchyGeneration = authoring->Data().hierarchyGeneration;
+					failedRuntime.parentObjectId = prepared.body.parentObjectId;
+					failedRuntime.parentObjectGeneration = prepared.body.parentObjectGeneration;
+					failedRuntime.parentTransformRevision = prepared.body.parentTransformRevision;
+					stagedBodies.push_back({prepared.body.objectId, std::move(failedRuntime)});
 					rejectTransaction(result.message);
 					break;
 				}
@@ -799,6 +937,11 @@ namespace TerraEngine::Physics {
 					prepared.body.parentWorldPose,
 					prepared.body.parentWorldScale,
 					prepared.body.hasParent};
+				runtime.objectTransformRevision = prepared.body.objectTransformRevision;
+				runtime.hierarchyGeneration = authoring->Data().hierarchyGeneration;
+				runtime.parentObjectId = prepared.body.parentObjectId;
+				runtime.parentObjectGeneration = prepared.body.parentObjectGeneration;
+				runtime.parentTransformRevision = prepared.body.parentTransformRevision;
 				stagedBodies.push_back({prepared.body.objectId, runtime});
 				stagedBodyHandles[prepared.body.objectId] = newBody;
 			}
@@ -1091,12 +1234,78 @@ namespace TerraEngine::Physics {
 		void ExtractLocked() {
 			if(completedSteps.empty()) return;
 			extraction = {};
-			extraction.world = world.Handle();
-			extraction.tick = completedSteps.back().tick;
-			const Backend::PhysicsBackendResult result = backend->Extract(extraction);
+			preparedBodyStateBatch.reset();
+			preparedTransformSources.clear();
+			Backend::PhysicsBackendExtractionRequest request;
+			request.world = world.Handle();
+			request.tick = completedSteps.back().tick;
+			// Event draining is controlled by the extraction field mask as well as the
+			// drainEvents flag. Always request that immutable stream so narrowing body
+			// reads cannot silently disable callbacks and automation contact history.
+			request.fields = PhysicsBodyStateFieldMask::BodyState
+				| PhysicsBodyStateFieldMask::Events;
+			// Constraint impulses and character grounding cost provider work only when
+			// those runtime families exist, while still preserving their publication
+			// contract in mixed scenes.
+			if(!runtimeConstraints.empty()) request.fields |= PhysicsBodyStateFieldMask::Constraints;
+			if(!runtimeCharacters.empty()) request.fields |= PhysicsBodyStateFieldMask::Characters;
+			request.batchSize = configuredSettings.providerExtractionBatchSize;
+			request.parallelThreshold = configuredSettings.parallelExtractionThreshold;
+			request.fullState = world.AcquireCompleteBodyState() == nullptr;
+			request.selection = request.fullState
+				? Backend::PhysicsBackendExtractionSelection::FullState
+				: Backend::PhysicsBackendExtractionSelection::PublicationRelevant;
+			request.allowParallelReads = true;
+			request.drainEvents = true;
+			const Backend::PhysicsBackendResult result = backend->Extract(request, extraction);
 			if(!result.Succeeded()) {
-				AppendCommandResult(0U, PhysicsResultStatus::ProviderFailure, extraction.tick, result.message);
+				AppendCommandResult(0U, PhysicsResultStatus::ProviderFailure, request.tick, result.message);
 				extraction.bodies.clear();
+			} else {
+				preparedBodyStateBatch = PhysicsWorld::ConvertExtractedBodyStates(extraction);
+				if(!preparedBodyStateBatch) {
+					AppendCommandResult(0U, PhysicsResultStatus::StaleTarget,
+						request.tick, "Provider extraction could not be converted into generation-safe engine state.");
+				}
+			}
+
+			if(preparedBodyStateBatch) {
+				preparedTransformSources.reserve(preparedBodyStateBatch->updates.size());
+				for(const IncrementalBodyStateUpdate& update : preparedBodyStateBatch->updates) {
+					if(update.removed || !HasPhysicsBodyStateFields(update.fields, PhysicsBodyStateFieldMask::Pose)) continue;
+					const auto runtime = runtimeBodies.find(update.state.objectId);
+					if(runtime == runtimeBodies.end() || runtime->second.body != update.state.handle
+						|| runtime->second.motionType != PhysicsMotionType::Dynamic) continue;
+					const RuntimeBody& body = runtime->second;
+					PhysicsPose localPose = update.state.worldPose;
+					if(body.hasParent) {
+						glm::vec3 position = ToGlmPosition(update.state.worldPose.position);
+						glm::quat rotation = ToGlmRotation(update.state.worldPose.rotation);
+						const glm::vec3 parentPosition = ToGlmPosition(body.parentWorldPose.position);
+						const glm::quat parentRotation = ToGlmRotation(body.parentWorldPose.rotation);
+						const glm::vec3 parentScale = ToGlmPosition(body.parentWorldScale);
+						position = glm::inverse(parentRotation) * (position - parentPosition);
+						position = {position.x / parentScale.x, position.y / parentScale.y, position.z / parentScale.z};
+						rotation = glm::normalize(glm::inverse(parentRotation) * rotation);
+						localPose = {{position.x, position.y, position.z},
+							{rotation.x, rotation.y, rotation.z, rotation.w}};
+					}
+					preparedTransformSources.push_back({
+						.objectId = body.objectId,
+						.body = body.body,
+						.objectLifetimeGeneration = body.objectGeneration,
+						.bodyGeneration = body.body.slotGeneration,
+						.componentGeneration = body.componentGeneration,
+						.expectedTransformRevision = body.objectTransformRevision,
+						.expectedHierarchyGeneration = body.hierarchyGeneration,
+						.parentObjectId = body.parentObjectId,
+						.expectedParentLifetimeGeneration = body.parentObjectGeneration,
+						.expectedParentTransformRevision = body.parentTransformRevision,
+						.localPose = localPose,
+						.worldPoseReceipt = update.state.worldPose,
+						.poseChanged = !body.hasPublishedPose
+							|| !SamePose(body.lastPublishedPose, update.state.worldPose)});
+				}
 			}
 			ExecutePreparedQueriesLocked();
 		}
@@ -1210,85 +1419,81 @@ namespace TerraEngine::Physics {
 			return hits;
 		}
 
-		void PublishTransformTransactionsLocked(const std::vector<PhysicsBodyState>& states) {
-			constexpr std::size_t bodiesPerTransaction = 1024U;
-			ObjectManager& objects = ObjectManager::instance();
-			// Keep publication bookkeeping capacity across fixed ticks. The immutable
-			// transaction itself remains fresh, but this avoids repeated vector growth
-			// when a large dynamic scene spans several protected flush batches.
-			pendingTransformPublications.reserve(pendingTransformPublications.size()
-				+ ((states.size() + bodiesPerTransaction - 1U) / bodiesPerTransaction));
-			std::size_t transactionIndex = 0U;
-			for(std::size_t begin = 0U; begin < states.size(); begin += bodiesPerTransaction) {
-				Scene::TransactionalMutationBuilder builder(
-					"physics-transform-" + std::to_string(extraction.tick) + "-" + std::to_string(transactionIndex++),
-					Scene::TransactionOrigin::System,
-					"PhysicsSystem");
-				std::vector<Scene::TransactionTransformUpdate> transformUpdates;
-				std::vector<std::pair<TerraEngine::UUID, PhysicsPose>> publishedPoses;
-				const std::size_t end = std::min(states.size(), begin + bodiesPerTransaction);
-				transformUpdates.reserve(end - begin);
-				publishedPoses.reserve(end - begin);
-				for(std::size_t index = begin; index < end; ++index) {
-					const PhysicsBodyState& state = states[index];
-					auto record = runtimeBodies.find(state.objectId);
-					if(record == runtimeBodies.end() || record->second.motionType != PhysicsMotionType::Dynamic
-						// An awake body can still have an unchanged pose (for example while a
-						// solver settles velocity). Re-sending the same transform would add
-						// protected-flush work without changing any visible authored value.
-						|| (record->second.hasPublishedPose
-							&& SamePose(record->second.lastPublishedPose, state.worldPose))) {
-						continue;
-					}
-				const auto object = objects.getObject(state.objectId);
-					if(!object) continue;
-
-					glm::vec3 position = ToGlmPosition(state.worldPose.position);
-					glm::quat rotation = ToGlmRotation(state.worldPose.rotation);
-					if(record->second.hasParent) {
-						const glm::vec3 parentPosition = ToGlmPosition(record->second.parentWorldPose.position);
-						const glm::quat parentRotation = ToGlmRotation(record->second.parentWorldPose.rotation);
-						const glm::vec3 parentScale = ToGlmPosition(record->second.parentWorldScale);
-						position = glm::inverse(parentRotation) * (position - parentPosition);
-						position = {position.x / parentScale.x, position.y / parentScale.y, position.z / parentScale.z};
-						rotation = glm::normalize(glm::inverse(parentRotation) * rotation);
-					}
-					transformUpdates.push_back({state.objectId, position, rotation});
-					publishedPoses.emplace_back(state.objectId, state.worldPose);
-				}
-				if(!transformUpdates.empty()) {
-					builder.UpdateTransformBatch(objects, std::move(transformUpdates));
-					Scene::Transaction transaction = std::move(builder).Build();
-					pendingTransformPublications.push_back({transaction.id, std::move(publishedPoses)});
-					Scene::SceneMutationQueue::Instance().EnqueueTransaction(std::move(transaction));
-				}
+		void PublishTransformTransactionsLocked(const IncrementalBodyStatePublication& publication) {
+			if(preparedTransformSources.empty() || !authoring || !publication.complete) {
+				++publicationDiagnostics.emptyPacketsSkipped;
+				publicationDiagnostics.currentEntries = 0U;
+				publicationDiagnostics.currentChunks = 0U;
+				return;
 			}
+			const PhysicsAuthoringData& authored = authoring->Data();
+			const std::uint64_t groupId = ++nextTransformPublicationGroupId;
+			const std::uint64_t packetGeneration = ++nextTransformPacketGeneration;
+			TransformPublicationPacket packet = PrepareTransformPublicationPacket(
+				{publication.complete->world, publication.complete->tick,
+					publication.complete->storeGeneration, authored.snapshotGeneration},
+				authored.sceneGeneration,
+				authored.hierarchyGeneration,
+				groupId == 0U ? ++nextTransformPublicationGroupId : groupId,
+				packetGeneration == 0U ? ++nextTransformPacketGeneration : packetGeneration,
+				preparedTransformSources,
+				configuredSettings.transformPublicationChunkSize,
+				TerraEngine::Scheduling::SameFramePhysicsPublicationConsumerActive()
+					? TransformPublicationVisibilityBoundary::AfterPhysics
+					: TransformPublicationVisibilityBoundary::FrameEnd);
+			if(packet.entries.empty()) {
+				++publicationDiagnostics.emptyPacketsSkipped;
+				publicationDiagnostics.currentEntries = 0U;
+				publicationDiagnostics.currentChunks = 0U;
+				return;
+			}
+			++publicationDiagnostics.preparedPackets;
+			publicationDiagnostics.currentEntries = packet.entries.size();
+			publicationDiagnostics.currentChunks = packet.chunks.size();
+			publicationDiagnostics.targetBoundary = packet.targetBoundary == TransformPublicationVisibilityBoundary::AfterPhysics
+				? "after_physics" : "frame_end";
+
+			PhysicsTransactionRuntimeState runtime;
+			runtime.world = world.Handle();
+			runtime.bodyHandles.reserve(runtimeBodies.size());
+			runtime.bodyGenerations.reserve(runtimeBodies.size());
+			for(const auto& [objectId, body] : runtimeBodies) {
+				runtime.bodyHandles.emplace(objectId, body.body);
+				runtime.bodyGenerations.emplace(objectId, body.body.slotGeneration);
+			}
+			const TransformPublicationValidationResult validation =
+				ValidatePhysicsTransformPublication(ObjectManager::instance(), runtime, packet);
+			if(!validation.accepted) {
+				++diagnosticCounters.rejectedCount;
+				++publicationDiagnostics.rejectedPackets;
+				publicationDiagnostics.lastFailure = validation.message;
+				return;
+			}
+
+			Scene::TransactionPublicationGroup group = BuildTransformPublicationGroup(packet);
+			pendingTransformPublications.push_back({packet, group.groupId});
+			Scene::SceneMutationQueue::Instance().EnqueuePublicationGroup(std::move(group));
 		}
 
 		void PublishLocked() {
 			const Clock::time_point start = Clock::now();
 			if(completedSteps.empty()) return;
-			auto states = std::make_shared<std::vector<PhysicsBodyState>>();
-			states->reserve(extraction.bodies.size());
-			for(const Backend::PhysicsBackendBodyState& providerState : extraction.bodies) {
-				const auto indexedObject = bodyObjects.find(providerState.handle.slotIndex);
-				if(indexedObject == bodyObjects.end()) continue;
-				const auto runtime = runtimeBodies.find(indexedObject->second);
-				if(runtime == runtimeBodies.end()) continue;
-				if(runtime->second.body != providerState.handle) continue;
-				states->push_back({
-					providerState.handle,
-					runtime->second.objectId,
-					runtime->second.objectGeneration,
-					runtime->second.componentGeneration,
-					providerState.pose,
-					providerState.linearVelocity,
-					providerState.angularVelocity,
-					providerState.awake});
+			if(preparedBodyStateBatch) {
+				const auto publication = world.PublishPreparedBodyStates(*preparedBodyStateBatch);
+				if(publication) {
+					latestIncrementalBodies = publication->complete;
+					// The flat compatibility view is materialized only when a legacy
+					// caller asks for it, so unchanged pages remain shared in the hot path.
+					latestBodies.reset();
+					lastStatePagesReused = publication->pagesReused;
+					lastStatePagesCopied = publication->pagesCopied;
+					++stateStorePublicationCount;
+					PublishTransformTransactionsLocked(*publication);
+				} else {
+					++stateStoreRejectedBatchCount;
+					++diagnosticCounters.rejectedCount;
+				}
 			}
-			PublishTransformTransactionsLocked(*states);
-			latestBodies = std::make_shared<const PhysicsBodyStateSnapshot>(PhysicsBodyStateSnapshot{
-				world.Handle(), extraction.tick, states});
 			latestCommands = std::make_shared<const PhysicsCommandResultSnapshot>(PhysicsCommandResultSnapshot{
 				world.Handle(), extraction.tick,
 				std::make_shared<const std::vector<PhysicsCommandResult>>(commandResults)});
@@ -1399,6 +1604,9 @@ namespace TerraEngine::Physics {
 				// Debug data is copied at the protected publish boundary. Every vector is
 				// immutable after this point, so Scene View and profiler redraws never
 				// retain a provider object or read a world that is being stepped.
+				const std::vector<PhysicsBodyState> debugStates = latestIncrementalBodies
+					? latestIncrementalBodies->Flatten()
+					: std::vector<PhysicsBodyState>{};
 				const std::size_t maximumPrimitives = world.Settings().maxDebugPrimitives;
 				std::size_t primitiveCount = 0U;
 				auto hasCapacity = [&]() { return primitiveCount < maximumPrimitives; };
@@ -1456,9 +1664,9 @@ namespace TerraEngine::Physics {
 				if(authoring) {
 					for(const PhysicsColliderDescriptor& collider : authoring->Data().colliders) {
 						if(!hasCapacity() || !collider.enabled) break;
-						const auto body = std::find_if(states->begin(), states->end(),
+						const auto body = std::find_if(debugStates.begin(), debugStates.end(),
 							[&](const PhysicsBodyState& value) { return value.objectId == collider.objectId; });
-						if(body == states->end()) continue;
+						if(body == debugStates.end()) continue;
 						const PhysicsVector3 center{
 							body->worldPose.position.x + collider.localPose.position.x,
 							body->worldPose.position.y + collider.localPose.position.y,
@@ -1494,7 +1702,7 @@ namespace TerraEngine::Physics {
 				}
 
 				constexpr float axisLength = 0.35F;
-				for(const PhysicsBodyState& state : *states) {
+				for(const PhysicsBodyState& state : debugStates) {
 					if(hasCapacity()) {
 						lines->push_back({state.worldPose.position,
 							{state.worldPose.position.x + axisLength, state.worldPose.position.y, state.worldPose.position.z},
@@ -1566,7 +1774,7 @@ namespace TerraEngine::Physics {
 			cache.retirementCount = cacheStatistics.retirementCount;
 
 			PhysicsDiagnosticsMemory memory;
-			memory.snapshotBytes = sizeof(PhysicsBodyState) * (latestBodies && latestBodies->bodies ? latestBodies->bodies->size() : 0U)
+			memory.snapshotBytes = (latestIncrementalBodies ? latestIncrementalBodies->retainedBytes : 0U)
 				+ sizeof(PhysicsCommandResult) * (latestCommands && latestCommands->results ? latestCommands->results->size() : 0U)
 				+ sizeof(PhysicsCharacterState) * (latestCharacters && latestCharacters->states ? latestCharacters->states->size() : 0U)
 				+ sizeof(PhysicsEvent) * (latestEvents && latestEvents->events ? latestEvents->events->size() : 0U);
@@ -1577,32 +1785,144 @@ namespace TerraEngine::Physics {
 			}
 			diagnosticSnapshotHighWaterBytes = std::max(diagnosticSnapshotHighWaterBytes, memory.snapshotBytes);
 			memory.highWaterBytes = diagnosticSnapshotHighWaterBytes;
+
+			PhysicsAuthoringDiagnostics authoringDiagnostics;
+			authoringDiagnostics.snapshotReused = authoringSnapshotReused;
+			if(authoringGeneration) {
+				const PhysicsAuthoringGenerationData& data = authoringGeneration->Data();
+				authoringDiagnostics.authoringGeneration = data.generation;
+				authoringDiagnostics.snapshotGeneration = data.snapshotGeneration;
+				authoringDiagnostics.assetJournalGeneration = data.assetJournalGeneration;
+				authoringDiagnostics.changedObjects = authoringSnapshotReused ? 0U : data.changes.size();
+				authoringDiagnostics.assetObservations = authoringSnapshotReused ? 0U : data.assetObservations.size();
+				authoringDiagnostics.fullAssetRefresh = !authoringSnapshotReused && data.fullAssetRefresh;
+				if(!authoringSnapshotReused) for(const PhysicsAuthoringChange& change : data.changes) {
+					const auto count = [&change](PhysicsAuthoringChangeReason reason) {
+						return HasAnyReason(change.reasons, reason) ? 1ULL : 0ULL;
+					};
+					authoringDiagnostics.added += count(PhysicsAuthoringChangeReason::Added);
+					authoringDiagnostics.removed += count(PhysicsAuthoringChangeReason::Removed);
+					authoringDiagnostics.transforms += count(PhysicsAuthoringChangeReason::Transform);
+					authoringDiagnostics.bodyComponents += count(PhysicsAuthoringChangeReason::BodyComponent);
+					authoringDiagnostics.colliderComponents += count(PhysicsAuthoringChangeReason::ColliderComponent);
+					authoringDiagnostics.hierarchyDependencies += count(PhysicsAuthoringChangeReason::HierarchyDependency);
+					authoringDiagnostics.colliderAssets += count(PhysicsAuthoringChangeReason::ColliderAsset);
+					authoringDiagnostics.materialAssets += count(PhysicsAuthoringChangeReason::MaterialAsset);
+					authoringDiagnostics.settings += count(PhysicsAuthoringChangeReason::Settings);
+					authoringDiagnostics.lifecycle += count(PhysicsAuthoringChangeReason::Lifecycle);
+				}
+			}
+
+			PhysicsPreparationDiagnostics preparationDiagnostics;
+			preparationDiagnostics.scratchActiveItems = preparationScratch.ActiveItems();
+			preparationDiagnostics.scratchHighWatermark = preparationScratch.HighWatermark();
+			preparationDiagnostics.scratchAllocations = preparationScratch.AllocationCount();
+			preparationDiagnostics.scratchReuses = preparationScratch.ReuseCount();
+			preparationDiagnostics.rejected = lastPreparationRejected;
+			if(preparationPlan && preparationPlanExecutedThisFrame) {
+				const PhysicsPreparationPlanData& data = preparationPlan->Data();
+				preparationDiagnostics.executionPath = ToDiagnosticsPath(data.executionPath);
+				preparationDiagnostics.estimatedWorkItems = data.estimatedWorkItems;
+				preparationDiagnostics.rangeCount = data.ranges.size();
+				preparationDiagnostics.creates = data.creates.size();
+				preparationDiagnostics.removals = data.removals.size();
+				preparationDiagnostics.updates = data.updates.size();
+				preparationDiagnostics.dependencyRebuilds = data.dependencyRebuilds.size();
+				preparationDiagnostics.failure = data.rejectionReason;
+			}
+
+			PhysicsExtractionDiagnostics extractionDiagnostics;
+			extractionDiagnostics.providerOrderGeneration = extraction.providerOrderGeneration;
+			extractionDiagnostics.totalBodies = extraction.totalBodyCount;
+			extractionDiagnostics.activeBodies = extraction.activeBodyCount;
+			extractionDiagnostics.examinedBodies = extraction.examinedBodyCount;
+			extractionDiagnostics.extractedBodies = extraction.extractedBodyCount;
+			extractionDiagnostics.convertedBodies = preparedBodyStateBatch ? preparedBodyStateBatch->updates.size() : 0U;
+			extractionDiagnostics.removedBodies = extraction.removedBodies.size();
+			extractionDiagnostics.rangeCount = extraction.extractionRangeCount;
+			extractionDiagnostics.fieldMask = static_cast<std::uint32_t>(extraction.extractedFields);
+			extractionDiagnostics.fullState = extraction.fullState;
+			extractionDiagnostics.parallelReads = extraction.usedParallelReads;
+			extractionDiagnostics.serialFallback = extraction.usedSerialFallback;
+			extractionDiagnostics.eventDrain = extraction.eventDrainPerformed;
+			if(const auto changed = world.AcquireChangedBodyState()) {
+				extractionDiagnostics.changedBodies = changed->changes ? changed->changes->size() : 0U;
+			}
+
+			PhysicsStateStoreDiagnostics stateStoreDiagnostics;
+			stateStoreDiagnostics.publicationCount = stateStorePublicationCount;
+			stateStoreDiagnostics.rejectedBatchCount = stateStoreRejectedBatchCount;
+			stateStoreDiagnostics.pagesReused = lastStatePagesReused;
+			stateStoreDiagnostics.pagesCopied = lastStatePagesCopied;
+			if(latestIncrementalBodies) {
+				stateStoreDiagnostics.storeGeneration = latestIncrementalBodies->storeGeneration;
+				stateStoreDiagnostics.providerOrderGeneration = latestIncrementalBodies->providerOrderGeneration;
+				stateStoreDiagnostics.pageCount = latestIncrementalBodies->pages.size();
+				stateStoreDiagnostics.bodyCount = latestIncrementalBodies->bodyCount;
+				stateStoreDiagnostics.retainedBytes = latestIncrementalBodies->retainedBytes;
+			}
+			publicationDiagnostics.pendingGroups = pendingTransformPublications.size();
+
+			const bool currentFailure = world.State() == PhysicsWorldState::Failed
+				|| lastPreparationRejected || !publicationDiagnostics.lastFailure.empty();
+			PhysicsDiagnosticsRate rate;
+			rate.aggregateIntervalFrames = configuredSettings.aggregateDiagnosticsIntervalFrames;
+			rate.aggregateRefreshed = ShouldRefreshPhysicsAggregateDiagnostics(
+				world.Timing().completedTick, rate.aggregateIntervalFrames, lastAggregateDiagnosticsTick, currentFailure);
+			if(rate.aggregateRefreshed) lastAggregateDiagnosticsTick = world.Timing().completedTick;
+			rate.lastAggregateTick = lastAggregateDiagnosticsTick;
 			auto scheduler = std::make_shared<std::vector<PhysicsSchedulerDeclaration>>();
-			scheduler->push_back({"PhysicsSnapshot", "Physics", "SceneGraph,PhysicsSettings", "PhysicsAuthoringSnapshot", "protected snapshot", false});
-			scheduler->push_back({"PhysicsPrepare", "Physics", "PhysicsAuthoringSnapshot,PhysicsQueryQueue", "PhysicsPreparedWork,PhysicsPreparedQueries", "none", true});
-			scheduler->push_back({"PhysicsCommandCommit", "Physics", "PhysicsPreparedWork", "PhysicsWorld", "hard boundary", false});
-			scheduler->push_back({"PhysicsSimulate", "Physics", "PhysicsWorld", "PhysicsWorld", "provider barrier", true});
-			scheduler->push_back({"PhysicsExtract", "Physics", "PhysicsWorld,PhysicsPreparedQueries", "PhysicsPublishedSnapshots,PhysicsBackendQueryResults,PhysicsRawEvents", "provider barrier", true});
-			scheduler->push_back({"PhysicsPublish", "Physics", "PhysicsPublishedSnapshots,PhysicsEventSubscriptions", "PhysicsQueryResults,PhysicsEventPackets,PhysicsTransformTransactions", "hard boundary", false});
-			scheduler->push_back({"PhysicsPublicationBarrier", "Physics", "PhysicsTransformTransactions", "SceneGraph", "After Physics", false});
-			latestDiagnostics = std::make_shared<const PhysicsDiagnosticsSnapshot>(PhysicsDiagnosticsSnapshot{
-				world.Handle(), world.Timing().completedTick, world.State(), diagnosticCounters,
-				diagnosticTimings, memory, cache, diagnosticQueues, scheduler});
+			const TerraEngine::Scheduling::SameFramePhysicsPublicationState publicationState =
+				TerraEngine::Scheduling::SameFramePhysicsPublicationStateSnapshot();
+			scheduler->push_back({"PhysicsSnapshot", "Physics", "SceneGraph,PhysicsSettings", "PhysicsAuthoringSnapshot", "protected snapshot", false,
+				true, "active physics frame", "", authoringDiagnostics.changedObjects});
+			scheduler->push_back({"PhysicsPrepare", "Physics", "PhysicsAuthoringSnapshot,PhysicsQueryQueue", "PhysicsPreparedWork,PhysicsPreparedQueries", "none", true,
+				true, "snapshot or fixed-step input available", "PhysicsSnapshot", preparationDiagnostics.estimatedWorkItems});
+			scheduler->push_back({"PhysicsCommandCommit", "Physics", "PhysicsPreparedWork", "PhysicsWorld", "hard boundary", false,
+				true, "prepared provider mutation or command work available", "PhysicsPrepare", diagnosticCounters.commandCount});
+			scheduler->push_back({"PhysicsSimulate", "Physics", "PhysicsWorld", "PhysicsWorld", "provider ownership", true,
+				!completedSteps.empty(), completedSteps.empty() ? "no fixed step planned" : "fixed step planned", "PhysicsCommandCommit", completedSteps.size()});
+			scheduler->push_back({"PhysicsExtract", "Physics", "PhysicsWorld,PhysicsPreparedQueries", "PhysicsPublishedSnapshots,PhysicsBackendQueryResults,PhysicsRawEvents", "immutable provider snapshot then protected event drain", true,
+				!completedSteps.empty(), completedSteps.empty() ? "no completed provider step" : "provider step completed", "PhysicsSimulate", extractionDiagnostics.extractedBodies});
+			scheduler->push_back({"PhysicsPublish", "Physics", "PhysicsPublishedSnapshots,PhysicsEventSubscriptions", "PhysicsQueryResults,PhysicsEventPackets,PhysicsTransformTransactions", "hard boundary", false,
+				!completedSteps.empty(), completedSteps.empty() ? "no extracted packet" : "extracted packet ready", "PhysicsExtract", publicationDiagnostics.currentEntries});
+			scheduler->push_back({"PhysicsPublicationBarrier", "Physics", "PhysicsTransformTransactions", "SceneGraph",
+				publicationState.active ? "After Physics" : "Frame End", false,
+				!completedSteps.empty(), publicationState.reason, "PhysicsPublish", pendingTransformPublications.size()});
+			PhysicsDiagnosticsSnapshot diagnostics;
+			diagnostics.world = world.Handle();
+			diagnostics.tick = world.Timing().completedTick;
+			diagnostics.state = world.State();
+			diagnostics.counters = diagnosticCounters;
+			diagnostics.timings = diagnosticTimings;
+			diagnostics.memory = memory;
+			diagnostics.cache = cache;
+			diagnostics.queues = diagnosticQueues;
+			diagnostics.authoring = std::move(authoringDiagnostics);
+			diagnostics.preparation = std::move(preparationDiagnostics);
+			diagnostics.extraction = extractionDiagnostics;
+			diagnostics.stateStore = stateStoreDiagnostics;
+			diagnostics.publication = publicationDiagnostics;
+			diagnostics.rate = rate;
+			diagnostics.scheduler = std::move(scheduler);
+			latestDiagnostics = std::make_shared<const PhysicsDiagnosticsSnapshot>(std::move(diagnostics));
 			PublishPhysicsDiagnosticsSnapshot(latestDiagnostics);
 			completedSteps.clear();
 		}
 
 		void CompleteAfterPhysicsFlushLocked(
-			const std::vector<Scene::TransactionResult>& transactionResults) {
+			const std::vector<Scene::TransactionResult>& transactionResults,
+			const std::vector<Scene::TransactionPublicationGroupResult>& publicationGroupResults) {
 			const bool hasPhysicsPublications = !pendingTransformPublications.empty();
 			bool onlyPhysicsPublications = hasPhysicsPublications
-				&& transactionResults.size() == pendingTransformPublications.size();
+				&& transactionResults.empty()
+				&& publicationGroupResults.size() == pendingTransformPublications.size();
 			if(onlyPhysicsPublications) {
-				for(const Scene::TransactionResult& result : transactionResults) {
+				for(const Scene::TransactionPublicationGroupResult& result : publicationGroupResults) {
 					const bool belongsToPhysics = std::any_of(
 						pendingTransformPublications.begin(), pendingTransformPublications.end(),
 						[&result](const PendingTransformPublication& publication) {
-							return publication.transactionId == result.transactionId;
+							return publication.groupId == result.groupId;
 						});
 					if(!belongsToPhysics) {
 						onlyPhysicsPublications = false;
@@ -1610,25 +1930,41 @@ namespace TerraEngine::Physics {
 					}
 				}
 			}
-			std::unordered_map<std::string, Scene::TransactionStatus> statuses;
-			statuses.reserve(transactionResults.size());
-			for(const Scene::TransactionResult& result : transactionResults) {
-				statuses.emplace(result.transactionId, result.status);
+			std::unordered_map<std::string, const Scene::TransactionPublicationGroupResult*> resultsByGroup;
+			resultsByGroup.reserve(publicationGroupResults.size());
+			for(const Scene::TransactionPublicationGroupResult& result : publicationGroupResults) {
+				resultsByGroup.emplace(result.groupId, &result);
 			}
 
 			for(const PendingTransformPublication& publication : pendingTransformPublications) {
-				const auto status = statuses.find(publication.transactionId);
-				if(status != statuses.end() && status->second == Scene::TransactionStatus::Committed) {
-					for(const auto& [objectId, pose] : publication.poses) {
-						auto runtime = runtimeBodies.find(objectId);
-						if(runtime == runtimeBodies.end()) continue;
-						runtime->second.lastPublishedPose = pose;
-						runtime->second.hasPublishedPose = true;
+				const auto result = resultsByGroup.find(publication.groupId);
+				if(result != resultsByGroup.end()) {
+					const TransformPublicationReceipt receipt =
+						MakeTransformPublicationReceipt(publication.packet, *result->second);
+					if(receipt.Accepted()) {
+						++publicationDiagnostics.acceptedPackets;
+						publicationDiagnostics.acknowledgedEntries += receipt.acknowledgedEntries.size();
+						publicationDiagnostics.lastFailure.clear();
+						for(const TransformPublicationEntryReceipt& acknowledged : receipt.acknowledgedEntries) {
+							auto runtime = runtimeBodies.find(acknowledged.objectId);
+							if(runtime == runtimeBodies.end() || runtime->second.body != acknowledged.body) continue;
+							runtime->second.lastPublishedPose = acknowledged.worldPose;
+							runtime->second.hasPublishedPose = true;
+							const auto object = ObjectManager::instance().getObject(acknowledged.objectId);
+							if(object) {
+								runtime->second.objectTransformRevision =
+									ObjectManager::instance().GetObjectTransformRevision(*object);
+							}
+						}
+						continue;
 					}
-				} else {
+				}
+				{
 					// Leave lastPublishedPose unchanged so the next extraction retries a
 					// rejected write even if the provider body has already gone to sleep.
 					++diagnosticCounters.rejectedCount;
+					++publicationDiagnostics.rejectedPackets;
+					publicationDiagnostics.lastFailure = "Transform publication did not commit at its declared boundary.";
 				}
 			}
 			pendingTransformPublications.clear();
@@ -1652,9 +1988,16 @@ namespace TerraEngine::Physics {
 		bool backendInitialized = false;
 		bool editorLifecycleControlled = false;
 		std::optional<PhysicsAuthoringSnapshot> authoring;
+		std::optional<PhysicsAuthoringGeneration> authoringGeneration;
+		std::optional<PhysicsPreparationPlan> preparationPlan;
+		PhysicsPreparationScratch preparationScratch;
+		PhysicsAssetGeneration observedPhysicsAssetGeneration = 0U;
 		std::uint64_t authoringEquivalentSceneSpatialRevision = 0U;
 		bool authoringSceneRevisionValid = false;
 		PhysicsGeneration lastPreparedAuthoringSnapshotGeneration = 0U;
+		bool authoringSnapshotReused = false;
+		bool lastPreparationRejected = false;
+		bool preparationPlanExecutedThisFrame = false;
 		std::vector<PreparedBody> preparedBodies;
 		std::vector<TerraEngine::UUID> preparedRemovals;
 		std::vector<PhysicsConstraintDescriptor> preparedConstraints;
@@ -1668,6 +2011,10 @@ namespace TerraEngine::Physics {
 		std::vector<PhysicsFixedStepRequest> pendingFlushSteps;
 		std::vector<PendingTransformPublication> pendingTransformPublications;
 		Backend::PhysicsBackendExtraction extraction;
+		std::optional<IncrementalBodyStateUpdateBatch> preparedBodyStateBatch;
+		std::vector<TransformPublicationSourceRecord> preparedTransformSources;
+		std::uint64_t nextTransformPublicationGroupId = 0U;
+		std::uint64_t nextTransformPacketGeneration = 0U;
 		std::unordered_map<TerraEngine::UUID, RuntimeBody> runtimeBodies;
 		std::unordered_map<TerraEngine::UUID, RuntimeConstraint> runtimeConstraints;
 		std::unordered_map<TerraEngine::UUID, RuntimeCharacter> runtimeCharacters;
@@ -1681,6 +2028,7 @@ namespace TerraEngine::Physics {
 		std::unordered_map<TerraEngine::UUID, PhysicsMaterialRuntime> materialAssets;
 		std::vector<PhysicsCommandResult> commandResults;
 		std::shared_ptr<const PhysicsBodyStateSnapshot> latestBodies;
+		std::shared_ptr<const IncrementalBodyStateSnapshot> latestIncrementalBodies;
 		std::shared_ptr<const PhysicsCommandResultSnapshot> latestCommands;
 		std::shared_ptr<const PhysicsEventPacket> latestEvents;
 		std::shared_ptr<const PhysicsCharacterStatePacket> latestCharacters;
@@ -1692,6 +2040,12 @@ namespace TerraEngine::Physics {
 		PhysicsDiagnosticsCounters diagnosticCounters;
 		PhysicsDiagnosticsTimings diagnosticTimings;
 		PhysicsDiagnosticsQueues diagnosticQueues;
+		PhysicsPublicationDiagnostics publicationDiagnostics;
+		std::uint64_t stateStorePublicationCount = 0U;
+		std::uint64_t stateStoreRejectedBatchCount = 0U;
+		std::uint64_t lastStatePagesReused = 0U;
+		std::uint64_t lastStatePagesCopied = 0U;
+		PhysicsTick lastAggregateDiagnosticsTick = 0U;
 		std::uint64_t explicitStepPublicationCount = 0U;
 		mutable std::mutex mutex;
 	};
@@ -1771,69 +2125,101 @@ namespace TerraEngine::Physics {
 
 	std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> PhysicsSystem::DeclareFrameWorkloads(float deltaTime) {
 		using namespace TerraEngine::Scheduling;
-		auto protectedWorkload = [this](std::string name, std::vector<std::string> reads,
-			std::vector<std::string> writes, WorkerSystemPhaseKind kind, bool hardBoundary,
-			auto work) {
-			FrameWorkloadDeclaration declaration;
-			declaration.workloadName = std::move(name);
-			declaration.phase = "Physics";
-			declaration.reads = std::move(reads);
-			declaration.writes = std::move(writes);
-			declaration.workerEligible = false;
-			declaration.mainThreadRequired = true;
-			declaration.mutationPolicy = FrameWorkloadMutationPolicy::DeferredOnly;
-			declaration.phaseKind = kind;
-			declaration.boundaryClassification = HardBoundaryClassification::Protected;
-			declaration.hardBoundary = hardBoundary;
-			declaration.protectedReason = "This workload reads or publishes generation-validated live state at a protected physics boundary.";
-			declaration.profilingLabel = declaration.workloadName;
-			declaration.work = [this, work](JobGraphContext&) {
-				std::lock_guard<std::mutex> lock(impl->mutex);
-				work();
+		static const std::array<FrameWorkloadDeclaration, 7> stableDescriptors = [] {
+			std::array<FrameWorkloadDeclaration, 7> descriptors;
+			auto configure = [](FrameWorkloadDeclaration& descriptor, std::string name,
+				std::vector<std::string> reads, std::vector<std::string> writes,
+				bool workerEligible, WorkerSystemPhaseKind kind) {
+				descriptor.workloadName = std::move(name);
+				descriptor.ownerSystem = "PhysicsSystem";
+				descriptor.phase = "Physics";
+				descriptor.stableDescriptorId = "PhysicsSystem/Physics/" + descriptor.workloadName;
+				descriptor.activationPredicateKey = "physics-frame-work-available";
+				descriptor.reads = std::move(reads);
+				descriptor.writes = std::move(writes);
+				descriptor.workerEligible = workerEligible;
+				descriptor.mainThreadRequired = !workerEligible;
+				descriptor.mutationPolicy = workerEligible
+					? FrameWorkloadMutationPolicy::None
+					: FrameWorkloadMutationPolicy::DeferredOnly;
+				descriptor.phaseKind = kind;
+				descriptor.boundaryClassification = workerEligible
+					? HardBoundaryClassification::WorkerSafe
+					: HardBoundaryClassification::Protected;
+				descriptor.hardBoundary = !workerEligible;
+				descriptor.safeSubwork = workerEligible
+					? "Consumes immutable preparation values or provider-owned snapshots and emits typed packets without mutating ObjectManager."
+					: std::string{};
+				descriptor.protectedReason = workerEligible
+					? std::string{}
+					: "Live-world ownership, provider ordering, and publication commitment remain protected.";
+				descriptor.profilingLabel = descriptor.workloadName;
 			};
-			return declaration;
-		};
-		auto workerWorkload = [this](std::string name, std::vector<std::string> reads,
-			std::vector<std::string> writes, auto work) {
-			FrameWorkloadDeclaration declaration;
-			declaration.workloadName = std::move(name);
-			declaration.phase = "Physics";
-			declaration.reads = std::move(reads);
-			declaration.writes = std::move(writes);
-			declaration.workerEligible = true;
-			declaration.mainThreadRequired = false;
-			declaration.phaseKind = WorkerSystemPhaseKind::WorkerPrepare;
-			declaration.boundaryClassification = HardBoundaryClassification::WorkerSafe;
-			declaration.safeSubwork = "Consumes immutable or provider-owned data and emits typed packets without mutating ObjectManager.";
-			declaration.profilingLabel = declaration.workloadName;
-			declaration.work = [this, work](JobGraphContext&) {
-				std::lock_guard<std::mutex> lock(impl->mutex);
-				work();
-			};
-			return declaration;
-		};
 
-		std::vector<FrameWorkloadDeclaration> workloads;
-		workloads.push_back(protectedWorkload("PhysicsSnapshot",
-			{"SceneGraph", "ObjectManager", "PhysicsSettingsUpdateQueue"},
-			{"PhysicsSettings", "PhysicsWorld", "PhysicsAuthoringSnapshot"},
-			WorkerSystemPhaseKind::Snapshot, true, [this]() { impl->SnapshotLocked(); }));
-		workloads.push_back(workerWorkload("PhysicsPrepare",
-			{"PhysicsAuthoringSnapshot", "PhysicsPublishedSnapshots", "PhysicsQueryQueue"}, {"PhysicsPreparedWork", "PhysicsPreparedQueries"},
-			[this, deltaTime]() { impl->PrepareLocked(deltaTime); }));
-		workloads.push_back(protectedWorkload("PhysicsCommandCommit",
-			{"PhysicsPreparedWork", "PhysicsWorld"}, {"PhysicsWorld"},
-			WorkerSystemPhaseKind::ProtectedCommit, true, [this]() { impl->CommitLocked(); }));
-		workloads.push_back(workerWorkload("PhysicsSimulate",
-			{"PhysicsWorld"}, {"PhysicsWorld"}, [this]() { impl->SimulateLocked(); }));
-		workloads.push_back(workerWorkload("PhysicsExtract",
-			{"PhysicsWorld", "PhysicsPreparedQueries"}, {"PhysicsPublishedSnapshots", "PhysicsBackendQueryResults", "PhysicsRawEvents"}, [this]() { impl->ExtractLocked(); }));
-		workloads.push_back(protectedWorkload("PhysicsPublish",
-			{"PhysicsPublishedSnapshots", "PhysicsBackendQueryResults", "PhysicsRawEvents", "PhysicsEventSubscriptions"}, {"PhysicsQueryResults", "PhysicsEventPackets", "PhysicsTransformTransactions", "SceneMutationQueue"},
-			WorkerSystemPhaseKind::ProtectedCommit, true, [this]() { impl->PublishLocked(); }));
-		workloads.push_back(protectedWorkload("PhysicsPublicationBarrier",
-			{"PhysicsTransformTransactions"}, {"PhysicsPublishedSnapshots"},
-			WorkerSystemPhaseKind::Barrier, true, [this]() { impl->PublicationBarrierLocked(); }));
+			configure(descriptors[0], "PhysicsSnapshot",
+				{"SceneGraph", "ObjectManager", "PhysicsSettingsUpdateQueue"},
+				{"PhysicsSettings", "PhysicsWorld", "PhysicsAuthoringSnapshot"}, false, WorkerSystemPhaseKind::Snapshot);
+			configure(descriptors[1], "PhysicsPrepare",
+				{"PhysicsAuthoringSnapshot", "PhysicsPublishedSnapshots", "PhysicsQueryQueue"},
+				{"PhysicsPreparedWork", "PhysicsPreparedQueries"}, true, WorkerSystemPhaseKind::WorkerPrepare);
+			configure(descriptors[2], "PhysicsCommandCommit",
+				{"PhysicsPreparedWork", "PhysicsWorld"}, {"PhysicsWorld"}, false, WorkerSystemPhaseKind::ProtectedCommit);
+			configure(descriptors[3], "PhysicsSimulate",
+				{"PhysicsWorld"}, {"PhysicsWorld"}, true, WorkerSystemPhaseKind::WorkerPrepare);
+			configure(descriptors[4], "PhysicsExtract",
+				{"PhysicsWorld", "PhysicsPreparedQueries"},
+				{"PhysicsPublishedSnapshots", "PhysicsBackendQueryResults", "PhysicsRawEvents"}, true, WorkerSystemPhaseKind::WorkerPrepare);
+			configure(descriptors[5], "PhysicsPublish",
+				{"PhysicsPublishedSnapshots", "PhysicsBackendQueryResults", "PhysicsRawEvents", "PhysicsEventSubscriptions"},
+				{"PhysicsQueryResults", "PhysicsEventPackets", "PhysicsTransformTransactions", "SceneMutationQueue"}, false, WorkerSystemPhaseKind::ProtectedCommit);
+			configure(descriptors[6], "PhysicsPublicationBarrier",
+				{"PhysicsTransformTransactions"}, {"PhysicsPublishedSnapshots"}, false, WorkerSystemPhaseKind::Barrier);
+			for (std::size_t index = 1U; index < descriptors.size(); ++index)
+			{
+				descriptors[index].explicitDependencies = {descriptors[index - 1U].stableDescriptorId};
+			}
+			return descriptors;
+		}();
+
+		std::lock_guard<std::mutex> lock(impl->mutex);
+		const Impl::FrameWorkloadActivation activation = impl->InspectFrameWorkloadActivationLocked(deltaTime);
+		std::vector<FrameWorkloadDeclaration> workloads(stableDescriptors.begin(), stableDescriptors.end());
+		const std::array<bool, 7> active = {
+			activation.snapshot,
+			activation.prepare,
+			activation.commandCommit,
+			activation.simulate,
+			activation.extract,
+			activation.publish,
+			activation.publicationBarrier};
+		const std::array<std::size_t, 7> estimates = {
+			activation.authoringItems,
+			activation.authoringItems + activation.queryItems,
+			activation.authoringItems + activation.commandItems,
+			activation.simulate ? 1U : 0U,
+			activation.providerItems + activation.queryItems,
+			activation.providerItems + activation.queryItems,
+			activation.publicationBarrier ? 1U : 0U};
+		for (std::size_t index = 0U; index < workloads.size(); ++index)
+		{
+			workloads[index].active = active[index];
+			workloads[index].ready = impl->world.Handle().IsValid();
+			workloads[index].readinessReason = workloads[index].ready ? std::string{} : "physics world is not active";
+			workloads[index].estimatedWorkItemCount = estimates[index];
+		}
+		workloads[1].inlineWorkItemThreshold = impl->configuredSettings.parallelPreparationThreshold;
+		workloads[3].inlineWorkItemThreshold = 1U;
+		workloads[4].inlineWorkItemThreshold = impl->configuredSettings.parallelExtractionThreshold;
+		workloads[6].sameFrameVisibilityRequired = activation.publicationBarrier
+			&& activation.providerItems > 0U
+			&& TerraEngine::Scheduling::SameFramePhysicsPublicationConsumerActive();
+		workloads[0].work = [this](JobGraphContext&) { std::lock_guard<std::mutex> workloadLock(impl->mutex); impl->SnapshotLocked(); };
+		workloads[1].work = [this, deltaTime](JobGraphContext&) { std::lock_guard<std::mutex> workloadLock(impl->mutex); impl->PrepareLocked(deltaTime); };
+		workloads[2].work = [this](JobGraphContext&) { std::lock_guard<std::mutex> workloadLock(impl->mutex); impl->CommitLocked(); };
+		workloads[3].work = [this](JobGraphContext&) { std::lock_guard<std::mutex> workloadLock(impl->mutex); impl->SimulateLocked(); };
+		workloads[4].work = [this](JobGraphContext&) { std::lock_guard<std::mutex> workloadLock(impl->mutex); impl->ExtractLocked(); };
+		workloads[5].work = [this](JobGraphContext&) { std::lock_guard<std::mutex> workloadLock(impl->mutex); impl->PublishLocked(); };
+		workloads[6].work = [this](JobGraphContext&) { std::lock_guard<std::mutex> workloadLock(impl->mutex); impl->PublicationBarrierLocked(); };
 		return workloads;
 	}
 
@@ -1981,7 +2367,19 @@ namespace TerraEngine::Physics {
 
 	std::shared_ptr<const PhysicsBodyStateSnapshot> PhysicsSystem::LatestBodySnapshot() const {
 		std::lock_guard<std::mutex> lock(impl->mutex);
+		if(!impl->latestBodies && impl->latestIncrementalBodies) {
+			impl->latestBodies = std::make_shared<const PhysicsBodyStateSnapshot>(PhysicsBodyStateSnapshot{
+				impl->latestIncrementalBodies->world,
+				impl->latestIncrementalBodies->tick,
+				std::make_shared<const std::vector<PhysicsBodyState>>(
+					impl->latestIncrementalBodies->Flatten())});
+		}
 		return impl->latestBodies;
+	}
+
+	std::shared_ptr<const IncrementalBodyStateSnapshot> PhysicsSystem::LatestIncrementalBodySnapshot() const {
+		std::lock_guard<std::mutex> lock(impl->mutex);
+		return impl->latestIncrementalBodies;
 	}
 
 	std::shared_ptr<const PhysicsCommandResultSnapshot> PhysicsSystem::LatestCommandResults() const {
@@ -2026,8 +2424,9 @@ namespace TerraEngine::Physics {
 	}
 
 	void PhysicsSystem::OnAfterPhysicsFlush(
-		const std::vector<TerraEngine::Scene::TransactionResult>& results) {
+		const std::vector<TerraEngine::Scene::TransactionResult>& results,
+		const std::vector<TerraEngine::Scene::TransactionPublicationGroupResult>& publicationGroups) {
 		std::lock_guard<std::mutex> lock(impl->mutex);
-		impl->CompleteAfterPhysicsFlushLocked(results);
+		impl->CompleteAfterPhysicsFlushLocked(results, publicationGroups);
 	}
 }

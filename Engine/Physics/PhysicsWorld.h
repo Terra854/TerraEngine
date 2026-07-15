@@ -9,6 +9,7 @@
 #include "Core/Export.h"
 #include "PhysicsCommands.h"
 #include "PhysicsEvents.h"
+#include "IncrementalBodyStateStore.h"
 #include "PhysicsQueries.h"
 #include "PhysicsSettings.h"
 #include "Utilities/UUID.h"
@@ -25,6 +26,10 @@
 #include <vector>
 
 namespace TerraEngine::Physics {
+	namespace Backend {
+		struct PhysicsBackendExtraction;
+	}
+
 	inline constexpr PhysicsWorldId kPrimaryPhysicsWorldId{1U};
 
 	// One request describes exactly one fixed physics update. Consumers must use
@@ -286,6 +291,16 @@ namespace TerraEngine::Physics {
 			PhysicsTick requestedTick,
 			PhysicsTick currentTick) const;
 
+		// Conversion reads only provider-neutral copied values, so schedulers may run
+		// it on a worker before protected live-world ownership is acquired. Publication
+		// then preflights every generation before the store switches both same-tick views.
+		static std::optional<IncrementalBodyStateUpdateBatch> ConvertExtractedBodyStates(
+			const Backend::PhysicsBackendExtraction& extraction);
+		std::optional<IncrementalBodyStatePublication> PublishPreparedBodyStates(
+			const IncrementalBodyStateUpdateBatch& batch);
+		std::shared_ptr<const IncrementalBodyStateSnapshot> AcquireCompleteBodyState() const;
+		std::shared_ptr<const ChangedBodyStatePacket> AcquireChangedBodyState() const;
+
 		// Next is accepted only while paused and only when no earlier Next token is
 		// outstanding. Capturing duration here prevents a later settings edit from
 		// changing the requested step's duration.
@@ -347,6 +362,7 @@ namespace TerraEngine::Physics {
 		PhysicsHandleAllocator<PhysicsCharacterHandle> characterRegistry;
 		std::unordered_map<std::uint64_t, PhysicsConstraintRuntimeState> constraintRuntime;
 		std::vector<std::shared_ptr<const PhysicsCharacterStatePacket>> characterStateHistory;
+		IncrementalBodyStateStore bodyStateStore;
 		std::unordered_map<std::uint64_t, std::shared_ptr<const PhysicsCookedShapeData>> cookedShapes;
 		std::unordered_map<TerraEngine::UUID, std::shared_ptr<const PhysicsCookedShapeAssetState>> cookedShapeAssets;
 		mutable PhysicsCookedShapeCacheStatistics cookedShapeStatistics;

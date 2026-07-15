@@ -1547,6 +1547,52 @@ namespace TerraEngine::Renderer {
 		return diagnostics;
 	}
 
+	std::optional<TerraEngine::Profiling::PresentationWaitKind> ClassifyUnavoidablePresentationWait(BackendSubmitStage stage)
+	{
+		// Only synchronization that is inherent to acquiring, completing, and
+		// presenting a frame belongs in the unavoidable stream. Forced idle and
+		// swapchain recovery remain ordinary stall diagnostics because callers can
+		// often remove or prevent those waits.
+		switch (stage)
+		{
+		case BackendSubmitStage::ImageAcquire:
+			return TerraEngine::Profiling::PresentationWaitKind::SwapchainAcquire;
+		case BackendSubmitStage::QueueSubmit:
+			return TerraEngine::Profiling::PresentationWaitKind::RenderQueueBackpressure;
+		case BackendSubmitStage::FenceWait:
+			return TerraEngine::Profiling::PresentationWaitKind::GpuCompletion;
+		case BackendSubmitStage::Present:
+			return TerraEngine::Profiling::PresentationWaitKind::UiComposition;
+		default:
+			return std::nullopt;
+		}
+	}
+
+	std::vector<TerraEngine::Profiling::PresentationWaitRecord> BuildPresentationWaitRecords(const BackendFrameBreakdown& breakdown)
+	{
+		std::vector<TerraEngine::Profiling::PresentationWaitRecord> records;
+		records.reserve(breakdown.stageTimings.size());
+		for (const BackendStageTiming& timing : breakdown.stageTimings)
+		{
+			const auto waitKind = ClassifyUnavoidablePresentationWait(timing.stage);
+			if (!waitKind.has_value())
+			{
+				continue;
+			}
+
+			TerraEngine::Profiling::PresentationWaitRecord record;
+			record.kind = *waitKind;
+			record.duration.availability = TerraEngine::Profiling::TelemetryAvailability::Available;
+			// Backend timing is currently measured in milliseconds. Convert once at
+			// the diagnostics boundary so profiler streams retain integer nanoseconds.
+			record.duration.nanoseconds = static_cast<std::uint64_t>(std::llround(
+				static_cast<double>(std::max(0.0f, timing.milliseconds)) * 1'000'000.0));
+			record.detail = timing.label.empty() ? ToString(timing.stage) : timing.label;
+			records.push_back(std::move(record));
+		}
+		return records;
+	}
+
 	void ApplyBackendBreakdownToRenderDiagnostics(RenderDiagnosticsSummary& summary, const BackendFrameBreakdown& breakdown)
 	{
 		summary.backendFrameBreakdown = breakdown;
@@ -1554,6 +1600,7 @@ namespace TerraEngine::Renderer {
 		summary.queuedBackgroundMilliseconds = SumQueuedBackendFrameCost(summary.backendFrameBreakdown);
 		summary.backendStalls = CollectBackendStallDiagnostics(summary.backendFrameBreakdown, 0.25f);
 		summary.viewSubmitWork = summary.backendFrameBreakdown.viewSubmitWork;
+		summary.presentationWaits = BuildPresentationWaitRecords(summary.backendFrameBreakdown);
 		summary.recentRendererPhases = BuildRecentRendererPhaseRing(summary.backendFrameBreakdown);
 		if (summary.detailed && !summary.backendFrameBreakdown.stageTimings.empty())
 		{

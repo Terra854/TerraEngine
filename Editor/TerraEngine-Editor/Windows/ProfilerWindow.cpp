@@ -244,6 +244,58 @@ const char* TimingAggregateValue(const ProfilerTimingStreamAggregate& aggregate,
 	return buffer;
 }
 
+// DrawEvidenceMetrics renders unit-tagged capture summaries.  Each row carries
+// its availability so absent optional streams stay distinguishable from a
+// valid zero-duration stage.
+void DrawEvidenceMetrics(const char* tableId, const std::vector<EditorProfilerMetricSummary>& metrics)
+{
+	if (metrics.empty())
+	{
+		ImGui::TextDisabled("No stream was recorded at this capture level.");
+		return;
+	}
+	if (!ImGui::BeginTable(tableId, 7, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	{
+		return;
+	}
+	ImGui::TableSetupColumn("Stream", ImGuiTableColumnFlags_WidthStretch, 2.0f);
+	ImGui::TableSetupColumn("Median");
+	ImGui::TableSetupColumn("P95");
+	ImGui::TableSetupColumn("P99");
+	ImGui::TableSetupColumn("Maximum");
+	ImGui::TableSetupColumn("Samples");
+	ImGui::TableSetupColumn("Availability", ImGuiTableColumnFlags_WidthStretch, 1.5f);
+	ImGui::TableHeadersRow();
+	for (const EditorProfilerMetricSummary& metric : metrics)
+	{
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::TextUnformatted(metric.label.c_str());
+		ImGui::TableSetColumnIndex(1);
+		ImGui::Text(metric.available ? "%.3f %s" : "n/a", metric.median, metric.unit.c_str());
+		ImGui::TableSetColumnIndex(2);
+		ImGui::Text(metric.available ? "%.3f %s" : "n/a", metric.p95, metric.unit.c_str());
+		ImGui::TableSetColumnIndex(3);
+		ImGui::Text(metric.available ? "%.3f %s" : "n/a", metric.p99, metric.unit.c_str());
+		ImGui::TableSetColumnIndex(4);
+		ImGui::Text(metric.available ? "%.3f %s" : "n/a", metric.maximum, metric.unit.c_str());
+		ImGui::TableSetColumnIndex(5);
+		ImGui::Text("%llu valid / %llu unavailable",
+			static_cast<unsigned long long>(metric.sampleCount),
+			static_cast<unsigned long long>(metric.unavailableCount));
+		ImGui::TableSetColumnIndex(6);
+		if (metric.available)
+		{
+			ImGui::TextUnformatted("available");
+		}
+		else
+		{
+			ImGui::TextUnformatted(metric.unavailableReason.empty() ? "unavailable" : metric.unavailableReason.c_str());
+		}
+	}
+	ImGui::EndTable();
+}
+
 // BuildSampleTree is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 SampleTree BuildSampleTree(const ProfilerFrameRecord& frame, ProfilerModuleId selectedModule)
 {
@@ -674,6 +726,7 @@ void ProfilerWindow::DrawFrameList()
 void ProfilerWindow::DrawFrameDetails()
 {
 	DrawRendererRecoverySummary();
+	DrawCaptureEvidenceSummary();
 
 	const auto selectedFrame = Profiler::Instance().GetSelectedFrameSnapshot();
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -773,6 +826,89 @@ void ProfilerWindow::DrawFrameDetails()
 			}
 		}
 		ImGui::EndTabBar();
+	}
+}
+
+void ProfilerWindow::DrawCaptureEvidenceSummary()
+{
+	// This reads the immutable profiler snapshot.  The window never consults
+	// live physics or scheduler state while inspecting a saved capture.
+	const TerraEngine::Profiling::ProfilerCaptureDocument document = Profiler::Instance().GetDocumentSnapshot();
+	const EditorProfilerCaptureSummary summary = EditorProfilerService::SummarizeDocument("live", document);
+	ImGui::SeparatorText("Capture Evidence");
+	ImGui::Text("v%u  %s capture  %llu committed frames  %llu B",
+		summary.payloadVersion,
+		TerraEngine::Profiling::ToString(document.metadata.settings.detailLevel),
+		static_cast<unsigned long long>(summary.committedFrameCount),
+		static_cast<unsigned long long>(summary.artifactSizeBytes));
+	if (summary.recoveredIncompleteTail)
+	{
+		ImGui::TextColored(ImVec4(1.0f, 0.80f, 0.25f, 1.0f), "Recovery warning: incomplete final chunk was discarded; committed frames remain readable.");
+	}
+	else if (!summary.captureComplete)
+	{
+		ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.25f, 1.0f), "Capture is incomplete and was not recoverable.");
+	}
+	else
+	{
+		ImGui::TextDisabled("Capture is complete.");
+	}
+
+	if (ImGui::TreeNode("Physics and Scene View Stages"))
+	{
+		DrawEvidenceMetrics("ProfilerStageEvidence", summary.stageTimings);
+		ImGui::TreePop();
+	}
+	if (ImGui::TreeNode("Protected Boundary Breakdown"))
+	{
+		DrawEvidenceMetrics("ProfilerBoundaryEvidence", summary.protectedBoundaryTimings);
+		ImGui::TreePop();
+	}
+	if (ImGui::TreeNode("Presentation and Responsiveness"))
+	{
+		DrawEvidenceMetrics("ProfilerPresentationWaitEvidence", summary.presentationWaitTimings);
+		DrawEvidenceMetrics("ProfilerResponsivenessEvidence", summary.responsivenessTimings);
+		ImGui::TreePop();
+	}
+	if (ImGui::TreeNode("Worker Timeline Summary"))
+	{
+		if (summary.workerHistories.empty())
+		{
+			ImGui::TextDisabled("No worker telemetry was recorded at this capture level.");
+		}
+		else if (ImGui::BeginTable("ProfilerWorkerTimeline", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+		{
+			ImGui::TableSetupColumn("Worker");
+			ImGui::TableSetupColumn("Run P95");
+			ImGui::TableSetupColumn("Wait P95");
+			ImGui::TableSetupColumn("Idle P95");
+			ImGui::TableSetupColumn("Max Queue");
+			ImGui::TableSetupColumn("Useful Items");
+			ImGui::TableHeadersRow();
+			for (const EditorProfilerWorkerSummary& worker : summary.workerHistories)
+			{
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0); ImGui::Text("%u", worker.workerId);
+				ImGui::TableSetColumnIndex(1); ImGui::Text(worker.runDuration.available ? "%.3f ms" : "n/a", worker.runDuration.p95);
+				ImGui::TableSetColumnIndex(2); ImGui::Text(worker.waitDuration.available ? "%.3f ms" : "n/a", worker.waitDuration.p95);
+				ImGui::TableSetColumnIndex(3); ImGui::Text(worker.idleDuration.available ? "%.3f ms" : "n/a", worker.idleDuration.p95);
+				ImGui::TableSetColumnIndex(4); ImGui::Text("%llu", static_cast<unsigned long long>(worker.maximumQueueDepth));
+				ImGui::TableSetColumnIndex(5); ImGui::Text("%llu", static_cast<unsigned long long>(worker.totalUsefulWorkItems));
+			}
+			ImGui::EndTable();
+		}
+		ImGui::TreePop();
+	}
+	if (ImGui::TreeNode("Physics Work Volumes"))
+	{
+		const EditorProfilerWorkVolumeSummary& volume = summary.workVolumes;
+		ImGui::Text("Ticks %llu  Total %llu  Active %llu  Examined %llu",
+			static_cast<unsigned long long>(volume.measuredTickCount), static_cast<unsigned long long>(volume.totalBodies),
+			static_cast<unsigned long long>(volume.activeBodies), static_cast<unsigned long long>(volume.examinedBodies));
+		ImGui::Text("Extracted %llu  Converted %llu  Changed %llu  Published %llu",
+			static_cast<unsigned long long>(volume.extractedBodies), static_cast<unsigned long long>(volume.convertedBodies),
+			static_cast<unsigned long long>(volume.changedBodies), static_cast<unsigned long long>(volume.publishedBodies));
+		ImGui::TreePop();
 	}
 }
 

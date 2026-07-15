@@ -122,6 +122,25 @@ namespace TerraEngine::Physics {
 			return Reject(PhysicsSettingsValidationCode::InvalidDebugLimit,
 				"Debug history and primitive limits must stay within their calibrated bounds.");
 		}
+		if(transformPublicationChunkSize < kPhysicsMinimumPublicationBatchSize
+			|| transformPublicationChunkSize > kPhysicsMaximumPublicationBatchSize
+			|| providerExtractionBatchSize < kPhysicsMinimumPublicationBatchSize
+			|| providerExtractionBatchSize > kPhysicsMaximumPublicationBatchSize) {
+			return Reject(PhysicsSettingsValidationCode::InvalidPublicationBatchSize,
+				"Physics publication and extraction batch sizes must remain between 64 and 8,192 records.");
+		}
+		if(parallelPreparationThreshold == 0U
+			|| parallelPreparationThreshold > kPhysicsMaximumParallelThreshold
+			|| parallelExtractionThreshold == 0U
+			|| parallelExtractionThreshold > kPhysicsMaximumParallelThreshold) {
+			return Reject(PhysicsSettingsValidationCode::InvalidParallelThreshold,
+				"Physics parallel thresholds must remain between 1 and 1,000,000 work items.");
+		}
+		if(aggregateDiagnosticsIntervalFrames == 0U
+			|| aggregateDiagnosticsIntervalFrames > kPhysicsMaximumDiagnosticsIntervalFrames) {
+			return Reject(PhysicsSettingsValidationCode::InvalidDiagnosticsInterval,
+				"Aggregate physics diagnostics must publish every 1 to 600 frames.");
+		}
 
 		return PhysicsSettingsValidationResult{true, PhysicsSettingsValidationCode::None, {}, kPhysicsCollisionLayerCount};
 	}
@@ -142,6 +161,9 @@ namespace TerraEngine::Physics {
 		case PhysicsSettingsValidationCode::InvalidQueryLimit: return "InvalidQueryLimit";
 		case PhysicsSettingsValidationCode::InvalidHistoryLimit: return "InvalidHistoryLimit";
 		case PhysicsSettingsValidationCode::InvalidDebugLimit: return "InvalidDebugLimit";
+		case PhysicsSettingsValidationCode::InvalidPublicationBatchSize: return "InvalidPublicationBatchSize";
+		case PhysicsSettingsValidationCode::InvalidParallelThreshold: return "InvalidParallelThreshold";
+		case PhysicsSettingsValidationCode::InvalidDiagnosticsInterval: return "InvalidDiagnosticsInterval";
 		}
 		return "Unknown";
 	}

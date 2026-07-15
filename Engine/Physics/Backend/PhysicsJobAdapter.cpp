@@ -4,7 +4,10 @@
 
 #include <algorithm>
 #include <chrono>
+#include <future>
+#include <limits>
 #include <stdexcept>
+#include <vector>
 
 namespace TerraEngine::Physics::Backend {
 	PhysicsJobAdapter::PhysicsJobAdapter(ThreadPool& sharedPool, PhysicsJobAdapterConfig configuration)
@@ -150,6 +153,78 @@ namespace TerraEngine::Physics::Backend {
 			diagnostics.observedWorkerThreads = static_cast<std::uint32_t>(workerThreadIds.size());
 		}
 		return diagnostics;
+	}
+
+	PhysicsIndependentRangeExecution PhysicsJobAdapter::ExecuteIndependentRanges(
+		std::size_t itemCount,
+		std::size_t batchSize,
+		std::size_t parallelThreshold,
+		bool providerAdvertisesSafeReads,
+		const std::function<void(std::size_t, std::size_t)>& work) const {
+		PhysicsIndependentRangeExecution execution;
+		if(itemCount == 0U) return execution;
+		if(batchSize == 0U || !work) {
+			execution.succeeded = false;
+			return execution;
+		}
+
+		const std::size_t rangeCount = (itemCount + batchSize - 1U) / batchSize;
+		execution.rangeCount = static_cast<std::uint32_t>(std::min<std::size_t>(
+			rangeCount, std::numeric_limits<std::uint32_t>::max()));
+		const bool canRunParallel = providerAdvertisesSafeReads
+			&& itemCount >= parallelThreshold
+			&& rangeCount > 1U
+			&& sharedPool.getThreadCount() > 1U;
+		if(!canRunParallel) {
+			execution.serialFallback = rangeCount > 1U;
+			try {
+				for(std::size_t rangeIndex = 0U; rangeIndex < rangeCount; ++rangeIndex) {
+					const std::size_t begin = rangeIndex * batchSize;
+					work(begin, std::min(begin + batchSize, itemCount));
+				}
+			} catch(...) {
+				execution.succeeded = false;
+			}
+			return execution;
+		}
+
+		execution.parallel = true;
+		std::atomic<std::size_t> nextRange{0U};
+		std::atomic<bool> failed{false};
+		auto consumeRanges = [&]() {
+			for(;;) {
+				const std::size_t rangeIndex = nextRange.fetch_add(1U, std::memory_order_relaxed);
+				if(rangeIndex >= rangeCount) return;
+				const std::size_t begin = rangeIndex * batchSize;
+				try {
+					work(begin, std::min(begin + batchSize, itemCount));
+				} catch(...) {
+					// Every lane keeps draining its deterministic assignments. The caller
+					// receives one failure bit after all tasks have joined, so no task can
+					// outlive provider records captured by the extraction call.
+					failed.store(true, std::memory_order_release);
+				}
+			}
+		};
+
+		const std::size_t laneCount = std::min(rangeCount, sharedPool.getThreadCount());
+		std::vector<std::future<void>> futures;
+		futures.reserve(laneCount - 1U);
+		for(std::size_t lane = 1U; lane < laneCount; ++lane) {
+			auto task = sharedPool.createTask(consumeRanges);
+			futures.push_back(task->getFuture());
+			sharedPool.enqueue(std::move(task));
+		}
+		consumeRanges();
+		for(std::future<void>& future : futures) {
+			try {
+				future.get();
+			} catch(...) {
+				failed.store(true, std::memory_order_release);
+			}
+		}
+		execution.succeeded = !failed.load(std::memory_order_acquire);
+		return execution;
 	}
 
 	void PhysicsJobAdapter::QueueJob(Job* job) {

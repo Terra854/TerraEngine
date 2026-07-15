@@ -54,7 +54,8 @@ enum class ScriptBuildReason
 {
 	ProjectOpen,
 	FileChange,
-	ManualRefresh
+	ManualRefresh,
+	ExplicitRebuild
 };
 
 // struct ScriptCompilationStatus groups related state and operations so callers have one documented contract.
@@ -65,6 +66,12 @@ struct ScriptCompilationStatus
 	ScriptCoordinatorState state = ScriptCoordinatorState::Idle;
 	ScriptBuildProfile activeProfile = ScriptBuildProfile::Release;
 	bool gameplayAssemblyLoaded = false;
+	// A warm hit loads a manifest-validated output without invoking dotnet.
+	// Forced builds are kept visible so automation can prove an explicit request
+	// was honored even when all inputs were otherwise unchanged.
+	bool reusedReadyOutput = false;
+	bool forcedBuild = false;
+	ManagedReadinessValidation readinessValidation = ManagedReadinessValidation::Missing;
 	bool queuedBuild = false;
 	bool cancellationRequested = false;
 	double progress = 0.0;
@@ -126,6 +133,7 @@ private:
 
 	void PrepareForBuild();
 	void RestorePausedGameplayState();
+	bool TryLoadManagedReadiness(std::string* outError);
 	bool TryReloadWorkspaceAssembly(std::string* outError);
 	void SynchronizeBoundScriptTypesFromAssets();
 	void PublishAttachableScriptTypes();

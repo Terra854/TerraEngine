@@ -6,6 +6,8 @@
 
 #include "Scene/SpatialIndex.h"
 
+#include "Core/Scheduling/WorkerSafety.h"
+
 #include <algorithm>
 
 namespace TerraEngine::Scene
@@ -46,9 +48,47 @@ namespace TerraEngine::Scene
 		}
 	}
 
+	SpatialIndex::SpatialIndex() = default;
+
+	SpatialIndex::SpatialIndex(bool createPartitionLeaf)
+		: partitionLeaf(createPartitionLeaf)
+	{
+	}
+
+	SpatialIndex::~SpatialIndex() = default;
+
+	void SpatialIndex::EnsurePartitions()
+	{
+		if (partitionLeaf)
+		{
+			return;
+		}
+		if (!staticPartition)
+		{
+			staticPartition = std::unique_ptr<SpatialIndex>(new SpatialIndex(true));
+		}
+		if (!movablePartition)
+		{
+			movablePartition = std::unique_ptr<SpatialIndex>(new SpatialIndex(true));
+		}
+	}
+
 	// SpatialIndex::Clear is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void SpatialIndex::Clear()
 	{
+		if (!partitionLeaf)
+		{
+			staticPartition.reset();
+			movablePartition.reset();
+			staticPartitionRevision = 0u;
+			movablePartitionRevision = 0u;
+			lastBoundsPublicationGeneration = 0u;
+			boundsSceneGeneration = 0u;
+			lastBoundsPublicationOrder.clear();
+			diagnostics = {};
+			hasBuiltIndex = false;
+			return;
+		}
 		nodes.clear();
 		recordsById.clear();
 		nodeByObjectId.clear();
@@ -61,6 +101,28 @@ namespace TerraEngine::Scene
 	// SpatialIndex::Rebuild is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void SpatialIndex::Rebuild(const std::vector<SpatialObjectRecord>& records)
 	{
+		if (!partitionLeaf)
+		{
+			const auto start = std::chrono::steady_clock::now();
+			EnsurePartitions();
+			std::vector<SpatialObjectRecord> staticRecords;
+			std::vector<SpatialObjectRecord> movableRecords;
+			staticRecords.reserve(records.size());
+			movableRecords.reserve(records.size());
+			for (const SpatialObjectRecord& record : records)
+			{
+				(record.isStatic ? staticRecords : movableRecords).push_back(record);
+			}
+			staticPartition->Rebuild(staticRecords);
+			movablePartition->Rebuild(movableRecords);
+			++staticPartitionRevision;
+			++movablePartitionRevision;
+			hasBuiltIndex = true;
+			RefreshAggregateDiagnostics(SpatialRefreshMode::Full);
+			const auto end = std::chrono::steady_clock::now();
+			diagnostics.lastUpdateDurationMs = std::chrono::duration<double, std::milli>(end - start).count();
+			return;
+		}
 		const auto start = std::chrono::steady_clock::now();
 		Clear();
 		hasBuiltIndex = true;
@@ -124,6 +186,45 @@ namespace TerraEngine::Scene
 	// SpatialIndex::Refresh is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void SpatialIndex::Refresh(const std::vector<SpatialObjectRecord>& records, bool forceFullRefresh)
 	{
+		if (!partitionLeaf)
+		{
+			if (forceFullRefresh || !hasBuiltIndex)
+			{
+				Rebuild(records);
+				return;
+			}
+			const auto start = std::chrono::steady_clock::now();
+			EnsurePartitions();
+			std::vector<SpatialObjectRecord> staticRecords;
+			std::vector<SpatialObjectRecord> movableRecords;
+			staticRecords.reserve(records.size());
+			movableRecords.reserve(records.size());
+			for (const SpatialObjectRecord& record : records)
+			{
+				(record.isStatic ? staticRecords : movableRecords).push_back(record);
+			}
+			staticPartition->Refresh(staticRecords);
+			movablePartition->Refresh(movableRecords);
+			const SpatialRefreshMode staticMode = staticPartition->diagnostics.refreshMode;
+			const SpatialRefreshMode movableMode = movablePartition->diagnostics.refreshMode;
+			if (staticMode != SpatialRefreshMode::Unchanged)
+			{
+				++staticPartitionRevision;
+			}
+			if (movableMode != SpatialRefreshMode::Unchanged)
+			{
+				++movablePartitionRevision;
+			}
+			const SpatialRefreshMode aggregateMode = (staticMode == SpatialRefreshMode::Full || movableMode == SpatialRefreshMode::Full)
+				? SpatialRefreshMode::Full
+				: ((staticMode == SpatialRefreshMode::Incremental || movableMode == SpatialRefreshMode::Incremental)
+					? SpatialRefreshMode::Incremental
+					: SpatialRefreshMode::Unchanged);
+			RefreshAggregateDiagnostics(aggregateMode);
+			const auto end = std::chrono::steady_clock::now();
+			diagnostics.lastUpdateDurationMs = std::chrono::duration<double, std::milli>(end - start).count();
+			return;
+		}
 		if (forceFullRefresh || !hasBuiltIndex)
 		{
 			Rebuild(records);
@@ -263,6 +364,20 @@ namespace TerraEngine::Scene
 	// SpatialIndex::MarkDirty is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void SpatialIndex::MarkDirty(const TerraEngine::UUID& objectId)
 	{
+		if (!partitionLeaf)
+		{
+			EnsurePartitions();
+			if (staticPartition->recordsById.contains(objectId))
+			{
+				staticPartition->MarkDirty(objectId);
+			}
+			else if (movablePartition->recordsById.contains(objectId))
+			{
+				movablePartition->MarkDirty(objectId);
+			}
+			diagnostics.dirtyObjectCount = staticPartition->diagnostics.dirtyObjectCount + movablePartition->diagnostics.dirtyObjectCount;
+			return;
+		}
 		if (objectId != TerraEngine::EMPTY_UUID)
 		{
 			dirtyObjectIds.insert(objectId);
@@ -272,6 +387,17 @@ namespace TerraEngine::Scene
 
 	void SpatialIndex::InvalidateForHierarchySnapshotRebuild(std::uint64_t hierarchyRevision)
 	{
+		if (!partitionLeaf)
+		{
+			if (hierarchyRevision == 0 || hierarchyRevision == lastHierarchySnapshotRevision)
+			{
+				return;
+			}
+			lastHierarchySnapshotRevision = hierarchyRevision;
+			hasBuiltIndex = false;
+			++diagnostics.revisionMismatchFallbackCount;
+			return;
+		}
 		if (hierarchyRevision == 0 || hierarchyRevision == lastHierarchySnapshotRevision)
 		{
 			return;
@@ -284,6 +410,159 @@ namespace TerraEngine::Scene
 		// rebuild from the complete snapshot so spatial consumers never query a
 		// stale tree after transform ordering changes.
 		++diagnostics.revisionMismatchFallbackCount;
+	}
+
+	bool SpatialIndex::RebuildCompleteSceneSnapshot(const std::vector<SpatialObjectRecord>& records, std::uint64_t sceneGeneration)
+	{
+		if (partitionLeaf || sceneGeneration == 0U)
+		{
+			return false;
+		}
+		// Validate identities before clearing the previous index.  Duplicate or
+		// empty ids would otherwise turn a bad prepared packet into a partial
+		// visible broadphase snapshot.
+		std::unordered_set<TerraEngine::UUID> seen;
+		seen.reserve(records.size());
+		for (const SpatialObjectRecord& record : records)
+		{
+			if (record.objectId == TerraEngine::EMPTY_UUID || !seen.insert(record.objectId).second)
+			{
+				return false;
+			}
+		}
+		Rebuild(records);
+		boundsSceneGeneration = sceneGeneration;
+		lastBoundsPublicationGeneration = sceneGeneration;
+		return true;
+	}
+
+	bool SpatialIndex::ApplyBoundsPublicationBatch(const SpatialBoundsPublicationBatch& batch)
+	{
+		if (TerraEngine::Scheduling::IsWorkerSafetyScopeActive())
+		{
+			TerraEngine::Scheduling::ReportWorkerSafetyViolation(
+				TerraEngine::Scheduling::WorkerSafetySeverity::Error,
+				"SpatialIndex.ApplyBoundsPublicationBatch",
+				"Worker code attempted to publish changed bounds directly.",
+				"Prepare the value-only batch on workers and apply it at a protected scheduler boundary.");
+			return false;
+		}
+		if (partitionLeaf || batch.sceneGeneration == 0u || batch.publicationGeneration == 0u
+			|| batch.publicationGeneration <= lastBoundsPublicationGeneration
+			|| (boundsSceneGeneration != 0u && boundsSceneGeneration != batch.sceneGeneration))
+		{
+			return false;
+		}
+		EnsurePartitions();
+
+		std::vector<SpatialBoundsPublicationChange> changes = batch.changes;
+		std::sort(changes.begin(), changes.end(), [](const SpatialBoundsPublicationChange& left, const SpatialBoundsPublicationChange& right) {
+			return UuidLess(left.record.objectId, right.record.objectId);
+		});
+		for (std::size_t index = 0; index < changes.size(); ++index)
+		{
+			const SpatialBoundsPublicationChange& change = changes[index];
+			if (change.record.objectId == TerraEngine::EMPTY_UUID
+				|| (index > 0u && changes[index - 1u].record.objectId == change.record.objectId))
+			{
+				return false;
+			}
+			const bool inStatic = staticPartition->recordsById.contains(change.record.objectId);
+			const bool inMovable = movablePartition->recordsById.contains(change.record.objectId);
+			if ((change.kind == SpatialBoundsChangeKind::Add && (inStatic || inMovable))
+				|| (change.kind != SpatialBoundsChangeKind::Add && !inStatic && !inMovable))
+			{
+				return false;
+			}
+		}
+
+		// Preflight completed without touching live storage. The following value
+		// maps are the full candidate state for each independently published tree.
+		auto staticRecordsById = staticPartition->recordsById;
+		auto movableRecordsById = movablePartition->recordsById;
+		bool touchesStatic = false;
+		bool touchesMovable = false;
+		for (const SpatialBoundsPublicationChange& change : changes)
+		{
+			const TerraEngine::UUID& objectId = change.record.objectId;
+			if (auto existing = staticRecordsById.find(objectId); existing != staticRecordsById.end())
+			{
+				staticRecordsById.erase(existing);
+				touchesStatic = true;
+			}
+			if (auto existing = movableRecordsById.find(objectId); existing != movableRecordsById.end())
+			{
+				movableRecordsById.erase(existing);
+				touchesMovable = true;
+			}
+			if (change.kind != SpatialBoundsChangeKind::Remove)
+			{
+				if (change.record.isStatic)
+				{
+					staticRecordsById[objectId] = change.record;
+					touchesStatic = true;
+				}
+				else
+				{
+					movableRecordsById[objectId] = change.record;
+					touchesMovable = true;
+				}
+			}
+		}
+
+		const auto makeSortedRecords = [](const auto& recordsById) {
+			std::vector<SpatialObjectRecord> records;
+			records.reserve(recordsById.size());
+			for (const auto& [objectId, record] : recordsById)
+			{
+				(void)objectId;
+				records.push_back(record);
+			}
+			std::sort(records.begin(), records.end(), [](const SpatialObjectRecord& left, const SpatialObjectRecord& right) {
+				return UuidLess(left.objectId, right.objectId);
+			});
+			return records;
+		};
+
+		if (touchesStatic)
+		{
+			staticPartition->Refresh(makeSortedRecords(staticRecordsById));
+			++staticPartitionRevision;
+		}
+		if (touchesMovable)
+		{
+			movablePartition->Refresh(makeSortedRecords(movableRecordsById));
+			++movablePartitionRevision;
+		}
+		lastBoundsPublicationGeneration = batch.publicationGeneration;
+		boundsSceneGeneration = batch.sceneGeneration;
+		hasBuiltIndex = true;
+		lastBoundsPublicationOrder.clear();
+		lastBoundsPublicationOrder.reserve(changes.size());
+		for (const SpatialBoundsPublicationChange& change : changes)
+		{
+			lastBoundsPublicationOrder.push_back(change.record.objectId);
+		}
+		const bool full = (touchesStatic && staticPartition->diagnostics.refreshMode == SpatialRefreshMode::Full)
+			|| (touchesMovable && movablePartition->diagnostics.refreshMode == SpatialRefreshMode::Full);
+		RefreshAggregateDiagnostics(full ? SpatialRefreshMode::Full : SpatialRefreshMode::Incremental);
+		return true;
+	}
+
+	SpatialPartitionRevisionSnapshot SpatialIndex::GetPartitionRevisionSnapshot() const
+	{
+		SpatialPartitionRevisionSnapshot snapshot;
+		snapshot.staticRevision = staticPartitionRevision;
+		snapshot.movableRevision = movablePartitionRevision;
+		snapshot.publicationGeneration = lastBoundsPublicationGeneration;
+		snapshot.staticRecordCount = staticPartition ? staticPartition->recordsById.size() : 0u;
+		snapshot.movableRecordCount = movablePartition ? movablePartition->recordsById.size() : 0u;
+		return snapshot;
+	}
+
+	std::vector<TerraEngine::UUID> SpatialIndex::GetLastBoundsPublicationOrder() const
+	{
+		return lastBoundsPublicationOrder;
 	}
 
 	// SpatialIndex::QueryAABB is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -503,6 +782,42 @@ namespace TerraEngine::Scene
 		}
 	}
 
+	void SpatialIndex::RefreshAggregateDiagnostics(SpatialRefreshMode requestedMode)
+	{
+		if (partitionLeaf || !staticPartition || !movablePartition)
+		{
+			return;
+		}
+		const SpatialDiagnosticsSnapshot& statics = staticPartition->diagnostics;
+		const SpatialDiagnosticsSnapshot& movables = movablePartition->diagnostics;
+		SpatialDiagnosticsSnapshot aggregate;
+		aggregate.indexedObjectCount = statics.indexedObjectCount + movables.indexedObjectCount;
+		aggregate.staticObjectCount = statics.indexedObjectCount;
+		aggregate.dynamicObjectCount = movables.indexedObjectCount;
+		aggregate.dirtyObjectCount = statics.dirtyObjectCount + movables.dirtyObjectCount;
+		aggregate.transformDirtyRootCount = statics.transformDirtyRootCount + movables.transformDirtyRootCount;
+		aggregate.transformExpandedObjectCount = statics.transformExpandedObjectCount + movables.transformExpandedObjectCount;
+		aggregate.transformProcessedObjectCount = statics.transformProcessedObjectCount + movables.transformProcessedObjectCount;
+		aggregate.transformSkippedCleanObjectCount = statics.transformSkippedCleanObjectCount + movables.transformSkippedCleanObjectCount;
+		aggregate.transformHierarchyLevelCount = std::max(statics.transformHierarchyLevelCount, movables.transformHierarchyLevelCount);
+		aggregate.boundsRecomputedObjectCount = statics.boundsRecomputedObjectCount + movables.boundsRecomputedObjectCount;
+		aggregate.invalidTransformObjectCount = statics.invalidTransformObjectCount + movables.invalidTransformObjectCount;
+		aggregate.invalidBoundsObjectCount = statics.invalidBoundsObjectCount + movables.invalidBoundsObjectCount;
+		aggregate.addedObjectCount = statics.addedObjectCount + movables.addedObjectCount;
+		aggregate.updatedObjectCount = statics.updatedObjectCount + movables.updatedObjectCount;
+		aggregate.removedObjectCount = statics.removedObjectCount + movables.removedObjectCount;
+		aggregate.unchangedObjectCount = statics.unchangedObjectCount + movables.unchangedObjectCount;
+		aggregate.fullRefreshObjectCount = statics.fullRefreshObjectCount + movables.fullRefreshObjectCount;
+		aggregate.incrementalRefreshCount = requestedMode == SpatialRefreshMode::Incremental ? 1u : 0u;
+		aggregate.fullRefreshCount = requestedMode == SpatialRefreshMode::Full ? 1u : 0u;
+		aggregate.revisionMismatchFallbackCount = statics.revisionMismatchFallbackCount + movables.revisionMismatchFallbackCount;
+		aggregate.fallbackObjectCount = statics.fallbackObjectCount + movables.fallbackObjectCount;
+		aggregate.largeObjectCount = statics.largeObjectCount + movables.largeObjectCount;
+		aggregate.maxNodeDepth = std::max(statics.maxNodeDepth, movables.maxNodeDepth);
+		aggregate.refreshMode = requestedMode;
+		diagnostics = aggregate;
+	}
+
 	// SpatialIndex::ResetRefreshCounters is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void SpatialIndex::ResetRefreshCounters(SpatialRefreshMode mode)
 	{
@@ -671,6 +986,50 @@ namespace TerraEngine::Scene
 	{
 		const auto start = std::chrono::steady_clock::now();
 		std::unordered_set<TerraEngine::UUID> seen;
+		if (!partitionLeaf)
+		{
+			SpatialQueryFilter unboundedFilter = filter;
+			unboundedFilter.maxResults = 0u;
+			const auto appendPartition = [&](const std::unique_ptr<SpatialIndex>& partition) {
+				if (!partition)
+				{
+					return;
+				}
+				if (!partition->nodes.empty())
+				{
+					partition->QueryNode(0, shape, unboundedFilter, result, seen);
+				}
+				for (const TerraEngine::UUID& objectId : partition->fallbackObjectIds)
+				{
+					if (!seen.insert(objectId).second)
+					{
+						continue;
+					}
+					partition->AppendHit(result, partition->recordsById.at(objectId), 0.0f, unboundedFilter);
+				}
+			};
+			appendPartition(staticPartition);
+			appendPartition(movablePartition);
+			std::sort(result.hits.begin(), result.hits.end(), [&](const SpatialQueryHit& left, const SpatialQueryHit& right) {
+				if (filter.sortMode == SpatialSortMode::DistanceAscending && left.distance != right.distance)
+				{
+					return left.distance < right.distance;
+				}
+				return UuidLess(left.objectId, right.objectId);
+			});
+			if (filter.maxResults != 0u && result.hits.size() > filter.maxResults)
+			{
+				result.rejectedCount += static_cast<std::uint32_t>(result.hits.size() - filter.maxResults);
+				result.hits.resize(filter.maxResults);
+			}
+			const auto end = std::chrono::steady_clock::now();
+			std::scoped_lock lock(diagnosticsMutex);
+			diagnostics.visibleCandidateCount = static_cast<std::uint32_t>(result.hits.size());
+			diagnostics.rejectedObjectCount = result.rejectedCount;
+			diagnostics.fallbackObjectCount = result.fallbackCount;
+			diagnostics.lastQueryDurationMs = std::chrono::duration<double, std::milli>(end - start).count();
+			return;
+		}
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!nodes.empty())
 		{
@@ -707,5 +1066,120 @@ namespace TerraEngine::Scene
 			diagnostics.fallbackObjectCount = result.fallbackCount;
 			diagnostics.lastQueryDurationMs = std::chrono::duration<double, std::milli>(end - start).count();
 		}
+	}
+
+	bool EditorSelectableSpatialSnapshot::IsValid() const
+	{
+		return generation != 0u && index != nullptr;
+	}
+
+	std::uint64_t EditorSelectableSpatialSnapshot::Generation() const
+	{
+		return generation;
+	}
+
+	std::size_t EditorSelectableSpatialSnapshot::RecordCount() const
+	{
+		return recordCount;
+	}
+
+	SpatialQueryResult EditorSelectableSpatialSnapshot::QueryAABB(const SpatialAABB& area, const SpatialQueryFilter& filter) const
+	{
+		if (!index)
+		{
+			SpatialQueryResult result{};
+			result.validInput = false;
+			return result;
+		}
+		return index->QueryAABB(area, filter);
+	}
+
+	SpatialQueryResult EditorSelectableSpatialSnapshot::QuerySphere(const SpatialSphere& sphere, const SpatialQueryFilter& filter) const
+	{
+		if (!index)
+		{
+			SpatialQueryResult result{};
+			result.validInput = false;
+			return result;
+		}
+		return index->QuerySphere(sphere, filter);
+	}
+
+	SpatialQueryResult EditorSelectableSpatialSnapshot::QueryFrustum(const SpatialFrustum& frustum, const SpatialQueryFilter& filter) const
+	{
+		if (!index)
+		{
+			SpatialQueryResult result{};
+			result.validInput = false;
+			return result;
+		}
+		return index->QueryFrustum(frustum, filter);
+	}
+
+	SpatialQueryResult EditorSelectableSpatialSnapshot::QueryRay(const SpatialRay& ray, const SpatialQueryFilter& filter) const
+	{
+		if (!index)
+		{
+			SpatialQueryResult result{};
+			result.validInput = false;
+			return result;
+		}
+		return index->QueryRay(ray, filter);
+	}
+
+	bool EditorSelectableSpatialSnapshotPublisher::Publish(std::vector<SpatialObjectRecord> records, std::uint64_t generation)
+	{
+		if (generation == 0u)
+		{
+			return false;
+		}
+		{
+			std::scoped_lock lock(publishMutex);
+			if (latest && generation <= latest->Generation())
+			{
+				// Reject an already-stale generation before doing any index build work.
+				return false;
+			}
+		}
+
+		// Only explicitly editor-selectable records enter this snapshot. A record
+		// does not need to be renderable, which is the key distinction from the
+		// renderer-owned visibility index.
+		records.erase(std::remove_if(records.begin(), records.end(), [](const SpatialObjectRecord& record) {
+			return record.objectId == TerraEngine::EMPTY_UUID
+				|| (record.categoryMask & SpatialCategoryEditorSelectable) == 0u;
+		}), records.end());
+
+		std::sort(records.begin(), records.end(), [](const SpatialObjectRecord& left, const SpatialObjectRecord& right) {
+			return UuidLess(left.objectId, right.objectId);
+		});
+		const auto duplicate = std::adjacent_find(records.begin(), records.end(), [](const SpatialObjectRecord& left, const SpatialObjectRecord& right) {
+			return left.objectId == right.objectId;
+		});
+		if (duplicate != records.end())
+		{
+			return false;
+		}
+
+		auto preparedIndex = std::make_shared<SpatialIndex>();
+		preparedIndex->Rebuild(records);
+		auto preparedSnapshot = std::make_shared<EditorSelectableSpatialSnapshot>();
+		preparedSnapshot->generation = generation;
+		preparedSnapshot->recordCount = records.size();
+		preparedSnapshot->index = std::move(preparedIndex);
+
+		std::scoped_lock lock(publishMutex);
+		if (latest && generation <= latest->Generation())
+		{
+			return false;
+		}
+		latest = std::move(preparedSnapshot);
+		return true;
+	}
+
+	std::shared_ptr<const EditorSelectableSpatialSnapshot> EditorSelectableSpatialSnapshotPublisher::Latest() const
+	{
+		std::scoped_lock lock(publishMutex);
+		return latest;
 	}
 }

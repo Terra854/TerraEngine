@@ -7,7 +7,9 @@
 #include "ThreadPool/ThreadPool.h"
 
 #include <algorithm>
+#include <limits>
 #include <map>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <tuple>
@@ -16,6 +18,15 @@
 
 namespace TerraEngine::Scheduling {
 	namespace {
+		std::mutex g_ProfilingExecutionRecordsMutex;
+		std::vector<TerraEngine::Profiling::WorkloadExecutionRecord> g_ProfilingExecutionRecords;
+
+		void PublishExecutionRecordsForProfiling(const FrameExecutionPlan& plan)
+		{
+			std::lock_guard<std::mutex> lock(g_ProfilingExecutionRecordsMutex);
+			g_ProfilingExecutionRecords = plan.executionRecords;
+		}
+
 		int SeverityRank(ArchitectureDiagnosticSeverity severity)
 		{
 			switch (severity)
@@ -90,6 +101,17 @@ namespace TerraEngine::Scheduling {
 
 		FrameWorkloadExecutionPolicy SelectPolicy(const FrameWorkloadDeclaration& declaration, std::vector<ArchitectureDiagnostic>& diagnostics)
 		{
+			if (!declaration.active)
+			{
+				AddArchitectureDiagnostic(diagnostics, ArchitectureDiagnosticSeverity::Info, ArchitectureDiagnosticCode::InactiveWorkloadOmitted, declaration.workloadName, declaration.activationPredicateKey, "Inactive workload descriptor was omitted before graph construction.", "No action is required unless the activation predicate should have selected this workload.");
+				return FrameWorkloadExecutionPolicy::Omitted;
+			}
+			if (!declaration.ready)
+			{
+				const std::string reason = declaration.readinessReason.empty() ? "required immutable input is not ready" : declaration.readinessReason;
+				AddArchitectureDiagnostic(diagnostics, ArchitectureDiagnosticSeverity::Info, ArchitectureDiagnosticCode::WorkloadNotReady, declaration.workloadName, "", "Workload descriptor was omitted because " + reason + ".", "Publish the required immutable input before activating the workload.");
+				return FrameWorkloadExecutionPolicy::Omitted;
+			}
 			if (declaration.workerEligible && declaration.reads.empty() && declaration.writes.empty())
 			{
 				AddArchitectureDiagnostic(diagnostics, ArchitectureDiagnosticSeverity::Error, ArchitectureDiagnosticCode::MissingWorkerAccess, declaration.workloadName, "", "Worker-safe workload has no declared reads or writes.", "Declare all accessed resources or keep the workload protected.");
@@ -176,6 +198,9 @@ namespace TerraEngine::Scheduling {
 				case FrameWorkloadExecutionPolicy::Inline:
 					summary.protectedCategories.push_back(result.declaration.ownerSystem + ":" + result.declaration.workloadName + ":inline");
 					break;
+				case FrameWorkloadExecutionPolicy::Omitted:
+					++summary.omittedCount;
+					break;
 				case FrameWorkloadExecutionPolicy::Rejected:
 					++summary.rejectedCount;
 					summary.rejectedCategories.push_back(result.declaration.ownerSystem + ":" + result.declaration.workloadName);
@@ -235,17 +260,150 @@ namespace TerraEngine::Scheduling {
 			plan.migrationSummary = std::move(summary);
 		}
 
-		void ApplyJobGraphSummary(FrameExecutionPlan& plan, const JobGraphSummary& summary)
+		struct ScheduledPartition
+		{
+			std::size_t resultIndex = 0u;
+			FrameWorkloadPartition partition;
+			std::string jobName;
+		};
+
+		TerraEngine::Profiling::WorkloadExecutionPath ToTelemetryPath(FrameWorkloadExecutionPolicy policy)
+		{
+			switch (policy)
+			{
+			case FrameWorkloadExecutionPolicy::Inline:
+				return TerraEngine::Profiling::WorkloadExecutionPath::Inline;
+			case FrameWorkloadExecutionPolicy::WorkerSafe:
+				return TerraEngine::Profiling::WorkloadExecutionPath::Worker;
+			case FrameWorkloadExecutionPolicy::Protected:
+				return TerraEngine::Profiling::WorkloadExecutionPath::Protected;
+			case FrameWorkloadExecutionPolicy::Rejected:
+				return TerraEngine::Profiling::WorkloadExecutionPath::Rejected;
+			case FrameWorkloadExecutionPolicy::Omitted:
+			default:
+				return TerraEngine::Profiling::WorkloadExecutionPath::None;
+			}
+		}
+
+		TerraEngine::Profiling::WorkloadExecutionStatus ToTelemetryStatus(const FrameWorkloadResult& result, bool completed)
+		{
+			if (result.executionPolicy == FrameWorkloadExecutionPolicy::Rejected)
+			{
+				return TerraEngine::Profiling::WorkloadExecutionStatus::Rejected;
+			}
+			if (result.executionPolicy == FrameWorkloadExecutionPolicy::Omitted)
+			{
+				return result.declaration.active
+					? TerraEngine::Profiling::WorkloadExecutionStatus::NotReady
+					: TerraEngine::Profiling::WorkloadExecutionStatus::Inactive;
+			}
+			if (completed)
+			{
+				return TerraEngine::Profiling::WorkloadExecutionStatus::Completed;
+			}
+			return TerraEngine::Profiling::WorkloadExecutionStatus::Cancelled;
+		}
+
+		void AppendExecutionRecord(
+			FrameExecutionPlan& plan,
+			const FrameWorkloadResult& result,
+			const FrameWorkloadPartition& partition,
+			const JobGraphResultEntry* entry,
+			bool completed)
+		{
+			if (plan.executionRecords.size() >= TerraEngine::Profiling::kMaximumWorkloadExecutionRecordsPerFrame)
+			{
+				++plan.droppedExecutionRecordCount;
+				return;
+			}
+
+			// This record intentionally copies only decision evidence. In particular it
+			// never retains the descriptor's callbacks or per-frame snapshot inputs.
+			TerraEngine::Profiling::WorkloadExecutionRecord record;
+			const TerraEngine::Profiling::TelemetryDuration unavailableDuration{
+				TerraEngine::Profiling::TelemetryAvailability::Unavailable,
+				0u,
+				"The workload path did not measure this duration."
+			};
+			record.frameId = plan.frameId;
+			record.descriptorId = result.declaration.stableDescriptorId;
+			record.descriptorGeneration = result.declaration.stableDescriptorGeneration;
+			record.ownerSystem = result.declaration.ownerSystem;
+			record.phase = result.declaration.phase;
+			record.workloadName = result.declaration.workloadName;
+			record.activationPredicateKey = result.declaration.activationPredicateKey;
+			record.active = result.declaration.active;
+			record.ready = result.declaration.ready;
+			record.selectedPath = ToTelemetryPath(result.executionPolicy);
+			record.status = ToTelemetryStatus(result, completed);
+			record.partitionIndex = partition.partitionIndex;
+			record.partitionCount = partition.partitionCount;
+			record.itemBegin = partition.itemBegin;
+			record.itemEnd = partition.itemEnd;
+			record.sameFrameVisibilityRequired = result.declaration.sameFrameVisibilityRequired;
+			record.queueDuration = unavailableDuration;
+			record.runDuration = unavailableDuration;
+			record.coordinatorWaitDuration = unavailableDuration;
+			record.ownershipWaitDuration = unavailableDuration;
+			record.flushDuration = unavailableDuration;
+			record.publicationDuration = unavailableDuration;
+			if (entry != nullptr)
+			{
+				record.dispatchCount = entry->dispatchCount;
+				record.usefulWorkItemCount = entry->usefulWorkItemCount;
+				record.queueDuration.availability = TerraEngine::Profiling::TelemetryAvailability::Available;
+				record.queueDuration.nanoseconds = entry->queueDurationNs;
+				record.queueDuration.unavailableReason.clear();
+				record.runDuration.availability = TerraEngine::Profiling::TelemetryAvailability::Available;
+				record.runDuration.nanoseconds = entry->runDurationNs;
+				record.runDuration.unavailableReason.clear();
+				record.coordinatorWaitDuration.availability = TerraEngine::Profiling::TelemetryAvailability::Available;
+				record.coordinatorWaitDuration.nanoseconds = entry->coordinatorWaitDurationNs;
+				record.coordinatorWaitDuration.unavailableReason.clear();
+			}
+			plan.executionRecords.push_back(std::move(record));
+		}
+
+		void ApplyJobGraphSummary(FrameExecutionPlan& plan, const JobGraphSummary& summary, const std::vector<ScheduledPartition>& scheduledPartitions)
 		{
 			std::unordered_map<std::string, JobGraphNodeState> statesByName;
+			std::unordered_map<std::string, const JobGraphResultEntry*> entriesByName;
 			for (const JobGraphResultEntry& entry : summary.jobs)
 			{
 				statesByName[entry.name] = entry.state;
+				entriesByName[entry.name] = &entry;
 			}
 			for (FrameWorkloadResult& result : plan.results)
 			{
-				const auto found = statesByName.find(result.declaration.workloadName);
-				result.completed = found != statesByName.end() && found->second == JobGraphNodeState::Completed;
+				result.completed = result.executionPolicy == FrameWorkloadExecutionPolicy::Omitted;
+			}
+			std::vector<bool> hasScheduledPartition(plan.results.size(), false);
+			std::vector<bool> allScheduledPartitionsCompleted(plan.results.size(), true);
+			for (const ScheduledPartition& scheduled : scheduledPartitions)
+			{
+				FrameWorkloadResult& result = plan.results[scheduled.resultIndex];
+				const auto found = statesByName.find(scheduled.jobName);
+				const bool completed = found != statesByName.end() && found->second == JobGraphNodeState::Completed;
+				hasScheduledPartition[scheduled.resultIndex] = true;
+				allScheduledPartitionsCompleted[scheduled.resultIndex] = allScheduledPartitionsCompleted[scheduled.resultIndex] && completed;
+				const auto entry = entriesByName.find(scheduled.jobName);
+				AppendExecutionRecord(plan, result, scheduled.partition, entry == entriesByName.end() ? nullptr : entry->second, completed);
+			}
+			for (std::size_t resultIndex = 0; resultIndex < plan.results.size(); ++resultIndex)
+			{
+				if (hasScheduledPartition[resultIndex])
+				{
+					// A partitioned descriptor completes only after every deterministic
+					// range succeeds; one completed worker range is not a full publication.
+					plan.results[resultIndex].completed = allScheduledPartitionsCompleted[resultIndex];
+				}
+			}
+			for (const FrameWorkloadResult& result : plan.results)
+			{
+				if (result.executionPolicy == FrameWorkloadExecutionPolicy::Omitted || result.executionPolicy == FrameWorkloadExecutionPolicy::Rejected)
+				{
+					AppendExecutionRecord(plan, result, {}, nullptr, result.executionPolicy == FrameWorkloadExecutionPolicy::Omitted);
+				}
 			}
 			plan.completed = summary.completed && std::all_of(plan.results.begin(), plan.results.end(), [](const FrameWorkloadResult& result) {
 				return result.completed || result.executionPolicy == FrameWorkloadExecutionPolicy::Rejected;
@@ -278,12 +436,19 @@ namespace TerraEngine::Scheduling {
 			return "worker-safe";
 		case FrameWorkloadExecutionPolicy::Inline:
 			return "inline";
+		case FrameWorkloadExecutionPolicy::Omitted:
+			return "omitted";
 		case FrameWorkloadExecutionPolicy::Rejected:
 			return "rejected";
 		case FrameWorkloadExecutionPolicy::Protected:
 		default:
 			return "protected";
 		}
+	}
+
+	std::string ToString(FrameWorkloadPartitionPolicy policy)
+	{
+		return policy == FrameWorkloadPartitionPolicy::DeterministicRanges ? "deterministic-ranges" : "single";
 	}
 
 	std::string ToString(FrameWorkloadMutationPolicy policy)
@@ -393,6 +558,11 @@ namespace TerraEngine::Scheduling {
 		case ArchitectureDiagnosticCode::MutationRequiresBarrier: return "mutation-requires-barrier";
 		case ArchitectureDiagnosticCode::ExecutionFailed: return "execution-failed";
 		case ArchitectureDiagnosticCode::CompatibilityFallback: return "compatibility-fallback";
+		case ArchitectureDiagnosticCode::InactiveWorkloadOmitted: return "inactive-workload-omitted";
+		case ArchitectureDiagnosticCode::WorkloadNotReady: return "workload-not-ready";
+		case ArchitectureDiagnosticCode::DuplicateDescriptorIdentity: return "duplicate-descriptor-identity";
+		case ArchitectureDiagnosticCode::MissingExplicitDependency: return "missing-explicit-dependency";
+		case ArchitectureDiagnosticCode::ExplicitDependencyCycle: return "explicit-dependency-cycle";
 		case ArchitectureDiagnosticCode::ActiveMembershipInvalidated: return "active-membership-invalidated";
 		case ArchitectureDiagnosticCode::CompactReferenceStale: return "compact-reference-stale";
 		case ArchitectureDiagnosticCode::HierarchySnapshotBlocked: return "hierarchy-snapshot-blocked";
@@ -430,6 +600,7 @@ namespace TerraEngine::Scheduling {
 			<< " workerSafe=" << summary.workerSafeCount
 			<< " protected=" << summary.protectedCount
 			<< " inline=" << summary.inlineCount
+			<< " omitted=" << summary.omittedCount
 			<< " rejected=" << summary.rejectedCount
 			<< " fallbacks=" << summary.fallbackCount
 			<< " mutationFlushes=" << summary.mutationFlushCount
@@ -656,12 +827,48 @@ namespace TerraEngine::Scheduling {
 				<< " kind=" << ToString(result.declaration.phaseKind)
 				<< " policy=" << ToString(result.executionPolicy)
 				<< " mutation=" << ToString(result.declaration.mutationPolicy)
+				<< " descriptor=" << result.declaration.stableDescriptorId << ":" << result.declaration.stableDescriptorGeneration
+				<< " active=" << (result.declaration.active ? "true" : "false")
+				<< " ready=" << (result.declaration.ready ? "true" : "false")
+				<< " partitions=" << result.partitionCount
 				<< " completed=" << (result.completed ? "true" : "false")
 				<< "]";
 		}
 		stream << '\n' << plan.migrationSummary.formatted << '\n';
 		stream << FormatArchitectureDiagnostics(plan.diagnostics);
 		return stream.str();
+	}
+
+	std::vector<FrameWorkloadPartition> BuildDeterministicWorkloadPartitions(std::size_t itemCount, std::size_t targetItemsPerPartition, std::size_t maximumPartitionCount)
+	{
+		std::vector<FrameWorkloadPartition> partitions;
+		if (itemCount == 0)
+		{
+			return partitions;
+		}
+
+		// A zero target explicitly means one range. This makes an incompletely
+		// tuned descriptor safe without multiplying dispatch overhead.
+		const std::size_t safeTarget = targetItemsPerPartition == 0 ? itemCount : targetItemsPerPartition;
+		std::size_t partitionCount = (itemCount + safeTarget - 1u) / safeTarget;
+		if (maximumPartitionCount > 0)
+		{
+			partitionCount = std::min(partitionCount, maximumPartitionCount);
+		}
+		partitionCount = std::max<std::size_t>(1u, partitionCount);
+		partitions.reserve(partitionCount);
+		for (std::size_t index = 0; index < partitionCount; ++index)
+		{
+			// Integer-ratio boundaries distribute any remainder deterministically
+			// while covering every item exactly once without overlaps or gaps.
+			FrameWorkloadPartition partition;
+			partition.partitionIndex = index;
+			partition.partitionCount = partitionCount;
+			partition.itemBegin = (itemCount * index) / partitionCount;
+			partition.itemEnd = (itemCount * (index + 1u)) / partitionCount;
+			partitions.push_back(partition);
+		}
+		return partitions;
 	}
 
 	FrameExecutionPlan ValidateFrameWorkloads(std::vector<FrameWorkloadDeclaration> workloads, std::string frameId)
@@ -677,6 +884,17 @@ namespace TerraEngine::Scheduling {
 		{
 			declaration.reads = NormalizeList(std::move(declaration.reads));
 			declaration.writes = NormalizeList(std::move(declaration.writes));
+			declaration.explicitDependencies = NormalizeList(std::move(declaration.explicitDependencies));
+			if (declaration.stableDescriptorId.empty())
+			{
+				// Legacy system declarations receive a stable derived identity. Systems
+				// that cache descriptors can supply their own identity and generation.
+				declaration.stableDescriptorId = declaration.ownerSystem + "/" + declaration.phase + "/" + declaration.workloadName;
+			}
+			if (declaration.stableDescriptorGeneration == 0u)
+			{
+				declaration.stableDescriptorGeneration = 1u;
+			}
 			if (declaration.workloadName.empty())
 			{
 				AddArchitectureDiagnostic(plan.diagnostics, ArchitectureDiagnosticSeverity::Error, ArchitectureDiagnosticCode::EmptyWorkloadName, "", "", "Frame workload has no stable name.", "Set workloadName before validation.");
@@ -689,8 +907,134 @@ namespace TerraEngine::Scheduling {
 			result.declaration = declaration;
 			result.executionPolicy = SelectPolicy(declaration, plan.diagnostics);
 			result.fallbackUsed = result.executionPolicy == FrameWorkloadExecutionPolicy::Protected && !declaration.workerEligible;
+			result.omitted = result.executionPolicy == FrameWorkloadExecutionPolicy::Omitted;
 			plan.results.push_back(std::move(result));
 		}
+
+		std::unordered_map<std::string, std::size_t> descriptorIndex;
+		for (std::size_t index = 0; index < plan.results.size(); ++index)
+		{
+			const std::string& identity = plan.results[index].declaration.stableDescriptorId;
+			const auto [found, inserted] = descriptorIndex.emplace(identity, index);
+			if (!inserted)
+			{
+				AddArchitectureDiagnostic(plan.diagnostics, ArchitectureDiagnosticSeverity::Error, ArchitectureDiagnosticCode::DuplicateDescriptorIdentity, identity, "", "Stable workload descriptor identity is declared more than once in this frame.", "Give every cached descriptor a unique stable identity.");
+				plan.results[index].executionPolicy = FrameWorkloadExecutionPolicy::Rejected;
+				plan.results[found->second].executionPolicy = FrameWorkloadExecutionPolicy::Rejected;
+			}
+		}
+
+		// Propagate dependency readiness before graph construction. A descriptor
+		// whose prerequisite is inactive is itself omitted, so neither descriptor
+		// creates a no-op job or synchronization edge.
+		bool readinessChanged = true;
+		while (readinessChanged)
+		{
+			readinessChanged = false;
+			for (FrameWorkloadResult& result : plan.results)
+			{
+				if (result.executionPolicy == FrameWorkloadExecutionPolicy::Rejected || result.executionPolicy == FrameWorkloadExecutionPolicy::Omitted)
+				{
+					continue;
+				}
+				for (const std::string& dependencyIdentity : result.declaration.explicitDependencies)
+				{
+					const auto dependency = descriptorIndex.find(dependencyIdentity);
+					if (dependency == descriptorIndex.end())
+					{
+						AddArchitectureDiagnostic(plan.diagnostics, ArchitectureDiagnosticSeverity::Error, ArchitectureDiagnosticCode::MissingExplicitDependency, result.declaration.workloadName, dependencyIdentity, "Explicit workload dependency does not exist in this frame plan.", "Declare the stable dependency descriptor or omit the dependent workload.");
+						result.executionPolicy = FrameWorkloadExecutionPolicy::Rejected;
+						break;
+					}
+					if (plan.results[dependency->second].executionPolicy == FrameWorkloadExecutionPolicy::Omitted)
+					{
+						result.declaration.ready = false;
+						result.declaration.readinessReason = "explicit dependency '" + dependencyIdentity + "' is not active or ready";
+						result.executionPolicy = FrameWorkloadExecutionPolicy::Omitted;
+						result.omitted = true;
+						AddArchitectureDiagnostic(plan.diagnostics, ArchitectureDiagnosticSeverity::Info, ArchitectureDiagnosticCode::WorkloadNotReady, result.declaration.workloadName, dependencyIdentity, "Workload was omitted because an explicit dependency is not active or ready.", "Align dependent activation with the prerequisite or publish the prerequisite input first.");
+						readinessChanged = true;
+						break;
+					}
+				}
+			}
+		}
+
+		// Validate explicit dependency cycles independently from resource edges so
+		// a bad cached descriptor is rejected before any callback can run.
+		std::vector<std::size_t> dependencyIndegree(plan.results.size(), 0u);
+		std::vector<std::vector<std::size_t>> dependencyOutgoing(plan.results.size());
+		std::size_t dependencyNodeCount = 0u;
+		for (std::size_t index = 0; index < plan.results.size(); ++index)
+		{
+			const FrameWorkloadResult& result = plan.results[index];
+			if (result.executionPolicy == FrameWorkloadExecutionPolicy::Omitted || result.executionPolicy == FrameWorkloadExecutionPolicy::Rejected)
+			{
+				continue;
+			}
+			++dependencyNodeCount;
+			for (const std::string& dependencyIdentity : result.declaration.explicitDependencies)
+			{
+				const auto dependency = descriptorIndex.find(dependencyIdentity);
+				if (dependency == descriptorIndex.end()
+					|| plan.results[dependency->second].executionPolicy == FrameWorkloadExecutionPolicy::Omitted
+					|| plan.results[dependency->second].executionPolicy == FrameWorkloadExecutionPolicy::Rejected)
+				{
+					continue;
+				}
+				dependencyOutgoing[dependency->second].push_back(index);
+				++dependencyIndegree[index];
+			}
+		}
+		std::vector<std::size_t> dependencyReady;
+		for (std::size_t index = 0; index < dependencyIndegree.size(); ++index)
+		{
+			if (plan.results[index].executionPolicy != FrameWorkloadExecutionPolicy::Omitted
+				&& plan.results[index].executionPolicy != FrameWorkloadExecutionPolicy::Rejected
+				&& dependencyIndegree[index] == 0u)
+			{
+				dependencyReady.push_back(index);
+			}
+		}
+		std::size_t dependencyVisited = 0u;
+		while (!dependencyReady.empty())
+		{
+			const std::size_t index = dependencyReady.back();
+			dependencyReady.pop_back();
+			++dependencyVisited;
+			for (std::size_t dependent : dependencyOutgoing[index])
+			{
+				if (--dependencyIndegree[dependent] == 0u)
+				{
+					dependencyReady.push_back(dependent);
+				}
+			}
+		}
+		if (dependencyVisited != dependencyNodeCount)
+		{
+			AddArchitectureDiagnostic(plan.diagnostics, ArchitectureDiagnosticSeverity::Error, ArchitectureDiagnosticCode::ExplicitDependencyCycle, plan.frameId, "", "Explicit workload dependencies contain a cycle.", "Remove or reverse one stable descriptor dependency before executing the frame.");
+			for (std::size_t index = 0; index < dependencyIndegree.size(); ++index)
+			{
+				if (dependencyIndegree[index] > 0u)
+				{
+					plan.results[index].executionPolicy = FrameWorkloadExecutionPolicy::Rejected;
+				}
+			}
+		}
+		auto hasDependencyPath = [&dependencyOutgoing](std::size_t from, std::size_t to) {
+			std::vector<bool> visited(dependencyOutgoing.size(), false);
+			std::vector<std::size_t> pending{from};
+			while (!pending.empty())
+			{
+				const std::size_t current = pending.back();
+				pending.pop_back();
+				if (current == to) return true;
+				if (current >= visited.size() || visited[current]) continue;
+				visited[current] = true;
+				pending.insert(pending.end(), dependencyOutgoing[current].begin(), dependencyOutgoing[current].end());
+			}
+			return false;
+		};
 
 		for (std::size_t leftIndex = 0; leftIndex < plan.results.size(); ++leftIndex)
 		{
@@ -702,9 +1046,9 @@ namespace TerraEngine::Scheduling {
 				{
 					continue;
 				}
-				if (left.declaration.executionOrder != 0
-					&& right.declaration.executionOrder != 0
-					&& left.declaration.executionOrder != right.declaration.executionOrder)
+				const bool explicitlyOrdered = hasDependencyPath(leftIndex, rightIndex)
+					|| hasDependencyPath(rightIndex, leftIndex);
+				if (explicitlyOrdered)
 				{
 					continue;
 				}
@@ -745,40 +1089,108 @@ namespace TerraEngine::Scheduling {
 		}
 
 		JobGraph graph(plan.frameId, "Architecture Hardened Frame");
-		std::vector<DependencyHandle> handles;
-		handles.reserve(plan.results.size());
-		for (FrameWorkloadResult& result : plan.results)
+		std::vector<std::vector<DependencyHandle>> handlesByResult(plan.results.size());
+		std::vector<ScheduledPartition> scheduledPartitions;
+		std::unordered_map<std::string, std::size_t> resultIndexByDescriptor;
+		for (std::size_t resultIndex = 0; resultIndex < plan.results.size(); ++resultIndex)
 		{
-			JobGraphJobDeclaration job;
-			job.name = result.declaration.workloadName;
-			job.executionPolicy = result.executionPolicy == FrameWorkloadExecutionPolicy::WorkerSafe
-				? JobGraphExecutionPolicy::WorkerEligible
-				: result.executionPolicy == FrameWorkloadExecutionPolicy::Inline
-				? JobGraphExecutionPolicy::MainThread
-				: JobGraphExecutionPolicy::Protected;
-			job.cancellable = true;
-			job.requiresSuccessfulDependencies = true;
-			job.mayMutateSceneStructure = result.declaration.mutationPolicy == FrameWorkloadMutationPolicy::DeferredOnly;
-			job.profilingLabel = result.declaration.profilingLabel.empty() ? result.declaration.workloadName : result.declaration.profilingLabel;
-			job.work = result.declaration.work;
-			handles.push_back(graph.AddJob(std::move(job)));
+			resultIndexByDescriptor.emplace(plan.results[resultIndex].declaration.stableDescriptorId, resultIndex);
+			FrameWorkloadResult& result = plan.results[resultIndex];
+			if (result.executionPolicy == FrameWorkloadExecutionPolicy::Omitted || result.executionPolicy == FrameWorkloadExecutionPolicy::Rejected)
+			{
+				// Omitted descriptors deliberately produce no graph node, task, or edge.
+				continue;
+			}
+
+			std::vector<FrameWorkloadPartition> partitions;
+			if (result.executionPolicy == FrameWorkloadExecutionPolicy::WorkerSafe
+				&& result.declaration.partitionPolicy == FrameWorkloadPartitionPolicy::DeterministicRanges
+				&& result.declaration.estimatedWorkItemCount > 0u
+				&& result.declaration.rangeWork)
+			{
+				partitions = BuildDeterministicWorkloadPartitions(
+					result.declaration.estimatedWorkItemCount,
+					result.declaration.partitionWorkItemCount,
+					result.declaration.maximumPartitionCount);
+			}
+			if (partitions.empty())
+			{
+				// A callback without a range contract executes once. This avoids silently
+				// replaying legacy whole-workload callbacks for every partition.
+				partitions.push_back({ 0u, 1u, 0u, result.declaration.estimatedWorkItemCount });
+			}
+			result.partitionCount = partitions.size();
+			for (const FrameWorkloadPartition& partition : partitions)
+			{
+				JobGraphJobDeclaration job;
+				job.name = result.declaration.stableDescriptorId + "#" + std::to_string(partition.partitionIndex);
+				job.executionPolicy = result.executionPolicy == FrameWorkloadExecutionPolicy::WorkerSafe
+					? JobGraphExecutionPolicy::WorkerEligible
+					: result.executionPolicy == FrameWorkloadExecutionPolicy::Inline
+					? JobGraphExecutionPolicy::MainThread
+					: JobGraphExecutionPolicy::Protected;
+				job.cancellable = true;
+				job.requiresSuccessfulDependencies = true;
+				job.mayMutateSceneStructure = result.declaration.mutationPolicy == FrameWorkloadMutationPolicy::DeferredOnly;
+				job.profilingLabel = result.declaration.profilingLabel.empty() ? result.declaration.workloadName : result.declaration.profilingLabel;
+				job.partitionIndex = partition.partitionIndex;
+				job.partitionCount = partition.partitionCount;
+				job.itemBegin = partition.itemBegin;
+				job.itemEnd = partition.itemEnd;
+				job.usefulWorkItemCount = partition.itemEnd - partition.itemBegin;
+				if (result.declaration.rangeWork)
+				{
+					job.work = [rangeWork = result.declaration.rangeWork, partition](JobGraphContext& context) {
+						rangeWork(partition, context);
+					};
+				}
+				else
+				{
+					job.work = result.declaration.work;
+				}
+				const DependencyHandle handle = graph.AddJob(std::move(job));
+				handlesByResult[resultIndex].push_back(handle);
+				scheduledPartitions.push_back({ resultIndex, partition, result.declaration.stableDescriptorId + "#" + std::to_string(partition.partitionIndex) });
+			}
 		}
 
+		auto addAllDependencies = [&graph](const std::vector<DependencyHandle>& before, const std::vector<DependencyHandle>& after) {
+			for (const DependencyHandle& beforeHandle : before)
+			{
+				for (const DependencyHandle& afterHandle : after)
+				{
+					graph.AddDependency(beforeHandle, afterHandle);
+				}
+			}
+		};
+		for (std::size_t resultIndex = 0; resultIndex < plan.results.size(); ++resultIndex)
+		{
+			const FrameWorkloadResult& result = plan.results[resultIndex];
+			for (const std::string& dependencyId : result.declaration.explicitDependencies)
+			{
+				const auto dependency = resultIndexByDescriptor.find(dependencyId);
+				if (dependency != resultIndexByDescriptor.end())
+				{
+					addAllDependencies(handlesByResult[dependency->second], handlesByResult[resultIndex]);
+				}
+			}
+		}
 		for (std::size_t leftIndex = 0; leftIndex < plan.results.size(); ++leftIndex)
 		{
 			for (std::size_t rightIndex = leftIndex + 1; rightIndex < plan.results.size(); ++rightIndex)
 			{
-				if (plan.results[leftIndex].declaration.executionOrder != 0
-					&& plan.results[rightIndex].declaration.executionOrder != 0
-					&& plan.results[leftIndex].declaration.executionOrder < plan.results[rightIndex].declaration.executionOrder)
+				const bool explicitlyOrdered = std::find(plan.results[rightIndex].declaration.explicitDependencies.begin(), plan.results[rightIndex].declaration.explicitDependencies.end(), plan.results[leftIndex].declaration.stableDescriptorId) != plan.results[rightIndex].declaration.explicitDependencies.end()
+					|| std::find(plan.results[leftIndex].declaration.explicitDependencies.begin(), plan.results[leftIndex].declaration.explicitDependencies.end(), plan.results[rightIndex].declaration.stableDescriptorId) != plan.results[leftIndex].declaration.explicitDependencies.end();
+				if (explicitlyOrdered)
 				{
-					graph.AddDependency(handles[leftIndex], handles[rightIndex]);
+					// An explicit descriptor edge carries the intended direction even when
+					// alphabetical declaration order differs from dataflow order.
 					continue;
 				}
 				std::string resourceName;
 				if (HasWriteConflict(plan.results[leftIndex].declaration, plan.results[rightIndex].declaration, resourceName))
 				{
-					graph.AddDependency(handles[leftIndex], handles[rightIndex]);
+					addAllDependencies(handlesByResult[leftIndex], handlesByResult[rightIndex]);
 				}
 			}
 		}
@@ -792,7 +1204,7 @@ namespace TerraEngine::Scheduling {
 				plan.parallelExecutionUsed = true;
 			}
 		}
-		ApplyJobGraphSummary(plan, summary);
+		ApplyJobGraphSummary(plan, summary, scheduledPartitions);
 		if (!summary.valid || !plan.completed)
 		{
 			AddArchitectureDiagnostic(plan.diagnostics, ArchitectureDiagnosticSeverity::Error, ArchitectureDiagnosticCode::ExecutionFailed, plan.frameId, "", "Frame workload graph did not complete successfully.", "Inspect JobGraph diagnostics.");
@@ -800,6 +1212,7 @@ namespace TerraEngine::Scheduling {
 		SortDiagnostics(plan.diagnostics);
 		RefreshMigrationSummary(plan);
 		plan.formatted = FormatFrameExecutionPlan(plan);
+		PublishExecutionRecordsForProfiling(plan);
 		return plan;
 	}
 
@@ -815,19 +1228,87 @@ namespace TerraEngine::Scheduling {
 		ApplyInlinePolicy(plan);
 
 		JobGraphContext context;
-		for (FrameWorkloadResult& result : plan.results)
+		std::unordered_map<std::string, std::size_t> resultIndexByDescriptor;
+		for (std::size_t index = 0; index < plan.results.size(); ++index)
 		{
+			resultIndexByDescriptor.emplace(plan.results[index].declaration.stableDescriptorId, index);
+		}
+		std::vector<std::size_t> indegree(plan.results.size(), 0U);
+		std::vector<std::vector<std::size_t>> outgoing(plan.results.size());
+		for (std::size_t index = 0; index < plan.results.size(); ++index)
+		{
+			for (const std::string& dependencyId : plan.results[index].declaration.explicitDependencies)
+			{
+				const auto dependency = resultIndexByDescriptor.find(dependencyId);
+				if (dependency != resultIndexByDescriptor.end())
+				{
+					outgoing[dependency->second].push_back(index);
+					++indegree[index];
+				}
+			}
+		}
+		std::vector<std::size_t> executionOrder;
+		executionOrder.reserve(plan.results.size());
+		while (executionOrder.size() < plan.results.size())
+		{
+			const auto ready = std::find(indegree.begin(), indegree.end(), 0U);
+			if (ready == indegree.end()) break;
+			const std::size_t index = static_cast<std::size_t>(std::distance(indegree.begin(), ready));
+			indegree[index] = std::numeric_limits<std::size_t>::max();
+			executionOrder.push_back(index);
+			for (const std::size_t dependent : outgoing[index])
+			{
+				if (indegree[dependent] != std::numeric_limits<std::size_t>::max() && indegree[dependent] > 0U)
+				{
+					--indegree[dependent];
+				}
+			}
+		}
+
+		for (const std::size_t resultIndex : executionOrder)
+		{
+			FrameWorkloadResult& result = plan.results[resultIndex];
+			if (result.executionPolicy == FrameWorkloadExecutionPolicy::Omitted)
+			{
+				result.completed = true;
+				AppendExecutionRecord(plan, result, {}, nullptr, true);
+				continue;
+			}
 			if (result.executionPolicy == FrameWorkloadExecutionPolicy::Rejected)
 			{
 				result.completed = false;
+				AppendExecutionRecord(plan, result, {}, nullptr, false);
 				continue;
 			}
+			std::vector<FrameWorkloadPartition> partitions;
+			if (result.declaration.partitionPolicy == FrameWorkloadPartitionPolicy::DeterministicRanges
+				&& result.declaration.estimatedWorkItemCount > 0u
+				&& result.declaration.rangeWork)
+			{
+				partitions = BuildDeterministicWorkloadPartitions(result.declaration.estimatedWorkItemCount, result.declaration.partitionWorkItemCount, result.declaration.maximumPartitionCount);
+			}
+			if (partitions.empty())
+			{
+				partitions.push_back({ 0u, 1u, 0u, result.declaration.estimatedWorkItemCount });
+			}
+			result.partitionCount = partitions.size();
 			try
 			{
-				if (result.declaration.work)
+				for (const FrameWorkloadPartition& partition : partitions)
 				{
 					TERRAENGINE_PROFILE_TASK_SCOPE("FrameWorkload::CompatibilityJob", TerraEngine::Profiling::ProfilerModuleId::CpuEngine, result.declaration.workloadName.c_str());
-					result.declaration.work(context);
+					if (result.declaration.rangeWork)
+					{
+						result.declaration.rangeWork(partition, context);
+					}
+					else if (result.declaration.work)
+					{
+						result.declaration.work(context);
+					}
+					JobGraphResultEntry entry;
+					entry.dispatchCount = 1u;
+					entry.usefulWorkItemCount = partition.itemEnd - partition.itemBegin;
+					AppendExecutionRecord(plan, result, partition, &entry, true);
 				}
 				result.completed = true;
 			}
@@ -847,6 +1328,13 @@ namespace TerraEngine::Scheduling {
 		SortDiagnostics(plan.diagnostics);
 		RefreshMigrationSummary(plan);
 		plan.formatted = FormatFrameExecutionPlan(plan);
+		PublishExecutionRecordsForProfiling(plan);
 		return plan;
+	}
+
+	std::vector<TerraEngine::Profiling::WorkloadExecutionRecord> LatestFrameWorkloadExecutionRecordsForProfiling()
+	{
+		std::lock_guard<std::mutex> lock(g_ProfilingExecutionRecordsMutex);
+		return g_ProfilingExecutionRecords;
 	}
 }

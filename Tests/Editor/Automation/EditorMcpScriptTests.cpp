@@ -60,6 +60,11 @@ namespace TerraEngine::EditorTests
 		registry.Add("Editor.MCP.Scripts.ListsOnlyApprovedTemplates", [](TestContext& context) {
 			ScriptAutomationFixture fixture("Templates");
 			context.Expect(fixture.ready, "Script template fixture should create its project.");
+			const nlohmann::json status = fixture.service.HandleTool("script.status", nlohmann::json::object(), WriteMode::ReadOnly, "script-status");
+			context.Expect(status.value("ok", false), "Managed readiness should be observable through a read-only script.status capability.");
+			context.Expect(status["data"].contains("readiness") && status["data"].contains("fingerprint") && status["data"].contains("loadedOutput"),
+				"Script status must expose additive cache, input-fingerprint, and loaded-output identity evidence.");
+			context.Expect(status["data"]["readiness"].contains("cache"), "Script status readiness must identify cache hit or miss evidence.");
 			const nlohmann::json listed = fixture.service.HandleTool("script.templates.list", nlohmann::json::object(), WriteMode::ReadOnly, "script-templates-list");
 			context.Expect(listed.value("ok", false), "Script template discovery should succeed for an open project.");
 			const nlohmann::json templates = listed["data"].value("templates", nlohmann::json::array());
@@ -152,6 +157,9 @@ namespace TerraEngine::EditorTests
 			const std::string jobId = accepted["data"].value("jobId", std::string());
 			context.Expect(!jobId.empty(), "Accepted compilation should return a job ID.");
 			context.ExpectEqual(std::string("jobs.get"), accepted["data"].value("pollTool", std::string()), "Compilation should advertise the common job polling tool.");
+			context.Expect(accepted["data"].value("forcedBuild", false), "An explicit script.compile request must state that it bypasses managed-output reuse.");
+			context.Expect(accepted["data"].contains("readiness"), "Explicit compilation should append readiness/cache evidence without changing the durable job fields.");
+			context.ExpectEqual(std::string("explicit_compile_requested"), accepted["data"]["readiness"].value("cache", nlohmann::json::object()).value("reason", std::string()), "The cache miss reason should explain the user-requested rebuild.");
 
 			const nlohmann::json canceled = fixture.service.HandleTool("jobs.cancel", {{"jobId", jobId}}, WriteMode::WritesEnabled, "script-compile-cancel");
 			context.Expect(canceled.value("ok", false), "Queued or running script compilation should accept cooperative cancellation.");

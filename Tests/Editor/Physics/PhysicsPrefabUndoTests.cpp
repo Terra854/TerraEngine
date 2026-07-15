@@ -116,5 +116,57 @@ namespace TerraEngine::EditorTests
 			context.ExpectEqual(oldRevision, source.sourceGraph.revision, "Rejected prefab batches must not change source revision.");
 			context.Expect(!diagnostics.empty(), "Rejected prefab batches need an actionable diagnostic.");
 		});
+
+		registry.Add("Editor.PhysicsPrefabUndo.OverrideResolutionPreservesAuthoredBytesAndSelection", [](TestContext& context) {
+			Scene::PrefabSource source;
+			source.sourceId = GenerateUUID();
+			source.sourceGraph.sceneId = GenerateUUID();
+			const UUID sourceObject = GenerateUUID();
+			const UUID instanceObject = GenerateUUID();
+			Scene::SceneGraphObject object;
+			object.objectId = sourceObject;
+			object.name = "Selected physics prefab";
+			source.sourceGraph.rootObjects = {sourceObject};
+			source.sourceGraph.objects.emplace(sourceObject, object);
+			const UUID colliderRecord = GenerateUUID();
+			source.componentDefaults[sourceObject]["ColliderSetComponent"] = {
+				{"schemaVersion", 1U},
+				{"colliders", nlohmann::json::array({{
+					{"recordId", ToHexString(colliderRecord)},
+					{"enabled", true},
+					{"material", "Materials/Stone.tephysmat"}
+				}})}
+			};
+			const std::string authoredBytesBeforeResolve = source.componentDefaults.at(sourceObject).at("ColliderSetComponent").dump();
+
+			Scene::PrefabInstance instance;
+			instance.sourceId = source.sourceId;
+			instance.sourceToInstanceObjectIds.emplace(sourceObject, instanceObject);
+			Scene::PrefabOverride override;
+			override.targetObjectId = sourceObject;
+			override.componentName = "ColliderSetComponent";
+			override.recordId = colliderRecord;
+			override.propertyPath = "enabled";
+			override.authoredValue = "false";
+			instance.overrides = {override};
+
+			// Selection names the instantiated object and must survive resolving,
+			// undo-style reset, and another resolve without being remapped to source.
+			const UUID selectedObjectId = instanceObject;
+			const Scene::PrefabCompositionResult resolved = Scene::ResolvePrefabInstance(source, instance);
+			context.Expect(resolved.success, "A selected prefab instance with a physics override must resolve.");
+			context.Expect(!resolved.resolvedComponentDefaults.at(instanceObject).at("ColliderSetComponent").at("colliders").at(0).at("enabled").get<bool>(),
+				"Resolved data must expose the instance's collider override.");
+			context.ExpectEqual(authoredBytesBeforeResolve, source.componentDefaults.at(sourceObject).at("ColliderSetComponent").dump(), "Resolving an override must not mutate source-authored bytes.");
+			context.Expect(instanceObject == selectedObjectId, "Prefab resolution must preserve the selected instance identity.");
+
+			Scene::ResetOverridesToDefaults(instance, sourceObject);
+			const Scene::PrefabCompositionResult reset = Scene::ResolvePrefabInstance(source, instance);
+			context.Expect(reset.success, "Resetting physics prefab overrides must remain resolvable.");
+			context.Expect(reset.resolvedComponentDefaults.at(instanceObject).at("ColliderSetComponent").at("colliders").at(0).at("enabled").get<bool>(),
+				"Reset must restore the source-authored collider value.");
+			context.ExpectEqual(authoredBytesBeforeResolve, source.componentDefaults.at(sourceObject).at("ColliderSetComponent").dump(), "Undo-style reset must not rewrite source-authored bytes.");
+			context.Expect(instanceObject == selectedObjectId, "Undo-style reset must preserve the selected instance identity.");
+		});
 	}
 }

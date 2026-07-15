@@ -109,9 +109,16 @@ namespace TerraEngine::Scene {
 		std::uint64_t metadataGeneration = 0;
 		std::uint64_t componentGeneration = 0;
 		std::uint64_t hierarchyRevision = 0;
+		std::uint64_t transformRevision = 0;
+		TerraEngine::UUID parentObjectId = TerraEngine::EMPTY_UUID;
+		std::uint64_t parentLifetimeGeneration = 0;
+		std::uint64_t parentTransformRevision = 0;
 	};
 
 	struct TransactionReadSet {
+		// Scene lifetime and hierarchy are separate generations. A clear/swap can
+		// reuse hierarchy revision values, so publication packets must observe both.
+		std::uint64_t sceneGeneration = 0;
 		std::uint64_t sceneRevision = 0;
 		std::vector<TransactionObjectObservation> objects;
 	};
@@ -185,6 +192,35 @@ namespace TerraEngine::Scene {
 		bool MutatedScene() const { return status == TransactionStatus::Committed && appliedWriteCount > 0; }
 	};
 
+	// Preparation chunks are a scheduling detail, not an atomicity boundary.
+	// The protected commit flattens one group into a single transaction after
+	// validating every chunk, so a stale entry rejects the complete simulation tick.
+	struct TransactionPublicationGroup {
+		std::string groupId;
+		std::vector<Transaction> chunks;
+		bool canceled = false;
+	};
+
+	struct TransactionPublicationChunkReceipt {
+		std::string transactionId;
+		std::size_t chunkIndex = 0;
+		TransactionStatus status = TransactionStatus::Pending;
+		std::size_t writeCount = 0;
+	};
+
+	struct TransactionPublicationGroupResult {
+		std::string groupId;
+		TransactionStatus status = TransactionStatus::Pending;
+		bool preflightAccepted = false;
+		std::size_t appliedWriteCount = 0;
+		std::size_t rejectedWriteCount = 0;
+		std::vector<TransactionPublicationChunkReceipt> chunkReceipts;
+		TransactionResult aggregateResult;
+		std::string message;
+
+		bool Committed() const { return status == TransactionStatus::Committed; }
+	};
+
 	struct TransactionDiagnostics {
 		std::uint64_t submittedCount = 0;
 		std::uint64_t committedCount = 0;
@@ -245,6 +281,8 @@ namespace TerraEngine::Scene {
 	TERRAENGINE_API TransactionObjectRef LocalObject(std::int32_t localObjectId);
 	TERRAENGINE_API TransactionResult PreflightTransaction(ObjectManager& objects, const Transaction& transaction);
 	TERRAENGINE_API TransactionResult CommitTransaction(ObjectManager& objects, const Transaction& transaction);
+	TERRAENGINE_API TransactionPublicationGroupResult PreflightTransactionPublicationGroup(ObjectManager& objects, const TransactionPublicationGroup& group);
+	TERRAENGINE_API TransactionPublicationGroupResult CommitTransactionPublicationGroup(ObjectManager& objects, const TransactionPublicationGroup& group);
 	TERRAENGINE_API bool ApplyTransactionInverseDeltas(ObjectManager& objects, const std::vector<TransactionInverseDelta>& inverseDeltas);
 	TERRAENGINE_API void AccumulateTransactionDiagnostics(TransactionDiagnostics& diagnostics, const Transaction& transaction, const TransactionResult& result);
 	TERRAENGINE_API TransactionDiagnostics MergeTransactionDiagnostics(const TransactionDiagnostics& left, const TransactionDiagnostics& right);

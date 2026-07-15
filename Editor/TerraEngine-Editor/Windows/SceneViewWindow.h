@@ -6,16 +6,20 @@
 #pragma once
 #include "../Framework/EditorWindow.h"
 #include "SceneViewOrientationWidget.h"
+#include "SceneViewMarkerPipeline.h"
 #include "SceneViewOverlayIcons.h"
 #include "SceneViewOverlayMarkers.h"
 #include "Engine/Renderer/RenderTypes.h"
+#include "Engine/Scene/SpatialIndex.h"
 #include "Engine/Utilities/UUID.h"
 #include <cstdint>
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
 #include <limits>
+#include <memory>
 #include <glm/gtc/quaternion.hpp>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -125,8 +129,26 @@ private:
 	TerraEngine::Editor::SceneViewOverlay::SceneOverlayPreference m_OverlayPreference;
 	TerraEngine::Editor::SceneViewOverlay::ViewportInteractionContext m_InteractionContext;
 	TerraEngine::Editor::SceneViewOverlay::OrientationWidgetState m_OrientationWidgetState;
+	TerraEngine::Editor::SceneViewOverlay::OrientationWidgetCache m_OrientationWidgetCache;
 	std::vector<TerraEngine::Editor::SceneViewOverlay::OverlayIconDefinition> m_IconDefinitions;
 	std::vector<TerraEngine::Editor::SceneViewOverlay::SceneObjectMarker> m_ObjectMarkers;
+	// Marker preparation is split from the legacy draw records. The pipeline and
+	// spatial snapshot retain immutable data across frames; m_ObjectMarkers is
+	// now only the bounded presentation batch consumed by ImGui.
+	TerraEngine::Editor::SceneViewOverlay::MarkerPipeline m_MarkerPipeline;
+	TerraEngine::Editor::SceneViewOverlay::MarkerFrameResult m_MarkerFrame;
+	TerraEngine::Scene::EditorSelectableSpatialSnapshotPublisher m_MarkerSpatialPublisher;
+	std::shared_ptr<const TerraEngine::Scene::EditorSelectableSpatialSnapshot> m_MarkerSpatialSnapshot;
+	std::unordered_map<TerraEngine::UUID, TerraEngine::Scene::SpatialObjectRecord> m_MarkerSpatialRecords;
+	std::uint64_t m_MarkerSceneGeneration = 0u;
+	std::uint64_t m_MarkerSpatialPublicationGeneration = 0u;
+	std::uint64_t m_MarkerViewGeneration = 0u;
+	std::uint64_t m_MarkerPreferenceGeneration = 0u;
+	std::uint32_t m_MarkerSpatialQueryRejectedCount = 0u;
+	std::uint32_t m_MarkerSpatialQueryFallbackCount = 0u;
+	std::size_t m_LastMarkerPreferenceHash = 0u;
+	glm::mat4 m_LastMarkerViewProjection = glm::mat4(0.0f);
+	glm::ivec4 m_LastMarkerViewport = glm::ivec4(0);
 	// Marker source data changes with scene structure, transforms, metadata,
 	// selection, or icon preferences. Projection still runs per frame so camera
 	// movement and viewport resize remain immediately visible without rescanning.

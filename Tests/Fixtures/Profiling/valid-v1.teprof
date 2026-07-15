@@ -1,0 +1,10 @@
+{
+	"format": "TerraEngineProfilerCapture",
+	"payloadVersion": 1,
+	"metadata": {
+		"terraEngineVersion": "feature-043-fixture",
+		"projectName": "Profiler V1 Compatibility",
+		"settings": {}
+	},
+	"frames": []
+}

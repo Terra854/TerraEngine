@@ -5,6 +5,7 @@
 #include "Physics/PhysicsDiagnostics.h"
 #include "Physics/PhysicsSettings.h"
 #include "Renderer/RenderSystem.h"
+#include "Editor/TerraEngine-Editor/Windows/SceneViewOverlayMarkers.h"
 #include "Editor/TerraEngine-Editor/Windows/SceneViewOverlayTypes.h"
 
 #include <filesystem>
@@ -34,6 +35,27 @@ namespace TerraEngine::EditorTests
 
 	void RegisterPhysicsSceneViewTests(TestRegistry& registry)
 	{
+		registry.Add("Physics.SceneView.PhysicsBearingObjectsAreNotGenericEmpties", [](TestContext& context) {
+			Editor::SceneViewOverlay::MarkerComponentClassification colliderOnly;
+			colliderOnly.hasColliderSet = true;
+			context.Expect(Editor::SceneViewOverlay::IsPhysicsBearing(colliderOnly), "A collider-only authoring object must be recognized as physics-bearing.");
+			context.Expect(
+				Editor::SceneViewOverlay::ClassifyMarkerCategory(colliderOnly) == Editor::SceneViewOverlay::MarkerCategory::Physics,
+				"Physics-bearing objects without meshes must use the physics marker instead of the generic empty marker.");
+
+			Editor::SceneViewOverlay::MarkerComponentClassification trueEmpty;
+			context.Expect(Editor::SceneViewOverlay::IsGenuinelyEmpty(trueEmpty), "An object with only identity and transform state is genuinely empty.");
+			context.Expect(
+				Editor::SceneViewOverlay::ClassifyMarkerCategory(trueEmpty) == Editor::SceneViewOverlay::MarkerCategory::EmptyObject,
+				"Only genuinely empty objects may receive the generic empty marker.");
+
+			Editor::SceneViewOverlay::MarkerComponentClassification scripted;
+			scripted.hasOtherMarkerRelevantComponent = true;
+			context.Expect(
+				Editor::SceneViewOverlay::ClassifyMarkerCategory(scripted) == Editor::SceneViewOverlay::MarkerCategory::Unsupported,
+				"An object with another functional component must not be mislabeled as empty.");
+		});
+
 		registry.Add("Physics.SceneView.ColliderAuthoringControlsLiveInColliderInspector", [](TestContext& context) {
 			const std::string sceneViewSource = ReadEditorSource("Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp");
 			const std::string inspectorSource = ReadEditorSource("Editor/TerraEngine-Editor/Windows/InspectorWindow.cpp");

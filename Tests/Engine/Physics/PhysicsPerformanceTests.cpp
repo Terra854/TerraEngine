@@ -11,6 +11,7 @@
 #include "Components/Transform.h"
 #include "Core/Object/ComponentRegistry.h"
 #include "Core/Object/ObjectManager.h"
+#include "Core/Scheduling/SystemScheduler.h"
 #include "Physics/PhysicsDiagnostics.h"
 #include "Physics/PhysicsAuthoringSnapshot.h"
 #include "Physics/PhysicsSystem.h"
@@ -34,6 +35,7 @@ namespace TerraEngine::Tests {
 			ThreadPoolSession() {
 				ThreadPool::instance().shutdown();
 				ThreadPool::instance().initialize();
+				TerraEngine::Scheduling::SetSameFramePhysicsPublicationConsumerActive(false);
 			}
 
 			~ThreadPoolSession() {
@@ -171,30 +173,34 @@ namespace TerraEngine::Tests {
 			physics.Initialize();
 			context.Expect(physics.StartWorld(), "The same-pose fixture must start its isolated physics world.");
 			physics.Update(physics.FixedTimeStep());
-			const std::vector<Scene::Transaction> firstPublication = mutations.PendingTransactions();
+			const std::vector<Scene::TransactionPublicationGroup> firstPublication = mutations.PendingPublicationGroups();
 			context.Expect(firstPublication.size() == 1U
-				&& firstPublication.front().writeSet.operations.size() == 1U
-				&& firstPublication.front().writeSet.operations.front().kind == Scene::TransactionWriteKind::UpdateTransformBatch,
-				"The first dynamic pose must publish through one typed transform batch.");
+				&& firstPublication.front().chunks.size() == 1U
+				&& firstPublication.front().chunks.front().writeSet.operations.size() == 1U
+				&& firstPublication.front().chunks.front().writeSet.operations.front().kind == Scene::TransactionWriteKind::UpdateTransformBatch,
+				"The first dynamic pose must publish through one typed tick-wide transform group.");
 			const auto firstFlush = mutations.Apply(objects, "physics-same-pose-first-flush");
-			context.Expect(firstFlush.transactionResults.size() == 1U
-				&& firstFlush.transactionResults.front().status == Scene::TransactionStatus::Committed,
+			context.Expect(firstFlush.publicationGroupResults.size() == 1U
+				&& firstFlush.publicationGroupResults.front().status == Scene::TransactionStatus::Committed,
 				"The first same-pose publication must commit before duplicate suppression is measured.");
-			physics.OnAfterPhysicsFlush(firstFlush.transactionResults);
+			physics.OnAfterPhysicsFlush(firstFlush.transactionResults, firstFlush.publicationGroupResults);
 
 			physics.Update(physics.FixedTimeStep());
 			// The first protected physics publication advances the authored Transform
 			// revision. One following capture consumes that revision and may rebuild the
 			// runtime body once, so flush it before measuring the steady-state path.
 			const auto secondFlush = mutations.Apply(objects, "physics-same-pose-second-flush");
-			physics.OnAfterPhysicsFlush(secondFlush.transactionResults);
+			physics.OnAfterPhysicsFlush(secondFlush.transactionResults, secondFlush.publicationGroupResults);
 
 			physics.Update(physics.FixedTimeStep());
-			const std::vector<Scene::Transaction> steadyPublications = mutations.PendingTransactions();
+			const std::vector<Scene::TransactionPublicationGroup> steadyPublications = mutations.PendingPublicationGroups();
+			const auto steadyDiagnostics = physics.LatestDiagnostics();
 			std::string steadyMessage = "A settled unchanged awake dynamic pose must not enqueue another transform publication batch.";
-			if(!steadyPublications.empty() && !steadyPublications.front().writeSet.operations.empty()
-				&& !steadyPublications.front().writeSet.operations.front().transformUpdates.empty()) {
-				const Scene::TransactionTransformUpdate& repeated = steadyPublications.front().writeSet.operations.front().transformUpdates.front();
+			if(!steadyPublications.empty() && !steadyPublications.front().chunks.empty()
+				&& !steadyPublications.front().chunks.front().writeSet.operations.empty()
+				&& !steadyPublications.front().chunks.front().writeSet.operations.front().transformUpdates.empty()) {
+				const Scene::TransactionTransformUpdate& repeated =
+					steadyPublications.front().chunks.front().writeSet.operations.front().transformUpdates.front();
 				steadyMessage += " Repeated position=(" + std::to_string(repeated.position.x) + ", "
 					+ std::to_string(repeated.position.y) + ", " + std::to_string(repeated.position.z)
 					+ ") rotation=(" + std::to_string(repeated.rotation.x) + ", "
@@ -202,8 +208,14 @@ namespace TerraEngine::Tests {
 					+ ", " + std::to_string(repeated.rotation.w) + ").";
 			}
 			context.Expect(steadyPublications.empty(), steadyMessage);
+			context.Expect(steadyDiagnostics
+				&& steadyDiagnostics->authoring.snapshotReused
+				&& steadyDiagnostics->authoring.changedObjects == 0U
+				&& steadyDiagnostics->preparation.estimatedWorkItems == 0U
+				&& steadyDiagnostics->publication.currentEntries == 0U,
+				"The canonical unchanged frame must report zero authoring, preparation, and protected publication work.");
 			const auto steadyFlush = mutations.Apply(objects, "physics-same-pose-steady-flush");
-			physics.OnAfterPhysicsFlush(steadyFlush.transactionResults);
+			physics.OnAfterPhysicsFlush(steadyFlush.transactionResults, steadyFlush.publicationGroupResults);
 		});
 
 		registry.Add("Physics.Performance.AuthoringSnapshotDetectsRealTransformAndComponentMutations", [](TestContext& context) {
@@ -265,7 +277,7 @@ namespace TerraEngine::Tests {
 			for(std::uint32_t tick = 0U; tick < kFixedTickCount; ++tick) {
 				physics.Update(fixedTimeStep);
 				const auto flush = mutations.Apply(objects, "physics-performance-fixed-tick");
-				physics.OnAfterPhysicsFlush(flush.transactionResults);
+				physics.OnAfterPhysicsFlush(flush.transactionResults, flush.publicationGroupResults);
 			}
 			// Publication runs before the protected After Physics flush marks the
 			// current request completed. Run one zero-delta frame after the final
@@ -273,7 +285,7 @@ namespace TerraEngine::Tests {
 			// ticks without scheduling a sixty-first simulation step.
 			physics.Update(0.0F);
 			const auto finalDiagnosticsFlush = mutations.Apply(objects, "physics-performance-final-diagnostics");
-			physics.OnAfterPhysicsFlush(finalDiagnosticsFlush.transactionResults);
+			physics.OnAfterPhysicsFlush(finalDiagnosticsFlush.transactionResults, finalDiagnosticsFlush.publicationGroupResults);
 
 			const auto diagnostics = physics.LatestDiagnostics();
 			const auto published = Physics::AcquirePhysicsDiagnosticsSnapshot();
@@ -286,10 +298,21 @@ namespace TerraEngine::Tests {
 			context.Expect(diagnostics && diagnostics->memory.highWaterBytes >= diagnostics->memory.snapshotBytes
 				&& diagnostics->memory.highWaterProviderAllocations >= diagnostics->memory.outstandingProviderAllocations,
 				"Allocation and snapshot high-water telemetry must remain internally consistent at the publication boundary.");
+			context.Expect(diagnostics
+				&& diagnostics->extraction.totalBodies >= kThroughputBodyCount
+				&& diagnostics->extraction.examinedBodies <= diagnostics->extraction.totalBodies
+				&& diagnostics->extraction.extractedBodies <= diagnostics->extraction.examinedBodies
+				&& diagnostics->stateStore.bodyCount >= kThroughputBodyCount
+				&& diagnostics->publication.currentEntries <= diagnostics->extraction.changedBodies,
+				"A complete fixed step must publish bounded, internally consistent extraction, state-store, and transform work volumes.");
 			context.Expect(diagnostics && diagnostics->scheduler != nullptr
-				&& ContainsWorkload(*diagnostics->scheduler, "PhysicsSimulate", "provider barrier")
-				&& ContainsWorkload(*diagnostics->scheduler, "PhysicsPublicationBarrier", "After Physics"),
-				"Diagnostics must expose both the provider synchronization barrier and the protected After Physics publication barrier.");
+				// PhysicsSimulate is worker-prepared, but the provider remains the
+				// authoritative owner of its world state. The current scheduler
+				// contract names that protected concern "provider ownership"; the
+				// older "provider barrier" label was stale diagnostic wording.
+				&& ContainsWorkload(*diagnostics->scheduler, "PhysicsSimulate", "provider ownership")
+				&& ContainsWorkload(*diagnostics->scheduler, "PhysicsPublicationBarrier", "Frame End"),
+				"Reduced-schedule diagnostics must expose provider ownership and the deferred Frame End publication boundary.");
 			context.Expect(published && published->tick == diagnostics->tick,
 				"Readers must observe the same completed-tick diagnostics snapshot that PhysicsSystem published.");
 		});

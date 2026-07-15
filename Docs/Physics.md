@@ -40,6 +40,49 @@ engine-neutral fields. `Discrete` and `LinearCast` are the supported initial
 collision-quality modes; use `LinearCast` for validated fast-body/thin-geometry
 cases.
 
+### Incremental runtime and publication behavior
+
+Collision categories use stable 0-31 layer IDs. A contact is accepted only
+when both bodies' effective masks include the opposite layer; disabled layers
+are rejected by the provider's broad filter first. Project-layer masks are the
+default, while an enabled body mask override replaces that default. Continuous
+collision is deliberately two-stage: the project must enable it and the
+individual body must request `LinearCast`. Otherwise the runtime resolves the
+body to `Discrete`.
+
+The accumulator consumes only configured fixed steps, clamps catch-up to the
+project limits, and gives paused `Next` requests exactly one configured step.
+Provider callbacks enter an exclusive engine-owned event drain. Persistent
+collision/trigger/contact/activation records are then filtered against the
+immutable subscription snapshot; filtered and dropped volumes remain visible
+in diagnostics. Sleeping/static bodies stay in the paged complete body-state
+snapshot but are not read or published every frame. Wake, removal, and explicit
+full-state verification make them incremental work again.
+
+Authoring changes are generation journal entries, not file timestamp polls.
+Unchanged bodies retain descriptor indices and shared primitive shape recipes;
+only exact object, dependency, collider-asset, or material-asset reasons enter
+the preparation plan. Large independent plans and provider extraction are split
+into deterministic bounded ranges using the project settings. The defaults are
+1,024 records for extraction/publication and 512 records before parallel work;
+validated ranges are 64-8,192 records.
+
+Extraction converts provider ranges into engine-owned records before the
+protected boundary. The state store reuses immutable pages and publishes both a
+same-tick complete query view and a changed-body packet. Only changed dynamic
+poses become typed transform chunks. Every chunk for a tick preflights and
+commits as one atomic publication group; any stale scene, hierarchy, object,
+body, transform, or parent generation rejects the whole group. Accepted flush
+receipts alone acknowledge poses. A declared later same-frame scene reader uses
+After Physics visibility; reduced/headless schedules defer to Frame End, and an
+empty changed packet creates no scene transaction.
+
+`physics.diagnostics.get`, the Physics Diagnostics window, and normal profiler
+captures expose authoring reasons, preparation path/ranges, extraction volumes,
+state-page reuse/copy counts, publication chunks/receipts/failures, and current
+health. Aggregate work-volume refreshes use the configured cadence (30 frames
+by default), while a current failure bypasses that rate limit.
+
 ## Provider baseline
 
 The runtime provider baseline is pristine Jolt Physics 5.6.0 at commit
@@ -57,7 +100,11 @@ cmake --build --preset RelWithDebInfo --target TerraEngine TerraEngine-Editor Te
 cmake --build --preset RelWithDebInfo --target install
 ```
 
-Spec 042 accepts RelWithDebInfo exclusively for compile, test, install, and live-validation completion gates.
+Spec 043 accepts RelWithDebInfo exclusively for compile, test, install, and
+live-validation completion gates. The canonical stress workload is 10,000
+bodies (1,000 dynamic, 1,000 kinematic, 8,000 static) with 100 exact paused
+steps. Max workers use hardware concurrency; explicit 1/2/4 values are reserved
+for comparison matrices, and no build command uses `--parallel`.
 
 Run the focused engine slice:
 
@@ -95,13 +142,26 @@ data, authored-scene hashes, and shutdown status:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Physics/RunInstalledEditorPhysicsStress.ps1 `
   -InstallRoot out/build/RelWithDebInfo/Build `
   -WorkRoot out/validation/installed-editor-physics-stress `
-  -ObjectCount 10000 -ActiveDynamicCount 1000 -ExplicitStepCount 100 -WorkerCount max `
+  -ObjectCount 10000 -ActiveDynamicCount 1000 -ExplicitStepCount 100 `
   -AllowLiveStress
 ```
 
 Add `-RunUs6Loopback` for managed/automation reload and idempotency checks, or
 `-RunAuthoringWalkthrough` for the editor authoring workflow. Keep each run in
 its own disposable `out/validation` directory and use a free `-McpPort`.
+
+The readiness matrix uses `cold`, `warm`, `stale`, `corrupt`, and
+`forced-build` modes. Profiler v2 is the only recording format; v1 remains
+load-only compatibility. Detailed, sampled, and aggregate captures stay open
+for five seconds and must remain at or below 10 MiB. Use the debug-memory
+switches separately so debug primitives and process sampling do not contaminate
+the canonical timing run.
+
+For the Spec 043 incremental matrix, retain each run under
+`out/validation/043-us2/` and include unchanged, active, stale-generation,
+reparent, and conflicting tick-wide publication cases. The emitted profiler and
+JSON evidence must record configured batch sizes alongside examined, extracted,
+changed, page-reuse, chunk, rejection, and acknowledgement counts.
 
 The headless export parity gate cooks source-only collider recipes, exports the
 package, validates the six evidence files, launches the published runtime, and

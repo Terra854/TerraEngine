@@ -949,3 +949,85 @@ Object Serializer::DeserializeObject(const nlohmann::json& json, std::optional<O
 	const entt::entity entity = DeserializeObjectEntity(json, parentEntity);
 	return *ObjectManager::instance().getObject(entity);
 }
+
+TerraEngine::Scene::PreparedSceneDecode Serializer::PrepareSceneDecode(
+	const nlohmann::json& sceneJson,
+	const std::function<bool()>& cancellationRequested)
+{
+	TerraEngine::Scene::PreparedSceneDecode result;
+	if (!sceneJson.is_object())
+	{
+		result.reason = "authored scene root is not an object";
+		return result;
+	}
+
+	const nlohmann::json* roots = nullptr;
+	if (const auto objects = sceneJson.find("objects"); objects != sceneJson.end() && objects->is_array())
+	{
+		roots = &*objects;
+	}
+	else if (const auto entities = sceneJson.find("entities"); entities != sceneJson.end() && entities->is_array())
+	{
+		roots = &*entities;
+	}
+	else
+	{
+		result.reason = "authored scene does not contain an objects or entities array";
+		return result;
+	}
+
+	std::function<bool(const nlohmann::json&, std::optional<std::size_t>, const std::string&)> appendObject;
+	appendObject = [&](const nlohmann::json& source, std::optional<std::size_t> parentIndex, const std::string& stablePath) {
+		if (cancellationRequested && cancellationRequested())
+		{
+			result.cancelled = true;
+			result.reason = "scene decode was cancelled";
+			return false;
+		}
+		if (!source.is_object())
+		{
+			result.reason = "scene object record is not an object";
+			return false;
+		}
+		TerraEngine::Scene::PreparedSceneObjectRecord record;
+		record.object = source;
+		// Child records are represented by their parent index, avoiding repeated
+		// recursive payloads in the worker-to-protected packet.
+		record.object.erase("children");
+		record.stablePath = stablePath;
+		record.parentRecordIndex = parentIndex;
+		const std::size_t recordIndex = result.objects.size();
+		result.objects.push_back(std::move(record));
+		++result.objectCount;
+		if (parentIndex.has_value()) ++result.hierarchyCount;
+		if (const auto components = source.find("components"); components != source.end())
+		{
+			if (!components->is_object())
+			{
+				result.reason = "scene component table is not an object";
+				return false;
+			}
+			result.componentCount += components->size();
+		}
+		if (const auto children = source.find("children"); children != source.end())
+		{
+			if (!children->is_array())
+			{
+				result.reason = "scene children field is not an array";
+				return false;
+			}
+			for (std::size_t childIndex = 0U; childIndex < children->size(); ++childIndex)
+			{
+				if (!appendObject((*children)[childIndex], recordIndex, stablePath + "/" + std::to_string(childIndex))) return false;
+			}
+		}
+		return true;
+	};
+
+	for (std::size_t rootIndex = 0U; rootIndex < roots->size(); ++rootIndex)
+	{
+		if (!appendObject((*roots)[rootIndex], std::nullopt, std::to_string(rootIndex))) return result;
+	}
+	result.accepted = true;
+	return result;
+}

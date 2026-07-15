@@ -41,6 +41,8 @@ namespace TerraEngine::EditorTests {
 	void RegisterProjectSettingsWindowTests(TestRegistry& registry);
 	void RegisterProjectSettingsMenuInventoryTests(TestRegistry& registry);
 	void RegisterProjectSettingsPersistenceTests(TestRegistry& registry);
+	void RegisterManagedReadinessTests(TestRegistry& registry);
+	void RegisterProjectReadinessPerformanceTests(TestRegistry& registry);
 	void RegisterEditorCommandLineTests(TestRegistry& registry);
 	void RegisterEditorStartupRendererConfigurationTests(TestRegistry& registry);
 	void RegisterEditorPostFrameBoundaryTests(TestRegistry& registry);
@@ -109,6 +111,7 @@ namespace TerraEngine::EditorTests {
 	void RegisterRendererRecoveryWindowTests(TestRegistry& registry);
 	void RegisterSceneViewDisplayToggleTests(TestRegistry& registry);
 	void RegisterSceneViewMarkerOverlayTests(TestRegistry& registry);
+	void RegisterSceneViewMarkerPerformanceTests(TestRegistry& registry);
 	void RegisterSceneViewMarkerSelectionTests(TestRegistry& registry);
 	void RegisterSceneViewOrientationWidgetTests(TestRegistry& registry);
 	void RegisterSceneViewOverlayAccessibilityTests(TestRegistry& registry);
@@ -188,6 +191,8 @@ int main() {
 	TerraEngine::EditorTests::RegisterProjectSettingsWindowTests(registry);
 	TerraEngine::EditorTests::RegisterProjectSettingsMenuInventoryTests(registry);
 	TerraEngine::EditorTests::RegisterProjectSettingsPersistenceTests(registry);
+	TerraEngine::EditorTests::RegisterManagedReadinessTests(registry);
+	TerraEngine::EditorTests::RegisterProjectReadinessPerformanceTests(registry);
 	TerraEngine::EditorTests::RegisterEditorCommandLineTests(registry);
 	TerraEngine::EditorTests::RegisterEditorStartupRendererConfigurationTests(registry);
 	TerraEngine::EditorTests::RegisterEditorPostFrameBoundaryTests(registry);
@@ -255,6 +260,7 @@ int main() {
 	TerraEngine::EditorTests::RegisterRendererRecoveryWindowTests(registry);
 	TerraEngine::EditorTests::RegisterSceneViewDisplayToggleTests(registry);
 	TerraEngine::EditorTests::RegisterSceneViewMarkerOverlayTests(registry);
+	TerraEngine::EditorTests::RegisterSceneViewMarkerPerformanceTests(registry);
 	TerraEngine::EditorTests::RegisterSceneViewMarkerSelectionTests(registry);
 	TerraEngine::EditorTests::RegisterSceneViewOrientationWidgetTests(registry);
 	TerraEngine::EditorTests::RegisterSceneViewOverlayAccessibilityTests(registry);

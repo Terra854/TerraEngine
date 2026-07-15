@@ -45,6 +45,36 @@ namespace TerraEngine::Editor::SceneViewOverlay
 		return state;
 	}
 
+	void OrientationWidgetCache::Reset()
+	{
+		key.reset();
+		state = OrientationWidgetState{};
+		reuseCount = 0u;
+		rebuildCount = 0u;
+	}
+
+	const OrientationWidgetState& BuildOrientationWidgetStateCached(
+		OrientationWidgetCache& cache,
+		const SceneViewOverlayCacheKey& key,
+		const glm::vec3& cameraForward,
+		const glm::vec3& cameraUp,
+		ProjectionMode projectionMode,
+		const glm::vec4& screenBounds)
+	{
+		if (cache.key.has_value() && *cache.key == key)
+		{
+			++cache.reuseCount;
+			return cache.state;
+		}
+
+		// The caller owns generation changes. Rebuild exactly once when any
+		// viewport, scene, selection, simulation, or preference input changes.
+		cache.state = BuildOrientationWidgetState(cameraForward, cameraUp, projectionMode, screenBounds);
+		cache.key = key;
+		++cache.rebuildCount;
+		return cache.state;
+	}
+
 	OrientationAxis HitTestOrientationWidget(const OrientationWidgetState& state, const glm::vec2& pointer)
 	{
 		const float minX = state.screenBounds.x;

@@ -6,6 +6,7 @@
 #include "Core/Scheduling/JobGraph.h"
 #include "Core/Object/Object.h"
 #include "Core/Object/ObjectManager.h"
+#include "Scene/SceneChangePacket.h"
 #include "Scene/HierarchySnapshot.h"
 #include "ThreadPool/ThreadPool.h"
 
@@ -175,13 +176,16 @@ namespace TerraEngine::Scene {
 			}
 
 			Transform world = MakeTransform(object.worldPosition, object.worldRotation, object.worldScale);
+			// The graph revision is captured per worker chunk; the exact record uses
+			// the narrower local transform revision for stale-work validation.
+			(void)graphRevision;
 			return SceneWorldTransformRecord{
 				object.objectId,
 				object.entity,
 				world,
 				MakeModelMatrix(world),
 				hierarchyLevel,
-				graphRevision
+				object.transformRevision
 			};
 		}
 
@@ -258,6 +262,7 @@ namespace TerraEngine::Scene {
 	SceneGraph BuildSceneGraphFromObjectManager(ObjectManager& objects, bool computeWorldTransforms)
 	{
 		SceneGraph graph;
+		graph.sceneGeneration = objects.GetSceneGeneration();
 		graph.revision = objects.GetSpatialRevision();
 
 		std::function<void(Object, SceneObjectId)> visitObject = [&](Object object, SceneObjectId parentId) {
@@ -479,6 +484,23 @@ namespace TerraEngine::Scene {
 					state.dirtyRoots.push_back(rootId);
 				}
 			}
+			// Exact packets can list both a direct edit and the descendants whose
+			// world transforms changed. Collapse them to minimal roots before branch
+			// expansion so each descendant is scheduled exactly once.
+			state.dirtyRoots.erase(std::remove_if(state.dirtyRoots.begin(), state.dirtyRoots.end(), [&graph, &rootSet](const SceneObjectId& objectId) {
+				auto object = graph.objects.find(objectId);
+				while (object != graph.objects.end() && object->second.parentId != TerraEngine::EMPTY_UUID)
+				{
+					if (rootSet.find(object->second.parentId) != rootSet.end())
+					{
+						return true;
+					}
+					object = graph.objects.find(object->second.parentId);
+				}
+				return false;
+			}), state.dirtyRoots.end());
+			rootSet.clear();
+			rootSet.insert(state.dirtyRoots.begin(), state.dirtyRoots.end());
 		}
 		std::sort(state.dirtyRoots.begin(), state.dirtyRoots.end(), [](const SceneObjectId& left, const SceneObjectId& right) {
 			return TerraEngine::ToHexString(left) < TerraEngine::ToHexString(right);
@@ -494,6 +516,56 @@ namespace TerraEngine::Scene {
 		std::sort(state.expandedDirtyObjects.begin(), state.expandedDirtyObjects.end(), [](const SceneObjectId& left, const SceneObjectId& right) {
 			return TerraEngine::ToHexString(left) < TerraEngine::ToHexString(right);
 		});
+		for (const SceneObjectId& objectId : state.expandedDirtyObjects)
+		{
+			if (rootSet.find(objectId) == rootSet.end())
+			{
+				state.affectedDescendants.push_back(objectId);
+			}
+		}
+		return state;
+	}
+
+	SceneDirtyTransformState BuildDirtyTransformState(const SceneGraph& graph, const SceneChangePacket& changes)
+	{
+		const SceneChangePacketValidationResult validation = changes.Validate(graph.sceneGeneration);
+		if (!validation.valid)
+		{
+			// Stale work must not silently expand to a full scene scan: doing so
+			// would expose data outside the packet's protected publication point.
+			SceneDirtyTransformState rejected;
+			rejected.valid = false;
+			rejected.fullRefreshRequested = false;
+			rejected.sourceRevision = graph.revision;
+			return rejected;
+		}
+
+		std::vector<SceneObjectId> roots;
+		roots.reserve(changes.TransformChanged().size() + changes.HierarchyChanged().size());
+		for (const SceneObjectRevisionSnapshot& snapshot : changes.TransformChanged())
+		{
+			roots.push_back(snapshot.objectId);
+		}
+		for (const SceneObjectRevisionSnapshot& snapshot : changes.HierarchyChanged())
+		{
+			roots.push_back(snapshot.objectId);
+		}
+		if (roots.empty())
+		{
+			// A valid empty packet is an intentional no-op. It must not become a
+			// whole-scene refresh merely because no dirty root was supplied.
+			SceneDirtyTransformState empty;
+			empty.fullRefreshRequested = false;
+			empty.reason = SceneTransformDirtyReason::LocalTransform;
+			empty.sourceRevision = graph.revision;
+			empty.sourceSceneGeneration = changes.SceneGeneration();
+			return empty;
+		}
+		const SceneTransformDirtyReason reason = changes.HierarchyChanged().empty()
+			? SceneTransformDirtyReason::LocalTransform
+			: SceneTransformDirtyReason::Hierarchy;
+		SceneDirtyTransformState state = BuildDirtyTransformState(graph, roots, reason);
+		state.sourceSceneGeneration = changes.SceneGeneration();
 		return state;
 	}
 
@@ -602,13 +674,26 @@ namespace TerraEngine::Scene {
 		result.dirtyRootCount = static_cast<std::uint32_t>(dirtyState.dirtyRoots.size());
 		result.expandedDirtyObjectCount = static_cast<std::uint32_t>(dirtyState.expandedDirtyObjects.size());
 		result.diagnostics = workPlan.diagnostics;
+		if (!dirtyState.valid)
+		{
+			result.valid = false;
+			result.diagnostics.push_back(SceneDiagnostic{
+				SceneDiagnosticSeverity::Error,
+				SceneDiagnosticCategory::Mutation,
+				TerraEngine::EMPTY_UUID,
+				{},
+				"Rejected scene change packet cannot drive transform propagation.",
+				"Publish a generation-valid packet at the protected boundary before preparing transform work."
+			});
+			return result;
+		}
 		if (!workPlan.valid)
 		{
 			return result;
 		}
 
 		std::unordered_set<SceneObjectId> dirtyObjects(dirtyState.expandedDirtyObjects.begin(), dirtyState.expandedDirtyObjects.end());
-		const bool processAll = dirtyState.fullRefreshRequested || dirtyObjects.empty();
+		const bool processAll = dirtyState.fullRefreshRequested;
 
 		struct TransformWorkItem {
 			SceneGraphObject* object = nullptr;

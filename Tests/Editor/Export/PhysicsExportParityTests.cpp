@@ -185,6 +185,26 @@ namespace TerraEngine::EditorTests {
 				"A fallback collision-layer configuration must be visible in parity evidence.");
 
 			drifted = exported;
+			drifted.gravityYMilliMetresPerSecondSquared = -9810;
+			context.Expect(!EquivalentPhysicsInvariants(play, drifted),
+				"A runtime that silently restores default gravity must fail editor/export physics parity.");
+
+			drifted = exported;
+			drifted.fixedTimeStepMicroseconds = 16667U;
+			context.Expect(!EquivalentPhysicsInvariants(play, drifted),
+				"A runtime that silently restores the default fixed timestep must fail deterministic parity.");
+
+			drifted = exported;
+			drifted.managedBindingsReady = false;
+			context.Expect(!EquivalentPhysicsInvariants(play, drifted),
+				"A missing managed physics bridge must be reported as an editor/export invariant mismatch.");
+
+			drifted = exported;
+			drifted.cookedColliderUsed = false;
+			context.Expect(!EquivalentPhysicsInvariants(play, drifted),
+				"A runtime that bypasses the validated cooked collider must fail export parity.");
+
+			drifted = exported;
 			drifted.activePhysicsJobsAfterDrain = 1U;
 			context.Expect(!EquivalentPhysicsInvariants(play, drifted),
 				"A runtime with active physics work after shutdown must never pass parity.");

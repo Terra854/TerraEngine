@@ -11,6 +11,7 @@
 #include "Scene/TransactionalMutation.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <vector>
@@ -156,6 +157,12 @@ namespace TerraEngine::Scheduling {
 		std::vector<ScheduleDiagnostic> diagnostics;
 		WorkerCoverageReport workerCoverageReport;
 		TerraEngine::Scene::TransactionDiagnostics transactionDiagnostics;
+		// These fields explain whether the optional protected After Physics
+		// boundary is active. Diagnostics can therefore distinguish an omitted
+		// no-op flush from a missing publication boundary.
+		bool afterPhysicsFlushActive = false;
+		std::string afterPhysicsConsumer;
+		std::string afterPhysicsReason;
 		std::string formatted;
 	};
 
@@ -166,6 +173,20 @@ namespace TerraEngine::Scheduling {
 	};
 
 	using MutationFlushCallback = std::function<MutationFlushRuntimeState(const MutationFlushPoint&)>;
+
+	// Physics publishes transforms at After Physics only when a later declared
+	// system consumes flushed scene state in the same frame. Headless or reduced
+	// schedules use Frame End and avoid an otherwise empty protected boundary.
+	struct SameFramePhysicsPublicationState {
+		bool active = false;
+		std::string consumerSystem;
+		std::string reason;
+	};
+
+	void SetSameFramePhysicsPublicationConsumerActive(bool active) noexcept;
+	void SetSameFramePhysicsPublicationState(SameFramePhysicsPublicationState state);
+	[[nodiscard]] bool SameFramePhysicsPublicationConsumerActive() noexcept;
+	[[nodiscard]] SameFramePhysicsPublicationState SameFramePhysicsPublicationStateSnapshot();
 
 	std::vector<SchedulerPhaseDefinition> DefaultSchedulerPhases();
 	std::vector<SchedulerResourceDefinition> DefaultSchedulerResources();
@@ -207,9 +228,15 @@ namespace TerraEngine::Scheduling {
 			SystemsBase* system = nullptr;
 			SystemDeclaration declaration;
 			std::size_t registrationIndex = 0;
+			// The cache owns only stable descriptor metadata. Per-frame callbacks,
+			// activation, readiness, estimates, and immutable inputs are rebound
+			// without rebuilding resource/dependency declarations.
+			std::vector<FrameWorkloadDeclaration> stableWorkloadDescriptors;
+			std::uint64_t stableDescriptorGeneration = 0;
 		};
 
-		std::vector<FrameWorkloadDeclaration> BuildSystemOwnedWorkloadDeclarations(SystemsBase& system, const SystemDeclaration& declaration, float deltaTime, std::size_t executionOrder) const;
+		std::vector<FrameWorkloadDeclaration> BuildSystemOwnedWorkloadDeclarations(RegisteredSystem& registeredSystem, float deltaTime, std::size_t executionOrder);
+		SameFramePhysicsPublicationState ResolveSameFramePhysicsPublicationState() const;
 
 		std::vector<SchedulerPhaseDefinition> phases;
 		std::vector<SchedulerResourceDefinition> resources;

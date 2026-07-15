@@ -128,6 +128,84 @@ namespace TerraEngine::Physics {
 		LinearCast
 	};
 
+	// Provider extraction uses an explicit field mask so a transform publication
+	// does not also pay for velocities, mass, and contact data it will not consume.
+	// Identity and generation fields are mandatory and are therefore not mask bits.
+	enum class PhysicsBodyStateFieldMask : std::uint32_t {
+		None = 0U,
+		Pose = 1U << 0U,
+		LinearVelocity = 1U << 1U,
+		AngularVelocity = 1U << 2U,
+		Mass = 1U << 3U,
+		ContactCount = 1U << 4U,
+		Awake = 1U << 5U,
+		Constraints = 1U << 6U,
+		Characters = 1U << 7U,
+		Events = 1U << 8U,
+		BodyState = (1U << 6U) - 1U,
+		All = (1U << 9U) - 1U
+	};
+
+	constexpr PhysicsBodyStateFieldMask operator|(
+		PhysicsBodyStateFieldMask left,
+		PhysicsBodyStateFieldMask right) noexcept {
+		return static_cast<PhysicsBodyStateFieldMask>(
+			static_cast<std::uint32_t>(left) | static_cast<std::uint32_t>(right));
+	}
+
+	constexpr PhysicsBodyStateFieldMask operator&(
+		PhysicsBodyStateFieldMask left,
+		PhysicsBodyStateFieldMask right) noexcept {
+		return static_cast<PhysicsBodyStateFieldMask>(
+			static_cast<std::uint32_t>(left) & static_cast<std::uint32_t>(right));
+	}
+
+	constexpr PhysicsBodyStateFieldMask& operator|=(
+		PhysicsBodyStateFieldMask& left,
+		PhysicsBodyStateFieldMask right) noexcept {
+		left = left | right;
+		return left;
+	}
+
+	constexpr bool HasPhysicsBodyStateFields(
+		PhysicsBodyStateFieldMask value,
+		PhysicsBodyStateFieldMask required) noexcept {
+		return (value & required) == required;
+	}
+
+	// Change reasons survive provider conversion and let downstream consumers
+	// distinguish a normal pose update from lifecycle or sleep-state transitions.
+	enum class PhysicsBodyStateChangeMask : std::uint16_t {
+		None = 0U,
+		Created = 1U << 0U,
+		Updated = 1U << 1U,
+		Removed = 1U << 2U,
+		Awakened = 1U << 3U,
+		Slept = 1U << 4U,
+		ExplicitlyRequested = 1U << 5U
+	};
+
+	constexpr PhysicsBodyStateChangeMask operator|(
+		PhysicsBodyStateChangeMask left,
+		PhysicsBodyStateChangeMask right) noexcept {
+		return static_cast<PhysicsBodyStateChangeMask>(
+			static_cast<std::uint16_t>(left) | static_cast<std::uint16_t>(right));
+	}
+
+	constexpr PhysicsBodyStateChangeMask operator&(
+		PhysicsBodyStateChangeMask left,
+		PhysicsBodyStateChangeMask right) noexcept {
+		return static_cast<PhysicsBodyStateChangeMask>(
+			static_cast<std::uint16_t>(left) & static_cast<std::uint16_t>(right));
+	}
+
+	constexpr PhysicsBodyStateChangeMask& operator|=(
+		PhysicsBodyStateChangeMask& left,
+		PhysicsBodyStateChangeMask right) noexcept {
+		left = left | right;
+		return left;
+	}
+
 	enum class PhysicsForceMode : std::uint8_t {
 		Force,
 		Acceleration,

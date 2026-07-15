@@ -92,6 +92,9 @@ namespace TerraEngine::Scene {
 		// Transaction receipts let the protected producer acknowledge publication
 		// only after this flush has actually accepted or rejected its full batch.
 		std::vector<TransactionResult> transactionResults;
+		// Group receipts preserve the tick-wide decision while still identifying
+		// each preparation chunk for producer-side acknowledgement.
+		std::vector<TransactionPublicationGroupResult> publicationGroupResults;
 		std::vector<SceneDiagnostic> diagnostics;
 		std::string formattedCommitSummary;
 	};
@@ -108,12 +111,15 @@ namespace TerraEngine::Scene {
 		void Enqueue(SceneMutationRequest request);
 		void EnqueueFromWorker(std::uint32_t workerIndex, SceneMutationRequest request);
 		void EnqueueTransaction(Transaction transaction);
+		void EnqueuePublicationGroup(TransactionPublicationGroup group);
 		TransactionResult PreflightTransaction(const Transaction& transaction, ObjectManager& objects) const;
 		bool CancelTransaction(const std::string& transactionId);
+		bool CancelPublicationGroup(const std::string& groupId);
 		bool Empty() const;
 		std::size_t Size() const;
 		std::vector<SceneMutationRequest> PendingRequests() const;
 		std::vector<Transaction> PendingTransactions() const;
+		std::vector<TransactionPublicationGroup> PendingPublicationGroups() const;
 		// Editor undo needs the complete inverse payload produced at commit time.
 		// Diagnostics intentionally discard that payload, so the editor drains this
 		// short-lived receipt channel at the beginning of its following frame.
@@ -124,11 +130,13 @@ namespace TerraEngine::Scene {
 		SceneMutationBatchResult Apply(ObjectManager& objects);
 		SceneMutationBatchResult Apply(ObjectManager& objects, std::string commitName);
 		std::vector<TransactionResult> DrainTransactions(ObjectManager& objects);
+		std::vector<TransactionPublicationGroupResult> DrainPublicationGroups(ObjectManager& objects);
 
 	private:
 		std::vector<SceneMutationRequest> requests;
 		std::vector<SceneMutationWorkerBuffer> workerBuffers;
 		std::vector<Transaction> transactions;
+		std::vector<TransactionPublicationGroup> publicationGroups;
 		std::vector<TransactionResult> completedEditorTransactionResults;
 		TransactionDiagnostics transactionDiagnostics;
 		mutable std::mutex requestsMutex;

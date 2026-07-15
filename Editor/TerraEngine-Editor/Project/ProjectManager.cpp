@@ -4,13 +4,18 @@
 
 #include "ProjectManager.h"
 #include <array>
+#include <bit>
 #include <fstream>
 #include <chrono>
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <iomanip>
+#include <sstream>
 #include <string>
+#include <vector>
 #include "Engine/Core/Logger/Logger.h"
+#include "Engine/Scene/DerivedSceneCache.h"
 #include "Engine/Scene/SceneManager.h"
 #include "Resource/ResourceStreaming.h"
 
@@ -29,6 +34,127 @@ namespace
 		"EditorLayout.terra",
 		"EditorLayout.ini"
 	};
+
+	std::vector<std::byte> ReadBinaryFile(const fs::path& path, std::string* outError)
+	{
+		std::ifstream input(path, std::ios::binary | std::ios::ate);
+		if (!input)
+		{
+			if (outError != nullptr) *outError = "Could not open '" + path.string() + "'.";
+			return {};
+		}
+		const std::streamsize length = input.tellg();
+		if (length < 0 || static_cast<std::uint64_t>(length) > TerraEngine::Scene::kDerivedSceneMaximumArtifactBytes)
+		{
+			if (outError != nullptr) *outError = "File is empty, unreadable, or exceeds the derived-scene size bound: '" + path.string() + "'.";
+			return {};
+		}
+		input.seekg(0, std::ios::beg);
+		std::vector<std::byte> bytes(static_cast<std::size_t>(length));
+		if (length > 0 && !input.read(reinterpret_cast<char*>(bytes.data()), length))
+		{
+			if (outError != nullptr) *outError = "Could not read all bytes from '" + path.string() + "'.";
+			return {};
+		}
+		return bytes;
+	}
+
+	std::string FormatChecksum(const std::vector<std::byte>& bytes)
+	{
+		std::ostringstream output;
+		output << std::hex << std::setfill('0') << std::setw(16)
+			<< TerraEngine::Scene::CalculateDerivedSceneChecksum(bytes);
+		return output.str();
+	}
+
+	std::string GetDerivedScenePlatformIdentity()
+	{
+#ifdef _WIN32
+		constexpr std::string_view operatingSystem = "Windows";
+#elif defined(__APPLE__)
+		constexpr std::string_view operatingSystem = "macOS";
+#else
+		constexpr std::string_view operatingSystem = "Linux";
+#endif
+		return std::string(operatingSystem) + (sizeof(void*) == 8U ? "-x64" : "-x86");
+	}
+
+	TerraEngine::Scene::DerivedSceneCompatibilityIdentity BuildDerivedSceneIdentity(
+		const fs::path& assetsRoot,
+		const fs::path& sourcePath,
+		const std::vector<std::byte>& sourceBytes)
+	{
+		std::error_code relativeError;
+		const fs::path sourceId = fs::relative(sourcePath, assetsRoot, relativeError);
+		TerraEngine::Scene::DerivedSceneCompatibilityIdentity identity;
+		identity.sourceId = relativeError ? sourcePath.filename().generic_string() : sourceId.generic_string();
+		identity.sourceHash = FormatChecksum(sourceBytes);
+		// The current authored scene has no external section dependency table. Keep
+		// this identity explicit so a later dependency graph can replace it without
+		// weakening validation of existing cache files.
+		identity.dependencyHash = "no-external-derived-dependencies-v1";
+		identity.componentSchemaFingerprint = "terraengine-component-schema-v1";
+		identity.reflectionFingerprint = "terraengine-reflection-schema-v1";
+		identity.engineCompatibility = "TerraEngine-derived-scene-v1";
+		identity.platform = GetDerivedScenePlatformIdentity();
+		identity.byteOrder = std::endian::native == std::endian::little
+			? TerraEngine::Scene::DerivedSceneByteOrder::LittleEndian
+			: TerraEngine::Scene::DerivedSceneByteOrder::BigEndian;
+		return identity;
+	}
+
+	fs::path GetDerivedScenePath(const fs::path& projectRoot, const std::string& sourceId)
+	{
+		fs::path relativeSource(sourceId);
+		fs::path derivedPath = projectRoot / "Library" / "DerivedScenes" / relativeSource;
+		derivedPath += ".bin";
+		return derivedPath.lexically_normal();
+	}
+
+	bool PublishBinaryFileAtomically(const fs::path& finalPath, const std::vector<std::byte>& bytes, std::string* outError)
+	{
+		std::error_code errorCode;
+		fs::create_directories(finalPath.parent_path(), errorCode);
+		if (errorCode)
+		{
+			if (outError != nullptr) *outError = "Could not create the derived-scene directory: " + errorCode.message();
+			return false;
+		}
+		const fs::path stagedPath = finalPath.string() + ".tmp";
+		{
+			std::ofstream output(stagedPath, std::ios::binary | std::ios::trunc);
+			if (!output)
+			{
+				if (outError != nullptr) *outError = "Could not open the derived-scene staging file.";
+				return false;
+			}
+			if (!bytes.empty()) output.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+			output.flush();
+			if (!output)
+			{
+				output.close();
+				fs::remove(stagedPath, errorCode);
+				if (outError != nullptr) *outError = "Could not flush the complete derived-scene staging file.";
+				return false;
+			}
+		}
+
+		bool published = false;
+#ifdef _WIN32
+		published = MoveFileExW(stagedPath.c_str(), finalPath.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
+		if (!published) errorCode = std::error_code(static_cast<int>(GetLastError()), std::system_category());
+#else
+		fs::rename(stagedPath, finalPath, errorCode);
+		published = !errorCode;
+#endif
+		if (!published)
+		{
+			std::error_code cleanupError;
+			fs::remove(stagedPath, cleanupError);
+			if (outError != nullptr) *outError = "Could not atomically publish the derived scene: " + errorCode.message();
+		}
+		return published;
+	}
 
 	fs::path ResolveProjectTemplateRoot()
 	{
@@ -473,8 +599,21 @@ bool ProjectManager::LoadProject(const fs::path& location, std::string* outError
 		nlohmann::json j;
 		file >> j;
 		currentSettings = j.get<ProjectSettings>();
+		// A successfully validated project replaces the prior lifecycle generation.
+		// Worker decode jobs holding the older value will cancel before publication.
+		projectClosing.store(true, std::memory_order_release);
+		const std::uint64_t activeGeneration = projectLoadGeneration.fetch_add(1U, std::memory_order_acq_rel) + 1U;
 		projectRoot = projectDir;
 		isProjectLoaded = true;
+		projectClosing.store(false, std::memory_order_release);
+		{
+			std::scoped_lock readinessLock(readinessMutex);
+			lastSceneLoadDecision = {};
+			readinessState = {};
+			readinessState.projectGeneration = activeGeneration;
+			readinessState.projectSettingsReady = true;
+			readinessState.editorMetadataDeferred = true;
+		}
 		rendererRecoveryActionState.canSaveProjectData = true;
 		rendererRecoveryActionState.lastSafeSaveRoot = projectRoot;
 		rendererRecoveryActionState.lastSafeSaveMessage.clear();
@@ -515,15 +654,253 @@ bool ProjectManager::LoadProject(const fs::path& location, std::string* outError
 	}
 }
 
+bool ProjectManager::PrepareSceneForLoading(const fs::path& scenePath, ProjectSceneLoadDecision& outDecision, std::string* outError)
+{
+	outDecision = {};
+	if (!isProjectLoaded || projectClosing.load(std::memory_order_acquire))
+	{
+		if (outError != nullptr) *outError = "A project must remain open while its scene is prepared.";
+		return false;
+	}
+
+	const std::uint64_t requestedGeneration = projectLoadGeneration.load(std::memory_order_acquire);
+	const auto cancellationRequested = [this, requestedGeneration]()
+	{
+		return projectClosing.load(std::memory_order_acquire)
+			|| projectLoadGeneration.load(std::memory_order_acquire) != requestedGeneration;
+	};
+	const fs::path assetsRoot = (projectRoot / "Assets").lexically_normal();
+	const fs::path sourcePath = (scenePath.is_absolute() ? scenePath : assetsRoot / scenePath).lexically_normal();
+	std::error_code relativeError;
+	const fs::path relativeSource = fs::relative(sourcePath, assetsRoot, relativeError);
+	if (relativeError || relativeSource.empty() || *relativeSource.begin() == "..")
+	{
+		if (outError != nullptr) *outError = "The requested scene must resolve beneath the active project's Assets directory.";
+		return false;
+	}
+
+	std::string sourceReadError;
+	const std::vector<std::byte> sourceBytes = ReadBinaryFile(sourcePath, &sourceReadError);
+	if (sourceBytes.empty())
+	{
+		if (outError != nullptr) *outError = sourceReadError.empty() ? "The authored scene is empty." : sourceReadError;
+		return false;
+	}
+	const TerraEngine::Scene::DerivedSceneCompatibilityIdentity identity = BuildDerivedSceneIdentity(assetsRoot, sourcePath, sourceBytes);
+	const fs::path derivedPath = GetDerivedScenePath(projectRoot, identity.sourceId);
+	outDecision.projectGeneration = requestedGeneration;
+	outDecision.sourcePath = sourcePath;
+	outDecision.derivedPath = derivedPath;
+
+	std::string derivedMissReason = "derived scene is missing";
+	if (fs::exists(derivedPath) && !cancellationRequested())
+	{
+		std::string derivedReadError;
+		const std::vector<std::byte> encoded = ReadBinaryFile(derivedPath, &derivedReadError);
+		std::string decodeError;
+		const std::optional<TerraEngine::Scene::DerivedSceneEnvelope> envelope =
+			TerraEngine::Scene::DecodeDerivedSceneEnvelope(encoded, &decodeError);
+		if (envelope.has_value())
+		{
+			const TerraEngine::Scene::DerivedSceneDecodeResult derived =
+				TerraEngine::Scene::PrepareDerivedSceneSections(*envelope, identity, cancellationRequested);
+			if (derived.accepted)
+			{
+				const auto objectsSection = std::find_if(derived.sections.begin(), derived.sections.end(), [](const auto& section)
+				{
+					return section.descriptor.type == TerraEngine::Scene::DerivedSceneSectionType::Objects;
+				});
+				if (objectsSection != derived.sections.end())
+				{
+					std::vector<std::uint8_t> cbor;
+					cbor.reserve(objectsSection->payload.size());
+					for (const std::byte value : objectsSection->payload) cbor.push_back(std::to_integer<std::uint8_t>(value));
+					nlohmann::json cachedDocument = nlohmann::json::from_cbor(cbor, true, false);
+					if (!cachedDocument.is_discarded())
+					{
+						TerraEngine::Scene::PreparedSceneDecode prepared = Serializer::PrepareSceneDecode(cachedDocument, cancellationRequested);
+						if (prepared.accepted)
+						{
+							outDecision.prepared = true;
+							outDecision.cacheHit = true;
+							outDecision.cacheState = "derived-hit";
+							outDecision.reason = "compatible checksummed derived scene reused";
+							outDecision.sceneDocument = std::move(cachedDocument);
+							outDecision.preparedScene = std::move(prepared);
+						}
+						else derivedMissReason = prepared.reason;
+					}
+					else derivedMissReason = "derived scene object section contains invalid CBOR";
+				}
+				else derivedMissReason = "derived scene object section is missing";
+			}
+			else
+			{
+				derivedMissReason = derived.reason;
+				outDecision.cancelled = derived.cancelled;
+			}
+		}
+		else derivedMissReason = decodeError.empty() ? derivedReadError : decodeError;
+	}
+
+	if (!outDecision.prepared)
+	{
+		if (cancellationRequested())
+		{
+			outDecision.cancelled = true;
+			outDecision.cacheState = "cancelled";
+			outDecision.reason = "scene preparation was cancelled by project close or replacement";
+		}
+		else
+		{
+			const std::string authoredText(reinterpret_cast<const char*>(sourceBytes.data()), sourceBytes.size());
+			nlohmann::json authoredDocument = nlohmann::json::parse(authoredText, nullptr, false);
+			if (authoredDocument.is_discarded())
+			{
+				if (outError != nullptr) *outError = "The authoritative scene JSON is invalid: '" + sourcePath.string() + "'.";
+				return false;
+			}
+			TerraEngine::Scene::PreparedSceneDecode prepared = Serializer::PrepareSceneDecode(authoredDocument, cancellationRequested);
+			if (!prepared.accepted)
+			{
+				outDecision.cancelled = prepared.cancelled;
+				if (outError != nullptr) *outError = prepared.reason;
+				return false;
+			}
+			outDecision.prepared = true;
+			outDecision.usedAuthoritativeSource = true;
+			outDecision.cacheState = "source-fallback";
+			outDecision.reason = derivedMissReason;
+			outDecision.sceneDocument = std::move(authoredDocument);
+			outDecision.preparedScene = std::move(prepared);
+
+			// Cache publication is best effort. The authoritative source has already
+			// prepared successfully, so an unavailable Library directory cannot make
+			// the project or scene fail to open.
+			const std::vector<std::uint8_t> cbor = nlohmann::json::to_cbor(outDecision.sceneDocument);
+			TerraEngine::Scene::DerivedSceneSection objectSection;
+			objectSection.descriptor.type = TerraEngine::Scene::DerivedSceneSectionType::Objects;
+			objectSection.descriptor.itemCount = outDecision.preparedScene.objectCount;
+			objectSection.payload.reserve(cbor.size());
+			for (const std::uint8_t value : cbor) objectSection.payload.push_back(static_cast<std::byte>(value));
+			objectSection.descriptor.storedBytes = objectSection.payload.size();
+			objectSection.descriptor.decodedBytes = objectSection.payload.size();
+			objectSection.descriptor.checksum = TerraEngine::Scene::CalculateDerivedSceneChecksum(objectSection.payload);
+
+			TerraEngine::Scene::DerivedSceneEnvelope envelope;
+			envelope.manifest.identity = identity;
+			envelope.manifest.objectCount = outDecision.preparedScene.objectCount;
+			envelope.manifest.componentCount = outDecision.preparedScene.componentCount;
+			envelope.manifest.hierarchyCount = outDecision.preparedScene.hierarchyCount;
+			envelope.manifest.payloadChecksum = objectSection.descriptor.checksum;
+			envelope.manifest.createdBy = "TerraEngine ProjectManager";
+			envelope.sections.push_back(objectSection);
+			envelope.manifest.sections.push_back(objectSection.descriptor);
+			const std::vector<std::byte> encoded = TerraEngine::Scene::EncodeDerivedSceneEnvelope(envelope);
+			std::string verificationError;
+			const auto verificationEnvelope = TerraEngine::Scene::DecodeDerivedSceneEnvelope(encoded, &verificationError);
+			const bool verified = verificationEnvelope.has_value()
+				&& TerraEngine::Scene::ValidateDerivedSceneEnvelope(*verificationEnvelope, identity).accepted;
+			if (verified && !cancellationRequested())
+			{
+				std::string publishError;
+				outDecision.regenerationPublished = PublishBinaryFileAtomically(derivedPath, encoded, &publishError);
+				if (!outDecision.regenerationPublished && !publishError.empty()) outDecision.reason += "; regeneration: " + publishError;
+			}
+			else if (!verificationError.empty()) outDecision.reason += "; regeneration validation: " + verificationError;
+		}
+	}
+
+	if (!outDecision.prepared)
+	{
+		if (outError != nullptr) *outError = outDecision.reason;
+		return false;
+	}
+
+	{
+		std::scoped_lock readinessLock(readinessMutex);
+		// Retain only compact decision evidence; copying a 10,000-object document
+		// into project status would defeat the cache's memory benefit.
+		lastSceneLoadDecision = {};
+		lastSceneLoadDecision.prepared = outDecision.prepared;
+		lastSceneLoadDecision.cacheHit = outDecision.cacheHit;
+		lastSceneLoadDecision.usedAuthoritativeSource = outDecision.usedAuthoritativeSource;
+		lastSceneLoadDecision.regenerationPublished = outDecision.regenerationPublished;
+		lastSceneLoadDecision.cancelled = outDecision.cancelled;
+		lastSceneLoadDecision.projectGeneration = outDecision.projectGeneration;
+		lastSceneLoadDecision.sourcePath = outDecision.sourcePath;
+		lastSceneLoadDecision.derivedPath = outDecision.derivedPath;
+		lastSceneLoadDecision.cacheState = outDecision.cacheState;
+		lastSceneLoadDecision.reason = outDecision.reason;
+		readinessState.sceneReadinessSource = outDecision.cacheHit ? "derived" : "source";
+		readinessState.sceneReadinessReason = outDecision.reason;
+	}
+	if (outError != nullptr) outError->clear();
+	return true;
+}
+
+std::uint64_t ProjectManager::GetProjectLoadGeneration() const
+{
+	return projectLoadGeneration.load(std::memory_order_acquire);
+}
+
+bool ProjectManager::IsProjectLoadGenerationCurrent(std::uint64_t generation) const
+{
+	return !projectClosing.load(std::memory_order_acquire)
+		&& projectLoadGeneration.load(std::memory_order_acquire) == generation;
+}
+
+ProjectSceneLoadDecision ProjectManager::GetLastSceneLoadDecision() const
+{
+	std::scoped_lock readinessLock(readinessMutex);
+	return lastSceneLoadDecision;
+}
+
+ProjectReadinessState ProjectManager::GetReadinessState() const
+{
+	std::scoped_lock readinessLock(readinessMutex);
+	return readinessState;
+}
+
+void ProjectManager::MarkSimulationEssentialReady(const ProjectSceneLoadDecision& decision)
+{
+	std::scoped_lock readinessLock(readinessMutex);
+	if (decision.prepared && decision.projectGeneration == readinessState.projectGeneration)
+	{
+		readinessState.simulationEssentialReady = true;
+		readinessState.editorMetadataDeferred = true;
+		readinessState.sceneReadinessSource = decision.cacheHit ? "derived" : "source";
+		readinessState.sceneReadinessReason = decision.reason;
+	}
+}
+
+void ProjectManager::MarkEditorMetadataReady()
+{
+	std::scoped_lock readinessLock(readinessMutex);
+	if (readinessState.simulationEssentialReady)
+	{
+		readinessState.editorMetadataDeferred = false;
+		readinessState.editorMetadataReady = true;
+	}
+}
+
 // ProjectManager::CloseProject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ProjectManager::CloseProject() {
 	if (isProjectLoaded) {
+		// Invalidate worker-prepared scene packets before any project paths or
+		// settings are cleared. A late job then rejects atomically at publication.
+		projectClosing.store(true, std::memory_order_release);
+		projectLoadGeneration.fetch_add(1U, std::memory_order_acq_rel);
 		SaveProjectSettings();
 		isProjectLoaded = false;
 		currentSettings.reset();
 		projectRoot.clear();
 		rendererRecoveryActionState.canSaveProjectData = false;
 		rendererRecoveryActionState.lastSafeSaveMessage = "No active project is available for renderer-recovery save.";
+		std::scoped_lock readinessLock(readinessMutex);
+		lastSceneLoadDecision = {};
+		readinessState = {};
+		readinessState.projectGeneration = projectLoadGeneration.load(std::memory_order_acquire);
 	}
 }
 
@@ -665,11 +1042,34 @@ void ProjectManager::SetRendererDiagnosticPreferences(bool vulkanValidationLayer
 	SaveEditorPreferences();
 }
 
-void ProjectManager::SetSceneViewOverlayPreference(const TerraEngine::Editor::SceneViewOverlay::SceneOverlayPreference& preference) {
+bool ProjectManager::SetSceneViewOverlayPreference(const TerraEngine::Editor::SceneViewOverlay::SceneOverlayPreference& preference, std::string* outError) {
 	// Scene View overlay options are editor preferences, not scene data, so
 	// changing gizmo/icon visibility never dirties the active project or export.
-	editorPrefs.sceneViewOverlay = TerraEngine::Editor::SceneViewOverlay::SanitizePreference(preference);
-	SaveEditorPreferences();
+	// Keep the old value until both complete validation and staged persistence
+	// succeed, so rejected updates cannot leak a partially changed live state.
+	EditorPreferences candidate = editorPrefs;
+	std::string validationError;
+	if (!TerraEngine::Editor::Settings::TryReplaceSceneViewOverlayPreference(candidate, preference, validationError)) {
+		if (outError != nullptr) {
+			*outError = validationError;
+		}
+		return false;
+	}
+
+	EditorPreferences previous = editorPrefs;
+	editorPrefs = std::move(candidate);
+	std::string persistenceError;
+	if (!SaveEditorPreferences(&persistenceError)) {
+		editorPrefs = std::move(previous);
+		if (outError != nullptr) {
+			*outError = persistenceError;
+		}
+		return false;
+	}
+	if (outError != nullptr) {
+		outError->clear();
+	}
+	return true;
 }
 
 // ProjectManager::SaveProjectSettings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -688,14 +1088,80 @@ void ProjectManager::SaveProjectSettings() {
 }
 
 // ProjectManager::SaveEditorPreferences is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void ProjectManager::SaveEditorPreferences() {
+bool ProjectManager::SaveEditorPreferences(std::string* outError) {
 	const fs::path preferencesPath = ResolveEditorPreferencesPath();
+	std::error_code errorCode;
 	if (!preferencesPath.parent_path().empty()) {
-		fs::create_directories(preferencesPath.parent_path());
+		fs::create_directories(preferencesPath.parent_path(), errorCode);
+		if (errorCode) {
+			if (outError != nullptr) {
+				*outError = "Editor preference directory could not be created: " + errorCode.message();
+			}
+			return false;
+		}
 	}
-	std::ofstream file(preferencesPath);
-	nlohmann::json j = editorPrefs;
-	file << j.dump(4);
+
+	const fs::path stagedPath = preferencesPath.string() + ".tmp";
+	std::string serializedPreferences;
+	try {
+		// Serialize before opening the staging file. If a future preference type
+		// rejects serialization, the prior final document and staging path remain
+		// untouched.
+		serializedPreferences = nlohmann::json(editorPrefs).dump(4);
+	} catch (const std::exception& exception) {
+		if (outError != nullptr) {
+			*outError = std::string("Editor preferences could not be serialized: ") + exception.what();
+		}
+		return false;
+	}
+	{
+		std::ofstream file(stagedPath, std::ios::binary | std::ios::trunc);
+		if (!file) {
+			if (outError != nullptr) {
+				*outError = "Editor preference staging file could not be opened.";
+			}
+			return false;
+		}
+		file << serializedPreferences;
+		file.flush();
+		if (!file) {
+			file.close();
+			fs::remove(stagedPath, errorCode);
+			if (outError != nullptr) {
+				*outError = "Editor preference staging file could not be written completely.";
+			}
+			return false;
+		}
+	}
+
+	// The staged file is complete before this single-file publication boundary.
+	// MoveFileEx replaces in one filesystem operation on Windows; POSIX rename
+	// provides the matching same-directory replacement behavior elsewhere.
+	bool published = false;
+#ifdef _WIN32
+	published = MoveFileExW(
+		stagedPath.c_str(),
+		preferencesPath.c_str(),
+		MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
+	if (!published) {
+		errorCode = std::error_code(static_cast<int>(GetLastError()), std::system_category());
+	}
+#else
+	fs::rename(stagedPath, preferencesPath, errorCode);
+	published = !errorCode;
+#endif
+	if (!published) {
+		std::error_code cleanupError;
+		fs::remove(stagedPath, cleanupError);
+		if (outError != nullptr) {
+			*outError = "Editor preferences could not be atomically published: " + errorCode.message();
+		}
+		return false;
+	}
+	if (outError != nullptr) {
+		outError->clear();
+	}
+	return true;
 }
 
 bool ProjectManager::SaveProjectDataForRendererRecovery(std::string* outError) {

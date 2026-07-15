@@ -3,6 +3,8 @@
 #pragma once
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
+#include <deque>
 #include <functional>
 #include <future>
 #include <iostream>
@@ -15,6 +17,58 @@
 #include <vector>
 
 class ThreadPool;
+
+// ThreadPoolWorkerActivity describes the worker's state at the instant an
+// immutable telemetry snapshot is captured. Timing counters below retain the
+// completed history, while this value explains what the worker is doing now.
+enum class ThreadPoolWorkerActivity : std::uint8_t {
+	Starting,
+	Idle,
+	Running,
+	Stopped
+};
+
+// ThreadPoolWorkerTelemetrySample is one completed dispatch. Queue depth at
+// enqueue travels with the queued task, so the worker that eventually claims
+// the task can publish both queue observations without guessing ownership.
+struct ThreadPoolWorkerTelemetrySample {
+	std::uint64_t sequence = 0;
+	std::size_t workerIndex = 0;
+	std::size_t queueDepthAtEnqueue = 0;
+	std::size_t queueDepthAtStart = 0;
+	std::uint64_t usefulItemCount = 0;
+	std::uint64_t waitNanoseconds = 0;
+	std::uint64_t runNanoseconds = 0;
+	std::uint64_t idleNanoseconds = 0;
+};
+
+// ThreadPoolWorkerTelemetry contains cumulative counters and a bounded copy of
+// recent dispatches for one worker. Callers receive this data only through a
+// const snapshot, never through the mutable counters updated by worker threads.
+struct ThreadPoolWorkerTelemetry {
+	std::size_t workerIndex = 0;
+	ThreadPoolWorkerActivity activity = ThreadPoolWorkerActivity::Starting;
+	std::size_t latestQueueDepthAtEnqueue = 0;
+	std::size_t latestQueueDepthAtStart = 0;
+	std::uint64_t dispatchCount = 0;
+	std::uint64_t usefulItemCount = 0;
+	std::uint64_t waitNanoseconds = 0;
+	std::uint64_t runNanoseconds = 0;
+	std::uint64_t idleNanoseconds = 0;
+	std::uint64_t droppedHistorySampleCount = 0;
+	std::vector<ThreadPoolWorkerTelemetrySample> history;
+};
+
+// ThreadPoolTelemetrySnapshot is an immutable, internally consistent view of
+// all worker counters. The sampling interval and history limit make omitted and
+// overwritten detail explicit instead of silently presenting partial evidence.
+struct ThreadPoolTelemetrySnapshot {
+	std::uint64_t generation = 0;
+	std::uint32_t samplingIntervalDispatches = 1;
+	std::size_t historyCapacityPerWorker = 0;
+	std::uint64_t droppedHistorySampleCount = 0;
+	std::vector<ThreadPoolWorkerTelemetry> workers;
+};
 
 // Interface for a task
 // struct ITask groups related state and operations so callers have one documented contract.
@@ -120,6 +174,8 @@ struct Task : public ITask, public std::enable_shared_from_this<Task<ReturnType>
 // class ThreadPool groups related state and operations so callers have one documented contract.
 class ThreadPool {
 public:
+	static constexpr std::size_t kMaximumTelemetryHistoryCapacityPerWorker = 256;
+
 	static ThreadPool& instance();
 
 	ThreadPool(const ThreadPool&) = delete;
@@ -147,7 +203,9 @@ public:
 		}
 	}
 
-	void enqueue(std::shared_ptr<ITask> weakTask);
+	// usefulItemCount records how much caller-visible work the dispatch owns.
+	// A zero value remains visible so diagnostics can identify useless dispatches.
+	void enqueue(std::shared_ptr<ITask> weakTask, std::uint64_t usefulItemCount = 1);
 	void completeTask(std::shared_ptr<ITask> completedTask);
 
 	std::shared_ptr<Task<void>> AllocateVoidTask(std::function<void()> func);
@@ -156,14 +214,51 @@ public:
 	// getThreadCount is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	size_t getThreadCount() const { return workers.size(); }
 
+	// ConfigureTelemetrySampling changes only diagnostic retention. Capacity is
+	// always clamped to the public hard maximum so long sessions stay bounded.
+	void ConfigureTelemetrySampling(std::uint32_t dispatchInterval, std::size_t historyCapacityPerWorker);
+	void ResetTelemetry();
+	[[nodiscard]] std::shared_ptr<const ThreadPoolTelemetrySnapshot> GetTelemetrySnapshot() const;
+
 private:
 	ThreadPool() : stop(false) {}
 	~ThreadPool() {}
 
 	void workerThread(int threadNum);
+	void ResetTelemetryForWorkers(std::size_t workerCount);
+	void RecordWorkerActivity(std::size_t workerIndex, ThreadPoolWorkerActivity activity, std::uint64_t idleNanoseconds = 0);
+	void RecordWorkerTaskStarted(
+		std::size_t workerIndex,
+		std::size_t queueDepthAtEnqueue,
+		std::size_t queueDepthAtStart,
+		std::uint64_t usefulItemCount,
+		std::uint64_t waitNanoseconds,
+		std::uint64_t idleNanoseconds);
+	void RecordWorkerTaskFinished(
+		std::size_t workerIndex,
+		std::size_t queueDepthAtEnqueue,
+		std::size_t queueDepthAtStart,
+		std::uint64_t usefulItemCount,
+		std::uint64_t waitNanoseconds,
+		std::uint64_t idleNanoseconds,
+		std::uint64_t runNanoseconds);
+
+	// QueuedTask preserves diagnostic facts captured under the queue lock. The
+	// callable remains independent of telemetry and keeps existing task behavior.
+	struct QueuedTask {
+		std::function<void()> execute;
+		std::size_t queueDepthAtEnqueue = 0;
+		std::uint64_t usefulItemCount = 0;
+		std::uint64_t enqueueNanoseconds = 0;
+	};
+
+	struct MutableWorkerTelemetry {
+		ThreadPoolWorkerTelemetry counters;
+		std::deque<ThreadPoolWorkerTelemetrySample> history;
+	};
 
 	std::vector<std::thread> workers;
-	std::queue<std::function<void()>> tasks;
+	std::queue<QueuedTask> tasks;
 
 	std::mutex queue_mutex;
 	std::condition_variable condition;
@@ -171,4 +266,12 @@ private:
 	
 	std::vector<Task<void>*> voidTaskPool;
 	std::mutex poolMutex;
+
+	mutable std::mutex telemetryMutex;
+	std::vector<MutableWorkerTelemetry> workerTelemetry;
+	std::uint64_t telemetryGeneration = 0;
+	std::uint64_t telemetrySequence = 0;
+	std::uint64_t droppedTelemetryHistorySamples = 0;
+	std::uint32_t telemetrySamplingIntervalDispatches = 1;
+	std::size_t telemetryHistoryCapacityPerWorker = kMaximumTelemetryHistoryCapacityPerWorker;
 };

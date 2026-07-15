@@ -94,7 +94,72 @@ namespace TerraEngine::Physics {
 		std::uint64_t hitCount = 0, missCount = 0, publicationCount = 0, retirementCount = 0;
 	};
 	struct PhysicsDiagnosticsQueues { std::uint64_t commandDepth = 0, queryDepth = 0, eventDepth = 0; };
-	struct PhysicsSchedulerDeclaration { std::string workload, phase, reads, writes, boundary; bool workerSafe = false; };
+	struct PhysicsSchedulerDeclaration {
+		std::string workload, phase, reads, writes, boundary;
+		bool workerSafe = false;
+		// Activation and dependency facts mirror the stable scheduler descriptor
+		// without retaining its callbacks or mutable frame inputs.
+		bool active = true;
+		std::string activationReason;
+		std::string dependencies;
+		std::uint64_t estimatedItems = 0U;
+	};
+
+	// Incremental-pipeline diagnostics describe work volume rather than only the
+	// final body count. All fields are copied values so editor and automation
+	// readers never retain an authoring snapshot, provider range, or transaction.
+	struct PhysicsAuthoringDiagnostics {
+		std::uint64_t authoringGeneration = 0U, snapshotGeneration = 0U, assetJournalGeneration = 0U;
+		std::uint64_t changedObjects = 0U, added = 0U, removed = 0U, transforms = 0U;
+		std::uint64_t bodyComponents = 0U, colliderComponents = 0U, hierarchyDependencies = 0U;
+		std::uint64_t colliderAssets = 0U, materialAssets = 0U, settings = 0U, lifecycle = 0U;
+		std::uint64_t assetObservations = 0U;
+		bool snapshotReused = false;
+		bool fullAssetRefresh = false;
+	};
+
+	struct PhysicsPreparationDiagnostics {
+		std::string executionPath = "fast";
+		std::uint64_t estimatedWorkItems = 0U, rangeCount = 0U;
+		std::uint64_t creates = 0U, removals = 0U, updates = 0U, dependencyRebuilds = 0U;
+		std::uint64_t scratchActiveItems = 0U, scratchHighWatermark = 0U;
+		std::uint64_t scratchAllocations = 0U, scratchReuses = 0U;
+		bool rejected = false;
+		std::string failure;
+	};
+
+	struct PhysicsExtractionDiagnostics {
+		std::uint64_t providerOrderGeneration = 0U;
+		std::uint64_t totalBodies = 0U, activeBodies = 0U, examinedBodies = 0U;
+		std::uint64_t extractedBodies = 0U, convertedBodies = 0U, changedBodies = 0U, removedBodies = 0U;
+		std::uint64_t rangeCount = 0U;
+		std::uint32_t fieldMask = 0U;
+		bool fullState = false, parallelReads = false, serialFallback = false, eventDrain = false;
+	};
+
+	struct PhysicsStateStoreDiagnostics {
+		std::uint64_t storeGeneration = 0U, providerOrderGeneration = 0U;
+		std::uint64_t publicationCount = 0U, rejectedBatchCount = 0U;
+		std::uint64_t pageCount = 0U, pagesReused = 0U, pagesCopied = 0U;
+		std::uint64_t bodyCount = 0U, retainedBytes = 0U;
+	};
+
+	struct PhysicsPublicationDiagnostics {
+		std::uint64_t preparedPackets = 0U, acceptedPackets = 0U, rejectedPackets = 0U;
+		std::uint64_t acknowledgedEntries = 0U, emptyPacketsSkipped = 0U;
+		std::uint64_t currentEntries = 0U, currentChunks = 0U, pendingGroups = 0U;
+		std::string targetBoundary = "frame_end";
+		std::string lastFailure;
+	};
+
+	struct PhysicsDiagnosticsRate {
+		std::uint32_t aggregateIntervalFrames = 1U;
+		PhysicsTick lastAggregateTick = 0U;
+		bool aggregateRefreshed = true;
+		// Health and failure fields are always current even when aggregate work
+		// volume is intentionally held at the configured publication cadence.
+		bool currentHealthPublished = true;
+	};
 
 	struct PhysicsDiagnosticsSnapshot {
 		PhysicsWorldHandle world;
@@ -105,8 +170,22 @@ namespace TerraEngine::Physics {
 		PhysicsDiagnosticsMemory memory;
 		PhysicsDiagnosticsCache cache;
 		PhysicsDiagnosticsQueues queues;
+		PhysicsAuthoringDiagnostics authoring;
+		PhysicsPreparationDiagnostics preparation;
+		PhysicsExtractionDiagnostics extraction;
+		PhysicsStateStoreDiagnostics stateStore;
+		PhysicsPublicationDiagnostics publication;
+		PhysicsDiagnosticsRate rate;
 		std::shared_ptr<const std::vector<PhysicsSchedulerDeclaration>> scheduler;
 	};
+
+	// Aggregate counters may be rate limited, but a failure always forces a new
+	// aggregate so a slow diagnostics cadence can never hide current health.
+	[[nodiscard]] bool ShouldRefreshPhysicsAggregateDiagnostics(
+		PhysicsTick tick,
+		std::uint32_t intervalFrames,
+		PhysicsTick lastAggregateTick,
+		bool currentFailure) noexcept;
 
 	// Diagnostics consumers obtain a copied shared snapshot, never a world or
 	// mutable counter reference. Publishing is performed by PhysicsSystem only.

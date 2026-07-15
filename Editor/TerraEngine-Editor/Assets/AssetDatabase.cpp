@@ -53,6 +53,18 @@ namespace {
 	constexpr const char* kPhysicsColliderCompilerName = "TerraEnginePhysicsColliderCompiler";
 #endif
 
+	std::optional<TerraEngine::Physics::PhysicsAssetKind> PhysicsAssetKindForImporter(
+		std::string_view importerName) {
+		if(importerName == "PhysicsColliderRecipeImporter"
+			|| importerName == "CookedColliderImporter") {
+			return TerraEngine::Physics::PhysicsAssetKind::CookedCollider;
+		}
+		if(importerName == "PhysicsMaterialImporter") {
+			return TerraEngine::Physics::PhysicsAssetKind::Material;
+		}
+		return std::nullopt;
+	}
+
 	std::string StableAssetOrganizationFingerprint(std::string_view value) {
 		// FNV-1a is deterministic across editor launches, unlike std::hash whose
 		// persistence guarantees are implementation-defined.
@@ -731,6 +743,9 @@ AssetDatabase::~AssetDatabase() {}
 
 // AssetDatabase::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void AssetDatabase::Initialize(const std::filesystem::path& projectRootPath) {
+	// A project boundary invalidates prior dependency observations before the new
+	// index begins publishing its initial collider and material registrations.
+	TerraEngine::Physics::PhysicsAssetChangeJournal::Instance().BeginSourceEpoch();
 	this->projectRoot = std::filesystem::absolute(projectRootPath);
 	this->assetRoot = this->projectRoot / "Assets";
 	this->buildRoot = this->projectRoot / "Build" / "Assets";
@@ -1243,6 +1258,16 @@ void AssetDatabase::FinishImport(const AssetMetadata& metadata, const std::files
 }
 
 void AssetDatabase::RegisterImportedAsset(const AssetMetadata& metadata, const std::filesystem::path& absSourcePath, bool needsImport) {
+	bool assetAlreadyKnown = false;
+	std::optional<AssetMetadata> previousMetadata;
+	for(const auto& [path, registered] : assets) {
+		(void)path;
+		if(registered.guid == metadata.guid) {
+			assetAlreadyKnown = true;
+			previousMetadata = registered;
+			break;
+		}
+	}
 	// Asset GUIDs must stay one-to-one with their live source path. Rename
 	// operations can briefly surface the same GUID under both the old and new
 	// path, and keeping the stale entry makes GUID lookups return outdated
@@ -1303,6 +1328,32 @@ void AssetDatabase::RegisterImportedAsset(const AssetMetadata& metadata, const s
 		// reference descriptor sets that a package reimport just updated or freed.
 		RegisterGeneratedModelPackageResources(absSourcePath, buildRoot);
 	}
+
+	const auto oldPhysicsKind = previousMetadata
+		? PhysicsAssetKindForImporter(previousMetadata->importerName)
+		: std::nullopt;
+	const auto newPhysicsKind = PhysicsAssetKindForImporter(metadata.importerName);
+	if(oldPhysicsKind && (!newPhysicsKind || *oldPhysicsKind != *newPhysicsKind)) {
+		PublishPhysicsAssetChange(*previousMetadata,
+			TerraEngine::Physics::PhysicsAssetChangeKind::Removed);
+	}
+	if(newPhysicsKind && (!assetAlreadyKnown || !oldPhysicsKind || *oldPhysicsKind != *newPhysicsKind)) {
+		PublishPhysicsAssetChange(metadata, TerraEngine::Physics::PhysicsAssetChangeKind::Added);
+	} else if(newPhysicsKind && needsImport) {
+		PublishPhysicsAssetChange(metadata, TerraEngine::Physics::PhysicsAssetChangeKind::Updated);
+	}
+}
+
+void AssetDatabase::PublishPhysicsAssetChange(
+	const AssetMetadata& metadata,
+	TerraEngine::Physics::PhysicsAssetChangeKind changeKind) {
+	const auto kind = PhysicsAssetKindForImporter(metadata.importerName);
+	if(!kind || metadata.guid == TerraEngine::EMPTY_UUID) return;
+	// Publication occurs only after the main-thread ResourceManager alias update
+	// or removal has completed, so physics never observes a generation whose
+	// corresponding compiled resource is still half-published.
+	TerraEngine::Physics::PhysicsAssetChangeJournal::Instance().Publish(
+		metadata.guid, *kind, changeKind);
 }
 
 bool AssetDatabase::LoadAssetIndex() {
@@ -2429,7 +2480,9 @@ void AssetDatabase::RemoveAsset(const std::filesystem::path& sourcePath) {
 	auto it = assets.find(absPath);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (it != assets.end()) {
-		const auto& metadata = it->second;
+		// Keep a value copy because publication happens after erasing the map entry.
+		// Retaining a reference here would make the journal read freed metadata.
+		const AssetMetadata metadata = it->second;
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (metadata.importerName == "ScriptImporter") {
@@ -2471,6 +2524,7 @@ void AssetDatabase::RemoveAsset(const std::filesystem::path& sourcePath) {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (std::filesystem::exists(meta)) std::filesystem::remove(meta, ec);
 		assets.erase(it);
+		PublishPhysicsAssetChange(metadata, TerraEngine::Physics::PhysicsAssetChangeKind::Removed);
 		RequestAssetIndexSave();
 	}
 }
@@ -2484,6 +2538,15 @@ const AssetMetadata* AssetDatabase::FindAssetByGuid(const TerraEngine::UUID& gui
 	}
 
 	return nullptr;
+}
+
+TerraEngine::Physics::PhysicsAssetChangeSnapshot AssetDatabase::GetPhysicsAssetChangesSince(
+	TerraEngine::Physics::PhysicsAssetGeneration observedGeneration) const {
+	return TerraEngine::Physics::PhysicsAssetChangeJournal::Instance().SnapshotSince(observedGeneration);
+}
+
+TerraEngine::Physics::PhysicsAssetGeneration AssetDatabase::GetPhysicsAssetChangeGeneration() const {
+	return TerraEngine::Physics::PhysicsAssetChangeJournal::Instance().CurrentGeneration();
 }
 
 bool AssetDatabase::TryGetGeneratedModelPackageChildDisplayName(

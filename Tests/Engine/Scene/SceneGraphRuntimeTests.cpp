@@ -3,6 +3,7 @@
 
 #include "Core/Object/ObjectManager.h"
 #include "Components/Transform.h"
+#include "Scene/SceneChangePacket.h"
 #include "Scene/SceneGraphRuntime.h"
 #include "Scene/Serializer.h"
 
@@ -17,6 +18,17 @@ namespace TerraEngine::Tests {
 		{
 			constexpr float kTolerance = 0.001f;
 			return glm::length(lhs - rhs) < kTolerance;
+		}
+
+		bool ContainsRevisionSnapshot(
+			const std::vector<TerraEngine::Scene::SceneObjectRevisionSnapshot>& snapshots,
+			const TerraEngine::UUID& objectId)
+		{
+			// Packet assertions compare stable identities instead of live handles so
+			// they exercise the same worker-readable contract as runtime consumers.
+			return std::any_of(snapshots.begin(), snapshots.end(), [&objectId](const auto& snapshot) {
+				return snapshot.objectId == objectId;
+			});
 		}
 	}
 
@@ -130,6 +142,41 @@ namespace TerraEngine::Tests {
 
 			context.Expect(afterTransformRevision > beforeTransformRevision, "Hierarchy changes should mark the moved branch transform-dirty.");
 			context.Expect(afterSpatialRevision > 0u, "Hierarchy changes should mark dependent spatial bounds dirty.");
+			objects.clear();
+		});
+
+		registry.Add("SceneGraphRuntime.ScenePacketPublishesDirtyDescendantsWithoutUnrelatedInvalidation", [](TestContext& context) {
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+			Object root = objects.createObject("Dirty Root");
+			Object child = objects.createObject("Affected Child");
+			Object grandchild = objects.createObject("Affected Grandchild");
+			Object unrelated = objects.createObject("Unrelated Root");
+			context.Expect(objects.setParent(child, root), "The child fixture should attach to the dirty root.");
+			context.Expect(objects.setParent(grandchild, child), "The grandchild fixture should attach below the dirty root.");
+			(void)objects.PublishSceneChangePacket();
+
+			objects.MarkObjectTransformDirty(root);
+			const TerraEngine::Scene::SceneChangePacket packet = objects.PublishSceneChangePacket();
+			const TerraEngine::UUID rootId = objects.getUUID(root);
+			const TerraEngine::UUID childId = objects.getUUID(child);
+			const TerraEngine::UUID grandchildId = objects.getUUID(grandchild);
+			const TerraEngine::UUID unrelatedId = objects.getUUID(unrelated);
+
+			context.ExpectEqual(static_cast<std::size_t>(3), packet.TransformChanged().size(), "A root edit should publish only the root and its two affected descendants.");
+			context.Expect(ContainsRevisionSnapshot(packet.TransformChanged(), rootId), "The directly changed root should be present.");
+			context.Expect(ContainsRevisionSnapshot(packet.TransformChanged(), childId), "The affected child should be present.");
+			context.Expect(ContainsRevisionSnapshot(packet.TransformChanged(), grandchildId), "The affected grandchild should be present.");
+			context.Expect(!ContainsRevisionSnapshot(packet.TransformChanged(), unrelatedId), "An unrelated root must retain its transform cache.");
+			context.Expect(ContainsRevisionSnapshot(packet.BoundsChanged(), childId), "Affected descendants should publish exact changed-bounds evidence.");
+
+			TerraEngine::Scene::SceneGraph graph = TerraEngine::Scene::BuildSceneGraphFromObjectManager(objects, false);
+			const TerraEngine::Scene::SceneDirtyTransformState dirty = TerraEngine::Scene::BuildDirtyTransformState(graph, packet);
+			const TerraEngine::Scene::SceneTransformPropagationResult propagation = TerraEngine::Scene::PropagateWorldTransforms(graph, dirty);
+			context.ExpectEqual(static_cast<std::size_t>(1), dirty.dirtyRoots.size(), "Descendant packet records should collapse back to the one minimal dirty root.");
+			context.ExpectEqual(static_cast<std::size_t>(2), dirty.affectedDescendants.size(), "Dirty-state diagnostics should distinguish the two affected descendants.");
+			context.ExpectEqual(3u, propagation.processedObjectCount, "Propagation should process the dirty branch and no unrelated objects.");
+			context.ExpectEqual(1u, propagation.skippedCleanObjectCount, "The unrelated object should remain a clean skipped record.");
 			objects.clear();
 		});
 

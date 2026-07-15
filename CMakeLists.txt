@@ -47,16 +47,6 @@ if(TERRAENGINE_NORMALIZED_INSTALL_PREFIX MATCHES [[/External/[^/]+/install/?$]])
 	set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/install" CACHE PATH "Install prefix" FORCE)
 endif()
 
-include(ProcessorCount)
-ProcessorCount(TERRAENGINE_CPU_COUNT)
-# Configure-time guard: select platform or option behavior before generating build files.
-if(TERRAENGINE_CPU_COUNT GREATER 0 AND NOT DEFINED CMAKE_BUILD_PARALLEL_LEVEL)
-	# Default to using all detected CPU cores for builds so compilation scales with
-	# available hardware without requiring callers to remember -j/--parallel
-	# arguments manually. Especially useful for those who open the project with Visual Studio
-	set(CMAKE_BUILD_PARALLEL_LEVEL ${TERRAENGINE_CPU_COUNT} CACHE STRING "Default parallel build jobs" FORCE)
-endif()
-
 set(ENGINE_SOURCES
 	Engine/Core/MainEngine.cpp
 	Engine/Core/FatalErrorReport.cpp
@@ -89,11 +79,14 @@ set(ENGINE_SOURCES
 	Engine/Runtime/BootSummary.cpp
 	Engine/Runtime/ExportStartupCoordinator.cpp
 	Engine/Scene/SceneGraphRuntime.cpp
+	Engine/Scene/SceneChangePacket.cpp
 	Engine/Scene/HierarchySnapshot.cpp
 	Engine/Scene/RuntimeLayout.cpp
 	Engine/Scene/PrefabComposition.cpp
 	Engine/Scene/SceneMutationQueue.cpp
 	Engine/Scene/TransactionalMutation.cpp
+	Engine/Scene/DerivedSceneCache.cpp
+	Engine/Scene/BulkScenePublication.cpp
 	Engine/Physics/PhysicsTypes.cpp
 	Engine/Physics/PhysicsSettings.cpp
 	Engine/Physics/PhysicsCommands.cpp
@@ -102,7 +95,12 @@ set(ENGINE_SOURCES
 	Engine/Physics/PhysicsTransactions.cpp
 	Engine/Physics/PhysicsWorld.cpp
 	Engine/Physics/PhysicsAuthoringSnapshot.cpp
+	Engine/Physics/PhysicsAuthoringGeneration.cpp
+	Engine/Physics/PhysicsPreparationPlan.cpp
+	Engine/Physics/IncrementalBodyStateStore.cpp
+	Engine/Physics/TransformPublicationPacket.cpp
 	Engine/Physics/PhysicsDiagnostics.cpp
+	Engine/Physics/Assets/PhysicsAssetChangeJournal.cpp
 	Engine/Physics/Assets/PhysicsMaterial.cpp
 	Engine/Physics/Assets/ColliderRecipe.cpp
 	Engine/Physics/Assets/CookedColliderAsset.cpp
@@ -117,6 +115,9 @@ set(ENGINE_SOURCES
 	Engine/ThreadPool/ThreadPool.cpp
 	Engine/Profiling/Profiler.cpp
 	Engine/Profiling/ProfilerCapture.cpp
+	Engine/Profiling/ProfilerCaptureV2.cpp
+	Engine/Profiling/PerformanceBaseline.cpp
+	Engine/Profiling/PerformanceTelemetry.cpp
 	Engine/Renderer/RenderCaptureEncoding.cpp
 	Engine/Renderer/RendererRecovery.cpp
 	Engine/Renderer/RendererRecoveryPolicy.cpp
@@ -190,11 +191,14 @@ set(ENGINE_HEADERS
 	Engine/Resource/ResourceStreaming.h
 	Engine/Resource/ShaderCollection.h
 	Engine/Scene/SceneGraphRuntime.h
+	Engine/Scene/SceneChangePacket.h
 	Engine/Scene/HierarchySnapshot.h
 	Engine/Scene/RuntimeLayout.h
 	Engine/Scene/PrefabComposition.h
 	Engine/Scene/SceneMutationQueue.h
 	Engine/Scene/TransactionalMutation.h
+	Engine/Scene/DerivedSceneCache.h
+	Engine/Scene/BulkScenePublication.h
 	Engine/Physics/PhysicsTypes.h
 	Engine/Physics/PhysicsSettings.h
 	Engine/Physics/PhysicsCommands.h
@@ -203,8 +207,13 @@ set(ENGINE_HEADERS
 	Engine/Physics/PhysicsTransactions.h
 	Engine/Physics/PhysicsWorld.h
 	Engine/Physics/PhysicsAuthoringSnapshot.h
+	Engine/Physics/PhysicsAuthoringGeneration.h
+	Engine/Physics/PhysicsPreparationPlan.h
+	Engine/Physics/IncrementalBodyStateStore.h
+	Engine/Physics/TransformPublicationPacket.h
 	Engine/Physics/PhysicsDiagnostics.h
 	Engine/Physics/PhysicsSystem.h
+	Engine/Physics/Assets/PhysicsAssetChangeJournal.h
 	Engine/Physics/Assets/PhysicsMaterial.h
 	Engine/Physics/Assets/ColliderRecipe.h
 	Engine/Physics/Assets/CookedColliderAsset.h
@@ -231,6 +240,8 @@ set(ENGINE_HEADERS
 	Engine/Profiling/Profiler.h
 	Engine/Profiling/ProfilerCapture.h
 	Engine/Profiling/ProfilerScope.h
+	Engine/Profiling/PerformanceBaseline.h
+	Engine/Profiling/PerformanceTelemetry.h
 	Engine/Renderer/RenderCaptureEncoding.h
 	Engine/Renderer/RendererRecovery.h
 	Engine/Renderer/RendererRecoveryPolicy.h
@@ -1134,6 +1145,7 @@ add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Subsystems/ScriptCompilationSubsystem.cpp
 	Editor/TerraEngine-Editor/Subsystems/UndoRedoSystem.cpp
 	Editor/TerraEngine-Editor/Project/ProjectManager.cpp
+	Editor/TerraEngine-Editor/Project/ManagedReadinessManifest.cpp
 	Editor/TerraEngine-Editor/Project/ScriptWorkspaceService.cpp
 	Editor/TerraEngine-Editor/Assets/AssetDatabase.cpp
 	Editor/TerraEngine-Editor/Assets/FileWatcher.cpp
@@ -1145,6 +1157,7 @@ add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Windows/ProjectBrowserWindow.cpp
 	Editor/TerraEngine-Editor/Windows/GameViewWindow.cpp
 	Editor/TerraEngine-Editor/Windows/SceneViewOrientationWidget.cpp
+	Editor/TerraEngine-Editor/Windows/SceneViewMarkerPipeline.cpp
 	Editor/TerraEngine-Editor/Windows/SceneViewOverlayIcons.cpp
 	Editor/TerraEngine-Editor/Windows/SceneViewOverlayMarkers.cpp
 	Editor/TerraEngine-Editor/Windows/SceneViewOverlayTypes.cpp

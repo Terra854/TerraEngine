@@ -25,6 +25,7 @@
 #include "File Formats/TerraEngineShaderFile.h"
 #include "Renderer/RenderTypes.h"
 #include "Scene/SceneMutationQueue.h"
+#include "Scene/Serializer.h"
 #include "Scene/TransactionalMutation.h"
 #include "ThreadPool/ThreadPool.h"
 #include "Utilities/UUID.h"
@@ -43,6 +44,10 @@ struct SceneDocument
 	std::string jsonContents;
 	// Cached parsed representation to avoid repeating JSON work in callers.
 	nlohmann::json parsedJson;
+	// ProjectManager may supply a validated derived/source preparation so scene
+	// activation does not repeat the recursive object-table decode on the
+	// protected editor boundary.
+	std::optional<TerraEngine::Scene::PreparedSceneDecode> preparedScene;
 	bool isPrefab = false;
 };
 
@@ -80,6 +85,10 @@ public:
 	// file is read and lightly validated, but they reuse cached data if the
 	// same path was requested earlier.
 	TerraEngine::UUID LoadScene(const std::filesystem::path& path);
+	TerraEngine::UUID LoadPreparedScene(
+		const std::filesystem::path& path,
+		nlohmann::json sceneDocument,
+		TerraEngine::Scene::PreparedSceneDecode preparedScene);
 	TerraEngine::UUID LoadPrefab(const std::filesystem::path& path);
 
 	// Asynchronous load helpers that schedule disk I/O on the shared thread

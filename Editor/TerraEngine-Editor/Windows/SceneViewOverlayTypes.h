@@ -9,6 +9,7 @@
 
 #include "Engine/Utilities/UUID.h"
 #include "Engine/Physics/PhysicsDiagnostics.h"
+#include "Engine/Profiling/PerformanceTelemetry.h"
 
 #include <array>
 #include <cstddef>
@@ -81,9 +82,33 @@ namespace TerraEngine::Editor::SceneViewOverlay
 		DirectionalLight,
 		PointLight,
 		SpotLight,
+		Physics,
 		EmptyObject,
 		SelectedObject,
 		Unsupported
+	};
+
+	// Large-scene preferences use typed values internally while their stable
+	// lower-case spellings remain compatible with editor preference JSON.
+	enum class LargeSceneMode
+	{
+		Automatic,
+		On,
+		Off
+	};
+
+	enum class PhysicsMarkerMode
+	{
+		SelectedOnly,
+		Clustered,
+		All
+	};
+
+	enum class DensePrimitiveTier
+	{
+		Full,
+		Simple,
+		Point
 	};
 
 	enum class InteractionRegion
@@ -131,6 +156,17 @@ namespace TerraEngine::Editor::SceneViewOverlay
 
 	struct SceneOverlayPreference
 	{
+		// These limits mirror performance-settings.schema.json. Keeping the
+		// defaults beside the typed fields gives old preference files a safe
+		// migration path without requiring a one-time conversion pass.
+		static constexpr std::uint32_t kDefaultLargeSceneObjectThreshold = 2000u;
+		static constexpr std::uint32_t kDefaultVisibleMarkerBudget = 2048u;
+		static constexpr std::uint32_t kDefaultMarkerPresentationBatchSize = 512u;
+		static constexpr float kDefaultDensityRadiusPixels = 18.0f;
+		static constexpr std::uint32_t kDefaultDensityThreshold = 4u;
+		static constexpr float kDefaultMaximumMarkerDistance = 0.0f;
+		static constexpr float kDefaultMinimumProjectedSizePixels = 1.0f;
+
 		bool iconsVisible = true;
 		bool cameraIconsVisible = true;
 		bool lightIconsVisible = true;
@@ -145,6 +181,41 @@ namespace TerraEngine::Editor::SceneViewOverlay
 		ProjectionMode projectionMode = ProjectionMode::Perspective;
 		bool orientationWidgetVisible = true;
 		std::string toolbarCompactMode = "auto";
+		LargeSceneMode largeSceneMode = LargeSceneMode::Automatic;
+		std::uint32_t largeSceneObjectThreshold = kDefaultLargeSceneObjectThreshold;
+		std::uint32_t visibleMarkerBudget = kDefaultVisibleMarkerBudget;
+		std::uint32_t markerPresentationBatchSize = kDefaultMarkerPresentationBatchSize;
+		float densityRadiusPixels = kDefaultDensityRadiusPixels;
+		std::uint32_t densityThreshold = kDefaultDensityThreshold;
+		float maximumMarkerDistance = kDefaultMaximumMarkerDistance;
+		float minimumProjectedSizePixels = kDefaultMinimumProjectedSizePixels;
+		PhysicsMarkerMode physicsMarkerMode = PhysicsMarkerMode::Clustered;
+		DensePrimitiveTier densePrimitiveTier = DensePrimitiveTier::Simple;
+	};
+
+	// Configured state is persisted; effective state is resolved from the
+	// current scene size. Automation and the UI can therefore report why an
+	// automatic safeguard is active without changing the user's chosen mode.
+	struct SceneViewLargeSceneState
+	{
+		LargeSceneMode configuredMode = LargeSceneMode::Automatic;
+		bool effective = false;
+		std::uint32_t objectCount = 0u;
+		std::uint32_t activationThreshold = SceneOverlayPreference::kDefaultLargeSceneObjectThreshold;
+	};
+
+	// Overlay geometry may be reused only while every generation that affects
+	// presentation is unchanged. The value is plain and immutable so worker
+	// preparation can compare it without reading live editor-owned state.
+	struct SceneViewOverlayCacheKey
+	{
+		std::uint64_t viewportGeneration = 0u;
+		std::uint64_t sceneGeneration = 0u;
+		std::uint64_t selectionGeneration = 0u;
+		std::uint64_t simulationGeneration = 0u;
+		std::uint64_t preferenceGeneration = 0u;
+
+		[[nodiscard]] bool operator==(const SceneViewOverlayCacheKey& other) const = default;
 	};
 
 	struct OverlayIconDefinition
@@ -212,6 +283,7 @@ namespace TerraEngine::Editor::SceneViewOverlay
 	{
 		SceneViewToolState toolState;
 		SceneOverlayPreference overlayPreferences;
+		SceneViewLargeSceneState largeSceneState;
 		std::uint32_t cameraMarkerCount = 0u;
 		std::uint32_t directionalLightMarkerCount = 0u;
 		std::uint32_t pointLightMarkerCount = 0u;
@@ -230,6 +302,21 @@ namespace TerraEngine::Editor::SceneViewOverlay
 		std::size_t physicsDebugPacketCount = 0U;
 		std::size_t physicsDebugPrimitiveCount = 0U;
 		bool physicsDebugVisible = false;
+		std::uint32_t sourceMarkerCount = 0u;
+		std::uint32_t spatialRecordCount = 0u;
+		std::uint32_t spatialQueryRejectedCount = 0u;
+		std::uint32_t spatialQueryFallbackCount = 0u;
+		std::uint32_t candidateMarkerCount = 0u;
+		std::uint32_t viewRejectedMarkerCount = 0u;
+		std::uint32_t densityConsolidatedMarkerCount = 0u;
+		std::uint32_t budgetRejectedMarkerCount = 0u;
+		std::uint32_t presentedMarkerCount = 0u;
+		std::uint32_t presentationBatchCount = 0u;
+		std::uint32_t selectedExemptionCount = 0u;
+		std::uint32_t cameraExemptionCount = 0u;
+		std::uint32_t lightExemptionCount = 0u;
+		std::vector<std::string> activeReductions;
+		std::vector<TerraEngine::Profiling::PerformanceStageRecord> stageTimings;
 	};
 
 	struct TransformEditCommit
@@ -286,12 +373,17 @@ namespace TerraEngine::Editor::SceneViewOverlay
 	[[nodiscard]] const char* ToString(OrientationMode mode);
 	[[nodiscard]] const char* ToString(ProjectionMode mode);
 	[[nodiscard]] const char* ToString(MarkerCategory category);
+	[[nodiscard]] const char* ToString(LargeSceneMode mode);
+	[[nodiscard]] const char* ToString(PhysicsMarkerMode mode);
+	[[nodiscard]] const char* ToString(DensePrimitiveTier tier);
 	[[nodiscard]] const char* ToString(InteractionRegion region);
 	[[nodiscard]] const char* ToString(TransformEditStatus status);
 
 	[[nodiscard]] bool IsPositiveFinite(float value);
 	[[nodiscard]] float SanitizePositive(float value, float fallback);
+	[[nodiscard]] bool ValidatePreference(const SceneOverlayPreference& preference, std::string* outError = nullptr);
 	[[nodiscard]] SceneOverlayPreference SanitizePreference(SceneOverlayPreference preference);
+	[[nodiscard]] SceneViewLargeSceneState ResolveLargeSceneState(const SceneOverlayPreference& preference, std::uint32_t objectCount);
 	[[nodiscard]] SceneViewToolState BuildToolStateFromPreference(const SceneOverlayPreference& preference, SceneViewTool activeTool, PivotMode pivotMode, OrientationMode orientationMode);
 	[[nodiscard]] SceneViewSchedulerDeclaration BuildSceneViewOverlaySchedulerDeclaration();
 	[[nodiscard]] PhysicsShapeAuthoringCommit FinalizePhysicsShapeEdit(const PhysicsShapeEditPreview& preview);

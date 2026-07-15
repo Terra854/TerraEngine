@@ -83,6 +83,21 @@ namespace TerraEngine::Physics {
 		return history;
 	}
 
+	bool ShouldRefreshPhysicsAggregateDiagnostics(
+		PhysicsTick tick,
+		std::uint32_t intervalFrames,
+		PhysicsTick lastAggregateTick,
+		bool currentFailure) noexcept
+	{
+		// Treat zero as one to keep this helper safe for partially loaded legacy
+		// settings. Validated project settings still reject a zero interval.
+		const PhysicsTick boundedInterval = std::max<PhysicsTick>(1U, intervalFrames);
+		return currentFailure
+			|| lastAggregateTick == 0U
+			|| tick < lastAggregateTick
+			|| tick - lastAggregateTick >= boundedInterval;
+	}
+
 	void PublishPhysicsDiagnosticsSnapshot(std::shared_ptr<const PhysicsDiagnosticsSnapshot> snapshot)
 	{
 		std::lock_guard<std::mutex> lock(g_DiagnosticsSnapshotMutex);

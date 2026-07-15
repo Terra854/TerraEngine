@@ -86,6 +86,30 @@ namespace TerraEngine::EditorTests {
 			context.Expect(find("Physics/Source.tecollider") != inventory.end() && find("Physics/Source.tecollider")->assetType == "other", "Source recipes are not runtime physics asset types and staging must exclude them.");
 		});
 
+		registry.Add("Editor.PhysicsExport.InventoryDoesNotInventEditorCacheOrPreferencePayloads", [](TestContext& context) {
+			TempPhysicsExportDirectory temporary;
+			const std::filesystem::path projectRoot = temporary.root_ / "Project";
+			const std::filesystem::path packageInput = projectRoot / "PackageInput";
+			temporary.Write("Project/PackageInput/Scenes/Runtime.tescene", R"({"objects":[]})");
+			// These sibling editor artifacts intentionally remain outside package input.
+			// The inventory must be rooted in explicit runtime staging, never a broad
+			// project walk that could turn disposable caches into gameplay state.
+			temporary.Write("Project/Library/DerivedScenes/Runtime.dscn", "derived scene cache");
+			temporary.Write("Project/EditorPreferences/SceneView.json", "editor marker preference");
+
+			std::vector<ExportContentInventoryEntry> inventory;
+			std::string error;
+			context.Expect(BuildExportContentInventory(packageInput, inventory, error), "The isolated runtime staging root should produce export inventory evidence.");
+			const auto contains = [&inventory](const std::string& path) {
+				return std::any_of(inventory.begin(), inventory.end(), [&path](const ExportContentInventoryEntry& entry) {
+					return entry.logicalPath == path;
+				});
+			};
+			context.Expect(contains("Scenes/Runtime.tescene"), "Authored runtime scenes must remain visible to export inventory.");
+			context.Expect(!contains("Library/DerivedScenes/Runtime.dscn"), "Derived scene cache artifacts must not become authored runtime inventory.");
+			context.Expect(!contains("EditorPreferences/SceneView.json"), "Editor marker preferences must not become authored runtime inventory.");
+		});
+
 		registry.Add("Editor.PhysicsExport.SixEvidenceFilesCarryPhysicsProvenance", [](TestContext& context) {
 			TempPhysicsExportDirectory temporary;
 			ExportRequest request;

@@ -55,6 +55,7 @@
 #include <memory>
 #include <mutex>
 #include <numbers>
+#include <numeric>
 #include <shared_mutex>
 #include <sstream>
 #include <string>
@@ -517,8 +518,9 @@ namespace TerraEngine::Physics::Backend {
 				const std::uint32_t secondMask = static_cast<std::uint32_t>(secondMetadata >> 32U);
 				const std::uint32_t firstLayer = static_cast<std::uint32_t>(firstMetadata & 0x1FU);
 				const std::uint32_t secondLayer = static_cast<std::uint32_t>(secondMetadata & 0x1FU);
-				return (firstMask & (1U << secondLayer)) != 0U
-					&& (secondMask & (1U << firstLayer)) != 0U
+				return PhysicsSettings::LayersCanCollide(
+					static_cast<std::uint8_t>(firstLayer), firstMask,
+					static_cast<std::uint8_t>(secondLayer), secondMask)
 					? JPH::ValidateResult::AcceptAllContactsForThisBodyPair
 					: JPH::ValidateResult::RejectAllContactsForThisBodyPair;
 			}
@@ -893,6 +895,10 @@ namespace TerraEngine::Physics::Backend {
 			bool enabled = true;
 			bool added = false;
 			std::uint64_t stagingToken = 0U;
+			std::uint32_t stableIndex = 0U;
+			PhysicsBackendBodyState retainedState;
+			PhysicsBodyStateChangeMask pendingChange = PhysicsBodyStateChangeMask::Created;
+			bool hasRetainedState = false;
 		};
 
 		// Constraint and character pointers are strictly provider-private. Engine code
@@ -982,6 +988,44 @@ namespace TerraEngine::Physics::Backend {
 				return Rejected(PhysicsBackendErrorCode::InvalidArgument, "The staging token does not belong to this world.");
 			}
 			return Success();
+		}
+
+		bool NearlySame(PhysicsVector3 left, PhysicsVector3 right) {
+			constexpr float epsilon = 1.0e-6F;
+			return std::fabs(left.x - right.x) <= epsilon
+				&& std::fabs(left.y - right.y) <= epsilon
+				&& std::fabs(left.z - right.z) <= epsilon;
+		}
+
+		bool NearlySame(PhysicsPose left, PhysicsPose right) {
+			constexpr float epsilon = 1.0e-6F;
+			const float rotationDot = left.rotation.x * right.rotation.x
+				+ left.rotation.y * right.rotation.y
+				+ left.rotation.z * right.rotation.z
+				+ left.rotation.w * right.rotation.w;
+			return NearlySame(left.position, right.position)
+				&& std::fabs(rotationDot) >= 1.0F - epsilon;
+		}
+
+		void RebuildBodyOrder() {
+			bodyOrder.clear();
+			bodyOrder.reserve(bodies.size());
+			for(const auto& [key, body] : bodies) {
+				if(body.added && body.stagingToken == 0U) bodyOrder.push_back(key);
+			}
+			std::sort(bodyOrder.begin(), bodyOrder.end());
+			bodyOrderIndices.clear();
+			bodyOrderIndices.reserve(bodyOrder.size());
+			for(std::uint32_t index = 0U; index < bodyOrder.size(); ++index) {
+				bodyOrderIndices[bodyOrder[index]] = index;
+				auto body = bodies.find(bodyOrder[index]);
+				if(body != bodies.end()) {
+					body->second.stableIndex = index;
+					body->second.retainedState.stableIndex = index;
+				}
+			}
+			++bodyOrderGeneration;
+			if(bodyOrderGeneration == 0U) ++bodyOrderGeneration;
 		}
 
 		BodyRecord* FindBodyByObject(const TerraEngine::UUID& objectId) {
@@ -1256,6 +1300,12 @@ namespace TerraEngine::Physics::Backend {
 		// shape. The snapshot hash covers every child and local transform.
 		std::unordered_map<std::uint64_t, JPH::Ref<JPH::Shape>> shapeCache;
 		std::unordered_map<std::uint64_t, BodyRecord> bodies;
+		// Membership changes rebuild this compact deterministic order once. Fixed
+		// steps reuse it directly and never sort the complete world per extraction.
+		std::vector<std::uint64_t> bodyOrder;
+		std::unordered_map<std::uint64_t, std::uint32_t> bodyOrderIndices;
+		std::uint64_t bodyOrderGeneration = 1U;
+		std::vector<PhysicsBodyHandle> pendingRemovedBodies;
 		std::unordered_map<std::uint64_t, ConstraintRecord> constraints;
 		std::unordered_map<std::uint64_t, CharacterRecord> characters;
 		// Query filters and callback publication resolve provider IDs frequently.
@@ -1269,6 +1319,7 @@ namespace TerraEngine::Physics::Backend {
 		TerraContactListener contactListener;
 		std::vector<PhysicsEvent> pendingEvents;
 		std::uint64_t droppedEvents = 0U;
+		PhysicsTick lastEventDrainTick = 0U;
 		bool typesRegistered = false;
 		bool initialized = false;
 		mutable std::atomic<bool> healthy{true};
@@ -1370,6 +1421,9 @@ namespace TerraEngine::Physics::Backend {
 			}
 		}
 		impl->bodies.clear();
+		impl->bodyOrder.clear();
+		impl->bodyOrderIndices.clear();
+		impl->pendingRemovedBodies.clear();
 		impl->constraints.clear();
 		impl->characters.clear();
 		impl->bodyIdToKey.clear();
@@ -1379,6 +1433,7 @@ namespace TerraEngine::Physics::Backend {
 		impl->staging.clear();
 		impl->pendingEvents.clear();
 		impl->droppedEvents = 0U;
+		impl->lastEventDrainTick = 0U;
 		impl->contactListener.Clear();
 		impl->physicsSystem.reset();
 		if(impl->jobAdapter != nullptr) {
@@ -1432,6 +1487,8 @@ namespace TerraEngine::Physics::Backend {
 				4096U, static_cast<std::size_t>(configuration.maximumContactConstraints) * 4U));
 			impl->physicsSystem->SetGravity(ToJoltVector(configuration.settings.gravity));
 			impl->worldConfiguration = configuration;
+			impl->bodyOrderGeneration = 1U;
+			impl->lastEventDrainTick = 0U;
 			return impl->CheckProviderHealth()
 				? Success("The Jolt world was created.")
 				: ProviderFailure("Jolt reported a fatal failure while creating the world.", true);
@@ -1465,6 +1522,9 @@ namespace TerraEngine::Physics::Backend {
 			impl->physicsSystem->GetBodyInterface().DestroyBody(body.bodyId);
 		}
 		impl->bodies.clear();
+		impl->bodyOrder.clear();
+		impl->bodyOrderIndices.clear();
+		impl->pendingRemovedBodies.clear();
 		impl->constraints.clear();
 		impl->characters.clear();
 		impl->bodyIdToKey.clear();
@@ -1474,6 +1534,7 @@ namespace TerraEngine::Physics::Backend {
 		impl->staging.clear();
 		impl->pendingEvents.clear();
 		impl->droppedEvents = 0U;
+		impl->lastEventDrainTick = 0U;
 		impl->contactListener.Clear();
 		impl->physicsSystem.reset();
 		impl->worldConfiguration = {};
@@ -1700,12 +1761,26 @@ namespace TerraEngine::Physics::Backend {
 				return Rejected(PhysicsBackendErrorCode::CapacityExceeded, "Jolt body capacity is exhausted.");
 			}
 			const JPH::BodyID providerBodyId = body->GetID();
-			impl->bodies.emplace(bodyKey, Impl::BodyRecord{
+			auto [bodyRecord, inserted] = impl->bodies.emplace(bodyKey, Impl::BodyRecord{
 				request.handle, request.objectId, request.objectGeneration,
 				request.componentGeneration, providerBodyId, request.mass,
 				request.motionType, request.collisionLayer, request.collisionMask,
 				request.frictionCombine, request.restitutionCombine,
 				request.sensor, fullyLocked, request.startAwake, request.enabled, false, staging.value});
+			(void)inserted;
+			bodyRecord->second.retainedState.handle = request.handle;
+			bodyRecord->second.retainedState.pose = request.pose;
+			bodyRecord->second.retainedState.linearVelocity = request.linearVelocity;
+			bodyRecord->second.retainedState.angularVelocity = request.angularVelocity;
+			bodyRecord->second.retainedState.mass = request.mass;
+			bodyRecord->second.retainedState.awake = request.startAwake;
+			bodyRecord->second.retainedState.objectId = request.objectId;
+			bodyRecord->second.retainedState.objectGeneration = request.objectGeneration;
+			bodyRecord->second.retainedState.componentGeneration = request.componentGeneration;
+			bodyRecord->second.retainedState.fields = PhysicsBodyStateFieldMask::BodyState;
+			bodyRecord->second.retainedState.change = PhysicsBodyStateChangeMask::Created;
+			bodyRecord->second.retainedState.motionType = request.motionType;
+			bodyRecord->second.hasRetainedState = true;
 			impl->bodyIdToKey[providerBodyId.GetIndexAndSequenceNumber()] = bodyKey;
 			// Do not update the object lookup while staging. A replacement body can
 			// share the authored identity with a live body; callers must keep seeing
@@ -1751,6 +1826,12 @@ namespace TerraEngine::Physics::Backend {
 		body->second.collisionLayer = request.collisionLayer;
 		body->second.collisionMask = request.collisionMask;
 		body->second.enabled = request.enabled;
+		body->second.retainedState.pose = request.pose;
+		body->second.retainedState.linearVelocity = request.linearVelocity;
+		body->second.retainedState.angularVelocity = request.angularVelocity;
+		body->second.retainedState.awake = request.wake || body->second.retainedState.awake;
+		body->second.pendingChange |= PhysicsBodyStateChangeMask::Updated;
+		if(request.wake) body->second.pendingChange |= PhysicsBodyStateChangeMask::Awakened;
 		bodies.SetUserData(body->second.bodyId, EncodeCollisionMetadata(
 			request.collisionLayer,
 			request.collisionMask,
@@ -1781,7 +1862,9 @@ namespace TerraEngine::Physics::Backend {
 			indexed != impl->bodyObjectToKey.end() && indexed->second == HandleKey(handle)) {
 			impl->bodyObjectToKey.erase(indexed);
 		}
+		impl->pendingRemovedBodies.push_back(handle);
 		impl->bodies.erase(body);
+		impl->RebuildBodyOrder();
 		return Success("The Jolt body was removed and destroyed.");
 	}
 
@@ -2041,9 +2124,11 @@ namespace TerraEngine::Physics::Backend {
 		JPH::BodyInterface& bodies = impl->physicsSystem->GetBodyInterface();
 		switch(command.type) {
 		case PhysicsCommandType::WakeBody:
+			if(bodies.IsActive(record->bodyId)) return Success("Redundant wake command was suppressed.");
 			bodies.ActivateBody(record->bodyId);
 			break;
 		case PhysicsCommandType::SleepBody:
+			if(!bodies.IsActive(record->bodyId)) return Success("Redundant sleep command was suppressed.");
 			bodies.DeactivateBody(record->bodyId);
 			break;
 		case PhysicsCommandType::ApplyForce:
@@ -2088,12 +2173,29 @@ namespace TerraEngine::Physics::Backend {
 					return Rejected(PhysicsBackendErrorCode::InvalidState,
 						"Kinematic targets require a kinematic body and a positive fixed duration.");
 				}
+				JPH::RVec3 currentPosition;
+				JPH::Quat currentRotation;
+				bodies.GetPositionAndRotation(record->bodyId, currentPosition, currentRotation);
+				const PhysicsVector3 currentLinearVelocity = FromJoltVector(bodies.GetLinearVelocity(record->bodyId));
+				if(impl->NearlySame(PhysicsPose{FromJoltPosition(currentPosition), FromJoltRotation(currentRotation)}, motion->pose)
+					&& impl->NearlySame(currentLinearVelocity, PhysicsVector3{})) {
+					return Success("Unchanged kinematic target was suppressed.");
+				}
 				bodies.MoveKinematic(
 					record->bodyId,
 					ToJoltPosition(motion->pose.position),
 					ToJoltRotation(motion->pose.rotation),
 					motion->duration);
 				break;
+			}
+			if(command.type == PhysicsCommandType::SetVelocity) {
+				JPH::Vec3 currentLinear;
+				JPH::Vec3 currentAngular;
+				bodies.GetLinearAndAngularVelocity(record->bodyId, currentLinear, currentAngular);
+				if(impl->NearlySame(FromJoltVector(currentLinear), motion->linearVelocity)
+					&& impl->NearlySame(FromJoltVector(currentAngular), motion->angularVelocity)) {
+					return Success("Unchanged velocity command was suppressed.");
+				}
 			}
 			if(command.type == PhysicsCommandType::Teleport) {
 				bodies.SetPositionAndRotation(record->bodyId,
@@ -2124,6 +2226,7 @@ namespace TerraEngine::Physics::Backend {
 		}
 		try {
 			PhysicsBackendProfileScope profile("Physics: Jolt Fixed Step");
+			const std::size_t firstNewEvent = impl->pendingEvents.size();
 			impl->contactListener.BeginTick(request.tick);
 			const JPH::EPhysicsUpdateError errors = impl->physicsSystem->Update(
 				request.deltaTime,
@@ -2133,6 +2236,16 @@ namespace TerraEngine::Physics::Backend {
 			impl->jobAdapter->WaitForIdle();
 			std::uint64_t dropped = 0U;
 			impl->ConvertRawEvents(impl->contactListener.Drain(dropped), dropped);
+			for(std::size_t index = firstNewEvent; index < impl->pendingEvents.size(); ++index) {
+				const PhysicsEvent& event = impl->pendingEvents[index];
+				Impl::BodyRecord* body = impl->FindBody(event.first.body);
+				if(body == nullptr) continue;
+				if(event.type == PhysicsEventType::Activated) {
+					body->pendingChange |= PhysicsBodyStateChangeMask::Awakened;
+				} else if(event.type == PhysicsEventType::Slept) {
+					body->pendingChange |= PhysicsBodyStateChangeMask::Slept;
+				}
+			}
 			if(errors != JPH::EPhysicsUpdateError::None) {
 				return ProviderFailure("Jolt exhausted one or more configured contact/body-pair capacities.");
 			}
@@ -2360,111 +2473,299 @@ namespace TerraEngine::Physics::Backend {
 	}
 
 	PhysicsBackendResult JoltPhysicsBackend::Extract(PhysicsBackendExtraction& extraction) const {
-		std::shared_lock lock(impl->mutex);
+		PhysicsBackendExtractionRequest request;
+		request.world = extraction.world;
+		request.tick = extraction.tick;
+		request.selection = PhysicsBackendExtractionSelection::FullState;
+		request.fields = PhysicsBodyStateFieldMask::All;
+		request.fullState = true;
+		return Extract(request, extraction);
+	}
+
+	PhysicsBackendExtractionCapabilities JoltPhysicsBackend::ExtractionCapabilities() const noexcept {
+		return {true, true, true, true, 8192U};
+	}
+
+	PhysicsBackendResult JoltPhysicsBackend::Extract(
+		const PhysicsBackendExtractionRequest& request,
+		PhysicsBackendExtraction& extraction) const {
+		// Retained states and event ownership are updated by this operation, so the
+		// backend takes exclusive membership ownership. Independent Jolt getter calls
+		// still run through bounded worker lanes while membership remains immutable.
+		std::unique_lock lock(impl->mutex);
 		const PhysicsBackendResult ready = impl->CheckReady();
 		if(!ready.Succeeded()) return ready;
-		if(impl->physicsSystem == nullptr || !HandleMatchesWorld(extraction.world, impl->worldConfiguration.world)) {
-			return Rejected(PhysicsBackendErrorCode::StaleWorld, "Extraction targets a stale Jolt world.");
+		if(!request.IsValid() || impl->physicsSystem == nullptr
+			|| !HandleMatchesWorld(request.world, impl->worldConfiguration.world)) {
+			return Rejected(PhysicsBackendErrorCode::InvalidArgument,
+				"Extraction targets an invalid request or stale Jolt world.");
 		}
-		extraction.bodies.clear();
-		std::vector<std::pair<std::uint64_t, const Impl::BodyRecord*>> ordered;
-		ordered.reserve(impl->bodies.size());
-		for(const auto& [key, body] : impl->bodies) {
-			if(body.added) ordered.emplace_back(key, &body);
-		}
-		std::sort(ordered.begin(), ordered.end(), [](const auto& left, const auto& right) {
-			return left.first < right.first;
-		});
+
+		extraction = {};
+		extraction.world = request.world;
+		extraction.tick = request.tick;
+		extraction.providerOrderGeneration = impl->bodyOrderGeneration;
+		extraction.totalBodyCount = impl->bodyOrder.size();
+		extraction.extractedFields = request.fields;
+		extraction.fullState = request.fullState;
 		const JPH::BodyInterface& bodies = impl->physicsSystem->GetBodyInterface();
-		for(const auto& [key, record] : ordered) {
-			(void)key;
-			JPH::RVec3 position;
-			JPH::Quat rotation;
-			JPH::Vec3 linearVelocity;
-			JPH::Vec3 angularVelocity;
-			bodies.GetPositionAndRotation(record->bodyId, position, rotation);
-			bodies.GetLinearAndAngularVelocity(record->bodyId, linearVelocity, angularVelocity);
-			extraction.bodies.push_back(PhysicsBackendBodyState{
-				record->handle,
-				PhysicsPose{FromJoltPosition(position), FromJoltRotation(rotation)},
-				FromJoltVector(linearVelocity),
-				FromJoltVector(angularVelocity),
-				record->mass,
-				0U,
-				bodies.IsActive(record->bodyId)});
+		std::vector<std::uint32_t> selectedIndices;
+
+		auto appendStableRange = [&](PhysicsBackendStableRange range) -> bool {
+			if(range.EndIndex() > impl->bodyOrder.size()) return false;
+			for(std::uint64_t index = range.firstIndex; index < range.EndIndex(); ++index) {
+				selectedIndices.push_back(static_cast<std::uint32_t>(index));
+			}
+			return true;
+		};
+
+		switch(request.selection) {
+		case PhysicsBackendExtractionSelection::FullState:
+			selectedIndices.resize(impl->bodyOrder.size());
+			std::iota(selectedIndices.begin(), selectedIndices.end(), 0U);
+			extraction.examinedBodyCount = impl->bodyOrder.size();
+			break;
+		case PhysicsBackendExtractionSelection::StableRanges:
+			for(const PhysicsBackendStableRange range : request.stableRanges) {
+				if(!appendStableRange(range)) {
+					return Rejected(PhysicsBackendErrorCode::InvalidArgument,
+						"A requested stable range exceeds the current provider order.");
+				}
+			}
+			extraction.examinedBodyCount = selectedIndices.size();
+			break;
+		case PhysicsBackendExtractionSelection::ExplicitHandles:
+			for(const PhysicsBodyHandle handle : request.explicitHandles) {
+				if(!HandleMatchesWorld(handle, impl->worldConfiguration.world)) continue;
+				const auto found = impl->bodyOrderIndices.find(HandleKey(handle));
+				if(found != impl->bodyOrderIndices.end()) selectedIndices.push_back(found->second);
+			}
+			extraction.examinedBodyCount = request.explicitHandles.size();
+			break;
+		case PhysicsBackendExtractionSelection::ActiveBodies:
+		case PhysicsBackendExtractionSelection::PublicationRelevant:
+			extraction.examinedBodyCount = impl->bodyOrder.size();
+			for(std::uint32_t index = 0U; index < impl->bodyOrder.size(); ++index) {
+				auto found = impl->bodies.find(impl->bodyOrder[index]);
+				if(found == impl->bodies.end()) continue;
+				const bool active = bodies.IsActive(found->second.bodyId);
+				const bool changed = found->second.pendingChange != PhysicsBodyStateChangeMask::None;
+				if(active || (request.selection == PhysicsBackendExtractionSelection::PublicationRelevant && changed)) {
+					selectedIndices.push_back(index);
+				}
+			}
+			break;
 		}
+		std::sort(selectedIndices.begin(), selectedIndices.end());
+		selectedIndices.erase(std::unique(selectedIndices.begin(), selectedIndices.end()), selectedIndices.end());
+		struct ExtractionRecordSnapshot {
+			std::uint32_t stableIndex = 0U;
+			PhysicsBodyHandle handle;
+			TerraEngine::UUID objectId{};
+			PhysicsGeneration objectGeneration = 0U;
+			PhysicsGeneration componentGeneration = 0U;
+			JPH::BodyID bodyId;
+			PhysicsBodyStateChangeMask pendingChange = PhysicsBodyStateChangeMask::None;
+			PhysicsMotionType motionType = PhysicsMotionType::Static;
+			float mass = 0.0F;
+			std::uint32_t contactCount = 0U;
+			bool retainedAwake = false;
+		};
+		std::vector<ExtractionRecordSnapshot> immutableRecords;
+		immutableRecords.reserve(selectedIndices.size());
+		for(const std::uint32_t stableIndex : selectedIndices) {
+			auto found = impl->bodies.find(impl->bodyOrder[stableIndex]);
+			if(found == impl->bodies.end()) {
+				return ProviderFailure("Stable Jolt body order changed while preparing extraction records.");
+			}
+			const Impl::BodyRecord& record = found->second;
+			immutableRecords.push_back({stableIndex, record.handle, record.objectId,
+				record.objectGeneration, record.componentGeneration, record.bodyId,
+				record.pendingChange, record.motionType, record.mass,
+				record.retainedState.contactCount, record.retainedState.awake});
+		}
+		extraction.bodies.resize(immutableRecords.size());
+		if(request.selection == PhysicsBackendExtractionSelection::PublicationRelevant
+			|| request.selection == PhysicsBackendExtractionSelection::FullState) {
+			extraction.removedBodies = std::move(impl->pendingRemovedBodies);
+			impl->pendingRemovedBodies.clear();
+		}
+
+		const auto readRange = [&](std::size_t begin, std::size_t end) {
+			for(std::size_t outputIndex = begin; outputIndex < end; ++outputIndex) {
+				// Worker ranges receive only copied metadata plus provider getter access.
+				// Retained-state, pending-change, and event ownership is committed below
+				// after every range joins under this protected provider boundary.
+				const ExtractionRecordSnapshot& record = immutableRecords[outputIndex];
+				PhysicsBackendBodyState state;
+				state.handle = record.handle;
+				state.stableIndex = record.stableIndex;
+				state.objectId = record.objectId;
+				state.objectGeneration = record.objectGeneration;
+				state.componentGeneration = record.componentGeneration;
+				state.fields = static_cast<PhysicsBodyStateFieldMask>(
+					static_cast<std::uint32_t>(request.fields)
+					& static_cast<std::uint32_t>(PhysicsBodyStateFieldMask::BodyState));
+				state.change = record.pendingChange;
+				state.motionType = record.motionType;
+				if(request.selection == PhysicsBackendExtractionSelection::ExplicitHandles) {
+					state.change |= PhysicsBodyStateChangeMask::ExplicitlyRequested;
+				}
+
+				if(HasPhysicsBodyStateFields(request.fields, PhysicsBodyStateFieldMask::Pose)) {
+					JPH::RVec3 position;
+					JPH::Quat rotation;
+					bodies.GetPositionAndRotation(record.bodyId, position, rotation);
+					state.pose = {FromJoltPosition(position), FromJoltRotation(rotation)};
+				}
+				if(HasPhysicsBodyStateFields(request.fields, PhysicsBodyStateFieldMask::LinearVelocity)
+					|| HasPhysicsBodyStateFields(request.fields, PhysicsBodyStateFieldMask::AngularVelocity)) {
+					JPH::Vec3 linearVelocity;
+					JPH::Vec3 angularVelocity;
+					bodies.GetLinearAndAngularVelocity(record.bodyId, linearVelocity, angularVelocity);
+					if(HasPhysicsBodyStateFields(request.fields, PhysicsBodyStateFieldMask::LinearVelocity)) {
+						state.linearVelocity = FromJoltVector(linearVelocity);
+					}
+					if(HasPhysicsBodyStateFields(request.fields, PhysicsBodyStateFieldMask::AngularVelocity)) {
+						state.angularVelocity = FromJoltVector(angularVelocity);
+					}
+				}
+				if(HasPhysicsBodyStateFields(request.fields, PhysicsBodyStateFieldMask::Mass)) {
+					state.mass = record.mass;
+				}
+				if(HasPhysicsBodyStateFields(request.fields, PhysicsBodyStateFieldMask::ContactCount)) {
+					state.contactCount = record.contactCount;
+				}
+				if(HasPhysicsBodyStateFields(request.fields, PhysicsBodyStateFieldMask::Awake)) {
+					state.awake = bodies.IsActive(record.bodyId);
+					if(state.awake != record.retainedAwake) {
+						state.change |= state.awake
+							? PhysicsBodyStateChangeMask::Awakened
+							: PhysicsBodyStateChangeMask::Slept;
+					}
+				}
+				extraction.bodies[outputIndex] = state;
+			}
+		};
+
+		// The adapter owns the safety fallback: one worker, a small selection,
+		// disabled provider capability, or an explicit request all execute the same
+		// immutable reader inline. Only the range reads parallelize; provider event
+		// draining and retained-state acknowledgement remain protected below.
+		const PhysicsIndependentRangeExecution execution = impl->jobAdapter->ExecuteIndependentRanges(
+			selectedIndices.size(), request.batchSize, request.parallelThreshold,
+			request.allowParallelReads && ExtractionCapabilities().independentBodyReadsSafe,
+			readRange);
+		if(!execution.succeeded) {
+			extraction.bodies.clear();
+			return ProviderFailure("A bounded Jolt extraction range failed.");
+		}
+		for(std::size_t index = 0U; index < immutableRecords.size(); ++index) {
+			const ExtractionRecordSnapshot& source = immutableRecords[index];
+			auto found = impl->bodies.find(impl->bodyOrder[source.stableIndex]);
+			if(found == impl->bodies.end() || found->second.handle != source.handle) {
+				extraction.bodies.clear();
+				return ProviderFailure("Provider membership changed before extraction state could commit.");
+			}
+			Impl::BodyRecord& retained = found->second;
+			const PhysicsBackendBodyState& state = extraction.bodies[index];
+			if(HasPhysicsBodyStateFields(state.fields, PhysicsBodyStateFieldMask::Pose)) retained.retainedState.pose = state.pose;
+			if(HasPhysicsBodyStateFields(state.fields, PhysicsBodyStateFieldMask::LinearVelocity)) retained.retainedState.linearVelocity = state.linearVelocity;
+			if(HasPhysicsBodyStateFields(state.fields, PhysicsBodyStateFieldMask::AngularVelocity)) retained.retainedState.angularVelocity = state.angularVelocity;
+			if(HasPhysicsBodyStateFields(state.fields, PhysicsBodyStateFieldMask::Awake)) retained.retainedState.awake = state.awake;
+			retained.retainedState.fields |= state.fields;
+			retained.retainedState.change = state.change;
+			if(request.selection == PhysicsBackendExtractionSelection::PublicationRelevant
+				|| request.selection == PhysicsBackendExtractionSelection::FullState) {
+				retained.pendingChange = PhysicsBodyStateChangeMask::None;
+			}
+		}
+		extraction.extractedBodyCount = extraction.bodies.size();
+		extraction.extractionRangeCount = execution.rangeCount;
+		extraction.usedParallelReads = execution.parallel;
+		extraction.usedSerialFallback = execution.serialFallback;
 		extraction.activeBodyCount = static_cast<std::uint64_t>(
 			impl->physicsSystem->GetNumActiveBodies(JPH::EBodyType::RigidBody));
 		extraction.contactCount = static_cast<std::uint64_t>(std::count_if(
 			impl->pendingEvents.begin(), impl->pendingEvents.end(), [](const PhysicsEvent& event) {
 				return event.type == PhysicsEventType::Contact;
 			}));
-		extraction.constraints.clear();
-		for(const auto& [key, record] : impl->constraints) {
-			(void)key;
-			if(!record.added || record.constraint == nullptr) continue;
-			PhysicsBackendConstraintState state;
-			state.handle = record.handle; state.ownerObjectId = record.ownerObjectId;
-			state.ownerObjectGeneration = record.ownerObjectGeneration; state.componentGeneration = record.componentGeneration;
-			state.recordId = record.recordId; state.recordGeneration = record.recordGeneration; state.enabled = record.enabled;
-			switch(record.kind) {
-			case PhysicsConstraintKind::Fixed: {
-				const auto& value = static_cast<const JPH::FixedConstraint&>(*record.constraint);
-				state.linearImpulseMagnitude = Magnitude(value.GetTotalLambdaPosition()); state.angularImpulseMagnitude = Magnitude(value.GetTotalLambdaRotation()); break;
+
+		if(HasPhysicsBodyStateFields(request.fields, PhysicsBodyStateFieldMask::Constraints)) {
+			for(const auto& [key, record] : impl->constraints) {
+				(void)key;
+				if(!record.added || record.constraint == nullptr) continue;
+				PhysicsBackendConstraintState state;
+				state.handle = record.handle; state.ownerObjectId = record.ownerObjectId;
+				state.ownerObjectGeneration = record.ownerObjectGeneration; state.componentGeneration = record.componentGeneration;
+				state.recordId = record.recordId; state.recordGeneration = record.recordGeneration; state.enabled = record.enabled;
+				switch(record.kind) {
+				case PhysicsConstraintKind::Fixed: {
+					const auto& value = static_cast<const JPH::FixedConstraint&>(*record.constraint);
+					state.linearImpulseMagnitude = Magnitude(value.GetTotalLambdaPosition()); state.angularImpulseMagnitude = Magnitude(value.GetTotalLambdaRotation()); break;
+				}
+				case PhysicsConstraintKind::Point: state.linearImpulseMagnitude = Magnitude(static_cast<const JPH::PointConstraint&>(*record.constraint).GetTotalLambdaPosition()); break;
+				case PhysicsConstraintKind::Distance: state.linearImpulseMagnitude = std::abs(static_cast<const JPH::DistanceConstraint&>(*record.constraint).GetTotalLambdaPosition()); break;
+				case PhysicsConstraintKind::Hinge: {
+					const auto& value = static_cast<const JPH::HingeConstraint&>(*record.constraint);
+					state.linearImpulseMagnitude = Magnitude(value.GetTotalLambdaPosition()); state.angularImpulseMagnitude = Magnitude(value.GetTotalLambdaRotation()) + std::abs(value.GetTotalLambdaRotationLimits()) + std::abs(value.GetTotalLambdaMotor()); break;
+				}
+				case PhysicsConstraintKind::Slider: {
+					const auto& value = static_cast<const JPH::SliderConstraint&>(*record.constraint);
+					state.linearImpulseMagnitude = Magnitude(value.GetTotalLambdaPosition()) + std::abs(value.GetTotalLambdaPositionLimits()) + std::abs(value.GetTotalLambdaMotor()); state.angularImpulseMagnitude = Magnitude(value.GetTotalLambdaRotation()); break;
+				}
+				case PhysicsConstraintKind::Cone: {
+					const auto& value = static_cast<const JPH::ConeConstraint&>(*record.constraint);
+					state.linearImpulseMagnitude = Magnitude(value.GetTotalLambdaPosition()); state.angularImpulseMagnitude = std::abs(value.GetTotalLambdaRotation()); break;
+				}
+				case PhysicsConstraintKind::SwingTwist: {
+					const auto& value = static_cast<const JPH::SwingTwistConstraint&>(*record.constraint);
+					state.linearImpulseMagnitude = Magnitude(value.GetTotalLambdaPosition()); state.angularImpulseMagnitude = std::abs(value.GetTotalLambdaTwist()) + std::abs(value.GetTotalLambdaSwingY()) + std::abs(value.GetTotalLambdaSwingZ()) + Magnitude(value.GetTotalLambdaMotor()); break;
+				}
+				case PhysicsConstraintKind::SixDegreesOfFreedom: {
+					const auto& value = static_cast<const JPH::SixDOFConstraint&>(*record.constraint);
+					state.linearImpulseMagnitude = Magnitude(value.GetTotalLambdaPosition()) + Magnitude(value.GetTotalLambdaMotorTranslation()); state.angularImpulseMagnitude = Magnitude(value.GetTotalLambdaRotation()) + Magnitude(value.GetTotalLambdaMotorRotation()); break;
+				}
+				case PhysicsConstraintKind::Gear: state.angularImpulseMagnitude = std::abs(static_cast<const JPH::GearConstraint&>(*record.constraint).GetTotalLambda()); break;
+				}
+				extraction.constraints.push_back(state);
 			}
-			case PhysicsConstraintKind::Point: state.linearImpulseMagnitude = Magnitude(static_cast<const JPH::PointConstraint&>(*record.constraint).GetTotalLambdaPosition()); break;
-			case PhysicsConstraintKind::Distance: state.linearImpulseMagnitude = std::abs(static_cast<const JPH::DistanceConstraint&>(*record.constraint).GetTotalLambdaPosition()); break;
-			case PhysicsConstraintKind::Hinge: {
-				const auto& value = static_cast<const JPH::HingeConstraint&>(*record.constraint);
-				state.linearImpulseMagnitude = Magnitude(value.GetTotalLambdaPosition()); state.angularImpulseMagnitude = Magnitude(value.GetTotalLambdaRotation()) + std::abs(value.GetTotalLambdaRotationLimits()) + std::abs(value.GetTotalLambdaMotor()); break;
-			}
-			case PhysicsConstraintKind::Slider: {
-				const auto& value = static_cast<const JPH::SliderConstraint&>(*record.constraint);
-				state.linearImpulseMagnitude = Magnitude(value.GetTotalLambdaPosition()) + std::abs(value.GetTotalLambdaPositionLimits()) + std::abs(value.GetTotalLambdaMotor()); state.angularImpulseMagnitude = Magnitude(value.GetTotalLambdaRotation()); break;
-			}
-			case PhysicsConstraintKind::Cone: {
-				const auto& value = static_cast<const JPH::ConeConstraint&>(*record.constraint);
-				state.linearImpulseMagnitude = Magnitude(value.GetTotalLambdaPosition()); state.angularImpulseMagnitude = std::abs(value.GetTotalLambdaRotation()); break;
-			}
-			case PhysicsConstraintKind::SwingTwist: {
-				const auto& value = static_cast<const JPH::SwingTwistConstraint&>(*record.constraint);
-				state.linearImpulseMagnitude = Magnitude(value.GetTotalLambdaPosition()); state.angularImpulseMagnitude = std::abs(value.GetTotalLambdaTwist()) + std::abs(value.GetTotalLambdaSwingY()) + std::abs(value.GetTotalLambdaSwingZ()) + Magnitude(value.GetTotalLambdaMotor()); break;
-			}
-			case PhysicsConstraintKind::SixDegreesOfFreedom: {
-				const auto& value = static_cast<const JPH::SixDOFConstraint&>(*record.constraint);
-				state.linearImpulseMagnitude = Magnitude(value.GetTotalLambdaPosition()) + Magnitude(value.GetTotalLambdaMotorTranslation()); state.angularImpulseMagnitude = Magnitude(value.GetTotalLambdaRotation()) + Magnitude(value.GetTotalLambdaMotorRotation()); break;
-			}
-			case PhysicsConstraintKind::Gear: state.angularImpulseMagnitude = std::abs(static_cast<const JPH::GearConstraint&>(*record.constraint).GetTotalLambda()); break;
-			}
-			extraction.constraints.push_back(state);
+			std::sort(extraction.constraints.begin(), extraction.constraints.end(), [](const auto& left, const auto& right) { return HandleKey(left.handle) < HandleKey(right.handle); });
 		}
-		std::sort(extraction.constraints.begin(), extraction.constraints.end(), [](const auto& left, const auto& right) { return HandleKey(left.handle) < HandleKey(right.handle); });
-		extraction.characters.clear();
-		for(const auto& [key, record] : impl->characters) {
-			(void)key;
-			if(!record.committed || record.character == nullptr) continue;
-			const JPH::CharacterVirtual& character = *record.character;
-			PhysicsBackendCharacterState state;
-			state.handle = record.handle; state.objectId = record.objectId; state.objectGeneration = record.objectGeneration; state.componentGeneration = record.componentGeneration;
-			state.pose = {FromJoltPosition(character.GetPosition()), FromJoltRotation(character.GetRotation())}; state.linearVelocity = FromJoltVector(character.GetLinearVelocity());
-			state.groundPosition = FromJoltPosition(character.GetGroundPosition()); state.groundNormal = FromJoltVector(character.GetGroundNormal()); state.supportVelocity = FromJoltVector(character.GetGroundVelocity()); state.supported = character.IsSupported();
-			switch(character.GetGroundState()) {
-			case JPH::CharacterBase::EGroundState::OnGround: state.groundState = PhysicsCharacterGroundState::OnGround; break;
-			case JPH::CharacterBase::EGroundState::OnSteepGround: state.groundState = PhysicsCharacterGroundState::OnSteepGround; break;
-			case JPH::CharacterBase::EGroundState::NotSupported: state.groundState = PhysicsCharacterGroundState::NotSupported; break;
-			case JPH::CharacterBase::EGroundState::InAir: state.groundState = PhysicsCharacterGroundState::InAir; break;
+
+		if(HasPhysicsBodyStateFields(request.fields, PhysicsBodyStateFieldMask::Characters)) {
+			for(const auto& [key, record] : impl->characters) {
+				(void)key;
+				if(!record.committed || record.character == nullptr) continue;
+				const JPH::CharacterVirtual& character = *record.character;
+				PhysicsBackendCharacterState state;
+				state.handle = record.handle; state.objectId = record.objectId; state.objectGeneration = record.objectGeneration; state.componentGeneration = record.componentGeneration;
+				state.pose = {FromJoltPosition(character.GetPosition()), FromJoltRotation(character.GetRotation())}; state.linearVelocity = FromJoltVector(character.GetLinearVelocity());
+				state.groundPosition = FromJoltPosition(character.GetGroundPosition()); state.groundNormal = FromJoltVector(character.GetGroundNormal()); state.supportVelocity = FromJoltVector(character.GetGroundVelocity()); state.supported = character.IsSupported();
+				switch(character.GetGroundState()) {
+				case JPH::CharacterBase::EGroundState::OnGround: state.groundState = PhysicsCharacterGroundState::OnGround; break;
+				case JPH::CharacterBase::EGroundState::OnSteepGround: state.groundState = PhysicsCharacterGroundState::OnSteepGround; break;
+				case JPH::CharacterBase::EGroundState::NotSupported: state.groundState = PhysicsCharacterGroundState::NotSupported; break;
+				case JPH::CharacterBase::EGroundState::InAir: state.groundState = PhysicsCharacterGroundState::InAir; break;
+				}
+				if(const Impl::BodyRecord* support = impl->FindBodyByJoltId(character.GetGroundBodyID())) state.supportBody = support->handle;
+				state.contactCount = static_cast<std::uint32_t>(std::count_if(character.GetActiveContacts().begin(), character.GetActiveContacts().end(), [](const JPH::CharacterContact& contact) { return contact.mHadCollision; }));
+				extraction.characters.push_back(state);
 			}
-			if(const Impl::BodyRecord* support = impl->FindBodyByJoltId(character.GetGroundBodyID())) state.supportBody = support->handle;
-			state.contactCount = static_cast<std::uint32_t>(std::count_if(character.GetActiveContacts().begin(), character.GetActiveContacts().end(), [](const JPH::CharacterContact& contact) { return contact.mHadCollision; }));
-			extraction.characters.push_back(state);
+			std::sort(extraction.characters.begin(), extraction.characters.end(), [](const auto& left, const auto& right) { return HandleKey(left.handle) < HandleKey(right.handle); });
 		}
-		std::sort(extraction.characters.begin(), extraction.characters.end(), [](const auto& left, const auto& right) { return HandleKey(left.handle) < HandleKey(right.handle); });
 		extraction.constraintCount = extraction.constraints.size();
-		extraction.events = std::move(impl->pendingEvents);
-		impl->pendingEvents.clear();
-		extraction.droppedEventCount = impl->droppedEvents;
-		impl->droppedEvents = 0U;
-		return Success("Jolt body state was converted into engine-owned values.");
+
+		if(HasPhysicsBodyStateFields(request.fields, PhysicsBodyStateFieldMask::Events)
+			&& request.drainEvents && (request.tick == 0U || request.tick > impl->lastEventDrainTick)) {
+			extraction.events = std::move(impl->pendingEvents);
+			impl->pendingEvents.clear();
+			extraction.droppedEventCount = impl->droppedEvents;
+			impl->droppedEvents = 0U;
+			impl->lastEventDrainTick = request.tick;
+			extraction.eventDrainPerformed = true;
+		}
+		return Success("Jolt state was collected through deterministic bounded provider ranges.");
 	}
 
 	PhysicsBackendResult JoltPhysicsBackend::CommitStaging(PhysicsBackendStagingToken staging) {
@@ -2549,6 +2850,7 @@ namespace TerraEngine::Physics::Backend {
 			body->second.stagingToken = 0U;
 			impl->bodyObjectToKey[body->second.objectId] = bodyKey;
 		}
+		if(!record->second.bodyKeys.empty()) impl->RebuildBodyOrder();
 		for(std::uint64_t constraintKey : record->second.constraintKeys) {
 			auto constraint = impl->constraints.find(constraintKey);
 			if(constraint != impl->constraints.end()) constraint->second.stagingToken = 0U;

@@ -482,6 +482,80 @@ namespace TerraEngine::Editor::Automation
 		nlohmann::json details = nlohmann::json::object();
 	};
 
+	// Performance automation records keep configured preferences separate from
+	// their effective runtime value. This distinction prevents clients from
+	// mistaking an automatic large-scene safeguard for a user-authored setting.
+	struct PerformanceSettingState
+	{
+		std::string name;
+		nlohmann::json configuredValue;
+		nlohmann::json effectiveValue;
+		std::string effectiveReason;
+	};
+
+	// A reduction is an intentional presentation or diagnostic simplification.
+	// It never represents missing physics state or a failed measurement.
+	struct PerformanceReduction
+	{
+		std::string id;
+		std::string reason;
+		std::uint64_t affectedItems = 0;
+		bool essentialInteractionPreserved = true;
+	};
+
+	// Cache decisions are additive diagnostics used by scene, managed, overlay,
+	// and profiler automation results without exposing mutable cache storage.
+	struct PerformanceCacheDecision
+	{
+		std::string cache;
+		bool hit = false;
+		std::string reason;
+		std::string identity;
+	};
+
+	struct PerformanceStageEvidence
+	{
+		std::string stage;
+		std::string unit = "nanoseconds";
+		std::uint64_t samples = 0;
+		std::uint64_t median = 0;
+		std::uint64_t p95 = 0;
+		std::uint64_t p99 = 0;
+		std::uint64_t maximum = 0;
+		bool available = false;
+		std::string unavailableReason;
+	};
+
+	// Automation histories are always bounded. The dropped count tells clients
+	// that an older sample was intentionally evicted instead of silently lost.
+	template<typename T>
+	struct BoundedPerformanceHistory
+	{
+		std::vector<T> samples;
+		std::size_t capacity = 0;
+		std::uint64_t droppedSamples = 0;
+		std::uint32_t intervalFrames = 1;
+	};
+
+	struct SceneViewPerformanceState
+	{
+		std::string configuredLargeSceneMode = "auto";
+		bool effectiveLargeSceneMode = false;
+		std::string effectiveReason;
+		std::vector<PerformanceReduction> reductions;
+		std::uint64_t sourceMarkers = 0;
+		std::uint64_t candidates = 0;
+		std::uint64_t viewRejected = 0;
+		std::uint64_t densityConsolidated = 0;
+		std::uint64_t budgetRejected = 0;
+		std::uint64_t presented = 0;
+		std::uint64_t selectedExemptions = 0;
+		std::uint64_t cameraExemptions = 0;
+		std::uint64_t lightExemptions = 0;
+		std::uint64_t presentationBatches = 0;
+		BoundedPerformanceHistory<PerformanceStageEvidence> stageHistory;
+	};
+
 	struct ExportJob
 	{
 		std::string jobId;

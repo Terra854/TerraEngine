@@ -23,6 +23,7 @@ private:
 	void DrawSchedulerSummary();
 	void DrawWorkerCoverageSummary();
 	void DrawParallelFrameSummary();
+	void DrawExecutionTelemetrySummary();
 	void DrawHardBoundarySummary();
 	void DrawSafetyViolationSummary();
 	void DrawRuntimeLayoutSummary();

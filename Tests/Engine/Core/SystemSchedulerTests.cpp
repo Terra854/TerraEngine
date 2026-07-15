@@ -89,6 +89,30 @@ namespace TerraEngine::Tests {
 			std::vector<std::string>* log = nullptr;
 		};
 
+		class StableDescriptorSystem final : public SystemsBase {
+		public:
+			void Initialize() override {}
+			void Update(float) override {}
+			void Shutdown() override {}
+			std::string SystemName() override { return "StableDescriptorSystem"; }
+
+			std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> DeclareFrameWorkloads(float deltaTime) override
+			{
+				TerraEngine::Scheduling::FrameWorkloadDeclaration workload;
+				workload.workloadName = "StableWork";
+				workload.stableDescriptorId = "StableDescriptorSystem/Scene/StableWork";
+				workload.activationPredicateKey = "fixture-has-work";
+				workload.reads = {alternateResource ? "ObjectManager" : "SceneGraph"};
+				workload.mainThreadRequired = true;
+				workload.workerEligible = false;
+				workload.estimatedWorkItemCount = deltaTime > 0.0F ? 1U : 0U;
+				workload.work = [](TerraEngine::Scheduling::JobGraphContext&) {};
+				return {std::move(workload)};
+			}
+
+			bool alternateResource = false;
+		};
+
 		TerraEngine::Scheduling::SystemDeclaration MakeDeclaration(std::string name, std::string phase)
 		{
 			TerraEngine::Scheduling::SystemDeclaration declaration;
@@ -511,6 +535,35 @@ namespace TerraEngine::Tests {
 			context.Expect(Contains(log, "DeclaredPhase"), "Declared phase should execute.");
 			context.Expect(!Contains(log, "Update"), "Legacy Update wrapper should not run when the system declares phase workloads.");
 			context.Expect(plan.formatted.find("PhaseSystem:ProtectedCommit") != std::string::npos, "Diagnostics should name the declared system-owned phase.");
+		});
+
+		registry.Add("Engine.SystemScheduler.StableDescriptorsReuseGenerationUntilMetadataChanges", [](TestContext& context) {
+			StableDescriptorSystem system;
+			TerraEngine::Scheduling::SystemScheduler scheduler;
+			auto declaration = MakeDeclaration(system.SystemName(), "Scene");
+			declaration.reads = {"SceneGraph", "ObjectManager"};
+			scheduler.RegisterSystem(system, declaration);
+
+			const auto first = scheduler.BuildFrameWorkloadDeclarations(0.016F);
+			const auto second = scheduler.BuildFrameWorkloadDeclarations(0.033F);
+			context.Expect(!first.empty() && !second.empty(), "Stable descriptor fixture must produce frame work.");
+			if (!first.empty() && !second.empty())
+			{
+				context.ExpectEqual(first.front().stableDescriptorId, second.front().stableDescriptorId,
+					"Repeated frames must retain the system-owned stable descriptor identity.");
+				context.ExpectEqual(first.front().stableDescriptorGeneration, second.front().stableDescriptorGeneration,
+					"Per-frame input binding must not rebuild unchanged descriptor metadata.");
+				context.Expect(first.front().estimatedWorkItemCount == second.front().estimatedWorkItemCount,
+					"Dynamic estimates may be rebound without changing the stable descriptor generation.");
+			}
+
+			system.alternateResource = true;
+			const auto changed = scheduler.BuildFrameWorkloadDeclarations(0.016F);
+			if (!second.empty() && !changed.empty())
+			{
+				context.Expect(changed.front().stableDescriptorGeneration > second.front().stableDescriptorGeneration,
+					"Changing stable resource metadata must publish a new descriptor generation.");
+			}
 		});
 
 		registry.Add("Engine.SystemScheduler.FrameWorkloadSummaryIncludesFlushFallbacks", [](TestContext& context) {

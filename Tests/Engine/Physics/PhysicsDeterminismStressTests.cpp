@@ -7,6 +7,7 @@
 #include "../TestHarness.h"
 
 #include "Physics/Backend/JoltPhysicsBackend.h"
+#include "Physics/PhysicsCommands.h"
 #include "ThreadPool/ThreadPool.h"
 
 #include <algorithm>
@@ -64,6 +65,9 @@ namespace TerraEngine::Tests {
 		struct ReplayHashes {
 			std::uint64_t backendState = 0U;
 			std::uint64_t sortedPackets = 0U;
+			std::uint64_t eventContactOrder = 0U;
+			std::uint64_t sleepWakeTransitions = 0U;
+			std::uint64_t publishedWorkVolumes = 0U;
 			std::uint64_t warmPeakAllocations = 0U;
 			std::uint64_t finalPeakAllocations = 0U;
 		};
@@ -84,6 +88,17 @@ namespace TerraEngine::Tests {
 
 		void HashFloat(std::uint64_t& hash, float value) {
 			HashWord(hash, std::bit_cast<std::uint32_t>(value));
+		}
+
+		void HashUuid(std::uint64_t& hash, const TerraEngine::UUID& value) {
+			for(const std::uint8_t byte : value) HashWord(hash, byte);
+		}
+
+		void HashBodyHandle(std::uint64_t& hash, const PhysicsBodyHandle& value) {
+			HashWord(hash, value.worldId.value);
+			HashWord(hash, value.worldGeneration);
+			HashWord(hash, value.slotIndex);
+			HashWord(hash, value.slotGeneration);
 		}
 
 		TerraEngine::UUID StableUuid(std::uint32_t index) {
@@ -170,11 +185,60 @@ namespace TerraEngine::Tests {
 			HashWord(hash, extraction.activeBodyCount);
 			HashWord(hash, extraction.contactCount);
 			for(const PhysicsBackendBodyState& body : extraction.bodies) {
-				HashWord(hash, body.handle.slotIndex);
-				HashWord(hash, body.handle.slotGeneration);
+				HashBodyHandle(hash, body.handle);
+				HashWord(hash, body.stableIndex);
+				HashUuid(hash, body.objectId);
+				HashWord(hash, body.objectGeneration);
+				HashWord(hash, body.componentGeneration);
 				HashFloat(hash, body.pose.position.x); HashFloat(hash, body.pose.position.y); HashFloat(hash, body.pose.position.z);
+				HashFloat(hash, body.pose.rotation.x); HashFloat(hash, body.pose.rotation.y); HashFloat(hash, body.pose.rotation.z); HashFloat(hash, body.pose.rotation.w);
 				HashFloat(hash, body.linearVelocity.x); HashFloat(hash, body.linearVelocity.y); HashFloat(hash, body.linearVelocity.z);
+				HashFloat(hash, body.angularVelocity.x); HashFloat(hash, body.angularVelocity.y); HashFloat(hash, body.angularVelocity.z);
+				HashFloat(hash, body.mass);
+				HashWord(hash, body.contactCount);
 				HashWord(hash, body.awake ? 1U : 0U);
+				HashWord(hash, static_cast<std::uint32_t>(body.fields));
+				HashWord(hash, static_cast<std::uint32_t>(body.change));
+				HashWord(hash, static_cast<std::uint32_t>(body.motionType));
+			}
+			return hash;
+		}
+
+		std::uint64_t HashEventContactOrder(const std::vector<PhysicsEvent>& events) {
+			std::uint64_t hash = 1469598103934665603ULL;
+			for(const PhysicsEvent& event : events) {
+				HashWord(hash, static_cast<std::uint32_t>(event.type));
+				HashWord(hash, event.world.worldId.value); HashWord(hash, event.world.worldGeneration); HashWord(hash, event.tick);
+				HashUuid(hash, event.first.objectId); HashWord(hash, event.first.objectGeneration); HashWord(hash, event.first.componentGeneration);
+				HashBodyHandle(hash, event.first.body); HashWord(hash, event.first.subshapeId);
+				HashWord(hash, event.hasSecondParticipant ? 1U : 0U);
+				HashUuid(hash, event.second.objectId); HashWord(hash, event.second.objectGeneration); HashWord(hash, event.second.componentGeneration);
+				HashBodyHandle(hash, event.second.body); HashWord(hash, event.second.subshapeId);
+				HashFloat(hash, event.point.x); HashFloat(hash, event.point.y); HashFloat(hash, event.point.z);
+				HashFloat(hash, event.normal.x); HashFloat(hash, event.normal.y); HashFloat(hash, event.normal.z);
+				HashFloat(hash, event.relativeVelocity.x); HashFloat(hash, event.relativeVelocity.y); HashFloat(hash, event.relativeVelocity.z);
+				HashFloat(hash, event.penetration); HashFloat(hash, event.impulse);
+				HashWord(hash, event.causalCommandSequence); HashWord(hash, event.contactIndex);
+			}
+			return hash;
+		}
+
+		std::uint64_t HashPublishedWorkVolumes(const PhysicsBackendExtraction& extraction) {
+			std::uint64_t hash = 1469598103934665603ULL;
+			HashWord(hash, extraction.totalBodyCount); HashWord(hash, extraction.activeBodyCount);
+			HashWord(hash, extraction.examinedBodyCount); HashWord(hash, extraction.extractedBodyCount);
+			HashWord(hash, extraction.extractionRangeCount); HashWord(hash, extraction.contactCount);
+			HashWord(hash, extraction.constraintCount); HashWord(hash, extraction.providerOrderGeneration);
+			HashWord(hash, extraction.droppedEventCount); HashWord(hash, extraction.eventDrainPerformed ? 1U : 0U);
+			return hash;
+		}
+
+		std::uint64_t HashSleepWakeTransitions(const PhysicsBackendExtraction& extraction) {
+			std::uint64_t hash = 1469598103934665603ULL;
+			for(const PhysicsBackendBodyState& body : extraction.bodies) {
+				HashBodyHandle(hash, body.handle);
+				HashWord(hash, body.awake ? 1U : 0U);
+				HashWord(hash, static_cast<std::uint32_t>(body.change));
 			}
 			return hash;
 		}
@@ -226,7 +290,23 @@ namespace TerraEngine::Tests {
 			if(!fixture.backend.Extract(extraction).Succeeded()) return {};
 
 			ReplayHashes hashes;
-			hashes.backendState = HashExtraction(std::move(extraction));
+			hashes.backendState = HashExtraction(extraction);
+			hashes.eventContactOrder = HashEventContactOrder(extraction.events);
+			hashes.publishedWorkVolumes = HashPublishedWorkVolumes(extraction);
+
+			// Explicit sleep then wake makes the replay fingerprint cover transition
+			// ordering, rather than merely the final active-body count.
+			const PhysicsBodyCommandTarget transitionTarget{fixture.world, StableUuid(0U), 1U, 1U};
+			if(!fixture.backend.ApplyCommand(PhysicsCommand::MakeSleep(transitionTarget)).Succeeded()) return {};
+			PhysicsBackendExtraction slept;
+			slept.world = fixture.world;
+			if(!fixture.backend.Extract(slept).Succeeded()) return {};
+			if(!fixture.backend.ApplyCommand(PhysicsCommand::MakeWake(transitionTarget)).Succeeded()) return {};
+			PhysicsBackendExtraction awakened;
+			awakened.world = fixture.world;
+			if(!fixture.backend.Extract(awakened).Succeeded()) return {};
+			hashes.sleepWakeTransitions = HashSleepWakeTransitions(slept);
+			HashWord(hashes.sleepWakeTransitions, HashSleepWakeTransitions(awakened));
 			hashes.sortedPackets = HashRays(fixture, kStressRayRepetitions, &hashes.warmPeakAllocations);
 			hashes.finalPeakAllocations = fixture.backend.AllocationDiagnostics().highWaterOutstandingAllocations;
 			return hashes;
@@ -319,7 +399,9 @@ namespace TerraEngine::Tests {
 
 			std::wifstream input(resultPath);
 			ReplayHashes hashes;
-			input >> hashes.backendState >> hashes.sortedPackets >> hashes.warmPeakAllocations >> hashes.finalPeakAllocations;
+			input >> hashes.backendState >> hashes.sortedPackets >> hashes.eventContactOrder
+				>> hashes.sleepWakeTransitions >> hashes.publishedWorkVolumes
+				>> hashes.warmPeakAllocations >> hashes.finalPeakAllocations;
 			const bool read = input.good() || input.eof();
 			input.close();
 			DeleteFileW(resultFile.data());
@@ -337,7 +419,9 @@ namespace TerraEngine::Tests {
 			// compare runs without importing provider objects across process boundaries.
 			const ReplayHashes hashes = Replay(request->workers);
 			std::wofstream output(request->resultPath, std::ios::trunc);
-			output << hashes.backendState << L' ' << hashes.sortedPackets << L' ' << hashes.warmPeakAllocations << L' ' << hashes.finalPeakAllocations;
+			output << hashes.backendState << L' ' << hashes.sortedPackets << L' ' << hashes.eventContactOrder
+				<< L' ' << hashes.sleepWakeTransitions << L' ' << hashes.publishedWorkVolumes
+				<< L' ' << hashes.warmPeakAllocations << L' ' << hashes.finalPeakAllocations;
 			output.flush();
 			context.Expect(output.good(), "A child replay must persist its fixed-width reproducibility hashes before exiting.");
 #else
@@ -364,15 +448,21 @@ namespace TerraEngine::Tests {
 #else
 				const std::optional<ReplayHashes> replay = Replay(workers);
 #endif
-				context.Expect(replay->backendState != 0U && replay->sortedPackets != 0U,
-					"Every child process must complete 100 identical 10,000-ray batches with non-empty fingerprints.");
+				context.Expect(replay->backendState != 0U && replay->sortedPackets != 0U
+					&& replay->eventContactOrder != 0U && replay->sleepWakeTransitions != 0U
+					&& replay->publishedWorkVolumes != 0U,
+					"Every child process must retain complete state, contact ordering, sleep/wake, work-volume, and ray fingerprints.");
 				context.Expect(replay->finalPeakAllocations <= replay->warmPeakAllocations + 32U,
 					"After warm-up, all one hundred 10,000-ray batches must keep provider allocation growth bounded.");
 				if(!baseline) {
 					baseline = replay;
 				} else {
-					context.Expect(replay->backendState == baseline->backendState && replay->sortedPackets == baseline->sortedPackets,
-						"Separate process launches must preserve backend-state and sorted-packet hashes at every unique worker count.");
+					context.Expect(replay->backendState == baseline->backendState
+						&& replay->sortedPackets == baseline->sortedPackets
+						&& replay->eventContactOrder == baseline->eventContactOrder
+						&& replay->sleepWakeTransitions == baseline->sleepWakeTransitions
+						&& replay->publishedWorkVolumes == baseline->publishedWorkVolumes,
+						"Separate process launches must preserve complete snapshots, contact order, sleep/wake transitions, work volumes, and sorted queries.");
 				}
 			}
 			context.Expect(baseline.has_value(), "The worker-count matrix must execute at least one 100-pass child replay.");

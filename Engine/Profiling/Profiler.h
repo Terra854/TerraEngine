@@ -8,6 +8,7 @@
 #include <chrono>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -41,6 +42,9 @@ public:
 	bool BeginSample(const char* name, ProfilerModuleId moduleId, const char* taskLabel = nullptr);
 	void EndSample();
 	void RecordRenderStats(const RenderStatsSnapshot& gameStats, const RenderStatsSnapshot& sceneStats);
+	// Copy value-only editor stage telemetry into the current capture frame.
+	// The profiler never retains the Scene View window or its mutable caches.
+	void RecordSceneViewStages(std::span<const PerformanceStageRecord> stages);
 	void RecordTaskQueued();
 	bool RecordTaskStarted(const char* taskLabel);
 	void RecordTaskFinished(bool sampleActive);

@@ -151,13 +151,13 @@ namespace TerraEngine::Editor::Automation
 			resolveHandler,
 			"project.state",
 			"project",
-			"Read the current project/session identity and dirty state.",
+			"Read project/session identity, source-authority, and derived-scene cache decisions.",
 			ObjectSchema(),
 			AutomationPermission::Read,
 			AutomationApprovalPolicy::None,
 			MutationMode::ReadOnly,
 			Availability(false, false),
-			ReadExecution({"ProjectSession", "ActiveScene", "SceneDirtyState"})));
+			ReadExecution({"ProjectSession", "ActiveScene", "SceneDirtyState", "DerivedSceneCache"})));
 
 		capabilities.push_back(Registration(resolveHandler, "scene.list", "scene", "List project scene documents and active/dirty state.", ObjectSchema(), AutomationPermission::Read, AutomationApprovalPolicy::None, MutationMode::ReadOnly, Availability(true, false), ReadExecution({"ProjectSession", "SceneInventory"})));
 		capabilities.push_back(Registration(resolveHandler, "scene.create", "scene", "Create and optionally open a project-relative scene.", ObjectSchema({{"path", {{"type", "string"}}}, {"name", {{"type", "string"}}}, {"open", {{"type", "boolean"}}}}, Json::array({"path"})), AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, MutationMode::SceneMutation, Availability(true, false), WriteExecution("scene_lifecycle_commit", {"ProjectSession", "SceneInventory"}, {"SceneFile", "ActiveScene"})));

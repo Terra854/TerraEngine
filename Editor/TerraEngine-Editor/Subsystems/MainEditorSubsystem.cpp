@@ -710,27 +710,6 @@ void MainEditorSubsystem::Initialize(EditorContext& context) {
 void MainEditorSubsystem::OnProjectOpened() {
 	if (!ctx || !ctx->projectManager->HasActiveProject()) return;
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (auto browser = GetWindow<ProjectBrowserWindow>()) {
-		browser->Reset();
-	}
-	
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (auto buildProfiles = GetWindow<BuildProfilesWindow>()) {
-		buildProfiles->OnProjectOpened();
-	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (ctx->editorProfiler) {
-		ctx->editorProfiler->OnProjectOpened();
-	}
-
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (auto uiBuilder = GetWindow<UIBuilderWindow>()) {
-		// Reset the builder when projects change so hidden internal asset paths
-		// never leak across workspaces and the next open starts from local state.
-		uiBuilder->ResetForProjectOpen();
-	}
-
 	auto projectRoot = ctx->projectManager->GetProjectRoot();
 	std::filesystem::path assetRoot = projectRoot / "Assets";
 	std::filesystem::path sceneRoot = assetRoot / "Scenes";
@@ -793,16 +772,31 @@ void MainEditorSubsystem::OnProjectOpened() {
 		}
 	}
 
+	// Start simulation-essential managed readiness before refreshing editor-only
+	// windows. The scene has already crossed its single protected publication
+	// boundary, so no panel can observe a partially populated ObjectManager.
 	ScriptCompilationSubsystem::Instance().OnProjectOpened();
+
+	// Project Browser, build-profile UI, profiler documents, and UI Builder state
+	// are editor metadata. Refresh them only after the active authored scene is
+	// complete; this work cannot delay or partially expose simulation state.
+	if (auto browser = GetWindow<ProjectBrowserWindow>()) browser->Reset();
+	if (auto buildProfiles = GetWindow<BuildProfilesWindow>()) buildProfiles->OnProjectOpened();
+	if (ctx->editorProfiler) ctx->editorProfiler->OnProjectOpened();
+	if (auto uiBuilder = GetWindow<UIBuilderWindow>()) uiBuilder->ResetForProjectOpen();
+	ctx->projectManager->MarkEditorMetadataReady();
 }
 
 // MainEditorSubsystem::CapturePlayModeSceneState is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::CapturePlayModeSceneState()
 {
 	m_HasPlayModeSceneSnapshot = false;
-	m_PlayModeSceneSnapshotJson.clear();
+	m_PlayModeSceneSnapshotPacket.reset();
 	m_PlayModeSelectedEntityUuid.reset();
+	m_PlayModeSelectedEntityUuids.clear();
 	m_PlayModeSceneWasDirty = SceneManager::Instance().IsActiveSceneDirty();
+	m_PlayModeSceneRenderSettings = SceneManager::Instance().GetActiveSceneRenderSettings();
+	m_LastPlayModeRestorationResult = {};
 
 	nlohmann::json snapshotJson;
 	const SceneDocument* activeScene = SceneManager::Instance().GetActiveScene();
@@ -830,46 +824,70 @@ void MainEditorSubsystem::CapturePlayModeSceneState()
 			m_PlayModeSelectedEntityUuid = ObjectManager::instance().getUUID(*selectedObject);
 		}
 	}
+	// Store every stable selection ID, not only the primary object. The packet
+	// changes EnTT handles during publication, while UUIDs continue to identify
+	// the same authored selection after the protected restore boundary.
+	m_PlayModeSelectedEntityUuids = selectedEntityUuids;
 
-	m_PlayModeSceneSnapshotJson = snapshotJson.dump();
+	// Prepare an owned, deterministic object table before Play begins. This
+	// replaces the former text dump/reparse path: the cached packet carries the
+	// authored data directly to the one protected Stop boundary.
+	const std::uint64_t expectedGeneration = ObjectManager::instance().GetSceneGeneration();
+	const TerraEngine::Scene::PreparedSceneDecode prepared = Serializer::PrepareSceneDecode(snapshotJson);
+	m_PlayModeSceneSnapshotPacket = TerraEngine::Scene::BuildBulkScenePublicationPacket(
+		prepared,
+		expectedGeneration,
+		expectedGeneration);
+	m_LastPlayModeRestorationResult.snapshotCaptured = !m_PlayModeSceneSnapshotPacket->cancelled;
+	m_LastPlayModeRestorationResult.preparedGeneration = expectedGeneration;
+	m_LastPlayModeRestorationResult.reason = prepared.reason;
+	if (!prepared.accepted)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Could not prepare the authored Play Mode restoration packet: " << prepared.reason);
+		m_PlayModeSceneSnapshotPacket.reset();
+		return;
+	}
 	m_HasPlayModeSceneSnapshot = true;
 }
 
 // MainEditorSubsystem::RestorePlayModeSceneState is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::RestorePlayModeSceneState()
 {
-	if (!m_HasPlayModeSceneSnapshot)
+	if (!m_HasPlayModeSceneSnapshot || !m_PlayModeSceneSnapshotPacket.has_value())
 	{
 		return;
 	}
 
-	nlohmann::json snapshotJson;
-	try
+	// Stop runs on the editor's protected lifecycle boundary, so it may make the
+	// complete authored graph visible atomically. A packet from an intervening
+	// scene unload or load is rejected instead of reviving stale object IDs.
+	const TerraEngine::Scene::BulkScenePublicationPreflight preflight =
+		TerraEngine::Scene::PreflightBulkScenePublication(*m_PlayModeSceneSnapshotPacket, ObjectManager::instance());
+	if (!preflight.accepted)
 	{
-		snapshotJson = nlohmann::json::parse(m_PlayModeSceneSnapshotJson);
-	}
-	catch (const nlohmann::json::parse_error& parseError)
-	{
-		TERRAENGINE_LOG(LogLevel::Error, "Failed to parse the pre-play scene snapshot at byte " << parseError.byte << ": " << parseError.what());
+		m_LastPlayModeRestorationResult.stale = true;
+		m_LastPlayModeRestorationResult.reason = preflight.reason;
+		TERRAENGINE_LOG(LogLevel::Warning, "Play Mode authored restore was rejected: " << preflight.reason);
 		ClearPlayModeSceneState();
 		SetSelectedEntity(std::nullopt);
 		return;
 	}
 
-	ObjectManager::instance().clear();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (snapshotJson.contains("sceneSettings"))
+	const TerraEngine::Scene::BulkScenePublicationResult publication =
+		TerraEngine::Scene::PublishBulkScenePacket(*m_PlayModeSceneSnapshotPacket, ObjectManager::instance());
+	m_LastPlayModeRestorationResult.cancelled = publication.cancelled;
+	m_LastPlayModeRestorationResult.publishedGeneration = publication.publishedSceneGeneration;
+	m_LastPlayModeRestorationResult.reason = publication.reason;
+	if (!publication.published)
 	{
-		SceneManager::Instance().SetActiveSceneRenderSettings(Serializer::DeserializeSceneRenderSettings(snapshotJson["sceneSettings"]));
+		m_LastPlayModeRestorationResult.stale = publication.reason.find("stale scene generation") != std::string::npos;
+		TERRAENGINE_LOG(LogLevel::Error, "Play Mode authored restore failed: " << publication.reason);
+		ClearPlayModeSceneState();
+		SetSelectedEntity(std::nullopt);
+		return;
 	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (snapshotJson.contains("objects") && snapshotJson["objects"].is_array())
-	{
-		for (const nlohmann::json& objectJson : snapshotJson["objects"])
-		{
-			Serializer::DeserializeObjectEntity(objectJson);
-		}
-	}
+
+	SceneManager::Instance().SetActiveSceneRenderSettings(m_PlayModeSceneRenderSettings);
 
 	ScriptingSystem::Instance().RebuildRestoredSceneBindings();
 	auto restoredGraph = TerraEngine::Scene::BuildSceneGraphFromObjectManager(ObjectManager::instance());
@@ -884,13 +902,30 @@ void MainEditorSubsystem::RestorePlayModeSceneState()
 	{
 		SceneManager::Instance().ClearActiveSceneDirty();
 	}
+	m_LastPlayModeRestorationResult.dirtyStateRestored = true;
+	m_LastPlayModeRestorationResult.prefabStatePreserved = m_IsPrefabEditingMode;
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (m_PlayModeSelectedEntityUuid.has_value())
+	std::vector<entt::entity> restoredSelection;
+	restoredSelection.reserve(m_PlayModeSelectedEntityUuids.size());
+	for (const TerraEngine::UUID objectId : m_PlayModeSelectedEntityUuids)
+	{
+		if (const std::optional<Object> restoredObject = ObjectManager::instance().getObject(objectId))
+		{
+			restoredSelection.push_back(restoredObject->EntityId());
+		}
+	}
+	if (!restoredSelection.empty())
+	{
+		SetSelectedEntities(restoredSelection);
+		m_LastPlayModeRestorationResult.selectionRestored = restoredSelection.size() == m_PlayModeSelectedEntityUuids.size();
+	}
+	else if (m_PlayModeSelectedEntityUuid.has_value())
 	{
 		if (auto restoredObject = ObjectManager::instance().getObject(*m_PlayModeSelectedEntityUuid))
 		{
 			SetSelectedEntity(restoredObject->EntityId());
+			m_LastPlayModeRestorationResult.selectionRestored = true;
 		}
 		else
 		{
@@ -901,6 +936,7 @@ void MainEditorSubsystem::RestorePlayModeSceneState()
 	{
 		SetSelectedEntity(std::nullopt);
 	}
+	m_LastPlayModeRestorationResult.completed = true;
 
 	ClearPlayModeSceneState();
 }
@@ -910,8 +946,9 @@ void MainEditorSubsystem::ClearPlayModeSceneState()
 {
 	m_HasPlayModeSceneSnapshot = false;
 	m_PlayModeSceneWasDirty = false;
-	m_PlayModeSceneSnapshotJson.clear();
+	m_PlayModeSceneSnapshotPacket.reset();
 	m_PlayModeSelectedEntityUuid.reset();
+	m_PlayModeSelectedEntityUuids.clear();
 }
 
 void MainEditorSubsystem::CapturePrefabReturnSceneState()
@@ -1232,9 +1269,31 @@ void MainEditorSubsystem::OpenScene(const std::filesystem::path& path) {
 	{
 		ClosePrefabMode();
 	}
-	TerraEngine::UUID sceneId = SceneManager::Instance().LoadScene(path);
-		if (sceneId != TerraEngine::EMPTY_UUID) {
-			SceneManager::Instance().SetActiveScene(sceneId);
+	ProjectSceneLoadDecision loadDecision;
+	TerraEngine::UUID sceneId = TerraEngine::EMPTY_UUID;
+	if (ctx != nullptr && ctx->projectManager != nullptr && ctx->projectManager->HasActiveProject())
+	{
+		std::string preparationError;
+		if (!ctx->projectManager->PrepareSceneForLoading(path, loadDecision, &preparationError))
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "Could not prepare scene '" << path << "': " << preparationError);
+			return;
+		}
+		if (!ctx->projectManager->IsProjectLoadGenerationCurrent(loadDecision.projectGeneration))
+		{
+			TERRAENGINE_LOG(LogLevel::Warning, "Discarded a prepared scene after its project generation closed or changed.");
+			return;
+		}
+		sceneId = SceneManager::Instance().LoadPreparedScene(
+			path,
+			std::move(loadDecision.sceneDocument),
+			std::move(loadDecision.preparedScene));
+	}
+	else
+	{
+		sceneId = SceneManager::Instance().LoadScene(path);
+	}
+		if (sceneId != TerraEngine::EMPTY_UUID && SceneManager::Instance().SetActiveScene(sceneId)) {
 			sceneLoaded = true;
 			m_CurrentScenePath = path;
 			ClearPlayModeSceneState();
@@ -1246,6 +1305,10 @@ void MainEditorSubsystem::OpenScene(const std::filesystem::path& path) {
 			for (const auto& diagnostic : summary.diagnostics)
 			{
 				TERRAENGINE_LOG(LogLevel::Warning, "Editor scene graph diagnostic: " << TerraEngine::Scene::FormatSceneDiagnostic(diagnostic));
+			}
+			if (ctx != nullptr && ctx->projectManager != nullptr && loadDecision.prepared)
+			{
+				ctx->projectManager->MarkSimulationEssentialReady(loadDecision);
 			}
 	
 			// Save to LastScene.txt
@@ -1595,10 +1658,23 @@ bool MainEditorSubsystem::StartPlayMode()
 {
 	if(ScriptingSystem::Instance().IsRunning())
 		return false;
+	if (ctx != nullptr && ctx->projectManager != nullptr && ctx->projectManager->HasActiveProject()
+		&& !ctx->projectManager->GetReadinessState().simulationEssentialReady)
+	{
+		// Play Mode must never start against a project whose scene publication was
+		// cancelled, rejected, or is still waiting for its protected boundary.
+		return false;
+	}
 	// Commit pending authoring transactions before capturing the exact pre-play
 	// snapshot consumed and later restored by both scripting and physics.
 	SceneManager::Instance().ApplySceneMutations("play-mode-entry");
 	CapturePlayModeSceneState();
+	if (!m_HasPlayModeSceneSnapshot)
+	{
+		// Starting runtime systems without a valid authored restore packet would
+		// leave Play Mode unable to return the editor to a complete scene.
+		return false;
+	}
 	if(!TerraEngine::Physics::PhysicsSystem::Instance().StartWorld())
 	{
 		ClearPlayModeSceneState();

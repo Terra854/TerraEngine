@@ -202,7 +202,7 @@ for id in jolt55 jolt56 physx58; do
 	harness_install_ms=$last_elapsed_ms
 	run_logged provider-configure "$logs/provider-configure.log" cmake -S "$provider_source" -B "$build" "${cmake_generator[@]}" -DCMAKE_BUILD_TYPE="$configuration" -DCMAKE_INSTALL_PREFIX="$install" "${offline[@]}" "${options[@]}"
 	provider_configure_ms=$last_elapsed_ms
-	run_logged provider-build "$logs/provider-build.log" cmake --build "$build" --config "$configuration" --parallel
+	run_logged provider-build "$logs/provider-build.log" cmake --build "$build" --config "$configuration"
 	provider_build_ms=$last_elapsed_ms
 	run_logged provider-install "$logs/provider-install.log" cmake --install "$build" --config "$configuration"
 	provider_install_ms=$last_elapsed_ms
@@ -211,7 +211,7 @@ for id in jolt55 jolt56 physx58; do
 		# Build the checked-in probe only against this run's installed Jolt
 		# package. NO_DEFAULT_PATH in the harness prevents global SDK fallback.
 		run_logged fixture-configure "$logs/fixture-configure.log" cmake -S "$harness_source" -B "$fixture_build" "${cmake_generator[@]}" -DCMAKE_BUILD_TYPE="$configuration" -DCMAKE_INSTALL_PREFIX="$install" -DBACKEND_SPIKE_PROVIDER="$cmake_id" -DBACKEND_SPIKE_SOURCE_DIR="$source" -DBACKEND_SPIKE_REVISION="$observed" -DBACKEND_SPIKE_EVIDENCE_DIR="$evidence" -DBACKEND_SPIKE_BUILD_FIXTURE=ON -DBACKEND_SPIKE_PROVIDER_INSTALL_DIR="$install" "${offline[@]}"
-		run_logged fixture-build "$logs/fixture-build.log" cmake --build "$fixture_build" --config "$configuration" --target BackendSpikeProviderFixture --parallel
+		run_logged fixture-build "$logs/fixture-build.log" cmake --build "$fixture_build" --config "$configuration" --target BackendSpikeProviderFixture
 		run_logged fixture-install "$logs/fixture-install.log" cmake --install "$fixture_build" --config "$configuration"
 		fixture_executable="$fixture_build/ProviderFixture"
 		[[ -x "$fixture_executable" ]] || fixture_executable="$fixture_build/$configuration/ProviderFixture"

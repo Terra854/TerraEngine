@@ -9,6 +9,67 @@
 
 namespace TerraEngine::Editor::SceneViewOverlay
 {
+	bool IsPhysicsBearing(const MarkerComponentClassification& components)
+	{
+		return components.hasRigidBody
+			|| components.hasColliderSet
+			|| components.hasConstraintSet
+			|| components.hasCharacterController;
+	}
+
+	bool IsGenuinelyEmpty(const MarkerComponentClassification& components)
+	{
+		// Transform and object identity are intentionally absent from these flags:
+		// every authored object owns them, so counting them would make "empty"
+		// impossible. Any functional component prevents the generic empty marker.
+		return !components.hasCamera
+			&& !components.hasDirectionalLight
+			&& !components.hasPointLight
+			&& !components.hasSpotLight
+			&& !components.hasRenderable
+			&& !IsPhysicsBearing(components)
+			&& !components.hasOtherMarkerRelevantComponent;
+	}
+
+	MarkerCategory ClassifyMarkerCategory(const MarkerComponentClassification& components)
+	{
+		if (components.selected)
+		{
+			return MarkerCategory::SelectedObject;
+		}
+		if (components.hasCamera)
+		{
+			return MarkerCategory::Camera;
+		}
+		if (components.hasDirectionalLight)
+		{
+			return MarkerCategory::DirectionalLight;
+		}
+		if (components.hasSpotLight)
+		{
+			return MarkerCategory::SpotLight;
+		}
+		if (components.hasPointLight)
+		{
+			return MarkerCategory::PointLight;
+		}
+		if (IsPhysicsBearing(components))
+		{
+			return MarkerCategory::Physics;
+		}
+		return IsGenuinelyEmpty(components) ? MarkerCategory::EmptyObject : MarkerCategory::Unsupported;
+	}
+
+	bool IsMarkerReserved(MarkerCategory category, bool selected)
+	{
+		return selected
+			|| category == MarkerCategory::SelectedObject
+			|| category == MarkerCategory::Camera
+			|| category == MarkerCategory::DirectionalLight
+			|| category == MarkerCategory::PointLight
+			|| category == MarkerCategory::SpotLight;
+	}
+
 	std::uint32_t MarkerCategoryPriority(MarkerCategory category, bool selected)
 	{
 		if (selected)
@@ -22,6 +83,7 @@ namespace TerraEngine::Editor::SceneViewOverlay
 		case MarkerCategory::DirectionalLight: return 650u;
 		case MarkerCategory::PointLight: return 600u;
 		case MarkerCategory::SpotLight: return 600u;
+		case MarkerCategory::Physics: return 400u;
 		case MarkerCategory::EmptyObject: return 300u;
 		case MarkerCategory::Unsupported: return 0u;
 		default: return 0u;

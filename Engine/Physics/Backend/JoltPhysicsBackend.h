@@ -78,6 +78,10 @@ namespace TerraEngine::Physics::Backend {
 		PhysicsBackendResult Step(const PhysicsBackendStepRequest& request) override;
 		PhysicsBackendQueryResult Query(const PhysicsBackendQueryRequest& request) const override;
 		PhysicsBackendResult Extract(PhysicsBackendExtraction& extraction) const override;
+		PhysicsBackendResult Extract(
+			const PhysicsBackendExtractionRequest& request,
+			PhysicsBackendExtraction& extraction) const override;
+		PhysicsBackendExtractionCapabilities ExtractionCapabilities() const noexcept override;
 
 		PhysicsBackendResult CommitStaging(PhysicsBackendStagingToken staging) override;
 		PhysicsBackendResult RollbackStaging(PhysicsBackendStagingToken staging) override;

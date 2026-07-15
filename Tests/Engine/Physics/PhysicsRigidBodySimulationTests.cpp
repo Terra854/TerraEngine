@@ -235,14 +235,21 @@ namespace TerraEngine::Tests {
 			PhysicsCommand sleep = PhysicsCommand::MakeWake(fixture.bodyObjectId, 1U, 1U);
 			sleep.type = PhysicsCommandType::SleepBody;
 			context.Expect(fixture.backend.ApplyCommand(sleep).Succeeded(), "A dynamic body must accept an explicit sleep request.");
+			const PhysicsBackendResult duplicateSleep = fixture.backend.ApplyCommand(sleep);
+			context.Expect(duplicateSleep.Succeeded() && duplicateSleep.message.find("suppressed") != std::string::npos,
+				"A redundant sleep command should be acknowledged without repeating provider work.");
 			context.Expect(fixture.backend.Extract(extraction).Succeeded(), "Sleep state must remain extractable.");
 			const auto sleepingState = std::find_if(extraction.bodies.begin(), extraction.bodies.end(), [&](const auto& state) {
 				return state.handle == fixture.body;
 			});
 			context.Expect(sleepingState != extraction.bodies.end() && !sleepingState->awake,
 				"Sleep must suppress the dynamic body's active state until it is woken.");
-			context.Expect(fixture.backend.ApplyCommand(PhysicsCommand::MakeWake(fixture.bodyObjectId, 1U, 1U)).Succeeded(),
+			const PhysicsCommand wake = PhysicsCommand::MakeWake(fixture.bodyObjectId, 1U, 1U);
+			context.Expect(fixture.backend.ApplyCommand(wake).Succeeded(),
 				"A sleeping dynamic body must accept a wake command.");
+			const PhysicsBackendResult duplicateWake = fixture.backend.ApplyCommand(wake);
+			context.Expect(duplicateWake.Succeeded() && duplicateWake.message.find("suppressed") != std::string::npos,
+				"A redundant wake command should be acknowledged without repeating provider work.");
 			context.Expect(fixture.backend.Extract(extraction).Succeeded(), "Wake state must remain extractable.");
 			const auto awakeState = std::find_if(extraction.bodies.begin(), extraction.bodies.end(), [&](const auto& state) {
 				return state.handle == fixture.body;

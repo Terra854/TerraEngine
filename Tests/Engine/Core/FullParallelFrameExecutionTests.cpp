@@ -70,12 +70,13 @@ namespace TerraEngine::Tests {
 		registry.Add("Engine.FullParallelFrame.OrderedWorkerHandoffIsAccepted", [](TestContext& context) {
 			auto writer = FullParallelFrameFixtures::MakeWorkerWorkload("Writer", {}, { "UI" });
 			auto reader = FullParallelFrameFixtures::MakeWorkerWorkload("Reader", { "UI" }, {});
-			writer.executionOrder = 10;
-			reader.executionOrder = 20;
+			writer.stableDescriptorId = "parallel/writer";
+			reader.stableDescriptorId = "parallel/reader";
+			reader.explicitDependencies = {writer.stableDescriptorId};
 
 			const auto plan = TerraEngine::Scheduling::ValidateFrameWorkloads({ reader, writer }, "ordered-handoff");
 
-			context.Expect(plan.valid, "Different execution-order groups should form an ordered handoff instead of a conflict.");
+			context.Expect(plan.valid, "An explicit descriptor dependency should form an ordered handoff instead of a conflict.");
 			context.ExpectEqual(static_cast<std::size_t>(0), plan.migrationSummary.rejectedCount, "Ordered handoffs should not reject worker workloads.");
 		});
 

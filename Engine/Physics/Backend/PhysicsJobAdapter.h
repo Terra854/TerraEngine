@@ -14,9 +14,11 @@
 #include <Jolt/Core/Memory.h>
 
 #include <atomic>
+#include <cstddef>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <thread>
 #include <unordered_set>
@@ -43,6 +45,13 @@ namespace TerraEngine::Physics::Backend {
 		std::uint64_t jobExecutionMicroseconds = 0;
 	};
 
+	struct PhysicsIndependentRangeExecution {
+		bool succeeded = true;
+		bool parallel = false;
+		bool serialFallback = false;
+		std::uint32_t rangeCount = 0U;
+	};
+
 	class TERRAENGINE_API PhysicsJobAdapter final : public JPH::JobSystemWithBarrier {
 	public:
 		PhysicsJobAdapter(ThreadPool& sharedPool, PhysicsJobAdapterConfig configuration = {});
@@ -65,6 +74,15 @@ namespace TerraEngine::Physics::Backend {
 		void WaitForIdle();
 		const PhysicsJobAdapterConfig& Config() const noexcept;
 		PhysicsJobAdapterDiagnostics Diagnostics() const;
+		// Provider-neutral extraction work writes each deterministic output range
+		// independently. One lane stays on the caller, preventing nested extraction
+		// from waiting behind every worker in the shared pool.
+		PhysicsIndependentRangeExecution ExecuteIndependentRanges(
+			std::size_t itemCount,
+			std::size_t batchSize,
+			std::size_t parallelThreshold,
+			bool providerAdvertisesSafeReads,
+			const std::function<void(std::size_t, std::size_t)>& work) const;
 
 	protected:
 		void QueueJob(Job* job) override;

@@ -336,7 +336,7 @@ function Invoke-BackendSpikeCandidate {
 		$providerConfigure = @("-S", $providerSource, "-B", $providerBuild) + $generatorArguments + @("-DCMAKE_BUILD_TYPE=$Configuration", "-DCMAKE_INSTALL_PREFIX=$installRoot") + $commonOfflineArguments + $providerOptions
 		$provider = [ordered]@{}
 		$provider.configure = Invoke-LoggedCommand -Stage "provider-configure" -FilePath "cmake" -Arguments $providerConfigure -LogPath (Join-Path $logsRoot "provider-configure.log") -SkipExecution:$DryRun
-		$provider.build = Invoke-LoggedCommand -Stage "provider-build" -FilePath "cmake" -Arguments @("--build", $providerBuild, "--config", $Configuration, "--parallel") -LogPath (Join-Path $logsRoot "provider-build.log") -SkipExecution:$DryRun
+		$provider.build = Invoke-LoggedCommand -Stage "provider-build" -FilePath "cmake" -Arguments @("--build", $providerBuild, "--config", $Configuration) -LogPath (Join-Path $logsRoot "provider-build.log") -SkipExecution:$DryRun
 		$provider.install = Invoke-LoggedCommand -Stage "provider-install" -FilePath "cmake" -Arguments @("--install", $providerBuild, "--config", $Configuration) -LogPath (Join-Path $logsRoot "provider-install.log") -SkipExecution:$DryRun
 
 		$builtInFixture = [ordered]@{ status = "not-supported" }
@@ -354,7 +354,7 @@ function Invoke-BackendSpikeCandidate {
 				"-DBACKEND_SPIKE_PROVIDER_INSTALL_DIR=$installRoot") + $commonOfflineArguments
 			$fixtureStages = [ordered]@{}
 			$fixtureStages.configure = Invoke-LoggedCommand -Stage "fixture-configure" -FilePath "cmake" -Arguments $fixtureConfigure -LogPath (Join-Path $logsRoot "fixture-configure.log") -SkipExecution:$DryRun
-			$fixtureStages.build = Invoke-LoggedCommand -Stage "fixture-build" -FilePath "cmake" -Arguments @("--build", $fixtureBuild, "--config", $Configuration, "--target", "BackendSpikeProviderFixture", "--parallel") -LogPath (Join-Path $logsRoot "fixture-build.log") -SkipExecution:$DryRun
+			$fixtureStages.build = Invoke-LoggedCommand -Stage "fixture-build" -FilePath "cmake" -Arguments @("--build", $fixtureBuild, "--config", $Configuration, "--target", "BackendSpikeProviderFixture") -LogPath (Join-Path $logsRoot "fixture-build.log") -SkipExecution:$DryRun
 			$fixtureStages.install = Invoke-LoggedCommand -Stage "fixture-install" -FilePath "cmake" -Arguments @("--install", $fixtureBuild, "--config", $Configuration) -LogPath (Join-Path $logsRoot "fixture-install.log") -SkipExecution:$DryRun
 
 			$fixtureRuns = [ordered]@{}

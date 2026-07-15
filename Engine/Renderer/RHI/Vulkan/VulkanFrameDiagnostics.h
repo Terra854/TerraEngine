@@ -8,9 +8,11 @@
 
 #include "Renderer/Graph/RenderFrameBreakdown.h"
 #include "Renderer/RendererRecovery.h"
+#include "Profiling/PerformanceTelemetry.h"
 #include "Core/Export.h"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 
 namespace TerraEngine::Renderer::Vulkan {
@@ -66,6 +68,11 @@ namespace TerraEngine::Renderer::Vulkan {
 		float milliseconds,
 		float thresholdMilliseconds = 0.25f,
 		std::string recommendedAction = {});
+	// Vulkan presentation waits are classified into the provider-neutral typed
+	// profiler categories. This reports ownership without changing any Vulkan
+	// fence, queue, acquire, or present synchronization behavior.
+	TERRAENGINE_API std::optional<TerraEngine::Profiling::PresentationWaitKind> ClassifyVulkanPresentationWait(
+		const VulkanFrameDiagnosticScope& scope);
 	// BuildVulkanViewSubmitWorkItem records enough identity to compare scene
 	// and game view submissions without exposing Vulkan objects to editor code.
 	TERRAENGINE_API ViewSubmitWorkItem BuildVulkanViewSubmitWorkItem(

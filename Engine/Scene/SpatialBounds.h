@@ -37,6 +37,16 @@ namespace TerraEngine::Scene
 		Fallback
 	};
 
+	// SpatialBoundsChangeKind describes one exact protected-boundary operation.
+	// Classification changes use Update and are applied as an atomic remove from
+	// the old partition plus add to the new partition.
+	enum class SpatialBoundsChangeKind : std::uint8_t
+	{
+		Add,
+		Update,
+		Remove
+	};
+
 	// struct SpatialAABB groups related state and operations so callers have one documented contract.
 	struct SpatialAABB
 	{

@@ -6,6 +6,7 @@
 
 #include "Utilities/UUID.h"
 #include "FileWatcher.h"
+#include "Physics/Assets/PhysicsAssetChangeJournal.h"
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -183,6 +184,11 @@ public:
 	std::filesystem::path GetAssetRoot() const { return assetRoot; }
 	std::filesystem::path GetBuildRoot() const { return buildRoot; }
 	const AssetMetadata* FindAssetByGuid(const TerraEngine::UUID& guid) const;
+	// Physics reads this immutable value after the asset database has completed
+	// registration. No editor metadata or filesystem handle crosses the boundary.
+	TerraEngine::Physics::PhysicsAssetChangeSnapshot GetPhysicsAssetChangesSince(
+		TerraEngine::Physics::PhysicsAssetGeneration observedGeneration) const;
+	TerraEngine::Physics::PhysicsAssetGeneration GetPhysicsAssetChangeGeneration() const;
 	bool TryGetGeneratedModelPackageChildDisplayName(const TerraEngine::UUID& guid, GeneratedModelPackageChildKind kind, std::string& outName) const;
 	bool TryGetGeneratedModelPackageChildIds(const TerraEngine::UUID& packageGuid, GeneratedModelPackageChildKind kind, std::vector<TerraEngine::UUID>& outChildIds) const;
 	bool IsMeshAsset(const AssetMetadata& metadata) const;
@@ -257,6 +263,9 @@ private:
 	bool RunCompilerProcess(const std::filesystem::path& compilerPath, const std::wstring& commandLine, const std::shared_ptr<AsyncImportProgressState>& progressState, std::string_view logPrefix, const std::filesystem::path& expectedOutputPath);
 	void FinishImport(const AssetMetadata& metadata, const std::filesystem::path& absSourcePath, bool needsImport);
 	void RegisterImportedAsset(const AssetMetadata& metadata, const std::filesystem::path& absSourcePath, bool needsImport);
+	void PublishPhysicsAssetChange(
+		const AssetMetadata& metadata,
+		TerraEngine::Physics::PhysicsAssetChangeKind changeKind);
 	void RegisterGeneratedModelPackageMaterialMetadata(const std::filesystem::path& absSourcePath);
 	void CleanupModelPackageGeneratedAssets(const AssetMetadata& metadata, const std::filesystem::path& absSourcePath);
 	void CleanupCancelledImport(const AssetMetadata& metadata, const std::filesystem::path& absSourcePath, bool removeSourceAsset);

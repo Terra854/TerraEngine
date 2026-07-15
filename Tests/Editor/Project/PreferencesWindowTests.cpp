@@ -47,7 +47,7 @@ namespace TerraEngine::EditorTests
 
 		registry.Add("Editor.Preferences.CategorySearchContract", [](TestContext& context) {
 			const auto allCategories = TerraEngine::Editor::Preferences::FilterPreferencesCategories("");
-			context.ExpectEqual(static_cast<std::size_t>(2), allCategories.size(), "Empty search should show the current Preferences categories.");
+			context.ExpectEqual(static_cast<std::size_t>(3), allCategories.size(), "Empty search should show the current Preferences categories.");
 
 			const auto validationMatches = TerraEngine::Editor::Preferences::FilterPreferencesCategories("validation");
 			context.ExpectEqual(static_cast<std::size_t>(1), validationMatches.size(), "Validation search should find the diagnostics category.");
@@ -62,6 +62,24 @@ namespace TerraEngine::EditorTests
 				std::string("mcp-bridge"),
 				std::string(mcpMatches.front().stableId),
 				"Assistant search should route to the MCP Bridge category.");
+
+			const auto sceneViewMatches = TerraEngine::Editor::Preferences::FilterPreferencesCategories("marker budget");
+			context.ExpectEqual(static_cast<std::size_t>(1), sceneViewMatches.size(), "Marker budget search should find the Scene View category.");
+			context.ExpectEqual(std::string("scene-view"), std::string(sceneViewMatches.front().stableId), "Marker budget search should route to Scene View preferences.");
+		});
+
+		registry.Add("Editor.Preferences.SceneViewLargeSceneControls", [](TestContext& context) {
+			const std::string preferencesSource =
+				ReadPreferencesSourceFile("Editor/TerraEngine-Editor/Windows/PreferencesWindow.cpp");
+			context.Expect(preferencesSource.find("DrawSceneViewCategory") != std::string::npos, "Preferences should own a Scene View category.");
+			context.Expect(preferencesSource.find("Large scene mode") != std::string::npos, "Scene View preferences should expose auto/on/off large-scene mode.");
+			context.Expect(preferencesSource.find("Visible marker budget") != std::string::npos, "Scene View preferences should expose the bounded marker budget.");
+			context.Expect(preferencesSource.find("Density threshold") != std::string::npos, "Scene View preferences should expose density controls.");
+			context.Expect(preferencesSource.find("Maximum marker distance") != std::string::npos, "Scene View preferences should expose distance rejection.");
+			context.Expect(preferencesSource.find("Minimum projected size") != std::string::npos, "Scene View preferences should expose projected-size rejection.");
+			context.Expect(preferencesSource.find("Physics markers") != std::string::npos, "Scene View preferences should expose physics marker presentation.");
+			context.Expect(preferencesSource.find("Dense primitive tier") != std::string::npos, "Scene View preferences should expose dense presentation complexity.");
+			context.Expect(preferencesSource.find("SetSceneViewOverlayPreference") != std::string::npos, "Scene View controls should persist through the validated atomic preference path.");
 		});
 
 		registry.Add("Editor.Preferences.McpBridgeMovedFromStandaloneWindow", [](TestContext& context) {

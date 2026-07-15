@@ -10,7 +10,32 @@
 #include "Renderer/RenderTypes.h"
 #include <entt/entt.hpp>
 #include <nlohmann/json.hpp>
+#include <cstdint>
 #include <optional>
+#include <functional>
+#include <string>
+#include <vector>
+
+namespace TerraEngine::Scene {
+	// A prepared record owns only parsed authored data.  It is intentionally
+	// independent of ObjectManager so worker jobs can build it before the one
+	// protected bulk-publication boundary.
+	struct PreparedSceneObjectRecord {
+		nlohmann::json object;
+		std::string stablePath;
+		std::optional<std::size_t> parentRecordIndex;
+	};
+
+	struct PreparedSceneDecode {
+		bool accepted = false;
+		bool cancelled = false;
+		std::string reason;
+		std::uint64_t objectCount = 0U;
+		std::uint64_t componentCount = 0U;
+		std::uint64_t hierarchyCount = 0U;
+		std::vector<PreparedSceneObjectRecord> objects;
+	};
+}
 
 // Static utility class that handles converting live Engine objects into JSON
 // documents and reconstructing them. This is used for scene saving and the
@@ -35,4 +60,11 @@ public:
 	// are restored if present in the source data.
 	static entt::entity DeserializeObjectEntity(const nlohmann::json& json, std::optional<entt::entity> parent = std::nullopt);
 	static Object DeserializeObject(const nlohmann::json& json, std::optional<Object> parent = std::nullopt);
+
+	// Extract a deterministic, value-only scene table from authored JSON.  The
+	// optional cancellation callback is safe to invoke on a worker thread; this
+	// method never reads or mutates live ECS storage.
+	static TerraEngine::Scene::PreparedSceneDecode PrepareSceneDecode(
+		const nlohmann::json& sceneJson,
+		const std::function<bool()>& cancellationRequested = {});
 };

@@ -695,6 +695,16 @@ The local command sequence is the supported validation gate. Keep the
 it retains the disposable project and any partial or complete export evidence
 after failure.
 
+For the Spec 043 canonical comparison, use 10,000 bodies (1,000 dynamic,
+1,000 kinematic, 8,000 static) and 100 exact paused steps. Scene View defaults
+are a 2,000-object large-scene threshold, 2,048 visible-marker budget, 512-item
+presentation batches, 18-pixel density radius, density threshold 4, clustered
+physics markers, and automatic large-scene mode. The explicit dense/selected/all
+marker modes are comparison controls, not altered project defaults. Max workers
+use hardware concurrency with no environment cap; only the 1/2/4 matrix sets
+`TERRAENGINE_THREADPOOL_WORKERS` deliberately, and build commands do not pass
+`--parallel`.
+
 ## Spec 042 physics hardening workflow
 
 The complete physics gate uses RelWithDebInfo on Windows x64. From a Visual
@@ -722,7 +732,7 @@ Remove-Item Env:TERRAENGINE_TEST_FILTER
 Then use the installed-editor harness and export baseline:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Physics/RunInstalledEditorPhysicsStress.ps1 -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/validation/physics-live -ObjectCount 10000 -ActiveDynamicCount 1000 -ExplicitStepCount 100 -WorkerCount max -AllowLiveStress
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Physics/RunInstalledEditorPhysicsStress.ps1 -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/validation/physics-live -ObjectCount 10000 -ActiveDynamicCount 1000 -ExplicitStepCount 100 -AllowLiveStress
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/ExportRuntimeBaseline/RunBaseline.ps1 -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/ci/physics-export-baseline
 ```
 
@@ -842,6 +852,49 @@ The live editor script output may remain `Assembly-CSharp.dll` on Linux because
 it is a managed `dotnet build` assembly. That is distinct from exported
 NativeAOT payloads such as `Assembly-CSharp.so`.
 
+## Spec 043 project readiness and Play Mode restoration
+
+Run the project-readiness slice after an integrated RelWithDebInfo build. Keep
+the native worker override unset so the tests and later installed run use the
+machine's full hardware-concurrency default; the build command intentionally
+does not pass a `--parallel` argument.
+
+```powershell
+Remove-Item Env:TERRAENGINE_THREADPOOL_WORKERS -ErrorAction SilentlyContinue
+cmake --build out/build/RelWithDebInfo --target TerraEngine-EngineTests TerraEngine-EditorTests TerraEngine-Editor
+$env:TERRAENGINE_TEST_FILTER = "DerivedSceneCache;BulkScenePublication"
+& .\out\build\RelWithDebInfo\TerraEngine-EngineTests.exe
+$env:TERRAENGINE_TEST_FILTER = "ManagedReadiness;ProjectReadiness;ArchitectureHardening.PlayModeBulkRestore;MCP.ProjectLifecycle;MCP.Scripts;MCP.PlayMode;PhysicsExport"
+& .\out\build\RelWithDebInfo\TerraEngine-EditorTests.exe
+Remove-Item Env:TERRAENGINE_TEST_FILTER -ErrorAction SilentlyContinue
+cmake --build out/build/RelWithDebInfo --target install
+```
+
+The focused tests cover missing/cold cache creation, unchanged warm reuse,
+source-stale and corrupt-envelope fallback, project-close cancellation, the
+10,000-object readiness gate, managed input/output fingerprints, conditional
+reference copying, explicit compile bypass, one-boundary scene publication,
+Play Mode bulk restoration, and export exclusion. A cache failure is successful
+recovery only when authored source loads completely, no partial live state is
+visible, and best-effort regeneration is atomically published.
+
+After install, run the harness's US4 matrix under a disposable work root:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Physics/RunInstalledEditorPhysicsStress.ps1 `
+	-InstallRoot out/build/RelWithDebInfo/Build `
+	-WorkRoot out/validation/043-us4 `
+	-RunUs4ReadinessMatrix -AllowLiveStress
+```
+
+Retain every scenario summary, MCP log, stage timing, source hash, cache
+decision, readiness result, artifact inventory, and shutdown result. Cold must
+regenerate from source; warm must report a compatible derived hit and unchanged
+managed readiness no slower than 2.5 seconds; stale and corrupt must report
+source fallback plus regeneration; forced compile must report a real forced
+build even after a warm hit. The authored scene hash must remain authoritative
+and normal shutdown must succeed in every accepted scenario.
+
 ## Windows Workflow
 
 The Windows workflow uses the same project-owned CTest surface and install
@@ -879,3 +932,24 @@ $env:TERRAENGINE_TEST_FILTER="Resource.Residency"
 Remove-Item Env:TERRAENGINE_TEST_FILTER
 cmd /c "C:\PROGRA~1\MIB055~1\18\COMMUN~1\Common7\Tools\VsDevCmd.bat -arch=x64 -host_arch=x64 && cmake --build --preset RelWithDebInfo --target install"
 ```
+
+## Spec 043 profiler v2 evidence
+
+The installed harness keeps profiler capture selection additive. New recordings
+use payload v2; v1 compatibility is verified by immutable fixture load tests and
+never by rewriting a v1 artifact. Use `-RunUs5ProfilerChecks` with
+`-CaptureLevel detailed|sampled|aggregate` and `-CaptureVersion v2`:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Physics/RunInstalledEditorPhysicsStress.ps1 `
+    -InstallRoot out/build/RelWithDebInfo/Build `
+    -WorkRoot out/validation/043-us5/detailed-v2 `
+    -CaptureLevel detailed -CaptureVersion v2 -RunUs5ProfilerChecks -AllowLiveStress
+```
+
+Evidence records the selected level/version, frame counts, comparable baseline,
+metric availability, artifact bytes, and a durable committed-artifact load probe.
+The harness holds the recording open for at least five wall-clock seconds and
+applies a 10 MiB size gate. Missing measurements remain explicit unavailable
+values rather than being invented as zero.
+Compare like-for-like level, version, workload, workers, and duration.

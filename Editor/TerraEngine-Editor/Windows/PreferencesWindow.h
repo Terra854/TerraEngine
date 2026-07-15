@@ -29,6 +29,7 @@ private:
 	void DrawCategorySidebar();
 	void DrawSelectedCategory();
 	void DrawRendererDiagnosticsCategory();
+	void DrawSceneViewCategory();
 	void DrawMcpBridgeCategory();
 	void DrawUnavailableState(const char* message);
 
@@ -38,4 +39,5 @@ private:
 	std::string m_SearchText;
 	int m_McpListenPortDraft = 0;
 	bool m_McpListenPortDraftInitialized = false;
+	std::string m_SceneViewPreferenceError;
 };

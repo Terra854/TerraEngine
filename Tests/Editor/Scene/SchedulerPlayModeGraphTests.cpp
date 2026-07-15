@@ -1,6 +1,7 @@
 #include "../TestHarness.h"
 
 #include "Core/Scheduling/EcsQueryTaskGraph.h"
+#include "Core/Scheduling/SystemScheduler.h"
 #include "Renderer/Graph/RenderDiagnostics.h"
 #include "Scripting/ScriptingSystem.h"
 
@@ -74,6 +75,28 @@ namespace TerraEngine::EditorTests {
 			context.ExpectEqual(static_cast<std::size_t>(1u), latest.backendStalls.size(), "Open scheduler diagnostics should expose backend stall diagnostics.");
 			context.ExpectEqual(static_cast<std::size_t>(1u), latest.viewSubmitWork.size(), "Open scheduler diagnostics should expose view submit reuse data.");
 			TerraEngine::Renderer::SetRenderDiagnosticsRequested(false);
+		});
+
+		registry.Add("Editor.SchedulerPlayModeGraph.PlayModeConsumerExplainsConditionalPhysicsFlush", [](TestContext& context) {
+			// The editor consumes this immutable scheduler decision when Scene View or
+			// another later system needs transforms from the current physics tick.
+			TerraEngine::Scheduling::SetSameFramePhysicsPublicationState({
+				true,
+				"SceneViewMarkerPipeline",
+				"Scene View markers read published physics transforms later in this frame."
+			});
+			const TerraEngine::Scheduling::SameFramePhysicsPublicationState active =
+				TerraEngine::Scheduling::SameFramePhysicsPublicationStateSnapshot();
+			context.Expect(active.active, "A Play Mode Scene View consumer should activate same-frame physics publication.");
+			context.ExpectEqual(std::string("SceneViewMarkerPipeline"), active.consumerSystem,
+				"Conditional-flush diagnostics should identify the active editor consumer.");
+			context.Expect(!active.reason.empty(), "Conditional-flush diagnostics should explain why the protected boundary is active.");
+
+			TerraEngine::Scheduling::SetSameFramePhysicsPublicationConsumerActive(false);
+			const TerraEngine::Scheduling::SameFramePhysicsPublicationState inactive =
+				TerraEngine::Scheduling::SameFramePhysicsPublicationStateSnapshot();
+			context.Expect(!inactive.active && !inactive.reason.empty(),
+				"Closing the later consumer should omit the After Physics flush with a recorded reason.");
 		});
 	}
 }

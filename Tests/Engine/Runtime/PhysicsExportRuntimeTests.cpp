@@ -58,11 +58,16 @@ namespace TerraEngine::Tests {
 			// values that the installed editor/export parity fixture records.
 			settings.gravity.y = -15.5F;
 			settings.fixedTimeStep = 0.02F;
+			settings.debugVisualizationEnabled = true;
+			settings.retainedDebugTicks = 3U;
+			settings.maxDebugPrimitives = 256U;
 			settings.layers[1U].name = "ParityDynamic";
 			settings.layers[1U].broadPhaseGroup = 7U;
 			nlohmann::json layers = nlohmann::json::array();
 			for(const auto& layer : settings.layers) layers.push_back({{"id", layer.id}, {"name", layer.name}, {"collisionMask", layer.collisionMask}, {"broadPhaseGroup", layer.broadPhaseGroup}, {"enabled", layer.enabled}});
-			return {{"schemaVersion", settings.schemaVersion}, {"gravity", {settings.gravity.x, settings.gravity.y, settings.gravity.z}}, {"fixedTimeStep", settings.fixedTimeStep}, {"layers", layers}};
+			return {{"schemaVersion", settings.schemaVersion}, {"gravity", {settings.gravity.x, settings.gravity.y, settings.gravity.z}}, {"fixedTimeStep", settings.fixedTimeStep},
+				{"debugVisualizationEnabled", settings.debugVisualizationEnabled}, {"retainedDebugTicks", settings.retainedDebugTicks},
+				{"maxDebugPrimitives", settings.maxDebugPrimitives}, {"layers", layers}};
 		}
 		std::string Hash(std::string_view text) {
 			std::uint64_t value = 14695981039346656037ULL;
@@ -120,6 +125,9 @@ namespace TerraEngine::Tests {
 			context.Expect(loaded.settings.gravity.y == -15.5F && loaded.settings.fixedTimeStep == 0.02F
 				&& loaded.settings.layers[1U].broadPhaseGroup == 7U,
 				"Mounted runtime settings must preserve the fixture's non-default gravity, timestep, and layer routing.");
+			context.Expect(loaded.settings.debugVisualizationEnabled && loaded.settings.retainedDebugTicks == 3U
+				&& loaded.settings.maxDebugPrimitives == 256U,
+				"Mounted runtime settings must preserve bounded debug-visualization limits instead of applying editor-only defaults.");
 			context.ExpectEqual(static_cast<std::size_t>(1U), loaded.colliders.size(), "A valid cooked collider must load from the content mount before scene simulation uses it.");
 			const Runtime::ExportStartupCoordinatorResult startup = Runtime::CoordinateExportStartup(MakeHeadlessStartupInput(loaded));
 			context.Expect(startup.CanEnterRuntime(), "A valid physics package must enter a headless runtime without requiring a renderer or source asset access.");

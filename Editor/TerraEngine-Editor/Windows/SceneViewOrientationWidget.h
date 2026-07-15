@@ -26,8 +26,19 @@ namespace TerraEngine::Editor::SceneViewOverlay
 		std::string label = "Persp";
 	};
 
+	struct OrientationWidgetCache
+	{
+		std::optional<SceneViewOverlayCacheKey> key;
+		OrientationWidgetState state;
+		std::uint64_t reuseCount = 0u;
+		std::uint64_t rebuildCount = 0u;
+
+		void Reset();
+	};
+
 	[[nodiscard]] const char* ToString(OrientationAxis axis);
 	[[nodiscard]] OrientationWidgetState BuildOrientationWidgetState(const glm::vec3& cameraForward, const glm::vec3& cameraUp, ProjectionMode projectionMode, const glm::vec4& screenBounds);
+	[[nodiscard]] const OrientationWidgetState& BuildOrientationWidgetStateCached(OrientationWidgetCache& cache, const SceneViewOverlayCacheKey& key, const glm::vec3& cameraForward, const glm::vec3& cameraUp, ProjectionMode projectionMode, const glm::vec4& screenBounds);
 	[[nodiscard]] OrientationAxis HitTestOrientationWidget(const OrientationWidgetState& state, const glm::vec2& pointer);
 	[[nodiscard]] OrientationSnapEuler SnapEulerForAxis(OrientationAxis axis);
 }

@@ -274,6 +274,70 @@ namespace TerraEngine::Physics {
 			bool truncated = false;
 		};
 
+		// Stable ranges address the provider's retained deterministic order rather
+		// than transient provider IDs. Half-open ranges make batching unambiguous.
+		struct PhysicsBackendStableRange {
+			std::uint32_t firstIndex = 0U;
+			std::uint32_t count = 0U;
+
+			constexpr std::uint64_t EndIndex() const noexcept {
+				return static_cast<std::uint64_t>(firstIndex) + count;
+			}
+
+			auto operator<=>(const PhysicsBackendStableRange&) const = default;
+		};
+
+		enum class PhysicsBackendExtractionSelection : std::uint8_t {
+			// PublicationRelevant includes newly created/updated bodies and movable
+			// bodies that are active after the completed fixed step.
+			PublicationRelevant,
+			ActiveBodies,
+			ExplicitHandles,
+			StableRanges,
+			FullState
+		};
+
+		struct PhysicsBackendExtractionRequest {
+			PhysicsWorldHandle world;
+			PhysicsTick tick = 0U;
+			PhysicsBackendExtractionSelection selection = PhysicsBackendExtractionSelection::PublicationRelevant;
+			PhysicsBodyStateFieldMask fields = PhysicsBodyStateFieldMask::BodyState;
+			std::vector<PhysicsBackendStableRange> stableRanges;
+			std::vector<PhysicsBodyHandle> explicitHandles;
+			std::uint32_t batchSize = 1024U;
+			std::uint32_t parallelThreshold = 512U;
+			bool fullState = false;
+			bool allowParallelReads = true;
+			bool drainEvents = true;
+
+			bool IsValid() const noexcept {
+				if(!world.IsValid() || batchSize == 0U || batchSize > 8192U
+					|| parallelThreshold == 0U || fields == PhysicsBodyStateFieldMask::None) {
+					return false;
+				}
+				std::uint64_t previousEnd = 0U;
+				for(std::size_t index = 0U; index < stableRanges.size(); ++index) {
+					const PhysicsBackendStableRange& range = stableRanges[index];
+					if(range.count == 0U || range.EndIndex() > std::numeric_limits<std::uint32_t>::max()
+						|| (index != 0U && range.firstIndex < previousEnd)) {
+						return false;
+					}
+					previousEnd = range.EndIndex();
+				}
+				if(selection == PhysicsBackendExtractionSelection::StableRanges && stableRanges.empty()) return false;
+				if(selection == PhysicsBackendExtractionSelection::ExplicitHandles && explicitHandles.empty()) return false;
+				return !fullState || selection == PhysicsBackendExtractionSelection::FullState;
+			}
+		};
+
+		struct PhysicsBackendExtractionCapabilities {
+			bool stableProviderOrder = false;
+			bool fieldMaskedBodyReads = false;
+			bool independentBodyReadsSafe = false;
+			bool exclusiveEventDrain = false;
+			std::uint32_t maximumBatchSize = 1U;
+		};
+
 		struct PhysicsBackendBodyState {
 			PhysicsBodyHandle handle;
 			PhysicsPose pose;
@@ -282,6 +346,16 @@ namespace TerraEngine::Physics {
 			float mass = 0.0F;
 			std::uint32_t contactCount = 0;
 			bool awake = false;
+			// The stable index and ownership generations are engine-owned metadata.
+			// Consumers can therefore resolve current ownership without hashing a
+			// provider record or interpreting a provider-specific body identifier.
+			std::uint32_t stableIndex = 0U;
+			TerraEngine::UUID objectId{};
+			PhysicsGeneration objectGeneration = 0U;
+			PhysicsGeneration componentGeneration = 0U;
+			PhysicsBodyStateFieldMask fields = PhysicsBodyStateFieldMask::None;
+			PhysicsBodyStateChangeMask change = PhysicsBodyStateChangeMask::None;
+			PhysicsMotionType motionType = PhysicsMotionType::Static;
 		};
 
 		struct PhysicsBackendConstraintState {
@@ -325,6 +399,7 @@ namespace TerraEngine::Physics {
 			PhysicsWorldHandle world;
 			PhysicsTick tick = 0;
 			std::vector<PhysicsBackendBodyState> bodies;
+			std::vector<PhysicsBodyHandle> removedBodies;
 			std::vector<PhysicsBackendConstraintState> constraints;
 			std::vector<PhysicsBackendCharacterState> characters;
 			std::uint64_t activeBodyCount = 0;
@@ -334,6 +409,16 @@ namespace TerraEngine::Physics {
 			// engine-owned values can therefore be sorted and published safely.
 			std::vector<PhysicsEvent> events;
 			std::uint64_t droppedEventCount = 0U;
+			std::uint64_t providerOrderGeneration = 0U;
+			std::uint64_t totalBodyCount = 0U;
+			std::uint64_t examinedBodyCount = 0U;
+			std::uint64_t extractedBodyCount = 0U;
+			std::uint32_t extractionRangeCount = 0U;
+			PhysicsBodyStateFieldMask extractedFields = PhysicsBodyStateFieldMask::None;
+			bool fullState = false;
+			bool usedParallelReads = false;
+			bool usedSerialFallback = false;
+			bool eventDrainPerformed = false;
 		};
 
 		struct PhysicsBackendStepRequest {
@@ -396,6 +481,23 @@ namespace TerraEngine::Physics {
 			virtual PhysicsBackendResult Step(const PhysicsBackendStepRequest& request) = 0;
 			virtual PhysicsBackendQueryResult Query(const PhysicsBackendQueryRequest& request) const = 0;
 			virtual PhysicsBackendResult Extract(PhysicsBackendExtraction& extraction) const = 0;
+			// The request overload is additive so existing provider implementations and
+			// compatibility tests keep the established full-state call. Providers may
+			// override it to expose bounded incremental collection.
+			virtual PhysicsBackendResult Extract(
+				const PhysicsBackendExtractionRequest& request,
+				PhysicsBackendExtraction& extraction) const {
+				if(!request.IsValid()) {
+					return {PhysicsResultStatus::Rejected, PhysicsBackendErrorCode::InvalidArgument,
+						"The provider-neutral extraction request is invalid."};
+				}
+				extraction.world = request.world;
+				extraction.tick = request.tick;
+				return Extract(extraction);
+			}
+			virtual PhysicsBackendExtractionCapabilities ExtractionCapabilities() const noexcept {
+				return {};
+			}
 
 			virtual PhysicsBackendResult CommitStaging(PhysicsBackendStagingToken staging) = 0;
 			virtual PhysicsBackendResult RollbackStaging(PhysicsBackendStagingToken staging) = 0;

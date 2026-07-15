@@ -113,5 +113,34 @@ namespace TerraEngine::EditorTests {
 			context.Expect(SceneManager::Instance().IsActiveSceneDirty(), "An unreachable saved revision must remain dirty after all retained undo steps.");
 			history.Clear();
 		});
+
+		registry.Add("Editor.TransactionalMutationUndo.PhysicsEditUndoRedoPreservesSelectionAndDirtyState", [](TestContext& context) {
+			ScriptingSystem::Instance().SetRunning(false);
+			UndoRedoSystem& history = UndoRedoSystem::Instance();
+			history.Clear();
+			int colliderEnabled = 1;
+			const TerraEngine::UUID selectedObject = GenerateUUID();
+			const TerraEngine::UUID selectionAtSave = selectedObject;
+			history.SetSavePoint();
+
+			// A physics inspector edit changes authored state, but selection is editor
+			// context rather than transaction payload and must remain stable through
+			// the grouped undo/redo operations.
+			colliderEnabled = 0;
+			history.PushCommand(std::make_unique<IntegerDeltaCommand>(colliderEnabled, 1, 0));
+			context.Expect(SceneManager::Instance().IsActiveSceneDirty(), "A committed physics edit after a save point must mark the scene dirty.");
+			context.Expect(selectionAtSave == selectedObject, "Committing a physics edit must preserve the active object selection identity.");
+
+			history.Undo();
+			context.ExpectEqual(1, colliderEnabled, "Undo must restore the authored collider value.");
+			context.Expect(!SceneManager::Instance().IsActiveSceneDirty(), "Undoing to the saved authored state must clear dirty state.");
+			context.Expect(selectionAtSave == selectedObject, "Undo must not replace the selected object identity.");
+
+			history.Redo();
+			context.ExpectEqual(0, colliderEnabled, "Redo must reapply the authored collider value.");
+			context.Expect(SceneManager::Instance().IsActiveSceneDirty(), "Redoing past the save point must restore dirty state.");
+			context.Expect(selectionAtSave == selectedObject, "Redo must not replace the selected object identity.");
+			history.Clear();
+		});
 	}
 }

@@ -5,6 +5,7 @@
 // This module ensures that scene transitions are handled safely and that all runtime systems are correctly synchronized.
 
 #include "Scene/SceneManager.h"
+#include "Scene/BulkScenePublication.h"
 
 #include <algorithm>
 #include <cctype>
@@ -190,6 +191,28 @@ TerraEngine::UUID SceneManager::LoadScene(const std::filesystem::path& path)
 	}, SceneFileType::Scene);
 }
 
+TerraEngine::UUID SceneManager::LoadPreparedScene(
+	const std::filesystem::path& path,
+	nlohmann::json sceneDocument,
+	TerraEngine::Scene::PreparedSceneDecode preparedScene)
+{
+	if (!preparedScene.accepted || preparedScene.cancelled || !sceneDocument.is_object())
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Rejected an invalid prepared scene document for " << path);
+		return TerraEngine::EMPTY_UUID;
+	}
+	const std::filesystem::path resolvedPath = ResolveScenePath(path);
+	const std::string key = NormalizeKey(resolvedPath);
+	const TerraEngine::UUID id = EnsureResourceId(key, sceneCache);
+	auto document = std::make_unique<SceneDocument>();
+	document->sourcePath = resolvedPath;
+	document->name = resolvedPath.stem().string();
+	document->parsedJson = std::move(sceneDocument);
+	document->preparedScene = std::move(preparedScene);
+	document->isPrefab = false;
+	return FinalizeLoad(key, sceneCache, id, std::move(document));
+}
+
 // SceneManager::LoadPrefab is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 TerraEngine::UUID SceneManager::LoadPrefab(const std::filesystem::path& path)
 {
@@ -258,21 +281,30 @@ bool SceneManager::SetActiveScene(const TerraEngine::UUID& id)
 	}
 
 	ObjectManager& objManager = ObjectManager::instance();
-	objManager.clear();
 	SkyComponent::registerType();
-
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (doc->parsedJson.contains("objects")) {
-		for (const auto& objJson : doc->parsedJson["objects"]) {
-			Serializer::DeserializeObjectEntity(objJson);
-		}
+	// JSON is decoded into value-only records before the live scene changes.
+	// PublishBulkScenePacket is the sole protected visibility boundary: no
+	// system callback can observe a half-created hierarchy during activation.
+	TerraEngine::Scene::PreparedSceneDecode decodedSource;
+	const TerraEngine::Scene::PreparedSceneDecode* prepared = nullptr;
+	if (doc->preparedScene.has_value())
+	{
+		prepared = &*doc->preparedScene;
 	}
-	// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	else if (doc->parsedJson.contains("entities")) {
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (const auto& objJson : doc->parsedJson["entities"]) {
-			Serializer::DeserializeObjectEntity(objJson);
-		}
+	else
+	{
+		decodedSource = Serializer::PrepareSceneDecode(doc->parsedJson);
+		prepared = &decodedSource;
+	}
+	const TerraEngine::Scene::BulkScenePublicationPacket packet = TerraEngine::Scene::BuildBulkScenePublicationPacket(
+		*prepared,
+		objManager.GetSceneGeneration(),
+		objManager.GetSceneGeneration());
+	const TerraEngine::Scene::BulkScenePublicationResult publication = TerraEngine::Scene::PublishBulkScenePacket(packet, objManager);
+	if (!publication.published)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Active scene publication rejected for " << doc->sourcePath << ": " << publication.reason);
+		return false;
 	}
 
 	auto graph = TerraEngine::Scene::BuildSceneGraphFromObjectManager(objManager);

@@ -159,6 +159,16 @@ namespace TerraEngine::Scene {
 		transactions.push_back(std::move(transaction));
 	}
 
+	void SceneMutationQueue::EnqueuePublicationGroup(TransactionPublicationGroup group)
+	{
+		std::scoped_lock lock(requestsMutex);
+		if (group.groupId.empty())
+		{
+			group.groupId = "publication-group-" + std::to_string(publicationGroups.size());
+		}
+		publicationGroups.push_back(std::move(group));
+	}
+
 	TransactionResult SceneMutationQueue::PreflightTransaction(const Transaction& transaction, ObjectManager& objects) const
 	{
 		return TerraEngine::Scene::PreflightTransaction(objects, transaction);
@@ -178,10 +188,24 @@ namespace TerraEngine::Scene {
 		return false;
 	}
 
+	bool SceneMutationQueue::CancelPublicationGroup(const std::string& groupId)
+	{
+		std::scoped_lock lock(requestsMutex);
+		for (TransactionPublicationGroup& group : publicationGroups)
+		{
+			if (group.groupId == groupId)
+			{
+				group.canceled = true;
+				return true;
+			}
+		}
+		return false;
+	}
+
 	bool SceneMutationQueue::Empty() const
 	{
 		std::scoped_lock lock(requestsMutex);
-		return requests.empty() && transactions.empty() && std::all_of(workerBuffers.begin(), workerBuffers.end(), [](const SceneMutationWorkerBuffer& buffer) {
+		return requests.empty() && transactions.empty() && publicationGroups.empty() && std::all_of(workerBuffers.begin(), workerBuffers.end(), [](const SceneMutationWorkerBuffer& buffer) {
 			return buffer.requests.empty();
 		});
 	}
@@ -195,6 +219,7 @@ namespace TerraEngine::Scene {
 			total += buffer.requests.size();
 		}
 		total += transactions.size();
+		total += publicationGroups.size();
 		return total;
 	}
 
@@ -257,6 +282,12 @@ namespace TerraEngine::Scene {
 		return transactions;
 	}
 
+	std::vector<TransactionPublicationGroup> SceneMutationQueue::PendingPublicationGroups() const
+	{
+		std::scoped_lock lock(requestsMutex);
+		return publicationGroups;
+	}
+
 	std::vector<TransactionResult> SceneMutationQueue::DrainCompletedEditorTransactionResults()
 	{
 		std::scoped_lock lock(requestsMutex);
@@ -277,6 +308,7 @@ namespace TerraEngine::Scene {
 		requests.clear();
 		workerBuffers.clear();
 		transactions.clear();
+		publicationGroups.clear();
 		completedEditorTransactionResults.clear();
 	}
 
@@ -520,7 +552,9 @@ namespace TerraEngine::Scene {
 			}
 		}
 
-		batch.applied = true;
+		// A protected boundary with no accepted request/transaction/group is a
+		// no-op, not a successful publication. Later receipts may set this true.
+		batch.applied = !requestSnapshot.empty();
 		const std::vector<TransactionResult> transactionResults = DrainTransactions(objects);
 		batch.transactionResults = transactionResults;
 		for (const TransactionResult& transactionResult : transactionResults)
@@ -533,6 +567,20 @@ namespace TerraEngine::Scene {
 			else
 			{
 				batch.rejectedMutationCount += transactionResult.rejectedWriteCount;
+			}
+		}
+		const std::vector<TransactionPublicationGroupResult> publicationGroupResults = DrainPublicationGroups(objects);
+		batch.publicationGroupResults = publicationGroupResults;
+		for (const TransactionPublicationGroupResult& groupResult : publicationGroupResults)
+		{
+			if (groupResult.status == TransactionStatus::Committed)
+			{
+				batch.applied = true;
+				batch.acceptedMutationCount += groupResult.appliedWriteCount;
+			}
+			else
+			{
+				batch.rejectedMutationCount += groupResult.rejectedWriteCount;
 			}
 		}
 		{
@@ -569,6 +617,22 @@ namespace TerraEngine::Scene {
 				}
 			}
 			results.push_back(std::move(result));
+		}
+		return results;
+	}
+
+	std::vector<TransactionPublicationGroupResult> SceneMutationQueue::DrainPublicationGroups(ObjectManager& objects)
+	{
+		std::vector<TransactionPublicationGroup> pending;
+		{
+			std::scoped_lock lock(requestsMutex);
+			pending.swap(publicationGroups);
+		}
+		std::vector<TransactionPublicationGroupResult> results;
+		results.reserve(pending.size());
+		for (const TransactionPublicationGroup& group : pending)
+		{
+			results.push_back(CommitTransactionPublicationGroup(objects, group));
 		}
 		return results;
 	}

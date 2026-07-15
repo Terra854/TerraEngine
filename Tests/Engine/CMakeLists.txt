@@ -19,6 +19,7 @@ add_executable(TerraEngine-EngineTests
 	Runtime/SceneRuntimeParityTests.cpp
 	Runtime/ThreadPoolSingletonTests.cpp
 	Runtime/WorkerPoolTests.cpp
+	Runtime/WorkerPoolTelemetryTests.cpp
 	Runtime/ExportRuntimePresentationTests.cpp
 	Runtime/RendererStabilitySmokeToolTests.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackagingRequest.cpp
@@ -43,6 +44,8 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_CURRENT_SOURCE_DIR}/Core/JobGraphTests.cpp
 	Core/SystemSchedulerTests.cpp
 	Core/TransformTaskGraphTests.cpp
+	Performance/PerformanceTestFixtures.cpp
+	Performance/PerformanceBaselineTests.cpp
 	Input/InputSystemTests.cpp
 	Input/WindowInputWorkerBoundaryTests.cpp
 	Platform/PlatformUtilsTests.cpp
@@ -56,6 +59,11 @@ add_executable(TerraEngine-EngineTests
 	Physics/PhysicsGameplayCommandTests.cpp
 	Physics/PhysicsQueryTests.cpp
 	Physics/PhysicsEventTests.cpp
+	Physics/PhysicsAuthoringIncrementalTests.cpp
+	Physics/PhysicsPreparationPlanTests.cpp
+	Physics/PhysicsBackendExtractionTests.cpp
+	Physics/IncrementalBodyStateStoreTests.cpp
+	Physics/PhysicsPublicationPacketTests.cpp
 	Physics/PhysicsStalePublicationTests.cpp
 	Physics/PhysicsProviderQueryEventTests.cpp
 	Physics/PhysicsTransactionTests.cpp
@@ -82,6 +90,11 @@ add_executable(TerraEngine-EngineTests
 	Physics/PhysicsLifecycleStressTests.cpp
 	Runtime/PhysicsExportRuntimeTests.cpp
 	Profiling/ProfilerCaptureTests.cpp
+	Profiling/ProfilerCaptureV2Tests.cpp
+	Profiling/ProfilerCaptureLevelTests.cpp
+	Profiling/ProfilerCapturePerformanceTests.cpp
+	Profiling/ProfilerPerformanceSummaryTests.cpp
+	Profiling/PerformanceTelemetryTests.cpp
 	Resource/ResourceResidencyBudgetTests.cpp
 	Resource/ResourceResidencyDiagnosticsTests.cpp
 	Resource/ResourceResidencyPolicyTests.cpp
@@ -170,11 +183,14 @@ add_executable(TerraEngine-EngineTests
 	Scripting/ScriptingWorkloadTests.cpp
 	Scripting/ScriptingWorkerBoundaryTests.cpp
 	Scene/PrefabCompositionTests.cpp
+	Scene/DerivedSceneCacheTests.cpp
+	Scene/BulkScenePublicationTests.cpp
 	Scene/HierarchySnapshotTests.cpp
 	Scene/RuntimeHierarchyLayoutTests.cpp
 	Scene/RuntimeLayoutCompatibilityTests.cpp
 	Scene/SceneSerializationTests.cpp
 	Scene/SceneGraphRuntimeTests.cpp
+	Scene/SceneChangePacketTests.cpp
 	Scene/SceneMutationQueueTests.cpp
 	Scene/TransactionalMutationTestFixtures.cpp
 	Scene/TransactionalMutationTests.cpp

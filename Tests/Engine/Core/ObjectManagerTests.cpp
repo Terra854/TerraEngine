@@ -52,6 +52,28 @@ namespace TerraEngine::Tests {
 	}
 
 	void RegisterObjectManagerTests(TestRegistry& registry) {
+		registry.Add("Engine.ObjectManager.ManagedBindingReloadDoesNotDirtyAuthoredObjects", [](TestContext& context) {
+			ResetObjectManager();
+			ObjectManager& manager = ObjectManager::instance();
+			const Object object = manager.createObject("ManagedHost");
+			const std::uint64_t componentGenerationBefore = manager.getObjectComponentGeneration(object);
+			const std::uint64_t bindingGenerationBefore = manager.getObjectBindingGeneration(object);
+			int modifiedCount = 0;
+			manager.SetOnModifiedCallback([&modifiedCount]() {
+				++modifiedCount;
+			});
+
+			manager.notifyManagedBindingsReloaded();
+
+			context.ExpectEqual(componentGenerationBefore, manager.getObjectComponentGeneration(object),
+				"Managed reloads must not claim that native component membership changed.");
+			context.Expect(manager.getObjectBindingGeneration(object) > bindingGenerationBefore,
+				"Managed reloads must invalidate stale managed wrapper identities.");
+			context.ExpectEqual(0, modifiedCount,
+				"Managed wrapper invalidation must not mark unchanged authored scene data dirty.");
+			ResetObjectManager();
+		});
+
 		registry.Add("Engine.ObjectManager.CreateObjectTracksMetadataUuidAndCallbacks", [](TestContext& context) {
 			ResetObjectManager();
 			ObjectManager& manager = ObjectManager::instance();

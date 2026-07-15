@@ -146,5 +146,25 @@ namespace TerraEngine::EditorTests
 				context.ExpectEqual(std::string("Force"), mode.value("default", std::string()), "Omitting applicationMode must retain ordinary Force behavior.");
 			}
 		});
+
+		registry.Add("Editor.MCP.Physics.DiagnosticsContractIsAdditiveAndBounded", [](TestContext& context) {
+			EditorAutomationRegistry capabilityRegistry;
+			context.Expect(capabilityRegistry.RegisterProvider(MakeProvider()).registered,
+				"Physics provider registration should succeed.");
+			AutomationStateSnapshot state;
+			state.projectAvailable = true;
+			const auto diagnostics = capabilityRegistry.Find("physics.diagnostics.get", 1, state);
+			context.Expect(diagnostics.has_value(), "Incremental diagnostics must remain discoverable.");
+			if (!diagnostics) return;
+			context.Expect(diagnostics->descriptor.description.find("authoring") != std::string::npos
+				&& diagnostics->descriptor.description.find("extraction") != std::string::npos
+				&& diagnostics->descriptor.description.find("publication") != std::string::npos,
+				"The additive diagnostics contract must name each bounded incremental pipeline stage.");
+			context.Expect(diagnostics->descriptor.inputSchema.value("additionalProperties", true) == false,
+				"Diagnostics requests must remain closed and bounded.");
+			context.ExpectEqual(std::string("immutable_physics_snapshot"),
+				diagnostics->descriptor.execution.visibilityBoundary,
+				"Diagnostics must read only immutable published state.");
+		});
 	}
 }

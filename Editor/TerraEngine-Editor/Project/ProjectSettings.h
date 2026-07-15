@@ -27,6 +27,14 @@ struct ProjectSettings {
 	}
 };
 
+namespace TerraEngine::Editor::ProjectSettings
+{
+	// Physics policy has a dedicated project-owned document because exports and
+	// the runtime consume it without loading editor automation preferences.
+	inline constexpr std::string_view kPhysicsSettingsRelativePath =
+		"ProjectSettings/PhysicsSettings.json";
+}
+
 namespace TerraEngine::Editor::Settings
 {
 	inline constexpr std::array<std::string_view, 1> kProjectAutomationSettingKeys{

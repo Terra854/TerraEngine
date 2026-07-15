@@ -41,5 +41,68 @@
 			"project-close",
 			"shutdown"
 		]
+	},
+	"performanceValidation": {
+		"us3WorkerMatrix": {
+			"scenarios": ["paused", "unchanged", "small", "large"],
+			"workerCounts": [1, 2, 4, "max"],
+			"thresholdOverrides": {
+				"parallelPreparation": 512,
+				"parallelExtraction": 512
+			},
+			"requireDeterministicHashes": true,
+			"requireAllScalingRuns": true,
+			"recommendation": "fastest successful correctness-gated result"
+		},
+		"canonical": {
+			"objectCount": 10000,
+			"dynamicBodies": 1000,
+			"kinematicBodies": 1000,
+			"staticBodies": 8000,
+			"activeDynamicBodies": 1000,
+			"exactStepCount": 100,
+			"debugVisualization": false
+		},
+		"smallScene": {
+			"objectCount": 256,
+			"dynamicBodies": 64,
+			"kinematicBodies": 32,
+			"staticBodies": 160,
+			"exactStepCount": 100,
+			"maximumRegressionPercent": 5.0
+		},
+		"denseMarkers": {
+			"objectCount": 10000,
+			"screenClusterCount": 1,
+			"selectedObjects": 1,
+			"cameras": 1,
+			"lights": 1
+		},
+		"readinessPasses": [
+			"cold",
+			"warm",
+			"stale",
+			"corrupt"
+		],
+		"markerModes": [
+			"selected_only",
+			"clustered",
+			"all"
+		],
+		"largeSceneModes": [
+			"auto",
+			"on",
+			"off"
+		],
+		"workerCounts": [1, 2, 4, "max"],
+		"captureLevels": [
+			"detailed",
+			"sampled",
+			"aggregate"
+		],
+		"debugMemory": {
+			"maximumPrimitiveBudget": 100000,
+			"skipProfilerCapture": true
+		}
 	}
 }

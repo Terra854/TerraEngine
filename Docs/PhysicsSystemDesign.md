@@ -204,6 +204,33 @@ Authored Components / Project Settings / Assets
 
 ---
 
+### Incremental high-frequency path
+
+The implemented high-frequency path retains generation-tagged authoring
+descriptors, provider order, immutable body-state pages, and last-accepted
+transform receipts. Exact scene and asset journals produce reason-tagged
+preparation operations; unchanged frames therefore have zero authoring,
+preparation, and transform-transaction work. Deterministic range partitioning
+uses the shared task system only above validated project thresholds.
+
+The provider retains static and sleeping records and extracts only selected,
+field-masked ranges unless an explicit full-state verification is requested.
+All provider values are converted before protected publication. Complete and
+changed state share one tick/store identity, while changed transform entries are
+split into bounded preparation chunks but committed as one atomic transaction
+group. Generation preflight covers the scene, hierarchy, object lifetime, body,
+Transform, parent lifetime, and parent Transform. Rejection has zero partial
+visibility, and the last-published pose advances only from an accepted receipt.
+
+Collision filtering is symmetric across both effective layer masks. Fixed-step
+settings are project-owned, continuous collision needs project and per-body
+opt-in, events are filtered from persistent engine-owned packets, and sleeping
+bodies avoid recurring publication until wake/change. Scheduler inspection
+activates After Physics visibility only for a later declared flushed-scene
+consumer; otherwise publication waits for Frame End. Diagnostics expose stage
+reasons, paths, work volumes, rates, failures, range sizes, page reuse, and
+transaction receipts without retaining provider objects.
+
 ## Core Runtime Types
 
 ### Stable Handles
@@ -1100,6 +1127,22 @@ No physics callback may outlive the world or engine.
 ---
 
 ## Performance and Memory Requirements
+
+The Spec 043 validation contract fixes the comparison identity: RelWithDebInfo,
+the installed tree under `out/build/RelWithDebInfo/Build`, 10,000 mixed bodies
+(1,000 dynamic, 1,000 kinematic, 8,000 static), 100 exact paused steps, and the
+repository-bundled dependencies. Max worker runs use hardware concurrency with
+no `TERRAENGINE_THREADPOOL_WORKERS` cap; only 1/2/4 runs are deliberate matrix
+overrides. Physics preparation and extraction partition thresholds default to
+512 items each. Scene View comparison defaults are a 2,000-object activation
+threshold, 2,048 visible markers, 512-item presentation batches, 18-pixel
+density radius, density threshold 4, clustered markers, and automatic mode.
+Profiler recordings use v2, while v1 is load-only compatibility; detailed,
+sampled, and aggregate five-second captures must remain at or below 10 MiB.
+Build commands intentionally do not pass `--parallel`.
+Export parity uses the installed baseline command
+`Tools/ExportRuntimeBaseline/RunBaseline.ps1 -InstallRoot out/build/RelWithDebInfo/Build`
+with a disposable `out/ci/export-runtime-baseline` work root.
 
 Target gates should be finalized by Spec Kit, but the initial design expects:
 

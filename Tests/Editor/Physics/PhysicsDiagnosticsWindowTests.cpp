@@ -23,6 +23,12 @@ namespace TerraEngine::EditorTests
 			snapshot->counters.contactCount = 3U;
 			snapshot->cache.hitCount = 4U;
 			snapshot->memory.highWaterProviderAllocations = 5U;
+			snapshot->authoring.changedObjects = 6U;
+			snapshot->preparation.estimatedWorkItems = 7U;
+			snapshot->extraction.extractedBodies = 8U;
+			snapshot->stateStore.pagesReused = 9U;
+			snapshot->publication.currentEntries = 10U;
+			snapshot->rate.currentHealthPublished = true;
 			snapshot->scheduler = std::make_shared<const std::vector<Physics::PhysicsSchedulerDeclaration>>(std::vector<Physics::PhysicsSchedulerDeclaration>{{"PhysicsStep", "FixedUpdate", "PhysicsCommands", "PhysicsSnapshots", "AfterPhysicsFlush", true}});
 			Physics::PublishPhysicsDiagnosticsSnapshot(snapshot);
 			const auto read = Physics::AcquirePhysicsDiagnosticsSnapshot();
@@ -30,6 +36,13 @@ namespace TerraEngine::EditorTests
 			context.Expect(read && read->scheduler && read->scheduler->front().workerSafe, "Scheduler declarations must remain observable without a live physics system call.");
 			context.Expect(read && read->counters.contactCount == 3U && read->cache.hitCount == 4U
 				&& read->memory.highWaterProviderAllocations == 5U, "Contact, cache, memory, and allocator high-water diagnostics must cross the immutable publication boundary.");
+			context.Expect(read && read->authoring.changedObjects == 6U
+				&& read->preparation.estimatedWorkItems == 7U
+				&& read->extraction.extractedBodies == 8U
+				&& read->stateStore.pagesReused == 9U
+				&& read->publication.currentEntries == 10U
+				&& read->rate.currentHealthPublished,
+				"Every incremental stage and current health must cross the same immutable diagnostics boundary.");
 		});
 
 		registry.Add("Physics.Diagnostics.SystemDeclarationNamesProfilerScopeAndBoundaries", [](TestContext& context) {

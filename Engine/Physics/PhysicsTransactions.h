@@ -8,6 +8,7 @@
 
 #include "Core/Export.h"
 #include "PhysicsCommands.h"
+#include "TransformPublicationPacket.h"
 #include "Scene/TransactionalMutation.h"
 
 #include <cstdint>
@@ -51,6 +52,9 @@ namespace TerraEngine::Physics {
 	// it, so the hot path needs no second lock or private worker pool.
 	struct PhysicsTransactionRuntimeState {
 		PhysicsWorldHandle world;
+		// Publication validates the complete compact body handle in addition to
+		// the authored component generation kept by the existing generation map.
+		std::unordered_map<TerraEngine::UUID, PhysicsBodyHandle> bodyHandles;
 		std::unordered_map<TerraEngine::UUID, PhysicsGeneration> bodyGenerations;
 		std::unordered_map<TerraEngine::UUID, PhysicsGeneration> constraintGenerations;
 		std::unordered_map<TerraEngine::UUID, PhysicsGeneration> characterGenerations;
@@ -129,5 +133,15 @@ namespace TerraEngine::Physics {
 		ObjectManager& objects,
 		PhysicsTransactionRuntimeState& runtime,
 		const PhysicsTransaction& transaction);
+	// Validate both the live scene generations and provider-owned body generation
+	// before a group is eligible for the deferred protected scene boundary.
+	TERRAENGINE_API TransformPublicationValidationResult ValidatePhysicsTransformPublication(
+		ObjectManager& objects,
+		const PhysicsTransactionRuntimeState& runtime,
+		const TransformPublicationPacket& packet);
+	TERRAENGINE_API TerraEngine::Scene::TransactionPublicationGroupResult CommitPhysicsTransformPublication(
+		ObjectManager& objects,
+		const PhysicsTransactionRuntimeState& runtime,
+		const TransformPublicationPacket& packet);
 	TERRAENGINE_API std::string_view ToString(PhysicsTransactionState state);
 }

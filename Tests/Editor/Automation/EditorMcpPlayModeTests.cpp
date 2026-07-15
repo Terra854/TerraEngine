@@ -117,6 +117,7 @@ namespace TerraEngine::EditorTests
 			{
 				const nlohmann::json& properties = exit->descriptor.resultSchema["properties"];
 				context.Expect(properties.contains("restoration"), "Play exit results must report authored-state restoration, including partial failures.");
+				context.Expect(properties.contains("readiness"), "Play contracts should reserve additive readiness evidence without narrowing legacy restoration responses.");
 			}
 		});
 	}

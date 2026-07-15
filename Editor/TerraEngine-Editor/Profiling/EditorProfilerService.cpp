@@ -11,6 +11,7 @@
 
 #include <future>
 #include <algorithm>
+#include <map>
 #include <iomanip>
 #include <numeric>
 #include <sstream>
@@ -19,6 +20,103 @@ using TerraEngine::Profiling::Profiler;
 using TerraEngine::Profiling::ProfilerCaptureDocument;
 using TerraEngine::Profiling::ProfilerCaptureSettings;
 using TerraEngine::Profiling::ProfilerSessionState;
+
+namespace
+{
+// PercentileFromSorted deliberately interpolates between neighbouring samples.
+// This produces a stable answer for small captures instead of rounding a P95
+// to a different whole frame as capture length changes.
+double PercentileFromSorted(const std::vector<double>& sortedValues, double percentile)
+{
+	if (sortedValues.empty())
+	{
+		return 0.0;
+	}
+	const double index = std::clamp(percentile, 0.0, 1.0) * static_cast<double>(sortedValues.size() - 1u);
+	const std::size_t lower = static_cast<std::size_t>(index);
+	const std::size_t upper = std::min(lower + 1u, sortedValues.size() - 1u);
+	return sortedValues[lower] + (sortedValues[upper] - sortedValues[lower]) * (index - static_cast<double>(lower));
+}
+
+// MetricAccumulator collects only valid telemetry samples.  Availability is
+// retained separately so consumers cannot mistake a missing timing source for
+// an observed zero duration.
+struct MetricAccumulator
+{
+	EditorProfilerMetricSummary summary;
+	std::vector<double> values;
+
+	void Add(const TerraEngine::Profiling::TelemetryDuration& duration)
+	{
+		if (duration.availability != TerraEngine::Profiling::TelemetryAvailability::Available)
+		{
+			++summary.unavailableCount;
+			if (summary.unavailableReason.empty())
+			{
+				summary.unavailableReason = duration.unavailableReason;
+			}
+			return;
+		}
+		values.push_back(static_cast<double>(duration.nanoseconds) / 1'000'000.0);
+	}
+
+	[[nodiscard]] EditorProfilerMetricSummary Finalize() const
+	{
+		EditorProfilerMetricSummary result = summary;
+		result.sampleCount = values.size();
+		result.available = !values.empty();
+		if (values.empty())
+		{
+			return result;
+		}
+		std::vector<double> sorted = values;
+		std::sort(sorted.begin(), sorted.end());
+		result.median = PercentileFromSorted(sorted, 0.50);
+		result.p95 = PercentileFromSorted(sorted, 0.95);
+		result.p99 = PercentileFromSorted(sorted, 0.99);
+		result.maximum = sorted.back();
+		return result;
+	}
+};
+
+void AddDuration(
+	std::map<std::string, MetricAccumulator>& accumulators,
+	std::string id,
+	std::string label,
+	const TerraEngine::Profiling::TelemetryDuration& duration)
+{
+	MetricAccumulator& accumulator = accumulators[id];
+	if (accumulator.summary.label.empty())
+	{
+		accumulator.summary.id = id;
+		accumulator.summary.label = std::move(label);
+		accumulator.summary.unit = "ms";
+	}
+	accumulator.Add(duration);
+}
+
+std::vector<EditorProfilerMetricSummary> FinalizeMetrics(const std::map<std::string, MetricAccumulator>& accumulators)
+{
+	std::vector<EditorProfilerMetricSummary> result;
+	result.reserve(accumulators.size());
+	for (const auto& [id, accumulator] : accumulators)
+	{
+		EditorProfilerMetricSummary summary = accumulator.Finalize();
+		// The map key is stable even if a producer omitted its optional display
+		// label, which keeps automation comparisons deterministic.
+		if (summary.id.empty())
+		{
+			summary.id = id;
+		}
+		if (summary.label.empty())
+		{
+			summary.label = id;
+		}
+		result.push_back(std::move(summary));
+	}
+	return result;
+}
+}
 
 // EditorProfilerService::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void EditorProfilerService::Initialize(EditorContext& context)
@@ -82,6 +180,16 @@ void EditorProfilerService::Update(float)
 // EditorProfilerService::StartRecording is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void EditorProfilerService::StartRecording()
 {
+	ProfilerCaptureSettings settings{};
+	// Preserve the legacy rolling-capture budget for callers that do not opt
+	// into the v2 bounded-chunk controls.
+	settings.maxFrames = 10000u;
+	settings.maxDurationSeconds = 0.0;
+	StartRecording(settings);
+}
+
+void EditorProfilerService::StartRecording(const ProfilerCaptureSettings& settings)
+{
 	if (!HasActiveProject())
 	{
 		std::lock_guard<std::mutex> lock(mutex);
@@ -90,9 +198,6 @@ void EditorProfilerService::StartRecording()
 		return;
 	}
 
-	ProfilerCaptureSettings settings{};
-	settings.maxFrames = 10000u;
-	settings.maxDurationSeconds = 0.0;
 	Profiler::Instance().StartRecording(MakeMetadata(), settings);
 	std::lock_guard<std::mutex> lock(mutex);
 	statusText = "Recording";
@@ -451,6 +556,24 @@ bool EditorProfilerService::SummarizeCaptureById(
 	if (!ReadCaptureDocumentById(artifactId, document, outError))
 		return false;
 	outSummary = SummarizeDocument(std::string(artifactId), document);
+	// Filesystem length is captured once at summary creation.  It is metadata,
+	// not a stream sample, and therefore must not be inferred from decoded data.
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		for (const auto& capture : captures)
+		{
+			if (MakeArtifactId(capture.fileName) == artifactId)
+			{
+				std::error_code error;
+				outSummary.artifactSizeBytes = std::filesystem::file_size(capture.absolutePath, error);
+				if (error)
+				{
+					outSummary.artifactSizeBytes = 0u;
+				}
+				break;
+			}
+		}
+	}
 	outError.clear();
 	return true;
 }
@@ -462,10 +585,33 @@ EditorProfilerCaptureSummary EditorProfilerService::SummarizeDocument(
 	EditorProfilerCaptureSummary summary;
 	summary.artifactId = std::move(artifactId);
 	summary.frameCount = document.frames.size();
-	if (document.frames.empty())
-		return summary;
+	summary.payloadVersion = document.payloadVersion;
+	// V1 artifacts have no explicit committed-count field.  Their fully parsed
+	// frame vector is the committed boundary, preserving a useful summary for
+	// legacy captures without pretending they were rewritten as v2.
+	summary.committedFrameCount = document.committedFrameCount == 0u
+		? static_cast<std::uint64_t>(document.frames.size())
+		: document.committedFrameCount;
+	summary.captureComplete = document.complete;
+	summary.recoveredIncompleteTail = document.recoveredIncompleteTail;
 
-	summary.minimumFrameMs = document.frames.front().durationMs;
+	std::map<std::string, MetricAccumulator> stageAccumulators;
+	std::map<std::string, MetricAccumulator> boundaryAccumulators;
+	std::map<std::string, MetricAccumulator> presentationAccumulators;
+	std::map<std::string, MetricAccumulator> responsivenessAccumulators;
+	struct WorkerAccumulator
+	{
+		EditorProfilerWorkerSummary summary;
+		MetricAccumulator run;
+		MetricAccumulator wait;
+		MetricAccumulator idle;
+	};
+	std::map<std::uint32_t, WorkerAccumulator> workerAccumulators;
+
+	if (!document.frames.empty())
+	{
+		summary.minimumFrameMs = document.frames.front().durationMs;
+	}
 	for (const auto& frame : document.frames)
 	{
 		summary.totalDurationMs += frame.durationMs;
@@ -475,9 +621,80 @@ EditorProfilerCaptureSummary EditorProfilerService::SummarizeDocument(
 			++summary.completeFrameCount;
 		else
 			++summary.incompleteFrameCount;
+
+		for (const TerraEngine::Profiling::PerformanceStageRecord& stage : frame.performanceStages)
+		{
+			const char* domain = stage.domain == TerraEngine::Profiling::PerformanceStageDomain::Physics ? "physics" : "scene_view";
+			const std::string id = std::string(domain) + "." + stage.stageName;
+			AddDuration(stageAccumulators, id, std::string(domain) + " / " + stage.stageName, stage.duration);
+		}
+		for (const TerraEngine::Profiling::ProtectedBoundaryRecord& boundary : frame.protectedBoundaries)
+		{
+			const std::string prefix = "boundary." + boundary.boundaryName + ".";
+			AddDuration(boundaryAccumulators, prefix + "queue", boundary.boundaryName + " queue", boundary.queueDuration);
+			AddDuration(boundaryAccumulators, prefix + "ownership_wait", boundary.boundaryName + " ownership wait", boundary.ownershipWaitDuration);
+			AddDuration(boundaryAccumulators, prefix + "execution", boundary.boundaryName + " execution", boundary.executionDuration);
+			AddDuration(boundaryAccumulators, prefix + "flush", boundary.boundaryName + " flush", boundary.flushDuration);
+			AddDuration(boundaryAccumulators, prefix + "publication", boundary.boundaryName + " publication", boundary.publicationDuration);
+		}
+		for (const TerraEngine::Profiling::PresentationWaitRecord& wait : frame.presentationWaits)
+		{
+			const std::string id = "presentation." + std::to_string(static_cast<unsigned int>(wait.kind));
+			AddDuration(presentationAccumulators, id, "Presentation wait", wait.duration);
+		}
+		if (frame.responsiveness.has_value())
+		{
+			const TerraEngine::Profiling::FrameResponsivenessRecord& responsiveness = *frame.responsiveness;
+			AddDuration(responsivenessAccumulators, "responsiveness.input_to_presentation", "Input to presentation", responsiveness.inputToPresentationDuration);
+			AddDuration(responsivenessAccumulators, "responsiveness.frame", "Frame responsiveness", responsiveness.frameDuration);
+		}
+		for (const TerraEngine::Profiling::WorkerTelemetryRecord& worker : frame.workerTelemetry)
+		{
+			WorkerAccumulator& accumulator = workerAccumulators[worker.workerId];
+			accumulator.summary.workerId = worker.workerId;
+			++accumulator.summary.sampleCount;
+			accumulator.summary.maximumQueueDepth = std::max(accumulator.summary.maximumQueueDepth, worker.queueDepth);
+			accumulator.summary.totalDispatchCount += worker.dispatchCount;
+			accumulator.summary.totalUsefulWorkItems += worker.usefulWorkItemCount;
+			if (accumulator.run.summary.label.empty())
+			{
+				accumulator.run.summary = {"worker.run", "Worker run", "ms"};
+				accumulator.wait.summary = {"worker.wait", "Worker wait", "ms"};
+				accumulator.idle.summary = {"worker.idle", "Worker idle", "ms"};
+			}
+			accumulator.run.Add(worker.runDuration);
+			accumulator.wait.Add(worker.waitDuration);
+			accumulator.idle.Add(worker.idleDuration);
+		}
+		if (frame.physicsWorkVolume.has_value())
+		{
+			const TerraEngine::Profiling::PhysicsWorkVolumeRecord& volume = *frame.physicsWorkVolume;
+			++summary.workVolumes.measuredTickCount;
+			summary.workVolumes.totalBodies = std::max(summary.workVolumes.totalBodies, volume.totalBodyCount);
+			summary.workVolumes.activeBodies = std::max(summary.workVolumes.activeBodies, volume.activeBodyCount);
+			summary.workVolumes.examinedBodies = std::max(summary.workVolumes.examinedBodies, volume.examinedBodyCount);
+			summary.workVolumes.extractedBodies = std::max(summary.workVolumes.extractedBodies, volume.extractedBodyCount);
+			summary.workVolumes.convertedBodies = std::max(summary.workVolumes.convertedBodies, volume.convertedBodyCount);
+			summary.workVolumes.changedBodies = std::max(summary.workVolumes.changedBodies, volume.changedBodyCount);
+			summary.workVolumes.publishedBodies = std::max(summary.workVolumes.publishedBodies, volume.publishedBodyCount);
+		}
 	}
-	summary.averageFrameMs = summary.totalDurationMs / static_cast<double>(summary.frameCount);
+	if (summary.frameCount != 0u)
+	{
+		summary.averageFrameMs = summary.totalDurationMs / static_cast<double>(summary.frameCount);
+	}
 	summary.timingStreams = TerraEngine::Profiling::BuildTimingStreamAggregates(document.frames);
+	summary.stageTimings = FinalizeMetrics(stageAccumulators);
+	summary.protectedBoundaryTimings = FinalizeMetrics(boundaryAccumulators);
+	summary.presentationWaitTimings = FinalizeMetrics(presentationAccumulators);
+	summary.responsivenessTimings = FinalizeMetrics(responsivenessAccumulators);
+	for (auto& [workerId, accumulator] : workerAccumulators)
+	{
+		accumulator.summary.runDuration = accumulator.run.Finalize();
+		accumulator.summary.waitDuration = accumulator.wait.Finalize();
+		accumulator.summary.idleDuration = accumulator.idle.Finalize();
+		summary.workerHistories.push_back(std::move(accumulator.summary));
+	}
 	return summary;
 }
 

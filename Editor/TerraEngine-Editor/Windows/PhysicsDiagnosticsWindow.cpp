@@ -79,6 +79,53 @@ void PhysicsDiagnosticsWindow::DrawCounters()
 		static_cast<unsigned long long>(snapshot->cache.payloadBytes),
 		static_cast<unsigned long long>(snapshot->cache.hitCount),
 		static_cast<unsigned long long>(snapshot->cache.missCount));
+	ImGui::SeparatorText("Incremental Pipeline");
+	ImGui::Text("Authoring gen %llu / snapshot %llu: %llu changed (%llu added, %llu removed, %llu transforms), reused %s.",
+		static_cast<unsigned long long>(snapshot->authoring.authoringGeneration),
+		static_cast<unsigned long long>(snapshot->authoring.snapshotGeneration),
+		static_cast<unsigned long long>(snapshot->authoring.changedObjects),
+		static_cast<unsigned long long>(snapshot->authoring.added),
+		static_cast<unsigned long long>(snapshot->authoring.removed),
+		static_cast<unsigned long long>(snapshot->authoring.transforms),
+		snapshot->authoring.snapshotReused ? "yes" : "no");
+	ImGui::Text("Prepare %s: %llu items / %llu ranges; scratch %llu active, %llu reused.",
+		snapshot->preparation.executionPath.c_str(),
+		static_cast<unsigned long long>(snapshot->preparation.estimatedWorkItems),
+		static_cast<unsigned long long>(snapshot->preparation.rangeCount),
+		static_cast<unsigned long long>(snapshot->preparation.scratchActiveItems),
+		static_cast<unsigned long long>(snapshot->preparation.scratchReuses));
+	ImGui::Text("Extract %llu/%llu bodies (%llu examined, %llu active, %llu changed), ranges %llu, parallel %s, fallback %s.",
+		static_cast<unsigned long long>(snapshot->extraction.extractedBodies),
+		static_cast<unsigned long long>(snapshot->extraction.totalBodies),
+		static_cast<unsigned long long>(snapshot->extraction.examinedBodies),
+		static_cast<unsigned long long>(snapshot->extraction.activeBodies),
+		static_cast<unsigned long long>(snapshot->extraction.changedBodies),
+		static_cast<unsigned long long>(snapshot->extraction.rangeCount),
+		snapshot->extraction.parallelReads ? "yes" : "no",
+		snapshot->extraction.serialFallback ? "yes" : "no");
+	ImGui::Text("State store gen %llu: %llu bodies / %llu pages / %llu B; pages reused %llu, copied %llu.",
+		static_cast<unsigned long long>(snapshot->stateStore.storeGeneration),
+		static_cast<unsigned long long>(snapshot->stateStore.bodyCount),
+		static_cast<unsigned long long>(snapshot->stateStore.pageCount),
+		static_cast<unsigned long long>(snapshot->stateStore.retainedBytes),
+		static_cast<unsigned long long>(snapshot->stateStore.pagesReused),
+		static_cast<unsigned long long>(snapshot->stateStore.pagesCopied));
+	ImGui::Text("Publication: %llu entries / %llu chunks / %llu pending, target %s; accepted %llu, rejected %llu, empty skipped %llu.",
+		static_cast<unsigned long long>(snapshot->publication.currentEntries),
+		static_cast<unsigned long long>(snapshot->publication.currentChunks),
+		static_cast<unsigned long long>(snapshot->publication.pendingGroups),
+		snapshot->publication.targetBoundary.c_str(),
+		static_cast<unsigned long long>(snapshot->publication.acceptedPackets),
+		static_cast<unsigned long long>(snapshot->publication.rejectedPackets),
+		static_cast<unsigned long long>(snapshot->publication.emptyPacketsSkipped));
+	if (!snapshot->publication.lastFailure.empty())
+	{
+		ImGui::TextWrapped("Current publication failure: %s", snapshot->publication.lastFailure.c_str());
+	}
+	ImGui::Text("Aggregate cadence: every %u frames, last tick %llu, refreshed %s; health is current.",
+		snapshot->rate.aggregateIntervalFrames,
+		static_cast<unsigned long long>(snapshot->rate.lastAggregateTick),
+		snapshot->rate.aggregateRefreshed ? "yes" : "no");
 }
 
 void PhysicsDiagnosticsWindow::DrawTimings()

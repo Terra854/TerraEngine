@@ -9,6 +9,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -49,18 +50,55 @@ namespace TerraEngine::Scene
 		std::uint32_t unchangedCount = 0;
 	};
 
+	struct SpatialBoundsPublicationChange
+	{
+		SpatialBoundsChangeKind kind = SpatialBoundsChangeKind::Update;
+		SpatialObjectRecord record{};
+	};
+
+	// A publication batch is value-only worker output. ApplyBoundsPublicationBatch
+	// validates the entire generation and identity set before either partition
+	// becomes visible at the protected boundary.
+	struct SpatialBoundsPublicationBatch
+	{
+		std::uint64_t sceneGeneration = 0;
+		std::uint64_t publicationGeneration = 0;
+		std::vector<SpatialBoundsPublicationChange> changes;
+	};
+
+	struct SpatialPartitionRevisionSnapshot
+	{
+		std::uint64_t staticRevision = 0;
+		std::uint64_t movableRevision = 0;
+		std::uint64_t publicationGeneration = 0;
+		std::size_t staticRecordCount = 0;
+		std::size_t movableRecordCount = 0;
+	};
+
 	// class SpatialIndex groups related state and operations so callers have one documented contract.
 	class SpatialIndex
 	{
 	public:
+		SpatialIndex();
+		~SpatialIndex();
+		SpatialIndex(const SpatialIndex&) = delete;
+		SpatialIndex& operator=(const SpatialIndex&) = delete;
+
 		void Clear();
 		void Rebuild(const std::vector<SpatialObjectRecord>& records);
+		// A scene replacement supplies a complete immutable record set.  This
+		// rebuilds both partitions before recording one scene-generation boundary,
+		// so consumers never mistake incremental changes for a partial load.
+		[[nodiscard]] bool RebuildCompleteSceneSnapshot(const std::vector<SpatialObjectRecord>& records, std::uint64_t sceneGeneration);
 		// Refresh compares the latest complete renderable snapshot against the
 		// cached records. It mutates only changed entries when that is safe and
 		// falls back to a full rebuild when root bounds must be recalculated.
 		void Refresh(const std::vector<SpatialObjectRecord>& records, bool forceFullRefresh = false);
 		void MarkDirty(const TerraEngine::UUID& objectId);
 		void InvalidateForHierarchySnapshotRebuild(std::uint64_t hierarchyRevision);
+		[[nodiscard]] bool ApplyBoundsPublicationBatch(const SpatialBoundsPublicationBatch& batch);
+		[[nodiscard]] SpatialPartitionRevisionSnapshot GetPartitionRevisionSnapshot() const;
+		[[nodiscard]] std::vector<TerraEngine::UUID> GetLastBoundsPublicationOrder() const;
 
 		[[nodiscard]] SpatialQueryResult QueryAABB(const SpatialAABB& area, const SpatialQueryFilter& filter = {}) const;
 		[[nodiscard]] SpatialQueryResult QuerySphere(const SpatialSphere& sphere, const SpatialQueryFilter& filter = {}) const;
@@ -115,6 +153,18 @@ namespace TerraEngine::Scene
 		mutable SpatialDiagnosticsSnapshot diagnostics{};
 		std::uint64_t lastHierarchySnapshotRevision = 0;
 		bool hasBuiltIndex = false;
+		bool partitionLeaf = false;
+		std::unique_ptr<SpatialIndex> staticPartition;
+		std::unique_ptr<SpatialIndex> movablePartition;
+		std::uint64_t staticPartitionRevision = 0;
+		std::uint64_t movablePartitionRevision = 0;
+		std::uint64_t lastBoundsPublicationGeneration = 0;
+		std::uint64_t boundsSceneGeneration = 0;
+		std::vector<TerraEngine::UUID> lastBoundsPublicationOrder;
+
+		explicit SpatialIndex(bool createPartitionLeaf);
+		void EnsurePartitions();
+		void RefreshAggregateDiagnostics(SpatialRefreshMode requestedMode);
 
 		int CreateNode(const SpatialAABB& tightBounds, std::uint32_t depth);
 		void InsertObject(int nodeIndex, const SpatialObjectRecord& record);
@@ -132,5 +182,45 @@ namespace TerraEngine::Scene
 		void AppendHit(SpatialQueryResult& result, const SpatialObjectRecord& record, float distance, const SpatialQueryFilter& filter) const;
 		void QueryNode(int nodeIndex, const QueryShape& shape, const SpatialQueryFilter& filter, SpatialQueryResult& result, std::unordered_set<TerraEngine::UUID>& seen) const;
 		void FinishResult(const QueryShape& shape, const SpatialQueryFilter& filter, SpatialQueryResult& result) const;
+	};
+
+	// EditorSelectableSpatialSnapshot is an immutable, worker-readable view of
+	// marker-bearing objects. It deliberately owns a separate index from the
+	// renderer so physics-only objects, lights, cameras, and true empties are not
+	// lost merely because they have no renderable component.
+	class EditorSelectableSpatialSnapshot
+	{
+	public:
+		EditorSelectableSpatialSnapshot() = default;
+
+		[[nodiscard]] bool IsValid() const;
+		[[nodiscard]] std::uint64_t Generation() const;
+		[[nodiscard]] std::size_t RecordCount() const;
+		[[nodiscard]] SpatialQueryResult QueryAABB(const SpatialAABB& area, const SpatialQueryFilter& filter = {}) const;
+		[[nodiscard]] SpatialQueryResult QuerySphere(const SpatialSphere& sphere, const SpatialQueryFilter& filter = {}) const;
+		[[nodiscard]] SpatialQueryResult QueryFrustum(const SpatialFrustum& frustum, const SpatialQueryFilter& filter = {}) const;
+		[[nodiscard]] SpatialQueryResult QueryRay(const SpatialRay& ray, const SpatialQueryFilter& filter = {}) const;
+
+	private:
+		friend class EditorSelectableSpatialSnapshotPublisher;
+
+		std::uint64_t generation = 0;
+		std::size_t recordCount = 0;
+		std::shared_ptr<const SpatialIndex> index;
+	};
+
+	// EditorSelectableSpatialSnapshotPublisher constructs a complete immutable
+	// candidate snapshot off the live scene and swaps it atomically only after
+	// validation. Readers can retain an older snapshot safely while a newer
+	// generation is prepared on another thread.
+	class EditorSelectableSpatialSnapshotPublisher
+	{
+	public:
+		[[nodiscard]] bool Publish(std::vector<SpatialObjectRecord> records, std::uint64_t generation);
+		[[nodiscard]] std::shared_ptr<const EditorSelectableSpatialSnapshot> Latest() const;
+
+	private:
+		mutable std::mutex publishMutex;
+		std::shared_ptr<const EditorSelectableSpatialSnapshot> latest;
 	};
 }

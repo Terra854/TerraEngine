@@ -28,6 +28,7 @@ namespace TerraEngine::Scene {
 	struct SceneGraph;
 	struct SceneDirtyTransformState;
 	struct SceneTransformPropagationResult;
+	class SceneChangePacket;
 
 	enum class RuntimeLayoutRecordKind {
 		Camera,
@@ -52,6 +53,7 @@ namespace TerraEngine::Scene {
 		entt::entity entity = entt::null;
 		Object objectHandle;
 		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		TerraEngine::UUID parentObjectId = TerraEngine::EMPTY_UUID;
 		std::optional<std::size_t> parentIndex;
 		std::size_t firstChildIndex = 0;
 		std::size_t childCount = 0;
@@ -59,6 +61,8 @@ namespace TerraEngine::Scene {
 		bool runtimeActive = true;
 		std::uint64_t transformRevision = 0;
 		std::uint64_t spatialRevision = 0;
+		std::uint64_t parentLinkGeneration = 0;
+		bool isStatic = false;
 	};
 
 	struct FlatHierarchyLayout {
@@ -85,7 +89,64 @@ namespace TerraEngine::Scene {
 		Transform worldTransform{};
 		glm::mat4 modelMatrix{1.0f};
 		std::uint64_t sourceRevision = 0;
+		bool isStatic = false;
 		bool processed = false;
+	};
+
+	// CompactTransformRuntimeRecord contains only numeric value data needed by
+	// high-frequency simulation and publication. It deliberately omits Object,
+	// strings, component metadata, and a duplicate model matrix.
+	struct CompactTransformRuntimeRecord {
+		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		std::size_t layoutIndex = 0;
+		std::optional<std::size_t> parentIndex;
+		glm::vec3 localPosition{0.0f, 0.0f, 0.0f};
+		glm::quat localRotation{1.0f, 0.0f, 0.0f, 0.0f};
+		glm::vec3 localScale{1.0f, 1.0f, 1.0f};
+		glm::vec3 worldPosition{0.0f, 0.0f, 0.0f};
+		glm::quat worldRotation{1.0f, 0.0f, 0.0f, 0.0f};
+		glm::vec3 worldScale{1.0f, 1.0f, 1.0f};
+		std::uint64_t transformRevision = 0;
+		std::uint64_t parentWorldGeneration = 0;
+		bool isStatic = false;
+	};
+
+	// Each state describes the world pose a child observed for its parent. The
+	// generation combines the exact parent chain and transform revisions.
+	struct ParentWorldRuntimeState {
+		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		TerraEngine::UUID parentObjectId = TerraEngine::EMPTY_UUID;
+		std::optional<std::size_t> parentIndex;
+		Transform parentWorldTransform{};
+		std::uint64_t generation = 0;
+		bool reused = false;
+	};
+
+	struct CompactTransformRuntimeSnapshot {
+		bool valid = true;
+		std::uint64_t sourceGraphRevision = 0;
+		std::uint64_t sourceHierarchyRevision = 0;
+		std::vector<CompactTransformRuntimeRecord> records;
+		std::vector<ParentWorldRuntimeState> parentWorldStates;
+		std::size_t reusedParentStateCount = 0;
+	};
+
+	// Spatial consumers keep static and movable updates in distinct vectors so
+	// one physics pose update cannot request a rebuild of static world indexing.
+	struct RuntimeSpatialRecordChange {
+		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		std::size_t layoutIndex = 0;
+		std::uint64_t spatialRevision = 0;
+		bool isStatic = false;
+	};
+
+	struct RuntimeLayoutChangeBatch {
+		bool valid = true;
+		std::uint64_t sourceSceneGeneration = 0;
+		std::uint64_t sourceLayoutRevision = 0;
+		std::vector<TransformRuntimeRecord> transformChanges;
+		std::vector<RuntimeSpatialRecordChange> staticSpatialChanges;
+		std::vector<RuntimeSpatialRecordChange> movableSpatialChanges;
 	};
 
 	struct RenderRuntimeRecord {
@@ -149,6 +210,8 @@ namespace TerraEngine::Scene {
 	TERRAENGINE_API std::vector<std::size_t> BuildDirtyTransformLayoutIndices(const FlatHierarchyLayout& layout, const SceneDirtyTransformState& dirtyState);
 	TERRAENGINE_API std::vector<TransformRuntimeRecord> BuildTransformRuntimeRecords(const FlatHierarchyLayout& layout, const SceneTransformPropagationResult& propagation);
 	TERRAENGINE_API std::vector<TransformRuntimeRecord> BuildDirtyTransformRuntimeRecords(const FlatHierarchyLayout& layout, const SceneTransformPropagationResult& propagation, const SceneDirtyTransformState& dirtyState);
+	TERRAENGINE_API CompactTransformRuntimeSnapshot BuildCompactTransformRuntimeSnapshot(const FlatHierarchyLayout& layout, const SceneGraph& graph, const CompactTransformRuntimeSnapshot* previousSnapshot = nullptr);
+	TERRAENGINE_API RuntimeLayoutChangeBatch BuildRuntimeLayoutChangeBatch(const FlatHierarchyLayout& layout, const SceneTransformPropagationResult& propagation, const SceneDirtyTransformState& dirtyState, const SceneChangePacket& changes);
 	TERRAENGINE_API LayoutDiagnosticsSummary BuildLayoutDiagnosticsSummary(const FlatHierarchyLayout& layout, std::size_t transformRecordCount, std::size_t renderRecordCount, std::uint64_t frameId = 0);
 
 }

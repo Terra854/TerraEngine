@@ -8,9 +8,11 @@
 #include "Components/Physics/ColliderSetComponent.h"
 #include "Components/Physics/RigidBodyComponent.h"
 #include "Physics/PhysicsAuthoringSnapshot.h"
+#include "Physics/PhysicsEvents.h"
 #include "Physics/PhysicsSystem.h"
 #include "Scene/SceneMutationQueue.h"
 #include "Scene/TransactionalMutation.h"
+#include "ThreadPool/ThreadPool.h"
 
 #include <algorithm>
 
@@ -69,6 +71,7 @@ namespace TerraEngine::Tests {
 				workload.workerEligible = false;
 				workload.mutationPolicy = TerraEngine::Scheduling::FrameWorkloadMutationPolicy::DeferredOnly;
 				workload.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::ProtectedCommit;
+				workload.sameFrameVisibilityRequired = true;
 				workload.protectedReason = "Fixture queues the typed physics Transform publication.";
 				workload.work = [this](TerraEngine::Scheduling::JobGraphContext&) {
 					ObjectManager& objects = ObjectManager::instance();
@@ -119,6 +122,25 @@ namespace TerraEngine::Tests {
 		private:
 			Object targetObject;
 		};
+
+		// The singleton physics system and shared worker pool must be torn down in
+		// this order so a failed expectation cannot leak provider work into later tests.
+		class ScheduledPhysicsRuntimeGuard final {
+		public:
+			ScheduledPhysicsRuntimeGuard() {
+				ThreadPool::instance().shutdown();
+				ThreadPool::instance().initialize();
+			}
+
+			~ScheduledPhysicsRuntimeGuard() {
+				auto& physics = TerraEngine::Physics::PhysicsSystem::Instance();
+				(void)physics.StopWorld();
+				physics.Shutdown();
+				TerraEngine::Scene::SceneMutationQueue::Instance().Clear();
+				ObjectManager::instance().clear();
+				ThreadPool::instance().shutdown();
+			}
+		};
 	}
 
 	void RegisterPhysicsSchedulerTests(TestRegistry& registry) {
@@ -148,7 +170,7 @@ namespace TerraEngine::Tests {
 			}
 		});
 
-		registry.Add("Physics.Scheduler.SevenWorkloadsHaveStrictGlobalOrder", [](TestContext& context) {
+		registry.Add("Physics.Scheduler.StableActivatedWorkloadsUseExplicitDependencies", [](TestContext& context) {
 			TerraEngine::Scheduling::SystemDeclaration scriptingDeclaration;
 			scriptingDeclaration.name = "ScriptingSystem";
 			scriptingDeclaration.phase = "Scripting";
@@ -168,15 +190,26 @@ namespace TerraEngine::Tests {
 			context.Expect(scheduler.BuildSchedule().valid,
 				"Physics dependencies and declared resources must validate in the real scheduler.");
 			const auto workloads = scheduler.BuildFrameWorkloadDeclarations(1.0F / 60.0F);
+			const auto repeated = scheduler.BuildFrameWorkloadDeclarations(1.0F / 60.0F);
 			std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> physicsWorkloads;
+			std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> repeatedPhysicsWorkloads;
 			std::copy_if(workloads.begin(), workloads.end(), std::back_inserter(physicsWorkloads), [](const auto& workload) {
 				return workload.ownerSystem == "PhysicsSystem";
 			});
+			std::copy_if(repeated.begin(), repeated.end(), std::back_inserter(repeatedPhysicsWorkloads), [](const auto& workload) {
+				return workload.ownerSystem == "PhysicsSystem";
+			});
 			context.ExpectEqual(static_cast<std::size_t>(7), physicsWorkloads.size(),
-				"PhysicsSystem must lower exactly seven named workloads.");
+				"PhysicsSystem must expose its seven stable phase descriptors for activation diagnostics.");
+			context.ExpectEqual(physicsWorkloads.size(), repeatedPhysicsWorkloads.size(),
+				"Repeated frames must reuse the same physics descriptor set.");
 			for(std::size_t index = 1U; index < physicsWorkloads.size(); ++index) {
-				context.Expect(physicsWorkloads[index - 1U].executionOrder < physicsWorkloads[index].executionOrder,
-					"Every local physics workload must receive a unique increasing global order.");
+				context.Expect(std::find(physicsWorkloads[index].explicitDependencies.begin(),
+					physicsWorkloads[index].explicitDependencies.end(), physicsWorkloads[index - 1U].stableDescriptorId)
+					!= physicsWorkloads[index].explicitDependencies.end(),
+					"Each physics phase must name its prerequisite descriptor instead of relying on global execution order.");
+				context.Expect(physicsWorkloads[index].stableDescriptorGeneration == repeatedPhysicsWorkloads[index].stableDescriptorGeneration,
+					"Unchanged physics descriptor metadata must retain its generation across frames.");
 			}
 			context.Expect(physicsWorkloads.front().workloadName == "PhysicsSnapshot"
 				&& physicsWorkloads.back().workloadName == "PhysicsPublicationBarrier",
@@ -187,6 +220,14 @@ namespace TerraEngine::Tests {
 			context.Expect(physicsWorkloads[0].mainThreadRequired && physicsWorkloads[2].mainThreadRequired
 				&& physicsWorkloads[5].mainThreadRequired && physicsWorkloads[6].mainThreadRequired,
 				"Snapshot, command commit, publish, and publication barrier must remain protected.");
+			context.Expect(std::all_of(physicsWorkloads.begin(), physicsWorkloads.end(), [](const auto& workload) {
+				return !workload.activationPredicateKey.empty() && !workload.stableDescriptorId.empty();
+			}), "Every physics phase must expose stable activation and descriptor identities.");
+			if (!physics.WorldHandle().IsValid()) {
+				context.Expect(std::none_of(physicsWorkloads.begin(), physicsWorkloads.end(), [](const auto& workload) {
+					return workload.active;
+				}), "An inactive physics world must omit every phase rather than dispatching no-op jobs.");
+			}
 		});
 
 		registry.Add("Physics.Scheduler.AfterPhysicsFlushPublishesTypedTransformBeforeUI", [](TestContext& context) {
@@ -226,6 +267,129 @@ namespace TerraEngine::Tests {
 				"UI must observe the queued physics Transform only after the protected After Physics flush.");
 			TerraEngine::Scene::SceneMutationQueue::Instance().Clear();
 			objects.clear();
+		});
+
+		registry.Add("Physics.Scheduler.PublicationBoundaryRequiresDeclaredSameFrameConsumer", [](TestContext& context) {
+			TerraEngine::Scheduling::SystemDeclaration physicsDeclaration;
+			physicsDeclaration.name = "PhysicsFixture";
+			physicsDeclaration.phase = "Physics";
+			physicsDeclaration.writes = {"SceneMutationQueue"};
+			physicsDeclaration.usesDefaultMetadata = false;
+			DeclarationOnlySystem physics(physicsDeclaration);
+
+			TerraEngine::Scheduling::SystemScheduler reducedScheduler;
+			reducedScheduler.RegisterSystem(physics, physics.SchedulerDeclaration());
+			context.Expect(reducedScheduler.BuildSchedule().valid, "The reduced physics-only schedule must validate.");
+			(void)reducedScheduler.BuildFrameWorkloadDeclarations(1.0F / 60.0F);
+			context.Expect(!TerraEngine::Scheduling::SameFramePhysicsPublicationConsumerActive(),
+				"A reduced schedule must defer physics transform visibility to Frame End.");
+
+			TerraEngine::Scheduling::SystemDeclaration uiDeclaration;
+			uiDeclaration.name = "UIConsumer";
+			uiDeclaration.phase = "UI";
+			uiDeclaration.reads = {"ObjectManager"};
+			uiDeclaration.requiresFlushedSceneMutations = true;
+			uiDeclaration.usesDefaultMetadata = false;
+			DeclarationOnlySystem ui(uiDeclaration);
+			TerraEngine::Scheduling::SystemScheduler interactiveScheduler;
+			interactiveScheduler.RegisterSystem(physics, physics.SchedulerDeclaration());
+			interactiveScheduler.RegisterSystem(ui, ui.SchedulerDeclaration());
+			context.Expect(interactiveScheduler.BuildSchedule().valid, "The interactive same-frame consumer schedule must validate.");
+			(void)interactiveScheduler.BuildFrameWorkloadDeclarations(1.0F / 60.0F);
+			context.Expect(TerraEngine::Scheduling::SameFramePhysicsPublicationConsumerActive(),
+				"A later declared scene reader must request After Physics transform visibility.");
+		});
+
+		registry.Add("Physics.Scheduler.ExtractionRetainsProviderEventsInImmutableHistory", [](TestContext& context) {
+			using namespace TerraEngine::Physics;
+			ScheduledPhysicsRuntimeGuard runtimeGuard;
+			ComponentRegistry::RegisterAllComponents();
+			ObjectManager& objects = ObjectManager::instance();
+			auto& mutations = TerraEngine::Scene::SceneMutationQueue::Instance();
+			objects.clear();
+			mutations.Clear();
+
+			// Two overlapping default boxes produce a real Jolt callback during the
+			// scheduled simulation phase. A collider-only object becomes static while
+			// the explicit body remains dynamic, avoiding two immovable participants.
+			const Object support = objects.createObject("Scheduled Event Support");
+			const Object dynamic = objects.createObject("Scheduled Event Dynamic");
+			Transform* supportTransform = objects.AddComponent<Transform>(support);
+			Transform* dynamicTransform = objects.AddComponent<Transform>(dynamic);
+			ColliderSetComponent* supportColliders = objects.AddComponent<ColliderSetComponent>(support);
+			ColliderSetComponent* dynamicColliders = objects.AddComponent<ColliderSetComponent>(dynamic);
+			RigidBodyComponent* dynamicBody = objects.AddComponent<RigidBodyComponent>(dynamic);
+			context.Expect(supportTransform != nullptr && dynamicTransform != nullptr
+				&& supportColliders != nullptr && dynamicColliders != nullptr && dynamicBody != nullptr,
+				"The scheduled provider-event fixture needs one static and one dynamic collider-backed object.");
+			if(supportColliders != nullptr) supportColliders->Add();
+			if(dynamicColliders != nullptr) dynamicColliders->Add();
+			if(dynamicBody != nullptr) dynamicBody->useGravity = false;
+			if(supportTransform != nullptr) supportTransform->position = {0.0F, 0.0F, 0.0F};
+			if(dynamicTransform != nullptr) dynamicTransform->position = {0.0F, 0.25F, 0.0F};
+			objects.MarkObjectTransformDirty(support);
+			objects.MarkObjectTransformDirty(dynamic);
+
+			auto& physics = PhysicsSystem::Instance();
+			physics.Shutdown();
+			physics.SetEditorLifecycleControlled(true);
+			physics.Initialize();
+			context.Expect(physics.StartWorld(), "The scheduled extraction regression needs a live provider world.");
+			const PhysicsEventSubscription subscription = physics.SubscribeEvents(PhysicsEventSubscriptionPolicy{});
+			context.Expect(subscription.id != 0U, "The live event stream must accept an all-events immutable subscription.");
+
+			TerraEngine::Scheduling::SystemDeclaration scriptingDeclaration;
+			scriptingDeclaration.name = "ScriptingSystem";
+			scriptingDeclaration.phase = "Scripting";
+			scriptingDeclaration.usesDefaultMetadata = false;
+			DeclarationOnlySystem scripting(scriptingDeclaration);
+			TerraEngine::Scheduling::SystemDeclaration uiDeclaration;
+			uiDeclaration.name = "UISystem";
+			uiDeclaration.phase = "UI";
+			uiDeclaration.reads = {"ObjectManager"};
+			uiDeclaration.requiresFlushedSceneMutations = true;
+			uiDeclaration.usesDefaultMetadata = false;
+			DeclarationOnlySystem ui(uiDeclaration);
+			TerraEngine::Scheduling::SystemScheduler scheduler;
+			scheduler.RegisterSystem(scripting, scripting.SchedulerDeclaration());
+			scheduler.RegisterSystem(physics, physics.SchedulerDeclaration());
+			scheduler.RegisterSystem(ui, ui.SchedulerDeclaration());
+			context.Expect(scheduler.BuildSchedule().valid, "The live extraction regression must execute through the declared Physics workload graph.");
+
+			std::shared_ptr<const PhysicsEventPacket> retained;
+			for(std::uint32_t frame = 0U; frame < 4U && (!retained || !retained->events || retained->events->empty()); ++frame) {
+				scheduler.ExecuteFrame(physics.FixedTimeStep(), [&](const TerraEngine::Scheduling::MutationFlushPoint& flushPoint) {
+					TerraEngine::Scheduling::MutationFlushRuntimeState state;
+					const auto flushed = mutations.Apply(objects, "physics-scheduler-event-history");
+					if(flushPoint.name == "After Physics") {
+						physics.OnAfterPhysicsFlush(flushed.transactionResults, flushed.publicationGroupResults);
+					}
+					state.pendingAfterFlush = mutations.Size();
+					return state;
+				});
+				const auto diagnostics = physics.LatestDiagnostics();
+				if(diagnostics && diagnostics->tick != 0U) retained = physics.ReadRetainedEventPacket(diagnostics->tick);
+			}
+
+			const auto diagnostics = physics.LatestDiagnostics();
+			const std::uint32_t fields = diagnostics ? diagnostics->extraction.fieldMask : 0U;
+			context.Expect(diagnostics != nullptr
+				&& (fields & static_cast<std::uint32_t>(PhysicsBodyStateFieldMask::Events)) != 0U
+				&& (fields & static_cast<std::uint32_t>(PhysicsBodyStateFieldMask::BodyState))
+					== static_cast<std::uint32_t>(PhysicsBodyStateFieldMask::BodyState),
+				"Scheduled extraction must retain the Events bit while requesting the complete body-state mask.");
+			context.Expect((fields & static_cast<std::uint32_t>(PhysicsBodyStateFieldMask::Constraints)) == 0U
+				&& (fields & static_cast<std::uint32_t>(PhysicsBodyStateFieldMask::Characters)) == 0U,
+				"Constraint and character fields must remain conditional when those runtime families are absent.");
+			context.Expect(retained != nullptr && retained->events != nullptr && !retained->events->empty(),
+				"A live provider callback must survive scheduled extraction and reach immutable retained event history.");
+			if(retained && retained->events && !retained->events->empty()) {
+				context.Expect(std::any_of(retained->events->begin(), retained->events->end(), [](const PhysicsEvent& event) {
+					return event.type == PhysicsEventType::CollisionEnter
+						|| event.type == PhysicsEventType::CollisionStay
+						|| event.type == PhysicsEventType::Contact;
+				}), "The retained packet must contain an actual collision/contact callback, not an empty bookkeeping publication.");
+			}
 		});
 
 		registry.Add("Physics.Scheduler.ColliderOnlyObjectsBecomeStaticAndBodiesWithoutCollidersAreExcluded", [](TestContext& context) {

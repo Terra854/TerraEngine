@@ -149,4 +149,21 @@ namespace TerraEngine::Editor::Settings
 			preferences.renderDebugDiagnostics = enabled;
 		return true;
 	}
+
+	inline bool TryReplaceSceneViewOverlayPreference(
+		::EditorPreferences& preferences,
+		const SceneViewOverlay::SceneOverlayPreference& candidate,
+		std::string& error)
+	{
+		// Validate the complete candidate before assignment. This copy-then-swap
+		// boundary guarantees an invalid update cannot partially change the live
+		// user preference document.
+		if (!SceneViewOverlay::ValidatePreference(candidate, &error))
+		{
+			return false;
+		}
+		preferences.sceneViewOverlay = candidate;
+		error.clear();
+		return true;
+	}
 }

@@ -296,5 +296,23 @@ namespace TerraEngine::Tests {
 			context.Expect(stepped && HasEvent(events, PhysicsEventType::CollisionExit),
 				"Removing a real physical overlap must publish collision exit after Jolt callbacks join.");
 		});
+
+		registry.Add("Physics.Provider.Jolt56.QueryResultsRemainOwnedAfterProviderMutation", [](TestContext& context) {
+			BackendFixture fixture;
+			context.Expect(fixture.Initialize(), "The copied-query fixture must initialize its isolated Jolt world.");
+			const PhysicsShapeHandle shape = fixture.PublishBox({1.0F, 1.0F, 1.0F});
+			TerraEngine::UUID objectId{};
+			const PhysicsBodyHandle body = fixture.PublishBody(shape, PhysicsMotionType::Static, {0.0F, 0.0F, 0.0F}, objectId);
+			const PhysicsBackendQueryResult copiedResult = fixture.backend.Query(MakeRayQuery(fixture.world));
+			context.Expect(copiedResult.result.Succeeded() && copiedResult.hits.size() == 1U,
+				"The provider must produce one engine-owned hit before its body is removed.");
+			context.Expect(fixture.backend.DestroyBody(body).Succeeded(),
+				"The provider fixture must remove the queried body through its protected ownership boundary.");
+			context.Expect(copiedResult.hits.front().body == body && copiedResult.hits.front().objectId == objectId,
+				"A completed query must keep copied body and object identities after the provider has released the source body.");
+			const PhysicsBackendQueryResult afterRemoval = fixture.backend.Query(MakeRayQuery(fixture.world));
+			context.Expect(afterRemoval.result.Succeeded() && afterRemoval.hits.empty(),
+				"A later provider query must observe removal without mutating an already returned immutable query result.");
+		});
 	}
 }

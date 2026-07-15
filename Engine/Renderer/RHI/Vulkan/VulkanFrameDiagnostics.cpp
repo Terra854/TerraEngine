@@ -1,5 +1,6 @@
 #include "VulkanFrameDiagnostics.h"
 #include "VulkanCommonIncludes.h"
+#include "Renderer/Graph/RenderDiagnostics.h"
 
 #include <sstream>
 #include <utility>
@@ -53,6 +54,14 @@ namespace TerraEngine::Renderer::Vulkan {
 				breakdown,
 				BuildBackendStallDiagnostic(timing, thresholdMilliseconds, std::move(recommendedAction)));
 		}
+	}
+
+	std::optional<TerraEngine::Profiling::PresentationWaitKind> ClassifyVulkanPresentationWait(
+		const VulkanFrameDiagnosticScope& scope)
+	{
+		// Keep Vulkan synchronization ownership unchanged. The graph-level helper
+		// only translates the already measured stage into a profiler category.
+		return ClassifyUnavoidablePresentationWait(scope.stage);
 	}
 
 	ViewSubmitWorkItem BuildVulkanViewSubmitWorkItem(

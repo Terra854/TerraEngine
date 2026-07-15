@@ -13,10 +13,12 @@
 #include "Engine/Core/Scheduling/EcsQueryTaskGraph.h"
 #include "Engine/Core/Scheduling/SystemScheduler.h"
 #include "Engine/Core/Scheduling/WorkerSafety.h"
+#include "Engine/Profiling/PerformanceTelemetry.h"
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Scripting/ScriptingSystem.h"
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/UI/UISystem.h"
+#include "ThreadPool/ThreadPool.h"
 
 #include <cstddef>
 #include <algorithm>
@@ -136,6 +138,47 @@ namespace
 		case WorkerSafetySeverity::Info:
 		default:
 			return "info";
+		}
+	}
+
+	const char* WorkloadPathText(TerraEngine::Profiling::WorkloadExecutionPath path)
+	{
+		switch (path)
+		{
+		case TerraEngine::Profiling::WorkloadExecutionPath::Inline: return "inline";
+		case TerraEngine::Profiling::WorkloadExecutionPath::Worker: return "worker";
+		case TerraEngine::Profiling::WorkloadExecutionPath::Protected: return "protected";
+		case TerraEngine::Profiling::WorkloadExecutionPath::Rejected: return "rejected";
+		case TerraEngine::Profiling::WorkloadExecutionPath::None:
+		default: return "omitted";
+		}
+	}
+
+	const char* WorkloadStatusText(TerraEngine::Profiling::WorkloadExecutionStatus status)
+	{
+		switch (status)
+		{
+		case TerraEngine::Profiling::WorkloadExecutionStatus::NotReady: return "not ready";
+		case TerraEngine::Profiling::WorkloadExecutionStatus::Inline: return "inline";
+		case TerraEngine::Profiling::WorkloadExecutionStatus::Queued: return "queued";
+		case TerraEngine::Profiling::WorkloadExecutionStatus::Running: return "running";
+		case TerraEngine::Profiling::WorkloadExecutionStatus::Completed: return "completed";
+		case TerraEngine::Profiling::WorkloadExecutionStatus::Rejected: return "rejected";
+		case TerraEngine::Profiling::WorkloadExecutionStatus::Cancelled: return "cancelled";
+		case TerraEngine::Profiling::WorkloadExecutionStatus::Inactive:
+		default: return "inactive";
+		}
+	}
+
+	const char* WorkerActivityText(ThreadPoolWorkerActivity activity)
+	{
+		switch (activity)
+		{
+		case ThreadPoolWorkerActivity::Idle: return "idle";
+		case ThreadPoolWorkerActivity::Running: return "running";
+		case ThreadPoolWorkerActivity::Stopped: return "stopped";
+		case ThreadPoolWorkerActivity::Starting:
+		default: return "starting";
 		}
 	}
 }
@@ -327,6 +370,7 @@ void SchedulerDiagnosticsWindow::DrawWorkerCoverageSummary()
 	}
 
 	DrawParallelFrameSummary();
+	DrawExecutionTelemetrySummary();
 	DrawHardBoundarySummary();
 	DrawSafetyViolationSummary();
 }
@@ -384,6 +428,171 @@ void SchedulerDiagnosticsWindow::DrawParallelFrameSummary()
 	DrawStringList("Protected:", report.protectedCategories);
 	DrawStringList("Rejected:", report.rejectedCategories);
 	DrawStringList("Fallback:", report.fallbackCategories);
+}
+
+void SchedulerDiagnosticsWindow::DrawExecutionTelemetrySummary()
+{
+	if (owner == nullptr || owner->GetContext() == nullptr || owner->GetContext()->engine == nullptr)
+	{
+		ImGui::TextDisabled("Execution telemetry is not available.");
+		return;
+	}
+
+	const ::Engine* engine = owner->GetContext()->engine;
+	const TerraEngine::Scheduling::FrameExecutionPlan& plan = engine->GetParallelFrameExecutionPlan();
+	const TerraEngine::Scheduling::ScheduleSummary& schedule = engine->GetSchedulerSummary();
+	const std::shared_ptr<const ThreadPoolTelemetrySnapshot> telemetry = ThreadPool::instance().GetTelemetrySnapshot();
+
+	// Both records below are copied immutable snapshots. The panel therefore only
+	// observes scheduler state and never participates in a frame's ownership path.
+	ImGui::SeparatorText("Execution Decisions and Workers");
+	if (ImGui::BeginTable("SchedulerDiagnosticsConditionalFlush", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	{
+		ImGui::TableSetupColumn("After Physics Flush");
+		ImGui::TableSetupColumn("Consumer");
+		ImGui::TableSetupColumn("Reason");
+		ImGui::TableHeadersRow();
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::TextUnformatted(schedule.afterPhysicsFlushActive ? "active" : "omitted");
+		ImGui::TableSetColumnIndex(1);
+		ImGui::TextUnformatted(schedule.afterPhysicsConsumer.empty() ? "none" : schedule.afterPhysicsConsumer.c_str());
+		ImGui::TableSetColumnIndex(2);
+		ImGui::TextWrapped("%s", schedule.afterPhysicsReason.empty() ? "No conditional physics flush was requested." : schedule.afterPhysicsReason.c_str());
+		ImGui::EndTable();
+	}
+
+	if (plan.executionRecords.empty())
+	{
+		ImGui::TextDisabled("Waiting for workload decision records.");
+	}
+	else if (ImGui::BeginTable("SchedulerDiagnosticsExecutionRecords", 11, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable))
+	{
+		ImGui::TableSetupColumn("Workload");
+		ImGui::TableSetupColumn("Active");
+		ImGui::TableSetupColumn("Ready");
+		ImGui::TableSetupColumn("Path");
+		ImGui::TableSetupColumn("Status");
+		ImGui::TableSetupColumn("Partition");
+		ImGui::TableSetupColumn("Worker");
+		ImGui::TableSetupColumn("Queue");
+		ImGui::TableSetupColumn("Dispatch");
+		ImGui::TableSetupColumn("Useful");
+		ImGui::TableSetupColumn("Run ms");
+		ImGui::TableHeadersRow();
+		for (const TerraEngine::Profiling::WorkloadExecutionRecord& record : plan.executionRecords)
+		{
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			ImGui::TextUnformatted(record.workloadName.c_str());
+			ImGui::TableSetColumnIndex(1);
+			ImGui::TextUnformatted(record.active ? "yes" : "no");
+			ImGui::TableSetColumnIndex(2);
+			ImGui::TextUnformatted(record.ready ? "yes" : "no");
+			ImGui::TableSetColumnIndex(3);
+			ImGui::TextUnformatted(WorkloadPathText(record.selectedPath));
+			ImGui::TableSetColumnIndex(4);
+			ImGui::TextUnformatted(WorkloadStatusText(record.status));
+			ImGui::TableSetColumnIndex(5);
+			ImGui::Text("%llu/%llu", static_cast<unsigned long long>(record.partitionIndex + 1u), static_cast<unsigned long long>(record.partitionCount));
+			ImGui::TableSetColumnIndex(6);
+			ImGui::TextUnformatted(record.workerIdentityAvailable ? std::to_string(record.workerId).c_str() : "n/a");
+			ImGui::TableSetColumnIndex(7);
+			ImGui::Text("%llu/%llu", static_cast<unsigned long long>(record.queueDepthAtEnqueue), static_cast<unsigned long long>(record.queueDepthAtStart));
+			ImGui::TableSetColumnIndex(8);
+			ImGui::Text("%llu", static_cast<unsigned long long>(record.dispatchCount));
+			ImGui::TableSetColumnIndex(9);
+			ImGui::Text("%llu", static_cast<unsigned long long>(record.usefulWorkItemCount));
+			ImGui::TableSetColumnIndex(10);
+			if (record.runDuration.availability == TerraEngine::Profiling::TelemetryAvailability::Available)
+			{
+				ImGui::Text("%.3f", static_cast<double>(record.runDuration.nanoseconds) / 1000000.0);
+			}
+			else
+			{
+				ImGui::TextDisabled("n/a");
+			}
+		}
+		ImGui::EndTable();
+	}
+	if (plan.droppedExecutionRecordCount > 0u)
+	{
+		ImGui::TextDisabled("%zu workload records were omitted because the per-frame retention bound was reached.", plan.droppedExecutionRecordCount);
+	}
+
+	if (ImGui::TreeNode("Dependency Edges"))
+	{
+		bool hasEdges = false;
+		for (const TerraEngine::Scheduling::FrameWorkloadDeclaration& workload : plan.workloads)
+		{
+			for (const std::string& dependency : workload.explicitDependencies)
+			{
+				hasEdges = true;
+				ImGui::BulletText("%s -> %s", dependency.c_str(), workload.stableDescriptorId.c_str());
+			}
+		}
+		if (!hasEdges)
+		{
+			ImGui::TextDisabled("No explicit workload dependencies were recorded.");
+		}
+		ImGui::TreePop();
+	}
+
+	if (ImGui::TreeNode("ThreadPool Telemetry"))
+	{
+		ImGui::Text("Snapshot %llu; every %u dispatches; retained history %zu per worker; dropped samples %llu",
+			static_cast<unsigned long long>(telemetry->generation), telemetry->samplingIntervalDispatches,
+			telemetry->historyCapacityPerWorker, static_cast<unsigned long long>(telemetry->droppedHistorySampleCount));
+		if (telemetry->workers.empty())
+		{
+			ImGui::TextDisabled("ThreadPool has not initialized workers.");
+		}
+		else if (ImGui::BeginTable("SchedulerDiagnosticsThreadPoolWorkers", 10, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable))
+		{
+			ImGui::TableSetupColumn("Worker");
+			ImGui::TableSetupColumn("State");
+			ImGui::TableSetupColumn("Queue E/S");
+			ImGui::TableSetupColumn("Dispatch");
+			ImGui::TableSetupColumn("Useful");
+			ImGui::TableSetupColumn("Run ms");
+			ImGui::TableSetupColumn("Wait ms");
+			ImGui::TableSetupColumn("Idle ms");
+			ImGui::TableSetupColumn("History");
+			ImGui::TableSetupColumn("Dropped");
+			ImGui::TableHeadersRow();
+			for (const ThreadPoolWorkerTelemetry& worker : telemetry->workers)
+			{
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0); ImGui::Text("%zu", worker.workerIndex);
+				ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(WorkerActivityText(worker.activity));
+				ImGui::TableSetColumnIndex(2); ImGui::Text("%zu/%zu", worker.latestQueueDepthAtEnqueue, worker.latestQueueDepthAtStart);
+				ImGui::TableSetColumnIndex(3); ImGui::Text("%llu", static_cast<unsigned long long>(worker.dispatchCount));
+				ImGui::TableSetColumnIndex(4); ImGui::Text("%llu", static_cast<unsigned long long>(worker.usefulItemCount));
+				ImGui::TableSetColumnIndex(5); ImGui::Text("%.3f", static_cast<double>(worker.runNanoseconds) / 1000000.0);
+				ImGui::TableSetColumnIndex(6); ImGui::Text("%.3f", static_cast<double>(worker.waitNanoseconds) / 1000000.0);
+				ImGui::TableSetColumnIndex(7); ImGui::Text("%.3f", static_cast<double>(worker.idleNanoseconds) / 1000000.0);
+				ImGui::TableSetColumnIndex(8); ImGui::Text("%zu", worker.history.size());
+				ImGui::TableSetColumnIndex(9); ImGui::Text("%llu", static_cast<unsigned long long>(worker.droppedHistorySampleCount));
+			}
+			ImGui::EndTable();
+		}
+		for (const ThreadPoolWorkerTelemetry& worker : telemetry->workers)
+		{
+			const std::string label = "Worker " + std::to_string(worker.workerIndex) + " History";
+			if (!worker.history.empty() && ImGui::TreeNode(label.c_str()))
+			{
+				for (const ThreadPoolWorkerTelemetrySample& sample : worker.history)
+				{
+					ImGui::BulletText("#%llu queue %zu/%zu useful %llu run %.3f ms wait %.3f ms idle %.3f ms",
+						static_cast<unsigned long long>(sample.sequence), sample.queueDepthAtEnqueue, sample.queueDepthAtStart,
+						static_cast<unsigned long long>(sample.usefulItemCount), static_cast<double>(sample.runNanoseconds) / 1000000.0,
+						static_cast<double>(sample.waitNanoseconds) / 1000000.0, static_cast<double>(sample.idleNanoseconds) / 1000000.0);
+				}
+				ImGui::TreePop();
+			}
+		}
+		ImGui::TreePop();
+	}
 }
 
 void SchedulerDiagnosticsWindow::DrawHardBoundarySummary()

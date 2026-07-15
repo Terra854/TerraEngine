@@ -128,6 +128,24 @@ namespace TerraEngine::EditorTests {
 			context.Expect(!std::filesystem::exists(transaction.LockPath()), "A successful commit should release the output lock.");
 		});
 
+		registry.Add("Editor.ExportOutputTransaction.PublishesOnlyValidatedRuntimeStaging", [](TestContext& context) {
+			TempExportOutputWorkspace workspace;
+			const std::filesystem::path projectRoot = workspace.FinalDirectory().parent_path() / "Project";
+			TempExportOutputWorkspace::WriteText(projectRoot / "Library/DerivedScenes/Level.dscn", "editor cache");
+			TempExportOutputWorkspace::WriteText(projectRoot / "EditorPreferences/SceneView.json", "editor preference");
+
+			ExportOutputTransaction transaction(workspace.FinalDirectory(), "runtime-only-publication");
+			std::string error;
+			context.Expect(transaction.Begin(error), error.empty() ? "Runtime staging transaction should begin." : error);
+			TempExportOutputWorkspace::WriteText(transaction.StagingDirectory() / "Package/game.json", "runtime manifest");
+			context.Expect(transaction.MarkStagedAndValidated(error), error.empty() ? "The explicit runtime staging set should validate." : error);
+			context.Expect(transaction.Commit(error), error.empty() ? "The validated runtime staging set should publish." : error);
+
+			context.Expect(std::filesystem::exists(workspace.FinalDirectory() / "Package/game.json"), "Validated runtime payload must become visible in export output.");
+			context.Expect(!std::filesystem::exists(workspace.FinalDirectory() / "Library/DerivedScenes/Level.dscn"), "Output publication must not sweep sibling derived-scene caches into the runtime.");
+			context.Expect(!std::filesystem::exists(workspace.FinalDirectory() / "EditorPreferences/SceneView.json"), "Output publication must not sweep sibling editor preferences into the runtime.");
+		});
+
 		registry.Add("Editor.ExportOutputTransaction.FailedPublishRestoresPreviousOutput", [](TestContext& context) {
 			TempExportOutputWorkspace workspace;
 			workspace.WriteFinalFile("known-good.txt", "known good output");

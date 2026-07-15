@@ -39,6 +39,9 @@ namespace TerraEngine::Scene {
 		TerraEngine::UUID parentId = TerraEngine::EMPTY_UUID;
 		std::int64_t parentIndex = -1;
 		std::uint32_t depth = 0;
+		// This tag changes only when this exact parent link changes. Unrelated
+		// hierarchy edits can therefore preserve cached parent-world state.
+		std::uint64_t parentLinkGeneration = 0;
 	};
 
 	struct HierarchySnapshot {

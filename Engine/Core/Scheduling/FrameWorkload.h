@@ -7,6 +7,7 @@
 #pragma once
 
 #include "Core/Export.h"
+#include "Profiling/PerformanceTelemetry.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -21,6 +22,7 @@ namespace TerraEngine::Scheduling {
 		Protected,
 		WorkerSafe,
 		Inline,
+		Omitted,
 		Rejected
 	};
 
@@ -32,6 +34,21 @@ namespace TerraEngine::Scheduling {
 	enum class FrameWorkloadExecutionMode {
 		Parallel,
 		Compatibility
+	};
+
+	// DeterministicRanges divides an immutable item domain into stable,
+	// contiguous ranges. Range boundaries depend only on descriptor values, not
+	// on the number of available workers, so publication order stays reproducible.
+	enum class FrameWorkloadPartitionPolicy {
+		Single,
+		DeterministicRanges
+	};
+
+	struct FrameWorkloadPartition {
+		std::size_t partitionIndex = 0;
+		std::size_t partitionCount = 0;
+		std::size_t itemBegin = 0;
+		std::size_t itemEnd = 0;
 	};
 
 	enum class WorkerConversionState {
@@ -82,6 +99,11 @@ namespace TerraEngine::Scheduling {
 		MutationRequiresBarrier,
 		ExecutionFailed,
 		CompatibilityFallback,
+		InactiveWorkloadOmitted,
+		WorkloadNotReady,
+		DuplicateDescriptorIdentity,
+		MissingExplicitDependency,
+		ExplicitDependencyCycle,
 		ActiveMembershipInvalidated,
 		CompactReferenceStale,
 		HierarchySnapshotBlocked,
@@ -101,11 +123,24 @@ namespace TerraEngine::Scheduling {
 		std::string workloadName;
 		std::string ownerSystem;
 		std::string phase;
+		// Stable descriptor identity is cached by the owning system. Compatibility
+		// callers may leave it empty; validation derives a deterministic identity.
+		std::string stableDescriptorId;
+		std::uint64_t stableDescriptorGeneration = 1u;
+		std::string activationPredicateKey;
+		bool active = true;
+		bool ready = true;
+		std::string readinessReason;
 		std::vector<std::string> reads;
 		std::vector<std::string> writes;
+		std::vector<std::string> explicitDependencies;
 		std::size_t executionOrder = 0;
 		std::size_t estimatedWorkItemCount = 0;
 		std::size_t inlineWorkItemThreshold = 0;
+		FrameWorkloadPartitionPolicy partitionPolicy = FrameWorkloadPartitionPolicy::Single;
+		std::size_t partitionWorkItemCount = 0;
+		std::size_t maximumPartitionCount = 0;
+		bool sameFrameVisibilityRequired = false;
 		bool workerEligible = false;
 		bool mainThreadRequired = true;
 		FrameWorkloadMutationPolicy mutationPolicy = FrameWorkloadMutationPolicy::None;
@@ -118,6 +153,7 @@ namespace TerraEngine::Scheduling {
 		std::string fallbackReason;
 		std::string profilingLabel;
 		std::function<void(JobGraphContext&)> work;
+		std::function<void(const FrameWorkloadPartition&, JobGraphContext&)> rangeWork;
 	};
 
 	struct FrameWorkloadResult {
@@ -126,6 +162,8 @@ namespace TerraEngine::Scheduling {
 		bool completed = false;
 		bool fallbackUsed = false;
 		bool inlineSelected = false;
+		bool omitted = false;
+		std::size_t partitionCount = 0;
 	};
 
 	struct ArchitectureMigrationSummary {
@@ -133,6 +171,7 @@ namespace TerraEngine::Scheduling {
 		std::size_t protectedCount = 0;
 		std::size_t inlineCount = 0;
 		std::size_t rejectedCount = 0;
+		std::size_t omittedCount = 0;
 		std::size_t fallbackCount = 0;
 		std::size_t mutationFlushCount = 0;
 		std::size_t workerPhaseCount = 0;
@@ -230,6 +269,10 @@ namespace TerraEngine::Scheduling {
 		std::vector<FrameWorkloadDeclaration> workloads;
 		std::vector<FrameWorkloadResult> results;
 		std::vector<ArchitectureDiagnostic> diagnostics;
+		// Execution records are bounded value snapshots; they never retain the
+		// std::function callbacks held by workload declarations.
+		std::vector<TerraEngine::Profiling::WorkloadExecutionRecord> executionRecords;
+		std::size_t droppedExecutionRecordCount = 0;
 		ArchitectureMigrationSummary migrationSummary;
 		FrameWorkloadExecutionMode executionMode = FrameWorkloadExecutionMode::Parallel;
 		bool parallelExecutionUsed = false;
@@ -241,6 +284,7 @@ namespace TerraEngine::Scheduling {
 	TERRAENGINE_API std::string ToString(FrameWorkloadExecutionPolicy policy);
 	TERRAENGINE_API std::string ToString(FrameWorkloadMutationPolicy policy);
 	TERRAENGINE_API std::string ToString(FrameWorkloadExecutionMode mode);
+	TERRAENGINE_API std::string ToString(FrameWorkloadPartitionPolicy policy);
 	TERRAENGINE_API std::string ToString(WorkerConversionState state);
 	TERRAENGINE_API std::string ToString(WorkerSystemPhaseKind kind);
 	TERRAENGINE_API std::string ToString(HardBoundaryClassification classification);
@@ -262,6 +306,11 @@ namespace TerraEngine::Scheduling {
 	TERRAENGINE_API FrameExecutionPlan ValidateFrameWorkloads(std::vector<FrameWorkloadDeclaration> workloads, std::string frameId = "frame");
 	TERRAENGINE_API FrameExecutionPlan ExecuteFrameWorkloads(std::vector<FrameWorkloadDeclaration> workloads, std::string frameId = "frame");
 	TERRAENGINE_API FrameExecutionPlan ExecuteFrameWorkloadsCompatibility(std::vector<FrameWorkloadDeclaration> workloads, std::string frameId = "frame");
+	// Returns a bounded value copy from the most recently completed scheduler
+	// execution. The profiler consumes it after the protected frame boundary;
+	// callbacks and mutable workload inputs are never retained here.
+	TERRAENGINE_API std::vector<TerraEngine::Profiling::WorkloadExecutionRecord> LatestFrameWorkloadExecutionRecordsForProfiling();
+	TERRAENGINE_API std::vector<FrameWorkloadPartition> BuildDeterministicWorkloadPartitions(std::size_t itemCount, std::size_t targetItemsPerPartition, std::size_t maximumPartitionCount = 0);
 	TERRAENGINE_API void AddArchitectureDiagnostic(std::vector<ArchitectureDiagnostic>& diagnostics, ArchitectureDiagnosticSeverity severity, ArchitectureDiagnosticCode code, std::string workloadName, std::string resourceName, std::string message, std::string action);
 
 }

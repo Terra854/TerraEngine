@@ -65,6 +65,7 @@ namespace TerraEngine::Physics {
 		PhysicsEventSubscription SubscribeEvents(PhysicsEventSubscriptionPolicy policy);
 		bool UnsubscribeEvents(std::uint64_t id, PhysicsGeneration generation);
 		std::shared_ptr<const PhysicsBodyStateSnapshot> LatestBodySnapshot() const;
+		std::shared_ptr<const IncrementalBodyStateSnapshot> LatestIncrementalBodySnapshot() const;
 		std::shared_ptr<const PhysicsCommandResultSnapshot> LatestCommandResults() const;
 		std::shared_ptr<const PhysicsEventPacket> LatestEventPacket() const;
 		// Returns one immutable retained event packet for the active world. Callers
@@ -77,7 +78,9 @@ namespace TerraEngine::Physics {
 		std::uint64_t ExplicitStepPublicationCount() const;
 		// The scheduler calls this only after the protected After Physics scene
 		// mutation flush, carrying receipts for generation-validated Transform writes.
-		void OnAfterPhysicsFlush(const std::vector<TerraEngine::Scene::TransactionResult>& results);
+		void OnAfterPhysicsFlush(
+			const std::vector<TerraEngine::Scene::TransactionResult>& results,
+			const std::vector<TerraEngine::Scene::TransactionPublicationGroupResult>& publicationGroups = {});
 
 	private:
 		PhysicsSystem();

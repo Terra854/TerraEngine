@@ -8,6 +8,7 @@
 #include "Core/Object/ComponentRegistry.h"
 #include "Core/Object/ObjectManager.h"
 #include "Physics/PhysicsSystem.h"
+#include "Scene/BulkScenePublication.h"
 #include "Scene/SceneMutationQueue.h"
 #include "Scene/Serializer.h"
 #include "ThreadPool/ThreadPool.h"
@@ -48,6 +49,17 @@ namespace TerraEngine::EditorTests {
 			colliders->Add();
 			objects.MarkObjectTransformDirty(authoredObject);
 			const nlohmann::json authoredSnapshot = Serializer::SerializeObject(authoredObject);
+			const TerraEngine::Scene::PreparedSceneDecode preparedRestore = Serializer::PrepareSceneDecode({
+				{"name", "Play Mode Physics"},
+				{"objects", nlohmann::json::array({authoredSnapshot})}
+			});
+			const TerraEngine::Scene::BulkScenePublicationPacket authoredRestorePacket =
+				TerraEngine::Scene::BuildBulkScenePublicationPacket(
+					preparedRestore,
+					objects.GetSceneGeneration(),
+					objects.GetSceneGeneration());
+			context.Expect(preparedRestore.accepted && !authoredRestorePacket.cancelled,
+				"Play Mode must prepare an authored bulk packet without a JSON text dump/reparse round trip.");
 
 			ThreadPoolSession pool;
 			auto& physics = TerraEngine::Physics::PhysicsSystem::Instance();
@@ -62,15 +74,17 @@ namespace TerraEngine::EditorTests {
 			context.Expect(physics.RequestExplicitStep(), "Paused Next must admit exactly one explicit physics token.");
 			physics.Update(100.0F);
 			const auto flush = mutations.Apply(objects, "editor-physics-play-next");
-			physics.OnAfterPhysicsFlush(flush.transactionResults);
+			physics.OnAfterPhysicsFlush(flush.transactionResults, flush.publicationGroupResults);
 			context.ExpectEqual(publicationsBefore + 1U, physics.ExplicitStepPublicationCount(),
 				"Next must publish exactly one configured tick after the protected scene flush.");
 			context.Expect(physics.IsPaused(), "Next must leave the shared world paused.");
 
 			context.Expect(physics.StopWorld(), "Stop must drain provider work before authored objects are restored.");
 			context.Expect(!physics.WorldHandle().IsValid(), "No provider body handle may survive the Stop boundary.");
-			objects.clear();
-			Serializer::DeserializeObjectEntity(authoredSnapshot);
+			const TerraEngine::Scene::BulkScenePublicationResult restored =
+				TerraEngine::Scene::PublishBulkScenePacket(authoredRestorePacket, objects);
+			context.Expect(restored.published && !restored.rolledBack,
+				"The protected Play Mode stop boundary must publish a complete authored bulk packet.");
 			auto roots = objects.getRootObjects();
 			context.ExpectEqual(static_cast<std::size_t>(1), roots.size(), "Restore must reconstruct exactly one authored root.");
 			Object restoredObject = roots.front();

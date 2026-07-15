@@ -62,5 +62,30 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(static_cast<std::size_t>(1), objects.getRootObjects().size(), "Late work should become visible exactly once on the next frame.");
 			objects.clear();
 		});
+
+		registry.Add("Engine.AutomationTransaction.SameFrameAndFrameEndVisibilityUseOnlyTheirDeclaredBoundaries", [](TestContext& context) {
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+			TerraEngine::Scene::SceneMutationQueue queue;
+
+			// A later same-frame consumer explicitly selects After Physics. The
+			// prepared write remains invisible until that named protected boundary.
+			queue.Enqueue({"same-frame-create", TerraEngine::Scene::SceneMutationOperation::CreateObject, {}, {}, "Same Frame"});
+			context.Expect(objects.getRootObjects().empty(), "A same-frame transaction must remain deferred before After Physics.");
+			const auto sameFrame = queue.Apply(objects, "After Physics");
+			context.Expect(sameFrame.applied, "After Physics must publish work required by a declared later same-frame consumer.");
+			context.ExpectEqual(static_cast<std::size_t>(1u), objects.getRootObjects().size(), "The later same-frame consumer may observe the committed object after its declared flush.");
+
+			objects.clear();
+			queue.Enqueue({"frame-end-create", TerraEngine::Scene::SceneMutationOperation::CreateObject, {}, {}, "Frame End"});
+			context.Expect(objects.getRootObjects().empty(), "Without a same-frame consumer, work must not become visible in the physics phase.");
+			// No After Physics Apply is performed in this branch. This models the
+			// scheduler omitting that protected workload rather than issuing a no-op.
+			context.Expect(!queue.Empty(), "Frame-end work must remain queued while the optional same-frame boundary is omitted.");
+			const auto frameEnd = queue.Apply(objects, "Frame End");
+			context.Expect(frameEnd.applied, "Frame End must publish work when no later same-frame consumer was declared.");
+			context.ExpectEqual(static_cast<std::size_t>(1u), objects.getRootObjects().size(), "Frame-end publication must expose the transaction exactly once.");
+			objects.clear();
+		});
 	}
 }

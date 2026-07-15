@@ -26,6 +26,54 @@ struct EditorProfilerCaptureArtifact
 	TerraEngine::Profiling::ProfilerCaptureArtifact artifact;
 };
 
+// EditorProfilerMetricSummary keeps a percentile series self-describing for
+// both the window and automation.  An unavailable source stays unavailable
+// instead of being represented as a misleading zero-millisecond sample.
+struct EditorProfilerMetricSummary
+{
+	std::string id;
+	std::string label;
+	std::string unit;
+	std::uint64_t sampleCount = 0u;
+	std::uint64_t unavailableCount = 0u;
+	bool available = false;
+	std::string unavailableReason;
+	double median = 0.0;
+	double p95 = 0.0;
+	double p99 = 0.0;
+	double maximum = 0.0;
+};
+
+// EditorProfilerWorkerSummary preserves a bounded aggregate for each worker.
+// The raw timeline remains inside the capture artifact, so summaries cannot
+// accidentally make durable automation results unbounded.
+struct EditorProfilerWorkerSummary
+{
+	std::uint32_t workerId = 0u;
+	std::uint64_t sampleCount = 0u;
+	std::uint64_t maximumQueueDepth = 0u;
+	std::uint64_t totalDispatchCount = 0u;
+	std::uint64_t totalUsefulWorkItems = 0u;
+	EditorProfilerMetricSummary runDuration;
+	EditorProfilerMetricSummary waitDuration;
+	EditorProfilerMetricSummary idleDuration;
+};
+
+// EditorProfilerWorkVolumeSummary reports the largest observed body counts
+// for the capture.  It keeps processed-versus-published work visible without
+// requiring callers to retrieve a full per-tick trace.
+struct EditorProfilerWorkVolumeSummary
+{
+	std::uint64_t measuredTickCount = 0u;
+	std::uint64_t totalBodies = 0u;
+	std::uint64_t activeBodies = 0u;
+	std::uint64_t examinedBodies = 0u;
+	std::uint64_t extractedBodies = 0u;
+	std::uint64_t convertedBodies = 0u;
+	std::uint64_t changedBodies = 0u;
+	std::uint64_t publishedBodies = 0u;
+};
+
 // EditorProfilerCaptureSummary is intentionally bounded: it exposes aggregate
 // frame and timing-stream evidence without returning every recorded sample.
 struct EditorProfilerCaptureSummary
@@ -38,7 +86,18 @@ struct EditorProfilerCaptureSummary
 	double minimumFrameMs = 0.0;
 	double maximumFrameMs = 0.0;
 	double averageFrameMs = 0.0;
+	std::uint32_t payloadVersion = 1u;
+	std::uint64_t committedFrameCount = 0u;
+	std::uint64_t artifactSizeBytes = 0u;
+	bool captureComplete = true;
+	bool recoveredIncompleteTail = false;
 	std::vector<TerraEngine::Profiling::ProfilerTimingStreamAggregate> timingStreams;
+	std::vector<EditorProfilerMetricSummary> stageTimings;
+	std::vector<EditorProfilerMetricSummary> protectedBoundaryTimings;
+	std::vector<EditorProfilerMetricSummary> presentationWaitTimings;
+	std::vector<EditorProfilerMetricSummary> responsivenessTimings;
+	std::vector<EditorProfilerWorkerSummary> workerHistories;
+	EditorProfilerWorkVolumeSummary workVolumes;
 };
 
 // class EditorProfilerService groups related state and operations so callers have one documented contract.
@@ -52,6 +111,7 @@ public:
 	void Update(float deltaTime);
 
 	void StartRecording();
+	void StartRecording(const TerraEngine::Profiling::ProfilerCaptureSettings& settings);
 	void PauseRecording();
 	void ResumeRecording();
 	void FinishCapture();

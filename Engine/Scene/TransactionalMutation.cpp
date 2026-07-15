@@ -229,6 +229,12 @@ namespace TerraEngine::Scene {
 				return result;
 			}
 
+			if (transaction.readSet.sceneGeneration != 0 && transaction.readSet.sceneGeneration != objects.GetSceneGeneration())
+			{
+				result.status = TransactionStatus::Conflicted;
+				AddConflict(result, TransactionConflictReason::SceneUnloadedOrSwitched, TerraEngine::EMPTY_UUID, 0, "Scene lifetime changed after transaction preparation.", transaction.readSet.sceneGeneration, objects.GetSceneGeneration());
+			}
+
 			if (transaction.readSet.sceneRevision != 0 && transaction.readSet.sceneRevision != objects.GetHierarchyRevision())
 			{
 				result.status = TransactionStatus::Conflicted;
@@ -261,6 +267,40 @@ namespace TerraEngine::Scene {
 				{
 					result.status = TransactionStatus::Conflicted;
 					AddConflict(result, TransactionConflictReason::ComponentVersionMismatch, observation.objectId, 0, "Observed component revision changed.", observation.componentGeneration, componentGeneration);
+				}
+				if (observation.hierarchyRevision != 0 && observation.hierarchyRevision != objects.GetHierarchyRevision())
+				{
+					result.status = TransactionStatus::Conflicted;
+					AddConflict(result, TransactionConflictReason::HierarchyConflict, observation.objectId, 0, "Observed hierarchy revision changed.", observation.hierarchyRevision, objects.GetHierarchyRevision());
+				}
+				const std::uint64_t transformRevision = objects.GetObjectTransformRevision(*object);
+				if (observation.transformRevision != 0 && observation.transformRevision != transformRevision)
+				{
+					result.status = TransactionStatus::Conflicted;
+					AddConflict(result, TransactionConflictReason::ComponentVersionMismatch, observation.objectId, 0, "Observed transform revision changed.", observation.transformRevision, transformRevision, std::string(Transform::kComponentName));
+				}
+
+				const std::optional<Object> parent = objects.getParent(*object);
+				const TerraEngine::UUID parentObjectId = parent ? objects.getUUID(*parent) : TerraEngine::EMPTY_UUID;
+				if (observation.parentObjectId != parentObjectId)
+				{
+					result.status = TransactionStatus::Conflicted;
+					AddConflict(result, TransactionConflictReason::HierarchyConflict, observation.objectId, 0, "Observed parent identity changed.");
+				}
+				if (parent)
+				{
+					const std::uint64_t parentLifetimeGeneration = objects.getObjectLifetimeGeneration(*parent);
+					const std::uint64_t parentTransformRevision = objects.GetObjectTransformRevision(*parent);
+					if (observation.parentLifetimeGeneration != 0 && observation.parentLifetimeGeneration != parentLifetimeGeneration)
+					{
+						result.status = TransactionStatus::Conflicted;
+						AddConflict(result, TransactionConflictReason::StaleObjectIdentity, observation.objectId, 0, "Observed parent lifetime changed.", observation.parentLifetimeGeneration, parentLifetimeGeneration);
+					}
+					if (observation.parentTransformRevision != 0 && observation.parentTransformRevision != parentTransformRevision)
+					{
+						result.status = TransactionStatus::Conflicted;
+						AddConflict(result, TransactionConflictReason::HierarchyConflict, observation.objectId, 0, "Observed parent transform revision changed.", observation.parentTransformRevision, parentTransformRevision);
+					}
 				}
 			}
 
@@ -470,6 +510,7 @@ namespace TerraEngine::Scene {
 
 	TransactionalMutationBuilder& TransactionalMutationBuilder::ObserveScene(ObjectManager& objects)
 	{
+		transaction.readSet.sceneGeneration = objects.GetSceneGeneration();
 		transaction.readSet.sceneRevision = objects.GetHierarchyRevision();
 		return *this;
 	}
@@ -478,12 +519,17 @@ namespace TerraEngine::Scene {
 	{
 		if (const std::optional<Object> object = objects.getObject(objectId))
 		{
+			const std::optional<Object> parent = objects.getParent(*object);
 			transaction.readSet.objects.push_back(TransactionObjectObservation{
-				objectId,
-				objects.getObjectLifetimeGeneration(*object),
-				objects.getObjectMetadataGeneration(*object),
-				objects.getObjectComponentGeneration(*object),
-				objects.GetHierarchyRevision()
+				.objectId = objectId,
+				.lifetimeGeneration = objects.getObjectLifetimeGeneration(*object),
+				.metadataGeneration = objects.getObjectMetadataGeneration(*object),
+				.componentGeneration = objects.getObjectComponentGeneration(*object),
+				.hierarchyRevision = objects.GetHierarchyRevision(),
+				.transformRevision = objects.GetObjectTransformRevision(*object),
+				.parentObjectId = parent ? objects.getUUID(*parent) : TerraEngine::EMPTY_UUID,
+				.parentLifetimeGeneration = parent ? objects.getObjectLifetimeGeneration(*parent) : 0,
+				.parentTransformRevision = parent ? objects.GetObjectTransformRevision(*parent) : 0
 			});
 		}
 		return *this;
@@ -978,6 +1024,151 @@ namespace TerraEngine::Scene {
 		result.status = TransactionStatus::Committed;
 		result.appliedWriteCount = LogicalWriteCount(transaction);
 		result.message = "Transaction committed.";
+		return result;
+	}
+
+	TransactionPublicationGroupResult PreflightTransactionPublicationGroup(ObjectManager& objects, const TransactionPublicationGroup& group)
+	{
+		TransactionPublicationGroupResult result;
+		result.groupId = group.groupId;
+		result.aggregateResult.transactionId = group.groupId;
+		if (group.groupId.empty() || group.chunks.empty() || group.canceled)
+		{
+			result.status = group.canceled ? TransactionStatus::Canceled : TransactionStatus::Rejected;
+			result.aggregateResult.status = result.status;
+			result.message = group.canceled
+				? "Publication group was canceled before preflight."
+				: "Publication group needs a nonempty identity and at least one chunk.";
+			return result;
+		}
+
+		Transaction flattened;
+		flattened.id = group.groupId;
+		flattened.origin = group.chunks.front().origin;
+		flattened.originName = group.chunks.front().originName;
+		flattened.mode = TransactionMode::PreflightOnly;
+		std::unordered_set<std::string> transactionIds;
+		std::unordered_set<TerraEngine::UUID> transformTargets;
+		std::size_t totalWrites = 0U;
+		result.chunkReceipts.reserve(group.chunks.size());
+		for (std::size_t chunkIndex = 0U; chunkIndex < group.chunks.size(); ++chunkIndex)
+		{
+			result.chunkReceipts.push_back(TransactionPublicationChunkReceipt{
+				.transactionId = group.chunks[chunkIndex].id,
+				.chunkIndex = chunkIndex,
+				.writeCount = LogicalWriteCount(group.chunks[chunkIndex])});
+		}
+		for (std::size_t chunkIndex = 0U; chunkIndex < group.chunks.size(); ++chunkIndex)
+		{
+			const Transaction& chunk = group.chunks[chunkIndex];
+			if (chunk.id.empty() || !transactionIds.insert(chunk.id).second
+				|| chunk.canceled || chunk.writeSet.operations.empty()
+				|| LogicalWriteCount(chunk) > chunk.budget.maxWriteCount)
+			{
+				result.status = TransactionStatus::Rejected;
+				result.aggregateResult.status = TransactionStatus::Rejected;
+				result.message = "A publication chunk has an invalid identity, payload, cancellation state, or write budget.";
+				for (TransactionPublicationChunkReceipt& current : result.chunkReceipts)
+				{
+					current.status = TransactionStatus::Rejected;
+				}
+				return result;
+			}
+
+			const auto mergeExpectedGeneration = [&](std::uint64_t& aggregate, std::uint64_t expected) {
+				if (expected == 0U) return true;
+				if (aggregate == 0U) aggregate = expected;
+				return aggregate == expected;
+			};
+			if (!mergeExpectedGeneration(flattened.readSet.sceneGeneration, chunk.readSet.sceneGeneration)
+				|| !mergeExpectedGeneration(flattened.readSet.sceneRevision, chunk.readSet.sceneRevision))
+			{
+				result.status = TransactionStatus::Rejected;
+				result.aggregateResult.status = TransactionStatus::Rejected;
+				result.message = "Publication chunks were prepared from different scene or hierarchy generations.";
+				for (TransactionPublicationChunkReceipt& current : result.chunkReceipts)
+				{
+					current.status = TransactionStatus::Rejected;
+				}
+				return result;
+			}
+
+			for (const TransactionWriteOperation& operation : chunk.writeSet.operations)
+			{
+				if (operation.kind != TransactionWriteKind::UpdateTransformBatch) continue;
+				for (const TransactionTransformUpdate& update : operation.transformUpdates)
+				{
+					if (!transformTargets.insert(update.objectId).second)
+					{
+						result.status = TransactionStatus::Rejected;
+						result.aggregateResult.status = TransactionStatus::Rejected;
+						result.message = "A transform target appears in more than one publication chunk.";
+						for (TransactionPublicationChunkReceipt& current : result.chunkReceipts)
+						{
+							current.status = TransactionStatus::Rejected;
+						}
+						return result;
+					}
+				}
+			}
+
+			totalWrites += LogicalWriteCount(chunk);
+			flattened.readSet.objects.insert(flattened.readSet.objects.end(), chunk.readSet.objects.begin(), chunk.readSet.objects.end());
+			flattened.writeSet.operations.insert(flattened.writeSet.operations.end(), chunk.writeSet.operations.begin(), chunk.writeSet.operations.end());
+		}
+		flattened.budget.maxWriteCount = totalWrites;
+		flattened.budget.maxConflictCount = 128U;
+		result.aggregateResult = PreflightTransaction(objects, flattened);
+		result.status = result.aggregateResult.status;
+		result.preflightAccepted = result.status == TransactionStatus::PreflightAccepted;
+		result.rejectedWriteCount = result.status == TransactionStatus::PreflightAccepted ? 0U : totalWrites;
+		for (TransactionPublicationChunkReceipt& receipt : result.chunkReceipts)
+		{
+			receipt.status = result.status;
+		}
+		result.message = result.status == TransactionStatus::PreflightAccepted
+			? "Every publication chunk passed one tick-wide preflight."
+			: "Tick-wide publication preflight rejected the complete group.";
+		return result;
+	}
+
+	TransactionPublicationGroupResult CommitTransactionPublicationGroup(ObjectManager& objects, const TransactionPublicationGroup& group)
+	{
+		TransactionPublicationGroupResult result = PreflightTransactionPublicationGroup(objects, group);
+		if (result.status != TransactionStatus::PreflightAccepted)
+		{
+			return result;
+		}
+
+		// Rebuild the same flattened transaction at the protected boundary. No live
+		// write occurs between this revalidation and CommitTransaction's own preflight.
+		Transaction flattened;
+		flattened.id = group.groupId;
+		flattened.origin = group.chunks.front().origin;
+		flattened.originName = group.chunks.front().originName;
+		flattened.mode = TransactionMode::Commit;
+		std::size_t totalWrites = 0U;
+		for (const Transaction& chunk : group.chunks)
+		{
+			if (flattened.readSet.sceneGeneration == 0U) flattened.readSet.sceneGeneration = chunk.readSet.sceneGeneration;
+			if (flattened.readSet.sceneRevision == 0U) flattened.readSet.sceneRevision = chunk.readSet.sceneRevision;
+			totalWrites += LogicalWriteCount(chunk);
+			flattened.readSet.objects.insert(flattened.readSet.objects.end(), chunk.readSet.objects.begin(), chunk.readSet.objects.end());
+			flattened.writeSet.operations.insert(flattened.writeSet.operations.end(), chunk.writeSet.operations.begin(), chunk.writeSet.operations.end());
+		}
+		flattened.budget.maxWriteCount = totalWrites;
+		flattened.budget.maxConflictCount = 128U;
+		result.aggregateResult = CommitTransaction(objects, flattened);
+		result.status = result.aggregateResult.status;
+		result.appliedWriteCount = result.aggregateResult.appliedWriteCount;
+		result.rejectedWriteCount = result.aggregateResult.rejectedWriteCount;
+		for (TransactionPublicationChunkReceipt& receipt : result.chunkReceipts)
+		{
+			receipt.status = result.status;
+		}
+		result.message = result.status == TransactionStatus::Committed
+			? "Every publication chunk committed as one atomic group."
+			: "The complete publication group was rejected without partial visibility.";
 		return result;
 	}
 

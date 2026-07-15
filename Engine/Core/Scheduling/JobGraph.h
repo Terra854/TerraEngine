@@ -11,6 +11,7 @@
 #include "SystemScheduler.h"
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -114,6 +115,15 @@ namespace TerraEngine::Scheduling {
 		JobGraphNodeState state = JobGraphNodeState::Pending;
 		JobGraphExecutionPolicy executionPolicy = JobGraphExecutionPolicy::Protected;
 		std::string profilingLabel;
+		std::size_t partitionIndex = 0;
+		std::size_t partitionCount = 0;
+		std::size_t itemBegin = 0;
+		std::size_t itemEnd = 0;
+		std::size_t usefulWorkItemCount = 0;
+		std::uint64_t dispatchCount = 0;
+		std::uint64_t queueDurationNs = 0;
+		std::uint64_t runDurationNs = 0;
+		std::uint64_t coordinatorWaitDurationNs = 0;
 	};
 
 	struct JobGraphDependencyEdge {
@@ -154,6 +164,11 @@ namespace TerraEngine::Scheduling {
 		bool requiresSuccessfulDependencies = true;
 		bool mayMutateSceneStructure = false;
 		std::string profilingLabel;
+		std::size_t partitionIndex = 0;
+		std::size_t partitionCount = 0;
+		std::size_t itemBegin = 0;
+		std::size_t itemEnd = 0;
+		std::size_t usefulWorkItemCount = 0;
 		JobGraphWork work;
 	};
 
@@ -212,6 +227,10 @@ namespace TerraEngine::Scheduling {
 
 		void Reset(std::string graphId, std::string label);
 		DependencyHandle AddJob(JobGraphJobDeclaration declaration);
+		// AddPartitionedJobs creates one independently schedulable node per stable
+		// range. Callers supply ranges in deterministic publication order; worker
+		// completion order never changes the returned handle order.
+		std::vector<DependencyHandle> AddPartitionedJobs(std::vector<JobGraphJobDeclaration> declarations);
 		DependencyHandle AddTaskGroup(JobGraphTaskGroupDeclaration declaration);
 		DependencyHandle AddBarrier(JobGraphBarrierDeclaration declaration);
 		void AddDependency(DependencyHandle before, DependencyHandle after);

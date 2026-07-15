@@ -123,6 +123,16 @@ namespace TerraEngine::Scheduling {
 			bool cancellable = true;
 			bool requiresSuccessfulDependencies = true;
 			bool mayMutateSceneStructure = false;
+			std::size_t partitionIndex = 0;
+			std::size_t partitionCount = 0;
+			std::size_t itemBegin = 0;
+			std::size_t itemEnd = 0;
+			std::size_t usefulWorkItemCount = 0;
+			std::uint64_t dispatchCount = 0;
+			std::uint64_t queueDurationNs = 0;
+			std::uint64_t runDurationNs = 0;
+			std::uint64_t coordinatorWaitDurationNs = 0;
+			std::chrono::steady_clock::time_point enqueuedAt;
 			JobGraphWork work;
 		};
 
@@ -344,6 +354,15 @@ namespace TerraEngine::Scheduling {
 				entry.state = node.state;
 				entry.executionPolicy = node.executionPolicy;
 				entry.profilingLabel = node.profilingLabel;
+				entry.partitionIndex = node.partitionIndex;
+				entry.partitionCount = node.partitionCount;
+				entry.itemBegin = node.itemBegin;
+				entry.itemEnd = node.itemEnd;
+				entry.usefulWorkItemCount = node.usefulWorkItemCount;
+				entry.dispatchCount = node.dispatchCount;
+				entry.queueDurationNs = node.queueDurationNs;
+				entry.runDurationNs = node.runDurationNs;
+				entry.coordinatorWaitDurationNs = node.coordinatorWaitDurationNs;
 				if (node.kind == JobGraphNodeKind::Job)
 				{
 					if (node.executionPolicy == JobGraphExecutionPolicy::WorkerEligible)
@@ -621,6 +640,11 @@ namespace TerraEngine::Scheduling {
 		node.cancellable = declaration.cancellable;
 		node.requiresSuccessfulDependencies = declaration.requiresSuccessfulDependencies;
 		node.mayMutateSceneStructure = declaration.mayMutateSceneStructure;
+		node.partitionIndex = declaration.partitionIndex;
+		node.partitionCount = declaration.partitionCount;
+		node.itemBegin = declaration.itemBegin;
+		node.itemEnd = declaration.itemEnd;
+		node.usefulWorkItemCount = declaration.usefulWorkItemCount;
 		node.profilingLabel = NormalizeLabel(declaration.profilingLabel, node.name);
 		node.work = std::move(declaration.work);
 		if (declaration.group.IsValid())
@@ -632,6 +656,17 @@ namespace TerraEngine::Scheduling {
 		impl->nodeById[node.handle.id] = impl->nodes.size();
 		impl->nodes.push_back(node);
 		return node.handle;
+	}
+
+	std::vector<DependencyHandle> JobGraph::AddPartitionedJobs(std::vector<JobGraphJobDeclaration> declarations)
+	{
+		std::vector<DependencyHandle> handles;
+		handles.reserve(declarations.size());
+		for (JobGraphJobDeclaration& declaration : declarations)
+		{
+			handles.push_back(AddJob(std::move(declaration)));
+		}
+		return handles;
 	}
 
 	DependencyHandle JobGraph::AddTaskGroup(JobGraphTaskGroupDeclaration declaration)
@@ -780,6 +815,10 @@ namespace TerraEngine::Scheduling {
 		{
 			indexById[impl->nodes[index].handle.id] = index;
 			impl->nodes[index].state = JobGraphNodeState::Pending;
+			impl->nodes[index].dispatchCount = 0u;
+			impl->nodes[index].queueDurationNs = 0u;
+			impl->nodes[index].runDurationNs = 0u;
+			impl->nodes[index].coordinatorWaitDurationNs = 0u;
 		}
 
 		std::vector<int> remainingDependencies(impl->nodes.size(), 0);
@@ -905,9 +944,12 @@ namespace TerraEngine::Scheduling {
 				if (node.executionPolicy == JobGraphExecutionPolicy::WorkerEligible)
 				{
 					node.state = JobGraphNodeState::Running;
+					node.enqueuedAt = std::chrono::steady_clock::now();
+					node.dispatchCount = 1u;
 					auto task = ThreadPool::instance().createTask([this, index, context, &workerTimeNs]() mutable {
 						const auto start = std::chrono::steady_clock::now();
 						Impl::Node& workerNode = impl->nodes[index];
+						workerNode.queueDurationNs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(start - workerNode.enqueuedAt).count());
 						WorkerSafetyScope workerSafetyScope(workerNode.name);
 						TERRAENGINE_PROFILE_TASK_SCOPE("JobGraph::WorkerJob", TerraEngine::Profiling::ProfilerModuleId::TaskExecution, workerNode.profilingLabel.c_str());
 						if (workerNode.work)
@@ -915,13 +957,14 @@ namespace TerraEngine::Scheduling {
 							workerNode.work(context);
 						}
 						const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
-						workerTimeNs.fetch_add(static_cast<std::uint64_t>(elapsed), std::memory_order_relaxed);
+						workerNode.runDurationNs = static_cast<std::uint64_t>(elapsed);
+						workerTimeNs.fetch_add(workerNode.runDurationNs, std::memory_order_relaxed);
 					});
 					RunningWorker worker;
 					worker.index = index;
 					worker.future = task->getFuture();
 					worker.task = std::move(task);
-					ThreadPool::instance().enqueue(worker.task);
+					ThreadPool::instance().enqueue(worker.task, node.usefulWorkItemCount);
 					runningWorkers.push_back(std::move(worker));
 				}
 			}
@@ -937,13 +980,15 @@ namespace TerraEngine::Scheduling {
 				{
 					node.state = JobGraphNodeState::Running;
 					const auto start = std::chrono::steady_clock::now();
+					node.dispatchCount = 1u;
 					TERRAENGINE_PROFILE_TASK_SCOPE("JobGraph::ProtectedJob", TerraEngine::Profiling::ProfilerModuleId::CpuEngine, node.profilingLabel.c_str());
 					if (node.work)
 					{
 						node.work(context);
 					}
 					const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
-					protectedTimeNs += static_cast<std::uint64_t>(elapsed);
+					node.runDurationNs = static_cast<std::uint64_t>(elapsed);
+					protectedTimeNs += node.runDurationNs;
 					completeNode(index, JobGraphNodeState::Completed);
 				}
 				catch (...)
@@ -962,7 +1007,8 @@ namespace TerraEngine::Scheduling {
 					const auto start = std::chrono::steady_clock::now();
 					worker.future.get();
 					const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
-					coordinatorWaitTimeNs += static_cast<std::uint64_t>(elapsed);
+					node.coordinatorWaitDurationNs = static_cast<std::uint64_t>(elapsed);
+					coordinatorWaitTimeNs += node.coordinatorWaitDurationNs;
 					completeNode(worker.index, JobGraphNodeState::Completed);
 				}
 				catch (...)

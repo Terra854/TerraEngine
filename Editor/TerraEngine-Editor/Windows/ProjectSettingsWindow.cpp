@@ -7,6 +7,8 @@
 #define IMGUI_DEFINE_MATH_OPERATORS
 #include "ProjectSettingsWindow.h"
 
+#include "../Project/ProjectSettings.h"
+
 #include "../Project/ProjectManager.h"
 #include "../Subsystems/MainEditorSubsystem.h"
 #include "Engine/Renderer/RenderSystem.h"
@@ -206,7 +208,7 @@ namespace
 
 	std::filesystem::path PhysicsSettingsPath(const std::filesystem::path& projectRoot)
 	{
-		return projectRoot / "ProjectSettings" / "PhysicsSettings.json";
+		return projectRoot / TerraEngine::Editor::ProjectSettings::kPhysicsSettingsRelativePath;
 	}
 
 	nlohmann::json BuildPhysicsSettingsJson(const TerraEngine::Physics::PhysicsSettings& settings)
@@ -228,7 +230,13 @@ namespace
 			{ "retainedResultTicks", settings.retainedResultTicks },
 			{ "debugVisualizationEnabled", settings.debugVisualizationEnabled },
 			{ "retainedDebugTicks", settings.retainedDebugTicks },
-			{ "maxDebugPrimitives", settings.maxDebugPrimitives }
+			{ "maxDebugPrimitives", settings.maxDebugPrimitives },
+			{ "transformPublicationChunkSize", settings.transformPublicationChunkSize },
+			{ "providerExtractionBatchSize", settings.providerExtractionBatchSize },
+			{ "parallelPreparationThreshold", settings.parallelPreparationThreshold },
+			{ "parallelExtractionThreshold", settings.parallelExtractionThreshold },
+			{ "aggregateDiagnosticsIntervalFrames", settings.aggregateDiagnosticsIntervalFrames },
+			{ "continuousCollisionEnabled", settings.continuousCollisionEnabled }
 		};
 	}
 
@@ -260,6 +268,12 @@ namespace
 			candidate.debugVisualizationEnabled = document.value("debugVisualizationEnabled", candidate.debugVisualizationEnabled);
 			candidate.retainedDebugTicks = document.value("retainedDebugTicks", candidate.retainedDebugTicks);
 			candidate.maxDebugPrimitives = document.value("maxDebugPrimitives", candidate.maxDebugPrimitives);
+			candidate.transformPublicationChunkSize = document.value("transformPublicationChunkSize", candidate.transformPublicationChunkSize);
+			candidate.providerExtractionBatchSize = document.value("providerExtractionBatchSize", candidate.providerExtractionBatchSize);
+			candidate.parallelPreparationThreshold = document.value("parallelPreparationThreshold", candidate.parallelPreparationThreshold);
+			candidate.parallelExtractionThreshold = document.value("parallelExtractionThreshold", candidate.parallelExtractionThreshold);
+			candidate.aggregateDiagnosticsIntervalFrames = document.value("aggregateDiagnosticsIntervalFrames", candidate.aggregateDiagnosticsIntervalFrames);
+			candidate.continuousCollisionEnabled = document.value("continuousCollisionEnabled", candidate.continuousCollisionEnabled);
 			if (document.contains("layers") && document["layers"].is_array() && document["layers"].size() == candidate.layers.size())
 			{
 				for (std::size_t index = 0; index < candidate.layers.size(); ++index)
@@ -668,6 +682,10 @@ void ProjectSettingsWindow::DrawPhysicsCategory()
 		changed |= ImGui::Checkbox("Enabled", &layer.enabled);
 		int broadPhase = static_cast<int>(layer.broadPhaseGroup);
 		if (ImGui::SliderInt("Broad Phase Group", &broadPhase, 0, 31)) { layer.broadPhaseGroup = static_cast<std::uint8_t>(broadPhase); changed = true; }
+		// The mask is project-owned pair filtering. Clearing an impossible pair
+		// keeps it out of narrow phase and event work in Play Mode and exports.
+		changed |= ImGui::InputScalar("Collides With Mask", ImGuiDataType_U32,
+			&layer.collisionMask, nullptr, nullptr, "%08X", ImGuiInputTextFlags_CharsHexadecimal);
 		ImGui::PopID();
 	}
 
@@ -684,6 +702,46 @@ void ProjectSettingsWindow::DrawPhysicsCategory()
 	int debugPrimitives = static_cast<int>(candidate.maxDebugPrimitives);
 	if (ImGui::SliderInt("Maximum Debug Primitives", &debugPrimitives, 1, 100000)) { candidate.maxDebugPrimitives = static_cast<std::uint32_t>(debugPrimitives); changed = true; }
 	ImGui::TextDisabled("Debug capture is opt-in and remains bounded even while paused.");
+
+	ImGui::SeparatorText("Incremental Pipeline");
+	int publicationChunk = static_cast<int>(candidate.transformPublicationChunkSize);
+	if (ImGui::SliderInt("Transform Publication Chunk", &publicationChunk,
+		static_cast<int>(TerraEngine::Physics::kPhysicsMinimumPublicationBatchSize),
+		static_cast<int>(TerraEngine::Physics::kPhysicsMaximumPublicationBatchSize)))
+	{
+		candidate.transformPublicationChunkSize = static_cast<std::uint32_t>(publicationChunk);
+		changed = true;
+	}
+	int extractionBatch = static_cast<int>(candidate.providerExtractionBatchSize);
+	if (ImGui::SliderInt("Provider Extraction Batch", &extractionBatch,
+		static_cast<int>(TerraEngine::Physics::kPhysicsMinimumPublicationBatchSize),
+		static_cast<int>(TerraEngine::Physics::kPhysicsMaximumPublicationBatchSize)))
+	{
+		candidate.providerExtractionBatchSize = static_cast<std::uint32_t>(extractionBatch);
+		changed = true;
+	}
+	int preparationThreshold = static_cast<int>(candidate.parallelPreparationThreshold);
+	if (ImGui::InputInt("Parallel Preparation Threshold", &preparationThreshold, 64, 512))
+	{
+		candidate.parallelPreparationThreshold = static_cast<std::uint32_t>(std::max(1, preparationThreshold));
+		changed = true;
+	}
+	int extractionThreshold = static_cast<int>(candidate.parallelExtractionThreshold);
+	if (ImGui::InputInt("Parallel Extraction Threshold", &extractionThreshold, 64, 512))
+	{
+		candidate.parallelExtractionThreshold = static_cast<std::uint32_t>(std::max(1, extractionThreshold));
+		changed = true;
+	}
+	int diagnosticRate = static_cast<int>(candidate.aggregateDiagnosticsIntervalFrames);
+	if (ImGui::SliderInt("Aggregate Diagnostics Interval (frames)", &diagnosticRate, 1,
+		static_cast<int>(TerraEngine::Physics::kPhysicsMaximumDiagnosticsIntervalFrames)))
+	{
+		candidate.aggregateDiagnosticsIntervalFrames = static_cast<std::uint32_t>(diagnosticRate);
+		changed = true;
+	}
+	changed |= ImGui::Checkbox("Allow Per-Body Continuous Collision", &candidate.continuousCollisionEnabled);
+	ImGui::TextDisabled("Continuous collision remains active only for bodies explicitly authored with Linear Cast quality.");
+	ImGui::TextDisabled("Chunk sizes affect preparation only; every tick still commits or rejects atomically.");
 
 	if (changed)
 	{

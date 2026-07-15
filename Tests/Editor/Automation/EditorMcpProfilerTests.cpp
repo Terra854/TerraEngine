@@ -102,6 +102,58 @@ namespace TerraEngine::EditorTests
 			}
 		});
 
+		registry.Add("Editor.MCP.Profiler.V2OptionsAndSummariesRemainAdditive", [](TestContext& context) {
+			EditorAutomationService service;
+			const auto start = FindProfilerCapability(service, "profiler.capture.start");
+			const auto list = FindProfilerCapability(service, "profiler.capture.list");
+			const auto summaryCapability = FindProfilerCapability(service, "profiler.capture.summary");
+			context.Expect(start.has_value() && list.has_value() && summaryCapability.has_value(), "Profiler v2 operations should preserve the legacy capture lifecycle tools.");
+			if (start.has_value())
+			{
+				context.Expect(SchemaHasProperty(start->descriptor.inputSchema, "captureLevel"), "Capture start should accept an optional detail level.");
+				context.Expect(SchemaHasProperty(start->descriptor.inputSchema, "payloadVersion"), "Capture start should declare its emitted capture version.");
+				context.Expect(SchemaHasProperty(start->descriptor.inputSchema, "maximumChunkFrames"), "Capture start should accept a bounded chunk-frame limit.");
+				context.Expect(SchemaHasProperty(start->descriptor.resultSchema, "bounds"), "Capture start should return effective bounds without changing durable job fields.");
+				context.Expect(SchemaHasProperty(start->descriptor.resultSchema, "jobId"), "V2 capture start must retain the existing durable job identifier.");
+			}
+			if (list.has_value())
+			{
+				context.Expect(SchemaHasProperty(list->descriptor.resultSchema, "artifacts"), "Capture listing should remain compatible while exposing artifact metadata additively.");
+			}
+			if (summaryCapability.has_value())
+			{
+				context.Expect(SchemaHasProperty(summaryCapability->descriptor.resultSchema, "summary"), "Capture summary should remain a structured read-only result.");
+			}
+		});
+
+		registry.Add("Editor.MCP.Profiler.TypedSummaryKeepsUnavailableTelemetryDistinct", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+			ProfilerCaptureDocument document;
+			document.payloadVersion = 2u;
+			document.committedFrameCount = 2u;
+			document.complete = false;
+			document.recoveredIncompleteTail = true;
+			ProfilerFrameRecord first;
+			first.frameIndex = 1u;
+			first.durationMs = 10.0;
+			first.performanceStages.push_back({PerformanceStageDomain::Physics, "provider_reads", {TelemetryAvailability::Available, 10'000'000u, {}}, {}, 10u, false});
+			first.performanceStages.push_back({PerformanceStageDomain::SceneView, "projection", {TelemetryAvailability::Unavailable, 0u, "Scene View hidden"}, {}, 0u, false});
+			first.physicsWorkVolume = PhysicsWorkVolumeRecord{1u, 100u, 80u, 70u, 60u, 50u, 40u, 30u};
+			ProfilerFrameRecord second = first;
+			second.frameIndex = 2u;
+			second.durationMs = 30.0;
+			second.performanceStages.front().duration.nanoseconds = 30'000'000u;
+			document.frames = {first, second};
+
+			const EditorProfilerCaptureSummary summary = EditorProfilerService::SummarizeDocument("v2-summary", document);
+			context.ExpectEqual(std::uint32_t(2u), summary.payloadVersion, "Typed summaries should retain the capture payload version.");
+			context.Expect(summary.recoveredIncompleteTail, "Recovery state should be visible instead of silently discarding tail evidence.");
+			context.ExpectEqual(std::size_t(2u), summary.stageTimings.size(), "Physics and Scene View typed stages should have separate bounded summary rows.");
+			context.Expect(summary.stageTimings.front().available, "Valid physics stage timings should remain available.");
+			context.Expect(summary.stageTimings.back().unavailableCount > 0u, "Unavailable Scene View timing should remain unavailable rather than becoming zero milliseconds.");
+			context.ExpectEqual(std::uint64_t(30u), summary.workVolumes.publishedBodies, "Work-volume summary should preserve the published-body count.");
+		});
+
 		registry.Add("Editor.MCP.Profiler.NoProjectProducesUnavailableState", [](TestContext& context) {
 			EditorAutomationService service;
 			for (const std::string_view operation : {"profiler.capture.start", "profiler.capture.list"})

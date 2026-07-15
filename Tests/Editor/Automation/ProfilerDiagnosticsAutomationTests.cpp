@@ -54,9 +54,24 @@ namespace TerraEngine::EditorTests
 
 			context.Expect(source.find("SerializeProfilerTimingStreams") != std::string::npos, "Detailed diagnostics should expose profiler timing streams structurally.");
 			context.Expect(source.find("\"profilerTimingStreams\"") != std::string::npos, "Diagnostics summary should contain profiler timing stream data.");
+			context.Expect(source.find("SerializeProfilerCaptureEvidence") != std::string::npos, "Detailed diagnostics should expose capture-level v2 evidence structurally.");
+			context.Expect(source.find("\"profilerCaptureEvidence\"") != std::string::npos, "Diagnostics summary should contain additive v2 capture evidence.");
+			context.Expect(source.find("\"protectedBoundaryTimings\"") != std::string::npos, "Diagnostics evidence should retain protected-boundary timing breakdowns.");
+			context.Expect(source.find("\"workVolumes\"") != std::string::npos, "Diagnostics evidence should retain processed-versus-published body counts.");
 			context.Expect(source.find("renderer.virtualGeometry.stats") != std::string::npos, "Automation should retain the structured virtual geometry stats tool.");
 			context.Expect(source.find("\"meshletsSelected\"") != std::string::npos, "Virtual geometry automation should expose meshlet counters as fields.");
 			context.Expect(source.find("\"pageResidency\"") != std::string::npos, "Virtual geometry automation should expose page residency as structured data.");
+		});
+
+		registry.Add("ProfilerDiagnosticsAutomation.SceneViewPerformanceState.IsAdditiveAndStructured", [](TestContext& context) {
+			const std::string source = ReadAutomationServiceSource();
+
+			context.Expect(source.find("scene_view.settings.get") != std::string::npos, "Automation should expose typed Scene View performance settings reads.");
+			context.Expect(source.find("scene_view.settings.set") != std::string::npos, "Automation should expose atomic Scene View performance settings replacement.");
+			context.Expect(source.find("configuredMode") != std::string::npos, "Scene View state should distinguish configured large-scene mode.");
+			context.Expect(source.find("densityConsolidated") != std::string::npos, "Scene View state should expose density work as structured evidence.");
+			context.Expect(source.find("presentationBatches") != std::string::npos, "Scene View state should report bounded presentation batches.");
+			context.Expect(source.find("selectedExemptions") != std::string::npos, "Scene View state should prove selected objects were exempt from general budgets.");
 		});
 	}
 }

@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "Profiling/PerformanceTelemetry.h"
+
 #include <cstdint>
 #include <filesystem>
 #include <optional>
@@ -36,6 +38,15 @@ enum class ProfilerCaptureMode : std::uint8_t
 	LiveRolling,
 	FinalizingToArtifact,
 	LoadedReadOnly
+};
+
+// ProfilerCaptureDetailLevel controls optional sample retention without ever
+// dropping the streams needed to explain a frame's critical path or correctness.
+enum class ProfilerCaptureDetailLevel : std::uint8_t
+{
+	Detailed,
+	Sampled,
+	Aggregate
 };
 
 // ProfilerTimingStreamStatus separates real samples from delayed or missing
@@ -79,6 +90,14 @@ struct ProfilerCaptureSettings
 	std::uint32_t maxFrames = 10000u;
 	double maxDurationSeconds = 0.0;
 	ProfilerCaptureMode captureMode = ProfilerCaptureMode::LiveRolling;
+	ProfilerCaptureDetailLevel detailLevel = ProfilerCaptureDetailLevel::Detailed;
+	// Sampled and aggregate modes use this deterministic frame cadence for
+	// optional scopes. Critical typed evidence remains present every frame.
+	std::uint32_t sampleIntervalFrames = 4u;
+	// Chunks are bounded before writing so a long capture is recoverable even if
+	// the final chunk/index is interrupted by shutdown or a power failure.
+	std::uint32_t maximumChunkFrames = 120u;
+	std::uint64_t maximumChunkBytes = 1024u * 1024u;
 };
 
 // struct ProfilerMetric groups related state and operations so callers have one documented contract.
@@ -187,6 +206,15 @@ struct ProfilerFrameRecord
 	std::vector<ProfilerModuleSummary> moduleSummaries;
 	std::vector<ProfilerSample> samples;
 	std::optional<ProfilerPhysicsFrameCounters> physics;
+	// Typed streams are value snapshots. They make native/editor telemetry
+	// available after loading a capture without retaining a live subsystem.
+	std::vector<PerformanceStageRecord> performanceStages;
+	std::vector<ProtectedBoundaryRecord> protectedBoundaries;
+	std::vector<WorkerTelemetryRecord> workerTelemetry;
+	std::vector<WorkloadExecutionRecord> workloadExecutions;
+	std::vector<PresentationWaitRecord> presentationWaits;
+	std::optional<FrameResponsivenessRecord> responsiveness;
+	std::optional<PhysicsWorkVolumeRecord> physicsWorkVolume;
 };
 
 // struct ProfilerFrameListItem keeps the editor frame list cheap to redraw.
@@ -219,6 +247,9 @@ struct ProfilerCaptureArtifact
 	ProfilerCaptureMetadata metadata;
 	std::uint32_t payloadVersion = 1u;
 	std::uint64_t frameCount = 0u;
+	std::uint64_t committedFrameCount = 0u;
+	bool complete = true;
+	bool recoveredIncompleteTail = false;
 	std::vector<ProfilerModuleId> moduleIds;
 	bool supported = true;
 	std::string status;
@@ -231,6 +262,10 @@ struct ProfilerCaptureDocument
 	std::vector<ProfilerFrameRecord> frames;
 	std::optional<std::filesystem::path> sourcePath;
 	std::string lastError;
+	std::uint32_t payloadVersion = 2u;
+	std::uint64_t committedFrameCount = 0u;
+	bool complete = true;
+	bool recoveredIncompleteTail = false;
 };
 
 const char* ToString(ProfilerSessionState state);
@@ -238,6 +273,7 @@ const char* ToString(ProfilerModuleId moduleId);
 const char* ToString(ProfilerTimingStreamStatus status);
 const char* ToString(ProfilerTimingStreamScope scope);
 const char* ToString(ProfilerTimingStreamSource source);
+const char* ToString(ProfilerCaptureDetailLevel level);
 std::string MakeTimestampForFileName();
 std::string MakeReadableTimestamp();
 bool AnyModuleEnabled(const ProfilerCaptureSettings& settings);

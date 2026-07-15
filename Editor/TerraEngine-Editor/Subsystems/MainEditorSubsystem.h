@@ -23,6 +23,7 @@
 #include "../Project/EditorPreferencesMetadata.h"
 #include "../Project/ProjectSettingsMetadata.h"
 #include "Engine/Renderer/RenderTypes.h"
+#include "Engine/Scene/BulkScenePublication.h"
 #include "Engine/Scene/TransactionalMutation.h"
 #include "Engine/Utilities/UUID.h"
 #include "../Core/ViewportTextureRegistry.h"
@@ -76,6 +77,24 @@ private:
 // class MainEditorSubsystem groups related state and operations so callers have one documented contract.
 class MainEditorSubsystem : public IEditorSubsystem {
 public:
+	// Play Mode restoration is published at one protected boundary. Automation
+	// reads this immutable summary after Stop instead of guessing whether a stale
+	// scene generation or cancellation left authored state untouched.
+	struct PlayModeRestorationResult
+	{
+		bool snapshotCaptured = false;
+		bool completed = false;
+		bool stale = false;
+		bool cancelled = false;
+		bool selectionRestored = false;
+		bool dirtyStateRestored = false;
+		bool prefabStatePreserved = false;
+		std::uint64_t preparedGeneration = 0U;
+		std::uint64_t publishedGeneration = 0U;
+		std::string boundary = "play_mode_stop_restore";
+		std::string reason;
+	};
+
 	struct SelectedPackageChildAsset
 	{
 		std::filesystem::path packagePath;
@@ -101,6 +120,7 @@ public:
 	bool SetPlayModePaused(bool paused);
 	bool StepPlayMode();
 	void StopPlayMode();
+	[[nodiscard]] const PlayModeRestorationResult& GetLastPlayModeRestorationResult() const { return m_LastPlayModeRestorationResult; }
 	// The installed acceptance CLI uses the same Play Mode entry, fixed-step,
 	// publication, and stop methods as the toolbar. It returns engine-owned
 	// invariant counts for comparison with the exported runtime report.
@@ -221,8 +241,11 @@ private:
 	bool showDemoWindow = false;
 	bool m_HasPlayModeSceneSnapshot = false;
 	bool m_PlayModeSceneWasDirty = false;
-	std::string m_PlayModeSceneSnapshotJson;
+	std::optional<TerraEngine::Scene::BulkScenePublicationPacket> m_PlayModeSceneSnapshotPacket;
+	SceneRenderSettings m_PlayModeSceneRenderSettings;
+	PlayModeRestorationResult m_LastPlayModeRestorationResult;
 	std::optional<TerraEngine::UUID> m_PlayModeSelectedEntityUuid;
+	std::vector<TerraEngine::UUID> m_PlayModeSelectedEntityUuids;
 	bool m_IsPrefabEditingMode = false;
 	bool m_PrefabEditingDirty = false;
 	bool m_HasPrefabReturnSceneSnapshot = false;

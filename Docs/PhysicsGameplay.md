@@ -90,9 +90,9 @@ become visible only through the declared transactional flush.
 From a Visual Studio x64 developer prompt:
 
 ```powershell
-cmake --build --preset RelWithDebInfo --target TerraEngine-EngineTests --parallel 4
+cmake --build --preset RelWithDebInfo --target TerraEngine-EngineTests
 ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R '^Engine\.PhysicsUS3$' --output-on-failure
-cmake --build --preset RelWithDebInfo --target install --parallel 4
+cmake --build --preset RelWithDebInfo --target install
 ```
 
 The US3 suite covers concurrent deterministic commands, all query contracts,

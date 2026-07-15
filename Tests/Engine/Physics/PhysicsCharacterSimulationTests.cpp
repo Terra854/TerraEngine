@@ -48,6 +48,10 @@ namespace TerraEngine::Tests {
 			const auto grounded = std::find_if(extraction.characters.begin(), extraction.characters.end(), [&](const auto& state) { return state.handle == capsule; });
 			context.Expect(grounded != extraction.characters.end() && grounded->supported && grounded->supportBody == fixture.floorBody, "Ground support, moving-support velocity publication, and contacts must use engine body handles.");
 			context.Expect(std::isfinite(grounded->groundNormal.y) && grounded->contactCount > 0U, "Ground and slope state must remain finite under Debug Jolt tolerances.");
+			context.Expect(grounded != extraction.characters.end() && grounded->objectId == capsuleRequest.objectId
+				&& grounded->objectGeneration == capsuleRequest.objectGeneration
+				&& grounded->componentGeneration == capsuleRequest.componentGeneration,
+				"Extracted character state must preserve the copied object and component generations needed to reject stale managed commands.");
 			PhysicsCharacterUpdateRequest jump; jump.handle = capsule; jump.objectId = capsuleRequest.objectId; jump.objectGeneration = 1U; jump.componentGeneration = 1U; jump.jumpRequested = true; jump.jumpSpeed = 5.0F;
 			context.Expect(fixture.backend.UpdateCharacter(jump).Succeeded(), "A grounded virtual character must accept a generation-validated jump.");
 			PhysicsCharacterUpdateRequest resize = jump; resize.jumpRequested = false; resize.resizeRequested = true; resize.resizeHeight = 1.5F; resize.recoverPenetration = true;

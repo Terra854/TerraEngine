@@ -170,7 +170,7 @@ namespace TerraEngine::Tests {
 			ProfilerCaptureDocument document = MakeCaptureDocument();
 			std::string error;
 
-			context.Expect(SaveCaptureDocument(document, capturePath, error), "Saving a profiler capture document should succeed.");
+			context.Expect(SaveCaptureDocument(document, capturePath, error), "Saving a profiler capture document should succeed: " + error);
 
 			ProfilerCaptureDocument loaded;
 			context.Expect(LoadCaptureDocument(capturePath, loaded, error), "Loading a saved profiler capture document should succeed.");
@@ -432,6 +432,43 @@ namespace TerraEngine::Tests {
 			profiler.Clear();
 		});
 
+		registry.Add("Engine.Profiler.SceneViewAndPresentationStreamsRemainExplicit", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+
+			Profiler& profiler = Profiler::Instance();
+			profiler.Clear();
+			ProfilerCaptureMetadata metadata;
+			metadata.projectName = "Typed editor evidence";
+			ProfilerCaptureSettings settings;
+			settings.maxFrames = 2U;
+			const std::vector<PerformanceStageRecord> stages = {{
+				PerformanceStageDomain::SceneView,
+				"SceneView.Projection",
+				{TelemetryAvailability::Available, 42'000U, {}},
+				"Scene View marker preparation",
+				128U,
+				false}};
+
+			profiler.StartRecording(metadata, settings);
+			profiler.BeginFrame();
+			profiler.RecordSceneViewStages(stages);
+			profiler.EndFrame();
+
+			const std::vector<ProfilerFrameRecord> frames = profiler.GetFramesSnapshot();
+			context.ExpectEqual(std::size_t(1U), frames.size(), "Typed editor evidence should publish with its owning profiler frame.");
+			if (!frames.empty())
+			{
+				context.Expect(std::any_of(frames.front().performanceStages.begin(), frames.front().performanceStages.end(), [](const PerformanceStageRecord& stage) {
+					return stage.domain == PerformanceStageDomain::SceneView && stage.stageName == "SceneView.Projection";
+				}), "Validated Scene View stages must survive the protected editor boundary as value records.");
+				context.Expect(!frames.front().presentationWaits.empty(), "Presentation-wait evidence must remain present even when its clock is explicitly unavailable.");
+				context.Expect(std::all_of(frames.front().presentationWaits.begin(), frames.front().presentationWaits.end(), [](const PresentationWaitRecord& wait) {
+					return ValidatePresentationWaitRecord(wait).valid;
+				}), "Available and unavailable presentation-wait records must both retain valid typed semantics.");
+			}
+			profiler.Clear();
+		});
+
 		registry.Add("Engine.Profiler.RecordingAggregatesSamplesAndTaskCounters", [](TestContext& context) {
 			using namespace TerraEngine::Profiling;
 
@@ -533,6 +570,63 @@ namespace TerraEngine::Tests {
 			profiler.RecordTaskFinished(taskSampleActive);
 			context.Expect(profiler.GetFramesSnapshot().empty(), "Idle instrumentation should not create profiler frames.");
 			context.Expect(profiler.GetFrameListSnapshot().empty(), "Idle instrumentation should leave the lightweight frame list empty.");
+		});
+
+		registry.Add("Engine.ProfilerCapture.V2DispatchesAtomicallyAndPreservesV1", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+
+			TempProfilerWorkspace workspace;
+			ProfilerCaptureDocument document = MakeCaptureDocument();
+			ProfilerFrameRecord& frame = document.frames.front();
+			frame.performanceStages.push_back({
+				PerformanceStageDomain::Physics, "Physics.ProviderRead",
+				{TelemetryAvailability::Available, 1000u, {}}, "PhysicsSystem", 12u, false});
+			frame.physicsWorkVolume = PhysicsWorkVolumeRecord{1u, 12u, 8u, 12u, 8u, 8u, 4u, 4u};
+
+			std::string error;
+			const std::filesystem::path v2Path = workspace.Path("round-trip-v2.teprof");
+			context.Expect(SaveCaptureDocument(document, v2Path, error), "The default save path should write a v2 capture atomically.");
+			ProfilerCaptureDocument loadedV2;
+			context.Expect(LoadCaptureDocument(v2Path, loadedV2, error), "The v2 dispatcher should load a committed capture.");
+			context.ExpectEqual(2u, loadedV2.payloadVersion, "Default profiler saves should use payload version two.");
+			context.Expect(!loadedV2.frames.empty() && !loadedV2.frames.front().performanceStages.empty(), "V2 round trips must retain typed critical-path stages.");
+			context.Expect(!loadedV2.frames.empty() && loadedV2.frames.front().physicsWorkVolume.has_value(), "V2 round trips must retain processed-versus-published work volumes.");
+
+			document.payloadVersion = 1u;
+			const std::filesystem::path v1Path = workspace.Path("legacy-v1.teprof");
+			context.Expect(SaveCaptureDocument(document, v1Path, error), "An explicit v1 fixture write should remain available for compatibility testing.");
+			ProfilerCaptureDocument loadedV1;
+			context.Expect(LoadCaptureDocument(v1Path, loadedV1, error), "The version dispatcher must keep v1 captures readable.");
+			context.ExpectEqual(1u, loadedV1.payloadVersion, "Version dispatch must identify a v1 fixture without rewriting it.");
+		});
+
+		registry.Add("Engine.ProfilerCapture.V2RecoversCommittedChunksAndRetainsCriticalStreams", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+
+			TempProfilerWorkspace workspace;
+			ProfilerCaptureDocument document = MakeCaptureDocument();
+			document.metadata.settings.detailLevel = ProfilerCaptureDetailLevel::Aggregate;
+			document.metadata.settings.maximumChunkFrames = 1u;
+			document.frames.front().performanceStages.push_back({
+				PerformanceStageDomain::SceneView, "SceneView.Emission",
+				{TelemetryAvailability::Available, 2000u, {}}, "SceneView", 4u, false});
+			std::string error;
+			const std::filesystem::path path = workspace.Path("recoverable-v2.teprof");
+			context.Expect(SaveCaptureDocument(document, path, error), "A v2 capture should save before tail-recovery testing.");
+			std::ifstream input(path, std::ios::binary);
+			std::string persisted((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+			const std::size_t lastLine = persisted.find_last_of('\n', persisted.size() > 1u ? persisted.size() - 2u : 0u);
+			if (lastLine != std::string::npos)
+			{
+				persisted.resize(lastLine + 1u);
+				std::ofstream output(path, std::ios::binary | std::ios::trunc);
+				output << persisted;
+			}
+			ProfilerCaptureDocument recovered;
+			context.Expect(LoadCaptureDocument(path, recovered, error), "A missing final v2 index should recover already committed chunks.");
+			context.Expect(recovered.recoveredIncompleteTail && !recovered.complete, "Recovery must explicitly report an incomplete final tail.");
+			context.Expect(!recovered.frames.empty() && recovered.frames.front().samples.empty(), "Aggregate captures should omit optional samples.");
+			context.Expect(!recovered.frames.empty() && !recovered.frames.front().performanceStages.empty(), "Aggregate captures must retain critical typed stage streams.");
 		});
 	}
 }

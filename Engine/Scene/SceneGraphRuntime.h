@@ -31,6 +31,7 @@ namespace TerraEngine::Scene {
 
 	using SceneObjectId = TerraEngine::UUID;
 	struct HierarchySnapshot;
+	class SceneChangePacket;
 
 	enum class SceneDiagnosticSeverity {
 		Info,
@@ -76,6 +77,9 @@ namespace TerraEngine::Scene {
 
 	struct SceneGraph {
 		SceneObjectId sceneId = TerraEngine::EMPTY_UUID;
+		// The object-manager lifetime generation rejects packets prepared for a
+		// scene that was cleared or atomically replaced after this graph snapshot.
+		std::uint64_t sceneGeneration = 0;
 		std::vector<SceneObjectId> rootObjects;
 		std::unordered_map<SceneObjectId, SceneGraphObject> objects;
 		std::vector<SceneDiagnostic> diagnostics;
@@ -117,10 +121,15 @@ namespace TerraEngine::Scene {
 	};
 
 	struct SceneDirtyTransformState {
+		bool valid = true;
 		bool fullRefreshRequested = true;
 		SceneTransformDirtyReason reason = SceneTransformDirtyReason::FullRefresh;
+		std::uint64_t sourceSceneGeneration = 0;
 		std::uint64_t sourceRevision = 0;
 		std::vector<SceneObjectId> dirtyRoots;
+		// Excludes direct roots so consumers can distinguish authored changes
+		// from descendants whose world transforms changed through propagation.
+		std::vector<SceneObjectId> affectedDescendants;
 		std::vector<SceneObjectId> expandedDirtyObjects;
 	};
 
@@ -163,6 +172,7 @@ namespace TerraEngine::Scene {
 	TERRAENGINE_API std::vector<SceneObjectId> BuildTraversalOrder(const SceneGraph& graph);
 	TERRAENGINE_API void ComputeWorldTransforms(SceneGraph& graph);
 	TERRAENGINE_API SceneDirtyTransformState BuildDirtyTransformState(const SceneGraph& graph, const std::vector<SceneObjectId>& dirtyRoots = {}, SceneTransformDirtyReason reason = SceneTransformDirtyReason::FullRefresh);
+	TERRAENGINE_API SceneDirtyTransformState BuildDirtyTransformState(const SceneGraph& graph, const SceneChangePacket& changes);
 	TERRAENGINE_API SceneTransformWorkPlan BuildTransformWorkPlan(const SceneGraph& graph);
 	TERRAENGINE_API SceneTransformWorkPlan BuildTransformWorkPlan(const SceneGraph& graph, const HierarchySnapshot& snapshot);
 	TERRAENGINE_API SceneTransformPropagationResult PropagateWorldTransforms(SceneGraph& graph, const SceneDirtyTransformState& dirtyState = {});

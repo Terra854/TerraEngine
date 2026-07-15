@@ -29,7 +29,7 @@ namespace TerraEngine::EditorTests {
 
 	void RegisterHeadlessExportDocumentationTests(TestRegistry& registry) {
 		registry.Add("Editor.HeadlessExport.Documentation.LocalCommandsRemainReproducible", [](TestContext& context) {
-			const std::string quickstart = ReadDocumentationText("specs/042-physics-system/quickstart.md");
+			const std::string quickstart = ReadDocumentationText("specs/043-optimize-engine-performance/quickstart.md");
 			const std::string baselineGuide = ReadDocumentationText("Docs/ExportRuntimeBaseline.md");
 			const std::string testingGuide = ReadDocumentationText("Docs/Testing.md");
 			const std::vector<std::string_view> sharedCommandTokens = {
@@ -53,7 +53,7 @@ namespace TerraEngine::EditorTests {
 		});
 
 		registry.Add("Editor.HeadlessExport.Documentation.InstalledPathsStayAuthoritative", [](TestContext& context) {
-			const std::string quickstart = ReadDocumentationText("specs/042-physics-system/quickstart.md");
+			const std::string quickstart = ReadDocumentationText("specs/043-optimize-engine-performance/quickstart.md");
 			const std::string baselineGuide = ReadDocumentationText("Docs/ExportRuntimeBaseline.md");
 			const std::string testingGuide = ReadDocumentationText("Docs/Testing.md");
 			const std::vector<std::string_view> installedPaths = {

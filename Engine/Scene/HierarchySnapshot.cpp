@@ -11,6 +11,23 @@
 
 namespace TerraEngine::Scene {
 	namespace {
+		std::uint64_t BuildParentLinkGeneration(const TerraEngine::UUID& objectId, const TerraEngine::UUID& parentId)
+		{
+			// FNV-1a is a deterministic dependency tag, not a security hash. The
+			// compact value avoids UUID comparisons in high-frequency hot paths.
+			std::uint64_t generation = 1469598103934665603ull;
+			const auto append = [&generation](const TerraEngine::UUID& id) {
+				for (std::uint8_t byte : id)
+				{
+					generation ^= byte;
+					generation *= 1099511628211ull;
+				}
+			};
+			append(objectId);
+			append(parentId);
+			return generation == 0u ? 1u : generation;
+		}
+
 		void AddDepthRange(HierarchySnapshot& snapshot, std::uint32_t depth, std::size_t index)
 		{
 			if (!snapshot.depthRanges.empty() && snapshot.depthRanges.back().depth == depth)
@@ -93,6 +110,7 @@ namespace TerraEngine::Scene {
 			entry.object = objects.makeObjectHandle(graphObject.entity);
 			entry.objectId = objectId;
 			entry.parentId = graphObject.parentId;
+			entry.parentLinkGeneration = BuildParentLinkGeneration(entry.objectId, entry.parentId);
 			entry.depth = 0;
 			if (entry.parentId != TerraEngine::EMPTY_UUID)
 			{

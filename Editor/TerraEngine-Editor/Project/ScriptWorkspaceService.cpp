@@ -9,9 +9,11 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdint>
 #include <cwctype>
 #include <cstdlib>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
 #include <vector>
 
@@ -718,6 +720,73 @@ namespace
 		}
 	}
 
+	// ComputeManagedSourceFingerprint deliberately walks only gameplay C# inputs.
+	// Project assets, derived Build output, and editor metadata must not invalidate
+	// a valid gameplay assembly just because their unrelated bytes changed.
+	std::string ComputeManagedSourceFingerprint(const std::filesystem::path& projectRoot)
+	{
+		if (projectRoot.empty())
+		{
+			return {};
+		}
+
+		std::vector<std::filesystem::path> sources;
+		std::error_code error;
+		for (std::filesystem::recursive_directory_iterator iterator(projectRoot, std::filesystem::directory_options::skip_permission_denied, error), end; iterator != end && !error; iterator.increment(error))
+		{
+			const std::filesystem::path relativePath = std::filesystem::relative(iterator->path(), projectRoot, error);
+			if (error)
+			{
+				return {};
+			}
+			const std::string firstPart = relativePath.empty() ? std::string{} : relativePath.begin()->string();
+			if (firstPart == "Build" || firstPart == "Library" || firstPart == "Temp" || firstPart == "ProjectSettings" || firstPart == "UserSettings")
+			{
+				iterator.disable_recursion_pending();
+				continue;
+			}
+			if (iterator->is_regular_file(error) && !error && iterator->path().extension() == ".cs")
+			{
+				sources.push_back(iterator->path());
+			}
+		}
+		if (error)
+		{
+			return {};
+		}
+
+		std::sort(sources.begin(), sources.end(), [&](const std::filesystem::path& left, const std::filesystem::path& right) {
+			return std::filesystem::relative(left, projectRoot).generic_string() < std::filesystem::relative(right, projectRoot).generic_string();
+		});
+
+		std::uint64_t hash = 14695981039346656037ull;
+		const auto appendText = [&](const std::string& text) {
+			for (const char value : text)
+			{
+				hash ^= static_cast<std::uint8_t>(value);
+				hash *= 1099511628211ull;
+			}
+			hash ^= 0u;
+			hash *= 1099511628211ull;
+		};
+		for (const std::filesystem::path& source : sources)
+		{
+			std::error_code relativeError;
+			const std::filesystem::path relativePath = std::filesystem::relative(source, projectRoot, relativeError);
+			const std::string fileFingerprint = ManagedReadinessManifest::FingerprintFile(source);
+			if (relativeError || fileFingerprint.empty())
+			{
+				return {};
+			}
+			appendText(relativePath.generic_string());
+			appendText(fileFingerprint);
+		}
+
+		std::ostringstream result;
+		result << std::hex << std::setfill('0') << std::setw(16) << hash;
+		return result.str();
+	}
+
 	std::filesystem::path CanonicalizeForContainment(const std::filesystem::path& path, std::error_code& error)
 	{
 		// weakly_canonical resolves every existing ancestor, including directory
@@ -845,6 +914,62 @@ std::filesystem::path ScriptWorkspaceService::GetReferenceRoot() const
 std::filesystem::path ScriptWorkspaceService::GetAssemblyPath() const
 {
 	return GetOutputRoot() / "Assembly-CSharp.dll";
+}
+
+std::filesystem::path ScriptWorkspaceService::GetManagedReadinessManifestPath() const
+{
+	return ManagedReadinessManifest::GetPath(GetOutputRoot());
+}
+
+ManagedReadinessInputs ScriptWorkspaceService::BuildManagedReadinessInputs(const std::string& buildProfile) const
+{
+	ManagedReadinessInputs inputs;
+	inputs.sourceFingerprint = ComputeManagedSourceFingerprint(m_ProjectRoot);
+	inputs.workspaceFingerprint = ManagedReadinessManifest::FingerprintFile(GetSolutionPath())
+		+ ManagedReadinessManifest::FingerprintFile(GetProjectPath());
+	inputs.buildProfile = buildProfile;
+	// Fingerprint the active editor toolchain, not merely its prior project
+	// copies. EnsureWorkspace synchronizes those validated copies before warm
+	// validation, while these source fingerprints detect an updated install.
+	inputs.bridgeFingerprint = ManagedReadinessManifest::FingerprintFile(ResolveManagedBridgePath());
+	inputs.analyzerFingerprint = ManagedReadinessManifest::FingerprintFile(ResolveManagedAnalyzerPath());
+	// The managed bridge fingerprint is already an exact ABI input. This
+	// explicit schema tag also invalidates cache records when native/managed
+	// loader semantics change without a bridge binary layout change.
+	inputs.runtimeAbiFingerprint = "TerraEngine.ManagedRuntimeAbi.v1";
+	return inputs;
+}
+
+ManagedReadinessValidation ScriptWorkspaceService::ValidateManagedReadiness(
+	const std::string& buildProfile,
+	ManagedReadinessManifest* outManifest,
+	std::string* outError) const
+{
+	const ManagedReadinessInputs expectedInputs = BuildManagedReadinessInputs(buildProfile);
+	if (expectedInputs.sourceFingerprint.empty() || expectedInputs.workspaceFingerprint.empty()
+		|| expectedInputs.bridgeFingerprint.empty() || expectedInputs.analyzerFingerprint.empty())
+	{
+		SetScriptWorkspaceError(outError, "Managed readiness inputs are incomplete; the workspace references must be synchronized before reuse.");
+		return ManagedReadinessValidation::Stale;
+	}
+	return ManagedReadinessManifest::Validate(GetManagedReadinessManifestPath(), expectedInputs, GetAssemblyPath(), outManifest, outError);
+}
+
+bool ScriptWorkspaceService::PublishManagedReadiness(const std::string& buildProfile, std::string* outError) const
+{
+	const ManagedReadinessInputs inputs = BuildManagedReadinessInputs(buildProfile);
+	const std::string outputFingerprint = ManagedReadinessManifest::FingerprintFile(GetAssemblyPath());
+	if (inputs.sourceFingerprint.empty() || inputs.workspaceFingerprint.empty() || inputs.bridgeFingerprint.empty()
+		|| inputs.analyzerFingerprint.empty() || outputFingerprint.empty())
+	{
+		SetScriptWorkspaceError(outError, "Managed readiness cannot be published because its source, workspace, reference, or output fingerprint is unavailable.");
+		return false;
+	}
+
+	ManagedReadinessManifest manifest;
+	manifest.inputs = inputs;
+	manifest.outputFingerprint = outputFingerprint;
+	return manifest.PersistAtomically(GetManagedReadinessManifestPath(), outError);
 }
 
 // ScriptWorkspaceService::EnsureWorkspace is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1136,19 +1261,13 @@ bool ScriptWorkspaceService::SyncManagedReferences(std::string* outError)
 		std::filesystem::create_directories(GetReferenceRoot());
 	}
 
-	std::error_code copyError;
-	std::filesystem::copy_file(sourceDll, targetDll, std::filesystem::copy_options::overwrite_existing, copyError);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (copyError)
+	// A matching fingerprint means the project already has the exact bridge
+	// bytes required by this workspace. Avoiding that copy is safe only after
+	// both source and destination were readable and compared byte-for-byte.
+	if (!CopyManagedReferenceIfChanged(sourceDll, targetDll, outError))
 	{
-		const std::string message = "Failed to synchronize TerraEngine.CSharp.dll into the project workspace: " + copyError.message();
 		m_Status.health = ScriptWorkspaceHealth::Broken;
-		m_Status.lastMessage = message;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (outError)
-		{
-			*outError = message;
-		}
+		m_Status.lastMessage = outError != nullptr ? *outError : "Failed to synchronize TerraEngine.CSharp.dll into the project workspace.";
 		return false;
 	}
 
@@ -1156,7 +1275,12 @@ bool ScriptWorkspaceService::SyncManagedReferences(std::string* outError)
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (std::filesystem::exists(sourcePdb))
 	{
-		std::filesystem::copy_file(sourcePdb, GetReferenceRoot() / "TerraEngine.CSharp.pdb", std::filesystem::copy_options::overwrite_existing, copyError);
+		if (!CopyManagedReferenceIfChanged(sourcePdb, GetReferenceRoot() / "TerraEngine.CSharp.pdb", outError))
+		{
+			m_Status.health = ScriptWorkspaceHealth::Broken;
+			m_Status.lastMessage = outError != nullptr ? *outError : "Failed to synchronize TerraEngine.CSharp.pdb into the project workspace.";
+			return false;
+		}
 	}
 
 	// Copy the source generator (analyzer) into the project.
@@ -1179,22 +1303,70 @@ bool ScriptWorkspaceService::SyncManagedReferences(std::string* outError)
 		return false;
 	}
 
-	std::filesystem::copy_file(analyzerSource, analyzerDest, std::filesystem::copy_options::overwrite_existing, copyError);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (copyError)
+	if (!CopyManagedReferenceIfChanged(analyzerSource, analyzerDest, outError))
 	{
-		const std::string message = "Failed to synchronize TerraEngine.Export.Generator.dll into the project workspace: " + copyError.message();
 		m_Status.health = ScriptWorkspaceHealth::Broken;
-		m_Status.lastMessage = message;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (outError)
-		{
-			*outError = message;
-		}
+		m_Status.lastMessage = outError != nullptr ? *outError : "Failed to synchronize TerraEngine.Export.Generator.dll into the project workspace.";
 		return false;
 	}
 
 	return true;
+}
+
+bool ScriptWorkspaceService::CopyManagedReferenceIfChanged(const std::filesystem::path& source, const std::filesystem::path& target, std::string* outError) const
+{
+	const std::string sourceFingerprint = ManagedReadinessManifest::FingerprintFile(source);
+	if (sourceFingerprint.empty())
+	{
+		SetScriptWorkspaceError(outError, "The managed reference source cannot be read: " + source.string() + ".");
+		return false;
+	}
+	if (!RequiresManagedReferenceCopy(source, target))
+	{
+		return true;
+	}
+
+	std::error_code directoryError;
+	std::filesystem::create_directories(target.parent_path(), directoryError);
+	if (directoryError)
+	{
+		SetScriptWorkspaceError(outError, "Failed to create the managed reference directory: " + directoryError.message());
+		return false;
+	}
+
+	const std::filesystem::path temporaryTarget = target.string() + ".tmp";
+	std::error_code copyError;
+	std::filesystem::copy_file(source, temporaryTarget, std::filesystem::copy_options::overwrite_existing, copyError);
+	if (copyError || ManagedReadinessManifest::FingerprintFile(temporaryTarget) != sourceFingerprint)
+	{
+		std::filesystem::remove(temporaryTarget);
+		SetScriptWorkspaceError(outError, "Failed to validate the copied managed reference " + target.string() + ".");
+		return false;
+	}
+
+	std::error_code renameError;
+	std::filesystem::rename(temporaryTarget, target, renameError);
+	if (renameError)
+	{
+		// Windows cannot replace an existing DLL through rename. The temporary
+		// file was fully copied and verified before the old cache copy is removed.
+		std::filesystem::remove(target, renameError);
+		renameError.clear();
+		std::filesystem::rename(temporaryTarget, target, renameError);
+	}
+	if (renameError || ManagedReadinessManifest::FingerprintFile(target) != sourceFingerprint)
+	{
+		std::filesystem::remove(temporaryTarget);
+		SetScriptWorkspaceError(outError, "Failed to publish the validated managed reference " + target.string() + ".");
+		return false;
+	}
+	return true;
+}
+
+bool ScriptWorkspaceService::RequiresManagedReferenceCopy(const std::filesystem::path& source, const std::filesystem::path& target)
+{
+	const std::string sourceFingerprint = ManagedReadinessManifest::FingerprintFile(source);
+	return sourceFingerprint.empty() || sourceFingerprint != ManagedReadinessManifest::FingerprintFile(target);
 }
 
 // ScriptWorkspaceService::WriteTextIfChanged is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

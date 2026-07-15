@@ -231,11 +231,18 @@ namespace TerraEngine::EditorTests
 			editorContext.engine = &engine;
 			EditorAutomationService service;
 			service.SetEditorContext(&editorContext);
+			const nlohmann::json compact = service.HandleTool("diagnostics.get_summary", nlohmann::json::object(), WriteMode::ReadOnly, "diag-parallel-compact");
+			context.Expect(compact["data"]["parallelFrame"].contains("executionTelemetry"), "Compact diagnostics should preserve the additive scheduler telemetry envelope.");
+			context.Expect(!compact["data"]["parallelFrame"]["executionTelemetry"].value("detailIncluded", true), "Compact diagnostics should avoid retaining workload and worker history arrays.");
+			context.Expect(compact["data"]["parallelFrame"]["executionTelemetry"]["executionRecords"].empty(), "Compact diagnostics should omit workload decision records.");
 			const nlohmann::json detailed = service.HandleTool("diagnostics.get_summary", {{"includeDetails", true}}, WriteMode::ReadOnly, "diag-parallel");
 			context.Expect(detailed.value("ok", false), "Engine-backed diagnostics should succeed.");
 			context.Expect(detailed["data"]["parallelFrame"].value("available", false), "Parallel-frame diagnostics should be available when an engine is attached.");
 			context.Expect(detailed["data"]["parallelFrame"].contains("migrationSummary"), "Parallel-frame diagnostics should expose migration counters.");
 			context.Expect(detailed["data"]["parallelFrame"].contains("workerCoverage"), "Parallel-frame diagnostics should expose worker coverage.");
+			context.Expect(detailed["data"]["parallelFrame"]["executionTelemetry"].value("detailIncluded", false), "Detailed diagnostics should opt in to bounded workload and worker history arrays.");
+			context.Expect(detailed["data"]["parallelFrame"]["executionTelemetry"].contains("dependencyEdges"), "Detailed diagnostics should expose explicit scheduler dependency edges.");
+			context.Expect(detailed["data"]["parallelFrame"]["executionTelemetry"]["conditionalFlush"].contains("reason"), "Scheduler diagnostics should explain the conditional After Physics flush decision.");
 			context.Expect(detailed["data"]["parallelFrame"]["runtimeLayout"].contains("metadataScanFallbackCount"), "Runtime layout diagnostics should expose metadata scan fallback count.");
 			context.Expect(detailed["data"]["parallelFrame"]["runtimeLayout"].contains("staleObjectHandleCount"), "Runtime layout diagnostics should expose stale compact reference count.");
 			context.Expect(!detailed["data"]["hardBoundaries"].empty(), "Hard-boundary classifications should be serialized.");

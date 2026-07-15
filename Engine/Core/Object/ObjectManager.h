@@ -24,6 +24,7 @@
 #include "ActiveMembership.h"
 #include "Components/Transform.h"
 #include "Core/Scheduling/WorkerSafety.h"
+#include "Scene/SceneChangePacket.h"
 #include "Scene/RuntimeLayout.h"
 #include "Utilities/UUID.h"
 
@@ -36,6 +37,14 @@ struct ObjectMetadata {
 	std::uint64_t metadataGeneration = 1;
 	std::uint64_t componentGeneration = 1;
 	std::uint64_t bindingGeneration = 1;
+};
+
+// Exact capacities are supplied by a validated prepared scene before a bulk
+// load begins.  Reserving the manager-owned lookup tables once prevents the
+// usual per-object rehash/invalidation work during a protected scene swap.
+struct BulkObjectStorageReservation {
+	std::size_t objectCount = 0U;
+	std::size_t componentCount = 0U;
 };
 
 // class ObjectManager groups related state and operations so callers have one documented contract.
@@ -315,6 +324,12 @@ public:
 	void removeObject(Object obj);
 
 	void clear();
+	// Bulk publication is protected-thread only.  While active, individual
+	// object changes remain private and observers receive one notification when
+	// FinishBulkPublication makes the completed generation visible.
+	void BeginBulkPublication(const BulkObjectStorageReservation& reservation);
+	void FinishBulkPublication(bool published);
+	[[nodiscard]] bool IsBulkPublicationActive() const { return bulkPublicationActive; }
 
 	// getRegistry is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	entt::registry& getRegistry() { return registry; }
@@ -329,6 +344,11 @@ public:
 	void SetOnSpatialObjectDirtyCallback(std::function<void(entt::entity)> callback) { onSpatialObjectDirty = callback; }
 	std::uint64_t GetSpatialRevision() const { return spatialRevision; }
 	std::uint64_t GetHierarchyRevision() const { return hierarchyRevision; }
+	// Capture all exact changes committed since the prior publication. This
+	// mutates only the protected-side journal; workers receive the returned
+	// immutable packet and must never call this method themselves.
+	TerraEngine::Scene::SceneChangePacket PublishSceneChangePacket();
+	std::uint64_t GetSceneGeneration() const { return sceneGeneration; }
 	std::uint64_t GetObjectTransformRevision(const Object& object) const;
 	std::uint64_t GetObjectSpatialRevision(const Object& object) const;
 
@@ -343,6 +363,10 @@ private:
 	std::uint64_t spatialRevision = 0;
 	std::uint64_t transformRevision = 0;
 	std::uint64_t hierarchyRevision = 0;
+	// Scene generation advances across clear/swap boundaries. A packet from an
+	// earlier scene must be rejected even if individual entity slots are reused.
+	std::uint64_t sceneGeneration = 1;
+	std::uint64_t sceneChangePublicationRevision = 0;
 	std::uint64_t runtimeActiveMembershipRevision = 0;
 	std::uint64_t cachedRuntimeActiveMembershipRevision = static_cast<std::uint64_t>(-1);
 	std::vector<TerraEngine::Scene::RuntimeActiveMembership> runtimeActiveMembershipCache;
@@ -358,7 +382,14 @@ private:
 	std::unordered_map<entt::entity, std::uint64_t> transformRevisionByEntity;
 	std::unordered_map<entt::entity, std::uint64_t> spatialRevisionByEntity;
 	std::unordered_map<entt::entity, std::uint64_t> generationByEntity;
+	struct PendingSceneChange {
+		TerraEngine::Scene::SceneObjectRevisionSnapshot snapshot;
+		std::uint32_t kinds = 0;
+	};
+	std::unordered_map<TerraEngine::UUID, PendingSceneChange> pendingSceneChanges;
 	std::uint64_t nextObjectGeneration = 1;
+	bool bulkPublicationActive = false;
+	bool bulkPublicationChanged = false;
 	// Name and tag indexes are maintained beside metadata so C# Object.Find
 	// calls do not scan every scene object during script updates.
 	std::unordered_map<std::string, std::vector<entt::entity>> nameIndex;
@@ -373,6 +404,8 @@ private:
 	void removeFromLookupBucket(std::unordered_map<std::string, std::vector<entt::entity>>& index, const std::string& key, entt::entity entityId);
 	void notifySpatialObjectDirty(entt::entity entityId);
 	void notifyHierarchyDirty();
+	TerraEngine::Scene::SceneObjectRevisionSnapshot captureSceneObjectRevision(const Object& object) const;
+	void recordSceneChange(TerraEngine::Scene::SceneChangeKind kind, const TerraEngine::Scene::SceneObjectRevisionSnapshot& snapshot);
 	void invalidateRuntimeActiveMembership();
 	void rebuildRuntimeActiveMembershipCache();
 	TerraEngine::UUID getEntityUUID(entt::entity entity) const;

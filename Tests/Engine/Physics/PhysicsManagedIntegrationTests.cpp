@@ -46,5 +46,28 @@ namespace TerraEngine::Tests {
 			context.Expect(lifecycle.find("PhysicsEvents.ResetManagedSubscriptions") != std::string::npos,
 				"Gameplay reload and stop must invalidate managed physics subscriptions before their runtime context is released.");
 		});
+
+		registry.Add("Engine.PhysicsManagedIntegration.ManagedCopiesKeepAbiReceiptsAndGenerationChecks", [](TestContext& context) {
+			const std::string physics = ReadSource("Engine/Managed/Source/Physics/Physics.cs");
+			const std::string rigidbody = ReadSource("Engine/Managed/Source/Physics/Rigidbody.cs");
+			const std::string events = ReadSource("Engine/Managed/Source/Physics/PhysicsEvents.cs");
+			const std::string characters = ReadSource("Engine/Managed/Source/Physics/CharacterController.cs");
+
+			context.Expect(physics.find("PhysicsAbiHeader.For<NativePhysicsQueryReceipt>()") != std::string::npos
+				&& physics.find("PhysicsAbiHeader.For<NativePhysicsQueryResultInfo>()") != std::string::npos
+				&& physics.find("Native_Physics_CopyCharacterStates") != std::string::npos,
+				"Managed query receipts, query results, and character state reads must retain the versioned caller-owned ABI boundary.");
+			context.Expect(rigidbody.find("NativePhysicsCommandReceipt") != std::string::npos
+				&& rigidbody.find("CorrelationId = correlationId") != std::string::npos
+				&& rigidbody.find("Identity = Identity") != std::string::npos,
+				"Managed commands must return copied correlation-bearing receipts and submit the complete generation-bearing identity.");
+			context.Expect(events.find("eventCount > 4096") != std::string::npos
+				&& events.find("stale or incompatible records") != std::string::npos
+				&& events.find("Native_Physics_UnsubscribeEvents") != std::string::npos,
+				"Managed subscriptions must reject oversized or stale event packets and release every native subscription during reset.");
+			context.Expect(characters.find("NativePhysicsCharacterCommandRequest") != std::string::npos
+				&& characters.find("Identity = Identity") != std::string::npos,
+				"Managed character commands must use the same copied, generation-validated native ABI as rigid-body commands.");
+		});
 	}
 }

@@ -5,7 +5,9 @@
 #include "Engine/Scene/SceneManager.h"
 #include "ProjectManager.h"
 
+#include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
 
@@ -80,6 +82,40 @@ namespace TerraEngine::EditorTests
 			context.Expect(templates.value("ok", false), "Template discovery should remain available at the project hub.");
 			context.Expect(state.value("ok", false), "Project state should remain available at the project hub.");
 			context.Expect(!state["data"].value("hasProject", true), "Hub project state should report that no project is open.");
+			const auto capability = fixture.service.GetRegistry().Find("project.state", 1, fixture.service.BuildAutomationStateSnapshot());
+			context.Expect(capability.has_value(), "Project state should remain discoverable while derived-cache evidence is unavailable at the hub.");
+			if (capability.has_value())
+			{
+				const auto& reads = capability->descriptor.execution.preparationReads;
+				context.Expect(std::find(reads.begin(), reads.end(), "DerivedSceneCache") != reads.end(), "Project-state diagnostics must declare the derived-scene cache they report.");
+			}
+		});
+
+		registry.Add("Editor.MCP.ProjectLifecycle.ProjectStateReportsSourceAndDerivedReadiness", [](TestContext& context) {
+			TemporaryProjectWorkspace workspace("DerivedReadiness");
+			LifecycleFixture fixture(workspace);
+			std::string error;
+			context.Expect(fixture.context.projectManager->CreateProject(workspace.root, "DerivedReadiness", ProjectTemplate::Blank, &error), error);
+			const std::filesystem::path scenePath = workspace.root / "Assets" / "Scenes" / "Automation.tescene";
+			std::filesystem::create_directories(scenePath.parent_path());
+			{
+				std::ofstream scene(scenePath, std::ios::binary | std::ios::trunc);
+				scene << R"({"name":"Automation","objects":[{"name":"Root","components":{},"children":[]}]})";
+			}
+
+			ProjectSceneLoadDecision cold;
+			context.Expect(fixture.context.projectManager->PrepareSceneForLoading("Scenes/Automation.tescene", cold, &error), error);
+			const nlohmann::json coldState = fixture.service.HandleTool("project.state", nlohmann::json::object(), WriteMode::ReadOnly, "project-state-cold");
+			context.Expect(coldState.value("ok", false), "Project state should expose the cold source decision additively.");
+			context.Expect(coldState["data"]["derivedScene"].value("usedAuthoritativeSource", false), "A cold project state should identify authored-source fallback.");
+			context.Expect(coldState["data"]["derivedScene"].value("regenerationPublished", false), "A cold project state should report successful atomic regeneration.");
+			context.Expect(coldState["data"].contains("readiness"), "Project state should expose explicit simulation/editor readiness without removing legacy fields.");
+
+			ProjectSceneLoadDecision warm;
+			context.Expect(fixture.context.projectManager->PrepareSceneForLoading("Scenes/Automation.tescene", warm, &error), error);
+			const nlohmann::json warmState = fixture.service.HandleTool("project.state", nlohmann::json::object(), WriteMode::ReadOnly, "project-state-warm");
+			context.Expect(warmState["data"]["derivedScene"].value("cacheHit", false), "An unchanged second preparation should be visible as a derived-scene hit.");
+			context.ExpectEqual(std::string("derived-hit"), warmState["data"]["derivedScene"].value("state", std::string()), "Project state should use a stable semantic derived-hit state.");
 		});
 	}
 }

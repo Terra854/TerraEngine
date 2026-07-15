@@ -5,10 +5,16 @@
 #include "Scene/HierarchySnapshot.h"
 #include "Scene/RuntimeLayout.h"
 #include "Scene/SceneGraphRuntime.h"
+#include "ThreadPool/ThreadPool.h"
 
+#include <algorithm>
+#include <array>
 #include <set>
 #include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <string>
+#include <thread>
 #include <unordered_map>
 
 namespace TerraEngine::Tests {
@@ -83,6 +89,82 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(static_cast<std::size_t>(1u), plan.migrationSummary.inlineCount, "Small scenes should inline worker-eligible work below the threshold.");
 			context.Expect(plan.migrationSummary.workerSafeCount == 0u, "Small-scene guard should avoid scheduling worker work that would cost more than it saves.");
 			context.ExpectEqual(1, calls.load(), "Small-scene inline work should run once on the caller thread.");
+		});
+
+		registry.Add("Engine.FullParallelFrame.WorkerMatrixPreservesThresholdsAndDeterministicPartitions", [](TestContext& context) {
+			ThreadPool& pool = ThreadPool::instance();
+			pool.shutdown();
+			const std::size_t maximumWorkers = std::max<std::size_t>(1U, std::thread::hardware_concurrency());
+			const std::array<std::size_t, 4> requestedWorkers{1U, 2U, 4U, maximumWorkers};
+			std::uint64_t baselineHash = 0U;
+			for (std::size_t matrixIndex = 0U; matrixIndex < requestedWorkers.size(); ++matrixIndex)
+			{
+				const std::size_t workers = requestedWorkers[matrixIndex];
+				if (std::find(requestedWorkers.begin(), requestedWorkers.begin() + matrixIndex, workers)
+					!= requestedWorkers.begin() + matrixIndex) continue;
+				pool.initialize(workers);
+				context.ExpectEqual(workers, pool.getThreadCount(),
+					"The 1/2/4/max comparison must use the exact requested worker identity without a hidden cap.");
+
+				pool.ResetTelemetry();
+				auto small = FullParallelFrameFixtures::MakeWorkerWorkload("MatrixSmall", {"SceneGraph"}, {"RuntimeLayout"});
+				small.estimatedWorkItemCount = 4U;
+				small.inlineWorkItemThreshold = 32U;
+				small.work = [](TerraEngine::Scheduling::JobGraphContext&) {};
+				const auto smallPlan = TerraEngine::Scheduling::ExecuteFrameWorkloads({small}, "matrix-small");
+				const auto smallTelemetry = pool.GetTelemetrySnapshot();
+				std::uint64_t smallDispatches = 0U;
+				for (const ThreadPoolWorkerTelemetry& worker : smallTelemetry->workers) smallDispatches += worker.dispatchCount;
+				context.Expect(smallPlan.completed && smallPlan.migrationSummary.inlineCount == 1U && smallDispatches == 0U,
+					"Work below the measured threshold must inline at every worker configuration.");
+
+				pool.ResetTelemetry();
+				std::vector<std::uint64_t> values(8192U, 0U);
+				auto large = FullParallelFrameFixtures::MakeWorkerWorkload("MatrixLarge", {"SceneGraph"}, {"RuntimeLayout"});
+				large.stableDescriptorId = "matrix/large";
+				large.estimatedWorkItemCount = values.size();
+				large.inlineWorkItemThreshold = 32U;
+				large.partitionPolicy = TerraEngine::Scheduling::FrameWorkloadPartitionPolicy::DeterministicRanges;
+				large.partitionWorkItemCount = 512U;
+				large.rangeWork = [&values](const TerraEngine::Scheduling::FrameWorkloadPartition& range, TerraEngine::Scheduling::JobGraphContext&) {
+					for (std::size_t index = range.itemBegin; index < range.itemEnd; ++index)
+					{
+						values[index] = static_cast<std::uint64_t>(index) * 11400714819323198485ULL + 137U;
+					}
+					// Keep ranges observable long enough for multi-worker scheduling
+					// without turning this deterministic gate into a timing benchmark.
+					std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				};
+				const auto largePlan = TerraEngine::Scheduling::ExecuteFrameWorkloads({large}, "matrix-large");
+				std::uint64_t hash = 1469598103934665603ULL;
+				for (const std::uint64_t value : values)
+				{
+					hash ^= value;
+					hash *= 1099511628211ULL;
+				}
+				const auto telemetry = pool.GetTelemetrySnapshot();
+				std::uint64_t dispatches = 0U;
+				std::uint64_t usefulItems = 0U;
+				std::size_t participatingWorkers = 0U;
+				for (const ThreadPoolWorkerTelemetry& worker : telemetry->workers)
+				{
+					dispatches += worker.dispatchCount;
+					usefulItems += worker.usefulItemCount;
+					if (worker.dispatchCount > 0U) ++participatingWorkers;
+				}
+				context.Expect(largePlan.valid && largePlan.completed && largePlan.results.front().partitionCount == 16U,
+					"Large work must select sixteen deterministic 512-item ranges.");
+				context.ExpectEqual(static_cast<std::uint64_t>(16U), dispatches,
+					"Every deterministic range must produce exactly one useful dispatch.");
+				context.ExpectEqual(static_cast<std::uint64_t>(values.size()), usefulItems,
+					"Worker telemetry must account for every item owned by the range dispatches.");
+				context.Expect(participatingWorkers >= 1U && participatingWorkers <= workers,
+					"Worker utilization evidence must name a valid subset of the resolved pool.");
+				if (baselineHash == 0U) baselineHash = hash;
+				context.ExpectEqual(baselineHash, hash,
+					"One, two, four, and maximum workers must publish the same deterministic result hash.");
+				pool.shutdown();
+			}
 		});
 
 		registry.Add("Engine.FullParallelFrame.TransformPropagationUsesWorkersForLargeHierarchy", [](TestContext& context) {

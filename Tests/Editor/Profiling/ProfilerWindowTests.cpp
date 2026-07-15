@@ -113,5 +113,18 @@ namespace TerraEngine::EditorTests
 			context.Expect(source.find("ProfilerVirtualGeometryPacketRows") == std::string::npos, "Profiler should not duplicate VG packet tables owned by Resource Residency.");
 			context.Expect(source.find("ProfilerVirtualGeometryPageSourceRows") == std::string::npos, "Profiler should not duplicate VG page-source tables owned by Resource Residency.");
 		});
+
+		registry.Add("ProfilerWindow.V2Evidence.PresentsRecoveryAndTypedStreams", [](TestContext& context) {
+			const std::string source = ReadProfilerWindowSource();
+
+			context.Expect(source.find("DrawCaptureEvidenceSummary") != std::string::npos, "Profiler Window should render capture-level v2 evidence separately from a selected frame.");
+			context.Expect(source.find("detailLevel") != std::string::npos, "Profiler Window should identify the detailed, sampled, or aggregate capture level.");
+			context.Expect(source.find("Recovery warning") != std::string::npos, "Recovered incomplete capture tails should remain visible to the user.");
+			context.Expect(source.find("Physics and Scene View Stages") != std::string::npos, "Profiler Window should distinguish native physics and Scene View stages.");
+			context.Expect(source.find("Protected Boundary Breakdown") != std::string::npos, "Profiler Window should break protected queue, ownership, flush, and publication waits apart.");
+			context.Expect(source.find("Worker Timeline Summary") != std::string::npos, "Profiler Window should present bounded worker history summaries.");
+			context.Expect(source.find("Physics Work Volumes") != std::string::npos, "Profiler Window should present processed-versus-published body volumes.");
+			context.Expect(source.find("unavailable") != std::string::npos, "Unavailable typed streams should be labelled instead of shown as zero.");
+		});
 	}
 }

@@ -21,6 +21,27 @@
 #include <cmath>
 #include <string>
 
+namespace
+{
+	void DrawGameViewPlaceholder(const ImVec2& availableSize, const char* message)
+	{
+		// A content-free Game View emits one background rectangle and one label.
+		// It deliberately avoids render-target, texture, stats, and UI-batch reads.
+		const ImVec2 cursorPosition = ImGui::GetCursorScreenPos();
+		ImDrawList* drawList = ImGui::GetWindowDrawList();
+		drawList->AddRectFilled(
+			cursorPosition,
+			ImVec2(cursorPosition.x + availableSize.x, cursorPosition.y + availableSize.y),
+			ImGui::GetColorU32(ImGuiCol_WindowBg));
+
+		const ImVec2 textSize = ImGui::CalcTextSize(message);
+		ImGui::SetCursorScreenPos(ImVec2(
+			cursorPosition.x + (availableSize.x - textSize.x) * 0.5f,
+			cursorPosition.y + (availableSize.y - textSize.y) * 0.5f));
+		ImGui::TextUnformatted(message);
+	}
+}
+
 GameViewWindow::GameViewWindow(MainEditorSubsystem* owner)
 	: EditorWindow("Game View", true, "Rendering"), m_Owner(owner) {
 	m_AspectRatios.push_back({ "Free Aspect", 0.0f, 0.0f, false });
@@ -29,6 +50,16 @@ GameViewWindow::GameViewWindow(MainEditorSubsystem* owner)
 	m_AspectRatios.push_back({ "Full HD (1920x1080)", 1920.0f, 1080.0f, true });
 	m_AspectRatios.push_back({ "4K UHD (3840x2160)", 3840.0f, 2160.0f, true });
 	m_AspectRatios.push_back({ "Stand. (4:3)", 4.0f, 3.0f, false });
+}
+
+void GameViewWindow::OnBeforeBegin()
+{
+	// Begin can report a docked tab as collapsed, in which case OnGui is not
+	// called. Clear this frame's request first and let an expanded active window
+	// explicitly opt back in below. This keeps hidden/collapsed GPU work bounded.
+	RenderSystem::Instance().SetGameViewSuppressed(true);
+	RenderSystem::Instance().SetGameViewTargetSize(glm::uvec2(0u));
+	UISystem::Instance().SetEditorGameViewPointer(glm::vec2(-1.0f, -1.0f), false, false);
 }
 
 // GameViewWindow::OnGui is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -146,51 +177,51 @@ void GameViewWindow::OnGui() {
 
 	imageSize.x *= m_Scale;
 	imageSize.y *= m_Scale;
-	const glm::uvec2 gameTargetSize(
-		static_cast<std::uint32_t>(std::max(1.0f, std::ceil(imageSize.x))),
-		static_cast<std::uint32_t>(std::max(1.0f, std::ceil(imageSize.y))));
-	RenderSystem::Instance().SetGameViewTargetSize(gameTargetSize);
-	UISystem::Instance().SetGameViewportSize(glm::vec2(imageSize.x, imageSize.y));
-
-	const bool isAssetPrefabEditing = m_Owner != nullptr && m_Owner->IsAssetPrefabEditingMode();
-	if (isAssetPrefabEditing)
-	{
-		const auto activePrefabCameras = ObjectManager::instance().getObjectsWithComponents<Transform, CameraComponent>();
-		if (activePrefabCameras.empty())
-		{
-			// Prefab assets opened from the asset browser are edited in isolation.
-			// If they have no active authored camera, keep the Game View idle.
-			// ObjectManager's component query excludes inactive objects and
-			// disabled CameraComponents, so disabled cameras do not count here.
-			UISystem::Instance().SetEditorGameViewPointer(glm::vec2(-1.0f, -1.0f), false, false);
-			const ImVec2 cursorPos = ImGui::GetCursorScreenPos();
-			ImDrawList* drawList = ImGui::GetWindowDrawList();
-			drawList->AddRectFilled(cursorPos, ImVec2(cursorPos.x + availableSize.x, cursorPos.y + availableSize.y), ImGui::GetColorU32(ImGuiCol_WindowBg));
-
-			const char* text = "Game View paused while editing prefab asset";
-			const ImVec2 textSize = ImGui::CalcTextSize(text);
-			ImGui::SetCursorScreenPos(ImVec2(cursorPos.x + (availableSize.x - textSize.x) * 0.5f, cursorPos.y + (availableSize.y - textSize.y) * 0.5f));
-			ImGui::Text("%s", text);
-			return;
-		}
-
-		// An active prefab-local camera is a valid preview source for asset-style
-		// prefab editing, so re-enable Game View submission for this frame and
-		// let the regular camera collection below submit those prefab cameras.
-		RenderSystem::Instance().SetGameViewSuppressed(false);
-	}
-
 	// --- Update Cameras ---
 	float aspect = (imageSize.y > 0.0001f) ? (imageSize.x / imageSize.y) : 1.0f;
 	if (aspect <= 0.0001f) aspect = 1.0f;
 
+	const bool isAssetPrefabEditing = m_Owner != nullptr && m_Owner->IsAssetPrefabEditingMode();
 	const bool hasPrefabModeSceneCameras = !isAssetPrefabEditing && (m_Owner != nullptr) && m_Owner->TryApplyPrefabModeGameViewCameras(aspect);
 	bool hasCameras = hasPrefabModeSceneCameras;
+	std::vector<Object> cameras;
 	if (!hasPrefabModeSceneCameras)
 	{
 		auto& objectManager = ObjectManager::instance();
-		auto cameras = objectManager.getObjectsWithComponents<Transform, CameraComponent>();
-		hasCameras = !cameras.empty();
+		const std::uint64_t membershipRevision = objectManager.GetRuntimeActiveMembershipRevision();
+		if (m_CameraActivityCache.NeedsRefresh(membershipRevision))
+		{
+			cameras = objectManager.getObjectsWithComponents<Transform, CameraComponent>();
+			m_CameraActivityCache.Store(membershipRevision, !cameras.empty());
+		}
+		hasCameras = m_CameraActivityCache.hasActiveCamera;
+		if (hasCameras && cameras.empty())
+		{
+			// Active cameras still need current transforms every frame. Only the
+			// repeated empty query is retained by the generation cache.
+			cameras = objectManager.getObjectsWithComponents<Transform, CameraComponent>();
+			hasCameras = !cameras.empty();
+			if (!hasCameras)
+			{
+				// Component enablement can change between the membership-generation
+				// read and the component query. Preserve the observed empty result so
+				// the remainder of this frame cannot present stale camera content.
+				m_CameraActivityCache.Store(membershipRevision, false);
+			}
+		}
+
+		const TerraEngine::Editor::GameViewUpdateDecision contentDecision =
+			TerraEngine::Editor::BuildGameViewUpdateDecision(true, hasCameras, false, m_Stats);
+		if (contentDecision.path == TerraEngine::Editor::GameViewUpdatePath::ContentFree)
+		{
+			RenderSystem::Instance().SetGameViewSuppressed(true);
+			const char* message = isAssetPrefabEditing
+				? "Game View paused while editing prefab asset"
+				: "No objects with cameras in the hierarchy";
+			DrawGameViewPlaceholder(availableSize, message);
+			return;
+		}
+
 		const std::size_t cameraCount = isAssetPrefabEditing ? std::min<std::size_t>(cameras.size(), 1u) : cameras.size();
 		// Iterate over the active camera snapshot; asset-prefab preview uses the
 		// first active prefab camera only so one camera owns the Game View output.
@@ -222,35 +253,39 @@ void GameViewWindow::OnGui() {
 		}
 	}
 
+	const TerraEngine::Renderer::RendererRecoverySnapshot recoverySnapshot =
+		RenderSystem::Instance().GetLatestRendererRecoverySnapshot();
+	const bool recoveryActive = TerraEngine::Renderer::IsRendererRecoveryActive(recoverySnapshot.state);
+	const TerraEngine::Editor::GameViewUpdateDecision updateDecision =
+		TerraEngine::Editor::BuildGameViewUpdateDecision(true, hasCameras, recoveryActive, m_Stats);
+	if (updateDecision.path == TerraEngine::Editor::GameViewUpdatePath::RendererRecovery)
+	{
+		const std::string status = std::string("Renderer unavailable: ")
+			+ TerraEngine::Renderer::ToString(recoverySnapshot.state)
+			+ (recoverySnapshot.message.empty() ? std::string{} : " - " + recoverySnapshot.message);
+		DrawGameViewPlaceholder(availableSize, status.c_str());
+		return;
+	}
+
+	// Only an active, renderable Game View publishes target and viewport work.
+	// Hidden, collapsed, recovery, and camera-free paths leave the request empty.
+	RenderSystem::Instance().SetGameViewSuppressed(false);
+	const glm::uvec2 gameTargetSize(
+		static_cast<std::uint32_t>(std::max(1.0f, std::ceil(imageSize.x))),
+		static_cast<std::uint32_t>(std::max(1.0f, std::ceil(imageSize.y))));
+	RenderSystem::Instance().SetGameViewTargetSize(gameTargetSize);
+	UISystem::Instance().SetGameViewportSize(glm::vec2(imageSize.x, imageSize.y));
+
 	// --- Draw Render ---
-	void* texID = m_Owner->GetGameTextureID();
+	void* texID = (m_Owner != nullptr && updateDecision.queryRenderTexture) ? m_Owner->GetGameTextureID() : nullptr;
 	ImVec2 cursorPos = ImGui::GetCursorScreenPos();
 	ImDrawList* drawList = ImGui::GetWindowDrawList();
 	drawList->AddRectFilled(cursorPos, ImVec2(cursorPos.x + availableSize.x, cursorPos.y + availableSize.y), ImGui::GetColorU32(ImGuiCol_WindowBg));
 
 	ImVec2 imageMin = cursorPos;
 	ImVec2 imageMax = ImVec2(cursorPos.x + availableSize.x, cursorPos.y + availableSize.y);
-	const TerraEngine::Renderer::RendererRecoverySnapshot recoverySnapshot =
-		RenderSystem::Instance().GetLatestRendererRecoverySnapshot();
-	if (TerraEngine::Renderer::IsRendererRecoveryActive(recoverySnapshot.state))
-	{
-		// Keep Game View usable during device-loss recovery without presenting
-		// a stale render target or feeding bogus pointer input to runtime UI.
-		UISystem::Instance().SetEditorGameViewPointer(glm::vec2(-1.0f, -1.0f), false, false);
-		const std::string status = std::string("Renderer unavailable: ")
-			+ TerraEngine::Renderer::ToString(recoverySnapshot.state)
-			+ (recoverySnapshot.message.empty() ? std::string{} : " - " + recoverySnapshot.message);
-		const ImVec2 textSize = ImGui::CalcTextSize(status.c_str(), nullptr, false, availableSize.x - 32.0f);
-		ImGui::SetCursorScreenPos(ImVec2(
-			cursorPos.x + std::max(16.0f, (availableSize.x - textSize.x) * 0.5f),
-			cursorPos.y + std::max(16.0f, (availableSize.y - textSize.y) * 0.5f)));
-		ImGui::PushTextWrapPos(cursorPos.x + availableSize.x - 16.0f);
-		ImGui::TextUnformatted(status.c_str());
-		ImGui::PopTextWrapPos();
-		return;
-	}
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (texID && hasCameras) {
+	if (texID && hasCameras && updateDecision.publishRuntimePointer) {
 		float xOffset = (availableSize.x - imageSize.x) * 0.5f;
 		float yOffset = (availableSize.y - imageSize.y) * 0.5f;
 		imageMin = ImVec2(cursorPos.x + xOffset, cursorPos.y + yOffset);
@@ -305,9 +340,12 @@ void GameViewWindow::OnGui() {
 	// while the right-side Stats panel reads the completed draw counters.
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (m_Stats) {
+	if (updateDecision.collectRenderStats) {
 		RenderStatsSnapshot stats{};
-		const bool statsReady = (m_Owner != nullptr) && m_Owner->TryGetGameViewRenderStats(stats) && texID != nullptr && hasCameras;
+		const bool statsReady = texID != nullptr
+			&& hasCameras
+			&& (m_Owner != nullptr)
+			&& m_Owner->TryGetGameViewRenderStats(stats);
 
 		std::array<std::string, 5> lines;
 		if (statsReady) {

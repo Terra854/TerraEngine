@@ -4,6 +4,10 @@
 #include "Core/Scheduling/FrameWorkload.h"
 #include "EditorAutomationService.h"
 #include "Engine/Core/Object/ObjectManager.h"
+#include "Physics/PhysicsDiagnostics.h"
+
+#include <memory>
+#include <vector>
 
 namespace TerraEngine::EditorTests {
 	void RegisterFullParallelFrameDiagnosticsTests(TestRegistry& registry)
@@ -71,6 +75,33 @@ namespace TerraEngine::EditorTests {
 			context.Expect(component != nullptr, "Edited object should still own the sky component.");
 			context.ExpectEqual(std::string("Textures/Sky/ProtectedCommit.tetf"), component->sourceAsset, "Protected reflection handler should update the reflected property.");
 			ObjectManager::instance().clear();
+		});
+
+		registry.Add("Editor.FullParallelFrame.InactiveDiagnosticsDoNotConsumeForeignDebugPackets", [](TestContext& context) {
+			// Packet selection is the cross-window boundary: an inactive diagnostics
+			// view must neither request provider work nor expose another world's data.
+			TerraEngine::Physics::PhysicsDebugPacketHistory history{2U};
+			const TerraEngine::Physics::PhysicsWorldHandle activeWorld{{700U}, 1U};
+			const TerraEngine::Physics::PhysicsWorldHandle inactiveWorld{{701U}, 1U};
+			auto packet = std::make_shared<TerraEngine::Physics::PhysicsDebugPacket>();
+			packet->world = activeWorld;
+			packet->producedTick = 3U;
+			packet->expiryTick = 8U;
+			packet->lines = std::make_shared<std::vector<TerraEngine::Physics::PhysicsDebugLine>>(4U);
+			history.Publish(std::move(packet));
+
+			context.Expect(history.Select(inactiveWorld, 3U).empty(),
+				"An inactive or unrelated editor window must not consume debug packets published by the active physics world.");
+			TerraEngine::Physics::PhysicsDebugDisplaySelection disabled;
+			disabled.showLines = false;
+			disabled.showTriangles = false;
+			disabled.showContacts = false;
+			disabled.showConstraints = false;
+			disabled.showCharacterSupport = false;
+			disabled.showRecentQueries = false;
+			const auto selected = history.Select(activeWorld, 3U, disabled);
+			context.Expect(selected.size() == 1U && selected.front()->lines && selected.front()->lines->size() == 4U,
+				"Disabling diagnostics must change only presentation selection; it must not mutate or republish the immutable physics packet.");
 		});
 	}
 }
