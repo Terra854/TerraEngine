@@ -8,6 +8,7 @@
 #include "../Framework/EditorWindow.h"
 #include "../Project/ProjectSettingsMetadata.h"
 
+#include <cstddef>
 #include <string>
 #include <optional>
 
@@ -59,5 +60,8 @@ private:
 	std::optional<TerraEngine::Editor::ProjectSettings::PhysicsSettingsPublicationRequest> m_PendingPhysicsSettingsRequest;
 	std::uint64_t m_NextPhysicsSettingsRequestSequence = 0;
 	bool m_PhysicsSettingsLoaded = false;
+	// The fixed 32-slot runtime layout stays internal while the editor presents
+	// one compact, readable layer editor instead of expanding every raw record.
+	std::size_t m_SelectedPhysicsLayerIndex = 0;
 	TerraEngine::Physics::PhysicsSettings m_PhysicsSettings = TerraEngine::Physics::PhysicsSettings::Defaults();
 };

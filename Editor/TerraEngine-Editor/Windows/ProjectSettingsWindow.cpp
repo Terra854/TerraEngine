@@ -666,27 +666,94 @@ void ProjectSettingsWindow::DrawPhysicsCategory()
 	if (ImGui::SliderInt("Position Iterations", &positionIterations, 1, 64)) { candidate.positionIterations = static_cast<std::uint32_t>(positionIterations); changed = true; }
 
 	ImGui::SeparatorText("Collision Layers");
-	for (std::size_t index = 0; index < candidate.layers.size(); ++index)
+	ImGui::TextWrapped("Select a layer to edit its name and collision relationships. Stable IDs remain fixed so existing components keep their references.");
+	m_SelectedPhysicsLayerIndex = std::min(m_SelectedPhysicsLayerIndex, candidate.layers.size() - 1U);
+	const float layerListHeight = ImGui::GetTextLineHeightWithSpacing() * 9.0F;
+	if (ImGui::BeginChild("PhysicsCollisionLayerList", ImVec2(0.0F, layerListHeight), true))
 	{
-		auto& layer = candidate.layers[index];
-		ImGui::PushID(static_cast<int>(index));
-		char name[128]{};
-		CopyStringToBuffer(layer.name, name, sizeof(name));
-		if (ImGui::InputText("Name", name, sizeof(name)))
+		if (ImGui::BeginTable("PhysicsCollisionLayerRows", 3,
+			ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp))
 		{
-			const auto impact = TerraEngine::Editor::ProjectSettings::PreflightPhysicsLayerRename(m_PhysicsSettings, index, name, CountPhysicsLayerReferences(layer.id));
-			if (impact.accepted) { layer.name = name; changed = true; }
-			else { m_ValidationMessage = impact.message; }
+			ImGui::TableSetupColumn("ID", ImGuiTableColumnFlags_WidthFixed, 42.0F);
+			ImGui::TableSetupColumn("Layer", ImGuiTableColumnFlags_WidthStretch);
+			ImGui::TableSetupColumn("State", ImGuiTableColumnFlags_WidthFixed, 70.0F);
+			ImGui::TableHeadersRow();
+			for (std::size_t index = 0; index < candidate.layers.size(); ++index)
+			{
+				const auto& listedLayer = candidate.layers[index];
+				ImGui::PushID(static_cast<int>(index));
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				ImGui::TextDisabled("%02u", static_cast<unsigned>(listedLayer.id));
+				ImGui::TableSetColumnIndex(1);
+				if (ImGui::Selectable(listedLayer.name.c_str(), m_SelectedPhysicsLayerIndex == index,
+					ImGuiSelectableFlags_SpanAllColumns))
+				{
+					m_SelectedPhysicsLayerIndex = index;
+				}
+				ImGui::TableSetColumnIndex(2);
+				ImGui::TextDisabled("%s", listedLayer.enabled ? "Enabled" : "Disabled");
+				ImGui::PopID();
+			}
+			ImGui::EndTable();
 		}
-		ImGui::SameLine(); ImGui::TextDisabled("ID %u (stable)", static_cast<unsigned>(layer.id));
-		changed |= ImGui::Checkbox("Enabled", &layer.enabled);
-		int broadPhase = static_cast<int>(layer.broadPhaseGroup);
-		if (ImGui::SliderInt("Broad Phase Group", &broadPhase, 0, 31)) { layer.broadPhaseGroup = static_cast<std::uint8_t>(broadPhase); changed = true; }
-		// The mask is project-owned pair filtering. Clearing an impossible pair
-		// keeps it out of narrow phase and event work in Play Mode and exports.
-		changed |= ImGui::InputScalar("Collides With Mask", ImGuiDataType_U32,
-			&layer.collisionMask, nullptr, nullptr, "%08X", ImGuiInputTextFlags_CharsHexadecimal);
-		ImGui::PopID();
+	}
+	ImGui::EndChild();
+
+	auto& selectedLayer = candidate.layers[m_SelectedPhysicsLayerIndex];
+	ImGui::SeparatorText("Selected Layer");
+	char layerName[128]{};
+	CopyStringToBuffer(selectedLayer.name, layerName, sizeof(layerName));
+	if (ImGui::InputText("Name", layerName, sizeof(layerName)))
+	{
+		const auto impact = TerraEngine::Editor::ProjectSettings::PreflightPhysicsLayerRename(
+			m_PhysicsSettings,
+			m_SelectedPhysicsLayerIndex,
+			layerName,
+			CountPhysicsLayerReferences(selectedLayer.id));
+		if (impact.accepted) { selectedLayer.name = layerName; changed = true; }
+		else { m_ValidationMessage = impact.message; }
+	}
+	ImGui::TextDisabled("Stable ID: %u", static_cast<unsigned>(selectedLayer.id));
+	changed |= ImGui::Checkbox("Enabled", &selectedLayer.enabled);
+	ShowOptionTooltip("Disabling a layer prevents every body assigned to it from producing collision pairs.");
+
+	ImGui::TextUnformatted("Collides With");
+	ImGui::TextDisabled("Changing a checkbox updates both layers so the runtime's symmetric collision policy stays predictable.");
+	const float pairListHeight = ImGui::GetTextLineHeightWithSpacing() * 8.0F;
+	if (ImGui::BeginChild("PhysicsCollisionPairList", ImVec2(0.0F, pairListHeight), true))
+	{
+		for (std::size_t otherIndex = 0; otherIndex < candidate.layers.size(); ++otherIndex)
+		{
+			const auto& otherLayer = candidate.layers[otherIndex];
+			bool collides = TerraEngine::Physics::PhysicsSettings::LayersCanCollide(
+				selectedLayer.id,
+				selectedLayer.collisionMask,
+				otherLayer.id,
+				otherLayer.collisionMask);
+			ImGui::PushID(static_cast<int>(otherIndex));
+			if (ImGui::Checkbox(otherLayer.name.c_str(), &collides))
+			{
+				TerraEngine::Editor::ProjectSettings::SetPhysicsLayerPairCollision(
+					candidate, m_SelectedPhysicsLayerIndex, otherIndex, collides);
+				changed = true;
+			}
+			ImGui::SameLine();
+			ImGui::TextDisabled("ID %u", static_cast<unsigned>(otherLayer.id));
+			ImGui::PopID();
+		}
+	}
+	ImGui::EndChild();
+
+	if (ImGui::CollapsingHeader("Advanced Collision Layer Settings"))
+	{
+		int broadPhase = static_cast<int>(selectedLayer.broadPhaseGroup);
+		if (ImGui::SliderInt("Broad Phase Group", &broadPhase, 0, 31))
+		{
+			selectedLayer.broadPhaseGroup = static_cast<std::uint8_t>(broadPhase);
+			changed = true;
+		}
+		ShowOptionTooltip("Broad-phase groups are a performance partition. Leave layers in group 0 unless profiling demonstrates a deliberate partition is needed.");
 	}
 
 	ImGui::SeparatorText("Queries and Debug");

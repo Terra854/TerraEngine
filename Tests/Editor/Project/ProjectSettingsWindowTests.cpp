@@ -96,5 +96,43 @@ namespace TerraEngine::EditorTests
 			context.Expect(residencySource.find("Enable Loaded Resource Cleanup") == std::string::npos, "Resource Residency should remain focused on diagnostics after policy controls move.");
 			context.Expect(residencySource.find("Diagnostics Filters") != std::string::npos, "Window-local diagnostic filters should stay in Resource Residency.");
 		});
+
+		registry.Add("Editor.ProjectSettings.CollisionLayerPairsRemainSymmetric", [](TestContext& context) {
+			auto settings = TerraEngine::Physics::PhysicsSettings::Defaults();
+			settings.layers[1].collisionMask = 0U;
+			settings.layers[2].collisionMask = 0U;
+
+			context.Expect(
+				TerraEngine::Editor::ProjectSettings::SetPhysicsLayerPairCollision(settings, 1U, 2U, true),
+				"A valid collision-layer pair should be editable.");
+			context.Expect((settings.layers[1].collisionMask & (1U << settings.layers[2].id)) != 0U,
+				"Enabling a pair should add the second layer to the first mask.");
+			context.Expect((settings.layers[2].collisionMask & (1U << settings.layers[1].id)) != 0U,
+				"Enabling a pair should add the first layer to the second mask.");
+
+			TerraEngine::Editor::ProjectSettings::SetPhysicsLayerPairCollision(settings, 1U, 2U, false);
+			context.Expect(!TerraEngine::Physics::PhysicsSettings::LayersCanCollide(
+				settings.layers[1].id,
+				settings.layers[1].collisionMask,
+				settings.layers[2].id,
+				settings.layers[2].collisionMask),
+				"Disabling a pair should remove the relationship from both masks.");
+			context.Expect(
+				!TerraEngine::Editor::ProjectSettings::SetPhysicsLayerPairCollision(settings, 1U, settings.layers.size(), true),
+				"An out-of-range collision-layer pair should be rejected without mutation.");
+		});
+
+		registry.Add("Editor.ProjectSettings.CollisionLayerEditorHidesRawMasks", [](TestContext& context) {
+			const std::string projectSettingsSource =
+				ReadProjectSourceFile("Editor/TerraEngine-Editor/Windows/ProjectSettingsWindow.cpp");
+			context.Expect(projectSettingsSource.find("PhysicsCollisionLayerList") != std::string::npos,
+				"Collision layers should use one compact selectable list.");
+			context.Expect(projectSettingsSource.find("PhysicsCollisionPairList") != std::string::npos,
+				"The selected layer should expose readable collision-pair checkboxes.");
+			context.Expect(projectSettingsSource.find("Collides With Mask") == std::string::npos,
+				"The Project Settings UI should not expose a hexadecimal implementation mask.");
+			context.Expect(projectSettingsSource.find("Advanced Collision Layer Settings") != std::string::npos,
+				"Broad-phase tuning should stay behind an advanced section.");
+		});
 	}
 }

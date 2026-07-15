@@ -121,6 +121,37 @@ namespace TerraEngine::Editor::ProjectSettings
 				: "The layer ID remains stable; existing component references continue to target this layer." };
 	}
 
+	// Collision acceptance is symmetric in the runtime: both layers must include
+	// the other layer's stable ID. Keep the authoring masks synchronized so one
+	// checkbox always describes the behavior users will actually see in Play Mode.
+	inline bool SetPhysicsLayerPairCollision(
+		TerraEngine::Physics::PhysicsSettings& settings,
+		std::size_t firstLayerIndex,
+		std::size_t secondLayerIndex,
+		bool shouldCollide)
+	{
+		if (firstLayerIndex >= settings.layers.size() || secondLayerIndex >= settings.layers.size())
+		{
+			return false;
+		}
+
+		auto& firstLayer = settings.layers[firstLayerIndex];
+		auto& secondLayer = settings.layers[secondLayerIndex];
+		const std::uint32_t secondLayerBit = 1U << secondLayer.id;
+		const std::uint32_t firstLayerBit = 1U << firstLayer.id;
+		if (shouldCollide)
+		{
+			firstLayer.collisionMask |= secondLayerBit;
+			secondLayer.collisionMask |= firstLayerBit;
+		}
+		else
+		{
+			firstLayer.collisionMask &= ~secondLayerBit;
+			secondLayer.collisionMask &= ~firstLayerBit;
+		}
+		return true;
+	}
+
 	inline std::string NormalizeSearchText(std::string_view text)
 	{
 		std::string normalized;
