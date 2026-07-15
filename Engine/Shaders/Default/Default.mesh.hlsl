@@ -50,6 +50,10 @@ static const uint kTaskBatchSize = 32u;
 struct TaskPayload
 {
 	uint meshletIndices[kTaskBatchSize];
+	// The task shader resolves page ownership before culling and compaction.
+	// Preserve that descriptor id with each visible meshlet so one draw can emit
+	// a run of independently uploaded page packets safely.
+	uint packetDescriptorIndices[kTaskBatchSize];
 };
 
 [[vk::binding(2, 0)]] StructuredBuffer<FrameCullingData> frameCullingData;
@@ -170,16 +174,21 @@ uint LoadVirtualGeometryBufferWord(uint bufferIndex, uint wordOffset, uint fallb
 	return globalBuffers[NonUniformResourceIndex(bufferIndex)][wordOffset];
 }
 
-uint LoadVirtualGeometryPagePayloadDescriptorWord(uint descriptorWord, uint fallbackValue)
+uint LoadVirtualGeometryPagePayloadDescriptorWordAt(uint packetDescriptorIndex, uint descriptorWord, uint fallbackValue)
 {
-	const uint packetOffset = SceneUniforms.virtualGeometryPacketDescriptorIndex == kInvalidVirtualGeometryBufferIndex
-		? SceneUniforms.selectedVirtualClusterOffset
-		: SceneUniforms.virtualGeometryPacketDescriptorIndex;
-	const uint wordOffset = packetOffset * kVirtualGeometryPayloadDescriptorStrideWords + descriptorWord;
+	const uint wordOffset = packetDescriptorIndex * kVirtualGeometryPayloadDescriptorStrideWords + descriptorWord;
 	return LoadVirtualGeometryBufferWord(
 		SceneUniforms.virtualGeometryPagePayloadBufferIndex,
 		wordOffset,
 		fallbackValue);
+}
+
+uint LoadVirtualGeometryPagePayloadDescriptorWord(uint descriptorWord, uint fallbackValue)
+{
+	const uint packetDescriptorIndex = SceneUniforms.virtualGeometryPacketDescriptorIndex == kInvalidVirtualGeometryBufferIndex
+		? SceneUniforms.selectedVirtualClusterOffset
+		: SceneUniforms.virtualGeometryPacketDescriptorIndex;
+	return LoadVirtualGeometryPagePayloadDescriptorWordAt(packetDescriptorIndex, descriptorWord, fallbackValue);
 }
 
 bool IsVirtualGeometryPageLocalSource(uint payloadSource)
@@ -196,7 +205,7 @@ uint LoadPageLocalPayloadWord(uint wordOffset, uint fallbackValue)
 		fallbackValue);
 }
 
-bool TryLoadPageLocalPayloadDescriptor(out PageLocalPayloadDescriptor descriptor)
+bool TryLoadPageLocalPayloadDescriptorAt(uint packetDescriptorIndex, out PageLocalPayloadDescriptor descriptor)
 {
 	descriptor.vertexWordOffset = 0u;
 	descriptor.vertexWordSize = 0u;
@@ -220,28 +229,36 @@ bool TryLoadPageLocalPayloadDescriptor(out PageLocalPayloadDescriptor descriptor
 		return false;
 	}
 
-	descriptor.vertexWordOffset = LoadVirtualGeometryPagePayloadDescriptorWord(kVirtualGeometryPayloadDescriptorVertexWordOffset, 0u);
-	descriptor.vertexWordSize = LoadVirtualGeometryPagePayloadDescriptorWord(kVirtualGeometryPayloadDescriptorVertexWordSize, 0u);
-	descriptor.primitiveWordOffset = LoadVirtualGeometryPagePayloadDescriptorWord(kVirtualGeometryPayloadDescriptorPrimitiveWordOffset, 0u);
-	descriptor.primitiveByteSize = LoadVirtualGeometryPagePayloadDescriptorWord(kVirtualGeometryPayloadDescriptorPrimitiveByteSize, 0u);
-	descriptor.remapWordOffset = LoadVirtualGeometryPagePayloadDescriptorWord(kVirtualGeometryPayloadDescriptorRemapWordOffset, 0u);
-	descriptor.remapCount = LoadVirtualGeometryPagePayloadDescriptorWord(kVirtualGeometryPayloadDescriptorRemapCount, 0u);
-	descriptor.meshletWordOffset = LoadVirtualGeometryPagePayloadDescriptorWord(kVirtualGeometryPayloadDescriptorMeshletWordOffset, 0u);
-	descriptor.meshletCount = LoadVirtualGeometryPagePayloadDescriptorWord(kVirtualGeometryPayloadDescriptorMeshletCount, 0u);
-	descriptor.boundsWordOffset = LoadVirtualGeometryPagePayloadDescriptorWord(kVirtualGeometryPayloadDescriptorBoundsWordOffset, 0u);
-	descriptor.boundsCount = LoadVirtualGeometryPagePayloadDescriptorWord(kVirtualGeometryPayloadDescriptorBoundsCount, 0u);
-	descriptor.decodeWordOffset = LoadVirtualGeometryPagePayloadDescriptorWord(kVirtualGeometryPayloadDescriptorDecodeWordOffset, 0u);
-	descriptor.materialWordOffset = LoadVirtualGeometryPagePayloadDescriptorWord(kVirtualGeometryPayloadDescriptorMaterialWordOffset, 0u);
-	descriptor.materialCount = LoadVirtualGeometryPagePayloadDescriptorWord(kVirtualGeometryPayloadDescriptorMaterialCount, 0u);
-	descriptor.localVertexCount = LoadVirtualGeometryPagePayloadDescriptorWord(kVirtualGeometryPayloadDescriptorLocalVertexCount, 0u);
-	descriptor.localPrimitiveByteCount = LoadVirtualGeometryPagePayloadDescriptorWord(kVirtualGeometryPayloadDescriptorLocalPrimitiveByteCount, 0u);
-	descriptor.localRemapEncoding = LoadVirtualGeometryPagePayloadDescriptorWord(kVirtualGeometryPayloadDescriptorLocalRemapEncoding, 0u);
+	descriptor.vertexWordOffset = LoadVirtualGeometryPagePayloadDescriptorWordAt(packetDescriptorIndex, kVirtualGeometryPayloadDescriptorVertexWordOffset, 0u);
+	descriptor.vertexWordSize = LoadVirtualGeometryPagePayloadDescriptorWordAt(packetDescriptorIndex, kVirtualGeometryPayloadDescriptorVertexWordSize, 0u);
+	descriptor.primitiveWordOffset = LoadVirtualGeometryPagePayloadDescriptorWordAt(packetDescriptorIndex, kVirtualGeometryPayloadDescriptorPrimitiveWordOffset, 0u);
+	descriptor.primitiveByteSize = LoadVirtualGeometryPagePayloadDescriptorWordAt(packetDescriptorIndex, kVirtualGeometryPayloadDescriptorPrimitiveByteSize, 0u);
+	descriptor.remapWordOffset = LoadVirtualGeometryPagePayloadDescriptorWordAt(packetDescriptorIndex, kVirtualGeometryPayloadDescriptorRemapWordOffset, 0u);
+	descriptor.remapCount = LoadVirtualGeometryPagePayloadDescriptorWordAt(packetDescriptorIndex, kVirtualGeometryPayloadDescriptorRemapCount, 0u);
+	descriptor.meshletWordOffset = LoadVirtualGeometryPagePayloadDescriptorWordAt(packetDescriptorIndex, kVirtualGeometryPayloadDescriptorMeshletWordOffset, 0u);
+	descriptor.meshletCount = LoadVirtualGeometryPagePayloadDescriptorWordAt(packetDescriptorIndex, kVirtualGeometryPayloadDescriptorMeshletCount, 0u);
+	descriptor.boundsWordOffset = LoadVirtualGeometryPagePayloadDescriptorWordAt(packetDescriptorIndex, kVirtualGeometryPayloadDescriptorBoundsWordOffset, 0u);
+	descriptor.boundsCount = LoadVirtualGeometryPagePayloadDescriptorWordAt(packetDescriptorIndex, kVirtualGeometryPayloadDescriptorBoundsCount, 0u);
+	descriptor.decodeWordOffset = LoadVirtualGeometryPagePayloadDescriptorWordAt(packetDescriptorIndex, kVirtualGeometryPayloadDescriptorDecodeWordOffset, 0u);
+	descriptor.materialWordOffset = LoadVirtualGeometryPagePayloadDescriptorWordAt(packetDescriptorIndex, kVirtualGeometryPayloadDescriptorMaterialWordOffset, 0u);
+	descriptor.materialCount = LoadVirtualGeometryPagePayloadDescriptorWordAt(packetDescriptorIndex, kVirtualGeometryPayloadDescriptorMaterialCount, 0u);
+	descriptor.localVertexCount = LoadVirtualGeometryPagePayloadDescriptorWordAt(packetDescriptorIndex, kVirtualGeometryPayloadDescriptorLocalVertexCount, 0u);
+	descriptor.localPrimitiveByteCount = LoadVirtualGeometryPagePayloadDescriptorWordAt(packetDescriptorIndex, kVirtualGeometryPayloadDescriptorLocalPrimitiveByteCount, 0u);
+	descriptor.localRemapEncoding = LoadVirtualGeometryPagePayloadDescriptorWordAt(packetDescriptorIndex, kVirtualGeometryPayloadDescriptorLocalRemapEncoding, 0u);
 	return descriptor.vertexWordSize != 0u
 		&& descriptor.primitiveByteSize != 0u
 		&& descriptor.remapCount != 0u
 		&& descriptor.meshletCount != 0u
 		&& descriptor.boundsCount >= descriptor.meshletCount
 		&& descriptor.localVertexCount != 0u;
+}
+
+bool TryLoadPageLocalPayloadDescriptor(out PageLocalPayloadDescriptor descriptor)
+{
+	const uint packetDescriptorIndex = SceneUniforms.virtualGeometryPacketDescriptorIndex == kInvalidVirtualGeometryBufferIndex
+		? SceneUniforms.selectedVirtualClusterOffset
+		: SceneUniforms.virtualGeometryPacketDescriptorIndex;
+	return TryLoadPageLocalPayloadDescriptorAt(packetDescriptorIndex, descriptor);
 }
 
 bool TryUsePageLocalGeometry(out PageLocalPayloadDescriptor descriptor)
@@ -775,8 +792,10 @@ void main(
 	out indices uint3 outputTriangles[kMaxMeshletTriangles])
 {
 	const uint visibleIndex = groupId.x;
+	const uint packetDescriptorIndex = taskPayload.packetDescriptorIndices[visibleIndex];
 	PageLocalPayloadDescriptor pageDescriptor;
-	const bool pageLocalGeometry = TryUsePageLocalGeometry(pageDescriptor);
+	const bool pageLocalGeometry = IsVirtualGeometryPageLocalSource(SceneUniforms.virtualGeometryPayloadSource)
+		&& TryLoadPageLocalPayloadDescriptorAt(packetDescriptorIndex, pageDescriptor);
 	// Choose the payload source before reading decode metadata. Resident page
 	// packets are self-contained and must not require a valid full-owner decode
 	// buffer merely because the shader also supports legacy owner-mesh draws.
@@ -798,20 +817,32 @@ void main(
 	const uint selectedMeshletCount = SceneUniforms.virtualMeshletCount == 0u
 		? (meshletCount - selectedMeshletOffset)
 		: min(SceneUniforms.virtualMeshletCount, meshletCount - selectedMeshletOffset);
-	// The selected-cluster packet describes the exact CPU cluster cut. This draw
-	// emits one selected cluster range rather than a whole-object envelope.
-	if (visibleIndex >= selectedMeshletCount)
-	{
-		SetMeshOutputCounts(0, 0);
-		return;
-	}
-
 	const uint meshletIndex = (SceneUniforms.taskCullingEnabled != 0u)
 		? taskPayload.meshletIndices[visibleIndex]
 		: selectedMeshletOffset + visibleIndex;
 	if (pageLocalGeometry)
 	{
-		EmitPageLocalMeshlet(pageDescriptor, meshletIndex, outputVertices, outputTriangles);
+		// Page-local indices are always resolved by the task stage. This remains
+		// true when culling is disabled because task compaction still establishes
+		// the packet descriptor and local meshlet pair for the mesh stage.
+		// Validate the resolved packet-local index, not visibleIndex. visibleIndex
+		// is only the 0-31 output slot within this task group and can exceed a later
+		// packet's meshlet count even when its resolved local index is valid.
+		const uint pageLocalMeshletIndex = taskPayload.meshletIndices[visibleIndex];
+		if (pageLocalMeshletIndex >= pageDescriptor.meshletCount)
+		{
+			SetMeshOutputCounts(0, 0);
+			return;
+		}
+		EmitPageLocalMeshlet(pageDescriptor, pageLocalMeshletIndex, outputVertices, outputTriangles);
+		return;
+	}
+
+	// Owner-mesh draws still use one continuous selected range, so their task
+	// output slot must stay within the draw's selected meshlet count.
+	if (visibleIndex >= selectedMeshletCount)
+	{
+		SetMeshOutputCounts(0, 0);
 		return;
 	}
 

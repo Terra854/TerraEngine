@@ -280,12 +280,18 @@ namespace TerraEngine::Tests
 			context.Expect(ShaderContains(taskShader, "LoadPageLocalMeshletBounds"), "Task shader should cull resident pages from page-local bounds.");
 			context.Expect(ShaderContains(taskShader, "DecodePageLocalMeshletPosition"), "Task shader Hi-Z projection should reconstruct positions from page-local vertex/remap streams.");
 			context.Expect(ShaderContains(taskShader, "SceneUniforms.virtualGeometryPacketDescriptorIndex"), "Task shader should address page-local descriptors by packet descriptor id, not selected cluster row.");
+			context.Expect(ShaderContains(taskShader, "TryResolvePageLocalMeshlet"), "Task shader should resolve each meshlet in a batched page-local packet run.");
+			context.Expect(ShaderContains(taskShader, "gTaskPayload.packetDescriptorIndices[visibleCount]"), "Task payloads should preserve the descriptor selected for every compacted meshlet.");
 			context.Expect(ShaderContains(taskShader, "kVirtualGeometryPayloadDescriptorMaterialWordOffset"), "Task shader descriptor layout should keep page-local material stream slots.");
 			context.Expect(ShaderContains(meshShader, "TryUsePageLocalGeometry"), "Mesh shader should choose page-local geometry for resident page and fallback packets.");
 			context.Expect(ShaderContains(meshShader, "LoadPageLocalPackedVertexWord"), "Mesh shader should emit resident pages from page-local packed vertices.");
 			context.Expect(ShaderContains(meshShader, "LoadPageLocalPrimitiveIndex"), "Mesh shader should emit resident pages from page-local primitive indices.");
 			context.Expect(ShaderContains(meshShader, "LoadPageLocalMeshletRecord"), "Mesh shader should emit resident pages from page-local meshlet records.");
 			context.Expect(ShaderContains(meshShader, "SceneUniforms.virtualGeometryPacketDescriptorIndex"), "Mesh shader should address page-local descriptors by packet descriptor id, not selected cluster row.");
+			context.Expect(ShaderContains(meshShader, "taskPayload.packetDescriptorIndices[visibleIndex]"), "Mesh shader should consume the per-meshlet descriptor chosen by the task shader.");
+			context.Expect(ShaderContains(meshShader, "TryLoadPageLocalPayloadDescriptorAt"), "Mesh shader should load independently addressed descriptors inside a page-local packet run.");
+			context.Expect(ShaderContains(meshShader, "const uint pageLocalMeshletIndex = taskPayload.meshletIndices[visibleIndex];"), "Mesh shader should preserve the packet-local meshlet index resolved by the task stage.");
+			context.Expect(ShaderContains(meshShader, "if (pageLocalMeshletIndex >= pageDescriptor.meshletCount)"), "Mesh shader should validate the resolved packet-local index instead of the task-group output slot.");
 			context.Expect(ShaderContains(meshShader, "kVirtualGeometryPayloadDescriptorMaterialWordOffset"), "Mesh shader descriptor layout should keep page-local material stream slots.");
 			context.Expect(ShaderContains(vulkanResources, "BuildVirtualGeometryPageLocalPayloadWords"), "Vulkan should synthesize shader-readable page-local stream payload words.");
 			context.Expect(ShaderContains(vulkanResources, "AppendVirtualGeometryPageLocalPacketPayload"), "Vulkan should append page-local stream bytes for every resident page packet.");
@@ -326,7 +332,7 @@ namespace TerraEngine::Tests
 				"Task shader should confine owner meshlet records to the non-page-local branch.");
 
 			const std::size_t taskBoundsDeclaration = taskShader.find("MeshletBounds bounds;", taskShader.find("void main(uint3 groupId"));
-			const std::size_t taskPageBounds = taskShader.find("bounds = LoadPageLocalMeshletBounds(pageDescriptor, meshletIndex);", taskBoundsDeclaration);
+			const std::size_t taskPageBounds = taskShader.find("bounds = LoadPageLocalMeshletBounds(activePageDescriptor, meshletIndex);", taskBoundsDeclaration);
 			const std::size_t taskBoundsElse = taskShader.find("else", taskPageBounds);
 			const std::size_t taskOwnerBounds = taskShader.find("bounds = meshletBounds[meshletIndex];", taskPageBounds);
 			context.Expect(
@@ -345,16 +351,22 @@ namespace TerraEngine::Tests
 					&& meshDecodeElse < meshOwnerDecode,
 				"Mesh shader should confine owner decode metadata to the non-page-local branch.");
 
-			const std::size_t pageEmit = meshShader.find("EmitPageLocalMeshlet(pageDescriptor, meshletIndex, outputVertices, outputTriangles);");
+			const std::size_t pageIndex = meshShader.find("const uint pageLocalMeshletIndex = taskPayload.meshletIndices[visibleIndex];");
+			const std::size_t pageIndexValidation = meshShader.find("if (pageLocalMeshletIndex >= pageDescriptor.meshletCount)", pageIndex);
+			const std::size_t pageEmit = meshShader.find("EmitPageLocalMeshlet(pageDescriptor, pageLocalMeshletIndex, outputVertices, outputTriangles);", pageIndexValidation);
 			const std::size_t branchReturn = pageEmit == std::string::npos ? std::string::npos : meshShader.find("return;", pageEmit);
 			const std::size_t ownerEmit = meshShader.find("EmitMeshlet(meshletIndex, outputVertices, outputTriangles);", pageEmit);
 			context.Expect(
-				pageEmit != std::string::npos
+				pageIndex != std::string::npos
+					&& pageIndexValidation != std::string::npos
+					&& pageEmit != std::string::npos
 					&& branchReturn != std::string::npos
 					&& ownerEmit != std::string::npos
+					&& pageIndex < pageIndexValidation
+					&& pageIndexValidation < pageEmit
 					&& pageEmit < branchReturn
 					&& branchReturn < ownerEmit,
-				"Page-local mesh emission should return before the owner-mesh emission path can execute.");
+				"Page-local mesh emission should validate the resolved local index and return before owner-mesh emission can execute.");
 		});
 
 		registry.Add("VirtualGeometry.ShaderLayout.US2.PageLocalDrawsLaunchLocalMeshletRanges", [](TestContext& context) {

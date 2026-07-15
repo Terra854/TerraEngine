@@ -93,6 +93,10 @@ public:
 
 	// Return whether the object is considered active in the scene.
 	bool isObjectActive(const Object& obj) const;
+	// Return the effective runtime state after applying every ancestor's authored
+	// active flag. This leaves the child's serialized checkbox unchanged, so an
+	// authored-active child returns when its parent is enabled again.
+	bool isObjectActiveInHierarchy(const Object& obj) const;
 	// Set the object's active state in the scene.
 	void setObjectActive(const Object& obj, bool active);
 

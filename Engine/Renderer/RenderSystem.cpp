@@ -1608,31 +1608,30 @@ std::vector<ClusterWorkBatch> RenderSystem::BuildVirtualGeometryClusterBatches(
 			return source == VirtualGeometryPagePayloadSource::ResidentPagePayload
 				|| source == VirtualGeometryPagePayloadSource::ResidentFallbackPayload;
 		};
-		if (isPageLocalSource(previous.payloadSource) || isPageLocalSource(next.payloadSource))
-		{
-			// The first page-local shader path indexes one descriptor per draw.
-			// Keep resident page/fallback packets split until the task shader can
-			// iterate a packet run and switch stream descriptors per meshlet.
-			return false;
-		}
+		const bool pageLocalRun = isPageLocalSource(previous.payloadSource)
+			&& isPageLocalSource(next.payloadSource);
 		const bool compatibleOwner =
 			previous.viewId == next.viewId
 			&& previous.viewType == next.viewType
 			&& previous.meshId == next.meshId
 			&& previous.materialId == next.materialId
 			&& previous.selectedLod == next.selectedLod
-			&& previous.pageId == next.pageId
-			&& previous.fallbackPageId == next.fallbackPageId
 			&& previous.payloadSource == next.payloadSource
 			&& previous.emittedSource == next.emittedSource
-			&& previous.pagePayloadByteOffset == next.pagePayloadByteOffset
-			&& previous.pagePayloadByteSize == next.pagePayloadByteSize
-			&& previous.payloadBufferIndex == next.payloadBufferIndex
-			&& previous.payloadDescriptorIndex == next.payloadDescriptorIndex
 			&& previous.fallbackPacket == next.fallbackPacket
 			&& previous.packetId + 1u == next.packetId;
+		// Embedded draws still share one payload binding for their entire run.
+		// Page-local draws carry one descriptor id per emitted meshlet, so adjacent
+		// packets may safely cross page boundaries without multiplying CPU draws.
+		const bool compatiblePayload = pageLocalRun
+			|| (previous.pageId == next.pageId
+				&& previous.fallbackPageId == next.fallbackPageId
+				&& previous.pagePayloadByteOffset == next.pagePayloadByteOffset
+				&& previous.pagePayloadByteSize == next.pagePayloadByteSize
+				&& previous.payloadBufferIndex == next.payloadBufferIndex
+				&& previous.payloadDescriptorIndex == next.payloadDescriptorIndex);
 		const bool contiguousMeshlets = previous.meshletOffset + previous.meshletCount == next.meshletOffset;
-		return compatibleOwner && contiguousMeshlets;
+		return compatibleOwner && compatiblePayload && contiguousMeshlets;
 	};
 
 	auto startBatch = [&](std::size_t packetIndex) {
@@ -1745,28 +1744,28 @@ std::vector<GpuVirtualGeometryBatchDescriptor> RenderSystem::BuildGpuVirtualGeom
 			return source == VirtualGeometryPagePayloadSource::ResidentPagePayload
 				|| source == VirtualGeometryPagePayloadSource::ResidentFallbackPayload;
 		};
-		if (isPageLocalSource(previous.payloadSource) || isPageLocalSource(next.payloadSource))
-		{
-			// Keep GPU packet batches aligned with the CPU draw batches above.
-			// A resident page descriptor currently describes one selected packet,
-			// so merging packets would make the shader decode the wrong stream.
-			return false;
-		}
-		return previous.viewId == next.viewId
+		const bool pageLocalRun = isPageLocalSource(previous.payloadSource)
+			&& isPageLocalSource(next.payloadSource);
+		const bool compatibleOwner = previous.viewId == next.viewId
 			&& previous.viewType == next.viewType
 			&& previous.meshId == next.meshId
 			&& previous.materialId == next.materialId
 			&& previous.selectedLod == next.selectedLod
-			&& previous.pageId == next.pageId
-			&& previous.fallbackPageId == next.fallbackPageId
 			&& previous.payloadSource == next.payloadSource
 			&& previous.emittedSource == next.emittedSource
-			&& previous.pagePayloadByteOffset == next.pagePayloadByteOffset
-			&& previous.pagePayloadByteSize == next.pagePayloadByteSize
-			&& previous.payloadBufferIndex == next.payloadBufferIndex
-			&& previous.payloadDescriptorIndex == next.payloadDescriptorIndex
 			&& previous.flags == next.flags
-			&& previous.packetId + 1u == next.packetId
+			&& previous.packetId + 1u == next.packetId;
+		// Match the CPU batching contract. Page-local packet rows own their stream
+		// bindings independently; non-page-local runs still require one binding.
+		const bool compatiblePayload = pageLocalRun
+			|| (previous.pageId == next.pageId
+				&& previous.fallbackPageId == next.fallbackPageId
+				&& previous.pagePayloadByteOffset == next.pagePayloadByteOffset
+				&& previous.pagePayloadByteSize == next.pagePayloadByteSize
+				&& previous.payloadBufferIndex == next.payloadBufferIndex
+				&& previous.payloadDescriptorIndex == next.payloadDescriptorIndex);
+		return compatibleOwner
+			&& compatiblePayload
 			&& previous.meshletOffset + previous.meshletCount == next.meshletOffset;
 	};
 
@@ -4312,7 +4311,9 @@ void RenderSystem::Update(float deltaTime)
 					continue;
 				}
 
-				const bool objectActive = objectManager.isObjectActive(*object);
+				// Sky candidates use effective hierarchy activity so a disabled parent
+				// cannot leave its child sky or directional light active.
+				const bool objectActive = objectManager.isObjectActiveInHierarchy(*object);
 				const std::uint64_t entityValue = static_cast<std::uint32_t>(entity);
 				const std::uint64_t candidateBits = entityValue
 					^ (component->active ? 0x9e3779b97f4a7c15ULL : 0ULL)

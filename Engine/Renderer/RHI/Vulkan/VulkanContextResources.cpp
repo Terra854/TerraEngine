@@ -112,6 +112,34 @@ namespace
 		std::unordered_map<TerraEngine::UUID, std::uint64_t> bytesByMesh;
 	};
 
+	std::uint64_t BuildVirtualGeometryPagePayloadResourceSignature(
+		const std::vector<GpuVirtualGeometryPacketRecord>& packets)
+	{
+		std::uint64_t signature = TerraEngine::Renderer::Vulkan::BuildVirtualGeometryPagePayloadReuseSignature(packets);
+		auto hashValue = [&signature](std::uint64_t value) {
+			// Match the packet-signature mixer while adding the loaded resource
+			// identity that the pure upload planner cannot see.
+			signature ^= value + 0x9e3779b97f4a7c15ull + (signature << 6u) + (signature >> 2u);
+		};
+		for (const GpuVirtualGeometryPacketRecord& packet : packets)
+		{
+			const Mesh* mesh = ResourceManager::Instance().GetMesh(packet.meshId);
+			// ResourceManager replaces a loaded Mesh instance on reload. Including
+			// both object and backing-storage identity invalidates cached page bytes
+			// without hashing the full vertex stream every rendered frame.
+			hashValue(static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(mesh)));
+			if (mesh != nullptr)
+			{
+				hashValue(static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(mesh->storage.data())));
+				hashValue(mesh->storage.size());
+				hashValue(mesh->meshletRecords.size());
+				hashValue(mesh->meshletBounds.size());
+				hashValue(mesh->virtualGeometryPayloadGeneration);
+			}
+		}
+		return signature;
+	}
+
 	void AddVirtualGeometryPagePayloadBytes(
 		std::unordered_map<TerraEngine::UUID, std::uint64_t>& bytesByMesh,
 		const TerraEngine::UUID& meshId,
@@ -842,7 +870,6 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 	resources.viewType = viewType;
 	resources.viewId = viewId;
 	resources.live = !frameData.virtualGeometryGpuPackets.empty() || !frameData.virtualGeometryGpuBatches.empty();
-	resources.pagePayloadBytesByMesh.clear();
 	resources.retireAfterFrameId = frameId + static_cast<std::uint64_t>(MAX_FRAMES_IN_FLIGHT);
 	if (currentFrame < pendingVirtualGeometryPageRetirementsByFrame.size())
 	{
@@ -928,15 +955,6 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 		counterReadbackWords.push_back(readback.rejectedPackets);
 		counterReadbackWords.push_back(readback.failOpenPackets);
 	}
-	// Resident page/fallback packets now append a shader-decodable page-local
-	// virtual geometry payload after the descriptor table. Legacy and
-	// conservative fallback packets keep descriptor metadata only and continue
-	// through the owner mesh path.
-	// The page-local virtual geometry payload is the renderable stream source.
-	VirtualGeometryPageLocalPayloadBuildResult pagePayloadBuild =
-		BuildVirtualGeometryPageLocalPayloadWords(frameData.virtualGeometryGpuPackets);
-	std::vector<std::uint32_t>& pagePayloadWords = pagePayloadBuild.words;
-	resources.pagePayloadBytesByMesh = std::move(pagePayloadBuild.bytesByMesh);
 	ensureAndWriteBuffer(
 		resources.generatedSubmissionBuffer,
 		resources.generatedSubmissionCapacity,
@@ -951,13 +969,40 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 		sizeof(std::uint32_t),
 		counterReadbackWords.data(),
 		"Virtual Geometry Counter Readback Buffer");
-	ensureAndWriteBuffer(
-		resources.pagePayloadBuffer,
-		resources.pagePayloadCapacity,
-		pagePayloadWords.size(),
-		sizeof(std::uint32_t),
-		pagePayloadWords.data(),
-		"Virtual Geometry Physical Page Payload Descriptor Buffer");
+
+	// The page-local virtual geometry payload appends a shader-decodable stream
+	// after the packet descriptor table. Building that stream performs remapping
+	// and temporary allocations, so keep the result in this frame slot when
+	// the packet cut and loaded mesh instances are unchanged.
+	const std::uint64_t pagePayloadSignature =
+		BuildVirtualGeometryPagePayloadResourceSignature(frameData.virtualGeometryGpuPackets);
+	const bool reusePagePayload = TerraEngine::Renderer::Vulkan::CanReuseVirtualGeometryPagePayload(
+		resources.pagePayloadReuseSignature,
+		pagePayloadSignature,
+		resources.pagePayloadCacheValid,
+		resources.pagePayloadBuffer.buffer != VK_NULL_HANDLE);
+	if (!reusePagePayload)
+	{
+		VirtualGeometryPageLocalPayloadBuildResult pagePayloadBuild;
+		{
+			TERRAENGINE_PROFILE_SCOPE("Vulkan: Build Virtual Geometry Page Payload", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			pagePayloadBuild = BuildVirtualGeometryPageLocalPayloadWords(frameData.virtualGeometryGpuPackets);
+		}
+		resources.pagePayloadBytesByMesh = std::move(pagePayloadBuild.bytesByMesh);
+		{
+			TERRAENGINE_PROFILE_SCOPE("Vulkan: Upload Virtual Geometry Page Payload", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			ensureAndWriteBuffer(
+				resources.pagePayloadBuffer,
+				resources.pagePayloadCapacity,
+				pagePayloadBuild.words.size(),
+				sizeof(std::uint32_t),
+				pagePayloadBuild.words.data(),
+				"Virtual Geometry Physical Page Payload Descriptor Buffer");
+		}
+		resources.pagePayloadReuseSignature = pagePayloadSignature;
+		resources.pagePayloadCacheValid = resources.pagePayloadBuffer.buffer != VK_NULL_HANDLE
+			&& !pagePayloadBuild.words.empty();
+	}
 
 	auto publishBindlessBufferForCurrentFrame = [&](
 		std::uint32_t& bindlessIndex,

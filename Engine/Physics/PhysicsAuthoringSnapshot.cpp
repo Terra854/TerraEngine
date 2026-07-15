@@ -538,7 +538,9 @@ namespace TerraEngine::Physics {
 					CombineTransformRevision(0U, localTransformRevision)};
 			}
 			transforms[index] = resolved;
-			if(!objects.isObjectActive(entry.object)) continue;
+			// Physics follows effective hierarchy activation: disabling a parent
+			// removes every descendant body without rewriting child authoring data.
+			if(!objects.isObjectActiveInHierarchy(entry.object)) continue;
 
 			const PhysicsGeneration objectGeneration = static_cast<PhysicsGeneration>(
 				objects.getObjectLifetimeGeneration(entry.object));

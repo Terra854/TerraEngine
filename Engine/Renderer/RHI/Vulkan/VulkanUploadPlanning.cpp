@@ -1,5 +1,6 @@
 #include "VulkanUploadPlanning.h"
 
+#include <functional>
 #include <limits>
 #include <utility>
 
@@ -24,9 +25,53 @@ namespace
 			return VirtualGeometryEmittedPageSource::None;
 		}
 	}
+
+	void HashPagePayloadValue(std::uint64_t& signature, std::uint64_t value)
+	{
+		// This is a fast change detector rather than a security hash. Packet order
+		// is significant because descriptor rows are consumed in submission order.
+		signature ^= value + 0x9e3779b97f4a7c15ull + (signature << 6u) + (signature >> 2u);
+	}
 }
 
 namespace TerraEngine::Renderer::Vulkan {
+
+	std::uint64_t BuildVirtualGeometryPagePayloadReuseSignature(const std::vector<GpuVirtualGeometryPacketRecord>& packets)
+	{
+		std::uint64_t signature = 1469598103934665603ull;
+		HashPagePayloadValue(signature, packets.size());
+		for (const GpuVirtualGeometryPacketRecord& packet : packets)
+		{
+			// Include every field copied into the descriptor table or used to
+			// extract meshlet bytes. Frame ownership, transforms, and culling
+			// bounds deliberately stay out because they do not change this buffer.
+			HashPagePayloadValue(signature, packet.packetId);
+			HashPagePayloadValue(signature, static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(packet.meshId)));
+			HashPagePayloadValue(signature, packet.selectedLod);
+			HashPagePayloadValue(signature, packet.clusterId);
+			HashPagePayloadValue(signature, packet.meshletOffset);
+			HashPagePayloadValue(signature, packet.meshletCount);
+			HashPagePayloadValue(signature, packet.pageId);
+			HashPagePayloadValue(signature, packet.fallbackPageId);
+			HashPagePayloadValue(signature, static_cast<std::uint64_t>(packet.payloadSource));
+			HashPagePayloadValue(signature, static_cast<std::uint64_t>(packet.emittedSource));
+			HashPagePayloadValue(signature, packet.pagePayloadByteOffset);
+			HashPagePayloadValue(signature, packet.pagePayloadByteSize);
+			HashPagePayloadValue(signature, packet.payloadBufferIndex);
+			HashPagePayloadValue(signature, packet.payloadDescriptorIndex);
+			HashPagePayloadValue(signature, packet.flags);
+		}
+		return signature;
+	}
+
+	bool CanReuseVirtualGeometryPagePayload(
+		std::uint64_t cachedSignature,
+		std::uint64_t currentSignature,
+		bool cacheValid,
+		bool bufferAvailable)
+	{
+		return cacheValid && bufferAvailable && cachedSignature == currentSignature;
+	}
 
 	UploadPreparationPlan BuildUploadPreparationPlan(const RenderFrameSnapshot& snapshot, std::size_t payloadBudget)
 	{

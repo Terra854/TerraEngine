@@ -1389,7 +1389,9 @@ void SceneViewWindow::BuildSceneObjectMarkers(const glm::mat4& viewProjection, c
 		TerraEngine::Scene::SpatialObjectRecord spatial;
 		spatial.objectId = objectId;
 		spatial.entity = entity;
-		spatial.active = objectManager.isObjectActive(*object);
+		// Inherited inactivity also removes child markers from normal scene queries;
+		// the child's own authored checkbox remains available in the Inspector.
+		spatial.active = objectManager.isObjectActiveInHierarchy(*object);
 		spatial.isStatic = objectManager.isObjectStatic(*object);
 		spatial.categoryMask = TerraEngine::Scene::SpatialCategoryEditorSelectable;
 		spatial.worldBounds = bounds;

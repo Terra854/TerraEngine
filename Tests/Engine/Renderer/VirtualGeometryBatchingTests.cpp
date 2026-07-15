@@ -6,6 +6,7 @@
 #include "Renderer/RHI/Vulkan/VulkanRendererWorkCache.h"
 #include "Renderer/RHI/Vulkan/VulkanUploadPlanning.h"
 
+#include <iterator>
 #include <limits>
 
 namespace TerraEngine::Tests {
@@ -89,6 +90,132 @@ namespace {
 			context.ExpectEqual(500u, batches.front().packetCount, "One compatible contiguous packet run should collapse into one submitted batch.");
 			context.ExpectEqual(2000u, batches.front().submittedMeshlets, "Submitted meshlets should preserve the exact contiguous packet range.");
 			context.ExpectEqual(static_cast<std::uint32_t>(VirtualGeometryBatchFallbackMode::None), static_cast<std::uint32_t>(batches.front().fallbackMode), "Contiguous dense packets should not use the legacy one-cluster fallback.");
+		});
+
+		registry.Add("VirtualGeometry.Batching.Regression.PageLocalPacketsShareOneDrawRunAcrossBindings", [](TestContext& context) {
+			const TerraEngine::UUID objectId = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID materialId = TerraEngine::GenerateUUID();
+			std::vector<VirtualGeometryClusterPacket> packets;
+			// Deliberately vary every page binding that used to force one CPU Vulkan
+			// submission per cluster, while retaining a contiguous page-local run.
+			for (std::uint32_t index = 0u; index < 36u; ++index)
+			{
+				VirtualGeometryClusterPacket packet;
+				packet.packetId = 100u + index;
+				packet.viewId = 6u;
+				packet.viewType = RenderViewType::Game;
+				packet.objectId = objectId;
+				packet.meshId = meshId;
+				packet.materialId = materialId;
+				packet.selectedLod = 0u;
+				packet.clusterId = index;
+				packet.meshletOffset = index * 7u;
+				packet.meshletCount = 7u;
+				packet.pageId = 200u + index;
+				packet.fallbackPageId = index;
+				packet.payloadSource = VirtualGeometryPagePayloadSource::ResidentPagePayload;
+				packet.emittedSource = VirtualGeometryEmittedPageSource::HighDetailPage;
+				packet.pagePayloadByteOffset = 4096ull * index;
+				packet.pagePayloadByteSize = 2048ull + index;
+				packet.payloadBufferIndex = 300u + index;
+				packet.payloadDescriptorIndex = 400u + index;
+				packets.push_back(packet);
+			}
+
+			const std::vector<ClusterWorkBatch> cpuBatches = RenderSystem::BuildVirtualGeometryClusterBatches(packets);
+			const std::vector<GpuVirtualGeometryPacketRecord> gpuPackets = RenderSystem::BuildGpuVirtualGeometryPacketRecords(
+				packets,
+				9101u,
+				VirtualGeometryDebugVisualizationMode::None);
+			const std::vector<GpuVirtualGeometryBatchDescriptor> gpuBatches = RenderSystem::BuildGpuVirtualGeometryBatchDescriptors(
+				gpuPackets,
+				9101u,
+				VirtualGeometryDebugVisualizationMode::None);
+
+			context.ExpectEqual(static_cast<std::size_t>(1u), cpuBatches.size(), "Consecutive page-local camera clusters should collapse into one CPU draw run.");
+			context.ExpectEqual(36u, cpuBatches.front().packetCount, "The CPU batch should retain every independently addressed camera packet.");
+			context.ExpectEqual(252u, cpuBatches.front().submittedMeshlets, "Page-local batching should preserve the exact camera meshlet count.");
+			context.ExpectEqual(static_cast<std::size_t>(1u), gpuBatches.size(), "GPU batch metadata should mirror the collapsed page-local draw run.");
+			context.ExpectEqual(36u, gpuBatches.front().packetCount, "The GPU batch should expose the whole descriptor run to the task shader.");
+		});
+
+		registry.Add("VirtualGeometry.Batching.Regression.AntiqueCameraLeafCutCollapsesToOneDraw", [](TestContext& context) {
+			const TerraEngine::UUID objectId = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID materialId = TerraEngine::GenerateUUID();
+			// These are the exact 16 leaf-cluster ranges from camera_uv.temf. Their
+			// irregular sizes previously produced 16 draws when the camera entered
+			// view even though they form one contiguous 267-meshlet cut.
+			constexpr std::uint32_t meshletCounts[] = {
+				17u, 17u, 16u, 19u, 14u, 14u, 15u, 16u,
+				19u, 19u, 17u, 16u, 20u, 14u, 18u, 16u
+			};
+			std::vector<VirtualGeometryClusterPacket> packets;
+			std::uint32_t meshletOffset = 0u;
+			for (std::uint32_t clusterId = 0u; clusterId < std::size(meshletCounts); ++clusterId)
+			{
+				VirtualGeometryClusterPacket packet;
+				packet.packetId = clusterId;
+				packet.viewId = 1u;
+				packet.viewType = RenderViewType::Scene;
+				packet.objectId = objectId;
+				packet.meshId = meshId;
+				packet.materialId = materialId;
+				packet.selectedLod = 0u;
+				packet.clusterId = clusterId;
+				packet.meshletOffset = meshletOffset;
+				packet.meshletCount = meshletCounts[clusterId];
+				packet.pageId = 0u;
+				packet.fallbackPageId = 3u;
+				packet.payloadSource = VirtualGeometryPagePayloadSource::ResidentPagePayload;
+				packet.emittedSource = VirtualGeometryEmittedPageSource::HighDetailPage;
+				packets.push_back(packet);
+				meshletOffset += meshletCounts[clusterId];
+			}
+
+			const std::vector<ClusterWorkBatch> batches = RenderSystem::BuildVirtualGeometryClusterBatches(packets);
+
+			context.ExpectEqual(static_cast<std::size_t>(1u), batches.size(), "The camera leaf cut should submit as one compatible draw run.");
+			context.ExpectEqual(16u, batches.front().packetCount, "The camera draw should retain all 16 shader descriptor rows.");
+			context.ExpectEqual(267u, batches.front().submittedMeshlets, "The collapsed camera draw should preserve every selected meshlet.");
+		});
+
+		registry.Add("VirtualGeometry.Batching.Regression.PagePayloadReuseIgnoresFrameIdAndInvalidatesGeometry", [](TestContext& context) {
+			GpuVirtualGeometryPacketRecord packet;
+			packet.packetId = 4u;
+			packet.frameId = 100u;
+			packet.meshId = TerraEngine::GenerateUUID();
+			packet.selectedLod = 0u;
+			packet.clusterId = 2u;
+			packet.meshletOffset = 34u;
+			packet.meshletCount = 16u;
+			packet.pageId = 0u;
+			packet.fallbackPageId = 3u;
+			packet.payloadSource = VirtualGeometryPagePayloadSource::ResidentPagePayload;
+			packet.emittedSource = VirtualGeometryEmittedPageSource::HighDetailPage;
+			packet.pagePayloadByteOffset = 4096u;
+			packet.pagePayloadByteSize = 2048u;
+			packet.payloadBufferIndex = 8u;
+			packet.payloadDescriptorIndex = 12u;
+
+			const std::uint64_t originalSignature = TerraEngine::Renderer::Vulkan::BuildVirtualGeometryPagePayloadReuseSignature({ packet });
+			packet.frameId = 103u;
+			const std::uint64_t laterFrameSignature = TerraEngine::Renderer::Vulkan::BuildVirtualGeometryPagePayloadReuseSignature({ packet });
+			context.ExpectEqual(originalSignature, laterFrameSignature, "Advancing a frame slot must reuse unchanged page-local geometry bytes.");
+			context.Expect(
+				TerraEngine::Renderer::Vulkan::CanReuseVirtualGeometryPagePayload(originalSignature, laterFrameSignature, true, true),
+				"A valid live buffer with an unchanged packet signature should be reused.");
+
+			packet.meshletCount += 1u;
+			const std::uint64_t changedGeometrySignature = TerraEngine::Renderer::Vulkan::BuildVirtualGeometryPagePayloadReuseSignature({ packet });
+			context.Expect(originalSignature != changedGeometrySignature, "Changing selected meshlet geometry must invalidate the retained payload.");
+			context.Expect(
+				!TerraEngine::Renderer::Vulkan::CanReuseVirtualGeometryPagePayload(originalSignature, changedGeometrySignature, true, true),
+				"A geometry change must force page-local stream reconstruction and upload.");
+			context.Expect(
+				!TerraEngine::Renderer::Vulkan::CanReuseVirtualGeometryPagePayload(originalSignature, originalSignature, true, false),
+				"A matching signature must not reuse a Vulkan buffer that was retired or never created.");
 		});
 
 		registry.Add("VirtualGeometry.Batching.US1.GpuPacketRecordsMirrorCpuClusterPackets", [](TestContext& context) {

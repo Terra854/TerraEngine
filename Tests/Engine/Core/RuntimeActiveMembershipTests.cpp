@@ -37,6 +37,48 @@ namespace TerraEngine::Tests {
 			objects.clear();
 		});
 
+		registry.Add("Engine.RuntimeLayout.ActiveMembership.ParentDisableSuppressesDescendants", [](TestContext& context) {
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+			Object root = objects.createObject("Root");
+			Object child = objects.createObject("Child");
+			Object grandchild = objects.createObject("Grandchild");
+			context.Expect(objects.setParent(child, root), "Child should attach below the active root.");
+			context.Expect(objects.setParent(grandchild, child), "Grandchild should attach below the active child.");
+
+			objects.setObjectActive(root, false);
+			const auto disabledBranch = objects.getObjectsWithComponents<Transform>();
+
+			context.Expect(disabledBranch.empty(), "Disabling a root should remove its entire branch from runtime queries.");
+			context.Expect(objects.isObjectActive(child), "Parent disable must preserve the child's authored active checkbox.");
+			context.Expect(!objects.isObjectActiveInHierarchy(child), "Child should be effectively inactive while its parent is disabled.");
+			context.Expect(!objects.isObjectActiveInHierarchy(grandchild), "Inherited inactivity should propagate through every descendant level.");
+
+			objects.setObjectActive(root, true);
+			const auto restoredBranch = objects.getObjectsWithComponents<Transform>();
+			context.ExpectEqual(static_cast<std::size_t>(3), restoredBranch.size(), "Re-enabling the parent should restore authored-active descendants.");
+			context.Expect(objects.isObjectActiveInHierarchy(grandchild), "Grandchild should become effectively active again.");
+			objects.clear();
+		});
+
+		registry.Add("Engine.RuntimeLayout.ActiveMembership.ReparentInvalidatesInheritedActivity", [](TestContext& context) {
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+			Object activeRoot = objects.createObject("ActiveRoot");
+			Object inactiveRoot = objects.createObject("InactiveRoot");
+			Object child = objects.createObject("Child");
+			objects.setObjectActive(inactiveRoot, false);
+			context.Expect(objects.setParent(child, activeRoot), "Child should begin below the active root.");
+			(void)objects.GetRuntimeActiveMembershipSnapshot();
+
+			context.Expect(objects.setParent(child, inactiveRoot), "Child should reparent below the inactive root.");
+			const auto runtimeObjects = objects.getObjectsWithComponents<Transform>();
+
+			context.ExpectEqual(static_cast<std::size_t>(1), runtimeObjects.size(), "Reparenting should rebuild inherited activity and leave only the active root visible.");
+			context.Expect(!objects.isObjectActiveInHierarchy(child), "The moved child should inherit its new parent's inactive state immediately.");
+			objects.clear();
+		});
+
 		registry.Add("Engine.RuntimeLayout.ActiveMembership.RevisionChangesOnTogglesAndStructure", [](TestContext& context) {
 			ObjectManager& objects = ObjectManager::instance();
 			objects.clear();

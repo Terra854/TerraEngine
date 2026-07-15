@@ -63,5 +63,12 @@ namespace TerraEngine::Renderer::Vulkan {
 	TERRAENGINE_API VirtualGeometryPageUploadPublication PlanVirtualGeometryPageUploadPublication(const GeometryPageRuntime& page);
 	TERRAENGINE_API VirtualGeometryPageRetirementPlan PlanVirtualGeometryPageRetirement(const GeometryPageRuntime& page, std::uint64_t frameId, std::uint64_t safeFrameLag = 2u);
 	TERRAENGINE_API std::vector<VirtualGeometryPagePayloadUploadRecord> BuildVirtualGeometryPagePayloadUploadPlan(const RenderFrameSnapshot& snapshot, RenderViewType viewType = RenderViewType::Game, std::uint32_t viewId = std::numeric_limits<std::uint32_t>::max());
+	// Page-local stream bytes depend on packet geometry and page bindings, but
+	// not on the advancing frame id. This signature lets a frame slot retain its
+	// already uploaded buffer until one of those shader-visible inputs changes.
+	TERRAENGINE_API std::uint64_t BuildVirtualGeometryPagePayloadReuseSignature(const std::vector<GpuVirtualGeometryPacketRecord>& packets);
+	// Reuse is safe only when the prior upload completed into a live buffer and
+	// its exact packet signature still matches the current render snapshot.
+	TERRAENGINE_API bool CanReuseVirtualGeometryPagePayload(std::uint64_t cachedSignature, std::uint64_t currentSignature, bool cacheValid, bool bufferAvailable);
 
 }

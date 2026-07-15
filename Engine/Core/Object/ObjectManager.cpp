@@ -350,6 +350,55 @@ void ObjectManager::rebuildRuntimeActiveMembershipCache()
 {
 	runtimeActiveMembershipCache.clear();
 	runtimeActiveMembershipCache.reserve(metadataMap.size());
+
+	// Resolve inherited activation once in parent-before-child order. Runtime
+	// systems consume this effective state, while metadataMap keeps every
+	// object's own checkbox independently for editor display and serialization.
+	std::unordered_map<entt::entity, bool> effectiveActiveByEntity;
+	effectiveActiveByEntity.reserve(metadataMap.size());
+	std::vector<entt::entity> traversalQueue;
+	traversalQueue.reserve(metadataMap.size());
+	for (const auto& [entityId, metadata] : metadataMap)
+	{
+		(void)metadata;
+		const entt::entity parentId = getParentEntityInternal(entityId);
+		if (parentId == entt::null || !registry.valid(parentId) || !metadataMap.contains(parentId))
+		{
+			traversalQueue.push_back(entityId);
+		}
+	}
+	for (std::size_t queueIndex = 0; queueIndex < traversalQueue.size(); ++queueIndex)
+	{
+		const entt::entity entityId = traversalQueue[queueIndex];
+		const auto metadata = metadataMap.find(entityId);
+		if (metadata == metadataMap.end() || effectiveActiveByEntity.contains(entityId))
+		{
+			continue;
+		}
+		const entt::entity parentId = getParentEntityInternal(entityId);
+		const bool parentActive = parentId == entt::null
+			|| !effectiveActiveByEntity.contains(parentId)
+			|| effectiveActiveByEntity.at(parentId);
+		effectiveActiveByEntity[entityId] = metadata->second.active && parentActive;
+		if (const auto children = childrenMap.find(entityId); children != childrenMap.end())
+		{
+			for (const entt::entity childId : children->second)
+			{
+				if (registry.valid(childId) && metadataMap.contains(childId))
+				{
+					traversalQueue.push_back(childId);
+				}
+			}
+		}
+	}
+	// Hierarchy mutation rejects cycles. If corrupted imported bookkeeping ever
+	// leaves an unreachable row, fail it closed instead of exposing it to runtime.
+	for (const auto& [entityId, metadata] : metadataMap)
+	{
+		(void)metadata;
+		effectiveActiveByEntity.try_emplace(entityId, false);
+	}
+
 	for (const auto& [entityId, metadata] : metadataMap)
 	{
 		if (!registry.valid(entityId))
@@ -360,7 +409,8 @@ void ObjectManager::rebuildRuntimeActiveMembershipCache()
 		membership.entity = entityId;
 		membership.objectHandle = makeObjectHandle(entityId);
 		membership.objectId = getEntityUUID(entityId);
-		membership.objectActive = metadata.active && registry.any_of<TerraEngine::ActiveObjectTag>(entityId);
+		membership.objectActive = effectiveActiveByEntity.at(entityId)
+			&& registry.any_of<TerraEngine::ActiveObjectTag>(entityId);
 		membership.componentActiveMask = membership.objectActive ? 1u : 0u;
 		membership.membershipRevision = runtimeActiveMembershipRevision;
 		membership.sourceMembershipRevision = runtimeActiveMembershipRevision;
@@ -639,6 +689,9 @@ bool ObjectManager::setParent(Object child, std::optional<Object> parent)
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (onModified && !bulkPublicationActive) onModified();
 	notifyHierarchyDirty();
+	// Reparenting can inherit a different active state for this entire branch,
+	// even though none of its authored checkboxes changed.
+	invalidateRuntimeActiveMembership();
 	MarkObjectTransformDirty(child);
 	recordSceneChange(TerraEngine::Scene::SceneChangeKind::Hierarchy, captureSceneObjectRevision(child));
 
@@ -831,6 +884,25 @@ bool ObjectManager::isObjectActive(const Object& obj) const
 	}
 	auto iter = metadataMap.find(entityId);
 	return iter != metadataMap.end() ? iter->second.active : false;
+}
+
+bool ObjectManager::isObjectActiveInHierarchy(const Object& obj) const
+{
+	entt::entity entityId = obj.EntityId();
+	std::size_t remainingAncestors = metadataMap.size() + 1u;
+	while (entityId != entt::null && registry.valid(entityId) && remainingAncestors-- > 0u)
+	{
+		const auto metadata = metadataMap.find(entityId);
+		if (metadata == metadataMap.end() || !metadata->second.active
+			|| !registry.any_of<TerraEngine::ActiveObjectTag>(entityId))
+		{
+			return false;
+		}
+		entityId = getParentEntityInternal(entityId);
+	}
+	// A valid hierarchy reaches entt::null. Exhausting the bounded walk means a
+	// corrupt cycle was encountered, so runtime behavior fails closed.
+	return entityId == entt::null;
 }
 
 void ObjectManager::setObjectActive(const Object& obj, bool active)

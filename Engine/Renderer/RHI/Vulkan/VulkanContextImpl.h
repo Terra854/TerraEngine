@@ -482,6 +482,11 @@ struct VulkanContext::Impl {
 					// one per-view Vulkan buffer. This map records the exact
 					// byte slices uploaded for each mesh in this frame resource.
 					std::unordered_map<TerraEngine::UUID, std::uint64_t> pagePayloadBytesByMesh;
+					// Repacking page-local meshlets is CPU-heavy. Each frame slot keeps
+					// the signature of the bytes already stored in its Vulkan buffer so
+					// an unchanged camera cut can reuse them on the next slot rotation.
+					std::uint64_t pagePayloadReuseSignature = 0u;
+					bool pagePayloadCacheValid = false;
 					std::uint64_t retireAfterFrameId = 0u;
 					bool live = false;
 				};

@@ -385,7 +385,7 @@ std::optional<entt::entity> SceneManager::GetActiveSkyObject() const
 		{
 			continue;
 		}
-		if (!objManager.isObjectActive(*object))
+		if (!objManager.isObjectActiveInHierarchy(*object))
 		{
 			continue;
 		}
