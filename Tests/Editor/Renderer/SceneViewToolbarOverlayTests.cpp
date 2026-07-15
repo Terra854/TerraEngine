@@ -34,5 +34,19 @@ namespace TerraEngine::EditorTests
 			context.Expect(sceneViewSource.find("DrawOverlayIconButton") != std::string::npos, "Scene View toolbar should use icon-only buttons.");
 			context.Expect(sceneViewSource.find("DrawOverlayToggleButton") == std::string::npos, "Scene View toolbar should not draw text-first debug buttons.");
 		});
+
+		registry.Add("SceneViewOverlay.Toolbar.ProjectionRoundTripRestoresPerspectivePose", [](TestContext& context) {
+			const std::string sceneViewSource = ReadSceneViewOverlaySourceForTest("Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp");
+			const std::string sceneViewHeader = ReadSceneViewOverlaySourceForTest("Editor/TerraEngine-Editor/Windows/SceneViewWindow.h");
+
+			context.Expect(sceneViewHeader.find("struct PerspectiveCameraState") != std::string::npos, "Scene View should retain a dedicated perspective camera snapshot while orthographic mode is active.");
+			context.Expect(sceneViewSource.find("m_PerspectiveCameraState.position = m_CameraPos;") != std::string::npos, "Entering orthographic mode should save the exact perspective position.");
+			context.Expect(sceneViewSource.find("m_PerspectiveCameraState.rotation = m_CameraRot;") != std::string::npos, "Entering orthographic mode should save the exact perspective look direction.");
+			context.Expect(sceneViewSource.find("m_PerspectiveCameraState.focus = m_CameraFocus;") != std::string::npos, "Entering orthographic mode should save the perspective orbit pivot.");
+			context.Expect(sceneViewSource.find("m_CameraPos = m_PerspectiveCameraState.position;") != std::string::npos, "Returning to perspective should restore position without reconstructing it from orthographic state.");
+			context.Expect(sceneViewSource.find("m_CameraRot = m_PerspectiveCameraState.rotation;") != std::string::npos, "Returning to perspective should restore orientation without normalization drift.");
+			context.Expect(sceneViewSource.find("SetSceneViewProjectionMode(projectionMode);") != std::string::npos, "Automation projection changes should use the same camera-preserving transition as the toolbar.");
+			context.Expect(sceneViewSource.find("SetSceneViewProjectionMode(switchingToOrthographic") != std::string::npos, "The visible projection button should use the shared camera-preserving transition.");
+		});
 	}
 }

@@ -77,6 +77,7 @@ private:
 	glm::vec3 ResolveSceneViewFocus(float fallbackDistance) const;
 	float ResolveSceneViewFocusDistance(const glm::vec3& focus, float fallbackDistance) const;
 	void RepositionCameraAroundFocus(const glm::vec3& focus, float distance);
+	void SetSceneViewProjectionMode(TerraEngine::Editor::SceneViewOverlay::ProjectionMode projectionMode);
 	bool IsPointerInsideOrientationWidget(const ImVec2& viewportPos, const ImVec2& viewportSize) const;
 	bool HandleSceneViewScrollZoom();
 	bool HandleSceneViewPan(const ImVec2& viewportSize);
@@ -103,6 +104,20 @@ private:
 	glm::vec3 m_CameraFocus{ 0.0f, 0.0f, 0.0f };
 	float m_CameraFocusDistance = 18.0f;
 	bool m_CameraFocusInitialized = false;
+	// Orthographic navigation is intentionally independent from perspective
+	// navigation. Preserve every value that defines the perspective composition
+	// so switching back restores the exact position, look direction, and pivot.
+	struct PerspectiveCameraState
+	{
+		glm::vec3 position{ 0.0f };
+		glm::vec3 rotation{ 0.0f };
+		glm::vec3 focus{ 0.0f };
+		float focusDistance = 18.0f;
+		float fieldOfView = 60.0f;
+		bool focusInitialized = false;
+		bool valid = false;
+	};
+	PerspectiveCameraState m_PerspectiveCameraState;
 
 	// Gizmo State
 	int m_CurrentGizmoOperation = -1; // -1 for none, or ImGuizmo::TRANSLATE etc.

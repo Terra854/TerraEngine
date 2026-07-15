@@ -829,7 +829,10 @@ bool SceneViewWindow::SetAutomationOrientation(std::string_view orientation, std
 	}
 	if (orientation == "perspective" || orientation == "orthographic")
 	{
-		m_ToolState.projectionMode = orientation == "perspective" ? SceneOverlay::ProjectionMode::Perspective : SceneOverlay::ProjectionMode::Orthographic;
+		const SceneOverlay::ProjectionMode projectionMode = orientation == "perspective"
+			? SceneOverlay::ProjectionMode::Perspective
+			: SceneOverlay::ProjectionMode::Orthographic;
+		SetSceneViewProjectionMode(projectionMode);
 		m_OverlayPreference.projectionMode = m_ToolState.projectionMode;
 		m_OverlayPreferenceDirty = true;
 		PersistOverlayPreferences();
@@ -965,6 +968,51 @@ void SceneViewWindow::RepositionCameraAroundFocus(const glm::vec3& focus, float 
 	m_CameraFocusDistance = std::clamp(distance, 1.0f, 1000.0f);
 	m_CameraFocusInitialized = true;
 	m_CameraPos = m_CameraFocus - GetCameraForward() * m_CameraFocusDistance;
+}
+
+void SceneViewWindow::SetSceneViewProjectionMode(SceneOverlay::ProjectionMode projectionMode)
+{
+	if (projectionMode == m_ToolState.projectionMode)
+	{
+		return;
+	}
+
+	if (projectionMode == SceneOverlay::ProjectionMode::Orthographic)
+	{
+		// Snapshot the perspective camera before orthographic setup changes its
+		// rotation or focus. Direct copies avoid normalization or reconstruction
+		// drift when the artist later returns to perspective mode.
+		m_PerspectiveCameraState.position = m_CameraPos;
+		m_PerspectiveCameraState.rotation = m_CameraRot;
+		m_PerspectiveCameraState.focus = m_CameraFocus;
+		m_PerspectiveCameraState.focusDistance = m_CameraFocusDistance;
+		m_PerspectiveCameraState.fieldOfView = m_Fov;
+		m_PerspectiveCameraState.focusInitialized = m_CameraFocusInitialized;
+		m_PerspectiveCameraState.valid = true;
+
+		const float fallbackDistance = m_CameraFocusInitialized ? m_CameraFocusDistance : 18.0f;
+		const glm::vec3 focus = ResolveSceneViewFocus(fallbackDistance);
+		const float focusDistance = ResolveSceneViewFocusDistance(focus, fallbackDistance);
+		// Orthographic mode starts at the established readable isometric angle,
+		// but this temporary drafting pose no longer replaces the perspective pose.
+		m_CameraRot.x = glm::radians(-35.264f);
+		m_CameraRot.y = glm::radians(-45.0f);
+		m_OrthographicHeight = std::clamp(PerspectiveVisibleHeight(m_Fov, focusDistance) * 0.65f, 2.0f, 160.0f);
+		RepositionCameraAroundFocus(focus, focusDistance);
+	}
+	else if (m_PerspectiveCameraState.valid)
+	{
+		// Restore all perspective composition values exactly. Orthographic panning,
+		// orbiting, and zooming remain isolated in the state being left behind.
+		m_CameraPos = m_PerspectiveCameraState.position;
+		m_CameraRot = m_PerspectiveCameraState.rotation;
+		m_CameraFocus = m_PerspectiveCameraState.focus;
+		m_CameraFocusDistance = m_PerspectiveCameraState.focusDistance;
+		m_Fov = m_PerspectiveCameraState.fieldOfView;
+		m_CameraFocusInitialized = m_PerspectiveCameraState.focusInitialized;
+	}
+
+	m_ToolState.projectionMode = projectionMode;
 }
 
 bool SceneViewWindow::IsPointerInsideOrientationWidget(const ImVec2& viewportPos, const ImVec2& viewportSize) const
@@ -1181,19 +1229,9 @@ void SceneViewWindow::DrawSceneToolbar()
 	if (DrawOverlayIconButton("scene_projection", perspectiveProjection ? "projection-persp" : "projection-ortho", false, perspectiveProjection ? "Perspective Projection\nClick to switch to orthographic Scene View." : "Orthographic Projection\nClick to switch to perspective Scene View.", buttonSize))
 	{
 		const bool switchingToOrthographic = m_ToolState.projectionMode == SceneOverlay::ProjectionMode::Perspective;
-		m_ToolState.projectionMode = switchingToOrthographic ? SceneOverlay::ProjectionMode::Orthographic : SceneOverlay::ProjectionMode::Perspective;
-		if (switchingToOrthographic)
-		{
-			const glm::vec3 focus = ResolveSceneViewFocus(m_CameraFocusDistance);
-			const float focusDistance = ResolveSceneViewFocusDistance(focus, m_CameraFocusDistance);
-			// Enter orthographic mode at a readable isometric editor angle. A
-			// shallow flycam pitch technically works with an ortho projection, but
-			// it still feels like a perspective horizon view to artists.
-			m_CameraRot.x = glm::radians(-35.264f);
-			m_CameraRot.y = glm::radians(-45.0f);
-			m_OrthographicHeight = std::clamp(PerspectiveVisibleHeight(m_Fov, focusDistance) * 0.65f, 2.0f, 160.0f);
-			RepositionCameraAroundFocus(focus, focusDistance);
-		}
+		SetSceneViewProjectionMode(switchingToOrthographic
+			? SceneOverlay::ProjectionMode::Orthographic
+			: SceneOverlay::ProjectionMode::Perspective);
 		m_OverlayPreference.projectionMode = m_ToolState.projectionMode;
 		m_OverlayPreferenceDirty = true;
 	}
