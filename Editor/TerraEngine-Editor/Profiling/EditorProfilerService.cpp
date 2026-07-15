@@ -181,8 +181,14 @@ void EditorProfilerService::Update(float)
 void EditorProfilerService::StartRecording()
 {
 	ProfilerCaptureSettings settings{};
-	// Preserve the legacy rolling-capture budget for callers that do not opt
-	// into the v2 bounded-chunk controls.
+	// The ordinary toolbar action must observe the engine without serializing
+	// every worker scope through the profiler mutex. Aggregate mode retains the
+	// critical frame, physics, scheduler, presentation, and worker streams;
+	// typed callers can still request sampled or detailed scope capture.
+	settings.detailLevel = TerraEngine::Profiling::ProfilerCaptureDetailLevel::Aggregate;
+	settings.recordMarkers = false;
+	settings.taskExecutionEnabled = false;
+	settings.recordTaskContext = false;
 	settings.maxFrames = 10000u;
 	settings.maxDurationSeconds = 0.0;
 	StartRecording(settings);

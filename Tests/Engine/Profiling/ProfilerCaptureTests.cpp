@@ -517,6 +517,58 @@ namespace TerraEngine::Tests {
 			profiler.Clear();
 		});
 
+		registry.Add("Engine.Profiler.CaptureDetailControlsLiveInstrumentationCost", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+
+			Profiler& profiler = Profiler::Instance();
+			profiler.Clear();
+			ProfilerCaptureMetadata metadata;
+			metadata.projectName = "Capture detail cost";
+
+			ProfilerCaptureSettings aggregateSettings;
+			aggregateSettings.detailLevel = ProfilerCaptureDetailLevel::Aggregate;
+			profiler.StartRecording(metadata, aggregateSettings);
+			profiler.BeginFrame(true);
+			context.Expect(!profiler.BeginSample("Aggregate Scope", ProfilerModuleId::CpuEngine),
+				"Aggregate captures should skip optional marker locking in the live instrumentation path.");
+			context.Expect(!profiler.RecordTaskStarted("Aggregate Task"),
+				"Aggregate captures should skip optional task locking in the live instrumentation path.");
+			profiler.EndFrame();
+			const std::vector<ProfilerFrameRecord> aggregateFrames = profiler.GetFramesSnapshot();
+			context.ExpectEqual(std::size_t(1U), aggregateFrames.size(),
+				"Aggregate captures must still retain their critical frame evidence.");
+			context.Expect(aggregateFrames.front().samples.empty(),
+				"Aggregate captures should not retain optional scope samples.");
+			profiler.Clear();
+
+			ProfilerCaptureSettings sampledSettings;
+			sampledSettings.detailLevel = ProfilerCaptureDetailLevel::Sampled;
+			sampledSettings.sampleIntervalFrames = 4U;
+			profiler.StartRecording(metadata, sampledSettings);
+			for (std::uint32_t frameIndex = 0U; frameIndex < 5U; ++frameIndex)
+			{
+				profiler.BeginFrame(true);
+				const bool sampleActive = profiler.BeginSample("Sampled Scope", ProfilerModuleId::CpuEngine);
+				context.ExpectEqual(frameIndex == 0U || frameIndex == 4U, sampleActive,
+					"Sampled captures should enable optional scopes only on their deterministic cadence.");
+				if (sampleActive)
+				{
+					profiler.EndSample();
+				}
+				profiler.EndFrame();
+			}
+			const std::vector<ProfilerFrameRecord> sampledFrames = profiler.GetFramesSnapshot();
+			context.ExpectEqual(std::size_t(5U), sampledFrames.size(),
+				"Sampled capture cadence must not drop critical frame records.");
+			context.Expect(HasSampleNamed(sampledFrames[0], "Sampled Scope")
+				&& sampledFrames[1].samples.empty()
+				&& sampledFrames[2].samples.empty()
+				&& sampledFrames[3].samples.empty()
+				&& HasSampleNamed(sampledFrames[4], "Sampled Scope"),
+				"Only cadence frames should retain sampled optional markers.");
+			profiler.Clear();
+		});
+
 		registry.Add("Engine.Profiler.RecordingArmsOutsidePlayModeAndCapturesOnlyPlayFrames", [](TestContext& context) {
 			using namespace TerraEngine::Profiling;
 

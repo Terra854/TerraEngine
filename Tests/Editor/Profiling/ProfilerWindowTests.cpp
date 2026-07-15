@@ -8,7 +8,9 @@ namespace TerraEngine::EditorTests
 {
 	namespace
 	{
-		std::string ReadProfilerWindowSource()
+		// Source-oriented editor tests use repository text because these policies
+		// describe when expensive work is allowed to run, not its numeric result.
+		std::string ReadRepositorySource(const std::string& path)
 		{
 			const auto read = [](const std::string& candidate) {
 				std::ifstream file(candidate, std::ios::binary);
@@ -21,7 +23,6 @@ namespace TerraEngine::EditorTests
 				return buffer.str();
 			};
 
-			const std::string path = "Editor/TerraEngine-Editor/Windows/ProfilerWindow.cpp";
 			std::string text = read(path);
 			if (!text.empty())
 			{
@@ -46,42 +47,19 @@ namespace TerraEngine::EditorTests
 			return {};
 		}
 
+		std::string ReadProfilerWindowSource()
+		{
+			return ReadRepositorySource("Editor/TerraEngine-Editor/Windows/ProfilerWindow.cpp");
+		}
+
 		std::string ReadProfilerSource()
 		{
-			const auto read = [](const std::string& candidate) {
-				std::ifstream file(candidate, std::ios::binary);
-				if (!file)
-				{
-					return std::string();
-				}
-				std::ostringstream buffer;
-				buffer << file.rdbuf();
-				return buffer.str();
-			};
+			return ReadRepositorySource("Engine/Profiling/Profiler.cpp");
+		}
 
-			const std::string path = "Engine/Profiling/Profiler.cpp";
-			std::string text = read(path);
-			if (!text.empty())
-			{
-				return text;
-			}
-			text = read(std::string("../../../") + path);
-			if (!text.empty())
-			{
-				return text;
-			}
-			const std::string thisFile = __FILE__;
-			const auto marker = thisFile.find("Tests\\Editor\\Profiling\\ProfilerWindowTests.cpp");
-			if (marker != std::string::npos)
-			{
-				return read(thisFile.substr(0u, marker) + path);
-			}
-			const auto slashMarker = thisFile.find("Tests/Editor/Profiling/ProfilerWindowTests.cpp");
-			if (slashMarker != std::string::npos)
-			{
-				return read(thisFile.substr(0u, slashMarker) + path);
-			}
-			return {};
+		std::string ReadEditorProfilerServiceSource()
+		{
+			return ReadRepositorySource("Editor/TerraEngine-Editor/Profiling/EditorProfilerService.cpp");
 		}
 	}
 
@@ -125,6 +103,25 @@ namespace TerraEngine::EditorTests
 			context.Expect(source.find("Worker Timeline Summary") != std::string::npos, "Profiler Window should present bounded worker history summaries.");
 			context.Expect(source.find("Physics Work Volumes") != std::string::npos, "Profiler Window should present processed-versus-published body volumes.");
 			context.Expect(source.find("unavailable") != std::string::npos, "Unavailable typed streams should be labelled instead of shown as zero.");
+		});
+
+		registry.Add("ProfilerWindow.Recording.KeepsNormalRedrawAndCaptureLowOverhead", [](TestContext& context) {
+			const std::string source = ReadProfilerWindowSource();
+			const std::string serviceSource = ReadEditorProfilerServiceSource();
+			const std::size_t timingDisclosure = source.find("TreeNode(\"Timing Distribution\")");
+			const std::size_t frameCopy = source.find("GetFramesSnapshot()", timingDisclosure);
+			const std::size_t evidenceDisclosure = source.find("TreeNode(\"Whole Capture Analysis\")");
+			const std::size_t documentCopy = source.find("GetDocumentSnapshot()", evidenceDisclosure);
+
+			context.Expect(serviceSource.find("detailLevel = TerraEngine::Profiling::ProfilerCaptureDetailLevel::Aggregate") != std::string::npos,
+				"The ordinary Record action should use low-overhead aggregate capture.");
+			context.Expect(serviceSource.find("recordMarkers = false") != std::string::npos
+				&& serviceSource.find("taskExecutionEnabled = false") != std::string::npos,
+				"The ordinary Record action should leave mutex-heavy optional instrumentation disabled.");
+			context.Expect(timingDisclosure != std::string::npos && frameCopy != std::string::npos && timingDisclosure < frameCopy,
+				"Rolling timing distributions should copy the complete capture only after the user expands them.");
+			context.Expect(evidenceDisclosure != std::string::npos && documentCopy != std::string::npos && evidenceDisclosure < documentCopy,
+				"Whole-capture evidence should be copied and summarized only after the user expands it.");
 		});
 	}
 }

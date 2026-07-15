@@ -26,6 +26,7 @@
 #include <vector>
 
 using TerraEngine::Profiling::Profiler;
+using TerraEngine::Profiling::ProfilerCaptureSettings;
 using TerraEngine::Profiling::ProfilerFrameListItem;
 using TerraEngine::Profiling::ProfilerFrameRecord;
 using TerraEngine::Profiling::ProfilerModuleId;
@@ -831,11 +832,21 @@ void ProfilerWindow::DrawFrameDetails()
 
 void ProfilerWindow::DrawCaptureEvidenceSummary()
 {
-	// This reads the immutable profiler snapshot.  The window never consults
-	// live physics or scheduler state while inspecting a saved capture.
+	ImGui::SeparatorText("Capture Evidence");
+	// Whole-capture synthesis deep-copies and scans every retained typed stream.
+	// Keep it out of the normal redraw path until the user explicitly asks for
+	// the analysis; selected-frame details above remain cheap and live.
+	if (!ImGui::TreeNode("Whole Capture Analysis"))
+	{
+		const ProfilerCaptureSettings settings = Profiler::Instance().GetSettings();
+		ImGui::TextDisabled("%s capture; expand to aggregate retained evidence.",
+			TerraEngine::Profiling::ToString(settings.detailLevel));
+		return;
+	}
+	// This immutable snapshot keeps saved-capture inspection independent of live
+	// physics, scheduler, and renderer ownership.
 	const TerraEngine::Profiling::ProfilerCaptureDocument document = Profiler::Instance().GetDocumentSnapshot();
 	const EditorProfilerCaptureSummary summary = EditorProfilerService::SummarizeDocument("live", document);
-	ImGui::SeparatorText("Capture Evidence");
 	ImGui::Text("v%u  %s capture  %llu committed frames  %llu B",
 		summary.payloadVersion,
 		TerraEngine::Profiling::ToString(document.metadata.settings.detailLevel),
@@ -910,6 +921,7 @@ void ProfilerWindow::DrawCaptureEvidenceSummary()
 			static_cast<unsigned long long>(volume.changedBodies), static_cast<unsigned long long>(volume.publishedBodies));
 		ImGui::TreePop();
 	}
+	ImGui::TreePop();
 }
 
 void ProfilerWindow::DrawPhysicsSummary(const TerraEngine::Profiling::ProfilerFrameRecord& frame)
@@ -1013,53 +1025,60 @@ void ProfilerWindow::DrawFrameOverview(const ProfilerFrameRecord& frame)
 		return;
 	}
 
-	const std::vector<ProfilerFrameRecord> fullFrames = Profiler::Instance().GetFramesSnapshot();
-	const std::vector<ProfilerTimingStreamAggregate> timingStreams =
-		TerraEngine::Profiling::BuildTimingStreamAggregates(fullFrames, std::optional<ProfilerFrameRecord>(frame));
-	if (!timingStreams.empty() && ImGui::BeginTable("ProfilerTimingStreams", 10, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	// Distribution analysis copies and sorts the rolling frame capture. Keep that
+	// work behind an explicit disclosure so the normal profiler redraw stays
+	// proportional to the lightweight frame list instead of the capture length.
+	if (ImGui::TreeNode("Timing Distribution"))
 	{
-		ImGui::TableSetupColumn("Timing");
-		ImGui::TableSetupColumn("Selected");
-		ImGui::TableSetupColumn("Mean");
-		ImGui::TableSetupColumn("Median");
-		ImGui::TableSetupColumn("P95");
-		ImGui::TableSetupColumn("P99");
-		ImGui::TableSetupColumn("Min");
-		ImGui::TableSetupColumn("Max");
-		ImGui::TableSetupColumn("Samples");
-		ImGui::TableSetupColumn("Source");
-		ImGui::TableHeadersRow();
-		for (const ProfilerTimingStreamAggregate& stream : timingStreams)
+		const std::vector<ProfilerFrameRecord> fullFrames = Profiler::Instance().GetFramesSnapshot();
+		const std::vector<ProfilerTimingStreamAggregate> timingStreams =
+			TerraEngine::Profiling::BuildTimingStreamAggregates(fullFrames, std::optional<ProfilerFrameRecord>(frame));
+		if (!timingStreams.empty() && ImGui::BeginTable("ProfilerTimingStreams", 10, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
 		{
-			char selectedValue[64];
-			char aggregateValue[64];
-			ImGui::TableNextRow();
-			ImGui::TableSetColumnIndex(0);
-			ImGui::TextUnformatted(stream.label.c_str());
-			ImGui::TableSetColumnIndex(1);
-			ImGui::TextUnformatted(TimingDisplayValue(stream, selectedValue, sizeof(selectedValue)));
-			if (!stream.selectedStatusReason.empty() && ImGui::IsItemHovered())
+			ImGui::TableSetupColumn("Timing");
+			ImGui::TableSetupColumn("Selected");
+			ImGui::TableSetupColumn("Mean");
+			ImGui::TableSetupColumn("Median");
+			ImGui::TableSetupColumn("P95");
+			ImGui::TableSetupColumn("P99");
+			ImGui::TableSetupColumn("Min");
+			ImGui::TableSetupColumn("Max");
+			ImGui::TableSetupColumn("Samples");
+			ImGui::TableSetupColumn("Source");
+			ImGui::TableHeadersRow();
+			for (const ProfilerTimingStreamAggregate& stream : timingStreams)
 			{
-				ImGui::SetTooltip("%s", stream.selectedStatusReason.c_str());
+				char selectedValue[64];
+				char aggregateValue[64];
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				ImGui::TextUnformatted(stream.label.c_str());
+				ImGui::TableSetColumnIndex(1);
+				ImGui::TextUnformatted(TimingDisplayValue(stream, selectedValue, sizeof(selectedValue)));
+				if (!stream.selectedStatusReason.empty() && ImGui::IsItemHovered())
+				{
+					ImGui::SetTooltip("%s", stream.selectedStatusReason.c_str());
+				}
+				ImGui::TableSetColumnIndex(2);
+				ImGui::TextUnformatted(TimingAggregateValue(stream, stream.meanMs, aggregateValue, sizeof(aggregateValue)));
+				ImGui::TableSetColumnIndex(3);
+				ImGui::TextUnformatted(TimingAggregateValue(stream, stream.medianMs, aggregateValue, sizeof(aggregateValue)));
+				ImGui::TableSetColumnIndex(4);
+				ImGui::TextUnformatted(TimingAggregateValue(stream, stream.p95Ms, aggregateValue, sizeof(aggregateValue)));
+				ImGui::TableSetColumnIndex(5);
+				ImGui::TextUnformatted(TimingAggregateValue(stream, stream.p99Ms, aggregateValue, sizeof(aggregateValue)));
+				ImGui::TableSetColumnIndex(6);
+				ImGui::TextUnformatted(TimingAggregateValue(stream, stream.minMs, aggregateValue, sizeof(aggregateValue)));
+				ImGui::TableSetColumnIndex(7);
+				ImGui::TextUnformatted(TimingAggregateValue(stream, stream.maxMs, aggregateValue, sizeof(aggregateValue)));
+				ImGui::TableSetColumnIndex(8);
+				ImGui::Text("%zu / %zu missing", stream.sampleCount, stream.missingCount);
+				ImGui::TableSetColumnIndex(9);
+				ImGui::TextUnformatted(TerraEngine::Profiling::ToString(stream.source));
 			}
-			ImGui::TableSetColumnIndex(2);
-			ImGui::TextUnformatted(TimingAggregateValue(stream, stream.meanMs, aggregateValue, sizeof(aggregateValue)));
-			ImGui::TableSetColumnIndex(3);
-			ImGui::TextUnformatted(TimingAggregateValue(stream, stream.medianMs, aggregateValue, sizeof(aggregateValue)));
-			ImGui::TableSetColumnIndex(4);
-			ImGui::TextUnformatted(TimingAggregateValue(stream, stream.p95Ms, aggregateValue, sizeof(aggregateValue)));
-			ImGui::TableSetColumnIndex(5);
-			ImGui::TextUnformatted(TimingAggregateValue(stream, stream.p99Ms, aggregateValue, sizeof(aggregateValue)));
-			ImGui::TableSetColumnIndex(6);
-			ImGui::TextUnformatted(TimingAggregateValue(stream, stream.minMs, aggregateValue, sizeof(aggregateValue)));
-			ImGui::TableSetColumnIndex(7);
-			ImGui::TextUnformatted(TimingAggregateValue(stream, stream.maxMs, aggregateValue, sizeof(aggregateValue)));
-			ImGui::TableSetColumnIndex(8);
-			ImGui::Text("%zu / %zu missing", stream.sampleCount, stream.missingCount);
-			ImGui::TableSetColumnIndex(9);
-			ImGui::TextUnformatted(TerraEngine::Profiling::ToString(stream.source));
+			ImGui::EndTable();
 		}
-		ImGui::EndTable();
+		ImGui::TreePop();
 	}
 	// Explain the accounting boundary beside the values it governs. The frame
 	// duration excludes editor work; viewport CPU is nested and GPU can overlap.

@@ -91,8 +91,8 @@ struct ProfilerCaptureSettings
 	double maxDurationSeconds = 0.0;
 	ProfilerCaptureMode captureMode = ProfilerCaptureMode::LiveRolling;
 	ProfilerCaptureDetailLevel detailLevel = ProfilerCaptureDetailLevel::Detailed;
-	// Sampled and aggregate modes use this deterministic frame cadence for
-	// optional scopes. Critical typed evidence remains present every frame.
+	// Sampled mode uses this deterministic cadence for optional scopes. Aggregate
+	// mode skips optional scopes; critical typed evidence remains every frame.
 	std::uint32_t sampleIntervalFrames = 4u;
 	// Chunks are bounded before writing so a long capture is recoverable even if
 	// the final chunk/index is interrupted by shutdown or a power failure.

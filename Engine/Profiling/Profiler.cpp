@@ -916,8 +916,15 @@ void Profiler::UpdateFastRecordingFlagsLocked()
 	// fast flags false there prevents editor-preview instrumentation from paying
 	// profiler synchronization costs or leaking counters into the next play frame.
 	const bool frameActive = state == ProfilerSessionState::Recording && currentFrame.has_value();
+	const bool retainOptionalDetails = frameActive
+		&& (settings.detailLevel == ProfilerCaptureDetailLevel::Detailed
+			|| (settings.detailLevel == ProfilerCaptureDetailLevel::Sampled
+				&& currentFrame->frameIndex % std::max(1u, settings.sampleIntervalFrames) == 0u));
 	frameRecordingActive.store(frameActive, std::memory_order_release);
-	markerRecordingActive.store(frameActive && settings.recordMarkers, std::memory_order_release);
-	taskRecordingActive.store(frameActive && settings.taskExecutionEnabled, std::memory_order_release);
+	// Optional scopes span every worker and contend on the profiler's capture
+	// mutex. Apply the selected detail level during collection instead of paying
+	// that cost on every frame and discarding samples only during serialization.
+	markerRecordingActive.store(retainOptionalDetails && settings.recordMarkers, std::memory_order_release);
+	taskRecordingActive.store(retainOptionalDetails && settings.taskExecutionEnabled, std::memory_order_release);
 }
 }
