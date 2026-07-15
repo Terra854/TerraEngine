@@ -46,5 +46,33 @@ namespace TerraEngine::EditorTests {
 				"The stale restore rejection should provide a stable lifecycle diagnostic.");
 			objects.clear();
 		});
+
+		registry.Add("Editor.ArchitectureHardening.PlayModeStopRestoresAcrossRuntimeSceneGeneration", [](TestContext& context) {
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+			Object authored = objects.createObject("Authored Before Play");
+			const nlohmann::json authoredScene = {
+				{"name", "Play Mode Restore"},
+				{"objects", nlohmann::json::array({Serializer::SerializeObject(authored)})}
+			};
+			const TerraEngine::Scene::PreparedSceneDecode prepared = Serializer::PrepareSceneDecode(authoredScene);
+			TerraEngine::Scene::BulkScenePublicationPacket packet =
+				TerraEngine::Scene::BuildBulkScenePublicationPacket(prepared, objects.GetSceneGeneration(), objects.GetSceneGeneration());
+
+			// A runtime scene replacement is transient inside Play Mode. The editor's
+			// session-owned Stop packet must target the current runtime generation so
+			// it can replace that graph with the captured authored state atomically.
+			objects.clear();
+			(void)objects.createObject("Transient Runtime Scene");
+			packet.expectedSceneGeneration = objects.GetSceneGeneration();
+			const TerraEngine::Scene::BulkScenePublicationResult restored =
+				TerraEngine::Scene::PublishBulkScenePacket(packet, objects);
+			const std::vector<Object> roots = objects.getRootObjects();
+			context.Expect(restored.published && roots.size() == 1U,
+				"Stop must publish the captured authored graph even after runtime scene replacement advances the generation.");
+			context.Expect(!roots.empty() && objects.getObjectName(roots.front()) == "Authored Before Play",
+				"The transient runtime graph must be discarded rather than surviving Stop.");
+			objects.clear();
+		});
 	}
 }

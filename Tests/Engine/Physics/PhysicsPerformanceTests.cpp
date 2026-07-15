@@ -57,6 +57,24 @@ namespace TerraEngine::Tests {
 			}
 		};
 
+		// Scheduled physics tests register lightweight neighbors so the real Physics
+		// declaration can keep its authored Scripting -> Physics -> UI dependencies.
+		class PhysicsNeighborSystem final : public SystemsBase {
+		public:
+			explicit PhysicsNeighborSystem(TerraEngine::Scheduling::SystemDeclaration declaration)
+				: declaration(std::move(declaration)) {
+			}
+
+			void Initialize() override {}
+			void Update(float) override {}
+			void Shutdown() override {}
+			std::string SystemName() override { return declaration.name; }
+			TerraEngine::Scheduling::SystemDeclaration SchedulerDeclaration() override { return declaration; }
+
+		private:
+			TerraEngine::Scheduling::SystemDeclaration declaration;
+		};
+
 		void AddDynamicFixtureBodies(TestContext& context) {
 			ObjectManager& objects = ObjectManager::instance();
 			for(std::size_t index = 0U; index < kThroughputBodyCount; ++index) {
@@ -216,6 +234,92 @@ namespace TerraEngine::Tests {
 				"The canonical unchanged frame must report zero authoring, preparation, and protected publication work.");
 			const auto steadyFlush = mutations.Apply(objects, "physics-same-pose-steady-flush");
 			physics.OnAfterPhysicsFlush(steadyFlush.transactionResults, steadyFlush.publicationGroupResults);
+		});
+
+		registry.Add("Physics.Performance.PhysicsAuthoredTransformsDoNotResetGravityVelocity", [](TestContext& context) {
+			ThreadPoolSession pool;
+			PhysicsPerformanceCleanup cleanup;
+			ComponentRegistry::RegisterAllComponents();
+			ObjectManager& objects = ObjectManager::instance();
+			auto& mutations = Scene::SceneMutationQueue::Instance();
+			objects.clear();
+			mutations.Clear();
+
+			const Object object = objects.createObject("Accelerating Gravity Body");
+			Transform* transform = objects.AddComponent<Transform>(object);
+			RigidBodyComponent* body = objects.AddComponent<RigidBodyComponent>(object);
+			ColliderSetComponent* colliders = objects.AddComponent<ColliderSetComponent>(object);
+			context.Expect(transform != nullptr && body != nullptr && colliders != nullptr,
+				"The gravity regression fixture requires a dynamic body and an authored collider.");
+			if(transform != nullptr) transform->position = {0.0F, 100.0F, 0.0F};
+			if(body != nullptr) body->useGravity = true;
+			if(colliders != nullptr) colliders->Add();
+			objects.MarkObjectTransformDirty(object);
+			const Object unrelatedEditorObject = objects.createObject("Unrelated Editor Spatial Work");
+
+			auto& physics = Physics::PhysicsSystem::Instance();
+			physics.Shutdown();
+			physics.SetEditorLifecycleControlled(true);
+			physics.Initialize();
+			context.Expect(physics.StartWorld(),
+				"The gravity regression fixture must start its isolated physics world.");
+			TerraEngine::Scheduling::SystemDeclaration scriptingDeclaration;
+			scriptingDeclaration.name = "ScriptingSystem";
+			scriptingDeclaration.phase = "Scripting";
+			scriptingDeclaration.usesDefaultMetadata = false;
+			PhysicsNeighborSystem scripting(scriptingDeclaration);
+			TerraEngine::Scheduling::SystemDeclaration uiDeclaration;
+			uiDeclaration.name = "UISystem";
+			uiDeclaration.phase = "UI";
+			uiDeclaration.reads = {"ObjectManager"};
+			uiDeclaration.requiresFlushedSceneMutations = true;
+			uiDeclaration.usesDefaultMetadata = false;
+			PhysicsNeighborSystem ui(uiDeclaration);
+			TerraEngine::Scheduling::SystemScheduler scheduler;
+			scheduler.RegisterSystem(scripting, scripting.SchedulerDeclaration());
+			scheduler.RegisterSystem(physics, physics.SchedulerDeclaration());
+			scheduler.RegisterSystem(ui, ui.SchedulerDeclaration());
+			const auto& schedule = scheduler.BuildSchedule();
+			context.Expect(schedule.valid,
+				"The gravity regression fixture must execute through the editor's scheduled physics workload path. "
+				+ schedule.formatted);
+			const float fixedTimeStep = physics.FixedTimeStep();
+			for(std::uint32_t tick = 0U; tick < 10U; ++tick) {
+				scheduler.ExecuteFrame(fixedTimeStep,
+					[&](const TerraEngine::Scheduling::MutationFlushPoint& flushPoint) {
+						TerraEngine::Scheduling::MutationFlushRuntimeState state;
+						Scene::SceneMutationBatchResult flush;
+						// Without a same-frame consumer, physics publications intentionally
+						// remain queued at After Physics and become visible at Frame End.
+						if(flushPoint.name != "After Physics" && !mutations.Empty()) {
+							flush = mutations.Apply(objects, "physics-gravity-acceleration");
+						}
+						if(flushPoint.name == "Frame End") {
+							physics.OnAfterPhysicsFlush(
+								flush.transactionResults, flush.publicationGroupResults);
+						}
+						state.pendingAfterFlush = mutations.Size();
+						return state;
+					});
+				// Editor rendering and marker work can advance the global spatial
+				// revision without editing this body. The following capture must not
+				// reinterpret physics' own published pose as fresh authoring input.
+				objects.MarkObjectTransformDirty(unrelatedEditorObject);
+			}
+
+			const auto snapshot = physics.LatestBodySnapshot();
+			const TerraEngine::UUID objectId = objects.getUUID(object);
+			const auto state = snapshot && snapshot->bodies
+				? std::find_if(snapshot->bodies->begin(), snapshot->bodies->end(),
+					[objectId](const Physics::PhysicsBodyState& candidate) {
+						return candidate.objectId == objectId;
+					})
+				: std::vector<Physics::PhysicsBodyState>::const_iterator{};
+			const bool found = snapshot && snapshot->bodies && state != snapshot->bodies->end();
+			context.Expect(found,
+				"The gravity regression fixture must publish the dynamic body's runtime state.");
+			context.Expect(found && state->linearVelocity.y < -1.0F,
+				"Ten fixed gravity ticks must accumulate downward velocity instead of resetting it after each physics-authored Transform publication.");
 		});
 
 		registry.Add("Physics.Performance.AuthoringSnapshotDetectsRealTransformAndComponentMutations", [](TestContext& context) {

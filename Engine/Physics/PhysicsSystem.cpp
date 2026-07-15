@@ -589,6 +589,7 @@ namespace TerraEngine::Physics {
 			}
 
 			std::unordered_set<TerraEngine::UUID> bodiesToPrepare;
+			std::unordered_map<TerraEngine::UUID, PhysicsAuthoringChangeReason> bodyPreparationReasons;
 			const bool isNewAuthoringGeneration = authoringGeneration
 				&& lastPreparedAuthoringSnapshotGeneration != authoringGeneration->Data().snapshotGeneration;
 			if(isNewAuthoringGeneration) {
@@ -619,10 +620,11 @@ namespace TerraEngine::Physics {
 				const PhysicsPreparationPlanData& plan = preparationPlan->Data();
 				bodiesToPrepare.reserve(plan.creates.size() + plan.updates.size()
 					+ plan.dependencyRebuilds.size());
-				const auto appendObjects = [&bodiesToPrepare](
+				const auto appendObjects = [&bodiesToPrepare, &bodyPreparationReasons](
 					const std::vector<PhysicsPreparationOperation>& operations) {
 					for(const PhysicsPreparationOperation& operation : operations) {
 						bodiesToPrepare.insert(operation.objectId);
+						bodyPreparationReasons[operation.objectId] = operation.reasons;
 					}
 				};
 				appendObjects(plan.creates);
@@ -652,6 +654,23 @@ namespace TerraEngine::Physics {
 			}
 			for(const PhysicsBodyDescriptor& body : authoring->Data().bodies) {
 				if(!bodiesToPrepare.contains(body.objectId)) continue;
+				const auto reasons = bodyPreparationReasons.find(body.objectId);
+				const auto runtime = runtimeBodies.find(body.objectId);
+				if(reasons != bodyPreparationReasons.end()
+					&& reasons->second == PhysicsAuthoringChangeReason::Transform
+					&& runtime != runtimeBodies.end()
+					&& runtime->second.objectGeneration == body.objectGeneration
+					&& runtime->second.componentGeneration == body.componentGeneration
+					&& runtime->second.hasPublishedPose
+					&& SamePose(runtime->second.lastPublishedPose, body.worldPose)) {
+					// A global spatial revision can force a fresh authoring capture even
+					// when this body's only changed Transform came from physics itself.
+					// Recreating the provider body here would restore authored initial
+					// velocity every tick, turning gravity into a slow constant drift.
+					// Exact pose and generation agreement proves there is no editor or
+					// script-authored change to send back to the provider.
+					continue;
+				}
 				const auto colliders = collidersByObject.find(body.objectId);
 				if(colliders != collidersByObject.end() && !colliders->second.empty()) {
 					PreparedBody prepared;

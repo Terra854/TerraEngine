@@ -72,16 +72,19 @@ namespace TerraEngine::Scene {
 			publishedObjects.reserve(packet.objects.size());
 			for (const PreparedSceneObjectRecord& record : packet.objects) {
 				if (cancellationRequested && cancellationRequested()) throw std::runtime_error("bulk publication cancelled during protected materialization");
-				const entt::entity entity = Serializer::DeserializeObjectEntity(record.object);
+				// Records are guaranteed to be parent-first by preflight. Attach the
+				// object while it still has its default transform, then deserialize its
+				// authored components. The normal setParent path preserves world space;
+				// attaching after component restoration would therefore reinterpret an
+				// authored local camera/child transform as a temporary root world pose.
+				std::optional<entt::entity> parentEntity;
+				if (record.parentRecordIndex.has_value()) {
+					parentEntity = publishedObjects[*record.parentRecordIndex].EntityId();
+				}
+				const entt::entity entity = Serializer::DeserializeObjectEntity(record.object, parentEntity);
 				auto created = objects.getObject(entity);
 				if (!created.has_value()) throw std::runtime_error("bulk publication could not resolve a materialized object");
 				publishedObjects.push_back(*created);
-			}
-			for (std::size_t index = 0U; index < packet.objects.size(); ++index) {
-				if (const auto parentIndex = packet.objects[index].parentRecordIndex; parentIndex.has_value()
-					&& !objects.setParent(publishedObjects[index], publishedObjects[*parentIndex])) {
-					throw std::runtime_error("bulk publication could not attach a validated parent-first object");
-				}
 			}
 			objects.FinishBulkPublication(true);
 			return {true, false, false, objects.GetSceneGeneration(), {}};

@@ -2027,7 +2027,6 @@ void SceneViewWindow::OnGui() {
 	proj[1][1] *= -1; // Vulkan flip
 
 	BuildSceneObjectMarkers(projNoFlip * view, cursorPos, contentSize);
-	DrawSceneObjectMarkers();
 	const bool orientationChanged = DrawOrientationWidget(view, projNoFlip, cursorPos, contentSize);
 	if (orientationChanged)
 	{
@@ -2044,9 +2043,14 @@ void SceneViewWindow::OnGui() {
 	RenderSystem::Instance().SetSceneViewCamera(view, proj, m_CameraPos, m_ToolState.projectionMode == SceneOverlay::ProjectionMode::Orthographic);
 	ApplyPrefabContextTintForNextRender();
 
+	// Register the transform gizmo before marker hit testing and object picking.
+	// Parent objects commonly have an empty-object marker at the exact transform
+	// pivot; current-frame ImGuizmo hover must win there so the marker cannot
+	// consume the first click intended for a translate/rotate/scale handle.
+	DrawGizmos(view, projNoFlip, cursorPos, contentSize);
+	DrawSceneObjectMarkers();
 	HandlePicking(view, projNoFlip, cursorPos, contentSize);
 
-	DrawGizmos(view, projNoFlip, cursorPos, contentSize);
 	DrawPhysicsDebugOverlay(view, projNoFlip, cursorPos, contentSize);
 	PublishSceneViewDiagnostics(true);
 }

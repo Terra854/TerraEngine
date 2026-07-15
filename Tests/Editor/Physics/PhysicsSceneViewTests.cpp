@@ -71,6 +71,16 @@ namespace TerraEngine::EditorTests
 			context.Expect(
 				sceneViewSource.find("MarkObjectTransformDirty(*selectedObject)") != std::string::npos,
 				"Scene View transform gizmos must invalidate propagated child world transforms after moving a parent.");
+			const std::size_t drawGizmoPosition = sceneViewSource.find("DrawGizmos(view, projNoFlip, cursorPos, contentSize);");
+			const std::size_t drawMarkersPosition = sceneViewSource.find("DrawSceneObjectMarkers();", drawGizmoPosition);
+			const std::size_t pickingPosition = sceneViewSource.find("HandlePicking(view, projNoFlip, cursorPos, contentSize);", drawMarkersPosition);
+			context.Expect(
+				drawGizmoPosition != std::string::npos
+					&& drawMarkersPosition != std::string::npos
+					&& pickingPosition != std::string::npos
+					&& drawGizmoPosition < drawMarkersPosition
+					&& drawMarkersPosition < pickingPosition,
+				"Parent pivot markers and object picking must defer to the transform gizmo registered for the current frame.");
 			context.Expect(
 				sceneViewSource.find("Collider shape refreshed from the restored undo/redo state") != std::string::npos,
 				"An active collider preview must follow exact ColliderSet values restored by undo and redo without leaving edit mode.");

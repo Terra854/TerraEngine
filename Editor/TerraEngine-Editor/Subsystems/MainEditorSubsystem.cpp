@@ -858,11 +858,20 @@ void MainEditorSubsystem::RestorePlayModeSceneState()
 		return;
 	}
 
+	// Runtime code may replace or clear the live scene while Play Mode is active,
+	// which legitimately advances ObjectManager's scene generation. The cached
+	// packet is owned by this exact Play Mode session, so retarget its optimistic
+	// generation check to the live runtime graph at Stop. Project close, editor
+	// scene changes, and shutdown clear m_HasPlayModeSceneSnapshot separately;
+	// therefore only the active session can authorize this protected restore.
+	TerraEngine::Scene::BulkScenePublicationPacket restorePacket = *m_PlayModeSceneSnapshotPacket;
+	restorePacket.expectedSceneGeneration = ObjectManager::instance().GetSceneGeneration();
+
 	// Stop runs on the editor's protected lifecycle boundary, so it may make the
-	// complete authored graph visible atomically. A packet from an intervening
-	// scene unload or load is rejected instead of reviving stale object IDs.
+	// complete authored graph visible atomically after the session-owned packet
+	// has been rebound to the runtime scene generation it is replacing.
 	const TerraEngine::Scene::BulkScenePublicationPreflight preflight =
-		TerraEngine::Scene::PreflightBulkScenePublication(*m_PlayModeSceneSnapshotPacket, ObjectManager::instance());
+		TerraEngine::Scene::PreflightBulkScenePublication(restorePacket, ObjectManager::instance());
 	if (!preflight.accepted)
 	{
 		m_LastPlayModeRestorationResult.stale = true;
@@ -874,7 +883,7 @@ void MainEditorSubsystem::RestorePlayModeSceneState()
 	}
 
 	const TerraEngine::Scene::BulkScenePublicationResult publication =
-		TerraEngine::Scene::PublishBulkScenePacket(*m_PlayModeSceneSnapshotPacket, ObjectManager::instance());
+		TerraEngine::Scene::PublishBulkScenePacket(restorePacket, ObjectManager::instance());
 	m_LastPlayModeRestorationResult.cancelled = publication.cancelled;
 	m_LastPlayModeRestorationResult.publishedGeneration = publication.publishedSceneGeneration;
 	m_LastPlayModeRestorationResult.reason = publication.reason;
