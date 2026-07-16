@@ -6,6 +6,7 @@
 #include "Core/Object/ObjectManager.h"
 #include "Core/Object/Component.h"
 #include "Components/Transform.h"
+#include "Components/ScriptComponent.h"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -39,9 +40,15 @@ namespace TerraEngine::Scene {
 			{
 			case SceneMutationOperation::DeleteObject:
 			case SceneMutationOperation::ReparentObject:
+			case SceneMutationOperation::SetObjectName:
+			case SceneMutationOperation::SetObjectTag:
+			case SceneMutationOperation::SetObjectLayer:
+			case SceneMutationOperation::SetObjectActive:
+			case SceneMutationOperation::SetObjectStatic:
 			case SceneMutationOperation::AddComponent:
 			case SceneMutationOperation::RemoveComponent:
 			case SceneMutationOperation::UpdateComponent:
+			case SceneMutationOperation::AddScriptBinding:
 			case SceneMutationOperation::ApplyPrefabDefaults:
 			case SceneMutationOperation::ResetPrefabDefaults:
 				return true;
@@ -344,6 +351,17 @@ namespace TerraEngine::Scene {
 				result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Error, request, "Mutation target no longer exists.", "Drop or rebuild the request from current selection state."));
 			}
 
+			// Deferred managed creation reserves its stable UUID before publication.
+			// Reject collisions during preflight so the entire request batch remains
+			// atomic and managed receipts never resolve to an unrelated live object.
+			if (request.operation == SceneMutationOperation::CreateObject
+				&& request.targetObjectId != TerraEngine::EMPTY_UUID
+				&& graph.objects.find(request.targetObjectId) != graph.objects.end())
+			{
+				result.accepted = false;
+				result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Error, request, "Create mutation reserved an existing object UUID.", "Generate a fresh stable UUID before retrying the request."));
+			}
+
 			if (deletedTargets.contains(request.targetObjectId))
 			{
 				result.accepted = false;
@@ -363,6 +381,12 @@ namespace TerraEngine::Scene {
 			{
 				result.accepted = false;
 				result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Error, request, "Component mutation is missing a component name.", "Set componentName so the owning system can apply the payload deterministically."));
+			}
+
+			if (request.operation == SceneMutationOperation::AddScriptBinding && request.metadataValue.empty())
+			{
+				result.accepted = false;
+				result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Error, request, "Script binding mutation is missing a managed class name.", "Provide the fully qualified managed script type name."));
 			}
 
 			if (request.operation == SceneMutationOperation::DeleteObject && result.accepted)
@@ -437,6 +461,10 @@ namespace TerraEngine::Scene {
 			case SceneMutationOperation::CreateObject:
 			{
 				Object created = objects.createObject(request.displayName.empty() ? "Object" : request.displayName);
+				if (request.targetObjectId != TerraEngine::EMPTY_UUID)
+				{
+					objects.UpdateObjectUUID(created, request.targetObjectId);
+				}
 				result.createdObjectId = objects.getUUID(created);
 				if (request.parentObjectId != TerraEngine::EMPTY_UUID)
 				{
@@ -462,6 +490,36 @@ namespace TerraEngine::Scene {
 						parent = objects.getObject(request.parentObjectId);
 					}
 					objects.setParent(*target, parent);
+				}
+				break;
+			case SceneMutationOperation::SetObjectName:
+				if (auto target = objects.getObject(request.targetObjectId))
+				{
+					objects.setObjectName(*target, request.metadataValue);
+				}
+				break;
+			case SceneMutationOperation::SetObjectTag:
+				if (auto target = objects.getObject(request.targetObjectId))
+				{
+					objects.setObjectTag(*target, request.metadataValue);
+				}
+				break;
+			case SceneMutationOperation::SetObjectLayer:
+				if (auto target = objects.getObject(request.targetObjectId))
+				{
+					objects.setObjectLayer(*target, request.metadataValue);
+				}
+				break;
+			case SceneMutationOperation::SetObjectActive:
+				if (auto target = objects.getObject(request.targetObjectId))
+				{
+					objects.setObjectActive(*target, request.metadataBooleanValue);
+				}
+				break;
+			case SceneMutationOperation::SetObjectStatic:
+				if (auto target = objects.getObject(request.targetObjectId))
+				{
+					objects.setObjectStatic(*target, request.metadataBooleanValue);
 				}
 				break;
 			case SceneMutationOperation::AddComponent:
@@ -543,6 +601,27 @@ namespace TerraEngine::Scene {
 					catch (const std::exception& exception)
 					{
 						result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Error, request, std::string("Component update payload could not be parsed: ") + exception.what(), "Rebuild the script mutation payload from supported property types."));
+					}
+				}
+				break;
+			case SceneMutationOperation::AddScriptBinding:
+				if (auto target = objects.getObject(request.targetObjectId))
+				{
+					ScriptComponent* scripts = objects.GetComponent<ScriptComponent>(*target);
+					if (scripts == nullptr)
+					{
+						scripts = objects.AddComponent<ScriptComponent>(*target);
+					}
+					if (scripts == nullptr)
+					{
+						result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Error, request, "Script component could not be created.", "Retry after refreshing the target object."));
+						break;
+					}
+					auto guard = scripts->acquireWriteLock();
+					if (!scripts->HasBinding(request.metadataValue))
+					{
+						scripts->AddBinding(TerraEngine::EMPTY_UUID, request.metadataValue);
+						objects.notifyObjectStructureChanged(*target);
 					}
 				}
 				break;

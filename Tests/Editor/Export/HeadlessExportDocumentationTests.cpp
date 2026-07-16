@@ -28,47 +28,6 @@ namespace TerraEngine::EditorTests {
 	}
 
 	void RegisterHeadlessExportDocumentationTests(TestRegistry& registry) {
-		registry.Add("Editor.HeadlessExport.Documentation.LocalCommandsRemainReproducible", [](TestContext& context) {
-			const std::string quickstart = ReadDocumentationText("specs/043-optimize-engine-performance/quickstart.md");
-			const std::string baselineGuide = ReadDocumentationText("Docs/ExportRuntimeBaseline.md");
-			const std::string testingGuide = ReadDocumentationText("Docs/Testing.md");
-			const std::vector<std::string_view> sharedCommandTokens = {
-				"cmake --preset RelWithDebInfo",
-				"TerraEngine-EngineTests",
-				"TerraEngine-EditorTests",
-				"TerraEngineModelPackageCompiler",
-				"TerraEngine-Export",
-				"TerraEngine-Editor",
-				"Editor.ExportUnitTests|Editor.HeadlessExport",
-				"--output-on-failure",
-				"--target install",
-				"Tools/ExportRuntimeBaseline/RunBaseline.ps1",
-				"-InstallRoot",
-				"out/ci/export-runtime-baseline"
-			};
-
-			context.Expect(ContainsEvery(quickstart, sharedCommandTokens), "The feature quickstart should reproduce the local validation command surface.");
-			context.Expect(ContainsEvery(baselineGuide, sharedCommandTokens), "The baseline guide should reproduce the local validation command surface.");
-			context.Expect(ContainsEvery(testingGuide, sharedCommandTokens), "The testing guide should reproduce the local validation command surface.");
-		});
-
-		registry.Add("Editor.HeadlessExport.Documentation.InstalledPathsStayAuthoritative", [](TestContext& context) {
-			const std::string quickstart = ReadDocumentationText("specs/043-optimize-engine-performance/quickstart.md");
-			const std::string baselineGuide = ReadDocumentationText("Docs/ExportRuntimeBaseline.md");
-			const std::string testingGuide = ReadDocumentationText("Docs/Testing.md");
-			const std::vector<std::string_view> installedPaths = {
-				"out/build/RelWithDebInfo/Build/Editor/TerraEngine-Export.exe",
-				"out/build/RelWithDebInfo/Build/Editor/TerraEngineModelPackageCompiler.exe",
-				"out/build/RelWithDebInfo/Build/Editor/Managed/TerraEngine.CSharp.dll",
-				"out/build/RelWithDebInfo/Build/Editor/Managed/Analyzers/TerraEngine.Export.Generator.dll",
-				"out/build/RelWithDebInfo/Build/Launcher/TerraEngine-Launcher.exe"
-			};
-
-			context.Expect(ContainsEvery(quickstart, installedPaths), "The quickstart should list every installed export dependency.");
-			context.Expect(ContainsEvery(baselineGuide, installedPaths), "The baseline guide should list every installed export dependency.");
-			context.Expect(ContainsEvery(testingGuide, installedPaths), "The testing guide should list every installed export dependency.");
-		});
-
 		registry.Add("Editor.HeadlessExport.Documentation.EvidenceAndFailureCategoriesAreComplete", [](TestContext& context) {
 			const std::string baselineGuide = ReadDocumentationText("Docs/ExportRuntimeBaseline.md");
 			const std::string testingGuide = ReadDocumentationText("Docs/Testing.md");

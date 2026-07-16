@@ -11,6 +11,7 @@
 #include "Components/CameraComponent.h"
 #include "Components/LightComponent.h"
 #include "Components/MeshRenderComponent.h"
+#include "Components/SkyComponent.h"
 #include "Components/PrefabLinkComponent.h"
 #include "Components/UIComponent.h"
 #include "Components/Physics/CharacterControllerComponent.h"
@@ -70,6 +71,7 @@ void ComponentRegistry::RegisterAllComponents() {
 	CameraComponent::registerType();
 	LightComponent::registerType();
 	MeshRenderComponent::registerType();
+	SkyComponent::registerType();
 	PrefabLinkComponent::registerType();
 	UIComponent::registerType();
 	RigidBodyComponent::registerType();

@@ -8,6 +8,33 @@ namespace TerraEngine
 	{
 		public static uint AbiVersion => InternalCalls.Native_Physics_GetAbiVersion();
 
+		// Configuration copies the complete world configuration, including all
+		// collision layers. Assignments are validated by native code and become
+		// visible at the next protected physics boundary.
+		public static PhysicsConfiguration Configuration
+		{
+			get
+			{
+				NativePhysicsSettingsRecord settings = new() { Header = PhysicsAbiHeader.For<NativePhysicsSettingsRecord>() };
+				InternalCalls.Native_Physics_ReadSettingsRecord(ref settings);
+				return settings.ToPublic();
+			}
+			set
+			{
+				PhysicsStatus status = ApplyConfiguration(value);
+				if (status != PhysicsStatus.Accepted && status != PhysicsStatus.Success)
+				{
+					throw new ArgumentException($"Native physics rejected the configuration with status {status}.", nameof(value));
+				}
+			}
+		}
+
+		public static PhysicsStatus ApplyConfiguration(PhysicsConfiguration settings)
+		{
+			NativePhysicsSettingsRecord native = NativePhysicsSettingsRecord.FromPublic(settings);
+			return InternalCalls.Native_Physics_SubmitSettingsRecord(ref native);
+		}
+
 		public static unsafe PhysicsQueryResult Query(PhysicsQueryRequest request)
 		{
 			NativePhysicsQueryRequest nativeRequest = ToNative(request);

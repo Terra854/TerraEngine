@@ -26,9 +26,15 @@ namespace TerraEngine::Scene {
 		CreateObject,
 		DeleteObject,
 		ReparentObject,
+		SetObjectName,
+		SetObjectTag,
+		SetObjectLayer,
+		SetObjectActive,
+		SetObjectStatic,
 		AddComponent,
 		RemoveComponent,
 		UpdateComponent,
+		AddScriptBinding,
 		CreatePrefab,
 		DeletePrefab,
 		ApplyPrefabDefaults,
@@ -55,6 +61,10 @@ namespace TerraEngine::Scene {
 		TerraEngine::UUID targetObjectId = TerraEngine::EMPTY_UUID;
 		TerraEngine::UUID parentObjectId = TerraEngine::EMPTY_UUID;
 		std::string displayName;
+		// Metadata mutations carry copied scalar values so worker callbacks never
+		// retain pointers into managed strings or touch ObjectManager directly.
+		std::string metadataValue;
+		bool metadataBooleanValue = false;
 		std::string componentName;
 		std::string payloadJson;
 		SceneComponentPropertyMutation typedComponentPayload;

@@ -51,6 +51,21 @@ public:
 	[[nodiscard]] const std::filesystem::path& GetLoadedGameplayAssemblyPath() const { return m_LoadedGameplayAssemblyPath; }
 	[[nodiscard]] const std::string& GetLastGameplayDiagnostic() const { return m_LastGameplayDiagnostic; }
 	[[nodiscard]] float GetLastDeltaTime() const { return m_LastDeltaTime; }
+	struct RuntimeTimeSnapshot
+	{
+		float deltaTime = 0.0F;
+		float unscaledDeltaTime = 0.0F;
+		float timeScale = 1.0F;
+		double elapsedTime = 0.0;
+		double unscaledElapsedTime = 0.0;
+		std::uint64_t frameCount = 0U;
+	};
+	// MainEngine calls BeginFrameTiming before scheduler planning. Managed writes
+	// only publish a pending scalar, so worker callbacks never rewrite a frame
+	// graph that is already executing.
+	float BeginFrameTiming(float unscaledDeltaTime);
+	bool QueueRuntimeTimeScale(float timeScale);
+	[[nodiscard]] RuntimeTimeSnapshot GetRuntimeTimeSnapshot() const;
 	[[nodiscard]] bool ManagedCallbacksRunProtected() const { return true; }
 	[[nodiscard]] bool ManagedCallbacksRequireSchedulerAnnotations() const { return false; }
 	[[nodiscard]] std::string GetSchedulerBoundarySummary() const;
@@ -253,6 +268,9 @@ private:
 	std::filesystem::path m_LoadedGameplayAssemblyPath;
 	std::string m_LastGameplayDiagnostic;
 	float m_LastDeltaTime = 0.0f;
+	mutable std::mutex m_RuntimeTimeMutex;
+	RuntimeTimeSnapshot m_RuntimeTimeSnapshot;
+	std::optional<float> m_PendingRuntimeTimeScale;
 
 	std::mutex m_InspectorWatchMutex;
 	InspectorWatchState m_InspectorWatchState;

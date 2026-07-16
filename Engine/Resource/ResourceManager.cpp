@@ -1784,6 +1784,24 @@ bool ResourceManager::ReleaseResidentResource(
 	return true;
 }
 
+bool ResourceManager::ReleaseStreamableAssetForRuntime(
+	const TerraEngine::UUID& id,
+	AssetType type,
+	std::uint64_t frameId)
+{
+	if (id == TerraEngine::EMPTY_UUID)
+	{
+		return false;
+	}
+	return ReleaseResidentResource(
+		id,
+		type,
+		TerraEngine::Resource::ResidencyReleaseReason::ExplicitRuntimeUnload,
+		TerraEngine::Resource::ResidencyReleaseDomain::CpuAndGpu,
+		frameId,
+		0U);
+}
+
 void ResourceManager::ClearResidencyState()
 {
 	std::unique_lock lock(m_ResidencyMutex);

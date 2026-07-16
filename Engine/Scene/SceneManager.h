@@ -107,6 +107,8 @@ public:
 	// scene is not loaded yet.
 	bool SetActiveScene(const TerraEngine::UUID& id);
 	const SceneDocument* GetActiveScene() const;
+	TerraEngine::UUID GetActiveSceneId() const { return activeSceneId; }
+	std::vector<TerraEngine::UUID> GetLoadedSceneIds() const;
 
 	// Commits the current state of the ObjectManager to a .tescene file. If a path
 	// is omitted, the document's original source location is overwritten. This 

@@ -15,7 +15,10 @@ namespace TerraEngine
 		private bool _enableCallbackActive;
 		private Transform? _transform;
 
-		public bool Enabled
+		// Script bindings keep per-instance lifecycle state inside the managed
+		// dispatch record, so this intentionally differs from a native component's
+		// reflected active flag exposed by Component.Enabled.
+		public new bool Enabled
 		{
 			get => _enabled;
 			set => _enabled = value;

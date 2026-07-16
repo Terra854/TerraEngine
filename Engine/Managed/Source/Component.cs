@@ -17,6 +17,14 @@ namespace TerraEngine
 
 		public Object Object { get; internal set; } = null!;
 		public Transform Transform => Object.Transform;
+		// Every native Component<Derived> reflects this shared active flag. Keeping
+		// it on the base class gives all current and future wrappers one consistent
+		// way to participate in runtime system filtering.
+		public bool Enabled
+		{
+			get => GetProperty<bool>("active");
+			set => SetProperty("active", value);
+		}
 
 		public T? GetComponent<T>() where T : Component, new()
 		{
@@ -56,6 +64,18 @@ namespace TerraEngine
 			InternalCalls.Native_SetComponentProperty(Object.ID, ResolveNativeComponentTypeName(GetType()), propertyName, &value, (int)type);
 		}
 
+		protected string GetStringProperty(string propertyName)
+		{
+			return InternalCalls.ReadNativeUtf8(InternalCalls.Native_GetComponentStringProperty(
+				Object.ID, ResolveNativeComponentTypeName(GetType()), propertyName));
+		}
+
+		protected void SetStringProperty(string propertyName, string? value)
+		{
+			InternalCalls.Native_SetComponentStringProperty(
+				Object.ID, ResolveNativeComponentTypeName(GetType()), propertyName, value ?? string.Empty);
+		}
+
 		// ResolveNativeComponentTypeName bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static string ResolveNativeComponentTypeName(Type managedType)
 		{
@@ -71,6 +91,7 @@ namespace TerraEngine
 				nameof(Camera) => "CameraComponent",
 				nameof(Light) => "LightComponent",
 				nameof(MeshRenderer) => "MeshRenderComponent",
+				nameof(Sky) => "SkyComponent",
 				nameof(Rigidbody) => "RigidBodyComponent",
 				nameof(ColliderSet) => "ColliderSetComponent",
 				nameof(ConstraintSet) => "ConstraintSetComponent",

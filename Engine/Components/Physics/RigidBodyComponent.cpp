@@ -76,22 +76,22 @@ TerraEngine::Physics::RigidBodyValidationResult RigidBodyComponent::Validate() c
 void RigidBodyComponent::reflect(entt::meta_factory<RigidBodyComponent>& factory)
 {
 	TerraEngine::Reflection::RegisterDataProperty<&RigidBodyComponent::schemaVersion>(factory, "schemaVersion");
-	TerraEngine::Reflection::RegisterDataProperty<&RigidBodyComponent::motionType>(factory, "motionType");
-	TerraEngine::Reflection::RegisterDataProperty<&RigidBodyComponent::massMode>(factory, "massMode");
+	TerraEngine::Reflection::RegisterAccessorProperty<&RigidBodyComponent::SetMotionTypeValue, &RigidBodyComponent::GetMotionTypeValue>(factory, "motionType");
+	TerraEngine::Reflection::RegisterAccessorProperty<&RigidBodyComponent::SetMassModeValue, &RigidBodyComponent::GetMassModeValue>(factory, "massMode");
 	TerraEngine::Reflection::RegisterDataProperty<&RigidBodyComponent::mass>(factory, "mass");
 	TerraEngine::Reflection::RegisterDataProperty<&RigidBodyComponent::linearDamping>(factory, "linearDamping");
 	TerraEngine::Reflection::RegisterDataProperty<&RigidBodyComponent::angularDamping>(factory, "angularDamping");
 	TerraEngine::Reflection::RegisterDataProperty<&RigidBodyComponent::useGravity>(factory, "useGravity");
 	TerraEngine::Reflection::RegisterDataProperty<&RigidBodyComponent::allowSleeping>(factory, "allowSleeping");
 	TerraEngine::Reflection::RegisterDataProperty<&RigidBodyComponent::startAwake>(factory, "startAwake");
-	TerraEngine::Reflection::RegisterDataProperty<&RigidBodyComponent::continuousCollisionMode>(factory, "continuousCollisionMode");
-	TerraEngine::Reflection::RegisterDataProperty<&RigidBodyComponent::initialLinearVelocity>(factory, "initialLinearVelocity");
-	TerraEngine::Reflection::RegisterDataProperty<&RigidBodyComponent::initialAngularVelocity>(factory, "initialAngularVelocity");
+	TerraEngine::Reflection::RegisterAccessorProperty<&RigidBodyComponent::SetMotionQualityValue, &RigidBodyComponent::GetMotionQualityValue>(factory, "continuousCollisionMode");
+	TerraEngine::Reflection::RegisterAccessorProperty<&RigidBodyComponent::SetInitialLinearVelocityValue, &RigidBodyComponent::GetInitialLinearVelocityValue>(factory, "initialLinearVelocity");
+	TerraEngine::Reflection::RegisterAccessorProperty<&RigidBodyComponent::SetInitialAngularVelocityValue, &RigidBodyComponent::GetInitialAngularVelocityValue>(factory, "initialAngularVelocity");
 	TerraEngine::Reflection::RegisterDataProperty<&RigidBodyComponent::maxLinearVelocity>(factory, "maxLinearVelocity");
 	TerraEngine::Reflection::RegisterDataProperty<&RigidBodyComponent::maxAngularVelocity>(factory, "maxAngularVelocity");
 	TerraEngine::Reflection::RegisterDataProperty<&RigidBodyComponent::allowedDegreesOfFreedom>(factory, "allowedDegreesOfFreedom");
-	TerraEngine::Reflection::RegisterDataProperty<&RigidBodyComponent::interpolationMode>(factory, "interpolationMode");
-	TerraEngine::Reflection::RegisterDataProperty<&RigidBodyComponent::collisionLayerId>(factory, "collisionLayerId");
+	TerraEngine::Reflection::RegisterAccessorProperty<&RigidBodyComponent::SetInterpolationModeValue, &RigidBodyComponent::GetInterpolationModeValue>(factory, "interpolationMode");
+	TerraEngine::Reflection::RegisterAccessorProperty<&RigidBodyComponent::SetCollisionLayerValue, &RigidBodyComponent::GetCollisionLayerValue>(factory, "collisionLayerId");
 	TerraEngine::Reflection::RegisterDataProperty<&RigidBodyComponent::useCollisionMaskOverride>(factory, "useCollisionMaskOverride");
 	TerraEngine::Reflection::RegisterDataProperty<&RigidBodyComponent::collisionMaskOverride>(factory, "collisionMaskOverride");
 	TerraEngine::Reflection::RegisterDataProperty<&RigidBodyComponent::enabled>(factory, "enabled");

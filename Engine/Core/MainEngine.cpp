@@ -396,6 +396,10 @@ bool Engine::Update(float deltaTime)
 	profiler.BeginFrame(playModeFrame);
 	{
 		TERRAENGINE_PROFILE_SCOPE("Engine::Update", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		// Runtime time-scale requests are published once before the scheduler builds
+		// immutable frame workloads. Every system therefore receives the same
+		// scaled delta, while Time.UnscaledDeltaTime retains the host frame value.
+		const float scheduledDeltaTime = ScriptingSystem::Instance().BeginFrameTiming(deltaTime);
 
 		// Real systems publish ECS query graph summaries as they execute. Clear
 		// the frame collector here so scheduler diagnostics piggyback on actual
@@ -406,7 +410,7 @@ bool Engine::Update(float deltaTime)
 			TerraEngine::Scheduling::ClearPublishedEcsGraphFrameSummaries();
 		}
 
-		const TerraEngine::Scheduling::ScheduleSummary& schedulerSummary = systemScheduler.ExecuteFrame(deltaTime, [](const TerraEngine::Scheduling::MutationFlushPoint& flushPoint) {
+		const TerraEngine::Scheduling::ScheduleSummary& schedulerSummary = systemScheduler.ExecuteFrame(scheduledDeltaTime, [](const TerraEngine::Scheduling::MutationFlushPoint& flushPoint) {
 			TerraEngine::Scheduling::MutationFlushRuntimeState state;
 			TerraEngine::Scene::SceneMutationQueue& queue = TerraEngine::Scene::SceneMutationQueue::Instance();
 			TerraEngine::Scene::SceneMutationBatchResult result;
@@ -418,6 +422,11 @@ bool Engine::Update(float deltaTime)
 				// observe the ObjectManager changing midway through their update.
 				result = SceneManager::Instance().ApplySceneMutations("system-scheduler-flush");
 				state.message = result.applied ? "Scene mutation queue flushed." : "Scene mutation queue rejected one or more requests.";
+			}
+			if (flushPoint.name == "Frame End") {
+				// Scene metadata, prefab lifecycle, and explicit resource-release
+				// requests from managed callbacks publish only at this protected edge.
+				FlushManagedRuntimeRequests();
 			}
 			const bool physicsPublicationBoundary = (flushPoint.name == "After Physics" && sameFramePhysicsConsumer)
 				|| (flushPoint.name == "Frame End" && !sameFramePhysicsConsumer);

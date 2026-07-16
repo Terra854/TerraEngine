@@ -262,6 +262,10 @@ public:
 		TerraEngine::Resource::StreamingNeedType needType,
 		std::uint64_t frameId,
 		std::string_view reason = {});
+	// Explicit managed/runtime unloads are executed only at the engine's protected
+	// frame-end boundary. Persistent asset registrations remain intact, so a
+	// later preload can safely recreate the released CPU/GPU payload.
+	bool ReleaseStreamableAssetForRuntime(const TerraEngine::UUID& id, AssetType type, std::uint64_t frameId);
 
 	// Check if a resource with the given UUID exists in any of the manager's caches.
 	bool HasResource(const TerraEngine::UUID& id) const;

@@ -10,11 +10,122 @@ namespace TerraEngine
 		// retain it, but every native call revalidates it at the protected boundary.
 		public PhysicsBodyHandle Handle { get; internal set; }
 		public PhysicsIdentity Identity { get; internal set; }
+		public uint SchemaVersion => GetProperty<uint>("schemaVersion");
+
+		public PhysicsMotionType MotionType
+		{
+			get => (PhysicsMotionType)GetProperty<uint>("motionType");
+			set => SetProperty("motionType", (uint)value);
+		}
+
+		public PhysicsMassMode MassMode
+		{
+			get => (PhysicsMassMode)GetProperty<uint>("massMode");
+			set => SetProperty("massMode", (uint)value);
+		}
+
+		public float Mass
+		{
+			get => GetProperty<float>("mass");
+			set => SetProperty("mass", value);
+		}
+
+		public float LinearDamping
+		{
+			get => GetProperty<float>("linearDamping");
+			set => SetProperty("linearDamping", value);
+		}
+
+		public float AngularDamping
+		{
+			get => GetProperty<float>("angularDamping");
+			set => SetProperty("angularDamping", value);
+		}
 
 		public bool UseGravity
 		{
 			get => GetProperty<bool>("useGravity");
 			set => SetProperty("useGravity", value);
+		}
+
+		public bool AllowSleeping
+		{
+			get => GetProperty<bool>("allowSleeping");
+			set => SetProperty("allowSleeping", value);
+		}
+
+		public bool StartAwake
+		{
+			get => GetProperty<bool>("startAwake");
+			set => SetProperty("startAwake", value);
+		}
+
+		public PhysicsMotionQuality ContinuousCollisionMode
+		{
+			get => (PhysicsMotionQuality)GetProperty<uint>("continuousCollisionMode");
+			set => SetProperty("continuousCollisionMode", (uint)value);
+		}
+
+		public Vector3 InitialLinearVelocity
+		{
+			get => GetProperty<Vector3>("initialLinearVelocity");
+			set => SetProperty("initialLinearVelocity", value);
+		}
+
+		public Vector3 InitialAngularVelocity
+		{
+			get => GetProperty<Vector3>("initialAngularVelocity");
+			set => SetProperty("initialAngularVelocity", value);
+		}
+
+		public float MaxLinearVelocity
+		{
+			get => GetProperty<float>("maxLinearVelocity");
+			set => SetProperty("maxLinearVelocity", value);
+		}
+
+		public float MaxAngularVelocity
+		{
+			get => GetProperty<float>("maxAngularVelocity");
+			set => SetProperty("maxAngularVelocity", value);
+		}
+
+		public PhysicsDegreesOfFreedom AllowedDegreesOfFreedom
+		{
+			get => (PhysicsDegreesOfFreedom)GetProperty<uint>("allowedDegreesOfFreedom");
+			set => SetProperty("allowedDegreesOfFreedom", (uint)value);
+		}
+
+		public PhysicsInterpolationMode InterpolationMode
+		{
+			get => (PhysicsInterpolationMode)GetProperty<uint>("interpolationMode");
+			set => SetProperty("interpolationMode", (uint)value);
+		}
+
+		public uint CollisionLayer
+		{
+			get => GetProperty<uint>("collisionLayerId");
+			set => SetProperty("collisionLayerId", value);
+		}
+
+		public bool UseCollisionMaskOverride
+		{
+			get => GetProperty<bool>("useCollisionMaskOverride");
+			set => SetProperty("useCollisionMaskOverride", value);
+		}
+
+		public uint CollisionMaskOverride
+		{
+			get => GetProperty<uint>("collisionMaskOverride");
+			set => SetProperty("collisionMaskOverride", value);
+		}
+
+		// PhysicsEnabled controls body creation independently from the common
+		// Component.Enabled flag used by system-level component filtering.
+		public bool PhysicsEnabled
+		{
+			get => GetProperty<bool>("enabled");
+			set => SetProperty("enabled", value);
 		}
 
 		public PhysicsCommandReceipt AddForce(Vector3 value, ForceMode mode = ForceMode.Force, ulong effectiveTick = 0, ulong correlationId = 0)

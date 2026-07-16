@@ -1,147 +1,278 @@
-// Graphics.cs — Managed API for global rendering settings and quality presets.
-//
-// This file defines the C# interface for controlling the engine's renderer,
-// including shadow resolution, light budgets, and ambient occlusion settings.
-// It allows scripts to query and modify graphics quality presets and provides
-// access to real-time lighting diagnostics for editor status displays.
+// Graphics.cs — Safe managed access to game-wide runtime rendering settings.
 
 using System;
 using System.Runtime.InteropServices;
 
 namespace TerraEngine
 {
-    /// <summary>
-    /// Predefined graphics quality levels for the engine.
-    /// </summary>
-    public enum QualityPreset : uint
-    {
-        /// <summary> Lowest quality, optimized for performance. </summary>
-        Low = 0,
-        /// <summary> Balanced quality and performance. </summary>
-        Medium = 1,
-        /// <summary> High quality, standard for modern PCs. </summary>
-        High = 2,
-        /// <summary> Maximum quality, for enthusiast hardware. </summary>
-        Ultra = 3,
-        /// <summary> User-defined custom settings. </summary>
-        Custom = 4
-    }
+	public enum QualityPreset : uint
+	{
+		Low = 0,
+		Medium = 1,
+		High = 2,
+		Ultra = 3,
+		Custom = 4
+	}
 
-    /// <summary>
-    /// Individual rendering parameters that can be adjusted.
-    /// </summary>
-    [StructLayout(LayoutKind.Sequential)]
-    public struct RenderSettings
-    {
-        /// <summary> Resolution of shadow map textures (e.g. 512, 1024, 2048, 4096). </summary>
-        public uint ShadowResolution;
-        /// <summary> Size of the PCF filter kernel (must be an odd number like 1, 3, 5, 7). </summary>
-        public uint ShadowFilteringSize;
-        /// <summary> Scene-wide candidate budget uploaded into the lightweight GPU analysis pass before the final retained-light list is chosen for shading. </summary>
-        public uint MaxUploadedLights;
-        /// <summary> Scene-wide maximum number of dynamic lights retained for shading each frame. Variable light bins no longer treat this as a per-cluster cap. </summary>
-        public uint MaxDynamicLights;
-        /// <summary> Scene-wide maximum number of retained lights that may still request shadow resources in the same frame. This value is clamped so it never exceeds MaxDynamicLights or the available shadow slots. </summary>
-        public uint MaxShadowLights;
-        /// <summary> Optional cap for retained area lights so grouped presets can bound higher-cost lighting classes independently. </summary>
-        public uint MaxAreaLights;
-        /// <summary> Toggles Linearly Transformed Cosines (LTC) for Area Lights. 1 = Enabled, 0 = Disabled. </summary>
-        public uint EnableLTC;
-        /// <summary> Toggles Image-Based Lighting (IBL). 1 = Enabled, 0 = Disabled. </summary>
-        public uint EnableIBL;
-        /// <summary> Scales indirect and environment lighting without changing direct light intensity. </summary>
-        public float IndirectStrength;
-        /// <summary> Scales contact darkening applied to indirect and environment lighting. </summary>
-        public float AmbientOcclusionStrength;
-        /// <summary> Quality tier for contact darkening, where 0 disables the effect and higher values increase fidelity. </summary>
-        public uint AmbientOcclusionQuality;
-        /// <summary> Anisotropic filtering level (1 to 16). </summary>
-        public uint AnisotropicFiltering;
-        /// <summary> Startup-only Variable Rate Shading toggle. 1 = Enabled, 0 = Disabled. </summary>
-        public uint VariableRateShading;
-        /// <summary> Startup-only Vulkan validation layer request. 1 = request validation, 0 = run normally. </summary>
-        public uint ValidationEnabled;
-        /// <summary> Startup-only render debug diagnostics request. 1 = enabled, 0 = disabled. </summary>
-        public uint DebugEnabled;
-    }
+	public enum GraphicsStatus : uint
+	{
+		Success = 0,
+		Accepted = 1,
+		InvalidArgument = 2,
+		VersionMismatch = 3,
+		InvalidPreset = 4
+	}
 
-    // LightingDiagnosticCategory is the managed-facing contract for this subsystem; keep it predictable for scripts.
-    public enum LightingDiagnosticCategory : uint
-    {
-        Shadow = 0,
-        IndirectLighting = 1,
-        AmbientOcclusion = 2,
-        MaterialShadow = 3,
-        Budget = 4
-    }
+	public enum VirtualGeometryDebugMode : uint
+	{
+		None = 0,
+		LOD = 1,
+		MeshletId = 2,
+		Bounds = 3,
+		Culling = 4,
+		HiZ = 5,
+		Residency = 6,
+		Error = 7,
+		Cluster = 8
+	}
 
-    // LightingDiagnosticStatus is the managed-facing contract for this subsystem; keep it predictable for scripts.
-    public enum LightingDiagnosticStatus : uint
-    {
-        Active = 0,
-        Disabled = 1,
-        Degraded = 2,
-        Fallback = 3,
-        Unavailable = 4
-    }
+	public struct VirtualGeometrySettings
+	{
+		public float LodErrorScale;
+		public uint MaxLodDrop;
+		public bool HiZOcclusionEnabled;
+		public bool HiZSelfOcclusionGuardEnabled;
+		public bool HiZNearPlaneGuardEnabled;
+		public bool HiZThinGeometryGuardEnabled;
+		public VirtualGeometryDebugMode DebugVisualizationMode;
+		public ulong GeometryBudgetBytes;
+		public float PreloadBias;
+		public float LodTransitionHysteresisPixels;
+		public uint LodTransitionStableFrames;
+	}
 
-    /// <summary>
-    /// Provides access to global graphics and rendering settings.
-    /// </summary>
-    public static class Graphics
-    {
-        /// <summary>
-        /// Gets or sets the current quality preset. Setting this automatically updates individual RenderSettings.
-        /// </summary>
-        public static QualityPreset QualityPreset
-        {
-            get => Native_Graphics_GetQualityPreset();
-            set => Native_Graphics_SetQualityPreset((uint)value);
-        }
+	// This public value is never passed directly to native code. Conversion to a
+	// fixed ABI record keeps ordinary C# bool layout and future API growth from
+	// changing the buffer size understood by the engine DLL.
+	public struct RenderSettings
+	{
+		public uint ShadowResolution;
+		public uint ShadowFilteringSize;
+		public uint MaxUploadedLights;
+		public uint MaxDynamicLights;
+		public uint MaxShadowLights;
+		public uint MaxAreaLights;
+		public bool EnableLTC;
+		public bool EnableIBL;
+		public float IndirectStrength;
+		public float AmbientOcclusionStrength;
+		public uint AmbientOcclusionQuality;
+		public uint AnisotropicFiltering;
+		// VRS and validation are reported for completeness. Backend limitations may
+		// defer their visible effect until the renderer recreates startup resources.
+		public bool VariableRateShading;
+		public bool ValidationEnabled;
+		public bool DebugEnabled;
+		public VirtualGeometrySettings VirtualGeometry;
+	}
 
-        /// <summary>
-        /// Gets or sets the individual rendering settings. Setting this automatically switches the QualityPreset to Custom.
-        /// </summary>
-        public static RenderSettings RenderSettings
-        {
-            get
-            {
-                Native_Graphics_GetRenderSettings(out RenderSettings settings);
-                return settings;
-            }
-            set => Native_Graphics_SetRenderSettings(ref value);
-        }
+	[StructLayout(LayoutKind.Sequential, Pack = 8)]
+	internal struct NativeGraphicsAbiHeader
+	{
+		public uint AbiVersion;
+		public uint StructSize;
+	}
 
-        /// <summary>
-        /// Returns a compact human-readable lighting diagnostics summary for editor status displays.
-        /// </summary>
-        public static string LightingDiagnosticsSummary
-        {
-            get
-            {
-                IntPtr message = Native_Graphics_GetLightingDiagnosticsSummary(0u);
-                return Marshal.PtrToStringAnsi(message) ?? string.Empty;
-            }
-        }
+	[StructLayout(LayoutKind.Sequential, Pack = 8)]
+	internal struct NativeGraphicsRenderSettings
+	{
+		internal const uint AbiVersion = 1;
+		internal const uint Size = 120;
 
-        [DllImport("TerraEngine")]
-        // Native_Graphics_SetQualityPreset bridges managed callers to engine state; validate arguments before forwarding to native code.
-        private static extern void Native_Graphics_SetQualityPreset(uint preset);
+		public NativeGraphicsAbiHeader Header;
+		public uint ShadowResolution;
+		public uint ShadowFilteringSize;
+		public uint MaxUploadedLights;
+		public uint MaxDynamicLights;
+		public uint MaxShadowLights;
+		public uint MaxAreaLights;
+		public uint EnableLTC;
+		public uint EnableIBL;
+		public float IndirectStrength;
+		public float AmbientOcclusionStrength;
+		public uint AmbientOcclusionQuality;
+		public uint AnisotropicFiltering;
+		public uint VariableRateShading;
+		public uint ValidationEnabled;
+		public uint DebugEnabled;
+		public float VirtualGeometryLodErrorScale;
+		public uint VirtualGeometryMaxLodDrop;
+		public uint VirtualGeometryHiZOcclusionEnabled;
+		public uint VirtualGeometryHiZSelfOcclusionGuardEnabled;
+		public uint VirtualGeometryHiZNearPlaneGuardEnabled;
+		public uint VirtualGeometryHiZThinGeometryGuardEnabled;
+		public uint VirtualGeometryDebugVisualizationMode;
+		public ulong VirtualGeometryBudgetBytes;
+		public float VirtualGeometryPreloadBias;
+		public float VirtualGeometryLodTransitionHysteresisPixels;
+		public uint VirtualGeometryLodTransitionStableFrames;
+		private uint _reserved;
 
-        [DllImport("TerraEngine")]
-        // Native_Graphics_GetQualityPreset bridges managed callers to engine state; validate arguments before forwarding to native code.
-        private static extern QualityPreset Native_Graphics_GetQualityPreset();
+		public static NativeGraphicsRenderSettings FromPublic(RenderSettings settings)
+		{
+			return new NativeGraphicsRenderSettings
+			{
+				Header = new NativeGraphicsAbiHeader { AbiVersion = AbiVersion, StructSize = Size },
+				ShadowResolution = settings.ShadowResolution,
+				ShadowFilteringSize = settings.ShadowFilteringSize,
+				MaxUploadedLights = settings.MaxUploadedLights,
+				MaxDynamicLights = settings.MaxDynamicLights,
+				MaxShadowLights = settings.MaxShadowLights,
+				MaxAreaLights = settings.MaxAreaLights,
+				EnableLTC = settings.EnableLTC ? 1U : 0U,
+				EnableIBL = settings.EnableIBL ? 1U : 0U,
+				IndirectStrength = settings.IndirectStrength,
+				AmbientOcclusionStrength = settings.AmbientOcclusionStrength,
+				AmbientOcclusionQuality = settings.AmbientOcclusionQuality,
+				AnisotropicFiltering = settings.AnisotropicFiltering,
+				VariableRateShading = settings.VariableRateShading ? 1U : 0U,
+				ValidationEnabled = settings.ValidationEnabled ? 1U : 0U,
+				DebugEnabled = settings.DebugEnabled ? 1U : 0U,
+				VirtualGeometryLodErrorScale = settings.VirtualGeometry.LodErrorScale,
+				VirtualGeometryMaxLodDrop = settings.VirtualGeometry.MaxLodDrop,
+				VirtualGeometryHiZOcclusionEnabled = settings.VirtualGeometry.HiZOcclusionEnabled ? 1U : 0U,
+				VirtualGeometryHiZSelfOcclusionGuardEnabled = settings.VirtualGeometry.HiZSelfOcclusionGuardEnabled ? 1U : 0U,
+				VirtualGeometryHiZNearPlaneGuardEnabled = settings.VirtualGeometry.HiZNearPlaneGuardEnabled ? 1U : 0U,
+				VirtualGeometryHiZThinGeometryGuardEnabled = settings.VirtualGeometry.HiZThinGeometryGuardEnabled ? 1U : 0U,
+				VirtualGeometryDebugVisualizationMode = (uint)settings.VirtualGeometry.DebugVisualizationMode,
+				VirtualGeometryBudgetBytes = settings.VirtualGeometry.GeometryBudgetBytes,
+				VirtualGeometryPreloadBias = settings.VirtualGeometry.PreloadBias,
+				VirtualGeometryLodTransitionHysteresisPixels = settings.VirtualGeometry.LodTransitionHysteresisPixels,
+				VirtualGeometryLodTransitionStableFrames = settings.VirtualGeometry.LodTransitionStableFrames
+			};
+		}
 
-        [DllImport("TerraEngine")]
-        // Native_Graphics_SetRenderSettings bridges managed callers to engine state; validate arguments before forwarding to native code.
-        private static extern void Native_Graphics_SetRenderSettings(ref RenderSettings settings);
+		public readonly RenderSettings ToPublic()
+		{
+			return new RenderSettings
+			{
+				ShadowResolution = ShadowResolution,
+				ShadowFilteringSize = ShadowFilteringSize,
+				MaxUploadedLights = MaxUploadedLights,
+				MaxDynamicLights = MaxDynamicLights,
+				MaxShadowLights = MaxShadowLights,
+				MaxAreaLights = MaxAreaLights,
+				EnableLTC = EnableLTC != 0,
+				EnableIBL = EnableIBL != 0,
+				IndirectStrength = IndirectStrength,
+				AmbientOcclusionStrength = AmbientOcclusionStrength,
+				AmbientOcclusionQuality = AmbientOcclusionQuality,
+				AnisotropicFiltering = AnisotropicFiltering,
+				VariableRateShading = VariableRateShading != 0,
+				ValidationEnabled = ValidationEnabled != 0,
+				DebugEnabled = DebugEnabled != 0,
+				VirtualGeometry = new VirtualGeometrySettings
+				{
+					LodErrorScale = VirtualGeometryLodErrorScale,
+					MaxLodDrop = VirtualGeometryMaxLodDrop,
+					HiZOcclusionEnabled = VirtualGeometryHiZOcclusionEnabled != 0,
+					HiZSelfOcclusionGuardEnabled = VirtualGeometryHiZSelfOcclusionGuardEnabled != 0,
+					HiZNearPlaneGuardEnabled = VirtualGeometryHiZNearPlaneGuardEnabled != 0,
+					HiZThinGeometryGuardEnabled = VirtualGeometryHiZThinGeometryGuardEnabled != 0,
+					DebugVisualizationMode = (VirtualGeometryDebugMode)VirtualGeometryDebugVisualizationMode,
+					GeometryBudgetBytes = VirtualGeometryBudgetBytes,
+					PreloadBias = VirtualGeometryPreloadBias,
+					LodTransitionHysteresisPixels = VirtualGeometryLodTransitionHysteresisPixels,
+					LodTransitionStableFrames = VirtualGeometryLodTransitionStableFrames
+				}
+			};
+		}
+	}
 
-        [DllImport("TerraEngine")]
-        // Native_Graphics_GetRenderSettings bridges managed callers to engine state; validate arguments before forwarding to native code.
-        private static extern void Native_Graphics_GetRenderSettings(out RenderSettings settings);
+	public static class Graphics
+	{
+		public static uint AbiVersion => Native_Graphics_GetAbiVersion();
 
-        [DllImport("TerraEngine")]
-        // Native_Graphics_GetLightingDiagnosticsSummary bridges managed callers to engine state; validate arguments before forwarding to native code.
-        private static extern IntPtr Native_Graphics_GetLightingDiagnosticsSummary(uint viewType);
-    }
+		public static QualityPreset QualityPreset
+		{
+			get
+			{
+				GraphicsStatus status = Native_Graphics_ReadQualityPreset(out uint preset);
+				EnsureReadable(status, nameof(QualityPreset));
+				return (QualityPreset)preset;
+			}
+			set
+			{
+				GraphicsStatus status = Native_Graphics_SubmitRuntimeQualityPreset((uint)value);
+				EnsureAccepted(status, nameof(QualityPreset));
+			}
+		}
+
+		public static RenderSettings RenderSettings
+		{
+			get
+			{
+				NativeGraphicsRenderSettings settings = new()
+				{
+					Header = new NativeGraphicsAbiHeader
+					{
+						AbiVersion = NativeGraphicsRenderSettings.AbiVersion,
+						StructSize = NativeGraphicsRenderSettings.Size
+					}
+				};
+				GraphicsStatus status = Native_Graphics_ReadRenderSettings(ref settings);
+				EnsureReadable(status, nameof(RenderSettings));
+				return settings.ToPublic();
+			}
+			set => EnsureAccepted(ApplyRuntimeSettings(value), nameof(RenderSettings));
+		}
+
+		public static ulong RuntimeSettingsGeneration => Native_Graphics_GetRuntimeSettingsGeneration();
+
+		public static GraphicsStatus ApplyRuntimeSettings(RenderSettings settings)
+		{
+			NativeGraphicsRenderSettings native = NativeGraphicsRenderSettings.FromPublic(settings);
+			return Native_Graphics_SubmitRuntimeRenderSettings(ref native);
+		}
+
+		public static string LightingDiagnosticsSummary
+			=> Marshal.PtrToStringAnsi(Native_Graphics_GetLightingDiagnosticsSummary(0U)) ?? string.Empty;
+
+		private static void EnsureReadable(GraphicsStatus status, string operation)
+		{
+			if (status != GraphicsStatus.Success)
+			{
+				throw new InvalidOperationException($"Graphics {operation} read failed with status {status}.");
+			}
+		}
+
+		private static void EnsureAccepted(GraphicsStatus status, string operation)
+		{
+			if (status != GraphicsStatus.Accepted && status != GraphicsStatus.Success)
+			{
+				throw new ArgumentException($"Graphics {operation} update was rejected with status {status}.");
+			}
+		}
+
+		[DllImport("TerraEngine")]
+		private static extern uint Native_Graphics_GetAbiVersion();
+
+		[DllImport("TerraEngine")]
+		private static extern GraphicsStatus Native_Graphics_ReadRenderSettings(ref NativeGraphicsRenderSettings settings);
+
+		[DllImport("TerraEngine")]
+		private static extern GraphicsStatus Native_Graphics_SubmitRuntimeRenderSettings(ref NativeGraphicsRenderSettings settings);
+
+		[DllImport("TerraEngine")]
+		private static extern GraphicsStatus Native_Graphics_SubmitRuntimeQualityPreset(uint preset);
+
+		[DllImport("TerraEngine")]
+		private static extern GraphicsStatus Native_Graphics_ReadQualityPreset(out uint preset);
+
+		[DllImport("TerraEngine")]
+		private static extern ulong Native_Graphics_GetRuntimeSettingsGeneration();
+
+		[DllImport("TerraEngine")]
+		private static extern IntPtr Native_Graphics_GetLightingDiagnosticsSummary(uint viewType);
+	}
 }

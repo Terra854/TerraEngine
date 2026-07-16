@@ -29,5 +29,17 @@ namespace TerraEngine
 			get => GetProperty<float>("farPlane");
 			set => SetProperty("farPlane", value);
 		}
+
+		public float AspectRatio
+		{
+			get => GetProperty<float>("aspectRatio");
+			set => SetProperty("aspectRatio", value);
+		}
+
+		public Vector3 Up
+		{
+			get => GetProperty<Vector3>("up");
+			set => SetProperty("up", value);
+		}
 	}
 }

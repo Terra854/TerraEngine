@@ -11,8 +11,32 @@ using System.Collections.Generic;
 
 namespace TerraEngine
 {
+	/// <summary>
+	/// Receipt for an object creation queued at a protected scene boundary.
+	/// Resolve returns null until the engine publishes the request successfully.
+	/// </summary>
+	public readonly struct ObjectCreationRequest
+	{
+		internal ObjectCreationRequest(RuntimeStatus status, string stableId)
+		{
+			Status = status;
+			StableId = stableId;
+		}
+
+		public RuntimeStatus Status { get; }
+		public string StableId { get; }
+		public bool Accepted => Status == RuntimeStatus.Accepted || Status == RuntimeStatus.Success;
+
+		public Object? Resolve()
+		{
+			if (!Accepted || string.IsNullOrWhiteSpace(StableId)) return null;
+			RuntimeStatus status = InternalCalls.Native_Object_ResolveStableId(StableId, out uint objectId);
+			return status == RuntimeStatus.Success && Object.IsValidId(objectId) ? new Object(objectId) : null;
+		}
+	}
+
 	// Object is the managed-facing contract for this subsystem; keep it predictable for scripts.
-	public class Object
+	public unsafe class Object
 	{
 		public const uint InvalidID = uint.MaxValue;
 
@@ -46,10 +70,67 @@ namespace TerraEngine
 			set
 			{
 				InternalCalls.Native_Object_SetName(ID, value);
-				_cachedName = value;
-				_nameCacheGeneration = InternalCalls.Native_Object_GetMetadataGeneration(ID);
-				SeedDispatchCacheGenerations(ID, _nameCacheGeneration, ResolveComponentGeneration(), ResolveBindingGeneration());
+				// The previous value remains authoritative until the protected flush.
+				// Clear this wrapper's local copy instead of publishing the queued value.
+				_cachedName = null;
 			}
+		}
+
+		public string Tag
+		{
+			get => InternalCalls.ReadNativeUtf8(InternalCalls.Native_Object_GetTag(ID));
+			set => InternalCalls.Native_Object_SetTag(ID, value ?? "Untagged");
+		}
+
+		public string Layer
+		{
+			get => InternalCalls.ReadNativeUtf8(InternalCalls.Native_Object_GetLayer(ID));
+			set => InternalCalls.Native_Object_SetLayer(ID, value ?? "Default");
+		}
+
+		// Active is the authored checkbox. ActiveInHierarchy additionally accounts
+		// for disabled ancestors and is therefore read-only runtime state.
+		public bool Active
+		{
+			get => InternalCalls.Native_Object_GetActive(ID);
+			set => InternalCalls.Native_Object_SetActive(ID, value);
+		}
+
+		public bool ActiveInHierarchy => InternalCalls.Native_Object_GetActiveInHierarchy(ID);
+
+		public bool IsStatic
+		{
+			get => InternalCalls.Native_Object_GetStatic(ID);
+			set => InternalCalls.Native_Object_SetStatic(ID, value);
+		}
+
+		// Parent changes use the transactional scene queue. The old hierarchy
+		// remains visible until the engine reaches its protected flush boundary.
+		public Object? Parent
+		{
+			get
+			{
+				uint parentId = InternalCalls.Native_Object_GetParent(ID);
+				return IsValidId(parentId) ? new Object(parentId) : null;
+			}
+			set => SetParent(value);
+		}
+
+		public Object[] Children => CopyObjectIds((uint* output, uint capacity, out uint required) =>
+			InternalCalls.Native_Object_CopyChildren(ID, output, capacity, out required));
+
+		public RuntimeStatus SetParent(Object? parent)
+		{
+			return InternalCalls.Native_Object_SetParent(ID, parent?.ID ?? InvalidID);
+		}
+
+		public static Object[] All => CopyObjectIds(InternalCalls.Native_Object_CopyAll);
+
+		public static Object[] FindAllWithTag(string tag)
+		{
+			if (tag == null) throw new ArgumentNullException(nameof(tag));
+			return CopyObjectIds((uint* output, uint capacity, out uint required) =>
+				InternalCalls.Native_Object_CopyWithTag(tag, output, capacity, out required));
 		}
 
 		private readonly struct DispatchGenerationState
@@ -75,10 +156,15 @@ namespace TerraEngine
 
 		public Transform Transform => _transform ??= new Transform { Object = this };
 
-		// Instantiate bridges managed callers to engine state; validate arguments before forwarding to native code.
-		public static Object Instantiate(string name = "New Object")
+		// Creation returns a stable receipt because publishing an EnTT entity id
+		// during a managed callback would expose live storage before the protected
+		// scene flush. Resolve the receipt on a later frame.
+		public static ObjectCreationRequest Instantiate(string name = "New Object")
 		{
-			return new Object(InternalCalls.Native_Object_Create(name));
+			if (string.IsNullOrWhiteSpace(name)) return new ObjectCreationRequest(RuntimeStatus.InvalidArgument, string.Empty);
+			NativeObjectCreationReceipt receipt = new() { Header = NativeRuntimeAbiHeader.For<NativeObjectCreationReceipt>() };
+			RuntimeStatus status = InternalCalls.Native_Object_RequestCreate(name, ref receipt);
+			return new ObjectCreationRequest(status, receipt.StableId);
 		}
 
 		// Find bridges managed callers to engine state; validate arguments before forwarding to native code.
@@ -113,9 +199,8 @@ namespace TerraEngine
 				if (InternalCalls.Native_ScriptComponent_AddBinding(ID, scriptName))
 				{
 					T component = new() { Object = this };
-					RefreshKnownGenerations();
-					StoreCachedComponent(componentType, component);
-					StoreCachedPresence(componentType, true, scriptBinding: true);
+					// The script binding becomes visible only after the scene mutation
+					// flush, matching native component membership changes.
 					return component;
 				}
 
@@ -129,9 +214,9 @@ namespace TerraEngine
 			{
 				T component = new() { Object = this };
 				Physics.BindComponent(component, this);
-				RefreshKnownGenerations();
-				StoreCachedComponent(componentType, component);
-				StoreCachedPresence(componentType, true, scriptBinding: false);
+				// An accepted deferred add can be configured immediately because its
+				// later property writes enter the same ordered mutation queue. Do not
+				// claim membership through the read cache before publication.
 				return component;
 			}
 
@@ -205,12 +290,52 @@ namespace TerraEngine
 			return hasComponent;
 		}
 
+		public bool RemoveComponent<T>() where T : Component
+		{
+			Type componentType = typeof(T);
+			// Transform defines object spatial identity and cannot be removed through
+			// the managed composition API.
+			if (componentType == typeof(Transform) || typeof(Script).IsAssignableFrom(componentType))
+			{
+				return false;
+			}
+
+			bool removed = InternalCalls.Native_RemoveComponent(
+				ID, Component.ResolveNativeComponentTypeName(componentType));
+			// Keep the pre-flush membership observable. Generation changes after the
+			// protected commit invalidate the cache naturally on the next read.
+			return removed;
+		}
+
 		// IsValidId bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static bool IsValidId(uint id)
 		{
 			// EnTT uses its null sentinel as the invalid object marker, which is
 			// uint.MaxValue for the current 32-bit entity configuration.
 			return id != InvalidID;
+		}
+
+		private unsafe delegate RuntimeStatus CopyObjectIdsCall(uint* output, uint capacity, out uint requiredCount);
+
+		private static unsafe Object[] CopyObjectIds(CopyObjectIdsCall copy)
+		{
+			RuntimeStatus probe = copy(null, 0, out uint count);
+			if ((probe != RuntimeStatus.Success && probe != RuntimeStatus.Conflict) || count == 0)
+			{
+				return Array.Empty<Object>();
+			}
+			// The cap prevents corrupted native counts from forcing an unbounded
+			// managed allocation across the ABI boundary.
+			if (count > 1_000_000) throw new InvalidOperationException("Native object enumeration exceeded the managed safety limit.");
+			uint[] ids = new uint[count];
+			fixed (uint* output = ids)
+			{
+				RuntimeStatus status = copy(output, count, out uint copiedCount);
+				if (status != RuntimeStatus.Success || copiedCount > count) return Array.Empty<Object>();
+				Object[] objects = new Object[copiedCount];
+				for (int index = 0; index < objects.Length; ++index) objects[index] = new Object(ids[index]);
+				return objects;
+			}
 		}
 
 		// bool bridges managed callers to engine state; validate arguments before forwarding to native code.

@@ -501,6 +501,43 @@ ScriptingSystem& ScriptingSystem::Instance() {
 	return instance;
 }
 
+float ScriptingSystem::BeginFrameTiming(float unscaledDeltaTime)
+{
+	std::scoped_lock lock(m_RuntimeTimeMutex);
+	if (m_PendingRuntimeTimeScale.has_value())
+	{
+		m_RuntimeTimeSnapshot.timeScale = *m_PendingRuntimeTimeScale;
+		m_PendingRuntimeTimeScale.reset();
+	}
+	const float safeUnscaledDelta = std::isfinite(unscaledDeltaTime) && unscaledDeltaTime >= 0.0F
+		? unscaledDeltaTime
+		: 0.0F;
+	const float activeScale = (m_Running || m_ExportMode) ? m_RuntimeTimeSnapshot.timeScale : 1.0F;
+	m_RuntimeTimeSnapshot.unscaledDeltaTime = safeUnscaledDelta;
+	m_RuntimeTimeSnapshot.deltaTime = safeUnscaledDelta * activeScale;
+	m_RuntimeTimeSnapshot.unscaledElapsedTime += static_cast<double>(safeUnscaledDelta);
+	m_RuntimeTimeSnapshot.elapsedTime += static_cast<double>(m_RuntimeTimeSnapshot.deltaTime);
+	++m_RuntimeTimeSnapshot.frameCount;
+	return m_RuntimeTimeSnapshot.deltaTime;
+}
+
+bool ScriptingSystem::QueueRuntimeTimeScale(float timeScale)
+{
+	if (!std::isfinite(timeScale) || timeScale < 0.0F || timeScale > 100.0F)
+	{
+		return false;
+	}
+	std::scoped_lock lock(m_RuntimeTimeMutex);
+	m_PendingRuntimeTimeScale = timeScale;
+	return true;
+}
+
+ScriptingSystem::RuntimeTimeSnapshot ScriptingSystem::GetRuntimeTimeSnapshot() const
+{
+	std::scoped_lock lock(m_RuntimeTimeMutex);
+	return m_RuntimeTimeSnapshot;
+}
+
 bool ScriptingSystem::IsScriptingDiagnosticsRequested() const
 {
 	return ScriptingDiagnosticsRequested();
@@ -1325,6 +1362,11 @@ void ScriptingSystem::SetRunning(bool running)
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!m_Running)
 	{
+		{
+			std::scoped_lock timeLock(m_RuntimeTimeMutex);
+			m_RuntimeTimeSnapshot.timeScale = 1.0F;
+			m_PendingRuntimeTimeScale.reset();
+		}
 		if (managedResetGameplaySession != nullptr)
 		{
 			// Stopping play should discard every live managed Script instance so
@@ -1515,8 +1557,8 @@ TerraEngine::Scheduling::SystemDeclaration ScriptingSystem::SchedulerDeclaration
 	TerraEngine::Scheduling::SystemDeclaration declaration;
 	declaration.name = "ScriptingSystem";
 	declaration.phase = "Scripting";
-	declaration.reads = { "SceneGraph", "Resources" };
-	declaration.writes = { "Scripting", "ObjectManager", "SceneMutationQueue" };
+	declaration.reads = { "SceneGraph", "Resources", "RuntimeTime" };
+	declaration.writes = { "Scripting", "ObjectManager", "SceneMutationQueue", "RuntimeTimeQueue" };
 	// Managed callbacks can be batched by native code, but the managed boundary
 	// itself remains protected because scripts may call reflection APIs and
 	// request structural scene mutations. Native pre/post work reports worker
@@ -1526,8 +1568,8 @@ TerraEngine::Scheduling::SystemDeclaration ScriptingSystem::SchedulerDeclaration
 	declaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::ProtectedCommit;
 	declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::PartiallyWorkerSafe;
 	declaration.hardBoundary = true;
-	declaration.safeSubwork = "Native script batch preparation, immutable dispatch inputs, generation validation, deferred mutation capture, and JSON transaction payload submission.";
-	declaration.protectedCommit = "Arbitrary managed callback invocation, managed lifecycle/reload hooks, immediate native/reflection API calls, and protected transaction commits.";
+	declaration.safeSubwork = "Native script batch preparation, immutable dispatch inputs, generation validation, deferred mutation capture, runtime-time request capture, and JSON transaction payload submission.";
+	declaration.protectedCommit = "Frame-start runtime-time publication, arbitrary managed callback invocation, managed lifecycle/reload hooks, immediate native/reflection API calls, and protected transaction commits.";
 	declaration.protectedReason = declaration.protectedCommit;
 	declaration.profilingLabel = declaration.name;
 	declaration.usesDefaultMetadata = false;

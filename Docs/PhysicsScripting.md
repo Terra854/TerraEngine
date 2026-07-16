@@ -35,6 +35,76 @@ correlation ID for diagnostics. Unlike editor automation, the managed ABI does
 not expose an idempotency-key field; producer sequencing and protected-boundary
 validation prevent stale or duplicate native effects.
 
+## Runtime authoring and object metadata
+
+`Rigidbody` exposes its complete scalar authoring profile: motion and mass
+modes, mass, damping, gravity/sleep flags, continuous collision quality,
+initial velocities, velocity limits, allowed degrees of freedom, interpolation,
+collision layer/mask override, and the physics-specific enabled flag.
+`CharacterController` exposes shape dimensions, local center/up direction,
+step and support volumes, slope/contact limits, mass/strength, collision filter,
+gravity/jump behavior, rotation policy, and its physics-specific enabled flag.
+
+These properties change durable component authoring. A worker callback queues a
+copied typed mutation, and the value becomes visible only after the protected
+scripting scene flush. Physics then observes it through its next immutable
+authoring snapshot; setting a property does not immediately rebuild provider
+state inside the callback.
+
+```csharp
+Rigidbody body = Object.GetComponent<Rigidbody>()!;
+body.MotionType = PhysicsMotionType.Dynamic;
+body.MassMode = PhysicsMassMode.ExplicitMass;
+body.Mass = 12.5f;
+body.ContinuousCollisionMode = PhysicsMotionQuality.LinearCast;
+body.AllowedDegreesOfFreedom = PhysicsDegreesOfFreedom.All;
+body.CollisionLayer = 2;
+
+// Object metadata follows the same worker-safe publication rule.
+Object.Tag = "Player";
+Object.Layer = "Gameplay";
+Object.IsStatic = false;
+Object.Active = true;
+bool currentlyEffective = Object.ActiveInHierarchy;
+```
+
+`Component.Enabled` is the common component filtering flag. Physics components
+also expose `PhysicsEnabled`, which controls whether the physics authoring record
+creates runtime provider state. `Object.ActiveInHierarchy` is read-only because
+it combines the object's authored `Active` flag with every ancestor.
+
+Collider and constraint collections use stable child-record identities and are
+not scalar reflection properties. `Records` returns a copied array, while
+`ReplaceRecords` validates and replaces the complete collection atomically.
+A direct protected call returns `Success`; a worker callback returns `Accepted`
+and publishes only at the scripting flush. If another component edit advances
+the object's generation before that flush, the stale replacement conflicts and
+the prior collection remains intact.
+
+```csharp
+ColliderSet colliders = Object.GetComponent<ColliderSet>()!;
+ColliderDefinition bodyShape = ColliderDefinition.Box(new Vector3(0.5f, 1.0f, 0.5f));
+bodyShape.LocalCenter = new Vector3(0.0f, 1.0f, 0.0f);
+bodyShape.CollisionLayerId = 2;
+PhysicsStatus colliderStatus = colliders.ReplaceRecords(new[] { bodyShape });
+
+ConstraintSet constraints = Object.GetComponent<ConstraintSet>()!;
+PhysicsUuid bodyShapeOwnerId = Object.GetComponent<Rigidbody>()!.Identity.ObjectId;
+ConstraintDefinition hinge = ConstraintDefinition.ToWorld(
+	bodyShapeOwnerId, PhysicsConstraintKind.Hinge);
+hinge.Limits = new PhysicsConstraintLimits {
+	Enabled = true, Minimum = -45.0f, Maximum = 45.0f
+};
+PhysicsStatus constraintStatus = constraints.ReplaceRecords(new[] { hinge });
+```
+
+Use `ColliderDefinition.Box`, `Sphere`, `Capsule`, `Cylinder`,
+`TaperedCapsule`, or `FromAsset` to receive valid schema, identity, pose,
+filter, and debug defaults. Use `ConstraintDefinition.BetweenObjects` or
+`ToWorld` to receive valid frames, axes, break thresholds, and reset generation.
+Six-DOF settings are named `TranslationX/Y/Z` and `RotationX/Y/Z`. The original
+`GetRecord` methods remain available for generation-safe runtime handle facades.
+
 ## Generation-safe identity and immutable reads
 
 Resolved wrappers carry `PhysicsIdentity` (object, component, optional record,

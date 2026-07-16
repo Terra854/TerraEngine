@@ -79,11 +79,11 @@ TerraEngine::Physics::CharacterControllerValidationResult CharacterControllerCom
 void CharacterControllerComponent::reflect(entt::meta_factory<CharacterControllerComponent>& factory)
 {
 	TerraEngine::Reflection::RegisterDataProperty<&CharacterControllerComponent::schemaVersion>(factory, "schemaVersion");
-	TerraEngine::Reflection::RegisterDataProperty<&CharacterControllerComponent::shapeKind>(factory, "shapeKind");
+	TerraEngine::Reflection::RegisterAccessorProperty<&CharacterControllerComponent::SetShapeKindValue, &CharacterControllerComponent::GetShapeKindValue>(factory, "shapeKind");
 	TerraEngine::Reflection::RegisterDataProperty<&CharacterControllerComponent::radius>(factory, "radius");
 	TerraEngine::Reflection::RegisterDataProperty<&CharacterControllerComponent::height>(factory, "height");
-	TerraEngine::Reflection::RegisterDataProperty<&CharacterControllerComponent::localCenter>(factory, "localCenter");
-	TerraEngine::Reflection::RegisterDataProperty<&CharacterControllerComponent::upDirection>(factory, "upDirection");
+	TerraEngine::Reflection::RegisterAccessorProperty<&CharacterControllerComponent::SetLocalCenterValue, &CharacterControllerComponent::GetLocalCenterValue>(factory, "localCenter");
+	TerraEngine::Reflection::RegisterAccessorProperty<&CharacterControllerComponent::SetUpDirectionValue, &CharacterControllerComponent::GetUpDirectionValue>(factory, "upDirection");
 	TerraEngine::Reflection::RegisterDataProperty<&CharacterControllerComponent::stepHeight>(factory, "stepHeight");
 	TerraEngine::Reflection::RegisterDataProperty<&CharacterControllerComponent::supportVolumeRadius>(factory, "supportVolumeRadius");
 	TerraEngine::Reflection::RegisterDataProperty<&CharacterControllerComponent::supportVolumeHeight>(factory, "supportVolumeHeight");
@@ -91,13 +91,13 @@ void CharacterControllerComponent::reflect(entt::meta_factory<CharacterControlle
 	TerraEngine::Reflection::RegisterDataProperty<&CharacterControllerComponent::contactPadding>(factory, "contactPadding");
 	TerraEngine::Reflection::RegisterDataProperty<&CharacterControllerComponent::mass>(factory, "mass");
 	TerraEngine::Reflection::RegisterDataProperty<&CharacterControllerComponent::maximumStrength>(factory, "maximumStrength");
-	TerraEngine::Reflection::RegisterDataProperty<&CharacterControllerComponent::collisionLayerId>(factory, "collisionLayerId");
+	TerraEngine::Reflection::RegisterAccessorProperty<&CharacterControllerComponent::SetCollisionLayerValue, &CharacterControllerComponent::GetCollisionLayerValue>(factory, "collisionLayerId");
 	TerraEngine::Reflection::RegisterDataProperty<&CharacterControllerComponent::collisionMask>(factory, "collisionMask");
 	TerraEngine::Reflection::RegisterDataProperty<&CharacterControllerComponent::groundAdhesion>(factory, "groundAdhesion");
 	TerraEngine::Reflection::RegisterDataProperty<&CharacterControllerComponent::allowStairWalking>(factory, "allowStairWalking");
 	TerraEngine::Reflection::RegisterDataProperty<&CharacterControllerComponent::useGravity>(factory, "useGravity");
 	TerraEngine::Reflection::RegisterDataProperty<&CharacterControllerComponent::gravityScale>(factory, "gravityScale");
 	TerraEngine::Reflection::RegisterDataProperty<&CharacterControllerComponent::jumpSpeed>(factory, "jumpSpeed");
-	TerraEngine::Reflection::RegisterDataProperty<&CharacterControllerComponent::rotationPolicy>(factory, "rotationPolicy");
+	TerraEngine::Reflection::RegisterAccessorProperty<&CharacterControllerComponent::SetRotationPolicyValue, &CharacterControllerComponent::GetRotationPolicyValue>(factory, "rotationPolicy");
 	TerraEngine::Reflection::RegisterDataProperty<&CharacterControllerComponent::enabled>(factory, "enabled");
 }

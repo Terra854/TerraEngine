@@ -1,6 +1,8 @@
 #include "../TestHarness.h"
 
 #include "Components/Transform.h"
+#include "Components/CameraComponent.h"
+#include "Components/ScriptComponent.h"
 #include "Core/Object/ComponentRegistry.h"
 #include "Core/Object/ObjectManager.h"
 #include "Scene/SceneMutationQueue.h"
@@ -50,6 +52,42 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(static_cast<std::size_t>(1), ObjectManager::instance().getRootObjects().size(), "Flush should create the requested object.");
 
 			ObjectManager::instance().clear();
+		});
+
+		registry.Add("Scripting.Mutation.MainThreadManagedCallbacksRemainInvisibleUntilFlush", [](TestContext& context) {
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+			ComponentRegistry::RegisterAllComponents();
+			TerraEngine::Scene::SceneMutationQueue::Instance().Clear();
+			Object target = objects.createObject("Before");
+
+			ScriptingSystem::ScriptDispatchContext dispatchContext;
+			dispatchContext.workerDispatch = false;
+			dispatchContext.sourceObjectId = static_cast<std::uint32_t>(target.EntityId());
+			dispatchContext.sourceObjectUuid = objects.getUUID(target);
+			dispatchContext.sourceBindingId = "main-thread-managed";
+			dispatchContext.frameOrder = 77U;
+			ScriptingSystem::SetCurrentScriptDispatchContext(dispatchContext);
+			Native_Object_SetName(static_cast<std::uint32_t>(target.EntityId()), "After");
+			Native_Object_SetTag(static_cast<std::uint32_t>(target.EntityId()), "QueuedTag");
+			const bool cameraAccepted = Native_AddComponent(static_cast<std::uint32_t>(target.EntityId()), "CameraComponent");
+			const bool scriptAccepted = Native_ScriptComponent_AddBinding(static_cast<std::uint32_t>(target.EntityId()), "Gameplay.QueuedScript");
+			ScriptingSystem::ClearCurrentScriptDispatchContext();
+
+			context.Expect(cameraAccepted && scriptAccepted, "Main-thread managed component writes should be accepted into the mutation queue.");
+			context.ExpectEqual(std::string("Before"), objects.getObjectName(target), "Queued metadata must not publish during the managed callback.");
+			context.ExpectEqual(std::string("Untagged"), objects.getObjectTag(target), "Queued tags must retain the old value until the protected flush.");
+			context.Expect(objects.GetComponent<CameraComponent>(target) == nullptr, "Queued component membership must remain invisible before the protected flush.");
+			context.Expect(objects.GetComponent<ScriptComponent>(target) == nullptr, "Queued script bindings must not create live component storage during callback dispatch.");
+
+			const TerraEngine::Scene::SceneMutationBatchResult result = TerraEngine::Scene::SceneMutationQueue::Instance().Apply(objects, "main-thread-managed-hardening-test");
+			const ScriptComponent* scripts = objects.GetComponent<ScriptComponent>(target);
+			context.Expect(result.applied, "The protected boundary should publish the complete managed mutation batch.");
+			context.ExpectEqual(std::string("After"), objects.getObjectName(target), "The flush should publish queued object metadata.");
+			context.ExpectEqual(std::string("QueuedTag"), objects.getObjectTag(target), "The flush should publish the queued tag.");
+			context.Expect(objects.GetComponent<CameraComponent>(target) != nullptr, "The flush should publish queued component membership.");
+			context.Expect(scripts != nullptr && scripts->HasBinding("Gameplay.QueuedScript"), "The flush should publish queued managed script bindings.");
+			objects.clear();
 		});
 
 		registry.Add("Scripting.Mutation.ManagedTransactionJsonQueuesAndCommits", [](TestContext& context) {

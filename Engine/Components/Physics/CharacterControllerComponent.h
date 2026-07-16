@@ -13,6 +13,8 @@
 #include <string>
 #include <string_view>
 
+#include <glm/vec3.hpp>
+
 namespace TerraEngine::Physics
 {
 	inline constexpr std::uint32_t kCharacterControllerComponentSchemaVersion = 1U;
@@ -91,6 +93,20 @@ struct CharacterControllerComponent final : public Component<CharacterController
 	// Pure validation lets snapshot preparation reject bad authoring data before
 	// a protected world rebuild or any provider allocation occurs.
 	[[nodiscard]] TerraEngine::Physics::CharacterControllerValidationResult Validate() const;
+
+	// Convert compact physics authoring types to the fixed-width values supported
+	// by the managed reflection bridge. Validation still occurs when PhysicsSystem
+	// prepares the immutable authoring snapshot.
+	[[nodiscard]] std::uint32_t GetShapeKindValue() const { return static_cast<std::uint32_t>(shapeKind); }
+	void SetShapeKindValue(std::uint32_t value) { shapeKind = static_cast<TerraEngine::Physics::PhysicsCharacterShapeKind>(value); }
+	[[nodiscard]] glm::vec3 GetLocalCenterValue() const { return { localCenter.x, localCenter.y, localCenter.z }; }
+	void SetLocalCenterValue(const glm::vec3& value) { localCenter = { value.x, value.y, value.z }; }
+	[[nodiscard]] glm::vec3 GetUpDirectionValue() const { return { upDirection.x, upDirection.y, upDirection.z }; }
+	void SetUpDirectionValue(const glm::vec3& value) { upDirection = { value.x, value.y, value.z }; }
+	[[nodiscard]] std::uint32_t GetCollisionLayerValue() const { return collisionLayerId; }
+	void SetCollisionLayerValue(std::uint32_t value) { collisionLayerId = static_cast<std::uint8_t>(value > 0xFFU ? 0xFFU : value); }
+	[[nodiscard]] std::uint32_t GetRotationPolicyValue() const { return static_cast<std::uint32_t>(rotationPolicy); }
+	void SetRotationPolicyValue(std::uint32_t value) { rotationPolicy = static_cast<TerraEngine::Physics::PhysicsCharacterRotationPolicy>(value); }
 
 	static void reflect(entt::meta_factory<CharacterControllerComponent>& factory);
 };

@@ -9,6 +9,8 @@
 #include "Components/UIComponent.h"
 #include "Components/Transform.h"
 #include "Components/ScriptComponent.h"
+#include "Components/Physics/ColliderSetComponent.h"
+#include "Components/Physics/ConstraintSetComponent.h"
 #include "DotNet/DotNetHost.h"
 #include "ScriptingSystem.h"
 #include "UI/UIElement.h"
@@ -24,12 +26,14 @@
 #include <charconv>
 #include <cstring>
 #include <cmath>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -47,6 +51,112 @@ Engine* g_ApplicationHostEngine = nullptr;
 ApplicationEditorStopPlayModeCallback g_ApplicationEditorStopCallback = nullptr;
 thread_local std::string g_UIBridgeReturnBuffer;
 thread_local std::string g_SceneBridgeReturnBuffer;
+thread_local std::string g_RuntimeBridgeReturnBuffer;
+
+namespace {
+	struct ManagedPrefabInstantiationRequest
+	{
+		std::string path;
+		TerraEngine::UUID parentObjectId = TerraEngine::EMPTY_UUID;
+	};
+
+	struct ManagedSceneLoadRequest
+	{
+		std::string path;
+		bool prefab = false;
+	};
+
+	struct ManagedResourceReleaseRequest
+	{
+		TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+		AssetType assetType = AssetType::Mesh;
+	};
+
+	std::mutex g_ManagedRuntimeRequestMutex;
+	std::optional<SceneRenderSettings> g_PendingManagedSceneRenderSettings;
+	std::optional<TerraEngine::UUID> g_PendingManagedActiveScene;
+	std::vector<ManagedSceneLoadRequest> g_PendingManagedSceneLoads;
+	std::vector<ManagedPrefabInstantiationRequest> g_PendingManagedPrefabInstantiations;
+	std::vector<ManagedResourceReleaseRequest> g_PendingManagedResourceReleases;
+	bool g_PendingManagedSceneUnloadAll = false;
+	std::uint64_t g_ManagedSceneRenderSettingsGeneration = 0U;
+	std::uint64_t g_ManagedRuntimeFrameId = 0U;
+
+	bool HasRuntimeAbiHeader(const NativeRuntimeAbiHeader& header, std::size_t requiredSize)
+	{
+		return header.abiVersion == kNativeRuntimeAbiVersion && header.structSize >= requiredSize;
+	}
+
+	void WriteRuntimeDiagnostic(char (&destination)[kNativeRuntimeDiagnosticBytes], std::string_view text)
+	{
+		std::memset(destination, 0, sizeof(destination));
+		const std::size_t count = std::min(text.size(), sizeof(destination) - 1U);
+		std::memcpy(destination, text.data(), count);
+	}
+
+	std::optional<AssetType> ManagedAssetType(int assetType)
+	{
+		switch (assetType)
+		{
+		case 0: return AssetType::Mesh;
+		case 1: return AssetType::Texture;
+		case 2: return AssetType::Material;
+		case 3: return AssetType::ShaderCollection;
+		default: return std::nullopt;
+		}
+	}
+
+	void CollectPrefabUuidRemap(const nlohmann::json& value, std::unordered_map<std::string, std::string>& remap)
+	{
+		if (value.is_object())
+		{
+			if (const auto uuid = value.find("uuid"); uuid != value.end() && uuid->is_string())
+			{
+				remap.try_emplace(uuid->get<std::string>(), TerraEngine::ToHexString(TerraEngine::GenerateUUID()));
+			}
+			for (const auto& [key, child] : value.items())
+			{
+				(void)key;
+				CollectPrefabUuidRemap(child, remap);
+			}
+		}
+		else if (value.is_array())
+		{
+			for (const nlohmann::json& child : value)
+			{
+				CollectPrefabUuidRemap(child, remap);
+			}
+		}
+	}
+
+	void RewritePrefabUuidReferences(nlohmann::json& value, const std::unordered_map<std::string, std::string>& remap)
+	{
+		if (value.is_string())
+		{
+			const std::string current = value.get<std::string>();
+			if (const auto replacement = remap.find(current); replacement != remap.end())
+			{
+				value = replacement->second;
+			}
+			return;
+		}
+		if (value.is_object())
+		{
+			for (auto& [key, child] : value.items())
+			{
+				(void)key;
+				RewritePrefabUuidReferences(child, remap);
+			}
+		}
+		else if (value.is_array())
+		{
+			for (nlohmann::json& child : value)
+			{
+				RewritePrefabUuidReferences(child, remap);
+			}
+		}
+	}
+}
 
 static std::optional<Object> ResolveManagedObject(uint32_t objectId)
 {
@@ -133,6 +243,8 @@ namespace {
 	NativePhysicsQueryHandle FromQueryHandle(PhysicsQueryHandle value) { return {FromWorld({value.worldId, value.worldGeneration}), value.resultSlot, value.resultGeneration, value.submittedTick, value.expiryTick}; }
 	PhysicsVector3 ToVector(NativePhysicsVector3 value) { return {value.x, value.y, value.z}; }
 	NativePhysicsVector3 FromVector(PhysicsVector3 value) { return {value.x, value.y, value.z}; }
+	PhysicsQuaternion ToQuaternion(NativePhysicsQuaternion value) { return {value.x, value.y, value.z, value.w}; }
+	NativePhysicsQuaternion FromQuaternion(PhysicsQuaternion value) { return {value.x, value.y, value.z, value.w}; }
 	PhysicsPose ToPose(NativePhysicsPose value) { return {ToVector(value.position), {value.rotation.x, value.rotation.y, value.rotation.z, value.rotation.w}}; }
 	NativePhysicsPose FromPose(PhysicsPose value) { return {FromVector(value.position), {value.rotation.x, value.rotation.y, value.rotation.z, value.rotation.w}}; }
 
@@ -293,6 +405,178 @@ namespace {
 			destination.reserved = 0U;
 		}
 		return info.status;
+	}
+
+	constexpr std::uint32_t kMaximumManagedAuthoringRecords = 4096U;
+
+	NativePhysicsColliderRecord FromColliderRecord(const ColliderRecord& source) {
+		NativePhysicsColliderRecord destination{};
+		destination.header = {kNativePhysicsAbiVersion, sizeof(destination)};
+		destination.recordId = FromUuid(source.recordId);
+		destination.recordVersion = source.recordVersion;
+		destination.shapeKind = static_cast<std::uint32_t>(source.Kind());
+		destination.localCenter = FromVector(source.localCenter);
+		destination.localRotation = FromQuaternion(source.localRotation);
+		std::visit([&](const auto& shape) {
+			using Shape = std::decay_t<decltype(shape)>;
+			if constexpr(std::is_same_v<Shape, BoxColliderShape>) destination.halfExtents = FromVector(shape.halfExtents);
+			else if constexpr(std::is_same_v<Shape, SphereColliderShape>) destination.radius = shape.radius;
+			else if constexpr(std::is_same_v<Shape, CapsuleColliderShape> || std::is_same_v<Shape, CylinderColliderShape>) {
+				destination.radius = shape.radius;
+				destination.height = shape.height;
+			}
+			else if constexpr(std::is_same_v<Shape, TaperedCapsuleColliderShape>) {
+				destination.topRadius = shape.topRadius;
+				destination.bottomRadius = shape.bottomRadius;
+				destination.height = shape.height;
+			}
+			else destination.colliderAssetId = FromUuid(shape.colliderAssetId);
+		}, source.shape);
+		destination.materialId = FromUuid(source.materialId);
+		destination.queryFlags = source.queryFlags;
+		destination.collisionLayerId = source.collisionLayerId;
+		destination.eventPolicy = static_cast<std::uint8_t>(source.eventPolicy);
+		destination.useDefaultMaterial = source.useDefaultMaterial ? 1U : 0U;
+		destination.isTrigger = source.isTrigger ? 1U : 0U;
+		destination.useLayerOverride = source.useLayerOverride ? 1U : 0U;
+		destination.enabled = source.enabled ? 1U : 0U;
+		destination.hasDebugColorOverride = source.hasDebugColorOverride ? 1U : 0U;
+		destination.debugRed = source.debugColor.red;
+		destination.debugGreen = source.debugColor.green;
+		destination.debugBlue = source.debugColor.blue;
+		destination.debugAlpha = source.debugColor.alpha;
+		return destination;
+	}
+
+	std::optional<ColliderRecord> ToColliderRecord(const NativePhysicsColliderRecord& source) {
+		if(!HasPhysicsAbiHeader(&source)) return std::nullopt;
+		ColliderRecord destination;
+		destination.recordId = ToUuid(source.recordId);
+		destination.recordVersion = source.recordVersion;
+		destination.localCenter = ToVector(source.localCenter);
+		destination.localRotation = ToQuaternion(source.localRotation);
+		switch(static_cast<PhysicsShapeKind>(source.shapeKind)) {
+		case PhysicsShapeKind::Box: destination.shape = BoxColliderShape{ToVector(source.halfExtents)}; break;
+		case PhysicsShapeKind::Sphere: destination.shape = SphereColliderShape{source.radius}; break;
+		case PhysicsShapeKind::Capsule: destination.shape = CapsuleColliderShape{source.radius, source.height}; break;
+		case PhysicsShapeKind::Cylinder: destination.shape = CylinderColliderShape{source.radius, source.height}; break;
+		case PhysicsShapeKind::TaperedCapsule: destination.shape = TaperedCapsuleColliderShape{source.topRadius, source.bottomRadius, source.height}; break;
+		case PhysicsShapeKind::ConvexHull: destination.shape = ConvexHullColliderShape{ToUuid(source.colliderAssetId)}; break;
+		case PhysicsShapeKind::Mesh: destination.shape = TriangleMeshColliderShape{ToUuid(source.colliderAssetId)}; break;
+		case PhysicsShapeKind::Compound: destination.shape = CompoundColliderShape{ToUuid(source.colliderAssetId)}; break;
+		default: return std::nullopt;
+		}
+		destination.materialId = ToUuid(source.materialId);
+		destination.queryFlags = source.queryFlags;
+		destination.collisionLayerId = source.collisionLayerId;
+		destination.eventPolicy = static_cast<PhysicsColliderEventPolicy>(source.eventPolicy);
+		destination.useDefaultMaterial = source.useDefaultMaterial != 0U;
+		destination.isTrigger = source.isTrigger != 0U;
+		destination.useLayerOverride = source.useLayerOverride != 0U;
+		destination.enabled = source.enabled != 0U;
+		destination.hasDebugColorOverride = source.hasDebugColorOverride != 0U;
+		destination.debugColor = {source.debugRed, source.debugGreen, source.debugBlue, source.debugAlpha};
+		return destination;
+	}
+
+	NativePhysicsConstraintLimits FromConstraintLimits(const PhysicsConstraintLimits& source) {
+		return {source.enabled ? 1U : 0U, source.minimum, source.maximum};
+	}
+
+	NativePhysicsConstraintSpring FromConstraintSpring(const PhysicsConstraintSpring& source) {
+		return {source.enabled ? 1U : 0U, source.stiffness, source.damping};
+	}
+
+	NativePhysicsConstraintMotor FromConstraintMotor(const PhysicsConstraintMotor& source) {
+		return {static_cast<std::uint32_t>(source.mode), source.targetPosition, source.targetVelocity, source.maximumForce};
+	}
+
+	PhysicsConstraintLimits ToConstraintLimits(const NativePhysicsConstraintLimits& source) {
+		return {source.enabled != 0U, source.minimum, source.maximum};
+	}
+
+	PhysicsConstraintSpring ToConstraintSpring(const NativePhysicsConstraintSpring& source) {
+		return {source.enabled != 0U, source.stiffness, source.damping};
+	}
+
+	PhysicsConstraintMotor ToConstraintMotor(const NativePhysicsConstraintMotor& source) {
+		return {static_cast<PhysicsConstraintMotorMode>(source.mode), source.targetPosition, source.targetVelocity, source.maximumForce};
+	}
+
+	NativePhysicsConstraintRecord FromConstraintRecord(const ConstraintRecord& source) {
+		NativePhysicsConstraintRecord destination{};
+		destination.header = {kNativePhysicsAbiVersion, sizeof(destination)};
+		destination.recordId = FromUuid(source.recordId);
+		destination.recordVersion = source.recordVersion;
+		destination.kind = static_cast<std::uint32_t>(source.kind);
+		destination.firstEndpointKind = static_cast<std::uint32_t>(source.firstEndpointKind);
+		destination.secondEndpointKind = static_cast<std::uint32_t>(source.secondEndpointKind);
+		destination.firstObjectId = FromUuid(source.firstObjectId);
+		destination.secondObjectId = FromUuid(source.secondObjectId);
+		destination.firstFrame = FromPose(source.firstFrame);
+		destination.secondFrame = FromPose(source.secondFrame);
+		destination.firstAxis = FromVector(source.firstAxis);
+		destination.secondAxis = FromVector(source.secondAxis);
+		destination.limits = FromConstraintLimits(source.limits);
+		destination.spring = FromConstraintSpring(source.spring);
+		destination.motor = FromConstraintMotor(source.motor);
+		for(std::size_t index = 0U; index < source.axisLimits.size(); ++index) {
+			destination.axisSettings[index].limits = FromConstraintLimits(source.axisLimits[index]);
+			destination.axisSettings[index].spring = FromConstraintSpring(source.axisSprings[index]);
+			destination.axisSettings[index].motor = FromConstraintMotor(source.axisMotors[index]);
+		}
+		destination.firstGearConstraintId = FromUuid(source.firstGearConstraintId);
+		destination.secondGearConstraintId = FromUuid(source.secondGearConstraintId);
+		destination.gearRatio = source.gearRatio;
+		destination.breakForce = source.breakForce;
+		destination.breakTorque = source.breakTorque;
+		destination.resetGeneration = source.resetGeneration;
+		destination.collideConnected = source.collideConnected ? 1U : 0U;
+		destination.enabled = source.enabled ? 1U : 0U;
+		return destination;
+	}
+
+	std::optional<ConstraintRecord> ToConstraintRecord(const NativePhysicsConstraintRecord& source) {
+		if(!HasPhysicsAbiHeader(&source)) return std::nullopt;
+		ConstraintRecord destination;
+		destination.recordId = ToUuid(source.recordId);
+		destination.recordVersion = source.recordVersion;
+		destination.kind = static_cast<PhysicsConstraintKind>(source.kind);
+		destination.firstEndpointKind = static_cast<PhysicsConstraintEndpointKind>(source.firstEndpointKind);
+		destination.secondEndpointKind = static_cast<PhysicsConstraintEndpointKind>(source.secondEndpointKind);
+		destination.firstObjectId = ToUuid(source.firstObjectId);
+		destination.secondObjectId = ToUuid(source.secondObjectId);
+		destination.firstFrame = ToPose(source.firstFrame);
+		destination.secondFrame = ToPose(source.secondFrame);
+		destination.firstAxis = ToVector(source.firstAxis);
+		destination.secondAxis = ToVector(source.secondAxis);
+		destination.limits = ToConstraintLimits(source.limits);
+		destination.spring = ToConstraintSpring(source.spring);
+		destination.motor = ToConstraintMotor(source.motor);
+		for(std::size_t index = 0U; index < destination.axisLimits.size(); ++index) {
+			destination.axisLimits[index] = ToConstraintLimits(source.axisSettings[index].limits);
+			destination.axisSprings[index] = ToConstraintSpring(source.axisSettings[index].spring);
+			destination.axisMotors[index] = ToConstraintMotor(source.axisSettings[index].motor);
+		}
+		destination.firstGearConstraintId = ToUuid(source.firstGearConstraintId);
+		destination.secondGearConstraintId = ToUuid(source.secondGearConstraintId);
+		destination.gearRatio = source.gearRatio;
+		destination.breakForce = source.breakForce;
+		destination.breakTorque = source.breakTorque;
+		destination.resetGeneration = source.resetGeneration;
+		destination.collideConnected = source.collideConnected != 0U;
+		destination.enabled = source.enabled != 0U;
+		return destination;
+	}
+
+	template<typename Record>
+	NativePhysicsStatus ValidateManagedRecordInput(const Record* records, std::uint32_t recordCount) {
+		if(recordCount > kMaximumManagedAuthoringRecords) return NativePhysicsStatus::LimitExceeded;
+		if(recordCount != 0U && records == nullptr) return NativePhysicsStatus::InvalidArgument;
+		for(std::uint32_t index = 0U; index < recordCount; ++index) {
+			if(!HasPhysicsAbiHeader(&records[index])) return NativePhysicsStatus::VersionMismatch;
+		}
+		return NativePhysicsStatus::Success;
 	}
 }
 
@@ -519,6 +803,94 @@ extern "C" {
 		return settings->status;
 	}
 
+	static NativePhysicsStatus Native_Physics_ReadSettingsRecord(NativePhysicsSettingsRecord* settings) {
+		if(!HasPhysicsAbiHeader(settings)) return NativePhysicsStatus::VersionMismatch;
+		const PhysicsSettings source = PhysicsSystem::Instance().ConfiguredSettings();
+		const PhysicsWorldHandle world = PhysicsSystem::Instance().WorldHandle();
+		settings->header = {kNativePhysicsAbiVersion, sizeof(*settings)};
+		settings->status = NativePhysicsStatus::Success;
+		settings->settingsGeneration = static_cast<std::uint32_t>(PhysicsSystem::Instance().SettingsGeneration());
+		settings->gravity = FromVector(source.gravity);
+		settings->fixedTimeStep = source.fixedTimeStep;
+		settings->maxSubsteps = source.maxSubsteps;
+		settings->maxAccumulatedTime = source.maxAccumulatedTime;
+		settings->velocityIterations = source.velocityIterations;
+		settings->positionIterations = source.positionIterations;
+		settings->maxCastDistance = source.maxCastDistance;
+		settings->maxShapeExtent = source.maxShapeExtent;
+		settings->maxHitsPerQuery = source.maxHitsPerQuery;
+		settings->maxRequestsPerBatch = source.maxRequestsPerBatch;
+		settings->retainedResultTicks = source.retainedResultTicks;
+		settings->debugVisualizationEnabled = source.debugVisualizationEnabled ? 1U : 0U;
+		settings->retainedDebugTicks = source.retainedDebugTicks;
+		settings->maxDebugPrimitives = source.maxDebugPrimitives;
+		settings->transformPublicationChunkSize = source.transformPublicationChunkSize;
+		settings->providerExtractionBatchSize = source.providerExtractionBatchSize;
+		settings->parallelPreparationThreshold = source.parallelPreparationThreshold;
+		settings->parallelExtractionThreshold = source.parallelExtractionThreshold;
+		settings->aggregateDiagnosticsIntervalFrames = source.aggregateDiagnosticsIntervalFrames;
+		settings->continuousCollisionEnabled = source.continuousCollisionEnabled ? 1U : 0U;
+		settings->worldId = world.worldId.value;
+		settings->worldGeneration = world.worldGeneration;
+		settings->reserved = 0U;
+		for(std::size_t index = 0U; index < source.layers.size(); ++index) {
+			NativePhysicsCollisionLayer& destination = settings->layers[index];
+			const CollisionLayer& layer = source.layers[index];
+			destination.id = layer.id;
+			destination.broadPhaseGroup = layer.broadPhaseGroup;
+			destination.collisionMask = layer.collisionMask;
+			destination.enabled = layer.enabled ? 1U : 0U;
+			std::memset(destination.name, 0, sizeof(destination.name));
+			const std::size_t count = std::min(layer.name.size(), sizeof(destination.name) - 1U);
+			std::memcpy(destination.name, layer.name.data(), count);
+		}
+		WriteDiagnostic(settings->diagnostic, world.IsValid() ? "" : "Physics settings are configured but no world is active.");
+		return settings->status;
+	}
+
+	static NativePhysicsStatus Native_Physics_SubmitSettingsRecord(const NativePhysicsSettingsRecord* settings) {
+		if(!HasPhysicsAbiHeader(settings)) return NativePhysicsStatus::VersionMismatch;
+		PhysicsSettings candidate = PhysicsSettings::Defaults();
+		candidate.gravity = ToVector(settings->gravity);
+		candidate.fixedTimeStep = settings->fixedTimeStep;
+		candidate.maxSubsteps = settings->maxSubsteps;
+		candidate.maxAccumulatedTime = settings->maxAccumulatedTime;
+		candidate.velocityIterations = settings->velocityIterations;
+		candidate.positionIterations = settings->positionIterations;
+		candidate.maxCastDistance = settings->maxCastDistance;
+		candidate.maxShapeExtent = settings->maxShapeExtent;
+		candidate.maxHitsPerQuery = settings->maxHitsPerQuery;
+		candidate.maxRequestsPerBatch = settings->maxRequestsPerBatch;
+		candidate.retainedResultTicks = settings->retainedResultTicks;
+		candidate.debugVisualizationEnabled = settings->debugVisualizationEnabled != 0U;
+		candidate.retainedDebugTicks = settings->retainedDebugTicks;
+		candidate.maxDebugPrimitives = settings->maxDebugPrimitives;
+		candidate.transformPublicationChunkSize = settings->transformPublicationChunkSize;
+		candidate.providerExtractionBatchSize = settings->providerExtractionBatchSize;
+		candidate.parallelPreparationThreshold = settings->parallelPreparationThreshold;
+		candidate.parallelExtractionThreshold = settings->parallelExtractionThreshold;
+		candidate.aggregateDiagnosticsIntervalFrames = settings->aggregateDiagnosticsIntervalFrames;
+		candidate.continuousCollisionEnabled = settings->continuousCollisionEnabled != 0U;
+		for(std::size_t index = 0U; index < candidate.layers.size(); ++index) {
+			const NativePhysicsCollisionLayer& source = settings->layers[index];
+			if(source.id > std::numeric_limits<std::uint8_t>::max()
+				|| source.broadPhaseGroup > std::numeric_limits<std::uint8_t>::max()) {
+				return NativePhysicsStatus::InvalidArgument;
+			}
+			CollisionLayer& layer = candidate.layers[index];
+			layer.id = static_cast<std::uint8_t>(source.id);
+			layer.broadPhaseGroup = static_cast<std::uint8_t>(source.broadPhaseGroup);
+			layer.collisionMask = source.collisionMask;
+			layer.enabled = source.enabled != 0U;
+			const char* nameEnd = std::find(std::begin(source.name), std::end(source.name), '\0');
+			layer.name.assign(source.name, nameEnd);
+		}
+		if(!candidate.Validate().accepted) return NativePhysicsStatus::InvalidArgument;
+		return PhysicsSystem::Instance().QueueSettingsUpdate(std::move(candidate))
+			? NativePhysicsStatus::Accepted
+			: NativePhysicsStatus::Conflict;
+	}
+
 	NativePhysicsStatus Native_Physics_ResolveIdentity(std::uint32_t objectEntity, NativePhysicsIdentitySnapshot* identity) {
 		if(!HasPhysicsAbiHeader(identity)) return NativePhysicsStatus::VersionMismatch;
 		identity->header = {kNativePhysicsAbiVersion, sizeof(*identity)};
@@ -567,6 +939,247 @@ extern "C" {
 		if(found == snapshot->states->end()) return NativePhysicsStatus::StaleTarget;
 		*state = {{kNativePhysicsAbiVersion, sizeof(*state)}, FromHandle(found->handle), NativeIdentity(found->objectId, found->objectGeneration, found->componentGeneration), FromPose(found->pose), FromVector(found->linearVelocity), FromVector(found->groundNormal), FromVector(found->supportVelocity), FromHandle(found->supportBody), found->tick, static_cast<std::uint32_t>(found->groundState), found->contactCount, found->supported ? 1U : 0U, {}};
 		return NativePhysicsStatus::Success;
+	}
+
+	NativePhysicsStatus Native_Physics_CopyColliderRecords(std::uint32_t objectEntity, NativePhysicsColliderRecord* records, std::uint32_t capacity, std::uint32_t* required) {
+		if(required == nullptr) return NativePhysicsStatus::InvalidArgument;
+		*required = 0U;
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		ObjectManager& objects = ObjectManager::instance();
+		const std::optional<Object> object = objects.getObject(static_cast<entt::entity>(objectEntity));
+		if(!object) return NativePhysicsStatus::StaleTarget;
+		const ColliderSetComponent* component = objects.GetComponent<ColliderSetComponent>(*object);
+		if(component == nullptr) return NativePhysicsStatus::InvalidState;
+		if(component->colliders.size() > kMaximumManagedAuthoringRecords) return NativePhysicsStatus::LimitExceeded;
+		*required = static_cast<std::uint32_t>(component->colliders.size());
+		if(*required > capacity || (*required != 0U && records == nullptr)) return NativePhysicsStatus::LimitExceeded;
+		for(std::uint32_t index = 0U; index < *required; ++index) records[index] = FromColliderRecord(component->colliders[index]);
+		return NativePhysicsStatus::Success;
+	}
+
+	NativePhysicsStatus Native_Physics_ReplaceColliderRecords(std::uint32_t objectEntity, const NativePhysicsColliderRecord* records, std::uint32_t recordCount) {
+		const NativePhysicsStatus inputStatus = ValidateManagedRecordInput(records, recordCount);
+		if(inputStatus != NativePhysicsStatus::Success) return inputStatus;
+		std::vector<ColliderRecord> replacements;
+		replacements.reserve(recordCount);
+		for(std::uint32_t index = 0U; index < recordCount; ++index) {
+			std::optional<ColliderRecord> converted = ToColliderRecord(records[index]);
+			if(!converted) return NativePhysicsStatus::InvalidArgument;
+			replacements.push_back(std::move(*converted));
+		}
+		ColliderSetComponent candidate;
+		candidate.colliders = replacements;
+		if(!candidate.Validate().accepted) return NativePhysicsStatus::InvalidArgument;
+
+		if(auto context = ScriptingSystem::CurrentScriptDispatchContext(); context.has_value()) {
+			std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+			ObjectManager& objects = ObjectManager::instance();
+			const std::optional<Object> object = objects.getObject(static_cast<entt::entity>(objectEntity));
+			if(!object) return NativePhysicsStatus::StaleTarget;
+			if(objects.GetComponent<ColliderSetComponent>(*object) == nullptr) return NativePhysicsStatus::InvalidState;
+			const TerraEngine::UUID objectId = objects.getUUID(*object);
+			TerraEngine::Scene::TransactionalMutationBuilder builder(
+				"managed-collider-set-" + std::to_string(context->frameOrder) + "-" + TerraEngine::ToHexString(objectId),
+				TerraEngine::Scene::TransactionOrigin::ManagedCallback,
+				context->sourceBindingId);
+			builder.ObserveObject(objects, objectId)
+				.UpdateComponentProperty(objectId, std::string(ColliderSetComponent::kComponentName), "colliders", std::move(replacements));
+			TerraEngine::Scene::SceneMutationQueue::Instance().EnqueueTransaction(std::move(builder).Build());
+			return NativePhysicsStatus::Accepted;
+		}
+
+		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		ObjectManager& objects = ObjectManager::instance();
+		const std::optional<Object> object = objects.getObject(static_cast<entt::entity>(objectEntity));
+		if(!object) return NativePhysicsStatus::StaleTarget;
+		ColliderSetComponent* component = objects.GetComponent<ColliderSetComponent>(*object);
+		if(component == nullptr) return NativePhysicsStatus::InvalidState;
+		component->colliders = std::move(replacements);
+		objects.notifyObjectStructureChanged(*object);
+		return NativePhysicsStatus::Success;
+	}
+
+	NativePhysicsStatus Native_Physics_CopyConstraintRecords(std::uint32_t objectEntity, NativePhysicsConstraintRecord* records, std::uint32_t capacity, std::uint32_t* required) {
+		if(required == nullptr) return NativePhysicsStatus::InvalidArgument;
+		*required = 0U;
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		ObjectManager& objects = ObjectManager::instance();
+		const std::optional<Object> object = objects.getObject(static_cast<entt::entity>(objectEntity));
+		if(!object) return NativePhysicsStatus::StaleTarget;
+		const ConstraintSetComponent* component = objects.GetComponent<ConstraintSetComponent>(*object);
+		if(component == nullptr) return NativePhysicsStatus::InvalidState;
+		if(component->constraints.size() > kMaximumManagedAuthoringRecords) return NativePhysicsStatus::LimitExceeded;
+		*required = static_cast<std::uint32_t>(component->constraints.size());
+		if(*required > capacity || (*required != 0U && records == nullptr)) return NativePhysicsStatus::LimitExceeded;
+		for(std::uint32_t index = 0U; index < *required; ++index) records[index] = FromConstraintRecord(component->constraints[index]);
+		return NativePhysicsStatus::Success;
+	}
+
+	NativePhysicsStatus Native_Physics_ReplaceConstraintRecords(std::uint32_t objectEntity, const NativePhysicsConstraintRecord* records, std::uint32_t recordCount) {
+		const NativePhysicsStatus inputStatus = ValidateManagedRecordInput(records, recordCount);
+		if(inputStatus != NativePhysicsStatus::Success) return inputStatus;
+		std::vector<ConstraintRecord> replacements;
+		replacements.reserve(recordCount);
+		for(std::uint32_t index = 0U; index < recordCount; ++index) {
+			std::optional<ConstraintRecord> converted = ToConstraintRecord(records[index]);
+			if(!converted) return NativePhysicsStatus::InvalidArgument;
+			replacements.push_back(std::move(*converted));
+		}
+		ConstraintSetComponent candidate;
+		candidate.constraints = replacements;
+		if(!candidate.Validate().accepted) return NativePhysicsStatus::InvalidArgument;
+
+		if(auto context = ScriptingSystem::CurrentScriptDispatchContext(); context.has_value()) {
+			std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+			ObjectManager& objects = ObjectManager::instance();
+			const std::optional<Object> object = objects.getObject(static_cast<entt::entity>(objectEntity));
+			if(!object) return NativePhysicsStatus::StaleTarget;
+			if(objects.GetComponent<ConstraintSetComponent>(*object) == nullptr) return NativePhysicsStatus::InvalidState;
+			const TerraEngine::UUID objectId = objects.getUUID(*object);
+			TerraEngine::Scene::TransactionalMutationBuilder builder(
+				"managed-constraint-set-" + std::to_string(context->frameOrder) + "-" + TerraEngine::ToHexString(objectId),
+				TerraEngine::Scene::TransactionOrigin::ManagedCallback,
+				context->sourceBindingId);
+			builder.ObserveObject(objects, objectId)
+				.UpdateComponentProperty(objectId, std::string(ConstraintSetComponent::kComponentName), "constraints", std::move(replacements));
+			TerraEngine::Scene::SceneMutationQueue::Instance().EnqueueTransaction(std::move(builder).Build());
+			return NativePhysicsStatus::Accepted;
+		}
+
+		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		ObjectManager& objects = ObjectManager::instance();
+		const std::optional<Object> object = objects.getObject(static_cast<entt::entity>(objectEntity));
+		if(!object) return NativePhysicsStatus::StaleTarget;
+		ConstraintSetComponent* component = objects.GetComponent<ConstraintSetComponent>(*object);
+		if(component == nullptr) return NativePhysicsStatus::InvalidState;
+		component->constraints = std::move(replacements);
+		objects.notifyObjectStructureChanged(*object);
+		return NativePhysicsStatus::Success;
+	}
+}
+
+void FlushManagedRuntimeRequests()
+{
+	std::optional<SceneRenderSettings> sceneSettings;
+	std::optional<TerraEngine::UUID> activeScene;
+	std::vector<ManagedSceneLoadRequest> sceneLoads;
+	std::vector<ManagedPrefabInstantiationRequest> prefabRequests;
+	std::vector<ManagedResourceReleaseRequest> resourceReleases;
+	bool unloadAll = false;
+	std::uint64_t frameId = 0U;
+	{
+		std::scoped_lock lock(g_ManagedRuntimeRequestMutex);
+		sceneSettings = std::move(g_PendingManagedSceneRenderSettings);
+		g_PendingManagedSceneRenderSettings.reset();
+		activeScene = std::move(g_PendingManagedActiveScene);
+		g_PendingManagedActiveScene.reset();
+		sceneLoads.swap(g_PendingManagedSceneLoads);
+		prefabRequests.swap(g_PendingManagedPrefabInstantiations);
+		resourceReleases.swap(g_PendingManagedResourceReleases);
+		unloadAll = std::exchange(g_PendingManagedSceneUnloadAll, false);
+		frameId = ++g_ManagedRuntimeFrameId;
+	}
+
+	if (unloadAll)
+	{
+		ObjectManager::instance().clear();
+		SceneManager::Instance().UnloadAll();
+		// Unload-all is an atomic lifecycle barrier for this frame. Requests that
+		// were captured beside it cannot reactivate stale scenes or recreate prefab
+		// objects after the world has been cleared.
+		activeScene.reset();
+		sceneLoads.clear();
+		prefabRequests.clear();
+	}
+	for (const ManagedSceneLoadRequest& request : sceneLoads)
+	{
+		// File resolution, parsing, and cache publication all stay inside this
+		// protected boundary. Managed callbacks only contribute copied paths.
+		if (request.prefab)
+		{
+			SceneManager::Instance().LoadPrefab(request.path);
+		}
+		else
+		{
+			SceneManager::Instance().LoadScene(request.path);
+		}
+	}
+	if (activeScene.has_value())
+	{
+		SceneManager::Instance().SetActiveScene(*activeScene);
+	}
+	if (sceneSettings.has_value())
+	{
+		SceneManager::Instance().SetActiveSceneRenderSettings(*sceneSettings);
+		std::scoped_lock lock(g_ManagedRuntimeRequestMutex);
+		++g_ManagedSceneRenderSettingsGeneration;
+	}
+
+	for (const ManagedPrefabInstantiationRequest& request : prefabRequests)
+	{
+		const TerraEngine::UUID prefabId = SceneManager::Instance().LoadPrefab(request.path);
+		const SceneDocument* prefab = SceneManager::Instance().GetPrefab(prefabId);
+		if (prefab == nullptr || !prefab->parsedJson.contains("objects") || !prefab->parsedJson["objects"].is_array())
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "Managed prefab instantiation rejected invalid prefab: " << request.path);
+			continue;
+		}
+
+		std::optional<entt::entity> parentEntity;
+		if (request.parentObjectId != TerraEngine::EMPTY_UUID)
+		{
+			const std::optional<Object> parent = ObjectManager::instance().getObject(request.parentObjectId);
+			if (!parent)
+			{
+				TERRAENGINE_LOG(LogLevel::Warning, "Managed prefab parent became stale before publication.");
+				continue;
+			}
+			parentEntity = parent->EntityId();
+		}
+
+		std::vector<Object> createdRoots;
+		bool published = true;
+		try
+		{
+			for (nlohmann::json root : prefab->parsedJson["objects"])
+			{
+				std::unordered_map<std::string, std::string> remap;
+				CollectPrefabUuidRemap(root, remap);
+				RewritePrefabUuidReferences(root, remap);
+				const entt::entity entity = Serializer::DeserializeObjectEntity(root, parentEntity);
+				const std::optional<Object> created = ObjectManager::instance().getObject(entity);
+				if (!created)
+				{
+					published = false;
+					break;
+				}
+				createdRoots.push_back(*created);
+			}
+		}
+		catch (const std::exception& exception)
+		{
+			published = false;
+			TERRAENGINE_LOG(LogLevel::Error, "Managed prefab instantiation failed: " << exception.what());
+		}
+		if (!published)
+		{
+			for (auto it = createdRoots.rbegin(); it != createdRoots.rend(); ++it)
+			{
+				if (ObjectManager::instance().getObject(it->EntityId()))
+				{
+					ObjectManager::instance().removeObject(*it);
+				}
+			}
+		}
+		else if (!createdRoots.empty())
+		{
+			SceneManager::Instance().ForceMarkActiveSceneDirty();
+		}
+	}
+
+	for (const ManagedResourceReleaseRequest& request : resourceReleases)
+	{
+		ResourceManager::Instance().ReleaseStreamableAssetForRuntime(request.assetId, request.assetType, frameId);
 	}
 }
 
@@ -682,6 +1295,78 @@ static nlohmann::json MarshallNativeValueToJson(void* data, ScriptType type)
 	}
 	}
 	return {};
+}
+
+static bool HasValidGraphicsHeader(const NativeGraphicsAbiHeader& header)
+{
+	return header.abiVersion == kNativeGraphicsAbiVersion
+		&& header.structSize == sizeof(NativeGraphicsRenderSettings);
+}
+
+static NativeGraphicsRenderSettings ToNativeGraphicsSettings(const RenderSettings& settings)
+{
+	NativeGraphicsRenderSettings result{};
+	result.header = { kNativeGraphicsAbiVersion, sizeof(NativeGraphicsRenderSettings) };
+	result.shadowResolution = settings.shadowResolution;
+	result.shadowFilteringSize = settings.shadowFilteringSize;
+	result.maxUploadedLights = settings.maxUploadedLights;
+	result.maxDynamicLights = settings.maxDynamicLights;
+	result.maxShadowLights = settings.maxShadowLights;
+	result.maxAreaLights = settings.maxAreaLights;
+	result.enableLTC = settings.enableLTC;
+	result.enableIBL = settings.enableIBL;
+	result.indirectStrength = settings.indirectStrength;
+	result.ambientOcclusionStrength = settings.ambientOcclusionStrength;
+	result.ambientOcclusionQuality = settings.ambientOcclusionQuality;
+	result.anisotropicFiltering = settings.anisotropicFiltering;
+	result.variableRateShading = settings.variableRateShading;
+	result.validationEnabled = settings.validationEnabled;
+	result.debugEnabled = settings.debugEnabled;
+	result.virtualGeometryLodErrorScale = settings.virtualGeometry.lodErrorScale;
+	result.virtualGeometryMaxLodDrop = settings.virtualGeometry.maxLodDrop;
+	result.virtualGeometryHiZOcclusionEnabled = settings.virtualGeometry.hiZOcclusionEnabled ? 1U : 0U;
+	result.virtualGeometryHiZSelfOcclusionGuardEnabled = settings.virtualGeometry.hiZSelfOcclusionGuardEnabled ? 1U : 0U;
+	result.virtualGeometryHiZNearPlaneGuardEnabled = settings.virtualGeometry.hiZNearPlaneGuardEnabled ? 1U : 0U;
+	result.virtualGeometryHiZThinGeometryGuardEnabled = settings.virtualGeometry.hiZThinGeometryGuardEnabled ? 1U : 0U;
+	result.virtualGeometryDebugVisualizationMode = static_cast<std::uint32_t>(settings.virtualGeometry.debugVisualizationMode);
+	result.virtualGeometryBudgetBytes = settings.virtualGeometry.geometryBudgetBytes;
+	result.virtualGeometryPreloadBias = settings.virtualGeometry.preloadBias;
+	result.virtualGeometryLodTransitionHysteresisPixels = settings.virtualGeometry.lodTransitionHysteresisPixels;
+	result.virtualGeometryLodTransitionStableFrames = settings.virtualGeometry.lodTransitionStableFrames;
+	return result;
+}
+
+static RenderSettings FromNativeGraphicsSettings(const NativeGraphicsRenderSettings& settings)
+{
+	RenderSettings result;
+	result.shadowResolution = settings.shadowResolution;
+	result.shadowFilteringSize = settings.shadowFilteringSize;
+	result.maxUploadedLights = settings.maxUploadedLights;
+	result.maxDynamicLights = settings.maxDynamicLights;
+	result.maxShadowLights = settings.maxShadowLights;
+	result.maxAreaLights = settings.maxAreaLights;
+	result.enableLTC = settings.enableLTC;
+	result.enableIBL = settings.enableIBL;
+	result.indirectStrength = settings.indirectStrength;
+	result.ambientOcclusionStrength = settings.ambientOcclusionStrength;
+	result.ambientOcclusionQuality = settings.ambientOcclusionQuality;
+	result.anisotropicFiltering = settings.anisotropicFiltering;
+	result.variableRateShading = settings.variableRateShading;
+	result.validationEnabled = settings.validationEnabled;
+	result.debugEnabled = settings.debugEnabled;
+	result.virtualGeometry.lodErrorScale = settings.virtualGeometryLodErrorScale;
+	result.virtualGeometry.maxLodDrop = settings.virtualGeometryMaxLodDrop;
+	result.virtualGeometry.hiZOcclusionEnabled = settings.virtualGeometryHiZOcclusionEnabled != 0U;
+	result.virtualGeometry.hiZSelfOcclusionGuardEnabled = settings.virtualGeometryHiZSelfOcclusionGuardEnabled != 0U;
+	result.virtualGeometry.hiZNearPlaneGuardEnabled = settings.virtualGeometryHiZNearPlaneGuardEnabled != 0U;
+	result.virtualGeometry.hiZThinGeometryGuardEnabled = settings.virtualGeometryHiZThinGeometryGuardEnabled != 0U;
+	result.virtualGeometry.debugVisualizationMode = static_cast<VirtualGeometryDebugVisualizationMode>(settings.virtualGeometryDebugVisualizationMode);
+	result.virtualGeometry.geometryBudgetBytes = settings.virtualGeometryBudgetBytes;
+	result.virtualGeometry.preloadBias = settings.virtualGeometryPreloadBias;
+	result.virtualGeometry.lodTransitionHysteresisPixels = settings.virtualGeometryLodTransitionHysteresisPixels;
+	result.virtualGeometry.lodTransitionStableFrames = settings.virtualGeometryLodTransitionStableFrames;
+	result.virtualGeometry = SanitizeVirtualGeometryQualityProfile(result.virtualGeometry);
+	return result;
 }
 
 static TerraEngine::Reflection::Variant MakeManagedTransactionVariant(const nlohmann::json& value, int valueKind)
@@ -1008,6 +1693,28 @@ static void SetMeshRendererAssetReference(uint32_t objectId, std::string_view pr
 						<< "' for MeshRenderComponent property '" << propertyName << "'.");
 					return;
 				}
+			}
+
+			// Gameplay callbacks publish the resolved UUID through
+			// the same typed deferred component path as ordinary reflected setters so
+			// mesh streaming and render snapshots never observe a partial live write.
+			if (auto context = ScriptingSystem::CurrentScriptDispatchContext(); context.has_value())
+			{
+				ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
+				TerraEngine::Scene::SceneMutationRequest request = scriptingSystem.BuildScriptMutationRequest(
+					TerraEngine::Scene::SceneMutationOperation::UpdateComponent,
+					*context,
+					objects.getUUID(*object),
+					{},
+					"MeshRenderComponent");
+				request.typedComponentPayload.propertyName = std::string(propertyName);
+				request.typedComponentPayload.value = resolvedId;
+				request.typedComponentPayload.valid = true;
+				request.coalescingKey = std::to_string(context->frameOrder)
+					+ "|" + TerraEngine::ToHexString(objects.getUUID(*object))
+					+ "|MeshRenderComponent|" + std::string(propertyName);
+				scriptingSystem.RecordScriptMutationRequest(std::move(request));
+				return;
 			}
 
 			it->second.entitySetter(enttRegistry, entity, propertyName, resolvedId);
@@ -1358,30 +2065,9 @@ extern "C" {
 		return WriteApplicationReturnText(ResourceManager::Instance().GetVersion());
 	}
 
-	// Native_Object_Create is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	uint32_t Native_Object_Create(const char* name) {
-		if (auto context = ScriptingSystem::CurrentScriptDispatchContext(); context.has_value() && context->workerDispatch) {
-			ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
-			scriptingSystem.RecordScriptMutationRequest(scriptingSystem.BuildScriptMutationRequest(
-				TerraEngine::Scene::SceneMutationOperation::CreateObject,
-				*context,
-				TerraEngine::EMPTY_UUID,
-				name ? name : "New Object"));
-			return InvalidObjectId();
-		}
-
-		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
-		// Managed object creation keeps its immediate gameplay behavior today,
-		// but the operation is also expressible as a SceneMutationQueue request
-		// for future worker-originated script bridges. Keeping that contract in
-		// this boundary prevents C# authors from needing scheduler annotations.
-		Object obj = ObjectManager::instance().createObject(name ? name : "New Object");
-		return static_cast<uint32_t>(obj.EntityId());
-	}
-
 	// Native_Object_Destroy is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Native_Object_Destroy(uint32_t objectId) {
-		if (auto context = ScriptingSystem::CurrentScriptDispatchContext(); context.has_value() && context->workerDispatch) {
+		if (auto context = ScriptingSystem::CurrentScriptDispatchContext(); context.has_value()) {
 			std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 			ObjectManager& objects = ObjectManager::instance();
 			const entt::entity entity = static_cast<entt::entity>(objectId);
@@ -1396,9 +2082,9 @@ extern "C" {
 		}
 
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
-		// Destruction remains immediate for existing C# gameplay compatibility.
-		// Worker jobs must use SceneMutationQueue instead, so no managed callback
-		// observes object storage changing from a background thread.
+		// Calls outside a gameplay dispatch can run only on an already protected
+		// host path. Every managed lifecycle callback returns through the queued
+		// branch above, regardless of which scheduler thread invoked it.
 		ObjectManager& objects = ObjectManager::instance();
 		const entt::entity entity = static_cast<entt::entity>(objectId);
 		if (std::optional<Object> object = objects.getObject(entity)) {
@@ -1422,6 +2108,19 @@ extern "C" {
 
 	// Native_Object_SetName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Native_Object_SetName(uint32_t objectId, const char* name) {
+		if (auto context = ScriptingSystem::CurrentScriptDispatchContext(); context.has_value()) {
+			std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+			ObjectManager& objects = ObjectManager::instance();
+			if (std::optional<Object> object = objects.getObject(static_cast<entt::entity>(objectId))) {
+				ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
+				auto request = scriptingSystem.BuildScriptMutationRequest(
+					TerraEngine::Scene::SceneMutationOperation::SetObjectName, *context, objects.getUUID(*object));
+				request.metadataValue = name ? name : "";
+				request.coalescingKey = "metadata|" + TerraEngine::ToHexString(objects.getUUID(*object)) + "|name";
+				scriptingSystem.RecordScriptMutationRequest(std::move(request));
+			}
+			return;
+		}
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		ObjectManager& objects = ObjectManager::instance();
 		const entt::entity entity = static_cast<entt::entity>(objectId);
@@ -1460,6 +2159,117 @@ extern "C" {
 		return InvalidObjectId();
 	}
 
+	static NativeRuntimeStatus Native_Object_RequestCreate(const char* name, NativeObjectCreationReceipt* receipt) {
+		if(receipt == nullptr || !HasRuntimeAbiHeader(receipt->header, sizeof(*receipt))) return NativeRuntimeStatus::VersionMismatch;
+		receipt->header = {kNativeRuntimeAbiVersion, sizeof(*receipt)};
+		receipt->status = NativeRuntimeStatus::InvalidArgument;
+		receipt->reserved = 0U;
+		std::memset(receipt->stableId, 0, sizeof(receipt->stableId));
+		if(name == nullptr || name[0] == '\0') return receipt->status;
+
+		const TerraEngine::UUID stableId = TerraEngine::GenerateUUID();
+		TerraEngine::Scene::SceneMutationRequest mutation;
+		if(const auto context = ScriptingSystem::CurrentScriptDispatchContext(); context.has_value()) {
+			mutation = ScriptingSystem::Instance().BuildScriptMutationRequest(
+				TerraEngine::Scene::SceneMutationOperation::CreateObject,
+				*context,
+				stableId,
+				name);
+		} else {
+			mutation.operation = TerraEngine::Scene::SceneMutationOperation::CreateObject;
+			mutation.targetObjectId = stableId;
+			mutation.displayName = name;
+			mutation.requestId = "managed-object-create-" + TerraEngine::ToHexString(stableId);
+		}
+		ScriptingSystem::Instance().RecordScriptMutationRequest(std::move(mutation));
+
+		const std::string text = TerraEngine::ToHexString(stableId);
+		const std::size_t count = std::min(text.size(), sizeof(receipt->stableId) - 1U);
+		std::memcpy(receipt->stableId, text.data(), count);
+		receipt->status = NativeRuntimeStatus::Accepted;
+		return receipt->status;
+	}
+
+	static NativeRuntimeStatus Native_Object_ResolveStableId(const char* stableId, std::uint32_t* objectId) {
+		if(objectId == nullptr) return NativeRuntimeStatus::InvalidArgument;
+		*objectId = InvalidObjectId();
+		if(stableId == nullptr || stableId[0] == '\0') return NativeRuntimeStatus::InvalidArgument;
+		const std::optional<TerraEngine::UUID> parsed = TerraEngine::ParseUUID(stableId);
+		if(!parsed) return NativeRuntimeStatus::InvalidArgument;
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		const std::optional<Object> object = ObjectManager::instance().getObject(*parsed);
+		if(!object) return NativeRuntimeStatus::NotFound;
+		*objectId = static_cast<std::uint32_t>(object->EntityId());
+		return NativeRuntimeStatus::Success;
+	}
+
+	static uint32_t Native_Object_GetParent(uint32_t objectId) {
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		ObjectManager& objects = ObjectManager::instance();
+		const std::optional<Object> object = objects.getObject(static_cast<entt::entity>(objectId));
+		if(!object) return InvalidObjectId();
+		const std::optional<Object> parent = objects.getParent(*object);
+		return parent ? static_cast<uint32_t>(parent->EntityId()) : InvalidObjectId();
+	}
+
+	static NativeRuntimeStatus Native_Object_SetParent(uint32_t objectId, uint32_t parentObjectId) {
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		ObjectManager& objects = ObjectManager::instance();
+		const std::optional<Object> object = objects.getObject(static_cast<entt::entity>(objectId));
+		if(!object) return NativeRuntimeStatus::NotFound;
+		const TerraEngine::UUID objectUuid = objects.getUUID(*object);
+		TerraEngine::Scene::TransactionObjectRef parentRef{};
+		if(parentObjectId != InvalidObjectId()) {
+			const std::optional<Object> parent = objects.getObject(static_cast<entt::entity>(parentObjectId));
+			if(!parent || parent->EntityId() == object->EntityId()) return NativeRuntimeStatus::InvalidArgument;
+			parentRef = TerraEngine::Scene::ExistingObject(objects.getUUID(*parent));
+		}
+		TerraEngine::Scene::TransactionalMutationBuilder builder(
+			"managed-reparent-" + TerraEngine::ToHexString(objectUuid),
+			TerraEngine::Scene::TransactionOrigin::ManagedCallback,
+			"managed-hierarchy");
+		builder.ObserveObject(objects, objectUuid).ReparentObject(objectUuid, parentRef);
+		TerraEngine::Scene::SceneMutationQueue::Instance().EnqueueTransaction(std::move(builder).Build());
+		return NativeRuntimeStatus::Accepted;
+	}
+
+	static NativeRuntimeStatus Native_Object_CopyChildren(uint32_t objectId, uint32_t* children, std::uint32_t capacity, std::uint32_t* requiredCount) {
+		if(requiredCount == nullptr) return NativeRuntimeStatus::InvalidArgument;
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		ObjectManager& objects = ObjectManager::instance();
+		const std::optional<Object> object = objects.getObject(static_cast<entt::entity>(objectId));
+		if(!object) { *requiredCount = 0U; return NativeRuntimeStatus::NotFound; }
+		const std::vector<Object> values = objects.getChildren(*object);
+		*requiredCount = static_cast<std::uint32_t>(values.size());
+		if(values.size() > capacity || (!values.empty() && children == nullptr)) return NativeRuntimeStatus::Conflict;
+		for(std::size_t index = 0U; index < values.size(); ++index) children[index] = static_cast<uint32_t>(values[index].EntityId());
+		return NativeRuntimeStatus::Success;
+	}
+
+	static NativeRuntimeStatus Native_Object_CopyAll(uint32_t* output, std::uint32_t capacity, std::uint32_t* requiredCount) {
+		if(requiredCount == nullptr) return NativeRuntimeStatus::InvalidArgument;
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		std::vector<Object> values = ObjectManager::instance().getObjectsWithComponentsIncludingInactive<Transform>();
+		ObjectManager::instance().SortObjectsByStableId(values);
+		*requiredCount = static_cast<std::uint32_t>(values.size());
+		if(values.size() > capacity || (!values.empty() && output == nullptr)) return NativeRuntimeStatus::Conflict;
+		for(std::size_t index = 0U; index < values.size(); ++index) output[index] = static_cast<uint32_t>(values[index].EntityId());
+		return NativeRuntimeStatus::Success;
+	}
+
+	static NativeRuntimeStatus Native_Object_CopyWithTag(const char* tag, uint32_t* output, std::uint32_t capacity, std::uint32_t* requiredCount) {
+		if(tag == nullptr || requiredCount == nullptr) return NativeRuntimeStatus::InvalidArgument;
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		ObjectManager& objects = ObjectManager::instance();
+		std::vector<Object> values = objects.getObjectsWithComponentsIncludingInactive<Transform>();
+		values.erase(std::remove_if(values.begin(), values.end(), [&](const Object& object) { return objects.getObjectTag(object) != tag; }), values.end());
+		objects.SortObjectsByStableId(values);
+		*requiredCount = static_cast<std::uint32_t>(values.size());
+		if(values.size() > capacity || (!values.empty() && output == nullptr)) return NativeRuntimeStatus::Conflict;
+		for(std::size_t index = 0U; index < values.size(); ++index) output[index] = static_cast<uint32_t>(values[index].EntityId());
+		return NativeRuntimeStatus::Success;
+	}
+
 	// Native_MeshRenderer_GetMesh is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const char* Native_MeshRenderer_GetMesh(uint32_t objectId) {
 		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
@@ -1491,13 +2301,9 @@ extern "C" {
 		if (assetReference == nullptr || assetReference[0] == '\0') {
 			return false;
 		}
-		AssetType type = AssetType::Mesh;
-		switch (assetType) {
-		case 1: type = AssetType::Texture; break;
-		case 2: type = AssetType::Material; break;
-		case 3: type = AssetType::ShaderCollection; break;
-		default: type = AssetType::Mesh; break;
-		}
+		const std::optional<AssetType> resolvedType = ManagedAssetType(assetType);
+		if(!resolvedType) return false;
+		const AssetType type = *resolvedType;
 		ResourceManager& resources = ResourceManager::Instance();
 		const TerraEngine::UUID id = resources.ResolveAssetReference(assetReference, type);
 		if (id == TerraEngine::EMPTY_UUID) {
@@ -1529,7 +2335,7 @@ extern "C" {
 
 	// Native_AddComponent is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool Native_AddComponent(uint32_t objectId, const char* componentType) {
-		if (auto context = ScriptingSystem::CurrentScriptDispatchContext(); context.has_value() && context->workerDispatch) {
+		if (auto context = ScriptingSystem::CurrentScriptDispatchContext(); context.has_value()) {
 			if (componentType == nullptr || componentType[0] == '\0') {
 				return false;
 			}
@@ -1557,6 +2363,42 @@ extern "C" {
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (auto it = reg.find(componentType); it != reg.end()) {
 				it->second.entityAddComponent(objects.getRegistry(), entity);
+				objects.notifyObjectStructureChanged(*object);
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool Native_RemoveComponent(uint32_t objectId, const char* componentType) {
+		if (componentType == nullptr || componentType[0] == '\0' || std::string_view(componentType) == Transform::kComponentName) {
+			return false;
+		}
+		if (auto context = ScriptingSystem::CurrentScriptDispatchContext(); context.has_value()) {
+			std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+			ObjectManager& objects = ObjectManager::instance();
+			const entt::entity entity = static_cast<entt::entity>(objectId);
+			if (std::optional<Object> object = objects.getObject(entity)) {
+				ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
+				scriptingSystem.RecordScriptMutationRequest(scriptingSystem.BuildScriptMutationRequest(
+					TerraEngine::Scene::SceneMutationOperation::RemoveComponent,
+					*context,
+					objects.getUUID(*object),
+					{},
+					componentType));
+				return true;
+			}
+			return false;
+		}
+
+		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		ObjectManager& objects = ObjectManager::instance();
+		const entt::entity entity = static_cast<entt::entity>(objectId);
+		if (std::optional<Object> object = objects.getObject(entity)) {
+			auto& registry = ComponentAccessRegistry();
+			if (auto iterator = registry.find(componentType); iterator != registry.end()
+				&& iterator->second.entityHasComponent(objects.getRegistry(), entity)) {
+				iterator->second.entityRemoveComponent(objects.getRegistry(), entity);
 				objects.notifyObjectStructureChanged(*object);
 				return true;
 			}
@@ -1596,10 +2438,28 @@ extern "C" {
 
 	// Native_ScriptComponent_AddBinding is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool Native_ScriptComponent_AddBinding(uint32_t objectId, const char* className) {
-		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		if (className == nullptr || className[0] == '\0') {
 			return false;
 		}
+		if (const auto context = ScriptingSystem::CurrentScriptDispatchContext(); context.has_value()) {
+			std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+			ObjectManager& objects = ObjectManager::instance();
+			const std::optional<Object> object = objects.getObject(static_cast<entt::entity>(objectId));
+			if(!object) return false;
+			ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
+			auto request = scriptingSystem.BuildScriptMutationRequest(
+				TerraEngine::Scene::SceneMutationOperation::AddScriptBinding,
+				*context,
+				objects.getUUID(*object));
+			request.metadataValue = className;
+			request.coalescingKey = std::to_string(context->frameOrder)
+				+ "|" + TerraEngine::ToHexString(objects.getUUID(*object))
+				+ "|ScriptBinding|" + className;
+			scriptingSystem.RecordScriptMutationRequest(std::move(request));
+			return true;
+		}
+
+		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		ObjectManager& objects = ObjectManager::instance();
@@ -1811,7 +2671,7 @@ extern "C" {
 
 	// Native_SetComponentProperty is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Native_SetComponentProperty(uint32_t objectId, const char* componentType, const char* propertyName, void* inValue, int type) {
-		if (auto context = ScriptingSystem::CurrentScriptDispatchContext(); context.has_value() && context->workerDispatch) {
+		if (auto context = ScriptingSystem::CurrentScriptDispatchContext(); context.has_value()) {
 			if (componentType == nullptr || componentType[0] == '\0' || propertyName == nullptr || propertyName[0] == '\0' || inValue == nullptr) {
 				return;
 			}
@@ -1869,28 +2729,247 @@ extern "C" {
 		}
 	}
 
-	// Native_Graphics_SetQualityPreset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	void Native_Graphics_SetQualityPreset(uint32_t preset) {
-		RenderSystem::Instance().SetQualityPreset(static_cast<QualityPreset>(preset));
+	const char* Native_Object_GetTag(uint32_t objectId) {
+		static thread_local std::string valueBuffer;
+		valueBuffer = "Untagged";
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		ObjectManager& objects = ObjectManager::instance();
+		if (std::optional<Object> object = objects.getObject(static_cast<entt::entity>(objectId))) {
+			valueBuffer = objects.getObjectTag(*object);
+		}
+		return valueBuffer.c_str();
 	}
 
-	// Native_Graphics_GetQualityPreset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	uint32_t Native_Graphics_GetQualityPreset() {
-		return static_cast<uint32_t>(RenderSystem::Instance().GetQualityPreset());
-	}
-
-	// Native_Graphics_SetRenderSettings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	void Native_Graphics_SetRenderSettings(RenderSettings* settings) {
-		if (settings) {
-			RenderSystem::Instance().SetRenderSettings(*settings);
+	void Native_Object_SetTag(uint32_t objectId, const char* tag) {
+		if (auto context = ScriptingSystem::CurrentScriptDispatchContext(); context.has_value()) {
+			std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+			ObjectManager& objects = ObjectManager::instance();
+			if (std::optional<Object> object = objects.getObject(static_cast<entt::entity>(objectId))) {
+				ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
+				auto request = scriptingSystem.BuildScriptMutationRequest(
+					TerraEngine::Scene::SceneMutationOperation::SetObjectTag, *context, objects.getUUID(*object));
+				request.metadataValue = tag ? tag : "Untagged";
+				request.coalescingKey = "metadata|" + TerraEngine::ToHexString(objects.getUUID(*object)) + "|tag";
+				scriptingSystem.RecordScriptMutationRequest(std::move(request));
+			}
+			return;
+		}
+		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		ObjectManager& objects = ObjectManager::instance();
+		if (std::optional<Object> object = objects.getObject(static_cast<entt::entity>(objectId))) {
+			objects.setObjectTag(*object, tag ? tag : "Untagged");
 		}
 	}
 
-	// Native_Graphics_GetRenderSettings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	void Native_Graphics_GetRenderSettings(RenderSettings* outSettings) {
-		if (outSettings) {
-			*outSettings = RenderSystem::Instance().GetRenderSettings();
+	const char* Native_Object_GetLayer(uint32_t objectId) {
+		static thread_local std::string valueBuffer;
+		valueBuffer = "Default";
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		ObjectManager& objects = ObjectManager::instance();
+		if (std::optional<Object> object = objects.getObject(static_cast<entt::entity>(objectId))) {
+			valueBuffer = objects.getObjectLayer(*object);
 		}
+		return valueBuffer.c_str();
+	}
+
+	void Native_Object_SetLayer(uint32_t objectId, const char* layer) {
+		if (auto context = ScriptingSystem::CurrentScriptDispatchContext(); context.has_value()) {
+			std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+			ObjectManager& objects = ObjectManager::instance();
+			if (std::optional<Object> object = objects.getObject(static_cast<entt::entity>(objectId))) {
+				ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
+				auto request = scriptingSystem.BuildScriptMutationRequest(
+					TerraEngine::Scene::SceneMutationOperation::SetObjectLayer, *context, objects.getUUID(*object));
+				request.metadataValue = layer ? layer : "Default";
+				request.coalescingKey = "metadata|" + TerraEngine::ToHexString(objects.getUUID(*object)) + "|layer";
+				scriptingSystem.RecordScriptMutationRequest(std::move(request));
+			}
+			return;
+		}
+		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		ObjectManager& objects = ObjectManager::instance();
+		if (std::optional<Object> object = objects.getObject(static_cast<entt::entity>(objectId))) {
+			objects.setObjectLayer(*object, layer ? layer : "Default");
+		}
+	}
+
+	bool Native_Object_GetActive(uint32_t objectId) {
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		ObjectManager& objects = ObjectManager::instance();
+		if (std::optional<Object> object = objects.getObject(static_cast<entt::entity>(objectId))) {
+			return objects.isObjectActive(*object);
+		}
+		return false;
+	}
+
+	bool Native_Object_GetActiveInHierarchy(uint32_t objectId) {
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		ObjectManager& objects = ObjectManager::instance();
+		if (std::optional<Object> object = objects.getObject(static_cast<entt::entity>(objectId))) {
+			return objects.isObjectActiveInHierarchy(*object);
+		}
+		return false;
+	}
+
+	void Native_Object_SetActive(uint32_t objectId, bool active) {
+		if (auto context = ScriptingSystem::CurrentScriptDispatchContext(); context.has_value()) {
+			std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+			ObjectManager& objects = ObjectManager::instance();
+			if (std::optional<Object> object = objects.getObject(static_cast<entt::entity>(objectId))) {
+				ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
+				auto request = scriptingSystem.BuildScriptMutationRequest(
+					TerraEngine::Scene::SceneMutationOperation::SetObjectActive, *context, objects.getUUID(*object));
+				request.metadataBooleanValue = active;
+				request.coalescingKey = "metadata|" + TerraEngine::ToHexString(objects.getUUID(*object)) + "|active";
+				scriptingSystem.RecordScriptMutationRequest(std::move(request));
+			}
+			return;
+		}
+		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		ObjectManager& objects = ObjectManager::instance();
+		if (std::optional<Object> object = objects.getObject(static_cast<entt::entity>(objectId))) {
+			objects.setObjectActive(*object, active);
+		}
+	}
+
+	bool Native_Object_GetStatic(uint32_t objectId) {
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		ObjectManager& objects = ObjectManager::instance();
+		if (std::optional<Object> object = objects.getObject(static_cast<entt::entity>(objectId))) {
+			return objects.isObjectStatic(*object);
+		}
+		return false;
+	}
+
+	void Native_Object_SetStatic(uint32_t objectId, bool isStatic) {
+		if (auto context = ScriptingSystem::CurrentScriptDispatchContext(); context.has_value()) {
+			std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+			ObjectManager& objects = ObjectManager::instance();
+			if (std::optional<Object> object = objects.getObject(static_cast<entt::entity>(objectId))) {
+				ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
+				auto request = scriptingSystem.BuildScriptMutationRequest(
+					TerraEngine::Scene::SceneMutationOperation::SetObjectStatic, *context, objects.getUUID(*object));
+				request.metadataBooleanValue = isStatic;
+				request.coalescingKey = "metadata|" + TerraEngine::ToHexString(objects.getUUID(*object)) + "|static";
+				scriptingSystem.RecordScriptMutationRequest(std::move(request));
+			}
+			return;
+		}
+		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		ObjectManager& objects = ObjectManager::instance();
+		if (std::optional<Object> object = objects.getObject(static_cast<entt::entity>(objectId))) {
+			objects.setObjectStatic(*object, isStatic);
+		}
+	}
+
+	const char* Native_GetComponentStringProperty(uint32_t objectId, const char* componentType, const char* propertyName) {
+		static thread_local std::string valueBuffer;
+		valueBuffer.clear();
+		if (componentType == nullptr || propertyName == nullptr) {
+			return valueBuffer.c_str();
+		}
+
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		ObjectManager& objects = ObjectManager::instance();
+		const entt::entity entity = static_cast<entt::entity>(objectId);
+		if (objects.getObject(entity).has_value()) {
+			auto& registry = ComponentAccessRegistry();
+			if (auto iterator = registry.find(componentType); iterator != registry.end()) {
+				TerraEngine::Reflection::Variant value = iterator->second.entityGetter(objects.getRegistry(), entity, propertyName);
+				if (TerraEngine::Reflection::IsType<std::string>(value)) {
+					valueBuffer = TerraEngine::Reflection::GetValue<std::string>(value);
+				}
+			}
+		}
+		return valueBuffer.c_str();
+	}
+
+	void Native_SetComponentStringProperty(uint32_t objectId, const char* componentType, const char* propertyName, const char* value) {
+		if (componentType == nullptr || componentType[0] == '\0' || propertyName == nullptr
+			|| propertyName[0] == '\0' || value == nullptr) {
+			return;
+		}
+		if (auto context = ScriptingSystem::CurrentScriptDispatchContext(); context.has_value()) {
+			std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+			ObjectManager& objects = ObjectManager::instance();
+			const entt::entity entity = static_cast<entt::entity>(objectId);
+			if (std::optional<Object> object = objects.getObject(entity)) {
+				ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
+				TerraEngine::Scene::SceneMutationRequest request = scriptingSystem.BuildScriptMutationRequest(
+					TerraEngine::Scene::SceneMutationOperation::UpdateComponent,
+					*context,
+					objects.getUUID(*object),
+					{},
+					componentType);
+				request.typedComponentPayload.propertyName = propertyName;
+				request.typedComponentPayload.value = std::string(value);
+				request.typedComponentPayload.valid = true;
+				request.coalescingKey = std::to_string(context->frameOrder)
+					+ "|" + TerraEngine::ToHexString(objects.getUUID(*object))
+					+ "|" + componentType + "|" + propertyName;
+				scriptingSystem.RecordScriptMutationRequest(std::move(request));
+			}
+			return;
+		}
+
+		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		ObjectManager& objects = ObjectManager::instance();
+		const entt::entity entity = static_cast<entt::entity>(objectId);
+		if (std::optional<Object> object = objects.getObject(entity)) {
+			auto& registry = ComponentAccessRegistry();
+			if (auto iterator = registry.find(componentType); iterator != registry.end()) {
+				iterator->second.entitySetter(objects.getRegistry(), entity, propertyName, std::string(value));
+				objects.notifyObjectStructureChanged(*object);
+			}
+		}
+	}
+
+	std::uint32_t Native_Graphics_GetAbiVersion() {
+		return kNativeGraphicsAbiVersion;
+	}
+
+	NativeGraphicsStatus Native_Graphics_ReadRenderSettings(NativeGraphicsRenderSettings* settings) {
+		if (settings == nullptr) {
+			return NativeGraphicsStatus::InvalidArgument;
+		}
+		if (!HasValidGraphicsHeader(settings->header)) {
+			return NativeGraphicsStatus::VersionMismatch;
+		}
+		*settings = ToNativeGraphicsSettings(RenderSystem::Instance().GetRuntimeRenderSettingsSnapshot());
+		return NativeGraphicsStatus::Success;
+	}
+
+	NativeGraphicsStatus Native_Graphics_SubmitRuntimeRenderSettings(const NativeGraphicsRenderSettings* settings) {
+		if (settings == nullptr) {
+			return NativeGraphicsStatus::InvalidArgument;
+		}
+		if (!HasValidGraphicsHeader(settings->header)) {
+			return NativeGraphicsStatus::VersionMismatch;
+		}
+		return RenderSystem::Instance().QueueRuntimeRenderSettings(FromNativeGraphicsSettings(*settings))
+			? NativeGraphicsStatus::Accepted
+			: NativeGraphicsStatus::InvalidArgument;
+	}
+
+	NativeGraphicsStatus Native_Graphics_SubmitRuntimeQualityPreset(std::uint32_t preset) {
+		if (preset > static_cast<std::uint32_t>(QualityPreset::Ultra)) {
+			return NativeGraphicsStatus::InvalidPreset;
+		}
+		return RenderSystem::Instance().QueueRuntimeQualityPreset(static_cast<QualityPreset>(preset))
+			? NativeGraphicsStatus::Accepted
+			: NativeGraphicsStatus::InvalidPreset;
+	}
+
+	NativeGraphicsStatus Native_Graphics_ReadQualityPreset(std::uint32_t* preset) {
+		if (preset == nullptr) {
+			return NativeGraphicsStatus::InvalidArgument;
+		}
+		*preset = static_cast<std::uint32_t>(RenderSystem::Instance().GetRuntimeQualityPresetSnapshot());
+		return NativeGraphicsStatus::Success;
+	}
+
+	std::uint64_t Native_Graphics_GetRuntimeSettingsGeneration() {
+		return RenderSystem::Instance().GetRuntimeRenderSettingsGeneration();
 	}
 
 	// Native_Graphics_GetLightingDiagnosticsSummary is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1948,6 +3027,37 @@ extern "C" {
 		if (outX) *outX = x;
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (outY) *outY = y;
+	}
+
+	static NativeRuntimeStatus Native_Input_ReadSnapshot(NativeInputSnapshot* snapshot) {
+		if(snapshot == nullptr || !HasRuntimeAbiHeader(snapshot->header, sizeof(*snapshot))) return NativeRuntimeStatus::VersionMismatch;
+		static_assert(KeyCount() <= kNativeInputKeyCapacity);
+		static_assert(MouseButtonCount() <= kNativeInputMouseButtonCapacity);
+		const InputSystem::InputSnapshot source = InputSystem::Instance().GetLatestWorkerSnapshot();
+		snapshot->header = {kNativeRuntimeAbiVersion, sizeof(*snapshot)};
+		snapshot->status = NativeRuntimeStatus::Success;
+		snapshot->keyCount = static_cast<std::uint32_t>(KeyCount());
+		snapshot->mouseButtonCount = static_cast<std::uint32_t>(MouseButtonCount());
+		snapshot->workerReadable = source.workerReadable ? 1U : 0U;
+		snapshot->frameRevision = source.frameRevision;
+		snapshot->cursorX = source.cursorPosition.first;
+		snapshot->cursorY = source.cursorPosition.second;
+		snapshot->scrollX = source.scrollDelta.first;
+		snapshot->scrollY = source.scrollDelta.second;
+		std::memset(snapshot->keyStates, 0, sizeof(snapshot->keyStates));
+		std::memset(snapshot->mouseButtonStates, 0, sizeof(snapshot->mouseButtonStates));
+		std::memset(snapshot->mousePressedThisFrame, 0, sizeof(snapshot->mousePressedThisFrame));
+		for(std::size_t index = 0U; index < source.keyStates.size(); ++index) snapshot->keyStates[index] = static_cast<std::uint8_t>(source.keyStates[index]);
+		for(std::size_t index = 0U; index < source.mouseButtonStates.size(); ++index) {
+			snapshot->mouseButtonStates[index] = static_cast<std::uint8_t>(source.mouseButtonStates[index]);
+			snapshot->mousePressedThisFrame[index] = source.mouseButtonPressedThisFrame[index] ? 1U : 0U;
+		}
+		WriteRuntimeDiagnostic(snapshot->diagnostic, source.boundarySummary);
+		return snapshot->status;
+	}
+
+	static void Native_Input_SetMousePosition(double x, double y) {
+		if(std::isfinite(x) && std::isfinite(y)) InputSystem::Instance().SetCursorPosition(x, y);
 	}
 
 	// Native_UI_WasElementClicked is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -2334,31 +3444,139 @@ extern "C" {
 		return true;
 	}
 
-	// Native_Scene_LoadScene is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	const char* Native_Scene_LoadScene(const char* path) {
-		static thread_local std::string uuidBuffer;
-		if (path == nullptr) return "";
-		TerraEngine::UUID id = SceneManager::Instance().LoadScene(path);
-		uuidBuffer = TerraEngine::ToHexString(id);
-		return uuidBuffer.c_str();
+	static NativeRuntimeStatus Native_Scene_RequestLoad(const char* path, bool prefab) {
+		if(path == nullptr || path[0] == '\0') return NativeRuntimeStatus::InvalidArgument;
+		// The managed string is copied now; filesystem access and cache mutation
+		// are deferred to FlushManagedRuntimeRequests at the frame-end boundary.
+		std::scoped_lock lock(g_ManagedRuntimeRequestMutex);
+		g_PendingManagedSceneLoads.push_back({path, prefab});
+		return NativeRuntimeStatus::Accepted;
 	}
 
-	// Native_Scene_LoadPrefab is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	const char* Native_Scene_LoadPrefab(const char* path) {
-		static thread_local std::string uuidBuffer;
-		if (path == nullptr) return "";
-		TerraEngine::UUID id = SceneManager::Instance().LoadPrefab(path);
-		uuidBuffer = TerraEngine::ToHexString(id);
-		return uuidBuffer.c_str();
+	static NativeRuntimeStatus Native_Scene_RequestSetActive(const char* uuidHex) {
+		if(uuidHex == nullptr || uuidHex[0] == '\0') return NativeRuntimeStatus::InvalidArgument;
+		const std::optional<TerraEngine::UUID> id = TerraEngine::ParseUUID(uuidHex);
+		if(!id) return NativeRuntimeStatus::InvalidArgument;
+		if(SceneManager::Instance().GetScene(*id) == nullptr) return NativeRuntimeStatus::NotFound;
+		std::scoped_lock lock(g_ManagedRuntimeRequestMutex);
+		g_PendingManagedActiveScene = *id;
+		return NativeRuntimeStatus::Accepted;
 	}
 
-	// Native_Scene_SetActiveScene is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	bool Native_Scene_SetActiveScene(const char* uuidHex) {
-		if (uuidHex == nullptr) return false;
-		auto id = TerraEngine::ParseUUID(uuidHex);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!id) return false;
-		return SceneManager::Instance().SetActiveScene(*id);
+	static NativeRuntimeStatus Native_ResourceStreaming_ReadStatus(const char* assetReference, int assetType, NativeResourceStreamingStatus* status) {
+		if(status == nullptr || !HasRuntimeAbiHeader(status->header, sizeof(*status))) return NativeRuntimeStatus::VersionMismatch;
+		status->header = {kNativeRuntimeAbiVersion, sizeof(*status)};
+		status->status = NativeRuntimeStatus::InvalidArgument;
+		status->assetType = static_cast<std::uint32_t>(assetType);
+		status->payloadState = 0U;
+		status->resident = 0U;
+		status->cpuBytes = 0U;
+		status->gpuBytes = 0U;
+		status->generation = 0U;
+		WriteRuntimeDiagnostic(status->diagnostic, "Asset reference and type are required.");
+		if(assetReference == nullptr || assetReference[0] == '\0') return status->status;
+		const std::optional<AssetType> type = ManagedAssetType(assetType);
+		if(!type) return status->status;
+		ResourceManager& resources = ResourceManager::Instance();
+		const TerraEngine::UUID id = resources.ResolveAssetReference(assetReference, *type);
+		if(id == TerraEngine::EMPTY_UUID) {
+			status->status = NativeRuntimeStatus::NotFound;
+			WriteRuntimeDiagnostic(status->diagnostic, "Asset reference could not be resolved.");
+			return status->status;
+		}
+		const std::optional<TerraEngine::Resource::StreamableAssetRecord> record = resources.GetStreamableAsset(id);
+		status->resident = resources.IsResourceResident(id) ? 1U : 0U;
+		if(record) {
+			status->payloadState = static_cast<std::uint32_t>(record->payloadState);
+			status->cpuBytes = record->exactCpuBytes.status == TerraEngine::Resource::ExactResidencyByteStatus::Unavailable
+				? record->estimatedCpuBytes : record->exactCpuBytes.bytes;
+			status->gpuBytes = record->exactGpuBytes.status == TerraEngine::Resource::ExactResidencyByteStatus::Unavailable
+				? record->estimatedGpuBytes : record->exactGpuBytes.bytes;
+			status->generation = record->residencyGeneration;
+			WriteRuntimeDiagnostic(status->diagnostic, record->failureReason);
+		} else {
+			WriteRuntimeDiagnostic(status->diagnostic, status->resident != 0U ? "Resource is resident but has no visibility-streaming record." : "Resource is registered but not resident.");
+		}
+		status->status = NativeRuntimeStatus::Success;
+		return status->status;
+	}
+
+	static NativeRuntimeStatus Native_ResourceStreaming_RequestRelease(const char* assetReference, int assetType) {
+		if(assetReference == nullptr || assetReference[0] == '\0') return NativeRuntimeStatus::InvalidArgument;
+		const std::optional<AssetType> type = ManagedAssetType(assetType);
+		if(!type) return NativeRuntimeStatus::InvalidArgument;
+		ResourceManager& resources = ResourceManager::Instance();
+		const TerraEngine::UUID id = resources.ResolveAssetReference(assetReference, *type);
+		if(id == TerraEngine::EMPTY_UUID) return NativeRuntimeStatus::NotFound;
+		std::scoped_lock lock(g_ManagedRuntimeRequestMutex);
+		const bool alreadyQueued = std::any_of(g_PendingManagedResourceReleases.begin(), g_PendingManagedResourceReleases.end(), [&](const ManagedResourceReleaseRequest& request) {
+			return request.assetId == id && request.assetType == *type;
+		});
+		if(!alreadyQueued) g_PendingManagedResourceReleases.push_back({id, *type});
+		return NativeRuntimeStatus::Accepted;
+	}
+
+	static const char* Native_Scene_GetActiveScene() {
+		g_RuntimeBridgeReturnBuffer = TerraEngine::ToHexString(SceneManager::Instance().GetActiveSceneId());
+		return g_RuntimeBridgeReturnBuffer.c_str();
+	}
+
+	static const char* Native_Scene_GetLoadedScenes() {
+		nlohmann::json values = nlohmann::json::array();
+		for(const TerraEngine::UUID& id : SceneManager::Instance().GetLoadedSceneIds()) values.push_back(TerraEngine::ToHexString(id));
+		g_RuntimeBridgeReturnBuffer = values.dump();
+		return g_RuntimeBridgeReturnBuffer.c_str();
+	}
+
+	static NativeRuntimeStatus Native_Scene_InstantiatePrefab(const char* path, uint32_t parentObjectId) {
+		if(path == nullptr || path[0] == '\0') return NativeRuntimeStatus::InvalidArgument;
+		TerraEngine::UUID parentId = TerraEngine::EMPTY_UUID;
+		if(parentObjectId != InvalidObjectId()) {
+			const std::optional<Object> parent = ObjectManager::instance().getObject(static_cast<entt::entity>(parentObjectId));
+			if(!parent) return NativeRuntimeStatus::NotFound;
+			parentId = ObjectManager::instance().getUUID(*parent);
+		}
+		// Resolution and cache publication happen at the protected frame boundary.
+		// A managed worker only copies the path and stable parent UUID here.
+		std::scoped_lock lock(g_ManagedRuntimeRequestMutex);
+		g_PendingManagedPrefabInstantiations.push_back({path, parentId});
+		return NativeRuntimeStatus::Accepted;
+	}
+
+	static NativeRuntimeStatus Native_Scene_RequestUnloadAll() {
+		std::scoped_lock lock(g_ManagedRuntimeRequestMutex);
+		g_PendingManagedSceneUnloadAll = true;
+		return NativeRuntimeStatus::Accepted;
+	}
+
+	static NativeRuntimeStatus Native_Scene_ReadRenderSettings(NativeSceneRenderSettings* settings) {
+		if(settings == nullptr || !HasRuntimeAbiHeader(settings->header, sizeof(*settings))) return NativeRuntimeStatus::VersionMismatch;
+		const SceneRenderSettings source = SceneManager::Instance().GetActiveSceneRenderSettings();
+		settings->header = {kNativeRuntimeAbiVersion, sizeof(*settings)};
+		settings->status = NativeRuntimeStatus::Success;
+		settings->reserved = 0U;
+		settings->indirectStrength = source.indirectStrength;
+		settings->ambientOcclusionStrength = source.ambientOcclusionStrength;
+		settings->ambientOcclusionQuality = source.ambientOcclusionQuality;
+		settings->reserved2 = 0U;
+		{
+			std::scoped_lock lock(g_ManagedRuntimeRequestMutex);
+			settings->generation = g_ManagedSceneRenderSettingsGeneration;
+		}
+		return settings->status;
+	}
+
+	static NativeRuntimeStatus Native_Scene_SubmitRenderSettings(const NativeSceneRenderSettings* settings) {
+		if(settings == nullptr || !HasRuntimeAbiHeader(settings->header, sizeof(*settings))) return NativeRuntimeStatus::VersionMismatch;
+		if(!std::isfinite(settings->indirectStrength) || !std::isfinite(settings->ambientOcclusionStrength)) return NativeRuntimeStatus::InvalidArgument;
+		SceneRenderSettings candidate;
+		candidate.indirectStrength = settings->indirectStrength;
+		candidate.ambientOcclusionStrength = settings->ambientOcclusionStrength;
+		candidate.ambientOcclusionQuality = settings->ambientOcclusionQuality;
+		candidate = SanitizeSceneRenderSettings(candidate);
+		std::scoped_lock lock(g_ManagedRuntimeRequestMutex);
+		g_PendingManagedSceneRenderSettings = candidate;
+		return NativeRuntimeStatus::Accepted;
 	}
 
 	// Native_Scene_SubmitTransactionJson is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -2400,6 +3618,103 @@ extern "C" {
 	// Native_Time_GetDeltaTime is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	float Native_Time_GetDeltaTime() {
 		return ScriptingSystem::Instance().GetLastDeltaTime();
+	}
+
+	static NativeRuntimeStatus Native_Time_ReadSnapshot(NativeTimeSnapshot* snapshot) {
+		if(snapshot == nullptr || !HasRuntimeAbiHeader(snapshot->header, sizeof(*snapshot))) return NativeRuntimeStatus::VersionMismatch;
+		const ScriptingSystem::RuntimeTimeSnapshot source = ScriptingSystem::Instance().GetRuntimeTimeSnapshot();
+		snapshot->header = {kNativeRuntimeAbiVersion, sizeof(*snapshot)};
+		snapshot->status = NativeRuntimeStatus::Success;
+		snapshot->reserved = 0U;
+		snapshot->deltaTime = source.deltaTime;
+		snapshot->unscaledDeltaTime = source.unscaledDeltaTime;
+		snapshot->fixedDeltaTime = TerraEngine::Physics::PhysicsSystem::Instance().FixedTimeStep();
+		snapshot->timeScale = source.timeScale;
+		snapshot->elapsedTime = source.elapsedTime;
+		snapshot->unscaledElapsedTime = source.unscaledElapsedTime;
+		snapshot->frameCount = source.frameCount;
+		return snapshot->status;
+	}
+
+	static NativeRuntimeStatus Native_Time_SetTimeScale(float timeScale) {
+		return ScriptingSystem::Instance().QueueRuntimeTimeScale(timeScale)
+			? NativeRuntimeStatus::Accepted
+			: NativeRuntimeStatus::InvalidArgument;
+	}
+
+	NativeRuntimeStatus Native_Runtime_Invoke(const NativeRuntimeRequest* request, void* packet) {
+		if(request == nullptr || !HasRuntimeAbiHeader(request->header, sizeof(*request))) return NativeRuntimeStatus::VersionMismatch;
+		const auto physicsStatus = [](NativePhysicsStatus status) {
+			switch(status) {
+			case NativePhysicsStatus::Success: return NativeRuntimeStatus::Success;
+			case NativePhysicsStatus::Accepted: return NativeRuntimeStatus::Accepted;
+			case NativePhysicsStatus::InvalidArgument: return NativeRuntimeStatus::InvalidArgument;
+			case NativePhysicsStatus::InvalidState: return NativeRuntimeStatus::InvalidState;
+			case NativePhysicsStatus::VersionMismatch: return NativeRuntimeStatus::VersionMismatch;
+			default: return NativeRuntimeStatus::Conflict;
+			}
+		};
+		// Every operation copies through caller-owned fixed-width packets. Pointer
+		// fields are valid only for this synchronous dispatch and are never queued.
+		switch(request->operation) {
+		case NativeRuntimeOperation::ObjectGetParent:
+			if(packet == nullptr) return NativeRuntimeStatus::InvalidArgument;
+			*static_cast<std::uint32_t*>(packet) = Native_Object_GetParent(request->objectId);
+			return NativeRuntimeStatus::Success;
+		case NativeRuntimeOperation::ObjectSetParent:
+			return Native_Object_SetParent(request->objectId, request->secondaryId);
+		case NativeRuntimeOperation::ObjectCopyChildren:
+			return Native_Object_CopyChildren(request->objectId, static_cast<std::uint32_t*>(request->output), request->capacity, request->requiredCount);
+		case NativeRuntimeOperation::ObjectCopyAll:
+			return Native_Object_CopyAll(static_cast<std::uint32_t*>(request->output), request->capacity, request->requiredCount);
+		case NativeRuntimeOperation::ObjectCopyWithTag:
+			return Native_Object_CopyWithTag(request->text, static_cast<std::uint32_t*>(request->output), request->capacity, request->requiredCount);
+		case NativeRuntimeOperation::ObjectRequestCreate:
+			return Native_Object_RequestCreate(request->text, static_cast<NativeObjectCreationReceipt*>(packet));
+		case NativeRuntimeOperation::ObjectResolveStableId:
+			return Native_Object_ResolveStableId(request->text, static_cast<std::uint32_t*>(packet));
+		case NativeRuntimeOperation::InputReadSnapshot:
+			return Native_Input_ReadSnapshot(static_cast<NativeInputSnapshot*>(packet));
+		case NativeRuntimeOperation::InputSetMousePosition:
+			Native_Input_SetMousePosition(request->x, request->y);
+			return NativeRuntimeStatus::Success;
+		case NativeRuntimeOperation::TimeReadSnapshot:
+			return Native_Time_ReadSnapshot(static_cast<NativeTimeSnapshot*>(packet));
+		case NativeRuntimeOperation::TimeSetScale:
+			return Native_Time_SetTimeScale(request->scalar);
+		case NativeRuntimeOperation::SceneGetActive:
+			if(packet == nullptr) return NativeRuntimeStatus::InvalidArgument;
+			*static_cast<const char**>(packet) = Native_Scene_GetActiveScene();
+			return NativeRuntimeStatus::Success;
+		case NativeRuntimeOperation::SceneGetLoaded:
+			if(packet == nullptr) return NativeRuntimeStatus::InvalidArgument;
+			*static_cast<const char**>(packet) = Native_Scene_GetLoadedScenes();
+			return NativeRuntimeStatus::Success;
+		case NativeRuntimeOperation::SceneRequestLoad:
+			return Native_Scene_RequestLoad(request->text, false);
+		case NativeRuntimeOperation::SceneRequestLoadPrefab:
+			return Native_Scene_RequestLoad(request->text, true);
+		case NativeRuntimeOperation::SceneRequestSetActive:
+			return Native_Scene_RequestSetActive(request->text);
+		case NativeRuntimeOperation::SceneInstantiatePrefab:
+			return Native_Scene_InstantiatePrefab(request->text, request->objectId);
+		case NativeRuntimeOperation::SceneUnloadAll:
+			return Native_Scene_RequestUnloadAll();
+		case NativeRuntimeOperation::SceneReadRenderSettings:
+			return Native_Scene_ReadRenderSettings(static_cast<NativeSceneRenderSettings*>(packet));
+		case NativeRuntimeOperation::SceneSubmitRenderSettings:
+			return Native_Scene_SubmitRenderSettings(static_cast<const NativeSceneRenderSettings*>(packet));
+		case NativeRuntimeOperation::ResourceReadStatus:
+			return Native_ResourceStreaming_ReadStatus(request->text, static_cast<int>(request->assetType), static_cast<NativeResourceStreamingStatus*>(packet));
+		case NativeRuntimeOperation::ResourceRequestRelease:
+			return Native_ResourceStreaming_RequestRelease(request->text, static_cast<int>(request->assetType));
+		case NativeRuntimeOperation::PhysicsReadSettings:
+			return physicsStatus(Native_Physics_ReadSettingsRecord(static_cast<NativePhysicsSettingsRecord*>(packet)));
+		case NativeRuntimeOperation::PhysicsSubmitSettings:
+			return physicsStatus(Native_Physics_SubmitSettingsRecord(static_cast<const NativePhysicsSettingsRecord*>(packet)));
+		default:
+			return NativeRuntimeStatus::InvalidArgument;
+		}
 	}
 
 }

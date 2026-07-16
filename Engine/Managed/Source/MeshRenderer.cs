@@ -23,5 +23,11 @@ namespace TerraEngine
 			get => InternalCalls.ReadNativeUtf8(InternalCalls.Native_MeshRenderer_GetMaterial(Object.ID));
 			set => InternalCalls.Native_MeshRenderer_SetMaterial(Object.ID, value ?? string.Empty);
 		}
+
+		public bool TaskShaderCullingEnabled
+		{
+			get => GetProperty<bool>("taskShaderCullingEnabled");
+			set => SetProperty("taskShaderCullingEnabled", value);
+		}
 	}
 }

@@ -2492,6 +2492,9 @@ void RenderSystem::Update(float deltaTime)
 		return;
 	}
 	TERRAENGINE_PROFILE_SCOPE("RenderSystem::Update", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+	// Runtime C# settings become visible only at this protected render boundary.
+	// Applying before snapshot construction gives every view one coherent profile.
+	ApplyQueuedRuntimeRenderSettings();
 	DrainCaptureReadbacks();
 
 	// Standalone runtime UI should track the real framebuffer size. In the
@@ -5103,7 +5106,8 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 		TerraEngine::Scheduling::kResourceVirtualGeometryPagePublications,
 		TerraEngine::Scheduling::kResourceVisibleStreamingTouchSets,
 		TerraEngine::Scheduling::kResourceRendererRecoveryStateSnapshot,
-		TerraEngine::Scheduling::kResourceRendererDeviceIncidentLog
+		TerraEngine::Scheduling::kResourceRendererDeviceIncidentLog,
+		TerraEngine::Scheduling::kResourceRuntimeRenderSettingsQueue
 	};
 	declaration.writes = {
 		"Renderer",
@@ -5136,7 +5140,8 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 		TerraEngine::Scheduling::kResourceVisibleCommandReuseDiagnostics,
 		TerraEngine::Scheduling::kResourceVisibleStreamingTouchSets,
 		TerraEngine::Scheduling::kResourceRendererRecoveryStateSnapshot,
-		TerraEngine::Scheduling::kResourceRendererDeviceIncidentLog
+		TerraEngine::Scheduling::kResourceRendererDeviceIncidentLog,
+		TerraEngine::Scheduling::kResourceRuntimeRenderSettings
 	};
 	// Live ECS collection still runs protected inside RenderSystem, while draw,
 	// light, upload, adaptive virtual geometry LOD/cluster/page intent, and
@@ -5150,7 +5155,7 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 	declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::PartiallyWorkerSafe;
 	declaration.hardBoundary = true;
 	declaration.safeSubwork = "Immutable render snapshots, visible-command cache lookup, draw packets, culling and lighting preparation, generation-tagged submission plans, virtual geometry LOD/page preparation, page request planning, page payload source planning, resource readiness, secondary command buffers, and submit descriptions.";
-	declaration.protectedCommit = "Swapchain acquire, acquired-image generation validation, command/fence ownership, queue submit/present, presentation recreation, completion publication, ResourceManager visible streaming touch publication, virtual geometry page payload publication, page retirement draining, virtual geometry GPU publication, virtual geometry diagnostics publication, renderer diagnostics, and device-loss containment.";
+	declaration.protectedCommit = "Runtime render-settings queue application, Swapchain acquire, acquired-image generation validation, command/fence ownership, queue submit/present, presentation recreation, completion publication, ResourceManager visible streaming touch publication, virtual geometry page payload publication, page retirement draining, virtual geometry GPU publication, virtual geometry diagnostics publication, renderer diagnostics, and device-loss containment.";
 	declaration.protectedReason = "Live GPU queue and presentation ownership remain protected after worker preparation.";
 	declaration.profilingLabel = declaration.name;
 	declaration.usesDefaultMetadata = false;
@@ -6339,12 +6344,19 @@ void RenderSystem::MarkSkyStateDirty()
 // RenderSystem::SetQualityPreset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void RenderSystem::SetQualityPreset(QualityPreset preset)
 {
+	ApplyQualityPreset(preset, true);
+}
+
+void RenderSystem::ApplyQualityPreset(QualityPreset preset, bool persistProjectSettings)
+{
 	if (preset == QualityPreset::Custom)
 	{
+		std::lock_guard<std::mutex> lock(runtimeRenderSettingsMutex);
 		currentPreset = QualityPreset::Custom;
 		return;
 	}
 
+	std::lock_guard<std::mutex> lock(runtimeRenderSettingsMutex);
 	currentPreset = preset;
 	// Dispatch by explicit engine state so each case documents one supported behavior.
 	switch (preset)
@@ -6412,14 +6424,20 @@ void RenderSystem::SetQualityPreset(QualityPreset preset)
 	}
 
 	currentSettings = SanitizeRenderSettings(currentSettings);
-	SaveSettings();
+	if (persistProjectSettings)
+	{
+		SaveSettings();
+	}
 }
 
 // RenderSystem::SetRenderSettings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void RenderSystem::SetRenderSettings(const RenderSettings& settings)
 {
-	currentSettings = SanitizeRenderSettings(settings);
-	currentPreset = QualityPreset::Custom;
+	{
+		std::lock_guard<std::mutex> lock(runtimeRenderSettingsMutex);
+		currentSettings = SanitizeRenderSettings(settings);
+		currentPreset = QualityPreset::Custom;
+	}
 	ResourceManager::Instance().SetRenderDebugEnabled(ResolveRenderDebugDiagnosticsEnabled());
 	ApplyRenderDiagnosticsRequest();
 	if (auto* vulkanContext = dynamic_cast<VulkanContext*>(rhi.get()))
@@ -6427,6 +6445,82 @@ void RenderSystem::SetRenderSettings(const RenderSettings& settings)
 		vulkanContext->SetVariableRateShadingEnabled(currentSettings.variableRateShading > 0u);
 	}
 	SaveSettings();
+}
+
+bool RenderSystem::QueueRuntimeQualityPreset(QualityPreset preset)
+{
+	if (preset > QualityPreset::Ultra)
+	{
+		return false;
+	}
+
+	std::lock_guard<std::mutex> lock(runtimeRenderSettingsMutex);
+	pendingRuntimeRenderSettings = RuntimeRenderSettingsRequest{ {}, preset, true };
+	return true;
+}
+
+bool RenderSystem::QueueRuntimeRenderSettings(const RenderSettings& settings)
+{
+	std::lock_guard<std::mutex> lock(runtimeRenderSettingsMutex);
+	pendingRuntimeRenderSettings = RuntimeRenderSettingsRequest{
+		SanitizeRenderSettings(settings), QualityPreset::Custom, false };
+	return true;
+}
+
+RenderSettings RenderSystem::GetRuntimeRenderSettingsSnapshot() const
+{
+	std::lock_guard<std::mutex> lock(runtimeRenderSettingsMutex);
+	return currentSettings;
+}
+
+QualityPreset RenderSystem::GetRuntimeQualityPresetSnapshot() const
+{
+	std::lock_guard<std::mutex> lock(runtimeRenderSettingsMutex);
+	return currentPreset;
+}
+
+std::uint64_t RenderSystem::GetRuntimeRenderSettingsGeneration() const
+{
+	std::lock_guard<std::mutex> lock(runtimeRenderSettingsMutex);
+	return runtimeRenderSettingsGeneration;
+}
+
+void RenderSystem::ApplyQueuedRuntimeRenderSettings()
+{
+	std::optional<RuntimeRenderSettingsRequest> request;
+	{
+		std::lock_guard<std::mutex> lock(runtimeRenderSettingsMutex);
+		request = std::move(pendingRuntimeRenderSettings);
+		pendingRuntimeRenderSettings.reset();
+	}
+	if (!request)
+	{
+		return;
+	}
+
+	if (request->usePreset)
+	{
+		ApplyQualityPreset(request->preset, false);
+	}
+	else
+	{
+		std::lock_guard<std::mutex> lock(runtimeRenderSettingsMutex);
+		currentSettings = SanitizeRenderSettings(request->settings);
+		currentPreset = QualityPreset::Custom;
+	}
+
+	// Backend-affecting toggles are now applied by RenderSystem itself rather
+	// than by the worker that submitted the managed request.
+	ResourceManager::Instance().SetRenderDebugEnabled(ResolveRenderDebugDiagnosticsEnabled());
+	ApplyRenderDiagnosticsRequest();
+	if (auto* vulkanContext = dynamic_cast<VulkanContext*>(rhi.get()))
+	{
+		vulkanContext->SetVariableRateShadingEnabled(currentSettings.variableRateShading > 0U);
+	}
+	{
+		std::lock_guard<std::mutex> lock(runtimeRenderSettingsMutex);
+		++runtimeRenderSettingsGeneration;
+	}
 }
 
 void RenderSystem::ApplyTransientRenderDiagnostics(bool validationEnabled, bool debugEnabled)

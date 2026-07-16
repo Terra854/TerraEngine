@@ -13,6 +13,8 @@
 #include <string_view>
 #include <vector>
 
+#include <glm/vec3.hpp>
+
 namespace TerraEngine::Physics
 {
 	inline constexpr std::uint32_t kRigidBodyComponentSchemaVersion = 1U;
@@ -102,6 +104,24 @@ struct RigidBodyComponent final : public Component<RigidBodyComponent>
 	// Validation is pure so snapshot jobs can reject invalid authored values
 	// without reading live object storage or invoking the physics provider.
 	[[nodiscard]] TerraEngine::Physics::RigidBodyValidationResult Validate() const;
+
+	// Managed reflection uses fixed-width numbers and glm vectors. These
+	// accessors translate that stable scripting vocabulary to the compact
+	// engine-owned enum/vector representation without exposing provider types.
+	[[nodiscard]] std::uint32_t GetMotionTypeValue() const { return static_cast<std::uint32_t>(motionType); }
+	void SetMotionTypeValue(std::uint32_t value) { motionType = static_cast<TerraEngine::Physics::PhysicsMotionType>(value); }
+	[[nodiscard]] std::uint32_t GetMassModeValue() const { return static_cast<std::uint32_t>(massMode); }
+	void SetMassModeValue(std::uint32_t value) { massMode = static_cast<TerraEngine::Physics::PhysicsMassMode>(value); }
+	[[nodiscard]] std::uint32_t GetMotionQualityValue() const { return static_cast<std::uint32_t>(continuousCollisionMode); }
+	void SetMotionQualityValue(std::uint32_t value) { continuousCollisionMode = static_cast<TerraEngine::Physics::PhysicsMotionQuality>(value); }
+	[[nodiscard]] glm::vec3 GetInitialLinearVelocityValue() const { return { initialLinearVelocity.x, initialLinearVelocity.y, initialLinearVelocity.z }; }
+	void SetInitialLinearVelocityValue(const glm::vec3& value) { initialLinearVelocity = { value.x, value.y, value.z }; }
+	[[nodiscard]] glm::vec3 GetInitialAngularVelocityValue() const { return { initialAngularVelocity.x, initialAngularVelocity.y, initialAngularVelocity.z }; }
+	void SetInitialAngularVelocityValue(const glm::vec3& value) { initialAngularVelocity = { value.x, value.y, value.z }; }
+	[[nodiscard]] std::uint32_t GetInterpolationModeValue() const { return static_cast<std::uint32_t>(interpolationMode); }
+	void SetInterpolationModeValue(std::uint32_t value) { interpolationMode = static_cast<TerraEngine::Physics::PhysicsInterpolationMode>(value); }
+	[[nodiscard]] std::uint32_t GetCollisionLayerValue() const { return collisionLayerId; }
+	void SetCollisionLayerValue(std::uint32_t value) { collisionLayerId = static_cast<std::uint8_t>(value > 0xFFU ? 0xFFU : value); }
 
 	// Reflection uses stable numeric accessors for engine enums. Scene JSON uses
 	// symbolic enum names in the physics serializer implemented by its owner.

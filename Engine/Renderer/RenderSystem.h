@@ -161,6 +161,14 @@ public:
 	// GetQualityPreset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	QualityPreset GetQualityPreset() const { return currentPreset; }
 	void SetRenderSettings(const RenderSettings& settings);
+	// Managed gameplay callbacks enqueue game-wide runtime overrides here. The
+	// render boundary applies the latest request before it builds frame snapshots,
+	// and deliberately does not rewrite the project's RenderSettings.json file.
+	bool QueueRuntimeQualityPreset(QualityPreset preset);
+	bool QueueRuntimeRenderSettings(const RenderSettings& settings);
+	RenderSettings GetRuntimeRenderSettingsSnapshot() const;
+	QualityPreset GetRuntimeQualityPresetSnapshot() const;
+	std::uint64_t GetRuntimeRenderSettingsGeneration() const;
 	// Applies editor/user diagnostic preferences to the running renderer without
 	// saving RenderSettings.json, keeping Preferences separate from project data.
 	void ApplyTransientRenderDiagnostics(bool validationEnabled, bool debugEnabled);
@@ -247,6 +255,8 @@ public:
 
 private:
 	RenderSystem();
+	void ApplyQualityPreset(QualityPreset preset, bool persistProjectSettings);
+	void ApplyQueuedRuntimeRenderSettings();
 	void CompleteCapture(TerraEngine::Renderer::RenderCaptureResult result);
 	// Moves non-blocking backend fence completions into the bounded public
 	// result queue. This runs only at the protected render boundary.
@@ -346,6 +356,18 @@ private:
 	std::uint64_t activeRenderFrameId = 0u;
 	std::uint64_t nextCaptureRequestSequence = 1u;
 
+	struct RuntimeRenderSettingsRequest
+	{
+		RenderSettings settings{};
+		QualityPreset preset = QualityPreset::Custom;
+		bool usePreset = false;
+	};
+	// Script workers only publish copied value records into this one-slot queue.
+	// RenderSystem consumes the newest request at its protected frame boundary,
+	// so no managed callback races currentSettings or backend resource changes.
+	mutable std::mutex runtimeRenderSettingsMutex;
+	std::optional<RuntimeRenderSettingsRequest> pendingRuntimeRenderSettings;
+	std::uint64_t runtimeRenderSettingsGeneration = 0U;
 	QualityPreset currentPreset = QualityPreset::High;
 	RenderSettings currentSettings;
 };

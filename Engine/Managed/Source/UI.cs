@@ -534,6 +534,24 @@ namespace TerraEngine
 	{
 		private VisualElement? _cachedRoot;
 
+		public string SourceMarkup
+		{
+			get => GetStringProperty("sourceMarkup");
+			set { SetStringProperty("sourceMarkup", value); _cachedRoot = null; }
+		}
+
+		public string SourceStyle
+		{
+			get => GetStringProperty("sourceStyle");
+			set { SetStringProperty("sourceStyle", value); _cachedRoot = null; }
+		}
+
+		public bool Visible
+		{
+			get => GetProperty<bool>("visible");
+			set => SetProperty("visible", value);
+		}
+
 		// GetRoot bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public VisualElement GetRoot()
 		{

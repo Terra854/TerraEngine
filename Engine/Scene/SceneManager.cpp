@@ -335,6 +335,24 @@ const SceneDocument* SceneManager::GetActiveScene() const
 	return GetScene(activeSceneId);
 }
 
+std::vector<TerraEngine::UUID> SceneManager::GetLoadedSceneIds() const
+{
+	std::shared_lock lock(sceneCache.mutex);
+	std::vector<TerraEngine::UUID> ids;
+	ids.reserve(sceneCache.resources.size());
+	for (const auto& [id, document] : sceneCache.resources)
+	{
+		if (document)
+		{
+			ids.push_back(id);
+		}
+	}
+	std::sort(ids.begin(), ids.end(), [](const TerraEngine::UUID& left, const TerraEngine::UUID& right) {
+		return TerraEngine::ToHexString(left) < TerraEngine::ToHexString(right);
+	});
+	return ids;
+}
+
 // SceneManager::IsActiveSceneDirty is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool SceneManager::IsActiveSceneDirty() const
 {

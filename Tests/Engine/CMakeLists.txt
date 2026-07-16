@@ -265,6 +265,18 @@ endif()
 add_test(NAME Engine.SpatialUnitTests COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
 set_tests_properties(Engine.SpatialUnitTests PROPERTIES LABELS "Engine")
 
+# This smoke process loads TerraEngine.CSharp.dll through the real .NET host and
+# crosses the native dispatcher with public API calls. Running from the native
+# output directory lets Windows resolve TerraEngine.dll and its bundled peers.
+add_test(
+	NAME Engine.ManagedRuntimeApiSmoke
+	COMMAND dotnet run --project "${CMAKE_SOURCE_DIR}/Tests/Managed/RuntimeApiSmoke/RuntimeApiSmoke.csproj" --configuration Debug
+)
+set_tests_properties(Engine.ManagedRuntimeApiSmoke PROPERTIES
+	LABELS "Engine;Managed;Scripting"
+	WORKING_DIRECTORY "$<TARGET_FILE_DIR:TerraEngine-EngineTests>"
+)
+
 add_test(NAME Engine.PhysicsDependencyContract COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
 set_tests_properties(Engine.PhysicsDependencyContract PROPERTIES
 	LABELS "Engine;Physics;Dependency"

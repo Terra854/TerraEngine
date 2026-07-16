@@ -135,12 +135,15 @@ namespace TerraEngine
 	// InternalCalls is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	public static class InternalCalls
 	{
+		[ThreadStatic]
+		private static bool s_workerDispatchActive;
 		private static volatile bool s_scriptingDiagnosticsActive;
 		private static long s_bridgeCacheHits;
 		private static long s_bridgeCacheMisses;
 		private static long s_bridgeCallsAvoided;
 
 		internal static bool ScriptingDiagnosticsActive => s_scriptingDiagnosticsActive;
+		internal static bool WorkerDispatchActive => s_workerDispatchActive;
 
 		public static void PushScriptDispatchContext(uint objectId, IntPtr bindingIdPtr, ulong frameOrder, int workerDispatch, int exportMode, ulong objectGeneration, ulong componentGeneration, ulong bindingGeneration)
 		{
@@ -150,6 +153,7 @@ namespace TerraEngine
 			// contract as editor script dispatch without exposing extra native
 			// state to ordinary component wrappers.
 			Native_Scripting_PushDispatchContext(objectId, bindingIdPtr, frameOrder, workerDispatch, exportMode, objectGeneration, componentGeneration, bindingGeneration);
+			s_workerDispatchActive = workerDispatch != 0;
 		}
 
 		public static void PopScriptDispatchContext()
@@ -158,6 +162,7 @@ namespace TerraEngine
 			// the native side stores the context in thread-local state used by
 			// component setters to decide whether writes must be deferred.
 			Native_Scripting_PopDispatchContext();
+			s_workerDispatchActive = false;
 		}
 
 		internal static void RecordManagedCacheHit()
@@ -1725,10 +1730,6 @@ namespace TerraEngine
 		internal static extern IntPtr Native_Application_GetVersion();
 
 		[DllImport("TerraEngine")]
-		// Native_Object_Create bridges managed callers to engine state; validate arguments before forwarding to native code.
-		internal static extern uint Native_Object_Create(string? name);
-
-		[DllImport("TerraEngine")]
 		// Native_Object_Destroy bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern void Native_Object_Destroy(uint objectId);
 
@@ -1739,6 +1740,71 @@ namespace TerraEngine
 		[DllImport("TerraEngine")]
 		// Native_Object_FindWithTag bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern uint Native_Object_FindWithTag(string tag);
+
+		[DllImport("TerraEngine")]
+		private static extern unsafe RuntimeStatus Native_Runtime_Invoke(ref NativeRuntimeRequest request, void* packet);
+
+		private static unsafe RuntimeStatus InvokeRuntimePacket<T>(NativeRuntimeOperation operation, ref T packet, NativeRuntimeRequest request = default) where T : unmanaged
+		{
+			request.Header = NativeRuntimeAbiHeader.For<NativeRuntimeRequest>();
+			request.Operation = operation;
+			fixed (T* pointer = &packet) return Native_Runtime_Invoke(ref request, pointer);
+		}
+
+		private static PhysicsStatus ToPhysicsStatus(RuntimeStatus status) => status switch
+		{
+			RuntimeStatus.Success => PhysicsStatus.Success,
+			RuntimeStatus.Accepted => PhysicsStatus.Accepted,
+			RuntimeStatus.InvalidArgument => PhysicsStatus.InvalidArgument,
+			RuntimeStatus.InvalidState => PhysicsStatus.InvalidState,
+			RuntimeStatus.VersionMismatch => PhysicsStatus.VersionMismatch,
+			_ => PhysicsStatus.Conflict
+		};
+
+		internal static unsafe uint Native_Object_GetParent(uint objectId)
+		{
+			NativeRuntimeRequest request = NativeRuntimeRequest.For(NativeRuntimeOperation.ObjectGetParent);
+			request.ObjectId = objectId;
+			uint parentId = uint.MaxValue;
+			Native_Runtime_Invoke(ref request, &parentId);
+			return parentId;
+		}
+
+		internal static unsafe RuntimeStatus Native_Object_SetParent(uint objectId, uint parentObjectId)
+		{
+			NativeRuntimeRequest request = NativeRuntimeRequest.For(NativeRuntimeOperation.ObjectSetParent);
+			request.ObjectId = objectId;
+			request.SecondaryId = parentObjectId;
+			return Native_Runtime_Invoke(ref request, null);
+		}
+
+		private static unsafe RuntimeStatus CopyRuntimeObjects(NativeRuntimeOperation operation, uint objectId, string? tag, uint* objects, uint capacity, out uint requiredCount)
+		{
+			IntPtr text = tag == null ? IntPtr.Zero : Marshal.StringToCoTaskMemUTF8(tag);
+			try
+			{
+				uint count = 0;
+				NativeRuntimeRequest request = NativeRuntimeRequest.For(operation);
+				request.ObjectId = objectId;
+				request.Output = (IntPtr)objects;
+				request.Capacity = capacity;
+				request.RequiredCount = (IntPtr)(&count);
+				request.Text = text;
+				RuntimeStatus status = Native_Runtime_Invoke(ref request, null);
+				requiredCount = count;
+				return status;
+			}
+			finally { if (text != IntPtr.Zero) Marshal.FreeCoTaskMem(text); }
+		}
+
+		internal static unsafe RuntimeStatus Native_Object_CopyChildren(uint objectId, uint* children, uint capacity, out uint requiredCount)
+			=> CopyRuntimeObjects(NativeRuntimeOperation.ObjectCopyChildren, objectId, null, children, capacity, out requiredCount);
+
+		internal static unsafe RuntimeStatus Native_Object_CopyAll(uint* objects, uint capacity, out uint requiredCount)
+			=> CopyRuntimeObjects(NativeRuntimeOperation.ObjectCopyAll, 0, null, objects, capacity, out requiredCount);
+
+		internal static unsafe RuntimeStatus Native_Object_CopyWithTag(string tag, uint* objects, uint capacity, out uint requiredCount)
+			=> CopyRuntimeObjects(NativeRuntimeOperation.ObjectCopyWithTag, 0, tag, objects, capacity, out requiredCount);
 
 		[DllImport("TerraEngine")]
 		// Native_MeshRenderer_GetMesh bridges managed callers to engine state; validate arguments before forwarding to native code.
@@ -1760,6 +1826,32 @@ namespace TerraEngine
 		// Native_ResourceStreaming_Preload sends a non-blocking streaming hint to native ResourceManager.
 		internal static extern bool Native_ResourceStreaming_Preload(string assetReference, int assetType);
 
+		internal static unsafe RuntimeStatus Native_ResourceStreaming_ReadStatus(string assetReference, int assetType, ref NativeResourceStreamingStatus status)
+		{
+			IntPtr text = Marshal.StringToCoTaskMemUTF8(assetReference);
+			try
+			{
+				NativeRuntimeRequest request = NativeRuntimeRequest.For(NativeRuntimeOperation.ResourceReadStatus);
+				request.Text = text;
+				request.AssetType = (uint)assetType;
+				return InvokeRuntimePacket(NativeRuntimeOperation.ResourceReadStatus, ref status, request);
+			}
+			finally { Marshal.FreeCoTaskMem(text); }
+		}
+
+		internal static unsafe RuntimeStatus Native_ResourceStreaming_RequestRelease(string assetReference, int assetType)
+		{
+			IntPtr text = Marshal.StringToCoTaskMemUTF8(assetReference);
+			try
+			{
+				NativeRuntimeRequest request = NativeRuntimeRequest.For(NativeRuntimeOperation.ResourceRequestRelease);
+				request.Text = text;
+				request.AssetType = (uint)assetType;
+				return Native_Runtime_Invoke(ref request, null);
+			}
+			finally { Marshal.FreeCoTaskMem(text); }
+		}
+
 		[DllImport("TerraEngine")]
 		// Native_HasComponent bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern bool Native_HasComponent(uint objectId, string componentType);
@@ -1767,6 +1859,9 @@ namespace TerraEngine
 		[DllImport("TerraEngine")]
 		// Native_AddComponent bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern bool Native_AddComponent(uint objectId, string componentType);
+
+		[DllImport("TerraEngine")]
+		internal static extern bool Native_RemoveComponent(uint objectId, string componentType);
 
 		[DllImport("TerraEngine")]
 		internal static extern ulong Native_Object_GetComponentGeneration(uint objectId);
@@ -1793,6 +1888,12 @@ namespace TerraEngine
 		[DllImport("TerraEngine")]
 		// Native_SetComponentProperty bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern unsafe void Native_SetComponentProperty(uint objectId, string componentType, string propertyName, void* inValue, int type);
+
+		[DllImport("TerraEngine")]
+		internal static extern IntPtr Native_GetComponentStringProperty(uint objectId, string componentType, string propertyName);
+
+		[DllImport("TerraEngine")]
+		internal static extern void Native_SetComponentStringProperty(uint objectId, string componentType, string propertyName, string value);
 
 		[DllImport("TerraEngine")]
 		// Native_ScriptComponent_AddBinding bridges managed callers to engine state; validate arguments before forwarding to native code.
@@ -1827,6 +1928,33 @@ namespace TerraEngine
 		[DllImport("TerraEngine")]
 		// Native_Object_SetName bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern void Native_Object_SetName(uint objectId, string name);
+
+		[DllImport("TerraEngine")]
+		internal static extern IntPtr Native_Object_GetTag(uint objectId);
+
+		[DllImport("TerraEngine")]
+		internal static extern void Native_Object_SetTag(uint objectId, string tag);
+
+		[DllImport("TerraEngine")]
+		internal static extern IntPtr Native_Object_GetLayer(uint objectId);
+
+		[DllImport("TerraEngine")]
+		internal static extern void Native_Object_SetLayer(uint objectId, string layer);
+
+		[DllImport("TerraEngine")]
+		internal static extern bool Native_Object_GetActive(uint objectId);
+
+		[DllImport("TerraEngine")]
+		internal static extern bool Native_Object_GetActiveInHierarchy(uint objectId);
+
+		[DllImport("TerraEngine")]
+		internal static extern void Native_Object_SetActive(uint objectId, bool active);
+
+		[DllImport("TerraEngine")]
+		internal static extern bool Native_Object_GetStatic(uint objectId);
+
+		[DllImport("TerraEngine")]
+		internal static extern void Native_Object_SetStatic(uint objectId, bool isStatic);
 
 		[DllImport("TerraEngine")]
 		// Native_Input_IsKeyPressed bridges managed callers to engine state; validate arguments before forwarding to native code.
@@ -1932,17 +2060,76 @@ namespace TerraEngine
 		// Native_UI_SetEventCallback bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern bool Native_UI_SetEventCallback(IntPtr elementHandle, int eventType, bool enabled);
 
-		[DllImport("TerraEngine")]
-		// Native_Scene_LoadScene bridges managed callers to engine state; validate arguments before forwarding to native code.
-		internal static extern IntPtr Native_Scene_LoadScene(string path);
+		private static unsafe IntPtr ReadRuntimeText(NativeRuntimeOperation operation)
+		{
+			NativeRuntimeRequest request = NativeRuntimeRequest.For(operation);
+			IntPtr text = IntPtr.Zero;
+			Native_Runtime_Invoke(ref request, &text);
+			return text;
+		}
 
-		[DllImport("TerraEngine")]
-		// Native_Scene_LoadPrefab bridges managed callers to engine state; validate arguments before forwarding to native code.
-		internal static extern IntPtr Native_Scene_LoadPrefab(string path);
+		internal static IntPtr Native_Scene_GetActiveScene() => ReadRuntimeText(NativeRuntimeOperation.SceneGetActive);
+		internal static IntPtr Native_Scene_GetLoadedScenes() => ReadRuntimeText(NativeRuntimeOperation.SceneGetLoaded);
 
-		[DllImport("TerraEngine")]
-		// Native_Scene_SetActiveScene bridges managed callers to engine state; validate arguments before forwarding to native code.
-		internal static extern bool Native_Scene_SetActiveScene(string uuid);
+		private static unsafe RuntimeStatus InvokeRuntimeText(NativeRuntimeOperation operation, string text, void* packet)
+		{
+			IntPtr nativeText = Marshal.StringToCoTaskMemUTF8(text);
+			try
+			{
+				NativeRuntimeRequest request = NativeRuntimeRequest.For(operation);
+				request.Text = nativeText;
+				return Native_Runtime_Invoke(ref request, packet);
+			}
+			finally { Marshal.FreeCoTaskMem(nativeText); }
+		}
+
+		internal static unsafe RuntimeStatus Native_Object_RequestCreate(string name, ref NativeObjectCreationReceipt receipt)
+		{
+			fixed (NativeObjectCreationReceipt* packet = &receipt)
+				return InvokeRuntimeText(NativeRuntimeOperation.ObjectRequestCreate, name, packet);
+		}
+
+		internal static unsafe RuntimeStatus Native_Object_ResolveStableId(string stableId, out uint objectId)
+		{
+			uint resolved = Object.InvalidID;
+			RuntimeStatus status = InvokeRuntimeText(NativeRuntimeOperation.ObjectResolveStableId, stableId, &resolved);
+			objectId = resolved;
+			return status;
+		}
+
+		internal static unsafe RuntimeStatus Native_Scene_RequestLoad(string path)
+			=> InvokeRuntimeText(NativeRuntimeOperation.SceneRequestLoad, path, null);
+
+		internal static unsafe RuntimeStatus Native_Scene_RequestLoadPrefab(string path)
+			=> InvokeRuntimeText(NativeRuntimeOperation.SceneRequestLoadPrefab, path, null);
+
+		internal static unsafe RuntimeStatus Native_Scene_RequestSetActive(string stableId)
+			=> InvokeRuntimeText(NativeRuntimeOperation.SceneRequestSetActive, stableId, null);
+
+		internal static unsafe RuntimeStatus Native_Scene_InstantiatePrefab(string path, uint parentObjectId)
+		{
+			IntPtr text = Marshal.StringToCoTaskMemUTF8(path);
+			try
+			{
+				NativeRuntimeRequest request = NativeRuntimeRequest.For(NativeRuntimeOperation.SceneInstantiatePrefab);
+				request.Text = text;
+				request.ObjectId = parentObjectId;
+				return Native_Runtime_Invoke(ref request, null);
+			}
+			finally { Marshal.FreeCoTaskMem(text); }
+		}
+
+		internal static unsafe RuntimeStatus Native_Scene_RequestUnloadAll()
+		{
+			NativeRuntimeRequest request = NativeRuntimeRequest.For(NativeRuntimeOperation.SceneUnloadAll);
+			return Native_Runtime_Invoke(ref request, null);
+		}
+
+		internal static RuntimeStatus Native_Scene_ReadRenderSettings(ref NativeSceneRenderSettings settings)
+			=> InvokeRuntimePacket(NativeRuntimeOperation.SceneReadRenderSettings, ref settings);
+
+		internal static RuntimeStatus Native_Scene_SubmitRenderSettings(ref NativeSceneRenderSettings settings)
+			=> InvokeRuntimePacket(NativeRuntimeOperation.SceneSubmitRenderSettings, ref settings);
 
 		[DllImport("TerraEngine")]
 		// Native_Scene_SubmitTransactionJson bridges managed worker-safe mutation payloads to the protected native transaction queue.
@@ -1951,6 +2138,27 @@ namespace TerraEngine
 		[DllImport("TerraEngine")]
 		// Native_Time_GetDeltaTime bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern float Native_Time_GetDeltaTime();
+
+		internal static RuntimeStatus Native_Time_ReadSnapshot(ref NativeTimeSnapshot snapshot)
+			=> InvokeRuntimePacket(NativeRuntimeOperation.TimeReadSnapshot, ref snapshot);
+
+		internal static unsafe RuntimeStatus Native_Time_SetTimeScale(float timeScale)
+		{
+			NativeRuntimeRequest request = NativeRuntimeRequest.For(NativeRuntimeOperation.TimeSetScale);
+			request.Scalar = timeScale;
+			return Native_Runtime_Invoke(ref request, null);
+		}
+
+		internal static RuntimeStatus Native_Input_ReadSnapshot(ref NativeInputSnapshot snapshot)
+			=> InvokeRuntimePacket(NativeRuntimeOperation.InputReadSnapshot, ref snapshot);
+
+		internal static unsafe void Native_Input_SetMousePosition(double x, double y)
+		{
+			NativeRuntimeRequest request = NativeRuntimeRequest.For(NativeRuntimeOperation.InputSetMousePosition);
+			request.X = x;
+			request.Y = y;
+			Native_Runtime_Invoke(ref request, null);
+		}
 
 		[DllImport("TerraEngine")]
 		internal static extern uint Native_Physics_GetAbiVersion();
@@ -1994,6 +2202,12 @@ namespace TerraEngine
 		[DllImport("TerraEngine")]
 		internal static extern PhysicsStatus Native_Physics_ReadSettings(ref NativePhysicsSettingsSnapshot settings);
 
+		internal static PhysicsStatus Native_Physics_ReadSettingsRecord(ref NativePhysicsSettingsRecord settings)
+			=> ToPhysicsStatus(InvokeRuntimePacket(NativeRuntimeOperation.PhysicsReadSettings, ref settings));
+
+		internal static PhysicsStatus Native_Physics_SubmitSettingsRecord(ref NativePhysicsSettingsRecord settings)
+			=> ToPhysicsStatus(InvokeRuntimePacket(NativeRuntimeOperation.PhysicsSubmitSettings, ref settings));
+
 		[DllImport("TerraEngine")]
 		internal static extern PhysicsStatus Native_Physics_ResolveIdentity(uint objectEntity, ref NativePhysicsIdentitySnapshot identity);
 
@@ -2002,5 +2216,17 @@ namespace TerraEngine
 
 		[DllImport("TerraEngine")]
 		internal static extern PhysicsStatus Native_Physics_ResolveCharacter(uint objectEntity, ref NativePhysicsCharacterState state);
+
+		[DllImport("TerraEngine")]
+		internal static extern unsafe PhysicsStatus Native_Physics_CopyColliderRecords(uint objectEntity, NativePhysicsColliderRecord* records, uint capacity, out uint requiredCount);
+
+		[DllImport("TerraEngine")]
+		internal static extern unsafe PhysicsStatus Native_Physics_ReplaceColliderRecords(uint objectEntity, NativePhysicsColliderRecord* records, uint recordCount);
+
+		[DllImport("TerraEngine")]
+		internal static extern unsafe PhysicsStatus Native_Physics_CopyConstraintRecords(uint objectEntity, NativePhysicsConstraintRecord* records, uint capacity, out uint requiredCount);
+
+		[DllImport("TerraEngine")]
+		internal static extern unsafe PhysicsStatus Native_Physics_ReplaceConstraintRecords(uint objectEntity, NativePhysicsConstraintRecord* records, uint recordCount);
 	}
 }
