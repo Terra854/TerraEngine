@@ -180,14 +180,11 @@ private:
 	// movement but never aliases a live ColliderSetComponent record.
 	std::optional<TerraEngine::Editor::SceneViewOverlay::PhysicsShapeEditPreview> m_PhysicsShapePreview;
 	TerraEngine::UUID m_SelectedColliderRecordId = TerraEngine::EMPTY_UUID;
-	int m_PhysicsActiveHandle = -1;
-	ImVec2 m_PhysicsHandleDragStart{};
-	glm::vec3 m_PhysicsPreviewDragStartCenter{0.0f};
-	glm::vec3 m_PhysicsPreviewDragStartExtents{0.5f};
 	// These values track only the last live authored collider state. Undo, redo,
 	// or another Inspector transaction can therefore refresh the detached preview
 	// without mistaking the user's uncommitted handle drag for an external edit.
 	glm::vec3 m_PhysicsLastAuthoredCenter{0.0f};
+	glm::quat m_PhysicsLastAuthoredRotation{1.0f, 0.0f, 0.0f, 0.0f};
 	glm::vec3 m_PhysicsLastAuthoredExtents{0.5f};
 	std::string m_PhysicsPreviewStatus;
 	std::uint64_t m_PhysicsShapeCommitSequence = 0U;

@@ -345,6 +345,7 @@ namespace TerraEngine::Editor::SceneViewOverlay
 		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
 		TerraEngine::UUID colliderRecordId = TerraEngine::EMPTY_UUID;
 		glm::vec3 localCenter = glm::vec3(0.0f);
+		glm::quat localRotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
 		glm::vec3 localExtents = glm::vec3(0.5f);
 		bool fitToRenderMeshRequested = false;
 		bool active = false;

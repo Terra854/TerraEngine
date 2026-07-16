@@ -94,6 +94,37 @@ namespace TerraEngine::EditorTests
 				"ColliderSet Inspector must show one plainly named shape control set, enabling it only for explicit editing and Apply.");
 		});
 
+		registry.Add("Physics.SceneView.ColliderEditingUsesMoveRotateScaleToolsAndShortcuts", [](TestContext& context) {
+			const std::string sceneViewSource = ReadEditorSource("Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp");
+			const std::string overlayHeader = ReadEditorSource("Editor/TerraEngine-Editor/Windows/SceneViewOverlayTypes.h");
+			Editor::SceneViewOverlay::PhysicsShapeEditPreview preview;
+			preview.objectId = TerraEngine::GenerateUUID();
+			preview.colliderRecordId = TerraEngine::GenerateUUID();
+			preview.localRotation = glm::angleAxis(glm::radians(45.0F), glm::vec3(0.0F, 1.0F, 0.0F));
+			preview.active = true;
+			context.Expect(
+				Editor::SceneViewOverlay::FinalizePhysicsShapeEdit(preview).valid,
+				"A finite non-zero collider preview rotation must be eligible for the atomic Apply transaction.");
+			preview.localRotation = glm::quat(0.0F, 0.0F, 0.0F, 0.0F);
+			context.Expect(
+				!Editor::SceneViewOverlay::FinalizePhysicsShapeEdit(preview).valid,
+				"A zero collider preview quaternion must be rejected before it can reach live authoring state.");
+			context.Expect(
+				sceneViewSource.find("ImGuizmo::Manipulate(") != std::string::npos
+					&& sceneViewSource.find("(ImGuizmo::OPERATION)m_CurrentGizmoOperation") != std::string::npos
+					&& sceneViewSource.find("Collider Move/Rotate/Scale") != std::string::npos,
+				"Collider edit mode must route the active Move, Rotate, or Scale tool through ImGuizmo instead of exposing scale-only custom handles.");
+			context.Expect(
+				sceneViewSource.find("ImGui::IsKeyPressed(ImGuiKey_W)") != std::string::npos
+					&& sceneViewSource.find("ImGui::IsKeyPressed(ImGuiKey_E)") != std::string::npos
+					&& sceneViewSource.find("ImGui::IsKeyPressed(ImGuiKey_R)") != std::string::npos,
+				"The existing W, E, and R Scene View shortcuts must remain the collider Move, Rotate, and Scale selectors while collider editing is active.");
+			context.Expect(
+				overlayHeader.find("glm::quat localRotation") != std::string::npos
+					&& sceneViewSource.find("record->localRotation = ToPhysics(commit.preview.localRotation)") != std::string::npos,
+				"Collider rotation must stay detached during preview and enter the same atomic Apply transaction as center and extents.");
+		});
+
 		registry.Add("Physics.SceneView.DebugPacketsRemainValidWhilePaused", [](TestContext& context) {
 			Physics::PhysicsDebugPacket packet;
 			packet.world = {{1U}, 3U};

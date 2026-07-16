@@ -720,6 +720,19 @@ TerraEngine::Physics::PhysicsVector3 ToPhysics(const glm::vec3& value)
 	return {value.x, value.y, value.z};
 }
 
+glm::quat ToGlm(const TerraEngine::Physics::PhysicsQuaternion& value)
+{
+	// GLM stores quaternion constructor arguments as W, X, Y, Z while the stable
+	// physics contract exposes fields as X, Y, Z, W.
+	return glm::normalize(glm::quat(value.w, value.x, value.y, value.z));
+}
+
+TerraEngine::Physics::PhysicsQuaternion ToPhysics(const glm::quat& value)
+{
+	const glm::quat normalized = glm::normalize(value);
+	return {normalized.x, normalized.y, normalized.z, normalized.w};
+}
+
 // Primitive authoring has different stored dimensions, but the Scene View
 // exposes a common local half-extent box for intuitive resize handles.
 glm::vec3 ColliderHalfExtents(const TerraEngine::Physics::ColliderRecord& record)
@@ -2121,9 +2134,11 @@ void SceneViewWindow::BeginPhysicsColliderPreview(entt::entity entity, const Ter
 	preview.objectId = objects.getUUID(*object);
 	preview.colliderRecordId = recordId;
 	preview.localCenter = ToGlm(record->localCenter);
+	preview.localRotation = ToGlm(record->localRotation);
 	preview.localExtents = ColliderHalfExtents(*record);
 	preview.active = true;
 	m_PhysicsLastAuthoredCenter = preview.localCenter;
+	m_PhysicsLastAuthoredRotation = preview.localRotation;
 	m_PhysicsLastAuthoredExtents = preview.localExtents;
 	m_PhysicsShapePreview = std::move(preview);
 	m_PhysicsPreviewStatus = "Editing collider shape; Apply publishes one queued transaction.";
@@ -2207,7 +2222,6 @@ void SceneViewWindow::RequestPhysicsColliderFitToRenderMesh(entt::entity entity)
 void SceneViewWindow::CancelPhysicsColliderPreview()
 {
 	m_PhysicsShapePreview.reset();
-	m_PhysicsActiveHandle = -1;
 	m_PhysicsPreviewStatus = "Collider edit canceled; no scene or physics state changed.";
 }
 
@@ -2257,6 +2271,7 @@ void SceneViewWindow::CommitPhysicsColliderPreview()
 	// preserved, and asset-backed colliders reject dimension edits instead of
 	// inventing a primitive that would silently change authored intent.
 	record->localCenter = ToPhysics(commit.preview.localCenter);
+	record->localRotation = ToPhysics(commit.preview.localRotation);
 	if (!ApplyColliderHalfExtents(*record, commit.preview.localExtents))
 	{
 		m_PhysicsPreviewStatus = "Asset-backed collider dimensions cannot be edited with primitive handles.";
@@ -2292,7 +2307,6 @@ void SceneViewWindow::CommitPhysicsColliderPreview()
 			TerraEngine::Reflection::Variant{std::move(updatedRecords)});
 	TerraEngine::Scene::SceneMutationQueue::Instance().EnqueueTransaction(builder.Build());
 	m_PhysicsShapePreview.reset();
-	m_PhysicsActiveHandle = -1;
 	m_PhysicsPreviewStatus = "Collider edit queued for the protected transactional flush.";
 }
 
@@ -2339,22 +2353,25 @@ void SceneViewWindow::DrawPhysicsColliderEditHandles(const glm::mat4& view, cons
 		// publishing an edit prepared for a stale object or removed record.
 		m_PhysicsShapePreview.reset();
 		m_SelectedColliderRecordId = TerraEngine::EMPTY_UUID;
-		m_PhysicsActiveHandle = -1;
 		return;
 	}
 
 	const glm::vec3 authoredCenter = ToGlm(authoredRecord->localCenter);
+	const glm::quat authoredRotation = ToGlm(authoredRecord->localRotation);
 	const glm::vec3 authoredExtents = ColliderHalfExtents(*authoredRecord);
-	if (authoredCenter != m_PhysicsLastAuthoredCenter || authoredExtents != m_PhysicsLastAuthoredExtents)
+	if (authoredCenter != m_PhysicsLastAuthoredCenter
+		|| authoredRotation != m_PhysicsLastAuthoredRotation
+		|| authoredExtents != m_PhysicsLastAuthoredExtents)
 	{
 		// Undo/redo publishes a new live ColliderSet value at the protected flush.
 		// Keep edit mode active, but replace the detached visual state so handles
 		// and Inspector preview fields show the exact restored collider immediately.
 		m_PhysicsShapePreview->localCenter = authoredCenter;
+		m_PhysicsShapePreview->localRotation = authoredRotation;
 		m_PhysicsShapePreview->localExtents = authoredExtents;
 		m_PhysicsLastAuthoredCenter = authoredCenter;
+		m_PhysicsLastAuthoredRotation = authoredRotation;
 		m_PhysicsLastAuthoredExtents = authoredExtents;
-		m_PhysicsActiveHandle = -1;
 		m_PhysicsPreviewStatus = "Collider shape refreshed from the restored undo/redo state.";
 	}
 	const std::optional<glm::mat4> model = ComputeEntityWorldMatrix(*selectedEntity);
@@ -2365,9 +2382,11 @@ void SceneViewWindow::DrawPhysicsColliderEditHandles(const glm::mat4& view, cons
 
 	const glm::mat4 viewProjection = proj * view;
 	const glm::vec3 localCenter = m_PhysicsShapePreview->localCenter;
+	const glm::quat localRotation = glm::normalize(m_PhysicsShapePreview->localRotation);
 	const glm::vec3 extents = glm::max(m_PhysicsShapePreview->localExtents, glm::vec3(0.001f));
-	const glm::vec3 center = glm::vec3(*model * glm::vec4(localCenter, 1.0f));
-	const std::array<ImU32, 3> colors = { IM_COL32(245, 78, 78, 255), IM_COL32(88, 225, 112, 255), IM_COL32(84, 152, 255, 255) };
+	const glm::mat4 colliderPose = *model
+		* glm::translate(glm::mat4(1.0F), localCenter)
+		* glm::mat4_cast(localRotation);
 	ImDrawList* drawList = ImGui::GetWindowDrawList();
 	std::array<glm::vec3, 8> corners{};
 	for (int index = 0; index < 8; ++index)
@@ -2376,7 +2395,7 @@ void SceneViewWindow::DrawPhysicsColliderEditHandles(const glm::mat4& view, cons
 			(index & 1) == 0 ? -extents.x : extents.x,
 			(index & 2) == 0 ? -extents.y : extents.y,
 			(index & 4) == 0 ? -extents.z : extents.z);
-		corners[static_cast<std::size_t>(index)] = glm::vec3(*model * glm::vec4(localCenter + signedExtent, 1.0f));
+		corners[static_cast<std::size_t>(index)] = glm::vec3(colliderPose * glm::vec4(signedExtent, 1.0f));
 	}
 	constexpr std::array<std::array<int, 2>, 12> edges = {{{0, 1}, {0, 2}, {0, 4}, {1, 3}, {1, 5}, {2, 3}, {2, 6}, {3, 7}, {4, 5}, {4, 6}, {5, 7}, {6, 7}}};
 	for (const auto& edge : edges)
@@ -2384,59 +2403,40 @@ void SceneViewWindow::DrawPhysicsColliderEditHandles(const glm::mat4& view, cons
 		DrawWorldLine(drawList, corners[static_cast<std::size_t>(edge[0])], corners[static_cast<std::size_t>(edge[1])], viewProjection, viewportPos, viewportSize, IM_COL32(255, 206, 72, 235), 1.5f);
 	}
 
-	ImVec2 centerScreen{};
-	const bool centerVisible = ProjectWorldPoint(center, viewProjection, viewportPos, viewportSize, centerScreen);
-	const auto drawHandle = [&](int handle, const ImVec2& position, ImU32 color, const glm::vec2& screenAxis) {
-		drawList->AddCircleFilled(position, 7.0f, color);
-		ImGui::SetCursorScreenPos(ImVec2(position.x - 9.0f, position.y - 9.0f));
-		ImGui::PushID(handle + 9000);
-		ImGui::InvisibleButton("PhysicsColliderHandle", ImVec2(18.0f, 18.0f));
-		if (ImGui::IsItemActivated())
+	// Collider Move/Rotate/Scale uses the same active toolbar operation as object
+	// editing. Handle changes made by W, E, and R therefore take effect in this
+	// frame while the detached preview remains the only mutable state.
+	glm::mat4 manipulatedModel = colliderPose * glm::scale(glm::mat4(1.0F), extents);
+	const float* snap = m_UsingSnap
+		? (m_CurrentGizmoOperation == ImGuizmo::ROTATE
+			? m_RotationSnapValue
+			: (m_CurrentGizmoOperation == ImGuizmo::SCALE ? m_ScaleSnapValue : m_SnapValue))
+		: nullptr;
+	if (m_CurrentGizmoOperation >= 0 && ImGuizmo::Manipulate(
+		glm::value_ptr(view),
+		glm::value_ptr(proj),
+		(ImGuizmo::OPERATION)m_CurrentGizmoOperation,
+		m_ToolState.orientationMode == SceneOverlay::OrientationMode::Local ? ImGuizmo::LOCAL : ImGuizmo::WORLD,
+		glm::value_ptr(manipulatedModel),
+		nullptr,
+		snap))
+	{
+		glm::vec3 editedExtents;
+		glm::quat editedRotation;
+		glm::vec3 editedCenter;
+		glm::vec3 skew;
+		glm::vec4 perspective;
+		const glm::mat4 editedLocal = glm::inverse(*model) * manipulatedModel;
+		if (glm::decompose(editedLocal, editedExtents, editedRotation, editedCenter, skew, perspective))
 		{
-			m_PhysicsActiveHandle = handle;
-			m_PhysicsHandleDragStart = ImGui::GetMousePos();
-			m_PhysicsPreviewDragStartCenter = m_PhysicsShapePreview->localCenter;
-			m_PhysicsPreviewDragStartExtents = m_PhysicsShapePreview->localExtents;
+			// Decomposition returns the collider's local authoring values. Absolute
+			// scale prevents an axis crossing from publishing invalid dimensions.
+			m_PhysicsShapePreview->localCenter = editedCenter;
+			m_PhysicsShapePreview->localRotation = glm::normalize(editedRotation);
+			m_PhysicsShapePreview->localExtents = glm::max(glm::abs(editedExtents), glm::vec3(0.001F));
 			m_InteractionContext.activeRegion = SceneOverlay::InteractionRegion::Gizmo;
+			m_PhysicsPreviewStatus = "Editing collider with Move/Rotate/Scale; Apply publishes one queued transaction.";
 		}
-		if (m_PhysicsActiveHandle == handle && ImGui::IsMouseDown(ImGuiMouseButton_Left))
-		{
-			const ImVec2 mousePosition = ImGui::GetMousePos();
-			const ImVec2 delta(mousePosition.x - m_PhysicsHandleDragStart.x, mousePosition.y - m_PhysicsHandleDragStart.y);
-			if (handle == 0)
-			{
-				// The center handle moves in Scene View's visible local X/Y plane;
-				// precision fields retain full XYZ control for depth-only edits.
-				m_PhysicsShapePreview->localCenter = m_PhysicsPreviewDragStartCenter + glm::vec3(delta.x * 0.01f, -delta.y * 0.01f, 0.0f);
-			}
-			else
-			{
-				const float screenLength = std::max(glm::length(screenAxis), 1.0f);
-				const float deltaMetres = glm::dot(glm::vec2(delta.x, delta.y), screenAxis / screenLength) * (extents[handle - 1] / screenLength);
-				m_PhysicsShapePreview->localExtents = m_PhysicsPreviewDragStartExtents;
-				m_PhysicsShapePreview->localExtents[handle - 1] = std::max(0.001f, m_PhysicsPreviewDragStartExtents[handle - 1] + deltaMetres);
-			}
-		}
-		ImGui::PopID();
-	};
-	if (centerVisible)
-	{
-		drawHandle(0, centerScreen, IM_COL32(255, 206, 72, 255), glm::vec2(1.0f, 0.0f));
-	}
-	for (int axis = 0; axis < 3; ++axis)
-	{
-		const glm::vec3 endpoint = glm::vec3(*model * glm::vec4(localCenter + glm::vec3(axis == 0 ? extents.x : 0.0f, axis == 1 ? extents.y : 0.0f, axis == 2 ? extents.z : 0.0f), 1.0f));
-		ImVec2 endpointScreen{};
-		if (!centerVisible || !ProjectWorldPoint(endpoint, viewProjection, viewportPos, viewportSize, endpointScreen))
-		{
-			continue;
-		}
-		drawList->AddLine(centerScreen, endpointScreen, colors[static_cast<std::size_t>(axis)], 2.0f);
-		drawHandle(axis + 1, endpointScreen, colors[static_cast<std::size_t>(axis)], glm::vec2(endpointScreen.x - centerScreen.x, endpointScreen.y - centerScreen.y));
-	}
-	if (!ImGui::IsMouseDown(ImGuiMouseButton_Left))
-	{
-		m_PhysicsActiveHandle = -1;
 	}
 }
 

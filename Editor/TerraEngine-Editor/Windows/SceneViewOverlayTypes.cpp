@@ -389,11 +389,19 @@ namespace TerraEngine::Editor::SceneViewOverlay
 	{
 		PhysicsShapeAuthoringCommit commit;
 		commit.preview = preview;
-		// A zero UUID or non-positive extent cannot become a transaction because it
-		// would make a rejected edit look partially applied in the Scene View.
+		// A zero UUID, invalid rotation, or non-positive extent cannot become a
+		// transaction because it would make a rejected edit look partially applied
+		// in the Scene View.
+		const float rotationLengthSquared = glm::dot(preview.localRotation, preview.localRotation);
 		commit.valid = preview.active
 			&& preview.objectId != TerraEngine::EMPTY_UUID
 			&& preview.colliderRecordId != TerraEngine::EMPTY_UUID
+			&& std::isfinite(preview.localRotation.x)
+			&& std::isfinite(preview.localRotation.y)
+			&& std::isfinite(preview.localRotation.z)
+			&& std::isfinite(preview.localRotation.w)
+			&& std::isfinite(rotationLengthSquared)
+			&& rotationLengthSquared > 0.000001F
 			&& IsPositiveFinite(preview.localExtents.x)
 			&& IsPositiveFinite(preview.localExtents.y)
 			&& IsPositiveFinite(preview.localExtents.z);
