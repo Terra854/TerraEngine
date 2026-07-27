@@ -15,6 +15,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -66,6 +67,10 @@ namespace TerraEngine::Renderer
 		TerraEngine::Scene::SceneGraph graph;
 		std::unordered_map<entt::entity, Transform> worldTransforms;
 		bool initialized = false;
+		// Scene generation is independent from hierarchy revision. A bulk scene
+		// replacement can rebuild the same topology and therefore reuse the same
+		// hierarchy revision while every entity/component lifetime has changed.
+		std::uint64_t sceneGeneration = 0U;
 		std::uint64_t hierarchyRevision = 0U;
 		std::uint64_t spatialRevision = 0U;
 		std::uint32_t hierarchyLevelCount = 0U;
@@ -117,6 +122,13 @@ public:
 	LightingDiagnosticsSnapshot GetLatestLightingDiagnostics(RenderViewType viewType) const;
 	RenderSnapshotDiagnosticsSnapshot GetLatestRenderSnapshotDiagnostics() const;
 	TerraEngine::Renderer::RendererRecoverySnapshot GetLatestRendererRecoverySnapshot() const;
+	TerraEngine::Renderer::AnimationGpuBackendExecutionSnapshot
+		GetLatestAnimationGpuBackendExecution() const;
+	// Return a copied renderable list from the last protected frame. Automation
+	// diagnostics use this to associate each animated mesh object with its exact
+	// immutable CPU/GPU deformation generation without exposing live render data.
+	std::vector<TerraEngine::Renderer::RenderFrameRenderableRecord>
+		GetLatestRenderablesSnapshot() const;
 	void SetRendererRecoveryPolicy(const TerraEngine::Renderer::RendererRecoveryPolicy& policy);
 	TerraEngine::Renderer::RendererRecoveryPolicy GetRendererRecoveryPolicy() const;
 	std::vector<TerraEngine::Renderer::OcclusionDebugSample> GetLatestVirtualGeometryOcclusionDebugSamples(RenderViewType viewType, std::size_t maxCount = TerraEngine::Renderer::kVirtualGeometryOcclusionDebugSampleCapacity) const;
@@ -132,6 +144,18 @@ public:
 	[[nodiscard]] TerraEngine::Scheduling::HardBoundary GetLiveGpuSubmissionBoundary() const;
 	std::vector<TerraEngine::Scene::RenderRuntimeRecord> BuildCompactRenderRuntimeRecords();
 	static bool CompactRenderRecordsMatchSnapshot(const std::vector<TerraEngine::Scene::RenderRuntimeRecord>& records, const TerraEngine::Renderer::RenderFrameSnapshot& snapshot);
+	// This pure resolver accepts only copied identities and immutable publication
+	// ownership. It is safe to unit test without a renderer, scene, or GPU.
+	static TerraEngine::Renderer::AnimationRenderBinding ResolveAnimationRenderBinding(
+		const TerraEngine::Renderer::AnimationRenderBindingRequest& request) noexcept;
+	// Converts one sealed CPU pose to the exact affine palette and morph lanes
+	// consumed by the default mesh shader. Inputs are copied asset metadata only;
+	// no renderer or live scene state is accessed.
+	static std::shared_ptr<const TerraEngine::Renderer::CpuAnimationDeformationData>
+		BuildCpuAnimationDeformation(
+			const TerraEngine::Animation::PublishedAnimatorPose& publication,
+			std::span<const std::uint32_t> paletteJoints,
+			std::span<const std::uint64_t> morphTargetIds) noexcept;
 	static TerraEngine::Renderer::VirtualGeometryDrawRange SelectVirtualGeometryLodRange(const VirtualGeometryAssetRuntime& asset, const VirtualGeometryQualityProfile& quality, float projectedRadiusPixels, bool taskShaderCullingEnabled, bool boundsValid);
 	static TerraEngine::Renderer::VirtualGeometryDrawRange SelectVirtualGeometryResidentLodRange(const VirtualGeometryAssetRuntime& asset, const VirtualGeometryQualityProfile& quality, float projectedRadiusPixels, bool taskShaderCullingEnabled, bool boundsValid);
 	static TerraEngine::Renderer::VirtualGeometryDrawRange SelectVirtualGeometryShadowLodRange(const VirtualGeometryAssetRuntime& asset, const VirtualGeometryQualityProfile& quality, bool boundsValid);
@@ -304,6 +328,9 @@ private:
 		TerraEngine::UUID objectId;
 		bool isStatic = false;
 		MeshRenderComponent mesh;
+		// Protected collection resolves this pointer bundle before any worker-safe
+		// signature, visibility, or draw preparation sees the renderable.
+		TerraEngine::Renderer::AnimationRenderBinding animationBinding{};
 	};
 	// struct LightEntry groups related state and operations so callers have one documented contract.
 	struct LightEntry
@@ -325,6 +352,8 @@ private:
 	LightingDiagnosticsSnapshot latestSceneLightingDiagnostics{};
 	RenderSnapshotDiagnosticsSnapshot latestRenderSnapshotDiagnostics{};
 	TerraEngine::Renderer::RendererRecoverySnapshot latestRendererRecoverySnapshot{};
+	TerraEngine::Renderer::AnimationGpuBackendExecutionSnapshot
+		latestAnimationGpuBackendExecution{};
 	TerraEngine::Renderer::RendererRecoveryPolicy rendererRecoveryPolicy = TerraEngine::Renderer::MakeEditorRendererRecoveryPolicy();
 	TerraEngine::Renderer::RenderDiagnosticsSummary latestRenderGraphDiagnostics{};
 	TerraEngine::Renderer::RenderFrameSnapshot latestRenderFrameSnapshot{};
@@ -334,6 +363,14 @@ private:
 	// Workers only receive immutable snapshots of the resulting state, so Scene
 	// View, Game View, and future render targets cannot share mutable decisions.
 	std::unordered_map<std::uint64_t, TerraEngine::Renderer::VirtualGeometryClusterSelectionResult> virtualGeometryTransitionCache;
+	struct CompatibleAnimationPoseCacheRecord
+	{
+		TerraEngine::Renderer::AnimationRenderBinding binding{};
+		std::uint64_t lastTouchedFrameId = 0U;
+	};
+	// One prior complete pose per render object supports an explicit hold-last
+	// request without retaining unbounded publication generations.
+	std::unordered_map<TerraEngine::UUID, CompatibleAnimationPoseCacheRecord> compatibleAnimationPoseCache;
 	// Visualizer modes are view-local runtime preferences. Project settings keep
 	// only the default, while each editor view can request a different mode for
 	// the next prepared frame without mutating global quality state.

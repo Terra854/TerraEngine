@@ -63,10 +63,14 @@ private:
 	bool pendingSaveLayout = false;
 	bool startupProjectOpenAttempted = false;
 	bool physicsInvariantRunAttempted = false;
+	// The installed acceptance command waits for the normal asynchronous
+	// Assembly-CSharp coordinator instead of canceling it during early shutdown.
+	float physicsInvariantManagedWaitSeconds = 0.0f;
 	int requestedProcessExitCode = 0;
 	std::uint64_t imguiPresentationGeneration = 0;
 	void HandleProjectLoaded();
 	void ProcessStartupProjectOpen();
+	void ProcessPhysicsInvariantValidation(float deltaTime);
 public:
 	void DrawWindowMenu();
 	void HideAllWindows();

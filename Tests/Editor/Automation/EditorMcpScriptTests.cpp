@@ -127,7 +127,8 @@ namespace TerraEngine::EditorTests
 				{{"template", "component"}, {"typeName", "PlayerController"}, {"namespace", "Game.Play"}, {"destination", "Assets/Scripts/Gameplay/PlayerController.cs"}},
 				WriteMode::WritesEnabled,
 				"script-create-valid");
-			context.Expect(created.value("ok", false), "An approved template and contained destination should create a script.");
+			context.Expect(created.value("ok", false),
+				"An approved template and contained destination should create a script. Response: " + created.dump());
 			context.ExpectEqual(std::string("Game.Play.PlayerController"), created["data"].value("qualifiedTypeName", std::string()), "Script creation should report the generated managed type.");
 			context.Expect(std::filesystem::exists(fixture.projectRoot / "Assets/Scripts/Gameplay/PlayerController.cs"), "The script should be published only at the validated project-relative destination.");
 

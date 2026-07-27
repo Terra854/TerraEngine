@@ -1,0 +1,1250 @@
+{
+	"schemaVersion": 2,
+	"phase": "us5-gameplay",
+	"fixtureOverlays": [
+		{
+			"source": "Tests/Fixtures/Animation/AdvancedAssets",
+			"destination": "Assets/Advanced"
+		},
+		{
+			"source": "Tests/Fixtures/Animation/AdvancedRuntimeActors",
+			"destination": "Assets/AdvancedActors"
+		}
+	],
+	"requiredTools": [
+		"asset.import",
+		"asset.inspect",
+		"prefab.instantiate",
+		"scene.list_objects",
+		"component.get",
+		"script.status",
+		"animation.runtime.diagnostics",
+		"history.state",
+		"camera.capture_custom",
+		"play.state",
+		"play.pause",
+		"animation.runtime.procedural.read",
+		"animation.runtime.parameters",
+		"play.step",
+		"component.set_property",
+		"animation.runtime.residency",
+		"animation.runtime.profiler",
+		"play.resume",
+		"game_view.capture",
+		"camera.capture_object"
+	],
+	"requiredEvidence": [
+		"editor/mcp-operations.json",
+		"editor/operations/us5-import-gameplay-package.json",
+		"editor/operations/us5-inspect-gameplay-package.json",
+		"editor/operations/us5-instantiate-gameplay-hero.json",
+		"editor/operations/us5-instantiate-runtime-actor.json",
+		"editor/operations/us5-observe-gameplay-hero.json",
+		"editor/operations/us5-observe-runtime-actor.json",
+		"editor/operations/us5-read-authored-gameplay-animator.json",
+		"editor/operations/us5-read-authored-runtime-animator.json",
+		"editor/operations/us5-script-status-preplay.json",
+		"editor/operations/us5-diagnostics-preplay.json",
+		"editor/operations/us5-history-before-play.json",
+		"editor/operations/us5-play-state.json",
+		"editor/operations/us5-pause-runtime.json",
+		"editor/operations/us5-read-publication-baseline.json",
+		"editor/operations/us5-submit-live-parameters-v1.json",
+		"editor/operations/us5-replay-live-parameters-v1.json",
+		"editor/operations/us5-step-live-parameters-v1.json",
+		"editor/operations/us5-read-publication-v1.json",
+		"editor/operations/us5-request-apply-root-motion.json",
+		"editor/operations/us5-read-apply-root-motion.json",
+		"editor/operations/us5-step-root-motion-policy.json",
+		"editor/operations/us5-submit-live-parameters-v2.json",
+		"editor/operations/us5-step-live-parameters-v2.json",
+		"editor/operations/us5-read-publication-v2.json",
+		"editor/operations/us5-diagnostics-runtime.json",
+		"editor/operations/us5-animation-residency.json",
+		"editor/operations/us5-animation-profiler.json",
+		"editor/operations/us5-script-status-runtime.json",
+		"editor/operations/us5-resume-runtime.json",
+		"editor/operations/us5-reject-stale-play-handle.json",
+		"editor/operations/us5-read-restored-gameplay-animator.json",
+		"editor/operations/us5-read-restored-runtime-animator.json",
+		"editor/operations/us5-reimport-gameplay-package.json",
+		"editor/operations/us5-read-gameplay-animator-after-reimport.json",
+		"editor/operations/us5-script-status-restored.json",
+		"editor/operations/us5-diagnostics-restored.json",
+		"editor/operations/us5-observe-restored-gameplay-scene.json",
+		"editor/operations/us5-history-restored.json"
+	],
+	"operations": [
+		{
+			"id": "us5-import-gameplay-package",
+			"stage": "prePlay",
+			"order": 10,
+			"tool": "asset.import",
+			"arguments": {
+				"path": "Models/US1Hero.gltf",
+				"force": true
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.importResult.animationManifest",
+					"data.importResult.generatedPrefabs"
+				],
+				"fieldOneOf": {
+					"data.status": [
+						"Succeeded",
+						"SucceededWithWarnings"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/us5-import-gameplay-package.json"
+		},
+		{
+			"id": "us5-inspect-gameplay-package",
+			"stage": "prePlay",
+			"order": 20,
+			"tool": "asset.inspect",
+			"arguments": {
+				"asset": "Assets/Models/US1Hero.gltf"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data"
+				]
+			},
+			"evidencePath": "editor/operations/us5-inspect-gameplay-package.json"
+		},
+		{
+			"id": "us5-instantiate-gameplay-hero",
+			"stage": "prePlay",
+			"order": 30,
+			"tool": "prefab.instantiate",
+			"arguments": {
+				"prefab": "Assets/Models/US1Hero_Generated/US1Hero.teprefab",
+				"name": "US5 Gameplay Hero"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.instanceId",
+					"data.prefabId"
+				]
+			},
+			"evidencePath": "editor/operations/us5-instantiate-gameplay-hero.json"
+		},
+		{
+			"id": "us5-instantiate-runtime-actor",
+			"stage": "prePlay",
+			"order": 40,
+			"tool": "prefab.instantiate",
+			"arguments": {
+				"prefab": "Assets/AdvancedActors/SourceMotionActor.teprefab",
+				"name": "US5 Gameplay Runtime Actor"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.instanceId",
+					"data.prefabId"
+				]
+			},
+			"evidencePath": "editor/operations/us5-instantiate-runtime-actor.json"
+		},
+		{
+			"id": "us5-observe-gameplay-hero",
+			"stage": "prePlay",
+			"order": 50,
+			"tool": "scene.list_objects",
+			"arguments": {
+				"includeComponents": true,
+				"search": "US5 Gameplay Hero"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.objects"
+				]
+			},
+			"evidencePath": "editor/operations/us5-observe-gameplay-hero.json"
+		},
+		{
+			"id": "us5-observe-runtime-actor",
+			"stage": "prePlay",
+			"order": 60,
+			"tool": "scene.list_objects",
+			"arguments": {
+				"includeComponents": true,
+				"search": "US5 Gameplay Runtime Actor"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.objects"
+				]
+			},
+			"evidencePath": "editor/operations/us5-observe-runtime-actor.json"
+		},
+		{
+			"id": "us5-read-authored-gameplay-animator",
+			"stage": "prePlay",
+			"order": 70,
+			"tool": "component.get",
+			"arguments": {
+				"object": null,
+				"component": "AnimatorComponent"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us5-instantiate-gameplay-hero",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "object",
+					"valueType": "uuid"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.component",
+					"data.properties.requestedMode",
+					"data.properties.rootMotionPolicy",
+					"data.properties.initialParameters"
+				],
+				"fieldEquals": {
+					"data.component": "AnimatorComponent",
+					"data.properties.requestedMode": 0,
+					"data.properties.rootMotionPolicy": 1
+				}
+			},
+			"evidencePath": "editor/operations/us5-read-authored-gameplay-animator.json"
+		},
+		{
+			"id": "us5-read-authored-runtime-animator",
+			"stage": "prePlay",
+			"order": 80,
+			"tool": "component.get",
+			"arguments": {
+				"object": null,
+				"component": "AnimatorComponent"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us5-instantiate-runtime-actor",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "object",
+					"valueType": "uuid"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.component",
+					"data.properties.requestedMode",
+					"data.properties.rootMotionPolicy",
+					"data.properties.motionDatabaseOverrideAssetId"
+				],
+				"fieldEquals": {
+					"data.component": "AnimatorComponent",
+					"data.properties.requestedMode": 0,
+					"data.properties.rootMotionPolicy": 1
+				}
+			},
+			"evidencePath": "editor/operations/us5-read-authored-runtime-animator.json"
+		},
+		{
+			"id": "us5-script-status-preplay",
+			"stage": "prePlay",
+			"order": 90,
+			"tool": "script.status",
+			"arguments": {},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.coordinatorState",
+					"data.readiness",
+					"data.fingerprint.source",
+					"data.fingerprint.workspace",
+					"data.fingerprint.profile",
+					"data.fingerprint.bridge",
+					"data.fingerprint.analyzer",
+					"data.fingerprint.runtimeAbi",
+					"data.loadedOutput.identity",
+					"data.loadedOutput.fingerprint",
+					"data.loadedOutput.published"
+				]
+			},
+			"evidencePath": "editor/operations/us5-script-status-preplay.json"
+		},
+		{
+			"id": "us5-diagnostics-preplay",
+			"stage": "prePlay",
+			"order": 100,
+			"tool": "animation.runtime.diagnostics",
+			"arguments": {
+				"includeDetails": true,
+				"maximumItems": 64,
+				"correlationId": "us5-gameplay-preplay"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.schemaVersion",
+					"data.rendererAvailable",
+					"data.summaryAvailable",
+					"data.integration.planStatus",
+					"data.integration.executionPolicy",
+					"data.detailsPendingPublication"
+				],
+				"fieldEquals": {
+					"data.rendererAvailable": true
+				}
+			},
+			"evidencePath": "editor/operations/us5-diagnostics-preplay.json"
+		},
+		{
+			"id": "us5-history-before-play",
+			"stage": "prePlay",
+			"order": 110,
+			"tool": "history.state",
+			"arguments": {},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.canUndo",
+					"data.canRedo",
+					"data.undoDepth",
+					"data.redoDepth",
+					"data.sequence"
+				]
+			},
+			"evidencePath": "editor/operations/us5-history-before-play.json"
+		},
+		{
+			"id": "us5-play-state",
+			"stage": "play",
+			"order": 130,
+			"tool": "play.state",
+			"arguments": {},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState"
+				],
+				"fieldEquals": {
+					"data.currentState": "playing"
+				}
+			},
+			"evidencePath": "editor/operations/us5-play-state.json"
+		},
+		{
+			"id": "us5-pause-runtime",
+			"stage": "play",
+			"order": 140,
+			"tool": "play.pause",
+			"arguments": {
+				"expectedState": "playing",
+				"correlationId": "us5-pause-runtime"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState"
+				],
+				"fieldEquals": {
+					"data.currentState": "paused"
+				}
+			},
+			"evidencePath": "editor/operations/us5-pause-runtime.json"
+		},
+		{
+			"id": "us5-read-publication-baseline",
+			"stage": "play",
+			"order": 150,
+			"tool": "animation.runtime.procedural.read",
+			"arguments": {
+				"target": {
+					"objectId": null
+				},
+				"includeResults": false,
+				"maximumItems": 8,
+				"correlationId": "us5-publication-baseline"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us5-instantiate-gameplay-hero",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "target.objectId",
+					"valueType": "uuid"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.target.slotIndex",
+					"data.target.generation",
+					"data.currentPublication.available",
+					"data.currentPublication.poseGeneration",
+					"data.currentPublication.authorityPublicationGeneration",
+					"data.currentPublication.tick",
+					"data.visibilityBoundary"
+				],
+				"fieldEquals": {
+					"data.currentPublication.available": true,
+					"data.visibilityBoundary": "immutable_procedural_store_copies"
+				}
+			},
+			"evidencePath": "editor/operations/us5-read-publication-baseline.json"
+		},
+		{
+			"id": "us5-submit-live-parameters-v1",
+			"stage": "play",
+			"order": 160,
+			"tool": "animation.runtime.parameters",
+			"arguments": {
+				"target": {
+					"objectId": null
+				},
+				"commands": [
+					{
+						"kind": "play"
+					},
+					{
+						"kind": "set_speed",
+						"speed": 1.25
+					},
+					{
+						"kind": "set_looping",
+						"flag": true
+					},
+					{
+						"kind": "set_parameter",
+						"parameterId": 5001,
+						"parameterType": "float",
+						"floatValue": 0.75
+					}
+				],
+				"idempotencyKey": "us5-live-parameters-v1",
+				"correlationId": "us5-live-parameters-v1",
+				"expectedGeneration": 1
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us5-instantiate-gameplay-hero",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "target.objectId",
+					"valueType": "uuid"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.status",
+					"data.commandCount",
+					"data.queuedCount",
+					"data.commands",
+					"data.visibilityBoundary",
+					"data.generation",
+					"data.idempotencyDisposition"
+				],
+				"fieldEquals": {
+					"data.status": "queued",
+					"data.commandCount": 4,
+					"data.queuedCount": 4,
+					"data.visibilityBoundary": "animation_protected_capture_then_publication",
+					"data.generation": 2,
+					"data.idempotencyDisposition": "new"
+				}
+			},
+			"evidencePath": "editor/operations/us5-submit-live-parameters-v1.json"
+		},
+		{
+			"id": "us5-replay-live-parameters-v1",
+			"stage": "play",
+			"order": 170,
+			"tool": "animation.runtime.parameters",
+			"arguments": {
+				"target": {
+					"objectId": null
+				},
+				"commands": [
+					{
+						"kind": "play"
+					},
+					{
+						"kind": "set_speed",
+						"speed": 1.25
+					},
+					{
+						"kind": "set_looping",
+						"flag": true
+					},
+					{
+						"kind": "set_parameter",
+						"parameterId": 5001,
+						"parameterType": "float",
+						"floatValue": 0.75
+					}
+				],
+				"idempotencyKey": "us5-live-parameters-v1",
+				"correlationId": "us5-live-parameters-v1",
+				"expectedGeneration": 1
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us5-instantiate-gameplay-hero",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "target.objectId",
+					"valueType": "uuid"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.status",
+					"data.commandCount",
+					"data.queuedCount",
+					"data.commands",
+					"data.visibilityBoundary",
+					"data.generation",
+					"data.idempotencyDisposition"
+				],
+				"fieldEquals": {
+					"data.status": "queued",
+					"data.commandCount": 4,
+					"data.queuedCount": 4,
+					"data.visibilityBoundary": "animation_protected_capture_then_publication",
+					"data.generation": 2,
+					"data.idempotencyDisposition": "replay"
+				}
+			},
+			"evidencePath": "editor/operations/us5-replay-live-parameters-v1.json"
+		},
+		{
+			"id": "us5-step-live-parameters-v1",
+			"stage": "play",
+			"order": 180,
+			"tool": "play.step",
+			"arguments": {
+				"expectedState": "paused",
+				"correlationId": "us5-step-live-parameters-v1"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState",
+					"data.stepsCompleted"
+				],
+				"fieldEquals": {
+					"data.currentState": "paused",
+					"data.stepsCompleted": 1
+				}
+			},
+			"evidencePath": "editor/operations/us5-step-live-parameters-v1.json"
+		},
+		{
+			"id": "us5-read-publication-v1",
+			"stage": "play",
+			"order": 190,
+			"tool": "animation.runtime.procedural.read",
+			"arguments": {
+				"target": {
+					"objectId": null
+				},
+				"includeResults": false,
+				"maximumItems": 8,
+				"correlationId": "us5-publication-v1"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us5-instantiate-gameplay-hero",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "target.objectId",
+					"valueType": "uuid"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentPublication.available",
+					"data.currentPublication.poseGeneration",
+					"data.currentPublication.authorityPublicationGeneration",
+					"data.currentPublication.tick",
+					"data.visibilityBoundary"
+				],
+				"fieldEquals": {
+					"data.currentPublication.available": true,
+					"data.visibilityBoundary": "immutable_procedural_store_copies"
+				}
+			},
+			"evidencePath": "editor/operations/us5-read-publication-v1.json"
+		},
+		{
+			"id": "us5-request-apply-root-motion",
+			"stage": "play",
+			"order": 200,
+			"tool": "component.set_property",
+			"arguments": {
+				"object": null,
+				"component": "AnimatorComponent",
+				"property": "rootMotionPolicy",
+				"value": 2
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us5-instantiate-gameplay-hero",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "object",
+					"valueType": "uuid"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.component",
+					"data.property"
+				],
+				"fieldEquals": {
+					"data.component": "AnimatorComponent",
+					"data.property": "rootMotionPolicy"
+				}
+			},
+			"evidencePath": "editor/operations/us5-request-apply-root-motion.json"
+		},
+		{
+			"id": "us5-read-apply-root-motion",
+			"stage": "play",
+			"order": 210,
+			"tool": "component.get",
+			"arguments": {
+				"object": null,
+				"component": "AnimatorComponent"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us5-instantiate-gameplay-hero",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "object",
+					"valueType": "uuid"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.properties.rootMotionPolicy"
+				],
+				"fieldEquals": {
+					"data.properties.rootMotionPolicy": 2
+				}
+			},
+			"evidencePath": "editor/operations/us5-read-apply-root-motion.json"
+		},
+		{
+			"id": "us5-step-root-motion-policy",
+			"stage": "play",
+			"order": 220,
+			"tool": "play.step",
+			"arguments": {
+				"expectedState": "paused",
+				"correlationId": "us5-step-root-motion-policy"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState",
+					"data.stepsCompleted"
+				],
+				"fieldEquals": {
+					"data.currentState": "paused",
+					"data.stepsCompleted": 1
+				}
+			},
+			"evidencePath": "editor/operations/us5-step-root-motion-policy.json"
+		},
+		{
+			"id": "us5-submit-live-parameters-v2",
+			"stage": "play",
+			"order": 230,
+			"tool": "animation.runtime.parameters",
+			"arguments": {
+				"target": {
+					"objectId": null
+				},
+				"commands": [
+					{
+						"kind": "set_speed",
+						"speed": 0.5
+					},
+					{
+						"kind": "set_looping",
+						"flag": false
+					},
+					{
+						"kind": "set_parameter",
+						"parameterId": 5001,
+						"parameterType": "float",
+						"floatValue": 0.25
+					}
+				],
+				"idempotencyKey": "us5-live-parameters-v2",
+				"correlationId": "us5-live-parameters-v2",
+				"expectedGeneration": 2
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us5-instantiate-gameplay-hero",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "target.objectId",
+					"valueType": "uuid"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.status",
+					"data.commandCount",
+					"data.queuedCount",
+					"data.commands",
+					"data.visibilityBoundary",
+					"data.generation",
+					"data.idempotencyDisposition"
+				],
+				"fieldEquals": {
+					"data.status": "queued",
+					"data.commandCount": 3,
+					"data.queuedCount": 3,
+					"data.visibilityBoundary": "animation_protected_capture_then_publication",
+					"data.generation": 3,
+					"data.idempotencyDisposition": "new"
+				}
+			},
+			"evidencePath": "editor/operations/us5-submit-live-parameters-v2.json"
+		},
+		{
+			"id": "us5-step-live-parameters-v2",
+			"stage": "play",
+			"order": 240,
+			"tool": "play.step",
+			"arguments": {
+				"expectedState": "paused",
+				"correlationId": "us5-step-live-parameters-v2"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState",
+					"data.stepsCompleted"
+				],
+				"fieldEquals": {
+					"data.currentState": "paused",
+					"data.stepsCompleted": 1
+				}
+			},
+			"evidencePath": "editor/operations/us5-step-live-parameters-v2.json"
+		},
+		{
+			"id": "us5-read-publication-v2",
+			"stage": "play",
+			"order": 250,
+			"tool": "animation.runtime.procedural.read",
+			"arguments": {
+				"target": {
+					"objectId": null
+				},
+				"includeResults": false,
+				"maximumItems": 8,
+				"correlationId": "us5-publication-v2"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us5-instantiate-gameplay-hero",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "target.objectId",
+					"valueType": "uuid"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentPublication.available",
+					"data.currentPublication.poseGeneration",
+					"data.currentPublication.authorityPublicationGeneration",
+					"data.currentPublication.tick",
+					"data.visibilityBoundary"
+				],
+				"fieldEquals": {
+					"data.currentPublication.available": true,
+					"data.visibilityBoundary": "immutable_procedural_store_copies"
+				}
+			},
+			"evidencePath": "editor/operations/us5-read-publication-v2.json"
+		},
+		{
+			"id": "us5-diagnostics-runtime",
+			"stage": "play",
+			"order": 260,
+			"tool": "animation.runtime.diagnostics",
+			"arguments": {
+				"includeDetails": true,
+				"maximumItems": 64,
+				"correlationId": "us5-gameplay-runtime"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.summaryAvailable",
+					"data.summary.counters.parameterQueueDepth",
+					"data.summary.counters.commandQueueDepth",
+					"data.summary.counters.eventQueueDepth",
+					"data.summary.counters.rootMotionQueueDepth",
+					"data.summary.counters.rejectedBatches",
+					"data.details.animators",
+					"data.details.modeSwitchHistoryCount"
+				],
+				"fieldEquals": {
+					"data.summaryAvailable": true,
+					"data.summary.counters.parameterQueueDepth": 0,
+					"data.summary.counters.rejectedBatches": 0
+				}
+			},
+			"evidencePath": "editor/operations/us5-diagnostics-runtime.json"
+		},
+		{
+			"id": "us5-animation-residency",
+			"stage": "play",
+			"order": 270,
+			"tool": "animation.runtime.residency",
+			"arguments": {
+				"includeDetails": true,
+				"maximumItems": 64,
+				"correlationId": "us5-gameplay-residency"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.summaryAvailable",
+					"data.collectionEnabled",
+					"data.detailedCollectionEnabled",
+					"data.collectionPromotedByRequest",
+					"data.detailsAvailable",
+					"data.residency.requests",
+					"data.residency.gpuTransferBytes",
+					"data.residency.gpuReadbackBytes",
+					"data.details.modeSwitchHistoryCount"
+				],
+				"fieldEquals": {
+					"data.summaryAvailable": true,
+					"data.detailsAvailable": true
+				}
+			},
+			"evidencePath": "editor/operations/us5-animation-residency.json"
+		},
+		{
+			"id": "us5-animation-profiler",
+			"stage": "play",
+			"order": 280,
+			"tool": "animation.runtime.profiler",
+			"arguments": {
+				"includeDetails": true,
+				"maximumItems": 64,
+				"correlationId": "us5-gameplay-profiler"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.summaryAvailable",
+					"data.collectionEnabled",
+					"data.detailedCollectionEnabled",
+					"data.collectionPromotedByRequest",
+					"data.detailsAvailable",
+					"data.profiler.detailLevel",
+					"data.profiler.workerJobs",
+					"data.profiler.gpuDispatches",
+					"data.details.modeSwitchHistoryCount"
+				],
+				"fieldEquals": {
+					"data.summaryAvailable": true,
+					"data.detailsAvailable": true
+				}
+			},
+			"evidencePath": "editor/operations/us5-animation-profiler.json"
+		},
+		{
+			"id": "us5-script-status-runtime",
+			"stage": "play",
+			"order": 290,
+			"tool": "script.status",
+			"arguments": {},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.coordinatorState",
+					"data.readiness",
+					"data.fingerprint.bridge",
+					"data.fingerprint.runtimeAbi",
+					"data.loadedOutput.identity",
+					"data.loadedOutput.fingerprint",
+					"data.loadedOutput.published"
+				]
+			},
+			"evidencePath": "editor/operations/us5-script-status-runtime.json"
+		},
+		{
+			"id": "us5-resume-runtime",
+			"stage": "play",
+			"order": 300,
+			"tool": "play.resume",
+			"arguments": {
+				"expectedState": "paused",
+				"correlationId": "us5-resume-runtime"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState"
+				],
+				"fieldEquals": {
+					"data.currentState": "playing"
+				}
+			},
+			"evidencePath": "editor/operations/us5-resume-runtime.json"
+		},
+		{
+			"id": "us5-reject-stale-play-handle",
+			"stage": "postPlay",
+			"order": 330,
+			"tool": "animation.runtime.procedural.read",
+			"arguments": {
+				"target": {
+					"animator": {
+						"slotIndex": null,
+						"generation": null
+					}
+				},
+				"includeResults": false,
+				"maximumItems": 8,
+				"correlationId": "us5-stale-play-handle"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us5-read-publication-baseline",
+					"sourceResponsePath": "data.target.slotIndex",
+					"destinationArgumentPath": "target.animator.slotIndex",
+					"valueType": "integer"
+				},
+				{
+					"sourceOperationId": "us5-read-publication-baseline",
+					"sourceResponsePath": "data.target.generation",
+					"destinationArgumentPath": "target.animator.generation",
+					"valueType": "integer"
+				}
+			],
+			"expect": {
+				"ok": false,
+				"errorCategory": "stale_target",
+				"requiredFields": [
+					"error.category"
+				],
+				"fieldEquals": {
+					"error.category": "stale_target"
+				}
+			},
+			"evidencePath": "editor/operations/us5-reject-stale-play-handle.json"
+		},
+		{
+			"id": "us5-read-restored-gameplay-animator",
+			"stage": "postPlay",
+			"order": 340,
+			"tool": "component.get",
+			"arguments": {
+				"object": null,
+				"component": "AnimatorComponent"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us5-instantiate-gameplay-hero",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "object",
+					"valueType": "uuid"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.properties.requestedMode",
+					"data.properties.rootMotionPolicy",
+					"data.properties.initialParameters"
+				],
+				"fieldEquals": {
+					"data.properties.requestedMode": 0,
+					"data.properties.rootMotionPolicy": 1
+				}
+			},
+			"evidencePath": "editor/operations/us5-read-restored-gameplay-animator.json"
+		},
+		{
+			"id": "us5-read-restored-runtime-animator",
+			"stage": "postPlay",
+			"order": 350,
+			"tool": "component.get",
+			"arguments": {
+				"object": null,
+				"component": "AnimatorComponent"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us5-instantiate-runtime-actor",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "object",
+					"valueType": "uuid"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.properties.requestedMode",
+					"data.properties.rootMotionPolicy",
+					"data.properties.motionDatabaseOverrideAssetId"
+				],
+				"fieldEquals": {
+					"data.properties.requestedMode": 0,
+					"data.properties.rootMotionPolicy": 1
+				}
+			},
+			"evidencePath": "editor/operations/us5-read-restored-runtime-animator.json"
+		},
+		{
+			"id": "us5-reimport-gameplay-package",
+			"stage": "postPlay",
+			"order": 360,
+			"tool": "asset.import",
+			"arguments": {
+				"path": "Models/US1Hero.gltf",
+				"force": true
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.importResult.animationManifest",
+					"data.importResult.generatedPrefabs"
+				],
+				"fieldOneOf": {
+					"data.status": [
+						"Succeeded",
+						"SucceededWithWarnings"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/us5-reimport-gameplay-package.json"
+		},
+		{
+			"id": "us5-read-gameplay-animator-after-reimport",
+			"stage": "postPlay",
+			"order": 370,
+			"tool": "component.get",
+			"arguments": {
+				"object": null,
+				"component": "AnimatorComponent"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us5-instantiate-gameplay-hero",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "object",
+					"valueType": "uuid"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.properties.requestedMode",
+					"data.properties.rootMotionPolicy",
+					"data.properties.defaultClipAssetId",
+					"data.properties.skeletonOverrideAssetId"
+				],
+				"fieldEquals": {
+					"data.properties.requestedMode": 0,
+					"data.properties.rootMotionPolicy": 1
+				}
+			},
+			"evidencePath": "editor/operations/us5-read-gameplay-animator-after-reimport.json"
+		},
+		{
+			"id": "us5-script-status-restored",
+			"stage": "postPlay",
+			"order": 380,
+			"tool": "script.status",
+			"arguments": {},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.coordinatorState",
+					"data.readiness",
+					"data.fingerprint.source",
+					"data.fingerprint.workspace",
+					"data.fingerprint.bridge",
+					"data.fingerprint.runtimeAbi",
+					"data.loadedOutput.identity",
+					"data.loadedOutput.fingerprint",
+					"data.loadedOutput.published"
+				]
+			},
+			"evidencePath": "editor/operations/us5-script-status-restored.json"
+		},
+		{
+			"id": "us5-diagnostics-restored",
+			"stage": "postPlay",
+			"order": 390,
+			"tool": "animation.runtime.diagnostics",
+			"arguments": {
+				"includeDetails": false,
+				"maximumItems": 64,
+				"correlationId": "us5-gameplay-restored"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.schemaVersion",
+					"data.rendererAvailable",
+					"data.summaryAvailable",
+					"data.integration.planStatus"
+				],
+				"fieldEquals": {
+					"data.rendererAvailable": true
+				}
+			},
+			"evidencePath": "editor/operations/us5-diagnostics-restored.json"
+		},
+		{
+			"id": "us5-observe-restored-gameplay-scene",
+			"stage": "postPlay",
+			"order": 400,
+			"tool": "scene.list_objects",
+			"arguments": {
+				"includeComponents": true,
+				"search": "US5 Gameplay"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.objects"
+				]
+			},
+			"evidencePath": "editor/operations/us5-observe-restored-gameplay-scene.json"
+		},
+		{
+			"id": "us5-history-restored",
+			"stage": "postPlay",
+			"order": 410,
+			"tool": "history.state",
+			"arguments": {},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.canUndo",
+					"data.canRedo",
+					"data.undoDepth",
+					"data.redoDepth",
+					"data.sequence"
+				]
+			},
+			"evidencePath": "editor/operations/us5-history-restored.json"
+		}
+	],
+	"captures": [
+		{
+			"id": "us5-gameplay-scene-view",
+			"view": "SceneView",
+			"stage": "prePlay",
+			"order": 115,
+			"tool": "camera.capture_custom",
+			"arguments": {
+				"name": "US5 Gameplay Scene View",
+				"position": [
+					0,
+					1,
+					4
+				],
+				"target": [
+					0,
+					0.5,
+					0
+				],
+				"up": [
+					0,
+					1,
+					0
+				],
+				"projection": "perspective",
+				"verticalFovDegrees": 60,
+				"nearPlane": 0.1,
+				"farPlane": 100
+			}
+		},
+		{
+			"id": "us5-gameplay-game-view",
+			"view": "GameView",
+			"stage": "play",
+			"order": 310,
+			"tool": "game_view.capture",
+			"arguments": {
+				"includeOverlays": false,
+				"transparentBackground": false
+			}
+		},
+		{
+			"id": "us5-gameplay-camera",
+			"view": "InGameCamera",
+			"stage": "postPlay",
+			"order": 420,
+			"tool": "camera.capture_object",
+			"arguments": {
+				"object": "US1 Capture Camera",
+				"includeDisabled": false,
+				"transparentBackground": false
+			}
+		}
+	],
+	"visualExpectations": [
+		{
+			"captureId": "us5-gameplay-scene-view",
+			"contentPolicy": "visible-geometry-required"
+		},
+		{
+			"captureId": "us5-gameplay-game-view",
+			"contentPolicy": "visible-geometry-required"
+		},
+		{
+			"captureId": "us5-gameplay-camera",
+			"contentPolicy": "visible-geometry-required"
+		}
+	],
+	"visualIdentityExceptions": [
+		{
+			"captureIds": [
+				"us5-gameplay-game-view",
+				"us5-gameplay-camera"
+			],
+			"reason": "Game View and the authored in-game capture intentionally resolve the same active camera, so exact visual parity is valid."
+		}
+	],
+	"manualChecklist": [
+		{
+			"id": "us5-mouse-native-managed-parity",
+			"input": "mouse",
+			"required": true,
+			"instruction": "In the installed editor, use real mouse input to select the visible US5 Gameplay Hero and the separate mesh-free US5 Gameplay Runtime Actor. Open AnimatorComponent, Animation Diagnostics, and the managed scripting readiness/status surface; leave Animation Diagnostics open for the scripted detailed snapshots. Exercise only actually exposed native or managed gameplay controls for copied parameters, command receipts, snapshots, events, curves or morphs, IK, bones or sockets, and root-motion policy/results. Inspect generation, status, observability, compatibility, queue bounds, and callback diagnostics. Do not treat script.status as proof that a managed callback was invoked; native/C# behavioral parity that has no installed-editor invocation surface remains bound to retained focused tests. Restore Auto and ExtractOnly and leave the editor stopped."
+		},
+		{
+			"id": "us5-mouse-reload-and-stale-handles",
+			"input": "mouse",
+			"required": true,
+			"instruction": "With real mouse input, inspect the generated package and both AnimatorComponents, perform only the editor's supported reimport or managed reload action, and inspect the newly published asset/runtime identities. Where the installed UI exposes stale animator, subscription, attachment, bone, or socket handles, verify they reject rather than mutate a reused object and that a newly acquired handle remains usable. If a managed stale-wrapper or attachment mutation surface is not exposed in this fixture, leave the relevant diagnostics visible and keep that portion explicitly focused-test-only; do not manufacture a direct MCP attachment or managed-callback operation. Restore the authored policies before completing the item."
+		},
+		{
+			"id": "us5-keyboard-play-restore",
+			"input": "keyboard",
+			"required": true,
+			"instruction": "Use real keyboard input in the installed editor to enter Play, pause, single-step, resume, stop, and save. Observe the visible hero through Game View and the authored gameplay camera while exercising supported event, root-motion, and attachment controls, then verify stopped-state AnimatorComponent values return to Auto and ExtractOnly with no transient runtime parameter, root-motion transform, attachment publication, or stale subscription serialized into the scene. Leave Animation Diagnostics open and Play Mode stopped for the scripted gate. Do not collect or compare performance-regression timings under the active power limit."
+		}
+	]
+}

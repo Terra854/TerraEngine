@@ -132,7 +132,11 @@ namespace TerraEngine::Editor::Automation
 			"Import or reimport a project-relative source asset.",
 			ObjectSchema({
 				{"path", AssetReferenceSchema()},
-				{"force", {{"type", "boolean"}}}
+				{"force", {{"type", "boolean"}}},
+				// The handler validates the same containment/database contract and
+				// returns before mutation when dryRun is true. Advertise that public
+				// preflight surface so strict MCP clients do not reject a supported key.
+				{"dryRun", {{"type", "boolean"}}}
 			}, {"path"}),
 			MutationMode::AssetMutation,
 			AutomationApprovalPolicy::None));

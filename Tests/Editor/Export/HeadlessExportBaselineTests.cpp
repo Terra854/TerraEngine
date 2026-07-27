@@ -85,6 +85,14 @@ namespace TerraEngine::EditorTests {
 			ExpectContains(context, helper, "archive-inspection.log", "Helper should retain its final package/evidence inspection summary.");
 		});
 
+		registry.Add("Editor.HeadlessExportBaseline.FailsClosedOnManagedWorkspaceLeaks", [](TestContext& context) {
+			const std::string helper = ReadText(RepositoryRoot() / "Tools" / "ExportRuntimeBaseline" / "RunBaseline.ps1");
+			ExpectContains(context, helper, "Build/Assembly-CSharp/Assembly-CSharp.dll", "The installed editor lane must prove its ordinary managed build at the disposable project path.");
+			ExpectContains(context, helper, "Library/AssetIndex.json", "The installed editor lane must inspect durable script compilation state.");
+			ExpectContains(context, helper, "compileStatus -ne \"Ready\"", "The baseline must reject an editor script build that did not reach Ready.");
+			ExpectContains(context, helper, "Library/NativeAot", "The export lane must reject project-local NativeAOT workspace leakage.");
+		});
+
 		registry.Add("Editor.HeadlessExportBaseline.LegacyEntryPointForwardsToCanonicalTool", [](TestContext& context) {
 			const std::string legacy = ReadText(RepositoryRoot() / "Tests" / "Tools" / "ExportRuntimeBaseline" / "ExportSample.ps1");
 			ExpectContains(context, legacy, "Tools/ExportRuntimeBaseline/RunBaseline.ps1", "Historical helper should forward to the canonical installed-tree gate.");

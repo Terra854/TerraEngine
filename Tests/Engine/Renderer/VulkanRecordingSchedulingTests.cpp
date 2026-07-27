@@ -8,10 +8,57 @@
 #include "Renderer/RHI/Vulkan/VulkanTransitionPlanning.h"
 #include "Renderer/RHI/Vulkan/VulkanUploadPlanning.h"
 
+#include <filesystem>
+#include <fstream>
+#include <string>
+
 namespace TerraEngine::Tests {
 
 	void RegisterVulkanRecordingSchedulingTests(TestRegistry& registry)
 	{
+		registry.Add("Renderer.VulkanRecording.AnimationBackendReceiptRequiresRecordedSubmittedWork", [](TestContext& context) {
+			TerraEngine::Renderer::AnimationGpuBackendExecutionSnapshot snapshot;
+			context.Expect(!snapshot.HasSubmittedWork() && !snapshot.HasCompletedWork(),
+				"An empty backend receipt must not be presented as evidence of GPU animation execution.");
+
+			snapshot.latestSubmitted = {
+				71U,
+				3U,
+				9U,
+				4U,
+				8U};
+			context.Expect(snapshot.HasSubmittedWork() && !snapshot.HasCompletedWork(),
+				"A submission receipt becomes valid only with frame, generation, serial, and nonzero recorded-dispatch identity.");
+
+			snapshot.latestCompleted = snapshot.latestSubmitted;
+			context.Expect(snapshot.HasCompletedWork(),
+				"Fence-owned completion should preserve the exact submitted animation receipt without pose readback.");
+
+			snapshot.latestSubmitted.recordedDispatchCount = 0U;
+			context.Expect(!snapshot.HasSubmittedWork(),
+				"A zero-dispatch plan must never satisfy truthful backend execution diagnostics.");
+		});
+
+		registry.Add("Renderer.VulkanRecording.AnimationPlanIsPublishedAfterBackendFrameReset", [](TestContext& context) {
+			// Vulkan BeginFrame retires the reused slot and deliberately clears its
+			// pending animation plan. Freeze the coordinator call order so a future
+			// refactor cannot silently erase newly published compute work again.
+			const std::filesystem::path sourcePath =
+				std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+					/ "Engine" / "Renderer" / "RenderSystem.cpp";
+			std::ifstream sourceStream(sourcePath, std::ios::binary);
+			const std::string source{
+				std::istreambuf_iterator<char>(sourceStream),
+				std::istreambuf_iterator<char>()};
+			const std::size_t beginFrame = source.find("rhi->BeginFrame();");
+			const std::size_t consumePlan = source.find(
+				"rhi->ConsumeRenderSubmissionPlan(renderSubmissionPlan)");
+			context.Expect(beginFrame != std::string::npos
+					&& consumePlan != std::string::npos
+					&& beginFrame < consumePlan,
+				"The backend frame slot must reset before it receives this frame's immutable animation plan.");
+		});
+
 		registry.Add("Renderer.VulkanRecording.BuildsWorkerBatchesFromPackets", [](TestContext& context) {
 			TerraEngine::Renderer::RenderFrameSnapshot snapshot;
 			snapshot.frameId = 5u;
@@ -67,9 +114,12 @@ namespace TerraEngine::Tests {
 			profile.supportsRenderTaskGroups = true;
 
 			const auto plan = TerraEngine::Renderer::Vulkan::BuildVulkanRendererThreadingPlan(snapshot, profile);
-			context.ExpectEqual(static_cast<std::size_t>(20u), plan.stages.size(), "The Vulkan threading plan should cover all selected renderer threading opportunities.");
-			context.Expect(plan.workerEligibleStageCount >= 19u, "All non-submit ownership stages should be worker eligible when backend capabilities allow it.");
-			context.ExpectEqual(static_cast<std::size_t>(1u), plan.coordinatorStageCount, "Final submit, present, resize, and resource retirement should remain the only required coordinator stage.");
+			// Phase 6 adds four explicit animation stages: two worker-safe planning
+			// stages and two protected recording/completion stages. Keeping them in
+			// this count makes scheduler ownership changes visible to diagnostics.
+			context.ExpectEqual(static_cast<std::size_t>(24u), plan.stages.size(), "The Vulkan threading plan should cover all selected renderer and animation threading opportunities.");
+			context.Expect(plan.workerEligibleStageCount >= 21u, "All planning stages should be worker eligible when backend capabilities allow it.");
+			context.ExpectEqual(static_cast<std::size_t>(3u), plan.coordinatorStageCount, "Final submission plus animation recording and completion must remain protected coordinator stages.");
 			context.Expect(plan.stages.back().stageId == "final-submit-present-retire", "The coordinator boundary should be explicit and easy to diagnose.");
 		});
 

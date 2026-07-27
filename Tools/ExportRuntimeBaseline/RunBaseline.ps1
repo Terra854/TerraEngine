@@ -426,6 +426,29 @@ $editorInvariantJson = Get-Content -LiteralPath $editorInvariantPath -Raw
 $editorInvariant = $editorInvariantJson | ConvertFrom-Json
 Assert-PhysicsInvariantReport -Report $editorInvariant -Mode "Editor Play Mode"
 
+# A physics-only invariant can succeed even if the editor's asynchronous
+# Assembly-CSharp launch failed. Require the installed editor to finish its real
+# managed build at this same (potentially deep) project path before export is
+# allowed to provide an independent NativeAOT assembly.
+$editorManagedAssembly = Join-Path $projectRoot "Build/Assembly-CSharp/Assembly-CSharp.dll"
+if (-not (Test-Path -LiteralPath $editorManagedAssembly -PathType Leaf) -or
+	(Get-Item -LiteralPath $editorManagedAssembly).Length -eq 0) {
+	throw "Installed editor did not publish a non-empty Assembly-CSharp.dll at '$editorManagedAssembly'."
+}
+$assetIndexPath = Join-Path $projectRoot "Library/AssetIndex.json"
+if (-not (Test-Path -LiteralPath $assetIndexPath -PathType Leaf)) {
+	throw "Installed editor did not persist its script compilation state at '$assetIndexPath'."
+}
+$assetIndex = Get-Content -LiteralPath $assetIndexPath -Raw | ConvertFrom-Json
+$scriptAssets = @($assetIndex.assets | Where-Object { $_.importerName -eq "ScriptImporter" })
+if ($scriptAssets.Count -eq 0) {
+	throw "Installed editor did not register the baseline ScriptImporter asset."
+}
+$unreadyScripts = @($scriptAssets | Where-Object { $_.settings.compileStatus -ne "Ready" })
+if ($unreadyScripts.Count -ne 0) {
+	throw "Installed editor script compilation did not reach Ready: $($unreadyScripts.settings.lastBuildSummary -join '; ')."
+}
+
 $prepareLog = Join-Path $workDirectory "baseline-prepare.log"
 @(
 	"projectRoot=$projectRoot",
@@ -452,6 +475,14 @@ $exportArguments = @(
 )
 Invoke-LoggedJsonNative -Stage "headless-export" -FilePath $exportCommand -Arguments $exportArguments `
 	-LogPath $exportLog -StdoutPath $exportStdoutLog -StderrPath $exportStderrLog
+
+# NativeAOT restore, object, package, CLI-home, and publish directories are
+# private per-run workspace state. Their presence in the project would retain a
+# dead junction path and make sequential or concurrent exports non-reproducible.
+$projectLocalNativeAotState = Join-Path $projectRoot "Library/NativeAot"
+if (Test-Path -LiteralPath $projectLocalNativeAotState) {
+	throw "Headless export leaked NativeAOT workspace state into '$projectLocalNativeAotState'."
+}
 
 $outputParent = Split-Path -Parent $outputRoot
 $transactionPrefix = ".$(Split-Path -Leaf $outputRoot).export"

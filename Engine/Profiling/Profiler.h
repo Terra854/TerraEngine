@@ -14,6 +14,11 @@
 
 struct RenderStatsSnapshot;
 
+namespace TerraEngine::Animation
+{
+	struct AnimationDiagnosticsSnapshot;
+}
+
 namespace TerraEngine::Profiling
 {
 // class Profiler groups related state and operations so callers have one documented contract.
@@ -42,6 +47,18 @@ public:
 	bool BeginSample(const char* name, ProfilerModuleId moduleId, const char* taskLabel = nullptr);
 	void EndSample();
 	void RecordRenderStats(const RenderStatsSnapshot& gameStats, const RenderStatsSnapshot& sceneStats);
+	// Animation publishes one fixed-size copied summary at its protected frame
+	// boundary. This method is a no-op when capture is inactive, keeping dormant
+	// projects out of the profiler lock and allocation path.
+	void RecordAnimationDiagnostics(const TerraEngine::Animation::AnimationDiagnosticsSnapshot& snapshot);
+	// The zero-animator scheduler path has already established dormancy and the
+	// frozen baseline identity. Record its three public facts directly so a
+	// capture does not construct or validate the full active diagnostics payload.
+	void RecordDormantAnimationFacts(std::uint64_t schedulerMembershipChecks = 1U);
+	// Advanced animation producers may publish the complete typed aggregate after
+	// worker preparation reaches its protected boundary. Invalid or over-limit
+	// detail is rejected atomically and never replaces an earlier complete record.
+	void RecordAnimationTelemetry(const ProfilerAnimationFrameTelemetry& telemetry);
 	// Copy value-only editor stage telemetry into the current capture frame.
 	// The profiler never retains the Scene View window or its mutable caches.
 	void RecordSceneViewStages(std::span<const PerformanceStageRecord> stages);

@@ -9,6 +9,7 @@
 #include "EditorAutomationService.h"
 #include "../Project/EditorMcpPreferences.h"
 
+#include <atomic>
 #include <deque>
 #include <functional>
 #include <chrono>
@@ -35,10 +36,19 @@ namespace TerraEngine::Editor::Automation
 		void Initialize(EditorContext* context, MainEditorSubsystem* mainEditor = nullptr);
 		void Shutdown();
 		void Update(float deltaTime);
+		// EditorSystem owns the scheduler-protected PostFrame boundary. This narrow
+		// forwarder lets that owner advance durable recordings even when the MCP
+		// listener is disabled, disconnected, or has no queued requests.
+		void PumpAnimationRecordingsAtProtectedFrame();
 		void SetMainEditor(MainEditorSubsystem* mainEditor);
 		void SetSelectionCallbacks(std::function<std::optional<entt::entity>()> getter, std::function<void(std::optional<entt::entity>)> setter);
 
 		void SetEnabled(bool enabled);
+	#if defined(TERRAENGINE_EDITOR_TESTS)
+		// Tests use this narrow synchronization seam to force enable/shutdown into
+		// the ordering that previously regressed. Production builds omit it.
+		void SetEnablePublicationHookForTests(std::function<void()> hook);
+	#endif
 		bool IsEnabled() const;
 		void SetWriteMode(WriteMode mode);
 		WriteMode GetWriteMode() const;
@@ -46,7 +56,7 @@ namespace TerraEngine::Editor::Automation
 		std::uint16_t GetConfiguredListenPort() const;
 		BridgeState GetState() const;
 
-		void OnLocalClientConnected(std::string clientName, std::string peerAddress);
+		bool TryOnLocalClientConnected(std::string clientName, std::string peerAddress);
 		void OnLocalClientDisconnected(std::string reason);
 		void RecordRejectedPeer(std::string peerAddress, std::string reason);
 
@@ -55,7 +65,9 @@ namespace TerraEngine::Editor::Automation
 		std::optional<AssistantRequest> PopNextQueuedRequest();
 		std::vector<AssistantRequest> GetQueuedRequests() const;
 		nlohmann::json CallTool(std::string_view name, const nlohmann::json& arguments);
-		nlohmann::json SubmitToolCall(std::string name, nlohmann::json arguments);
+		nlohmann::json SubmitToolCall(std::string name, nlohmann::json arguments, nlohmann::json transportRequestId = nullptr,
+			const std::atomic<bool>* transportStopRequested = nullptr);
+		bool CancelPendingToolCall(const nlohmann::json& transportRequestId);
 		nlohmann::json ReadResource(std::string_view uri) const;
 		nlohmann::json ListResources() const;
 		std::uint16_t GetListenPort() const;
@@ -77,17 +89,30 @@ namespace TerraEngine::Editor::Automation
 	private:
 		struct PendingToolCall
 		{
+			enum class State
+			{
+				Queued,
+				Processing,
+				Completed,
+				Abandoned
+			};
+
 			std::string name;
 			nlohmann::json arguments = nlohmann::json::object();
+			// The JSON-RPC identity lets a cancellation arriving on another HTTP
+			// connection find the exact queued call without exposing bridge IDs.
+			nlohmann::json transportRequestId = nullptr;
 			nlohmann::json result;
-			bool completed = false;
+			State state = State::Queued;
 			std::mutex mutex;
 			std::condition_variable completedSignal;
 		};
 
 		bool RequiresWritePermission(const AutomationCapabilityDescriptor& capability) const;
 		bool RequiresApproval(const AutomationCapabilityDescriptor& capability) const;
+		nlohmann::json CallToolLocked(std::string_view name, const nlohmann::json& arguments);
 		nlohmann::json BuildApprovalResponse(const AutomationCapabilityDescriptor& capability, const nlohmann::json& arguments, const std::string& requestId);
+		ApprovalPrompt CreateApprovalPromptLocked(std::string requestId, std::string capability, std::string summary, nlohmann::json arguments, std::chrono::system_clock::time_point expiresAt);
 		void PersistPreferences() const;
 		void ProcessPendingToolCalls();
 		void ExpirePendingApprovals();
@@ -103,13 +128,28 @@ namespace TerraEngine::Editor::Automation
 		std::deque<ActivityRecord> activityHistory;
 		std::deque<AssistantRequest> requestQueue;
 		std::deque<std::shared_ptr<PendingToolCall>> pendingToolCalls;
+		// Bridge policy/session containers are read by the loopback listener and
+		// written by the editor UI. Keep them separate from activity and pending
+		// call locks so service callbacks never require a recursive mutex.
+		// Lifecycle policy is held across tool execution so disable/shutdown cannot
+		// race an approved or ordinary handler past the security boundary.
+		mutable std::mutex lifecycleMutex;
+		mutable std::mutex stateMutex;
+		mutable std::mutex activityMutex;
 		mutable std::mutex pendingToolCallsMutex;
+		bool acceptingToolCalls = false;
 		std::vector<ApprovalPrompt> approvals;
 		std::uint64_t nextActivitySequence = 1;
 		std::uint64_t nextRequestSequence = 1;
 		std::uint64_t nextApprovalSequence = 1;
 		std::uint64_t nextSessionSequence = 1;
 		std::size_t maxActivityRecords = 256;
+		// Resolved approvals remain queryable for stateless loopback reconnects,
+		// but the listener must never accumulate unbounded retained envelopes.
+		std::size_t maxApprovalRecords = 256;
 		std::string lastDiagnosticRequest = "never";
+	#if defined(TERRAENGINE_EDITOR_TESTS)
+		std::function<void()> enablePublicationHookForTests;
+	#endif
 	};
 }

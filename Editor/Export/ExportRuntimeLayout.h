@@ -21,6 +21,12 @@ struct ExportRuntimeLayout {
 	std::filesystem::path fontDirectory;
 	std::filesystem::path managedDirectory;
 	std::filesystem::path modelPackageCompiler;
+	// NativeAOT compilation is an editor feature, so the installed feed and SDK
+	// pin live beside the editor instead of depending on user NuGet settings.
+	std::filesystem::path nativeAotToolchainDirectory;
+	std::filesystem::path nativeAotNugetConfig;
+	std::filesystem::path nativeAotNugetFeed;
+	std::filesystem::path nativeAotGlobalJson;
 };
 
 /// Resolves an installed layout from an editor-side executable. The executable

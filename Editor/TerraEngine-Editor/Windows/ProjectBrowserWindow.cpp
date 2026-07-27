@@ -12,6 +12,7 @@
 #include "AssetImportResult.h"
 #include "ModelPackageImporter.h"
 #include "Engine/Resource/ResourceManager.h"
+#include "Engine/ThreadPool/ThreadPool.h"
 #include <imgui.h>
 #include <ImGuiFileDialog.h>
 #include <algorithm>
@@ -172,7 +173,13 @@ enum class PackageChildKind
 	Mesh,
 	Material,
 	Texture,
-	Prefab
+	Prefab,
+	// Skeletons are package-owned runtime payloads. They remain read-only until
+	// the user explicitly makes a checked editable copy in the selected folder.
+	Skeleton,
+	// Animation clips are immutable package children. Keep them distinct so a
+	// click reaches the clip Inspector instead of masquerading as a loose asset.
+	AnimationClip
 };
 
 struct PackageChildTile
@@ -218,6 +225,49 @@ void AppendPackageChildren(std::vector<PackageChildTile>& outChildren, const nlo
 	}
 }
 
+void AppendPublishedAnimationChildren(
+	std::vector<PackageChildTile>& outChildren,
+	const nlohmann::json& document, const std::string& manifestKind,
+	PackageChildKind tileKind, const char* fallbackName)
+{
+	const nlohmann::json manifest = document.value("animationManifest", nlohmann::json::object());
+	const std::uint64_t candidateGeneration = manifest.value("candidateGeneration", std::uint64_t{0U});
+	const std::uint64_t publishedGeneration = manifest.value("publishedGeneration", std::uint64_t{0U});
+	if (!manifest.is_object()
+		|| manifest.value("cancelled", false)
+		|| !manifest.value("publishedAtomically", false)
+		|| publishedGeneration == 0U
+		|| candidateGeneration != publishedGeneration)
+	{
+		return;
+	}
+
+	for (const nlohmann::json& asset : manifest.value("subAssets", nlohmann::json::array()))
+	{
+		if (!asset.is_object() || asset.value("kind", std::string()) != manifestKind)
+		{
+			continue;
+		}
+		const std::string guid = asset.value("guid", std::string());
+		if (!TerraEngine::ParseUUID(guid)) continue;
+
+		PackageChildTile child;
+		child.kind = tileKind;
+		const std::string displayName = asset.value("name", std::string());
+		const std::string semanticKey = asset.value("semanticKey", std::string());
+		const std::filesystem::path compiledPath = asset.value("compiledPath", std::string());
+		child.name = !displayName.empty()
+			? displayName
+			: !semanticKey.empty() ? semanticKey
+				: !compiledPath.stem().empty() ? compiledPath.stem().string()
+				: fallbackName;
+		child.sourcePath = asset.value("sourcePath", std::string());
+		if (child.sourcePath.empty()) child.sourcePath = compiledPath.generic_string();
+		child.guidHex = guid;
+		outChildren.push_back(std::move(child));
+	}
+}
+
 std::vector<PackageChildTile> BuildPackageChildTiles(const std::filesystem::path& packagePath)
 {
 	const nlohmann::json document = LoadPackageImportResultJson(packagePath);
@@ -230,6 +280,13 @@ std::vector<PackageChildTile> BuildPackageChildTiles(const std::filesystem::path
 	// Generated prefabs are the primary thing users drag into scenes, so show
 	// them before the implementation-detail mesh/material/texture children.
 	AppendPackageChildren(children, document.value("generatedPrefabs", nlohmann::json::array()), PackageChildKind::Prefab);
+	// This lightweight tile pass trusts only the publication marker already read
+	// for the browser. Inspector/AssetDatabase repeats full dependency and hash
+	// validation before it opens the compiled payload.
+	AppendPublishedAnimationChildren(children, document, "Skeleton",
+		PackageChildKind::Skeleton, "Skeleton");
+	AppendPublishedAnimationChildren(children, document, "AnimationClip",
+		PackageChildKind::AnimationClip, "Animation Clip");
 	AppendPackageChildren(children, document.value("generatedMeshes", nlohmann::json::array()), PackageChildKind::Mesh);
 	AppendPackageChildren(children, document.value("generatedMaterials", nlohmann::json::array()), PackageChildKind::Material);
 	AppendPackageChildren(children, document.value("generatedTextures", nlohmann::json::array()), PackageChildKind::Texture);
@@ -260,6 +317,10 @@ const char* PackageChildIcon(PackageChildKind kind)
 		return "[TEX]";
 	case PackageChildKind::Prefab:
 		return "[PFB]";
+	case PackageChildKind::Skeleton:
+		return "[SKL]";
+	case PackageChildKind::AnimationClip:
+		return "[ANM]";
 	default:
 		return "[SUB]";
 	}
@@ -277,6 +338,12 @@ const char* PackageChildPayload(PackageChildKind kind)
 		return "ASSET_TEXTURE";
 	case PackageChildKind::Prefab:
 		return "ASSET_PREFAB";
+	case PackageChildKind::Skeleton:
+		return "ASSET_GUID";
+	case PackageChildKind::AnimationClip:
+		// T056 preview is read-only; later authoring work may add a typed clip
+		// drag payload without changing this stable selection identity.
+		return "ASSET_GUID";
 	default:
 		return "ASSET_GUID";
 	}
@@ -294,6 +361,10 @@ const char* PackageChildKindName(PackageChildKind kind)
 		return "Texture";
 	case PackageChildKind::Prefab:
 		return "Prefab";
+	case PackageChildKind::Skeleton:
+		return "Skeleton";
+	case PackageChildKind::AnimationClip:
+		return "AnimationClip";
 	default:
 		return "SubAsset";
 	}
@@ -356,9 +427,13 @@ bool DrawPackageChildTile(const PackageChildTile& child, float thumbnailSize, fl
 		ImGui::EndDragDropSource();
 	}
 
-	const std::string tooltip = child.sourcePath.empty()
+	std::string tooltip = child.sourcePath.empty()
 		? child.name
 		: child.name + "\n" + child.sourcePath;
+	if(child.kind == PackageChildKind::Skeleton || child.kind == PackageChildKind::AnimationClip)
+	{
+		tooltip += "\nRead-only model-package child. Right-click to make an editable loose copy.";
+	}
 	DrawTileLabel(child.name, labelWidth, tooltip);
 	return clicked;
 }
@@ -400,16 +475,36 @@ ProjectBrowserWindow::ProjectBrowserWindow(MainEditorSubsystem* owner)
 
 // ProjectBrowserWindow::OnGui is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ProjectBrowserWindow::OnGui() {
+	// File-dialog completion is processed before the main browser body, so bind
+	// the active Assets root here as well as in the ordinary drawing path.
+	if(m_Owner && m_Owner->GetContext()
+		&& m_Owner->GetContext()->projectManager->HasActiveProject()
+		&& m_AnimationAssetActions.AssetRoot().empty()) {
+		(void)m_AnimationAssetActions.SetAssetRoot(AssetDatabase::Instance().GetAssetRoot());
+	}
 	if (ImGuiFileDialog::Instance()->Display("ImportAssetDlg")) {
 		if (ImGuiFileDialog::Instance()->IsOk()) {
 			std::filesystem::path filePath = ImGuiFileDialog::Instance()->GetFilePathName();
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (std::filesystem::exists(filePath)) {
-				std::filesystem::path dest = AssetDatabase::Instance().GetAssetRoot() / filePath.filename();
-				try {
-					std::filesystem::copy(filePath, dest, std::filesystem::copy_options::overwrite_existing);
-				} catch (const std::exception& e) {
-					// Log error
+				if(TerraEngine::Editor::Assets::AnimationAssetActions::KindForPath(filePath)) {
+					TerraEngine::Editor::Assets::AnimationAssetEntry imported;
+					std::error_code relativeError;
+					const std::filesystem::path relativeFolder = std::filesystem::relative(
+						m_CurrentDirectory, AssetDatabase::Instance().GetAssetRoot(), relativeError);
+					const auto status = relativeError
+						? TerraEngine::Editor::Animation::AnimationAuthoringStatus::InvalidArgument
+						: m_AnimationAssetActions.Import(filePath, relativeFolder.generic_string(), imported);
+					m_AnimationLifecycleMessage = status == TerraEngine::Editor::Animation::AnimationAuthoringStatus::Ok
+						? "Validated animation document imported atomically."
+						: m_AnimationAssetActions.LastDiagnostic();
+				} else {
+					std::filesystem::path dest = AssetDatabase::Instance().GetAssetRoot() / filePath.filename();
+					try {
+						std::filesystem::copy(filePath, dest, std::filesystem::copy_options::overwrite_existing);
+					} catch (const std::exception&) {
+						m_AnimationLifecycleMessage = "The selected asset could not be imported.";
+					}
 				}
 			}
 		}
@@ -419,6 +514,13 @@ void ProjectBrowserWindow::OnGui() {
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (m_Owner->GetContext() && m_Owner->GetContext()->projectManager->HasActiveProject()) {
 		std::filesystem::path root = AssetDatabase::Instance().GetAssetRoot();
+		// AssetDatabase remains the project-wide registration/import owner. The
+		// browser lifecycle service only receives its root so it can stage source
+		// documents; the watcher/database observes those files normally.
+		if(m_AnimationAssetActions.AssetRoot().empty()) {
+			(void)m_AnimationAssetActions.SetAssetRoot(root);
+		}
+		PollAnimationValidation();
 		if (m_CurrentDirectory.empty() || !std::filesystem::exists(m_CurrentDirectory)) {
 			m_CurrentDirectory = root;
 		}
@@ -443,6 +545,27 @@ void ProjectBrowserWindow::OnGui() {
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (ImGui::MenuItem("UI Markup (.tuiml)")) {
 				OpenCreateAssetModal("Create UI Markup", "New UI", ".tuiml");
+			}
+			if(ImGui::BeginMenu("Animation")) {
+				for(const TerraEngine::Editor::Assets::AnimationAssetKind kind
+					: TerraEngine::Editor::Assets::AnimationAssetActions::SupportedKinds()) {
+					const std::string label = std::string(
+						TerraEngine::Editor::Assets::AnimationAssetActions::DisplayName(kind))
+						+ " (" + TerraEngine::Editor::Assets::AnimationAssetActions::Extension(kind) + ")";
+					if(ImGui::MenuItem(label.c_str())) {
+						OpenCreateAnimationAssetModal(kind);
+					}
+				}
+				ImGui::Separator();
+				if(ImGui::MenuItem("Undo Animation Asset Action", nullptr, false,
+					m_AnimationAssetActions.UndoDepth() != 0U)) {
+					(void)m_AnimationAssetActions.Undo();
+				}
+				if(ImGui::MenuItem("Redo Animation Asset Action", nullptr, false,
+					m_AnimationAssetActions.RedoDepth() != 0U)) {
+					(void)m_AnimationAssetActions.Redo();
+				}
+				ImGui::EndMenu();
 			}
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (ImGui::MenuItem("C# Script (.cs)")) {
@@ -513,12 +636,22 @@ void ProjectBrowserWindow::OnGui() {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::BeginPopupModal("Delete Asset?", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
 			ImGui::Text("Are you sure you want to delete '%s'?", m_AssetToDelete.filename().string().c_str());
-			ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "This action cannot be undone!");
+			const bool animationAsset = TerraEngine::Editor::Assets::AnimationAssetActions::KindForPath(m_AssetToDelete).has_value();
+			if(animationAsset) ImGui::TextWrapped("Animation deletion can be restored with Undo Animation Asset Action.");
+			else ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "This action cannot be undone!");
 			ImGui::Separator();
 
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (ImGui::Button("Delete", ImVec2(120, 0))) {
-				AssetDatabase::Instance().DeleteAsset(m_AssetToDelete);
+				if(animationAsset) {
+					TerraEngine::Editor::Assets::AnimationAssetEntry tracked;
+					if(m_AnimationAssetActions.EnsureTracked(m_AssetToDelete, tracked)
+						== TerraEngine::Editor::Animation::AnimationAuthoringStatus::Ok) {
+						(void)m_AnimationAssetActions.Delete(tracked.id);
+					}
+				} else {
+					AssetDatabase::Instance().DeleteAsset(m_AssetToDelete);
+				}
 				ImGui::CloseCurrentPopup();
 			}
 			ImGui::SetItemDefaultFocus();
@@ -531,6 +664,10 @@ void ProjectBrowserWindow::OnGui() {
 		}
 
 		DrawCreateAssetModal();
+		DrawAnimationLifecycleModal();
+		if(!m_AnimationLifecycleMessage.empty()) {
+			ImGui::TextWrapped("%s", m_AnimationLifecycleMessage.c_str());
+		}
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (m_ShowCreateScriptModal) {
@@ -571,12 +708,25 @@ void ProjectBrowserWindow::OnGui() {
 
 void ProjectBrowserWindow::OpenCreateAssetModal(const std::string& title, const std::string& defaultName, const std::string& extension)
 {
+	m_CreateAnimationAssetKind.reset();
 	m_CreateAssetTitle = title;
 	m_CreateAssetExtension = extension;
 	m_CreateAssetError.clear();
 	std::fill(m_NewAssetName.begin(), m_NewAssetName.end(), '\0');
 	std::copy(defaultName.begin(), defaultName.end(), m_NewAssetName.begin());
 	m_ShowCreateAssetModal = true;
+}
+
+void ProjectBrowserWindow::OpenCreateAnimationAssetModal(
+	TerraEngine::Editor::Assets::AnimationAssetKind kind)
+{
+	m_CreateAnimationAssetKind = kind;
+	OpenCreateAssetModal(
+		std::string("Create ") + TerraEngine::Editor::Assets::AnimationAssetActions::DisplayName(kind),
+		std::string("New ") + TerraEngine::Editor::Assets::AnimationAssetActions::DisplayName(kind),
+		TerraEngine::Editor::Assets::AnimationAssetActions::Extension(kind));
+	// OpenCreateAssetModal resets ordinary mode; restore the selected typed action.
+	m_CreateAnimationAssetKind = kind;
 }
 
 void ProjectBrowserWindow::DrawCreateAssetModal()
@@ -608,6 +758,26 @@ void ProjectBrowserWindow::CreateNamedAsset()
 	std::string assetName = m_NewAssetName.data();
 	if (assetName.empty()) {
 		m_CreateAssetError = "Name cannot be empty.";
+		return;
+	}
+
+	if(m_CreateAnimationAssetKind) {
+		std::error_code relativeError;
+		const std::filesystem::path root = AssetDatabase::Instance().GetAssetRoot();
+		const std::filesystem::path relativeFolder = std::filesystem::relative(
+			m_CurrentDirectory, root, relativeError);
+		TerraEngine::Editor::Assets::AnimationAssetEntry created;
+		const auto status = !relativeError
+			? m_AnimationAssetActions.Create(*m_CreateAnimationAssetKind, assetName,
+				relativeFolder.generic_string(), created)
+			: TerraEngine::Editor::Animation::AnimationAuthoringStatus::InvalidArgument;
+		if(status != TerraEngine::Editor::Animation::AnimationAuthoringStatus::Ok) {
+			m_CreateAssetError = "The animation asset could not be staged in the selected folder.";
+			return;
+		}
+		m_Owner->SetSelectedAsset(std::filesystem::absolute(created.sourcePath));
+		m_CreateAnimationAssetKind.reset();
+		ImGui::CloseCurrentPopup();
 		return;
 	}
 
@@ -828,6 +998,7 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 			}
 
 			if (ImGui::BeginPopupContextItem("AssetIconContextMenu")) {
+				DrawAnimationAssetContextActions(absoluteEntryPath);
 				if (ImGui::MenuItem("Delete")) {
 					m_AssetToDelete = absoluteEntryPath;
 					m_ShowDeleteModal = true;
@@ -867,12 +1038,15 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 						OpenMarkupAssetInBuilder(m_Owner, entry.path());
 					} else if (entry.path().extension() == ".teprefab") {
 						m_Owner->OpenPrefabAsset(std::filesystem::absolute(entry.path()));
+					} else if(TerraEngine::Editor::Assets::AnimationAssetActions::KindForPath(entry.path())) {
+						OpenAnimationAsset(entry.path());
 					}
 				}
 			}
 
 			DrawTileLabel(filename, tileLabelWidth, filename);
 			if (ImGui::BeginPopupContextItem("AssetNameContextMenu")) {
+				DrawAnimationAssetContextActions(absoluteEntryPath);
 				if (ImGui::MenuItem("Delete")) {
 					m_AssetToDelete = absoluteEntryPath;
 					m_ShowDeleteModal = true;
@@ -910,8 +1084,26 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 						}
 						else
 						{
-							m_Owner->SetSelectedAsset(absoluteEntryPath);
+						m_Owner->SetSelectedAsset(absoluteEntryPath);
 						}
+					}
+					if((child.kind == PackageChildKind::Skeleton
+						|| child.kind == PackageChildKind::AnimationClip)
+						&& ImGui::BeginPopupContextItem("GeneratedAnimationPackageChildContext"))
+					{
+						// Package reimport owns this child. The context action is deliberately
+						// named for its result so artists do not mistake it for an in-place edit.
+						ImGui::TextDisabled("Read-only model-package child");
+						if(ImGui::MenuItem("Make Editable Copy in Current Folder"))
+						{
+							ExtractGeneratedAnimationPackageChild(child.guidHex,
+								child.kind == PackageChildKind::Skeleton, child.name);
+						}
+						if(ImGui::IsItemHovered())
+						{
+							ImGui::SetTooltip("Creates a separate checked loose asset with a new identity. The package child stays read-only.");
+						}
+						ImGui::EndPopup();
 					}
 					ImGui::PopID();
 				}
@@ -922,10 +1114,198 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 	}
 }
 
+void ProjectBrowserWindow::OpenAnimationAsset(const std::filesystem::path& path)
+{
+	TerraEngine::Editor::Assets::AnimationAssetEntry tracked;
+	const auto status = m_AnimationAssetActions.EnsureTracked(std::filesystem::absolute(path), tracked);
+	if(status != TerraEngine::Editor::Animation::AnimationAuthoringStatus::Ok) {
+		m_AnimationLifecycleMessage = m_AnimationAssetActions.LastDiagnostic();
+		return;
+	}
+	if(!m_Owner->OpenAnimationAssetEditor(path)) {
+		m_AnimationLifecycleMessage = "No native editor accepts this animation document.";
+	}
+}
+
+void ProjectBrowserWindow::ExtractGeneratedAnimationPackageChild(
+	const std::string& guidHex, bool isSkeleton, const std::string& displayName)
+{
+	const std::optional<TerraEngine::UUID> guid = TerraEngine::ParseUUID(guidHex);
+	if(!guid)
+	{
+		m_AnimationLifecycleMessage = "The generated child does not have a valid asset identity.";
+		return;
+	}
+	const GeneratedModelPackageChildKind generatedKind = isSkeleton
+		? GeneratedModelPackageChildKind::Skeleton
+		: GeneratedModelPackageChildKind::AnimationClip;
+	GeneratedModelPackageChildMetadata child;
+	if(!AssetDatabase::Instance().TryGetGeneratedModelPackageChildMetadata(*guid,
+		generatedKind, child) || !child.readOnlyPackageChild || child.compiledPath.empty())
+	{
+		m_AnimationLifecycleMessage = "The selected package child is not a published read-only animation payload.";
+		return;
+	}
+
+	std::error_code relativeError;
+	const std::filesystem::path assetRoot = AssetDatabase::Instance().GetAssetRoot();
+	const std::filesystem::path destinationFolder = std::filesystem::relative(
+		m_CurrentDirectory, assetRoot, relativeError);
+	if(relativeError)
+	{
+		m_AnimationLifecycleMessage = "Select a folder inside Assets before making an editable copy.";
+		return;
+	}
+	// Display names come from arbitrary source formats. Replace only filename-illegal
+	// characters so the default remains recognizable while the typed lifecycle
+	// service can keep its strict path-containment rules.
+	std::string editableName = displayName;
+	for(char& character : editableName)
+	{
+		if(std::strchr("\\/:*?\"<>|", character) != nullptr) character = '_';
+	}
+	if(editableName.empty() || editableName == "." || editableName == "..")
+	{
+		editableName = isSkeleton ? "Editable Skeleton" : "Editable Animation Clip";
+	}
+
+	const std::filesystem::path generatedSource = child.compiledPath.is_absolute()
+		? child.compiledPath
+		: AssetDatabase::Instance().GetBuildRoot() / child.compiledPath;
+	TerraEngine::Editor::Assets::AnimationAssetEntry extracted;
+	const auto status = m_AnimationAssetActions.ExtractReadOnlyPackageChild(
+		isSkeleton ? TerraEngine::Editor::Assets::AnimationAssetKind::Skeleton
+			: TerraEngine::Editor::Assets::AnimationAssetKind::Clip,
+		generatedSource, AssetDatabase::Instance().GetBuildRoot(), std::move(editableName),
+		destinationFolder.generic_string(), extracted);
+	if(status != TerraEngine::Editor::Animation::AnimationAuthoringStatus::Ok)
+	{
+		m_AnimationLifecycleMessage = m_AnimationAssetActions.LastDiagnostic();
+		return;
+	}
+	// The catalog creates the durable bytes. AssetDatabase owns registration and
+	// the companion .meta identity, so import it only after the atomic publish.
+	AssetDatabase::Instance().ImportAssetWithProgress(extracted.sourcePath, true);
+	m_Owner->SetSelectedAsset(std::filesystem::absolute(extracted.sourcePath));
+	m_AnimationLifecycleMessage = m_AnimationAssetActions.LastDiagnostic();
+}
+
+void ProjectBrowserWindow::DrawAnimationAssetContextActions(const std::filesystem::path& path)
+{
+	if(!TerraEngine::Editor::Assets::AnimationAssetActions::KindForPath(path)) return;
+	TerraEngine::Editor::Assets::AnimationAssetEntry tracked;
+	if(m_AnimationAssetActions.EnsureTracked(path, tracked)
+		!= TerraEngine::Editor::Animation::AnimationAuthoringStatus::Ok) {
+		ImGui::TextDisabled("Invalid animation document");
+		return;
+	}
+	if(ImGui::MenuItem("Open / Edit")) OpenAnimationAsset(path);
+	if(ImGui::MenuItem("Duplicate")) {
+		TerraEngine::Editor::Assets::AnimationAssetEntry copy;
+		const auto status = m_AnimationAssetActions.Duplicate(
+			tracked.id, tracked.name + " Copy", copy);
+		m_AnimationLifecycleMessage = status == TerraEngine::Editor::Animation::AnimationAuthoringStatus::Ok
+			? "Animation asset duplicated." : "Animation asset duplication failed.";
+	}
+	if(ImGui::MenuItem("Rename")) {
+		m_AnimationLifecycleAssetId = tracked.id;
+		m_AnimationLifecycleModal = AnimationLifecycleModal::Rename;
+		std::fill(m_AnimationLifecycleValue.begin(), m_AnimationLifecycleValue.end(), '\0');
+		std::copy_n(tracked.name.data(), std::min(tracked.name.size(), m_AnimationLifecycleValue.size() - 1U),
+			m_AnimationLifecycleValue.begin());
+	}
+	if(ImGui::MenuItem("Move")) {
+		m_AnimationLifecycleAssetId = tracked.id;
+		m_AnimationLifecycleModal = AnimationLifecycleModal::Move;
+		std::fill(m_AnimationLifecycleValue.begin(), m_AnimationLifecycleValue.end(), '\0');
+		std::copy_n(tracked.folder.data(), std::min(tracked.folder.size(), m_AnimationLifecycleValue.size() - 1U),
+			m_AnimationLifecycleValue.begin());
+	}
+	const bool validatingThisAsset = m_AnimationValidationRequest
+		&& m_AnimationValidationRequest->assetId == tracked.id
+		&& m_AnimationValidation->running.load(std::memory_order_acquire);
+	if(ImGui::MenuItem(validatingThisAsset ? "Cancel Validation" : "Validate")) {
+		if(validatingThisAsset) {
+			(void)m_AnimationAssetActions.CancelValidation(*m_AnimationValidationRequest);
+			m_AnimationValidationRequest.reset();
+			m_AnimationLifecycleMessage = "Animation validation canceled; late worker output will be stale.";
+		} else if(!m_AnimationValidation->running.load(std::memory_order_acquire)) {
+			TerraEngine::Editor::Assets::AnimationAssetValidationRequest request;
+			if(m_AnimationAssetActions.BeginValidation(tracked.id, request)
+				== TerraEngine::Editor::Animation::AnimationAuthoringStatus::Ok) {
+				m_AnimationValidationRequest = request;
+				m_AnimationValidation->running.store(true, std::memory_order_release);
+				const std::shared_ptr<AnimationValidationWorkerState> shared = m_AnimationValidation;
+				auto work = [shared, request]() {
+					auto result = TerraEngine::Editor::Assets::AnimationAssetActions::ValidateCandidate(request);
+					std::scoped_lock lock(shared->mutex);
+					shared->completed = std::move(result);
+				};
+				if(ThreadPool::instance().getThreadCount() == 0U) work();
+				else ThreadPool::instance().enqueue(ThreadPool::instance().createTask(std::move(work)), 1U);
+			}
+		}
+	}
+	ImGui::Separator();
+}
+
+void ProjectBrowserWindow::PollAnimationValidation()
+{
+	std::optional<TerraEngine::Editor::Assets::AnimationAssetValidationResult> completed;
+	{
+		std::scoped_lock lock(m_AnimationValidation->mutex);
+		if(m_AnimationValidation->completed) {
+			completed = std::move(m_AnimationValidation->completed);
+			m_AnimationValidation->completed.reset();
+		}
+	}
+	if(!completed) return;
+	const auto status = m_AnimationAssetActions.CompleteValidation(*completed);
+	if(status != TerraEngine::Editor::Animation::AnimationAuthoringStatus::Stale) {
+		m_AnimationLifecycleMessage = completed->diagnostic;
+	}
+	m_AnimationValidationRequest.reset();
+	m_AnimationValidation->running.store(false, std::memory_order_release);
+}
+
+void ProjectBrowserWindow::DrawAnimationLifecycleModal()
+{
+	if(m_AnimationLifecycleModal == AnimationLifecycleModal::None) return;
+	const char* title = m_AnimationLifecycleModal == AnimationLifecycleModal::Rename
+		? "Rename Animation Asset" : "Move Animation Asset";
+	ImGui::OpenPopup(title);
+	if(!ImGui::BeginPopupModal(title, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+	ImGui::InputText(m_AnimationLifecycleModal == AnimationLifecycleModal::Rename ? "Name" : "Assets-relative folder",
+		m_AnimationLifecycleValue.data(), m_AnimationLifecycleValue.size());
+	if(ImGui::Button("Apply", ImVec2(120.0F, 0.0F))) {
+		const auto status = m_AnimationLifecycleModal == AnimationLifecycleModal::Rename
+			? m_AnimationAssetActions.Rename(m_AnimationLifecycleAssetId, m_AnimationLifecycleValue.data())
+			: m_AnimationAssetActions.Move(m_AnimationLifecycleAssetId, m_AnimationLifecycleValue.data());
+		m_AnimationLifecycleMessage = status == TerraEngine::Editor::Animation::AnimationAuthoringStatus::Ok
+			? "Animation lifecycle action applied." : "Animation lifecycle action failed.";
+		if(status == TerraEngine::Editor::Animation::AnimationAuthoringStatus::Ok) {
+			m_AnimationLifecycleModal = AnimationLifecycleModal::None;
+			ImGui::CloseCurrentPopup();
+		}
+	}
+	ImGui::SameLine();
+	if(ImGui::Button("Cancel", ImVec2(120.0F, 0.0F))) {
+		m_AnimationLifecycleModal = AnimationLifecycleModal::None;
+		ImGui::CloseCurrentPopup();
+	}
+	ImGui::EndPopup();
+}
+
 // ProjectBrowserWindow::Reset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ProjectBrowserWindow::Reset() {
 	m_CurrentDirectory.clear();
 	m_CollapsedPackageGroups.clear();
 	m_InitializedPackageGroups.clear();
 	m_SelectedPackageChildGuid.clear();
+	// A project owns its own animation catalog and inverse history. Worker packets
+	// are value-only, so a late completion against this fresh catalog is stale.
+	m_AnimationAssetActions = TerraEngine::Editor::Assets::AnimationAssetActions{};
+	m_AnimationValidationRequest.reset();
+	m_AnimationLifecycleModal = AnimationLifecycleModal::None;
+	m_AnimationLifecycleMessage.clear();
 }

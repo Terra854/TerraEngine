@@ -107,14 +107,28 @@ namespace TerraEngine::Editor::Automation
 			AutomationPermission::Read,
 			AutomationApprovalPolicy::None,
 			ProfileInputSchema(false)));
-		capabilities.push_back(MakeExportRegistration(
+		auto exportStart = MakeExportRegistration(
 			resolveHandler,
 			"export.start",
 			"Start an approved export using an existing project profile.",
 			MutationMode::ExportMutation,
 			AutomationPermission::ProjectWrite,
 			AutomationApprovalPolicy::HighImpact,
-			ProfileInputSchema(true)));
+			ProfileInputSchema(true));
+		// Approval is resolved asynchronously by the editor UI. Describe the durable
+		// job that appears after approval so reconnecting clients know how to recover,
+		// poll, and cancel the export without relying on status-message text.
+		exportStart.descriptor.jobBehavior = {
+			{"returnsDurableJob", true},
+			{"pollOperation", "jobs.get"},
+			{"cancelOperation", "export.cancel"},
+			{"progressRange", nlohmann::json::array({0.0, 1.0})},
+			{"retention", "bounded_for_editor_session"},
+			{"reconnectReadable", true},
+			{"defaultTimeoutMs", 300000U},
+			{"maximumTimeoutMs", 3600000U}
+		};
+		capabilities.push_back(std::move(exportStart));
 		capabilities.push_back(MakeExportRegistration(
 			resolveHandler,
 			"export.cancel",

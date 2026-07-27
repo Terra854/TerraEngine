@@ -1,0 +1,789 @@
+// AnimationStreaming.cpp - bounded clip/database block request coordination.
+
+#include "Animation/Streaming/AnimationStreaming.h"
+
+#include "Resource/ResourceManager.h"
+#include "ThreadPool/ThreadPool.h"
+
+#include <algorithm>
+#include <limits>
+#include <new>
+#include <unordered_set>
+
+namespace TerraEngine::Animation
+{
+	namespace
+	{
+		std::uint64_t AddSaturated(std::uint64_t left, std::uint64_t right) noexcept
+		{
+			return left > std::numeric_limits<std::uint64_t>::max() - right
+				? std::numeric_limits<std::uint64_t>::max() : left + right;
+		}
+
+		bool IsTerminal(AnimationStreamState state) noexcept
+		{
+			return state == AnimationStreamState::Missing || state == AnimationStreamState::Failed
+				|| state == AnimationStreamState::Cancelled;
+		}
+
+		AnimationStreamFallbackKind DefaultFallback(AnimationStreamPayloadKind kind) noexcept
+		{
+			return kind == AnimationStreamPayloadKind::ClipSegment
+				? AnimationStreamFallbackKind::ReferencePose
+				: AnimationStreamFallbackKind::DeterministicMotionSearch;
+		}
+
+		bool MatchesImmutableRequest(
+			const AnimationStreamRequest& left,
+			const AnimationStreamRequest& right) noexcept
+		{
+			return left.assetId == right.assetId && left.kind == right.kind
+				&& left.blockIndex == right.blockIndex && left.byteSize == right.byteSize
+				&& left.generation == right.generation
+				&& left.prefetch == right.prefetch && left.priority == right.priority
+				&& left.logicalPath.lexically_normal() == right.logicalPath.lexically_normal()
+				&& left.byteOffset == right.byteOffset
+				&& left.expectedContentFingerprint == right.expectedContentFingerprint;
+		}
+
+		AnimationStreamReadStatus ToStreamReadStatus(AnimationRangeReadStatus status) noexcept
+		{
+			switch (status)
+			{
+			case AnimationRangeReadStatus::Ok: return AnimationStreamReadStatus::Ok;
+			case AnimationRangeReadStatus::Cancelled: return AnimationStreamReadStatus::Cancelled;
+			case AnimationRangeReadStatus::NotFound: return AnimationStreamReadStatus::NotFound;
+			case AnimationRangeReadStatus::OutOfRange: return AnimationStreamReadStatus::OutOfRange;
+			case AnimationRangeReadStatus::ReadLimitExceeded: return AnimationStreamReadStatus::ReadLimitExceeded;
+			case AnimationRangeReadStatus::NotAnimationAsset: return AnimationStreamReadStatus::NotAnimationAsset;
+			case AnimationRangeReadStatus::InvalidRequest: return AnimationStreamReadStatus::Rejected;
+			case AnimationRangeReadStatus::IoError: return AnimationStreamReadStatus::IoError;
+			}
+			return AnimationStreamReadStatus::IoError;
+		}
+	}
+
+	std::uint64_t ComputeAnimationStreamContentFingerprint(
+		std::span<const std::uint8_t> bytes) noexcept
+	{
+		std::uint64_t hash = 1469598103934665603ULL;
+		for(const std::uint8_t value : bytes) {
+			hash ^= value;
+			hash *= 1099511628211ULL;
+		}
+		return hash;
+	}
+
+	const AnimationResidentPayload* AnimationStreamingResidencySnapshot::Find(
+		const AnimationStreamRequest& request) const noexcept
+	{
+		const auto found = std::find_if(payloads.begin(), payloads.end(),
+			[&](const AnimationResidentPayload& payload) {
+				return MatchesImmutableRequest(payload.request, request);
+			});
+		return found == payloads.end() ? nullptr : &*found;
+	}
+
+	AnimationStreamingCoordinator::AnimationStreamingCoordinator(
+		std::uint32_t maximumPrefetchRequests,
+		std::uint32_t maximumPendingRequests,
+		std::uint64_t maximumPendingBytes,
+		std::uint32_t maximumTrackedPayloadGenerations)
+		: m_maximumPrefetchRequests(std::max(1u, maximumPrefetchRequests)),
+		m_maximumPendingRequests(std::max(1u, maximumPendingRequests)),
+		m_maximumPendingBytes(std::max<std::uint64_t>(1u, maximumPendingBytes)),
+		m_maximumTrackedPayloadGenerations(std::max(1u, maximumTrackedPayloadGenerations))
+	{
+		m_residencySnapshot = std::make_shared<AnimationStreamingResidencySnapshot>();
+	}
+
+	std::string AnimationStreamingCoordinator::MakePayloadKey(const AnimationStreamRequest& request)
+	{
+		return TerraEngine::ToHexString(request.assetId) + ":"
+			+ std::to_string(static_cast<unsigned>(request.kind)) + ":"
+			+ std::to_string(request.blockIndex);
+	}
+
+	std::string AnimationStreamingCoordinator::MakeGenerationKey(const AnimationStreamRequest& request)
+	{
+		return MakePayloadKey(request) + ":" + std::to_string(request.generation);
+	}
+
+	void AnimationStreamingCoordinator::PruneTerminalDecisionsLocked()
+	{
+		if (m_decisions.size() < m_maximumTrackedPayloadGenerations)
+		{
+			return;
+		}
+		std::stable_sort(m_decisions.begin(), m_decisions.end(), [](const auto& left, const auto& right) {
+			if (IsTerminal(left.state) != IsTerminal(right.state))
+			{
+				return IsTerminal(left.state);
+			}
+			if (left.publicationSequence != right.publicationSequence)
+			{
+				return left.publicationSequence < right.publicationSequence;
+			}
+			return MakeGenerationKey(left.request) < MakeGenerationKey(right.request);
+		});
+		while (m_decisions.size() >= m_maximumTrackedPayloadGenerations
+			&& !m_decisions.empty() && IsTerminal(m_decisions.front().state))
+		{
+			const std::string payloadKey = MakePayloadKey(m_decisions.front().request);
+			m_residentPayloads.erase(MakeGenerationKey(m_decisions.front().request));
+			m_cancellationTokens.erase(MakeGenerationKey(m_decisions.front().request));
+			m_decisions.erase(m_decisions.begin());
+			const bool payloadStillTracked = std::any_of(m_decisions.begin(), m_decisions.end(),
+				[&](const AnimationStreamDecision& decision) {
+					return MakePayloadKey(decision.request) == payloadKey;
+				});
+			if (!payloadStillTracked)
+			{
+				m_latestRequestedGenerations.erase(payloadKey);
+				m_activeGenerations.erase(payloadKey);
+			}
+		}
+	}
+
+	void AnimationStreamingCoordinator::RebuildResidencySnapshotLocked()
+	{
+		auto snapshot = std::make_shared<AnimationStreamingResidencySnapshot>();
+		snapshot->publicationSequence = m_publicationSequence;
+		snapshot->payloads.reserve(m_residentPayloads.size());
+		for(const AnimationStreamDecision& decision : m_decisions) {
+			if(decision.state != AnimationStreamState::Resident) continue;
+			const auto payload = m_residentPayloads.find(MakeGenerationKey(decision.request));
+			if(payload == m_residentPayloads.end() || !payload->second) continue;
+			snapshot->payloads.push_back({decision.request, payload->second});
+		}
+		std::sort(snapshot->payloads.begin(), snapshot->payloads.end(),
+			[](const AnimationResidentPayload& left, const AnimationResidentPayload& right) {
+				return MakeGenerationKey(left.request) < MakeGenerationKey(right.request);
+			});
+		m_residencySnapshot = std::move(snapshot);
+	}
+
+	void AnimationStreamingCoordinator::SignalSupersededReadsLocked(
+		const AnimationStreamRequest& request)
+	{
+		const std::string payloadKey = MakePayloadKey(request);
+		for (const AnimationStreamDecision& decision : m_decisions)
+		{
+			if (MakePayloadKey(decision.request) != payloadKey
+				|| decision.request.generation >= request.generation
+				|| decision.state != AnimationStreamState::Cancelled)
+			{
+				continue;
+			}
+			if (const auto token = m_cancellationTokens.find(MakeGenerationKey(decision.request));
+				token != m_cancellationTokens.end())
+			{
+				token->second->store(true, std::memory_order_release);
+			}
+		}
+	}
+
+	AnimationStreamDecision AnimationStreamingCoordinator::RequestLocked(const AnimationStreamRequest& request)
+	{
+		AnimationStreamDecision result;
+		result.request = request;
+		result.fallbackKind = DefaultFallback(request.kind);
+		if (request.assetId == TerraEngine::EMPTY_UUID || request.generation == 0u || request.byteSize == 0u)
+		{
+			++m_rejectedRequests;
+			result.reason = "A streaming request requires a non-empty asset, nonzero generation, and nonzero payload size.";
+			return result;
+		}
+
+		const std::string payloadKey = MakePayloadKey(request);
+		const std::string generationKey = MakeGenerationKey(request);
+		if (const auto latest = m_latestRequestedGenerations.find(payloadKey);
+			latest != m_latestRequestedGenerations.end() && request.generation < latest->second)
+		{
+			++m_rejectedRequests;
+			result.reason = "A newer payload generation already owns this streaming request.";
+			return result;
+		}
+
+		auto existing = std::find_if(m_decisions.begin(), m_decisions.end(), [&](const auto& value) {
+			return MakeGenerationKey(value.request) == generationKey;
+		});
+		AnimationStreamDecision* evictedRetry = nullptr;
+		if (existing != m_decisions.end())
+		{
+			const bool identical = MatchesImmutableRequest(existing->request, request);
+			if (!identical)
+			{
+				++m_rejectedRequests;
+				result.reason = "The same payload generation was reused with different immutable request data.";
+				return result;
+			}
+			if(existing->state == AnimationStreamState::Missing) {
+				// Missing is the recoverable terminal state produced only by budget
+				// eviction. Requeueing the exact immutable generation lets an active
+				// consumer reactivate it without inventing an asset reload generation.
+				evictedRetry = &*existing;
+			} else {
+				result = *existing;
+				result.accepted = !IsTerminal(existing->state);
+				if(result.accepted) {
+					result.reason = "Idempotent streaming request joined the existing work.";
+				} else if(existing->state == AnimationStreamState::Failed) {
+					result.reason = "A failed payload requires a newer asset generation before retry.";
+				} else {
+					result.reason = "A cancelled payload requires a newer asset generation before retry.";
+				}
+				return result;
+			}
+		}
+
+		// Newer work makes older pending IO incapable of publication. Transition it
+		// to a terminal state now so pending-count/byte bounds describe work that
+		// can still complete instead of leaking superseded requests indefinitely.
+		for (AnimationStreamDecision& decision : m_decisions)
+		{
+			if (MakePayloadKey(decision.request) == payloadKey
+				&& decision.request.generation < request.generation
+				&& decision.state == AnimationStreamState::Requested)
+			{
+				decision.state = AnimationStreamState::Cancelled;
+				decision.accepted = false;
+				decision.useSafeFallback = true;
+				decision.publicationSequence = ++m_publicationSequence;
+				decision.reason = "Superseded by a newer payload generation before publication.";
+				++m_fallbackUses;
+			}
+		}
+
+		std::uint32_t pendingCount = 0u;
+		std::uint32_t pendingPrefetchCount = 0u;
+		std::uint64_t pendingBytes = 0u;
+		for (const AnimationStreamDecision& value : m_decisions)
+		{
+			if (value.state != AnimationStreamState::Requested)
+			{
+				continue;
+			}
+			++pendingCount;
+			pendingBytes = AddSaturated(pendingBytes, value.request.byteSize);
+			pendingPrefetchCount += value.request.prefetch ? 1u : 0u;
+		}
+		if (pendingCount >= m_maximumPendingRequests
+			|| request.byteSize > m_maximumPendingBytes - std::min(pendingBytes, m_maximumPendingBytes))
+		{
+			++m_rejectedRequests;
+			result.reason = "The bounded streaming request or byte budget is full; safe fallback remains active.";
+			return result;
+		}
+		if (request.prefetch && pendingPrefetchCount >= m_maximumPrefetchRequests)
+		{
+			++m_rejectedRequests;
+			result.reason = "The bounded prefetch horizon is full; demand requests retain priority.";
+			return result;
+		}
+
+		if(evictedRetry != nullptr) {
+			result = *evictedRetry;
+			result.request = request;
+			result.state = AnimationStreamState::Requested;
+			result.accepted = true;
+			result.useSafeFallback = true;
+			result.activeGeneration = false;
+			result.fallbackGeneration = 0U;
+			result.publicationSequence = ++m_publicationSequence;
+			result.reason = "An exact same-generation payload was requeued after budget eviction.";
+			*evictedRetry = result;
+			m_latestRequestedGenerations[payloadKey] = request.generation;
+			// QueueRead installs a new token after Request returns. Removing any
+			// historical entry here guarantees cancellation controls only fresh IO.
+			m_cancellationTokens.erase(generationKey);
+			++m_fallbackUses;
+			return result;
+		}
+
+		PruneTerminalDecisionsLocked();
+		if (m_decisions.size() >= m_maximumTrackedPayloadGenerations)
+		{
+			++m_rejectedRequests;
+			result.reason = "The bounded streaming diagnostics/history table is full.";
+			return result;
+		}
+
+		if (const auto active = m_activeGenerations.find(payloadKey); active != m_activeGenerations.end())
+		{
+			result.fallbackKind = AnimationStreamFallbackKind::LastResidentGeneration;
+			result.fallbackGeneration = active->second;
+		}
+		result.state = AnimationStreamState::Requested;
+		result.accepted = true;
+		result.useSafeFallback = true;
+		result.publicationSequence = ++m_publicationSequence;
+		result.reason = "Queued on the asynchronous IO path; fallback remains authoritative until protected publication.";
+		m_latestRequestedGenerations[payloadKey] = request.generation;
+		m_decisions.push_back(result);
+		++m_fallbackUses;
+		return result;
+	}
+
+	AnimationStreamDecision AnimationStreamingCoordinator::Request(const AnimationStreamRequest& request)
+	{
+		std::scoped_lock lock(m_mutex);
+		AnimationStreamDecision result = RequestLocked(request);
+		if (result.accepted)
+		{
+			SignalSupersededReadsLocked(request);
+		}
+		return result;
+	}
+
+	AnimationStreamReadJob AnimationStreamingCoordinator::QueueRead(
+		::ResourceManager& resourceManager,
+		const AnimationStreamRequest& request)
+	{
+		AnimationStreamReadJob job;
+		job.decision = Request(request);
+		std::shared_ptr<std::atomic_bool> cancellation = std::make_shared<std::atomic_bool>(false);
+		if (job.decision.accepted)
+		{
+			std::scoped_lock lock(m_mutex);
+			const auto found = std::find_if(m_decisions.begin(), m_decisions.end(), [&](const auto& value) {
+				return MakeGenerationKey(value.request) == MakeGenerationKey(request);
+			});
+			if (found != m_decisions.end() && found->state == AnimationStreamState::Requested)
+			{
+				auto [token, inserted] = m_cancellationTokens.try_emplace(
+					MakeGenerationKey(request), cancellation);
+				cancellation = token->second;
+				(void)inserted;
+			}
+			else
+			{
+				cancellation->store(true, std::memory_order_release);
+			}
+		}
+		else
+		{
+			cancellation->store(true, std::memory_order_release);
+		}
+
+		const bool requestAccepted = job.decision.accepted;
+		auto read = [&resourceManager, request, cancellation, requestAccepted]() {
+			AnimationStreamReadResult result;
+			result.request = request;
+			if (cancellation->load(std::memory_order_acquire))
+			{
+				result.status = requestAccepted
+					? AnimationStreamReadStatus::Cancelled : AnimationStreamReadStatus::Rejected;
+				result.reason = "Streaming IO was rejected or cancelled before the worker read began.";
+				return result;
+			}
+			if (request.logicalPath.empty())
+			{
+				result.status = AnimationStreamReadStatus::NotAnimationAsset;
+				result.reason = "A streaming IO request requires a cooked animation logical path.";
+				return result;
+			}
+
+			AnimationRangeReadResult range = resourceManager.ReadAnimationAssetRange(
+				request.logicalPath, request.byteOffset, request.byteSize, request.byteSize);
+			if (cancellation->load(std::memory_order_acquire))
+			{
+				range.bytes.clear();
+				result.status = AnimationStreamReadStatus::Cancelled;
+				result.reason = "Cancellation won after IO and before protected animation publication.";
+				return result;
+			}
+			result.status = ToStreamReadStatus(range.status);
+			result.bytes = std::move(range.bytes);
+			result.reason = std::move(range.message);
+			return result;
+		};
+
+		// Engine startup normally owns worker creation. A zero-worker test/tool
+		// session executes the same bounded callable inline instead of returning a
+		// future that can never become ready.
+		if (ThreadPool::instance().getThreadCount() == 0u)
+		{
+			std::promise<AnimationStreamReadResult> ready;
+			ready.set_value(read());
+			job.completion = ready.get_future().share();
+			return job;
+		}
+		auto task = ThreadPool::instance().createTask(std::move(read));
+		job.completion = task->getFuture().share();
+		ThreadPool::instance().enqueue(task, 1u);
+		return job;
+	}
+
+	bool AnimationStreamingCoordinator::PublishReadResult(
+		const AnimationStreamReadResult& result)
+	{
+		if (result.status == AnimationStreamReadStatus::Cancelled
+			|| result.status == AnimationStreamReadStatus::Rejected)
+		{
+			return false;
+		}
+		const bool sizeMatches = result.Succeeded()
+			&& result.bytes.size() == result.request.byteSize;
+		const bool fingerprintMatches = sizeMatches
+			&& (result.request.expectedContentFingerprint == 0U
+				|| ComputeAnimationStreamContentFingerprint(result.bytes)
+					== result.request.expectedContentFingerprint);
+		std::shared_ptr<const std::vector<std::uint8_t>> payload;
+		if(fingerprintMatches) {
+			try {
+				payload = std::make_shared<const std::vector<std::uint8_t>>(result.bytes);
+			} catch(const std::bad_alloc&) {
+				payload.reset();
+			}
+		}
+
+		const bool complete = fingerprintMatches && payload != nullptr;
+		std::scoped_lock lock(m_mutex);
+		const bool published = CompleteLocked(
+			result.request, complete, std::move(payload));
+		if(published) m_cancellationTokens.erase(MakeGenerationKey(result.request));
+		return published && complete;
+	}
+
+	std::vector<AnimationStreamDecision> AnimationStreamingCoordinator::RequestBatch(
+		std::span<const AnimationStreamRequest> requests)
+	{
+		std::scoped_lock lock(m_mutex);
+		if (requests.empty())
+		{
+			return {};
+		}
+		if (requests.size() > m_maximumPendingRequests)
+		{
+			m_rejectedRequests += requests.size();
+			std::vector<AnimationStreamDecision> rejected;
+			rejected.reserve(requests.size());
+			for (const AnimationStreamRequest& request : requests)
+			{
+				AnimationStreamDecision decision;
+				decision.request = request;
+				decision.fallbackKind = DefaultFallback(request.kind);
+				decision.reason = "The atomic streaming batch exceeds the hard request bound.";
+				rejected.push_back(std::move(decision));
+			}
+			return rejected;
+		}
+
+		const auto previousDecisions = m_decisions;
+		const auto previousLatest = m_latestRequestedGenerations;
+		const auto previousActive = m_activeGenerations;
+		const std::uint64_t previousSequence = m_publicationSequence;
+		const std::uint64_t previousRejected = m_rejectedRequests;
+		const std::uint64_t previousFallbackUses = m_fallbackUses;
+		std::vector<AnimationStreamDecision> results;
+		results.reserve(requests.size());
+		bool accepted = true;
+		std::unordered_set<std::string> identities;
+		for (const AnimationStreamRequest& request : requests)
+		{
+			if (!identities.insert(MakeGenerationKey(request)).second)
+			{
+				AnimationStreamDecision duplicate;
+				duplicate.request = request;
+				duplicate.reason = "An atomic streaming batch cannot contain duplicate payload generations.";
+				results.push_back(std::move(duplicate));
+				accepted = false;
+				break;
+			}
+			results.push_back(RequestLocked(request));
+			if (!results.back().accepted)
+			{
+				accepted = false;
+				break;
+			}
+		}
+		if (accepted)
+		{
+			for (const AnimationStreamRequest& request : requests)
+			{
+				SignalSupersededReadsLocked(request);
+			}
+			return results;
+		}
+
+		m_decisions = previousDecisions;
+		m_latestRequestedGenerations = previousLatest;
+		m_activeGenerations = previousActive;
+		m_publicationSequence = previousSequence;
+		m_fallbackUses = previousFallbackUses;
+		m_rejectedRequests = previousRejected + requests.size();
+		results.clear();
+		for (const AnimationStreamRequest& request : requests)
+		{
+			AnimationStreamDecision rejected;
+			rejected.request = request;
+			rejected.fallbackKind = DefaultFallback(request.kind);
+			rejected.reason = "The atomic streaming batch was rejected without queuing partial work.";
+			results.push_back(std::move(rejected));
+		}
+		return results;
+	}
+
+	bool AnimationStreamingCoordinator::CompleteLocked(
+		const AnimationStreamRequest& request,
+		bool success,
+		std::shared_ptr<const std::vector<std::uint8_t>> payload)
+	{
+		const std::string payloadKey = MakePayloadKey(request);
+		const std::string generationKey = MakeGenerationKey(request);
+		const auto found = std::find_if(m_decisions.begin(), m_decisions.end(), [&](const auto& value) {
+			return MakeGenerationKey(value.request) == generationKey;
+		});
+		const auto latest = m_latestRequestedGenerations.find(payloadKey);
+		if (found == m_decisions.end() || found->state != AnimationStreamState::Requested
+			|| !MatchesImmutableRequest(found->request, request)
+			|| latest == m_latestRequestedGenerations.end() || latest->second != request.generation)
+		{
+			++m_staleCompletions;
+			return false;
+		}
+
+		found->publicationSequence = ++m_publicationSequence;
+		if (!success)
+		{
+			m_residentPayloads.erase(generationKey);
+			found->state = AnimationStreamState::Failed;
+			found->accepted = false;
+			found->useSafeFallback = true;
+			found->reason = "IO or validation failed; the prior resident block or deterministic fallback remains active.";
+			++m_fallbackUses;
+			return true;
+		}
+
+		if (const auto active = m_activeGenerations.find(payloadKey); active != m_activeGenerations.end())
+		{
+			const std::uint64_t previousGeneration = active->second;
+			for (AnimationStreamDecision& decision : m_decisions)
+			{
+				if (MakePayloadKey(decision.request) == payloadKey
+					&& decision.request.generation == previousGeneration)
+				{
+					decision.activeGeneration = false;
+					break;
+				}
+			}
+		}
+		m_activeGenerations[payloadKey] = request.generation;
+		found->state = AnimationStreamState::Resident;
+		found->accepted = true;
+		found->useSafeFallback = false;
+		found->activeGeneration = true;
+		found->fallbackGeneration = 0u;
+		found->reason = "Complete block published at the protected animation streaming boundary.";
+		if(payload) {
+			m_residentPayloads[generationKey] = std::move(payload);
+			RebuildResidencySnapshotLocked();
+		}
+		return true;
+	}
+
+	bool AnimationStreamingCoordinator::Complete(const AnimationStreamRequest& request, bool success)
+	{
+		std::scoped_lock lock(m_mutex);
+		return CompleteLocked(request, success, {});
+	}
+
+	bool AnimationStreamingCoordinator::Cancel(const AnimationStreamRequest& request)
+	{
+		std::scoped_lock lock(m_mutex);
+		const auto found = std::find_if(m_decisions.begin(), m_decisions.end(), [&](const auto& value) {
+			return MakeGenerationKey(value.request) == MakeGenerationKey(request);
+		});
+		if (found == m_decisions.end() || found->state != AnimationStreamState::Requested
+			|| !MatchesImmutableRequest(found->request, request))
+		{
+			return false;
+		}
+		found->state = AnimationStreamState::Cancelled;
+		found->accepted = false;
+		found->useSafeFallback = true;
+		found->publicationSequence = ++m_publicationSequence;
+		found->reason = "Cancellation won before protected publication; stale completion will be rejected.";
+		if (const auto token = m_cancellationTokens.find(MakeGenerationKey(request));
+			token != m_cancellationTokens.end())
+		{
+			token->second->store(true, std::memory_order_release);
+			m_cancellationTokens.erase(token);
+		}
+		++m_fallbackUses;
+		return true;
+	}
+
+	bool AnimationStreamingCoordinator::Retain(const AnimationStreamRequest& request)
+	{
+		std::scoped_lock lock(m_mutex);
+		const auto found = std::find_if(m_decisions.begin(), m_decisions.end(), [&](const auto& value) {
+			return MakeGenerationKey(value.request) == MakeGenerationKey(request);
+		});
+		if (found == m_decisions.end() || IsTerminal(found->state)
+			|| !MatchesImmutableRequest(found->request, request)
+			|| found->retainCount == std::numeric_limits<std::uint32_t>::max())
+		{
+			return false;
+		}
+		++found->retainCount;
+		return true;
+	}
+
+	bool AnimationStreamingCoordinator::Release(const AnimationStreamRequest& request)
+	{
+		std::scoped_lock lock(m_mutex);
+		const auto found = std::find_if(m_decisions.begin(), m_decisions.end(), [&](const auto& value) {
+			return MakeGenerationKey(value.request) == MakeGenerationKey(request);
+		});
+		if (found == m_decisions.end() || !MatchesImmutableRequest(found->request, request)
+			|| found->retainCount == 0u)
+		{
+			return false;
+		}
+		--found->retainCount;
+		return true;
+	}
+
+	bool AnimationStreamingCoordinator::SetGameplayCritical(
+		const AnimationStreamRequest& request,
+		bool gameplayCritical)
+	{
+		std::scoped_lock lock(m_mutex);
+		const auto found = std::find_if(m_decisions.begin(), m_decisions.end(), [&](const auto& value) {
+			return MakeGenerationKey(value.request) == MakeGenerationKey(request);
+		});
+		if(found == m_decisions.end() || !MatchesImmutableRequest(found->request, request)) {
+			return false;
+		}
+		if(found->request.gameplayCritical == gameplayCritical) return true;
+		found->request.gameplayCritical = gameplayCritical;
+		found->publicationSequence = ++m_publicationSequence;
+		if(found->state == AnimationStreamState::Resident
+			&& m_residentPayloads.contains(MakeGenerationKey(found->request))) {
+			RebuildResidencySnapshotLocked();
+		}
+		return true;
+	}
+
+	std::vector<AnimationStreamDecision> AnimationStreamingCoordinator::ApplyResidentBudget(
+		std::uint64_t residentBudgetBytes)
+	{
+		std::scoped_lock lock(m_mutex);
+		std::uint64_t residentBytes = 0u;
+		std::vector<AnimationStreamDecision*> candidates;
+		for (AnimationStreamDecision& decision : m_decisions)
+		{
+			if (decision.state != AnimationStreamState::Resident)
+			{
+				continue;
+			}
+			residentBytes = AddSaturated(residentBytes, decision.request.byteSize);
+			if (!decision.request.gameplayCritical && decision.retainCount == 0u)
+			{
+				candidates.push_back(&decision);
+			}
+		}
+		std::sort(candidates.begin(), candidates.end(), [](const auto* left, const auto* right) {
+			if (left->activeGeneration != right->activeGeneration) return !left->activeGeneration;
+			if (left->request.priority != right->request.priority) return left->request.priority < right->request.priority;
+			if (left->publicationSequence != right->publicationSequence) return left->publicationSequence < right->publicationSequence;
+			return MakeGenerationKey(left->request) < MakeGenerationKey(right->request);
+		});
+		std::vector<AnimationStreamDecision> released;
+		bool snapshotChanged = false;
+		for (AnimationStreamDecision* decision : candidates)
+		{
+			if (residentBytes <= residentBudgetBytes) break;
+			residentBytes = residentBytes > decision->request.byteSize
+				? residentBytes - decision->request.byteSize : 0u;
+			if (decision->activeGeneration)
+			{
+				m_activeGenerations.erase(MakePayloadKey(decision->request));
+				decision->activeGeneration = false;
+			}
+			decision->state = AnimationStreamState::Missing;
+			decision->accepted = false;
+			decision->useSafeFallback = true;
+			decision->fallbackKind = DefaultFallback(decision->request.kind);
+			decision->publicationSequence = ++m_publicationSequence;
+			decision->reason = "Resident block released under pressure; bounded safe fallback is active.";
+			m_residentPayloads.erase(MakeGenerationKey(decision->request));
+			snapshotChanged = true;
+			released.push_back(*decision);
+			++m_fallbackUses;
+		}
+		if(snapshotChanged) RebuildResidencySnapshotLocked();
+		return released;
+	}
+
+	std::optional<AnimationStreamDecision> AnimationStreamingCoordinator::Query(
+		const AnimationStreamRequest& request) const
+	{
+		std::scoped_lock lock(m_mutex);
+		const auto found = std::find_if(m_decisions.begin(), m_decisions.end(), [&](const auto& value) {
+			return MakeGenerationKey(value.request) == MakeGenerationKey(request);
+		});
+		return found == m_decisions.end()
+			? std::optional<AnimationStreamDecision>{}
+			: std::optional<AnimationStreamDecision>{*found};
+	}
+
+	std::vector<AnimationStreamDecision> AnimationStreamingCoordinator::Snapshot() const
+	{
+		std::scoped_lock lock(m_mutex);
+		std::vector<AnimationStreamDecision> copy = m_decisions;
+		std::sort(copy.begin(), copy.end(), [](const auto& left, const auto& right) {
+			return MakeGenerationKey(left.request) < MakeGenerationKey(right.request);
+		});
+		return copy;
+	}
+
+	std::shared_ptr<const AnimationStreamingResidencySnapshot>
+	AnimationStreamingCoordinator::LoadResidencySnapshot() const
+	{
+		std::scoped_lock lock(m_mutex);
+		return m_residencySnapshot;
+	}
+
+	AnimationStreamingDiagnostics AnimationStreamingCoordinator::BuildDiagnostics() const
+	{
+		std::scoped_lock lock(m_mutex);
+		AnimationStreamingDiagnostics diagnostics;
+		diagnostics.trackedPayloadGenerations = static_cast<std::uint32_t>(m_decisions.size());
+		diagnostics.rejectedRequests = m_rejectedRequests;
+		diagnostics.staleCompletions = m_staleCompletions;
+		diagnostics.fallbackUses = m_fallbackUses;
+		for (const AnimationStreamDecision& decision : m_decisions)
+		{
+			switch (decision.state)
+			{
+			case AnimationStreamState::Requested:
+				++diagnostics.requestedPayloads;
+				diagnostics.pendingBytes = AddSaturated(diagnostics.pendingBytes, decision.request.byteSize);
+				diagnostics.pendingPrefetchPayloads += decision.request.prefetch ? 1u : 0u;
+				break;
+			case AnimationStreamState::Resident:
+				++diagnostics.residentPayloads;
+				diagnostics.residentBytes = AddSaturated(diagnostics.residentBytes, decision.request.byteSize);
+				break;
+			case AnimationStreamState::Failed:
+				++diagnostics.failedPayloads;
+				break;
+			case AnimationStreamState::Cancelled:
+				++diagnostics.cancelledPayloads;
+				break;
+			case AnimationStreamState::Missing:
+				break;
+			}
+			if ((decision.request.gameplayCritical || decision.retainCount != 0u)
+				&& (decision.state == AnimationStreamState::Resident || decision.state == AnimationStreamState::Requested))
+			{
+				++diagnostics.retainedGameplayPayloads;
+				diagnostics.protectedBytes = AddSaturated(diagnostics.protectedBytes, decision.request.byteSize);
+			}
+		}
+		return diagnostics;
+	}
+}

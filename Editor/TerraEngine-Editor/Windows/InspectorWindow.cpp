@@ -4,6 +4,7 @@
 // It synchronizes changes made in the UI back to the underlying engine objects, ensuring real-time feedback in the scene.
 
 #include "InspectorWindow.h"
+#include "AnimatorInspectorMetadata.h"
 #include "../Subsystems/MainEditorSubsystem.h"
 #include "../Subsystems/ScriptCompilationSubsystem.h"
 #include "../Subsystems/UndoRedoSystem.h"
@@ -20,12 +21,16 @@
 #include "Engine/Components/LightComponent.h"
 #include "Engine/Components/UIComponent.h"
 #include "Engine/Components/ScriptComponent.h"
+#include "Engine/Components/AnimatorComponent.h"
 #include "Engine/Components/Physics/RigidBodyComponent.h"
 #include "Engine/Components/Physics/ColliderSetComponent.h"
 #include "Engine/Components/Physics/ConstraintSetComponent.h"
 #include "Engine/Components/Physics/CharacterControllerComponent.h"
 #include "Engine/Physics/PhysicsSystem.h"
 #include "Engine/Scripting/ScriptingSystem.h"
+#include "Engine/Animation/AnimationSystem.h"
+#include "Engine/Animation/Assets/AnimationClipAsset.h"
+#include "Engine/Animation/Assets/AnimationControllerAsset.h"
 #include "AssetDatabase.h"
 #include "AssetImportResult.h"
 #include "Editor/AssetCompilers/MeshCompiler.h"
@@ -42,6 +47,7 @@
 #include <glm/trigonometric.hpp>
 #include <algorithm>
 #include <cctype>
+#include <cinttypes>
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
@@ -70,6 +76,45 @@ TerraEngine::UUID GetObjectUuid(entt::entity entity)
 	return TerraEngine::EMPTY_UUID;
 }
 
+const char* AnimationExecutionPolicyName(TerraEngine::Animation::AnimationExecutionPolicy policy)
+{
+	switch (policy) {
+	case TerraEngine::Animation::AnimationExecutionPolicy::Auto: return "Auto";
+	case TerraEngine::Animation::AnimationExecutionPolicy::ForceGpuVisual: return "GPU Visual";
+	case TerraEngine::Animation::AnimationExecutionPolicy::ForceHybridAuthoritative: return "Hybrid Authoritative";
+	case TerraEngine::Animation::AnimationExecutionPolicy::ForceCpuDeterministicFallback: return "CPU Deterministic Fallback";
+	}
+	return "Unknown";
+}
+
+const char* AnimatorTimePolicyName(TerraEngine::Animation::AnimatorTimePolicy policy)
+{
+	switch (policy) {
+	case TerraEngine::Animation::AnimatorTimePolicy::Scaled: return "Scaled";
+	case TerraEngine::Animation::AnimatorTimePolicy::Unscaled: return "Unscaled";
+	case TerraEngine::Animation::AnimatorTimePolicy::Fixed: return "Fixed";
+	}
+	return "Unknown";
+}
+
+const char* AnimatorPlaybackRunStateName(TerraEngine::Animation::AnimatorPlaybackRunState state)
+{
+	switch (state) {
+	case TerraEngine::Animation::AnimatorPlaybackRunState::Stopped: return "Stopped";
+	case TerraEngine::Animation::AnimatorPlaybackRunState::Playing: return "Playing";
+	case TerraEngine::Animation::AnimatorPlaybackRunState::Paused: return "Paused";
+	case TerraEngine::Animation::AnimatorPlaybackRunState::Completed: return "Completed";
+	}
+	return "Unknown";
+}
+
+std::string AnimationFingerprintText(TerraEngine::Animation::AnimationCompatibilityFingerprint fingerprint)
+{
+	char text[24]{};
+	std::snprintf(text, sizeof(text), "0x%016llX", static_cast<unsigned long long>(fingerprint));
+	return text;
+}
+
 bool IsGeneratedPackageSubAssetPath(const std::filesystem::path& path)
 {
 	const std::filesystem::path normalized = std::filesystem::absolute(path).lexically_normal();
@@ -84,6 +129,83 @@ bool IsGeneratedPackageSubAssetPath(const std::filesystem::path& path)
 		}
 	}
 	return false;
+}
+
+std::string LowercaseNormalizedPath(const std::filesystem::path& path)
+{
+	// Windows compares paths without regard to letter case. Normalizing both
+	// sides before the prefix check also gives separators one stable spelling.
+	std::string text = path.lexically_normal().generic_string();
+	std::transform(text.begin(), text.end(), text.begin(), [](unsigned char value) {
+		return static_cast<char>(std::tolower(value));
+	});
+	return text;
+}
+
+bool IsPathInsideOrEqual(const std::filesystem::path& candidate, const std::filesystem::path& root)
+{
+	const std::string normalizedCandidate = LowercaseNormalizedPath(candidate);
+	std::string normalizedRoot = LowercaseNormalizedPath(root);
+	if (!normalizedRoot.ends_with('/'))
+	{
+		normalizedRoot.push_back('/');
+	}
+	return normalizedCandidate == normalizedRoot.substr(0U, normalizedRoot.size() - 1U)
+		|| normalizedCandidate.rfind(normalizedRoot, 0U) == 0U;
+}
+
+std::optional<std::filesystem::path> ResolvePublishedAnimationClipPath(
+	const std::filesystem::path& buildRoot,
+	const std::filesystem::path& publishedRelativePath)
+{
+	// A rooted path such as "\\clip.teanim" is not reported as absolute on
+	// every Windows path form, but joining it can still discard BuildRoot.
+	// Reject every root-bearing form and every parent traversal explicitly.
+	if (publishedRelativePath.empty()
+		|| publishedRelativePath.is_absolute()
+		|| publishedRelativePath.has_root_name()
+		|| publishedRelativePath.has_root_directory()
+		|| publishedRelativePath.extension() != ".teanim")
+	{
+		return std::nullopt;
+	}
+	for (const std::filesystem::path& part : publishedRelativePath)
+	{
+		if (part == "..")
+		{
+			return std::nullopt;
+		}
+	}
+
+	std::error_code pathError;
+	const std::filesystem::path absoluteRoot =
+		std::filesystem::absolute(buildRoot, pathError).lexically_normal();
+	if (pathError)
+	{
+		return std::nullopt;
+	}
+	const std::filesystem::path lexicalCandidate =
+		(absoluteRoot / publishedRelativePath).lexically_normal();
+	if (!IsPathInsideOrEqual(lexicalCandidate, absoluteRoot))
+	{
+		return std::nullopt;
+	}
+
+	// Resolve existing symlinks as a second boundary check. This prevents a
+	// manifest path that looks contained from opening a file outside BuildRoot.
+	const std::filesystem::path canonicalRoot =
+		std::filesystem::weakly_canonical(absoluteRoot, pathError);
+	if (pathError)
+	{
+		return std::nullopt;
+	}
+	const std::filesystem::path canonicalCandidate =
+		std::filesystem::weakly_canonical(lexicalCandidate, pathError);
+	if (pathError || !IsPathInsideOrEqual(canonicalCandidate, canonicalRoot))
+	{
+		return std::nullopt;
+	}
+	return canonicalCandidate;
 }
 
 template<typename ComponentType>
@@ -261,6 +383,14 @@ std::optional<GeneratedModelPackageChildKind> GeneratedChildKindForUuidProperty(
 	{
 		return GeneratedModelPackageChildKind::Texture;
 	}
+	if (propertyName == "skeletonOverrideAssetId")
+	{
+		return GeneratedModelPackageChildKind::Skeleton;
+	}
+	if (propertyName == "defaultClipAssetId")
+	{
+		return GeneratedModelPackageChildKind::AnimationClip;
+	}
 	return std::nullopt;
 }
 
@@ -278,7 +408,9 @@ bool TryResolveGeneratedPackageChildNameForProperty(
 	const GeneratedModelPackageChildKind candidateKinds[] = {
 		GeneratedModelPackageChildKind::Mesh,
 		GeneratedModelPackageChildKind::Material,
-		GeneratedModelPackageChildKind::Texture
+		GeneratedModelPackageChildKind::Texture,
+		GeneratedModelPackageChildKind::Skeleton,
+		GeneratedModelPackageChildKind::AnimationClip
 	};
 	for (GeneratedModelPackageChildKind candidateKind : candidateKinds)
 	{
@@ -397,6 +529,15 @@ std::string BuildDisplayComponentName(const std::string& componentName)
 
 std::string BuildDisplayPropertyName(const std::string& componentName, const std::string& propertyName)
 {
+	if(componentName == "AnimatorComponent")
+	{
+		if(const auto* metadata =
+			TerraEngine::Editor::Animation::FindAnimatorInspectorProperty(propertyName))
+		{
+			return std::string(metadata->label);
+		}
+	}
+
 	if (componentName == "SkyComponent")
 	{
 		if (propertyName == "sourceAsset")
@@ -426,6 +567,99 @@ std::string BuildDisplayPropertyName(const std::string& componentName, const std
 	}
 
 	return propertyName;
+}
+
+void DrawAnimatorPropertyGuidance(std::string_view propertyName, bool labelHovered)
+{
+	const auto* metadata =
+		TerraEngine::Editor::Animation::FindAnimatorInspectorProperty(propertyName);
+	if(metadata == nullptr || !labelHovered)
+	{
+		return;
+	}
+
+	ImGui::BeginTooltip();
+	ImGui::PushTextWrapPos(ImGui::GetFontSize() * 32.0F);
+	ImGui::TextUnformatted(metadata->explanation.data(), metadata->explanation.data() + metadata->explanation.size());
+	ImGui::Spacing();
+	ImGui::TextUnformatted("How to use it:");
+	ImGui::TextWrapped("%.*s", static_cast<int>(metadata->usage.size()), metadata->usage.data());
+	ImGui::PopTextWrapPos();
+	ImGui::EndTooltip();
+}
+
+std::vector<AssetType> CandidateAssetTypesForProperty(std::string_view propertyName)
+{
+	if(propertyName == "controllerAssetId") return {AssetType::AnimationController};
+	if(propertyName == "defaultClipAssetId") return {AssetType::AnimationClip};
+	if(propertyName == "skeletonOverrideAssetId") return {AssetType::Skeleton};
+	if(propertyName == "avatarOverrideAssetId") return {AssetType::Skeleton};
+	if(propertyName == "retargetProfileOverrideAssetId") return {AssetType::RetargetProfile};
+	if(propertyName == "ragdollProfileOverrideAssetId") return {AssetType::RagdollProfile};
+	if(propertyName == "motionDatabaseOverrideAssetId") return {AssetType::MotionDatabase};
+	if(propertyName == "meshId") return {AssetType::Mesh};
+	if(propertyName == "materialId") return {AssetType::Material};
+	if(propertyName.find("Texture") != std::string_view::npos
+		|| propertyName.find("texture") != std::string_view::npos)
+	{
+		return {AssetType::Texture};
+	}
+	return {
+		AssetType::Mesh,
+		AssetType::Material,
+		AssetType::Texture,
+		AssetType::ShaderCollection
+	};
+}
+
+std::string EmptyAnimatorAssetLabel(std::string_view propertyName)
+{
+	if(propertyName == "controllerAssetId") return "None - uses Default Clip";
+	if(propertyName == "defaultClipAssetId") return "None - reference pose";
+	if(propertyName == "skeletonOverrideAssetId") return "None - uses model skeleton";
+	return "None - no override";
+}
+
+bool ResolveInspectorAssetLabel(
+	const TerraEngine::UUID& assetId,
+	std::string_view propertyName,
+	std::string& outLabel)
+{
+	if(assetId == TerraEngine::EMPTY_UUID)
+	{
+		outLabel = propertyName.ends_with("AssetId")
+			? EmptyAnimatorAssetLabel(propertyName)
+			: "None";
+		return true;
+	}
+
+	// Imported model children have a stable package identity even though they do
+	// not appear as separate editable source files in AssetDatabase.
+	if(TryResolveGeneratedPackageChildNameForProperty(assetId, propertyName, outLabel))
+	{
+		return true;
+	}
+	for(const auto& [path, metadata] : AssetDatabase::Instance().GetAssets())
+	{
+		if(metadata.guid == assetId)
+		{
+			outLabel = path.stem().string();
+			return true;
+		}
+	}
+	for(const AssetType assetType : CandidateAssetTypesForProperty(propertyName))
+	{
+		const std::filesystem::path resourcePath =
+			ResourceManager::Instance().DescribeAssetReference(assetId, assetType);
+		if(!resourcePath.empty())
+		{
+			outLabel = resourcePath.stem().string();
+			return true;
+		}
+	}
+
+	outLabel = "(Missing asset)";
+	return false;
 }
 
 bool IsSkyComponentName(const std::string& componentName)
@@ -1256,6 +1490,8 @@ InspectorWindow::InspectorWindow(MainEditorSubsystem* owner)
 	: EditorWindow("Inspector", true, "General"), m_Owner(owner) {
 }
 
+InspectorWindow::~InspectorWindow() = default;
+
 bool InspectorWindow::IsPrefabOverride(entt::entity obj, const std::string& compName, const std::string& propertyName) const
 {
 	std::optional<Object> object = ObjectManager::instance().getObject(obj);
@@ -1368,6 +1604,136 @@ void InspectorWindow::UpdateInspectorDragState() {
 	}
 }
 
+TerraEngine::UUID InspectorWindow::ResolveAnimatorStartClipAssetId(
+	TerraEngine::UUID controllerAssetId,
+	TerraEngine::UUID defaultClipAssetId)
+{
+	if(controllerAssetId == TerraEngine::EMPTY_UUID)
+	{
+		m_AnimatorFrameRangeControllerId = TerraEngine::EMPTY_UUID;
+		m_AnimatorFrameRangeControllerGeneration = 0U;
+		m_AnimatorFrameRangeControllerEntryClipId = TerraEngine::EMPTY_UUID;
+		return defaultClipAssetId;
+	}
+
+	ResourceManager& resources = ResourceManager::Instance();
+	const TerraEngine::Animation::AnimationGeneration observedGeneration =
+		resources.GetAnimationAssetRuntimeGeneration(
+			controllerAssetId,
+			AssetType::AnimationController);
+	if(m_AnimatorFrameRangeControllerId == controllerAssetId
+		&& m_AnimatorFrameRangeControllerGeneration == observedGeneration)
+	{
+		return m_AnimatorFrameRangeControllerEntryClipId != TerraEngine::EMPTY_UUID
+			? m_AnimatorFrameRangeControllerEntryClipId
+			: defaultClipAssetId;
+	}
+
+	TerraEngine::UUID entryClipAssetId = TerraEngine::EMPTY_UUID;
+	TerraEngine::Animation::AnimationControllerAsset controller;
+	TerraEngine::Animation::AnimationGeneration copiedGeneration = 0U;
+	if(observedGeneration != 0U
+		&& resources.CopyAnimationControllerPublication(
+			controllerAssetId,
+			controller,
+			copiedGeneration)
+		&& copiedGeneration == observedGeneration)
+	{
+		// Controllers may nest entry states. Follow the same bounded entry-leaf
+		// rule as runtime binding, then resolve a clip node at that leaf.
+		const TerraEngine::Animation::AnimationControllerState* entry = nullptr;
+		for(const auto& state : controller.states)
+		{
+			if(state.parentStateId == 0U && state.entry)
+			{
+				entry = &state;
+				break;
+			}
+		}
+		for(std::size_t depth = 0U; entry != nullptr && depth < 64U; ++depth)
+		{
+			const TerraEngine::Animation::AnimationControllerState* child = nullptr;
+			for(const auto& state : controller.states)
+			{
+				if(state.parentStateId == entry->stableId && state.entry)
+				{
+					child = &state;
+					break;
+				}
+			}
+			if(child == nullptr) break;
+			entry = child;
+		}
+		if(entry != nullptr)
+		{
+			for(const auto& node : controller.nodes)
+			{
+				if(node.stableId == entry->nodeId
+					&& node.kind
+						== TerraEngine::Animation::AnimationControllerNodeKind::Clip
+					&& node.dependencyAssetId.IsValid())
+				{
+					entryClipAssetId = node.dependencyAssetId.value;
+					break;
+				}
+			}
+		}
+	}
+
+	m_AnimatorFrameRangeControllerId = controllerAssetId;
+	m_AnimatorFrameRangeControllerGeneration = observedGeneration;
+	m_AnimatorFrameRangeControllerEntryClipId = entryClipAssetId;
+	return entryClipAssetId != TerraEngine::EMPTY_UUID
+		? entryClipAssetId
+		: defaultClipAssetId;
+}
+
+std::optional<std::uint32_t> InspectorWindow::ResolveAnimatorPlaybackMaximumFrame(
+	TerraEngine::UUID clipAssetId)
+{
+	if(clipAssetId == TerraEngine::EMPTY_UUID)
+	{
+		m_AnimatorFrameRangeClipId = TerraEngine::EMPTY_UUID;
+		m_AnimatorFrameRangeClipGeneration = 0U;
+		m_AnimatorFrameRangeMaximum.reset();
+		return m_AnimatorFrameRangeMaximum;
+	}
+
+	ResourceManager& resources = ResourceManager::Instance();
+	const TerraEngine::Animation::AnimationGeneration observedGeneration =
+		resources.GetAnimationAssetRuntimeGeneration(
+			clipAssetId,
+			AssetType::AnimationClip);
+	if(m_AnimatorFrameRangeClipId == clipAssetId
+		&& m_AnimatorFrameRangeClipGeneration == observedGeneration)
+	{
+		return m_AnimatorFrameRangeMaximum;
+	}
+
+	// Copy only after the cheap generation key changes. This keeps normal
+	// Inspector drawing independent of clip size while still invalidating the
+	// maximum immediately after an atomic reimport publication.
+	TerraEngine::Animation::AnimationClipAsset clip;
+	TerraEngine::Animation::AnimationGeneration copiedGeneration = 0U;
+	std::optional<std::uint32_t> maximum;
+	if(observedGeneration != 0U
+		&& resources.CopyAnimationClipPublication(
+			clipAssetId,
+			clip,
+			copiedGeneration)
+		&& copiedGeneration == observedGeneration)
+	{
+		maximum = TerraEngine::Editor::Animation::BuildAnimatorInspectorFrameRange(
+			std::numeric_limits<std::uint32_t>::max(),
+			clip.durationTicks).maximumFrame;
+	}
+
+	m_AnimatorFrameRangeClipId = clipAssetId;
+	m_AnimatorFrameRangeClipGeneration = observedGeneration;
+	m_AnimatorFrameRangeMaximum = maximum;
+	return m_AnimatorFrameRangeMaximum;
+}
+
 // InspectorWindow::DrawProperty is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProperty prop, entt::entity obj, ComponentAccessFunctions& access) {
 	std::string name = MetaPropertyName(prop);
@@ -1406,11 +1772,19 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 	if (prefabOverride) {
 		ImGui::PopStyleColor();
 	}
+	// Capture hover state before opening the context-menu path because popup
+	// contents can replace ImGui's current item while the menu is visible.
+	const bool propertyLabelHovered =
+		ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal);
 	if (ImGui::BeginPopupContextItem(("PrefabPropertyReset_" + compName + "_" + name).c_str())) {
 		if (ImGui::MenuItem("Reset To Prefab Default")) {
 			ResetPrefabOverride(obj, compName, name);
 		}
 		ImGui::EndPopup();
+	}
+	if(compName == "AnimatorComponent")
+	{
+		DrawAnimatorPropertyGuidance(name, propertyLabelHovered);
 	}
 	ImGui::TableSetColumnIndex(1);
 
@@ -1467,16 +1841,208 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 	// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	else if (IsMetaType<std::uint32_t>(type)) {
 		std::uint32_t val = MetaValue<std::uint32_t>(var);
-		int signedValue = static_cast<int>(val);
-		ImGui::SetNextItemWidth(-1.0f);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (ImGui::DragInt(("##" + name).c_str(), &signedValue, 1.0f, 0, std::numeric_limits<int>::max())) {
-			const std::uint32_t clampedValue = static_cast<std::uint32_t>(std::max(0, signedValue));
-			access.entitySetter(ObjectManager::instance().getRegistry(), obj, name, clampedValue);
+		const auto* animatorMetadata = compName == "AnimatorComponent"
+			? TerraEngine::Editor::Animation::FindAnimatorInspectorProperty(name)
+			: nullptr;
+		if(animatorMetadata != nullptr
+			&& animatorMetadata->control
+				== TerraEngine::Editor::Animation::AnimatorInspectorControlKind::ReadOnly)
+		{
+			const std::string readOnlyValue = name == "schemaVersion"
+				? std::to_string(val) + " (managed by editor)"
+				: val == 0U
+					? "None (use Animation Diagnostics)"
+					: "Legacy flags: 0x" + [&]() {
+						char text[16]{};
+						std::snprintf(text, sizeof(text), "%08X", val);
+						return std::string(text);
+					}();
+			char readOnlyBuffer[128]{};
+			std::strncpy(
+				readOnlyBuffer,
+				readOnlyValue.c_str(),
+				sizeof(readOnlyBuffer) - 1U);
+			ImGui::SetNextItemWidth(-1.0F);
+			ImGui::InputText(
+				("##" + name).c_str(),
+				readOnlyBuffer,
+				sizeof(readOnlyBuffer),
+				ImGuiInputTextFlags_ReadOnly);
 		}
-		startEditing(var);
-		endEditing();
-		UpdateInspectorDragState();
+		else if(animatorMetadata != nullptr
+			&& animatorMetadata->control
+				== TerraEngine::Editor::Animation::AnimatorInspectorControlKind::Choice)
+		{
+			const auto* selected =
+				TerraEngine::Editor::Animation::FindAnimatorInspectorChoice(*animatorMetadata, val);
+			const std::string unknown = "Unknown (" + std::to_string(val) + ")";
+			const char* preview = selected != nullptr ? selected->label.data() : unknown.c_str();
+			ImGui::SetNextItemWidth(-1.0F);
+			if(ImGui::BeginCombo(("##" + name).c_str(), preview))
+			{
+				for(const auto& choice : animatorMetadata->choices)
+				{
+					const bool isSelected = choice.value == val;
+					if(ImGui::Selectable(choice.label.data(), isSelected) && !isSelected)
+					{
+						const ReflectionVariant oldValue =
+							access.entityGetter(ObjectManager::instance().getRegistry(), obj, name);
+						access.entitySetter(ObjectManager::instance().getRegistry(), obj, name, choice.value);
+						const ReflectionVariant newValue =
+							access.entityGetter(ObjectManager::instance().getRegistry(), obj, name);
+						UndoRedoSystem::Instance().PushCommand(
+							std::make_unique<ModifyComponentCommand>(
+								obj, compName, name, oldValue, newValue));
+						NotifySceneAfterComponentMutation(compName);
+					}
+					if(ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+					{
+						ImGui::SetTooltip("%.*s",
+							static_cast<int>(choice.guidance.size()),
+							choice.guidance.data());
+					}
+					if(isSelected)
+					{
+						ImGui::SetItemDefaultFocus();
+					}
+				}
+				ImGui::EndCombo();
+			}
+		}
+		else
+		{
+			const bool isAnimatorStartFrame = animatorMetadata != nullptr
+				&& animatorMetadata->control
+					== TerraEngine::Editor::Animation::AnimatorInspectorControlKind::UnsignedInteger
+				&& name == "defaultClipStartFrame";
+			if(isAnimatorStartFrame)
+			{
+				const ReflectionVariant clipVariant = access.entityGetter(
+					ObjectManager::instance().getRegistry(),
+					obj,
+					"defaultClipAssetId");
+				const TerraEngine::UUID clipAssetId =
+					IsValid(clipVariant)
+						&& IsMetaValueType<TerraEngine::UUID>(clipVariant)
+					? MetaValue<TerraEngine::UUID>(clipVariant)
+					: TerraEngine::EMPTY_UUID;
+				const ReflectionVariant controllerVariant = access.entityGetter(
+					ObjectManager::instance().getRegistry(),
+					obj,
+					"controllerAssetId");
+				const TerraEngine::UUID controllerAssetId =
+					IsValid(controllerVariant)
+						&& IsMetaValueType<TerraEngine::UUID>(controllerVariant)
+					? MetaValue<TerraEngine::UUID>(controllerVariant)
+					: TerraEngine::EMPTY_UUID;
+				const TerraEngine::UUID startClipAssetId =
+					ResolveAnimatorStartClipAssetId(
+						controllerAssetId,
+						clipAssetId);
+				const std::optional<std::uint32_t> maximum =
+					ResolveAnimatorPlaybackMaximumFrame(startClipAssetId);
+				if(maximum)
+				{
+					const ReflectionVariant loopVariant = access.entityGetter(
+						ObjectManager::instance().getRegistry(),
+						obj,
+						"loopDefaultClip");
+					const bool loopDefaultClip =
+						IsValid(loopVariant)
+							&& IsMetaValueType<bool>(loopVariant)
+						? MetaValue<bool>(loopVariant)
+						: true;
+					const auto range =
+						TerraEngine::Editor::Animation::BuildAnimatorInspectorFrameRange(
+							val,
+							static_cast<TerraEngine::Animation::AnimationFixedTick>(*maximum),
+							loopDefaultClip);
+					if(range.currentFrame != val)
+					{
+						// A shortened reimport may invalidate a previously legal
+						// authored value. Normalize it through the shared reflected
+						// setter before drawing so neither the scene nor UI can retain
+						// current > max.
+						access.entitySetter(
+							ObjectManager::instance().getRegistry(),
+							obj,
+							name,
+							range.currentFrame);
+						NotifySceneAfterComponentMutation(compName);
+						val = range.currentFrame;
+					}
+					// ImGui applies drag/navigation deltas before clamping. Keep the
+					// temporary value signed so moving left from zero saturates there
+					// instead of wrapping through uint32 and appearing at the maximum.
+					std::int64_t editedFrame = static_cast<std::int64_t>(val);
+					const std::int64_t minimumFrame = 0;
+					const std::int64_t maximumFrame =
+						static_cast<std::int64_t>(range.maximumFrame);
+					const std::string format =
+						std::string("%") + PRId64 + "/"
+						+ std::to_string(range.maximumFrame);
+					ImGui::SetNextItemWidth(-1.0F);
+					if(ImGui::SliderScalar(
+						("##" + name).c_str(),
+						ImGuiDataType_S64,
+						&editedFrame,
+						&minimumFrame,
+						&maximumFrame,
+						format.c_str(),
+						ImGuiSliderFlags_AlwaysClamp))
+					{
+						const std::uint32_t boundedFrame =
+							TerraEngine::Editor::Animation::BuildAnimatorInspectorFrameRange(
+								editedFrame,
+								static_cast<TerraEngine::Animation::AnimationFixedTick>(
+									range.maximumFrame),
+								false).currentFrame;
+						access.entitySetter(
+							ObjectManager::instance().getRegistry(),
+							obj,
+							name,
+							boundedFrame);
+					}
+					startEditing(var);
+					endEditing();
+					UpdateInspectorDragState();
+				}
+				else
+				{
+					// A missing/unpublished clip has no trustworthy maximum. Keep
+					// the value read-only until publication instead of accepting an
+					// input that cannot satisfy the requested clamp contract.
+					char unavailable[64]{};
+					std::snprintf(
+						unavailable,
+						sizeof(unavailable),
+						"%u/?",
+						val);
+					ImGui::SetNextItemWidth(-1.0F);
+					ImGui::BeginDisabled();
+					ImGui::InputText(
+						("##" + name).c_str(),
+						unavailable,
+						sizeof(unavailable),
+						ImGuiInputTextFlags_ReadOnly);
+					ImGui::EndDisabled();
+				}
+			}
+			else
+			{
+				int signedValue = static_cast<int>(val);
+				ImGui::SetNextItemWidth(-1.0f);
+				// Generic unsigned fields remain numeric when a component has not
+				// supplied a documented domain-specific control.
+				if (ImGui::DragInt(("##" + name).c_str(), &signedValue, 1.0f, 0, std::numeric_limits<int>::max())) {
+					const std::uint32_t clampedValue = static_cast<std::uint32_t>(std::max(0, signedValue));
+					access.entitySetter(ObjectManager::instance().getRegistry(), obj, name, clampedValue);
+				}
+				startEditing(var);
+				endEditing();
+				UpdateInspectorDragState();
+			}
+		}
 	}
 	// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	else if (IsMetaType<bool>(type)) {
@@ -1494,8 +2060,11 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 	// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	else if (IsMetaType<std::string>(type)) {
 		std::string val = MetaValue<std::string>(var);
-		char buffer[256];
-		strncpy(buffer, val.c_str(), sizeof(buffer));
+		// Controller parameter JSON can be substantially longer than an ordinary
+		// one-line property. Keep a bounded but useful editing buffer and always
+		// reserve the final byte for a terminator.
+		char buffer[2048]{};
+		strncpy(buffer, val.c_str(), sizeof(buffer) - 1U);
 		ImGui::SetNextItemWidth(-1.0f);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::InputText(("##" + name).c_str(), buffer, sizeof(buffer))) {
@@ -1557,61 +2126,8 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 	// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	else if (IsMetaType<TerraEngine::UUID>(type)) {
 		TerraEngine::UUID val = MetaValue<TerraEngine::UUID>(var);
-		std::string label = "None";
-		bool found = false;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (val != TerraEngine::EMPTY_UUID) {
-			// Generated GLB/FBX children can share the package parent's
-			// compiled file, so resolve their sidecar child name before falling
-			// back to source/compiled paths. This makes component fields display
-			// the actual assigned child mesh/material/texture identity.
-			if (TryResolveGeneratedPackageChildNameForProperty(val, name, label))
-			{
-				found = true;
-			}
-
-			if (!found) {
-				const auto& assets = AssetDatabase::Instance().GetAssets();
-				for (const auto& [path, meta] : assets) {
-					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-					if (meta.guid == val) {
-						label = path.stem().string();
-						found = true;
-						break;
-					}
-				}
-			}
-
-			if (!found) {
-				// Generated model-package children are registered directly with
-				// ResourceManager instead of becoming independent editable assets.
-				// Resolve those runtime registrations so valid GLB/FBX sub-assets
-				// do not appear as missing in component UUID fields.
-				std::vector<AssetType> candidateTypes;
-				if (name == "meshId") candidateTypes.push_back(AssetType::Mesh);
-				else if (name == "materialId") candidateTypes.push_back(AssetType::Material);
-				else if (name.find("Texture") != std::string::npos || name.find("texture") != std::string::npos) candidateTypes.push_back(AssetType::Texture);
-				else {
-					candidateTypes = {
-						AssetType::Mesh,
-						AssetType::Material,
-						AssetType::Texture,
-						AssetType::ShaderCollection
-					};
-				}
-
-				for (AssetType candidateType : candidateTypes) {
-					const std::filesystem::path resourcePath = ResourceManager::Instance().DescribeAssetReference(val, candidateType);
-					if (!resourcePath.empty()) {
-						label = resourcePath.stem().string();
-						found = true;
-						break;
-					}
-				}
-			}
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (!found) label = "(Missing)";
-		}
+		std::string label;
+		const bool found = ResolveInspectorAssetLabel(val, name, label);
 
 		char buf[128]{};
 		strncpy(buf, label.c_str(), sizeof(buf) - 1u);
@@ -3472,10 +3988,343 @@ void InspectorWindow::DrawCharacterControllerInspector(const std::vector<entt::e
 		submit("useGravity", useGravity, [](auto& character, bool value) { character.useGravity = value; }, "Edit Character Gravity");
 }
 
+void InspectorWindow::DrawAnimationPreviewControls(
+	const TerraEngine::Editor::Animation::AnimationPreviewSessionDescriptor& descriptor)
+{
+	using TerraEngine::Animation::AnimationStatus;
+	using TerraEngine::Animation::AnimatorPlaybackRunState;
+	using TerraEngine::Editor::Animation::AnimationPreviewEndReason;
+	using TerraEngine::Editor::Animation::AnimationPreviewSnapshot;
+
+	const bool playModeActive = ScriptingSystem::Instance().IsRunning();
+	AnimationPreviewSnapshot snapshot = m_AnimationPreview.GetSnapshot();
+	if (snapshot.active
+		&& (snapshot.session.clipAssetId != descriptor.clipAssetId
+			|| snapshot.session.clipGeneration != descriptor.clipGeneration
+			|| snapshot.session.compatibilityFingerprint != descriptor.compatibilityFingerprint))
+	{
+		// A reimport can retain the GUID while publishing a new immutable
+		// generation. Never continue a cursor against mixed-generation metadata.
+		m_AnimationPreview.EndSession(AnimationPreviewEndReason::ClipGenerationChanged);
+		snapshot = m_AnimationPreview.GetSnapshot();
+	}
+
+	if (snapshot.active && !playModeActive)
+	{
+		(void)m_AnimationPreview.Tick(static_cast<double>(ImGui::GetIO().DeltaTime));
+		snapshot = m_AnimationPreview.GetSnapshot();
+	}
+
+	ImGui::SeparatorText("Clip Preview");
+	ImGui::PushID("AnimationPreviewControls");
+	if (!snapshot.active)
+	{
+		ImGui::BeginDisabled(playModeActive);
+		if (ImGui::Button("Start Preview", ImVec2(-1.0F, 0.0F)))
+		{
+			(void)m_AnimationPreview.BeginSession(descriptor);
+			snapshot = m_AnimationPreview.GetSnapshot();
+		}
+		ImGui::EndDisabled();
+		if (playModeActive)
+		{
+			ImGui::TextDisabled("Stop Play Mode before starting an editor preview.");
+		}
+	}
+	else
+	{
+		if (ImGui::Button("End Preview", ImVec2(-1.0F, 0.0F)))
+		{
+			m_AnimationPreview.EndSession();
+			snapshot = m_AnimationPreview.GetSnapshot();
+		}
+	}
+
+	if (snapshot.active)
+	{
+		const AnimatorPlaybackRunState runState = snapshot.playback.runState;
+		if (runState == AnimatorPlaybackRunState::Playing)
+		{
+			if (ImGui::Button("Pause")) (void)m_AnimationPreview.Pause();
+		}
+		else if (runState == AnimatorPlaybackRunState::Paused)
+		{
+			if (ImGui::Button("Resume")) (void)m_AnimationPreview.Resume();
+		}
+		else
+		{
+			if (ImGui::Button("Play")) (void)m_AnimationPreview.Play();
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Stop")) (void)m_AnimationPreview.Stop();
+
+		bool looping = snapshot.playback.looping;
+		if (ImGui::Checkbox("Loop", &looping)) (void)m_AnimationPreview.SetLooping(looping);
+		ImGui::SameLine();
+		bool reverse = snapshot.playback.reverse;
+		if (ImGui::Checkbox("Reverse", &reverse)) (void)m_AnimationPreview.SetReverse(reverse);
+
+		float speed = snapshot.session.speed;
+		ImGui::SetNextItemWidth(-1.0F);
+		if (ImGui::SliderFloat("Speed", &speed, 0.0F, 4.0F, "%.2fx"))
+		{
+			(void)m_AnimationPreview.SetSpeed(speed);
+		}
+
+		float normalizedTime = snapshot.playback.normalizedTime;
+		ImGui::SetNextItemWidth(-1.0F);
+		if (ImGui::SliderFloat("Time", &normalizedTime, 0.0F, 1.0F, "%.3f"))
+		{
+			(void)m_AnimationPreview.SeekNormalized(normalizedTime);
+		}
+		snapshot = m_AnimationPreview.GetSnapshot();
+	}
+
+	if (ImGui::BeginTable("AnimationPreviewStatus", 2, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp))
+	{
+		auto row = [](const char* label, const std::string& value) {
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			ImGui::TextUnformatted(label);
+			ImGui::TableSetColumnIndex(1);
+			ImGui::TextWrapped("%s", value.c_str());
+		};
+		row("State", snapshot.active ? AnimatorPlaybackRunStateName(snapshot.playback.runState) : "Inactive");
+		row("Status", std::string(TerraEngine::Animation::ToString(snapshot.latestStatus)));
+		row("Tick", std::to_string(snapshot.playback.resolvedTick)
+			+ " / " + std::to_string(descriptor.durationTicks));
+		row("Loop Count", std::to_string(snapshot.playback.loopCount));
+		row("Safe Pose", snapshot.safePoseReason);
+		ImGui::EndTable();
+	}
+	ImGui::TextDisabled("Preview owns only a transient fixed-tick cursor; authored Animator fields are never changed.");
+	ImGui::PopID();
+}
+
+void InspectorWindow::DrawAnimatorInspector(
+	entt::entity entity,
+	const std::vector<entt::entity>& selectedObjects)
+{
+	const std::optional<Object> object = ObjectManager::instance().getObject(entity);
+	AnimatorComponent* animator = object
+		? ObjectManager::instance().GetComponent<AnimatorComponent>(*object)
+		: nullptr;
+	if (!object || animator == nullptr)
+	{
+		ImGui::TextDisabled("Animator data is no longer available for this selection.");
+		m_AnimationPreview.EndSession(TerraEngine::Editor::Animation::AnimationPreviewEndReason::SelectionChanged);
+		return;
+	}
+
+	TerraEngine::UUID controllerAssetId = TerraEngine::EMPTY_UUID;
+	TerraEngine::UUID defaultClipAssetId = TerraEngine::EMPTY_UUID;
+	TerraEngine::UUID skeletonAssetId = TerraEngine::EMPTY_UUID;
+	bool loopDefaultClip = true;
+	bool playAutomatically = true;
+	std::uint32_t defaultClipStartFrame = 0U;
+	TerraEngine::Animation::AnimationExecutionPolicy requestedMode =
+		TerraEngine::Animation::AnimationExecutionPolicy::Auto;
+	TerraEngine::Animation::AnimatorTimePolicy timePolicy =
+		TerraEngine::Animation::AnimatorTimePolicy::Scaled;
+	TerraEngine::Animation::AnimatorRootMotionPolicy rootMotionPolicy =
+		TerraEngine::Animation::AnimatorRootMotionPolicy::ExtractOnly;
+	std::string initialParameters;
+	{
+		// Copy authored values while holding the component read lock, then release
+		// it before drawing UI or querying independently published runtime state.
+		auto lock = animator->acquireReadLock();
+		controllerAssetId = animator->controllerAssetId;
+		defaultClipAssetId = animator->defaultClipAssetId;
+		skeletonAssetId = animator->skeletonOverrideAssetId;
+		loopDefaultClip = animator->loopDefaultClip;
+		playAutomatically = animator->playAutomatically;
+		defaultClipStartFrame = animator->defaultClipStartFrame;
+		requestedMode = animator->requestedMode;
+		timePolicy = animator->timePolicy;
+		rootMotionPolicy = animator->rootMotionPolicy;
+		initialParameters = animator->initialParametersJson;
+	}
+
+	// Reflection widgets above remain the only mutation path, so their existing
+	// undo and prefab handling applies equally to Basic and Advanced controls.
+	// This copied comparison merely tells a multi-selection user when values are
+	// not uniform; it never locks or retains another live component while drawing.
+	bool mixedRequestedMode = false;
+	bool mixedRootPolicy = false;
+	bool mixedInitialParameters = false;
+	for (const entt::entity selected : selectedObjects)
+	{
+		const std::optional<Object> selectedObject = ObjectManager::instance().getObject(selected);
+		AnimatorComponent* selectedAnimator = selectedObject
+			? ObjectManager::instance().GetComponent<AnimatorComponent>(*selectedObject)
+			: nullptr;
+		if (selectedAnimator == nullptr)
+		{
+			continue;
+		}
+		auto selectedLock = selectedAnimator->acquireReadLock();
+		mixedRequestedMode |= selectedAnimator->requestedMode != requestedMode;
+		mixedRootPolicy |= selectedAnimator->rootMotionPolicy != rootMotionPolicy;
+		mixedInitialParameters |= selectedAnimator->initialParametersJson != initialParameters;
+	}
+
+	ImGui::SeparatorText("Authored Animation");
+	if (selectedObjects.size() > 1U)
+	{
+		ImGui::TextDisabled("Mixed selection: mode %s, root policy %s, initial parameters %s.",
+			mixedRequestedMode ? "mixed" : "uniform",
+			mixedRootPolicy ? "mixed" : "uniform",
+			mixedInitialParameters ? "mixed" : "uniform");
+	}
+	if (ImGui::BeginTable("AnimatorAuthoredStatus", 2, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp))
+	{
+		auto row = [](const char* label, const std::string& value) {
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			ImGui::TextUnformatted(label);
+			ImGui::TableSetColumnIndex(1);
+			ImGui::TextWrapped("%s", value.c_str());
+		};
+		std::string controllerLabel;
+		std::string defaultClipLabel;
+		std::string skeletonLabel;
+		(void)ResolveInspectorAssetLabel(controllerAssetId, "controllerAssetId", controllerLabel);
+		(void)ResolveInspectorAssetLabel(defaultClipAssetId, "defaultClipAssetId", defaultClipLabel);
+		(void)ResolveInspectorAssetLabel(skeletonAssetId, "skeletonOverrideAssetId", skeletonLabel);
+		row("Animation Controller", controllerLabel);
+		row("Default Clip", defaultClipLabel);
+		row("Loop Default Clip", loopDefaultClip ? "Enabled" : "Disabled");
+		row("Play Automatically", playAutomatically ? "Enabled" : "Disabled");
+		const TerraEngine::UUID startClipAssetId =
+			ResolveAnimatorStartClipAssetId(
+				controllerAssetId,
+				defaultClipAssetId);
+		const std::optional<std::uint32_t> maximumFrame =
+			ResolveAnimatorPlaybackMaximumFrame(startClipAssetId);
+		row("Default Clip Start Frame", maximumFrame
+			? TerraEngine::Editor::Animation::FormatAnimatorInspectorFrameRange(
+				TerraEngine::Editor::Animation::BuildAnimatorInspectorFrameRange(
+					defaultClipStartFrame,
+					static_cast<TerraEngine::Animation::AnimationFixedTick>(*maximumFrame),
+					loopDefaultClip))
+			: std::to_string(defaultClipStartFrame) + "/?");
+		row("Skeleton Override", skeletonLabel);
+		row("Requested Mode", AnimationExecutionPolicyName(requestedMode));
+		row("Time Policy", AnimatorTimePolicyName(timePolicy));
+		row("Root Motion", rootMotionPolicy == TerraEngine::Animation::AnimatorRootMotionPolicy::Ignore ? "Ignore"
+			: rootMotionPolicy == TerraEngine::Animation::AnimatorRootMotionPolicy::ApplyToObject ? "Apply to Object"
+			: rootMotionPolicy == TerraEngine::Animation::AnimatorRootMotionPolicy::ApplyToCharacter ? "Apply to Character"
+			: "Extract Only");
+		row("Initial Parameters", initialParameters.empty() ? "{}" : initialParameters);
+		ImGui::EndTable();
+	}
+	if (requestedMode == TerraEngine::Animation::AnimationExecutionPolicy::Auto)
+	{
+		ImGui::TextDisabled("Auto selects the compatible published execution path. Choose an Advanced requested mode only when diagnosing compatibility.");
+	}
+	if (controllerAssetId == TerraEngine::EMPTY_UUID
+		&& defaultClipAssetId == TerraEngine::EMPTY_UUID)
+	{
+		ImGui::TextWrapped("Setup needed: assign either an Animation Controller or a Default Clip. A Skeleton Override is optional when the model already supplies a compatible skeleton.");
+	}
+
+	const TerraEngine::UUID objectId = ObjectManager::instance().getUUID(*object);
+	const std::shared_ptr<const TerraEngine::Animation::PublishedAnimatorPose> published =
+		TerraEngine::Animation::AnimationSystem::Instance().LoadPublishedAnimatorPoseForObject(objectId);
+	ImGui::SeparatorText("Runtime Animation");
+	if (!published)
+	{
+		ImGui::TextDisabled("No generation-safe runtime animator pose is published for this object.");
+		ImGui::TextWrapped("Safe pose: the authored/reference pose remains active until compatible clip and skeleton generations are bound.");
+	}
+	else
+	{
+		const TerraEngine::Animation::AnimatorPlaybackStateSnapshot playback =
+			TerraEngine::Animation::AnimationSystem::Instance().LoadAnimatorPlaybackState(published->animator);
+		if (ImGui::BeginTable("AnimatorRuntimeStatus", 2, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp))
+		{
+			auto row = [](const char* label, const std::string& value) {
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				ImGui::TextUnformatted(label);
+				ImGui::TableSetColumnIndex(1);
+				ImGui::TextWrapped("%s", value.c_str());
+			};
+			row("State", AnimatorPlaybackRunStateName(playback.runState));
+			row("Status", std::string(TerraEngine::Animation::ToString(published->status)));
+			row("Normalized Time", std::to_string(playback.normalizedTime));
+			row("Loop Count", std::to_string(playback.loopCount));
+			row("Effective Speed", std::to_string(playback.effectiveSpeed));
+			row("Clip Generation", std::to_string(published->clip.generation));
+			row("Skeleton Generation", std::to_string(published->skeleton.generation));
+			row("Safe Pose", published->safePose
+				? "Yes - " + std::string(TerraEngine::Animation::ToString(published->status))
+				: "No - latest complete pose is active");
+			ImGui::EndTable();
+		}
+	}
+
+	if (m_LastAnimationClipDescriptor)
+	{
+		GeneratedModelPackageChildMetadata currentClipMetadata;
+		const bool descriptorStillPublished =
+			AssetDatabase::Instance().TryGetGeneratedModelPackageChildMetadata(
+				m_LastAnimationClipDescriptor->clipAssetId.value,
+				GeneratedModelPackageChildKind::AnimationClip,
+				currentClipMetadata)
+			&& currentClipMetadata.publishedGeneration == m_LastAnimationClipDescriptor->clipGeneration
+			&& currentClipMetadata.compatibilityFingerprint
+				== m_LastAnimationClipDescriptor->compatibilityFingerprint;
+		if (!descriptorStillPublished)
+		{
+			// The source package may reimport while an entity remains selected.
+			// Never let that entity reuse a descriptor from the prior generation.
+			m_AnimationPreview.EndSession(
+				TerraEngine::Editor::Animation::AnimationPreviewEndReason::ClipGenerationChanged);
+			m_LastAnimationClipDescriptor.reset();
+			ImGui::SeparatorText("Clip Preview");
+			ImGui::TextWrapped("The previously inspected clip generation is no longer published. Select the generated Animation Clip again.");
+			return;
+		}
+
+		// Rebind only the editor selection identity. The clip GUID, generation,
+		// compatibility fingerprint, and BuildRoot path remain manifest-owned.
+		TerraEngine::Editor::Animation::AnimationPreviewSessionDescriptor descriptor =
+			*m_LastAnimationClipDescriptor;
+		descriptor.selectionId = objectId;
+		DrawAnimationPreviewControls(descriptor);
+	}
+	else
+	{
+		ImGui::SeparatorText("Clip Preview");
+		ImGui::TextWrapped("Select a generated Animation Clip in the Project Browser to inspect it and make its transient preview controls available here.");
+	}
+}
+
 void InspectorWindow::OnGui() {
 	m_InspectorValueDragging = false;
-	
+
 	auto selectedPackageChild = m_Owner->GetSelectedPackageChildAsset();
+	auto selectedAsset = m_Owner->GetSelectedAsset();
+	std::vector<entt::entity> selectedEntities = m_Owner->GetSelectedEntities();
+	auto selectedEntity = m_Owner->GetSelectedEntity();
+
+	// Preview state follows the Inspector selection rather than the scene. This
+	// check runs before every early return so asset/entity changes and Play Mode
+	// transitions cannot leave an editor-owned cursor alive off-screen.
+	TerraEngine::UUID previewSelectionId = TerraEngine::EMPTY_UUID;
+	if (selectedPackageChild)
+	{
+		previewSelectionId = selectedPackageChild->guid;
+	}
+	else if (!selectedAsset && selectedEntity)
+	{
+		previewSelectionId = GetObjectUuid(*selectedEntity);
+	}
+	m_AnimationPreview.SynchronizeContext(
+		previewSelectionId,
+		ScriptingSystem::Instance().IsRunning());
+
 	if (selectedPackageChild) {
 		DrawModelPackageChildInspector(
 			selectedPackageChild->packagePath,
@@ -3485,7 +4334,6 @@ void InspectorWindow::OnGui() {
 		return;
 	}
 
-	auto selectedAsset = m_Owner->GetSelectedAsset();
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (selectedAsset) {
 		std::string ext = selectedAsset->extension().string();
@@ -3506,8 +4354,6 @@ void InspectorWindow::OnGui() {
 		return;
 	}
 
-	std::vector<entt::entity> selectedEntities = m_Owner->GetSelectedEntities();
-	auto selectedEntity = m_Owner->GetSelectedEntity();
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (selectedEntity) {
 		auto& objManager = ObjectManager::instance();
@@ -3910,6 +4756,65 @@ void InspectorWindow::OnGui() {
 					{
 						DrawCharacterControllerInspector(selectedEntities);
 					}
+					else if (compName == "AnimatorComponent")
+					{
+						// Keep reflection as the sole mutation path so all animator edits
+						// preserve prefab override and undo behavior. Tabs only organize
+						// those durable fields; runtime data remains below and read-only.
+						auto drawAnimatorProperties = [&](bool advanced) {
+							if (!ImGui::BeginTable(advanced ? "AnimatorAdvancedProperties" : "AnimatorBasicProperties", 2, ImGuiTableFlags_SizingStretchProp))
+							{
+								return;
+							}
+							ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 190.0f);
+							ImGui::TableSetupColumn("Widget", ImGuiTableColumnFlags_WidthStretch);
+							for (const ReflectionProperty& prop : TerraEngine::Reflection::GetProperties(type))
+							{
+								const std::string propertyName = MetaPropertyName(prop);
+								if (propertyName == "active")
+								{
+									continue;
+								}
+								const bool basic = propertyName == "controllerAssetId"
+									|| propertyName == "defaultClipAssetId"
+									|| propertyName == "loopDefaultClip"
+									|| propertyName == "playAutomatically"
+									|| propertyName == "defaultClipStartFrame"
+									|| propertyName == "skeletonOverrideAssetId"
+									|| propertyName == "requestedMode"
+									|| propertyName == "rootMotionPolicy"
+									|| propertyName == "initialParameters";
+								if (basic == advanced)
+								{
+									continue;
+								}
+								DrawProperty(compName, prop, obj, access);
+							}
+							ImGui::EndTable();
+						};
+						if (ImGui::BeginTabBar("AnimatorAuthoringTabs"))
+						{
+							if (ImGui::BeginTabItem("Basic"))
+							{
+								ImGui::TextWrapped("Assign a controller or default clip, then keep the recommended policy choices unless your gameplay requires different behavior.");
+								ImGui::TextDisabled("Hover a field name for what the setting does and how to use it.");
+								ImGui::Spacing();
+								drawAnimatorProperties(false);
+								ImGui::EndTabItem();
+							}
+							if (ImGui::BeginTabItem("Advanced"))
+							{
+								ImGui::TextWrapped("Optional overrides for retargeting, ragdoll, motion matching, timing, events, and off-screen behavior.");
+								ImGui::TextDisabled("Hover a field name for usage guidance and recommended defaults.");
+								ImGui::Spacing();
+								drawAnimatorProperties(true);
+								ImGui::TextDisabled("Advanced overrides can reject incompatible published content; Auto is preferred for normal authoring.");
+								ImGui::EndTabItem();
+							}
+							ImGui::EndTabBar();
+						}
+						DrawAnimatorInspector(obj, selectedEntities);
+					}
 					// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 					else if (compName == "Script")
 					{
@@ -4076,6 +4981,11 @@ void InspectorWindow::DrawModelPackageChildInspector(const std::filesystem::path
 
 	if (!hasImportResult) {
 		ImGui::TextDisabled("This package has no generated import result yet.");
+		if (m_AnimationPreview.IsActive())
+		{
+			m_AnimationPreview.EndSession(
+				TerraEngine::Editor::Animation::AnimationPreviewEndReason::InvalidClip);
+		}
 		return;
 	}
 
@@ -4099,6 +5009,191 @@ void InspectorWindow::DrawModelPackageChildInspector(const std::filesystem::path
 			ImGui::EndTable();
 		}
 	};
+
+	const auto animationClipChild = std::find_if(
+		importResult.animationManifest.subAssets.begin(),
+		importResult.animationManifest.subAssets.end(),
+		[&](const TerraEngine::AssetPipeline::GeneratedAnimationSubAsset& child) {
+			return child.guid == guid
+				&& child.kind == TerraEngine::AssetPipeline::AnimationImportSubAssetKind::AnimationClip;
+		});
+	if (animationClipChild != importResult.animationManifest.subAssets.end())
+	{
+		GeneratedModelPackageChildMetadata publishedMetadata;
+		const bool published = AssetDatabase::Instance().TryGetGeneratedModelPackageChildMetadata(
+			guid,
+			GeneratedModelPackageChildKind::AnimationClip,
+			publishedMetadata)
+			&& publishedMetadata.packageGuid == importResult.packageGuid
+			&& publishedMetadata.publishedGeneration == importResult.animationManifest.publishedGeneration
+			&& publishedMetadata.compatibilityFingerprint == animationClipChild->compatibilityFingerprint
+			&& publishedMetadata.compiledPath == animationClipChild->compiledPath;
+		if (!published)
+		{
+			// AssetDatabase performs the dependency-fingerprint and atomic-publication
+			// checks. Fail closed instead of opening candidate or partial outputs.
+			ImGui::TextColored(
+				ImVec4(1.0F, 0.45F, 0.25F, 1.0F),
+				"This animation clip is not part of a complete published manifest generation.");
+			m_AnimationPreview.EndSession(
+				TerraEngine::Editor::Animation::AnimationPreviewEndReason::ClipGenerationChanged);
+			if (m_LastAnimationClipDescriptor
+				&& m_LastAnimationClipDescriptor->clipAssetId.value == guid)
+			{
+				m_LastAnimationClipDescriptor.reset();
+				m_InspectedAnimationClip.reset();
+				m_InspectedAnimationClipKey.clear();
+			}
+			return;
+		}
+
+		const std::filesystem::path buildRoot =
+			std::filesystem::absolute(AssetDatabase::Instance().GetBuildRoot()).lexically_normal();
+		const std::optional<std::filesystem::path> resolvedCompiledPath =
+			ResolvePublishedAnimationClipPath(buildRoot, animationClipChild->compiledPath);
+		const std::filesystem::path compiledPath =
+			resolvedCompiledPath.value_or(std::filesystem::path{});
+		const std::string cacheKey = TerraEngine::ToHexString(guid)
+			+ "|" + std::to_string(publishedMetadata.publishedGeneration)
+			+ "|" + animationClipChild->contentHashHex
+			+ "|" + compiledPath.generic_string();
+
+		if (cacheKey != m_InspectedAnimationClipKey)
+		{
+			// Decode once per immutable publication identity. The cache is replaced
+			// atomically only after the full file and envelope validate.
+			if (m_AnimationPreview.IsActive())
+			{
+				m_AnimationPreview.EndSession(
+					TerraEngine::Editor::Animation::AnimationPreviewEndReason::ClipGenerationChanged);
+			}
+			m_InspectedAnimationClipKey = cacheKey;
+			m_InspectedAnimationClip.reset();
+			m_LastAnimationClipDescriptor.reset();
+			m_InspectedAnimationClipStatus = TerraEngine::Animation::AnimationStatus::MissingAsset;
+
+			if (!resolvedCompiledPath)
+			{
+				m_InspectedAnimationClipStatus = TerraEngine::Animation::AnimationStatus::InvalidType;
+			}
+			else
+			{
+				std::error_code fileError;
+				const std::uintmax_t fileSize = std::filesystem::file_size(compiledPath, fileError);
+				if (fileError)
+				{
+					m_InspectedAnimationClipStatus = TerraEngine::Animation::AnimationStatus::MissingAsset;
+				}
+				else if (fileSize > static_cast<std::uintmax_t>(std::numeric_limits<std::size_t>::max())
+					|| fileSize > static_cast<std::uintmax_t>(std::numeric_limits<std::streamsize>::max()))
+				{
+					m_InspectedAnimationClipStatus = TerraEngine::Animation::AnimationStatus::RangeOverflow;
+				}
+				else
+				{
+					std::ifstream input(compiledPath, std::ios::binary);
+					std::vector<std::uint8_t> bytes(static_cast<std::size_t>(fileSize));
+					if (!input.is_open())
+					{
+						m_InspectedAnimationClipStatus = TerraEngine::Animation::AnimationStatus::MissingAsset;
+					}
+					else
+					{
+						if (!bytes.empty())
+						{
+							input.read(
+								reinterpret_cast<char*>(bytes.data()),
+								static_cast<std::streamsize>(bytes.size()));
+						}
+						if ((!bytes.empty() && input.gcount() != static_cast<std::streamsize>(bytes.size()))
+							|| input.bad())
+						{
+							m_InspectedAnimationClipStatus = TerraEngine::Animation::AnimationStatus::TruncatedInput;
+						}
+						else
+						{
+							auto decoded = std::make_unique<TerraEngine::Animation::AnimationClipAsset>();
+							m_InspectedAnimationClipStatus = TerraEngine::Animation::DeserializeAnimationClipAsset(
+								bytes,
+								animationClipChild->compatibilityFingerprint,
+								*decoded);
+							if (m_InspectedAnimationClipStatus == TerraEngine::Animation::AnimationStatus::Ok
+								&& (decoded->assetId.value != guid
+									|| decoded->compatibilityFingerprint != animationClipChild->compatibilityFingerprint))
+							{
+								m_InspectedAnimationClipStatus = TerraEngine::Animation::AnimationStatus::IncompatibleAsset;
+							}
+							if (m_InspectedAnimationClipStatus == TerraEngine::Animation::AnimationStatus::Ok)
+							{
+								m_InspectedAnimationClip = std::move(decoded);
+							}
+						}
+					}
+				}
+			}
+		}
+
+		drawCommonTable("GeneratedAnimationClipSummary", [&]() {
+			drawRow("GUID", TerraEngine::ToHexString(animationClipChild->guid));
+			drawRow("Semantic Key", animationClipChild->semanticKey);
+			drawRow("Display Name", animationClipChild->displayName);
+			drawRow("Compiled Clip", animationClipChild->compiledPath.generic_string());
+			drawRow("Published Generation", std::to_string(publishedMetadata.publishedGeneration));
+			drawRow("Compatibility", AnimationFingerprintText(animationClipChild->compatibilityFingerprint));
+			drawRow("Content Hash", animationClipChild->contentHashHex);
+			drawRow("Read Only", animationClipChild->readOnlyPackageChild ? "Yes" : "No");
+			drawRow("Decode Status", std::string(TerraEngine::Animation::ToString(m_InspectedAnimationClipStatus)));
+		});
+
+		if (!m_InspectedAnimationClip)
+		{
+			if (m_AnimationPreview.IsActive())
+			{
+				m_AnimationPreview.EndSession(
+					TerraEngine::Editor::Animation::AnimationPreviewEndReason::InvalidClip);
+			}
+			ImGui::TextColored(
+				ImVec4(1.0F, 0.45F, 0.25F, 1.0F),
+				"The published .teanim clip could not be inspected: %s",
+				std::string(TerraEngine::Animation::ToString(m_InspectedAnimationClipStatus)).c_str());
+			return;
+		}
+
+		const TerraEngine::Animation::AnimationClipAsset& clip = *m_InspectedAnimationClip;
+		const double durationSeconds = static_cast<double>(clip.durationTicks)
+			/ static_cast<double>(TerraEngine::Animation::kAnimationFixedTicksPerSecond);
+		drawCommonTable("GeneratedAnimationClipDecodedSummary", [&]() {
+			drawRow("Skeleton GUID", TerraEngine::ToHexString(clip.skeletonAssetId.value));
+			drawRow("Duration Ticks", std::to_string(clip.durationTicks));
+			drawRow("Duration Seconds", std::to_string(durationSeconds));
+			drawRowU32("Sample Rate", clip.sampleRate);
+			drawRow("Segments", std::to_string(clip.segments.size()));
+			drawRow("Tracks", std::to_string(clip.tracks.size()));
+			drawRow("Named Channels", std::to_string(clip.namedChannels.size()));
+			drawRow("Events", std::to_string(clip.events.size()));
+			drawRow("Root Motion", clip.rootMotion.enabled ? "Enabled" : "Disabled");
+			drawRow("Translation Error (m)", std::to_string(clip.compression.translationErrorMeters));
+			drawRow("Rotation Error (deg)", std::to_string(clip.compression.rotationErrorDegrees));
+			drawRow("Scale Error", std::to_string(clip.compression.scaleErrorFraction));
+			drawRow("Morph Error", std::to_string(clip.compression.morphError));
+		});
+
+		TerraEngine::Editor::Animation::AnimationPreviewSessionDescriptor descriptor;
+		descriptor.selectionId = guid;
+		descriptor.clipAssetId = clip.assetId;
+		descriptor.clipGeneration = std::max<std::uint64_t>(1U, publishedMetadata.publishedGeneration);
+		descriptor.compatibilityFingerprint = animationClipChild->compatibilityFingerprint;
+		descriptor.durationTicks = clip.durationTicks;
+		descriptor.sampleRate = clip.sampleRate;
+		descriptor.displayName = animationClipChild->displayName;
+		descriptor.compiledPath = compiledPath;
+		descriptor.looping = true;
+		descriptor.reverse = false;
+		descriptor.speed = 1.0F;
+		m_LastAnimationClipDescriptor = descriptor;
+		DrawAnimationPreviewControls(descriptor);
+		return;
+	}
 
 	for (const TerraEngine::AssetPipeline::GeneratedModelMeshAsset& mesh : importResult.generatedMeshes) {
 		if (mesh.guid != guid) {
@@ -4258,6 +5353,11 @@ void InspectorWindow::DrawModelPackageChildInspector(const std::filesystem::path
 		return;
 	}
 
+	if (kind == "AnimationClip" && m_AnimationPreview.IsActive())
+	{
+		m_AnimationPreview.EndSession(
+			TerraEngine::Editor::Animation::AnimationPreviewEndReason::InvalidClip);
+	}
 	ImGui::TextDisabled("Generated child %s was not found in the package import result.", TerraEngine::ToHexString(guid).c_str());
 }
 

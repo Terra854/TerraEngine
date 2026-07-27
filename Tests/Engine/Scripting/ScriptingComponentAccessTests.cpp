@@ -102,6 +102,35 @@ namespace TerraEngine::Tests {
 			context.Expect(readView.scriptRecords.front().bindingGeneration != 0, "Read views should carry binding generations for managed HasComponent caches.");
 		});
 
+		registry.Add("Scripting.ComponentAccess.ReflectedTransformWritePublishesOneSpatialRevision", [](TestContext& context) {
+			ScriptingRuntimeTestScope scope;
+			ObjectManager& objects = ObjectManager::instance();
+			const Object object = objects.createObject("Managed Transform Target");
+			const std::uint32_t objectId = static_cast<std::uint32_t>(object.EntityId());
+			const std::uint64_t transformRevisionBefore =
+				objects.GetObjectTransformRevision(object);
+			const std::uint64_t spatialRevisionBefore = objects.GetSpatialRevision();
+			glm::vec3 position{3.0F, 4.0F, 5.0F};
+
+			// This no-dispatch-context call is the compatibility path used by
+			// protected editor/runtime bridges. Gameplay callbacks use the
+			// deferred SceneMutationQueue path tested below.
+			Native_SetComponentProperty(
+				objectId, "Transform", "Position", &position, 5);
+
+			const Transform* transform = objects.GetComponent<Transform>(object);
+			context.Expect(transform != nullptr && transform->position == position,
+				"The managed component ABI must update the authored Transform value.");
+			context.ExpectEqual(
+				transformRevisionBefore + 1U,
+				objects.GetObjectTransformRevision(object),
+				"The shared reflected setter must publish exactly one Transform revision.");
+			context.ExpectEqual(
+				spatialRevisionBefore + 1U,
+				objects.GetSpatialRevision(),
+				"The managed Transform write must invalidate renderer and bounds snapshots exactly once.");
+		});
+
 		registry.Add("Scripting.ObjectMetadata.WorkerWritesPublishOnlyAtProtectedFlush", [](TestContext& context) {
 			ScriptingRuntimeTestScope scope;
 			ObjectManager& objects = ObjectManager::instance();

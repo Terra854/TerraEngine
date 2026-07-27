@@ -2,6 +2,8 @@
 
 #include "SceneMutationQueue.h"
 
+#include "Animation/Runtime/RootMotion.h"
+
 #include "Core/Object/Object.h"
 #include "Core/Object/ObjectManager.h"
 #include "Core/Object/Component.h"
@@ -589,12 +591,11 @@ namespace TerraEngine::Scene {
 						{
 							result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Warning, request, "Component update could not write the reflected property.", "Verify the property name and value type match the component reflection metadata."));
 						}
-						if (request.componentName == Transform::kComponentName)
+						if (request.componentName != Transform::kComponentName)
 						{
-							objects.MarkObjectTransformDirty(*target);
-						}
-						else
-						{
+							// Reflected Transform setters publish their spatial
+							// revision centrally; other component edits still
+							// invalidate the object's structural snapshot here.
 							objects.notifyObjectStructureChanged(*target);
 						}
 					}
@@ -638,10 +639,15 @@ namespace TerraEngine::Scene {
 		batch.transactionResults = transactionResults;
 		for (const TransactionResult& transactionResult : transactionResults)
 		{
+			// Unknown transaction IDs are ignored by the animation publisher. Known
+			// root-motion IDs become observable only at this protected scene flush.
+			TerraEngine::Animation::AnimationRootMotionResultPublisher::Instance()
+				.ObserveSceneTransactionResult(transactionResult);
 			if (transactionResult.status == TransactionStatus::Committed)
 			{
 				batch.applied = true;
 				batch.acceptedMutationCount += transactionResult.appliedWriteCount;
+				batch.acceptedAnimationPublications.insert(batch.acceptedAnimationPublications.end(), transactionResult.acceptedAnimationPublications.begin(), transactionResult.acceptedAnimationPublications.end());
 			}
 			else
 			{
@@ -656,6 +662,7 @@ namespace TerraEngine::Scene {
 			{
 				batch.applied = true;
 				batch.acceptedMutationCount += groupResult.appliedWriteCount;
+				batch.acceptedAnimationPublications.insert(batch.acceptedAnimationPublications.end(), groupResult.aggregateResult.acceptedAnimationPublications.begin(), groupResult.aggregateResult.acceptedAnimationPublications.end());
 			}
 			else
 			{

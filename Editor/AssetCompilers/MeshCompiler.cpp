@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cctype>
 #include <cstddef>
 #include <cstring>
@@ -15,7 +17,9 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
 #include <limits>
+#include <numeric>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -24,6 +28,13 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#endif
 
 #include <assimp/Importer.hpp>
 #include <assimp/ProgressHandler.hpp>
@@ -114,6 +125,10 @@ namespace
 		std::array<float, 3> tangent; // Final smoothed normal + tangents for sync
 		std::array<float, 2> uv;
 		float tangentW = 1.0f; // Sign for bitangent calculation
+		// Offline deformable cooks use this non-rendered identity to prevent the
+		// static weld from merging vertices whose skin or morph records differ.
+		// Ordinary static imports leave it at zero and retain legacy welding.
+		std::uint32_t weldIdentity = 0u;
 	};
 
 	// The VG simplifier must preserve more than position: hard-surface imports
@@ -3120,7 +3135,7 @@ bool IsSupportedMeshSourceExtension(const std::filesystem::path& filePath)
 	return result;
 }
 
-bool CompileMesh(
+static bool CompileMeshInternal(
 	const std::filesystem::path& input,
 	const std::filesystem::path& output,
 	bool includeMeshletBounds,
@@ -3129,7 +3144,8 @@ bool CompileMesh(
 	float weldThreshold,
 	const VirtualGeometryAdaptiveCompileSettings* adaptiveSettings,
 	MeshCompileProgressCallback progressCallback,
-	const VirtualGeometryConeSafetyCookSettings* coneSafetySettings)
+	const VirtualGeometryConeSafetyCookSettings* coneSafetySettings,
+	const std::vector<std::uint32_t>* rawVertexWeldIdentities)
 {
 	MeshCompileReport report{};
 	report.assetPath = input;
@@ -3165,6 +3181,22 @@ bool CompileMesh(
 	if (!ImportSourceMesh(input, report, rawVertices, rawIndices, hasUv, progressCallback))
 	{
 		return FinalizeReport(false);
+	}
+	if(rawVertexWeldIdentities != nullptr)
+	{
+		// CompileMeshFromRaw emits OBJ faces in source-index order. The importer
+		// returns one triangle-corner record in that same order; fail closed if a
+		// future importer change breaks the correspondence needed by deformation.
+		if(rawVertexWeldIdentities->size() != rawVertices.size())
+		{
+			report.status = "compile_fail";
+			report.failureReason = "raw-weld-identity-mismatch";
+			return FinalizeReport(false);
+		}
+		for(std::size_t index = 0u; index < rawVertices.size(); ++index)
+		{
+			rawVertices[index].weldIdentity = (*rawVertexWeldIdentities)[index];
+		}
 	}
 
 	// Phase 2: Foundational Cleanup (Welding & Smoothing)
@@ -3510,11 +3542,28 @@ bool CompileMesh(
 	}
 }
 
-bool CompileMeshFromRaw(
+bool CompileMesh(
+	const std::filesystem::path& input,
+	const std::filesystem::path& output,
+	bool includeMeshletBounds,
+	MeshCompileReport* outReport,
+	float smoothingAngle,
+	float weldThreshold,
+	const VirtualGeometryAdaptiveCompileSettings* adaptiveSettings,
+	MeshCompileProgressCallback progressCallback,
+	const VirtualGeometryConeSafetyCookSettings* coneSafetySettings)
+{
+	return CompileMeshInternal(
+		input, output, includeMeshletBounds, outReport, smoothingAngle, weldThreshold,
+		adaptiveSettings, std::move(progressCallback), coneSafetySettings, nullptr);
+}
+
+static bool CompileMeshFromRawInternal(
 	const std::filesystem::path& logicalSource,
 	const std::filesystem::path& output,
 	const std::vector<RawMeshVertex>& vertices,
 	const std::vector<std::uint32_t>& indices,
+	bool preserveSourceVertexIdentity,
 	bool includeMeshletBounds,
 	MeshCompileReport* outReport,
 	float smoothingAngle,
@@ -3597,7 +3646,18 @@ bool CompileMeshFromRaw(
 		}
 	}
 
-	const bool compiled = CompileMesh(stagedObj, output, includeMeshletBounds, outReport, smoothingAngle, weldThreshold, adaptiveSettings, progressCallback, coneSafetySettings);
+	std::vector<std::uint32_t> rawVertexWeldIdentities;
+	if(preserveSourceVertexIdentity)
+	{
+		// The transient OBJ importer expands faces into triangle corners. Repeating
+		// each original index here preserves legitimate static sharing while keeping
+		// coincident vertices with different deformation records separate.
+		rawVertexWeldIdentities.assign(indices.begin(), indices.end());
+	}
+	const bool compiled = CompileMeshInternal(
+		stagedObj, output, includeMeshletBounds, outReport, smoothingAngle, weldThreshold,
+		adaptiveSettings, std::move(progressCallback), coneSafetySettings,
+		preserveSourceVertexIdentity ? &rawVertexWeldIdentities : nullptr);
 	std::error_code removeError;
 	std::filesystem::remove(stagedObj, removeError);
 	if (outReport != nullptr)
@@ -3605,4 +3665,1484 @@ bool CompileMeshFromRaw(
 		outReport->assetPath = logicalSource;
 	}
 	return compiled;
+}
+
+bool CompileMeshFromRaw(
+	const std::filesystem::path& logicalSource,
+	const std::filesystem::path& output,
+	const std::vector<RawMeshVertex>& vertices,
+	const std::vector<std::uint32_t>& indices,
+	bool includeMeshletBounds,
+	MeshCompileReport* outReport,
+	float smoothingAngle,
+	float weldThreshold,
+	const VirtualGeometryAdaptiveCompileSettings* adaptiveSettings,
+	MeshCompileProgressCallback progressCallback,
+	const VirtualGeometryConeSafetyCookSettings* coneSafetySettings)
+{
+	return CompileMeshFromRawInternal(
+		logicalSource, output, vertices, indices, false, includeMeshletBounds, outReport,
+		smoothingAngle, weldThreshold, adaptiveSettings, std::move(progressCallback), coneSafetySettings);
+}
+
+namespace
+{
+	constexpr std::uint32_t kInvalidPalettePartition = std::numeric_limits<std::uint32_t>::max();
+	std::atomic<std::uint64_t> gSkinnedMeshStageSequence{0u};
+
+	bool TryConvertSkinnedCount(std::size_t value, std::uint32_t& outValue)
+	{
+		// The TEMF extension stores offsets and counts as uint32 values. Check
+		// before narrowing so hostile package data cannot wrap file ranges.
+		if (value > std::numeric_limits<std::uint32_t>::max())
+		{
+			return false;
+		}
+		outValue = static_cast<std::uint32_t>(value);
+		return true;
+	}
+
+	bool TryMultiplySkinnedSize(std::size_t left, std::size_t right, std::size_t& outValue)
+	{
+		// Package-controlled counts must never wrap a host-size allocation before
+		// the stricter uint32 on-disk checks run.
+		if (left != 0u && right > (std::numeric_limits<std::size_t>::max() / left))
+		{
+			return false;
+		}
+		outValue = left * right;
+		return true;
+	}
+
+	bool TryAlignSkinnedOffset(std::uint64_t value, std::uint32_t alignment, std::uint32_t& outValue)
+	{
+		// Alignment is a power of two for every TEMF stream. Work in uint64 so the
+		// addition cannot silently wrap before narrowing to the v1 uint32 offset.
+		if (alignment == 0u || (alignment & (alignment - 1u)) != 0u)
+		{
+			return false;
+		}
+		const std::uint64_t mask = static_cast<std::uint64_t>(alignment - 1u);
+		if (value > std::numeric_limits<std::uint64_t>::max() - mask)
+		{
+			return false;
+		}
+		const std::uint64_t aligned = (value + mask) & ~mask;
+		if (aligned > std::numeric_limits<std::uint32_t>::max())
+		{
+			return false;
+		}
+		outValue = static_cast<std::uint32_t>(aligned);
+		return true;
+	}
+
+	bool HasTemfMagic(const MeshHeader& header)
+	{
+		return header.magic[0] == 'T'
+			&& header.magic[1] == 'E'
+			&& header.magic[2] == 'M'
+			&& header.magic[3] == 'F';
+	}
+
+	template <typename Record>
+	bool TryReadStagedRecord(std::fstream& stream, std::uint32_t offset, Record& outRecord)
+	{
+		// The static TEMF is still private staging data here. Read typed records
+		// only after the caller has checked the complete byte range, preventing a
+		// corrupt intermediate file from producing partially published metadata.
+		stream.clear();
+		stream.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+		stream.read(reinterpret_cast<char*>(&outRecord), sizeof(Record));
+		return static_cast<bool>(stream);
+	}
+
+	bool TryBuildDeformableVirtualGeometrySidecar(
+		std::fstream& stream,
+		std::uint32_t stagedSize,
+		const MeshHeader& meshHeader,
+		const SkinnedMeshCookInput& input,
+		const std::vector<const SkinnedMeshMorphTarget*>& orderedMorphs,
+		const std::vector<std::uint32_t>& vertexPaletteIndices,
+		const std::vector<std::uint8_t>& skinningBytes,
+		std::uint32_t sidecarOffset,
+		DeformableVirtualGeometrySidecarHeader& outHeader,
+		std::vector<DeformableVirtualGeometryClusterRecord>& outClusters,
+		std::vector<std::uint32_t>& outPaletteIndices,
+		std::vector<DeformableVirtualGeometryMorphRecord>& outMorphs,
+		std::vector<DeformableVirtualGeometryMorphVertex>& outMorphVertices)
+	{
+		const auto RangeWithinStagedFile = [stagedSize](std::uint32_t offset, std::uint64_t byteCount) {
+			return offset <= stagedSize && byteCount <= static_cast<std::uint64_t>(stagedSize - offset);
+		};
+		const auto BuildEnvelope = [&](const std::vector<std::uint32_t>& vertices,
+			float (&outMinimum)[3], float (&outMaximum)[3], float& outDeformationError) {
+			std::array<float, 3> largestDisplacement{};
+			for (std::size_t axis = 0u; axis < 3u; ++axis)
+			{
+				outMinimum[axis] = std::numeric_limits<float>::max();
+				outMaximum[axis] = std::numeric_limits<float>::lowest();
+			}
+			for (std::uint32_t vertexIndex : vertices)
+			{
+				for (std::size_t axis = 0u; axis < 3u; ++axis)
+				{
+					float minimum = input.vertices[vertexIndex].baseVertex.position[axis];
+					float maximum = minimum;
+					for (const SkinnedMeshMorphTarget* morph : orderedMorphs)
+					{
+						const float delta = morph->positionDeltas[vertexIndex][axis];
+						minimum += std::min(delta, 0.0f);
+						maximum += std::max(delta, 0.0f);
+					}
+					outMinimum[axis] = std::min(outMinimum[axis], minimum);
+					outMaximum[axis] = std::max(outMaximum[axis], maximum);
+					largestDisplacement[axis] = std::max(
+						largestDisplacement[axis],
+						std::max(std::abs(minimum - input.vertices[vertexIndex].baseVertex.position[axis]),
+							std::abs(maximum - input.vertices[vertexIndex].baseVertex.position[axis])));
+				}
+			}
+			outDeformationError = std::sqrt(
+				largestDisplacement[0] * largestDisplacement[0]
+				+ largestDisplacement[1] * largestDisplacement[1]
+				+ largestDisplacement[2] * largestDisplacement[2]);
+			return std::isfinite(outDeformationError);
+		};
+
+		if (vertexPaletteIndices.size() != input.vertices.size()
+			|| skinningBytes.size() != input.vertices.size() * kDeformableMeshSkinningStrideBytes)
+		{
+			return false;
+		}
+		const bool hasBoundSkinning = std::any_of(
+			skinningBytes.begin(), skinningBytes.end(), [](std::uint8_t value) { return value != 0u; });
+		std::vector<VirtualGeometryClusterRecord> sourceClusters;
+		std::vector<VirtualGeometryCullableGroupRecord> sourceGroups;
+		bool hasVirtualGeometryClusters = false;
+		if ((meshHeader.meshletFlags & kMeshletHeaderFlagHasVirtualGeometry) != 0u)
+		{
+			VirtualGeometryHeader virtualHeader{};
+			if (meshHeader.virtualGeometryHeaderOffset == 0u
+				|| meshHeader.virtualGeometryHeaderSize != sizeof(VirtualGeometryHeader)
+				|| !RangeWithinStagedFile(meshHeader.virtualGeometryHeaderOffset, sizeof(VirtualGeometryHeader))
+				|| !TryReadStagedRecord(stream, meshHeader.virtualGeometryHeaderOffset, virtualHeader)
+				|| virtualHeader.payloadGeneration != kVirtualGeometryPayloadGeneration
+				|| virtualHeader.headerSize != sizeof(VirtualGeometryHeader))
+			{
+				return false;
+			}
+			std::uint64_t clusterBytes = static_cast<std::uint64_t>(virtualHeader.clusterCount)
+				* sizeof(VirtualGeometryClusterRecord);
+			std::uint64_t groupBytes = static_cast<std::uint64_t>(virtualHeader.cullableGroupCount)
+				* sizeof(VirtualGeometryCullableGroupRecord);
+			if ((virtualHeader.clusterCount != 0u && !RangeWithinStagedFile(virtualHeader.clusterTableOffset, clusterBytes))
+				|| (virtualHeader.cullableGroupCount != 0u && !RangeWithinStagedFile(virtualHeader.cullableGroupTableOffset, groupBytes)))
+			{
+				return false;
+			}
+			sourceClusters.resize(virtualHeader.clusterCount);
+			sourceGroups.resize(virtualHeader.cullableGroupCount);
+			if (!sourceClusters.empty())
+			{
+				stream.clear();
+				stream.seekg(static_cast<std::streamoff>(virtualHeader.clusterTableOffset), std::ios::beg);
+				stream.read(reinterpret_cast<char*>(sourceClusters.data()), static_cast<std::streamsize>(clusterBytes));
+				if (!stream)
+				{
+					return false;
+				}
+			}
+			if (!sourceGroups.empty())
+			{
+				stream.clear();
+				stream.seekg(static_cast<std::streamoff>(virtualHeader.cullableGroupTableOffset), std::ios::beg);
+				stream.read(reinterpret_cast<char*>(sourceGroups.data()), static_cast<std::streamsize>(groupBytes));
+				if (!stream)
+				{
+					return false;
+				}
+			}
+			hasVirtualGeometryClusters = !sourceClusters.empty();
+		}
+
+		const MeshletRemapEncoding remapEncoding = static_cast<MeshletRemapEncoding>(meshHeader.meshletVertexRemapEncoding);
+		const std::uint32_t remapStride = GetRemapElementSizeBytes(remapEncoding);
+		const std::uint64_t remapBytes = static_cast<std::uint64_t>(meshHeader.meshletVertexRemapCount) * remapStride;
+		if ((remapEncoding != MeshletRemapEncoding::Uint16 && remapEncoding != MeshletRemapEncoding::Uint32)
+			|| !RangeWithinStagedFile(meshHeader.meshletVertexRemapDataOffset, remapBytes))
+		{
+			return false;
+		}
+		std::vector<std::uint8_t> remapBytesBuffer(static_cast<std::size_t>(remapBytes));
+		stream.clear();
+		stream.seekg(static_cast<std::streamoff>(meshHeader.meshletVertexRemapDataOffset), std::ios::beg);
+		stream.read(reinterpret_cast<char*>(remapBytesBuffer.data()), static_cast<std::streamsize>(remapBytesBuffer.size()));
+		if (!stream)
+		{
+			return false;
+		}
+		const auto ReadRemappedVertex = [&](std::uint32_t remapIndex, std::uint32_t& outVertex) {
+			if (remapIndex >= meshHeader.meshletVertexRemapCount)
+			{
+				return false;
+			}
+			const std::size_t offset = static_cast<std::size_t>(remapIndex) * remapStride;
+			if (remapEncoding == MeshletRemapEncoding::Uint16)
+			{
+				std::uint16_t compact = 0u;
+				std::memcpy(&compact, remapBytesBuffer.data() + offset, sizeof(compact));
+				outVertex = compact;
+			}
+			else
+			{
+				std::memcpy(&outVertex, remapBytesBuffer.data() + offset, sizeof(outVertex));
+			}
+			return outVertex < vertexPaletteIndices.size();
+		};
+
+		const auto AppendCluster = [&](const VirtualGeometryClusterRecord* sourceCluster, bool fallbackOnly) {
+			std::vector<std::uint32_t> clusterVertices;
+			if (sourceCluster == nullptr)
+			{
+				clusterVertices.resize(static_cast<std::uint32_t>(input.vertices.size()));
+				std::iota(clusterVertices.begin(), clusterVertices.end(), 0u);
+			}
+			else
+			{
+				if (sourceCluster->groupOffset > sourceGroups.size()
+					|| sourceCluster->groupCount > sourceGroups.size() - sourceCluster->groupOffset)
+				{
+					return false;
+				}
+				for (std::uint32_t groupIndex = sourceCluster->groupOffset;
+					groupIndex < sourceCluster->groupOffset + sourceCluster->groupCount; ++groupIndex)
+				{
+					const VirtualGeometryCullableGroupRecord& group = sourceGroups[groupIndex];
+					if (group.vertexOffset > meshHeader.meshletVertexRemapCount
+						|| group.vertexCount > meshHeader.meshletVertexRemapCount - group.vertexOffset)
+					{
+						return false;
+					}
+					for (std::uint32_t remapIndex = group.vertexOffset;
+						remapIndex < group.vertexOffset + group.vertexCount; ++remapIndex)
+					{
+						std::uint32_t vertex = 0u;
+						if (!ReadRemappedVertex(remapIndex, vertex))
+						{
+							return false;
+						}
+						clusterVertices.push_back(vertex);
+					}
+				}
+				std::sort(clusterVertices.begin(), clusterVertices.end());
+				clusterVertices.erase(std::unique(clusterVertices.begin(), clusterVertices.end()), clusterVertices.end());
+				if (clusterVertices.empty())
+				{
+					return false;
+				}
+			}
+			std::vector<std::uint32_t> palettes;
+			palettes.reserve(clusterVertices.size());
+			for (std::uint32_t vertex : clusterVertices)
+			{
+				palettes.push_back(vertexPaletteIndices[vertex]);
+			}
+			std::sort(palettes.begin(), palettes.end());
+			palettes.erase(std::unique(palettes.begin(), palettes.end()), palettes.end());
+			if (palettes.empty())
+			{
+				return false;
+			}
+			DeformableVirtualGeometryClusterRecord record{};
+			record.clusterId = sourceCluster == nullptr ? 0u : sourceCluster->clusterId;
+			record.fallbackClusterId = sourceCluster == nullptr ? 0u : sourceCluster->fallbackClusterId;
+			record.parentClusterId = sourceCluster == nullptr ? kVirtualGeometryInvalidIndex : sourceCluster->parentClusterId;
+			record.firstChildClusterId = sourceCluster == nullptr ? kVirtualGeometryInvalidIndex : sourceCluster->firstChildClusterId;
+			record.childCount = sourceCluster == nullptr ? 0u : sourceCluster->childCount;
+			record.geometricError = sourceCluster == nullptr ? 0.0f : sourceCluster->geometricError;
+			if (!std::isfinite(record.geometricError) || record.geometricError < 0.0f
+				|| !BuildEnvelope(clusterVertices, record.deformationBoundsMin, record.deformationBoundsMax, record.deformationError))
+			{
+				return false;
+			}
+			record.flags = kDeformableVirtualGeometryClusterFlagActive
+				| kDeformableVirtualGeometryClusterFlagFallbackCoverageComplete;
+			record.morphTargetCount = static_cast<std::uint32_t>(orderedMorphs.size());
+			if (fallbackOnly)
+			{
+				record.flags |= kDeformableVirtualGeometryClusterFlagFallbackActive;
+			}
+			if (!hasBoundSkinning)
+			{
+				record.flags |= kDeformableVirtualGeometryClusterFlagConservativeEnvelopeValid
+					| kDeformableVirtualGeometryClusterFlagFrustumCullingSafe;
+				if (record.childCount != 0u)
+				{
+					record.flags |= kDeformableVirtualGeometryClusterFlagRefinementSafe;
+				}
+			}
+			record.paletteIndexCount = static_cast<std::uint32_t>(palettes.size());
+			outPaletteIndices.insert(outPaletteIndices.end(), palettes.begin(), palettes.end());
+			outClusters.push_back(record);
+			return true;
+		};
+
+		if (hasVirtualGeometryClusters)
+		{
+			for (const VirtualGeometryClusterRecord& cluster : sourceClusters)
+			{
+				if (cluster.clusterId != outClusters.size() || !AppendCluster(&cluster, cluster.fallbackClusterId == cluster.clusterId))
+				{
+					return false;
+				}
+			}
+		}
+		else if (!AppendCluster(nullptr, true))
+		{
+			return false;
+		}
+
+		std::uint64_t paletteCursor = static_cast<std::uint64_t>(sidecarOffset)
+			+ sizeof(DeformableVirtualGeometrySidecarHeader)
+			+ static_cast<std::uint64_t>(outClusters.size()) * sizeof(DeformableVirtualGeometryClusterRecord);
+		for (DeformableVirtualGeometryClusterRecord& cluster : outClusters)
+		{
+			cluster.paletteIndexOffset = static_cast<std::uint32_t>(paletteCursor);
+			paletteCursor += static_cast<std::uint64_t>(cluster.paletteIndexCount) * sizeof(std::uint32_t);
+		}
+		const std::uint64_t morphTableOffset = paletteCursor;
+		paletteCursor += static_cast<std::uint64_t>(orderedMorphs.size()) * sizeof(DeformableVirtualGeometryMorphRecord);
+		const std::uint64_t morphVertexDataOffset = paletteCursor;
+		for (const SkinnedMeshMorphTarget* morph : orderedMorphs)
+		{
+			DeformableVirtualGeometryMorphRecord morphRecord{};
+			morphRecord.stableTargetId = morph->stableTargetId;
+			morphRecord.vertexDataOffset = static_cast<std::uint32_t>(paletteCursor);
+			morphRecord.vertexCount = static_cast<std::uint32_t>(input.vertices.size());
+			morphRecord.vertexStrideBytes = sizeof(DeformableVirtualGeometryMorphVertex);
+			morphRecord.flags = kDeformableVirtualGeometryMorphFlagPosition;
+			if (!morph->normalDeltas.empty())
+			{
+				morphRecord.flags |= kDeformableVirtualGeometryMorphFlagNormal;
+			}
+			if (!morph->tangentDeltas.empty())
+			{
+				morphRecord.flags |= kDeformableVirtualGeometryMorphFlagTangent;
+			}
+			outMorphs.push_back(morphRecord);
+			for (std::size_t vertexIndex = 0u; vertexIndex < input.vertices.size(); ++vertexIndex)
+			{
+				DeformableVirtualGeometryMorphVertex gpuRecord{};
+				std::copy_n(morph->positionDeltas[vertexIndex].begin(), 3u, gpuRecord.positionDelta);
+				if (!morph->normalDeltas.empty())
+				{
+					std::copy_n(morph->normalDeltas[vertexIndex].begin(), 3u, gpuRecord.normalDelta);
+				}
+				if (!morph->tangentDeltas.empty())
+				{
+					std::copy_n(morph->tangentDeltas[vertexIndex].begin(), 3u, gpuRecord.tangentDelta);
+				}
+				outMorphVertices.push_back(gpuRecord);
+			}
+			paletteCursor += static_cast<std::uint64_t>(input.vertices.size()) * sizeof(DeformableVirtualGeometryMorphVertex);
+		}
+		if (paletteCursor > std::numeric_limits<std::uint32_t>::max()
+			|| outMorphVertices.size() != orderedMorphs.size() * input.vertices.size())
+		{
+			return false;
+		}
+		outHeader.magic = kDeformableVirtualGeometrySidecarMagicValue;
+		outHeader.version = kDeformableVirtualGeometrySidecarVersion;
+		outHeader.headerSize = static_cast<std::uint16_t>(sizeof(DeformableVirtualGeometrySidecarHeader));
+		outHeader.payloadSize = static_cast<std::uint32_t>(paletteCursor - sidecarOffset);
+		outHeader.flags = kDeformableVirtualGeometrySidecarFlagDerivedFromClusters;
+		outHeader.clusterCount = static_cast<std::uint32_t>(outClusters.size());
+		outHeader.clusterTableOffset = sidecarOffset + static_cast<std::uint32_t>(sizeof(DeformableVirtualGeometrySidecarHeader));
+		outHeader.paletteIndexCount = static_cast<std::uint32_t>(outPaletteIndices.size());
+		outHeader.paletteIndexTableOffset = outPaletteIndices.empty() ? 0u : outClusters.front().paletteIndexOffset;
+		outHeader.morphTargetCount = static_cast<std::uint32_t>(outMorphs.size());
+		outHeader.morphTableOffset = outMorphs.empty() ? 0u : static_cast<std::uint32_t>(morphTableOffset);
+		outHeader.morphVertexDataOffset = outMorphs.empty() ? 0u : static_cast<std::uint32_t>(morphVertexDataOffset);
+		outHeader.morphVertexStrideBytes = sizeof(DeformableVirtualGeometryMorphVertex);
+		return outHeader.clusterCount != 0u && outHeader.paletteIndexCount != 0u;
+	}
+
+	bool TryAppendDeformablePayload(
+		const std::filesystem::path& stagedPath,
+		const SkinnedMeshCookInput& input,
+		const SkinnedMeshCookSettings& settings,
+		const std::vector<SkinnedMeshPalettePartition>& palettes,
+		const std::vector<std::uint32_t>& vertexPaletteIndices,
+		const std::vector<std::uint8_t>& skinningBytes,
+		SkinnedMeshDeformableTemfSummary& outSummary,
+		SkinnedMeshCookFailure& outFailure)
+	{
+		outFailure = SkinnedMeshCookFailure::StagedPayloadWriteFailed;
+		std::fstream stream(stagedPath, std::ios::binary | std::ios::in | std::ios::out);
+		if (!stream)
+		{
+			return false;
+		}
+
+		MeshHeader header{};
+		stream.read(reinterpret_cast<char*>(&header), sizeof(header));
+		if (!stream || !HasTemfMagic(header) || header.version != kMeshCurrentVersion
+			|| header.headerSize != sizeof(MeshHeader))
+		{
+			outFailure = SkinnedMeshCookFailure::FormatCompatibilityMismatch;
+			return false;
+		}
+
+		std::error_code sizeError;
+		const std::uintmax_t stagedSize = std::filesystem::file_size(stagedPath, sizeError);
+		if (sizeError || stagedSize < sizeof(MeshHeader)
+			|| stagedSize > static_cast<std::uintmax_t>(std::numeric_limits<std::uint32_t>::max()))
+		{
+			outFailure = SkinnedMeshCookFailure::PayloadRangeOverflow;
+			return false;
+		}
+
+		std::size_t expectedSkinningBytes = 0u;
+		if (!TryMultiplySkinnedSize(input.vertices.size(), kDeformableMeshSkinningStrideBytes, expectedSkinningBytes)
+			|| expectedSkinningBytes > std::numeric_limits<std::uint32_t>::max()
+			|| skinningBytes.size() != expectedSkinningBytes
+			|| vertexPaletteIndices.size() != input.vertices.size()
+			|| header.meshletVertexCount != input.vertices.size()
+			|| header.meshletSkinningDataOffset != 0u
+			|| header.meshletSkinningDataCount != 0u
+			|| header.virtualGeometryReserved != 0u)
+		{
+			outFailure = SkinnedMeshCookFailure::StaticVertexLayoutIncompatible;
+			return false;
+		}
+
+		std::uint32_t skinningOffset = 0u;
+		std::uint32_t metadataOffset = 0u;
+		if (!TryAlignSkinnedOffset(stagedSize, kMeshletVertexDataAlignmentBytes, skinningOffset)
+			|| !TryAlignSkinnedOffset(
+				static_cast<std::uint64_t>(skinningOffset) + skinningBytes.size(),
+				kMeshletVertexDataAlignmentBytes,
+				metadataOffset))
+		{
+			outFailure = SkinnedMeshCookFailure::PayloadRangeOverflow;
+			return false;
+		}
+
+		std::uint32_t vertexCount = 0u;
+		std::uint32_t paletteCount = 0u;
+		std::uint32_t morphCount = 0u;
+		if (!TryConvertSkinnedCount(input.vertices.size(), vertexCount)
+			|| !TryConvertSkinnedCount(palettes.size(), paletteCount)
+			|| !TryConvertSkinnedCount(input.morphTargets.size(), morphCount))
+		{
+			outFailure = SkinnedMeshCookFailure::PayloadRangeOverflow;
+			return false;
+		}
+		for (std::uint32_t paletteIndex : vertexPaletteIndices)
+		{
+			if (paletteIndex >= paletteCount)
+			{
+				outFailure = SkinnedMeshCookFailure::PalettePartitionLimitExceeded;
+				return false;
+			}
+		}
+
+		std::vector<const SkinnedMeshMorphTarget*> orderedMorphs;
+		orderedMorphs.reserve(input.morphTargets.size());
+		for (const SkinnedMeshMorphTarget& morph : input.morphTargets)
+		{
+			orderedMorphs.push_back(&morph);
+		}
+		std::sort(orderedMorphs.begin(), orderedMorphs.end(), [](const SkinnedMeshMorphTarget* left, const SkinnedMeshMorphTarget* right) {
+			return left->stableTargetId < right->stableTargetId;
+		});
+		for (std::size_t index = 1u; index < orderedMorphs.size(); ++index)
+		{
+			if (orderedMorphs[index - 1u]->stableTargetId == orderedMorphs[index]->stableTargetId)
+			{
+				outFailure = SkinnedMeshCookFailure::DuplicateMorphTarget;
+				return false;
+			}
+		}
+
+		std::vector<DeformableMeshPaletteRecord> paletteRecords(palettes.size());
+		std::vector<DeformableMeshMorphRecord> morphRecords(orderedMorphs.size());
+		std::uint64_t tableCursor = static_cast<std::uint64_t>(metadataOffset) + sizeof(DeformableMeshPayloadHeader)
+			+ static_cast<std::uint64_t>(paletteRecords.size()) * sizeof(DeformableMeshPaletteRecord)
+			+ static_cast<std::uint64_t>(morphRecords.size()) * sizeof(DeformableMeshMorphRecord);
+		if (tableCursor > std::numeric_limits<std::uint32_t>::max())
+		{
+			outFailure = SkinnedMeshCookFailure::PayloadRangeOverflow;
+			return false;
+		}
+
+		for (std::size_t index = 0u; index < palettes.size(); ++index)
+		{
+			std::uint32_t jointCount = 0u;
+			if (palettes[index].sourceJointIds.size() > kDeformableMeshMaximumPaletteJoints
+				|| !TryConvertSkinnedCount(palettes[index].sourceJointIds.size(), jointCount)
+				|| tableCursor + static_cast<std::uint64_t>(jointCount) * sizeof(std::uint32_t) > std::numeric_limits<std::uint32_t>::max())
+			{
+				outFailure = SkinnedMeshCookFailure::PayloadRangeOverflow;
+				return false;
+			}
+			paletteRecords[index] = { static_cast<std::uint32_t>(tableCursor), jointCount };
+			tableCursor += static_cast<std::uint64_t>(jointCount) * sizeof(std::uint32_t);
+		}
+
+		const std::uint32_t vertexPaletteIndexOffset = static_cast<std::uint32_t>(tableCursor);
+		const std::uint64_t vertexPaletteBytes = static_cast<std::uint64_t>(vertexPaletteIndices.size()) * sizeof(std::uint32_t);
+		if (tableCursor + vertexPaletteBytes > std::numeric_limits<std::uint32_t>::max())
+		{
+			outFailure = SkinnedMeshCookFailure::PayloadRangeOverflow;
+			return false;
+		}
+		tableCursor += vertexPaletteBytes;
+
+		for (std::size_t index = 0u; index < orderedMorphs.size(); ++index)
+		{
+			const SkinnedMeshMorphTarget& morph = *orderedMorphs[index];
+			std::uint32_t deltaCount = 0u;
+			if (!TryConvertSkinnedCount(morph.positionDeltas.size(), deltaCount)
+				|| tableCursor + static_cast<std::uint64_t>(deltaCount) * sizeof(std::array<float, 3>) > std::numeric_limits<std::uint32_t>::max())
+			{
+				outFailure = SkinnedMeshCookFailure::PayloadRangeOverflow;
+				return false;
+			}
+			morphRecords[index] = {
+				morph.stableTargetId,
+				static_cast<std::uint32_t>(tableCursor),
+				deltaCount,
+				static_cast<std::uint32_t>(sizeof(std::array<float, 3>)),
+				kDeformableMeshPayloadFlagDenseMorphPositionDeltas
+			};
+			tableCursor += static_cast<std::uint64_t>(deltaCount) * sizeof(std::array<float, 3>);
+		}
+		if (tableCursor - metadataOffset > std::numeric_limits<std::uint32_t>::max())
+		{
+			outFailure = SkinnedMeshCookFailure::PayloadRangeOverflow;
+			return false;
+		}
+		// Keep TDEF v1's payloadSize frozen at tableCursor. TDFV starts immediately
+		// afterward, allowing historical readers to validate and consume the base
+		// skin/morph data unchanged while current loaders opt into cluster facts.
+		const std::uint32_t sidecarOffset = static_cast<std::uint32_t>(tableCursor);
+		DeformableVirtualGeometrySidecarHeader virtualGeometrySidecar{};
+		std::vector<DeformableVirtualGeometryClusterRecord> virtualGeometryClusters;
+		std::vector<std::uint32_t> virtualGeometryPaletteIndices;
+		std::vector<DeformableVirtualGeometryMorphRecord> virtualGeometryMorphs;
+		std::vector<DeformableVirtualGeometryMorphVertex> virtualGeometryMorphVertices;
+		if (!TryBuildDeformableVirtualGeometrySidecar(
+			stream,
+			static_cast<std::uint32_t>(stagedSize),
+			header,
+			input,
+			orderedMorphs,
+			vertexPaletteIndices,
+			skinningBytes,
+			sidecarOffset,
+			virtualGeometrySidecar,
+			virtualGeometryClusters,
+			virtualGeometryPaletteIndices,
+			virtualGeometryMorphs,
+			virtualGeometryMorphVertices))
+		{
+			outFailure = SkinnedMeshCookFailure::StagedPayloadWriteFailed;
+			return false;
+		}
+		const std::uint64_t stagedPayloadEnd = static_cast<std::uint64_t>(sidecarOffset)
+			+ virtualGeometrySidecar.payloadSize;
+		if (stagedPayloadEnd > std::numeric_limits<std::uint32_t>::max())
+		{
+			outFailure = SkinnedMeshCookFailure::PayloadRangeOverflow;
+			return false;
+		}
+
+		DeformableMeshPayloadHeader metadata{};
+		metadata.magic = kDeformableMeshPayloadMagicValue;
+		metadata.version = kDeformableMeshPayloadVersion;
+		metadata.headerSize = static_cast<std::uint16_t>(sizeof(DeformableMeshPayloadHeader));
+		metadata.payloadSize = static_cast<std::uint32_t>(tableCursor - metadataOffset);
+		metadata.compatibleMeshVersion = kMeshCurrentVersion;
+		metadata.skinningVertexCount = vertexCount;
+		metadata.palettePartitionCount = paletteCount;
+		metadata.morphTargetCount = morphCount;
+		metadata.paletteTableOffset = metadataOffset + static_cast<std::uint32_t>(sizeof(DeformableMeshPayloadHeader));
+		metadata.morphTableOffset = metadata.paletteTableOffset
+			+ static_cast<std::uint32_t>(paletteRecords.size() * sizeof(DeformableMeshPaletteRecord));
+		metadata.vertexPaletteIndexOffset = vertexPaletteIndexOffset;
+		metadata.vertexPaletteIndexCount = vertexCount;
+		metadata.skinningDataOffset = skinningOffset;
+		metadata.skinningDataSize = static_cast<std::uint32_t>(skinningBytes.size());
+		metadata.skinningStrideBytes = kDeformableMeshSkinningStrideBytes;
+		metadata.maximumInfluences = kDeformableMeshMaximumInfluences;
+		metadata.maximumPaletteJoints = kDeformableMeshMaximumPaletteJoints;
+		metadata.sourceSkeletonJointCount = settings.sourceSkeletonJointCount;
+		metadata.skeletonCompatibilityFingerprint = settings.skeletonCompatibilityFingerprint;
+		metadata.flags = kDeformableMeshPayloadFlagConservativeMorphEnvelope
+			| kDeformableMeshPayloadFlagZeroWeightMeansIdentity
+			| kDeformableMeshPayloadFlagVertexPaletteIndices
+			| kDeformableMeshPayloadFlagDenseMorphPositionDeltas;
+		metadata.virtualGeometryDeformationFlags = kDeformableMeshVirtualGeometryFlagWholeMeshEnvelope
+			| kDeformableMeshVirtualGeometryFlagDisableUnprovenConeCulling
+			| kDeformableMeshVirtualGeometryFlagRequireCompleteFallback;
+		for (std::size_t component = 0u; component < 3u; ++component)
+		{
+			metadata.deformationBoundsMin[component] = std::numeric_limits<float>::max();
+			metadata.deformationBoundsMax[component] = std::numeric_limits<float>::lowest();
+		}
+		for (std::size_t vertexIndex = 0u; vertexIndex < input.vertices.size(); ++vertexIndex)
+		{
+			const SkinnedMeshCookVertex& vertex = input.vertices[vertexIndex];
+			for (std::size_t component = 0u; component < 3u; ++component)
+			{
+				// Multiple morph targets can be active together. Summing all negative
+				// and positive deltas produces a conservative [0,1]-weight envelope;
+				// sampling each target independently would underestimate combinations.
+				float minimum = vertex.baseVertex.position[component];
+				float maximum = vertex.baseVertex.position[component];
+				for (const SkinnedMeshMorphTarget* morph : orderedMorphs)
+				{
+					const float delta = morph->positionDeltas[vertexIndex][component];
+					minimum += std::min(delta, 0.0f);
+					maximum += std::max(delta, 0.0f);
+				}
+				metadata.deformationBoundsMin[component] = std::min(metadata.deformationBoundsMin[component], minimum);
+				metadata.deformationBoundsMax[component] = std::max(metadata.deformationBoundsMax[component], maximum);
+			}
+		}
+
+		// Append all extension data before rewriting the small root header. A crash
+		// can only damage this private staged file; the published TEMF is untouched.
+		stream.clear();
+		stream.seekp(0, std::ios::end);
+		const std::streamoff currentEnd = stream.tellp();
+		if (currentEnd < 0 || static_cast<std::uint64_t>(currentEnd) > skinningOffset)
+		{
+			return false;
+		}
+		std::vector<char> padding(static_cast<std::size_t>(skinningOffset - static_cast<std::uint64_t>(currentEnd)), 0);
+		stream.write(padding.data(), static_cast<std::streamsize>(padding.size()));
+		stream.write(reinterpret_cast<const char*>(skinningBytes.data()), static_cast<std::streamsize>(skinningBytes.size()));
+		const std::uint64_t afterSkinning = static_cast<std::uint64_t>(skinningOffset) + skinningBytes.size();
+		padding.assign(static_cast<std::size_t>(metadataOffset - afterSkinning), 0);
+		stream.write(padding.data(), static_cast<std::streamsize>(padding.size()));
+		stream.write(reinterpret_cast<const char*>(&metadata), sizeof(metadata));
+		stream.write(reinterpret_cast<const char*>(paletteRecords.data()), static_cast<std::streamsize>(paletteRecords.size() * sizeof(DeformableMeshPaletteRecord)));
+		stream.write(reinterpret_cast<const char*>(morphRecords.data()), static_cast<std::streamsize>(morphRecords.size() * sizeof(DeformableMeshMorphRecord)));
+		for (const SkinnedMeshPalettePartition& palette : palettes)
+		{
+			stream.write(reinterpret_cast<const char*>(palette.sourceJointIds.data()), static_cast<std::streamsize>(palette.sourceJointIds.size() * sizeof(std::uint32_t)));
+		}
+		stream.write(reinterpret_cast<const char*>(vertexPaletteIndices.data()), static_cast<std::streamsize>(vertexPaletteIndices.size() * sizeof(std::uint32_t)));
+		for (const SkinnedMeshMorphTarget* morph : orderedMorphs)
+		{
+			stream.write(reinterpret_cast<const char*>(morph->positionDeltas.data()), static_cast<std::streamsize>(morph->positionDeltas.size() * sizeof(std::array<float, 3>)));
+		}
+		stream.write(reinterpret_cast<const char*>(&virtualGeometrySidecar), sizeof(virtualGeometrySidecar));
+		stream.write(
+			reinterpret_cast<const char*>(virtualGeometryClusters.data()),
+			static_cast<std::streamsize>(virtualGeometryClusters.size() * sizeof(DeformableVirtualGeometryClusterRecord)));
+		stream.write(
+			reinterpret_cast<const char*>(virtualGeometryPaletteIndices.data()),
+			static_cast<std::streamsize>(virtualGeometryPaletteIndices.size() * sizeof(std::uint32_t)));
+		stream.write(
+			reinterpret_cast<const char*>(virtualGeometryMorphs.data()),
+			static_cast<std::streamsize>(virtualGeometryMorphs.size() * sizeof(DeformableVirtualGeometryMorphRecord)));
+		stream.write(
+			reinterpret_cast<const char*>(virtualGeometryMorphVertices.data()),
+			static_cast<std::streamsize>(virtualGeometryMorphVertices.size() * sizeof(DeformableVirtualGeometryMorphVertex)));
+		const std::streamoff writtenEnd = stream.tellp();
+		stream.flush();
+		if (!stream || writtenEnd < 0 || static_cast<std::uint64_t>(writtenEnd) != stagedPayloadEnd)
+		{
+			return false;
+		}
+
+		// Read the staged header back from disk before publishing its root pointer.
+		// This catches short writes, stale layouts, and—critically—a skeleton
+		// fingerprint that differs from the generation supplied by the importer.
+		DeformableMeshPayloadHeader stagedMetadata{};
+		stream.clear();
+		stream.seekg(static_cast<std::streamoff>(metadataOffset), std::ios::beg);
+		stream.read(reinterpret_cast<char*>(&stagedMetadata), sizeof(stagedMetadata));
+		if (!stream
+			|| stagedMetadata.magic != kDeformableMeshPayloadMagicValue
+			|| stagedMetadata.version != kDeformableMeshPayloadVersion
+			|| stagedMetadata.headerSize != sizeof(DeformableMeshPayloadHeader)
+			|| stagedMetadata.compatibleMeshVersion != kMeshCurrentVersion
+			|| stagedMetadata.skeletonCompatibilityFingerprint != settings.skeletonCompatibilityFingerprint
+			|| stagedMetadata.maximumInfluences != kDeformableMeshMaximumInfluences
+			|| stagedMetadata.maximumPaletteJoints != kDeformableMeshMaximumPaletteJoints
+			|| stagedMetadata.skinningStrideBytes != kDeformableMeshSkinningStrideBytes)
+		{
+			outFailure = SkinnedMeshCookFailure::FormatCompatibilityMismatch;
+			return false;
+		}
+
+		const auto RangeWithin = [](std::uint32_t offset, std::uint64_t byteCount, std::uint64_t rangeBegin, std::uint64_t rangeEnd) {
+			const std::uint64_t begin = offset;
+			return begin >= rangeBegin && begin <= rangeEnd && byteCount <= (rangeEnd - begin);
+		};
+		const std::uint64_t payloadEnd = static_cast<std::uint64_t>(metadataOffset) + stagedMetadata.payloadSize;
+		const std::uint64_t paletteTableBytes = static_cast<std::uint64_t>(stagedMetadata.palettePartitionCount)
+			* sizeof(DeformableMeshPaletteRecord);
+		const std::uint64_t morphTableBytes = static_cast<std::uint64_t>(stagedMetadata.morphTargetCount)
+			* sizeof(DeformableMeshMorphRecord);
+		const std::uint64_t vertexPaletteTableBytes = static_cast<std::uint64_t>(stagedMetadata.vertexPaletteIndexCount)
+			* sizeof(std::uint32_t);
+		if (payloadEnd != tableCursor
+			|| stagedMetadata.skinningVertexCount != vertexCount
+			|| stagedMetadata.sourceSkeletonJointCount != settings.sourceSkeletonJointCount
+			|| stagedMetadata.skinningDataOffset != skinningOffset
+			|| stagedMetadata.skinningDataSize != skinningBytes.size()
+			|| !RangeWithin(stagedMetadata.skinningDataOffset, stagedMetadata.skinningDataSize, skinningOffset, metadataOffset)
+			|| !RangeWithin(stagedMetadata.paletteTableOffset, paletteTableBytes, metadataOffset, payloadEnd)
+			|| !RangeWithin(stagedMetadata.morphTableOffset, morphTableBytes, metadataOffset, payloadEnd)
+			|| !RangeWithin(stagedMetadata.vertexPaletteIndexOffset, vertexPaletteTableBytes, metadataOffset, payloadEnd))
+		{
+			outFailure = SkinnedMeshCookFailure::PayloadRangeOverflow;
+			return false;
+		}
+		for (const DeformableMeshPaletteRecord& record : paletteRecords)
+		{
+			if (record.jointCount == 0u || record.jointCount > kDeformableMeshMaximumPaletteJoints
+				|| !RangeWithin(
+					record.jointTableOffset,
+					static_cast<std::uint64_t>(record.jointCount) * sizeof(std::uint32_t),
+					metadataOffset,
+					payloadEnd))
+			{
+				outFailure = SkinnedMeshCookFailure::PayloadRangeOverflow;
+				return false;
+			}
+		}
+		for (const DeformableMeshMorphRecord& record : morphRecords)
+		{
+			if (record.positionDeltaStrideBytes != sizeof(std::array<float, 3>)
+				|| record.positionDeltaCount != vertexCount
+				|| !RangeWithin(
+					record.positionDeltaOffset,
+					static_cast<std::uint64_t>(record.positionDeltaCount) * record.positionDeltaStrideBytes,
+					metadataOffset,
+					payloadEnd))
+			{
+				outFailure = SkinnedMeshCookFailure::PayloadRangeOverflow;
+				return false;
+			}
+		}
+
+		header.meshletSkinningDataOffset = skinningOffset;
+		header.meshletSkinningDataCount = vertexCount;
+		header.virtualGeometryReserved = metadataOffset;
+		stream.seekp(0, std::ios::beg);
+		stream.write(reinterpret_cast<const char*>(&header), sizeof(header));
+		stream.flush();
+		if (!stream)
+		{
+			return false;
+		}
+
+		outSummary.hasSkinning = true;
+		outSummary.morphTargetCount = morphCount;
+		outSummary.palettePartitionCount = paletteCount;
+		outSummary.deformationEnvelopeValid = true;
+		outSummary.zeroWeightIdentityEncoded = true;
+		outSummary.virtualGeometryFailsOpen = true;
+		outSummary.virtualGeometryClusterCount = virtualGeometrySidecar.clusterCount;
+		outSummary.skeletonCompatibilityValidated = true;
+		outSummary.skeletonCompatibilityFingerprint = metadata.skeletonCompatibilityFingerprint;
+		outFailure = SkinnedMeshCookFailure::None;
+		return true;
+	}
+
+	bool ReplaceStagedTemf(const std::filesystem::path& stagedPath, const std::filesystem::path& outputPath)
+	{
+#ifdef _WIN32
+		// MoveFileEx performs the protected replace in one filesystem operation;
+		// callers never delete the known-good output before this succeeds.
+		return MoveFileExW(stagedPath.c_str(), outputPath.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+		std::error_code error;
+		std::filesystem::rename(stagedPath, outputPath, error);
+		return !error;
+#endif
+	}
+}
+
+bool CompileSkinnedMeshFromRaw(
+	const std::filesystem::path& logicalSource,
+	const std::filesystem::path& output,
+	const SkinnedMeshCookInput& input,
+	SkinnedMeshCookReport* outReport,
+	const SkinnedMeshCookSettings& settings)
+{
+	SkinnedMeshCookReport report{};
+	report.skeletonCompatibilityFingerprint = settings.skeletonCompatibilityFingerprint;
+	std::error_code existenceError;
+	const bool hadLastKnownGood = std::filesystem::exists(output, existenceError) && !existenceError;
+	const auto SetDiagnostic = [&](std::string code, std::string message, std::string correction) {
+		report.diagnosticCode = std::move(code);
+		report.diagnosticMessage = std::move(message);
+		report.recommendedCorrection = std::move(correction);
+	};
+	const auto Finish = [&](bool success, SkinnedMeshCookFailure failure) {
+		report.failure = failure;
+		report.published = success;
+		report.preservedLastKnownGood = !success && hadLastKnownGood;
+		if (outReport != nullptr)
+		{
+			*outReport = report;
+		}
+		return success;
+	};
+
+	if (input.vertices.empty() || input.vertices.size() > std::numeric_limits<std::uint32_t>::max()
+		|| input.indices.empty() || (input.indices.size() % 3u) != 0u
+		|| settings.sourceSkeletonJointCount == 0u || settings.maximumPalettePartitions == 0u)
+	{
+		SetDiagnostic(
+			"SkinnedMeshInvalidInput",
+			"Skinned mesh cooking requires used vertices, triangle indices, a nonzero identity-joint domain, and at least one permitted palette.",
+			"Triangulate the mesh, remove empty primitives, and verify the skeleton and palette cook settings.");
+		return Finish(false, SkinnedMeshCookFailure::InvalidInput);
+	}
+	for (std::uint32_t index : input.indices)
+	{
+		if (index >= input.vertices.size())
+		{
+			SetDiagnostic(
+				"SkinnedMeshIndexOutOfRange",
+				"A triangle references a vertex outside the decoded vertex array.",
+				"Re-export the source mesh or repair the primitive index buffer before importing.");
+			return Finish(false, SkinnedMeshCookFailure::InvalidInput);
+		}
+	}
+
+	report.cookedVertices.reserve(input.vertices.size());
+	for (std::size_t sourceVertexIndex = 0u; sourceVertexIndex < input.vertices.size(); ++sourceVertexIndex)
+	{
+		const SkinnedMeshCookVertex& sourceVertex = input.vertices[sourceVertexIndex];
+		const RawMeshVertex& baseVertex = sourceVertex.baseVertex;
+		const bool finiteBaseVertex = std::all_of(baseVertex.position.begin(), baseVertex.position.end(), [](float value) { return std::isfinite(value); })
+			&& std::all_of(baseVertex.normal.begin(), baseVertex.normal.end(), [](float value) { return std::isfinite(value); })
+			&& std::all_of(baseVertex.uv.begin(), baseVertex.uv.end(), [](float value) { return std::isfinite(value); });
+		if (!finiteBaseVertex)
+		{
+			report.failingVertexIndex = static_cast<std::uint32_t>(sourceVertexIndex);
+			SetDiagnostic(
+				"SkinnedMeshNonFiniteVertex",
+				"A skinned vertex contains a non-finite position, normal, or texture coordinate.",
+				"Repair or re-export the source geometry so every vertex attribute is finite.");
+			return Finish(false, SkinnedMeshCookFailure::InvalidInput);
+		}
+
+		std::vector<SkinnedMeshInfluence> merged = sourceVertex.influences;
+		for (const SkinnedMeshInfluence& influence : merged)
+		{
+			if (!std::isfinite(influence.weight) || influence.weight < 0.0f)
+			{
+				report.failingVertexIndex = static_cast<std::uint32_t>(sourceVertexIndex);
+				report.failingJointIndex = influence.jointIndex;
+				SetDiagnostic(
+					"SkinnedMeshInvalidInfluenceWeight",
+					"A skin influence has a negative or non-finite weight.",
+					"Normalize the source skin weights and remove NaN, infinity, and negative values before reimporting.");
+				return Finish(false, SkinnedMeshCookFailure::InvalidInfluenceWeight);
+			}
+			if (influence.weight > 0.0f && influence.jointIndex >= settings.sourceSkeletonJointCount)
+			{
+				report.failingVertexIndex = static_cast<std::uint32_t>(sourceVertexIndex);
+				report.failingJointIndex = influence.jointIndex;
+				SetDiagnostic(
+					"SkinnedMeshMissingJoint",
+					"Vertex " + std::to_string(sourceVertexIndex) + " references joint "
+						+ std::to_string(influence.jointIndex) + ", but the source skeleton has only "
+						+ std::to_string(settings.sourceSkeletonJointCount) + " joints.",
+					"Restore the missing joint, remove the stale influence, or bind the mesh to the matching skeleton generation.");
+				return Finish(false, SkinnedMeshCookFailure::MissingJoint);
+			}
+		}
+		std::sort(merged.begin(), merged.end(), [](const SkinnedMeshInfluence& left, const SkinnedMeshInfluence& right) {
+			return left.jointIndex < right.jointIndex;
+		});
+		std::vector<SkinnedMeshInfluence> uniqueInfluences;
+		for (const SkinnedMeshInfluence& influence : merged)
+		{
+			if (!uniqueInfluences.empty() && uniqueInfluences.back().jointIndex == influence.jointIndex)
+			{
+				uniqueInfluences.back().weight += influence.weight;
+				if (!std::isfinite(uniqueInfluences.back().weight))
+				{
+					report.failingVertexIndex = static_cast<std::uint32_t>(sourceVertexIndex);
+					report.failingJointIndex = influence.jointIndex;
+					SetDiagnostic(
+						"SkinnedMeshInfluenceWeightOverflow",
+						"Merged duplicate influences overflowed the supported finite weight range.",
+						"Normalize duplicate joint weights in the source skin before reimporting.");
+					return Finish(false, SkinnedMeshCookFailure::InvalidInfluenceWeight);
+				}
+			}
+			else
+			{
+				uniqueInfluences.push_back(influence);
+			}
+		}
+		uniqueInfluences.erase(
+			std::remove_if(uniqueInfluences.begin(), uniqueInfluences.end(), [](const SkinnedMeshInfluence& influence) {
+				return influence.weight == 0.0f;
+			}),
+			uniqueInfluences.end());
+
+		float totalWeight = 0.0f;
+		for (const SkinnedMeshInfluence& influence : uniqueInfluences)
+		{
+			totalWeight += influence.weight;
+		}
+		if (!std::isfinite(totalWeight))
+		{
+			report.failingVertexIndex = static_cast<std::uint32_t>(sourceVertexIndex);
+			SetDiagnostic(
+				"SkinnedMeshInfluenceWeightOverflow",
+				"The combined influence weight is outside the supported finite range.",
+				"Normalize skin weights in the source asset before reimporting.");
+			return Finish(false, SkinnedMeshCookFailure::InvalidInfluenceWeight);
+		}
+		SkinnedMeshCookedVertex cooked{};
+		if (!(totalWeight > 0.0f))
+		{
+			cooked.usesIdentityDeformation = true;
+			report.zeroWeightVertexCount += 1u;
+			report.cookedVertices.push_back(std::move(cooked));
+			continue;
+		}
+
+		std::sort(uniqueInfluences.begin(), uniqueInfluences.end(), [](const SkinnedMeshInfluence& left, const SkinnedMeshInfluence& right) {
+			return left.weight != right.weight ? left.weight > right.weight : left.jointIndex < right.jointIndex;
+		});
+		const std::size_t retainedCount = std::min<std::size_t>(kDeformableMeshMaximumInfluences, uniqueInfluences.size());
+		float retainedWeight = 0.0f;
+		for (std::size_t index = 0u; index < retainedCount; ++index)
+		{
+			retainedWeight += uniqueInfluences[index].weight;
+		}
+		if (!(retainedWeight > 0.0f) || !std::isfinite(retainedWeight))
+		{
+			report.failingVertexIndex = static_cast<std::uint32_t>(sourceVertexIndex);
+			SetDiagnostic(
+				"SkinnedMeshInfluenceWeightOverflow",
+				"The retained influence sum is outside the supported finite range.",
+				"Normalize skin weights in the source asset before reimporting.");
+			return Finish(false, SkinnedMeshCookFailure::InvalidInfluenceWeight);
+		}
+		cooked.discardedWeight = totalWeight - retainedWeight;
+		cooked.influences.assign(uniqueInfluences.begin(), uniqueInfluences.begin() + static_cast<std::ptrdiff_t>(retainedCount));
+		std::sort(cooked.influences.begin(), cooked.influences.end(), [](const SkinnedMeshInfluence& left, const SkinnedMeshInfluence& right) {
+			return left.jointIndex < right.jointIndex;
+		});
+		for (SkinnedMeshInfluence& influence : cooked.influences)
+		{
+			influence.weight /= retainedWeight;
+			cooked.normalizedWeightSum += influence.weight;
+			cooked.sourceJointIds.push_back(influence.jointIndex);
+		}
+		report.cookedVertices.push_back(std::move(cooked));
+	}
+
+	const bool hasBoundSkinning = std::any_of(
+		report.cookedVertices.begin(),
+		report.cookedVertices.end(),
+		[](const SkinnedMeshCookedVertex& vertex) { return !vertex.usesIdentityDeformation; });
+	if (hasBoundSkinning && settings.skeletonCompatibilityFingerprint == 0u)
+	{
+		SetDiagnostic(
+			"SkinnedMeshMissingSkeletonCompatibilityFingerprint",
+			"A mesh with retained skin influences does not identify the compatible cooked skeleton generation.",
+			"Pass the nonzero compatibility fingerprint emitted by the package's SkeletonAsset cook.");
+		return Finish(false, SkinnedMeshCookFailure::MissingSkeletonCompatibilityFingerprint);
+	}
+
+	std::vector<std::uint32_t> morphTargetIds;
+	morphTargetIds.reserve(input.morphTargets.size());
+	for (const SkinnedMeshMorphTarget& morph : input.morphTargets)
+	{
+		if (morph.positionDeltas.size() != input.vertices.size())
+		{
+			SetDiagnostic(
+				"SkinnedMeshMorphVertexCountMismatch",
+				"A morph target does not contain exactly one position delta per cooked vertex.",
+				"Re-export the morph target with topology identical to the base mesh.");
+			return Finish(false, SkinnedMeshCookFailure::InvalidMorphTarget);
+		}
+		if ((!morph.normalDeltas.empty() && morph.normalDeltas.size() != input.vertices.size())
+			|| (!morph.tangentDeltas.empty() && morph.tangentDeltas.size() != input.vertices.size()))
+		{
+			SetDiagnostic(
+				"SkinnedMeshMorphAttributeVertexCountMismatch",
+				"An optional morph normal or tangent channel does not contain one delta per cooked vertex.",
+				"Re-export every supplied morph attribute with topology identical to the base mesh.");
+			return Finish(false, SkinnedMeshCookFailure::InvalidMorphTarget);
+		}
+		for (const std::array<float, 3>& delta : morph.positionDeltas)
+		{
+			if (!std::isfinite(delta[0]) || !std::isfinite(delta[1]) || !std::isfinite(delta[2]))
+			{
+				SetDiagnostic(
+					"SkinnedMeshNonFiniteMorphDelta",
+					"A morph target contains a non-finite position delta.",
+					"Repair or re-export the morph so every delta is finite.");
+				return Finish(false, SkinnedMeshCookFailure::InvalidMorphTarget);
+			}
+		}
+		const auto HasNonFiniteDelta = [](const std::vector<std::array<float, 3>>& deltas) {
+			return std::any_of(deltas.begin(), deltas.end(), [](const std::array<float, 3>& delta) {
+				return !std::isfinite(delta[0]) || !std::isfinite(delta[1]) || !std::isfinite(delta[2]);
+			});
+		};
+		if (HasNonFiniteDelta(morph.normalDeltas) || HasNonFiniteDelta(morph.tangentDeltas))
+		{
+			SetDiagnostic(
+				"SkinnedMeshNonFiniteMorphAttributeDelta",
+				"A morph normal or tangent delta contains a non-finite component.",
+				"Repair or re-export optional morph attributes so every supplied delta is finite.");
+			return Finish(false, SkinnedMeshCookFailure::InvalidMorphTarget);
+		}
+		morphTargetIds.push_back(morph.stableTargetId);
+	}
+	std::sort(morphTargetIds.begin(), morphTargetIds.end());
+	if (std::adjacent_find(morphTargetIds.begin(), morphTargetIds.end()) != morphTargetIds.end())
+	{
+		SetDiagnostic(
+			"SkinnedMeshDuplicateMorphTarget",
+			"Two morph streams use the same stable target identifier.",
+			"Assign unique semantic morph target identifiers before cooking the package.");
+		return Finish(false, SkinnedMeshCookFailure::DuplicateMorphTarget);
+	}
+
+	// Vertices shared by two triangles cannot use two unrelated palette-local
+	// index spaces. Build topology-connected components first, then pack whole
+	// components into deterministic palettes. This avoids silently corrupting a
+	// shared vertex when the 256-joint boundary falls between adjacent triangles.
+	std::vector<std::uint32_t> componentParent(input.vertices.size());
+	std::iota(componentParent.begin(), componentParent.end(), 0u);
+	const auto FindComponent = [&](std::uint32_t vertex) {
+		std::uint32_t root = vertex;
+		while (componentParent[root] != root)
+		{
+			root = componentParent[root];
+		}
+		while (componentParent[vertex] != vertex)
+		{
+			const std::uint32_t next = componentParent[vertex];
+			componentParent[vertex] = root;
+			vertex = next;
+		}
+		return root;
+	};
+	const auto UnionComponents = [&](std::uint32_t left, std::uint32_t right) {
+		const std::uint32_t leftRoot = FindComponent(left);
+		const std::uint32_t rightRoot = FindComponent(right);
+		if (leftRoot != rightRoot)
+		{
+			// Always attach the larger root to the smaller root so source traversal
+			// and thread scheduling cannot change component identity.
+			componentParent[std::max(leftRoot, rightRoot)] = std::min(leftRoot, rightRoot);
+		}
+	};
+	std::vector<bool> referencedVertices(input.vertices.size(), false);
+	for (std::size_t triangle = 0u; triangle < input.indices.size(); triangle += 3u)
+	{
+		const std::uint32_t first = input.indices[triangle];
+		const std::uint32_t second = input.indices[triangle + 1u];
+		const std::uint32_t third = input.indices[triangle + 2u];
+		UnionComponents(first, second);
+		UnionComponents(first, third);
+		referencedVertices[first] = true;
+		referencedVertices[second] = true;
+		referencedVertices[third] = true;
+	}
+
+	struct PaletteComponent
+	{
+		std::uint32_t firstVertex = 0u;
+		std::vector<std::uint32_t> vertices;
+		std::vector<std::uint32_t> sourceJointIds;
+	};
+	std::vector<PaletteComponent> components;
+	std::vector<std::uint32_t> componentLookup(input.vertices.size(), kInvalidPalettePartition);
+	for (std::uint32_t vertexIndex = 0u; vertexIndex < input.vertices.size(); ++vertexIndex)
+	{
+		if (!referencedVertices[vertexIndex])
+		{
+			continue;
+		}
+		const std::uint32_t root = FindComponent(vertexIndex);
+		if (componentLookup[root] == kInvalidPalettePartition)
+		{
+			componentLookup[root] = static_cast<std::uint32_t>(components.size());
+			components.push_back({ vertexIndex, {}, {} });
+		}
+		PaletteComponent& component = components[componentLookup[root]];
+		component.vertices.push_back(vertexIndex);
+		const std::vector<std::uint32_t>& joints = report.cookedVertices[vertexIndex].sourceJointIds;
+		component.sourceJointIds.insert(component.sourceJointIds.end(), joints.begin(), joints.end());
+	}
+	for (PaletteComponent& component : components)
+	{
+		std::sort(component.sourceJointIds.begin(), component.sourceJointIds.end());
+		component.sourceJointIds.erase(
+			std::unique(component.sourceJointIds.begin(), component.sourceJointIds.end()),
+			component.sourceJointIds.end());
+		if (component.sourceJointIds.empty())
+		{
+			// TDEF keeps palette records structurally nonempty. Joint zero is a
+			// deterministic placeholder for an unbound component; all four weights
+			// remain zero and the identity flag forbids runtime palette sampling.
+			component.sourceJointIds.push_back(0u);
+		}
+		if (component.sourceJointIds.size() > kDeformableMeshMaximumPaletteJoints)
+		{
+			SetDiagnostic(
+				"SkinnedMeshConnectedPaletteTooLarge",
+				"A topology-connected deformable region references more than 256 retained joints and cannot share one palette-local index space.",
+				"Split the mesh at a safe primitive boundary or reduce the skeleton influences for that region.");
+			return Finish(false, SkinnedMeshCookFailure::PalettePartitionLimitExceeded);
+		}
+	}
+	std::sort(components.begin(), components.end(), [](const PaletteComponent& left, const PaletteComponent& right) {
+		if (left.sourceJointIds != right.sourceJointIds)
+		{
+			return std::lexicographical_compare(
+				left.sourceJointIds.begin(), left.sourceJointIds.end(),
+				right.sourceJointIds.begin(), right.sourceJointIds.end());
+		}
+		return left.firstVertex < right.firstVertex;
+	});
+
+	std::vector<std::uint32_t> vertexPalette(input.vertices.size(), kInvalidPalettePartition);
+	for (const PaletteComponent& component : components)
+	{
+		std::uint32_t selectedPalette = kInvalidPalettePartition;
+		std::vector<std::uint32_t> selectedJointUnion;
+		for (std::uint32_t paletteIndex = 0u; paletteIndex < report.palettePartitions.size(); ++paletteIndex)
+		{
+			const std::vector<std::uint32_t>& existing = report.palettePartitions[paletteIndex].sourceJointIds;
+			std::vector<std::uint32_t> combined;
+			combined.reserve(existing.size() + component.sourceJointIds.size());
+			std::set_union(
+				existing.begin(), existing.end(),
+				component.sourceJointIds.begin(), component.sourceJointIds.end(),
+				std::back_inserter(combined));
+			if (combined.size() <= kDeformableMeshMaximumPaletteJoints)
+			{
+				selectedPalette = paletteIndex;
+				selectedJointUnion = std::move(combined);
+				break;
+			}
+		}
+		if (selectedPalette == kInvalidPalettePartition)
+		{
+			if (report.palettePartitions.size() >= settings.maximumPalettePartitions)
+			{
+				SetDiagnostic(
+					"SkinnedMeshPalettePartitionLimitExceeded",
+					"The deterministic cook requires more palette partitions than the active operational limit permits.",
+					"Increase maximumPalettePartitions or split the mesh into smaller deformable sections.");
+				return Finish(false, SkinnedMeshCookFailure::PalettePartitionLimitExceeded);
+			}
+			selectedPalette = static_cast<std::uint32_t>(report.palettePartitions.size());
+			report.palettePartitions.push_back({ component.sourceJointIds });
+		}
+		else
+		{
+			report.palettePartitions[selectedPalette].sourceJointIds = std::move(selectedJointUnion);
+		}
+		for (std::uint32_t vertexIndex : component.vertices)
+		{
+			vertexPalette[vertexIndex] = selectedPalette;
+			report.cookedVertices[vertexIndex].palettePartitionIndex = selectedPalette;
+		}
+	}
+	if (report.palettePartitions.empty())
+	{
+		SetDiagnostic(
+			"SkinnedMeshNoPalettePartition",
+			"No referenced deformable vertices were available to form a palette partition.",
+			"Remove empty primitives or re-export the skinned mesh with valid triangle references.");
+		return Finish(false, SkinnedMeshCookFailure::PalettePartitionLimitExceeded);
+	}
+
+	std::size_t sourceSkinningByteCount = 0u;
+	if (!TryMultiplySkinnedSize(input.vertices.size(), kDeformableMeshSkinningStrideBytes, sourceSkinningByteCount)
+		|| sourceSkinningByteCount > std::numeric_limits<std::uint32_t>::max())
+	{
+		SetDiagnostic(
+			"SkinnedMeshSkinningStreamOverflow",
+			"The 8-byte-per-vertex skinning stream exceeds the TEMF v1 address range.",
+			"Split the source mesh into smaller assets before cooking.");
+		return Finish(false, SkinnedMeshCookFailure::PayloadRangeOverflow);
+	}
+	std::vector<std::uint8_t> sourceSkinningBytes(sourceSkinningByteCount, 0u);
+	for (std::size_t vertexIndex = 0u; vertexIndex < report.cookedVertices.size(); ++vertexIndex)
+	{
+		SkinnedMeshCookedVertex& cooked = report.cookedVertices[vertexIndex];
+		std::uint8_t* encoded = sourceSkinningBytes.data() + vertexIndex * kDeformableMeshSkinningStrideBytes;
+		if (!referencedVertices[vertexIndex])
+		{
+			continue;
+		}
+		if (cooked.usesIdentityDeformation)
+		{
+			// Four zero weights are a deliberate identity record, not an invalid
+			// normalization. The payload flag requires runtime decoders to bypass
+			// palette sampling for this exact representation.
+			continue;
+		}
+		const std::uint32_t paletteIndex = vertexPalette[vertexIndex];
+		if (paletteIndex == kInvalidPalettePartition || paletteIndex >= report.palettePartitions.size())
+		{
+			return Finish(false, SkinnedMeshCookFailure::PalettePartitionLimitExceeded);
+		}
+		const std::vector<std::uint32_t>& palette = report.palettePartitions[paletteIndex].sourceJointIds;
+		std::uint32_t quantizedSum = 0u;
+		std::array<float, kDeformableMeshMaximumInfluences> fractionalRemainders{};
+		for (std::size_t influenceIndex = 0u; influenceIndex < cooked.influences.size(); ++influenceIndex)
+		{
+			const auto joint = std::lower_bound(palette.begin(), palette.end(), cooked.influences[influenceIndex].jointIndex);
+			if (joint == palette.end() || *joint != cooked.influences[influenceIndex].jointIndex)
+			{
+				return Finish(false, SkinnedMeshCookFailure::PalettePartitionLimitExceeded);
+			}
+			const std::uint8_t localJoint = static_cast<std::uint8_t>(std::distance(palette.begin(), joint));
+			const float scaledWeight = cooked.influences[influenceIndex].weight * 255.0f;
+			const std::uint32_t quantized = static_cast<std::uint32_t>(std::floor(scaledWeight));
+			encoded[influenceIndex] = localJoint;
+			encoded[4u + influenceIndex] = static_cast<std::uint8_t>(quantized);
+			cooked.paletteJointIndices[influenceIndex] = localJoint;
+			cooked.quantizedWeights[influenceIndex] = static_cast<std::uint8_t>(quantized);
+			fractionalRemainders[influenceIndex] = scaledWeight - static_cast<float>(quantized);
+			quantizedSum += quantized;
+		}
+		if (quantizedSum > 255u)
+		{
+			SetDiagnostic(
+				"SkinnedMeshWeightQuantizationOverflow",
+				"Normalized retained weights produced an invalid UNORM8 sum.",
+				"Normalize the source skin weights before reimporting.");
+			return Finish(false, SkinnedMeshCookFailure::InvalidInfluenceWeight);
+		}
+		std::array<std::size_t, kDeformableMeshMaximumInfluences> remainderOrder{ 0u, 1u, 2u, 3u };
+		std::sort(remainderOrder.begin(), remainderOrder.begin() + static_cast<std::ptrdiff_t>(cooked.influences.size()),
+			[&](std::size_t left, std::size_t right) {
+				if (fractionalRemainders[left] != fractionalRemainders[right])
+				{
+					return fractionalRemainders[left] > fractionalRemainders[right];
+				}
+				return cooked.influences[left].jointIndex < cooked.influences[right].jointIndex;
+			});
+		std::uint32_t remainder = 255u - quantizedSum;
+		for (std::uint32_t unit = 0u; unit < remainder; ++unit)
+		{
+			const std::size_t influenceIndex = remainderOrder[unit % cooked.influences.size()];
+			encoded[4u + influenceIndex] += 1u;
+			cooked.quantizedWeights[influenceIndex] += 1u;
+		}
+		// A very small positive source weight can legitimately round to zero after
+		// deterministic UNORM8 apportionment. Zero-weight slots must use joint zero:
+		// runtime validation treats any other palette index as non-canonical because
+		// that index must never be sampled. Keep the retained source influence in the
+		// report, but canonicalize its encoded and reported palette-local value.
+		for (std::size_t influenceIndex = 0u; influenceIndex < cooked.influences.size(); ++influenceIndex)
+		{
+			if (cooked.quantizedWeights[influenceIndex] == 0u)
+			{
+				encoded[influenceIndex] = 0u;
+				cooked.paletteJointIndices[influenceIndex] = 0u;
+			}
+		}
+	}
+
+	// Canonicalize used vertices by first primitive occurrence. The static mesh
+	// optimizer also assigns surviving vertices by first occurrence, so the
+	// appended skin/morph streams stay aligned whenever the static attributes do
+	// not require a deformation-unsafe merge or split. Such a mismatch is rejected
+	// after the static stage rather than publishing misbound animation data.
+	SkinnedMeshCookInput stagedInput;
+	stagedInput.indices.reserve(input.indices.size());
+	std::vector<std::uint32_t> sourceToStaged(input.vertices.size(), kInvalidPalettePartition);
+	std::vector<std::uint32_t> stagedToSource;
+	for (std::uint32_t sourceIndex : input.indices)
+	{
+		if (sourceToStaged[sourceIndex] == kInvalidPalettePartition)
+		{
+			sourceToStaged[sourceIndex] = static_cast<std::uint32_t>(stagedInput.vertices.size());
+			stagedInput.vertices.push_back(input.vertices[sourceIndex]);
+			stagedToSource.push_back(sourceIndex);
+		}
+		stagedInput.indices.push_back(sourceToStaged[sourceIndex]);
+	}
+	std::vector<const SkinnedMeshMorphTarget*> orderedSourceMorphs;
+	orderedSourceMorphs.reserve(input.morphTargets.size());
+	for (const SkinnedMeshMorphTarget& morph : input.morphTargets)
+	{
+		orderedSourceMorphs.push_back(&morph);
+	}
+	std::sort(orderedSourceMorphs.begin(), orderedSourceMorphs.end(), [](const SkinnedMeshMorphTarget* left, const SkinnedMeshMorphTarget* right) {
+		return left->stableTargetId < right->stableTargetId;
+	});
+	for (const SkinnedMeshMorphTarget* sourceMorph : orderedSourceMorphs)
+	{
+		SkinnedMeshMorphTarget stagedMorph;
+		stagedMorph.stableTargetId = sourceMorph->stableTargetId;
+		stagedMorph.positionDeltas.reserve(stagedToSource.size());
+		for (std::uint32_t sourceIndex : stagedToSource)
+		{
+			stagedMorph.positionDeltas.push_back(sourceMorph->positionDeltas[sourceIndex]);
+			if (!sourceMorph->normalDeltas.empty())
+			{
+				stagedMorph.normalDeltas.push_back(sourceMorph->normalDeltas[sourceIndex]);
+			}
+			if (!sourceMorph->tangentDeltas.empty())
+			{
+				stagedMorph.tangentDeltas.push_back(sourceMorph->tangentDeltas[sourceIndex]);
+			}
+		}
+		stagedInput.morphTargets.push_back(std::move(stagedMorph));
+	}
+	std::size_t stagedSkinningByteCount = 0u;
+	if (!TryMultiplySkinnedSize(stagedToSource.size(), kDeformableMeshSkinningStrideBytes, stagedSkinningByteCount))
+	{
+		SetDiagnostic(
+			"SkinnedMeshSkinningStreamOverflow",
+			"The canonical skinning stream size overflowed the host address range.",
+			"Split the source mesh into smaller assets before cooking.");
+		return Finish(false, SkinnedMeshCookFailure::PayloadRangeOverflow);
+	}
+	std::vector<std::uint8_t> stagedSkinningBytes(stagedSkinningByteCount, 0u);
+	std::vector<std::uint32_t> stagedVertexPalettes;
+	stagedVertexPalettes.reserve(stagedToSource.size());
+	for (std::size_t stagedIndex = 0u; stagedIndex < stagedToSource.size(); ++stagedIndex)
+	{
+		const std::uint32_t sourceIndex = stagedToSource[stagedIndex];
+		std::memcpy(
+			stagedSkinningBytes.data() + stagedIndex * kDeformableMeshSkinningStrideBytes,
+			sourceSkinningBytes.data() + static_cast<std::size_t>(sourceIndex) * kDeformableMeshSkinningStrideBytes,
+			kDeformableMeshSkinningStrideBytes);
+		stagedVertexPalettes.push_back(vertexPalette[sourceIndex]);
+	}
+
+	std::vector<RawMeshVertex> staticVertices;
+	staticVertices.reserve(stagedInput.vertices.size());
+	for (const SkinnedMeshCookVertex& vertex : stagedInput.vertices)
+	{
+		staticVertices.push_back(vertex.baseVertex);
+	}
+	const std::uint64_t stageSequence = gSkinnedMeshStageSequence.fetch_add(1u, std::memory_order_relaxed);
+	const std::uint64_t stageNonce = static_cast<std::uint64_t>(
+		std::chrono::steady_clock::now().time_since_epoch().count());
+#ifdef _WIN32
+	const std::uint32_t processId = static_cast<std::uint32_t>(::GetCurrentProcessId());
+#else
+	const std::uint32_t processId = 0u;
+#endif
+	// A process-local counter alone is insufficient: two editor processes can
+	// simultaneously recook the same asset after a shared-cache invalidation.
+	// Hash the full process/counter/clock tuple into a fixed-width token. This
+	// retains cross-process isolation without allowing decimal clock text to push
+	// an otherwise valid nested Windows project beyond the legacy path limit.
+	std::uint64_t stageToken = 1469598103934665603ULL;
+	const auto mixStageValue = [&stageToken](auto value) {
+		for(std::size_t byteIndex = 0U; byteIndex < sizeof(value); ++byteIndex)
+		{
+			stageToken ^= static_cast<std::uint8_t>(value >> (byteIndex * 8U));
+			stageToken *= 1099511628211ULL;
+		}
+	};
+	mixStageValue(processId);
+	mixStageValue(stageSequence);
+	mixStageValue(stageNonce);
+	std::ostringstream stageTokenText;
+	stageTokenText << std::hex << std::setfill('0') << std::setw(16) << stageToken;
+	const std::filesystem::path stagePath = output.parent_path()
+		/ (output.filename().string() + ".s-" + stageTokenText.str());
+	std::error_code ignored;
+	std::filesystem::remove(stagePath, ignored);
+	MeshCompileReport staticReport{};
+	if (!CompileMeshFromRawInternal(
+		logicalSource,
+		stagePath,
+		staticVertices,
+		stagedInput.indices,
+		true,
+		true,
+		&staticReport,
+		60.0f,
+		1e-6f,
+		nullptr,
+		{},
+		nullptr))
+	{
+		std::filesystem::remove(stagePath, ignored);
+		SetDiagnostic(
+			"SkinnedMeshStaticCookFailed",
+			"The shared TEMF geometry stage failed: " + staticReport.failureReason,
+			"Resolve the reported static geometry error and retry the package cook.");
+		return Finish(false, SkinnedMeshCookFailure::StaticMeshCookFailed);
+	}
+	SkinnedMeshCookFailure appendFailure = SkinnedMeshCookFailure::StagedPayloadWriteFailed;
+	if (!TryAppendDeformablePayload(
+		stagePath,
+		stagedInput,
+		settings,
+		report.palettePartitions,
+		stagedVertexPalettes,
+		stagedSkinningBytes,
+		report.deformableTemf,
+		appendFailure))
+	{
+		std::filesystem::remove(stagePath, ignored);
+		if (appendFailure == SkinnedMeshCookFailure::StaticVertexLayoutIncompatible)
+		{
+			SetDiagnostic(
+				"SkinnedMeshStaticVertexLayoutIncompatible",
+				"Static cleanup merged or split vertices in a way that would misalign skin or morph streams.",
+				"Preserve deformable seams in the source mesh or split vertices whose skin/morph data differs.");
+		}
+		else if (appendFailure == SkinnedMeshCookFailure::FormatCompatibilityMismatch)
+		{
+			SetDiagnostic(
+				"SkinnedMeshTemfCompatibilityMismatch",
+				"The staged static TEMF version is incompatible with the deformable extension writer.",
+				"Rebuild the mesh compiler and runtime from the same TerraEngine revision.");
+		}
+		else if (appendFailure == SkinnedMeshCookFailure::PayloadRangeOverflow)
+		{
+			SetDiagnostic(
+				"SkinnedMeshPayloadRangeOverflow",
+				"A deformable TEMF count or byte range exceeds the checked v1 address space.",
+				"Split the mesh or morph set into smaller runtime assets.");
+		}
+		else
+		{
+			SetDiagnostic(
+				"SkinnedMeshStagedPayloadWriteFailed",
+				"The private staged deformable payload could not be validated or written.",
+				"Check available disk space and retry; the published generation was not modified.");
+		}
+		return Finish(false, appendFailure);
+	}
+	if (!ReplaceStagedTemf(stagePath, output))
+	{
+		std::filesystem::remove(stagePath, ignored);
+		SetDiagnostic(
+			"SkinnedMeshPublicationFailed",
+			"The validated staged TEMF could not atomically replace the published path.",
+			"Close processes locking the destination and retry; the last-known-good generation remains intact.");
+		return Finish(false, SkinnedMeshCookFailure::PublicationFailed);
+	}
+	SetDiagnostic(
+		"SkinnedMeshCookSucceeded",
+		"The deformable TEMF generation was validated and published atomically.",
+		{});
+	return Finish(true, SkinnedMeshCookFailure::None);
 }

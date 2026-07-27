@@ -376,8 +376,6 @@ namespace TerraEngine::EditorTests
 			context.Expect(result.status == TerraEngine::AssetPipeline::ModelImportStatus::SucceededWithWarnings, "Unsupported authoring data should warn without blocking static mesh output.");
 			context.Expect(!result.generatedMeshes.empty(), "Usable static geometry should still be generated when unsupported authoring data is ignored.");
 			const std::vector<std::string> expectedCodes = {
-				"UnsupportedAnimationIgnored",
-				"UnsupportedSkinIgnored",
 				"UnsupportedCameraIgnored",
 				"UnsupportedLightIgnored",
 				"UnsupportedConstraintIgnored"
@@ -386,6 +384,9 @@ namespace TerraEngine::EditorTests
 			{
 				context.Expect(HasDiagnosticCode(result, code), "Unsupported package content should be reported through diagnostics.");
 			}
+			context.Expect(!HasDiagnosticCode(result, "UnsupportedAnimationIgnored")
+				&& !HasDiagnosticCode(result, "UnsupportedSkinIgnored"),
+				"Animation and skin records are supported package content and must not be downgraded by the format-neutral dispatcher.");
 		});
 
 		registry.Add("VirtualGeometry.Editor.PackageImport.RejectsCorruptSidecarWithoutMutatingLoadedResult", [](TestContext& context) {

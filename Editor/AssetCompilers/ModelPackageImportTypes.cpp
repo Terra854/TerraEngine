@@ -8,14 +8,70 @@
 #include "File Formats/TerraEngineMeshFile.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
+#include <sstream>
+#include <tuple>
 #include <vector>
 
 namespace TerraEngine::AssetPipeline
 {
 	namespace
 	{
+		constexpr std::uint64_t kManifestHashOffset = 1469598103934665603ull;
+		constexpr std::uint64_t kManifestHashPrime = 1099511628211ull;
+
+		void FoldManifestHash(std::uint64_t& hash, std::string_view value)
+		{
+			for(const char character : value)
+			{
+				hash ^= static_cast<std::uint8_t>(character);
+				hash *= kManifestHashPrime;
+			}
+			// A separator prevents {"ab", "c"} from aliasing {"a", "bc"}.
+			hash ^= 0xffu;
+			hash *= kManifestHashPrime;
+		}
+
+		std::string NormalizeAnimationSemanticKey(std::string_view semanticKey)
+		{
+			std::string normalized;
+			normalized.reserve(semanticKey.size());
+			bool priorSlash = false;
+			for(const unsigned char character : semanticKey)
+			{
+				const bool slash = character == '/' || character == '\\';
+				if(slash)
+				{
+					if(!priorSlash) normalized.push_back('/');
+					priorSlash = true;
+					continue;
+				}
+				priorSlash = false;
+				normalized.push_back(static_cast<char>(std::tolower(character)));
+			}
+			while(normalized.starts_with("./")) normalized.erase(0u, 2u);
+			return normalized;
+		}
+
+		void FoldUuid(std::uint64_t& hash, const TerraEngine::UUID& uuid)
+		{
+			for(const std::uint8_t byte : uuid)
+			{
+				hash ^= byte;
+				hash *= kManifestHashPrime;
+			}
+		}
+
+		std::string HashToHex(std::uint64_t hash)
+		{
+			std::ostringstream stream;
+			stream << std::hex << std::setfill('0') << std::setw(16) << hash;
+			return stream.str();
+		}
+
 		template <typename T>
 		nlohmann::json ArrayToJson(const T& values)
 		{
@@ -163,6 +219,169 @@ namespace TerraEngine::AssetPipeline
 		case ModelTextureSemantic::Data: return "Data";
 		}
 		return "Data";
+	}
+
+	const char* ToString(AnimationImportSubAssetKind kind)
+	{
+		switch(kind)
+		{
+		case AnimationImportSubAssetKind::Skeleton: return "Skeleton";
+		case AnimationImportSubAssetKind::AnimationClip: return "AnimationClip";
+		case AnimationImportSubAssetKind::DeformableMesh: return "DeformableMesh";
+		case AnimationImportSubAssetKind::MorphTarget: return "MorphTarget";
+		case AnimationImportSubAssetKind::Material: return "Material";
+		case AnimationImportSubAssetKind::Texture: return "Texture";
+		case AnimationImportSubAssetKind::Prefab: return "Prefab";
+		case AnimationImportSubAssetKind::Mesh: return "Mesh";
+		}
+		return "AnimationClip";
+	}
+
+	TerraEngine::UUID BuildStableAnimationSubAssetUuid(
+		const TerraEngine::UUID& packageGuid,
+		AnimationImportSubAssetKind kind,
+		std::string_view semanticKey)
+	{
+		const std::string normalizedKey = NormalizeAnimationSemanticKey(semanticKey);
+		std::uint64_t high = kManifestHashOffset;
+		std::uint64_t low = 1099511628211ull ^ 0x9e3779b97f4a7c15ull;
+		FoldUuid(high, packageGuid);
+		FoldUuid(low, packageGuid);
+		FoldManifestHash(high, ToString(kind));
+		FoldManifestHash(high, normalizedKey);
+		FoldManifestHash(low, normalizedKey);
+		FoldManifestHash(low, ToString(kind));
+		TerraEngine::UUID uuid{};
+		for(std::size_t byte = 0u; byte < 8u; ++byte)
+		{
+			uuid[byte] = static_cast<std::uint8_t>((high >> (byte * 8u)) & 0xffu);
+			uuid[byte + 8u] = static_cast<std::uint8_t>((low >> (byte * 8u)) & 0xffu);
+		}
+		return uuid;
+	}
+
+	void CanonicalizeAnimationImportManifest(AnimationImportManifest& manifest)
+	{
+		for(GeneratedAnimationSubAsset& subAsset : manifest.subAssets)
+		{
+			subAsset.semanticKey = NormalizeAnimationSemanticKey(subAsset.semanticKey);
+			std::sort(subAsset.dependencies.begin(), subAsset.dependencies.end(), [](const auto& left, const auto& right) {
+				return std::tie(left.assetGuid, left.compatibilityFingerprint, left.required)
+					< std::tie(right.assetGuid, right.compatibilityFingerprint, right.required);
+			});
+			subAsset.dependencies.erase(std::unique(
+				subAsset.dependencies.begin(), subAsset.dependencies.end(), [](const auto& left, const auto& right) {
+					return left.assetGuid == right.assetGuid
+						&& left.compatibilityFingerprint == right.compatibilityFingerprint
+						&& left.required == right.required;
+				}), subAsset.dependencies.end());
+		}
+		std::sort(manifest.subAssets.begin(), manifest.subAssets.end(), [](const auto& left, const auto& right) {
+			return std::tie(left.kind, left.semanticKey, left.guid)
+				< std::tie(right.kind, right.semanticKey, right.guid);
+		});
+	}
+
+	bool ValidateAnimationImportManifestDependencies(
+		const AnimationImportManifest& manifest,
+		std::string* failureReason)
+	{
+		const auto fail = [&](std::string reason) {
+			if(failureReason != nullptr) *failureReason = std::move(reason);
+			return false;
+		};
+		if(failureReason != nullptr) failureReason->clear();
+
+		const auto findSubAsset = [&](const TerraEngine::UUID& guid) {
+			return std::find_if(manifest.subAssets.begin(), manifest.subAssets.end(), [&](const auto& candidate) {
+				return candidate.guid == guid;
+			});
+		};
+		const auto isPrefabBinding = [](AnimationImportSubAssetKind kind) {
+			return kind == AnimationImportSubAssetKind::Skeleton
+				|| kind == AnimationImportSubAssetKind::AnimationClip
+				|| kind == AnimationImportSubAssetKind::DeformableMesh
+				|| kind == AnimationImportSubAssetKind::MorphTarget;
+		};
+
+		// Required dependency edges are internal package references. Reject them
+		// before publication if their target is absent or their asserted binary
+		// compatibility fingerprint disagrees with the generated target.
+		for(const GeneratedAnimationSubAsset& subAsset : manifest.subAssets)
+		{
+			for(const AnimationImportDependency& dependency : subAsset.dependencies)
+			{
+				if(dependency.assetGuid == TerraEngine::EMPTY_UUID)
+				{
+					return fail("A package child contains an empty dependency GUID.");
+				}
+				const auto target = findSubAsset(dependency.assetGuid);
+				if(target == manifest.subAssets.end())
+				{
+					if(dependency.required)
+					{
+						return fail("A required package-child dependency does not exist in the same generation.");
+					}
+					continue;
+				}
+				if(dependency.compatibilityFingerprint != 0u
+					&& dependency.compatibilityFingerprint != target->compatibilityFingerprint)
+				{
+					return fail("A package-child dependency has a stale compatibility fingerprint.");
+				}
+			}
+		}
+
+		// A prefab is the playable package root. Its dependency list must retain
+		// every animation binding emitted by this generation, while categories the
+		// source does not contain naturally impose no requirement.
+		for(const GeneratedAnimationSubAsset& prefab : manifest.subAssets)
+		{
+			if(prefab.kind != AnimationImportSubAssetKind::Prefab) continue;
+			for(const GeneratedAnimationSubAsset& binding : manifest.subAssets)
+			{
+				if(!isPrefabBinding(binding.kind) || binding.guid == TerraEngine::EMPTY_UUID) continue;
+				const auto dependency = std::find_if(
+					prefab.dependencies.begin(), prefab.dependencies.end(), [&](const auto& candidate) {
+						return candidate.assetGuid == binding.guid && candidate.required;
+					});
+				if(dependency == prefab.dependencies.end())
+				{
+					return fail("The generated prefab does not depend on every animation binding asset.");
+				}
+				if(dependency->compatibilityFingerprint != binding.compatibilityFingerprint)
+				{
+					return fail("The generated prefab records a stale animation binding fingerprint.");
+				}
+			}
+		}
+		return true;
+	}
+
+	std::string BuildAnimationImportDependencyFingerprint(const AnimationImportManifest& manifest)
+	{
+		AnimationImportManifest canonical = manifest;
+		CanonicalizeAnimationImportManifest(canonical);
+		std::uint64_t hash = kManifestHashOffset;
+		FoldUuid(hash, canonical.packageGuid);
+		FoldManifestHash(hash, canonical.sourceHashHex);
+		FoldManifestHash(hash, canonical.importerName);
+		FoldManifestHash(hash, canonical.importerVersion);
+		FoldManifestHash(hash, canonical.settingsFingerprintHex);
+		for(const GeneratedAnimationSubAsset& subAsset : canonical.subAssets)
+		{
+			FoldManifestHash(hash, ToString(subAsset.kind));
+			FoldManifestHash(hash, subAsset.semanticKey);
+			FoldUuid(hash, subAsset.guid);
+			FoldManifestHash(hash, subAsset.contentHashHex);
+			for(const AnimationImportDependency& dependency : subAsset.dependencies)
+			{
+				FoldUuid(hash, dependency.assetGuid);
+				FoldManifestHash(hash, std::to_string(dependency.compatibilityFingerprint));
+				FoldManifestHash(hash, dependency.required ? "required" : "optional");
+			}
+		}
+		return HashToHex(hash);
 	}
 
 	nlohmann::json ToJson(const ImportedModelPackage& value)
@@ -323,6 +542,9 @@ namespace TerraEngine::AssetPipeline
 
 		return {
 			{ "guid", TerraEngine::ToHexString(value.guid) },
+			// Expose the optional palette owner so editor automation can diagnose
+			// which synthetic animation skeleton drives a deformable mesh instance.
+			{ "animationSkeletonGuid", TerraEngine::ToHexString(value.animationSkeletonGuid) },
 			{ "sourceMeshIndex", value.sourceMeshIndex },
 			{ "sourcePrimitiveIndex", OptionalIndexToJson(value.sourcePrimitiveIndex) },
 			{ "sourceNodePath", value.sourceNodePath },
@@ -386,6 +608,61 @@ namespace TerraEngine::AssetPipeline
 		};
 	}
 
+	nlohmann::json ToJson(const AnimationImportDependency& value)
+	{
+		return {
+			{ "assetGuid", TerraEngine::ToHexString(value.assetGuid) },
+			{ "compatibilityFingerprint", value.compatibilityFingerprint },
+			{ "required", value.required }
+		};
+	}
+
+	nlohmann::json ToJson(const GeneratedAnimationSubAsset& value)
+	{
+		nlohmann::json dependencies = nlohmann::json::array();
+		for(const AnimationImportDependency& dependency : value.dependencies)
+		{
+			dependencies.push_back(ToJson(dependency));
+		}
+		return {
+			{ "guid", TerraEngine::ToHexString(value.guid) },
+			{ "kind", ToString(value.kind) },
+			{ "semanticKey", value.semanticKey },
+			{ "name", value.displayName },
+			{ "sourcePath", value.sourcePath.generic_string() },
+			{ "compiledPath", value.compiledPath.generic_string() },
+			{ "compatibilityFingerprint", value.compatibilityFingerprint },
+			{ "contentHash", value.contentHashHex },
+			{ "dependencies", dependencies },
+			{ "readOnlyPackageChild", value.readOnlyPackageChild }
+		};
+	}
+
+	nlohmann::json ToJson(const AnimationImportManifest& value)
+	{
+		nlohmann::json subAssets = nlohmann::json::array();
+		for(const GeneratedAnimationSubAsset& subAsset : value.subAssets)
+		{
+			subAssets.push_back(ToJson(subAsset));
+		}
+		return {
+			{ "schemaVersion", value.schemaVersion },
+			{ "packageGuid", TerraEngine::ToHexString(value.packageGuid) },
+			{ "sourceHash", value.sourceHashHex },
+			{ "importerName", value.importerName },
+			{ "importerVersion", value.importerVersion },
+			{ "settingsFingerprint", value.settingsFingerprintHex },
+			{ "dependencyFingerprint", value.dependencyFingerprintHex },
+			{ "candidateGeneration", value.candidateGeneration },
+			{ "publishedGeneration", value.publishedGeneration },
+			{ "lastKnownGoodGeneration", value.lastKnownGoodGeneration },
+			{ "cancelled", value.cancelled },
+			{ "publishedAtomically", value.publishedAtomically },
+			{ "preservedLastKnownGood", value.preservedLastKnownGood },
+			{ "subAssets", subAssets }
+		};
+	}
+
 	nlohmann::json ToJson(const ModelPackageImportResult& value)
 	{
 		nlohmann::json meshes = nlohmann::json::array();
@@ -433,6 +710,7 @@ namespace TerraEngine::AssetPipeline
 			{ "generatedTextures", textures },
 			{ "generatedPrefabs", prefabs },
 			{ "materialAssignments", assignments },
+			{ "animationManifest", ToJson(value.animationManifest) },
 			{ "diagnostics", diagnostics }
 		};
 	}

@@ -3,6 +3,27 @@
 #include <iostream>
 
 namespace TerraEngine::EditorTests {
+	// Editor animation tests use one stable registrar so later authoring and MCP
+	// stories do not rely on static initialization or hidden test discovery.
+	void RegisterAnimationEditorTestScaffolding(TestRegistry& registry);
+	void RegisterAnimationWindowTests(TestRegistry& registry);
+	void RegisterAnimationAssetLifecycleTests(TestRegistry& registry);
+	void RegisterAnimationAuthoringTransactionTests(TestRegistry& registry);
+	void RegisterAnimationControllerAuthoringServiceTests(TestRegistry& registry);
+	void RegisterMotionDatabaseAuthoringTests(TestRegistry& registry);
+	void RegisterRagdollAuthoringTests(TestRegistry& registry);
+	void RegisterAnimationPreviewTests(TestRegistry& registry);
+	void RegisterAnimationRecordingTests(TestRegistry& registry);
+	void RegisterAnimationPrefabPlayModeTests(TestRegistry& registry);
+	void RegisterAnimationDiagnosticsWindowTests(TestRegistry& registry);
+	void RegisterAnimationExportTests(TestRegistry& registry);
+	void RegisterAnimationAutomationContractTests(TestRegistry& registry);
+	void RegisterAnimationAutomationMutationTests(TestRegistry& registry);
+	void RegisterAnimationAutomationJobTests(TestRegistry& registry);
+	void RegisterAnimationAutomationRuntimeTests(TestRegistry& registry);
+	void RegisterFbxAnimationImportTests(TestRegistry& registry);
+	void RegisterAnimationSubAssetIdentityTests(TestRegistry& registry);
+	void RegisterGltfAnimationImportTests(TestRegistry& registry);
 	void RegisterArchiveSerializationTests(TestRegistry& registry);
 	void RegisterBuildProfileCollectionTests(TestRegistry& registry);
 	void RegisterBuildProfileEdgeTests(TestRegistry& registry);
@@ -23,6 +44,7 @@ namespace TerraEngine::EditorTests {
 	void RegisterLinuxPlatformExportTests(TestRegistry& registry);
 	void RegisterMaterialExportValidationTests(TestRegistry& registry);
 	void RegisterMaterialPreviewContractTests(TestRegistry& registry);
+	void RegisterNativeAotProjectWorkspaceTests(TestRegistry& registry);
 	void RegisterPackRoundTripTests(TestRegistry& registry);
 	void RegisterPackagingRequestValidationTests(TestRegistry& registry);
 	void RegisterPrefabAuthoringWorkflowTests(TestRegistry& registry);
@@ -93,6 +115,7 @@ namespace TerraEngine::EditorTests {
 	void RegisterFbxImportDiagnosticsTests(TestRegistry& registry);
 	void RegisterFbxPackageBrowserContractTests(TestRegistry& registry);
 	void RegisterFbxReadOnlySubAssetTests(TestRegistry& registry);
+	void RegisterAssetDatabaseCancellationTests(TestRegistry& registry);
 	void RegisterTextureCompilerWorkerTests(TestRegistry& registry);
 	void RegisterGltfPackageImporterTests(TestRegistry& registry);
 	void RegisterGltfMaterialTextureTests(TestRegistry& registry);
@@ -153,6 +176,25 @@ int main() {
 		context.Expect(true, "The editor test harness should execute registered tests.");
 	});
 
+	TerraEngine::EditorTests::RegisterAnimationEditorTestScaffolding(registry);
+	TerraEngine::EditorTests::RegisterAnimationWindowTests(registry);
+	TerraEngine::EditorTests::RegisterAnimationAssetLifecycleTests(registry);
+	TerraEngine::EditorTests::RegisterAnimationAuthoringTransactionTests(registry);
+	TerraEngine::EditorTests::RegisterAnimationControllerAuthoringServiceTests(registry);
+	TerraEngine::EditorTests::RegisterMotionDatabaseAuthoringTests(registry);
+	TerraEngine::EditorTests::RegisterRagdollAuthoringTests(registry);
+	TerraEngine::EditorTests::RegisterAnimationPreviewTests(registry);
+	TerraEngine::EditorTests::RegisterAnimationRecordingTests(registry);
+	TerraEngine::EditorTests::RegisterAnimationPrefabPlayModeTests(registry);
+	TerraEngine::EditorTests::RegisterAnimationDiagnosticsWindowTests(registry);
+	TerraEngine::EditorTests::RegisterAnimationExportTests(registry);
+	TerraEngine::EditorTests::RegisterAnimationAutomationContractTests(registry);
+	TerraEngine::EditorTests::RegisterAnimationAutomationMutationTests(registry);
+	TerraEngine::EditorTests::RegisterAnimationAutomationJobTests(registry);
+	TerraEngine::EditorTests::RegisterAnimationAutomationRuntimeTests(registry);
+	TerraEngine::EditorTests::RegisterFbxAnimationImportTests(registry);
+	TerraEngine::EditorTests::RegisterAnimationSubAssetIdentityTests(registry);
+	TerraEngine::EditorTests::RegisterGltfAnimationImportTests(registry);
 	TerraEngine::EditorTests::RegisterArchiveSerializationTests(registry);
 	TerraEngine::EditorTests::RegisterBuildProfileCollectionTests(registry);
 	TerraEngine::EditorTests::RegisterBuildProfileEdgeTests(registry);
@@ -173,6 +215,7 @@ int main() {
 	TerraEngine::EditorTests::RegisterLinuxPlatformExportTests(registry);
 	TerraEngine::EditorTests::RegisterMaterialExportValidationTests(registry);
 	TerraEngine::EditorTests::RegisterMaterialPreviewContractTests(registry);
+	TerraEngine::EditorTests::RegisterNativeAotProjectWorkspaceTests(registry);
 	TerraEngine::EditorTests::RegisterPackRoundTripTests(registry);
 	TerraEngine::EditorTests::RegisterPackagingRequestValidationTests(registry);
 	TerraEngine::EditorTests::RegisterPrefabAuthoringWorkflowTests(registry);
@@ -243,6 +286,7 @@ int main() {
 	TerraEngine::EditorTests::RegisterFbxImportDiagnosticsTests(registry);
 	TerraEngine::EditorTests::RegisterFbxPackageBrowserContractTests(registry);
 	TerraEngine::EditorTests::RegisterFbxReadOnlySubAssetTests(registry);
+	TerraEngine::EditorTests::RegisterAssetDatabaseCancellationTests(registry);
 	TerraEngine::EditorTests::RegisterTextureCompilerWorkerTests(registry);
 	TerraEngine::EditorTests::RegisterGltfPackageImporterTests(registry);
 	TerraEngine::EditorTests::RegisterGltfMaterialTextureTests(registry);

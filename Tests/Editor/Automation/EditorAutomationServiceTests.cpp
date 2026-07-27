@@ -2,6 +2,7 @@
 #include "EditorAutomationService.h"
 
 #include "BuildProfile.h"
+#include "Components/AnimatorComponent.h"
 #include "Components/SkyComponent.h"
 #include "EditorContext.h"
 #include "AssetDatabase.h"
@@ -130,11 +131,31 @@ namespace TerraEngine::EditorTests
 
 		registry.Add("Editor.Automation.Service.ReadOnlySceneListingWorksWithoutProject", [](TestContext& context) {
 			ObjectManager::instance().clear();
-			Object object = ObjectManager::instance().createObject("Automation Test Object");
+			Object parent = ObjectManager::instance().createObject("Automation Test Parent");
+			Object child = ObjectManager::instance().createObject("Automation Test Child");
+			context.Expect(ObjectManager::instance().setParent(child, parent), "The listing fixture hierarchy should be valid.");
 			EditorAutomationService service;
 			const nlohmann::json result = service.HandleTool("scene.list_objects", {{"includeComponents", false}}, WriteMode::ReadOnly, "req-3");
 			context.Expect(result.value("ok", false), "Read-only scene listing should succeed without project state.");
-			context.ExpectEqual(result["data"]["objects"][0].value("name", std::string()), ObjectManager::instance().getObjectName(object), "Scene listing should include created object.");
+			context.ExpectEqual(result["data"]["objects"].size(), std::size_t(2), "Scene listing should include root and nested objects.");
+			const auto childResult = std::find_if(
+				result["data"]["objects"].begin(),
+				result["data"]["objects"].end(),
+				[](const nlohmann::json& value) {
+					return value.value("name", std::string{}) == "Automation Test Child";
+				});
+			context.Expect(childResult != result["data"]["objects"].end(), "Scene listing should include a nested child.");
+			if (childResult != result["data"]["objects"].end())
+			{
+				context.ExpectEqual(
+					childResult->value("parent", std::uint32_t{}),
+					static_cast<std::uint32_t>(parent.EntityId()),
+					"The compatibility parent field should retain the parent entity.");
+				context.ExpectEqual(
+					childResult->value("parentUuid", std::string{}),
+					TerraEngine::ToHexString(ObjectManager::instance().getUUID(parent)),
+					"The stable parent UUID should identify the parent across reloads.");
+			}
 			ObjectManager::instance().clear();
 		});
 
@@ -182,6 +203,81 @@ namespace TerraEngine::EditorTests
 			UndoRedoSystem::Instance().Undo();
 			const nlohmann::json restored = service.HandleTool("component.get", {{"object", objectName}, {"component", "SkyComponent"}}, WriteMode::ReadOnly, "cmp-5");
 			context.Expect(restored.value("ok", false), "Undo should restore removed component.");
+			ObjectManager::instance().clear();
+			UndoRedoSystem::Instance().Clear();
+		});
+
+		registry.Add("Editor.Automation.Service.TransformPropertyEditsInvalidateWorldTransformHistory", [](TestContext& context) {
+			ObjectManager::instance().clear();
+			UndoRedoSystem::Instance().Clear();
+			Transform::registerType();
+			EditorAutomationService service;
+			Object object = ObjectManager::instance().createObject("Transform Revision Source");
+			const std::string objectId = TerraEngine::ToHexString(ObjectManager::instance().getUUID(object));
+			const std::uint64_t beforeEdit = ObjectManager::instance().GetObjectTransformRevision(object);
+
+			const nlohmann::json set = service.HandleTool(
+				"component.set_property",
+				{{"object", objectId}, {"component", "Transform"}, {"property", "Scale"}, {"value", {0.25f, 0.5f, 0.75f}}},
+				WriteMode::WritesEnabled,
+				"transform-revision-1");
+			context.Expect(set.value("ok", false), "Reflected Transform property edit should succeed.");
+			const std::uint64_t afterEdit = ObjectManager::instance().GetObjectTransformRevision(object);
+			context.Expect(afterEdit > beforeEdit, "A reflected Transform edit must invalidate propagated world transforms.");
+			context.Expect(ObjectManager::instance().GetComponent<Transform>(object)->scale == glm::vec3(0.25f, 0.5f, 0.75f), "The reflected Transform edit should publish the requested scale.");
+
+			UndoRedoSystem::Instance().Undo();
+			const std::uint64_t afterUndo = ObjectManager::instance().GetObjectTransformRevision(object);
+			context.Expect(afterUndo > afterEdit, "Undoing a reflected Transform edit must invalidate propagated world transforms.");
+			context.Expect(ObjectManager::instance().GetComponent<Transform>(object)->scale == glm::vec3(1.0f), "Undo should restore the original Transform scale.");
+
+			UndoRedoSystem::Instance().Redo();
+			context.Expect(ObjectManager::instance().GetObjectTransformRevision(object) > afterUndo, "Redoing a reflected Transform edit must invalidate propagated world transforms.");
+			context.Expect(ObjectManager::instance().GetComponent<Transform>(object)->scale == glm::vec3(0.25f, 0.5f, 0.75f), "Redo should restore the reflected Transform scale.");
+			ObjectManager::instance().clear();
+			UndoRedoSystem::Instance().Clear();
+		});
+
+		registry.Add("Editor.Automation.Service.ComponentUnsignedAccessorDefaultsRemainMutable", [](TestContext& context) {
+			ObjectManager::instance().clear();
+			UndoRedoSystem::Instance().Clear();
+			AnimatorComponent::registerType();
+			EditorAutomationService service;
+			Object object = ObjectManager::instance().createObject("Animator Policy");
+			(void)ObjectManager::instance().AddComponent<AnimatorComponent>(object);
+			const std::string objectName = ObjectManager::instance().getObjectName(object);
+
+			const nlohmann::json before = service.HandleTool(
+				"component.get",
+				{{"object", objectName}, {"component", "AnimatorComponent"}},
+				WriteMode::ReadOnly,
+				"cmp-unsigned-1");
+			context.Expect(before.value("ok", false)
+				&& before["data"]["properties"].value("updatePolicy", std::numeric_limits<std::uint32_t>::max()) == 0U,
+				"Component reads must retain reflected uint32 defaults instead of omitting them from automation metadata.");
+
+			const nlohmann::json set = service.HandleTool(
+				"component.set_property",
+				{{"object", objectName}, {"component", "AnimatorComponent"}, {"property", "updatePolicy"}, {"value", 2U}},
+				WriteMode::WritesEnabled,
+				"cmp-unsigned-2");
+			const nlohmann::json after = service.HandleTool(
+				"component.get",
+				{{"object", objectName}, {"component", "AnimatorComponent"}},
+				WriteMode::ReadOnly,
+				"cmp-unsigned-3");
+			context.Expect(set.value("ok", false)
+				&& after["data"]["properties"].value("updatePolicy", 0U) == 2U,
+				"A reflected uint32 accessor must pass metadata preflight and publish the requested value.");
+
+			UndoRedoSystem::Instance().Undo();
+			const nlohmann::json restored = service.HandleTool(
+				"component.get",
+				{{"object", objectName}, {"component", "AnimatorComponent"}},
+				WriteMode::ReadOnly,
+				"cmp-unsigned-4");
+			context.Expect(restored["data"]["properties"].value("updatePolicy", std::numeric_limits<std::uint32_t>::max()) == 0U,
+				"Undo must restore the complete uint32-bearing component payload.");
 			ObjectManager::instance().clear();
 			UndoRedoSystem::Instance().Clear();
 		});

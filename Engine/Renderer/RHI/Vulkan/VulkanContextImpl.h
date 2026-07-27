@@ -11,6 +11,8 @@
 #include "VulkanHiZ.h"
 #include "VulkanVRS.h"
 #include "VulkanUploadPlanning.h"
+#include "VulkanDescriptorPlanning.h"
+#include "VulkanCommandRecording.h"
 
 #include "Core/Logger/Logger.h"
 #include "Window/WindowSystem.h"
@@ -32,6 +34,7 @@
 #include <deque>
 #include <optional>
 #include <map>
+#include <memory>
 #include <unordered_map>
 #include <mutex>
 #include <atomic>
@@ -40,6 +43,7 @@
 #include <filesystem>
 #include <string_view>
 #include <chrono>
+#include <compare>
 
 inline const std::vector<const char*> validationLayers = {
 	"VK_LAYER_KHRONOS_validation"
@@ -69,9 +73,12 @@ struct QueueFamilyIndices {
 // Swap chain capabilities returned by physical devices.
 // struct SwapChainSupportDetails groups related state and operations so callers have one documented contract.
 struct SwapChainSupportDetails {
-	VkSurfaceCapabilitiesKHR capabilities;
+	VkSurfaceCapabilitiesKHR capabilities{};
 	std::vector<VkSurfaceFormatKHR> formats;
 	std::vector<VkPresentModeKHR> presentModes;
+	// A failed surface query must never be mistaken for an empty but usable
+	// capability set by candidate construction.
+	bool valid = false;
 };
 
 // GPU buffer wrapper that keeps the VMA allocation alongside the VkBuffer.
@@ -81,6 +88,31 @@ struct VulkanBuffer {
 	VmaAllocation allocation;
 	VkDeviceSize size;
 };
+
+// Conventional graphics shaders read this one 64-byte record through global
+// set-0/binding-9. meshDataIndex selects its bindless buffer and textureIndex
+// selects one work-packet record, avoiding any change to the frozen mesh push
+// constants while retaining immutable animation-generation identity.
+struct alignas(16) VulkanGpuAnimationGraphicsRecord {
+	std::uint32_t planGeneration = 0U;
+	std::uint32_t rendererGeneration = 0U;
+	std::uint32_t workPacketIndex = 0U;
+	std::uint32_t generationRecordIndex = 0U;
+	std::uint32_t paletteMatricesBindlessIndex = std::numeric_limits<std::uint32_t>::max();
+	std::uint32_t morphOutputsBindlessIndex = std::numeric_limits<std::uint32_t>::max();
+	std::uint64_t paletteOffsetBytes = 0U;
+	// This remains the byte offset frozen in GpuAnimationWorkPacket, rather
+	// than a float index, so native/HLSL addressing cannot drift.
+	std::uint64_t morphOutputOffsetBytes = 0U;
+	std::uint32_t jointCount = 0U;
+	std::uint32_t morphCount = 0U;
+	std::uint32_t paletteEntryCount = 0U;
+	std::uint32_t flags = 0U;
+	std::uint32_t stageMask = 0U;
+	std::uint32_t validMarker = 0U;
+};
+static_assert(sizeof(VulkanGpuAnimationGraphicsRecord) == 64U,
+	"Animation graphics bridge records must remain 64-byte shader ABI values.");
 
 // GPU image wrapper for textures and attachments.
 // struct VulkanImage groups related state and operations so callers have one documented contract.
@@ -100,7 +132,14 @@ struct VulkanImage {
 struct VulkanMesh {
 	VulkanBuffer meshShaderVertexBuffer;
 	VulkanBuffer meshletVertexRemapBuffer;
+	// Binding 6 always receives this buffer. Non-skinned meshes own one
+	// zero-filled skinning record so statically used default shader layouts
+	// never observe an unwritten storage-buffer descriptor.
 	VulkanBuffer meshSkinningBuffer;
+	// Target-major float4 position/normal/tangent deltas. Binding 7 always
+	// receives this buffer, including its one-record zero fallback for meshes
+	// without morph data, so reflected default layouts never bind VK_NULL_HANDLE.
+	VulkanBuffer meshMorphDeltaBuffer;
 	VulkanBuffer meshDecodeInfoBuffer;
 	VulkanBuffer indexBuffer;
 	VulkanBuffer meshletBuffer;
@@ -179,6 +218,10 @@ struct VulkanContext::Impl {
 	bool validationLayersEnabled = false;
 	VkSurfaceKHR surface = VK_NULL_HANDLE;
 	VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+	// Cached once during physical-device selection so per-frame animation
+	// publication can reject oversized storage-buffer descriptors without a
+	// driver query on the render hot path.
+	VkDeviceSize maximumStorageBufferRange = 0U;
 	VkDevice device = VK_NULL_HANDLE;
 	VkQueue graphicsQueue = VK_NULL_HANDLE;
 	VkQueue presentQueue = VK_NULL_HANDLE;
@@ -242,6 +285,11 @@ struct VulkanContext::Impl {
 	// uiSemaphores are present-ready semaphores owned by swapchain image index,
 	// so this collection always matches swapchainImages rather than frame slots.
 	std::vector<VkSemaphore> uiSemaphores;
+	// Each queued present owns a maintenance fence until the presentation engine
+	// releases its wait semaphore. Signaled fences move into the reusable pool;
+	// pending fences move with a retired swapchain and gate its destruction.
+	std::vector<VkFence> presentationCompletionFences;
+	std::vector<VkFence> availablePresentationCompletionFences;
 	std::vector<VkFence> inFlightFences;
 	// PresentationResourceBundle is movable ownership used during recreation.
 	// Candidate construction can fail without destroying the last active bundle.
@@ -260,42 +308,110 @@ struct VulkanContext::Impl {
 		std::vector<VkSemaphore> acquireByFrame;
 		std::vector<VkSemaphore> editorOffscreenReadyByFrame;
 		std::vector<VkSemaphore> presentReadyByImage;
+		// Pending fences prove completion of every queued present. Reusable signaled
+		// fences are retained too so candidate publication remains allocation-bounded.
+		std::vector<VkFence> presentCompletionFences;
+		std::vector<VkFence> availablePresentCompletionFences;
+		// This proof is valid only when every present queued for this bundle carried
+		// a maintenance fence. A preparation failure makes retirement fail closed.
+		bool presentCompletionCoverageValid = false;
 		std::vector<VkFence> frameFences;
 	};
+	struct RetiredPresentationResourceBundle
+	{
+		PresentationResourceBundle resources;
+		std::uint64_t generation = 0u;
+	};
 	TerraEngine::Renderer::Vulkan::PresentationLifecycle presentationLifecycle;
+	TerraEngine::Renderer::Vulkan::PresentationRecreationCoordinator presentationRecreation;
 	TerraEngine::Renderer::Vulkan::EditorFrameCompletionTracker editorCompletionTracker{3u};
+	// The installed-editor harness waits for this one-time marker instead of
+	// inferring readiness from resize callbacks or an acquire result.
+	std::uint64_t editorPresentationReadyLoggedGeneration = 0u;
 	std::optional<TerraEngine::Renderer::Vulkan::AcquiredPresentationImage> acquiredPresentationImage;
 	std::uint32_t surfaceMinimumImageCount = 0;
 	std::uint32_t requestedSwapchainImageCount = 0;
+	std::deque<RetiredPresentationResourceBundle> retiredPresentationBundles;
+	static constexpr std::size_t MAX_RETIRED_PRESENTATION_BUNDLES = 2u;
+	struct PendingUnextendedAcquireProof
+	{
+		VkFence fence = VK_NULL_HANDLE;
+		std::uint64_t generation = 0u;
+		std::uint32_t imageIndex = 0u;
+	};
+	// Older Vulkan implementations expose no present fence. A later completed
+	// acquire of the same image is the portable proof that its prior present ended.
+	TerraEngine::Renderer::Vulkan::UnextendedPresentationRetirementTracker unextendedRetirementTracker;
+	std::vector<PendingUnextendedAcquireProof> pendingUnextendedAcquireProofs;
+	// The extension is optional. Without it, retirement is intentionally
+	// bounded while the acquire-history fallback waits for explicit proof.
+	bool presentationFencesEnabled = false;
+	// Device-side swapchain maintenance must use the same KHR or EXT lineage as
+	// the optional surface-maintenance instance extension enabled at startup.
+	const char* surfaceMaintenanceExtensionName = nullptr;
+	// The extension can be available while one generation loses coverage because
+	// allocating or resetting its next fence failed. Track that distinction so a
+	// partially fenced generation is never destroyed as though all presents were proven.
+	bool presentationCompletionCoverageValid = false;
 
 	VmaAllocator allocator = VK_NULL_HANDLE;
 	WindowSystem* windowSystem = nullptr;
 
 	uint32_t currentFrame = 0;
 	bool framebufferResized = false;
-	// Native window managers can emit hundreds of size notifications during one
-	// drag. Rebuild at most once per short interval so the editor stays interactive
-	// without performing a device-idle swapchain replacement for every callback.
-	std::chrono::steady_clock::time_point framebufferResizeLastRebuild{};
-	static constexpr std::chrono::milliseconds FRAMEBUFFER_RESIZE_REBUILD_INTERVAL{32};
 	bool ClaimFramebufferResizeRebuild()
 	{
-		if (!framebufferResized)
+		// Poll retirement fences at the protected frame boundary. A failed old-
+		// swapchain handoff needs every retired bundle gone; a full backlog needs
+		// only one free slot before publishing one new retry revision.
+		CollectCompletedPresentationResourceBundles();
+		if (presentationRecreation.IsWaitingForRetirementProof())
 		{
-			return false;
+			const bool proofReady = presentationRecreation.OldSwapchainWasConsumed()
+				? retiredPresentationBundles.empty()
+				: retiredPresentationBundles.size() < MAX_RETIRED_PRESENTATION_BUNDLES;
+			if (proofReady) {
+				const bool retryPublished = presentationRecreation.RequestRetryAfterRetirement();
+				(void)retryPublished;
+			}
 		}
-
-		const auto now = std::chrono::steady_clock::now();
-		if (framebufferResizeLastRebuild != std::chrono::steady_clock::time_point{}
-			&& now - framebufferResizeLastRebuild < FRAMEBUFFER_RESIZE_REBUILD_INTERVAL)
-		{
-			return false;
+		// The coordinator coalesces duplicate callbacks by revision. Retain this
+		// method as the production boundary used by editor presentation callers.
+		return presentationRecreation.Claim().has_value();
+	}
+	void RecordFramebufferResize(int width, int height)
+	{
+		const auto safeWidth = static_cast<std::uint32_t>(std::max(width, 0));
+		const auto safeHeight = static_cast<std::uint32_t>(std::max(height, 0));
+		presentationRecreation.RequestFramebufferExtent({ safeWidth, safeHeight });
+		framebufferResized = presentationRecreation.IsRecoveryPending();
+	}
+	void RequestOutOfDateRecovery()
+	{
+		presentationRecreation.RequestOutOfDate();
+		framebufferResized = true;
+	}
+	bool RequestSuboptimalRecoveryIfNeeded()
+	{
+		const bool requested = presentationRecreation.RequestSuboptimalIfExtentChanged();
+		framebufferResized = framebufferResized || requested;
+		return requested;
+	}
+	void PublishPresentationRecreationSuccess()
+	{
+		presentationRecreation.PublishSuccess({ swapchainExtent.width, swapchainExtent.height });
+		bool needsUnextendedProof = false;
+		for (const RetiredPresentationResourceBundle& retired : retiredPresentationBundles) {
+			if (!retired.resources.presentCompletionCoverageValid) {
+				needsUnextendedProof = true;
+				break;
+			}
 		}
-
-		// Claim the protected rebuild before waiting on the device. Any callbacks
-		// received during that work remain pending for the next throttled rebuild.
-		framebufferResizeLastRebuild = now;
-		return true;
+		// A newer chain supersedes any unreachable anchor from its predecessor. The
+		// first present of this generation becomes the release anchor for all old bundles.
+		unextendedRetirementTracker.BeginGeneration(
+			presentationLifecycle.Generation(), needsUnextendedProof);
+		framebufferResized = false;
 	}
 	static constexpr int MAX_FRAMES_IN_FLIGHT = 3;
 	bool initialized = false;
@@ -939,6 +1055,99 @@ struct VulkanContext::Impl {
 	// which only describes the UI wait-semaphore chain.
 	std::vector<std::uint8_t> pendingPrimaryCommandBuffersSubmitted;
 	std::vector<std::vector<VulkanBuffer>> retiredBuffersByFrame;
+	// Animation resources are frame-slot owned, never animator owned. A single
+	// descriptor set/resource table services every compatible packet in one
+	// immutable generation, which prevents crowd scenes from allocating Vulkan
+	// descriptors or submitting queues per animated instance.
+	struct VulkanAnimationPoseHistoryIdentity
+	{
+		std::uint64_t stableInstanceId = 0U;
+		std::uint64_t localPoseOffsetBytes = 0U;
+		std::uint32_t jointCount = 0U;
+		std::uint32_t skeletonGeneration = 0U;
+		std::uint32_t programGeneration = 0U;
+
+		auto operator<=>(const VulkanAnimationPoseHistoryIdentity&) const = default;
+	};
+	struct VulkanAnimationFrameResources
+	{
+		std::array<VulkanBuffer, TerraEngine::Animation::kGpuAnimationDescriptorBindingCount> buffers{};
+		std::array<VkDeviceSize, TerraEngine::Animation::kGpuAnimationDescriptorBindingCount> capacities{};
+		TerraEngine::Renderer::Vulkan::VulkanAnimationDescriptorSetPlan descriptorPlan{};
+		std::uint32_t planGeneration = 0U;
+		std::uint32_t rendererGeneration = 0U;
+		std::uint64_t frameId = 0U;
+		std::uint64_t submissionSerial = 0U;
+		std::uint32_t recordedDispatchCount = 0U;
+		// These set-0/binding-9 slots are owned by the frame resource, not an
+		// animator. Conventional graphics shaders receive them through copied
+		// push constants and never need the compute-only set-1 descriptors.
+		std::uint32_t generationRecordsBindlessIndex = INVALID_BINDLESS_BUFFER_INDEX;
+		std::uint32_t workPacketsBindlessIndex = INVALID_BINDLESS_BUFFER_INDEX;
+		std::uint32_t paletteMatricesBindlessIndex = INVALID_BINDLESS_BUFFER_INDEX;
+		std::uint32_t morphOutputsBindlessIndex = INVALID_BINDLESS_BUFFER_INDEX;
+		std::uint32_t graphicsBridgeBindlessIndex = INVALID_BINDLESS_BUFFER_INDEX;
+		VulkanBuffer graphicsBridgeBuffer{};
+		VkDeviceSize graphicsBridgeCapacityBytes = 0U;
+		// Hold-last is safe only when this completed frame slot still contains the
+		// same animator/layout sequence. A changed packet order or cooked generation
+		// forces the local-pose buffer back to its stateless bind-pose sentinel.
+		std::vector<VulkanAnimationPoseHistoryIdentity> poseHistoryIdentities;
+		bool live = false;
+		bool completionPending = false;
+	};
+	// CPU fallback palettes are graphics inputs only. Keeping them separate from
+	// compute resources prevents a CPU animator from fabricating GPU dispatches
+	// or overwriting a Hybrid/GPU palette in the same frame.
+	struct VulkanCpuAnimationFrameResources
+	{
+		VulkanBuffer paletteBuffer{};
+		VulkanBuffer morphWeightBuffer{};
+		VulkanBuffer graphicsBridgeBuffer{};
+		VkDeviceSize paletteCapacityBytes = 0U;
+		VkDeviceSize morphWeightCapacityBytes = 0U;
+		VkDeviceSize graphicsBridgeCapacityBytes = 0U;
+		std::uint32_t paletteBindlessIndex = INVALID_BINDLESS_BUFFER_INDEX;
+		std::uint32_t morphWeightBindlessIndex = INVALID_BINDLESS_BUFFER_INDEX;
+		std::uint32_t graphicsBridgeBindlessIndex = INVALID_BINDLESS_BUFFER_INDEX;
+		std::uint64_t frameId = 0U;
+		std::uint64_t rendererGeneration = 0U;
+		bool live = false;
+	};
+	VkDescriptorSetLayout animationDescriptorSetLayout = VK_NULL_HANDLE;
+	std::vector<VkDescriptorSet> animationDescriptorSets;
+	// Animation compute shares the existing global descriptor set at set 0 and
+	// keeps its frame-owned storage buffers at set 1. The pending plan is an
+	// immutable render-system publication; it is retained only until the first
+	// primary command buffer records it for the current frame slot.
+	TerraEngine::Renderer::Vulkan::VulkanAnimationComputePipelines animationComputePipelines{};
+	TerraEngine::Renderer::Vulkan::VulkanAnimationCommandPlan pendingAnimationCommandPlan{};
+	std::shared_ptr<const TerraEngine::Animation::GpuAnimationPlan> pendingAnimationImmutablePlan;
+	std::uint64_t pendingAnimationFrameId = 0U;
+	bool animationComputeRecordedForCurrentFrame = false;
+	bool animationComputeSubmissionMarkedForCurrentFrame = false;
+	std::uint32_t recordedAnimationDispatchCountForCurrentFrame = 0U;
+	struct VulkanAnimationCompletion
+	{
+		std::uint64_t frameId = 0U;
+		std::uint32_t planGeneration = 0U;
+		std::uint32_t rendererGeneration = 0U;
+		std::uint64_t submissionSerial = 0U;
+		std::uint32_t recordedDispatchCount = 0U;
+	};
+	std::vector<VulkanAnimationFrameResources> animationFrameResources;
+	std::vector<VulkanCpuAnimationFrameResources> cpuAnimationFrameResources;
+	std::deque<VulkanAnimationCompletion> completedAnimationGenerations;
+	std::shared_ptr<const TerraEngine::Renderer::CpuAnimationDeformationPlan>
+		pendingCpuAnimationPlan;
+	TerraEngine::Renderer::AnimationGpuBackendExecutionSnapshot
+		latestAnimationGpuBackendExecution{};
+	std::uint64_t nextAnimationSubmissionSerial = 1U;
+	// Graphics sees exactly one current-frame animation bridge buffer. The
+	// inactive sentinel preserves dormant/static paths without stale indexing.
+	std::uint32_t activeAnimationGraphicsBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
+	std::uint32_t activeCpuAnimationGraphicsBufferIndex =
+		INVALID_BINDLESS_BUFFER_INDEX;
 	std::vector<std::vector<size_t>> workerBufferUsage; // Tracks next available secondary buffer index per worker per frame
 	std::atomic_bool swapchainImageAcquired = false;
 	// A descriptor-safety flush may submit a runtime prefix and consume the
@@ -968,10 +1177,18 @@ struct VulkanContext::Impl {
 		VkCommandPool commandPool = VK_NULL_HANDLE;
 		std::uint32_t width = 0;
 		std::uint32_t height = 0;
+		// The live target can follow the dock size while automation requires an
+		// exact output size. Preserve both dimensions until encoding completes.
+		std::uint32_t requestedWidth = 0;
+		std::uint32_t requestedHeight = 0;
 		VkFormat sourceFormat = VK_FORMAT_UNDEFINED;
 		std::chrono::steady_clock::time_point submittedAt{};
 		std::chrono::milliseconds timeout = std::chrono::milliseconds(2000);
 		bool completionPublished = false;
+		// Preserve which offscreen image owns this readback. Source kind remains
+		// GameView for next-frame captures even though their pixels come from the
+		// dedicated target rather than a potentially hidden dock target.
+		bool dedicatedRenderTarget = false;
 	};
 	std::deque<VulkanReadbackRequest> inFlightReadbacks;
 	std::deque<TerraEngine::Renderer::RenderCaptureResult> completedReadbacks;
@@ -1054,6 +1271,9 @@ struct VulkanContext::Impl {
 	bool CreateLogicalDevice();
 
 	bool CreateSwapChain(WindowSystem& windowSystem, VkSwapchainKHR oldSwapchain = VK_NULL_HANDLE);
+	// Becomes true before vkCreateSwapchainKHR receives a non-null old swapchain.
+	// That call is an ownership boundary: failure must not restore/acquire it.
+	bool oldSwapchainConsumedByCreateAttempt = false;
 	bool CreateImageViews();
 	VkFormat FindDepthFormat();
 	VkFormat FindSupportedFormat(const std::vector<VkFormat>& candidates, VkImageTiling tiling, VkFormatFeatureFlags features);
@@ -1068,6 +1288,15 @@ struct VulkanContext::Impl {
 	PresentationResourceBundle TakePresentationResourceBundle();
 	void RestorePresentationResourceBundle(PresentationResourceBundle&& bundle);
 	void DestroyPresentationResourceBundle(PresentationResourceBundle& bundle);
+	void RetirePresentationResourceBundle(PresentationResourceBundle&& bundle, std::uint64_t generation);
+	void CollectCompletedPresentationResourceBundles();
+	bool PreparePresentationCompletionFence(std::uint32_t imageIndex,
+		VkPresentInfoKHR& presentInfo, VkSwapchainPresentFenceInfoKHR& completionInfo);
+	void ResolveUnenqueuedPresentationFence(bool fencePrepared, VkResult presentResult);
+	VkFence PrepareUnextendedAcquireProof();
+	void ResolveUnextendedAcquireProof(VkFence proofFence, VkResult acquireResult, std::uint32_t imageIndex);
+	void CollectCompletedUnextendedAcquireProofs();
+	void RecordUnextendedPresent(std::uint32_t imageIndex, VkResult presentResult);
 	bool CreateGpuTimestampQueries();
 	void DestroyGpuTimestampQueries();
 	void ResolveCompletedGpuTimestamps(uint32_t frameIndex);
@@ -1080,6 +1309,17 @@ struct VulkanContext::Impl {
 	VulkanBuffer CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage, const char* name = nullptr);
 	void DestroyBufferImmediate(VulkanBuffer& buffer);
 	void RetireBuffer(VulkanBuffer& buffer);
+	bool PublishVulkanAnimationResources(const TerraEngine::Animation::GpuAnimationPlan& plan, std::uint32_t rendererGeneration);
+	bool PublishVulkanCpuAnimationResources(
+		const TerraEngine::Renderer::CpuAnimationDeformationPlan& plan);
+	bool EnsureVulkanAnimationDescriptorSets();
+	bool EnsureVulkanAnimationComputePipelines();
+	void DestroyVulkanAnimationComputePipelines();
+	void MarkVulkanAnimationGenerationSubmitted(std::uint32_t rendererGeneration);
+	void CompleteVulkanAnimationFrameResources(std::uint32_t frameIndex);
+	void RetireVulkanAnimationFrameResources(VulkanAnimationFrameResources& resources);
+	void RetireVulkanCpuAnimationFrameResources(
+		VulkanCpuAnimationFrameResources& resources);
 	void CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size);
 	VkCommandBuffer BeginSingleTimeCommands();
 	bool EndSingleTimeCommands(VkCommandBuffer commandBuffer, std::string_view operation = "immediate command");

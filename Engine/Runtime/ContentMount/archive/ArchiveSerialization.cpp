@@ -18,6 +18,15 @@ std::uint32_t EncodeAssetClass(std::string_view assetClass) {
 		{"video", 5U},
 		{"data", 6U},
 		{"other", 7U},
+		// These values mirror the writer's append-only animation class table. An
+		// older/newer unknown code still falls through to "other" below.
+		{"skeleton", 8U},
+		{"animation-clip", 9U},
+		{"animation-controller", 10U},
+		{"animation-mask", 11U},
+		{"retarget-profile", 12U},
+		{"motion-database", 13U},
+		{"ragdoll-profile", 14U},
 	};
 
 	const auto found = kCodes.find(assetClass);
@@ -42,6 +51,20 @@ std::string DecodeAssetClass(std::uint32_t assetClassCode) {
 		return "video";
 	case 6U:
 		return "data";
+	case 8U:
+		return "skeleton";
+	case 9U:
+		return "animation-clip";
+	case 10U:
+		return "animation-controller";
+	case 11U:
+		return "animation-mask";
+	case 12U:
+		return "retarget-profile";
+	case 13U:
+		return "motion-database";
+	case 14U:
+		return "ragdoll-profile";
 	default:
 		return "other";
 	}

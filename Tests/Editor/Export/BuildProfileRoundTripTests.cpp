@@ -2,6 +2,7 @@
 
 #include "BuildProfile.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <string>
 
@@ -9,6 +10,20 @@ namespace TerraEngine::EditorTests {
 	namespace {
 		std::filesystem::path MakeTempProfilePath() {
 			return std::filesystem::temp_directory_path() / "TerraEngineEditorTests" / "BuildProfiles" / "round-trip-profile.json";
+		}
+
+		NativeAotPublishContext MakeNativeAotTestContext() {
+			// Command tests use deliberately distinct paths so an omitted option
+			// cannot accidentally pass by matching another publish argument.
+			return {
+				"C:/Installed Editor/NativeAotNuGet",
+				"C:/Installed Editor/NativeAotNuGet/NuGet.Config",
+				"C:/Installed Editor/NativeAotNuGet/feed",
+				"C:/Temp/TEAOT-command-test/packages",
+				"C:/Temp/TEAOT-command-test/dotnet-home",
+				"C:/Temp/TEAOT-command-test/obj",
+				"C:/Temp/TEAOT-command-test/bin"
+			};
 		}
 
 		class TempProfileDirectory {
@@ -91,14 +106,16 @@ namespace TerraEngine::EditorTests {
 
 			const std::filesystem::path projectPath = "C:/Projects/Terra Game/Assembly-CSharp.csproj";
 			const std::filesystem::path outputPath = "C:/Projects/Terra Game/Builds/Profile/Managed";
+			const NativeAotPublishContext toolchain = MakeNativeAotTestContext();
 
-			const std::string unstrippedCommand = BuildNativeAotPublishCommand(profile, projectPath, outputPath);
+			const std::string unstrippedCommand = BuildNativeAotPublishCommand(profile, projectPath, outputPath, toolchain);
 			context.Expect(unstrippedCommand.find("-p:PublishAot=true") != std::string::npos, "NativeAOT publish should always enable PublishAot.");
+			context.Expect(unstrippedCommand.find("--no-restore") != std::string::npos, "NativeAOT publish should consume the explicit offline restore without performing a second restore.");
 			context.Expect(unstrippedCommand.find("-p:StripSymbols=true") == std::string::npos, "Disabled strip output should not pass StripSymbols to dotnet.");
 			context.Expect(unstrippedCommand.find("-p:DebugType=none") == std::string::npos, "Included debug symbols should not suppress debug output.");
 
 			profile.stripNativeAotOutput = true;
-			const std::string strippedCommand = BuildNativeAotPublishCommand(profile, projectPath, outputPath);
+			const std::string strippedCommand = BuildNativeAotPublishCommand(profile, projectPath, outputPath, toolchain);
 			context.Expect(strippedCommand.find("-p:StripSymbols=true") != std::string::npos, "Enabled strip output should pass StripSymbols to dotnet.");
 		});
 
@@ -107,12 +124,29 @@ namespace TerraEngine::EditorTests {
 			profile.platform = ExportPlatform::Linux;
 			profile.includeDebugSymbols = false;
 			profile.stripNativeAotOutput = true;
-			profile.additionalPublishArgs = "-p:InvariantGlobalization=true";
+			profile.additionalPublishArgs =
+				"-p:InvariantGlobalization=true "
+				"-p:BaseIntermediateOutputPath=C:/Attacker/obj/ "
+				"-p:MSBuildProjectExtensionsPath=C:/Attacker/extensions/ "
+				"-p:BaseOutputPath=C:/Attacker/bin/ "
+				"-p:OutputPath=C:/Attacker/output/ "
+				"-p:PublishDir=C:/Attacker/publish/ "
+				"-o C:/Attacker/cli-output/ "
+				"-p:RestorePackagesPath=C:/Attacker/packages/ "
+				"-p:DefaultItemExcludes=C:/Attacker/generated/** "
+				"-p:RestoreSources=https://example.invalid/v3/index.json "
+				"-p:RestoreFallbackFolders=C:/Attacker/fallback/ "
+				"-p:RestoreAdditionalProjectSources=https://additional.invalid/ "
+				"-p:NuGetAudit=true --no-restore";
+			const NativeAotPublishContext toolchain = MakeNativeAotTestContext();
+			const std::filesystem::path publishDirectory =
+				"C:/Temp/TEAOT-command-test/publish";
 
 			const std::string command = BuildNativeAotPublishCommand(
 				profile,
 				"/tmp/Terra Game/Assembly-CSharp.csproj",
-				"/tmp/Terra Game/Builds/Profile/Managed");
+				publishDirectory,
+				toolchain);
 
 			// These checks make sure the strip option does not displace the
 			// platform, debug-symbol, or user-supplied publish arguments.
@@ -120,6 +154,153 @@ namespace TerraEngine::EditorTests {
 			context.Expect(command.find("-p:StripSymbols=true") != std::string::npos, "Strip output should remain present with other publish options.");
 			context.Expect(command.find("-p:DebugType=none") != std::string::npos, "Disabled debug symbols should suppress debug output.");
 			context.Expect(command.find("-p:InvariantGlobalization=true") != std::string::npos, "Additional publish arguments should be appended after built-in options.");
+			context.Expect(command.rfind("-p:RestoreSources=\"C:/Installed Editor/NativeAotNuGet/feed/\"")
+				> command.rfind("https://example.invalid"), "The installed feed must override a profile-provided restore source.");
+			context.Expect(command.rfind("-p:BaseIntermediateOutputPath=\"C:/Temp/TEAOT-command-test/obj/\"")
+					> command.rfind("C:/Attacker/obj/")
+					&& command.rfind("-p:MSBuildProjectExtensionsPath=\"C:/Temp/TEAOT-command-test/obj/\"")
+						> command.rfind("C:/Attacker/extensions/")
+					&& command.rfind("-p:BaseOutputPath=\"C:/Temp/TEAOT-command-test/bin/\"")
+						> command.rfind("C:/Attacker/bin/")
+					&& command.rfind("-p:OutputPath=\"C:/Temp/TEAOT-command-test/bin/\"")
+						> command.rfind("C:/Attacker/output/"),
+				"Engine-owned obj and bin properties must override malicious profile values.");
+			context.Expect(command.rfind("-p:PublishDir=\"C:/Temp/TEAOT-command-test/publish/\"")
+					> command.rfind("C:/Attacker/publish/")
+					&& command.rfind("-o \"C:/Temp/TEAOT-command-test/publish/\"")
+						> command.rfind("C:/Attacker/cli-output/"),
+				"Both NativeAOT publish output controls must end at the private publish directory.");
+			context.Expect(command.rfind("-p:RestorePackagesPath=\"C:/Temp/TEAOT-command-test/packages/\"")
+					> command.rfind("C:/Attacker/packages/"),
+				"The private package cache must override a profile-provided restore cache.");
+#ifdef _WIN32
+			const std::string defaultItemExcludes =
+				"-p:DefaultItemExcludes=\"$([MSBuild]::Unescape('obj/**\"^%\"3Bbin/**\"^%\"3BBuild/**\"^%\"3BLibrary/**\"^%\"3BTemp/**'))\"";
+#else
+			const std::string defaultItemExcludes =
+				"-p:DefaultItemExcludes='$([MSBuild]::Unescape("
+				"'\\''obj/**%3Bbin/**%3BBuild/**%3BLibrary/**%3BTemp/**'\\''"
+				"))'";
+#endif
+			context.Expect(command.rfind(defaultItemExcludes)
+					> command.rfind("C:/Attacker/generated/**"),
+				"The delayed MSBuild Unescape representation must override a profile value.");
+			context.Expect(command.find("-p:DefaultItemExcludes=obj/**")
+					== std::string::npos,
+				"Publish must not retain the ineffective bare escaped exclusion list.");
+			context.Expect(
+				command.find("obj/**;bin/**;Build/**;Library/**;Temp/**")
+					== std::string::npos,
+				"Publish must not emit raw semicolon separators that MSBuild parses as switches.");
+			context.Expect(command.find("-p:RestoreFallbackFolders=") != std::string::npos
+				&& command.find("-p:RestoreAdditionalProjectSources=") != std::string::npos
+				&& command.find("-p:NuGetAudit=false") != std::string::npos,
+				"NativeAOT publish should disable fallback, additional, and audit sources after profile arguments.");
+			context.Expect(command.rfind("-p:RestoreFallbackFolders=")
+					> command.rfind("C:/Attacker/fallback/")
+					&& command.rfind("-p:RestoreAdditionalProjectSources=")
+						> command.rfind("https://additional.invalid/")
+					&& command.rfind("-p:NuGetAudit=false")
+						> command.rfind("-p:NuGetAudit=true"),
+				"Offline NuGet properties must be authoritative after every profile argument.");
+			context.Expect(command.find("--configfile") == std::string::npos
+					&& command.find("--packages") == std::string::npos
+					&& command.find("--no-http-cache") == std::string::npos
+					&& command.find("--disable-parallel") == std::string::npos,
+				"Publish must not receive CLI switches that belong exclusively to dotnet restore.");
+			context.Expect(command.ends_with("--no-restore"),
+				"The fail-closed no-restore decision must remain the final publish switch after profile arguments.");
+
+			const std::string restore = BuildNativeAotRestoreCommand(
+				profile, "/tmp/Terra Game/Assembly-CSharp.csproj", toolchain);
+			context.Expect(restore.find("dotnet restore") == 0U
+				&& restore.find("-p:PublishAot=true") != std::string::npos
+				&& restore.find("--configfile \"C:/Installed Editor/NativeAotNuGet/NuGet.Config\"") != std::string::npos
+				&& restore.find("--packages \"C:/Temp/TEAOT-command-test/packages/\"") != std::string::npos,
+				"NativeAOT restore should select the installed config and private per-run cache.");
+			context.Expect(restore.find("-p:BaseIntermediateOutputPath=\"C:/Temp/TEAOT-command-test/obj/\"")
+					!= std::string::npos
+					&& restore.find("-p:MSBuildProjectExtensionsPath=\"C:/Temp/TEAOT-command-test/obj/\"")
+						!= std::string::npos
+					&& restore.find("-p:BaseOutputPath=\"C:/Temp/TEAOT-command-test/bin/\"")
+						!= std::string::npos
+					&& restore.find("-p:OutputPath=\"C:/Temp/TEAOT-command-test/bin/\"")
+						!= std::string::npos
+					&& restore.find("-p:RestorePackagesPath=\"C:/Temp/TEAOT-command-test/packages/\"")
+						!= std::string::npos,
+				"Restore and publish must share the exact private obj, bin, and package paths.");
+			context.Expect(restore.find(defaultItemExcludes) != std::string::npos,
+				"Restore must use the same MSBuild-escaped and shell-quoted exclusions as publish.");
+			context.Expect(
+				restore.find("obj/**;bin/**;Build/**;Library/**;Temp/**")
+					== std::string::npos,
+				"Restore must not emit raw semicolon separators that MSBuild parses as switches.");
+			context.Expect(restore.ends_with("-p:NuGetAudit=false"),
+				"Offline NuGet properties must remain the final restore boundary.");
+		});
+
+		registry.Add("Editor.BuildProfile.NativeAotCommandsQuoteShellSensitivePaths", [](TestContext& context) {
+			BuildProfile profile{};
+			profile.platform = GetHostExportPlatform();
+			NativeAotPublishContext toolchain = MakeNativeAotTestContext();
+#ifdef _WIN32
+			const std::filesystem::path project =
+				"C:/Projects/%TERRAENGINE_PATH_SENTINEL%/Assembly-CSharp.csproj";
+			const std::filesystem::path output =
+				"C:/Projects/%TERRAENGINE_PATH_SENTINEL%/Managed";
+			toolchain.nugetFeed =
+				"C:/Installed %TERRAENGINE_PATH_SENTINEL%/NativeAotNuGet/feed";
+			toolchain.packageCache =
+				"C:/Temp/%TERRAENGINE_PATH_SENTINEL%/packages";
+			toolchain.intermediateOutputDirectory =
+				"C:/Temp/%TERRAENGINE_PATH_SENTINEL%/obj";
+			toolchain.binaryOutputDirectory =
+				"C:/Temp/%TERRAENGINE_PATH_SENTINEL%/bin";
+			const std::string restore =
+				BuildNativeAotRestoreCommand(profile, project, toolchain);
+			const std::string publish =
+				BuildNativeAotPublishCommand(profile, project, output, toolchain);
+			const std::string projectArgument =
+				"\"C:/Projects/\"^%\"TERRAENGINE_PATH_SENTINEL\"^%\"/Assembly-CSharp.csproj\"";
+			const std::string outputArgument =
+				"-o \"C:/Projects/\"^%\"TERRAENGINE_PATH_SENTINEL\"^%\"/Managed/\"";
+			const std::string feedProperty =
+				"-p:RestoreSources=\"C:/Installed \"^%\"TERRAENGINE_PATH_SENTINEL\"^%\"/NativeAotNuGet/feed/\"";
+			const std::string packageArgument =
+				"--packages \"C:/Temp/\"^%\"TERRAENGINE_PATH_SENTINEL\"^%\"/packages/\"";
+			context.Expect(restore.find(projectArgument) != std::string::npos
+					&& publish.find(projectArgument) != std::string::npos
+					&& publish.find(outputArgument) != std::string::npos
+					&& restore.find(feedProperty) != std::string::npos
+					&& publish.find(feedProperty) != std::string::npos
+					&& restore.find(packageArgument) != std::string::npos,
+				"Windows NativeAOT paths must close quotes, escape each percent outside quotes, and reopen the same argument.");
+			context.Expect(restore.find("^%TERRAENGINE_PATH_SENTINEL^%")
+					== std::string::npos
+					&& publish.find("^%TERRAENGINE_PATH_SENTINEL^%")
+						== std::string::npos,
+				"Windows NativeAOT paths must not leave caret escapes inside one quoted segment.");
+			context.Expect(
+				std::count(restore.begin(), restore.end(), '"') % 2 == 0
+					&& std::count(publish.begin(), publish.end(), '"') % 2 == 0,
+				"Segmented Windows NativeAOT arguments must keep their double quotes balanced.");
+#else
+			const std::filesystem::path project =
+				"/tmp/Terra $HOME 'Game/Assembly-CSharp.csproj";
+			const std::filesystem::path output =
+				"/tmp/Terra $HOME 'Game/Managed";
+			toolchain.nugetFeed = "/opt/Terra $HOME 'SDK/feed";
+			const std::string restore =
+				BuildNativeAotRestoreCommand(profile, project, toolchain);
+			const std::string publish =
+				BuildNativeAotPublishCommand(profile, project, output, toolchain);
+			context.Expect(restore.find("'\\''") != std::string::npos
+					&& publish.find("'\\''") != std::string::npos,
+				"POSIX single quotes in NativeAOT paths must use the close-escape-reopen form.");
+			context.Expect(restore.find("\"/tmp/Terra $HOME") == std::string::npos
+					&& publish.find("\"/tmp/Terra $HOME") == std::string::npos,
+				"POSIX NativeAOT paths must not use double quotes that expand shell variables.");
+#endif
 		});
 
 		registry.Add("Editor.BuildProfile.WindowsArtifactNamesRemainCompatible", [](TestContext& context) {

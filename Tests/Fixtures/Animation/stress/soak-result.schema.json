@@ -1,0 +1,61 @@
+{
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"$id": "https://terraengine.local/schemas/animation-soak-result-v1.json",
+	"title": "TerraEngine animation soak iteration result",
+	"type": "object",
+	"additionalProperties": false,
+	"required": [
+		"schemaVersion",
+		"runId",
+		"iteration",
+		"passed",
+		"heartbeatSequence",
+		"counters",
+		"resources"
+	],
+	"properties": {
+		"schemaVersion": { "const": 1 },
+		"runId": { "type": "string", "minLength": 1 },
+		"iteration": { "type": "integer", "minimum": 0 },
+		"passed": { "type": "boolean" },
+		"heartbeatSequence": { "type": "integer", "minimum": 1 },
+		"counters": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"deadlocks",
+				"crashes",
+				"stalePublications",
+				"partialPublications",
+				"unrecoverableRendererFailures",
+				"unrecoverablePhysicsFailures"
+			],
+			"properties": {
+				"deadlocks": { "type": "integer", "const": 0 },
+				"crashes": { "type": "integer", "const": 0 },
+				"stalePublications": { "type": "integer", "const": 0 },
+				"partialPublications": { "type": "integer", "const": 0 },
+				"unrecoverableRendererFailures": { "type": "integer", "const": 0 },
+				"unrecoverablePhysicsFailures": { "type": "integer", "const": 0 }
+			}
+		},
+		"resources": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": [
+				"privateBytes",
+				"gpuResidentBytes",
+				"handleCount",
+				"threadCount",
+				"retainedHistoryRecords"
+			],
+			"properties": {
+				"privateBytes": { "type": "integer", "minimum": 0 },
+				"gpuResidentBytes": { "type": "integer", "minimum": 0 },
+				"handleCount": { "type": "integer", "minimum": 0 },
+				"threadCount": { "type": "integer", "minimum": 0 },
+				"retainedHistoryRecords": { "type": "integer", "minimum": 0, "maximum": 36000 }
+			}
+		}
+	}
+}

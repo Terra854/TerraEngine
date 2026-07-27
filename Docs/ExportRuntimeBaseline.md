@@ -37,6 +37,23 @@ cmake --build --preset RelWithDebInfo --target install
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/ExportRuntimeBaseline/RunBaseline.ps1 -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/ci/export-runtime-baseline
 ```
 
+The long-path lane uses the same installed binaries and fixture, but places the
+project beyond 360 characters. It proves that both the editor's ordinary
+Assembly-CSharp build and the NativeAOT export toolchain use scoped short
+workspaces without leaking transient restore, object, cache, or publish state
+into the project:
+
+```powershell
+$deepWorkRoot = "out/ci/export-runtime-baseline/" + (
+  (1..8 | ForEach-Object { "segment-abcdefghijklmnopqrstuvwxyz-{0:d2}" -f $_ }) -join "/"
+)
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File Tools/ExportRuntimeBaseline/RunBaseline.ps1 `
+  -InstallRoot out/build/RelWithDebInfo/Build `
+  -WorkRoot $deepWorkRoot `
+  -RunId export-runtime-long-path
+```
+
 The compatibility script at
 `Tests/Tools/ExportRuntimeBaseline/ExportSample.ps1` forwards to the same
 authoritative helper. It does not contain a second export implementation.
@@ -87,6 +104,9 @@ schema version 1, `success=true`, `failureCategory=none`, and exit code 0.
 `content-inventory.json` is sorted by normalized path and no required entry may
 set `placeholderDetected=true`. `progress.jsonl` contains independently
 parseable records in emission order, including exactly one final result record.
+The helper also requires the installed editor's script asset to reach
+`compileStatus=Ready`, verifies its non-empty managed assembly, and rejects a
+project-local `Library/NativeAot` directory after export.
 
 ## Local validation gate
 

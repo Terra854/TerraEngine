@@ -184,6 +184,18 @@ namespace TerraEngine::Resource
 		case AssetType::Texture: return ResidencyAssetType::Texture;
 		case AssetType::Material: return ResidencyAssetType::Material;
 		case AssetType::ShaderCollection: return ResidencyAssetType::ShaderCollection;
+		case AssetType::Skeleton: return ResidencyAssetType::Skeleton;
+		case AssetType::AnimationClip: return ResidencyAssetType::AnimationClip;
+		case AssetType::AnimationController: return ResidencyAssetType::AnimationController;
+		case AssetType::AnimationMask: return ResidencyAssetType::AnimationMask;
+		case AssetType::RetargetProfile: return ResidencyAssetType::RetargetProfile;
+		case AssetType::MotionDatabase: return ResidencyAssetType::MotionDatabase;
+		case AssetType::RagdollProfile: return ResidencyAssetType::RagdollProfile;
+		// Physics assets remain provider-owned payloads until their dedicated
+		// residency accounting is introduced, so they retain the legacy fallback.
+		case AssetType::PhysicsMaterial:
+		case AssetType::CookedCollider:
+			return ResidencyAssetType::Other;
 		}
 		return ResidencyAssetType::Other;
 	}
@@ -199,6 +211,13 @@ namespace TerraEngine::Resource
 		case ResidencyAssetType::ShaderCollection: return "shader-collection";
 		case ResidencyAssetType::FontAtlas: return "font-atlas";
 		case ResidencyAssetType::Other: return "other";
+		case ResidencyAssetType::Skeleton: return "skeleton";
+		case ResidencyAssetType::AnimationClip: return "animation-clip";
+		case ResidencyAssetType::AnimationController: return "animation-controller";
+		case ResidencyAssetType::AnimationMask: return "animation-mask";
+		case ResidencyAssetType::RetargetProfile: return "retarget-profile";
+		case ResidencyAssetType::MotionDatabase: return "motion-database";
+		case ResidencyAssetType::RagdollProfile: return "ragdoll-profile";
 		}
 		return "other";
 	}
@@ -321,6 +340,13 @@ namespace TerraEngine::Resource
 		case CpuPayloadOwnershipKind::VirtualGeometryPage: return "virtual-geometry-page";
 		case CpuPayloadOwnershipKind::VirtualGeometryFallbackPage: return "virtual-geometry-fallback-page";
 		case CpuPayloadOwnershipKind::VirtualGeometryMetadata: return "virtual-geometry-metadata";
+		case CpuPayloadOwnershipKind::Skeleton: return "skeleton";
+		case CpuPayloadOwnershipKind::AnimationClip: return "animation-clip";
+		case CpuPayloadOwnershipKind::AnimationController: return "animation-controller";
+		case CpuPayloadOwnershipKind::AnimationMask: return "animation-mask";
+		case CpuPayloadOwnershipKind::RetargetProfile: return "retarget-profile";
+		case CpuPayloadOwnershipKind::MotionDatabase: return "motion-database";
+		case CpuPayloadOwnershipKind::RagdollProfile: return "ragdoll-profile";
 		case CpuPayloadOwnershipKind::Unknown: return "unknown";
 		}
 		return "unknown";
@@ -1119,5 +1145,496 @@ namespace TerraEngine::Resource
 		});
 
 		return summary;
+	}
+
+	AnimationResidencyTracker::AnimationResidencyTracker(std::size_t maximumTrackedGenerations)
+		: m_maximumTrackedGenerations(std::max<std::size_t>(1u, maximumTrackedGenerations))
+	{
+	}
+
+	std::string AnimationResidencyTracker::MakeKey(
+		const TerraEngine::UUID& assetId,
+		std::uint64_t requestGeneration)
+	{
+		return TerraEngine::ToHexString(assetId) + ":" + std::to_string(requestGeneration);
+	}
+
+	bool AnimationResidencyTracker::IsAnimationAssetType(ResidencyAssetType type) noexcept
+	{
+		return type >= ResidencyAssetType::Skeleton && type <= ResidencyAssetType::RagdollProfile;
+	}
+
+	bool AnimationResidencyTracker::RequiresAuthorityRetention(const AnimationResidencyRequest& request) noexcept
+	{
+		return request.gameplayCritical || request.offscreenAuthority;
+	}
+
+	bool AnimationResidencyTracker::IsResidentState(ResidencyState state) noexcept
+	{
+		return state == ResidencyState::Active || state == ResidencyState::Idle || state == ResidencyState::Pinned;
+	}
+
+	bool AnimationResidencyTracker::HasRetains(const TrackedGeneration& generation) noexcept
+	{
+		return std::any_of(generation.usageRetainCounts.begin(), generation.usageRetainCounts.end(),
+			[](std::uint32_t count) { return count != 0u; });
+	}
+
+	AnimationResidencyUsage AnimationResidencyTracker::BuildRetainedUsage(const TrackedGeneration& generation) noexcept
+	{
+		AnimationResidencyUsage usages = AnimationResidencyUsage::None;
+		for (std::size_t index = 0u; index < generation.usageRetainCounts.size(); ++index)
+		{
+			if (generation.usageRetainCounts[index] != 0u)
+			{
+				usages = usages | static_cast<AnimationResidencyUsage>(1u << index);
+			}
+		}
+		return usages;
+	}
+
+	AnimationResidencyDecision AnimationResidencyTracker::MakeDecisionLocked(const TrackedGeneration& generation) const
+	{
+		AnimationResidencyDecision decision;
+		decision.assetId = generation.record.request.assetId;
+		decision.requestGeneration = generation.record.request.requestGeneration;
+		decision.state = generation.record.state;
+		decision.accepted = generation.record.state != ResidencyState::Failed
+			&& generation.record.state != ResidencyState::Released;
+		decision.retainedForAuthority = RequiresAuthorityRetention(generation.record.request) || HasRetains(generation);
+		decision.safeFallbackRequired = !IsResidentState(generation.record.state);
+		decision.residentBytes = IsResidentState(generation.record.state) ? generation.record.request.byteSize : 0u;
+		const std::string assetKey = TerraEngine::ToHexString(generation.record.request.assetId);
+		if (const auto active = m_activeGeneration.find(assetKey); active != m_activeGeneration.end())
+		{
+			decision.activeGeneration = active->second;
+		}
+		decision.reason = generation.record.lastDiagnostic;
+		return decision;
+	}
+
+	void AnimationResidencyTracker::RefreshRetentionStateLocked(TrackedGeneration& generation)
+	{
+		generation.record.retainedUsages = BuildRetainedUsage(generation);
+		generation.record.retainCount = 0u;
+		for (std::uint32_t count : generation.usageRetainCounts)
+		{
+			generation.record.retainCount = count > std::numeric_limits<std::uint32_t>::max() - generation.record.retainCount
+				? std::numeric_limits<std::uint32_t>::max()
+				: generation.record.retainCount + count;
+		}
+		if (IsResidentState(generation.record.state))
+		{
+			const bool retained = HasRetains(generation)
+				|| (generation.record.activeGeneration && RequiresAuthorityRetention(generation.record.request));
+			generation.record.state = retained ? ResidencyState::Pinned : ResidencyState::Idle;
+		}
+	}
+
+	void AnimationResidencyTracker::PruneReleasedLocked()
+	{
+		if (m_generations.size() < m_maximumTrackedGenerations)
+		{
+			return;
+		}
+		std::vector<std::pair<std::string, std::uint64_t>> released;
+		for (const auto& [key, generation] : m_generations)
+		{
+			if (generation.record.state == ResidencyState::Released)
+			{
+				released.emplace_back(key, generation.record.lastTouchedSequence);
+			}
+		}
+		std::sort(released.begin(), released.end(), [](const auto& left, const auto& right) {
+			return left.second != right.second ? left.second < right.second : left.first < right.first;
+		});
+		for (const auto& [key, sequence] : released)
+		{
+			(void)sequence;
+			if (m_generations.size() < m_maximumTrackedGenerations)
+			{
+				break;
+			}
+			const auto found = m_generations.find(key);
+			if (found == m_generations.end())
+			{
+				continue;
+			}
+			const std::string assetKey = TerraEngine::ToHexString(found->second.record.request.assetId);
+			m_generations.erase(found);
+			const bool assetStillTracked = std::any_of(m_generations.begin(), m_generations.end(),
+				[&](const auto& pair) {
+					return TerraEngine::ToHexString(pair.second.record.request.assetId) == assetKey;
+				});
+			if (!assetStillTracked)
+			{
+				m_latestRequestedGeneration.erase(assetKey);
+				m_activeGeneration.erase(assetKey);
+			}
+		}
+	}
+
+	AnimationResidencyDecision AnimationResidencyTracker::Request(const AnimationResidencyRequest& request)
+	{
+		AnimationResidencyDecision decision;
+		decision.assetId = request.assetId;
+		decision.requestGeneration = request.requestGeneration;
+		if (request.assetId == TerraEngine::EMPTY_UUID || request.requestGeneration == 0u
+			|| request.byteSize == 0u || !IsAnimationAssetType(request.assetType))
+		{
+			decision.reason = "A request requires a typed animation asset, nonzero bytes, and a nonzero generation.";
+			return decision;
+		}
+
+		std::scoped_lock lock(m_mutex);
+		const std::string assetKey = TerraEngine::ToHexString(request.assetId);
+		const std::string generationKey = MakeKey(request.assetId, request.requestGeneration);
+		if (const auto latest = m_latestRequestedGeneration.find(assetKey);
+			latest != m_latestRequestedGeneration.end() && request.requestGeneration < latest->second)
+		{
+			++m_rejectedRequests;
+			decision.reason = "Stale animation residency generation rejected before IO was scheduled.";
+			return decision;
+		}
+		if (const auto existing = m_generations.find(generationKey); existing != m_generations.end())
+		{
+			const AnimationResidencyRequest& prior = existing->second.record.request;
+			const bool identical = prior.assetType == request.assetType && prior.byteSize == request.byteSize
+				&& prior.priority == request.priority && prior.gameplayCritical == request.gameplayCritical
+				&& prior.offscreenAuthority == request.offscreenAuthority;
+			if (!identical)
+			{
+				++m_rejectedRequests;
+				decision.reason = "The same generation was reused with different immutable request data.";
+				return decision;
+			}
+			decision = MakeDecisionLocked(existing->second);
+			decision.reason = decision.accepted
+				? "Idempotent request joined the existing generation."
+				: "A terminal generation cannot be reused; submit a newer request generation.";
+			return decision;
+		}
+
+		// A newer generation supersedes unfinished IO for this asset. Marking the
+		// older request terminal prevents a completion that can no longer publish
+		// from consuming the bounded request table forever.
+		for (auto& [key, generation] : m_generations)
+		{
+			(void)key;
+			if (generation.record.request.assetId == request.assetId
+				&& generation.record.request.requestGeneration < request.requestGeneration
+				&& generation.record.state == ResidencyState::Loading)
+			{
+				generation.record.state = ResidencyState::Released;
+				generation.record.cancellationRequested = true;
+				generation.record.lastTouchedSequence = ++m_touchSequence;
+				generation.record.lastDiagnostic = "Superseded by a newer animation residency generation.";
+				++m_cancelledRequests;
+			}
+		}
+
+		PruneReleasedLocked();
+		if (m_generations.size() >= m_maximumTrackedGenerations)
+		{
+			++m_rejectedRequests;
+			decision.reason = "The bounded animation residency generation table is full.";
+			return decision;
+		}
+
+		TrackedGeneration tracked;
+		tracked.record.request = request;
+		tracked.record.state = ResidencyState::Loading;
+		tracked.record.lastTouchedSequence = ++m_touchSequence;
+		tracked.record.lastDiagnostic = "Queued asynchronously; the prior generation or reference pose remains safe.";
+		m_generations.emplace(generationKey, std::move(tracked));
+		m_latestRequestedGeneration[assetKey] = request.requestGeneration;
+		decision = MakeDecisionLocked(m_generations.at(generationKey));
+		decision.accepted = true;
+		return decision;
+	}
+
+	bool AnimationResidencyTracker::Retain(
+		const TerraEngine::UUID& assetId,
+		std::uint64_t requestGeneration,
+		AnimationResidencyUsage usage)
+	{
+		const std::uint32_t bits = static_cast<std::uint32_t>(usage);
+		if (bits == 0u || (bits & ~0x1ffu) != 0u)
+		{
+			return false;
+		}
+		std::scoped_lock lock(m_mutex);
+		const auto found = m_generations.find(MakeKey(assetId, requestGeneration));
+		if (found == m_generations.end() || found->second.record.state == ResidencyState::Released
+			|| found->second.record.state == ResidencyState::Failed)
+		{
+			return false;
+		}
+		for (std::size_t index = 0u; index < found->second.usageRetainCounts.size(); ++index)
+		{
+			if ((bits & (1u << index)) != 0u
+				&& found->second.usageRetainCounts[index] == std::numeric_limits<std::uint32_t>::max())
+			{
+				return false;
+			}
+		}
+		for (std::size_t index = 0u; index < found->second.usageRetainCounts.size(); ++index)
+		{
+			if ((bits & (1u << index)) != 0u)
+			{
+				++found->second.usageRetainCounts[index];
+			}
+		}
+		found->second.record.lastTouchedSequence = ++m_touchSequence;
+		found->second.record.lastDiagnostic = "Retained by an explicit animation consumer.";
+		RefreshRetentionStateLocked(found->second);
+		return true;
+	}
+
+	bool AnimationResidencyTracker::Release(
+		const TerraEngine::UUID& assetId,
+		std::uint64_t requestGeneration,
+		AnimationResidencyUsage usage)
+	{
+		const std::uint32_t bits = static_cast<std::uint32_t>(usage);
+		if (bits == 0u || (bits & ~0x1ffu) != 0u)
+		{
+			return false;
+		}
+		std::scoped_lock lock(m_mutex);
+		const auto found = m_generations.find(MakeKey(assetId, requestGeneration));
+		if (found == m_generations.end())
+		{
+			return false;
+		}
+		for (std::size_t index = 0u; index < found->second.usageRetainCounts.size(); ++index)
+		{
+			if ((bits & (1u << index)) != 0u && found->second.usageRetainCounts[index] == 0u)
+			{
+				return false;
+			}
+		}
+		for (std::size_t index = 0u; index < found->second.usageRetainCounts.size(); ++index)
+		{
+			if ((bits & (1u << index)) != 0u)
+			{
+				--found->second.usageRetainCounts[index];
+			}
+		}
+		found->second.record.lastTouchedSequence = ++m_touchSequence;
+		found->second.record.lastDiagnostic = "An animation consumer released its generation retain.";
+		RefreshRetentionStateLocked(found->second);
+		return true;
+	}
+
+	bool AnimationResidencyTracker::Touch(const TerraEngine::UUID& assetId, std::uint64_t requestGeneration)
+	{
+		std::scoped_lock lock(m_mutex);
+		const auto found = m_generations.find(MakeKey(assetId, requestGeneration));
+		if (found == m_generations.end() || found->second.record.state == ResidencyState::Released)
+		{
+			return false;
+		}
+		found->second.record.lastTouchedSequence = ++m_touchSequence;
+		return true;
+	}
+
+	bool AnimationResidencyTracker::Cancel(const TerraEngine::UUID& assetId, std::uint64_t requestGeneration)
+	{
+		std::scoped_lock lock(m_mutex);
+		const auto found = m_generations.find(MakeKey(assetId, requestGeneration));
+		if (found == m_generations.end() || found->second.record.state != ResidencyState::Loading)
+		{
+			return false;
+		}
+		found->second.record.state = ResidencyState::Released;
+		found->second.record.cancellationRequested = true;
+		found->second.record.lastTouchedSequence = ++m_touchSequence;
+		found->second.record.lastDiagnostic = "Cancelled before protected resource publication.";
+		++m_cancelledRequests;
+		return true;
+	}
+
+	bool AnimationResidencyTracker::Complete(
+		const TerraEngine::UUID& assetId,
+		std::uint64_t requestGeneration,
+		bool success)
+	{
+		std::scoped_lock lock(m_mutex);
+		const auto found = m_generations.find(MakeKey(assetId, requestGeneration));
+		const std::string assetKey = TerraEngine::ToHexString(assetId);
+		const auto latest = m_latestRequestedGeneration.find(assetKey);
+		if (found == m_generations.end() || found->second.record.state != ResidencyState::Loading
+			|| found->second.record.cancellationRequested
+			|| latest == m_latestRequestedGeneration.end() || latest->second != requestGeneration)
+		{
+			++m_staleCompletions;
+			return false;
+		}
+		found->second.record.lastTouchedSequence = ++m_touchSequence;
+		if (!success)
+		{
+			found->second.record.state = ResidencyState::Failed;
+			found->second.record.lastDiagnostic = "Load failed; last-known-good or reference-pose fallback remains authoritative.";
+			return true;
+		}
+
+		if (const auto previous = m_activeGeneration.find(assetKey); previous != m_activeGeneration.end())
+		{
+			if (const auto old = m_generations.find(MakeKey(assetId, previous->second)); old != m_generations.end())
+			{
+				old->second.record.activeGeneration = false;
+				RefreshRetentionStateLocked(old->second);
+			}
+		}
+		m_activeGeneration[assetKey] = requestGeneration;
+		found->second.record.activeGeneration = true;
+		found->second.record.state = ResidencyState::Idle;
+		found->second.record.lastDiagnostic = "Complete generation published at the protected residency boundary.";
+		RefreshRetentionStateLocked(found->second);
+		return true;
+	}
+
+	std::vector<AnimationResidencyDecision> AnimationResidencyTracker::ApplyBudget(std::uint64_t budgetBytes)
+	{
+		std::scoped_lock lock(m_mutex);
+		std::uint64_t residentBytes = 0u;
+		std::vector<std::pair<std::string, TrackedGeneration*>> candidates;
+		for (auto& [key, generation] : m_generations)
+		{
+			if (!IsResidentState(generation.record.state))
+			{
+				continue;
+			}
+			residentBytes = AddSaturated(residentBytes, generation.record.request.byteSize);
+			const bool retained = HasRetains(generation)
+				|| (generation.record.activeGeneration && RequiresAuthorityRetention(generation.record.request));
+			if (!retained)
+			{
+				candidates.emplace_back(key, &generation);
+			}
+		}
+		std::sort(candidates.begin(), candidates.end(), [](const auto& left, const auto& right) {
+			const AnimationResidencyRecord& lhs = left.second->record;
+			const AnimationResidencyRecord& rhs = right.second->record;
+			const std::uint8_t leftRank = PriorityReleaseRank(lhs.request.priority);
+			const std::uint8_t rightRank = PriorityReleaseRank(rhs.request.priority);
+			if (leftRank != rightRank) return leftRank < rightRank;
+			if (lhs.activeGeneration != rhs.activeGeneration) return !lhs.activeGeneration;
+			if (lhs.lastTouchedSequence != rhs.lastTouchedSequence) return lhs.lastTouchedSequence < rhs.lastTouchedSequence;
+			return left.first < right.first;
+		});
+		std::vector<AnimationResidencyDecision> decisions;
+		for (const auto& [key, generation] : candidates)
+		{
+			(void)key;
+			if (residentBytes <= budgetBytes) break;
+			const std::uint64_t bytes = generation->record.request.byteSize;
+			generation->record.state = ResidencyState::Released;
+			generation->record.lastTouchedSequence = ++m_touchSequence;
+			generation->record.lastDiagnostic = "Evicted under pressure; a safe fallback is required.";
+			if (generation->record.activeGeneration)
+			{
+				m_activeGeneration.erase(TerraEngine::ToHexString(generation->record.request.assetId));
+				generation->record.activeGeneration = false;
+			}
+			residentBytes = residentBytes > bytes ? residentBytes - bytes : 0u;
+			AnimationResidencyDecision decision = MakeDecisionLocked(*generation);
+			decision.accepted = true;
+			decisions.push_back(std::move(decision));
+		}
+		return decisions;
+	}
+
+	std::optional<AnimationResidencyDecision> AnimationResidencyTracker::Query(
+		const TerraEngine::UUID& assetId,
+		std::uint64_t requestGeneration) const
+	{
+		std::scoped_lock lock(m_mutex);
+		const auto found = m_generations.find(MakeKey(assetId, requestGeneration));
+		if (found == m_generations.end())
+		{
+			return std::nullopt;
+		}
+		return MakeDecisionLocked(found->second);
+	}
+
+	std::vector<AnimationResidencyRequest> AnimationResidencyTracker::Snapshot() const
+	{
+		const std::vector<AnimationResidencyRecord> records = SnapshotRecords();
+		std::vector<AnimationResidencyRequest> requests;
+		requests.reserve(records.size());
+		for (const AnimationResidencyRecord& record : records)
+		{
+			requests.push_back(record.request);
+		}
+		return requests;
+	}
+
+	std::vector<AnimationResidencyRecord> AnimationResidencyTracker::SnapshotRecords() const
+	{
+		std::scoped_lock lock(m_mutex);
+		std::vector<AnimationResidencyRecord> records;
+		records.reserve(m_generations.size());
+		for (const auto& [key, generation] : m_generations)
+		{
+			(void)key;
+			records.push_back(generation.record);
+		}
+		std::sort(records.begin(), records.end(), [](const auto& left, const auto& right) {
+			const std::string leftId = TerraEngine::ToHexString(left.request.assetId);
+			const std::string rightId = TerraEngine::ToHexString(right.request.assetId);
+			return leftId != rightId ? leftId < rightId
+				: left.request.requestGeneration < right.request.requestGeneration;
+		});
+		return records;
+	}
+
+	AnimationResidencyDiagnostics AnimationResidencyTracker::BuildDiagnostics(std::uint64_t budgetBytes) const
+	{
+		std::scoped_lock lock(m_mutex);
+		AnimationResidencyDiagnostics diagnostics;
+		diagnostics.budgetBytes = budgetBytes;
+		diagnostics.rejectedRequests = m_rejectedRequests;
+		diagnostics.cancelledRequests = m_cancelledRequests;
+		diagnostics.staleCompletions = m_staleCompletions;
+		constexpr std::array<ResidencyAssetType, 7u> types = {
+			ResidencyAssetType::Skeleton, ResidencyAssetType::AnimationClip,
+			ResidencyAssetType::AnimationController, ResidencyAssetType::AnimationMask,
+			ResidencyAssetType::RetargetProfile, ResidencyAssetType::MotionDatabase,
+			ResidencyAssetType::RagdollProfile
+		};
+		for (ResidencyAssetType type : types)
+		{
+			diagnostics.types.push_back(AnimationResidencyTypeDiagnostics{type});
+		}
+		for (const auto& [key, generation] : m_generations)
+		{
+			(void)key;
+			auto type = std::find_if(diagnostics.types.begin(), diagnostics.types.end(),
+				[&generation](const auto& item) { return item.assetType == generation.record.request.assetType; });
+			if (type == diagnostics.types.end()) continue;
+			++type->trackedGenerations;
+			if (generation.record.state == ResidencyState::Loading) ++type->loadingGenerations;
+			if (generation.record.state == ResidencyState::Failed) ++type->failedGenerations;
+			if (!IsResidentState(generation.record.state)) continue;
+			++type->residentGenerations;
+			type->residentBytes = AddSaturated(type->residentBytes, generation.record.request.byteSize);
+			diagnostics.residentBytes = AddSaturated(diagnostics.residentBytes, generation.record.request.byteSize);
+			const bool retained = HasRetains(generation)
+				|| (generation.record.activeGeneration && RequiresAuthorityRetention(generation.record.request));
+			if (retained)
+			{
+				++type->retainedGenerations;
+				diagnostics.protectedBytes = AddSaturated(diagnostics.protectedBytes, generation.record.request.byteSize);
+			}
+			else
+			{
+				diagnostics.evictableBytes = AddSaturated(diagnostics.evictableBytes, generation.record.request.byteSize);
+			}
+		}
+		diagnostics.overBudgetBytes = diagnostics.residentBytes > budgetBytes
+			? diagnostics.residentBytes - budgetBytes : 0u;
+		return diagnostics;
 	}
 }

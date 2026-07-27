@@ -35,6 +35,8 @@ public:
 	TerraEngine::Renderer::RenderCaptureResult ReadbackCapture(const TerraEngine::Renderer::RenderCaptureRequest& request) override;
 	std::vector<TerraEngine::Renderer::RenderCaptureResult> PollCaptureReadbacks() override;
 	TerraEngine::Renderer::BackendFrameBreakdown GetLatestBackendFrameBreakdown() const override;
+	TerraEngine::Renderer::AnimationGpuBackendExecutionSnapshot
+		GetLatestAnimationGpuBackendExecution() const override;
 	bool IsTaskShaderSupported() const override;
 	bool SupportsVirtualGeometryMeshShaderRoute() const override;
 	RenderStatsSnapshot GetLatestRenderStats(RenderViewType viewType) const override;

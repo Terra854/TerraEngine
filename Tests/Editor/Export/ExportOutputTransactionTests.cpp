@@ -9,11 +9,52 @@
 #include <future>
 #include <iterator>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 namespace TerraEngine::EditorTests {
 	namespace {
 		std::atomic<uint64_t> g_TransactionWorkspaceSequence = 0;
+
+		/// Allows the regression helpers themselves to prepare and inspect paths
+		/// beyond MAX_PATH without depending on the test runner's manifest.
+		std::filesystem::path NativeIoPath(const std::filesystem::path& path) {
+#if defined(_WIN32)
+			if(path.empty()) {
+				return path;
+			}
+			std::filesystem::path absolutePath = path;
+			if(!absolutePath.is_absolute()) {
+				std::error_code error;
+				absolutePath = std::filesystem::absolute(absolutePath, error);
+				if(error) {
+					return path;
+				}
+			}
+			std::filesystem::path preferred = absolutePath.lexically_normal();
+			preferred.make_preferred();
+			const std::filesystem::path::string_type& native = preferred.native();
+			constexpr std::wstring_view extendedPrefix = LR"(\\?\)";
+			constexpr std::wstring_view devicePrefix = LR"(\\.\)";
+			constexpr std::wstring_view uncPrefix = LR"(\\)";
+			if(native.starts_with(extendedPrefix) || native.starts_with(devicePrefix)) {
+				return preferred;
+			}
+
+			std::filesystem::path::string_type extended;
+			if(native.starts_with(uncPrefix)) {
+				extended.assign(LR"(\\?\UNC\)");
+				extended.append(native.substr(uncPrefix.size()));
+			} else {
+				extended.assign(extendedPrefix);
+				extended.append(native);
+			}
+			return std::filesystem::path(std::move(extended));
+#else
+			return path;
+#endif
+		}
 
 		/// Gives every test its own directory so concurrently-running writer tests
 		/// cannot remove another test's files.
@@ -44,13 +85,13 @@ namespace TerraEngine::EditorTests {
 			}
 
 			static void WriteText(const std::filesystem::path& path, const std::string& contents) {
-				std::filesystem::create_directories(path.parent_path());
-				std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+				std::filesystem::create_directories(NativeIoPath(path.parent_path()));
+				std::ofstream stream(NativeIoPath(path), std::ios::binary | std::ios::trunc);
 				stream << contents;
 			}
 
 			static std::string ReadText(const std::filesystem::path& path) {
-				std::ifstream stream(path, std::ios::binary);
+				std::ifstream stream(NativeIoPath(path), std::ios::binary);
 				return std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
 			}
 
@@ -302,6 +343,73 @@ namespace TerraEngine::EditorTests {
 			context.Expect(!std::filesystem::exists(transaction.ScratchDirectory() / "orphan.txt"), "Begin should replace stale same-run scratch with an empty directory.");
 			context.ExpectEqual(std::string("still good"), TempExportOutputWorkspace::ReadText(workspace.FinalDirectory() / "known-good.txt"), "Orphan cleanup must preserve the visible output.");
 			context.Expect(transaction.Rollback(error), error.empty() ? "The orphan-cleanup transaction should roll back." : error);
+		});
+
+		registry.Add("Editor.ExportOutputTransaction.DeepWindowsPathPublishesAndCleansAtomically", [](TestContext& context) {
+			const uint64_t sequence = g_TransactionWorkspaceSequence.fetch_add(1, std::memory_order_relaxed) + 1;
+			const std::filesystem::path cleanupRoot = std::filesystem::temp_directory_path()
+				/ "TerraEngineEditorTests" / "DeepExportOutputTransaction" / std::to_string(sequence);
+			std::filesystem::path deepParent = cleanupRoot;
+			const auto finalForParent = [](const std::filesystem::path& parent) {
+				return parent / "Baseline";
+			};
+			while(finalForParent(deepParent).native().size() < 300U) {
+				// Each component remains comfortably below the component limit while
+				// the overall path deterministically exceeds legacy MAX_PATH.
+				deepParent /= "nested-long-path-segment";
+			}
+			const std::filesystem::path finalDirectory = finalForParent(deepParent);
+			std::error_code cleanupError;
+			std::filesystem::remove_all(NativeIoPath(cleanupRoot), cleanupError);
+			TempExportOutputWorkspace::WriteText(finalDirectory / "known-good.txt", "known good");
+
+			ExportOutputTransaction successful(finalDirectory, "deep-success");
+			std::string error;
+			context.Expect(finalDirectory.native().size() >= 300U,
+				"The regression fixture must place lock metadata and transaction siblings beyond MAX_PATH.");
+			context.Expect(successful.Begin(error),
+				error.empty() ? "The deep transaction should acquire its lock and publish owner metadata." : error);
+			context.Expect(!TempExportOutputWorkspace::ReadText(successful.LockMetadataPath()).empty(),
+				"The extended lock path must expose complete owner metadata after acquisition.");
+			TempExportOutputWorkspace::WriteText(successful.StagingDirectory() / "Package/game.json", "runtime manifest");
+			context.Expect(successful.MarkStagedAndValidated(error),
+				error.empty() ? "The deep staging directory should cross the validation boundary." : error);
+			context.Expect(successful.Commit(error),
+				error.empty() ? "The deep validated output should publish transactionally." : error);
+			context.ExpectEqual(std::string("runtime manifest"),
+				TempExportOutputWorkspace::ReadText(finalDirectory / "Package/game.json"),
+				"The deep staged payload must become visible at the requested logical output path.");
+			context.ExpectEqual(std::string("known good"),
+				TempExportOutputWorkspace::ReadText(finalDirectory / "known-good.txt"),
+				"Deep overlay publication must preserve files absent from staging.");
+			context.Expect(!std::filesystem::exists(NativeIoPath(successful.StagingDirectory()))
+				&& !std::filesystem::exists(NativeIoPath(successful.ScratchDirectory()))
+				&& !std::filesystem::exists(NativeIoPath(successful.LockPath())),
+				"Successful deep publication must remove all private transaction paths.");
+
+			ExportOutputTransaction rejected(finalDirectory, "deep-rejected");
+			context.Expect(rejected.Begin(error),
+				error.empty() ? "A second deep transaction should prepare its isolated candidate." : error);
+			TempExportOutputWorkspace::WriteText(rejected.StagingDirectory() / "Package/game.json", "partial replacement");
+			context.Expect(rejected.MarkStagedAndValidated(error),
+				error.empty() ? "The rejected fixture must first reach the real validation boundary." : error);
+			std::filesystem::remove_all(NativeIoPath(rejected.StagingDirectory()), cleanupError);
+			context.Expect(!rejected.Commit(error),
+				"Removing the validated deep staging tree must reject publication.");
+			context.ExpectEqual(std::string("runtime manifest"),
+				TempExportOutputWorkspace::ReadText(finalDirectory / "Package/game.json"),
+				"A failed deep publication must leave the previous complete output byte-identical.");
+			context.Expect(rejected.Rollback(error),
+				error.empty() ? "The rejected deep transaction should release its lock and cleanup state." : error);
+			context.Expect(!std::filesystem::exists(NativeIoPath(rejected.StagingDirectory()))
+				&& !std::filesystem::exists(NativeIoPath(rejected.ScratchDirectory()))
+				&& !std::filesystem::exists(NativeIoPath(rejected.LockPath())),
+				"Rollback must remove every private path after a deep publication failure.");
+
+			cleanupError.clear();
+			std::filesystem::remove_all(NativeIoPath(cleanupRoot), cleanupError);
+			context.Expect(!cleanupError && !std::filesystem::exists(NativeIoPath(cleanupRoot)),
+				"The deep export transaction workspace must remain fully removable.");
 		});
 	}
 }

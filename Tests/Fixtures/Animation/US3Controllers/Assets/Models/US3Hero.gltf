@@ -1,0 +1,109 @@
+{
+	"asset": {
+		"version": "2.0",
+		"generator": "TerraEngine Spec 043 US3 controllers gate",
+		"extras": {
+			"sourceHandedness": "Right",
+			"sourceUpAxis": "Y",
+			"sourceUnitScale": 1.0
+		}
+	},
+	"buffers": [
+		{
+			"byteLength": 348,
+			"uri": "data:application/octet-stream;base64,AAAAvwAAAAAAAAAAAAAAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAD8AAIA/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAAAAAAABAAIAAAAAAIA/AAAAAAAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAAAAAAIA/zczMvQAAAAAAAAAAzczMPQAAAAAAAAAAAAAAAM3MTD4AAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAAAAAAAAACAPgAAAAAAAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAAAAAACAPwAAAAAAAIA/"
+		}
+	],
+	"bufferViews": [
+		{ "buffer": 0, "byteOffset": 0, "byteLength": 36 },
+		{ "buffer": 0, "byteOffset": 36, "byteLength": 36 },
+		{ "buffer": 0, "byteOffset": 72, "byteLength": 24 },
+		{ "buffer": 0, "byteOffset": 96, "byteLength": 24 },
+		{ "buffer": 0, "byteOffset": 120, "byteLength": 48 },
+		{ "buffer": 0, "byteOffset": 168, "byteLength": 6, "target": 34963 },
+		{ "buffer": 0, "byteOffset": 176, "byteLength": 64 },
+		{ "buffer": 0, "byteOffset": 240, "byteLength": 36 },
+		{ "buffer": 0, "byteOffset": 276, "byteLength": 8 },
+		{ "buffer": 0, "byteOffset": 284, "byteLength": 24 },
+		{ "buffer": 0, "byteOffset": 308, "byteLength": 32 },
+		{ "buffer": 0, "byteOffset": 340, "byteLength": 8 }
+	],
+	"accessors": [
+		{ "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [-0.5, 0.0, 0.0], "max": [0.5, 1.0, 0.0] },
+		{ "bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC3" },
+		{ "bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC2" },
+		{ "bufferView": 3, "componentType": 5123, "count": 3, "type": "VEC4" },
+		{ "bufferView": 4, "componentType": 5126, "count": 3, "type": "VEC4" },
+		{ "bufferView": 5, "componentType": 5123, "count": 3, "type": "SCALAR" },
+		{ "bufferView": 6, "componentType": 5126, "count": 1, "type": "MAT4" },
+		{ "bufferView": 7, "componentType": 5126, "count": 3, "type": "VEC3" },
+		{ "bufferView": 8, "componentType": 5126, "count": 2, "type": "SCALAR", "min": [0.0], "max": [1.0] },
+		{ "bufferView": 9, "componentType": 5126, "count": 2, "type": "VEC3" },
+		{ "bufferView": 10, "componentType": 5126, "count": 2, "type": "VEC4" },
+		{ "bufferView": 11, "componentType": 5126, "count": 2, "type": "SCALAR" }
+	],
+	"materials": [
+		{
+			"name": "US3HeroMaterial",
+			"pbrMetallicRoughness": {
+				"baseColorFactor": [0.15, 0.55, 0.9, 1.0],
+				"metallicFactor": 0.0,
+				"roughnessFactor": 0.6
+			}
+		}
+	],
+	"meshes": [
+		{
+			"name": "US3HeroBody",
+			"weights": [0.0],
+			"extras": { "targetNames": ["Smile"] },
+			"primitives": [
+				{
+					"attributes": {
+						"POSITION": 0,
+						"NORMAL": 1,
+						"TEXCOORD_0": 2,
+						"JOINTS_0": 3,
+						"WEIGHTS_0": 4
+					},
+					"indices": 5,
+					"material": 0,
+					"targets": [ { "POSITION": 7 } ]
+				}
+			]
+		}
+	],
+	"nodes": [
+		{ "name": "US3Hero", "mesh": 0, "skin": 0, "children": [1] },
+		{
+			"name": "RootJoint",
+			"translation": [0.0, 0.0, 0.0],
+			"extras": { "terraEngineSocket": "RootSocket" }
+		}
+	],
+	"skins": [
+		{ "name": "US3HeroSkeleton", "inverseBindMatrices": 6, "skeleton": 1, "joints": [1] }
+	],
+	"animations": [
+		{
+			"name": "US3HeroIdle",
+			"samplers": [
+				{ "input": 8, "output": 9, "interpolation": "LINEAR" },
+				{ "input": 8, "output": 10, "interpolation": "LINEAR" },
+				{ "input": 8, "output": 11, "interpolation": "LINEAR" }
+			],
+			"channels": [
+				{ "sampler": 0, "target": { "node": 1, "path": "translation" } },
+				{ "sampler": 1, "target": { "node": 1, "path": "rotation" } },
+				{ "sampler": 2, "target": { "node": 0, "path": "weights" } }
+			],
+			"extras": {
+				"events": [
+					{ "name": "US3ControllerMidpoint", "time": 0.5, "payload": "gate" }
+				]
+			}
+		}
+	],
+	"scenes": [ { "nodes": [0] } ],
+	"scene": 0
+}

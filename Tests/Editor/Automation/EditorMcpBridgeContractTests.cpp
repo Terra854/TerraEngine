@@ -48,14 +48,21 @@ namespace TerraEngine::EditorTests
 			context.Expect(!resources.empty(), "Bridge should expose resources.");
 			context.ExpectEqual(resources[0].value("uri", std::string()), std::string("terraengine://bridge/status"), "Status should be listed first.");
 			bool sawCaptureAvailability = false;
+			bool sawRecentApprovalResults = false;
 			for (const auto& resource : resources)
 			{
 				if (resource.value("uri", std::string()) == "terraengine://capture/availability")
 				{
 					sawCaptureAvailability = true;
 				}
+				if (resource.value("uri", std::string()) == "terraengine://approvals/recent")
+				{
+					sawRecentApprovalResults = true;
+				}
 			}
 			context.Expect(sawCaptureAvailability, "Bridge should list capture availability.");
+			context.Expect(sawRecentApprovalResults,
+				"Bridge should advertise retained approval results for stateless clients.");
 		});
 
 		registry.Add("Editor.MCP.Contract.StatusAndActivityResources", [](TestContext& context) {
@@ -79,6 +86,25 @@ namespace TerraEngine::EditorTests
 			context.Expect(bridge.ReadResource("terraengine://capture/availability").contains("supportedSources"), "Capture availability should have an empty-state response.");
 		});
 
+		registry.Add("Editor.MCP.Contract.AnimationCapabilityResourceFiltersTheDiscoveryEnvelope", [](TestContext& context) {
+			EditorMcpBridge bridge;
+			bridge.Initialize(nullptr);
+			const nlohmann::json resource = bridge.ReadResource("terraengine://animation/capabilities");
+			const nlohmann::json capabilities = resource.value("capabilities", nlohmann::json::array());
+			context.Expect(resource.value("ok", false), "Animation capability discovery should return a successful resource envelope.");
+			context.Expect(!capabilities.empty(), "Animation capability discovery must not silently return an empty list.");
+			for (const nlohmann::json& capability : capabilities)
+			{
+				context.ExpectEqual(capability.value("category", std::string{}), std::string("animation"),
+					"The animation-only capability resource must not leak tools from another provider.");
+				context.Expect(capability.contains("inputSchema") && capability.contains("resultSchema"),
+					"Every animation capability should retain its self-describing request and response schemas.");
+				context.Expect(capability.contains("limits") && capability.contains("approvalPolicy") && capability.contains("jobBehavior"),
+					"Every animation capability should retain limits, approval, and durable-job metadata.");
+			}
+			bridge.Shutdown();
+		});
+
 		registry.Add("Editor.MCP.Contract.AssetExportToolsAdvertiseSafetyMetadata", [](TestContext& context) {
 			EditorMcpBridge bridge;
 			bridge.Initialize(nullptr);
@@ -99,7 +125,13 @@ namespace TerraEngine::EditorTests
 				}
 				if (capability.value("name", "") == "export.start")
 				{
-					sawExportStart = capability.value("requiresApproval", false) && capability.value("mutationMode", "") == "export_mutation";
+					const nlohmann::json jobBehavior = capability.value("jobBehavior", nlohmann::json::object());
+					sawExportStart = capability.value("requiresApproval", false)
+						&& capability.value("mutationMode", "") == "export_mutation"
+						&& jobBehavior.value("returnsDurableJob", false)
+						&& jobBehavior.value("pollOperation", "") == "jobs.get"
+						&& jobBehavior.value("cancelOperation", "") == "export.cancel"
+						&& jobBehavior.value("reconnectReadable", false);
 				}
 				if (capability.value("name", "") == "asset.prepare_delete")
 				{
@@ -107,7 +139,7 @@ namespace TerraEngine::EditorTests
 				}
 			}
 			context.Expect(sawAssetImport, "asset.import should advertise project-scoped mutation behavior.");
-			context.Expect(sawExportStart, "export.start should advertise approval-gated export mutation behavior.");
+			context.Expect(sawExportStart, "export.start should advertise its approval-gated, reconnect-readable durable job behavior.");
 			context.Expect(sawAssetDeleteApproval, "asset.prepare_delete should advertise destructive approval behavior.");
 			context.Expect(!sawWriteModeTool, "MCP discovery should not advertise editor-owned write-mode changes.");
 		});

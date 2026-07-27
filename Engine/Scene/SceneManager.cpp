@@ -34,9 +34,91 @@
 #include "Components/LightComponent.h"
 #include "Components/MeshRenderComponent.h"
 #include "Components/SkyComponent.h"
+#include "Components/AnimatorComponent.h"
 
 namespace
 {
+	bool MigrateAnimatorPayloads(nlohmann::json& value)
+	{
+		if (value.is_array())
+		{
+			for (nlohmann::json& child : value)
+			{
+				if (!MigrateAnimatorPayloads(child)) return false;
+			}
+			return true;
+		}
+		if (!value.is_object()) return true;
+
+		if (auto components = value.find("components"); components != value.end() && components->is_object())
+		{
+			if (auto animator = components->find(std::string(AnimatorComponent::kComponentName)); animator != components->end())
+			{
+				if (!animator->is_object()) return false;
+				std::uint32_t schema = 0U;
+				try
+				{
+					schema = animator->value("schemaVersion", 0U);
+				}
+				catch (const nlohmann::json::exception&)
+				{
+					return false;
+				}
+				if (schema > TerraEngine::Animation::kAnimatorComponentSchemaVersion) return false;
+
+				// Version 0 used provisional names in early imported prefab fixtures.
+				// Copy only when the canonical field is absent so explicit new authoring
+				// always wins and the migration remains idempotent.
+				const auto renameIfAbsent = [&animator](std::string_view legacy, std::string_view canonical)
+				{
+					const std::string legacyKey(legacy);
+					const std::string canonicalKey(canonical);
+					if (!animator->contains(canonicalKey) && animator->contains(legacyKey))
+					{
+						(*animator)[canonicalKey] = (*animator)[legacyKey];
+					}
+					animator->erase(legacyKey);
+				};
+				renameIfAbsent("controller", "controllerAssetId");
+				renameIfAbsent("clipAssetId", "defaultClipAssetId");
+				renameIfAbsent("defaultClip", "defaultClipAssetId");
+				renameIfAbsent("skeletonAssetId", "skeletonOverrideAssetId");
+				renameIfAbsent("executionMode", "requestedMode");
+				renameIfAbsent("initialParametersJson", "initialParameters");
+				renameIfAbsent("parameters", "initialParameters");
+				if (!animator->contains("requestedMode"))
+				{
+					(*animator)["requestedMode"] = static_cast<std::uint32_t>(
+						TerraEngine::Animation::AnimationExecutionPolicy::Auto);
+				}
+				if (!animator->contains("defaultClipStartFrame"))
+				{
+					// Schema 2 adds a persistent direct-clip cursor. Older scenes
+					// retain their historical frame-zero behavior after migration.
+					(*animator)["defaultClipStartFrame"] = 0U;
+				}
+				if (!animator->contains("playAutomatically"))
+				{
+					// Schema 3 makes the historical runtime-autoplay behavior an
+					// explicit authored choice without changing older scenes.
+					(*animator)["playAutomatically"] = true;
+				}
+				if (auto parameters = animator->find("initialParameters"); parameters != animator->end() && parameters->is_object())
+				{
+					*parameters = parameters->dump();
+				}
+				(*animator)["schemaVersion"] = TerraEngine::Animation::kAnimatorComponentSchemaVersion;
+			}
+		}
+
+		for (auto& [key, child] : value.items())
+		{
+			if (key == "components") continue;
+			if (!MigrateAnimatorPayloads(child)) return false;
+		}
+		return true;
+	}
+
 	// LoadSceneRenderSettingsFromDocument is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	SceneRenderSettings LoadSceneRenderSettingsFromDocument(const SceneDocument& document)
 	{
@@ -201,6 +283,17 @@ TerraEngine::UUID SceneManager::LoadPreparedScene(
 		TERRAENGINE_LOG(LogLevel::Error, "Rejected an invalid prepared scene document for " << path);
 		return TerraEngine::EMPTY_UUID;
 	}
+	// Prepared packets may have been decoded by an older worker before the main
+	// thread learned the latest component schema. Migrate a private document copy
+	// and rebuild the value-only packet atomically so the two representations can
+	// never disagree during publication.
+	if (!MigrateAnimatorPayloads(sceneDocument))
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Rejected prepared scene with an unsupported AnimatorComponent schema: " << path);
+		return TerraEngine::EMPTY_UUID;
+	}
+	preparedScene = Serializer::PrepareSceneDecode(sceneDocument);
+	if (!preparedScene.accepted || preparedScene.cancelled) return TerraEngine::EMPTY_UUID;
 	const std::filesystem::path resolvedPath = ResolveScenePath(path);
 	const std::string key = NormalizeKey(resolvedPath);
 	const TerraEngine::UUID id = EnsureResourceId(key, sceneCache);
@@ -879,6 +972,13 @@ std::unique_ptr<SceneDocument> SceneManager::LoadSceneDocument(const std::filesy
 	catch (const nlohmann::json::parse_error& parseError)
 	{
 		TERRAENGINE_LOG(LogLevel::Error, "Scene file failed JSON parse at byte " << parseError.byte << ": " << parseError.what() << " Path: " << path);
+		return nullptr;
+	}
+	// Migration runs on the parsed value before it enters either cache. A failure
+	// discards the private document and leaves the currently active scene intact.
+	if (!MigrateAnimatorPayloads(parsed))
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Scene contains an unsupported or malformed AnimatorComponent schema: " << path);
 		return nullptr;
 	}
 

@@ -1,185 +1,241 @@
-// ContentMount.cpp — Contains the Content Mount file-specific types, helper functions, and module integration code implementation for mounted content registration, lookup, and byte-loading services.
-
-// ContentMount.cpp — Implementation of the TEPAK runtime content mount.
-//
-// This file integrates TEPAK's PackReader API into the engine runtime. The TEPAK
-// first-party source code is copied verbatim into Engine/Runtime/ContentMount/ so the
-// engine build is self-contained. TEPAK's third-party dependencies (zstd, xxhash)
-// remain sourced from TEPAK/External/ as submodules.
+// ContentMount.cpp - synchronized TEPAK reader publication and checked reads.
 
 #include "ContentMount.h"
 
 #include "Core/Logger/Logger.h"
-
 #include "TEPAK/PackReader.h"
 #include "TEPAK/PackTypes.h"
 
+#include <algorithm>
 #include <mutex>
-#include <stdexcept>
-#include <unordered_set>
+#include <shared_mutex>
+#include <unordered_map>
+#include <utility>
 
-// Hidden implementation — holds the TEPAK PackReader and associated state.
-struct ContentMount::Impl {
-	// The underlying TEPAK archive reader, opened via PackReader::Open().
+struct ContentMount::Impl final
+{
+	// Readers keep this shared lock through decompression. Mount and Unmount take
+	// the unique side, so neither can replace the PackReader during an active read.
+	mutable std::shared_mutex archiveMutex;
 	tepak::PackReader reader;
-
-	// Path to the currently mounted .tepak archive file on disk.
 	std::filesystem::path archivePath;
-
-	// Whether a valid archive is currently mounted and ready for reads.
+	std::unordered_map<std::string, MountedContentEntry> entries;
 	bool mounted = false;
-
-	// Quick-lookup set of normalised file paths inside the archive so
-	// Exists() calls are O(1) without rescanning metadata tables.
-	std::unordered_set<std::string> filePaths;
-
-	// Guard concurrent mount/unmount operations from different engine threads.
-	std::mutex mountMutex;
 };
 
-// --- Singleton ---
+namespace
+{
+	MountedContentEntry CopyEntry(const tepak::PackEntry& entry)
+	{
+		return {entry.normalizedPath, entry.assetClass, entry.logicalSize, entry.entryHash};
+	}
 
-ContentMount& ContentMount::Instance() {
+	template<typename ImplType>
+	MountedContentReadResult ReadCheckedLocked(
+		const ImplType& impl,
+		std::string_view logicalPath,
+		std::uint64_t offset,
+		std::optional<std::uint64_t> requestedSize,
+		std::uint64_t maximumReadBytes)
+	{
+		MountedContentReadResult result;
+		if(!impl.mounted)
+		{
+			result.status = ContentReadStatus::NotMounted;
+			return result;
+		}
+
+		const std::string normalized = ContentMount::NormalizeLogicalPath(logicalPath);
+		const auto found = impl.entries.find(normalized);
+		if(found == impl.entries.end())
+		{
+			result.status = ContentReadStatus::NotFound;
+			return result;
+		}
+		result.entry = found->second;
+
+		const std::uint64_t size = requestedSize.value_or(result.entry.logicalSize);
+		if(offset > result.entry.logicalSize || size > result.entry.logicalSize - offset)
+		{
+			result.status = ContentReadStatus::OutOfRange;
+			return result;
+		}
+		if(size > maximumReadBytes)
+		{
+			result.status = ContentReadStatus::ReadLimitExceeded;
+			return result;
+		}
+
+		try
+		{
+			result.bytes = impl.reader.ReadRange(normalized, offset, size);
+			if(result.bytes.size() != size)
+			{
+				result.bytes.clear();
+				result.status = ContentReadStatus::ArchiveError;
+				return result;
+			}
+			result.status = ContentReadStatus::Ok;
+		}
+		catch(const std::exception& exception)
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "ContentMount: checked read failed for '"
+				<< normalized << "': " << exception.what());
+			result.bytes.clear();
+			result.status = ContentReadStatus::ArchiveError;
+		}
+		return result;
+	}
+}
+
+ContentMount& ContentMount::Instance()
+{
 	static ContentMount instance;
 	return instance;
 }
 
-// --- Constructors / assignment ---
+ContentMount::ContentMount()
+	: m_impl(std::make_unique<Impl>())
+{
+}
 
-ContentMount::ContentMount() : m_impl(std::make_unique<Impl>()) {}
 ContentMount::~ContentMount() = default;
 ContentMount::ContentMount(ContentMount&&) noexcept = default;
 ContentMount& ContentMount::operator=(ContentMount&&) noexcept = default;
 
-// --- Public API ---
-
-bool ContentMount::Mount(const std::filesystem::path& archivePath) {
-	std::scoped_lock lock(m_impl->mountMutex);
-
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (m_impl->mounted) {
-		TERRAENGINE_LOG(LogLevel::Warning, "ContentMount: Unmounting existing archive before mounting a new one.");
-		Unmount();
+bool ContentMount::Mount(const std::filesystem::path& archivePath)
+{
+	// Candidate construction intentionally happens without the live-mount lock.
+	// Existing worker reads continue while the new archive validates and indexes.
+	tepak::PackReader candidateReader;
+	std::unordered_map<std::string, MountedContentEntry> candidateEntries;
+	try
+	{
+		candidateReader = tepak::PackReader::Open(archivePath);
+		for(const tepak::PackEntry& entry : candidateReader.GetEntries())
+		{
+			candidateEntries.emplace(entry.normalizedPath, CopyEntry(entry));
+		}
 	}
-
-	try {
-		m_impl->reader = tepak::PackReader::Open(archivePath);
-	}
-	catch (const std::exception& e) {
-		TERRAENGINE_LOG(LogLevel::Error, "ContentMount: Failed to open TEPAK archive at "
-			<< archivePath.string() << " — " << e.what());
+	catch(const std::exception& exception)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "ContentMount: failed to open TEPAK archive at "
+			<< archivePath.string() << ": " << exception.what());
 		return false;
 	}
 
-	// Build the quick-lookup set from all entries in the archive.
-	m_impl->filePaths.clear();
-	for (const auto& entry : m_impl->reader.GetEntries()) {
-		m_impl->filePaths.insert(entry.normalizedPath);
+	{
+		std::unique_lock lock(m_impl->archiveMutex);
+		m_impl->reader = std::move(candidateReader);
+		m_impl->entries = std::move(candidateEntries);
+		m_impl->archivePath = archivePath;
+		m_impl->mounted = true;
 	}
 
-	m_impl->archivePath = archivePath;
-	m_impl->mounted = true;
-
-	TERRAENGINE_LOG(LogLevel::Info, "ContentMount: Mounted TEPAK archive '"
-		<< archivePath.filename().string() << "' with "
-		<< m_impl->filePaths.size() << " entries.");
-
+	TERRAENGINE_LOG(LogLevel::Info, "ContentMount: mounted TEPAK archive '"
+		<< archivePath.filename().string() << "'.");
 	return true;
 }
 
-// ContentMount::IsMounted is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-bool ContentMount::IsMounted() const {
+bool ContentMount::IsMounted() const
+{
+	std::shared_lock lock(m_impl->archiveMutex);
 	return m_impl->mounted;
 }
 
-// ContentMount::GetArchivePath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-const std::filesystem::path& ContentMount::GetArchivePath() const {
+std::filesystem::path ContentMount::GetArchivePath() const
+{
+	std::shared_lock lock(m_impl->archiveMutex);
 	return m_impl->archivePath;
 }
 
-// ContentMount::NormalizeLogicalPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-std::string ContentMount::NormalizeLogicalPath(std::string_view logicalPath) {
+std::string ContentMount::NormalizeLogicalPath(std::string_view logicalPath)
+{
 	std::string normalized(logicalPath);
-	for (char& c : normalized) {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (c == '\\') c = '/';
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (c >= 'A' && c <= 'Z') c += ('a' - 'A');
+	for(char& character : normalized)
+	{
+		if(character == '\\') character = '/';
+		if(character >= 'A' && character <= 'Z')
+		{
+			character = static_cast<char>(character + ('a' - 'A'));
+		}
 	}
 
 	std::string_view lookup = normalized;
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	while (!lookup.empty() && lookup.front() == '/') {
-		lookup.remove_prefix(1);
-	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (lookup.starts_with("./")) {
-		lookup.remove_prefix(2);
-	}
-
+	while(!lookup.empty() && lookup.front() == '/') lookup.remove_prefix(1U);
+	while(lookup.starts_with("./")) lookup.remove_prefix(2U);
 	return std::string(lookup);
 }
 
-// ContentMount::Exists is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-bool ContentMount::Exists(std::string_view logicalPath) const {
-	if (!m_impl->mounted) {
-		return false;
-	}
-
-	return m_impl->filePaths.count(NormalizeLogicalPath(logicalPath)) > 0;
+bool ContentMount::Exists(std::string_view logicalPath) const
+{
+	return FindEntry(logicalPath).has_value();
 }
 
-// ContentMount::ReadAll is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-std::vector<uint8_t> ContentMount::ReadAll(std::string_view logicalPath) const {
-	if (!m_impl->mounted) {
-		TERRAENGINE_LOG(LogLevel::Error, "ContentMount: Cannot read — no archive is mounted.");
-		return {};
-	}
-
-	try {
-		// TEPAK's ReadAll returns a ByteBuffer (std::vector<uint8_t>) which is
-		// exactly what the engine resource managers expect.
-		return m_impl->reader.ReadAll(NormalizeLogicalPath(logicalPath));
-	}
-	catch (const std::exception& e) {
-		TERRAENGINE_LOG(LogLevel::Error, "ContentMount: Failed to read '"
-			<< std::string(logicalPath) << "' — " << e.what());
-		return {};
-	}
+std::optional<MountedContentEntry> ContentMount::FindEntry(std::string_view logicalPath) const
+{
+	std::shared_lock lock(m_impl->archiveMutex);
+	if(!m_impl->mounted) return std::nullopt;
+	const auto found = m_impl->entries.find(NormalizeLogicalPath(logicalPath));
+	if(found == m_impl->entries.end()) return std::nullopt;
+	return found->second;
 }
 
-// ContentMount::ReadRange is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-std::vector<uint8_t> ContentMount::ReadRange(std::string_view logicalPath, uint64_t offset, uint64_t size) const {
-	if (!m_impl->mounted) {
-		TERRAENGINE_LOG(LogLevel::Error, "ContentMount: Cannot read range — no archive is mounted.");
-		return {};
+std::vector<MountedContentEntry> ContentMount::SnapshotEntries() const
+{
+	std::shared_lock lock(m_impl->archiveMutex);
+	std::vector<MountedContentEntry> result;
+	if(!m_impl->mounted) return result;
+	result.reserve(m_impl->entries.size());
+	for(const auto& [path, entry] : m_impl->entries)
+	{
+		(void)path;
+		result.push_back(entry);
 	}
-
-	try {
-		return m_impl->reader.ReadRange(NormalizeLogicalPath(logicalPath), offset, size);
-	}
-	catch (const std::exception& e) {
-		TERRAENGINE_LOG(LogLevel::Error, "ContentMount: Failed to read range from '"
-			<< std::string(logicalPath) << "' — " << e.what());
-		return {};
-	}
+	std::sort(result.begin(), result.end(), [](const auto& left, const auto& right) {
+		return left.logicalPath < right.logicalPath;
+	});
+	return result;
 }
 
-// ContentMount::Unmount is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void ContentMount::Unmount() {
-	std::scoped_lock lock(m_impl->mountMutex);
+MountedContentReadResult ContentMount::ReadRangeChecked(
+	std::string_view logicalPath,
+	std::uint64_t offset,
+	std::uint64_t size,
+	std::uint64_t maximumReadBytes) const
+{
+	std::shared_lock lock(m_impl->archiveMutex);
+	return ReadCheckedLocked(*m_impl, logicalPath, offset, size, maximumReadBytes);
+}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!m_impl->mounted) {
-		return;
-	}
+MountedContentReadResult ContentMount::ReadAllChecked(
+	std::string_view logicalPath,
+	std::uint64_t maximumReadBytes) const
+{
+	std::shared_lock lock(m_impl->archiveMutex);
+	return ReadCheckedLocked(*m_impl, logicalPath, 0U, std::nullopt, maximumReadBytes);
+}
 
-	// Release the TEPAK reader by assigning a default-constructed instance.
-	// shared_ptr inside PackReader will drop the implementation and all memory.
+std::vector<std::uint8_t> ContentMount::ReadAll(std::string_view logicalPath) const
+{
+	return ReadAllChecked(logicalPath).bytes;
+}
+
+std::vector<std::uint8_t> ContentMount::ReadRange(
+	std::string_view logicalPath,
+	std::uint64_t offset,
+	std::uint64_t size) const
+{
+	return ReadRangeChecked(logicalPath, offset, size).bytes;
+}
+
+void ContentMount::Unmount()
+{
+	std::unique_lock lock(m_impl->archiveMutex);
+	if(!m_impl->mounted) return;
 	m_impl->reader = tepak::PackReader{};
-	m_impl->filePaths.clear();
+	m_impl->entries.clear();
 	m_impl->archivePath.clear();
 	m_impl->mounted = false;
-
-	TERRAENGINE_LOG(LogLevel::Info, "ContentMount: Unmounted TEPAK archive.");
+	TERRAENGINE_LOG(LogLevel::Info, "ContentMount: unmounted TEPAK archive.");
 }

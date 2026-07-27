@@ -30,6 +30,9 @@ namespace TerraEngine::AssetPipeline
 		// progressCallback may be invoked from a background import worker. The
 		// receiver must copy the values into thread-safe UI state before drawing.
 		std::function<void(float progress, std::string_view stage, std::string_view message)> progressCallback;
+		// Import workers poll this callback only at bounded transaction points. A
+		// true result rejects the staged generation before live outputs are exposed.
+		std::function<bool()> cancellationRequested;
 	};
 
 	[[nodiscard]] bool IsModelPackageSourceExtension(const std::filesystem::path& filePath);

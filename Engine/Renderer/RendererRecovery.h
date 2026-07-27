@@ -130,6 +130,15 @@ namespace TerraEngine::Renderer
 
 	TERRAENGINE_API bool IsRendererRecoveryActive(RendererRecoveryStateKind state);
 	TERRAENGINE_API bool CanSubmitNormalGpuWork(const RendererRecoverySnapshot& snapshot);
+	// These helpers validate a recovered renderer snapshot without creating one.
+	// They preserve the terminal device-loss policy: only the renderer owner may
+	// supply a later Active generation after it has recreated its own backend.
+	TERRAENGINE_API bool IsRendererGenerationCurrent(
+		const RendererRecoverySnapshot& snapshot,
+		std::uint64_t renderSessionGeneration);
+	TERRAENGINE_API bool CanAcceptRecoveredGpuResources(
+		const RendererRecoverySnapshot& previous,
+		const RendererRecoverySnapshot& recovered);
 	TERRAENGINE_API std::string ValidateRecoverySnapshot(const RendererRecoverySnapshot& snapshot);
 	TERRAENGINE_API RendererDeviceFailureStage ClassifyFailureStage(std::string_view operation);
 	TERRAENGINE_API RendererRecoveryAffectedView ClassifyAffectedView(std::string_view operation);

@@ -1,0 +1,5 @@
+{
+  "name": "Animated Export Startup",
+  "animationController": "controllers/hero.teanimctrl",
+  "runtimeContentOnly": true
+}

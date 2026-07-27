@@ -35,6 +35,40 @@ namespace TerraEngine::Renderer {
 		RenderViewType viewType = RenderViewType::Game;
 		glm::uvec2 targetSize = glm::uvec2(0u);
 		std::uint32_t outputId = 0u;
+		// View generation invalidates visibility only. It is deliberately absent
+		// from animation deformation records so moving one camera cannot rebuild a
+		// pose that every Scene, Game, shadow, reflection, and capture view shares.
+		std::uint64_t viewGeneration = 0u;
+	};
+
+	enum class AnimationRenderEvaluationSource : std::uint8_t
+	{
+		None = 0U,
+		CpuPose = 1U,
+		GpuVisual = 2U,
+		HybridAuthoritative = 3U,
+		SafeFallback = 4U
+	};
+
+	// One immutable deformation generation is referenced by every view that draws
+	// the object. Offsets are renderer-neutral packet indices, never Vulkan handles
+	// or CPU pointers, so worker plans can retain this record safely.
+	struct AnimationRenderGenerationRecord
+	{
+		std::uint64_t stableInstanceId = 0U;
+		std::uint64_t poseGeneration = 0U;
+		std::uint64_t morphGeneration = 0U;
+		std::uint64_t paletteGeneration = 0U;
+		std::uint64_t deformablePayloadGeneration = 0U;
+		std::uint64_t programGeneration = 0U;
+		std::uint64_t animationPlanGeneration = 0U;
+		std::uint64_t rendererGeneration = 0U;
+		std::uint32_t firstGpuWorkPacket = 0U;
+		std::uint32_t gpuWorkPacketCount = 0U;
+		std::uint32_t gpuStageMask = 0U;
+		AnimationRenderEvaluationSource source = AnimationRenderEvaluationSource::None;
+		bool complete = false;
+		bool safeFallback = false;
 	};
 
 	struct VirtualGeometryDrawRange
@@ -144,6 +178,8 @@ namespace TerraEngine::Renderer {
 		VirtualGeometryDrawRange virtualGeometry;
 		bool taskShaderCullingEnabled = true;
 		bool usingFallback = false;
+		AnimationRenderGenerationRecord animation;
+		RenderInvalidationGenerationRecord invalidation;
 	};
 
 	struct VirtualGeometryViewDrawRecord
@@ -164,6 +200,9 @@ namespace TerraEngine::Renderer {
 		RenderViewType viewType = RenderViewType::Game;
 		glm::uvec2 targetSize = glm::uvec2(0u);
 		std::uint32_t outputId = 0u;
+		// This copied token invalidates only the camera-owned visibility result.
+		// Deformation generations remain shared by every view of the renderable.
+		std::uint64_t viewGeneration = 0U;
 		VirtualGeometryDebugVisualizationMode debugVisualizationMode = VirtualGeometryDebugVisualizationMode::None;
 		bool shadowPass = false;
 		bool exportRuntime = false;
@@ -298,6 +337,9 @@ namespace TerraEngine::Renderer {
 	TERRAENGINE_API void SortSnapshotDeterministically(RenderFrameSnapshot& snapshot);
 	TERRAENGINE_API bool SnapshotUsesOnlyResolvedResources(const RenderFrameSnapshot& snapshot);
 	TERRAENGINE_API bool SnapshotContainsLiveMutableState(const RenderFrameSnapshot& snapshot);
+	TERRAENGINE_API bool ValidateAnimationRenderGenerationRecord(const AnimationRenderGenerationRecord& record);
+	TERRAENGINE_API std::uint64_t BuildAnimationRenderGenerationHash(const AnimationRenderGenerationRecord& record);
+	TERRAENGINE_API std::uint64_t BuildRenderInvalidationGenerationHash(const RenderInvalidationGenerationRecord& record);
 	TERRAENGINE_API std::uint64_t BuildSnapshotDeterministicHash(const RenderFrameSnapshot& snapshot);
 	TERRAENGINE_API std::uint64_t EstimateSnapshotWorkload(const RenderFrameSnapshot& snapshot);
 	TERRAENGINE_API VirtualGeometryViewSelectionState BuildVirtualGeometryViewSelectionState(const RenderFrameViewRequest& view, const std::vector<RenderFrameRenderableRecord>& renderables);

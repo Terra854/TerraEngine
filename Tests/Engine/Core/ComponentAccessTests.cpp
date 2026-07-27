@@ -207,5 +207,37 @@ namespace TerraEngine::Tests {
 			context.Expect(objects.GetComponent<Transform>(object) == restored, "Object component get should return the restored component.");
 			objects.clear();
 		});
+
+		registry.Add("Engine.ComponentAccess.ReflectedTransformWritesPublishSpatialRevisions", [](TestContext& context) {
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+			const Object object = objects.createObject("Reflected Transform Target");
+			const std::uint64_t transformRevisionBefore =
+				objects.GetObjectTransformRevision(object);
+			const std::uint64_t spatialRevisionBefore = objects.GetSpatialRevision();
+
+			bool propertyWritten = false;
+			{
+				std::lock_guard lock(ComponentAccessRegistryMutex());
+				auto transformAccess = ComponentAccessRegistry().find(
+					std::string(Transform::kComponentName));
+				if(transformAccess != ComponentAccessRegistry().end()) {
+					propertyWritten = transformAccess->second.entitySetter(
+						objects.getRegistry(),
+						object.EntityId(),
+						"Position",
+						glm::vec3{7.0F, 2.0F, -3.0F});
+				}
+			}
+
+			const Transform* transform = objects.GetComponent<Transform>(object);
+			context.Expect(propertyWritten && transform != nullptr
+				&& transform->position == glm::vec3(7.0F, 2.0F, -3.0F),
+				"The shared reflected setter must apply the Transform value used by inspector, automation, and managed runtime callers.");
+			context.Expect(objects.GetObjectTransformRevision(object) > transformRevisionBefore
+				&& objects.GetSpatialRevision() > spatialRevisionBefore,
+				"A reflected Transform write must invalidate render, hierarchy, and bounds snapshots without requiring a caller-specific dirty notification.");
+			objects.clear();
+		});
 	}
 }

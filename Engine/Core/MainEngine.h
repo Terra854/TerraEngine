@@ -28,6 +28,7 @@
 #include "ThreadPool/ThreadPool.h"
 #include "Timer.h"
 #include "Runtime/ExportStartupCoordinator.h"
+#include "Runtime/Validation/AnimationParityValidator.h"
 
 // Primary engine facade exposed to the launcher and other executables. The
 // TERRAENGINE_API macro ensures the class is exported from the shared library
@@ -57,10 +58,18 @@ class TERRAENGINE_API Engine {
 		// uses this before Initialize() so parity validation never creates a window
 		// or render device merely to run a deterministic physics fixture.
 		void ConfigureHeadlessPhysicsValidation();
+		// Starts the same no-window/no-renderer lifecycle for animation export and
+		// recovery validation. The existing physics name remains for compatibility;
+		// CPU animation fallback is selected because RenderSystem is intentionally
+		// absent from the resulting scheduler.
+		void ConfigureHeadlessCpuFallback();
 		// Executes the already-loaded startup scene through the same PhysicsSystem
 		// and scheduler/flush boundary used by ordinary frames. Callers own normal
 		// engine shutdown after this bounded validation operation returns.
 		TerraEngine::Runtime::PhysicsInvariantReport RunPhysicsInvariantFixture();
+		// Runs a bounded fixed-tick animation parity capture on the already initialized scene.
+		TerraEngine::Runtime::AnimationParityReport RunAnimationParityFixture(
+			const TerraEngine::Runtime::AnimationParityValidationOptions& options = {});
 
 		template <typename T>
 		// GetSystem is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

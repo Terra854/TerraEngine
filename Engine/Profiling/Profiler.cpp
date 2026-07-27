@@ -2,6 +2,7 @@
 
 #include "Profiling/Profiler.h"
 
+#include "Animation/Diagnostics/AnimationDiagnostics.h"
 #include "Core/Scheduling/FrameWorkload.h"
 #include "Physics/PhysicsDiagnostics.h"
 #include "Renderer/Graph/RenderDiagnostics.h"
@@ -67,6 +68,40 @@ void AddOrReplaceMetric(ProfilerModuleSummary& module, std::string name, double 
 	module.metrics.push_back({std::move(name), value, std::move(unit)});
 }
 
+// MaterializeAnimationDiagnosticsMetrics restores the established capture
+// schema on an outward-facing copy. Retained dormant frames deliberately keep
+// these facts typed so recording them never allocates metric strings or scans
+// the module metric vector.
+void MaterializeAnimationDiagnosticsMetrics(ProfilerFrameRecord& frame)
+{
+	if (!frame.animationDiagnostics.has_value())
+	{
+		return;
+	}
+
+	ProfilerModuleSummary* module = FindModule(frame.moduleSummaries, ProfilerModuleId::CpuEngine);
+	if (module == nullptr)
+	{
+		return;
+	}
+
+	const ProfilerAnimationDiagnosticsFacts& facts = *frame.animationDiagnostics;
+	AddOrReplaceMetric(*module, "Animation.SchedulerMembershipChecks", static_cast<double>(facts.schedulerMembershipChecks), "count");
+	AddOrReplaceMetric(*module, "Animation.Dormant", facts.dormant ? 1.0 : 0.0, "boolean");
+	AddOrReplaceMetric(*module, "Animation.BaselineIdentityMatched", facts.baselineIdentityMatched ? 1.0 : 0.0, "boolean");
+}
+
+// MaterializeAnimationDiagnosticsMetrics makes a public document self
+// contained before it is returned or saved, without changing compact retained
+// frames in the profiler session.
+void MaterializeAnimationDiagnosticsMetrics(ProfilerCaptureDocument& document)
+{
+	for (ProfilerFrameRecord& frame : document.frames)
+	{
+		MaterializeAnimationDiagnosticsMetrics(frame);
+	}
+}
+
 ProfilerTimingStreamSample MakeTimingSample(
 	std::string id,
 	std::string label,
@@ -100,6 +135,120 @@ TelemetryDuration UnavailableTelemetryDuration(std::string reason)
 std::uint64_t MillisecondsToNanoseconds(double milliseconds)
 {
 	return static_cast<std::uint64_t>(std::max(0.0, milliseconds) * 1000000.0 + 0.5);
+}
+
+// SetAnimationStage converts the existing millisecond diagnostics clock into
+// the profiler's integer nanosecond representation. The source snapshot has
+// already been validated, so a zero is still an available measurement.
+void SetAnimationStage(
+	ProfilerAnimationFrameSummary& summary,
+	ProfilerAnimationStage stage,
+	double milliseconds)
+{
+	ProfilerAnimationStageTiming& timing = summary.stageTimings[static_cast<std::size_t>(stage)];
+	timing.nanoseconds = MillisecondsToNanoseconds(milliseconds);
+	timing.available = true;
+	timing.sampled = false;
+}
+
+// MakeAnimationTelemetry adapts the foundation diagnostics snapshot without
+// inventing counters that its producer does not expose. Availability bits name
+// the complete counter families present in this older summary contract.
+ProfilerAnimationFrameTelemetry MakeAnimationTelemetry(
+	const TerraEngine::Animation::AnimationDiagnosticsSnapshot& snapshot)
+{
+	const TerraEngine::Animation::AnimationDiagnosticsCounters& counters = snapshot.counters;
+	ProfilerAnimationFrameTelemetry telemetry;
+	ProfilerAnimationFrameSummary& summary = telemetry.summary;
+	summary.availableEvidenceMask = kProfilerAnimationVolumeEvidence | kProfilerAnimationTransferEvidence;
+	summary.schedulerMembershipChecks = counters.schedulerMembershipChecks;
+	summary.activeAnimators = counters.activeAnimators;
+	summary.evaluatedAnimators = counters.evaluatedAnimators;
+	summary.cpuAnimators = counters.cpuFallbackAnimators;
+	summary.gpuVisualAnimators = counters.gpuVisualAnimators;
+	summary.hybridAnimators = counters.hybridAuthoritativeAnimators;
+	summary.workerJobs = counters.workerJobs;
+	summary.sampledJoints = counters.cpuSampledJoints;
+	summary.gpuEvaluatedJoints = counters.gpuEvaluatedJoints;
+	summary.gpuBatches = counters.gpuBatches;
+	summary.gpuTransferBytes = counters.gpuTransferBytes;
+	summary.gpuReadbackBytes = counters.gpuReadbackBytes;
+	summary.completePoseReadbackBytes = counters.completePoseReadbackBytes;
+	summary.boundedMetadataReadbackBytes = counters.boundedMetadataReadbackBytes;
+	summary.gpuWaitCount = counters.gpuWaits;
+	summary.residencyHits = counters.residencyHits;
+	summary.residencyMisses = counters.residencyMisses;
+	SetAnimationStage(summary, ProfilerAnimationStage::WorkPlanning, snapshot.timings.preparationMs);
+	SetAnimationStage(summary, ProfilerAnimationStage::CpuGraphEvaluation, snapshot.timings.evaluationMs);
+	SetAnimationStage(summary, ProfilerAnimationStage::CpuAuthority, snapshot.timings.cpuAuthorityMs);
+	SetAnimationStage(summary, ProfilerAnimationStage::GpuPlanning, snapshot.timings.gpuPlanningMs);
+	SetAnimationStage(summary, ProfilerAnimationStage::GpuEvaluation, snapshot.timings.gpuExecutionMs);
+	SetAnimationStage(summary, ProfilerAnimationStage::Deformation, snapshot.timings.deformationMs);
+	SetAnimationStage(summary, ProfilerAnimationStage::ProtectedPublication, snapshot.timings.publicationMs);
+	SetAnimationStage(summary, ProfilerAnimationStage::Presentation, snapshot.timings.presentationMs);
+	return telemetry;
+}
+
+bool ShouldRetainAnimationDetails(
+	const ProfilerCaptureSettings& captureSettings,
+	std::uint64_t frameIndex)
+{
+	if (captureSettings.detailLevel == ProfilerCaptureDetailLevel::Detailed)
+	{
+		return true;
+	}
+	if (captureSettings.detailLevel == ProfilerCaptureDetailLevel::Sampled)
+	{
+		return frameIndex % std::max(1U, captureSettings.sampleIntervalFrames) == 0U;
+	}
+	return false;
+}
+
+// AddAnimationTelemetryMetrics exposes the aggregate counters to existing UI
+// consumers. The typed record remains authoritative for availability and stage
+// attribution; these names are presentation aliases, not acceptance evidence.
+void AddAnimationTelemetryMetrics(
+	ProfilerModuleSummary& module,
+	const ProfilerAnimationFrameSummary& summary)
+{
+	AddOrReplaceMetric(module, "Animation.AvailableEvidenceMask", static_cast<double>(summary.availableEvidenceMask), "bitmask");
+	AddOrReplaceMetric(module, "Animation.ActiveAnimators", static_cast<double>(summary.activeAnimators), "count");
+	AddOrReplaceMetric(module, "Animation.EvaluatedAnimators", static_cast<double>(summary.evaluatedAnimators), "count");
+	AddOrReplaceMetric(module, "Animation.CpuAnimators", static_cast<double>(summary.cpuAnimators), "count");
+	AddOrReplaceMetric(module, "Animation.GpuVisualAnimators", static_cast<double>(summary.gpuVisualAnimators), "count");
+	AddOrReplaceMetric(module, "Animation.HybridAuthoritativeAnimators", static_cast<double>(summary.hybridAnimators), "count");
+	AddOrReplaceMetric(module, "Animation.WorkerCount", static_cast<double>(summary.workerCount), "count");
+	AddOrReplaceMetric(module, "Animation.WorkerJobs", static_cast<double>(summary.workerJobs), "count");
+	AddOrReplaceMetric(module, "Animation.WorkerUsefulItems", static_cast<double>(summary.workerUsefulItems), "count");
+	AddOrReplaceMetric(module, "Animation.WorkerBusy", static_cast<double>(summary.workerBusyNanoseconds), "nanoseconds");
+	AddOrReplaceMetric(module, "Animation.WorkerCapacity", static_cast<double>(summary.workerCapacityNanoseconds), "nanoseconds");
+	AddOrReplaceMetric(module, "Animation.SampledJoints", static_cast<double>(summary.sampledJoints), "count");
+	AddOrReplaceMetric(module, "Animation.BlendedTracks", static_cast<double>(summary.blendedTracks), "count");
+	AddOrReplaceMetric(module, "Animation.EvaluatedGraphNodes", static_cast<double>(summary.evaluatedGraphNodes), "count");
+	AddOrReplaceMetric(module, "Animation.MotionMatchingCandidates", static_cast<double>(summary.motionMatchingCandidates), "count");
+	AddOrReplaceMetric(module, "Animation.IkChains", static_cast<double>(summary.ikChains), "count");
+	AddOrReplaceMetric(module, "Animation.RagdollBodies", static_cast<double>(summary.ragdollBodies), "count");
+	AddOrReplaceMetric(module, "Animation.GpuEvaluatedJoints", static_cast<double>(summary.gpuEvaluatedJoints), "count");
+	AddOrReplaceMetric(module, "Animation.GpuBatches", static_cast<double>(summary.gpuBatches), "count");
+	AddOrReplaceMetric(module, "Animation.FrameArenaBytes", static_cast<double>(summary.frameArenaBytes), "bytes");
+	AddOrReplaceMetric(module, "Animation.FrameArenaHighWaterBytes", static_cast<double>(summary.frameArenaHighWaterBytes), "bytes");
+	AddOrReplaceMetric(module, "Animation.PoseCacheBytes", static_cast<double>(summary.poseCacheBytes), "bytes");
+	AddOrReplaceMetric(module, "Animation.PoseCacheHighWaterBytes", static_cast<double>(summary.poseCacheHighWaterBytes), "bytes");
+	AddOrReplaceMetric(module, "Animation.GpuResidentBytes", static_cast<double>(summary.gpuResidentBytes), "bytes");
+	AddOrReplaceMetric(module, "Animation.GpuResidentHighWaterBytes", static_cast<double>(summary.gpuResidentHighWaterBytes), "bytes");
+	AddOrReplaceMetric(module, "Animation.GpuTransferBytes", static_cast<double>(summary.gpuTransferBytes), "bytes");
+	AddOrReplaceMetric(module, "Animation.GpuReadbackBytes", static_cast<double>(summary.gpuReadbackBytes), "bytes");
+	AddOrReplaceMetric(module, "Animation.CompletePoseReadbackBytes", static_cast<double>(summary.completePoseReadbackBytes), "bytes");
+	AddOrReplaceMetric(module, "Animation.BoundedMetadataReadbackBytes", static_cast<double>(summary.boundedMetadataReadbackBytes), "bytes");
+	AddOrReplaceMetric(module, "Animation.GpuWaits", static_cast<double>(summary.gpuWaitCount), "count");
+	AddOrReplaceMetric(module, "Animation.SchedulerWaits", static_cast<double>(summary.schedulerWaitCount), "count");
+	AddOrReplaceMetric(module, "Animation.ProtectedBoundaryStalls", static_cast<double>(summary.protectedBoundaryStallCount), "count");
+	AddOrReplaceMetric(module, "Animation.PoseCacheHits", static_cast<double>(summary.poseCacheHits), "count");
+	AddOrReplaceMetric(module, "Animation.PoseCacheMisses", static_cast<double>(summary.poseCacheMisses), "count");
+	AddOrReplaceMetric(module, "Animation.ClipCacheHits", static_cast<double>(summary.clipCacheHits), "count");
+	AddOrReplaceMetric(module, "Animation.ClipCacheMisses", static_cast<double>(summary.clipCacheMisses), "count");
+	AddOrReplaceMetric(module, "Animation.ResidencyHits", static_cast<double>(summary.residencyHits), "count");
+	AddOrReplaceMetric(module, "Animation.ResidencyMisses", static_cast<double>(summary.residencyMisses), "count");
 }
 
 // Viewport CPU timing must come from profiler scopes instead of renderer frame
@@ -219,7 +368,9 @@ ProfilerCaptureDocument Profiler::FinishRecording()
 	state = ProfilerSessionState::Finalizing;
 	statusText = "Finalizing capture";
 	UpdateFastRecordingFlagsLocked();
-	return document;
+	ProfilerCaptureDocument snapshot = document;
+	MaterializeAnimationDiagnosticsMetrics(snapshot);
+	return snapshot;
 }
 
 // Profiler::Clear is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -453,6 +604,166 @@ void Profiler::EndFrame()
 	TrimFrameBuffer(document.frames, settings);
 	currentFrame.reset();
 	UpdateFastRecordingFlagsLocked();
+}
+
+void Profiler::RecordDormantAnimationFacts(std::uint64_t schedulerMembershipChecks)
+{
+	// Most frames are not being captured. The fast flag keeps a static project
+	// out of the profiler mutex entirely during ordinary play.
+	if(!frameRecordingActive.load(std::memory_order_acquire))
+	{
+		return;
+	}
+	if(schedulerMembershipChecks > 1U)
+	{
+		// Dormant diagnostics permit at most the single bounded membership check.
+		// Reject contradictory caller input instead of retaining misleading proof.
+		return;
+	}
+
+	std::lock_guard<std::mutex> lock(mutex);
+	if(state != ProfilerSessionState::Recording || !currentFrame.has_value())
+	{
+		return;
+	}
+
+	// Dormancy is established by the scheduler's zero membership result. Store
+	// only the fixed typed facts; public snapshot APIs materialize the established
+	// three metrics later without retaining a dynamic per-frame diagnostics tree.
+	currentFrame->animationDiagnostics = ProfilerAnimationDiagnosticsFacts{
+		schedulerMembershipChecks,
+		true,
+		true};
+}
+
+void Profiler::RecordAnimationTelemetry(const ProfilerAnimationFrameTelemetry& telemetry)
+{
+	// Validation can inspect bounded copied detail without taking the profiler
+	// mutex. Idle sessions still leave before that work or any allocation.
+	if (!frameRecordingActive.load(std::memory_order_acquire)
+		|| !ValidateProfilerAnimationFrameTelemetry(telemetry))
+	{
+		return;
+	}
+
+	std::lock_guard<std::mutex> lock(mutex);
+	if (state != ProfilerSessionState::Recording || !currentFrame.has_value())
+	{
+		return;
+	}
+
+	// Copy the fixed summary on every active captured frame. Per-instance rows
+	// obey the capture's existing bounded detail policy and are never retained by
+	// Aggregate mode or by an off-cadence Sampled frame.
+	auto retained = std::make_shared<ProfilerAnimationFrameTelemetry>();
+	retained->summary = telemetry.summary;
+	if (ShouldRetainAnimationDetails(settings, currentFrame->frameIndex))
+	{
+		retained->details = telemetry.details;
+	}
+
+	ProfilerModuleSummary* module = FindModule(currentFrame->moduleSummaries, ProfilerModuleId::CpuEngine);
+	if (module != nullptr)
+	{
+		AddAnimationTelemetryMetrics(*module, retained->summary);
+	}
+	currentFrame->animationDiagnostics = ProfilerAnimationDiagnosticsFacts{
+		retained->summary.schedulerMembershipChecks,
+		false,
+		true};
+	currentFrame->animationTelemetry = std::move(retained);
+}
+
+void Profiler::RecordAnimationDiagnostics(const TerraEngine::Animation::AnimationDiagnosticsSnapshot& snapshot)
+{
+	// The atomic flag avoids the profiler mutex and every dynamic metric string
+	// allocation when no capture is active, including the zero-animator path.
+	if (!frameRecordingActive.load(std::memory_order_acquire)
+		|| !TerraEngine::Animation::ValidateAnimationDiagnosticsSnapshot(snapshot))
+	{
+		return;
+	}
+	std::optional<ProfilerAnimationFrameTelemetry> activeTelemetry;
+	if (!snapshot.dormant)
+	{
+		activeTelemetry.emplace(MakeAnimationTelemetry(snapshot));
+		if (!ValidateProfilerAnimationFrameTelemetry(*activeTelemetry))
+		{
+			return;
+		}
+	}
+
+	std::lock_guard<std::mutex> lock(mutex);
+	if (state != ProfilerSessionState::Recording || !currentFrame.has_value())
+	{
+		return;
+	}
+	// A dormant frame retains only the three facts needed to prove that animation
+	// performed its bounded membership check. Copying every zero-valued active
+	// counter into a long detailed capture would multiply string/vector storage by
+	// the frame count and make an otherwise static project pay animation memory.
+	const auto& counters = snapshot.counters;
+	currentFrame->animationDiagnostics = ProfilerAnimationDiagnosticsFacts{
+		counters.schedulerMembershipChecks,
+		snapshot.dormant,
+		true};
+	if (snapshot.dormant)
+	{
+		return;
+	}
+	// The diagnostics adapter contains aggregate evidence only. A producer that
+	// has opt-in per-instance rows uses RecordAnimationTelemetry at the same
+	// protected boundary instead.
+	currentFrame->animationTelemetry =
+		std::make_shared<const ProfilerAnimationFrameTelemetry>(std::move(*activeTelemetry));
+
+	ProfilerModuleSummary* module = FindModule(currentFrame->moduleSummaries, ProfilerModuleId::CpuEngine);
+	if (module == nullptr)
+	{
+		return;
+	}
+	AddAnimationTelemetryMetrics(*module, currentFrame->animationTelemetry->summary);
+
+	// Active captures retain the full fixed summary. Detailed per-instance history
+	// remains a separate opt-in path and cannot grow this bounded metric set.
+	AddOrReplaceMetric(*module, "Animation.SchedulerMembershipChecks", static_cast<double>(counters.schedulerMembershipChecks), "count");
+	AddOrReplaceMetric(*module, "Animation.Dormant", 0.0, "boolean");
+	AddOrReplaceMetric(*module, "Animation.BaselineIdentityMatched", 1.0, "boolean");
+	AddOrReplaceMetric(*module, "Animation.ActiveAnimators", static_cast<double>(counters.activeAnimators), "count");
+	AddOrReplaceMetric(*module, "Animation.EvaluatedAnimators", static_cast<double>(counters.evaluatedAnimators), "count");
+	AddOrReplaceMetric(*module, "Animation.WorkerJobs", static_cast<double>(counters.workerJobs), "count");
+	AddOrReplaceMetric(*module, "Animation.TransientAllocations", static_cast<double>(counters.transientAllocations), "count");
+	AddOrReplaceMetric(*module, "Animation.PoseAllocations", static_cast<double>(counters.poseAllocations), "count");
+	AddOrReplaceMetric(*module, "Animation.ResidencyRequests", static_cast<double>(counters.residencyRequests), "count");
+	AddOrReplaceMetric(*module, "Animation.GpuDispatches", static_cast<double>(counters.gpuDispatches), "count");
+	AddOrReplaceMetric(*module, "Animation.GpuUploadBytes", static_cast<double>(counters.gpuUploadBytes), "bytes");
+	AddOrReplaceMetric(*module, "Animation.GpuReadbacks", static_cast<double>(counters.gpuReadbacks), "count");
+	AddOrReplaceMetric(*module, "Animation.GpuWaits", static_cast<double>(counters.gpuWaits), "count");
+	AddOrReplaceMetric(*module, "Animation.GpuVisualAnimators", static_cast<double>(counters.gpuVisualAnimators), "count");
+	AddOrReplaceMetric(*module, "Animation.HybridAuthoritativeAnimators", static_cast<double>(counters.hybridAuthoritativeAnimators), "count");
+	AddOrReplaceMetric(*module, "Animation.CpuFallbackAnimators", static_cast<double>(counters.cpuFallbackAnimators), "count");
+	AddOrReplaceMetric(*module, "Animation.CpuSampledJoints", static_cast<double>(counters.cpuSampledJoints), "count");
+	AddOrReplaceMetric(*module, "Animation.GpuEvaluatedJoints", static_cast<double>(counters.gpuEvaluatedJoints), "count");
+	AddOrReplaceMetric(*module, "Animation.GpuBatches", static_cast<double>(counters.gpuBatches), "count");
+	AddOrReplaceMetric(*module, "Animation.GpuTransferBytes", static_cast<double>(counters.gpuTransferBytes), "bytes");
+	AddOrReplaceMetric(*module, "Animation.GpuReadbackBytes", static_cast<double>(counters.gpuReadbackBytes), "bytes");
+	AddOrReplaceMetric(*module, "Animation.CompletePoseReadbackBytes", static_cast<double>(counters.completePoseReadbackBytes), "bytes");
+	AddOrReplaceMetric(*module, "Animation.BoundedMetadataReadbackBytes", static_cast<double>(counters.boundedMetadataReadbackBytes), "bytes");
+	AddOrReplaceMetric(*module, "Animation.ResidencyHits", static_cast<double>(counters.residencyHits), "count");
+	AddOrReplaceMetric(*module, "Animation.ResidencyMisses", static_cast<double>(counters.residencyMisses), "count");
+	AddOrReplaceMetric(*module, "Animation.Fallbacks", static_cast<double>(counters.fallbackCount), "count");
+	AddOrReplaceMetric(*module, "Animation.ModeSwitches", static_cast<double>(counters.modeSwitchCount), "count");
+	AddOrReplaceMetric(*module, "Animation.PhysicsHandoffs", static_cast<double>(counters.physicsHandoffs), "count");
+	AddOrReplaceMetric(*module, "Animation.ManagedCallbacks", static_cast<double>(counters.managedCallbacks), "count");
+	AddOrReplaceMetric(*module, "Animation.DetailedRecords", static_cast<double>(counters.detailedRecords), "count");
+	AddOrReplaceMetric(*module, "Animation.Preparation", snapshot.timings.preparationMs, "milliseconds");
+	AddOrReplaceMetric(*module, "Animation.Evaluation", snapshot.timings.evaluationMs, "milliseconds");
+	AddOrReplaceMetric(*module, "Animation.Publication", snapshot.timings.publicationMs, "milliseconds");
+	AddOrReplaceMetric(*module, "Animation.Presentation", snapshot.timings.presentationMs, "milliseconds");
+	AddOrReplaceMetric(*module, "Animation.CpuAuthority", snapshot.timings.cpuAuthorityMs, "milliseconds");
+	AddOrReplaceMetric(*module, "Animation.GpuPlanning", snapshot.timings.gpuPlanningMs, "milliseconds");
+	AddOrReplaceMetric(*module, "Animation.GpuExecution", snapshot.timings.gpuExecutionMs, "milliseconds");
+	AddOrReplaceMetric(*module, "Animation.Deformation", snapshot.timings.deformationMs, "milliseconds");
 }
 
 void Profiler::RecordSceneViewStages(std::span<const PerformanceStageRecord> stages)
@@ -753,13 +1064,18 @@ ProfilerCaptureSettings Profiler::GetSettings() const
 // Profiler::GetDocumentSnapshot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 ProfilerCaptureDocument Profiler::GetDocumentSnapshot() const
 {
-	std::lock_guard<std::mutex> lock(mutex);
-	ProfilerCaptureDocument snapshot = document;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (currentFrame.has_value())
+	ProfilerCaptureDocument snapshot;
 	{
-		snapshot.frames.push_back(*currentFrame);
+		// Copy under the mutex, then materialize the optional public metric strings
+		// after releasing it so a long dormant capture cannot block recording.
+		std::lock_guard<std::mutex> lock(mutex);
+		snapshot = document;
+		if (currentFrame.has_value())
+		{
+			snapshot.frames.push_back(*currentFrame);
+		}
 	}
+	MaterializeAnimationDiagnosticsMetrics(snapshot);
 	return snapshot;
 }
 
@@ -790,12 +1106,20 @@ std::vector<ProfilerFrameListItem> Profiler::GetFrameListSnapshot() const
 // Profiler::GetFramesSnapshot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::vector<ProfilerFrameRecord> Profiler::GetFramesSnapshot() const
 {
-	std::lock_guard<std::mutex> lock(mutex);
-	std::vector<ProfilerFrameRecord> frames = document.frames;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (currentFrame.has_value())
+	std::vector<ProfilerFrameRecord> frames;
 	{
-		frames.push_back(*currentFrame);
+		// Copy the retained records while synchronized. String materialization below
+		// is intentionally outside this lock because it is presentation-only work.
+		std::lock_guard<std::mutex> lock(mutex);
+		frames = document.frames;
+		if (currentFrame.has_value())
+		{
+			frames.push_back(*currentFrame);
+		}
+	}
+	for (ProfilerFrameRecord& frame : frames)
+	{
+		MaterializeAnimationDiagnosticsMetrics(frame);
 	}
 	return frames;
 }
@@ -803,30 +1127,41 @@ std::vector<ProfilerFrameRecord> Profiler::GetFramesSnapshot() const
 // Profiler::GetSelectedFrameSnapshot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::optional<ProfilerFrameRecord> Profiler::GetSelectedFrameSnapshot() const
 {
-	std::lock_guard<std::mutex> lock(mutex);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!selectedFrameIndex.has_value())
+	std::optional<ProfilerFrameRecord> snapshot;
 	{
-		if (!document.frames.empty())
+		std::lock_guard<std::mutex> lock(mutex);
+		if (!selectedFrameIndex.has_value())
 		{
-			return document.frames.back();
+			if (!document.frames.empty())
+			{
+				snapshot = document.frames.back();
+			}
+			else if (currentFrame.has_value())
+			{
+				snapshot = *currentFrame;
+			}
 		}
-		return currentFrame;
-	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (const ProfilerFrameRecord& frame : document.frames)
-	{
-		if (frame.frameIndex == *selectedFrameIndex)
+		else
 		{
-			return frame;
+			for (const ProfilerFrameRecord& frame : document.frames)
+			{
+				if (frame.frameIndex == *selectedFrameIndex)
+				{
+					snapshot = frame;
+					break;
+				}
+			}
+			if (!snapshot.has_value() && currentFrame.has_value() && currentFrame->frameIndex == *selectedFrameIndex)
+			{
+				snapshot = *currentFrame;
+			}
 		}
 	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (currentFrame.has_value() && currentFrame->frameIndex == *selectedFrameIndex)
+	if (snapshot.has_value())
 	{
-		return currentFrame;
+		MaterializeAnimationDiagnosticsMetrics(*snapshot);
 	}
-	return std::nullopt;
+	return snapshot;
 }
 
 // Profiler::GetSourcePath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

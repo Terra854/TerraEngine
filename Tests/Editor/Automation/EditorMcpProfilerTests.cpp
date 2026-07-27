@@ -44,6 +44,10 @@ namespace TerraEngine::EditorTests
 			context.ExpectEqual(20.0, summary.averageFrameMs, "The summary should publish a bounded average instead of raw samples.");
 			context.ExpectEqual(10.0, summary.minimumFrameMs, "The summary should retain the minimum frame duration.");
 			context.ExpectEqual(30.0, summary.maximumFrameMs, "The summary should retain the maximum frame duration.");
+			context.ExpectEqual(10.0, summary.frameMedianMs, "Frame percentiles should include complete frames only.");
+			context.ExpectEqual(10.0, summary.frameP95Ms, "An incomplete tail must not inflate the complete-frame p95.");
+			context.ExpectEqual(10.0, summary.frameP99Ms, "An incomplete tail must not inflate the complete-frame p99.");
+			context.ExpectEqual(10.0, summary.frameWorstMs, "The bounded performance maximum should exclude incomplete frames.");
 		});
 
 		registry.Add("Editor.MCP.Profiler.DiscoveryCoversCaptureLifecycle", [](TestContext& context) {

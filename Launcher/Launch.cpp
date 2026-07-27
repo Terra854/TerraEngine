@@ -60,14 +60,9 @@ fs::path ResolveExecutablePath(const char* argv0) {
 // ResolveManagedLibraryPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 fs::path ResolveManagedLibraryPath(const fs::path& executableDirectory) {
 	// Exported builds always place the NativeAOT gameplay library in Managed/.
-	// The filename follows native platform conventions so Linux exports can
-	// load a shared object while Windows keeps the existing DLL contract.
-#ifdef _WIN32
-	const fs::path managedLibraryName = "Assembly-CSharp.dll";
-#else
-	const fs::path managedLibraryName = "Assembly-CSharp.so";
-#endif
-	return executableDirectory / "Managed" / managedLibraryName;
+	// CMake supplies the platform-specific filename to this native launcher so
+	// an installed Linux export never accidentally searches for the Windows ABI.
+	return executableDirectory / "Managed" / TERRAENGINE_MANAGED_RUNTIME_LIBRARY;
 }
 
 bool HasArgument(int argc, char* argv[], const char* expectedArgument) {
@@ -208,7 +203,36 @@ int main(int argc, char *argv[])
 			return 0;
 		}
 
+		if (HasArgument(argc, argv, "--validate-export-animation-parity")) {
+			Engine parityEngine;
+			const bool headlessCpuFallback = HasArgument(argc, argv, "--headless-cpu-fallback");
+			if (headlessCpuFallback) parityEngine.ConfigureHeadlessCpuFallback();
+			parityEngine.Initialize();
+			TerraEngine::Runtime::AnimationParityValidationOptions options;
+			options.mode = headlessCpuFallback ? "headless-cpu-fallback" : "rendered-runtime";
+			options.requireRenderedVisualCapture = !headlessCpuFallback;
+			TerraEngine::Runtime::AnimationParityReport report =
+				parityEngine.RunAnimationParityFixture(options);
+			parityEngine.Shutdown();
+			report.orderlyShutdown = true;
+			std::cout << report.ToJson().dump() << std::endl;
+			if (!report.succeeded || !report.orderlyShutdown
+				|| report.ticksEvaluated != options.tickCount
+				|| report.animatorCount == 0U) {
+				std::cerr << "[Launcher] Export animation parity validation failed: " << report.diagnostic << std::endl;
+				return 1;
+			}
+			return 0;
+		}
+
 		Engine engine;
+		if (HasArgument(argc, argv, "--headless-cpu-fallback")) {
+			// This is the shipped renderer-unavailable path, not a launcher-only
+			// smoke mode. Configure it before Run() so ScriptingSystem loads the
+			// exported NativeAOT animation ABI during normal engine initialization,
+			// while the scheduler intentionally omits window, UI, and renderer work.
+			engine.ConfigureHeadlessCpuFallback();
+		}
 		engine.Run();
 	}
 	catch (const std::exception& e) {

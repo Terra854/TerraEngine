@@ -1,0 +1,1381 @@
+{
+	"schemaVersion": 2,
+	"phase": "us8-motion-matching",
+	"fixtureOverlays": [
+		{
+			"source": "Tests/Fixtures/Animation/AdvancedAssets",
+			"destination": "Assets/Advanced"
+		},
+		{
+			"source": "Tests/Fixtures/Animation/AdvancedRuntimeActors",
+			"destination": "Assets/AdvancedActors"
+		}
+	],
+	"requiredTools": [
+		"asset.import",
+		"asset.list",
+		"asset.inspect",
+		"prefab.instantiate",
+		"scene.list_objects",
+		"animation.motion_database.build",
+		"animation.job.cancel",
+		"animation.job.get",
+		"play.state",
+		"play.pause",
+		"play.step",
+		"play.resume",
+		"animation.runtime.motion_match.request",
+		"animation.runtime.motion_match.read",
+		"animation.runtime.diagnostics",
+		"animation.runtime.residency",
+		"animation.runtime.profiler",
+		"camera.capture_custom",
+		"game_view.capture",
+		"camera.capture_object"
+	],
+	"requiredEvidence": [
+		"editor/mcp-operations.json",
+		"editor/operations/us8-import-motion-fixture.json",
+		"editor/operations/us8-list-motion-assets.json",
+		"editor/operations/us8-inspect-motion-source.json",
+		"editor/operations/us8-instantiate-motion-hero.json",
+		"editor/operations/us8-instantiate-runtime-actor.json",
+		"editor/operations/us8-observe-motion-hero.json",
+		"editor/operations/us8-observe-runtime-actor.json",
+		"editor/operations/us8-diagnostics-preplay.json",
+		"editor/operations/us8-start-cancelled-database-build.json",
+		"editor/operations/us8-cancel-database-build.json",
+		"editor/operations/us8-read-cancelled-build-1.json",
+		"editor/operations/us8-read-cancelled-build-2.json",
+		"editor/operations/us8-read-cancelled-build-3.json",
+		"editor/operations/us8-read-cancelled-build-4.json",
+		"editor/operations/us8-read-cancelled-build-final.json",
+		"editor/operations/us8-retry-database-build.json",
+		"editor/operations/us8-read-retry-build-1.json",
+		"editor/operations/us8-read-retry-build-2.json",
+		"editor/operations/us8-read-retry-build-3.json",
+		"editor/operations/us8-read-retry-build-4.json",
+		"editor/operations/us8-read-retry-build-5.json",
+		"editor/operations/us8-read-retry-build-6.json",
+		"editor/operations/us8-read-retry-build-7.json",
+		"editor/operations/us8-read-retry-build-8.json",
+		"editor/operations/us8-read-retry-build-9.json",
+		"editor/operations/us8-read-retry-build-10.json",
+		"editor/operations/us8-read-retry-build-11.json",
+		"editor/operations/us8-read-retry-build-final.json",
+		"editor/operations/us8-play-state.json",
+		"editor/operations/us8-pause-runtime.json",
+		"editor/operations/us8-set-built-database.json",
+		"editor/operations/us8-step-set-database.json",
+		"editor/operations/us8-query-built-database.json",
+		"editor/operations/us8-step-motion-query.json",
+		"editor/operations/us8-read-motion-query.json",
+		"editor/operations/us8-diagnostics-runtime.json",
+		"editor/operations/us8-gpu-residency.json",
+		"editor/operations/us8-gpu-profiler.json",
+		"editor/operations/us8-resume-runtime.json",
+		"editor/operations/us8-diagnostics-restored.json",
+		"editor/operations/us8-observe-restored-motion-hero.json",
+		"editor/operations/us8-observe-restored-runtime-actor.json"
+	],
+	"operations": [
+		{
+			"id": "us8-import-motion-fixture",
+			"stage": "prePlay",
+			"order": 10,
+			"tool": "asset.import",
+			"arguments": {
+				"path": "Models/US1Hero.gltf",
+				"force": true
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.importResult.animationManifest",
+					"data.importResult.generatedPrefabs"
+				],
+				"fieldOneOf": {
+					"data.status": [
+						"Succeeded",
+						"SucceededWithWarnings"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/us8-import-motion-fixture.json"
+		},
+		{
+			"id": "us8-list-motion-assets",
+			"stage": "prePlay",
+			"order": 20,
+			"tool": "asset.list",
+			"arguments": {
+				"search": "US1Hero"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.assets"
+				]
+			},
+			"evidencePath": "editor/operations/us8-list-motion-assets.json"
+		},
+		{
+			"id": "us8-inspect-motion-source",
+			"stage": "prePlay",
+			"order": 30,
+			"tool": "asset.inspect",
+			"arguments": {
+				"asset": "Assets/Models/US1Hero.gltf"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data"
+				]
+			},
+			"evidencePath": "editor/operations/us8-inspect-motion-source.json"
+		},
+		{
+			"id": "us8-instantiate-motion-hero",
+			"stage": "prePlay",
+			"order": 40,
+			"tool": "prefab.instantiate",
+			"arguments": {
+				"prefab": "Assets/Models/US1Hero_Generated/US1Hero.teprefab",
+				"name": "US8 Motion Matching Hero"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.instanceId",
+					"data.prefabId"
+				]
+			},
+			"evidencePath": "editor/operations/us8-instantiate-motion-hero.json"
+		},
+		{
+			"id": "us8-instantiate-runtime-actor",
+			"stage": "prePlay",
+			"order": 50,
+			"tool": "prefab.instantiate",
+			"arguments": {
+				"prefab": "Assets/AdvancedActors/SourceBuiltMotionActor.teprefab",
+				"name": "US8 Motion Runtime Actor"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.instanceId",
+					"data.prefabId"
+				]
+			},
+			"evidencePath": "editor/operations/us8-instantiate-runtime-actor.json"
+		},
+		{
+			"id": "us8-observe-motion-hero",
+			"stage": "prePlay",
+			"order": 60,
+			"tool": "scene.list_objects",
+			"arguments": {
+				"includeComponents": true,
+				"search": "US8 Motion Matching Hero"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.objects"
+				]
+			},
+			"evidencePath": "editor/operations/us8-observe-motion-hero.json"
+		},
+		{
+			"id": "us8-observe-runtime-actor",
+			"stage": "prePlay",
+			"order": 70,
+			"tool": "scene.list_objects",
+			"arguments": {
+				"includeComponents": true,
+				"search": "US8 Motion Runtime Actor"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.objects"
+				]
+			},
+			"evidencePath": "editor/operations/us8-observe-runtime-actor.json"
+		},
+		{
+			"id": "us8-diagnostics-preplay",
+			"stage": "prePlay",
+			"order": 80,
+			"tool": "animation.runtime.diagnostics",
+			"arguments": {
+				"includeDetails": true,
+				"maximumItems": 64,
+				"correlationId": "us8-motion-preplay"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data"
+				]
+			},
+			"evidencePath": "editor/operations/us8-diagnostics-preplay.json"
+		},
+		{
+			"id": "us8-start-cancelled-database-build",
+			"stage": "prePlay",
+			"order": 90,
+			"tool": "animation.motion_database.build",
+			"arguments": {
+				"authoringPath": "AdvancedActors/source-locomotion.motiondb-authoring.json",
+				"outputPath": "AdvancedActors/source-locomotion-built.temotiondb",
+				"idempotencyKey": "us8-motion-build-cancel-v1",
+				"correlationId": "us8-motion-build-cancel",
+				"expectedGeneration": 1
+			},
+			"approval": {
+				"policy": "high_impact"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.authoringGeneration",
+					"data.outputPath",
+					"data.visibilityBoundary"
+				],
+				"fieldEquals": {
+					"data.state": "queued",
+					"data.authoringGeneration": 1,
+					"data.visibilityBoundary": "motion_database_worker_then_atomic_publish"
+				}
+			},
+			"evidencePath": "editor/operations/us8-start-cancelled-database-build.json"
+		},
+		{
+			"id": "us8-cancel-database-build",
+			"stage": "prePlay",
+			"order": 100,
+			"tool": "animation.job.cancel",
+			"arguments": {
+				"jobId": null,
+				"idempotencyKey": "us8-motion-build-cancel-request-v1",
+				"correlationId": "us8-motion-build-cancel-request"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us8-start-cancelled-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.cancelRequested",
+					"data.idempotencyDisposition"
+				],
+				"fieldEquals": {
+					"data.cancelRequested": true,
+					"data.idempotencyDisposition": "new"
+				}
+			},
+			"evidencePath": "editor/operations/us8-cancel-database-build.json"
+		},
+		{
+			"id": "us8-read-cancelled-build-1",
+			"stage": "prePlay",
+			"order": 110,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "us8-read-cancelled-build-1"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us8-start-cancelled-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.cancelRequested",
+					"data.result"
+				],
+				"fieldOneOf": {
+					"data.state": [
+						"running",
+						"cancel_requested",
+						"canceled"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/us8-read-cancelled-build-1.json"
+		},
+		{
+			"id": "us8-read-cancelled-build-2",
+			"stage": "prePlay",
+			"order": 120,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "us8-read-cancelled-build-2"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us8-start-cancelled-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.cancelRequested",
+					"data.result"
+				],
+				"fieldOneOf": {
+					"data.state": [
+						"running",
+						"cancel_requested",
+						"canceled"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/us8-read-cancelled-build-2.json"
+		},
+		{
+			"id": "us8-read-cancelled-build-3",
+			"stage": "prePlay",
+			"order": 130,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "us8-read-cancelled-build-3"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us8-start-cancelled-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.cancelRequested",
+					"data.result"
+				],
+				"fieldOneOf": {
+					"data.state": [
+						"running",
+						"cancel_requested",
+						"canceled"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/us8-read-cancelled-build-3.json"
+		},
+		{
+			"id": "us8-read-cancelled-build-4",
+			"stage": "prePlay",
+			"order": 140,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "us8-read-cancelled-build-4"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us8-start-cancelled-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.cancelRequested",
+					"data.result"
+				],
+				"fieldOneOf": {
+					"data.state": [
+						"running",
+						"cancel_requested",
+						"canceled"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/us8-read-cancelled-build-4.json"
+		},
+		{
+			"id": "us8-read-cancelled-build-final",
+			"stage": "prePlay",
+			"order": 150,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "us8-read-cancelled-build-final"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us8-start-cancelled-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.cancelRequested",
+					"data.result.status",
+					"data.result.lastGoodPreserved"
+				],
+				"fieldEquals": {
+					"data.state": "canceled",
+					"data.cancelRequested": true,
+					"data.result.status": "cancelled",
+					"data.result.lastGoodPreserved": true
+				}
+			},
+			"evidencePath": "editor/operations/us8-read-cancelled-build-final.json"
+		},
+		{
+			"id": "us8-retry-database-build",
+			"stage": "prePlay",
+			"order": 160,
+			"tool": "animation.motion_database.build",
+			"arguments": {
+				"authoringPath": "AdvancedActors/source-locomotion.motiondb-authoring.json",
+				"outputPath": "AdvancedActors/source-locomotion-built.temotiondb",
+				"idempotencyKey": "us8-motion-build-retry-v1",
+				"correlationId": "us8-motion-build-retry",
+				"expectedGeneration": 2
+			},
+			"approval": {
+				"policy": "high_impact"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.authoringGeneration",
+					"data.outputPath",
+					"data.visibilityBoundary"
+				],
+				"fieldEquals": {
+					"data.state": "queued",
+					"data.authoringGeneration": 1,
+					"data.visibilityBoundary": "motion_database_worker_then_atomic_publish"
+				}
+			},
+			"evidencePath": "editor/operations/us8-retry-database-build.json"
+		},
+		{
+			"id": "us8-read-retry-build-1",
+			"stage": "prePlay",
+			"order": 170,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "us8-read-retry-build-1"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us8-retry-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.progress",
+					"data.result"
+				],
+				"fieldOneOf": {
+					"data.state": [
+						"queued",
+						"preparing",
+						"running",
+						"succeeded"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/us8-read-retry-build-1.json"
+		},
+		{
+			"id": "us8-read-retry-build-2",
+			"stage": "prePlay",
+			"order": 180,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "us8-read-retry-build-2"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us8-retry-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.progress",
+					"data.result"
+				],
+				"fieldOneOf": {
+					"data.state": [
+						"queued",
+						"preparing",
+						"running",
+						"succeeded"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/us8-read-retry-build-2.json"
+		},
+		{
+			"id": "us8-read-retry-build-3",
+			"stage": "prePlay",
+			"order": 190,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "us8-read-retry-build-3"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us8-retry-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.progress",
+					"data.result"
+				],
+				"fieldOneOf": {
+					"data.state": [
+						"queued",
+						"preparing",
+						"running",
+						"succeeded"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/us8-read-retry-build-3.json"
+		},
+		{
+			"id": "us8-read-retry-build-4",
+			"stage": "prePlay",
+			"order": 200,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "us8-read-retry-build-4"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us8-retry-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.progress",
+					"data.result"
+				],
+				"fieldOneOf": {
+					"data.state": [
+						"queued",
+						"preparing",
+						"running",
+						"succeeded"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/us8-read-retry-build-4.json"
+		},
+		{
+			"id": "us8-read-retry-build-5",
+			"stage": "prePlay",
+			"order": 210,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "us8-read-retry-build-5"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us8-retry-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.progress",
+					"data.result"
+				],
+				"fieldOneOf": {
+					"data.state": [
+						"queued",
+						"preparing",
+						"running",
+						"succeeded"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/us8-read-retry-build-5.json"
+		},
+		{
+			"id": "us8-read-retry-build-6",
+			"stage": "prePlay",
+			"order": 220,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "us8-read-retry-build-6"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us8-retry-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.progress",
+					"data.result"
+				],
+				"fieldOneOf": {
+					"data.state": [
+						"queued",
+						"preparing",
+						"running",
+						"succeeded"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/us8-read-retry-build-6.json"
+		},
+		{
+			"id": "us8-read-retry-build-7",
+			"stage": "prePlay",
+			"order": 230,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "us8-read-retry-build-7"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us8-retry-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.progress",
+					"data.result"
+				],
+				"fieldOneOf": {
+					"data.state": [
+						"queued",
+						"preparing",
+						"running",
+						"succeeded"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/us8-read-retry-build-7.json"
+		},
+		{
+			"id": "us8-read-retry-build-8",
+			"stage": "prePlay",
+			"order": 240,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "us8-read-retry-build-8"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us8-retry-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.progress",
+					"data.result"
+				],
+				"fieldOneOf": {
+					"data.state": [
+						"queued",
+						"preparing",
+						"running",
+						"succeeded"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/us8-read-retry-build-8.json"
+		},
+		{
+			"id": "us8-read-retry-build-9",
+			"stage": "prePlay",
+			"order": 250,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "us8-read-retry-build-9"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us8-retry-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.progress",
+					"data.result"
+				],
+				"fieldOneOf": {
+					"data.state": [
+						"queued",
+						"preparing",
+						"running",
+						"succeeded"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/us8-read-retry-build-9.json"
+		},
+		{
+			"id": "us8-read-retry-build-10",
+			"stage": "prePlay",
+			"order": 260,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "us8-read-retry-build-10"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us8-retry-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.progress",
+					"data.result"
+				],
+				"fieldOneOf": {
+					"data.state": [
+						"queued",
+						"preparing",
+						"running",
+						"succeeded"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/us8-read-retry-build-10.json"
+		},
+		{
+			"id": "us8-read-retry-build-11",
+			"stage": "prePlay",
+			"order": 270,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "us8-read-retry-build-11"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us8-retry-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.progress",
+					"data.result"
+				],
+				"fieldOneOf": {
+					"data.state": [
+						"queued",
+						"preparing",
+						"running",
+						"succeeded"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/us8-read-retry-build-11.json"
+		},
+		{
+			"id": "us8-read-retry-build-final",
+			"stage": "prePlay",
+			"order": 280,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "us8-read-retry-build-final"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us8-retry-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.progress",
+					"data.result.status",
+					"data.result.assetId",
+					"data.result.databaseGeneration",
+					"data.result.outputPath"
+				],
+				"fieldEquals": {
+					"data.state": "succeeded",
+					"data.result.status": "published"
+				}
+			},
+			"evidencePath": "editor/operations/us8-read-retry-build-final.json"
+		},
+		{
+			"id": "us8-play-state",
+			"stage": "play",
+			"order": 300,
+			"tool": "play.state",
+			"arguments": {},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState"
+				],
+				"fieldEquals": {
+					"data.currentState": "playing"
+				}
+			},
+			"evidencePath": "editor/operations/us8-play-state.json"
+		},
+		{
+			"id": "us8-pause-runtime",
+			"stage": "play",
+			"order": 310,
+			"tool": "play.pause",
+			"arguments": {
+				"expectedState": "playing",
+				"correlationId": "us8-pause-runtime"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState"
+				],
+				"fieldEquals": {
+					"data.currentState": "paused"
+				}
+			},
+			"evidencePath": "editor/operations/us8-pause-runtime.json"
+		},
+		{
+			"id": "us8-set-built-database",
+			"stage": "play",
+			"order": 320,
+			"tool": "animation.runtime.motion_match.request",
+			"arguments": {
+				"target": {
+					"objectId": null
+				},
+				"action": "set_database",
+				"assetId": null,
+				"assetGeneration": null,
+				"featureCount": 48,
+				"flags": 0,
+				"targetTick": 0,
+				"idempotencyKey": "us8-set-built-database-v1",
+				"correlationId": "us8-set-built-database",
+				"expectedGeneration": 3
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us8-instantiate-runtime-actor",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "target.objectId",
+					"valueType": "uuid"
+				},
+				{
+					"sourceOperationId": "us8-read-retry-build-final",
+					"sourceResponsePath": "data.result.assetId",
+					"destinationArgumentPath": "assetId",
+					"valueType": "uuid"
+				},
+				{
+					"sourceOperationId": "us8-read-retry-build-final",
+					"sourceResponsePath": "data.result.databaseGeneration",
+					"destinationArgumentPath": "assetGeneration",
+					"valueType": "integer"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.status",
+					"data.acknowledgement",
+					"data.queryId",
+					"data.visibilityBoundary"
+				],
+				"fieldEquals": {
+					"data.acknowledgement": "queued_not_yet_published",
+					"data.queryId": 0,
+					"data.visibilityBoundary": "animation_protected_capture_then_publication"
+				},
+				"fieldOneOf": {
+					"data.status": [
+						"queued",
+						"ok"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/us8-set-built-database.json"
+		},
+		{
+			"id": "us8-step-set-database",
+			"stage": "play",
+			"order": 330,
+			"tool": "play.step",
+			"arguments": {
+				"expectedState": "paused",
+				"correlationId": "us8-step-set-database"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState",
+					"data.stepsCompleted"
+				],
+				"fieldEquals": {
+					"data.currentState": "paused",
+					"data.stepsCompleted": 1
+				}
+			},
+			"evidencePath": "editor/operations/us8-step-set-database.json"
+		},
+		{
+			"id": "us8-query-built-database",
+			"stage": "play",
+			"order": 340,
+			"tool": "animation.runtime.motion_match.request",
+			"arguments": {
+				"target": {
+					"objectId": null
+				},
+				"action": "query",
+				"assetId": null,
+				"assetGeneration": null,
+				"featureCount": 48,
+				"queryId": 8001,
+				"flags": 0,
+				"targetTick": 0,
+				"idempotencyKey": "us8-query-built-database-v1",
+				"correlationId": "us8-query-built-database",
+				"expectedGeneration": 4
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us8-instantiate-runtime-actor",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "target.objectId",
+					"valueType": "uuid"
+				},
+				{
+					"sourceOperationId": "us8-read-retry-build-final",
+					"sourceResponsePath": "data.result.assetId",
+					"destinationArgumentPath": "assetId",
+					"valueType": "uuid"
+				},
+				{
+					"sourceOperationId": "us8-read-retry-build-final",
+					"sourceResponsePath": "data.result.databaseGeneration",
+					"destinationArgumentPath": "assetGeneration",
+					"valueType": "integer"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.status",
+					"data.acknowledgement",
+					"data.queryId",
+					"data.visibilityBoundary"
+				],
+				"fieldEquals": {
+					"data.acknowledgement": "queued_not_yet_published",
+					"data.queryId": 8001,
+					"data.visibilityBoundary": "animation_protected_capture_then_publication"
+				},
+				"fieldOneOf": {
+					"data.status": [
+						"queued",
+						"ok"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/us8-query-built-database.json"
+		},
+		{
+			"id": "us8-step-motion-query",
+			"stage": "play",
+			"order": 350,
+			"tool": "play.step",
+			"arguments": {
+				"expectedState": "paused",
+				"correlationId": "us8-step-motion-query"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState",
+					"data.stepsCompleted"
+				],
+				"fieldEquals": {
+					"data.currentState": "paused",
+					"data.stepsCompleted": 1
+				}
+			},
+			"evidencePath": "editor/operations/us8-step-motion-query.json"
+		},
+		{
+			"id": "us8-read-motion-query",
+			"stage": "play",
+			"order": 360,
+			"tool": "animation.runtime.motion_match.read",
+			"arguments": {
+				"target": {
+					"objectId": null
+				},
+				"maximumItems": 8,
+				"correlationId": "us8-read-motion-query"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us8-instantiate-runtime-actor",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "target.objectId",
+					"valueType": "uuid"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.snapshotCount",
+					"data.latestSnapshot.status",
+					"data.latestSnapshot.queryId",
+					"data.latestSnapshot.selectedSampleId",
+					"data.latestSnapshot.totalScore",
+					"data.latestSnapshot.trajectoryScore",
+					"data.latestSnapshot.poseScore",
+					"data.latestSnapshot.usedFallback",
+					"data.latestSnapshot.publicationGeneration",
+					"data.visibilityBoundary"
+				],
+				"fieldEquals": {
+					"data.latestSnapshot.status": "ok",
+					"data.latestSnapshot.queryId": 8001,
+					"data.visibilityBoundary": "immutable_motion_match_store_copies"
+				}
+			},
+			"evidencePath": "editor/operations/us8-read-motion-query.json"
+		},
+		{
+			"id": "us8-diagnostics-runtime",
+			"stage": "play",
+			"order": 370,
+			"tool": "animation.runtime.diagnostics",
+			"arguments": {
+				"includeDetails": true,
+				"maximumItems": 64,
+				"correlationId": "us8-motion-runtime",
+				"rendererAvailable": true
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data"
+				]
+			},
+			"evidencePath": "editor/operations/us8-diagnostics-runtime.json"
+		},
+		{
+			"id": "us8-gpu-residency",
+			"stage": "play",
+			"order": 380,
+			"tool": "animation.runtime.residency",
+			"arguments": {
+				"includeDetails": true,
+				"maximumItems": 64,
+				"correlationId": "us8-gpu-top-k"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.collectionPromotedByRequest"
+				]
+			},
+			"evidencePath": "editor/operations/us8-gpu-residency.json"
+		},
+		{
+			"id": "us8-gpu-profiler",
+			"stage": "play",
+			"order": 390,
+			"tool": "animation.runtime.profiler",
+			"arguments": {
+				"includeDetails": true,
+				"maximumItems": 64,
+				"correlationId": "us8-gpu-top-k"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.collectionPromotedByRequest"
+				]
+			},
+			"evidencePath": "editor/operations/us8-gpu-profiler.json"
+		},
+		{
+			"id": "us8-resume-runtime",
+			"stage": "play",
+			"order": 400,
+			"tool": "play.resume",
+			"arguments": {
+				"expectedState": "paused",
+				"correlationId": "us8-resume-runtime"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState"
+				],
+				"fieldEquals": {
+					"data.currentState": "playing"
+				}
+			},
+			"evidencePath": "editor/operations/us8-resume-runtime.json"
+		},
+		{
+			"id": "us8-diagnostics-restored",
+			"stage": "postPlay",
+			"order": 420,
+			"tool": "animation.runtime.diagnostics",
+			"arguments": {
+				"includeDetails": true,
+				"maximumItems": 64,
+				"correlationId": "us8-motion-restored"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data"
+				]
+			},
+			"evidencePath": "editor/operations/us8-diagnostics-restored.json"
+		},
+		{
+			"id": "us8-observe-restored-motion-hero",
+			"stage": "postPlay",
+			"order": 430,
+			"tool": "scene.list_objects",
+			"arguments": {
+				"includeComponents": true,
+				"search": "US8 Motion Matching Hero"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.objects"
+				]
+			},
+			"evidencePath": "editor/operations/us8-observe-restored-motion-hero.json"
+		},
+		{
+			"id": "us8-observe-restored-runtime-actor",
+			"stage": "postPlay",
+			"order": 440,
+			"tool": "scene.list_objects",
+			"arguments": {
+				"includeComponents": true,
+				"search": "US8 Motion Runtime Actor"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.objects"
+				]
+			},
+			"evidencePath": "editor/operations/us8-observe-restored-runtime-actor.json"
+		}
+	],
+	"captures": [
+		{
+			"id": "us8motionmatching-scene-view",
+			"view": "SceneView",
+			"stage": "prePlay",
+			"order": 290,
+			"tool": "camera.capture_custom",
+			"arguments": {
+				"name": "US8 Motion Matching Scene",
+				"position": [0, 1, 4],
+				"target": [0, 0.5, 0],
+				"up": [0, 1, 0],
+				"projection": "perspective",
+				"verticalFovDegrees": 60,
+				"nearPlane": 0.1,
+				"farPlane": 100
+			}
+		},
+		{
+			"id": "us8motionmatching-game-view",
+			"view": "GameView",
+			"stage": "play",
+			"order": 410,
+			"tool": "game_view.capture",
+			"arguments": {
+				"includeOverlays": false,
+				"transparentBackground": false
+			}
+		},
+		{
+			"id": "us8motionmatching-ingame-camera",
+			"view": "InGameCamera",
+			"stage": "postPlay",
+			"order": 450,
+			"tool": "camera.capture_object",
+			"arguments": {
+				"object": "US1 Capture Camera",
+				"includeDisabled": false,
+				"transparentBackground": false
+			}
+		}
+	],
+	"visualExpectations": [
+		{
+			"captureId": "us8motionmatching-scene-view",
+			"contentPolicy": "visible-geometry-required"
+		},
+		{
+			"captureId": "us8motionmatching-game-view",
+			"contentPolicy": "visible-geometry-required"
+		},
+		{
+			"captureId": "us8motionmatching-ingame-camera",
+			"contentPolicy": "visible-geometry-required"
+		}
+	],
+	"visualIdentityExceptions": [
+		{
+			"captureIds": [
+				"us8motionmatching-game-view",
+				"us8motionmatching-ingame-camera"
+			],
+			"reason": "Game View and the authored in-game camera intentionally resolve the same active camera, so matching pixels are valid evidence."
+		}
+	],
+	"manualChecklist": [
+		{
+			"id": "us8-mouse-build-cancel-query-and-topk",
+			"input": "mouse",
+			"required": true,
+			"instruction": "Using real mouse input in the installed editor, use the visible US8 Motion Matching Hero for camera evidence and the separate mesh-free US8 Motion Runtime Actor for copied runtime proof. Inspect the motion-database authoring input, retained canceled job, atomically published retry, candidates, hard exclusions, contacts, phase, tags, fallback, score breakdown, database generation, and GPU top-K evidence. Capture the database window and candidate diagnostics, and do not attribute visible mesh deformation to the diagnostic actor."
+		},
+		{
+			"id": "us8-keyboard-deterministic-parity-and-restore",
+			"input": "keyboard",
+			"required": true,
+			"instruction": "Use keyboard input to replay identical trajectory, pose, contact, and tag query streams in Play Mode and compare CPU-authoritative selection with GPU top-K candidates, tie-breaking, fallback, rollback-safe generation rejection, and continuity. Do not claim timing or CPU-reduction acceptance. Exit Play Mode, confirm the authored database and scene restore, and retain parity and restored-state screenshots beneath the gate run root."
+		}
+	]
+}

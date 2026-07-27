@@ -60,6 +60,18 @@ namespace TerraEngine::AssetPipeline
 			return value == "Color" ? ModelTextureSemantic::Color : ModelTextureSemantic::Data;
 		}
 
+		AnimationImportSubAssetKind ParseAnimationImportSubAssetKind(const std::string& value)
+		{
+			if(value == "Skeleton") return AnimationImportSubAssetKind::Skeleton;
+			if(value == "DeformableMesh") return AnimationImportSubAssetKind::DeformableMesh;
+			if(value == "MorphTarget") return AnimationImportSubAssetKind::MorphTarget;
+			if(value == "Material") return AnimationImportSubAssetKind::Material;
+			if(value == "Texture") return AnimationImportSubAssetKind::Texture;
+			if(value == "Prefab") return AnimationImportSubAssetKind::Prefab;
+			if(value == "Mesh") return AnimationImportSubAssetKind::Mesh;
+			return AnimationImportSubAssetKind::AnimationClip;
+		}
+
 		std::optional<std::size_t> ReadOptionalIndex(const nlohmann::json& object, const char* key)
 		{
 			if (!object.contains(key) || object[key].is_null())
@@ -376,6 +388,49 @@ namespace TerraEngine::AssetPipeline
 				record.slotName = assignment.value("slotName", std::string());
 				result.materialAssignments.push_back(std::move(record));
 			}
+
+			const nlohmann::json manifest = document.value("animationManifest", nlohmann::json::object());
+			result.animationManifest.schemaVersion = manifest.value("schemaVersion", result.animationManifest.schemaVersion);
+			result.animationManifest.packageGuid = ReadUuid(manifest, "packageGuid");
+			if(result.animationManifest.packageGuid == TerraEngine::EMPTY_UUID)
+			{
+				result.animationManifest.packageGuid = result.packageGuid;
+			}
+			result.animationManifest.sourceHashHex = manifest.value("sourceHash", result.package.sourceHashHex);
+			result.animationManifest.importerName = manifest.value("importerName", std::string());
+			result.animationManifest.importerVersion = manifest.value("importerVersion", std::string("1"));
+			result.animationManifest.settingsFingerprintHex = manifest.value("settingsFingerprint", std::string());
+			result.animationManifest.dependencyFingerprintHex = manifest.value("dependencyFingerprint", std::string());
+			result.animationManifest.candidateGeneration = manifest.value("candidateGeneration", std::uint64_t{0u});
+			result.animationManifest.publishedGeneration = manifest.value("publishedGeneration", std::uint64_t{0u});
+			result.animationManifest.lastKnownGoodGeneration = manifest.value("lastKnownGoodGeneration", std::uint64_t{0u});
+			result.animationManifest.cancelled = manifest.value("cancelled", false);
+			result.animationManifest.publishedAtomically = manifest.value("publishedAtomically", false);
+			result.animationManifest.preservedLastKnownGood = manifest.value("preservedLastKnownGood", false);
+			for(const nlohmann::json& child : manifest.value("subAssets", nlohmann::json::array()))
+			{
+				GeneratedAnimationSubAsset record;
+				record.guid = ReadUuid(child, "guid");
+				record.kind = ParseAnimationImportSubAssetKind(child.value("kind", std::string("AnimationClip")));
+				record.semanticKey = child.value("semanticKey", std::string());
+				record.displayName = child.value("name", std::string());
+				record.sourcePath = child.value("sourcePath", std::string());
+				record.compiledPath = child.value("compiledPath", std::string());
+				record.compatibilityFingerprint = child.value("compatibilityFingerprint", std::uint64_t{0u});
+				record.contentHashHex = child.value("contentHash", std::string());
+				record.readOnlyPackageChild = child.value("readOnlyPackageChild", true);
+				for(const nlohmann::json& dependency : child.value("dependencies", nlohmann::json::array()))
+				{
+					AnimationImportDependency dependencyRecord;
+					dependencyRecord.assetGuid = ReadUuid(dependency, "assetGuid");
+					dependencyRecord.compatibilityFingerprint = dependency.value(
+						"compatibilityFingerprint", std::uint64_t{0u});
+					dependencyRecord.required = dependency.value("required", true);
+					record.dependencies.push_back(dependencyRecord);
+				}
+				result.animationManifest.subAssets.push_back(std::move(record));
+			}
+			CanonicalizeAnimationImportManifest(result.animationManifest);
 
 			for (const nlohmann::json& diagnostic : document.value("diagnostics", nlohmann::json::array()))
 			{

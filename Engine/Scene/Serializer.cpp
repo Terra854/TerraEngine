@@ -5,6 +5,7 @@
 // This module provides the backend support for scene persistence, allowing for stable asset storage and versioning.
 
 #include "Scene/Serializer.h"
+#include "Components/AnimatorComponent.h"
 #include "Core/Object/ObjectManager.h"
 #include "Core/Object/Component.h"
 #include "Components/Physics/CharacterControllerComponent.h"
@@ -18,6 +19,191 @@
 
 namespace {
 	using namespace TerraEngine::Physics;
+	using namespace TerraEngine::Animation;
+
+	nlohmann::json SerializeAnimator(const AnimatorComponent& animator)
+	{
+		// Runtime handles, effective execution mode, poses, cursors, and receipts
+		// are deliberately absent. Missing asset UUIDs remain authored strings so a
+		// later mount/reimport can resolve them without rewriting the scene.
+		return {
+			{"active", animator.active},
+			{"schemaVersion", kAnimatorComponentSchemaVersion},
+			{"controllerAssetId", TerraEngine::ToHexString(animator.controllerAssetId)},
+			{"defaultClipAssetId", TerraEngine::ToHexString(animator.defaultClipAssetId)},
+			{"loopDefaultClip", animator.loopDefaultClip},
+			{"playAutomatically", animator.playAutomatically},
+			{"defaultClipStartFrame", animator.defaultClipStartFrame},
+			{"skeletonOverrideAssetId", TerraEngine::ToHexString(animator.skeletonOverrideAssetId)},
+			{"avatarOverrideAssetId", TerraEngine::ToHexString(animator.avatarOverrideAssetId)},
+			{"retargetProfileOverrideAssetId", TerraEngine::ToHexString(animator.retargetProfileOverrideAssetId)},
+			{"ragdollProfileOverrideAssetId", TerraEngine::ToHexString(animator.ragdollProfileOverrideAssetId)},
+			{"motionDatabaseOverrideAssetId", TerraEngine::ToHexString(animator.motionDatabaseOverrideAssetId)},
+			{"requestedMode", static_cast<std::uint32_t>(animator.requestedMode)},
+			{"rootMotionPolicy", static_cast<std::uint32_t>(animator.rootMotionPolicy)},
+			{"updatePolicy", static_cast<std::uint32_t>(animator.updatePolicy)},
+			{"timePolicy", static_cast<std::uint32_t>(animator.timePolicy)},
+			{"initialParameters", animator.initialParametersJson},
+			{"eventPolicy", static_cast<std::uint32_t>(animator.eventPolicy)},
+			{"cullingPolicy", static_cast<std::uint32_t>(animator.cullingPolicy)},
+			{"diagnosticOverrides", animator.diagnosticOverrides}
+		};
+	}
+
+	bool ReadAnimatorUuid(
+		const nlohmann::json& json,
+		std::string_view key,
+		TerraEngine::UUID& destination)
+	{
+		const auto found = json.find(std::string(key));
+		if(found == json.end()) return true;
+		if(!found->is_string()) return false;
+		const std::optional<TerraEngine::UUID> parsed = TerraEngine::ParseUUID(found->get<std::string>());
+		if(!parsed) return false;
+		destination = *parsed;
+		return true;
+	}
+
+	template<typename Enum>
+	bool ReadAnimatorEnum(
+		const nlohmann::json& json,
+		std::string_view key,
+		std::uint32_t maximum,
+		Enum fallback,
+		Enum& destination)
+	{
+		const auto found = json.find(std::string(key));
+		if(found == json.end()) return true;
+		// Persisted policy values are untrusted input. Keep the component alive
+		// and restore the policy's documented safe default instead of dropping
+		// the whole authored component when a value is unknown or malformed.
+		if(!found->is_number_unsigned() && !found->is_number_integer()) {
+			destination = fallback;
+			return true;
+		}
+		if(found->is_number_unsigned()) {
+			const std::uint64_t raw = found->get<std::uint64_t>();
+			if(raw > maximum) {
+				destination = fallback;
+				return true;
+			}
+			destination = static_cast<Enum>(raw);
+			return true;
+		}
+		const std::int64_t raw = found->get<std::int64_t>();
+		if(raw < 0 || static_cast<std::uint64_t>(raw) > maximum) {
+			destination = fallback;
+			return true;
+		}
+		destination = static_cast<Enum>(raw);
+		return true;
+	}
+
+	bool ReadAnimatorUnsigned(
+		const nlohmann::json& json,
+		std::string_view key,
+		std::uint32_t& destination)
+	{
+		const auto found = json.find(std::string(key));
+		if(found == json.end()) return true;
+		// Authored frame controls are untrusted scene input. Reject negative,
+		// fractional, and overflowing values before committing any component field.
+		if(found->is_number_unsigned()) {
+			const std::uint64_t raw = found->get<std::uint64_t>();
+			if(raw > std::numeric_limits<std::uint32_t>::max()) return false;
+			destination = static_cast<std::uint32_t>(raw);
+			return true;
+		}
+		if(!found->is_number_integer()) return false;
+		const std::int64_t raw = found->get<std::int64_t>();
+		if(raw < 0
+			|| static_cast<std::uint64_t>(raw) > std::numeric_limits<std::uint32_t>::max()) {
+			return false;
+		}
+		destination = static_cast<std::uint32_t>(raw);
+		return true;
+	}
+
+	bool DeserializeAnimator(const nlohmann::json& json, AnimatorComponent& destination)
+	{
+		if(!json.is_object()) return false;
+		AnimatorComponent staged;
+		try {
+			const std::uint32_t schema = json.value("schemaVersion", kAnimatorComponentSchemaVersion);
+			if(schema > kAnimatorComponentSchemaVersion) return false;
+			staged.schemaVersion = kAnimatorComponentSchemaVersion;
+			staged.active = json.value("active", staged.active);
+			if(!ReadAnimatorUuid(json, "controllerAssetId", staged.controllerAssetId)
+				|| !ReadAnimatorUuid(json, "defaultClipAssetId", staged.defaultClipAssetId)
+				|| !ReadAnimatorUuid(json, "skeletonOverrideAssetId", staged.skeletonOverrideAssetId)
+				|| !ReadAnimatorUuid(json, "avatarOverrideAssetId", staged.avatarOverrideAssetId)
+				|| !ReadAnimatorUuid(json, "retargetProfileOverrideAssetId", staged.retargetProfileOverrideAssetId)
+				|| !ReadAnimatorUuid(json, "ragdollProfileOverrideAssetId", staged.ragdollProfileOverrideAssetId)
+				|| !ReadAnimatorUuid(json, "motionDatabaseOverrideAssetId", staged.motionDatabaseOverrideAssetId)) return false;
+			if(const auto loop = json.find("loopDefaultClip"); loop != json.end()) {
+				// Treat a malformed authored switch as a rejected component instead
+				// of silently turning a one-shot clip into different runtime behavior.
+				if(!loop->is_boolean()) return false;
+				staged.loopDefaultClip = loop->get<bool>();
+			}
+			if(const auto autoplay = json.find("playAutomatically"); autoplay != json.end()) {
+				// Reject malformed switches atomically instead of silently changing
+				// whether a saved scene advances when Play Mode begins.
+				if(!autoplay->is_boolean()) return false;
+				staged.playAutomatically = autoplay->get<bool>();
+			}
+			if(!ReadAnimatorUnsigned(
+				json, "defaultClipStartFrame", staged.defaultClipStartFrame)) return false;
+			if(!ReadAnimatorEnum(json, "requestedMode",
+				static_cast<std::uint32_t>(AnimationExecutionPolicy::ForceCpuDeterministicFallback), AnimationExecutionPolicy::Auto, staged.requestedMode)
+				|| !ReadAnimatorEnum(json, "rootMotionPolicy",
+					static_cast<std::uint32_t>(AnimatorRootMotionPolicy::ApplyToCharacter), AnimatorRootMotionPolicy::ExtractOnly, staged.rootMotionPolicy)
+				|| !ReadAnimatorEnum(json, "updatePolicy",
+					static_cast<std::uint32_t>(AnimatorUpdatePolicy::Manual), AnimatorUpdatePolicy::EveryFrame, staged.updatePolicy)
+				|| !ReadAnimatorEnum(json, "timePolicy",
+					static_cast<std::uint32_t>(AnimatorTimePolicy::Fixed), AnimatorTimePolicy::Scaled, staged.timePolicy)
+				|| !ReadAnimatorEnum(json, "eventPolicy",
+					static_cast<std::uint32_t>(AnimatorEventPolicy::Suppress), AnimatorEventPolicy::Dispatch, staged.eventPolicy)
+				|| !ReadAnimatorEnum(json, "cullingPolicy",
+					static_cast<std::uint32_t>(AnimatorCullingPolicy::SuspendVisualWhenInvisible), AnimatorCullingPolicy::Automatic, staged.cullingPolicy)) return false;
+
+			if(const auto parameters = json.find("initialParameters"); parameters != json.end()) {
+				if(parameters->is_string()) staged.initialParametersJson = parameters->get<std::string>();
+				else if(parameters->is_object()) staged.initialParametersJson = parameters->dump();
+				else return false;
+			}
+			const nlohmann::json initialParameters = nlohmann::json::parse(staged.initialParametersJson);
+			if(!initialParameters.is_object()) return false;
+			staged.diagnosticOverrides = json.value("diagnosticOverrides", staged.diagnosticOverrides);
+		} catch(const nlohmann::json::exception&) {
+			return false;
+		}
+
+		// Commit only after every field and nested initial-parameter payload passed.
+		// No parse/validation can fail after this point, so rejected components leave
+		// no partially updated authored state behind.
+		destination.active = staged.active;
+		destination.schemaVersion = staged.schemaVersion;
+		destination.controllerAssetId = staged.controllerAssetId;
+		destination.defaultClipAssetId = staged.defaultClipAssetId;
+		destination.loopDefaultClip = staged.loopDefaultClip;
+		destination.playAutomatically = staged.playAutomatically;
+		destination.defaultClipStartFrame = staged.defaultClipStartFrame;
+		destination.skeletonOverrideAssetId = staged.skeletonOverrideAssetId;
+		destination.avatarOverrideAssetId = staged.avatarOverrideAssetId;
+		destination.retargetProfileOverrideAssetId = staged.retargetProfileOverrideAssetId;
+		destination.ragdollProfileOverrideAssetId = staged.ragdollProfileOverrideAssetId;
+		destination.motionDatabaseOverrideAssetId = staged.motionDatabaseOverrideAssetId;
+		destination.requestedMode = staged.requestedMode;
+		destination.rootMotionPolicy = staged.rootMotionPolicy;
+		destination.updatePolicy = staged.updatePolicy;
+		destination.timePolicy = staged.timePolicy;
+		destination.initialParametersJson = std::move(staged.initialParametersJson);
+		destination.eventPolicy = staged.eventPolicy;
+		destination.cullingPolicy = staged.cullingPolicy;
+		destination.diagnosticOverrides = staged.diagnosticOverrides;
+		return true;
+	}
 
 	nlohmann::json PhysicsVectorJson(const PhysicsVector3& value) {
 		return {value.x, value.y, value.z};
@@ -640,6 +826,13 @@ nlohmann::json SerializeObjectRecursive(Object object) {
 
 		if (functions.entityHasComponent && functions.entityHasComponent(enttRegistry, entity))
 		{
+			if(compName == AnimatorComponent::kComponentName) {
+				if(const AnimatorComponent* animator = enttRegistry.try_get<AnimatorComponent>(entity)) {
+					auto guard = animator->acquireReadLock();
+					objJson["components"][compName] = SerializeAnimator(*animator);
+				}
+				continue;
+			}
 			// Collection components need a typed serializer because reflection does
 			// not flatten variants or vectors. Keep this special case at the protected
 			// scene boundary; worker snapshots consume only the decoded typed values.
@@ -775,6 +968,11 @@ SceneRenderSettings Serializer::DeserializeSceneRenderSettings(const nlohmann::j
 // Serializer::DeserializeObjectEntity restores authored state through manager
 // APIs so stale identity and component access stay centralized.
 entt::entity Serializer::DeserializeObjectEntity(const nlohmann::json& json, std::optional<entt::entity> parent) {
+	// Disk data may name AnimatorComponent before any live instance has invoked
+	// its CRTP constructor. Register its authored reflection contract first so
+	// the generic component path can restore it while ignoring unknown runtime
+	// keys from malformed or obsolete payloads.
+	AnimatorComponent::registerType();
 	ObjectManager& objManager = ObjectManager::instance();
 	entt::registry& enttRegistry = objManager.getRegistry();
 	std::string name = json.value("name", "Unnamed");
@@ -845,6 +1043,13 @@ entt::entity Serializer::DeserializeObjectEntity(const nlohmann::json& json, std
 				if(compName == RigidBodyComponent::kComponentName) {
 					RigidBodyComponent* body = enttRegistry.try_get<RigidBodyComponent>(entity);
 					if(body == nullptr || !DeserializeRigidBody(compData, *body)) {
+						if(functions.entityRemoveComponent) functions.entityRemoveComponent(enttRegistry, entity);
+					}
+					continue;
+				}
+				if(compName == AnimatorComponent::kComponentName) {
+					AnimatorComponent* animator = enttRegistry.try_get<AnimatorComponent>(entity);
+					if(animator == nullptr || !DeserializeAnimator(compData, *animator)) {
 						if(functions.entityRemoveComponent) functions.entityRemoveComponent(enttRegistry, entity);
 					}
 					continue;

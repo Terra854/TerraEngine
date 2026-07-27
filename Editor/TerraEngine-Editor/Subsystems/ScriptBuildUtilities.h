@@ -16,11 +16,14 @@ namespace TerraEngine::Editor::Scripting
 {
 	struct ScriptBuildInvocation
 	{
-		// The project root is used as the process working directory so relative
-		// MSBuild paths in the generated Assembly-CSharp project resolve exactly
-		// as they do when a developer runs dotnet manually.
-		std::filesystem::path workingDirectory;
+		// Canonical paths remain the editor's durable identity. A Windows build
+		// may additionally name the same project through a verified short
+		// junction so nested MSBuild tools such as csc.exe also inherit a short
+		// working directory.
+		std::filesystem::path projectRoot;
+		std::filesystem::path processWorkingDirectory;
 		std::filesystem::path projectPath;
+		std::filesystem::path buildProjectPath;
 		std::string profileName;
 		std::string commandLine;
 	};
@@ -49,27 +52,45 @@ namespace TerraEngine::Editor::Scripting
 		return quoted;
 	}
 
-	inline ScriptBuildInvocation CreateScriptBuildInvocation(const std::filesystem::path& workingDirectory, const std::filesystem::path& projectPath, std::string profileName)
+	inline ScriptBuildInvocation CreateScriptBuildInvocation(
+		const std::filesystem::path& projectRoot,
+		const std::filesystem::path& projectPath,
+		std::string profileName,
+		const std::filesystem::path& processWorkingDirectory = {},
+		const std::filesystem::path& buildProjectPath = {})
 	{
 		ScriptBuildInvocation invocation;
-		invocation.workingDirectory = workingDirectory;
+		invocation.projectRoot = projectRoot;
+		invocation.processWorkingDirectory = processWorkingDirectory.empty()
+			? projectRoot
+			: processWorkingDirectory;
 		invocation.projectPath = projectPath;
+		invocation.buildProjectPath = buildProjectPath.empty()
+			? projectPath
+			: buildProjectPath;
 		invocation.profileName = std::move(profileName);
 		// The editor captures stdout/stderr through a pipe. Persistent .NET build
 		// servers can inherit that pipe and keep it open after dotnet exits,
 		// leaving the background reader stuck waiting for EOF on Linux. Disable
 		// those servers for interactive script builds so project-open cannot hang.
-		invocation.commandLine = "dotnet build " + QuoteDotNetCommandArgument(projectPath)
+		invocation.commandLine = "dotnet build " + QuoteDotNetCommandArgument(invocation.buildProjectPath)
 			+ " -c " + invocation.profileName
 			+ " -nologo -p:GenerateFullPaths=true -p:UseSharedCompilation=false --disable-build-servers";
 		return invocation;
 	}
 
-	inline std::string DescribeScriptBuildLaunchFailure(const ScriptBuildInvocation& invocation)
+	inline std::string DescribeScriptBuildLaunchFailure(
+		const ScriptBuildInvocation& invocation,
+		const std::string& processError = {})
 	{
 		std::ostringstream stream;
 		stream << "Failed to start dotnet build for Assembly-CSharp. Command: " << invocation.commandLine
-			<< ". Working directory: " << invocation.workingDirectory.string() << ".";
+			<< ". Project root: " << invocation.projectRoot.string()
+			<< ". Process working directory: " << invocation.processWorkingDirectory.string() << ".";
+		if (!processError.empty())
+		{
+			stream << " Process launch details: " << processError;
+		}
 		return stream.str();
 	}
 
@@ -78,7 +99,8 @@ namespace TerraEngine::Editor::Scripting
 		std::ostringstream stream;
 		stream << "dotnet build failed for Assembly-CSharp with exit code " << exitCode
 			<< ". Command: " << invocation.commandLine
-			<< ". Working directory: " << invocation.workingDirectory.string() << ".";
+			<< ". Project root: " << invocation.projectRoot.string()
+			<< ". Process working directory: " << invocation.processWorkingDirectory.string() << ".";
 		if (!capturedOutput.empty())
 		{
 			stream << " Captured output:\n" << capturedOutput;

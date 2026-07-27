@@ -14,8 +14,28 @@ namespace TerraEngine
 	public class Component
 	{
 		private static readonly ConcurrentDictionary<Type, string> s_nativeTypeNames = new();
+		private Object _object = null!;
 
-		public Object Object { get; internal set; } = null!;
+		public Object Object
+		{
+			get => _object;
+			internal set
+			{
+				_object = value;
+				// Native wrappers such as Animator must copy their generation-safe
+				// identity as soon as Object.GetComponent constructs them. Keeping the
+				// hook assembly-internal prevents gameplay types from intercepting the
+				// engine-owned binding step.
+				OnObjectAssigned();
+			}
+		}
+
+		internal virtual void OnObjectAssigned()
+		{
+			// Most reflected components need no extra runtime identity. Animation
+			// overrides this hook without changing the existing generic wrappers.
+		}
+
 		public Transform Transform => Object.Transform;
 		// Every native Component<Derived> reflects this shared active flag. Keeping
 		// it on the base class gives all current and future wrappers one consistent
@@ -96,6 +116,7 @@ namespace TerraEngine
 				nameof(ColliderSet) => "ColliderSetComponent",
 				nameof(ConstraintSet) => "ConstraintSetComponent",
 				nameof(CharacterController) => "CharacterControllerComponent",
+				nameof(Animation.Animator) => "AnimatorComponent",
 				_ => managedType.Name
 			};
 		}

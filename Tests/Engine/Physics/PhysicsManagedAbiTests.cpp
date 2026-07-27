@@ -58,13 +58,17 @@ namespace TerraEngine::Tests {
 		registry.Add("Engine.PhysicsManagedAbi.NativeAotVtableKeepsPhysicsTailAppendOnly", [](TestContext& context) {
 			context.Expect(kManagedVTablePhysicsVersion == 2U && kManagedVTableV1Size == 112U
 				&& offsetof(ManagedVTable, tableSize) == kManagedVTableV1Size
-				&& sizeof(ManagedVTable) == kManagedVTableV2Size,
+				&& kManagedVTableV2Size == 136U
+				&& offsetof(ManagedVTable, getAnimationAbiVersion) == kManagedVTableV2Size
+				&& kManagedVTableAnimationVersion == 3U
+				&& sizeof(ManagedVTable) == kManagedVTableV3Size,
 				"The NativeAOT physics hooks must remain an append-only v2 tail after the v1 table.");
 
 			std::ifstream managedMirror{std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Engine/Managed/Source/Export/ExportVTable.cs"};
 			const std::string source{std::istreambuf_iterator<char>(managedMirror), std::istreambuf_iterator<char>()};
-			context.Expect(source.find("Size = 136") != std::string::npos
+			context.Expect(source.find("Size = 152") != std::string::npos
 				&& source.find("FieldOffset(120)") != std::string::npos
+				&& source.find("FieldOffset(128)") != std::string::npos
 				&& source.find("GetPhysicsAbiVersion") != std::string::npos
 				&& source.find("DispatchPhysicsEventBatch") != std::string::npos,
 				"The managed NativeAOT mirror must expose the native physics ABI version and protected event-dispatch hooks at matching offsets.");

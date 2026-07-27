@@ -83,6 +83,9 @@ and MCP `tools/call` content envelopes remain compatible.
 - Scene graph: `scene.list_objects`, `object.create`, `object.set_metadata`,
   `object.set_parent`, `object.delete`, `component.list`, `component.get`,
   `component.add`, `component.remove`, and `component.set_property`.
+  `scene.list_objects` walks the complete hierarchy in deterministic UUID order;
+  each row retains the compatibility `parent` entity and adds `parentUuid` for
+  stable hierarchy bindings across scene reloads.
 
 Project creation/opening remain native editor actions and are not advertised by
 MCP. Scene and asset paths are normalized against the owner-opened project. Dirty
@@ -202,7 +205,11 @@ Approval policy is `none`, `destructive`, or `high_impact`. Required approvals
 are created and resolved only by the editor Preferences UI, expire safely, and
 are bound to the normalized request fingerprint. Approving a different request,
 changing its arguments, or replaying an expired approval does not authorize the
-call. Every approval outcome is retained in bounded activity history.
+call. The loopback transport closes each HTTP request after its response, so
+pending approvals remain bound to the current enabled-listener session across
+those ordinary socket closures. Disabling the bridge, re-enabling it, or
+restarting the editor starts a new listener session and invalidates every older
+prompt. Every approval outcome is retained in bounded activity history.
 
 State-changing calls include a correlation ID and return affected identifiers.
 When supplied, an idempotency key is scoped to the client, capability, and
@@ -253,6 +260,8 @@ desktop input emulation.
 
 Jobs, idempotency results, cursors, logs, approvals, and activity are retained
 only for the current editor session; clients must rediscover after restart.
+Approvals have the narrower lifetime of one continuously enabled listener and
+are canceled whenever that listener is disabled.
 Project artifacts and saved editor data retain their normal persistence. Active
 jobs are cooperative rather than forcibly terminated: an already committed
 atomic change remains committed, while an uncommitted transaction remains
@@ -263,3 +272,15 @@ project, active scene, renderer, stopped Play Mode, or implemented subsystem may
 be advertised as unavailable with a structured reason. Future engine features
 remain absent until their component or subsystem registers a complete automation
 descriptor and executable handler.
+
+## Animation Provider
+
+The optional `animation` provider follows the same read-only, write-mode, and
+approval rules as other MCP providers. Its asset and authoring mutations use
+expected generations and idempotency keys; long-running work uses bounded
+session-retained jobs. It has no authority to open/close projects or control the
+application lifecycle. Its runtime residency and profiler reads consume copied,
+bounded diagnostics snapshots and do not enable detailed collection when an
+automation client merely polls a collapsed surface. See
+[Animation automation](Animation/Automation.md) for the operation and recovery
+workflow.

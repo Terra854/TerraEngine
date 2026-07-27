@@ -69,6 +69,10 @@ namespace TerraEngine::EditorTests {
 			layout.shaderDirectory = layout.editorDirectory / "Shaders";
 			layout.fontDirectory = layout.editorDirectory / "Fonts";
 			layout.managedDirectory = layout.editorDirectory / "Managed";
+			layout.nativeAotToolchainDirectory = layout.editorDirectory / "NativeAotNuGet";
+			layout.nativeAotNugetConfig = layout.nativeAotToolchainDirectory / "NuGet.Config";
+			layout.nativeAotNugetFeed = layout.nativeAotToolchainDirectory / "feed";
+			layout.nativeAotGlobalJson = layout.nativeAotToolchainDirectory / "global.json";
 			layout.executablePath = executablePath;
 			layout.modelPackageCompiler = layout.editorDirectory
 				/ ("TerraEngineModelPackageCompiler" + GetExportExecutableSuffix(platform));
@@ -81,6 +85,9 @@ namespace TerraEngine::EditorTests {
 			TouchParityFile(layout.launcherDirectory / GetExportGlfwLibraryName(platform));
 			std::filesystem::create_directories(layout.engineDirectory);
 			std::filesystem::create_directories(layout.managedDirectory);
+			std::filesystem::create_directories(layout.nativeAotNugetFeed);
+			TouchParityFile(layout.nativeAotNugetConfig, "offline-config");
+			TouchParityFile(layout.nativeAotGlobalJson, "sdk-pin");
 			TouchParityFile(layout.fontDirectory / "Roboto-Medium.ttf", "font-payload");
 
 			// Package inspection deliberately requires the complete runtime shader

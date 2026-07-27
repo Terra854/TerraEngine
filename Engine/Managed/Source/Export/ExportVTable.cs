@@ -45,9 +45,13 @@ namespace TerraEngine.Export
 		public int WorkerDispatch;
 	}
 
-	[StructLayout(LayoutKind.Explicit, Size = 136)]
+	[StructLayout(LayoutKind.Explicit, Size = 152)]
 	public unsafe struct ManagedVTable
 	{
+		// This released ABI size belongs to InitManagedRuntimeV3 forever. A future
+		// tail must add a new constant and initializer instead of changing this one.
+		public const ulong V3Size = 152;
+
 		[FieldOffset(0)]  public ulong Version;
 		[FieldOffset(8)]  public delegate* unmanaged[Cdecl]<int>                                          GetScriptCount;
 		[FieldOffset(16)] public delegate* unmanaged[Cdecl]<ulong*, int, void>                            GetScriptIds;
@@ -66,5 +70,9 @@ namespace TerraEngine.Export
 		[FieldOffset(112)] public ulong TableSize;
 		[FieldOffset(120)] public delegate* unmanaged[Cdecl]<uint> GetPhysicsAbiVersion;
 		[FieldOffset(128)] public delegate* unmanaged[Cdecl]<void*, uint, ulong, uint, ulong, void> DispatchPhysicsEventBatch;
+		// Appended v3 tail. The engine validates both Version and TableSize before
+		// calling either animation pointer, preserving v1/v2 binary compatibility.
+		[FieldOffset(136)] public delegate* unmanaged[Cdecl]<ushort> GetAnimationAbiVersion;
+		[FieldOffset(144)] public delegate* unmanaged[Cdecl]<void*, uint, long, ulong, uint, uint, void> DispatchAnimationEventBatch;
 	}
 }

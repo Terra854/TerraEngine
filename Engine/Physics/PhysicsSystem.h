@@ -3,6 +3,7 @@
 #pragma once
 
 #include "Core/SystemBase.h"
+#include "Animation/Ragdoll/RagdollPhysicsBridge.h"
 #include "PhysicsAuthoringSnapshot.h"
 #include "PhysicsDiagnostics.h"
 #include "PhysicsWorld.h"
@@ -53,8 +54,28 @@ namespace TerraEngine::Physics {
 		bool IsPaused() const;
 		float FixedTimeStep() const;
 		PhysicsWorldHandle WorldHandle() const;
+		// Returns the current physics-clock generation for copied cross-system
+		// requests. Animation must not substitute its independent frame counter:
+		// a later physics extraction validates this exact simulation time domain.
+		Animation::AnimationFixedTick CurrentFixedTick() const;
 
 		PhysicsCommandReceipt SubmitCommand(PhysicsCommand command);
+		// Ragdoll producers may run in animation, scripts, or worker preparation.
+		// They only enqueue copied typed requests here; PhysicsCommandCommit owns the
+		// later drain and therefore no producer mutates the live provider world.
+		Animation::AnimationStatus SubmitRagdollPhysicsRequest(Animation::RagdollPhysicsRequest request);
+		Animation::AnimationStatus SubmitRagdollPhysicsRequestBatch(
+			std::span<const Animation::RagdollPhysicsRequest> requests);
+		std::shared_ptr<const Animation::PhysicsPoseSnapshot> LatestRagdollPhysicsPose(
+			std::uint64_t ragdollId,
+			const Animation::RagdollGenerationStamp& expectedGeneration) const;
+		std::shared_ptr<const Animation::PhysicsPoseSnapshot> LatestRagdollPhysicsPoseAtOrAfter(
+			std::uint64_t ragdollId,
+			const Animation::RagdollGenerationStamp& expectedIdentity) const;
+		std::shared_ptr<const Animation::RagdollPhysicsResultSnapshot> LatestRagdollPhysicsResults() const;
+		// Animation root-motion and other deferred producers use the same truthful
+		// command-id cancellation path as the world-owned queue.
+		bool CancelCommand(PhysicsCommandId commandId);
 		PhysicsQueryReceipt SubmitQuery(PhysicsQueryRequest request);
 		PhysicsQueryBatchSubmission SubmitQueryBatch(std::span<const PhysicsQueryRequest> requests);
 		bool CancelQuery(PhysicsQueryHandle handle);

@@ -28,6 +28,11 @@ namespace TerraEngine.Export
 		[LibraryImport(EngineDll, EntryPoint = "Native_Physics_GetAbiVersion")]
 		public static partial uint GetPhysicsAbiVersion();
 
+		// Export diagnostics can compare the loaded native animation ABI with the
+		// managed AnimationAbi.Version constant before exchanging copied packets.
+		[LibraryImport(EngineDll, EntryPoint = "Native_Animation_GetAbiVersion")]
+		public static partial ushort GetAnimationAbiVersion();
+
 		/// <summary>
 		/// Writes a message to the engine's log stream.
 		/// </summary>

@@ -637,6 +637,99 @@ const char* ToString(ProfilerCaptureDetailLevel level)
 	return "detailed";
 }
 
+const char* ToString(ProfilerAnimationStage stage)
+{
+	switch (stage)
+	{
+	case ProfilerAnimationStage::SchedulerMembership:
+		return "Animation.SchedulerMembership";
+	case ProfilerAnimationStage::WorkPlanning:
+		return "Animation.WorkPlanning";
+	case ProfilerAnimationStage::CpuGraphEvaluation:
+		return "Animation.CpuGraphEvaluation";
+	case ProfilerAnimationStage::MotionMatching:
+		return "Animation.MotionMatching";
+	case ProfilerAnimationStage::IkSolve:
+		return "Animation.IkSolve";
+	case ProfilerAnimationStage::RagdollHandoff:
+		return "Animation.RagdollHandoff";
+	case ProfilerAnimationStage::CpuAuthority:
+		return "Animation.CpuAuthority";
+	case ProfilerAnimationStage::GpuPlanning:
+		return "Animation.GpuPlanning";
+	case ProfilerAnimationStage::GpuEvaluation:
+		return "Animation.GpuEvaluation";
+	case ProfilerAnimationStage::Deformation:
+		return "Animation.Deformation";
+	case ProfilerAnimationStage::ProtectedPublication:
+		return "Animation.ProtectedPublication";
+	case ProfilerAnimationStage::Presentation:
+		return "Animation.Presentation";
+	case ProfilerAnimationStage::Count:
+		break;
+	}
+	return "Animation.Unknown";
+}
+
+bool ValidateProfilerAnimationFrameTelemetry(const ProfilerAnimationFrameTelemetry& telemetry) noexcept
+{
+	const ProfilerAnimationFrameSummary& summary = telemetry.summary;
+	if (summary.schemaVersion != 1U
+		|| (summary.availableEvidenceMask & ~kProfilerAnimationAllEvidence) != 0U
+		|| summary.activeAnimators == 0U
+		|| summary.evaluatedAnimators > summary.activeAnimators
+		|| telemetry.details.size() > kMaximumProfilerAnimationDetailRecordsPerFrame
+		|| telemetry.details.size() > summary.activeAnimators)
+	{
+		return false;
+	}
+
+	// Mode buckets may omit suspended work but must never claim more instances
+	// than the active set. Subtraction avoids an overflow in the three-way sum.
+	if (summary.cpuAnimators > summary.activeAnimators
+		|| summary.gpuVisualAnimators > summary.activeAnimators - summary.cpuAnimators
+		|| summary.hybridAnimators > summary.activeAnimators - summary.cpuAnimators - summary.gpuVisualAnimators)
+	{
+		return false;
+	}
+	if (((summary.availableEvidenceMask & kProfilerAnimationWorkerEvidence) != 0U
+			&& summary.workerJobs != 0U && summary.workerCount == 0U)
+		|| summary.workerBusyNanoseconds > summary.workerCapacityNanoseconds
+		|| summary.frameArenaBytes > summary.frameArenaHighWaterBytes
+		|| summary.poseCacheBytes > summary.poseCacheHighWaterBytes
+		|| summary.gpuResidentBytes > summary.gpuResidentHighWaterBytes
+		|| summary.completePoseReadbackBytes > summary.gpuReadbackBytes
+		|| summary.boundedMetadataReadbackBytes > summary.gpuReadbackBytes)
+	{
+		return false;
+	}
+
+	for (const ProfilerAnimationStageTiming& timing : summary.stageTimings)
+	{
+		// A number without a clock provenance is invalid, and a sampled record must
+		// also be available. A measured stage may legitimately take zero time.
+		if ((!timing.available && timing.nanoseconds != 0U) || (timing.sampled && !timing.available))
+		{
+			return false;
+		}
+	}
+	for (std::size_t index = 0U; index < telemetry.details.size(); ++index)
+	{
+		if (telemetry.details[index].stableInstanceId == 0U)
+		{
+			return false;
+		}
+		for (std::size_t prior = 0U; prior < index; ++prior)
+		{
+			if (telemetry.details[prior].stableInstanceId == telemetry.details[index].stableInstanceId)
+			{
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
 // MakeTimestampForFileName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string MakeTimestampForFileName()
 {
@@ -830,6 +923,21 @@ bool SaveCaptureDocument(const ProfilerCaptureDocument& document, const std::fil
 	// escape hatch never rewrites an existing artifact in place.
 	if (document.payloadVersion >= kProfilerCaptureV2PayloadVersion)
 	{
+		for (const ProfilerFrameRecord& frame : document.frames)
+		{
+			if (!frame.animationTelemetry)
+			{
+				continue;
+			}
+			if (!ValidateProfilerAnimationFrameTelemetry(*frame.animationTelemetry)
+				|| !frame.animationDiagnostics.has_value() || frame.animationDiagnostics->dormant
+				|| frame.animationDiagnostics->schedulerMembershipChecks
+					!= frame.animationTelemetry->summary.schedulerMembershipChecks)
+			{
+				outError = "Profiler capture contains invalid or conflicting animation telemetry.";
+				return false;
+			}
+		}
 		return SaveProfilerCaptureV2(document, path, outError);
 	}
 	try
@@ -847,12 +955,15 @@ bool SaveCaptureDocument(const ProfilerCaptureDocument& document, const std::fil
 			{"settings", SettingsToJson(document.metadata.settings)}
 		};
 		json["frameCount"] = document.frames.size();
-		json["frames"] = nlohmann::json::array();
+		json["frames"] = nlohmann::ordered_json::array();
 
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const ProfilerFrameRecord& frame : document.frames)
 		{
-			nlohmann::json frameJson;
+			// Keep every nested value in the same ordered_json domain as the root.
+			// GCC 14 correctly treats moving a plain json value into an ordered_json
+			// array as ambiguous because both value and object-entry overloads apply.
+			nlohmann::ordered_json frameJson;
 			frameJson["frameIndex"] = frame.frameIndex;
 			frameJson["frameStartMs"] = frame.frameStartMs;
 			frameJson["durationMs"] = frame.durationMs;
@@ -872,7 +983,7 @@ bool SaveCaptureDocument(const ProfilerCaptureDocument& document, const std::fil
 					{"queryMs", physics.queryMs}, {"publishMs", physics.publishMs}
 				};
 			}
-			frameJson["timingStreams"] = nlohmann::json::array();
+			frameJson["timingStreams"] = nlohmann::ordered_json::array();
 			// Timing streams are stored beside modules because they answer a
 			// different question: "which clock measured this frame?" rather than
 			// "which profiler module owned these samples?"
@@ -888,15 +999,15 @@ bool SaveCaptureDocument(const ProfilerCaptureDocument& document, const std::fil
 					{"statusReason", stream.statusReason}
 				});
 			}
-			frameJson["modules"] = nlohmann::json::array();
+			frameJson["modules"] = nlohmann::ordered_json::array();
 			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (const ProfilerModuleSummary& module : frame.moduleSummaries)
 			{
-				nlohmann::json moduleJson;
+				nlohmann::ordered_json moduleJson;
 				moduleJson["moduleId"] = ModuleIdToStableName(module.moduleId);
 				moduleJson["available"] = module.available;
 				moduleJson["totalMs"] = module.totalMs;
-				moduleJson["metrics"] = nlohmann::json::array();
+				moduleJson["metrics"] = nlohmann::ordered_json::array();
 				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 				for (const ProfilerMetric& metric : module.metrics)
 				{
@@ -904,7 +1015,7 @@ bool SaveCaptureDocument(const ProfilerCaptureDocument& document, const std::fil
 				}
 				frameJson["modules"].push_back(std::move(moduleJson));
 			}
-			frameJson["samples"] = nlohmann::json::array();
+			frameJson["samples"] = nlohmann::ordered_json::array();
 			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (const ProfilerSample& sample : frame.samples)
 			{
@@ -1230,6 +1341,62 @@ namespace
 constexpr std::uint32_t kV2MaximumStringCount = 1u << 20u;
 constexpr std::uint32_t kV2MaximumFramesPerChunk = 4096u;
 
+// IsPublicAnimationDiagnosticsMetric identifies the three legacy-facing
+// profiler metrics represented by the compact typed V2 animation field.
+// Keeping the names here makes the writer and reader agree on exactly which
+// records must not be stored twice for every dormant frame.
+bool IsPublicAnimationDiagnosticsMetric(std::string_view name)
+{
+	return name == "Animation.SchedulerMembershipChecks"
+		|| name == "Animation.Dormant"
+		|| name == "Animation.BaselineIdentityMatched";
+}
+
+// AddOrReplaceMetric restores the public profiler surface after the reader has
+// decoded compact animation facts. The file format retains typed scalars while
+// callers continue to receive the established string-named metrics.
+void AddOrReplaceMetric(ProfilerModuleSummary& module, std::string name, double value, std::string unit)
+{
+	for (ProfilerMetric& metric : module.metrics)
+	{
+		if (metric.name == name)
+		{
+			metric.value = value;
+			metric.unit = std::move(unit);
+			return;
+		}
+	}
+	module.metrics.push_back({std::move(name), value, std::move(unit)});
+}
+
+// MaterializeAnimationDiagnosticsMetrics removes any legacy duplicate records
+// and recreates the three public metrics from the authoritative typed facts.
+// This lets new compact captures and old metric-based V2 captures coexist.
+void MaterializeAnimationDiagnosticsMetrics(ProfilerFrameRecord& frame)
+{
+	if (!frame.animationDiagnostics.has_value())
+	{
+		return;
+	}
+
+	for (ProfilerModuleSummary& module : frame.moduleSummaries)
+	{
+		if (module.moduleId != ProfilerModuleId::CpuEngine)
+		{
+			continue;
+		}
+
+		std::erase_if(module.metrics, [](const ProfilerMetric& metric) {
+			return IsPublicAnimationDiagnosticsMetric(metric.name);
+		});
+		const ProfilerAnimationDiagnosticsFacts& facts = *frame.animationDiagnostics;
+		AddOrReplaceMetric(module, "Animation.SchedulerMembershipChecks", static_cast<double>(facts.schedulerMembershipChecks), "count");
+		AddOrReplaceMetric(module, "Animation.Dormant", facts.dormant ? 1.0 : 0.0, "boolean");
+		AddOrReplaceMetric(module, "Animation.BaselineIdentityMatched", facts.baselineIdentityMatched ? 1.0 : 0.0, "boolean");
+		return;
+	}
+}
+
 std::uint64_t ToNanoseconds(double milliseconds)
 {
 	return static_cast<std::uint64_t>(std::max(0.0, milliseconds) * 1000000.0 + 0.5);
@@ -1294,6 +1461,12 @@ void CollectFrameStrings(V2StringTable& table, const ProfilerFrameRecord& frame)
 	{
 		for (const ProfilerMetric& metric : module.metrics)
 		{
+			// Typed facts replace these public metric records in a V2 payload, so
+			// their strings do not belong in the artifact string table either.
+			if (frame.animationDiagnostics.has_value() && IsPublicAnimationDiagnosticsMetric(metric.name))
+			{
+				continue;
+			}
 			table.Intern(metric.name); table.Intern(metric.unit);
 		}
 	}
@@ -1386,13 +1559,167 @@ bool KeepOptionalV2Data(const ProfilerFrameRecord& frame, const ProfilerCaptureS
 	return false;
 }
 
+nlohmann::json PackAnimationTelemetryV2(
+	const ProfilerAnimationFrameTelemetry& telemetry,
+	bool includeDetails)
+{
+	const ProfilerAnimationFrameSummary& summary = telemetry.summary;
+	nlohmann::json stages = nlohmann::json::array();
+	for (const ProfilerAnimationStageTiming& timing : summary.stageTimings)
+	{
+		stages.push_back(nlohmann::json::array({timing.nanoseconds, timing.available, timing.sampled}));
+	}
+	nlohmann::json result = {
+		{"v", summary.schemaVersion},
+		{"e", summary.availableEvidenceMask},
+		{"c", nlohmann::json::array({
+			summary.schedulerMembershipChecks, summary.activeAnimators, summary.evaluatedAnimators,
+			summary.cpuAnimators, summary.gpuVisualAnimators, summary.hybridAnimators,
+			summary.workerCount, summary.workerJobs, summary.workerUsefulItems,
+			summary.workerBusyNanoseconds, summary.workerCapacityNanoseconds,
+			summary.sampledJoints, summary.blendedTracks, summary.evaluatedGraphNodes,
+			summary.motionMatchingCandidates, summary.ikChains, summary.ragdollBodies,
+			summary.gpuEvaluatedJoints, summary.gpuBatches,
+			summary.frameArenaBytes, summary.frameArenaHighWaterBytes,
+			summary.poseCacheBytes, summary.poseCacheHighWaterBytes,
+			summary.gpuResidentBytes, summary.gpuResidentHighWaterBytes,
+			summary.gpuTransferBytes, summary.gpuReadbackBytes,
+			summary.completePoseReadbackBytes, summary.boundedMetadataReadbackBytes,
+			summary.gpuWaitCount, summary.schedulerWaitCount, summary.protectedBoundaryStallCount,
+			summary.poseCacheHits, summary.poseCacheMisses,
+			summary.clipCacheHits, summary.clipCacheMisses,
+			summary.residencyHits, summary.residencyMisses})},
+		{"s", std::move(stages)}
+	};
+	if (includeDetails && !telemetry.details.empty())
+	{
+		result["d"] = nlohmann::json::array();
+		for (const ProfilerAnimationDetailRecord& detail : telemetry.details)
+		{
+			result["d"].push_back(nlohmann::json::array({
+				detail.stableInstanceId, detail.executionMode, detail.batchOrdinal,
+				detail.sampledJoints, detail.evaluatedGraphNodes, detail.transferBytes,
+				detail.readbackBytes, detail.evaluationNanoseconds, detail.poseCacheReused}));
+		}
+	}
+	return result;
+}
+
+bool UnpackAnimationTelemetryV2(
+	const nlohmann::json& json,
+	ProfilerAnimationFrameTelemetry& out,
+	std::string& error)
+{
+	if (!json.is_object() || !json.contains("v") || !json.at("v").is_number_unsigned()
+		|| !json.contains("e") || !json.at("e").is_number_unsigned()
+		|| !json.contains("c") || !json.at("c").is_array() || json.at("c").size() != 38U
+		|| !json.contains("s") || !json.at("s").is_array()
+		|| json.at("s").size() != kProfilerAnimationStageCount)
+	{
+		error = "Profiler v2 has malformed animation telemetry.";
+		return false;
+	}
+	for (const nlohmann::json& value : json.at("c"))
+	{
+		if (!value.is_number_unsigned())
+		{
+			error = "Profiler v2 animation telemetry has a non-unsigned counter.";
+			return false;
+		}
+	}
+
+	ProfilerAnimationFrameSummary& summary = out.summary;
+	summary.schemaVersion = json.at("v").get<std::uint32_t>();
+	summary.availableEvidenceMask = json.at("e").get<std::uint32_t>();
+	const nlohmann::json& counters = json.at("c");
+	std::size_t index = 0U;
+	auto next = [&counters, &index]() { return counters.at(index++).get<std::uint64_t>(); };
+	summary.schedulerMembershipChecks = next(); summary.activeAnimators = next(); summary.evaluatedAnimators = next();
+	summary.cpuAnimators = next(); summary.gpuVisualAnimators = next(); summary.hybridAnimators = next();
+	summary.workerCount = next(); summary.workerJobs = next(); summary.workerUsefulItems = next();
+	summary.workerBusyNanoseconds = next(); summary.workerCapacityNanoseconds = next();
+	summary.sampledJoints = next(); summary.blendedTracks = next(); summary.evaluatedGraphNodes = next();
+	summary.motionMatchingCandidates = next(); summary.ikChains = next(); summary.ragdollBodies = next();
+	summary.gpuEvaluatedJoints = next(); summary.gpuBatches = next();
+	summary.frameArenaBytes = next(); summary.frameArenaHighWaterBytes = next();
+	summary.poseCacheBytes = next(); summary.poseCacheHighWaterBytes = next();
+	summary.gpuResidentBytes = next(); summary.gpuResidentHighWaterBytes = next();
+	summary.gpuTransferBytes = next(); summary.gpuReadbackBytes = next();
+	summary.completePoseReadbackBytes = next(); summary.boundedMetadataReadbackBytes = next();
+	summary.gpuWaitCount = next(); summary.schedulerWaitCount = next(); summary.protectedBoundaryStallCount = next();
+	summary.poseCacheHits = next(); summary.poseCacheMisses = next();
+	summary.clipCacheHits = next(); summary.clipCacheMisses = next();
+	summary.residencyHits = next(); summary.residencyMisses = next();
+
+	for (std::size_t stageIndex = 0U; stageIndex < kProfilerAnimationStageCount; ++stageIndex)
+	{
+		const nlohmann::json& stage = json.at("s").at(stageIndex);
+		if (!stage.is_array() || stage.size() != 3U || !stage.at(0).is_number_unsigned()
+			|| !stage.at(1).is_boolean() || !stage.at(2).is_boolean())
+		{
+			error = "Profiler v2 has malformed animation stage timing.";
+			return false;
+		}
+		summary.stageTimings[stageIndex] = ProfilerAnimationStageTiming{
+			stage.at(0).get<std::uint64_t>(), stage.at(1).get<bool>(), stage.at(2).get<bool>()};
+	}
+
+	if (const auto details = json.find("d"); details != json.end())
+	{
+		if (!details->is_array() || details->size() > kMaximumProfilerAnimationDetailRecordsPerFrame)
+		{
+			error = "Profiler v2 animation detail exceeds its bounded schema.";
+			return false;
+		}
+		out.details.reserve(details->size());
+		for (const nlohmann::json& value : *details)
+		{
+			if (!value.is_array() || value.size() != 9U
+				|| !value.at(0).is_number_unsigned() || !value.at(1).is_number_unsigned()
+				|| !value.at(2).is_number_unsigned() || !value.at(3).is_number_unsigned()
+				|| !value.at(4).is_number_unsigned() || !value.at(5).is_number_unsigned()
+				|| !value.at(6).is_number_unsigned() || !value.at(7).is_number_unsigned()
+				|| !value.at(8).is_boolean())
+			{
+				error = "Profiler v2 has malformed animation detail.";
+				return false;
+			}
+			out.details.push_back(ProfilerAnimationDetailRecord{
+				value.at(0).get<std::uint64_t>(), value.at(1).get<std::uint32_t>(),
+				value.at(2).get<std::uint32_t>(), value.at(3).get<std::uint64_t>(),
+				value.at(4).get<std::uint64_t>(), value.at(5).get<std::uint64_t>(),
+				value.at(6).get<std::uint64_t>(), value.at(7).get<std::uint64_t>(),
+				value.at(8).get<bool>()});
+		}
+	}
+	if (!ValidateProfilerAnimationFrameTelemetry(out))
+	{
+		error = "Profiler v2 contains invalid animation telemetry.";
+		return false;
+	}
+	return true;
+}
+
 nlohmann::json PackFrameV2(const ProfilerFrameRecord& frame, const ProfilerCaptureSettings& settings, V2StringTable& table)
 {
 	nlohmann::json result = {
 		{"i", frame.frameIndex}, {"s", ToNanoseconds(frame.frameStartMs)},
 		{"d", ToNanoseconds(frame.durationMs)}, {"c", frame.complete}
 	};
+	if (frame.animationDiagnostics.has_value())
+	{
+		// The typed facts are critical bounded evidence, not optional detail. They
+		// use one compact array instead of three dynamically named CPU metrics.
+		const ProfilerAnimationDiagnosticsFacts& facts = *frame.animationDiagnostics;
+		result["x"] = nlohmann::json::array({facts.schedulerMembershipChecks, facts.dormant, facts.baselineIdentityMatched});
+	}
 	const bool includeOptional = KeepOptionalV2Data(frame, settings);
+	if (frame.animationTelemetry)
+	{
+		// Aggregate counters and stage availability are critical every-frame proof;
+		// only the bounded per-instance rows follow the optional detail policy.
+		result["y"] = PackAnimationTelemetryV2(*frame.animationTelemetry, includeOptional);
+	}
 	if (includeOptional)
 	{
 		result["t"] = nlohmann::json::array();
@@ -1408,6 +1735,12 @@ nlohmann::json PackFrameV2(const ProfilerFrameRecord& frame, const ProfilerCaptu
 			nlohmann::json metrics = nlohmann::json::array();
 			for (const ProfilerMetric& metric : module.metrics)
 			{
+				// The compact typed field above is authoritative whenever it exists.
+				// Do not serialize the public presentation aliases a second time.
+				if (frame.animationDiagnostics.has_value() && IsPublicAnimationDiagnosticsMetric(metric.name))
+				{
+					continue;
+				}
 				metrics.push_back(nlohmann::json::array({table.Intern(metric.name), metric.value, table.Intern(metric.unit)}));
 			}
 			result["m"].push_back(nlohmann::json::array({static_cast<std::uint8_t>(module.moduleId), module.available, ToNanoseconds(module.totalMs), metrics}));
@@ -1494,6 +1827,38 @@ bool UnpackFrameV2(const nlohmann::json& json, const std::vector<std::string>& s
 		out.frameStartMs = ToMilliseconds(json.at("s").get<std::uint64_t>());
 		out.durationMs = ToMilliseconds(json.at("d").get<std::uint64_t>());
 		out.complete = json.at("c").get<bool>();
+		if (const auto it = json.find("x"); it != json.end())
+		{
+			// Reject malformed typed facts before exposing a partially reconstructed
+			// frame. Older V2 captures simply omit this optional additive field.
+			if (!it->is_array() || it->size() != 3u || !(*it)[0].is_number_unsigned()
+				|| !(*it)[1].is_boolean() || !(*it)[2].is_boolean())
+			{
+				error = "Profiler v2 has malformed compact animation diagnostics.";
+				return false;
+			}
+			out.animationDiagnostics = ProfilerAnimationDiagnosticsFacts{
+				(*it)[0].get<std::uint64_t>(), (*it)[1].get<bool>(), (*it)[2].get<bool>()};
+		}
+		if (const auto it = json.find("y"); it != json.end())
+		{
+			ProfilerAnimationFrameTelemetry telemetry;
+			if (!UnpackAnimationTelemetryV2(*it, telemetry, error))
+			{
+				return false;
+			}
+			// A typed active record and the compact common facts must agree. New
+			// writers always emit both; rejecting a mismatch prevents split evidence.
+			if (!out.animationDiagnostics.has_value()
+				|| out.animationDiagnostics->dormant
+				|| out.animationDiagnostics->schedulerMembershipChecks != telemetry.summary.schedulerMembershipChecks)
+			{
+				error = "Profiler v2 animation telemetry conflicts with compact diagnostics.";
+				return false;
+			}
+			out.animationTelemetry =
+				std::make_shared<const ProfilerAnimationFrameTelemetry>(std::move(telemetry));
+		}
 		if (const auto it = json.find("t"); it != json.end()) for (const auto& value : *it)
 		{
 			if (!value.is_array() || value.size() != 7u) { error = "Profiler v2 has malformed timing data."; return false; }
@@ -1539,6 +1904,7 @@ bool UnpackFrameV2(const nlohmann::json& json, const std::vector<std::string>& s
 		}
 		if (const auto it = json.find("r"); it != json.end()) { if (!it->is_array() || it->size() != 4u) { error = "Profiler v2 has malformed responsiveness data."; return false; } FrameResponsivenessRecord record; record.frameIndex = (*it)[0].get<std::uint64_t>(); record.presentationSequence = (*it)[3].get<std::uint64_t>(); if (!UnpackDuration((*it)[1], strings, record.inputToPresentationDuration, error) || !UnpackDuration((*it)[2], strings, record.frameDuration, error) || !ValidateFrameResponsivenessRecord(record).valid) return false; out.responsiveness = std::move(record); }
 		if (const auto it = json.find("v"); it != json.end()) { if (!it->is_array() || it->size() != 8u) { error = "Profiler v2 has malformed physics-volume data."; return false; } PhysicsWorkVolumeRecord volume{(*it)[0].get<std::uint64_t>(), (*it)[1].get<std::uint64_t>(), (*it)[2].get<std::uint64_t>(), (*it)[3].get<std::uint64_t>(), (*it)[4].get<std::uint64_t>(), (*it)[5].get<std::uint64_t>(), (*it)[6].get<std::uint64_t>(), (*it)[7].get<std::uint64_t>()}; if (!ValidatePhysicsWorkVolumeRecord(volume).valid) { error = "Profiler v2 has invalid physics-volume data."; return false; } out.physicsWorkVolume = volume; }
+		MaterializeAnimationDiagnosticsMetrics(out);
 		return true;
 	}
 	catch (const nlohmann::json::exception& exception)

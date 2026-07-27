@@ -1,0 +1,141 @@
+{
+	"schemaVersion": 1,
+	"representation": "production-prefab-overlays",
+	"deterministic": true,
+	"deployment": {
+		"actorRoot": "Assets/AdvancedActors",
+		"cookedAssetRoot": "Assets/Advanced"
+	},
+	"actors": [
+		{
+			"file": "SourceMotionActor.teprefab",
+			"projectPath": "Assets/AdvancedActors/SourceMotionActor.teprefab",
+			"metaFile": "SourceMotionActor.teprefab.meta",
+			"prefabAssetGuidHex": "5445414e303433414456414354000001",
+			"rootObjectUuidHex": "5445414e3034334143544f424a000001",
+			"sha256": "5fbdfe57f450e3fd66073e45d783aa2fd01d0f03f0858bdc492903d4cf5701be",
+			"animatorComponent": {
+				"schemaVersion": 1,
+				"defaultClipAssetGuidHex": "5445414e303433414456464958000003",
+				"skeletonOverrideAssetGuidHex": "5445414e303433414456464958000001",
+				"retargetProfileOverrideAssetGuidHex": "00000000000000000000000000000000",
+				"ragdollProfileOverrideAssetGuidHex": "00000000000000000000000000000000",
+				"motionDatabaseOverrideAssetGuidHex": "5445414e303433414456464958000006"
+			}
+		},
+		{
+			"file": "SourceBuiltMotionActor.teprefab",
+			"projectPath": "Assets/AdvancedActors/SourceBuiltMotionActor.teprefab",
+			"metaFile": "SourceBuiltMotionActor.teprefab.meta",
+			"prefabAssetGuidHex": "5445414e303433414456414354000005",
+			"rootObjectUuidHex": "5445414e3034334143544f424a000004",
+			"sha256": "a90c8c490535f6af30799b2bd4c5f37543a7fe1a6b4e85f407a803a5f12ad091",
+			"animatorComponent": {
+				"schemaVersion": 1,
+				"defaultClipAssetGuidHex": "5445414e303433414456464958000003",
+				"skeletonOverrideAssetGuidHex": "5445414e303433414456464958000001",
+				"retargetProfileOverrideAssetGuidHex": "00000000000000000000000000000000",
+				"ragdollProfileOverrideAssetGuidHex": "00000000000000000000000000000000",
+				"motionDatabaseOverrideAssetGuidHex": "5445414e303433414456414354000004"
+			}
+		},
+		{
+			"file": "TargetRetargetActor.teprefab",
+			"projectPath": "Assets/AdvancedActors/TargetRetargetActor.teprefab",
+			"metaFile": "TargetRetargetActor.teprefab.meta",
+			"prefabAssetGuidHex": "5445414e303433414456414354000002",
+			"rootObjectUuidHex": "5445414e3034334143544f424a000002",
+			"sha256": "683e47c8812df92db50d02000faf2318031cc2c8edf1f08439918c0bff57b5c9",
+			"animatorComponent": {
+				"schemaVersion": 1,
+				"defaultClipAssetGuidHex": "5445414e303433414456464958000003",
+				"skeletonOverrideAssetGuidHex": "5445414e303433414456464958000002",
+				"retargetProfileOverrideAssetGuidHex": "5445414e303433414456464958000005",
+				"ragdollProfileOverrideAssetGuidHex": "00000000000000000000000000000000",
+				"motionDatabaseOverrideAssetGuidHex": "00000000000000000000000000000000"
+			}
+		},
+		{
+			"file": "TargetRagdollActor.teprefab",
+			"projectPath": "Assets/AdvancedActors/TargetRagdollActor.teprefab",
+			"metaFile": "TargetRagdollActor.teprefab.meta",
+			"prefabAssetGuidHex": "5445414e303433414456414354000003",
+			"rootObjectUuidHex": "5445414e3034334143544f424a000003",
+			"sha256": "6f178ca7cb1586949e14b60b26323c3997cda3c3217cba72b3aaaf793286ed5e",
+			"animatorComponent": {
+				"schemaVersion": 1,
+				"defaultClipAssetGuidHex": "5445414e303433414456464958000004",
+				"skeletonOverrideAssetGuidHex": "5445414e303433414456464958000002",
+				"retargetProfileOverrideAssetGuidHex": "00000000000000000000000000000000",
+				"ragdollProfileOverrideAssetGuidHex": "5445414e303433414456464958000007",
+				"motionDatabaseOverrideAssetGuidHex": "00000000000000000000000000000000"
+			}
+		}
+	],
+	"motionDatabaseAuthoring": {
+		"file": "source-locomotion.motiondb-authoring.json",
+		"projectPath": "Assets/AdvancedActors/source-locomotion.motiondb-authoring.json",
+		"sha256": "162673d7c1b645b2215f79411d151ef363e48ba9333639982659db794cf7f4a2",
+		"outputAssetGuidHex": "5445414e303433414456414354000004",
+		"sourceClipAssetGuidHex": "5445414e303433414456464958000003",
+		"sourceClipId": "0xbc034d0e92ea3b0b",
+		"sourceClipResolverFingerprint": "0x3fad510f215d0684",
+		"sourceEnvelopeFingerprint": "0x328ab144a83e7df9",
+		"compatibilityFingerprint": "0x043a000000001001",
+		"automationPaths": {
+			"authoringPath": "AdvancedActors/source-locomotion.motiondb-authoring.json",
+			"outputPath": "AdvancedActors/source-locomotion-built.temotiondb"
+		}
+	},
+	"requiredCookedAssets": [
+		{
+			"assetGuidHex": "5445414e303433414456464958000001",
+			"assetType": "Skeleton",
+			"file": "source-humanoid.teskel",
+			"compatibilityFingerprint": "0x043a000000001001",
+			"expectedInitialGeneration": 1
+		},
+		{
+			"assetGuidHex": "5445414e303433414456464958000002",
+			"assetType": "Skeleton",
+			"file": "target-humanoid.teskel",
+			"compatibilityFingerprint": "0x043a000000002001",
+			"expectedInitialGeneration": 1
+		},
+		{
+			"assetGuidHex": "5445414e303433414456464958000003",
+			"assetType": "AnimationClip",
+			"file": "source-locomotion.teanim",
+			"compatibilityFingerprint": "0x043a000000001001",
+			"expectedInitialGeneration": 1
+		},
+		{
+			"assetGuidHex": "5445414e303433414456464958000004",
+			"assetType": "AnimationClip",
+			"file": "target-recovery.teanim",
+			"compatibilityFingerprint": "0x043a000000002001",
+			"expectedInitialGeneration": 1
+		},
+		{
+			"assetGuidHex": "5445414e303433414456464958000005",
+			"assetType": "RetargetProfile",
+			"file": "humanoid-retarget.teretarget",
+			"compatibilityFingerprint": "0x043a000000007001",
+			"expectedInitialGeneration": 1
+		},
+		{
+			"assetGuidHex": "5445414e303433414456464958000006",
+			"assetType": "MotionDatabase",
+			"file": "locomotion.temotiondb",
+			"compatibilityFingerprint": "0x043a000000001001",
+			"expectedInitialGeneration": 1
+		},
+		{
+			"assetGuidHex": "5445414e303433414456464958000007",
+			"assetType": "RagdollProfile",
+			"file": "target-humanoid.teragdoll",
+			"compatibilityFingerprint": "0x043a000000002001",
+			"expectedInitialGeneration": 1
+		}
+	]
+}

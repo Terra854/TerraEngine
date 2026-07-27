@@ -6,8 +6,10 @@
 
 #include "Utilities/UUID.h"
 #include "FileWatcher.h"
+#include "Animation/Streaming/AnimationHotReload.h"
 #include "Physics/Assets/PhysicsAssetChangeJournal.h"
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <vector>
 #include <map>
@@ -21,6 +23,7 @@
 #include <optional>
 #include <string_view>
 #include <deque>
+#include <utility>
 
 struct AssetMetadata {
 	TerraEngine::UUID guid;
@@ -153,7 +156,85 @@ struct AssetOrganizationResult {
 enum class GeneratedModelPackageChildKind {
 	Mesh,
 	Material,
-	Texture
+	Texture,
+	// Append animation package-child kinds so the original mesh/material/texture
+	// numeric values remain stable for editor code that persists the selection.
+	Skeleton,
+	AnimationClip,
+	MorphTarget,
+	DeformableMesh,
+	Prefab
+};
+
+enum class AnimationReimportState : std::uint8_t {
+	Queued,
+	Compiling,
+	Registered,
+	Published,
+	RetainedLastKnownGood,
+	Cancelled,
+	Failed
+};
+
+// This bounded main-thread publication record lets Inspector/automation report
+// whether a watched animation source became active or deliberately retained its
+// last-known-good generation. It never exposes mutable cache pointers.
+struct AnimationReimportStatus {
+	std::filesystem::path sourcePath;
+	TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+	TerraEngine::Animation::AnimationReloadAssetType assetType =
+		TerraEngine::Animation::AnimationReloadAssetType::AnimationClip;
+	AnimationReimportState state = AnimationReimportState::Queued;
+	std::uint64_t candidateGeneration = 0u;
+	std::uint64_t activeGeneration = 0u;
+	std::uint64_t publicationBoundary = 0u;
+	std::uint64_t sequence = 0u;
+	bool lastKnownGoodPreserved = false;
+	std::string diagnostic;
+};
+
+// GeneratedModelPackageChildMetadata is a read-only view over one package
+// manifest record. It deliberately does not become AssetMetadata: package
+// children share the source package's lifecycle and must not acquire editable
+// loose-asset metadata or independent .meta files.
+struct GeneratedModelPackageChildMetadata {
+	TerraEngine::UUID packageGuid = TerraEngine::EMPTY_UUID;
+	TerraEngine::UUID guid = TerraEngine::EMPTY_UUID;
+	GeneratedModelPackageChildKind kind = GeneratedModelPackageChildKind::Mesh;
+	std::string displayName;
+	std::string semanticKey;
+	std::filesystem::path sourcePath;
+	std::filesystem::path compiledPath;
+	std::uint64_t compatibilityFingerprint = 0u;
+	std::uint64_t publishedGeneration = 0u;
+	bool readOnlyPackageChild = true;
+	std::vector<TerraEngine::UUID> dependencies;
+};
+
+// ModelPackageAnimationSummaryMetadata supplies Inspector, Asset Browser, and
+// automation with the same generation and validation evidence. Diagnostics are
+// concise stable-code messages so callers do not need to parse importer logs.
+struct ModelPackageAnimationSummaryMetadata {
+	bool readable = false;
+	bool publishedAtomically = false;
+	bool preservedLastKnownGood = false;
+	bool prefabBindingsValid = true;
+	std::uint32_t schemaVersion = 0u;
+	std::uint64_t candidateGeneration = 0u;
+	std::uint64_t publishedGeneration = 0u;
+	std::uint64_t lastKnownGoodGeneration = 0u;
+	std::size_t generatedChildCount = 0u;
+	std::size_t readOnlyChildCount = 0u;
+	std::size_t skeletonCount = 0u;
+	std::size_t animationClipCount = 0u;
+	std::size_t deformableMeshCount = 0u;
+	std::size_t morphTargetCount = 0u;
+	std::size_t prefabCount = 0u;
+	std::size_t infoCount = 0u;
+	std::size_t warningCount = 0u;
+	std::size_t errorCount = 0u;
+	std::string dependencyFingerprint;
+	std::vector<std::string> diagnostics;
 };
 
 // class AssetDatabase groups related state and operations so callers have one documented contract.
@@ -174,6 +255,11 @@ public:
 	// then moves supported expensive compile steps to a worker and publishes
 	// their results during Update on the main editor thread.
 	void ImportAssetWithProgress(const std::filesystem::path& sourcePath, bool force = false);
+	// Explicit automation imports require read-after-write behavior. Call this
+	// only at the editor's protected main-thread boundary: it waits for and
+	// finalizes the active worker for this one source path without draining jobs
+	// for any other asset, then discards this path's coalesced follow-up request.
+	void FinalizeActiveImportForExplicitReimport(const std::filesystem::path& sourcePath);
 
 	// Delete an asset from disk and unregister it
 	void DeleteAsset(const std::filesystem::path& sourcePath);
@@ -191,6 +277,8 @@ public:
 	TerraEngine::Physics::PhysicsAssetGeneration GetPhysicsAssetChangeGeneration() const;
 	bool TryGetGeneratedModelPackageChildDisplayName(const TerraEngine::UUID& guid, GeneratedModelPackageChildKind kind, std::string& outName) const;
 	bool TryGetGeneratedModelPackageChildIds(const TerraEngine::UUID& packageGuid, GeneratedModelPackageChildKind kind, std::vector<TerraEngine::UUID>& outChildIds) const;
+	bool TryGetGeneratedModelPackageChildMetadata(const TerraEngine::UUID& guid, GeneratedModelPackageChildKind kind, GeneratedModelPackageChildMetadata& outMetadata) const;
+	bool TryGetModelPackageAnimationSummary(const AssetMetadata& metadata, ModelPackageAnimationSummaryMetadata& outSummary) const;
 	bool IsMeshAsset(const AssetMetadata& metadata) const;
 	bool TryGetVirtualGeometryMetadata(const AssetMetadata& metadata, VirtualGeometryAssetMetadata& outMetadata) const;
 	VirtualGeometryAdaptiveSettingsMetadata GetDefaultVirtualGeometryAdaptiveSettings() const;
@@ -230,10 +318,31 @@ public:
 	bool IsAssetCompiling(const std::filesystem::path& absSourcePath) const;
 	std::vector<AssetImportProgress> GetImportProgressSnapshot() const;
 	std::optional<AssetImportProgress> GetImportProgress(const std::filesystem::path& absSourcePath) const;
+	std::vector<AnimationReimportStatus> GetAnimationReimportStatusSnapshot() const;
+	std::optional<AnimationReimportStatus> GetLatestAnimationReimportStatus(
+		const std::filesystem::path& sourcePath) const;
 	bool CancelImport(const std::filesystem::path& absSourcePath, bool removeAssetAfterCancel = true);
 	void RequestCancelAllImports(bool removeAssetsAfterCancel = true);
 	void CancelAllImportsAndWait(bool removeAssetsAfterCancel = true);
 	size_t GetCompileJobsCount() const;
+
+#ifdef TERRAENGINE_EDITOR_TESTS
+	// Editor tests install this worker hook to hold an import at a deterministic
+	// cancellation boundary. A missing hook keeps the production compiler path.
+	using AsyncImportCompileHookForTests = std::function<bool(
+		const AssetMetadata& metadata,
+		const std::atomic_bool& cancellationRequested)>;
+	void SetAsyncImportCompileHookForTests(AsyncImportCompileHookForTests hook);
+	// This hook runs after the complete package publisher batch is staged but
+	// before ResourceManager reparses live replacements. It lets integration
+	// tests introduce a deterministic validation/commit race without adding a
+	// production failure switch.
+	using AnimationPackagePostPublisherPrepareHookForTests = std::function<void()>;
+	void SetAnimationPackagePostPublisherPrepareHookForTests(
+		AnimationPackagePostPublisherPrepareHookForTests hook);
+	[[nodiscard]] std::optional<TerraEngine::Animation::AnimationReloadGenerationView>
+		GetAnimationReloadGenerationForTests(const TerraEngine::UUID& assetId) const;
+#endif
 
 private:
 	AssetDatabase();
@@ -261,12 +370,28 @@ private:
 	bool CompileShaderWithProcess(const AssetMetadata& metadata, const std::shared_ptr<AsyncImportProgressState>& progressState);
 	bool CompilePhysicsColliderWithProcess(const AssetMetadata& metadata, const std::shared_ptr<AsyncImportProgressState>& progressState);
 	bool RunCompilerProcess(const std::filesystem::path& compilerPath, const std::wstring& commandLine, const std::shared_ptr<AsyncImportProgressState>& progressState, std::string_view logPrefix, const std::filesystem::path& expectedOutputPath);
+	// Publication and cancellation share one short mutex boundary. Whichever
+	// operation wins becomes authoritative, so a cancelled worker cannot publish
+	// its private staging file after the caller has received a cancellation result.
+	bool PublishCompiledAssetFromWorker(
+		const std::filesystem::path& stagedPath,
+		const std::filesystem::path& finalPath,
+		const std::shared_ptr<AsyncImportProgressState>& progressState) const;
+	bool MarkImportPublicationComplete(const std::shared_ptr<AsyncImportProgressState>& progressState) const;
+	bool RequestImportCancellation(const std::shared_ptr<AsyncImportProgressState>& progressState, bool removeAssetAfterCancel) const;
+	// Shutdown drains successful jobs through the normal main-thread publication
+	// path. Jobs explicitly cancelled earlier still follow their chosen cleanup mode.
+	void DrainAllImportsAndWait();
 	void FinishImport(const AssetMetadata& metadata, const std::filesystem::path& absSourcePath, bool needsImport);
 	void RegisterImportedAsset(const AssetMetadata& metadata, const std::filesystem::path& absSourcePath, bool needsImport);
 	void PublishPhysicsAssetChange(
 		const AssetMetadata& metadata,
 		TerraEngine::Physics::PhysicsAssetChangeKind changeKind);
 	void RegisterGeneratedModelPackageMaterialMetadata(const std::filesystem::path& absSourcePath);
+	void RegisterGeneratedModelPackageResources(const std::filesystem::path& absSourcePath);
+	void UpdateModelPackageAnimationSummary(const std::filesystem::path& absSourcePath);
+	void PublishGeneratedAnimationHotReload(const std::filesystem::path& absSourcePath);
+	void RecordAnimationReimportStatus(AnimationReimportStatus status);
 	void CleanupModelPackageGeneratedAssets(const AssetMetadata& metadata, const std::filesystem::path& absSourcePath);
 	void CleanupCancelledImport(const AssetMetadata& metadata, const std::filesystem::path& absSourcePath, bool removeSourceAsset);
 	void RemoveAsset(const std::filesystem::path& sourcePath);
@@ -285,6 +410,14 @@ private:
 	std::filesystem::path buildRoot; 
 
 	std::map<std::filesystem::path, AssetMetadata> assets;
+	// The sidecar is durable identity; this table only tracks which package-owned
+	// runtime aliases this editor session published so a reimport/delete can
+	// unregister removed typed children without inventing loose AssetMetadata.
+	std::map<TerraEngine::UUID, std::vector<std::pair<TerraEngine::UUID, GeneratedModelPackageChildKind>>> generatedModelPackageResources;
+	// This editor-session publisher runs only after the complete generated
+	// package alias set is visible, so failed source candidates retain the
+	// previous evaluator generation instead of exposing partial output.
+	TerraEngine::Animation::AnimationHotReloadPublisher animationHotReloadPublisher;
 	std::filesystem::path assetIndexPath;
 	// Startup index registration can discover generated package children. Their
 	// normal FinishImport path requests persistence, but those requests must be
@@ -294,6 +427,14 @@ private:
 	
 	// File Watcher
 	FileWatcher fileWatcher;
+	bool watcherReconcilePending = false;
+	mutable std::mutex animationReimportStatusMutex;
+	std::deque<AnimationReimportStatus> animationReimportStatuses;
+	std::uint64_t nextAnimationReimportStatusSequence = 0u;
+	// A publication survives at least one subsequent editor Update before its
+	// replaced generation becomes retirement-eligible. Explicit evaluator/GPU
+	// retains in the publisher can extend that lifetime further.
+	std::uint64_t animationReloadBoundaryToRetireNextUpdate = 0u;
 	
 	// Debouncing
 	// struct PendingEvent groups related state and operations so callers have one documented contract.
@@ -319,6 +460,8 @@ private:
 		std::chrono::steady_clock::time_point startedAt = std::chrono::steady_clock::now();
 		std::atomic_bool cancelRequested = false;
 		std::atomic_bool removeAssetAfterCancel = false;
+		mutable std::mutex publicationMutex;
+		bool publicationCompleted = false;
 		mutable std::mutex processMutex;
 		void* compilerProcessHandle = nullptr;
 	};
@@ -330,7 +473,17 @@ private:
 		std::filesystem::path absSourcePath;
 		std::shared_ptr<AsyncImportProgressState> progressState;
 	};
+	// Update, shutdown drain, and explicit same-path synchronization share the
+	// same result handling so failure/cancellation cannot publish differently.
+	void FinalizeAsyncImportJob(AsyncCompileJob& job);
 	std::vector<AsyncCompileJob> asyncJobs;
+
+#ifdef TERRAENGINE_EDITOR_TESTS
+	mutable std::mutex asyncImportCompileHookMutex;
+	AsyncImportCompileHookForTests asyncImportCompileHookForTests;
+	mutable std::mutex animationPackageTestHookMutex;
+	AnimationPackagePostPublisherPrepareHookForTests animationPackagePostPublisherPrepareHookForTests;
+#endif
 
 	// struct RecentlyRemovedAsset groups related state and operations so callers have one documented contract.
 	struct RecentlyRemovedAsset {

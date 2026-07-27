@@ -1,0 +1,51 @@
+{
+	"schemaVersion": 1,
+	"authoringGeneration": 1,
+	"assetId": "5445414e303433414456414354000004",
+	"compatibilityFingerprint": 304555924800933889,
+	"samplesPerBlock": 2,
+	"featureWeights": [
+		1, 1, 1, 1, 1, 1, 1, 1,
+		1, 1, 1, 1, 1, 1, 1, 1,
+		1, 1, 1, 1, 1, 1, 1, 1,
+		1, 1, 1, 1, 1, 1, 1, 1,
+		1, 1, 1, 1, 1, 1, 1, 1,
+		1, 1, 1, 1, 1, 1, 1, 1
+	],
+	"sources": [
+		{
+			"sourceClipId": 13547756829050288907,
+			"sourceClipFingerprint": 4588412720786507396,
+			"sourcePath": "Assets/Advanced/source-locomotion.teanim",
+			"enabled": true,
+			"baseTagMask": 1,
+			"baseContactMask": 0,
+			"contactRanges": [
+				{
+					"firstTick": 0,
+					"lastTick": 30,
+					"contactMask": 1
+				},
+				{
+					"firstTick": 60,
+					"lastTick": 90,
+					"contactMask": 2
+				}
+			],
+			"tagRanges": [
+				{
+					"firstTick": 60,
+					"lastTick": 90,
+					"tagMask": 4
+				}
+			],
+			"exclusionRanges": [
+				{
+					"firstTick": 90,
+					"lastTick": 90,
+					"exclusionFlags": 8
+				}
+			]
+		}
+	]
+}

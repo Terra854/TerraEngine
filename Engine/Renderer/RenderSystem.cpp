@@ -18,6 +18,10 @@
 #include "Components/MeshRenderComponent.h"
 #include "Components/LightComponent.h"
 #include "Components/SkyComponent.h"
+#include "Components/AnimatorComponent.h"
+#include "Animation/AnimationSystem.h"
+#include "Animation/AnimationPresentationSystem.h"
+#include "Animation/Assets/SkeletonAsset.h"
 #include "Scene/SceneGraphRuntime.h"
 #include "Scene/SceneManager.h"
 #include "Core/Object/ObjectManager.h"
@@ -37,6 +41,7 @@
 #define GLM_FORCE_RADIANS
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <future>
@@ -67,6 +72,202 @@ namespace
 	constexpr std::uint64_t kRenderHashPrime = 1099511628211ull;
 	constexpr const char* kDeterministicCapturePngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
 	constexpr float kVirtualGeometryClusterRefinementErrorPixels = 1.5f;
+	constexpr std::size_t kCompatibleAnimationPoseCacheCapacity = 4096U;
+
+	TerraEngine::Renderer::AnimationRenderBindingStatus ValidateAnimatorPosePublication(
+		const TerraEngine::Renderer::AnimationRenderBindingRequest& request,
+		const TerraEngine::Animation::PublishedAnimatorPose& publication) noexcept
+	{
+		using TerraEngine::Renderer::AnimationRenderBindingStatus;
+		if(publication.safePose
+			|| publication.status != TerraEngine::Animation::AnimationStatus::Ok) {
+			return AnimationRenderBindingStatus::SafePose;
+		}
+		if(publication.ownerObjectId != request.animatorObjectId
+			|| publication.componentGeneration != request.componentGeneration
+			|| !publication.animator.IsValid()
+			|| publication.animator.slotIndex != request.animatorSlotIndex
+			|| publication.animator.generation != request.animatorGeneration
+			|| !publication.skeleton.IsValid()
+			|| publication.skeleton.assetId.value != request.skeletonAssetId
+			|| publication.skeleton.generation != request.skeletonGeneration) {
+			return AnimationRenderBindingStatus::StaleGeneration;
+		}
+		if(publication.skeletonCompatibilityFingerprint
+			!= request.skeletonCompatibilityFingerprint) {
+			return AnimationRenderBindingStatus::IncompatibleSkeleton;
+		}
+		if(publication.snapshot == nullptr || publication.snapshot->pose == nullptr
+			|| publication.snapshot->animator != publication.animator
+			|| publication.snapshot->publicationGeneration == 0U
+			|| publication.snapshot->playback.latestStatus
+				!= TerraEngine::Animation::AnimationStatus::Ok
+			|| publication.snapshot->pose->ValidateForPublication()
+				!= TerraEngine::Animation::AnimationStatus::Ok) {
+			return AnimationRenderBindingStatus::InvalidPose;
+		}
+
+		const TerraEngine::Animation::AnimationPoseGeneration& poseGeneration =
+			publication.snapshot->pose->Generation();
+		if(poseGeneration.animator != publication.animator
+			|| poseGeneration.poseGeneration != publication.snapshot->publicationGeneration
+			|| poseGeneration.skeleton != publication.skeleton
+			|| poseGeneration.programGeneration == 0U) {
+			return AnimationRenderBindingStatus::InvalidPose;
+		}
+		return AnimationRenderBindingStatus::Ready;
+	}
+
+	bool HeldAnimationBindingMatchesRequest(
+		const TerraEngine::Renderer::AnimationRenderBindingRequest& request) noexcept
+	{
+		using namespace TerraEngine::Renderer;
+		const AnimationRenderBinding& held = request.heldBinding;
+		if(held.status != AnimationRenderBindingStatus::Ready || held.safePose
+			|| !held.HasCpuPose() || held.posePublicationGeneration == 0U
+			|| held.meshId != request.meshId
+			|| held.animatorObjectId != request.animatorObjectId
+			|| held.skeletonAssetId != request.skeletonAssetId
+			|| held.animatorObjectGeneration != request.animatorObjectGeneration
+			|| held.animationAuthorityGeneration != request.animationAuthorityGeneration
+			|| held.animatorSlotIndex != request.animatorSlotIndex
+			|| held.animatorGeneration != request.animatorGeneration
+			|| held.deformablePayloadGeneration != request.deformablePayloadGeneration
+			|| held.componentGeneration != request.componentGeneration
+			|| held.skeletonGeneration != request.skeletonGeneration
+			|| held.skeletonCompatibilityFingerprint
+				!= request.skeletonCompatibilityFingerprint
+			|| held.invalidation.asset != request.invalidation.asset
+			|| held.invalidation.page != request.invalidation.page
+			|| held.invalidation.material != request.invalidation.material
+			|| held.invalidation.renderer != request.invalidation.renderer
+			|| held.invalidation.residency != request.invalidation.residency) {
+			return false;
+		}
+		return ValidateAnimatorPosePublication(request, *held.pose)
+				== AnimationRenderBindingStatus::Ready
+			&& held.pose->snapshot->publicationGeneration
+				== held.posePublicationGeneration;
+	}
+
+	bool GpuVisualIdentityMatchesRequest(
+		const TerraEngine::Renderer::AnimationRenderBindingRequest& request,
+		const TerraEngine::Renderer::AnimationGpuRenderBinding& identity) noexcept
+	{
+		// GPU Visual is allowed to omit a CPU pose, but it is never allowed to
+		// omit identity. Every value below is copied from one published packet and
+		// compared as one bundle before a draw can reference its palette.
+		if(!identity.IsComplete() || identity.hybridCpuAuthority
+			|| request.meshId == TerraEngine::EMPTY_UUID
+			|| request.animatorObjectId == TerraEngine::EMPTY_UUID
+			|| request.animatorObjectGeneration == 0U
+			|| request.animationAuthorityGeneration == 0U
+			|| request.deformablePayloadGeneration == 0U
+			|| request.componentGeneration == 0U
+			|| request.skeletonCompatibilityFingerprint == 0U
+			|| !request.expectedGpuRenderIdentity.IsComplete()
+			|| !identity.renderIdentity.IsComplete()) {
+			return false;
+		}
+		const std::uint64_t packedStableInstanceId =
+			(static_cast<std::uint64_t>(identity.instanceSlot) << 32U)
+			| static_cast<std::uint64_t>(identity.instanceGeneration);
+		return identity.stableInstanceId == packedStableInstanceId
+			&& identity.componentGeneration == request.componentGeneration
+			&& identity.renderIdentity == request.expectedGpuRenderIdentity
+			&& identity.renderIdentity.meshId == request.meshId
+			&& identity.renderIdentity.deformablePayloadGeneration
+				== request.deformablePayloadGeneration
+			&& identity.renderIdentity.skeletonCompatibilityFingerprint
+				== request.skeletonCompatibilityFingerprint
+			&& identity.meshGeneration
+				== identity.renderIdentity.meshHeaderVersion
+			&& identity.rendererGeneration
+				== identity.renderIdentity.rendererGeneration
+			&& identity.sceneGeneration
+				== identity.renderIdentity.sceneGeneration;
+	}
+
+	bool IsMorphOnlyIdentityDeformableMesh(const Mesh& mesh) noexcept
+	{
+		const DeformableMeshPayloadHeader& metadata = mesh.deformableMetadata;
+		// Morph-only cooks deliberately carry no skeleton fingerprint. Their one
+		// identity joint exists solely because skinning and morph rendering share
+		// the frozen deformable vertex layout; it must never be interpreted as a
+		// mesh authored for an arbitrary skeleton.
+		return metadata.skeletonCompatibilityFingerprint == 0U
+			&& metadata.sourceSkeletonJointCount == 1U
+			&& metadata.morphTargetCount != 0U
+			&& metadata.morphTargetCount == mesh.deformableMorphs.size()
+			&& metadata.palettePartitionCount == 1U
+			&& mesh.deformablePalettes.size() == 1U
+			&& mesh.deformablePalettes.front().jointCount == 1U
+			&& mesh.deformablePaletteJoints.size() == 1U
+			&& mesh.deformablePaletteJoints.front() == 0U;
+	}
+
+	TerraEngine::Animation::AnimationCompatibilityFingerprint
+	ResolveDeformableSkeletonFingerprint(
+		const Mesh& mesh,
+		const TerraEngine::Animation::PublishedAnimatorPose* publication) noexcept
+	{
+		const TerraEngine::Animation::AnimationCompatibilityFingerprint
+			authoredFingerprint =
+			mesh.deformableMetadata.skeletonCompatibilityFingerprint;
+		if(authoredFingerprint != 0U) return authoredFingerprint;
+		if(!IsMorphOnlyIdentityDeformableMesh(mesh) || publication == nullptr
+			|| publication->skeletonCompatibilityFingerprint == 0U
+			|| publication->skeletonAsset == nullptr
+			|| publication->skeletonAsset->compatibilityFingerprint
+				!= publication->skeletonCompatibilityFingerprint
+			|| publication->skeletonAsset->joints.size() != 1U
+			|| publication->skeletonAsset->inverseBindMatrices.size() != 1U) {
+			return 0U;
+		}
+		// A checked one-joint publication supplies lifecycle identity for the
+		// shared CPU graphics bridge. The mesh remains skeleton-unbound on disk;
+		// only its morph lanes are allowed to use this effective fingerprint.
+		return publication->skeletonCompatibilityFingerprint;
+	}
+
+	bool IsValidatedAnimationDeformableMesh(const Mesh& mesh) noexcept
+	{
+		const DeformableMeshPayloadHeader& metadata = mesh.deformableMetadata;
+		constexpr std::uint32_t requiredFlags = kDeformableMeshPayloadFlagConservativeMorphEnvelope
+			| kDeformableMeshPayloadFlagZeroWeightMeansIdentity
+			| kDeformableMeshPayloadFlagVertexPaletteIndices
+			| kDeformableMeshPayloadFlagDenseMorphPositionDeltas;
+		constexpr std::uint32_t requiredVirtualFlags = kDeformableMeshVirtualGeometryFlagWholeMeshEnvelope
+			| kDeformableMeshVirtualGeometryFlagDisableUnprovenConeCulling
+			| kDeformableMeshVirtualGeometryFlagRequireCompleteFallback;
+
+		// ResourceManager sets hasDeformablePayload only after full range validation.
+		// Rechecking the compact layout identity here keeps synthetic/in-memory Mesh
+		// values from waking AnimationSystem for static content. Morph-only
+		// payloads are valid animation consumers when they carry the cooker's
+		// exact one-joint identity layout.
+		return mesh.hasDeformablePayload
+			&& mesh.deformablePayloadGeneration != 0U
+			&& metadata.magic == kDeformableMeshPayloadMagicValue
+			&& metadata.version == kDeformableMeshPayloadVersion
+			&& metadata.headerSize == sizeof(DeformableMeshPayloadHeader)
+			&& metadata.compatibleMeshVersion == mesh.header.version
+			&& metadata.skinningVertexCount != 0U
+			&& metadata.skinningVertexCount == mesh.header.meshletSkinningDataCount
+			&& metadata.palettePartitionCount != 0U
+			&& metadata.palettePartitionCount == mesh.deformablePalettes.size()
+			&& metadata.vertexPaletteIndexCount == metadata.skinningVertexCount
+			&& metadata.vertexPaletteIndexCount == mesh.deformableVertexPaletteIndices.size()
+			&& metadata.skinningStrideBytes == kDeformableMeshSkinningStrideBytes
+			&& metadata.maximumInfluences == kDeformableMeshMaximumInfluences
+			&& metadata.maximumPaletteJoints == kDeformableMeshMaximumPaletteJoints
+			&& metadata.sourceSkeletonJointCount != 0U
+			&& (metadata.skeletonCompatibilityFingerprint != 0U
+				|| IsMorphOnlyIdentityDeformableMesh(mesh))
+			&& metadata.morphTargetCount == mesh.deformableMorphs.size()
+			&& metadata.flags == requiredFlags
+			&& metadata.virtualGeometryDeformationFlags == requiredVirtualFlags;
+	}
 
 	struct CachedDrawCommandRecord
 	{
@@ -885,6 +1086,75 @@ namespace
 		return seed;
 	}
 
+	std::uint64_t BuildAnimationRenderBindingSignature(
+		const TerraEngine::Renderer::AnimationRenderBinding& binding)
+	{
+		// Do not hash the shared_ptr address: its immutable generation and complete
+		// dependency identity are the cache contract. This makes every view and
+		// shadow pass invalidate together when a new compatible pose is published.
+		std::uint64_t seed = kRenderHashOffset;
+		HashCombine(seed, static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(binding.meshId)));
+		HashCombine(seed, static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(binding.animatorObjectId)));
+		HashCombine(seed, static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(binding.skeletonAssetId)));
+		HashCombine(seed, binding.animatorObjectGeneration);
+		HashCombine(seed, binding.animationAuthorityGeneration);
+		HashCombine(seed, binding.animatorSlotIndex);
+		HashCombine(seed, binding.animatorGeneration);
+		HashCombine(seed, binding.deformablePayloadGeneration);
+		HashCombine(seed, binding.componentGeneration);
+		HashCombine(seed, binding.skeletonGeneration);
+		HashCombine(seed, binding.skeletonCompatibilityFingerprint);
+		HashCombine(seed, static_cast<std::uint64_t>(binding.source));
+		HashCombine(seed, static_cast<std::uint64_t>(binding.status));
+		HashCombine(seed, binding.posePublicationGeneration);
+		HashCombine(seed, binding.safePose ? 1U : 0U);
+		HashCombine(seed, binding.invalidation.pose);
+		HashCombine(seed, binding.invalidation.morph);
+		HashCombine(seed, binding.invalidation.asset);
+		HashCombine(seed, binding.invalidation.page);
+		HashCombine(seed, binding.invalidation.view);
+		HashCombine(seed, binding.invalidation.material);
+		HashCombine(seed, binding.invalidation.renderer);
+		HashCombine(seed, binding.invalidation.residency);
+		HashCombine(seed, binding.gpu.presentationGeneration);
+		HashCombine(seed, binding.gpu.sourceGeneration);
+		HashCombine(seed, binding.gpu.paletteGeneration);
+		HashCombine(seed, binding.gpu.stableInstanceId);
+		HashCombine(seed, binding.gpu.planGeneration);
+		HashCombine(seed, binding.gpu.rendererGeneration);
+		HashCombine(seed, binding.gpu.workPacketIndex);
+		HashCombine(seed, binding.gpu.stableSubmissionOrdinal);
+		HashCombine(seed, binding.gpu.instanceSlot);
+		HashCombine(seed, binding.gpu.instanceGeneration);
+		HashCombine(seed, binding.gpu.componentGeneration);
+		HashCombine(seed, binding.gpu.skeletonGeneration);
+		HashCombine(seed, binding.gpu.meshGeneration);
+		HashCombine(seed, binding.gpu.resourceGeneration);
+		HashCombine(seed, binding.gpu.sceneGeneration);
+		HashCombine(seed, binding.gpu.workGeneration);
+		HashCombine(seed, binding.gpu.programGeneration);
+		HashCombine(seed, binding.gpu.stageMask);
+		HashCombine(seed, binding.gpu.hybridCpuAuthority ? 1U : 0U);
+		HashCombine(seed, binding.gpu.valid ? 1U : 0U);
+		return seed;
+	}
+
+	std::uint64_t BuildStableAnimationInstanceId(
+		const TerraEngine::Renderer::AnimationRenderBinding& binding,
+		const TerraEngine::UUID& objectId)
+	{
+		// Animator slot plus generation is the same stable value used by animation
+		// planning. The object hash is only a nonzero fallback for an explicit safe
+		// bind pose that has no live instance identity.
+		if(binding.animatorGeneration != 0U
+			&& binding.animatorSlotIndex != TerraEngine::Animation::kInvalidAnimatorInstanceSlot) {
+			return (static_cast<std::uint64_t>(binding.animatorSlotIndex) << 32U)
+				| static_cast<std::uint64_t>(binding.animatorGeneration);
+		}
+		return std::max<std::uint64_t>(1U,
+			static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(objectId)));
+	}
+
 	std::uint64_t BuildLightCandidateSignature(const Transform& transform, const LightComponent& light)
 	{
 		// The packed light cache key covers transform and every authoring field
@@ -1283,7 +1553,7 @@ namespace
 			query.access.readResources.assign(readResources.begin(), readResources.end());
 			query.access.writeResources.assign(writeResources.begin(), writeResources.end());
 			query.access.workerEligible = false;
-			query.access.mainThreadReason = "Renderer collection currently reads live EnTT component storage and frame allocator containers.";
+			query.access.mainThreadReason = "Renderer collection reads live EnTT hierarchy/component storage, protected resources, and frame allocator containers before publishing immutable worker inputs.";
 		}
 		query.preserveMatchingObjectOrder = true;
 		query.copyObjectIdsIntoChunks = false;
@@ -2265,9 +2535,11 @@ const std::unordered_map<entt::entity, Transform>& TerraEngine::Renderer::Render
 	// must never retain pointers into live component storage because worker and
 	// editor mutations can replace that storage after the snapshot is prepared.
 	diagnostics = {};
+	const std::uint64_t observedSceneGeneration = objects.GetSceneGeneration();
 	const std::uint64_t observedHierarchyRevision = objects.GetHierarchyRevision();
 	const std::uint64_t observedSpatialRevision = objects.GetSpatialRevision();
-	if (!initialized || hierarchyRevision != observedHierarchyRevision)
+	if (!initialized || sceneGeneration != observedSceneGeneration
+		|| hierarchyRevision != observedHierarchyRevision)
 	{
 		graph = TerraEngine::Scene::BuildSceneGraphFromObjectManager(objects, false);
 		graph.revision = observedSpatialRevision;
@@ -2287,6 +2559,7 @@ const std::unordered_map<entt::entity, Transform>& TerraEngine::Renderer::Render
 		}
 
 		initialized = true;
+		sceneGeneration = observedSceneGeneration;
 		hierarchyRevision = observedHierarchyRevision;
 		spatialRevision = observedSpatialRevision;
 		hierarchyLevelCount = latestPropagation.hierarchyLevelCount;
@@ -2433,10 +2706,309 @@ void TerraEngine::Renderer::RenderWorldTransformCache::Clear()
 	worldTransforms.clear();
 	latestPropagation = {};
 	initialized = false;
+	sceneGeneration = 0U;
 	hierarchyRevision = 0U;
 	spatialRevision = 0U;
 	hierarchyLevelCount = 0U;
 	flatHierarchy = false;
+}
+
+TerraEngine::Renderer::AnimationRenderBinding RenderSystem::ResolveAnimationRenderBinding(
+	const TerraEngine::Renderer::AnimationRenderBindingRequest& request) noexcept
+{
+	using namespace TerraEngine::Renderer;
+	AnimationRenderBinding result;
+	result.meshId = request.meshId;
+	result.animatorObjectId = request.animatorObjectId;
+	result.skeletonAssetId = request.skeletonAssetId;
+	result.animatorObjectGeneration = request.animatorObjectGeneration;
+	result.animationAuthorityGeneration = request.animationAuthorityGeneration;
+	result.animatorSlotIndex = request.animatorSlotIndex;
+	result.animatorGeneration = request.animatorGeneration;
+	result.deformablePayloadGeneration = request.deformablePayloadGeneration;
+	result.componentGeneration = request.componentGeneration;
+	result.skeletonGeneration = request.skeletonGeneration;
+	result.skeletonCompatibilityFingerprint = request.skeletonCompatibilityFingerprint;
+	result.invalidation = request.invalidation;
+
+	// A current safe/error publication is an explicit dependency result even if
+	// its missing skeleton prevented the producer from filling every identity.
+	// Report that result before generic identity validation and never consult held.
+	if(request.currentPose != nullptr
+		&& (request.currentPose->safePose
+			|| request.currentPose->status != TerraEngine::Animation::AnimationStatus::Ok)) {
+		result.status = AnimationRenderBindingStatus::SafePose;
+		return result;
+	}
+
+	// A Visual GPU animator publishes its packet independently from the CPU pose
+	// stream. Accept it only after the packet's complete immutable identity has
+	// matched this draw's copied mesh/resource/scene values; Hybrid deliberately
+	// falls through and still requires the CPU-authoritative pose path below.
+	if(request.currentPose == nullptr && request.gpuVisualIdentity.has_value()
+		&& GpuVisualIdentityMatchesRequest(request, *request.gpuVisualIdentity)) {
+		const AnimationGpuRenderBinding& identity = *request.gpuVisualIdentity;
+		result.animatorSlotIndex = identity.instanceSlot;
+		result.animatorGeneration = identity.instanceGeneration;
+		result.componentGeneration = identity.componentGeneration;
+		result.skeletonGeneration = identity.skeletonGeneration;
+		result.source = AnimationRenderPoseSource::GpuVisual;
+		result.status = AnimationRenderBindingStatus::Ready;
+		result.posePublicationGeneration = identity.workGeneration;
+		result.invalidation.pose = identity.workGeneration;
+		result.invalidation.morph = identity.workGeneration;
+		result.safePose = false;
+		result.gpu = identity;
+		return result;
+	}
+
+	// Missing identity fields cannot name one compatible mesh/component/skeleton
+	// bundle. Preserve the default bind-pose result without copying any pointer.
+	if(request.meshId == TerraEngine::EMPTY_UUID
+		|| request.animatorObjectId == TerraEngine::EMPTY_UUID
+		|| request.skeletonAssetId == TerraEngine::EMPTY_UUID
+		|| request.animatorObjectGeneration == 0U
+		|| request.animationAuthorityGeneration == 0U
+		|| request.animatorSlotIndex == TerraEngine::Animation::kInvalidAnimatorInstanceSlot
+		|| request.animatorGeneration == 0U
+		|| request.deformablePayloadGeneration == 0U
+		|| request.componentGeneration == 0U
+		|| request.skeletonGeneration == 0U
+		|| request.skeletonCompatibilityFingerprint == 0U) {
+		result.status = AnimationRenderBindingStatus::InvalidPose;
+		return result;
+	}
+
+	if(request.currentPose != nullptr) {
+		result.status = ValidateAnimatorPosePublication(request, *request.currentPose);
+		if(result.status != AnimationRenderBindingStatus::Ready) {
+			return result;
+		}
+
+		result.source = AnimationRenderPoseSource::CpuPose;
+		result.posePublicationGeneration = request.currentPose->snapshot->publicationGeneration;
+		result.invalidation.pose = result.posePublicationGeneration;
+		result.invalidation.morph = result.posePublicationGeneration;
+		result.safePose = false;
+		result.pose = request.currentPose;
+		return result;
+	}
+
+	if(request.fallbackPolicy == AnimationRenderFallbackPolicy::HoldLastCompatiblePose
+		&& HeldAnimationBindingMatchesRequest(request)) {
+		result.source = AnimationRenderPoseSource::HeldCpuPose;
+		result.status = AnimationRenderBindingStatus::Ready;
+		result.posePublicationGeneration = request.heldBinding.posePublicationGeneration;
+		result.invalidation.pose = request.heldBinding.invalidation.pose;
+		result.invalidation.morph = request.heldBinding.invalidation.morph;
+		result.safePose = false;
+		result.pose = request.heldBinding.pose;
+		return result;
+	}
+
+	result.status = AnimationRenderBindingStatus::MissingPose;
+	return result;
+}
+
+std::shared_ptr<const TerraEngine::Renderer::CpuAnimationDeformationData>
+RenderSystem::BuildCpuAnimationDeformation(
+	const TerraEngine::Animation::PublishedAnimatorPose& publication,
+	std::span<const std::uint32_t> paletteJoints,
+	std::span<const std::uint64_t> morphTargetIds) noexcept
+{
+	using namespace TerraEngine::Animation;
+	using TerraEngine::Renderer::CpuAnimationDeformationData;
+	if(publication.safePose || publication.status != AnimationStatus::Ok
+		|| publication.snapshot == nullptr || publication.snapshot->pose == nullptr
+		|| publication.skeletonAsset == nullptr
+		|| publication.skeletonCompatibilityFingerprint == 0U
+		|| publication.skeletonAsset->compatibilityFingerprint
+			!= publication.skeletonCompatibilityFingerprint
+		|| paletteJoints.empty()
+		|| paletteJoints.size() > kGpuAnimationPaletteEntriesPerPartition
+		|| morphTargetIds.size() > kGpuAnimationMaximumMorphTargetsV1) {
+		return {};
+	}
+
+	const PoseBuffer& pose = *publication.snapshot->pose;
+	const SkeletonAsset& skeleton = *publication.skeletonAsset;
+	const std::span<const AnimationTransform> modelTransforms =
+		pose.ModelTransforms();
+	if(modelTransforms.empty()
+		|| modelTransforms.size() != publication.jointStableIds.size()
+		|| skeleton.joints.size() != skeleton.inverseBindMatrices.size()) {
+		return {};
+	}
+
+	enum class InverseBindStorage
+	{
+		Unknown,
+		RowMajor,
+		ColumnMajor
+	};
+	std::string sourceExtension =
+		std::filesystem::path(skeleton.source.sourcePackagePath)
+			.extension().string();
+	std::transform(sourceExtension.begin(), sourceExtension.end(),
+		sourceExtension.begin(), [](unsigned char value) {
+			return static_cast<char>(std::tolower(value));
+		});
+	const InverseBindStorage inverseBindStorage = sourceExtension == ".fbx"
+		? InverseBindStorage::RowMajor
+		: (sourceExtension == ".gltf" || sourceExtension == ".glb"
+			? InverseBindStorage::ColumnMajor
+			: InverseBindStorage::Unknown);
+
+	const auto isIdentityMatrix = [](const AnimationMatrix4x4& matrix) noexcept {
+		for(std::size_t row = 0U; row < 4U; ++row) {
+			for(std::size_t column = 0U; column < 4U; ++column) {
+				const float expected = row == column ? 1.0F : 0.0F;
+				if(std::abs(matrix.values[row * 4U + column] - expected)
+					> 1.0e-6F) {
+					return false;
+				}
+			}
+		}
+		return true;
+	};
+	const auto convertInverseBind = [inverseBindStorage, &isIdentityMatrix](
+		const AnimationMatrix4x4& source,
+		std::array<float, 16U>& output) noexcept {
+		// Version-one skeletons predate an explicit matrix-major field. Match the
+		// importer's frozen FBX/glTF convention and accept unknown provenance only
+		// for identity, whose transpose is unambiguous.
+		if(inverseBindStorage == InverseBindStorage::Unknown
+			&& !isIdentityMatrix(source)) {
+			return false;
+		}
+		for(std::size_t row = 0U; row < 4U; ++row) {
+			for(std::size_t column = 0U; column < 4U; ++column) {
+				const std::size_t sourceIndex =
+					inverseBindStorage == InverseBindStorage::ColumnMajor
+						? column * 4U + row : row * 4U + column;
+				const float value = source.values[sourceIndex];
+				if(!std::isfinite(value)) return false;
+				output[row * 4U + column] = value;
+			}
+		}
+		return std::abs(output[12U]) <= 1.0e-4F
+			&& std::abs(output[13U]) <= 1.0e-4F
+			&& std::abs(output[14U]) <= 1.0e-4F
+			&& std::abs(output[15U] - 1.0F) <= 1.0e-4F;
+	};
+	const auto transformMatrix = [](const AnimationTransform& transform,
+		std::array<float, 16U>& output) noexcept {
+		if(!IsFinite(transform)) return false;
+		const float lengthSquared =
+			transform.rotation.x * transform.rotation.x
+			+ transform.rotation.y * transform.rotation.y
+			+ transform.rotation.z * transform.rotation.z
+			+ transform.rotation.w * transform.rotation.w;
+		if(!std::isfinite(lengthSquared) || lengthSquared <= 1.0e-12F) {
+			return false;
+		}
+		const float inverseLength = 1.0F / std::sqrt(lengthSquared);
+		const float x = transform.rotation.x * inverseLength;
+		const float y = transform.rotation.y * inverseLength;
+		const float z = transform.rotation.z * inverseLength;
+		const float w = transform.rotation.w * inverseLength;
+		const float xx = x * x;
+		const float yy = y * y;
+		const float zz = z * z;
+		const float xy = x * y;
+		const float xz = x * z;
+		const float yz = y * z;
+		const float wx = w * x;
+		const float wy = w * y;
+		const float wz = w * z;
+		// T * R * S scales the rotation columns. The shader consumes row-major
+		// affine rows and applies dot(row.xyz, position) + row.w.
+		output = {
+			(1.0F - 2.0F * (yy + zz)) * transform.scale.x,
+			(2.0F * (xy - wz)) * transform.scale.y,
+			(2.0F * (xz + wy)) * transform.scale.z,
+			transform.translation.x,
+			(2.0F * (xy + wz)) * transform.scale.x,
+			(1.0F - 2.0F * (xx + zz)) * transform.scale.y,
+			(2.0F * (yz - wx)) * transform.scale.z,
+			transform.translation.y,
+			(2.0F * (xz - wy)) * transform.scale.x,
+			(2.0F * (yz + wx)) * transform.scale.y,
+			(1.0F - 2.0F * (xx + yy)) * transform.scale.z,
+			transform.translation.z,
+			0.0F, 0.0F, 0.0F, 1.0F};
+		return true;
+	};
+	const auto multiply = [](const std::array<float, 16U>& left,
+		const std::array<float, 16U>& right,
+		std::array<float, 16U>& output) noexcept {
+		for(std::size_t row = 0U; row < 4U; ++row) {
+			for(std::size_t column = 0U; column < 4U; ++column) {
+				float value = 0.0F;
+				for(std::size_t lane = 0U; lane < 4U; ++lane) {
+					value += left[row * 4U + lane]
+						* right[lane * 4U + column];
+				}
+				if(!std::isfinite(value)) return false;
+				output[row * 4U + column] = value;
+			}
+		}
+		return true;
+	};
+
+	try {
+		auto deformation = std::make_shared<CpuAnimationDeformationData>();
+		deformation->jointCount = static_cast<std::uint32_t>(
+			std::min<std::size_t>(paletteJoints.size(),
+				kGpuAnimationPaletteEntriesPerPartition));
+		deformation->paletteMatrices.reserve(paletteJoints.size());
+		for(const std::uint32_t skeletonJointIndex : paletteJoints) {
+			if(skeletonJointIndex >= skeleton.joints.size()) return {};
+			const std::uint64_t stableJointId =
+				skeleton.joints[skeletonJointIndex].stableId;
+			const auto poseJoint = std::find(publication.jointStableIds.begin(),
+				publication.jointStableIds.end(), stableJointId);
+			if(poseJoint == publication.jointStableIds.end()) return {};
+			const std::size_t poseJointIndex = static_cast<std::size_t>(
+				std::distance(publication.jointStableIds.begin(), poseJoint));
+			if(poseJointIndex >= modelTransforms.size()) return {};
+
+			std::array<float, 16U> model{};
+			std::array<float, 16U> inverseBind{};
+			std::array<float, 16U> skinning{};
+			if(!transformMatrix(modelTransforms[poseJointIndex], model)
+				|| !convertInverseBind(
+					skeleton.inverseBindMatrices[skeletonJointIndex],
+					inverseBind)
+				|| !multiply(model, inverseBind, skinning)) {
+				return {};
+			}
+			GpuAnimationPaletteRecord matrix{};
+			std::copy_n(skinning.begin(), 4U, matrix.row0.begin());
+			std::copy_n(skinning.begin() + 4U, 4U, matrix.row1.begin());
+			std::copy_n(skinning.begin() + 8U, 4U, matrix.row2.begin());
+			deformation->paletteMatrices.push_back(matrix);
+		}
+
+		const std::span<const AnimationNamedFloatValue> publishedMorphs =
+			pose.MorphValues();
+		deformation->morphWeights.reserve(morphTargetIds.size());
+		for(const std::uint64_t targetId : morphTargetIds) {
+			const auto value = std::find_if(publishedMorphs.begin(),
+				publishedMorphs.end(), [targetId](
+					const AnimationNamedFloatValue& candidate) {
+					return candidate.stableId == targetId;
+				});
+			const float weight =
+				value == publishedMorphs.end() ? 0.0F : value->value;
+			if(!std::isfinite(weight)) return {};
+			deformation->morphWeights.push_back(weight);
+		}
+		if(!deformation->IsComplete()) return {};
+		return deformation;
+	} catch(const std::bad_alloc&) {
+		return {};
+	}
 }
 
 // RenderSystem::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -2492,6 +3064,15 @@ void RenderSystem::Update(float deltaTime)
 		return;
 	}
 	TERRAENGINE_PROFILE_SCOPE("RenderSystem::Update", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+	if (!editorModeEnabled)
+	{
+		// A standalone runtime derives Game View state from authored scene
+		// cameras every frame. Clear the previous descriptor before collection so
+		// a scene switch to a camera-less scene cannot leave capture requests
+		// pointing at a stale camera from the prior scene.
+		hasLatestGameViewCamera = false;
+		latestGameViewCamera = {};
+	}
 	// Runtime C# settings become visible only at this protected render boundary.
 	// Applying before snapshot construction gives every view one coherent profile.
 	ApplyQueuedRuntimeRenderSettings();
@@ -2526,6 +3107,28 @@ void RenderSystem::Update(float deltaTime)
 
 	// Snapshot camera components so view/projection data is sourced from
 	// authored entities instead of the legacy hardcoded values.
+	const std::uint64_t protectedRendererGeneration = rhi
+		? rhi->GetLatestRendererRecoverySnapshot().renderSessionGeneration
+		: latestRendererRecoverySnapshot.renderSessionGeneration;
+	const std::uint64_t protectedSceneGeneration =
+		objManager.GetSceneGeneration();
+	// Load the presentation envelope once at this protected boundary. The same
+	// shared immutable plan is used for GPU-only draw matching and later backend
+	// submission, so a newer publication cannot be mixed into this frame.
+	const std::shared_ptr<const TerraEngine::Animation::PublishedGpuAnimationPresentationPlan>
+		gpuPresentation = TerraEngine::Animation::AnimationPresentationSystem::Instance()
+			.LoadPublishedGpuAnimationPresentationPlan();
+	std::shared_ptr<const TerraEngine::Animation::GpuAnimationPlan> immutableGpuAnimationPlan;
+	if(gpuPresentation != nullptr && !gpuPresentation->safeFallback
+		&& gpuPresentation->loweringStatus == TerraEngine::Animation::GpuAnimationLoweringStatus::Ok
+		&& gpuPresentation->planStatus == TerraEngine::Animation::GpuAnimationPlanStatus::Ok
+		&& gpuPresentation->presentationGeneration != 0U
+		&& gpuPresentation->sourceGeneration != 0U
+		&& gpuPresentation->plan.generation != 0U
+		&& !gpuPresentation->plan.workPackets.empty()) {
+		immutableGpuAnimationPlan = std::shared_ptr<const TerraEngine::Animation::GpuAnimationPlan>(
+			gpuPresentation, &gpuPresentation->plan);
+	}
 	FrameVector<CameraEntry> cameras;
 	cameras.reserve(10);
 	// Snapshot renderable components to avoid locking the registry during parallel work.
@@ -2535,8 +3138,113 @@ void RenderSystem::Update(float deltaTime)
 	// touching the entity registry after this point.
 	FrameVector<LightEntry> lights;
 	lights.reserve(256);
+	// These protected-boundary containers are populated only for validated
+	// animated TDEF meshes. Static TEMF records never touch the AnimationSystem
+	// singleton; morph-only payloads participate only when their exact identity
+	// palette and a compatible one-joint animation publication are both present.
+	std::unordered_set<TerraEngine::UUID> aliveCompatibleAnimationObjects;
+	std::unordered_map<TerraEngine::UUID,
+		std::shared_ptr<const TerraEngine::Animation::PublishedAnimatorPose>> animatorPosePublications;
+	std::optional<std::uint64_t> animationAuthorityGeneration;
 	std::size_t runtimeLayoutRejectedRecordCount = 0u;
 	std::vector<std::string> runtimeLayoutRejectionReasons;
+	const auto findUniqueGpuVisualIdentity = [&immutableGpuAnimationPlan, &gpuPresentation,
+		protectedRendererGeneration, protectedSceneGeneration](
+		const TerraEngine::Renderer::AnimationRenderBindingRequest& request)
+		-> std::optional<TerraEngine::Renderer::AnimationGpuRenderBinding>
+	{
+		if(immutableGpuAnimationPlan == nullptr || gpuPresentation == nullptr
+			|| protectedRendererGeneration == 0U
+			|| protectedRendererGeneration > std::numeric_limits<std::uint32_t>::max()
+			|| protectedSceneGeneration == 0U
+			|| protectedSceneGeneration > std::numeric_limits<std::uint32_t>::max()
+			|| immutableGpuAnimationPlan->renderIdentities.size()
+				!= immutableGpuAnimationPlan->workPackets.size()
+			|| !request.expectedGpuRenderIdentity.IsComplete()) {
+			return std::nullopt;
+		}
+
+		std::optional<TerraEngine::Animation::GpuAnimationOwnerObjectMapping> ownerMapping;
+		for(const TerraEngine::Animation::GpuAnimationOwnerObjectMapping& mapping :
+			gpuPresentation->ownerObjectMappings) {
+			if(!mapping.IsComplete() || mapping.ownerObjectId != request.animatorObjectId
+				|| mapping.componentGeneration != request.componentGeneration) {
+				continue;
+			}
+			if(ownerMapping.has_value()) {
+				// Multiple immutable records for one component cannot prove which packet
+				// belongs to this draw, so fail open rather than use a global guess.
+				return std::nullopt;
+			}
+			ownerMapping = mapping;
+		}
+		if(!ownerMapping.has_value()) return std::nullopt;
+
+		std::optional<TerraEngine::Renderer::AnimationGpuRenderBinding> match;
+		const std::uint32_t rendererGeneration =
+			static_cast<std::uint32_t>(protectedRendererGeneration);
+		for(std::uint32_t packetIndex = 0U;
+			packetIndex < immutableGpuAnimationPlan->workPackets.size(); ++packetIndex) {
+			const TerraEngine::Animation::GpuAnimationWorkPacket& packet =
+				immutableGpuAnimationPlan->workPackets[packetIndex];
+			const TerraEngine::Animation::GpuAnimationRenderIdentity& renderIdentity =
+				immutableGpuAnimationPlan->renderIdentities[packetIndex];
+			if(packet.generationRecordIndex >= immutableGpuAnimationPlan->generationRecords.size()
+				|| packet.stageMask == 0U
+				|| !renderIdentity.IsComplete()
+				|| renderIdentity != request.expectedGpuRenderIdentity
+				|| TerraEngine::Animation::HasGpuAnimationFlag(packet.flags,
+					TerraEngine::Animation::GpuAnimationWorkFlag::HybridCpuAuthority)) {
+				continue;
+			}
+			const TerraEngine::Animation::GpuAnimationGenerationRecord& generation =
+				immutableGpuAnimationPlan->generationRecords[packet.generationRecordIndex];
+			if(!TerraEngine::Animation::IsGpuAnimationGenerationRecordValid(generation)
+				|| generation.instanceSlot == TerraEngine::Animation::kInvalidAnimatorInstanceSlot
+				|| packet.stableInstanceId != ownerMapping->stableInstanceId
+				|| generation.instanceSlot != ownerMapping->instanceSlot
+				|| generation.instanceGeneration != ownerMapping->instanceGeneration
+				|| generation.componentGeneration != ownerMapping->componentGeneration
+				|| generation.componentGeneration != request.componentGeneration
+				|| generation.meshGeneration != renderIdentity.meshHeaderVersion
+				|| generation.sceneGeneration != protectedSceneGeneration
+				|| generation.rendererGeneration != rendererGeneration
+				|| packet.stableInstanceId != ((static_cast<std::uint64_t>(generation.instanceSlot) << 32U)
+					| static_cast<std::uint64_t>(generation.instanceGeneration))) {
+				continue;
+			}
+
+			TerraEngine::Renderer::AnimationGpuRenderBinding candidate{};
+			candidate.stableInstanceId = packet.stableInstanceId;
+			candidate.presentationGeneration = gpuPresentation->presentationGeneration;
+			candidate.sourceGeneration = gpuPresentation->sourceGeneration;
+			candidate.paletteGeneration = gpuPresentation->presentationGeneration;
+			candidate.planGeneration = immutableGpuAnimationPlan->generation;
+			candidate.rendererGeneration = rendererGeneration;
+			candidate.workPacketIndex = packetIndex;
+			candidate.stableSubmissionOrdinal = packet.stableSubmissionOrdinal;
+			candidate.instanceSlot = generation.instanceSlot;
+			candidate.instanceGeneration = generation.instanceGeneration;
+			candidate.componentGeneration = generation.componentGeneration;
+			candidate.skeletonGeneration = generation.skeletonGeneration;
+			candidate.meshGeneration = generation.meshGeneration;
+			candidate.resourceGeneration = generation.resourceGeneration;
+			candidate.sceneGeneration = generation.sceneGeneration;
+			candidate.workGeneration = generation.workGeneration;
+			candidate.programGeneration = generation.programGeneration;
+			candidate.stageMask = packet.stageMask;
+			candidate.renderIdentity = renderIdentity;
+			candidate.valid = true;
+			if(match.has_value()) {
+				// The plan ABI names one packet per animator. Without a mesh ID in the
+				// packet, two candidates cannot be proven to belong to this draw even
+				// when their submission ordinals differ, so reject fail-open.
+				return std::nullopt;
+			}
+			match = candidate;
+		}
+		return match;
+	};
 	{
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: ECS Collection Graph", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		const bool diagnosticsEnabled = TerraEngine::Scheduling::EcsGraphFrameDiagnosticsEnabled();
@@ -2568,10 +3276,15 @@ void RenderSystem::Update(float deltaTime)
 		renderCollectionGraph.AddQuery(MakeProtectedRenderQuery(
 			"Render.CollectRenderables",
 			diagnosticsEnabled,
-			{ "Transform", "MeshRenderComponent" },
-			{ "Render.CameraCollection" },
+			{ "Transform", "MeshRenderComponent", "AnimatorComponent" },
+			{ "Render.CameraCollection", TerraEngine::Scheduling::kResourceAnimatorComponents,
+				TerraEngine::Scheduling::kResourceAnimationRuntimeState },
 			{ "Render.RenderableCollection" },
-			[&cameras, &renderables, &runtimeLayoutRejectedRecordCount, &runtimeLayoutRejectionReasons, this](const TerraEngine::Scheduling::EcsQueryChunk&, TerraEngine::Scheduling::JobGraphContext&)
+			[&cameras, &renderables, &aliveCompatibleAnimationObjects,
+				&animatorPosePublications, &animationAuthorityGeneration,
+				&runtimeLayoutRejectedRecordCount, &runtimeLayoutRejectionReasons,
+				&findUniqueGpuVisualIdentity, protectedRendererGeneration,
+				protectedSceneGeneration, this](const TerraEngine::Scheduling::EcsQueryChunk&, TerraEngine::Scheduling::JobGraphContext&)
 			{
 				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Collect Renderables", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 				if (cameras.empty() && !hasSceneViewCamera)
@@ -2606,7 +3319,166 @@ void RenderSystem::Update(float deltaTime)
 						reflectedMesh.spatialObjectId = spatialObjectId;
 						reflectedMesh.taskShaderCullingEnabled = objectTaskCullingEnabled;
 						const TerraEngine::UUID objectId = spatialObjectId != TerraEngine::EMPTY_UUID ? spatialObjectId : objManager.getUUID(object);
-						renderables.push_back({ object.EntityId(), objectId, objManager.isObjectStatic(object), reflectedMesh });
+
+						TerraEngine::Renderer::AnimationRenderBinding animationBinding;
+						const Mesh* runtimeMesh = rm.GetMesh(meshId);
+						if(runtimeMesh != nullptr
+							&& IsValidatedAnimationDeformableMesh(*runtimeMesh)) {
+							animationBinding.meshId = meshId;
+							animationBinding.deformablePayloadGeneration =
+								runtimeMesh->deformablePayloadGeneration;
+							animationBinding.skeletonCompatibilityFingerprint =
+								runtimeMesh->deformableMetadata.skeletonCompatibilityFingerprint;
+
+							std::optional<Object> nearestAnimatorObject;
+							TerraEngine::UUID skeletonOverrideAssetId = TerraEngine::EMPTY_UUID;
+							std::optional<Object> hierarchyObject = object;
+							for(std::size_t depth = 0U; hierarchyObject.has_value() && depth < 1024U; ++depth) {
+								const entt::entity entity = hierarchyObject->EntityId();
+								auto& registry = objManager.getRegistry();
+								if(registry.valid(entity) && registry.all_of<AnimatorComponent>(entity)) {
+									const AnimatorComponent& animator = registry.get<AnimatorComponent>(entity);
+									// The nearest authored animator owns the subtree. A disabled
+									// nearest component deliberately blocks an ancestor animator.
+									if(IsRuntimeComponentActive(animator)) {
+										nearestAnimatorObject = hierarchyObject;
+										skeletonOverrideAssetId = animator.skeletonOverrideAssetId;
+									}
+									break;
+								}
+								hierarchyObject = objManager.getParent(*hierarchyObject);
+							}
+
+							if(nearestAnimatorObject.has_value()) {
+								const TerraEngine::UUID animatorObjectId =
+									objManager.getUUID(*nearestAnimatorObject);
+								const std::uint64_t animatorObjectLifetime =
+									objManager.getObjectLifetimeGeneration(*nearestAnimatorObject);
+								const std::uint64_t componentGeneration64 =
+									objManager.getObjectComponentGeneration(*nearestAnimatorObject);
+								if(objectId != TerraEngine::EMPTY_UUID
+									&& animatorObjectId != TerraEngine::EMPTY_UUID
+									&& animatorObjectLifetime != 0U
+									&& componentGeneration64 != 0U
+									&& componentGeneration64 <= std::numeric_limits<std::uint32_t>::max()) {
+									const std::uint32_t componentGeneration =
+										static_cast<std::uint32_t>(componentGeneration64);
+									if(!animationAuthorityGeneration.has_value()) {
+										animationAuthorityGeneration = TerraEngine::Animation::AnimationSystem::Instance()
+											.AuthorityPublicationGeneration();
+									}
+
+									std::shared_ptr<const TerraEngine::Animation::PublishedAnimatorPose> currentPose;
+									if(const auto published = animatorPosePublications.find(animatorObjectId);
+										published != animatorPosePublications.end()) {
+										currentPose = published->second;
+									} else {
+										currentPose = TerraEngine::Animation::AnimationSystem::Instance()
+											.LoadPublishedAnimatorPoseForObject(animatorObjectId);
+										animatorPosePublications.emplace(animatorObjectId, currentPose);
+									}
+
+									auto held = compatibleAnimationPoseCache.find(objectId);
+									const TerraEngine::Animation::PublishedAnimatorPose*
+										compatibilityPublication = currentPose.get();
+									if(compatibilityPublication == nullptr
+										&& held != compatibleAnimationPoseCache.end()) {
+										compatibilityPublication =
+											held->second.binding.pose.get();
+									}
+									const TerraEngine::Animation::AnimationCompatibilityFingerprint
+										effectiveSkeletonFingerprint =
+											ResolveDeformableSkeletonFingerprint(
+												*runtimeMesh,
+												compatibilityPublication);
+
+									TerraEngine::Renderer::AnimationRenderBindingRequest request;
+									request.meshId = meshId;
+									request.animatorObjectId = animatorObjectId;
+									request.animatorObjectGeneration = animatorObjectLifetime;
+									request.animationAuthorityGeneration = *animationAuthorityGeneration;
+									request.deformablePayloadGeneration = runtimeMesh->deformablePayloadGeneration;
+									request.componentGeneration = componentGeneration;
+									request.skeletonCompatibilityFingerprint =
+										effectiveSkeletonFingerprint;
+									request.expectedGpuRenderIdentity.meshId = meshId;
+									request.expectedGpuRenderIdentity.meshHeaderVersion =
+										runtimeMesh->header.version;
+									request.expectedGpuRenderIdentity.deformablePayloadGeneration =
+										runtimeMesh->deformablePayloadGeneration;
+									request.expectedGpuRenderIdentity.rendererGeneration =
+										protectedRendererGeneration;
+									request.expectedGpuRenderIdentity.sceneGeneration =
+										protectedSceneGeneration;
+									request.expectedGpuRenderIdentity.skeletonCompatibilityFingerprint =
+										effectiveSkeletonFingerprint;
+									request.invalidation.asset = runtimeMesh->deformablePayloadGeneration
+										^ effectiveSkeletonFingerprint;
+									request.invalidation.page = runtimeMesh->deformablePayloadGeneration;
+									request.invalidation.view = nextRenderFrameId;
+									request.invalidation.material = std::max<std::uint64_t>(1U,
+										static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(materialId)));
+									request.invalidation.renderer = protectedRendererGeneration;
+									request.invalidation.residency = runtimeMesh->deformablePayloadGeneration;
+									request.currentPose = currentPose;
+
+									if(currentPose != nullptr) {
+										request.animatorSlotIndex = currentPose->animator.slotIndex;
+										request.animatorGeneration = currentPose->animator.generation;
+										request.skeletonAssetId = skeletonOverrideAssetId != TerraEngine::EMPTY_UUID
+											? skeletonOverrideAssetId
+											: currentPose->skeleton.assetId.value;
+										request.skeletonGeneration = currentPose->skeleton.generation;
+									} else if(held != compatibleAnimationPoseCache.end()) {
+										const TerraEngine::Renderer::AnimationRenderBinding& prior = held->second.binding;
+										const bool liveIdentityMatches = prior.meshId == request.meshId
+											&& prior.animatorObjectId == request.animatorObjectId
+											&& prior.animatorObjectGeneration == request.animatorObjectGeneration
+											&& prior.animationAuthorityGeneration == request.animationAuthorityGeneration
+											&& prior.deformablePayloadGeneration == request.deformablePayloadGeneration
+											&& prior.componentGeneration == request.componentGeneration
+											&& prior.skeletonCompatibilityFingerprint
+												== request.skeletonCompatibilityFingerprint
+											&& (skeletonOverrideAssetId == TerraEngine::EMPTY_UUID
+												|| prior.skeletonAssetId == skeletonOverrideAssetId);
+										if(liveIdentityMatches) {
+											request.animatorSlotIndex = prior.animatorSlotIndex;
+											request.animatorGeneration = prior.animatorGeneration;
+											request.skeletonAssetId = prior.skeletonAssetId;
+											request.skeletonGeneration = prior.skeletonGeneration;
+											request.fallbackPolicy = TerraEngine::Renderer::AnimationRenderFallbackPolicy::HoldLastCompatiblePose;
+											request.heldBinding = prior;
+										} else {
+											compatibleAnimationPoseCache.erase(held);
+											held = compatibleAnimationPoseCache.end();
+										}
+									}
+									if(currentPose == nullptr) {
+										// This only scans the already-retained immutable plan. It never
+										// opens an animator instance or invents a CPU pose for Visual GPU.
+										request.gpuVisualIdentity = findUniqueGpuVisualIdentity(request);
+									}
+
+									animationBinding = ResolveAnimationRenderBinding(request);
+									if(animationBinding.status == TerraEngine::Renderer::AnimationRenderBindingStatus::Ready
+										&& animationBinding.source == TerraEngine::Renderer::AnimationRenderPoseSource::CpuPose) {
+										compatibleAnimationPoseCache[objectId] = {
+											animationBinding, nextRenderFrameId };
+										aliveCompatibleAnimationObjects.insert(objectId);
+									} else if(animationBinding.status == TerraEngine::Renderer::AnimationRenderBindingStatus::Ready
+										&& animationBinding.source == TerraEngine::Renderer::AnimationRenderPoseSource::HeldCpuPose
+										&& held != compatibleAnimationPoseCache.end()) {
+										held->second.lastTouchedFrameId = nextRenderFrameId;
+										aliveCompatibleAnimationObjects.insert(objectId);
+									} else {
+										compatibleAnimationPoseCache.erase(objectId);
+									}
+								}
+							}
+						}
+
+						renderables.push_back({ object.EntityId(), objectId,
+							objManager.isObjectStatic(object), reflectedMesh, std::move(animationBinding) });
 					}
 				);
 			}));
@@ -2671,6 +3543,30 @@ void RenderSystem::Update(float deltaTime)
 		}
 	}
 
+	// Scene/object/component retirement removes held ownership immediately. The
+	// hard cap is a second guard for extremely large scenes and editor churn.
+	for(auto cache = compatibleAnimationPoseCache.begin();
+		cache != compatibleAnimationPoseCache.end();) {
+		if(!aliveCompatibleAnimationObjects.contains(cache->first)) {
+			cache = compatibleAnimationPoseCache.erase(cache);
+		} else {
+			++cache;
+		}
+	}
+	while(compatibleAnimationPoseCache.size() > kCompatibleAnimationPoseCacheCapacity) {
+		auto victim = std::min_element(compatibleAnimationPoseCache.begin(),
+			compatibleAnimationPoseCache.end(), [](const auto& lhs, const auto& rhs) {
+				if(lhs.second.lastTouchedFrameId != rhs.second.lastTouchedFrameId) {
+					return lhs.second.lastTouchedFrameId < rhs.second.lastTouchedFrameId;
+				}
+				return TerraEngine::ToHexString(lhs.first) < TerraEngine::ToHexString(rhs.first);
+			});
+		if(victim == compatibleAnimationPoseCache.end()) {
+			break;
+		}
+		compatibleAnimationPoseCache.erase(victim);
+	}
+
 	// Throttle warning spam so missing cameras do not flood the console every frame.
 	static bool loggedMissingCamera = false;
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -2716,6 +3612,184 @@ void RenderSystem::Update(float deltaTime)
 	};
 
 	activeRenderFrameId = nextRenderFrameId++;
+	if(immutableGpuAnimationPlan != nullptr && gpuPresentation != nullptr
+		&& protectedRendererGeneration != 0U
+		&& protectedRendererGeneration <= std::numeric_limits<std::uint32_t>::max()
+		&& protectedSceneGeneration != 0U
+		&& protectedSceneGeneration <= std::numeric_limits<std::uint32_t>::max()
+		&& immutableGpuAnimationPlan->renderIdentities.size()
+			== immutableGpuAnimationPlan->workPackets.size()) {
+		const std::uint32_t rendererGeneration = static_cast<std::uint32_t>(protectedRendererGeneration);
+		for(RenderableEntry& entry : renderables) {
+			TerraEngine::Renderer::AnimationRenderBinding& binding = entry.animationBinding;
+			if(binding.meshId == TerraEngine::EMPTY_UUID
+				|| binding.status != TerraEngine::Renderer::AnimationRenderBindingStatus::Ready
+				|| binding.safePose) {
+				continue;
+			}
+
+			std::optional<std::uint32_t> packetIndex;
+			if(binding.gpu.IsComplete()) {
+				// A GPU-only resolver already named one exact plan packet. Verify its
+				// complete envelope before retaining it; do not look up a replacement.
+				if(binding.gpu.presentationGeneration == gpuPresentation->presentationGeneration
+					&& binding.gpu.sourceGeneration == gpuPresentation->sourceGeneration
+					&& binding.gpu.planGeneration == immutableGpuAnimationPlan->generation
+					&& binding.gpu.rendererGeneration == rendererGeneration
+					&& binding.gpu.workPacketIndex < immutableGpuAnimationPlan->workPackets.size()) {
+					packetIndex = binding.gpu.workPacketIndex;
+				} else {
+					binding.gpu = {};
+					continue;
+				}
+			} else {
+				const std::uint64_t stableInstanceId = BuildStableAnimationInstanceId(binding, entry.objectId);
+				for(std::uint32_t index = 0U; index < immutableGpuAnimationPlan->workPackets.size(); ++index) {
+					if(immutableGpuAnimationPlan->workPackets[index].stableInstanceId != stableInstanceId) continue;
+					if(packetIndex.has_value()) {
+						// CPU bindings cannot name a mesh ordinal. Multiple packets for one
+						// instance are ambiguous, so keep the verified CPU path instead.
+						packetIndex.reset();
+						break;
+					}
+					packetIndex = index;
+				}
+			}
+			if(!packetIndex.has_value()) continue;
+
+			const TerraEngine::Animation::GpuAnimationWorkPacket& packet =
+				immutableGpuAnimationPlan->workPackets[*packetIndex];
+			const TerraEngine::Animation::GpuAnimationRenderIdentity& renderIdentity =
+				immutableGpuAnimationPlan->renderIdentities[*packetIndex];
+			const Mesh* currentMesh =
+				ResourceManager::Instance().GetMesh(binding.meshId);
+			TerraEngine::Animation::GpuAnimationRenderIdentity expectedRenderIdentity{};
+			if(currentMesh != nullptr) {
+				expectedRenderIdentity.meshId = binding.meshId;
+				expectedRenderIdentity.meshHeaderVersion =
+					currentMesh->header.version;
+				expectedRenderIdentity.deformablePayloadGeneration =
+					binding.deformablePayloadGeneration;
+				expectedRenderIdentity.rendererGeneration =
+					protectedRendererGeneration;
+				expectedRenderIdentity.sceneGeneration =
+					protectedSceneGeneration;
+				expectedRenderIdentity.skeletonCompatibilityFingerprint =
+					binding.skeletonCompatibilityFingerprint;
+			}
+			if(packet.generationRecordIndex >= immutableGpuAnimationPlan->generationRecords.size()
+				|| !renderIdentity.IsComplete()
+				|| currentMesh == nullptr
+				|| renderIdentity != expectedRenderIdentity
+				|| currentMesh->deformablePayloadGeneration
+					!= binding.deformablePayloadGeneration
+				|| currentMesh->deformableMetadata.skeletonCompatibilityFingerprint
+					!= binding.skeletonCompatibilityFingerprint
+				|| (binding.gpu.IsComplete()
+					&& binding.gpu.renderIdentity != renderIdentity)) {
+				binding.gpu = {};
+				continue;
+			}
+			const TerraEngine::Animation::GpuAnimationGenerationRecord& generation =
+				immutableGpuAnimationPlan->generationRecords[packet.generationRecordIndex];
+			if(!TerraEngine::Animation::IsGpuAnimationGenerationRecordValid(generation)
+				|| packet.stageMask == 0U
+				|| generation.rendererGeneration != rendererGeneration
+				|| generation.sceneGeneration
+					!= static_cast<std::uint32_t>(protectedSceneGeneration)
+				|| generation.meshGeneration
+					!= renderIdentity.meshHeaderVersion
+				|| generation.instanceSlot != binding.animatorSlotIndex
+				|| generation.instanceGeneration != binding.animatorGeneration
+				|| generation.componentGeneration != binding.componentGeneration
+				|| (binding.gpu.IsComplete()
+					&& packet.stableInstanceId != binding.gpu.stableInstanceId)) {
+				binding.gpu = {};
+				continue;
+			}
+
+			if(!binding.gpu.IsComplete()) {
+				binding.gpu.stableInstanceId = packet.stableInstanceId;
+				binding.gpu.presentationGeneration = gpuPresentation->presentationGeneration;
+				binding.gpu.sourceGeneration = gpuPresentation->sourceGeneration;
+				binding.gpu.paletteGeneration = gpuPresentation->presentationGeneration;
+				binding.gpu.planGeneration = immutableGpuAnimationPlan->generation;
+				binding.gpu.rendererGeneration = rendererGeneration;
+				binding.gpu.workPacketIndex = *packetIndex;
+				binding.gpu.stableSubmissionOrdinal = packet.stableSubmissionOrdinal;
+				binding.gpu.instanceSlot = generation.instanceSlot;
+				binding.gpu.instanceGeneration = generation.instanceGeneration;
+				binding.gpu.componentGeneration = generation.componentGeneration;
+				binding.gpu.skeletonGeneration = generation.skeletonGeneration;
+				binding.gpu.meshGeneration = generation.meshGeneration;
+				binding.gpu.resourceGeneration = generation.resourceGeneration;
+				binding.gpu.sceneGeneration = generation.sceneGeneration;
+				binding.gpu.workGeneration = generation.workGeneration;
+				binding.gpu.programGeneration = generation.programGeneration;
+				binding.gpu.stageMask = packet.stageMask;
+				binding.gpu.renderIdentity = renderIdentity;
+				binding.gpu.hybridCpuAuthority = TerraEngine::Animation::HasGpuAnimationFlag(
+					packet.flags, TerraEngine::Animation::GpuAnimationWorkFlag::HybridCpuAuthority);
+				binding.gpu.valid = true;
+			}
+			binding.invalidation.pose = generation.workGeneration;
+			binding.invalidation.morph = generation.workGeneration;
+		}
+	}
+	auto cpuDeformationPlan =
+		std::make_shared<TerraEngine::Renderer::CpuAnimationDeformationPlan>();
+	cpuDeformationPlan->frameId = activeRenderFrameId;
+	cpuDeformationPlan->rendererGeneration = protectedRendererGeneration;
+	for(RenderableEntry& entry : renderables) {
+		TerraEngine::Renderer::AnimationRenderBinding& binding =
+			entry.animationBinding;
+		// Hybrid/GPU bindings already own a compute-produced palette. Only the
+		// CPU deterministic/fallback path needs the host-upload bridge.
+		if(binding.gpu.IsComplete() || !binding.HasCpuPose()
+			|| binding.pose == nullptr || protectedRendererGeneration == 0U) {
+			continue;
+		}
+		const Mesh* mesh = ResourceManager::Instance().GetMesh(binding.meshId);
+		if(mesh == nullptr
+			|| mesh->deformablePayloadGeneration
+				!= binding.deformablePayloadGeneration
+			|| ResolveDeformableSkeletonFingerprint(
+					*mesh, binding.pose.get())
+				!= binding.skeletonCompatibilityFingerprint) {
+			continue;
+		}
+		std::vector<std::uint64_t> morphTargetIds;
+		try {
+			morphTargetIds.reserve(mesh->deformableMorphs.size());
+			for(const DeformableMeshMorphRecord& morph : mesh->deformableMorphs) {
+				morphTargetIds.push_back(morph.stableTargetId);
+			}
+		} catch(const std::bad_alloc&) {
+			continue;
+		}
+		const std::shared_ptr<const TerraEngine::Renderer::CpuAnimationDeformationData>
+			deformation = BuildCpuAnimationDeformation(
+				*binding.pose, mesh->deformablePaletteJoints, morphTargetIds);
+		if(deformation == nullptr || !deformation->IsComplete()
+			|| cpuDeformationPlan->records.size()
+				>= std::numeric_limits<std::uint32_t>::max()) {
+			continue;
+		}
+		binding.cpuDeformation = deformation;
+		binding.cpuDeformationRecordIndex = static_cast<std::uint32_t>(
+			cpuDeformationPlan->records.size());
+		cpuDeformationPlan->records.push_back({
+			BuildStableAnimationInstanceId(binding, entry.objectId),
+			binding.meshId,
+			binding.posePublicationGeneration,
+			binding.deformablePayloadGeneration,
+			protectedRendererGeneration,
+			binding.skeletonCompatibilityFingerprint,
+			deformation});
+	}
+	if(cpuDeformationPlan->records.empty()) {
+		cpuDeformationPlan.reset();
+	}
 	const TerraEngine::Renderer::BackendCapabilityProfile backendCapabilities = rhi
 		? rhi->GetBackendCapabilityProfile()
 		: TerraEngine::Renderer::BackendCapabilityProfile{};
@@ -2728,7 +3802,8 @@ void RenderSystem::Update(float deltaTime)
 		std::lock_guard<std::mutex> lock(statsMutex);
 		for (const TerraEngine::Renderer::RenderCaptureRequest& captureRequest : pendingCaptureRequests)
 		{
-			if (captureRequest.sourceKind != TerraEngine::Renderer::RenderCaptureSourceKind::GameView
+			if ((captureRequest.sourceKind != TerraEngine::Renderer::RenderCaptureSourceKind::GameView
+					|| captureRequest.dedicatedRenderTarget)
 				&& captureRequest.format == "image/png")
 			{
 				hasPendingDedicatedCaptureRender = true;
@@ -2741,25 +3816,29 @@ void RenderSystem::Update(float deltaTime)
 	renderFrameSnapshot.frameId = activeRenderFrameId;
 	renderFrameSnapshot.renderSettings = SanitizeRenderSettings(currentSettings);
 	renderFrameSnapshot.sceneRevision = objManager.GetSpatialRevision();
+	// Capture the renderer lifetime once. Every animated record in this immutable
+	// frame must agree with it; querying recovery state per renderable could mix a
+	// pre-loss and post-loss generation in one snapshot.
+	const std::uint64_t snapshotRendererGeneration = protectedRendererGeneration;
 	renderFrameSnapshot.viewRequests.reserve(3u + gameViewCameras.size() + cameras.size());
 	if (hasSceneViewCamera && (!editorModeEnabled || (sceneViewTargetSize.x > 0u && sceneViewTargetSize.y > 0u)))
 	{
-		renderFrameSnapshot.viewRequests.push_back({ RenderOutputKind::SceneView, RenderViewType::Scene, sceneViewTargetSize, 1u });
+		renderFrameSnapshot.viewRequests.push_back({ RenderOutputKind::SceneView, RenderViewType::Scene, sceneViewTargetSize, 1u, activeRenderFrameId });
 	}
 	if (!gameViewSuppressed && (!editorModeEnabled || (gameViewTargetSize.x > 0u && gameViewTargetSize.y > 0u)))
 	{
 		if (!gameViewCameras.empty())
 		{
-			renderFrameSnapshot.viewRequests.push_back({ RenderOutputKind::GameView, RenderViewType::Game, gameViewTargetSize, 2u });
+			renderFrameSnapshot.viewRequests.push_back({ RenderOutputKind::GameView, RenderViewType::Game, gameViewTargetSize, 2u, activeRenderFrameId });
 		}
 		else if (!cameras.empty())
 		{
-			renderFrameSnapshot.viewRequests.push_back({ RenderOutputKind::MainRuntimeView, RenderViewType::Game, gameViewTargetSize, 2u });
+			renderFrameSnapshot.viewRequests.push_back({ RenderOutputKind::MainRuntimeView, RenderViewType::Game, gameViewTargetSize, 2u, activeRenderFrameId });
 		}
 	}
 	if (hasPendingDedicatedCaptureRender)
 	{
-		renderFrameSnapshot.viewRequests.push_back({ RenderOutputKind::OffscreenTexture, RenderViewType::Game, pendingDedicatedCaptureTargetSize, 9000u });
+		renderFrameSnapshot.viewRequests.push_back({ RenderOutputKind::OffscreenTexture, RenderViewType::Game, pendingDedicatedCaptureTargetSize, 9000u, activeRenderFrameId });
 	}
 	if (renderFrameSnapshot.viewRequests.empty())
 	{
@@ -2826,6 +3905,55 @@ void RenderSystem::Update(float deltaTime)
 			entry.mesh.taskShaderCullingEnabled,
 			false
 		});
+		TerraEngine::Renderer::RenderFrameRenderableRecord& snapshotRenderable =
+			renderFrameSnapshot.renderables.back();
+		const TerraEngine::Renderer::AnimationRenderBinding& binding = entry.animationBinding;
+		if(binding.meshId != TerraEngine::EMPTY_UUID) {
+			TerraEngine::Renderer::AnimationRenderGenerationRecord& animation =
+				snapshotRenderable.animation;
+			animation.stableInstanceId = BuildStableAnimationInstanceId(binding, entry.objectId);
+			animation.deformablePayloadGeneration = binding.deformablePayloadGeneration;
+			animation.rendererGeneration = snapshotRendererGeneration;
+			if(binding.gpu.IsComplete() && immutableGpuAnimationPlan != nullptr
+				&& binding.gpu.workPacketIndex < immutableGpuAnimationPlan->workPackets.size()) {
+				const TerraEngine::Animation::GpuAnimationWorkPacket& gpuPacket =
+					immutableGpuAnimationPlan->workPackets[binding.gpu.workPacketIndex];
+				const TerraEngine::Animation::GpuAnimationGenerationRecord& gpuGeneration =
+					immutableGpuAnimationPlan->generationRecords[gpuPacket.generationRecordIndex];
+				animation.poseGeneration = gpuGeneration.workGeneration;
+				animation.morphGeneration = gpuGeneration.workGeneration;
+				animation.paletteGeneration = binding.gpu.paletteGeneration;
+				animation.programGeneration = gpuGeneration.programGeneration;
+				animation.animationPlanGeneration = binding.gpu.planGeneration;
+				animation.firstGpuWorkPacket = binding.gpu.workPacketIndex;
+				animation.gpuWorkPacketCount = 1U;
+				animation.gpuStageMask = binding.gpu.stageMask;
+				animation.source = binding.gpu.hybridCpuAuthority
+					? TerraEngine::Renderer::AnimationRenderEvaluationSource::HybridAuthoritative
+					: TerraEngine::Renderer::AnimationRenderEvaluationSource::GpuVisual;
+				animation.complete = true;
+			} else {
+				animation.poseGeneration = binding.posePublicationGeneration;
+				// CPU snapshots publish pose and morph arrays atomically. Their one
+				// publication identity is shared by every render view.
+				animation.morphGeneration = binding.posePublicationGeneration;
+				animation.paletteGeneration = binding.posePublicationGeneration;
+				if(binding.pose != nullptr && binding.pose->snapshot != nullptr
+					&& binding.pose->snapshot->pose != nullptr) {
+					animation.programGeneration =
+						binding.pose->snapshot->pose->Generation().programGeneration;
+				}
+				animation.safeFallback = binding.safePose
+					|| binding.status != TerraEngine::Renderer::AnimationRenderBindingStatus::Ready;
+				animation.source = animation.safeFallback
+					? TerraEngine::Renderer::AnimationRenderEvaluationSource::SafeFallback
+					: TerraEngine::Renderer::AnimationRenderEvaluationSource::CpuPose;
+				animation.complete = !animation.safeFallback && binding.HasCpuPose();
+			}
+
+			snapshotRenderable.invalidation = binding.invalidation;
+			snapshotRenderable.invalidation.view = activeRenderFrameId;
+		}
 		// Keep mesh and material records aligned with renderables. Several
 		// backend preparation and export diagnostics paths treat this snapshot
 		// as a per-renderable contract rather than a unique resource table.
@@ -2851,10 +3979,14 @@ void RenderSystem::Update(float deltaTime)
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Prepare Backend Work Caches", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		rendererPreparationSummary = rendererPreparationCache.BuildFramePreparation(renderFrameSnapshot, renderGraphPasses, backendCapabilities);
 	}
-	TerraEngine::Renderer::RenderSubmissionPlan renderSubmissionPlan = TerraEngine::Renderer::BuildRenderSubmissionPlan(renderFrameSnapshot, renderGraphPasses, renderPacketPlan, activeRenderFrameId);
-	if (!rhi->ConsumeRenderSubmissionPlan(renderSubmissionPlan))
-	{
-		TERRAENGINE_LOG(LogLevel::Error, "Render graph rejected frame " << activeRenderFrameId << " before backend submission.");
+	TerraEngine::Renderer::RenderSubmissionPlan renderSubmissionPlan = TerraEngine::Renderer::BuildRenderSubmissionPlan(
+		renderFrameSnapshot, renderGraphPasses, renderPacketPlan, activeRenderFrameId,
+		immutableGpuAnimationPlan);
+	if(cpuDeformationPlan != nullptr) {
+		renderSubmissionPlan.animationWork.cpuDeformationPlan =
+			std::move(cpuDeformationPlan);
+		(void)TerraEngine::Renderer::ValidateRenderSubmissionPlan(
+			renderSubmissionPlan, activeRenderFrameId);
 	}
 	TerraEngine::Renderer::RenderDiagnosticsSummary renderGraphDiagnostics = TerraEngine::Renderer::BuildRenderDiagnosticsSummary(renderFrameSnapshot, renderPacketPlan, renderSubmissionPlan, backendCapabilities);
 	renderGraphDiagnostics.runtimeLayoutRenderRecordCount = cameras.size() + renderables.size() + lights.size();
@@ -2982,6 +4114,10 @@ void RenderSystem::Update(float deltaTime)
 			{
 				cacheEntry->second.lastTouchedFrameId = activeRenderFrameId;
 				renderableDrawCommands[index] = cacheEntry->second.command;
+				// Pose publication changes are intentionally absent from the base draw
+				// signature. Always overwrite the copied binding on a cache hit so the
+				// command cannot retain a prior frame's immutable publication.
+				renderableDrawCommands[index].animationBinding = entry.animationBinding;
 				++drawCommandCache.hitCount;
 				continue;
 			}
@@ -2990,6 +4126,7 @@ void RenderSystem::Update(float deltaTime)
 			command.meshId = meshComp.meshId;
 			command.materialId = meshComp.materialId;
 			command.objectId = entry.objectId;
+			command.animationBinding = entry.animationBinding;
 			command.taskShaderCullingEnabled = meshComp.taskShaderCullingEnabled;
 			command.modelMatrix = makeModelMatrix(getWorldTransform(entry.entity));
 			renderableDrawCommands[index] = command;
@@ -2998,6 +4135,9 @@ void RenderSystem::Update(float deltaTime)
 			record.signature = signature;
 			record.lastTouchedFrameId = activeRenderFrameId;
 			record.command = command;
+			// The per-object compatible-pose cache owns the one retained prior pose.
+			// Base draw caching must not add another hidden publication owner.
+			record.command.animationBinding = {};
 			drawCommandCache.recordsByObjectId[entry.objectId] = std::move(record);
 			++drawCommandCache.missCount;
 		}
@@ -3012,15 +4152,17 @@ void RenderSystem::Update(float deltaTime)
 				+ std::to_string(drawCommandCache.hitCount + drawCommandCache.missCount));
 		}
 	}
-	// The visible and shadow caches store draw commands with model matrices.
-	// Include every renderable's current draw signature so Play-mode transform
-	// changes invalidate cached view work even when the editor camera is still.
+	// The visible and shadow caches store draw commands with model matrices and
+	// immutable pose ownership. Include both signatures so transform or pose
+	// publication changes invalidate every view even when its camera is still.
 	std::uint64_t renderableWorldSignature = kRenderHashOffset;
 	HashCombine(renderableWorldSignature, static_cast<std::uint64_t>(drawCommandSignatures.size()));
 	for (std::size_t index = 0u; index < drawCommandSignatures.size(); ++index)
 	{
 		HashCombine(renderableWorldSignature, static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(renderables[index].objectId)));
 		HashCombine(renderableWorldSignature, drawCommandSignatures[index]);
+		HashCombine(renderableWorldSignature,
+			BuildAnimationRenderBindingSignature(renderables[index].animationBinding));
 	}
 
 	auto collectCandidateIndices = [&](const TerraEngine::Scene::SpatialQueryResult& query) {
@@ -3442,6 +4584,46 @@ void RenderSystem::Update(float deltaTime)
 				TerraEngine::Renderer::AddVirtualGeometryFailOpenDiagnostic(renderGraphDiagnostics, command.meshId, range);
 			}
 			std::vector<TerraEngine::Renderer::VirtualGeometryPageNeedRecord> annotatedPageNeeds = selection.pageNeeds;
+
+			if (command.animationBinding.RequiresOwnerMeshDeformationFallback())
+			{
+				// Streamed page packets currently omit their matching skin and
+				// morph records. Do not reinterpret a page-local cluster range as
+				// an owner-mesh range: that rendered only whichever meshlets were
+				// present in the first packet and could remove an animated model's
+				// opposite side. Publish one complete owner draw instead.
+				command.virtualMeshletOffset = 0U;
+				command.virtualMeshletCount = mesh->header.meshletCount;
+				command.selectedVirtualLod = range.selectedLodIndex;
+				command.selectedVirtualClusterOffset = range.selectedClusterOffset;
+				command.selectedVirtualClusterCount = range.selectedClusterCount;
+				command.selectedVirtualPageNeedOffset = range.pageNeedOffset;
+				command.selectedVirtualPageNeedCount = range.pageNeedCount;
+				command.virtualGeometryPageId = range.pageId;
+				command.virtualGeometryFallbackPageId = range.fallbackPageId;
+				command.virtualGeometryPayloadSource =
+					VirtualGeometryPagePayloadSource::ConservativeEmbeddedFallback;
+				command.virtualGeometryEmittedSource =
+					VirtualGeometryEmittedPageSource::ConservativeEmbeddedFallback;
+				command.virtualGeometryPagePayloadByteOffset = 0U;
+				command.virtualGeometryPagePayloadByteSize = 0U;
+				command.virtualGeometryPayloadBufferIndex = 0xffffffffU;
+				command.virtualGeometryPayloadDescriptorIndex = 0xffffffffU;
+				command.virtualGeometryPacketDescriptorIndex = 0xffffffffU;
+				command.virtualGeometryFlags =
+					(virtualGeometryFlags | kVirtualGeometryFlagFailOpen)
+					& ~kVirtualGeometryFlagConeCullingSafe;
+				expandedCommands.push_back(command);
+				packet.selectedClusters.insert(
+					packet.selectedClusters.end(),
+					selection.selectedClusters.begin(),
+					selection.selectedClusters.end());
+				packet.pageNeeds.insert(
+					packet.pageNeeds.end(),
+					annotatedPageNeeds.begin(),
+					annotatedPageNeeds.end());
+				continue;
+			}
 
 			if (selection.selectedClusters.empty())
 			{
@@ -4459,6 +5641,14 @@ void RenderSystem::Update(float deltaTime)
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: RHI Begin Frame", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		rhi->BeginFrame();
 	}
+	// BeginFrame first retires and clears the reused backend frame slot. Publish
+	// this frame's immutable animation plan only after that reset; publishing it
+	// earlier would let Vulkan erase the pending compute work before RenderFrame
+	// can record it and could rewrite descriptors still owned by the prior slot.
+	if (!rhi->ConsumeRenderSubmissionPlan(renderSubmissionPlan))
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Render graph rejected frame " << activeRenderFrameId << " before backend submission.");
+	}
 
 	TerraEngine::Scene::SpatialDiagnosticsSnapshot sceneSpatialDiagnostics{};
 	TerraEngine::Scene::SpatialDiagnosticsSnapshot gameSpatialDiagnostics{};
@@ -4649,6 +5839,18 @@ void RenderSystem::Update(float deltaTime)
 			frameData.projectionMatrix = glm::perspectiveRH_ZO(glm::radians(clampedFov), safeAspect, nearPlane, farPlane);
 			frameData.projectionMatrix[1][1] *= -1;
 			frameData.cameraWorldPosition = cameraTransform.position;
+			// The editor publishes this descriptor through GameViewWindow. A
+			// packaged runtime has no dock, so publish the exact authored camera
+			// used for MainRuntimeView here as read-only capture metadata. This
+			// lets exported-runtime validation request a real Vulkan readback
+			// without inventing an editor-only camera owner.
+			latestGameViewCamera = {
+				frameData.viewMatrix,
+				frameData.projectionMatrix,
+				frameData.cameraWorldPosition,
+				false
+			};
+			hasLatestGameViewCamera = true;
 			frameData.editorContextTint = glm::vec4(0.0f);
 			const VisibleCommandBuildResult visibleCommands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix, gameViewTargetSize, RenderOutputKind::MainRuntimeView, RenderViewType::Game, 2u, frameData.cameraWorldPosition);
 			frameData.commands = visibleCommands.commands;
@@ -4682,7 +5884,8 @@ void RenderSystem::Update(float deltaTime)
 	}
 	for (const TerraEngine::Renderer::RenderCaptureRequest& captureRequest : captureRequestsForReadback)
 	{
-		const bool needsDedicatedCaptureRender = captureRequest.sourceKind != TerraEngine::Renderer::RenderCaptureSourceKind::GameView
+		const bool needsDedicatedCaptureRender = (captureRequest.sourceKind != TerraEngine::Renderer::RenderCaptureSourceKind::GameView
+				|| captureRequest.dedicatedRenderTarget)
 			&& captureRequest.format == "image/png"
 			&& rhi
 			&& rhi->GetBackendCapabilityProfile().supportsImageReadback;
@@ -5042,6 +6245,9 @@ void RenderSystem::Update(float deltaTime)
 		latestSceneLightingDiagnostics = rhi->GetLatestLightingDiagnostics(RenderViewType::Scene);
 		latestRenderSnapshotDiagnostics = rhi->GetLatestRenderSnapshotDiagnostics();
 		latestRendererRecoverySnapshot = rhi ? rhi->GetLatestRendererRecoverySnapshot() : recoverySnapshot;
+		latestAnimationGpuBackendExecution = rhi
+			? rhi->GetLatestAnimationGpuBackendExecution()
+			: TerraEngine::Renderer::AnimationGpuBackendExecutionSnapshot{};
 		latestRenderGraphDiagnostics = renderGraphDiagnostics;
 		latestRenderFrameSnapshot = renderFrameSnapshot;
 		latestSkyRuntimeState = skyRuntimeState;
@@ -5063,6 +6269,7 @@ void RenderSystem::Shutdown()
 	// Drop copied scene data before backend teardown so a later editor restart
 	// cannot reuse transforms or sky entities from the previous scene session.
 	worldTransformCache.Clear();
+	compatibleAnimationPoseCache.clear();
 	hasCachedSkyObjectResolution = false;
 	cachedSkyObject.reset();
 	cachedSkyHierarchyRevision = 0U;
@@ -5091,6 +6298,8 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 		"ObjectManager",
 		"UI",
 		"Resources",
+		TerraEngine::Scheduling::kResourceAnimatorComponents,
+		TerraEngine::Scheduling::kResourceAnimationRuntimeState,
 		TerraEngine::Scheduling::kResourceVirtualGeometryQualityProfile,
 		TerraEngine::Scheduling::kResourceVirtualGeometryResidencySnapshots,
 		TerraEngine::Scheduling::kResourceVirtualGeometryPageResidencySnapshots,
@@ -5154,8 +6363,8 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 	declaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::WorkerPrepare;
 	declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::PartiallyWorkerSafe;
 	declaration.hardBoundary = true;
-	declaration.safeSubwork = "Immutable render snapshots, visible-command cache lookup, draw packets, culling and lighting preparation, generation-tagged submission plans, virtual geometry LOD/page preparation, page request planning, page payload source planning, resource readiness, secondary command buffers, and submit descriptions.";
-	declaration.protectedCommit = "Runtime render-settings queue application, Swapchain acquire, acquired-image generation validation, command/fence ownership, queue submit/present, presentation recreation, completion publication, ResourceManager visible streaming touch publication, virtual geometry page payload publication, page retirement draining, virtual geometry GPU publication, virtual geometry diagnostics publication, renderer diagnostics, and device-loss containment.";
+	declaration.safeSubwork = "Immutable render snapshots, generation-validated animation pose bindings, visible-command cache lookup, draw packets, culling and lighting preparation, generation-tagged submission plans, virtual geometry LOD/page preparation, page request planning, page payload source planning, resource readiness, secondary command buffers, and submit descriptions.";
+	declaration.protectedCommit = "Runtime render-settings queue application, live hierarchy/AnimatorComponent/deformable-resource capture, immutable AnimationRuntimeState pose capture, Swapchain acquire, acquired-image generation validation, command/fence ownership, queue submit/present, presentation recreation, completion publication, ResourceManager visible streaming touch publication, virtual geometry page payload publication, page retirement draining, virtual geometry GPU publication, virtual geometry diagnostics publication, renderer diagnostics, and device-loss containment.";
 	declaration.protectedReason = "Live GPU queue and presentation ownership remain protected after worker preparation.";
 	declaration.profilingLabel = declaration.name;
 	declaration.usesDefaultMetadata = false;
@@ -5843,6 +7052,7 @@ void RenderSystem::Clear()
 		latestSceneLightingDiagnostics = {};
 		latestRenderSnapshotDiagnostics = {};
 		latestRendererRecoverySnapshot = TerraEngine::Renderer::MakeActiveRecoverySnapshot();
+		latestAnimationGpuBackendExecution = {};
 		latestRenderGraphDiagnostics = {};
 		latestRenderFrameSnapshot = {};
 		latestGameStats.viewType = RenderViewType::Game;
@@ -5863,6 +7073,7 @@ void RenderSystem::Clear()
 	latestGameViewTargetSize = glm::uvec2(0u);
 	latestGameViewFrameId = 0u;
 	virtualGeometryTransitionCache.clear();
+	compatibleAnimationPoseCache.clear();
 	worldTransformCache.Clear();
 	latestTransformCacheDiagnostics = {};
 	skyStateDirty = true;
@@ -5944,6 +7155,23 @@ TerraEngine::Renderer::RendererRecoverySnapshot RenderSystem::GetLatestRendererR
 {
 	std::lock_guard<std::mutex> lock(statsMutex);
 	return latestRendererRecoverySnapshot;
+}
+
+TerraEngine::Renderer::AnimationGpuBackendExecutionSnapshot
+RenderSystem::GetLatestAnimationGpuBackendExecution() const
+{
+	std::lock_guard<std::mutex> lock(statsMutex);
+	return latestAnimationGpuBackendExecution;
+}
+
+std::vector<TerraEngine::Renderer::RenderFrameRenderableRecord>
+RenderSystem::GetLatestRenderablesSnapshot() const
+{
+	// The protected renderer owns the source snapshot. Copying while holding the
+	// statistics mutex gives editor/MCP readers one internally consistent frame
+	// and prevents them from retaining references into the next render update.
+	std::lock_guard<std::mutex> lock(statsMutex);
+	return latestRenderFrameSnapshot.renderables;
 }
 
 std::vector<TerraEngine::Renderer::OcclusionDebugSample> RenderSystem::GetLatestVirtualGeometryOcclusionDebugSamples(RenderViewType viewType, std::size_t maxCount) const
@@ -6123,19 +7351,26 @@ void RenderSystem::ProcessQueuedCaptureRequests()
 		TerraEngine::Renderer::RenderCaptureResult result;
 		result.requestId = request.requestId;
 		result.sourceKind = request.sourceKind;
-			result.sourceName = request.sourceName;
-			result.size = request.targetSize;
-			// Game View captures report the last frame that actually submitted a
-			// Game/runtime view; custom offscreen captures report the frame boundary
-			// that drained the queue. Both values are read-only diagnostics.
-			const std::uint64_t captureFrameId = request.sourceKind == TerraEngine::Renderer::RenderCaptureSourceKind::GameView && latestGameViewFrameId != 0u
-				? latestGameViewFrameId
-				: activeRenderFrameId;
-			result.frameId = captureFrameId;
-			result.freshness = request.freshness;
-			result.overlaysIncluded = request.includeOverlays;
+		result.sourceName = request.sourceName;
+		result.size = request.targetSize;
+		// Game View captures report the last frame that actually submitted a
+		// Game/runtime view; custom offscreen captures report the frame boundary
+		// that drained the queue. Both values are read-only diagnostics.
+		const std::uint64_t captureFrameId = request.sourceKind == TerraEngine::Renderer::RenderCaptureSourceKind::GameView
+			&& !request.dedicatedRenderTarget
+			&& latestGameViewFrameId != 0u
+			? latestGameViewFrameId
+			: activeRenderFrameId;
+		result.frameId = captureFrameId;
+		result.freshness = request.freshness;
+		result.overlaysIncluded = request.includeOverlays;
 
-		if (request.sourceKind == TerraEngine::Renderer::RenderCaptureSourceKind::GameView && !hasLatestGameViewCamera)
+		// A normal Game View readback needs the last frame published by the dock.
+		// A dedicated request already contains an immutable authored-camera
+		// snapshot, so it remains valid even when the dock has never rendered.
+		if (request.sourceKind == TerraEngine::Renderer::RenderCaptureSourceKind::GameView
+			&& !request.dedicatedRenderTarget
+			&& !hasLatestGameViewCamera)
 		{
 			result.message = "No active Game View camera is available.";
 			result.errorCategory = "missing_target";
@@ -6145,27 +7380,27 @@ void RenderSystem::ProcessQueuedCaptureRequests()
 			result.message = "Only image/png capture output is currently supported.";
 			result.errorCategory = "unsupported_readback";
 		}
-			else if (rhi && rhi->GetBackendCapabilityProfile().supportsImageReadback)
+		else if (rhi && rhi->GetBackendCapabilityProfile().supportsImageReadback)
+		{
+			// Stamp the immutable request copy with the exact frame whose output
+			// the backend is about to copy. The caller-owned descriptor remains
+			// unchanged and can be reused safely.
+			TerraEngine::Renderer::RenderCaptureRequest backendRequest = request;
+			backendRequest.submittedFrameId = captureFrameId;
+			result = rhi->ReadbackCapture(backendRequest);
+			result.requestId = request.requestId;
+			result.sourceKind = request.sourceKind;
+			result.sourceName = request.sourceName;
+			if (result.size.x == 0u || result.size.y == 0u)
 			{
-				// Stamp the immutable request copy with the exact frame whose output
-				// the backend is about to copy. The caller-owned descriptor remains
-				// unchanged and can be reused safely.
-				TerraEngine::Renderer::RenderCaptureRequest backendRequest = request;
-				backendRequest.submittedFrameId = captureFrameId;
-				result = rhi->ReadbackCapture(backendRequest);
-				result.requestId = request.requestId;
-				result.sourceKind = request.sourceKind;
-				result.sourceName = request.sourceName;
-				if (result.size.x == 0u || result.size.y == 0u)
-				{
-					result.size = request.targetSize;
-				}
-				if (result.frameId == 0u)
-				{
-					result.frameId = captureFrameId;
-				}
-				result.freshness = request.freshness;
+				result.size = request.targetSize;
 			}
+			if (result.frameId == 0u)
+			{
+				result.frameId = captureFrameId;
+			}
+			result.freshness = request.freshness;
+		}
 
 		const bool backendFallbackEligible = result.errorCategory == "internal"
 			|| result.errorCategory == "backend_readback_unavailable"
@@ -6181,7 +7416,7 @@ void RenderSystem::ProcessQueuedCaptureRequests()
 			result.requestId = request.requestId;
 			result.sourceKind = request.sourceKind;
 			result.sourceName = request.sourceName;
-				result.frameId = captureFrameId;
+			result.frameId = captureFrameId;
 			result.freshness = request.freshness;
 			result.overlaysIncluded = request.includeOverlays;
 			result.backendReadback = false;
@@ -6238,24 +7473,40 @@ void RenderSystem::DrainCaptureReadbacks()
 
 TerraEngine::Renderer::RenderCaptureResult RenderSystem::CaptureImage(const TerraEngine::Renderer::RenderCaptureRequest& request)
 {
+	TerraEngine::Renderer::RenderCaptureRequest preparedRequest = request;
+	if (preparedRequest.sourceKind == TerraEngine::Renderer::RenderCaptureSourceKind::GameView
+		&& preparedRequest.freshness == "nextFrame"
+		&& !preparedRequest.dedicatedRenderTarget
+		&& hasLatestGameViewCamera)
+	{
+		// Synchronous MCP calls cannot wait for the normal editor loop without
+		// blocking that same loop. Snapshot the latest published Game View camera
+		// and render one dedicated frame so nextFrame has real, bounded semantics
+		// even when the Game View dock tab is occluded.
+		preparedRequest.viewMatrix = latestGameViewCamera.view;
+		preparedRequest.projectionMatrix = latestGameViewCamera.proj;
+		preparedRequest.cameraWorldPosition = latestGameViewCamera.pos;
+		preparedRequest.dedicatedRenderTarget = true;
+	}
 	std::string errorMessage;
-	std::string requestId = QueueCaptureRequest(request, errorMessage);
+	std::string requestId = QueueCaptureRequest(preparedRequest, errorMessage);
 	if (requestId.empty())
 	{
 		TerraEngine::Renderer::RenderCaptureResult result;
-		result.requestId = request.requestId;
-		result.sourceKind = request.sourceKind;
-		result.sourceName = request.sourceName;
-		result.size = request.targetSize;
+		result.requestId = preparedRequest.requestId;
+		result.sourceKind = preparedRequest.sourceKind;
+		result.sourceName = preparedRequest.sourceName;
+		result.size = preparedRequest.targetSize;
 		result.message = errorMessage;
 		result.errorCategory = errorMessage.find("queue") != std::string::npos ? "queue_full" : "over_budget";
 		return result;
 	}
-	const bool shouldRenderDedicatedCaptureImmediately = request.sourceKind != TerraEngine::Renderer::RenderCaptureSourceKind::GameView
+	const bool shouldRenderDedicatedCaptureImmediately = (preparedRequest.sourceKind != TerraEngine::Renderer::RenderCaptureSourceKind::GameView
+			|| preparedRequest.dedicatedRenderTarget)
 		&& initialized
 		&& rhi
 		&& rhi->GetBackendCapabilityProfile().supportsImageReadback
-		&& request.format == "image/png";
+		&& preparedRequest.format == "image/png";
 	if (shouldRenderDedicatedCaptureImmediately)
 	{
 		// MCP tool calls are synchronous. One render update submits the dedicated
@@ -6268,7 +7519,7 @@ TerraEngine::Renderer::RenderCaptureResult RenderSystem::CaptureImage(const Terr
 		ProcessQueuedCaptureRequests();
 	}
 
-	const std::chrono::milliseconds timeout(request.timeoutMs > 0u ? request.timeoutMs : captureLimits.defaultTimeoutMs);
+	const std::chrono::milliseconds timeout(preparedRequest.timeoutMs > 0u ? preparedRequest.timeoutMs : captureLimits.defaultTimeoutMs);
 	const auto deadline = std::chrono::steady_clock::now() + timeout;
 	do
 	{
@@ -6291,9 +7542,9 @@ TerraEngine::Renderer::RenderCaptureResult RenderSystem::CaptureImage(const Terr
 
 	TerraEngine::Renderer::RenderCaptureResult result;
 	result.requestId = requestId;
-	result.sourceKind = request.sourceKind;
-	result.sourceName = request.sourceName;
-	result.size = request.targetSize;
+	result.sourceKind = preparedRequest.sourceKind;
+	result.sourceName = preparedRequest.sourceName;
+	result.size = preparedRequest.targetSize;
 	result.message = "Capture request did not complete before polling.";
 	result.errorCategory = "timeout";
 	return result;

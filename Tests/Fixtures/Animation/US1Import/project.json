@@ -1,0 +1,5 @@
+{
+	"name": "Animation US1 Import Gate",
+	"version": "1.0.0",
+	"startupScene": "Scenes/US1Import.tescene"
+}

@@ -72,6 +72,10 @@ bool DiscoverExportRuntimeLayout(
 	outLayout.shaderDirectory = outLayout.editorDirectory / "Shaders";
 	outLayout.fontDirectory = outLayout.editorDirectory / "Fonts";
 	outLayout.managedDirectory = outLayout.editorDirectory / "Managed";
+	outLayout.nativeAotToolchainDirectory = outLayout.editorDirectory / "NativeAotNuGet";
+	outLayout.nativeAotNugetConfig = outLayout.nativeAotToolchainDirectory / "NuGet.Config";
+	outLayout.nativeAotNugetFeed = outLayout.nativeAotToolchainDirectory / "feed";
+	outLayout.nativeAotGlobalJson = outLayout.nativeAotToolchainDirectory / "global.json";
 #ifdef _WIN32
 	outLayout.modelPackageCompiler = outLayout.editorDirectory / "TerraEngineModelPackageCompiler.exe";
 #else
@@ -93,6 +97,10 @@ bool ValidateExportRuntimeLayout(
 		|| !RequireDirectory(layout.shaderDirectory, "shader", outError)
 		|| !RequireDirectory(layout.fontDirectory, "font", outError)
 		|| !RequireDirectory(layout.managedDirectory, "managed reference", outError)
+		|| !RequireDirectory(layout.nativeAotToolchainDirectory, "NativeAOT toolchain", outError)
+		|| !RequireDirectory(layout.nativeAotNugetFeed, "NativeAOT offline feed", outError)
+		|| !RequireFile(layout.nativeAotNugetConfig, "NativeAOT NuGet.Config", outError)
+		|| !RequireFile(layout.nativeAotGlobalJson, "NativeAOT global.json", outError)
 		|| !RequireFile(layout.modelPackageCompiler, "model package compiler", outError)) {
 		return false;
 	}

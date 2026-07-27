@@ -28,6 +28,10 @@
 #include "Engine/Components/LightComponent.h"
 #include "Engine/Scene/SceneMutationQueue.h"
 #include "Engine/Scene/TransactionalMutation.h"
+#include "Engine/Animation/AnimationSystem.h"
+#include "Engine/Animation/Assets/SkeletonAsset.h"
+#include "Engine/Animation/Runtime/AnimationAttachments.h"
+#include "Engine/Scripting/AnimationScriptAbi.h"
 #include <imgui.h>
 #include <ImGuizmo.h>
 #include <entt/entt.hpp>
@@ -42,6 +46,7 @@
 #include <string_view>
 #include <memory>
 #include <utility>
+#include <unordered_map>
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtx/quaternion.hpp>
@@ -151,6 +156,51 @@ float PerspectiveVisibleHeight(float fovDegrees, float distance)
 	const float clampedDistance = std::max(distance, 1.0f);
 	const float clampedFov = std::clamp(fovDegrees, 1.0f, 120.0f);
 	return 2.0f * clampedDistance * std::tan(glm::radians(clampedFov) * 0.5f);
+}
+
+glm::mat4 AnimationTransformMatrix(const TerraEngine::Animation::AnimationTransform& transform)
+{
+	// Animation records use x/y/z/w quaternion order; glm's constructor takes
+	// w/x/y/z. Keeping the conversion here avoids duplicating that subtle rule in
+	// every Scene View overlay producer.
+	glm::mat4 matrix(1.0f);
+	matrix = glm::translate(matrix, glm::vec3(
+		transform.translation.x, transform.translation.y, transform.translation.z));
+	matrix *= glm::mat4_cast(glm::quat(
+		transform.rotation.w, transform.rotation.x,
+		transform.rotation.y, transform.rotation.z));
+	matrix = glm::scale(matrix, glm::vec3(
+		transform.scale.x, transform.scale.y, transform.scale.z));
+	return matrix;
+}
+
+glm::mat4 NativeAnimationTransformMatrix(const NativeAnimationTransform& transform)
+{
+	glm::mat4 matrix(1.0f);
+	matrix = glm::translate(matrix, glm::vec3(
+		transform.translation.x, transform.translation.y, transform.translation.z));
+	matrix *= glm::mat4_cast(glm::quat(
+		transform.rotation.w, transform.rotation.x,
+		transform.rotation.y, transform.rotation.z));
+	matrix = glm::scale(matrix, glm::vec3(
+		transform.scale.x, transform.scale.y, transform.scale.z));
+	return matrix;
+}
+
+const char* ProceduralGoalLabel(NativeAnimationProceduralGoalKind kind)
+{
+	switch(kind)
+	{
+	case NativeAnimationProceduralGoalKind::Position: return "Position goal";
+	case NativeAnimationProceduralGoalKind::Rotation: return "Rotation goal";
+	case NativeAnimationProceduralGoalKind::PositionAndRotation: return "Position + rotation goal";
+	case NativeAnimationProceduralGoalKind::Aim: return "Aim goal";
+	case NativeAnimationProceduralGoalKind::Look: return "Look goal";
+	case NativeAnimationProceduralGoalKind::FootPlant: return "Foot contact goal";
+	case NativeAnimationProceduralGoalKind::CopyTransform: return "Copy-transform goal";
+	case NativeAnimationProceduralGoalKind::Twist: return "Twist goal";
+	}
+	return "Procedural goal";
 }
 
 bool ProjectWorldPoint(
@@ -1255,6 +1305,46 @@ void SceneViewWindow::DrawSceneToolbar()
 		m_OverlayPreference.diagnosticsVisible = m_ShowVirtualGeometryDiagnostics;
 		m_OverlayPreferenceDirty = true;
 	}
+	ImGui::SameLine(0.0f, 2.0f);
+	if (DrawOverlayIconButton(
+		"scene_animation_overlays", "orbit-ring", m_ShowAnimationOverlays,
+		m_ShowAnimationOverlays
+			? "Animation Overlays Visible\nClick to hide. Right-click to choose skeleton, socket, root, IK, contact, ragdoll, morph/bounds, or VG coverage kinds."
+			: "Animation Overlays Hidden\nClick to show the selected animator. Right-click to choose overlay kinds.",
+		buttonSize))
+	{
+		m_ShowAnimationOverlays = !m_ShowAnimationOverlays;
+		m_AnimationOverlayConfigured = false;
+	}
+	if(ImGui::IsItemClicked(ImGuiMouseButton_Right))
+	{
+		ImGui::OpenPopup("SceneAnimationOverlayKinds");
+	}
+	if(ImGui::BeginPopup("SceneAnimationOverlayKinds"))
+	{
+		ImGui::TextUnformatted("Animation overlay kinds");
+		ImGui::Separator();
+		auto toggleKind = [&](TerraEngine::Editor::Animation::AnimationOverlayType type, const char* label) {
+			const std::uint32_t bit = TerraEngine::Editor::Animation::AnimationOverlayTypeMask(type);
+			bool enabled = (m_AnimationOverlayKinds & bit) != 0U;
+			if(ImGui::Checkbox(label, &enabled))
+			{
+				if(enabled) m_AnimationOverlayKinds |= bit;
+				else m_AnimationOverlayKinds &= ~bit;
+				m_AnimationOverlayConfigured = false;
+			}
+		};
+		toggleKind(TerraEngine::Editor::Animation::AnimationOverlayType::Skeleton, "Skeleton / joints");
+		toggleKind(TerraEngine::Editor::Animation::AnimationOverlayType::Socket, "Sockets");
+		toggleKind(TerraEngine::Editor::Animation::AnimationOverlayType::RootTrajectory, "Root trajectory");
+		toggleKind(TerraEngine::Editor::Animation::AnimationOverlayType::IkTarget, "IK / procedural targets");
+		toggleKind(TerraEngine::Editor::Animation::AnimationOverlayType::Contact, "Contacts");
+		toggleKind(TerraEngine::Editor::Animation::AnimationOverlayType::Ragdoll, "Ragdoll");
+		toggleKind(TerraEngine::Editor::Animation::AnimationOverlayType::MorphBounds, "Morph bounds");
+		toggleKind(TerraEngine::Editor::Animation::AnimationOverlayType::SkinnedBounds, "Skinned bounds");
+		toggleKind(TerraEngine::Editor::Animation::AnimationOverlayType::VirtualGeometryCoverage, "VG coverage");
+		ImGui::EndPopup();
+	}
 	PersistOverlayPreferences();
 }
 
@@ -2101,6 +2191,7 @@ void SceneViewWindow::OnGui() {
 	// pivot; current-frame ImGuizmo hover must win there so the marker cannot
 	// consume the first click intended for a translate/rotate/scale handle.
 	DrawGizmos(view, projNoFlip, cursorPos, contentSize);
+	DrawAnimationSceneHandles(view, projNoFlip, cursorPos, contentSize);
 	DrawSceneObjectMarkers();
 	HandlePicking(view, projNoFlip, cursorPos, contentSize);
 
@@ -2593,7 +2684,9 @@ void SceneViewWindow::HandlePicking(const glm::mat4& view, const glm::mat4& proj
 	if (m_InteractionContext.activeRegion == SceneOverlay::InteractionRegion::Marker
 		|| m_InteractionContext.activeRegion == SceneOverlay::InteractionRegion::OrientationWidget
 		|| m_InteractionContext.hoveredRegion == SceneOverlay::InteractionRegion::OrientationWidget
-		|| m_InteractionContext.activeRegion == SceneOverlay::InteractionRegion::Toolbar)
+		|| m_InteractionContext.activeRegion == SceneOverlay::InteractionRegion::Toolbar
+		|| m_InteractionContext.activeRegion == SceneOverlay::InteractionRegion::Gizmo
+		|| m_InteractionContext.hoveredRegion == SceneOverlay::InteractionRegion::Gizmo)
 	{
 		return;
 	}
@@ -2846,6 +2939,583 @@ void SceneViewWindow::ApplyPrefabContextTintForNextRender()
 	// around them is washed out by the renderer.
 	CollectFocusedPrefabObjectIds(*selectedEntity, focusedObjectIds);
 	RenderSystem::Instance().SetSceneViewContextTint(focusedObjectIds);
+}
+
+void SceneViewWindow::DrawAnimationSceneHandles(
+	const glm::mat4& view,
+	const glm::mat4& proj,
+	const ImVec2& viewportPos,
+	const ImVec2& viewportSize)
+{
+	using TerraEngine::Editor::Animation::AnimationHandleKind;
+	using TerraEngine::Editor::Animation::AnimationOverlayPrimitive;
+	using TerraEngine::Editor::Animation::AnimationOverlayStatus;
+	using TerraEngine::Editor::Animation::AnimationOverlayType;
+	using TerraEngine::Editor::Animation::AnimationSceneHandle;
+	using TerraEngine::Animation::AnimationStatus;
+
+	m_AnimationSceneHandles.SetRendererAvailable(true);
+	if(!m_ShowAnimationOverlays || m_Owner == nullptr)
+	{
+		(void)m_AnimationSceneHandles.Set({});
+		m_AnimationSceneHandles.ClearSelection();
+		m_SelectedAnimationGoalId = 0U;
+		return;
+	}
+	if(m_AnimationSceneHandles.ActiveEdit() != nullptr)
+	{
+		// The detached procedural target owns ImGuizmo until Apply or Cancel so an
+		// object transform cannot be changed by the same drag.
+		return;
+	}
+
+	const std::optional<entt::entity> selectedEntity = m_Owner->GetSelectedEntity();
+	const std::optional<Object> selectedObject = selectedEntity
+		? ObjectManager::instance().getObject(*selectedEntity) : std::nullopt;
+	if(!selectedObject)
+	{
+		(void)m_AnimationSceneHandles.Set({});
+		m_AnimationHandleStatus = "Select an object with a published Animator pose.";
+		return;
+	}
+
+	const TerraEngine::UUID objectId = ObjectManager::instance().getUUID(*selectedObject);
+	const std::shared_ptr<const TerraEngine::Animation::PublishedAnimatorPose> published =
+		TerraEngine::Animation::AnimationSystem::Instance()
+			.LoadPublishedAnimatorPoseForObject(objectId);
+	if(!published || !published->snapshot || !published->snapshot->pose
+		|| !published->snapshot->pose->IsSealed())
+	{
+		(void)m_AnimationSceneHandles.Set({});
+		m_AnimationHandleStatus = "The selected Animator has no complete immutable pose publication.";
+		return;
+	}
+
+	if(!m_AnimationOverlayConfigured)
+	{
+		TerraEngine::Editor::Animation::AnimationOverlayOptions options;
+		options.enabled = true;
+		options.expanded = true;
+		options.rendererAvailable = true;
+		options.enabledKinds = m_AnimationOverlayKinds;
+		options.maximumPrimitives =
+			TerraEngine::Editor::Animation::kMaximumAnimationOverlayPrimitives;
+		m_AnimationOverlays.Configure(options);
+		m_AnimationOverlayConfigured = true;
+	}
+
+	const glm::mat4 ownerWorld = published->sourceObjectWorldTransformCaptured
+		? AnimationTransformMatrix(published->sourceObjectWorldTransform)
+		: glm::mat4(1.0F);
+	const std::span<const TerraEngine::Animation::AnimationTransform> modelTransforms =
+		published->snapshot->pose->ModelTransforms();
+	const std::size_t jointCount = std::min(
+		modelTransforms.size(), published->jointStableIds.size());
+
+	// Resolve stable skeleton parent IDs through a checked copied publication.
+	// This work is opt-in and selected-object-only; no cache-owned pointer escapes.
+	TerraEngine::Animation::SkeletonAsset skeleton;
+	TerraEngine::Animation::AnimationGeneration skeletonGeneration = 0U;
+	const bool copiedSkeleton = ResourceManager::Instance().CopySkeletonPublication(
+		published->skeleton.assetId.value, skeleton, skeletonGeneration)
+		&& skeletonGeneration == published->skeleton.generation;
+	std::unordered_map<std::uint64_t, std::size_t> publishedJointIndices;
+	publishedJointIndices.reserve(jointCount);
+	for(std::size_t index = 0U; index < jointCount; ++index)
+	{
+		publishedJointIndices.emplace(published->jointStableIds[index], index);
+	}
+	std::unordered_map<std::uint64_t, const TerraEngine::Animation::SkeletonJoint*> skeletonJoints;
+	if(copiedSkeleton)
+	{
+		skeletonJoints.reserve(skeleton.joints.size());
+		for(const TerraEngine::Animation::SkeletonJoint& joint : skeleton.joints)
+		{
+			skeletonJoints.emplace(joint.stableId, &joint);
+		}
+	}
+
+	std::vector<NativeAnimationRagdollSnapshot> ragdollSnapshots;
+	std::uint32_t ragdollCount = 0U;
+	AnimationStatus ragdollStatus = TerraEngine::Animation::AnimationSystem::Instance()
+		.CopyRagdollSnapshots(published->animator, {}, ragdollCount);
+	if(ragdollStatus == AnimationStatus::BufferTooSmall && ragdollCount > 0U)
+	{
+		ragdollSnapshots.resize(ragdollCount);
+		ragdollStatus = TerraEngine::Animation::AnimationSystem::Instance()
+			.CopyRagdollSnapshots(published->animator, ragdollSnapshots, ragdollCount);
+	}
+	const bool ragdollActive = ragdollStatus == AnimationStatus::Ok
+		&& std::any_of(ragdollSnapshots.begin(), ragdollSnapshots.end(),
+			[](const NativeAnimationRagdollSnapshot& snapshot) {
+				return snapshot.blendWeight > 0.0F;
+			});
+	const float ragdollWeight = ragdollActive
+		? std::clamp(ragdollSnapshots.front().blendWeight, 0.0F, 1.0F) : 0.0F;
+
+	std::vector<AnimationSceneHandle> handles;
+	handles.reserve(std::min<std::size_t>(
+		jointCount + skeleton.sockets.size() + 32U,
+		TerraEngine::Editor::Animation::kMaximumAnimationSceneHandles));
+	std::vector<glm::vec3> jointWorldPositions(jointCount);
+	glm::vec3 jointBoundsMinimum(std::numeric_limits<float>::max());
+	glm::vec3 jointBoundsMaximum(std::numeric_limits<float>::lowest());
+	for(std::size_t index = 0U; index < jointCount; ++index)
+	{
+		const glm::mat4 world = ownerWorld * AnimationTransformMatrix(modelTransforms[index]);
+		jointWorldPositions[index] = glm::vec3(world[3]);
+		jointBoundsMinimum = glm::min(jointBoundsMinimum, jointWorldPositions[index]);
+		jointBoundsMaximum = glm::max(jointBoundsMaximum, jointWorldPositions[index]);
+	}
+	std::size_t activeMorphCount = 0U;
+	for(const TerraEngine::Animation::AnimationNamedFloatValue& morph
+		: published->snapshot->pose->MorphValues())
+	{
+		if(std::abs(morph.value) > 0.0001F) ++activeMorphCount;
+	}
+	const std::vector<TerraEngine::Renderer::OcclusionDebugSample> virtualGeometrySamples =
+		RenderSystem::Instance().GetLatestVirtualGeometryOcclusionDebugSamples(
+			RenderViewType::Scene,
+			TerraEngine::Renderer::kVirtualGeometryOcclusionDebugSampleCapacity);
+	const std::size_t selectedVirtualGeometrySamples = static_cast<std::size_t>(
+		std::count_if(virtualGeometrySamples.begin(), virtualGeometrySamples.end(),
+			[&objectId](const TerraEngine::Renderer::OcclusionDebugSample& sample) {
+				return sample.objectId == objectId;
+			}));
+	const std::uint64_t objectOverlayId = std::max<std::uint64_t>(
+		1U, std::hash<std::string>{}(TerraEngine::ToHexString(objectId)));
+
+	for(std::size_t index = 0U; index < jointCount && handles.size()
+		< TerraEngine::Editor::Animation::kMaximumAnimationSceneHandles; ++index)
+	{
+		AnimationSceneHandle handle;
+		handle.kind = ragdollActive ? AnimationHandleKind::RagdollBody : AnimationHandleKind::Joint;
+		handle.ownerId = published->jointStableIds[index];
+		handle.x = jointWorldPositions[index].x;
+		handle.y = jointWorldPositions[index].y;
+		handle.z = jointWorldPositions[index].z;
+		handle.weight = ragdollActive ? ragdollWeight : 1.0F;
+		handle.sourceGeneration = published->componentGeneration;
+		handle.label = "Joint " + std::to_string(handle.ownerId);
+
+		const auto skeletonJoint = skeletonJoints.find(handle.ownerId);
+		if(skeletonJoint != skeletonJoints.end())
+		{
+			if(!skeletonJoint->second->displayName.empty())
+			{
+				handle.label = skeletonJoint->second->displayName;
+			}
+			const std::int32_t parentIndex = skeletonJoint->second->parentIndex;
+			if(parentIndex >= 0 && static_cast<std::size_t>(parentIndex) < skeleton.joints.size())
+			{
+				const std::uint64_t parentId = skeleton.joints[static_cast<std::size_t>(parentIndex)].stableId;
+				const auto publishedParent = publishedJointIndices.find(parentId);
+				if(publishedParent != publishedJointIndices.end())
+				{
+					const glm::vec3 parent = jointWorldPositions[publishedParent->second];
+					handle.endX = parent.x;
+					handle.endY = parent.y;
+					handle.endZ = parent.z;
+					handle.hasEndPoint = true;
+				}
+			}
+		}
+		handles.push_back(std::move(handle));
+	}
+
+	TerraEngine::Animation::AnimationSocketReadSnapshot sockets;
+	if(TerraEngine::Animation::AnimationAttachmentSnapshotPublisher::Instance()
+		.CopySocketSnapshot(published->animator, sockets))
+	{
+		for(const TerraEngine::Animation::AnimationAttachmentTransformSnapshot& socket : sockets.sockets)
+		{
+			if(handles.size() == TerraEngine::Editor::Animation::kMaximumAnimationSceneHandles) break;
+			const glm::mat4 socketWorld = ownerWorld * AnimationTransformMatrix(socket.modelTransform);
+			AnimationSceneHandle handle;
+			handle.kind = AnimationHandleKind::Socket;
+			handle.ownerId = socket.stableId;
+			handle.x = socketWorld[3].x;
+			handle.y = socketWorld[3].y;
+			handle.z = socketWorld[3].z;
+			handle.sourceGeneration = published->componentGeneration;
+			handle.label = "Socket " + std::to_string(socket.stableId);
+			handles.push_back(std::move(handle));
+		}
+	}
+
+	std::vector<NativeAnimationProceduralGoalCommand> goals;
+	std::uint32_t goalCount = 0U;
+	AnimationStatus goalStatus = TerraEngine::Animation::AnimationSystem::Instance()
+		.CopyProceduralGoals(published->animator, {}, goalCount);
+	if(goalStatus == AnimationStatus::BufferTooSmall && goalCount > 0U)
+	{
+		goals.resize(goalCount);
+		goalStatus = TerraEngine::Animation::AnimationSystem::Instance()
+			.CopyProceduralGoals(published->animator, goals, goalCount);
+	}
+	if(goalStatus == AnimationStatus::Ok)
+	{
+		for(const NativeAnimationProceduralGoalCommand& goal : goals)
+		{
+			if(goal.command != NativeAnimationProceduralCommandKind::SetGoal
+				|| handles.size() == TerraEngine::Editor::Animation::kMaximumAnimationSceneHandles) continue;
+			const bool worldSpace = goal.coordinateSpace
+				== NativeAnimationProceduralCoordinateSpace::World;
+			const bool modelSpace = goal.coordinateSpace
+				== NativeAnimationProceduralCoordinateSpace::Model;
+			const glm::mat4 goalMatrix = NativeAnimationTransformMatrix(goal.goalTransform);
+			const glm::mat4 worldGoal = worldSpace ? goalMatrix : ownerWorld * goalMatrix;
+			AnimationSceneHandle handle;
+			handle.kind = goal.goalKind == NativeAnimationProceduralGoalKind::FootPlant
+				? AnimationHandleKind::Contact : AnimationHandleKind::IkGoal;
+			handle.ownerId = goal.goalId;
+			handle.x = worldGoal[3].x;
+			handle.y = worldGoal[3].y;
+			handle.z = worldGoal[3].z;
+			handle.rotationX = goal.goalTransform.rotation.x;
+			handle.rotationY = goal.goalTransform.rotation.y;
+			handle.rotationZ = goal.goalTransform.rotation.z;
+			handle.rotationW = goal.goalTransform.rotation.w;
+			handle.weight = std::clamp(std::max(goal.positionWeight, goal.rotationWeight), 0.0F, 1.0F);
+			handle.sourceGeneration = published->componentGeneration;
+			handle.label = std::string(ProceduralGoalLabel(goal.goalKind)) + " #"
+				+ std::to_string(goal.goalId);
+			// Parent/local goal positions need the evaluated parent snapshot to be
+			// invertible. They remain visible but read-only rather than guessing a
+			// write-back space from the live hierarchy.
+			handle.editable = worldSpace || modelSpace;
+			handles.push_back(std::move(handle));
+		}
+	}
+
+	if(const auto& rootMotion = published->snapshot->pose->RootMotionDelta(); rootMotion)
+	{
+		AnimationSceneHandle handle;
+		handle.kind = AnimationHandleKind::RootMotion;
+		handle.ownerId = std::max<std::uint64_t>(
+			1U, std::hash<std::string>{}(TerraEngine::ToHexString(objectId)));
+		handle.x = ownerWorld[3].x;
+		handle.y = ownerWorld[3].y;
+		handle.z = ownerWorld[3].z;
+		handle.endX = handle.x + rootMotion->worldTranslation.x;
+		handle.endY = handle.y + rootMotion->worldTranslation.y;
+		handle.endZ = handle.z + rootMotion->worldTranslation.z;
+		handle.hasEndPoint = true;
+		handle.sourceGeneration = published->componentGeneration;
+		handle.label = "Root motion delta";
+		if(handles.size() < TerraEngine::Editor::Animation::kMaximumAnimationSceneHandles)
+		{
+			handles.push_back(std::move(handle));
+		}
+	}
+
+	if(!m_AnimationSceneHandles.Set(handles))
+	{
+		m_AnimationHandleStatus = "Animation overlay collection exceeded a bound or contained non-finite data.";
+		return;
+	}
+
+	TerraEngine::Editor::Animation::AnimationOverlayPreparedPacket prepared;
+	const std::uint64_t sourceGeneration = std::max<std::uint64_t>(
+		1U, published->authorityPublicationGeneration);
+	const AnimationOverlayStatus prepareStatus = m_AnimationOverlays.Prepare(
+		{sourceGeneration, 1U},
+		[&](std::uint32_t enabledKinds, std::size_t maximum,
+			std::vector<AnimationOverlayPrimitive>& output) {
+			output.clear();
+			output.reserve(std::min(maximum,
+				m_AnimationSceneHandles.Snapshot().size() + 3U));
+			for(const AnimationSceneHandle& handle : m_AnimationSceneHandles.Snapshot())
+			{
+				if(output.size() == maximum) break;
+				AnimationOverlayPrimitive primitive;
+				switch(handle.kind)
+				{
+				case AnimationHandleKind::Joint:
+				case AnimationHandleKind::JointLimit:
+					primitive.type = AnimationOverlayType::Skeleton;
+					primitive.color = {0.25F, 0.72F, 1.0F, 0.95F};
+					break;
+				case AnimationHandleKind::Socket:
+					primitive.type = AnimationOverlayType::Socket;
+					primitive.color = {0.20F, 1.0F, 0.92F, 1.0F};
+					break;
+				case AnimationHandleKind::RootMotion:
+					primitive.type = AnimationOverlayType::RootTrajectory;
+					primitive.color = {0.35F, 1.0F, 0.35F, 1.0F};
+					break;
+				case AnimationHandleKind::IkGoal:
+					primitive.type = AnimationOverlayType::IkTarget;
+					primitive.color = {1.0F, 0.82F, 0.20F, 1.0F};
+					break;
+				case AnimationHandleKind::Contact:
+					primitive.type = AnimationOverlayType::Contact;
+					primitive.color = {1.0F, 0.48F, 0.16F, 1.0F};
+					break;
+				case AnimationHandleKind::RagdollBody:
+					primitive.type = AnimationOverlayType::Ragdoll;
+					primitive.color = {0.95F, 0.35F, 0.95F, 1.0F};
+					break;
+				}
+				primitive.stableId = handle.ownerId;
+				primitive.start = {handle.x, handle.y, handle.z};
+				primitive.end = handle.hasEndPoint
+					? TerraEngine::Editor::Animation::AnimationOverlayVec3{
+						handle.endX, handle.endY, handle.endZ}
+					: primitive.start;
+				primitive.label = handle.label;
+				primitive.accessibilityText = handle.label;
+				output.push_back(std::move(primitive));
+			}
+
+			// Bounds and coverage records are derived only from immutable pose and
+			// renderer diagnostic copies captured above. A diagonal is intentionally
+			// used as the smallest bounded primitive understood by the existing Scene
+			// View renderer; its label makes the conservative meaning explicit.
+			auto appendDiagnosticPrimitive = [&](AnimationOverlayType type,
+				std::uint64_t identitySalt,
+				const glm::vec3& start,
+				const glm::vec3& end,
+				TerraEngine::Editor::Animation::AnimationOverlayColor color,
+				std::string label) {
+				if(output.size() == maximum
+					|| (enabledKinds & TerraEngine::Editor::Animation::AnimationOverlayTypeMask(type)) == 0U) {
+					return;
+				}
+				AnimationOverlayPrimitive primitive;
+				primitive.type = type;
+				primitive.stableId = objectOverlayId ^ identitySalt;
+				if(primitive.stableId == 0U) primitive.stableId = identitySalt;
+				primitive.start = {start.x, start.y, start.z};
+				primitive.end = {end.x, end.y, end.z};
+				primitive.color = color;
+				primitive.label = std::move(label);
+				primitive.accessibilityText = std::string(
+					TerraEngine::Editor::Animation::ToString(type)) + ": " + primitive.label;
+				output.push_back(std::move(primitive));
+			};
+
+			if(jointCount > 0U)
+			{
+				appendDiagnosticPrimitive(AnimationOverlayType::SkinnedBounds,
+					0x51A11E01ULL, jointBoundsMinimum, jointBoundsMaximum,
+					{0.36F, 0.72F, 1.0F, 0.9F},
+					"Conservative published joint-position bounds");
+				if(activeMorphCount > 0U)
+				{
+					appendDiagnosticPrimitive(AnimationOverlayType::MorphBounds,
+						0xA40F0001ULL, jointBoundsMinimum, jointBoundsMaximum,
+						{1.0F, 0.42F, 0.72F, 0.9F},
+						"Current pose envelope with " + std::to_string(activeMorphCount)
+							+ " active morph channel(s)");
+				}
+			}
+			if(selectedVirtualGeometrySamples > 0U)
+			{
+				const glm::vec3 origin(ownerWorld[3]);
+				appendDiagnosticPrimitive(AnimationOverlayType::VirtualGeometryCoverage,
+					0x760C0001ULL, origin, origin,
+					{0.42F, 1.0F, 0.58F, 1.0F},
+					std::to_string(selectedVirtualGeometrySamples)
+						+ " bounded Scene View VG coverage sample(s)");
+			}
+			return AnimationOverlayStatus::Ok;
+		}, prepared);
+	if(prepareStatus == AnimationOverlayStatus::Ok)
+	{
+		(void)m_AnimationOverlays.Publish(prepared);
+	}
+
+	const TerraEngine::Editor::Animation::AnimationOverlaySnapshot overlay =
+		m_AnimationOverlays.Snapshot();
+	const glm::mat4 viewProjection = proj * view;
+	ImDrawList* drawList = ImGui::GetWindowDrawList();
+	for(const AnimationOverlayPrimitive& primitive : overlay.primitives)
+	{
+		const ImU32 color = ImGui::GetColorU32(ImVec4(
+			primitive.color.red, primitive.color.green,
+			primitive.color.blue, primitive.color.alpha));
+		const glm::vec3 start(primitive.start.x, primitive.start.y, primitive.start.z);
+		const glm::vec3 end(primitive.end.x, primitive.end.y, primitive.end.z);
+		const glm::vec3 primitiveDelta = end - start;
+		if(glm::dot(primitiveDelta, primitiveDelta) > 0.0000001F)
+		{
+			DrawWorldLine(drawList, start, end, viewProjection,
+				viewportPos, viewportSize, color, 2.0F);
+		}
+		ImVec2 screen{};
+		if(ProjectWorldPoint(start, viewProjection, viewportPos, viewportSize, screen))
+		{
+			drawList->AddCircleFilled(screen, primitive.type == AnimationOverlayType::Skeleton
+				? 3.0F : 5.0F, color, 16);
+			if(primitive.type != AnimationOverlayType::Skeleton)
+			{
+				drawList->AddText(ImVec2(screen.x + 7.0F, screen.y - 7.0F), color,
+					primitive.label.c_str());
+			}
+		}
+	}
+
+	// Select only editable procedural targets. The nearest projected handle wins,
+	// and the viewport marks the region as a gizmo so ordinary object picking does
+	// not consume the same click.
+	const ImVec2 mouse = ImGui::GetMousePos();
+	const AnimationSceneHandle* hoveredGoal = nullptr;
+	float hoveredDistanceSquared = 100.0F;
+	for(const AnimationSceneHandle& handle : m_AnimationSceneHandles.Snapshot())
+	{
+		if(!handle.editable) continue;
+		const AnimationOverlayType overlayType = handle.kind == AnimationHandleKind::Contact
+			? AnimationOverlayType::Contact : AnimationOverlayType::IkTarget;
+		if((m_AnimationOverlayKinds
+			& TerraEngine::Editor::Animation::AnimationOverlayTypeMask(overlayType)) == 0U) continue;
+		ImVec2 screen{};
+		if(!ProjectWorldPoint(glm::vec3(handle.x, handle.y, handle.z), viewProjection,
+			viewportPos, viewportSize, screen)) continue;
+		const float dx = screen.x - mouse.x;
+		const float dy = screen.y - mouse.y;
+		const float distanceSquared = dx * dx + dy * dy;
+		if(distanceSquared < hoveredDistanceSquared)
+		{
+			hoveredDistanceSquared = distanceSquared;
+			hoveredGoal = &handle;
+		}
+	}
+	if(hoveredGoal != nullptr)
+	{
+		m_InteractionContext.hoveredRegion = SceneOverlay::InteractionRegion::Gizmo;
+		if(ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGuizmo::IsOver())
+		{
+			if(m_AnimationSceneHandles.Select(hoveredGoal->kind, hoveredGoal->ownerId)
+				&& m_AnimationSceneHandles.BeginEdit(hoveredGoal->sourceGeneration))
+			{
+				m_SelectedAnimationGoalId = hoveredGoal->ownerId;
+				m_AnimationHandleStatus = "Detached procedural goal preview; Apply queues the edit.";
+			}
+		}
+	}
+
+	const TerraEngine::Editor::Animation::AnimationSceneHandleEdit* activeEdit =
+		m_AnimationSceneHandles.ActiveEdit();
+	if(activeEdit == nullptr)
+	{
+		return;
+	}
+
+	glm::mat4 editMatrix = glm::translate(glm::mat4(1.0F), glm::vec3(
+		activeEdit->candidate.x, activeEdit->candidate.y, activeEdit->candidate.z));
+	if(ImGuizmo::Manipulate(glm::value_ptr(view), glm::value_ptr(proj),
+		ImGuizmo::TRANSLATE, ImGuizmo::WORLD, glm::value_ptr(editMatrix), nullptr,
+		m_UsingSnap ? m_SnapValue : nullptr))
+	{
+		const glm::vec3 translation(editMatrix[3]);
+		(void)m_AnimationSceneHandles.UpdateEditPosition(
+			translation.x, translation.y, translation.z);
+	}
+
+	ImGui::SetNextWindowPos(ImVec2(
+		viewportPos.x + viewportSize.x - 330.0F,
+		viewportPos.y + 42.0F), ImGuiCond_Always);
+	if(ImGui::Begin("Animation Handle Controls##SceneView", nullptr,
+		ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings
+		| ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoCollapse))
+	{
+		activeEdit = m_AnimationSceneHandles.ActiveEdit();
+		if(activeEdit != nullptr)
+		{
+			ImGui::TextUnformatted(activeEdit->candidate.label.c_str());
+			float position[3] = {
+				activeEdit->candidate.x, activeEdit->candidate.y, activeEdit->candidate.z};
+			if(ImGui::DragFloat3("World position", position, 0.01F))
+			{
+				(void)m_AnimationSceneHandles.UpdateEditPosition(
+					position[0], position[1], position[2]);
+			}
+			float rotation[4] = {
+				activeEdit->candidate.rotationX, activeEdit->candidate.rotationY,
+				activeEdit->candidate.rotationZ, activeEdit->candidate.rotationW};
+			if(ImGui::DragFloat4("Goal-space rotation", rotation, 0.005F, -1.0F, 1.0F))
+			{
+				glm::quat normalized(rotation[3], rotation[0], rotation[1], rotation[2]);
+				if(glm::dot(normalized, normalized) > 0.000001F)
+				{
+					normalized = glm::normalize(normalized);
+					(void)m_AnimationSceneHandles.UpdateEditRotation(
+						normalized.x, normalized.y, normalized.z, normalized.w);
+				}
+			}
+			ImGui::TextWrapped("%s", m_AnimationHandleStatus.c_str());
+
+			if(ImGui::Button("Apply"))
+			{
+				AnimationSceneHandle committed;
+				if(!m_AnimationSceneHandles.CommitEdit(
+					published->componentGeneration, committed))
+				{
+					m_AnimationHandleStatus = "The Animator component generation changed; the edit was rejected.";
+				}
+				else
+				{
+					const auto command = std::find_if(goals.begin(), goals.end(),
+						[&](const NativeAnimationProceduralGoalCommand& candidate) {
+							return candidate.command == NativeAnimationProceduralCommandKind::SetGoal
+								&& candidate.goalId == committed.ownerId;
+						});
+					if(command == goals.end())
+					{
+						m_AnimationHandleStatus = "The procedural goal retired before Apply.";
+					}
+					else
+					{
+						NativeAnimationProceduralGoalCommand update = *command;
+						glm::vec3 goalPosition(committed.x, committed.y, committed.z);
+						if(update.coordinateSpace != NativeAnimationProceduralCoordinateSpace::World)
+						{
+							goalPosition = glm::vec3(glm::inverse(ownerWorld)
+								* glm::vec4(goalPosition, 1.0F));
+						}
+						update.goalTransform.translation = {
+							goalPosition.x, goalPosition.y, goalPosition.z};
+						update.goalTransform.rotation = {
+							committed.rotationX, committed.rotationY,
+							committed.rotationZ, committed.rotationW};
+						++m_AnimationHandleCommandSequence;
+						if(m_AnimationHandleCommandSequence == 0U) ++m_AnimationHandleCommandSequence;
+						update.producerId = 0x45444954U; // Stable native editor producer identity: EDIT.
+						update.producerSequence = m_AnimationHandleCommandSequence;
+						update.correlationId = m_AnimationHandleCommandSequence;
+						update.idempotencyKey = m_AnimationHandleCommandSequence
+							^ (update.goalId * 0x9e3779b97f4a7c15ULL);
+						if(update.idempotencyKey == 0U) update.idempotencyKey = 1U;
+						update.cancellationToken = m_AnimationHandleCommandSequence;
+						update.targetTick = published->snapshot->tick + 1;
+						update.expectedPublicationGeneration =
+							published->authorityPublicationGeneration;
+						update.expectedPoseGeneration =
+							published->snapshot->pose->Generation().poseGeneration;
+						const NativeAnimationProceduralGoalReceipt receipt =
+							TerraEngine::Animation::AnimationSystem::Instance()
+								.SubmitProceduralGoal(update);
+						m_AnimationHandleStatus = receipt.status == NativeAnimationStatus::Queued
+							? "Queued; the new target becomes visible after the animation publication boundary."
+							: "The typed procedural command rejected the edit with status "
+								+ std::to_string(static_cast<std::uint16_t>(receipt.status)) + ".";
+					}
+				}
+				m_AnimationSceneHandles.ClearSelection();
+				m_SelectedAnimationGoalId = 0U;
+			}
+			ImGui::SameLine();
+			if(ImGui::Button("Cancel"))
+			{
+				m_AnimationSceneHandles.CancelEdit();
+				m_AnimationSceneHandles.ClearSelection();
+				m_SelectedAnimationGoalId = 0U;
+				m_AnimationHandleStatus = "Procedural goal preview cancelled; runtime state was unchanged.";
+			}
+		}
+	}
+	ImGui::End();
 }
 
 // SceneViewWindow::DrawGizmos is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

@@ -8,8 +8,10 @@
 
 #include <algorithm>
 #include <array>
+#include <compare>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <optional>
@@ -18,7 +20,13 @@
 #include <glm/glm.hpp>
 #include <glm/common.hpp>
 #include "Scene/SpatialDiagnostics.h"
+#include "Animation/Gpu/GpuAnimationPlan.h"
+#include "Animation/Runtime/AnimatorInstanceStore.h"
 #include "Utilities/UUID.h"
+
+namespace TerraEngine::Animation {
+	struct PublishedAnimatorPose;
+}
 
 enum class RenderViewType : std::uint8_t
 {
@@ -41,6 +49,295 @@ inline const char* ToString(RenderViewType viewType)
 }
 
 namespace TerraEngine::Renderer {
+	// AnimationRenderFallbackPolicy is authored/runtime policy only. Render jobs
+	// never repair animation state; they either consume one immutable compatible
+	// pose generation, retain a compatible prior generation, or draw the bind
+	// pose that is already present in the cooked mesh.
+	enum class AnimationRenderFallbackPolicy : std::uint8_t
+	{
+		BindPose = 0U,
+		HoldLastCompatiblePose = 1U
+	};
+
+	enum class AnimationRenderPoseSource : std::uint8_t
+	{
+		BindPose = 0U,
+		CpuPose = 1U,
+		HeldCpuPose = 2U,
+		// GPU visual work has a complete immutable packet identity but deliberately
+		// has no CPU pose. CPU deterministic and fallback modes never use this.
+		GpuVisual = 3U
+	};
+
+	enum class AnimationRenderBindingStatus : std::uint8_t
+	{
+		Ready = 0U,
+		SafePose = 1U,
+		MissingPose = 2U,
+		StaleGeneration = 3U,
+		IncompatibleSkeleton = 4U,
+		InvalidPose = 5U
+	};
+
+	// Prepared visibility and submission caches name every independent lifetime
+	// that can change their answer. The fields are value generations rather than
+	// resource pointers, so renderer workers can compare and hash them safely.
+	struct RenderInvalidationGenerationRecord
+	{
+		std::uint64_t pose = 0U;
+		std::uint64_t morph = 0U;
+		std::uint64_t asset = 0U;
+		std::uint64_t page = 0U;
+		std::uint64_t view = 0U;
+		std::uint64_t material = 0U;
+		std::uint64_t renderer = 0U;
+		std::uint64_t residency = 0U;
+
+		auto operator<=>(const RenderInvalidationGenerationRecord&) const = default;
+	};
+
+	// This is the renderer-facing identity of one immutable GPU work packet. It
+	// contains no Vulkan handles or live animator pointer; the backend resolves the
+	// packet through the frame's separately retained presentation plan.
+	struct AnimationGpuRenderBinding
+	{
+		// These copied packet values are the renderer's GPU-only identity. They
+		// prevent a draw from borrowing a palette merely because another animator
+		// happened to share a slot-like or mesh-like value in a later plan.
+		std::uint64_t stableInstanceId = 0U;
+		std::uint64_t presentationGeneration = 0U;
+		std::uint64_t sourceGeneration = 0U;
+		std::uint64_t paletteGeneration = 0U;
+		std::uint32_t planGeneration = 0U;
+		std::uint32_t rendererGeneration = 0U;
+		std::uint32_t workPacketIndex = std::numeric_limits<std::uint32_t>::max();
+		std::uint32_t stableSubmissionOrdinal = 0U;
+		std::uint32_t instanceSlot = TerraEngine::Animation::kInvalidAnimatorInstanceSlot;
+		std::uint32_t instanceGeneration = 0U;
+		std::uint32_t componentGeneration = 0U;
+		std::uint32_t skeletonGeneration = 0U;
+		std::uint32_t meshGeneration = 0U;
+		std::uint32_t resourceGeneration = 0U;
+		std::uint32_t sceneGeneration = 0U;
+		std::uint32_t workGeneration = 0U;
+		std::uint32_t programGeneration = 0U;
+		std::uint32_t stageMask = 0U;
+		// Exact mesh/render lifetimes stay CPU-only beside the frozen shader
+		// generations. In particular, deformablePayloadGeneration must never be
+		// narrowed into the 32-bit animation residency lane.
+		TerraEngine::Animation::GpuAnimationRenderIdentity renderIdentity{};
+		bool hybridCpuAuthority = false;
+		bool valid = false;
+
+		[[nodiscard]] bool IsComplete() const noexcept
+		{
+			return valid && stableInstanceId != 0U && presentationGeneration != 0U
+				&& sourceGeneration != 0U && paletteGeneration != 0U
+				&& planGeneration != 0U && rendererGeneration != 0U
+				&& workPacketIndex != std::numeric_limits<std::uint32_t>::max()
+				&& instanceSlot != TerraEngine::Animation::kInvalidAnimatorInstanceSlot
+				&& instanceGeneration != 0U && componentGeneration != 0U
+				&& skeletonGeneration != 0U && meshGeneration != 0U
+				&& resourceGeneration != 0U && sceneGeneration != 0U
+				&& workGeneration != 0U && programGeneration != 0U && stageMask != 0U
+				&& renderIdentity.IsComplete();
+		}
+	};
+
+	// CPU deterministic/fallback evaluation publishes the same graphics-facing
+	// 3x4 palette format as GPU evaluation. The immutable vectors are built once
+	// for a pose generation, then flattened into frame-owned Vulkan buffers at
+	// the protected submission boundary.
+	struct CpuAnimationDeformationData
+	{
+		std::vector<TerraEngine::Animation::GpuAnimationPaletteRecord> paletteMatrices;
+		std::vector<float> morphWeights;
+		std::uint32_t jointCount = 0U;
+
+		[[nodiscard]] bool IsComplete() const noexcept
+		{
+			return jointCount != 0U
+				&& jointCount <= TerraEngine::Animation::kGpuAnimationPaletteEntriesPerPartition
+				&& !paletteMatrices.empty()
+				&& paletteMatrices.size()
+					<= TerraEngine::Animation::kGpuAnimationPaletteEntriesPerPartition
+				&& morphWeights.size()
+					<= TerraEngine::Animation::kGpuAnimationMaximumMorphTargetsV1;
+		}
+	};
+
+	// One record ties immutable CPU output to the exact mesh and renderer
+	// lifetimes that accepted it. Record indices are copied into DrawCommand, so
+	// every Scene/Game/shadow view reuses one frame upload.
+	struct CpuAnimationDeformationRecord
+	{
+		std::uint64_t stableInstanceId = 0U;
+		TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+		std::uint64_t poseGeneration = 0U;
+		std::uint64_t deformablePayloadGeneration = 0U;
+		std::uint64_t rendererGeneration = 0U;
+		std::uint64_t skeletonCompatibilityFingerprint = 0U;
+		std::shared_ptr<const CpuAnimationDeformationData> data;
+
+		[[nodiscard]] bool IsComplete() const noexcept
+		{
+			return stableInstanceId != 0U && meshId != TerraEngine::EMPTY_UUID
+				&& poseGeneration != 0U && deformablePayloadGeneration != 0U
+				&& rendererGeneration != 0U
+				&& skeletonCompatibilityFingerprint != 0U
+				&& data != nullptr && data->IsComplete();
+		}
+	};
+
+	struct CpuAnimationDeformationPlan
+	{
+		std::uint64_t frameId = 0U;
+		std::uint64_t rendererGeneration = 0U;
+		std::vector<CpuAnimationDeformationRecord> records;
+
+		[[nodiscard]] bool IsComplete() const noexcept
+		{
+			if(frameId == 0U || rendererGeneration == 0U || records.empty()) {
+				return false;
+			}
+			return std::all_of(records.begin(), records.end(),
+				[this](const CpuAnimationDeformationRecord& record) {
+					return record.IsComplete()
+						&& record.rendererGeneration == rendererGeneration;
+				});
+		}
+	};
+
+	// A backend execution record is published only after the native command
+	// recorder emitted at least one animation dispatch and the owning graphics
+	// queue accepted that command buffer. It deliberately contains no timing or
+	// pose data, so diagnostics can prove real GPU execution without introducing
+	// a readback, fence wait, or performance-sensitive instrumentation path.
+	struct AnimationGpuBackendExecutionRecord
+	{
+		std::uint64_t frameId = 0U;
+		std::uint64_t submissionSerial = 0U;
+		std::uint32_t planGeneration = 0U;
+		std::uint32_t rendererGeneration = 0U;
+		std::uint32_t recordedDispatchCount = 0U;
+
+		[[nodiscard]] bool IsComplete() const noexcept
+		{
+			return frameId != 0U && submissionSerial != 0U
+				&& planGeneration != 0U && rendererGeneration != 0U
+				&& recordedDispatchCount != 0U;
+		}
+
+		auto operator<=>(const AnimationGpuBackendExecutionRecord&) const = default;
+	};
+
+	// Submission and completion are separate observations. The submitted record
+	// proves the queue accepted real recorded commands; the completed record is
+	// advanced only when the existing frame-slot fence is reused. Keeping both
+	// prevents a newer in-flight submission from hiding the last proven
+	// completion while still avoiding any animation-specific synchronization.
+	struct AnimationGpuBackendExecutionSnapshot
+	{
+		AnimationGpuBackendExecutionRecord latestSubmitted{};
+		AnimationGpuBackendExecutionRecord latestCompleted{};
+
+		[[nodiscard]] bool HasSubmittedWork() const noexcept
+		{
+			return latestSubmitted.IsComplete();
+		}
+
+		[[nodiscard]] bool HasCompletedWork() const noexcept
+		{
+			return latestCompleted.IsComplete();
+		}
+	};
+
+	// A DrawCommand copies this result. Keeping the publication bundle alive
+	// guarantees that all pose spans remain valid until the protected render
+	// submission has finished consuming the command.
+	struct AnimationRenderBinding
+	{
+		TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+		TerraEngine::UUID animatorObjectId = TerraEngine::EMPTY_UUID;
+		TerraEngine::UUID skeletonAssetId = TerraEngine::EMPTY_UUID;
+		std::uint64_t animatorObjectGeneration = 0U;
+		std::uint64_t animationAuthorityGeneration = 0U;
+		std::uint32_t animatorSlotIndex = 0xffffffffU;
+		std::uint32_t animatorGeneration = 0U;
+		std::uint64_t deformablePayloadGeneration = 0U;
+		std::uint32_t componentGeneration = 0U;
+		std::uint32_t skeletonGeneration = 0U;
+		std::uint64_t skeletonCompatibilityFingerprint = 0U;
+		AnimationRenderPoseSource source = AnimationRenderPoseSource::BindPose;
+		AnimationRenderBindingStatus status = AnimationRenderBindingStatus::MissingPose;
+		std::uint64_t posePublicationGeneration = 0U;
+		bool safePose = true;
+		RenderInvalidationGenerationRecord invalidation;
+		AnimationGpuRenderBinding gpu;
+		std::shared_ptr<const TerraEngine::Animation::PublishedAnimatorPose> pose;
+		std::shared_ptr<const CpuAnimationDeformationData> cpuDeformation;
+		std::uint32_t cpuDeformationRecordIndex =
+			std::numeric_limits<std::uint32_t>::max();
+
+		[[nodiscard]] bool HasCpuPose() const noexcept
+		{
+			return pose != nullptr && status == AnimationRenderBindingStatus::Ready
+				&& !safePose && source != AnimationRenderPoseSource::BindPose;
+		}
+
+		[[nodiscard]] bool HasCpuDeformation() const noexcept
+		{
+			return HasCpuPose() && cpuDeformation != nullptr
+				&& cpuDeformation->IsComplete()
+				&& cpuDeformationRecordIndex
+					!= std::numeric_limits<std::uint32_t>::max();
+		}
+
+		[[nodiscard]] bool RequiresOwnerMeshDeformationFallback() const noexcept
+		{
+			// Version-one streamed virtual-geometry pages contain positions and
+			// indices, but not the matching skin/morph streams. A complete CPU or
+			// GPU deformation must therefore render one whole owner payload until
+			// page-local deformation records are published by a later format.
+			return deformablePayloadGeneration != 0U
+				&& posePublicationGeneration != 0U
+				&& status == AnimationRenderBindingStatus::Ready
+				&& !safePose
+				&& source != AnimationRenderPoseSource::BindPose;
+		}
+	};
+
+	// The resolver receives only protected-boundary values. currentPose is one
+	// immutable AnimationSystem publication; heldBinding includes the full mesh
+	// identity that originally accepted its pose, so a mesh recook cannot reuse a
+	// compatible-looking pointer from another deformable payload generation.
+	struct AnimationRenderBindingRequest
+	{
+		TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+		TerraEngine::UUID animatorObjectId = TerraEngine::EMPTY_UUID;
+		TerraEngine::UUID skeletonAssetId = TerraEngine::EMPTY_UUID;
+		std::uint64_t animatorObjectGeneration = 0U;
+		std::uint64_t animationAuthorityGeneration = 0U;
+		std::uint32_t animatorSlotIndex = 0xffffffffU;
+		std::uint32_t animatorGeneration = 0U;
+		std::uint64_t deformablePayloadGeneration = 0U;
+		std::uint32_t componentGeneration = 0U;
+		std::uint32_t skeletonGeneration = 0U;
+		std::uint64_t skeletonCompatibilityFingerprint = 0U;
+		// This exact record names the render-side mesh and protected renderer/scene
+		// publication that a GPU-only packet was lowered against. It complements
+		// shader-visible generations without truncating a 64-bit payload lifetime.
+		TerraEngine::Animation::GpuAnimationRenderIdentity
+			expectedGpuRenderIdentity{};
+		AnimationRenderFallbackPolicy fallbackPolicy = AnimationRenderFallbackPolicy::BindPose;
+		RenderInvalidationGenerationRecord invalidation;
+		std::shared_ptr<const TerraEngine::Animation::PublishedAnimatorPose> currentPose;
+		// Render collection may resolve this copied identity from the immutable
+		// presentation envelope before it asks the CPU pose cache. It is optional
+		// because CPU and safe-fallback animation do not have GPU packet work.
+		std::optional<AnimationGpuRenderBinding> gpuVisualIdentity;
+		AnimationRenderBinding heldBinding{};
+	};
 
 	// RenderCaptureSourceKind identifies the camera source that an editor or
 	// MCP request wants to sample. The renderer keeps this typed so diagnostics
@@ -81,6 +378,10 @@ namespace TerraEngine::Renderer {
 		bool transparentBackground = false;
 		bool allowBackendFallback = true;
 		std::uint32_t timeoutMs = 2000u;
+		// A next-frame Game View request keeps its GameView source identity while
+		// rendering through the dedicated offscreen target. This avoids returning
+		// stale pixels when the docked Game View tab is not currently visible.
+		bool dedicatedRenderTarget = false;
 		// The render coordinator stamps the frame whose output the backend copies.
 		// Callers leave this zero; it is read-only correlation metadata.
 		std::uint64_t submittedFrameId = 0u;
@@ -316,6 +617,10 @@ inline constexpr std::uint32_t kVirtualGeometryFlagHiZSelfOcclusionGuard = 1u <<
 inline constexpr std::uint32_t kVirtualGeometryFlagHiZNearPlaneGuard = 1u << 3u;
 inline constexpr std::uint32_t kVirtualGeometryFlagHiZThinGeometryGuard = 1u << 4u;
 inline constexpr std::uint32_t kVirtualGeometryFlagConeCullingSafe = 1u << 5u;
+// The task stage publishes exact group-relative meshlet indices even when it is
+// operating as a pass-through stage. Keeping that contract separate from the
+// culling toggle prevents larger ranges from restarting every 32 meshlets.
+inline constexpr std::uint32_t kVirtualGeometryFlagTaskPayloadValid = 1u << 6u;
 inline constexpr std::uint32_t kVirtualGeometryDebugModeShift = 8u;
 inline constexpr std::uint32_t kVirtualGeometryDebugModeMask = 0xFFu;
 
@@ -1939,6 +2244,9 @@ struct DrawCommand
 	std::uint32_t meshDataIndex = 0u;
 	std::uint32_t textureIndex = 0u;
 	TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+	// Animation binding is a copied, immutable generation bundle. Static meshes
+	// leave it at the bind-pose default and pay no animation-system lookup cost.
+	TerraEngine::Renderer::AnimationRenderBinding animationBinding{};
 	// Editor-only tint is submitted per draw so Scene View context modes can
 	// de-emphasize surrounding objects without changing runtime materials.
 	glm::vec4 editorTint = glm::vec4(0.0f);

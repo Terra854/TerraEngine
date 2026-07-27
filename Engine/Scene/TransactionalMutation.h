@@ -79,7 +79,10 @@ namespace TerraEngine::Scene {
 		UpdateComponentProperty,
 		// A physics publication changes both fields together. Keeping the pair
 		// typed avoids reflection and per-property allocations at a hot boundary.
-		UpdateTransformBatch
+		UpdateTransformBatch,
+		// Animation owns runtime storage, so this records typed publication intent
+		// for the protected boundary instead of writing component state from workers.
+		PublishAnimationMutations
 	};
 
 	// A transform batch carries local-space values for existing objects. The
@@ -89,6 +92,17 @@ namespace TerraEngine::Scene {
 		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
 		glm::vec3 position{0.0F, 0.0F, 0.0F};
 		glm::quat rotation{1.0F, 0.0F, 0.0F, 0.0F};
+	};
+
+	struct AnimationMutationPublication {
+		TerraEngine::UUID targetObjectId = TerraEngine::EMPTY_UUID;
+		std::uint64_t expectedComponentGeneration = 0U;
+		std::uint32_t animatorSlot = 0xffffffffU;
+		std::uint32_t animatorGeneration = 0U;
+		std::int64_t targetTick = 0;
+		std::uint64_t producerSequence = 0U;
+		std::uint32_t commandCount = 0U;
+		std::uint64_t payloadFingerprint = 0U;
 	};
 
 	struct TransactionBudget {
@@ -135,6 +149,7 @@ namespace TerraEngine::Scene {
 		std::string propertyName;
 		TerraEngine::Reflection::Variant propertyValue;
 		std::vector<TransactionTransformUpdate> transformUpdates;
+		std::vector<AnimationMutationPublication> animationPublications;
 	};
 
 	struct TransactionWriteSet {
@@ -188,6 +203,7 @@ namespace TerraEngine::Scene {
 		std::vector<TransactionInverseDelta> inverseDeltas;
 		std::unordered_map<std::int32_t, TerraEngine::UUID> createdObjects;
 		std::string message;
+		std::vector<AnimationMutationPublication> acceptedAnimationPublications;
 
 		bool MutatedScene() const { return status == TransactionStatus::Committed && appliedWriteCount > 0; }
 	};
@@ -268,6 +284,7 @@ namespace TerraEngine::Scene {
 		// Snapshot every target while the protected producer owns ObjectManager,
 		// so the later protected flush can reject the whole batch if it went stale.
 		TransactionalMutationBuilder& UpdateTransformBatch(ObjectManager& objects, std::vector<TransactionTransformUpdate> updates);
+		TransactionalMutationBuilder& PublishAnimationMutations(ObjectManager& objects, std::vector<AnimationMutationPublication> publications);
 		Transaction Build() &;
 		Transaction Build() &&;
 

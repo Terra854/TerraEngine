@@ -7,6 +7,8 @@
 
 #include "MainEngine.h"
 #include "SystemBase.h"
+#include "Animation/AnimationPresentationSystem.h"
+#include "Animation/AnimationSystem.h"
 #include "Logger/Logger.h"
 #include "Timer.h"
 #include "Input/GLFW/GlfwInputBackend.h"
@@ -162,6 +164,16 @@ void Engine::ConfigureHeadlessPhysicsValidation()
 	headlessPhysicsValidation = true;
 }
 
+void Engine::ConfigureHeadlessCpuFallback()
+{
+	// Keep one headless lifecycle flag so physics parity and animation export
+	// validation cannot diverge in their scheduler membership. With RenderSystem
+	// absent, Auto animation resolution observes renderer unavailability and
+	// selects its already-published CPU deterministic fallback at a safe frame
+	// boundary instead of attempting a late device creation.
+	headlessPhysicsValidation = true;
+}
+
 // Engine::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Engine::Initialize()
 {
@@ -221,6 +233,13 @@ void Engine::Initialize()
 	ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
 	RegisterEngineSystem(systems, systemScheduler, scriptingSystem, scriptingSystem.SchedulerDeclaration());
 
+	// Scripts publish typed animation commands before this phase. AnimationSystem
+	// captures those inputs once, prepares/evaluates worker ranges, then commits
+	// authoritative root-motion/physics handoffs at its protected boundary.
+	TerraEngine::Animation::AnimationSystem& animationSystem = TerraEngine::Animation::AnimationSystem::Instance();
+	animationSystem.SetHeadlessExecutionRequired(headlessPhysicsValidation);
+	RegisterEngineSystem(systems, systemScheduler, animationSystem, animationSystem.SchedulerDeclaration());
+
 	// Editor Play Mode owns world creation/restoration, while exported games
 	// start the same shared system during ordinary engine initialization.
 	TerraEngine::Physics::PhysicsSystem& physicsSystem = TerraEngine::Physics::PhysicsSystem::Instance();
@@ -233,6 +252,23 @@ void Engine::Initialize()
 		std::erase(physicsDeclaration.before, "UISystem");
 	}
 	RegisterEngineSystem(systems, systemScheduler, physicsSystem, std::move(physicsDeclaration));
+
+	// Presentation is a separate post-physics owner so current-step ragdoll
+	// snapshots can shape the visual plan without rewriting controller authority.
+	// Headless runtimes keep the phase for recording/deterministic handoffs but
+	// remove dependencies on presentation-only systems that are not registered.
+	TerraEngine::Animation::AnimationPresentationSystem& animationPresentationSystem =
+		TerraEngine::Animation::AnimationPresentationSystem::Instance();
+	auto animationPresentationDeclaration = animationPresentationSystem.SchedulerDeclaration();
+	if(headlessPhysicsValidation) {
+		std::erase(animationPresentationDeclaration.before, "UISystem");
+		std::erase(animationPresentationDeclaration.before, "RenderSystem");
+	}
+	RegisterEngineSystem(
+		systems,
+		systemScheduler,
+		animationPresentationSystem,
+		std::move(animationPresentationDeclaration));
 
 	if (!headlessPhysicsValidation) {
 		// UISystem and RenderSystem are presentation-only. Omitting them keeps the
@@ -282,9 +318,20 @@ void Engine::Initialize()
 		// before any system initializes. This prevents a corrupt collider, material,
 		// managed binding, or provider revision from creating a live Jolt world.
 		if(resourceManager.IsExportRuntime() && ContentMount::Instance().IsMounted()) {
+			// The launcher already configured the NativeAOT library from its
+			// executable-relative Managed directory. Keep this early packaged-content
+			// validation on the same platform-specific ABI filename so headless Linux
+			// startup never falls back to a Windows-only extension.
+#ifdef _WIN32
+			const std::filesystem::path managedRuntimePath = resourceManager.GetEngineRoot()
+				/ "Managed" / "Assembly-CSharp.dll";
+#else
+			const std::filesystem::path managedRuntimePath = resourceManager.GetEngineRoot()
+				/ "Managed" / "Assembly-CSharp.so";
+#endif
 			packagedPhysics = TerraEngine::Runtime::LoadPackagedPhysicsRuntime(
 				ContentMount::Instance(), true,
-				resourceManager.GetEngineRoot() / "Managed" / "Assembly-CSharp.dll");
+				managedRuntimePath);
 			if(packagedPhysics->declared && !packagedPhysics->loaded) {
 				throw std::runtime_error(packagedPhysics->diagnostic);
 			}
@@ -500,6 +547,115 @@ bool Engine::Update(float deltaTime)
 	}
 
 	return true;
+}
+
+TerraEngine::Runtime::AnimationParityReport Engine::RunAnimationParityFixture(
+	const TerraEngine::Runtime::AnimationParityValidationOptions& options)
+{
+	TerraEngine::Runtime::AnimationParityReport report;
+	report.requestedTicks = options.tickCount;
+	report.fixedDeltaSeconds = options.fixedDeltaSeconds;
+	report.mode = options.mode;
+	report.visualCapture = {
+		{"required", options.requireRenderedVisualCapture},
+		{"available", false}
+	};
+	if (options.tickCount == 0U || !std::isfinite(options.fixedDeltaSeconds) || options.fixedDeltaSeconds <= 0.0F) {
+		report.diagnostic = "Animation parity requires a positive fixed tick configuration.";
+		return report;
+	}
+	// Export startup resolves animation payloads asynchronously. The first
+	// scheduler update may therefore publish the deliberately safe placeholder
+	// while the skeleton and clip finish loading. Give that normal dependency
+	// transition a bounded window, but start the requested parity sequence only
+	// after a complete sealed pose exists. A missing or corrupt dependency still
+	// fails closed once this limit is exhausted.
+	constexpr std::uint32_t kMaximumStartupWarmupTicks = 120U;
+	bool capturedFirstAuthoritativeTick = false;
+	for (std::uint32_t warmupTick = 0U;
+		warmupTick < kMaximumStartupWarmupTicks;
+		++warmupTick) {
+		if (!Update(options.fixedDeltaSeconds)) {
+			report.diagnostic = "The scheduler stopped during animation parity validation.";
+			return report;
+		}
+		if (TerraEngine::Runtime::CaptureAnimationParityTick(
+			TerraEngine::Animation::AnimationSystem::Instance(), 0U, report)) {
+			report.diagnostic.clear();
+			capturedFirstAuthoritativeTick = true;
+			break;
+		}
+	}
+	if (!capturedFirstAuthoritativeTick) {
+		report.ticks.clear();
+		report.ticksEvaluated = 0U;
+		report.diagnostic =
+			"The startup scene did not publish a complete sealed animator pose within "
+			"120 fixed warm-up ticks.";
+		return report;
+	}
+	for (std::uint32_t tick = 1U; tick < options.tickCount; ++tick) {
+		if (!Update(options.fixedDeltaSeconds)) {
+			report.diagnostic = "The scheduler stopped during animation parity validation.";
+			return report;
+		}
+		if (!TerraEngine::Runtime::CaptureAnimationParityTick(
+			TerraEngine::Animation::AnimationSystem::Instance(), tick, report)) return report;
+	}
+	if (!report.ticks.empty()) report.animators = report.ticks.back().at("animators");
+	if (options.requireRenderedVisualCapture) {
+		// A rendered lane is only accepted when the installed Vulkan backend
+		// returns real pixels. The deterministic one-pixel fallback is useful for
+		// API availability tests but cannot prove exported visual deformation.
+		if (headlessPhysicsValidation) {
+			report.diagnostic = "Rendered visual capture was requested from a headless runtime.";
+			return report;
+		}
+		RenderSystem* renderSystem = GetSystem<RenderSystem>();
+		if (renderSystem == nullptr) {
+			report.diagnostic = "The rendered animation parity lane has no RenderSystem.";
+			return report;
+		}
+		TerraEngine::Renderer::RenderCaptureRequest request;
+		request.requestId = "export-animation-parity-game-view";
+		request.sourceKind = TerraEngine::Renderer::RenderCaptureSourceKind::GameView;
+		request.viewType = RenderViewType::Game;
+		request.sourceName = "Export animation parity Game View";
+		request.targetSize = glm::uvec2(1280U, 720U);
+		request.format = "image/png";
+		// Ask RenderSystem for one dedicated frame from the latest authored
+		// runtime camera. Packaged builds render their visible window through the
+		// swapchain, while validation needs a transfer-readable offscreen target
+		// that contains the same immutable camera and animation generation.
+		request.freshness = "nextFrame";
+		request.includeOverlays = false;
+		request.allowBackendFallback = false;
+		request.timeoutMs = 10000U;
+		const TerraEngine::Renderer::RenderCaptureResult capture =
+			renderSystem->CaptureImage(request);
+		report.visualCapture = {
+			{"required", true},
+			{"available", capture.ok},
+			{"backendReadback", capture.backendReadback},
+			{"deterministicFallback", capture.deterministicFallback},
+			{"mimeType", capture.mimeType},
+			{"width", capture.size.x},
+			{"height", capture.size.y},
+			{"frameId", capture.frameId},
+			{"message", capture.message},
+			{"errorCategory", capture.errorCategory},
+			{"pngBase64", capture.base64Data}
+		};
+		if (!capture.ok || !capture.backendReadback || capture.deterministicFallback
+			|| capture.mimeType != "image/png" || capture.size.x == 0U
+			|| capture.size.y == 0U || capture.base64Data.empty()) {
+			report.diagnostic =
+				"The rendered animation parity lane did not produce a real Vulkan PNG readback.";
+			return report;
+		}
+	}
+	report.succeeded = true;
+	return report;
 }
 
 TerraEngine::Runtime::PhysicsInvariantReport Engine::RunPhysicsInvariantFixture()

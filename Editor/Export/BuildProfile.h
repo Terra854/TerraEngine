@@ -178,14 +178,41 @@ std::string GetExportLauncherFileName(const std::string& projectName, ExportPlat
 /// Returns the NativeAOT gameplay library filename expected under Managed/.
 std::string GetExportManagedRuntimeLibraryName(ExportPlatform platform);
 
+/// Describes the installed, executable-relative NativeAOT toolchain used by
+/// export. Every path is explicit so a gameplay project cannot inherit a user
+/// NuGet cache, an ambient package source, or another concurrent build's
+/// intermediate/output tree.
+struct NativeAotPublishContext {
+	/// Installed directory used for global.json SDK selection.
+	std::filesystem::path workingDirectory;
+	/// Installed offline NuGet configuration and bundled package feed.
+	std::filesystem::path nugetConfig;
+	std::filesystem::path nugetFeed;
+	/// Private per-operation package cache and dotnet first-use state.
+	std::filesystem::path packageCache;
+	std::filesystem::path dotnetCliHome;
+	/// Private per-operation MSBuild obj and bin directories.
+	std::filesystem::path intermediateOutputDirectory;
+	std::filesystem::path binaryOutputDirectory;
+};
+
+/// Builds the offline restore that materializes the NativeAOT package graph.
+/// The publish command deliberately runs with --no-restore after this succeeds.
+std::string BuildNativeAotRestoreCommand(
+	const BuildProfile& profile,
+	const std::filesystem::path& managedProject,
+	const NativeAotPublishContext& context);
+
 /// Builds the dotnet publish command used for NativeAOT gameplay compilation.
 /// @param profile Build profile whose toggles become publish properties.
 /// @param managedProject Full path to Assembly-CSharp.csproj.
 /// @param managedOutputDir Full path where dotnet should place NativeAOT output.
+/// @param context Installed fail-closed feed and project-local cache paths.
 std::string BuildNativeAotPublishCommand(
 	const BuildProfile& profile,
 	const std::filesystem::path& managedProject,
-	const std::filesystem::path& managedOutputDir);
+	const std::filesystem::path& managedOutputDir,
+	const NativeAotPublishContext& context);
 
 /// Returns the engine shared library filename installed beside exported launchers.
 std::string GetExportEngineLibraryName(ExportPlatform platform);

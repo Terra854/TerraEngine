@@ -380,6 +380,88 @@ namespace TerraEngine::Tests
 			context.Expect(ShaderContains(vulkanSource, "std::min(command.virtualMeshletOffset, mesh.meshletCount)"), "Owner-mesh fallback draws should still clamp their global meshlet offset to the resident owner payload.");
 		});
 
+		registry.Add("VirtualGeometry.ShaderLayout.AnimatedPagePacketsCollapseToWholeOwner", [](TestContext& context) {
+			const std::string renderSystemSource = ReadRenderSystemSource();
+			const std::string meshShader = ReadDefaultMeshShader();
+			const std::string vulkanSource = ReadVulkanContextSource();
+
+			const std::size_t ownerFallback = renderSystemSource.find(
+				"command.animationBinding.RequiresOwnerMeshDeformationFallback()");
+			const std::size_t wholeOwnerCount = renderSystemSource.find(
+				"command.virtualMeshletCount = mesh->header.meshletCount", ownerFallback);
+			const std::size_t packetExpansion = renderSystemSource.find(
+				"BuildVirtualGeometryClusterPackets(", ownerFallback);
+			context.Expect(
+				ownerFallback != std::string::npos
+					&& wholeOwnerCount != std::string::npos
+					&& packetExpansion != std::string::npos
+					&& ownerFallback < wholeOwnerCount
+					&& wholeOwnerCount < packetExpansion,
+				"Active deformation must publish one complete owner-mesh draw before page packets can be expanded into partial owner ranges.");
+			context.Expect(
+				ShaderContains(vulkanSource, "const bool wholeOwnerDeformationFallback =")
+					&& ShaderContains(vulkanSource, "? mesh.meshletCount"),
+				"Vulkan must defensively recover the complete owner mesh when a page-local animated command reaches the backend.");
+			context.ExpectEqual(
+				static_cast<std::uint32_t>(1u << 6u),
+				::kVirtualGeometryFlagTaskPayloadValid,
+				"The task-payload-valid bit must remain below the virtual-geometry debug-mode byte.");
+			const std::size_t visiblePayloadAssignment = vulkanSource.find(
+				"push.virtualGeometryFlags |= kVirtualGeometryFlagTaskPayloadValid");
+			const std::size_t shadowPayloadAssignment = vulkanSource.find(
+				"shadowDraw.push.virtualGeometryFlags |=");
+			const std::size_t shadowPayloadFlag = vulkanSource.find(
+				"kVirtualGeometryFlagTaskPayloadValid", shadowPayloadAssignment);
+			context.Expect(
+				visiblePayloadAssignment != std::string::npos
+					&& shadowPayloadAssignment != std::string::npos
+					&& shadowPayloadFlag != std::string::npos
+					&& shadowPayloadFlag - shadowPayloadAssignment < 128u
+					&& ShaderContains(meshShader,
+						"(SceneUniforms.virtualGeometryFlags & kVirtualGeometryFlagTaskPayloadValid) != 0u")
+					&& ShaderContains(meshShader,
+						"const uint meshletIndex = taskPayloadValid"),
+				"Visible and shadow task pipelines must keep consuming task payload indices when task culling is disabled.");
+			context.Expect(
+				!ShaderContains(meshShader,
+					"const uint meshletIndex = (SceneUniforms.taskCullingEnabled != 0u)"),
+				"Meshlet addressing must not mistake the visibility-culling toggle for task-payload validity.");
+
+			// BaseCharacter owns 65 meshlets, which requires three 32-wide task
+			// groups. Model the pass-through task payload and prove every owner
+			// meshlet reaches one mesh-stage child exactly once.
+			std::array<std::uint32_t, 65u> emittedCounts{};
+			constexpr std::uint32_t kTaskBatchSize = 32u;
+			for (std::uint32_t taskGroup = 0u; taskGroup < 3u; ++taskGroup)
+			{
+				std::array<std::uint32_t, kTaskBatchSize> payload{};
+				std::uint32_t visibleCount = 0u;
+				for (std::uint32_t localIndex = 0u;
+					localIndex < kTaskBatchSize;
+					++localIndex)
+				{
+					const std::uint32_t meshletIndex =
+						taskGroup * kTaskBatchSize + localIndex;
+					if (meshletIndex >= emittedCounts.size())
+					{
+						break;
+					}
+					payload[visibleCount++] = meshletIndex;
+				}
+				for (std::uint32_t child = 0u; child < visibleCount; ++child)
+				{
+					++emittedCounts[payload[child]];
+				}
+			}
+			for (const std::uint32_t emittedCount : emittedCounts)
+			{
+				context.ExpectEqual(
+					static_cast<std::uint32_t>(1u),
+					emittedCount,
+					"Pass-through task payloads must emit owner meshlets 0 through 64 exactly once.");
+			}
+		});
+
 		registry.Add("VirtualGeometry.ShaderLayout.US2.PageLocalDescriptorUpdatesDrainRecordedViews", [](TestContext& context) {
 			const std::string vulkanResources = ReadVulkanContextResourcesSource();
 
@@ -564,6 +646,20 @@ namespace TerraEngine::Tests
 			context.Expect(ShaderContains(vulkanResourcesSource, "VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // 11: Hi-Z sampler"), "The global Hi-Z sampler binding should be update-after-bind so descriptor republish cannot invalidate already-recorded Scene/Game command buffers.");
 			context.Expect(ShaderContains(vulkanResourcesSource, "VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // 8: Point-shadow sampler"), "The point-shadow sampler binding should be update-after-bind because shadow resource rebuilds can republish it between editor views.");
 			context.Expect(!ShaderContains(vulkanResourcesSource, "if (hiZ.fullView == VK_NULL_HANDLE || hiZ.sampler == VK_NULL_HANDLE) return;"), "Global Hi-Z descriptor publication must not return early just because one editor view is missing.");
+		});
+
+		registry.Add("VirtualGeometry.ShaderLayout.SkinningDescriptorAlwaysOwnsAValidPayload", [](TestContext& context) {
+			const std::string vulkanResourcesSource = ReadVulkanContextResourcesSource();
+
+			// Vulkan validates statically used descriptors independently of the
+			// runtime deformation branch. These source contracts keep every
+			// reflected binding 6 valid and preserve real deformable owner data.
+			context.Expect(ShaderContains(vulkanResourcesSource, "&& !cpuMesh->hasDeformablePayload;"), "Page-local virtual geometry must retain full owner buffers for deformable draws until page-local skinning is implemented.");
+			context.Expect(ShaderContains(vulkanResourcesSource, "createPlaceholderStorageBuffer(kDeformableMeshSkinningStrideBytes, \"Virtual Geometry Owner Placeholder Skinning Buffer\")"), "Page-local static meshes should own an explicit zero skinning record.");
+			context.Expect(ShaderContains(vulkanResourcesSource, "createPlaceholderStorageBuffer(kDeformableMeshSkinningStrideBytes, \"Static Mesh Skinning Fallback Buffer\")"), "Owning static meshes should own the same stride-correct zero skinning record.");
+			context.Expect(ShaderContains(vulkanResourcesSource, "if (HasStorageBinding(6) && mesh.meshSkinningBuffer.buffer == VK_NULL_HANDLE)"), "Descriptor creation should fail closed if the required skinning owner could not be created.");
+			context.Expect(ShaderContains(vulkanResourcesSource, "if (HasStorageBinding(6))"), "Reflected skinning binding 6 should always be written, including for static meshes.");
+			context.Expect(!ShaderContains(vulkanResourcesSource, "if (hasSkinning && HasStorageBinding(6))"), "Descriptor publication must not silently skip a statically used skinning binding.");
 		});
 
 		registry.Add("VirtualGeometry.ShaderLayout.HiZPyramidTracksEditorRenderTargetSize", [](TestContext& context) {

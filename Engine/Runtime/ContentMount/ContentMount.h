@@ -1,16 +1,4 @@
-// ContentMount.h — Contains declarations for the Content Mount file-specific types, helper functions, and module integration code used by mounted content registration, lookup, and byte-loading services.
-
-// ContentMount.h — Runtime content-access abstraction for TEPAK archives.
-//
-// In exported builds the ContentMount replaces the filesystem-based resource access
-// with reads from a .tepak archive. The engine's ResourceManager calls into this
-// abstraction when the build is running in export mode, transparently routing file
-// operations through the TEPAK PackReader.
-//
-// TEPAK first-party source code is copied into Engine/Runtime/ContentMount/ so the
-// engine build is self-contained. TEPAK's third-party dependencies (zstd, xxhash)
-// remain sourced from TEPAK/External/ as submodules. The standalone TEPAK/ project
-// is untouched.
+// ContentMount.h - thread-safe runtime access to one mounted TEPAK archive.
 
 #pragma once
 
@@ -18,22 +6,49 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
-// Forward-declare TEPAK reader to avoid leaking TEPAK internals into the engine
-// header. The implementation file includes the concrete TEPAK headers directly.
-namespace tepak {
-	class PackReader;
-}
+// Checked reads distinguish an empty file from an unavailable or rejected read.
+// Legacy vector-returning helpers remain available for existing resource callers.
+enum class ContentReadStatus : std::uint8_t
+{
+	Ok,
+	NotMounted,
+	NotFound,
+	OutOfRange,
+	ReadLimitExceeded,
+	ArchiveError
+};
 
-/// ContentMount provides the engine runtime with a virtualised file-read interface
-/// backed by a TEPAK archive. In editor builds the mount is not used — the engine
-/// reads directly from the project's filesystem. In export builds, all assets are
-/// read through this mount.
-class TERRAENGINE_API ContentMount {
+// This copied metadata record never exposes PackReader-owned references across a
+// remount boundary. Callers can safely retain it after the archive changes.
+struct TERRAENGINE_API MountedContentEntry final
+{
+	std::string logicalPath;
+	std::string assetClass;
+	std::uint64_t logicalSize = 0U;
+	std::uint64_t entryHash = 0U;
+};
+
+struct TERRAENGINE_API MountedContentReadResult final
+{
+	ContentReadStatus status = ContentReadStatus::NotMounted;
+	MountedContentEntry entry;
+	std::vector<std::uint8_t> bytes;
+
+	[[nodiscard]] bool Succeeded() const noexcept { return status == ContentReadStatus::Ok; }
+};
+
+// ContentMount publishes complete reader/metadata snapshots under one lock. A
+// failed remount leaves the prior snapshot live, while unmount waits for active
+// reads so PackReader state is never invalidated underneath worker jobs.
+class TERRAENGINE_API ContentMount final
+{
 public:
 	ContentMount();
 	~ContentMount();
@@ -44,46 +59,43 @@ public:
 	ContentMount(const ContentMount&) = delete;
 	ContentMount& operator=(const ContentMount&) = delete;
 
-	/// Opens a .tepak archive and mounts it as the runtime content root.
-	/// Throws on failure (invalid archive, missing file, version mismatch).
-	/// @param archivePath Absolute path to the .tepak file.
-	/// @return true if the archive was successfully opened and validated.
+	// Opens and validates a candidate before atomically replacing the live mount.
+	// Returns false without disturbing an existing mount when opening fails.
 	bool Mount(const std::filesystem::path& archivePath);
 
-	/// Returns whether a content archive is currently mounted.
 	[[nodiscard]] bool IsMounted() const;
-
-	/// Returns the path to the mounted archive, or empty if nothing is mounted.
-	[[nodiscard]] const std::filesystem::path& GetArchivePath() const;
-
-	/// Checks whether a logical path exists inside the mounted archive.
-	/// @param logicalPath Normalised forward-slash path (e.g. "scenes/main.tescene").
+	[[nodiscard]] std::filesystem::path GetArchivePath() const;
 	[[nodiscard]] bool Exists(std::string_view logicalPath) const;
+	[[nodiscard]] std::optional<MountedContentEntry> FindEntry(std::string_view logicalPath) const;
+	[[nodiscard]] std::vector<MountedContentEntry> SnapshotEntries() const;
 
-	/// Applies the one archive lookup policy shared by manifest entries and
-	/// runtime reads: forward slashes, lowercase, and no leading root markers.
+	// Applies the one lookup policy shared by archive metadata and runtime reads.
 	[[nodiscard]] static std::string NormalizeLogicalPath(std::string_view logicalPath);
 
-	/// Reads the entire contents of a logical file from the mounted archive.
-	/// @param logicalPath Normalised forward-slash path.
-	/// @return Byte buffer with the file contents.
-	[[nodiscard]] std::vector<uint8_t> ReadAll(std::string_view logicalPath) const;
+	// Holds a shared mount lock across metadata validation and PackReader I/O. The
+	// caller-provided limit prevents untrusted archive metadata from causing an
+	// unexpectedly large allocation before a format reader validates its header.
+	[[nodiscard]] MountedContentReadResult ReadRangeChecked(
+		std::string_view logicalPath,
+		std::uint64_t offset,
+		std::uint64_t size,
+		std::uint64_t maximumReadBytes = std::numeric_limits<std::uint64_t>::max()) const;
+	[[nodiscard]] MountedContentReadResult ReadAllChecked(
+		std::string_view logicalPath,
+		std::uint64_t maximumReadBytes = std::numeric_limits<std::uint64_t>::max()) const;
 
-	/// Reads a byte range from a logical file, decompressing only overlapping extents.
-	/// @param logicalPath Normalised forward-slash path.
-	/// @param offset Byte offset within the logical file.
-	/// @param size Number of bytes to read.
-	/// @return Byte buffer with the requested range.
-	[[nodiscard]] std::vector<uint8_t> ReadRange(std::string_view logicalPath, uint64_t offset, uint64_t size) const;
+	// Compatibility helpers report failures as empty buffers, matching the
+	// original ContentMount contract used by existing resource managers.
+	[[nodiscard]] std::vector<std::uint8_t> ReadAll(std::string_view logicalPath) const;
+	[[nodiscard]] std::vector<std::uint8_t> ReadRange(
+		std::string_view logicalPath,
+		std::uint64_t offset,
+		std::uint64_t size) const;
 
-	/// Releases the mounted archive and frees all associated resources.
 	void Unmount();
-
-	/// Global singleton access — the engine keeps one active content mount.
 	static ContentMount& Instance();
 
 private:
-	// struct Impl groups related state and operations so callers have one documented contract.
 	struct Impl;
 	std::unique_ptr<Impl> m_impl;
 };

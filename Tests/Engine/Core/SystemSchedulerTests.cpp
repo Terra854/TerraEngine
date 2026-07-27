@@ -113,6 +113,25 @@ namespace TerraEngine::Tests {
 			bool alternateResource = false;
 		};
 
+		// This fixture deliberately reports no frame work while counting each
+		// declaration request. Repeated calls prove the scheduler does not turn one
+		// dormant observation into a permanent activation cache.
+		class DormantDeclaringSystem final : public SystemsBase {
+		public:
+			void Initialize() override {}
+			void Update(float) override {}
+			void Shutdown() override {}
+			std::string SystemName() override { return "DormantMiddle"; }
+
+			std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> DeclareFrameWorkloads(float) override
+			{
+				++declarationCalls;
+				return {};
+			}
+
+			std::size_t declarationCalls = 0U;
+		};
+
 		TerraEngine::Scheduling::SystemDeclaration MakeDeclaration(std::string name, std::string phase)
 		{
 			TerraEngine::Scheduling::SystemDeclaration declaration;
@@ -173,6 +192,61 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(std::string("Scene"), first.systems[1], "Scene phase should run before Render.");
 			context.ExpectEqual(std::string("Render"), first.systems[2], "Render phase should run last in this fixture.");
 			context.ExpectEqual(first.formatted, second.formatted, "Repeated validation should produce the same summary text.");
+		});
+
+		registry.Add("Engine.SystemScheduler.CachedSortedPhasesPreserveDormantFrameOrdering", [](TestContext& context) {
+			FakeSystem late("LateSystem");
+			DormantDeclaringSystem dormant;
+			FakeSystem early("EarlySystem");
+			TerraEngine::Scheduling::SystemScheduler scheduler;
+			const std::vector<TerraEngine::Scheduling::SchedulerPhaseDefinition> definitions = {
+				{"Late", 30, true},
+				{"Dormant", 20, true},
+				{"Early", 10, true}
+			};
+			scheduler.SetPhaseDefinitions(definitions);
+			scheduler.SetMutationFlushPoints({});
+			scheduler.RegisterSystem(late, MakeDeclaration("LateSystem", "Late"));
+			auto dormantDeclaration = MakeDeclaration("DormantMiddle", "Dormant");
+			dormantDeclaration.omitWhenNoFrameWorkloads = true;
+			scheduler.RegisterSystem(dormant, std::move(dormantDeclaration));
+			scheduler.RegisterSystem(early, MakeDeclaration("EarlySystem", "Early"));
+
+			const TerraEngine::Scheduling::ScheduleSummary summary = scheduler.BuildSchedule();
+			context.Expect(summary.valid, "An unsorted phase-definition list should validate through its deterministic sorted summary.");
+			context.Expect(summary.phases == std::vector<std::string>({"Early", "Dormant", "Late"}),
+				"The validated summary must retain the canonical sorted phase-name order used by frame lowering.");
+			const auto& observableDefinitions = scheduler.PhaseDefinitions();
+			context.Expect(observableDefinitions.size() == definitions.size()
+				&& observableDefinitions[0].name == "Late"
+				&& observableDefinitions[1].name == "Dormant"
+				&& observableDefinitions[2].name == "Early",
+				"PhaseDefinitions must preserve the caller's original observable order.");
+
+			const auto first = scheduler.BuildFrameWorkloadDeclarations(0.016F);
+			const auto second = scheduler.BuildFrameWorkloadDeclarations(0.033F);
+			context.ExpectEqual(static_cast<std::size_t>(2U), first.size(),
+				"The dormant middle phase must contribute no compatibility descriptor.");
+			context.ExpectEqual(first.size(), second.size(),
+				"Repeated dormant frames must retain the same active descriptor set.");
+			if(first.size() == 2U && second.size() == 2U) {
+				context.ExpectEqual(std::string("EarlySystem"), first[0].ownerSystem,
+					"Frame descriptors must follow the cached validated phase order rather than input definition order.");
+				context.ExpectEqual(std::string("LateSystem"), first[1].ownerSystem,
+					"The later active phase must remain ordered after an empty phase.");
+				context.Expect(Contains(first[1].explicitDependencies, first[0].stableDescriptorId),
+					"Skipping an empty phase must preserve the prior active terminal dependency.");
+				context.ExpectEqual(first[0].stableDescriptorId, second[0].stableDescriptorId,
+					"Repeated dormancy must not rebuild unchanged descriptor identity.");
+				context.Expect(first[1].explicitDependencies == second[1].explicitDependencies,
+					"Repeated dormant frames must lower identical phase dependencies.");
+			}
+			context.ExpectEqual(static_cast<std::size_t>(2U), dormant.declarationCalls,
+				"Dormancy is frame-local and every frame must ask the system to declare current work.");
+			context.ExpectEqual(summary.diagnostics.size(), scheduler.LatestSummary().diagnostics.size(),
+				"Frame lowering over an empty phase must not add or remove schedule diagnostics.");
+			context.ExpectEqual(summary.formatted, scheduler.LatestSummary().formatted,
+				"The public formatted summary must remain stable while cached phase names drive frame lowering.");
 		});
 
 		registry.Add("Engine.SystemScheduler.DefaultMetadataFallsBackToPostFrame", [](TestContext& context) {

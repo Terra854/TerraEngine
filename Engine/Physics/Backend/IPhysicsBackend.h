@@ -118,6 +118,10 @@ namespace TerraEngine::Physics {
 			float angularDamping = 0.05F;
 			float maximumLinearVelocity = 500.0F;
 			float maximumAngularVelocity = 94.24778F;
+			// Ragdoll profiles may intentionally tune gravity per body. Ordinary rigid
+			// bodies retain the previous full-gravity default, while zero remains the
+			// provider-neutral representation for gravity-disabled bodies.
+			float gravityFactor = 1.0F;
 			std::uint32_t allowedDegreesOfFreedom = 0x3FU;
 			std::uint8_t collisionLayer = 0;
 			std::uint32_t collisionMask = 0xFFFFFFFFU;

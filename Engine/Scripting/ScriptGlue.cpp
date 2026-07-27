@@ -11,6 +11,9 @@
 #include "Components/ScriptComponent.h"
 #include "Components/Physics/ColliderSetComponent.h"
 #include "Components/Physics/ConstraintSetComponent.h"
+#include "Animation/AnimationSystem.h"
+#include "Animation/Runtime/AnimationAttachments.h"
+#include "Animation/Runtime/RootMotion.h"
 #include "DotNet/DotNetHost.h"
 #include "ScriptingSystem.h"
 #include "UI/UIElement.h"
@@ -30,10 +33,12 @@
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
+#include <span>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -578,9 +583,1441 @@ namespace {
 		}
 		return NativePhysicsStatus::Success;
 	}
+
+	NativeAnimationStatus ToNativeAnimationStatus(TerraEngine::Animation::AnimationStatus status) noexcept
+	{
+		return static_cast<NativeAnimationStatus>(status);
+	}
+
+	NativeAnimationStatus ValidateAnimationHeader(
+		const NativeAnimationAbiHeader* header,
+		NativeAnimationRecordKind expected,
+		std::size_t requiredSize) noexcept
+	{
+		if(header == nullptr) return NativeAnimationStatus::InvalidArgument;
+		if(header->version != kNativeAnimationAbiVersion) return NativeAnimationStatus::UnsupportedMajorVersion;
+		if(header->size < requiredSize) return NativeAnimationStatus::TruncatedInput;
+		if(header->kind != static_cast<std::uint16_t>(expected)) return NativeAnimationStatus::InvalidType;
+		return NativeAnimationStatus::Ok;
+	}
+
+	template<typename Record>
+	NativeAnimationStatus ValidateAnimationRecord(
+		const Record* record,
+		NativeAnimationRecordKind expected) noexcept
+	{
+		return ValidateAnimationHeader(record == nullptr ? nullptr : &record->header, expected, sizeof(Record));
+	}
+
+	NativeAnimationUuid AnimationFromUuid(const TerraEngine::UUID& value) noexcept
+	{
+		NativeAnimationUuid result{};
+		std::memcpy(&result.first, value.data(), sizeof(result.first));
+		std::memcpy(&result.second, value.data() + sizeof(result.first), sizeof(result.second));
+		return result;
+	}
+
+	NativeAnimationAnimatorHandle AnimationFromHandle(
+		TerraEngine::Animation::AnimatorInstanceHandle value) noexcept
+	{
+		return {value.slotIndex, value.generation};
+	}
+
+	TerraEngine::Animation::AnimatorInstanceHandle AnimationToHandle(
+		NativeAnimationAnimatorHandle value) noexcept
+	{
+		return {value.slotIndex, value.generation};
+	}
+
+	NativeAnimationVector3 AnimationFromVector(
+		TerraEngine::Animation::AnimationFloat3 value) noexcept
+	{
+		return {value.x, value.y, value.z};
+	}
+
+	TerraEngine::Animation::AnimationFloat3 AnimationToVector(
+		NativeAnimationVector3 value) noexcept
+	{
+		return {value.x, value.y, value.z};
+	}
+
+	NativeAnimationQuaternion AnimationFromQuaternion(
+		TerraEngine::Animation::AnimationQuaternion value) noexcept
+	{
+		return {value.x, value.y, value.z, value.w};
+	}
+
+	TerraEngine::Animation::AnimationQuaternion AnimationToQuaternion(
+		NativeAnimationQuaternion value) noexcept
+	{
+		return {value.x, value.y, value.z, value.w};
+	}
+
+	NativeAnimationTransform AnimationFromTransform(
+		const TerraEngine::Animation::AnimationTransform& value) noexcept
+	{
+		return {
+			AnimationFromVector(value.translation),
+			AnimationFromQuaternion(value.rotation),
+			AnimationFromVector(value.scale)};
+	}
+
+	TerraEngine::Animation::AnimationTransform AnimationToTransform(
+		const NativeAnimationTransform& value) noexcept
+	{
+		return {
+			AnimationToVector(value.translation),
+			AnimationToQuaternion(value.rotation),
+			AnimationToVector(value.scale)};
+	}
+
+	NativeAnimationAbiHeader AnimationHeader(
+		NativeAnimationRecordKind kind,
+		std::size_t size) noexcept
+	{
+		return {
+			static_cast<std::uint32_t>(size),
+			kNativeAnimationAbiVersion,
+			static_cast<std::uint16_t>(kind)};
+	}
+
+	void FillAnimationReceipt(
+		const TerraEngine::Animation::AnimationCommandReceipt& source,
+		NativeAnimationCommandReceipt& destination) noexcept
+	{
+		destination = {};
+		destination.header = AnimationHeader(
+			NativeAnimationRecordKind::CommandReceipt, sizeof(destination));
+		destination.status = ToNativeAnimationStatus(source.status);
+		destination.animator = AnimationFromHandle(source.target);
+		destination.producerId = source.producerId;
+		destination.duplicate = source.duplicate ? 1U : 0U;
+		destination.producerSequence = source.producerSequence;
+		destination.correlationId = source.correlationId;
+		destination.idempotencyKey = source.idempotencyKey;
+		destination.cancellationToken = source.cancellationToken;
+		destination.targetTick = source.targetTick;
+		destination.observableTick = source.observableTick;
+		destination.publicationGeneration = source.publicationGeneration;
+	}
+
+	void FillRootMotionReceipt(
+		const TerraEngine::Animation::AnimationRootMotionApplicationReceipt& source,
+		NativeAnimationRootMotionApplicationReceipt& destination) noexcept
+	{
+		destination = {};
+		destination.header = AnimationHeader(
+			NativeAnimationRecordKind::RootMotionApplicationReceipt, sizeof(destination));
+		destination.status = ToNativeAnimationStatus(source.status);
+		destination.animator = AnimationFromHandle(source.animator);
+		destination.mode = static_cast<NativeAnimationRootMotionApplicationMode>(source.mode);
+		destination.generation = source.generation;
+		destination.producerId = source.producerId;
+		destination.duplicate = source.duplicate ? 1U : 0U;
+		destination.idempotencyConflict = source.idempotencyConflict ? 1U : 0U;
+		destination.producerSequence = source.producerSequence;
+		destination.correlationId = source.correlationId;
+		destination.idempotencyKey = source.idempotencyKey;
+		destination.publicationGeneration = source.publicationGeneration;
+		destination.observableTick = source.observableTick;
+		destination.physicsCommandId = source.physicsCommandId;
+	}
+
+	void FillAnimationBufferInfo(
+		NativeAnimationBufferInfo& info,
+		NativeAnimationStatus status,
+		std::size_t required,
+		std::size_t written,
+		std::int64_t sourceTick,
+		std::uint64_t publicationGeneration,
+		bool overflowed = false,
+		std::uint32_t droppedLowerBound = 0U) noexcept
+	{
+		info = {};
+		info.header = AnimationHeader(NativeAnimationRecordKind::BufferInfo, sizeof(info));
+		info.status = status;
+		info.requiredCount = required > std::numeric_limits<std::uint32_t>::max()
+			? std::numeric_limits<std::uint32_t>::max()
+			: static_cast<std::uint32_t>(required);
+		info.writtenCount = written > std::numeric_limits<std::uint32_t>::max()
+			? std::numeric_limits<std::uint32_t>::max()
+			: static_cast<std::uint32_t>(written);
+		info.overflowed = overflowed ? 1U : 0U;
+		info.droppedCountLowerBound = droppedLowerBound;
+		info.sourceTick = sourceTick;
+		info.publicationGeneration = publicationGeneration;
+	}
+
+	template<typename NativeValue, typename SourceValue, typename Converter>
+	NativeAnimationStatus CopyAnimationSpan(
+		std::span<const SourceValue> source,
+		NativeValue* destination,
+		std::uint32_t capacity,
+		NativeAnimationBufferInfo* info,
+		std::int64_t sourceTick,
+		std::uint64_t publicationGeneration,
+		Converter&& converter)
+	{
+		const NativeAnimationStatus infoStatus = ValidateAnimationRecord(
+			info, NativeAnimationRecordKind::BufferInfo);
+		if(infoStatus != NativeAnimationStatus::Ok) return infoStatus;
+		if(source.size() > std::numeric_limits<std::uint32_t>::max()) {
+			FillAnimationBufferInfo(*info, NativeAnimationStatus::HardLimitExceeded,
+				source.size(), 0U, sourceTick, publicationGeneration, true, 1U);
+			return info->status;
+		}
+		if(source.size() > capacity) {
+			// The two-call contract is atomic: an undersized buffer receives no
+			// prefix, while requiredCount reports the exact complete size.
+			FillAnimationBufferInfo(*info, NativeAnimationStatus::BufferTooSmall,
+				source.size(), 0U, sourceTick, publicationGeneration);
+			return info->status;
+		}
+		if(!source.empty() && destination == nullptr) {
+			FillAnimationBufferInfo(*info, NativeAnimationStatus::InvalidArgument,
+				source.size(), 0U, sourceTick, publicationGeneration);
+			return info->status;
+		}
+		for(std::size_t index = 0U; index < source.size(); ++index) {
+			destination[index] = converter(source[index], static_cast<std::uint32_t>(index));
+		}
+		FillAnimationBufferInfo(*info, NativeAnimationStatus::Ok,
+			source.size(), source.size(), sourceTick, publicationGeneration);
+		return info->status;
+	}
+
+	void CopyBoundedAnimationText(char* destination, std::size_t capacity, std::string_view source) noexcept
+	{
+		if(destination == nullptr || capacity == 0U) return;
+		std::memset(destination, 0, capacity);
+		const std::size_t count = std::min(source.size(), capacity - 1U);
+		std::memcpy(destination, source.data(), count);
+	}
+
+	NativeAnimationEvent MakeNativeAnimationEvent(
+		const TerraEngine::Animation::AnimationEventRecord& source,
+		const TerraEngine::Animation::PublishedAnimatorPose& owner) noexcept
+	{
+		NativeAnimationEvent event{};
+		event.header = AnimationHeader(NativeAnimationRecordKind::Event, sizeof(event));
+		event.animator = AnimationFromHandle(source.identity.animator);
+		event.clipAssetId = AnimationFromUuid(source.identity.clipAssetId.value);
+		event.controllerAssetId = AnimationFromUuid(owner.controller.assetId.value);
+		event.controllerGeneration = owner.controller.generation;
+		event.controllerStateId = source.identity.stateInstanceId;
+		event.sourceStateId = source.sourceStateId;
+		event.eventId = source.identity.eventId;
+		event.sourceTick = source.identity.sourceTick;
+		event.loopCount = source.identity.loopCount;
+		event.layerIndex = source.layerIndex;
+		event.payloadType = static_cast<std::uint32_t>(source.payloadType);
+		event.direction = static_cast<std::int32_t>(source.direction);
+		event.historical = source.historical ? 1U : 0U;
+		event.clipGeneration = owner.clip.generation;
+		event.poseGeneration = owner.snapshot ? owner.snapshot->publicationGeneration : 0U;
+		event.producerOrder = source.producerOrder;
+		event.correlationId = source.correlationId;
+		event.publicationGeneration =
+			TerraEngine::Animation::AnimationSystem::Instance().AuthorityPublicationGeneration();
+		// V1 authored clips use a stable numeric event identity rather than a
+		// separate retained name. Exposing that identity as the default tag keeps
+		// tag filtering deterministic without borrowing asset string storage.
+		const std::string tag = std::to_string(source.identity.eventId);
+		CopyBoundedAnimationText(event.tag, sizeof(event.tag), tag);
+		CopyBoundedAnimationText(event.payload, sizeof(event.payload), source.payload);
+		return event;
+	}
+
+	NativeAnimationRootMotionResultDetails MakeNativeRootMotionDetails(
+		const TerraEngine::Animation::AnimationRootMotionApplicationResult& source) noexcept
+	{
+		NativeAnimationRootMotionResultDetails result{};
+		result.header = AnimationHeader(
+			NativeAnimationRecordKind::RootMotionResultDetails, sizeof(result));
+		result.status = ToNativeAnimationStatus(source.status);
+		result.animator = AnimationFromHandle(source.animator);
+		result.disposition = static_cast<NativeAnimationRootMotionDisposition>(source.disposition);
+		result.generation = source.generation;
+		result.applicationMode = static_cast<NativeAnimationRootMotionApplicationMode>(
+			source.applicationMode);
+		result.authoredPolicy = static_cast<std::uint32_t>(source.authoredPolicy);
+		result.ownerObjectId = AnimationFromUuid(source.ownerObjectId);
+		result.objectGeneration = source.objectGeneration;
+		result.componentGeneration = source.componentGeneration;
+		result.sourceBeginTick = source.sourceBeginTick;
+		result.sourceEndTick = source.sourceEndTick;
+		result.localTranslation = AnimationFromVector(source.localTranslation);
+		result.requestedTranslation = AnimationFromVector(source.requestedTranslation);
+		result.appliedTranslation = AnimationFromVector(source.appliedTranslation);
+		result.localYawRadians = source.localYawRadians;
+		result.requestedYawRadians = source.requestedYawRadians;
+		result.appliedYawRadians = source.appliedYawRadians;
+		result.layerContribution = source.layerContribution;
+		result.requestedRotation = AnimationFromQuaternion(source.requestedRotation);
+		result.appliedRotation = AnimationFromQuaternion(source.appliedRotation);
+		result.sourceStateId = source.sourceStateId;
+		result.accumulatedCycles = source.accumulatedCycles;
+		result.layerIndex = source.layerIndex;
+		result.producerId = source.producerId;
+		result.producerSequence = source.producerSequence;
+		result.correlationId = source.correlationId;
+		result.idempotencyKey = source.idempotencyKey;
+		result.publicationGeneration = source.publicationGeneration;
+		result.physicsCommandId = source.physicsCommandId;
+		result.duplicate = source.duplicate ? 1U : 0U;
+		result.idempotencyConflict = source.idempotencyConflict ? 1U : 0U;
+		return result;
+	}
+
+	template <typename Snapshot, typename CopyFunction>
+	NativeAnimationStatus CopyAdvancedAnimationSnapshots(
+		const NativeAnimationAnimatorHandle* animator,
+		Snapshot* values,
+		std::uint32_t capacity,
+		NativeAnimationBufferInfo* info,
+		CopyFunction&& copy)
+	{
+		using namespace TerraEngine::Animation;
+		const NativeAnimationStatus infoStatus = ValidateAnimationRecord(
+			info, NativeAnimationRecordKind::BufferInfo);
+		if(infoStatus != NativeAnimationStatus::Ok) return infoStatus;
+		if(animator == nullptr || (capacity != 0U && values == nullptr)) {
+			FillAnimationBufferInfo(*info, NativeAnimationStatus::InvalidArgument,
+				0U, 0U, 0, AnimationSystem::Instance().AuthorityPublicationGeneration());
+			return info->status;
+		}
+		std::uint32_t requiredCount = 0U;
+		const AnimationStatus status = copy(
+			AnimationToHandle(*animator), std::span<Snapshot>(values, capacity), requiredCount);
+		const NativeAnimationStatus nativeStatus = ToNativeAnimationStatus(status);
+		const bool copied = status == AnimationStatus::Ok;
+		std::int64_t sourceTick = 0;
+		std::uint64_t publicationGeneration =
+			AnimationSystem::Instance().AuthorityPublicationGeneration();
+		if(copied && requiredCount != 0U) {
+			const Snapshot& newest = values[requiredCount - 1U];
+			if constexpr(requires { newest.observationTick; }) {
+				sourceTick = newest.observationTick;
+			} else {
+				sourceTick = newest.tick;
+			}
+			publicationGeneration = newest.publicationGeneration;
+		}
+		FillAnimationBufferInfo(*info, nativeStatus, requiredCount,
+			copied ? requiredCount : 0U, sourceTick, publicationGeneration);
+		return info->status;
+	}
+
+	constexpr bool HasMotionMatchUuid(NativeAnimationUuid value) noexcept
+	{
+		return value.first != 0U || value.second != 0U;
+	}
+
+	bool ValidateMotionMatchQueryPayload(
+		const NativeAnimationMotionMatchQueryRequestV2& request) noexcept
+	{
+		constexpr std::uint32_t requiredFields =
+			static_cast<std::uint32_t>(NativeAnimationMotionMatchQueryField::Identity)
+			| static_cast<std::uint32_t>(NativeAnimationMotionMatchQueryField::Features)
+			| static_cast<std::uint32_t>(NativeAnimationMotionMatchQueryField::FeatureWeights);
+		if(request.animator.generation == 0U || !HasMotionMatchUuid(request.databaseAssetId)
+			|| request.databaseGeneration == 0U || request.schemaFingerprint == 0U
+			|| request.featureCount != kNativeAnimationMotionFeatureCount
+			|| request.queryId == 0U || request.correlationId == 0U
+			|| request.targetTick < 0 || request.reserved16 != 0U || request.reserved32 != 0U
+			|| (request.queryFields & requiredFields) != requiredFields
+			|| (request.queryFields & ~kNativeAnimationMotionMatchAllQueryFields) != 0U
+			|| request.maximumCandidates == 0U
+			|| request.maximumCandidates > kNativeAnimationMotionMaximumTopK
+			|| request.maximumSamplesToVisit == 0U
+			|| request.maximumSamplesToVisit > kNativeAnimationMotionMaximumSamples
+			|| request.maximumDiagnosticExclusions
+				> kNativeAnimationMotionMaximumExcludedSamples
+			|| request.excludedSampleCount > kNativeAnimationMotionMaximumExcludedSamples
+			|| (request.requiredTags & request.excludedTags) != 0U
+			|| (request.requiredTransitionFlags & request.excludedTransitionFlags) != 0U) {
+			return false;
+		}
+		const bool hasExclusions = (request.queryFields & static_cast<std::uint32_t>(
+			NativeAnimationMotionMatchQueryField::Exclusions)) != 0U;
+		if(!hasExclusions && request.excludedSampleCount != 0U) return false;
+		std::uint64_t previous = 0U;
+		for(std::uint32_t index = 0U;
+			index < kNativeAnimationMotionMaximumExcludedSamples; ++index) {
+			const std::uint64_t sampleId = request.excludedSampleIds[index];
+			if(index < request.excludedSampleCount) {
+				if(sampleId == 0U || (index != 0U && sampleId <= previous)) return false;
+				previous = sampleId;
+			} else if(sampleId != 0U) {
+				// Zeroing unused inline entries makes equivalent copied requests byte
+				// stable and prevents caller scratch data from crossing the boundary.
+				return false;
+			}
+		}
+		return true;
+	}
+
 }
 
 extern "C" {
+	std::uint16_t Native_Animation_GetAbiVersion()
+	{
+		return kNativeAnimationAbiVersion;
+	}
+
+	NativeAnimationStatus Native_Animation_ResolveAnimator(
+		std::uint32_t objectEntity,
+		NativeAnimationAnimatorHandleRecord* animator)
+	{
+		const NativeAnimationStatus outputStatus = ValidateAnimationRecord(
+			animator, NativeAnimationRecordKind::AnimatorHandle);
+		if(outputStatus != NativeAnimationStatus::Ok) return outputStatus;
+		const NativeAnimationAbiHeader header = animator->header;
+		*animator = {};
+		animator->header = header;
+		animator->status = NativeAnimationStatus::StaleHandle;
+
+		ObjectManager& objects = ObjectManager::instance();
+		const std::optional<Object> object = objects.getObject(static_cast<entt::entity>(objectEntity));
+		if(!object) return animator->status;
+		const TerraEngine::UUID objectId = objects.getUUID(*object);
+		const TerraEngine::Animation::AnimatorInstanceHandle handle =
+			TerraEngine::Animation::AnimationSystem::Instance().ResolveAnimatorForObject(objectId);
+		if(!handle.IsValid()) {
+			animator->status = NativeAnimationStatus::NotReady;
+			return animator->status;
+		}
+		animator->status = NativeAnimationStatus::Ok;
+		animator->animator = AnimationFromHandle(handle);
+		animator->ownerObjectId = AnimationFromUuid(objectId);
+		animator->componentGeneration = TerraEngine::CompressObjectGeneration(
+			objects.getObjectComponentGeneration(*object));
+		return animator->status;
+	}
+
+	NativeAnimationStatus Native_Animation_SubmitCommand(
+		const NativeAnimationCommandRequest* request,
+		NativeAnimationCommandReceipt* receipt)
+	{
+		using namespace TerraEngine::Animation;
+		const NativeAnimationStatus requestStatus = ValidateAnimationRecord(
+			request, NativeAnimationRecordKind::CommandRequest);
+		if(requestStatus != NativeAnimationStatus::Ok) return requestStatus;
+		const NativeAnimationStatus receiptStatus = ValidateAnimationRecord(
+			receipt, NativeAnimationRecordKind::CommandReceipt);
+		if(receiptStatus != NativeAnimationStatus::Ok) return receiptStatus;
+
+		AnimationCommand command;
+		command.target = AnimationToHandle(request->animator);
+		command.targetTick = request->targetTick;
+		command.producerId = request->producerId;
+		command.producerSequence = request->producerSequence;
+		command.correlationId = request->correlationId;
+		command.idempotencyKey = request->idempotencyKey;
+		command.cancellationToken = request->cancellationToken;
+		command.playbackTick = request->playbackTick;
+		command.playbackSpeed = request->playbackSpeed;
+		command.playbackFlag = request->playbackFlag != 0U;
+		command.stateId = request->stateId;
+		command.layerIndex = request->layerIndex;
+		command.layerWeight = request->floatValue;
+
+		AnimationCommandReceipt nativeReceipt;
+		nativeReceipt.target = command.target;
+		nativeReceipt.producerId = command.producerId;
+		nativeReceipt.producerSequence = command.producerSequence;
+		nativeReceipt.correlationId = command.correlationId;
+		nativeReceipt.idempotencyKey = command.idempotencyKey;
+		nativeReceipt.cancellationToken = command.cancellationToken;
+		nativeReceipt.targetTick = command.targetTick;
+		nativeReceipt.status = AnimationStatus::InvalidArgument;
+
+		const bool commonIdentityValid = command.target.IsValid()
+			&& command.producerId != 0U
+			&& command.producerSequence != 0U
+			&& command.correlationId != 0U
+			&& command.targetTick >= 0;
+		if(!commonIdentityValid) {
+			FillAnimationReceipt(nativeReceipt, *receipt);
+			return receipt->status;
+		}
+
+		switch(request->command) {
+		case NativeAnimationCommandKind::SetParameter:
+			if(request->parameterId == 0U
+				|| request->parameterId > std::numeric_limits<std::uint32_t>::max()) break;
+			command.kind = AnimationCommandKind::SetParameter;
+			command.parameterId = static_cast<std::uint32_t>(request->parameterId);
+			switch(request->parameterType) {
+			case NativeAnimationParameterType::Boolean:
+				if(request->booleanValue > 1U) break;
+				command.parameterType = AnimationParameterType::Boolean;
+				command.value = request->booleanValue != 0U;
+				nativeReceipt = AnimationSystem::Instance().SubmitCommand(std::move(command));
+				break;
+			case NativeAnimationParameterType::Integer:
+				command.parameterType = AnimationParameterType::Integer;
+				command.value = request->integerValue;
+				nativeReceipt = AnimationSystem::Instance().SubmitCommand(std::move(command));
+				break;
+			case NativeAnimationParameterType::Float:
+				if(!std::isfinite(request->floatValue)) break;
+				command.parameterType = AnimationParameterType::Float;
+				command.value = request->floatValue;
+				nativeReceipt = AnimationSystem::Instance().SubmitCommand(std::move(command));
+				break;
+			case NativeAnimationParameterType::Vector3:
+				command.parameterType = AnimationParameterType::Vector3;
+				command.value = AnimationToVector(request->parameterVector);
+				nativeReceipt = AnimationSystem::Instance().SubmitCommand(std::move(command));
+				break;
+			case NativeAnimationParameterType::Quaternion:
+				command.parameterType = AnimationParameterType::Quaternion;
+				command.value = AnimationToQuaternion(request->parameterQuaternion);
+				nativeReceipt = AnimationSystem::Instance().SubmitCommand(std::move(command));
+				break;
+			case NativeAnimationParameterType::Transform:
+				command.parameterType = AnimationParameterType::Transform;
+				command.value = AnimationToTransform(request->parameterTransform);
+				nativeReceipt = AnimationSystem::Instance().SubmitCommand(std::move(command));
+				break;
+			default:
+				nativeReceipt.status = AnimationStatus::Unsupported;
+				break;
+			}
+			break;
+		case NativeAnimationCommandKind::FireTrigger:
+			if(request->parameterId == 0U
+				|| request->parameterId > std::numeric_limits<std::uint32_t>::max()) break;
+			command.kind = AnimationCommandKind::FireTrigger;
+			command.parameterType = AnimationParameterType::Trigger;
+			command.parameterId = static_cast<std::uint32_t>(request->parameterId);
+			command.value = std::monostate{};
+			nativeReceipt = AnimationSystem::Instance().SubmitCommand(std::move(command));
+			break;
+		case NativeAnimationCommandKind::Play:
+			// State zero retains the already-bound state for ABI-v1 compatibility;
+			// non-zero selects an explicit controller state at frame publication.
+			if(command.playbackTick < 0) break;
+			command.kind = AnimationCommandKind::Play;
+			nativeReceipt = AnimationSystem::Instance().SubmitCommand(std::move(command));
+			break;
+		case NativeAnimationCommandKind::Stop: command.kind = AnimationCommandKind::Stop; nativeReceipt = AnimationSystem::Instance().SubmitCommand(std::move(command)); break;
+		case NativeAnimationCommandKind::Pause: command.kind = AnimationCommandKind::Pause; nativeReceipt = AnimationSystem::Instance().SubmitCommand(std::move(command)); break;
+		case NativeAnimationCommandKind::Resume: command.kind = AnimationCommandKind::Resume; nativeReceipt = AnimationSystem::Instance().SubmitCommand(std::move(command)); break;
+		case NativeAnimationCommandKind::Seek: command.kind = AnimationCommandKind::Seek; nativeReceipt = AnimationSystem::Instance().SubmitCommand(std::move(command)); break;
+		case NativeAnimationCommandKind::SetLooping: command.kind = AnimationCommandKind::SetLooping; nativeReceipt = AnimationSystem::Instance().SubmitCommand(std::move(command)); break;
+		case NativeAnimationCommandKind::SetReverse: command.kind = AnimationCommandKind::SetReverse; nativeReceipt = AnimationSystem::Instance().SubmitCommand(std::move(command)); break;
+		case NativeAnimationCommandKind::SetSpeed:
+			if(!std::isfinite(command.playbackSpeed)) break;
+			command.kind = AnimationCommandKind::SetSpeed;
+			nativeReceipt = AnimationSystem::Instance().SubmitCommand(std::move(command));
+			break;
+		case NativeAnimationCommandKind::CrossFade: {
+			if(command.stateId == 0U || !std::isfinite(request->transitionSeconds)
+				|| request->transitionSeconds < 0.0F) break;
+			const long double ticks = static_cast<long double>(request->transitionSeconds)
+				* static_cast<long double>(kAnimationFixedTicksPerSecond);
+			if(ticks > static_cast<long double>(
+				std::numeric_limits<AnimationFixedTick>::max())) break;
+			command.transitionTicks = static_cast<AnimationFixedTick>(std::llround(ticks));
+			command.kind = AnimationCommandKind::CrossFade;
+			nativeReceipt = AnimationSystem::Instance().SubmitCommand(std::move(command));
+			break;
+		}
+		case NativeAnimationCommandKind::SetLayerWeight:
+			if(!std::isfinite(command.layerWeight)
+				|| command.layerWeight < 0.0F || command.layerWeight > 1.0F) break;
+			command.kind = AnimationCommandKind::SetLayerWeight;
+			nativeReceipt = AnimationSystem::Instance().SubmitCommand(std::move(command));
+			break;
+		case NativeAnimationCommandKind::SetIkGoal:
+		case NativeAnimationCommandKind::ClearIkGoal:
+		case NativeAnimationCommandKind::RequestRagdoll:
+			nativeReceipt.status = AnimationStatus::Unsupported;
+			break;
+		default:
+			nativeReceipt.status = AnimationStatus::InvalidArgument;
+			break;
+		}
+		FillAnimationReceipt(nativeReceipt, *receipt);
+		return receipt->status;
+	}
+
+	NativeAnimationStatus Native_Animation_CancelCommand(
+		const NativeAnimationCancellationRequest* request,
+		NativeAnimationCommandReceipt* receipt)
+	{
+		const NativeAnimationStatus requestStatus = ValidateAnimationRecord(
+			request, NativeAnimationRecordKind::CancellationRequest);
+		if(requestStatus != NativeAnimationStatus::Ok) return requestStatus;
+		const NativeAnimationStatus receiptStatus = ValidateAnimationRecord(
+			receipt, NativeAnimationRecordKind::CommandReceipt);
+		if(receiptStatus != NativeAnimationStatus::Ok) return receiptStatus;
+		const TerraEngine::Animation::AnimationCommandReceipt native =
+			TerraEngine::Animation::AnimationSystem::Instance().CancelCommand(
+				request->cancellationToken, request->correlationId);
+		FillAnimationReceipt(native, *receipt);
+		return receipt->status;
+	}
+
+	NativeAnimationStatus Native_Animation_ReadReceipt(
+		const NativeAnimationReceiptQuery* query,
+		NativeAnimationCommandReceipt* receipt)
+	{
+		const NativeAnimationStatus queryStatus = ValidateAnimationRecord(
+			query, NativeAnimationRecordKind::ReceiptQuery);
+		if(queryStatus != NativeAnimationStatus::Ok) return queryStatus;
+		const NativeAnimationStatus receiptStatus = ValidateAnimationRecord(
+			receipt, NativeAnimationRecordKind::CommandReceipt);
+		if(receiptStatus != NativeAnimationStatus::Ok) return receiptStatus;
+		const TerraEngine::Animation::AnimationCommandReceipt native =
+			TerraEngine::Animation::AnimationSystem::Instance().ReadCommandReceipt(
+				query->producerId, query->producerSequence, query->correlationId);
+		FillAnimationReceipt(native, *receipt);
+		return receipt->status;
+	}
+
+	NativeAnimationStatus Native_Animation_QueryCapability(
+		const NativeAnimationCapabilityQuery* query,
+		NativeAnimationCapabilityResult* result)
+	{
+		using namespace TerraEngine::Animation;
+		const NativeAnimationStatus queryStatus = ValidateAnimationRecord(
+			query, NativeAnimationRecordKind::CapabilityQuery);
+		if(queryStatus != NativeAnimationStatus::Ok) return queryStatus;
+		const NativeAnimationStatus resultStatus = ValidateAnimationRecord(
+			result, NativeAnimationRecordKind::CapabilityResult);
+		if(resultStatus != NativeAnimationStatus::Ok) return resultStatus;
+		*result = {};
+		result->header = AnimationHeader(NativeAnimationRecordKind::CapabilityResult, sizeof(*result));
+		result->capability = query->capability;
+		const AnimatorInstanceHandle handle = AnimationToHandle(query->animator);
+		if(!AnimationSystem::Instance().IsAnimatorInstanceAlive(handle)) {
+			result->status = NativeAnimationStatus::StaleHandle;
+			result->reasonMask = static_cast<std::uint32_t>(NativeAnimationCapabilityReason::AnimatorNotReady);
+			return result->status;
+		}
+		switch(query->capability) {
+		case NativeAnimationCapability::ParameterWrite:
+		case NativeAnimationCapability::Trigger:
+		case NativeAnimationCapability::Playback:
+		case NativeAnimationCapability::EventRead:
+			result->status = NativeAnimationStatus::Ok;
+			result->supported = 1U;
+			result->reasonMask = static_cast<std::uint32_t>(NativeAnimationCapabilityReason::Available);
+			break;
+		case NativeAnimationCapability::BoneRead: {
+			const std::shared_ptr<const PublishedAnimatorPose> published =
+				AnimationSystem::Instance().LoadPublishedAnimatorPose(handle);
+			if(!published || !published->snapshot || !published->snapshot->pose
+				|| !published->snapshot->pose->IsSealed()) {
+				result->status = NativeAnimationStatus::NotReady;
+				result->reasonMask = static_cast<std::uint32_t>(
+					NativeAnimationCapabilityReason::AnimatorNotReady);
+				break;
+			}
+			const PoseBuffer& pose = *published->snapshot->pose;
+			const std::span<const AnimationTransform> local = pose.LocalTransforms();
+			const std::span<const AnimationTransform> model = pose.ModelTransforms();
+			const bool currentCpuPose = pose.Generation().animator == handle
+				&& pose.Generation().poseGeneration == published->snapshot->publicationGeneration
+				&& model.size() == local.size()
+				&& model.size() == published->jointStableIds.size();
+			if(!currentCpuPose) {
+				result->status = NativeAnimationStatus::NotReady;
+				result->reasonMask = static_cast<std::uint32_t>(
+					NativeAnimationCapabilityReason::AnimatorNotReady);
+				break;
+			}
+			const bool requestedBoneAvailable = query->stableId == 0U
+				? !model.empty()
+				: std::find(published->jointStableIds.begin(), published->jointStableIds.end(),
+					query->stableId) != published->jointStableIds.end();
+			if(!requestedBoneAvailable) {
+				result->status = NativeAnimationStatus::Unsupported;
+				result->reasonMask = static_cast<std::uint32_t>(
+					NativeAnimationCapabilityReason::UnsupportedOperation);
+				break;
+			}
+			result->status = NativeAnimationStatus::Ok;
+			result->supported = 1U;
+			result->reasonMask = static_cast<std::uint32_t>(NativeAnimationCapabilityReason::Available);
+			break;
+		}
+		case NativeAnimationCapability::SocketRead: {
+			// A zero stable ID asks whether this runtime exposes the socket-read
+			// operation at all. It does not ask whether a particular socket has
+			// reached a protected publication yet, so an empty current set remains
+			// a supported capability. Non-zero IDs continue through the strict
+			// generation-matched availability checks below.
+			if(query->stableId == 0U) {
+				result->status = NativeAnimationStatus::Ok;
+				result->supported = 1U;
+				result->reasonMask = static_cast<std::uint32_t>(
+					NativeAnimationCapabilityReason::Available);
+				break;
+			}
+			const std::shared_ptr<const PublishedAnimatorPose> published =
+				AnimationSystem::Instance().LoadPublishedAnimatorPose(handle);
+			AnimationSocketReadSnapshot socketSnapshot;
+			const bool copied = AnimationAttachmentSnapshotPublisher::Instance()
+				.CopySocketSnapshot(handle, socketSnapshot);
+			const bool currentSnapshot = published && published->snapshot
+				&& published->snapshot->pose && copied
+				&& socketSnapshot.animator == handle
+				&& socketSnapshot.poseGeneration == published->snapshot->publicationGeneration
+				&& socketSnapshot.publicationGeneration == published->snapshot->publicationGeneration
+				&& socketSnapshot.sourceTick == published->snapshot->tick
+				&& socketSnapshot.skeleton == published->skeleton;
+			if(!currentSnapshot) {
+				result->status = NativeAnimationStatus::NotReady;
+				result->reasonMask = static_cast<std::uint32_t>(
+					NativeAnimationCapabilityReason::AnimatorNotReady);
+				break;
+			}
+			const bool requestedSocketAvailable = std::any_of(
+				socketSnapshot.sockets.begin(), socketSnapshot.sockets.end(),
+				[query](const AnimationAttachmentTransformSnapshot& value) {
+					return value.stableId == query->stableId;
+				});
+			if(!requestedSocketAvailable) {
+				result->status = NativeAnimationStatus::Unsupported;
+				result->reasonMask = static_cast<std::uint32_t>(
+					NativeAnimationCapabilityReason::UnsupportedOperation);
+				break;
+			}
+			result->status = NativeAnimationStatus::Ok;
+			result->supported = 1U;
+			result->reasonMask = static_cast<std::uint32_t>(NativeAnimationCapabilityReason::Available);
+			break;
+		}
+		case NativeAnimationCapability::RootMotion: {
+			const std::shared_ptr<const PublishedAnimatorPose> published =
+				AnimationSystem::Instance().LoadPublishedAnimatorPose(handle);
+			if(!published || !published->snapshot || !published->snapshot->pose
+				|| !published->snapshot->pose->RootMotionDelta()) {
+				result->status = NativeAnimationStatus::NotReady;
+				result->reasonMask = static_cast<std::uint32_t>(
+					NativeAnimationCapabilityReason::AnimatorNotReady);
+				break;
+			}
+			const AnimationRootMotionDelta& delta =
+				*published->snapshot->pose->RootMotionDelta();
+			if(delta.animator != handle || delta.generation == 0U
+				|| delta.generation != published->snapshot->publicationGeneration
+				|| published->authorityPublicationGeneration == 0U) {
+				result->status = NativeAnimationStatus::NotReady;
+				result->reasonMask = static_cast<std::uint32_t>(
+					NativeAnimationCapabilityReason::AnimatorNotReady);
+				break;
+			}
+			if(published->rootMotionPolicy == AnimatorRootMotionPolicy::ApplyToObject
+				&& (published->ownerObjectId == TerraEngine::EMPTY_UUID
+					|| published->objectGeneration == 0U
+					|| published->componentGeneration == 0U
+					|| !published->sourceObjectWorldTransformCaptured)) {
+				result->status = NativeAnimationStatus::NotReady;
+				result->reasonMask = static_cast<std::uint32_t>(
+					NativeAnimationCapabilityReason::AnimatorNotReady);
+				break;
+			}
+			if(published->rootMotionPolicy == AnimatorRootMotionPolicy::ApplyToCharacter) {
+				const std::shared_ptr<const TerraEngine::Physics::PhysicsCharacterStatePacket> states =
+					TerraEngine::Physics::PhysicsSystem::Instance().LatestCharacterStatePacket();
+				const bool matchingTarget = states && states->states
+					&& std::any_of(states->states->begin(), states->states->end(), [&published](const auto& state) {
+						return state.objectId == published->ownerObjectId
+							&& state.objectGeneration == published->objectGeneration
+							&& state.componentGeneration == published->componentGeneration;
+					});
+				if(!matchingTarget) {
+					result->status = NativeAnimationStatus::NotReady;
+					result->reasonMask = static_cast<std::uint32_t>(
+						NativeAnimationCapabilityReason::MissingPhysicsTarget);
+					break;
+				}
+			}
+			result->status = NativeAnimationStatus::Ok;
+			result->supported = 1U;
+			result->reasonMask = static_cast<std::uint32_t>(NativeAnimationCapabilityReason::Available);
+			break;
+		}
+		case NativeAnimationCapability::Retarget:
+		case NativeAnimationCapability::IkGoal:
+		case NativeAnimationCapability::MotionMatching:
+		case NativeAnimationCapability::Ragdoll:
+			// These operations have bounded copied request owners. Asset, pose, and
+			// physics readiness are reported by each request/snapshot rather than
+			// misrepresenting the native capability as absent.
+			result->status = NativeAnimationStatus::Ok;
+			result->supported = 1U;
+			result->reasonMask = static_cast<std::uint32_t>(
+				NativeAnimationCapabilityReason::Available);
+			break;
+		case NativeAnimationCapability::StateTransition:
+			result->status = NativeAnimationStatus::Unsupported;
+			result->reasonMask = static_cast<std::uint32_t>(NativeAnimationCapabilityReason::UnsupportedOperation);
+			break;
+		default:
+			result->status = NativeAnimationStatus::InvalidArgument;
+			break;
+		}
+		return result->status;
+	}
+
+	NativeAnimationStatus Native_Animation_ReadState(
+		const NativeAnimationAnimatorHandle* animator,
+		NativeAnimationStateSnapshot* snapshot)
+	{
+		using namespace TerraEngine::Animation;
+		const NativeAnimationStatus snapshotStatus = ValidateAnimationRecord(
+			snapshot, NativeAnimationRecordKind::StateSnapshot);
+		if(snapshotStatus != NativeAnimationStatus::Ok) return snapshotStatus;
+		if(animator == nullptr) return NativeAnimationStatus::InvalidArgument;
+		const AnimatorInstanceHandle handle = AnimationToHandle(*animator);
+		const std::shared_ptr<const PublishedAnimatorPose> published =
+			AnimationSystem::Instance().LoadPublishedAnimatorPose(handle);
+		*snapshot = {};
+		snapshot->header = AnimationHeader(NativeAnimationRecordKind::StateSnapshot, sizeof(*snapshot));
+		snapshot->animator = *animator;
+		if(!AnimationSystem::Instance().IsAnimatorInstanceAlive(handle)) {
+			snapshot->status = NativeAnimationStatus::StaleHandle;
+			return snapshot->status;
+		}
+		if(!published || !published->snapshot || !published->snapshot->pose) {
+			snapshot->status = NativeAnimationStatus::NotReady;
+			return snapshot->status;
+		}
+		const AnimationSnapshot& source = *published->snapshot;
+		snapshot->status = ToNativeAnimationStatus(published->status);
+		snapshot->controllerStateId = source.playback.currentStateId;
+		snapshot->tick = source.tick;
+		snapshot->observationTick = source.tick;
+		snapshot->ageTicks = 0;
+		snapshot->normalizedTime = source.playback.normalizedTime;
+		snapshot->transitionProgress = source.playback.transitionProgress;
+		snapshot->effectiveSpeed = source.playback.effectiveSpeed;
+		snapshot->loopCount = source.playback.loopCount;
+		snapshot->publicationGeneration = AnimationSystem::Instance().AuthorityPublicationGeneration();
+		snapshot->layerCount = static_cast<std::uint32_t>(source.playback.activeLayers.size());
+		snapshot->parameterCount = static_cast<std::uint32_t>(source.playback.parameters.size());
+		snapshot->curveCount = static_cast<std::uint32_t>(source.pose->CurveValues().size());
+		snapshot->morphCount = static_cast<std::uint32_t>(source.pose->MorphValues().size());
+		snapshot->boneCount = static_cast<std::uint32_t>(source.pose->ModelTransforms().size());
+		snapshot->socketCount = static_cast<std::uint32_t>(
+			AnimationAttachmentSnapshotPublisher::Instance().PublishedSocketCount(handle));
+		snapshot->eventCount = static_cast<std::uint32_t>(source.pose->Events().size());
+		snapshot->hasRootMotion = source.pose->RootMotionDelta().has_value() ? 1U : 0U;
+		snapshot->requestedExecutionPolicy = static_cast<std::uint32_t>(published->requestedExecutionPolicy);
+		snapshot->effectiveExecutionMode = static_cast<std::uint32_t>(published->effectiveExecutionMode);
+		snapshot->controllerAssetId = AnimationFromUuid(published->controller.assetId.value);
+		snapshot->controllerGeneration = published->controller.generation;
+		snapshot->clipAssetId = AnimationFromUuid(published->clip.assetId.value);
+		snapshot->clipGeneration = published->clip.generation;
+		snapshot->skeletonAssetId = AnimationFromUuid(published->skeleton.assetId.value);
+		snapshot->skeletonGeneration = published->skeleton.generation;
+		snapshot->updatePolicy = static_cast<std::uint32_t>(published->updatePolicy);
+		snapshot->eventPolicy = static_cast<std::uint32_t>(published->eventPolicy);
+		snapshot->cullingPolicy = static_cast<std::uint32_t>(published->cullingPolicy);
+		snapshot->rootMotionPolicy = static_cast<std::uint32_t>(published->rootMotionPolicy);
+		return snapshot->status;
+	}
+
+	NativeAnimationStatus Native_Animation_CopyParameters(
+		const NativeAnimationAnimatorHandle* animator,
+		NativeAnimationNamedValue* values,
+		std::uint32_t capacity,
+		NativeAnimationBufferInfo* info)
+	{
+		using namespace TerraEngine::Animation;
+		const NativeAnimationStatus infoStatus = ValidateAnimationRecord(info, NativeAnimationRecordKind::BufferInfo);
+		if(infoStatus != NativeAnimationStatus::Ok) return infoStatus;
+		if(animator == nullptr) return NativeAnimationStatus::InvalidArgument;
+		const AnimatorInstanceHandle handle = AnimationToHandle(*animator);
+		if(!AnimationSystem::Instance().IsAnimatorInstanceAlive(handle)) {
+			FillAnimationBufferInfo(*info, NativeAnimationStatus::StaleHandle, 0U, 0U, 0, 0U);
+			return info->status;
+		}
+		const std::shared_ptr<const AnimationSnapshot> snapshot = AnimationSystem::Instance().LoadAnimatorSnapshot(handle);
+		if(!snapshot) {
+			FillAnimationBufferInfo(*info, NativeAnimationStatus::NotReady, 0U, 0U, 0, 0U);
+			return info->status;
+		}
+		return CopyAnimationSpan<NativeAnimationNamedValue, AnimationParameterSnapshot>(
+			snapshot->playback.parameters, values, capacity, info, snapshot->tick,
+			AnimationSystem::Instance().AuthorityPublicationGeneration(),
+			[](const AnimationParameterSnapshot& source, std::uint32_t) {
+				NativeAnimationNamedValue value{};
+				value.header = AnimationHeader(NativeAnimationRecordKind::NamedValue, sizeof(value));
+				value.stableId = source.parameterId;
+				value.type = static_cast<NativeAnimationParameterType>(source.type);
+				if(const bool* booleanValue = std::get_if<bool>(&source.value)) value.booleanValue = *booleanValue ? 1U : 0U;
+				else if(const std::int32_t* integerValue = std::get_if<std::int32_t>(&source.value)) value.integerValue = *integerValue;
+				else if(const float* floatValue = std::get_if<float>(&source.value)) value.floatValue = *floatValue;
+				else if(const AnimationFloat3* vectorValue = std::get_if<AnimationFloat3>(&source.value)) value.vectorValue = AnimationFromVector(*vectorValue);
+				else if(const AnimationQuaternion* quaternionValue = std::get_if<AnimationQuaternion>(&source.value)) value.quaternionValue = AnimationFromQuaternion(*quaternionValue);
+				else if(const AnimationTransform* transformValue = std::get_if<AnimationTransform>(&source.value)) value.transformValue = AnimationFromTransform(*transformValue);
+				else if(source.type == AnimationParameterType::Trigger) value.booleanValue = 1U;
+				return value;
+			});
+	}
+
+	NativeAnimationStatus Native_Animation_CopyCurves(
+		const NativeAnimationAnimatorHandle* animator,
+		NativeAnimationNamedValue* values,
+		std::uint32_t capacity,
+		NativeAnimationBufferInfo* info)
+	{
+		using namespace TerraEngine::Animation;
+		const NativeAnimationStatus infoStatus = ValidateAnimationRecord(info, NativeAnimationRecordKind::BufferInfo);
+		if(infoStatus != NativeAnimationStatus::Ok) return infoStatus;
+		if(animator == nullptr) return NativeAnimationStatus::InvalidArgument;
+		const AnimatorInstanceHandle handle = AnimationToHandle(*animator);
+		if(!AnimationSystem::Instance().IsAnimatorInstanceAlive(handle)) {
+			FillAnimationBufferInfo(*info, NativeAnimationStatus::StaleHandle, 0U, 0U, 0, 0U);
+			return info->status;
+		}
+		const std::shared_ptr<const AnimationSnapshot> snapshot = AnimationSystem::Instance().LoadAnimatorSnapshot(handle);
+		if(!snapshot || !snapshot->pose) {
+			FillAnimationBufferInfo(*info, NativeAnimationStatus::NotReady, 0U, 0U, 0, 0U);
+			return info->status;
+		}
+		return CopyAnimationSpan<NativeAnimationNamedValue, AnimationNamedFloatValue>(
+			snapshot->pose->CurveValues(), values, capacity, info, snapshot->tick,
+			AnimationSystem::Instance().AuthorityPublicationGeneration(),
+			[](const AnimationNamedFloatValue& source, std::uint32_t) {
+				NativeAnimationNamedValue value{};
+				value.header = AnimationHeader(NativeAnimationRecordKind::NamedValue, sizeof(value));
+				value.stableId = source.stableId;
+				value.type = NativeAnimationParameterType::Float;
+				value.floatValue = source.value;
+				return value;
+			});
+	}
+
+	NativeAnimationStatus Native_Animation_CopyMorphs(
+		const NativeAnimationAnimatorHandle* animator,
+		NativeAnimationNamedValue* values,
+		std::uint32_t capacity,
+		NativeAnimationBufferInfo* info)
+	{
+		using namespace TerraEngine::Animation;
+		const NativeAnimationStatus infoStatus = ValidateAnimationRecord(info, NativeAnimationRecordKind::BufferInfo);
+		if(infoStatus != NativeAnimationStatus::Ok) return infoStatus;
+		if(animator == nullptr) return NativeAnimationStatus::InvalidArgument;
+		const AnimatorInstanceHandle handle = AnimationToHandle(*animator);
+		if(!AnimationSystem::Instance().IsAnimatorInstanceAlive(handle)) {
+			FillAnimationBufferInfo(*info, NativeAnimationStatus::StaleHandle, 0U, 0U, 0, 0U);
+			return info->status;
+		}
+		const std::shared_ptr<const AnimationSnapshot> snapshot = AnimationSystem::Instance().LoadAnimatorSnapshot(handle);
+		if(!snapshot || !snapshot->pose) {
+			FillAnimationBufferInfo(*info, NativeAnimationStatus::NotReady, 0U, 0U, 0, 0U);
+			return info->status;
+		}
+		return CopyAnimationSpan<NativeAnimationNamedValue, AnimationNamedFloatValue>(
+			snapshot->pose->MorphValues(), values, capacity, info, snapshot->tick,
+			AnimationSystem::Instance().AuthorityPublicationGeneration(),
+			[](const AnimationNamedFloatValue& source, std::uint32_t) {
+				NativeAnimationNamedValue value{};
+				value.header = AnimationHeader(NativeAnimationRecordKind::NamedValue, sizeof(value));
+				value.stableId = source.stableId;
+				value.type = NativeAnimationParameterType::Float;
+				value.floatValue = source.value;
+				return value;
+			});
+	}
+
+	NativeAnimationStatus Native_Animation_CopyBones(
+		const NativeAnimationAnimatorHandle* animator,
+		NativeAnimationBoneSnapshot* values,
+		std::uint32_t capacity,
+		NativeAnimationBufferInfo* info)
+	{
+		using namespace TerraEngine::Animation;
+		const NativeAnimationStatus infoStatus = ValidateAnimationRecord(info, NativeAnimationRecordKind::BufferInfo);
+		if(infoStatus != NativeAnimationStatus::Ok) return infoStatus;
+		if(animator == nullptr) return NativeAnimationStatus::InvalidArgument;
+		const AnimatorInstanceHandle handle = AnimationToHandle(*animator);
+		if(!AnimationSystem::Instance().IsAnimatorInstanceAlive(handle)) {
+			FillAnimationBufferInfo(*info, NativeAnimationStatus::StaleHandle, 0U, 0U, 0, 0U);
+			return info->status;
+		}
+		const std::shared_ptr<const PublishedAnimatorPose> published = AnimationSystem::Instance().LoadPublishedAnimatorPose(handle);
+		if(!published || !published->snapshot || !published->snapshot->pose) {
+			FillAnimationBufferInfo(*info, NativeAnimationStatus::NotReady, 0U, 0U, 0, 0U);
+			return info->status;
+		}
+		const std::span<const AnimationTransform> model = published->snapshot->pose->ModelTransforms();
+		const std::span<const AnimationTransform> local = published->snapshot->pose->LocalTransforms();
+		if(model.size() != local.size() || model.size() != published->jointStableIds.size()) {
+			FillAnimationBufferInfo(*info, NativeAnimationStatus::InvalidEnvelope, 0U, 0U,
+				published->snapshot->tick, AnimationSystem::Instance().AuthorityPublicationGeneration());
+			return info->status;
+		}
+		if(model.size() > capacity) {
+			FillAnimationBufferInfo(*info, NativeAnimationStatus::BufferTooSmall, model.size(), 0U,
+				published->snapshot->tick, AnimationSystem::Instance().AuthorityPublicationGeneration());
+			return info->status;
+		}
+		if(!model.empty() && values == nullptr) {
+			FillAnimationBufferInfo(*info, NativeAnimationStatus::InvalidArgument, model.size(), 0U,
+				published->snapshot->tick, AnimationSystem::Instance().AuthorityPublicationGeneration());
+			return info->status;
+		}
+		for(std::size_t index = 0U; index < model.size(); ++index) {
+			NativeAnimationBoneSnapshot bone{};
+			bone.header = AnimationHeader(NativeAnimationRecordKind::BoneSnapshot, sizeof(bone));
+			bone.stableId = published->jointStableIds[index];
+			bone.jointIndex = static_cast<std::uint32_t>(index);
+			bone.poseGeneration = published->snapshot->publicationGeneration;
+			bone.localTransform = AnimationFromTransform(local[index]);
+			bone.modelTransform = AnimationFromTransform(model[index]);
+			values[index] = bone;
+		}
+		FillAnimationBufferInfo(*info, NativeAnimationStatus::Ok, model.size(), model.size(),
+			published->snapshot->tick, AnimationSystem::Instance().AuthorityPublicationGeneration());
+		return info->status;
+	}
+
+	NativeAnimationStatus Native_Animation_CopySockets(
+		const NativeAnimationAnimatorHandle* animator,
+		NativeAnimationSocketSnapshot* values,
+		std::uint32_t capacity,
+		NativeAnimationBufferInfo* info)
+	{
+		using namespace TerraEngine::Animation;
+		const NativeAnimationStatus infoStatus = ValidateAnimationRecord(info, NativeAnimationRecordKind::BufferInfo);
+		if(infoStatus != NativeAnimationStatus::Ok) return infoStatus;
+		if(animator == nullptr) return NativeAnimationStatus::InvalidArgument;
+		const AnimatorInstanceHandle handle = AnimationToHandle(*animator);
+		if(!AnimationSystem::Instance().IsAnimatorInstanceAlive(handle)) {
+			FillAnimationBufferInfo(*info, NativeAnimationStatus::StaleHandle, 0U, 0U, 0, 0U);
+			return info->status;
+		}
+		AnimationSocketReadSnapshot socketSnapshot;
+		if(!AnimationAttachmentSnapshotPublisher::Instance().CopySocketSnapshot(handle, socketSnapshot)) {
+			FillAnimationBufferInfo(*info, NativeAnimationStatus::NotReady, 0U, 0U, 0, 0U);
+			return info->status;
+		}
+		return CopyAnimationSpan<NativeAnimationSocketSnapshot, AnimationAttachmentTransformSnapshot>(
+			socketSnapshot.sockets, values, capacity, info, socketSnapshot.sourceTick,
+			socketSnapshot.publicationGeneration,
+			[poseGeneration = socketSnapshot.poseGeneration](const AnimationAttachmentTransformSnapshot& source, std::uint32_t) {
+				NativeAnimationSocketSnapshot socket{};
+				socket.header = AnimationHeader(NativeAnimationRecordKind::SocketSnapshot, sizeof(socket));
+				socket.stableId = source.stableId;
+				socket.parentBoneStableId = source.parentBoneStableId;
+				socket.poseGeneration = poseGeneration;
+				socket.modelTransform = AnimationFromTransform(source.modelTransform);
+				return socket;
+			});
+	}
+
+	NativeAnimationStatus Native_Animation_CopyEvents(
+		const NativeAnimationAnimatorHandle* animator,
+		NativeAnimationEvent* values,
+		std::uint32_t capacity,
+		NativeAnimationBufferInfo* info)
+	{
+		using namespace TerraEngine::Animation;
+		const NativeAnimationStatus infoStatus = ValidateAnimationRecord(info, NativeAnimationRecordKind::BufferInfo);
+		if(infoStatus != NativeAnimationStatus::Ok) return infoStatus;
+		if(animator == nullptr) return NativeAnimationStatus::InvalidArgument;
+		const AnimatorInstanceHandle handle = AnimationToHandle(*animator);
+		if(!AnimationSystem::Instance().IsAnimatorInstanceAlive(handle)) {
+			FillAnimationBufferInfo(*info, NativeAnimationStatus::StaleHandle, 0U, 0U, 0, 0U);
+			return info->status;
+		}
+		const std::shared_ptr<const PublishedAnimatorPose> published = AnimationSystem::Instance().LoadPublishedAnimatorPose(handle);
+		if(!published || !published->snapshot || !published->snapshot->pose) {
+			FillAnimationBufferInfo(*info, NativeAnimationStatus::NotReady, 0U, 0U, 0, 0U);
+			return info->status;
+		}
+		return CopyAnimationSpan<NativeAnimationEvent, AnimationEventRecord>(
+			published->snapshot->pose->Events(), values, capacity, info, published->snapshot->tick,
+			AnimationSystem::Instance().AuthorityPublicationGeneration(),
+			[&published](const AnimationEventRecord& source, std::uint32_t) {
+				return MakeNativeAnimationEvent(source, *published);
+			});
+	}
+
+	NativeAnimationStatus Native_Animation_CopyEventBatch(
+		NativeAnimationEvent* values,
+		std::uint32_t capacity,
+		NativeAnimationBufferInfo* info)
+	{
+		using namespace TerraEngine::Animation;
+		const NativeAnimationStatus infoStatus = ValidateAnimationRecord(info, NativeAnimationRecordKind::BufferInfo);
+		if(infoStatus != NativeAnimationStatus::Ok) return infoStatus;
+		std::vector<std::shared_ptr<const PublishedAnimatorPose>> published;
+		AnimationSystem::Instance().CopyPublishedAnimatorPoses(published);
+		try {
+			std::vector<NativeAnimationEvent> batch;
+			std::int64_t sourceTick = 0;
+			for(const std::shared_ptr<const PublishedAnimatorPose>& owner : published) {
+				if(!owner || !owner->snapshot || !owner->snapshot->pose) continue;
+				sourceTick = std::max(sourceTick, owner->snapshot->tick);
+				for(const AnimationEventRecord& event : owner->snapshot->pose->Events()) {
+					batch.push_back(MakeNativeAnimationEvent(event, *owner));
+				}
+			}
+			std::sort(batch.begin(), batch.end(), [](const NativeAnimationEvent& left, const NativeAnimationEvent& right) {
+				if(left.sourceTick != right.sourceTick) return left.sourceTick < right.sourceTick;
+				if(left.animator.slotIndex != right.animator.slotIndex) return left.animator.slotIndex < right.animator.slotIndex;
+				if(left.animator.generation != right.animator.generation) return left.animator.generation < right.animator.generation;
+				if(left.producerOrder != right.producerOrder) return left.producerOrder < right.producerOrder;
+				return left.correlationId < right.correlationId;
+			});
+			return CopyAnimationSpan<NativeAnimationEvent, NativeAnimationEvent>(
+				batch, values, capacity, info, sourceTick,
+				AnimationSystem::Instance().AuthorityPublicationGeneration(),
+				[](const NativeAnimationEvent& source, std::uint32_t) { return source; });
+		} catch(const std::bad_alloc&) {
+			FillAnimationBufferInfo(*info, NativeAnimationStatus::InternalError, 0U, 0U, 0, 0U);
+			return info->status;
+		}
+	}
+
+	NativeAnimationStatus Native_Animation_ApplyRootMotion(
+		const NativeAnimationRootMotionApplicationRequest* request,
+		NativeAnimationRootMotionApplicationReceipt* receipt)
+	{
+		using namespace TerraEngine::Animation;
+		const NativeAnimationStatus requestStatus = ValidateAnimationRecord(
+			request, NativeAnimationRecordKind::RootMotionApplicationRequest);
+		if(requestStatus != NativeAnimationStatus::Ok) return requestStatus;
+		const NativeAnimationStatus receiptStatus = ValidateAnimationRecord(
+			receipt, NativeAnimationRecordKind::RootMotionApplicationReceipt);
+		if(receiptStatus != NativeAnimationStatus::Ok) return receiptStatus;
+
+		AnimationRootMotionDeferredApplicationRequest native;
+		native.animator = AnimationToHandle(request->animator);
+		native.mode = static_cast<AnimationRootMotionApplicationMode>(request->mode);
+		native.expectedPoseGeneration = request->expectedPoseGeneration;
+		native.expectedPublicationGeneration = request->expectedPublicationGeneration;
+		native.producerId = request->producerId;
+		native.producerSequence = request->producerSequence;
+		native.correlationId = request->correlationId;
+		native.idempotencyKey = request->idempotencyKey;
+		native.fixedDurationSeconds = request->fixedDurationSeconds;
+		const AnimationRootMotionApplicationReceipt nativeReceipt =
+			AnimationSystem::Instance().SubmitRootMotionApplication(native);
+		FillRootMotionReceipt(nativeReceipt, *receipt);
+		return receipt->status;
+	}
+
+	NativeAnimationStatus Native_Animation_CopyRootMotionResults(
+		const NativeAnimationAnimatorHandle* animator,
+		NativeAnimationRootMotionResult* values,
+		std::uint32_t capacity,
+		NativeAnimationBufferInfo* info)
+	{
+		using namespace TerraEngine::Animation;
+		const NativeAnimationStatus infoStatus = ValidateAnimationRecord(info, NativeAnimationRecordKind::BufferInfo);
+		if(infoStatus != NativeAnimationStatus::Ok) return infoStatus;
+		if(animator == nullptr) return NativeAnimationStatus::InvalidArgument;
+		const AnimatorInstanceHandle handle = AnimationToHandle(*animator);
+		if(!AnimationSystem::Instance().IsAnimatorInstanceAlive(handle)) {
+			FillAnimationBufferInfo(*info, NativeAnimationStatus::StaleHandle, 0U, 0U, 0, 0U);
+			return info->status;
+		}
+		std::vector<AnimationRootMotionApplicationResult> results;
+		AnimationRootMotionResultPublisher::Instance().CopyForAnimator(handle, results);
+		const std::int64_t sourceTick = results.empty() ? 0 : results.back().sourceEndTick;
+		return CopyAnimationSpan<NativeAnimationRootMotionResult, AnimationRootMotionApplicationResult>(
+			results, values, capacity, info, sourceTick,
+			AnimationSystem::Instance().AuthorityPublicationGeneration(),
+			[](const AnimationRootMotionApplicationResult& source, std::uint32_t) {
+				NativeAnimationRootMotionResult result{};
+				result.header = AnimationHeader(NativeAnimationRecordKind::RootMotionResult, sizeof(result));
+				result.status = ToNativeAnimationStatus(source.status);
+				result.animator = AnimationFromHandle(source.animator);
+				result.disposition = static_cast<NativeAnimationRootMotionDisposition>(source.disposition);
+				result.generation = source.generation;
+				result.sourceBeginTick = source.sourceBeginTick;
+				result.sourceEndTick = source.sourceEndTick;
+				result.requestedTranslation = AnimationFromVector(source.requestedTranslation);
+				result.appliedTranslation = AnimationFromVector(source.appliedTranslation);
+				result.requestedYawRadians = source.requestedYawRadians;
+				result.appliedYawRadians = source.appliedYawRadians;
+				result.correlationId = source.correlationId;
+				result.publicationGeneration = source.publicationGeneration;
+				return result;
+			});
+	}
+
+	NativeAnimationStatus Native_Animation_CopyRootMotionResultDetails(
+		const NativeAnimationAnimatorHandle* animator,
+		NativeAnimationRootMotionResultDetails* values,
+		std::uint32_t capacity,
+		NativeAnimationBufferInfo* info)
+	{
+		using namespace TerraEngine::Animation;
+		const NativeAnimationStatus infoStatus = ValidateAnimationRecord(
+			info, NativeAnimationRecordKind::BufferInfo);
+		if(infoStatus != NativeAnimationStatus::Ok) return infoStatus;
+		if(animator == nullptr) return NativeAnimationStatus::InvalidArgument;
+		const AnimatorInstanceHandle handle = AnimationToHandle(*animator);
+		if(!AnimationSystem::Instance().IsAnimatorInstanceAlive(handle)) {
+			FillAnimationBufferInfo(*info, NativeAnimationStatus::StaleHandle, 0U, 0U, 0, 0U);
+			return info->status;
+		}
+		std::vector<AnimationRootMotionApplicationResult> results;
+		AnimationRootMotionResultPublisher::Instance().CopyForAnimator(handle, results);
+		const std::int64_t sourceTick = results.empty() ? 0 : results.back().sourceEndTick;
+		return CopyAnimationSpan<NativeAnimationRootMotionResultDetails,
+			AnimationRootMotionApplicationResult>(
+			results, values, capacity, info, sourceTick,
+			AnimationSystem::Instance().AuthorityPublicationGeneration(),
+			[](const AnimationRootMotionApplicationResult& source, std::uint32_t) {
+				return MakeNativeRootMotionDetails(source);
+			});
+	}
+
+	NativeAnimationStatus Native_Animation_SubmitProceduralGoal(
+		const NativeAnimationProceduralGoalCommand* request,
+		NativeAnimationProceduralGoalReceipt* receipt)
+	{
+		using namespace TerraEngine::Animation;
+		const NativeAnimationStatus requestStatus = ValidateAnimationRecord(
+			request, NativeAnimationRecordKind::ProceduralGoalCommand);
+		if(requestStatus != NativeAnimationStatus::Ok) return requestStatus;
+		const NativeAnimationStatus receiptStatus = ValidateAnimationRecord(
+			receipt, NativeAnimationRecordKind::ProceduralGoalReceipt);
+		if(receiptStatus != NativeAnimationStatus::Ok) return receiptStatus;
+
+		// The runtime owns the copied request after this call. Managed gameplay
+		// never receives an alias to the evaluator's pending or active goal state.
+		*receipt = AnimationSystem::Instance().SubmitProceduralGoal(*request);
+		return receipt->status;
+	}
+
+	NativeAnimationStatus Native_Animation_CopyProceduralResults(
+		const NativeAnimationAnimatorHandle* animator,
+		NativeAnimationProceduralResultSnapshot* values,
+		std::uint32_t capacity,
+		NativeAnimationBufferInfo* info)
+	{
+		using namespace TerraEngine::Animation;
+		const NativeAnimationStatus infoStatus = ValidateAnimationRecord(
+			info, NativeAnimationRecordKind::BufferInfo);
+		if(infoStatus != NativeAnimationStatus::Ok) return infoStatus;
+		if(animator == nullptr || (capacity != 0U && values == nullptr)) {
+			FillAnimationBufferInfo(*info, NativeAnimationStatus::InvalidArgument,
+				0U, 0U, 0, 0U);
+			return info->status;
+		}
+
+		std::uint32_t requiredCount = 0U;
+		const AnimationStatus copyStatus = AnimationSystem::Instance().CopyProceduralResults(
+			AnimationToHandle(*animator),
+			std::span<NativeAnimationProceduralResultSnapshot>(values, capacity),
+			requiredCount);
+		const NativeAnimationStatus nativeStatus = ToNativeAnimationStatus(copyStatus);
+		const bool copied = copyStatus == AnimationStatus::Ok;
+		const std::int64_t sourceTick = copied && requiredCount != 0U
+			? values[requiredCount - 1U].observationTick : 0;
+		const std::uint64_t publicationGeneration = copied && requiredCount != 0U
+			? values[requiredCount - 1U].publicationGeneration
+			: AnimationSystem::Instance().AuthorityPublicationGeneration();
+		// Preserve the ABI's atomic two-call protocol: failed or undersized reads
+		// report the exact count but never claim that a partial prefix was written.
+		FillAnimationBufferInfo(*info, nativeStatus, requiredCount,
+			copied ? requiredCount : 0U, sourceTick, publicationGeneration);
+		return info->status;
+	}
+
+	bool IsKnownRetargetOperation(NativeAnimationRetargetOperation value) noexcept
+	{
+		return value == NativeAnimationRetargetOperation::ActivateProfile
+			|| value == NativeAnimationRetargetOperation::DeactivateProfile
+			|| value == NativeAnimationRetargetOperation::RequestRebuild;
+	}
+
+	bool IsKnownMotionMatchOperation(NativeAnimationMotionMatchOperation value) noexcept
+	{
+		return value == NativeAnimationMotionMatchOperation::SetDatabase
+			|| value == NativeAnimationMotionMatchOperation::Query
+			|| value == NativeAnimationMotionMatchOperation::Clear;
+	}
+
+	bool IsKnownRagdollOperation(NativeAnimationRagdollOperation value) noexcept
+	{
+		return value == NativeAnimationRagdollOperation::Activate
+			|| value == NativeAnimationRagdollOperation::Deactivate
+			|| value == NativeAnimationRagdollOperation::RequestRecovery;
+	}
+
+	bool IsKnownDeterminismOperation(NativeAnimationDeterminismOperation value) noexcept
+	{
+		return value == NativeAnimationDeterminismOperation::Capture
+			|| value == NativeAnimationDeterminismOperation::Restore
+			|| value == NativeAnimationDeterminismOperation::ReplaySeek
+			|| value == NativeAnimationDeterminismOperation::RequestReplication;
+	}
+
+	NativeAnimationStatus Native_Animation_SubmitRetargetRequest(
+		const NativeAnimationRetargetRequest* request,
+		NativeAnimationRetargetReceipt* receipt)
+	{
+		const NativeAnimationStatus requestStatus = ValidateAnimationRecord(
+			request, NativeAnimationRecordKind::RetargetRequest);
+		if(requestStatus != NativeAnimationStatus::Ok) return requestStatus;
+		const NativeAnimationStatus receiptStatus = ValidateAnimationRecord(
+			receipt, NativeAnimationRecordKind::RetargetReceipt);
+		if(receiptStatus != NativeAnimationStatus::Ok) return receiptStatus;
+		if(!IsKnownRetargetOperation(request->operation)) return NativeAnimationStatus::InvalidArgument;
+		*receipt = TerraEngine::Animation::AnimationSystem::Instance()
+			.SubmitRetargetRequest(*request);
+		return receipt->status;
+	}
+
+	NativeAnimationStatus Native_Animation_CopyRetargetSnapshots(
+		const NativeAnimationAnimatorHandle* animator, NativeAnimationRetargetSnapshot* values,
+		std::uint32_t capacity, NativeAnimationBufferInfo* info)
+	{
+		return CopyAdvancedAnimationSnapshots(animator, values, capacity, info,
+			[](TerraEngine::Animation::AnimatorInstanceHandle handle,
+				std::span<NativeAnimationRetargetSnapshot> destination,
+				std::uint32_t& requiredCount) {
+				return TerraEngine::Animation::AnimationSystem::Instance()
+					.CopyRetargetSnapshots(
+					handle, destination, requiredCount);
+			});
+	}
+
+	NativeAnimationStatus Native_Animation_SubmitMotionMatchRequest(
+		const NativeAnimationMotionMatchRequest* request,
+		NativeAnimationMotionMatchReceipt* receipt)
+	{
+		const NativeAnimationStatus requestStatus = ValidateAnimationRecord(
+			request, NativeAnimationRecordKind::MotionMatchRequest);
+		if(requestStatus != NativeAnimationStatus::Ok) return requestStatus;
+		const NativeAnimationStatus receiptStatus = ValidateAnimationRecord(
+			receipt, NativeAnimationRecordKind::MotionMatchReceipt);
+		if(receiptStatus != NativeAnimationStatus::Ok) return receiptStatus;
+		if(!IsKnownMotionMatchOperation(request->operation)) return NativeAnimationStatus::InvalidArgument;
+		*receipt = TerraEngine::Animation::AnimationSystem::Instance()
+			.SubmitMotionMatchRequest(*request);
+		return receipt->status;
+	}
+
+	NativeAnimationStatus Native_Animation_CopyMotionMatchSnapshots(
+		const NativeAnimationAnimatorHandle* animator, NativeAnimationMotionMatchSnapshot* values,
+		std::uint32_t capacity, NativeAnimationBufferInfo* info)
+	{
+		return CopyAdvancedAnimationSnapshots(animator, values, capacity, info,
+			[](TerraEngine::Animation::AnimatorInstanceHandle handle,
+				std::span<NativeAnimationMotionMatchSnapshot> destination,
+				std::uint32_t& requiredCount) {
+				return TerraEngine::Animation::AnimationSystem::Instance()
+					.CopyMotionMatchSnapshots(
+					handle, destination, requiredCount);
+			});
+	}
+
+	NativeAnimationStatus Native_Animation_SubmitMotionMatchQueryV2(
+		const NativeAnimationMotionMatchQueryRequestV2* request,
+		NativeAnimationMotionMatchQueryReceiptV2* receipt)
+	{
+		const NativeAnimationStatus requestStatus = ValidateAnimationRecord(
+			request, NativeAnimationRecordKind::MotionMatchQueryRequestV2);
+		if(requestStatus != NativeAnimationStatus::Ok) return requestStatus;
+		const NativeAnimationStatus receiptStatus = ValidateAnimationRecord(
+			receipt, NativeAnimationRecordKind::MotionMatchQueryReceiptV2);
+		if(receiptStatus != NativeAnimationStatus::Ok) return receiptStatus;
+		if(!ValidateMotionMatchQueryPayload(*request)) {
+			return NativeAnimationStatus::InvalidArgument;
+		}
+
+		// AnimationSystem owns the complete copied record. This keeps the managed
+		// bridge pointer-free and ensures every validated V2 field reaches the same
+		// protected capture/evaluation/publication lifecycle as native producers.
+		*receipt = TerraEngine::Animation::AnimationSystem::Instance()
+			.SubmitMotionMatchQueryV2(*request);
+		return receipt->status;
+	}
+
+	NativeAnimationStatus Native_Animation_CopyMotionMatchResultsV2(
+		const NativeAnimationAnimatorHandle* animator,
+		NativeAnimationMotionMatchResultV2* values,
+		std::uint32_t capacity,
+		NativeAnimationBufferInfo* info)
+	{
+		return CopyAdvancedAnimationSnapshots(animator, values, capacity, info,
+			[](TerraEngine::Animation::AnimatorInstanceHandle handle,
+				std::span<NativeAnimationMotionMatchResultV2> destination,
+				std::uint32_t& requiredCount) {
+				return TerraEngine::Animation::AnimationSystem::Instance()
+					.CopyMotionMatchResultsV2(handle, destination, requiredCount);
+			});
+	}
+
+	NativeAnimationStatus Native_Animation_SubmitRagdollRequest(
+		const NativeAnimationRagdollRequest* request,
+		NativeAnimationRagdollReceipt* receipt)
+	{
+		const NativeAnimationStatus requestStatus = ValidateAnimationRecord(
+			request, NativeAnimationRecordKind::RagdollRequest);
+		if(requestStatus != NativeAnimationStatus::Ok) return requestStatus;
+		const NativeAnimationStatus receiptStatus = ValidateAnimationRecord(
+			receipt, NativeAnimationRecordKind::RagdollReceipt);
+		if(receiptStatus != NativeAnimationStatus::Ok) return receiptStatus;
+		if(!IsKnownRagdollOperation(request->operation) || !std::isfinite(request->blendWeight)
+			|| request->blendWeight < 0.0F || request->blendWeight > 1.0F) return NativeAnimationStatus::InvalidArgument;
+		*receipt = TerraEngine::Animation::AnimationSystem::Instance()
+			.SubmitRagdollRequest(*request);
+		return receipt->status;
+	}
+
+	NativeAnimationStatus Native_Animation_CopyRagdollSnapshots(
+		const NativeAnimationAnimatorHandle* animator, NativeAnimationRagdollSnapshot* values,
+		std::uint32_t capacity, NativeAnimationBufferInfo* info)
+	{
+		return CopyAdvancedAnimationSnapshots(animator, values, capacity, info,
+			[](TerraEngine::Animation::AnimatorInstanceHandle handle,
+				std::span<NativeAnimationRagdollSnapshot> destination,
+				std::uint32_t& requiredCount) {
+				return TerraEngine::Animation::AnimationSystem::Instance()
+					.CopyRagdollSnapshots(
+					handle, destination, requiredCount);
+			});
+	}
+
+	NativeAnimationStatus Native_Animation_SubmitDeterminismRequest(
+		const NativeAnimationDeterminismRequest* request,
+		NativeAnimationDeterminismReceipt* receipt)
+	{
+		const NativeAnimationStatus requestStatus = ValidateAnimationRecord(
+			request, NativeAnimationRecordKind::DeterminismRequest);
+		if(requestStatus != NativeAnimationStatus::Ok) return requestStatus;
+		const NativeAnimationStatus receiptStatus = ValidateAnimationRecord(
+			receipt, NativeAnimationRecordKind::DeterminismReceipt);
+		if(receiptStatus != NativeAnimationStatus::Ok) return receiptStatus;
+		if(!IsKnownDeterminismOperation(request->operation) || request->targetTick < request->sourceTick) {
+			return NativeAnimationStatus::InvalidArgument;
+		}
+		*receipt = TerraEngine::Animation::AnimationSystem::Instance()
+			.SubmitDeterminismRequest(*request);
+		return receipt->status;
+	}
+
+	NativeAnimationStatus Native_Animation_CopyDeterminismSnapshots(
+		const NativeAnimationAnimatorHandle* animator, NativeAnimationDeterminismSnapshot* values,
+		std::uint32_t capacity, NativeAnimationBufferInfo* info)
+	{
+		return CopyAdvancedAnimationSnapshots(animator, values, capacity, info,
+			[](TerraEngine::Animation::AnimatorInstanceHandle handle,
+				std::span<NativeAnimationDeterminismSnapshot> destination,
+				std::uint32_t& requiredCount) {
+				return TerraEngine::Animation::AnimationSystem::Instance()
+					.CopyDeterminismSnapshots(
+					handle, destination, requiredCount);
+			});
+	}
+
 	std::uint32_t Native_Physics_GetAbiVersion() { return kNativePhysicsAbiVersion; }
 
 	NativePhysicsStatus Native_Physics_SubmitBodyCommand(const NativePhysicsBodyCommandRequest* request, NativePhysicsCommandReceipt* receipt) {
@@ -2718,10 +4155,13 @@ extern "C" {
 			if (componentType != nullptr && propertyName != nullptr && inValue != nullptr && componentType[0] != '\0' && propertyName[0] != '\0') {
 				if (auto it = reg.find(componentType); it != reg.end()) {
 					TerraEngine::Reflection::Variant val = MarshallFromNative(inValue, static_cast<ScriptType>(type));
-					it->second.entitySetter(objects.getRegistry(), entity, propertyName, val);
-					if (std::string_view(componentType) == Transform::kComponentName) {
-						objects.MarkObjectTransformDirty(*object);
-					} else {
+					const bool propertyWritten = it->second.entitySetter(
+						objects.getRegistry(), entity, propertyName, val);
+					if (propertyWritten
+						&& std::string_view(componentType) != Transform::kComponentName) {
+						// Reflected Transform setters publish their spatial revision
+						// centrally. Other compatibility writes still invalidate
+						// the component/structure generation through this bridge.
 						objects.notifyObjectStructureChanged(*object);
 					}
 				}

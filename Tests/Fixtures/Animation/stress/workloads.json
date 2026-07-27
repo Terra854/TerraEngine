@@ -1,0 +1,179 @@
+{
+	"schemaVersion": 1,
+	"feature": "043-complete-animation-system",
+	"task": "T129",
+	"purpose": "reproducible-generation-and-final-phase-readiness",
+	"performanceAcceptancePhase": 18,
+	"performanceExecutionDeferred": true,
+	"definitionHashAlgorithm": "sha256-canonical-json-v1",
+	"authority": {
+		"runtimeContract": {
+			"path": "specs/043-complete-animation-system/contracts/runtime-limits-and-validation.md",
+			"sha256": "1bb8bb3d0affa53d146b717171a7b23d72437af88449c273e8cb1a2fe4869279"
+		},
+		"performanceWorkloads": {
+			"path": "Tools/Animation/PerformanceWorkloads.json",
+			"sha256": "f304b2f2c31addf3301f77260b686caf7b4c87abdbb9756bcc6e481ba0a180f6"
+		},
+		"baseline": {
+			"sourceCommit": "6d12e3a99d7c0d41899fc96fa18b02b61e5a0aa9",
+			"manifestSha256": "cf4375934729e1afa745d9446faacfc1a7ba53a6d7db79b3d1e0e8164a5ced8f",
+			"evidenceAggregateSha256": "4020949bd881f94f0395853e947e4512fb587c7bdd1ce5592317e75c01b5fcb5"
+		}
+	},
+	"generation": {
+		"format": "TerraEngineAnimationStressProject",
+		"formatVersion": 1,
+		"fixedTickRateHz": 60,
+		"workerCount": 31,
+		"randomAlgorithm": "pcg32-v1",
+		"projectFiles": [
+			"project.json",
+			"ProjectSettings/AnimationStress.json",
+			"Assets/Scenes/AnimationStress.tescene",
+			"generation-result.json"
+		]
+	},
+	"resultContract": {
+		"schemaVersion": 1,
+		"requiredRunKinds": ["readiness", "final-phase-18"],
+		"finalOnlyStatistics": ["median", "p95", "p99", "worst"],
+		"minimumPairedMeasuredRuns": 5,
+		"missingMetricPolicy": "reject",
+		"identityMismatchPolicy": "reject",
+		"fixtureHashMismatchPolicy": "reject"
+	},
+	"workloads": [
+		{
+			"id": "crowd-1000",
+			"definitionSha256": "11bfd18d158d96a9d48964c15f9db2771c2ccf3eeda90a039f9c48b9224779cb",
+			"definition": {
+				"profile": "Crowd",
+				"seed": 11235813,
+				"activeCharacters": 1000,
+				"jointsPerCharacter": 100,
+				"blendedClipsPerCharacter": 2,
+				"morphTargetsPerCharacter": 4,
+				"shadowCastingViews": 1,
+				"gameCaptureViews": 1,
+				"warmupSeconds": 30,
+				"measuredSecondsAfterWarmup": 60,
+				"pairedMeasuredRuns": 5,
+				"executionModes": ["CpuDeterministicFallback", "GpuVisual", "HybridAuthoritative"],
+				"diagnosticsModes": ["Disabled", "EnabledCollapsed"],
+				"requiredCounters": [
+					"activeAnimators", "evaluatedAnimators", "cpuAnimators", "gpuVisualAnimators",
+					"hybridAnimators", "sampledJoints", "blendedTracks", "gpuEvaluatedJoints",
+					"gpuBatches", "completePoseReadbackBytes", "gpuWaitCount", "poseCacheBytes",
+					"gpuResidentBytes", "frameArenaHighWaterBytes"
+				]
+			}
+		},
+		{
+			"id": "complex-hero",
+			"definitionSha256": "9f4f2a0b24b102c36ab651ca6a628496830e0c8a4c78644442aadf3f4506b150",
+			"definition": {
+				"profile": "ComplexHero",
+				"seed": 27182818,
+				"sourceJoints": 256,
+				"palettePartitionLimit": 256,
+				"layeredController": true,
+				"activeMorphTargets": 2,
+				"ikChains": 2,
+				"motionMatching": true,
+				"deformableVirtualGeometry": true,
+				"partialRagdoll": true,
+				"gameCaptureViews": 2,
+				"shadows": true,
+				"warmupSeconds": 30,
+				"measuredSecondsAfterWarmup": 60,
+				"pairedMeasuredRuns": 5,
+				"executionModes": ["CpuDeterministicFallback", "GpuVisual", "HybridAuthoritative"],
+				"requiredCounters": [
+					"evaluatedGraphNodes", "motionMatchingCandidates", "ikChains", "ragdollBodies",
+					"gpuTransferBytes", "gpuReadbackBytes", "poseCacheHighWaterBytes",
+					"gpuResidentHighWaterBytes", "protectedBoundaryStallCount"
+				]
+			}
+		},
+		{
+			"id": "mode-churn-10000",
+			"definitionSha256": "b1abe12176bad926cb60a12bf46f2dfa35922b3955bac9e32f4507b771d54c58",
+			"definition": {
+				"profile": "ModeChurn",
+				"seed": 31415926,
+				"timelineChanges": 10000,
+				"changeKinds": ["requested-policy", "capability", "budget", "visibility"],
+				"executionModes": ["CpuDeterministicFallback", "GpuVisual", "HybridAuthoritative"],
+				"requiredExactFailures": {
+					"bindPoseFlashes": 0,
+					"stateLosses": 0,
+					"duplicateEvents": 0,
+					"lostEvents": 0,
+					"rootMotionDiscontinuities": 0,
+					"stalePublications": 0,
+					"mixedGenerations": 0,
+					"hysteresisOscillations": 0
+				}
+			}
+		},
+		{
+			"id": "randomized-scheduler",
+			"definitionSha256": "1189a8cdb5c4c3dc2ef39a4a3197a1aa908846921814a70bc9098d2af26c2b18",
+			"definition": {
+				"profile": "Randomized",
+				"seeds": [32452843, 49979687, 67867967, 86028121, 104395301],
+				"ticksPerSeed": 100000,
+				"workerCounts": [1, 4, 16, 31],
+				"operations": ["spawn", "despawn", "parameter", "command", "visibility", "reload", "cancel"],
+				"requiredExactFailures": {
+					"rangeOwnershipViolations": 0,
+					"determinismMismatches": 0,
+					"partialPublications": 0,
+					"stalePublications": 0,
+					"deadlocks": 0
+				}
+			}
+		},
+		{
+			"id": "device-loss-recovery",
+			"definitionSha256": "d673caee8578292f103815bfe0eeda09e05a03a98dc196575d2f5d91a57af43c",
+			"definition": {
+				"profile": "DeviceLoss",
+				"seed": 982451653,
+				"injectionTicks": [120, 480, 960, 1920],
+				"injectionStages": ["gpu-planning", "gpu-evaluation", "deformation", "presentation"],
+				"requiredFallback": "CpuDeterministicFallback",
+				"requiredExactFailures": {
+					"unrecoverableFailures": 0,
+					"staleGpuPublications": 0,
+					"completePoseReadbacks": 0,
+					"animationGpuPoseWaits": 0,
+					"mixedGenerations": 0
+				}
+			}
+		},
+		{
+			"id": "memory-pressure",
+			"definitionSha256": "a74b7a365d50147615199306f93559167f69d76e10b9725450cff2a80e5d8b31",
+			"definition": {
+				"profile": "MemoryPressure",
+				"seed": 2147483647,
+				"pressureStepsPercent": [100, 75, 50, 25, 10],
+				"budgetsBytes": {
+					"frameArena": 67108864,
+					"poseCache": 268435456,
+					"gpuResidency": 536870912,
+					"detailedDiagnostics": 16777216
+				},
+				"requiredExactFailures": {
+					"unboundedGrowth": 0,
+					"requiredHistoryEvictions": 0,
+					"partialPublications": 0,
+					"stalePublications": 0,
+					"unrecoverableFailures": 0
+				}
+			}
+		}
+	]
+}

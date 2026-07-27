@@ -1,0 +1,740 @@
+{
+	"schemaVersion": 2,
+	"phase": "us7-retarget",
+	"fixtureOverlays": [
+		{
+			"source": "Tests/Fixtures/Animation/AdvancedAssets",
+			"destination": "Assets/Advanced"
+		},
+		{
+			"source": "Tests/Fixtures/Animation/AdvancedRuntimeActors",
+			"destination": "Assets/AdvancedActors"
+		}
+	],
+	"requiredTools": [
+		"asset.import",
+		"asset.list",
+		"asset.inspect",
+		"prefab.instantiate",
+		"scene.list_objects",
+		"play.state",
+		"play.pause",
+		"play.step",
+		"play.resume",
+		"animation.runtime.retarget.request",
+		"animation.runtime.retarget.read",
+		"animation.runtime.diagnostics",
+		"camera.capture_custom",
+		"game_view.capture",
+		"camera.capture_object"
+	],
+	"requiredEvidence": [
+		"editor/mcp-operations.json",
+		"editor/operations/us7-import-source-target.json",
+		"editor/operations/us7-list-retarget-assets.json",
+		"editor/operations/us7-inspect-source-package.json",
+		"editor/operations/us7-failed-reload-preserves-generation.json",
+		"editor/operations/us7-recover-valid-source.json",
+		"editor/operations/us7-instantiate-retarget-hero.json",
+		"editor/operations/us7-instantiate-runtime-actor.json",
+		"editor/operations/us7-observe-retarget-hero.json",
+		"editor/operations/us7-observe-runtime-actor.json",
+		"editor/operations/us7-play-state.json",
+		"editor/operations/us7-pause-runtime.json",
+		"editor/operations/us7-read-retarget-baseline.json",
+		"editor/operations/us7-activate-retarget-profile.json",
+		"editor/operations/us7-step-retarget-activation.json",
+		"editor/operations/us7-read-retarget-activation.json",
+		"editor/operations/us7-request-retarget-rebuild.json",
+		"editor/operations/us7-step-retarget-rebuild.json",
+		"editor/operations/us7-read-retarget-rebuild.json",
+		"editor/operations/us7-retarget-diagnostics-runtime.json",
+		"editor/operations/us7-resume-runtime.json",
+		"editor/operations/us7-retarget-diagnostics-restored.json",
+		"editor/operations/us7-observe-restored-retarget-hero.json",
+		"editor/operations/us7-observe-restored-runtime-actor.json"
+	],
+	"operations": [
+		{
+			"id": "us7-import-source-target",
+			"stage": "prePlay",
+			"order": 10,
+			"tool": "asset.import",
+			"arguments": {
+				"path": "Models/US1Hero.gltf",
+				"force": true
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.importResult.animationManifest",
+					"data.importResult.generatedPrefabs"
+				],
+				"fieldOneOf": {
+					"data.status": [
+						"Succeeded",
+						"SucceededWithWarnings"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/us7-import-source-target.json"
+		},
+		{
+			"id": "us7-list-retarget-assets",
+			"stage": "prePlay",
+			"order": 20,
+			"tool": "asset.list",
+			"arguments": {
+				"search": "US1Hero"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.assets"
+				]
+			},
+			"evidencePath": "editor/operations/us7-list-retarget-assets.json"
+		},
+		{
+			"id": "us7-inspect-source-package",
+			"stage": "prePlay",
+			"order": 30,
+			"tool": "asset.inspect",
+			"arguments": {
+				"asset": "Assets/Models/US1Hero.gltf"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data"
+				]
+			},
+			"evidencePath": "editor/operations/us7-inspect-source-package.json"
+		},
+		{
+			"id": "us7-failed-reload-preserves-generation",
+			"stage": "prePlay",
+			"order": 40,
+			"tool": "asset.import",
+			"arguments": {
+				"path": "Models/US1Hero.gltf",
+				"force": true
+			},
+			"fileTransition": {
+				"target": "Assets/Models/US1Hero.gltf",
+				"replacement": "GateInputs/US1Hero.invalid.gltf",
+				"preserveRoots": [
+					"Assets/Models/US1Hero_Generated",
+					"Build/Assets/Models/US1Hero_Generated"
+				]
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.importResult.diagnostics"
+				],
+				"fieldEquals": {
+					"data.status": "Failed"
+				}
+			},
+			"evidencePath": "editor/operations/us7-failed-reload-preserves-generation.json"
+		},
+		{
+			"id": "us7-recover-valid-source",
+			"stage": "prePlay",
+			"order": 50,
+			"tool": "asset.import",
+			"arguments": {
+				"path": "Models/US1Hero.gltf",
+				"force": true
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.importResult.generatedPrefabs"
+				],
+				"fieldOneOf": {
+					"data.status": [
+						"Succeeded",
+						"SucceededWithWarnings"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/us7-recover-valid-source.json"
+		},
+		{
+			"id": "us7-instantiate-retarget-hero",
+			"stage": "prePlay",
+			"order": 60,
+			"tool": "prefab.instantiate",
+			"arguments": {
+				"prefab": "Assets/Models/US1Hero_Generated/US1Hero.teprefab",
+				"name": "US7 Retarget Hero"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.instanceId",
+					"data.prefabId"
+				]
+			},
+			"evidencePath": "editor/operations/us7-instantiate-retarget-hero.json"
+		},
+		{
+			"id": "us7-instantiate-runtime-actor",
+			"stage": "prePlay",
+			"order": 70,
+			"tool": "prefab.instantiate",
+			"arguments": {
+				"prefab": "Assets/AdvancedActors/TargetRetargetActor.teprefab",
+				"name": "US7 Retarget Runtime Actor"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.instanceId",
+					"data.prefabId"
+				]
+			},
+			"evidencePath": "editor/operations/us7-instantiate-runtime-actor.json"
+		},
+		{
+			"id": "us7-observe-retarget-hero",
+			"stage": "prePlay",
+			"order": 80,
+			"tool": "scene.list_objects",
+			"arguments": {
+				"includeComponents": true,
+				"search": "US7 Retarget Hero"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.objects"
+				]
+			},
+			"evidencePath": "editor/operations/us7-observe-retarget-hero.json"
+		},
+		{
+			"id": "us7-observe-runtime-actor",
+			"stage": "prePlay",
+			"order": 90,
+			"tool": "scene.list_objects",
+			"arguments": {
+				"includeComponents": true,
+				"search": "US7 Retarget Runtime Actor"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.objects"
+				]
+			},
+			"evidencePath": "editor/operations/us7-observe-runtime-actor.json"
+		},
+		{
+			"id": "us7-play-state",
+			"stage": "play",
+			"order": 110,
+			"tool": "play.state",
+			"arguments": {},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState"
+				],
+				"fieldEquals": {
+					"data.currentState": "playing"
+				}
+			},
+			"evidencePath": "editor/operations/us7-play-state.json"
+		},
+		{
+			"id": "us7-pause-runtime",
+			"stage": "play",
+			"order": 120,
+			"tool": "play.pause",
+			"arguments": {
+				"expectedState": "playing",
+				"correlationId": "us7-pause-runtime"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState"
+				],
+				"fieldEquals": {
+					"data.currentState": "paused"
+				}
+			},
+			"evidencePath": "editor/operations/us7-pause-runtime.json"
+		},
+		{
+			"id": "us7-read-retarget-baseline",
+			"stage": "play",
+			"order": 130,
+			"tool": "animation.runtime.retarget.read",
+			"arguments": {
+				"target": {
+					"objectId": null
+				},
+				"maximumItems": 8,
+				"correlationId": "us7-retarget-baseline"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us7-instantiate-runtime-actor",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "target.objectId",
+					"valueType": "uuid"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentPublication.available",
+					"data.currentPublication.poseGeneration",
+					"data.currentPublication.authorityPublicationGeneration",
+					"data.currentPublication.tick",
+					"data.visibilityBoundary"
+				],
+				"fieldEquals": {
+					"data.currentPublication.available": true,
+					"data.visibilityBoundary": "immutable_retarget_store_copies"
+				}
+			},
+			"evidencePath": "editor/operations/us7-read-retarget-baseline.json"
+		},
+		{
+			"id": "us7-activate-retarget-profile",
+			"stage": "play",
+			"order": 140,
+			"tool": "animation.runtime.retarget.request",
+			"arguments": {
+				"target": {
+					"objectId": null
+				},
+				"action": "activate_profile",
+				"profileAssetId": "5445414e303433414456464958000005",
+				"profileGeneration": 1,
+				"layerIndex": 0,
+				"expectedPoseGeneration": null,
+				"expectedPublicationGeneration": null,
+				"targetTick": 0,
+				"idempotencyKey": "us7-retarget-activate-v1",
+				"correlationId": "us7-retarget-activate",
+				"expectedGeneration": 1
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us7-instantiate-runtime-actor",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "target.objectId",
+					"valueType": "uuid"
+				},
+				{
+					"sourceOperationId": "us7-read-retarget-baseline",
+					"sourceResponsePath": "data.currentPublication.poseGeneration",
+					"destinationArgumentPath": "expectedPoseGeneration",
+					"valueType": "integer"
+				},
+				{
+					"sourceOperationId": "us7-read-retarget-baseline",
+					"sourceResponsePath": "data.currentPublication.authorityPublicationGeneration",
+					"destinationArgumentPath": "expectedPublicationGeneration",
+					"valueType": "integer"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.status",
+					"data.acknowledgement",
+					"data.receipt.profileGeneration",
+					"data.receipt.observableTick",
+					"data.receipt.publicationGeneration",
+					"data.visibilityBoundary"
+				],
+				"fieldEquals": {
+					"data.acknowledgement": "queued_not_yet_published",
+					"data.receipt.profileGeneration": 1,
+					"data.visibilityBoundary": "animation_protected_capture_then_publication"
+				},
+				"fieldOneOf": {
+					"data.status": [
+						"queued",
+						"ok"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/us7-activate-retarget-profile.json"
+		},
+		{
+			"id": "us7-step-retarget-activation",
+			"stage": "play",
+			"order": 150,
+			"tool": "play.step",
+			"arguments": {
+				"expectedState": "paused",
+				"correlationId": "us7-step-retarget-activation"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState",
+					"data.stepsCompleted"
+				],
+				"fieldEquals": {
+					"data.currentState": "paused",
+					"data.stepsCompleted": 1
+				}
+			},
+			"evidencePath": "editor/operations/us7-step-retarget-activation.json"
+		},
+		{
+			"id": "us7-read-retarget-activation",
+			"stage": "play",
+			"order": 160,
+			"tool": "animation.runtime.retarget.read",
+			"arguments": {
+				"target": {
+					"objectId": null
+				},
+				"maximumItems": 8,
+				"correlationId": "us7-retarget-activation-result"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us7-instantiate-runtime-actor",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "target.objectId",
+					"valueType": "uuid"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentPublication.poseGeneration",
+					"data.currentPublication.authorityPublicationGeneration",
+					"data.snapshotCount",
+					"data.latestSnapshot.status",
+					"data.latestSnapshot.profileAssetId",
+					"data.latestSnapshot.profileGeneration",
+					"data.latestSnapshot.sourceSkeletonGeneration",
+					"data.latestSnapshot.targetSkeletonGeneration",
+					"data.latestSnapshot.poseGeneration",
+					"data.latestSnapshot.contactErrorMeters",
+					"data.latestSnapshot.reachableIkErrorMeters",
+					"data.latestSnapshot.observationTick",
+					"data.latestSnapshot.publicationGeneration",
+					"data.visibilityBoundary"
+				],
+				"fieldEquals": {
+					"data.latestSnapshot.status": "ok",
+					"data.latestSnapshot.profileAssetId": "5445414e303433414456464958000005",
+					"data.latestSnapshot.profileGeneration": 1,
+					"data.visibilityBoundary": "immutable_retarget_store_copies"
+				}
+			},
+			"evidencePath": "editor/operations/us7-read-retarget-activation.json"
+		},
+		{
+			"id": "us7-request-retarget-rebuild",
+			"stage": "play",
+			"order": 170,
+			"tool": "animation.runtime.retarget.request",
+			"arguments": {
+				"target": {
+					"objectId": null
+				},
+				"action": "request_rebuild",
+				"profileAssetId": "5445414e303433414456464958000005",
+				"profileGeneration": 1,
+				"layerIndex": 0,
+				"expectedPoseGeneration": null,
+				"expectedPublicationGeneration": null,
+				"targetTick": 0,
+				"idempotencyKey": "us7-retarget-rebuild-v1",
+				"correlationId": "us7-retarget-rebuild",
+				"expectedGeneration": 2
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us7-instantiate-runtime-actor",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "target.objectId",
+					"valueType": "uuid"
+				},
+				{
+					"sourceOperationId": "us7-read-retarget-activation",
+					"sourceResponsePath": "data.currentPublication.poseGeneration",
+					"destinationArgumentPath": "expectedPoseGeneration",
+					"valueType": "integer"
+				},
+				{
+					"sourceOperationId": "us7-read-retarget-activation",
+					"sourceResponsePath": "data.currentPublication.authorityPublicationGeneration",
+					"destinationArgumentPath": "expectedPublicationGeneration",
+					"valueType": "integer"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.status",
+					"data.acknowledgement",
+					"data.receipt.profileGeneration",
+					"data.receipt.observableTick",
+					"data.receipt.publicationGeneration",
+					"data.visibilityBoundary"
+				],
+				"fieldEquals": {
+					"data.acknowledgement": "queued_not_yet_published",
+					"data.receipt.profileGeneration": 1,
+					"data.visibilityBoundary": "animation_protected_capture_then_publication"
+				},
+				"fieldOneOf": {
+					"data.status": [
+						"queued",
+						"ok"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/us7-request-retarget-rebuild.json"
+		},
+		{
+			"id": "us7-step-retarget-rebuild",
+			"stage": "play",
+			"order": 180,
+			"tool": "play.step",
+			"arguments": {
+				"expectedState": "paused",
+				"correlationId": "us7-step-retarget-rebuild"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState",
+					"data.stepsCompleted"
+				],
+				"fieldEquals": {
+					"data.currentState": "paused",
+					"data.stepsCompleted": 1
+				}
+			},
+			"evidencePath": "editor/operations/us7-step-retarget-rebuild.json"
+		},
+		{
+			"id": "us7-read-retarget-rebuild",
+			"stage": "play",
+			"order": 190,
+			"tool": "animation.runtime.retarget.read",
+			"arguments": {
+				"target": {
+					"objectId": null
+				},
+				"maximumItems": 8,
+				"correlationId": "us7-retarget-rebuild-result"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "us7-instantiate-runtime-actor",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "target.objectId",
+					"valueType": "uuid"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.snapshotCount",
+					"data.latestSnapshot.status",
+					"data.latestSnapshot.profileAssetId",
+					"data.latestSnapshot.profileGeneration",
+					"data.latestSnapshot.contactErrorMeters",
+					"data.latestSnapshot.reachableIkErrorMeters",
+					"data.latestSnapshot.observationTick",
+					"data.latestSnapshot.publicationGeneration",
+					"data.visibilityBoundary"
+				],
+				"fieldEquals": {
+					"data.latestSnapshot.status": "ok",
+					"data.latestSnapshot.profileAssetId": "5445414e303433414456464958000005",
+					"data.latestSnapshot.profileGeneration": 1,
+					"data.visibilityBoundary": "immutable_retarget_store_copies"
+				}
+			},
+			"evidencePath": "editor/operations/us7-read-retarget-rebuild.json"
+		},
+		{
+			"id": "us7-retarget-diagnostics-runtime",
+			"stage": "play",
+			"order": 200,
+			"tool": "animation.runtime.diagnostics",
+			"arguments": {
+				"includeDetails": true,
+				"maximumItems": 64,
+				"correlationId": "us7-retarget-runtime",
+				"rendererAvailable": true
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data"
+				]
+			},
+			"evidencePath": "editor/operations/us7-retarget-diagnostics-runtime.json"
+		},
+		{
+			"id": "us7-resume-runtime",
+			"stage": "play",
+			"order": 210,
+			"tool": "play.resume",
+			"arguments": {
+				"expectedState": "paused",
+				"correlationId": "us7-resume-runtime"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState"
+				],
+				"fieldEquals": {
+					"data.currentState": "playing"
+				}
+			},
+			"evidencePath": "editor/operations/us7-resume-runtime.json"
+		},
+		{
+			"id": "us7-retarget-diagnostics-restored",
+			"stage": "postPlay",
+			"order": 230,
+			"tool": "animation.runtime.diagnostics",
+			"arguments": {
+				"includeDetails": true,
+				"maximumItems": 64,
+				"correlationId": "us7-retarget-restored"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data"
+				]
+			},
+			"evidencePath": "editor/operations/us7-retarget-diagnostics-restored.json"
+		},
+		{
+			"id": "us7-observe-restored-retarget-hero",
+			"stage": "postPlay",
+			"order": 240,
+			"tool": "scene.list_objects",
+			"arguments": {
+				"includeComponents": true,
+				"search": "US7 Retarget Hero"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.objects"
+				]
+			},
+			"evidencePath": "editor/operations/us7-observe-restored-retarget-hero.json"
+		},
+		{
+			"id": "us7-observe-restored-runtime-actor",
+			"stage": "postPlay",
+			"order": 250,
+			"tool": "scene.list_objects",
+			"arguments": {
+				"includeComponents": true,
+				"search": "US7 Retarget Runtime Actor"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.objects"
+				]
+			},
+			"evidencePath": "editor/operations/us7-observe-restored-runtime-actor.json"
+		}
+	],
+	"captures": [
+		{
+			"id": "us7retarget-scene-view",
+			"view": "SceneView",
+			"stage": "prePlay",
+			"order": 100,
+			"tool": "camera.capture_custom",
+			"arguments": {
+				"name": "US7 Retarget Scene",
+				"position": [0, 1, 4],
+				"target": [0, 0.5, 0],
+				"up": [0, 1, 0],
+				"projection": "perspective",
+				"verticalFovDegrees": 60,
+				"nearPlane": 0.1,
+				"farPlane": 100
+			}
+		},
+		{
+			"id": "us7retarget-game-view",
+			"view": "GameView",
+			"stage": "play",
+			"order": 220,
+			"tool": "game_view.capture",
+			"arguments": {
+				"includeOverlays": false,
+				"transparentBackground": false
+			}
+		},
+		{
+			"id": "us7retarget-ingame-camera",
+			"view": "InGameCamera",
+			"stage": "postPlay",
+			"order": 260,
+			"tool": "camera.capture_object",
+			"arguments": {
+				"object": "US1 Capture Camera",
+				"includeDisabled": false,
+				"transparentBackground": false
+			}
+		}
+	],
+	"visualExpectations": [
+		{
+			"captureId": "us7retarget-scene-view",
+			"contentPolicy": "visible-geometry-required"
+		},
+		{
+			"captureId": "us7retarget-game-view",
+			"contentPolicy": "visible-geometry-required"
+		},
+		{
+			"captureId": "us7retarget-ingame-camera",
+			"contentPolicy": "visible-geometry-required"
+		}
+	],
+	"visualIdentityExceptions": [
+		{
+			"captureIds": [
+				"us7retarget-game-view",
+				"us7retarget-ingame-camera"
+			],
+			"reason": "Game View and the authored in-game camera intentionally resolve the same active camera, so matching pixels are valid evidence."
+		}
+	],
+	"manualChecklist": [
+		{
+			"id": "us7-mouse-map-preview-and-reload",
+			"input": "mouse",
+			"required": true,
+			"instruction": "Using real mouse input in the installed editor, use the visible US7 Retarget Hero for camera evidence and the separate mesh-free US7 Retarget Runtime Actor for copied runtime proof. Open the source and target rigs and saved retarget profile; inspect semantic and explicit mappings, required or optional chains, orientation, scale, root, contact, twist, fallback policies, source-target preview, and quantitative errors. Perform an incompatible mapping reload, verify the actionable diagnostic and last-known-good generation, restore a valid mapping, and do not attribute visible mesh deformation to the diagnostic actor."
+		},
+		{
+			"id": "us7-keyboard-runtime-parity-and-restore",
+			"input": "keyboard",
+			"required": true,
+			"instruction": "Use keyboard input to run the mapped animation in Play Mode, exercise native and managed runtime retarget controls, compare source and target timing, facing, contacts, root motion, socket queries, and deterministic mode output, then exit Play Mode and confirm profile identity and the authored scene restore. Save evidence screenshots and receipts beneath the gate run root."
+		}
+	]
+}

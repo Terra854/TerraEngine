@@ -1,0 +1,64 @@
+{
+	"schemaVersion": 1,
+	"phase": "us1-import",
+	"acceptedEvidence": {
+		"statement": "The accepted US1 rows are bound to every reviewed import, reimport, query, prefab, runtime, native camera, manual input, and focused test artifact produced by this installed gate.",
+		"requirementIds": [
+			"FR-001", "FR-002", "FR-003", "FR-004", "FR-005", "FR-006",
+			"FR-007", "FR-008", "FR-009", "FR-010", "FR-011", "FR-012",
+			"FR-013", "FR-014", "FR-015", "FR-016", "FR-017", "FR-018",
+			"SC-002"
+		],
+		"operationIds": [
+			"us1-import-first",
+			"us1-import-repeat",
+			"us1-query-package",
+			"us1-inspect-package-impact",
+			"us1-failed-reimport-preserves-generation",
+			"us1-recover-valid-source",
+			"us1-instantiate-playable-prefab",
+			"us1-scene-bind-query",
+			"us1-play-diagnostics",
+			"us1-post-play-scene-query"
+		],
+		"captureIds": [
+			"us1-import-scene-view",
+			"us1-import-game-view",
+			"us1-import-in-game-camera"
+		],
+		"manualChecklistIds": [
+			"us1-mouse-asset-inspection",
+			"us1-keyboard-save-check"
+		],
+		"requiredArtifacts": [
+			"editor/mcp-operations.json",
+			"editor/manual-evidence.json",
+			"editor/camera-evidence.json",
+			"editor/play-mode.json",
+			"tests/focused-tests.command.json"
+		]
+	},
+	"updates": [
+		{ "id": "FR-001", "status": "Accepted" },
+		{ "id": "FR-002", "status": "Accepted" },
+		{ "id": "FR-003", "status": "Accepted" },
+		{ "id": "FR-004", "status": "Accepted" },
+		{ "id": "FR-005", "status": "Accepted" },
+		{ "id": "FR-006", "status": "Accepted" },
+		{ "id": "FR-007", "status": "Accepted" },
+		{ "id": "FR-008", "status": "Accepted" },
+		{ "id": "FR-009", "status": "Accepted" },
+		{ "id": "FR-010", "status": "Accepted" },
+		{ "id": "FR-011", "status": "Accepted" },
+		{ "id": "FR-012", "status": "Accepted" },
+		{ "id": "FR-013", "status": "Accepted" },
+		{ "id": "FR-014", "status": "Accepted" },
+		{ "id": "FR-015", "status": "Accepted" },
+		{ "id": "FR-016", "status": "Accepted" },
+		{ "id": "FR-017", "status": "Accepted" },
+		{ "id": "FR-018", "status": "Accepted" },
+		{ "id": "SC-001", "status": "Evidence incomplete" },
+		{ "id": "SC-002", "status": "Accepted" },
+		{ "id": "SC-003", "status": "In progress" }
+	]
+}

@@ -6,6 +6,213 @@
 
 namespace TerraEngine::Renderer::Vulkan
 {
+	void PresentationRecreationCoordinator::SetActiveExtent(PresentationExtent extent) noexcept
+	{
+		activeExtent_ = extent;
+		requestedExtent_ = extent;
+	}
+
+	void PresentationRecreationCoordinator::Request(PresentationRecreationReason reason) noexcept
+	{
+		// Every explicit recovery cause represents a new protected attempt, even
+		// when the compositor has not reported a different pixel extent yet.
+		reason_ = reason;
+		recoveryPending_ = true;
+		++revision_;
+	}
+
+	void PresentationRecreationCoordinator::RequestFramebufferExtent(PresentationExtent extent) noexcept
+	{
+		if (extent == requestedExtent_)
+		{
+			return;
+		}
+
+		requestedExtent_ = extent;
+		Request(PresentationRecreationReason::FramebufferExtentChanged);
+	}
+
+	void PresentationRecreationCoordinator::RequestOutOfDate() noexcept
+	{
+		Request(PresentationRecreationReason::OutOfDate);
+	}
+
+	bool PresentationRecreationCoordinator::RequestSuboptimalIfExtentChanged() noexcept
+	{
+		// VK_SUBOPTIMAL_KHR is advisory. Replacing an otherwise usable chain only
+		// makes sense when the currently requested presentation key differs.
+		// While retirement proof is pending, another advisory revision would keep
+		// retrying the same full backlog and prevent the active chain from presenting.
+		if (retirementProofPending_ || requestedExtent_.IsZero() || requestedExtent_ == activeExtent_)
+		{
+			return false;
+		}
+
+		Request(PresentationRecreationReason::SuboptimalExtentChanged);
+		return true;
+	}
+
+	std::optional<PresentationRecreationRequest> PresentationRecreationCoordinator::Claim() noexcept
+	{
+		if (!recoveryPending_ || requestedExtent_.IsZero() || claimedRevision_ == revision_)
+		{
+			return std::nullopt;
+		}
+
+		claimedRevision_ = revision_;
+		return PresentationRecreationRequest{ requestedExtent_, reason_, revision_ };
+	}
+
+	void PresentationRecreationCoordinator::PublishSuccess(PresentationExtent extent) noexcept
+	{
+		activeExtent_ = extent;
+		requestedExtent_ = extent;
+		recoveryPending_ = false;
+		oldSwapchainWasConsumed_ = false;
+		retirementProofPending_ = false;
+	}
+
+	void PresentationRecreationCoordinator::PublishFailure(bool oldSwapchainWasConsumed) noexcept
+	{
+		// Leave the claimed revision consumed. Retrying it every frame would turn
+		// a recoverable driver failure or minimized window into an idle-loop.
+		oldSwapchainWasConsumed_ = oldSwapchainWasConsumed;
+		recoveryPending_ = true;
+		retirementProofPending_ = false;
+	}
+
+	void PresentationRecreationCoordinator::PublishRetirementBlocked(bool oldSwapchainWasConsumed) noexcept
+	{
+		// This failure is different from a bad candidate: retrying becomes useful
+		// once explicit present-fence proof releases the old bundle or backlog slot.
+		oldSwapchainWasConsumed_ = oldSwapchainWasConsumed;
+		recoveryPending_ = true;
+		retirementProofPending_ = true;
+	}
+
+	bool PresentationRecreationCoordinator::RequestRetryAfterRetirement() noexcept
+	{
+		if (!recoveryPending_ || !retirementProofPending_)
+		{
+			return false;
+		}
+
+		// The caller has verified the required retired bundle or capacity is now
+		// available. Publish one new revision so Claim performs one bounded retry.
+		retirementProofPending_ = false;
+		oldSwapchainWasConsumed_ = false;
+		Request(PresentationRecreationReason::CandidateFailure);
+		return true;
+	}
+
+	bool PresentationRecreationCoordinator::IsSuspendedForZeroExtent() const noexcept
+	{
+		return recoveryPending_ && requestedExtent_.IsZero();
+	}
+
+	bool PresentationRecreationCoordinator::IsRecoveryPending() const noexcept
+	{
+		return recoveryPending_;
+	}
+
+	void PresentationRetirementTracker::BeginRetirement(std::uint64_t generation, std::uint32_t presentCount)
+	{
+		generation_ = generation;
+		completionByPresent_.assign(presentCount, false);
+		completionCoverageValid_ = true;
+	}
+
+	void PresentationRetirementTracker::RecordPresentFence(
+		std::uint64_t generation, std::uint32_t presentIndex, bool signaled)
+	{
+		if (generation == generation_ && presentIndex < completionByPresent_.size())
+		{
+			completionByPresent_[presentIndex] = signaled;
+		}
+	}
+
+	void PresentationRetirementTracker::RecordUnfencedPresent(std::uint64_t generation) noexcept
+	{
+		// A single untracked present invalidates the whole generation: older signaled
+		// fences cannot prove that the presentation engine released this later wait.
+		if (generation == generation_) completionCoverageValid_ = false;
+	}
+
+	bool PresentationRetirementTracker::CanDestroyRetiredBundle(std::uint64_t generation) const noexcept
+	{
+		return generation == generation_
+			&& completionCoverageValid_
+			&& !completionByPresent_.empty()
+			&& std::all_of(completionByPresent_.begin(), completionByPresent_.end(), [](bool complete) { return complete; });
+	}
+
+	void UnextendedPresentationRetirementTracker::BeginGeneration(
+		std::uint64_t generation, bool retiredBundlesPending) noexcept
+	{
+		// Ignore stale notifications. A replacement can occur before its first
+		// present, so preserve the pending old bundles and re-anchor them to the
+		// first present of the newest generation.
+		if (generation < activeGeneration_)
+		{
+			return;
+		}
+
+		if (generation == activeGeneration_)
+		{
+			retiredBundlesPending_ = retiredBundlesPending_ || retiredBundlesPending;
+			return;
+		}
+
+		activeGeneration_ = generation;
+		retiredBundlesPending_ = retiredBundlesPending_ || retiredBundlesPending;
+		firstPresentAnchored_ = false;
+		anchorGeneration_ = 0u;
+		anchorImageIndex_ = 0u;
+	}
+
+	void UnextendedPresentationRetirementTracker::RecordPresent(
+		std::uint64_t generation, std::uint32_t imageIndex) noexcept
+	{
+		if (!retiredBundlesPending_ || generation != activeGeneration_ || firstPresentAnchored_)
+		{
+			return;
+		}
+
+		// Do not require an image count here: the production acquire result is
+		// authoritative, and this model's job is only to preserve identity.
+		anchorGeneration_ = generation;
+		anchorImageIndex_ = imageIndex;
+		firstPresentAnchored_ = true;
+	}
+
+	bool UnextendedPresentationRetirementTracker::NeedsAcquireProof() const noexcept
+	{
+		return retiredBundlesPending_ && firstPresentAnchored_;
+	}
+
+	bool UnextendedPresentationRetirementTracker::RecordCompletedAcquire(
+		std::uint64_t generation, std::uint32_t imageIndex) noexcept
+	{
+		if (!NeedsAcquireProof() || generation != anchorGeneration_
+			|| imageIndex != anchorImageIndex_)
+		{
+			return false;
+		}
+
+		retiredBundlesPending_ = false;
+		firstPresentAnchored_ = false;
+		return true;
+	}
+
+	void UnextendedPresentationRetirementTracker::Reset() noexcept
+	{
+		activeGeneration_ = 0u;
+		anchorGeneration_ = 0u;
+		anchorImageIndex_ = 0u;
+		retiredBundlesPending_ = false;
+		firstPresentAnchored_ = false;
+	}
+
 	bool PresentationLifecycle::Configure(std::uint32_t concurrentFrames, std::uint32_t surfaceMinimum,
 		std::uint32_t requestedImages, std::uint32_t actualImages)
 	{

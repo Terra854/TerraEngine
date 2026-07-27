@@ -605,6 +605,8 @@ EditorProfilerCaptureSummary EditorProfilerService::SummarizeDocument(
 	std::map<std::string, MetricAccumulator> boundaryAccumulators;
 	std::map<std::string, MetricAccumulator> presentationAccumulators;
 	std::map<std::string, MetricAccumulator> responsivenessAccumulators;
+	std::vector<double> completeFrameDurations;
+	completeFrameDurations.reserve(document.frames.size());
 	struct WorkerAccumulator
 	{
 		EditorProfilerWorkerSummary summary;
@@ -624,7 +626,10 @@ EditorProfilerCaptureSummary EditorProfilerService::SummarizeDocument(
 		summary.minimumFrameMs = std::min(summary.minimumFrameMs, frame.durationMs);
 		summary.maximumFrameMs = std::max(summary.maximumFrameMs, frame.durationMs);
 		if (frame.complete)
+		{
 			++summary.completeFrameCount;
+			completeFrameDurations.push_back(frame.durationMs);
+		}
 		else
 			++summary.incompleteFrameCount;
 
@@ -688,6 +693,16 @@ EditorProfilerCaptureSummary EditorProfilerService::SummarizeDocument(
 	if (summary.frameCount != 0u)
 	{
 		summary.averageFrameMs = summary.totalDurationMs / static_cast<double>(summary.frameCount);
+	}
+	if (!completeFrameDurations.empty())
+	{
+		// A recovered partial tail is useful lifecycle evidence, but it must not
+		// enter timing percentiles as if it were a fully observed frame.
+		std::sort(completeFrameDurations.begin(), completeFrameDurations.end());
+		summary.frameMedianMs = PercentileFromSorted(completeFrameDurations, 0.50);
+		summary.frameP95Ms = PercentileFromSorted(completeFrameDurations, 0.95);
+		summary.frameP99Ms = PercentileFromSorted(completeFrameDurations, 0.99);
+		summary.frameWorstMs = completeFrameDurations.back();
 	}
 	summary.timingStreams = TerraEngine::Profiling::BuildTimingStreamAggregates(document.frames);
 	summary.stageTimings = FinalizeMetrics(stageAccumulators);

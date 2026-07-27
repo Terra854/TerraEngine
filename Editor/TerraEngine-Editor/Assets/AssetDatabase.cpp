@@ -15,7 +15,9 @@
 #include <cstring>
 #include <cstdlib>
 #include <regex>
+#include <set>
 #include <stdexcept>
+#include <string_view>
 #include <thread>
 #ifdef _WIN32
 #define NOMINMAX
@@ -34,6 +36,7 @@
 #include "Editor/AssetCompilers/PhysicsColliderCompiler.h"
 #include "AssetImportResult.h"
 #include "Engine/File Formats/TerraEngineTextureFile.h"
+#include "Engine/File Formats/TerraEngineAnimationFile.h"
 #include "Engine/Resource/ResourceManager.h"
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Scene/SceneManager.h"
@@ -52,6 +55,33 @@ namespace {
 #else
 	constexpr const char* kPhysicsColliderCompilerName = "TerraEnginePhysicsColliderCompiler";
 #endif
+
+	// AnimationHotReloadPublisher invokes this callback only after its own staged
+	// generation has passed stale-state validation. ResourceManager then commits
+	// every prepared live cache under one lock set; false leaves both owners at
+	// their complete previous generation.
+	struct AnimationResourceBatchCommitContext {
+		PreparedAnimationAssetReloadBatch* prepared = nullptr;
+	};
+
+	bool CommitPreparedAnimationResourceBatch(void* opaqueContext) noexcept {
+		auto* context = static_cast<AnimationResourceBatchCommitContext*>(opaqueContext);
+		return context != nullptr && context->prepared != nullptr
+			&& ResourceManager::Instance().CommitPreparedAnimationAssetReloadBatch(
+				*context->prepared);
+	}
+
+	void ReleasePreparedAnimationResourceBatchLocks(void* opaqueContext) noexcept {
+		auto* context = static_cast<AnimationResourceBatchCommitContext*>(opaqueContext);
+		if(context != nullptr && context->prepared != nullptr) {
+			ResourceManager::Instance().ReleasePreparedAnimationAssetReloadBatchLocks(*context->prepared);
+		}
+	}
+
+	void RetireAnimationResourcePayload(void*, const TerraEngine::UUID& assetId,
+		std::uint64_t generation) noexcept {
+		ResourceManager::Instance().RetireAnimationAssetPayloadGeneration(assetId, generation);
+	}
 
 	std::optional<TerraEngine::Physics::PhysicsAssetKind> PhysicsAssetKindForImporter(
 		std::string_view importerName) {
@@ -207,13 +237,70 @@ namespace {
 			&& filename.compare(filename.size() - std::string(".import.json").size(), std::string(".import.json").size(), ".import.json") == 0;
 	}
 
+	bool IsMotionDatabaseAuthoringSidecarPath(const std::filesystem::path& path) {
+		// Motion-database authoring JSON is a durable editor document paired with
+		// its cooked asset. Importing it as a generic project asset can race its
+		// exact-byte save token and also exposes bookkeeping in the Project Browser.
+		const std::string filename = path.filename().string();
+		constexpr std::string_view suffix = ".temotiondb.authoring.json";
+		return filename.size() >= suffix.size()
+			&& filename.compare(filename.size() - suffix.size(), suffix.size(), suffix) == 0;
+	}
+
+	bool IsGeneratedAnimationPackageBinary(const std::filesystem::path& path) {
+		const std::string extension = LowerPath(path.extension());
+		if(extension != ".teskel" && extension != ".teanim") {
+			return false;
+		}
+		// Skeletons and clips below a package-owned Generated directory are exposed
+		// through its manifest. Treating them as loose assets would create editable
+		// .meta files and a second GUID for the same runtime payload.
+		for(const std::filesystem::path& part : path.parent_path()) {
+			const std::string name = part.string();
+			if(name.size() >= std::string("_Generated").size()
+				&& name.ends_with("_Generated")) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool IsModelPackageTransactionPath(const std::filesystem::path& path) {
+		// ModelPackageImporter writes package candidates below a reserved
+		// `.ta-<16 lowercase hex digits>` Assets directory. Those files are one
+		// unpublished transaction, not independently authored assets. Ignoring only
+		// the exact reserved shape keeps ordinary dot-folders discoverable while
+		// preventing the watcher from racing package publication or assigning
+		// metadata to private material/prefab candidates.
+		for(const std::filesystem::path& part : path) {
+			const std::string name = part.string();
+			if(name.size() != 20U || !name.starts_with(".ta-")) {
+				continue;
+			}
+			const bool isLowerHexToken = std::all_of(name.begin() + 4, name.end(), [](char value) {
+				return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f');
+			});
+			if(isLowerHexToken) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	bool IsIgnoredAssetDatabasePath(const std::filesystem::path& path) {
+		if(IsModelPackageTransactionPath(path)) {
+			return true;
+		}
 		if (path.extension() == ".meta") {
 			std::filesystem::path sourcePath = path;
 			sourcePath.replace_extension("");
-			return IsImportSidecarPath(sourcePath);
+			return IsImportSidecarPath(sourcePath)
+				|| IsMotionDatabaseAuthoringSidecarPath(sourcePath)
+				|| IsGeneratedAnimationPackageBinary(sourcePath);
 		}
-		return IsImportSidecarPath(path);
+		return IsImportSidecarPath(path)
+			|| IsMotionDatabaseAuthoringSidecarPath(path)
+			|| IsGeneratedAnimationPackageBinary(path);
 	}
 
 	bool IsTrackedSourceAssetPath(const std::filesystem::path& path) {
@@ -340,73 +427,223 @@ namespace {
 		return true;
 	}
 
-	// RegisterGeneratedModelPackageResources bridges package-owned sub-assets into the
-	// runtime resource table. Some generated package outputs, especially
-	// textures, are not standalone source assets in the browser, but materials
-	// still reference their stable package GUIDs and need ResourceManager paths.
-	void RegisterGeneratedModelPackageResources(
-		const std::filesystem::path& sourcePath,
-		const std::filesystem::path& buildRoot)
+	std::optional<AssetType> RuntimeAssetTypeForGeneratedKind(GeneratedModelPackageChildKind kind)
 	{
-		const std::filesystem::path sidecarPath = TerraEngine::AssetPipeline::GetImportResultPath(sourcePath);
-		if (!std::filesystem::exists(sidecarPath))
+		switch (kind)
+		{
+		case GeneratedModelPackageChildKind::Mesh:
+		case GeneratedModelPackageChildKind::DeformableMesh:
+			return AssetType::Mesh;
+		case GeneratedModelPackageChildKind::Material:
+			return AssetType::Material;
+		case GeneratedModelPackageChildKind::Texture:
+			return AssetType::Texture;
+		case GeneratedModelPackageChildKind::Skeleton:
+			return AssetType::Skeleton;
+		case GeneratedModelPackageChildKind::AnimationClip:
+			return AssetType::AnimationClip;
+		case GeneratedModelPackageChildKind::MorphTarget:
+		case GeneratedModelPackageChildKind::Prefab:
+			return std::nullopt;
+		}
+		return std::nullopt;
+	}
+
+	std::optional<AssetType> RuntimeAssetTypeForCookedAnimationImporter(std::string_view importerName)
+	{
+		// Cooked animation files are copied as immutable runtime artifacts. Keep
+		// this mapping in the AssetDatabase so watcher, delete, and registration
+		// paths cannot accidentally disagree about their stable resource type.
+		if (importerName == "SkeletonAssetImporter") return AssetType::Skeleton;
+		if (importerName == "AnimationClipAssetImporter") return AssetType::AnimationClip;
+		if (importerName == "AnimationControllerAssetImporter") return AssetType::AnimationController;
+		if (importerName == "AnimationMaskAssetImporter") return AssetType::AnimationMask;
+		if (importerName == "RetargetProfileAssetImporter") return AssetType::RetargetProfile;
+		if (importerName == "MotionDatabaseAssetImporter") return AssetType::MotionDatabase;
+		if (importerName == "RagdollProfileAssetImporter") return AssetType::RagdollProfile;
+		return std::nullopt;
+	}
+
+	std::optional<TerraEngine::Animation::AnimationReloadAssetType> ReloadAssetTypeForRuntimeType(
+		AssetType type)
+	{
+		using ReloadType = TerraEngine::Animation::AnimationReloadAssetType;
+		switch (type)
+		{
+		case AssetType::Skeleton: return ReloadType::Skeleton;
+		case AssetType::AnimationClip: return ReloadType::AnimationClip;
+		case AssetType::AnimationController: return ReloadType::AnimationController;
+		case AssetType::AnimationMask: return ReloadType::AnimationMask;
+		case AssetType::RetargetProfile: return ReloadType::RetargetProfile;
+		case AssetType::MotionDatabase: return ReloadType::MotionDatabase;
+		case AssetType::RagdollProfile: return ReloadType::RagdollProfile;
+		default: return std::nullopt;
+		}
+	}
+
+	std::optional<TerraEngine::UUID> ReadCookedAnimationAssetId(
+		const std::filesystem::path& path)
+	{
+		TerraEngine::Animation::AnimationAssetEnvelope envelope{};
+		std::ifstream input(path, std::ios::binary);
+		if (!input.read(reinterpret_cast<char*>(&envelope), sizeof(envelope))
+			|| envelope.magic != TerraEngine::Animation::kAnimationAssetMagic
+			|| envelope.headerSize != sizeof(envelope)
+			|| envelope.endianMarker != TerraEngine::Animation::kAnimationLittleEndianMarker
+			|| envelope.assetId.value == TerraEngine::EMPTY_UUID)
+		{
+			return std::nullopt;
+		}
+		return envelope.assetId.value;
+	}
+
+	std::optional<GeneratedModelPackageChildKind> GeneratedKindForManifestKind(
+		TerraEngine::AssetPipeline::AnimationImportSubAssetKind kind)
+	{
+		using ManifestKind = TerraEngine::AssetPipeline::AnimationImportSubAssetKind;
+		switch (kind)
+		{
+		case ManifestKind::Skeleton: return GeneratedModelPackageChildKind::Skeleton;
+		case ManifestKind::AnimationClip: return GeneratedModelPackageChildKind::AnimationClip;
+		case ManifestKind::DeformableMesh: return GeneratedModelPackageChildKind::DeformableMesh;
+		case ManifestKind::MorphTarget: return GeneratedModelPackageChildKind::MorphTarget;
+		case ManifestKind::Material: return GeneratedModelPackageChildKind::Material;
+		case ManifestKind::Texture: return GeneratedModelPackageChildKind::Texture;
+		case ManifestKind::Prefab: return GeneratedModelPackageChildKind::Prefab;
+		case ManifestKind::Mesh: return GeneratedModelPackageChildKind::Mesh;
+		}
+		return std::nullopt;
+	}
+
+	std::optional<TerraEngine::AssetPipeline::AnimationImportSubAssetKind> ManifestKindForGeneratedKind(
+		GeneratedModelPackageChildKind kind)
+	{
+		using ManifestKind = TerraEngine::AssetPipeline::AnimationImportSubAssetKind;
+		switch (kind)
+		{
+		case GeneratedModelPackageChildKind::Skeleton: return ManifestKind::Skeleton;
+		case GeneratedModelPackageChildKind::AnimationClip: return ManifestKind::AnimationClip;
+		case GeneratedModelPackageChildKind::DeformableMesh: return ManifestKind::DeformableMesh;
+		case GeneratedModelPackageChildKind::MorphTarget: return ManifestKind::MorphTarget;
+		case GeneratedModelPackageChildKind::Material: return ManifestKind::Material;
+		case GeneratedModelPackageChildKind::Texture: return ManifestKind::Texture;
+		case GeneratedModelPackageChildKind::Prefab: return ManifestKind::Prefab;
+		case GeneratedModelPackageChildKind::Mesh: return ManifestKind::Mesh;
+		}
+		return std::nullopt;
+	}
+
+	std::optional<std::filesystem::path> ResolveGeneratedBuildArtifact(
+		const std::filesystem::path& buildRoot,
+		const std::filesystem::path& relativePath)
+	{
+		// Manifest paths are project-relative payload locations. Reject absolute or
+		// parent-traversing records before they can become a runtime path alias.
+		if (relativePath.empty() || relativePath.is_absolute() || HasParentTraversal(relativePath))
+		{
+			return std::nullopt;
+		}
+		const std::filesystem::path root = std::filesystem::absolute(buildRoot).lexically_normal();
+		const std::filesystem::path candidate = std::filesystem::absolute(buildRoot / relativePath).lexically_normal();
+		if (!PathIsWithin(candidate, root) || !std::filesystem::is_regular_file(candidate))
+		{
+			return std::nullopt;
+		}
+		return candidate;
+	}
+
+	struct GeneratedPackageResourceAlias
+	{
+		TerraEngine::UUID guid = TerraEngine::EMPTY_UUID;
+		GeneratedModelPackageChildKind kind = GeneratedModelPackageChildKind::Mesh;
+		std::filesystem::path compiledPath;
+	};
+
+	void AppendGeneratedPackageAlias(
+		std::vector<GeneratedPackageResourceAlias>& aliases,
+		GeneratedPackageResourceAlias candidate)
+	{
+		const std::optional<AssetType> candidateType = RuntimeAssetTypeForGeneratedKind(candidate.kind);
+		if (!candidateType || candidate.guid == TerraEngine::EMPTY_UUID)
 		{
 			return;
 		}
+		const auto duplicate = std::find_if(aliases.begin(), aliases.end(), [&](const GeneratedPackageResourceAlias& current) {
+			return current.guid == candidate.guid
+				&& RuntimeAssetTypeForGeneratedKind(current.kind) == candidateType;
+		});
+		if (duplicate == aliases.end())
+		{
+			aliases.push_back(std::move(candidate));
+		}
+	}
 
-		std::ifstream in(sidecarPath);
-		if (!in)
+	bool IsPublishedAnimationManifest(
+		const TerraEngine::AssetPipeline::ModelPackageImportResult& importResult)
+	{
+		const TerraEngine::AssetPipeline::AnimationImportManifest& manifest = importResult.animationManifest;
+		if(importResult.status == TerraEngine::AssetPipeline::ModelImportStatus::Failed
+			|| importResult.packageGuid == TerraEngine::EMPTY_UUID
+			|| manifest.packageGuid != importResult.packageGuid
+			|| manifest.cancelled
+			|| !manifest.publishedAtomically
+			|| manifest.publishedGeneration == 0u
+			|| manifest.candidateGeneration != manifest.publishedGeneration)
+		{
+			return false;
+		}
+
+		// Recomputing the dependency fingerprint makes registration fail closed if
+		// a sidecar was partially edited or copied without its matching children.
+		return !manifest.dependencyFingerprintHex.empty()
+			&& manifest.dependencyFingerprintHex
+				== TerraEngine::AssetPipeline::BuildAnimationImportDependencyFingerprint(manifest)
+			&& TerraEngine::AssetPipeline::ValidateAnimationImportManifestDependencies(manifest);
+	}
+
+	std::optional<std::filesystem::path> ResolveGeneratedSourceArtifact(
+		const std::filesystem::path& assetRoot,
+		const std::filesystem::path& relativePath)
+	{
+		// Generated source documents are package-owned, but they still must remain
+		// beneath Assets before any inspector-side validation opens them.
+		if(relativePath.empty() || relativePath.is_absolute() || HasParentTraversal(relativePath))
+		{
+			return std::nullopt;
+		}
+		const std::filesystem::path root = std::filesystem::absolute(assetRoot).lexically_normal();
+		const std::filesystem::path candidate = std::filesystem::absolute(assetRoot / relativePath).lexically_normal();
+		if(!PathIsWithin(candidate, root) || !std::filesystem::is_regular_file(candidate))
+		{
+			return std::nullopt;
+		}
+		return candidate;
+	}
+
+	constexpr std::size_t kMaximumAnimationSummaryDiagnostics = 64u;
+	constexpr std::size_t kMaximumAnimationSummaryDiagnosticCharacters = 512u;
+
+	void AppendAnimationSummaryDiagnostic(
+		ModelPackageAnimationSummaryMetadata& summary,
+		std::string diagnostic)
+	{
+		// Inspector and automation responses are intentionally bounded. Import logs
+		// retain full details, while this summary stays safe to display or serialize.
+		if(summary.diagnostics.size() >= kMaximumAnimationSummaryDiagnostics)
 		{
 			return;
 		}
+		if(diagnostic.size() > kMaximumAnimationSummaryDiagnosticCharacters)
+		{
+			diagnostic.resize(kMaximumAnimationSummaryDiagnosticCharacters - 3u);
+			diagnostic += "...";
+		}
+		summary.diagnostics.push_back(std::move(diagnostic));
+	}
 
-		json result;
-		try
-		{
-			in >> result;
-		}
-		catch (const json::exception& ex)
-		{
-			TERRAENGINE_LOG(LogLevel::Warning, "Skipping generated model package resource registration for malformed import sidecar "
-				<< sidecarPath << ": " << ex.what());
-			return;
-		}
-		for (const json& mesh : result.value("generatedMeshes", json::array()))
-		{
-			const auto guid = TerraEngine::ParseUUID(mesh.value("guid", ""));
-			const json virtualGeometry = mesh.value("virtualGeometry", json::object());
-			const std::string packageStatus = result.value("status", std::string());
-			const std::string virtualGeometryStatus = virtualGeometry.value("status", std::string());
-			if (!guid
-				|| packageStatus == "Failed"
-				|| !mesh.contains("compiledPath")
-				|| virtualGeometryStatus == "Failed"
-				|| virtualGeometryStatus == "NeedsRebuild")
-			{
-				continue;
-			}
-			ResourceManager::Instance().RegisterAssetPath(*guid, buildRoot / mesh["compiledPath"].get<std::string>(), AssetType::Mesh);
-		}
-
-		for (const json& material : result.value("generatedMaterials", json::array()))
-		{
-			const auto guid = TerraEngine::ParseUUID(material.value("guid", ""));
-			if (!guid || !material.contains("compiledPath"))
-			{
-				continue;
-			}
-			ResourceManager::Instance().RegisterAssetPath(*guid, buildRoot / material["compiledPath"].get<std::string>(), AssetType::Material);
-		}
-
-		for (const json& texture : result.value("generatedTextures", json::array()))
-		{
-			const auto guid = TerraEngine::ParseUUID(texture.value("guid", ""));
-			if (!guid || !texture.contains("compiledPath"))
-			{
-				continue;
-			}
-			ResourceManager::Instance().RegisterAssetPath(*guid, buildRoot / texture["compiledPath"].get<std::string>(), AssetType::Texture);
-		}
+	bool ContainsUuid(const std::vector<TerraEngine::UUID>& values, const TerraEngine::UUID& value)
+	{
+		return std::find(values.begin(), values.end(), value) != values.end();
 	}
 
 	bool AreClose(float lhs, float rhs)
@@ -741,6 +978,26 @@ AssetDatabase& AssetDatabase::Instance() {
 AssetDatabase::AssetDatabase() {}
 AssetDatabase::~AssetDatabase() {}
 
+#ifdef TERRAENGINE_EDITOR_TESTS
+void AssetDatabase::SetAsyncImportCompileHookForTests(AsyncImportCompileHookForTests hook) {
+	// The worker copies the hook while holding this mutex, then invokes the copy
+	// without the mutex so a blocking test hook cannot prevent later cleanup.
+	std::lock_guard<std::mutex> lock(asyncImportCompileHookMutex);
+	asyncImportCompileHookForTests = std::move(hook);
+}
+
+void AssetDatabase::SetAnimationPackagePostPublisherPrepareHookForTests(
+	AnimationPackagePostPublisherPrepareHookForTests hook) {
+	std::lock_guard<std::mutex> lock(animationPackageTestHookMutex);
+	animationPackagePostPublisherPrepareHookForTests = std::move(hook);
+}
+
+std::optional<TerraEngine::Animation::AnimationReloadGenerationView>
+AssetDatabase::GetAnimationReloadGenerationForTests(const TerraEngine::UUID& assetId) const {
+	return animationHotReloadPublisher.QueryGeneration(assetId);
+}
+#endif
+
 // AssetDatabase::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void AssetDatabase::Initialize(const std::filesystem::path& projectRootPath) {
 	// A project boundary invalidates prior dependency observations before the new
@@ -757,6 +1014,21 @@ void AssetDatabase::Initialize(const std::filesystem::path& projectRootPath) {
 	if (!std::filesystem::exists(assetIndexPath.parent_path())) std::filesystem::create_directories(assetIndexPath.parent_path());
 
 	assets.clear();
+	generatedModelPackageResources.clear();
+	// Initialize is a protected project boundary. Publisher retains from the
+	// previous project are no longer valid, so reclaim their real cache payloads
+	// before Reset discards the only publisher-generation retirement records.
+	ResourceManager::Instance().ReleaseAllRetiredAnimationAssetPayloadsAtProtectedBoundary();
+	animationHotReloadPublisher.Reset();
+#ifdef TERRAENGINE_EDITOR_TESTS
+	SetAnimationPackagePostPublisherPrepareHookForTests({});
+#endif
+	{
+		std::lock_guard<std::mutex> lock(animationReimportStatusMutex);
+		animationReimportStatuses.clear();
+		nextAnimationReimportStatusSequence = 0u;
+	}
+	animationReloadBoundaryToRetireNextUpdate = 0u;
 	loadingAssetIndex = false;
 	assetIndexSaveDeferred = false;
 	recentlyRemovedAssets.clear();
@@ -785,13 +1057,27 @@ void AssetDatabase::Initialize(const std::filesystem::path& projectRootPath) {
 
 // AssetDatabase::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void AssetDatabase::Shutdown() {
-	CancelAllImportsAndWait(true);
+	// Ordinary project/editor shutdown is not an instruction to delete authored
+	// content. Stop accepting watcher work, then let successful compiler jobs use
+	// the same metadata/resource publication path they would use during Update.
+	// The interactive "Continue Closing" path requests destructive cancellation
+	// before it reaches here, and DrainAllImportsAndWait preserves that intent.
+	fileWatcher.Stop();
+	DrainAllImportsAndWait();
 	if (projectReconcileFuture.valid()) {
 		projectReconcileFuture.wait();
 		(void)projectReconcileFuture.get();
 	}
-	fileWatcher.Stop();
 	assets.clear();
+	generatedModelPackageResources.clear();
+	// Draining all imports completes the editor's protected shutdown boundary.
+	// Reclaim old cache generations before resetting publisher bookkeeping.
+	ResourceManager::Instance().ReleaseAllRetiredAnimationAssetPayloadsAtProtectedBoundary();
+	animationHotReloadPublisher.Reset();
+#ifdef TERRAENGINE_EDITOR_TESTS
+	SetAnimationPackagePostPublisherPrepareHookForTests({});
+#endif
+	animationReloadBoundaryToRetireNextUpdate = 0u;
 	deferredImports.clear();
 	pendingReconcileImports.clear();
 	pendingReconcileOrphanedMetas.clear();
@@ -800,6 +1086,20 @@ void AssetDatabase::Shutdown() {
 
 // AssetDatabase::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void AssetDatabase::Update() {
+	// The prior update boundary is now complete. The publisher still refuses to
+	// retire generations held by evaluator/GPU/managed references.
+	if (animationReloadBoundaryToRetireNextUpdate != 0u)
+	{
+		animationHotReloadPublisher.RetireThroughBoundary(
+			animationReloadBoundaryToRetireNextUpdate, RetireAnimationResourcePayload);
+		// Retained frame/GPU/managed generations are deliberately skipped. Keep the
+		// completed boundary scheduled until the bounded publisher queue is empty so
+		// their later ReleaseGeneration becomes observable without another reload.
+		if (!animationHotReloadPublisher.HasPendingRetirements())
+		{
+			animationReloadBoundaryToRetireNextUpdate = 0u;
+		}
+	}
 	PruneRecentlyRemovedAssets();
 	PublishBackgroundProjectReconcile();
 	ProcessPendingProjectReconcile();
@@ -834,20 +1134,7 @@ void AssetDatabase::Update() {
 	for (auto jobIt = asyncJobs.begin(); jobIt != asyncJobs.end(); ) {
 		if (jobIt->future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
 			const std::filesystem::path completedPath = jobIt->absSourcePath;
-			bool compiled = jobIt->future.get();
-			const bool cancelled = jobIt->progressState && jobIt->progressState->cancelRequested.load();
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (cancelled) {
-				SetImportProgress(jobIt->progressState, "Cancelled", "Cleaning up cancelled import outputs.", 1.0f, false, true);
-				CleanupCancelledImport(jobIt->metadata, jobIt->absSourcePath, jobIt->progressState->removeAssetAfterCancel.load());
-			} else if (!compiled) {
-				SetImportProgress(jobIt->progressState, "Failed", "Compilation failed; see the log for details.", 1.0f, false, true);
-				TERRAENGINE_LOG(LogLevel::Error, "Asset compilation failed for: " << jobIt->absSourcePath);
-			} else {
-				SetImportProgress(jobIt->progressState, "Registering", "Updating metadata and editor resources on the main thread.", 0.95f, false, false);
-				FinishImport(jobIt->metadata, jobIt->absSourcePath, jobIt->needsImport);
-				SetImportProgress(jobIt->progressState, "Complete", "Import finished.", 1.0f, false, false);
-			}
+			FinalizeAsyncImportJob(*jobIt);
 			jobIt = asyncJobs.erase(jobIt);
 			if (const auto deferredIt = deferredImports.find(completedPath); deferredIt != deferredImports.end()) {
 				readyDeferredImports.push_back(*deferredIt);
@@ -900,11 +1187,14 @@ bool AssetDatabase::CancelImport(const std::filesystem::path& absSourcePath, boo
 	for (AsyncCompileJob& job : asyncJobs) {
 		if (job.absSourcePath == normalizedPath && job.progressState) {
 			const AssetImportProgress snapshot = SnapshotImportProgress(job.progressState);
-			job.progressState->cancelRequested.store(true);
-			job.progressState->removeAssetAfterCancel.store(removeAssetAfterCancel);
+			if (!RequestImportCancellation(job.progressState, removeAssetAfterCancel)) {
+				// Atomic publication already won the boundary. Returning false tells
+				// the caller that the completed result will be finalized normally.
+				return false;
+			}
 			TerminateCompilerProcess(job.progressState);
 			SetImportProgress(job.progressState, "Cancelling", "Stopping import and preparing cleanup.", snapshot.progress, false, false);
-			CleanupCancelledImport(job.metadata, job.absSourcePath, removeAssetAfterCancel);
+			CleanupCancelledImport(job.metadata, job.absSourcePath, job.progressState->removeAssetAfterCancel.load());
 			return true;
 		}
 	}
@@ -915,34 +1205,136 @@ void AssetDatabase::RequestCancelAllImports(bool removeAssetsAfterCancel) {
 	for (AsyncCompileJob& job : asyncJobs) {
 		if (job.progressState) {
 			const AssetImportProgress snapshot = SnapshotImportProgress(job.progressState);
-			job.progressState->cancelRequested.store(true);
-			job.progressState->removeAssetAfterCancel.store(removeAssetsAfterCancel);
+			if (!RequestImportCancellation(job.progressState, removeAssetsAfterCancel)) {
+				// A fully published compiler result is too late to cancel. The drain
+				// path below will register it instead of discarding coherent output.
+				continue;
+			}
 			TerminateCompilerProcess(job.progressState);
 			SetImportProgress(job.progressState, "Cancelling", "Stopping import and preparing cleanup.", snapshot.progress, false, false);
+			CleanupCancelledImport(job.metadata, job.absSourcePath, job.progressState->removeAssetAfterCancel.load());
 		}
-		CleanupCancelledImport(job.metadata, job.absSourcePath, removeAssetsAfterCancel);
 	}
 	deferredImports.clear();
 }
 
 void AssetDatabase::CancelAllImportsAndWait(bool removeAssetsAfterCancel) {
 	RequestCancelAllImports(removeAssetsAfterCancel);
+	DrainAllImportsAndWait();
+}
 
-	for (AsyncCompileJob& job : asyncJobs) {
-		if (job.future.valid()) {
-			job.future.wait();
-			try {
-				(void)job.future.get();
-			} catch (const std::exception& exception) {
-				TERRAENGINE_LOG(LogLevel::Warning, "Asset import worker ended during cancellation: " << exception.what());
-			} catch (...) {
-				TERRAENGINE_LOG(LogLevel::Warning, "Asset import worker ended during cancellation with an unknown error.");
-			}
-		}
-		CleanupCancelledImport(job.metadata, job.absSourcePath, job.progressState && job.progressState->removeAssetAfterCancel.load());
-	}
+void AssetDatabase::DrainAllImportsAndWait() {
+	// A successful job has already published a complete compiled file atomically,
+	// but metadata and live registration still belong to the caller thread. Drain
+	// every future and complete that final protected step before project state is
+	// cleared. Explicitly cancelled jobs retain their destructive/non-destructive
+	// mode and may reach CleanupCancelledImport repeatedly without changing it.
+	for (AsyncCompileJob& job : asyncJobs) FinalizeAsyncImportJob(job);
+
 	asyncJobs.clear();
 	deferredImports.clear();
+}
+
+void AssetDatabase::FinalizeAsyncImportJob(AsyncCompileJob& job)
+{
+	bool compiled = false;
+	bool workerReturned = false;
+	if (job.future.valid())
+	{
+		// Update calls this only for a ready future. Shutdown and explicit MCP
+		// import intentionally wait here because they own a protected boundary.
+		job.future.wait();
+		try
+		{
+			compiled = job.future.get();
+			workerReturned = true;
+		}
+		catch (const std::exception& exception)
+		{
+			TERRAENGINE_LOG(LogLevel::Warning,
+				"Asset import worker ended while finalizing " << job.absSourcePath << ": " << exception.what());
+		}
+		catch (...)
+		{
+			TERRAENGINE_LOG(LogLevel::Warning,
+				"Asset import worker ended while finalizing with an unknown error: " << job.absSourcePath);
+		}
+	}
+
+	const bool cancelled = job.progressState && job.progressState->cancelRequested.load();
+	if (cancelled)
+	{
+		if (const std::optional<AssetType> animationType =
+			RuntimeAssetTypeForCookedAnimationImporter(job.metadata.importerName))
+		{
+			RecordAnimationReimportStatus({job.absSourcePath, job.metadata.guid,
+				*ReloadAssetTypeForRuntimeType(*animationType), AnimationReimportState::Cancelled,
+				0u, ResourceManager::Instance().GetAnimationAssetRuntimeGeneration(
+					job.metadata.guid, *animationType), 0u, 0u, true,
+				"Animation reimport was cancelled before main-thread publication."});
+		}
+		SetImportProgress(job.progressState, "Cancelled", "Cancelled import cleanup is complete.", 1.0f, false, true);
+		CleanupCancelledImport(
+			job.metadata,
+			job.absSourcePath,
+			job.progressState->removeAssetAfterCancel.load());
+	}
+	else if (workerReturned && compiled)
+	{
+		SetImportProgress(
+			job.progressState,
+			"Registering",
+			"Updating metadata and editor resources on the main thread.",
+			0.95f,
+			false,
+			false);
+		FinishImport(job.metadata, job.absSourcePath, job.needsImport);
+		SetImportProgress(job.progressState, "Complete", "Import finished.", 1.0f, false, false);
+	}
+	else
+	{
+		if (const std::optional<AssetType> animationType =
+			RuntimeAssetTypeForCookedAnimationImporter(job.metadata.importerName))
+		{
+			const std::optional<AnimationReimportStatus> latest =
+				GetLatestAnimationReimportStatus(job.absSourcePath);
+			if (!latest || latest->state != AnimationReimportState::RetainedLastKnownGood)
+			{
+				RecordAnimationReimportStatus({job.absSourcePath, job.metadata.guid,
+					*ReloadAssetTypeForRuntimeType(*animationType), AnimationReimportState::Failed,
+					0u, ResourceManager::Instance().GetAnimationAssetRuntimeGeneration(
+						job.metadata.guid, *animationType), 0u, 0u, true,
+					"Animation worker failed; the prior compiled artifact and live generation remain authoritative."});
+			}
+		}
+		SetImportProgress(
+			job.progressState,
+			"Failed",
+			"Compilation failed; the prior published asset was preserved.",
+			1.0f,
+			false,
+			true);
+		TERRAENGINE_LOG(LogLevel::Warning, "Asset import did not complete: " << job.absSourcePath);
+	}
+}
+
+void AssetDatabase::FinalizeActiveImportForExplicitReimport(const std::filesystem::path& sourcePath)
+{
+	const std::filesystem::path normalizedPath = std::filesystem::absolute(sourcePath);
+	const auto active = std::find_if(asyncJobs.begin(), asyncJobs.end(), [&](const AsyncCompileJob& job) {
+		return job.absSourcePath == normalizedPath;
+	});
+	if (active != asyncJobs.end())
+	{
+		// Waiting only for the matching future preserves progress and throughput
+		// for unrelated startup/file-watcher jobs in this same editor session.
+		FinalizeAsyncImportJob(*active);
+		asyncJobs.erase(active);
+	}
+
+	// A duplicate request may have arrived while this job was compiling. The
+	// explicit synchronous reimport below supersedes that one path only.
+	deferredImports.erase(normalizedPath);
 }
 
 std::vector<AssetImportProgress> AssetDatabase::GetImportProgressSnapshot() const {
@@ -967,6 +1359,47 @@ std::optional<AssetImportProgress> AssetDatabase::GetImportProgress(const std::f
 	return std::nullopt;
 }
 
+std::vector<AnimationReimportStatus> AssetDatabase::GetAnimationReimportStatusSnapshot() const
+{
+	std::lock_guard<std::mutex> lock(animationReimportStatusMutex);
+	return {animationReimportStatuses.begin(), animationReimportStatuses.end()};
+}
+
+std::optional<AnimationReimportStatus> AssetDatabase::GetLatestAnimationReimportStatus(
+	const std::filesystem::path& sourcePath) const
+{
+	std::error_code error;
+	const std::filesystem::path normalized = sourcePath.empty()
+		? std::filesystem::path{}
+		: std::filesystem::absolute(sourcePath, error).lexically_normal();
+	std::lock_guard<std::mutex> lock(animationReimportStatusMutex);
+	for (auto it = animationReimportStatuses.rbegin(); it != animationReimportStatuses.rend(); ++it)
+	{
+		if (it->sourcePath == normalized)
+		{
+			return *it;
+		}
+	}
+	return std::nullopt;
+}
+
+void AssetDatabase::RecordAnimationReimportStatus(AnimationReimportStatus status)
+{
+	if (!status.sourcePath.empty())
+	{
+		std::error_code error;
+		status.sourcePath = std::filesystem::absolute(status.sourcePath, error).lexically_normal();
+	}
+	std::lock_guard<std::mutex> lock(animationReimportStatusMutex);
+	status.sequence = ++nextAnimationReimportStatusSequence;
+	animationReimportStatuses.push_back(std::move(status));
+	constexpr std::size_t kMaximumAnimationReimportStatuses = 512u;
+	while (animationReimportStatuses.size() > kMaximumAnimationReimportStatuses)
+	{
+		animationReimportStatuses.pop_front();
+	}
+}
+
 bool AssetDatabase::ShouldCompileAssetAsync(const std::string& importerName) const {
 	// Heavy asset compilers run on worker jobs and, on Windows, through child
 	// executables. That lets the UI show per-file progress and cancel the
@@ -975,6 +1408,7 @@ bool AssetDatabase::ShouldCompileAssetAsync(const std::string& importerName) con
 		|| importerName == "MeshImporter"
 		|| importerName == "ShaderImporter"
 		|| importerName == "PhysicsColliderRecipeImporter"
+		|| RuntimeAssetTypeForCookedAnimationImporter(importerName).has_value()
 		|| TerraEngine::AssetPipeline::IsModelPackageImporterName(importerName);
 }
 
@@ -1027,6 +1461,70 @@ void AssetDatabase::TerminateCompilerProcess(const std::shared_ptr<AsyncImportPr
 		(void)kill(processId, SIGTERM);
 	}
 #endif
+}
+
+bool AssetDatabase::RequestImportCancellation(
+	const std::shared_ptr<AsyncImportProgressState>& progressState,
+	bool removeAssetAfterCancel) const {
+	if (!progressState) {
+		return false;
+	}
+
+	std::lock_guard<std::mutex> lock(progressState->publicationMutex);
+	if (progressState->publicationCompleted) {
+		if (!removeAssetAfterCancel) {
+			return false;
+		}
+		// Explicit discard remains authoritative even if the worker completed
+		// its atomic rename just before the user clicked cancel. The cleanup path
+		// will remove that complete output together with the authored asset.
+		progressState->removeAssetAfterCancel.store(true);
+		progressState->cancelRequested.store(true);
+		return true;
+	}
+
+	// Destructive intent is monotonic. Repeating a non-destructive shutdown or
+	// automation cancellation must never downgrade an earlier explicit discard.
+	if (removeAssetAfterCancel) {
+		progressState->removeAssetAfterCancel.store(true);
+	}
+	progressState->cancelRequested.store(true);
+	return true;
+}
+
+bool AssetDatabase::MarkImportPublicationComplete(
+	const std::shared_ptr<AsyncImportProgressState>& progressState) const {
+	if (!progressState) {
+		return true;
+	}
+
+	std::lock_guard<std::mutex> lock(progressState->publicationMutex);
+	if (progressState->cancelRequested.load()) {
+		return false;
+	}
+	progressState->publicationCompleted = true;
+	return true;
+}
+
+bool AssetDatabase::PublishCompiledAssetFromWorker(
+	const std::filesystem::path& stagedPath,
+	const std::filesystem::path& finalPath,
+	const std::shared_ptr<AsyncImportProgressState>& progressState) const {
+	if (!progressState) {
+		return PublishCompiledAssetAtomically(stagedPath, finalPath);
+	}
+
+	// Hold only the short final rename boundary. Compiler work remains parallel,
+	// while cancellation can still terminate a long-running child process.
+	std::lock_guard<std::mutex> lock(progressState->publicationMutex);
+	if (progressState->cancelRequested.load()) {
+		return false;
+	}
+	if (!PublishCompiledAssetAtomically(stagedPath, finalPath)) {
+		return false;
+	}
+	progressState->publicationCompleted = true;
+	return true;
 }
 
 // AssetDatabase::OnFileEvent is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1168,6 +1666,26 @@ void AssetDatabase::ImportAssetInternal(const std::filesystem::path& sourcePath,
 	// on disk so inspector labels and meta persistence follow asset renames.
 	metadata.sourcePath = std::filesystem::relative(absSourcePath, assetRoot);
 	metadata.importerName = importerName;
+	if (RuntimeAssetTypeForCookedAnimationImporter(importerName))
+	{
+		// A cooked envelope owns its durable identity. New loose imports adopt that
+		// GUID instead of generating an unrelated .meta GUID that the typed loader
+		// would later (correctly) reject. Existing metadata never changes silently.
+		if (const std::optional<TerraEngine::UUID> cookedId = ReadCookedAnimationAssetId(absSourcePath))
+		{
+			if (!metadataValid)
+			{
+				metadata.guid = *cookedId;
+			}
+			else if (metadata.guid != *cookedId)
+			{
+				needsImport = true;
+				TERRAENGINE_LOG(LogLevel::Warning,
+					"Cooked animation identity differs from its existing metadata; reimport will fail closed: "
+					<< absSourcePath);
+			}
+		}
+	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (metadata.importerName == "ScriptImporter") {
@@ -1204,6 +1722,15 @@ void AssetDatabase::ImportAssetInternal(const std::filesystem::path& sourcePath,
 			
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (allowAsyncCompile && ShouldCompileAssetAsync(metadata.importerName)) {
+				if (const std::optional<AssetType> animationType =
+					RuntimeAssetTypeForCookedAnimationImporter(metadata.importerName))
+				{
+					RecordAnimationReimportStatus({absSourcePath, metadata.guid,
+						*ReloadAssetTypeForRuntimeType(*animationType), AnimationReimportState::Queued,
+						0u, ResourceManager::Instance().GetAnimationAssetRuntimeGeneration(
+							metadata.guid, *animationType), 0u, 0u, true,
+						"Cooked animation change was coalesced and queued for worker validation."});
+				}
 				auto progressState = std::make_shared<AsyncImportProgressState>();
 				progressState->snapshot.sourcePath = metadata.sourcePath;
 				progressState->snapshot.importerName = metadata.importerName;
@@ -1215,10 +1742,39 @@ void AssetDatabase::ImportAssetInternal(const std::filesystem::path& sourcePath,
 					resolvedMeshSettings = settings;
 				}
 
-				auto future = std::async(std::launch::async, [this, metadata, progressState, resolvedMeshSettings]() {
+				auto future = std::async(std::launch::async, [this, metadata, absSourcePath, progressState, resolvedMeshSettings]() {
 					try {
+						if (const std::optional<AssetType> animationType =
+							RuntimeAssetTypeForCookedAnimationImporter(metadata.importerName))
+						{
+							RecordAnimationReimportStatus({absSourcePath, metadata.guid,
+								*ReloadAssetTypeForRuntimeType(*animationType), AnimationReimportState::Compiling,
+								0u, ResourceManager::Instance().GetAnimationAssetRuntimeGeneration(
+									metadata.guid, *animationType), 0u, 0u, true,
+								"Worker is validating and staging the complete cooked animation envelope."});
+						}
 						SetImportProgress(progressState, "Importing", "Reading source data and writing compiled output.", 0.15f, true, false);
-						const bool compiled = CompileAsset(metadata, progressState, resolvedMeshSettings);
+						bool compiled = false;
+#ifdef TERRAENGINE_EDITOR_TESTS
+						AsyncImportCompileHookForTests compileHook;
+						{
+							std::lock_guard<std::mutex> lock(asyncImportCompileHookMutex);
+							compileHook = asyncImportCompileHookForTests;
+						}
+						if (compileHook) {
+							compiled = compileHook(metadata, progressState->cancelRequested);
+						} else {
+							compiled = CompileAsset(metadata, progressState, resolvedMeshSettings);
+						}
+#else
+						compiled = CompileAsset(metadata, progressState, resolvedMeshSettings);
+#endif
+						// Compilers with a staged output mark this inside the publication
+						// lock. This second idempotent mark also covers package compilers
+						// and the deterministic test hook after they report success.
+						if (compiled) {
+							compiled = MarkImportPublicationComplete(progressState);
+						}
 						SetImportProgress(progressState,
 							compiled ? "Finalizing" : "Failed",
 							compiled ? "Compile output is ready for main-thread registration." : "Compilation failed; see the log for details.",
@@ -1287,6 +1843,8 @@ void AssetDatabase::RegisterImportedAsset(const AssetMetadata& metadata, const s
 	if (!metadata.compiledPath.empty()) {
 		AssetType type;
 		bool known = false;
+		const std::optional<AssetType> cookedAnimationType =
+			RuntimeAssetTypeForCookedAnimationImporter(metadata.importerName);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (metadata.importerName == "MeshImporter") { type = AssetType::Mesh; known = true; }
 		// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1298,14 +1856,120 @@ void AssetDatabase::RegisterImportedAsset(const AssetMetadata& metadata, const s
 		else if (metadata.importerName == "PhysicsMaterialImporter") { type = AssetType::PhysicsMaterial; known = true; }
 		else if (metadata.importerName == "PhysicsColliderRecipeImporter"
 			|| metadata.importerName == "CookedColliderImporter") { type = AssetType::CookedCollider; known = true; }
+		else if (cookedAnimationType) {
+			type = *cookedAnimationType;
+			known = true;
+		}
 
 		if (known) {
+			const std::filesystem::path fullCompiled = buildRoot / metadata.compiledPath;
+			AnimationResourceValidationResult animationValidation;
+			bool registrationAccepted = true;
+			if (cookedAnimationType)
+			{
+				animationValidation = ResourceManager::Instance().ValidateAnimationAssetFile(
+					fullCompiled, *cookedAnimationType);
+				registrationAccepted = animationValidation.Passed()
+					&& animationValidation.assetId == metadata.guid;
+				if (!registrationAccepted)
+				{
+					RecordAnimationReimportStatus({absSourcePath, metadata.guid,
+						*ReloadAssetTypeForRuntimeType(*cookedAnimationType),
+						AnimationReimportState::RetainedLastKnownGood, 0u,
+						ResourceManager::Instance().GetAnimationAssetRuntimeGeneration(
+							metadata.guid, *cookedAnimationType), 0u, 0u, true,
+						animationValidation.Passed()
+							? "Cooked animation registration rejected an envelope GUID mismatch."
+							: animationValidation.diagnosticCode + ": " + animationValidation.message});
+				}
+			}
+
+			if (!registrationAccepted)
+			{
+				TERRAENGINE_LOG(LogLevel::Warning,
+					"Animation registration retained its prior path and generation: " << fullCompiled);
+			}
+			else
+			{
 			// Register source path as an alias so the engine can resolve things like "viking_room.png" to the same GUID.
 			// We do this first so that idToPath (the preferred load path) is eventually overwritten by the compiled path.
 			ResourceManager::Instance().RegisterAssetPath(metadata.guid, absSourcePath, type);
-
-			std::filesystem::path fullCompiled = buildRoot / metadata.compiledPath;
 			ResourceManager::Instance().RegisterAssetPath(metadata.guid, fullCompiled, type);
+
+			if (cookedAnimationType)
+			{
+				const TerraEngine::Animation::AnimationReloadOutcome previous =
+					animationHotReloadPublisher.Query(metadata.guid);
+				RecordAnimationReimportStatus({absSourcePath, metadata.guid,
+					*ReloadAssetTypeForRuntimeType(*cookedAnimationType), AnimationReimportState::Registered,
+					previous.activeGeneration + 1u, previous.activeGeneration, 0u, 0u,
+					false, "Validated cooked animation path and identity were registered atomically."});
+
+				if (needsImport || previous.activeGeneration == 0u)
+				{
+					TerraEngine::Animation::AnimationReloadCandidate candidate;
+					candidate.assetId = metadata.guid;
+					candidate.generation = previous.activeGeneration + 1u;
+					candidate.compatibilityFingerprint = animationValidation.actualCompatibilityFingerprint;
+					candidate.parsed = true;
+					candidate.dependenciesReady = true;
+					candidate.assetType = *ReloadAssetTypeForRuntimeType(*cookedAnimationType);
+					candidate.contentFingerprint = animationValidation.contentFingerprint;
+					candidate.contentHash = animationValidation.contentHash;
+					candidate.contentHashPresent = animationValidation.contentHashPresent;
+					const std::array candidates{candidate};
+					ResourceManager& resources = ResourceManager::Instance();
+					std::vector<AnimationAssetReloadRequest> cacheRequests;
+					if(resources.GetAnimationAssetRuntimeGeneration(
+						metadata.guid, *cookedAnimationType) != 0U) {
+						cacheRequests.push_back({metadata.guid, *cookedAnimationType,
+							candidate.compatibilityFingerprint, candidate.contentFingerprint,
+							previous.activeGeneration, candidate.contentHash,
+							candidate.contentHashPresent});
+					}
+					auto publisherBatch = animationHotReloadPublisher.PrepareBatch(candidates);
+					PreparedAnimationAssetReloadBatch resourceBatch;
+					bool resourcesPrepared = true;
+					if(!cacheRequests.empty()) {
+						resourceBatch = resources.PrepareAnimationAssetReloadBatch(cacheRequests);
+						resourcesPrepared = resourceBatch.Accepted();
+					}
+
+					if(publisherBatch.Accepted() && resourcesPrepared) {
+						AnimationResourceBatchCommitContext context{&resourceBatch};
+						(void)animationHotReloadPublisher.CommitPreparedBatch(
+							publisherBatch,
+						cacheRequests.empty() ? nullptr : CommitPreparedAnimationResourceBatch,
+						cacheRequests.empty() ? nullptr : &context,
+						cacheRequests.empty() ? nullptr : ReleasePreparedAnimationResourceBatchLocks);
+					}
+					std::vector<TerraEngine::Animation::AnimationReloadOutcome> outcomes =
+						std::move(publisherBatch).ReleaseOutcomes();
+					TerraEngine::Animation::AnimationReloadOutcome outcome;
+					if(!outcomes.empty()) outcome = std::move(outcomes.front());
+					const bool liveReloaded = outcome.published
+						&& (cacheRequests.empty() || resourceBatch.Committed());
+					const TerraEngine::Animation::AnimationReloadOutcome active =
+						animationHotReloadPublisher.Query(metadata.guid);
+					if(liveReloaded) {
+						resources.FinalizeCommittedAnimationAssetReloadBatch(resourceBatch);
+						animationReloadBoundaryToRetireNextUpdate = std::max(
+							animationReloadBoundaryToRetireNextUpdate, outcome.publicationBoundary);
+					}
+					const std::string diagnostic = liveReloaded
+						? "Animation publisher and every resident typed cache switched at one protected boundary."
+						: !resourcesPrepared
+							? "Animation cache staging failed; publisher and all live caches retained their prior generation: "
+								+ std::string(resourceBatch.Diagnostic())
+							: outcome.reason;
+					RecordAnimationReimportStatus({absSourcePath, metadata.guid,
+						candidate.assetType,
+						liveReloaded ? AnimationReimportState::Published
+							: AnimationReimportState::RetainedLastKnownGood,
+						candidate.generation, active.activeGeneration,
+						active.publicationBoundary, 0u, !liveReloaded, diagnostic});
+				}
+			}
 
 			(void)needsImport;
 			// Import registration is allowed to update the asset database and
@@ -1316,6 +1980,7 @@ void AssetDatabase::RegisterImportedAsset(const AssetMetadata& metadata, const s
 			// buffers invalid before submit. The renderer/resource residency path
 			// owns descriptor-safe retirement once a later frame observes the new
 			// asset revision.
+			}
 		}
 	}
 
@@ -1326,7 +1991,8 @@ void AssetDatabase::RegisterImportedAsset(const AssetMetadata& metadata, const s
 		// GPU descriptor invalidation must happen through the renderer's normal
 		// retirement path, otherwise already-recorded command buffers may still
 		// reference descriptor sets that a package reimport just updated or freed.
-		RegisterGeneratedModelPackageResources(absSourcePath, buildRoot);
+		RegisterGeneratedModelPackageResources(absSourcePath);
+		UpdateModelPackageAnimationSummary(absSourcePath);
 	}
 
 	const auto oldPhysicsKind = previousMetadata
@@ -1619,6 +2285,412 @@ void AssetDatabase::RegisterGeneratedModelPackageMaterialMetadata(const std::fil
 	}
 }
 
+void AssetDatabase::RegisterGeneratedModelPackageResources(const std::filesystem::path& absSourcePath)
+{
+	TerraEngine::AssetPipeline::ModelPackageImportResult importResult;
+	if(!TerraEngine::AssetPipeline::LoadModelPackageImportResult(absSourcePath, importResult)
+		|| importResult.status == TerraEngine::AssetPipeline::ModelImportStatus::Failed)
+	{
+		// Failed candidates never replace a working registration. The package
+		// importer deliberately leaves the last-known-good sidecar in place.
+		return;
+	}
+
+	const auto packageIt = assets.find(std::filesystem::absolute(absSourcePath));
+	if(packageIt == assets.end() || packageIt->second.guid != importResult.packageGuid)
+	{
+		TERRAENGINE_LOG(LogLevel::Warning,
+			"Generated animation package registration rejected because the sidecar package GUID does not match its source metadata: "
+			<< absSourcePath);
+		return;
+	}
+
+	const bool hasPublishedAnimationManifest = IsPublishedAnimationManifest(importResult);
+	std::vector<GeneratedPackageResourceAlias> aliases;
+	if(hasPublishedAnimationManifest)
+	{
+		aliases.reserve(importResult.animationManifest.subAssets.size());
+		for(const TerraEngine::AssetPipeline::GeneratedAnimationSubAsset& child : importResult.animationManifest.subAssets)
+		{
+			const std::optional<GeneratedModelPackageChildKind> kind = GeneratedKindForManifestKind(child.kind);
+			if(!kind || !RuntimeAssetTypeForGeneratedKind(*kind))
+			{
+				continue;
+			}
+			if(!child.readOnlyPackageChild)
+			{
+				TERRAENGINE_LOG(LogLevel::Warning,
+					"Generated animation package registration rejected an editable manifest child: "
+					<< child.semanticKey);
+				return;
+			}
+
+			const std::optional<std::filesystem::path> compiledPath = ResolveGeneratedBuildArtifact(
+				buildRoot, child.compiledPath);
+			if(!compiledPath)
+			{
+				// Treat missing runtime data as an invalid generation instead of exposing
+				// a mixture of old and new child paths to the engine.
+				TERRAENGINE_LOG(LogLevel::Warning,
+					"Generated animation package runtime artifact is missing or unsafe: "
+					<< child.compiledPath);
+				return;
+			}
+			const std::optional<AssetType> runtimeType = RuntimeAssetTypeForGeneratedKind(*kind);
+			if (runtimeType && (*runtimeType == AssetType::Skeleton
+				|| *runtimeType == AssetType::AnimationClip))
+			{
+				const AnimationResourceValidationResult validation =
+					ResourceManager::Instance().ValidateAnimationAssetFile(
+						*compiledPath, *runtimeType, child.compatibilityFingerprint);
+				if (!validation.Passed() || validation.assetId != child.guid)
+				{
+					// Validate every animation child before publishing any alias. A bad
+					// sibling therefore cannot create a mixed package generation.
+					RecordAnimationReimportStatus({absSourcePath, child.guid,
+						*ReloadAssetTypeForRuntimeType(*runtimeType),
+						AnimationReimportState::RetainedLastKnownGood,
+						importResult.animationManifest.publishedGeneration,
+						animationHotReloadPublisher.Query(child.guid).activeGeneration,
+						0u, 0u, true,
+						validation.Passed()
+							? "Generated animation child GUID does not match its manifest identity."
+							: validation.diagnosticCode + ": " + validation.message});
+					TERRAENGINE_LOG(LogLevel::Warning,
+						"Generated animation package retained its prior alias generation because child validation failed: "
+						<< child.semanticKey);
+					return;
+				}
+			}
+			AppendGeneratedPackageAlias(aliases, {child.guid, *kind, *compiledPath});
+		}
+	}
+	else
+	{
+		// Sidecars created before the Spec 043 animation manifest still identify
+		// stable generated render resources. Preserve that read-only compatibility
+		// path while reserving atomic all-or-none publication for current manifests.
+		aliases.reserve(importResult.generatedMeshes.size()
+			+ importResult.generatedMaterials.size()
+			+ importResult.generatedTextures.size());
+		const auto appendLegacyAlias = [&](const TerraEngine::UUID& guid,
+			GeneratedModelPackageChildKind kind,
+			const std::filesystem::path& relativePath) {
+			if(const std::optional<std::filesystem::path> compiledPath =
+				ResolveGeneratedBuildArtifact(buildRoot, relativePath))
+			{
+				AppendGeneratedPackageAlias(aliases, {guid, kind, *compiledPath});
+			}
+		};
+		for(const TerraEngine::AssetPipeline::GeneratedModelMeshAsset& mesh : importResult.generatedMeshes)
+		{
+			appendLegacyAlias(mesh.guid, GeneratedModelPackageChildKind::Mesh, mesh.compiledPath);
+		}
+		for(const TerraEngine::AssetPipeline::GeneratedModelMaterialAsset& material : importResult.generatedMaterials)
+		{
+			appendLegacyAlias(material.guid, GeneratedModelPackageChildKind::Material, material.compiledPath);
+		}
+		for(const TerraEngine::AssetPipeline::GeneratedModelTextureAsset& texture : importResult.generatedTextures)
+		{
+			appendLegacyAlias(texture.guid, GeneratedModelPackageChildKind::Texture, texture.compiledPath);
+		}
+	}
+
+	if(aliases.empty())
+	{
+		return;
+	}
+
+	// Publish every new preferred path before retiring children that disappeared.
+	// Stable IDs are re-registered in place, so a move/rename changes their load
+	// path without destroying an already loaded resource mid-frame.
+	for(const GeneratedPackageResourceAlias& alias : aliases)
+	{
+		const std::optional<AssetType> type = RuntimeAssetTypeForGeneratedKind(alias.kind);
+		if(type)
+		{
+			ResourceManager::Instance().RegisterAssetPath(alias.guid, alias.compiledPath, *type);
+		}
+	}
+
+	std::vector<std::pair<TerraEngine::UUID, GeneratedModelPackageChildKind>> nextRegistrations;
+	nextRegistrations.reserve(aliases.size());
+	for(const GeneratedPackageResourceAlias& alias : aliases)
+	{
+		nextRegistrations.emplace_back(alias.guid, alias.kind);
+	}
+
+	if(const auto previousIt = generatedModelPackageResources.find(importResult.packageGuid);
+		previousIt != generatedModelPackageResources.end())
+	{
+		for(const auto& [previousGuid, previousKind] : previousIt->second)
+		{
+			const std::optional<AssetType> previousType = RuntimeAssetTypeForGeneratedKind(previousKind);
+			const bool remainsPublished = previousType && std::any_of(
+				nextRegistrations.begin(), nextRegistrations.end(),
+				[&](const auto& current) {
+					return current.first == previousGuid
+						&& RuntimeAssetTypeForGeneratedKind(current.second) == previousType;
+				});
+			if(previousType && !remainsPublished)
+			{
+				// DeleteResource removes stale path aliases and sends any loaded render
+				// object through the renderer's protected invalidation path.
+				ResourceManager::Instance().DeleteResource(previousGuid, *previousType);
+			}
+		}
+	}
+
+	generatedModelPackageResources[importResult.packageGuid] = std::move(nextRegistrations);
+	// Aliases are now published as one coherent package generation.  Only after
+	// that protected boundary may evaluators advance their last-known-good
+	// generation; malformed children deliberately leave the old publication up.
+	PublishGeneratedAnimationHotReload(absSourcePath);
+}
+
+void AssetDatabase::PublishGeneratedAnimationHotReload(const std::filesystem::path& absSourcePath)
+{
+	TerraEngine::AssetPipeline::ModelPackageImportResult importResult;
+	if (!TerraEngine::AssetPipeline::LoadModelPackageImportResult(absSourcePath, importResult)
+		|| !IsPublishedAnimationManifest(importResult))
+	{
+		return;
+	}
+
+	struct PreparedAnimationChild
+	{
+		const TerraEngine::AssetPipeline::GeneratedAnimationSubAsset* child = nullptr;
+		AssetType type = AssetType::AnimationClip;
+		std::filesystem::path cookedPath;
+		AnimationResourceValidationResult validation;
+		TerraEngine::Animation::AnimationReloadCandidate candidate;
+	};
+	std::vector<PreparedAnimationChild> prepared;
+
+	for (const TerraEngine::AssetPipeline::GeneratedAnimationSubAsset& child : importResult.animationManifest.subAssets)
+	{
+		const std::optional<GeneratedModelPackageChildKind> kind = GeneratedKindForManifestKind(child.kind);
+		const std::optional<AssetType> type = kind ? RuntimeAssetTypeForGeneratedKind(*kind) : std::nullopt;
+		if (!type || (*type != AssetType::Skeleton && *type != AssetType::AnimationClip))
+		{
+			continue;
+		}
+
+		const std::optional<std::filesystem::path> cookedPath = ResolveGeneratedBuildArtifact(buildRoot, child.compiledPath);
+		PreparedAnimationChild item;
+		item.child = &child;
+		item.type = *type;
+		if (cookedPath)
+		{
+			item.cookedPath = *cookedPath;
+			item.validation = *type == AssetType::Skeleton
+				? ResourceManager::Instance().ValidateSkeletonAssetFile(*cookedPath, child.compatibilityFingerprint)
+				: ResourceManager::Instance().ValidateAnimationClipAssetFile(*cookedPath, child.compatibilityFingerprint);
+		}
+		item.candidate.assetId = child.guid;
+		item.candidate.generation = importResult.animationManifest.publishedGeneration;
+		item.candidate.compatibilityFingerprint = child.compatibilityFingerprint;
+		item.candidate.parsed = cookedPath && item.validation.Passed()
+			&& item.validation.assetId == child.guid;
+		item.candidate.dependenciesReady = item.candidate.parsed;
+		item.candidate.assetType = *ReloadAssetTypeForRuntimeType(*type);
+		item.candidate.contentFingerprint = item.validation.contentFingerprint;
+		item.candidate.contentHash = item.validation.contentHash;
+		item.candidate.contentHashPresent = item.validation.contentHashPresent;
+		item.candidate.dependenciesAreCompleteDeclaration = true;
+		prepared.push_back(std::move(item));
+	}
+
+	if (prepared.empty())
+	{
+		return;
+	}
+
+	// Dependency records are built only for animation children in this package.
+	// Render-resource dependencies stay in the package manifest and do not enter
+	// the evaluator-generation graph.
+	for (PreparedAnimationChild& item : prepared)
+	{
+		for (const TerraEngine::AssetPipeline::AnimationImportDependency& sourceDependency :
+			item.child->dependencies)
+		{
+			const auto dependency = std::find_if(prepared.begin(), prepared.end(), [&](const auto& candidate) {
+				return candidate.child->guid == sourceDependency.assetGuid;
+			});
+			if (dependency == prepared.end())
+			{
+				continue;
+			}
+			item.candidate.dependencies.push_back({sourceDependency.assetGuid,
+				dependency->candidate.generation,
+				sourceDependency.compatibilityFingerprint != 0u
+					? sourceDependency.compatibilityFingerprint
+					: dependency->candidate.compatibilityFingerprint,
+				sourceDependency.required});
+		}
+		RecordAnimationReimportStatus({absSourcePath, item.child->guid,
+			item.candidate.assetType, AnimationReimportState::Registered,
+			item.candidate.generation,
+			animationHotReloadPublisher.Query(item.child->guid).activeGeneration,
+			0u, 0u, false,
+			"Generated package child passed complete-batch validation and alias registration."});
+	}
+
+	std::vector<TerraEngine::Animation::AnimationReloadCandidate> candidates;
+	candidates.reserve(prepared.size());
+	for (const PreparedAnimationChild& item : prepared)
+	{
+		candidates.push_back(item.candidate);
+	}
+	auto publisherBatch = animationHotReloadPublisher.PrepareBatch(candidates);
+#ifdef TERRAENGINE_EDITOR_TESTS
+	if(publisherBatch.Accepted()) {
+		AnimationPackagePostPublisherPrepareHookForTests hook;
+		{
+			std::lock_guard<std::mutex> lock(animationPackageTestHookMutex);
+			hook = animationPackagePostPublisherPrepareHookForTests;
+		}
+		if(hook) hook();
+	}
+#endif
+
+	ResourceManager& resources = ResourceManager::Instance();
+	std::vector<AnimationAssetReloadRequest> cacheRequests;
+	cacheRequests.reserve(prepared.size());
+	for(const PreparedAnimationChild& item : prepared) {
+		if(resources.GetAnimationAssetRuntimeGeneration(item.child->guid, item.type) != 0U) {
+			cacheRequests.push_back({item.child->guid, item.type,
+				item.candidate.compatibilityFingerprint, item.candidate.contentFingerprint,
+				animationHotReloadPublisher.Query(item.child->guid).activeGeneration,
+				item.candidate.contentHash, item.candidate.contentHashPresent});
+		}
+	}
+	PreparedAnimationAssetReloadBatch resourceBatch;
+	bool resourcesPrepared = true;
+	if(publisherBatch.Accepted() && !cacheRequests.empty()) {
+		resourceBatch = resources.PrepareAnimationAssetReloadBatch(cacheRequests);
+		resourcesPrepared = resourceBatch.Accepted();
+	}
+	if(publisherBatch.Accepted() && resourcesPrepared) {
+		AnimationResourceBatchCommitContext context{&resourceBatch};
+		(void)animationHotReloadPublisher.CommitPreparedBatch(
+			publisherBatch,
+			cacheRequests.empty() ? nullptr : CommitPreparedAnimationResourceBatch,
+			cacheRequests.empty() ? nullptr : &context,
+			cacheRequests.empty() ? nullptr : ReleasePreparedAnimationResourceBatchLocks);
+	}
+	std::vector<TerraEngine::Animation::AnimationReloadOutcome> outcomes =
+		std::move(publisherBatch).ReleaseOutcomes();
+	if (outcomes.size() != prepared.size())
+	{
+		return;
+	}
+
+	const bool published = resourcesPrepared
+		&& (cacheRequests.empty() || resourceBatch.Committed())
+		&& std::all_of(outcomes.begin(), outcomes.end(), [](const auto& outcome) {
+			return outcome.published;
+		});
+	if (published)
+	{
+		resources.FinalizeCommittedAnimationAssetReloadBatch(resourceBatch);
+		// Dependency edges were validated and swapped inside PreparedBatch, so no
+		// post-publication best-effort graph mutation can split invalidation state.
+	}
+
+	for (std::size_t index = 0u; index < prepared.size(); ++index)
+	{
+		const PreparedAnimationChild& item = prepared[index];
+		const TerraEngine::Animation::AnimationReloadOutcome& outcome = outcomes[index];
+		const TerraEngine::Animation::AnimationReloadOutcome active =
+			animationHotReloadPublisher.Query(item.child->guid);
+		if (published)
+		{
+			animationReloadBoundaryToRetireNextUpdate = std::max(
+				animationReloadBoundaryToRetireNextUpdate, outcome.publicationBoundary);
+		}
+		const std::string diagnostic = published
+			? "Complete generated animation batch and every resident typed cache switched at one protected boundary."
+			: !resourcesPrepared
+				? "Generated animation cache staging failed; publisher and all live caches retained their prior generation: "
+					+ std::string(resourceBatch.Diagnostic())
+				: "The coordinated generated animation commit was rejected; publisher and live caches retained their prior complete generation. "
+					+ outcome.reason;
+		RecordAnimationReimportStatus({absSourcePath, item.child->guid,
+			item.candidate.assetType,
+			published
+				? AnimationReimportState::Published
+				: AnimationReimportState::RetainedLastKnownGood,
+			item.candidate.generation, active.activeGeneration,
+			active.publicationBoundary, 0u,
+			!published, diagnostic});
+		if (!published)
+		{
+			// This is intentionally non-destructive: the publisher has retained a
+			// previously accepted generation, and the next corrected import can retry.
+			TERRAENGINE_LOG(LogLevel::Warning,
+				"Animation reload candidate retained last-known-good generation for "
+				<< item.child->semanticKey << ": " << diagnostic);
+		}
+	}
+}
+
+void AssetDatabase::UpdateModelPackageAnimationSummary(const std::filesystem::path& absSourcePath)
+{
+	const auto packageIt = assets.find(std::filesystem::absolute(absSourcePath));
+	if(packageIt == assets.end()
+		|| !TerraEngine::AssetPipeline::IsModelPackageImporterName(packageIt->second.importerName))
+	{
+		return;
+	}
+
+	ModelPackageAnimationSummaryMetadata summary;
+	if(!TryGetModelPackageAnimationSummary(packageIt->second, summary))
+	{
+		return;
+	}
+
+	json summaryJson = {
+		{"readable", summary.readable},
+		{"publishedAtomically", summary.publishedAtomically},
+		{"preservedLastKnownGood", summary.preservedLastKnownGood},
+		{"prefabBindingsValid", summary.prefabBindingsValid},
+		{"schemaVersion", summary.schemaVersion},
+		{"candidateGeneration", summary.candidateGeneration},
+		{"publishedGeneration", summary.publishedGeneration},
+		{"lastKnownGoodGeneration", summary.lastKnownGoodGeneration},
+		{"generatedChildCount", summary.generatedChildCount},
+		{"readOnlyChildCount", summary.readOnlyChildCount},
+		{"skeletonCount", summary.skeletonCount},
+		{"animationClipCount", summary.animationClipCount},
+		{"deformableMeshCount", summary.deformableMeshCount},
+		{"morphTargetCount", summary.morphTargetCount},
+		{"prefabCount", summary.prefabCount},
+		{"infoCount", summary.infoCount},
+		{"warningCount", summary.warningCount},
+		{"errorCount", summary.errorCount},
+		{"dependencyFingerprint", summary.dependencyFingerprint},
+		{"diagnostics", summary.diagnostics}
+	};
+
+	AssetMetadata& writableMetadata = assets[std::filesystem::absolute(absSourcePath)];
+	if(!writableMetadata.settings.is_object())
+	{
+		writableMetadata.settings = json::object();
+	}
+	const auto existing = writableMetadata.settings.find("animationPackage");
+	if(existing != writableMetadata.settings.end() && *existing == summaryJson)
+	{
+		return;
+	}
+
+	// This updates only the parent package metadata. Manifest children remain
+	// read-only views and never receive independent .meta sidecars.
+	writableMetadata.settings["animationPackage"] = std::move(summaryJson);
+	(void)SaveMetadata(writableMetadata);
+	RequestAssetIndexSave();
+}
+
 void AssetDatabase::CleanupModelPackageGeneratedAssets(const AssetMetadata& metadata, const std::filesystem::path& absSourcePath) {
 	if (!TerraEngine::AssetPipeline::IsModelPackageImporterName(metadata.importerName)) {
 		return;
@@ -1626,6 +2698,37 @@ void AssetDatabase::CleanupModelPackageGeneratedAssets(const AssetMetadata& meta
 
 	TerraEngine::AssetPipeline::ModelPackageImportResult importResult;
 	const bool loadedImportResult = TerraEngine::AssetPipeline::LoadModelPackageImportResult(absSourcePath, importResult);
+	std::vector<std::pair<TerraEngine::UUID, AssetType>> retiredRuntimeAliases;
+	const auto retireRuntimeAlias = [&](const TerraEngine::UUID& guid, AssetType type) {
+		if(guid == TerraEngine::EMPTY_UUID)
+		{
+			return;
+		}
+		const auto alreadyRetired = std::find(retiredRuntimeAliases.begin(), retiredRuntimeAliases.end(),
+			std::pair<TerraEngine::UUID, AssetType>{guid, type});
+		if(alreadyRetired != retiredRuntimeAliases.end())
+		{
+			return;
+		}
+		ResourceManager::Instance().DeleteResource(guid, type);
+		retiredRuntimeAliases.emplace_back(guid, type);
+	};
+
+	// The session table is authoritative for aliases that were actually exposed.
+	// Remove these first so deleted or renamed-away package children cannot remain
+	// resolvable after their owning package leaves the database.
+	if(const auto registeredIt = generatedModelPackageResources.find(metadata.guid);
+		registeredIt != generatedModelPackageResources.end())
+	{
+		for(const auto& [guid, kind] : registeredIt->second)
+		{
+			if(const std::optional<AssetType> type = RuntimeAssetTypeForGeneratedKind(kind))
+			{
+				retireRuntimeAlias(guid, *type);
+			}
+		}
+		generatedModelPackageResources.erase(registeredIt);
+	}
 	const auto isSafeGeneratedRoot = [](const std::filesystem::path& relativeRoot) {
 		if (relativeRoot.empty() || relativeRoot.is_absolute()) {
 			return false;
@@ -1643,13 +2746,13 @@ void AssetDatabase::CleanupModelPackageGeneratedAssets(const AssetMetadata& meta
 
 	if (loadedImportResult) {
 		for (const TerraEngine::AssetPipeline::GeneratedModelMeshAsset& mesh : importResult.generatedMeshes) {
-			ResourceManager::Instance().DeleteResource(mesh.guid, AssetType::Mesh);
+			retireRuntimeAlias(mesh.guid, AssetType::Mesh);
 		}
 		for (const TerraEngine::AssetPipeline::GeneratedModelTextureAsset& texture : importResult.generatedTextures) {
-			ResourceManager::Instance().DeleteResource(texture.guid, AssetType::Texture);
+			retireRuntimeAlias(texture.guid, AssetType::Texture);
 		}
 		for (const TerraEngine::AssetPipeline::GeneratedModelMaterialAsset& material : importResult.generatedMaterials) {
-			ResourceManager::Instance().DeleteResource(material.guid, AssetType::Material);
+			retireRuntimeAlias(material.guid, AssetType::Material);
 			const std::filesystem::path materialSourcePath = std::filesystem::absolute(assetRoot / material.sourcePath);
 			if (auto materialIt = assets.find(materialSourcePath); materialIt != assets.end()) {
 				assets.erase(materialIt);
@@ -1665,6 +2768,18 @@ void AssetDatabase::CleanupModelPackageGeneratedAssets(const AssetMetadata& meta
 			std::error_code removeMetaError;
 			std::filesystem::remove(prefabSourcePath.string() + ".meta", removeMetaError);
 		}
+		for(const TerraEngine::AssetPipeline::GeneratedAnimationSubAsset& child : importResult.animationManifest.subAssets)
+		{
+			const std::optional<GeneratedModelPackageChildKind> kind = GeneratedKindForManifestKind(child.kind);
+			if(kind)
+			{
+				if(const std::optional<AssetType> type = RuntimeAssetTypeForGeneratedKind(*kind))
+				{
+					retireRuntimeAlias(child.guid, *type);
+				}
+			}
+		}
+		generatedModelPackageResources.erase(importResult.packageGuid);
 	}
 
 	std::filesystem::path generatedRoot = loadedImportResult ? importResult.package.importRoot : std::filesystem::path();
@@ -1703,32 +2818,43 @@ void AssetDatabase::CleanupModelPackageGeneratedAssets(const AssetMetadata& meta
 }
 
 void AssetDatabase::CleanupCancelledImport(const AssetMetadata& metadata, const std::filesystem::path& absSourcePath, bool removeSourceAsset) {
-	std::error_code ec;
-	if (assets.find(absSourcePath) != assets.end()) {
-		RemoveAsset(absSourcePath);
-	}
-
-	if (!metadata.compiledPath.empty()) {
-		std::filesystem::remove(buildRoot / metadata.compiledPath, ec);
-		ec.clear();
-	}
-
-	const std::filesystem::path metaPath = absSourcePath.string() + ".meta";
-	std::filesystem::remove(metaPath, ec);
-	ec.clear();
-
-	if (TerraEngine::AssetPipeline::IsModelPackageImporterName(metadata.importerName)) {
-		CleanupModelPackageGeneratedAssets(metadata, absSourcePath);
-	}
-
-	if (removeSourceAsset) {
-		std::filesystem::remove(absSourcePath, ec);
-		ec.clear();
-	}
-
 	pendingEvents.erase(absSourcePath);
 	deferredImports.erase(absSourcePath);
-	TERRAENGINE_LOG(LogLevel::Info, "Cancelled asset import and cleaned partial outputs for: " << absSourcePath);
+
+	if (!removeSourceAsset) {
+		// Shutdown and automation cancellation only stop worker-owned work. The
+		// compiler functions remove their unique staging files after the worker has
+		// observed cancellation; authored source, .meta identity, live registration,
+		// and the last atomically published output remain untouched here.
+		TERRAENGINE_LOG(LogLevel::Info, "Cancelled asset import and preserved published asset state for: " << absSourcePath);
+		return;
+	}
+
+	std::error_code ec;
+	const bool registeredAssetRemoved = assets.find(absSourcePath) != assets.end();
+	if (registeredAssetRemoved) {
+		// RemoveAsset owns registered resource, package-child, compiled, metadata,
+		// journal, and index cleanup. Do not repeat those side effects below.
+		RemoveAsset(absSourcePath);
+	} else {
+		// A first import may not have reached registration yet. Explicit discard
+		// still removes any final output or generated package state it created.
+		if (!metadata.compiledPath.empty()) {
+			std::filesystem::remove(buildRoot / metadata.compiledPath, ec);
+			ec.clear();
+		}
+
+		const std::filesystem::path metaPath = absSourcePath.string() + ".meta";
+		std::filesystem::remove(metaPath, ec);
+		ec.clear();
+
+		if (TerraEngine::AssetPipeline::IsModelPackageImporterName(metadata.importerName)) {
+			CleanupModelPackageGeneratedAssets(metadata, absSourcePath);
+		}
+	}
+
+	std::filesystem::remove(absSourcePath, ec);
+	TERRAENGINE_LOG(LogLevel::Info, "Cancelled asset import and destructively removed its asset state for: " << absSourcePath);
 }
 
 // AssetDatabase::DeleteAsset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1809,6 +2935,13 @@ std::string AssetDatabase::GetImporterName(const std::filesystem::path& filePath
 	if (ext == ".tephysmat") return "PhysicsMaterialImporter";
 	if (ext == ".tecollider") return "PhysicsColliderRecipeImporter";
 	if (ext == ".tepcoll") return "CookedColliderImporter";
+	if (ext == ".teskel") return "SkeletonAssetImporter";
+	if (ext == ".teanim") return "AnimationClipAssetImporter";
+	if (ext == ".teanimctrl") return "AnimationControllerAssetImporter";
+	if (ext == ".teanimmask") return "AnimationMaskAssetImporter";
+	if (ext == ".teretarget") return "RetargetProfileAssetImporter";
+	if (ext == ".temotiondb") return "MotionDatabaseAssetImporter";
+	if (ext == ".teragdoll") return "RagdollProfileAssetImporter";
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ext == ".cs") return "ScriptImporter";
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -2155,7 +3288,7 @@ bool AssetDatabase::CompileMeshWithProcess(const AssetMetadata& metadata, const 
 		std::filesystem::remove(stagedMeshReportPath, cleanupError);
 		return false;
 	}
-	if (!PublishCompiledAssetAtomically(stagedCompiledPath, fullCompiledPath)) {
+	if (!PublishCompiledAssetFromWorker(stagedCompiledPath, fullCompiledPath, progressState)) {
 		std::filesystem::remove(stagedCompiledPath, cleanupError);
 		std::filesystem::remove(stagedMeshReportPath, cleanupError);
 		return false;
@@ -2173,7 +3306,7 @@ bool AssetDatabase::CompileMeshWithProcess(const AssetMetadata& metadata, const 
 		std::filesystem::remove(stagedMeshReportPath, cleanupError);
 		return false;
 	}
-	if (!PublishCompiledAssetAtomically(stagedCompiledPath, fullCompiledPath)) {
+	if (!PublishCompiledAssetFromWorker(stagedCompiledPath, fullCompiledPath, progressState)) {
 		std::filesystem::remove(stagedCompiledPath, cleanupError);
 		std::filesystem::remove(stagedMeshReportPath, cleanupError);
 		return false;
@@ -2227,7 +3360,7 @@ bool AssetDatabase::CompileTextureWithProcess(const AssetMetadata& metadata, con
 		std::filesystem::remove(stagedCompiledPath, cleanupError);
 		return false;
 	}
-	if (!PublishCompiledAssetAtomically(stagedCompiledPath, fullCompiledPath)) {
+	if (!PublishCompiledAssetFromWorker(stagedCompiledPath, fullCompiledPath, progressState)) {
 		std::filesystem::remove(stagedCompiledPath, cleanupError);
 		return false;
 	}
@@ -2246,7 +3379,7 @@ bool AssetDatabase::CompileTextureWithProcess(const AssetMetadata& metadata, con
 		std::filesystem::remove(stagedCompiledPath, cleanupError);
 		return false;
 	}
-	if (!PublishCompiledAssetAtomically(stagedCompiledPath, fullCompiledPath)) {
+	if (!PublishCompiledAssetFromWorker(stagedCompiledPath, fullCompiledPath, progressState)) {
 		std::filesystem::remove(stagedCompiledPath, cleanupError);
 		return false;
 	}
@@ -2302,7 +3435,7 @@ bool AssetDatabase::CompileShaderWithProcess(const AssetMetadata& metadata, cons
 		std::filesystem::remove(stagedShaderBytecodePath, cleanupError);
 		return false;
 	}
-	if (!PublishCompiledAssetAtomically(stagedCompiledPath, fullCompiledPath)) {
+	if (!PublishCompiledAssetFromWorker(stagedCompiledPath, fullCompiledPath, progressState)) {
 		std::filesystem::remove(stagedCompiledPath, cleanupError);
 		std::filesystem::remove(stagedShaderBytecodePath, cleanupError);
 		return false;
@@ -2326,7 +3459,7 @@ bool AssetDatabase::CompileShaderWithProcess(const AssetMetadata& metadata, cons
 		std::filesystem::remove(stagedCompiledPath, cleanupError);
 		return false;
 	}
-	if (!PublishCompiledAssetAtomically(stagedCompiledPath, fullCompiledPath)) {
+	if (!PublishCompiledAssetFromWorker(stagedCompiledPath, fullCompiledPath, progressState)) {
 		std::filesystem::remove(stagedCompiledPath, cleanupError);
 		return false;
 	}
@@ -2362,7 +3495,7 @@ bool AssetDatabase::CompilePhysicsColliderWithProcess(const AssetMetadata& metad
 		std::filesystem::remove(stagedCompiledPath, cleanupError);
 		return false;
 	}
-	if(!PublishCompiledAssetAtomically(stagedCompiledPath, fullCompiledPath)) {
+	if(!PublishCompiledAssetFromWorker(stagedCompiledPath, fullCompiledPath, progressState)) {
 		std::filesystem::remove(stagedCompiledPath, cleanupError);
 		return false;
 	}
@@ -2413,7 +3546,7 @@ bool AssetDatabase::CompilePhysicsColliderWithProcess(const AssetMetadata& metad
 		std::filesystem::remove(stagedCompiledPath, cleanupError);
 		return false;
 	}
-	if(!PublishCompiledAssetAtomically(stagedCompiledPath, fullCompiledPath)) {
+	if(!PublishCompiledAssetFromWorker(stagedCompiledPath, fullCompiledPath, progressState)) {
 		std::filesystem::remove(stagedCompiledPath, cleanupError);
 		return false;
 	}
@@ -2452,13 +3585,37 @@ bool AssetDatabase::CompileAsset(const AssetMetadata& metadata, const std::share
 	else if(metadata.importerName == "PhysicsColliderRecipeImporter") {
 		return CompilePhysicsColliderWithProcess(metadata, progressState);
 	}
-	else if(metadata.importerName == "PhysicsMaterialImporter" || metadata.importerName == "CookedColliderImporter") {
-		const std::filesystem::path stagedPath = fullCompiledPath.string() + ".staged";
+	else if(metadata.importerName == "PhysicsMaterialImporter" || metadata.importerName == "CookedColliderImporter"
+		|| RuntimeAssetTypeForCookedAnimationImporter(metadata.importerName).has_value()) {
+		// Cooked animation assets are already versioned runtime envelopes. Copy
+		// through staging rather than reparsing/re-serializing them so the watcher
+		// publishes a complete generation or leaves the prior build artifact intact.
+		const std::filesystem::path stagedPath = fullCompiledPath.parent_path()
+			/ (fullCompiledPath.stem().string() + ".staged" + fullCompiledPath.extension().string());
 		std::error_code error;
 		std::filesystem::create_directories(fullCompiledPath.parent_path(), error);
 		if(error) return false;
 		std::filesystem::copy_file(fullSourcePath, stagedPath, std::filesystem::copy_options::overwrite_existing, error);
-		if(error || !PublishCompiledAssetAtomically(stagedPath, fullCompiledPath)) {
+		if(error) return false;
+		if (const std::optional<AssetType> animationType =
+			RuntimeAssetTypeForCookedAnimationImporter(metadata.importerName))
+		{
+			const AnimationResourceValidationResult validation =
+				ResourceManager::Instance().ValidateAnimationAssetFile(stagedPath, *animationType);
+			if (!validation.Passed() || validation.assetId != metadata.guid)
+			{
+				std::filesystem::remove(stagedPath, error);
+				RecordAnimationReimportStatus({fullSourcePath, metadata.guid,
+					*ReloadAssetTypeForRuntimeType(*animationType), AnimationReimportState::RetainedLastKnownGood,
+					0u, ResourceManager::Instance().GetAnimationAssetRuntimeGeneration(
+						metadata.guid, *animationType), 0u, 0u, true,
+					validation.Passed()
+						? "Cooked envelope GUID does not match its durable asset metadata; prior output was retained."
+						: validation.diagnosticCode + ": " + validation.message});
+				return false;
+			}
+		}
+		if(!PublishCompiledAssetFromWorker(stagedPath, fullCompiledPath, progressState)) {
 			std::filesystem::remove(stagedPath, error);
 			return false;
 		}
@@ -2504,6 +3661,10 @@ void AssetDatabase::RemoveAsset(const std::filesystem::path& sourcePath) {
 		else if (metadata.importerName == "PhysicsMaterialImporter") { type = AssetType::PhysicsMaterial; knownResource = true; }
 		else if (metadata.importerName == "PhysicsColliderRecipeImporter"
 			|| metadata.importerName == "CookedColliderImporter") { type = AssetType::CookedCollider; knownResource = true; }
+		else if (const std::optional<AssetType> animationType = RuntimeAssetTypeForCookedAnimationImporter(metadata.importerName)) {
+			type = *animationType;
+			knownResource = true;
+		}
 
 		if (knownResource) {
 			ResourceManager::Instance().DeleteResource(metadata.guid, type);
@@ -2554,61 +3715,13 @@ bool AssetDatabase::TryGetGeneratedModelPackageChildDisplayName(
 	GeneratedModelPackageChildKind kind,
 	std::string& outName) const
 {
-	for (const auto& [sourcePath, metadata] : assets)
+	GeneratedModelPackageChildMetadata child;
+	if(!TryGetGeneratedModelPackageChildMetadata(guid, kind, child))
 	{
-		if (!TerraEngine::AssetPipeline::IsModelPackageImporterName(metadata.importerName))
-		{
-			continue;
-		}
-
-		TerraEngine::AssetPipeline::ModelPackageImportResult importResult;
-		if (!TerraEngine::AssetPipeline::LoadModelPackageImportResult(sourcePath, importResult))
-		{
-			continue;
-		}
-
-		switch (kind)
-		{
-		case GeneratedModelPackageChildKind::Mesh:
-			for (const TerraEngine::AssetPipeline::GeneratedModelMeshAsset& mesh : importResult.generatedMeshes)
-			{
-				if (mesh.guid != guid)
-				{
-					continue;
-				}
-				// Mesh children can share the parent package's compiled TEMF.
-				// The sidecar name is therefore the only editor-facing child
-				// identity that distinguishes component assignments correctly.
-				outName = GeneratedChildNameFallback(mesh.displayName, mesh.sourceNodePath, mesh.sourcePath, mesh.compiledPath, mesh.guid);
-				return true;
-			}
-			break;
-		case GeneratedModelPackageChildKind::Material:
-			for (const TerraEngine::AssetPipeline::GeneratedModelMaterialAsset& material : importResult.generatedMaterials)
-			{
-				if (material.guid != guid)
-				{
-					continue;
-				}
-				outName = GeneratedChildNameFallback(material.displayName, {}, material.sourcePath, material.compiledPath, material.guid);
-				return true;
-			}
-			break;
-		case GeneratedModelPackageChildKind::Texture:
-			for (const TerraEngine::AssetPipeline::GeneratedModelTextureAsset& texture : importResult.generatedTextures)
-			{
-				if (texture.guid != guid)
-				{
-					continue;
-				}
-				outName = GeneratedChildNameFallback(texture.displayName, {}, texture.sourcePath, texture.compiledPath, texture.guid);
-				return true;
-			}
-			break;
-		}
+		return false;
 	}
-
-	return false;
+	outName = child.displayName;
+	return true;
 }
 
 bool AssetDatabase::TryGetGeneratedModelPackageChildIds(
@@ -2635,43 +3748,540 @@ bool AssetDatabase::TryGetGeneratedModelPackageChildIds(
 			continue;
 		}
 
-		// Generated children are stable package-owned assets. Editor diagnostics
-		// need these child IDs so package wrapper rows can report the GPU memory
-		// uploaded for the actual generated mesh/material/texture that renders.
-		switch (kind)
+		const std::optional<TerraEngine::AssetPipeline::AnimationImportSubAssetKind> manifestKind
+			= ManifestKindForGeneratedKind(kind);
+		if(manifestKind && IsPublishedAnimationManifest(importResult))
 		{
-		case GeneratedModelPackageChildKind::Mesh:
-			for (const TerraEngine::AssetPipeline::GeneratedModelMeshAsset& mesh : importResult.generatedMeshes)
+			// Published manifests are authoritative. In particular, a deformable mesh
+			// must not also appear as an ordinary Mesh child merely because both share
+			// the same legacy generatedMeshes transport record.
+			for(const TerraEngine::AssetPipeline::GeneratedAnimationSubAsset& child : importResult.animationManifest.subAssets)
 			{
-				if (mesh.guid != TerraEngine::EMPTY_UUID)
+				if(child.kind == *manifestKind && child.guid != TerraEngine::EMPTY_UUID
+					&& !ContainsUuid(outChildIds, child.guid))
+				{
+					outChildIds.push_back(child.guid);
+				}
+			}
+		}
+		else if(kind == GeneratedModelPackageChildKind::Mesh)
+		{
+			// Sidecars written before AnimationImportManifest treated every generated
+			// render payload as a static mesh. Preserve that legacy discovery fallback.
+			for(const TerraEngine::AssetPipeline::GeneratedModelMeshAsset& mesh : importResult.generatedMeshes)
+			{
+				if(mesh.guid != TerraEngine::EMPTY_UUID && !ContainsUuid(outChildIds, mesh.guid))
 				{
 					outChildIds.push_back(mesh.guid);
 				}
 			}
-			break;
-		case GeneratedModelPackageChildKind::Material:
-			for (const TerraEngine::AssetPipeline::GeneratedModelMaterialAsset& material : importResult.generatedMaterials)
-			{
-				if (material.guid != TerraEngine::EMPTY_UUID)
-				{
-					outChildIds.push_back(material.guid);
-				}
-			}
-			break;
-		case GeneratedModelPackageChildKind::Texture:
-			for (const TerraEngine::AssetPipeline::GeneratedModelTextureAsset& texture : importResult.generatedTextures)
-			{
-				if (texture.guid != TerraEngine::EMPTY_UUID)
-				{
-					outChildIds.push_back(texture.guid);
-				}
-			}
-			break;
 		}
+
+		// Older static-package sidecars predate AnimationImportManifest. Preserve
+		// their material/texture/prefab discovery without weakening the published
+		// manifest requirement for new animation-only kinds.
+		if(outChildIds.empty() && kind == GeneratedModelPackageChildKind::Material)
+		{
+			for(const auto& material : importResult.generatedMaterials)
+			{
+				if(material.guid != TerraEngine::EMPTY_UUID) outChildIds.push_back(material.guid);
+			}
+		}
+		else if(outChildIds.empty() && kind == GeneratedModelPackageChildKind::Texture)
+		{
+			for(const auto& texture : importResult.generatedTextures)
+			{
+				if(texture.guid != TerraEngine::EMPTY_UUID) outChildIds.push_back(texture.guid);
+			}
+		}
+		else if(outChildIds.empty() && kind == GeneratedModelPackageChildKind::Prefab)
+		{
+			for(const auto& prefab : importResult.generatedPrefabs)
+			{
+				if(prefab.guid != TerraEngine::EMPTY_UUID) outChildIds.push_back(prefab.guid);
+			}
+		}
+
+		std::sort(outChildIds.begin(), outChildIds.end());
+		outChildIds.erase(std::unique(outChildIds.begin(), outChildIds.end()), outChildIds.end());
 		return !outChildIds.empty();
 	}
 
 	return false;
+}
+
+bool AssetDatabase::TryGetGeneratedModelPackageChildMetadata(
+	const TerraEngine::UUID& guid,
+	GeneratedModelPackageChildKind kind,
+	GeneratedModelPackageChildMetadata& outMetadata) const
+{
+	outMetadata = {};
+	for(const auto& [sourcePath, metadata] : assets)
+	{
+		if(!TerraEngine::AssetPipeline::IsModelPackageImporterName(metadata.importerName))
+		{
+			continue;
+		}
+
+		TerraEngine::AssetPipeline::ModelPackageImportResult importResult;
+		if(!TerraEngine::AssetPipeline::LoadModelPackageImportResult(sourcePath, importResult))
+		{
+			continue;
+		}
+
+		if(kind == GeneratedModelPackageChildKind::Mesh)
+		{
+			const bool publishedManifest = IsPublishedAnimationManifest(importResult);
+			const auto manifestChild = publishedManifest
+				? std::find_if(importResult.animationManifest.subAssets.begin(), importResult.animationManifest.subAssets.end(),
+					[&](const auto& child) {
+						return child.guid == guid
+							&& child.kind == TerraEngine::AssetPipeline::AnimationImportSubAssetKind::Mesh;
+					})
+				: importResult.animationManifest.subAssets.end();
+			if(publishedManifest && manifestChild == importResult.animationManifest.subAssets.end())
+			{
+				continue;
+			}
+			for(const TerraEngine::AssetPipeline::GeneratedModelMeshAsset& mesh : importResult.generatedMeshes)
+			{
+				if(mesh.guid != guid)
+				{
+					continue;
+				}
+				outMetadata.packageGuid = importResult.packageGuid;
+				outMetadata.guid = mesh.guid;
+				outMetadata.kind = kind;
+				outMetadata.displayName = GeneratedChildNameFallback(
+					mesh.displayName, mesh.sourceNodePath, mesh.sourcePath, mesh.compiledPath, mesh.guid);
+				outMetadata.semanticKey = publishedManifest ? manifestChild->semanticKey
+					: mesh.sourceNodePath.empty() ? "mesh/" + std::to_string(mesh.sourceMeshIndex)
+						: "mesh/" + mesh.sourceNodePath;
+				outMetadata.sourcePath = mesh.sourcePath;
+				outMetadata.compiledPath = mesh.compiledPath;
+				outMetadata.publishedGeneration = importResult.animationManifest.publishedGeneration;
+				if(publishedManifest)
+				{
+					outMetadata.compatibilityFingerprint = manifestChild->compatibilityFingerprint;
+					outMetadata.readOnlyPackageChild = manifestChild->readOnlyPackageChild;
+					for(const auto& dependency : manifestChild->dependencies)
+					{
+						if(dependency.assetGuid != TerraEngine::EMPTY_UUID
+							&& !ContainsUuid(outMetadata.dependencies, dependency.assetGuid))
+						{
+							outMetadata.dependencies.push_back(dependency.assetGuid);
+						}
+					}
+				}
+				for(const auto& assignment : importResult.materialAssignments)
+				{
+					if(assignment.meshGuid == mesh.guid && assignment.materialGuid != TerraEngine::EMPTY_UUID
+						&& !ContainsUuid(outMetadata.dependencies, assignment.materialGuid))
+					{
+						outMetadata.dependencies.push_back(assignment.materialGuid);
+					}
+				}
+				return true;
+			}
+			continue;
+		}
+
+		const std::optional<TerraEngine::AssetPipeline::AnimationImportSubAssetKind> manifestKind
+			= ManifestKindForGeneratedKind(kind);
+		if(manifestKind && IsPublishedAnimationManifest(importResult))
+		{
+			for(const TerraEngine::AssetPipeline::GeneratedAnimationSubAsset& child : importResult.animationManifest.subAssets)
+			{
+				if(child.guid != guid || child.kind != *manifestKind)
+				{
+					continue;
+				}
+				outMetadata.packageGuid = importResult.packageGuid;
+				outMetadata.guid = child.guid;
+				outMetadata.kind = kind;
+				outMetadata.displayName = GeneratedChildNameFallback(
+					child.displayName, child.semanticKey, child.sourcePath, child.compiledPath, child.guid);
+				outMetadata.semanticKey = child.semanticKey;
+				outMetadata.sourcePath = child.sourcePath;
+				outMetadata.compiledPath = child.compiledPath;
+				outMetadata.compatibilityFingerprint = child.compatibilityFingerprint;
+				outMetadata.publishedGeneration = importResult.animationManifest.publishedGeneration;
+				outMetadata.readOnlyPackageChild = child.readOnlyPackageChild;
+				for(const TerraEngine::AssetPipeline::AnimationImportDependency& dependency : child.dependencies)
+				{
+					if(dependency.assetGuid != TerraEngine::EMPTY_UUID
+						&& !ContainsUuid(outMetadata.dependencies, dependency.assetGuid))
+					{
+						outMetadata.dependencies.push_back(dependency.assetGuid);
+					}
+				}
+				return true;
+			}
+		}
+
+		if(kind == GeneratedModelPackageChildKind::Material)
+		{
+			for(const auto& material : importResult.generatedMaterials)
+			{
+				if(material.guid != guid) continue;
+				outMetadata = {importResult.packageGuid, material.guid, kind,
+					GeneratedChildNameFallback(material.displayName, {}, material.sourcePath, material.compiledPath, material.guid),
+					"material", material.sourcePath, material.compiledPath};
+				outMetadata.dependencies = material.textureGuids;
+				return true;
+			}
+		}
+		else if(kind == GeneratedModelPackageChildKind::Texture)
+		{
+			for(const auto& texture : importResult.generatedTextures)
+			{
+				if(texture.guid != guid) continue;
+				outMetadata = {importResult.packageGuid, texture.guid, kind,
+					GeneratedChildNameFallback(texture.displayName, {}, texture.sourcePath, texture.compiledPath, texture.guid),
+					"texture", texture.sourcePath, texture.compiledPath};
+				return true;
+			}
+		}
+		else if(kind == GeneratedModelPackageChildKind::Prefab)
+		{
+			for(const auto& prefab : importResult.generatedPrefabs)
+			{
+				if(prefab.guid != guid) continue;
+				outMetadata = {importResult.packageGuid, prefab.guid, kind,
+					GeneratedChildNameFallback(prefab.displayName, {}, prefab.sourcePath, {}, prefab.guid),
+					"prefab/package-root", prefab.sourcePath, {}};
+				outMetadata.dependencies = prefab.meshGuids;
+				for(const TerraEngine::UUID& materialGuid : prefab.materialGuids)
+				{
+					if(!ContainsUuid(outMetadata.dependencies, materialGuid)) outMetadata.dependencies.push_back(materialGuid);
+				}
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+bool AssetDatabase::TryGetModelPackageAnimationSummary(
+	const AssetMetadata& metadata,
+	ModelPackageAnimationSummaryMetadata& outSummary) const
+{
+	outSummary = {};
+	if(!TerraEngine::AssetPipeline::IsModelPackageImporterName(metadata.importerName))
+	{
+		return false;
+	}
+
+	const std::filesystem::path sourcePath = std::filesystem::absolute(assetRoot / metadata.sourcePath);
+	TerraEngine::AssetPipeline::ModelPackageImportResult importResult;
+	if(!TerraEngine::AssetPipeline::LoadModelPackageImportResult(sourcePath, importResult))
+	{
+		return false;
+	}
+
+	outSummary.readable = true;
+	const TerraEngine::AssetPipeline::AnimationImportManifest& manifest = importResult.animationManifest;
+	outSummary.schemaVersion = manifest.schemaVersion;
+	outSummary.candidateGeneration = manifest.candidateGeneration;
+	outSummary.publishedGeneration = manifest.publishedGeneration;
+	outSummary.lastKnownGoodGeneration = manifest.lastKnownGoodGeneration;
+	outSummary.preservedLastKnownGood = manifest.preservedLastKnownGood;
+	outSummary.generatedChildCount = manifest.subAssets.size();
+	outSummary.dependencyFingerprint = manifest.dependencyFingerprintHex;
+	outSummary.publishedAtomically = IsPublishedAnimationManifest(importResult)
+		&& manifest.packageGuid == metadata.guid;
+
+	const auto appendValidationError = [&](std::string code, std::string message) {
+		++outSummary.errorCount;
+		outSummary.prefabBindingsValid = false;
+		AppendAnimationSummaryDiagnostic(outSummary, std::move(code) + ": " + std::move(message));
+	};
+	const auto appendValidationWarning = [&](std::string code, std::string message) {
+		++outSummary.warningCount;
+		AppendAnimationSummaryDiagnostic(outSummary, std::move(code) + ": " + std::move(message));
+	};
+
+	for(const TerraEngine::AssetPipeline::ModelImportDiagnostic& diagnostic : importResult.diagnostics)
+	{
+		switch(diagnostic.severity)
+		{
+		case TerraEngine::AssetPipeline::ModelDiagnosticSeverity::Info: ++outSummary.infoCount; break;
+		case TerraEngine::AssetPipeline::ModelDiagnosticSeverity::Warning: ++outSummary.warningCount; break;
+		case TerraEngine::AssetPipeline::ModelDiagnosticSeverity::Error: ++outSummary.errorCount; break;
+		}
+		const std::string code = diagnostic.code.empty() ? "ModelImportDiagnostic" : diagnostic.code;
+		AppendAnimationSummaryDiagnostic(outSummary,
+			code + (diagnostic.message.empty() ? std::string{} : ": " + diagnostic.message));
+	}
+
+	if(importResult.packageGuid == TerraEngine::EMPTY_UUID
+		|| importResult.packageGuid != metadata.guid
+		|| manifest.packageGuid != importResult.packageGuid)
+	{
+		appendValidationError("AnimationPackageGuidMismatch",
+			"The source metadata, import result, and animation manifest must identify the same package.");
+	}
+	if(!outSummary.publishedAtomically)
+	{
+		appendValidationError("AnimationManifestNotPublished",
+			"The manifest is cancelled, incomplete, stale, or does not match its dependency fingerprint.");
+	}
+
+	std::map<TerraEngine::UUID, const TerraEngine::AssetPipeline::GeneratedAnimationSubAsset*> childrenById;
+	std::vector<TerraEngine::UUID> skeletonIds;
+	std::vector<TerraEngine::UUID> clipIds;
+	std::vector<TerraEngine::UUID> deformableMeshIds;
+	std::vector<TerraEngine::UUID> morphTargetIds;
+	std::vector<const TerraEngine::AssetPipeline::GeneratedAnimationSubAsset*> prefabs;
+	for(const TerraEngine::AssetPipeline::GeneratedAnimationSubAsset& child : manifest.subAssets)
+	{
+		if(child.readOnlyPackageChild)
+		{
+			++outSummary.readOnlyChildCount;
+		}
+		else
+		{
+			appendValidationError("AnimationPackageChildEditable",
+				"Generated child '" + child.semanticKey + "' must remain a read-only package view.");
+		}
+
+		if(child.guid == TerraEngine::EMPTY_UUID || !childrenById.emplace(child.guid, &child).second)
+		{
+			appendValidationError("AnimationPackageChildIdentityInvalid",
+				"A generated child has an empty or duplicate stable GUID.");
+		}
+
+		switch(child.kind)
+		{
+		case TerraEngine::AssetPipeline::AnimationImportSubAssetKind::Skeleton:
+			++outSummary.skeletonCount;
+			skeletonIds.push_back(child.guid);
+			break;
+		case TerraEngine::AssetPipeline::AnimationImportSubAssetKind::AnimationClip:
+			++outSummary.animationClipCount;
+			clipIds.push_back(child.guid);
+			break;
+		case TerraEngine::AssetPipeline::AnimationImportSubAssetKind::DeformableMesh:
+			++outSummary.deformableMeshCount;
+			deformableMeshIds.push_back(child.guid);
+			break;
+		case TerraEngine::AssetPipeline::AnimationImportSubAssetKind::MorphTarget:
+			++outSummary.morphTargetCount;
+			morphTargetIds.push_back(child.guid);
+			break;
+		case TerraEngine::AssetPipeline::AnimationImportSubAssetKind::Prefab:
+			++outSummary.prefabCount;
+			prefabs.push_back(&child);
+			break;
+		case TerraEngine::AssetPipeline::AnimationImportSubAssetKind::Material:
+		case TerraEngine::AssetPipeline::AnimationImportSubAssetKind::Texture:
+		case TerraEngine::AssetPipeline::AnimationImportSubAssetKind::Mesh:
+			break;
+		}
+	}
+
+	for(const TerraEngine::AssetPipeline::GeneratedAnimationSubAsset& child : manifest.subAssets)
+	{
+		for(const TerraEngine::AssetPipeline::AnimationImportDependency& dependency : child.dependencies)
+		{
+			const auto dependencyIt = childrenById.find(dependency.assetGuid);
+			if(dependency.required && dependencyIt == childrenById.end())
+			{
+				appendValidationError("AnimationPackageDependencyMissing",
+					"Generated child '" + child.semanticKey + "' requires a child GUID that is absent from the published manifest.");
+				continue;
+			}
+			if(dependencyIt != childrenById.end() && dependency.compatibilityFingerprint != 0u
+				&& dependency.compatibilityFingerprint != dependencyIt->second->compatibilityFingerprint)
+			{
+				appendValidationError("AnimationPackageDependencyIncompatible",
+					"Generated child '" + child.semanticKey + "' references a different compatibility generation.");
+			}
+		}
+	}
+
+	const bool hasAnimatedBindings = !skeletonIds.empty() || !clipIds.empty()
+		|| !deformableMeshIds.empty() || !morphTargetIds.empty();
+	if(hasAnimatedBindings && prefabs.empty())
+	{
+		appendValidationError("AnimationPrefabMissing",
+			"An animated package must publish a prefab that binds its generated children.");
+	}
+
+	const auto validateBindingArray = [&](const json& bindings,
+		const char* fieldName,
+		const std::vector<TerraEngine::UUID>& expectedIds,
+		std::string_view prefabName) {
+		if(expectedIds.empty())
+		{
+			return true;
+		}
+		const auto field = bindings.find(fieldName);
+		if(field == bindings.end() || !field->is_array())
+		{
+			appendValidationError("AnimationPrefabBindingMissing",
+				"Prefab '" + std::string(prefabName) + "' is missing binding array '" + fieldName + "'.");
+			return false;
+		}
+
+		std::vector<TerraEngine::UUID> actualIds;
+		for(const json& value : *field)
+		{
+			if(!value.is_string())
+			{
+				appendValidationError("AnimationPrefabBindingInvalid",
+					"Prefab binding array '" + std::string(fieldName) + "' contains a non-GUID value.");
+				return false;
+			}
+			const std::optional<TerraEngine::UUID> parsed = TerraEngine::ParseUUID(value.get<std::string>());
+			if(!parsed || !ContainsUuid(expectedIds, *parsed))
+			{
+				appendValidationError("AnimationPrefabBindingInvalid",
+					"Prefab binding array '" + std::string(fieldName) + "' references a child outside its package kind.");
+				return false;
+			}
+			if(!ContainsUuid(actualIds, *parsed)) actualIds.push_back(*parsed);
+		}
+		for(const TerraEngine::UUID& expectedId : expectedIds)
+		{
+			if(!ContainsUuid(actualIds, expectedId))
+			{
+				appendValidationError("AnimationPrefabBindingIncomplete",
+					"Prefab binding array '" + std::string(fieldName) + "' omits a published package child.");
+				return false;
+			}
+		}
+		return true;
+	};
+
+	for(const TerraEngine::AssetPipeline::GeneratedAnimationSubAsset* prefab : prefabs)
+	{
+		if(prefab == nullptr)
+		{
+			continue;
+		}
+		std::vector<TerraEngine::UUID> dependencyIds;
+		for(const TerraEngine::AssetPipeline::AnimationImportDependency& dependency : prefab->dependencies)
+		{
+			if(dependency.required && dependency.assetGuid != TerraEngine::EMPTY_UUID)
+			{
+				dependencyIds.push_back(dependency.assetGuid);
+			}
+		}
+		for(const std::vector<TerraEngine::UUID>* expected : {&skeletonIds, &clipIds, &deformableMeshIds, &morphTargetIds})
+		{
+			for(const TerraEngine::UUID& expectedId : *expected)
+			{
+				if(!ContainsUuid(dependencyIds, expectedId))
+				{
+					appendValidationError("AnimationPrefabDependencyIncomplete",
+						"Prefab '" + prefab->semanticKey + "' does not depend on every generated animation child.");
+				}
+			}
+		}
+
+		const std::optional<std::filesystem::path> prefabPath = ResolveGeneratedSourceArtifact(assetRoot, prefab->sourcePath);
+		if(!prefabPath)
+		{
+			appendValidationError("AnimationPrefabDocumentMissing",
+				"The generated prefab document is missing or resolves outside the project Assets root.");
+			continue;
+		}
+
+		try
+		{
+			std::ifstream input(*prefabPath);
+			json prefabDocument;
+			input >> prefabDocument;
+			const auto bindingsIt = prefabDocument.find("animationBindings");
+			if(hasAnimatedBindings && (bindingsIt == prefabDocument.end() || !bindingsIt->is_object()))
+			{
+				appendValidationError("AnimationPrefabBindingsMissing",
+					"The generated prefab has no animationBindings object.");
+				continue;
+			}
+			if(!hasAnimatedBindings)
+			{
+				continue;
+			}
+
+			const json& bindings = *bindingsIt;
+			// The generated-prefab schema names every value as an asset identity so
+			// editor automation cannot confuse source node indices with stable GUIDs.
+			validateBindingArray(bindings, "skeletonAssetIds", skeletonIds, prefab->displayName);
+			validateBindingArray(bindings, "clipAssetIds", clipIds, prefab->displayName);
+			validateBindingArray(bindings, "deformableMeshAssetIds", deformableMeshIds, prefab->displayName);
+			validateBindingArray(bindings, "morphTargetAssetIds", morphTargetIds, prefab->displayName);
+
+			TerraEngine::UUID boundSkeleton = TerraEngine::EMPTY_UUID;
+			if(!skeletonIds.empty())
+			{
+				const auto skeletonField = bindings.find("primarySkeletonAssetId");
+				const std::optional<TerraEngine::UUID> parsed = skeletonField != bindings.end() && skeletonField->is_string()
+					? TerraEngine::ParseUUID(skeletonField->get<std::string>()) : std::nullopt;
+				if(!parsed || !ContainsUuid(skeletonIds, *parsed))
+				{
+					appendValidationError("AnimationPrefabSkeletonBindingInvalid",
+						"The prefab primarySkeletonAssetId does not reference a skeleton from this package.");
+				}
+				else
+				{
+					boundSkeleton = *parsed;
+				}
+			}
+
+			if(!clipIds.empty())
+			{
+				const auto clipField = bindings.find("defaultClipAssetId");
+				const std::optional<TerraEngine::UUID> parsed = clipField != bindings.end() && clipField->is_string()
+					? TerraEngine::ParseUUID(clipField->get<std::string>()) : std::nullopt;
+				if(!parsed || !ContainsUuid(clipIds, *parsed))
+				{
+					appendValidationError("AnimationPrefabDefaultClipInvalid",
+						"The prefab defaultClipAssetId does not reference an animation clip from this package.");
+				}
+			}
+
+			if(boundSkeleton != TerraEngine::EMPTY_UUID)
+			{
+				bool animatorBound = false;
+				for(const json& object : prefabDocument.value("objects", json::array()))
+				{
+					const json components = object.value("components", json::object());
+					const auto animator = components.find("AnimatorComponent");
+					if(animator == components.end() || !animator->is_object()) continue;
+					const auto skeletonOverride = animator->find("skeletonOverrideAssetId");
+					const std::optional<TerraEngine::UUID> parsed = skeletonOverride != animator->end() && skeletonOverride->is_string()
+						? TerraEngine::ParseUUID(skeletonOverride->get<std::string>()) : std::nullopt;
+					const auto defaultClip = animator->find("defaultClipAssetId");
+					const std::optional<TerraEngine::UUID> parsedClip = defaultClip != animator->end() && defaultClip->is_string()
+						? TerraEngine::ParseUUID(defaultClip->get<std::string>()) : std::nullopt;
+					const bool clipBound = clipIds.empty()
+						|| (parsedClip && ContainsUuid(clipIds, *parsedClip));
+					animatorBound = parsed && *parsed == boundSkeleton && clipBound;
+					if(animatorBound) break;
+				}
+				if(!animatorBound)
+				{
+					appendValidationError("AnimationPrefabAnimatorBindingInvalid",
+						"AnimatorComponent does not bind the prefab's published skeleton and default clip.");
+				}
+			}
+		}
+		catch(const std::exception& exception)
+		{
+			appendValidationError("AnimationPrefabDocumentInvalid",
+				"The generated prefab could not be parsed: " + std::string(exception.what()));
+		}
+	}
+
+	if(outSummary.diagnostics.size() == kMaximumAnimationSummaryDiagnostics
+		&& importResult.diagnostics.size() > kMaximumAnimationSummaryDiagnostics)
+	{
+		appendValidationWarning("AnimationSummaryDiagnosticsTruncated",
+			"Additional importer diagnostics are available in the package sidecar and editor log.");
+	}
+	return true;
 }
 
 bool AssetDatabase::IsMeshAsset(const AssetMetadata& metadata) const {
@@ -3306,6 +4916,7 @@ std::string AssetDatabase::GetScriptFullName(const TerraEngine::UUID& guid) cons
 
 // AssetDatabase::SetScriptCompileState is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void AssetDatabase::SetScriptCompileState(const std::string& compileState, const std::string& summary) {
+	bool updatedScriptAsset = false;
 	for (auto& [path, metadata] : assets) {
 		if (metadata.importerName != "ScriptImporter") {
 			continue;
@@ -3313,7 +4924,17 @@ void AssetDatabase::SetScriptCompileState(const std::string& compileState, const
 
 		metadata.settings["compileStatus"] = compileState;
 		metadata.settings["lastBuildSummary"] = summary;
-		SaveMetadata(metadata);
+		updatedScriptAsset = true;
+		if (!SaveMetadata(metadata)) {
+			TERRAENGINE_LOG(LogLevel::Warning,
+				"Failed to persist script compile state for " << metadata.sourcePath << ".");
+		}
+	}
+	if (updatedScriptAsset) {
+		// Script compilation is independent from asset importing. Publish the
+		// terminal coordinator state into AssetIndex explicitly so a prior
+		// reconcile/import save cannot leave durable metadata at "Compiling".
+		RequestAssetIndexSave();
 	}
 }
 

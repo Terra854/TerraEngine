@@ -1,5 +1,8 @@
 #include "RenderWorkPacket.h"
 
+#include <algorithm>
+#include <utility>
+
 namespace TerraEngine::Renderer {
 
 	const char* ToString(RenderBackendWorkKind workKind)
@@ -48,6 +51,105 @@ namespace TerraEngine::Renderer {
 			}
 			plan.batches.push_back(std::move(batch));
 		}
+		return plan;
+	}
+
+	AnimationBackendWorkPlan BuildAnimationBackendWorkPlan(
+		const RenderFrameSnapshot& snapshot,
+		std::shared_ptr<const TerraEngine::Animation::GpuAnimationPlan> immutablePlan)
+	{
+		AnimationBackendWorkPlan plan;
+		plan.frameId = snapshot.frameId;
+		const auto reject = [&plan](std::string reason)
+		{
+			plan.valid = false;
+			plan.rejectionReason = std::move(reason);
+			plan.ranges.clear();
+			plan.gpuAnimatorCount = 0U;
+			plan.immutablePlan.reset();
+		};
+		for (const RenderFrameRenderableRecord& renderable : snapshot.renderables)
+		{
+			const AnimationRenderGenerationRecord& animation = renderable.animation;
+			if (animation.source == AnimationRenderEvaluationSource::None)
+			{
+				continue;
+			}
+			if (!ValidateAnimationRenderGenerationRecord(animation))
+			{
+				reject("An animated renderable carried an incomplete or mixed generation record.");
+				return plan;
+			}
+			if (animation.source == AnimationRenderEvaluationSource::CpuPose
+				|| animation.source == AnimationRenderEvaluationSource::SafeFallback)
+			{
+				++plan.cpuOrFallbackAnimatorCount;
+				continue;
+			}
+
+			const auto duplicate = std::find_if(plan.ranges.begin(), plan.ranges.end(),
+				[stableInstanceId = animation.stableInstanceId](const AnimationBackendWorkRange& range)
+				{
+					return range.stableInstanceId == stableInstanceId;
+				});
+			if (duplicate != plan.ranges.end())
+			{
+				// Multiple meshes may reference one animator. They consume one palette
+				// generation and must not submit its compute work once per mesh/view.
+				if (duplicate->animationPlanGeneration != animation.animationPlanGeneration
+					|| duplicate->paletteGeneration != animation.paletteGeneration
+					|| duplicate->rendererGeneration != animation.rendererGeneration
+					|| duplicate->firstGpuWorkPacket != animation.firstGpuWorkPacket
+					|| duplicate->gpuWorkPacketCount != animation.gpuWorkPacketCount
+					|| duplicate->gpuStageMask != animation.gpuStageMask)
+				{
+					reject("One animator was referenced with conflicting GPU work generations.");
+					return plan;
+				}
+				continue;
+			}
+			plan.ranges.push_back({
+				animation.stableInstanceId,
+				animation.animationPlanGeneration,
+				animation.paletteGeneration,
+				animation.rendererGeneration,
+				animation.firstGpuWorkPacket,
+				animation.gpuWorkPacketCount,
+				animation.gpuStageMask});
+			++plan.gpuAnimatorCount;
+		}
+		std::sort(plan.ranges.begin(), plan.ranges.end(),
+			[](const AnimationBackendWorkRange& left, const AnimationBackendWorkRange& right)
+			{
+				return left.stableInstanceId < right.stableInstanceId;
+			});
+		if(plan.ranges.empty()) return plan;
+		if(!immutablePlan || immutablePlan->generation == 0U) {
+			reject("GPU animation ranges require their complete immutable presentation plan.");
+			return plan;
+		}
+		for(const AnimationBackendWorkRange& range : plan.ranges) {
+			const std::size_t first = range.firstGpuWorkPacket;
+			const std::size_t count = range.gpuWorkPacketCount;
+			if(range.animationPlanGeneration != immutablePlan->generation
+				|| first > immutablePlan->workPackets.size()
+				|| count > immutablePlan->workPackets.size() - first) {
+				reject("GPU animation packet ranges do not belong to the retained plan generation.");
+				return plan;
+			}
+			for(std::size_t packetIndex = first; packetIndex < first + count; ++packetIndex) {
+				const TerraEngine::Animation::GpuAnimationWorkPacket& packet =
+					immutablePlan->workPackets[packetIndex];
+				if(packet.stableInstanceId != range.stableInstanceId
+					|| packet.generationRecordIndex >= immutablePlan->generationRecords.size()
+					|| immutablePlan->generationRecords[packet.generationRecordIndex].rendererGeneration
+						!= range.rendererGeneration) {
+					reject("GPU animation packet identity or renderer generation is stale.");
+					return plan;
+				}
+			}
+		}
+		plan.immutablePlan = std::move(immutablePlan);
 		return plan;
 	}
 

@@ -1,8 +1,18 @@
 # Engine unit tests stay headless and deterministic so contributors can run
 # them before the editor or renderer is available.
+file(GLOB_RECURSE TERRAENGINE_ENGINE_ANIMATION_TEST_SOURCES CONFIGURE_DEPENDS
+	"${CMAKE_CURRENT_SOURCE_DIR}/Animation/*.cpp"
+)
+
 add_executable(TerraEngine-EngineTests
 	EngineTests.cpp
+	${TERRAENGINE_ENGINE_ANIMATION_TEST_SOURCES}
+	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/AnimationClipCompiler.cpp
+	# Motion database cook tests link the production deterministic compiler
+	# directly, matching the existing clip compiler test boundary above.
+	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/MotionDatabaseCompiler.cpp
 	Runtime/ArchiveSerializationTests.cpp
+	Runtime/AnimationParityValidatorTests.cpp
 	Runtime/BinaryIOTests.cpp
 	Runtime/BootSummaryValidationTests.cpp
 	Runtime/CodecProviderTests.cpp
@@ -110,6 +120,8 @@ add_executable(TerraEngine-EngineTests
 	Resource/VirtualGeometryResourceTests.cpp
 	Resource/VirtualGeometryResidencyTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/MockRenderBackendTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/AnimatedRenderViewTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/DeformableVirtualGeometryTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RendererThreadingTestFixtures.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderBackendCompatibilityTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderBackendDiagnosticsOverheadTests.cpp
@@ -175,6 +187,12 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanRecordingSchedulingTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanThreadLocalContextTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanStaleBatchTests.cpp
+	# Animation ABI and managed parity tests live with the scripting boundary
+	# instead of the recursively discovered native Animation tests, so list them
+	# explicitly.
+	Scripting/AnimationAbiTests.cpp
+	Scripting/AnimationManagedLifecycleTests.cpp
+	Scripting/AnimationManagedParityTests.cpp
 	Scripting/ScriptingComponentAccessTests.cpp
 	Scripting/ScriptingDiagnosticsTests.cpp
 	Scripting/ScriptingDispatchTests.cpp
@@ -221,6 +239,7 @@ target_include_directories(TerraEngine-EngineTests
 		${CMAKE_SOURCE_DIR}/Engine/Core/Object
 		${CMAKE_SOURCE_DIR}/Engine/Runtime/ContentMount
 		${CMAKE_SOURCE_DIR}/Editor/Export
+		${CMAKE_SOURCE_DIR}/Editor/AssetCompilers
 		${CMAKE_SOURCE_DIR}/External/xxhash
 		${CMAKE_SOURCE_DIR}/External/zstd/lib
 )
@@ -425,4 +444,30 @@ add_test(NAME Engine.AdaptiveVirtualGeometry COMMAND $<TARGET_FILE:TerraEngine-E
 set_tests_properties(Engine.AdaptiveVirtualGeometry PROPERTIES
 	LABELS "Engine;VirtualGeometry;AdaptiveVirtualGeometry"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=AdaptiveVirtualGeometry;VirtualGeometry.Render;VirtualGeometry.Resource;VirtualGeometry.Diagnostics;VirtualGeometry.HiZ;VirtualGeometry.Stress"
+)
+
+# The broad Animation filter is intentionally stable. Story-specific test names
+# can be added under Tests/Engine/Animation without changing CTest wiring.
+add_test(NAME Engine.Animation COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.Animation PROPERTIES
+	LABELS "Engine;Animation"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Animation"
+)
+
+add_test(NAME Engine.AnimationParityValidator COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.AnimationParityValidator PROPERTIES
+	LABELS "Engine;Animation;Parity"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Engine.AnimationParity"
+)
+
+# The cross-platform acceptance stream is semantic correctness work, not a
+# benchmark. Keeping it as a separately named serial test makes the exact
+# 100,000-tick evidence selectable on every installed toolchain without hiding
+# the workload behind the shorter developer smoke profile.
+add_test(NAME Engine.AnimationDeterminism100k COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.AnimationDeterminism100k PROPERTIES
+	LABELS "Engine;Animation;Determinism;CrossPlatform"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Animation.CrossPlatformDeterminism;TERRAENGINE_ANIMATION_DETERMINISM_TICKS=100000"
+	RUN_SERIAL TRUE
+	TIMEOUT 1800
 )

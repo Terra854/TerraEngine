@@ -65,10 +65,27 @@ namespace TerraEngine::Tests {
 			context.Expect(diagnostics.reusedWithoutPropagation, "An unchanged frame must reuse the protected world transform snapshot.");
 			context.Expect(diagnostics.changedObjectCount == 0U, "An unchanged frame must not mark transform branches dirty.");
 
-			childTransform->position.x = 4.0f;
-			objects.MarkObjectTransformDirty(child);
+			// Exercise the same reflected setter used by inspector fields,
+			// automation, managed scripts, and exported runtimes. The setter must
+			// publish the transform revision itself so animated renderables cannot
+			// remain at a stale model matrix after an authored placement edit.
+			bool reflectedTransformWritten = false;
+			{
+				std::lock_guard lock(ComponentAccessRegistryMutex());
+				auto transformAccess = ComponentAccessRegistry().find(
+					std::string(Transform::kComponentName));
+				if(transformAccess != ComponentAccessRegistry().end()) {
+					reflectedTransformWritten = transformAccess->second.entitySetter(
+						objects.getRegistry(),
+						child.EntityId(),
+						"Position",
+						glm::vec3{4.0F, childTransform->position.y, childTransform->position.z});
+				}
+			}
 			const auto& changedWorldTransforms = cache.Refresh(objects, diagnostics);
 			const auto changedChild = changedWorldTransforms.find(child.EntityId());
+			context.Expect(reflectedTransformWritten,
+				"The transform cache fixture must update the child through the shared reflected property path.");
 			context.Expect(!diagnostics.rebuiltForHierarchy, "A local transform edit must not rebuild unchanged parent-child topology.");
 			context.Expect(diagnostics.changedObjectCount == 1U, "A local transform edit must identify exactly the changed branch root.");
 			context.Expect(diagnostics.propagatedObjectCount >= 1U, "A local transform edit must propagate the changed branch before rendering.");
@@ -111,6 +128,59 @@ namespace TerraEngine::Tests {
 				context.Expect(diagnostics.usedFlatHierarchyFastPath, "Independent root bodies must bypass generic hierarchy propagation planning.");
 				context.Expect(flatRootWorldTransform != flatWorldTransforms.end() && flatRootWorldTransform->second.position.x == 7.0f, "The flat cache fast path must publish changed local transforms as world transforms.");
 			}
+			objects.clear();
+
+			// Bulk Play/Stop restoration clears ObjectManager and republishes the
+			// same authored topology. Its hierarchy revision can therefore repeat
+			// even though every entity and component belongs to a new scene lifetime.
+			Object firstParent = objects.createObject("First Scene Parent");
+			Object firstChild = objects.createObject("First Scene Child");
+			context.Expect(objects.setParent(firstChild, firstParent),
+				"The scene-generation fixture must create its first hierarchy.");
+			Transform* firstParentTransform = objects.GetComponent<Transform>(firstParent);
+			Transform* firstChildTransform = objects.GetComponent<Transform>(firstChild);
+			context.Expect(firstParentTransform != nullptr && firstChildTransform != nullptr,
+				"The first scene lifetime must expose both transforms.");
+			if(firstParentTransform != nullptr && firstChildTransform != nullptr)
+			{
+				firstParentTransform->position.x = 10.0f;
+				firstChildTransform->position.x = 2.0f;
+				objects.MarkObjectTransformDirty(firstParent);
+				objects.MarkObjectTransformDirty(firstChild);
+			}
+			cache.Clear();
+			cache.Refresh(objects, diagnostics);
+			const std::uint64_t firstSceneGeneration = objects.GetSceneGeneration();
+			const std::uint64_t firstHierarchyRevision = objects.GetHierarchyRevision();
+
+			objects.clear();
+			Object restoredParent = objects.createObject("Restored Scene Parent");
+			Object restoredChild = objects.createObject("Restored Scene Child");
+			context.Expect(objects.setParent(restoredChild, restoredParent),
+				"The scene-generation fixture must recreate the same hierarchy.");
+			Transform* restoredParentTransform = objects.GetComponent<Transform>(restoredParent);
+			Transform* restoredChildTransform = objects.GetComponent<Transform>(restoredChild);
+			context.Expect(restoredParentTransform != nullptr && restoredChildTransform != nullptr,
+				"The restored scene lifetime must expose both transforms.");
+			if(restoredParentTransform != nullptr && restoredChildTransform != nullptr)
+			{
+				restoredParentTransform->position.x = 100.0f;
+				restoredChildTransform->position.x = 3.0f;
+				objects.MarkObjectTransformDirty(restoredParent);
+				objects.MarkObjectTransformDirty(restoredChild);
+			}
+			context.Expect(objects.GetSceneGeneration() != firstSceneGeneration,
+				"Clearing for restoration must advance the scene lifetime.");
+			context.ExpectEqual(firstHierarchyRevision, objects.GetHierarchyRevision(),
+				"Equivalent restored topology should reproduce the hierarchy revision that exposed the cache bug.");
+
+			const auto& restoredWorldTransforms = cache.Refresh(objects, diagnostics);
+			const auto restoredChildWorld = restoredWorldTransforms.find(restoredChild.EntityId());
+			context.Expect(diagnostics.rebuiltForHierarchy,
+				"A new scene lifetime must rebuild cached transforms even when its hierarchy revision repeats.");
+			context.Expect(restoredChildWorld != restoredWorldTransforms.end()
+				&& restoredChildWorld->second.position.x == 103.0f,
+				"The rebuilt cache must publish transforms from the restored scene rather than stale pre-Play values.");
 			objects.clear();
 		});
 	}

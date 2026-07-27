@@ -59,6 +59,23 @@ namespace TerraEngine::AssetPipeline
 		Data
 	};
 
+	// Every generated package child has a semantic kind and key. The pair is
+	// stable across source-array reorder and display-name changes, unlike an
+	// importer-local index, so scenes and controllers can safely retain its GUID.
+	enum class AnimationImportSubAssetKind : std::uint8_t
+	{
+		Skeleton,
+		AnimationClip,
+		DeformableMesh,
+		MorphTarget,
+		Material,
+		Texture,
+		Prefab,
+		// Appended to preserve the serialized numeric values of every existing
+		// animation-package kind while distinguishing ordinary render meshes.
+		Mesh
+	};
+
 	struct ImportedModelPackage
 	{
 		std::filesystem::path sourcePath;
@@ -168,6 +185,10 @@ namespace TerraEngine::AssetPipeline
 		std::filesystem::path sourcePath;
 		std::filesystem::path compiledPath;
 		std::string displayName;
+		// Animated glTF morph instances keep the skeleton that owns their source
+		// node. The prefab writer uses this only when one package contains several
+		// independent animation roots; ordinary static meshes leave it empty.
+		TerraEngine::UUID animationSkeletonGuid = TerraEngine::EMPTY_UUID;
 		std::array<float, 3> localBoundsMin = { 0.0f, 0.0f, 0.0f };
 		std::array<float, 3> localBoundsMax = { 0.0f, 0.0f, 0.0f };
 		bool virtualGeometryRequested = true;
@@ -206,6 +227,48 @@ namespace TerraEngine::AssetPipeline
 		std::string slotName;
 	};
 
+	struct AnimationImportDependency
+	{
+		TerraEngine::UUID assetGuid = TerraEngine::EMPTY_UUID;
+		std::uint64_t compatibilityFingerprint = 0u;
+		bool required = true;
+	};
+
+	struct GeneratedAnimationSubAsset
+	{
+		TerraEngine::UUID guid = TerraEngine::EMPTY_UUID;
+		AnimationImportSubAssetKind kind = AnimationImportSubAssetKind::AnimationClip;
+		std::string semanticKey;
+		std::string displayName;
+		std::filesystem::path sourcePath;
+		std::filesystem::path compiledPath;
+		std::uint64_t compatibilityFingerprint = 0u;
+		std::string contentHashHex;
+		std::vector<AnimationImportDependency> dependencies;
+		bool readOnlyPackageChild = true;
+	};
+
+	// The manifest is the durable publication boundary for one complete package
+	// generation. Candidate data is assembled in staging and becomes observable
+	// only after every output and this record have published successfully.
+	struct AnimationImportManifest
+	{
+		std::uint32_t schemaVersion = 1u;
+		TerraEngine::UUID packageGuid = TerraEngine::EMPTY_UUID;
+		std::string sourceHashHex;
+		std::string importerName;
+		std::string importerVersion = "1";
+		std::string settingsFingerprintHex;
+		std::string dependencyFingerprintHex;
+		std::uint64_t candidateGeneration = 0u;
+		std::uint64_t publishedGeneration = 0u;
+		std::uint64_t lastKnownGoodGeneration = 0u;
+		bool cancelled = false;
+		bool publishedAtomically = false;
+		bool preservedLastKnownGood = false;
+		std::vector<GeneratedAnimationSubAsset> subAssets;
+	};
+
 	struct ModelPackageImportResult
 	{
 		ModelImportStatus status = ModelImportStatus::Failed;
@@ -216,6 +279,7 @@ namespace TerraEngine::AssetPipeline
 		std::vector<GeneratedModelTextureAsset> generatedTextures;
 		std::vector<GeneratedModelPrefabAsset> generatedPrefabs;
 		std::vector<ModelMaterialAssignment> materialAssignments;
+		AnimationImportManifest animationManifest;
 		std::vector<ModelImportDiagnostic> diagnostics;
 	};
 
@@ -224,7 +288,20 @@ namespace TerraEngine::AssetPipeline
 	[[nodiscard]] const char* ToString(ModelDiagnosticSeverity severity);
 	[[nodiscard]] const char* ToString(ModelTextureUsage usage);
 	[[nodiscard]] const char* ToString(ModelTextureSemantic semantic);
+	[[nodiscard]] const char* ToString(AnimationImportSubAssetKind kind);
 	[[nodiscard]] TerraEngine::UUID BuildStableGeneratedModelUuid(const TerraEngine::UUID& packageGuid, std::string_view role, std::size_t index);
+	[[nodiscard]] TerraEngine::UUID BuildStableAnimationSubAssetUuid(
+		const TerraEngine::UUID& packageGuid,
+		AnimationImportSubAssetKind kind,
+		std::string_view semanticKey);
+	void CanonicalizeAnimationImportManifest(AnimationImportManifest& manifest);
+	// Dependency validation is shared by the publication boundary and editor
+	// metadata readers. It rejects dangling required references and proves that a
+	// generated prefab retains every animation asset needed to bind it later.
+	[[nodiscard]] bool ValidateAnimationImportManifestDependencies(
+		const AnimationImportManifest& manifest,
+		std::string* failureReason = nullptr);
+	[[nodiscard]] std::string BuildAnimationImportDependencyFingerprint(const AnimationImportManifest& manifest);
 
 	[[nodiscard]] nlohmann::json ToJson(const ImportedModelPackage& value);
 	[[nodiscard]] nlohmann::json ToJson(const ModelImportDiagnostic& value);
@@ -237,6 +314,9 @@ namespace TerraEngine::AssetPipeline
 	[[nodiscard]] nlohmann::json ToJson(const GeneratedModelMeshAsset& value);
 	[[nodiscard]] nlohmann::json ToJson(const GeneratedModelPrefabAsset& value);
 	[[nodiscard]] nlohmann::json ToJson(const ModelMaterialAssignment& value);
+	[[nodiscard]] nlohmann::json ToJson(const AnimationImportDependency& value);
+	[[nodiscard]] nlohmann::json ToJson(const GeneratedAnimationSubAsset& value);
+	[[nodiscard]] nlohmann::json ToJson(const AnimationImportManifest& value);
 	[[nodiscard]] nlohmann::json ToJson(const ModelPackageImportResult& value);
 	void PopulateGeneratedMeshVirtualGeometryMetadata(const std::filesystem::path& compiledMeshPath, GeneratedModelMeshAsset& mesh, std::vector<ModelImportDiagnostic>& diagnostics);
 }

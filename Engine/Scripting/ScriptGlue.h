@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "AnimationScriptAbi.h"
 #include "Core/Export.h"
 #include <cstddef>
 #include <cstdint>
@@ -605,6 +606,128 @@ extern "C" {
 	TERRAENGINE_API void Native_Scripting_PushDispatchContext(uint32_t objectId, const char* bindingId, std::uint64_t frameOrder, int workerDispatch, int exportMode, std::uint64_t objectGeneration, std::uint64_t componentGeneration, std::uint64_t bindingGeneration);
 	TERRAENGINE_API void Native_Scripting_PopDispatchContext();
 	TERRAENGINE_API void Native_Scripting_ReportBridgeCacheCounters(std::uint64_t hits, std::uint64_t misses, std::uint64_t avoidedCalls);
+
+	// Animation ABI v1. Reads copy complete protected-boundary snapshots; a null
+	// data pointer with zero capacity is the supported count-query form.
+	TERRAENGINE_API std::uint16_t Native_Animation_GetAbiVersion();
+	TERRAENGINE_API NativeAnimationStatus Native_Animation_ResolveAnimator(
+		std::uint32_t objectEntity,
+		NativeAnimationAnimatorHandleRecord* animator);
+	TERRAENGINE_API NativeAnimationStatus Native_Animation_SubmitCommand(
+		const NativeAnimationCommandRequest* request,
+		NativeAnimationCommandReceipt* receipt);
+	TERRAENGINE_API NativeAnimationStatus Native_Animation_CancelCommand(
+		const NativeAnimationCancellationRequest* request,
+		NativeAnimationCommandReceipt* receipt);
+	TERRAENGINE_API NativeAnimationStatus Native_Animation_ReadReceipt(
+		const NativeAnimationReceiptQuery* query,
+		NativeAnimationCommandReceipt* receipt);
+	TERRAENGINE_API NativeAnimationStatus Native_Animation_QueryCapability(
+		const NativeAnimationCapabilityQuery* query,
+		NativeAnimationCapabilityResult* result);
+	TERRAENGINE_API NativeAnimationStatus Native_Animation_ReadState(
+		const NativeAnimationAnimatorHandle* animator,
+		NativeAnimationStateSnapshot* snapshot);
+	TERRAENGINE_API NativeAnimationStatus Native_Animation_CopyParameters(
+		const NativeAnimationAnimatorHandle* animator,
+		NativeAnimationNamedValue* values,
+		std::uint32_t capacity,
+		NativeAnimationBufferInfo* info);
+	TERRAENGINE_API NativeAnimationStatus Native_Animation_CopyCurves(
+		const NativeAnimationAnimatorHandle* animator,
+		NativeAnimationNamedValue* values,
+		std::uint32_t capacity,
+		NativeAnimationBufferInfo* info);
+	TERRAENGINE_API NativeAnimationStatus Native_Animation_CopyMorphs(
+		const NativeAnimationAnimatorHandle* animator,
+		NativeAnimationNamedValue* values,
+		std::uint32_t capacity,
+		NativeAnimationBufferInfo* info);
+	TERRAENGINE_API NativeAnimationStatus Native_Animation_CopyBones(
+		const NativeAnimationAnimatorHandle* animator,
+		NativeAnimationBoneSnapshot* values,
+		std::uint32_t capacity,
+		NativeAnimationBufferInfo* info);
+	TERRAENGINE_API NativeAnimationStatus Native_Animation_CopySockets(
+		const NativeAnimationAnimatorHandle* animator,
+		NativeAnimationSocketSnapshot* values,
+		std::uint32_t capacity,
+		NativeAnimationBufferInfo* info);
+	TERRAENGINE_API NativeAnimationStatus Native_Animation_CopyEvents(
+		const NativeAnimationAnimatorHandle* animator,
+		NativeAnimationEvent* values,
+		std::uint32_t capacity,
+		NativeAnimationBufferInfo* info);
+	TERRAENGINE_API NativeAnimationStatus Native_Animation_CopyEventBatch(
+		NativeAnimationEvent* values,
+		std::uint32_t capacity,
+		NativeAnimationBufferInfo* info);
+	TERRAENGINE_API NativeAnimationStatus Native_Animation_CopyRootMotionResults(
+		const NativeAnimationAnimatorHandle* animator,
+		NativeAnimationRootMotionResult* values,
+		std::uint32_t capacity,
+		NativeAnimationBufferInfo* info);
+	TERRAENGINE_API NativeAnimationStatus Native_Animation_ApplyRootMotion(
+		const NativeAnimationRootMotionApplicationRequest* request,
+		NativeAnimationRootMotionApplicationReceipt* receipt);
+	TERRAENGINE_API NativeAnimationStatus Native_Animation_CopyRootMotionResultDetails(
+		const NativeAnimationAnimatorHandle* animator,
+		NativeAnimationRootMotionResultDetails* values,
+		std::uint32_t capacity,
+		NativeAnimationBufferInfo* info);
+	TERRAENGINE_API NativeAnimationStatus Native_Animation_SubmitProceduralGoal(
+		const NativeAnimationProceduralGoalCommand* request,
+		NativeAnimationProceduralGoalReceipt* receipt);
+	TERRAENGINE_API NativeAnimationStatus Native_Animation_CopyProceduralResults(
+		const NativeAnimationAnimatorHandle* animator,
+		NativeAnimationProceduralResultSnapshot* values,
+		std::uint32_t capacity,
+		NativeAnimationBufferInfo* info);
+	// Advanced records are copied deferred requests.  Until their scheduler-owned
+	// owners are connected, valid calls return Unsupported instead of aliasing a
+	// compiler, physics world, or deterministic history object.
+	TERRAENGINE_API NativeAnimationStatus Native_Animation_SubmitRetargetRequest(
+		const NativeAnimationRetargetRequest* request,
+		NativeAnimationRetargetReceipt* receipt);
+	TERRAENGINE_API NativeAnimationStatus Native_Animation_CopyRetargetSnapshots(
+		const NativeAnimationAnimatorHandle* animator,
+		NativeAnimationRetargetSnapshot* values,
+		std::uint32_t capacity,
+		NativeAnimationBufferInfo* info);
+	TERRAENGINE_API NativeAnimationStatus Native_Animation_SubmitMotionMatchRequest(
+		const NativeAnimationMotionMatchRequest* request,
+		NativeAnimationMotionMatchReceipt* receipt);
+	TERRAENGINE_API NativeAnimationStatus Native_Animation_CopyMotionMatchSnapshots(
+		const NativeAnimationAnimatorHandle* animator,
+		NativeAnimationMotionMatchSnapshot* values,
+		std::uint32_t capacity,
+		NativeAnimationBufferInfo* info);
+	// V2 records are additive: existing callers retain the frozen v1 strides,
+	// while typed queries and detailed result validity remain copied and bounded.
+	TERRAENGINE_API NativeAnimationStatus Native_Animation_SubmitMotionMatchQueryV2(
+		const NativeAnimationMotionMatchQueryRequestV2* request,
+		NativeAnimationMotionMatchQueryReceiptV2* receipt);
+	TERRAENGINE_API NativeAnimationStatus Native_Animation_CopyMotionMatchResultsV2(
+		const NativeAnimationAnimatorHandle* animator,
+		NativeAnimationMotionMatchResultV2* values,
+		std::uint32_t capacity,
+		NativeAnimationBufferInfo* info);
+	TERRAENGINE_API NativeAnimationStatus Native_Animation_SubmitRagdollRequest(
+		const NativeAnimationRagdollRequest* request,
+		NativeAnimationRagdollReceipt* receipt);
+	TERRAENGINE_API NativeAnimationStatus Native_Animation_CopyRagdollSnapshots(
+		const NativeAnimationAnimatorHandle* animator,
+		NativeAnimationRagdollSnapshot* values,
+		std::uint32_t capacity,
+		NativeAnimationBufferInfo* info);
+	TERRAENGINE_API NativeAnimationStatus Native_Animation_SubmitDeterminismRequest(
+		const NativeAnimationDeterminismRequest* request,
+		NativeAnimationDeterminismReceipt* receipt);
+	TERRAENGINE_API NativeAnimationStatus Native_Animation_CopyDeterminismSnapshots(
+		const NativeAnimationAnimatorHandle* animator,
+		NativeAnimationDeterminismSnapshot* values,
+		std::uint32_t capacity,
+		NativeAnimationBufferInfo* info);
 
 	// Physics ABI v1. Every record begins with NativePhysicsAbiHeader and is
 	// copied across the boundary, making reload and world teardown safe.
