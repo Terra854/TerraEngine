@@ -98,6 +98,14 @@ public:
 	{
 		return {};
 	}
+	// This compact receipt is independent from render timing diagnostics. A
+	// backend returns a non-empty record only after it recorded animation compute
+	// commands and successfully submitted their owning graphics command buffer.
+	virtual TerraEngine::Renderer::AnimationGpuBackendExecutionSnapshot
+		GetLatestAnimationGpuBackendExecution() const
+	{
+		return {};
+	}
 	// GetLatestRenderStats is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	virtual RenderStatsSnapshot GetLatestRenderStats(RenderViewType viewType) const
 	{

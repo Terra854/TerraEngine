@@ -3,10 +3,9 @@
 // ExportVTable.h — C-compatible interop contract for NativeAOT exported builds.
 //
 // In exported (NativeAOT) builds the managed gameplay layer compiles ahead-of-time
-// into a shared library that exposes a single C entry point: InitManagedRuntime().
-// That function populates this ManagedVTable struct with pointers to all operations
-// the C++ engine needs. The engine then calls these function pointers directly,
-// bypassing the hostfxr runtime entirely.
+// into a shared library with a retained legacy initializer and a capacity-aware
+// current initializer. The selected function populates this ManagedVTable with
+// operations the C++ engine calls directly, bypassing hostfxr entirely.
 //
 // Both sides (C++ and C#) must agree on the struct layout. The C# mirror lives in
 // Engine/Managed/Source/Export/ExportVTable.cs. Any change to this header must be
@@ -14,6 +13,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 #pragma pack(push, 8)
@@ -54,8 +54,8 @@ struct ExportScriptBatchItem {
 	int32_t workerDispatch;
 };
 
-// Function-pointer table populated by the NativeAOT managed library during
-// InitManagedRuntime(). The C++ engine consumes this struct exclusively in
+// Function-pointer table populated by the NativeAOT managed library during its
+// selected initializer. The C++ engine consumes this struct exclusively in
 // exported builds — no other interop channel is used (AC-003).
 //
 // Versioning: `version` is set by the managed side and checked by the engine.
@@ -100,6 +100,12 @@ struct ManagedVTable {
 	uint64_t tableSize;
 	uint32_t (__cdecl* getPhysicsAbiVersion)();
 	void     (__cdecl* dispatchPhysicsEventBatch)(const void* events, uint32_t eventCount, uint64_t worldId, uint32_t worldGeneration, uint64_t tick);
+	// v3 tail: copied animation events use the same protected callback shape in
+	// hosted and NativeAOT runtimes. Both version and tableSize must authorize
+	// these fields before the engine reads either pointer.
+	uint16_t (__cdecl* getAnimationAbiVersion)();
+	void     (__cdecl* dispatchAnimationEventBatch)(const void* events, uint32_t eventCount, int64_t sourceTick,
+		uint64_t publicationGeneration, uint32_t overflowed, uint32_t droppedCountLowerBound);
 #else
 	int32_t  (*getScriptCount)();
 	void     (*getScriptIds)(uint64_t* outBuffer, int32_t capacity);
@@ -117,24 +123,38 @@ struct ManagedVTable {
 	uint64_t tableSize;
 	uint32_t (*getPhysicsAbiVersion)();
 	void     (*dispatchPhysicsEventBatch)(const void* events, uint32_t eventCount, uint64_t worldId, uint32_t worldGeneration, uint64_t tick);
+	uint16_t (*getAnimationAbiVersion)();
+	void     (*dispatchAnimationEventBatch)(const void* events, uint32_t eventCount, int64_t sourceTick,
+		uint64_t publicationGeneration, uint32_t overflowed, uint32_t droppedCountLowerBound);
 #endif
 };
 
 #pragma pack(pop)
 
-// The single C-exported entry point from the NativeAOT shared library.
-// The engine calls this exactly once during startup to populate the VTable.
-// Returns 0 on success, non-zero on failure.
+// NativeAOT libraries retain the v1-only legacy export for old hosts and add a
+// capacity-aware v3 export for current hosts. The engine selects one exactly
+// once during startup; each initializer returns 0 on success.
 #ifdef _WIN32
 using InitManagedRuntimeFn = int32_t(__cdecl*)(ManagedVTable* outTable);
+using InitManagedRuntimeV3Fn = int32_t(__cdecl*)(ManagedVTable* outTable, uint64_t hostCapacity);
 #else
 using InitManagedRuntimeFn = int32_t(*)(ManagedVTable* outTable);
+using InitManagedRuntimeV3Fn = int32_t(*)(ManagedVTable* outTable, uint64_t hostCapacity);
 #endif
 
-// V1 remains readable for older exports. V2 appends the fixed-width physics
-// event bridge, and tableSize guards every tail access before dereferencing it.
+// V1 and V2 sizes stay pinned for older exports. V3 appends the fixed-width
+// animation event bridge; tableSize guards every tail before dereferencing it.
 inline constexpr uint32_t kManagedVTableMinVersion = 1;
 inline constexpr uint32_t kManagedVTablePhysicsVersion = 2;
+inline constexpr uint32_t kManagedVTableAnimationVersion = 3;
 inline constexpr uint32_t kManagedPhysicsAbiVersion = 1;
+inline constexpr uint16_t kManagedAnimationAbiVersion = 1;
 inline constexpr uint64_t kManagedVTableV1Size = 112;
-inline constexpr uint64_t kManagedVTableV2Size = sizeof(ManagedVTable);
+inline constexpr uint64_t kManagedVTableV2Size = 136;
+inline constexpr uint64_t kManagedVTableV3Size = 152;
+
+// Pin every released tail independently. A later v4 append must introduce its
+// own size constant instead of silently changing what a v3 host accepts.
+static_assert(offsetof(ManagedVTable, getAnimationAbiVersion) == kManagedVTableV2Size);
+static_assert(offsetof(ManagedVTable, dispatchAnimationEventBatch) == 144U);
+static_assert(sizeof(ManagedVTable) == kManagedVTableV3Size);

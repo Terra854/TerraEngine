@@ -4,8 +4,10 @@
 
 #include "Profiling/PerformanceTelemetry.h"
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -195,6 +197,137 @@ struct ProfilerPhysicsFrameCounters
 	double publishMs = 0.0;
 };
 
+// ProfilerAnimationDiagnosticsFacts keeps the always-present animation
+// evidence in fixed typed storage while a capture is retained. Dormant frames
+// use these three scalar facts instead of allocating and searching three
+// string-based ProfilerMetric entries on every frame. Public capture copies
+// materialize the established metric names only when a caller requests them.
+struct ProfilerAnimationDiagnosticsFacts
+{
+	std::uint64_t schedulerMembershipChecks = 0U;
+	bool dormant = false;
+	bool baselineIdentityMatched = false;
+};
+
+// ProfilerAnimationStage is append-only because saved capture files store these
+// values numerically. The names split CPU planning/authority work from GPU work
+// and protected publication so a slow frame cannot hide behind one aggregate.
+enum class ProfilerAnimationStage : std::uint8_t
+{
+	SchedulerMembership = 0U,
+	WorkPlanning = 1U,
+	CpuGraphEvaluation = 2U,
+	MotionMatching = 3U,
+	IkSolve = 4U,
+	RagdollHandoff = 5U,
+	CpuAuthority = 6U,
+	GpuPlanning = 7U,
+	GpuEvaluation = 8U,
+	Deformation = 9U,
+	ProtectedPublication = 10U,
+	Presentation = 11U,
+	Count = 12U
+};
+
+inline constexpr std::size_t kProfilerAnimationStageCount =
+	static_cast<std::size_t>(ProfilerAnimationStage::Count);
+inline constexpr std::size_t kMaximumProfilerAnimationDetailRecordsPerFrame = 256U;
+inline constexpr std::uint32_t kProfilerAnimationWorkerEvidence = 1U << 0U;
+inline constexpr std::uint32_t kProfilerAnimationVolumeEvidence = 1U << 1U;
+inline constexpr std::uint32_t kProfilerAnimationMemoryEvidence = 1U << 2U;
+inline constexpr std::uint32_t kProfilerAnimationTransferEvidence = 1U << 3U;
+inline constexpr std::uint32_t kProfilerAnimationStallEvidence = 1U << 4U;
+inline constexpr std::uint32_t kProfilerAnimationCacheEvidence = 1U << 5U;
+inline constexpr std::uint32_t kProfilerAnimationAllEvidence =
+	kProfilerAnimationWorkerEvidence | kProfilerAnimationVolumeEvidence
+	| kProfilerAnimationMemoryEvidence | kProfilerAnimationTransferEvidence
+	| kProfilerAnimationStallEvidence | kProfilerAnimationCacheEvidence;
+
+// ProfilerAnimationStageTiming distinguishes an unavailable timestamp from a
+// measured zero. Sampled timings remain explicitly labelled so consumers do not
+// accidentally compare them with an every-frame timing stream.
+struct ProfilerAnimationStageTiming
+{
+	std::uint64_t nanoseconds = 0U;
+	bool available = false;
+	bool sampled = false;
+};
+
+// ProfilerAnimationFrameSummary is fixed-size copied evidence for one active
+// frame. Counts are raw volumes and bytes rather than derived percentages, so
+// final-phase tooling can reproduce utilization, cache reuse, and memory math.
+struct ProfilerAnimationFrameSummary
+{
+	std::uint32_t schemaVersion = 1U;
+	// Each bit states that the corresponding zero/non-zero counter family was
+	// actually observed. Missing hardware instrumentation must not look like zero.
+	std::uint32_t availableEvidenceMask = 0U;
+	std::uint64_t schedulerMembershipChecks = 0U;
+	std::uint64_t activeAnimators = 0U;
+	std::uint64_t evaluatedAnimators = 0U;
+	std::uint64_t cpuAnimators = 0U;
+	std::uint64_t gpuVisualAnimators = 0U;
+	std::uint64_t hybridAnimators = 0U;
+	std::uint64_t workerCount = 0U;
+	std::uint64_t workerJobs = 0U;
+	std::uint64_t workerUsefulItems = 0U;
+	std::uint64_t workerBusyNanoseconds = 0U;
+	std::uint64_t workerCapacityNanoseconds = 0U;
+	std::uint64_t sampledJoints = 0U;
+	std::uint64_t blendedTracks = 0U;
+	std::uint64_t evaluatedGraphNodes = 0U;
+	std::uint64_t motionMatchingCandidates = 0U;
+	std::uint64_t ikChains = 0U;
+	std::uint64_t ragdollBodies = 0U;
+	std::uint64_t gpuEvaluatedJoints = 0U;
+	std::uint64_t gpuBatches = 0U;
+	std::uint64_t frameArenaBytes = 0U;
+	std::uint64_t frameArenaHighWaterBytes = 0U;
+	std::uint64_t poseCacheBytes = 0U;
+	std::uint64_t poseCacheHighWaterBytes = 0U;
+	std::uint64_t gpuResidentBytes = 0U;
+	std::uint64_t gpuResidentHighWaterBytes = 0U;
+	std::uint64_t gpuTransferBytes = 0U;
+	std::uint64_t gpuReadbackBytes = 0U;
+	std::uint64_t completePoseReadbackBytes = 0U;
+	std::uint64_t boundedMetadataReadbackBytes = 0U;
+	std::uint64_t gpuWaitCount = 0U;
+	std::uint64_t schedulerWaitCount = 0U;
+	std::uint64_t protectedBoundaryStallCount = 0U;
+	std::uint64_t poseCacheHits = 0U;
+	std::uint64_t poseCacheMisses = 0U;
+	std::uint64_t clipCacheHits = 0U;
+	std::uint64_t clipCacheMisses = 0U;
+	std::uint64_t residencyHits = 0U;
+	std::uint64_t residencyMisses = 0U;
+	std::array<ProfilerAnimationStageTiming, kProfilerAnimationStageCount> stageTimings{};
+};
+
+// Detailed records are numeric copied diagnostics only. They contain no live
+// object pointers or unbounded strings and are retained only when the capture's
+// existing Detailed/Sampled policy opts in.
+struct ProfilerAnimationDetailRecord
+{
+	std::uint64_t stableInstanceId = 0U;
+	std::uint32_t executionMode = 0U;
+	std::uint32_t batchOrdinal = 0U;
+	std::uint64_t sampledJoints = 0U;
+	std::uint64_t evaluatedGraphNodes = 0U;
+	std::uint64_t transferBytes = 0U;
+	std::uint64_t readbackBytes = 0U;
+	std::uint64_t evaluationNanoseconds = 0U;
+	bool poseCacheReused = false;
+};
+
+// Active animation telemetry is referenced immutably from retained frames. A
+// null pointer is the dormant/disabled representation, keeping empty projects
+// on the existing three-scalar allocation-free path.
+struct ProfilerAnimationFrameTelemetry
+{
+	ProfilerAnimationFrameSummary summary;
+	std::vector<ProfilerAnimationDetailRecord> details;
+};
+
 // struct ProfilerFrameRecord groups related state and operations so callers have one documented contract.
 struct ProfilerFrameRecord
 {
@@ -206,6 +339,12 @@ struct ProfilerFrameRecord
 	std::vector<ProfilerModuleSummary> moduleSummaries;
 	std::vector<ProfilerSample> samples;
 	std::optional<ProfilerPhysicsFrameCounters> physics;
+	// Retained frames keep common dormant-animation evidence as values. Snapshot
+	// helpers add the legacy public metric strings to their copied frame only.
+	std::optional<ProfilerAnimationDiagnosticsFacts> animationDiagnostics;
+	// Only active opted-in captures allocate this immutable record. Dormant frames
+	// leave it null so disabled/collapsed projects retain structurally minimal data.
+	std::shared_ptr<const ProfilerAnimationFrameTelemetry> animationTelemetry;
 	// Typed streams are value snapshots. They make native/editor telemetry
 	// available after loading a capture without retaining a live subsystem.
 	std::vector<PerformanceStageRecord> performanceStages;
@@ -274,6 +413,10 @@ const char* ToString(ProfilerTimingStreamStatus status);
 const char* ToString(ProfilerTimingStreamScope scope);
 const char* ToString(ProfilerTimingStreamSource source);
 const char* ToString(ProfilerCaptureDetailLevel level);
+const char* ToString(ProfilerAnimationStage stage);
+// Validation is fail-closed before a record enters a live frame or a loaded
+// capture. Rejected records never replace prior complete telemetry.
+bool ValidateProfilerAnimationFrameTelemetry(const ProfilerAnimationFrameTelemetry& telemetry) noexcept;
 std::string MakeTimestampForFileName();
 std::string MakeReadableTimestamp();
 bool AnyModuleEnabled(const ProfilerCaptureSettings& settings);

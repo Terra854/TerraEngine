@@ -379,6 +379,13 @@ void SetComponentPayloadCommand::Undo()
 		if (reg.count(m_ComponentName))
 		{
 			reg[m_ComponentName].entityDeserialize(ObjectManager::instance().getRegistry(), obj->EntityId(), m_OldPayload);
+			// Reflected Transform history must invalidate propagated world
+			// matrices just like the original edit; scene-dirty state alone
+			// cannot make the renderer or spatial index observe the restored TRS.
+			if (m_ComponentName == Transform::kComponentName)
+			{
+				ObjectManager::instance().MarkObjectTransformDirty(*obj);
+			}
 			NotifySceneAfterComponentMutation(m_ComponentName);
 		}
 	}
@@ -392,6 +399,10 @@ void SetComponentPayloadCommand::Redo()
 		if (reg.count(m_ComponentName))
 		{
 			reg[m_ComponentName].entityDeserialize(ObjectManager::instance().getRegistry(), obj->EntityId(), m_NewPayload);
+			if (m_ComponentName == Transform::kComponentName)
+			{
+				ObjectManager::instance().MarkObjectTransformDirty(*obj);
+			}
 			NotifySceneAfterComponentMutation(m_ComponentName);
 		}
 	}

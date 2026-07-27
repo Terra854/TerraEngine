@@ -20,6 +20,25 @@ namespace {
 
 	void RegisterRenderCaptureEncodingTests(TestRegistry& registry)
 	{
+		registry.Add("Renderer.CaptureEncoding.ResizeRgba8PreservesRequestedDimensions", [](TestContext& context) {
+			const std::array<std::uint8_t, 8> source = {
+				255u, 0u, 0u, 255u,
+				0u, 0u, 255u, 128u
+			};
+
+			const std::vector<std::uint8_t> resized = TerraEngine::Renderer::ResizeRgba8(source, 2u, 1u, 4u, 2u);
+
+			context.ExpectEqual(static_cast<std::size_t>(32u), resized.size(), "RGBA resize should publish targetWidth*targetHeight*4 bytes.");
+			for (std::uint32_t y = 0u; y < 2u; ++y)
+			{
+				const std::size_t row = static_cast<std::size_t>(y) * 16u;
+				context.ExpectEqual(static_cast<std::uint8_t>(255u), resized[row], "Nearest resize should preserve the first source pixel.");
+				context.ExpectEqual(static_cast<std::uint8_t>(255u), resized[row + 7u], "Nearest resize should duplicate the first pixel alpha.");
+				context.ExpectEqual(static_cast<std::uint8_t>(255u), resized[row + 10u], "Nearest resize should preserve the second source pixel blue channel.");
+				context.ExpectEqual(static_cast<std::uint8_t>(128u), resized[row + 15u], "Nearest resize should preserve the second source pixel alpha.");
+			}
+		});
+
 		registry.Add("Renderer.CaptureEncoding.Rgba8PngPublishesDimensions", [](TestContext& context) {
 			const std::array<std::uint8_t, 8> pixels = {
 				255u, 0u, 0u, 255u,

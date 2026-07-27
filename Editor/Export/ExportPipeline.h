@@ -28,6 +28,7 @@ private:
 	bool RunManagedCompilation(
 		const BuildProfile& profile,
 		const std::filesystem::path& projectRoot,
+		const ExportRuntimeLayout& runtimeLayout,
 		ExportResult& result,
 		ExportProgressCallback progressCallback);
 

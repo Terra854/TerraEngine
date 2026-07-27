@@ -141,6 +141,7 @@ private:
 
 	void BeginBuild();
 	void HandleCompletedBuild(ScriptBuildResult result);
+	void CancelAndDrainActiveBuild();
 	void UpdateSharedState();
 
 	[[nodiscard]] ScriptBuildResult RunBuildJob(ScriptBuildProfile profile);

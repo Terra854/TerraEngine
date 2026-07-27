@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 2,
+  "fixedTicksPerSecond": 60,
+  "maximumBodiesPerRuntimeSnapshot": 256,
+  "authority": {
+    "physics": "Jolt",
+    "visualBlend": "animation",
+    "gpuMayChangePhysicsState": false,
+    "completePoseReadbackAllowed": false
+  },
+  "fixtures": [
+    {
+      "name": "full-body-activation",
+      "coverage": ["all-joints", "pose", "linear-velocity", "angular-velocity"],
+      "expected": ["atomic-create", "activation-pose-continuity", "current-step-publication"],
+      "bodyCount": 3,
+      "constraintCount": 2
+    },
+    {
+      "name": "partial-branch-boundary",
+      "coverage": ["per-joint", "branch", "layer", "mask", "time-ramp"],
+      "expected": ["kinematic-anchor", "match-animation-continuity", "motor-to-animation"],
+      "weights": [0.0, 0.25, 0.5, 1.0]
+    },
+    {
+      "name": "moving-support-recovery",
+      "coverage": ["pose-match", "contacts", "support-velocity", "root-alignment"],
+      "expected": ["stable-candidate-tie-break", "copied-support-alignment", "transition-handoff"]
+    },
+    {
+      "name": "blocked-recovery",
+      "coverage": ["clearance-query", "blocked-space", "velocity-envelope"],
+      "expected": ["no-candidate-publication", "no-teleport", "last-good-preserved"]
+    },
+    {
+      "name": "stale-world-body-profile",
+      "coverage": ["world-generation", "body-generation", "profile-generation", "constraint-generation"],
+      "expected": ["atomic-rejection", "immutable-pose-preserved", "correlated-diagnostic"]
+    },
+    {
+      "name": "rollback-replay-network",
+      "coverage": ["event-watermark", "root-motion", "motion-match", "retarget", "recording", "replication"],
+      "expected": ["bounded-history", "byte-stable-state", "stable-replay-selection", "stale-correction-rejected"]
+    }
+  ]
+}

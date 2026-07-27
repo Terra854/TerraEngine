@@ -2,6 +2,9 @@
 
 #include "PhysicsSystem.h"
 
+#include "Animation/Ragdoll/RagdollActivation.h"
+#include "Animation/Runtime/RootMotion.h"
+
 #include "Backend/JoltPhysicsBackend.h"
 #include "Components/Transform.h"
 #include "Core/Object/ObjectManager.h"
@@ -103,6 +106,7 @@ namespace TerraEngine::Physics {
 			std::size_t providerItems = 0U;
 			std::size_t commandItems = 0U;
 			std::size_t queryItems = 0U;
+			std::size_t ragdollItems = 0U;
 		};
 		struct RuntimeBody {
 			TerraEngine::UUID objectId{};
@@ -149,6 +153,36 @@ namespace TerraEngine::Physics {
 			PhysicsCharacterHandle handle;
 		};
 
+		// Ragdoll provider objects deliberately live outside the scene rigid-body
+		// maps. Animation owns the visual skeleton and consumes copied poses, so a
+		// simulated body must never masquerade as an authored ObjectManager entity.
+		struct RuntimeRagdollBody {
+			std::uint64_t bodyId = 0U;
+			std::uint64_t stableJointId = 0U;
+			PhysicsBodyHandle body;
+			PhysicsShapeHandle shape;
+			Animation::AnimationTransform lastWorldPose{};
+			Animation::AnimationFloat3 lastLinearVelocity{};
+			Animation::AnimationFloat3 lastAngularVelocity{};
+		};
+
+		struct RuntimeRagdollConstraint {
+			std::uint64_t constraintId = 0U;
+			PhysicsConstraintHandle handle;
+			PhysicsConstraintRuntimeRegistration registration;
+			// Retaining the provider-neutral create packet lets a later typed motor
+			// update replace only drive settings without reconstructing authoring data.
+			Backend::PhysicsConstraintCreateRequest request;
+		};
+
+		struct RuntimeRagdoll {
+			Animation::RagdollGenerationStamp generation{};
+			std::shared_ptr<const Animation::RagdollProfileAsset> profile;
+			std::vector<RuntimeRagdollBody> bodies;
+			std::vector<RuntimeRagdollConstraint> constraints;
+			bool active = false;
+		};
+
 		struct PendingTransformPublication {
 			TransformPublicationPacket packet;
 			std::string groupId;
@@ -165,6 +199,7 @@ namespace TerraEngine::Physics {
 			const PhysicsQueryDiagnostics queries = world.QueryDiagnostics();
 			activation.commandItems = commands.queuedDepth;
 			activation.queryItems = queries.queuedDepth;
+			activation.ragdollItems = ragdollPhysicsBridge.PendingCount();
 			activation.providerItems = world.RegistryStatistics().bodyCount;
 			activation.authoringItems = authoring ? authoring->Data().bodies.size() : activation.providerItems;
 
@@ -182,7 +217,8 @@ namespace TerraEngine::Physics {
 			const bool predictedStep = explicitStep || (accumulating
 				&& timing.accumulator + deltaTime >= settings.fixedTimeStep);
 			const bool preparationWork = worldActive
-				&& (authoringChanged || accumulating || explicitStep || activation.commandItems > 0U);
+				&& (authoringChanged || accumulating || explicitStep || activation.commandItems > 0U
+					|| activation.ragdollItems > 0U);
 
 			// Snapshot remains protected because it observes live scene generations.
 			// Every later phase is activated only when its prerequisite can produce
@@ -257,6 +293,7 @@ namespace TerraEngine::Physics {
 			bodyObjects.clear();
 			runtimeConstraints.clear();
 			runtimeCharacters.clear();
+			runtimeRagdolls.clear();
 			preparedBodies.clear();
 			preparedRemovals.clear();
 			preparedConstraints.clear();
@@ -290,6 +327,9 @@ namespace TerraEngine::Physics {
 			latestEvents.reset();
 			latestCharacters.reset();
 			latestDiagnostics.reset();
+			// Any retained ragdoll pose belongs to the old world generation. Clear it
+			// before the provider teardown makes a replacement world observable.
+			ragdollPhysicsBridge.Clear();
 			PublishedPhysicsDebugPackets().Clear();
 			PublishPhysicsDiagnosticsSnapshot({});
 			const bool completed = world.CompleteTeardown();
@@ -792,8 +832,580 @@ namespace TerraEngine::Physics {
 			return body != runtimeBodies.end() ? body->second.body : PhysicsBodyHandle{};
 		}
 
+		static TerraEngine::UUID MakeRagdollRuntimeUuid(
+			std::uint64_t ragdollId,
+			std::uint64_t recordId,
+			std::uint64_t family) noexcept {
+			// Provider records require UUID ownership metadata even though ragdoll
+			// bodies are not scene objects. A deterministic namespace keeps rebuilds
+			// stable and lets extraction verify exact ownership without random state.
+			TerraEngine::UUID value{};
+			std::uint64_t high = ragdollId ^ (family * 0x9e3779b97f4a7c15ULL);
+			std::uint64_t low = recordId ^ (ragdollId + 0xd6e8feb86659fd93ULL);
+			if(high == 0U && low == 0U) low = 1U;
+			std::memcpy(value.data(), &high, sizeof(high));
+			std::memcpy(value.data() + sizeof(high), &low, sizeof(low));
+			return value;
+		}
+
+		static PhysicsVector3 ToPhysicsVector(const Animation::AnimationFloat3& value) noexcept {
+			return {value.x, value.y, value.z};
+		}
+
+		static PhysicsQuaternion ToPhysicsRotation(const Animation::AnimationQuaternion& value) noexcept {
+			const float lengthSquared = value.x * value.x + value.y * value.y
+				+ value.z * value.z + value.w * value.w;
+			if(!std::isfinite(lengthSquared) || lengthSquared <= 1.0e-8F) return {};
+			const float inverseLength = 1.0F / std::sqrt(lengthSquared);
+			return {value.x * inverseLength, value.y * inverseLength,
+				value.z * inverseLength, value.w * inverseLength};
+		}
+
+		static PhysicsPose ToPhysicsPose(const Animation::AnimationTransform& value) noexcept {
+			return {ToPhysicsVector(value.translation), ToPhysicsRotation(value.rotation)};
+		}
+
+		static Animation::AnimationTransform ToAnimationTransform(const PhysicsPose& value) noexcept {
+			return {{value.position.x, value.position.y, value.position.z},
+				{value.rotation.x, value.rotation.y, value.rotation.z, value.rotation.w},
+				{1.0F, 1.0F, 1.0F}};
+		}
+
+		static std::uint64_t MixRagdollRecipeHash(
+			std::uint64_t hash,
+			std::uint64_t value) noexcept {
+			hash ^= value + 0x9e3779b97f4a7c15ULL + (hash << 6U) + (hash >> 2U);
+			return hash == 0U ? 1U : hash;
+		}
+
+		std::optional<Backend::PhysicsShapeRecipe> MakeRagdollShapeRecipeLocked(
+			const Animation::RagdollBodyRecord& body,
+			std::string& diagnostic) {
+			if(body.colliders.empty()) {
+				diagnostic = "A ragdoll body has no collider recipe.";
+				return std::nullopt;
+			}
+
+			Backend::PhysicsShapeRecipe compound;
+			compound.kind = PhysicsShapeKind::Compound;
+			compound.dimensions = {1.0F, 1.0F, 1.0F};
+			compound.stableRecipeHash = MixRagdollRecipeHash(14695981039346656037ULL, body.bodyId);
+			compound.children.reserve(body.colliders.size());
+			for(std::size_t index = 0U; index < body.colliders.size(); ++index) {
+				const Animation::RagdollColliderRecord& collider = body.colliders[index];
+				Backend::PhysicsShapeRecipe child;
+				child.localCenter = ToPhysicsVector(collider.localCenter);
+				child.localRotation = ToPhysicsRotation(collider.localOrientation);
+				child.subShapeKey = static_cast<std::uint32_t>(index + 1U);
+				child.sensor = collider.isSensor;
+				child.stableRecipeHash = MixRagdollRecipeHash(body.bodyId, collider.colliderId);
+				switch(collider.shape) {
+				case Animation::RagdollColliderShape::Sphere:
+					child.kind = PhysicsShapeKind::Sphere;
+					child.dimensions = {collider.dimensions.x, collider.dimensions.x, collider.dimensions.x};
+					break;
+				case Animation::RagdollColliderShape::Capsule:
+					child.kind = PhysicsShapeKind::Capsule;
+					child.dimensions = {collider.dimensions.x,
+						2.0F * (collider.dimensions.y + collider.dimensions.x), collider.dimensions.x};
+					break;
+				case Animation::RagdollColliderShape::Box:
+					child.kind = PhysicsShapeKind::Box;
+					child.dimensions = {2.0F * collider.dimensions.x,
+						2.0F * collider.dimensions.y, 2.0F * collider.dimensions.z};
+					break;
+				case Animation::RagdollColliderShape::ConvexHull:
+					child.kind = PhysicsShapeKind::ConvexHull;
+					child.dimensions = {1.0F, 1.0F, 1.0F};
+					if(collider.convexHullSource == Animation::RagdollConvexHullSource::InlineVertices) {
+						child.points.reserve(collider.convexHullVertices.size());
+						for(const Animation::AnimationFloat3& point : collider.convexHullVertices) {
+							child.points.push_back(ToPhysicsVector(point));
+						}
+					} else if(collider.convexHullSource == Animation::RagdollConvexHullSource::ImmutableCookedAsset) {
+						const TerraEngine::UUID assetId = collider.immutableShape.assetId.value;
+						const auto state = ResolveCookedAssetLocked(assetId, diagnostic);
+						if(!state || !state->data
+							|| state->publicationGeneration != collider.immutableShape.expectedGeneration) {
+							diagnostic = diagnostic.empty()
+								? "A ragdoll collider references an absent or stale immutable cooked shape."
+								: diagnostic;
+							return std::nullopt;
+						}
+						child.sourceAssetId = assetId;
+						child.cookedFormatFamily = state->data->formatFamily;
+						child.cookedProvider = state->data->provider;
+						child.cookedProviderVersion = state->data->providerVersion;
+						child.cookedProviderRevision = state->data->providerRevision;
+						child.cookedFormatVersion = state->data->formatVersion;
+						child.cookedPayloadChecksum = state->data->payloadChecksum;
+						child.cookedPayload = std::shared_ptr<const std::vector<std::byte>>(
+							state->data, &state->data->payload);
+						child.stableRecipeHash = MixRagdollRecipeHash(
+							child.stableRecipeHash, state->data->recipeHash);
+					} else {
+						diagnostic = "A convex ragdoll collider has no immutable point or cooked-shape source.";
+						return std::nullopt;
+					}
+					break;
+				}
+				compound.stableRecipeHash = MixRagdollRecipeHash(
+					compound.stableRecipeHash, child.stableRecipeHash);
+				compound.children.push_back(std::move(child));
+			}
+			if(compound.children.size() == 1U) return std::move(compound.children.front());
+			return compound;
+		}
+
+		static PhysicsConstraintKind ConvertRagdollConstraintKind(
+			Animation::RagdollConstraintKind kind) noexcept {
+			switch(kind) {
+			case Animation::RagdollConstraintKind::Fixed: return PhysicsConstraintKind::Fixed;
+			case Animation::RagdollConstraintKind::Hinge: return PhysicsConstraintKind::Hinge;
+			case Animation::RagdollConstraintKind::Cone: return PhysicsConstraintKind::Cone;
+			case Animation::RagdollConstraintKind::SwingTwist: return PhysicsConstraintKind::SwingTwist;
+			case Animation::RagdollConstraintKind::SixDof: return PhysicsConstraintKind::SixDegreesOfFreedom;
+			}
+			return PhysicsConstraintKind::Fixed;
+		}
+
+		static Backend::PhysicsConstraintAxisSettings ConvertRagdollAxis(
+			const Animation::RagdollAxisLimit& limit,
+			const Animation::RagdollAxisMotor& motor) noexcept {
+			Backend::PhysicsConstraintAxisSettings converted;
+			converted.limitEnabled = limit.mode != Animation::RagdollLimitMode::Free;
+			converted.minimum = limit.mode == Animation::RagdollLimitMode::Locked ? 0.0F : limit.minimum;
+			converted.maximum = limit.mode == Animation::RagdollLimitMode::Locked ? 0.0F : limit.maximum;
+			converted.springEnabled = limit.springFrequencyHertz > 0.0F;
+			converted.springUsesFrequency = true;
+			converted.springFrequency = limit.springFrequencyHertz;
+			converted.springDamping = limit.springDampingRatio;
+			switch(motor.mode) {
+			case Animation::RagdollMotorMode::Disabled:
+				converted.motorMode = Backend::PhysicsBackendMotorMode::Off;
+				break;
+			case Animation::RagdollMotorMode::Position:
+				converted.motorMode = Backend::PhysicsBackendMotorMode::Position;
+				break;
+			case Animation::RagdollMotorMode::Velocity:
+				converted.motorMode = Backend::PhysicsBackendMotorMode::Velocity;
+				break;
+			}
+			converted.motorTargetPosition = motor.targetPosition;
+			converted.motorTargetVelocity = motor.targetVelocity;
+			converted.motorMaximumForce = motor.maximumForce;
+			return converted;
+		}
+
+		void ReleaseRagdollHandlesLocked(RuntimeRagdoll& ragdoll) noexcept {
+			for(auto constraint = ragdoll.constraints.rbegin(); constraint != ragdoll.constraints.rend(); ++constraint) {
+				world.RemoveConstraint(constraint->handle);
+				world.Release(constraint->handle);
+			}
+			for(auto body = ragdoll.bodies.rbegin(); body != ragdoll.bodies.rend(); ++body) {
+				world.Release(body->body);
+				world.Release(body->shape);
+			}
+		}
+
+		void DestroyCommittedRagdollLocked(RuntimeRagdoll& ragdoll) noexcept {
+			// Constraints always retire before endpoint bodies; provider deletion then
+			// cannot reject because of a surviving dependency. Handles are released only
+			// after the provider no longer references their slots.
+			for(auto constraint = ragdoll.constraints.rbegin(); constraint != ragdoll.constraints.rend(); ++constraint) {
+				world.RemoveConstraint(constraint->handle);
+				const Backend::PhysicsBackendResult result = backend->DestroyConstraint(constraint->handle);
+				if(!result.Succeeded()) ++diagnosticCounters.rejectedCount;
+				world.Release(constraint->handle);
+			}
+			for(auto body = ragdoll.bodies.rbegin(); body != ragdoll.bodies.rend(); ++body) {
+				const Backend::PhysicsBackendResult bodyResult = backend->DestroyBody(body->body);
+				const Backend::PhysicsBackendResult shapeResult = backend->DestroyShape(body->shape);
+				if(!bodyResult.Succeeded() || !shapeResult.Succeeded()) ++diagnosticCounters.rejectedCount;
+				world.Release(body->body);
+				world.Release(body->shape);
+			}
+		}
+
+		bool StageRagdollLocked(
+			std::uint64_t ragdollId,
+			const Animation::RagdollGenerationStamp& generation,
+			std::shared_ptr<const Animation::RagdollProfileAsset> profile,
+			const Animation::RagdollActivationPlan& activation,
+			bool active,
+			Backend::PhysicsBackendStagingToken& staging,
+			RuntimeRagdoll& output,
+			std::string& diagnostic) {
+			if(!profile || profile->runtimeGeneration != generation.profileGeneration
+				|| generation.worldGeneration != world.Handle().worldGeneration
+				|| activation.generation != generation
+				|| Animation::ValidateRagdollProfileAssetStructure(*profile) != Animation::AnimationStatus::Ok
+				|| profile->bodies.size() != activation.bodies.size()
+				|| profile->bodies.size() > Animation::kRagdollSnapshotMaximumBodies) {
+				diagnostic = "The ragdoll profile, activation pose, or active physics-world generation is incompatible.";
+				return false;
+			}
+
+			RuntimeRagdoll staged;
+			staged.generation = generation;
+			staged.profile = std::move(profile);
+			staged.active = active;
+			staged.bodies.reserve(staged.profile->bodies.size());
+			std::unordered_map<std::uint64_t, PhysicsBodyHandle> bodyHandles;
+			bodyHandles.reserve(staged.profile->bodies.size());
+			for(std::size_t index = 0U; index < staged.profile->bodies.size(); ++index) {
+				const Animation::RagdollBodyRecord& profileBody = staged.profile->bodies[index];
+				const Animation::RagdollActivationBody& activationBody = activation.bodies[index];
+				if(profileBody.bodyId != activationBody.bodyId
+					|| profileBody.stableJointId != activationBody.stableJointId
+					|| profileBody.collisionLayer >= configuredSettings.layers.size()
+					|| !configuredSettings.layers[profileBody.collisionLayer].enabled) {
+					diagnostic = "A ragdoll body mapping or collision layer is invalid for the active physics settings.";
+					ReleaseRagdollHandlesLocked(staged);
+					return false;
+				}
+
+				auto shapeRecipe = MakeRagdollShapeRecipeLocked(profileBody, diagnostic);
+				if(!shapeRecipe) {
+					ReleaseRagdollHandlesLocked(staged);
+					return false;
+				}
+				const PhysicsShapeHandle shape = world.AllocateShape();
+				const PhysicsBodyHandle body = world.AllocateBody();
+				if(!shape.IsValid() || !body.IsValid()) {
+					if(shape.IsValid()) world.Release(shape);
+					if(body.IsValid()) world.Release(body);
+					diagnostic = "Physics handle capacity was exhausted while staging a ragdoll body.";
+					ReleaseRagdollHandlesLocked(staged);
+					return false;
+				}
+				staged.bodies.push_back({profileBody.bodyId, profileBody.stableJointId,
+					body, shape, activationBody.worldPose,
+					activationBody.linearVelocity, activationBody.angularVelocity});
+
+				Backend::PhysicsBackendResult result = backend->CreateShape(
+					world.Handle(), shape, *shapeRecipe, staging);
+				if(!result.Succeeded()) {
+					diagnostic = result.message;
+					ReleaseRagdollHandlesLocked(staged);
+					return false;
+				}
+				Backend::PhysicsBodyCreateRequest request;
+				request.handle = body;
+				request.objectId = MakeRagdollRuntimeUuid(ragdollId, profileBody.bodyId, 1U);
+				request.objectGeneration = static_cast<PhysicsGeneration>(generation.publicationGeneration);
+				request.componentGeneration = static_cast<PhysicsGeneration>(generation.profileGeneration);
+				request.shape = shape;
+				request.motionType = profileBody.motionType == Animation::RagdollMotionType::Dynamic
+					? PhysicsMotionType::Dynamic : PhysicsMotionType::Kinematic;
+				request.motionQuality = PhysicsMotionQuality::LinearCast;
+				request.pose = ToPhysicsPose(activationBody.worldPose);
+				request.linearVelocity = ToPhysicsVector(activationBody.linearVelocity);
+				request.angularVelocity = ToPhysicsVector(activationBody.angularVelocity);
+				request.mass = profileBody.massKilograms;
+				request.friction = profileBody.colliders.front().friction;
+				request.restitution = profileBody.colliders.front().restitution;
+				request.linearDamping = profileBody.linearDamping;
+				request.angularDamping = profileBody.angularDamping;
+				request.maximumLinearVelocity = profileBody.maximumLinearVelocity;
+				request.maximumAngularVelocity = profileBody.maximumAngularVelocity;
+				request.gravityFactor = profileBody.gravityFactor;
+				request.collisionLayer = static_cast<std::uint8_t>(profileBody.collisionLayer);
+				request.collisionMask = profileBody.collisionMask;
+				request.useGravity = profileBody.gravityFactor > 0.0F;
+				request.sensor = std::all_of(profileBody.colliders.begin(), profileBody.colliders.end(),
+					[](const Animation::RagdollColliderRecord& collider) { return collider.isSensor; });
+				request.allowSleeping = profileBody.allowSleep;
+				request.startAwake = active && profileBody.startAwake;
+				request.enabled = active;
+				result = backend->CreateBody(request, staging);
+				if(!result.Succeeded()) {
+					diagnostic = result.message;
+					ReleaseRagdollHandlesLocked(staged);
+					return false;
+				}
+				bodyHandles.emplace(profileBody.bodyId, body);
+			}
+
+			staged.constraints.reserve(staged.profile->constraints.size());
+			for(const Animation::RagdollConstraintRecord& profileConstraint : staged.profile->constraints) {
+				const auto parent = bodyHandles.find(profileConstraint.parentBodyId);
+				const auto child = bodyHandles.find(profileConstraint.childBodyId);
+				if(parent == bodyHandles.end() || child == bodyHandles.end()) {
+					diagnostic = "A ragdoll constraint references an absent staged endpoint body.";
+					ReleaseRagdollHandlesLocked(staged);
+					return false;
+				}
+				const PhysicsConstraintHandle handle = world.AllocateConstraint();
+				if(!handle.IsValid()) {
+					diagnostic = "Physics constraint handle capacity was exhausted while staging a ragdoll.";
+					ReleaseRagdollHandlesLocked(staged);
+					return false;
+				}
+				Backend::PhysicsConstraintCreateRequest request;
+				request.handle = handle;
+				request.ownerObjectId = MakeRagdollRuntimeUuid(ragdollId, profileConstraint.constraintId, 2U);
+				request.ownerObjectGeneration = static_cast<PhysicsGeneration>(generation.publicationGeneration);
+				request.componentGeneration = static_cast<PhysicsGeneration>(generation.profileGeneration);
+				request.recordId = MakeRagdollRuntimeUuid(ragdollId, profileConstraint.constraintId, 3U);
+				request.recordGeneration = static_cast<PhysicsGeneration>(generation.profileGeneration);
+				request.kind = ConvertRagdollConstraintKind(profileConstraint.kind);
+				request.bodyA = parent->second;
+				request.bodyB = child->second;
+				request.localFrameA = {ToPhysicsVector(profileConstraint.parentFrame.localPosition),
+					ToPhysicsRotation(profileConstraint.parentFrame.localOrientation)};
+				request.localFrameB = {ToPhysicsVector(profileConstraint.childFrame.localPosition),
+					ToPhysicsRotation(profileConstraint.childFrame.localOrientation)};
+				request.axisA = NormalizeOr(ToPhysicsVector(profileConstraint.parentFrame.primaryAxis), {1.0F, 0.0F, 0.0F});
+				request.axisB = NormalizeOr(ToPhysicsVector(profileConstraint.childFrame.primaryAxis), {1.0F, 0.0F, 0.0F});
+				request.normalAxisA = NormalizeOr(ToPhysicsVector(profileConstraint.parentFrame.secondaryAxis), {0.0F, 1.0F, 0.0F});
+				request.normalAxisB = NormalizeOr(ToPhysicsVector(profileConstraint.childFrame.secondaryAxis), {0.0F, 1.0F, 0.0F});
+				for(std::size_t axis = 0U; axis < request.axes.size(); ++axis) {
+					request.axes[axis] = ConvertRagdollAxis(
+						profileConstraint.limits[axis], profileConstraint.motors[axis]);
+				}
+				request.breakForce = profileConstraint.breakForce > 0.0F
+					? profileConstraint.breakForce : std::numeric_limits<float>::infinity();
+				request.breakTorque = profileConstraint.breakTorque > 0.0F
+					? profileConstraint.breakTorque : std::numeric_limits<float>::infinity();
+				request.collideConnected = !profileConstraint.disableCollisionBetweenBodies;
+				request.enabled = active;
+				request.resetGeneration = static_cast<PhysicsGeneration>(generation.publicationGeneration);
+				const Backend::PhysicsBackendResult result = backend->CreateConstraint(request, staging);
+				if(!result.Succeeded()) {
+					world.Release(handle);
+					diagnostic = result.message;
+					ReleaseRagdollHandlesLocked(staged);
+					return false;
+				}
+				PhysicsConstraintRuntimeRegistration registration{handle, request.ownerObjectId,
+					request.ownerObjectGeneration, request.componentGeneration, request.recordId,
+					request.recordGeneration, request.breakForce, request.breakTorque,
+					request.resetGeneration};
+				staged.constraints.push_back({profileConstraint.constraintId, handle, registration, request});
+				if(!world.RegisterConstraint(registration)) {
+					diagnostic = "The physics world rejected a staged ragdoll constraint registration.";
+					ReleaseRagdollHandlesLocked(staged);
+					return false;
+				}
+			}
+			output = std::move(staged);
+			return true;
+		}
+
+		void CommitRagdollRequestsLocked() {
+			std::vector<Animation::RagdollPhysicsRequest> requests;
+			if(ragdollPhysicsBridge.Drain(requests) != Animation::AnimationStatus::Ok) {
+				++diagnosticCounters.rejectedCount;
+				return;
+			}
+			if(requests.empty()) return;
+
+			const PhysicsTick physicsTick = !plannedSteps.requests.empty()
+				? plannedSteps.requests.back().tick : world.Timing().tick;
+			const Animation::AnimationFixedTick committedStep =
+				static_cast<Animation::AnimationFixedTick>(std::max<PhysicsTick>(1U, physicsTick));
+			Backend::PhysicsBackendStagingToken staging;
+			std::unordered_map<std::uint64_t, RuntimeRagdoll> candidate = runtimeRagdolls;
+			std::vector<RuntimeRagdoll> stagedAllocations;
+			std::vector<RuntimeRagdoll> retireAfterCommit;
+			std::vector<std::uint64_t> touchedPoseIds;
+			struct RagdollMotorUpdate {
+				Backend::PhysicsConstraintCreateRequest previous;
+				Backend::PhysicsConstraintCreateRequest next;
+			};
+			std::vector<RagdollMotorUpdate> motorUpdates;
+			std::size_t appliedMotorUpdateCount = 0U;
+			std::string diagnostic;
+
+			const auto rollbackStaging = [&]() {
+				if(staging.IsValid()) {
+					const Backend::PhysicsBackendResult rolledBack = backend->RollbackStaging(staging);
+					if(!rolledBack.Succeeded()) {
+						// A failed provider commit may have consumed the token. Explicitly
+						// retire each staged dependency in reverse order before releasing slots.
+						for(auto ragdoll = stagedAllocations.rbegin(); ragdoll != stagedAllocations.rend(); ++ragdoll) {
+							for(auto constraint = ragdoll->constraints.rbegin(); constraint != ragdoll->constraints.rend(); ++constraint) {
+								backend->DestroyConstraint(constraint->handle);
+							}
+							for(auto body = ragdoll->bodies.rbegin(); body != ragdoll->bodies.rend(); ++body) {
+								backend->DestroyBody(body->body);
+								backend->DestroyShape(body->shape);
+							}
+						}
+					}
+				}
+				for(RuntimeRagdoll& ragdoll : stagedAllocations) ReleaseRagdollHandlesLocked(ragdoll);
+			};
+
+			const auto rollbackMotorUpdates = [&]() {
+				while(appliedMotorUpdateCount > 0U) {
+					--appliedMotorUpdateCount;
+					const Backend::PhysicsBackendResult restored = backend->UpdateConstraint(
+						motorUpdates[appliedMotorUpdateCount].previous);
+					if(!restored.Succeeded()) ++diagnosticCounters.rejectedCount;
+				}
+			};
+
+			const auto rejectBatch = [&](std::string reason) {
+				rollbackMotorUpdates();
+				rollbackStaging();
+				const Animation::AnimationStatus rejected = ragdollPhysicsBridge.RejectBatchAtProtectedBoundary(
+					requests, committedStep, std::move(reason));
+				if(rejected != Animation::AnimationStatus::Rejected) {
+					ragdollPhysicsBridge.RestoreUndeliveredDrain(std::move(requests));
+				}
+				diagnosticCounters.rejectedCount += requests.size();
+			};
+
+			for(const Animation::RagdollPhysicsRequest& request : requests) {
+				if(request.generation.worldGeneration != world.Handle().worldGeneration) {
+					diagnostic = "A ragdoll request targets a stale physics-world generation.";
+					break;
+				}
+				auto current = candidate.find(request.ragdollId);
+				if(request.kind == Animation::RagdollPhysicsRequestKind::Create) {
+					if(current != candidate.end() || !request.profile) {
+						diagnostic = "Ragdoll creation requires an absent identity and a resolved immutable profile.";
+						break;
+					}
+				} else {
+					if(current == candidate.end()) {
+						diagnostic = "A ragdoll lifecycle request targets an absent runtime identity.";
+						break;
+					}
+					if(request.expectedCurrentGeneration.IsValid()
+						&& current->second.generation != request.expectedCurrentGeneration) {
+						diagnostic = "A ragdoll lifecycle request targets a stale current generation.";
+						break;
+					}
+				}
+
+				if(request.kind == Animation::RagdollPhysicsRequestKind::UpdateMotors) {
+					if(!current->second.active || !current->second.profile
+						|| request.motorDrives.empty()) {
+						diagnostic = "A ragdoll motor update requires one active compatible runtime.";
+						break;
+					}
+					for(const Animation::RagdollMotorDrive& drive : request.motorDrives) {
+						auto runtimeConstraint = std::find_if(
+							current->second.constraints.begin(), current->second.constraints.end(),
+							[&drive](const RuntimeRagdollConstraint& value) {
+								return value.constraintId == drive.constraintId;
+							});
+						const auto authoredConstraint = std::find_if(
+							current->second.profile->constraints.begin(),
+							current->second.profile->constraints.end(),
+							[&drive](const Animation::RagdollConstraintRecord& value) {
+								return value.constraintId == drive.constraintId;
+							});
+						if(runtimeConstraint == current->second.constraints.end()
+							|| authoredConstraint == current->second.profile->constraints.end()) {
+							diagnostic = "A ragdoll motor update references an absent authored constraint.";
+							break;
+						}
+						Backend::PhysicsConstraintCreateRequest next = runtimeConstraint->request;
+						for(std::size_t axis = 0U; axis < next.axes.size(); ++axis) {
+							next.axes[axis] = ConvertRagdollAxis(
+								authoredConstraint->limits[axis], authoredConstraint->motors[axis]);
+							next.axes[axis].motorMaximumForce *= drive.strengthScale;
+						}
+						motorUpdates.push_back({runtimeConstraint->request, next});
+						runtimeConstraint->request = std::move(next);
+					}
+					if(!diagnostic.empty()) break;
+					continue;
+				}
+
+				touchedPoseIds.push_back(request.ragdollId);
+				if(request.kind == Animation::RagdollPhysicsRequestKind::Teardown) {
+					retireAfterCommit.push_back(current->second);
+					candidate.erase(current);
+					continue;
+				}
+
+				const std::shared_ptr<const Animation::RagdollProfileAsset> profile = request.profile
+					? request.profile : current->second.profile;
+				Animation::RagdollActivationPlan activation;
+				if(request.kind == Animation::RagdollPhysicsRequestKind::Deactivate) {
+					activation.generation = request.generation;
+					activation.bodies.reserve(current->second.bodies.size());
+					for(const RuntimeRagdollBody& body : current->second.bodies) {
+						activation.bodies.push_back({body.bodyId, body.stableJointId, body.lastWorldPose,
+							body.lastLinearVelocity, body.lastAngularVelocity});
+					}
+				} else {
+					const Animation::AnimationStatus prepared = Animation::PrepareRagdollActivation(
+						request.activationPose, *profile, request.generation, activation);
+					if(prepared != Animation::AnimationStatus::Ok) {
+						diagnostic = "The complete animation pose could not be mapped to the requested ragdoll generation.";
+						break;
+					}
+				}
+
+				const bool targetActive = request.kind == Animation::RagdollPhysicsRequestKind::Activate
+					|| (request.kind == Animation::RagdollPhysicsRequestKind::Rebuild
+						&& current != candidate.end() && current->second.active);
+				RuntimeRagdoll staged;
+				if(!StageRagdollLocked(request.ragdollId, request.generation, profile,
+					activation, targetActive, staging, staged, diagnostic)) {
+					break;
+				}
+				if(current != candidate.end()) retireAfterCommit.push_back(current->second);
+				candidate.insert_or_assign(request.ragdollId, staged);
+				stagedAllocations.push_back(std::move(staged));
+			}
+
+			if(!diagnostic.empty()) {
+				rejectBatch(std::move(diagnostic));
+				return;
+			}
+			std::sort(touchedPoseIds.begin(), touchedPoseIds.end());
+			touchedPoseIds.erase(std::unique(touchedPoseIds.begin(), touchedPoseIds.end()), touchedPoseIds.end());
+			std::shared_ptr<const Animation::RagdollPhysicsResultSnapshot> preparedResults;
+			if(ragdollPhysicsBridge.PrepareResultSnapshot(requests, committedStep,
+				Animation::AnimationStatus::Ok, "The ragdoll lifecycle batch committed atomically.",
+				preparedResults) != Animation::AnimationStatus::Ok) {
+				rollbackStaging();
+				ragdollPhysicsBridge.RestoreUndeliveredDrain(std::move(requests));
+				++diagnosticCounters.rejectedCount;
+				return;
+			}
+			// Motor replacement is allocation-free after provider validation. Apply all
+			// drives only after every request and result record has been prepared; if a
+			// provider unexpectedly rejects one, restore the already-applied prefix.
+			for(; appliedMotorUpdateCount < motorUpdates.size(); ++appliedMotorUpdateCount) {
+				const Backend::PhysicsBackendResult updated = backend->UpdateConstraint(
+					motorUpdates[appliedMotorUpdateCount].next);
+				if(!updated.Succeeded()) {
+					diagnostic = updated.message.empty()
+						? "The provider rejected a ragdoll motor drive update." : updated.message;
+					break;
+				}
+			}
+			if(!diagnostic.empty()) {
+				rejectBatch(std::move(diagnostic));
+				return;
+			}
+			if(staging.IsValid()) {
+				const Backend::PhysicsBackendResult committed = backend->CommitStaging(staging);
+				if(!committed.Succeeded()) {
+					rejectBatch(committed.message.empty()
+						? "The provider rejected the complete staged ragdoll batch." : committed.message);
+					return;
+				}
+			}
+
+			for(RuntimeRagdoll& retired : retireAfterCommit) DestroyCommittedRagdollLocked(retired);
+			runtimeRagdolls = std::move(candidate);
+			ragdollPhysicsBridge.PublishPreparedResultsAtProtectedBoundary(
+				std::move(preparedResults), touchedPoseIds);
+			diagnosticCounters.commandCount += requests.size();
+		}
+
 		void CommitLocked() {
 			const Clock::time_point start = Clock::now();
+			CommitRagdollRequestsLocked();
 			commandResults.clear();
 			struct StagedBody {
 				TerraEngine::UUID objectId{};
@@ -1250,6 +1862,76 @@ namespace TerraEngine::Physics {
 			diagnosticTimings.simulateMs = MillisecondsSince(start);
 		}
 
+		void PublishRagdollExtractionLocked() {
+			if(runtimeRagdolls.empty() || extraction.tick == 0U) return;
+			for(auto& [ragdollId, ragdoll] : runtimeRagdolls) {
+				if(!ragdoll.active || !ragdoll.profile) continue;
+				Animation::PhysicsPoseSnapshot snapshot;
+				snapshot.generation = ragdoll.generation;
+				snapshot.generation.worldGeneration = world.Handle().worldGeneration;
+				snapshot.generation.fixedStep = static_cast<Animation::AnimationFixedTick>(extraction.tick);
+				snapshot.bodies.reserve(ragdoll.bodies.size());
+				std::vector<Animation::PhysicsPoseExpectedBodyGeneration> expectedBodies;
+				expectedBodies.reserve(ragdoll.bodies.size());
+				std::vector<RuntimeRagdollBody> updatedBodies = ragdoll.bodies;
+				bool complete = true;
+				for(std::size_t index = 0U; index < ragdoll.bodies.size(); ++index) {
+					const RuntimeRagdollBody& runtimeBody = ragdoll.bodies[index];
+					const auto extracted = std::find_if(extraction.bodies.begin(), extraction.bodies.end(),
+						[&runtimeBody](const Backend::PhysicsBackendBodyState& state) {
+							return state.handle == runtimeBody.body;
+						});
+					const TerraEngine::UUID expectedObjectId = MakeRagdollRuntimeUuid(
+						ragdollId, runtimeBody.bodyId, 1U);
+					if(extracted == extraction.bodies.end()
+						|| extracted->objectId != expectedObjectId
+						|| extracted->objectGeneration != ragdoll.generation.publicationGeneration
+						|| extracted->componentGeneration != ragdoll.generation.profileGeneration
+						|| world.Status(runtimeBody.body) != PhysicsHandleStatus::Alive
+						|| !HasPhysicsBodyStateFields(extracted->fields, PhysicsBodyStateFieldMask::BodyState)) {
+						complete = false;
+						break;
+					}
+					Animation::PhysicsPoseBodySnapshot body;
+					body.bodyId = runtimeBody.bodyId;
+					body.stableJointId = runtimeBody.stableJointId;
+					body.modelPose = ToAnimationTransform(extracted->pose);
+					body.linearVelocity = {extracted->linearVelocity.x,
+						extracted->linearVelocity.y, extracted->linearVelocity.z};
+					body.angularVelocity = {extracted->angularVelocity.x,
+						extracted->angularVelocity.y, extracted->angularVelocity.z};
+					body.sleeping = !extracted->awake;
+					body.bodyGeneration = runtimeBody.body.slotGeneration;
+					snapshot.bodies.push_back(body);
+					expectedBodies.push_back({body.bodyId, body.bodyGeneration});
+					updatedBodies[index].lastWorldPose = body.modelPose;
+					updatedBodies[index].lastLinearVelocity = body.linearVelocity;
+					updatedBodies[index].lastAngularVelocity = body.angularVelocity;
+				}
+				for(const RuntimeRagdollConstraint& constraint : ragdoll.constraints) {
+					if(world.Status(constraint.handle) != PhysicsHandleStatus::Alive
+						|| constraint.handle.worldGeneration != snapshot.generation.worldGeneration) {
+						complete = false;
+						break;
+					}
+				}
+				if(!complete || snapshot.bodies.size() != ragdoll.bodies.size()) {
+					++diagnosticCounters.staleCount;
+					continue;
+				}
+				snapshot.completeCurrentStep = true;
+				const Animation::RagdollGenerationStamp publishedGeneration = snapshot.generation;
+				if(ragdollPhysicsBridge.PublishCurrentStepPose(
+					ragdollId, std::move(snapshot), publishedGeneration, expectedBodies)
+					== Animation::AnimationStatus::Ok) {
+					ragdoll.generation.fixedStep = static_cast<Animation::AnimationFixedTick>(extraction.tick);
+					ragdoll.bodies = std::move(updatedBodies);
+				} else {
+					++diagnosticCounters.staleCount;
+				}
+			}
+		}
+
 		void ExtractLocked() {
 			if(completedSteps.empty()) return;
 			extraction = {};
@@ -1266,11 +1948,16 @@ namespace TerraEngine::Physics {
 			// Constraint impulses and character grounding cost provider work only when
 			// those runtime families exist, while still preserving their publication
 			// contract in mixed scenes.
-			if(!runtimeConstraints.empty()) request.fields |= PhysicsBodyStateFieldMask::Constraints;
+			const bool ragdollConstraints = std::any_of(runtimeRagdolls.begin(), runtimeRagdolls.end(),
+				[](const auto& entry) { return !entry.second.constraints.empty(); });
+			if(!runtimeConstraints.empty() || ragdollConstraints) request.fields |= PhysicsBodyStateFieldMask::Constraints;
 			if(!runtimeCharacters.empty()) request.fields |= PhysicsBodyStateFieldMask::Characters;
 			request.batchSize = configuredSettings.providerExtractionBatchSize;
 			request.parallelThreshold = configuredSettings.parallelExtractionThreshold;
-			request.fullState = world.AcquireCompleteBodyState() == nullptr;
+			// Ragdoll presentation consumes every mapped body even when sleeping or
+			// offscreen. Full extraction preserves physics authority; it is enabled only
+			// while at least one bounded ragdoll runtime exists.
+			request.fullState = world.AcquireCompleteBodyState() == nullptr || !runtimeRagdolls.empty();
 			request.selection = request.fullState
 				? Backend::PhysicsBackendExtractionSelection::FullState
 				: Backend::PhysicsBackendExtractionSelection::PublicationRelevant;
@@ -1326,6 +2013,7 @@ namespace TerraEngine::Physics {
 							|| !SamePose(body.lastPublishedPose, update.state.worldPose)});
 				}
 			}
+			if(result.Succeeded()) PublishRagdollExtractionLocked();
 			ExecutePreparedQueriesLocked();
 		}
 
@@ -1591,6 +2279,12 @@ namespace TerraEngine::Physics {
 			}
 			if(!characterStates.empty()) world.PublishCharacterStates(extraction.tick, characterStates);
 			latestCharacters = world.AcquireCharacterStatePacket(extraction.tick, extraction.tick);
+			if(latestCommands) {
+				// Root-motion receipts become final only after Physics has published
+				// both the command outcome and the adjusted authoritative target pose.
+				TerraEngine::Animation::AnimationRootMotionResultPublisher::Instance().ObservePhysicsResults(
+					*latestCommands, latestIncrementalBodies, latestCharacters);
+			}
 
 			std::vector<PhysicsEvent> currentEvents;
 			currentEvents.reserve(extraction.events.size() + breakEvents.size());
@@ -1897,8 +2591,8 @@ namespace TerraEngine::Physics {
 				true, "active physics frame", "", authoringDiagnostics.changedObjects});
 			scheduler->push_back({"PhysicsPrepare", "Physics", "PhysicsAuthoringSnapshot,PhysicsQueryQueue", "PhysicsPreparedWork,PhysicsPreparedQueries", "none", true,
 				true, "snapshot or fixed-step input available", "PhysicsSnapshot", preparationDiagnostics.estimatedWorkItems});
-			scheduler->push_back({"PhysicsCommandCommit", "Physics", "PhysicsPreparedWork", "PhysicsWorld", "hard boundary", false,
-				true, "prepared provider mutation or command work available", "PhysicsPrepare", diagnosticCounters.commandCount});
+			scheduler->push_back({"PhysicsCommandCommit", "Physics", "PhysicsPreparedWork,RagdollPhysicsQueue", "PhysicsWorld,RagdollPhysicsSnapshots,RagdollPhysicsResults", "hard boundary: typed ragdoll drain", false,
+				true, "prepared provider mutation, command, or ragdoll request work available", "PhysicsPrepare", diagnosticCounters.commandCount + ragdollPhysicsBridge.PendingCount()});
 			scheduler->push_back({"PhysicsSimulate", "Physics", "PhysicsWorld", "PhysicsWorld", "provider ownership", true,
 				!completedSteps.empty(), completedSteps.empty() ? "no fixed step planned" : "fixed step planned", "PhysicsCommandCommit", completedSteps.size()});
 			scheduler->push_back({"PhysicsExtract", "Physics", "PhysicsWorld,PhysicsPreparedQueries", "PhysicsPublishedSnapshots,PhysicsBackendQueryResults,PhysicsRawEvents", "immutable provider snapshot then protected event drain", true,
@@ -2037,6 +2731,7 @@ namespace TerraEngine::Physics {
 		std::unordered_map<TerraEngine::UUID, RuntimeBody> runtimeBodies;
 		std::unordered_map<TerraEngine::UUID, RuntimeConstraint> runtimeConstraints;
 		std::unordered_map<TerraEngine::UUID, RuntimeCharacter> runtimeCharacters;
+		std::unordered_map<std::uint64_t, RuntimeRagdoll> runtimeRagdolls;
 		// Slot lookup keeps extraction O(n) for large scenes while the full typed
 		// handle comparison above still rejects stale slot generations.
 		std::unordered_map<PhysicsSlotIndex, TerraEngine::UUID> bodyObjects;
@@ -2046,6 +2741,9 @@ namespace TerraEngine::Physics {
 		std::unordered_set<TerraEngine::UUID> materialAssetsNeedingReload;
 		std::unordered_map<TerraEngine::UUID, PhysicsMaterialRuntime> materialAssets;
 		std::vector<PhysicsCommandResult> commandResults;
+		// The bridge is the only cross-system ingress. It owns copied requests and
+		// immutable pose/result publications; PhysicsSystem owns the protected drain.
+		Animation::RagdollPhysicsBridge ragdollPhysicsBridge;
 		std::shared_ptr<const PhysicsBodyStateSnapshot> latestBodies;
 		std::shared_ptr<const IncrementalBodyStateSnapshot> latestIncrementalBodies;
 		std::shared_ptr<const PhysicsCommandResultSnapshot> latestCommands;
@@ -2127,15 +2825,15 @@ namespace TerraEngine::Physics {
 		declaration.phase = "Physics";
 		declaration.after = {"ScriptingSystem"};
 		declaration.before = {"UISystem"};
-		declaration.reads = {"SceneGraph", "ObjectManager", "PhysicsSettingsUpdateQueue", "PhysicsAuthoringSnapshot", "PhysicsQueryQueue", "PhysicsEventSubscriptions"};
-		declaration.writes = {"PhysicsSettings", "PhysicsPreparedWork", "PhysicsWorld", "PhysicsQueryResults", "PhysicsEventPackets", "PhysicsPublishedSnapshots", "PhysicsTransformTransactions", "SceneMutationQueue"};
+		declaration.reads = {"SceneGraph", "ObjectManager", "PhysicsSettingsUpdateQueue", "PhysicsAuthoringSnapshot", "PhysicsQueryQueue", "PhysicsEventSubscriptions", "RagdollPhysicsQueue"};
+		declaration.writes = {"PhysicsSettings", "PhysicsPreparedWork", "PhysicsWorld", "PhysicsQueryResults", "PhysicsEventPackets", "PhysicsPublishedSnapshots", "RagdollPhysicsSnapshots", "RagdollPhysicsResults", "PhysicsTransformTransactions", "SceneMutationQueue"};
 		declaration.mainThread = true;
 		declaration.requiresFlushedSceneMutations = true;
 		declaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::ProtectedCommit;
 		declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::PartiallyWorkerSafe;
 		declaration.hardBoundary = true;
 		declaration.safeSubwork = "Immutable authoring preparation, provider stepping through the shared job adapter, and extraction into typed packets.";
-		declaration.protectedCommit = "World generation changes, provider staging commit, command ordering, snapshot swap, and transform transaction publication.";
+		declaration.protectedCommit = "World generation changes, provider staging commit, typed ragdoll request drain, immutable ragdoll snapshot/result swap, command ordering, and transform transaction publication.";
 		declaration.protectedReason = declaration.protectedCommit;
 		declaration.profilingLabel = "Physics";
 		declaration.usesDefaultMetadata = false;
@@ -2182,7 +2880,8 @@ namespace TerraEngine::Physics {
 				{"PhysicsAuthoringSnapshot", "PhysicsPublishedSnapshots", "PhysicsQueryQueue"},
 				{"PhysicsPreparedWork", "PhysicsPreparedQueries"}, true, WorkerSystemPhaseKind::WorkerPrepare);
 			configure(descriptors[2], "PhysicsCommandCommit",
-				{"PhysicsPreparedWork", "PhysicsWorld"}, {"PhysicsWorld"}, false, WorkerSystemPhaseKind::ProtectedCommit);
+				{"PhysicsPreparedWork", "PhysicsWorld", "RagdollPhysicsQueue"},
+				{"PhysicsWorld", "RagdollPhysicsSnapshots", "RagdollPhysicsResults"}, false, WorkerSystemPhaseKind::ProtectedCommit);
 			configure(descriptors[3], "PhysicsSimulate",
 				{"PhysicsWorld"}, {"PhysicsWorld"}, true, WorkerSystemPhaseKind::WorkerPrepare);
 			configure(descriptors[4], "PhysicsExtract",
@@ -2214,7 +2913,7 @@ namespace TerraEngine::Physics {
 		const std::array<std::size_t, 7> estimates = {
 			activation.authoringItems,
 			activation.authoringItems + activation.queryItems,
-			activation.authoringItems + activation.commandItems,
+			activation.authoringItems + activation.commandItems + activation.ragdollItems,
 			activation.simulate ? 1U : 0U,
 			activation.providerItems + activation.queryItems,
 			activation.providerItems + activation.queryItems,
@@ -2314,9 +3013,54 @@ namespace TerraEngine::Physics {
 		return impl->world.Handle();
 	}
 
+	Animation::AnimationFixedTick PhysicsSystem::CurrentFixedTick() const {
+		std::lock_guard<std::mutex> lock(impl->mutex);
+		// Timing::tick names the most recently issued physics step. Before the first
+		// step it is zero, so reserve generation one for the imminent first
+		// extraction rather than leaking an invalid zero stamp to animation.
+		return static_cast<Animation::AnimationFixedTick>(
+			std::max<PhysicsTick>(1U, impl->world.Timing().tick));
+	}
+
 	PhysicsCommandReceipt PhysicsSystem::SubmitCommand(PhysicsCommand command) {
 		std::lock_guard<std::mutex> lock(impl->mutex);
 		return impl->world.EnqueueCommand(std::move(command));
+	}
+
+	Animation::AnimationStatus PhysicsSystem::SubmitRagdollPhysicsRequest(
+		Animation::RagdollPhysicsRequest request) {
+		std::lock_guard<std::mutex> lock(impl->mutex);
+		if(!impl->world.Handle().IsValid()) return Animation::AnimationStatus::NotReady;
+		return impl->ragdollPhysicsBridge.Enqueue(std::move(request));
+	}
+
+	Animation::AnimationStatus PhysicsSystem::SubmitRagdollPhysicsRequestBatch(
+		std::span<const Animation::RagdollPhysicsRequest> requests) {
+		// The bridge owns copied request values. No provider object or live world
+		// storage crosses this thread-safe producer boundary.
+		return impl->ragdollPhysicsBridge.EnqueueBatch(requests);
+	}
+
+	std::shared_ptr<const Animation::PhysicsPoseSnapshot> PhysicsSystem::LatestRagdollPhysicsPose(
+		std::uint64_t ragdollId,
+		const Animation::RagdollGenerationStamp& expectedGeneration) const {
+		return impl->ragdollPhysicsBridge.AcquireCurrentStepPose(ragdollId, expectedGeneration);
+	}
+
+	std::shared_ptr<const Animation::PhysicsPoseSnapshot> PhysicsSystem::LatestRagdollPhysicsPoseAtOrAfter(
+		std::uint64_t ragdollId,
+		const Animation::RagdollGenerationStamp& expectedIdentity) const {
+		return impl->ragdollPhysicsBridge.AcquireLatestCurrentStepPose(
+			ragdollId, expectedIdentity);
+	}
+
+	std::shared_ptr<const Animation::RagdollPhysicsResultSnapshot> PhysicsSystem::LatestRagdollPhysicsResults() const {
+		return impl->ragdollPhysicsBridge.LatestResults();
+	}
+
+	bool PhysicsSystem::CancelCommand(PhysicsCommandId commandId) {
+		std::lock_guard<std::mutex> lock(impl->mutex);
+		return impl->world.CancelCommand(commandId);
 	}
 
 	PhysicsQueryReceipt PhysicsSystem::SubmitQuery(PhysicsQueryRequest request) {

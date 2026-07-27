@@ -4,9 +4,13 @@
 
 #include "ExportPipeline.h"
 #include "ExportEvidence.h"
+#include "AnimationExportDependencies.h"
 #include "ExportOutputTransaction.h"
 #include "ExportPackageValidator.h"
 #include "ExportScriptBindingRewriter.h"
+#include "NativeAotProjectWorkspace.h"
+#include "io/PathNormalizer.h"
+#include "validation/AnimationPackValidator.h"
 #include "AssetImportResult.h"
 #include "Physics/Assets/CookedColliderAsset.h"
 #include "Physics/Assets/PhysicsMaterial.h"
@@ -27,6 +31,7 @@
 #include <iterator>
 #include <optional>
 #include <sstream>
+#include <string_view>
 #include <unordered_set>
 #include <nlohmann/json.hpp>
 
@@ -392,6 +397,69 @@ static int ExecuteUtf8ShellCommand(const std::string& commandLine) {
 #endif
 }
 
+static std::string QuotePosixShellValue(const std::string& value) {
+	// Single quotes preserve spaces and shell metacharacters in the project and
+	// installed-toolchain paths. POSIX shells represent a literal quote by
+	// closing, escaping, and reopening the quoted value.
+	std::string quoted = "'";
+	for(const char character : value) {
+		if(character == '\'') {
+			quoted += "'";
+			quoted += '\\';
+			quoted += "'";
+		}
+		else quoted += character;
+	}
+	quoted += "'";
+	return quoted;
+}
+
+#ifdef _WIN32
+static std::string EscapeWindowsCommandExpansion(std::string_view value) {
+	// cmd.exe expands %NAME% even inside quotes. Prefix each percent with a
+	// caret so valid project/install paths containing percent signs remain
+	// literal when setting environment variables or changing directories.
+	std::string escaped;
+	escaped.reserve(value.size());
+	for(const char character : value) {
+		if(character == '%') escaped += '^';
+		escaped += character;
+	}
+	return escaped;
+}
+#endif
+
+static int ExecuteNativeAotToolchainCommand(
+	const std::string& commandLine,
+	const NativeAotPublishContext& context)
+{
+	const std::string toolchainDirectory = PathToUtf8(context.workingDirectory);
+	const std::string packageCache = PathToUtf8(context.packageCache);
+	const std::string dotnetCliHome = PathToUtf8(context.dotnetCliHome);
+#ifdef _WIN32
+	// cmd.exe is already the _wsystem host. pushd scopes global.json discovery
+	// to the installed toolchain and the set commands scope cache variables to
+	// this child shell, leaving the editor and the user's profile untouched.
+	const std::string wrapped = "pushd \"" + EscapeWindowsCommandExpansion(toolchainDirectory) + "\" && "
+		"set \"NUGET_PACKAGES=" + EscapeWindowsCommandExpansion(packageCache) + "\" && "
+		"set \"DOTNET_CLI_HOME=" + EscapeWindowsCommandExpansion(dotnetCliHome) + "\" && "
+		"set \"DOTNET_CLI_TELEMETRY_OPTOUT=1\" && "
+		"set \"DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1\" && "
+		"set \"DOTNET_NOLOGO=1\" && "
+		"set \"NUGET_XMLDOC_MODE=skip\" && "
+		"set \"NUGET_CERT_REVOCATION_MODE=offline\" && "
+		+ commandLine;
+#else
+	const std::string wrapped = "cd " + QuotePosixShellValue(toolchainDirectory) + " && "
+		"NUGET_PACKAGES=" + QuotePosixShellValue(packageCache) + " "
+		"DOTNET_CLI_HOME=" + QuotePosixShellValue(dotnetCliHome) + " "
+		"DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1 "
+		"DOTNET_NOLOGO=1 NUGET_XMLDOC_MODE=skip "
+		"NUGET_CERT_REVOCATION_MODE=offline " + commandLine;
+#endif
+	return ExecuteUtf8ShellCommand(wrapped);
+}
+
 static nlohmann::json BuildRendererRecoveryManifest(const BuildProfile& profile)
 {
 	nlohmann::json recovery;
@@ -753,7 +821,8 @@ ExportResult ExportPipeline::Execute(
 
 		if(executionProfile.enableManagedCompilation) {
 			result.stage = ExportStage::ManagedCompilation;
-			if(!RunManagedCompilation(executionProfile, request.projectRoot, result, capturedProgress)) {
+			if(!RunManagedCompilation(executionProfile, request.projectRoot,
+				request.runtimeLayout, result, capturedProgress)) {
 				result.affectedPath = request.projectRoot / "Assembly-CSharp.csproj";
 				return finish(ExportFailureCategory::ManagedCompilationFailed, result.stage, result.errorMessage);
 			}
@@ -819,6 +888,47 @@ ExportResult ExportPipeline::Execute(
 				? "Export package manifest does not match resolved-manifest evidence."
 				: inspection.findings.front().message;
 			return finish(ExportFailureCategory::PackageValidationFailed, result.stage, error);
+		}
+
+		// Deep animation validation reopens the packaged archive and reconstructs
+		// the exact bytes consumers will mount. It verifies append-only TEPAK class
+		// codes, hashes, source-free manifests, dependency closure, and headless/CPU
+		// fallback capability before the output transaction may publish anything.
+		const TerraEngine::Export::AnimationPackValidationReport animationInspection =
+			TerraEngine::Export::AnimationPackValidator::ValidateArchive(result.packageResult.outputPath);
+		std::string animationEvidenceError;
+		if(!TerraEngine::Export::AnimationPackValidator::WriteEvidence(
+			animationInspection,
+			request.evidenceDirectory / "animation-validation.json",
+			animationEvidenceError)) {
+			result.affectedPath = request.evidenceDirectory / "animation-validation.json";
+			return finish(ExportFailureCategory::EvidenceWriteFailed, ExportStage::Evidence, animationEvidenceError);
+		}
+		packageValidationReport += "Animation archive validation: "
+			+ std::string(animationInspection.accepted ? "PASS\n" : "FAIL\n");
+		if(!animationInspection.accepted) {
+			for(const TerraEngine::Export::AnimationPackEvidence& evidence : animationInspection.evidence) {
+				if(evidence.passed) continue;
+				ExportDiagnostic diagnostic;
+				diagnostic.severity = ExportDiagnosticSeverity::Error;
+				diagnostic.category = "Animation";
+				diagnostic.stage = "package_validation";
+				diagnostic.code = evidence.rule;
+				diagnostic.message = evidence.message;
+				diagnostic.filePath = evidence.path;
+				result.diagnostics.push_back(std::move(diagnostic));
+			}
+			result.affectedPath = result.packageResult.outputPath;
+			const auto failedEvidence = std::find_if(
+				animationInspection.evidence.begin(),
+				animationInspection.evidence.end(),
+				[](const TerraEngine::Export::AnimationPackEvidence& evidence) { return !evidence.passed; });
+			return finish(
+				ExportFailureCategory::PackageValidationFailed,
+				result.stage,
+				failedEvidence == animationInspection.evidence.end()
+					? "Animation archive validation failed without a diagnostic."
+					: failedEvidence->message);
 		}
 
 		result.stage = ExportStage::RuntimeStaging;
@@ -951,17 +1061,22 @@ bool ExportPipeline::RunValidation(const BuildProfile& profile, const std::files
 
 bool ExportPipeline::RunManagedCompilation(const BuildProfile& profile,
 	const std::filesystem::path& projectRoot,
+	const ExportRuntimeLayout& runtimeLayout,
 	ExportResult& result,
 	ExportProgressCallback progressCallback)
 {
 	EmitProgress(progressCallback, ExportPhase::Compiling, 0.15f,
 		"Compiling managed project with NativeAOT...");
 
-	// The managed project is strictly required to be at the project root for export.
-	std::filesystem::path managedProject = projectRoot / "Assembly-CSharp.csproj";
+	// The authored managed project is strictly required to be at the project root.
+	// NativeAOT may later access it through a short alias, but validation always
+	// reports the real user-owned path.
+	const std::filesystem::path sourceManagedProject =
+		projectRoot / "Assembly-CSharp.csproj";
 
-	if (!std::filesystem::exists(managedProject)) {
-		result.errorMessage = "Managed project not found: " + PathToUtf8(managedProject);
+	if (!std::filesystem::exists(sourceManagedProject)) {
+		result.errorMessage = "Managed project not found: "
+			+ PathToUtf8(sourceManagedProject);
 		return false;
 	}
 
@@ -972,30 +1087,54 @@ bool ExportPipeline::RunManagedCompilation(const BuildProfile& profile,
 		return false;
 	}
 
+	NativeAotProjectWorkspace nativeAotWorkspace(projectRoot);
+	std::string workspaceError;
+	if(!nativeAotWorkspace.Prepare(workspaceError)) {
+		result.errorMessage = workspaceError;
+		return false;
+	}
+	const std::filesystem::path& buildProjectRoot =
+		nativeAotWorkspace.BuildProjectRoot();
+	const std::filesystem::path managedProject =
+		buildProjectRoot / "Assembly-CSharp.csproj";
+	std::error_code equivalentError;
+	if(!std::filesystem::equivalent(
+			managedProject, sourceManagedProject, equivalentError)
+		|| equivalentError) {
+		result.errorMessage = "The private NativeAOT project path does not "
+			"resolve to the authored managed project";
+		if(equivalentError) {
+			result.errorMessage += ": " + equivalentError.message();
+		}
+		return false;
+	}
+
 	// Resolve the output directory for the NativeAOT publish output.
 	std::filesystem::path outputDir = ResolveOutputDirectory(profile, projectRoot);
 	std::filesystem::create_directories(outputDir);
 	const std::filesystem::path managedOutputDir = outputDir / "Managed";
+	// All SDK, compiler, linker, package, and publish output is private to this
+	// operation. This prevents concurrent exports from sharing assets files and
+	// keeps long project/output paths away from NativeAOT child processes.
+	const std::filesystem::path& nativeAotPublishOutputDir =
+		nativeAotWorkspace.PublishDirectory();
+	const NativeAotPublishContext nativeAotContext{
+		.workingDirectory = runtimeLayout.nativeAotToolchainDirectory,
+		.nugetConfig = runtimeLayout.nativeAotNugetConfig,
+		.nugetFeed = runtimeLayout.nativeAotNugetFeed,
+		.packageCache = nativeAotWorkspace.PackageCacheDirectory(),
+		.dotnetCliHome = nativeAotWorkspace.DotnetCliHomeDirectory(),
+		.intermediateOutputDirectory =
+			nativeAotWorkspace.IntermediateOutputDirectory(),
+		.binaryOutputDirectory =
+			nativeAotWorkspace.BinaryOutputDirectory()
+	};
 
 	// NativeAOT publish does not clean removed files from a previous export.
 	// Clear the export Managed directory first so stale bridge/runtime payloads
 	// such as TerraEngine.CSharp.dll cannot survive after the export pipeline
 	// stops copying them.
 	RemoveDirectoryIfExists(managedOutputDir);
-
-	// Wipe the intermediate object directory to prevent stale NativeAOT caching
-	// across exports, ensuring we compile the latest bootstrap sources.
-	// The .csproj places obj files in Build/Assembly-CSharp/obj by default.
-	std::filesystem::path objDir = projectRoot / "Build" / "Assembly-CSharp" / "obj";
-	if (std::filesystem::exists(objDir)) {
-		try { std::filesystem::remove_all(objDir); } catch (...) {}
-	}
-	
-	// Also wipe any old obj folder just in case.
-	std::filesystem::path oldObjDir = outputDir / "obj";
-	if (std::filesystem::exists(oldObjDir)) {
-		try { std::filesystem::remove_all(oldObjDir); } catch (...) {}
-	}
 
 	// Old projects may still contain interop sources that conflict with the source
 	// generator. Export reports the problem but never deletes project source; the
@@ -1006,29 +1145,68 @@ bool ExportPipeline::RunManagedCompilation(const BuildProfile& profile,
 		return false;
 	}
 
-	// Build the dotnet publish command in the shared build-profile helper so
-	// profile toggles are tested without launching a real NativeAOT publish.
+	// Restore first with PublishAot=true so all SDK-selected compiler packages
+	// come only from the installed feed. Publish then consumes that exact assets
+	// file with --no-restore and cannot silently contact a user or network source.
+	const int restoreExitCode = ExecuteNativeAotToolchainCommand(
+		BuildNativeAotRestoreCommand(profile, managedProject, nativeAotContext) + " 1>&2",
+		nativeAotContext);
+	if(restoreExitCode != 0) {
+		result.errorMessage = "NativeAOT offline restore failed (exit code "
+			+ std::to_string(restoreExitCode) + ").";
+		return false;
+	}
+
 	// The CLI reserves stdout for one-JSON-object-per-line automation records.
 	// Both cmd.exe and POSIX shells accept this redirection, so verbose MSBuild
 	// output remains human-readable on stderr without corrupting JSONL output.
-	const std::string commandLine = BuildNativeAotPublishCommand(profile, managedProject, managedOutputDir) + " 1>&2";
-
-	// Execute the dotnet publish command.
-	const int exitCode = ExecuteUtf8ShellCommand(commandLine);
-	if (exitCode != 0) {
+	const int publishExitCode = ExecuteNativeAotToolchainCommand(
+		BuildNativeAotPublishCommand(
+			profile, managedProject, nativeAotPublishOutputDir, nativeAotContext) + " 1>&2",
+		nativeAotContext);
+	if(publishExitCode != 0) {
 		result.errorMessage = "NativeAOT compilation failed (exit code " +
-			std::to_string(exitCode) + ").";
+			std::to_string(publishExitCode) + ").";
 		return false;
 	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!profile.includeDebugSymbols) {
-		RemoveDebugSymbolFiles(managedOutputDir);
+		RemoveDebugSymbolFiles(nativeAotPublishOutputDir);
 	}
 	std::string managedOutputError;
 	if(!ValidateManagedRuntimeOutput(
-		managedOutputDir / GetExportManagedRuntimeLibraryName(profile.platform), managedOutputError)) {
+		nativeAotPublishOutputDir / GetExportManagedRuntimeLibraryName(profile.platform),
+		managedOutputError)) {
 		result.errorMessage = managedOutputError;
+		return false;
+	}
+
+	std::error_code copyError;
+	std::filesystem::copy(
+		nativeAotPublishOutputDir,
+		managedOutputDir,
+		std::filesystem::copy_options::recursive
+			| std::filesystem::copy_options::overwrite_existing,
+		copyError);
+	if(copyError) {
+		result.errorMessage = "Could not publish validated NativeAOT output "
+			"from the private workspace: " + copyError.message();
+		return false;
+	}
+	if(!ValidateManagedRuntimeOutput(
+			managedOutputDir / GetExportManagedRuntimeLibraryName(profile.platform),
+			managedOutputError)) {
+		result.errorMessage = managedOutputError;
+		return false;
+	}
+
+	// Successful operations report cleanup failures instead of silently leaking
+	// a junction or per-run compiler state. Early failures use the same cleanup
+	// path through the workspace destructor while preserving their primary error.
+	if(!nativeAotWorkspace.Cleanup(workspaceError)) {
+		result.errorMessage = "Managed output was validated, but the private "
+			"NativeAOT workspace could not be cleaned: " + workspaceError;
 		return false;
 	}
 
@@ -1073,15 +1251,19 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 		if (std::filesystem::exists(rawAssets)) {
 			for (const auto& entry : std::filesystem::recursive_directory_iterator(rawAssets)) {
 				if (!entry.is_regular_file()) continue;
-				
+
+				const std::filesystem::path relative = std::filesystem::relative(entry.path(), rawAssets);
 				// Exclude .meta files from the exported build.
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (entry.path().extension() == ".meta") continue;
 				// Collider recipes are editor/compiler input. A shipped runtime may
 				// consume only the validated .tepcoll envelope referenced below.
 				if(entry.path().extension() == ".tecollider") continue;
+				// Raw model packages and generated import sidecars contain editor and
+				// source-machine paths. Only their checked cooked children and sanitized
+				// runtime manifests may cross the TEPAK publication boundary.
+				if(TerraEngine::Export::IsForbiddenAnimationRuntimePath(relative.generic_string())) continue;
 
-				auto relative = std::filesystem::relative(entry.path(), rawAssets);
 				auto dest = stagingDir / relative;
 				std::filesystem::create_directories(dest.parent_path());
 				std::filesystem::copy_file(entry.path(), dest, std::filesystem::copy_options::overwrite_existing);
@@ -1101,6 +1283,7 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 				if(entry.path().extension() == ".tecollider") continue;
 
 				auto relative = std::filesystem::relative(entry.path(), compiledAssets);
+				if(TerraEngine::Export::IsForbiddenAnimationRuntimePath(relative.generic_string())) continue;
 				auto dest = stagingDir / relative;
 				std::filesystem::create_directories(dest.parent_path());
 				std::filesystem::copy_file(entry.path(), dest, std::filesystem::copy_options::overwrite_existing);
@@ -1165,24 +1348,100 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 		// In an exported build, the engine uses this map to resolve the UUIDs found
 		// in scene/prefab files back to the logical paths inside the TEPAK archive.
 		std::unordered_set<std::string> stagedAssetGuids;
-		auto addStagedAsset = [this, &stagedAssetGuids](std::string guid, AssetType type, const std::filesystem::path& path) -> bool {
+		std::string stagedAssetIdentityError;
+		auto readStagedAssetEvidence = [&stagingDir](
+			const std::string& packagePath,
+			std::string& checksum,
+			std::uint64_t& byteSize) -> bool {
+			std::vector<std::byte> bytes;
+			if(!ReadExportBytes(stagingDir / std::filesystem::path(packagePath), bytes)) {
+				return false;
+			}
+			checksum = HashBytesForExport(bytes);
+			byteSize = static_cast<std::uint64_t>(bytes.size());
+			return true;
+		};
+		auto addStagedAsset = [this, &stagedAssetGuids, &stagedAssetIdentityError, &readStagedAssetEvidence](
+			std::string guid,
+			AssetType type,
+			const std::filesystem::path& path,
+			std::string checksum,
+			std::uint64_t byteSize) -> bool {
 			if (guid.empty() || path.empty()) {
 				return false;
 			}
+			const std::string packagePath = path.generic_string();
+			const std::string normalizedPath = tepak::io::NormalizeLookupPath(packagePath);
+			if(normalizedPath.empty()) {
+				return false;
+			}
+			const auto existing = std::find_if(m_StagedAssets.begin(), m_StagedAssets.end(), [&guid](const StagedAsset& asset) {
+				return asset.guid == guid;
+			});
+			if(existing != m_StagedAssets.end()) {
+				// Metadata, generated-package sidecars, and cooked-envelope discovery
+				// may independently prove one runtime identity. Compare the TEPAK
+				// lookup key rather than host casing, then require byte evidence before
+				// coalescing so a reused GUID cannot conceal a different payload.
+				if(existing->type != type
+					|| tepak::io::NormalizeLookupPath(existing->path) != normalizedPath) {
+					stagedAssetIdentityError =
+						"Staged asset GUID resolves to a different runtime type or canonical path: "
+						+ guid;
+					return false;
+				}
+				if(existing->checksum.empty()
+					&& !readStagedAssetEvidence(
+						existing->path,
+						existing->checksum,
+						existing->byteSize)) {
+					stagedAssetIdentityError =
+						"Could not verify existing staged content for duplicate asset GUID: "
+						+ guid;
+					return false;
+				}
+				if(checksum.empty()) {
+					if(packagePath == existing->path) {
+						// An identical physical spelling names the same staged file, so
+						// reuse the evidence just read instead of buffering it twice.
+						checksum = existing->checksum;
+						byteSize = existing->byteSize;
+					}
+					else if(!readStagedAssetEvidence(packagePath, checksum, byteSize)) {
+						stagedAssetIdentityError =
+							"Could not verify candidate staged content for duplicate asset GUID: "
+							+ guid;
+						return false;
+					}
+				}
+				if(existing->checksum != checksum || existing->byteSize != byteSize) {
+					stagedAssetIdentityError =
+						"Staged asset GUID resolves to different content at the same canonical path: "
+						+ guid;
+					return false;
+				}
+				return true;
+			}
 			if (!stagedAssetGuids.insert(guid).second) {
+				stagedAssetIdentityError =
+					"Staged asset GUID could not be inserted exactly once: " + guid;
 				return false;
 			}
 
 			StagedAsset asset;
 			asset.guid = std::move(guid);
-			asset.path = path.generic_string();
+			// Retain the authored spelling for backwards-compatible game.json output.
+			// Duplicate comparison always uses the canonical TEPAK lookup form above.
+			asset.path = packagePath;
 			asset.type = type;
+			asset.checksum = std::move(checksum);
+			asset.byteSize = byteSize;
 			asset.virtualGeometryRequired = asset.type == AssetType::Mesh
 				&& IsCompiledVirtualGeometryMeshPath(asset.path);
 			m_StagedAssets.push_back(std::move(asset));
 			return true;
 		};
-		auto addValidatedPhysicsAsset = [this, &addStagedAsset, &stagingDir](
+		auto addValidatedPhysicsAsset = [this, &addStagedAsset, &stagingDir, &stagedAssetIdentityError](
 			const std::string& guid, AssetType type, const std::filesystem::path& packagePath, std::string& error) -> bool {
 			const std::filesystem::path stagedPath = stagingDir / packagePath;
 			std::vector<std::byte> bytes;
@@ -1214,7 +1473,12 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 					error = "Physics material could not be parsed: " + PathToUtf8(packagePath);
 					return false;
 				}
-				if(!addStagedAsset(guid, type, packagePath)) { error = "Physics material GUID is duplicated in export staging: " + guid; return false; }
+				if(!addStagedAsset(guid, type, packagePath, record.checksum, record.byteSize)) {
+					error = stagedAssetIdentityError.empty()
+						? "Physics material GUID is duplicated in export staging: " + guid
+						: stagedAssetIdentityError;
+					return false;
+				}
 				m_PhysicsManifest.materials.push_back(std::move(record));
 				return true;
 			}
@@ -1231,7 +1495,12 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 			const auto& envelope = collider->Envelope();
 			record.sourceProvenanceHash = HashPhysicsValue(envelope.sourceContentHash);
 			record.recipeHash = HashPhysicsValue(envelope.recipeHash);
-			if(!addStagedAsset(guid, type, packagePath)) { error = "Cooked collider GUID is duplicated in export staging: " + guid; return false; }
+			if(!addStagedAsset(guid, type, packagePath, record.checksum, record.byteSize)) {
+				error = stagedAssetIdentityError.empty()
+					? "Cooked collider GUID is duplicated in export staging: " + guid
+					: stagedAssetIdentityError;
+				return false;
+			}
 			m_PhysicsManifest.colliders.push_back(std::move(record));
 			return true;
 		};
@@ -1262,16 +1531,31 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 					|| mesh.virtualGeometryStatus == "NeedsRebuild") {
 					continue;
 				}
-				addedAny = addStagedAsset(TerraEngine::ToHexString(mesh.guid), AssetType::Mesh, mesh.compiledPath) || addedAny;
+				addedAny = addStagedAsset(
+					TerraEngine::ToHexString(mesh.guid),
+					AssetType::Mesh,
+					mesh.compiledPath,
+					{},
+					0U) || addedAny;
 			}
 			for (const TerraEngine::AssetPipeline::GeneratedModelMaterialAsset& material : importResult.generatedMaterials) {
 				if (!material.compiledPath.empty()) {
-					addedAny = addStagedAsset(TerraEngine::ToHexString(material.guid), AssetType::Material, material.compiledPath) || addedAny;
+					addedAny = addStagedAsset(
+						TerraEngine::ToHexString(material.guid),
+						AssetType::Material,
+						material.compiledPath,
+						{},
+						0U) || addedAny;
 				}
 			}
 			for (const TerraEngine::AssetPipeline::GeneratedModelTextureAsset& texture : importResult.generatedTextures) {
 				if (!texture.compiledPath.empty()) {
-					addedAny = addStagedAsset(TerraEngine::ToHexString(texture.guid), AssetType::Texture, texture.compiledPath) || addedAny;
+					addedAny = addStagedAsset(
+						TerraEngine::ToHexString(texture.guid),
+						AssetType::Texture,
+						texture.compiledPath,
+						{},
+						0U) || addedAny;
 				}
 			}
 			return addedAny;
@@ -1299,7 +1583,13 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 					if (importer == "MeshImporter") type = AssetType::Mesh;
 					else if (IsModelPackageImporterName(importer)) {
 						const std::filesystem::path sourceAssetPath = resolveSourceAssetPath(entry.path(), meta.value("sourcePath", std::string{}));
-						if (stageModelPackageChildren(sourceAssetPath)) {
+						const bool stagedPackageChildren =
+							stageModelPackageChildren(sourceAssetPath);
+						if(!stagedAssetIdentityError.empty()) {
+							result.errorMessage = stagedAssetIdentityError;
+							return false;
+						}
+						if(stagedPackageChildren) {
 							continue;
 						}
 
@@ -1343,7 +1633,16 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 							}
 						}
 						else {
-							addStagedAsset(std::move(guid), type, manifestPath);
+							if(!addStagedAsset(
+								std::move(guid),
+								type,
+								manifestPath,
+								{},
+								0U)
+								&& !stagedAssetIdentityError.empty()) {
+								result.errorMessage = stagedAssetIdentityError;
+								return false;
+							}
 						}
 					}
 				}
@@ -1418,6 +1717,67 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 		if(!RewriteStagedPhysicsColliderReferences(stagingDir, physicsReferenceError)) {
 			result.errorMessage = physicsReferenceError;
 			return false;
+		}
+
+		// Resolve animation closure from checked cooked envelopes plus real import
+		// sidecars before writing either runtime manifest. A missing dependency or
+		// shader rejects the entire staging transaction, so no partial archive can
+		// advertise an unusable character package.
+		const TerraEngine::Export::AnimationExportClosure animationClosure =
+			TerraEngine::Export::AnimationExportDependencyResolver::Resolve({rawAssets, stagingDir});
+		if(!animationClosure.Complete()) {
+			for(const TerraEngine::Export::AnimationExportIssue& issue : animationClosure.issues) {
+				ExportDiagnostic diagnostic;
+				diagnostic.severity = ExportDiagnosticSeverity::Error;
+				diagnostic.category = "Animation";
+				diagnostic.stage = "asset_staging";
+				diagnostic.code = issue.code;
+				diagnostic.message = issue.message;
+				diagnostic.filePath = issue.path;
+				result.diagnostics.push_back(std::move(diagnostic));
+			}
+			result.errorMessage = animationClosure.issues.empty()
+				? "Animation export dependency closure is incomplete."
+				: animationClosure.issues.front().message;
+			return false;
+		}
+		std::string animationManifestError;
+		if(!TerraEngine::Export::AnimationExportDependencyResolver::WriteRuntimeManifests(
+			animationClosure, stagingDir, animationManifestError)) {
+			result.errorMessage = animationManifestError;
+			return false;
+		}
+		for(const TerraEngine::Export::AnimationExportAsset& asset : animationClosure.assets) {
+			// Generated prefabs are authored runtime documents loaded by SceneManager,
+			// not ResourceManager assets. Keep the exact prefab record in the
+			// animation manifests and TEPAK, but omit it from game.json's typed GUID
+			// map. Every other unknown type still fails closed so a new dependency
+			// family cannot silently bypass runtime registration.
+			const bool isGeneratedPrefabDocument =
+				asset.assetType == TerraEngine::Export::kUnknownAnimationExportAssetType
+				&& asset.generatedPackageAsset
+				&& !asset.cookedAnimationEnvelope
+				&& std::filesystem::path(asset.path).extension() == ".teprefab"
+				&& asset.assetClass == "other";
+			if(isGeneratedPrefabDocument) {
+				continue;
+			}
+			if(asset.assetType == TerraEngine::Export::kUnknownAnimationExportAssetType
+				|| asset.assetType > static_cast<std::uint32_t>(AssetType::RagdollProfile)) {
+				result.errorMessage = "Animation dependency has no stable runtime AssetType: " + asset.path;
+				return false;
+			}
+			if(!addStagedAsset(
+				asset.assetGuid,
+				static_cast<AssetType>(asset.assetType),
+				asset.path,
+				asset.fileHash,
+				asset.byteSize)) {
+				result.errorMessage = stagedAssetIdentityError.empty()
+					? "Animation dependency GUID is duplicated in export staging: " + asset.assetGuid
+					: stagedAssetIdentityError;
+				return false;
+			}
 		}
 
 		// Directory iteration order is platform-dependent. Sort durable records
@@ -1630,6 +1990,21 @@ bool ExportPipeline::WriteExportManifest(const BuildProfile& profile,
 		manifest["rendererRecovery"] = BuildRendererRecoveryManifest(profile);
 		manifest["virtualGeometry"] = BuildVirtualGeometryExportManifest(profile);
 		manifest["physics"] = BuildPhysicsManifestJson(m_PhysicsManifest);
+		const bool hasAnimationAssets = std::any_of(
+			m_StagedAssets.begin(), m_StagedAssets.end(), [](const StagedAsset& asset) {
+				return asset.type >= AssetType::Skeleton && asset.type <= AssetType::RagdollProfile;
+			});
+		if(hasAnimationAssets) {
+			// The generic asset table remains the authoritative GUID-to-path map. This
+			// compact section tells startup code where to find the richer transitive
+			// dependency/capability document without embedding source-side metadata.
+			manifest["animation"] = {
+				{"schemaVersion", TerraEngine::Export::kAnimationExportManifestSchemaVersion},
+				{"runtimeManifest", TerraEngine::Export::kAnimationRuntimeManifestPath},
+				{"cpuFallback", true},
+				{"headless", true}
+			};
+		}
 
 		// Include the asset GUID map so the engine runtime can resolve 
 		// cross-resource references (UUIDs) back to filenames in the archive.

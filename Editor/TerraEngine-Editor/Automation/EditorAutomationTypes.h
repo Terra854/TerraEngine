@@ -289,6 +289,13 @@ namespace TerraEngine::Editor::Automation
 		std::string description;
 		nlohmann::json inputSchema = nlohmann::json{{"type", "object"}};
 		nlohmann::json resultSchema = nlohmann::json{{"type", "object"}};
+		// Machine-readable contracts complement JSON Schema with operational facts
+		// that clients need before dispatch: hard/default limits, identity scope,
+		// durable-job behavior, and the stable diagnostic fields returned on error.
+		nlohmann::json limits = nlohmann::json::object();
+		nlohmann::json generationContract = nlohmann::json::object();
+		nlohmann::json jobBehavior = nlohmann::json::object();
+		nlohmann::json diagnosticsContract = nlohmann::json::object();
 		AutomationPermission permission = AutomationPermission::Read;
 		AutomationApprovalPolicy approvalPolicy = AutomationApprovalPolicy::None;
 		MutationMode mutationMode = MutationMode::ReadOnly;
@@ -463,6 +470,13 @@ namespace TerraEngine::Editor::Automation
 		std::uint32_t worldGeneration = 0;
 		bool resolved = false;
 		bool approved = false;
+		// Approval and protected dispatch are asynchronous from the original
+		// loopback request. Retain the exact handler envelope so a reconnecting
+		// client can continue from real approved output instead of reconstructing
+		// job IDs or mutation receipts from logs.
+		bool dispatchCompleted = false;
+		std::string resolutionState = "pending";
+		nlohmann::json dispatchResult = nullptr;
 		std::chrono::system_clock::time_point expiresAt = std::chrono::system_clock::now();
 	};
 

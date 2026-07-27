@@ -95,6 +95,9 @@ namespace TerraEngine::EditorTests {
 			std::filesystem::create_directories(editorDirectory / "Shaders");
 			std::filesystem::create_directories(editorDirectory / "Fonts");
 			std::filesystem::create_directories(editorDirectory / "Managed");
+			std::filesystem::create_directories(editorDirectory / "NativeAotNuGet" / "feed");
+			Touch(editorDirectory / "NativeAotNuGet" / "NuGet.Config");
+			Touch(editorDirectory / "NativeAotNuGet" / "global.json");
 
 			fixture.project = tempDirectory.Root() / (useUnicodePaths
 				? std::filesystem::path(std::u8string(u8"Project \u00e9 space"))
@@ -177,6 +180,19 @@ namespace TerraEngine::EditorTests {
 
 			const BuildProfile sourceProfile = LoadBuildProfile(fixture.profile);
 			context.Expect(std::filesystem::path("Builds/StoredValue") == sourceProfile.outputDirectory, "Parsing must not persist the command-line output override to the profile source.");
+		});
+
+		registry.Add("Editor.HeadlessExport.AcceptsCanonicalEditorGameManifest", [](TestContext& context) {
+			TempHeadlessContractDirectory tempDirectory;
+			const HeadlessContractFixture fixture = MakeValidFixture(tempDirectory);
+			std::filesystem::remove(fixture.project / "project.json");
+			Touch(fixture.project / "game.json", R"({"name":"Installed editor project"})");
+
+			const HeadlessExportParseResult parsed = ParseHeadlessExportCommandLine(
+				ValidArguments(fixture), fixture.executable, tempDirectory.Root());
+
+			context.Expect(parsed.success,
+				"A project created by the installed editor must export with its canonical game.json and no synthetic project.json.");
 		});
 
 		registry.Add("Editor.HeadlessExport.ResolvesRelativePathsAgainstLaunchDirectory", [](TestContext& context) {

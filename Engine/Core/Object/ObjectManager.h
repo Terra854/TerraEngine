@@ -232,6 +232,17 @@ public:
 		return objects;
 	}
 
+	// Check component storage membership without walking the runtime-active
+	// object cache. Systems use this as a dormant fast path before paying for a
+	// stable, active-only snapshot; inactive owners deliberately still count so
+	// callers cannot mistake authored component storage for an empty project.
+	template<typename... Components>
+	bool HasAnyObjectWithComponentsIncludingInactive()
+	{
+		auto view = registry.view<Components...>();
+		return view.begin() != view.end();
+	}
+
 	// Snapshot matching objects before worker dispatch so query chunks iterate a
 	// stable list even if later systems request deferred structural mutations.
 	template<typename... Components>

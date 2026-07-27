@@ -49,15 +49,17 @@ namespace TerraEngine::Tests {
 			int failedCount = 0;
 			const char* filterValue = std::getenv("TERRAENGINE_TEST_FILTER");
 			const std::string filter = filterValue != nullptr ? filterValue : "";
+			const char* excludeFilterValue = std::getenv("TERRAENGINE_TEST_EXCLUDE_FILTER");
+			const std::string excludeFilter = excludeFilterValue != nullptr ? excludeFilterValue : "";
 
-			auto matchesFilter = [&filter](const std::string& testName) {
-				if(filter.empty()) {
-					return true;
-				}
+			// Both environment variables use the same comma/semicolon-separated,
+			// case-sensitive substring format. Keeping the parser shared prevents an
+			// exclusion from interpreting a test name differently than inclusion does.
+			auto containsAnyToken = [](const std::string& testName, const std::string& tokenList) {
 				std::size_t begin = 0;
-				while(begin <= filter.size()) {
-					const std::size_t end = filter.find_first_of(",;", begin);
-					const std::string token = filter.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+				while(begin <= tokenList.size()) {
+					const std::size_t end = tokenList.find_first_of(",;", begin);
+					const std::string token = tokenList.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
 					if(!token.empty() && testName.find(token) != std::string::npos) {
 						return true;
 					}
@@ -72,7 +74,9 @@ namespace TerraEngine::Tests {
 			// Each test gets its own failure boundary so one regression still reports
 			// the rest of the suite, matching the feedback style expected from CTest.
 			for(const TestCase& test : tests_) {
-				if(!matchesFilter(test.name)) {
+				const bool included = filter.empty() || containsAnyToken(test.name, filter);
+				const bool excluded = !excludeFilter.empty() && containsAnyToken(test.name, excludeFilter);
+				if(!included || excluded) {
 					continue;
 				}
 				try {

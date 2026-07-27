@@ -15,6 +15,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
+using TerraEngine.Animation;
 
 namespace TerraEngine
 {
@@ -336,6 +337,7 @@ namespace TerraEngine
 				var nextCatalog = ScriptReflection.BuildAttachableTypeCatalog(nextAssembly);
 				DisposeScriptInstances();
 				PhysicsEvents.ResetManagedSubscriptions();
+				Animation.AnimationEvents.ResetManagedSubscriptions();
 
 				lock (s_bridgeSync)
 				{
@@ -374,6 +376,7 @@ namespace TerraEngine
 		{
 			DisposeScriptInstances();
 			PhysicsEvents.ResetManagedSubscriptions();
+			Animation.AnimationEvents.ResetManagedSubscriptions();
 
 			lock (s_bridgeSync)
 			{
@@ -405,6 +408,7 @@ namespace TerraEngine
 			// reflected type catalog warm for the next Play press.
 			DisposeScriptInstances();
 			PhysicsEvents.ResetManagedSubscriptions();
+			Animation.AnimationEvents.ResetManagedSubscriptions();
 		}
 
 		[UnmanagedCallersOnly]
@@ -2228,5 +2232,95 @@ namespace TerraEngine
 
 		[DllImport("TerraEngine")]
 		internal static extern unsafe PhysicsStatus Native_Physics_ReplaceConstraintRecords(uint objectEntity, NativePhysicsConstraintRecord* records, uint recordCount);
+
+		// Animation v1 only exchanges fixed-width, caller-owned records. The
+		// two-call copy methods first report RequiredCount through BufferInfo and
+		// never retain any pointer after the P/Invoke frame returns.
+		[DllImport("TerraEngine")]
+		internal static extern ushort Native_Animation_GetAbiVersion();
+
+		[DllImport("TerraEngine")]
+		internal static extern AnimationStatus Native_Animation_ResolveAnimator(uint objectEntity, ref NativeAnimationAnimatorHandleRecord record);
+
+		[DllImport("TerraEngine")]
+		internal static extern AnimationStatus Native_Animation_SubmitCommand(ref NativeAnimationCommandRequest request, ref NativeAnimationCommandReceipt receipt);
+
+		[DllImport("TerraEngine")]
+		internal static extern AnimationStatus Native_Animation_CancelCommand(ref NativeAnimationCancellationRequest request, ref NativeAnimationCommandReceipt receipt);
+
+		[DllImport("TerraEngine")]
+		internal static extern AnimationStatus Native_Animation_ReadReceipt(ref NativeAnimationReceiptQuery query, ref NativeAnimationCommandReceipt receipt);
+
+		[DllImport("TerraEngine")]
+		internal static extern AnimationStatus Native_Animation_QueryCapability(ref NativeAnimationCapabilityQuery query, ref NativeAnimationCapabilityResult result);
+
+		[DllImport("TerraEngine")]
+		internal static extern AnimationStatus Native_Animation_ReadState(ref AnimatorHandle animator, ref NativeAnimationStateSnapshot state);
+
+		[DllImport("TerraEngine")]
+		internal static extern unsafe AnimationStatus Native_Animation_CopyParameters(ref AnimatorHandle animator, NativeAnimationNamedValue* values, uint capacity, ref NativeAnimationBufferInfo info);
+
+		[DllImport("TerraEngine")]
+		internal static extern unsafe AnimationStatus Native_Animation_CopyCurves(ref AnimatorHandle animator, NativeAnimationNamedValue* values, uint capacity, ref NativeAnimationBufferInfo info);
+
+		[DllImport("TerraEngine")]
+		internal static extern unsafe AnimationStatus Native_Animation_CopyMorphs(ref AnimatorHandle animator, NativeAnimationNamedValue* values, uint capacity, ref NativeAnimationBufferInfo info);
+
+		[DllImport("TerraEngine")]
+		internal static extern unsafe AnimationStatus Native_Animation_CopyBones(ref AnimatorHandle animator, NativeAnimationBoneSnapshot* values, uint capacity, ref NativeAnimationBufferInfo info);
+
+		[DllImport("TerraEngine")]
+		internal static extern unsafe AnimationStatus Native_Animation_CopySockets(ref AnimatorHandle animator, NativeAnimationSocketSnapshot* values, uint capacity, ref NativeAnimationBufferInfo info);
+
+		[DllImport("TerraEngine")]
+		internal static extern unsafe AnimationStatus Native_Animation_CopyEvents(ref AnimatorHandle animator, NativeAnimationEvent* values, uint capacity, ref NativeAnimationBufferInfo info);
+
+		[DllImport("TerraEngine")]
+		internal static extern unsafe AnimationStatus Native_Animation_CopyEventBatch(NativeAnimationEvent* values, uint capacity, ref NativeAnimationBufferInfo info);
+
+		[DllImport("TerraEngine")]
+		internal static extern unsafe AnimationStatus Native_Animation_CopyRootMotionResults(ref AnimatorHandle animator, NativeAnimationRootMotionResult* values, uint capacity, ref NativeAnimationBufferInfo info);
+
+		[DllImport("TerraEngine")]
+		internal static extern AnimationStatus Native_Animation_ApplyRootMotion(ref NativeAnimationRootMotionApplicationRequest request, ref NativeAnimationRootMotionApplicationReceipt receipt);
+
+		[DllImport("TerraEngine")]
+		internal static extern unsafe AnimationStatus Native_Animation_CopyRootMotionResultDetails(ref AnimatorHandle animator, NativeAnimationRootMotionResultDetails* values, uint capacity, ref NativeAnimationBufferInfo info);
+
+		[DllImport("TerraEngine")]
+		internal static extern AnimationStatus Native_Animation_SubmitProceduralGoal(ref NativeAnimationProceduralGoalCommand request, ref NativeAnimationProceduralGoalReceipt receipt);
+
+		[DllImport("TerraEngine")]
+		internal static extern unsafe AnimationStatus Native_Animation_CopyProceduralResults(ref AnimatorHandle animator, NativeAnimationProceduralResultSnapshot* values, uint capacity, ref NativeAnimationBufferInfo info);
+
+		[DllImport("TerraEngine")]
+		internal static extern AnimationStatus Native_Animation_SubmitRetargetRequest(ref NativeAnimationRetargetRequest request, ref NativeAnimationRetargetReceipt receipt);
+
+		[DllImport("TerraEngine")]
+		internal static extern unsafe AnimationStatus Native_Animation_CopyRetargetSnapshots(ref AnimatorHandle animator, NativeAnimationRetargetSnapshot* values, uint capacity, ref NativeAnimationBufferInfo info);
+
+		[DllImport("TerraEngine")]
+		internal static extern AnimationStatus Native_Animation_SubmitMotionMatchRequest(ref NativeAnimationMotionMatchRequest request, ref NativeAnimationMotionMatchReceipt receipt);
+
+		[DllImport("TerraEngine")]
+		internal static extern unsafe AnimationStatus Native_Animation_CopyMotionMatchSnapshots(ref AnimatorHandle animator, NativeAnimationMotionMatchSnapshot* values, uint capacity, ref NativeAnimationBufferInfo info);
+
+		[DllImport("TerraEngine")]
+		internal static extern AnimationStatus Native_Animation_SubmitMotionMatchQueryV2(ref NativeAnimationMotionMatchQueryRequestV2 request, ref NativeAnimationMotionMatchQueryReceiptV2 receipt);
+
+		[DllImport("TerraEngine")]
+		internal static extern unsafe AnimationStatus Native_Animation_CopyMotionMatchResultsV2(ref AnimatorHandle animator, NativeAnimationMotionMatchResultV2* values, uint capacity, ref NativeAnimationBufferInfo info);
+
+		[DllImport("TerraEngine")]
+		internal static extern AnimationStatus Native_Animation_SubmitRagdollRequest(ref NativeAnimationRagdollRequest request, ref NativeAnimationRagdollReceipt receipt);
+
+		[DllImport("TerraEngine")]
+		internal static extern unsafe AnimationStatus Native_Animation_CopyRagdollSnapshots(ref AnimatorHandle animator, NativeAnimationRagdollSnapshot* values, uint capacity, ref NativeAnimationBufferInfo info);
+
+		[DllImport("TerraEngine")]
+		internal static extern AnimationStatus Native_Animation_SubmitDeterminismRequest(ref NativeAnimationDeterminismRequest request, ref NativeAnimationDeterminismReceipt receipt);
+
+		[DllImport("TerraEngine")]
+		internal static extern unsafe AnimationStatus Native_Animation_CopyDeterminismSnapshots(ref AnimatorHandle animator, NativeAnimationDeterminismSnapshot* values, uint capacity, ref NativeAnimationBufferInfo info);
 	}
 }

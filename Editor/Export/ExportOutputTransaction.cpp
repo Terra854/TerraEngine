@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <limits>
 #include <sstream>
+#include <string_view>
 #include <system_error>
 #include <unordered_map>
 #include <utility>
@@ -29,6 +30,47 @@ namespace {
 	constexpr std::string_view kLockMetadataFileName = "owner.txt";
 	constexpr uint32_t kLockMetadataSchemaVersion = 1;
 	std::atomic<uint64_t> g_OwnerTokenCounter = 0;
+
+	/// Returns a native I/O spelling that bypasses the legacy MAX_PATH parser
+	/// while retaining prefix-free logical paths in public APIs and lock metadata.
+	/// This is intentionally defensive because this library can be hosted by
+	/// third-party tools that do not carry TerraEngine's longPathAware manifest.
+	std::filesystem::path NativeIoPath(const std::filesystem::path& path) {
+#if defined(_WIN32)
+		if(path.empty()) {
+			return path;
+		}
+		std::filesystem::path absolutePath = path;
+		if(!absolutePath.is_absolute()) {
+			std::error_code error;
+			absolutePath = std::filesystem::absolute(absolutePath, error);
+			if(error) {
+				return path;
+			}
+		}
+		std::filesystem::path preferred = absolutePath.lexically_normal();
+		preferred.make_preferred();
+		const std::filesystem::path::string_type& native = preferred.native();
+		constexpr std::wstring_view extendedPrefix = LR"(\\?\)";
+		constexpr std::wstring_view devicePrefix = LR"(\\.\)";
+		constexpr std::wstring_view uncPrefix = LR"(\\)";
+		if(native.starts_with(extendedPrefix) || native.starts_with(devicePrefix)) {
+			return preferred;
+		}
+
+		std::filesystem::path::string_type extended;
+		if(native.starts_with(uncPrefix)) {
+			extended.assign(LR"(\\?\UNC\)");
+			extended.append(native.substr(uncPrefix.size()));
+		} else {
+			extended.assign(extendedPrefix);
+			extended.append(native);
+		}
+		return std::filesystem::path(std::move(extended));
+#else
+		return path;
+#endif
+	}
 
 	/// Converts a path to portable UTF-8 without depending on the process locale.
 	std::string PathToUtf8(const std::filesystem::path& path) {
@@ -254,15 +296,15 @@ bool ExportOutputTransaction::Acquire(std::string& error) {
 	}
 
 	std::error_code parentError;
-	std::filesystem::create_directories(m_FinalDirectory.parent_path(), parentError);
+	std::filesystem::create_directories(NativeIoPath(m_FinalDirectory.parent_path()), parentError);
 	if(parentError) {
 		error = "output_parent_unavailable: Could not create the output parent directory: " + parentError.message();
 		return false;
 	}
 
 	std::error_code typeError;
-	if(std::filesystem::exists(m_FinalDirectory, typeError)
-		&& !std::filesystem::is_directory(m_FinalDirectory, typeError)) {
+	if(std::filesystem::exists(NativeIoPath(m_FinalDirectory), typeError)
+		&& !std::filesystem::is_directory(NativeIoPath(m_FinalDirectory), typeError)) {
 		error = "output_path_invalid: The final output path exists but is not a directory.";
 		return false;
 	}
@@ -296,7 +338,7 @@ bool ExportOutputTransaction::Acquire(std::string& error) {
 		// No other process can own this directory yet, so a failed initial metadata
 		// write may safely remove the lock that this object just created.
 		std::error_code cleanupError;
-		std::filesystem::remove_all(m_LockPath, cleanupError);
+		std::filesystem::remove_all(NativeIoPath(m_LockPath), cleanupError);
 		m_OwnsLock = false;
 		m_State = ExportOutputTransactionState::RolledBack;
 		return false;
@@ -336,7 +378,7 @@ bool ExportOutputTransaction::MarkStagedAndValidated(std::string& error) {
 	}
 
 	std::error_code directoryError;
-	if(!std::filesystem::is_directory(m_StagingDirectory, directoryError) || directoryError) {
+	if(!std::filesystem::is_directory(NativeIoPath(m_StagingDirectory), directoryError) || directoryError) {
 		error = "output_staging_missing: The transaction staging directory disappeared before validation completed.";
 		return false;
 	}
@@ -357,7 +399,7 @@ bool ExportOutputTransaction::Commit(std::string& error) {
 	}
 
 	std::error_code typeError;
-	m_HadPreviousOutput = std::filesystem::exists(m_FinalDirectory, typeError);
+	m_HadPreviousOutput = std::filesystem::exists(NativeIoPath(m_FinalDirectory), typeError);
 	if(typeError) {
 		error = "output_publication_failed: Could not inspect the previous output: " + typeError.message();
 		return false;
@@ -369,8 +411,8 @@ bool ExportOutputTransaction::Commit(std::string& error) {
 	// never deleted as an implicit side effect of export.
 	std::error_code publishError;
 	std::filesystem::copy(
-		m_StagingDirectory,
-		m_FinalDirectory,
+		NativeIoPath(m_StagingDirectory),
+		NativeIoPath(m_FinalDirectory),
 		std::filesystem::copy_options::overwrite_existing | std::filesystem::copy_options::recursive,
 		publishError);
 	if(publishError) {
@@ -412,7 +454,7 @@ bool ExportOutputTransaction::Rollback(std::string& error) {
 	}
 
 	std::error_code backupExistsError;
-	const bool backupExists = std::filesystem::exists(m_BackupDirectory, backupExistsError);
+	const bool backupExists = std::filesystem::exists(NativeIoPath(m_BackupDirectory), backupExistsError);
 	if(backupExistsError) {
 		error = "output_rollback_failed: Could not inspect the backup directory: " + backupExistsError.message();
 		return false;
@@ -499,7 +541,7 @@ const std::string& ExportOutputTransaction::CleanupWarning() const {
 bool ExportOutputTransaction::TryCreateLock(std::string& error) {
 	error.clear();
 	std::error_code createError;
-	const bool created = std::filesystem::create_directory(m_LockPath, createError);
+	const bool created = std::filesystem::create_directory(NativeIoPath(m_LockPath), createError);
 	if(createError) {
 		error = "output_lock_unavailable: Could not create the exclusive output lock: " + createError.message();
 	}
@@ -536,17 +578,17 @@ bool ExportOutputTransaction::RecoverExistingLock(std::string& error) {
 	// the known previous success over a new directory whose caller never received
 	// a successful commit result.
 	std::error_code existsError;
-	if(std::filesystem::exists(metadata.backupDirectory, existsError)) {
+	if(std::filesystem::exists(NativeIoPath(metadata.backupDirectory), existsError)) {
 		const bool metadataClaimsPublished = metadata.state == ToString(ExportOutputTransactionState::Published)
 			|| metadata.state == ToString(ExportOutputTransactionState::Cleaned);
-		if(metadataClaimsPublished && std::filesystem::exists(m_FinalDirectory, existsError)) {
+		if(metadataClaimsPublished && std::filesystem::exists(NativeIoPath(m_FinalDirectory), existsError)) {
 			std::string cleanupError;
 			if(!CleanupPath(metadata.backupDirectory, cleanupError)) {
 				error = "output_lock_recovery_failed: " + cleanupError;
 				return false;
 			}
 		} else {
-			if(std::filesystem::exists(m_FinalDirectory, existsError)) {
+			if(std::filesystem::exists(NativeIoPath(m_FinalDirectory), existsError)) {
 				std::string cleanupError;
 				if(!CleanupPath(m_FinalDirectory, cleanupError)) {
 					error = "output_lock_recovery_failed: " + cleanupError;
@@ -554,7 +596,10 @@ bool ExportOutputTransaction::RecoverExistingLock(std::string& error) {
 				}
 			}
 			std::error_code restoreError;
-			std::filesystem::rename(metadata.backupDirectory, m_FinalDirectory, restoreError);
+			std::filesystem::rename(
+				NativeIoPath(metadata.backupDirectory),
+				NativeIoPath(m_FinalDirectory),
+				restoreError);
 			if(restoreError) {
 				error = "output_lock_recovery_failed: Could not restore the previous output: " + restoreError.message();
 				return false;
@@ -583,7 +628,7 @@ bool ExportOutputTransaction::RecoverExistingLock(std::string& error) {
 	}
 
 	std::error_code removeError;
-	std::filesystem::remove_all(m_LockPath, removeError);
+	std::filesystem::remove_all(NativeIoPath(m_LockPath), removeError);
 	if(removeError) {
 		error = "output_lock_recovery_failed: Could not remove the stale lock: " + removeError.message();
 		return false;
@@ -597,14 +642,17 @@ bool ExportOutputTransaction::PrepareRunDirectories(std::string& error) {
 	// process termination. Once this transaction owns the output lock, those
 	// reserved sibling paths are safe to repair and reuse.
 	std::error_code existsError;
-	if(std::filesystem::exists(m_BackupDirectory, existsError)) {
-		if(std::filesystem::exists(m_FinalDirectory, existsError)) {
+	if(std::filesystem::exists(NativeIoPath(m_BackupDirectory), existsError)) {
+		if(std::filesystem::exists(NativeIoPath(m_FinalDirectory), existsError)) {
 			if(!CleanupPath(m_BackupDirectory, error)) {
 				return false;
 			}
 		} else {
 			std::error_code restoreError;
-			std::filesystem::rename(m_BackupDirectory, m_FinalDirectory, restoreError);
+			std::filesystem::rename(
+				NativeIoPath(m_BackupDirectory),
+				NativeIoPath(m_FinalDirectory),
+				restoreError);
 			if(restoreError) {
 				error = "output_staging_failed: Could not restore an orphaned previous output: " + restoreError.message();
 				return false;
@@ -622,12 +670,12 @@ bool ExportOutputTransaction::PrepareRunDirectories(std::string& error) {
 	}
 
 	std::error_code stagingError;
-	std::filesystem::create_directory(m_StagingDirectory, stagingError);
+	std::filesystem::create_directory(NativeIoPath(m_StagingDirectory), stagingError);
 	if(stagingError) {
 		error = "output_staging_failed: Could not create the private staging directory: " + stagingError.message();
 		return false;
 	}
-	std::filesystem::create_directory(m_ScratchDirectory, stagingError);
+	std::filesystem::create_directory(NativeIoPath(m_ScratchDirectory), stagingError);
 	if(stagingError) {
 		std::string ignoredCleanup;
 		(void)CleanupPath(m_StagingDirectory, ignoredCleanup);
@@ -635,7 +683,7 @@ bool ExportOutputTransaction::PrepareRunDirectories(std::string& error) {
 		return false;
 	}
 
-	m_HadPreviousOutput = std::filesystem::exists(m_FinalDirectory, existsError);
+	m_HadPreviousOutput = std::filesystem::exists(NativeIoPath(m_FinalDirectory), existsError);
 	if(existsError) {
 		error = "output_staging_failed: Could not inspect the previous output: " + existsError.message();
 		return false;
@@ -652,7 +700,7 @@ bool ExportOutputTransaction::WriteLockMetadata(std::string& error) const {
 	error.clear();
 	const std::filesystem::path temporaryPath = m_LockPath / ("owner-" + m_OwnerToken + ".tmp");
 	{
-		std::ofstream stream(temporaryPath, std::ios::binary | std::ios::trunc);
+		std::ofstream stream(NativeIoPath(temporaryPath), std::ios::binary | std::ios::trunc);
 		if(!stream.is_open()) {
 			error = "output_lock_metadata_failed: Could not open temporary lock owner metadata.";
 			return false;
@@ -672,7 +720,7 @@ bool ExportOutputTransaction::WriteLockMetadata(std::string& error) const {
 		if(!stream.good()) {
 			error = "output_lock_metadata_failed: Could not flush lock owner metadata.";
 			std::error_code ignoredError;
-			std::filesystem::remove(temporaryPath, ignoredError);
+			std::filesystem::remove(NativeIoPath(temporaryPath), ignoredError);
 			return false;
 		}
 	}
@@ -680,18 +728,20 @@ bool ExportOutputTransaction::WriteLockMetadata(std::string& error) const {
 	const std::filesystem::path metadataPath = LockMetadataPath();
 	std::error_code replaceError;
 #if defined(_WIN32)
+	const std::filesystem::path nativeTemporaryPath = NativeIoPath(temporaryPath);
+	const std::filesystem::path nativeMetadataPath = NativeIoPath(metadataPath);
 	if(!::MoveFileExW(
-		temporaryPath.c_str(),
-		metadataPath.c_str(),
+		nativeTemporaryPath.c_str(),
+		nativeMetadataPath.c_str(),
 		MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
 		replaceError = std::error_code(static_cast<int>(::GetLastError()), std::system_category());
 	}
 #else
-	std::filesystem::rename(temporaryPath, metadataPath, replaceError);
+	std::filesystem::rename(NativeIoPath(temporaryPath), NativeIoPath(metadataPath), replaceError);
 #endif
 	if(replaceError) {
 		std::error_code ignoredError;
-		std::filesystem::remove(temporaryPath, ignoredError);
+		std::filesystem::remove(NativeIoPath(temporaryPath), ignoredError);
 		error = "output_lock_metadata_failed: Could not publish lock owner metadata: " + replaceError.message();
 		return false;
 	}
@@ -700,7 +750,7 @@ bool ExportOutputTransaction::WriteLockMetadata(std::string& error) const {
 
 bool ExportOutputTransaction::ReadLockMetadata(LockMetadata& metadata, std::string& error) const {
 	error.clear();
-	std::ifstream stream(LockMetadataPath(), std::ios::binary);
+	std::ifstream stream(NativeIoPath(LockMetadataPath()), std::ios::binary);
 	if(!stream.is_open()) {
 		error = "lock owner metadata is missing";
 		return false;
@@ -774,7 +824,7 @@ bool ExportOutputTransaction::ReleaseOwnedLock(std::string& warning) {
 	}
 
 	std::error_code removeError;
-	std::filesystem::remove_all(m_LockPath, removeError);
+	std::filesystem::remove_all(NativeIoPath(m_LockPath), removeError);
 	if(removeError) {
 		warning = "output_lock_cleanup_failed: Could not remove the owned output lock: " + removeError.message();
 		return false;
@@ -786,7 +836,7 @@ bool ExportOutputTransaction::ReleaseOwnedLock(std::string& warning) {
 bool ExportOutputTransaction::RestoreBackup(std::string& error) {
 	error.clear();
 	std::error_code existsError;
-	if(!std::filesystem::exists(m_BackupDirectory, existsError)) {
+	if(!std::filesystem::exists(NativeIoPath(m_BackupDirectory), existsError)) {
 		if(existsError) {
 			error = "output_rollback_failed: Could not inspect the backup directory: " + existsError.message();
 			return false;
@@ -794,7 +844,7 @@ bool ExportOutputTransaction::RestoreBackup(std::string& error) {
 		return true;
 	}
 
-	if(std::filesystem::exists(m_FinalDirectory, existsError)) {
+	if(std::filesystem::exists(NativeIoPath(m_FinalDirectory), existsError)) {
 		std::string cleanupError;
 		if(!CleanupPath(m_FinalDirectory, cleanupError)) {
 			error = "output_rollback_failed: " + cleanupError;
@@ -807,7 +857,10 @@ bool ExportOutputTransaction::RestoreBackup(std::string& error) {
 	}
 
 	std::error_code restoreError;
-	std::filesystem::rename(m_BackupDirectory, m_FinalDirectory, restoreError);
+	std::filesystem::rename(
+		NativeIoPath(m_BackupDirectory),
+		NativeIoPath(m_FinalDirectory),
+		restoreError);
 	if(restoreError) {
 		error = "output_rollback_failed: Could not restore the previous output: " + restoreError.message();
 		return false;
@@ -821,7 +874,7 @@ bool ExportOutputTransaction::CleanupPath(const std::filesystem::path& path, std
 		return true;
 	}
 	std::error_code cleanupError;
-	std::filesystem::remove_all(path, cleanupError);
+	std::filesystem::remove_all(NativeIoPath(path), cleanupError);
 	if(cleanupError) {
 		error = "Could not remove '" + PathToUtf8(path) + "': " + cleanupError.message();
 		return false;

@@ -1,12 +1,17 @@
 #include "../TestHarness.h"
 #include "EditorAutomationService.h"
 
+#include "AssetDatabase.h"
 #include "EditorContext.h"
+#include "Engine/Components/PrefabLinkComponent.h"
+#include "Engine/Components/Transform.h"
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Scene/SceneManager.h"
 #include "ProjectManager.h"
+#include "UndoRedoSystem.h"
 
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -48,8 +53,62 @@ namespace TerraEngine::EditorTests
 			{
 				ObjectManager::instance().clear();
 				SceneManager::Instance().UnloadAll();
+				if (assetDatabaseEnabled)
+				{
+					AssetDatabase::Instance().Shutdown();
+				}
 				std::error_code ignored;
 				std::filesystem::remove_all(workspace, ignored);
+			}
+
+			void EnableAssetDatabase()
+			{
+				// Existing prefabs are discovered through the same project index used by
+				// the installed editor. This deliberately creates no prefab through MCP,
+				// reproducing a generated or previously-authored asset after startup.
+				context.assetDatabase = std::shared_ptr<AssetDatabase>(&AssetDatabase::Instance(), [](AssetDatabase*) {});
+				context.assetDatabase->Initialize(projectRoot);
+				assetDatabaseEnabled = true;
+			}
+
+			std::string WriteExistingPrefab(const std::filesystem::path& projectRelativePath, std::string_view name)
+			{
+				const std::filesystem::path absolutePath = projectRoot / projectRelativePath;
+				std::filesystem::create_directories(absolutePath.parent_path());
+				const TerraEngine::UUID rootId = TerraEngine::GenerateUUID();
+				const TerraEngine::UUID childId = TerraEngine::GenerateUUID();
+				std::ofstream output(absolutePath, std::ios::binary | std::ios::trunc);
+				output << nlohmann::json{
+					{"name", std::string(name)},
+					{"objects", nlohmann::json::array({{
+						{"name", std::string(name)},
+						{"uuid", TerraEngine::ToHexString(rootId)},
+						{"components", {{"Transform", {
+							{"Position", {3.0f, 4.0f, 5.0f}},
+							{"Rotation", {1.0f, 0.0f, 0.0f, 0.0f}},
+							{"Scale", {1.0f, 2.0f, 1.0f}}
+						}}}},
+						{"children", nlohmann::json::array({{
+							{"name", "Imported Hero Mesh"},
+							{"uuid", TerraEngine::ToHexString(childId)},
+							{"components", {{"Transform", {
+								{"Position", {0.0f, 2.0f, 0.0f}},
+								{"Rotation", {1.0f, 0.0f, 0.0f, 0.0f}},
+								{"Scale", {0.5f, 0.5f, 0.5f}}
+							}}}}
+						}})}
+					}})}
+				}.dump(2);
+				output.close();
+				context.assetDatabase->ScanProject();
+				for (const auto& [registeredPath, metadata] : context.assetDatabase->GetAssets())
+				{
+					if (registeredPath.lexically_normal() == std::filesystem::absolute(absolutePath).lexically_normal())
+					{
+						return TerraEngine::ToHexString(metadata.guid);
+					}
+				}
+				return {};
 			}
 
 			nlohmann::json CreateObject(std::string_view name, std::string_view requestId)
@@ -67,11 +126,76 @@ namespace TerraEngine::EditorTests
 			EditorContext context;
 			EditorAutomationService service;
 			bool ready = false;
+			bool assetDatabaseEnabled = false;
 		};
 	}
 
 	void RegisterEditorMcpPrefabTests(TestRegistry& registry)
 	{
+		registry.Add("Editor.MCP.Prefab.InstantiatesRegisteredProjectAssetAfterServiceStartup", [](TestContext& context) {
+			PrefabAutomationFixture fixture("ExistingProjectAsset");
+			context.Expect(fixture.ready, "Existing-prefab fixture should create and open a project scene.");
+			fixture.EnableAssetDatabase();
+			const std::string registeredGuid = fixture.WriteExistingPrefab(
+				"Assets/Models/Hero_Generated/Hero.teprefab", "Imported Hero");
+			context.Expect(!registeredGuid.empty(), "The existing prefab should be registered in the project asset index.");
+
+			const nlohmann::json instantiated = fixture.service.HandleTool(
+				"prefab.instantiate",
+				{{"prefab", "Assets/Models/Hero_Generated/Hero.teprefab"}, {"name", "Hero Instance"}},
+				WriteMode::WritesEnabled,
+				"prefab-existing-instantiate");
+			context.Expect(instantiated.value("ok", false),
+				"A registered project prefab should instantiate without being created during the current automation session.");
+			context.ExpectEqual(registeredGuid,
+				instantiated.value("data", nlohmann::json::object()).value("prefabId", std::string()),
+				"Existing prefab resolution should expose the stable AssetDatabase GUID as its source identity.");
+			context.ExpectEqual(static_cast<std::uint64_t>(1u),
+				instantiated.value("data", nlohmann::json::object()).value("prefabGeneration", 0ull),
+				"A loose registered prefab should begin at the service's first stable generation.");
+			context.Expect(!instantiated.value("data", nlohmann::json::object()).value("instanceId", std::string()).empty(),
+				"Existing prefab instantiation should publish a stable scene-object identity.");
+
+			const std::optional<TerraEngine::UUID> instanceId = TerraEngine::ParseUUID(
+				instantiated.value("data", nlohmann::json::object()).value("instanceId", std::string()));
+			const std::optional<Object> root = instanceId ? ObjectManager::instance().getObject(*instanceId) : std::nullopt;
+			context.Expect(root.has_value(), "The returned instance ID should identify the deserialized prefab root.");
+			if (!root) return;
+			context.ExpectEqual(std::string("Hero Instance"), ObjectManager::instance().getObjectName(*root),
+				"The requested name should be applied to the canonical prefab root.");
+			const Transform* rootTransform = ObjectManager::instance().GetComponent<Transform>(*root);
+			context.Expect(rootTransform != nullptr && rootTransform->position == glm::vec3(3.0f, 4.0f, 5.0f)
+				&& rootTransform->scale == glm::vec3(1.0f, 2.0f, 1.0f),
+				"Registered prefab instantiation should restore authored root component values.");
+			const std::vector<Object> children = ObjectManager::instance().getChildren(*root);
+			context.ExpectEqual(static_cast<std::size_t>(1U), children.size(),
+				"Registered prefab instantiation should restore the authored child hierarchy.");
+			if (!children.empty())
+			{
+				context.ExpectEqual(std::string("Imported Hero Mesh"), ObjectManager::instance().getObjectName(children.front()),
+					"Child names should come from the prefab document rather than a generated empty root.");
+				const Transform* childTransform = ObjectManager::instance().GetComponent<Transform>(children.front());
+				context.Expect(childTransform != nullptr && childTransform->position == glm::vec3(0.0f, 2.0f, 0.0f),
+					"Child components should be deserialized with their authored values.");
+			}
+			const PrefabLinkComponent* link = ObjectManager::instance().GetComponent<PrefabLinkComponent>(*root);
+			context.Expect(link != nullptr && link->prefabSourceId != TerraEngine::EMPTY_UUID
+				&& link->sourceObjectId != TerraEngine::EMPTY_UUID,
+				"The complete graph root should retain prefab source and source-object link identities.");
+
+			UndoRedoSystem::Instance().Undo();
+			context.Expect(!ObjectManager::instance().getObject(*instanceId).has_value(),
+				"One undo should remove the complete prefab graph as a single history action.");
+			UndoRedoSystem::Instance().Redo();
+			const std::optional<Object> restoredRoot = ObjectManager::instance().getObject(*instanceId);
+			context.Expect(restoredRoot.has_value(), "Redo should restore the prefab's stable canonical root identity.");
+			if (restoredRoot)
+			{
+				context.ExpectEqual(static_cast<std::size_t>(1U), ObjectManager::instance().getChildren(*restoredRoot).size(),
+					"Redo should restore the complete child graph rather than only the root.");
+			}
+		});
+
 		registry.Add("Editor.MCP.Prefab.CreateAndInstantiatePreserveStableIdentity", [](TestContext& context) {
 			PrefabAutomationFixture fixture("CreateInstantiate");
 			context.Expect(fixture.ready, "Prefab fixture should create and open a project scene.");

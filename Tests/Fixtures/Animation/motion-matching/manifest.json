@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "database": {
+    "sampleCount": 250000,
+    "featureCount": 48,
+    "topK": 32,
+    "quantization": "int16-normalized-v1",
+    "samplesPerResidentBlock": 4096,
+    "cpuSampleStrideBytes": 160,
+    "gpuSampleStrideBytes": 256,
+    "sourceSets": ["locomotion", "start", "stop", "turn", "jump", "recovery"],
+    "featureBlocks": [
+      {"name": "trajectory", "first": 0, "count": 12},
+      {"name": "pose", "first": 12, "count": 18},
+      {"name": "velocity", "first": 30, "count": 9},
+      {"name": "facing", "first": 39, "count": 3},
+      {"name": "contact", "first": 42, "count": 2},
+      {"name": "phase", "first": 44, "count": 1},
+      {"name": "tag", "first": 45, "count": 1},
+      {"name": "transition", "first": 46, "count": 1},
+      {"name": "continuity", "first": 47, "count": 1}
+    ]
+  },
+  "queryStream": {
+    "queryCount": 100000,
+    "deterministicSeed": 43043,
+    "generator": "splitmix64-v1",
+    "stableOrdering": ["total-cost", "source-clip-id", "source-tick", "stable-sample-id"],
+    "contains": ["trajectory", "pose", "velocity", "facing", "contact", "phase", "tag", "exclusion", "continuity"],
+    "requiredCorrectnessCases": ["stable-tie", "hard-exclusion", "continuity-break", "stale-generation", "cancelled-readback"]
+  },
+  "limits": {
+    "maximumSamples": 16777216,
+    "maximumTopK": 256,
+    "maximumInFlightRequests": 64,
+    "reductionTileSize": 1024
+  },
+  "performanceAcceptance": {
+    "deferredUntil": "T283",
+    "timingMayNotRunBeforeFinalPhase": true
+  }
+}

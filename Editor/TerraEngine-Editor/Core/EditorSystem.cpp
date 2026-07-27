@@ -8,6 +8,7 @@
 #include "MainEditorSubsystem.h"
 #include "ProjectManager.h"
 #include "AssetDatabase.h"
+#include "../Subsystems/ScriptCompilationSubsystem.h"
 #include "../Automation/EditorMcpBridge.h"
 #include "Engine/Scripting/ScriptingSystem.h"
 #include "Engine/Scene/SceneManager.h"
@@ -79,6 +80,85 @@ void EditorSystem::SetStartupProjectPath(const std::filesystem::path& projectPat
 
 void EditorSystem::SetPhysicsInvariantOutputPath(const std::filesystem::path& outputPath) {
 	physicsInvariantOutputPath = outputPath;
+}
+
+// The installed-editor acceptance command shares normal project startup with an
+// interactive session. Project startup intentionally builds Assembly-CSharp on
+// a worker, so this gate waits for the coordinator to publish and load that DLL
+// before it runs the physics fixture and requests orderly engine shutdown.
+void EditorSystem::ProcessPhysicsInvariantValidation(float deltaTime) {
+	if (!physicsInvariantOutputPath.has_value() || physicsInvariantRunAttempted) {
+		return;
+	}
+	if (deltaTime > 0.0f) {
+		physicsInvariantManagedWaitSeconds += deltaTime;
+	}
+
+	TerraEngine::Runtime::PhysicsInvariantReport report;
+	bool validationReady = false;
+	bool runPhysicsFixture = false;
+	if (!context.projectManager->HasActiveProject()) {
+		report.diagnostic = "The requested startup project could not be opened for editor physics validation.";
+		validationReady = true;
+	} else if (!mainEditor) {
+		report.diagnostic = "The main editor subsystem is unavailable for physics validation.";
+		validationReady = true;
+	} else {
+		const ScriptCompilationStatus& scriptStatus = ScriptCompilationSubsystem::Instance().GetStatus();
+		if (scriptStatus.state == ScriptCoordinatorState::Ready && scriptStatus.gameplayAssemblyLoaded) {
+			runPhysicsFixture = true;
+			validationReady = true;
+		} else if (scriptStatus.state == ScriptCoordinatorState::Ready) {
+			report.diagnostic = "Assembly-CSharp reported Ready without a loaded gameplay assembly.";
+			validationReady = true;
+		} else if (scriptStatus.state == ScriptCoordinatorState::Failed
+			|| scriptStatus.state == ScriptCoordinatorState::Canceled) {
+			report.diagnostic = "Assembly-CSharp did not become ready: " + scriptStatus.lastSummary;
+			validationReady = true;
+		} else if (physicsInvariantManagedWaitSeconds >= 120.0f) {
+			report.diagnostic = "Timed out waiting for Assembly-CSharp managed readiness: " + scriptStatus.lastSummary;
+			validationReady = true;
+		}
+	}
+	if (!validationReady) {
+		return;
+	}
+
+	// Mark the command in progress before the fixture recursively executes engine
+	// frames. Those frames include EditorSystem::Update and must not start a
+	// second validation run against the same Play Mode state.
+	physicsInvariantRunAttempted = true;
+	if (runPhysicsFixture) {
+		// This calls the same Play Mode lifecycle and PhysicsSystem used by an
+		// interactive editor session after managed project readiness is real.
+		report = mainEditor->RunPhysicsExportInvariantFixture();
+	}
+	try {
+		const std::filesystem::path outputPath = std::filesystem::absolute(*physicsInvariantOutputPath);
+		if (!outputPath.parent_path().empty()) {
+			std::filesystem::create_directories(outputPath.parent_path());
+		}
+		const std::string serialized = TerraEngine::Runtime::SerializePhysicsInvariantReport(report);
+		std::ofstream output(outputPath, std::ios::binary | std::ios::trunc);
+		if (!output) {
+			throw std::runtime_error("Could not open the editor physics invariant output path.");
+		}
+		output.write(serialized.data(), static_cast<std::streamsize>(serialized.size()));
+		output.flush();
+		if (!output) {
+			throw std::runtime_error("Could not persist the complete editor physics invariant report.");
+		}
+		std::cout << "[Editor] Physics invariant report: " << serialized << '\n';
+		requestedProcessExitCode = report.succeeded && report.orderlyShutdown
+			&& report.activePhysicsJobsAfterDrain == 0U && report.queuedPhysicsJobsAfterDrain == 0U ? 0 : 1;
+	} catch (const std::exception& exception) {
+		requestedProcessExitCode = 1;
+		TERRAENGINE_LOG(LogLevel::Error, "[EditorSystem] Physics invariant validation failed: " << exception.what());
+	}
+
+	// The engine owns shutdown ordering. Request a normal loop exit only after
+	// the evidence file is closed and the managed build is no longer in flight.
+	context.engine->SignalShutdown();
 }
 
 int EditorSystem::RequestedProcessExitCode() const noexcept {
@@ -561,46 +641,6 @@ void EditorSystem::Initialize() {
 	// editor, managed, and callback setup, which keeps it aligned with normal
 	// project-hub opens without waiting for the first frame update.
 	ProcessStartupProjectOpen();
-
-	if (physicsInvariantOutputPath.has_value() && !physicsInvariantRunAttempted) {
-		physicsInvariantRunAttempted = true;
-		TerraEngine::Runtime::PhysicsInvariantReport report;
-		try {
-			if (!context.projectManager->HasActiveProject()) {
-				report.diagnostic = "The requested startup project could not be opened for editor physics validation.";
-			} else if (!mainEditor) {
-				report.diagnostic = "The main editor subsystem is unavailable for physics validation.";
-			} else {
-				// This calls the same Play Mode lifecycle and PhysicsSystem used by
-				// an interactive editor session after renderer and managed startup.
-				report = mainEditor->RunPhysicsExportInvariantFixture();
-			}
-
-			const std::filesystem::path outputPath = std::filesystem::absolute(*physicsInvariantOutputPath);
-			if (!outputPath.parent_path().empty()) {
-				std::filesystem::create_directories(outputPath.parent_path());
-			}
-			const std::string serialized = TerraEngine::Runtime::SerializePhysicsInvariantReport(report);
-			std::ofstream output(outputPath, std::ios::binary | std::ios::trunc);
-			if (!output) {
-				throw std::runtime_error("Could not open the editor physics invariant output path.");
-			}
-			output.write(serialized.data(), static_cast<std::streamsize>(serialized.size()));
-			output.flush();
-			if (!output) {
-				throw std::runtime_error("Could not persist the complete editor physics invariant report.");
-			}
-			std::cout << "[Editor] Physics invariant report: " << serialized << '\n';
-			requestedProcessExitCode = report.succeeded && report.orderlyShutdown
-				&& report.activePhysicsJobsAfterDrain == 0U && report.queuedPhysicsJobsAfterDrain == 0U ? 0 : 1;
-		} catch (const std::exception& exception) {
-			requestedProcessExitCode = 1;
-			TERRAENGINE_LOG(LogLevel::Error, "[EditorSystem] Physics invariant validation failed: " << exception.what());
-		}
-		// The engine owns shutdown ordering, so request a normal loop exit after
-		// the evidence file is closed instead of tearing systems down in-place.
-		context.engine->SignalShutdown();
-	}
 }
 
 // EditorSystem::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -614,6 +654,19 @@ void EditorSystem::Update(float deltaTime) {
 	// Keep this idempotent fallback so future delayed-startup paths still open
 	// the requested project before the editor chooses between hub and workspace UI.
 	ProcessStartupProjectOpen();
+	// Animation authority has already published through the scheduler by the time
+	// this protected PostFrame system runs. Advance durable recorder sessions before
+	// any editor-only early return so capture never depends on MCP polling, listener
+	// enablement, ImGui visibility, or the installed physics-validation path.
+	if (context.editorMcpBridge) {
+		context.editorMcpBridge->PumpAnimationRecordingsAtProtectedFrame();
+	}
+	// The opt-in installed acceptance mode must observe the prior frame's
+	// script-coordinator publication before beginning another ImGui frame.
+	ProcessPhysicsInvariantValidation(deltaTime);
+	if (physicsInvariantRunAttempted) {
+		return;
+	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (pendingLoadLayout) {
@@ -816,7 +869,7 @@ TerraEngine::Scheduling::SystemDeclaration EditorSystem::SchedulerDeclaration() 
 	declaration.reads = {
 		"RendererOutput", "PresentationState", "WindowSnapshot", "InputSnapshot",
 		"ProjectState", "EditorState", "ImGuiDrawData", "EditorAutomationQueue",
-		"EditorAutomationSession"
+		"EditorAutomationSession", "AnimationRuntimeState"
 	};
 	declaration.writes = {
 		"EditorUiPresentation", "ViewportTextureRegistry", "EditorSubmissionCompletion",
@@ -828,7 +881,7 @@ TerraEngine::Scheduling::SystemDeclaration EditorSystem::SchedulerDeclaration() 
 	declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::Protected;
 	declaration.hardBoundary = true;
 	declaration.safeSubwork = "Automation schema validation, immutable request preparation, reference-impact scans, log filtering, and editor subsystem snapshots may run on workers; ImGui context mutation remains protected.";
-	declaration.protectedCommit = "Prepared automation request commit at post_editor_automation_flush, SceneMutationQueue publication, project and Play Mode transitions, ImGui frame mutation, checked Vulkan backend recording, descriptor mutation, acquire, submit, present, and retirement publication.";
+	declaration.protectedCommit = "Immutable animation recording capture, prepared automation request commit at post_editor_automation_flush, SceneMutationQueue publication, project and Play Mode transitions, ImGui frame mutation, checked Vulkan backend recording, descriptor mutation, acquire, submit, present, and retirement publication.";
 	declaration.protectedReason = declaration.protectedCommit;
 	declaration.profilingLabel = declaration.name;
 	declaration.usesDefaultMetadata = false;

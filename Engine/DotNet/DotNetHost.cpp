@@ -177,11 +177,15 @@ bool DotNetHost::InitializeExportRuntime(const std::filesystem::path& nativeAotL
 		return false;
 	}
 
-	// Resolve the single exported C function that populates the VTable.
+	// Prefer the capacity-aware v3 entry point. The legacy initializer has no
+	// destination-size argument, so current generators deliberately restrict it
+	// to the released v1 prefix for memory safety with older native hosts.
+	auto initV3Fn = reinterpret_cast<InitManagedRuntimeV3Fn>(
+		GetNativeExport(nativeAotLibraryHandle, "InitManagedRuntimeV3"));
 	auto initFn = reinterpret_cast<InitManagedRuntimeFn>(
 		GetNativeExport(nativeAotLibraryHandle, "InitManagedRuntime"));
-	if (initFn == nullptr) {
-		SetNativeError("The NativeAOT gameplay library does not export InitManagedRuntime. Rebuild the gameplay project and confirm the source generator produced the export bootstrap.");
+	if (initV3Fn == nullptr && initFn == nullptr) {
+		SetNativeError("The NativeAOT gameplay library exports neither InitManagedRuntimeV3 nor the legacy InitManagedRuntime entry point. Rebuild the gameplay project and confirm the source generator produced the export bootstrap.");
 		TERRAENGINE_LOG(LogLevel::Error, m_LastNativeError);
 		FreeNativeLibrary(nativeAotLibraryHandle);
 		nativeAotLibraryHandle = nullptr;
@@ -193,7 +197,9 @@ bool DotNetHost::InitializeExportRuntime(const std::filesystem::path& nativeAotL
 
 	// Call the managed init function. The NativeAOT side populates the VTable
 	// struct with function pointers from the source-generated script registry.
-	const int32_t result = initFn(outTable);
+	const int32_t result = initV3Fn != nullptr
+		? initV3Fn(outTable, sizeof(ManagedVTable))
+		: initFn(outTable);
 
 	TERRAENGINE_LOG(LogLevel::Debug, "--- RAW VTABLE DUMP ---");
 	uint64_t* rawPtr = reinterpret_cast<uint64_t*>(outTable);
@@ -205,7 +211,9 @@ bool DotNetHost::InitializeExportRuntime(const std::filesystem::path& nativeAotL
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (result != 0) {
-		SetNativeError("InitManagedRuntime returned error code " + std::to_string(result) + ". The gameplay NativeAOT library failed to initialize its registry.");
+		SetNativeError(std::string(initV3Fn != nullptr ? "InitManagedRuntimeV3" : "InitManagedRuntime")
+			+ " returned error code " + std::to_string(result)
+			+ ". The gameplay NativeAOT library failed to initialize its registry.");
 		TERRAENGINE_LOG(LogLevel::Error, m_LastNativeError);
 		FreeNativeLibrary(nativeAotLibraryHandle);
 		nativeAotLibraryHandle = nullptr;
@@ -238,6 +246,30 @@ bool DotNetHost::InitializeExportRuntime(const std::filesystem::path& nativeAotL
 			|| outTable->dispatchPhysicsEventBatch == nullptr
 			|| outTable->getPhysicsAbiVersion() != kManagedPhysicsAbiVersion) {
 			SetNativeError("ManagedVTable physics ABI validation failed. Rebuild the gameplay NativeAOT library with the current TerraEngine managed SDK.");
+			TERRAENGINE_LOG(LogLevel::Error, m_LastNativeError);
+			FreeNativeLibrary(nativeAotLibraryHandle);
+			nativeAotLibraryHandle = nullptr;
+			return false;
+		}
+	}
+
+	// V3 is another append-only tail. Reject a producer that advertises the
+	// animation callback without enough bytes or without the exact copied ABI;
+	// v1/v2 exports remain loadable and simply do not offer automatic events.
+	if (outTable->version >= kManagedVTableAnimationVersion) {
+		if (outTable->tableSize < kManagedVTableV3Size) {
+			SetNativeError("ManagedVTable v" + std::to_string(outTable->version)
+				+ " reported only " + std::to_string(outTable->tableSize)
+				+ " bytes; the animation-enabled host requires " + std::to_string(kManagedVTableV3Size) + ".");
+			TERRAENGINE_LOG(LogLevel::Error, m_LastNativeError);
+			FreeNativeLibrary(nativeAotLibraryHandle);
+			nativeAotLibraryHandle = nullptr;
+			return false;
+		}
+		if (outTable->getAnimationAbiVersion == nullptr
+			|| outTable->dispatchAnimationEventBatch == nullptr
+			|| outTable->getAnimationAbiVersion() != kManagedAnimationAbiVersion) {
+			SetNativeError("ManagedVTable animation ABI validation failed. Rebuild the gameplay NativeAOT library with the current TerraEngine managed SDK.");
 			TERRAENGINE_LOG(LogLevel::Error, m_LastNativeError);
 			FreeNativeLibrary(nativeAotLibraryHandle);
 			nativeAotLibraryHandle = nullptr;

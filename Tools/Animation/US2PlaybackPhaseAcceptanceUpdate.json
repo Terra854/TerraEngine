@@ -1,0 +1,149 @@
+{
+	"schemaVersion": 1,
+	"phase": "us2-playback",
+	"acceptedEvidence": {
+		"statement": "The accepted us2-playback rows are bound to every reviewed phase-specific MCP operation, native camera capture, required manual input action, and retained focused test artifact.",
+		"requirementIds": [
+			"FR-019",
+			"FR-020",
+			"FR-021",
+			"FR-022",
+			"FR-023",
+			"FR-024",
+			"FR-025",
+			"FR-026",
+			"FR-027",
+			"FR-028",
+			"FR-030",
+			"FR-031",
+			"FR-032",
+			"FR-033",
+			"FR-034",
+			"FR-035",
+			"SC-004"
+		],
+		"operationIds": [
+			"us2-import-playback-package",
+			"us2-query-generated-animation",
+			"us2-instantiate-playback-prefab",
+			"us2-preplay-scene-query",
+			"us2-playback-diagnostics",
+			"us2-postplay-restoration-query",
+			"us2-postplay-diagnostics"
+		],
+		"captureIds": [
+			"us2-playback-scene-view",
+			"us2-playback-game-view",
+			"us2-playback-in-game-camera"
+		],
+		"manualChecklistIds": [
+			"us2-mouse-clip-playback-preview",
+			"us2-keyboard-save-and-restoration"
+		],
+		"requiredArtifacts": [
+			"editor/mcp-operations.json",
+			"editor/manual-evidence.json",
+			"editor/camera-evidence.json",
+			"editor/play-mode.json",
+			"tests/focused-tests.command.json"
+		]
+	},
+	"updates": [
+		{
+			"id": "FR-019",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-020",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-021",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-022",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-023",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-024",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-025",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-026",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-027",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-028",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-029",
+			"status": "In progress"
+		},
+		{
+			"id": "FR-030",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-031",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-032",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-033",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-034",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-035",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-036",
+			"status": "In progress"
+		},
+		{
+			"id": "FR-037",
+			"status": "In progress"
+		},
+		{
+			"id": "SC-004",
+			"status": "Accepted"
+		},
+		{
+			"id": "SC-005",
+			"status": "In progress"
+		},
+		{
+			"id": "SC-017",
+			"status": "In progress"
+		},
+		{
+			"id": "SC-023",
+			"status": "In progress"
+		},
+		{
+			"id": "SC-026",
+			"status": "In progress"
+		}
+	]
+}

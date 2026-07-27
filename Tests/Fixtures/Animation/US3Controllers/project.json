@@ -1,0 +1,5 @@
+{
+	"name": "Animation US3 Controller Authoring Gate",
+	"version": "1.0.0",
+	"startupScene": "Scenes/US3Controllers.tescene"
+}

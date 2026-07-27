@@ -1,0 +1,373 @@
+// AnimationSystem.h - pre-physics animation authority scheduler owner.
+//
+// The system owns live animator instances and typed command submission. Frame
+// work is split into protected capture/publication and worker-safe preparation
+// so worker jobs never touch live ObjectManager or component storage.
+
+#pragma once
+
+#include "Animation/Runtime/AnimationCommandQueue.h"
+#include "Animation/Runtime/AdvancedAnimationCommandStore.h"
+#include "Animation/Runtime/AnimationCancellation.h"
+#include "Animation/Runtime/AnimationEvaluationCache.h"
+#include "Animation/Runtime/AnimationFallback.h"
+#include "Animation/Runtime/AnimationMemory.h"
+#include "Animation/Runtime/AnimationSnapshots.h"
+#include "Animation/Runtime/AnimationWorkScheduler.h"
+#include "Animation/Runtime/AnimatorPlayback.h"
+#include "Animation/Runtime/RootMotion.h"
+#include "Animation/Procedural/ProceduralCommandStore.h"
+#include "Animation/Gpu/GpuAnimationPlanner.h"
+#include "Core/SystemBase.h"
+
+#include <compare>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <span>
+#include <string>
+#include <vector>
+
+namespace TerraEngine::Animation {
+	struct MotionDatabaseAsset;
+	struct RagdollProfileAsset;
+	struct RetargetCompiledProfile;
+	struct RetargetProfileAsset;
+
+	// Controller graphs may reference several immutable clips. Each node binding
+	// owns its payload and resident-segment bitmap so a worker can change states
+	// without resolving ResourceManager storage or touching an editor asset.
+	struct AnimatorControllerClipBinding {
+		std::uint64_t nodeStableId = 0U;
+		std::shared_ptr<const AnimationClipAsset> clip;
+		std::vector<std::uint8_t> residentSegments;
+		AnimationGeneration clipGeneration = 0U;
+		// Computed once at bind from the complete cooked payload. Rollback and
+		// replication can then identify clip bytes without rehashing them per frame.
+		std::uint64_t deterministicContentFingerprint = 0U;
+		// Controller nodes retain their own immutable segment publication because
+		// state changes may select a different clip while worker work is in flight.
+		std::shared_ptr<const AnimationClipSegmentPayloadSet> streamedSegmentPayloads;
+	};
+
+	// These generations originate outside AnimationSystem and therefore cannot be
+	// inferred from a clip or pose pointer. Producers opt into unchanged-instance
+	// reuse only after supplying every correctness domain with a truthful value.
+	struct AnimationEvaluationExternalGenerations {
+		std::uint64_t consumerGeneration = 0U;
+		std::uint64_t morphGeneration = 0U;
+		std::uint64_t graphGeneration = 0U;
+		std::uint64_t viewGeneration = 0U;
+		std::uint64_t assetGeneration = 0U;
+		std::uint64_t residencyGeneration = 0U;
+		std::uint64_t materialGeneration = 0U;
+		std::uint64_t rendererGeneration = 0U;
+		std::uint64_t physicsGeneration = 0U;
+		std::uint64_t deterministicGeneration = 0U;
+		bool unchangedInputReuseEligible = false;
+
+		[[nodiscard]] bool IsComplete() const noexcept
+		{
+			return consumerGeneration != 0U && morphGeneration != 0U && graphGeneration != 0U
+				&& viewGeneration != 0U && assetGeneration != 0U
+				&& residencyGeneration != 0U && materialGeneration != 0U
+				&& rendererGeneration != 0U && physicsGeneration != 0U
+				&& deterministicGeneration != 0U;
+		}
+
+		auto operator<=>(const AnimationEvaluationExternalGenerations&) const = default;
+	};
+
+	struct AnimatorPlaybackBinding {
+		// Shared immutable assets keep every worker view alive until the protected
+		// publication completes, even if a hot reload replaces the live binding.
+		std::shared_ptr<const AnimationClipAsset> clip;
+		std::shared_ptr<const SkeletonAsset> skeleton;
+		// Advanced authored assets are copied together with their ResourceManager
+		// generation. Runtime requests can therefore validate a stable UUID and
+		// generation without reparsing files or borrowing cache-owned pointers.
+		std::shared_ptr<const RetargetProfileAsset> retargetProfile;
+		// The checked mapping table is compiled at the protected bind boundary.
+		// Workers may therefore evaluate an active retarget profile without parsing
+		// authored mappings or borrowing mutable publisher state each frame.
+		std::shared_ptr<const RetargetCompiledProfile> compiledRetargetProfile;
+		std::shared_ptr<const MotionDatabaseAsset> motionDatabase;
+		std::shared_ptr<const RagdollProfileAsset> ragdollProfile;
+		std::shared_ptr<const SkeletonAsset> retargetSourceSkeleton;
+		std::vector<AnimatorControllerClipBinding> controllerClips;
+		std::vector<std::uint8_t> residentSegments;
+		std::vector<std::uint64_t> jointStableIds;
+		// Source-rig order is retained separately from the target publication layout.
+		// A retarget worker samples this exact immutable order, then publishes only
+		// target-rig joints through jointStableIds.
+		std::vector<std::uint64_t> retargetSourceJointStableIds;
+		std::vector<std::uint64_t> morphStableIds;
+		std::vector<std::uint64_t> curveStableIds;
+		// GPU presentation uses only immutable, binding-owned values.  The vectors
+		// below replace borrowed consumer spans and remain valid through worker
+		// planning and protected publication.
+		std::shared_ptr<const EvaluationProgram> evaluationProgram;
+		// An authored controller must never silently degrade into an unrelated
+		// default-clip animator. While its worker compile is pending or rejected,
+		// the binding carries that explicit status and publishes a safe pose.
+		bool controllerProgramRequired = false;
+		AnimationStatus controllerProgramStatus = AnimationStatus::Ok;
+		AnimationExecutionPolicy requestedExecutionPolicy = AnimationExecutionPolicy::Auto;
+		std::vector<std::uint32_t> authoritativeJointIndices;
+		std::vector<std::int32_t> jointParents;
+		AnimationGpuExecutionInputs gpuExecution{};
+		std::uint32_t gpuProgramResourceIndex = kGpuAnimationInvalidResourceIndex;
+		GpuAnimationVisualInput gpuVisual{};
+		std::shared_ptr<const GpuAnimationResidentPayloads> gpuResidentPayloads;
+		AnimationGeneration clipGeneration = 1U;
+		std::uint64_t clipDeterministicContentFingerprint = 0U;
+		AnimationGeneration skeletonGeneration = 1U;
+		AnimationGeneration programGeneration = 1U;
+		AnimationGeneration retargetProfileGeneration = 0U;
+		AnimationGeneration motionDatabaseGeneration = 0U;
+		AnimationGeneration ragdollProfileGeneration = 0U;
+		AnimationGeneration retargetSourceSkeletonGeneration = 0U;
+		// Cache participation is deliberately disabled by default. Asset, renderer,
+		// view, material, residency, physics, and determinism owners must forward
+		// their real publication generations before reuse can be correctness-safe.
+		AnimationEvaluationExternalGenerations evaluationGenerations{};
+		AnimationFallbackPolicy fallbackPolicy = AnimationFallbackPolicy::CpuThenHoldLast;
+		// Missing-resource recovery cannot derive compatibility from a null asset.
+		// A producer may carry the last known compatible skeleton/program identity;
+		// otherwise hold-last is intentionally unavailable and bind pose is attempted.
+		AnimationCompatibilityFingerprint fallbackCompatibilityFingerprint = 0U;
+		std::uint64_t stateId = 1U;
+		// Authored initial values cross the binding boundary as copied JSON and are
+		// parsed once into typed runtime snapshots before worker evaluation begins.
+		std::string initialParametersJson = "{}";
+		AnimatorRootMotionPolicy rootMotionPolicy = AnimatorRootMotionPolicy::ExtractOnly;
+		AnimatorUpdatePolicy updatePolicy = AnimatorUpdatePolicy::EveryFrame;
+		AnimatorEventPolicy eventPolicy = AnimatorEventPolicy::Dispatch;
+		AnimatorCullingPolicy cullingPolicy = AnimatorCullingPolicy::Automatic;
+		AnimatorPlaybackConfiguration playback{};
+		// This copied authored cursor is applied immediately after Configure and
+		// before optional autoplay. It therefore selects both the frozen editor pose
+		// and the first runtime pose without placing mutable cursor state in a component.
+		AnimationFixedTick initialPlaybackTick = 0;
+		// Component-authored animators are expected to evaluate their default clip or
+		// controller entry state immediately. Direct runtime bindings remain stopped
+		// unless their caller explicitly opts in, preserving command-driven control.
+		bool playOnBind = false;
+		// This snapshot pins the exact segment bytes represented by residentSegments.
+		// Null preserves legacy/full-resident callers that decode clip->streamData.
+		std::shared_ptr<const AnimationClipSegmentPayloadSet> streamedSegmentPayloads;
+	};
+
+	// This copied diagnostic snapshot exposes the selected task granularity and
+	// bounded-memory/cancellation outcome without exposing mutable runtime storage.
+	struct AnimationProductionIntegrationSnapshot {
+		AnimationStatus planStatus = AnimationStatus::NotReady;
+		AnimationWorkExecutionPolicy executionPolicy = AnimationWorkExecutionPolicy::Omitted;
+		std::size_t availableWorkerCount = 0U;
+		std::size_t selectedWorkerCount = 0U;
+		std::size_t itemCount = 0U;
+		std::size_t rangeCount = 0U;
+		std::size_t scratchBytes = 0U;
+		std::size_t cacheEntryCount = 0U;
+		std::size_t reusedItemCount = 0U;
+		std::size_t fallbackItemCount = 0U;
+		AnimationMemorySnapshot memory{};
+		bool deterministicPublicationValidated = false;
+		bool cancellationRequested = false;
+	};
+
+	// Render/gameplay consumers receive one copied generation bundle. Checking a
+	// single pointer prevents a mesh from combining a new pose with an old clip,
+	// skeleton, component, or safe-pose diagnostic generation.
+	struct PublishedAnimatorPose {
+		AnimatorInstanceHandle animator;
+		UUID ownerObjectId = EMPTY_UUID;
+		AnimationGeneration objectGeneration = 0U;
+		AnimationGeneration componentGeneration = 0U;
+		AnimationTransform sourceObjectWorldTransform{};
+		bool sourceObjectWorldTransformCaptured = false;
+		std::uint64_t authorityPublicationGeneration = 0U;
+		AnimationAssetHandle controller;
+		AnimationAssetHandle clip;
+		AnimationAssetHandle skeleton;
+		// CPU deformation keeps the exact immutable skeleton generation beside
+		// the pose. Render workers can build skinning matrices without reopening
+		// ResourceManager while a hot reload may replace the live asset.
+		std::shared_ptr<const SkeletonAsset> skeletonAsset;
+		std::vector<std::uint64_t> jointStableIds;
+		AnimationCompatibilityFingerprint skeletonCompatibilityFingerprint = 0U;
+		AnimationExecutionPolicy requestedExecutionPolicy = AnimationExecutionPolicy::Auto;
+		AnimationEffectiveExecutionMode effectiveExecutionMode =
+			AnimationEffectiveExecutionMode::CpuDeterministicFallback;
+		AnimatorRootMotionPolicy rootMotionPolicy = AnimatorRootMotionPolicy::ExtractOnly;
+		AnimatorUpdatePolicy updatePolicy = AnimatorUpdatePolicy::EveryFrame;
+		AnimatorEventPolicy eventPolicy = AnimatorEventPolicy::Dispatch;
+		AnimatorCullingPolicy cullingPolicy = AnimatorCullingPolicy::Automatic;
+		AnimationStatus status = AnimationStatus::NotReady;
+		bool safePose = true;
+		// This copied diagnostic distinguishes the exact immutable streamed view
+		// from the complete DATA fallback used while gameplay-critical segments
+		// are still arriving. It never exposes the payload or mutable residency.
+		bool streamedClipPayloadsActive = false;
+		// The accounting lease shares the immutable pose's lifetime. Long-lived
+		// readers and hold-last fallback therefore remain visible to the bounded
+		// PosePool budget instead of disappearing at the next frame capture.
+		std::shared_ptr<const AnimationMemoryLease> poseMemoryReservation;
+		std::shared_ptr<const AnimationSnapshot> snapshot;
+	};
+
+	class TERRAENGINE_API AnimationSystem final : public SystemsBase {
+	public:
+		static AnimationSystem& Instance();
+
+		AnimationSystem(const AnimationSystem&) = delete;
+		AnimationSystem& operator=(const AnimationSystem&) = delete;
+
+		void Initialize() override;
+		void Update(float deltaTime) override;
+		void Shutdown() override;
+		std::string SystemName() override;
+		TerraEngine::Scheduling::SystemDeclaration SchedulerDeclaration() override;
+		std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> DeclareFrameWorkloads(float deltaTime) override;
+
+		// These protected-lifecycle wrappers keep AnimatorInstanceStore private to
+		// its owning system. Component, scene, and future managed integrations can
+		// request lifecycle changes without receiving mutable store access.
+		[[nodiscard]] AnimatorInstanceHandle CreateAnimatorInstance(AnimatorInstanceDescriptor descriptor);
+		[[nodiscard]] bool InvalidateAnimatorInstance(AnimatorInstanceHandle handle);
+		// Standalone runtimes enable authored playback by default. The editor
+		// disables it outside Play Mode so a stopped scene has no component-owned
+		// runtime palette and renders the mesh's authored bind geometry.
+		void SetAuthoredComponentPlaybackEnabled(bool enabled);
+		[[nodiscard]] bool IsAuthoredComponentPlaybackEnabled() const noexcept;
+		// Engine startup sets this before scheduler initialization for runtimes
+		// that intentionally omit RenderSystem. The copied value becomes an
+		// explicit execution-mode input, so a renderer-free process cannot retain
+		// a stale GPU/Hybrid label from asset capability metadata.
+		void SetHeadlessExecutionRequired(bool required);
+		[[nodiscard]] bool IsHeadlessExecutionRequired() const noexcept;
+		// Edit Mode keeps a tick-zero pose published for skinned imports whose
+		// authored bind geometry requires a skeleton palette, while Play Mode
+		// advances the same component-owned playback normally.
+		void SetAuthoredComponentPlaybackAdvancing(bool advancing);
+		[[nodiscard]] bool IsAuthoredComponentPlaybackAdvancing() const noexcept;
+		// Scene, script, renderer, physics, device, and Play Mode owners call this
+		// only from their protected lifecycle boundary. It invalidates in-flight
+		// tokens and optional reuse without granting access to animation internals.
+		[[nodiscard]] AnimationStatus NotifyLifecycleInvalidation(
+			AnimationLifecycleBoundary boundary);
+		[[nodiscard]] bool IsAnimatorInstanceAlive(AnimatorInstanceHandle handle) const;
+		// Binding copies immutable ownership and validates the dependency generation
+		// before any worker sees it. Missing or incompatible clip data is retained as
+		// an explicit safe-pose status rather than partially mixing generations.
+		[[nodiscard]] AnimationStatus BindAnimatorPlayback(
+			AnimatorInstanceHandle handle,
+			AnimatorPlaybackBinding binding);
+		// Dynamic view/residency/material/renderer/physics owners refresh their
+		// immutable generations through this protected narrow API. A changed bundle
+		// cancels the captured frame and invalidates only this animator's cache.
+		[[nodiscard]] AnimationStatus UpdateEvaluationGenerations(
+			AnimatorInstanceHandle handle,
+			AnimationEvaluationExternalGenerations generations);
+		[[nodiscard]] AnimationCommandReceipt SubmitCommand(AnimationCommand command);
+		// Automation and other cross-system producers use this atomic batch path so
+		// a rejected later command cannot leave earlier parameter edits queued.
+		[[nodiscard]] AnimationCommandBatchReceipt SubmitCommandBatch(
+			std::span<const AnimationCommand> commands);
+		[[nodiscard]] AnimationCommandReceipt CancelCommand(
+			std::uint64_t cancellationToken,
+			std::uint64_t correlationId);
+		[[nodiscard]] AnimationCommandReceipt ReadCommandReceipt(
+			std::uint32_t producerId,
+			std::uint64_t producerSequence,
+			std::uint64_t correlationId) const;
+		// Gameplay requests carry only copied identities. The system resolves the
+		// latest exact immutable root delta, then routes typed deferred work without
+		// exposing PoseBuffer or live component references.
+		[[nodiscard]] AnimationRootMotionApplicationReceipt SubmitRootMotionApplication(
+			AnimationRootMotionDeferredApplicationRequest request);
+		// Procedural gameplay input remains a copied, typed deferred path. The
+		// protected animation boundary validates publication generations before a
+		// goal becomes active, and copied result reads never expose evaluator storage.
+		[[nodiscard]] NativeAnimationProceduralGoalReceipt SubmitProceduralGoal(
+			const NativeAnimationProceduralGoalCommand& command);
+		[[nodiscard]] AnimationStatus CopyProceduralResults(
+			AnimatorInstanceHandle handle,
+			std::span<NativeAnimationProceduralResultSnapshot> destination,
+			std::uint32_t& requiredCount) const;
+		// Scene View and native diagnostics use the same bounded copy protocol as
+		// managed callers. Active goals remain store-owned and are never exposed by
+		// reference while an editor handle is being dragged.
+		[[nodiscard]] AnimationStatus CopyProceduralGoals(
+			AnimatorInstanceHandle handle,
+			std::span<NativeAnimationProceduralGoalCommand> destination,
+			std::uint32_t& requiredCount) const;
+		// Advanced managed requests share the same bounded deferred ownership as
+		// ordinary commands. Receipts report queue admission immediately; copied
+		// snapshots become visible only after the protected animation/physics
+		// publication boundaries have processed the request.
+		[[nodiscard]] NativeAnimationRetargetReceipt SubmitRetargetRequest(
+			const NativeAnimationRetargetRequest& request);
+		[[nodiscard]] NativeAnimationMotionMatchReceipt SubmitMotionMatchRequest(
+			const NativeAnimationMotionMatchRequest& request);
+		// V2 carries the complete deterministic search query inline. The runtime
+		// retains that copied value until protected capture, so callers never lend
+		// feature or exclusion storage to animation workers.
+		[[nodiscard]] NativeAnimationMotionMatchQueryReceiptV2 SubmitMotionMatchQueryV2(
+			const NativeAnimationMotionMatchQueryRequestV2& request);
+		[[nodiscard]] NativeAnimationRagdollReceipt SubmitRagdollRequest(
+			const NativeAnimationRagdollRequest& request);
+		[[nodiscard]] NativeAnimationDeterminismReceipt SubmitDeterminismRequest(
+			const NativeAnimationDeterminismRequest& request);
+		[[nodiscard]] AnimationStatus CopyRetargetSnapshots(
+			AnimatorInstanceHandle handle,
+			std::span<NativeAnimationRetargetSnapshot> destination,
+			std::uint32_t& requiredCount) const;
+		[[nodiscard]] AnimationStatus CopyMotionMatchSnapshots(
+			AnimatorInstanceHandle handle,
+			std::span<NativeAnimationMotionMatchSnapshot> destination,
+			std::uint32_t& requiredCount) const;
+		[[nodiscard]] AnimationStatus CopyMotionMatchResultsV2(
+			AnimatorInstanceHandle handle,
+			std::span<NativeAnimationMotionMatchResultV2> destination,
+			std::uint32_t& requiredCount) const;
+		[[nodiscard]] AnimationStatus CopyRagdollSnapshots(
+			AnimatorInstanceHandle handle,
+			std::span<NativeAnimationRagdollSnapshot> destination,
+			std::uint32_t& requiredCount) const;
+		[[nodiscard]] AnimationStatus CopyDeterminismSnapshots(
+			AnimatorInstanceHandle handle,
+			std::span<NativeAnimationDeterminismSnapshot> destination,
+			std::uint32_t& requiredCount) const;
+		[[nodiscard]] AnimatorInstanceHandle ResolveAnimatorForObject(
+			const UUID& ownerObjectId) const noexcept;
+		void CopyPublishedAnimatorPoses(
+			std::vector<std::shared_ptr<const PublishedAnimatorPose>>& output) const;
+		[[nodiscard]] std::shared_ptr<const AnimationSnapshot> LoadAnimatorSnapshot(
+			AnimatorInstanceHandle handle) const noexcept;
+		[[nodiscard]] std::shared_ptr<const PublishedAnimatorPose> LoadPublishedAnimatorPose(
+			AnimatorInstanceHandle handle) const noexcept;
+		[[nodiscard]] std::shared_ptr<const PublishedAnimatorPose> LoadPublishedAnimatorPoseForObject(
+			const UUID& ownerObjectId) const noexcept;
+		[[nodiscard]] AnimatorPlaybackStateSnapshot LoadAnimatorPlaybackState(
+			AnimatorInstanceHandle handle) const noexcept;
+		[[nodiscard]] std::size_t PendingCommandCount() const;
+		[[nodiscard]] std::size_t CapturedCommandCount() const;
+
+		// AnimationPresentation reads the cached count from the same coordinator
+		// membership check that activated this frame. It must not scan the runtime
+		// store a second time on a dormant frame.
+		[[nodiscard]] std::size_t ScheduledAnimatorCount() const noexcept;
+		[[nodiscard]] std::size_t PublishedAnimatorCount() const noexcept;
+		[[nodiscard]] std::uint64_t AuthorityPublicationGeneration() const noexcept;
+		[[nodiscard]] AnimationProductionIntegrationSnapshot
+			ReadProductionIntegrationSnapshot() const noexcept;
+
+	private:
+		AnimationSystem();
+		~AnimationSystem() override;
+
+		struct Impl;
+		std::unique_ptr<Impl> impl_;
+	};
+}

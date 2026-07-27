@@ -2,11 +2,13 @@
 #include "EditorMcpBridge.h"
 
 #include <algorithm>
+#include <barrier>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <thread>
 
 #include "EditorContext.h"
 #include "ProjectManager.h"
@@ -104,9 +106,106 @@ namespace TerraEngine::EditorTests
 			context.Expect(bridge.GetListenPort() != 0, "Direct editor enable should start the local listener.");
 			bridge.SetEnabled(false);
 			context.Expect(!bridge.IsEnabled(), "Bridge should disable.");
+			context.Expect(!bridge.BuildStatusJson().value("acceptingToolCalls", true),
+				"A disabled bridge must close tool-call admission.");
 			context.ExpectEqual(static_cast<std::uint16_t>(0), bridge.GetListenPort(), "Direct editor disable should stop the listener immediately.");
 			bridge.Shutdown();
 			context.ExpectEqual(std::string(TerraEngine::Editor::Automation::ToString(bridge.GetState())), std::string("stopped"), "Bridge should stop on shutdown.");
+		});
+
+		registry.Add("Editor.MCP.Safety.ShutdownIsTerminalAndIdempotent", [](TestContext& context) {
+			EditorMcpBridge bridge;
+			bridge.Initialize(nullptr);
+			bridge.SetEnabled(true);
+
+			// Concurrent callers model explicit subsystem teardown racing the
+			// bridge destructor path. Release both workers from one real barrier so
+			// scheduler serialization cannot make the concurrency test vacuous.
+			std::barrier<> shutdownStart(3);
+			std::thread firstShutdown([&bridge, &shutdownStart]() {
+				shutdownStart.arrive_and_wait();
+				bridge.Shutdown();
+			});
+			std::thread secondShutdown([&bridge, &shutdownStart]() {
+				shutdownStart.arrive_and_wait();
+				bridge.Shutdown();
+			});
+			shutdownStart.arrive_and_wait();
+			firstShutdown.join();
+			secondShutdown.join();
+			bridge.Shutdown();
+
+			context.Expect(bridge.GetState() == TerraEngine::Editor::Automation::BridgeState::Stopped,
+				"Repeated and concurrent shutdown should leave one terminal Stopped state.");
+			context.ExpectEqual(static_cast<std::uint16_t>(0), bridge.GetListenPort(),
+				"Terminal shutdown should release the loopback listener.");
+			context.Expect(!bridge.BuildStatusJson().value("acceptingToolCalls", true),
+				"Terminal shutdown must leave tool-call admission closed.");
+			bridge.SetEnabled(true);
+			bridge.SetEnabled(false);
+			context.Expect(bridge.GetState() == TerraEngine::Editor::Automation::BridgeState::Stopped,
+				"Enable or disable callbacks arriving after shutdown must not resurrect or overwrite Stopped.");
+			context.ExpectEqual(static_cast<std::uint16_t>(0), bridge.GetListenPort(),
+				"A stopped bridge must never reopen a listener.");
+			bridge.EnqueueRequest("diagnostics.get_summary", {});
+			context.Expect(bridge.GetQueuedRequests().empty(),
+				"A terminal bridge must reject work queued by a late producer.");
+		});
+
+		registry.Add("Editor.MCP.Safety.ConcurrentEnableAndShutdownNeverReopenAdmission", [](TestContext& context) {
+			EditorMcpBridge bridge;
+			bridge.Initialize(nullptr);
+			std::mutex hookMutex;
+			std::condition_variable hookSignal;
+			bool enableOwnsLifecycleGate = false;
+			bool allowEnablePublication = false;
+			bridge.SetEnablePublicationHookForTests([&]() {
+				std::unique_lock lock(hookMutex);
+				enableOwnsLifecycleGate = true;
+				hookSignal.notify_all();
+				hookSignal.wait(lock, [&]() {
+					return allowEnablePublication;
+				});
+			});
+
+			std::thread enable([&]() {
+				bridge.SetEnabled(true);
+			});
+			bool enableReachedGate = false;
+			{
+				std::unique_lock lock(hookMutex);
+				enableReachedGate = hookSignal.wait_for(lock, std::chrono::seconds(2), [&]() {
+					return enableOwnsLifecycleGate;
+				});
+			}
+
+			std::thread shutdown([&]() {
+				bridge.Shutdown();
+			});
+			const auto admissionCloseDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+			while (bridge.BuildStatusJson().value("acceptingToolCalls", true)
+				&& std::chrono::steady_clock::now() < admissionCloseDeadline)
+			{
+				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+			}
+			const bool shutdownClosedAdmissionBeforeEnablePublished =
+				!bridge.BuildStatusJson().value("acceptingToolCalls", true);
+			{
+				std::lock_guard lock(hookMutex);
+				allowEnablePublication = true;
+			}
+			hookSignal.notify_all();
+			enable.join();
+			shutdown.join();
+
+			context.Expect(enableReachedGate,
+				"The deterministic hook should prove enable owns the lifecycle gate before shutdown waits.");
+			context.Expect(shutdownClosedAdmissionBeforeEnablePublished,
+				"Shutdown should close admission before waiting for the in-flight enable operation.");
+			context.Expect(bridge.GetState() == TerraEngine::Editor::Automation::BridgeState::Stopped,
+				"Shutdown should remain terminal after the blocked enable operation publishes its listener state.");
+			context.Expect(!bridge.BuildStatusJson().value("acceptingToolCalls", true),
+				"Shutdown must re-close admission after enable releases the lifecycle gate.");
 		});
 
 		registry.Add("Editor.MCP.Safety.DisabledBridgeRejectsEnableTool", [](TestContext& context) {
@@ -157,6 +256,7 @@ namespace TerraEngine::EditorTests
 		registry.Add("Editor.MCP.Safety.RequestQueueIsFifo", [](TestContext& context) {
 			EditorMcpBridge bridge;
 			bridge.Initialize(nullptr);
+			bridge.SetEnabled(true);
 			bridge.EnqueueRequest("first", {});
 			bridge.EnqueueRequest("second", {});
 			const auto first = bridge.PopNextQueuedRequest();
@@ -164,6 +264,28 @@ namespace TerraEngine::EditorTests
 			context.Expect(first.has_value() && second.has_value(), "Two queued requests should be returned.");
 			context.ExpectEqual(first->capability, std::string("first"), "First request should be popped first.");
 			context.ExpectEqual(second->capability, std::string("second"), "Second request should be popped second.");
+		});
+
+		registry.Add("Editor.MCP.Safety.DisableDoesNotReplayLegacyQueueAfterReenable", [](TestContext& context) {
+			EditorMcpBridge bridge;
+			bridge.Initialize(nullptr);
+			bridge.SetEnabled(true);
+			bridge.EnqueueRequest("diagnostics.get_summary", {{"includeDetails", true}});
+			context.ExpectEqual(bridge.GetQueuedRequests().size(), static_cast<std::size_t>(1),
+				"Legacy fixture should queue one request before disable.");
+
+			bridge.SetEnabled(false);
+			const bool queueClearedAtDisable = bridge.GetQueuedRequests().empty();
+			bridge.SetEnabled(true);
+			bridge.Update(0.0f);
+
+			context.Expect(queueClearedAtDisable,
+				"Disable should detach every legacy request from the ending listener session.");
+			context.Expect(bridge.GetQueuedRequests().empty(),
+				"Re-enable must not replay legacy requests from the prior listener session.");
+			context.Expect(bridge.BuildStatusJson().value("lastDiagnosticRequest", std::string("never")) == "never",
+				"The stale diagnostic request should never reach its handler after re-enable.");
+			bridge.Shutdown();
 		});
 
 		registry.Add("Editor.MCP.Safety.ActivityHistoryIsBoundedNewestFirst", [](TestContext& context) {
@@ -216,6 +338,110 @@ namespace TerraEngine::EditorTests
 			context.Expect(bridge.GetPendingApprovals().empty(), "Expired approval should be resolved during bridge update.");
 		});
 
+		registry.Add("Editor.MCP.Safety.ApprovedDispatchResultSurvivesStatelessReconnect", [](TestContext& context) {
+			EditorMcpBridge bridge;
+			bridge.Initialize(nullptr);
+			bridge.SetEnabled(true);
+			bridge.SetWriteMode(WriteMode::WritesEnabled);
+
+			const nlohmann::json requested = bridge.CallTool(
+				"asset.prepare_delete", {{"path", "Assets/Missing.txt"}});
+			const std::string approvalId = requested["data"].value("approvalId", "");
+			const std::string requestId = requested.value("requestId", "");
+			context.Expect(!approvalId.empty() && !requestId.empty(),
+				"The protected request should publish stable approval and request identities.");
+			context.Expect(bridge.ResolveApproval(approvalId, true),
+				"The Preferences-side approval should execute the protected handler.");
+
+			const nlohmann::json recent = bridge.ReadResource("terraengine://approvals/recent");
+			const auto approvals = recent.value("approvals", nlohmann::json::array());
+			const auto retained = std::find_if(approvals.begin(), approvals.end(),
+				[&approvalId](const nlohmann::json& approval) {
+					return approval.value("approvalId", std::string{}) == approvalId;
+				});
+			context.Expect(recent.value("ok", false) && retained != approvals.end(),
+				"A later stateless resource request should find the exact resolved approval.");
+			if (retained != approvals.end())
+			{
+				const nlohmann::json dispatch = retained->value(
+					"dispatchResult", nlohmann::json(nullptr));
+				context.Expect(retained->value("requestId", std::string{}) == requestId
+						&& retained->value("capability", std::string{}) == "asset.prepare_delete"
+						&& retained->value("state", std::string{}) == "approved"
+						&& retained->value("approved", false)
+						&& retained->value("dispatchCompleted", false),
+					"The retained record should remain bound to the exact approved request and completed dispatch.");
+				context.Expect(dispatch.is_object()
+						&& dispatch.contains("ok")
+						&& dispatch.value("requestId", std::string{}) == requestId,
+					"The recent-approval resource should retain the handler's exact correlated response envelope.");
+			}
+
+			const nlohmann::json denied = bridge.CallTool(
+				"asset.prepare_delete", {{"path", "Assets/AlsoMissing.txt"}});
+			const std::string deniedId = denied["data"].value("approvalId", "");
+			context.Expect(bridge.ResolveApproval(deniedId, false),
+				"A denial should resolve without dispatching protected work.");
+			const nlohmann::json afterDenial = bridge.ReadResource("terraengine://approvals/recent");
+			const auto deniedApprovals = afterDenial.value("approvals", nlohmann::json::array());
+			const auto retainedDenial = std::find_if(deniedApprovals.begin(), deniedApprovals.end(),
+				[&deniedId](const nlohmann::json& approval) {
+					return approval.value("approvalId", std::string{}) == deniedId;
+				});
+			context.Expect(retainedDenial != deniedApprovals.end()
+					&& retainedDenial->value("state", std::string{}) == "denied"
+					&& retainedDenial->value("dispatchCompleted", false)
+					&& retainedDenial->value("dispatchResult", nlohmann::json::object()).is_null(),
+				"A denied approval should remain queryable without fabricating a protected-handler result.");
+		});
+
+		registry.Add("Editor.MCP.Safety.ApprovalSurvivesStatelessHttpDisconnect", [](TestContext& context) {
+			EditorMcpBridge bridge;
+			bridge.Initialize(nullptr);
+			bridge.SetEnabled(true);
+			bridge.SetWriteMode(WriteMode::WritesEnabled);
+			context.Expect(bridge.TryOnLocalClientConnected("http-json-rpc", "127.0.0.1"), "Enabled bridge should accept the loopback HTTP client.");
+
+			const nlohmann::json result = bridge.CallTool("asset.prepare_delete", {{"path", "Assets/Missing.txt"}});
+			const std::string approvalId = result["data"].value("approvalId", "");
+			bridge.OnLocalClientDisconnected("request complete");
+
+			context.ExpectEqual(result.value("status", std::string()), std::string("waiting_approval"), "HTTP tool call should return a pending approval.");
+			context.ExpectEqual(bridge.GetPendingApprovals().size(), static_cast<std::size_t>(1), "Closing one request socket must preserve its approval.");
+			context.Expect(bridge.ResolveApproval(approvalId, true), "The Preferences UI should resolve an approval after its request socket closes.");
+
+			const auto activity = bridge.GetRecentActivity(64);
+			const bool recordedApproval = std::any_of(activity.begin(), activity.end(), [](const auto& event) {
+				return event.message == "Approved request.";
+			});
+			const bool recordedExpiredBinding = std::any_of(activity.begin(), activity.end(), [](const auto& event) {
+				return event.message.find("Approval binding expired") != std::string::npos;
+			});
+			context.Expect(recordedApproval, "A resolved HTTP approval should execute through the approved path.");
+			context.Expect(!recordedExpiredBinding, "Ordinary HTTP disconnect must not masquerade as a successful but expired approval.");
+		});
+
+		registry.Add("Editor.MCP.Safety.DisableInvalidatesPendingApprovals", [](TestContext& context) {
+			EditorMcpBridge bridge;
+			bridge.Initialize(nullptr);
+			bridge.SetEnabled(true);
+			bridge.SetWriteMode(WriteMode::WritesEnabled);
+			context.Expect(bridge.TryOnLocalClientConnected("http-json-rpc", "127.0.0.1"), "Enabled bridge should accept the loopback HTTP client.");
+
+			const nlohmann::json result = bridge.CallTool("asset.prepare_delete", {{"path", "Assets/Missing.txt"}});
+			const std::string approvalId = result["data"].value("approvalId", "");
+			bridge.OnLocalClientDisconnected("request complete");
+			bridge.SetEnabled(false);
+
+			context.Expect(bridge.GetPendingApprovals().empty(), "Disabling the listener must cancel every pending approval.");
+			context.Expect(!bridge.ResolveApproval(approvalId, true), "An approval from a disabled listener session must not be reusable.");
+			bridge.SetEnabled(true);
+			context.Expect(!bridge.ResolveApproval(approvalId, true), "Re-enabling the listener must start a fresh approval session.");
+			context.Expect(bridge.ReadResource("terraengine://approvals/recent")
+					.value("approvals", nlohmann::json::array()).empty(),
+				"A fresh listener session must not expose retained results or cancellations from the prior security boundary.");
+		});
+
 		registry.Add("Editor.MCP.Safety.InvalidRequestsReturnContractErrors", [](TestContext& context) {
 			EditorMcpBridge bridge;
 			bridge.Initialize(nullptr);
@@ -241,6 +467,7 @@ namespace TerraEngine::EditorTests
 		registry.Add("Editor.MCP.Safety.QueuedRequestsCanBeCanceledBeforeUpdate", [](TestContext& context) {
 			EditorMcpBridge bridge;
 			bridge.Initialize(nullptr);
+			bridge.SetEnabled(true);
 			bridge.EnqueueRequest("object.create", {{"name", "Canceled"}});
 			const auto queued = bridge.GetQueuedRequests();
 			context.ExpectEqual(static_cast<std::size_t>(1), queued.size(), "Fixture should queue one request.");

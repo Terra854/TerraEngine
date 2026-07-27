@@ -14,6 +14,7 @@
 #include <string>
 
 #include "Core/Logger/Logger.h"
+#include "File Formats/TerraEngineAnimationFile.h"
 #include "File Formats/TerraEngineMeshFile.h"
 
 namespace
@@ -149,6 +150,792 @@ namespace
 		}
 
 		outRelativeOffset = relativeOffset;
+		return true;
+	}
+
+	bool RejectDeformableValidation(
+		AnimationResourceValidationResult& result,
+		TerraEngine::Animation::AnimationStatus status,
+		std::string code,
+		std::string message)
+	{
+		result.status = status;
+		result.diagnosticCode = std::move(code);
+		result.message = std::move(message);
+		return false;
+	}
+
+	bool ValidateDeformableFileRange(
+		std::span<const std::uint8_t> fileBytes,
+		std::uint64_t offset,
+		std::uint64_t size,
+		std::uint64_t extensionBegin,
+		std::uint64_t extensionEnd)
+	{
+		std::uint64_t end = 0U;
+		return TerraEngine::Animation::CheckedAdd(offset, size, end)
+			&& offset >= extensionBegin
+			&& end <= extensionEnd
+			&& end <= fileBytes.size();
+	}
+
+	template <typename Record>
+	bool ReadDeformableRecord(
+		std::span<const std::uint8_t> fileBytes,
+		std::uint64_t offset,
+		Record& record)
+	{
+		if (offset > fileBytes.size() || fileBytes.size() - static_cast<std::size_t>(offset) < sizeof(Record))
+		{
+			return false;
+		}
+		std::memcpy(&record, fileBytes.data() + static_cast<std::size_t>(offset), sizeof(Record));
+		return true;
+	}
+
+	bool ValidateDeformableMeshPayload(
+		std::span<const std::uint8_t> fileBytes,
+		const MeshHeader& meshHeader,
+		const std::filesystem::path& resolvedPath,
+		std::uint32_t expectedSkeletonJointCount,
+		TerraEngine::Animation::AnimationCompatibilityFingerprint expectedCompatibilityFingerprint,
+		bool requireDeformablePayload,
+		AnimationResourceValidationResult& result)
+	{
+		using TerraEngine::Animation::AnimationLimit;
+		using TerraEngine::Animation::AnimationStatus;
+		result = {};
+		result.assetType = AssetType::Mesh;
+		result.resolvedPath = resolvedPath;
+		result.fileSizeBytes = fileBytes.size();
+		result.detectedMajorVersion = meshHeader.version;
+		result.expectedCompatibilityFingerprint = expectedCompatibilityFingerprint;
+
+		const std::uint32_t metadataOffset = meshHeader.virtualGeometryReserved;
+		if (metadataOffset == 0U)
+		{
+			if (meshHeader.meshletSkinningDataOffset != 0U || meshHeader.meshletSkinningDataCount != 0U)
+			{
+				return RejectDeformableValidation(result, AnimationStatus::InvalidEnvelope,
+					"DeformableMetadataMissing",
+					"TEMF advertises skinning bytes without the required checked TDEF metadata. Reimport the skinned mesh.");
+			}
+			if (requireDeformablePayload)
+			{
+				return RejectDeformableValidation(result, AnimationStatus::InvalidType,
+					"StaticMeshIsNotDeformable",
+					"The TEMF is a valid static-mesh layout but has no deformable TDEF extension. Import a skinned mesh artifact.");
+			}
+			result.status = AnimationStatus::Ok;
+			result.diagnosticCode = "StaticMeshCompatible";
+			result.message = "The static TEMF v1 payload remains compatible and contains no deformable extension.";
+			return true;
+		}
+
+		if ((metadataOffset % kMeshletVertexDataAlignmentBytes) != 0U)
+		{
+			return RejectDeformableValidation(result, AnimationStatus::InvalidEnvelope,
+				"DeformableMetadataMisaligned",
+				"The TDEF metadata offset is not aligned to the TEMF payload boundary. Recook the mesh.");
+		}
+
+		DeformableMeshPayloadHeader metadata{};
+		if (!ReadDeformableRecord(fileBytes, metadataOffset, metadata))
+		{
+			return RejectDeformableValidation(result, AnimationStatus::TruncatedInput,
+				"DeformableHeaderTruncated",
+				"The TDEF header range is outside the TEMF file. Restore or recook the mesh.");
+		}
+		result.detectedMinorVersion = metadata.version;
+		result.deformableVertexCount = metadata.skinningVertexCount;
+		result.palettePartitionCount = metadata.palettePartitionCount;
+		result.morphTargetCount = metadata.morphTargetCount;
+		result.sourceSkeletonJointCount = metadata.sourceSkeletonJointCount;
+
+		if (metadata.magic != kDeformableMeshPayloadMagicValue)
+		{
+			return RejectDeformableValidation(result, AnimationStatus::InvalidEnvelope,
+				"DeformableMagicMismatch",
+				"The appended deformable payload does not begin with the TDEF magic. Recook the mesh.");
+		}
+		if (metadata.version != kDeformableMeshPayloadVersion)
+		{
+			return RejectDeformableValidation(result, AnimationStatus::UnsupportedMajorVersion,
+				"DeformableVersionUnsupported",
+				"The TDEF payload version is not supported by this runtime. Recook it with the current editor.");
+		}
+		if (metadata.headerSize != sizeof(DeformableMeshPayloadHeader)
+			|| metadata.payloadSize < sizeof(DeformableMeshPayloadHeader)
+			|| metadata.compatibleMeshVersion != meshHeader.version
+			|| metadata.reserved != 0U)
+		{
+			return RejectDeformableValidation(result, AnimationStatus::InvalidEnvelope,
+				"DeformableHeaderInvalid",
+				"The TDEF header size, reserved field, or compatible TEMF version is invalid. Recook the mesh.");
+		}
+		result.actualCompatibilityFingerprint = metadata.skeletonCompatibilityFingerprint;
+		result.compatibilityFingerprintPresent = metadata.skeletonCompatibilityFingerprint != 0U;
+		if (expectedCompatibilityFingerprint != 0U
+			&& metadata.skeletonCompatibilityFingerprint != expectedCompatibilityFingerprint)
+		{
+			return RejectDeformableValidation(result, AnimationStatus::IncompatibleAsset,
+				"DeformableSkeletonFingerprintMismatch",
+				"The TDEF payload was cooked against a different skeleton generation. Reimport the complete package atomically.");
+		}
+
+		std::uint64_t extensionEnd = 0U;
+		if (!TerraEngine::Animation::CheckedAdd(metadataOffset, metadata.payloadSize, extensionEnd)
+			|| extensionEnd > fileBytes.size())
+		{
+			return RejectDeformableValidation(result, AnimationStatus::RangeOutOfBounds,
+				"DeformablePayloadRangeInvalid",
+				"The declared TDEF payload extends beyond the TEMF file. Restore or recook the mesh.");
+		}
+		if (metadata.skinningVertexCount == 0U
+			|| metadata.skinningVertexCount != meshHeader.meshletVertexCount
+			|| metadata.skinningVertexCount != meshHeader.meshletSkinningDataCount
+			|| metadata.vertexPaletteIndexCount != metadata.skinningVertexCount
+			|| metadata.palettePartitionCount == 0U
+			|| metadata.palettePartitionCount > metadata.skinningVertexCount)
+		{
+			return RejectDeformableValidation(result, AnimationStatus::InvalidArgument,
+				"DeformableCountMismatch",
+				"Skinning, vertex-palette, or palette-partition counts disagree with the base TEMF vertex count. Recook the mesh.");
+		}
+		if (metadata.sourceSkeletonJointCount == 0U
+			|| TerraEngine::Animation::ValidateAnimationHardLimit(
+				AnimationLimit::SkeletonJoints, metadata.sourceSkeletonJointCount) != AnimationStatus::Ok
+			|| TerraEngine::Animation::ValidateAnimationHardLimit(
+				AnimationLimit::MeshMorphTargets, metadata.morphTargetCount) != AnimationStatus::Ok)
+		{
+			return RejectDeformableValidation(result, AnimationStatus::HardLimitExceeded,
+				"DeformableHardLimitExceeded",
+				"The source skeleton or morph-target count exceeds the frozen runtime hard limit. Split the asset before import.");
+		}
+		if (expectedSkeletonJointCount != 0U
+			&& metadata.sourceSkeletonJointCount != expectedSkeletonJointCount)
+		{
+			return RejectDeformableValidation(result, AnimationStatus::IncompatibleAsset,
+				"DeformableSkeletonJointCountMismatch",
+				"The deformable mesh was cooked against a different skeleton joint count. Reimport the package atomically.");
+		}
+		if (metadata.skinningStrideBytes != kDeformableMeshSkinningStrideBytes
+			|| metadata.maximumInfluences != kDeformableMeshMaximumInfluences
+			|| metadata.maximumPaletteJoints != kDeformableMeshMaximumPaletteJoints)
+		{
+			return RejectDeformableValidation(result, AnimationStatus::IncompatibleAsset,
+				"DeformableLayoutIncompatible",
+				"The skinning stride, retained-influence count, or palette limit does not match the runtime layout.");
+		}
+
+		constexpr std::uint32_t knownFlags = kDeformableMeshPayloadFlagConservativeMorphEnvelope
+			| kDeformableMeshPayloadFlagZeroWeightMeansIdentity
+			| kDeformableMeshPayloadFlagVertexPaletteIndices
+			| kDeformableMeshPayloadFlagDenseMorphPositionDeltas;
+		constexpr std::uint32_t requiredVirtualFlags = kDeformableMeshVirtualGeometryFlagWholeMeshEnvelope
+			| kDeformableMeshVirtualGeometryFlagDisableUnprovenConeCulling
+			| kDeformableMeshVirtualGeometryFlagRequireCompleteFallback;
+		if (metadata.flags != knownFlags || metadata.virtualGeometryDeformationFlags != requiredVirtualFlags)
+		{
+			return RejectDeformableValidation(result, AnimationStatus::UnknownRequiredChunk,
+				"DeformableFlagsUnsupported",
+				"Required identity, morph-envelope, palette, or fail-open virtual-geometry rules are missing or unknown.");
+		}
+		for (std::size_t component = 0U; component < 3U; ++component)
+		{
+			if (!std::isfinite(metadata.deformationBoundsMin[component])
+				|| !std::isfinite(metadata.deformationBoundsMax[component])
+				|| metadata.deformationBoundsMin[component] > metadata.deformationBoundsMax[component])
+			{
+				return RejectDeformableValidation(result, AnimationStatus::InvalidArgument,
+					"DeformableEnvelopeInvalid",
+					"The conservative deformation envelope contains a non-finite or inverted axis. Recook the mesh.");
+			}
+		}
+
+		std::uint64_t expectedSkinningBytes = 0U;
+		if (!TerraEngine::Animation::CheckedMultiply(
+			metadata.skinningVertexCount, kDeformableMeshSkinningStrideBytes, expectedSkinningBytes)
+			|| metadata.skinningDataSize != expectedSkinningBytes
+			|| metadata.skinningDataOffset != meshHeader.meshletSkinningDataOffset)
+		{
+			return RejectDeformableValidation(result, AnimationStatus::RangeOverflow,
+				"DeformableSkinningRangeInvalid",
+				"The 8-byte-per-vertex skinning stream size or base-header offset is inconsistent.");
+		}
+		std::uint64_t skinningEnd = 0U;
+		if (!TerraEngine::Animation::CheckedAdd(metadata.skinningDataOffset, metadata.skinningDataSize, skinningEnd)
+			|| skinningEnd > fileBytes.size() || skinningEnd > metadataOffset)
+		{
+			return RejectDeformableValidation(result, AnimationStatus::RangeOutOfBounds,
+				"DeformableSkinningOutOfBounds",
+				"The skinning stream is outside the file or overlaps the TDEF metadata.");
+		}
+
+		std::uint64_t paletteTableBytes = 0U;
+		std::uint64_t morphTableBytes = 0U;
+		if (!TerraEngine::Animation::CheckedMultiply(metadata.palettePartitionCount,
+				sizeof(DeformableMeshPaletteRecord), paletteTableBytes)
+			|| !TerraEngine::Animation::CheckedMultiply(metadata.morphTargetCount,
+				sizeof(DeformableMeshMorphRecord), morphTableBytes))
+		{
+			return RejectDeformableValidation(result, AnimationStatus::RangeOverflow,
+				"DeformableTableSizeOverflow",
+				"A deformable table byte count overflowed checked arithmetic.");
+		}
+		const std::uint64_t expectedPaletteTableOffset = static_cast<std::uint64_t>(metadataOffset) + metadata.headerSize;
+		const std::uint64_t expectedMorphTableOffset = expectedPaletteTableOffset + paletteTableBytes;
+		if (metadata.paletteTableOffset != expectedPaletteTableOffset
+			|| metadata.morphTableOffset != expectedMorphTableOffset
+			|| !ValidateDeformableFileRange(fileBytes, metadata.paletteTableOffset, paletteTableBytes, metadataOffset, extensionEnd)
+			|| !ValidateDeformableFileRange(fileBytes, metadata.morphTableOffset, morphTableBytes, metadataOffset, extensionEnd))
+		{
+			return RejectDeformableValidation(result, AnimationStatus::RangeOutOfBounds,
+				"DeformableTableRangeInvalid",
+				"Palette or morph records are not in their canonical checked TDEF table ranges.");
+		}
+
+		std::vector<DeformableMeshPaletteRecord> palettes(metadata.palettePartitionCount);
+		if (!palettes.empty())
+		{
+			std::memcpy(palettes.data(), fileBytes.data() + metadata.paletteTableOffset,
+				static_cast<std::size_t>(paletteTableBytes));
+		}
+		std::vector<DeformableMeshMorphRecord> morphs(metadata.morphTargetCount);
+		if (!morphs.empty())
+		{
+			std::memcpy(morphs.data(), fileBytes.data() + metadata.morphTableOffset,
+				static_cast<std::size_t>(morphTableBytes));
+		}
+
+		using ByteRange = std::pair<std::uint64_t, std::uint64_t>;
+		std::vector<ByteRange> variableRanges;
+		variableRanges.reserve(palettes.size() + morphs.size() + 1U);
+		for (std::size_t paletteIndex = 0U; paletteIndex < palettes.size(); ++paletteIndex)
+		{
+			const DeformableMeshPaletteRecord& palette = palettes[paletteIndex];
+			std::uint64_t jointBytes = 0U;
+			if (palette.jointCount == 0U || palette.jointCount > kDeformableMeshMaximumPaletteJoints
+				|| !TerraEngine::Animation::CheckedMultiply(palette.jointCount, sizeof(std::uint32_t), jointBytes)
+				|| !ValidateDeformableFileRange(fileBytes, palette.jointTableOffset, jointBytes,
+					metadataOffset, extensionEnd))
+			{
+				return RejectDeformableValidation(result, AnimationStatus::RangeOutOfBounds,
+					"DeformablePaletteRangeInvalid",
+					"A palette is empty, exceeds 256 joints, or points outside the TDEF payload.");
+			}
+			variableRanges.emplace_back(palette.jointTableOffset, palette.jointTableOffset + jointBytes);
+			std::uint32_t previousJoint = 0U;
+			for (std::uint32_t jointIndex = 0U; jointIndex < palette.jointCount; ++jointIndex)
+			{
+				std::uint32_t sourceJoint = 0U;
+				std::memcpy(&sourceJoint,
+					fileBytes.data() + palette.jointTableOffset + static_cast<std::size_t>(jointIndex) * sizeof(sourceJoint),
+					sizeof(sourceJoint));
+				if (sourceJoint >= metadata.sourceSkeletonJointCount
+					|| (jointIndex != 0U && sourceJoint <= previousJoint))
+				{
+					return RejectDeformableValidation(result, AnimationStatus::IncompatibleAsset,
+						"DeformablePaletteJointInvalid",
+						"Palette source-joint IDs must be strictly ordered and within the source skeleton.");
+				}
+				previousJoint = sourceJoint;
+			}
+		}
+
+		std::uint64_t vertexPaletteBytes = 0U;
+		if (!TerraEngine::Animation::CheckedMultiply(metadata.vertexPaletteIndexCount,
+				sizeof(std::uint32_t), vertexPaletteBytes)
+			|| !ValidateDeformableFileRange(fileBytes, metadata.vertexPaletteIndexOffset,
+				vertexPaletteBytes, metadataOffset, extensionEnd))
+		{
+			return RejectDeformableValidation(result, AnimationStatus::RangeOutOfBounds,
+				"DeformableVertexPaletteRangeInvalid",
+				"The per-vertex palette-index table points outside the TDEF payload.");
+		}
+		variableRanges.emplace_back(metadata.vertexPaletteIndexOffset,
+			static_cast<std::uint64_t>(metadata.vertexPaletteIndexOffset) + vertexPaletteBytes);
+
+		std::uint32_t previousMorphId = 0U;
+		for (std::size_t morphIndex = 0U; morphIndex < morphs.size(); ++morphIndex)
+		{
+			const DeformableMeshMorphRecord& morph = morphs[morphIndex];
+			std::uint64_t morphBytes = 0U;
+			if (morph.stableTargetId == 0U
+				|| (morphIndex != 0U && morph.stableTargetId <= previousMorphId)
+				|| morph.positionDeltaCount != metadata.skinningVertexCount
+				|| morph.positionDeltaStrideBytes != sizeof(float) * 3U
+				|| morph.flags != kDeformableMeshPayloadFlagDenseMorphPositionDeltas
+				|| !TerraEngine::Animation::CheckedMultiply(
+					morph.positionDeltaCount, morph.positionDeltaStrideBytes, morphBytes)
+				|| !ValidateDeformableFileRange(fileBytes, morph.positionDeltaOffset,
+					morphBytes, metadataOffset, extensionEnd))
+			{
+				return RejectDeformableValidation(result, AnimationStatus::RangeOutOfBounds,
+					"DeformableMorphRangeInvalid",
+					"A morph target has an unstable ID, incompatible dense layout, or out-of-range delta stream.");
+			}
+			previousMorphId = morph.stableTargetId;
+			variableRanges.emplace_back(morph.positionDeltaOffset,
+				static_cast<std::uint64_t>(morph.positionDeltaOffset) + morphBytes);
+			for (std::uint32_t vertexIndex = 0U; vertexIndex < morph.positionDeltaCount; ++vertexIndex)
+			{
+				float delta[3]{};
+				std::memcpy(delta,
+					fileBytes.data() + morph.positionDeltaOffset
+						+ static_cast<std::size_t>(vertexIndex) * morph.positionDeltaStrideBytes,
+					sizeof(delta));
+				if (!std::isfinite(delta[0]) || !std::isfinite(delta[1]) || !std::isfinite(delta[2]))
+				{
+					return RejectDeformableValidation(result, AnimationStatus::InvalidArgument,
+						"DeformableMorphDeltaInvalid",
+						"A morph delta contains a non-finite component. Recook the source mesh.");
+				}
+			}
+		}
+
+		std::sort(variableRanges.begin(), variableRanges.end());
+		std::uint64_t expectedVariableOffset = expectedMorphTableOffset + morphTableBytes;
+		for (const ByteRange& range : variableRanges)
+		{
+			if (range.first != expectedVariableOffset || range.second < range.first)
+			{
+				return RejectDeformableValidation(result, AnimationStatus::InvalidChunk,
+					"DeformableRangesOverlapOrGap",
+					"TDEF variable tables overlap or contain an unrecorded gap. Recook the mesh deterministically.");
+			}
+			expectedVariableOffset = range.second;
+		}
+		if (expectedVariableOffset != extensionEnd)
+		{
+			return RejectDeformableValidation(result, AnimationStatus::InvalidChunk,
+				"DeformablePayloadSizeMismatch",
+				"The TDEF payload size includes unclaimed bytes or truncates a recorded stream.");
+		}
+
+		for (std::uint32_t vertexIndex = 0U; vertexIndex < metadata.skinningVertexCount; ++vertexIndex)
+		{
+			std::uint32_t paletteIndex = 0U;
+			std::memcpy(&paletteIndex,
+				fileBytes.data() + metadata.vertexPaletteIndexOffset
+					+ static_cast<std::size_t>(vertexIndex) * sizeof(paletteIndex),
+				sizeof(paletteIndex));
+			if (paletteIndex >= palettes.size())
+			{
+				return RejectDeformableValidation(result, AnimationStatus::RangeOutOfBounds,
+					"DeformableVertexPaletteInvalid",
+					"A vertex references a palette partition outside the validated palette table.");
+			}
+
+			const std::uint8_t* skinning = fileBytes.data() + metadata.skinningDataOffset
+				+ static_cast<std::size_t>(vertexIndex) * kDeformableMeshSkinningStrideBytes;
+			std::uint32_t weightSum = 0U;
+			for (std::size_t influence = 0U; influence < kDeformableMeshMaximumInfluences; ++influence)
+			{
+				const std::uint8_t localJoint = skinning[influence];
+				const std::uint8_t weight = skinning[4U + influence];
+				weightSum += weight;
+				if ((weight != 0U && localJoint >= palettes[paletteIndex].jointCount)
+					|| (weight == 0U && localJoint != 0U))
+				{
+					return RejectDeformableValidation(result, AnimationStatus::RangeOutOfBounds,
+						"DeformableInfluenceInvalid",
+						"A retained influence references a joint outside its palette or uses a non-canonical zero-weight joint.");
+				}
+			}
+			if (weightSum == 0U)
+			{
+				++result.zeroWeightIdentityVertexCount;
+				continue;
+			}
+			if (weightSum != 255U)
+			{
+				return RejectDeformableValidation(result, AnimationStatus::InvalidArgument,
+					"DeformableWeightNormalizationInvalid",
+					"Non-identity UNORM8 weights must sum exactly to 255. Recook the mesh to restore deterministic normalization.");
+			}
+		}
+		if (result.zeroWeightIdentityVertexCount != metadata.skinningVertexCount
+			&& metadata.skeletonCompatibilityFingerprint == 0U)
+		{
+			return RejectDeformableValidation(result, AnimationStatus::IncompatibleAsset,
+				"DeformableSkeletonFingerprintMissing",
+				"A TDEF payload with nonzero skin weights must identify its compatible cooked skeleton generation. Reimport the package.");
+		}
+
+		result.status = AnimationStatus::Ok;
+		result.diagnosticCode = "DeformableMeshValid";
+		result.message = "The TEMF/TDEF magic, versions, counts, checked ranges, palette joints, morphs, conservative envelope, and zero-weight identity records are valid.";
+		return true;
+	}
+
+	bool ValidateDeformableVirtualGeometrySidecar(
+		std::span<const std::uint8_t> fileBytes,
+		const MeshHeader& meshHeader,
+		const std::filesystem::path& resolvedPath,
+		AnimationResourceValidationResult& result)
+	{
+		// TDFV is intentionally outside TDEF v1's payloadSize. A TDEF-only file
+		// therefore remains loadable, while a file that advertises a sidecar must
+		// validate every byte before any runtime Mesh state receives its records.
+		const std::uint32_t tdefOffset = meshHeader.virtualGeometryReserved;
+		if (tdefOffset == 0U)
+		{
+			// Ordinary static TEMF files have no TDEF boundary and therefore cannot
+			// advertise TDFV. Preserve their historical load path unchanged.
+			return true;
+		}
+		DeformableMeshPayloadHeader tdef{};
+		if (!ReadDeformableRecord(fileBytes, tdefOffset, tdef))
+		{
+			return RejectDeformableValidation(result, TerraEngine::Animation::AnimationStatus::TruncatedInput,
+				"DeformableSidecarBaseHeaderMissing",
+				"The checked TDEF header disappeared before virtual-geometry metadata could be validated.");
+		}
+		std::uint64_t sidecarOffset = 0U;
+		if (!TerraEngine::Animation::CheckedAdd(tdefOffset, tdef.payloadSize, sidecarOffset)
+			|| sidecarOffset > fileBytes.size())
+		{
+			return RejectDeformableValidation(result, TerraEngine::Animation::AnimationStatus::RangeOutOfBounds,
+				"DeformableSidecarOffsetInvalid",
+				"The TDEF payload does not leave a valid boundary for optional cluster metadata.");
+		}
+		if (sidecarOffset == fileBytes.size())
+		{
+			// Legacy TDEF v1 remains safe; it simply has no cluster-local proof and
+			// downstream deformation code must retain its conservative fallback.
+			return true;
+		}
+
+		DeformableVirtualGeometrySidecarHeader sidecar{};
+		if (!ReadDeformableRecord(fileBytes, sidecarOffset, sidecar)
+			|| sidecar.magic != kDeformableVirtualGeometrySidecarMagicValue
+			|| sidecar.version != kDeformableVirtualGeometrySidecarVersion
+			|| sidecar.headerSize != sizeof(DeformableVirtualGeometrySidecarHeader)
+			|| sidecar.flags != kDeformableVirtualGeometrySidecarFlagDerivedFromClusters
+			|| sidecar.payloadSize < sizeof(DeformableVirtualGeometrySidecarHeader)
+			|| sidecar.clusterCount == 0U || sidecar.paletteIndexCount == 0U
+			|| sidecar.morphTargetCount != tdef.morphTargetCount
+			|| sidecar.morphVertexStrideBytes != sizeof(DeformableVirtualGeometryMorphVertex))
+		{
+			return RejectDeformableValidation(result, TerraEngine::Animation::AnimationStatus::InvalidEnvelope,
+				"DeformableVirtualGeometrySidecarInvalid",
+				"The optional TDFV header is malformed, unsupported, or omits required cluster coverage.");
+		}
+		std::uint64_t sidecarEnd = 0U;
+		if (!TerraEngine::Animation::CheckedAdd(sidecarOffset, sidecar.payloadSize, sidecarEnd)
+			|| sidecarEnd != fileBytes.size())
+		{
+			return RejectDeformableValidation(result, TerraEngine::Animation::AnimationStatus::RangeOutOfBounds,
+				"DeformableVirtualGeometrySidecarRangeInvalid",
+				"The TDFV range is truncated or contains unclaimed trailing bytes.");
+		}
+		std::uint64_t clusterBytes = 0U;
+		std::uint64_t paletteBytes = 0U;
+		std::uint64_t morphTableBytes = 0U;
+		std::uint64_t morphVertexBytes = 0U;
+		if (!TerraEngine::Animation::CheckedMultiply(sidecar.clusterCount,
+				sizeof(DeformableVirtualGeometryClusterRecord), clusterBytes)
+			|| !TerraEngine::Animation::CheckedMultiply(sidecar.paletteIndexCount,
+				sizeof(std::uint32_t), paletteBytes)
+			|| !TerraEngine::Animation::CheckedMultiply(sidecar.morphTargetCount,
+				sizeof(DeformableVirtualGeometryMorphRecord), morphTableBytes)
+			|| !TerraEngine::Animation::CheckedMultiply(
+				static_cast<std::uint64_t>(sidecar.morphTargetCount) * tdef.skinningVertexCount,
+				sizeof(DeformableVirtualGeometryMorphVertex), morphVertexBytes))
+		{
+			return RejectDeformableValidation(result, TerraEngine::Animation::AnimationStatus::RangeOverflow,
+				"DeformableVirtualGeometrySidecarSizeOverflow",
+				"A TDFV table count overflowed checked arithmetic.");
+		}
+		const std::uint64_t expectedClusterOffset = sidecarOffset + sidecar.headerSize;
+		const std::uint64_t expectedPaletteOffset = expectedClusterOffset + clusterBytes;
+		const std::uint64_t expectedMorphTableOffset = expectedPaletteOffset + paletteBytes;
+		const std::uint64_t expectedMorphVertexDataOffset = expectedMorphTableOffset + morphTableBytes;
+		if (sidecar.clusterTableOffset != expectedClusterOffset
+			|| sidecar.paletteIndexTableOffset != expectedPaletteOffset
+			|| sidecar.morphTableOffset != (sidecar.morphTargetCount == 0U ? 0U : expectedMorphTableOffset)
+			|| sidecar.morphVertexDataOffset != (sidecar.morphTargetCount == 0U ? 0U : expectedMorphVertexDataOffset)
+			|| !ValidateDeformableFileRange(fileBytes, sidecar.clusterTableOffset, clusterBytes, sidecarOffset, sidecarEnd)
+			|| !ValidateDeformableFileRange(fileBytes, sidecar.paletteIndexTableOffset, paletteBytes, sidecarOffset, sidecarEnd)
+			|| (sidecar.morphTargetCount != 0U
+				&& (!ValidateDeformableFileRange(fileBytes, sidecar.morphTableOffset, morphTableBytes, sidecarOffset, sidecarEnd)
+					|| !ValidateDeformableFileRange(fileBytes, sidecar.morphVertexDataOffset, morphVertexBytes, sidecarOffset, sidecarEnd)))
+			|| expectedMorphVertexDataOffset + morphVertexBytes != sidecarEnd)
+		{
+			return RejectDeformableValidation(result, TerraEngine::Animation::AnimationStatus::RangeOutOfBounds,
+				"DeformableVirtualGeometrySidecarTableInvalid",
+				"TDFV cluster or palette ranges are not the canonical contiguous payload tables.");
+		}
+
+		std::vector<DeformableVirtualGeometryClusterRecord> clusters(sidecar.clusterCount);
+		std::vector<std::uint32_t> paletteIndices(sidecar.paletteIndexCount);
+		std::vector<DeformableVirtualGeometryMorphRecord> morphs(sidecar.morphTargetCount);
+		std::memcpy(clusters.data(), fileBytes.data() + sidecar.clusterTableOffset, static_cast<std::size_t>(clusterBytes));
+		std::memcpy(paletteIndices.data(), fileBytes.data() + sidecar.paletteIndexTableOffset, static_cast<std::size_t>(paletteBytes));
+		if (!morphs.empty())
+		{
+			std::memcpy(morphs.data(), fileBytes.data() + sidecar.morphTableOffset, static_cast<std::size_t>(morphTableBytes));
+		}
+		std::uint32_t expectedClusterPaletteOffset = sidecar.paletteIndexTableOffset;
+		constexpr std::uint32_t requiredClusterFlags = kDeformableVirtualGeometryClusterFlagActive
+			| kDeformableVirtualGeometryClusterFlagFallbackCoverageComplete;
+		for (std::uint32_t clusterIndex = 0U; clusterIndex < sidecar.clusterCount; ++clusterIndex)
+		{
+			const DeformableVirtualGeometryClusterRecord& cluster = clusters[clusterIndex];
+			std::uint64_t clusterPaletteBytes = 0U;
+			if (cluster.clusterId != clusterIndex
+				|| cluster.paletteIndexCount == 0U
+				|| cluster.morphTargetCount != sidecar.morphTargetCount
+				|| (cluster.flags & ~kDeformableVirtualGeometryClusterFlagAll) != 0U
+				|| (cluster.flags & requiredClusterFlags) != requiredClusterFlags
+				|| (cluster.flags & (kDeformableVirtualGeometryClusterFlagDynamicBoundsValid
+					| kDeformableVirtualGeometryClusterFlagConeCullingSafe
+					| kDeformableVirtualGeometryClusterFlagHiZCullingSafe)) != 0U
+				|| ((cluster.flags & kDeformableVirtualGeometryClusterFlagFrustumCullingSafe) != 0U
+					&& (cluster.flags & kDeformableVirtualGeometryClusterFlagConservativeEnvelopeValid) == 0U)
+				|| !std::isfinite(cluster.geometricError) || cluster.geometricError < 0.0F
+				|| !std::isfinite(cluster.deformationError) || cluster.deformationError < 0.0F
+				|| !TerraEngine::Animation::CheckedMultiply(cluster.paletteIndexCount, sizeof(std::uint32_t), clusterPaletteBytes)
+				|| cluster.paletteIndexOffset != expectedClusterPaletteOffset
+				|| !ValidateDeformableFileRange(fileBytes, cluster.paletteIndexOffset, clusterPaletteBytes, sidecarOffset, sidecarEnd))
+			{
+				return RejectDeformableValidation(result, TerraEngine::Animation::AnimationStatus::InvalidChunk,
+					"DeformableVirtualGeometryClusterInvalid",
+					"A TDFV cluster has invalid proof flags, palette coverage, or deformation error metadata.");
+			}
+			for (std::size_t axis = 0U; axis < 3U; ++axis)
+			{
+				if (!std::isfinite(cluster.deformationBoundsMin[axis])
+					|| !std::isfinite(cluster.deformationBoundsMax[axis])
+					|| cluster.deformationBoundsMin[axis] > cluster.deformationBoundsMax[axis])
+				{
+					return RejectDeformableValidation(result, TerraEngine::Animation::AnimationStatus::InvalidArgument,
+						"DeformableVirtualGeometryEnvelopeInvalid",
+						"A TDFV cluster deformation envelope contains a non-finite or inverted axis.");
+				}
+			}
+			const std::size_t paletteBegin = static_cast<std::size_t>(cluster.paletteIndexOffset - sidecar.paletteIndexTableOffset) / sizeof(std::uint32_t);
+			std::uint32_t previousPalette = 0U;
+			for (std::uint32_t paletteOffset = 0U; paletteOffset < cluster.paletteIndexCount; ++paletteOffset)
+			{
+				const std::uint32_t palette = paletteIndices[paletteBegin + paletteOffset];
+				if (palette >= tdef.palettePartitionCount || (paletteOffset != 0U && palette <= previousPalette))
+				{
+					return RejectDeformableValidation(result, TerraEngine::Animation::AnimationStatus::RangeOutOfBounds,
+						"DeformableVirtualGeometryPaletteInvalid",
+						"A TDFV cluster references an unknown or non-deterministically ordered TDEF palette.");
+				}
+				previousPalette = palette;
+			}
+			expectedClusterPaletteOffset += static_cast<std::uint32_t>(clusterPaletteBytes);
+		}
+		for (std::uint32_t morphIndex = 0U; morphIndex < sidecar.morphTargetCount; ++morphIndex)
+		{
+			const DeformableVirtualGeometryMorphRecord& morph = morphs[morphIndex];
+			const std::uint64_t expectedOffset = expectedMorphVertexDataOffset
+				+ static_cast<std::uint64_t>(morphIndex) * tdef.skinningVertexCount * sizeof(DeformableVirtualGeometryMorphVertex);
+			if (morph.stableTargetId == 0U
+				|| morph.vertexDataOffset != expectedOffset
+				|| morph.vertexCount != tdef.skinningVertexCount
+				|| morph.vertexStrideBytes != sizeof(DeformableVirtualGeometryMorphVertex)
+				|| (morph.flags & ~(
+					kDeformableVirtualGeometryMorphFlagPosition
+					| kDeformableVirtualGeometryMorphFlagNormal
+					| kDeformableVirtualGeometryMorphFlagTangent)) != 0U
+				|| (morph.flags & kDeformableVirtualGeometryMorphFlagPosition) == 0U)
+			{
+				return RejectDeformableValidation(result, TerraEngine::Animation::AnimationStatus::InvalidChunk,
+					"DeformableVirtualGeometryMorphRecordInvalid",
+					"A TDFV morph target does not use the required target-major 48-byte GPU record layout.");
+			}
+			for (std::uint32_t vertexIndex = 0U; vertexIndex < morph.vertexCount; ++vertexIndex)
+			{
+				DeformableVirtualGeometryMorphVertex vertex{};
+				std::memcpy(&vertex, fileBytes.data() + morph.vertexDataOffset
+					+ static_cast<std::size_t>(vertexIndex) * sizeof(vertex), sizeof(vertex));
+				for (float value : vertex.positionDelta)
+				{
+					if (!std::isfinite(value)) return RejectDeformableValidation(result, TerraEngine::Animation::AnimationStatus::InvalidArgument, "DeformableVirtualGeometryMorphValueInvalid", "A TDFV position delta is non-finite.");
+				}
+				if (vertex.positionDelta[3] != 0.0F)
+				{
+					return RejectDeformableValidation(result, TerraEngine::Animation::AnimationStatus::InvalidArgument, "DeformableVirtualGeometryMorphPaddingInvalid", "A TDFV position float4 must keep its padding component at zero.");
+				}
+				for (float value : vertex.normalDelta)
+				{
+					if (!std::isfinite(value)) return RejectDeformableValidation(result, TerraEngine::Animation::AnimationStatus::InvalidArgument, "DeformableVirtualGeometryMorphValueInvalid", "A TDFV normal delta is non-finite.");
+				}
+				for (float value : vertex.tangentDelta)
+				{
+					if (!std::isfinite(value)) return RejectDeformableValidation(result, TerraEngine::Animation::AnimationStatus::InvalidArgument, "DeformableVirtualGeometryMorphValueInvalid", "A TDFV tangent delta is non-finite.");
+				}
+				if (vertex.normalDelta[3] != 0.0F || vertex.tangentDelta[3] != 0.0F
+					|| ((morph.flags & kDeformableVirtualGeometryMorphFlagNormal) == 0U
+						&& (vertex.normalDelta[0] != 0.0F || vertex.normalDelta[1] != 0.0F || vertex.normalDelta[2] != 0.0F))
+					|| ((morph.flags & kDeformableVirtualGeometryMorphFlagTangent) == 0U
+						&& (vertex.tangentDelta[0] != 0.0F || vertex.tangentDelta[1] != 0.0F || vertex.tangentDelta[2] != 0.0F)))
+				{
+					return RejectDeformableValidation(result, TerraEngine::Animation::AnimationStatus::InvalidArgument, "DeformableVirtualGeometryMorphPaddingInvalid", "Absent morph channels and float4 padding must be encoded as zero.");
+				}
+			}
+		}
+
+		if ((meshHeader.meshletFlags & kMeshletHeaderFlagHasVirtualGeometry) != 0U)
+		{
+			VirtualGeometryHeader virtualHeader{};
+			if (!ReadDeformableRecord(fileBytes, meshHeader.virtualGeometryHeaderOffset, virtualHeader)
+				|| virtualHeader.headerSize != sizeof(VirtualGeometryHeader)
+				|| virtualHeader.clusterCount != sidecar.clusterCount)
+			{
+				return RejectDeformableValidation(result, TerraEngine::Animation::AnimationStatus::IncompatibleAsset,
+					"DeformableVirtualGeometryClusterCountMismatch",
+					"TDFV cluster coverage does not match the immutable virtual-geometry cluster table.");
+			}
+			std::uint64_t sourceClusterBytes = 0U;
+			if (!TerraEngine::Animation::CheckedMultiply(virtualHeader.clusterCount, sizeof(VirtualGeometryClusterRecord), sourceClusterBytes)
+				|| !ValidateDeformableFileRange(fileBytes, virtualHeader.clusterTableOffset, sourceClusterBytes, 0U, fileBytes.size()))
+			{
+				return RejectDeformableValidation(result, TerraEngine::Animation::AnimationStatus::RangeOutOfBounds,
+					"DeformableVirtualGeometrySourceClusterRangeInvalid",
+					"The virtual-geometry cluster table cannot be checked against TDFV metadata.");
+			}
+			for (std::uint32_t index = 0U; index < sidecar.clusterCount; ++index)
+			{
+				VirtualGeometryClusterRecord sourceCluster{};
+				std::memcpy(&sourceCluster, fileBytes.data() + virtualHeader.clusterTableOffset
+					+ static_cast<std::size_t>(index) * sizeof(sourceCluster), sizeof(sourceCluster));
+				if (sourceCluster.clusterId != clusters[index].clusterId
+					|| sourceCluster.fallbackClusterId != clusters[index].fallbackClusterId
+					|| sourceCluster.parentClusterId != clusters[index].parentClusterId
+					|| sourceCluster.firstChildClusterId != clusters[index].firstChildClusterId
+					|| sourceCluster.childCount != clusters[index].childCount
+					|| sourceCluster.geometricError != clusters[index].geometricError)
+				{
+					return RejectDeformableValidation(result, TerraEngine::Animation::AnimationStatus::IncompatibleAsset,
+						"DeformableVirtualGeometryClusterBindingMismatch",
+						"TDFV records no longer match the cluster hierarchy or geometric errors they were cooked against.");
+				}
+			}
+		}
+		else if (sidecar.clusterCount != 1U || clusters.front().fallbackClusterId != 0U
+			|| clusters.front().parentClusterId != kVirtualGeometryInvalidIndex)
+		{
+			return RejectDeformableValidation(result, TerraEngine::Animation::AnimationStatus::InvalidChunk,
+				"DeformableVirtualGeometryFallbackRecordInvalid",
+				"A non-virtual mesh must use one deterministic complete-coverage TDFV fallback record.");
+		}
+		return true;
+	}
+
+	bool CopyValidatedDeformableRuntimeMetadata(
+		std::span<const std::uint8_t> fileBytes,
+		const MeshHeader& meshHeader,
+		Mesh& mesh)
+	{
+		// ValidateDeformableMeshPayload has already proven every count and byte
+		// range before this helper runs. Copying the records makes those facts
+		// available to renderer jobs without letting them reopen a file or retain a
+		// pointer into the loader's temporary byte vector.
+		const std::uint32_t metadataOffset = meshHeader.virtualGeometryReserved;
+		if(metadataOffset == 0U) {
+			return true;
+		}
+
+		DeformableMeshPayloadHeader metadata{};
+		if(!ReadDeformableRecord(fileBytes, metadataOffset, metadata)) {
+			return false;
+		}
+
+		// Hash the checked skinning stream and complete validated extension, not
+		// only its header. This makes palette, influence, morph, or envelope recooks
+		// invalidate renderer bindings while remaining deterministic across loads.
+		std::uint64_t payloadGeneration = 14695981039346656037ULL;
+		const auto hashBytes = [&payloadGeneration](std::span<const std::uint8_t> bytes) {
+			for(const std::uint8_t byte : bytes) {
+				payloadGeneration ^= static_cast<std::uint64_t>(byte);
+				payloadGeneration *= 1099511628211ULL;
+			}
+		};
+		hashBytes(fileBytes.subspan(metadata.skinningDataOffset, metadata.skinningDataSize));
+		hashBytes(fileBytes.subspan(metadataOffset, metadata.payloadSize));
+		mesh.hasDeformablePayload = true;
+		mesh.deformablePayloadGeneration = payloadGeneration == 0U ? 1U : payloadGeneration;
+		mesh.deformableMetadata = metadata;
+		mesh.deformablePalettes.resize(metadata.palettePartitionCount);
+		mesh.deformableMorphs.resize(metadata.morphTargetCount);
+		if(!mesh.deformablePalettes.empty()) {
+			std::memcpy(mesh.deformablePalettes.data(),
+				fileBytes.data() + metadata.paletteTableOffset,
+				mesh.deformablePalettes.size() * sizeof(DeformableMeshPaletteRecord));
+		}
+		if(!mesh.deformableMorphs.empty()) {
+			std::memcpy(mesh.deformableMorphs.data(),
+				fileBytes.data() + metadata.morphTableOffset,
+				mesh.deformableMorphs.size() * sizeof(DeformableMeshMorphRecord));
+		}
+
+		std::size_t totalPaletteJoints = 0U;
+		for(const DeformableMeshPaletteRecord& palette : mesh.deformablePalettes) {
+			totalPaletteJoints += palette.jointCount;
+		}
+		mesh.deformablePaletteJoints.clear();
+		mesh.deformablePaletteJoints.reserve(totalPaletteJoints);
+		for(const DeformableMeshPaletteRecord& palette : mesh.deformablePalettes) {
+			const std::size_t oldSize = mesh.deformablePaletteJoints.size();
+			mesh.deformablePaletteJoints.resize(oldSize + palette.jointCount);
+			std::memcpy(mesh.deformablePaletteJoints.data() + oldSize,
+				fileBytes.data() + palette.jointTableOffset,
+				static_cast<std::size_t>(palette.jointCount) * sizeof(std::uint32_t));
+		}
+
+		mesh.deformableVertexPaletteIndices.resize(metadata.vertexPaletteIndexCount);
+		if(!mesh.deformableVertexPaletteIndices.empty()) {
+			std::memcpy(mesh.deformableVertexPaletteIndices.data(),
+				fileBytes.data() + metadata.vertexPaletteIndexOffset,
+				mesh.deformableVertexPaletteIndices.size() * sizeof(std::uint32_t));
+		}
+
+		const std::uint64_t sidecarOffset = static_cast<std::uint64_t>(metadataOffset) + metadata.payloadSize;
+		if (sidecarOffset < fileBytes.size())
+		{
+			DeformableVirtualGeometrySidecarHeader sidecar{};
+			if (!ReadDeformableRecord(fileBytes, sidecarOffset, sidecar))
+			{
+				return false;
+			}
+			std::vector<DeformableVirtualGeometryClusterRecord> clusters(sidecar.clusterCount);
+			std::vector<std::uint32_t> paletteIndices(sidecar.paletteIndexCount);
+			std::vector<DeformableVirtualGeometryMorphRecord> morphs(sidecar.morphTargetCount);
+			std::uint64_t morphVertexCount = 0U;
+			if (!TerraEngine::Animation::CheckedMultiply(
+				sidecar.morphTargetCount, metadata.skinningVertexCount, morphVertexCount))
+			{
+				return false;
+			}
+			if (morphVertexCount > std::numeric_limits<std::size_t>::max())
+			{
+				return false;
+			}
+			std::vector<DeformableVirtualGeometryMorphVertex> morphVertices(static_cast<std::size_t>(morphVertexCount));
+			std::memcpy(clusters.data(), fileBytes.data() + sidecar.clusterTableOffset,
+				clusters.size() * sizeof(DeformableVirtualGeometryClusterRecord));
+			std::memcpy(paletteIndices.data(), fileBytes.data() + sidecar.paletteIndexTableOffset,
+				paletteIndices.size() * sizeof(std::uint32_t));
+			if (!morphs.empty())
+			{
+				std::memcpy(morphs.data(), fileBytes.data() + sidecar.morphTableOffset,
+					morphs.size() * sizeof(DeformableVirtualGeometryMorphRecord));
+				std::memcpy(morphVertices.data(), fileBytes.data() + sidecar.morphVertexDataOffset,
+					morphVertices.size() * sizeof(DeformableVirtualGeometryMorphVertex));
+			}
+			mesh.hasDeformableVirtualGeometrySidecar = true;
+			mesh.deformableVirtualGeometrySidecar = sidecar;
+			mesh.deformableVirtualGeometryClusters = std::move(clusters);
+			mesh.deformableVirtualGeometryPaletteIndices = std::move(paletteIndices);
+			mesh.deformableVirtualGeometryMorphs = std::move(morphs);
+			mesh.deformableVirtualGeometryMorphVertices = std::move(morphVertices);
+		}
 		return true;
 	}
 
@@ -1109,7 +1896,8 @@ namespace
 
 		std::size_t skinningBytes = 0;
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!TryMultiply(static_cast<std::size_t>(header.meshletSkinningDataCount), 8ULL, skinningBytes))
+		if (!TryMultiply(static_cast<std::size_t>(header.meshletSkinningDataCount),
+			static_cast<std::size_t>(kDeformableMeshSkinningStrideBytes), skinningBytes))
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TEMF skinning payload size overflow in " << resolvedPath);
 			return nullptr;
@@ -1158,9 +1946,25 @@ namespace
 			return nullptr;
 		}
 
+		AnimationResourceValidationResult deformableValidation;
+		if (!ValidateDeformableMeshPayload(
+			fileBytes, header, resolvedPath, 0U, 0U, false, deformableValidation)
+			|| !ValidateDeformableVirtualGeometrySidecar(fileBytes, header, resolvedPath, deformableValidation))
+		{
+			TERRAENGINE_LOG(LogLevel::Error,
+				deformableValidation.diagnosticCode << ": " << deformableValidation.message
+				<< " path=" << resolvedPath);
+			return nullptr;
+		}
+
 		const std::size_t payloadOffset = header.headerSize;
 		auto mesh = std::make_unique<Mesh>();
 		mesh->header = header;
+		if(!CopyValidatedDeformableRuntimeMetadata(fileBytes, header, *mesh)) {
+			TERRAENGINE_LOG(LogLevel::Error,
+				"Validated TDEF metadata could not be copied into runtime mesh state: " << resolvedPath);
+			return nullptr;
+		}
 
 		mesh->storage.assign(fileBytes.begin() + static_cast<std::ptrdiff_t>(payloadOffset), fileBytes.end());
 
@@ -1419,6 +2223,89 @@ namespace
 
 		return mesh;
 	}
+}
+
+AnimationResourceValidationResult ResourceManager::ValidateDeformableMeshFile(
+	const std::filesystem::path& path,
+	std::uint32_t expectedSkeletonJointCount,
+	TerraEngine::Animation::AnimationCompatibilityFingerprint expectedCompatibilityFingerprint) const
+{
+	using TerraEngine::Animation::AnimationStatus;
+	AnimationResourceValidationResult result;
+	result.assetType = AssetType::Mesh;
+	result.resolvedPath = ResolveAssetPath(path);
+	result.expectedCompatibilityFingerprint = expectedCompatibilityFingerprint;
+	if (!IsCompiledMeshPath(path))
+	{
+		RejectDeformableValidation(result, AnimationStatus::Unsupported,
+			"DeformableSourceFormatRejected",
+			"Runtime deformation loading accepts only cooked .temf files and never parses a glTF or FBX source package.");
+		return result;
+	}
+
+	const std::vector<std::uint8_t> fileBytes = ReadFileBytes(result.resolvedPath);
+	result.fileSizeBytes = fileBytes.size();
+	if (fileBytes.size() < sizeof(MeshHeader))
+	{
+		RejectDeformableValidation(result,
+			fileBytes.empty() ? AnimationStatus::MissingAsset : AnimationStatus::TruncatedInput,
+			fileBytes.empty() ? "DeformableMeshMissing" : "DeformableTemfHeaderTruncated",
+			fileBytes.empty()
+				? "The cooked deformable TEMF could not be read from the project or mounted runtime content."
+				: "The TEMF is too small to contain its fixed mesh header.");
+		return result;
+	}
+
+	MeshHeader header{};
+	std::memcpy(&header, fileBytes.data(), sizeof(header));
+	result.detectedMajorVersion = header.version;
+	std::uint32_t magic = 0U;
+	std::memcpy(&magic, header.magic, sizeof(magic));
+	if (magic != kMeshMagicValue || header.headerSize != sizeof(MeshHeader))
+	{
+		RejectDeformableValidation(result, AnimationStatus::InvalidEnvelope,
+			"DeformableTemfHeaderInvalid",
+			"The TEMF magic or fixed header size is invalid. Restore or recook the deformable mesh.");
+		return result;
+	}
+	if (header.version != kMeshCurrentVersion)
+	{
+		RejectDeformableValidation(result, AnimationStatus::UnsupportedMajorVersion,
+			"DeformableTemfVersionUnsupported",
+			"The TEMF version is unsupported by this runtime. Recook the mesh with the current editor.");
+		return result;
+	}
+
+	if (ValidateDeformableMeshPayload(fileBytes, header, result.resolvedPath,
+		expectedSkeletonJointCount, expectedCompatibilityFingerprint, true, result))
+	{
+		ValidateDeformableVirtualGeometrySidecar(fileBytes, header, result.resolvedPath, result);
+	}
+	return result;
+}
+
+TerraEngine::UUID ResourceManager::LoadDeformableMesh(
+	const std::filesystem::path& path,
+	std::uint32_t expectedSkeletonJointCount,
+	TerraEngine::Animation::AnimationCompatibilityFingerprint expectedCompatibilityFingerprint)
+{
+	const AnimationResourceValidationResult validation = ValidateDeformableMeshFile(
+		path, expectedSkeletonJointCount, expectedCompatibilityFingerprint);
+	if (!validation.Passed())
+	{
+		TERRAENGINE_LOG(LogLevel::Error,
+			validation.diagnosticCode << ": " << validation.message
+			<< " path=" << validation.resolvedPath);
+		return TerraEngine::EMPTY_UUID;
+	}
+
+	const TerraEngine::UUID id = LoadMesh(path);
+	if (id == TerraEngine::EMPTY_UUID)
+	{
+		return TerraEngine::EMPTY_UUID;
+	}
+	std::shared_lock lock(meshCache.mutex);
+	return meshCache.resources.contains(id) ? id : TerraEngine::EMPTY_UUID;
 }
 
 void ResourceManager::CacheLoadedMeshBounds(const TerraEngine::UUID& id, const Mesh* mesh)

@@ -12,6 +12,8 @@ namespace TerraEngine::Tests {
 		registry.Add("Engine.ActiveMembership.ActiveOnlyQueriesSkipInactiveObjects", [](TestContext& context) {
 			ObjectManager& objects = ObjectManager::instance();
 			objects.clear();
+			context.Expect(!objects.HasAnyObjectWithComponentsIncludingInactive<Transform>(),
+				"An empty component storage should let dormant systems skip active-membership scans.");
 			Object active = objects.createObject("Active");
 			Object inactive = objects.createObject("Inactive");
 			objects.setObjectActive(inactive, false);
@@ -19,6 +21,8 @@ namespace TerraEngine::Tests {
 			const auto activeObjects = objects.getObjectsWithComponents<Transform>();
 			const auto allObjects = objects.getObjectsWithComponentsIncludingInactive<Transform>();
 
+			context.Expect(objects.HasAnyObjectWithComponentsIncludingInactive<Transform>(),
+				"Inactive component owners must still make the storage-membership probe true.");
 			context.ExpectEqual(static_cast<std::size_t>(1), activeObjects.size(), "Active query should only return active objects.");
 			context.ExpectEqual(entt::to_integral(active.EntityId()), entt::to_integral(activeObjects.front().EntityId()), "The active object should remain in query membership.");
 			context.ExpectEqual(static_cast<std::size_t>(2), allObjects.size(), "Include-inactive query should preserve editor/serialization visibility.");

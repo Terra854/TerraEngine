@@ -3,6 +3,7 @@
 #include "TransactionalMutation.h"
 
 #include "Components/Transform.h"
+#include "Components/AnimatorComponent.h"
 #include "Core/Object/Component.h"
 #include "Core/Object/Object.h"
 #include "Core/Object/ObjectManager.h"
@@ -89,9 +90,20 @@ namespace TerraEngine::Scene {
 			{
 				// Each transform pair is one authored-object write even though it
 				// stores position and rotation together for atomic publication.
-				count += operation.kind == TransactionWriteKind::UpdateTransformBatch
-					? operation.transformUpdates.size()
-					: 1U;
+				if (operation.kind == TransactionWriteKind::UpdateTransformBatch)
+				{
+					count += operation.transformUpdates.size();
+				}
+				else if (operation.kind == TransactionWriteKind::PublishAnimationMutations)
+				{
+					// Each copied animation record consumes independent validation and
+					// receipt capacity, so its count must participate in the budget.
+					count += operation.animationPublications.size();
+				}
+				else
+				{
+					++count;
+				}
 			}
 			return count;
 		}
@@ -225,6 +237,7 @@ namespace TerraEngine::Scene {
 			if (logicalWriteCount > transaction.budget.maxWriteCount)
 			{
 				result.status = TransactionStatus::Rejected;
+				result.rejectedWriteCount = logicalWriteCount;
 				AddConflict(result, TransactionConflictReason::CommitBudgetRejection, TerraEngine::EMPTY_UUID, 0, "Transaction exceeds its configured write budget.", transaction.budget.maxWriteCount, logicalWriteCount);
 				return result;
 			}
@@ -354,6 +367,42 @@ namespace TerraEngine::Scene {
 						{
 							result.status = TransactionStatus::Conflicted;
 							AddConflict(result, TransactionConflictReason::MissingTarget, update.objectId, index, "Transform publication target no longer has a Transform component.", 0, 0, std::string(Transform::kComponentName), {}, operation.kind);
+						}
+					}
+					continue;
+				}
+
+				if (operation.kind == TransactionWriteKind::PublishAnimationMutations)
+				{
+					if (operation.animationPublications.empty())
+					{
+						result.status = TransactionStatus::Rejected;
+						AddConflict(result, TransactionConflictReason::InvalidPayload, TerraEngine::EMPTY_UUID, index, "Animation publication batch contains no typed records.", 0, 0, {}, {}, operation.kind);
+						continue;
+					}
+					std::unordered_set<std::string> publicationTargets;
+					for (const AnimationMutationPublication& publication : operation.animationPublications)
+					{
+						const std::string key = TerraEngine::ToHexString(publication.targetObjectId) + "|" + std::to_string(publication.animatorSlot);
+						if (publication.targetObjectId == TerraEngine::EMPTY_UUID || publication.expectedComponentGeneration == 0U
+							|| publication.animatorSlot == 0xffffffffU || publication.animatorGeneration == 0U
+							|| publication.producerSequence == 0U || publication.commandCount == 0U
+							|| !publicationTargets.insert(key).second)
+						{
+							result.status = TransactionStatus::Rejected;
+							AddConflict(result, TransactionConflictReason::InvalidPayload, publication.targetObjectId, index, "Animation publication has an empty, stale-shaped, or duplicate typed record.", 0, 0, {}, {}, operation.kind);
+							continue;
+						}
+						const std::optional<Object> target = objects.getObject(publication.targetObjectId);
+						if (!target || objects.getObjectComponentGeneration(*target) != publication.expectedComponentGeneration)
+						{
+							result.status = TransactionStatus::Conflicted;
+							AddConflict(result, TransactionConflictReason::ComponentVersionMismatch, publication.targetObjectId, index, "Animator component generation changed before typed publication.", publication.expectedComponentGeneration, target ? objects.getObjectComponentGeneration(*target) : 0U, {}, {}, operation.kind);
+						}
+						else if (objects.GetComponent<AnimatorComponent>(*target) == nullptr)
+						{
+							result.status = TransactionStatus::Conflicted;
+							AddConflict(result, TransactionConflictReason::MissingTarget, publication.targetObjectId, index, "Animation publication target no longer has an AnimatorComponent.", 0U, 0U, std::string(AnimatorComponent::kComponentName), {}, operation.kind);
 						}
 					}
 					continue;
@@ -713,6 +762,22 @@ namespace TerraEngine::Scene {
 		return *this;
 	}
 
+	TransactionalMutationBuilder& TransactionalMutationBuilder::PublishAnimationMutations(ObjectManager& objects, std::vector<AnimationMutationPublication> publications)
+	{
+		// Capture every target generation while the producer owns ObjectManager. A
+		// later protected flush rejects the complete batch if any target went stale.
+		transaction.readSet.objects.reserve(transaction.readSet.objects.size() + publications.size());
+		for (const AnimationMutationPublication& publication : publications)
+		{
+			ObserveObject(objects, publication.targetObjectId);
+		}
+		TransactionWriteOperation operation;
+		operation.kind = TransactionWriteKind::PublishAnimationMutations;
+		operation.animationPublications = std::move(publications);
+		transaction.writeSet.operations.push_back(std::move(operation));
+		return *this;
+	}
+
 	Transaction TransactionalMutationBuilder::Build() &
 	{
 		return NormalizeTransaction(transaction);
@@ -876,6 +941,15 @@ namespace TerraEngine::Scene {
 				continue;
 			}
 
+			if (operation.kind == TransactionWriteKind::PublishAnimationMutations)
+			{
+				// Preflight already validated every copied record. This receipt becomes
+				// observable only when the enclosing protected transaction commits.
+				result.acceptedAnimationPublications.insert(result.acceptedAnimationPublications.end(),
+					operation.animationPublications.begin(), operation.animationPublications.end());
+				continue;
+			}
+
 			const std::optional<Object> target = ResolveRef(objects, operation.target, localObjects);
 			if (!target)
 			{
@@ -992,8 +1066,12 @@ namespace TerraEngine::Scene {
 						AddConflict(result, TransactionConflictReason::InvalidPayload, targetId, index, "Reflected component property write failed during publication.", 0, 0, operation.componentName, operation.propertyName, operation.kind);
 						break;
 					}
-					if (operation.componentName == Transform::kComponentName) objects.MarkObjectTransformDirty(*target);
-					else objects.notifyObjectStructureChanged(*target);
+					if (operation.componentName != Transform::kComponentName) {
+						// The reflected Transform setter already publishes one
+						// spatial revision. Avoid double-incrementing it while
+						// retaining structural invalidation for other components.
+						objects.notifyObjectStructureChanged(*target);
+					}
 				}
 				result.inverseDeltas.push_back(std::move(inverse));
 				break;
@@ -1019,6 +1097,7 @@ namespace TerraEngine::Scene {
 				: "Transaction publication failed and rollback could not restore every write.";
 			result.inverseDeltas.clear();
 			result.createdObjects.clear();
+			result.acceptedAnimationPublications.clear();
 			return result;
 		}
 		result.status = TransactionStatus::Committed;
@@ -1288,8 +1367,11 @@ namespace TerraEngine::Scene {
 				{
 					restoredEveryDelta = false;
 				}
-				if (operation.componentName == Transform::kComponentName) objects.MarkObjectTransformDirty(*target);
-				else objects.notifyObjectStructureChanged(*target);
+				if (operation.componentName != Transform::kComponentName) {
+					// Rollback uses the same reflected setter, so Transform
+					// restoration has already invalidated spatial snapshots.
+					objects.notifyObjectStructureChanged(*target);
+				}
 				break;
 			}
 			case TransactionWriteKind::CreateObject:
@@ -1339,6 +1421,7 @@ namespace TerraEngine::Scene {
 		TransactionResult diagnosticResult = result;
 		diagnosticResult.inverseDeltas.clear();
 		diagnosticResult.createdObjects.clear();
+		diagnosticResult.acceptedAnimationPublications.clear();
 		diagnostics.recentResults.push_back(std::move(diagnosticResult));
 		if (diagnostics.recentResults.size() > 64)
 		{

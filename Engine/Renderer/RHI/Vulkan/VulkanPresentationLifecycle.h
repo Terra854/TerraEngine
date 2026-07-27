@@ -91,6 +91,116 @@ namespace TerraEngine::Renderer::Vulkan
 		}
 	};
 
+	// PresentationRecreationReason records why the coordinator must replace the
+	// native presentation chain. Keeping this CPU-only makes resize policy
+	// deterministic in tests instead of depending on a window manager callback.
+	enum class PresentationRecreationReason
+	{
+		FramebufferExtentChanged,
+		OutOfDate,
+		SuboptimalExtentChanged,
+		CandidateFailure
+	};
+
+	struct PresentationExtent
+	{
+		std::uint32_t width = 0;
+		std::uint32_t height = 0;
+
+		[[nodiscard]] bool IsZero() const noexcept { return width == 0 || height == 0; }
+		[[nodiscard]] bool operator==(const PresentationExtent&) const noexcept = default;
+	};
+
+	struct PresentationRecreationRequest
+	{
+		PresentationExtent extent{};
+		PresentationRecreationReason reason = PresentationRecreationReason::FramebufferExtentChanged;
+		std::uint64_t revision = 0;
+	};
+
+	// PresentationRecreationCoordinator coalesces native resize bursts into one
+	// protected recreation attempt. A failed attempt is not retried every frame:
+	// a new extent, an OUT_OF_DATE result, or an explicit retry creates a new
+	// revision. That prevents a minimized window from repeatedly idling the GPU.
+	class PresentationRecreationCoordinator
+	{
+	public:
+		void SetActiveExtent(PresentationExtent extent) noexcept;
+		void RequestFramebufferExtent(PresentationExtent extent) noexcept;
+		void RequestOutOfDate() noexcept;
+		[[nodiscard]] bool RequestSuboptimalIfExtentChanged() noexcept;
+		[[nodiscard]] std::optional<PresentationRecreationRequest> Claim() noexcept;
+		void PublishSuccess(PresentationExtent extent) noexcept;
+		void PublishFailure(bool oldSwapchainWasConsumed) noexcept;
+		void PublishRetirementBlocked(bool oldSwapchainWasConsumed) noexcept;
+		[[nodiscard]] bool RequestRetryAfterRetirement() noexcept;
+
+		[[nodiscard]] bool IsSuspendedForZeroExtent() const noexcept;
+		[[nodiscard]] bool IsRecoveryPending() const noexcept;
+		[[nodiscard]] bool IsWaitingForRetirementProof() const noexcept { return retirementProofPending_; }
+		[[nodiscard]] bool OldSwapchainWasConsumed() const noexcept { return oldSwapchainWasConsumed_; }
+		[[nodiscard]] PresentationExtent RequestedExtent() const noexcept { return requestedExtent_; }
+		[[nodiscard]] std::uint64_t Revision() const noexcept { return revision_; }
+
+	private:
+		void Request(PresentationRecreationReason reason) noexcept;
+
+		PresentationExtent activeExtent_{};
+		PresentationExtent requestedExtent_{};
+		PresentationRecreationReason reason_ = PresentationRecreationReason::FramebufferExtentChanged;
+		std::uint64_t revision_ = 0;
+		std::uint64_t claimedRevision_ = 0;
+		bool recoveryPending_ = false;
+		bool oldSwapchainWasConsumed_ = false;
+		bool retirementProofPending_ = false;
+	};
+
+	// PresentationRetirementTracker is a fake-dispatch equivalent for the
+	// per-present maintenance-fence contract. Tests drive fence completion and
+	// coverage loss explicitly so retirement never relies on a real compositor.
+	class PresentationRetirementTracker
+	{
+	public:
+		void BeginRetirement(std::uint64_t generation, std::uint32_t presentCount);
+		void RecordPresentFence(std::uint64_t generation, std::uint32_t presentIndex, bool signaled);
+		void RecordUnfencedPresent(std::uint64_t generation) noexcept;
+		[[nodiscard]] bool CanDestroyRetiredBundle(std::uint64_t generation) const noexcept;
+
+	private:
+		std::uint64_t generation_ = 0u;
+		std::vector<bool> completionByPresent_;
+		bool completionCoverageValid_ = false;
+	};
+
+	// UnextendedPresentationRetirementTracker models the Khronos fallback used
+	// only when swapchain-maintenance present fences are unavailable. A completed
+	// acquire of the first image presented by the newest chain proves that the
+	// presentation engine has moved beyond every retired chain. It deliberately
+	// has no Vulkan handles so callers can test the ownership rule deterministically.
+	class UnextendedPresentationRetirementTracker
+	{
+	public:
+		// Start or replace the active swapchain generation. A newer generation
+		// folds any older retired bundles under its first future presentation.
+		void BeginGeneration(std::uint64_t generation, bool retiredBundlesPending) noexcept;
+		// The first present in the active generation becomes the acquire proof
+		// anchor. Later presents do not replace that anchor.
+		void RecordPresent(std::uint64_t generation, std::uint32_t imageIndex) noexcept;
+		[[nodiscard]] bool NeedsAcquireProof() const noexcept;
+		// Returns true exactly once when a completed acquire matches the newest
+		// first-present anchor and can therefore release all retired bundles.
+		[[nodiscard]] bool RecordCompletedAcquire(std::uint64_t generation,
+			std::uint32_t imageIndex) noexcept;
+		void Reset() noexcept;
+
+	private:
+		std::uint64_t activeGeneration_ = 0u;
+		std::uint64_t anchorGeneration_ = 0u;
+		std::uint32_t anchorImageIndex_ = 0u;
+		bool retiredBundlesPending_ = false;
+		bool firstPresentAnchored_ = false;
+	};
+
 	// PresentationLifecycle validates collection sizes and rejects stale image
 	// records before the Vulkan backend touches an image-owned handle.
 	class TERRAENGINE_API PresentationLifecycle

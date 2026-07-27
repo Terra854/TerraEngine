@@ -1,0 +1,152 @@
+{
+	"schemaVersion": 1,
+	"representation": "production-cooked-animation-assets",
+	"generator": "Tools/Animation/AdvancedAnimationFixtureMaterializer.cpp",
+	"deterministic": true,
+	"files": [
+		{
+			"file": "source-humanoid.teskel",
+			"assetType": "Skeleton",
+			"assetGuidHex": "5445414e303433414456464958000001",
+			"compatibilityFingerprint": "0x043a000000001001",
+			"envelopeContentHash": "739bd5ffa42c4819614460c28277cceefb78405ad9d274e7498e593099bd2194",
+			"sha256": "322ba744a36f3d76af36cec7ca10b835c4edd55fd107bdf919f8a535483f2897",
+			"sizeBytes": 1920,
+			"envelopeDependencies": []
+		},
+		{
+			"file": "target-humanoid.teskel",
+			"assetType": "Skeleton",
+			"assetGuidHex": "5445414e303433414456464958000002",
+			"compatibilityFingerprint": "0x043a000000002001",
+			"envelopeContentHash": "c10fedf7491cc2164dc9d78e8eed6a1e1d80c9d8d8e172dc95bd22fac0bf9a97",
+			"sha256": "269eb2c85dbdd940971ab56e4cd3dbf0b8a87415e93695f0e69d9a79182a5545",
+			"sizeBytes": 2138,
+			"envelopeDependencies": []
+		},
+		{
+			"file": "source-locomotion.teanim",
+			"assetType": "AnimationClip",
+			"assetGuidHex": "5445414e303433414456464958000003",
+			"compatibilityFingerprint": "0x043a000000001001",
+			"envelopeContentHash": "d3e40a371a885f851d0ff6b53c336c7203e29b99d0e6dbcbe5056f397718635e",
+			"sha256": "7fa62d51f9f7700e51a8365145c0baaeae035f35567703887dcc6343a05fd76e",
+			"sizeBytes": 7052,
+			"envelopeDependencies": []
+		},
+		{
+			"file": "target-recovery.teanim",
+			"assetType": "AnimationClip",
+			"assetGuidHex": "5445414e303433414456464958000004",
+			"compatibilityFingerprint": "0x043a000000002001",
+			"envelopeContentHash": "77d1829024b9a954274659988ee7ff7013ceec160988af813ffbf911acd24ca0",
+			"sha256": "372b8c8b7ee2cb631adb089a88e721fb3c23b46d4f2bb0d9e2890e0587d19d5a",
+			"sizeBytes": 2230,
+			"envelopeDependencies": []
+		},
+		{
+			"file": "humanoid-retarget.teretarget",
+			"assetType": "RetargetProfile",
+			"assetGuidHex": "5445414e303433414456464958000005",
+			"compatibilityFingerprint": "0x043a000000007001",
+			"envelopeContentHash": "50b7a3d4a0b620c923e293a692e94573126a077072d78aaff9f891b6961a2485",
+			"sha256": "b33b119881b4223a556d2ccf28bbc77bff10f133950a3f33e8edf88935b1ff7c",
+			"sizeBytes": 1285,
+			"envelopeDependencies": [
+				{
+					"assetGuidHex": "5445414e303433414456464958000001",
+					"expectedAssetType": 6,
+					"expectedGeneration": 1
+				},
+				{
+					"assetGuidHex": "5445414e303433414456464958000002",
+					"expectedAssetType": 6,
+					"expectedGeneration": 1
+				}
+			]
+		},
+		{
+			"file": "locomotion.temotiondb",
+			"assetType": "MotionDatabase",
+			"assetGuidHex": "5445414e303433414456464958000006",
+			"compatibilityFingerprint": "0x043a000000001001",
+			"envelopeContentHash": "1e2d2c72736e21076a7e4c0f4c9affe89afa625a0ef070f21287cc2a7b1ddc58",
+			"sha256": "9f1450ab59fecdc196aec22bc2f5a491e853385b64f5a97b83c607bea89c90cd",
+			"sizeBytes": 2124,
+			"envelopeDependencies": []
+		},
+		{
+			"file": "target-humanoid.teragdoll",
+			"assetType": "RagdollProfile",
+			"assetGuidHex": "5445414e303433414456464958000007",
+			"compatibilityFingerprint": "0x043a000000002001",
+			"envelopeContentHash": "0a6e304523d34ef25f70f93d3086f398ace0da289c91356b3da0da6f4358daf6",
+			"sha256": "8f06be8aadbc2e2f37533cfabc149eb590b08b8940f222e8cdb0023496e1c9bc",
+			"sizeBytes": 3835,
+			"envelopeDependencies": [
+				{
+					"assetGuidHex": "5445414e303433414456464958000002",
+					"expectedAssetType": 6,
+					"expectedGeneration": 1
+				},
+				{
+					"assetGuidHex": "5445414e303433414456464958000004",
+					"expectedAssetType": 7,
+					"expectedGeneration": 1
+				}
+			]
+		}
+	],
+	"relationships": {
+		"sourceSkeleton": {
+			"assetGuidHex": "5445414e303433414456464958000001",
+			"compatibilityFingerprint": "0x043a000000001001",
+			"referencePoseHash": "0x043a000000001101"
+		},
+		"targetSkeleton": {
+			"assetGuidHex": "5445414e303433414456464958000002",
+			"compatibilityFingerprint": "0x043a000000002001",
+			"referencePoseHash": "0x043a000000002101"
+		},
+		"sourceLocomotionClip": {
+			"assetGuidHex": "5445414e303433414456464958000003",
+			"skeletonAssetGuidHex": "5445414e303433414456464958000001",
+			"recordingProvenance": true
+		},
+		"targetRecoveryClip": {
+			"assetGuidHex": "5445414e303433414456464958000004",
+			"skeletonAssetGuidHex": "5445414e303433414456464958000002"
+		},
+		"retargetProfile": {
+			"assetGuidHex": "5445414e303433414456464958000005",
+			"sourceSkeletonAssetGuidHex": "5445414e303433414456464958000001",
+			"targetSkeletonAssetGuidHex": "5445414e303433414456464958000002",
+			"compiledStableHash": "0x41dcc25117bba38a"
+		},
+		"motionDatabase": {
+			"assetGuidHex": "5445414e303433414456464958000006",
+			"sourceClipAssetGuidHex": "5445414e303433414456464958000003",
+			"sourceClipId": "0xbc034d0e92ea3b0b",
+			"sourceClipFingerprintFnv1a64": "0x328ab144a83e7df9",
+			"contentFingerprint": "0x2c7d6751b2c249ea"
+		},
+		"ragdollProfile": {
+			"assetGuidHex": "5445414e303433414456464958000007",
+			"skeletonAssetGuidHex": "5445414e303433414456464958000002",
+			"recoveryClipAssetGuidHex": "5445414e303433414456464958000004",
+			"physicsProviderFingerprint": "0x000000004a4f4c54"
+		}
+	},
+	"validation": [
+		"Each writer was invoked twice and produced byte-identical output.",
+		"Each checked-in file was decoded and reserialized to identical bytes.",
+		"Both clips were sampled through AnimationCodecView within authored tolerances.",
+		"The retarget profile passed CompileRetargetProfile with complete required coverage.",
+		"The motion database passed DATA and STRM validation and block decode.",
+		"The ragdoll profile passed structure and full skeleton/physics-policy validation."
+	],
+	"limitations": [
+		"Primitive ragdoll collider recipes need no external geometry asset; Jolt body creation remains a live runtime operation.",
+		"IK goals are runtime/controller commands rather than a standalone cooked asset and are intentionally outside this codec bundle."
+	]
+}

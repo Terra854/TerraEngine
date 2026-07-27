@@ -6,8 +6,15 @@
 
 #include "EditorAutomationService.h"
 #include "EditorAutomationTransaction.h"
+#include "AnimationAdvancedOperations.h"
+#include "AnimationAssetOperations.h"
+#include "AnimationAutomationJobs.h"
+#include "AnimationAutomationSchemas.h"
+#include "AnimationControllerOperations.h"
+#include "AnimationRuntimeOperations.h"
 
 #include "Providers/AssetPrefabAutomationProvider.h"
+#include "Providers/AnimationAutomationProvider.h"
 #include "Providers/AuthoringAutomationProvider.h"
 #include "Providers/EditorDiagnosticsAutomationProvider.h"
 #include "Providers/HistoryPlayModeAutomationProvider.h"
@@ -42,9 +49,15 @@
 #include "Engine/Scene/RuntimeLayout.h"
 #include "Engine/Scene/Serializer.h"
 #include "Engine/Core/Scheduling/FrameWorkload.h"
+#include "Engine/Animation/AnimationPresentationSystem.h"
+#include "Engine/Animation/AnimationSystem.h"
+#include "Engine/Animation/Assets/AnimationClipAsset.h"
+#include "Engine/Animation/Assets/AnimationControllerAsset.h"
+#include "Engine/Animation/Diagnostics/AnimationDiagnostics.h"
 #include "Engine/Profiling/Profiler.h"
 #include "Engine/Renderer/RendererRecovery.h"
 #include "Engine/Renderer/RenderSystem.h"
+#include "Engine/Resource/ResourceManager.h"
 #include "Engine/Physics/PhysicsSystem.h"
 #include "Engine/Physics/Assets/ColliderRecipe.h"
 #include "Engine/Physics/Assets/CookedColliderAsset.h"
@@ -61,6 +74,7 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <new>
 #include <fstream>
 #include <initializer_list>
 #include <optional>
@@ -105,6 +119,61 @@ namespace TerraEngine::Editor::Automation
 		bool IsOperationOneOf(AutomationOperationId operation, std::initializer_list<AutomationOperationId> candidates)
 		{
 			return std::find(candidates.begin(), candidates.end(), operation) != candidates.end();
+		}
+
+		bool ReadBoundedAutomationFile(
+			const std::filesystem::path& path,
+			std::size_t maximumBytes,
+			std::vector<std::uint8_t>& output,
+			std::string& error)
+		{
+			output.clear();
+			std::ifstream stream(path, std::ios::binary | std::ios::ate);
+			if (!stream)
+			{
+				error = "The compiled asset could not be opened.";
+				return false;
+			}
+			const std::streamoff size = stream.tellg();
+			if (size < 0 || static_cast<std::uint64_t>(size) > maximumBytes)
+			{
+				error = "The compiled asset is outside the bounded automation read size.";
+				return false;
+			}
+			try
+			{
+				output.resize(static_cast<std::size_t>(size));
+			}
+			catch (const std::bad_alloc&)
+			{
+				error = "The bounded automation read could not allocate its detached buffer.";
+				return false;
+			}
+			stream.seekg(0, std::ios::beg);
+			if (!output.empty()
+				&& !stream.read(reinterpret_cast<char*>(output.data()), static_cast<std::streamsize>(output.size())))
+			{
+				output.clear();
+				error = "The compiled asset ended before the bounded read completed.";
+				return false;
+			}
+			return true;
+		}
+
+		std::string_view AnimationChildKindName(GeneratedModelPackageChildKind kind)
+		{
+			switch (kind)
+			{
+			case GeneratedModelPackageChildKind::Mesh: return "mesh";
+			case GeneratedModelPackageChildKind::Material: return "material";
+			case GeneratedModelPackageChildKind::Texture: return "texture";
+			case GeneratedModelPackageChildKind::Skeleton: return "skeleton";
+			case GeneratedModelPackageChildKind::AnimationClip: return "animation_clip";
+			case GeneratedModelPackageChildKind::MorphTarget: return "morph_target";
+			case GeneratedModelPackageChildKind::DeformableMesh: return "deformable_mesh";
+			case GeneratedModelPackageChildKind::Prefab: return "prefab";
+			}
+			return "unknown";
 		}
 
 		std::string ScriptCoordinatorStateName(ScriptCoordinatorState state)
@@ -1860,6 +1929,13 @@ namespace TerraEngine::Editor::Automation
 		(void)capabilityRegistry.RegisterProvider(std::make_shared<EditorDiagnosticsAutomationProvider>(resolveHandler));
 		(void)capabilityRegistry.RegisterProvider(std::make_shared<HistoryPlayModeAutomationProvider>(resolveHandler));
 		(void)capabilityRegistry.RegisterProvider(std::make_shared<AuthoringAutomationProvider>(resolveHandler));
+		// Animation owns a domain-specific resolver because its generation-safe
+		// transactions, retained jobs, and renderer captures must never fall through
+		// the legacy central operation switch.
+		const AutomationHandlerResolver resolveAnimationHandler = [this](std::string_view name) {
+			return ResolveAnimationAutomationHandler(name);
+		};
+		(void)capabilityRegistry.RegisterProvider(std::make_shared<AnimationAutomationProvider>(resolveAnimationHandler));
 		// Physics names are resolved once into domain-specific typed handlers. They
 		// never enter the legacy request-time central string dispatcher above.
 		const AutomationHandlerResolver resolvePhysicsHandler = [this](std::string_view name) {
@@ -1867,6 +1943,29 @@ namespace TerraEngine::Editor::Automation
 		};
 		(void)capabilityRegistry.RegisterProvider(std::make_shared<PhysicsAutomationProvider>(resolvePhysicsHandler));
 		RegisterDefaultCapabilities();
+	}
+
+	EditorAutomationService::~EditorAutomationService()
+	{
+		// Durable sessions are keyed by this service's job store. Retire them before
+		// the store address can be reused by a later bridge, otherwise a disconnected
+		// recording or database worker could outlive its project/editor owner.
+		AnimationAutomationJobs(jobService).CancelAllRecordings();
+		animationAutomationDetailedDiagnosticsLease.Reset();
+	}
+
+	AutomationHandler EditorAutomationService::ResolveAnimationAutomationHandler(std::string_view name)
+	{
+		const AutomationOperationId operation = AutomationOperation(name);
+		const std::string operationName(name);
+		const auto [existing, inserted] = boundProviderOperationNames.emplace(operation, operationName);
+		if (!inserted && existing->second != operationName)
+		{
+			throw std::logic_error("Animation automation operation ID collision between " + existing->second + " and " + operationName + ".");
+		}
+		return [this, operation, operationName](const AutomationRequestContext& request) {
+			return ExecuteAnimationAutomationHandler(operation, operationName, request);
+		};
 	}
 
 	AutomationHandler EditorAutomationService::ResolvePhysicsAutomationHandler(std::string_view name)
@@ -1996,6 +2095,104 @@ namespace TerraEngine::Editor::Automation
 		(void)jobService.CompleteSucceeded(jobId, {{"outputAsset", displayPath}, {"assetId", TerraEngine::ToHexString(collider->Envelope().assetId)}, {"size", bytes.size()}});
 		finishIdempotency(true, "succeeded");
 		activePhysicsCookJobs.erase(active);
+	}
+
+	void EditorAutomationService::PumpAnimationRecordingsAtProtectedFrame()
+	{
+		// AnimationAutomationJobs loads only sealed published snapshots here; no UI,
+		// MCP connection, or job.get request participates in capture ownership.
+		AnimationAutomationJobs(jobService).PumpActiveRecordingsFromPublishedSnapshots();
+	}
+
+	void EditorAutomationService::RefreshAnimationImportJob(std::string_view jobId)
+	{
+		const auto active = activeAnimationImportJobs.find(std::string(jobId));
+		if (active == activeAnimationImportJobs.end())
+		{
+			return;
+		}
+		const ActiveAnimationImportJob import = active->second;
+		const std::optional<AutomationJobSnapshot> retained = jobService.Get(jobId);
+		if (!retained || retained->state == AutomationJobState::Succeeded
+			|| retained->state == AutomationJobState::Failed
+			|| retained->state == AutomationJobState::Canceled)
+		{
+			activeAnimationImportJobs.erase(active);
+			return;
+		}
+		if (std::chrono::system_clock::now() >= import.deadline)
+		{
+			if (editorContext != nullptr && editorContext->assetDatabase != nullptr
+				&& editorContext->assetDatabase->IsAssetCompiling(import.sourcePath))
+			{
+				(void)editorContext->assetDatabase->CancelImport(import.sourcePath, false);
+			}
+			(void)jobService.AddDiagnostic(jobId, {
+				AutomationLogSeverity::Error,
+				"timeout",
+				"Animation import exceeded its declared timeout before publication.",
+				{{"recommendedAction", "Inspect importer diagnostics, then retry with a new idempotency key or a larger bounded timeout."}}
+			});
+			(void)jobService.CompleteFailed(jobId, {
+				{"status", "timeout"},
+				{"message", "Animation import exceeded its declared timeout before publication."},
+				{"recommendedAction", "Inspect importer diagnostics, then retry with a new idempotency key or a larger bounded timeout."}
+			});
+			activeAnimationImportJobs.erase(active);
+			return;
+		}
+		if (editorContext == nullptr || editorContext->assetDatabase == nullptr
+			|| BuildAutomationStateSnapshot().projectGeneration != import.projectGeneration)
+		{
+			if (editorContext != nullptr && editorContext->assetDatabase != nullptr
+				&& editorContext->assetDatabase->IsAssetCompiling(import.sourcePath))
+			{
+				(void)editorContext->assetDatabase->CancelImport(import.sourcePath, false);
+			}
+			(void)jobService.CompleteFailed(jobId, {{"message", "Project generation changed before animation import publication."}});
+			activeAnimationImportJobs.erase(active);
+			return;
+		}
+
+		AssetDatabase& assets = *editorContext->assetDatabase;
+		if (jobService.IsCancellationRequested(jobId))
+		{
+			if (assets.IsAssetCompiling(import.sourcePath))
+			{
+				(void)assets.CancelImport(import.sourcePath, false);
+				return;
+			}
+			(void)jobService.CompleteCanceled(jobId, {{"cancellationBoundary", "before_animation_asset_publication"}});
+			activeAnimationImportJobs.erase(active);
+			return;
+		}
+		if (const std::optional<AssetImportProgress> progress = assets.GetImportProgress(import.sourcePath))
+		{
+			(void)jobService.SetState(jobId, AutomationJobState::Running, progress->stage.empty() ? "importing" : progress->stage);
+			(void)jobService.PublishProgress(jobId, std::clamp(static_cast<double>(progress->progress), 0.0, 0.99), progress->stage);
+			if (progress->failed)
+			{
+				(void)jobService.CompleteFailed(jobId, {{"message", progress->message.empty() ? "Animation import failed validation." : progress->message}});
+				activeAnimationImportJobs.erase(active);
+			}
+			return;
+		}
+		if (assets.IsAssetCompiling(import.sourcePath))
+		{
+			(void)jobService.SetState(jobId, AutomationJobState::Running, "importing");
+			return;
+		}
+
+		const std::filesystem::path normalized = std::filesystem::absolute(import.sourcePath).lexically_normal();
+		if (assets.GetAssets().find(normalized) == assets.GetAssets().end())
+		{
+			(void)jobService.CompleteFailed(jobId, {{"message", "Animation import completed without publishing asset metadata."}});
+			activeAnimationImportJobs.erase(active);
+			return;
+		}
+		(void)jobService.PublishProgress(jobId, 1.0, "published");
+		(void)jobService.CompleteSucceeded(jobId, {{"sourcePath", normalized.generic_string()}});
+		activeAnimationImportJobs.erase(active);
 	}
 
 	void EditorAutomationService::SetMainEditor(MainEditorSubsystem* editor)
@@ -2280,6 +2477,1326 @@ namespace TerraEngine::Editor::Automation
 		};
 		(void)logStore.Append(std::move(completion));
 		return response;
+	}
+
+	AutomationDispatchResult EditorAutomationService::ExecuteAnimationPreviewCommit(
+		const nlohmann::json& arguments,
+		bool rendererAvailable)
+	{
+		using namespace TerraEngine::Animation;
+		using namespace TerraEngine::Editor::Animation;
+		const auto reject = [](ErrorCategory category, std::string message) {
+			return AutomationDispatchResult{false, category, std::move(message), nlohmann::json::object()};
+		};
+		const auto mapStatus = [](AnimationStatus status) {
+			switch(status)
+			{
+			case AnimationStatus::InvalidArgument:
+			case AnimationStatus::InvalidType:
+			case AnimationStatus::InvalidChunk:
+			case AnimationStatus::InvalidEnvelope: return ErrorCategory::Validation;
+			case AnimationStatus::StaleHandle: return ErrorCategory::StaleTarget;
+			case AnimationStatus::HardLimitExceeded:
+			case AnimationStatus::BufferTooSmall: return ErrorCategory::OverBudget;
+			case AnimationStatus::Unsupported: return ErrorCategory::UnsupportedCapability;
+			case AnimationStatus::Cancelled: return ErrorCategory::Canceled;
+			case AnimationStatus::MissingAsset:
+			case AnimationStatus::NotReady: return ErrorCategory::MissingTarget;
+			case AnimationStatus::Rejected: return ErrorCategory::Conflict;
+			default: return ErrorCategory::Internal;
+			}
+		};
+		if(editorContext == nullptr || editorContext->assetDatabase == nullptr)
+		{
+			return reject(ErrorCategory::Unavailable,
+				"Animation preview requires the open project's AssetDatabase.");
+		}
+		const std::optional<UUID> assetId = TerraEngine::ParseUUID(
+			arguments.value("assetId", std::string{}));
+		if(!assetId)
+		{
+			return reject(ErrorCategory::Validation, "assetId is not a UUID.");
+		}
+
+		AssetDatabase& assets = *editorContext->assetDatabase;
+		std::filesystem::path compiledPath;
+		std::string displayName;
+		std::uint64_t publishedGeneration = 1U;
+		AnimationCompatibilityFingerprint publishedFingerprint = 0U;
+		if(const AssetMetadata* metadata = assets.FindAssetByGuid(*assetId))
+		{
+			if(metadata->importerName != "AnimationClipAssetImporter")
+			{
+				return reject(ErrorCategory::MissingTarget,
+					"animation.preview.play requires a registered animation clip asset.");
+			}
+			compiledPath = assets.GetBuildRoot() / metadata->compiledPath;
+			displayName = metadata->sourcePath.filename().string();
+			publishedGeneration = std::max<std::uint64_t>(1U,
+				ResourceManager::Instance().GetAnimationAssetRuntimeGeneration(
+					*assetId, AssetType::AnimationClip));
+		}
+		else
+		{
+			GeneratedModelPackageChildMetadata generated;
+			if(!assets.TryGetGeneratedModelPackageChildMetadata(
+				*assetId, GeneratedModelPackageChildKind::AnimationClip, generated))
+			{
+				return reject(ErrorCategory::MissingTarget,
+					"The requested standalone or generated animation clip was not found.");
+			}
+			compiledPath = assets.GetBuildRoot() / generated.compiledPath;
+			displayName = generated.displayName;
+			publishedGeneration = std::max<std::uint64_t>(1U, generated.publishedGeneration);
+			publishedFingerprint = generated.compatibilityFingerprint;
+		}
+
+		constexpr std::size_t kMaximumPreviewClipBytes = 256U * 1024U * 1024U;
+		std::vector<std::uint8_t> bytes;
+		std::string readError;
+		if(!ReadBoundedAutomationFile(compiledPath, kMaximumPreviewClipBytes, bytes, readError))
+		{
+			return reject(ErrorCategory::Unavailable, std::move(readError));
+		}
+		AnimationPreviewAssetInput input;
+		const AnimationStatus decoded = DeserializeAnimationClipAsset(bytes, 0U, input.clip);
+		if(decoded != AnimationStatus::Ok || input.clip.assetId.value != *assetId)
+		{
+			return reject(ErrorCategory::Validation,
+				"The requested clip failed checked deserialization with status "
+				+ std::string(ToString(decoded)) + ".");
+		}
+		if(publishedFingerprint != 0U
+			&& input.clip.compatibilityFingerprint != publishedFingerprint)
+		{
+			return reject(ErrorCategory::StaleTarget,
+				"The generated clip fingerprint no longer matches its package publication.");
+		}
+		input.clip.runtimeGeneration = publishedGeneration;
+		input.residentSegments.assign(input.clip.segments.size(), 1U);
+		for(const AnimationClipTrack& track : input.clip.tracks)
+		{
+			if(track.kind == AnimationClipTrackKind::Translation
+				|| track.kind == AnimationClipTrackKind::Rotation
+				|| track.kind == AnimationClipTrackKind::Scale)
+			{
+				input.jointStableIds.push_back(track.stableTargetId);
+			}
+		}
+		std::sort(input.jointStableIds.begin(), input.jointStableIds.end());
+		input.jointStableIds.erase(
+			std::unique(input.jointStableIds.begin(), input.jointStableIds.end()),
+			input.jointStableIds.end());
+		SkeletonAsset skeleton;
+		AnimationGeneration skeletonGeneration = 0U;
+		if(ResourceManager::Instance().CopySkeletonPublication(
+			input.clip.skeletonAssetId.value, skeleton, skeletonGeneration)
+			&& skeleton.compatibilityFingerprint == input.clip.compatibilityFingerprint)
+		{
+			input.referenceSkeleton = std::move(skeleton);
+		}
+
+		AnimationPreviewSessionDescriptor descriptor;
+		descriptor.selectionId = *assetId;
+		descriptor.clipAssetId = input.clip.assetId;
+		descriptor.clipGeneration = publishedGeneration;
+		descriptor.compatibilityFingerprint = input.clip.compatibilityFingerprint;
+		descriptor.durationTicks = input.clip.durationTicks;
+		descriptor.sampleRate = input.clip.sampleRate;
+		descriptor.displayName = displayName.empty() ? compiledPath.filename().string() : displayName;
+		descriptor.compiledPath = compiledPath;
+		descriptor.looping = arguments.value("looping", true);
+		descriptor.reverse = arguments.value("reverse", false);
+		descriptor.speed = arguments.value("speed", 1.0F);
+		descriptor.followSelection = false;
+
+		const std::string action = arguments.value("action", std::string("play"));
+		const bool dryRun = arguments.value("dryRun", false);
+		const bool playModeActive = ScriptingSystem::Instance().IsRunning();
+		const auto executeTransport = [&](AnimationPreviewController& preview,
+			AnimationPreviewSessionHandle handle) {
+			if(action == "open") return AnimationStatus::Ok;
+			if(action == "play") return preview.Play(handle);
+			if(action == "pause") return preview.Pause(handle);
+			if(action == "resume") return preview.Resume(handle);
+			if(action == "stop") return preview.Stop(handle);
+			if(action == "seek")
+			{
+				if(arguments.contains("normalizedTime"))
+				{
+					return preview.SeekNormalized(handle, arguments["normalizedTime"].get<float>());
+				}
+				return preview.Seek(handle, arguments.value("seekTick", 0LL));
+			}
+			if(action == "step") return preview.Step(handle, arguments.value("deltaTicks", 1LL));
+			if(action == "set_speed") return preview.SetSpeed(handle, arguments.value("speed", 1.0F));
+			if(action == "set_looping") return preview.SetLooping(handle, arguments.value("flag", true));
+			if(action == "set_reverse") return preview.SetReverse(handle, arguments.value("flag", false));
+			if(action == "tick") return preview.TickSession(handle, arguments.value("deltaSeconds", 0.0));
+			if(action == "close")
+			{
+				return preview.DestroySession(handle, AnimationPreviewEndReason::Explicit);
+			}
+			return AnimationStatus::Unsupported;
+		};
+
+		if(dryRun)
+		{
+			AnimationPreviewController preview;
+			preview.SynchronizeContext(*assetId, playModeActive);
+			AnimationPreviewSessionHandle handle;
+			AnimationStatus status = preview.CreateIsolatedSession(
+				descriptor, input, rendererAvailable, handle);
+			if(status == AnimationStatus::Ok)
+			{
+				status = executeTransport(preview, handle);
+			}
+			if(status != AnimationStatus::Ok)
+			{
+				return reject(mapStatus(status),
+					"The preview request failed dry-run validation with status "
+					+ std::string(ToString(status)) + ".");
+			}
+			AutomationDispatchResult result;
+			result.ok = true;
+			result.message = "Validated the isolated preview request without changing editor preview state.";
+			result.data = {
+				{"action", action},
+				{"assetId", TerraEngine::ToHexString(*assetId)},
+				{"clipGeneration", publishedGeneration},
+				{"rendererAvailable", rendererAvailable},
+				{"evaluationMode", rendererAvailable ? "cpu_reference" : "cpu_renderer_fallback"},
+				{"publication", "none_dry_run"}
+			};
+			return result;
+		}
+
+		animationAutomationPreview.SynchronizeContext(*assetId, playModeActive);
+		bool alive = animationAutomationPreview.IsSessionAlive(animationAutomationPreviewHandle);
+		if(alive)
+		{
+			AnimationPreviewSessionState current;
+			if(animationAutomationPreview.GetSessionState(animationAutomationPreviewHandle, current)
+				!= AnimationStatus::Ok
+				|| animationAutomationPreviewAssetId != *assetId
+				|| current.descriptor.clipGeneration != publishedGeneration
+				|| action == "open")
+			{
+				(void)animationAutomationPreview.DestroySession(
+					animationAutomationPreviewHandle,
+					AnimationPreviewEndReason::ClipGenerationChanged);
+				animationAutomationPreviewHandle = {};
+				animationAutomationPreviewAssetId = EMPTY_UUID;
+				alive = false;
+			}
+		}
+		if(!alive && action == "close")
+		{
+			AutomationDispatchResult result;
+			result.ok = true;
+			result.message = "The isolated automation preview was already closed.";
+			result.data = {{"action", action}, {"active", false}, {"authoredMutationCount", 0U}};
+			return result;
+		}
+		if(!alive)
+		{
+			const AnimationStatus created = animationAutomationPreview.CreateIsolatedSession(
+				descriptor, input, rendererAvailable, animationAutomationPreviewHandle);
+			if(created != AnimationStatus::Ok)
+			{
+				return reject(mapStatus(created),
+					"The isolated preview session could not be created: "
+					+ std::string(ToString(created)) + ".");
+			}
+			animationAutomationPreviewAssetId = *assetId;
+		}
+
+		const AnimationStatus status = executeTransport(
+			animationAutomationPreview, animationAutomationPreviewHandle);
+		if(status != AnimationStatus::Ok)
+		{
+			return reject(mapStatus(status),
+				"The isolated preview command was rejected with status "
+				+ std::string(ToString(status)) + ".");
+		}
+		if(action == "close")
+		{
+			animationAutomationPreviewHandle = {};
+			animationAutomationPreviewAssetId = EMPTY_UUID;
+			AutomationDispatchResult result;
+			result.ok = true;
+			result.message = "Closed the isolated automation preview without changing authored state.";
+			result.data = {{"action", action}, {"active", false}, {"authoredMutationCount", 0U}};
+			return result;
+		}
+
+		AnimationPreviewSessionState state;
+		const AnimationStatus stateStatus = animationAutomationPreview.GetSessionState(
+			animationAutomationPreviewHandle, state);
+		if(stateStatus != AnimationStatus::Ok)
+		{
+			return reject(mapStatus(stateStatus),
+				"The preview changed but its copied state could not be read back.");
+		}
+		AutomationDispatchResult result;
+		result.ok = true;
+		result.message = "Applied the command to the isolated editor preview world.";
+		result.data = {
+			{"action", action},
+			{"assetId", TerraEngine::ToHexString(*assetId)},
+			{"active", state.active},
+			{"handle", {
+				{"slotIndex", state.handle.slotIndex},
+				{"generation", state.handle.generation}
+			}},
+			{"clipGeneration", state.descriptor.clipGeneration},
+			{"sessionRevision", state.sessionRevision},
+			{"playback", {
+				{"tick", state.playback.absoluteTick},
+				{"resolvedTick", state.playback.resolvedTick},
+				{"loopIndex", state.playback.loopCount},
+				{"runState", static_cast<std::uint32_t>(state.playback.runState)},
+				{"looping", state.playback.looping},
+				{"reverse", state.playback.reverse},
+				{"speed", state.playback.effectiveSpeed}
+			}},
+			{"output", {
+				{"complete", state.output.complete},
+				{"jointCount", state.output.joints.size()},
+				{"morphCount", state.output.morphs.size()},
+				{"curveCount", state.output.curves.size()},
+				{"eventCount", state.output.events.size()},
+				{"fallbackChannelCount", state.output.fallbackChannelCount},
+				{"unavailableChannelCount", state.output.unavailableChannelCount}
+			}},
+			{"rendererAvailable", state.rendererAvailable},
+			{"evaluationMode", static_cast<std::uint32_t>(state.evaluationMode)},
+			{"authoredMutationCount", 0U},
+			{"visibilityBoundary", "isolated_preview_protected_publish"}
+		};
+		return result;
+	}
+
+	AutomationDispatchResult EditorAutomationService::ExecuteAnimationAutomationHandler(
+		AutomationOperationId operation,
+		std::string_view operationName,
+		const AutomationRequestContext& request)
+	{
+		const auto reject = [](ErrorCategory category, std::string message) {
+			return AutomationDispatchResult{false, category, std::move(message), nlohmann::json::object()};
+		};
+		const auto succeed = [](std::string message, nlohmann::json data) {
+			return AutomationDispatchResult{true, ErrorCategory::Internal, std::move(message), std::move(data)};
+		};
+		const auto categoryFromName = [](std::string_view name) {
+			if (name == "validation") return ErrorCategory::Validation;
+			if (name == "permission") return ErrorCategory::Permission;
+			if (name == "approval_required") return ErrorCategory::ApprovalRequired;
+			if (name == "missing_target") return ErrorCategory::MissingTarget;
+			if (name == "invalid_camera_object") return ErrorCategory::InvalidCameraObject;
+			if (name == "unsupported_capability") return ErrorCategory::UnsupportedCapability;
+			if (name == "unsupported_readback") return ErrorCategory::UnsupportedReadback;
+			if (name == "queue_full") return ErrorCategory::QueueFull;
+			if (name == "over_budget") return ErrorCategory::OverBudget;
+			if (name == "conflict") return ErrorCategory::Conflict;
+			if (name == "stale_target") return ErrorCategory::StaleTarget;
+			if (name == "unavailable") return ErrorCategory::Unavailable;
+			if (name == "canceled") return ErrorCategory::Canceled;
+			if (name == "timeout") return ErrorCategory::Timeout;
+			return ErrorCategory::Internal;
+		};
+		const auto dispatchEnvelope = [&categoryFromName](const nlohmann::json& envelope) {
+			AutomationDispatchResult result;
+			result.ok = envelope.value("ok", false);
+			result.message = envelope.value("message", std::string{});
+			result.data = envelope.value("data", nlohmann::json::object());
+			if (!result.ok && envelope.contains("error") && envelope["error"].is_object())
+			{
+				result.error = categoryFromName(envelope["error"].value("category", std::string{}));
+			}
+			return result;
+		};
+
+		if (!request.state.projectAvailable)
+		{
+			return reject(ErrorCategory::Unavailable, "Animation automation requires an already-open project.");
+		}
+		// Validate every operation, including job reads/cancellation, before any
+		// shared store is inspected or mutated. This keeps the advertised schema
+		// authoritative instead of letting the fast job branches accept bad types
+		// or unadvertised fields.
+		const AutomationDispatchResult validatedRequest = ValidateAnimationAutomationRequest(
+			operationName,
+			request.arguments);
+		if (!validatedRequest.ok)
+		{
+			return validatedRequest;
+		}
+
+		// Handlers execute at the editor's protected automation boundary. Keeping
+		// the lock across generation comparison and publication prevents two worker-
+		// prepared edits from both accepting the same generation.
+		std::scoped_lock lock(animationAutomationMutex);
+		if (animationAutomationProjectGeneration != request.state.projectGeneration)
+		{
+			// Do not carry an old project's recorder sessions across the protected
+			// project-generation boundary. The job store reset below would otherwise
+			// leave only the in-memory recorder alive.
+			AnimationAutomationJobs(jobService).CancelAllRecordings();
+			animationAutomationPreview.DestroyAllSessions(
+				TerraEngine::Editor::Animation::AnimationPreviewEndReason::Explicit);
+			animationAutomationPreviewHandle = {};
+			animationAutomationPreviewAssetId = TerraEngine::EMPTY_UUID;
+			animationAutomationProjectGeneration = request.state.projectGeneration;
+			animationAutomationGeneration = 1U;
+			animationAutomationTransactions.Reset();
+			animationAutomationDetailedDiagnosticsLease.Reset();
+			activeAnimationImportJobs.clear();
+		}
+
+		AnimationAutomationJobs animationJobs(jobService);
+		if (operation == AutomationOperation("animation.job.get"))
+		{
+			const std::string jobId = request.arguments.value("jobId", std::string{});
+			RefreshAnimationImportJob(jobId);
+			return animationJobs.Get(jobId);
+		}
+		if (operation == AutomationOperation("animation.job.cancel"))
+		{
+			const std::string jobId = request.arguments.value("jobId", std::string{});
+			RefreshAnimationImportJob(jobId);
+			return animationJobs.Cancel(jobId);
+		}
+
+		nlohmann::json arguments = request.arguments;
+		arguments["correlationId"] = request.correlationId;
+		if (IsOperationOneOf(operation, {
+			AutomationOperation("animation.runtime.diagnostics"),
+			AutomationOperation("animation.camera.capture")
+		}))
+		{
+			arguments["rendererAvailable"] = request.state.rendererAvailable;
+		}
+		const bool isImport = IsOperationOneOf(operation, {
+			AutomationOperation("animation.asset.import"),
+			AutomationOperation("animation.asset.reimport")
+		});
+		const bool isMutation = isImport || IsOperationOneOf(operation, {
+			AutomationOperation("animation.controller.edit"),
+			AutomationOperation("animation.advanced.edit"),
+			AutomationOperation("animation.recording.start"),
+			AutomationOperation("animation.recording.stop"),
+			AutomationOperation("animation.preview.play"),
+			AutomationOperation("animation.runtime.parameters"),
+			// Runtime procedural and retarget requests only enqueue copied records.
+			// Their observable state remains owned by AnimationSystem's later protected
+			// capture/publication boundary, but MCP retries still need this outer receipt.
+			AutomationOperation("animation.runtime.procedural.goal"),
+			AutomationOperation("animation.runtime.retarget.request"),
+			AutomationOperation("animation.runtime.motion_match.request"),
+			AutomationOperation("animation.runtime.ragdoll.request"),
+			// The durable job remains separately reconnect-readable, while this receipt
+			// preserves project-generation and idempotency semantics at admission.
+			AutomationOperation("animation.motion_database.build")
+		});
+		if (isImport)
+		{
+			// Import paths are protected by the open-project generation. Clients do
+			// not need a separate animation generation before the asset exists.
+			arguments["expectedGeneration"] = animationAutomationGeneration;
+		}
+
+		std::string idempotencyClientScope = request.clientId + "#" + std::to_string(request.state.projectGeneration);
+		bool idempotencyReserved = false;
+		if (isMutation)
+		{
+			const std::string key = arguments.value("idempotencyKey", std::string{});
+			if (key.empty())
+			{
+				return reject(ErrorCategory::Validation, "Animation mutations require a non-empty idempotency key.");
+			}
+			nlohmann::json semanticArguments = arguments;
+			// Correlation identifies one transport attempt, not the requested work.
+			// Excluding it lets a retry that omitted an explicit correlation ID replay
+			// the original receipt instead of conflicting with the bridge-generated ID.
+			semanticArguments.erase("correlationId");
+			const IdempotencyDecision decision = idempotencyStore.Begin({
+				idempotencyClientScope,
+				std::string(operationName),
+				key,
+				std::string(operationName) + "\n" + std::to_string(request.state.projectGeneration) + "\n" + semanticArguments.dump(),
+				{{"correlationId", request.correlationId}, {"status", "preparing"}}
+			});
+			if (decision.disposition == IdempotencyDisposition::Replay)
+			{
+				if (decision.result.value("receiptVersion", 0U) == 1U)
+				{
+					AutomationDispatchResult replay;
+					replay.ok = decision.result.value("ok", false);
+					replay.error = categoryFromName(decision.result.value("errorCategory", std::string{}));
+					replay.message = decision.result.value("message", std::string{});
+					replay.data = decision.result.value("data", nlohmann::json::object());
+					replay.data["idempotencyDisposition"] = "replay";
+					return replay;
+				}
+				// Records created by an earlier editor build used the data object as
+				// the receipt. Preserve that same-session compatibility additively.
+				nlohmann::json replay = decision.result;
+				replay["idempotencyDisposition"] = "replay";
+				return succeed("Replayed the retained animation automation receipt.", std::move(replay));
+			}
+			if (decision.disposition == IdempotencyDisposition::Conflict)
+			{
+				return reject(ErrorCategory::Conflict, "The animation idempotency key was already used for different work.");
+			}
+			if (decision.disposition == IdempotencyDisposition::CapacityExceeded)
+			{
+				return reject(ErrorCategory::QueueFull, "The bounded animation idempotency store is full.");
+			}
+			idempotencyReserved = true;
+			// The domain receipt store receives a project/client/operation-scoped key;
+			// equal user keys from separate clients or projects cannot alias.
+			// The public key is bounded to 128 bytes. Collapse the project/client/
+			// operation scope into a stable compact domain key before a second schema
+			// validation and the native command identities derive from it.
+			arguments["idempotencyKey"] = "domain-" + std::to_string(AutomationOperation(
+				idempotencyClientScope + "#" + std::string(operationName) + "#" + key));
+		}
+		const auto abandonReservation = [&]() {
+			if (idempotencyReserved)
+			{
+				(void)idempotencyStore.Erase(
+					idempotencyClientScope,
+					operationName,
+					request.arguments.value("idempotencyKey", std::string{}));
+			}
+		};
+		const auto publishReservation = [&](const AutomationDispatchResult& terminalResult) {
+			if (!idempotencyReserved)
+			{
+				return;
+			}
+			(void)idempotencyStore.PublishResult(
+				idempotencyClientScope,
+				operationName,
+				request.arguments.value("idempotencyKey", std::string{}),
+				{
+					{"receiptVersion", 1U},
+					{"ok", terminalResult.ok},
+					{"errorCategory", std::string(ToString(terminalResult.error))},
+					{"message", terminalResult.message},
+					{"data", terminalResult.data}
+				},
+				true);
+		};
+
+		nlohmann::json importPreflightData = nlohmann::json::object();
+		if (isImport)
+		{
+			nlohmann::json preflightArguments = {
+				{"path", arguments.value("sourcePath", std::string{})},
+				{"force", operation == AutomationOperation("animation.asset.reimport")},
+				{"dryRun", true}
+			};
+			const AutomationDispatchResult preflight = dispatchEnvelope(
+				HandleAssetImport(preflightArguments, request.requestId));
+			if (!preflight.ok)
+			{
+				abandonReservation();
+				return preflight;
+			}
+			importPreflightData = preflight.data;
+		}
+
+		AutomationDispatchResult result;
+		if (isImport || operation == AutomationOperation("animation.asset.inspect"))
+		{
+			result = ExecuteAnimationAssetOperation(operationName, arguments, animationAutomationTransactions, animationAutomationGeneration);
+		}
+		else if (IsOperationOneOf(operation, {
+			AutomationOperation("animation.controller.edit"),
+			AutomationOperation("animation.controller.validate")
+		}))
+		{
+			result = ExecuteAnimationControllerOperation(
+				operationName,
+				arguments,
+				animationAutomationTransactions,
+				animationAutomationGeneration,
+				editorContext != nullptr ? editorContext->assetDatabase.get() : nullptr);
+		}
+		else if (operation == AutomationOperation("animation.advanced.edit"))
+		{
+			result = ExecuteAnimationAdvancedOperation(
+				operationName,
+				arguments,
+				animationAutomationTransactions,
+				animationAutomationGeneration,
+				editorContext != nullptr ? editorContext->assetDatabase.get() : nullptr);
+		}
+		else
+		{
+			std::function<AutomationDispatchResult()> protectedCommit;
+			if(operation == AutomationOperation("animation.preview.play"))
+			{
+				protectedCommit = [this, &arguments, rendererAvailable = request.state.rendererAvailable]() {
+					return ExecuteAnimationPreviewCommit(arguments, rendererAvailable);
+				};
+			}
+			result = ExecuteAnimationRuntimeOperation(
+				operationName,
+				arguments,
+				animationAutomationTransactions,
+				animationAutomationGeneration,
+				protectedCommit,
+				&animationJobs,
+				editorContext != nullptr && editorContext->assetDatabase != nullptr
+					? editorContext->assetDatabase->GetAssetRoot() : std::filesystem::path{},
+				&animationAutomationDetailedDiagnosticsLease);
+		}
+		if (!result.ok)
+		{
+			abandonReservation();
+			return result;
+		}
+
+		if (operation == AutomationOperation("animation.asset.inspect"))
+		{
+			const auto assetId = TerraEngine::ParseUUID(arguments.value("assetId", std::string{}));
+			if (!assetId || editorContext == nullptr || editorContext->assetDatabase == nullptr)
+			{
+				return reject(ErrorCategory::MissingTarget, "The requested animation asset is unavailable in the open project.");
+			}
+			const AssetMetadata* metadata = editorContext->assetDatabase->FindAssetByGuid(*assetId);
+			if (metadata == nullptr)
+			{
+				return reject(ErrorCategory::MissingTarget, "The requested animation asset was not found.");
+			}
+			result.data["sourcePath"] = metadata->sourcePath.generic_string();
+			result.data["compiledPath"] = metadata->compiledPath.generic_string();
+			result.data["importer"] = metadata->importerName;
+			result.data["registeredAssetId"] = TerraEngine::ToHexString(metadata->guid);
+			result.data["subassets"] = nlohmann::json::array();
+			result.data["sourceDiagnostics"] = nlohmann::json::array();
+
+			const std::size_t maximumItems = arguments.value(
+				"maximumItems",
+				static_cast<std::uint64_t>(kAnimationAutomationMaximumItems));
+			std::size_t emittedChildren = 0U;
+			for (const GeneratedModelPackageChildKind kind : {
+				GeneratedModelPackageChildKind::Mesh,
+				GeneratedModelPackageChildKind::Material,
+				GeneratedModelPackageChildKind::Texture,
+				GeneratedModelPackageChildKind::Skeleton,
+				GeneratedModelPackageChildKind::AnimationClip,
+				GeneratedModelPackageChildKind::MorphTarget,
+				GeneratedModelPackageChildKind::DeformableMesh,
+				GeneratedModelPackageChildKind::Prefab
+			})
+			{
+				std::vector<TerraEngine::UUID> childIds;
+				if (!editorContext->assetDatabase->TryGetGeneratedModelPackageChildIds(metadata->guid, kind, childIds))
+				{
+					continue;
+				}
+				for (const TerraEngine::UUID childId : childIds)
+				{
+					if (emittedChildren >= maximumItems)
+					{
+						break;
+					}
+					GeneratedModelPackageChildMetadata child;
+					if (!editorContext->assetDatabase->TryGetGeneratedModelPackageChildMetadata(childId, kind, child))
+					{
+						continue;
+					}
+					nlohmann::json dependencies = nlohmann::json::array();
+					for (const TerraEngine::UUID dependency : child.dependencies)
+					{
+						dependencies.push_back(TerraEngine::ToHexString(dependency));
+					}
+					result.data["subassets"].push_back({
+						{"assetId", TerraEngine::ToHexString(child.guid)},
+						{"kind", AnimationChildKindName(child.kind)},
+						{"displayName", child.displayName},
+						{"semanticKey", child.semanticKey},
+						{"compiledPath", child.compiledPath.generic_string()},
+						{"compatibilityFingerprint", child.compatibilityFingerprint},
+						{"publishedGeneration", child.publishedGeneration},
+						{"readOnlyPackageChild", child.readOnlyPackageChild},
+						{"dependencies", std::move(dependencies)}
+					});
+					++emittedChildren;
+				}
+			}
+
+			ModelPackageAnimationSummaryMetadata summary;
+			if (editorContext->assetDatabase->TryGetModelPackageAnimationSummary(*metadata, summary))
+			{
+				result.data["packageSummary"] = {
+					{"readable", summary.readable},
+					{"publishedAtomically", summary.publishedAtomically},
+					{"preservedLastKnownGood", summary.preservedLastKnownGood},
+					{"prefabBindingsValid", summary.prefabBindingsValid},
+					{"schemaVersion", summary.schemaVersion},
+					{"candidateGeneration", summary.candidateGeneration},
+					{"publishedGeneration", summary.publishedGeneration},
+					{"lastKnownGoodGeneration", summary.lastKnownGoodGeneration},
+					{"generatedChildCount", summary.generatedChildCount},
+					{"returnedChildCount", emittedChildren},
+					{"resultsTruncated", emittedChildren < summary.generatedChildCount},
+					{"skeletonCount", summary.skeletonCount},
+					{"animationClipCount", summary.animationClipCount},
+					{"morphTargetCount", summary.morphTargetCount},
+					{"deformableMeshCount", summary.deformableMeshCount},
+					{"prefabCount", summary.prefabCount},
+					{"dependencyFingerprint", summary.dependencyFingerprint}
+				};
+				for (const std::string& diagnostic : summary.diagnostics)
+				{
+					if (result.data["sourceDiagnostics"].size() >= maximumItems)
+					{
+						break;
+					}
+					result.data["sourceDiagnostics"].push_back({
+						{"category", "import"},
+						{"status", summary.errorCount == 0U ? "published" : "invalid"},
+						{"correlationId", request.correlationId},
+						{"generation", summary.publishedGeneration},
+						{"message", diagnostic},
+						{"recommendedAction", summary.errorCount == 0U
+							? "No action is required."
+							: "Inspect the package import result and repair the named source or binding."}
+					});
+				}
+			}
+		}
+
+		if (operation == AutomationOperation("animation.controller.validate"))
+		{
+			const auto assetId = TerraEngine::ParseUUID(arguments.value("assetId", std::string{}));
+			if (!assetId || editorContext == nullptr || editorContext->assetDatabase == nullptr)
+			{
+				return reject(ErrorCategory::MissingTarget, "The requested animation controller is unavailable in the open project.");
+			}
+			const AssetMetadata* metadata = editorContext->assetDatabase->FindAssetByGuid(*assetId);
+			if (metadata == nullptr || metadata->importerName != "AnimationControllerAssetImporter")
+			{
+				return reject(ErrorCategory::MissingTarget, "The requested asset is not a registered animation controller.");
+			}
+
+			constexpr std::size_t kMaximumControllerBytes = 64U * 1024U * 1024U;
+			const std::filesystem::path compiledPath =
+				editorContext->assetDatabase->GetBuildRoot() / metadata->compiledPath;
+			std::vector<std::uint8_t> bytes;
+			std::string readError;
+			TerraEngine::Animation::AnimationControllerAsset controller;
+			TerraEngine::Animation::AnimationStatus status = TerraEngine::Animation::AnimationStatus::InvalidEnvelope;
+			if (ReadBoundedAutomationFile(compiledPath, kMaximumControllerBytes, bytes, readError))
+			{
+				status = TerraEngine::Animation::DeserializeAnimationControllerAsset(bytes, 0U, controller);
+				if (status == TerraEngine::Animation::AnimationStatus::Ok)
+				{
+					status = TerraEngine::Animation::ValidateAnimationControllerAsset(controller);
+				}
+			}
+
+			const bool valid = status == TerraEngine::Animation::AnimationStatus::Ok;
+			nlohmann::json diagnostics = nlohmann::json::array();
+			if (!valid)
+			{
+				diagnostics.push_back({
+					{"category", readError.empty() ? "controller_validation" : "asset_read"},
+					{"status", readError.empty() ? std::string(TerraEngine::Animation::ToString(status)) : "unavailable"},
+					{"correlationId", request.correlationId},
+					{"generation", animationAutomationGeneration},
+					{"message", readError.empty() ? "The compiled controller did not pass its bounded codec and semantic validation." : readError},
+					{"recommendedAction", "Recompile or repair the controller source, then validate the newly published generation."}
+				});
+			}
+			result.message = valid
+				? "Validated the compiled animation controller."
+				: "The compiled animation controller is invalid; no authored or runtime state changed.";
+			result.data = {
+				{"schemaVersion", kAnimationAutomationSchemaVersion},
+				{"assetId", arguments.value("assetId", std::string{})},
+				{"valid", valid},
+				{"status", valid ? "ok" : (readError.empty() ? std::string(TerraEngine::Animation::ToString(status)) : "unavailable")},
+				{"compatibilityFingerprint", controller.compatibilityFingerprint},
+				{"counts", {
+					{"parameters", controller.parameters.size()},
+					{"nodes", controller.nodes.size()},
+					{"states", controller.states.size()},
+					{"transitions", controller.transitions.size()},
+					{"layers", controller.layers.size()},
+					{"subgraphs", controller.subgraphDependencies.size()}
+				}},
+				{"diagnostics", std::move(diagnostics)},
+				{"immutable", true}
+			};
+		}
+
+		if (operation == AutomationOperation("animation.runtime.diagnostics"))
+		{
+			using namespace TerraEngine::Animation;
+			const std::optional<AnimationDiagnosticsSnapshot> summary =
+				AcquireAnimationDiagnosticsSnapshot();
+			const AnimationProductionIntegrationSnapshot integration =
+				AnimationSystem::Instance().ReadProductionIntegrationSnapshot();
+			const TerraEngine::Renderer::AnimationGpuBackendExecutionSnapshot
+				backendExecution =
+					RenderSystem::Instance().GetLatestAnimationGpuBackendExecution();
+			const std::vector<TerraEngine::Renderer::RenderFrameRenderableRecord>
+				renderables =
+					RenderSystem::Instance().GetLatestRenderablesSnapshot();
+			const std::shared_ptr<const PublishedGpuAnimationPresentationPlan>
+				gpuPresentation =
+					AnimationPresentationSystem::Instance()
+						.LoadPublishedGpuAnimationPresentationPlan();
+			const std::size_t maximumItems = arguments.value(
+				"maximumItems",
+				static_cast<std::uint64_t>(kAnimationAutomationMaximumItems));
+			const auto renderSourceName = [](
+				TerraEngine::Renderer::AnimationRenderEvaluationSource source)
+				-> std::string_view
+			{
+				using TerraEngine::Renderer::AnimationRenderEvaluationSource;
+				switch (source)
+				{
+					case AnimationRenderEvaluationSource::None:
+						return "None";
+					case AnimationRenderEvaluationSource::CpuPose:
+						return "CpuPose";
+					case AnimationRenderEvaluationSource::GpuVisual:
+						return "GpuVisual";
+					case AnimationRenderEvaluationSource::HybridAuthoritative:
+						return "HybridAuthoritative";
+					case AnimationRenderEvaluationSource::SafeFallback:
+						return "SafeFallback";
+				}
+				return "Unknown";
+			};
+			const auto backendRecordJson = [](
+				const TerraEngine::Renderer::AnimationGpuBackendExecutionRecord& record)
+				-> nlohmann::json
+			{
+				if (!record.IsComplete())
+				{
+					return nullptr;
+				}
+				return {
+					{"frameId", record.frameId},
+					{"submissionSerial", record.submissionSerial},
+					{"planGeneration", record.planGeneration},
+					{"rendererGeneration", record.rendererGeneration},
+					{"recordedDispatchCount", record.recordedDispatchCount}
+				};
+			};
+			nlohmann::json gpuPresentationJson = nullptr;
+			if (gpuPresentation)
+			{
+				// Keep backward compatibility with the representative first packet,
+				// while the bounded packet list below lets diagnostics associate every
+				// animated draw with its exact offsets and playback cursor.
+				nlohmann::json firstPacket = nullptr;
+				nlohmann::json packets = nlohmann::json::array();
+				if (!gpuPresentation->plan.workPackets.empty()
+					&& !gpuPresentation->plan.renderIdentities.empty())
+				{
+					const GpuAnimationWorkPacket& packet =
+						gpuPresentation->plan.workPackets.front();
+					const GpuAnimationRenderIdentity& identity =
+						gpuPresentation->plan.renderIdentities.front();
+					nlohmann::json generation = nullptr;
+					if (packet.generationRecordIndex
+						< gpuPresentation->plan.generationRecords.size())
+					{
+						const GpuAnimationGenerationRecord& record =
+							gpuPresentation->plan.generationRecords[
+								packet.generationRecordIndex];
+						generation = {
+							{"instanceSlot", record.instanceSlot},
+							{"instanceGeneration", record.instanceGeneration},
+							{"componentGeneration", record.componentGeneration},
+							{"meshGeneration", record.meshGeneration},
+							{"resourceGeneration", record.resourceGeneration},
+							{"rendererGeneration", record.rendererGeneration},
+							{"sceneGeneration", record.sceneGeneration},
+							{"workGeneration", record.workGeneration},
+							{"programGeneration", record.programGeneration}
+						};
+					}
+					firstPacket = {
+						{"stableInstanceId", packet.stableInstanceId},
+						{"workPacketIndex", 0U},
+						{"stageMask", packet.stageMask},
+						{"jointCount", packet.jointCount},
+						{"morphCount", packet.morphCount},
+						{"sampleTick", packet.sampleTick},
+						{"localPoseOffsetBytes", packet.localPoseOffsetBytes},
+						{"modelPoseOffsetBytes", packet.modelPoseOffsetBytes},
+						{"paletteOffsetBytes", packet.paletteOffsetBytes},
+						{"generation", std::move(generation)},
+						{"renderIdentity", {
+							{"meshId", TerraEngine::ToHexString(identity.meshId)},
+							{"meshHeaderVersion", identity.meshHeaderVersion},
+							{"deformablePayloadGeneration",
+								identity.deformablePayloadGeneration},
+							{"rendererGeneration", identity.rendererGeneration},
+							{"sceneGeneration", identity.sceneGeneration},
+							{"skeletonCompatibilityFingerprint",
+								identity.skeletonCompatibilityFingerprint}
+						}}
+					};
+				}
+				for (std::size_t packetIndex = 0U;
+					packetIndex < gpuPresentation->plan.workPackets.size()
+						&& packets.size() < maximumItems;
+					++packetIndex)
+				{
+					if (packetIndex >= gpuPresentation->plan.renderIdentities.size())
+					{
+						break;
+					}
+					const GpuAnimationWorkPacket& packet =
+						gpuPresentation->plan.workPackets[packetIndex];
+					const GpuAnimationRenderIdentity& identity =
+						gpuPresentation->plan.renderIdentities[packetIndex];
+					nlohmann::json generation = nullptr;
+					if (packet.generationRecordIndex
+						< gpuPresentation->plan.generationRecords.size())
+					{
+						const GpuAnimationGenerationRecord& record =
+							gpuPresentation->plan.generationRecords[
+								packet.generationRecordIndex];
+						generation = {
+							{"instanceSlot", record.instanceSlot},
+							{"instanceGeneration", record.instanceGeneration},
+							{"componentGeneration", record.componentGeneration},
+							{"meshGeneration", record.meshGeneration},
+							{"resourceGeneration", record.resourceGeneration},
+							{"rendererGeneration", record.rendererGeneration},
+							{"sceneGeneration", record.sceneGeneration},
+							{"workGeneration", record.workGeneration},
+							{"programGeneration", record.programGeneration}
+						};
+					}
+					packets.push_back({
+						{"workPacketIndex", packetIndex},
+						{"stableInstanceId", packet.stableInstanceId},
+						{"stableSubmissionOrdinal",
+							packet.stableSubmissionOrdinal},
+						{"generationRecordIndex",
+							packet.generationRecordIndex},
+						{"stageMask", packet.stageMask},
+						{"flags", packet.flags},
+						{"jointCount", packet.jointCount},
+						{"morphCount", packet.morphCount},
+						{"paletteEntryCount", packet.paletteEntryCount},
+						{"sampleTick", packet.sampleTick},
+						{"scratchOffsetBytes", packet.scratchOffsetBytes},
+						{"localPoseOffsetBytes", packet.localPoseOffsetBytes},
+						{"modelPoseOffsetBytes", packet.modelPoseOffsetBytes},
+						{"paletteOffsetBytes", packet.paletteOffsetBytes},
+						{"morphOutputOffsetBytes",
+							packet.morphOutputOffsetBytes},
+						{"generation", std::move(generation)},
+						{"renderIdentity", {
+							{"meshId", TerraEngine::ToHexString(identity.meshId)},
+							{"meshHeaderVersion", identity.meshHeaderVersion},
+							{"deformablePayloadGeneration",
+								identity.deformablePayloadGeneration},
+							{"rendererGeneration", identity.rendererGeneration},
+							{"sceneGeneration", identity.sceneGeneration},
+							{"skeletonCompatibilityFingerprint",
+								identity.skeletonCompatibilityFingerprint}
+						}}
+					});
+				}
+				gpuPresentationJson = {
+					{"presentationGeneration",
+						gpuPresentation->presentationGeneration},
+					{"sourceGeneration", gpuPresentation->sourceGeneration},
+					{"loweringStatus",
+						static_cast<std::uint32_t>(
+							gpuPresentation->loweringStatus)},
+					{"planStatus",
+						static_cast<std::uint32_t>(
+							gpuPresentation->planStatus)},
+					{"safeFallback", gpuPresentation->safeFallback},
+					{"planGeneration", gpuPresentation->plan.generation},
+					{"workPacketCount",
+						gpuPresentation->plan.workPackets.size()},
+					{"dispatchCommandCount",
+						gpuPresentation->plan.dispatchCommands.size()},
+					{"ownerMappingCount",
+						gpuPresentation->ownerObjectMappings.size()},
+					{"packets", std::move(packets)},
+					{"packetsTruncated",
+						gpuPresentation->plan.workPackets.size()
+							> maximumItems},
+					{"firstPacket", std::move(firstPacket)}
+				};
+			}
+
+			nlohmann::json diagnostics = nlohmann::json::array();
+			nlohmann::json renderableBindings = nlohmann::json::array();
+			std::size_t animatedRenderableCount = 0U;
+			for (const TerraEngine::Renderer::RenderFrameRenderableRecord& renderable :
+				renderables)
+			{
+				const TerraEngine::Renderer::AnimationRenderGenerationRecord& animation =
+					renderable.animation;
+				if (animation.source
+					== TerraEngine::Renderer::AnimationRenderEvaluationSource::None)
+				{
+					continue;
+				}
+				++animatedRenderableCount;
+				if (renderableBindings.size() >= maximumItems)
+				{
+					continue;
+				}
+				// Keep this record identity-only and bounded. It deliberately omits
+				// matrices, palettes, morph arrays, and backend handles.
+				renderableBindings.push_back({
+					{"objectId", TerraEngine::ToHexString(renderable.objectId)},
+					{"meshId", TerraEngine::ToHexString(renderable.meshId)},
+					{"source", std::string(renderSourceName(animation.source))},
+					{"complete", animation.complete},
+					{"safeFallback", animation.safeFallback},
+					{"stableInstanceId", animation.stableInstanceId},
+					{"poseGeneration", animation.poseGeneration},
+					{"paletteGeneration", animation.paletteGeneration},
+					{"programGeneration", animation.programGeneration},
+					{"animationPlanGeneration", animation.animationPlanGeneration},
+					{"rendererGeneration", animation.rendererGeneration},
+					{"firstGpuWorkPacket", animation.firstGpuWorkPacket},
+					{"gpuWorkPacketCount", animation.gpuWorkPacketCount},
+					{"gpuStageMask", animation.gpuStageMask}
+				});
+			}
+			if (!summary)
+			{
+				diagnostics.push_back({
+					{"category", "animation_snapshot"},
+					{"status", "not_ready"},
+					{"correlationId", request.correlationId},
+					{"generation", AnimationSystem::Instance().AuthorityPublicationGeneration()},
+					{"message", "No complete animation diagnostics snapshot has reached the protected publication boundary yet."},
+					{"recommendedAction", "Advance one editor frame or inspect the renderer-independent production integration snapshot returned with this result."}
+				});
+			}
+
+			nlohmann::json summaryJson = nullptr;
+			if (summary)
+			{
+				const AnimationDiagnosticsCounters& counters = summary->counters;
+				const AnimationDiagnosticsTimings& timings = summary->timings;
+				summaryJson = {
+					{"schemaVersion", summary->schemaVersion},
+					{"frameIndex", summary->frameIndex},
+					{"fixedTick", summary->fixedTick},
+					{"detailLevel", static_cast<std::uint32_t>(summary->detailLevel)},
+					{"dormant", summary->dormant},
+					{"baseline", {
+						{"feature", std::string(summary->baseline.feature)},
+						{"sourceCommit", std::string(summary->baseline.sourceCommit)},
+						{"manifestSha256", std::string(summary->baseline.manifestSha256)},
+						{"evidenceSha256", std::string(summary->baseline.evidenceSha256)},
+						{"workloadsSha256", std::string(summary->baseline.workloadsSha256)}
+					}},
+					{"counters", {
+						{"activeAnimators", counters.activeAnimators},
+						{"evaluatedAnimators", counters.evaluatedAnimators},
+						{"suspendedAnimators", counters.suspendedAnimators},
+						{"degradedAnimators", counters.degradedAnimators},
+						{"schedulerMembershipChecks", counters.schedulerMembershipChecks},
+						{"workerJobs", counters.workerJobs},
+						{"transientAllocations", counters.transientAllocations},
+						{"poseAllocations", counters.poseAllocations},
+						{"residencyRequests", counters.residencyRequests},
+						{"gpuDispatches", counters.gpuDispatches},
+						{"gpuUploadBytes", counters.gpuUploadBytes},
+						{"gpuReadbacks", counters.gpuReadbacks},
+						{"gpuWaits", counters.gpuWaits},
+						{"physicsHandoffs", counters.physicsHandoffs},
+						{"managedCallbacks", counters.managedCallbacks},
+						{"parameterQueueDepth", counters.parameterQueueDepth},
+						{"commandQueueDepth", counters.commandQueueDepth},
+						{"eventQueueDepth", counters.eventQueueDepth},
+						{"rootMotionQueueDepth", counters.rootMotionQueueDepth},
+						{"rejectedBatches", counters.rejectedBatches},
+						{"staleWorkItems", counters.staleWorkItems},
+						{"gpuVisualAnimators", counters.gpuVisualAnimators},
+						{"hybridAuthoritativeAnimators", counters.hybridAuthoritativeAnimators},
+						{"cpuFallbackAnimators", counters.cpuFallbackAnimators},
+						{"cpuSampledJoints", counters.cpuSampledJoints},
+						{"gpuEvaluatedJoints", counters.gpuEvaluatedJoints},
+						{"gpuBatches", counters.gpuBatches},
+						{"gpuTransferBytes", counters.gpuTransferBytes},
+						{"gpuReadbackBytes", counters.gpuReadbackBytes},
+						{"completePoseReadbackBytes", counters.completePoseReadbackBytes},
+						{"boundedMetadataReadbackBytes", counters.boundedMetadataReadbackBytes},
+						{"residencyHits", counters.residencyHits},
+						{"residencyMisses", counters.residencyMisses},
+						{"fallbackCount", counters.fallbackCount},
+						{"modeSwitchCount", counters.modeSwitchCount}
+					}},
+					{"timings", {
+						{"preparationMs", timings.preparationMs},
+						{"evaluationMs", timings.evaluationMs},
+						{"publicationMs", timings.publicationMs},
+						{"presentationMs", timings.presentationMs},
+						{"cpuAuthorityMs", timings.cpuAuthorityMs},
+						{"gpuPlanningMs", timings.gpuPlanningMs},
+						{"gpuExecutionMs", timings.gpuExecutionMs},
+						{"deformationMs", timings.deformationMs}
+					}}
+				};
+			}
+
+			nlohmann::json detailedJson = nullptr;
+			if (arguments.value("includeDetails", false))
+			{
+				// The runtime adapter retained this lease before returning to the
+				// service. Do not create a local replacement here: its destructor would
+				// disable detailed collection before the next protected frame.
+				if (!animationAutomationDetailedDiagnosticsLease.EnsureRequested())
+				{
+					return reject(ErrorCategory::Unavailable,
+						"Detailed animation diagnostics could not acquire the bounded automation collection request.");
+				}
+				const std::optional<AnimationDetailedDiagnosticsSnapshot> detailed =
+					AcquireAnimationDetailedDiagnosticsSnapshot();
+				if (!detailed)
+				{
+					diagnostics.push_back({
+						{"category", "animation_detailed_snapshot"},
+						{"status", "pending_publication"},
+						{"correlationId", request.correlationId},
+						{"generation", AnimationSystem::Instance().AuthorityPublicationGeneration()},
+						{"message", "Detailed animation diagnostics were requested and will become available after the next protected animation publication."},
+						{"recommendedAction", "Advance an editor or simulation frame, then request detailed diagnostics again."}
+					});
+				}
+				else
+				{
+					nlohmann::json animators = nlohmann::json::array();
+					for (const AnimationAnimatorDiagnosticRecord& animator : detailed->animators)
+					{
+						if (animators.size() >= maximumItems)
+						{
+							break;
+						}
+						animators.push_back({
+							{"stableInstanceId", animator.stableInstanceId},
+							{"instanceSlot", animator.instanceSlot},
+							{"instanceGeneration", animator.instanceGeneration},
+							{"requestedPolicy", static_cast<std::uint32_t>(animator.requestedPolicy)},
+							{"effectiveMode", std::string(ToString(animator.effectiveMode))},
+							{"selectionReason", std::string(ToString(animator.selectionReason))},
+							{"fallbackReason", std::string(ToString(animator.fallbackReason))},
+							{"poseResidency", static_cast<std::uint32_t>(animator.poseResidency)},
+							{"cpuAuthoritativeJointCount", animator.cpuAuthoritativeJointCount},
+							{"gpuStageMask", animator.gpuStageMask},
+							{"batchOrdinal", animator.batchOrdinal},
+							{"gpuEvaluatedElements", animator.gpuEvaluatedElements},
+							{"transferBytes", animator.transferBytes},
+							{"readbackBytes", animator.readbackBytes},
+							{"completePoseReadbackBytes", animator.completePoseReadbackBytes},
+							{"readbackCount", animator.readbackCount},
+							{"synchronizationWaitCount", animator.synchronizationWaitCount},
+							{"modeSwitchCount", animator.modeSwitchCount}
+						});
+					}
+					detailedJson = {
+						{"schemaVersion", detailed->schemaVersion},
+						{"frameIndex", detailed->frameIndex},
+						{"collapsed", detailed->collapsed},
+						{"animators", std::move(animators)},
+						{"totalAnimatorRecords", detailed->animators.size()},
+						{"recordsTruncated", detailed->animators.size() > maximumItems},
+						{"modeSwitchHistoryCount", detailed->modeSwitchHistory.size()}
+					};
+				}
+			}
+
+			result.message = summary
+				? "Read the immutable animation runtime diagnostics snapshot."
+				: "Animation diagnostics are not published yet; returned renderer-independent readiness data.";
+			result.data = {
+				{"schemaVersion", kAnimationAutomationSchemaVersion},
+				{"rendererAvailable", request.state.rendererAvailable},
+				{"summaryAvailable", summary.has_value()},
+				// Callers need to distinguish a deliberately deferred detailed
+				// snapshot from a collapsed or empty result. Keep this main service
+				// endpoint aligned with AnimationRuntimeOperations' public contract.
+				{"detailsPendingPublication",
+					arguments.value("includeDetails", false)
+						&& detailedJson.is_null()},
+				{"summary", std::move(summaryJson)},
+				{"details", std::move(detailedJson)},
+				{"gpuPresentation", std::move(gpuPresentationJson)},
+				{"renderableBindings", {
+					{"records", std::move(renderableBindings)},
+					{"totalAnimatedRenderables", animatedRenderableCount},
+					{"recordsTruncated", animatedRenderableCount > maximumItems}
+				}},
+				{"gpuBackendExecution", {
+					{"submitted", backendExecution.HasSubmittedWork()},
+					{"completed", backendExecution.HasCompletedWork()},
+					{"latestSubmitted",
+						backendRecordJson(backendExecution.latestSubmitted)},
+					{"latestCompleted",
+						backendRecordJson(backendExecution.latestCompleted)}
+				}},
+				{"integration", {
+					{"planStatus", std::string(ToString(integration.planStatus))},
+					{"executionPolicy", static_cast<std::uint32_t>(integration.executionPolicy)},
+					{"availableWorkerCount", integration.availableWorkerCount},
+					{"selectedWorkerCount", integration.selectedWorkerCount},
+					{"itemCount", integration.itemCount},
+					{"rangeCount", integration.rangeCount},
+					{"scratchBytes", integration.scratchBytes},
+					{"cacheEntryCount", integration.cacheEntryCount},
+					{"reusedItemCount", integration.reusedItemCount},
+					{"fallbackItemCount", integration.fallbackItemCount},
+					{"deterministicPublicationValidated", integration.deterministicPublicationValidated},
+					{"cancellationRequested", integration.cancellationRequested},
+					{"memory", {
+						{"configured", integration.memory.configured},
+						{"shutdown", integration.memory.shutdown},
+						{"totalBytesInUse", integration.memory.totalBytesInUse},
+						{"totalHighWaterBytes", integration.memory.totalHighWaterBytes},
+						{"activeReservations", integration.memory.activeReservations},
+						{"pressureEvents", integration.memory.pressureEvents},
+						{"allocationFailures", integration.memory.allocationFailures}
+					}}
+				}},
+				{"diagnostics", std::move(diagnostics)}
+			};
+		}
+
+		if (operation == AutomationOperation("animation.camera.capture"))
+		{
+			const std::string source = arguments.value("source", std::string{});
+			nlohmann::json envelope;
+			if (source == "game")
+			{
+				envelope = HandleGameViewCapture(arguments, request.requestId);
+			}
+			else if (source == "camera")
+			{
+				envelope = HandleCameraObjectCapture(arguments, request.requestId);
+			}
+			else if (source == "custom")
+			{
+				envelope = HandleCustomCameraCapture(arguments, request.requestId);
+			}
+			else if (source == "scene")
+			{
+				const std::shared_ptr<SceneViewWindow> sceneView = mainEditor != nullptr
+					? mainEditor->GetWindow<SceneViewWindow>()
+					: nullptr;
+				if (sceneView == nullptr)
+				{
+					return reject(ErrorCategory::Unavailable, "Scene View is unavailable in the installed editor session.");
+				}
+				const nlohmann::json sceneState = sceneView->GetAutomationState();
+				const nlohmann::json camera = sceneState.value("camera", nlohmann::json::object());
+				nlohmann::json sceneCapture = arguments;
+				sceneCapture["name"] = "Scene View";
+				sceneCapture["position"] = camera.value("position", nlohmann::json::array({0.0, 0.0, 5.0}));
+				sceneCapture["lookAt"] = camera.value("focus", nlohmann::json::array({0.0, 0.0, 0.0}));
+				sceneCapture["up"] = camera.value("up", nlohmann::json::array({0.0, 1.0, 0.0}));
+				sceneCapture["projection"] = sceneState.value("projection", "perspective");
+				sceneCapture["verticalFovDegrees"] = camera.value("fieldOfViewDegrees", 60.0);
+				sceneCapture["orthographicHeight"] = 10.0;
+				sceneCapture["nearPlane"] = 0.1;
+				sceneCapture["farPlane"] = 10000.0;
+				envelope = HandleCustomCameraCapture(sceneCapture, request.requestId);
+				if (envelope.value("ok", false) && envelope.contains("data"))
+				{
+					envelope["data"]["automationSource"] = "scene";
+					envelope["data"]["sceneViewState"] = std::move(sceneState);
+				}
+			}
+			else
+			{
+				return reject(ErrorCategory::Validation, "Animation capture source is not supported.");
+			}
+			return dispatchEnvelope(envelope);
+		}
+
+		if (isImport && arguments.value("dryRun", false))
+		{
+			result.data["preflight"] = std::move(importPreflightData);
+		}
+		if (isImport && !arguments.value("dryRun", false))
+		{
+			// Reserve the durable job before queuing the real AssetDatabase mutation.
+			// If admission fails, the preflight above had no side effects and the
+			// caller can retry without duplicating an already-queued import.
+			const AutomationDispatchResult started = animationJobs.Start({
+				"animation_import",
+				std::string(operationName),
+				request.requestId,
+				request.correlationId,
+				request.arguments.value("idempotencyKey", std::string{}),
+				true
+			});
+			if (!started.ok)
+			{
+				abandonReservation();
+				return started;
+			}
+			const std::string jobId = started.data.value("jobId", std::string{});
+			nlohmann::json importArguments = {
+				{"path", arguments.value("sourcePath", std::string{})},
+				{"force", operation == AutomationOperation("animation.asset.reimport")},
+				{"dryRun", false}
+			};
+			AutomationDispatchResult imported = dispatchEnvelope(
+				HandleAssetImport(importArguments, request.requestId));
+			if (!imported.ok)
+			{
+				(void)jobService.CompleteFailed(jobId, {
+					{"message", imported.message},
+					{"errorCategory", std::string(ToString(imported.error))}
+				});
+				imported.data["jobId"] = jobId;
+				imported.data["correlationId"] = request.correlationId;
+				publishReservation(imported);
+				return imported;
+			}
+			const std::filesystem::path relative = imported.data.value("path", std::string{});
+			const std::filesystem::path absolute = editorContext->assetDatabase->GetAssetRoot() / relative;
+			const std::uint32_t timeoutMs = arguments.value("timeoutMs", 300000U);
+			activeAnimationImportJobs.emplace(jobId, ActiveAnimationImportJob{
+				absolute,
+				request.state.projectGeneration,
+				std::chrono::system_clock::now() + std::chrono::milliseconds(timeoutMs)
+			});
+			RefreshAnimationImportJob(jobId);
+			result.data["jobId"] = jobId;
+			result.data["import"] = std::move(imported.data);
+		}
+
+		const bool dryRun = arguments.value("dryRun", false);
+		if (isMutation && !dryRun)
+		{
+			++animationAutomationGeneration;
+		}
+		result.data["generation"] = animationAutomationGeneration;
+		result.data["correlationId"] = request.correlationId;
+		result.data["diagnostics"] = result.data.value("diagnostics", nlohmann::json::array());
+		if (isMutation)
+		{
+			result.data["idempotencyDisposition"] = "new";
+			publishReservation(result);
+		}
+		return result;
 	}
 
 	AutomationDispatchResult EditorAutomationService::ExecutePhysicsAutomationHandler(
@@ -3542,7 +5059,66 @@ namespace TerraEngine::Editor::Automation
 		{
 			PrefabAuthoringService::Result result;
 			if (operation == AutomationOperation("prefab.instantiate"))
-				result = prefabAuthoringService.Instantiate(arguments.value("prefab", std::string{}), arguments.value("name", std::string{}));
+			{
+				const std::string prefabIdentity = arguments.value("prefab", std::string{});
+				const AssetMetadata* registeredPrefab = nullptr;
+				if (editorContext != nullptr && editorContext->assetDatabase != nullptr)
+				{
+					// Stable GUID input avoids path ambiguity after a move. Path input is
+					// accepted only after projectAssetPath has proven it remains under Assets.
+					if (const std::optional<TerraEngine::UUID> guid = TerraEngine::ParseUUID(prefabIdentity))
+					{
+						registeredPrefab = editorContext->assetDatabase->FindAssetByGuid(*guid);
+					}
+					if (registeredPrefab == nullptr)
+					{
+						if (const auto validatedPath = projectAssetPath(prefabIdentity))
+						{
+							const std::string wanted = LowerAscii(validatedPath->second.lexically_normal().generic_string());
+							for (const auto& [absolutePath, metadata] : editorContext->assetDatabase->GetAssets())
+							{
+								if (LowerAscii(absolutePath.lexically_normal().generic_string()) == wanted)
+								{
+									registeredPrefab = &metadata;
+									break;
+								}
+							}
+						}
+					}
+				}
+
+				if (registeredPrefab != nullptr && registeredPrefab->importerName == "PrefabImporter")
+				{
+					std::uint64_t publishedGeneration = 1u;
+					GeneratedModelPackageChildMetadata generatedChild;
+					if (editorContext->assetDatabase->TryGetGeneratedModelPackageChildMetadata(
+						registeredPrefab->guid, GeneratedModelPackageChildKind::Prefab, generatedChild))
+					{
+						// Generated animation packages publish all children under one
+						// generation. Retaining it makes stale override checks deterministic.
+						publishedGeneration = std::max<std::uint64_t>(1u, generatedChild.publishedGeneration);
+					}
+					const std::filesystem::path relativePath =
+						(std::filesystem::path("Assets") / registeredPrefab->sourcePath).lexically_normal();
+					const std::filesystem::path absolutePath =
+						(editorContext->assetDatabase->GetAssetRoot() / registeredPrefab->sourcePath).lexically_normal();
+					const PrefabAuthoringService::Result registered = prefabAuthoringService.RegisterExistingAsset(
+						relativePath, absolutePath, registeredPrefab->guid, publishedGeneration);
+					// Registered assets enter the service's protected graph transaction,
+					// which is also used by native hierarchy drag/drop. The response keeps
+					// the indexed GUID/generation while instanceId names the real root.
+					result = registered.ok
+						? prefabAuthoringService.Instantiate(
+							registered.data.value("prefabId", std::string{}), arguments.value("name", std::string{}))
+						: registered;
+				}
+				else
+				{
+					// Session-created prefabs are immediately usable before the file watcher
+					// publishes them into AssetDatabase, so preserve that short local path.
+					result = prefabAuthoringService.Instantiate(prefabIdentity, arguments.value("name", std::string{}));
+				}
+			}
 			else if (operation == AutomationOperation("prefab.overrides.inspect"))
 				result = prefabAuthoringService.InspectOverrides(arguments.value("instance", std::string{}));
 			else if (operation == AutomationOperation("prefab.overrides.apply"))
@@ -3947,6 +5523,8 @@ namespace TerraEngine::Editor::Automation
 					{"artifactId", summary.artifactId}, {"frameCount", summary.frameCount}, {"completeFrameCount", summary.completeFrameCount},
 					{"incompleteFrameCount", summary.incompleteFrameCount}, {"totalDurationMs", summary.totalDurationMs},
 					{"minimumFrameMs", summary.minimumFrameMs}, {"maximumFrameMs", summary.maximumFrameMs}, {"averageFrameMs", summary.averageFrameMs},
+					{"frameMedianMs", summary.frameMedianMs}, {"frameP95Ms", summary.frameP95Ms},
+					{"frameP99Ms", summary.frameP99Ms}, {"frameWorstMs", summary.frameWorstMs},
 					{"payloadVersion", summary.payloadVersion}, {"committedFrameCount", summary.committedFrameCount},
 					{"artifactSizeBytes", summary.artifactSizeBytes}, {"complete", summary.captureComplete},
 					{"recoveredIncompleteTail", summary.recoveredIncompleteTail}, {"timingStreams", streams},
@@ -4162,6 +5740,10 @@ namespace TerraEngine::Editor::Automation
 				{"description", descriptor.description},
 				{"inputSchema", descriptor.inputSchema},
 				{"resultSchema", descriptor.resultSchema},
+				{"limits", descriptor.limits},
+				{"generationContract", descriptor.generationContract},
+				{"jobBehavior", descriptor.jobBehavior},
+				{"diagnosticsContract", descriptor.diagnosticsContract},
 				{"permission", PermissionJson(descriptor.permission)},
 				{"approvalPolicy", ApprovalPolicyJson(descriptor.approvalPolicy)},
 				{"provider", capability.providerId},
@@ -4667,8 +6249,9 @@ namespace TerraEngine::Editor::Automation
 			return result;
 		}
 
-		const nlohmann::json existingPayload = componentIt->second.entitySerialize(ObjectManager::instance().getRegistry(), *target.entity);
-		if (!existingPayload.contains(property))
+		const TerraEngine::Reflection::Property reflectedProperty =
+			TerraEngine::Reflection::FindProperty(componentIt->second.reflectionType, property);
+		if (!TerraEngine::Reflection::IsValid(reflectedProperty))
 		{
 			result.message = "Property is not present in component reflection metadata.";
 			return result;
@@ -4737,7 +6320,13 @@ namespace TerraEngine::Editor::Automation
 		data["active"] = objectHandle ? objectManager.isObjectActive(*objectHandle) : false;
 		data["static"] = objectHandle ? objectManager.isObjectStatic(*objectHandle) : false;
 		std::optional<Object> parent = objectHandle ? objectManager.getParent(*objectHandle) : std::nullopt;
+		// Keep the original entity-valued parent field for existing automation
+		// clients, and publish a stable UUID alongside it so callers can bind a
+		// hierarchy result across scene reloads or compare it with object UUIDs.
 		data["parent"] = parent ? nlohmann::json(static_cast<std::uint32_t>(parent->EntityId())) : nullptr;
+		data["parentUuid"] = parent
+			? nlohmann::json(TerraEngine::ToHexString(objectManager.getUUID(*parent)))
+			: nullptr;
 		if (includeComponents)
 		{
 			nlohmann::json components = nlohmann::json::array();
@@ -4759,18 +6348,37 @@ namespace TerraEngine::Editor::Automation
 		const bool includeComponents = arguments.value("includeComponents", false);
 		const std::string search = arguments.value("search", "");
 		nlohmann::json objects = nlohmann::json::array();
-		std::vector<Object> roots = ObjectManager::instance().getRootObjects();
-		ObjectManager::instance().SortObjectsByStableId(roots);
-		for (Object object : roots)
+		ObjectManager& objectManager = ObjectManager::instance();
+		std::vector<Object> roots = objectManager.getRootObjects();
+		objectManager.SortObjectsByStableId(roots);
+		std::unordered_set<entt::entity> visited;
+		std::function<void(Object)> appendHierarchy = [&](Object object)
 		{
+			// A malformed hierarchy must not make an automation read recurse
+			// forever. Normal hierarchy writes reject cycles, while this guard
+			// keeps the diagnostic surface safe if externally-authored data is bad.
+			if (!visited.insert(object.EntityId()).second)
+			{
+				return;
+			}
 			const bool matches = search.empty()
-				|| ContainsCaseInsensitive(ObjectManager::instance().getObjectName(object), search)
-				|| ContainsCaseInsensitive(ObjectManager::instance().getObjectTag(object), search)
-				|| ContainsCaseInsensitive(ObjectManager::instance().getObjectLayer(object), search);
+				|| ContainsCaseInsensitive(objectManager.getObjectName(object), search)
+				|| ContainsCaseInsensitive(objectManager.getObjectTag(object), search)
+				|| ContainsCaseInsensitive(objectManager.getObjectLayer(object), search);
 			if (matches)
 			{
 				objects.push_back(SerializeObjectSummary(object.EntityId(), includeComponents));
 			}
+			// Children are returned in stable UUID order by ObjectManager, which
+			// makes complete scene listings deterministic across entity allocation.
+			for (Object child : objectManager.getChildren(object))
+			{
+				appendHierarchy(child);
+			}
+		};
+		for (Object root : roots)
+		{
+			appendHierarchy(root);
 		}
 		return BuildSuccess(requestId, "Listed scene objects.", {{"objects", objects}});
 	}
@@ -5034,7 +6642,18 @@ namespace TerraEngine::Editor::Automation
 		const nlohmann::json newPayload = it->second.entitySerialize(objectManager.getRegistry(), object);
 		if (std::optional<Object> objectHandle = objectManager.getObject(object))
 		{
-			objectManager.notifyObjectStructureChanged(*objectHandle);
+			// Transform values feed the renderer's world-transform cache and
+			// spatial bounds. Generic component invalidation does not advance
+			// those revisions, so use the same typed notification as queued and
+			// transactional component-property mutations.
+			if (component == Transform::kComponentName)
+			{
+				objectManager.MarkObjectTransformDirty(*objectHandle);
+			}
+			else
+			{
+				objectManager.notifyObjectStructureChanged(*objectHandle);
+			}
 		}
 		UndoRedoSystem::Instance().PushCommand(std::make_unique<SetComponentPayloadCommand>(object, component, oldPayload, newPayload));
 		MarkSceneMutated(ActivityEventType::Mutation, requestId, "component.set_property", "Updated component property.");
@@ -5122,6 +6741,32 @@ namespace TerraEngine::Editor::Automation
 			|| (assetText.size() > rootText.size() && assetText[rootText.size()] != '/'))
 		{
 			return BuildError(requestId, ErrorCategory::Validation, "Asset import path must stay inside the active project's Assets folder.", relative.generic_string());
+		}
+		if (arguments.value("dryRun", false))
+		{
+			// Dry-run uses the exact path, existence, containment, and asset-database
+			// checks above, then stops before finalizing or queuing any importer work.
+			// This makes automation preflight meaningful without creating a hidden
+			// mutation that a rejected durable-job reservation cannot account for.
+			return BuildSuccess(requestId, "Validated asset import without queuing work.", {
+				{"path", validation["path"]},
+				{"force", arguments.value("force", false)},
+				{"status", "validated"},
+				{"dryRun", true}
+			});
+		}
+		// The asset watcher/startup reconcile may already be compiling this exact
+		// source. Finalize only that job before the explicit synchronous import so
+		// the response cannot read an older package sidecar. Unrelated jobs continue
+		// running and retain their own deferred requests.
+		editorContext->assetDatabase->FinalizeActiveImportForExplicitReimport(absolutePath);
+		if (!std::filesystem::exists(absolutePath) || std::filesystem::is_directory(absolutePath))
+		{
+			return BuildError(
+				requestId,
+				ErrorCategory::MissingTarget,
+				"Asset file was removed while its prior import was being finalized.",
+				relative.generic_string());
 		}
 		editorContext->assetDatabase->ImportAsset(absolutePath, arguments.value("force", false));
 		if (activityCallback)
@@ -5891,6 +7536,41 @@ namespace TerraEngine::Editor::Automation
 		request.transparentBackground = validation["transparentBackground"].get<bool>();
 		request.allowBackendFallback = validation["allowBackendFallback"].get<bool>();
 		request.timeoutMs = validation["timeoutMs"].get<std::uint32_t>();
+		if (request.freshness == "nextFrame")
+		{
+			const std::vector<Object> cameras =
+				ObjectManager::instance().getObjectsWithComponents<Transform, CameraComponent>();
+			if (cameras.empty())
+			{
+				return BuildError(requestId, ErrorCategory::MissingTarget, "No active Game View camera is available.");
+			}
+			const std::optional<AuthoredCameraCaptureSnapshot> camera =
+				ReadAuthoredCameraCaptureSnapshot(ObjectManager::instance(), cameras.back());
+			if (!camera)
+			{
+				return BuildError(requestId, ErrorCategory::InvalidCameraObject, "The active Game View camera could not be snapshotted.");
+			}
+
+			// A hidden Game View dock tab does not refresh its cached render target.
+			// Snapshot the same last active camera that the visible Game View would
+			// submit and render it through the dedicated target for nextFrame.
+			TerraEngine::Renderer::RenderCaptureRequest nextFrameRequest =
+				BuildCaptureRequestFromCamera(
+					TerraEngine::Renderer::RenderCaptureSourceKind::GameView,
+					"Game View",
+					camera->transform,
+					camera->camera,
+					size,
+					request.transparentBackground);
+			nextFrameRequest.requestId = request.requestId;
+			nextFrameRequest.format = request.format;
+			nextFrameRequest.freshness = request.freshness;
+			nextFrameRequest.includeOverlays = request.includeOverlays;
+			nextFrameRequest.allowBackendFallback = request.allowBackendFallback;
+			nextFrameRequest.timeoutMs = request.timeoutMs;
+			nextFrameRequest.dedicatedRenderTarget = true;
+			request = std::move(nextFrameRequest);
+		}
 
 		const TerraEngine::Renderer::RenderCaptureResult capture = RenderSystem::Instance().CaptureImage(request);
 		if (!capture.ok)

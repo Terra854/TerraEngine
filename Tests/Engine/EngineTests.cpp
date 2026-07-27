@@ -3,7 +3,11 @@
 #include <iostream>
 
 namespace TerraEngine::Tests {
+	// Animation story tests register through one stable entry point so their
+	// CTest filter can grow without adding global initialization side effects.
+	void RegisterAnimationTestScaffolding(TestRegistry& registry);
 	void RegisterArchiveSerializationTests(TestRegistry& registry);
+	void RegisterAnimationParityValidatorTests(TestRegistry& registry);
 	void RegisterBinaryIOTests(TestRegistry& registry);
 	void RegisterBootSummaryValidationTests(TestRegistry& registry);
 	void RegisterCodecProviderTests(TestRegistry& registry);
@@ -101,6 +105,8 @@ namespace TerraEngine::Tests {
 	void RegisterVirtualGeometryResourceTests(TestRegistry& registry);
 	void RegisterVirtualGeometryResidencyTests(TestRegistry& registry);
 	void RegisterRenderTypesTests(TestRegistry& registry);
+	void RegisterAnimatedRenderViewTests(TestRegistry& registry);
+	void RegisterDeformableVirtualGeometryTests(TestRegistry& registry);
 	void RegisterRendererGraphSmokeTests(TestRegistry& registry);
 	void RegisterRenderDiagnosticsTests(TestRegistry& registry);
 	void RegisterRenderRuntimeLayoutTests(TestRegistry& registry);
@@ -179,6 +185,9 @@ namespace TerraEngine::Tests {
 	void RegisterSkyComponentSerializationTests(TestRegistry& registry);
 	void RegisterSceneStreamingDeferredLoadTests(TestRegistry& registry);
 	void RegisterScriptingComponentAccessTests(TestRegistry& registry);
+	void RegisterAnimationAbiTests(TestRegistry& registry);
+	void RegisterAnimationManagedLifecycleTests(TestRegistry& registry);
+	void RegisterAnimationManagedParityTests(TestRegistry& registry);
 	void RegisterScriptingDiagnosticsTests(TestRegistry& registry);
 	void RegisterScriptingDispatchTests(TestRegistry& registry);
 	void RegisterScriptingMutationTests(TestRegistry& registry);
@@ -212,7 +221,9 @@ int main() {
 		context.Expect(true, "The engine test harness should execute registered tests.");
 	});
 
+	TerraEngine::Tests::RegisterAnimationTestScaffolding(registry);
 	TerraEngine::Tests::RegisterArchiveSerializationTests(registry);
+	TerraEngine::Tests::RegisterAnimationParityValidatorTests(registry);
 	TerraEngine::Tests::RegisterBinaryIOTests(registry);
 	TerraEngine::Tests::RegisterBootSummaryValidationTests(registry);
 	TerraEngine::Tests::RegisterCodecProviderTests(registry);
@@ -318,6 +329,8 @@ int main() {
 	TerraEngine::Tests::RegisterVirtualGeometryResourceTests(registry);
 	TerraEngine::Tests::RegisterVirtualGeometryResidencyTests(registry);
 	TerraEngine::Tests::RegisterRenderTypesTests(registry);
+	TerraEngine::Tests::RegisterAnimatedRenderViewTests(registry);
+	TerraEngine::Tests::RegisterDeformableVirtualGeometryTests(registry);
 	TerraEngine::Tests::RegisterRendererGraphSmokeTests(registry);
 	TerraEngine::Tests::RegisterRenderDiagnosticsTests(registry);
 	TerraEngine::Tests::RegisterRenderRuntimeLayoutTests(registry);
@@ -396,6 +409,9 @@ int main() {
 	TerraEngine::Tests::RegisterSkyComponentSerializationTests(registry);
 	TerraEngine::Tests::RegisterSceneStreamingDeferredLoadTests(registry);
 	TerraEngine::Tests::RegisterScriptingComponentAccessTests(registry);
+	TerraEngine::Tests::RegisterAnimationAbiTests(registry);
+	TerraEngine::Tests::RegisterAnimationManagedLifecycleTests(registry);
+	TerraEngine::Tests::RegisterAnimationManagedParityTests(registry);
 	TerraEngine::Tests::RegisterScriptingDiagnosticsTests(registry);
 	TerraEngine::Tests::RegisterScriptingDispatchTests(registry);
 	TerraEngine::Tests::RegisterScriptingMutationTests(registry);

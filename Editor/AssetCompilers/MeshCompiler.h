@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <functional>
 #include <array>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -159,6 +160,121 @@ struct RawMeshVertex
 	std::array<float, 2> uv = { 0.0f, 0.0f };
 };
 
+// The package importers hand raw joint ids and floating-point weights to this
+// bounded cooker record. It deliberately does not expose runtime palette state:
+// the cooker derives that state deterministically before publishing TEMF.
+struct SkinnedMeshInfluence
+{
+	std::uint32_t jointIndex = 0u;
+	float weight = 0.0f;
+};
+
+struct SkinnedMeshCookVertex
+{
+	RawMeshVertex baseVertex;
+	std::vector<SkinnedMeshInfluence> influences;
+};
+
+// Morph deltas retain a stable target id so a future runtime loader can reject
+// mismatched mesh/morph bindings without relying on source-file array order.
+struct SkinnedMeshMorphTarget
+{
+	std::uint32_t stableTargetId = 0u;
+	std::vector<std::array<float, 3>> positionDeltas;
+	// Optional source channels remain target-major in the sidecar writer. Empty
+	// arrays mean the DCC source omitted that semantic and cook as zero float4s.
+	std::vector<std::array<float, 3>> normalDeltas;
+	std::vector<std::array<float, 3>> tangentDeltas;
+};
+
+struct SkinnedMeshCookInput
+{
+	std::vector<SkinnedMeshCookVertex> vertices;
+	std::vector<std::uint32_t> indices;
+	std::vector<SkinnedMeshMorphTarget> morphTargets;
+};
+
+struct SkinnedMeshCookSettings
+{
+	// A package importer can lower this operational budget for a target, but no
+	// individual partition may exceed the immutable 256-joint format limit.
+	std::uint32_t maximumPalettePartitions = std::numeric_limits<std::uint32_t>::max();
+	// Source skeleton ids are checked before the worker allocates palette data.
+	std::uint32_t sourceSkeletonJointCount = 4096u;
+	// Skinned importers must copy the nonzero fingerprint emitted by the cooked
+	// SkeletonAsset. Zero is valid only when every retained weight is zero and
+	// the TEMF is therefore an unbound morph-only/identity payload.
+	std::uint64_t skeletonCompatibilityFingerprint = 0u;
+};
+
+enum class SkinnedMeshCookFailure : std::uint8_t
+{
+	None,
+	InvalidInput,
+	InvalidInfluenceWeight,
+	MissingJoint,
+	InvalidMorphTarget,
+	DuplicateMorphTarget,
+	MissingSkeletonCompatibilityFingerprint,
+	PalettePartitionLimitExceeded,
+	StaticMeshCookFailed,
+	StaticVertexLayoutIncompatible,
+	PayloadRangeOverflow,
+	FormatCompatibilityMismatch,
+	StagedPayloadWriteFailed,
+	PublicationFailed
+};
+
+struct SkinnedMeshCookedVertex
+{
+	std::vector<SkinnedMeshInfluence> influences;
+	std::vector<std::uint32_t> sourceJointIds;
+	// These arrays expose the exact 8-byte GPU record produced by the cook. A
+	// zeroed weight array is the explicit identity-deformation representation.
+	std::array<std::uint8_t, 4> paletteJointIndices{};
+	std::array<std::uint8_t, 4> quantizedWeights{};
+	std::uint32_t palettePartitionIndex = std::numeric_limits<std::uint32_t>::max();
+	float normalizedWeightSum = 0.0f;
+	float discardedWeight = 0.0f;
+	bool usesIdentityDeformation = false;
+};
+
+struct SkinnedMeshPalettePartition
+{
+	std::vector<std::uint32_t> sourceJointIds;
+};
+
+struct SkinnedMeshDeformableTemfSummary
+{
+	bool hasSkinning = false;
+	std::uint32_t morphTargetCount = 0u;
+	std::uint32_t palettePartitionCount = 0u;
+	std::uint32_t virtualGeometryClusterCount = 0u;
+	bool deformationEnvelopeValid = false;
+	bool zeroWeightIdentityEncoded = false;
+	bool virtualGeometryFailsOpen = false;
+	bool skeletonCompatibilityValidated = false;
+	std::uint64_t skeletonCompatibilityFingerprint = 0u;
+};
+
+struct SkinnedMeshCookReport
+{
+	SkinnedMeshCookFailure failure = SkinnedMeshCookFailure::None;
+	bool published = false;
+	bool preservedLastKnownGood = false;
+	std::uint32_t zeroWeightVertexCount = 0u;
+	std::uint32_t failingVertexIndex = std::numeric_limits<std::uint32_t>::max();
+	std::uint32_t failingJointIndex = std::numeric_limits<std::uint32_t>::max();
+	std::uint64_t skeletonCompatibilityFingerprint = 0u;
+	float weightQuantizationUnit = 1.0f / 255.0f;
+	std::string diagnosticCode;
+	std::string diagnosticMessage;
+	std::string recommendedCorrection;
+	std::vector<SkinnedMeshCookedVertex> cookedVertices;
+	std::vector<SkinnedMeshPalettePartition> palettePartitions;
+	SkinnedMeshDeformableTemfSummary deformableTemf;
+};
+
 // Returns true when the file extension maps to a mesh source format the offline
 // compiler can parse directly. Editor discovery and CLI validation both use this
 // helper so supported formats stay in sync.
@@ -197,3 +313,14 @@ bool CompileMeshFromRaw(
 	const VirtualGeometryAdaptiveCompileSettings* adaptiveSettings = nullptr,
 	MeshCompileProgressCallback progressCallback = {},
 	const VirtualGeometryConeSafetyCookSettings* coneSafetySettings = nullptr);
+
+// Cooks already-decoded package geometry into a staged deformable TEMF. Worker
+// preparation normalizes/reduces weights and builds palettes; only the final
+// replace operation touches the published path, preserving last-known-good data
+// whenever validation or staging fails.
+bool CompileSkinnedMeshFromRaw(
+	const std::filesystem::path& logicalSource,
+	const std::filesystem::path& output,
+	const SkinnedMeshCookInput& input,
+	SkinnedMeshCookReport* outReport = nullptr,
+	const SkinnedMeshCookSettings& settings = {});

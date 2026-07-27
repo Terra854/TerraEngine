@@ -24,6 +24,7 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -39,6 +40,76 @@ namespace
 	std::atomic_size_t g_ScriptingBridgeCacheMisses{ 0 };
 	std::atomic_size_t g_ScriptingBridgeCallsAvoided{ 0 };
 	thread_local std::optional<ScriptingSystem::ScriptDispatchContext> g_CurrentScriptDispatchContext;
+	constexpr std::uint32_t kMaximumManagedAnimationEventBatch = 4096U;
+	using AnimationEventDispatchFn = void (*)(const void*, std::uint32_t, std::int64_t,
+		std::uint64_t, std::uint32_t, std::uint32_t);
+	AnimationEventDispatchFn g_ManagedDispatchAnimationEvents = nullptr;
+	std::int64_t g_LastDeliveredAnimationEventTick = std::numeric_limits<std::int64_t>::min();
+	std::uint64_t g_LastDeliveredAnimationEventPublication = 0U;
+
+	void ResetAnimationEventDelivery() noexcept
+	{
+		// A new gameplay domain may subscribe to the same simulation tick as the
+		// old domain. Reset both values so its first immutable publication is not
+		// mistaken for a duplicate from the previous assembly.
+		g_LastDeliveredAnimationEventTick = std::numeric_limits<std::int64_t>::min();
+		g_LastDeliveredAnimationEventPublication = 0U;
+	}
+
+	void DeliverAnimationEventsAtProtectedBoundary()
+	{
+		if(g_ManagedDispatchAnimationEvents == nullptr) return;
+
+		NativeAnimationBufferInfo info{};
+		info.header = {sizeof(info), kNativeAnimationAbiVersion,
+			static_cast<std::uint16_t>(NativeAnimationRecordKind::BufferInfo)};
+		const NativeAnimationStatus probe = Native_Animation_CopyEventBatch(nullptr, 0U, &info);
+		if(probe != NativeAnimationStatus::Ok && probe != NativeAnimationStatus::BufferTooSmall
+			&& probe != NativeAnimationStatus::NotReady) {
+			TERRAENGINE_LOG(LogLevel::Error,
+				"Animation event count probe failed with status " << static_cast<std::uint16_t>(probe) << ".");
+			return;
+		}
+		if(probe == NativeAnimationStatus::NotReady) return;
+		if(info.requiredCount > kMaximumManagedAnimationEventBatch) {
+			// Refuse provider-controlled allocations above the managed hard limit.
+			// The native animation queue owns its bounded retention diagnostics.
+			TERRAENGINE_LOG(LogLevel::Error,
+				"Animation event publication requested " << info.requiredCount
+				<< " records, exceeding the protected managed limit of "
+				<< kMaximumManagedAnimationEventBatch << ".");
+			return;
+		}
+
+		std::vector<NativeAnimationEvent> events(info.requiredCount);
+		if(!events.empty()) {
+			info = {};
+			info.header = {sizeof(info), kNativeAnimationAbiVersion,
+				static_cast<std::uint16_t>(NativeAnimationRecordKind::BufferInfo)};
+			const NativeAnimationStatus copied = Native_Animation_CopyEventBatch(
+				events.data(), static_cast<std::uint32_t>(events.size()), &info);
+			if(copied != NativeAnimationStatus::Ok || info.writtenCount > events.size()) {
+				// A publication can advance between the count probe and copy. No partial
+				// records are dispatched; the next scripting boundary retries the new one.
+				return;
+			}
+		}
+
+		if(info.sourceTick == g_LastDeliveredAnimationEventTick
+			&& info.publicationGeneration == g_LastDeliveredAnimationEventPublication) return;
+
+		// Mark the copied publication before invoking managed code so a re-entrant
+		// editor pump or callback cannot deliver the same immutable packet twice.
+		g_LastDeliveredAnimationEventTick = info.sourceTick;
+		g_LastDeliveredAnimationEventPublication = info.publicationGeneration;
+		g_ManagedDispatchAnimationEvents(
+			events.empty() ? nullptr : events.data(),
+			info.writtenCount,
+			info.sourceTick,
+			info.publicationGeneration,
+			info.overflowed,
+			info.droppedCountLowerBound);
+	}
 
 	fs::path ResolveExecutableDirectory()
 	{
@@ -513,8 +584,25 @@ float ScriptingSystem::BeginFrameTiming(float unscaledDeltaTime)
 		? unscaledDeltaTime
 		: 0.0F;
 	const float activeScale = (m_Running || m_ExportMode) ? m_RuntimeTimeSnapshot.timeScale : 1.0F;
+	// Capture the Play Mode decision before the Scripting phase consumes an
+	// explicit-step token.  Animation and physics run later in the scheduler, so
+	// reading m_StepFrames there would otherwise make one requested step look
+	// like an ordinary paused frame.
+	const bool playSessionActive = m_Running || m_ExportMode;
+	const bool playSessionPaused = playSessionActive && m_Paused;
+	const bool advancesSimulation = playSessionActive
+		&& (!playSessionPaused || m_StepFrames > 0);
+	const float normalSimulationDelta = safeUnscaledDelta * activeScale;
 	m_RuntimeTimeSnapshot.unscaledDeltaTime = safeUnscaledDelta;
-	m_RuntimeTimeSnapshot.deltaTime = safeUnscaledDelta * activeScale;
+	m_RuntimeTimeSnapshot.deltaTime = normalSimulationDelta;
+	m_RuntimeTimeSnapshot.playSessionActive = playSessionActive;
+	m_RuntimeTimeSnapshot.playSessionPaused = playSessionPaused;
+	m_RuntimeTimeSnapshot.advancesSimulation = advancesSimulation;
+	// Explicit stepping is coordinated with Physics, so animation must receive
+	// the same fixed duration that managed callbacks will receive this frame.
+	m_RuntimeTimeSnapshot.simulationDeltaTime = playSessionPaused && advancesSimulation
+		? m_ExplicitStepDeltaTime.value_or(normalSimulationDelta)
+		: normalSimulationDelta;
 	m_RuntimeTimeSnapshot.unscaledElapsedTime += static_cast<double>(safeUnscaledDelta);
 	m_RuntimeTimeSnapshot.elapsedTime += static_cast<double>(m_RuntimeTimeSnapshot.deltaTime);
 	++m_RuntimeTimeSnapshot.frameCount;
@@ -1340,6 +1428,11 @@ void ScriptingSystem::Initialize() {
 		bridgeAssemblyPath,
 		L"TerraEngine.PhysicsEvents, TerraEngine.CSharp",
 		L"DispatchProtectedNative"));
+	g_ManagedDispatchAnimationEvents = reinterpret_cast<AnimationEventDispatchFn>(DotNetHost::Instance().GetManagedFunction(
+		bridgeAssemblyPath,
+		L"TerraEngine.Animation.AnimationEvents, TerraEngine.CSharp",
+		L"DispatchProtectedNative"));
+	ResetAnimationEventDelivery();
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (managedInit != nullptr) {
@@ -1362,6 +1455,7 @@ void ScriptingSystem::SetRunning(bool running)
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!m_Running)
 	{
+		ResetAnimationEventDelivery();
 		{
 			std::scoped_lock timeLock(m_RuntimeTimeMutex);
 			m_RuntimeTimeSnapshot.timeScale = 1.0F;
@@ -1415,6 +1509,12 @@ void ScriptingSystem::StepExplicit(float deltaTime, int frames)
 void ScriptingSystem::Update(float deltaTime) {
 	TERRAENGINE_PROFILE_SCOPE("ScriptingSystem::Update", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 	m_LastDeltaTime = deltaTime;
+	if(m_Running && (m_ExportMode || m_GameplayAssemblyLoaded)) {
+		// Both hosted and NativeAOT runtimes enter through this same protected
+		// copy path before ordinary gameplay updates observe the publication.
+		TERRAENGINE_PROFILE_SCOPE("ScriptingSystem: Dispatch Animation Events", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		DeliverAnimationEventsAtProtectedBoundary();
+	}
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (m_ExportMode) {
 		TERRAENGINE_PROFILE_SCOPE("ScriptingSystem: Export Runtime Update", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
@@ -1497,6 +1597,8 @@ void ScriptingSystem::Shutdown() {
 	m_ExportVTable = {};
 	m_ExportMode = false;
 	managedDispatchPhysicsEvents = nullptr;
+	g_ManagedDispatchAnimationEvents = nullptr;
+	ResetAnimationEventDelivery();
 	m_LastDeliveredPhysicsWorldGeneration = 0;
 	m_LastDeliveredPhysicsTick = 0;
 
@@ -1557,7 +1659,11 @@ TerraEngine::Scheduling::SystemDeclaration ScriptingSystem::SchedulerDeclaration
 	TerraEngine::Scheduling::SystemDeclaration declaration;
 	declaration.name = "ScriptingSystem";
 	declaration.phase = "Scripting";
-	declaration.reads = { "SceneGraph", "Resources", "RuntimeTime" };
+	// Managed event delivery copies the previous protected animation callback
+	// batch. Name that exact scheduler resource so startup validation can prove
+	// the handoff exists instead of relying on an unregistered aggregate label.
+	declaration.reads = { "SceneGraph", "Resources", "RuntimeTime",
+		TerraEngine::Scheduling::kResourceAnimationManagedCallbackBatches };
 	declaration.writes = { "Scripting", "ObjectManager", "SceneMutationQueue", "RuntimeTimeQueue" };
 	// Managed callbacks can be batched by native code, but the managed boundary
 	// itself remains protected because scripts may call reflection APIs and
@@ -1569,7 +1675,7 @@ TerraEngine::Scheduling::SystemDeclaration ScriptingSystem::SchedulerDeclaration
 	declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::PartiallyWorkerSafe;
 	declaration.hardBoundary = true;
 	declaration.safeSubwork = "Native script batch preparation, immutable dispatch inputs, generation validation, deferred mutation capture, runtime-time request capture, and JSON transaction payload submission.";
-	declaration.protectedCommit = "Frame-start runtime-time publication, arbitrary managed callback invocation, managed lifecycle/reload hooks, immediate native/reflection API calls, and protected transaction commits.";
+	declaration.protectedCommit = "Frame-start runtime-time publication, copied animation-event delivery, arbitrary managed callback invocation, managed lifecycle/reload hooks, immediate native/reflection API calls, and protected transaction commits.";
 	declaration.protectedReason = declaration.protectedCommit;
 	declaration.profilingLabel = declaration.name;
 	declaration.usesDefaultMetadata = false;
@@ -1636,6 +1742,7 @@ bool ScriptingSystem::LoadGameplayAssembly(const std::filesystem::path& assembly
 	}
 	m_LastDeliveredPhysicsWorldGeneration = 0;
 	m_LastDeliveredPhysicsTick = 0;
+	ResetAnimationEventDelivery();
 	m_LoadedGameplayAssemblyPath = assemblyPathString;
 	m_LastGameplayDiagnostic = "Loaded gameplay assembly " + m_LoadedGameplayAssemblyPath.string();
 	RefreshBindingStatuses();
@@ -1656,6 +1763,7 @@ void ScriptingSystem::ClearGameplayAssembly() {
 	}
 	m_LastDeliveredPhysicsWorldGeneration = 0;
 	m_LastDeliveredPhysicsTick = 0;
+	ResetAnimationEventDelivery();
 	m_LoadedGameplayAssemblyPath.clear();
 	m_LastGameplayDiagnostic.clear();
 	SetAllBindingStatuses({});
@@ -2204,6 +2312,22 @@ void ScriptingSystem::InitializeExportMode(const ManagedVTable& vtable) {
 	// Copy the VTable so the scripting system owns its own snapshot.
 	m_ExportVTable = vtable;
 	m_ExportMode = true;
+	g_ManagedDispatchAnimationEvents = nullptr;
+	ResetAnimationEventDelivery();
+	if(m_ExportVTable.version >= kManagedVTableAnimationVersion) {
+		// V1/V2 exports remain loadable, but a producer that advertises v3 must
+		// provide the complete tail and the exact copied-animation ABI version.
+		if(m_ExportVTable.tableSize < kManagedVTableV3Size
+			|| m_ExportVTable.getAnimationAbiVersion == nullptr
+			|| m_ExportVTable.dispatchAnimationEventBatch == nullptr
+			|| m_ExportVTable.getAnimationAbiVersion() != kManagedAnimationAbiVersion) {
+			m_ExportVTable = {};
+			m_ExportMode = false;
+			throw std::runtime_error(
+				"ManagedVTable animation ABI validation failed. Rebuild the NativeAOT gameplay library with the current TerraEngine managed SDK.");
+		}
+		g_ManagedDispatchAnimationEvents = m_ExportVTable.dispatchAnimationEventBatch;
+	}
 
 	// Log function pointers to detect potential marshalling/corruption issues.
 	TERRAENGINE_LOG(LogLevel::Debug, "VTable Function Pointers:");

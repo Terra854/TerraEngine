@@ -23,6 +23,26 @@ namespace TerraEngine::EditorTests
 			contents << input.rdbuf();
 			return contents.str();
 		}
+
+		std::string ReadEditorMcpBridgeSource()
+		{
+			const std::filesystem::path sourcePath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Editor/TerraEngine-Editor/Automation/EditorMcpBridge.cpp";
+			std::ifstream input(sourcePath, std::ios::binary);
+			std::ostringstream contents;
+			contents << input.rdbuf();
+			return contents.str();
+		}
+
+		std::string ReadEditorAutomationServiceSource()
+		{
+			const std::filesystem::path sourcePath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Editor/TerraEngine-Editor/Automation/EditorAutomationService.cpp";
+			std::ifstream input(sourcePath, std::ios::binary);
+			std::ostringstream contents;
+			contents << input.rdbuf();
+			return contents.str();
+		}
 	}
 
 	void RegisterEditorAutomationSchedulerTests(TestRegistry& registry)
@@ -42,6 +62,7 @@ namespace TerraEngine::EditorTests
 			context.Expect(!source.empty(), "Scheduler contract tests should read EditorSystem.cpp from the configured source root.");
 			context.Expect(source.find("\"EditorAutomationQueue\"") != std::string::npos, "EditorSystem should read prepared automation requests.");
 			context.Expect(source.find("\"EditorAutomationSession\"") != std::string::npos, "EditorSystem should declare session-retained automation state.");
+			context.Expect(source.find("\"AnimationRuntimeState\"") != std::string::npos, "EditorSystem should declare its immutable animation-publication read.");
 			context.Expect(source.find("\"SceneMutationQueue\"") != std::string::npos, "Scene-facing automation should publish through the deferred mutation queue.");
 		});
 
@@ -50,9 +71,31 @@ namespace TerraEngine::EditorTests
 
 			context.Expect(source.find("immutable request preparation") != std::string::npos, "Worker-safe automation work should prepare immutable requests.");
 			context.Expect(source.find("may run on workers") != std::string::npos, "Scheduler diagnostics should explicitly identify worker-safe preparation.");
-			context.Expect(source.find("Prepared automation request commit") != std::string::npos, "Scheduler diagnostics should name the protected automation commit.");
+			// The commit phrase sits inside a longer sentence after the recording
+			// boundary, so its grammatical capitalization is intentionally lower-case.
+			context.Expect(source.find("prepared automation request commit") != std::string::npos, "Scheduler diagnostics should name the protected automation commit.");
 			context.Expect(source.find("WorkerSystemPhaseKind::ProtectedCommit") != std::string::npos, "EditorSystem should remain classified as a protected commit.");
 			context.Expect(source.find("HardBoundaryClassification::Protected") != std::string::npos, "Automation must not make the complete editor update worker-safe.");
+		});
+
+		registry.Add("Editor.Automation.Scheduler.RecordingPumpPrecedesEditorEarlyReturns", [](TestContext& context) {
+			const std::string editor = ReadEditorSystemSource();
+			const std::string bridge = ReadEditorMcpBridgeSource();
+			const std::string service = ReadEditorAutomationServiceSource();
+			const std::size_t pump = editor.find("PumpAnimationRecordingsAtProtectedFrame()");
+			const std::size_t physicsValidation = editor.find("ProcessPhysicsInvariantValidation(deltaTime)");
+
+			context.Expect(pump != std::string::npos && physicsValidation != std::string::npos
+					&& pump < physicsValidation,
+				"Scheduler-owned recording capture must run before the installed-validation early return.");
+			context.Expect(bridge.find("service.PumpAnimationRecordingsAtProtectedFrame()")
+					!= std::string::npos,
+				"The bridge must forward protected capture to its one shared automation service, not a request-local store.");
+			context.Expect(service.find("EditorAutomationService::~EditorAutomationService()")
+					!= std::string::npos
+					&& service.find("AnimationAutomationJobs(jobService).CancelAllRecordings()")
+						!= std::string::npos,
+				"Destroying the shared automation service must retire every process-global recording session keyed by its job store.");
 		});
 
 		registry.Add("Editor.Automation.Scheduler.IdleBridgeDoesNotPublishWork", [](TestContext& context) {

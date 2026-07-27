@@ -7,30 +7,49 @@
 
 #include "FbxPackageImporter.h"
 
+#include "AnimationClipCompiler.h"
 #include "MaterialAssetWriter.h"
 #include "MeshCompiler.h"
 #include "TextureCompiler.h"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <limits>
+#include <map>
+#include <optional>
+#include <set>
 #include <sstream>
+#include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <assimp/Importer.hpp>
 #include <assimp/ProgressHandler.hpp>
+#include <assimp/anim.h>
+#include <assimp/config.h>
 #include <assimp/material.h>
+#include <assimp/metadata.h>
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
+
+#if defined(_WIN32)
+	#ifndef NOMINMAX
+		#define NOMINMAX
+	#endif
+	#include <Windows.h>
+#endif
 
 namespace TerraEngine::AssetPipeline
 {
@@ -282,6 +301,142 @@ namespace TerraEngine::AssetPipeline
 			return BuildStableGeneratedModelUuid(packageGuid, role, index);
 		}
 
+		constexpr unsigned int kFbxPackageImportFlags =
+			aiProcess_Triangulate |
+			aiProcess_SortByPType |
+			aiProcess_JoinIdenticalVertices |
+			aiProcess_FindInvalidData |
+			aiProcess_GenSmoothNormals |
+			aiProcess_CalcTangentSpace |
+			aiProcess_ImproveCacheLocality |
+			aiProcess_GlobalScale |
+			aiProcess_PopulateArmatureData;
+
+		std::uint64_t AppendStableHash(std::uint64_t hash, std::span<const std::uint8_t> bytes)
+		{
+			constexpr std::uint64_t prime = 1099511628211ull;
+			for (const std::uint8_t byte : bytes)
+			{
+				hash ^= byte;
+				hash *= prime;
+			}
+			return hash;
+		}
+
+		std::uint64_t AppendStableHash(std::uint64_t hash, std::string_view value)
+		{
+			return AppendStableHash(hash, {
+				reinterpret_cast<const std::uint8_t*>(value.data()),
+				value.size()
+			});
+		}
+
+		template<typename Value>
+		std::uint64_t AppendStablePodHash(std::uint64_t hash, const Value& value)
+		{
+			return AppendStableHash(hash, {
+				reinterpret_cast<const std::uint8_t*>(&value),
+				sizeof(Value)
+			});
+		}
+
+		std::uint64_t BuildSemanticHash(
+			const TerraEngine::UUID& packageGuid,
+			std::string_view role,
+			std::string_view semanticKey)
+		{
+			std::uint64_t hash = 1469598103934665603ull;
+			hash = AppendStableHash(hash, packageGuid);
+			hash = AppendStableHash(hash, role);
+			hash = AppendStableHash(hash, semanticKey);
+			return hash == 0u ? 1u : hash;
+		}
+
+		TerraEngine::Animation::AnimationGuid ToAnimationGuid(const TerraEngine::UUID& guid)
+		{
+			return { guid };
+		}
+
+		std::string StableHashSuffix(std::uint64_t hash)
+		{
+			std::ostringstream text;
+			text << std::hex << hash;
+			return text.str();
+		}
+
+		std::string NormalizeSemanticSegment(std::string_view value, std::string_view fallback)
+		{
+			std::string normalized;
+			normalized.reserve(value.size());
+			for (const unsigned char character : value)
+			{
+				if (std::isalnum(character) || character == '_' || character == '-' || character == '.')
+				{
+					normalized.push_back(static_cast<char>(std::tolower(character)));
+				}
+				else if (normalized.empty() || normalized.back() != '_')
+				{
+					normalized.push_back('_');
+				}
+			}
+			return normalized.empty() ? std::string(fallback) : normalized;
+		}
+
+		bool WriteBinaryAtomically(const std::filesystem::path& outputPath, std::span<const std::uint8_t> bytes)
+		{
+			static std::atomic<std::uint64_t> stageSequence{0u};
+			std::error_code ec;
+			std::filesystem::create_directories(outputPath.parent_path(), ec);
+			if (ec)
+			{
+				return false;
+			}
+
+			std::uint64_t contentHash = 1469598103934665603ull;
+			contentHash = AppendStableHash(contentHash, bytes);
+			// Use a compact sibling filename rather than appending to a potentially
+			// long semantic clip name. The containing package stage is already unique;
+			// hash plus sequence separates multiple atomic writes within that stage.
+			const std::filesystem::path stagedPath = outputPath.parent_path()
+				/ (".ta-" + StableHashSuffix(contentHash) + "-"
+					+ std::to_string(stageSequence.fetch_add(1u, std::memory_order_relaxed)) + ".tmp");
+			std::filesystem::remove(stagedPath, ec);
+			ec.clear();
+			{
+				std::ofstream stream(stagedPath, std::ios::binary | std::ios::trunc);
+				if (!stream)
+				{
+					return false;
+				}
+				stream.write(
+					reinterpret_cast<const char*>(bytes.data()),
+					static_cast<std::streamsize>(bytes.size()));
+				stream.flush();
+				if (!stream)
+				{
+					stream.close();
+					std::filesystem::remove(stagedPath, ec);
+					return false;
+				}
+			}
+
+			bool published = false;
+#if defined(_WIN32)
+			published = ::MoveFileExW(
+				stagedPath.c_str(),
+				outputPath.c_str(),
+				MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
+#else
+			std::filesystem::rename(stagedPath, outputPath, ec);
+			published = !ec;
+#endif
+			if (!published)
+			{
+				std::filesystem::remove(stagedPath, ec);
+			}
+			return published;
+		}
+
 		void AddDiagnostic(
 			ModelPackageImportResult& result,
 			ModelDiagnosticSeverity severity,
@@ -513,10 +668,8 @@ namespace TerraEngine::AssetPipeline
 
 		void AddUnsupportedDiagnostics(const aiScene& scene, ModelPackageImportResult& result)
 		{
-			if (scene.HasAnimations())
-			{
-				AddDiagnostic(result, ModelDiagnosticSeverity::Warning, "UnsupportedAnimationIgnored", "animations", "Animation data is not imported by this static FBX feature.", "Static mesh data was imported.");
-			}
+			// Animation, hierarchy, bones, and morphs are consumed by the animated
+			// sidecar below. Only source features outside T035 remain unsupported.
 			if (scene.HasCameras())
 			{
 				AddDiagnostic(result, ModelDiagnosticSeverity::Warning, "UnsupportedCameraIgnored", "cameras", "Camera data is not imported by this static FBX feature.", "Renderable meshes were imported.");
@@ -525,15 +678,30 @@ namespace TerraEngine::AssetPipeline
 			{
 				AddDiagnostic(result, ModelDiagnosticSeverity::Warning, "UnsupportedLightIgnored", "lights", "Light data is not imported by this static FBX feature.", "Renderable meshes were imported.");
 			}
-			for (unsigned int meshIndex = 0; meshIndex < scene.mNumMeshes; ++meshIndex)
-			{
-				const aiMesh* mesh = scene.mMeshes[meshIndex];
-				if (mesh != nullptr && mesh->HasBones())
-				{
-					AddDiagnostic(result, ModelDiagnosticSeverity::Warning, "UnsupportedSkeletonIgnored", mesh->mName.C_Str(), "Skeleton and skin weights are not imported by this static FBX feature.", "The bind-pose/static mesh geometry was imported.");
-					return;
-				}
-			}
+		}
+
+		aiMatrix4x4 ComposeSourceGlobalTransform(
+			const aiMatrix4x4& parentTransform,
+			const aiMatrix4x4& localTransform)
+		{
+			// Terra's matrices use row-major storage with column-vector application,
+			// so a hierarchy global is parent * local. Assimp stores the same matrix
+			// layout and its scalar multiplication formula preserves that textual
+			// order. Keeping this rule in one helper prevents mesh baking and runtime
+			// skeleton evaluation from drifting into different hierarchy spaces.
+			return parentTransform * localTransform;
+		}
+
+		aiMatrix4x4 RebaseOffsetToPackageSpace(
+			const aiMatrix4x4& meshLocalToBone,
+			const aiMatrix4x4& packageToMesh)
+		{
+			// A source offset maps mesh-local positions to bone-local positions. The
+			// cooker has already converted those positions to package space, so the
+			// stored inverse bind must apply meshLocalToBone * packageToMesh. Assimp's
+			// matrix operator preserves that textual order, matching the runtime's
+			// globalBone * inverseBind * packageVertex palette convention.
+			return meshLocalToBone * packageToMesh;
 		}
 
 		bool TryReadTextureReference(const aiMaterial& material, aiTextureType type, aiString& outPath)
@@ -859,7 +1027,9 @@ namespace TerraEngine::AssetPipeline
 			std::vector<std::uint32_t>& indices,
 			bool& boundsInitialized)
 		{
-			const aiMatrix4x4 nodeTransform = parentTransform * node.mTransformation;
+			const aiMatrix4x4 nodeTransform = ComposeSourceGlobalTransform(
+				parentTransform,
+				node.mTransformation);
 			const std::string currentNodePath = NodePath(parentPath, node);
 			for (unsigned int nodeMeshIndex = 0; nodeMeshIndex < node.mNumMeshes; ++nodeMeshIndex)
 			{
@@ -935,16 +1105,1941 @@ namespace TerraEngine::AssetPipeline
 				}
 			}
 		}
+
+		bool HasImportErrors(const ModelPackageImportResult& result)
+		{
+			return std::any_of(result.diagnostics.begin(), result.diagnostics.end(), [](const ModelImportDiagnostic& diagnostic) {
+				return diagnostic.severity == ModelDiagnosticSeverity::Error;
+			});
+		}
+
+		TerraEngine::Animation::AnimationTransform ToAnimationTransform(const aiMatrix4x4& matrix)
+		{
+			aiVector3D scale;
+			aiVector3D translation;
+			aiQuaternion rotation;
+			matrix.Decompose(scale, rotation, translation);
+			const float lengthSquared = rotation.x * rotation.x + rotation.y * rotation.y
+				+ rotation.z * rotation.z + rotation.w * rotation.w;
+			if (std::isfinite(lengthSquared) && lengthSquared > std::numeric_limits<float>::epsilon())
+			{
+				const float reciprocalLength = 1.0f / std::sqrt(lengthSquared);
+				rotation.x *= reciprocalLength;
+				rotation.y *= reciprocalLength;
+				rotation.z *= reciprocalLength;
+				rotation.w *= reciprocalLength;
+			}
+			else
+			{
+				rotation = aiQuaternion();
+			}
+			return {
+				{ translation.x, translation.y, translation.z },
+				{ rotation.x, rotation.y, rotation.z, rotation.w },
+				{ scale.x, scale.y, scale.z }
+			};
+		}
+
+		TerraEngine::Animation::AnimationMatrix4x4 ToAnimationMatrix(const aiMatrix4x4& matrix)
+		{
+			return {{
+				matrix.a1, matrix.a2, matrix.a3, matrix.a4,
+				matrix.b1, matrix.b2, matrix.b3, matrix.b4,
+				matrix.c1, matrix.c2, matrix.c3, matrix.c4,
+				matrix.d1, matrix.d2, matrix.d3, matrix.d4
+			}};
+		}
+
+		TerraEngine::Animation::AnimationMatrix4x4 IdentityAnimationMatrix()
+		{
+			return {{
+				1.0f, 0.0f, 0.0f, 0.0f,
+				0.0f, 1.0f, 0.0f, 0.0f,
+				0.0f, 0.0f, 1.0f, 0.0f,
+				0.0f, 0.0f, 0.0f, 1.0f
+			}};
+		}
+
+		bool MatricesNearlyEqual(
+			const TerraEngine::Animation::AnimationMatrix4x4& left,
+			const TerraEngine::Animation::AnimationMatrix4x4& right)
+		{
+			for (std::size_t index = 0u; index < left.values.size(); ++index)
+			{
+				if (std::abs(left.values[index] - right.values[index]) > 0.00001f)
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+
+		bool IsSocketName(std::string_view name)
+		{
+			const std::string normalized = NormalizeSemanticSegment(name, "node");
+			return normalized.starts_with("socket")
+				|| normalized.starts_with("attach")
+				|| normalized.starts_with("mount")
+				|| normalized.starts_with("locator")
+				|| normalized.ends_with("_socket")
+				|| normalized.ends_with("_attach");
+		}
+
+		TerraEngine::Animation::SkeletonSourceAxis ToSourceAxis(std::int32_t axis, std::int32_t sign)
+		{
+			using TerraEngine::Animation::SkeletonSourceAxis;
+			if (axis == 0)
+			{
+				return sign < 0 ? SkeletonSourceAxis::NegativeX : SkeletonSourceAxis::PositiveX;
+			}
+			if (axis == 1)
+			{
+				return sign < 0 ? SkeletonSourceAxis::NegativeY : SkeletonSourceAxis::PositiveY;
+			}
+			return sign < 0 ? SkeletonSourceAxis::NegativeZ : SkeletonSourceAxis::PositiveZ;
+		}
+
+		template<typename Value>
+		bool TryReadSceneMetadata(const aiScene& scene, std::string_view key, Value& output)
+		{
+			return scene.mMetaData != nullptr
+				&& scene.mMetaData->Get(std::string(key), output);
+		}
+
+		FbxCoordinateConversion ReadCoordinateConversion(const aiScene& scene)
+		{
+			FbxCoordinateConversion conversion;
+			TryReadSceneMetadata(scene, "UpAxis", conversion.upAxis);
+			TryReadSceneMetadata(scene, "UpAxisSign", conversion.upAxisSign);
+			TryReadSceneMetadata(scene, "FrontAxis", conversion.frontAxis);
+			TryReadSceneMetadata(scene, "FrontAxisSign", conversion.frontAxisSign);
+			TryReadSceneMetadata(scene, "CoordAxis", conversion.coordinateAxis);
+			TryReadSceneMetadata(scene, "CoordAxisSign", conversion.coordinateAxisSign);
+
+			float unitScaleCentimeters = 1.0f;
+			double unitScaleDouble = 1.0;
+			if (!TryReadSceneMetadata(scene, "UnitScaleFactor", unitScaleCentimeters)
+				&& TryReadSceneMetadata(scene, "UnitScaleFactor", unitScaleDouble))
+			{
+				unitScaleCentimeters = static_cast<float>(unitScaleDouble);
+			}
+			conversion.unitScaleMeters = unitScaleCentimeters * 0.01f;
+			conversion.assimpOutputNormalizedToMeters = true;
+			return conversion;
+		}
+
+		struct FbxNodeLookup
+		{
+			std::vector<const aiNode*> sourceNodes;
+			std::vector<std::string> semanticKeysByIndex;
+			std::unordered_map<const aiNode*, std::size_t> indexByPointer;
+			std::unordered_map<std::string, std::vector<std::size_t>> indicesByName;
+			std::unordered_set<std::string> semanticKeys;
+		};
+
+		void BuildAnimatedNodeHierarchy(
+			const FbxPackageImportOptions& options,
+			const aiNode& source,
+			std::int32_t parentIndex,
+			std::string parentSemanticKey,
+			FbxAnimatedPackageData& output,
+			FbxNodeLookup& lookup,
+			ModelPackageImportResult& package)
+		{
+			const std::size_t nodeIndex = output.nodes.size();
+			const std::string displayName = source.mName.length > 0u
+				? std::string(source.mName.C_Str())
+				: (parentIndex < 0 ? std::string("Root") : std::string("Node"));
+			const std::string segment = parentIndex < 0
+				? std::string("$root")
+				: NormalizeSemanticSegment(displayName, "node");
+			std::string semanticKey = parentSemanticKey.empty()
+				? segment
+				: parentSemanticKey + "/" + segment;
+
+			if (!lookup.semanticKeys.insert(semanticKey).second)
+			{
+				// Equal sibling labels are not a stable semantic identity. A transform
+				// signature disambiguates ordinary exporter duplicates without depending
+				// on source array order, while the diagnostic tells authors how to fix an
+				// exact collision that cannot be reasoned about semantically.
+				std::uint64_t transformHash = 1469598103934665603ull;
+				transformHash = AppendStablePodHash(transformHash, source.mTransformation);
+				semanticKey += "#" + StableHashSuffix(transformHash);
+				if (!lookup.semanticKeys.insert(semanticKey).second)
+				{
+					AddDiagnostic(
+						package,
+						ModelDiagnosticSeverity::Error,
+						"FbxAmbiguousNodeIdentity",
+						displayName,
+						"Two FBX sibling nodes have the same name and indistinguishable bind transform.",
+						"Give the nodes unique semantic names before reimporting so animation references remain stable.");
+					semanticKey += "#ambiguous";
+				}
+			}
+
+			FbxAnimatedNode node;
+			node.stableId = BuildSemanticHash(options.packageGuid, "fbx-node", semanticKey);
+			node.parentIndex = parentIndex;
+			node.semanticKey = semanticKey;
+			node.displayName = displayName;
+			node.localTransform = ToAnimationTransform(source.mTransformation);
+			node.socketCandidate = IsSocketName(displayName);
+			output.nodes.push_back(std::move(node));
+			lookup.sourceNodes.push_back(&source);
+			lookup.semanticKeysByIndex.push_back(semanticKey);
+			lookup.indexByPointer.emplace(&source, nodeIndex);
+			lookup.indicesByName[displayName].push_back(nodeIndex);
+
+			std::vector<const aiNode*> sortedChildren;
+			sortedChildren.reserve(source.mNumChildren);
+			for (unsigned int childIndex = 0u; childIndex < source.mNumChildren; ++childIndex)
+			{
+				if (source.mChildren[childIndex] != nullptr)
+				{
+					sortedChildren.push_back(source.mChildren[childIndex]);
+				}
+			}
+			std::sort(sortedChildren.begin(), sortedChildren.end(), [](const aiNode* left, const aiNode* right) {
+				const std::string leftName = NormalizeSemanticSegment(left->mName.C_Str(), "node");
+				const std::string rightName = NormalizeSemanticSegment(right->mName.C_Str(), "node");
+				if (leftName != rightName)
+				{
+					return leftName < rightName;
+				}
+				const std::array<float, 16u> leftMatrix{
+					left->mTransformation.a1, left->mTransformation.a2, left->mTransformation.a3, left->mTransformation.a4,
+					left->mTransformation.b1, left->mTransformation.b2, left->mTransformation.b3, left->mTransformation.b4,
+					left->mTransformation.c1, left->mTransformation.c2, left->mTransformation.c3, left->mTransformation.c4,
+					left->mTransformation.d1, left->mTransformation.d2, left->mTransformation.d3, left->mTransformation.d4
+				};
+				const std::array<float, 16u> rightMatrix{
+					right->mTransformation.a1, right->mTransformation.a2, right->mTransformation.a3, right->mTransformation.a4,
+					right->mTransformation.b1, right->mTransformation.b2, right->mTransformation.b3, right->mTransformation.b4,
+					right->mTransformation.c1, right->mTransformation.c2, right->mTransformation.c3, right->mTransformation.c4,
+					right->mTransformation.d1, right->mTransformation.d2, right->mTransformation.d3, right->mTransformation.d4
+				};
+				return std::tie(leftMatrix, left->mNumMeshes, left->mNumChildren)
+					< std::tie(rightMatrix, right->mNumMeshes, right->mNumChildren);
+			});
+			for (const aiNode* child : sortedChildren)
+			{
+					BuildAnimatedNodeHierarchy(
+						options,
+						*child,
+						static_cast<std::int32_t>(nodeIndex),
+						semanticKey,
+						output,
+						lookup,
+						package);
+			}
+		}
+
+		std::optional<std::size_t> ResolveNodeIndex(
+			const aiNode* directNode,
+			std::string_view nodeName,
+			const FbxNodeLookup& lookup)
+		{
+			if (directNode != nullptr)
+			{
+				const auto direct = lookup.indexByPointer.find(directNode);
+				if (direct != lookup.indexByPointer.end())
+				{
+					return direct->second;
+				}
+			}
+			const auto named = lookup.indicesByName.find(std::string(nodeName));
+			if (named == lookup.indicesByName.end() || named->second.size() != 1u)
+			{
+				return std::nullopt;
+			}
+			return named->second.front();
+		}
+
+		std::optional<std::size_t> ResolveAnimationNodeIndex(
+			std::string_view nodeName,
+			const FbxNodeLookup& lookup,
+			const std::vector<bool>& deformingNodes)
+		{
+			const auto named = lookup.indicesByName.find(std::string(nodeName));
+			if (named == lookup.indicesByName.end())
+			{
+				return std::nullopt;
+			}
+			if (named->second.size() == 1u)
+			{
+				return named->second.front();
+			}
+
+			// FBX permits a render model and a limb node to share a display name.
+			// Animation channels only identify that display name, so a duplicate can
+			// be resolved safely only when skin extraction established one deforming
+			// candidate. Never use Assimp's source-array order as a tie breaker.
+			std::optional<std::size_t> deformingCandidate;
+			for (const std::size_t candidate : named->second)
+			{
+				if (candidate >= deformingNodes.size() || !deformingNodes[candidate])
+				{
+					continue;
+				}
+				if (deformingCandidate)
+				{
+					return std::nullopt;
+				}
+				deformingCandidate = candidate;
+			}
+			return deformingCandidate;
+		}
+
+		std::string MeshSemanticKey(const aiMesh& mesh)
+		{
+			if (mesh.mName.length > 0u)
+			{
+				return "mesh:" + NormalizeSemanticSegment(mesh.mName.C_Str(), "mesh");
+			}
+			// An unnamed mesh has no authored semantic label. Its topology signature
+			// is the only source-order-independent discriminator available through
+			// Assimp, so content edits may legitimately give that anonymous child a
+			// new identity until the author supplies a stable name.
+			std::uint64_t signature = 1469598103934665603ull;
+			signature = AppendStablePodHash(signature, mesh.mNumVertices);
+			signature = AppendStablePodHash(signature, mesh.mNumFaces);
+			if (mesh.mNumVertices > 0u && mesh.mVertices != nullptr)
+			{
+				for (unsigned int vertexIndex = 0u; vertexIndex < mesh.mNumVertices; ++vertexIndex)
+				{
+					signature = AppendStablePodHash(signature, mesh.mVertices[vertexIndex]);
+				}
+			}
+			return "mesh:unnamed:" + StableHashSuffix(signature);
+		}
+
+		std::string MaterialSectionSemanticKey(const aiScene& scene, const aiMesh& mesh)
+		{
+			if (mesh.mMaterialIndex < scene.mNumMaterials)
+			{
+				const aiMaterial* material = scene.mMaterials[mesh.mMaterialIndex];
+				aiString materialName;
+				if (material != nullptr
+					&& material->Get(AI_MATKEY_NAME, materialName) == AI_SUCCESS
+					&& materialName.length > 0u)
+				{
+					return "material:" + NormalizeSemanticSegment(materialName.C_Str(), "material");
+				}
+			}
+
+			// An unnamed material supplies no durable authored section identity. Keep
+			// the fallback intentionally shared so equal base-mesh sections fail
+			// closed instead of inheriting an unstable Assimp material-array index.
+			return "material:unnamed";
+		}
+
+		std::string DeformableMeshSectionSemanticKey(const aiScene& scene, const aiMesh& mesh)
+		{
+			// Assimp may split one authored FBX geometry into several aiMesh records
+			// for its material sections. Retain the base mesh identity and append the
+			// authored material semantic so skin and morph records remain distinct
+			// across that lossless importer representation change.
+			return MeshSemanticKey(mesh) + "/" + MaterialSectionSemanticKey(scene, mesh);
+		}
+
+		std::optional<std::size_t> ResolveBoneNodeIndex(
+			const aiBone& bone,
+			const FbxNodeLookup& lookup)
+		{
+#if !defined(ASSIMP_BUILD_NO_ARMATUREPOPULATE_PROCESS)
+			return ResolveNodeIndex(bone.mNode, bone.mName.C_Str(), lookup);
+#else
+			return ResolveNodeIndex(nullptr, bone.mName.C_Str(), lookup);
+#endif
+		}
+
+		void CollectSourceMeshTransforms(
+			const aiScene& scene,
+			const aiNode& node,
+			const aiMatrix4x4& parentTransform,
+			std::vector<std::vector<aiMatrix4x4>>& transforms)
+		{
+			const aiMatrix4x4 globalTransform = ComposeSourceGlobalTransform(
+				parentTransform,
+				node.mTransformation);
+			for (unsigned int index = 0u; index < node.mNumMeshes; ++index)
+			{
+				if (node.mMeshes[index] < scene.mNumMeshes)
+				{
+					transforms[node.mMeshes[index]].push_back(globalTransform);
+				}
+			}
+			for (unsigned int index = 0u; index < node.mNumChildren; ++index)
+			{
+				if (node.mChildren[index] != nullptr)
+				{
+					CollectSourceMeshTransforms(scene, *node.mChildren[index], globalTransform, transforms);
+				}
+			}
+		}
+
+		bool AssimpMatricesNearlyEqual(const aiMatrix4x4& left, const aiMatrix4x4& right)
+		{
+			return MatricesNearlyEqual(ToAnimationMatrix(left), ToAnimationMatrix(right));
+		}
+
+		void ExtractSkinsAndInverseBinds(
+			const FbxPackageImportOptions& options,
+			const aiScene& scene,
+			const FbxNodeLookup& lookup,
+			TerraEngine::Animation::AnimationGuid skeletonAssetId,
+			FbxAnimatedPackageData& output,
+			std::vector<bool>& deformingNodes,
+			std::vector<bool>& inverseBindAssigned,
+			std::vector<TerraEngine::Animation::AnimationMatrix4x4>& inverseBinds,
+			ModelPackageImportResult& package)
+		{
+			bool reportedInvalidWeight = false;
+			std::unordered_set<std::string> emittedSkinSemanticKeys;
+			std::vector<std::vector<aiMatrix4x4>> sourceMeshTransforms(scene.mNumMeshes);
+			if (scene.mRootNode != nullptr)
+			{
+				CollectSourceMeshTransforms(scene, *scene.mRootNode, aiMatrix4x4(), sourceMeshTransforms);
+			}
+			for (unsigned int meshIndex = 0u; meshIndex < scene.mNumMeshes; ++meshIndex)
+			{
+				const aiMesh* mesh = scene.mMeshes[meshIndex];
+				if (mesh == nullptr || !mesh->HasBones())
+				{
+					continue;
+				}
+
+				FbxImportedSkinnedMesh skin;
+				skin.sourceMeshIndex = meshIndex;
+				skin.semanticKey = DeformableMeshSectionSemanticKey(scene, *mesh);
+				if (!emittedSkinSemanticKeys.insert(skin.semanticKey).second)
+				{
+					AddDiagnostic(
+						package,
+						ModelDiagnosticSeverity::Error,
+						"FbxAmbiguousSkinnedMeshIdentity",
+						skin.semanticKey,
+						"Multiple skinned FBX mesh sections have the same normalized mesh and material identity.",
+						"Give each ambiguous skinned section a unique authored mesh or material name before reimporting.");
+					continue;
+				}
+				skin.skeletonAssetId = skeletonAssetId;
+				if (sourceMeshTransforms[meshIndex].empty())
+				{
+					AddDiagnostic(
+						package,
+						ModelDiagnosticSeverity::Error,
+						"FbxSkinnedMeshPlacementMissing",
+						skin.semanticKey,
+						"A skinned FBX mesh has no hierarchy placement transform.",
+						"Attach the mesh to exactly one exported hierarchy node before reimporting.");
+					continue;
+				}
+				const aiMatrix4x4 meshTransform = sourceMeshTransforms[meshIndex].front();
+				const bool hasDistinctInstances = std::any_of(
+					sourceMeshTransforms[meshIndex].begin() + 1,
+					sourceMeshTransforms[meshIndex].end(),
+					[&](const aiMatrix4x4& candidate) { return !AssimpMatricesNearlyEqual(meshTransform, candidate); });
+				if (hasDistinctInstances)
+				{
+					AddDiagnostic(
+						package,
+						ModelDiagnosticSeverity::Error,
+						"FbxSkinnedMeshInstanceBindConflict",
+						skin.semanticKey,
+						"One skinned FBX source mesh is instanced at different hierarchy transforms, which cannot share one inverse-bind table after package-space baking.",
+						"Make each differently placed skinned instance a distinct authored mesh before reimporting.");
+					continue;
+				}
+				if (!std::isfinite(meshTransform.Determinant())
+					|| std::abs(meshTransform.Determinant()) <= 0.000001f)
+				{
+					AddDiagnostic(
+						package,
+						ModelDiagnosticSeverity::Error,
+						"FbxSkinnedMeshPlacementSingular",
+						skin.semanticKey,
+						"A skinned FBX mesh has a singular placement transform that cannot be reconciled with its inverse binds.",
+						"Remove zero scale and re-export a finite invertible mesh placement.");
+					continue;
+				}
+				aiMatrix4x4 inverseMeshTransform = meshTransform;
+				inverseMeshTransform.Inverse();
+				for (unsigned int boneIndex = 0u; boneIndex < mesh->mNumBones; ++boneIndex)
+				{
+					const aiBone* bone = mesh->mBones[boneIndex];
+					if (bone == nullptr)
+					{
+						continue;
+					}
+					const std::optional<std::size_t> nodeIndex = ResolveBoneNodeIndex(*bone, lookup);
+					if (!nodeIndex)
+					{
+						AddDiagnostic(
+							package,
+							ModelDiagnosticSeverity::Error,
+							"FbxBoneNodeMissing",
+							bone->mName.C_Str(),
+							"An FBX skin bone does not resolve to exactly one hierarchy node.",
+							"Ensure every deforming bone has a unique node name and is inside the exported hierarchy.");
+						continue;
+					}
+
+					deformingNodes[*nodeIndex] = true;
+					const TerraEngine::Animation::AnimationMatrix4x4 bind = ToAnimationMatrix(
+						RebaseOffsetToPackageSpace(bone->mOffsetMatrix, inverseMeshTransform));
+					if (inverseBindAssigned[*nodeIndex]
+						&& !MatricesNearlyEqual(inverseBinds[*nodeIndex], bind))
+					{
+						AddDiagnostic(
+							package,
+							ModelDiagnosticSeverity::Warning,
+							"FbxInverseBindConflict",
+							bone->mName.C_Str(),
+							"The same FBX bone carries different inverse-bind matrices in multiple meshes.",
+							"Verify the meshes share one bind pose; a deterministic canonical bind is retained.");
+						if (bind.values < inverseBinds[*nodeIndex].values)
+						{
+							inverseBinds[*nodeIndex] = bind;
+						}
+					}
+					else
+					{
+						inverseBinds[*nodeIndex] = bind;
+						inverseBindAssigned[*nodeIndex] = true;
+					}
+
+					const std::uint64_t jointStableId = output.nodes[*nodeIndex].stableId;
+					for (unsigned int weightIndex = 0u; weightIndex < bone->mNumWeights; ++weightIndex)
+					{
+						const aiVertexWeight& sourceWeight = bone->mWeights[weightIndex];
+						if (sourceWeight.mVertexId >= mesh->mNumVertices
+							|| !std::isfinite(sourceWeight.mWeight)
+							|| sourceWeight.mWeight <= 0.0f)
+						{
+							if (!reportedInvalidWeight)
+							{
+								AddDiagnostic(
+									package,
+									ModelDiagnosticSeverity::Warning,
+									"FbxInvalidBoneWeightSkipped",
+									skin.semanticKey,
+									"A non-finite, non-positive, or out-of-range FBX bone influence was rejected.",
+									"Normalize weights and remove invalid vertex assignments in the source file before reimporting.");
+								reportedInvalidWeight = true;
+							}
+							continue;
+						}
+						skin.influences.push_back({ sourceWeight.mVertexId, jointStableId, sourceWeight.mWeight });
+					}
+				}
+				std::sort(skin.influences.begin(), skin.influences.end(), [](const auto& left, const auto& right) {
+					return std::tie(left.vertexIndex, left.jointStableId, left.weight)
+						< std::tie(right.vertexIndex, right.jointStableId, right.weight);
+				});
+				output.skinnedMeshes.push_back(std::move(skin));
+			}
+		}
+
+		bool ValidateAuthoredInverseBinds(
+			const std::vector<FbxAnimatedNode>& nodes,
+			const std::vector<bool>& deformingNodes,
+			const std::vector<bool>& inverseBindAssigned,
+			const std::vector<TerraEngine::Animation::AnimationMatrix4x4>& inverseBinds,
+			ModelPackageImportResult& package)
+		{
+			if (nodes.size() != deformingNodes.size()
+				|| nodes.size() != inverseBindAssigned.size()
+				|| nodes.size() != inverseBinds.size())
+			{
+				AddDiagnostic(
+					package,
+					ModelDiagnosticSeverity::Error,
+					"FbxAuthoredInverseBindCountMismatch",
+					"skeleton:scene",
+					"The normalized FBX hierarchy and authored inverse-bind tables have different joint counts.",
+					"Re-export one complete skeleton hierarchy and reimport the package.");
+				return false;
+			}
+
+			// FBX bone offsets describe the mesh's authored bind pose. That pose may
+			// deliberately differ from the node transforms stored in the scene—for
+			// example, a mesh can be bound in a T-pose while the exported nodes are
+			// already at frame zero of an arms-down animation. Replacing the authored
+			// offsets with inverse node transforms would make the T-pose an identity
+			// deformation and cancel most of the real animation. Preserve the rebased
+			// Assimp offsets collected above and only validate that every deforming
+			// joint supplied a finite, invertible affine matrix.
+			for (std::size_t index = 0u; index < nodes.size(); ++index)
+			{
+				if (!deformingNodes[index])
+				{
+					continue;
+				}
+				if (!inverseBindAssigned[index]
+					|| !TerraEngine::Animation::IsFinite(inverseBinds[index]))
+				{
+					AddDiagnostic(
+						package,
+						ModelDiagnosticSeverity::Error,
+						"FbxAuthoredInverseBindMissing",
+						nodes[index].semanticKey,
+						"A deforming FBX joint does not provide one finite authored inverse-bind matrix.",
+						"Rebind the mesh to the exported skeleton and re-export the FBX.");
+					return false;
+				}
+
+				const auto& values = inverseBinds[index].values;
+				const float determinant =
+					values[0u] * (values[5u] * values[10u] - values[6u] * values[9u])
+					- values[1u] * (values[4u] * values[10u] - values[6u] * values[8u])
+					+ values[2u] * (values[4u] * values[9u] - values[5u] * values[8u]);
+				if (!std::isfinite(determinant) || std::abs(determinant) <= 1.0e-12F)
+				{
+					AddDiagnostic(
+						package,
+						ModelDiagnosticSeverity::Error,
+						"FbxAuthoredInverseBindSingular",
+						nodes[index].semanticKey,
+						"A deforming FBX joint has a singular authored inverse-bind matrix.",
+						"Remove zero scale from the skin bind pose and re-export the model.");
+					return false;
+				}
+				if (std::abs(values[12u]) > 0.0001F
+					|| std::abs(values[13u]) > 0.0001F
+					|| std::abs(values[14u]) > 0.0001F
+					|| std::abs(values[15u] - 1.0F) > 0.0001F)
+				{
+					AddDiagnostic(
+						package,
+						ModelDiagnosticSeverity::Error,
+						"FbxAuthoredInverseBindNotAffine",
+						nodes[index].semanticKey,
+						"A deforming FBX joint has a perspective or malformed authored inverse-bind matrix.",
+						"Export an ordinary affine skin bind pose and reimport the model.");
+					return false;
+				}
+			}
+			return true;
+		}
+
+		std::unordered_map<std::string, std::vector<std::size_t>> ExtractMorphTargets(
+			const FbxPackageImportOptions& options,
+			const aiScene& scene,
+			FbxAnimatedPackageData& output,
+			ModelPackageImportResult& package)
+		{
+			std::unordered_map<std::string, std::vector<std::size_t>> morphTargetsByMeshName;
+			std::unordered_set<std::uint32_t> emittedMorphTargetIds;
+			for (unsigned int meshIndex = 0u; meshIndex < scene.mNumMeshes; ++meshIndex)
+			{
+				const aiMesh* mesh = scene.mMeshes[meshIndex];
+				if (mesh == nullptr || mesh->mNumAnimMeshes == 0u)
+				{
+					continue;
+				}
+				const std::string meshKey = DeformableMeshSectionSemanticKey(scene, *mesh);
+				for (unsigned int targetIndex = 0u; targetIndex < mesh->mNumAnimMeshes; ++targetIndex)
+				{
+					const aiAnimMesh* target = mesh->mAnimMeshes[targetIndex];
+					if (target == nullptr || target->mNumVertices != mesh->mNumVertices)
+					{
+						AddDiagnostic(
+							package,
+							ModelDiagnosticSeverity::Error,
+							"FbxMorphVertexCountMismatch",
+							meshKey,
+							"An FBX morph attachment does not match its base mesh vertex count.",
+							"Re-export the morph with unchanged base topology.");
+						continue;
+					}
+
+					FbxGeneratedMorphTarget morph;
+					morph.sourceMeshIndex = meshIndex;
+					morph.sourceTargetIndex = targetIndex;
+					morph.positionDeltas.resize(mesh->mNumVertices);
+					if (target->mNormals != nullptr && mesh->mNormals != nullptr)
+					{
+						morph.normalDeltas.resize(mesh->mNumVertices);
+					}
+					if (target->mTangents != nullptr && mesh->mTangents != nullptr)
+					{
+						morph.tangentDeltas.resize(mesh->mNumVertices);
+					}
+					for (unsigned int vertexIndex = 0u; vertexIndex < mesh->mNumVertices; ++vertexIndex)
+					{
+						if (target->mVertices != nullptr && mesh->mVertices != nullptr)
+						{
+							const aiVector3D delta = target->mVertices[vertexIndex] - mesh->mVertices[vertexIndex];
+							morph.positionDeltas[vertexIndex] = { delta.x, delta.y, delta.z };
+						}
+						if (target->mNormals != nullptr && mesh->mNormals != nullptr)
+						{
+							const aiVector3D delta = target->mNormals[vertexIndex] - mesh->mNormals[vertexIndex];
+							morph.normalDeltas[vertexIndex] = { delta.x, delta.y, delta.z };
+						}
+						if (target->mTangents != nullptr && mesh->mTangents != nullptr)
+						{
+							const aiVector3D delta = target->mTangents[vertexIndex] - mesh->mTangents[vertexIndex];
+							morph.tangentDeltas[vertexIndex] = { delta.x, delta.y, delta.z };
+						}
+					}
+					std::uint64_t morphSignature = 1469598103934665603ull;
+					for (const auto& delta : morph.positionDeltas) morphSignature = AppendStablePodHash(morphSignature, delta);
+					for (const auto& delta : morph.normalDeltas) morphSignature = AppendStablePodHash(morphSignature, delta);
+					for (const auto& delta : morph.tangentDeltas) morphSignature = AppendStablePodHash(morphSignature, delta);
+					morph.displayName = target->mName.length > 0u
+						? std::string(target->mName.C_Str())
+						: "Morph_" + StableHashSuffix(morphSignature);
+					morph.semanticKey = meshKey + "/morph:"
+						+ NormalizeSemanticSegment(morph.displayName, "morph");
+					std::uint32_t stableTargetId = static_cast<std::uint32_t>(
+						BuildSemanticHash(options.packageGuid, "fbx-morph", morph.semanticKey) & 0xffffffffu);
+					if (stableTargetId == 0u)
+					{
+						stableTargetId = 1u;
+					}
+					if (!emittedMorphTargetIds.insert(stableTargetId).second)
+					{
+						AddDiagnostic(
+							package,
+							ModelDiagnosticSeverity::Error,
+							"FbxMorphTargetIdCollision",
+							morph.semanticKey,
+							"Two FBX morph targets map to the same frozen 32-bit TEMF target identifier.",
+							"Rename one morph target to establish a distinct semantic identity before reimporting.");
+						continue;
+					}
+					morph.stableId = stableTargetId;
+					morph.guid = BuildStableAnimationSubAssetUuid(
+						options.packageGuid,
+						AnimationImportSubAssetKind::MorphTarget,
+						morph.semanticKey);
+					const std::size_t emittedIndex = output.morphTargets.size();
+					output.morphTargets.push_back(std::move(morph));
+					morphTargetsByMeshName[mesh->mName.C_Str()].push_back(emittedIndex);
+				}
+			}
+			return morphTargetsByMeshName;
+		}
+
+		aiVector3D TransformDeformationDelta(const aiMatrix4x4& transform, const aiVector3D& value)
+		{
+			// Morph position, normal, and tangent deltas are vector differences, not
+			// absolute directions. Preserve their authored magnitude and node scale
+			// while deliberately excluding translation and normalization.
+			return {
+				transform.a1 * value.x + transform.a2 * value.y + transform.a3 * value.z,
+				transform.b1 * value.x + transform.b2 * value.y + transform.b3 * value.z,
+				transform.c1 * value.x + transform.c2 * value.y + transform.c3 * value.z
+			};
+		}
+
+		bool AppendDeformableMeshes(
+			const aiScene& scene,
+			const aiNode& node,
+			const aiMatrix4x4& parentTransform,
+			const FbxNodeLookup& nodeLookup,
+			const std::unordered_map<std::uint32_t, const FbxGeneratedMorphTarget*>& morphTargets,
+			SkinnedMeshCookInput& output,
+			ModelPackageImportResult& package)
+		{
+			// Keep baked vertices in the same package space as the skeleton's
+			// parent * local bind hierarchy through the shared Assimp seam.
+			const aiMatrix4x4 nodeTransform = ComposeSourceGlobalTransform(
+				parentTransform,
+				node.mTransformation);
+			for (unsigned int nodeMeshIndex = 0u; nodeMeshIndex < node.mNumMeshes; ++nodeMeshIndex)
+			{
+				const unsigned int sourceMeshIndex = node.mMeshes[nodeMeshIndex];
+				if (sourceMeshIndex >= scene.mNumMeshes || scene.mMeshes[sourceMeshIndex] == nullptr)
+				{
+					continue;
+				}
+				const aiMesh& mesh = *scene.mMeshes[sourceMeshIndex];
+				if (output.vertices.size() > std::numeric_limits<std::uint32_t>::max() - mesh.mNumVertices)
+				{
+					AddDiagnostic(
+						package,
+						ModelDiagnosticSeverity::Error,
+						"FbxDeformableVertexRangeOverflow",
+						MeshSemanticKey(mesh),
+						"The merged FBX deformable vertex range exceeds the TEMF 32-bit address space.",
+						"Split the package into smaller deformable mesh assets.");
+					return false;
+				}
+				const std::uint32_t vertexOffset = static_cast<std::uint32_t>(output.vertices.size());
+				std::vector<std::vector<SkinnedMeshInfluence>> influences(mesh.mNumVertices);
+				for (unsigned int boneIndex = 0u; boneIndex < mesh.mNumBones; ++boneIndex)
+				{
+					const aiBone* bone = mesh.mBones[boneIndex];
+					if (bone == nullptr)
+					{
+						continue;
+					}
+					const std::optional<std::size_t> jointIndex = ResolveBoneNodeIndex(*bone, nodeLookup);
+					if (!jointIndex || *jointIndex > std::numeric_limits<std::uint32_t>::max())
+					{
+						AddDiagnostic(
+							package,
+							ModelDiagnosticSeverity::Error,
+							"FbxDeformableJointMissing",
+							bone->mName.C_Str(),
+							"A deformable FBX mesh references a bone that is absent or ambiguous in the emitted skeleton.",
+							"Restore the bone inside the exported hierarchy and give it a unique semantic name.");
+						return false;
+					}
+					for (unsigned int weightIndex = 0u; weightIndex < bone->mNumWeights; ++weightIndex)
+					{
+						const aiVertexWeight& weight = bone->mWeights[weightIndex];
+						if (weight.mVertexId >= mesh.mNumVertices)
+						{
+							AddDiagnostic(
+								package,
+								ModelDiagnosticSeverity::Error,
+								"FbxDeformableWeightVertexOutOfRange",
+								bone->mName.C_Str(),
+								"An FBX bone weight references a vertex outside its source mesh.",
+								"Repair the skin binding or re-export the mesh with consistent topology.");
+							return false;
+						}
+						influences[weight.mVertexId].push_back({
+							static_cast<std::uint32_t>(*jointIndex),
+							weight.mWeight
+						});
+					}
+				}
+
+				for (unsigned int vertexIndex = 0u; vertexIndex < mesh.mNumVertices; ++vertexIndex)
+				{
+					SkinnedMeshCookVertex vertex;
+					const aiVector3D position = TransformPoint(nodeTransform, mesh.mVertices[vertexIndex]);
+					vertex.baseVertex.position = { position.x, position.y, position.z };
+					if (mesh.HasNormals())
+					{
+						const aiVector3D normal = TransformDirection(nodeTransform, mesh.mNormals[vertexIndex]);
+						vertex.baseVertex.normal = { normal.x, normal.y, normal.z };
+					}
+					if (mesh.HasTextureCoords(0u))
+					{
+						vertex.baseVertex.uv = {
+							mesh.mTextureCoords[0u][vertexIndex].x,
+							mesh.mTextureCoords[0u][vertexIndex].y
+						};
+					}
+					vertex.influences = std::move(influences[vertexIndex]);
+					output.vertices.push_back(std::move(vertex));
+				}
+
+				for (SkinnedMeshMorphTarget& cookedMorph : output.morphTargets)
+				{
+					const auto sourceMorph = morphTargets.find(cookedMorph.stableTargetId);
+					const FbxGeneratedMorphTarget* source = sourceMorph != morphTargets.end()
+						? sourceMorph->second
+						: nullptr;
+					for (unsigned int vertexIndex = 0u; vertexIndex < mesh.mNumVertices; ++vertexIndex)
+					{
+						std::array<float, 3u> positionDelta{};
+						std::array<float, 3u> normalDelta{};
+						std::array<float, 3u> tangentDelta{};
+						if (source != nullptr && source->sourceMeshIndex == sourceMeshIndex
+							&& vertexIndex < source->positionDeltas.size())
+						{
+							const auto& localDelta = source->positionDeltas[vertexIndex];
+							const aiVector3D transformed = TransformDeformationDelta(
+								nodeTransform,
+								{ localDelta.x, localDelta.y, localDelta.z });
+							positionDelta = { transformed.x, transformed.y, transformed.z };
+						}
+						if (source != nullptr && !source->normalDeltas.empty()
+							&& source->sourceMeshIndex == sourceMeshIndex && vertexIndex < source->normalDeltas.size())
+						{
+							const auto& localDelta = source->normalDeltas[vertexIndex];
+							const aiVector3D transformed = TransformDeformationDelta(
+								nodeTransform,
+								{ localDelta.x, localDelta.y, localDelta.z });
+							normalDelta = { transformed.x, transformed.y, transformed.z };
+						}
+						if (source != nullptr && !source->tangentDeltas.empty()
+							&& source->sourceMeshIndex == sourceMeshIndex && vertexIndex < source->tangentDeltas.size())
+						{
+							const auto& localDelta = source->tangentDeltas[vertexIndex];
+							const aiVector3D transformed = TransformDeformationDelta(
+								nodeTransform,
+								{ localDelta.x, localDelta.y, localDelta.z });
+							tangentDelta = { transformed.x, transformed.y, transformed.z };
+						}
+						cookedMorph.positionDeltas.push_back(positionDelta);
+						if (source != nullptr && !source->normalDeltas.empty())
+						{
+							cookedMorph.normalDeltas.push_back(normalDelta);
+						}
+						if (source != nullptr && !source->tangentDeltas.empty())
+						{
+							cookedMorph.tangentDeltas.push_back(tangentDelta);
+						}
+					}
+				}
+
+				for (unsigned int faceIndex = 0u; faceIndex < mesh.mNumFaces; ++faceIndex)
+				{
+					const aiFace& face = mesh.mFaces[faceIndex];
+					if (face.mNumIndices != 3u)
+					{
+						continue;
+					}
+					output.indices.push_back(vertexOffset + face.mIndices[0u]);
+					output.indices.push_back(vertexOffset + face.mIndices[1u]);
+					output.indices.push_back(vertexOffset + face.mIndices[2u]);
+				}
+			}
+
+			for (unsigned int childIndex = 0u; childIndex < node.mNumChildren; ++childIndex)
+			{
+				if (node.mChildren[childIndex] != nullptr
+					&& !AppendDeformableMeshes(
+						scene,
+						*node.mChildren[childIndex],
+						nodeTransform,
+						nodeLookup,
+						morphTargets,
+						output,
+						package))
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+
+		bool CookDeformablePackageMesh(
+			const FbxPackageImportOptions& options,
+			const aiScene& scene,
+			const FbxNodeLookup& nodeLookup,
+			const FbxGeneratedSkeleton& skeleton,
+			const FbxAnimatedPackageData& animation,
+			ModelPackageImportResult& package)
+		{
+			if (package.generatedMeshes.empty())
+			{
+				AddDiagnostic(
+					package,
+					ModelDiagnosticSeverity::Error,
+					"FbxDeformableOutputMissing",
+					options.sourceRelativePath.generic_string(),
+					"The animated FBX package has no generated TEMF destination for its deformable payload.",
+					"Restore renderable triangle geometry and reimport the complete character package.");
+				return false;
+			}
+
+			SkinnedMeshCookInput cookInput;
+			std::vector<const FbxGeneratedMorphTarget*> orderedMorphs;
+			for (const FbxGeneratedMorphTarget& morph : animation.morphTargets)
+			{
+				orderedMorphs.push_back(&morph);
+			}
+			std::sort(orderedMorphs.begin(), orderedMorphs.end(), [](const auto* left, const auto* right) {
+				return std::tie(left->stableId, left->semanticKey) < std::tie(right->stableId, right->semanticKey);
+			});
+			for (const FbxGeneratedMorphTarget* morph : orderedMorphs)
+			{
+				SkinnedMeshMorphTarget cookedMorph;
+				cookedMorph.stableTargetId = static_cast<std::uint32_t>(morph->stableId);
+				cookInput.morphTargets.push_back(std::move(cookedMorph));
+			}
+			std::unordered_map<std::uint32_t, const FbxGeneratedMorphTarget*> morphLookup;
+			for (const FbxGeneratedMorphTarget* morph : orderedMorphs)
+			{
+				morphLookup.emplace(static_cast<std::uint32_t>(morph->stableId), morph);
+			}
+			if (!AppendDeformableMeshes(
+				scene,
+				*scene.mRootNode,
+				aiMatrix4x4(),
+				nodeLookup,
+				morphLookup,
+				cookInput,
+				package))
+			{
+				return false;
+			}
+
+			SkinnedMeshCookSettings settings;
+			settings.sourceSkeletonJointCount = static_cast<std::uint32_t>(skeleton.asset.joints.size());
+			settings.skeletonCompatibilityFingerprint = skeleton.asset.compatibilityFingerprint;
+			SkinnedMeshCookReport report;
+			const std::filesystem::path compiledPath = options.buildRoot / package.generatedMeshes.front().compiledPath;
+			if (!CompileSkinnedMeshFromRaw(options.sourceRelativePath, compiledPath, cookInput, &report, settings))
+			{
+				std::string message = report.diagnosticMessage;
+				if (report.failingVertexIndex != std::numeric_limits<std::uint32_t>::max())
+				{
+					message += " Failing vertex: " + std::to_string(report.failingVertexIndex) + ".";
+				}
+				if (report.failingJointIndex != std::numeric_limits<std::uint32_t>::max())
+				{
+					message += " Failing joint: " + std::to_string(report.failingJointIndex) + ".";
+				}
+				if (report.preservedLastKnownGood)
+				{
+					message += " The previous TEMF generation was preserved.";
+				}
+				AddDiagnostic(
+					package,
+					ModelDiagnosticSeverity::Error,
+					report.diagnosticCode.empty() ? "FbxDeformableCookFailed" : report.diagnosticCode,
+					package.generatedMeshes.front().compiledPath.generic_string(),
+					std::move(message),
+					report.recommendedCorrection);
+				return false;
+			}
+
+			GeneratedModelMeshAsset& generatedMesh = package.generatedMeshes.front();
+			std::size_t reducedVertexCount = 0u;
+			float maximumDiscardedWeight = 0.0f;
+			for (const SkinnedMeshCookedVertex& vertex : report.cookedVertices)
+			{
+				if (vertex.discardedWeight > 0.0f)
+				{
+					++reducedVertexCount;
+					maximumDiscardedWeight = std::max(maximumDiscardedWeight, vertex.discardedWeight);
+				}
+			}
+			if (reducedVertexCount > 0u)
+			{
+				AddDiagnostic(
+					package,
+					ModelDiagnosticSeverity::Warning,
+					"FbxInfluenceReductionApplied",
+					generatedMesh.compiledPath.generic_string(),
+					"Deterministic four-influence reduction affected " + std::to_string(reducedVertexCount)
+						+ " vertices; the largest discarded source-weight sum was "
+						+ std::to_string(maximumDiscardedWeight) + ".",
+					"Review skin fidelity or reduce authored influences to four per vertex before export.");
+			}
+			AddCoverageTag(generatedMesh, "deformable-temf");
+			if (!animation.skinnedMeshes.empty()) AddCoverageTag(generatedMesh, "skinned-deformation");
+			if (!animation.morphTargets.empty()) AddCoverageTag(generatedMesh, "morph-deformation");
+			PopulateGeneratedMeshVirtualGeometryMetadata(compiledPath, generatedMesh, package.diagnostics);
+			AddDiagnostic(
+				package,
+				ModelDiagnosticSeverity::Info,
+				"FbxDeformableCookSummary",
+				generatedMesh.compiledPath.generic_string(),
+				"Cooked a real deformable TEMF payload with "
+					+ std::to_string(report.cookedVertices.size()) + " vertices, "
+					+ std::to_string(report.palettePartitions.size()) + " palettes, and "
+					+ std::to_string(report.deformableTemf.morphTargetCount) + " morph targets.",
+				"Zero-weight vertices use the format's explicit identity-deformation record.");
+			return true;
+		}
+
+		std::string HashBytesHex(std::span<const std::uint8_t> bytes)
+		{
+			return StableHashSuffix(AppendStableHash(1469598103934665603ull, bytes));
+		}
+
+		std::uint64_t BuildSkeletonCompatibilityFingerprint(
+			const std::vector<FbxAnimatedNode>& nodes,
+			const std::vector<bool>& deformingNodes,
+			const std::vector<TerraEngine::Animation::AnimationMatrix4x4>& inverseBinds)
+		{
+			std::uint64_t hash = 1469598103934665603ull;
+			for (std::size_t index = 0u; index < nodes.size(); ++index)
+			{
+				hash = AppendStablePodHash(hash, nodes[index].stableId);
+				hash = AppendStablePodHash(hash, nodes[index].parentIndex);
+				hash = AppendStablePodHash(hash, nodes[index].localTransform);
+				const std::uint8_t deforming = deformingNodes[index] ? 1u : 0u;
+				hash = AppendStablePodHash(hash, deforming);
+				hash = AppendStablePodHash(hash, inverseBinds[index]);
+			}
+			return hash == 0u ? 1u : hash;
+		}
+
+		bool WriteGeneratedAnimationBytes(
+			const FbxPackageImportOptions& options,
+			const std::filesystem::path& relativePath,
+			std::span<const std::uint8_t> bytes)
+		{
+			const std::filesystem::path assetPath = (options.assetRoot / relativePath).lexically_normal();
+			const std::filesystem::path buildPath = (options.buildRoot / relativePath).lexically_normal();
+			if (!WriteBinaryAtomically(assetPath, bytes))
+			{
+				return false;
+			}
+			if (assetPath == buildPath)
+			{
+				return true;
+			}
+			return WriteBinaryAtomically(buildPath, bytes);
+		}
+
+		std::optional<FbxGeneratedSkeleton> BuildSkeletonCandidate(
+			const FbxPackageImportOptions& options,
+			const FbxCoordinateConversion& conversion,
+			const std::vector<FbxAnimatedNode>& nodes,
+			const std::vector<bool>& deformingNodes,
+			const std::vector<TerraEngine::Animation::AnimationMatrix4x4>& inverseBinds,
+			ModelPackageImportResult& package)
+		{
+			using namespace TerraEngine::Animation;
+			if (nodes.empty() || nodes.size() != deformingNodes.size() || nodes.size() != inverseBinds.size())
+			{
+				AddDiagnostic(
+					package,
+					ModelDiagnosticSeverity::Error,
+					"FbxSkeletonHierarchyInvalid",
+					options.sourceRelativePath.generic_string(),
+					"The normalized FBX hierarchy is empty or internally inconsistent.",
+					"Check the exported hierarchy and reimport the package.");
+				return std::nullopt;
+			}
+			if (ValidateAnimationHardLimit(AnimationLimit::SkeletonJoints, nodes.size()) != AnimationStatus::Ok)
+			{
+				AddDiagnostic(
+					package,
+					ModelDiagnosticSeverity::Error,
+					"FbxSkeletonJointLimitExceeded",
+					options.sourceRelativePath.generic_string(),
+					"The FBX hierarchy exceeds the frozen skeleton joint hard limit.",
+					"Split the character into supported skeletons before reimporting.");
+				return std::nullopt;
+			}
+
+			FbxGeneratedSkeleton generated;
+			generated.semanticKey = "skeleton:scene";
+			generated.guid = BuildStableAnimationSubAssetUuid(
+				options.packageGuid,
+				AnimationImportSubAssetKind::Skeleton,
+				generated.semanticKey);
+			generated.sourcePath = package.package.importRoot / "Skeleton.teskel";
+			generated.compiledPath = generated.sourcePath;
+
+			SkeletonAsset skeleton;
+			skeleton.assetId = ToAnimationGuid(generated.guid);
+			skeleton.compatibilityFingerprint = BuildSkeletonCompatibilityFingerprint(nodes, deformingNodes, inverseBinds);
+			skeleton.referencePoseHash = skeleton.compatibilityFingerprint;
+			skeleton.rootJointIndex = 0u;
+			skeleton.source.unitScaleMeters = conversion.unitScaleMeters;
+			skeleton.source.upAxis = ToSourceAxis(conversion.upAxis, conversion.upAxisSign);
+			skeleton.source.forwardAxis = ToSourceAxis(conversion.frontAxis, conversion.frontAxisSign);
+			skeleton.source.sourcePackagePath = options.sourceRelativePath.generic_string();
+			skeleton.inverseBindMatrices = inverseBinds;
+			skeleton.joints.reserve(nodes.size());
+			for (std::size_t index = 0u; index < nodes.size(); ++index)
+			{
+				SkeletonJoint joint;
+				joint.stableId = nodes[index].stableId;
+				joint.parentIndex = nodes[index].parentIndex;
+				joint.localBindTransform = nodes[index].localTransform;
+				joint.deformsMesh = deformingNodes[index];
+				joint.displayName = nodes[index].displayName;
+				joint.normalizedSourcePath = nodes[index].semanticKey;
+				joint.semanticRole = "joint:" + nodes[index].semanticKey;
+				skeleton.joints.push_back(std::move(joint));
+				if (nodes[index].socketCandidate)
+				{
+					SkeletonSocket socket;
+					socket.stableId = BuildSemanticHash(options.packageGuid, "fbx-socket", nodes[index].semanticKey);
+					socket.jointStableId = nodes[index].stableId;
+					socket.localTransform = {};
+					socket.displayName = nodes[index].displayName;
+					socket.semanticRole = "socket:" + nodes[index].semanticKey;
+					skeleton.sockets.push_back(std::move(socket));
+				}
+			}
+
+			std::vector<std::uint8_t> bytes;
+			const AnimationStatus serializeStatus = SerializeSkeletonAsset(skeleton, bytes);
+			if (serializeStatus != AnimationStatus::Ok)
+			{
+				AddDiagnostic(
+					package,
+					ModelDiagnosticSeverity::Error,
+					"FbxSkeletonCookFailed",
+					generated.semanticKey,
+					"The normalized FBX skeleton failed checked .teskel serialization with status "
+						+ std::string(ToString(serializeStatus)) + ".",
+					"Fix invalid hierarchy, transform, bind, socket, or hard-limit data before reimporting.");
+				return std::nullopt;
+			}
+			generated.asset = std::move(skeleton);
+			return generated;
+		}
+
+		bool WriteSkeletonCandidate(
+			const FbxPackageImportOptions& options,
+			const FbxGeneratedSkeleton& generated,
+			ModelPackageImportResult& package)
+		{
+			std::vector<std::uint8_t> bytes;
+			const TerraEngine::Animation::AnimationStatus serializeStatus =
+				TerraEngine::Animation::SerializeSkeletonAsset(generated.asset, bytes);
+			if (serializeStatus != TerraEngine::Animation::AnimationStatus::Ok
+				|| !WriteGeneratedAnimationBytes(options, generated.compiledPath, bytes))
+			{
+				AddDiagnostic(
+					package,
+					ModelDiagnosticSeverity::Error,
+					"FbxSkeletonWriteFailed",
+					generated.compiledPath.generic_string(),
+					"The checked .teskel candidate could not be serialized or atomically replaced in the staging roots.",
+					"Close programs holding the output file, verify project permissions, and reimport.");
+				return false;
+			}
+
+			GeneratedAnimationSubAsset manifestAsset;
+			manifestAsset.guid = generated.guid;
+			manifestAsset.kind = AnimationImportSubAssetKind::Skeleton;
+			manifestAsset.semanticKey = generated.semanticKey;
+			manifestAsset.displayName = "Skeleton";
+			manifestAsset.sourcePath = generated.sourcePath;
+			manifestAsset.compiledPath = generated.compiledPath;
+			manifestAsset.compatibilityFingerprint = generated.asset.compatibilityFingerprint;
+			manifestAsset.contentHashHex = HashBytesHex(bytes);
+			package.animationManifest.subAssets.push_back(std::move(manifestAsset));
+			return true;
+		}
+
+		TerraEngine::Animation::AnimationFixedTick ToFixedAnimationTick(
+			double sourceTime,
+			double sourceTicksPerSecond,
+			double sourceOrigin)
+		{
+			const double seconds = (sourceTime - sourceOrigin) / sourceTicksPerSecond;
+			const double fixedTick = seconds * static_cast<double>(TerraEngine::Animation::kAnimationFixedTicksPerSecond);
+			if (!std::isfinite(fixedTick))
+			{
+				return -1;
+			}
+			if (fixedTick <= 0.0)
+			{
+				return 0;
+			}
+			if (fixedTick >= static_cast<double>(std::numeric_limits<TerraEngine::Animation::AnimationFixedTick>::max()))
+			{
+				return std::numeric_limits<TerraEngine::Animation::AnimationFixedTick>::max();
+			}
+			return static_cast<TerraEngine::Animation::AnimationFixedTick>(std::llround(fixedTick));
+		}
+
+		TerraEngine::Animation::AnimationQuaternion NormalizeAnimationQuaternion(const aiQuaternion& source)
+		{
+			const float lengthSquared = source.x * source.x + source.y * source.y
+				+ source.z * source.z + source.w * source.w;
+			if (!std::isfinite(lengthSquared) || lengthSquared <= std::numeric_limits<float>::epsilon())
+			{
+				return {};
+			}
+			const float reciprocalLength = 1.0f / std::sqrt(lengthSquared);
+			return {
+				source.x * reciprocalLength,
+				source.y * reciprocalLength,
+				source.z * reciprocalLength,
+				source.w * reciprocalLength
+			};
+		}
+
+		template<typename Key>
+		void AppendOrReplaceCollapsedKey(std::vector<Key>& keys, Key key, bool& collapsedTimestamp)
+		{
+			if (!keys.empty() && keys.back().tick == key.tick)
+			{
+				keys.back() = std::move(key);
+				collapsedTimestamp = true;
+				return;
+			}
+			keys.push_back(std::move(key));
+		}
+
+		double FindAnimationOrigin(const aiAnimation& animation)
+		{
+			double minimum = 0.0;
+			for (unsigned int channelIndex = 0u; channelIndex < animation.mNumChannels; ++channelIndex)
+			{
+				const aiNodeAnim* channel = animation.mChannels[channelIndex];
+				if (channel == nullptr)
+				{
+					continue;
+				}
+				if (channel->mNumPositionKeys > 0u) minimum = std::min(minimum, channel->mPositionKeys[0u].mTime);
+				if (channel->mNumRotationKeys > 0u) minimum = std::min(minimum, channel->mRotationKeys[0u].mTime);
+				if (channel->mNumScalingKeys > 0u) minimum = std::min(minimum, channel->mScalingKeys[0u].mTime);
+			}
+			for (unsigned int channelIndex = 0u; channelIndex < animation.mNumMorphMeshChannels; ++channelIndex)
+			{
+				const aiMeshMorphAnim* channel = animation.mMorphMeshChannels[channelIndex];
+				if (channel != nullptr && channel->mNumKeys > 0u)
+				{
+					minimum = std::min(minimum, channel->mKeys[0u].mTime);
+				}
+			}
+			return minimum;
+		}
+
+		TerraEngine::Animation::AnimationFixedTick FindAnimationDuration(
+			const aiAnimation& animation,
+			double sourceTicksPerSecond,
+			double sourceOrigin)
+		{
+			double maximum = std::max(0.0, animation.mDuration);
+			for (unsigned int channelIndex = 0u; channelIndex < animation.mNumChannels; ++channelIndex)
+			{
+				const aiNodeAnim* channel = animation.mChannels[channelIndex];
+				if (channel == nullptr)
+				{
+					continue;
+				}
+				if (channel->mNumPositionKeys > 0u) maximum = std::max(maximum, channel->mPositionKeys[channel->mNumPositionKeys - 1u].mTime);
+				if (channel->mNumRotationKeys > 0u) maximum = std::max(maximum, channel->mRotationKeys[channel->mNumRotationKeys - 1u].mTime);
+				if (channel->mNumScalingKeys > 0u) maximum = std::max(maximum, channel->mScalingKeys[channel->mNumScalingKeys - 1u].mTime);
+			}
+			for (unsigned int channelIndex = 0u; channelIndex < animation.mNumMorphMeshChannels; ++channelIndex)
+			{
+				const aiMeshMorphAnim* channel = animation.mMorphMeshChannels[channelIndex];
+				if (channel != nullptr && channel->mNumKeys > 0u)
+				{
+					maximum = std::max(maximum, channel->mKeys[channel->mNumKeys - 1u].mTime);
+				}
+			}
+			return std::max<TerraEngine::Animation::AnimationFixedTick>(
+				1,
+				ToFixedAnimationTick(maximum, sourceTicksPerSecond, sourceOrigin));
+		}
+
+		std::string BuildClipSemanticKey(
+			const aiAnimation& animation,
+			const FbxNodeLookup& lookup)
+		{
+			const std::string displayName = animation.mName.length > 0u
+				? std::string(animation.mName.C_Str())
+				: std::string("unnamed");
+			std::string semanticKey = "clip:" + NormalizeSemanticSegment(displayName, "unnamed");
+			if (animation.mName.length == 0u)
+			{
+				std::vector<std::string> targets;
+				for (unsigned int index = 0u; index < animation.mNumChannels; ++index)
+				{
+					const aiNodeAnim* channel = animation.mChannels[index];
+					if (channel == nullptr)
+					{
+						continue;
+					}
+					const auto found = lookup.indicesByName.find(channel->mNodeName.C_Str());
+					if (found != lookup.indicesByName.end() && found->second.size() == 1u)
+					{
+						targets.push_back(lookup.semanticKeysByIndex[found->second.front()]);
+					}
+				}
+				for (unsigned int index = 0u; index < animation.mNumMorphMeshChannels; ++index)
+				{
+					if (animation.mMorphMeshChannels[index] != nullptr)
+					{
+						targets.push_back("morph:" + std::string(animation.mMorphMeshChannels[index]->mName.C_Str()));
+					}
+				}
+				std::sort(targets.begin(), targets.end());
+				std::uint64_t signature = 1469598103934665603ull;
+				for (const std::string& target : targets)
+				{
+					signature = AppendStableHash(signature, target);
+				}
+				semanticKey += ":" + StableHashSuffix(signature);
+			}
+			return semanticKey;
+		}
+
+		float QuaternionYawRadians(const TerraEngine::Animation::AnimationQuaternion& rotation)
+		{
+			return std::atan2(
+				2.0f * (rotation.w * rotation.y + rotation.x * rotation.z),
+				1.0f - 2.0f * (rotation.y * rotation.y + rotation.z * rotation.z));
+		}
+
+		void AddVectorSourceTrack(
+			std::uint64_t stableTargetId,
+			TerraEngine::Animation::AnimationClipTrackKind kind,
+			TerraEngine::Animation::AnimationInterpolation interpolation,
+			const std::vector<FbxVectorKey>& keys,
+			std::vector<AnimationSourceTrack>& tracks)
+		{
+			if (keys.empty())
+			{
+				return;
+			}
+			AnimationSourceTrack track;
+			track.stableTargetId = stableTargetId;
+			track.kind = kind;
+			track.interpolation = keys.size() == 1u
+				? TerraEngine::Animation::AnimationInterpolation::Constant
+				: interpolation;
+			for (const FbxVectorKey& key : keys)
+			{
+				AnimationSourceKey sourceKey;
+				sourceKey.tick = key.tick;
+				sourceKey.vectorValue = key.value;
+				track.keys.push_back(sourceKey);
+			}
+			tracks.push_back(std::move(track));
+		}
+
+		void AddRotationSourceTrack(
+			std::uint64_t stableTargetId,
+			TerraEngine::Animation::AnimationInterpolation interpolation,
+			const std::vector<FbxQuaternionKey>& keys,
+			std::vector<AnimationSourceTrack>& tracks)
+		{
+			if (keys.empty())
+			{
+				return;
+			}
+			AnimationSourceTrack track;
+			track.stableTargetId = stableTargetId;
+			track.kind = TerraEngine::Animation::AnimationClipTrackKind::Rotation;
+			track.interpolation = keys.size() == 1u
+				? TerraEngine::Animation::AnimationInterpolation::Constant
+				: interpolation;
+			for (const FbxQuaternionKey& key : keys)
+			{
+				AnimationSourceKey sourceKey;
+				sourceKey.tick = key.tick;
+				sourceKey.rotationValue = key.value;
+				track.keys.push_back(sourceKey);
+			}
+			tracks.push_back(std::move(track));
+		}
+
+		std::vector<FbxGeneratedAnimationClip> ExtractCompileAndWriteClips(
+			const FbxPackageImportOptions& options,
+			const aiScene& scene,
+			const FbxNodeLookup& lookup,
+			const std::vector<bool>& deformingNodes,
+			const std::unordered_map<std::string, std::vector<std::size_t>>& morphTargetsByMeshName,
+			const std::vector<FbxGeneratedMorphTarget>& morphTargets,
+			const FbxGeneratedSkeleton& skeleton,
+			ModelPackageImportResult& package)
+		{
+			using namespace TerraEngine::Animation;
+			std::vector<FbxGeneratedAnimationClip> clips;
+			if (ValidateAnimationHardLimit(AnimationLimit::PackageClips, scene.mNumAnimations) != AnimationStatus::Ok)
+			{
+				AddDiagnostic(
+					package,
+					ModelDiagnosticSeverity::Error,
+					"FbxClipLimitExceeded",
+					options.sourceRelativePath.generic_string(),
+					"The FBX package declares more clips than the frozen package hard limit.",
+					"Split the source animation library across supported packages.");
+				return clips;
+			}
+
+			std::size_t rootMotionNodeIndex = 0u;
+			for (std::size_t index = 0u; index < deformingNodes.size(); ++index)
+			{
+				if (!deformingNodes[index])
+				{
+					continue;
+				}
+				const std::int32_t parentIndex = skeleton.asset.joints[index].parentIndex;
+				if (parentIndex < 0 || !deformingNodes[static_cast<std::size_t>(parentIndex)])
+				{
+					rootMotionNodeIndex = index;
+					break;
+				}
+			}
+
+			std::unordered_map<std::string, std::size_t> semanticKeyCounts;
+			for (unsigned int animationIndex = 0u; animationIndex < scene.mNumAnimations; ++animationIndex)
+			{
+				if (scene.mAnimations[animationIndex] != nullptr)
+				{
+					++semanticKeyCounts[BuildClipSemanticKey(*scene.mAnimations[animationIndex], lookup)];
+				}
+			}
+			std::unordered_set<std::string> reportedAmbiguousSemanticKeys;
+			for (unsigned int animationIndex = 0u; animationIndex < scene.mNumAnimations; ++animationIndex)
+			{
+				const aiAnimation* animation = scene.mAnimations[animationIndex];
+				if (animation == nullptr)
+				{
+					continue;
+				}
+				const double ticksPerSecond = animation->mTicksPerSecond > 0.0
+					? animation->mTicksPerSecond
+					: 30.0;
+				if (animation->mTicksPerSecond <= 0.0)
+				{
+					AddDiagnostic(
+						package,
+						ModelDiagnosticSeverity::Warning,
+						"FbxClipRateMissing",
+						animation->mName.C_Str(),
+						"The FBX clip does not declare ticks-per-second; the Assimp fallback of 30 Hz was used.",
+						"Set an explicit frame rate in the DCC export settings for reproducible timing.");
+				}
+				const double sourceOrigin = FindAnimationOrigin(*animation);
+				const AnimationFixedTick durationTicks = FindAnimationDuration(*animation, ticksPerSecond, sourceOrigin);
+				std::string semanticKey = BuildClipSemanticKey(*animation, lookup);
+				if (semanticKeyCounts[semanticKey] > 1u)
+				{
+					if (reportedAmbiguousSemanticKeys.insert(semanticKey).second)
+					{
+						AddDiagnostic(
+							package,
+							ModelDiagnosticSeverity::Error,
+							"FbxAmbiguousClipIdentity",
+							animation->mName.C_Str(),
+							"Multiple FBX clips have the same normalized semantic identity.",
+							"Give every clip a unique semantic name before reimporting.");
+					}
+					continue;
+				}
+
+				FbxGeneratedAnimationClip generated;
+				generated.semanticKey = semanticKey;
+				generated.displayName = animation->mName.length > 0u
+					? std::string(animation->mName.C_Str())
+					: "Animation";
+				generated.guid = BuildStableAnimationSubAssetUuid(
+					options.packageGuid,
+					AnimationImportSubAssetKind::AnimationClip,
+					semanticKey);
+				generated.sourceTicksPerSecond = ticksPerSecond;
+				const std::string clipFileName = SanitizeAssetName(generated.displayName, "Animation")
+					+ "_" + StableHashSuffix(BuildSemanticHash(options.packageGuid, "fbx-clip-path", semanticKey))
+					+ ".teanim";
+				generated.sourcePath = package.package.importRoot / "Animations" / clipFileName;
+				generated.compiledPath = generated.sourcePath;
+
+				AnimationClipCompileInput compileInput;
+				compileInput.assetId = ToAnimationGuid(generated.guid);
+				compileInput.skeletonAssetId = skeleton.asset.assetId;
+				compileInput.compatibilityFingerprint = skeleton.asset.compatibilityFingerprint;
+				compileInput.durationTicks = durationTicks;
+				compileInput.sampleRate = kAnimationFixedTicksPerSecond;
+				compileInput.segmentDurationTicks = 30;
+				bool collapsedTimestamp = false;
+				std::unordered_set<std::string> reportedUnresolvedAnimationTargets;
+
+				for (unsigned int channelIndex = 0u; channelIndex < animation->mNumChannels; ++channelIndex)
+				{
+					const aiNodeAnim* sourceChannel = animation->mChannels[channelIndex];
+					if (sourceChannel == nullptr)
+					{
+						continue;
+					}
+					const std::optional<std::size_t> nodeIndex = ResolveAnimationNodeIndex(
+						sourceChannel->mNodeName.C_Str(),
+						lookup,
+						deformingNodes);
+					if (!nodeIndex)
+					{
+						const std::string targetName = sourceChannel->mNodeName.C_Str();
+						if (reportedUnresolvedAnimationTargets.insert(targetName).second)
+						{
+							// Multiple component channels can refer to the same unresolved
+							// target. Report the authoring fault once per clip so diagnostics
+							// stay actionable without hiding the rejected clip state.
+							AddDiagnostic(
+								package,
+								ModelDiagnosticSeverity::Error,
+								"FbxAnimationTargetMissing",
+								targetName,
+								"An FBX animation channel has no unambiguous hierarchy target or unique deforming duplicate-name target.",
+								"Give animated nodes unique names, or ensure exactly one duplicate-name node deforms the imported skin.");
+						}
+						continue;
+					}
+
+					FbxNodeAnimationChannel channel;
+					channel.targetStableId = skeleton.asset.joints[*nodeIndex].stableId;
+					channel.targetSemanticKey = skeleton.asset.joints[*nodeIndex].normalizedSourcePath;
+					for (unsigned int keyIndex = 0u; keyIndex < sourceChannel->mNumPositionKeys; ++keyIndex)
+					{
+						const aiVectorKey& sourceKey = sourceChannel->mPositionKeys[keyIndex];
+						AppendOrReplaceCollapsedKey(channel.translations, FbxVectorKey{
+							ToFixedAnimationTick(sourceKey.mTime, ticksPerSecond, sourceOrigin),
+							{ sourceKey.mValue.x, sourceKey.mValue.y, sourceKey.mValue.z }
+						}, collapsedTimestamp);
+					}
+					for (unsigned int keyIndex = 0u; keyIndex < sourceChannel->mNumRotationKeys; ++keyIndex)
+					{
+						const aiQuatKey& sourceKey = sourceChannel->mRotationKeys[keyIndex];
+						AppendOrReplaceCollapsedKey(channel.rotations, FbxQuaternionKey{
+							ToFixedAnimationTick(sourceKey.mTime, ticksPerSecond, sourceOrigin),
+							NormalizeAnimationQuaternion(sourceKey.mValue)
+						}, collapsedTimestamp);
+					}
+					for (unsigned int keyIndex = 0u; keyIndex < sourceChannel->mNumScalingKeys; ++keyIndex)
+					{
+						const aiVectorKey& sourceKey = sourceChannel->mScalingKeys[keyIndex];
+						AppendOrReplaceCollapsedKey(channel.scales, FbxVectorKey{
+							ToFixedAnimationTick(sourceKey.mTime, ticksPerSecond, sourceOrigin),
+							{ sourceKey.mValue.x, sourceKey.mValue.y, sourceKey.mValue.z }
+						}, collapsedTimestamp);
+					}
+
+					AddVectorSourceTrack(
+						channel.targetStableId,
+						AnimationClipTrackKind::Translation,
+						channel.translationInterpolation,
+						channel.translations,
+						compileInput.tracks);
+					AddRotationSourceTrack(
+						channel.targetStableId,
+						channel.rotationInterpolation,
+						channel.rotations,
+						compileInput.tracks);
+					AddVectorSourceTrack(
+						channel.targetStableId,
+						AnimationClipTrackKind::Scale,
+						channel.scaleInterpolation,
+						channel.scales,
+						compileInput.tracks);
+
+					if (*nodeIndex == rootMotionNodeIndex && !channel.translations.empty() && !channel.rotations.empty())
+					{
+						AddVectorSourceTrack(
+							channel.targetStableId,
+							AnimationClipTrackKind::RootTranslation,
+							channel.translationInterpolation,
+							channel.translations,
+							compileInput.tracks);
+						AnimationSourceTrack yawTrack;
+						yawTrack.stableTargetId = channel.targetStableId;
+						yawTrack.kind = AnimationClipTrackKind::RootYaw;
+						yawTrack.interpolation = channel.rotations.size() == 1u
+							? AnimationInterpolation::Constant
+							: AnimationInterpolation::Linear;
+						float priorYaw = 0.0f;
+						bool firstYaw = true;
+						for (const FbxQuaternionKey& rotationKey : channel.rotations)
+						{
+							float yaw = QuaternionYawRadians(rotationKey.value);
+							if (!firstYaw)
+							{
+								while (yaw - priorYaw > 3.14159265358979323846f) yaw -= 6.28318530717958647692f;
+								while (yaw - priorYaw < -3.14159265358979323846f) yaw += 6.28318530717958647692f;
+							}
+							yawTrack.keys.push_back({ rotationKey.tick, {}, {}, yaw });
+							priorYaw = yaw;
+							firstYaw = false;
+						}
+						compileInput.tracks.push_back(std::move(yawTrack));
+					}
+					generated.nodeChannels.push_back(std::move(channel));
+				}
+
+				for (unsigned int channelIndex = 0u; channelIndex < animation->mNumMorphMeshChannels; ++channelIndex)
+				{
+					const aiMeshMorphAnim* sourceChannel = animation->mMorphMeshChannels[channelIndex];
+					if (sourceChannel == nullptr)
+					{
+						continue;
+					}
+					const auto targetGroup = morphTargetsByMeshName.find(sourceChannel->mName.C_Str());
+					if (targetGroup == morphTargetsByMeshName.end())
+					{
+						AddDiagnostic(
+							package,
+							ModelDiagnosticSeverity::Error,
+							"FbxMorphAnimationTargetMissing",
+							sourceChannel->mName.C_Str(),
+							"An FBX morph animation channel has no compatible imported morph target group.",
+							"Export the morph attachment and its animation in the same mesh package.");
+						continue;
+					}
+
+					FbxMorphAnimationChannel channel;
+					channel.meshSemanticKey = sourceChannel->mName.C_Str();
+					for (unsigned int keyIndex = 0u; keyIndex < sourceChannel->mNumKeys; ++keyIndex)
+					{
+						const aiMeshMorphKey& sourceKey = sourceChannel->mKeys[keyIndex];
+						FbxMorphWeightKey key;
+						key.tick = ToFixedAnimationTick(sourceKey.mTime, ticksPerSecond, sourceOrigin);
+						if (sourceKey.mNumValuesAndWeights > 0u
+							&& sourceKey.mValues != nullptr
+							&& sourceKey.mWeights != nullptr)
+						{
+							key.targetIndices.assign(
+								sourceKey.mValues,
+								sourceKey.mValues + sourceKey.mNumValuesAndWeights);
+						}
+						key.weights.reserve(sourceKey.mNumValuesAndWeights);
+						for (unsigned int valueIndex = 0u; valueIndex < key.targetIndices.size(); ++valueIndex)
+						{
+							key.weights.push_back(static_cast<float>(sourceKey.mWeights[valueIndex]));
+						}
+						AppendOrReplaceCollapsedKey(channel.keys, std::move(key), collapsedTimestamp);
+					}
+
+					for (const std::size_t emittedMorphIndex : targetGroup->second)
+					{
+						const FbxGeneratedMorphTarget& morph = morphTargets[emittedMorphIndex];
+						AnimationSourceTrack morphTrack;
+						morphTrack.stableTargetId = morph.stableId;
+						morphTrack.kind = AnimationClipTrackKind::MorphWeight;
+						morphTrack.interpolation = channel.keys.size() == 1u
+							? AnimationInterpolation::Constant
+							: AnimationInterpolation::Linear;
+						for (const FbxMorphWeightKey& key : channel.keys)
+						{
+							float weight = 0.0f;
+							for (std::size_t valueIndex = 0u; valueIndex < key.targetIndices.size(); ++valueIndex)
+							{
+								if (key.targetIndices[valueIndex] == morph.sourceTargetIndex && valueIndex < key.weights.size())
+								{
+									weight = key.weights[valueIndex];
+									break;
+								}
+							}
+							morphTrack.keys.push_back({ key.tick, {}, {}, weight });
+						}
+						compileInput.tracks.push_back(std::move(morphTrack));
+					}
+					generated.morphChannels.push_back(std::move(channel));
+				}
+
+				if (collapsedTimestamp)
+				{
+					AddDiagnostic(
+						package,
+						ModelDiagnosticSeverity::Warning,
+						"FbxAnimationTimestampCollapsed",
+						semanticKey,
+						"Multiple source keys mapped to the same fixed 60 Hz tick; the last chronological value was retained.",
+						"Export at a supported time base or increase source key spacing to avoid quantization loss.");
+				}
+				if (compileInput.tracks.empty())
+				{
+					AddDiagnostic(
+						package,
+						ModelDiagnosticSeverity::Error,
+						"FbxClipHasNoSupportedTracks",
+						semanticKey,
+						"The FBX clip contains no valid node or morph channels after normalization.",
+						"Export translation, rotation, scale, or morph-weight channels targeting included objects.");
+					continue;
+				}
+
+				AnimationClipCompileReport compileReport;
+				const AnimationStatus compileStatus = CompileAnimationClip(
+					compileInput,
+					{},
+					generated.asset,
+					compileReport);
+				if (compileStatus != AnimationStatus::Ok)
+				{
+					AddDiagnostic(
+						package,
+						ModelDiagnosticSeverity::Error,
+						"FbxClipCookFailed",
+						semanticKey,
+						"The normalized FBX clip failed deterministic .teanim compilation with status "
+							+ std::string(ToString(compileStatus)) + ": " + compileReport.diagnostic,
+						"Inspect invalid targets, timestamps, non-finite values, hard limits, and compression tolerances.");
+					continue;
+				}
+
+				std::vector<std::uint8_t> bytes;
+				const AnimationStatus serializeStatus = SerializeAnimationClipAsset(generated.asset, bytes);
+				if (serializeStatus != AnimationStatus::Ok || !WriteGeneratedAnimationBytes(options, generated.compiledPath, bytes))
+				{
+					AddDiagnostic(
+						package,
+						ModelDiagnosticSeverity::Error,
+						"FbxClipWriteFailed",
+						generated.compiledPath.generic_string(),
+						"The checked .teanim payload could not be serialized or atomically replaced.",
+						"Close programs holding the output, verify permissions, and reimport after correcting any invalid clip data.");
+					continue;
+				}
+
+				GeneratedAnimationSubAsset manifestAsset;
+				manifestAsset.guid = generated.guid;
+				manifestAsset.kind = AnimationImportSubAssetKind::AnimationClip;
+				manifestAsset.semanticKey = semanticKey;
+				manifestAsset.displayName = generated.displayName;
+				manifestAsset.sourcePath = generated.sourcePath;
+				manifestAsset.compiledPath = generated.compiledPath;
+				manifestAsset.compatibilityFingerprint = skeleton.asset.compatibilityFingerprint;
+				manifestAsset.contentHashHex = HashBytesHex(bytes);
+				manifestAsset.dependencies.push_back({
+					skeleton.guid,
+					skeleton.asset.compatibilityFingerprint,
+					true
+				});
+				package.animationManifest.subAssets.push_back(std::move(manifestAsset));
+				clips.push_back(std::move(generated));
+			}
+			std::sort(clips.begin(), clips.end(), [](const auto& left, const auto& right) {
+				return std::tie(left.semanticKey, left.guid) < std::tie(right.semanticKey, right.guid);
+			});
+			return clips;
+		}
+
+		void PopulateDeformationManifest(
+			const FbxPackageImportOptions& options,
+			const FbxGeneratedSkeleton& skeleton,
+			const FbxAnimatedPackageData& animation,
+			ModelPackageImportResult& package)
+		{
+			const std::filesystem::path meshSourcePath = package.generatedMeshes.empty()
+				? options.sourceRelativePath
+				: package.generatedMeshes.front().sourcePath;
+			const std::filesystem::path meshCompiledPath = package.generatedMeshes.empty()
+				? std::filesystem::path{}
+				: package.generatedMeshes.front().compiledPath;
+			const std::string cookedPayloadHash = meshCompiledPath.empty()
+				? std::string{}
+				: ComputeFileHashHex(options.buildRoot / meshCompiledPath);
+			if (!package.generatedMeshes.empty()
+				&& (!animation.skinnedMeshes.empty() || !animation.morphTargets.empty()))
+			{
+				GeneratedAnimationSubAsset manifestAsset;
+				const GeneratedModelMeshAsset& generatedMesh = package.generatedMeshes.front();
+				manifestAsset.kind = AnimationImportSubAssetKind::DeformableMesh;
+				manifestAsset.semanticKey = "deformable:package-mesh";
+				manifestAsset.guid = generatedMesh.guid;
+				manifestAsset.displayName = generatedMesh.displayName;
+				manifestAsset.sourcePath = meshSourcePath;
+				manifestAsset.compiledPath = meshCompiledPath;
+				manifestAsset.compatibilityFingerprint = skeleton.asset.compatibilityFingerprint;
+				std::uint64_t contentHash = 1469598103934665603ull;
+				for (const FbxImportedSkinnedMesh& skin : animation.skinnedMeshes)
+				{
+					contentHash = AppendStableHash(contentHash, skin.semanticKey);
+					for (const FbxBoneInfluence& influence : skin.influences)
+					{
+						contentHash = AppendStablePodHash(contentHash, influence.vertexIndex);
+						contentHash = AppendStablePodHash(contentHash, influence.jointStableId);
+						contentHash = AppendStablePodHash(contentHash, influence.weight);
+					}
+				}
+				manifestAsset.contentHashHex = cookedPayloadHash.empty()
+					? StableHashSuffix(contentHash)
+					: cookedPayloadHash;
+				manifestAsset.dependencies.push_back({
+					skeleton.guid,
+					skeleton.asset.compatibilityFingerprint,
+					true
+				});
+				package.animationManifest.subAssets.push_back(std::move(manifestAsset));
+			}
+
+			for (const FbxGeneratedMorphTarget& morph : animation.morphTargets)
+			{
+				GeneratedAnimationSubAsset manifestAsset;
+				manifestAsset.guid = morph.guid;
+				manifestAsset.kind = AnimationImportSubAssetKind::MorphTarget;
+				manifestAsset.semanticKey = morph.semanticKey;
+				manifestAsset.displayName = morph.displayName;
+				manifestAsset.sourcePath = meshSourcePath;
+				manifestAsset.compiledPath = meshCompiledPath;
+				manifestAsset.compatibilityFingerprint = skeleton.asset.compatibilityFingerprint;
+				std::uint64_t contentHash = 1469598103934665603ull;
+				for (const TerraEngine::Animation::AnimationFloat3& delta : morph.positionDeltas)
+				{
+					contentHash = AppendStablePodHash(contentHash, delta);
+				}
+				for (const TerraEngine::Animation::AnimationFloat3& delta : morph.normalDeltas)
+				{
+					contentHash = AppendStablePodHash(contentHash, delta);
+				}
+				for (const TerraEngine::Animation::AnimationFloat3& delta : morph.tangentDeltas)
+				{
+					contentHash = AppendStablePodHash(contentHash, delta);
+				}
+				manifestAsset.contentHashHex = cookedPayloadHash.empty()
+					? StableHashSuffix(contentHash)
+					: cookedPayloadHash;
+				manifestAsset.dependencies.push_back({
+					skeleton.guid,
+					skeleton.asset.compatibilityFingerprint,
+					true
+				});
+				manifestAsset.dependencies.push_back({
+					package.generatedMeshes.front().guid,
+					skeleton.asset.compatibilityFingerprint,
+					true
+				});
+				package.animationManifest.subAssets.push_back(std::move(manifestAsset));
+			}
+		}
+
+		std::uint64_t BuildAnimatedParityFingerprint(const FbxAnimatedPackageData& animation)
+		{
+			std::uint64_t hash = 1469598103934665603ull;
+			hash = AppendStablePodHash(hash, animation.coordinateConversion.unitScaleMeters);
+			hash = AppendStablePodHash(hash, animation.coordinateConversion.upAxis);
+			hash = AppendStablePodHash(hash, animation.coordinateConversion.upAxisSign);
+			hash = AppendStablePodHash(hash, animation.coordinateConversion.frontAxis);
+			hash = AppendStablePodHash(hash, animation.coordinateConversion.frontAxisSign);
+			hash = AppendStablePodHash(hash, animation.coordinateConversion.coordinateAxis);
+			hash = AppendStablePodHash(hash, animation.coordinateConversion.coordinateAxisSign);
+			const std::uint8_t normalizedToMeters = animation.coordinateConversion.assimpOutputNormalizedToMeters ? 1u : 0u;
+			hash = AppendStablePodHash(hash, normalizedToMeters);
+			for (const FbxAnimatedNode& node : animation.nodes)
+			{
+				hash = AppendStablePodHash(hash, node.stableId);
+				hash = AppendStablePodHash(hash, node.parentIndex);
+				hash = AppendStablePodHash(hash, node.localTransform);
+				hash = AppendStableHash(hash, node.semanticKey);
+			}
+			std::vector<std::uint64_t> skeletonFingerprints;
+			for (const FbxGeneratedSkeleton& skeleton : animation.skeletons)
+			{
+				skeletonFingerprints.push_back(skeleton.asset.compatibilityFingerprint);
+			}
+			std::sort(skeletonFingerprints.begin(), skeletonFingerprints.end());
+			for (const std::uint64_t fingerprint : skeletonFingerprints) hash = AppendStablePodHash(hash, fingerprint);
+			std::vector<std::uint64_t> skinFingerprints;
+			for (const FbxImportedSkinnedMesh& skin : animation.skinnedMeshes)
+			{
+				std::uint64_t skinHash = AppendStableHash(1469598103934665603ull, skin.semanticKey);
+				for (const FbxBoneInfluence& influence : skin.influences)
+				{
+					skinHash = AppendStablePodHash(skinHash, influence.vertexIndex);
+					skinHash = AppendStablePodHash(skinHash, influence.jointStableId);
+					skinHash = AppendStablePodHash(skinHash, influence.weight);
+				}
+				skinFingerprints.push_back(skinHash);
+			}
+			std::sort(skinFingerprints.begin(), skinFingerprints.end());
+			for (const std::uint64_t fingerprint : skinFingerprints) hash = AppendStablePodHash(hash, fingerprint);
+			std::vector<std::pair<std::string, TerraEngine::Animation::AnimationFixedTick>> clipIdentities;
+			for (const FbxGeneratedAnimationClip& clip : animation.clips)
+			{
+				clipIdentities.emplace_back(clip.semanticKey, clip.asset.durationTicks);
+			}
+			std::sort(clipIdentities.begin(), clipIdentities.end());
+			for (const auto& [semanticKey, duration] : clipIdentities)
+			{
+				hash = AppendStableHash(hash, semanticKey);
+				hash = AppendStablePodHash(hash, duration);
+			}
+			std::vector<std::uint64_t> morphIds;
+			for (const FbxGeneratedMorphTarget& morph : animation.morphTargets) morphIds.push_back(morph.stableId);
+			std::sort(morphIds.begin(), morphIds.end());
+			for (const std::uint64_t morphId : morphIds) hash = AppendStablePodHash(hash, morphId);
+			return hash == 0u ? 1u : hash;
+		}
 	}
 
-	ModelPackageImportResult ImportFbxPackage(const FbxPackageImportOptions& options)
+	static ModelPackageImportResult ImportFbxStaticPackage(const FbxPackageImportOptions& options)
 	{
 		ModelPackageImportResult result{};
 		result.packageGuid = options.packageGuid;
 		result.package.sourcePath = options.sourceRelativePath;
 		result.package.packageKind = ModelPackageKind::Fbx;
 		result.package.sourceHashHex = ComputeFileHashHex(options.sourcePath);
-		result.package.importRoot = options.sourceRelativePath.parent_path() / (options.sourcePath.stem().string() + "_Generated");
+		// Generated children follow the logical project-relative source name. The
+		// physical source may be a cache or test fixture with a different basename.
+		result.package.importRoot = options.sourceRelativePath.parent_path()
+			/ (options.sourceRelativePath.stem().string() + "_Generated");
 
 		ReportProgress(options, 0.04f, "Reading", "Opening FBX source data.");
 		if (NormalizeExtension(options.sourcePath) != ".fbx")
@@ -955,21 +3050,17 @@ namespace TerraEngine::AssetPipeline
 		}
 
 		Assimp::Importer importer;
-		constexpr unsigned int importFlags =
-			aiProcess_Triangulate |
-			aiProcess_SortByPType |
-			aiProcess_JoinIdenticalVertices |
-			aiProcess_FindInvalidData |
-			aiProcess_GenSmoothNormals |
-			aiProcess_CalcTangentSpace |
-			aiProcess_ImproveCacheLocality;
+		// Pivot helper nodes vary with exporter details and obscure semantic paths.
+		// Baking them preserves the evaluated transform while keeping node identity
+		// compatible with glTF's direct hierarchy contract.
+		importer.SetPropertyBool(AI_CONFIG_IMPORT_FBX_PRESERVE_PIVOTS, false);
 
 		// Assimp owns and deletes custom progress handlers. Returning false
 		// from the handler lets cancel requests abort long FBX parsing instead
 		// of forcing project close to wait for the whole parse to finish.
 		importer.SetProgressHandler(new FbxAssimpProgressHandler(options));
 		ReportProgress(options, 0.12f, "Parsing", "Parsing FBX scene with Assimp.");
-		const aiScene* scene = importer.ReadFile(options.sourcePath.string(), importFlags);
+		const aiScene* scene = importer.ReadFile(options.sourcePath.string(), kFbxPackageImportFlags);
 		if (scene == nullptr)
 		{
 			AddDiagnostic(result, ModelDiagnosticSeverity::Error, "ParseFailed", options.sourceRelativePath.generic_string(), std::string("Failed to parse FBX package: ") + importer.GetErrorString());
@@ -1039,5 +3130,217 @@ namespace TerraEngine::AssetPipeline
 		ReportProgress(options, 0.94f, "Diagnostics", "Finalizing package diagnostics.");
 		PromoteStatusFromDiagnostics(result);
 		return result;
+	}
+
+	FbxAnimatedImportResult ImportFbxPackageWithAnimation(const FbxPackageImportOptions& options)
+	{
+		FbxAnimatedImportResult result;
+		result.package = ImportFbxStaticPackage(options);
+		result.package.animationManifest.packageGuid = options.packageGuid;
+		result.package.animationManifest.sourceHashHex = result.package.package.sourceHashHex;
+		result.package.animationManifest.importerName = "AssimpFbxPackageImporter";
+		// Version 4 preserves the authored FBX skin-bind matrices instead of
+		// rebuilding them from scene-node transforms. The AssetDatabase compares
+		// this importer recipe version during startup so version-3 packages recook.
+		result.package.animationManifest.importerVersion = "4";
+		result.package.animationManifest.settingsFingerprintHex = "fbx-meters-pivots-authored-skin-bind-v4";
+
+		if (result.package.status == ModelImportStatus::Failed)
+		{
+			return result;
+		}
+		if (options.packageGuid == TerraEngine::EMPTY_UUID)
+		{
+			AddDiagnostic(
+				result.package,
+				ModelDiagnosticSeverity::Error,
+				"FbxAnimationPackageIdentityMissing",
+				options.sourceRelativePath.generic_string(),
+				"Animated FBX import requires a stable package GUID before subassets can be cooked.",
+				"Create or repair the source asset metadata and reimport the package.");
+			PromoteStatusFromDiagnostics(result.package);
+			return result;
+		}
+
+		Assimp::Importer importer;
+		importer.SetPropertyBool(AI_CONFIG_IMPORT_FBX_PRESERVE_PIVOTS, false);
+		importer.SetProgressHandler(new FbxAssimpProgressHandler(options));
+		const aiScene* scene = importer.ReadFile(options.sourcePath.string(), kFbxPackageImportFlags);
+		if (scene == nullptr || scene->mRootNode == nullptr)
+		{
+			AddDiagnostic(
+				result.package,
+				ModelDiagnosticSeverity::Error,
+				"FbxAnimationParseFailed",
+				options.sourceRelativePath.generic_string(),
+				std::string("The animation pass could not parse the FBX hierarchy: ") + importer.GetErrorString(),
+				"Repair the source package; the common publication transaction will retain the last-known-good generation.");
+			PromoteStatusFromDiagnostics(result.package);
+			return result;
+		}
+
+		bool hasAnimationPayload = scene->HasAnimations();
+		for (unsigned int meshIndex = 0u; meshIndex < scene->mNumMeshes; ++meshIndex)
+		{
+			const aiMesh* mesh = scene->mMeshes[meshIndex];
+			hasAnimationPayload = hasAnimationPayload
+				|| (mesh != nullptr && (mesh->HasBones() || mesh->mNumAnimMeshes > 0u));
+		}
+		if (!hasAnimationPayload)
+		{
+			CanonicalizeAnimationImportManifest(result.package.animationManifest);
+			result.package.animationManifest.dependencyFingerprintHex =
+				BuildAnimationImportDependencyFingerprint(result.package.animationManifest);
+			return result;
+		}
+
+		result.animation.coordinateConversion = ReadCoordinateConversion(*scene);
+		AddDiagnostic(
+			result.package,
+			ModelDiagnosticSeverity::Info,
+			"FbxCoordinateConversionApplied",
+			options.sourceRelativePath.generic_string(),
+			"FBX units, handedness, and source axes were normalized once through Assimp GlobalScale into Terra meter-space.",
+			"Source axis and unit metadata remain recorded on the generated skeleton for parity diagnostics.");
+		if (scene->HasAnimations())
+		{
+			AddDiagnostic(
+				result.package,
+				ModelDiagnosticSeverity::Info,
+				"FbxCurveInterpolationBaked",
+				options.sourceRelativePath.generic_string(),
+				"Assimp supplies FBX transform and morph curves as chronological sampled keys; Terra preserves those samples with their effective linear interpolation.",
+				"Use a source export sample rate high enough to retain intended cubic or stepped motion.");
+			for (unsigned int animationIndex = 0u; animationIndex < scene->mNumAnimations; ++animationIndex)
+			{
+				const aiAnimation* animation = scene->mAnimations[animationIndex];
+				if (animation != nullptr && animation->mNumMeshChannels > 0u)
+				{
+					AddDiagnostic(
+						result.package,
+						ModelDiagnosticSeverity::Warning,
+						"FbxVertexCacheAnimationUnsupported",
+						animation->mName.C_Str(),
+						"The FBX clip contains legacy per-frame mesh replacement channels that are distinct from supported morph targets.",
+						"Export the deformation as blend shapes/morph targets or skeletal animation.");
+				}
+			}
+		}
+
+		FbxNodeLookup nodeLookup;
+		BuildAnimatedNodeHierarchy(
+			options,
+			*scene->mRootNode,
+			-1,
+			{},
+			result.animation,
+			nodeLookup,
+			result.package);
+		std::vector<bool> deformingNodes(result.animation.nodes.size(), false);
+		std::vector<TerraEngine::Animation::AnimationMatrix4x4> inverseBinds(
+			result.animation.nodes.size(),
+			IdentityAnimationMatrix());
+		std::vector<bool> inverseBindAssigned(result.animation.nodes.size(), false);
+
+		const std::string skeletonSemanticKey = "skeleton:scene";
+		const TerraEngine::UUID skeletonGuid = BuildStableAnimationSubAssetUuid(
+			options.packageGuid,
+			AnimationImportSubAssetKind::Skeleton,
+			skeletonSemanticKey);
+		ExtractSkinsAndInverseBinds(
+			options,
+			*scene,
+			nodeLookup,
+			ToAnimationGuid(skeletonGuid),
+			result.animation,
+			deformingNodes,
+			inverseBindAssigned,
+			inverseBinds,
+			result.package);
+		const bool authoredInverseBindsReady = ValidateAuthoredInverseBinds(
+			result.animation.nodes,
+			deformingNodes,
+			inverseBindAssigned,
+			inverseBinds,
+			result.package);
+		const auto morphTargetsByMeshName = ExtractMorphTargets(
+			options,
+			*scene,
+			result.animation,
+			result.package);
+
+		const std::optional<FbxGeneratedSkeleton> skeleton = authoredInverseBindsReady
+			? BuildSkeletonCandidate(
+				options,
+				result.animation.coordinateConversion,
+				result.animation.nodes,
+				deformingNodes,
+				inverseBinds,
+				result.package)
+			: std::nullopt;
+		if (skeleton)
+		{
+			const bool requiresDeformableCook = !result.animation.skinnedMeshes.empty()
+				|| !result.animation.morphTargets.empty();
+			const bool deformableCooked = !requiresDeformableCook
+				|| CookDeformablePackageMesh(
+					options,
+					*scene,
+					nodeLookup,
+					*skeleton,
+					result.animation,
+					result.package);
+			if (deformableCooked && WriteSkeletonCandidate(options, *skeleton, result.package))
+			{
+				result.animation.skeletons.push_back(*skeleton);
+				result.animation.clips = ExtractCompileAndWriteClips(
+					options,
+					*scene,
+					nodeLookup,
+					deformingNodes,
+					morphTargetsByMeshName,
+					result.animation.morphTargets,
+					*skeleton,
+					result.package);
+				if (requiresDeformableCook)
+				{
+					PopulateDeformationManifest(options, *skeleton, result.animation, result.package);
+				}
+			}
+		}
+
+		result.animation.parityFingerprint = BuildAnimatedParityFingerprint(result.animation);
+		if (HasImportErrors(result.package))
+		{
+			// A failed skeleton, deformable mesh, morph, or clip candidate must not
+			// expose a subset as a publishable generation. T037 owns the protected
+			// filesystem transaction and can retain the prior canonical manifest.
+			result.package.animationManifest.subAssets.clear();
+			result.package.animationManifest.publishedAtomically = false;
+		}
+		CanonicalizeAnimationImportManifest(result.package.animationManifest);
+		result.package.animationManifest.dependencyFingerprintHex =
+			BuildAnimationImportDependencyFingerprint(result.package.animationManifest);
+		AddDiagnostic(
+			result.package,
+			ModelDiagnosticSeverity::Info,
+			"FbxAnimationImportSummary",
+			options.sourceRelativePath.generic_string(),
+			"Imported " + std::to_string(result.animation.nodes.size()) + " hierarchy nodes, "
+				+ std::to_string(result.animation.skinnedMeshes.size()) + " skinned meshes, "
+				+ std::to_string(result.animation.skeletons.size()) + " skeletons, "
+				+ std::to_string(result.animation.clips.size()) + " clips, and "
+				+ std::to_string(result.animation.morphTargets.size()) + " morph targets.",
+			"Inspect earlier diagnostics for any rejected source object or fidelity-changing normalization.");
+		PromoteStatusFromDiagnostics(result.package);
+		return result;
+	}
+
+	ModelPackageImportResult ImportFbxPackage(const FbxPackageImportOptions& options)
+	{
+		// Existing callers retain their package-shaped return while receiving the
+		// same generated animation files and durable manifest as the typed API.
+		FbxAnimatedImportResult animated = ImportFbxPackageWithAnimation(options);
+		return std::move(animated.package);
 	}
 }

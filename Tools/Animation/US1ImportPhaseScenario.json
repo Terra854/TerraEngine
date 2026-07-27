@@ -1,0 +1,322 @@
+{
+	"schemaVersion": 2,
+	"phase": "us1-import",
+	"requiredTools": [
+		"asset.import",
+		"asset.list",
+		"asset.inspect",
+		"prefab.instantiate",
+		"diagnostics.get_summary"
+	],
+	"requiredEvidence": [
+		"editor/mcp-operations.json",
+		"editor/operations/us1-import-first.json",
+		"editor/operations/us1-import-repeat.json",
+		"editor/operations/us1-query-package.json",
+		"editor/operations/us1-inspect-package-impact.json",
+		"editor/operations/us1-failed-reimport-preserves-generation.json",
+		"editor/operations/us1-recover-valid-source.json",
+		"editor/operations/us1-instantiate-playable-prefab.json",
+		"editor/operations/us1-scene-bind-query.json",
+		"editor/operations/us1-play-diagnostics.json",
+		"editor/operations/us1-post-play-scene-query.json"
+	],
+	"operations": [
+		{
+			"id": "us1-import-first",
+			"stage": "prePlay",
+			"order": 10,
+			"tool": "asset.import",
+			"arguments": {
+				"path": "Models/US1Hero.gltf",
+				"force": true
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.importResult.generatedMeshes",
+					"data.importResult.generatedPrefabs",
+					"data.importResult.animationManifest"
+				],
+				"fieldOneOf": {
+					"data.status": [
+						"Succeeded",
+						"SucceededWithWarnings"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/us1-import-first.json"
+		},
+		{
+			"id": "us1-import-repeat",
+			"stage": "prePlay",
+			"order": 20,
+			"tool": "asset.import",
+			"arguments": {
+				"path": "Models/US1Hero.gltf",
+				"force": true
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.importResult.packageGuid",
+					"data.importResult.generatedPrefabs"
+				],
+				"fieldOneOf": {
+					"data.status": [
+						"Succeeded",
+						"SucceededWithWarnings"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/us1-import-repeat.json"
+		},
+		{
+			"id": "us1-query-package",
+			"stage": "prePlay",
+			"order": 30,
+			"tool": "asset.list",
+			"arguments": {
+				"search": "US1Hero"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.assets"
+				]
+			},
+			"evidencePath": "editor/operations/us1-query-package.json"
+		},
+		{
+			"id": "us1-inspect-package-impact",
+			"stage": "prePlay",
+			"order": 40,
+			"tool": "asset.inspect",
+			"arguments": {
+				"asset": "Assets/Models/US1Hero.gltf",
+				"operation": "move",
+				"destination": "Assets/Models/US1HeroMoved.gltf"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.impact.fingerprint"
+				]
+			},
+			"evidencePath": "editor/operations/us1-inspect-package-impact.json"
+		},
+		{
+			"id": "us1-failed-reimport-preserves-generation",
+			"stage": "prePlay",
+			"order": 50,
+			"tool": "asset.import",
+			"arguments": {
+				"path": "Models/US1Hero.gltf",
+				"force": true
+			},
+			"fileTransition": {
+				"target": "Assets/Models/US1Hero.gltf",
+				"replacement": "GateInputs/US1Hero.invalid.gltf",
+				"preserveRoots": [
+					"Assets/Models/US1Hero_Generated",
+					"Build/Assets/Models/US1Hero_Generated"
+				]
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.importResult.diagnostics"
+				],
+				"fieldEquals": {
+					"data.status": "Failed"
+				}
+			},
+			"evidencePath": "editor/operations/us1-failed-reimport-preserves-generation.json"
+		},
+		{
+			"id": "us1-recover-valid-source",
+			"stage": "prePlay",
+			"order": 60,
+			"tool": "asset.import",
+			"arguments": {
+				"path": "Models/US1Hero.gltf",
+				"force": true
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.importResult.generatedPrefabs"
+				],
+				"fieldOneOf": {
+					"data.status": [
+						"Succeeded",
+						"SucceededWithWarnings"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/us1-recover-valid-source.json"
+		},
+		{
+			"id": "us1-instantiate-playable-prefab",
+			"stage": "prePlay",
+			"order": 70,
+			"tool": "prefab.instantiate",
+			"arguments": {
+				"prefab": "Assets/Models/US1Hero_Generated/US1Hero.teprefab",
+				"name": "US1 Hero Playable Prefab"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.instanceId",
+					"data.prefabId"
+				]
+			},
+			"evidencePath": "editor/operations/us1-instantiate-playable-prefab.json"
+		},
+		{
+			"id": "us1-scene-bind-query",
+			"stage": "prePlay",
+			"order": 80,
+			"tool": "scene.list_objects",
+			"arguments": {
+				"includeComponents": true,
+				"search": "US1"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.objects"
+				]
+			},
+			"evidencePath": "editor/operations/us1-scene-bind-query.json"
+		},
+		{
+			"id": "us1-play-diagnostics",
+			"stage": "play",
+			"order": 110,
+			"tool": "diagnostics.get_summary",
+			"arguments": {
+				"includeDetails": true,
+				"surface": "us1-import-bind-preview"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data"
+				]
+			},
+			"evidencePath": "editor/operations/us1-play-diagnostics.json"
+		},
+		{
+			"id": "us1-post-play-scene-query",
+			"stage": "postPlay",
+			"order": 130,
+			"tool": "scene.list_objects",
+			"arguments": {
+				"includeComponents": true,
+				"search": "US1 Hero Playable Prefab"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.objects"
+				]
+			},
+			"evidencePath": "editor/operations/us1-post-play-scene-query.json"
+		}
+	],
+	"captures": [
+		{
+			"id": "us1-import-scene-view",
+			"view": "SceneView",
+			"stage": "prePlay",
+			"order": 90,
+			"tool": "camera.capture_custom",
+			"arguments": {
+				"name": "US1 Import Scene View",
+				"position": [
+					0,
+					1,
+					4
+				],
+				"target": [
+					0,
+					0.5,
+					0
+				],
+				"up": [
+					0,
+					1,
+					0
+				],
+				"projection": "perspective",
+				"verticalFovDegrees": 60,
+				"nearPlane": 0.1,
+				"farPlane": 100
+			}
+		},
+		{
+			"id": "us1-import-game-view",
+			"view": "GameView",
+			"stage": "play",
+			"order": 120,
+			"tool": "game_view.capture",
+			"arguments": {
+				"includeOverlays": false,
+				"transparentBackground": false
+			}
+		},
+		{
+			"id": "us1-import-in-game-camera",
+			"view": "InGameCamera",
+			"stage": "postPlay",
+			"order": 140,
+			"tool": "camera.capture_object",
+			"arguments": {
+				"object": "US1 Capture Camera",
+				"includeDisabled": false,
+				"transparentBackground": false
+			}
+		}
+	],
+	"visualExpectations": [
+		{
+			"captureId": "us1-import-scene-view",
+			"contentPolicy": "visible-geometry-required"
+		},
+		{
+			"captureId": "us1-import-game-view",
+			"contentPolicy": "visible-geometry-required"
+		},
+		{
+			"captureId": "us1-import-in-game-camera",
+			"contentPolicy": "visible-geometry-required"
+		}
+	],
+	"visualIdentityExceptions": [
+		{
+			"captureIds": [
+				"us1-import-game-view",
+				"us1-import-in-game-camera"
+			],
+			"reason": "Game View and the authored in-game capture intentionally resolve the same active camera, so exact visual parity is valid."
+		}
+	],
+	"manualChecklist": [
+		{
+			"id": "us1-mouse-asset-inspection",
+			"input": "mouse",
+			"required": true,
+			"minimumInputEvents": 2,
+			"instruction": "Using the installed editor and real mouse input, click Models/US1Hero.gltf and Models/US1Hero_Generated/US1Hero.teprefab in the Project Browser. Verify the Inspector exposes the model package and generated prefab rather than loose source-only content. Submit both ordered atomic click requests; the gate captures and binds the native-window screenshot itself."
+		},
+		{
+			"id": "us1-keyboard-save-check",
+			"input": "keyboard",
+			"required": true,
+			"minimumInputEvents": 1,
+			"instruction": "Using the installed editor Ctrl+S shortcut, save the US1 scene after inspecting the generated prefab and confirm the editor remains stopped. Submit the atomic key-chord request; the gate captures and binds the native-window screenshot itself."
+		}
+	]
+}

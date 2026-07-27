@@ -1,0 +1,65 @@
+{
+  "schema": "terraengine.animation.retarget-fixture",
+  "version": 1,
+  "description": "Synthetic rigs exercise proportion, rest-orientation, hierarchy-detail, twist, optional-limb, and constraint behavior without external content dependencies.",
+  "tolerances": {
+    "contactPositionMeters": 0.02,
+    "reachableIkEndEffectorMeters": 0.01,
+    "timingTicks": 0,
+    "tighterOverride": null,
+    "reviewReason": null
+  },
+  "sourceRig": {
+    "referenceHeightMeters": 1.0,
+    "joints": [
+      { "id": 1, "parent": null, "semantic": "Root" },
+      { "id": 2, "parent": 1, "semantic": "Hips" },
+      { "id": 3, "parent": 2, "semantic": "LeftLeg" },
+      { "id": 4, "parent": 3, "semantic": "LeftFoot" },
+      { "id": 5, "parent": 2, "semantic": "LeftArm" },
+      { "id": 6, "parent": 5, "semantic": "LeftHand" },
+      { "id": 7, "parent": 2, "semantic": "OptionalTail" }
+    ]
+  },
+  "targetRig": {
+    "referenceHeightMeters": 1.5,
+    "joints": [
+      { "id": 101, "parent": null, "semantic": "Root" },
+      { "id": 102, "parent": 101, "semantic": "Hips" },
+      { "id": 103, "parent": 102, "semantic": "LeftLeg" },
+      { "id": 104, "parent": 103, "semantic": "LegDetail" },
+      { "id": 105, "parent": 104, "semantic": "LeftFoot" },
+      { "id": 106, "parent": 102, "semantic": "LeftArm", "restOrientationDegreesZ": 90.0 },
+      { "id": 107, "parent": 106, "semantic": "ArmTwist" },
+      { "id": 108, "parent": 107, "semantic": "LeftHand" }
+    ]
+  },
+  "scenarios": [
+    {
+      "name": "proportion-and-rest-orientation",
+      "expects": ["finite-local-pose", "finite-model-pose", "scaled-root-displacement", "basis-aligned-arm"]
+    },
+    {
+      "name": "hierarchy-detail-and-twist",
+      "expects": ["unmapped-detail-preserved", "unit-sum-twist-distribution", "target-hierarchy-rebuilt"]
+    },
+    {
+      "name": "optional-limb-fallback",
+      "missingTargetJointId": 999,
+      "expects": ["publishable-warning", "declared-reference-pose-fallback", "reduced-fidelity-counter"]
+    },
+    {
+      "name": "root-contact-and-reachable-effector",
+      "sourceTick": 120,
+      "normalizedTime": 0.375,
+      "contactTargetMeters": [1.5, 0.25, 0.0],
+      "expects": ["exact-time-copy", "facing-preserved", "root-displacement-preserved", "contact-within-default", "effector-within-default"]
+    },
+    {
+      "name": "deterministic-repeatability",
+      "repeatCount": 10000,
+      "wallClockThreshold": null,
+      "expects": ["bit-stable-transforms", "bit-stable-metrics", "bit-stable-hash"]
+    }
+  ]
+}

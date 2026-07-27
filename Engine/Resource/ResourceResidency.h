@@ -6,10 +6,14 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
+#include <mutex>
 #include <vector>
 
 #include "Resource/ResourceStreaming.h"
@@ -30,7 +34,17 @@ namespace TerraEngine::Resource
 		Shader,
 		ShaderCollection,
 		FontAtlas,
-		Other
+		Other,
+		// Keep the original 0-6 identities unchanged. The animation residency
+		// buckets are distinct so later budgets and diagnostics can account for
+		// every dependency type without guessing from a filename.
+		Skeleton = 7U,
+		AnimationClip = 8U,
+		AnimationController = 9U,
+		AnimationMask = 10U,
+		RetargetProfile = 11U,
+		MotionDatabase = 12U,
+		RagdollProfile = 13U
 	};
 
 	enum class ResidencyState : std::uint8_t
@@ -137,7 +151,17 @@ namespace TerraEngine::Resource
 		ShaderCollection,
 		VirtualGeometryPage,
 		VirtualGeometryFallbackPage,
-		VirtualGeometryMetadata
+		VirtualGeometryMetadata,
+		// Animation payload kinds are append-only diagnostic identities. Keeping
+		// each class distinct prevents typed cooked data from being reported as a
+		// decoded render mesh merely because both live in CPU memory.
+		Skeleton,
+		AnimationClip,
+		AnimationController,
+		AnimationMask,
+		RetargetProfile,
+		MotionDatabase,
+		RagdollProfile
 	};
 
 	enum class CpuPayloadOwnershipState : std::uint8_t
@@ -403,6 +427,158 @@ namespace TerraEngine::Resource
 		std::uint32_t residentHighDetailPages = 0u;
 		std::uint32_t retiringPages = 0u;
 		std::vector<VirtualGeometryPageBudgetPressureContributor> contributors;
+	};
+
+	// AnimationResidencyTracker owns only request state. ResourceManager remains
+	// responsible for IO and GPU work, so callers can exercise this policy on a
+	// worker without mutating live resource payloads.
+	struct AnimationResidencyRequest
+	{
+		TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+		ResidencyAssetType assetType = ResidencyAssetType::AnimationClip;
+		std::uint64_t byteSize = 0u;
+		StreamingPriorityClass priority = StreamingPriorityClass::Normal;
+		bool gameplayCritical = false;
+		bool offscreenAuthority = false;
+		std::uint64_t requestGeneration = 0u;
+	};
+
+	// AnimationResidencyUsage records why a generation must remain available.
+	// Visibility is intentionally separate from authoritative consumers: an
+	// offscreen animator may stop visual work, but it must keep the data needed
+	// for events, root motion, physics, recording, replication, and rollback.
+	enum class AnimationResidencyUsage : std::uint32_t
+	{
+		None = 0u,
+		Visible = 1u << 0u,
+		Events = 1u << 1u,
+		RootMotion = 1u << 2u,
+		Physics = 1u << 3u,
+		Recording = 1u << 4u,
+		Replication = 1u << 5u,
+		Rollback = 1u << 6u,
+		Validation = 1u << 7u,
+		Preview = 1u << 8u
+	};
+
+	constexpr AnimationResidencyUsage operator|(AnimationResidencyUsage left, AnimationResidencyUsage right) noexcept
+	{
+		return static_cast<AnimationResidencyUsage>(
+			static_cast<std::uint32_t>(left) | static_cast<std::uint32_t>(right));
+	}
+
+	constexpr AnimationResidencyUsage operator&(AnimationResidencyUsage left, AnimationResidencyUsage right) noexcept
+	{
+		return static_cast<AnimationResidencyUsage>(
+			static_cast<std::uint32_t>(left) & static_cast<std::uint32_t>(right));
+	}
+
+	constexpr bool Any(AnimationResidencyUsage usage) noexcept
+	{
+		return static_cast<std::uint32_t>(usage) != 0u;
+	}
+
+	struct AnimationResidencyDecision
+	{
+		TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+		std::uint64_t requestGeneration = 0u;
+		ResidencyState state = ResidencyState::Loading;
+		bool accepted = false;
+		bool retainedForAuthority = false;
+		bool safeFallbackRequired = true;
+		std::uint64_t activeGeneration = 0u;
+		std::uint64_t residentBytes = 0u;
+		std::string reason;
+	};
+
+	struct AnimationResidencyRecord
+	{
+		AnimationResidencyRequest request;
+		ResidencyState state = ResidencyState::Loading;
+		AnimationResidencyUsage retainedUsages = AnimationResidencyUsage::None;
+		std::uint32_t retainCount = 0u;
+		std::uint64_t lastTouchedSequence = 0u;
+		bool activeGeneration = false;
+		bool cancellationRequested = false;
+		std::string lastDiagnostic;
+	};
+
+	struct AnimationResidencyTypeDiagnostics
+	{
+		ResidencyAssetType assetType = ResidencyAssetType::AnimationClip;
+		std::uint32_t trackedGenerations = 0u;
+		std::uint32_t loadingGenerations = 0u;
+		std::uint32_t residentGenerations = 0u;
+		std::uint32_t retainedGenerations = 0u;
+		std::uint32_t failedGenerations = 0u;
+		std::uint64_t residentBytes = 0u;
+	};
+
+	struct AnimationResidencyDiagnostics
+	{
+		std::uint64_t budgetBytes = 0u;
+		std::uint64_t residentBytes = 0u;
+		std::uint64_t evictableBytes = 0u;
+		std::uint64_t protectedBytes = 0u;
+		std::uint64_t overBudgetBytes = 0u;
+		std::uint64_t rejectedRequests = 0u;
+		std::uint64_t cancelledRequests = 0u;
+		std::uint64_t staleCompletions = 0u;
+		std::vector<AnimationResidencyTypeDiagnostics> types;
+	};
+
+	class TERRAENGINE_API AnimationResidencyTracker final
+	{
+	public:
+		explicit AnimationResidencyTracker(std::size_t maximumTrackedGenerations = 4096u);
+		AnimationResidencyDecision Request(const AnimationResidencyRequest& request);
+		bool Retain(
+			const TerraEngine::UUID& assetId,
+			std::uint64_t requestGeneration,
+			AnimationResidencyUsage usage);
+		bool Release(
+			const TerraEngine::UUID& assetId,
+			std::uint64_t requestGeneration,
+			AnimationResidencyUsage usage);
+		bool Touch(const TerraEngine::UUID& assetId, std::uint64_t requestGeneration);
+		bool Cancel(const TerraEngine::UUID& assetId, std::uint64_t requestGeneration);
+		bool Complete(const TerraEngine::UUID& assetId, std::uint64_t requestGeneration, bool success);
+		std::vector<AnimationResidencyDecision> ApplyBudget(std::uint64_t budgetBytes);
+		[[nodiscard]] std::optional<AnimationResidencyDecision> Query(
+			const TerraEngine::UUID& assetId,
+			std::uint64_t requestGeneration) const;
+		[[nodiscard]] std::vector<AnimationResidencyRequest> Snapshot() const;
+		[[nodiscard]] std::vector<AnimationResidencyRecord> SnapshotRecords() const;
+		[[nodiscard]] AnimationResidencyDiagnostics BuildDiagnostics(std::uint64_t budgetBytes) const;
+
+	private:
+		struct TrackedGeneration
+		{
+			AnimationResidencyRecord record;
+			std::array<std::uint32_t, 9u> usageRetainCounts{};
+		};
+
+		[[nodiscard]] static std::string MakeKey(
+			const TerraEngine::UUID& assetId,
+			std::uint64_t requestGeneration);
+		[[nodiscard]] static bool IsAnimationAssetType(ResidencyAssetType type) noexcept;
+		[[nodiscard]] static bool RequiresAuthorityRetention(const AnimationResidencyRequest& request) noexcept;
+		[[nodiscard]] static bool IsResidentState(ResidencyState state) noexcept;
+		[[nodiscard]] static bool HasRetains(const TrackedGeneration& generation) noexcept;
+		[[nodiscard]] static AnimationResidencyUsage BuildRetainedUsage(const TrackedGeneration& generation) noexcept;
+		[[nodiscard]] AnimationResidencyDecision MakeDecisionLocked(const TrackedGeneration& generation) const;
+		void PruneReleasedLocked();
+		void RefreshRetentionStateLocked(TrackedGeneration& generation);
+
+		std::size_t m_maximumTrackedGenerations = 4096u;
+		std::uint64_t m_touchSequence = 0u;
+		std::uint64_t m_rejectedRequests = 0u;
+		std::uint64_t m_cancelledRequests = 0u;
+		std::uint64_t m_staleCompletions = 0u;
+		mutable std::mutex m_mutex;
+		std::unordered_map<std::string, TrackedGeneration> m_generations;
+		std::unordered_map<std::string, std::uint64_t> m_latestRequestedGeneration;
+		std::unordered_map<std::string, std::uint64_t> m_activeGeneration;
 	};
 
 	TERRAENGINE_API ResidencyPolicy MakeDefaultResidencyPolicy();

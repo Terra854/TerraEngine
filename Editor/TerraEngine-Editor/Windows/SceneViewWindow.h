@@ -9,6 +9,8 @@
 #include "SceneViewMarkerPipeline.h"
 #include "SceneViewOverlayIcons.h"
 #include "SceneViewOverlayMarkers.h"
+#include "../Animation/AnimationOverlays.h"
+#include "../Animation/AnimationSceneHandles.h"
 #include "Engine/Renderer/RenderTypes.h"
 #include "Engine/Scene/SpatialIndex.h"
 #include "Engine/Utilities/UUID.h"
@@ -84,6 +86,7 @@ private:
 	void HandleCameraInput(float deltaTime, const ImVec2& viewportSize);
 	void DrawGizmos(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize);
 	void DrawPhysicsColliderEditHandles(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize);
+	void DrawAnimationSceneHandles(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize);
 	void DrawPhysicsDebugOverlay(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize);
 	void ApplyPrefabContextTintForNextRender();
 	void CollectFocusedPrefabObjectIds(entt::entity entity, std::unordered_set<TerraEngine::UUID>& objectIds);
@@ -188,6 +191,19 @@ private:
 	glm::vec3 m_PhysicsLastAuthoredExtents{0.5f};
 	std::string m_PhysicsPreviewStatus;
 	std::uint64_t m_PhysicsShapeCommitSequence = 0U;
+
+	// Animation overlays are opt-in and collect only the selected animator's
+	// immutable publication. Procedural edits remain detached until Apply submits
+	// a generation-safe animation command at the normal protected boundary.
+	TerraEngine::Editor::Animation::AnimationOverlays m_AnimationOverlays;
+	TerraEngine::Editor::Animation::AnimationSceneHandles m_AnimationSceneHandles;
+	std::uint32_t m_AnimationOverlayKinds =
+		TerraEngine::Editor::Animation::kAllAnimationOverlayKinds;
+	bool m_ShowAnimationOverlays = false;
+	bool m_AnimationOverlayConfigured = false;
+	std::uint64_t m_SelectedAnimationGoalId = 0U;
+	std::uint64_t m_AnimationHandleCommandSequence = 0U;
+	std::string m_AnimationHandleStatus;
 
 	void HandlePicking(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize);
 };

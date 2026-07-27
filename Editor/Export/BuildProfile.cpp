@@ -34,6 +34,60 @@ namespace {
 		const std::u8string encoded = path.generic_u8string();
 		return std::string(reinterpret_cast<const char*>(encoded.data()), encoded.size());
 	}
+
+	std::string QuoteShellArgument(std::string_view value) {
+#ifdef _WIN32
+		// Export currently runs through cmd.exe. Percent expansion still occurs
+		// inside double quotes, while a caret inside those quotes is preserved.
+		// Close the quoted segment around each percent, emit the caret outside,
+		// and reopen it. cmd consumes that caret and the child process receives
+		// one literal percent while all spaces remain in one logical argument.
+		std::string quoted = "\"";
+		for(const char character : value) {
+			if(character == '%') quoted += "\"^%\"";
+			else quoted += character;
+		}
+		quoted += '"';
+		return quoted;
+#else
+		// POSIX single quotes suppress $, backtick, backslash, and whitespace
+		// interpretation. A literal quote is represented by closing the quoted
+		// region, emitting an escaped quote, and reopening it.
+		std::string quoted = "'";
+		for(const char character : value) {
+			if(character == '\'') quoted += "'\\''";
+			else quoted += character;
+		}
+		quoted += '\'';
+		return quoted;
+#endif
+	}
+
+	std::string QuoteShellPath(const std::filesystem::path& path) {
+		return QuoteShellArgument(PathToUtf8(path));
+	}
+
+	std::string QuoteShellDirectoryProperty(
+		const std::filesystem::path& directory)
+	{
+		// MSBuild concatenates several of these properties with filenames. A
+		// generic trailing slash keeps the value unambiguous on every host and
+		// avoids a backslash escaping the closing quote in downstream tools.
+		std::string value = PathToUtf8(directory.lexically_normal());
+		if(value.empty() || value.back() != '/') value += '/';
+		return QuoteShellArgument(value);
+	}
+
+	std::string GeneratedTreeExcludesShellValue()
+	{
+		// A command-line `%3B` survives as an escaped literal when the value is
+		// later consumed by an item Exclude. Preserve it through shell/MSBuild
+		// command parsing, then deliberately unescape during project evaluation
+		// so DefaultItemExcludes becomes five real patterns rather than one path.
+		constexpr std::string_view kDelayedMsBuildExcludes =
+			"$([MSBuild]::Unescape('obj/**%3Bbin/**%3BBuild/**%3BLibrary/**%3BTemp/**'))";
+		return QuoteShellArgument(kDelayedMsBuildExcludes);
+	}
 }
 
 // --- ID generation ---
@@ -102,22 +156,102 @@ std::string GetExportManagedRuntimeLibraryName(ExportPlatform platform) {
 	return "Assembly-CSharp" + GetExportSharedLibrarySuffix(platform);
 }
 
+namespace {
+	void AppendEngineOwnedWorkspaceProperties(
+		std::ostringstream& command,
+		const NativeAotPublishContext& context)
+	{
+		// Restore and publish must consume exactly the same assets file and build
+		// tree. These values are appended after profile arguments so a saved
+		// profile cannot redirect generated files into the authored project.
+		command
+			<< " -p:BaseIntermediateOutputPath="
+			<< QuoteShellDirectoryProperty(context.intermediateOutputDirectory)
+			<< " -p:MSBuildProjectExtensionsPath="
+			<< QuoteShellDirectoryProperty(context.intermediateOutputDirectory)
+			<< " -p:BaseOutputPath="
+			<< QuoteShellDirectoryProperty(context.binaryOutputDirectory)
+			<< " -p:OutputPath="
+			<< QuoteShellDirectoryProperty(context.binaryOutputDirectory)
+			<< " -p:RestorePackagesPath="
+			<< QuoteShellDirectoryProperty(context.packageCache)
+			// Moving BaseIntermediateOutputPath also moves the SDK's implicit
+			// obj exclusion. Reassert every TerraEngine-generated project tree
+			// so stale editor outputs cannot be compiled as authored source.
+			// MSBuild parses raw semicolons as command-switch separators before
+			// evaluating the quoted property, so encode each list separator with
+			// its documented property escape. A delayed MSBuild Unescape turns
+			// those protected separators into a true Exclude list only when the
+			// project evaluates DefaultItemExcludes.
+			<< " -p:DefaultItemExcludes="
+			<< GeneratedTreeExcludesShellValue();
+	}
+
+	void AppendOfflineNuGetProperties(
+		std::ostringstream& command,
+		const NativeAotPublishContext& context)
+	{
+		// These options appear after profile-provided arguments. MSBuild uses the
+		// final property value, which prevents a saved profile from re-enabling an
+		// ambient source, fallback folder, or online vulnerability endpoint.
+		command << " -p:RestoreSources="
+			<< QuoteShellDirectoryProperty(context.nugetFeed)
+			<< " -p:RestoreFallbackFolders="
+			<< " -p:RestoreAdditionalProjectSources="
+			<< " -p:RestoreIgnoreFailedSources=false"
+			<< " -p:NuGetAudit=false";
+	}
+
+	void AppendOfflineNuGetRestoreArguments(
+		std::ostringstream& command,
+		const NativeAotPublishContext& context)
+	{
+		// These switches belong to `dotnet restore`; `dotnet publish` does not
+		// accept them even when --no-restore is present. The following MSBuild
+		// properties are shared with publish because both commands understand them.
+		command << " --configfile " << QuoteShellPath(context.nugetConfig)
+			<< " --packages "
+			<< QuoteShellDirectoryProperty(context.packageCache)
+			<< " --no-http-cache"
+			<< " --disable-parallel";
+	}
+}
+
+std::string BuildNativeAotRestoreCommand(
+	const BuildProfile& profile,
+	const std::filesystem::path& managedProject,
+	const NativeAotPublishContext& context)
+{
+	// NativeAOT packages are selected by the SDK during restore, not by a
+	// PackageReference in the gameplay project. Make the property explicit so
+	// a missing vendored compiler fails before publish starts writing output.
+	std::ostringstream command;
+	command << "dotnet restore"
+		<< " " << QuoteShellPath(managedProject)
+		<< " -r " << GetExportRuntimeIdentifier(profile.platform)
+		<< " -p:PublishAot=true";
+	AppendOfflineNuGetRestoreArguments(command, context);
+	AppendEngineOwnedWorkspaceProperties(command, context);
+	AppendOfflineNuGetProperties(command, context);
+	return command.str();
+}
+
 std::string BuildNativeAotPublishCommand(
 	const BuildProfile& profile,
 	const std::filesystem::path& managedProject,
-	const std::filesystem::path& managedOutputDir)
+	const std::filesystem::path& managedOutputDir,
+	const NativeAotPublishContext& context)
 {
 	// The export pipeline runs this exact command through the shell. Keeping the
-	// string construction in one helper lets tests verify that each profile
-	// toggle maps to the intended dotnet NativeAOT property.
+	// string construction in one helper lets tests verify profile toggles and
+	// the final fail-closed NativeAOT boundary without launching dotnet.
 	std::ostringstream command;
 	command << "dotnet publish"
-		<< " \"" << PathToUtf8(managedProject) << "\""
+		<< " " << QuoteShellPath(managedProject)
 		<< " -c Release"
 		<< " -r " << GetExportRuntimeIdentifier(profile.platform)
 		<< " -p:PublishAot=true"
-		<< " -p:DefineConstants=TERRAENGINE_EXPORT"
-		<< " -o \"" << PathToUtf8(managedOutputDir) << "\"";
+		<< " -p:DefineConstants=TERRAENGINE_EXPORT";
 
 	if (profile.stripNativeAotOutput) {
 		command << " -p:StripSymbols=true";
@@ -131,6 +265,17 @@ std::string BuildNativeAotPublishCommand(
 		command << " " << profile.additionalPublishArgs;
 	}
 
+	AppendEngineOwnedWorkspaceProperties(command, context);
+	// PublishDir is separate from the shared binary output. Appending both the
+	// MSBuild property and dotnet's output switch after profile arguments makes
+	// the private publish directory authoritative even for hostile overrides.
+	command << " -p:PublishDir="
+		<< QuoteShellDirectoryProperty(managedOutputDir)
+		<< " -o " << QuoteShellDirectoryProperty(managedOutputDir);
+	AppendOfflineNuGetProperties(command, context);
+	// Keep this final so a saved profile cannot append a restore-enabling switch
+	// after the engine's fail-closed decision.
+	command << " --no-restore";
 	return command.str();
 }
 

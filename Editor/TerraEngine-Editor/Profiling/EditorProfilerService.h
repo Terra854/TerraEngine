@@ -86,6 +86,12 @@ struct EditorProfilerCaptureSummary
 	double minimumFrameMs = 0.0;
 	double maximumFrameMs = 0.0;
 	double averageFrameMs = 0.0;
+	// Performance gates compare complete frames only. Keeping these bounded
+	// aggregates in the public summary avoids exposing the raw frame timeline.
+	double frameMedianMs = 0.0;
+	double frameP95Ms = 0.0;
+	double frameP99Ms = 0.0;
+	double frameWorstMs = 0.0;
 	std::uint32_t payloadVersion = 1u;
 	std::uint64_t committedFrameCount = 0u;
 	std::uint64_t artifactSizeBytes = 0u;

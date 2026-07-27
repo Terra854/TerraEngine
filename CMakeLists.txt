@@ -47,6 +47,80 @@ if(TERRAENGINE_NORMALIZED_INSTALL_PREFIX MATCHES [[/External/[^/]+/install/?$]])
 	set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/install" CACHE PATH "Install prefix" FORCE)
 endif()
 
+# Spec 043 adds many files incrementally beneath dedicated Animation folders.
+# CONFIGURE_DEPENDS keeps those reviewed repository paths registered without
+# requiring every later story to modify this central build file. The additional
+# name-based patterns cover integration files such as AnimatorComponent while
+# leaving unrelated engine and editor sources explicitly listed below.
+file(GLOB_RECURSE TERRAENGINE_ANIMATION_ENGINE_SOURCES CONFIGURE_DEPENDS
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Animation/*.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/*Animation*.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/*Animator*.cpp"
+)
+file(GLOB_RECURSE TERRAENGINE_ANIMATION_ENGINE_HEADERS CONFIGURE_DEPENDS
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Animation/*.h"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Animation/*.hpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/*Animation*.h"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/*Animation*.hpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/*Animator*.h"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/*Animator*.hpp"
+)
+list(REMOVE_DUPLICATES TERRAENGINE_ANIMATION_ENGINE_SOURCES)
+list(REMOVE_DUPLICATES TERRAENGINE_ANIMATION_ENGINE_HEADERS)
+
+file(GLOB_RECURSE TERRAENGINE_ANIMATION_SHADER_SOURCES CONFIGURE_DEPENDS
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/Animation/*"
+)
+file(GLOB_RECURSE TERRAENGINE_ANIMATION_EDITOR_SOURCES CONFIGURE_DEPENDS
+	"${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Animation/*.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Animation/*.h"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Animation/*.hpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Editor/*Animation*.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Editor/*Animation*.h"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Editor/*Animation*.hpp"
+)
+# Several animation-domain windows and their motion-database compiler use the
+# asset type in their filename rather than the word "Animation". Keep this
+# explicit list beside the animation glob so production editor registration and
+# the linked implementations cannot drift.
+list(APPEND TERRAENGINE_ANIMATION_EDITOR_SOURCES
+	"${CMAKE_CURRENT_SOURCE_DIR}/Editor/AssetCompilers/MotionDatabaseCompiler.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Editor/AssetCompilers/MotionDatabaseCompiler.h"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/SkeletonEditorWindow.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/SkeletonEditorWindow.h"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/RetargetEditorWindow.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/RetargetEditorWindow.h"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/MotionDatabaseWindow.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/MotionDatabaseWindow.h"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/MotionDatabaseAuthoringHost.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/MotionDatabaseAuthoringHost.h"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/RagdollEditorWindow.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/RagdollEditorWindow.h"
+)
+file(GLOB_RECURSE TERRAENGINE_ANIMATION_ASSET_COMPILER_SOURCES CONFIGURE_DEPENDS
+	"${CMAKE_CURRENT_SOURCE_DIR}/Editor/AssetCompilers/*Animation*.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Editor/AssetCompilers/*Animation*.h"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Editor/AssetCompilers/*Animation*.hpp"
+)
+# MotionDatabaseCompiler follows the asset's domain name instead of the older
+# *Animation* filename convention, so list it explicitly for compiler targets.
+list(APPEND TERRAENGINE_ANIMATION_ASSET_COMPILER_SOURCES
+	"${CMAKE_CURRENT_SOURCE_DIR}/Editor/AssetCompilers/MotionDatabaseCompiler.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Editor/AssetCompilers/MotionDatabaseCompiler.h"
+)
+list(REMOVE_DUPLICATES TERRAENGINE_ANIMATION_EDITOR_SOURCES)
+list(REMOVE_DUPLICATES TERRAENGINE_ANIMATION_ASSET_COMPILER_SOURCES)
+
+file(GLOB_RECURSE TERRAENGINE_ANIMATION_MANAGED_CORE_SOURCES CONFIGURE_DEPENDS
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Managed/Source/Animation/*.cs"
+)
+file(GLOB_RECURSE TERRAENGINE_ANIMATION_MANAGED_EDITOR_SOURCES CONFIGURE_DEPENDS
+	"${CMAKE_CURRENT_SOURCE_DIR}/Editor/Managed/TerraEngine.Editor/Source/Animation/*.cs"
+)
+file(GLOB_RECURSE TERRAENGINE_ANIMATION_TOOL_SOURCES CONFIGURE_DEPENDS
+	"${CMAKE_CURRENT_SOURCE_DIR}/Tools/Animation/*"
+)
+
 set(ENGINE_SOURCES
 	Engine/Core/MainEngine.cpp
 	Engine/Core/FatalErrorReport.cpp
@@ -161,6 +235,7 @@ set(ENGINE_SOURCES
 	Engine/Runtime/ContentMount/codec/CodecProvider.cpp
 	Engine/Runtime/ContentMount/io/PathNormalizer.cpp
 	Engine/Runtime/ContentMount/util/WorkerPool.cpp
+	${TERRAENGINE_ANIMATION_ENGINE_SOURCES}
 )
 
 set(ENGINE_HEADERS
@@ -283,6 +358,7 @@ set(ENGINE_HEADERS
 	Engine/Runtime/BootSummary.h
 	Engine/Runtime/ExportStartupCoordinator.h
 	Engine/Debug.h
+	${TERRAENGINE_ANIMATION_ENGINE_HEADERS}
 )
 
 set(BASISU_SOURCES
@@ -631,6 +707,21 @@ endif()
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine PREFIX "TerraEngine-Engine" FILES ${ENGINE_SOURCES} ${ENGINE_HEADERS})
 source_group("External/basisu" FILES ${BASISU_SOURCES})
 
+# These no-op catalog targets make shader and tool ownership visible in IDEs
+# from the first setup phase. Later tasks add real compiler/install commands,
+# while source files remain reviewable in their dedicated repository folders.
+add_custom_target(TerraEngine.Animation.Shaders)
+if(TERRAENGINE_ANIMATION_SHADER_SOURCES)
+	target_sources(TerraEngine.Animation.Shaders PRIVATE ${TERRAENGINE_ANIMATION_SHADER_SOURCES})
+	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/Animation PREFIX "Animation Shaders" FILES ${TERRAENGINE_ANIMATION_SHADER_SOURCES})
+endif()
+
+add_custom_target(TerraEngine.Animation.Tools)
+if(TERRAENGINE_ANIMATION_TOOL_SOURCES)
+	target_sources(TerraEngine.Animation.Tools PRIVATE ${TERRAENGINE_ANIMATION_TOOL_SOURCES})
+	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Tools/Animation PREFIX "Animation Tools" FILES ${TERRAENGINE_ANIMATION_TOOL_SOURCES})
+endif()
+
 # --- Managed Source ----------------------------------------------------------
 # The following files are managed C# source files. CMake will generate the
 # .sln and .csproj files for these during the build process if configured.
@@ -743,12 +834,22 @@ set(MANAGED_CORE_SOURCES
 	Engine/Managed/Source/SerializationAttributes.cs
 	Engine/Managed/Source/ScriptReflection.cs
 	Engine/Managed/Source/Export/ExportVTable.cs
+	${TERRAENGINE_ANIMATION_MANAGED_CORE_SOURCES}
 )
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine/Managed PREFIX "Engine/Managed" FILES ${MANAGED_CORE_SOURCES})
 
-# Custom target to build the C# project
-# We use 'dotnet build' directly to avoid CMake C# generator limitations (VS only)
+# Verify and restore every managed dependency through one serialized,
+# repository-contained boundary. Individual targets use --no-restore below so
+# none of them can consult an ambient user or network NuGet source.
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/TerraEngineOfflineNuGet.cmake")
+terraengine_add_offline_nuget_restore_target(
+	TerraEngine.Managed.Restore
+	"${TERRAENGINE_DOTNET_RID}"
+)
+
+# Custom target to build the C# project.
+# We use 'dotnet build' directly to avoid CMake C# generator limitations (VS only).
 set(MANAGED_OUTPUT_DIR "${CMAKE_BINARY_DIR}/Build/Binaries/Managed/$<CONFIG>")
 set(EXPORT_GENERATOR_OUTPUT_DIR "${CMAKE_BINARY_DIR}/Build/Intermediate/Managed/TerraEngine.Export.Generator/$<CONFIG>")
 add_custom_target(TerraEngine.Managed.Output
@@ -756,10 +857,14 @@ add_custom_target(TerraEngine.Managed.Output
 	COMMAND ${CMAKE_COMMAND} -E make_directory "${MANAGED_OUTPUT_DIR}"
 	COMMENT "Preparing managed publish output directory"
 )
+add_dependencies(TerraEngine.Managed.Output TerraEngine.Managed.Restore)
 add_custom_target(TerraEngine ALL
-    COMMAND dotnet publish "${CMAKE_CURRENT_SOURCE_DIR}/Engine/Managed/TerraEngine.csproj" -c $<CONFIG> -r ${TERRAENGINE_DOTNET_RID} --self-contained true -o "${MANAGED_OUTPUT_DIR}"
-    COMMENT "Publishing Managed Assembly: TerraEngine (Self-Contained)"
-    SOURCES ${MANAGED_CORE_SOURCES}
+	COMMAND ${TERRAENGINE_DOTNET_COMMAND} publish
+		"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Managed/TerraEngine.csproj"
+		-c $<CONFIG> -r ${TERRAENGINE_DOTNET_RID}
+		--self-contained true --no-restore -o "${MANAGED_OUTPUT_DIR}"
+	COMMENT "Publishing Managed Assembly: TerraEngine (Self-Contained)"
+	SOURCES ${MANAGED_CORE_SOURCES}
 )
 add_dependencies(TerraEngine TerraEngine.Managed.Output)
 
@@ -770,7 +875,10 @@ add_custom_target(TerraEngine.Export.Generator ALL
 	COMMAND ${CMAKE_COMMAND} -E make_directory "${MANAGED_OUTPUT_DIR}/Analyzers"
 	# Send the analyzer output to a CMake-owned directory so Debug, Release, and
 	# platform-qualified MSBuild layouts all stage the same DLL path.
-	COMMAND dotnet build "${CMAKE_CURRENT_SOURCE_DIR}/Editor/Managed/TerraEngine.Export.Generator/TerraEngine.Export.Generator.csproj" -c $<CONFIG> -nologo -p:OutDir="${EXPORT_GENERATOR_OUTPUT_DIR}/"
+	COMMAND ${TERRAENGINE_DOTNET_COMMAND} build
+		"${CMAKE_CURRENT_SOURCE_DIR}/Editor/Managed/TerraEngine.Export.Generator/TerraEngine.Export.Generator.csproj"
+		-c $<CONFIG> --no-restore -nologo
+		-p:OutDir="${EXPORT_GENERATOR_OUTPUT_DIR}/"
 	COMMAND ${CMAKE_COMMAND} -E copy_if_different
 		"${EXPORT_GENERATOR_OUTPUT_DIR}/TerraEngine.Export.Generator.dll"
 		"${MANAGED_OUTPUT_DIR}/Analyzers/TerraEngine.Export.Generator.dll"
@@ -783,13 +891,19 @@ add_dependencies(TerraEngine.Export.Generator TerraEngine.Managed.Output)
 
 set(MANAGED_EDITOR_SOURCES
 	Editor/Managed/TerraEngine.Editor/Source/EditorApplication.cs
+	${TERRAENGINE_ANIMATION_MANAGED_EDITOR_SOURCES}
 )
 
 add_custom_target(TerraEngine.Editor.Managed ALL
-	# The vendored Hexa.NET.ImGui project is multi-targeted. Serializing MSBuild
-	# keeps .NET 10 Linux publishes deterministic instead of failing during the
-	# parallel restore graph walk with no emitted compiler error.
-	COMMAND dotnet publish "${CMAKE_CURRENT_SOURCE_DIR}/Editor/Managed/TerraEngine.Editor/TerraEngine.Editor.csproj" -c $<CONFIG> -r ${TERRAENGINE_DOTNET_RID} --self-contained true -o "${MANAGED_OUTPUT_DIR}" -m:1
+	# Match the restore boundary's Hexa compatibility properties so publishing
+	# the editor cannot re-enable unrelated trim/AOT analyzer work. Serializing
+	# MSBuild also keeps the project-reference build deterministic.
+	COMMAND ${TERRAENGINE_DOTNET_COMMAND} publish
+		"${CMAKE_CURRENT_SOURCE_DIR}/Editor/Managed/TerraEngine.Editor/TerraEngine.Editor.csproj"
+		-c $<CONFIG> -r ${TERRAENGINE_DOTNET_RID}
+		--self-contained true --no-restore
+		${TERRAENGINE_DOTNET_HEXA_COMPATIBILITY_ARGUMENTS}
+		-o "${MANAGED_OUTPUT_DIR}" -m:1
 	COMMENT "Publishing Managed Assembly: TerraEngine.Editor (Self-Contained)"
 	SOURCES ${MANAGED_EDITOR_SOURCES}
 )
@@ -810,6 +924,15 @@ set_target_properties(TerraEngine-Launcher PROPERTIES
 target_link_libraries(TerraEngine-Launcher
     PRIVATE
         TerraEngine-Engine
+)
+
+# The launcher resolves the exported NativeAOT gameplay ABI relative to its
+# own executable. Keep that platform-specific filename in CMake beside the
+# export build-profile convention so installed Windows and Linux launchers do
+# not depend on source, editor, or build-tree paths at runtime.
+target_compile_definitions(TerraEngine-Launcher
+	PRIVATE
+		TERRAENGINE_MANAGED_RUNTIME_LIBRARY="${TERRAENGINE_MANAGED_RUNTIME_LIBRARY}"
 )
 
 add_dependencies(TerraEngine-Launcher
@@ -846,6 +969,7 @@ add_executable(TerraEngineModelPackageCompiler
 	Editor/AssetCompilers/MeshCompiler.cpp
 	Editor/AssetCompilers/TextureCompiler.cpp
 	Editor/TerraEngine-Editor/Assets/AssetImportResult.cpp
+	${TERRAENGINE_ANIMATION_ASSET_COMPILER_SOURCES}
 )
 
 # Target boundary: this declaration defines one buildable unit and its install/runtime behavior.
@@ -901,6 +1025,27 @@ if(MSVC)
 	target_compile_options(TerraEnginePhysicsConstraintCharacterStress PRIVATE /FS)
 endif()
 
+# The animation soak driver launches this small engine-linked process in bounded
+# slices. Keeping it separate from the editor makes T133/T285 usable headlessly
+# while still exercising the production animation storage and publication code.
+add_executable(TerraEngineAnimationSoakRunner
+	Tools/Animation/AnimationSoakRunner.cpp
+)
+target_include_directories(TerraEngineAnimationSoakRunner
+	PRIVATE
+		${CMAKE_CURRENT_SOURCE_DIR}/Engine
+)
+target_link_libraries(TerraEngineAnimationSoakRunner PRIVATE TerraEngine-Engine)
+if(MSVC)
+	target_compile_options(TerraEngineAnimationSoakRunner PRIVATE /FS)
+	target_link_libraries(TerraEngineAnimationSoakRunner PRIVATE Psapi)
+else()
+	set_target_properties(TerraEngineAnimationSoakRunner PROPERTIES
+		BUILD_RPATH "${TERRAENGINE_LOCAL_RPATH}"
+		INSTALL_RPATH "${TERRAENGINE_LOCAL_RPATH}/../Engine"
+	)
+endif()
+
 # Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
 target_include_directories(TerraEngineMeshCompiler
 	PRIVATE
@@ -948,6 +1093,10 @@ target_include_directories(TerraEngineModelPackageCompiler
 # Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
 target_link_libraries(TerraEngineModelPackageCompiler
 	PRIVATE
+		# Animation package cooking serializes the same validated skeleton/clip
+		# contracts and codec views used at runtime. Linking the engine keeps one
+		# implementation of those binary rules instead of duplicating them here.
+		TerraEngine-Engine
 		assimp::assimp
 		fastgltf::fastgltf
 		meshoptimizer
@@ -1045,6 +1194,7 @@ add_library(TerraEngine-ExportSupport STATIC
 	Editor/AssetCompilers/ModelPackageImportTypes.cpp
 	Editor/TerraEngine-Editor/Assets/AssetImportResult.cpp
 	Editor/Export/BuildProfile.cpp
+	Editor/Export/AnimationExportDependencies.cpp
 	Editor/Export/ExportEvidence.cpp
 	Editor/Export/ExportOutputTransaction.cpp
 	Editor/Export/ExportPackageValidator.cpp
@@ -1053,6 +1203,7 @@ add_library(TerraEngine-ExportSupport STATIC
 	Editor/Export/ExportScriptBindingRewriter.cpp
 	Editor/Export/ExportTypes.cpp
 	Editor/Export/ExportValidator.cpp
+	Editor/Export/NativeAotProjectWorkspace.cpp
 	Editor/Export/TepakPackager.cpp
 	Editor/Export/archive/ArchiveSerialization.cpp
 	Editor/Export/archive/ExtentReader.cpp
@@ -1064,6 +1215,7 @@ add_library(TerraEngine-ExportSupport STATIC
 	Editor/Export/io/PathNormalizer.cpp
 	Editor/Export/util/WorkerPool.cpp
 	Editor/Export/validation/PackValidator.cpp
+	Editor/Export/validation/AnimationPackValidator.cpp
 )
 target_include_directories(TerraEngine-ExportSupport
 	PUBLIC
@@ -1181,6 +1333,7 @@ add_executable(TerraEngine-Editor
 	Editor/AssetCompilers/PhysicsColliderCompiler.cpp
 	Editor/AssetCompilers/PhysicsMaterialAssetWriter.cpp
 	${IMGUI_FILE_DIALOG_DIR}/ImGuiFileDialog.cpp
+	${TERRAENGINE_ANIMATION_EDITOR_SOURCES}
 )
 set_target_properties(TerraEngine-Editor PROPERTIES
 	BUILD_RPATH "${TERRAENGINE_LOCAL_RPATH}"
@@ -1268,6 +1421,46 @@ if(BUILD_TESTING)
 	add_subdirectory(Tests/Editor)
 endif()
 
+# Windows removes the legacy MAX_PATH limit only when both the operating-system
+# policy and the executable manifest opt in. Apply one reviewed manifest to
+# every TerraEngine process that can read, cook, stage, export, or validate a
+# project so a deep checkout behaves the same as a short checkout.
+if(WIN32 AND MSVC)
+	set(TERRAENGINE_WINDOWS_LONG_PATH_MANIFEST
+		"${CMAKE_CURRENT_SOURCE_DIR}/cmake/TerraEngine.Windows.manifest")
+	set(TERRAENGINE_WINDOWS_LONG_PATH_TARGETS
+		TerraEngine-Launcher
+		TerraEngineMeshCompiler
+		TerraEngineTextureCompiler
+		TerraEngineModelPackageCompiler
+		TerraEngineShaderCompiler
+		TerraEnginePhysicsColliderCompiler
+		TerraEnginePhysicsGameplayStress
+		TerraEnginePhysicsConstraintCharacterStress
+		TerraEngineAnimationSoakRunner
+		TerraEngine-Export
+		TerraEngine-Editor
+	)
+	if(BUILD_TESTING)
+		list(APPEND TERRAENGINE_WINDOWS_LONG_PATH_TARGETS
+			TerraEngine-EngineTests
+			TerraEngine-EditorTests
+		)
+	endif()
+
+	foreach(terraengine_long_path_target IN LISTS TERRAENGINE_WINDOWS_LONG_PATH_TARGETS)
+		if(NOT TARGET "${terraengine_long_path_target}")
+			message(FATAL_ERROR
+				"Long-path manifest target is missing: ${terraengine_long_path_target}")
+		endif()
+		# A .manifest target source is handed to CMake's MSVC link wrapper, which
+		# merges it with the generated UAC manifest without creating duplicate
+		# RT_MANIFEST resources. It is also a tracked relink dependency.
+		target_sources("${terraengine_long_path_target}" PRIVATE
+			"${TERRAENGINE_WINDOWS_LONG_PATH_MANIFEST}")
+	endforeach()
+endif()
+
 # --- Build Configurations & Optimizations ---
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Debug CACHE STRING "Choose the type of build." FORCE)
@@ -1310,6 +1503,8 @@ set(ENGINE_INSTALL_DESTINATION ${CMAKE_BINARY_DIR}/Build)
 # adapters remain private implementation details of the engine DLL.
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/TerraEngineInstall.cmake")
 terraengine_install_physics_foundation("${ENGINE_INSTALL_DESTINATION}")
+terraengine_install_offline_nuget_notices("${ENGINE_INSTALL_DESTINATION}")
+terraengine_install_nativeaot_nuget_toolchain("${ENGINE_INSTALL_DESTINATION}")
 
 # Jolt is statically linked into TerraEngine-Engine, so its upstream MIT notice
 # must accompany every runtime installation even though no standalone Jolt
@@ -1320,6 +1515,7 @@ install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/External/JoltPhysics/LICENSE"
 )
 
 set(DEFAULT_SHADER_SRC_DIR "${CMAKE_SOURCE_DIR}/Engine/Shaders/Default")
+set(ANIMATION_SHADER_SRC_DIR "${CMAKE_SOURCE_DIR}/Engine/Shaders/Animation")
 	# Configure-time guard: select platform or option behavior before generating build files.
 	if(WIN32)
 		set(TERRAENGINE_DXC_PATH "${CMAKE_SOURCE_DIR}/External/dxc/windows/bin/x64/dxc.exe")
@@ -1331,6 +1527,7 @@ set(SHADER_INSTALL_SCRIPT "${CMAKE_BINARY_DIR}/CMakeFiles/install_default_shader
 file(GENERATE OUTPUT "${SHADER_INSTALL_SCRIPT}" CONTENT "
 set(SHADER_COMPILER \"$<TARGET_FILE:TerraEngineShaderCompiler>\")
 set(SHADER_SRC_DIR \"${DEFAULT_SHADER_SRC_DIR}\")
+set(ANIMATION_SHADER_SRC_DIR \"${ANIMATION_SHADER_SRC_DIR}\")
 set(EDITOR_SHADER_SRC_DIR \"${CMAKE_SOURCE_DIR}/Editor/Shaders\")
 set(UI_SHADER_SRC_DIR \"${CMAKE_SOURCE_DIR}/Engine/Shaders/UI\")
 set(SKY_SHADER_SRC_DIR \"${CMAKE_SOURCE_DIR}/Engine/Shaders/Sky\")
@@ -1342,6 +1539,7 @@ set(editor_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/Editor\")
 set(lighting_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/Lighting\")
 set(postprocess_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/PostProcess\")
 set(virtualgeometry_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/VirtualGeometry\")
+set(animation_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/Animation\")
 set(ui_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/UI\")
 set(sky_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/Sky\")
 set(lighting_src_dir \"${CMAKE_SOURCE_DIR}/Engine/Shaders/Lighting\")
@@ -1352,6 +1550,7 @@ file(MAKE_DIRECTORY \"\${editor_out_dir}\")
 file(MAKE_DIRECTORY \"\${lighting_out_dir}\")
 file(MAKE_DIRECTORY \"\${postprocess_out_dir}\")
 file(MAKE_DIRECTORY \"\${virtualgeometry_out_dir}\")
+file(MAKE_DIRECTORY \"\${animation_out_dir}\")
 file(MAKE_DIRECTORY \"\${ui_out_dir}\")
 file(MAKE_DIRECTORY \"\${sky_out_dir}\")
 file(REMOVE
@@ -1369,6 +1568,16 @@ file(REMOVE
 	\"\${postprocess_out_dir}/GTAO.comp.spv\"
 	\"\${postprocess_out_dir}/GTAOBlur.comp.spv\"
 	\"\${virtualgeometry_out_dir}/VirtualGeometryPacketCompaction.comp.spv\"
+	\"\${animation_out_dir}/AnimationSample.comp.spv\"
+	\"\${animation_out_dir}/AnimationBlend.comp.spv\"
+	\"\${animation_out_dir}/AnimationHierarchy.comp.spv\"
+	\"\${animation_out_dir}/AnimationProcedural.comp.spv\"
+	\"\${animation_out_dir}/AnimationMorph.comp.spv\"
+	\"\${animation_out_dir}/AnimationBounds.comp.spv\"
+	\"\${animation_out_dir}/AnimationPalette.comp.spv\"
+	\"\${animation_out_dir}/AnimationRagdoll.comp.spv\"
+	\"\${animation_out_dir}/MotionMatchScore.comp.spv\"
+	\"\${animation_out_dir}/MotionMatchTopK.comp.spv\"
 	\"\${ui_out_dir}/UI_Static.vert.spv\"
 	\"\${ui_out_dir}/UI_Static.frag.spv\"
 	\"\${ui_out_dir}/UI_Instanced.vert.spv\"
@@ -1508,6 +1717,33 @@ execute_process(
 if(NOT compile_vg_packet_compaction EQUAL 0)
     message(FATAL_ERROR \"Failed to compile VirtualGeometryPacketCompaction.comp.hlsl during install\")
 endif()
+
+# Compile every GPU animation stage into the installed editor tree. Keeping the
+# list explicit makes a missing stage fail the install instead of silently
+# leaving the runtime with a partial compute pipeline set.
+set(animation_compute_shader_names
+	AnimationSample
+	AnimationBlend
+	AnimationHierarchy
+	AnimationProcedural
+	AnimationMorph
+	AnimationBounds
+	AnimationPalette
+	AnimationRagdoll
+	MotionMatchScore
+	MotionMatchTopK)
+foreach(animation_shader_name IN LISTS animation_compute_shader_names)
+	execute_process(
+		COMMAND \"\${DXC_PATH}\" -T cs_6_0 -E main
+			-Fo \"\${animation_out_dir}/\${animation_shader_name}.comp.spv\"
+			-spirv -I \"\${ANIMATION_SHADER_SRC_DIR}\"
+			\"\${ANIMATION_SHADER_SRC_DIR}/\${animation_shader_name}.comp.hlsl\"
+		RESULT_VARIABLE compile_animation_shader)
+	if(NOT compile_animation_shader EQUAL 0)
+		message(FATAL_ERROR
+			\"Failed to compile \${animation_shader_name}.comp.hlsl during install\")
+	endif()
+endforeach()
 
 execute_process(
     COMMAND \"\${DXC_PATH}\" -T vs_6_0 -E VSMain -Fo \"\${ui_out_dir}/UI_Static.vert.spv\" -spirv \"\${UI_SHADER_SRC_DIR}/UI_Static.hlsl\"
@@ -1735,7 +1971,33 @@ endif()
 		"${CMAKE_CURRENT_SOURCE_DIR}/Docs/PhysicsColliderAssets.md"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Docs/PhysicsGameplay.md"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Docs/PhysicsConstraintsAndCharacters.md"
+		"${CMAKE_CURRENT_SOURCE_DIR}/Docs/CSharpRuntimeAPI.md"
 		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Docs"
+	)
+	# Install the complete animation guide set. Asset authors, gameplay users,
+	# automation clients, and release validators need different parts of this
+	# documentation, so selecting only the managed API pages leaves the installed
+	# editor unable to explain its own advanced workflows and failure modes.
+	install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Docs/Animation/"
+		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Docs/Animation"
+		FILES_MATCHING PATTERN "*.md"
+	)
+	# Spec 043's bounded acquisition, fixture, soak, phase-gate, and evidence
+	# drivers are shipped as inspectable command-line tools. They still require
+	# the inputs named by each command, but no validation script should disappear
+	# merely because the editor is being exercised from its installed tree.
+	install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Tools/Animation/"
+		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Tools/Animation"
+		FILES_MATCHING PATTERN "*.ps1" PATTERN "*.json"
+	)
+	# Keep the small deterministic animation and export-parity inputs beside the
+	# installed validation tooling. The Tests path makes their QA-only role clear;
+	# exported games continue to consume cooked TEPAK data, never these sources.
+	install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Tests/Fixtures/Animation/"
+		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Tests/Fixtures/Animation"
+	)
+	install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Tests/Fixtures/AnimationExportRuntime/"
+		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Tests/Fixtures/AnimationExportRuntime"
 	)
 	install(FILES
 		"${CMAKE_CURRENT_SOURCE_DIR}/Tests/Fixtures/VirtualGeometry/README.md"
@@ -1828,6 +2090,23 @@ install(TARGETS TerraEnginePhysicsConstraintCharacterStress
 	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
 	BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
 )
+# Install the resumable animation-soak slice runner at the path documented by
+# RunAnimationSoak.ps1. Windows receives the complete CMake-known runtime DLL
+# closure beside the executable; Linux resolves the canonical sibling Engine
+# directory through INSTALL_RPATH.
+install(TARGETS TerraEngineAnimationSoakRunner
+	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tools
+	BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tools
+)
+if(WIN32)
+	# The engine DLL imports platform dependencies such as glfw3.dll. Installing
+	# TARGET_RUNTIME_DLLS keeps this headless tool runnable without relying on a
+	# developer PATH or copying an incomplete hand-maintained dependency list.
+	install(FILES $<TARGET_RUNTIME_DLLS:TerraEngineAnimationSoakRunner>
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Tools
+		OPTIONAL
+	)
+endif()
 
 # Configure-time guard: select platform or option behavior before generating build files.
 if(WIN32)

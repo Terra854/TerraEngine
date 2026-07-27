@@ -110,7 +110,8 @@ namespace TerraEngine::EditorTests
 				{{"source", "Assets/Scenes/Duplicate.tescene"}, {"destination", "Assets/Scenes/Renamed.tescene"}},
 				WriteMode::WritesEnabled,
 				"scene-rename");
-			context.Expect(renamed.value("ok", false), "Scene rename should succeed after impact preflight.");
+			context.Expect(renamed.value("ok", false),
+				"Scene rename should succeed after impact preflight. Response: " + renamed.dump());
 			context.Expect(!std::filesystem::exists(fixture.projectRoot() / "Assets/Scenes/Duplicate.tescene"), "Rename should remove only the old scene path.");
 			context.Expect(std::filesystem::exists(fixture.projectRoot() / "Assets/Scenes/Renamed.tescene"), "Rename should preserve scene content at the new path.");
 		});

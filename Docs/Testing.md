@@ -12,6 +12,252 @@ The export runtime baseline checks also validate
 that the sample project keeps its startup scene, project render settings, UI
 signal, and script signal wired for manual and CI export coverage.
 
+## Repository-contained managed restore
+
+TerraEngine's Windows managed targets restore only from the audited package
+archives in `.nuget/feed`. CMake regenerates missing or hash-mismatched
+archives from the HTTPS locations and SHA-256 values in the tracked
+`cmake/TerraEngineNuGet.lock.json` lock. Root `NuGet.Config` clears user, machine,
+fallback, network, and audit sources; CMake also supplies the absolute feed path
+and a build-tree package cache. After the single managed restore target runs,
+the engine assembly, source generator, and editor assembly build with
+`--no-restore`.
+
+The current closure is pinned to .NET SDK `10.0.302`, runtime pack `10.0.10`,
+and RID `win-x64`. Confirm the exact SDK and verify every archive, license, and
+manifest entry before configuring:
+
+```powershell
+dotnet --version
+$archives = @(
+	Get-ChildItem .nuget/feed/*.nupkg |
+	Select-Object -ExpandProperty FullName
+)
+$env:NUGET_CERT_REVOCATION_MODE = "offline"
+dotnet nuget verify @archives --all --verbosity minimal
+Remove-Item Env:NUGET_CERT_REVOCATION_MODE
+cmake -DTERRAENGINE_RUNTIME_ID=win-x64 `
+	-P cmake/TerraEngineOfflineNuGet.cmake
+```
+
+The first command must print `10.0.302`. NuGet verifies each archive's
+available author and repository signatures without an online revocation
+lookup. The CMake verifier rejects changed or unmanifested packages, mismatched
+SDK metadata, and changed legal files. Set
+`-DTERRAENGINE_NUGET_CACHE_MODE=OFF` when network access is prohibited; this
+keeps verification fail-closed instead of regenerating a missing archive.
+`cmake/TerraEngineNuGet.lock.json` records the complete project and NativeAOT
+export dependency closure with original package provenance. The fourth project is the
+`netstandard2.0` target of the vendored Hexa.NET.ImGui project referenced by the
+editor.
+
+CMake treats both `.nuget` and `<build>/NuGetPackages` as generated caches.
+Configure repairs missing or damaged pinned feed archives and recreates the
+generated manifest, restore config, notices, and legal files from the tracked
+lock. The first managed build regenerates its isolated extracted-package cache
+from that verified feed. Later builds skip restore while its stamp, all 25
+package metadata files, the feed archives, restore configuration, SDK pin, and
+participating project files remain valid. Deleting either complete cache or
+any package metadata file causes CMake to regenerate it. CMake verifies the
+SHA-512 of every restored archive before publishing with `--no-restore`; NuGet
+itself never falls back to the user's package cache or a network source.
+
+For a normal clean Windows build, use the existing preset. The managed restore
+target runs automatically before any managed publish, but it can also be
+exercised independently:
+
+```powershell
+cmake --fresh --preset RelWithDebInfo
+cmake --build --preset RelWithDebInfo `
+	--target TerraEngine.Managed.Restore
+cmake --build --preset RelWithDebInfo
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+	--output-on-failure
+cmake --build --preset RelWithDebInfo --target install
+```
+
+To prove that no ambient global package cache is involved, use a unique empty
+cache beneath `out/` and run the four restores directly. Do not clear or alter
+the user's normal NuGet cache:
+
+```powershell
+$repo = (Get-Location).Path
+$run = Get-Date -Format "yyyyMMdd-HHmmss"
+$coldRoot = Join-Path $repo "out/validation/nuget-offline/$run"
+$packageCache = Join-Path $coldRoot "packages"
+$env:DOTNET_CLI_HOME = Join-Path $coldRoot "dotnet-home"
+$env:NUGET_PACKAGES = $packageCache
+$env:DOTNET_CLI_TELEMETRY_OPTOUT = "1"
+$env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE = "1"
+$env:DOTNET_NOLOGO = "1"
+$env:NUGET_XMLDOC_MODE = "skip"
+$env:NUGET_CERT_REVOCATION_MODE = "offline"
+$feed = Join-Path $repo ".nuget/feed"
+$config = Join-Path $repo "NuGet.Config"
+$common = @(
+	"--configfile", $config,
+	"--packages", $packageCache,
+	"--no-http-cache",
+	"--disable-parallel",
+	"--verbosity", "minimal",
+	"-p:RestoreSources=$feed",
+	"-p:RestoreFallbackFolders=",
+	"-p:RestoreAdditionalProjectSources=",
+	"-p:RestoreIgnoreFailedSources=false",
+	"-p:NuGetAudit=false"
+)
+$hexaCompatibility = @(
+	"-p:IsAotCompatible=false",
+	"-p:EnableTrimAnalyzer=false",
+	"-p:EnableSingleFileAnalyzer=false",
+	"-p:EnableAotAnalyzer=false"
+)
+dotnet restore Engine/Managed/TerraEngine.csproj `
+	--runtime win-x64 -p:PublishAot=true @common
+dotnet restore `
+	Editor/Managed/TerraEngine.Export.Generator/TerraEngine.Export.Generator.csproj `
+	@common
+dotnet restore `
+	External/Hexa.NET.ImGui/Hexa.NET.ImGui/Hexa.NET.ImGui.csproj `
+	-p:TargetFramework=netstandard2.0 --runtime win-x64 `
+	@hexaCompatibility @common
+dotnet restore `
+	Editor/Managed/TerraEngine.Editor/TerraEngine.Editor.csproj `
+	--runtime win-x64 --no-dependencies @hexaCompatibility @common
+Remove-Item Env:NUGET_PACKAGES
+Remove-Item Env:DOTNET_CLI_HOME
+Remove-Item Env:DOTNET_CLI_TELEMETRY_OPTOUT
+Remove-Item Env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE
+Remove-Item Env:DOTNET_NOLOGO
+Remove-Item Env:NUGET_XMLDOC_MODE
+Remove-Item Env:NUGET_CERT_REVOCATION_MODE
+```
+
+Retain the cold cache, restore output, and generated `project.assets.json` files
+as evidence. Their package folders must resolve only beneath the selected cold
+cache, and their restore sources must resolve only to `.nuget/feed`.
+
+Installed editor export has the same requirement. The install target places a
+copy of the verified feed, a fail-closed `NuGet.Config`, and the pinned
+`global.json` below `Build/Editor/NativeAotNuGet`. The export pipeline restores
+`Assembly-CSharp.csproj` with `PublishAot=true` into
+`<project>/Library/NativeAot/NuGetPackages`, then publishes with `--no-restore`.
+For a source-free proof, copy the installed `Build` directory outside the
+repository and run the Export Runtime Baseline against that copy; no user NuGet
+cache or repository feed may be used.
+
+The explicit Hexa restore is part of the dependency boundary, not an
+optimization. Auditing only the three TerraEngine assets files reported 21
+archives because the editor's existing assets did not prove a cold traversal
+of the multi-targeted project reference. An empty-cache restore additionally
+requires System.Buffers 4.6.0, System.Memory 4.6.0, System.Numerics.Vectors
+4.6.0, and System.Runtime.CompilerServices.Unsafe 6.1.0. It also requires the
+pinned Microsoft.NETCore.App, Microsoft.WindowsDesktop.App,
+Microsoft.AspNetCore.App, and Microsoft.NETCore.App.NativeAOT `win-x64`
+runtime packs that the SDK records as download dependencies. The 25-package
+manifest records that empirically verified closure. The compatibility
+properties prevent unrelated Hexa target frameworks and trim/AOT analyzer
+packages from widening the repository contract.
+
+The committed feed does not yet contain `linux-x64` runtime packs. Linux
+configure reports that limitation and managed restore fails locally instead of
+falling back to an online feed. Audit and vendor the exact pinned-SDK Linux
+closure before treating Linux as repository-contained.
+
+## Animation Registry and Filters
+
+Animation coverage uses the existing engine and editor `TestRegistry` harnesses.
+The initial scaffold entries are `Animation.RegistrationAvailable` and
+`Editor.Animation.RegistrationAvailable`; later animation cases should keep the
+`Animation.` or `Editor.Animation.` prefix so the substring filter remains a
+stable focused workflow.
+
+CTest exposes focused `Engine.Animation` and `Editor.Animation` registrations.
+Run both from an already configured build tree with:
+
+```powershell
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+	-R "^(Engine\.Animation|Editor\.Animation)$" --output-on-failure
+```
+
+For direct harness diagnosis, set the shared substring filter before launching
+both binaries and remove it afterward so unrelated test commands are not
+silently filtered:
+
+```powershell
+$env:TERRAENGINE_TEST_FILTER = "Animation"
+& .\out\build\RelWithDebInfo\TerraEngine-EngineTests.exe
+& .\out\build\RelWithDebInfo\TerraEngine-EditorTests.exe
+Remove-Item Env:TERRAENGINE_TEST_FILTER
+```
+
+The focused registrations are iteration aids. Feature and release gates still
+run the broader scheduler, transactional mutation, renderer, physics,
+scripting, automation, export, and complete CTest surfaces described below.
+
+### Animation phase-gate performance schedule
+
+Candidate animation benchmarks, workflow timing/throughput/latency gates,
+diagnostics-overhead measurements, candidate captures, and paired engine
+comparisons run only in final Phase 18. T001 remains the immutable reference
+capture. An intermediate gate uses explicit reviewed authority and omits both
+performance manifest parameters:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+	-File Tools/Animation/RunAnimationPhaseGate.ps1 `
+	-Phase foundation -GateTask T024 `
+	-DeferPerformanceExecutionToFinalIntegration `
+	-PerformanceDeferralAuthority "Spec 043 final-only performance schedule amendment (2026-07-17)" `
+	-FixtureRoot <fixture-project> `
+	-ScenarioManifest <scenario.json> `
+	-AcceptanceUpdateManifest <acceptance-update.json> `
+	-Execute
+```
+
+In this mode, CTest entries matching `Performance` or exact
+`Editor.ExportBaseline` are excluded. Because several broad engine/editor CTest
+registries mix correctness cases with measured workloads, the gate also applies
+exact in-process exclusions for the animation benchmark namespaces, measured
+profiler clock/file-size cases, production virtual-geometry batching/stress
+gates, the physics fresh-process load/allocation matrix, editor physics
+performance cases, and the large-scene cold/warm timing gate. Generic tokens
+such as `Performance`, `PerformanceGate`, `Timing`, or `Overhead` are not used at
+the harness level because they would hide structural schema and diagnostics
+checks. `Animation.Dormant.*` remains active because those cases prove non-timed
+structural invariants. Every intermediate `-Execute` run requires this deferral
+switch. The resulting correctness gate can pass, but its performance
+pass/comparability/repeatability fields remain `null` because they were
+deliberately not measured, and T283, T284, and T288 still block final integration.
+
+The reviewed schedule metadata is hash-locked without changing performance
+workloads or thresholds: runtime contract
+`1bb8bb3d0affa53d146b717171a7b23d72437af88449c273e8cb1a2fe4869279`,
+renderer workload manifest
+`397b7cb6ac01714a628c44bab6cb002c034c8d8e5422bf184dc10cddf201b12f`,
+and performance workloads
+`f304b2f2c31addf3301f77260b686caf7b4c87abdbb9756bcc6e481ba0a180f6`.
+
+The final live gate rejects that switch and requires both final inputs:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+	-File Tools/Animation/RunAnimationPhaseGate.ps1 `
+	-Phase final-live -GateTask T288 `
+	-FinalAnimationPerformanceEvidenceManifest out/validation/animation/final/animation-performance/t283-manifest.json `
+	-PerformanceCandidateManifest out/validation/animation/final/engine-performance/candidate-manifest.json `
+	-FixtureRoot <fixture-project> `
+	-ScenarioManifest <scenario.json> `
+	-AcceptanceUpdateManifest <acceptance-update.json> `
+	-Execute
+```
+
+The T283 manifest must explicitly be passing, non-deferred, scoped to final
+animation performance, and cover SC-001, SC-006, SC-009, SC-013 through SC-015,
+and SC-027 through SC-031. The engine-wide candidate is evaluated by the locked
+T284 comparator. Missing or incomparable proof fails closed. See
+`Docs/Animation/README.md` for the current schema limitation and evidence shape.
+
 The scene graph runtime checks validate deterministic traversal, hierarchy
 diagnostics, prefab composition, queued mutation safety, and editor/runtime
 parity. Manual validation fixtures live under `Tests/Fixtures/SceneGraphRuntime`.
@@ -644,6 +890,24 @@ cmake --build --preset RelWithDebInfo --target install
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/ExportRuntimeBaseline/RunBaseline.ps1 -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/ci/export-runtime-baseline
 ```
 
+Run the same installed gate beyond 360 characters whenever editor scripting,
+NativeAOT, package staging, or output publication changes:
+
+```powershell
+$deepWorkRoot = "out/ci/export-runtime-baseline/" + (
+  (1..8 | ForEach-Object { "segment-abcdefghijklmnopqrstuvwxyz-{0:d2}" -f $_ }) -join "/"
+)
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File Tools/ExportRuntimeBaseline/RunBaseline.ps1 `
+  -InstallRoot out/build/RelWithDebInfo/Build `
+  -WorkRoot $deepWorkRoot `
+  -RunId export-runtime-long-path
+```
+
+This lane fails unless the installed editor's ordinary Assembly-CSharp build
+reaches `Ready`, the NativeAOT export succeeds from its private short workspace,
+and no `Library/NativeAot` restore or publish state leaks into the project.
+
 The installed tools are read from `out/build/RelWithDebInfo/Build`; callers do
 not run an executable from the intermediate target directory. Verify these
 installed dependencies before running the baseline:
@@ -830,9 +1094,18 @@ Run both test executables with those filters before live GPU work.
 Live resize/minimize validation is deliberately opt-in and paced. Use
 `Tools/RendererStability/RunLiveSmoke.ps1` with `-AllowLiveGpuStress`, at most
 50 operations per batch, and inspect its process/driver evidence after each
-batch. Stop immediately on a new display-driver event or device loss. Do not
-inject device loss on the primary display adapter; the engine's policy for a
-genuine driver/hardware loss remains terminal containment.
+batch. The harness snapshots the latest Windows System-log RecordId/time before
+launch and polls after every resize and throughout minimize/restore waits. A
+qualifying newer display-driver event records `driver-event-failure.json`, stops
+the launched editor process tree, and never advances to the next operation; an
+older event cannot invalidate the run. Run the CPU-only seam regression before
+live work with `powershell.exe -NoProfile -ExecutionPolicy Bypass -File
+Tools/RendererStability/RunLiveSmoke.Tests.ps1`. The harness also waits for the
+backend's first-successful-present marker and stores typed generation/extent
+evidence in `presentation-readiness.json`; a window handle alone is never used
+as a Vulkan readiness proxy. Do not inject device loss on the primary display
+adapter; the engine's policy for a genuine driver/hardware loss remains terminal
+containment.
 
 ### Linux Editor Script Smoke Checks
 

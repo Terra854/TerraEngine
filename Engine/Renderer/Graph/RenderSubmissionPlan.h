@@ -3,6 +3,7 @@
 #pragma once
 
 #include "RenderGraph.h"
+#include "RenderWorkPacket.h"
 #include "Core/Export.h"
 
 #include <cstdint>
@@ -17,6 +18,7 @@ namespace TerraEngine::Renderer {
 		std::size_t requestedViewCount = 0u;
 		std::vector<RenderPassNode> orderedPasses;
 		std::vector<RenderWorkPacket> recordedWork;
+		AnimationBackendWorkPlan animationWork;
 		std::vector<RenderResourceState> resourceTransitions;
 		std::vector<RenderQueueReadiness> queueReadiness;
 		std::vector<std::string> fallbacksUsed;
@@ -32,7 +34,8 @@ namespace TerraEngine::Renderer {
 		const RenderFrameSnapshot& snapshot,
 		const std::vector<RenderPassNode>& passes,
 		const RenderWorkPacketPlan& packetPlan,
-		std::uint64_t currentFrameId);
+		std::uint64_t currentFrameId,
+		std::shared_ptr<const TerraEngine::Animation::GpuAnimationPlan> animationPlan = {});
 
 	TERRAENGINE_API bool ValidateRenderSubmissionPlan(RenderSubmissionPlan& plan, std::uint64_t currentFrameId);
 

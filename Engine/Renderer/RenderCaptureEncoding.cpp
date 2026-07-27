@@ -98,6 +98,56 @@ namespace {
 
 }
 
+std::vector<std::uint8_t> ResizeRgba8(
+	std::span<const std::uint8_t> rgbaPixels,
+	std::uint32_t sourceWidth,
+	std::uint32_t sourceHeight,
+	std::uint32_t targetWidth,
+	std::uint32_t targetHeight)
+{
+	if (sourceWidth == 0u || sourceHeight == 0u || targetWidth == 0u || targetHeight == 0u)
+	{
+		throw std::invalid_argument("RGBA resize dimensions must be non-zero.");
+	}
+
+	const std::uint64_t sourceBytes = static_cast<std::uint64_t>(sourceWidth) * static_cast<std::uint64_t>(sourceHeight) * 4u;
+	const std::uint64_t targetBytes = static_cast<std::uint64_t>(targetWidth) * static_cast<std::uint64_t>(targetHeight) * 4u;
+	if (sourceBytes > std::numeric_limits<std::size_t>::max()
+		|| targetBytes > std::numeric_limits<std::size_t>::max()
+		|| rgbaPixels.size() != static_cast<std::size_t>(sourceBytes))
+	{
+		throw std::invalid_argument("RGBA resize byte count does not match the source dimensions.");
+	}
+
+	if (sourceWidth == targetWidth && sourceHeight == targetHeight)
+	{
+		return std::vector<std::uint8_t>(rgbaPixels.begin(), rgbaPixels.end());
+	}
+
+	std::vector<std::uint8_t> resized(static_cast<std::size_t>(targetBytes));
+	// Capture completion owns one immutable pixel buffer and publishes one result,
+	// so this bounded pass stays sequential at the protected readback boundary.
+	// It avoids task scheduling overhead for an operation that runs only on an
+	// explicitly requested capture, never on the normal per-frame render path.
+	for (std::uint32_t targetY = 0u; targetY < targetHeight; ++targetY)
+	{
+		const std::uint32_t sourceY = static_cast<std::uint32_t>(
+			(static_cast<std::uint64_t>(targetY) * sourceHeight) / targetHeight);
+		for (std::uint32_t targetX = 0u; targetX < targetWidth; ++targetX)
+		{
+			const std::uint32_t sourceX = static_cast<std::uint32_t>(
+				(static_cast<std::uint64_t>(targetX) * sourceWidth) / targetWidth);
+			const std::size_t sourceOffset = (static_cast<std::size_t>(sourceY) * sourceWidth + sourceX) * 4u;
+			const std::size_t targetOffset = (static_cast<std::size_t>(targetY) * targetWidth + targetX) * 4u;
+			for (std::size_t channel = 0u; channel < 4u; ++channel)
+			{
+				resized[targetOffset + channel] = rgbaPixels[sourceOffset + channel];
+			}
+		}
+	}
+	return resized;
+}
+
 std::vector<std::uint8_t> EncodeRgba8ToPng(
 	std::span<const std::uint8_t> rgbaPixels,
 	std::uint32_t width,

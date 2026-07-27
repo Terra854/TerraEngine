@@ -6,13 +6,16 @@
 
 #pragma once
 
+#include <array>
 #include <filesystem>
 #include <cstdint>
 #include <functional>
 #include <future>
 #include <memory>
+#include <limits>
 #include <optional>
 #include <shared_mutex>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -25,6 +28,7 @@
 
 #include "Core/Export.h"
 #include "Core/Logger/Logger.h"
+#include "Animation/AnimationTypes.h"
 #include "File Formats/TerraEngineShaderFile.h"
 #include "Renderer/RenderTypes.h"
 #include "Renderer/RendererRecoveryPolicy.h"
@@ -42,6 +46,16 @@ struct Shader;
 struct ShaderCollection;
 // struct Texture groups related state and operations so callers have one documented contract.
 struct Texture;
+namespace TerraEngine::Animation
+{
+	struct AnimationClipAsset;
+	struct AnimationControllerAsset;
+	struct AnimationMaskAsset;
+	struct MotionDatabaseAsset;
+	struct RagdollProfileAsset;
+	struct RetargetProfileAsset;
+	struct SkeletonAsset;
+}
 // ShaderStage names the supported states explicitly so serialization and switches stay readable.
 enum class ShaderStage : std::uint32_t;
 
@@ -54,7 +68,178 @@ enum class AssetType : std::uint32_t {
 	// no generic render-resource cache because physics owns their typed runtime
 	// loading; the values still let paths and tooling preserve asset identity.
 	PhysicsMaterial = 4U,
-	CookedCollider = 5U
+	CookedCollider = 5U,
+	// Animation assets append after every pre-existing value. These identities
+	// are persisted by scenes, import manifests, resource diagnostics, and later
+	// TEPAK dependency records, so they must never be reordered or reused.
+	Skeleton = 6U,
+	AnimationClip = 7U,
+	AnimationController = 8U,
+	AnimationMask = 9U,
+	RetargetProfile = 10U,
+	MotionDatabase = 11U,
+	RagdollProfile = 12U
+};
+
+constexpr bool IsAnimationAssetType(AssetType type) noexcept
+{
+	return type >= AssetType::Skeleton && type <= AssetType::RagdollProfile;
+}
+
+// Validation commands return structured evidence instead of only logging a
+// parser failure. Tooling can display diagnosticCode/message directly, while
+// runtime callers can branch on the stable AnimationStatus value.
+struct AnimationResourceValidationResult
+{
+	TerraEngine::Animation::AnimationStatus status = TerraEngine::Animation::AnimationStatus::InvalidArgument;
+	AssetType assetType = AssetType::Skeleton;
+	// The identity comes from the checked cooked envelope, not editor metadata.
+	// Reimport uses it to reject a file that was copied over the wrong GUID.
+	TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+	std::filesystem::path resolvedPath;
+	std::uint64_t fileSizeBytes = 0U;
+	std::uint16_t detectedMajorVersion = 0U;
+	std::uint16_t detectedMinorVersion = 0U;
+	std::uint64_t expectedCompatibilityFingerprint = 0U;
+	std::uint64_t actualCompatibilityFingerprint = 0U;
+	// The compact prefix remains useful in UI diagnostics, while transactional
+	// publication compares contentHash in full to prevent prefix collisions.
+	std::uint64_t contentFingerprint = 0U;
+	std::array<std::uint8_t, 32U> contentHash{};
+	bool contentHashPresent = false;
+	bool compatibilityFingerprintPresent = false;
+	std::uint32_t jointCount = 0U;
+	std::uint32_t clipSegmentCount = 0U;
+	std::uint32_t clipTrackCount = 0U;
+	std::uint32_t deformableVertexCount = 0U;
+	std::uint32_t palettePartitionCount = 0U;
+	std::uint32_t morphTargetCount = 0U;
+	std::uint32_t zeroWeightIdentityVertexCount = 0U;
+	std::uint32_t sourceSkeletonJointCount = 0U;
+	std::string diagnosticCode;
+	std::string message;
+
+	[[nodiscard]] bool Passed() const noexcept
+	{
+		return status == TerraEngine::Animation::AnimationStatus::Ok;
+	}
+};
+
+enum class AnimationRangeReadStatus : std::uint8_t
+{
+	Ok,
+	InvalidRequest,
+	Cancelled,
+	NotFound,
+	OutOfRange,
+	ReadLimitExceeded,
+	NotAnimationAsset,
+	IoError
+};
+
+// Streaming jobs return owned bytes plus a stable failure category. The
+// evaluator can therefore keep its prior generation/reference pose without
+// parsing log text or treating an empty vector as an ambiguous success.
+struct AnimationRangeReadResult
+{
+	AnimationRangeReadStatus status = AnimationRangeReadStatus::InvalidRequest;
+	std::filesystem::path resolvedPath;
+	std::vector<std::uint8_t> bytes;
+	std::string message;
+
+	[[nodiscard]] bool Succeeded() const noexcept
+	{
+		return status == AnimationRangeReadStatus::Ok;
+	}
+};
+
+// A block range is an absolute byte interval inside one checked cooked asset.
+// ResourceManager derives these intervals from the same published generation
+// that supplied the immutable typed asset, so streaming callers never guess
+// offsets from in-memory structures whose layout differs from the disk format.
+struct AnimationCookedBlockRange
+{
+	std::uint32_t blockIndex = 0U;
+	std::uint64_t byteOffset = 0U;
+	std::uint64_t byteSize = 0U;
+};
+
+enum class AnimationCookedRangeStatus : std::uint8_t
+{
+	Ok,
+	InvalidRequest,
+	MissingAsset,
+	StaleGeneration,
+	InvalidFormat,
+	UnsupportedLayout,
+	IoError
+};
+
+// The table is a value snapshot captured under the animation cache lock. Its
+// path, generation, and ranges can safely cross into worker-owned IO requests.
+struct AnimationCookedRangeTable
+{
+	AnimationCookedRangeStatus status = AnimationCookedRangeStatus::InvalidRequest;
+	std::filesystem::path logicalPath;
+	TerraEngine::Animation::AnimationGeneration generation = 0U;
+	std::vector<AnimationCookedBlockRange> blocks;
+	std::string message;
+
+	[[nodiscard]] bool Succeeded() const noexcept
+	{
+		return status == AnimationCookedRangeStatus::Ok;
+	}
+};
+
+// One request names an already-published live animation cache entry. Batch
+// preparation reparses every requested cooked file before any cache changes,
+// then the protected commit validates that these exact generations still own
+// their paths. This gives editor hot reload one all-or-nothing cache boundary.
+struct AnimationAssetReloadRequest
+{
+	TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+	AssetType assetType = AssetType::Skeleton;
+	// These fingerprints bind a resource-cache replacement to the exact
+	// publisher candidate that AssetDatabase validated. Zero preserves the
+	// standalone ResourceManager reload API's legacy unchecked behavior.
+	TerraEngine::Animation::AnimationCompatibilityFingerprint expectedCompatibilityFingerprint = 0U;
+	std::uint64_t expectedContentFingerprint = 0U;
+	// The publisher's currently active generation, captured before preparing its
+	// replacement. It is intentionally independent from ResourceManager's
+	// cache-local counter and identifies the payload that publisher retirement
+	// will later authorize for destruction.
+	std::uint64_t publisherRetirementGeneration = 0U;
+	std::array<std::uint8_t, 32U> expectedContentHash{};
+	bool expectedContentHashPresent = false;
+};
+
+// PreparedAnimationAssetReloadBatch owns parsed replacement payloads behind an
+// opaque state so this public header does not expose ResourceManager's private
+// cache representation. The value is move-only because a prepared transaction
+// may be committed at most once.
+class TERRAENGINE_API PreparedAnimationAssetReloadBatch final
+{
+	struct State;
+
+public:
+	PreparedAnimationAssetReloadBatch() noexcept;
+	~PreparedAnimationAssetReloadBatch();
+	PreparedAnimationAssetReloadBatch(PreparedAnimationAssetReloadBatch&& other) noexcept;
+	PreparedAnimationAssetReloadBatch& operator=(PreparedAnimationAssetReloadBatch&& other) noexcept;
+	PreparedAnimationAssetReloadBatch(const PreparedAnimationAssetReloadBatch&) = delete;
+	PreparedAnimationAssetReloadBatch& operator=(const PreparedAnimationAssetReloadBatch&) = delete;
+
+	[[nodiscard]] bool Accepted() const noexcept;
+	[[nodiscard]] bool Committed() const noexcept;
+	[[nodiscard]] std::size_t Size() const noexcept;
+	[[nodiscard]] std::string_view Diagnostic() const noexcept;
+
+private:
+	friend class ResourceManager;
+	std::unique_ptr<State> m_state;
+	std::string m_diagnostic;
+	bool m_accepted = false;
+	bool m_committed = false;
 };
 
 #include "Resource/ResourceResidency.h"
@@ -167,6 +352,60 @@ public:
 	// asynchronous request for the same asset to avoid duplicate work.
 	TerraEngine::UUID LoadMaterial(const std::filesystem::path& path);
 	TerraEngine::UUID LoadMesh(const std::filesystem::path& path);
+	// Cooked skeleton and clip loaders never inspect glTF/FBX source files. A
+	// nonzero expected fingerprint turns loading into an atomic compatibility
+	// check; an incompatible payload is rejected before entering the cache.
+	TerraEngine::UUID LoadSkeleton(
+		const std::filesystem::path& path,
+		TerraEngine::Animation::AnimationCompatibilityFingerprint expectedCompatibilityFingerprint = 0U);
+	TerraEngine::UUID LoadAnimationClip(
+		const std::filesystem::path& path,
+		TerraEngine::Animation::AnimationCompatibilityFingerprint expectedCompatibilityFingerprint = 0U);
+	// Reload replaces the immutable payload under the same durable UUID. It
+	// first publishes a tombstone generation, so retained animation handles can
+	// never alias the replacement while another system observes the reload.
+	bool ReloadSkeleton(const TerraEngine::UUID& id);
+	bool ReloadAnimationClip(const TerraEngine::UUID& id);
+	// Reload any cooked animation asset through its checked typed reader. The
+	// active payload is replaced only after the candidate parses completely and
+	// the observed cache generation still matches, preserving last-known-good
+	// data when a watcher races another publication or sees a corrupt file.
+	bool ReloadAnimationAsset(const TerraEngine::UUID& id, AssetType type);
+	// Parse every requested replacement off to the side without changing live
+	// caches. CommitPreparedAnimationAssetReloadBatch then locks all animation
+	// caches in one fixed order, revalidates every path/generation, and performs
+	// only no-fail pointer/generation swaps. A false commit changes no live cache.
+	PreparedAnimationAssetReloadBatch PrepareAnimationAssetReloadBatch(
+		std::span<const AnimationAssetReloadRequest> requests);
+	bool CommitPreparedAnimationAssetReloadBatch(
+		PreparedAnimationAssetReloadBatch& prepared) noexcept;
+	// Refresh residency and streaming diagnostics only after the coordinating
+	// publisher has also committed. Diagnostic bookkeeping is intentionally not
+	// part of the no-fail pointer-swap callback.
+	void FinalizeCommittedAnimationAssetReloadBatch(
+		PreparedAnimationAssetReloadBatch& prepared) noexcept;
+	// The publisher invokes this only after its own generation tables become
+	// visible. It releases the cache locks retained by the coordinated commit,
+	// so no reader can observe a cache-only intermediate state.
+	void ReleasePreparedAnimationAssetReloadBatchLocks(
+		PreparedAnimationAssetReloadBatch& prepared) noexcept;
+	// Old payloads are retained by publisher generation until the publisher
+	// proves that its protected boundary has retired the matching generation.
+	void RetireAnimationAssetPayloadGeneration(const TerraEngine::UUID& id,
+		TerraEngine::Animation::AnimationGeneration generation) noexcept;
+	// Project/session teardown is a protected boundary that invalidates every
+	// publisher retain. Release all old cache generations before publisher state
+	// is reset so no orphaned retirement records survive into the next project.
+	void ReleaseAllRetiredAnimationAssetPayloadsAtProtectedBoundary();
+	// Diagnostics and lifecycle tests use this bounded count to prove that
+	// publisher retirement reclaims real cache ownership, not only metadata.
+	[[nodiscard]] std::size_t GetRetiredAnimationPayloadCountForDiagnostics() const;
+	// This explicit deformable entry point requires the appended TDEF payload.
+	// LoadMesh remains backward compatible with static TEMF v1 assets.
+	TerraEngine::UUID LoadDeformableMesh(
+		const std::filesystem::path& path,
+		std::uint32_t expectedSkeletonJointCount = 0U,
+		TerraEngine::Animation::AnimationCompatibilityFingerprint expectedCompatibilityFingerprint = 0U);
 	TerraEngine::UUID LoadShader(const std::filesystem::path& path);
 	TerraEngine::UUID LoadShaderCollection(const std::vector<ShaderStagePath>& stagePaths);
 	TerraEngine::UUID LoadTexture(const std::filesystem::path& path);
@@ -251,7 +490,14 @@ public:
 		TerraEngine::Resource::StreamingNeedType needType,
 		std::uint64_t frameId,
 		std::string_view reason = {},
-		std::int32_t priority = 0);
+		std::int32_t priority = 0,
+		const TerraEngine::UUID& ownerObjectId = TerraEngine::EMPTY_UUID);
+	// Object-owned needs let protected scene synchronization replace or remove
+	// one animator's retention without disturbing another animator that shares
+	// the same immutable asset publication.
+	std::size_t ReleaseStreamingNeedsForObject(
+		const TerraEngine::UUID& ownerObjectId,
+		TerraEngine::Resource::StreamingNeedType needType);
 	void PublishVisibleStreamingTouches(
 		const TerraEngine::Renderer::VisibleStreamingTouchSet& touchSet,
 		std::uint64_t frameId,
@@ -261,7 +507,12 @@ public:
 		AssetType type,
 		TerraEngine::Resource::StreamingNeedType needType,
 		std::uint64_t frameId,
-		std::string_view reason = {});
+		std::string_view reason = {},
+		const TerraEngine::UUID& ownerObjectId = TerraEngine::EMPTY_UUID);
+	// Cancellation invalidates the request's private publication token. Backend
+	// IO may finish, but its stale completion cannot enter a live cache; a later
+	// request receives a fresh token and may safely reuse the durable asset ID.
+	bool CancelStreamableLoad(const TerraEngine::UUID& id, AssetType type);
 	// Explicit managed/runtime unloads are executed only at the engine's protected
 	// frame-end boundary. Persistent asset registrations remain intact, so a
 	// later preload can safely recreate the released CPU/GPU payload.
@@ -285,6 +536,27 @@ public:
 	// can display or persist friendly identifiers instead of raw GUID text.
 	std::filesystem::path DescribeAssetReference(const TerraEngine::UUID& id, AssetType type) const;
 
+	// These read-only commands use the same checked parsers as publication and
+	// expose exact counts, versions, fingerprints, and recovery guidance. They
+	// do not reserve UUIDs or mutate a live resource cache.
+	AnimationResourceValidationResult ValidateSkeletonAssetFile(
+		const std::filesystem::path& path,
+		TerraEngine::Animation::AnimationCompatibilityFingerprint expectedCompatibilityFingerprint = 0U) const;
+	AnimationResourceValidationResult ValidateAnimationClipAssetFile(
+		const std::filesystem::path& path,
+		TerraEngine::Animation::AnimationCompatibilityFingerprint expectedCompatibilityFingerprint = 0U) const;
+	// Validate any of the seven cooked animation asset kinds through its typed
+	// parser without reserving a UUID or mutating a live cache. Editor reimport
+	// uses this before atomically replacing its last-known-good build artifact.
+	AnimationResourceValidationResult ValidateAnimationAssetFile(
+		const std::filesystem::path& path,
+		AssetType type,
+		TerraEngine::Animation::AnimationCompatibilityFingerprint expectedCompatibilityFingerprint = 0U) const;
+	AnimationResourceValidationResult ValidateDeformableMeshFile(
+		const std::filesystem::path& path,
+		std::uint32_t expectedSkeletonJointCount = 0U,
+		TerraEngine::Animation::AnimationCompatibilityFingerprint expectedCompatibilityFingerprint = 0U) const;
+
 	// Inject a generated material directly into the cache so tooling can synthesize preview materials
 	// without writing TMAT files to disk. The cacheKey should be unique and stable (e.g., "generated/preview").
 	TerraEngine::UUID RegisterMaterial(const std::string& cacheKey, std::unique_ptr<Material> material);
@@ -298,6 +570,9 @@ public:
 	std::shared_future<TerraEngine::UUID> LoadShaderAsync(const std::filesystem::path& path);
 	std::shared_future<TerraEngine::UUID> LoadShaderCollectionAsync(const std::vector<ShaderStagePath>& stagePaths);
 	std::shared_future<TerraEngine::UUID> LoadTextureAsync(const std::filesystem::path& path);
+	std::shared_future<TerraEngine::UUID> LoadAnimationAssetAsync(
+		const std::filesystem::path& path,
+		AssetType type);
 
 	// Fetch a loaded resource using its UUID so callers can pass lightweight
 	// identifiers around without holding shared ownership. Returned pointers
@@ -305,6 +580,55 @@ public:
 	// or a subsequent reload replaces the resource.
 	Material* GetMaterial(const TerraEngine::UUID& id);
 	Mesh* GetMesh(const TerraEngine::UUID& id);
+	TerraEngine::Animation::SkeletonAsset* GetSkeleton(const TerraEngine::UUID& id);
+	TerraEngine::Animation::AnimationClipAsset* GetAnimationClip(const TerraEngine::UUID& id);
+	// Return the session-local generation currently assigned to a cooked
+	// animation publication or tombstone. Zero means the UUID/type has not been
+	// published in this manager session (or is not an animation cache type).
+	[[nodiscard]] TerraEngine::Animation::AnimationGeneration GetAnimationAssetRuntimeGeneration(
+		const TerraEngine::UUID& id,
+		AssetType type) const noexcept;
+	// A retained runtime generation may describe a deletion or eviction
+	// tombstone. This lightweight query distinguishes that state from an actual
+	// immutable payload without copying a potentially large clip or database.
+	[[nodiscard]] bool IsAnimationAssetPublished(
+		const TerraEngine::UUID& id,
+		AssetType type) const noexcept;
+	// Copy a consistent asset/generation pair while holding the cache lock. The
+	// coordinator calls these only when its cheap generation signature changed,
+	// avoiding per-frame deep copies and raw-pointer reload races.
+	[[nodiscard]] bool CopySkeletonPublication(
+		const TerraEngine::UUID& id,
+		TerraEngine::Animation::SkeletonAsset& output,
+		TerraEngine::Animation::AnimationGeneration& generation) const;
+	[[nodiscard]] bool CopyAnimationClipPublication(
+		const TerraEngine::UUID& id,
+		TerraEngine::Animation::AnimationClipAsset& output,
+		TerraEngine::Animation::AnimationGeneration& generation) const;
+	[[nodiscard]] bool CopyAnimationControllerPublication(
+		const TerraEngine::UUID& id,
+		TerraEngine::Animation::AnimationControllerAsset& output,
+		TerraEngine::Animation::AnimationGeneration& generation) const;
+	[[nodiscard]] bool CopyAnimationMaskPublication(
+		const TerraEngine::UUID& id,
+		TerraEngine::Animation::AnimationMaskAsset& output,
+		TerraEngine::Animation::AnimationGeneration& generation) const;
+	// Specialist animation assets are cached as checked immutable bytes. These
+	// helpers deserialize while holding the cache read lock and return the exact
+	// session generation paired with those bytes, preventing hot reload from
+	// combining a new payload with an old generation in AnimationSystem.
+	[[nodiscard]] bool CopyRetargetProfilePublication(
+		const TerraEngine::UUID& id,
+		TerraEngine::Animation::RetargetProfileAsset& output,
+		TerraEngine::Animation::AnimationGeneration& generation) const;
+	[[nodiscard]] bool CopyMotionDatabasePublication(
+		const TerraEngine::UUID& id,
+		TerraEngine::Animation::MotionDatabaseAsset& output,
+		TerraEngine::Animation::AnimationGeneration& generation) const;
+	[[nodiscard]] bool CopyRagdollProfilePublication(
+		const TerraEngine::UUID& id,
+		TerraEngine::Animation::RagdollProfileAsset& output,
+		TerraEngine::Animation::AnimationGeneration& generation) const;
 	TerraEngine::Scene::SpatialAABB GetMeshLocalBounds(const TerraEngine::UUID& id);
 	Shader* GetShader(const TerraEngine::UUID& id);
 	ShaderCollection* GetShaderCollection(const TerraEngine::UUID& id);
@@ -318,6 +642,26 @@ public:
 	// Utility entry point used by format-specific loader helpers to pull
 	// bytes from disk after the path has been resolved.
 	std::vector<std::uint8_t> ReadFileBytes(const std::filesystem::path& path) const;
+	// Streaming workers use this checked range path for clip segments and motion
+	// database blocks. Export runtimes read only from the mounted TEPAK; editor
+	// sessions may use a loose cooked artifact for iteration.
+	AnimationRangeReadResult ReadAnimationAssetRange(
+		const std::filesystem::path& path,
+		std::uint64_t offset,
+		std::uint64_t size,
+		std::uint64_t maximumReadBytes) const;
+	// Resolve every clip segment to its real DATA/stream byte interval after
+	// checking the cooked envelope against the currently published clip. This
+	// performs only small metadata reads; segment payload bytes stay asynchronous.
+	[[nodiscard]] AnimationCookedRangeTable DescribeAnimationClipSegmentRanges(
+		const TerraEngine::UUID& id,
+		TerraEngine::Animation::AnimationGeneration generation) const;
+	// Current motion databases add an optional contiguous STRM chunk whose checked
+	// block intervals can be read independently. Valid legacy DATA-only assets
+	// still report UnsupportedLayout and keep the complete CPU fallback active.
+	[[nodiscard]] AnimationCookedRangeTable DescribeMotionDatabaseBlockRanges(
+		const TerraEngine::UUID& id,
+		TerraEngine::Animation::AnimationGeneration generation) const;
 
 	// Collapse relative paths against the configured project asset root. Export
 	// runtimes use the archive folder as asset root so the result can still map
@@ -342,9 +686,17 @@ private:
 		std::unordered_map<std::string, TerraEngine::UUID> pathToId;
 		std::unordered_map<TerraEngine::UUID, std::string> idToPath;
 		std::unordered_map<TerraEngine::UUID, std::unique_ptr<Resource>> resources;
+		// Retained tombstones make a delete/reload distinguishable from a first
+		// publication of the same durable GUID for the lifetime of this manager.
+		std::unordered_map<TerraEngine::UUID, TerraEngine::Animation::AnimationGeneration> runtimeGenerations;
 		// Futures for tasks that are actively loading. Shared futures let
 		// multiple threads wait without spawning redundant tasks.
 		std::unordered_map<std::string, std::shared_future<TerraEngine::UUID>> inFlight;
+		// A task captures the token current when it was scheduled. Cancellation,
+		// teardown, or a retry removes/replaces that token so FinalizeLoad rejects
+		// stale worker output without touching the current immutable payload.
+		std::unordered_map<std::string, std::uint64_t> inFlightTokens;
+		std::uint64_t nextInFlightToken = 0u;
 		// Residency metadata lets the generic loader path report the resource
 		// type without each format-specific loader duplicating registration code.
 		AssetType assetType = AssetType::Material;
@@ -357,6 +709,27 @@ private:
 		std::unordered_map<std::string, TerraEngine::UUID> pathToId;
 		std::unordered_map<TerraEngine::UUID, std::string> idToPath;
 		mutable std::shared_mutex mutex;
+	};
+
+	// Several animation authoring assets are consumed by their specialist
+	// evaluators rather than by a renderer-facing typed cache.  The resource
+	// manager still owns their byte payload lifetime so streaming, cancellation,
+	// and residency policy cannot accidentally treat those assets as free.
+	struct OpaqueAnimationResource
+	{
+		TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+		std::vector<std::uint8_t> bytes;
+	};
+	struct RetiredAnimationPayload
+	{
+		TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+		// Keep both dimensions: cacheGeneration documents the exact resource
+		// instance replaced, while publisherGeneration is the authority used by
+		// cross-owner retirement callbacks.
+		TerraEngine::Animation::AnimationGeneration cacheGeneration = 0U;
+		std::uint64_t publisherGeneration = 0U;
+		void* payload = nullptr;
+		void (*destroyPayload)(void*) noexcept = nullptr;
 	};
 
 	template <typename Resource>
@@ -396,13 +769,30 @@ private:
 	// thread pool. If the resource already exists or is in-flight, the
 	// existing shared_future is returned instead of scheduling new work.
 	template <typename Resource>
-	std::shared_future<TerraEngine::UUID> LoadOrSchedule(const std::filesystem::path& path, ResourceCache<Resource>& cache, const LoaderFunction<Resource>& loader);
+	std::shared_future<TerraEngine::UUID> LoadOrSchedule(
+		const std::filesystem::path& path,
+		ResourceCache<Resource>& cache,
+		const LoaderFunction<Resource>& loader,
+		bool deriveIdentityFromResource = false);
 
 	// Finalize a successful load by updating caches and clearing any
 	// in-flight tracking entries. This runs on both synchronous and
 	// asynchronous code paths to keep cache semantics consistent.
 	template <typename Resource>
-	TerraEngine::UUID FinalizeLoad(const std::string& key, ResourceCache<Resource>& cache, const TerraEngine::UUID& id, std::unique_ptr<Resource> resource);
+	TerraEngine::UUID FinalizeLoad(
+		const std::string& key,
+		ResourceCache<Resource>& cache,
+		const TerraEngine::UUID& id,
+		std::unique_ptr<Resource> resource,
+		std::uint64_t expectedLoadToken = 0u);
+
+	// Advance one cache-owned animation generation while its cache mutex is
+	// held. Generation zero is reserved for an invalid/stale publication, and
+	// exhaustion fails closed rather than wrapping a stale handle back to one.
+	template <typename Resource>
+	std::optional<TerraEngine::Animation::AnimationGeneration> AdvanceAnimationGenerationLocked(
+		ResourceCache<Resource>& cache,
+		const TerraEngine::UUID& id);
 
 	// Produce a normalized string key used by the cache maps. Paths are
 	// stored using generic separators to avoid Windows/Linux mismatches.
@@ -449,6 +839,9 @@ private:
 	std::uint64_t ComputeLoadedResourceBytes(const Resource& resource) const;
 	std::uint64_t ComputeLoadedResourceBytes(const Material& resource) const;
 	std::uint64_t ComputeLoadedResourceBytes(const Mesh& resource) const;
+	std::uint64_t ComputeLoadedResourceBytes(const TerraEngine::Animation::SkeletonAsset& resource) const;
+	std::uint64_t ComputeLoadedResourceBytes(const TerraEngine::Animation::AnimationClipAsset& resource) const;
+	std::uint64_t ComputeLoadedResourceBytes(const OpaqueAnimationResource& resource) const;
 	std::uint64_t ComputeLoadedResourceBytes(const Shader& resource) const;
 	std::uint64_t ComputeLoadedResourceBytes(const ShaderCollection& resource) const;
 	std::uint64_t ComputeLoadedResourceBytes(const Texture& resource) const;
@@ -463,6 +856,9 @@ private:
 
 	void ClearResidencyState();
 	void ClearStreamingState();
+	// Shutdown, unlike a regular cache clear, ends the ResourceManager session.
+	// Only then may the otherwise monotonic animation generation ledgers reset.
+	void ClearAnimationRuntimeGenerations();
 	void UpdateStreamableLoadResult(
 		const TerraEngine::UUID& id,
 		AssetType type,
@@ -473,6 +869,8 @@ private:
 		std::string_view failureReason = {});
 	void MarkStreamableReleased(const TerraEngine::UUID& id, std::uint64_t frameId);
 	TerraEngine::Resource::StreamingDiagnosticsSummary BuildStreamingDiagnosticsLocked(std::uint64_t frameId) const;
+	TerraEngine::UUID LoadOpaqueAnimationAsset(const std::filesystem::path& path, AssetType type);
+	std::shared_future<TerraEngine::UUID> LoadOpaqueAnimationAssetAsync(const std::filesystem::path& path, AssetType type);
 
 	ThreadPool& threadPool;
 	std::filesystem::path assetRoot;
@@ -508,9 +906,20 @@ private:
 	std::uint32_t m_StreamingLoadsIssuedThisFrame = 0u;
 	std::unordered_map<TerraEngine::UUID, TerraEngine::Scene::SpatialAABB> m_MeshLocalBoundsCache;
 	mutable std::shared_mutex m_MeshLocalBoundsMutex;
+	// Bounded ownership for old immutable payloads. Entries are added while
+	// the coordinated cache locks are held and removed by publisher retirement.
+	std::vector<RetiredAnimationPayload> m_RetiredAnimationPayloads;
+	mutable std::mutex m_RetiredAnimationPayloadMutex;
 
 	ResourceCache<Material> materialCache;
 	ResourceCache<Mesh> meshCache;
+	ResourceCache<TerraEngine::Animation::SkeletonAsset> skeletonCache;
+	ResourceCache<TerraEngine::Animation::AnimationClipAsset> animationClipCache;
+	ResourceCache<OpaqueAnimationResource> animationControllerCache;
+	ResourceCache<OpaqueAnimationResource> animationMaskCache;
+	ResourceCache<OpaqueAnimationResource> retargetProfileCache;
+	ResourceCache<OpaqueAnimationResource> motionDatabaseCache;
+	ResourceCache<OpaqueAnimationResource> ragdollProfileCache;
 	ResourceCache<Shader> shaderCache;
 	ResourceCache<ShaderCollection> shaderCollectionCache;
 	ResourceCache<Texture> textureCache;
@@ -669,39 +1078,127 @@ Resource* ResourceManager::GetResourceById(const TerraEngine::UUID& id, Resource
 }
 
 template <typename Resource>
+std::optional<TerraEngine::Animation::AnimationGeneration> ResourceManager::AdvanceAnimationGenerationLocked(
+	ResourceCache<Resource>& cache,
+	const TerraEngine::UUID& id)
+{
+	auto [iterator, inserted] = cache.runtimeGenerations.try_emplace(id, 0U);
+	(void)inserted;
+	if(iterator->second == std::numeric_limits<TerraEngine::Animation::AnimationGeneration>::max()) {
+		// A wrapped generation could make a stale handle valid again. The engine
+		// cannot safely publish another payload for this UUID in this session.
+		return std::nullopt;
+	}
+	++iterator->second;
+	return iterator->second;
+}
+
+template <typename Resource>
 // ResourceManager::FinalizeLoad is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-TerraEngine::UUID ResourceManager::FinalizeLoad(const std::string& key, ResourceCache<Resource>& cache, const TerraEngine::UUID& id, std::unique_ptr<Resource> resource)
+TerraEngine::UUID ResourceManager::FinalizeLoad(
+	const std::string& key,
+	ResourceCache<Resource>& cache,
+	const TerraEngine::UUID& id,
+	std::unique_ptr<Resource> resource,
+	std::uint64_t expectedLoadToken)
 {
 	// Capture success before we move the resource into the cache so logging reflects the actual loader result.
-	const bool loadedSuccessfully = static_cast<bool>(resource);
+	bool loadedSuccessfully = static_cast<bool>(resource);
+	TerraEngine::UUID publicationId = id;
 
 	std::unique_lock lock(cache.mutex);
-	cache.pathToId[key] = id;
+	if (expectedLoadToken != 0u)
+	{
+		const auto currentToken = cache.inFlightTokens.find(key);
+		if (currentToken == cache.inFlightTokens.end() || currentToken->second != expectedLoadToken)
+		{
+			// The worker may still finish physical IO after cancellation. Rejecting
+			// here is the protected publication boundary: live payloads, generations,
+			// and residency accounting remain completely unchanged.
+			return TerraEngine::EMPTY_UUID;
+		}
+	}
+	if (loadedSuccessfully)
+	{
+		if constexpr (requires(const Resource& value) { value.assetId.value; })
+		{
+			const TerraEngine::UUID embeddedId = resource->assetId.value;
+			if (publicationId == TerraEngine::EMPTY_UUID)
+			{
+				publicationId = embeddedId;
+			}
+			if (embeddedId == TerraEngine::EMPTY_UUID || embeddedId != publicationId)
+			{
+				loadedSuccessfully = false;
+				resource.reset();
+			}
+		}
+		else if constexpr (requires(const Resource& value) { value.assetId == id; })
+		{
+			const TerraEngine::UUID embeddedId = resource->assetId;
+			if (publicationId == TerraEngine::EMPTY_UUID)
+			{
+				publicationId = embeddedId;
+			}
+			if (embeddedId == TerraEngine::EMPTY_UUID || embeddedId != publicationId)
+			{
+				loadedSuccessfully = false;
+				resource.reset();
+			}
+		}
+		else if (publicationId == TerraEngine::EMPTY_UUID)
+		{
+			// Only self-identifying resources may defer UUID selection until parsing.
+			loadedSuccessfully = false;
+			resource.reset();
+		}
+	}
+	if (loadedSuccessfully && IsAnimationAssetType(cache.assetType))
+	{
+		const std::optional<TerraEngine::Animation::AnimationGeneration> generation =
+			AdvanceAnimationGenerationLocked(cache, publicationId);
+		if (!generation.has_value())
+		{
+			loadedSuccessfully = false;
+			resource.reset();
+		}
+		else if constexpr (requires(Resource& value, TerraEngine::Animation::AnimationGeneration runtimeGeneration) {
+			value.runtimeGeneration = runtimeGeneration;
+		})
+		{
+			resource->runtimeGeneration = *generation;
+		}
+	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (resource)
 	{
-		cache.resources[id] = std::move(resource);
+		cache.pathToId[key] = publicationId;
+		cache.idToPath[publicationId] = key;
+		cache.resources[publicationId] = std::move(resource);
 	}
 	else
 	{
-		cache.resources.erase(id);
+		// A failed first load leaves no payload. A failed retry/reload deliberately
+		// keeps any previous immutable generation instead of erasing last-known-good
+		// data while the caller is still using it.
 	}
 
 	cache.inFlight.erase(key);
+	cache.inFlightTokens.erase(key);
 	// Log the outcome to tie disk/parsing work back to a UUID for later lookups.
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (loadedSuccessfully)
 	{
-		TERRAENGINE_LOG(LogLevel::Debug, "Finalized load for " << key << " (id " << ToHexString(id) << ")");
-		CacheLoadedMeshBounds(id, cache.resources[id].get());
+		TERRAENGINE_LOG(LogLevel::Debug, "Finalized load for " << key << " (id " << ToHexString(publicationId) << ")");
+		CacheLoadedMeshBounds(publicationId, cache.resources[publicationId].get());
 		if (cache.tracksResidency)
 		{
 			RegisterResidencyResource(
-				id,
+				publicationId,
 				cache.assetType,
 				key,
-				EstimateLoadedResourceBytes(cache.resources[id]),
+				EstimateLoadedResourceBytes(cache.resources[publicationId]),
 				0u,
 				true,
 				TerraEngine::Resource::ResidencyState::Active);
@@ -709,17 +1206,17 @@ TerraEngine::UUID ResourceManager::FinalizeLoad(const std::string& key, Resource
 	}
 	else
 	{
-		TERRAENGINE_LOG(LogLevel::Warning, "Load failed for " << key << "; cache entry cleared for id " << ToHexString(id));
+		TERRAENGINE_LOG(LogLevel::Warning, "Load failed for " << key << "; last-known-good cache state was preserved for id " << ToHexString(id));
 	}
 	UpdateStreamableLoadResult(
-		id,
+		loadedSuccessfully ? publicationId : id,
 		cache.assetType,
 		key,
 		loadedSuccessfully,
-		loadedSuccessfully && cache.tracksResidency ? EstimateLoadedResourceBytes(cache.resources[id]) : 0u,
+		loadedSuccessfully && cache.tracksResidency ? EstimateLoadedResourceBytes(cache.resources[publicationId]) : 0u,
 		0u,
 		loadedSuccessfully ? std::string_view{} : std::string_view("loader returned no payload"));
-	return id;
+	return loadedSuccessfully ? publicationId : TerraEngine::EMPTY_UUID;
 }
 
 template <typename Resource>
@@ -751,6 +1248,27 @@ void ResourceManager::VisitAssetCache(AssetType type, Visitor&& visitor)
 	case AssetType::Mesh:
 		visitor(meshCache);
 		return;
+	case AssetType::Skeleton:
+		visitor(skeletonCache);
+		return;
+	case AssetType::AnimationClip:
+		visitor(animationClipCache);
+		return;
+	case AssetType::AnimationController:
+		visitor(animationControllerCache);
+		return;
+	case AssetType::AnimationMask:
+		visitor(animationMaskCache);
+		return;
+	case AssetType::RetargetProfile:
+		visitor(retargetProfileCache);
+		return;
+	case AssetType::MotionDatabase:
+		visitor(motionDatabaseCache);
+		return;
+	case AssetType::RagdollProfile:
+		visitor(ragdollProfileCache);
+		return;
 	case AssetType::Texture:
 		visitor(textureCache);
 		return;
@@ -767,7 +1285,11 @@ void ResourceManager::VisitAssetCache(AssetType type, Visitor&& visitor)
 
 template <typename Resource>
 // ResourceManager::LoadOrSchedule is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-std::shared_future<TerraEngine::UUID> ResourceManager::LoadOrSchedule(const std::filesystem::path& path, ResourceCache<Resource>& cache, const LoaderFunction<Resource>& loader)
+std::shared_future<TerraEngine::UUID> ResourceManager::LoadOrSchedule(
+	const std::filesystem::path& path,
+	ResourceCache<Resource>& cache,
+	const LoaderFunction<Resource>& loader,
+	bool deriveIdentityFromResource)
 {
 	const std::filesystem::path resolvedPath = ResolveAssetPath(path);
 	const std::string key = NormalizeKey(resolvedPath);
@@ -797,23 +1319,48 @@ std::shared_future<TerraEngine::UUID> ResourceManager::LoadOrSchedule(const std:
 		}
 	}
 
-	const TerraEngine::UUID id = EnsureResourceId(key, cache);
-
-	// Schedule the expensive file I/O work on the thread pool so callers
-	// can continue executing immediately.
-	// Debug logging clarifies when background work is spun up versus reused from cache.
-	TERRAENGINE_LOG(LogLevel::Debug, "Scheduling async load for " << resolvedPath << " (id " << ToHexString(id) << ")");
-	auto task = threadPool.createTask([this, key, resolvedPath, &cache, id, loader]() -> TerraEngine::UUID {
-		auto resource = loader(resolvedPath);
-		return FinalizeLoad(key, cache, id, std::move(resource));
-	});
-
-	auto future = task->getFuture().share();
+	// Cooked animation files own a durable UUID in their checked envelope. When
+	// no editor/runtime registration exists yet, leave the identity empty until
+	// the worker has parsed that envelope; generating a random path UUID here
+	// would make a valid standalone async load fail its identity check.
+	TerraEngine::UUID id = deriveIdentityFromResource
+		? TerraEngine::EMPTY_UUID : EnsureResourceId(key, cache);
+	std::unique_lock lock(cache.mutex);
+	// Repeat both checks while holding the publication lock. The earlier shared
+	// check is only a fast path; this boundary guarantees concurrent callers see
+	// one future instead of briefly creating competing tokens before either task
+	// has installed its shared future.
+	if (const auto existing = cache.pathToId.find(key); existing != cache.pathToId.end())
 	{
-		std::unique_lock lock(cache.mutex);
-		cache.inFlight[key] = future;
+		id = existing->second;
+		if (cache.resources.contains(existing->second))
+		{
+			return MakeReadyFuture(existing->second);
+		}
 	}
+	if (const auto pending = cache.inFlight.find(key); pending != cache.inFlight.end())
+	{
+		return pending->second;
+	}
+	if (cache.nextInFlightToken == std::numeric_limits<std::uint64_t>::max())
+	{
+		return MakeReadyFuture(TerraEngine::EMPTY_UUID);
+	}
+	const std::uint64_t loadToken = ++cache.nextInFlightToken;
+	cache.inFlightTokens[key] = loadToken;
+	// Schedule the expensive file I/O work on the shared task system so callers
+	// can continue immediately. The identity may be empty only for an
+	// unregistered, self-identifying animation resource.
+	TERRAENGINE_LOG(LogLevel::Debug, "Scheduling async load for " << resolvedPath << " (id " << ToHexString(id) << ")");
+	auto task = threadPool.createTask([this, key, resolvedPath, &cache, id, loader, loadToken]() -> TerraEngine::UUID {
+		auto resource = loader(resolvedPath);
+		return FinalizeLoad(key, cache, id, std::move(resource), loadToken);
+	});
+	auto future = task->getFuture().share();
+	cache.inFlight[key] = future;
+	// Enqueueing only publishes work to the shared task system. The worker may
+	// begin immediately, but FinalizeLoad waits for this short cache lock before
+	// it can publish a payload, so the future/token pair is always fully visible.
 	threadPool.enqueue(task);
-
 	return future;
 }

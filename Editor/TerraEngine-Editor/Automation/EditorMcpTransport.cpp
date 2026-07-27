@@ -9,8 +9,12 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <chrono>
+#include <cctype>
 #include <cstring>
+#include <exception>
 #include <sstream>
+#include <utility>
 
 #if defined(_WIN32)
 	#ifndef WIN32_LEAN_AND_MEAN
@@ -21,6 +25,7 @@
 #else
 	#include <arpa/inet.h>
 	#include <netinet/in.h>
+	#include <sys/select.h>
 	#include <sys/socket.h>
 	#include <unistd.h>
 #endif
@@ -29,6 +34,29 @@ namespace TerraEngine::Editor::Automation
 {
 	namespace
 	{
+		template<typename Callback>
+		class ScopeExitGuard final
+		{
+		public:
+			explicit ScopeExitGuard(Callback callbackValue)
+				: callback(std::move(callbackValue))
+			{
+			}
+
+			ScopeExitGuard(const ScopeExitGuard&) = delete;
+			ScopeExitGuard& operator=(const ScopeExitGuard&) = delete;
+
+			~ScopeExitGuard()
+			{
+				// Accepted sockets have one listener-owned close path. Running the
+				// callback from the destructor covers continue, break, and exception.
+				callback();
+			}
+
+		private:
+			Callback callback;
+		};
+
 #if defined(_WIN32)
 		using SocketHandle = SOCKET;
 		constexpr SocketHandle kInvalidSocket = INVALID_SOCKET;
@@ -111,30 +139,86 @@ namespace TerraEngine::Editor::Automation
 			return stream.str();
 		}
 
-		std::size_t ParseContentLength(const std::string& headers)
+		std::string BuildHttpAccepted()
 		{
-			std::string lower = headers;
-			std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) {
-				return static_cast<char>(std::tolower(c));
-			});
-			const std::string key = "content-length:";
-			const std::size_t keyPos = lower.find(key);
-			if (keyPos == std::string::npos)
+			// JSON-RPC notifications have no response object. HTTP still needs a
+			// bounded acknowledgement so the notification connection can close.
+			return "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+		}
+
+		enum class ContentLengthStatus
+		{
+			Missing,
+			Malformed,
+			Present
+		};
+
+		struct ContentLengthParseResult
+		{
+			ContentLengthStatus status = ContentLengthStatus::Missing;
+			std::size_t value = 0;
+		};
+
+		ContentLengthParseResult ParseContentLength(std::string_view headers)
+		{
+			// Parse individual header lines instead of searching a substring. This
+			// rejects duplicate or malformed lengths, which otherwise let different
+			// HTTP parsers disagree about where this request ends.
+			ContentLengthParseResult result;
+			std::size_t lineStart = headers.find("\r\n");
+			if (lineStart == std::string_view::npos)
 			{
-				return 0;
+				return {ContentLengthStatus::Malformed, 0};
 			}
-			const std::size_t valueStart = keyPos + key.size();
-			const std::size_t valueEnd = lower.find("\r\n", valueStart);
-			const std::string value = lower.substr(valueStart, valueEnd == std::string::npos ? std::string::npos : valueEnd - valueStart);
-			std::size_t length = 0;
-			const char* begin = value.data();
-			const char* end = value.data() + value.size();
-			while (begin != end && (*begin == ' ' || *begin == '\t'))
+			lineStart += 2;
+			while (lineStart < headers.size())
 			{
-				++begin;
+				const std::size_t lineEnd = headers.find("\r\n", lineStart);
+				const std::string_view line = headers.substr(lineStart,
+					lineEnd == std::string_view::npos ? std::string_view::npos : lineEnd - lineStart);
+				if (line.empty())
+				{
+					break;
+				}
+				const std::size_t separator = line.find(':');
+				if (separator == std::string_view::npos)
+				{
+					return {ContentLengthStatus::Malformed, 0};
+				}
+				std::string name(line.substr(0, separator));
+				std::transform(name.begin(), name.end(), name.begin(), [](unsigned char character) {
+					return static_cast<char>(std::tolower(character));
+				});
+				if (name == "content-length")
+				{
+					if (result.status == ContentLengthStatus::Present)
+					{
+						return {ContentLengthStatus::Malformed, 0};
+					}
+					std::string_view value = line.substr(separator + 1);
+					while (!value.empty() && (value.front() == ' ' || value.front() == '\t'))
+					{
+						value.remove_prefix(1);
+					}
+					while (!value.empty() && (value.back() == ' ' || value.back() == '\t'))
+					{
+						value.remove_suffix(1);
+					}
+					std::size_t parsedLength = 0;
+					const auto [parsedEnd, error] = std::from_chars(value.data(), value.data() + value.size(), parsedLength);
+					if (value.empty() || error != std::errc{} || parsedEnd != value.data() + value.size())
+					{
+						return {ContentLengthStatus::Malformed, 0};
+					}
+					result = {ContentLengthStatus::Present, parsedLength};
+				}
+				if (lineEnd == std::string_view::npos)
+				{
+					break;
+				}
+				lineStart = lineEnd + 2;
 			}
-			std::from_chars(begin, end, length);
-			return length;
+			return result;
 		}
 
 		bool SendAll(SocketHandle socket, const std::string& response)
@@ -150,6 +234,36 @@ namespace TerraEngine::Editor::Automation
 				sentBytes += static_cast<std::size_t>(sent);
 			}
 			return true;
+		}
+
+		enum class SocketReadiness
+		{
+			Ready,
+			TimedOut,
+			Failed
+		};
+
+		SocketReadiness WaitForReadableSocket(SocketHandle socket)
+		{
+			fd_set readableSockets;
+			FD_ZERO(&readableSockets);
+			FD_SET(socket, &readableSockets);
+			// Polling is deliberately bounded. Windows does not guarantee that a
+			// synchronous recv already running on another thread returns promptly
+			// after shutdown(), so this timeout gives stopRequested a reliable
+			// protected-boundary check without imposing a client request timeout.
+			timeval timeout{};
+			timeout.tv_usec = 100'000;
+#if defined(_WIN32)
+			const int readyCount = select(0, &readableSockets, nullptr, nullptr, &timeout);
+#else
+			const int readyCount = select(socket + 1, &readableSockets, nullptr, nullptr, &timeout);
+#endif
+			if (readyCount > 0)
+			{
+				return SocketReadiness::Ready;
+			}
+			return readyCount == 0 ? SocketReadiness::TimedOut : SocketReadiness::Failed;
 		}
 
 		void WakeListener(std::uint16_t port)
@@ -170,11 +284,65 @@ namespace TerraEngine::Editor::Automation
 			connect(wakeSocket, reinterpret_cast<sockaddr*>(&address), sizeof(address));
 			CloseSocket(wakeSocket);
 		}
+
+		void JoinThreadNoThrow(std::thread& thread) noexcept
+		{
+			if (!thread.joinable())
+			{
+				return;
+			}
+			try
+			{
+				// Transport ownership keeps destruction on the editor/lifecycle
+				// thread. The defensive self check prevents std::system_error from
+				// escaping a no-throw cleanup path if that contract is violated.
+				if (thread.get_id() == std::this_thread::get_id())
+				{
+					thread.detach();
+				}
+				else
+				{
+					thread.join();
+				}
+			}
+			catch (...)
+			{
+				// A joinable std::thread would terminate during member destruction.
+				// Detach is only a last-resort containment path for an OS error.
+				try
+				{
+					if (thread.joinable())
+					{
+						thread.detach();
+					}
+				}
+				catch (...)
+				{
+				}
+			}
+		}
+
+		// Eight ordinary tool calls may wait for the editor thread. One additional
+		// bounded worker is reserved for a cancellation notification so a user can
+		// still retract a queued call while all ordinary lanes are occupied.
+		constexpr std::size_t kMaxConcurrentOrdinaryClientWorkers = 8;
+		constexpr std::size_t kMaxConcurrentClientWorkers = kMaxConcurrentOrdinaryClientWorkers + 1;
+		constexpr std::size_t kMaxHttpHeaderBytes = 16U * 1024U;
+		constexpr std::size_t kMaxHttpBodyBytes = 1024U * 1024U;
+		constexpr auto kHttpRequestDeadline = std::chrono::seconds(3);
+		constexpr auto kHttpIdleReadDeadline = std::chrono::seconds(1);
 	}
 
 	EditorMcpTransport::EditorMcpTransport(EditorMcpBridge& bridge)
 		: bridge(bridge)
 	{
+	}
+
+	EditorMcpTransport::~EditorMcpTransport() noexcept
+	{
+		// The transport owns sockets, a listener, and accepted-client workers.
+		// Always reclaim them even when a caller leaves scope through an exception.
+		StopListening();
 	}
 
 	bool EditorMcpTransport::IsLocalAddress(std::string_view address)
@@ -188,47 +356,67 @@ namespace TerraEngine::Editor::Automation
 
 	bool EditorMcpTransport::AcceptPeer(std::string_view address, std::string_view clientName)
 	{
-		if (!bridge.IsEnabled())
-		{
-			bridge.RecordRejectedPeer(std::string(address), "bridge disabled");
-			return false;
-		}
 		if (!IsLocalAddress(address))
 		{
 			bridge.RecordRejectedPeer(std::string(address), "non-local peer");
 			return false;
 		}
-		connected = true;
-		bridge.OnLocalClientConnected(std::string(clientName), std::string(address));
+		if (!bridge.TryOnLocalClientConnected(std::string(clientName), std::string(address)))
+		{
+			bridge.RecordRejectedPeer(std::string(address), "bridge disabled");
+			return false;
+		}
+		{
+			std::lock_guard lock(socketMutex);
+			++connectedPeerCount;
+		}
 		return true;
 	}
 
 	void EditorMcpTransport::DropPeer(std::string_view reason)
 	{
-		if (connected)
+		bool wasConnected = false;
 		{
-			connected = false;
+			std::lock_guard lock(socketMutex);
+			wasConnected = connectedPeerCount > 0;
+			if (wasConnected)
+			{
+				--connectedPeerCount;
+			}
+		}
+		if (wasConnected)
+		{
 			bridge.OnLocalClientDisconnected(std::string(reason));
 		}
 	}
 
 	bool EditorMcpTransport::StartListening(std::uint16_t preferredPort)
 	{
+		std::lock_guard lifecycleLock(lifecycleMutex);
 		if (listening)
 		{
 			return true;
 		}
 
-		lastError.clear();
-		if (!EnsureSocketRuntime(lastError))
+		std::string startupError;
+		if (!EnsureSocketRuntime(startupError))
 		{
+			std::lock_guard lock(socketMutex);
+			lastError = std::move(startupError);
 			return false;
+		}
+		{
+			std::lock_guard lock(socketMutex);
+			lastError.clear();
 		}
 
 		SocketHandle socketHandle = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 		if (socketHandle == kInvalidSocket)
 		{
-			lastError = LastSocketError();
+			{
+				std::lock_guard lock(socketMutex);
+				lastError = LastSocketError();
+			}
 			ShutdownSocketRuntime();
 			return false;
 		}
@@ -250,62 +438,142 @@ namespace TerraEngine::Editor::Automation
 		address.sin_port = htons(preferredPort);
 		if (bind(socketHandle, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0)
 		{
-			lastError = "Could not bind MCP bridge to 127.0.0.1:" + std::to_string(preferredPort) + ": " + LastSocketError();
+			{
+				std::lock_guard lock(socketMutex);
+				lastError = "Could not bind MCP bridge to 127.0.0.1:" + std::to_string(preferredPort) + ": " + LastSocketError();
+			}
 			CloseSocket(socketHandle);
 			ShutdownSocketRuntime();
 			return false;
 		}
 
+		std::uint16_t boundPort = 0;
 		sockaddr_in boundAddress{};
 		socklen_t boundLength = sizeof(boundAddress);
 		if (getsockname(socketHandle, reinterpret_cast<sockaddr*>(&boundAddress), &boundLength) == 0)
 		{
-			listenPort = ntohs(boundAddress.sin_port);
+			boundPort = ntohs(boundAddress.sin_port);
 		}
 
 		if (listen(socketHandle, 8) != 0)
 		{
-			lastError = LastSocketError();
+			{
+				std::lock_guard lock(socketMutex);
+				lastError = LastSocketError();
+			}
 			CloseSocket(socketHandle);
 			ShutdownSocketRuntime();
 			return false;
 		}
 
-		listenSocket = static_cast<std::intptr_t>(socketHandle);
+		{
+			std::lock_guard lock(socketMutex);
+			listenSocket = static_cast<std::intptr_t>(socketHandle);
+			activeClientSockets.clear();
+			listenPort = boundPort;
+			connectedPeerCount = 0;
+		}
 		stopRequested = false;
 		listening = true;
 		// The listener owns only local socket IO. It never applies editor
 		// mutations; tools/call is handed to the bridge queue and processed from
 		// the editor update loop.
-		listenerThread = std::thread(&EditorMcpTransport::ListenLoop, this);
+		try
+		{
+			listenerThread = std::thread(&EditorMcpTransport::ListenLoop, this);
+		}
+		catch (const std::exception& exception)
+		{
+			// Publishing the descriptor before thread creation makes Start/Stop
+			// state observable consistently. Roll every publication back if the OS
+			// cannot create the listener thread.
+			{
+				std::lock_guard lock(socketMutex);
+				listenSocket = -1;
+				listenPort = 0;
+				lastError = std::string("Could not start MCP listener thread: ") + exception.what();
+			}
+			stopRequested = true;
+			listening = false;
+			CloseSocket(socketHandle);
+			ShutdownSocketRuntime();
+			return false;
+		}
 		return true;
 	}
 
-	void EditorMcpTransport::StopListening()
+	void EditorMcpTransport::StopListening() noexcept
 	{
-		if (!listening && !listenerThread.joinable())
+		std::lock_guard lifecycleLock(lifecycleMutex);
+		bool hasClientWorkers = false;
+		{
+			std::lock_guard lock(clientWorkersMutex);
+			hasClientWorkers = !clientWorkers.empty();
+		}
+		if (!listening && !listenerThread.joinable() && !hasClientWorkers)
 		{
 			return;
 		}
 		stopRequested = true;
-		WakeListener(listenPort);
-		const SocketHandle socketHandle = static_cast<SocketHandle>(listenSocket);
-		if (socketHandle != kInvalidSocket)
+		SocketHandle socketHandle = kInvalidSocket;
+		std::uint16_t port = 0;
 		{
+			std::lock_guard lock(socketMutex);
+			socketHandle = static_cast<SocketHandle>(listenSocket);
+			port = listenPort;
+			// Remove public admission immediately, but keep the local descriptor
+			// open until the listener has relinquished its copied handle. Closing it
+			// now could let another subsystem reuse the value before accept().
+			listenSocket = -1;
+			// Keep the publication mutex through every shutdown so a worker cannot
+			// close and release a descriptor for reuse before the interrupt reaches
+			// the intended accepted client.
+			for (const std::intptr_t activeClient : activeClientSockets)
+			{
 #if defined(_WIN32)
-			shutdown(socketHandle, SD_BOTH);
+				shutdown(static_cast<SocketHandle>(activeClient), SD_BOTH);
 #else
-			shutdown(socketHandle, SHUT_RDWR);
+				shutdown(static_cast<SocketHandle>(activeClient), SHUT_RDWR);
 #endif
+			}
 		}
-		CloseSocket(socketHandle);
-		listenSocket = -1;
-		if (listenerThread.joinable())
+		// A loopback connection wakes an accept already in progress and is also
+		// queued safely if the listener copied the descriptor just before stop.
+		WakeListener(port);
+		JoinThreadNoThrow(listenerThread);
+
+		// The listener can publish a client between the first snapshot and its
+		// final stop check. It is now joined, so a second pass covers that window
+		// before waiting for accepted-client workers.
 		{
-			listenerThread.join();
+			std::lock_guard lock(socketMutex);
+			for (const std::intptr_t activeClient : activeClientSockets)
+			{
+#if defined(_WIN32)
+				shutdown(static_cast<SocketHandle>(activeClient), SD_BOTH);
+#else
+				shutdown(static_cast<SocketHandle>(activeClient), SHUT_RDWR);
+#endif
+			}
 		}
+		// Only the lifecycle owner closes the listening descriptor, and only after
+		// the listener can no longer call accept with its local copy.
+		CloseSocket(socketHandle);
+		JoinAllClientWorkers();
 		listening = false;
-		listenPort = 0;
+		std::vector<std::intptr_t> remainingActiveClients;
+		{
+			std::lock_guard lock(socketMutex);
+			listenPort = 0;
+			// Normal worker cleanup removes and closes every publication. Swapping
+			// any remainder provides no-throw defensive cleanup after all joins.
+			remainingActiveClients.swap(activeClientSockets);
+			connectedPeerCount = 0;
+		}
+		for (const std::intptr_t remainingClient : remainingActiveClients)
+		{
+			CloseSocket(static_cast<SocketHandle>(remainingClient));
+		}
 		ShutdownSocketRuntime();
 	}
 
@@ -316,86 +584,360 @@ namespace TerraEngine::Editor::Automation
 
 	std::uint16_t EditorMcpTransport::GetListenPort() const
 	{
+		std::lock_guard lock(socketMutex);
 		return listenPort;
 	}
 
 	std::string EditorMcpTransport::GetEndpoint() const
 	{
-		return listenPort == 0 ? std::string() : "http://127.0.0.1:" + std::to_string(listenPort) + "/mcp";
+		const std::uint16_t port = GetListenPort();
+		return port == 0 ? std::string() : "http://127.0.0.1:" + std::to_string(port) + "/mcp";
 	}
 
 	std::string EditorMcpTransport::GetLastError() const
 	{
+		std::lock_guard lock(socketMutex);
 		return lastError;
+	}
+
+	void EditorMcpTransport::ReleaseAcceptedClient(std::intptr_t clientHandle)
+	{
+		const SocketHandle client = static_cast<SocketHandle>(clientHandle);
+		bool ownsClose = false;
+		{
+			std::lock_guard lock(socketMutex);
+			const auto found = std::find(activeClientSockets.begin(), activeClientSockets.end(), clientHandle);
+			if (found != activeClientSockets.end())
+			{
+				activeClientSockets.erase(found);
+				ownsClose = true;
+			}
+		}
+		if (ownsClose)
+		{
+			CloseSocket(client);
+		}
+	}
+
+	void EditorMcpTransport::ReapCompletedClientWorkers() noexcept
+	{
+		for (;;)
+		{
+			std::unique_ptr<ClientWorker> completedWorker;
+			{
+				std::lock_guard lock(clientWorkersMutex);
+				const auto found = std::find_if(clientWorkers.begin(), clientWorkers.end(),
+					[](const std::unique_ptr<ClientWorker>& worker) {
+						return worker->completed.load(std::memory_order_acquire);
+					});
+				if (found == clientWorkers.end())
+				{
+					return;
+				}
+				completedWorker = std::move(*found);
+				clientWorkers.erase(found);
+			}
+			JoinThreadNoThrow(completedWorker->thread);
+		}
+	}
+
+	void EditorMcpTransport::JoinAllClientWorkers() noexcept
+	{
+		std::vector<std::unique_ptr<ClientWorker>> workers;
+		{
+			std::lock_guard lock(clientWorkersMutex);
+			workers.swap(clientWorkers);
+		}
+		for (const std::unique_ptr<ClientWorker>& worker : workers)
+		{
+			JoinThreadNoThrow(worker->thread);
+		}
 	}
 
 	void EditorMcpTransport::ListenLoop()
 	{
 		while (!stopRequested)
 		{
+			ReapCompletedClientWorkers();
+			SocketHandle listener = kInvalidSocket;
+			{
+				std::lock_guard lock(socketMutex);
+				listener = static_cast<SocketHandle>(listenSocket);
+			}
+			if (listener == kInvalidSocket)
+			{
+				break;
+			}
+			const SocketReadiness listenerReadiness = WaitForReadableSocket(listener);
+			if (listenerReadiness == SocketReadiness::TimedOut)
+			{
+				continue;
+			}
+			if (listenerReadiness == SocketReadiness::Failed)
+			{
+				if (!stopRequested)
+				{
+					std::lock_guard lock(socketMutex);
+					lastError = LastSocketError();
+				}
+				break;
+			}
 			sockaddr_in clientAddress{};
 			socklen_t clientLength = sizeof(clientAddress);
-			const SocketHandle client = accept(static_cast<SocketHandle>(listenSocket), reinterpret_cast<sockaddr*>(&clientAddress), &clientLength);
+			const SocketHandle client = accept(listener, reinterpret_cast<sockaddr*>(&clientAddress), &clientLength);
 			if (client == kInvalidSocket)
 			{
 				if (!stopRequested)
 				{
+					std::lock_guard lock(socketMutex);
 					lastError = LastSocketError();
 				}
 				continue;
 			}
 
-			const std::string peerAddress = inet_ntoa(clientAddress.sin_addr);
+			bool published = false;
+			try
+			{
+				// Publish before checking stopRequested. StopListening can now
+				// interrupt a client that was accepted concurrently; if stop was
+				// already requested, this thread observes it and owns the close.
+				std::lock_guard lock(socketMutex);
+				activeClientSockets.push_back(static_cast<std::intptr_t>(client));
+				published = true;
+			}
+			catch (...)
+			{
+				CloseSocket(client);
+				break;
+			}
+			if (stopRequested)
+			{
+				if (published)
+				{
+					ReleaseAcceptedClient(static_cast<std::intptr_t>(client));
+				}
+				break;
+			}
+
+			try
+			{
+				bool atCapacity = false;
+				{
+					std::lock_guard lock(clientWorkersMutex);
+					atCapacity = clientWorkers.size() >= kMaxConcurrentClientWorkers;
+				}
+				if (atCapacity)
+				{
+					SendAll(client, BuildHttpError(503, "The editor MCP bridge has reached its local client limit."));
+					ReleaseAcceptedClient(static_cast<std::intptr_t>(client));
+					continue;
+				}
+
+				const char* peerText = inet_ntoa(clientAddress.sin_addr);
+				std::string peerAddress = peerText != nullptr ? peerText : "127.0.0.1";
+				auto worker = std::make_unique<ClientWorker>();
+				ClientWorker* workerPointer = worker.get();
+				{
+					std::lock_guard lock(clientWorkersMutex);
+					clientWorkers.push_back(std::move(worker));
+				}
+
+				try
+				{
+					workerPointer->thread = std::thread(
+						[this, client, workerPointer, peerAddress = std::move(peerAddress)]() mutable {
+							ScopeExitGuard cleanup([this, client, workerPointer]() {
+								ReleaseAcceptedClient(static_cast<std::intptr_t>(client));
+								workerPointer->completed.store(true, std::memory_order_release);
+							});
+							HandleAcceptedClient(static_cast<std::intptr_t>(client), std::move(peerAddress), *workerPointer);
+						});
+				}
+				catch (...)
+				{
+					std::unique_ptr<ClientWorker> failedWorker;
+					{
+						std::lock_guard lock(clientWorkersMutex);
+						const auto found = std::find_if(clientWorkers.begin(), clientWorkers.end(),
+							[workerPointer](const std::unique_ptr<ClientWorker>& candidate) {
+								return candidate.get() == workerPointer;
+							});
+						if (found != clientWorkers.end())
+						{
+							failedWorker = std::move(*found);
+							clientWorkers.erase(found);
+						}
+					}
+					ReleaseAcceptedClient(static_cast<std::intptr_t>(client));
+					break;
+				}
+			}
+			catch (const std::exception&)
+			{
+				ReleaseAcceptedClient(static_cast<std::intptr_t>(client));
+				break;
+			}
+		}
+		ReapCompletedClientWorkers();
+	}
+
+	void EditorMcpTransport::HandleAcceptedClient(std::intptr_t clientHandle, std::string peerAddress, ClientWorker& worker)
+	{
+		const SocketHandle client = static_cast<SocketHandle>(clientHandle);
+		bool peerAccepted = false;
+		std::string disconnectReason = "request complete";
+		ScopeExitGuard peerCleanup([this, &peerAccepted, &disconnectReason]() {
+			if (peerAccepted)
+			{
+				DropPeer(disconnectReason);
+			}
+		});
+		try
+		{
 			if (!AcceptPeer(peerAddress, "http-json-rpc"))
 			{
 				SendAll(client, BuildHttpError(403, "Only enabled local clients may use the editor MCP bridge."));
-				CloseSocket(client);
-				continue;
+				return;
 			}
+			peerAccepted = true;
 
 			std::string request;
 			std::array<char, 4096> buffer{};
 			std::size_t headerEnd = std::string::npos;
 			std::size_t contentLength = 0;
+			bool parsedHeaders = false;
+			const auto requestDeadline = std::chrono::steady_clock::now() + kHttpRequestDeadline;
+			auto idleDeadline = std::chrono::steady_clock::now() + kHttpIdleReadDeadline;
 			while (!stopRequested)
 			{
+				const auto now = std::chrono::steady_clock::now();
+				if (now >= requestDeadline || now >= idleDeadline)
+				{
+					disconnectReason = "HTTP request deadline exceeded";
+					SendAll(client, BuildHttpError(408, "HTTP request timed out before completion."));
+					return;
+				}
+				const SocketReadiness readiness = WaitForReadableSocket(client);
+				if (readiness == SocketReadiness::TimedOut)
+				{
+					continue;
+				}
+				if (readiness == SocketReadiness::Failed)
+				{
+					break;
+				}
 				const int received = recv(client, buffer.data(), static_cast<int>(buffer.size()), 0);
 				if (received <= 0)
 				{
 					break;
 				}
 				request.append(buffer.data(), static_cast<std::size_t>(received));
+				idleDeadline = std::chrono::steady_clock::now() + kHttpIdleReadDeadline;
 				headerEnd = request.find("\r\n\r\n");
-				if (headerEnd != std::string::npos)
+				if (headerEnd == std::string::npos)
 				{
-					contentLength = ParseContentLength(request.substr(0, headerEnd));
-					if (request.size() >= headerEnd + 4 + contentLength)
+					if (request.size() > kMaxHttpHeaderBytes)
 					{
-						break;
+						disconnectReason = "HTTP headers exceeded limit";
+						SendAll(client, BuildHttpError(431, "HTTP request headers exceed the local bridge limit."));
+						return;
 					}
+					continue;
+				}
+				if (headerEnd > kMaxHttpHeaderBytes)
+				{
+					disconnectReason = "HTTP headers exceeded limit";
+					SendAll(client, BuildHttpError(431, "HTTP request headers exceed the local bridge limit."));
+					return;
+				}
+				if (!parsedHeaders)
+				{
+					const ContentLengthParseResult parsedLength = ParseContentLength(std::string_view(request).substr(0, headerEnd));
+					if (parsedLength.status == ContentLengthStatus::Missing)
+					{
+						disconnectReason = "HTTP Content-Length missing";
+						SendAll(client, BuildHttpError(411, "HTTP Content-Length is required."));
+						return;
+					}
+					if (parsedLength.status == ContentLengthStatus::Malformed)
+					{
+						disconnectReason = "HTTP Content-Length malformed";
+						SendAll(client, BuildHttpError(400, "HTTP Content-Length is malformed."));
+						return;
+					}
+					contentLength = parsedLength.value;
+					if (contentLength > kMaxHttpBodyBytes)
+					{
+						disconnectReason = "HTTP body exceeded limit";
+						SendAll(client, BuildHttpError(413, "HTTP request body exceeds the local bridge limit."));
+						return;
+					}
+					parsedHeaders = true;
+				}
+				if (request.size() >= headerEnd + 4 + contentLength)
+				{
+					break;
 				}
 			}
 
+			if (stopRequested)
+			{
+				disconnectReason = "listener stopped";
+				return;
+			}
 			if (headerEnd == std::string::npos)
 			{
+				disconnectReason = "malformed HTTP request";
 				SendAll(client, BuildHttpError(400, "Malformed HTTP request."));
-				DropPeer("malformed HTTP request");
-				CloseSocket(client);
-				continue;
+				return;
 			}
 
 			const std::string body = request.substr(headerEnd + 4, contentLength);
-			try
+			const nlohmann::json message = nlohmann::json::parse(body);
+			const bool cancellationNotification = message.is_object()
+				&& !message.contains("id")
+				&& message.contains("method")
+				&& message["method"].is_string()
+				&& message["method"].get<std::string>() == "notifications/cancelled";
+			if (!cancellationNotification)
 			{
-				const nlohmann::json message = nlohmann::json::parse(body);
-				SendAll(client, BuildHttpResponse(HandleMessage(message)));
+				// The ninth worker is only a temporary parsing reserve. Ordinary
+				// requests cannot consume it while eight editor-dispatch calls wait.
+				worker.usesControlReserve = false;
+				std::size_t ordinaryWorkerCount = 0;
+				{
+					std::lock_guard lock(clientWorkersMutex);
+					ordinaryWorkerCount = static_cast<std::size_t>(std::count_if(
+						clientWorkers.begin(), clientWorkers.end(), [](const std::unique_ptr<ClientWorker>& candidate) {
+							return !candidate->usesControlReserve.load(std::memory_order_acquire);
+						}));
+				}
+				if (ordinaryWorkerCount > kMaxConcurrentOrdinaryClientWorkers)
+				{
+					disconnectReason = "ordinary client limit reached";
+					SendAll(client, BuildHttpError(503, "The editor MCP bridge has reached its local tool-call limit."));
+					return;
+				}
 			}
-			catch (const nlohmann::json::parse_error&)
-			{
-				SendAll(client, BuildHttpError(400, "Malformed JSON request."));
-			}
-			DropPeer("request complete");
-			CloseSocket(client);
+			const nlohmann::json response = HandleMessage(message);
+			SendAll(client, cancellationNotification ? BuildHttpAccepted() : BuildHttpResponse(response));
+		}
+		catch (const nlohmann::json::parse_error&)
+		{
+			disconnectReason = "malformed JSON request";
+			SendAll(client, BuildHttpError(400, "Malformed JSON request."));
+		}
+		catch (const std::exception&)
+		{
+			// Keep malformed arguments or provider failures contained to this
+			// request instead of terminating a client worker or the editor.
+			disconnectReason = "request failed";
+			SendAll(client, BuildHttpError(500, "MCP request failed."));
+		}
+		catch (...)
+		{
+			disconnectReason = "request failed";
+			SendAll(client, BuildHttpError(500, "MCP request failed."));
 		}
 	}
 
@@ -436,7 +978,7 @@ namespace TerraEngine::Editor::Automation
 				return BuildJsonRpcError(id, -32602, "tools/call requires params.name.");
 			}
 			const nlohmann::json arguments = params.value("arguments", nlohmann::json::object());
-			nlohmann::json toolResult = bridge.SubmitToolCall(params["name"].get<std::string>(), arguments);
+			nlohmann::json toolResult = bridge.SubmitToolCall(params["name"].get<std::string>(), arguments, id, &stopRequested);
 			nlohmann::json content = nlohmann::json::array();
 			nlohmann::json textResult = toolResult;
 			textResult.erase("mcpContent");
@@ -452,8 +994,17 @@ namespace TerraEngine::Editor::Automation
 		}
 		if (method == "notifications/cancelled")
 		{
-			const std::string requestId = params.value("requestId", "");
-			return BuildJsonRpcResult(id, {{"canceled", !requestId.empty() && bridge.CancelQueuedRequest(requestId)}, {"requestId", requestId}});
+			const nlohmann::json requestId = params.is_object() && params.contains("requestId")
+				? params["requestId"]
+				: nlohmann::json(nullptr);
+			bool canceled = bridge.CancelPendingToolCall(requestId);
+			// Retain compatibility for the older assistant queue, whose bridge
+			// request IDs are strings rather than transport JSON-RPC identities.
+			if (!canceled && requestId.is_string())
+			{
+				canceled = bridge.CancelQueuedRequest(requestId.get<std::string>());
+			}
+			return BuildJsonRpcResult(id, {{"canceled", canceled}, {"requestId", requestId}});
 		}
 		return BuildJsonRpcError(id, -32601, "Unsupported MCP method.");
 	}

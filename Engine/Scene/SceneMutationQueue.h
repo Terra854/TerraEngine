@@ -105,6 +105,9 @@ namespace TerraEngine::Scene {
 		// Group receipts preserve the tick-wide decision while still identifying
 		// each preparation chunk for producer-side acknowledgement.
 		std::vector<TransactionPublicationGroupResult> publicationGroupResults;
+		// Typed animation receipts become visible only because Apply owns a declared
+		// protected boundary; systems can consume them without JSON conversion.
+		std::vector<AnimationMutationPublication> acceptedAnimationPublications;
 		std::vector<SceneDiagnostic> diagnostics;
 		std::string formattedCommitSummary;
 	};

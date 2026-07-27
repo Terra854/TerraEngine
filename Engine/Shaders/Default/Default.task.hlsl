@@ -1,4 +1,5 @@
 #pragma pack_matrix(column_major)
+#include "DefaultDeformation.hlsli"
 
 // Default.task.hlsl is the task-stage visibility filter for the default
 // mesh-shader route. It consumes TEMF meshlet bounds plus the selected
@@ -207,6 +208,52 @@ static const uint kVirtualGeometryPayloadDescriptorMaterialCount = 28u;
 static const uint kVirtualGeometryPayloadDescriptorLocalVertexCount = 29u;
 static const uint kVirtualGeometryPayloadDescriptorLocalPrimitiveByteCount = 30u;
 static const uint kVirtualGeometryPayloadDescriptorLocalRemapEncoding = 31u;
+
+bool TryLoadGpuAnimationGraphicsRecord(out DefaultGpuAnimationGraphicsRecord record)
+{
+	record = (DefaultGpuAnimationGraphicsRecord)0;
+	if (SceneUniforms.meshDataIndex == kInvalidAnimationGraphicsBufferIndex
+		|| SceneUniforms.textureIndex == kInvalidAnimationGraphicsBufferIndex)
+	{
+		return false;
+	}
+
+	uint elementCount;
+	uint stride;
+	globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)].GetDimensions(elementCount, stride);
+	if (elementCount > 0x3FFFFFFFu
+		|| SceneUniforms.textureIndex > (0xFFFFFFFFu - kAnimationGraphicsRecordBytes) / kAnimationGraphicsRecordBytes)
+	{
+		return false;
+	}
+	const uint byteCount = elementCount * 4u;
+	const uint byteOffset = SceneUniforms.textureIndex * kAnimationGraphicsRecordBytes;
+	if (byteOffset > byteCount || kAnimationGraphicsRecordBytes > byteCount - byteOffset)
+	{
+		return false;
+	}
+
+	const uint wordOffset = byteOffset >> 2u;
+	record.planGeneration = globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)][wordOffset + 0u];
+	record.rendererGeneration = globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)][wordOffset + 1u];
+	record.workPacketIndex = globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)][wordOffset + 2u];
+	record.generationRecordIndex = globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)][wordOffset + 3u];
+	record.paletteBufferIndex = globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)][wordOffset + 4u];
+	record.morphWeightBufferIndex = globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)][wordOffset + 5u];
+	record.paletteOffsetBytes = uint2(
+		globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)][wordOffset + 6u],
+		globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)][wordOffset + 7u]);
+	record.morphWeightOffsetBytes = uint2(
+		globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)][wordOffset + 8u],
+		globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)][wordOffset + 9u]);
+	record.jointCount = globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)][wordOffset + 10u];
+	record.morphCount = globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)][wordOffset + 11u];
+	record.paletteEntryCount = globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)][wordOffset + 12u];
+	record.workFlags = globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)][wordOffset + 13u];
+	record.stageMask = globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)][wordOffset + 14u];
+	record.validMarker = globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)][wordOffset + 15u];
+	return DefaultGpuAnimationRecordHeaderIsValid(record, SceneUniforms.textureIndex);
+}
 static const uint kVirtualGeometrySourceResidentPagePayload = 1u;
 static const uint kVirtualGeometrySourceResidentFallbackPayload = 2u;
 
@@ -1116,8 +1163,14 @@ bool IsOccluded(const uint meshletIndex, const uint meshletCount, const MeshDeco
 [numthreads(1, 1, 1)]
 void main(uint3 groupId : SV_GroupID)
 {
+	DefaultGpuAnimationGraphicsRecord animationRecord;
+	const bool gpuDeformationAvailable = TryLoadGpuAnimationGraphicsRecord(animationRecord);
 	PageLocalPayloadDescriptor pageDescriptor;
-	const bool pageLocalGeometry = TryUsePageLocalGeometry(pageDescriptor);
+	// Page-local packet payloads currently omit skinning and target-major morph
+	// streams. Owner/fallback coverage is therefore the only safe route for GPU
+	// deformation; task indices must match the mesh-stage source selection.
+	const bool pageLocalGeometry = !gpuDeformationAvailable
+		&& TryUsePageLocalGeometry(pageDescriptor);
 	// Do not touch the owner decode buffer for resident page packets. Page-local
 	// descriptors carry a complete decode record and must remain independently
 	// usable when the full owner geometry allocation is intentionally skipped.
@@ -1158,7 +1211,11 @@ void main(uint3 groupId : SV_GroupID)
 
 	const bool cullingEnabled = (SceneUniforms.taskCullingEnabled != 0u)
 		&& (frameData.globalTaskCullingEnabled != 0u)
-		&& (frameData.taskShaderSupported != 0u);
+		&& (frameData.taskShaderSupported != 0u)
+		// The graphics bridge has no per-cluster dynamic-bounds address in this
+		// frozen pass. Bind-pose rejection is unsafe, so deformable work fails
+		// open to the owner/fallback range until that proof is published.
+		&& !gpuDeformationAvailable;
 
 	for (uint localIndex = 0u; localIndex < kTaskBatchSize; ++localIndex)
 	{

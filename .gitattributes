@@ -1,0 +1,11 @@
+# The offline NuGet closure is audited by exact byte length and SHA-256 hashes.
+# Disable checkout-time line-ending conversion for every archive, manifest,
+# license, and notice so a clean Windows clone preserves the verified payload.
+/External/NuGet/** -text
+
+# These reviewed validation contracts are also pinned by byte-level hashes.
+# Keep their canonical LF bytes unchanged in detached Windows worktrees.
+/Tools/Animation/PerformanceWorkloads.json -text
+/Tests/Fixtures/Animation/stress/workloads.json -text
+/Tests/Fixtures/RendererPerformanceBaseline/workloads.json -text
+/specs/043-complete-animation-system/contracts/runtime-limits-and-validation.md -text

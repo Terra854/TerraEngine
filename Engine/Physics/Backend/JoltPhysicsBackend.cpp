@@ -1700,7 +1700,8 @@ namespace TerraEngine::Physics::Backend {
 			|| !std::isfinite(request.linearDamping) || request.linearDamping < 0.0F
 			|| !std::isfinite(request.angularDamping) || request.angularDamping < 0.0F
 			|| !std::isfinite(request.maximumLinearVelocity) || request.maximumLinearVelocity <= 0.0F
-			|| !std::isfinite(request.maximumAngularVelocity) || request.maximumAngularVelocity <= 0.0F) {
+			|| !std::isfinite(request.maximumAngularVelocity) || request.maximumAngularVelocity <= 0.0F
+			|| !std::isfinite(request.gravityFactor) || request.gravityFactor < 0.0F) {
 			return Rejected(PhysicsBackendErrorCode::InvalidArgument, "The body request is invalid or stale.");
 		}
 		const std::uint64_t bodyKey = HandleKey(request.handle);
@@ -1746,7 +1747,7 @@ namespace TerraEngine::Physics::Backend {
 			}
 			settings.mIsSensor = request.sensor;
 			settings.mAllowSleeping = request.allowSleeping;
-			settings.mGravityFactor = request.useGravity ? 1.0F : 0.0F;
+			settings.mGravityFactor = request.useGravity ? request.gravityFactor : 0.0F;
 			settings.mUserData = EncodeCollisionMetadata(
 				request.collisionLayer,
 				request.collisionMask,

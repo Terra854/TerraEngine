@@ -45,7 +45,21 @@ public:
 	};
 
 	Result Create(entt::entity sourceEntity, const std::filesystem::path& projectRelativePath, const std::filesystem::path& absolutePath);
-	Result Instantiate(std::string_view prefabIdentity, std::string_view requestedName);
+	// RegisterExistingAsset lets editor-owned asset discovery attach a prefab
+	// that predates this service session. The AssetDatabase GUID remains the
+	// stable identity, while the generation tracks atomic package reimports.
+	Result RegisterExistingAsset(
+		const std::filesystem::path& projectRelativePath,
+		const std::filesystem::path& absolutePath,
+		const TerraEngine::UUID& assetGuid,
+		std::uint64_t publishedGeneration = 1u);
+	// Registered prefab assets are instantiated as their complete serialized
+	// object graph. Session-created lightweight prefabs retain their historical
+	// single-root behavior until AssetDatabase publishes them.
+	Result Instantiate(
+		std::string_view prefabIdentity,
+		std::string_view requestedName,
+		std::optional<entt::entity> parent = std::nullopt);
 	Result InspectOverrides(std::string_view instanceIdentity) const;
 	Result ApplyOverrides(std::string_view instanceIdentity, std::optional<std::uint64_t> expectedGeneration);
 	Result RevertOverrides(std::string_view instanceIdentity);
@@ -59,6 +73,15 @@ private:
 		std::string sourceObjectId;
 		std::string sourceName;
 		std::uint64_t generation = 1u;
+		// Only AssetDatabase-registered prefabs have an authoritative disk graph.
+		// Keeping the absolute path here lets every caller use one protected
+		// deserialization path without changing lightweight session semantics.
+		std::filesystem::path absolutePath;
+		TerraEngine::UUID assetGuid = TerraEngine::EMPTY_UUID;
+		// Registration captures the validated document that owns the reported
+		// generation, avoiding a file-watcher race between indexing and publish.
+		nlohmann::json serializedDocument;
+		bool hasSerializedGraph = false;
 	};
 	struct InstanceState {
 		std::string prefabId;
@@ -145,6 +168,9 @@ public:
 	// GetSelectedAsset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::optional<std::filesystem::path> GetSelectedAsset() const { return selectedAsset; }
 	void SetSelectedAsset(std::optional<std::filesystem::path> asset);
+	// Selects a cooked animation document and reveals its matching native editor.
+	// The title mapping avoids coupling Project Browser to every window class.
+	bool OpenAnimationAssetEditor(const std::filesystem::path& path);
 	// Generated package children are not standalone source files, so the
 	// inspector needs their package path plus GUID to show the right read-only
 	// sub-asset details instead of falling back to the parent glTF/FBX summary.

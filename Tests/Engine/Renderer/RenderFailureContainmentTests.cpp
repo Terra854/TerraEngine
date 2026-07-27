@@ -145,7 +145,12 @@ namespace TerraEngine::Tests {
 			context.Expect(contextSource.find("Editor UI Present Command Buffer") != std::string::npos, "Temporary UI submissions should remain identifiable in Vulkan validation diagnostics.");
 			context.Expect(initSource.find("Keep editor\n\t\t// presentation color-only") != std::string::npos, "Editor presentation should not share a writable depth attachment across swapchain frames in flight.");
 			context.Expect(contextSource.find("renderPass.clearValueCount = 1;") != std::string::npos, "The ImGui swapchain pass should clear only its color attachment.");
-			context.Expect(implHeader.find("FRAMEBUFFER_RESIZE_REBUILD_INTERVAL{32}") != std::string::npos, "Rapid native resize callbacks should throttle rebuilds without adding a visible trailing delay.");
+			// Resize callbacks now publish extent revisions into the coordinator. This
+			// coalesces duplicate callbacks without a timer that can recreate a healthy
+			// swapchain periodically or leave one delayed rebuild after input stops.
+			context.Expect(implHeader.find("presentationRecreation.RequestFramebufferExtent") != std::string::npos
+				&& implHeader.find("FRAMEBUFFER_RESIZE_REBUILD_INTERVAL") == std::string::npos,
+				"Rapid native resize callbacks should coalesce into explicit extent revisions without a periodic rebuild timer.");
 			context.Expect(contextSource.find("if (!impl->ClaimFramebufferResizeRebuild())") != std::string::npos, "Editor resize handling should rebuild promptly at a protected frame boundary.");
 			context.Expect(contextSource.find("recording here\n\t\t// would only resize Scene/Game targets") != std::string::npos, "Editor view recording should pause while a native resize is pending instead of reallocating targets for discarded frames.");
 			context.Expect(contextSource.find("result.outcome = EditorPresentOutcome::RecreationRequested") != std::string::npos, "PresentEditor should return a typed stale-draw-data result after recreation.");

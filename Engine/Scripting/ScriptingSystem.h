@@ -55,6 +55,13 @@ public:
 	{
 		float deltaTime = 0.0F;
 		float unscaledDeltaTime = 0.0F;
+		// These values are captured before scheduler planning.  Systems after
+		// Scripting must use this immutable decision rather than consulting the
+		// mutable pause/step fields after Scripting has consumed a step token.
+		bool playSessionActive = false;
+		bool playSessionPaused = false;
+		bool advancesSimulation = false;
+		float simulationDeltaTime = 0.0F;
 		float timeScale = 1.0F;
 		double elapsedTime = 0.0;
 		double unscaledElapsedTime = 0.0;

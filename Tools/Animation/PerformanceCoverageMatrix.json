@@ -1,0 +1,112 @@
+{
+	"schemaVersion": 1,
+	"feature": "043-complete-animation-system",
+	"task": "T131",
+	"comparisonTask": "T284",
+	"finalPhaseOnly": true,
+	"performanceWorkloads": {
+		"path": "Tools/Animation/PerformanceWorkloads.json",
+		"sha256": "f304b2f2c31addf3301f77260b686caf7b4c87abdbb9756bcc6e481ba0a180f6"
+	},
+	"lockedBaseline": {
+		"path": "out/validation/animation/baseline/locked-baseline.json",
+		"sha256": "cf4375934729e1afa745d9446faacfc1a7ba53a6d7db79b3d1e0e8164a5ced8f"
+	},
+	"comparisonPolicy": {
+		"minimumPairedMeasuredRuns": 5,
+		"pairedWarmupRequired": true,
+		"statistics": ["median", "p95", "p99", "worst"],
+		"thresholdSource": "PerformanceWorkloads.json-only",
+		"missingDomain": "reject",
+		"missingMetric": "reject",
+		"missingFact": "reject",
+		"failedMappedWorkload": "reject",
+		"identityMismatch": "reject"
+	},
+	"domains": [
+		{
+			"id": "renderer",
+			"baselineControlId": "installed-renderer-smoke",
+			"sourceContracts": ["Tests/Fixtures/RendererPerformanceBaseline/workloads.json", "Tests/Engine/Renderer/RenderPerformanceGateTests.cpp"],
+			"requiredMetricIds": ["operations", "driverEvents", "crashReports"],
+			"requiredFactIds": []
+		},
+		{
+			"id": "camera",
+			"baselineControlId": "installed-physics-profiler",
+			"sourceContracts": ["Tests/Editor/Renderer/SceneViewMarkerPerformanceTests.cpp", "Tests/Fixtures/McpCameraImages/README.md"],
+			"requiredMetricIds": ["viewportCpuP95Ms", "viewportGpuP95Ms"],
+			"requiredFactIds": ["normalShutdown"]
+		},
+		{
+			"id": "ui",
+			"baselineControlId": "focused-control-matrix",
+			"sourceContracts": ["Tests/Engine/UI/UISystemPreparationTests.cpp", "Tests/Engine/UI/UILayoutEngineTests.cpp"],
+			"requiredMetricIds": ["totalSeconds"],
+			"requiredFactIds": []
+		},
+		{
+			"id": "physics",
+			"baselineControlId": "installed-physics-profiler",
+			"sourceContracts": ["Tests/Engine/Physics/PhysicsPerformanceTests.cpp", "Tests/Editor/Physics/PhysicsEditorPerformanceTests.cpp"],
+			"requiredMetricIds": ["stepMedianMs", "stepP95Ms", "stepP99Ms", "stepWorstMs", "maxPrivateBytes"],
+			"requiredFactIds": ["determinismHash", "normalShutdown"]
+		},
+		{
+			"id": "scripting",
+			"baselineControlId": "focused-control-matrix",
+			"sourceContracts": ["Tests/Engine/Scripting/ScriptingWorkloadTests.cpp", "Tests/Engine/Scripting/ScriptingWorkerBoundaryTests.cpp"],
+			"requiredMetricIds": ["totalSeconds"],
+			"requiredFactIds": []
+		},
+		{
+			"id": "resource",
+			"baselineControlId": "focused-control-matrix",
+			"sourceContracts": ["Tests/Engine/Resource/ResourceStreamingTests.cpp", "Tests/Engine/Resource/ResourceResidencyBudgetTests.cpp"],
+			"requiredMetricIds": ["totalSeconds"],
+			"requiredFactIds": []
+		},
+		{
+			"id": "virtual-geometry",
+			"baselineControlId": "focused-control-matrix",
+			"sourceContracts": ["Tests/Engine/Renderer/VirtualGeometryPerformanceGateTests.cpp", "Tests/Engine/Resource/VirtualGeometryResourceTests.cpp"],
+			"requiredMetricIds": ["totalSeconds"],
+			"requiredFactIds": []
+		},
+		{
+			"id": "scheduler",
+			"baselineControlId": "focused-control-matrix",
+			"sourceContracts": ["Tests/Engine/Core/SystemSchedulerTests.cpp", "Tests/Editor/Scene/SchedulerPlayModeGraphTests.cpp"],
+			"requiredMetricIds": ["totalSeconds"],
+			"requiredFactIds": []
+		},
+		{
+			"id": "profiler",
+			"baselineControlId": "installed-physics-profiler",
+			"sourceContracts": ["Tests/Engine/Profiling/ProfilerCapturePerformanceTests.cpp", "Tests/Engine/Profiling/ProfilerPerformanceSummaryTests.cpp"],
+			"requiredMetricIds": ["engineMeanMs", "profilerBytes", "frameMedianMs", "frameP95Ms", "frameP99Ms", "frameWorstMs"],
+			"requiredFactIds": ["profilerMetricGatePassed", "profilerDurationGatePassed", "profilerSizeGatePassed"]
+		},
+		{
+			"id": "mcp",
+			"baselineControlId": "focused-control-matrix",
+			"sourceContracts": ["Tests/Editor/Automation/EditorMcpProfilerTests.cpp", "Tests/Editor/Automation/EditorMcpCameraImageContractTests.cpp"],
+			"requiredMetricIds": ["totalSeconds"],
+			"requiredFactIds": []
+		},
+		{
+			"id": "startup",
+			"baselineControlId": "installed-export-runtime",
+			"sourceContracts": ["Tests/Engine/Runtime/ExportStartupFlowTests.cpp", "Tests/Editor/Core/EditorStartupRendererConfigurationTests.cpp"],
+			"requiredMetricIds": ["elapsedSeconds", "errors", "warnings"],
+			"requiredFactIds": ["orderlyRuntimeShutdown"]
+		},
+		{
+			"id": "export",
+			"baselineControlId": "installed-export-runtime",
+			"sourceContracts": ["Tests/Editor/Export/HeadlessExportBaselineTests.cpp", "Tests/Engine/Runtime/PhysicsExportRuntimeTests.cpp"],
+			"requiredMetricIds": ["elapsedSeconds", "packageBytes", "packageEntries", "errors", "warnings"],
+			"requiredFactIds": ["physicsParity", "orderlyRuntimeShutdown"]
+		}
+	]
+}

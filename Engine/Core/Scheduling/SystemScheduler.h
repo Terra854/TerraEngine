@@ -53,6 +53,31 @@ namespace TerraEngine::Scheduling {
 		ResourceAccessMode mode = ResourceAccessMode::Read;
 	};
 
+	// Animation crosses scripting, physics, presentation, rendering, and managed
+	// delivery. Stable resource names make every immutable handoff visible in the
+	// scheduler summary instead of hiding ownership behind a broad ObjectManager
+	// declaration. Later evaluator stages can refine payload types without
+	// changing these diagnostics-facing contract names.
+	inline constexpr const char kResourceAnimatorComponents[] = "AnimatorComponents";
+	inline constexpr const char kResourceAnimationCommandQueues[] = "AnimationCommandQueues";
+	inline constexpr const char kResourceAnimationFrameInputs[] = "AnimationFrameInputs";
+	inline constexpr const char kResourceAnimationEvaluationPrograms[] = "AnimationEvaluationPrograms";
+	inline constexpr const char kResourceAnimationResidencyCapabilities[] = "AnimationResidencyCapabilities";
+	inline constexpr const char kResourceAnimationExecutionModes[] = "AnimationExecutionModes";
+	inline constexpr const char kResourceAnimationConsumerMasks[] = "AnimationConsumerMasks";
+	inline constexpr const char kResourceAnimationWorkPackets[] = "AnimationWorkPackets";
+	inline constexpr const char kResourceAnimationVisualPackets[] = "AnimationVisualPackets";
+	inline constexpr const char kResourceAnimationClipSegments[] = "AnimationClipSegments";
+	inline constexpr const char kResourceAnimationRollbackState[] = "AnimationRollbackState";
+	inline constexpr const char kResourceAnimationAuthoritativeOutputs[] = "AnimationAuthoritativeOutputs";
+	inline constexpr const char kResourceAnimationRuntimeState[] = "AnimationRuntimeState";
+	inline constexpr const char kResourceAnimationPhysicsHandoffQueue[] = "AnimationPhysicsHandoffQueue";
+	inline constexpr const char kResourceAnimationManagedCallbackBatches[] = "AnimationManagedCallbackBatches";
+	inline constexpr const char kResourceAnimationRagdollMappings[] = "AnimationRagdollMappings";
+	inline constexpr const char kResourceAnimationRecordingSamples[] = "AnimationRecordingSamples";
+	inline constexpr const char kResourceAnimationPresentationPrepared[] = "AnimationPresentationPrepared";
+	inline constexpr const char kResourceAnimationPresentationPlan[] = "AnimationPresentationPlan";
+
 	// Virtual geometry resource names are centralized here so RenderSystem,
 	// tests, and diagnostics all describe the same scheduler handoff. The names
 	// are plain strings because the scheduler validates declarations before any
@@ -109,6 +134,11 @@ namespace TerraEngine::Scheduling {
 		std::string protectedReason;
 		std::string fallbackReason;
 		std::string profilingLabel;
+		// Converted systems can intentionally return no descriptors when their
+		// bounded membership check finds no useful work. Legacy systems leave this
+		// false so an empty declaration still receives the Update() compatibility
+		// wrapper instead of disappearing from the frame accidentally.
+		bool omitWhenNoFrameWorkloads = false;
 		bool usesDefaultMetadata = true;
 	};
 

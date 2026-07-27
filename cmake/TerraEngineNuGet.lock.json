@@ -1,0 +1,741 @@
+{
+    "schemaVersion":  1,
+    "generatedLegalFiles":  [
+                                 {
+                                     "path":  "licenses/shared/MIT.txt",
+                                     "packageFile":  "feed/microsoft.aspnetcore.app.runtime.win-x64.10.0.10.nupkg",
+                                     "archiveEntry":  "LICENSE.txt",
+                                     "bytes":  1139,
+                                     "sha256":  "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+                                 }
+                             ],
+    "dotnetSdkVersion":  "10.0.302",
+    "runtimePackVersion":  "10.0.10",
+    "supportedRuntimeIdentifiers":  [
+                                        "win-x64"
+                                    ],
+    "packageCount":  25,
+    "totalBytes":  170401909,
+    "packages":  [
+                     {
+                         "id":  "HexaGen.Runtime",
+                         "version":  "1.1.21",
+                         "file":  "feed/hexagen.runtime.1.1.21.nupkg",
+                         "bytes":  148375,
+                         "sha256":  "399748c028c89c9e8a01698f70ab3454dfe8e00718da4e36ec976d39ff4df4c9",
+                         "sha512":  "b32e8a769965d07c4cc3e27f2df7f5d0e8ca3ff05764bfbfd99f478f38922277710835afc191fbe3cb97336f702f61785b247deac402a05100c8e4acc86fe790",
+                         "signatureEntryPresent":  true,
+                         "sourceUrl":  "https://api.nuget.org/v3-flatcontainer/hexagen.runtime/1.1.21/hexagen.runtime.1.1.21.nupkg",
+                         "projectUrl":  "https://github.com/JunaMeinhold/HexaGen",
+                         "repositoryUrl":  "https://github.com/JunaMeinhold/HexaGen",
+                         "authors":  "Juna Meinhold",
+                         "license":  {
+                                         "type":  "file",
+                                         "value":  "LICENSE.txt",
+                                         "primaryFile":  "licenses/hexagen.runtime/1.1.21/LICENSE.txt"
+                                     },
+                         "legalFiles":  [
+                                            {
+                                                "path":  "licenses/hexagen.runtime/1.1.21/LICENSE.txt",
+                                                "bytes":  1091,
+                                                "sha256":  "4d58417d5df95fabd6a337d5eb2370309fbf76d611ac2dde3229043d2c0d5152"
+                                            }
+                                        ]
+                     },
+                     {
+                         "id":  "Microsoft.AspNetCore.App.Runtime.win-x64",
+                         "version":  "10.0.10",
+                         "file":  "feed/microsoft.aspnetcore.app.runtime.win-x64.10.0.10.nupkg",
+                         "bytes":  12758490,
+                         "sha256":  "1669e0b37959ad5d6306dccc1991ee15863fd08f65dc40fd2addcaffd235d977",
+                         "sha512":  "ff61edef0227871584e3306cbfd8ad6fc98baccd0cdbc05608312414dc1b68cb6ae7ba84f05cac4d4ffe68e2fed167195fdc00cb038e0529b81b0d40bbd4ad6b",
+                         "signatureEntryPresent":  true,
+                         "sourceUrl":  "https://api.nuget.org/v3-flatcontainer/microsoft.aspnetcore.app.runtime.win-x64/10.0.10/microsoft.aspnetcore.app.runtime.win-x64.10.0.10.nupkg",
+                         "projectUrl":  "https://asp.net/",
+                         "repositoryUrl":  "https://github.com/dotnet/dotnet",
+                         "authors":  "Microsoft",
+                         "license":  {
+                                         "type":  "expression",
+                                         "value":  "MIT",
+                                         "primaryFile":  "licenses/microsoft.aspnetcore.app.runtime.win-x64/10.0.10/LICENSE.txt"
+                                     },
+                         "legalFiles":  [
+                                            {
+                                                "path":  "licenses/microsoft.aspnetcore.app.runtime.win-x64/10.0.10/LICENSE.txt",
+                                                "bytes":  1139,
+                                                "sha256":  "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+                                            },
+                                            {
+                                                "path":  "licenses/microsoft.aspnetcore.app.runtime.win-x64/10.0.10/THIRD-PARTY-NOTICES.TXT",
+                                                "bytes":  56748,
+                                                "sha256":  "307d014f65d8482314f1400ddeae7a0cbabb96c2207bcc77f6233cc10588e5d9"
+                                            }
+                                        ]
+                     },
+                     {
+                         "id":  "Microsoft.CodeAnalysis.Analyzers",
+                         "version":  "3.11.0",
+                         "file":  "feed/microsoft.codeanalysis.analyzers.3.11.0.nupkg",
+                         "bytes":  1605871,
+                         "sha256":  "850da5e84e8f3b89bb8be66c7c5944c7ef7752c2cfa38218df00e4346d75fd2c",
+                         "sha512":  "b4ff522f32caef65c2131961f0a5dfaca6d4eb272664bdc4c4697f6b7325ecb372d9469a9bb8058e3526773c936243174f27240871e9cf1edb0fa04cba687c06",
+                         "signatureEntryPresent":  true,
+                         "sourceUrl":  "https://api.nuget.org/v3-flatcontainer/microsoft.codeanalysis.analyzers/3.11.0/microsoft.codeanalysis.analyzers.3.11.0.nupkg",
+                         "projectUrl":  "https://github.com/dotnet/roslyn-analyzers",
+                         "repositoryUrl":  "https://github.com/dotnet/roslyn-analyzers",
+                         "authors":  "Microsoft",
+                         "license":  {
+                                         "type":  "expression",
+                                         "value":  "MIT",
+                                         "primaryFile":  "licenses/shared/MIT.txt"
+                                     },
+                         "legalFiles":  [
+                                            {
+                                                "path":  "licenses/microsoft.codeanalysis.analyzers/3.11.0/ThirdPartyNotices.txt",
+                                                "bytes":  14230,
+                                                "sha256":  "0eabe2880daf9bfb25ac160b1e779c5da95a88406dd06cdb570ec7edb5eabb76"
+                                            },
+                                            {
+                                                "path":  "licenses/shared/MIT.txt",
+                                                "bytes":  1139,
+                                                "sha256":  "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+                                            }
+                                        ]
+                     },
+                     {
+                         "id":  "Microsoft.CodeAnalysis.Common",
+                         "version":  "4.12.0",
+                         "file":  "feed/microsoft.codeanalysis.common.4.12.0.nupkg",
+                         "bytes":  7120597,
+                         "sha256":  "9a6fce286df33cb01e4d5199b6e2f1486fa3a500ce7219f5a321ea041256d87a",
+                         "sha512":  "f37b183c5d127a456179c0290855ec2c2b102fda85cc097989e084a956fc528d3c9d5df8603ddc7eaec52efe849219c0c0f6cfee4cb5f6c00412a60b0d4af158",
+                         "signatureEntryPresent":  true,
+                         "sourceUrl":  "https://api.nuget.org/v3-flatcontainer/microsoft.codeanalysis.common/4.12.0/microsoft.codeanalysis.common.4.12.0.nupkg",
+                         "projectUrl":  "https://github.com/dotnet/roslyn",
+                         "repositoryUrl":  "https://github.com/dotnet/roslyn",
+                         "authors":  "Microsoft",
+                         "license":  {
+                                         "type":  "expression",
+                                         "value":  "MIT",
+                                         "primaryFile":  "licenses/shared/MIT.txt"
+                                     },
+                         "legalFiles":  [
+                                            {
+                                                "path":  "licenses/microsoft.codeanalysis.common/4.12.0/ThirdPartyNotices.rtf",
+                                                "bytes":  2183,
+                                                "sha256":  "ef4678850e7e3aaf9297f07e5c4060d477854e545ccf8e2ef8452d65a7b2efaf"
+                                            },
+                                            {
+                                                "path":  "licenses/shared/MIT.txt",
+                                                "bytes":  1139,
+                                                "sha256":  "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+                                            }
+                                        ]
+                     },
+                     {
+                         "id":  "Microsoft.CodeAnalysis.CSharp",
+                         "version":  "4.12.0",
+                         "file":  "feed/microsoft.codeanalysis.csharp.4.12.0.nupkg",
+                         "bytes":  16985075,
+                         "sha256":  "9b58b5439a7212ae25028623344f5b6848d3a651fcf9b5f1e70480f9e3267a19",
+                         "sha512":  "0db6ffb5ac458a597dffed87449b9f5d6dee740b49690c37f8bcdb5930f2631ed9d361d5754e7274c5d74ea83994581298b0cd05ef81f2346e236798c3c38138",
+                         "signatureEntryPresent":  true,
+                         "sourceUrl":  "https://api.nuget.org/v3-flatcontainer/microsoft.codeanalysis.csharp/4.12.0/microsoft.codeanalysis.csharp.4.12.0.nupkg",
+                         "projectUrl":  "https://github.com/dotnet/roslyn",
+                         "repositoryUrl":  "https://github.com/dotnet/roslyn",
+                         "authors":  "Microsoft",
+                         "license":  {
+                                         "type":  "expression",
+                                         "value":  "MIT",
+                                         "primaryFile":  "licenses/shared/MIT.txt"
+                                     },
+                         "legalFiles":  [
+                                            {
+                                                "path":  "licenses/microsoft.codeanalysis.csharp/4.12.0/ThirdPartyNotices.rtf",
+                                                "bytes":  2183,
+                                                "sha256":  "ef4678850e7e3aaf9297f07e5c4060d477854e545ccf8e2ef8452d65a7b2efaf"
+                                            },
+                                            {
+                                                "path":  "licenses/shared/MIT.txt",
+                                                "bytes":  1139,
+                                                "sha256":  "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+                                            }
+                                        ]
+                     },
+                     {
+                         "id":  "Microsoft.DotNet.ILCompiler",
+                         "version":  "10.0.10",
+                         "file":  "feed/microsoft.dotnet.ilcompiler.10.0.10.nupkg",
+                         "bytes":  94732,
+                         "sha256":  "d33a348d049d71d464edc689b1f16cbbebf5f254cb148c6a9154dfd505aa8378",
+                         "sha512":  "35ef709253d94137bb4f8f686861aab1d922360300a71f413d5e3ea6ac360cca7428f0afc54275c7634860d2a35098dda40408755e07b8e50994dab28789cd7c",
+                         "signatureEntryPresent":  true,
+                         "sourceUrl":  "https://api.nuget.org/v3-flatcontainer/microsoft.dotnet.ilcompiler/10.0.10/microsoft.dotnet.ilcompiler.10.0.10.nupkg",
+                         "projectUrl":  "https://dot.net/",
+                         "repositoryUrl":  "https://github.com/dotnet/dotnet",
+                         "authors":  "Microsoft",
+                         "license":  {
+                                         "type":  "expression",
+                                         "value":  "MIT",
+                                         "primaryFile":  "licenses/shared/MIT.txt"
+                                     },
+                         "legalFiles":  [
+                                            {
+                                                "path":  "licenses/microsoft.dotnet.ilcompiler/10.0.10/THIRD-PARTY-NOTICES.TXT",
+                                                "bytes":  78041,
+                                                "sha256":  "6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21"
+                                            },
+                                            {
+                                                "path":  "licenses/shared/MIT.txt",
+                                                "bytes":  1139,
+                                                "sha256":  "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+                                            }
+                                        ]
+                     },
+                     {
+                         "id":  "Microsoft.NET.ILLink.Tasks",
+                         "version":  "10.0.10",
+                         "file":  "feed/microsoft.net.illink.tasks.10.0.10.nupkg",
+                         "bytes":  1535223,
+                         "sha256":  "97a0eca2030901738f070f142aaf02b3b1aead2bc984c08c428847910b4be312",
+                         "sha512":  "804f0eec3ad1008dd08abdf24b3bdd465ec3cd57fc5eb15f234bdb5179761878a6ddd30f755a25f43c70361fd3ceaf729a8935294fb6c2edaaac5e6358dbf5a5",
+                         "signatureEntryPresent":  true,
+                         "sourceUrl":  "https://api.nuget.org/v3-flatcontainer/microsoft.net.illink.tasks/10.0.10/microsoft.net.illink.tasks.10.0.10.nupkg",
+                         "projectUrl":  "https://dot.net/",
+                         "repositoryUrl":  "https://github.com/dotnet/dotnet",
+                         "authors":  "Microsoft",
+                         "license":  {
+                                         "type":  "expression",
+                                         "value":  "MIT",
+                                         "primaryFile":  "licenses/shared/MIT.txt"
+                                     },
+                         "legalFiles":  [
+                                            {
+                                                "path":  "licenses/microsoft.net.illink.tasks/10.0.10/THIRD-PARTY-NOTICES.TXT",
+                                                "bytes":  78041,
+                                                "sha256":  "6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21"
+                                            },
+                                            {
+                                                "path":  "licenses/shared/MIT.txt",
+                                                "bytes":  1139,
+                                                "sha256":  "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+                                            }
+                                        ]
+                     },
+                     {
+                         "id":  "Microsoft.NETCore.App.Runtime.NativeAOT.win-x64",
+                         "version":  "10.0.10",
+                         "file":  "feed/microsoft.netcore.app.runtime.nativeaot.win-x64.10.0.10.nupkg",
+                         "bytes":  29432703,
+                         "sha256":  "5fd7129af9eed4b5a2ed04219b636f7ba0dd965569275d3379fc4d02f623e626",
+                         "sha512":  "de31b8cf1433d25cfe09a0969471e094019090823f1b1a4e2810e2e12e9efb4416372571609f18a120fbfebccb6255bd135b7f66c8fcf52d0221499dbe3ea978",
+                         "signatureEntryPresent":  true,
+                         "sourceUrl":  "https://api.nuget.org/v3-flatcontainer/microsoft.netcore.app.runtime.nativeaot.win-x64/10.0.10/microsoft.netcore.app.runtime.nativeaot.win-x64.10.0.10.nupkg",
+                         "projectUrl":  "https://dot.net/",
+                         "repositoryUrl":  "https://github.com/dotnet/dotnet",
+                         "authors":  "Microsoft",
+                         "license":  {
+                                         "type":  "expression",
+                                         "value":  "MIT",
+                                         "primaryFile":  "licenses/microsoft.netcore.app.runtime.nativeaot.win-x64/10.0.10/LICENSE.TXT"
+                                     },
+                         "legalFiles":  [
+                                            {
+                                                "path":  "licenses/microsoft.netcore.app.runtime.nativeaot.win-x64/10.0.10/LICENSE.TXT",
+                                                "bytes":  1139,
+                                                "sha256":  "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+                                            },
+                                            {
+                                                "path":  "licenses/microsoft.netcore.app.runtime.nativeaot.win-x64/10.0.10/THIRD-PARTY-NOTICES.TXT",
+                                                "bytes":  78041,
+                                                "sha256":  "6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21"
+                                            }
+                                        ]
+                     },
+                     {
+                         "id":  "Microsoft.NETCore.App.Runtime.win-x64",
+                         "version":  "10.0.10",
+                         "file":  "feed/microsoft.netcore.app.runtime.win-x64.10.0.10.nupkg",
+                         "bytes":  39889960,
+                         "sha256":  "56899c9057d6981ab9f237d6489e469af043668ab34cfb4199b55f92702b06bb",
+                         "sha512":  "77fea6d9bc0d3f7e7f6c10e6b4d3dbd0604bc252b47b233cfd06fbcc4b481490e08c0a3deb46d1394941e9772e2cce1599f03c86494e8060d4f7c9d483ac43c0",
+                         "signatureEntryPresent":  true,
+                         "sourceUrl":  "https://api.nuget.org/v3-flatcontainer/microsoft.netcore.app.runtime.win-x64/10.0.10/microsoft.netcore.app.runtime.win-x64.10.0.10.nupkg",
+                         "projectUrl":  "https://dot.net/",
+                         "repositoryUrl":  "https://github.com/dotnet/dotnet",
+                         "authors":  "Microsoft",
+                         "license":  {
+                                         "type":  "expression",
+                                         "value":  "MIT",
+                                         "primaryFile":  "licenses/microsoft.netcore.app.runtime.win-x64/10.0.10/LICENSE.TXT"
+                                     },
+                         "legalFiles":  [
+                                            {
+                                                "path":  "licenses/microsoft.netcore.app.runtime.win-x64/10.0.10/LICENSE.TXT",
+                                                "bytes":  1139,
+                                                "sha256":  "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+                                            },
+                                            {
+                                                "path":  "licenses/microsoft.netcore.app.runtime.win-x64/10.0.10/THIRD-PARTY-NOTICES.TXT",
+                                                "bytes":  78041,
+                                                "sha256":  "6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21"
+                                            }
+                                        ]
+                     },
+                     {
+                         "id":  "Microsoft.NETCore.Platforms",
+                         "version":  "1.1.0",
+                         "file":  "feed/microsoft.netcore.platforms.1.1.0.nupkg",
+                         "bytes":  17960,
+                         "sha256":  "15e338d24b5c39b4099389cc612841eb51ff13c07bb4829f97d39b27420e7023",
+                         "sha512":  "6bf892c274596fe2c7164e3d8503b24e187f64d0b7bec6d9b05eb95f04086fceb7a85ea6b2685d42dc465c52f6f0e6f636c0b3fddac48f6f0125dfd83e92d106",
+                         "signatureEntryPresent":  true,
+                         "sourceUrl":  "https://api.nuget.org/v3-flatcontainer/microsoft.netcore.platforms/1.1.0/microsoft.netcore.platforms.1.1.0.nupkg",
+                         "projectUrl":  "https://dot.net/",
+                         "repositoryUrl":  "",
+                         "authors":  "Microsoft",
+                         "license":  {
+                                         "type":  "legacy-url",
+                                         "value":  "http://go.microsoft.com/fwlink/?LinkId=329770",
+                                         "primaryFile":  "licenses/microsoft.netcore.platforms/1.1.0/dotnet_library_license.txt"
+                                     },
+                         "legalFiles":  [
+                                            {
+                                                "path":  "licenses/microsoft.netcore.platforms/1.1.0/dotnet_library_license.txt",
+                                                "bytes":  9451,
+                                                "sha256":  "f1db688d8481c91a452fabcea5060a23da9ea5088329b58c478a040e2e426297"
+                                            },
+                                            {
+                                                "path":  "licenses/microsoft.netcore.platforms/1.1.0/ThirdPartyNotices.txt",
+                                                "bytes":  1617,
+                                                "sha256":  "0684b2349427ee28e392ae8914645832e59731dba8a38a984f72b3fb8769c76b"
+                                            }
+                                        ]
+                     },
+                     {
+                         "id":  "Microsoft.WindowsDesktop.App.Runtime.win-x64",
+                         "version":  "10.0.10",
+                         "file":  "feed/microsoft.windowsdesktop.app.runtime.win-x64.10.0.10.nupkg",
+                         "bytes":  39156316,
+                         "sha256":  "f57afeb29ba87f687cb5fd6693c82a1161e8b28e79cf380a02087f4c2ba35758",
+                         "sha512":  "5d4d9afd4b125e095e2b787b014c622374fe4521fcd3a9cb2b9763b654c590f31f05b37d072d0016f4d026a13841817a188bdbdfec1beb918edb2cde27d7e6b0",
+                         "signatureEntryPresent":  true,
+                         "sourceUrl":  "https://api.nuget.org/v3-flatcontainer/microsoft.windowsdesktop.app.runtime.win-x64/10.0.10/microsoft.windowsdesktop.app.runtime.win-x64.10.0.10.nupkg",
+                         "projectUrl":  "https://dot.net/",
+                         "repositoryUrl":  "https://github.com/dotnet/dotnet",
+                         "authors":  "Microsoft",
+                         "license":  {
+                                         "type":  "expression",
+                                         "value":  "MIT",
+                                         "primaryFile":  "licenses/microsoft.windowsdesktop.app.runtime.win-x64/10.0.10/LICENSE"
+                                     },
+                         "legalFiles":  [
+                                            {
+                                                "path":  "licenses/microsoft.windowsdesktop.app.runtime.win-x64/10.0.10/LICENSE",
+                                                "bytes":  1137,
+                                                "sha256":  "a89886665765362eb77e0f8e26602c924520041d1711b2eedc136434fe4d01ab"
+                                            }
+                                        ]
+                     },
+                     {
+                         "id":  "NETStandard.Library",
+                         "version":  "2.0.3",
+                         "file":  "feed/netstandard.library.2.0.3.nupkg",
+                         "bytes":  3146139,
+                         "sha256":  "3eb87644f79bcffb3c0331dbdac3c7837265f2cdf58a7bfd93e431776f77c9ba",
+                         "sha512":  "e78f0cea69c14895b1b089644077dbce8631a626055d96522f4d29e061d8bfc3e48aa1419e74faf265b998612c03f721f5f0cef4690f824150a5689764dee601",
+                         "signatureEntryPresent":  true,
+                         "sourceUrl":  "https://api.nuget.org/v3-flatcontainer/netstandard.library/2.0.3/netstandard.library.2.0.3.nupkg",
+                         "projectUrl":  "https://dot.net/",
+                         "repositoryUrl":  "",
+                         "authors":  "Microsoft",
+                         "license":  {
+                                         "type":  "legacy-url",
+                                         "value":  "https://github.com/dotnet/standard/blob/master/LICENSE.TXT",
+                                         "primaryFile":  "licenses/netstandard.library/2.0.3/LICENSE.TXT"
+                                     },
+                         "legalFiles":  [
+                                            {
+                                                "path":  "licenses/netstandard.library/2.0.3/LICENSE.TXT",
+                                                "bytes":  1115,
+                                                "sha256":  "fc95de1436a321aadbfafd21f8a8506a2f4678bfc003bd806d6b59d3088efadc"
+                                            },
+                                            {
+                                                "path":  "licenses/netstandard.library/2.0.3/THIRD-PARTY-NOTICES.TXT",
+                                                "bytes":  1617,
+                                                "sha256":  "0684b2349427ee28e392ae8914645832e59731dba8a38a984f72b3fb8769c76b"
+                                            }
+                                        ]
+                     },
+                     {
+                         "id":  "runtime.win-x64.Microsoft.DotNet.ILCompiler",
+                         "version":  "10.0.10",
+                         "file":  "feed/runtime.win-x64.microsoft.dotnet.ilcompiler.10.0.10.nupkg",
+                         "bytes":  11897913,
+                         "sha256":  "0ae1c40ef28915e63c257999d4cd860db9086878c3a6f8e30388e00056ab350a",
+                         "sha512":  "37d1639cf75ef73b4758df369b803507eed0d75c69a0f0fb95c4e9f48d0fb7e7f1c2fc98484d3a7a11a8f15b722226da73c644ec2670a9923408eb62ff49f7b6",
+                         "signatureEntryPresent":  true,
+                         "sourceUrl":  "https://api.nuget.org/v3-flatcontainer/runtime.win-x64.microsoft.dotnet.ilcompiler/10.0.10/runtime.win-x64.microsoft.dotnet.ilcompiler.10.0.10.nupkg",
+                         "projectUrl":  "https://dot.net/",
+                         "repositoryUrl":  "https://github.com/dotnet/dotnet",
+                         "authors":  "Microsoft",
+                         "license":  {
+                                         "type":  "expression",
+                                         "value":  "MIT",
+                                         "primaryFile":  "licenses/shared/MIT.txt"
+                                     },
+                         "legalFiles":  [
+                                            {
+                                                "path":  "licenses/runtime.win-x64.microsoft.dotnet.ilcompiler/10.0.10/THIRD-PARTY-NOTICES.TXT",
+                                                "bytes":  78041,
+                                                "sha256":  "6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21"
+                                            },
+                                            {
+                                                "path":  "licenses/shared/MIT.txt",
+                                                "bytes":  1139,
+                                                "sha256":  "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+                                            }
+                                        ]
+                     },
+                     {
+                         "id":  "System.Buffers",
+                         "version":  "4.5.1",
+                         "file":  "feed/system.buffers.4.5.1.nupkg",
+                         "bytes":  93737,
+                         "sha256":  "c30b3dd2c7e2f4cee4b823d692fd42118309b42ab1f5007f923d329a5b0d6b12",
+                         "sha512":  "80da6158e55b9bcf7e0b5e6379b9cf45a632914f037b53c5bf5609576e3cd7821f7861956b73d74470d2d0c2e56dd235a5ef4ca6ffe7e192b820dc2d023aaff2",
+                         "signatureEntryPresent":  true,
+                         "sourceUrl":  "https://api.nuget.org/v3-flatcontainer/system.buffers/4.5.1/system.buffers.4.5.1.nupkg",
+                         "projectUrl":  "https://dot.net/",
+                         "repositoryUrl":  "",
+                         "authors":  "Microsoft",
+                         "license":  {
+                                         "type":  "legacy-url",
+                                         "value":  "https://github.com/dotnet/corefx/blob/master/LICENSE.TXT",
+                                         "primaryFile":  "licenses/system.buffers/4.5.1/LICENSE.TXT"
+                                     },
+                         "legalFiles":  [
+                                            {
+                                                "path":  "licenses/system.buffers/4.5.1/LICENSE.TXT",
+                                                "bytes":  1139,
+                                                "sha256":  "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+                                            },
+                                            {
+                                                "path":  "licenses/system.buffers/4.5.1/THIRD-PARTY-NOTICES.TXT",
+                                                "bytes":  15835,
+                                                "sha256":  "7864a01e2fdef7e8fdf81b906efb1466f083206affea7ba7e6dadea429754765"
+                                            }
+                                        ]
+                     },
+                     {
+                         "id":  "System.Buffers",
+                         "version":  "4.6.0",
+                         "file":  "feed/system.buffers.4.6.0.nupkg",
+                         "bytes":  67596,
+                         "sha256":  "736425805075e8895f066b3960bb1308543f41e2a84baa61d5af6675192afc97",
+                         "sha512":  "8916c9c93497f5b255a5444b18b896f05824e557e6e62182cedc38206e08258731272f815d3084804585789b4ee9cfa43e752642ef3b28ae66d7cf3ea9b12b71",
+                         "signatureEntryPresent":  true,
+                         "sourceUrl":  "https://api.nuget.org/v3-flatcontainer/system.buffers/4.6.0/system.buffers.4.6.0.nupkg",
+                         "projectUrl":  "https://github.com/dotnet/maintenance-packages",
+                         "repositoryUrl":  "https://github.com/dotnet/maintenance-packages",
+                         "authors":  "Microsoft",
+                         "license":  {
+                                         "type":  "expression",
+                                         "value":  "MIT",
+                                         "primaryFile":  "licenses/shared/MIT.txt"
+                                     },
+                         "legalFiles":  [
+                                            {
+                                                "path":  "licenses/shared/MIT.txt",
+                                                "bytes":  1139,
+                                                "sha256":  "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+                                            }
+                                        ]
+                     },
+                     {
+                         "id":  "System.Collections.Immutable",
+                         "version":  "8.0.0",
+                         "file":  "feed/system.collections.immutable.8.0.0.nupkg",
+                         "bytes":  787241,
+                         "sha256":  "17b3958ca370a6a6d487c95389d6ea256622e3bea7b2af67fba934f90551a37c",
+                         "sha512":  "057a9591c22b8629afbde9baab60a15a4b96e976188abbdbe85961beec1a32806a05da5caf89de84904a3fae53c38d14a9c50cea80e8383b1e70cd328d9e8053",
+                         "signatureEntryPresent":  true,
+                         "sourceUrl":  "https://api.nuget.org/v3-flatcontainer/system.collections.immutable/8.0.0/system.collections.immutable.8.0.0.nupkg",
+                         "projectUrl":  "https://dot.net/",
+                         "repositoryUrl":  "https://github.com/dotnet/runtime",
+                         "authors":  "Microsoft",
+                         "license":  {
+                                         "type":  "expression",
+                                         "value":  "MIT",
+                                         "primaryFile":  "licenses/system.collections.immutable/8.0.0/LICENSE.TXT"
+                                     },
+                         "legalFiles":  [
+                                            {
+                                                "path":  "licenses/system.collections.immutable/8.0.0/LICENSE.TXT",
+                                                "bytes":  1139,
+                                                "sha256":  "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+                                            },
+                                            {
+                                                "path":  "licenses/system.collections.immutable/8.0.0/THIRD-PARTY-NOTICES.TXT",
+                                                "bytes":  68911,
+                                                "sha256":  "19c19dcac9f3ee6302cfbc6745bb8e79f08efc4c933eb8dc5509bf14b88347ec"
+                                            }
+                                        ]
+                     },
+                     {
+                         "id":  "System.Memory",
+                         "version":  "4.5.5",
+                         "file":  "feed/system.memory.4.5.5.nupkg",
+                         "bytes":  208978,
+                         "sha256":  "10f43da352a29fb2b3188e4edd4dcf5100194c8b526e4f61fe2e2b5623775a22",
+                         "sha512":  "e8c8e536c97b94ac3443c940b30dad43cf6e97dc7a8c3d989371048fe74e168606384f5e0143bdc0d86f7783bf9fdee8417964cb3a8a5d752713e90b125172dc",
+                         "signatureEntryPresent":  true,
+                         "sourceUrl":  "https://api.nuget.org/v3-flatcontainer/system.memory/4.5.5/system.memory.4.5.5.nupkg",
+                         "projectUrl":  "https://dot.net/",
+                         "repositoryUrl":  "",
+                         "authors":  "Microsoft",
+                         "license":  {
+                                         "type":  "legacy-url",
+                                         "value":  "https://github.com/dotnet/corefx/blob/master/LICENSE.TXT",
+                                         "primaryFile":  "licenses/system.memory/4.5.5/LICENSE.TXT"
+                                     },
+                         "legalFiles":  [
+                                            {
+                                                "path":  "licenses/system.memory/4.5.5/LICENSE.TXT",
+                                                "bytes":  1139,
+                                                "sha256":  "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+                                            },
+                                            {
+                                                "path":  "licenses/system.memory/4.5.5/THIRD-PARTY-NOTICES.TXT",
+                                                "bytes":  15835,
+                                                "sha256":  "7864a01e2fdef7e8fdf81b906efb1466f083206affea7ba7e6dadea429754765"
+                                            }
+                                        ]
+                     },
+                     {
+                         "id":  "System.Memory",
+                         "version":  "4.6.0",
+                         "file":  "feed/system.memory.4.6.0.nupkg",
+                         "bytes":  192800,
+                         "sha256":  "3a10042b350ce9e11a1fdf4370668ccf6a452c6feafcde0a556aaa881614385a",
+                         "sha512":  "4d8ecda55e15bf4bf06a767a27cbeb2c67f26db3ca840bcbde84f1ec49ddb19fc9ffbd6c9b4d493c21c89adbd8b70875be615ab7f18f4bf89df61b6a20f2beea",
+                         "signatureEntryPresent":  true,
+                         "sourceUrl":  "https://api.nuget.org/v3-flatcontainer/system.memory/4.6.0/system.memory.4.6.0.nupkg",
+                         "projectUrl":  "https://github.com/dotnet/maintenance-packages",
+                         "repositoryUrl":  "https://github.com/dotnet/maintenance-packages",
+                         "authors":  "Microsoft",
+                         "license":  {
+                                         "type":  "expression",
+                                         "value":  "MIT",
+                                         "primaryFile":  "licenses/shared/MIT.txt"
+                                     },
+                         "legalFiles":  [
+                                            {
+                                                "path":  "licenses/shared/MIT.txt",
+                                                "bytes":  1139,
+                                                "sha256":  "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+                                            }
+                                        ]
+                     },
+                     {
+                         "id":  "System.Numerics.Vectors",
+                         "version":  "4.5.0",
+                         "file":  "feed/system.numerics.vectors.4.5.0.nupkg",
+                         "bytes":  382792,
+                         "sha256":  "a9d49320581fda1b4f4be6212c68c01a22cdf228026099c20a8eabefcf90f9cf",
+                         "sha512":  "9c04ec0530f608aaf801837a791b33857e2ca6d2265a6049c01fd4e972825967e709cad3070f174829b7400f608e9a641d3afc3a45d4636d4c47dd43dd0657b3",
+                         "signatureEntryPresent":  true,
+                         "sourceUrl":  "https://api.nuget.org/v3-flatcontainer/system.numerics.vectors/4.5.0/system.numerics.vectors.4.5.0.nupkg",
+                         "projectUrl":  "https://dot.net/",
+                         "repositoryUrl":  "",
+                         "authors":  "Microsoft",
+                         "license":  {
+                                         "type":  "legacy-url",
+                                         "value":  "https://github.com/dotnet/corefx/blob/master/LICENSE.TXT",
+                                         "primaryFile":  "licenses/system.numerics.vectors/4.5.0/LICENSE.TXT"
+                                     },
+                         "legalFiles":  [
+                                            {
+                                                "path":  "licenses/system.numerics.vectors/4.5.0/LICENSE.TXT",
+                                                "bytes":  1139,
+                                                "sha256":  "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+                                            },
+                                            {
+                                                "path":  "licenses/system.numerics.vectors/4.5.0/THIRD-PARTY-NOTICES.TXT",
+                                                "bytes":  15835,
+                                                "sha256":  "7864a01e2fdef7e8fdf81b906efb1466f083206affea7ba7e6dadea429754765"
+                                            }
+                                        ]
+                     },
+                     {
+                         "id":  "System.Numerics.Vectors",
+                         "version":  "4.6.0",
+                         "file":  "feed/system.numerics.vectors.4.6.0.nupkg",
+                         "bytes":  136752,
+                         "sha256":  "7ca4b7b964361e647af6f3610c7a8f2d834eb77aa98e25903976431ef444d475",
+                         "sha512":  "7716566e79dbdb5fb942e280894127b498ab8792a25359ea94b5ad06ee2ff7f171d519ec80d9fc4f85db99086f0aafd3f78db4d4fe84b061b6cf663975e775c8",
+                         "signatureEntryPresent":  true,
+                         "sourceUrl":  "https://api.nuget.org/v3-flatcontainer/system.numerics.vectors/4.6.0/system.numerics.vectors.4.6.0.nupkg",
+                         "projectUrl":  "https://github.com/dotnet/maintenance-packages",
+                         "repositoryUrl":  "https://github.com/dotnet/maintenance-packages",
+                         "authors":  "Microsoft",
+                         "license":  {
+                                         "type":  "expression",
+                                         "value":  "MIT",
+                                         "primaryFile":  "licenses/shared/MIT.txt"
+                                     },
+                         "legalFiles":  [
+                                            {
+                                                "path":  "licenses/shared/MIT.txt",
+                                                "bytes":  1139,
+                                                "sha256":  "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+                                            }
+                                        ]
+                     },
+                     {
+                         "id":  "System.Reflection.Metadata",
+                         "version":  "8.0.0",
+                         "file":  "feed/system.reflection.metadata.8.0.0.nupkg",
+                         "bytes":  1307788,
+                         "sha256":  "750182df425ab880d63565ccad234e2677156b5ba6475b228dacd8c140dd4881",
+                         "sha512":  "fbab0c76426379ed01ea79b702504197b710688d283e788bbef92b90586610dddfa3f84638d685770a4068ef8645395b65ee24459cc5c14ee4497416d11c89c6",
+                         "signatureEntryPresent":  true,
+                         "sourceUrl":  "https://api.nuget.org/v3-flatcontainer/system.reflection.metadata/8.0.0/system.reflection.metadata.8.0.0.nupkg",
+                         "projectUrl":  "https://dot.net/",
+                         "repositoryUrl":  "https://github.com/dotnet/runtime",
+                         "authors":  "Microsoft",
+                         "license":  {
+                                         "type":  "expression",
+                                         "value":  "MIT",
+                                         "primaryFile":  "licenses/system.reflection.metadata/8.0.0/LICENSE.TXT"
+                                     },
+                         "legalFiles":  [
+                                            {
+                                                "path":  "licenses/system.reflection.metadata/8.0.0/LICENSE.TXT",
+                                                "bytes":  1139,
+                                                "sha256":  "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+                                            },
+                                            {
+                                                "path":  "licenses/system.reflection.metadata/8.0.0/THIRD-PARTY-NOTICES.TXT",
+                                                "bytes":  68911,
+                                                "sha256":  "19c19dcac9f3ee6302cfbc6745bb8e79f08efc4c933eb8dc5509bf14b88347ec"
+                                            }
+                                        ]
+                     },
+                     {
+                         "id":  "System.Runtime.CompilerServices.Unsafe",
+                         "version":  "6.0.0",
+                         "file":  "feed/system.runtime.compilerservices.unsafe.6.0.0.nupkg",
+                         "bytes":  84343,
+                         "sha256":  "6c41b53e70e9eee298cff3a02ce5acdd15b04125589be0273f0566026720a762",
+                         "sha512":  "d4057301be4ec4936f24b9ce003b5ec4d99681ab6d9b65d5393dd38d04cdec37784aaa12c1a8b50ac3767ed878dae425749490773fec01e734f93cf1045822b3",
+                         "signatureEntryPresent":  true,
+                         "sourceUrl":  "https://api.nuget.org/v3-flatcontainer/system.runtime.compilerservices.unsafe/6.0.0/system.runtime.compilerservices.unsafe.6.0.0.nupkg",
+                         "projectUrl":  "https://dot.net/",
+                         "repositoryUrl":  "https://github.com/dotnet/runtime",
+                         "authors":  "Microsoft",
+                         "license":  {
+                                         "type":  "expression",
+                                         "value":  "MIT",
+                                         "primaryFile":  "licenses/system.runtime.compilerservices.unsafe/6.0.0/LICENSE.TXT"
+                                     },
+                         "legalFiles":  [
+                                            {
+                                                "path":  "licenses/system.runtime.compilerservices.unsafe/6.0.0/LICENSE.TXT",
+                                                "bytes":  1139,
+                                                "sha256":  "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+                                            },
+                                            {
+                                                "path":  "licenses/system.runtime.compilerservices.unsafe/6.0.0/THIRD-PARTY-NOTICES.TXT",
+                                                "bytes":  46990,
+                                                "sha256":  "a6344bfb229bc08d1071cec400eea216e307439f961c5943ec1b56d2245acb95"
+                                            }
+                                        ]
+                     },
+                     {
+                         "id":  "System.Runtime.CompilerServices.Unsafe",
+                         "version":  "6.1.0",
+                         "file":  "feed/system.runtime.compilerservices.unsafe.6.1.0.nupkg",
+                         "bytes":  62013,
+                         "sha256":  "372aaaa51707ba6cd2c69b2044382e0f9486c1d50d1c16e8d0e39dccb4c8cc25",
+                         "sha512":  "898d2ea5f7507a26827e8c53fa6e172726f4209364e01f532d015a9ce08ead4f57e71d71d938cac743856cb9a0d551b674ec8be671cc9f5f7c48143dd58cb591",
+                         "signatureEntryPresent":  true,
+                         "sourceUrl":  "https://api.nuget.org/v3-flatcontainer/system.runtime.compilerservices.unsafe/6.1.0/system.runtime.compilerservices.unsafe.6.1.0.nupkg",
+                         "projectUrl":  "https://github.com/dotnet/maintenance-packages",
+                         "repositoryUrl":  "https://github.com/dotnet/maintenance-packages",
+                         "authors":  "Microsoft",
+                         "license":  {
+                                         "type":  "expression",
+                                         "value":  "MIT",
+                                         "primaryFile":  "licenses/shared/MIT.txt"
+                                     },
+                         "legalFiles":  [
+                                            {
+                                                "path":  "licenses/shared/MIT.txt",
+                                                "bytes":  1139,
+                                                "sha256":  "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+                                            }
+                                        ]
+                     },
+                     {
+                         "id":  "System.Text.Encoding.CodePages",
+                         "version":  "7.0.0",
+                         "file":  "feed/system.text.encoding.codepages.7.0.0.nupkg",
+                         "bytes":  3198933,
+                         "sha256":  "782293570ba60f4e7564472825c0d54469c8180b04bcaa5f1f7c9d2a5b87c66a",
+                         "sha512":  "485abfaeb1f9dac307249b2d84375a7d63c4bb175109107ba59e3ab6b476c52a62d677ca3c06f0e9a999afd5bf2f21d396a4b4d534563bb9da8d1b8ed6fc458a",
+                         "signatureEntryPresent":  true,
+                         "sourceUrl":  "https://api.nuget.org/v3-flatcontainer/system.text.encoding.codepages/7.0.0/system.text.encoding.codepages.7.0.0.nupkg",
+                         "projectUrl":  "https://dot.net/",
+                         "repositoryUrl":  "https://github.com/dotnet/runtime",
+                         "authors":  "Microsoft",
+                         "license":  {
+                                         "type":  "expression",
+                                         "value":  "MIT",
+                                         "primaryFile":  "licenses/system.text.encoding.codepages/7.0.0/LICENSE.TXT"
+                                     },
+                         "legalFiles":  [
+                                            {
+                                                "path":  "licenses/system.text.encoding.codepages/7.0.0/LICENSE.TXT",
+                                                "bytes":  1139,
+                                                "sha256":  "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+                                            },
+                                            {
+                                                "path":  "licenses/system.text.encoding.codepages/7.0.0/THIRD-PARTY-NOTICES.TXT",
+                                                "bytes":  63076,
+                                                "sha256":  "e5263d73f2fcb1ee8fa2d4e5439cc0052d02f8a4910816977b8834359e3fe689"
+                                            }
+                                        ]
+                     },
+                     {
+                         "id":  "System.Threading.Tasks.Extensions",
+                         "version":  "4.5.4",
+                         "file":  "feed/system.threading.tasks.extensions.4.5.4.nupkg",
+                         "bytes":  89582,
+                         "sha256":  "a304a963cc0796c5179f9c6b7d8022bbce3b2fa7c029eb6196f631f7b462d678",
+                         "sha512":  "68052086e77d3c7198737a3da163d67740b7c44f93250c39659b3bf21b6547a9abf64cbf40481f5c78f24361af3aaf47d52d188b371554a0928a7f7665c1fc14",
+                         "signatureEntryPresent":  true,
+                         "sourceUrl":  "https://api.nuget.org/v3-flatcontainer/system.threading.tasks.extensions/4.5.4/system.threading.tasks.extensions.4.5.4.nupkg",
+                         "projectUrl":  "https://dot.net/",
+                         "repositoryUrl":  "",
+                         "authors":  "Microsoft",
+                         "license":  {
+                                         "type":  "legacy-url",
+                                         "value":  "https://github.com/dotnet/corefx/blob/master/LICENSE.TXT",
+                                         "primaryFile":  "licenses/system.threading.tasks.extensions/4.5.4/LICENSE.TXT"
+                                     },
+                         "legalFiles":  [
+                                            {
+                                                "path":  "licenses/system.threading.tasks.extensions/4.5.4/LICENSE.TXT",
+                                                "bytes":  1139,
+                                                "sha256":  "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+                                            },
+                                            {
+                                                "path":  "licenses/system.threading.tasks.extensions/4.5.4/THIRD-PARTY-NOTICES.TXT",
+                                                "bytes":  15835,
+                                                "sha256":  "7864a01e2fdef7e8fdf81b906efb1466f083206affea7ba7e6dadea429754765"
+                                            }
+                                        ]
+                     }
+                 ]
+}

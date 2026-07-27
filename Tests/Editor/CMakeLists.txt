@@ -1,7 +1,12 @@
 # Editor unit tests only compile deterministic non-UI editor support code.
 # They deliberately avoid the editor executable, GLFW, Vulkan, and launcher.
+file(GLOB_RECURSE TERRAENGINE_EDITOR_ANIMATION_TEST_SOURCES CONFIGURE_DEPENDS
+	"${CMAKE_CURRENT_SOURCE_DIR}/Animation/*.cpp"
+)
+
 add_executable(TerraEngine-EditorTests
 	EditorTests.cpp
+	${TERRAENGINE_EDITOR_ANIMATION_TEST_SOURCES}
 	Export/ArchiveSerializationTests.cpp
 	Export/BuildProfileCollectionTests.cpp
 	Export/BuildProfileEdgeTests.cpp
@@ -25,6 +30,7 @@ add_executable(TerraEngine-EditorTests
 	Export/LinuxPlatformExportTests.cpp
 	Export/MaterialExportValidationTests.cpp
 	Export/MaterialPreviewContractTests.cpp
+	Export/NativeAotProjectWorkspaceTests.cpp
 	Export/PackRoundTripTests.cpp
 	Export/PackagingRequestValidationTests.cpp
 	Export/ResidencyPolicyExportTests.cpp
@@ -92,6 +98,7 @@ add_executable(TerraEngine-EditorTests
 	AssetPipeline/FbxImportDiagnosticsTests.cpp
 	AssetPipeline/FbxPackageBrowserContractTests.cpp
 	AssetPipeline/FbxReadOnlySubAssetTests.cpp
+	AssetPipeline/AssetDatabaseCancellationTests.cpp
 	AssetPipeline/TextureCompilerWorkerTests.cpp
 	AssetPipeline/GltfPackageImporterTests.cpp
 	AssetPipeline/GltfMaterialTextureTests.cpp
@@ -155,6 +162,16 @@ add_executable(TerraEngine-EditorTests
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Core/EditorStartupRendererConfiguration.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Core/CheckedImGuiVulkanBridge.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Core/ViewportTextureRegistry.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Animation/AnimationPreviewController.cpp
+	# Animation authoring and automation tests link the same UI-independent
+	# production models used by the installed editor and MCP provider.
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Animation/AnimationAuthoringTransaction.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Animation/AnimationControllerAuthoringService.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Animation/AnimationOverlays.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Animation/AnimationPrefabIntegration.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Animation/AnimationRecorder.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Animation/AnimationSceneHandles.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Assets/AnimationAssetActions.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Project/ProjectManager.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Project/ManagedReadinessManifest.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Project/ScriptWorkspaceService.cpp
@@ -176,12 +193,25 @@ add_executable(TerraEngine-EditorTests
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/Providers/HistoryPlayModeAutomationProvider.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/Providers/AuthoringAutomationProvider.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/Providers/PhysicsAutomationProvider.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/AnimationAutomationSchemas.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/AnimationAutomationTransactions.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/AnimationAutomationJobs.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/AnimationAssetOperations.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/AnimationControllerOperations.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/AnimationAdvancedOperations.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/AnimationRuntimeOperations.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/Providers/AnimationAutomationProvider.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/SceneViewOrientationWidget.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/SceneViewMarkerPipeline.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/SceneViewOverlayIcons.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/SceneViewOverlayMarkers.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/SceneViewOverlayTypes.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/MeshCompiler.cpp
+	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/AnimationClipCompiler.cpp
+	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/MotionDatabaseCompiler.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/MotionDatabaseAuthoringHost.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/RetargetEditorWindow.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/RagdollEditorWindow.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/TextureCompiler.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/ShaderCompiler.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/ModelPackageImporter.cpp
@@ -230,6 +260,7 @@ endif()
 
 target_compile_definitions(TerraEngine-EditorTests
 	PRIVATE
+		TERRAENGINE_EDITOR_TESTS
 		XXH_STATIC_LINKING_ONLY
 		ZSTD_STATIC_LINKING_ONLY
 		TERRAENGINE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
@@ -249,6 +280,14 @@ target_link_libraries(TerraEngine-EditorTests
 		xxhash
 )
 
+# Script-workspace tests must consume the managed bridge and source generator
+# produced by this CMake build. Declaring the dependency prevents a developer's
+# pre-existing Engine/Managed/bin output from masking a clean-checkout failure.
+add_dependencies(TerraEngine-EditorTests
+	TerraEngine
+	TerraEngine.Export.Generator
+)
+
 if(WIN32)
 	target_link_libraries(TerraEngine-EditorTests PRIVATE ws2_32)
 endif()
@@ -260,6 +299,17 @@ if(WIN32)
 		COMMAND ${CMAKE_COMMAND} -E copy_if_different
 			$<TARGET_RUNTIME_DLLS:TerraEngine-EditorTests>
 			$<TARGET_FILE_DIR:TerraEngine-EditorTests>
+		# ScriptWorkspaceService resolves managed assets relative to the running
+		# executable. Stage the CMake-owned outputs there so synchronization tests
+		# remain self-contained when no direct dotnet bin directory exists.
+		COMMAND ${CMAKE_COMMAND} -E make_directory
+			"$<TARGET_FILE_DIR:TerraEngine-EditorTests>/Managed/Analyzers"
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different
+			"${MANAGED_OUTPUT_DIR}/TerraEngine.CSharp.dll"
+			"$<TARGET_FILE_DIR:TerraEngine-EditorTests>/Managed/TerraEngine.CSharp.dll"
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different
+			"${MANAGED_OUTPUT_DIR}/Analyzers/TerraEngine.Export.Generator.dll"
+			"$<TARGET_FILE_DIR:TerraEngine-EditorTests>/Managed/Analyzers/TerraEngine.Export.Generator.dll"
 		COMMAND_EXPAND_LISTS
 	)
 endif()
@@ -313,6 +363,12 @@ add_test(NAME Editor.VirtualGeometryAssetPipeline COMMAND $<TARGET_FILE:TerraEng
 set_tests_properties(Editor.VirtualGeometryAssetPipeline PROPERTIES
 	LABELS "Editor;VirtualGeometry;AssetPipeline"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Editor.AssetPipeline.VirtualGeometry,VirtualGeometry.Editor.PackageImport,VirtualGeometry.Editor.Inspector,VirtualGeometry.Editor.AssetDatabase"
+)
+
+add_test(NAME Editor.AssetDatabaseCancellation COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.AssetDatabaseCancellation PROPERTIES
+	LABELS "Editor;AssetPipeline;Cancellation"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=AssetDatabaseCancellation"
 )
 
 add_test(NAME Editor.VirtualGeometryAutomation COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
@@ -385,4 +441,12 @@ add_test(NAME Editor.PhysicsSoak COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
 set_tests_properties(Editor.PhysicsSoak PROPERTIES
 	LABELS "Editor;Physics;Stress;Soak"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Physics.Editor.Soak"
+)
+
+# Editor animation tests share one durable filter so later authoring and MCP
+# stories can add files without reopening this central registration list.
+add_test(NAME Editor.Animation COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.Animation PROPERTIES
+	LABELS "Editor;Animation"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Animation"
 )

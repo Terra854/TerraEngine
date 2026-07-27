@@ -34,6 +34,33 @@ entt::registry& ComponentAccessObjectRegistry()
 	return ObjectManager::instance().getRegistry();
 }
 
+void NotifyReflectedComponentPropertyMutation(
+	entt::registry& registry,
+	entt::entity entity,
+	std::string_view componentName)
+{
+	// Transform is the only reflected component whose property values feed the
+	// renderer's spatial cache directly. Other component types retain their
+	// existing structure/dirty notifications at the higher-level mutation path.
+	if(componentName != Transform::kComponentName) return;
+
+	ObjectManager& objects = ObjectManager::instance();
+	if(&registry != &objects.getRegistry()) {
+		// Tests and tools may own isolated EnTT registries. They have no
+		// ObjectManager spatial snapshot to invalidate.
+		return;
+	}
+
+	const std::optional<Object> object = objects.getObject(entity);
+	if(object) {
+		// This runs only after the reflected write lock is released. Inspector,
+		// automation, managed runtime, and exported-build writes therefore all
+		// publish the same transform/bounds revisions without retaining a live
+		// component pointer across the protected notification.
+		objects.MarkObjectTransformDirty(*object);
+	}
+}
+
 ComponentAccessObservation ObserveRegisteredComponentAccess(entt::registry& registry, entt::entity entity, std::string_view componentName, std::uint64_t componentGeneration)
 {
 	// Worker-side transaction builders use this read-only observation to bind

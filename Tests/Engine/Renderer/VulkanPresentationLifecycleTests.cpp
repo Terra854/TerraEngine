@@ -43,5 +43,99 @@ namespace TerraEngine::Tests
 			lifecycle.PublishRecreation(PresentationRecreationOutcome::DeferredZeroExtent, 2, 2, 3);
 			context.Expect(lifecycle.State() == PresentationLifecycleState::DeferredZeroExtent, "Minimize should defer without blocking.");
 		});
+
+		registry.Add("Renderer.VulkanPresentationLifecycle.CoalescesResizeAndAdvisorySuboptimal", [](TestContext& context) {
+			using namespace TerraEngine::Renderer::Vulkan;
+			PresentationRecreationCoordinator coordinator;
+			coordinator.SetActiveExtent({ 1600u, 900u });
+			coordinator.RequestFramebufferExtent({ 1920u, 1080u });
+			coordinator.RequestFramebufferExtent({ 1920u, 1080u });
+			const auto request = coordinator.Claim();
+			context.Expect(request.has_value() && request->revision == 1u, "Repeated native extent callbacks should coalesce into one recreation revision.");
+			context.Expect(!coordinator.Claim().has_value(), "A claimed resize revision must not rebuild periodically before a new event.");
+			coordinator.PublishSuccess({ 1920u, 1080u });
+			context.Expect(!coordinator.RequestSuboptimalIfExtentChanged(), "SUBOPTIMAL is advisory while the active presentation extent still matches.");
+			coordinator.RequestFramebufferExtent({ 0u, 0u });
+			context.Expect(coordinator.IsSuspendedForZeroExtent() && !coordinator.Claim().has_value(), "Minimize should suspend instead of claiming periodic zero-extent rebuilds.");
+			coordinator.RequestFramebufferExtent({ 1280u, 720u });
+			context.Expect(coordinator.Claim().has_value(), "Restore with a new nonzero extent should create exactly one fresh request.");
+		});
+
+		registry.Add("Renderer.VulkanPresentationLifecycle.FailureAndPresentFenceRetirement", [](TestContext& context) {
+			using namespace TerraEngine::Renderer::Vulkan;
+			PresentationRecreationCoordinator coordinator;
+			coordinator.SetActiveExtent({ 1280u, 720u });
+			coordinator.RequestOutOfDate();
+			context.Expect(coordinator.Claim().has_value(), "OUT_OF_DATE must force a recovery request even with an unchanged extent.");
+			coordinator.PublishRetirementBlocked(true);
+			context.Expect(coordinator.OldSwapchainWasConsumed() && !coordinator.Claim().has_value(), "A failed oldSwapchain handoff must suspend rather than restore or reattempt the retired chain.");
+			context.Expect(coordinator.RequestRetryAfterRetirement(), "Explicit retirement proof should publish one fresh recovery revision.");
+			context.Expect(coordinator.Claim().has_value(), "The fresh post-retirement revision should permit one bounded recovery attempt.");
+			context.Expect(!coordinator.Claim().has_value(), "Post-retirement recovery must not retry repeatedly without another event.");
+
+			PresentationRetirementTracker fences;
+			fences.BeginRetirement(9u, 3u);
+			fences.RecordPresentFence(9u, 0u, true);
+			fences.RecordPresentFence(9u, 1u, true);
+			context.Expect(!fences.CanDestroyRetiredBundle(9u), "A retired bundle must retain image-owned waits until every present completion fence signals.");
+			fences.RecordPresentFence(8u, 2u, true);
+			context.Expect(!fences.CanDestroyRetiredBundle(9u), "A stale generation completion may not release the current retired bundle.");
+			fences.RecordPresentFence(9u, 2u, true);
+			context.Expect(fences.CanDestroyRetiredBundle(9u), "All matching-generation present fences prove retirement ordering.");
+
+			PresentationRetirementTracker partialCoverage;
+			partialCoverage.BeginRetirement(10u, 2u);
+			partialCoverage.RecordPresentFence(10u, 0u, true);
+			partialCoverage.RecordPresentFence(10u, 1u, true);
+			partialCoverage.RecordUnfencedPresent(10u);
+			context.Expect(!partialCoverage.CanDestroyRetiredBundle(10u),
+				"Reusable signaled fences cannot release a generation after one later present lost completion coverage.");
+
+			PresentationRecreationCoordinator backlog;
+			backlog.SetActiveExtent({ 1280u, 720u });
+			backlog.RequestFramebufferExtent({ 1600u, 900u });
+			context.Expect(backlog.Claim().has_value(), "A changed extent should claim the initial bounded recreation attempt.");
+			backlog.PublishRetirementBlocked(false);
+			context.Expect(!backlog.RequestSuboptimalIfExtentChanged(),
+				"Advisory SUBOPTIMAL results must not spin new revisions while acquire-history proof is pending.");
+			context.Expect(!backlog.Claim().has_value(), "A full retirement backlog must keep presenting instead of reclaiming the same revision.");
+			context.Expect(backlog.RequestRetryAfterRetirement(), "Released fallback resources should explicitly re-arm the deferred resize.");
+			context.Expect(backlog.Claim().has_value(), "The re-armed fallback revision should be claimable exactly once.");
+		});
+
+		registry.Add("Renderer.VulkanPresentationLifecycle.UnextendedAcquireProofRetiresLatestChain", [](TestContext& context) {
+			using namespace TerraEngine::Renderer::Vulkan;
+			UnextendedPresentationRetirementTracker tracker;
+			tracker.BeginGeneration(4u, true);
+			context.Expect(!tracker.NeedsAcquireProof(), "A retired chain must remain intact until the new chain has its first present.");
+			tracker.RecordPresent(4u, 2u);
+			context.Expect(tracker.NeedsAcquireProof(), "The first new-chain present should request a matching completed acquire proof.");
+			context.Expect(!tracker.RecordCompletedAcquire(3u, 2u), "A stale-generation acquire must not release retired bundles.");
+			context.Expect(!tracker.RecordCompletedAcquire(4u, 1u), "An acquire of another image must not release the first-present anchor.");
+			context.Expect(tracker.RecordCompletedAcquire(4u, 2u), "The matching completed acquire proves the retired presentation chain can be released.");
+			context.Expect(!tracker.NeedsAcquireProof(), "A completed proof should release retired bundles exactly once.");
+			context.Expect(!tracker.RecordCompletedAcquire(4u, 2u), "A consumed acquire proof must not release the same bundle twice.");
+		});
+
+		registry.Add("Renderer.VulkanPresentationLifecycle.UnextendedRecreationFoldsAndSeparatesMaintenance", [](TestContext& context) {
+			using namespace TerraEngine::Renderer::Vulkan;
+			UnextendedPresentationRetirementTracker fallback;
+			fallback.BeginGeneration(10u, true);
+			// A zero-extent pause records no present/acquire and therefore leaves
+			// the old bundle pending rather than inventing completion evidence.
+			context.Expect(!fallback.NeedsAcquireProof(), "No presentation events during a zero-extent pause may release retired resources.");
+			fallback.BeginGeneration(11u, true);
+			fallback.RecordPresent(10u, 0u);
+			context.Expect(!fallback.NeedsAcquireProof(), "A superseded generation may not become the release anchor.");
+			fallback.RecordPresent(11u, 1u);
+			context.Expect(fallback.NeedsAcquireProof(), "Multiple recreations should fold old bundles under the newest first present.");
+			context.Expect(fallback.RecordCompletedAcquire(11u, 1u), "The newest matching acquire should release every folded retired bundle.");
+
+			PresentationRetirementTracker maintenance;
+			maintenance.BeginRetirement(11u, 1u);
+			context.Expect(!maintenance.CanDestroyRetiredBundle(11u), "The explicit maintenance-fence path must remain independent from acquire-history proof.");
+			maintenance.RecordPresentFence(11u, 0u, true);
+			context.Expect(maintenance.CanDestroyRetiredBundle(11u), "Maintenance mode releases only through its own explicit present fence.");
+		});
 	}
 }

@@ -11,12 +11,18 @@
 #include "EditorAutomationJobService.h"
 #include "EditorAutomationLogStore.h"
 #include "EditorAutomationRegistry.h"
+#include "AnimationAutomationTransactions.h"
+#include "AnimationRuntimeOperations.h"
+#include "../Animation/AnimationPreviewController.h"
 #include "../Subsystems/MainEditorSubsystem.h"
 
 #include "Engine/Core/Object/Object.h"
 
+#include <chrono>
 #include <functional>
+#include <filesystem>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -35,6 +41,7 @@ namespace TerraEngine::Editor::Automation
 		using ActivityCallback = std::function<void(ActivityEventType, std::string, std::string, std::string)>;
 
 		EditorAutomationService();
+		~EditorAutomationService();
 
 		void SetEditorContext(EditorContext* context);
 		void SetMainEditor(MainEditorSubsystem* editor);
@@ -55,6 +62,10 @@ namespace TerraEngine::Editor::Automation
 		EditorAutomationIdempotencyStore& GetIdempotencyStore();
 		const EditorAutomationIdempotencyStore& GetIdempotencyStore() const;
 		[[nodiscard]] AutomationStateSnapshot BuildAutomationStateSnapshot() const;
+		// EditorSystem calls this after AnimationSystem has published immutable
+		// snapshots for a frame. Keeping the call explicit prevents request polling
+		// from becoming the accidental owner of recorder capture progress.
+		void PumpAnimationRecordingsAtProtectedFrame();
 
 		nlohmann::json HandleTool(std::string_view name, const nlohmann::json& arguments, WriteMode writeMode, const std::string& requestId);
 		nlohmann::json BuildSuccess(std::string_view requestId, std::string_view message, nlohmann::json data = nlohmann::json::object()) const;
@@ -139,6 +150,15 @@ namespace TerraEngine::Editor::Automation
 		nlohmann::json HandleDiagnosticsGetSummary(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json ExecuteProviderHandler(std::uint64_t operation, std::string_view operationName, const nlohmann::json& arguments, WriteMode writeMode, const std::string& requestId);
 		void RefreshPhysicsCookJob(std::string_view jobId);
+		void RefreshAnimationImportJob(std::string_view jobId);
+		AutomationHandler ResolveAnimationAutomationHandler(std::string_view name);
+		AutomationDispatchResult ExecuteAnimationAutomationHandler(
+			std::uint64_t operation,
+			std::string_view operationName,
+			const AutomationRequestContext& request);
+		AutomationDispatchResult ExecuteAnimationPreviewCommit(
+			const nlohmann::json& arguments,
+			bool rendererAvailable);
 		AutomationHandler ResolvePhysicsAutomationHandler(std::string_view name);
 		AutomationDispatchResult ExecutePhysicsAutomationHandler(
 			std::uint64_t operation,
@@ -189,6 +209,30 @@ namespace TerraEngine::Editor::Automation
 		// AssetDatabase owns the worker process and atomic publication. This map
 		// only connects its bounded progress snapshots to reconnectable MCP jobs.
 		std::unordered_map<std::string, ActivePhysicsCookJob> activePhysicsCookJobs;
+		struct ActiveAnimationImportJob
+		{
+			std::filesystem::path sourcePath;
+			std::uint64_t projectGeneration = 0U;
+			std::chrono::system_clock::time_point deadline;
+		};
+		// Animation provider calls serialize only their protected publication step.
+		// Worker preparation stays immutable, while this mutex makes generation
+		// comparison and receipt publication one atomic editor boundary.
+		std::mutex animationAutomationMutex;
+		AnimationAutomationTransactions animationAutomationTransactions;
+		// Detailed animation diagnostics are opt-in. This lease is released on the
+		// project boundary and service shutdown, but survives a request long enough
+		// for the next protected animation frame to publish copied detail rows.
+		AnimationAutomationDetailedDiagnosticsLease animationAutomationDetailedDiagnosticsLease;
+		// Automation previews live in a private copied world owned by the editor
+		// service. They cannot mutate authored AnimatorComponent or ObjectManager
+		// state, and their generation-safe handle is retired on project changes.
+		TerraEngine::Editor::Animation::AnimationPreviewController animationAutomationPreview;
+		TerraEngine::Editor::Animation::AnimationPreviewSessionHandle animationAutomationPreviewHandle;
+		TerraEngine::UUID animationAutomationPreviewAssetId = TerraEngine::EMPTY_UUID;
+		std::unordered_map<std::string, ActiveAnimationImportJob> activeAnimationImportJobs;
+		std::uint64_t animationAutomationProjectGeneration = 0U;
+		std::uint64_t animationAutomationGeneration = 1U;
 		std::uint64_t nextTransactionId = 1u;
 		PrefabAuthoringService prefabAuthoringService;
 	};

@@ -91,7 +91,8 @@ namespace TerraEngine::EditorTests
 				{{"asset", "Assets/Models/Source.txt"}, {"operation", "move"}, {"destination", "Assets/Environment/Source.txt"}},
 				WriteMode::ReadOnly,
 				"asset-impact-inspect");
-			context.Expect(inspected.value("ok", false), "Asset inspection should return a preflight impact report.");
+			context.Expect(inspected.value("ok", false),
+				"Asset inspection should return a preflight impact report. Response: " + inspected.dump());
 			const nlohmann::json impact = inspected["data"].value("impact", nlohmann::json::object());
 			context.Expect(!impact.value("fingerprint", std::string()).empty(), "Impact reports need a stable fingerprint for approval binding.");
 			context.Expect(impact.contains("dependents") && impact["dependents"].is_array(), "Impact reports should enumerate project-owned dependents.");
@@ -141,7 +142,8 @@ namespace TerraEngine::EditorTests
 				{{"source", "Assets/Items/Source.txt"}, {"destination", "Assets/Archive/Source.txt"}},
 				WriteMode::WritesEnabled,
 				"asset-move");
-			context.Expect(moved.value("ok", false), "A contained asset move should publish atomically.");
+			context.Expect(moved.value("ok", false),
+				"A contained asset move should publish atomically. Response: " + moved.dump());
 			const std::string stableId = moved["data"].value("assetId", std::string());
 			context.Expect(!stableId.empty(), "Move results should identify the stable asset identity.");
 			context.Expect(moved["data"].contains("repairedReferences"), "Move results should report every repaired project reference.");
@@ -191,7 +193,8 @@ namespace TerraEngine::EditorTests
 				{{"asset", "Assets/Source.txt"}, {"operation", "move"}, {"destination", "Assets/First.txt"}},
 				WriteMode::ReadOnly,
 				"asset-approval-preflight");
-			context.Expect(prepared.value("ok", false), "High-impact asset work should provide a reviewable preflight.");
+			context.Expect(prepared.value("ok", false),
+				"High-impact asset work should provide a reviewable preflight. Response: " + prepared.dump());
 			const std::string fingerprint = prepared["data"]["impact"].value("fingerprint", std::string());
 			context.Expect(!fingerprint.empty(), "Approval preflight should publish its normalized impact fingerprint.");
 

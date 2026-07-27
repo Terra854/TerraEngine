@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "fixture": "animation-determinism",
+  "fixedTicksPerSecond": 60,
+  "frozenWorkerCounts": [1, 4, 16],
+  "scenarios": [
+    {
+      "name": "long-stream-correctness",
+      "ticks": 100000,
+      "expected": "identical pose/state/event/root/motion/ik/retarget/ragdoll/morph checksums"
+    },
+    {
+      "name": "authoritative-correction",
+      "correctionTicks": [120, 900, 4096],
+      "expected": "bounded rollback, replayed inputs, monotonic event watermarks"
+    },
+    {
+      "name": "late-join-and-replay-seek",
+      "seekTicks": [0, 180, 1440],
+      "expected": "latest retained snapshot and historical one-shot event suppression"
+    },
+    {
+      "name": "mismatch-localization",
+      "mismatches": ["asset", "graph", "pose", "event", "root", "motion-match"],
+      "expected": "earliest animator/tick/category/stable-id diagnostic"
+    }
+  ],
+  "constraints": {
+    "noGpuAddresses": true,
+    "transportOwnership": "external",
+    "performanceExecution": "deferred-by-power-limit"
+  }
+}

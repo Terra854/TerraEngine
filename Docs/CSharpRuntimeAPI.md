@@ -1,10 +1,11 @@
 # C# Runtime Configuration API
 
 TerraEngine gameplay assemblies can configure complete physics policy, object
-hierarchy, scene lifecycle, scene rendering, time, input, and resource streaming
-without borrowing native engine memory. Reads return copied snapshots. Writes
-return `Accepted` when they have entered a protected native queue and normally
-become visible at the next declared frame boundary.
+hierarchy, scene lifecycle, scene rendering, time, input, resource streaming,
+and animation without borrowing native engine memory. Reads return copied
+snapshots. Writes return an accepted/queued status when they have entered a
+protected native queue and normally become visible at the next declared frame
+boundary.
 
 ## Main surfaces
 
@@ -29,6 +30,15 @@ become visible at the next declared frame boundary.
   occlusion policy. This is separate from game-wide `Graphics.Settings`.
 - `ResourceStreaming.Preload`, `GetStatus`, and `Release` expose asynchronous
   readiness, residency bytes, diagnostics, and protected release.
+- `TerraEngine.Animation.Animator` submits typed, generation-validated playback
+  and parameter commands and returns stable receipts with observable ticks.
+  `ReadState`, `ReadParameters`, `ReadCurves`, `ReadMorphs`, `ReadBones`,
+  `ReadSockets`, `ReadEvents`, and `ReadRootMotionResults` return complete
+  immutable publications with explicit age, generation, and overflow metadata.
+- `TerraEngine.Animation.AnimationEvents` provides bounded disposable event
+  subscriptions in hosted and managed-vtable-v3 exported runtimes. See
+  `Docs/Animation/CSharpAnimationAPI.md` for filters, callback containment,
+  reload handling, provider capability checks, and observation boundaries.
 
 ## Boundary example
 
@@ -66,14 +76,26 @@ issued from managed lifecycle callbacks follow the same rule on main-thread and
 worker dispatches. Managed code must not assume that a successful setter changes
 same-callback reads.
 
+Animation follows that rule as well. `AnimationStatus.Queued` means the command
+was copied into the native queue; observe the receipt's `ObservableTick` and the
+snapshot's `PublicationGeneration` rather than assuming same-callback pose or
+event visibility. Stale wrappers return `StaleHandle` and are never silently
+rebound to a reused object/component slot.
+
+The root CMake configuration discovers `Engine/Managed/Source/Animation/*.cs`
+through the managed core source glob. Managed publish and the install target
+therefore place the animation surface in the same `TerraEngine.CSharp.dll` used
+by the editor and export pipeline; no build-tree-only animation assembly is
+required.
+
 ## Verification
 
 From a Visual Studio developer shell on Windows:
 
 ```powershell
 dotnet build Engine/Managed/TerraEngine.csproj -c Debug --no-restore
-$env:TERRAENGINE_TEST_FILTER="Scripting.RuntimeApi"
-.\out\build\CodexRelWithDebInfo\TerraEngine-EngineTests.exe
+$env:TERRAENGINE_TEST_FILTER="Scripting.RuntimeApi;Animation.Managed"
+.\out\build\RelWithDebInfo\TerraEngine-EngineTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
-cmake --build out\build\CodexRelWithDebInfo --target install --config RelWithDebInfo
+cmake --build out\build\RelWithDebInfo --target install --config RelWithDebInfo
 ```

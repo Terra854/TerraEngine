@@ -101,6 +101,9 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 	if (!CreateSyncObjects()) return false;
 	if (!presentationLifecycle.Configure(MAX_FRAMES_IN_FLIGHT, surfaceMinimumImageCount,
 		requestedSwapchainImageCount, static_cast<std::uint32_t>(swapchainImages.size()))) return false;
+	// Publish the initial native key so later VK_SUBOPTIMAL_KHR results stay
+	// advisory until GLFW has actually reported a different framebuffer extent.
+	presentationRecreation.SetActiveExtent({ swapchainExtent.width, swapchainExtent.height });
 	editorCompletionTracker.SetPresentationGeneration(presentationLifecycle.Generation());
 	if (!CreateGpuTimestampQueries()) return false;
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -133,14 +136,159 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 	return true;
 }
 
+bool VulkanContext::Impl::EnsureVulkanAnimationComputePipelines()
+{
+	// The immutable animation plan uses the normal bindless globals at set 0 and
+	// frame-slot animation storage at set 1. Keeping both layouts in this exact
+	// order matches the HLSL ABI without changing any graphics descriptor usage.
+	const auto hasAllRequiredPipelines = [&]() {
+		using Stage = TerraEngine::Animation::GpuAnimationStage;
+		return animationComputePipelines.layout != VK_NULL_HANDLE
+			&& animationComputePipelines.byStage[static_cast<std::size_t>(Stage::Sample)] != VK_NULL_HANDLE
+			&& animationComputePipelines.byStage[static_cast<std::size_t>(Stage::Blend)] != VK_NULL_HANDLE
+			&& animationComputePipelines.byStage[static_cast<std::size_t>(Stage::Hierarchy)] != VK_NULL_HANDLE
+			&& animationComputePipelines.byStage[static_cast<std::size_t>(Stage::Procedural)] != VK_NULL_HANDLE
+			&& animationComputePipelines.byStage[static_cast<std::size_t>(Stage::Ragdoll)] != VK_NULL_HANDLE
+			&& animationComputePipelines.byStage[static_cast<std::size_t>(Stage::Morph)] != VK_NULL_HANDLE
+			&& animationComputePipelines.byStage[static_cast<std::size_t>(Stage::Bounds)] != VK_NULL_HANDLE
+			&& animationComputePipelines.byStage[static_cast<std::size_t>(Stage::Palette)] != VK_NULL_HANDLE;
+	};
+	if (hasAllRequiredPipelines()) return true;
+	if (device == VK_NULL_HANDLE
+		|| globalDescriptorSetLayout == VK_NULL_HANDLE
+		|| animationDescriptorSetLayout == VK_NULL_HANDLE)
+	{
+		return false;
+	}
+
+	// Never leave a partial pipeline set usable: a missing optional shader must
+	// select the renderer's bind-pose fallback rather than record some stages.
+	DestroyVulkanAnimationComputePipelines();
+	const std::array<VkDescriptorSetLayout, 2> setLayouts{
+		globalDescriptorSetLayout,
+		animationDescriptorSetLayout };
+	VkPushConstantRange pushRange{};
+	pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	pushRange.offset = 0U;
+	pushRange.size = sizeof(TerraEngine::Animation::GpuAnimationPushConstants);
+	VkPipelineLayoutCreateInfo layoutInfo{};
+	layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+	layoutInfo.setLayoutCount = static_cast<std::uint32_t>(setLayouts.size());
+	layoutInfo.pSetLayouts = setLayouts.data();
+	layoutInfo.pushConstantRangeCount = 1U;
+	layoutInfo.pPushConstantRanges = &pushRange;
+	if (vkCreatePipelineLayout(device, &layoutInfo, nullptr, &animationComputePipelines.layout) != VK_SUCCESS)
+	{
+		animationComputePipelines.layout = VK_NULL_HANDLE;
+		return false;
+	}
+
+	const auto createPipeline = [&](TerraEngine::Animation::GpuAnimationStage stage, const char* shaderPath) {
+		std::vector<std::uint8_t> shaderBytes;
+		try {
+			shaderBytes = ResourceManager::Instance().ReadFileBytes(
+				ResourceManager::Instance().ResolveEngineAssetPath(shaderPath));
+		} catch (const std::exception&) {
+			return false;
+		}
+		if (shaderBytes.empty() || (shaderBytes.size() % sizeof(std::uint32_t)) != 0U) return false;
+
+		VkShaderModuleCreateInfo moduleInfo{};
+		moduleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+		moduleInfo.codeSize = shaderBytes.size();
+		moduleInfo.pCode = reinterpret_cast<const std::uint32_t*>(shaderBytes.data());
+		VkShaderModule module = VK_NULL_HANDLE;
+		if (vkCreateShaderModule(device, &moduleInfo, nullptr, &module) != VK_SUCCESS) return false;
+
+		VkPipelineShaderStageCreateInfo stageInfo{};
+		stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+		stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+		stageInfo.module = module;
+		stageInfo.pName = "main";
+		VkComputePipelineCreateInfo pipelineInfo{};
+		pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+		pipelineInfo.stage = stageInfo;
+		pipelineInfo.layout = animationComputePipelines.layout;
+		VkPipeline& pipeline = animationComputePipelines.byStage[static_cast<std::size_t>(stage)];
+		const VkResult result = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1U, &pipelineInfo, nullptr, &pipeline);
+		vkDestroyShaderModule(device, module, nullptr);
+		return result == VK_SUCCESS;
+	};
+
+	using Stage = TerraEngine::Animation::GpuAnimationStage;
+	const bool created = createPipeline(Stage::Sample, "Shaders/Animation/AnimationSample.comp.spv")
+		&& createPipeline(Stage::Blend, "Shaders/Animation/AnimationBlend.comp.spv")
+		&& createPipeline(Stage::Hierarchy, "Shaders/Animation/AnimationHierarchy.comp.spv")
+		&& createPipeline(Stage::Procedural, "Shaders/Animation/AnimationProcedural.comp.spv")
+		&& createPipeline(Stage::Ragdoll, "Shaders/Animation/AnimationRagdoll.comp.spv")
+		&& createPipeline(Stage::Morph, "Shaders/Animation/AnimationMorph.comp.spv")
+		&& createPipeline(Stage::Bounds, "Shaders/Animation/AnimationBounds.comp.spv")
+		&& createPipeline(Stage::Palette, "Shaders/Animation/AnimationPalette.comp.spv");
+	if (!created)
+	{
+		TERRAENGINE_LOG(LogLevel::Warning,
+			"GPU animation compute shaders are unavailable; animated draws will use their safe bind-pose fallback.");
+		DestroyVulkanAnimationComputePipelines();
+		return false;
+	}
+	return true;
+}
+
+void VulkanContext::Impl::DestroyVulkanAnimationComputePipelines()
+{
+	if (device != VK_NULL_HANDLE)
+	{
+		for (VkPipeline& pipeline : animationComputePipelines.byStage)
+		{
+			if (pipeline != VK_NULL_HANDLE) vkDestroyPipeline(device, pipeline, nullptr);
+			pipeline = VK_NULL_HANDLE;
+		}
+		if (animationComputePipelines.layout != VK_NULL_HANDLE)
+		{
+			vkDestroyPipelineLayout(device, animationComputePipelines.layout, nullptr);
+		}
+	}
+	animationComputePipelines = {};
+}
+
 // VulkanContext::Impl::Cleanup is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
+	bool presentationFenceWaitAllowed = device != VK_NULL_HANDLE && !skipDeviceIdle && !deviceLost;
 	if (device && !skipDeviceIdle) {
 		const VkResult idleResult = WaitDeviceIdle();
 		if (idleResult != VK_SUCCESS)
 		{
 			TERRAENGINE_LOG(LogLevel::Warning, "Vulkan cleanup could not prove the device idle before teardown: " << idleResult);
+			// A lost device cannot signal further presentation fences. Terminal
+			// device-loss cleanup therefore skips the otherwise blocking proof wait.
+			if (idleResult == VK_ERROR_DEVICE_LOST) presentationFenceWaitAllowed = false;
+		}
+	}
+	if (presentationFenceWaitAllowed) {
+		// Device-idle alone does not prove that the presentation engine released a
+		// present wait semaphore. Maintenance fences provide that explicit proof for
+		// every queued present and must signal before their owning bundles are torn down.
+		std::vector<VkFence> pendingPresentationFences;
+		for (VkFence fence : presentationCompletionFences) {
+			if (fence != VK_NULL_HANDLE) pendingPresentationFences.push_back(fence);
+		}
+		for (const RetiredPresentationResourceBundle& retired : retiredPresentationBundles) {
+			for (VkFence fence : retired.resources.presentCompletionFences) {
+				if (fence != VK_NULL_HANDLE) pendingPresentationFences.push_back(fence);
+			}
+		}
+		for (const PendingUnextendedAcquireProof& proof : pendingUnextendedAcquireProofs) {
+			if (proof.fence != VK_NULL_HANDLE) pendingPresentationFences.push_back(proof.fence);
+		}
+		if (!pendingPresentationFences.empty()) {
+			const VkResult presentationIdleResult = vkWaitForFences(device,
+				static_cast<std::uint32_t>(pendingPresentationFences.size()), pendingPresentationFences.data(),
+				VK_TRUE, std::numeric_limits<std::uint64_t>::max());
+			if (presentationIdleResult != VK_SUCCESS) {
+				TERRAENGINE_LOG(LogLevel::Warning, "Vulkan cleanup could not prove presentation completion before teardown: "
+					<< presentationIdleResult);
+			}
 		}
 	}
 
@@ -179,6 +327,13 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 
 	DestroyWorkerPools();
 	CleanupSwapChain();
+	// Renderer teardown ends the presentation session. Normal cleanup waited for
+	// the device above; device-loss teardown is terminal, so no live renderer can
+	// acquire these handles after this point.
+	for (RetiredPresentationResourceBundle& retired : retiredPresentationBundles) {
+		DestroyPresentationResourceBundle(retired.resources);
+	}
+	retiredPresentationBundles.clear();
 
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (auto& [id, mesh] : meshCache) {
@@ -203,6 +358,11 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 		vmaDestroyBuffer(allocator, mesh.meshShaderVertexBuffer.buffer, mesh.meshShaderVertexBuffer.allocation);
 		vmaDestroyBuffer(allocator, mesh.meshletVertexRemapBuffer.buffer, mesh.meshletVertexRemapBuffer.allocation);
 		vmaDestroyBuffer(allocator, mesh.meshSkinningBuffer.buffer, mesh.meshSkinningBuffer.allocation);
+		if (mesh.meshMorphDeltaBuffer.buffer != VK_NULL_HANDLE) {
+			// Morph deltas are a separate graphics stream. They have the same mesh
+			// lifetime as skinning bytes and must be released before VMA shutdown.
+			vmaDestroyBuffer(allocator, mesh.meshMorphDeltaBuffer.buffer, mesh.meshMorphDeltaBuffer.allocation);
+		}
 		vmaDestroyBuffer(allocator, mesh.meshDecodeInfoBuffer.buffer, mesh.meshDecodeInfoBuffer.allocation);
 		vmaDestroyBuffer(allocator, mesh.meshletBuffer.buffer, mesh.meshletBuffer.allocation);
 		if (mesh.meshletSectionBuffer.buffer != VK_NULL_HANDLE) {
@@ -232,6 +392,51 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 	activeVirtualGeometryCompactedPacketBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 	activeVirtualGeometryGeneratedSubmissionBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 	activeVirtualGeometryCounterReadbackBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
+
+	// Animation frame buffers are not part of meshCache. Destroy them while the
+	// allocator remains valid, then release the dependent pipelines before their
+	// descriptor-set layout and pool are torn down below.
+	DestroyVulkanAnimationComputePipelines();
+	for (VulkanAnimationFrameResources& resources : animationFrameResources) {
+		for (VulkanBuffer& buffer : resources.buffers) {
+			DestroyBufferImmediate(buffer);
+		}
+		DestroyBufferImmediate(resources.graphicsBridgeBuffer);
+		resources = {};
+	}
+	animationFrameResources.clear();
+	for (VulkanCpuAnimationFrameResources& resources
+		: cpuAnimationFrameResources) {
+		DestroyBufferImmediate(resources.paletteBuffer);
+		DestroyBufferImmediate(resources.morphWeightBuffer);
+		DestroyBufferImmediate(resources.graphicsBridgeBuffer);
+		resources = {};
+	}
+	cpuAnimationFrameResources.clear();
+	pendingAnimationImmutablePlan.reset();
+	pendingCpuAnimationPlan.reset();
+	pendingAnimationCommandPlan = {};
+	pendingAnimationFrameId = 0U;
+	animationComputeRecordedForCurrentFrame = false;
+	animationComputeSubmissionMarkedForCurrentFrame = false;
+	recordedAnimationDispatchCountForCurrentFrame = 0U;
+	activeAnimationGraphicsBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
+	activeCpuAnimationGraphicsBufferIndex =
+		INVALID_BINDLESS_BUFFER_INDEX;
+	completedAnimationGenerations.clear();
+	{
+		std::lock_guard<std::mutex> lock(statsMutex);
+		latestAnimationGpuBackendExecution = {};
+	}
+	if (device != VK_NULL_HANDLE && descriptorPool != VK_NULL_HANDLE && !animationDescriptorSets.empty()) {
+		vkFreeDescriptorSets(device, descriptorPool,
+			static_cast<std::uint32_t>(animationDescriptorSets.size()), animationDescriptorSets.data());
+	}
+	animationDescriptorSets.clear();
+	if (device != VK_NULL_HANDLE && animationDescriptorSetLayout != VK_NULL_HANDLE) {
+		vkDestroyDescriptorSetLayout(device, animationDescriptorSetLayout, nullptr);
+	}
+	animationDescriptorSetLayout = VK_NULL_HANDLE;
 
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (auto& retiredBuffers : retiredBuffersByFrame) {
@@ -608,6 +813,13 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 
 	DestroyFrameSyncObjects();
 	DestroyPresentationImageSyncObjects();
+	if (device != VK_NULL_HANDLE) {
+		for (const PendingUnextendedAcquireProof& proof : pendingUnextendedAcquireProofs) {
+			if (proof.fence != VK_NULL_HANDLE) vkDestroyFence(device, proof.fence, nullptr);
+		}
+	}
+	pendingUnextendedAcquireProofs.clear();
+	unextendedRetirementTracker.Reset();
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (device) {
@@ -660,6 +872,7 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 	if (device) vkDestroyDevice(device, nullptr);
 	device = VK_NULL_HANDLE;
 	physicalDevice = VK_NULL_HANDLE;
+	maximumStorageBufferRange = 0U;
 
 	if (validationLayersEnabled && instance) {
 		DestroyDebugUtilsMessengerEXT(instance, debugMessenger, nullptr);
@@ -792,6 +1005,7 @@ bool VulkanContext::Impl::PickPhysicalDevice() {
 		
 		VkPhysicalDeviceProperties deviceProperties;
 		vkGetPhysicalDeviceProperties(physicalDevice, &deviceProperties);
+		maximumStorageBufferRange = deviceProperties.limits.maxStorageBufferRange;
 
 		VkPhysicalDeviceMeshShaderFeaturesEXT queriedMeshFeatures{};
 		queriedMeshFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT;
@@ -912,6 +1126,12 @@ bool VulkanContext::Impl::CreateLogicalDevice() {
 	features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
 	features.pNext = &supportedVrsFeatures;
 	vkGetPhysicalDeviceFeatures2(physicalDevice, &features);
+	VkPhysicalDeviceSwapchainMaintenance1FeaturesKHR supportedPresentationFenceFeatures{};
+	supportedPresentationFenceFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_KHR;
+	VkPhysicalDeviceFeatures2 presentationFeaturesQuery{};
+	presentationFeaturesQuery.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+	presentationFeaturesQuery.pNext = &supportedPresentationFenceFeatures;
+	vkGetPhysicalDeviceFeatures2(physicalDevice, &presentationFeaturesQuery);
 
 	vrsFeatures.attachmentFragmentShadingRate = supportedVrsFeatures.attachmentFragmentShadingRate;
 	vrsFeatures.pipelineFragmentShadingRate = supportedVrsFeatures.pipelineFragmentShadingRate;
@@ -935,6 +1155,37 @@ bool VulkanContext::Impl::CreateLogicalDevice() {
 	availableDeviceExtensions.resize(availableDeviceExtensionCount);
 	vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &availableDeviceExtensionCount, availableDeviceExtensions.data());
 	std::vector<const char*> enabledDeviceExtensions = deviceExtensions;
+	const auto hasDeviceExtension = [&availableDeviceExtensions](const char* name) {
+		return std::any_of(availableDeviceExtensions.begin(), availableDeviceExtensions.end(),
+			[name](const VkExtensionProperties& extension) {
+				return std::strcmp(extension.extensionName, name) == 0;
+			});
+	};
+	// Pair the device extension with the instance-side surface-maintenance lineage
+	// selected in GetRequiredExtensions. Enabling only the device half would violate
+	// the extension dependency even though the present-fence structs are aliases.
+	const bool useKhrMaintenance = surfaceMaintenanceExtensionName != nullptr
+		&& std::strcmp(surfaceMaintenanceExtensionName, VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME) == 0;
+	const bool useExtMaintenance = surfaceMaintenanceExtensionName != nullptr
+		&& std::strcmp(surfaceMaintenanceExtensionName, VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME) == 0;
+	const char* maintenanceExtensionName = useKhrMaintenance
+		&& hasDeviceExtension(VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME)
+		? VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME
+		: (useExtMaintenance && hasDeviceExtension(VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME)
+			? VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME
+			: nullptr);
+	presentationFencesEnabled = maintenanceExtensionName != nullptr
+		&& supportedPresentationFenceFeatures.swapchainMaintenance1 == VK_TRUE;
+	VkPhysicalDeviceSwapchainMaintenance1FeaturesKHR presentationFenceFeatures{};
+	if (presentationFencesEnabled)
+	{
+		presentationFenceFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_KHR;
+		presentationFenceFeatures.swapchainMaintenance1 = VK_TRUE;
+		enabledDeviceExtensions.push_back(maintenanceExtensionName);
+		// Append optional presentation completion proof after the required
+		// feature chain without changing any existing feature ownership.
+		vrsFeatures.pNext = &presentationFenceFeatures;
+	}
 	diagnosticCheckpointsEnabled = std::any_of(
 		availableDeviceExtensions.begin(),
 		availableDeviceExtensions.end(),
@@ -973,6 +1224,12 @@ bool VulkanContext::Impl::CreateLogicalDevice() {
 	diagnosticCheckpointsEnabled = diagnosticCheckpointsEnabled
 		&& vkCmdSetCheckpointNV != nullptr
 		&& vkGetQueueCheckpointDataNV != nullptr;
+	if (presentationFencesEnabled) {
+		TERRAENGINE_LOG(LogLevel::Info, "[Vulkan] Presentation completion fences enabled via "
+			<< maintenanceExtensionName << " with " << surfaceMaintenanceExtensionName);
+	} else {
+		TERRAENGINE_LOG(LogLevel::Warning, "[Vulkan] Swapchain maintenance present fences unavailable; resize retirement uses the bounded fail-closed fallback.");
+	}
 
 	vkGetDeviceQueue(device, indices.graphicsFamily.value(), 0, &graphicsQueue);
 	vkGetDeviceQueue(device, indices.presentFamily.value(), 0, &presentQueue);
@@ -983,6 +1240,10 @@ bool VulkanContext::Impl::CreateLogicalDevice() {
 bool VulkanContext::Impl::CreateSwapChain(WindowSystem& windowSystem, VkSwapchainKHR oldSwapchain) {
 	// Assemble swapchain matching the current surface capabilities.
 	SwapChainSupportDetails swapChainSupport = QuerySwapChainSupport(physicalDevice);
+	if (!swapChainSupport.valid || swapChainSupport.formats.empty() || swapChainSupport.presentModes.empty()) {
+		TERRAENGINE_LOG(LogLevel::Error, "Swapchain support query did not return a complete usable surface snapshot.");
+		return false;
+	}
 
 	VkSurfaceFormatKHR surfaceFormat = ChooseSwapSurfaceFormat(swapChainSupport.formats);
 	VkPresentModeKHR presentMode = ChooseSwapPresentMode(swapChainSupport.presentModes);
@@ -1034,6 +1295,9 @@ bool VulkanContext::Impl::CreateSwapChain(WindowSystem& windowSystem, VkSwapchai
 	createInfo.oldSwapchain = oldSwapchain;
 
 	VkSwapchainKHR candidateSwapchain = VK_NULL_HANDLE;
+	// Vulkan treats supplying oldSwapchain as a handoff attempt. Do not restore
+	// or acquire that chain after this call, even if candidate construction fails.
+	oldSwapchainConsumedByCreateAttempt = oldSwapchain != VK_NULL_HANDLE;
 	const VkResult createResult = vkCreateSwapchainKHR(device, &createInfo, nullptr, &candidateSwapchain);
 	if (createResult != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "failed to create swap chain!");
@@ -1452,10 +1716,12 @@ bool VulkanContext::Impl::CreateCommandPool() {
 // VulkanContext::Impl::CreateSyncObjects is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool VulkanContext::Impl::CreateSyncObjects() {
 	// Frame-owned synchronization is independent from swapchain image ownership.
+	presentationCompletionCoverageValid = presentationFencesEnabled;
 	imageAvailableSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
 	renderFinishedSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
 	inFlightFences.resize(MAX_FRAMES_IN_FLIGHT);
 	uiSemaphores.resize(swapchainImages.size());
+	if (presentationFencesEnabled) availablePresentationCompletionFences.resize(swapchainImages.size());
 	InitializeFrameTracking();
 
 	VkSemaphoreCreateInfo semaphoreInfo{};
@@ -1479,6 +1745,13 @@ bool VulkanContext::Impl::CreateSyncObjects() {
 			DestroyFrameSyncObjects();
 			DestroyPresentationImageSyncObjects();
 			TERRAENGINE_LOG(LogLevel::Error, "failed to create image-owned present synchronization objects!");
+			return false;
+		}
+		if (presentationFencesEnabled
+			&& vkCreateFence(device, &fenceInfo, nullptr, &availablePresentationCompletionFences[imageIndex]) != VK_SUCCESS) {
+			DestroyFrameSyncObjects();
+			DestroyPresentationImageSyncObjects();
+			TERRAENGINE_LOG(LogLevel::Error, "failed to create image-owned presentation completion fences!");
 			return false;
 		}
 	}
@@ -1509,8 +1782,12 @@ void VulkanContext::Impl::DestroyFrameSyncObjects() {
 void VulkanContext::Impl::DestroyPresentationImageSyncObjects() {
 	if (device != VK_NULL_HANDLE) {
 		for (VkSemaphore semaphore : uiSemaphores) if (semaphore != VK_NULL_HANDLE) vkDestroySemaphore(device, semaphore, nullptr);
+		for (VkFence fence : presentationCompletionFences) if (fence != VK_NULL_HANDLE) vkDestroyFence(device, fence, nullptr);
+		for (VkFence fence : availablePresentationCompletionFences) if (fence != VK_NULL_HANDLE) vkDestroyFence(device, fence, nullptr);
 	}
 	uiSemaphores.clear();
+	presentationCompletionFences.clear();
+	availablePresentationCompletionFences.clear();
 	acquiredPresentationImage.reset();
 }
 
@@ -1529,7 +1806,18 @@ VulkanContext::Impl::PresentationResourceBundle VulkanContext::Impl::TakePresent
 	bundle.acquireByFrame = std::move(imageAvailableSemaphores);
 	bundle.editorOffscreenReadyByFrame = std::move(renderFinishedSemaphores);
 	bundle.presentReadyByImage = std::move(uiSemaphores);
+	bundle.presentCompletionFences = std::move(presentationCompletionFences);
+	bundle.availablePresentCompletionFences = std::move(availablePresentationCompletionFences);
+	bundle.presentCompletionCoverageValid = std::exchange(presentationCompletionCoverageValid, false);
 	bundle.frameFences = std::move(inFlightFences);
+	// A moved-from vector is valid but its size is unspecified. Clear every raw-
+	// handle collection explicitly so candidate creation cannot retain duplicate handles.
+	imageAvailableSemaphores.clear();
+	renderFinishedSemaphores.clear();
+	uiSemaphores.clear();
+	presentationCompletionFences.clear();
+	availablePresentationCompletionFences.clear();
+	inFlightFences.clear();
 	return bundle;
 }
 
@@ -1547,6 +1835,9 @@ void VulkanContext::Impl::RestorePresentationResourceBundle(PresentationResource
 	imageAvailableSemaphores = std::move(bundle.acquireByFrame);
 	renderFinishedSemaphores = std::move(bundle.editorOffscreenReadyByFrame);
 	uiSemaphores = std::move(bundle.presentReadyByImage);
+	presentationCompletionFences = std::move(bundle.presentCompletionFences);
+	availablePresentationCompletionFences = std::move(bundle.availablePresentCompletionFences);
+	presentationCompletionCoverageValid = std::exchange(bundle.presentCompletionCoverageValid, false);
 	inFlightFences = std::move(bundle.frameFences);
 }
 
@@ -1559,6 +1850,8 @@ void VulkanContext::Impl::DestroyPresentationResourceBundle(PresentationResource
 		for (VkSemaphore semaphore : bundle.acquireByFrame) if (semaphore != VK_NULL_HANDLE) vkDestroySemaphore(device, semaphore, nullptr);
 		for (VkSemaphore semaphore : bundle.editorOffscreenReadyByFrame) if (semaphore != VK_NULL_HANDLE) vkDestroySemaphore(device, semaphore, nullptr);
 		for (VkSemaphore semaphore : bundle.presentReadyByImage) if (semaphore != VK_NULL_HANDLE) vkDestroySemaphore(device, semaphore, nullptr);
+		for (VkFence fence : bundle.presentCompletionFences) if (fence != VK_NULL_HANDLE) vkDestroyFence(device, fence, nullptr);
+		for (VkFence fence : bundle.availablePresentCompletionFences) if (fence != VK_NULL_HANDLE) vkDestroyFence(device, fence, nullptr);
 		for (VkFence fence : bundle.frameFences) if (fence != VK_NULL_HANDLE) vkDestroyFence(device, fence, nullptr);
 		if (bundle.swapchain != VK_NULL_HANDLE) vkDestroySwapchainKHR(device, bundle.swapchain, nullptr);
 	}
@@ -1566,6 +1859,255 @@ void VulkanContext::Impl::DestroyPresentationResourceBundle(PresentationResource
 		vmaDestroyImage(allocator, bundle.depthImage, bundle.depthAllocation);
 	}
 	bundle = {};
+}
+
+void VulkanContext::Impl::RetirePresentationResourceBundle(
+	PresentationResourceBundle&& bundle, std::uint64_t generation)
+{
+	if (bundle.swapchain == VK_NULL_HANDLE)
+	{
+		return;
+	}
+
+	// Image-owned present semaphores can outlive a render fence. Keep the full
+	// bundle together until a per-present fence proves every queued present has
+	// completed; without the optional extension retain a bounded backlog rather
+	// than guessing from vkDeviceWaitIdle.
+	retiredPresentationBundles.push_back({ std::move(bundle), generation });
+}
+
+void VulkanContext::Impl::CollectCompletedPresentationResourceBundles()
+{
+	if (device == VK_NULL_HANDLE)
+	{
+		return;
+	}
+
+	for (auto it = retiredPresentationBundles.begin(); it != retiredPresentationBundles.end();)
+	{
+		// A bundle is eligible for retirement only when every present in its
+		// generation carried a completion fence. Fence presence alone is insufficient:
+		// a later preparation failure may have allowed an unfenced present.
+		bool completed = it->resources.presentCompletionCoverageValid;
+		for (VkFence fence : it->resources.presentCompletionFences)
+		{
+			if (fence == VK_NULL_HANDLE || vkGetFenceStatus(device, fence) != VK_SUCCESS)
+			{
+				completed = false;
+				break;
+			}
+		}
+		if (!completed)
+		{
+			++it;
+			continue;
+		}
+
+		// The fence proof satisfies the lifecycle rule before the image-owned
+		// present waits, views, and old swapchain are destroyed.
+		DestroyPresentationResourceBundle(it->resources);
+		it = retiredPresentationBundles.erase(it);
+	}
+}
+
+bool VulkanContext::Impl::PreparePresentationCompletionFence(
+	std::uint32_t imageIndex, VkPresentInfoKHR& presentInfo,
+	VkSwapchainPresentFenceInfoKHR& completionInfo)
+{
+	if (!presentationFencesEnabled)
+	{
+		presentationCompletionCoverageValid = false;
+		return false;
+	}
+	if (imageIndex >= uiSemaphores.size())
+	{
+		presentationCompletionCoverageValid = false;
+		return false;
+	}
+
+	// Poll every outstanding present without waiting on the CPU. Only signaled
+	// fences enter the reusable pool; unsignaled fences remain immutable until the
+	// presentation engine releases their associated wait semaphores.
+	for (auto it = presentationCompletionFences.begin(); it != presentationCompletionFences.end();) {
+		const VkResult status = vkGetFenceStatus(device, *it);
+		if (status == VK_SUCCESS) {
+			availablePresentationCompletionFences.push_back(*it);
+			it = presentationCompletionFences.erase(it);
+		} else if (status == VK_NOT_READY) {
+			++it;
+		} else {
+			presentationCompletionCoverageValid = false;
+			return false;
+		}
+	}
+
+	VkFence completionFence = VK_NULL_HANDLE;
+	if (!availablePresentationCompletionFences.empty()) {
+		completionFence = availablePresentationCompletionFences.back();
+		availablePresentationCompletionFences.pop_back();
+		if (vkResetFences(device, 1u, &completionFence) != VK_SUCCESS) {
+			availablePresentationCompletionFences.push_back(completionFence);
+			presentationCompletionCoverageValid = false;
+			return false;
+		}
+	} else {
+		// There can be no more outstanding presents than swapchain images: acquiring
+		// an image proves its previous present completed, so its fence should already
+		// have entered the pool above. Refuse an inconsistent state instead of growing
+		// an unbounded fence history while a compositor or driver is stalled.
+		presentationCompletionCoverageValid = false;
+		TERRAENGINE_LOG(LogLevel::Warning, "No reusable presentation completion fence was available after swapchain image acquisition; retirement will fail closed.");
+		return false;
+	}
+	presentationCompletionFences.push_back(completionFence);
+
+	completionInfo = {};
+	completionInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_KHR;
+	completionInfo.swapchainCount = 1u;
+	completionInfo.pFences = &presentationCompletionFences.back();
+	completionInfo.pNext = presentInfo.pNext;
+	presentInfo.pNext = &completionInfo;
+	return true;
+}
+
+void VulkanContext::Impl::ResolveUnenqueuedPresentationFence(
+	bool fencePrepared, VkResult presentResult)
+{
+	if (!fencePrepared
+		|| (presentResult != VK_ERROR_OUT_OF_HOST_MEMORY
+			&& presentResult != VK_ERROR_OUT_OF_DEVICE_MEMORY)
+		|| presentationCompletionFences.empty())
+	{
+		return;
+	}
+
+	// Vulkan guarantees that these allocation failures enqueue no presentation
+	// work and leave referenced synchronization untouched. Preparation reserved an
+	// unsignaled per-present fence before the rejected call, so replace it with a signaled
+	// reusable fence representing that no presentation ownership was created.
+	VkFence completionFence = presentationCompletionFences.back();
+	presentationCompletionFences.pop_back();
+	if (completionFence != VK_NULL_HANDLE) {
+		vkDestroyFence(device, completionFence, nullptr);
+		completionFence = VK_NULL_HANDLE;
+	}
+	VkFenceCreateInfo fenceInfo{};
+	fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+	fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+	if (vkCreateFence(device, &fenceInfo, nullptr, &completionFence) != VK_SUCCESS) {
+		presentationFencesEnabled = false;
+		TERRAENGINE_LOG(LogLevel::Warning, "Could not restore a signaled presentation fence after an unenqueued present allocation failure.");
+	} else {
+		availablePresentationCompletionFences.push_back(completionFence);
+	}
+}
+
+VkFence VulkanContext::Impl::PrepareUnextendedAcquireProof()
+{
+	CollectCompletedUnextendedAcquireProofs();
+	if (device == VK_NULL_HANDLE || deviceLost || !unextendedRetirementTracker.NeedsAcquireProof())
+	{
+		return VK_NULL_HANDLE;
+	}
+
+	// Successful acquire fences normally signal immediately or within one frame.
+	// Bound the history so a stalled driver cannot turn fallback evidence into an
+	// unbounded host allocation; later frames keep polling the existing proofs.
+	const std::size_t maximumProofs = std::max<std::size_t>(
+		1u, swapchainImages.size() + static_cast<std::size_t>(MAX_FRAMES_IN_FLIGHT));
+	if (pendingUnextendedAcquireProofs.size() >= maximumProofs)
+	{
+		return VK_NULL_HANDLE;
+	}
+
+	VkFence proofFence = VK_NULL_HANDLE;
+	VkFenceCreateInfo fenceInfo{};
+	fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+	if (vkCreateFence(device, &fenceInfo, nullptr, &proofFence) != VK_SUCCESS)
+	{
+		TERRAENGINE_LOG(LogLevel::Warning, "Could not allocate an acquire-history proof fence; retired presentation resources remain retained.");
+		return VK_NULL_HANDLE;
+	}
+	return proofFence;
+}
+
+void VulkanContext::Impl::ResolveUnextendedAcquireProof(
+	VkFence proofFence, VkResult acquireResult, std::uint32_t imageIndex)
+{
+	if (proofFence == VK_NULL_HANDLE)
+	{
+		return;
+	}
+	if (acquireResult == VK_SUCCESS || acquireResult == VK_SUBOPTIMAL_KHR)
+	{
+		// Store identity only after acquisition succeeded. The fence is polled on
+		// later frames, preserving the editor's bounded acquire wait behavior.
+		pendingUnextendedAcquireProofs.push_back({
+			proofFence, presentationLifecycle.Generation(), imageIndex });
+		CollectCompletedUnextendedAcquireProofs();
+		return;
+	}
+
+	// Failed or timed-out acquisition publishes no image and no pending fence
+	// signal operation, so the one-shot proof object has no ownership to retain.
+	vkDestroyFence(device, proofFence, nullptr);
+}
+
+void VulkanContext::Impl::CollectCompletedUnextendedAcquireProofs()
+{
+	if (device == VK_NULL_HANDLE)
+	{
+		return;
+	}
+
+	for (auto it = pendingUnextendedAcquireProofs.begin(); it != pendingUnextendedAcquireProofs.end();)
+	{
+		const VkResult status = vkGetFenceStatus(device, it->fence);
+		if (status == VK_NOT_READY)
+		{
+			++it;
+			continue;
+		}
+		if (status != VK_SUCCESS)
+		{
+			MarkDeviceLost(status, "unextended presentation acquire proof");
+			return;
+		}
+
+		const bool releasesRetiredBundles = unextendedRetirementTracker.RecordCompletedAcquire(
+			it->generation, it->imageIndex);
+		vkDestroyFence(device, it->fence, nullptr);
+		it = pendingUnextendedAcquireProofs.erase(it);
+		if (!releasesRetiredBundles)
+		{
+			continue;
+		}
+
+		// Khronos' unextended workaround proves the first present of the newest
+		// chain completed. Every older present on the same queue, and therefore all
+		// retired swapchains and their wait semaphores, can now be released together.
+		for (RetiredPresentationResourceBundle& retired : retiredPresentationBundles) {
+			DestroyPresentationResourceBundle(retired.resources);
+		}
+		retiredPresentationBundles.clear();
+		if (presentationRecreation.RequestRetryAfterRetirement()) {
+			framebufferResized = true;
+		}
+	}
+}
+
+void VulkanContext::Impl::RecordUnextendedPresent(
+	std::uint32_t imageIndex, VkResult presentResult)
+{
+	// Allocation failures are the two results Vulkan explicitly defines as not
+	// enqueued. Other results conservatively retain a present-history anchor.
+	if (presentResult == VK_ERROR_OUT_OF_HOST_MEMORY
+		|| presentResult == VK_ERROR_OUT_OF_DEVICE_MEMORY)
+	{
+		return;
+	}
+	unextendedRetirementTracker.RecordPresent(
+		presentationLifecycle.Generation(), imageIndex);
 }
 
 // VulkanContext::Impl::CreateDescriptorPool is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1581,7 +2123,11 @@ bool VulkanContext::Impl::CreateDescriptorPool() {
 	poolSizes[3].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 	poolSizes[3].descriptorCount = 256;
 	poolSizes[4].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	poolSizes[4].descriptorCount = 128;
+	// Animation owns 15 storage-buffer bindings for every frame in flight (45
+	// persistent descriptors), while every resident mesh also consumes several
+	// storage descriptors. Keep one shared pool, but size it for both persistent
+	// consumers so ordinary asset counts cannot starve animation publication.
+	poolSizes[4].descriptorCount = 4096;
 	poolSizes[5].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 	poolSizes[5].descriptorCount = 64;
 	poolSizes[6].type = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
@@ -1659,6 +2205,40 @@ std::vector<const char*> VulkanContext::Impl::GetRequiredExtensions() {
 	glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
 
 	std::vector<const char*> extensions(glfwExtensions, glfwExtensions + glfwExtensionCount);
+	surfaceMaintenanceExtensionName = nullptr;
+	const auto appendUniqueExtension = [&extensions](const char* name) {
+		const bool alreadyPresent = std::any_of(extensions.begin(), extensions.end(),
+			[name](const char* extension) { return std::strcmp(extension, name) == 0; });
+		if (!alreadyPresent) extensions.push_back(name);
+	};
+
+	// Swapchain present fences depend on surface-maintenance1 and
+	// get-surface-capabilities2 at instance scope. Enable the ratified KHR lineage
+	// when the loader exposes the complete pair, with the equivalent EXT lineage as
+	// an older-driver fallback. The later device selection must match this choice.
+	std::uint32_t availableExtensionCount = 0u;
+	if (vkEnumerateInstanceExtensionProperties(nullptr, &availableExtensionCount, nullptr) == VK_SUCCESS) {
+		std::vector<VkExtensionProperties> availableExtensions(availableExtensionCount);
+		if (vkEnumerateInstanceExtensionProperties(nullptr, &availableExtensionCount, availableExtensions.data()) == VK_SUCCESS) {
+			const auto hasInstanceExtension = [&availableExtensions](const char* name) {
+				return std::any_of(availableExtensions.begin(), availableExtensions.end(),
+					[name](const VkExtensionProperties& extension) {
+						return std::strcmp(extension.extensionName, name) == 0;
+					});
+			};
+			if (hasInstanceExtension(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME)) {
+				if (hasInstanceExtension(VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME)) {
+					surfaceMaintenanceExtensionName = VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME;
+				} else if (hasInstanceExtension(VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME)) {
+					surfaceMaintenanceExtensionName = VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME;
+				}
+				if (surfaceMaintenanceExtensionName != nullptr) {
+					appendUniqueExtension(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
+					appendUniqueExtension(surfaceMaintenanceExtensionName);
+				}
+			}
+		}
+	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (validationLayersEnabled) {
@@ -1677,7 +2257,8 @@ bool VulkanContext::Impl::IsDeviceSuitable(VkPhysicalDevice device) {
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (extensionsSupported) {
 		SwapChainSupportDetails swapChainSupport = QuerySwapChainSupport(device);
-		swapChainAdequate = !swapChainSupport.formats.empty() && !swapChainSupport.presentModes.empty();
+		swapChainAdequate = swapChainSupport.valid
+			&& !swapChainSupport.formats.empty() && !swapChainSupport.presentModes.empty();
 	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -1769,23 +2350,59 @@ QueueFamilyIndices VulkanContext::Impl::FindQueueFamilies(VkPhysicalDevice devic
 SwapChainSupportDetails VulkanContext::Impl::QuerySwapChainSupport(VkPhysicalDevice device) {
 	// Query swapchain capabilities for the given physical device.
 	SwapChainSupportDetails details;
-	vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, surface, &details.capabilities);
+	if (device == VK_NULL_HANDLE || surface == VK_NULL_HANDLE) {
+		return details;
+	}
+	const VkResult capabilitiesResult = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, surface, &details.capabilities);
+	if (capabilitiesResult != VK_SUCCESS) {
+		return details;
+	}
 
-	uint32_t formatCount;
-	vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, nullptr);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (formatCount != 0) {
+	bool formatsComplete = false;
+	for (std::uint32_t attempt = 0u; attempt < 2u && !formatsComplete; ++attempt) {
+		// VK_INCOMPLETE reports how many entries were written, not necessarily the
+		// new required capacity. Query the count again before the one bounded retry.
+		std::uint32_t formatCount = 0u;
+		const VkResult countResult = vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, nullptr);
+		if (countResult != VK_SUCCESS || formatCount == 0u) return details;
 		details.formats.resize(formatCount);
-		vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, details.formats.data());
+		const VkResult fillResult = vkGetPhysicalDeviceSurfaceFormatsKHR(
+			device, surface, &formatCount, details.formats.data());
+		if (fillResult == VK_SUCCESS && formatCount > 0u) {
+			details.formats.resize(formatCount);
+			formatsComplete = true;
+		} else if (fillResult != VK_INCOMPLETE) {
+			details.formats.clear();
+			return details;
+		}
+	}
+	if (!formatsComplete) {
+		details.formats.clear();
+		return details;
 	}
 
-	uint32_t presentModeCount;
-	vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, nullptr);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (presentModeCount != 0) {
+	bool presentModesComplete = false;
+	for (std::uint32_t attempt = 0u; attempt < 2u && !presentModesComplete; ++attempt) {
+		std::uint32_t presentModeCount = 0u;
+		const VkResult countResult = vkGetPhysicalDeviceSurfacePresentModesKHR(
+			device, surface, &presentModeCount, nullptr);
+		if (countResult != VK_SUCCESS || presentModeCount == 0u) return details;
 		details.presentModes.resize(presentModeCount);
-		vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, details.presentModes.data());
+		const VkResult fillResult = vkGetPhysicalDeviceSurfacePresentModesKHR(
+			device, surface, &presentModeCount, details.presentModes.data());
+		if (fillResult == VK_SUCCESS && presentModeCount > 0u) {
+			details.presentModes.resize(presentModeCount);
+			presentModesComplete = true;
+		} else if (fillResult != VK_INCOMPLETE) {
+			details.presentModes.clear();
+			return details;
+		}
 	}
+	if (!presentModesComplete) {
+		details.presentModes.clear();
+		return details;
+	}
+	details.valid = true;
 	return details;
 }
 
@@ -1868,11 +2485,30 @@ void VulkanContext::Impl::RecreateSwapChain() {
 	auto* window = static_cast<GLFWwindow*>(windowSystem->GetNativeHandle());
 	glfwGetFramebufferSize(window, &width, &height);
 	if (width <= 0 || height <= 0) {
-		framebufferResized = true;
+		RecordFramebufferResize(width, height);
 		presentationLifecycle.PublishRecreation(
 			TerraEngine::Renderer::Vulkan::PresentationRecreationOutcome::DeferredZeroExtent,
 			surfaceMinimumImageCount, requestedSwapchainImageCount,
 			static_cast<std::uint32_t>(swapchainImages.size()));
+		return;
+	}
+	CollectCompletedPresentationResourceBundles();
+	if (presentationRecreation.OldSwapchainWasConsumed() && !retiredPresentationBundles.empty()) {
+		// Do not create a VK_NULL_HANDLE replacement beside the chain that was
+		// already supplied as oldSwapchain. Some window systems reject that as a
+		// competing native-window chain; wait for explicit present completion.
+		framebufferResized = true;
+		return;
+	}
+	if (retiredPresentationBundles.size() >= MAX_RETIRED_PRESENTATION_BUNDLES) {
+		// Do not make an unbounded chain of old presentation waits when optional
+		// present-completion fences are unavailable or the compositor is stalled.
+		// The active chain remains intact; a later revision retries after proof.
+		presentationRecreation.PublishRetirementBlocked(false);
+		// Keep presenting the active chain so its acquire-history anchor can
+		// eventually free a backlog slot. The proof path re-arms this request.
+		framebufferResized = false;
+		TERRAENGINE_LOG(LogLevel::Warning, "Deferring swapchain recreation because the bounded retired-presentation backlog is still awaiting completion proof.");
 		return;
 	}
 
@@ -1889,9 +2525,10 @@ void VulkanContext::Impl::RecreateSwapChain() {
 	editorCompletionTracker.RecordProtectedIdle();
 
 	// Keep the complete old presentation bundle alive while the candidate is
-	// built. oldSwapchain lets the presentation engine migrate efficiently, and
-	// any failure restores the exact active bundle without touching gameplay.
+	// built. Once it is supplied to vkCreateSwapchainKHR, however, that attempt
+	// becomes irreversible and the old chain may not be restored or acquired.
 	PresentationResourceBundle activeBundle = TakePresentationResourceBundle();
+	oldSwapchainConsumedByCreateAttempt = false;
 	VulkanVRS activeVrs = vrs;
 	vrs = {};
 	bool candidateVrsCreated = false;
@@ -1924,7 +2561,30 @@ void VulkanContext::Impl::RecreateSwapChain() {
 		DestroyPresentationResourceBundle(failedCandidate);
 		if (candidateVrsCreated || vrs.view != VK_NULL_HANDLE) vrs.Destroy(device, allocator);
 		vrs = activeVrs;
+		if (oldSwapchainConsumedByCreateAttempt) {
+			// The old chain was supplied as oldSwapchain. Device-idle above proves
+			// submitted queue work is done, but it does not make the old handle
+			// reusable after the API ownership handoff attempt. Retire its image
+			// synchronization until completion proof and remain safely suspended.
+			const bool oldBundleHasExplicitCompletionProof = activeBundle.presentCompletionCoverageValid;
+			RetirePresentationResourceBundle(std::move(activeBundle), presentationLifecycle.Generation());
+			// No replacement chain exists to provide the unextended acquire-history
+			// anchor for this newly retired bundle. Only maintenance fences can recover.
+			unextendedRetirementTracker.Reset();
+			presentationRecreation.PublishRetirementBlocked(true);
+			framebufferResized = true;
+			if (oldBundleHasExplicitCompletionProof) {
+				TERRAENGINE_LOG(LogLevel::Error, "Presentation candidate failed after oldSwapchain handoff; suspended until maintenance-fence proof releases the retired chain.");
+			} else {
+				// Vulkan has no standards-defined unextended completion proof when the
+				// old chain was retired and no replacement chain exists. Remain terminal
+				// and fail closed instead of relying on device-idle and risking driver use-after-free.
+				TERRAENGINE_LOG(LogLevel::Error, "Presentation candidate failed after oldSwapchain handoff without maintenance fences; presentation is terminally suspended fail-closed.");
+			}
+			return;
+		}
 		RestorePresentationResourceBundle(std::move(activeBundle));
+		presentationRecreation.PublishFailure(false);
 		framebufferResized = true;
 		presentationLifecycle.RequestRecreation();
 		TERRAENGINE_LOG(LogLevel::Error, "Presentation candidate creation failed; the previous bundle remains active and retry stays pending.");
@@ -1932,7 +2592,8 @@ void VulkanContext::Impl::RecreateSwapChain() {
 	}
 
 	editorCompletionTracker.SetPresentationGeneration(presentationLifecycle.Generation());
-	DestroyPresentationResourceBundle(activeBundle);
+	RetirePresentationResourceBundle(std::move(activeBundle), presentationLifecycle.Generation());
+	CollectCompletedPresentationResourceBundles();
 	if (activeVrs.view != VK_NULL_HANDLE) activeVrs.Destroy(device, allocator);
 
 	if (!editorMode) {
@@ -1984,7 +2645,7 @@ void VulkanContext::Impl::RecreateSwapChain() {
 	swapchainImageAcquired = false;
 	swapchainAcquireWaitConsumed = false;
 	acquiredPresentationImage.reset();
-	framebufferResized = false;
+	PublishPresentationRecreationSuccess();
 	TERRAENGINE_LOG(LogLevel::Info, "Presentation candidate published atomically. generation="
 		<< presentationLifecycle.Generation() << ", images=" << swapchainImages.size());
 }

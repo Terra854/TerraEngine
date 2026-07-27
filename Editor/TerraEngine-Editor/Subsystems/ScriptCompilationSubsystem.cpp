@@ -11,6 +11,7 @@
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Components/ScriptComponent.h"
 #include "Engine/Scripting/ScriptingSystem.h"
+#include "NativeAotProjectWorkspace.h"
 
 #include <array>
 #include <algorithm>
@@ -18,7 +19,9 @@
 #include <cctype>
 #include <chrono>
 #include <cstring>
+#include <exception>
 #include <regex>
+#include <system_error>
 
 #if defined(_WIN32)
 #include <Windows.h>
@@ -33,6 +36,18 @@
 namespace
 {
 	constexpr float kScriptBuildDebounceSeconds = 0.25f;
+
+#if defined(_WIN32)
+	std::string DescribeWindowsProcessError(std::string_view operation, DWORD error)
+	{
+		// Capture the numeric Win32 code as well as the localized system message.
+		// The number remains stable in automation evidence even when the editor
+		// runs under a different display language.
+		return std::string(operation) + " failed with Windows error "
+			+ std::to_string(error) + ": "
+			+ std::system_category().message(static_cast<int>(error)) + ".";
+	}
+#endif
 
 	// BuildProfileToString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::string BuildProfileToString(ScriptBuildProfile profile)
@@ -83,6 +98,35 @@ namespace
 
 		SetHandleInformation(readHandle, HANDLE_FLAG_INHERIT, 0);
 
+		// A kill-on-close Job Object owns the complete dotnet/MSBuild/compiler
+		// process tree. Canceling only the directly launched dotnet process can
+		// otherwise leave Roslyn or MSBuild descendants writing into a project
+		// after the editor has closed it.
+		HANDLE jobHandle = CreateJobObjectW(nullptr, nullptr);
+		if (jobHandle == nullptr)
+		{
+			const DWORD jobError = GetLastError();
+			CloseHandle(writeHandle);
+			CloseHandle(readHandle);
+			output = DescribeWindowsProcessError("CreateJobObjectW", jobError);
+			return false;
+		}
+		JOBOBJECT_EXTENDED_LIMIT_INFORMATION jobLimits{};
+		jobLimits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+		if (!SetInformationJobObject(
+				jobHandle,
+				JobObjectExtendedLimitInformation,
+				&jobLimits,
+				sizeof(jobLimits)))
+		{
+			const DWORD jobError = GetLastError();
+			CloseHandle(jobHandle);
+			CloseHandle(writeHandle);
+			CloseHandle(readHandle);
+			output = DescribeWindowsProcessError("SetInformationJobObject", jobError);
+			return false;
+		}
+
 		STARTUPINFOW startupInfo{};
 		startupInfo.cb = sizeof(startupInfo);
 		startupInfo.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
@@ -99,22 +143,53 @@ namespace
 			nullptr,
 			nullptr,
 			TRUE,
-			CREATE_NO_WINDOW,
+			// Suspend until job assignment succeeds so no compiler child can
+			// escape the cancellation boundary between launch and assignment.
+			CREATE_NO_WINDOW | CREATE_SUSPENDED,
 			nullptr,
 			workingDirectory.wstring().c_str(),
 			&startupInfo,
 			&processInfo);
+		const DWORD launchError = started ? ERROR_SUCCESS : GetLastError();
 
 		CloseHandle(writeHandle);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!started)
 		{
+			output = DescribeWindowsProcessError("CreateProcessW", launchError);
+			CloseHandle(jobHandle);
 			CloseHandle(readHandle);
+			return false;
+		}
+		if (!AssignProcessToJobObject(jobHandle, processInfo.hProcess))
+		{
+			const DWORD assignmentError = GetLastError();
+			TerminateProcess(processInfo.hProcess, assignmentError);
+			WaitForSingleObject(processInfo.hProcess, INFINITE);
+			CloseHandle(processInfo.hThread);
+			CloseHandle(processInfo.hProcess);
+			CloseHandle(jobHandle);
+			CloseHandle(readHandle);
+			output = DescribeWindowsProcessError("AssignProcessToJobObject", assignmentError);
+			return false;
+		}
+		if (ResumeThread(processInfo.hThread) == static_cast<DWORD>(-1))
+		{
+			const DWORD resumeError = GetLastError();
+			// Closing this configured job terminates the still-suspended process
+			// and any descendants before their project handles are released.
+			CloseHandle(jobHandle);
+			WaitForSingleObject(processInfo.hProcess, INFINITE);
+			CloseHandle(processInfo.hThread);
+			CloseHandle(processInfo.hProcess);
+			CloseHandle(readHandle);
+			output = DescribeWindowsProcessError("ResumeThread", resumeError);
 			return false;
 		}
 
 		std::array<char, 4096> buffer{};
 		bool processExited = false;
+		bool terminationRequested = false;
 		while (!processExited)
 		{
 			DWORD available = 0u;
@@ -128,12 +203,18 @@ namespace
 				}
 			}
 
-			if (cancellationRequested.load(std::memory_order_relaxed))
+			if (!terminationRequested && cancellationRequested.load(std::memory_order_relaxed))
 			{
-				// dotnet is the directly launched process for generated build
-				// invocations, so termination stops uncommitted compilation work.
-				TerminateProcess(processInfo.hProcess, ERROR_CANCELLED);
+				// Terminate the whole job, not just dotnet, so cancellation is a
+				// protected boundary for all compiler descendants.
+				if (!TerminateJobObject(jobHandle, ERROR_CANCELLED))
+				{
+					// A direct termination remains a conservative fallback if
+					// the operating system rejects job-wide termination.
+					TerminateProcess(processInfo.hProcess, ERROR_CANCELLED);
+				}
 				canceled = true;
+				terminationRequested = true;
 			}
 			processExited = WaitForSingleObject(processInfo.hProcess, 50u) == WAIT_OBJECT_0;
 		}
@@ -160,6 +241,10 @@ namespace
 
 		CloseHandle(processInfo.hThread);
 		CloseHandle(processInfo.hProcess);
+		// Normal completion can still leave a tool holding inherited handles.
+		// Closing the kill-on-close job guarantees those descendants cannot
+		// outlive the captured build operation.
+		CloseHandle(jobHandle);
 		CloseHandle(readHandle);
 		return true;
 #else
@@ -386,10 +471,11 @@ void ScriptCompilationSubsystem::DrawUI()
 // ScriptCompilationSubsystem::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptCompilationSubsystem::Shutdown()
 {
-	if (m_BuildInFlight && m_ActiveBuild.valid())
-	{
-		m_ActiveBuild.wait();
-	}
+	// Shutdown must not let a compiler process retain project files after the
+	// editor context is released. The worker observes this token and terminates
+	// its complete Windows Job Object before the future is joined.
+	m_CancelRequested.store(true, std::memory_order_relaxed);
+	CancelAndDrainActiveBuild();
 
 	m_Context = nullptr;
 	m_Status = ScriptCompilationStatus{};
@@ -454,6 +540,13 @@ void ScriptCompilationSubsystem::OnProjectOpened()
 // ScriptCompilationSubsystem::OnProjectClosed is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptCompilationSubsystem::OnProjectClosed()
 {
+	// Project close clears the workspace service below. Cancel and join first so
+	// the worker cannot race that mutation while reading project paths or while
+	// a dotnet descendant is still writing derived outputs.
+	m_Status.queuedBuild = false;
+	m_CancelRequested.store(true, std::memory_order_relaxed);
+	CancelAndDrainActiveBuild();
+
 	m_Status = ScriptCompilationStatus{};
 	m_ShouldRestorePausedGameplayState = false;
 	m_WasRunningBeforeBuild = false;
@@ -916,6 +1009,32 @@ void ScriptCompilationSubsystem::BeginBuild()
 	UpdateSharedState();
 }
 
+void ScriptCompilationSubsystem::CancelAndDrainActiveBuild()
+{
+	if (!m_BuildInFlight || !m_ActiveBuild.valid())
+	{
+		m_BuildInFlight = false;
+		return;
+	}
+
+	try
+	{
+		// get() both joins the async worker and consumes its result. Project close
+		// deliberately discards that result because publishing or reloading an
+		// assembly after the close boundary would target the wrong session.
+		static_cast<void>(m_ActiveBuild.get());
+	}
+	catch (const std::exception& exception)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Assembly-CSharp worker failed while editor lifecycle teardown drained it: " << exception.what());
+	}
+	catch (...)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Assembly-CSharp worker failed with an unknown exception while editor lifecycle teardown drained it.");
+	}
+	m_BuildInFlight = false;
+}
+
 // ScriptCompilationSubsystem::HandleCompletedBuild is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptCompilationSubsystem::HandleCompletedBuild(ScriptBuildResult result)
 {
@@ -1066,19 +1185,36 @@ ScriptCompilationSubsystem::ScriptBuildResult ScriptCompilationSubsystem::RunBui
 		return result;
 	}
 
+	// Snapshot every canonical path before the worker launches dotnet. Project
+	// close joins this worker before mutating ScriptWorkspaceService, and these
+	// immutable values ensure diagnostics and output checks never observe a
+	// temporary alias or a later project's workspace.
+	const std::filesystem::path canonicalProjectRoot = m_WorkspaceService.GetProjectRoot();
+	const std::filesystem::path canonicalProjectPath = m_WorkspaceService.GetProjectPath();
+	const std::filesystem::path canonicalAssemblyPath = m_WorkspaceService.GetAssemblyPath();
+
+	NativeAotProjectWorkspace processWorkspace(canonicalProjectRoot);
+	std::string processWorkspaceError;
+	if (!processWorkspace.Prepare(processWorkspaceError))
+	{
+		result.failureMessage = "Could not prepare the private short-path workspace for Assembly-CSharp compilation: "
+			+ processWorkspaceError;
+		return result;
+	}
+
 	const TerraEngine::Editor::Scripting::ScriptBuildInvocation invocation = TerraEngine::Editor::Scripting::CreateScriptBuildInvocation(
-		m_WorkspaceService.GetProjectRoot(),
-		m_WorkspaceService.GetProjectPath(),
-		BuildProfileToString(profile));
+		canonicalProjectRoot,
+		canonicalProjectPath,
+		BuildProfileToString(profile),
+		processWorkspace.BuildProjectRoot(),
+		processWorkspace.BuildProjectRoot() / canonicalProjectPath.filename());
 
 	int exitCode = 0;
-	if (!RunProcessCapture(invocation.workingDirectory, invocation.commandLine, m_CancelRequested, result.buildOutput, exitCode, result.canceled))
+	if (!RunProcessCapture(invocation.processWorkingDirectory, invocation.commandLine, m_CancelRequested, result.buildOutput, exitCode, result.canceled))
 	{
-		result.failureMessage = TerraEngine::Editor::Scripting::DescribeScriptBuildLaunchFailure(invocation);
-		if (!result.buildOutput.empty())
-		{
-			result.failureMessage += " " + result.buildOutput;
-		}
+		result.failureMessage = TerraEngine::Editor::Scripting::DescribeScriptBuildLaunchFailure(
+			invocation,
+			result.buildOutput);
 		return result;
 	}
 	if (result.canceled)
@@ -1094,10 +1230,21 @@ ScriptCompilationSubsystem::ScriptBuildResult ScriptCompilationSubsystem::RunBui
 		return result;
 	}
 
-	result.assemblyPath = m_WorkspaceService.GetAssemblyPath();
+	result.assemblyPath = canonicalAssemblyPath;
 	if (!std::filesystem::exists(result.assemblyPath))
 	{
 		result.failureMessage = TerraEngine::Editor::Scripting::DescribeMissingScriptAssembly(result.assemblyPath);
+		return result;
+	}
+
+	// Keep the alias alive until process completion and pipe drain above, then
+	// remove it explicitly before publishing success. The destructor remains a
+	// conservative fallback for every earlier failure return.
+	std::string cleanupError;
+	if (!processWorkspace.Cleanup(cleanupError))
+	{
+		result.failureMessage = "Assembly-CSharp compiled successfully, but its private short-path workspace could not be removed: "
+			+ cleanupError;
 		return result;
 	}
 

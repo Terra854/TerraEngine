@@ -1,0 +1,39 @@
+{
+	"name": "Advanced Target Ragdoll Actor",
+	"objects": [
+		{
+			"name": "Advanced Target Ragdoll Actor",
+			"tag": "Untagged",
+			"layer": "Default",
+			"active": true,
+			"isStatic": false,
+			"uuid": "5445414e3034334143544f424a000003",
+			"components": {
+				"Transform": {
+					"Position": [1.5, 0.0, 0.0],
+					"Rotation": [1.0, 0.0, 0.0, 0.0],
+					"Scale": [1.0, 1.0, 1.0]
+				},
+				"AnimatorComponent": {
+					"active": true,
+					"schemaVersion": 1,
+					"controllerAssetId": "00000000000000000000000000000000",
+					"defaultClipAssetId": "5445414e303433414456464958000004",
+					"skeletonOverrideAssetId": "5445414e303433414456464958000002",
+					"avatarOverrideAssetId": "00000000000000000000000000000000",
+					"retargetProfileOverrideAssetId": "00000000000000000000000000000000",
+					"ragdollProfileOverrideAssetId": "5445414e303433414456464958000007",
+					"motionDatabaseOverrideAssetId": "00000000000000000000000000000000",
+					"requestedMode": 0,
+					"rootMotionPolicy": 1,
+					"updatePolicy": 0,
+					"timePolicy": 0,
+					"initialParameters": "{}",
+					"eventPolicy": 0,
+					"cullingPolicy": 0,
+					"diagnosticOverrides": 0
+				}
+			}
+		}
+	]
+}

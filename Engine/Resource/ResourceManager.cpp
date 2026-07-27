@@ -7,6 +7,7 @@
 #include "Resource/ResourceManager.h"
 #include "Renderer/RenderSystem.h"
 
+#include <cstring>
 #include <fstream>
 #include <stdexcept>
 #include <sstream>
@@ -17,9 +18,21 @@
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <mutex>
+#include <unordered_set>
 #include <nlohmann/json.hpp>
 
 #include "Core/Logger/Logger.h"
+#include "Animation/Assets/AnimationClipAsset.h"
+#include "Animation/Assets/AnimationControllerAsset.h"
+#include "Animation/Assets/AnimationMaskAsset.h"
+#include "Animation/Assets/MotionDatabaseAsset.h"
+#include "Animation/Assets/RagdollProfileAsset.h"
+#include "Animation/Assets/RetargetProfileAsset.h"
+#include "Animation/Assets/SkeletonAsset.h"
+#include "Animation/Codec/AnimationCodec.h"
+#include "File Formats/TerraEngineAnimationFile.h"
+#include "Runtime/ContentMount/AnimationContentResolver.h"
 #include "Runtime/ContentMount/ContentMount.h"
 // Concrete resource definitions are required here so the cache-owned
 // std::unique_ptr instances have complete types when the deleters compile.
@@ -30,6 +43,144 @@
 #include "Resource/ShaderCollection.h"
 #include "basisu_transcoder.h"
 #include "basisu_transcoder_uastc.h"
+
+// The prepared transaction stores type-erased pointers because skeletons,
+// clips, and the specialist byte-backed resources live in different caches.
+// Each pointer still carries its exact no-throw deleter, and ResourceManager
+// restores the concrete type only after every cache has passed commit checks.
+struct PreparedAnimationAssetReloadBatch::State
+{
+	struct Entry
+	{
+		TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+		AssetType assetType = AssetType::Skeleton;
+		std::string sourceKey;
+		TerraEngine::Animation::AnimationGeneration observedGeneration = 0U;
+		TerraEngine::Animation::AnimationGeneration nextGeneration = 0U;
+		std::uint64_t publisherRetirementGeneration = 0U;
+		std::uint64_t cpuBytes = 0U;
+		void* payload = nullptr;
+		void (*destroyPayload)(void*) noexcept = nullptr;
+		// These non-owning destinations are populated only while every animation
+		// cache lock is held during commit. They prevent any lookup or validation
+		// from occurring after the first live pointer swap.
+		void* destinationSlot = nullptr;
+		TerraEngine::Animation::AnimationGeneration* generationSlot = nullptr;
+
+		Entry() noexcept = default;
+		~Entry()
+		{
+			Reset();
+		}
+		Entry(const Entry&) = delete;
+		Entry& operator=(const Entry&) = delete;
+		Entry(Entry&& other) noexcept
+			: assetId(other.assetId),
+			assetType(other.assetType),
+			sourceKey(std::move(other.sourceKey)),
+			observedGeneration(other.observedGeneration),
+			nextGeneration(other.nextGeneration),
+			publisherRetirementGeneration(other.publisherRetirementGeneration),
+			cpuBytes(other.cpuBytes),
+			payload(std::exchange(other.payload, nullptr)),
+			destroyPayload(std::exchange(other.destroyPayload, nullptr)),
+			destinationSlot(std::exchange(other.destinationSlot, nullptr)),
+			generationSlot(std::exchange(other.generationSlot, nullptr))
+		{
+		}
+		Entry& operator=(Entry&& other) noexcept
+		{
+			if(this == &other) return *this;
+			Reset();
+			assetId = other.assetId;
+			assetType = other.assetType;
+			sourceKey = std::move(other.sourceKey);
+			observedGeneration = other.observedGeneration;
+			nextGeneration = other.nextGeneration;
+			publisherRetirementGeneration = other.publisherRetirementGeneration;
+			cpuBytes = other.cpuBytes;
+			payload = std::exchange(other.payload, nullptr);
+			destroyPayload = std::exchange(other.destroyPayload, nullptr);
+			destinationSlot = std::exchange(other.destinationSlot, nullptr);
+			generationSlot = std::exchange(other.generationSlot, nullptr);
+			return *this;
+		}
+
+		void Reset() noexcept
+		{
+			if(payload != nullptr && destroyPayload != nullptr) destroyPayload(payload);
+			payload = nullptr;
+			destroyPayload = nullptr;
+		}
+
+		[[nodiscard]] void* ReleasePayload() noexcept
+		{
+			destroyPayload = nullptr;
+			return std::exchange(payload, nullptr);
+		}
+	};
+
+	void UnlockPublicationLocks() noexcept
+	{
+		// The publisher calls this after its own no-throw table swap. Keeping all
+		// locks until then prevents independent cache readers seeing a half commit.
+		if(ragdollLock.owns_lock()) ragdollLock.unlock();
+		if(motionDatabaseLock.owns_lock()) motionDatabaseLock.unlock();
+		if(retargetProfileLock.owns_lock()) retargetProfileLock.unlock();
+		if(animationMaskLock.owns_lock()) animationMaskLock.unlock();
+		if(animationControllerLock.owns_lock()) animationControllerLock.unlock();
+		if(animationClipLock.owns_lock()) animationClipLock.unlock();
+		if(skeletonLock.owns_lock()) skeletonLock.unlock();
+		if(retirementLock.owns_lock()) retirementLock.unlock();
+	}
+
+	[[nodiscard]] bool OwnsPublicationLocks() const noexcept
+	{
+		return skeletonLock.owns_lock() || animationClipLock.owns_lock()
+			|| animationControllerLock.owns_lock() || animationMaskLock.owns_lock()
+			|| retargetProfileLock.owns_lock() || motionDatabaseLock.owns_lock()
+			|| ragdollLock.owns_lock();
+	}
+
+	ResourceManager* owner = nullptr;
+	std::vector<Entry> entries;
+	bool diagnosticsFinalized = false;
+	std::unique_lock<std::shared_mutex> skeletonLock;
+	std::unique_lock<std::shared_mutex> animationClipLock;
+	std::unique_lock<std::shared_mutex> animationControllerLock;
+	std::unique_lock<std::shared_mutex> animationMaskLock;
+	std::unique_lock<std::shared_mutex> retargetProfileLock;
+	std::unique_lock<std::shared_mutex> motionDatabaseLock;
+	std::unique_lock<std::shared_mutex> ragdollLock;
+	std::unique_lock<std::mutex> retirementLock;
+};
+
+PreparedAnimationAssetReloadBatch::PreparedAnimationAssetReloadBatch() noexcept = default;
+PreparedAnimationAssetReloadBatch::~PreparedAnimationAssetReloadBatch() = default;
+PreparedAnimationAssetReloadBatch::PreparedAnimationAssetReloadBatch(
+	PreparedAnimationAssetReloadBatch&& other) noexcept = default;
+PreparedAnimationAssetReloadBatch& PreparedAnimationAssetReloadBatch::operator=(
+	PreparedAnimationAssetReloadBatch&& other) noexcept = default;
+
+bool PreparedAnimationAssetReloadBatch::Accepted() const noexcept
+{
+	return m_accepted;
+}
+
+bool PreparedAnimationAssetReloadBatch::Committed() const noexcept
+{
+	return m_committed;
+}
+
+std::size_t PreparedAnimationAssetReloadBatch::Size() const noexcept
+{
+	return m_state != nullptr ? m_state->entries.size() : 0U;
+}
+
+std::string_view PreparedAnimationAssetReloadBatch::Diagnostic() const noexcept
+{
+	return m_diagnostic;
+}
 
 namespace
 {
@@ -53,6 +204,20 @@ namespace
 			return { ".tephysmat" };
 		case AssetType::CookedCollider:
 			return { ".tepcoll" };
+		case AssetType::Skeleton:
+			return { ".teskel" };
+		case AssetType::AnimationClip:
+			return { ".teanim" };
+		case AssetType::AnimationController:
+			return { ".teanimctrl" };
+		case AssetType::AnimationMask:
+			return { ".teanimmask" };
+		case AssetType::RetargetProfile:
+			return { ".teretarget" };
+		case AssetType::MotionDatabase:
+			return { ".temotiondb" };
+		case AssetType::RagdollProfile:
+			return { ".teragdoll" };
 		}
 
 		return {};
@@ -86,6 +251,209 @@ namespace
 	{
 		constexpr std::uint64_t max = std::numeric_limits<std::uint64_t>::max();
 		return left > max - right ? max : left + right;
+	}
+
+	std::string AnimationValidationRecoveryAction(TerraEngine::Animation::AnimationStatus status)
+	{
+		using TerraEngine::Animation::AnimationStatus;
+		switch (status)
+		{
+		case AnimationStatus::MissingAsset:
+			return "Verify the cooked artifact is installed or mounted and that the registered path is correct.";
+		case AnimationStatus::IncompatibleAsset:
+			return "Reimport the skeleton, clips, and deformable meshes together so their compatibility metadata matches.";
+		case AnimationStatus::UnsupportedMajorVersion:
+			return "Recook the asset with this TerraEngine version; unsupported binary layouts are never guessed at runtime.";
+		case AnimationStatus::ContentHashMismatch:
+			return "Restore or recook the asset because its checked payload no longer matches the recorded content hash.";
+		case AnimationStatus::RangeOverflow:
+		case AnimationStatus::RangeOutOfBounds:
+		case AnimationStatus::TruncatedInput:
+			return "Recook or restore the asset; one or more serialized byte ranges are truncated or outside the file.";
+		case AnimationStatus::HardLimitExceeded:
+			return "Split or simplify the authored content until every count is within the documented runtime hard limits.";
+		case AnimationStatus::Unsupported:
+			return "Use the cooked TerraEngine runtime extension instead of a DCC source file.";
+		default:
+			return "Recook the asset and inspect the import diagnostics for the first malformed field.";
+		}
+	}
+
+	void RejectAnimationValidation(
+		AnimationResourceValidationResult& result,
+		TerraEngine::Animation::AnimationStatus status,
+		std::string code,
+		std::string_view detail)
+	{
+		result.status = status;
+		result.diagnosticCode = std::move(code);
+		result.message = std::string(detail) + " Action: " + AnimationValidationRecoveryAction(status);
+	}
+
+	AnimationResourceValidationResult MakeAnimationValidationBase(
+		const ResourceManager& manager,
+		const std::filesystem::path& path,
+		AssetType type,
+		TerraEngine::Animation::AnimationCompatibilityFingerprint expectedCompatibilityFingerprint)
+	{
+		AnimationResourceValidationResult result;
+		result.assetType = type;
+		result.resolvedPath = manager.ResolveAssetPath(path);
+		result.expectedCompatibilityFingerprint = expectedCompatibilityFingerprint;
+		return result;
+	}
+
+	void ProbeAnimationEnvelopeVersion(
+		std::span<const std::uint8_t> bytes,
+		AnimationResourceValidationResult& result)
+	{
+		if (bytes.size() < sizeof(TerraEngine::Animation::AnimationAssetEnvelope))
+		{
+			return;
+		}
+		TerraEngine::Animation::AnimationAssetEnvelope envelope{};
+		std::memcpy(&envelope, bytes.data(), sizeof(envelope));
+		result.detectedMajorVersion = envelope.majorVersion;
+		result.detectedMinorVersion = envelope.minorVersion;
+	}
+
+	std::unique_ptr<TerraEngine::Animation::SkeletonAsset> ReadSkeletonResource(
+		const ResourceManager& manager,
+		const std::filesystem::path& resolvedPath,
+		TerraEngine::Animation::AnimationCompatibilityFingerprint expectedCompatibilityFingerprint,
+		AnimationResourceValidationResult& result)
+	{
+		using namespace TerraEngine::Animation;
+		result = MakeAnimationValidationBase(manager, resolvedPath, AssetType::Skeleton, expectedCompatibilityFingerprint);
+		const std::vector<std::uint8_t> bytes = manager.ReadFileBytes(result.resolvedPath);
+		result.fileSizeBytes = bytes.size();
+		ProbeAnimationEnvelopeVersion(bytes, result);
+		if (bytes.empty())
+		{
+			RejectAnimationValidation(result, AnimationStatus::MissingAsset, "SkeletonAssetMissing",
+				"The cooked .teskel artifact could not be read from the project or mounted runtime content.");
+			return nullptr;
+		}
+
+		AnimationAssetReader reader;
+		if (const AnimationStatus status = reader.Parse(bytes); status != AnimationStatus::Ok)
+		{
+			RejectAnimationValidation(result, status, "SkeletonEnvelopeRejected",
+				"The common animation envelope, chunk table, or content hash is invalid.");
+			return nullptr;
+		}
+		result.detectedMajorVersion = reader.Envelope().majorVersion;
+		result.detectedMinorVersion = reader.Envelope().minorVersion;
+		result.assetId = reader.Envelope().assetId.value;
+		result.actualCompatibilityFingerprint = reader.Envelope().compatibilityFingerprint;
+		std::memcpy(&result.contentFingerprint, reader.Envelope().contentHash.data(),
+			sizeof(result.contentFingerprint));
+		result.contentHash = reader.Envelope().contentHash;
+		result.contentHashPresent = true;
+		result.compatibilityFingerprintPresent = reader.Envelope().compatibilityFingerprint != 0U;
+		if (!result.compatibilityFingerprintPresent)
+		{
+			RejectAnimationValidation(result, AnimationStatus::IncompatibleAsset, "SkeletonFingerprintMissing",
+				"The skeleton does not publish the mandatory compatibility fingerprint.");
+			return nullptr;
+		}
+		if (expectedCompatibilityFingerprint != 0U
+			&& reader.Envelope().compatibilityFingerprint != expectedCompatibilityFingerprint)
+		{
+			RejectAnimationValidation(result, AnimationStatus::IncompatibleAsset, "SkeletonFingerprintMismatch",
+				"The skeleton fingerprint does not match the binding requested by the runtime.");
+			return nullptr;
+		}
+
+		auto asset = std::make_unique<SkeletonAsset>();
+		const AnimationCompatibilityFingerprint fingerprintToValidate = expectedCompatibilityFingerprint != 0U
+			? expectedCompatibilityFingerprint
+			: reader.Envelope().compatibilityFingerprint;
+		if (const AnimationStatus status = DeserializeSkeletonAsset(bytes, fingerprintToValidate, *asset);
+			status != AnimationStatus::Ok)
+		{
+			RejectAnimationValidation(result, status, "SkeletonPayloadRejected",
+				"The skeleton payload failed its checked tables, hierarchy, bind-pose, or semantic-identity validation.");
+			return nullptr;
+		}
+
+		result.jointCount = static_cast<std::uint32_t>(asset->joints.size());
+		result.status = AnimationStatus::Ok;
+		result.diagnosticCode = "SkeletonAssetValid";
+		result.message = "The source-independent skeleton envelope, fingerprint, hierarchy, inverse binds, sockets, and ranges are valid.";
+		return asset;
+	}
+
+	std::unique_ptr<TerraEngine::Animation::AnimationClipAsset> ReadAnimationClipResource(
+		const ResourceManager& manager,
+		const std::filesystem::path& resolvedPath,
+		TerraEngine::Animation::AnimationCompatibilityFingerprint expectedCompatibilityFingerprint,
+		AnimationResourceValidationResult& result)
+	{
+		using namespace TerraEngine::Animation;
+		result = MakeAnimationValidationBase(manager, resolvedPath, AssetType::AnimationClip, expectedCompatibilityFingerprint);
+		const std::vector<std::uint8_t> bytes = manager.ReadFileBytes(result.resolvedPath);
+		result.fileSizeBytes = bytes.size();
+		ProbeAnimationEnvelopeVersion(bytes, result);
+		if (bytes.empty())
+		{
+			RejectAnimationValidation(result, AnimationStatus::MissingAsset, "AnimationClipMissing",
+				"The cooked .teanim artifact could not be read from the project or mounted runtime content.");
+			return nullptr;
+		}
+
+		AnimationAssetReader reader;
+		if (const AnimationStatus status = reader.Parse(bytes); status != AnimationStatus::Ok)
+		{
+			RejectAnimationValidation(result, status, "AnimationClipEnvelopeRejected",
+				"The common animation envelope, chunk table, or content hash is invalid.");
+			return nullptr;
+		}
+		result.detectedMajorVersion = reader.Envelope().majorVersion;
+		result.detectedMinorVersion = reader.Envelope().minorVersion;
+		result.assetId = reader.Envelope().assetId.value;
+		result.actualCompatibilityFingerprint = reader.Envelope().compatibilityFingerprint;
+		std::memcpy(&result.contentFingerprint, reader.Envelope().contentHash.data(),
+			sizeof(result.contentFingerprint));
+		result.contentHash = reader.Envelope().contentHash;
+		result.contentHashPresent = true;
+		result.compatibilityFingerprintPresent = reader.Envelope().compatibilityFingerprint != 0U;
+		if (!result.compatibilityFingerprintPresent)
+		{
+			RejectAnimationValidation(result, AnimationStatus::IncompatibleAsset, "AnimationClipFingerprintMissing",
+				"The animation clip does not publish the mandatory skeleton compatibility fingerprint.");
+			return nullptr;
+		}
+		if (expectedCompatibilityFingerprint != 0U
+			&& reader.Envelope().compatibilityFingerprint != expectedCompatibilityFingerprint)
+		{
+			RejectAnimationValidation(result, AnimationStatus::IncompatibleAsset, "AnimationClipFingerprintMismatch",
+				"The animation clip fingerprint does not match the target skeleton binding.");
+			return nullptr;
+		}
+
+		auto asset = std::make_unique<AnimationClipAsset>();
+		if (const AnimationStatus status = DeserializeAnimationClipAsset(bytes, expectedCompatibilityFingerprint, *asset);
+			status != AnimationStatus::Ok)
+		{
+			RejectAnimationValidation(result, status, "AnimationClipPayloadRejected",
+				"The clip payload failed its checked segment, track, event, curve, morph, or stream-table validation.");
+			return nullptr;
+		}
+		AnimationCodecView decoder;
+		if (const AnimationStatus status = decoder.Open(*asset); status != AnimationStatus::Ok)
+		{
+			RejectAnimationValidation(result, status, "AnimationClipCodecRejected",
+				"The clip metadata is valid, but its independently seekable codec ranges or decoder version are invalid.");
+			return nullptr;
+		}
+
+		result.clipSegmentCount = static_cast<std::uint32_t>(asset->segments.size());
+		result.clipTrackCount = static_cast<std::uint32_t>(asset->tracks.size());
+		result.status = AnimationStatus::Ok;
+		result.diagnosticCode = "AnimationClipValid";
+		result.message = "The source-independent clip envelope, fingerprint, codec, segment tables, and checked stream ranges are valid.";
+		return asset;
 	}
 
 	float JsonFloatOr(const nlohmann::json& object, std::string_view key, float fallback)
@@ -244,6 +612,20 @@ namespace
 			return AssetType::Texture;
 		case TerraEngine::Resource::ResidencyAssetType::ShaderCollection:
 			return AssetType::ShaderCollection;
+		case TerraEngine::Resource::ResidencyAssetType::Skeleton:
+			return AssetType::Skeleton;
+		case TerraEngine::Resource::ResidencyAssetType::AnimationClip:
+			return AssetType::AnimationClip;
+		case TerraEngine::Resource::ResidencyAssetType::AnimationController:
+			return AssetType::AnimationController;
+		case TerraEngine::Resource::ResidencyAssetType::AnimationMask:
+			return AssetType::AnimationMask;
+		case TerraEngine::Resource::ResidencyAssetType::RetargetProfile:
+			return AssetType::RetargetProfile;
+		case TerraEngine::Resource::ResidencyAssetType::MotionDatabase:
+			return AssetType::MotionDatabase;
+		case TerraEngine::Resource::ResidencyAssetType::RagdollProfile:
+			return AssetType::RagdollProfile;
 		case TerraEngine::Resource::ResidencyAssetType::Material:
 		case TerraEngine::Resource::ResidencyAssetType::Shader:
 		case TerraEngine::Resource::ResidencyAssetType::FontAtlas:
@@ -424,6 +806,19 @@ namespace
 		return false;
 	}
 
+	bool IsNativeAnimationAssetPath(const std::filesystem::path& path)
+	{
+		for (std::uint32_t value = static_cast<std::uint32_t>(AssetType::Skeleton);
+			value <= static_cast<std::uint32_t>(AssetType::RagdollProfile); ++value)
+		{
+			if (HasNativeExtensionForAssetType(path, static_cast<AssetType>(value)))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
 	// FindEditorProjectRoot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::optional<std::filesystem::path> FindEditorProjectRoot(const std::filesystem::path& assetRoot)
 	{
@@ -453,6 +848,69 @@ namespace
 		}
 
 		return std::nullopt;
+	}
+
+	// Validate the common envelope and the type-specific payload before an
+	// opaque animation blob is allowed to cross the cache publication boundary.
+	// The caller may request the stable UUID encoded in the envelope so the
+	// path registry and immutable generation ledger remain keyed consistently.
+	bool ValidateOpaqueAnimationPayload(
+		std::span<const std::uint8_t> bytes,
+		AssetType type,
+		TerraEngine::UUID* assetId = nullptr,
+		TerraEngine::Animation::AnimationStatus* failureStatus = nullptr,
+		TerraEngine::Animation::AnimationCompatibilityFingerprint expectedCompatibilityFingerprint = 0u)
+	{
+		using namespace TerraEngine::Animation;
+		AnimationAssetReader envelopeReader;
+		const AnimationStatus envelopeStatus = envelopeReader.Parse(bytes);
+		if (envelopeStatus != AnimationStatus::Ok)
+		{
+			if (failureStatus != nullptr) *failureStatus = envelopeStatus;
+			return false;
+		}
+		if (assetId != nullptr)
+		{
+			*assetId = envelopeReader.Envelope().assetId.value;
+		}
+		AnimationStatus status = AnimationStatus::Unsupported;
+		switch (type)
+		{
+		case AssetType::AnimationController:
+		{
+			AnimationControllerAsset asset;
+			status = DeserializeAnimationControllerAsset(bytes, expectedCompatibilityFingerprint, asset);
+			break;
+		}
+		case AssetType::AnimationMask:
+		{
+			AnimationMaskAsset asset;
+			status = DeserializeAnimationMaskAsset(bytes, expectedCompatibilityFingerprint, asset);
+			break;
+		}
+		case AssetType::RetargetProfile:
+		{
+			RetargetProfileAsset asset;
+			status = DeserializeRetargetProfileAsset(bytes, expectedCompatibilityFingerprint, asset);
+			break;
+		}
+		case AssetType::MotionDatabase:
+		{
+			MotionDatabaseAsset asset;
+			status = DeserializeMotionDatabaseAsset(bytes, expectedCompatibilityFingerprint, asset);
+			break;
+		}
+		case AssetType::RagdollProfile:
+		{
+			RagdollProfileAsset asset;
+			status = DeserializeRagdollProfileAsset(bytes, expectedCompatibilityFingerprint, asset);
+			break;
+		}
+		default:
+			break;
+		}
+		if (failureStatus != nullptr) *failureStatus = status;
+		return status == AnimationStatus::Ok;
 	}
 }
 
@@ -499,6 +957,54 @@ std::uint64_t ResourceManager::ComputeLoadedResourceBytes(const Mesh& resource) 
 	return bytes;
 }
 
+std::uint64_t ResourceManager::ComputeLoadedResourceBytes(const TerraEngine::Animation::SkeletonAsset& resource) const
+{
+	std::uint64_t bytes = sizeof(TerraEngine::Animation::SkeletonAsset);
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.joints));
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.inverseBindMatrices));
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.sockets));
+	bytes = AddPayloadBytes(bytes, resource.source.sourcePackagePath.size());
+	for (const TerraEngine::Animation::SkeletonJoint& joint : resource.joints)
+	{
+		bytes = AddPayloadBytes(bytes, joint.displayName.size());
+		bytes = AddPayloadBytes(bytes, joint.normalizedSourcePath.size());
+		bytes = AddPayloadBytes(bytes, joint.semanticRole.size());
+	}
+	for (const TerraEngine::Animation::SkeletonSocket& socket : resource.sockets)
+	{
+		bytes = AddPayloadBytes(bytes, socket.displayName.size());
+		bytes = AddPayloadBytes(bytes, socket.semanticRole.size());
+	}
+	return bytes;
+}
+
+std::uint64_t ResourceManager::ComputeLoadedResourceBytes(const TerraEngine::Animation::AnimationClipAsset& resource) const
+{
+	std::uint64_t bytes = sizeof(TerraEngine::Animation::AnimationClipAsset);
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.segments));
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.tracks));
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.namedChannels));
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.events));
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.streamData));
+	for (const TerraEngine::Animation::AnimationClipNamedChannel& channel : resource.namedChannels)
+	{
+		bytes = AddPayloadBytes(bytes, channel.name.size());
+	}
+	for (const TerraEngine::Animation::AnimationClipEvent& event : resource.events)
+	{
+		bytes = AddPayloadBytes(bytes, event.payload.size());
+	}
+	return bytes;
+}
+
+std::uint64_t ResourceManager::ComputeLoadedResourceBytes(const OpaqueAnimationResource& resource) const
+{
+	// Opaque assets are retained exactly as their cooked byte payload.  Their
+	// specialist readers validate and interpret the bytes after this ownership
+	// boundary, so residency must not substitute a guessed decoded size.
+	return AddPayloadBytes(sizeof(OpaqueAnimationResource), VectorPayloadBytes(resource.bytes));
+}
+
 std::uint64_t ResourceManager::ComputeLoadedResourceBytes(const Shader& resource) const
 {
 	std::uint64_t bytes = sizeof(Shader);
@@ -531,6 +1037,9 @@ ResourceManager::ResourceManager()
 	// threadPool is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	: threadPool(ThreadPool::instance())
 {
+	// Coordinated reloads never allocate after their cache swaps. This bounded
+	// reserve holds one retired payload per supported pending publisher record.
+	m_RetiredAnimationPayloads.reserve(16384U);
 	assetRoot = std::filesystem::current_path();
 	engineRoot = std::filesystem::current_path();
 	m_ResidencyPolicy = TerraEngine::Resource::MakeDefaultResidencyPolicy();
@@ -539,6 +1048,23 @@ ResourceManager::ResourceManager()
 	materialCache.tracksResidency = true;
 	meshCache.assetType = AssetType::Mesh;
 	meshCache.tracksResidency = true;
+	skeletonCache.assetType = AssetType::Skeleton;
+	animationClipCache.assetType = AssetType::AnimationClip;
+	// Animation payloads are CPU-owned immutable snapshots.  Tracking them in
+	// the ordinary residency system makes gameplay-critical retention and
+	// pressure-driven release use the same protected boundary as other assets.
+	skeletonCache.tracksResidency = true;
+	animationClipCache.tracksResidency = true;
+	animationControllerCache.assetType = AssetType::AnimationController;
+	animationControllerCache.tracksResidency = true;
+	animationMaskCache.assetType = AssetType::AnimationMask;
+	animationMaskCache.tracksResidency = true;
+	retargetProfileCache.assetType = AssetType::RetargetProfile;
+	retargetProfileCache.tracksResidency = true;
+	motionDatabaseCache.assetType = AssetType::MotionDatabase;
+	motionDatabaseCache.tracksResidency = true;
+	ragdollProfileCache.assetType = AssetType::RagdollProfile;
+	ragdollProfileCache.tracksResidency = true;
 	shaderCollectionCache.assetType = AssetType::ShaderCollection;
 	// Shader collections are part of pipeline creation state, so register them
 	// for exact CPU accounting and let RegisterResidencyResource pin them until
@@ -721,6 +1247,7 @@ void ResourceManager::Shutdown()
 	m_RendererRecoveryPolicy = TerraEngine::Renderer::MakeEditorRendererRecoveryPolicy();
 	ResetManifestMetadata();
 	ClearCaches();
+	ClearAnimationRuntimeGenerations();
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ContentMount::Instance().IsMounted()) {
@@ -1112,9 +1639,954 @@ TerraEngine::UUID ResourceManager::GetDefaultTaskShaderCollectionID() const
 	return id;
 }
 
+AnimationResourceValidationResult ResourceManager::ValidateSkeletonAssetFile(
+	const std::filesystem::path& path,
+	TerraEngine::Animation::AnimationCompatibilityFingerprint expectedCompatibilityFingerprint) const
+{
+	AnimationResourceValidationResult result = MakeAnimationValidationBase(
+		*this, path, AssetType::Skeleton, expectedCompatibilityFingerprint);
+	if (!HasNativeExtensionForAssetType(path, AssetType::Skeleton))
+	{
+		RejectAnimationValidation(result, TerraEngine::Animation::AnimationStatus::Unsupported,
+			"SkeletonSourceFormatRejected",
+			"Runtime skeleton loading accepts only cooked .teskel files and never parses a glTF or FBX source package.");
+		return result;
+	}
+	ReadSkeletonResource(*this, result.resolvedPath, expectedCompatibilityFingerprint, result);
+	return result;
+}
+
+AnimationResourceValidationResult ResourceManager::ValidateAnimationClipAssetFile(
+	const std::filesystem::path& path,
+	TerraEngine::Animation::AnimationCompatibilityFingerprint expectedCompatibilityFingerprint) const
+{
+	AnimationResourceValidationResult result = MakeAnimationValidationBase(
+		*this, path, AssetType::AnimationClip, expectedCompatibilityFingerprint);
+	if (!HasNativeExtensionForAssetType(path, AssetType::AnimationClip))
+	{
+		RejectAnimationValidation(result, TerraEngine::Animation::AnimationStatus::Unsupported,
+			"AnimationClipSourceFormatRejected",
+			"Runtime clip loading accepts only cooked .teanim files and never parses a glTF or FBX source package.");
+		return result;
+	}
+	ReadAnimationClipResource(*this, result.resolvedPath, expectedCompatibilityFingerprint, result);
+	return result;
+}
+
+AnimationResourceValidationResult ResourceManager::ValidateAnimationAssetFile(
+	const std::filesystem::path& path,
+	AssetType type,
+	TerraEngine::Animation::AnimationCompatibilityFingerprint expectedCompatibilityFingerprint) const
+{
+	if (type == AssetType::Skeleton)
+	{
+		return ValidateSkeletonAssetFile(path, expectedCompatibilityFingerprint);
+	}
+	if (type == AssetType::AnimationClip)
+	{
+		return ValidateAnimationClipAssetFile(path, expectedCompatibilityFingerprint);
+	}
+	AnimationResourceValidationResult result = MakeAnimationValidationBase(
+		*this, path, type, expectedCompatibilityFingerprint);
+	if (!IsAnimationAssetType(type) || !HasNativeExtensionForAssetType(path, type))
+	{
+		RejectAnimationValidation(result, TerraEngine::Animation::AnimationStatus::Unsupported,
+			"AnimationSourceFormatRejected",
+			"Runtime animation loading accepts only the cooked extension for the requested typed asset.");
+		return result;
+	}
+	const std::vector<std::uint8_t> bytes = ReadFileBytes(result.resolvedPath);
+	result.fileSizeBytes = bytes.size();
+	ProbeAnimationEnvelopeVersion(bytes, result);
+	if (bytes.empty())
+	{
+		RejectAnimationValidation(result, TerraEngine::Animation::AnimationStatus::MissingAsset,
+			"AnimationAssetMissing", "The cooked animation artifact could not be read.");
+		return result;
+	}
+	TerraEngine::Animation::AnimationAssetReader reader;
+	const TerraEngine::Animation::AnimationStatus envelopeStatus = reader.Parse(bytes);
+	if (envelopeStatus == TerraEngine::Animation::AnimationStatus::Ok)
+	{
+		result.detectedMajorVersion = reader.Envelope().majorVersion;
+		result.detectedMinorVersion = reader.Envelope().minorVersion;
+		result.assetId = reader.Envelope().assetId.value;
+		result.actualCompatibilityFingerprint = reader.Envelope().compatibilityFingerprint;
+		std::memcpy(&result.contentFingerprint, reader.Envelope().contentHash.data(),
+			sizeof(result.contentFingerprint));
+		result.contentHash = reader.Envelope().contentHash;
+		result.contentHashPresent = true;
+		result.compatibilityFingerprintPresent = reader.Envelope().compatibilityFingerprint != 0u;
+	}
+	TerraEngine::Animation::AnimationStatus status = envelopeStatus;
+	TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+	if (ValidateOpaqueAnimationPayload(bytes, type, &assetId, &status, expectedCompatibilityFingerprint))
+	{
+		result.status = TerraEngine::Animation::AnimationStatus::Ok;
+		result.diagnosticCode = "AnimationAssetValidated";
+		result.message = "The complete typed animation payload passed envelope, bounds, hash, and compatibility validation.";
+		return result;
+	}
+	RejectAnimationValidation(result, status, "AnimationAssetRejected",
+		"The typed cooked animation payload failed validation before publication.");
+	return result;
+}
+
+TerraEngine::UUID ResourceManager::LoadSkeleton(
+	const std::filesystem::path& path,
+	TerraEngine::Animation::AnimationCompatibilityFingerprint expectedCompatibilityFingerprint)
+{
+	if (!HasNativeExtensionForAssetType(path, AssetType::Skeleton))
+	{
+		TERRAENGINE_LOG(LogLevel::Warning,
+			"Skipping non-cooked skeleton source; runtime requires .teskel: " << path);
+		return TerraEngine::EMPTY_UUID;
+	}
+
+	const std::filesystem::path resolvedPath = ResolveAssetPath(path);
+	const std::string key = NormalizeKey(resolvedPath);
+	if (const std::optional<TerraEngine::UUID> cached = ResolveCached(key, skeletonCache))
+	{
+		std::shared_lock lock(skeletonCache.mutex);
+		const auto resource = skeletonCache.resources.find(*cached);
+		if (resource != skeletonCache.resources.end()
+			&& (expectedCompatibilityFingerprint == 0U
+				|| resource->second->compatibilityFingerprint == expectedCompatibilityFingerprint))
+		{
+			return *cached;
+		}
+		TERRAENGINE_LOG(LogLevel::Error,
+			"Cached skeleton fingerprint does not match the requested binding for " << resolvedPath);
+		return TerraEngine::EMPTY_UUID;
+	}
+
+	AnimationResourceValidationResult validation;
+	std::unique_ptr<TerraEngine::Animation::SkeletonAsset> asset = ReadSkeletonResource(
+		*this, resolvedPath, expectedCompatibilityFingerprint, validation);
+	if (!asset)
+	{
+		TERRAENGINE_LOG(LogLevel::Error,
+			validation.diagnosticCode << ": " << validation.message << " path=" << validation.resolvedPath);
+		return TerraEngine::EMPTY_UUID;
+	}
+
+	const TerraEngine::UUID id = asset->assetId.value;
+	const std::uint64_t cpuBytes = ComputeLoadedResourceBytes(*asset);
+	{
+		std::unique_lock lock(skeletonCache.mutex);
+		if (const auto registered = skeletonCache.pathToId.find(key);
+			registered != skeletonCache.pathToId.end() && registered->second != id)
+		{
+			TERRAENGINE_LOG(LogLevel::Error,
+				"Registered skeleton UUID does not match the cooked envelope for " << resolvedPath);
+			return TerraEngine::EMPTY_UUID;
+		}
+		// A concurrent request may have published this exact resource while this
+		// caller parsed from disk. Reuse it instead of manufacturing a false
+		// hot-reload generation for unchanged data.
+		if(const auto existing = skeletonCache.resources.find(id); existing != skeletonCache.resources.end()) {
+			return id;
+		}
+		const std::optional<TerraEngine::Animation::AnimationGeneration> generation =
+			AdvanceAnimationGenerationLocked(skeletonCache, id);
+		if(!generation.has_value()) {
+			TERRAENGINE_LOG(LogLevel::Error, "Skeleton runtime generation exhausted for " << resolvedPath);
+			return TerraEngine::EMPTY_UUID;
+		}
+		asset->runtimeGeneration = *generation;
+		skeletonCache.pathToId[key] = id;
+		skeletonCache.idToPath[id] = key;
+		skeletonCache.resources[id] = std::move(asset);
+		skeletonCache.inFlight.erase(key);
+	}
+	RegisterResidencyResource(id, AssetType::Skeleton, key, cpuBytes, 0U, true,
+		TerraEngine::Resource::ResidencyState::Active);
+	UpdateStreamableLoadResult(id, AssetType::Skeleton, key, true, cpuBytes, 0U);
+	return id;
+}
+
+TerraEngine::UUID ResourceManager::LoadAnimationClip(
+	const std::filesystem::path& path,
+	TerraEngine::Animation::AnimationCompatibilityFingerprint expectedCompatibilityFingerprint)
+{
+	if (!HasNativeExtensionForAssetType(path, AssetType::AnimationClip))
+	{
+		TERRAENGINE_LOG(LogLevel::Warning,
+			"Skipping non-cooked animation source; runtime requires .teanim: " << path);
+		return TerraEngine::EMPTY_UUID;
+	}
+
+	const std::filesystem::path resolvedPath = ResolveAssetPath(path);
+	const std::string key = NormalizeKey(resolvedPath);
+	if (const std::optional<TerraEngine::UUID> cached = ResolveCached(key, animationClipCache))
+	{
+		std::shared_lock lock(animationClipCache.mutex);
+		const auto resource = animationClipCache.resources.find(*cached);
+		if (resource != animationClipCache.resources.end()
+			&& (expectedCompatibilityFingerprint == 0U
+				|| resource->second->compatibilityFingerprint == expectedCompatibilityFingerprint))
+		{
+			return *cached;
+		}
+		TERRAENGINE_LOG(LogLevel::Error,
+			"Cached animation clip fingerprint does not match the requested skeleton for " << resolvedPath);
+		return TerraEngine::EMPTY_UUID;
+	}
+
+	AnimationResourceValidationResult validation;
+	std::unique_ptr<TerraEngine::Animation::AnimationClipAsset> asset = ReadAnimationClipResource(
+		*this, resolvedPath, expectedCompatibilityFingerprint, validation);
+	if (!asset)
+	{
+		TERRAENGINE_LOG(LogLevel::Error,
+			validation.diagnosticCode << ": " << validation.message << " path=" << validation.resolvedPath);
+		return TerraEngine::EMPTY_UUID;
+	}
+
+	const TerraEngine::UUID id = asset->assetId.value;
+	const std::uint64_t cpuBytes = ComputeLoadedResourceBytes(*asset);
+	{
+		std::unique_lock lock(animationClipCache.mutex);
+		if (const auto registered = animationClipCache.pathToId.find(key);
+			registered != animationClipCache.pathToId.end() && registered->second != id)
+		{
+			TERRAENGINE_LOG(LogLevel::Error,
+				"Registered animation-clip UUID does not match the cooked envelope for " << resolvedPath);
+			return TerraEngine::EMPTY_UUID;
+		}
+		// See the equivalent skeleton branch: concurrent readers share one
+		// publication rather than turning ordinary cache contention into a reload.
+		if(const auto existing = animationClipCache.resources.find(id); existing != animationClipCache.resources.end()) {
+			return id;
+		}
+		const std::optional<TerraEngine::Animation::AnimationGeneration> generation =
+			AdvanceAnimationGenerationLocked(animationClipCache, id);
+		if(!generation.has_value()) {
+			TERRAENGINE_LOG(LogLevel::Error, "Animation clip runtime generation exhausted for " << resolvedPath);
+			return TerraEngine::EMPTY_UUID;
+		}
+		asset->runtimeGeneration = *generation;
+		animationClipCache.pathToId[key] = id;
+		animationClipCache.idToPath[id] = key;
+		animationClipCache.resources[id] = std::move(asset);
+		animationClipCache.inFlight.erase(key);
+	}
+	RegisterResidencyResource(id, AssetType::AnimationClip, key, cpuBytes, 0U, true,
+		TerraEngine::Resource::ResidencyState::Active);
+	UpdateStreamableLoadResult(id, AssetType::AnimationClip, key, true, cpuBytes, 0U);
+	return id;
+}
+
+TerraEngine::UUID ResourceManager::LoadOpaqueAnimationAsset(const std::filesystem::path& path, AssetType type)
+{
+	if (!HasNativeExtensionForAssetType(path, type))
+	{
+		return TerraEngine::EMPTY_UUID;
+	}
+
+	const std::filesystem::path resolvedPath = ResolveAssetPath(path);
+	const std::string key = NormalizeKey(resolvedPath);
+	const auto loadIntoCache = [&](auto& cache) {
+		if (const std::optional<TerraEngine::UUID> cached = ResolveCached(key, cache))
+		{
+			return *cached;
+		}
+		auto resource = std::make_unique<OpaqueAnimationResource>();
+		resource->bytes = ReadFileBytes(resolvedPath);
+		if (resource->bytes.empty()
+			|| !ValidateOpaqueAnimationPayload(resource->bytes, type, &resource->assetId)
+			|| resource->assetId == TerraEngine::EMPTY_UUID)
+		{
+			return TerraEngine::EMPTY_UUID;
+		}
+		const TerraEngine::UUID id = resource->assetId;
+		const std::uint64_t cpuBytes = ComputeLoadedResourceBytes(*resource);
+		{
+			std::unique_lock lock(cache.mutex);
+			if (const auto registered = cache.pathToId.find(key);
+				registered != cache.pathToId.end() && registered->second != id)
+			{
+				return TerraEngine::EMPTY_UUID;
+			}
+			if (cache.resources.contains(id))
+			{
+				return id;
+			}
+			if (!AdvanceAnimationGenerationLocked(cache, id).has_value())
+			{
+				return TerraEngine::EMPTY_UUID;
+			}
+			cache.pathToId[key] = id;
+			cache.idToPath[id] = key;
+			cache.resources[id] = std::move(resource);
+			cache.inFlight.erase(key);
+			cache.inFlightTokens.erase(key);
+		}
+		RegisterResidencyResource(id, type, key, cpuBytes, 0u, true,
+			TerraEngine::Resource::ResidencyState::Active);
+		UpdateStreamableLoadResult(id, type, key, true, cpuBytes, 0u);
+		return id;
+	};
+
+	switch (type)
+	{
+	case AssetType::AnimationController: return loadIntoCache(animationControllerCache);
+	case AssetType::AnimationMask: return loadIntoCache(animationMaskCache);
+	case AssetType::RetargetProfile: return loadIntoCache(retargetProfileCache);
+	case AssetType::MotionDatabase: return loadIntoCache(motionDatabaseCache);
+	case AssetType::RagdollProfile: return loadIntoCache(ragdollProfileCache);
+	default: return TerraEngine::EMPTY_UUID;
+	}
+}
+
+std::shared_future<TerraEngine::UUID> ResourceManager::LoadOpaqueAnimationAssetAsync(
+	const std::filesystem::path& path,
+	AssetType type)
+{
+	if (!HasNativeExtensionForAssetType(path, type))
+	{
+		return MakeReadyFuture(TerraEngine::EMPTY_UUID);
+	}
+
+	const LoaderFunction<OpaqueAnimationResource> loader = [this, type](const std::filesystem::path& resolvedPath) {
+		auto resource = std::make_unique<OpaqueAnimationResource>();
+		resource->bytes = ReadFileBytes(resolvedPath);
+		return resource->bytes.empty() || !ValidateOpaqueAnimationPayload(resource->bytes, type, &resource->assetId)
+			? std::unique_ptr<OpaqueAnimationResource>{} : std::move(resource);
+	};
+
+	switch (type)
+	{
+	case AssetType::AnimationController: return LoadOrSchedule(path, animationControllerCache, loader, true);
+	case AssetType::AnimationMask: return LoadOrSchedule(path, animationMaskCache, loader, true);
+	case AssetType::RetargetProfile: return LoadOrSchedule(path, retargetProfileCache, loader, true);
+	case AssetType::MotionDatabase: return LoadOrSchedule(path, motionDatabaseCache, loader, true);
+	case AssetType::RagdollProfile: return LoadOrSchedule(path, ragdollProfileCache, loader, true);
+	default: return MakeReadyFuture(TerraEngine::EMPTY_UUID);
+	}
+}
+
+std::shared_future<TerraEngine::UUID> ResourceManager::LoadAnimationAssetAsync(
+	const std::filesystem::path& path,
+	AssetType type)
+{
+	if (!IsAnimationAssetType(type) || !HasNativeExtensionForAssetType(path, type))
+	{
+		return MakeReadyFuture(TerraEngine::EMPTY_UUID);
+	}
+	if (type == AssetType::Skeleton)
+	{
+		const LoaderFunction<TerraEngine::Animation::SkeletonAsset> loader =
+			[this](const std::filesystem::path& resolvedPath) {
+				AnimationResourceValidationResult validation;
+				return ReadSkeletonResource(*this, resolvedPath, 0u, validation);
+			};
+		return LoadOrSchedule(path, skeletonCache, loader, true);
+	}
+	if (type == AssetType::AnimationClip)
+	{
+		const LoaderFunction<TerraEngine::Animation::AnimationClipAsset> loader =
+			[this](const std::filesystem::path& resolvedPath) {
+				AnimationResourceValidationResult validation;
+				return ReadAnimationClipResource(*this, resolvedPath, 0u, validation);
+			};
+		return LoadOrSchedule(path, animationClipCache, loader, true);
+	}
+	return LoadOpaqueAnimationAssetAsync(path, type);
+}
+
+bool ResourceManager::ReloadSkeleton(const TerraEngine::UUID& id)
+{
+	std::string sourceKey;
+	TerraEngine::Animation::AnimationGeneration observedGeneration = 0U;
+	{
+		std::shared_lock lock(skeletonCache.mutex);
+		const auto path = skeletonCache.idToPath.find(id);
+		const auto generation = skeletonCache.runtimeGenerations.find(id);
+		if(path == skeletonCache.idToPath.end()
+			|| skeletonCache.resources.find(id) == skeletonCache.resources.end()
+			|| generation == skeletonCache.runtimeGenerations.end()
+			|| generation->second == std::numeric_limits<TerraEngine::Animation::AnimationGeneration>::max()) return false;
+		sourceKey = path->second;
+		observedGeneration = generation->second;
+	}
+	AnimationResourceValidationResult validation;
+	std::unique_ptr<TerraEngine::Animation::SkeletonAsset> candidate = ReadSkeletonResource(
+		*this, sourceKey, 0U, validation);
+	if(!candidate || candidate->assetId.value != id) return false;
+	const std::uint64_t cpuBytes = ComputeLoadedResourceBytes(*candidate);
+	{
+		std::unique_lock lock(skeletonCache.mutex);
+		const auto path = skeletonCache.idToPath.find(id);
+		const auto generation = skeletonCache.runtimeGenerations.find(id);
+		if(path == skeletonCache.idToPath.end() || path->second != sourceKey
+			|| skeletonCache.resources.find(id) == skeletonCache.resources.end()
+			|| generation == skeletonCache.runtimeGenerations.end()
+			|| generation->second != observedGeneration) return false;
+		const std::optional<TerraEngine::Animation::AnimationGeneration> next =
+			AdvanceAnimationGenerationLocked(skeletonCache, id);
+		if(!next.has_value()) return false;
+		candidate->runtimeGeneration = *next;
+		skeletonCache.resources[id] = std::move(candidate);
+	}
+	RegisterResidencyResource(id, AssetType::Skeleton, sourceKey, cpuBytes, 0U, true,
+		TerraEngine::Resource::ResidencyState::Active);
+	UpdateStreamableLoadResult(id, AssetType::Skeleton, sourceKey, true, cpuBytes, 0U);
+	return true;
+}
+
+bool ResourceManager::ReloadAnimationClip(const TerraEngine::UUID& id)
+{
+	std::string sourceKey;
+	TerraEngine::Animation::AnimationGeneration observedGeneration = 0U;
+	{
+		std::shared_lock lock(animationClipCache.mutex);
+		const auto path = animationClipCache.idToPath.find(id);
+		const auto generation = animationClipCache.runtimeGenerations.find(id);
+		if(path == animationClipCache.idToPath.end()
+			|| animationClipCache.resources.find(id) == animationClipCache.resources.end()
+			|| generation == animationClipCache.runtimeGenerations.end()
+			|| generation->second == std::numeric_limits<TerraEngine::Animation::AnimationGeneration>::max()) return false;
+		sourceKey = path->second;
+		observedGeneration = generation->second;
+	}
+	AnimationResourceValidationResult validation;
+	std::unique_ptr<TerraEngine::Animation::AnimationClipAsset> candidate = ReadAnimationClipResource(
+		*this, sourceKey, 0U, validation);
+	if(!candidate || candidate->assetId.value != id) return false;
+	const std::uint64_t cpuBytes = ComputeLoadedResourceBytes(*candidate);
+	{
+		std::unique_lock lock(animationClipCache.mutex);
+		const auto path = animationClipCache.idToPath.find(id);
+		const auto generation = animationClipCache.runtimeGenerations.find(id);
+		if(path == animationClipCache.idToPath.end() || path->second != sourceKey
+			|| animationClipCache.resources.find(id) == animationClipCache.resources.end()
+			|| generation == animationClipCache.runtimeGenerations.end()
+			|| generation->second != observedGeneration) return false;
+		const std::optional<TerraEngine::Animation::AnimationGeneration> next =
+			AdvanceAnimationGenerationLocked(animationClipCache, id);
+		if(!next.has_value()) return false;
+		candidate->runtimeGeneration = *next;
+		animationClipCache.resources[id] = std::move(candidate);
+	}
+	RegisterResidencyResource(id, AssetType::AnimationClip, sourceKey, cpuBytes, 0U, true,
+		TerraEngine::Resource::ResidencyState::Active);
+	UpdateStreamableLoadResult(id, AssetType::AnimationClip, sourceKey, true, cpuBytes, 0U);
+	return true;
+}
+
+bool ResourceManager::ReloadAnimationAsset(const TerraEngine::UUID& id, AssetType type)
+{
+	if (id == TerraEngine::EMPTY_UUID || !IsAnimationAssetType(type))
+	{
+		return false;
+	}
+
+	if (type == AssetType::Skeleton)
+	{
+		return ReloadSkeleton(id);
+	}
+	if (type == AssetType::AnimationClip)
+	{
+		return ReloadAnimationClip(id);
+	}
+
+	const auto reloadOpaque = [&](auto& cache) {
+		std::string sourceKey;
+		TerraEngine::Animation::AnimationGeneration observedGeneration = 0u;
+		{
+			std::shared_lock lock(cache.mutex);
+			const auto path = cache.idToPath.find(id);
+			const auto generation = cache.runtimeGenerations.find(id);
+			if (path == cache.idToPath.end() || cache.resources.find(id) == cache.resources.end()
+				|| generation == cache.runtimeGenerations.end()
+				|| generation->second == std::numeric_limits<TerraEngine::Animation::AnimationGeneration>::max())
+			{
+				return false;
+			}
+			sourceKey = path->second;
+			observedGeneration = generation->second;
+		}
+
+		std::vector<std::uint8_t> bytes = ReadFileBytes(sourceKey);
+		if (bytes.empty() || !ValidateOpaqueAnimationPayload(bytes, type))
+		{
+			return false;
+		}
+		TerraEngine::Animation::AnimationAssetReader reader;
+		if (reader.Parse(bytes) != TerraEngine::Animation::AnimationStatus::Ok
+			|| reader.Envelope().assetId.value != id)
+		{
+			return false;
+		}
+
+		auto candidate = std::make_unique<OpaqueAnimationResource>();
+		candidate->assetId = id;
+		candidate->bytes = std::move(bytes);
+		const std::uint64_t cpuBytes = ComputeLoadedResourceBytes(*candidate);
+		{
+			std::unique_lock lock(cache.mutex);
+			const auto path = cache.idToPath.find(id);
+			const auto generation = cache.runtimeGenerations.find(id);
+			if (path == cache.idToPath.end() || path->second != sourceKey
+				|| cache.resources.find(id) == cache.resources.end()
+				|| generation == cache.runtimeGenerations.end() || generation->second != observedGeneration)
+			{
+				return false;
+			}
+			if (!AdvanceAnimationGenerationLocked(cache, id).has_value())
+			{
+				return false;
+			}
+			cache.resources[id] = std::move(candidate);
+		}
+		RegisterResidencyResource(id, type, sourceKey, cpuBytes, 0u, true,
+			TerraEngine::Resource::ResidencyState::Active);
+		UpdateStreamableLoadResult(id, type, sourceKey, true, cpuBytes, 0u);
+		return true;
+	};
+
+	switch (type)
+	{
+	case AssetType::AnimationController: return reloadOpaque(animationControllerCache);
+	case AssetType::AnimationMask: return reloadOpaque(animationMaskCache);
+	case AssetType::RetargetProfile: return reloadOpaque(retargetProfileCache);
+	case AssetType::MotionDatabase: return reloadOpaque(motionDatabaseCache);
+	case AssetType::RagdollProfile: return reloadOpaque(ragdollProfileCache);
+	default: return false;
+	}
+}
+
+PreparedAnimationAssetReloadBatch ResourceManager::PrepareAnimationAssetReloadBatch(
+	std::span<const AnimationAssetReloadRequest> requests)
+{
+	PreparedAnimationAssetReloadBatch prepared;
+	constexpr std::size_t kMaximumAtomicAnimationReloadAssets = 256U;
+	if(requests.size() > kMaximumAtomicAnimationReloadAssets) {
+		prepared.m_diagnostic = "The animation cache reload batch exceeds the hard 256-asset bound.";
+		return prepared;
+	}
+
+	try {
+		auto state = std::make_unique<PreparedAnimationAssetReloadBatch::State>();
+		state->owner = this;
+		state->entries.reserve(requests.size());
+		std::unordered_set<std::string> identities;
+		identities.reserve(requests.size());
+
+		for(const AnimationAssetReloadRequest& request : requests) {
+			if(request.assetId == TerraEngine::EMPTY_UUID || !IsAnimationAssetType(request.assetType)) {
+				prepared.m_diagnostic = "Every animation cache reload request requires a non-empty typed asset identity.";
+				return prepared;
+			}
+			const std::string identity = TerraEngine::ToHexString(request.assetId);
+			if(!identities.insert(identity).second) {
+				prepared.m_diagnostic = "An atomic animation cache reload batch contains the same asset identity more than once.";
+				return prepared;
+			}
+
+			PreparedAnimationAssetReloadBatch::State::Entry entry;
+			entry.assetId = request.assetId;
+			entry.assetType = request.assetType;
+			entry.publisherRetirementGeneration = request.publisherRetirementGeneration;
+			const auto capturePublication = [&](const auto& cache) {
+				std::shared_lock lock(cache.mutex);
+				const auto path = cache.idToPath.find(request.assetId);
+				const auto resource = cache.resources.find(request.assetId);
+				const auto generation = cache.runtimeGenerations.find(request.assetId);
+				if(path == cache.idToPath.end() || resource == cache.resources.end()
+					|| !resource->second || generation == cache.runtimeGenerations.end()
+					|| generation->second == 0U
+					|| generation->second == std::numeric_limits<
+						TerraEngine::Animation::AnimationGeneration>::max()) {
+					return false;
+				}
+				entry.sourceKey = path->second;
+				entry.observedGeneration = generation->second;
+				entry.nextGeneration = generation->second + 1U;
+				return true;
+			};
+
+			bool captured = false;
+			switch(request.assetType) {
+			case AssetType::Skeleton: captured = capturePublication(skeletonCache); break;
+			case AssetType::AnimationClip: captured = capturePublication(animationClipCache); break;
+			case AssetType::AnimationController: captured = capturePublication(animationControllerCache); break;
+			case AssetType::AnimationMask: captured = capturePublication(animationMaskCache); break;
+			case AssetType::RetargetProfile: captured = capturePublication(retargetProfileCache); break;
+			case AssetType::MotionDatabase: captured = capturePublication(motionDatabaseCache); break;
+			case AssetType::RagdollProfile: captured = capturePublication(ragdollProfileCache); break;
+			default: break;
+			}
+			if(!captured) {
+				prepared.m_diagnostic = "A requested animation asset is not a live, reloadable cache publication.";
+				return prepared;
+			}
+
+			if(request.assetType == AssetType::Skeleton) {
+				AnimationResourceValidationResult validation;
+				auto candidate = ReadSkeletonResource(*this, entry.sourceKey,
+					request.expectedCompatibilityFingerprint, validation);
+				if(!candidate || candidate->assetId.value != request.assetId
+					|| (request.expectedContentHashPresent
+						&& (!validation.contentHashPresent
+							|| validation.contentHash != request.expectedContentHash))
+					|| (request.expectedContentFingerprint != 0U
+						&& validation.contentFingerprint != request.expectedContentFingerprint)) {
+					prepared.m_diagnostic = "A staged skeleton replacement failed checked parsing or durable identity validation.";
+					return prepared;
+				}
+				candidate->runtimeGeneration = entry.nextGeneration;
+				entry.cpuBytes = ComputeLoadedResourceBytes(*candidate);
+				entry.payload = candidate.release();
+				entry.destroyPayload = [](void* payload) noexcept {
+					delete static_cast<TerraEngine::Animation::SkeletonAsset*>(payload);
+				};
+			} else if(request.assetType == AssetType::AnimationClip) {
+				AnimationResourceValidationResult validation;
+				auto candidate = ReadAnimationClipResource(*this, entry.sourceKey,
+					request.expectedCompatibilityFingerprint, validation);
+				if(!candidate || candidate->assetId.value != request.assetId
+					|| (request.expectedContentHashPresent
+						&& (!validation.contentHashPresent
+							|| validation.contentHash != request.expectedContentHash))
+					|| (request.expectedContentFingerprint != 0U
+						&& validation.contentFingerprint != request.expectedContentFingerprint)) {
+					prepared.m_diagnostic = "A staged animation clip replacement failed checked parsing or durable identity validation.";
+					return prepared;
+				}
+				candidate->runtimeGeneration = entry.nextGeneration;
+				entry.cpuBytes = ComputeLoadedResourceBytes(*candidate);
+				entry.payload = candidate.release();
+				entry.destroyPayload = [](void* payload) noexcept {
+					delete static_cast<TerraEngine::Animation::AnimationClipAsset*>(payload);
+				};
+			} else {
+				auto candidate = std::make_unique<OpaqueAnimationResource>();
+				candidate->bytes = ReadFileBytes(entry.sourceKey);
+				TerraEngine::UUID parsedAssetId = TerraEngine::EMPTY_UUID;
+				if(candidate->bytes.empty()
+					|| !ValidateOpaqueAnimationPayload(
+						candidate->bytes, request.assetType, &parsedAssetId)
+					|| parsedAssetId != request.assetId) {
+					prepared.m_diagnostic = "A staged specialist animation replacement failed checked parsing or durable identity validation.";
+					return prepared;
+				}
+				TerraEngine::Animation::AnimationAssetReader reader;
+				if(reader.Parse(candidate->bytes) != TerraEngine::Animation::AnimationStatus::Ok
+					|| (request.expectedCompatibilityFingerprint != 0U
+						&& reader.Envelope().compatibilityFingerprint != request.expectedCompatibilityFingerprint)) {
+					prepared.m_diagnostic = "A staged specialist animation replacement changed compatibility after publisher validation.";
+					return prepared;
+				}
+				std::uint64_t contentFingerprint = 0U;
+				std::memcpy(&contentFingerprint, reader.Envelope().contentHash.data(), sizeof(contentFingerprint));
+				if(request.expectedContentHashPresent
+					&& reader.Envelope().contentHash != request.expectedContentHash) {
+					prepared.m_diagnostic = "A staged specialist animation replacement changed its complete content hash after publisher validation.";
+					return prepared;
+				}
+				if(request.expectedContentFingerprint != 0U
+					&& contentFingerprint != request.expectedContentFingerprint) {
+					prepared.m_diagnostic = "A staged specialist animation replacement changed content after publisher validation.";
+					return prepared;
+				}
+				candidate->assetId = parsedAssetId;
+				entry.cpuBytes = ComputeLoadedResourceBytes(*candidate);
+				entry.payload = candidate.release();
+				entry.destroyPayload = [](void* payload) noexcept {
+					delete static_cast<OpaqueAnimationResource*>(payload);
+				};
+			}
+			state->entries.push_back(std::move(entry));
+		}
+
+		prepared.m_state = std::move(state);
+		prepared.m_accepted = true;
+		prepared.m_diagnostic = "Every replacement parsed successfully and is staged for one protected cache boundary.";
+		return prepared;
+	} catch(const std::exception& exception) {
+		prepared.m_diagnostic = "Animation cache reload staging failed before publication: "
+			+ std::string(exception.what());
+		return prepared;
+	} catch(...) {
+		prepared.m_diagnostic = "Animation cache reload staging failed before publication with an unknown exception.";
+		return prepared;
+	}
+}
+
+bool ResourceManager::CommitPreparedAnimationAssetReloadBatch(
+	PreparedAnimationAssetReloadBatch& prepared) noexcept
+{
+	if(!prepared.m_accepted || prepared.m_committed || !prepared.m_state
+		|| prepared.m_state->owner != this) {
+		return false;
+	}
+
+	try {
+		PreparedAnimationAssetReloadBatch::State& state = *prepared.m_state;
+		// These locks outlive the callback and are released only by the publisher's
+		// postcommit hook. That makes cache and publisher publication one visible
+		// boundary rather than two adjacent, independently observable operations.
+		state.skeletonLock = std::unique_lock<std::shared_mutex>(skeletonCache.mutex, std::defer_lock);
+		state.animationClipLock = std::unique_lock<std::shared_mutex>(animationClipCache.mutex, std::defer_lock);
+		state.animationControllerLock = std::unique_lock<std::shared_mutex>(animationControllerCache.mutex, std::defer_lock);
+		state.animationMaskLock = std::unique_lock<std::shared_mutex>(animationMaskCache.mutex, std::defer_lock);
+		state.retargetProfileLock = std::unique_lock<std::shared_mutex>(retargetProfileCache.mutex, std::defer_lock);
+		state.motionDatabaseLock = std::unique_lock<std::shared_mutex>(motionDatabaseCache.mutex, std::defer_lock);
+		state.ragdollLock = std::unique_lock<std::shared_mutex>(ragdollProfileCache.mutex, std::defer_lock);
+		state.retirementLock = std::unique_lock<std::mutex>(m_RetiredAnimationPayloadMutex, std::defer_lock);
+		std::lock(state.skeletonLock, state.animationClipLock, state.animationControllerLock,
+			state.animationMaskLock, state.retargetProfileLock, state.motionDatabaseLock,
+			state.ragdollLock, state.retirementLock);
+		constexpr std::size_t kMaximumRetiredAnimationPayloads = 16384U;
+		if(state.entries.size() > kMaximumRetiredAnimationPayloads - m_RetiredAnimationPayloads.size()) {
+			state.UnlockPublicationLocks();
+			return false;
+		}
+
+		const auto bindDestination = [](auto& cache,
+			PreparedAnimationAssetReloadBatch::State::Entry& entry) noexcept {
+			const auto path = cache.idToPath.find(entry.assetId);
+			const auto resource = cache.resources.find(entry.assetId);
+			const auto generation = cache.runtimeGenerations.find(entry.assetId);
+			if(path == cache.idToPath.end() || path->second != entry.sourceKey
+				|| resource == cache.resources.end() || !resource->second
+				|| generation == cache.runtimeGenerations.end()
+				|| generation->second != entry.observedGeneration
+				|| entry.nextGeneration != entry.observedGeneration + 1U
+				|| entry.payload == nullptr) {
+				return false;
+			}
+			entry.destinationSlot = &resource->second;
+			entry.generationSlot = &generation->second;
+			return true;
+		};
+
+		for(auto& entry : state.entries) {
+			bool valid = false;
+			switch(entry.assetType) {
+			case AssetType::Skeleton: valid = bindDestination(skeletonCache, entry); break;
+			case AssetType::AnimationClip: valid = bindDestination(animationClipCache, entry); break;
+			case AssetType::AnimationController: valid = bindDestination(animationControllerCache, entry); break;
+			case AssetType::AnimationMask: valid = bindDestination(animationMaskCache, entry); break;
+			case AssetType::RetargetProfile: valid = bindDestination(retargetProfileCache, entry); break;
+			case AssetType::MotionDatabase: valid = bindDestination(motionDatabaseCache, entry); break;
+			case AssetType::RagdollProfile: valid = bindDestination(ragdollProfileCache, entry); break;
+			default: break;
+			}
+			if(!valid) {
+				for(auto& reset : state.entries) {
+					reset.destinationSlot = nullptr;
+					reset.generationSlot = nullptr;
+				}
+				state.UnlockPublicationLocks();
+				return false;
+			}
+		}
+
+		// No operation below this point allocates, performs IO, or searches a map.
+		// Every concrete unique_ptr swap and integer assignment is no-throw, so a
+		// successful callback can safely be followed by the publisher's own swaps.
+		for(auto& entry : state.entries) {
+			switch(entry.assetType) {
+			case AssetType::Skeleton:
+			{
+				auto replacement = std::unique_ptr<TerraEngine::Animation::SkeletonAsset>(
+					static_cast<TerraEngine::Animation::SkeletonAsset*>(entry.ReleasePayload()));
+				static_cast<std::unique_ptr<TerraEngine::Animation::SkeletonAsset>*>(
+					entry.destinationSlot)->swap(replacement);
+				m_RetiredAnimationPayloads.push_back({entry.assetId, entry.observedGeneration,
+					entry.publisherRetirementGeneration,
+					replacement.release(), [](void* payload) noexcept {
+						delete static_cast<TerraEngine::Animation::SkeletonAsset*>(payload);
+					}});
+				break;
+			}
+			case AssetType::AnimationClip:
+			{
+				auto replacement = std::unique_ptr<TerraEngine::Animation::AnimationClipAsset>(
+					static_cast<TerraEngine::Animation::AnimationClipAsset*>(entry.ReleasePayload()));
+				static_cast<std::unique_ptr<TerraEngine::Animation::AnimationClipAsset>*>(
+					entry.destinationSlot)->swap(replacement);
+				m_RetiredAnimationPayloads.push_back({entry.assetId, entry.observedGeneration,
+					entry.publisherRetirementGeneration,
+					replacement.release(), [](void* payload) noexcept {
+						delete static_cast<TerraEngine::Animation::AnimationClipAsset*>(payload);
+					}});
+				break;
+			}
+			case AssetType::AnimationController:
+			case AssetType::AnimationMask:
+			case AssetType::RetargetProfile:
+			case AssetType::MotionDatabase:
+			case AssetType::RagdollProfile:
+			{
+				auto replacement = std::unique_ptr<OpaqueAnimationResource>(
+					static_cast<OpaqueAnimationResource*>(entry.ReleasePayload()));
+				static_cast<std::unique_ptr<OpaqueAnimationResource>*>(
+					entry.destinationSlot)->swap(replacement);
+				m_RetiredAnimationPayloads.push_back({entry.assetId, entry.observedGeneration,
+					entry.publisherRetirementGeneration,
+					replacement.release(), [](void* payload) noexcept {
+						delete static_cast<OpaqueAnimationResource*>(payload);
+					}});
+				break;
+			}
+			default: break;
+			}
+			*entry.generationSlot = entry.nextGeneration;
+			entry.destinationSlot = nullptr;
+			entry.generationSlot = nullptr;
+		}
+		prepared.m_committed = true;
+		return true;
+	} catch(...) {
+		// Lock acquisition and pre-publication map validation are the only
+		// operations above that may throw, and both occur before the first swap.
+		prepared.m_state->UnlockPublicationLocks();
+		return false;
+	}
+}
+
+void ResourceManager::FinalizeCommittedAnimationAssetReloadBatch(
+	PreparedAnimationAssetReloadBatch& prepared) noexcept
+{
+	if(!prepared.m_committed || !prepared.m_state || prepared.m_state->owner != this
+		|| prepared.m_state->diagnosticsFinalized) {
+		return;
+	}
+	const bool standaloneCommit = prepared.m_state->OwnsPublicationLocks();
+	prepared.m_state->diagnosticsFinalized = true;
+	for(const auto& entry : prepared.m_state->entries) {
+		try {
+			RegisterResidencyResource(
+				entry.assetId,
+				entry.assetType,
+				entry.sourceKey,
+				entry.cpuBytes,
+				0U,
+				true,
+				TerraEngine::Resource::ResidencyState::Active);
+			UpdateStreamableLoadResult(
+				entry.assetId,
+				entry.assetType,
+				entry.sourceKey,
+				true,
+				entry.cpuBytes,
+				0U);
+		} catch(...) {
+			// The immutable payload and publisher are already complete. Diagnostic
+			// refresh failure must never turn a successful atomic commit into a
+			// misleading rollback after consumers can observe the new generation.
+			TERRAENGINE_LOG(LogLevel::Warning,
+				"Animation reload committed but residency diagnostics could not refresh for "
+				<< TerraEngine::ToHexString(entry.assetId));
+		}
+	}
+	if(standaloneCommit) {
+		// Direct ResourceManager callers have no publisher retirement owner. Their
+		// finalization is the documented protected boundary, so release locks and
+		// reclaim the just-retired payloads here.
+		prepared.m_state->UnlockPublicationLocks();
+		// Iterate the prepared state directly after unlocking. Allocating a temporary
+		// list here would violate this noexcept post-publication path and could
+		// terminate after the live cache had already switched generations.
+		for(const auto& entry : prepared.m_state->entries) {
+			std::lock_guard<std::mutex> lock(m_RetiredAnimationPayloadMutex);
+			for(auto iterator = m_RetiredAnimationPayloads.begin();
+				iterator != m_RetiredAnimationPayloads.end(); ) {
+				if(iterator->assetId == entry.assetId
+					&& iterator->cacheGeneration == entry.observedGeneration) {
+					if(iterator->payload != nullptr && iterator->destroyPayload != nullptr) iterator->destroyPayload(iterator->payload);
+					iterator = m_RetiredAnimationPayloads.erase(iterator);
+				} else ++iterator;
+			}
+		}
+	}
+}
+
+void ResourceManager::ReleasePreparedAnimationAssetReloadBatchLocks(
+	PreparedAnimationAssetReloadBatch& prepared) noexcept
+{
+	if(prepared.m_state && prepared.m_state->owner == this) {
+		// A first publisher publication replaces an already-resident cache payload
+		// but has no old publisher generation to retire. Reclaim that key-zero
+		// payload immediately after the publisher's new tables are visible.
+		prepared.m_state->UnlockPublicationLocks();
+		// The callback is noexcept and runs after the publisher swap, so it must not
+		// allocate. The prepared entries remain owned by the caller for the whole
+		// callback and can be inspected safely after their locks are released.
+		for(const auto& entry : prepared.m_state->entries) {
+			if(entry.publisherRetirementGeneration == 0U) {
+				RetireAnimationAssetPayloadGeneration(entry.assetId, 0U);
+			}
+		}
+	}
+}
+
+void ResourceManager::RetireAnimationAssetPayloadGeneration(const TerraEngine::UUID& id,
+	TerraEngine::Animation::AnimationGeneration generation) noexcept
+{
+	std::lock_guard<std::mutex> lock(m_RetiredAnimationPayloadMutex);
+	for(auto iterator = m_RetiredAnimationPayloads.begin();
+		iterator != m_RetiredAnimationPayloads.end(); ) {
+		if(iterator->assetId == id && iterator->publisherGeneration == generation) {
+			if(iterator->payload != nullptr && iterator->destroyPayload != nullptr) {
+				iterator->destroyPayload(iterator->payload);
+			}
+			iterator = m_RetiredAnimationPayloads.erase(iterator);
+		} else {
+			++iterator;
+		}
+	}
+}
+
+void ResourceManager::ReleaseAllRetiredAnimationAssetPayloadsAtProtectedBoundary()
+{
+	std::lock_guard<std::mutex> lock(m_RetiredAnimationPayloadMutex);
+	for(RetiredAnimationPayload& retired : m_RetiredAnimationPayloads) {
+		if(retired.payload != nullptr && retired.destroyPayload != nullptr) {
+			retired.destroyPayload(retired.payload);
+		}
+	}
+	m_RetiredAnimationPayloads.clear();
+}
+
+std::size_t ResourceManager::GetRetiredAnimationPayloadCountForDiagnostics() const
+{
+	std::lock_guard<std::mutex> lock(m_RetiredAnimationPayloadMutex);
+	return m_RetiredAnimationPayloads.size();
+}
+
+void ResourceManager::ClearAnimationRuntimeGenerations()
+{
+	{
+		std::unique_lock lock(skeletonCache.mutex);
+		skeletonCache.runtimeGenerations.clear();
+	}
+	{
+		std::unique_lock lock(animationClipCache.mutex);
+		animationClipCache.runtimeGenerations.clear();
+	}
+	const auto clearOpaqueLedger = [](auto& cache) {
+		std::unique_lock lock(cache.mutex);
+		cache.runtimeGenerations.clear();
+	};
+	clearOpaqueLedger(animationControllerCache);
+	clearOpaqueLedger(animationMaskCache);
+	clearOpaqueLedger(retargetProfileCache);
+	clearOpaqueLedger(motionDatabaseCache);
+	clearOpaqueLedger(ragdollProfileCache);
+}
+
 // ResourceManager::ClearCaches is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ResourceManager::ClearCaches()
 {
+	// Session teardown invalidates every cache publication, so no publisher can
+	// still lawfully retain these payloads. Release the bounded old-generation
+	// archive before clearing the live owners.
+	ReleaseAllRetiredAnimationAssetPayloadsAtProtectedBoundary();
 	// Acquire exclusive locks in a consistent order to avoid deadlocks if
 	// multiple threads ever clear different caches concurrently.
 	{
@@ -1123,6 +2595,7 @@ void ResourceManager::ClearCaches()
 		materialCache.idToPath.clear();
 		materialCache.resources.clear();
 		materialCache.inFlight.clear();
+		materialCache.inFlightTokens.clear();
 	}
 	{
 		std::unique_lock lock(meshCache.mutex);
@@ -1130,7 +2603,60 @@ void ResourceManager::ClearCaches()
 		meshCache.idToPath.clear();
 		meshCache.resources.clear();
 		meshCache.inFlight.clear();
+		meshCache.inFlightTokens.clear();
 	}
+	{
+		std::unique_lock lock(skeletonCache.mutex);
+		// ClearCaches is a teardown boundary for payload ownership. Keep the
+		// session ledger, but advance every known publication so a retained pose
+		// cannot compare equal to a later reload of the same cooked GUID.
+		for(auto& [id, generation] : skeletonCache.runtimeGenerations) {
+			(void)id;
+			if(generation != std::numeric_limits<TerraEngine::Animation::AnimationGeneration>::max()) {
+				++generation;
+			}
+		}
+		skeletonCache.pathToId.clear();
+		skeletonCache.idToPath.clear();
+		skeletonCache.resources.clear();
+		skeletonCache.inFlight.clear();
+		skeletonCache.inFlightTokens.clear();
+	}
+	{
+		std::unique_lock lock(animationClipCache.mutex);
+		for(auto& [id, generation] : animationClipCache.runtimeGenerations) {
+			(void)id;
+			if(generation != std::numeric_limits<TerraEngine::Animation::AnimationGeneration>::max()) {
+				++generation;
+			}
+		}
+		animationClipCache.pathToId.clear();
+		animationClipCache.idToPath.clear();
+		animationClipCache.resources.clear();
+		animationClipCache.inFlight.clear();
+		animationClipCache.inFlightTokens.clear();
+	}
+	const auto clearOpaqueAnimationCache = [](auto& cache) {
+		std::unique_lock lock(cache.mutex);
+		for (auto& [id, generation] : cache.runtimeGenerations)
+		{
+			(void)id;
+			if (generation != std::numeric_limits<TerraEngine::Animation::AnimationGeneration>::max())
+			{
+				++generation;
+			}
+		}
+		cache.pathToId.clear();
+		cache.idToPath.clear();
+		cache.resources.clear();
+		cache.inFlight.clear();
+		cache.inFlightTokens.clear();
+	};
+	clearOpaqueAnimationCache(animationControllerCache);
+	clearOpaqueAnimationCache(animationMaskCache);
+	clearOpaqueAnimationCache(retargetProfileCache);
+	clearOpaqueAnimationCache(motionDatabaseCache);
+	clearOpaqueAnimationCache(ragdollProfileCache);
 	{
 		std::unique_lock lock(m_MeshLocalBoundsMutex);
 		m_MeshLocalBoundsCache.clear();
@@ -1141,6 +2667,7 @@ void ResourceManager::ClearCaches()
 		shaderCache.idToPath.clear();
 		shaderCache.resources.clear();
 		shaderCache.inFlight.clear();
+		shaderCache.inFlightTokens.clear();
 	}
 	{
 		// Clear paired shader lookups so future installs cannot reuse stale stage combinations.
@@ -1149,6 +2676,7 @@ void ResourceManager::ClearCaches()
 		shaderCollectionCache.idToPath.clear();
 		shaderCollectionCache.resources.clear();
 		shaderCollectionCache.inFlight.clear();
+		shaderCollectionCache.inFlightTokens.clear();
 	}
 	{
 		std::unique_lock lock(textureCache.mutex);
@@ -1156,6 +2684,7 @@ void ResourceManager::ClearCaches()
 		textureCache.idToPath.clear();
 		textureCache.resources.clear();
 		textureCache.inFlight.clear();
+		textureCache.inFlightTokens.clear();
 	}
 	{
 		std::unique_lock lock(physicsMaterialPaths.mutex);
@@ -1189,10 +2718,30 @@ void ResourceManager::DeleteResource(const TerraEngine::UUID& id, AssetType type
 		cache.idToPath.erase(id);
 		cache.resources.erase(id);
 	};
+	// Animation cache removals advance the retained ledger under the same lock
+	// as the payload removal. This makes delete a real tombstone publication.
+	auto removeAnimationFromCache = [&](auto& cache) {
+		std::unique_lock lock(cache.mutex);
+		for (auto it = cache.pathToId.begin(); it != cache.pathToId.end(); ) {
+			it = it->second == id ? cache.pathToId.erase(it) : std::next(it);
+		}
+		cache.idToPath.erase(id);
+		cache.resources.erase(id);
+		if(!AdvanceAnimationGenerationLocked(cache, id).has_value()) {
+			TERRAENGINE_LOG(LogLevel::Error, "Animation runtime generation exhausted while deleting " << ToHexString(id));
+		}
+	};
 
 	// Dispatch by explicit engine state so each case documents one supported behavior.
 	switch (type) {
 	case AssetType::Mesh: removeFromCache(meshCache); break;
+	case AssetType::Skeleton: removeAnimationFromCache(skeletonCache); break;
+	case AssetType::AnimationClip: removeAnimationFromCache(animationClipCache); break;
+	case AssetType::AnimationController: removeAnimationFromCache(animationControllerCache); break;
+	case AssetType::AnimationMask: removeAnimationFromCache(animationMaskCache); break;
+	case AssetType::RetargetProfile: removeAnimationFromCache(retargetProfileCache); break;
+	case AssetType::MotionDatabase: removeAnimationFromCache(motionDatabaseCache); break;
+	case AssetType::RagdollProfile: removeAnimationFromCache(ragdollProfileCache); break;
 	case AssetType::Texture: removeFromCache(textureCache); break;
 	case AssetType::Material: removeFromCache(materialCache); break;
 	case AssetType::ShaderCollection: removeFromCache(shaderCollectionCache); break;
@@ -1216,7 +2765,11 @@ void ResourceManager::DeleteResource(const TerraEngine::UUID& id, AssetType type
 	}
 
 	// Physics assets have no renderer-owned object or descriptor to retire.
-	if(type != AssetType::PhysicsMaterial && type != AssetType::CookedCollider)
+	if(type != AssetType::PhysicsMaterial && type != AssetType::CookedCollider
+		&& type != AssetType::Skeleton && type != AssetType::AnimationClip
+		&& type != AssetType::AnimationController && type != AssetType::AnimationMask
+		&& type != AssetType::RetargetProfile && type != AssetType::MotionDatabase
+		&& type != AssetType::RagdollProfile)
 		RenderSystem::Instance().DeleteResource(id);
 	{
 		std::unique_lock lock(m_ResidencyMutex);
@@ -1304,18 +2857,48 @@ void ResourceManager::RegisterResidencyResource(
 	{
 		TerraEngine::Resource::CpuPayloadOwnershipRecord cpuRecord;
 		cpuRecord.ownerAssetId = id;
-		cpuRecord.payloadKind = TerraEngine::Resource::CpuPayloadOwnershipKind::DecodedMesh;
-		if (type == AssetType::Texture)
+		// Residency ownership mirrors the real cache payload. Animation objects
+		// are typed parsed assets (or typed immutable envelopes), never decoded
+		// meshes, so diagnostics and release accounting must preserve their class.
+		switch (type)
 		{
+		case AssetType::Mesh:
+			cpuRecord.payloadKind = TerraEngine::Resource::CpuPayloadOwnershipKind::DecodedMesh;
+			break;
+		case AssetType::Texture:
 			cpuRecord.payloadKind = TerraEngine::Resource::CpuPayloadOwnershipKind::TexturePixels;
-		}
-		else if (type == AssetType::Material)
-		{
+			break;
+		case AssetType::Material:
 			cpuRecord.payloadKind = TerraEngine::Resource::CpuPayloadOwnershipKind::MaterialMetadata;
-		}
-		else if (type == AssetType::ShaderCollection)
-		{
+			break;
+		case AssetType::ShaderCollection:
 			cpuRecord.payloadKind = TerraEngine::Resource::CpuPayloadOwnershipKind::ShaderCollection;
+			break;
+		case AssetType::Skeleton:
+			cpuRecord.payloadKind = TerraEngine::Resource::CpuPayloadOwnershipKind::Skeleton;
+			break;
+		case AssetType::AnimationClip:
+			cpuRecord.payloadKind = TerraEngine::Resource::CpuPayloadOwnershipKind::AnimationClip;
+			break;
+		case AssetType::AnimationController:
+			cpuRecord.payloadKind = TerraEngine::Resource::CpuPayloadOwnershipKind::AnimationController;
+			break;
+		case AssetType::AnimationMask:
+			cpuRecord.payloadKind = TerraEngine::Resource::CpuPayloadOwnershipKind::AnimationMask;
+			break;
+		case AssetType::RetargetProfile:
+			cpuRecord.payloadKind = TerraEngine::Resource::CpuPayloadOwnershipKind::RetargetProfile;
+			break;
+		case AssetType::MotionDatabase:
+			cpuRecord.payloadKind = TerraEngine::Resource::CpuPayloadOwnershipKind::MotionDatabase;
+			break;
+		case AssetType::RagdollProfile:
+			cpuRecord.payloadKind = TerraEngine::Resource::CpuPayloadOwnershipKind::RagdollProfile;
+			break;
+		case AssetType::PhysicsMaterial:
+		case AssetType::CookedCollider:
+			cpuRecord.payloadKind = TerraEngine::Resource::CpuPayloadOwnershipKind::Unknown;
+			break;
 		}
 		cpuRecord.byteSize = cpuBytes;
 		cpuRecord.state = TerraEngine::Resource::CpuPayloadOwnershipState::Retained;
@@ -1723,6 +3306,16 @@ bool ResourceManager::ReleaseResidentResource(
 	{
 		VisitAssetCache(type, [&](auto& cache) {
 			std::unique_lock lock(cache.mutex);
+			if (!cache.resources.contains(id))
+			{
+				return;
+			}
+			if (IsAnimationAssetType(type) && !AdvanceAnimationGenerationLocked(cache, id).has_value())
+			{
+				// Generation exhaustion fails closed: retaining memory is safer than
+				// making a stale animation handle alias a future reload.
+				return;
+			}
 			detachedCpuPayload = cache.resources.erase(id) > 0u;
 		});
 	}
@@ -2174,7 +3767,8 @@ void ResourceManager::MarkStreamingNeed(
 	TerraEngine::Resource::StreamingNeedType needType,
 	std::uint64_t frameId,
 	std::string_view reason,
-	std::int32_t priority)
+	std::int32_t priority,
+	const TerraEngine::UUID& ownerObjectId)
 {
 	if (id == TerraEngine::EMPTY_UUID)
 	{
@@ -2201,9 +3795,14 @@ void ResourceManager::MarkStreamingNeed(
 		record.payloadState = TerraEngine::Resource::StreamablePayloadState::Deferred;
 	}
 	TerraEngine::Resource::StreamingNeed need;
-	need.needId = std::string(TerraEngine::Resource::ToString(needType));
+	// Scene-owned runtime needs must remain distinct: two animators can share an
+	// asset, and removing one component must not release the other's protection.
+	need.needId = ownerObjectId == TerraEngine::EMPTY_UUID
+		? std::string(TerraEngine::Resource::ToString(needType))
+		: std::string("animator:") + ToHexString(ownerObjectId);
 	need.assetId = id;
 	need.needType = needType;
+	need.objectId = ownerObjectId;
 	need.priority = priority
 		+ TerraEngine::Resource::PriorityClassBias(record.assetPolicy.priorityClass)
 		+ record.assetPolicy.priorityBias;
@@ -2220,6 +3819,16 @@ void ResourceManager::MarkStreamingNeed(
 		// one-frame selection or preview from pinning an asset forever.
 		need.expiresAtSeconds = nowSeconds + m_StreamingPolicy.neededRetentionSeconds;
 	}
+	// Replace an earlier publication from the same owner before merging. Keeping
+	// the old record could retain its earlier expiry time and make an actively
+	// refreshed dependency appear idle under memory pressure.
+	record.needSources.erase(std::remove_if(
+		record.needSources.begin(), record.needSources.end(), [&need](const auto& existing) {
+			return existing.assetId == need.assetId
+				&& existing.needType == need.needType
+				&& existing.needId == need.needId
+				&& existing.objectId == need.objectId;
+		}), record.needSources.end());
 	record.needSources.push_back(std::move(need));
 	record.needSources = TerraEngine::Resource::MergeStreamingNeeds(std::move(record.needSources), nowSeconds);
 	record.protectionReason = ComputeStreamingProtection(record.needSources, m_StreamingPolicy);
@@ -2254,6 +3863,38 @@ void ResourceManager::MarkStreamingNeed(
 		break;
 	}
 	TouchResource(id, type, frameId, residencyReason, reason);
+}
+
+std::size_t ResourceManager::ReleaseStreamingNeedsForObject(
+	const TerraEngine::UUID& ownerObjectId,
+	TerraEngine::Resource::StreamingNeedType needType)
+{
+	if (ownerObjectId == TerraEngine::EMPTY_UUID)
+	{
+		return 0u;
+	}
+
+	const double nowSeconds = ResidencyClockSeconds();
+	std::size_t releasedCount = 0u;
+	std::unique_lock lock(m_StreamingMutex);
+	for (auto& [assetId, record] : m_StreamableAssets)
+	{
+		(void)assetId;
+		const std::size_t priorCount = record.needSources.size();
+		record.needSources.erase(std::remove_if(
+			record.needSources.begin(), record.needSources.end(),
+			[&](const TerraEngine::Resource::StreamingNeed& need) {
+				return need.objectId == ownerObjectId && need.needType == needType;
+			}), record.needSources.end());
+		releasedCount += priorCount - record.needSources.size();
+		if (record.needSources.size() != priorCount)
+		{
+			record.needSources = TerraEngine::Resource::MergeStreamingNeeds(
+				std::move(record.needSources), nowSeconds);
+			record.protectionReason = ComputeStreamingProtection(record.needSources, m_StreamingPolicy);
+		}
+	}
+	return releasedCount;
 }
 
 void ResourceManager::PublishVisibleStreamingTouches(
@@ -2319,9 +3960,12 @@ std::shared_future<TerraEngine::UUID> ResourceManager::RequestStreamableLoad(
 	AssetType type,
 	TerraEngine::Resource::StreamingNeedType needType,
 	std::uint64_t frameId,
-	std::string_view reason)
+	std::string_view reason,
+	const TerraEngine::UUID& ownerObjectId)
 {
-	MarkStreamingNeed(id, type, needType, frameId, reason, needType == TerraEngine::Resource::StreamingNeedType::Visible ? 100 : 10);
+	MarkStreamingNeed(id, type, needType, frameId, reason,
+		needType == TerraEngine::Resource::StreamingNeedType::Visible ? 100 : 10,
+		ownerObjectId);
 
 	{
 		std::unique_lock lock(m_StreamingMutex);
@@ -2361,6 +4005,14 @@ std::shared_future<TerraEngine::UUID> ResourceManager::RequestStreamableLoad(
 	{
 	case AssetType::Mesh:
 		return LoadMeshAsync(sourcePath);
+	case AssetType::Skeleton:
+	case AssetType::AnimationClip:
+	case AssetType::AnimationController:
+	case AssetType::AnimationMask:
+	case AssetType::RetargetProfile:
+	case AssetType::MotionDatabase:
+	case AssetType::RagdollProfile:
+		return LoadAnimationAssetAsync(sourcePath, type);
 	case AssetType::Texture:
 		return LoadTextureAsync(sourcePath);
 	case AssetType::Material:
@@ -2369,6 +4021,56 @@ std::shared_future<TerraEngine::UUID> ResourceManager::RequestStreamableLoad(
 		return MakeReadyFuture(id);
 	}
 	return MakeReadyFuture(TerraEngine::EMPTY_UUID);
+}
+
+bool ResourceManager::CancelStreamableLoad(const TerraEngine::UUID& id, AssetType type)
+{
+	if (id == TerraEngine::EMPTY_UUID)
+	{
+		return false;
+	}
+	bool cancelled = false;
+	std::string sourceKey;
+	VisitAssetCache(type, [&](auto& cache) {
+		std::unique_lock lock(cache.mutex);
+		const auto path = cache.idToPath.find(id);
+		if (path == cache.idToPath.end())
+		{
+			return;
+		}
+		sourceKey = path->second;
+		if (!cache.inFlight.contains(sourceKey))
+		{
+			return;
+		}
+		// Removing the token is the cancellation publication. The shared future
+		// remains valid for existing waiters, but its worker can no longer publish
+		// into this cache and a later request may install a fresh token/future.
+		cache.inFlightTokens.erase(sourceKey);
+		cache.inFlight.erase(sourceKey);
+		cancelled = true;
+	});
+	if (!cancelled)
+	{
+		return false;
+	}
+	{
+		std::unique_lock lock(m_StreamingMutex);
+		if (auto record = m_StreamableAssets.find(id); record != m_StreamableAssets.end())
+		{
+			record->second.payloadState = TerraEngine::Resource::StreamablePayloadState::Deferred;
+			record->second.failureReason = "Asynchronous load cancelled before publication.";
+		}
+	}
+	{
+		std::unique_lock lock(m_ResidencyMutex);
+		if (auto record = m_ResidentAssets.find(id); record != m_ResidentAssets.end())
+		{
+			record->second.inFlight = false;
+			record->second.lastTouchedReason = "streaming load cancelled";
+		}
+	}
+	return true;
 }
 
 void ResourceManager::UpdateStreamableLoadResult(
@@ -2540,6 +4242,10 @@ bool ResourceManager::HasResource(const TerraEngine::UUID& id) const
 	};
 	return isAvailable(meshCache) || isAvailable(textureCache) || isAvailable(materialCache) ||
 		isAvailable(shaderCollectionCache) || isAvailable(shaderCache)
+		|| isAvailable(skeletonCache) || isAvailable(animationClipCache)
+		|| isAvailable(animationControllerCache) || isAvailable(animationMaskCache)
+		|| isAvailable(retargetProfileCache) || isAvailable(motionDatabaseCache)
+		|| isAvailable(ragdollProfileCache)
 		|| hasRegisteredPath(physicsMaterialPaths) || hasRegisteredPath(cookedColliderPaths);
 }
 
@@ -2592,6 +4298,13 @@ std::filesystem::path ResourceManager::GetRegisteredAssetPath(const TerraEngine:
 	};
 	switch(type) {
 	case AssetType::Mesh: capture(meshCache); break;
+	case AssetType::Skeleton: capture(skeletonCache); break;
+	case AssetType::AnimationClip: capture(animationClipCache); break;
+	case AssetType::AnimationController: capture(animationControllerCache); break;
+	case AssetType::AnimationMask: capture(animationMaskCache); break;
+	case AssetType::RetargetProfile: capture(retargetProfileCache); break;
+	case AssetType::MotionDatabase: capture(motionDatabaseCache); break;
+	case AssetType::RagdollProfile: capture(ragdollProfileCache); break;
 	case AssetType::Texture: capture(textureCache); break;
 	case AssetType::Material: capture(materialCache); break;
 	case AssetType::ShaderCollection: capture(shaderCollectionCache); break;
@@ -2702,6 +4415,16 @@ TerraEngine::UUID ResourceManager::ResolveAssetReference(std::string_view assetR
 		{
 		case AssetType::Mesh:
 			return LoadMesh(candidatePath);
+		case AssetType::Skeleton:
+			return LoadSkeleton(candidatePath);
+		case AssetType::AnimationClip:
+			return LoadAnimationClip(candidatePath);
+		case AssetType::AnimationController:
+		case AssetType::AnimationMask:
+		case AssetType::RetargetProfile:
+		case AssetType::MotionDatabase:
+		case AssetType::RagdollProfile:
+			return LoadOpaqueAnimationAsset(candidatePath, type);
 		case AssetType::Texture:
 			return LoadTexture(candidatePath);
 		case AssetType::Material:
@@ -2767,6 +4490,27 @@ std::filesystem::path ResourceManager::DescribeAssetReference(const TerraEngine:
 	case AssetType::Mesh:
 		capturePath(meshCache);
 		break;
+	case AssetType::Skeleton:
+		capturePath(skeletonCache);
+		break;
+	case AssetType::AnimationClip:
+		capturePath(animationClipCache);
+		break;
+	case AssetType::AnimationController:
+		capturePath(animationControllerCache);
+		break;
+	case AssetType::AnimationMask:
+		capturePath(animationMaskCache);
+		break;
+	case AssetType::RetargetProfile:
+		capturePath(retargetProfileCache);
+		break;
+	case AssetType::MotionDatabase:
+		capturePath(motionDatabaseCache);
+		break;
+	case AssetType::RagdollProfile:
+		capturePath(ragdollProfileCache);
+		break;
 	case AssetType::Texture:
 		capturePath(textureCache);
 		break;
@@ -2814,6 +4558,228 @@ Material* ResourceManager::GetMaterial(const TerraEngine::UUID& id)
 Mesh* ResourceManager::GetMesh(const TerraEngine::UUID& id)
 {
 	return GetResourceById<Mesh>(id, meshCache, [this](const std::filesystem::path& p) { return LoadMesh(p); });
+}
+
+TerraEngine::Animation::SkeletonAsset* ResourceManager::GetSkeleton(const TerraEngine::UUID& id)
+{
+	return GetResourceById<TerraEngine::Animation::SkeletonAsset>(
+		id, skeletonCache, [this](const std::filesystem::path& path) { return LoadSkeleton(path); });
+}
+
+TerraEngine::Animation::AnimationClipAsset* ResourceManager::GetAnimationClip(const TerraEngine::UUID& id)
+{
+	return GetResourceById<TerraEngine::Animation::AnimationClipAsset>(
+		id, animationClipCache, [this](const std::filesystem::path& path) { return LoadAnimationClip(path); });
+}
+
+TerraEngine::Animation::AnimationGeneration ResourceManager::GetAnimationAssetRuntimeGeneration(
+	const TerraEngine::UUID& id,
+	AssetType type) const noexcept
+{
+	if(id == TerraEngine::EMPTY_UUID) return 0U;
+	const auto readGeneration = [&](const auto& cache) {
+		std::shared_lock lock(cache.mutex);
+		const auto found = cache.runtimeGenerations.find(id);
+		return found != cache.runtimeGenerations.end() ? found->second : 0U;
+	};
+	switch(type) {
+	case AssetType::Skeleton: return readGeneration(skeletonCache);
+	case AssetType::AnimationClip: return readGeneration(animationClipCache);
+	case AssetType::AnimationController: return readGeneration(animationControllerCache);
+	case AssetType::AnimationMask: return readGeneration(animationMaskCache);
+	case AssetType::RetargetProfile: return readGeneration(retargetProfileCache);
+	case AssetType::MotionDatabase: return readGeneration(motionDatabaseCache);
+	case AssetType::RagdollProfile: return readGeneration(ragdollProfileCache);
+	default: return 0U;
+	}
+}
+
+bool ResourceManager::IsAnimationAssetPublished(
+	const TerraEngine::UUID& id,
+	AssetType type) const noexcept
+{
+	if(id == TerraEngine::EMPTY_UUID || !IsAnimationAssetType(type)) return false;
+	const auto isPublished = [&](const auto& cache) {
+		std::shared_lock lock(cache.mutex);
+		const auto resource = cache.resources.find(id);
+		const auto generation = cache.runtimeGenerations.find(id);
+		return resource != cache.resources.end() && resource->second
+			&& generation != cache.runtimeGenerations.end() && generation->second != 0U;
+	};
+	switch(type) {
+	case AssetType::Skeleton: return isPublished(skeletonCache);
+	case AssetType::AnimationClip: return isPublished(animationClipCache);
+	case AssetType::AnimationController: return isPublished(animationControllerCache);
+	case AssetType::AnimationMask: return isPublished(animationMaskCache);
+	case AssetType::RetargetProfile: return isPublished(retargetProfileCache);
+	case AssetType::MotionDatabase: return isPublished(motionDatabaseCache);
+	case AssetType::RagdollProfile: return isPublished(ragdollProfileCache);
+	default: return false;
+	}
+}
+
+bool ResourceManager::CopySkeletonPublication(
+	const TerraEngine::UUID& id,
+	TerraEngine::Animation::SkeletonAsset& output,
+	TerraEngine::Animation::AnimationGeneration& generation) const
+{
+	std::shared_lock lock(skeletonCache.mutex);
+	const auto resource = skeletonCache.resources.find(id);
+	const auto publishedGeneration = skeletonCache.runtimeGenerations.find(id);
+	if(resource == skeletonCache.resources.end() || publishedGeneration == skeletonCache.runtimeGenerations.end()
+		|| publishedGeneration->second == 0U || resource->second->runtimeGeneration != publishedGeneration->second) {
+		return false;
+	}
+
+	// Copying under the same lock as the generation lookup forms an immutable
+	// boundary for workers even if a hot reload publishes immediately after it.
+	output = *resource->second;
+	generation = publishedGeneration->second;
+	return true;
+}
+
+bool ResourceManager::CopyAnimationClipPublication(
+	const TerraEngine::UUID& id,
+	TerraEngine::Animation::AnimationClipAsset& output,
+	TerraEngine::Animation::AnimationGeneration& generation) const
+{
+	std::shared_lock lock(animationClipCache.mutex);
+	const auto resource = animationClipCache.resources.find(id);
+	const auto publishedGeneration = animationClipCache.runtimeGenerations.find(id);
+	if(resource == animationClipCache.resources.end() || publishedGeneration == animationClipCache.runtimeGenerations.end()
+		|| publishedGeneration->second == 0U || resource->second->runtimeGeneration != publishedGeneration->second) {
+		return false;
+	}
+	// See CopySkeletonPublication: callers receive a matched payload and
+	// generation pair rather than a raw cache pointer that reload can replace.
+	output = *resource->second;
+	generation = publishedGeneration->second;
+	return true;
+}
+
+bool ResourceManager::CopyAnimationControllerPublication(
+	const TerraEngine::UUID& id,
+	TerraEngine::Animation::AnimationControllerAsset& output,
+	TerraEngine::Animation::AnimationGeneration& generation) const
+{
+	std::shared_lock lock(animationControllerCache.mutex);
+	const auto resource = animationControllerCache.resources.find(id);
+	const auto publishedGeneration = animationControllerCache.runtimeGenerations.find(id);
+	if(resource == animationControllerCache.resources.end()
+		|| publishedGeneration == animationControllerCache.runtimeGenerations.end()
+		|| publishedGeneration->second == 0U || !resource->second) {
+		return false;
+	}
+
+	// Deserialize while the matching opaque payload and session generation are
+	// protected by one cache lock. A reload can therefore never pair new bytes
+	// with the generation that belonged to the retired controller publication.
+	TerraEngine::Animation::AnimationControllerAsset candidate;
+	if(TerraEngine::Animation::DeserializeAnimationControllerAsset(
+		resource->second->bytes, 0U, candidate) != TerraEngine::Animation::AnimationStatus::Ok) {
+		return false;
+	}
+	output = std::move(candidate);
+	generation = publishedGeneration->second;
+	return true;
+}
+
+bool ResourceManager::CopyAnimationMaskPublication(
+	const TerraEngine::UUID& id,
+	TerraEngine::Animation::AnimationMaskAsset& output,
+	TerraEngine::Animation::AnimationGeneration& generation) const
+{
+	std::shared_lock lock(animationMaskCache.mutex);
+	const auto resource = animationMaskCache.resources.find(id);
+	const auto publishedGeneration = animationMaskCache.runtimeGenerations.find(id);
+	if(resource == animationMaskCache.resources.end()
+		|| publishedGeneration == animationMaskCache.runtimeGenerations.end()
+		|| publishedGeneration->second == 0U || !resource->second) {
+		return false;
+	}
+
+	// Masks use the same immutable opaque-cache publication contract as graph
+	// documents. The caller receives a value object and cannot retain cache bytes.
+	TerraEngine::Animation::AnimationMaskAsset candidate;
+	if(TerraEngine::Animation::DeserializeAnimationMaskAsset(
+		resource->second->bytes, 0U, candidate) != TerraEngine::Animation::AnimationStatus::Ok) {
+		return false;
+	}
+	output = std::move(candidate);
+	generation = publishedGeneration->second;
+	return true;
+}
+
+bool ResourceManager::CopyRetargetProfilePublication(
+	const TerraEngine::UUID& id,
+	TerraEngine::Animation::RetargetProfileAsset& output,
+	TerraEngine::Animation::AnimationGeneration& generation) const
+{
+	std::shared_lock lock(retargetProfileCache.mutex);
+	const auto resource = retargetProfileCache.resources.find(id);
+	const auto publishedGeneration = retargetProfileCache.runtimeGenerations.find(id);
+	if(resource == retargetProfileCache.resources.end()
+		|| publishedGeneration == retargetProfileCache.runtimeGenerations.end()
+		|| publishedGeneration->second == 0U || !resource->second) {
+		return false;
+	}
+	TerraEngine::Animation::RetargetProfileAsset candidate;
+	if(TerraEngine::Animation::DeserializeRetargetProfileAsset(
+		resource->second->bytes, 0U, candidate) != TerraEngine::Animation::AnimationStatus::Ok) {
+		return false;
+	}
+	candidate.runtimeGeneration = publishedGeneration->second;
+	output = std::move(candidate);
+	generation = publishedGeneration->second;
+	return true;
+}
+
+bool ResourceManager::CopyMotionDatabasePublication(
+	const TerraEngine::UUID& id,
+	TerraEngine::Animation::MotionDatabaseAsset& output,
+	TerraEngine::Animation::AnimationGeneration& generation) const
+{
+	std::shared_lock lock(motionDatabaseCache.mutex);
+	const auto resource = motionDatabaseCache.resources.find(id);
+	const auto publishedGeneration = motionDatabaseCache.runtimeGenerations.find(id);
+	if(resource == motionDatabaseCache.resources.end()
+		|| publishedGeneration == motionDatabaseCache.runtimeGenerations.end()
+		|| publishedGeneration->second == 0U || !resource->second) {
+		return false;
+	}
+	TerraEngine::Animation::MotionDatabaseAsset candidate;
+	if(TerraEngine::Animation::DeserializeMotionDatabaseAsset(
+		resource->second->bytes, 0U, candidate) != TerraEngine::Animation::AnimationStatus::Ok) {
+		return false;
+	}
+	candidate.runtimeGeneration = publishedGeneration->second;
+	output = std::move(candidate);
+	generation = publishedGeneration->second;
+	return true;
+}
+
+bool ResourceManager::CopyRagdollProfilePublication(
+	const TerraEngine::UUID& id,
+	TerraEngine::Animation::RagdollProfileAsset& output,
+	TerraEngine::Animation::AnimationGeneration& generation) const
+{
+	std::shared_lock lock(ragdollProfileCache.mutex);
+	const auto resource = ragdollProfileCache.resources.find(id);
+	const auto publishedGeneration = ragdollProfileCache.runtimeGenerations.find(id);
+	if(resource == ragdollProfileCache.resources.end()
+		|| publishedGeneration == ragdollProfileCache.runtimeGenerations.end()
+		|| publishedGeneration->second == 0U || !resource->second) {
+		return false;
+	}
+	TerraEngine::Animation::RagdollProfileAsset candidate;
+	if(TerraEngine::Animation::DeserializeRagdollProfileAsset(
+		resource->second->bytes, 0U, candidate) != TerraEngine::Animation::AnimationStatus::Ok) {
+		return false;
+	}
+	candidate.runtimeGeneration = publishedGeneration->second;
+	output = std::move(candidate);
+	generation = publishedGeneration->second;
+	return true;
 }
 
 // ResourceManager::GetShader is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -2871,15 +4837,39 @@ std::string ResourceManager::NormalizeKey(const std::filesystem::path& path) con
 std::vector<std::uint8_t> ResourceManager::ReadFileBytes(const std::filesystem::path& path) const
 {
 	const std::filesystem::path absolutePath = ResolveAssetPath(path);
+	const std::filesystem::path logicalPath = absolutePath.lexically_relative(assetRoot);
+	const std::string logicalPathString = ContentMount::NormalizeLogicalPath(logicalPath.generic_string());
+
+	// A packaged animation asset has exactly one authority: the active TEPAK.
+	// Failing closed here prevents a missing/corrupt archive entry from silently
+	// loading a developer's source or build-tree copy with different contents.
+	if (IsExportRuntime() && IsNativeAnimationAssetPath(absolutePath))
+	{
+		if (!ContentMount::Instance().IsMounted())
+		{
+			TERRAENGINE_LOG(LogLevel::Error,
+				"Packaged animation read rejected because no export archive is mounted: " << logicalPathString);
+			return {};
+		}
+		const TerraEngine::ResolvedAnimationContent content =
+			TerraEngine::AnimationContentResolver::Resolve(ContentMount::Instance(), logicalPathString);
+		if (!content.Succeeded())
+		{
+			TERRAENGINE_LOG(LogLevel::Error,
+				"Packaged animation entry is missing or has the wrong cooked class: " << logicalPathString);
+			return {};
+		}
+		const TerraEngine::AnimationContentReadResult read =
+			TerraEngine::AnimationContentResolver::ReadRange(
+				ContentMount::Instance(), logicalPathString, 0U, content.logicalSize, content.logicalSize);
+		return read.Succeeded() ? read.bytes : std::vector<std::uint8_t>{};
+	}
 
 	// In export builds, the ContentMount provides access to assets packed into 
 	// a .tepak archive. If a mount is active, we attempt to read through it 
 	// using a logical path relative to the asset root.
 	if (ContentMount::Instance().IsMounted())
 	{
-		const std::filesystem::path logicalPath = absolutePath.lexically_relative(assetRoot);
-		const std::string logicalPathString = ContentMount::NormalizeLogicalPath(logicalPath.generic_string());
-
 		TERRAENGINE_LOG(LogLevel::Debug, "Reading resource file from mount: " << logicalPathString);
 		const std::vector<std::uint8_t> mountedBytes = ContentMount::Instance().ReadAll(logicalPathString);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -2941,4 +4931,391 @@ std::vector<std::uint8_t> ResourceManager::ReadFileBytes(const std::filesystem::
 	}
 
 	return buffer;
+}
+
+AnimationRangeReadResult ResourceManager::ReadAnimationAssetRange(
+	const std::filesystem::path& path,
+	std::uint64_t offset,
+	std::uint64_t size,
+	std::uint64_t maximumReadBytes) const
+{
+	AnimationRangeReadResult result;
+	result.resolvedPath = ResolveAssetPath(path);
+	if (!IsNativeAnimationAssetPath(result.resolvedPath) || size == 0U
+		|| maximumReadBytes == 0U || size > maximumReadBytes
+		|| offset > std::numeric_limits<std::uint64_t>::max() - size)
+	{
+		result.status = size > maximumReadBytes
+			? AnimationRangeReadStatus::ReadLimitExceeded
+			: AnimationRangeReadStatus::InvalidRequest;
+		result.message = "Animation range request has an invalid type, size, limit, or overflowing offset.";
+		return result;
+	}
+
+	const std::string logicalPath = ContentMount::NormalizeLogicalPath(
+		result.resolvedPath.lexically_relative(assetRoot).generic_string());
+	if (ContentMount::Instance().IsMounted())
+	{
+		const TerraEngine::AnimationContentReadResult mounted =
+			TerraEngine::AnimationContentResolver::ReadRange(
+				ContentMount::Instance(), logicalPath, offset, size, maximumReadBytes);
+		if (mounted.Succeeded())
+		{
+			result.status = AnimationRangeReadStatus::Ok;
+			result.bytes = mounted.bytes;
+			result.message = "Read the complete bounded animation range from the mounted archive.";
+			return result;
+		}
+
+		// Export runtimes never try a second authority. Editor sessions may have a
+		// diagnostic archive mounted while still iterating on loose cooked files.
+		if (IsExportRuntime())
+		{
+			switch (mounted.content.status)
+			{
+			case TerraEngine::AnimationContentStatus::NotFound:
+			case TerraEngine::AnimationContentStatus::NotMounted:
+				result.status = AnimationRangeReadStatus::NotFound;
+				break;
+			case TerraEngine::AnimationContentStatus::OutOfRange:
+				result.status = AnimationRangeReadStatus::OutOfRange;
+				break;
+			case TerraEngine::AnimationContentStatus::ReadLimitExceeded:
+				result.status = AnimationRangeReadStatus::ReadLimitExceeded;
+				break;
+			case TerraEngine::AnimationContentStatus::NotAnimationAsset:
+			case TerraEngine::AnimationContentStatus::ForbiddenRuntimePath:
+				result.status = AnimationRangeReadStatus::NotAnimationAsset;
+				break;
+			case TerraEngine::AnimationContentStatus::ArchiveError:
+			case TerraEngine::AnimationContentStatus::Ok:
+				result.status = AnimationRangeReadStatus::IoError;
+				break;
+			}
+			result.message = "Mounted animation range failed closed; no loose-file fallback was attempted.";
+			return result;
+		}
+	}
+	else if (IsExportRuntime())
+	{
+		result.status = AnimationRangeReadStatus::NotFound;
+		result.message = "The configured export archive is not mounted; loose animation reads are forbidden.";
+		return result;
+	}
+
+	std::ifstream file(result.resolvedPath, std::ios::binary | std::ios::ate);
+	if (!file)
+	{
+		result.status = AnimationRangeReadStatus::NotFound;
+		result.message = "The loose cooked animation file could not be opened.";
+		return result;
+	}
+	const std::streamoff fileLength = file.tellg();
+	if (fileLength < 0 || static_cast<std::uint64_t>(fileLength) < offset
+		|| size > static_cast<std::uint64_t>(fileLength) - offset)
+	{
+		result.status = AnimationRangeReadStatus::OutOfRange;
+		result.message = "The requested animation range is outside the cooked file.";
+		return result;
+	}
+	if (size > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())
+		|| size > static_cast<std::uint64_t>(std::numeric_limits<std::streamsize>::max()))
+	{
+		result.status = AnimationRangeReadStatus::ReadLimitExceeded;
+		result.message = "The requested animation range cannot be represented by this runtime.";
+		return result;
+	}
+
+	result.bytes.resize(static_cast<std::size_t>(size));
+	file.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+	if (!file.read(reinterpret_cast<char*>(result.bytes.data()), static_cast<std::streamsize>(size)))
+	{
+		result.bytes.clear();
+		result.status = AnimationRangeReadStatus::IoError;
+		result.message = "The loose cooked animation range could not be read completely.";
+		return result;
+	}
+	result.status = AnimationRangeReadStatus::Ok;
+	result.message = "Read the complete bounded animation range from a loose editor artifact.";
+	return result;
+}
+
+AnimationCookedRangeTable ResourceManager::DescribeAnimationClipSegmentRanges(
+	const TerraEngine::UUID& id,
+	TerraEngine::Animation::AnimationGeneration generation) const
+{
+	using namespace TerraEngine::Animation;
+	AnimationCookedRangeTable result;
+	result.generation = generation;
+	if(id == TerraEngine::EMPTY_UUID || generation == 0U) {
+		result.message = "A cooked clip range query requires a non-empty asset and generation.";
+		return result;
+	}
+
+	// Capture only the checked metadata needed to relate the immutable cache
+	// publication to its file. Payload IO deliberately happens after this lock.
+	AnimationGuid cachedAssetId{};
+	AnimationGuid cachedSkeletonId{};
+	AnimationCompatibilityFingerprint cachedCompatibility = 0U;
+	AnimationFixedTick cachedDuration = 0;
+	std::uint32_t cachedSampleRate = 0U;
+	std::uint16_t cachedFormatVersion = 0U;
+	std::uint64_t cachedStreamSize = 0U;
+	std::vector<AnimationClipSegment> cachedSegments;
+	{
+		std::shared_lock lock(animationClipCache.mutex);
+		const auto publishedGeneration = animationClipCache.runtimeGenerations.find(id);
+		if(publishedGeneration == animationClipCache.runtimeGenerations.end()
+			|| publishedGeneration->second != generation) {
+			result.status = AnimationCookedRangeStatus::StaleGeneration;
+			result.message = "The requested clip generation is no longer the cache publication.";
+			return result;
+		}
+		const auto resource = animationClipCache.resources.find(id);
+		const auto path = animationClipCache.idToPath.find(id);
+		if(resource == animationClipCache.resources.end() || !resource->second
+			|| resource->second->runtimeGeneration != generation
+			|| path == animationClipCache.idToPath.end()) {
+			result.status = AnimationCookedRangeStatus::MissingAsset;
+			result.message = "The requested clip generation has no published payload or cooked path.";
+			return result;
+		}
+		result.logicalPath = path->second;
+		cachedAssetId = resource->second->assetId;
+		cachedSkeletonId = resource->second->skeletonAssetId;
+		cachedCompatibility = resource->second->compatibilityFingerprint;
+		cachedDuration = resource->second->durationTicks;
+		cachedSampleRate = resource->second->sampleRate;
+		cachedFormatVersion = resource->second->formatVersion;
+		cachedStreamSize = resource->second->streamData.size();
+		cachedSegments = resource->second->segments;
+	}
+
+	const auto failRead = [&](const AnimationRangeReadResult& read,
+		std::string_view context) {
+		result.blocks.clear();
+		result.status = read.status == AnimationRangeReadStatus::NotFound
+			? AnimationCookedRangeStatus::MissingAsset
+			: (read.status == AnimationRangeReadStatus::IoError
+				? AnimationCookedRangeStatus::IoError
+				: AnimationCookedRangeStatus::InvalidFormat);
+		result.message = std::string(context) + ": " + read.message;
+		return result;
+	};
+	const auto failFormat = [&](std::string_view message) {
+		result.blocks.clear();
+		result.status = AnimationCookedRangeStatus::InvalidFormat;
+		result.message = std::string(message);
+		return result;
+	};
+
+	const AnimationRangeReadResult envelopeRead = ReadAnimationAssetRange(
+		result.logicalPath, 0U, sizeof(AnimationAssetEnvelope), sizeof(AnimationAssetEnvelope));
+	if(!envelopeRead.Succeeded()) return failRead(envelopeRead, "Could not read the clip envelope");
+	AnimationAssetEnvelope envelope{};
+	std::memcpy(&envelope, envelopeRead.bytes.data(), sizeof(envelope));
+	if(envelope.magic != kAnimationAssetMagic
+		|| envelope.majorVersion != kAnimationAssetMajorVersion
+		|| envelope.headerSize != sizeof(AnimationAssetEnvelope)
+		|| envelope.endianMarker != kAnimationLittleEndianMarker
+		|| envelope.assetId != cachedAssetId
+		|| envelope.assetId.value != id
+		|| envelope.compatibilityFingerprint != cachedCompatibility) {
+		return failFormat("The clip envelope does not match the published cache generation.");
+	}
+	std::uint64_t fileSize = 0U;
+	if(!CheckedAdd(sizeof(AnimationAssetEnvelope), envelope.payloadSize, fileSize)
+		|| envelope.chunkCount == 0U || envelope.chunkCount > 64U) {
+		return failFormat("The clip envelope has an overflowing size or unsupported chunk count.");
+	}
+	std::uint64_t chunkTableBytes = 0U;
+	if(!CheckedMultiply(envelope.chunkCount, sizeof(AnimationChunkEntry), chunkTableBytes)
+		|| ValidateAnimationRange(fileSize, envelope.chunkTableOffset, chunkTableBytes)
+			!= AnimationStatus::Ok) {
+		return failFormat("The clip chunk table is outside the cooked envelope.");
+	}
+	const AnimationRangeReadResult chunkRead = ReadAnimationAssetRange(
+		result.logicalPath, envelope.chunkTableOffset, chunkTableBytes, chunkTableBytes);
+	if(!chunkRead.Succeeded()) return failRead(chunkRead, "Could not read the clip chunk table");
+
+	AnimationChunkEntry payloadChunk{};
+	bool foundPayload = false;
+	for(std::uint32_t index = 0U; index < envelope.chunkCount; ++index) {
+		AnimationChunkEntry entry{};
+		std::memcpy(&entry,
+			chunkRead.bytes.data() + static_cast<std::size_t>(index) * sizeof(entry), sizeof(entry));
+		if(ValidateAnimationRange(fileSize, entry.offset, entry.size) != AnimationStatus::Ok) {
+			return failFormat("A clip chunk points outside the cooked envelope.");
+		}
+		if(entry.type != kAnimationChunkPayload) continue;
+		if(foundPayload) return failFormat("The clip contains more than one DATA chunk.");
+		payloadChunk = entry;
+		foundPayload = true;
+	}
+	if(!foundPayload || payloadChunk.size < sizeof(AnimationClipAssetFileHeaderV1)) {
+		return failFormat("The clip has no complete DATA header.");
+	}
+
+	const AnimationRangeReadResult headerRead = ReadAnimationAssetRange(
+		result.logicalPath, payloadChunk.offset,
+		sizeof(AnimationClipAssetFileHeaderV1), sizeof(AnimationClipAssetFileHeaderV1));
+	if(!headerRead.Succeeded()) return failRead(headerRead, "Could not read the clip DATA header");
+	AnimationClipAssetFileHeaderV1 header{};
+	std::memcpy(&header, headerRead.bytes.data(), sizeof(header));
+	if(header.magic != kAnimationClipPayloadMagic
+		|| header.formatVersion != cachedFormatVersion
+		|| header.headerSize != sizeof(AnimationClipAssetFileHeaderV1)
+		|| header.skeletonAssetId != cachedSkeletonId
+		|| header.durationTicks != cachedDuration
+		|| header.sampleRate != cachedSampleRate
+		|| header.segmentCount != cachedSegments.size()
+		|| header.streamDataSize != cachedStreamSize
+		|| ValidateAnimationRange(payloadChunk.size,
+			header.streamDataOffset, header.streamDataSize) != AnimationStatus::Ok) {
+		return failFormat("The clip DATA header does not match the published typed payload.");
+	}
+
+	std::uint64_t streamBase = 0U;
+	if(!CheckedAdd(payloadChunk.offset, header.streamDataOffset, streamBase)) {
+		return failFormat("The clip stream base overflows its cooked file range.");
+	}
+	result.blocks.reserve(cachedSegments.size());
+	for(std::size_t index = 0U; index < cachedSegments.size(); ++index) {
+		const AnimationClipSegment& segment = cachedSegments[index];
+		if(segment.streamSize == 0U
+			|| ValidateAnimationRange(header.streamDataSize,
+				segment.streamOffset, segment.streamSize) != AnimationStatus::Ok) {
+			return failFormat("A published clip segment has no valid stream-data interval.");
+		}
+		std::uint64_t absoluteOffset = 0U;
+		if(!CheckedAdd(streamBase, segment.streamOffset, absoluteOffset)
+			|| ValidateAnimationRange(fileSize, absoluteOffset, segment.streamSize)
+				!= AnimationStatus::Ok) {
+			return failFormat("A clip segment overflows the cooked file range.");
+		}
+		result.blocks.push_back({static_cast<std::uint32_t>(index),
+			absoluteOffset, segment.streamSize});
+	}
+	result.status = AnimationCookedRangeStatus::Ok;
+	result.message = "Resolved checked physical ranges for the published clip segments.";
+	return result;
+}
+
+AnimationCookedRangeTable ResourceManager::DescribeMotionDatabaseBlockRanges(
+	const TerraEngine::UUID& id,
+	TerraEngine::Animation::AnimationGeneration generation) const
+{
+	using namespace TerraEngine::Animation;
+
+	AnimationCookedRangeTable result;
+	result.generation = generation;
+	if(id == TerraEngine::EMPTY_UUID || generation == 0U) {
+		result.message = "A cooked motion-database range query requires a non-empty asset and generation.";
+		return result;
+	}
+
+	std::shared_lock lock(motionDatabaseCache.mutex);
+	const auto publishedGeneration = motionDatabaseCache.runtimeGenerations.find(id);
+	if(publishedGeneration == motionDatabaseCache.runtimeGenerations.end()
+		|| publishedGeneration->second != generation) {
+		result.status = AnimationCookedRangeStatus::StaleGeneration;
+		result.message = "The requested motion-database generation is no longer published.";
+		return result;
+	}
+	const auto resource = motionDatabaseCache.resources.find(id);
+	const auto path = motionDatabaseCache.idToPath.find(id);
+	if(resource == motionDatabaseCache.resources.end() || !resource->second
+		|| path == motionDatabaseCache.idToPath.end()) {
+		result.status = AnimationCookedRangeStatus::MissingAsset;
+		result.message = "The requested motion-database generation has no payload or cooked path.";
+		return result;
+	}
+	result.logicalPath = path->second;
+
+	// Use the bytes owned by this exact cache publication instead of reopening the
+	// path. A loose-file reimport may already have replaced that path on disk while
+	// this generation remains visible, and mixing those generations would let an
+	// otherwise valid range publish bytes from the wrong database.
+	const std::span<const std::uint8_t> serialized = resource->second->bytes;
+	MotionDatabaseAsset authoritativeAsset;
+	const AnimationStatus decodeStatus = DeserializeMotionDatabaseAsset(
+		serialized, 0U, authoritativeAsset);
+	if(decodeStatus != AnimationStatus::Ok
+		|| authoritativeAsset.assetId.value != id
+		|| authoritativeAsset.residentBlocks.size()
+			> kMotionDatabaseMaximumResidentBlocks) {
+		result.status = AnimationCookedRangeStatus::InvalidFormat;
+		result.message = "The cached motion-database bytes no longer describe the published identity and bounded block table.";
+		return result;
+	}
+
+	AnimationAssetReader reader;
+	if(reader.Parse(serialized) != AnimationStatus::Ok) {
+		result.status = AnimationCookedRangeStatus::InvalidFormat;
+		result.message = "The cached motion-database envelope could not be parsed while resolving streamed blocks.";
+		return result;
+	}
+	const bool hasStreamChunk = std::any_of(
+		reader.Chunks().begin(), reader.Chunks().end(), [](const AnimationChunkEntry& entry) {
+			return entry.type == kAnimationChunkStreamData;
+		});
+	if(!hasStreamChunk) {
+		result.status = AnimationCookedRangeStatus::UnsupportedLayout;
+		// DATA-only files remain valid and fully resident. Their logical records are
+		// split across prefix and extension arrays, so no fabricated file interval
+		// may be sent to asynchronous streaming IO.
+		result.message = "This valid legacy motion database has no STRM chunk; deterministic complete-database fallback remains authoritative.";
+		return result;
+	}
+
+	if(authoritativeAsset.residentBlocks.empty()) {
+		result.status = AnimationCookedRangeStatus::Ok;
+		result.message = "The checked STRM chunk belongs to an empty motion database and therefore exposes no block ranges.";
+		return result;
+	}
+
+	// Resolve the first block through the format-owned API. The full deserialize
+	// above already validated every STRM byte and proved that resident-block CPU
+	// offsets are contiguous and bounded. Deriving later absolute offsets from the
+	// checked first range avoids reparsing a potentially large database once per
+	// block while retaining the exact on-disk STRM mapping.
+	MotionDatabaseStreamBlockRange firstRange;
+	const AnimationStatus rangeStatus = ResolveMotionDatabaseStreamBlockRange(
+		serialized, 0U, firstRange);
+	if(rangeStatus == AnimationStatus::Unsupported) {
+		result.status = AnimationCookedRangeStatus::UnsupportedLayout;
+		result.message = "This valid legacy motion database has no contiguous STRM block layout.";
+		return result;
+	}
+	const MotionDatabaseResidentBlock& firstBlock = authoritativeAsset.residentBlocks.front();
+	if(rangeStatus != AnimationStatus::Ok
+		|| firstRange.blockIndex != firstBlock.blockIndex
+		|| firstRange.firstSample != firstBlock.firstSample
+		|| firstRange.sampleCount != firstBlock.sampleCount
+		|| firstRange.byteSize != firstBlock.cpuByteSize
+		|| firstRange.contentFingerprint != firstBlock.contentFingerprint
+		|| firstRange.absoluteByteOffset < firstBlock.cpuByteOffset) {
+		result.status = AnimationCookedRangeStatus::InvalidFormat;
+		result.message = "The motion-database STRM range does not match its authoritative DATA block metadata.";
+		return result;
+	}
+	const std::uint64_t streamBase =
+		firstRange.absoluteByteOffset - firstBlock.cpuByteOffset;
+
+	result.blocks.reserve(authoritativeAsset.residentBlocks.size());
+	for(const MotionDatabaseResidentBlock& block : authoritativeAsset.residentBlocks) {
+		std::uint64_t absoluteOffset = 0U;
+		if(!CheckedAdd(streamBase, block.cpuByteOffset, absoluteOffset)
+			|| ValidateAnimationRange(serialized.size(), absoluteOffset, block.cpuByteSize)
+				!= AnimationStatus::Ok) {
+			result.blocks.clear();
+			result.status = AnimationCookedRangeStatus::InvalidFormat;
+			result.message = "A motion-database STRM block overflows the cached cooked asset range.";
+			return result;
+		}
+		result.blocks.push_back({block.blockIndex, absoluteOffset, block.cpuByteSize});
+	}
+	result.status = AnimationCookedRangeStatus::Ok;
+	result.message = "Resolved checked physical ranges for the published motion-database STRM blocks.";
+	return result;
 }

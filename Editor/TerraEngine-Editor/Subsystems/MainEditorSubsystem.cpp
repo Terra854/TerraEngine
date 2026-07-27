@@ -21,6 +21,7 @@
 #include "Engine/Components/MeshRenderComponent.h"
 #include "Engine/Components/PrefabLinkComponent.h"
 #include "Engine/Components/Transform.h"
+#include "Engine/Animation/AnimationSystem.h"
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Renderer/RHI/Vulkan/VulkanContext.h"
 #include "Engine/Scene/SceneManager.h"
@@ -46,6 +47,7 @@
 #include <algorithm>
 #include <cstring>
 #include <fstream>
+#include <stdexcept>
 #include <string_view>
 #include <unordered_map>
 #include <nlohmann/json.hpp>
@@ -64,6 +66,35 @@
 #include "../Windows/UIBuilderWindow.h"
 #include "../Windows/ProjectSettingsWindow.h"
 #include "../Windows/PreferencesWindow.h"
+#include "../Windows/SkeletonEditorWindow.h"
+#include "../Windows/AnimationClipEditorWindow.h"
+#include "../Windows/AnimationControllerWindow.h"
+#include "../Windows/RetargetEditorWindow.h"
+#include "../Windows/MotionDatabaseWindow.h"
+#include "../Windows/RagdollEditorWindow.h"
+#include "../Windows/AnimationDiagnosticsWindow.h"
+
+namespace
+{
+	// The graph transaction is shared by Asset Browser drag/drop and MCP-backed
+	// prefab instantiation. Preparation completes before the first live object is
+	// published, and every newly assigned UUID is retained for rollback.
+	struct ProtectedPrefabInstantiationResult
+	{
+		bool ok = false;
+		std::string errorCategory;
+		std::string message;
+		std::vector<entt::entity> roots;
+		std::size_t objectCount = 0U;
+	};
+
+	ProtectedPrefabInstantiationResult InstantiateRegisteredPrefabGraph(
+		const std::filesystem::path& prefabPath,
+		const TerraEngine::UUID& prefabGuid,
+		nlohmann::json prefabJson,
+		std::string_view requestedName,
+		std::optional<entt::entity> parent);
+}
 
 std::string PrefabAuthoringService::ResolvePrefabId(std::string_view identity) const {
 	const std::string value(identity);
@@ -98,12 +129,122 @@ PrefabAuthoringService::Result PrefabAuthoringService::Create(
 		return {false, "internal", "Could not publish the prefab asset."};
 	}
 	const std::string relative = projectRelativePath.lexically_normal().generic_string();
-	prefabsById[prefabId] = {prefabId, relative, sourceId, sourceName, 1u};
+	prefabsById[prefabId] = {prefabId, relative, sourceId, sourceName, 1u, {}, TerraEngine::EMPTY_UUID, {}, false};
 	prefabIdByPath[relative] = prefabId;
 	return {true, {}, "Created prefab.", {{"prefabId", prefabId}, {"sourceObjectId", sourceId}, {"path", relative}}};
 }
 
-PrefabAuthoringService::Result PrefabAuthoringService::Instantiate(std::string_view prefabIdentity, std::string_view requestedName) {
+PrefabAuthoringService::Result PrefabAuthoringService::RegisterExistingAsset(
+	const std::filesystem::path& projectRelativePath,
+	const std::filesystem::path& absolutePath,
+	const TerraEngine::UUID& assetGuid,
+	std::uint64_t publishedGeneration) {
+	const std::filesystem::path relativePath = projectRelativePath.lexically_normal();
+	const auto firstSegment = relativePath.begin();
+	if (assetGuid == TerraEngine::EMPTY_UUID
+		|| relativePath.empty()
+		|| relativePath.is_absolute()
+		|| relativePath.extension() != ".teprefab"
+		|| firstSegment == relativePath.end()
+		|| firstSegment->generic_string() != "Assets"
+		|| std::find(relativePath.begin(), relativePath.end(), std::filesystem::path("..")) != relativePath.end()
+		|| !absolutePath.is_absolute()
+		|| absolutePath.extension() != ".teprefab") {
+		return {false, "validation", "Registered prefab identity or path is invalid."};
+	}
+
+	std::ifstream input(absolutePath, std::ios::binary);
+	if (!input) {
+		return {false, "missing_target", "Registered prefab file was not found."};
+	}
+
+	nlohmann::json document;
+	try {
+		input >> document;
+	} catch (const nlohmann::json::exception&) {
+		return {false, "validation", "Registered prefab document is malformed."};
+	}
+	if (!document.is_object()) {
+		return {false, "validation", "Registered prefab document must be a JSON object."};
+	}
+	const bool hasSerializedGraph = document.contains("objects");
+	if (hasSerializedGraph && (!document["objects"].is_array() || document["objects"].empty())) {
+		return {false, "validation", "Registered prefab object graph must contain at least one root."};
+	}
+
+	// Prefer the authored document name, then its first root, and finally the
+	// filename. This supports both generated model prefabs and older lightweight
+	// prefabs created by the automation authoring service.
+	std::string sourceName;
+	std::string sourceObjectId;
+	if (const auto name = document.find("name"); name != document.end()) {
+		if (!name->is_string()) {
+			return {false, "validation", "Registered prefab name must be a string."};
+		}
+		sourceName = name->get<std::string>();
+	}
+	if (const auto sourceId = document.find("sourceObjectId"); sourceId != document.end()) {
+		if (!sourceId->is_string()) {
+			return {false, "validation", "Registered prefab sourceObjectId must be a string."};
+		}
+		sourceObjectId = sourceId->get<std::string>();
+	}
+	if (document.contains("objects") && document["objects"].is_array() && !document["objects"].empty()
+		&& document["objects"].front().is_object()) {
+		const nlohmann::json& firstRoot = document["objects"].front();
+		if (sourceName.empty()) {
+			if (const auto name = firstRoot.find("name"); name != firstRoot.end()) {
+				if (!name->is_string()) {
+					return {false, "validation", "Registered prefab root name must be a string."};
+				}
+				sourceName = name->get<std::string>();
+			}
+		}
+		if (sourceObjectId.empty()) {
+			if (const auto sourceId = firstRoot.find("uuid"); sourceId != firstRoot.end()) {
+				if (!sourceId->is_string()) {
+					return {false, "validation", "Registered prefab root UUID must be a string."};
+				}
+				sourceObjectId = sourceId->get<std::string>();
+			}
+		}
+	}
+	if (sourceName.empty()) {
+		sourceName = absolutePath.stem().string();
+	}
+
+	const std::string prefabId = TerraEngine::ToHexString(assetGuid);
+	const std::string relative = relativePath.generic_string();
+	const std::uint64_t generation = std::max<std::uint64_t>(1u, publishedGeneration);
+	if (const auto existing = prefabsById.find(prefabId); existing != prefabsById.end()) {
+		// A reimport may retain the GUID while moving or republishing the asset.
+		// Remove the former alias before publishing the current indexed path.
+		prefabIdByPath.erase(existing->second.relativePath);
+	}
+	prefabsById[prefabId] = {
+		prefabId,
+		relative,
+		sourceObjectId,
+		sourceName,
+		generation,
+		std::filesystem::absolute(absolutePath).lexically_normal(),
+		assetGuid,
+		std::move(document),
+		hasSerializedGraph
+	};
+	prefabIdByPath[relative] = prefabId;
+	return {true, {}, "Registered existing prefab asset.", {
+		{"prefabId", prefabId},
+		{"sourceObjectId", sourceObjectId},
+		{"path", relative},
+		{"prefabGeneration", generation}
+	}};
+}
+
+PrefabAuthoringService::Result PrefabAuthoringService::Instantiate(
+	std::string_view prefabIdentity,
+	std::string_view requestedName,
+	std::optional<entt::entity> parent) {
 	const std::string prefabId = ResolvePrefabId(prefabIdentity);
 	if (prefabId.empty()) {
 		return {false, "missing_target", "Prefab was not found."};
@@ -112,11 +253,43 @@ PrefabAuthoringService::Result PrefabAuthoringService::Instantiate(std::string_v
 		return {false, "conflict", "A prefab cannot contain itself.", {{"rolledBack", true}}};
 	}
 	const PrefabState& prefab = prefabsById.at(prefabId);
+	if (prefab.hasSerializedGraph) {
+		const ProtectedPrefabInstantiationResult graph = InstantiateRegisteredPrefabGraph(
+			prefab.absolutePath, prefab.assetGuid, prefab.serializedDocument, requestedName, parent);
+		if (!graph.ok || graph.roots.empty()) {
+			return {
+				false,
+				graph.errorCategory.empty() ? "internal" : graph.errorCategory,
+				graph.message.empty() ? "Could not instantiate the registered prefab graph." : graph.message,
+				{{"rolledBack", true}}
+			};
+		}
+
+		const Object instance = ObjectManager::instance().makeObjectHandle(graph.roots.front());
+		const std::string instanceId = TerraEngine::ToHexString(ObjectManager::instance().getUUID(instance));
+		instances[instanceId] = {prefabId, prefab.sourceName};
+		return {true, {}, "Instantiated prefab graph.", {
+			{"prefabId", prefabId},
+			{"instanceId", instanceId},
+			{"path", prefab.relativePath},
+			{"prefabGeneration", prefab.generation},
+			{"rootCount", graph.roots.size()},
+			{"objectCount", graph.objectCount}
+		}};
+	}
+
+	// A prefab created earlier in this automation session deliberately keeps the
+	// legacy lightweight representation until AssetDatabase indexes its file.
 	Object instance = ObjectManager::instance().createObject(requestedName.empty() ? prefab.sourceName : std::string(requestedName));
 	const std::string instanceId = TerraEngine::ToHexString(ObjectManager::instance().getUUID(instance));
 	instances[instanceId] = {prefabId, prefab.sourceName};
 	UndoRedoSystem::Instance().PushCommand(std::make_unique<CreateObjectCommand>(instance.EntityId()));
-	return {true, {}, "Instantiated prefab.", {{"prefabId", prefabId}, {"instanceId", instanceId}}};
+	return {true, {}, "Instantiated prefab.", {
+		{"prefabId", prefabId},
+		{"instanceId", instanceId},
+		{"path", prefab.relativePath},
+		{"prefabGeneration", prefab.generation}
+	}};
 }
 
 PrefabAuthoringService::Result PrefabAuthoringService::InspectOverrides(std::string_view instanceIdentity) const {
@@ -560,12 +733,52 @@ namespace
 		return std::nullopt;
 	}
 
-	void CollectPrefabInstanceUuidRemap(nlohmann::json& objectJson, std::unordered_map<TerraEngine::UUID, TerraEngine::UUID>& uuidRemap)
+	bool CollectPrefabInstanceUuidRemap(
+		nlohmann::json& objectJson,
+		std::unordered_map<TerraEngine::UUID, TerraEngine::UUID>& uuidRemap,
+		std::vector<TerraEngine::UUID>& generatedObjectIds,
+		std::string& reason)
 	{
-		if (std::optional<TerraEngine::UUID> sourceUuid = ReadSerializedObjectUuid(objectJson))
+		const auto uuidIt = objectJson.find("uuid");
+		if (uuidIt != objectJson.end())
 		{
-			const TerraEngine::UUID instanceUuid = TerraEngine::GenerateUUID();
-			uuidRemap[*sourceUuid] = instanceUuid;
+			if (!uuidIt->is_string())
+			{
+				reason = "prefab object UUID is not a string";
+				return false;
+			}
+			const std::optional<TerraEngine::UUID> sourceUuid = TerraEngine::ParseUUID(uuidIt->get<std::string>());
+			if (!sourceUuid)
+			{
+				reason = "prefab object UUID is malformed";
+				return false;
+			}
+
+			TerraEngine::UUID instanceUuid = TerraEngine::GenerateUUID();
+			while (ObjectManager::instance().getObject(instanceUuid).has_value()
+				|| std::find(generatedObjectIds.begin(), generatedObjectIds.end(), instanceUuid) != generatedObjectIds.end())
+			{
+				instanceUuid = TerraEngine::GenerateUUID();
+			}
+			if (!uuidRemap.emplace(*sourceUuid, instanceUuid).second)
+			{
+				reason = "prefab graph contains duplicate object UUIDs";
+				return false;
+			}
+			generatedObjectIds.push_back(instanceUuid);
+			objectJson["uuid"] = TerraEngine::ToHexString(instanceUuid);
+		}
+		else
+		{
+			// Older prefab documents may omit UUIDs. Assign them during immutable
+			// preparation so rollback can still identify every created object.
+			TerraEngine::UUID instanceUuid = TerraEngine::GenerateUUID();
+			while (ObjectManager::instance().getObject(instanceUuid).has_value()
+				|| std::find(generatedObjectIds.begin(), generatedObjectIds.end(), instanceUuid) != generatedObjectIds.end())
+			{
+				instanceUuid = TerraEngine::GenerateUUID();
+			}
+			generatedObjectIds.push_back(instanceUuid);
 			objectJson["uuid"] = TerraEngine::ToHexString(instanceUuid);
 		}
 
@@ -573,9 +786,13 @@ namespace
 		{
 			for (nlohmann::json& childJson : *childrenIt)
 			{
-				CollectPrefabInstanceUuidRemap(childJson, uuidRemap);
+				if (!CollectPrefabInstanceUuidRemap(childJson, uuidRemap, generatedObjectIds, reason))
+				{
+					return false;
+				}
 			}
 		}
+		return true;
 	}
 
 	void RewritePrefabInstanceUuidReferences(nlohmann::json& value, const std::unordered_map<TerraEngine::UUID, TerraEngine::UUID>& uuidRemap)
@@ -624,12 +841,12 @@ namespace
 		return std::filesystem::absolute(prefabPath).lexically_normal();
 	}
 
-	void AttachPrefabLink(entt::entity entity, const TerraEngine::UUID& prefabSourceId, const std::optional<TerraEngine::UUID>& sourceObjectId, const std::filesystem::path& prefabPath)
+	bool AttachPrefabLink(entt::entity entity, const TerraEngine::UUID& prefabSourceId, const std::optional<TerraEngine::UUID>& sourceObjectId, const std::filesystem::path& prefabPath)
 	{
 		std::optional<Object> object = ObjectManager::instance().getObject(entity);
 		if (!object)
 		{
-			return;
+			return false;
 		}
 
 		PrefabLinkComponent* existingLink = ObjectManager::instance().GetComponent<PrefabLinkComponent>(*object);
@@ -637,7 +854,7 @@ namespace
 		if (ensuredLink == nullptr)
 		{
 			TERRAENGINE_LOG(LogLevel::Warning, "Failed to attach prefab link metadata to dropped prefab instance.");
-			return;
+			return false;
 		}
 
 		PrefabLinkComponent& link = *ensuredLink;
@@ -649,6 +866,143 @@ namespace
 		const std::filesystem::path relativePrefabPath = std::filesystem::relative(prefabPath, SceneManager::Instance().GetSceneRoot(), relativeError);
 		link.prefabPath = relativeError ? prefabPath.generic_string() : relativePrefabPath.generic_string();
 		link.overriddenProperties.clear();
+		return true;
+	}
+
+	ProtectedPrefabInstantiationResult InstantiateRegisteredPrefabGraph(
+		const std::filesystem::path& prefabPath,
+		const TerraEngine::UUID& prefabGuid,
+		nlohmann::json prefabJson,
+		std::string_view requestedName,
+		std::optional<entt::entity> parent)
+	{
+		ProtectedPrefabInstantiationResult result;
+		const TerraEngine::Scene::PreparedSceneDecode prepared = Serializer::PrepareSceneDecode(prefabJson);
+		if (!prepared.accepted || prepared.cancelled || prepared.objectCount == 0U)
+		{
+			result.errorCategory = "validation";
+			result.message = prepared.reason.empty() ? "Registered prefab has no root objects." : prepared.reason;
+			return result;
+		}
+
+		ObjectManager& objects = ObjectManager::instance();
+		if (objects.IsBulkPublicationActive())
+		{
+			result.errorCategory = "conflict";
+			result.message = "Another protected scene publication is already active.";
+			return result;
+		}
+		std::optional<TerraEngine::UUID> parentUuid;
+		if (parent.has_value())
+		{
+			const std::optional<Object> parentObject = objects.getObject(*parent);
+			if (!parentObject)
+			{
+				result.errorCategory = "validation";
+				result.message = "Prefab parent no longer exists in the hierarchy.";
+				return result;
+			}
+			parentUuid = objects.getUUID(*parentObject);
+		}
+
+		std::vector<std::optional<TerraEngine::UUID>> sourceRootObjectIds;
+		std::unordered_map<TerraEngine::UUID, TerraEngine::UUID> uuidRemap;
+		std::vector<TerraEngine::UUID> generatedObjectIds;
+		std::string preparationFailure;
+		sourceRootObjectIds.reserve(prefabJson["objects"].size());
+		for (std::size_t rootIndex = 0U; rootIndex < prefabJson["objects"].size(); ++rootIndex)
+		{
+			nlohmann::json& objectJson = prefabJson["objects"][rootIndex];
+			sourceRootObjectIds.push_back(ReadSerializedObjectUuid(objectJson));
+			if (rootIndex == 0U && !requestedName.empty())
+			{
+				// A multi-root prefab has one canonical response root. Rename only that
+				// root so secondary authored roots keep deterministic source names.
+				objectJson["name"] = std::string(requestedName);
+			}
+			if (!CollectPrefabInstanceUuidRemap(objectJson, uuidRemap, generatedObjectIds, preparationFailure))
+			{
+				result.errorCategory = "validation";
+				result.message = preparationFailure;
+				return result;
+			}
+		}
+		for (nlohmann::json& objectJson : prefabJson["objects"])
+		{
+			RewritePrefabInstanceUuidReferences(objectJson, uuidRemap);
+		}
+
+		const bool sceneWasDirty = SceneManager::Instance().IsActiveSceneDirty();
+		bool publicationActive = false;
+		auto rollback = [&]() {
+			// IDs are ordered root-before-child, so removing an existing root also
+			// removes its descendants; later missing child lookups are harmless.
+			for (const TerraEngine::UUID& objectId : generatedObjectIds)
+			{
+				if (std::optional<Object> object = objects.getObject(objectId))
+				{
+					objects.removeObject(*object);
+				}
+			}
+			if (publicationActive)
+			{
+				objects.FinishBulkPublication(false);
+				publicationActive = false;
+			}
+			if (!sceneWasDirty)
+			{
+				SceneManager::Instance().ClearActiveSceneDirty();
+			}
+		};
+
+		const TerraEngine::UUID loadedPrefabId = SceneManager::Instance().LoadPrefab(prefabPath);
+		const TerraEngine::UUID linkSourceId = loadedPrefabId == TerraEngine::EMPTY_UUID ? prefabGuid : loadedPrefabId;
+		std::vector<std::unique_ptr<ICommand>> undoCommands;
+		undoCommands.reserve(prefabJson["objects"].size() * (parentUuid.has_value() ? 2U : 1U));
+		objects.BeginBulkPublication({prepared.objectCount, prepared.componentCount});
+		publicationActive = true;
+		try
+		{
+			for (std::size_t rootIndex = 0U; rootIndex < prefabJson["objects"].size(); ++rootIndex)
+			{
+				const entt::entity rootEntity = Serializer::DeserializeObjectEntity(prefabJson["objects"][rootIndex], parent);
+				if (!objects.getObject(rootEntity).has_value()
+					|| !AttachPrefabLink(rootEntity, linkSourceId, sourceRootObjectIds[rootIndex], prefabPath))
+				{
+					throw std::runtime_error("Prefab root could not be published with its link metadata.");
+				}
+				result.roots.push_back(rootEntity);
+				undoCommands.push_back(std::make_unique<CreateObjectCommand>(rootEntity));
+				if (parentUuid.has_value())
+				{
+					undoCommands.push_back(std::make_unique<SetParentCommand>(rootEntity, std::nullopt, parentUuid));
+				}
+			}
+
+			for (const TerraEngine::UUID& objectId : generatedObjectIds)
+			{
+				if (!objects.getObject(objectId).has_value())
+				{
+					throw std::runtime_error("Prefab graph publication omitted an authored object.");
+				}
+			}
+		}
+		catch (const std::exception& error)
+		{
+			rollback();
+			result.roots.clear();
+			result.errorCategory = "validation";
+			result.message = std::string("Registered prefab graph was rejected: ") + error.what();
+			return result;
+		}
+
+		objects.FinishBulkPublication(true);
+		publicationActive = false;
+		UndoRedoSystem::Instance().PushTransactionGroup("Instantiate Prefab", std::move(undoCommands));
+		SceneManager::Instance().ForceMarkActiveSceneDirty();
+		result.ok = true;
+		result.objectCount = prepared.objectCount;
+		return result;
 	}
 }
 
@@ -676,6 +1030,19 @@ void MainEditorSubsystem::Initialize(EditorContext& context) {
 	m_Windows.push_back(std::make_shared<SchedulerDiagnosticsWindow>(this));
 	m_Windows.push_back(std::make_shared<ResourceResidencyWindow>(this));
 	m_Windows.push_back(std::make_shared<UIBuilderWindow>(this));
+	// These windows declare their own Animation menu paths. Registering the
+	// persistent objects here lets the existing docking/layout system restore
+	// visibility without giving a menu command any authoring side effects.
+	// Animation authoring windows observe the shared Project Browser selection.
+	// Passing this owner keeps selection lifetime in the workspace subsystem and
+	// prevents any window from retaining a transient browser item pointer.
+	m_Windows.push_back(std::make_shared<SkeletonEditorWindow>(this));
+	m_Windows.push_back(std::make_shared<AnimationClipEditorWindow>(this));
+	m_Windows.push_back(std::make_shared<AnimationControllerWindow>(this));
+	m_Windows.push_back(std::make_shared<RetargetEditorWindow>(this));
+	m_Windows.push_back(std::make_shared<MotionDatabaseWindow>(this));
+	m_Windows.push_back(std::make_shared<RagdollEditorWindow>(this));
+	m_Windows.push_back(std::make_shared<AnimationDiagnosticsWindow>());
 
 	UndoRedoSystem::Instance().Initialize(context);
 	ScriptCompilationSubsystem::Instance().Initialize(context);
@@ -701,6 +1068,12 @@ void MainEditorSubsystem::Initialize(EditorContext& context) {
 	});
 
 	ScriptingSystem::Instance().SetRunning(false);
+	// Editor authoring evaluates a fresh tick-zero palette without advancing it.
+	// Some imported skins need that palette to display their authored pose; raw
+	// unskinned vertex positions are not necessarily the visible reference pose.
+	auto& animationSystem = TerraEngine::Animation::AnimationSystem::Instance();
+	animationSystem.SetAuthoredComponentPlaybackEnabled(true);
+	animationSystem.SetAuthoredComponentPlaybackAdvancing(false);
 	ClearPlayModeSceneState();
 	g_ActiveMainEditorSubsystem = this;
 	SetApplicationEditorStopPlayModeCallback(&StopPlayModeFromApplicationQuit);
@@ -709,6 +1082,9 @@ void MainEditorSubsystem::Initialize(EditorContext& context) {
 // MainEditorSubsystem::OnProjectOpened is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::OnProjectOpened() {
 	if (!ctx || !ctx->projectManager->HasActiveProject()) return;
+	auto& animationSystem = TerraEngine::Animation::AnimationSystem::Instance();
+	animationSystem.SetAuthoredComponentPlaybackEnabled(true);
+	animationSystem.SetAuthoredComponentPlaybackAdvancing(false);
 
 	auto projectRoot = ctx->projectManager->GetProjectRoot();
 	std::filesystem::path assetRoot = projectRoot / "Assets";
@@ -1355,77 +1731,53 @@ bool MainEditorSubsystem::InstantiatePrefabAsset(const TerraEngine::UUID& prefab
 	}
 
 	const std::filesystem::path prefabPath = ResolvePrefabAssetPath(*metadata);
-	std::ifstream prefabInput(prefabPath, std::ios::binary);
-	if (!prefabInput)
+	std::filesystem::path databaseRelativePath = metadata->sourcePath.lexically_normal();
+	if (databaseRelativePath.is_absolute())
 	{
-		TERRAENGINE_LOG(LogLevel::Error, "Failed to instantiate prefab because the prefab file could not be opened: " << prefabPath);
-		return false;
-	}
-
-	nlohmann::json prefabJson;
-	try
-	{
-		prefabInput >> prefabJson;
-	}
-	catch (const nlohmann::json::parse_error& parseError)
-	{
-		TERRAENGINE_LOG(LogLevel::Error, "Dropped prefab failed JSON parse at byte " << parseError.byte << ": " << parseError.what() << " Path: " << prefabPath);
-		return false;
-	}
-
-	if (!prefabJson.contains("objects") || !prefabJson["objects"].is_array() || prefabJson["objects"].empty())
-	{
-		TERRAENGINE_LOG(LogLevel::Warning, "Dropped prefab has no root objects: " << prefabPath);
-		return false;
-	}
-
-	std::optional<TerraEngine::UUID> parentUuid;
-	if (parent.has_value())
-	{
-		if (std::optional<Object> parentObject = ObjectManager::instance().getObject(*parent))
+		std::error_code relativeError;
+		databaseRelativePath = std::filesystem::relative(
+			databaseRelativePath, AssetDatabase::Instance().GetAssetRoot(), relativeError);
+		if (relativeError)
 		{
-			parentUuid = ObjectManager::instance().getUUID(*parentObject);
-		}
-		else
-		{
-			TERRAENGINE_LOG(LogLevel::Warning, "Dropped prefab parent no longer exists in the hierarchy.");
+			TERRAENGINE_LOG(LogLevel::Error, "Registered prefab path is outside the active AssetDatabase root: " << prefabPath);
 			return false;
 		}
 	}
 
-	const TerraEngine::UUID prefabSourceId = SceneManager::Instance().LoadPrefab(prefabPath);
-	const TerraEngine::UUID linkSourceId = prefabSourceId == TerraEngine::EMPTY_UUID ? prefabGuid : prefabSourceId;
-	std::vector<entt::entity> instantiatedRoots;
-	std::vector<std::unique_ptr<ICommand>> undoCommands;
-
-	for (nlohmann::json objectJson : prefabJson["objects"])
+	std::uint64_t publishedGeneration = 1U;
+	GeneratedModelPackageChildMetadata generatedChild;
+	if (AssetDatabase::Instance().TryGetGeneratedModelPackageChildMetadata(
+		prefabGuid, GeneratedModelPackageChildKind::Prefab, generatedChild))
 	{
-		const std::optional<TerraEngine::UUID> sourceRootObjectId = ReadSerializedObjectUuid(objectJson);
-		std::unordered_map<TerraEngine::UUID, TerraEngine::UUID> uuidRemap;
-		CollectPrefabInstanceUuidRemap(objectJson, uuidRemap);
-		RewritePrefabInstanceUuidReferences(objectJson, uuidRemap);
-
-		// Deserialize on the protected editor path so ObjectManager, component
-		// reflection, hierarchy, and render invalidation all see one normal
-		// authored scene mutation.
-		const entt::entity rootEntity = Serializer::DeserializeObjectEntity(objectJson, parent);
-		AttachPrefabLink(rootEntity, linkSourceId, sourceRootObjectId, prefabPath);
-		instantiatedRoots.push_back(rootEntity);
-		undoCommands.push_back(std::make_unique<CreateObjectCommand>(rootEntity));
-		if (parentUuid.has_value())
-		{
-			undoCommands.push_back(std::make_unique<SetParentCommand>(rootEntity, std::nullopt, parentUuid));
-		}
+		publishedGeneration = std::max<std::uint64_t>(1U, generatedChild.publishedGeneration);
 	}
 
-	if (instantiatedRoots.empty())
+	// Drag/drop and automation register the indexed asset into the same service,
+	// then enter one graph transaction. This prevents either caller from drifting
+	// into a simplified or partially visible prefab implementation.
+	const PrefabAuthoringService::Result registered = prefabAuthoringService.RegisterExistingAsset(
+		(std::filesystem::path("Assets") / databaseRelativePath).lexically_normal(),
+		prefabPath,
+		prefabGuid,
+		publishedGeneration);
+	const PrefabAuthoringService::Result instantiated = registered.ok
+		? prefabAuthoringService.Instantiate(registered.data.value("prefabId", std::string{}), {}, parent)
+		: registered;
+	if (!instantiated.ok)
 	{
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to instantiate registered prefab graph: " << instantiated.message << " Path: " << prefabPath);
 		return false;
 	}
 
-	UndoRedoSystem::Instance().PushTransactionGroup("Instantiate Prefab", std::move(undoCommands));
-	SetSelectedEntity(instantiatedRoots.front());
-	SceneManager::Instance().ForceMarkActiveSceneDirty();
+	const std::optional<TerraEngine::UUID> instanceId = TerraEngine::ParseUUID(
+		instantiated.data.value("instanceId", std::string{}));
+	const std::optional<Object> instance = instanceId ? ObjectManager::instance().getObject(*instanceId) : std::nullopt;
+	if (!instance)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Prefab graph transaction returned an invalid canonical root: " << prefabPath);
+		return false;
+	}
+	SetSelectedEntity(instance->EntityId());
 	TERRAENGINE_LOG(LogLevel::Info, "Instantiated prefab into hierarchy: " << prefabPath);
 	return true;
 }
@@ -1691,6 +2043,12 @@ bool MainEditorSubsystem::StartPlayMode()
 	}
 	if(ctx != nullptr && ctx->engine != nullptr)
 		ctx->engine->ResetFrameTimer();
+	// Entering Play Mode invalidates stopped edit-domain bindings. Their next
+	// protected synchronization starts each authored default clip atomically.
+	TerraEngine::Animation::AnimationSystem::Instance()
+		.SetAuthoredComponentPlaybackEnabled(true);
+	TerraEngine::Animation::AnimationSystem::Instance()
+		.SetAuthoredComponentPlaybackAdvancing(true);
 	ScriptingSystem::Instance().SetRunning(true);
 	ScriptingSystem::Instance().SetPaused(false);
 	(void)TerraEngine::Physics::PhysicsSystem::Instance().SetPaused(false);
@@ -1735,6 +2093,11 @@ void MainEditorSubsystem::StopPlayMode()
 	TerraEngine::Physics::PhysicsSystem::Instance().StopWorld();
 	ScriptingSystem::Instance().SetRunning(false);
 	ScriptingSystem::Instance().SetPaused(false);
+	// Recreate component-owned playback at tick zero before the authored snapshot
+	// returns. Edit Mode continues publishing that frozen reference palette, so
+	// Stop cannot retain the last runtime deformation or expose raw skin vertices.
+	TerraEngine::Animation::AnimationSystem::Instance()
+		.SetAuthoredComponentPlaybackAdvancing(false);
 	RestorePlayModeSceneState();
 }
 
@@ -2240,6 +2603,34 @@ void MainEditorSubsystem::SetSelectedAsset(std::optional<std::filesystem::path> 
 		ctx->scripting.hasWatchedObject = false;
 		ctx->scripting.watchedObjectId = 0;
 	}
+}
+
+bool MainEditorSubsystem::OpenAnimationAssetEditor(const std::filesystem::path& path)
+{
+	const std::string extension = path.extension().string();
+	const char* title = nullptr;
+	if(extension == ".teskel") title = "Skeleton Editor";
+	else if(extension == ".teanim") title = "Animation Clip Editor";
+	else if(extension == ".teanimctrl") title = "Animation Controller";
+	else if(extension == ".teretarget") title = "Retarget Editor";
+	else if(extension == ".temotiondb") title = "Motion Database";
+	else if(extension == ".teragdoll") title = "Ragdoll Editor";
+	else if(extension == ".teanimmask") {
+		// Masks currently use the selected-asset inspector; there is no standalone
+		// mask window to reveal. Selection still performs a complete Open action.
+		SetSelectedAsset(std::filesystem::absolute(path));
+		return true;
+	}
+	else return false;
+
+	SetSelectedAsset(std::filesystem::absolute(path));
+	for(const std::shared_ptr<EditorWindow>& window : m_Windows) {
+		if(window && window->GetTitle() == title) {
+			window->SetVisible(true);
+			return true;
+		}
+	}
+	return false;
 }
 
 bool MainEditorSubsystem::RebuildAssetFromInspector(const std::filesystem::path& path, std::string* outError) {
@@ -2775,6 +3166,8 @@ void MainEditorSubsystem::CloseCurrentProject() {
 	// Tear down provider state before scene unload and ObjectManager clearing.
 	TerraEngine::Physics::PhysicsSystem::Instance().StopWorld();
 	ScriptingSystem::Instance().SetRunning(false);
+	TerraEngine::Animation::AnimationSystem::Instance()
+		.SetAuthoredComponentPlaybackEnabled(false);
 	ScriptingSystem::SetScriptingDiagnosticsRequested(false);
 	TerraEngine::Scheduling::SetEcsGraphFrameDiagnosticsRequested(false);
 	ClearPlayModeSceneState();

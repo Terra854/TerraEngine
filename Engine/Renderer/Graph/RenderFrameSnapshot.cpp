@@ -776,6 +776,7 @@ namespace TerraEngine::Renderer {
 			HashCombine(signature, static_cast<std::uint64_t>(state.viewType));
 			HashCombine(signature, state.targetSize.x);
 			HashCombine(signature, state.targetSize.y);
+			HashCombine(signature, state.viewGeneration);
 			return signature;
 		}
 	}
@@ -876,8 +877,15 @@ namespace TerraEngine::Renderer {
 			});
 		};
 
+		const bool animationGenerationsResolved = std::all_of(
+			snapshot.renderables.begin(), snapshot.renderables.end(),
+			[](const RenderFrameRenderableRecord& renderable)
+			{
+				return ValidateAnimationRenderGenerationRecord(renderable.animation);
+			});
 		return snapshot.valid
 			&& !SnapshotContainsLiveMutableState(snapshot)
+			&& animationGenerationsResolved
 			&& allResourcesResolved(snapshot.materials)
 			&& allResourcesResolved(snapshot.meshes)
 			&& allResourcesResolved(snapshot.textures);
@@ -886,6 +894,81 @@ namespace TerraEngine::Renderer {
 	bool SnapshotContainsLiveMutableState(const RenderFrameSnapshot& snapshot)
 	{
 		return snapshot.containsLiveMutableState;
+	}
+
+	bool ValidateAnimationRenderGenerationRecord(const AnimationRenderGenerationRecord& record)
+	{
+		if (record.source == AnimationRenderEvaluationSource::None)
+		{
+			return record.stableInstanceId == 0U
+				&& record.poseGeneration == 0U
+				&& record.morphGeneration == 0U
+				&& record.paletteGeneration == 0U
+				&& record.gpuWorkPacketCount == 0U
+				&& !record.complete
+				&& !record.safeFallback;
+		}
+
+		if (record.stableInstanceId == 0U
+			|| record.deformablePayloadGeneration == 0U
+			|| record.rendererGeneration == 0U)
+		{
+			return false;
+		}
+		if (record.source == AnimationRenderEvaluationSource::SafeFallback)
+		{
+			return record.safeFallback && !record.complete
+				&& record.gpuWorkPacketCount == 0U;
+		}
+		if (record.programGeneration == 0U
+			|| !record.complete || record.safeFallback
+			|| record.poseGeneration == 0U
+			|| record.morphGeneration == 0U
+			|| record.paletteGeneration == 0U)
+		{
+			return false;
+		}
+		if (record.source == AnimationRenderEvaluationSource::CpuPose)
+		{
+			return record.gpuWorkPacketCount == 0U && record.gpuStageMask == 0U;
+		}
+		return record.animationPlanGeneration != 0U
+			&& record.gpuWorkPacketCount != 0U
+			&& record.gpuStageMask != 0U;
+	}
+
+	std::uint64_t BuildAnimationRenderGenerationHash(const AnimationRenderGenerationRecord& record)
+	{
+		std::uint64_t hash = 1469598103934665603ULL;
+		HashCombine(hash, record.stableInstanceId);
+		HashCombine(hash, record.poseGeneration);
+		HashCombine(hash, record.morphGeneration);
+		HashCombine(hash, record.paletteGeneration);
+		HashCombine(hash, record.deformablePayloadGeneration);
+		HashCombine(hash, record.programGeneration);
+		HashCombine(hash, record.animationPlanGeneration);
+		HashCombine(hash, record.rendererGeneration);
+		HashCombine(hash, record.firstGpuWorkPacket);
+		HashCombine(hash, record.gpuWorkPacketCount);
+		HashCombine(hash, record.gpuStageMask);
+		HashCombine(hash, static_cast<std::uint64_t>(record.source));
+		HashCombine(hash, record.complete ? 1U : 0U);
+		HashCombine(hash, record.safeFallback ? 1U : 0U);
+		return hash;
+	}
+
+	std::uint64_t BuildRenderInvalidationGenerationHash(const RenderInvalidationGenerationRecord& record)
+	{
+		std::uint64_t hash = 1469598103934665603ULL;
+		HashCombine(hash, record.pose);
+		HashCombine(hash, record.morph);
+		HashCombine(hash, record.asset);
+		HashCombine(hash, record.page);
+		HashCombine(hash, record.view);
+		HashCombine(hash, record.material);
+		HashCombine(hash, record.renderer);
+		HashCombine(hash, record.residency);
+		return hash;
 	}
 
 	std::uint64_t BuildSnapshotDeterministicHash(const RenderFrameSnapshot& snapshot)
@@ -900,6 +983,7 @@ namespace TerraEngine::Renderer {
 			HashCombine(hash, static_cast<std::uint64_t>(view.viewType));
 			HashCombine(hash, view.targetSize.x);
 			HashCombine(hash, view.targetSize.y);
+			HashCombine(hash, view.viewGeneration);
 		}
 		for (const RenderFrameRenderableRecord& renderable : snapshot.renderables)
 		{
@@ -909,6 +993,8 @@ namespace TerraEngine::Renderer {
 			HashVirtualGeometryRange(hash, renderable.virtualGeometry);
 			HashCombine(hash, renderable.taskShaderCullingEnabled ? 1u : 0u);
 			HashCombine(hash, renderable.usingFallback ? 1u : 0u);
+			HashCombine(hash, BuildAnimationRenderGenerationHash(renderable.animation));
+			HashCombine(hash, BuildRenderInvalidationGenerationHash(renderable.invalidation));
 		}
 		for (const VirtualGeometryViewSelectionState& state : snapshot.virtualGeometryViewSelections)
 		{
@@ -1113,6 +1199,7 @@ namespace TerraEngine::Renderer {
 		state.viewType = view.outputKind == RenderOutputKind::MainRuntimeView ? RenderViewType::ExportRuntime : view.viewType;
 		state.targetSize = view.targetSize;
 		state.outputId = view.outputId;
+		state.viewGeneration = view.viewGeneration;
 		state.shadowPass = view.viewType == RenderViewType::Shadow;
 		state.exportRuntime = view.viewType == RenderViewType::ExportRuntime || view.outputKind == RenderOutputKind::MainRuntimeView;
 		state.hiZOcclusionAllowed = true;

@@ -26,6 +26,37 @@ constexpr std::uint32_t kMeshletMaxVertices = 64;
 constexpr std::uint32_t kMeshletMaxTriangles = 124;
 constexpr std::uint32_t kMeshletHeaderFlagHasBounds = 1u << 0u;
 constexpr std::uint32_t kMeshletHeaderFlagHasVirtualGeometry = 1u << 1u;
+constexpr std::uint32_t kDeformableMeshPayloadMagicValue = 0x46454454u; // 'TDEF' little endian
+constexpr std::uint16_t kDeformableMeshPayloadVersion = 1u;
+constexpr std::uint32_t kDeformableMeshMaximumInfluences = 4u;
+constexpr std::uint32_t kDeformableMeshMaximumPaletteJoints = 256u;
+constexpr std::uint32_t kDeformableMeshSkinningStrideBytes = 8u;
+constexpr std::uint32_t kDeformableMeshPayloadFlagConservativeMorphEnvelope = 1u << 0u;
+constexpr std::uint32_t kDeformableMeshPayloadFlagZeroWeightMeansIdentity = 1u << 1u;
+constexpr std::uint32_t kDeformableMeshPayloadFlagVertexPaletteIndices = 1u << 2u;
+constexpr std::uint32_t kDeformableMeshPayloadFlagDenseMorphPositionDeltas = 1u << 3u;
+constexpr std::uint32_t kDeformableMeshVirtualGeometryFlagWholeMeshEnvelope = 1u << 0u;
+constexpr std::uint32_t kDeformableMeshVirtualGeometryFlagDisableUnprovenConeCulling = 1u << 1u;
+constexpr std::uint32_t kDeformableMeshVirtualGeometryFlagRequireCompleteFallback = 1u << 2u;
+// TDFV is an optional payload appended after the frozen TDEF v1 range. Older
+// readers stop at TDEF's payloadSize, while current readers use this separately
+// versioned sidecar for immutable deformable virtual-geometry cluster facts.
+constexpr std::uint32_t kDeformableVirtualGeometrySidecarMagicValue = 0x56464454u; // 'TDFV' little endian
+constexpr std::uint16_t kDeformableVirtualGeometrySidecarVersion = 1u;
+constexpr std::uint32_t kDeformableVirtualGeometrySidecarFlagDerivedFromClusters = 1u << 0u;
+constexpr std::uint32_t kDeformableVirtualGeometryClusterFlagActive = 1u << 0u;
+constexpr std::uint32_t kDeformableVirtualGeometryClusterFlagDynamicBoundsValid = 1u << 1u;
+constexpr std::uint32_t kDeformableVirtualGeometryClusterFlagConservativeEnvelopeValid = 1u << 2u;
+constexpr std::uint32_t kDeformableVirtualGeometryClusterFlagFrustumCullingSafe = 1u << 3u;
+constexpr std::uint32_t kDeformableVirtualGeometryClusterFlagConeCullingSafe = 1u << 4u;
+constexpr std::uint32_t kDeformableVirtualGeometryClusterFlagHiZCullingSafe = 1u << 5u;
+constexpr std::uint32_t kDeformableVirtualGeometryClusterFlagFallbackCoverageComplete = 1u << 6u;
+constexpr std::uint32_t kDeformableVirtualGeometryClusterFlagFallbackActive = 1u << 7u;
+constexpr std::uint32_t kDeformableVirtualGeometryClusterFlagRefinementSafe = 1u << 8u;
+constexpr std::uint32_t kDeformableVirtualGeometryClusterFlagAll = 0x1ffu;
+constexpr std::uint32_t kDeformableVirtualGeometryMorphFlagPosition = 1u << 0u;
+constexpr std::uint32_t kDeformableVirtualGeometryMorphFlagNormal = 1u << 1u;
+constexpr std::uint32_t kDeformableVirtualGeometryMorphFlagTangent = 1u << 2u;
 constexpr std::uint32_t kVirtualGeometryPayloadGeneration = 2u;
 constexpr std::uint32_t kVirtualGeometryInvalidIndex = 0xffffffffu;
 constexpr std::uint32_t kVirtualGeometryValidationFlagAdaptiveTargetsPresent = 1u << 0u;
@@ -412,13 +443,139 @@ struct MeshHeader
 	std::uint32_t virtualGeometryHeaderOffset; // Absolute offset to VirtualGeometryHeader when kMeshletHeaderFlagHasVirtualGeometry is set.
 	std::uint32_t virtualGeometryHeaderSize; // Size of the root virtual geometry header for atomic loader validation.
 	std::uint32_t virtualGeometryPayloadGeneration; // kVirtualGeometryPayloadGeneration for this unstable TEMF v1 development payload.
+	// Zero keeps historical/static TEMF unchanged. A nonzero value is the
+	// absolute offset of an appended DeformableMeshPayloadHeader, which older
+	// runtime readers safely ignore while newer readers can validate separately.
 	std::uint32_t virtualGeometryReserved;
 	VertexLayout layout;
 	QuantizationInfo quantization;
 };
+
+// The deformable extension is appended after the existing TEMF payload instead
+// of growing MeshHeader. This preserves static v1 files and lets loaders that
+// do not yet need deformation continue using the original header contract.
+struct DeformableMeshPayloadHeader
+{
+	std::uint32_t magic;
+	std::uint16_t version;
+	std::uint16_t headerSize;
+	// payloadSize covers the complete extension beginning at this header. A
+	// loader validates this range before allocating any palette or morph table.
+	std::uint32_t payloadSize;
+	std::uint16_t compatibleMeshVersion;
+	std::uint16_t reserved;
+	std::uint32_t skinningVertexCount;
+	std::uint32_t palettePartitionCount;
+	std::uint32_t morphTargetCount;
+	std::uint32_t paletteTableOffset;
+	std::uint32_t morphTableOffset;
+	std::uint32_t vertexPaletteIndexOffset;
+	std::uint32_t vertexPaletteIndexCount;
+	std::uint32_t skinningDataOffset;
+	std::uint32_t skinningDataSize;
+	std::uint32_t skinningStrideBytes;
+	std::uint32_t maximumInfluences;
+	std::uint32_t maximumPaletteJoints;
+	std::uint32_t sourceSkeletonJointCount;
+	// Zero is reserved for genuinely unbound morph-only or identity payloads.
+	// Any payload containing nonzero skin influences must carry the exact
+	// fingerprint emitted by its compatible SkeletonAsset generation.
+	std::uint64_t skeletonCompatibilityFingerprint;
+	std::uint32_t flags;
+	// These fail-open rules apply to every deformable meshlet/cluster until a
+	// later cook proves tighter per-cluster bounds and cone safety.
+	std::uint32_t virtualGeometryDeformationFlags;
+	float deformationBoundsMin[3];
+	float deformationBoundsMax[3];
+};
+
+struct DeformableMeshPaletteRecord
+{
+	std::uint32_t jointTableOffset;
+	std::uint32_t jointCount;
+};
+
+struct DeformableMeshMorphRecord
+{
+	std::uint32_t stableTargetId;
+	std::uint32_t positionDeltaOffset;
+	std::uint32_t positionDeltaCount;
+	std::uint32_t positionDeltaStrideBytes;
+	std::uint32_t flags;
+};
+
+// This optional sidecar begins immediately after the frozen TDEF v1 payload.
+// Keeping it out of DeformableMeshPayloadHeader preserves old TDEF readers and
+// lets corrupt/newer cluster metadata be rejected without weakening base-skin
+// validation. Every offset is absolute and checked before runtime publication.
+struct DeformableVirtualGeometrySidecarHeader
+{
+	std::uint32_t magic;
+	std::uint16_t version;
+	std::uint16_t headerSize;
+	std::uint32_t payloadSize;
+	std::uint32_t flags;
+	std::uint32_t clusterCount;
+	std::uint32_t clusterTableOffset;
+	std::uint32_t paletteIndexCount;
+	std::uint32_t paletteIndexTableOffset;
+	std::uint32_t morphTargetCount;
+	std::uint32_t morphTableOffset;
+	std::uint32_t morphVertexDataOffset;
+	std::uint32_t morphVertexStrideBytes;
+};
+
+// One record mirrors a cooked virtual-geometry cluster. Palette indices point
+// into the shared TDEF palette table, so no source-joint list is duplicated.
+// Bounds are conservative for the stored morph envelope only; the proof flags
+// explicitly prevent culling/refinement when skinning makes that unsafe.
+struct DeformableVirtualGeometryClusterRecord
+{
+	std::uint32_t clusterId;
+	std::uint32_t paletteIndexOffset;
+	std::uint32_t paletteIndexCount;
+	std::uint32_t morphTargetCount;
+	std::uint32_t flags;
+	std::uint32_t fallbackClusterId;
+	std::uint32_t parentClusterId;
+	std::uint32_t firstChildClusterId;
+	std::uint32_t childCount;
+	float deformationBoundsMin[3];
+	float deformationBoundsMax[3];
+	float geometricError;
+	float deformationError;
+};
+
+// Target-major records make the GPU contract a single 48-byte fetch per
+// target/vertex. Position is always present; missing source normal/tangent
+// channels are encoded as zero float4 values rather than changing the stride.
+struct DeformableVirtualGeometryMorphRecord
+{
+	std::uint32_t stableTargetId;
+	std::uint32_t vertexDataOffset;
+	std::uint32_t vertexCount;
+	std::uint32_t vertexStrideBytes;
+	std::uint32_t flags;
+};
+
+struct DeformableVirtualGeometryMorphVertex
+{
+	float positionDelta[4];
+	float normalDelta[4];
+	float tangentDelta[4];
+};
 #pragma pack(pop)
 
 static_assert(sizeof(MeshHeader) <= 640, "TEMF header should remain compact");
+static_assert(sizeof(DeformableMeshPayloadHeader) == 108u, "The finalized TDEF v1 header layout is frozen");
+static_assert(offsetof(DeformableMeshPayloadHeader, skeletonCompatibilityFingerprint) == 68u,
+	"The TDEF v1 skeleton compatibility fingerprint offset is shared with runtime validators");
+static_assert(sizeof(DeformableMeshPaletteRecord) == 8u, "Deformable palette records have a frozen v1 layout");
+static_assert(sizeof(DeformableMeshMorphRecord) == 20u, "Deformable morph records have a frozen v1 layout");
+static_assert(sizeof(DeformableVirtualGeometrySidecarHeader) == 48u, "TDFV v1 header layout is frozen");
+static_assert(sizeof(DeformableVirtualGeometryClusterRecord) == 68u, "TDFV v1 cluster layout is frozen");
+static_assert(sizeof(DeformableVirtualGeometryMorphRecord) == 20u, "TDFV v1 morph target layout is frozen");
+static_assert(sizeof(DeformableVirtualGeometryMorphVertex) == 48u, "TDFV GPU morph records use a fixed 48-byte stride");
 
 // In-memory representation of an entire .temf payload.
 // Raw byte storage keeps payload ownership in one place while spans/vectors expose typed views.
@@ -432,6 +589,29 @@ struct Mesh
 	std::span<const std::uint8_t> meshletVertexRemapData;
 	std::span<const std::uint8_t> meshletSkinningData;
 	std::span<const std::uint8_t> meshletPrimitiveIndexData;
+	// Deformable metadata remains available after file validation. Render and
+	// animation systems use these copied records to prove that a pose, skeleton,
+	// and palette belong to the same cooked generation without reopening the
+	// source file or retaining pointers into temporary loader storage.
+	bool hasDeformablePayload = false;
+	// The loader derives this 64-bit token from the checked skinning stream and
+	// every validated TDEF extension byte. A recook therefore invalidates prior
+	// render bindings without changing the frozen on-disk v1 header or depending
+	// on process-local load order.
+	std::uint64_t deformablePayloadGeneration = 0U;
+	DeformableMeshPayloadHeader deformableMetadata{};
+	std::vector<DeformableMeshPaletteRecord> deformablePalettes;
+	std::vector<DeformableMeshMorphRecord> deformableMorphs;
+	std::vector<std::uint32_t> deformablePaletteJoints;
+	std::vector<std::uint32_t> deformableVertexPaletteIndices;
+	// TDFV records are copied only after the base TDEF and the complete sidecar
+	// validate together, so render preparation sees no partially trusted facts.
+	bool hasDeformableVirtualGeometrySidecar = false;
+	DeformableVirtualGeometrySidecarHeader deformableVirtualGeometrySidecar{};
+	std::vector<DeformableVirtualGeometryClusterRecord> deformableVirtualGeometryClusters;
+	std::vector<std::uint32_t> deformableVirtualGeometryPaletteIndices;
+	std::vector<DeformableVirtualGeometryMorphRecord> deformableVirtualGeometryMorphs;
+	std::vector<DeformableVirtualGeometryMorphVertex> deformableVirtualGeometryMorphVertices;
 	std::vector<MeshletRecord> meshletRecords;
 	std::vector<MeshletSection> meshletSections;
 	std::vector<MeshletBounds> meshletBounds;

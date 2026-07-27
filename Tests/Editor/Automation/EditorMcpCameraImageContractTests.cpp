@@ -66,6 +66,7 @@ namespace TerraEngine::EditorTests
 		});
 
 		registry.Add("Editor.MCP.CameraImages.GameViewCaptureReadOnlySuccessAndMissingCamera", [](TestContext& context) {
+			ObjectManager::instance().clear();
 			RenderSystem::Instance().Clear();
 			EditorAutomationService service;
 			const auto* capability = service.FindCapability("game_view.capture");
@@ -95,7 +96,31 @@ namespace TerraEngine::EditorTests
 			context.Expect(captured.value("ok", false), "Game View capture should return an image when a camera descriptor exists.");
 			context.ExpectEqual(std::string("gameView"), captured["data"]["source"].value("kind", std::string()), "Game View capture should report gameView source kind.");
 			context.ExpectEqual(std::string("image"), captured["mcpContent"][0].value("type", std::string()), "Game View capture should include an MCP image item.");
+
+			// A hidden Game View has no freshly published dock camera. The service
+			// must snapshot the authored scene camera and keep Game View identity
+			// while the renderer uses a dedicated offscreen target.
 			RenderSystem::Instance().Clear();
+			Object authoredCamera = ObjectManager::instance().createObject("Hidden Game View Camera");
+			CameraComponent* authoredCameraComponent = ObjectManager::instance().AddComponent<CameraComponent>(authoredCamera);
+			Transform* authoredTransform = ObjectManager::instance().GetComponent<Transform>(authoredCamera);
+			context.Expect(authoredCameraComponent != nullptr, "Fixture should add an authored camera component.");
+			context.Expect(authoredTransform != nullptr, "Authored camera objects should include a Transform.");
+			authoredTransform->position = glm::vec3(0.0f, 1.0f, 5.0f);
+			authoredCameraComponent->aspectRatio = 1.0f;
+
+			const nlohmann::json nextFrame = service.HandleTool(
+				"game_view.capture",
+				{{"width", 64u}, {"height", 64u}, {"freshness", "nextFrame"}},
+				WriteMode::ReadOnly,
+				"game-view-next-frame-hidden");
+			context.Expect(nextFrame.value("ok", false), "nextFrame Game View capture should use the authored camera when the dock has not published a frame.");
+			context.ExpectEqual(std::string("gameView"), nextFrame["data"]["source"].value("kind", std::string()), "Dedicated nextFrame capture should preserve Game View source identity.");
+			context.ExpectEqual(std::string("nextFrame"), nextFrame["data"].value("freshness", std::string()), "Dedicated capture should preserve nextFrame freshness metadata.");
+			context.Expect(nextFrame["data"].value("deterministicFallback", false), "Headless contract validation should disclose deterministic fallback pixels.");
+
+			RenderSystem::Instance().Clear();
+			ObjectManager::instance().clear();
 		});
 
 		registry.Add("Editor.MCP.CameraImages.CameraObjectCaptureContracts", [](TestContext& context) {

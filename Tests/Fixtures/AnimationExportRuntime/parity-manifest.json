@@ -1,0 +1,24 @@
+{
+  "startupScene": "scenes/animated-startup.tescene",
+  "cookedAssetManifest": "cooked-assets.json",
+  "cookedOnly": true,
+  "required": [
+    "animation-state",
+    "animation-events",
+    "root-motion",
+    "motion-matching",
+    "ragdoll-blend",
+    "skinned-deformation",
+    "bounds"
+  ],
+  "forbiddenPathPrefixes": ["source/", "editor/", "build/"],
+  "expectedParityChecksums": {
+    "animationState": "state:locomotion/walk:frame-120",
+    "events": "events:foot-left,foot-right",
+    "rootMotion": "root:1.250000,0.000000,0.000000",
+    "motionMatching": "motion:block-3:pose-17",
+    "ragdollBlend": "ragdoll:0.350000",
+    "skinnedDeformation": "skin:palette-0:vertices-4",
+    "bounds": "bounds:-0.5,-1.0,-0.5:0.5,1.0,0.5"
+  }
+}

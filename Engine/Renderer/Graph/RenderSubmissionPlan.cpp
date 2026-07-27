@@ -1,5 +1,7 @@
 #include "RenderSubmissionPlan.h"
 
+#include <utility>
+
 namespace TerraEngine::Renderer {
 
 	namespace {
@@ -19,13 +21,15 @@ namespace TerraEngine::Renderer {
 		const RenderFrameSnapshot& snapshot,
 		const std::vector<RenderPassNode>& passes,
 		const RenderWorkPacketPlan& packetPlan,
-		std::uint64_t currentFrameId)
+		std::uint64_t currentFrameId,
+		std::shared_ptr<const TerraEngine::Animation::GpuAnimationPlan> animationPlan)
 	{
 		RenderSubmissionPlan plan;
 		plan.frameId = snapshot.frameId;
 		plan.requestedViewCount = snapshot.viewRequests.size();
 		plan.orderedPasses = passes;
 		plan.recordedWork = packetPlan.packets;
+		plan.animationWork = BuildAnimationBackendWorkPlan(snapshot, std::move(animationPlan));
 		plan.fallbacksUsed = packetPlan.serializedReasons;
 
 		for (const RenderPassNode& pass : passes)
@@ -57,6 +61,35 @@ namespace TerraEngine::Renderer {
 		if (plan.requestedViewCount > 0u && plan.orderedPasses.empty())
 		{
 			AddSubmissionDiagnostic(plan, "missing-passes", "Submission plan contains no render passes.", "Build a render graph before final submission.");
+		}
+		// Hand-authored and legacy submission plans do not declare an animation
+		// envelope. Treat the all-default record as "no animation work" while still
+		// validating every envelope produced by BuildAnimationBackendWorkPlan,
+		// including rejected envelopes whose diagnostic is the only populated field.
+		const bool hasDeclaredAnimationWork = plan.animationWork.frameId != 0U
+			|| !plan.animationWork.ranges.empty()
+			|| plan.animationWork.gpuAnimatorCount != 0U
+			|| plan.animationWork.cpuOrFallbackAnimatorCount != 0U
+			|| plan.animationWork.immutablePlan != nullptr
+			|| plan.animationWork.cpuDeformationPlan != nullptr
+			|| !plan.animationWork.valid
+			|| !plan.animationWork.rejectionReason.empty();
+		if(hasDeclaredAnimationWork
+			&& (plan.animationWork.frameId != plan.frameId || !plan.animationWork.valid))
+		{
+			AddSubmissionDiagnostic(plan, "invalid-animation-work",
+				plan.animationWork.rejectionReason.empty()
+					? "Animation work was prepared for a different frame."
+					: plan.animationWork.rejectionReason,
+				"Discard the complete animation envelope and use one declared CPU or bind-pose fallback generation.");
+		}
+		if(plan.animationWork.cpuDeformationPlan != nullptr
+			&& (!plan.animationWork.cpuDeformationPlan->IsComplete()
+				|| plan.animationWork.cpuDeformationPlan->frameId != plan.frameId))
+		{
+			AddSubmissionDiagnostic(plan, "invalid-cpu-animation-deformation",
+				"CPU animation deformation data is incomplete or belongs to another frame.",
+				"Discard the CPU palette upload and render the authored bind pose.");
 		}
 		if (!plan.frameOverlapAllowed && plan.frameOverlapBlockedReasons.empty())
 		{

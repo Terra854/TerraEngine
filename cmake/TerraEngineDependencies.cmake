@@ -1,6 +1,76 @@
 # TerraEngine keeps every build dependency in External/ so clean checkouts do
 # not depend on a system package manager. This helper configures the approved
 # Jolt revision as a private, CPU-only engine implementation detail.
+function(terraengine_read_checkout_revision checkout_root output_variable)
+	# Read Git's documented administrative files directly. Besides avoiding an
+	# external process during every CMake regeneration, this works in offline and
+	# hermetic builds where the source checkout exists but git.exe is unavailable.
+	set(_terraengine_git_marker "${checkout_root}/.git")
+	if(IS_DIRECTORY "${_terraengine_git_marker}")
+		set(_terraengine_git_dir "${_terraengine_git_marker}")
+	else()
+		file(READ "${_terraengine_git_marker}" _terraengine_git_marker_text)
+		string(STRIP "${_terraengine_git_marker_text}" _terraengine_git_marker_text)
+		if(NOT _terraengine_git_marker_text MATCHES "^gitdir:[ \t]*(.+)$")
+			message(FATAL_ERROR "${checkout_root}/.git is not a recognized Git checkout marker.")
+		endif()
+		get_filename_component(
+			_terraengine_git_dir
+			"${CMAKE_MATCH_1}"
+			ABSOLUTE
+			BASE_DIR "${checkout_root}")
+	endif()
+
+	file(READ "${_terraengine_git_dir}/HEAD" _terraengine_git_head)
+	string(STRIP "${_terraengine_git_head}" _terraengine_git_head)
+	if(NOT _terraengine_git_head MATCHES "^ref:[ \t]*(.+)$")
+		set(_terraengine_revision "${_terraengine_git_head}")
+	else()
+		set(_terraengine_head_ref "${CMAKE_MATCH_1}")
+		set(_terraengine_ref_roots "${_terraengine_git_dir}")
+		if(EXISTS "${_terraengine_git_dir}/commondir")
+			file(READ "${_terraengine_git_dir}/commondir" _terraengine_common_dir)
+			string(STRIP "${_terraengine_common_dir}" _terraengine_common_dir)
+			get_filename_component(
+				_terraengine_common_dir
+				"${_terraengine_common_dir}"
+				ABSOLUTE
+				BASE_DIR "${_terraengine_git_dir}")
+			list(APPEND _terraengine_ref_roots "${_terraengine_common_dir}")
+		endif()
+
+		foreach(_terraengine_ref_root IN LISTS _terraengine_ref_roots)
+			if(EXISTS "${_terraengine_ref_root}/${_terraengine_head_ref}")
+				file(READ "${_terraengine_ref_root}/${_terraengine_head_ref}" _terraengine_revision)
+				string(STRIP "${_terraengine_revision}" _terraengine_revision)
+				break()
+			endif()
+			if(EXISTS "${_terraengine_ref_root}/packed-refs")
+				file(STRINGS "${_terraengine_ref_root}/packed-refs" _terraengine_packed_refs)
+				foreach(_terraengine_packed_ref IN LISTS _terraengine_packed_refs)
+					if(_terraengine_packed_ref MATCHES "^([0-9a-fA-F]+)[ \t]+${_terraengine_head_ref}$")
+						set(_terraengine_revision "${CMAKE_MATCH_1}")
+						break()
+					endif()
+				endforeach()
+			endif()
+			if(DEFINED _terraengine_revision)
+				break()
+			endif()
+		endforeach()
+	endif()
+
+	if(NOT DEFINED _terraengine_revision OR NOT _terraengine_revision MATCHES "^[0-9a-fA-F]+$")
+		message(FATAL_ERROR "Could not resolve the checked-out revision for ${checkout_root} without invoking Git.")
+	endif()
+	string(LENGTH "${_terraengine_revision}" _terraengine_revision_length)
+	if(NOT _terraengine_revision_length EQUAL 40)
+		message(FATAL_ERROR "The resolved revision for ${checkout_root} is not a complete 40-character object id.")
+	endif()
+	string(TOLOWER "${_terraengine_revision}" _terraengine_revision)
+	set(${output_variable} "${_terraengine_revision}" PARENT_SCOPE)
+endfunction()
+
 function(terraengine_configure_jolt_dependency)
 	set(_terraengine_jolt_root "${CMAKE_SOURCE_DIR}/External/JoltPhysics")
 	set(TERRAENGINE_JOLT_REVISION "e77f175595e64cb44218cc9d9d56fc365ad0e36a")
@@ -15,18 +85,10 @@ function(terraengine_configure_jolt_dependency)
 	# A Git checkout carries an exact object identity. Source archives may omit
 	# Git metadata, so the version check below remains the portable fallback.
 	if(EXISTS "${_terraengine_jolt_root}/.git")
-		find_package(Git QUIET)
-		if(NOT Git_FOUND)
-			message(FATAL_ERROR "Git is required to validate the Jolt submodule revision.")
-		endif()
-		execute_process(
-			COMMAND "${GIT_EXECUTABLE}" -C "${_terraengine_jolt_root}" rev-parse HEAD
-			OUTPUT_VARIABLE TERRAENGINE_JOLT_ACTUAL_REVISION
-			OUTPUT_STRIP_TRAILING_WHITESPACE
-			RESULT_VARIABLE TERRAENGINE_JOLT_REVISION_RESULT
-		)
-		if(NOT TERRAENGINE_JOLT_REVISION_RESULT EQUAL 0 OR
-			NOT TERRAENGINE_JOLT_ACTUAL_REVISION STREQUAL TERRAENGINE_JOLT_REVISION)
+		terraengine_read_checkout_revision(
+			"${_terraengine_jolt_root}"
+			TERRAENGINE_JOLT_ACTUAL_REVISION)
+		if(NOT TERRAENGINE_JOLT_ACTUAL_REVISION STREQUAL TERRAENGINE_JOLT_REVISION)
 			message(FATAL_ERROR
 				"External/JoltPhysics must be revision ${TERRAENGINE_JOLT_REVISION}; "
 				"found '${TERRAENGINE_JOLT_ACTUAL_REVISION}'.")
@@ -81,6 +143,14 @@ function(terraengine_configure_jolt_dependency)
 	set(DISABLE_CUSTOM_ALLOCATOR OFF CACHE BOOL "Use TerraEngine's Jolt allocator adapter" FORCE)
 	set(DOUBLE_PRECISION OFF CACHE BOOL "Match TerraEngine float transforms" FORCE)
 	set(USE_ASSERTS ON CACHE BOOL "Route provider assertions through TerraEngine" FORCE)
+	if(NOT MSVC)
+		# TerraEngine's job adapter derives from Jolt's JobSystemWithBarrier. GCC's
+		# Itanium ABI records the base type information in the derived vtable, so
+		# Jolt must emit that type information even though neither implementation
+		# performs dynamic casts on the job-system boundary. MSVC does not require
+		# the base symbol and keeps Jolt's lower-overhead default.
+		set(CPP_RTTI_ENABLED ON CACHE BOOL "Emit Jolt base RTTI required by TerraEngine adapters" FORCE)
+	endif()
 
 	add_subdirectory(
 		"${_terraengine_jolt_root}/Build"
@@ -100,6 +170,9 @@ function(terraengine_configure_jolt_dependency)
 	unset(DISABLE_CUSTOM_ALLOCATOR CACHE)
 	unset(DOUBLE_PRECISION CACHE)
 	unset(USE_ASSERTS CACHE)
+	if(NOT MSVC)
+		unset(CPP_RTTI_ENABLED CACHE)
+	endif()
 
 	# Return stable metadata to the parent directory for engine/test contracts.
 	set(TERRAENGINE_JOLT_ROOT "${_terraengine_jolt_root}" PARENT_SCOPE)

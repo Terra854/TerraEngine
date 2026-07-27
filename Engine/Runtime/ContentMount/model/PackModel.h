@@ -18,6 +18,28 @@ inline constexpr std::uint32_t kVersionMajor = Version::kVersionMajor;
 inline constexpr std::uint32_t kVersionMinor = Version::kVersionMinor;
 inline constexpr std::uint64_t kMetadataAlignment = 8U;
 
+// TEPAK stores a compact numeric class in every file record. Existing readers
+// deliberately treat unknown values as Other, while newer readers can use the
+// appended animation identities for dependency discovery and diagnostics.
+// Never renumber an existing value: old archives persist these exact integers.
+enum class ArchiveAssetClass : std::uint32_t {
+	Unknown = 0U,
+	Mesh = 1U,
+	Texture = 2U,
+	Shader = 3U,
+	Audio = 4U,
+	Video = 5U,
+	Data = 6U,
+	Other = 7U,
+	Skeleton = 8U,
+	AnimationClip = 9U,
+	AnimationController = 10U,
+	AnimationMask = 11U,
+	RetargetProfile = 12U,
+	MotionDatabase = 13U,
+	RagdollProfile = 14U
+};
+
 // struct BinaryHeader groups related state and operations so callers have one documented contract.
 struct BinaryHeader final {
 	std::array<char, 4> magic = kMagic;

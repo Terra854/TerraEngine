@@ -1,0 +1,300 @@
+{
+	"schemaVersion": 1,
+	"phase": "us14-complete",
+	"acceptedEvidence": {
+		"statement": "The cumulative US14 completion evidence is bound to the reviewed lifecycle/failure operations, every registered animation automation family, seven view-specific captures, six real-input workflows, approved durable jobs, Play restoration, and retained focused-test artifacts. Performance and the continuous soak remain explicitly incomplete.",
+		"requirementIds": [
+			"FR-159",
+			"FR-160",
+			"FR-161",
+			"FR-162",
+			"FR-163",
+			"FR-164",
+			"FR-165",
+			"FR-166",
+			"FR-167",
+			"SC-024",
+			"FR-194",
+			"FR-195",
+			"FR-196",
+			"FR-197",
+			"FR-198",
+			"FR-199",
+			"FR-200",
+			"FR-201",
+			"FR-202",
+			"FR-208",
+			"SC-017"
+		],
+		"operationIds": [
+			"us11-import-fixture",
+			"us11-animation-import",
+			"us11-animation-import-job",
+			"us11-animation-reimport",
+			"us11-animation-reimport-job",
+			"us11-list-animation-assets",
+			"us11-inspect-animation-asset",
+			"us11-controller-edit",
+			"us11-controller-edit-replay",
+			"us11-controller-dry-run",
+			"us11-controller-validate",
+			"us11-advanced-edit",
+			"us11-preview-open",
+			"us11-preview-close",
+			"us11-motion-database-build",
+			"us11-motion-database-build-job",
+			"us11-instantiate-hero",
+			"us11-instantiate-source-actor",
+			"us11-instantiate-retarget-actor",
+			"us11-instantiate-ragdoll-actor",
+			"us11-scene-preplay",
+			"us11-activity-before",
+			"us11-jobs-before",
+			"us11-diagnostics-preplay",
+			"us11-animation-camera-custom",
+			"us11-play-state",
+			"us11-pause-play",
+			"us11-read-parameter-baseline",
+			"us11-runtime-parameters",
+			"us11-runtime-parameters-replay",
+			"us11-runtime-parameters-conflict",
+			"us11-runtime-parameters-stale",
+			"us11-step-parameters",
+			"us11-read-procedural-baseline",
+			"us11-set-procedural-goal",
+			"us11-step-procedural",
+			"us11-step-procedural-evaluate",
+			"us11-read-procedural-result",
+			"us11-read-retarget-baseline",
+			"us11-activate-retarget",
+			"us11-step-retarget",
+			"us11-read-retarget-result",
+			"us11-set-motion-database",
+			"us11-step-motion-database",
+			"us11-query-motion-match",
+			"us11-step-motion-match",
+			"us11-read-motion-match",
+			"us11-read-physics-baseline",
+			"us11-activate-ragdoll",
+			"us11-step-ragdoll",
+			"us11-step-ragdoll-settle",
+			"us11-read-ragdoll",
+			"us11-read-recording-publication",
+			"us11-start-recording",
+			"us11-recording-step-one",
+			"us11-recording-step-two",
+			"us11-stop-recording",
+			"us11-recording-job-succeeded",
+			"us11-read-cancelled-recording-publication",
+			"us11-start-cancelled-recording",
+			"us11-cancel-recording-new",
+			"us11-cancel-recording-replay",
+			"us11-pump-recording-cancellation",
+			"us11-recording-job-canceled",
+			"us11-diagnostics-runtime",
+			"us11-residency-runtime",
+			"us11-profiler-runtime",
+			"us11-resume-play",
+			"us11-animation-import-retained",
+			"us11-animation-reimport-retained",
+			"us11-motion-database-build-retained",
+			"us11-recording-job-retained",
+			"us11-cancelled-recording-job-retained",
+			"us11-jobs-restored",
+			"us11-activity-restored",
+			"us14-scale-import-valid",
+			"us14-scale-malformed-reload",
+			"us14-scale-recover-valid",
+			"us14-scale-instantiate-hero",
+			"us14-scale-observe-hero",
+			"us14-scale-cancel-transaction",
+			"us14-scale-verify-cancel-atomic",
+			"us14-scale-diagnostics-pre",
+			"us14-scale-renderer-safe-save-pre",
+			"us14-scale-renderer-scene",
+			"us14-scale-history-pre",
+			"us14-scale-play-state",
+			"us14-scale-pause",
+			"us14-scale-step-gpu",
+			"us14-scale-diagnostics-gpu",
+			"us14-scale-step-hybrid",
+			"us14-scale-diagnostics-hybrid",
+			"us14-scale-step-cpu",
+			"us14-scale-diagnostics-cpu",
+			"us14-scale-step-auto",
+			"us14-scale-step-hidden",
+			"us14-scale-step-visible",
+			"us14-scale-diagnostics-restored-mode",
+			"us14-scale-residency-bounded",
+			"us14-scale-profiler-bounded",
+			"us14-scale-renderer-game",
+			"us14-scale-resume",
+			"us14-scale-rapid-reload",
+			"us14-scale-diagnostics-post",
+			"us14-scale-renderer-safe-save-post",
+			"us14-scale-observe-restored",
+			"us14-scale-history-post"
+		],
+		"captureIds": [
+			"us14-scale-scene-visible",
+			"us14-scale-game-visible",
+			"us14-scale-ingame-visible",
+			"us11automation-scene-view",
+			"us11automation-game-view",
+			"us11automation-ingame-camera"
+		],
+		"manualChecklistIds": [
+			"us14-scale-real-mode-churn",
+			"us14-scale-real-visibility-reload",
+			"us14-scale-real-failure-cancellation",
+			"us14-scale-supported-renderer-recovery",
+			"us11-mouse-discovery-approval-every-operation-family",
+			"us11-keyboard-idempotency-reconnect-cancel-restore"
+		],
+		"requiredArtifacts": [
+			"editor/mcp-operations.json",
+			"editor/operations/us14-scale-malformed-reload.json",
+			"editor/operations/us14-scale-cancel-transaction.json",
+			"editor/operations/us14-scale-diagnostics-gpu.json",
+			"editor/operations/us14-scale-diagnostics-hybrid.json",
+			"editor/operations/us14-scale-diagnostics-cpu.json",
+			"editor/operations/us14-scale-renderer-safe-save-post.json",
+			"editor/manual-evidence.json",
+			"editor/camera-evidence.json",
+			"editor/play-mode.json",
+			"tests/focused-tests.command.json",
+			"editor/tool-inventory.json",
+			"editor/mcp-reconnect.json"
+		]
+	},
+	"updates": [
+		{
+			"id": "FR-159",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-160",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-161",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-162",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-163",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-164",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-165",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-166",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-167",
+			"status": "Accepted"
+		},
+		{
+			"id": "SC-024",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-194",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-195",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-196",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-197",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-198",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-199",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-200",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-201",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-202",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-203",
+			"status": "Evidence incomplete"
+		},
+		{
+			"id": "FR-204",
+			"status": "Evidence incomplete"
+		},
+		{
+			"id": "FR-205",
+			"status": "Evidence incomplete"
+		},
+		{
+			"id": "FR-206",
+			"status": "Evidence incomplete"
+		},
+		{
+			"id": "FR-207",
+			"status": "Evidence incomplete"
+		},
+		{
+			"id": "FR-208",
+			"status": "Accepted"
+		},
+		{
+			"id": "FR-209",
+			"status": "Evidence incomplete"
+		},
+		{
+			"id": "FR-210",
+			"status": "Evidence incomplete"
+		},
+		{
+			"id": "SC-013",
+			"status": "Evidence incomplete"
+		},
+		{
+			"id": "SC-014",
+			"status": "Evidence incomplete"
+		},
+		{
+			"id": "SC-015",
+			"status": "Evidence incomplete"
+		},
+		{
+			"id": "SC-017",
+			"status": "Accepted"
+		},
+		{
+			"id": "SC-025",
+			"status": "Evidence incomplete"
+		}
+	]
+}

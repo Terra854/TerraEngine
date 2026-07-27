@@ -57,6 +57,66 @@ namespace TerraEngine::Tests {
 			TerraEngine::Renderer::ValidateRenderSubmissionPlan(plan, 22u);
 			context.Expect(!plan.valid, "Requested render views still need graph passes before backend submission.");
 		});
+
+		registry.Add("Animation.RenderSubmission.AcceptsCompleteCpuDeformationPlan", [](TestContext& context) {
+			using namespace TerraEngine::Renderer;
+			auto deformation = std::make_shared<CpuAnimationDeformationData>();
+			deformation->paletteMatrices.resize(1U);
+			deformation->jointCount = 1U;
+			auto cpuPlan = std::make_shared<CpuAnimationDeformationPlan>();
+			cpuPlan->frameId = 31U;
+			cpuPlan->rendererGeneration = 4U;
+			TerraEngine::UUID meshId{};
+			meshId[0U] = 1U;
+			cpuPlan->records.push_back({
+				9U,
+				meshId,
+				7U,
+				6U,
+				4U,
+				5U,
+				deformation});
+
+			RenderSubmissionPlan plan;
+			plan.frameId = 31U;
+			plan.animationWork.frameId = 31U;
+			plan.animationWork.cpuOrFallbackAnimatorCount = 1U;
+			plan.animationWork.cpuDeformationPlan = std::move(cpuPlan);
+			ValidateRenderSubmissionPlan(plan, 31U);
+
+			context.Expect(plan.valid,
+				"A complete same-frame CPU palette plan must reach the protected backend upload boundary.");
+		});
+
+		registry.Add("Animation.RenderSubmission.RejectsStaleCpuDeformationAtomically", [](TestContext& context) {
+			using namespace TerraEngine::Renderer;
+			auto deformation = std::make_shared<CpuAnimationDeformationData>();
+			deformation->paletteMatrices.resize(1U);
+			deformation->jointCount = 1U;
+			auto cpuPlan = std::make_shared<CpuAnimationDeformationPlan>();
+			cpuPlan->frameId = 40U;
+			cpuPlan->rendererGeneration = 3U;
+			TerraEngine::UUID meshId{};
+			meshId[0U] = 1U;
+			cpuPlan->records.push_back({
+				8U,
+				meshId,
+				6U,
+				5U,
+				3U,
+				4U,
+				deformation});
+
+			RenderSubmissionPlan plan;
+			plan.frameId = 41U;
+			plan.animationWork.frameId = 41U;
+			plan.animationWork.cpuOrFallbackAnimatorCount = 1U;
+			plan.animationWork.cpuDeformationPlan = std::move(cpuPlan);
+			ValidateRenderSubmissionPlan(plan, 41U);
+
+			context.Expect(!plan.valid,
+				"A stale CPU palette plan must reject the complete frame handoff rather than mix pose generations.");
+		});
 	}
 
 }

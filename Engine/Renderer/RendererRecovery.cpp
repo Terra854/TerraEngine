@@ -97,6 +97,27 @@ namespace TerraEngine::Renderer
 		return snapshot.state == RendererRecoveryStateKind::Active;
 	}
 
+	bool IsRendererGenerationCurrent(
+		const RendererRecoverySnapshot& snapshot,
+		std::uint64_t renderSessionGeneration)
+	{
+		return CanSubmitNormalGpuWork(snapshot)
+			&& renderSessionGeneration != 0U
+			&& snapshot.renderSessionGeneration == renderSessionGeneration;
+	}
+
+	bool CanAcceptRecoveredGpuResources(
+		const RendererRecoverySnapshot& previous,
+		const RendererRecoverySnapshot& recovered)
+	{
+		// This validation intentionally does not alter previous. A terminal device
+		// loss remains terminal for existing renderer callers; an owning renderer
+		// must explicitly publish a distinct active session before resources reuse it.
+		return previous.state == RendererRecoveryStateKind::DeviceLost
+			&& CanSubmitNormalGpuWork(recovered)
+			&& recovered.renderSessionGeneration > previous.renderSessionGeneration;
+	}
+
 	std::string ValidateRecoverySnapshot(const RendererRecoverySnapshot& snapshot)
 	{
 		if (snapshot.state == RendererRecoveryStateKind::Active && !snapshot.incidentId.empty())

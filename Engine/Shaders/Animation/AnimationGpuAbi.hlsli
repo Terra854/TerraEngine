@@ -1,0 +1,208 @@
+// AnimationGpuAbi.hlsli - Shared, algorithm-free GPU animation ABI contract.
+//
+// C++ planning writes these records and every animation compute shader reads
+// them. Keep values append-only and do not add sampling or deformation logic
+// here; the stage-specific shader files own those algorithms.
+
+#ifndef TERRAENGINE_ANIMATION_GPU_ABI_HLSLI
+#define TERRAENGINE_ANIMATION_GPU_ABI_HLSLI
+
+#define TE_ANIMATION_GPU_DESCRIPTOR_SET 1u
+#define TE_ANIMATION_GPU_DESCRIPTOR_BINDING_COUNT 15u
+#define TE_ANIMATION_GPU_DESCRIPTOR_GENERATION_RECORDS 0u
+#define TE_ANIMATION_GPU_DESCRIPTOR_WORK_PACKETS 1u
+#define TE_ANIMATION_GPU_DESCRIPTOR_DISPATCH_RECORDS 2u
+#define TE_ANIMATION_GPU_DESCRIPTOR_PROGRAM_WORDS 3u
+#define TE_ANIMATION_GPU_DESCRIPTOR_PACKED_CLIP_BYTES 4u
+#define TE_ANIMATION_GPU_DESCRIPTOR_SKELETON_TABLES 5u
+#define TE_ANIMATION_GPU_DESCRIPTOR_MASK_TABLES 6u
+#define TE_ANIMATION_GPU_DESCRIPTOR_MORPH_INPUTS 7u
+#define TE_ANIMATION_GPU_DESCRIPTOR_SCRATCH 8u
+#define TE_ANIMATION_GPU_DESCRIPTOR_LOCAL_POSES 9u
+#define TE_ANIMATION_GPU_DESCRIPTOR_MODEL_POSES 10u
+#define TE_ANIMATION_GPU_DESCRIPTOR_PALETTE_MATRICES 11u
+#define TE_ANIMATION_GPU_DESCRIPTOR_MORPH_OUTPUTS 12u
+#define TE_ANIMATION_GPU_DESCRIPTOR_BOUNDS_OUTPUTS 13u
+#define TE_ANIMATION_GPU_DESCRIPTOR_DIAGNOSTICS 14u
+
+#define TE_ANIMATION_GPU_STAGE_SAMPLE 0u
+#define TE_ANIMATION_GPU_STAGE_BLEND 1u
+#define TE_ANIMATION_GPU_STAGE_HIERARCHY 2u
+#define TE_ANIMATION_GPU_STAGE_PROCEDURAL 3u
+#define TE_ANIMATION_GPU_STAGE_RAGDOLL 4u
+#define TE_ANIMATION_GPU_STAGE_MORPH 5u
+#define TE_ANIMATION_GPU_STAGE_BOUNDS 6u
+#define TE_ANIMATION_GPU_STAGE_PALETTE 7u
+#define TE_ANIMATION_GPU_STAGE_COUNT 8u
+#define TE_ANIMATION_GPU_GENERATION_RECORD_BYTES 64u
+#define TE_ANIMATION_GPU_WORK_PACKET_BYTES 144u
+#define TE_ANIMATION_GPU_DISPATCH_RECORD_BYTES 64u
+#define TE_ANIMATION_GPU_PUSH_CONSTANT_BYTES 32u
+#define TE_ANIMATION_GPU_PALETTE_STRIDE_BYTES 48u
+
+#define TE_ANIMATION_GPU_WORK_LOOPING 0x001u
+#define TE_ANIMATION_GPU_WORK_REVERSE 0x002u
+#define TE_ANIMATION_GPU_WORK_BIND_POSE_FALLBACK 0x004u
+#define TE_ANIMATION_GPU_WORK_HOLD_LAST_FALLBACK 0x008u
+#define TE_ANIMATION_GPU_WORK_HAS_MORPH 0x010u
+#define TE_ANIMATION_GPU_WORK_HAS_ROOT_MOTION 0x020u
+#define TE_ANIMATION_GPU_WORK_HYBRID_CPU_AUTHORITY 0x040u
+#define TE_ANIMATION_GPU_WORK_DETERMINISTIC_REFERENCE 0x080u
+#define TE_ANIMATION_GPU_WORK_ALLOW_VISUAL_PROCEDURAL 0x100u
+#define TE_ANIMATION_GPU_WORK_ALLOW_RAGDOLL_VISUAL 0x200u
+#define TE_ANIMATION_GPU_WORK_ALL_FLAGS 0x3ffu
+
+#define TE_ANIMATION_GPU_OUTPUT_POSE 0x01u
+#define TE_ANIMATION_GPU_OUTPUT_MORPH_WEIGHTS 0x02u
+#define TE_ANIMATION_GPU_OUTPUT_BOUNDS 0x04u
+#define TE_ANIMATION_GPU_OUTPUT_PALETTE 0x08u
+#define TE_ANIMATION_GPU_OUTPUT_ALL_FLAGS 0x0fu
+
+#define TE_ANIMATION_GPU_DISPATCH_WRITES_DIAGNOSTICS 0x01u
+#define TE_ANIMATION_GPU_DISPATCH_BIND_POSE_FALLBACK 0x02u
+#define TE_ANIMATION_GPU_DISPATCH_HOLD_LAST_FALLBACK 0x04u
+
+#define TE_ANIMATION_GPU_BARRIER_CODEC_TO_BLEND 0x001u
+#define TE_ANIMATION_GPU_BARRIER_BLEND_TO_HIERARCHY 0x002u
+#define TE_ANIMATION_GPU_BARRIER_HIERARCHY_TO_PROCEDURAL 0x004u
+#define TE_ANIMATION_GPU_BARRIER_HIERARCHY_TO_RAGDOLL 0x008u
+#define TE_ANIMATION_GPU_BARRIER_HIERARCHY_TO_MORPH 0x010u
+#define TE_ANIMATION_GPU_BARRIER_PROCEDURAL_TO_RAGDOLL 0x020u
+#define TE_ANIMATION_GPU_BARRIER_PROCEDURAL_TO_MORPH 0x040u
+#define TE_ANIMATION_GPU_BARRIER_RAGDOLL_TO_MORPH 0x080u
+#define TE_ANIMATION_GPU_BARRIER_MORPH_TO_BOUNDS 0x100u
+#define TE_ANIMATION_GPU_BARRIER_BOUNDS_TO_PALETTE 0x200u
+#define TE_ANIMATION_GPU_BARRIER_PALETTE_TO_RENDER 0x400u
+#define TE_ANIMATION_GPU_BARRIER_ALL_FLAGS 0x7ffu
+
+#define TE_ANIMATION_GPU_DIAGNOSTIC_INVALID_RECORD 0x001u
+#define TE_ANIMATION_GPU_DIAGNOSTIC_STALE_GENERATION 0x002u
+#define TE_ANIMATION_GPU_DIAGNOSTIC_RANGE_OVERFLOW 0x004u
+#define TE_ANIMATION_GPU_DIAGNOSTIC_MISSING_RESOURCE 0x008u
+#define TE_ANIMATION_GPU_DIAGNOSTIC_NONFINITE_OUTPUT 0x010u
+#define TE_ANIMATION_GPU_DIAGNOSTIC_SCRATCH_OVERFLOW 0x020u
+#define TE_ANIMATION_GPU_DIAGNOSTIC_PALETTE_OVERFLOW 0x040u
+#define TE_ANIMATION_GPU_DIAGNOSTIC_OUTPUT_OVERFLOW 0x080u
+#define TE_ANIMATION_GPU_DIAGNOSTIC_BIND_POSE_FALLBACK 0x100u
+#define TE_ANIMATION_GPU_DIAGNOSTIC_HOLD_LAST_FALLBACK 0x200u
+#define TE_ANIMATION_GPU_DIAGNOSTIC_RENDERER_LOST 0x400u
+
+// Codec records are packed byte streams. Stage shaders use ByteAddressBuffer
+// loads at these offsets instead of declaring an HLSL struct with incompatible
+// uint16/uint8 packing rules.
+#define TE_ANIMATION_CODEC_TRACK_MAGIC 0x31544341u
+#define TE_ANIMATION_CODEC_VERSION 1u
+#define TE_ANIMATION_CODEC_CONSTANT_TRACK 0x01u
+#define TE_ANIMATION_CODEC_ENCODING_SCALAR_UNORM16 0u
+#define TE_ANIMATION_CODEC_ENCODING_VECTOR3_UNORM16 1u
+#define TE_ANIMATION_CODEC_ENCODING_QUATERNION_SMALLEST_THREE16 2u
+#define TE_ANIMATION_CODEC_SCALAR_BITS 16u
+#define TE_ANIMATION_CODEC_VECTOR_BITS 48u
+#define TE_ANIMATION_CODEC_QUATERNION_BITS 50u
+#define TE_ANIMATION_CODEC_TRACK_HEADER_BYTES 88u
+#define TE_ANIMATION_CODEC_TRACK_MAGIC_OFFSET 0u
+#define TE_ANIMATION_CODEC_TRACK_VERSION_OFFSET 4u
+#define TE_ANIMATION_CODEC_TRACK_BYTE_SIZE_OFFSET 8u
+#define TE_ANIMATION_CODEC_TRACK_KEY_COUNT_OFFSET 12u
+#define TE_ANIMATION_CODEC_TRACK_SEGMENT_START_TICK_OFFSET 16u
+#define TE_ANIMATION_CODEC_TRACK_SEGMENT_END_TICK_OFFSET 24u
+#define TE_ANIMATION_CODEC_TRACK_RANGE_MINIMUM_OFFSET 32u
+#define TE_ANIMATION_CODEC_TRACK_RANGE_EXTENT_OFFSET 44u
+#define TE_ANIMATION_CODEC_TRACK_CONSTANT_VECTOR_OFFSET 56u
+#define TE_ANIMATION_CODEC_TRACK_CONSTANT_ROTATION_OFFSET 68u
+#define TE_ANIMATION_CODEC_TRACK_CONSTANT_SCALAR_OFFSET 84u
+#define TE_ANIMATION_CODEC_VECTOR_KEY_BYTES 6u
+#define TE_ANIMATION_CODEC_QUATERNION_KEY_BYTES 8u
+#define TE_ANIMATION_TRACK_DIRECTORY_MAGIC 0x31445441u
+#define TE_ANIMATION_TRACK_DIRECTORY_VERSION 1u
+#define TE_ANIMATION_TRACK_DIRECTORY_HEADER_BYTES 16u
+#define TE_ANIMATION_TRACK_DIRECTORY_ENTRY_BYTES 16u
+#define TE_ANIMATION_MAX_TRACK_SEGMENTS 4096u
+#define TE_ANIMATION_MORPH_TABLE_MAGIC 0x31544d41u
+#define TE_ANIMATION_MORPH_TABLE_VERSION 1u
+#define TE_ANIMATION_MORPH_TABLE_HEADER_BYTES 16u
+#define TE_ANIMATION_MORPH_BOUNDS_BYTES 32u
+#define TE_ANIMATION_MORPH_RECORD_BYTES 16u
+
+struct TeAnimationGpuGenerationRecord {
+	uint instanceSlot;
+	uint instanceGeneration;
+	uint componentGeneration;
+	uint workGeneration;
+	uint programGeneration;
+	uint controllerGeneration;
+	uint skeletonGeneration;
+	uint clipGeneration;
+	uint meshGeneration;
+	uint resourceGeneration;
+	uint rendererGeneration;
+	uint sceneGeneration;
+	uint frameIdLow;
+	uint frameIdHigh;
+	uint flags;
+	uint reserved;
+};
+
+struct TeAnimationGpuWorkPacket {
+	uint2 stableInstanceId;
+	uint2 stableProgramId;
+	uint2 inputPoseOffsetBytes;
+	uint2 scratchOffsetBytes;
+	uint2 localPoseOffsetBytes;
+	uint2 modelPoseOffsetBytes;
+	uint2 paletteOffsetBytes;
+	uint2 morphOutputOffsetBytes;
+	uint generationRecordIndex;
+	uint clipResourceIndex;
+	uint programResourceIndex;
+	uint skeletonResourceIndex;
+	uint maskResourceIndex;
+	uint morphResourceIndex;
+	uint jointCount;
+	uint morphCount;
+	uint paletteEntryCount;
+	uint palettePartitionCount;
+	uint scratchSizeBytes;
+	uint stageMask;
+	uint flags;
+	uint diagnosticIndex;
+	uint resourceLayoutId;
+	uint boundsOutputIndex;
+	uint stableSubmissionOrdinal;
+	uint sampleTick;
+	// These lanes mirror the explicit C++ tail fields. StructuredBuffer derives
+	// its array stride from declared HLSL members, so implicit host padding must
+	// never be the only reason the frozen record reaches 144 bytes.
+	uint reserved0;
+	uint reserved1;
+};
+
+struct TeAnimationGpuDispatchRecord {
+	uint2 stableInstanceId;
+	uint2 elementOffset;
+	uint workPacketIndex;
+	uint generationRecordIndex;
+	uint stage;
+	uint elementCount;
+	uint flags;
+	uint barrierFlags;
+	uint diagnosticIndex;
+	uint resourceLayoutId;
+	uint batchIndex;
+	uint stableSubmissionOrdinal;
+	uint reserved0;
+	uint reserved1;
+};
+
+struct TeAnimationGpuPushConstants {
+	uint stage;
+	uint firstDispatchRecord;
+	uint dispatchRecordCount;
+	uint firstElementLow;
+	uint firstElementHigh;
+	uint elementCount;
+	uint planGeneration;
+	uint flags;
+};
+
+#endif // TERRAENGINE_ANIMATION_GPU_ABI_HLSLI

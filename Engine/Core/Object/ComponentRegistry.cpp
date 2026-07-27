@@ -7,6 +7,7 @@
 
 #include "ComponentRegistry.h"
 #include "Components/Transform.h"
+#include "Components/AnimatorComponent.h"
 #include "Components/ScriptComponent.h"
 #include "Components/CameraComponent.h"
 #include "Components/LightComponent.h"
@@ -67,6 +68,10 @@ void ComponentRegistry::RegisterAllComponents() {
 	TerraEngine::Reflection::ConfigureTypeMetadata(rotationPolicyFactory, "PhysicsCharacterRotationPolicy");
 
 	Transform::registerType();
+	// Animator authoring metadata must exist before the first scene is loaded so
+	// the editor can enumerate and add the component without relying on lazy
+	// serializer registration from an already-authored object.
+	AnimatorComponent::registerType();
 	ScriptComponent::registerType();
 	CameraComponent::registerType();
 	LightComponent::registerType();

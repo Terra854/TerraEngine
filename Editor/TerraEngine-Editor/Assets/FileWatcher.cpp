@@ -6,6 +6,7 @@
 #include <iostream>
 #include <map>
 #include <chrono>
+#include <algorithm>
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -48,6 +49,78 @@ std::vector<FileEvent> FileWatcher::PopEvents() {
 	std::vector<FileEvent> events = std::move(eventQueue);
 	eventQueue.clear();
 	return events;
+}
+
+bool FileWatcher::ConsumeReconcileRequired()
+{
+	std::lock_guard<std::mutex> lock(queueMutex);
+	const bool required = reconcileRequired;
+	reconcileRequired = false;
+	return required;
+}
+
+FileWatcherDiagnostics FileWatcher::GetDiagnostics() const
+{
+	std::lock_guard<std::mutex> lock(queueMutex);
+	FileWatcherDiagnostics diagnostics;
+	diagnostics.watchedRoot = pathData;
+	diagnostics.queuedEvents = eventQueue.size();
+	diagnostics.lastSequence = nextSequence;
+	diagnostics.coalescedEvents = coalescedEvents;
+	diagnostics.droppedEvents = droppedEvents;
+	diagnostics.running = running.load();
+	diagnostics.reconcileRequired = reconcileRequired;
+	return diagnostics;
+}
+
+void FileWatcher::FlagReconcileRequired()
+{
+	std::lock_guard<std::mutex> lock(queueMutex);
+	reconcileRequired = true;
+}
+
+void FileWatcher::QueueEvent(std::filesystem::path path, FileStatus status)
+{
+	constexpr std::size_t kMaximumQueuedEvents = 4096u;
+	std::error_code pathError;
+	path = std::filesystem::absolute(path, pathError).lexically_normal();
+	if (pathError || path.empty())
+	{
+		FlagReconcileRequired();
+		return;
+	}
+	std::lock_guard<std::mutex> lock(queueMutex);
+	// The newest state for one path is the only useful one after AssetDatabase's
+	// debounce window. Replacing it avoids reimporting an already superseded
+	// intermediate save while retaining create/erase ordering across paths.
+	if (const auto existing = std::find_if(eventQueue.rbegin(), eventQueue.rend(),
+		[&path](const FileEvent& event) { return event.path == path; }); existing != eventQueue.rend())
+	{
+		// Preserve the net filesystem effect of common atomic-save sequences.
+		// In particular, Erased->Created is a replacement/modify, while an item
+		// created and erased inside one debounce window should remain erased.
+		if (existing->status == FileStatus::Erased && status == FileStatus::Created)
+		{
+			existing->status = FileStatus::Modified;
+		}
+		else if (existing->status != FileStatus::Created || status == FileStatus::Erased)
+		{
+			existing->status = status;
+		}
+		existing->sequence = ++nextSequence;
+		++coalescedEvents;
+		return;
+	}
+	if (eventQueue.size() >= kMaximumQueuedEvents)
+	{
+		// The editor consumes reconcileRequired and walks authoritative disk state.
+		// This makes bounded queue pressure observable and loss-recoverable instead
+		// of silently assuming another event will arrive for the dropped path.
+		eventQueue.erase(eventQueue.begin());
+		++droppedEvents;
+		reconcileRequired = true;
+	}
+	eventQueue.push_back({ std::move(path), status, ++nextSequence });
 }
 
 // FileWatcher::WatchLoop is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -117,10 +190,7 @@ void FileWatcher::WatchLoopWin32() {
 					else if (pNotify->Action == FILE_ACTION_REMOVED || pNotify->Action == FILE_ACTION_RENAMED_OLD_NAME) status = FileStatus::Erased;
 					else if (pNotify->Action == FILE_ACTION_MODIFIED) status = FileStatus::Modified;
 
-					{
-						std::lock_guard<std::mutex> lock(queueMutex);
-						eventQueue.push_back({fullPath, status});
-					}
+					QueueEvent(std::move(fullPath), status);
 
 					offset += pNotify->NextEntryOffset;
 				} while (pNotify->NextEntryOffset != 0);
@@ -225,10 +295,7 @@ void FileWatcher::WatchLoopLinux() {
 					}
 					else if (event->mask & IN_MODIFY) status = FileStatus::Modified;
 
-					{
-						std::lock_guard<std::mutex> lock(queueMutex);
-						eventQueue.push_back({fullPath, status});
-					}
+					QueueEvent(std::move(fullPath), status);
 				}
 			}
 			i += sizeof(struct inotify_event) + event->len;
@@ -259,10 +326,7 @@ void FileWatcher::WatchLoopGeneric() {
 		auto it = paths.begin();
 		while (it != paths.end()) {
 			if (!std::filesystem::exists(it->first)) {
-				{
-					std::lock_guard<std::mutex> lock(queueMutex);
-					eventQueue.push_back({it->first, FileStatus::Erased});
-				}
+				QueueEvent(it->first, FileStatus::Erased);
 				it = paths.erase(it);
 			} else {
 				it++;
@@ -278,18 +342,12 @@ void FileWatcher::WatchLoopGeneric() {
 					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (paths.find(file.path()) == paths.end()) {
 						paths[file.path()] = current_time;
-						{
-							std::lock_guard<std::mutex> lock(queueMutex);
-							eventQueue.push_back({file.path(), FileStatus::Created});
-						}
+						QueueEvent(file.path(), FileStatus::Created);
 					} else {
 						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 						if (paths[file.path()] != current_time) {
 							paths[file.path()] = current_time;
-							{
-								std::lock_guard<std::mutex> lock(queueMutex);
-								eventQueue.push_back({file.path(), FileStatus::Modified});
-							}
+							QueueEvent(file.path(), FileStatus::Modified);
 						}
 					}
 				} catch (...) {

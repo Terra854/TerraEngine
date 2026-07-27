@@ -165,6 +165,31 @@ std::string DetectAssetClass(const std::filesystem::path& sourcePath) {
 	std::string extension = PathToUtf8String(sourcePath.extension());
 	LowercaseAsciiInPlace(extension);
 
+	// Animation classes are persisted as append-only TEPAK codes. Classify the
+	// cooked extension before the broader data/other buckets so pack metadata is
+	// useful to runtime discovery without opening every payload first.
+	if (extension == ".teskel") {
+		return "skeleton";
+	}
+	if (extension == ".teanim") {
+		return "animation-clip";
+	}
+	if (extension == ".teanimctrl") {
+		return "animation-controller";
+	}
+	if (extension == ".teanimmask") {
+		return "animation-mask";
+	}
+	if (extension == ".teretarget") {
+		return "retarget-profile";
+	}
+	if (extension == ".temotiondb") {
+		return "motion-database";
+	}
+	if (extension == ".teragdoll") {
+		return "ragdoll-profile";
+	}
+
 	// Asset classes are coarse by design. They are primarily used for summaries
 	// and future policy hooks, not as a strict runtime type system.
 	if (extension == ".vert" || extension == ".frag" || extension == ".comp" || extension == ".hlsl" || extension == ".glsl") {

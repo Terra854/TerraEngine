@@ -220,6 +220,8 @@ PublishScripts/
 
 # NuGet Packages
 *.nupkg
+# TerraEngine regenerates this entire cache from the tracked CMake lock.
+/.nuget/
 # NuGet Symbol Packages
 *.snupkg
 # The packages folder can be ignored because of Package Restore

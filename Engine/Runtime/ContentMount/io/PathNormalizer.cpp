@@ -165,6 +165,29 @@ std::string DetectAssetClass(const std::filesystem::path& sourcePath) {
 
 	// Asset classes are coarse by design. They are primarily used for summaries
 	// and future policy hooks, not as a strict runtime type system.
+	// Cooked animation files are the exception: runtime discovery validates these
+	// append-only class names before it exposes an asset from a mounted archive.
+	if (extension == ".teskel") {
+		return "skeleton";
+	}
+	if (extension == ".teanim") {
+		return "animation-clip";
+	}
+	if (extension == ".teanimctrl") {
+		return "animation-controller";
+	}
+	if (extension == ".teanimmask") {
+		return "animation-mask";
+	}
+	if (extension == ".teretarget") {
+		return "retarget-profile";
+	}
+	if (extension == ".temotiondb") {
+		return "motion-database";
+	}
+	if (extension == ".teragdoll") {
+		return "ragdoll-profile";
+	}
 	if (extension == ".vert" || extension == ".frag" || extension == ".comp" || extension == ".hlsl" || extension == ".glsl") {
 		return "shader";
 	}

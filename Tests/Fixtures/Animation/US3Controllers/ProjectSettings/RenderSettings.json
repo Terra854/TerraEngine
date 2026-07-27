@@ -1,0 +1,5 @@
+{
+	"renderer": "Vulkan",
+	"vsync": false,
+	"resolution": [1920, 1080]
+}

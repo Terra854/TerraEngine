@@ -1234,8 +1234,22 @@ bool VulkanContext::Impl::MarkDeviceLost(VkResult result, std::string_view opera
 	editorRenderSubmitted = false;
 	swapchainImageAcquired = false;
 	swapchainAcquireWaitConsumed = false;
+	// A lost device cannot finish a pending generation. Drop the immutable
+	// publication and its graphics bridge atomically so later callers select the
+	// stateless bind-pose fallback instead of a stale bindless record.
+	activeAnimationGraphicsBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
+	activeCpuAnimationGraphicsBufferIndex =
+		INVALID_BINDLESS_BUFFER_INDEX;
+	pendingAnimationCommandPlan = {};
+	pendingAnimationImmutablePlan.reset();
+	pendingCpuAnimationPlan.reset();
+	pendingAnimationFrameId = 0U;
+	animationComputeRecordedForCurrentFrame = false;
+	animationComputeSubmissionMarkedForCurrentFrame = false;
+	recordedAnimationDispatchCountForCurrentFrame = 0U;
 	{
 		std::lock_guard<std::mutex> lock(statsMutex);
+		latestAnimationGpuBackendExecution = {};
 		latestRendererRecoverySnapshot = TerraEngine::Renderer::RecordDeviceLossIncident(
 			latestRendererRecoverySnapshot,
 			"VK_ERROR_DEVICE_LOST",
@@ -1439,10 +1453,9 @@ void VulkanContext::Initialize(WindowSystem& windowSystem) {
 void VulkanContext::Resize(int width, int height, ViewType view) {
 	if (impl) {
 		std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
-		impl->framebufferResized = true;
-		// The protected frame boundary reads the latest native extent. Do not start
-		// a trailing timer here: that made the editor intentionally unresponsive
-		// after the user released the window edge.
+		// Coalesce callbacks carrying the same framebuffer extent. Native window
+		// managers can report repeated dimensions while a resize drag is settling.
+		impl->RecordFramebufferResize(width, height);
 	}
 }
 
@@ -1485,6 +1498,20 @@ void VulkanContext::BeginFrame() {
 		impl->skipFrame = true;
 		return;
 	}
+	// Reusing a frame slot is the sole completion boundary for its animation
+	// generation. No pose data is read back: the completed receipt only records
+	// that the existing graphics submission and its compute prefix are finished.
+	impl->CompleteVulkanAnimationFrameResources(impl->currentFrame);
+	impl->animationComputeRecordedForCurrentFrame = false;
+	impl->animationComputeSubmissionMarkedForCurrentFrame = false;
+	impl->recordedAnimationDispatchCountForCurrentFrame = 0U;
+	impl->pendingAnimationCommandPlan = {};
+	impl->pendingAnimationImmutablePlan.reset();
+	impl->pendingCpuAnimationPlan.reset();
+	impl->pendingAnimationFrameId = 0U;
+	impl->activeAnimationGraphicsBufferIndex = VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
+	impl->activeCpuAnimationGraphicsBufferIndex =
+		VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
 	if (impl->editorMode) {
 		// This is the only point where the current frame slot's UI fence is
 		// known complete before any new Scene/Game command buffers are recorded.
@@ -1716,10 +1743,14 @@ void VulkanContext::BeginFrame() {
 	if (!impl->editorMode) {
 		const auto acquireStart = BackendClock::now();
 		VkResult result = VK_SUCCESS;
+		const VkFence unextendedAcquireProof = impl->PrepareUnextendedAcquireProof();
 		{
 			TERRAENGINE_PROFILE_SCOPE("Vulkan: BeginFrame Acquire Swapchain Image", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-			result = vkAcquireNextImageKHR(impl->device, impl->swapchain, UINT64_MAX, impl->imageAvailableSemaphores[impl->currentFrame], VK_NULL_HANDLE, &impl->acquiredImageIndex);
+			result = vkAcquireNextImageKHR(impl->device, impl->swapchain, UINT64_MAX,
+				impl->imageAvailableSemaphores[impl->currentFrame], unextendedAcquireProof,
+				&impl->acquiredImageIndex);
 		}
+		impl->ResolveUnextendedAcquireProof(unextendedAcquireProof, result, impl->acquiredImageIndex);
 		TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
 			impl->pendingBackendFrameBreakdown,
 			{ TerraEngine::Renderer::BackendFrameCostCategory::FenceWait, TerraEngine::Renderer::BackendSubmitStage::ImageAcquire, RenderViewType::Game, 0u, "Swapchain image acquire", true, false },
@@ -1733,8 +1764,9 @@ void VulkanContext::BeginFrame() {
 			return;
 		}
 		if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+			impl->RequestOutOfDateRecovery();
 			const auto recoveryStart = BackendClock::now();
-			impl->RecreateSwapChain();
+			if (impl->ClaimFramebufferResizeRebuild()) impl->RecreateSwapChain();
 			TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
 				impl->pendingBackendFrameBreakdown,
 				{ TerraEngine::Renderer::BackendFrameCostCategory::ResizeRecreateWait, TerraEngine::Renderer::BackendSubmitStage::SwapchainRecovery, RenderViewType::Game, 0u, "Recreate swapchain after acquire", true, false },
@@ -3004,6 +3036,13 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			TERRAENGINE_LOG(LogLevel::Error, "failed to submit intermediate editor view command buffers after snapshot budget exhaustion: " << submitResult);
 			return;
 		}
+		if (impl->animationComputeRecordedForCurrentFrame
+			&& !impl->animationComputeSubmissionMarkedForCurrentFrame) {
+			// This exceptional editor prefix contains the first primary command
+			// buffer, so it owns the animation generation's submission receipt.
+			impl->MarkVulkanAnimationGenerationSubmitted(impl->pendingAnimationCommandPlan.rendererGeneration);
+			impl->animationComputeSubmissionMarkedForCurrentFrame = true;
+		}
 		if (currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
 			impl->pendingPrimaryCommandBuffersSubmitted[currentFrame] = 1u;
 		}
@@ -3033,13 +3072,16 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		snapshotSlotIndex = 0u;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!impl->editorMode && !impl->swapchainImageAcquired) {
+	const bool renderingDedicatedCaptureTarget =
+		outputRequest.kind == RenderOutputKind::OffscreenTexture;
+	// Normal runtime views require an acquired swapchain image. A dedicated
+	// capture owns a separate offscreen image and can therefore remain valid
+	// independently of the presentation target.
+	if (!impl->editorMode
+		&& !renderingDedicatedCaptureTarget
+		&& !impl->swapchainImageAcquired) {
 		return;
 	}
-
-	const bool renderingDedicatedCaptureTarget = impl->editorMode
-		&& outputRequest.kind == RenderOutputKind::OffscreenTexture;
 	VkExtent2D requestedCaptureExtent = impl->swapchainExtent;
 	if (renderingDedicatedCaptureTarget)
 	{
@@ -3065,9 +3107,11 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	};
 	const VkExtent2D requestedEditorExtent = ResolveRequestedEditorExtent();
 
-	// Handle Editor Mode resizing (lazy).
+	// Editor views and dedicated exported-runtime captures both use lazily sized
+	// offscreen targets. Runtime captures intentionally allocate only captureView;
+	// Scene/Game editor targets remain editor-owned.
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (impl->editorMode) {
+	if (impl->editorMode || renderingDedicatedCaptureTarget) {
 		TERRAENGINE_PROFILE_SCOPE("Vulkan: RenderFrame Ensure Offscreen Targets", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		const auto ensureOffscreenResources = [&](VulkanContext::Impl::OffscreenResources& resources, VkExtent2D targetExtent) {
 			const bool extentMismatch = resources.extent.width != targetExtent.width
@@ -3109,7 +3153,9 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	const bool defaultTaskPipelineAvailable = impl->taskShaderSupported
 		&& (ResourceManager::Instance().GetShaderCollection(defaultTaskCollectionId) != nullptr);
 
-	VkRenderPass currentPass = impl->editorMode ? impl->offscreenRenderPass : impl->renderPass;
+	VkRenderPass currentPass = (impl->editorMode || renderingDedicatedCaptureTarget)
+		? impl->offscreenRenderPass
+		: impl->renderPass;
 	if (currentPass == VK_NULL_HANDLE) {
 		TERRAENGINE_LOG(LogLevel::Warning, "Skipping Vulkan draw submission because the active render pass is not ready.");
 		return;
@@ -3118,7 +3164,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	VkImage activeDepthImage = impl->depthImage;
 	VkImageView activeDepthView = impl->depthImageView;
 	VkExtent2D activeRenderExtent = impl->swapchainExtent;
-	if (impl->editorMode) {
+	if (impl->editorMode || renderingDedicatedCaptureTarget) {
 		const VulkanContext::Impl::OffscreenResources* activeOffscreenView = renderingDedicatedCaptureTarget
 			? &impl->captureView
 			: ((view == ViewType::Scene) ? &impl->sceneView : &impl->gameView);
@@ -3261,6 +3307,51 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		renderingDedicatedCaptureTarget
 			? "capture.primary.begin"
 			: (view == ViewType::Scene ? "scene.primary.begin" : "game.primary.begin"));
+	if (useMainCommandBuffer
+		&& !impl->animationComputeRecordedForCurrentFrame
+		&& impl->pendingAnimationCommandPlan.hasWork
+		&& impl->pendingAnimationCommandPlan.valid
+		&& impl->pendingAnimationImmutablePlan != nullptr)
+	{
+		// Record one immutable animation generation before every view. The compute
+		// work remains in this primary command buffer, so it shares the normal
+		// graphics submission, fence, and present chain with no queue submit or
+		// CPU pose readback of its own.
+		const bool descriptorsReady = impl->currentFrame < impl->globalDescriptorSets.size()
+			&& impl->currentFrame < impl->animationDescriptorSets.size()
+			&& impl->globalDescriptorSets[impl->currentFrame] != VK_NULL_HANDLE
+			&& impl->animationDescriptorSets[impl->currentFrame] != VK_NULL_HANDLE
+			&& impl->animationComputePipelines.layout != VK_NULL_HANDLE;
+		if (descriptorsReady)
+		{
+			const VkDescriptorSet globalSet = impl->globalDescriptorSets[impl->currentFrame];
+			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+				impl->animationComputePipelines.layout, 0U, 1U, &globalSet, 0U, nullptr);
+			const TerraEngine::Renderer::Vulkan::VulkanAnimationRecordingResult result =
+				TerraEngine::Renderer::Vulkan::RecordVulkanAnimationCommands(
+					cmd,
+					impl->pendingAnimationCommandPlan,
+					impl->animationComputePipelines,
+					impl->animationDescriptorSets[impl->currentFrame]);
+			if (result.status == TerraEngine::Renderer::Vulkan::VulkanAnimationRecordingStatus::Recorded
+				&& result.recordedDispatchCount != 0U)
+			{
+				impl->animationComputeRecordedForCurrentFrame = true;
+				impl->recordedAnimationDispatchCountForCurrentFrame =
+					result.recordedDispatchCount;
+			}
+		}
+		if (!impl->animationComputeRecordedForCurrentFrame)
+		{
+			// Do not let a graphics draw sample an upload that was not produced by
+			// this command buffer. The shader sees invalid bridge indices and leaves
+			// vertices in bind pose, which is the safe visual fallback.
+			impl->activeAnimationGraphicsBufferIndex = VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
+			impl->pendingAnimationCommandPlan = {};
+			impl->pendingAnimationImmutablePlan.reset();
+			impl->pendingAnimationFrameId = 0U;
+		}
+	}
 	if (impl->validationLayersEnabled && vkSetDebugUtilsObjectNameEXT != nullptr) {
 		// Validation messages otherwise print only an opaque command-buffer handle,
 		// which makes a cross-submit fault impossible to associate with Scene, Game,
@@ -3282,11 +3373,12 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!impl->editorMode) {
+	if (!impl->editorMode && !renderingDedicatedCaptureTarget) {
 		renderPassInfo.renderPass = impl->renderPass;
 		renderPassInfo.framebuffer = impl->framebuffers[imageIndex];
 	} else {
-		// Editor mode renders into per-view offscreen targets.
+		// Editor views and packaged-runtime capture validation render into
+		// transfer-readable offscreen targets.
 		renderPassInfo.renderPass = impl->offscreenRenderPass;
 		renderPassInfo.framebuffer = renderingDedicatedCaptureTarget
 			? impl->captureView.framebuffer
@@ -4231,6 +4323,133 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			&& mesh.meshletBuffer.buffer != VK_NULL_HANDLE
 			&& mesh.meshletCount != 0u;
 	};
+	const auto RequiresConservativeDeformableVisibility = [](const DrawCommand& command) {
+		// DrawCommand owns a copied animation publication.  Deliberately inspect
+		// only its immutable generation/status fields here: render recording must
+		// never chase an animator instance or a live pose while worker packets are
+		// being consumed.  Until the deformable-cluster dynamic-bounds buffer is
+		// bound by the shared animation ABI, disabling rejection is the safe way
+		// to preserve coverage for a published non-bind-pose deformation.
+		return command.animationBinding.RequiresOwnerMeshDeformationFallback();
+	};
+	const auto ApplyAnimationGraphicsBridge = [&](const DrawCommand& command, PushConstants& push) {
+		// Static and rejected animation draws publish invalid bridge fields. A
+		// validated CPU pose selects its own frame upload; GPU/Hybrid work then
+		// follows the separately generation-checked compute bridge below.
+		push.meshDataIndex = VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
+		push.textureIndex = VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
+		const TerraEngine::Renderer::AnimationRenderBinding& binding =
+			command.animationBinding;
+		if(binding.HasCpuDeformation()
+			&& impl->pendingCpuAnimationPlan != nullptr
+			&& impl->activeCpuAnimationGraphicsBufferIndex
+				!= VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX
+			&& impl->currentFrame < impl->cpuAnimationFrameResources.size()
+			&& binding.cpuDeformationRecordIndex
+				< impl->pendingCpuAnimationPlan->records.size()) {
+			const VulkanContext::Impl::VulkanCpuAnimationFrameResources&
+				resources =
+					impl->cpuAnimationFrameResources[impl->currentFrame];
+			const TerraEngine::Renderer::CpuAnimationDeformationRecord&
+				record = impl->pendingCpuAnimationPlan->records[
+					binding.cpuDeformationRecordIndex];
+			const std::uint64_t stableInstanceId =
+				(static_cast<std::uint64_t>(binding.animatorSlotIndex) << 32U)
+				| static_cast<std::uint64_t>(binding.animatorGeneration);
+			if(resources.live
+				&& resources.frameId
+					== impl->pendingCpuAnimationPlan->frameId
+				&& resources.rendererGeneration
+					== impl->pendingCpuAnimationPlan->rendererGeneration
+				&& resources.graphicsBridgeBindlessIndex
+					== impl->activeCpuAnimationGraphicsBufferIndex
+				&& record.IsComplete()
+				&& record.stableInstanceId == stableInstanceId
+				&& record.meshId == binding.meshId
+				&& record.poseGeneration
+					== binding.posePublicationGeneration
+				&& record.deformablePayloadGeneration
+					== binding.deformablePayloadGeneration
+				&& record.rendererGeneration
+					== binding.invalidation.renderer
+				&& record.skeletonCompatibilityFingerprint
+					== binding.skeletonCompatibilityFingerprint
+				&& record.data == binding.cpuDeformation) {
+				push.meshDataIndex =
+					impl->activeCpuAnimationGraphicsBufferIndex;
+				push.textureIndex =
+					binding.cpuDeformationRecordIndex;
+				return;
+			}
+		}
+		const TerraEngine::Renderer::AnimationGpuRenderBinding& gpu = command.animationBinding.gpu;
+		if (!gpu.IsComplete()
+			|| impl->activeAnimationGraphicsBufferIndex == VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX
+			|| impl->currentFrame >= impl->animationFrameResources.size())
+		{
+			return;
+		}
+
+		// The bridge buffer is frame-owned. Compare immutable generations before
+		// using its copied packet index so a stale render snapshot falls back to
+		// bind pose rather than sampling a newer instance's palette range.
+		const VulkanContext::Impl::VulkanAnimationFrameResources& resources =
+			impl->animationFrameResources[impl->currentFrame];
+		if (!resources.live
+			|| resources.graphicsBridgeBindlessIndex != impl->activeAnimationGraphicsBufferIndex
+			|| resources.planGeneration != gpu.planGeneration
+			|| resources.rendererGeneration != gpu.rendererGeneration
+			|| impl->pendingAnimationImmutablePlan == nullptr
+			|| impl->pendingAnimationImmutablePlan->generation != gpu.planGeneration
+			|| impl->pendingAnimationImmutablePlan->renderIdentities.size()
+				!= impl->pendingAnimationImmutablePlan->workPackets.size()
+			|| gpu.workPacketIndex >= impl->pendingAnimationImmutablePlan->workPackets.size())
+		{
+			return;
+		}
+		const TerraEngine::Animation::GpuAnimationWorkPacket& packet =
+			impl->pendingAnimationImmutablePlan->workPackets[gpu.workPacketIndex];
+		const TerraEngine::Animation::GpuAnimationRenderIdentity& renderIdentity =
+			impl->pendingAnimationImmutablePlan->renderIdentities[gpu.workPacketIndex];
+		if (packet.generationRecordIndex >= impl->pendingAnimationImmutablePlan->generationRecords.size())
+		{
+			return;
+		}
+		const TerraEngine::Animation::GpuAnimationGenerationRecord& generation =
+			impl->pendingAnimationImmutablePlan->generationRecords[packet.generationRecordIndex];
+		const bool packetIdentityMatches = packet.stableInstanceId == gpu.stableInstanceId
+			&& packet.stableSubmissionOrdinal == gpu.stableSubmissionOrdinal
+			&& packet.stageMask == gpu.stageMask
+			&& generation.instanceSlot == gpu.instanceSlot
+			&& generation.instanceGeneration == gpu.instanceGeneration
+			&& generation.componentGeneration == gpu.componentGeneration
+			&& generation.skeletonGeneration == gpu.skeletonGeneration
+			&& generation.meshGeneration == gpu.meshGeneration
+			&& generation.resourceGeneration == gpu.resourceGeneration
+			&& generation.rendererGeneration == gpu.rendererGeneration
+			&& generation.sceneGeneration == gpu.sceneGeneration
+			&& generation.workGeneration == gpu.workGeneration
+			&& generation.programGeneration == gpu.programGeneration
+			&& renderIdentity == gpu.renderIdentity
+			&& renderIdentity.meshId == command.animationBinding.meshId
+			&& renderIdentity.deformablePayloadGeneration
+				== command.animationBinding.deformablePayloadGeneration
+			&& renderIdentity.skeletonCompatibilityFingerprint
+				== command.animationBinding.skeletonCompatibilityFingerprint
+			&& TerraEngine::Animation::HasGpuAnimationFlag(packet.flags,
+				TerraEngine::Animation::GpuAnimationWorkFlag::HybridCpuAuthority)
+				== gpu.hybridCpuAuthority;
+		if (!packetIdentityMatches)
+		{
+			// An in-range packet index is not sufficient identity: deterministic
+			// sorting can assign that index to another animator in a newer snapshot.
+			// Reject the whole copied envelope and leave the draw in bind pose.
+			return;
+		}
+
+		push.meshDataIndex = impl->activeAnimationGraphicsBufferIndex;
+		push.textureIndex = gpu.workPacketIndex;
+	};
 
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const auto& command : frameData.commands) {
@@ -4245,7 +4464,9 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			continue;
 		}
 
-		VkRenderPass currentPass = impl->editorMode ? impl->offscreenRenderPass : impl->renderPass;
+		VkRenderPass currentPass = (impl->editorMode || renderingDedicatedCaptureTarget)
+			? impl->offscreenRenderPass
+			: impl->renderPass;
 		uint32_t materialFlags = material->header.flags;
 		VulkanMesh& mesh = meshIt->second;
 
@@ -4290,12 +4511,14 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		// bounds. Hi-Z visibility is guarded separately, so this flag only
 		// controls the ordinary per-meshlet culling path.
 		constexpr bool kEnableGpuMeshletCulling = true;
+		const bool conservativeDeformableVisibility = RequiresConservativeDeformableVisibility(command);
 		const bool activeTaskCulling = kEnableGpuMeshletCulling
 			&& pipeline->hasTaskStage
 			&& frameData.globalTaskShaderCullingEnabled
 			&& impl->globalTaskShaderCullingEnabled
 			&& command.taskShaderCullingEnabled
-			&& mesh.hasMeshletBounds;
+			&& mesh.hasMeshletBounds
+			&& !conservativeDeformableVisibility;
 
 		PushConstants push{};
 		push.viewProj = frameData.projectionMatrix * frameData.viewMatrix;
@@ -4305,15 +4528,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		if (impl->materialIndexMap.contains(command.materialId)) {
 			push.materialIndex = impl->materialIndexMap[command.materialId];
 		}
-		push.meshDataIndex = mesh.bindlessIndex;
-		push.textureIndex = 0;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (material->header.textureCount > 0 && !material->textures.empty()) {
-			TerraEngine::UUID texID = material->textures[0].textureUuid;
-			if (impl->textureIndexMap.contains(texID)) {
-				push.textureIndex = impl->textureIndexMap[texID];
-			}
-		}
+		ApplyAnimationGraphicsBridge(command, push);
 		push.vrsActive = 0u; 
 		push.taskCullingEnabled = activeTaskCulling ? 1u : 0u;
 		push.statsSlotIndex = statsSlotIndex;
@@ -4330,13 +4545,29 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		const bool requestedPageLocalGeometry =
 			command.virtualGeometryPayloadSource == VirtualGeometryPagePayloadSource::ResidentPagePayload
 			|| command.virtualGeometryPayloadSource == VirtualGeometryPagePayloadSource::ResidentFallbackPayload;
+		const bool graphicsBridgeActive =
+			push.meshDataIndex != VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
 		const bool pageLocalGeometry =
 			requestedPageLocalGeometry
-			&& impl->activeVirtualGeometryPagePayloadBufferIndex != VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
-		const uint32_t ownerMeshletOffset = std::min(command.virtualMeshletOffset, mesh.meshletCount);
-		const uint32_t ownerMeshletCount = command.virtualMeshletCount == 0u
-			? (mesh.meshletCount - ownerMeshletOffset)
-			: std::min(command.virtualMeshletCount, mesh.meshletCount - ownerMeshletOffset);
+			&& impl->activeVirtualGeometryPagePayloadBufferIndex != VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX
+			// Resident page packets currently omit the owner skin/morph streams.
+			// Select the owner/fallback payload for a graphics-bridge draw instead
+			// of rendering high-detail geometry without its published deformation.
+			&& !graphicsBridgeActive;
+		// RenderSystem normally collapses animated page packets before backend
+		// submission. Keep this second boundary defensive: stale/cross-version
+		// command producers must never reinterpret a packet-local offset as a
+		// partial owner range and remove visible animated meshlets.
+		const bool wholeOwnerDeformationFallback =
+			graphicsBridgeActive && requestedPageLocalGeometry;
+		const uint32_t ownerMeshletOffset = wholeOwnerDeformationFallback
+			? 0u
+			: std::min(command.virtualMeshletOffset, mesh.meshletCount);
+		const uint32_t ownerMeshletCount = wholeOwnerDeformationFallback
+			? mesh.meshletCount
+			: (command.virtualMeshletCount == 0u
+				? (mesh.meshletCount - ownerMeshletOffset)
+				: std::min(command.virtualMeshletCount, mesh.meshletCount - ownerMeshletOffset));
 		const uint32_t selectedMeshletCount = pageLocalGeometry
 			? command.virtualMeshletCount
 			: ownerMeshletCount;
@@ -4348,6 +4579,27 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		push.virtualMeshletCount = selectedMeshletCount;
 		push.selectedVirtualLod = command.selectedVirtualLod;
 		push.virtualGeometryFlags = command.virtualGeometryFlags;
+		if (pipeline->hasTaskStage)
+		{
+			// Task payload addressing remains authoritative when culling is off.
+			// A mesh-stage group id is local to each DispatchMesh call, so using it
+			// directly would repeat the first 32 meshlets of every larger range.
+			push.virtualGeometryFlags |= kVirtualGeometryFlagTaskPayloadValid;
+		}
+		if (conservativeDeformableVisibility)
+		{
+			// A whole-mesh envelope may be valid while per-cluster dynamic bounds
+			// are still unavailable.  Mark the visible fail-open policy and remove
+			// cone proof so every task/mesh pass agrees that it must not reject a
+			// moving cluster before the shader-visible bounds generation arrives.
+			push.virtualGeometryFlags |= kVirtualGeometryFlagFailOpen;
+			push.virtualGeometryFlags &= ~kVirtualGeometryFlagConeCullingSafe;
+		}
+		if (graphicsBridgeActive && requestedPageLocalGeometry)
+		{
+			push.virtualGeometryFlags |= kVirtualGeometryFlagFailOpen;
+			push.virtualGeometryFlags &= ~kVirtualGeometryFlagConeCullingSafe;
+		}
 		push.selectedVirtualClusterOffset = command.selectedVirtualClusterOffset;
 		push.selectedVirtualClusterCount = command.selectedVirtualClusterCount;
 		push.selectedVirtualPageNeedOffset = command.selectedVirtualPageNeedOffset;
@@ -4530,15 +4782,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			if (impl->materialIndexMap.contains(command.materialId)) {
 				shadowDraw.push.materialIndex = impl->materialIndexMap[command.materialId];
 			}
-			shadowDraw.push.meshDataIndex = mesh.bindlessIndex;
-			shadowDraw.push.textureIndex = 0u;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (material->header.textureCount > 0 && !material->textures.empty()) {
-				const TerraEngine::UUID textureId = material->textures[0].textureUuid;
-				if (impl->textureIndexMap.contains(textureId)) {
-					shadowDraw.push.textureIndex = impl->textureIndexMap[textureId];
-				}
-			}
+			ApplyAnimationGraphicsBridge(command, shadowDraw.push);
 			shadowDraw.push.vrsActive = 2u;
 			shadowDraw.push.taskCullingEnabled = 0u;
 			shadowDraw.push.statsSlotIndex = statsSlotIndex;
@@ -4555,6 +4799,21 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			shadowDraw.push.virtualMeshletCount = selectedShadowMeshletCount;
 			shadowDraw.push.selectedVirtualLod = command.selectedVirtualLod;
 			shadowDraw.push.virtualGeometryFlags = command.virtualGeometryFlags;
+			if (shadowPipeline->hasTaskStage)
+			{
+				// Shadow task stages still publish pass-through payload indices
+				// while camera-based visibility rejection is intentionally off.
+				shadowDraw.push.virtualGeometryFlags |=
+					kVirtualGeometryFlagTaskPayloadValid;
+			}
+			if (RequiresConservativeDeformableVisibility(command))
+			{
+				// Shadow maps must use the same immutable fail-open decision as the
+				// visible pass.  Their task culling is already disabled below because
+				// camera Hi-Z cannot prove light-view visibility.
+				shadowDraw.push.virtualGeometryFlags |= kVirtualGeometryFlagFailOpen;
+				shadowDraw.push.virtualGeometryFlags &= ~kVirtualGeometryFlagConeCullingSafe;
+			}
 			shadowDraw.push.selectedVirtualClusterOffset = command.selectedVirtualClusterOffset;
 			shadowDraw.push.selectedVirtualClusterCount = command.selectedVirtualClusterCount;
 			shadowDraw.push.selectedVirtualPageNeedOffset = command.selectedVirtualPageNeedOffset;
@@ -4665,7 +4924,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 
 	// If this is a subsequent pass targeting the swapchain (multi-camera),
 	// inject a barrier to wait for the previous pass to finish its writes.
-	if (!useMainCommandBuffer && !impl->editorMode) {
+	if (!useMainCommandBuffer && !impl->editorMode && !renderingDedicatedCaptureTarget) {
 		VkImageMemoryBarrier barrier{};
 		barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
 		barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
@@ -5243,7 +5502,9 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	}
 
 	VkSubpassContents contents = secondaryBuffers.empty() ? VK_SUBPASS_CONTENTS_INLINE : VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS;
-	if (!impl->editorMode && impl->depthImage != VK_NULL_HANDLE) {
+	if (!impl->editorMode
+		&& !renderingDedicatedCaptureTarget
+		&& impl->depthImage != VK_NULL_HANDLE) {
 		// Every swapchain framebuffer references the same depth image. Order its
 		// previous frame write before this frame clears it, even when a different
 		// frame-in-flight fence owns the earlier command buffer.
@@ -6356,12 +6617,11 @@ void VulkanContext::EndFrame() {
 			impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 0u;
 		}
 		impl->editorRenderSubmitted = false;
-		// Rebuild promptly on the leading edge, then cap repeated device-idle work
-		// while the OS continues sending resize notifications during a drag.
+		// Claim the latest coalesced extent revision exactly once. Callbacks that
+		// arrive during recreation publish a later revision for a later frame.
 		if (!impl->ClaimFramebufferResizeRebuild()) {
 			return;
 		}
-		impl->framebufferResized = false;
 		const auto recoveryStart = BackendClock::now();
 		impl->RecreateSwapChain();
 		TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
@@ -6432,18 +6692,32 @@ void VulkanContext::EndFrame() {
 			presentInfo.swapchainCount = 1;
 			presentInfo.pSwapchains = swapChains;
 			presentInfo.pImageIndices = &impl->acquiredImageIndex;
+			VkSwapchainPresentFenceInfoKHR presentCompletionInfo{};
+			const bool presentCompletionFencePrepared = impl->PreparePresentationCompletionFence(
+				impl->acquiredImageIndex, presentInfo, presentCompletionInfo);
+			if (impl->presentationFencesEnabled && !presentCompletionFencePrepared) {
+				// Preserve correctness by retaining retired bundles through the bounded
+				// fallback if an optional completion fence cannot be prepared.
+				impl->presentationFencesEnabled = false;
+			}
 
 			const auto presentStart = BackendClock::now();
 			const VkResult presentResult = impl->PresentSwapchain(&presentInfo);
+			impl->ResolveUnenqueuedPresentationFence(presentCompletionFencePrepared, presentResult);
+			impl->RecordUnextendedPresent(impl->acquiredImageIndex, presentResult);
 			TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
 				impl->pendingBackendFrameBreakdown,
 				{ TerraEngine::Renderer::BackendFrameCostCategory::Presentation, TerraEngine::Renderer::BackendSubmitStage::Present, RenderViewType::Game, 0u, "Empty runtime queue present", true, false },
 				ElapsedMilliseconds(presentStart),
 				0.25f);
-			if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR || impl->framebufferResized) {
-				impl->framebufferResized = false;
+			if (presentResult == VK_ERROR_OUT_OF_DATE_KHR) {
+				impl->RequestOutOfDateRecovery();
+			} else if (presentResult == VK_SUBOPTIMAL_KHR) {
+				impl->RequestSuboptimalRecoveryIfNeeded();
+			}
+			if (impl->framebufferResized && impl->ClaimFramebufferResizeRebuild()) {
 				impl->RecreateSwapChain();
-			} else if (presentResult != VK_SUCCESS) {
+			} else if (presentResult != VK_SUCCESS && presentResult != VK_SUBOPTIMAL_KHR) {
 				if (impl->MarkDeviceLost(presentResult, "empty runtime queue present")) {
 					return;
 				}
@@ -6529,6 +6803,13 @@ void VulkanContext::EndFrame() {
 			return;
 		}
 		impl->editorRenderSubmitted = true;
+		if (impl->animationComputeRecordedForCurrentFrame
+			&& !impl->animationComputeSubmissionMarkedForCurrentFrame) {
+			// Editor UI extends this queue chain to the frame fence. Mark only after
+			// the existing render submission accepted the recorded compute prefix.
+			impl->MarkVulkanAnimationGenerationSubmitted(impl->pendingAnimationCommandPlan.rendererGeneration);
+			impl->animationComputeSubmissionMarkedForCurrentFrame = true;
+		}
 		impl->ConfirmHiZWritesSubmitted(impl->currentFrame);
 		if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
 			impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 1u;
@@ -6570,6 +6851,12 @@ void VulkanContext::EndFrame() {
 				"Queue submit failed during runtime rendering; swapchain recovery was required.");
 			return;
 		}
+		if (impl->animationComputeRecordedForCurrentFrame
+			&& !impl->animationComputeSubmissionMarkedForCurrentFrame) {
+			// Runtime compute and graphics share this one fence-bearing submit.
+			impl->MarkVulkanAnimationGenerationSubmitted(impl->pendingAnimationCommandPlan.rendererGeneration);
+			impl->animationComputeSubmissionMarkedForCurrentFrame = true;
+		}
 		impl->ConfirmHiZWritesSubmitted(impl->currentFrame);
 		if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
 			impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 1u;
@@ -6594,17 +6881,29 @@ void VulkanContext::EndFrame() {
 		presentInfo.swapchainCount = 1;
 		presentInfo.pSwapchains = swapChains;
 		presentInfo.pImageIndices = &impl->acquiredImageIndex;
+		VkSwapchainPresentFenceInfoKHR presentCompletionInfo{};
+		const bool presentCompletionFencePrepared = impl->PreparePresentationCompletionFence(
+			impl->acquiredImageIndex, presentInfo, presentCompletionInfo);
+		if (impl->presentationFencesEnabled && !presentCompletionFencePrepared) {
+			impl->presentationFencesEnabled = false;
+		}
 
 		const auto presentStart = BackendClock::now();
 		VkResult result = impl->PresentSwapchain(&presentInfo);
+		impl->ResolveUnenqueuedPresentationFence(presentCompletionFencePrepared, result);
+		impl->RecordUnextendedPresent(impl->acquiredImageIndex, result);
 		TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
 			impl->pendingBackendFrameBreakdown,
 			{ TerraEngine::Renderer::BackendFrameCostCategory::Presentation, TerraEngine::Renderer::BackendSubmitStage::Present, RenderViewType::Game, 0u, "Queue present", true, false },
 			ElapsedMilliseconds(presentStart),
 			0.25f);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || impl->framebufferResized) {
-			impl->framebufferResized = false;
+		if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+			impl->RequestOutOfDateRecovery();
+		} else if (result == VK_SUBOPTIMAL_KHR) {
+			impl->RequestSuboptimalRecoveryIfNeeded();
+		}
+		if (impl->framebufferResized && impl->ClaimFramebufferResizeRebuild()) {
 			const auto recoveryStart = BackendClock::now();
 			impl->RecreateSwapChain();
 			TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
@@ -6613,7 +6912,7 @@ void VulkanContext::EndFrame() {
 				ElapsedMilliseconds(recoveryStart),
 				0.25f,
 				"Present reported resize or suboptimal swapchain state.");
-		} else if (result != VK_SUCCESS) {
+		} else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
 			if (impl->MarkDeviceLost(result, "runtime queue present")) {
 				return;
 			}
@@ -6738,11 +7037,81 @@ TerraEngine::Renderer::BackendCapabilityProfile VulkanContext::GetBackendCapabil
 
 bool VulkanContext::ConsumeRenderSubmissionPlan(const TerraEngine::Renderer::RenderSubmissionPlan& plan)
 {
-	// The current renderer still records concrete Vulkan work from FrameRenderData
-	// in RenderFrame. Consuming the validated graph here gives diagnostics and
-	// future backends a stable contract without moving presentation ownership
-	// out of EndFrame.
-	return plan.valid;
+	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
+	// The renderer graph has already validated packet identity. Recheck the
+	// immutable animation hand-off at Vulkan's protected boundary because this
+	// code owns descriptor writes and must never follow live animator state.
+	if (!plan.valid || !plan.animationWork.valid) return false;
+	impl->activeAnimationGraphicsBufferIndex = VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
+	impl->activeCpuAnimationGraphicsBufferIndex =
+		VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
+	impl->pendingAnimationCommandPlan = {};
+	impl->pendingAnimationImmutablePlan.reset();
+	impl->pendingCpuAnimationPlan.reset();
+	impl->pendingAnimationFrameId = 0U;
+	impl->animationComputeRecordedForCurrentFrame = false;
+	impl->animationComputeSubmissionMarkedForCurrentFrame = false;
+	impl->recordedAnimationDispatchCountForCurrentFrame = 0U;
+	const bool hasGpuAnimationWork = !plan.animationWork.ranges.empty();
+	const bool hasCpuAnimationWork =
+		plan.animationWork.cpuDeformationPlan != nullptr;
+	if(!hasGpuAnimationWork && !hasCpuAnimationWork) return true;
+
+	if(hasCpuAnimationWork) {
+		const std::shared_ptr<const TerraEngine::Renderer::CpuAnimationDeformationPlan>&
+			cpuPlan = plan.animationWork.cpuDeformationPlan;
+		if(cpuPlan == nullptr || !cpuPlan->IsComplete()
+			|| cpuPlan->frameId != plan.frameId
+			|| !impl->PublishVulkanCpuAnimationResources(*cpuPlan)) {
+			impl->activeCpuAnimationGraphicsBufferIndex =
+				VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
+			return false;
+		}
+		impl->pendingCpuAnimationPlan = cpuPlan;
+	}
+	if(!hasGpuAnimationWork) return true;
+
+	const std::shared_ptr<const TerraEngine::Animation::GpuAnimationPlan>& immutablePlan =
+		plan.animationWork.immutablePlan;
+	if (!immutablePlan || immutablePlan->generation == 0U || immutablePlan->workPackets.empty()) return false;
+	const std::uint32_t rendererGeneration = plan.animationWork.ranges.front().rendererGeneration;
+	if (rendererGeneration == 0U) return false;
+	for (const TerraEngine::Renderer::AnimationBackendWorkRange& range : plan.animationWork.ranges)
+	{
+		const std::size_t firstPacket = range.firstGpuWorkPacket;
+		const std::size_t packetCount = range.gpuWorkPacketCount;
+		if (range.animationPlanGeneration != immutablePlan->generation
+			|| range.rendererGeneration != rendererGeneration
+			|| range.paletteGeneration == 0U
+			|| packetCount == 0U
+			|| firstPacket > immutablePlan->workPackets.size()
+			|| packetCount > immutablePlan->workPackets.size() - firstPacket)
+		{
+			return false;
+		}
+	}
+
+	const TerraEngine::Renderer::Vulkan::VulkanAnimationCommandPlan commandPlan =
+		TerraEngine::Renderer::Vulkan::BuildVulkanAnimationCommandPlan(*immutablePlan, rendererGeneration);
+	if (!commandPlan.valid || !commandPlan.hasWork) return false;
+	if (!impl->PublishVulkanAnimationResources(*immutablePlan, rendererGeneration)
+		|| !impl->EnsureVulkanAnimationComputePipelines())
+	{
+		// PublishVulkanAnimationResources clears the active bridge before it
+		// begins. Preserve that invariant on every setup failure and report the
+		// rejected handoff truthfully so renderer diagnostics cannot claim that
+		// animation work was accepted when no descriptors or pipeline exist.
+		impl->activeAnimationGraphicsBufferIndex = VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
+		impl->activeCpuAnimationGraphicsBufferIndex =
+			VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
+		impl->pendingCpuAnimationPlan.reset();
+		return false;
+	}
+
+	impl->pendingAnimationCommandPlan = commandPlan;
+	impl->pendingAnimationImmutablePlan = immutablePlan;
+	impl->pendingAnimationFrameId = plan.animationWork.frameId;
+	return true;
 }
 
 TerraEngine::Renderer::RenderCaptureResult VulkanContext::ReadbackCapture(const TerraEngine::Renderer::RenderCaptureRequest& request)
@@ -6775,15 +7144,16 @@ TerraEngine::Renderer::RenderCaptureResult VulkanContext::ReadbackCapture(const 
 		return result;
 	}
 
-	if (!impl->editorMode)
-	{
-		result.message = "Vulkan capture readback currently targets editor offscreen render targets.";
-		return result;
-	}
-
 	const bool captureSceneView = request.sourceKind == TerraEngine::Renderer::RenderCaptureSourceKind::GameView
 		&& request.viewType == RenderViewType::Scene;
-	const bool captureDedicatedView = request.sourceKind != TerraEngine::Renderer::RenderCaptureSourceKind::GameView;
+	const bool captureDedicatedView = request.sourceKind != TerraEngine::Renderer::RenderCaptureSourceKind::GameView
+		|| request.dedicatedRenderTarget;
+	if (!impl->editorMode && !captureDedicatedView)
+	{
+		result.message =
+			"Packaged-runtime Vulkan readback requires a dedicated offscreen capture target.";
+		return result;
+	}
 	const Impl::OffscreenResources& target = captureDedicatedView
 		? impl->captureView
 		: (captureSceneView ? impl->sceneView : impl->gameView);
@@ -6946,15 +7316,12 @@ TerraEngine::Renderer::RenderCaptureResult VulkanContext::ReadbackCapture(const 
 	readbackRequest.commandPool = commandPool;
 	readbackRequest.width = sourceWidth;
 	readbackRequest.height = sourceHeight;
+	readbackRequest.requestedWidth = request.targetSize.x > 0u ? request.targetSize.x : sourceWidth;
+	readbackRequest.requestedHeight = request.targetSize.y > 0u ? request.targetSize.y : sourceHeight;
 	readbackRequest.sourceFormat = impl->offscreenColorFormat;
 	readbackRequest.submittedAt = std::chrono::steady_clock::now();
 	readbackRequest.timeout = std::chrono::milliseconds(request.timeoutMs > 0u ? request.timeoutMs : 2000u);
-	if (request.targetSize.x > 0u
-		&& request.targetSize.y > 0u
-		&& (request.targetSize.x != sourceWidth || request.targetSize.y != sourceHeight))
-	{
-		readbackRequest.completion.warnings.push_back("Capture returned the native Vulkan render target dimensions without post-readback resizing.");
-	}
+	readbackRequest.dedicatedRenderTarget = captureDedicatedView;
 	if (impl->offscreenColorFormat == VK_FORMAT_R16G16B16A16_SFLOAT)
 	{
 		readbackRequest.completion.warnings.push_back("HDR render target pixels were tone-clamped and gamma encoded into an 8-bit PNG.");
@@ -7106,7 +7473,7 @@ void VulkanContext::Impl::ProcessReadbackRequests()
 
 		const bool captureSceneView = request.completion.sourceKind == TerraEngine::Renderer::RenderCaptureSourceKind::GameView
 			&& request.viewType == RenderViewType::Scene;
-		const bool captureDedicatedView = request.completion.sourceKind != TerraEngine::Renderer::RenderCaptureSourceKind::GameView;
+		const bool captureDedicatedView = request.dedicatedRenderTarget;
 		const OffscreenResources& target = captureDedicatedView
 			? captureView
 			: (captureSceneView ? sceneView : gameView);
@@ -7171,8 +7538,21 @@ void VulkanContext::Impl::ProcessReadbackRequests()
 						request.width,
 						request.height,
 						request.sourceFormat);
-					const std::vector<std::uint8_t> pngBytes = TerraEngine::Renderer::EncodeRgba8ToPng(rgbaPixels, request.width, request.height);
+					const std::uint32_t outputWidth = request.requestedWidth > 0u ? request.requestedWidth : request.width;
+					const std::uint32_t outputHeight = request.requestedHeight > 0u ? request.requestedHeight : request.height;
+					if (outputWidth != request.width || outputHeight != request.height)
+					{
+						rgbaPixels = TerraEngine::Renderer::ResizeRgba8(
+							rgbaPixels,
+							request.width,
+							request.height,
+							outputWidth,
+							outputHeight);
+						request.completion.warnings.push_back("Capture pixels were resized from the live Vulkan target to the requested output dimensions.");
+					}
+					const std::vector<std::uint8_t> pngBytes = TerraEngine::Renderer::EncodeRgba8ToPng(rgbaPixels, outputWidth, outputHeight);
 					request.completion.base64Data = TerraEngine::Renderer::EncodeBase64(pngBytes);
+					request.completion.size = glm::uvec2(outputWidth, outputHeight);
 					request.completion.ok = true;
 					request.completion.errorCategory.clear();
 					request.completion.message = captureDedicatedView
@@ -7223,6 +7603,17 @@ TerraEngine::Renderer::BackendFrameBreakdown VulkanContext::GetLatestBackendFram
 	}
 	std::lock_guard<std::mutex> lock(impl->statsMutex);
 	return impl->latestBackendFrameBreakdown;
+}
+
+TerraEngine::Renderer::AnimationGpuBackendExecutionSnapshot
+VulkanContext::GetLatestAnimationGpuBackendExecution() const
+{
+	if (!impl)
+	{
+		return {};
+	}
+	std::lock_guard<std::mutex> lock(impl->statsMutex);
+	return impl->latestAnimationGpuBackendExecution;
 }
 
 // VulkanContext::GetLatestRenderSnapshotDiagnostics is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -7491,6 +7882,7 @@ TerraEngine::Renderer::Vulkan::EditorPresentResult VulkanContext::PresentEditor(
 
 	std::uint32_t imageIndex = 0;
 	VkResult acquireResult = VK_SUCCESS;
+	const VkFence unextendedAcquireProof = impl->PrepareUnextendedAcquireProof();
 	{
 		// Swapchain acquisition can wait for the presentation engine to release an
 		// image. Editor interaction must not inherit an unbounded compositor wait:
@@ -7499,8 +7891,9 @@ TerraEngine::Renderer::Vulkan::EditorPresentResult VulkanContext::PresentEditor(
 		TERRAENGINE_PROFILE_SCOPE("Editor Present: Acquire Image", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		acquireResult = vkAcquireNextImageKHR(
 			impl->device, impl->swapchain, 1'000'000ULL,
-			impl->imageAvailableSemaphores[impl->currentFrame], VK_NULL_HANDLE, &imageIndex);
+			impl->imageAvailableSemaphores[impl->currentFrame], unextendedAcquireProof, &imageIndex);
 	}
+	impl->ResolveUnextendedAcquireProof(unextendedAcquireProof, acquireResult, imageIndex);
 	if (acquireResult == VK_TIMEOUT || acquireResult == VK_NOT_READY) {
 		// No image or acquire semaphore was published. Leave currentFrame unchanged
 		// so its protected BeginFrame cleanup can consume any offscreen render signal
@@ -7515,7 +7908,8 @@ TerraEngine::Renderer::Vulkan::EditorPresentResult VulkanContext::PresentEditor(
 		if (drainResult != VK_SUCCESS) {
 			return fail(EditorUiFrameStage::DrainSemaphore, drainResult, "editor outdated acquire semaphore drain");
 		}
-		impl->RecreateSwapChain();
+		impl->RequestOutOfDateRecovery();
+		if (impl->ClaimFramebufferResizeRebuild()) impl->RecreateSwapChain();
 		result.outcome = EditorPresentOutcome::RecreationRequested;
 		result.stage = EditorUiFrameStage::AcquireImage;
 		result.nativeResult = static_cast<std::int32_t>(acquireResult);
@@ -7686,6 +8080,12 @@ TerraEngine::Renderer::Vulkan::EditorPresentResult VulkanContext::PresentEditor(
 	present.swapchainCount = 1;
 	present.pSwapchains = &impl->swapchain;
 	present.pImageIndices = &imageIndex;
+	VkSwapchainPresentFenceInfoKHR presentCompletionInfo{};
+	const bool presentCompletionFencePrepared = impl->PreparePresentationCompletionFence(
+		imageIndex, present, presentCompletionInfo);
+	if (impl->presentationFencesEnabled && !presentCompletionFencePrepared) {
+		impl->presentationFencesEnabled = false;
+	}
 	VkResult presentResult = VK_SUCCESS;
 	{
 		// FIFO presentation may apply back-pressure independently of image acquire;
@@ -7693,12 +8093,29 @@ TerraEngine::Renderer::Vulkan::EditorPresentResult VulkanContext::PresentEditor(
 		TERRAENGINE_PROFILE_SCOPE("Editor Present: Queue Present", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		presentResult = impl->PresentSwapchain(&present);
 	}
+	impl->ResolveUnenqueuedPresentationFence(presentCompletionFencePrepared, presentResult);
+	impl->RecordUnextendedPresent(imageIndex, presentResult);
 	result.stage = EditorUiFrameStage::Present;
 	result.nativeResult = static_cast<std::int32_t>(presentResult);
-	if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR || impl->framebufferResized) {
+	if ((presentResult == VK_SUCCESS || presentResult == VK_SUBOPTIMAL_KHR)
+		&& impl->editorPresentationReadyLoggedGeneration != impl->presentationLifecycle.Generation()) {
+		// Queue-present success confirms the editor submitted a real native
+		// presentation operation for this generation. Log once so automation does
+		// not mistake a resize callback or image acquisition for visual readiness.
+		impl->editorPresentationReadyLoggedGeneration = impl->presentationLifecycle.Generation();
+		TERRAENGINE_LOG(LogLevel::Info, "[Vulkan] Editor presentation ready generation="
+			<< impl->presentationLifecycle.Generation() << " extent="
+			<< impl->swapchainExtent.width << "x" << impl->swapchainExtent.height);
+	}
+	if (presentResult == VK_ERROR_OUT_OF_DATE_KHR) {
+		impl->RequestOutOfDateRecovery();
+	} else if (presentResult == VK_SUBOPTIMAL_KHR) {
+		impl->RequestSuboptimalRecoveryIfNeeded();
+	}
+	if (impl->framebufferResized && impl->ClaimFramebufferResizeRebuild()) {
 		impl->RecreateSwapChain();
 		result.outcome = EditorPresentOutcome::RecreationRequested;
-	} else if (presentResult != VK_SUCCESS) {
+	} else if (presentResult != VK_SUCCESS && presentResult != VK_SUBOPTIMAL_KHR) {
 		return fail(EditorUiFrameStage::Present, presentResult, "editor queue present");
 	}
 
@@ -8411,4 +8828,18 @@ void VulkanContext::Impl::ClearResources() {
 	// Material slot zero is the permanent fallback material, so rebuilt caches
 	// must resume authored material allocation at slot one.
 	nextMaterialIndex = 1u;
+	pendingAnimationCommandPlan = {};
+	pendingAnimationImmutablePlan.reset();
+	pendingCpuAnimationPlan.reset();
+	pendingAnimationFrameId = 0U;
+	animationComputeRecordedForCurrentFrame = false;
+	animationComputeSubmissionMarkedForCurrentFrame = false;
+	recordedAnimationDispatchCountForCurrentFrame = 0U;
+	activeAnimationGraphicsBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
+	activeCpuAnimationGraphicsBufferIndex =
+		INVALID_BINDLESS_BUFFER_INDEX;
+	{
+		std::lock_guard<std::mutex> lock(statsMutex);
+		latestAnimationGpuBackendExecution = {};
+	}
 }

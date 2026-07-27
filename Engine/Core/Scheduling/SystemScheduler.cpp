@@ -209,10 +209,12 @@ namespace TerraEngine::Scheduling {
 			{ "Input", 20, true, false, false, false, "Input device polling and state updates." },
 			{ "Scene", 30, true, false, false, true, "Scene loading, hierarchy state, and authored scene data." },
 			{ "Scripting", 40, true, false, false, true, "Gameplay script execution and managed runtime updates." },
-			{ "Physics", 45, true, true, false, true, "Fixed-step physics snapshot, preparation, simulation, and protected publication." },
-			{ "UI", 50, true, false, false, false, "Runtime UI layout and CPU-side UI data." },
-			{ "Render", 60, true, false, false, false, "Renderer submission and presentation." },
-			{ "PostFrame", 70, true, false, false, false, "Frame-end cleanup and compatibility defaults." }
+			{ "Animation", 45, true, true, false, false, "Controller authority, worker evaluation planning, and protected physics handoff." },
+			{ "Physics", 50, true, true, false, true, "Fixed-step physics snapshot, preparation, simulation, and protected publication." },
+			{ "AnimationPresentation", 55, true, true, false, false, "Current-step physics mapping and immutable animation presentation publication." },
+			{ "UI", 60, true, false, false, false, "Runtime UI layout and CPU-side UI data." },
+			{ "Render", 70, true, false, false, false, "Renderer submission and presentation." },
+			{ "PostFrame", 80, true, false, false, false, "Frame-end cleanup and compatibility defaults." }
 		};
 	}
 
@@ -231,6 +233,25 @@ namespace TerraEngine::Scheduling {
 			{ "Scripting", "Managed runtime, script assemblies, and script component state.", "May later expose script component query resources." },
 			{ "RuntimeTimeQueue", "Validated managed time-scale requests awaiting the next frame-start publication.", "Consumed before scheduler workload planning so every system observes one scale." },
 			{ "RuntimeTime", "Immutable scaled and unscaled frame timing published at frame start.", "Read by managed callbacks and every delta-time consumer." },
+			{ kResourceAnimatorComponents, "Protected authored AnimatorComponent membership and persisted configuration.", "Captured once before animation worker planning; workers never read live component storage." },
+			{ kResourceAnimationCommandQueues, "Typed parameter and playback commands captured from script, gameplay, editor, and automation producers.", "Commands are copied at the protected Animation boundary and deterministically ordered before worker evaluation." },
+			{ kResourceAnimationFrameInputs, "Immutable generation-labeled animator inputs for the current Animation phase.", "Written only by CaptureAnimationInputs and consumed by worker-safe planning." },
+			{ kResourceAnimationEvaluationPrograms, "Immutable compiled controller programs referenced by animation frame inputs.", "Worker planning reads generation-stable views rather than authored graph objects." },
+			{ kResourceAnimationResidencyCapabilities, "Immutable animation asset-residency, renderer-capability, and budget views.", "Mode planning reads this snapshot without requesting residency from worker code." },
+			{ kResourceAnimationExecutionModes, "Prepared requested-to-effective execution-mode decisions and explicit reasons.", "Worker-owned output becomes visible only with the protected authority publication." },
+			{ kResourceAnimationConsumerMasks, "Prepared authoritative joint, curve, event, root-motion, and physics consumer closures.", "The frame mask is immutable after planning so worker partitions remain range-disjoint." },
+			{ kResourceAnimationWorkPackets, "Typed deterministic animation evaluation packets grouped by compatible work.", "Worker evaluation reads packets without touching AnimatorComponent or ObjectManager storage." },
+			{ kResourceAnimationVisualPackets, "Generation-labeled visual evaluation packets retained across the physics handoff.", "AnimationPresentation consumes these packets after the current physics step." },
+			{ kResourceAnimationClipSegments, "Immutable checked clip-segment views used by authoritative animation evaluation.", "Resident resource views are captured before workers run and contain no live ResourceManager ownership." },
+			{ kResourceAnimationRollbackState, "Immutable fixed-tick rollback and deterministic history inputs.", "Authoritative worker evaluation reads bounded snapshots only." },
+			{ kResourceAnimationAuthoritativeOutputs, "Range-disjoint prepared authoritative subsets, events, curves, and root-motion deltas.", "Workers write owned ranges; PublishAnimationAuthority validates the complete generation before swapping." },
+			{ kResourceAnimationRuntimeState, "Protected immutable animation state publication visible to later systems.", "No partial worker output becomes observable through this resource." },
+			{ kResourceAnimationPhysicsHandoffQueue, "Typed root-motion and animation-to-physics commands for the current fixed step.", "Published once at the protected Animation-to-Physics boundary; workers never mutate physics or transforms directly." },
+			{ kResourceAnimationManagedCallbackBatches, "Copied animation callback batches awaiting protected managed delivery.", "Managed code never receives worker-owned storage or callbacks from a worker thread." },
+			{ kResourceAnimationRagdollMappings, "Prepared mappings from immutable current-step physics snapshots into skeleton space.", "Worker output is private until animation presentation publication." },
+			{ kResourceAnimationRecordingSamples, "Prepared bounded recording samples sourced from authoritative and presentation data.", "Recording publication remains generation-checked and protected." },
+			{ kResourceAnimationPresentationPrepared, "Worker-owned ragdoll, recording, and visual presentation preparation.", "The prepared value is not render-visible until PublishAnimationPresentation completes." },
+			{ kResourceAnimationPresentationPlan, "Immutable generation-labeled render-facing animation presentation plan.", "UI and Render read only the complete plan published at the protected presentation boundary." },
 			{ "PhysicsSettingsUpdateQueue", "Validated project or packaged-runtime physics settings awaiting protected application.", "Read only at a declared physics boundary before a world is created or rebuilt." },
 			{ "PhysicsSettings", "The active immutable gravity, fixed-step, layer, solver, query, and diagnostic configuration.", "Published through a protected settings boundary and read by physics workloads." },
 			{ "PhysicsAuthoringSnapshot", "Immutable hierarchy-resolved physics component and project-settings input.", "Written at PhysicsSnapshot and read by worker preparation." },
@@ -244,6 +265,9 @@ namespace TerraEngine::Scheduling {
 			{ "PhysicsEventSubscriptions", "Data-only event subscription snapshot and filters.", "Snapshotted before protected event publication." },
 			{ "PhysicsEventPackets", "Immutable ordered bounded event packet history.", "Published only after participant generation revalidation." },
 			{ "PhysicsPublishedSnapshots", "Immutable body, command, event, query, debug, and diagnostic publications.", "Swapped only after sorted publication completes." },
+			{ "RagdollPhysicsQueue", "Typed generation-qualified animation-to-physics ragdoll requests.", "Drained only by the protected Physics command boundary; worker producers never mutate the live Jolt world." },
+			{ "RagdollPhysicsSnapshots", "Immutable current-step ragdoll pose snapshots copied from physics authority.", "Published after provider work completes and consumed by animation presentation with exact generations." },
+			{ "RagdollPhysicsResults", "Immutable accepted or rejected ragdoll command results.", "Published atomically with the protected ragdoll request batch outcome." },
 			{ "PhysicsTransformTransactions", "Typed transform updates awaiting After Physics scene publication.", "Worker extraction cannot mutate live Transform storage." },
 			{ "UI", "Runtime UI document, style, and generated geometry state.", "" },
 			{ "Renderer", "Renderer frame graph, GPU submission, and render backend state.", "" },
@@ -541,6 +565,13 @@ namespace TerraEngine::Scheduling {
 		std::vector<FrameWorkloadDeclaration> current = system.DeclareFrameWorkloads(deltaTime);
 		if (current.empty())
 		{
+			if (declaration.omitWhenNoFrameWorkloads)
+			{
+				// The system performed its protected activation check and proved there
+				// is no useful frame work. Do not synthesize a legacy Update job; that
+				// would turn zero-work paths into protected per-frame overhead.
+				return {};
+			}
 			FrameWorkloadDeclaration workload;
 			workload.workloadName = declaration.name;
 			workload.ownerSystem = declaration.name;
@@ -1093,17 +1124,24 @@ namespace TerraEngine::Scheduling {
 			workloads.push_back(std::move(workload));
 		};
 
-		std::vector<SchedulerPhaseDefinition> orderedPhases = phases;
-		std::stable_sort(orderedPhases.begin(), orderedPhases.end(), [](const SchedulerPhaseDefinition& left, const SchedulerPhaseDefinition& right) {
-			return std::tie(left.order, left.name) < std::tie(right.order, right.name);
-		});
-
-		workloads.reserve(orderedIndices.size() + flushPoints.size());
-		for (const SchedulerPhaseDefinition& phase : orderedPhases)
+		// Systems that explicitly omit a legacy fallback contribute no descriptor on
+		// a dormant frame. Excluding them from the initial estimate keeps adding a
+		// zero-work subsystem from increasing the scheduler's per-frame allocation;
+		// an active system can still grow the vector when it publishes real work.
+		const std::size_t alwaysDeclaredSystemCount = static_cast<std::size_t>(std::count_if(
+			orderedIndices.begin(), orderedIndices.end(), [this](std::size_t index) {
+				return !systems[index].declaration.omitWhenNoFrameWorkloads;
+			}));
+		workloads.reserve(alwaysDeclaredSystemCount + flushPoints.size());
+		// BuildSchedule validates, sorts, and publishes this name list whenever the
+		// scheduler is dirty. Reusing it avoids copying phase definitions and
+		// allocating long phase-name strings on every frame, while PhaseDefinitions()
+		// continues to expose the caller's original definition order.
+		for (const std::string& phaseName : latestSummary.phases)
 		{
 			for (const MutationFlushPoint& point : flushPoints)
 			{
-				if (point.position == MutationFlushPosition::BeforePhase && point.phaseName == phase.name)
+				if (point.position == MutationFlushPosition::BeforePhase && point.phaseName == phaseName)
 				{
 					appendFlushWorkload(point, nextExecutionOrder++);
 				}
@@ -1112,7 +1150,7 @@ namespace TerraEngine::Scheduling {
 			for (std::size_t orderedIndex : orderedIndices)
 			{
 				RegisteredSystem& registeredSystem = systems[orderedIndex];
-				if (registeredSystem.declaration.phase == phase.name)
+				if (registeredSystem.declaration.phase == phaseName)
 				{
 					// Give each system a distinct order block. Converted systems can use
 					// local offsets within that block without interleaving another owner.
@@ -1122,7 +1160,7 @@ namespace TerraEngine::Scheduling {
 
 			for (const MutationFlushPoint& point : flushPoints)
 			{
-				if (point.position == MutationFlushPosition::AfterPhase && point.phaseName == phase.name)
+				if (point.position == MutationFlushPosition::AfterPhase && point.phaseName == phaseName)
 				{
 					appendFlushWorkload(point, nextExecutionOrder++);
 				}
@@ -1204,10 +1242,17 @@ namespace TerraEngine::Scheduling {
 		}
 
 		std::vector<std::size_t> previousPhaseTerminals;
-		for (const SchedulerPhaseDefinition& phase : orderedPhases)
+		for (const std::string& phaseName : latestSummary.phases)
 		{
-			const std::vector<std::size_t> systemNodes = activeIndices(phase.name, false);
-			const std::vector<std::size_t> flushNodes = activeIndices(phase.name, true);
+			const std::vector<std::size_t> systemNodes = activeIndices(phaseName, false);
+			const std::vector<std::size_t> flushNodes = activeIndices(phaseName, true);
+			if (systemNodes.empty() && flushNodes.empty())
+			{
+				// An empty phase is transparent to dependency lowering. In particular,
+				// keep the previous active phase terminals intact so a later phase still
+				// depends on them without constructing empty owner maps and vectors.
+				continue;
+			}
 			std::vector<std::size_t> beforeFlushes;
 			std::vector<std::size_t> afterFlushes;
 			for (const std::size_t flushIndex : flushNodes)

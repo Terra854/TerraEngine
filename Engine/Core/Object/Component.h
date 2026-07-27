@@ -8,6 +8,8 @@
 #pragma once
 
 #include <memory>
+#include <cstdint>
+#include <limits>
 #include <shared_mutex>
 #include <string>
 #include <type_traits>
@@ -161,6 +163,14 @@ TERRAENGINE_API std::unordered_map<std::string, ComponentAccessFunctions>& Compo
 TERRAENGINE_API std::mutex& ComponentAccessRegistryMutex();
 TERRAENGINE_API entt::registry& ComponentAccessObjectRegistry();
 TERRAENGINE_API ComponentAccessObservation ObserveRegisteredComponentAccess(entt::registry& registry, entt::entity entity, std::string_view componentName, std::uint64_t componentGeneration);
+// Reflected property setters are shared by the inspector, automation, managed
+// scripting, and compatibility mutation paths. Spatial components need one
+// centralized notification so render and hierarchy snapshots never keep an old
+// transform after any of those callers successfully writes a value.
+TERRAENGINE_API void NotifyReflectedComponentPropertyMutation(
+	entt::registry& registry,
+	entt::entity entity,
+	std::string_view componentName);
 
 template <typename ComponentType>
 // RegisterComponentAccess is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -201,24 +211,31 @@ void RegisterComponentAccess(const std::string& name)
 		return TerraEngine::Reflection::GetPropertyValue(prop, *component);
 	};
 
-	functions.entitySetter = [](entt::registry& registry, entt::entity entity, std::string_view property, const TerraEngine::Reflection::Variant& value) -> bool
+	functions.entitySetter = [name](entt::registry& registry, entt::entity entity, std::string_view property, const TerraEngine::Reflection::Variant& value) -> bool
 	{
 		// Promote to exclusive access before mutating reflected properties
-		// to keep writer updates serialized relative to readers.
+		// to keep writer updates serialized relative to readers. Release that
+		// component lock before publishing the spatial revision because the
+		// revision path intentionally coordinates with other scene snapshots.
 		ComponentType* component = registry.valid(entity) ? registry.try_get<ComponentType>(entity) : nullptr;
 		if (!component)
 		{
 			return false;
 		}
 
-		auto guard = component->acquireWriteLock();
-		TerraEngine::Reflection::Property prop = TerraEngine::Reflection::FindProperty(TerraEngine::Reflection::ResolveType<ComponentType>(), property);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!TerraEngine::Reflection::IsValid(prop))
 		{
-			return false;
+			auto guard = component->acquireWriteLock();
+			TerraEngine::Reflection::Property prop = TerraEngine::Reflection::FindProperty(TerraEngine::Reflection::ResolveType<ComponentType>(), property);
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+			if (!TerraEngine::Reflection::IsValid(prop)
+				|| !TerraEngine::Reflection::SetPropertyValue(prop, *component, value))
+			{
+				return false;
+			}
 		}
-		return TerraEngine::Reflection::SetPropertyValue(prop, *component, value);
+
+		NotifyReflectedComponentPropertyMutation(registry, entity, name);
+		return true;
 	};
 
 	functions.entityHasComponent = [](entt::registry& registry, entt::entity entity) -> bool
@@ -259,6 +276,7 @@ void RegisterComponentAccess(const std::string& name)
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (TerraEngine::Reflection::IsType<float>(val)) compJson[propName] = TerraEngine::Reflection::GetValue<float>(val);
 			else if (TerraEngine::Reflection::IsType<int>(val)) compJson[propName] = TerraEngine::Reflection::GetValue<int>(val);
+			else if (TerraEngine::Reflection::IsType<std::uint32_t>(val)) compJson[propName] = TerraEngine::Reflection::GetValue<std::uint32_t>(val);
 			else if (TerraEngine::Reflection::IsType<bool>(val)) compJson[propName] = TerraEngine::Reflection::GetValue<bool>(val);
 			else if (TerraEngine::Reflection::IsType<std::string>(val)) compJson[propName] = TerraEngine::Reflection::GetValue<std::string>(val);
 			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -297,7 +315,24 @@ void RegisterComponentAccess(const std::string& name)
 			{
 				TerraEngine::Reflection::Variant val;
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+				const TerraEngine::Reflection::Type propertyType =
+					TerraEngine::Reflection::GetPropertyType(prop);
 				if (propVal.is_number_float()) val = propVal.get<float>();
+				else if (propVal.is_number_unsigned()
+					&& TerraEngine::Reflection::IsType<std::uint32_t>(propertyType)) {
+					const std::uint64_t unsignedValue = propVal.get<std::uint64_t>();
+					if (unsignedValue <= std::numeric_limits<std::uint32_t>::max()) {
+						val = static_cast<std::uint32_t>(unsignedValue);
+					}
+				}
+				else if (propVal.is_number_integer()
+					&& TerraEngine::Reflection::IsType<std::uint32_t>(propertyType)) {
+					const std::int64_t signedValue = propVal.get<std::int64_t>();
+					if (signedValue >= 0
+						&& static_cast<std::uint64_t>(signedValue) <= std::numeric_limits<std::uint32_t>::max()) {
+						val = static_cast<std::uint32_t>(signedValue);
+					}
+				}
 				else if (propVal.is_number_integer()) val = propVal.get<int>();
 				else if (propVal.is_boolean()) val = propVal.get<bool>();
 				// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

@@ -258,7 +258,15 @@ void EditorProfilerService::FinishCapture()
 	}
 
 	std::weak_ptr<EditorProfilerService> weakSelf = weak_from_this();
-	auto task = ThreadPool::instance().createTask([weakSelf, storeSnapshot, cancelToken, document, generation]() mutable {
+	// FinishRecording transfers ownership of a potentially large bounded capture.
+	// Move it into the worker instead of retaining another full frame-history copy
+	// on the editor thread while persistence is in progress.
+	auto task = ThreadPool::instance().createTask([
+		weakSelf,
+		storeSnapshot,
+		cancelToken,
+		document = std::move(document),
+		generation]() mutable {
 		if (cancelToken && cancelToken->load(std::memory_order_acquire))
 		{
 			return;
@@ -267,7 +275,7 @@ void EditorProfilerService::FinishCapture()
 		std::filesystem::path savedPath;
 		std::string error;
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!storeSnapshot.SaveNewCapture(document, savedPath, error))
+		if (!storeSnapshot.SaveNewCapture(std::move(document), savedPath, error))
 		{
 			std::shared_ptr<EditorProfilerService> self = weakSelf.lock();
 			if (!self)
@@ -605,6 +613,8 @@ EditorProfilerCaptureSummary EditorProfilerService::SummarizeDocument(
 	std::map<std::string, MetricAccumulator> boundaryAccumulators;
 	std::map<std::string, MetricAccumulator> presentationAccumulators;
 	std::map<std::string, MetricAccumulator> responsivenessAccumulators;
+	std::vector<double> completeFrameDurations;
+	completeFrameDurations.reserve(document.frames.size());
 	struct WorkerAccumulator
 	{
 		EditorProfilerWorkerSummary summary;
@@ -624,7 +634,10 @@ EditorProfilerCaptureSummary EditorProfilerService::SummarizeDocument(
 		summary.minimumFrameMs = std::min(summary.minimumFrameMs, frame.durationMs);
 		summary.maximumFrameMs = std::max(summary.maximumFrameMs, frame.durationMs);
 		if (frame.complete)
+		{
 			++summary.completeFrameCount;
+			completeFrameDurations.push_back(frame.durationMs);
+		}
 		else
 			++summary.incompleteFrameCount;
 
@@ -688,6 +701,16 @@ EditorProfilerCaptureSummary EditorProfilerService::SummarizeDocument(
 	if (summary.frameCount != 0u)
 	{
 		summary.averageFrameMs = summary.totalDurationMs / static_cast<double>(summary.frameCount);
+	}
+	if (!completeFrameDurations.empty())
+	{
+		// A recovered partial tail is useful lifecycle evidence, but it must not
+		// enter timing percentiles as if it were a fully observed frame.
+		std::sort(completeFrameDurations.begin(), completeFrameDurations.end());
+		summary.frameMedianMs = PercentileFromSorted(completeFrameDurations, 0.50);
+		summary.frameP95Ms = PercentileFromSorted(completeFrameDurations, 0.95);
+		summary.frameP99Ms = PercentileFromSorted(completeFrameDurations, 0.99);
+		summary.frameWorstMs = completeFrameDurations.back();
 	}
 	summary.timingStreams = TerraEngine::Profiling::BuildTimingStreamAggregates(document.frames);
 	summary.stageTimings = FinalizeMetrics(stageAccumulators);

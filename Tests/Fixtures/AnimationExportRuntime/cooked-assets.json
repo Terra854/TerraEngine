@@ -1,0 +1,13 @@
+{
+  "format": "terra-animation-fixture-v1",
+  "metadataBytes": [1, 2, 3, 4],
+  "assets": [
+    {"path": "characters/hero.teskel", "class": "skeleton", "seed": 10, "expectedContentFingerprint": "58123f4dedd427f0"},
+    {"path": "characters/walk.teanim", "class": "animation-clip", "seed": 40, "dependencySeed": 10, "dependencyType": 6, "expectedContentFingerprint": "18f0dfd16e49adcb"},
+    {"path": "controllers/hero.teanimctrl", "class": "animation-controller", "seed": 70, "expectedContentFingerprint": "58123f4dedd427f0"},
+    {"path": "masks/upper.teanimmask", "class": "animation-mask", "seed": 90, "expectedContentFingerprint": "58123f4dedd427f0"},
+    {"path": "retarget/humanoid.teretarget", "class": "retarget-profile", "seed": 110, "expectedContentFingerprint": "58123f4dedd427f0"},
+    {"path": "motion/locomotion.temotiondb", "class": "motion-database", "seed": 130, "expectedContentFingerprint": "58123f4dedd427f0"},
+    {"path": "ragdoll/hero.teragdoll", "class": "ragdoll-profile", "seed": 150, "expectedContentFingerprint": "58123f4dedd427f0"}
+  ]
+}
