@@ -16,6 +16,7 @@
 #include "Core/Logger/Logger.h"
 #include "File Formats/TerraEngineAnimationFile.h"
 #include "File Formats/TerraEngineMeshFile.h"
+#include "Resource/ResourceStreaming.h"
 
 namespace
 {
@@ -624,11 +625,44 @@ namespace
 		}
 		std::uint64_t sidecarEnd = 0U;
 		if (!TerraEngine::Animation::CheckedAdd(sidecarOffset, sidecar.payloadSize, sidecarEnd)
-			|| sidecarEnd != fileBytes.size())
+			|| sidecarEnd > fileBytes.size())
 		{
 			return RejectDeformableValidation(result, TerraEngine::Animation::AnimationStatus::RangeOutOfBounds,
 				"DeformableVirtualGeometrySidecarRangeInvalid",
-				"The TDFV range is truncated or contains unclaimed trailing bytes.");
+				"The TDFV range is truncated.");
+		}
+		if (sidecarEnd < fileBytes.size())
+		{
+			// AVPD/AVPB is the only legal extension after frozen TDFV v1. The
+			// directory starts at a 16-byte boundary and claims every physical
+			// blob through checked ranges, so unrelated trailing bytes still fail.
+			const std::uint64_t directoryOffset =
+				(sidecarEnd + 15u) & ~std::uint64_t{15u};
+			const bool paddingValid =
+				directoryOffset <= fileBytes.size()
+				&& std::all_of(
+					fileBytes.begin()
+						+ static_cast<std::ptrdiff_t>(sidecarEnd),
+					fileBytes.begin()
+						+ static_cast<std::ptrdiff_t>(directoryOffset),
+					[](std::uint8_t value) { return value == 0u; });
+			const TerraEngine::Resource::AnimatedVirtualPageCatalog catalog =
+				paddingValid
+				? TerraEngine::Resource::
+					ParseAnimatedVirtualPageDirectory(
+						fileBytes, directoryOffset)
+				: TerraEngine::Resource::
+					AnimatedVirtualPageCatalog{};
+			if (!paddingValid || !catalog.valid)
+			{
+				return RejectDeformableValidation(
+					result,
+					TerraEngine::Animation::AnimationStatus::
+						RangeOutOfBounds,
+					"DeformableVirtualGeometryExtensionInvalid",
+					"Bytes after TDFV must be one aligned, fully "
+					"validated AVPD/AVPB extension.");
+			}
 		}
 		std::uint64_t clusterBytes = 0U;
 		std::uint64_t paletteBytes = 0U;
@@ -1966,6 +2000,73 @@ namespace
 			return nullptr;
 		}
 
+		// AVPD has no pointer in the frozen TEMF/TDEF headers. Current cookers
+		// append it after TDFV, so scan aligned extension starts and accept only a
+		// fully validated directory whose full-width mesh generation matches.
+		if(mesh->hasDeformablePayload)
+		{
+			for(std::uint64_t offset = header.headerSize;
+				offset + sizeof(AnimatedVirtualPageDirectoryHeader)
+					<= fileBytes.size();
+				offset += alignof(std::uint32_t))
+			{
+				std::uint32_t magic = 0u;
+				std::memcpy(&magic, fileBytes.data() + offset, sizeof(magic));
+				if(magic != kAnimatedVirtualPageDirectoryMagicValue)
+				{
+					continue;
+				}
+				TerraEngine::Resource::AnimatedVirtualPageCatalog catalog =
+					TerraEngine::Resource::ParseAnimatedVirtualPageDirectory(
+						fileBytes, offset);
+				if(!catalog.valid
+					|| catalog.header.meshPayloadGeneration
+						!= mesh->deformablePayloadGeneration)
+				{
+					continue;
+				}
+				std::vector<std::vector<AnimatedVirtualPageSectionRecord>>
+					parsedSections;
+				parsedSections.reserve(catalog.entries.size());
+				bool everyPageValid = true;
+				for(const AnimatedVirtualPageDirectoryEntry& entry :
+					catalog.entries)
+				{
+					const std::span<const std::uint8_t> pageBytes(
+						fileBytes.data() + entry.blobOffset,
+						static_cast<std::size_t>(entry.blobSize));
+					TerraEngine::Resource::AnimatedVirtualPageBlob blob =
+						TerraEngine::Resource::ParseAnimatedVirtualPageBlob(
+							pageBytes,
+							entry,
+							mesh->deformablePayloadGeneration);
+					if(!blob.valid)
+					{
+						everyPageValid = false;
+						break;
+					}
+					parsedSections.push_back(std::move(blob.sections));
+				}
+				if(!everyPageValid)
+				{
+					continue;
+				}
+				mesh->hasAnimatedVirtualPageDirectory = true;
+				mesh->animatedVirtualPageDirectory = catalog.header;
+				mesh->animatedVirtualPageEntries = std::move(catalog.entries);
+				mesh->animatedVirtualPageRoots = std::move(catalog.rootPageIds);
+				mesh->animatedVirtualPageSections =
+					std::move(parsedSections);
+				mesh->animatedVirtualPageDirectoryOffset = offset;
+				break;
+			}
+			if(!mesh->hasAnimatedVirtualPageDirectory)
+			{
+				mesh->animatedVirtualPageDirectoryDiagnostic =
+					"No valid AVPD directory matched the deformable payload generation.";
+			}
+		}
+
 		mesh->storage.assign(fileBytes.begin() + static_cast<std::ptrdiff_t>(payloadOffset), fileBytes.end());
 
 		const std::size_t payloadSize = mesh->storage.size();
@@ -2210,6 +2311,11 @@ namespace
 		{
 			return nullptr;
 		}
+		// True page-streaming readiness requires independently verifiable AVPB
+		// ranges. Legacy embedded virtual geometry remains renderable only through
+		// the existing compatibility/owner fallback path.
+		mesh->virtualGeometryPageStreamingReady =
+			mesh->hasAnimatedVirtualPageDirectory;
 
 		const VirtualMeshValidationResult virtualGeometryValidation = ValidateVirtualGeometryPayloadMetadata(header, *mesh, resolvedPath);
 		if (VirtualMeshValidationRejected(virtualGeometryValidation))
@@ -2322,6 +2428,36 @@ void ResourceManager::CacheLoadedMeshBounds(const TerraEngine::UUID& id, const M
 			glm::vec3(mesh->localBoundsMin[0], mesh->localBoundsMin[1], mesh->localBoundsMin[2]),
 			glm::vec3(mesh->localBoundsMax[0], mesh->localBoundsMax[1], mesh->localBoundsMax[2]),
 			TerraEngine::Scene::SpatialBoundsSource::Mesh);
+	}
+	if (mesh->hasDeformablePayload)
+	{
+		// The static mesh box is insufficient for CPU broadphase queries: a skin
+		// or morph can cross a view plane before compute publishes current page
+		// bounds. TDEF validation proves this whole-animation envelope is finite;
+		// union it with bind pose so editor selection and inactive-pose frames
+		// remain conservative as well.
+		const glm::vec3 deformationMinimum(
+			mesh->deformableMetadata.deformationBoundsMin[0],
+			mesh->deformableMetadata.deformationBoundsMin[1],
+			mesh->deformableMetadata.deformationBoundsMin[2]);
+		const glm::vec3 deformationMaximum(
+			mesh->deformableMetadata.deformationBoundsMax[0],
+			mesh->deformableMetadata.deformationBoundsMax[1],
+			mesh->deformableMetadata.deformationBoundsMax[2]);
+		const TerraEngine::Scene::SpatialAABB deformationBounds =
+			TerraEngine::Scene::MakeAABB(
+				deformationMinimum,
+				deformationMaximum,
+				TerraEngine::Scene::SpatialBoundsSource::Mesh);
+		if (deformationBounds.IsUsable())
+		{
+			bounds = bounds.IsUsable()
+				? TerraEngine::Scene::MakeAABB(
+					glm::min(bounds.min, deformationBounds.min),
+					glm::max(bounds.max, deformationBounds.max),
+					TerraEngine::Scene::SpatialBoundsSource::Mesh)
+				: deformationBounds;
+		}
 	}
 
 	std::unique_lock lock(m_MeshLocalBoundsMutex);

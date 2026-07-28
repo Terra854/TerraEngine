@@ -121,6 +121,9 @@ add_executable(TerraEngine-EngineTests
 	Resource/VirtualGeometryResidencyTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/MockRenderBackendTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/AnimatedRenderViewTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/AnimatedVirtualGeometryAbiTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/AnimatedVirtualGeometryRuntimeTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/AnimatedVirtualGeometrySchedulerTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/DeformableVirtualGeometryTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RendererThreadingTestFixtures.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderBackendCompatibilityTests.cpp

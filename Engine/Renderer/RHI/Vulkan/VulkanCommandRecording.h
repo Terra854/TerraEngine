@@ -97,4 +97,64 @@ namespace TerraEngine::Renderer::Vulkan {
 		const VulkanAnimationComputePipelines& pipelines,
 		VkDescriptorSet descriptorSet);
 
+	enum class VulkanDeformationBarrierKind : std::uint8_t
+	{
+		AnimationOrUploadToDeform,
+		DeformToBounds,
+		BoundsToRefinement,
+		RefinementToGraphics
+	};
+
+	struct VulkanDeformationDispatch
+	{
+		std::uint32_t workRecordIndex = 0u;
+		std::uint32_t groupCountX = 0u;
+	};
+
+	struct VulkanDeformationCommandPlan
+	{
+		std::uint64_t frameId = 0u;
+		std::uint64_t rendererGeneration = 0u;
+		std::vector<VulkanDeformationDispatch> deformationDispatches;
+		std::vector<VulkanDeformationBarrierKind> barriers;
+		bool hasWork = false;
+		bool valid = false;
+		std::string rejectionReason;
+	};
+
+	enum class VulkanDeformationPipelineStage : std::uint8_t
+	{
+		Deform,
+		Bounds,
+		Refinement,
+		Count
+	};
+
+	struct VulkanDeformationComputePipelines
+	{
+		VkPipelineLayout layout = VK_NULL_HANDLE;
+		std::array<VkPipeline,
+			static_cast<std::size_t>(
+				VulkanDeformationPipelineStage::Count)> byStage{};
+	};
+
+	struct VulkanDeformationRecordingResult
+	{
+		bool recorded = false;
+		std::uint32_t deformationDispatchCount = 0u;
+		std::uint32_t boundsDispatchCount = 0u;
+		std::uint32_t refinementDispatchCount = 0u;
+		std::uint32_t barrierCount = 0u;
+	};
+
+	TERRAENGINE_API VulkanDeformationCommandPlan BuildVulkanDeformationCommandPlan(
+		const GpuDeformationPlan& plan);
+	TERRAENGINE_API VulkanDeformationRecordingResult
+		RecordVulkanDeformationCommands(
+			VkCommandBuffer commandBuffer,
+			const VulkanDeformationCommandPlan& commandPlan,
+			const GpuDeformationPlan& immutablePlan,
+			const VulkanDeformationComputePipelines& pipelines,
+			VkDescriptorSet descriptorSet);
+
 }

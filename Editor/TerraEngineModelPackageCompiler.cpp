@@ -131,13 +131,16 @@ namespace
 		const TerraEngine::AssetPipeline::ModelPackageImportResult& previousResult,
 		TerraEngine::AssetPipeline::ModelPackageImportOptions& options)
 	{
+		options.virtualGeometryMeshOverrides.clear();
 		for (const TerraEngine::AssetPipeline::GeneratedModelMeshAsset& previousMesh : previousResult.generatedMeshes)
 		{
 			if (previousMesh.virtualGeometrySettings.hasOverride)
 			{
-				options.virtualGeometrySettings = previousMesh.virtualGeometrySettings;
-				options.hasVirtualGeometrySettings = true;
-				return;
+				// Preserve the child GUID with its recipe. Applying only the first
+				// saved override globally makes unrelated package meshes inherit it.
+				options.virtualGeometryMeshOverrides.push_back({
+					previousMesh.guid,
+					previousMesh.virtualGeometrySettings });
 			}
 		}
 	}

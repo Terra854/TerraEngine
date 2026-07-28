@@ -1226,3 +1226,52 @@ The harness holds the recording open for at least five wall-clock seconds and
 applies a 10 MiB size gate. Missing measurements remain explicit unavailable
 values rather than being invented as zero.
 Compare like-for-like level, version, workload, workers, and duration.
+
+## Spec 044 animated virtual geometry
+
+Animated virtual geometry has three validation layers. Run the focused CPU,
+format, shader-contract, scheduler, streaming, publication, and recovery checks
+before the complete suites:
+
+```powershell
+$env:TERRAENGINE_TEST_FILTER="AnimatedVirtualGeometry;VirtualGeometry.ShaderLayout;Renderer.AnimationView;ShaderGeometryContract"
+.\out\build\RelWithDebInfo\TerraEngine-EngineTests.exe
+Remove-Item Env:TERRAENGINE_TEST_FILTER
+$env:TERRAENGINE_TEST_FILTER="SkinnedMeshCook;AnimatedVirtualPageFormat;VirtualGeometry"
+.\out\build\RelWithDebInfo\TerraEngine-EditorTests.exe
+Remove-Item Env:TERRAENGINE_TEST_FILTER
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
+```
+
+Then build and inspect the installed tree. The three compute binaries and public
+geometry includes must be loaded from `Build/Editor/Shaders`, not the source
+tree:
+
+```powershell
+cmake --build --preset RelWithDebInfo --target install
+Get-Item out/build/RelWithDebInfo/Build/Editor/Shaders/VirtualGeometry/AnimatedPageDeform.comp.spv
+Get-Item out/build/RelWithDebInfo/Build/Editor/Shaders/VirtualGeometry/AnimatedClusterBounds.comp.spv
+Get-Item out/build/RelWithDebInfo/Build/Editor/Shaders/VirtualGeometry/AnimatedRefinement.comp.spv
+```
+
+For GPU acceptance, launch the installed editor and use the deterministic
+fixture in `Tests/Fixtures/AnimatedVirtualGeometry`. Capture adapter, driver,
+resolution, quality/budgets, build revision, view count, working-set high-water
+marks, reuse, fallback, and failure counters. Compare a rejection-disabled
+million-decision visibility run with the current-bounds route and require zero
+false rejections. The soak profile is
+`Tests/Fixtures/AnimatedVirtualGeometry/stress-profile.json`; its release gate is
+1,000 instances, four views, continuous churn, at least 99% exact-key reuse,
+bounded memory/retirement, and 30 minutes without unrecovered failure.
+
+To reproduce the animated LOD import regression specifically, run:
+
+```powershell
+$env:TERRAENGINE_TEST_FILTER="SkinnedMeshCook.PreservesAdaptiveLodsAndPerMeshPercentageThresholds;PackageImport.AppliesPercentageOverridesPerGeneratedMesh"
+.\out\build\RelWithDebInfo\TerraEngine-EditorTests.exe
+Remove-Item Env:TERRAENGINE_TEST_FILTER
+```
+
+The skinned cook must load a final deformable TEMF with more than one detail
+level and an animated physical page outside LOD0. The package test proves that
+two generated child meshes retain independent percentage thresholds.

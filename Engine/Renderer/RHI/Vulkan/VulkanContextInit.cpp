@@ -251,6 +251,163 @@ void VulkanContext::Impl::DestroyVulkanAnimationComputePipelines()
 	animationComputePipelines = {};
 }
 
+bool VulkanContext::Impl::EnsureVulkanDeformationComputePipelines()
+{
+	using Stage = TerraEngine::Renderer::Vulkan::
+		VulkanDeformationPipelineStage;
+	const auto Pipeline = [this](Stage stage) -> VkPipeline
+	{
+		return deformationComputePipelines.byStage[
+			static_cast<std::size_t>(stage)];
+	};
+	if(deformationComputePipelines.layout != VK_NULL_HANDLE
+		&& Pipeline(Stage::Deform) != VK_NULL_HANDLE
+		&& Pipeline(Stage::Bounds) != VK_NULL_HANDLE
+		&& Pipeline(Stage::Refinement) != VK_NULL_HANDLE)
+	{
+		return true;
+	}
+	if(device == VK_NULL_HANDLE
+		|| globalDescriptorSetLayout == VK_NULL_HANDLE
+		|| animationDescriptorSetLayout == VK_NULL_HANDLE
+		|| deformationDescriptorSetLayout == VK_NULL_HANDLE)
+	{
+		return false;
+	}
+	DestroyVulkanDeformationComputePipelines();
+	const std::array<VkDescriptorSetLayout, 3u> setLayouts{
+		globalDescriptorSetLayout,
+		animationDescriptorSetLayout,
+		deformationDescriptorSetLayout };
+	VkPushConstantRange pushRange{};
+	pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	pushRange.offset = 0u;
+	pushRange.size = 16u;
+	VkPipelineLayoutCreateInfo layoutInfo{};
+	layoutInfo.sType =
+		VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+	layoutInfo.setLayoutCount =
+		static_cast<std::uint32_t>(setLayouts.size());
+	layoutInfo.pSetLayouts = setLayouts.data();
+	layoutInfo.pushConstantRangeCount = 1u;
+	layoutInfo.pPushConstantRanges = &pushRange;
+	if(vkCreatePipelineLayout(
+		device,
+		&layoutInfo,
+		nullptr,
+		&deformationComputePipelines.layout) != VK_SUCCESS)
+	{
+		deformationComputePipelines.layout = VK_NULL_HANDLE;
+		return false;
+	}
+	const auto CreatePipeline = [this](
+		Stage stage,
+		const char* shaderPath)
+	{
+		std::vector<std::uint8_t> shaderBytes;
+		try
+		{
+			shaderBytes =
+				ResourceManager::Instance().ReadFileBytes(
+					ResourceManager::Instance().
+						ResolveEngineAssetPath(shaderPath));
+		}
+		catch(const std::exception&)
+		{
+			return false;
+		}
+		if(shaderBytes.empty()
+			|| shaderBytes.size() % sizeof(std::uint32_t) != 0u)
+		{
+			return false;
+		}
+		VkShaderModuleCreateInfo moduleInfo{};
+		moduleInfo.sType =
+			VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+		moduleInfo.codeSize = shaderBytes.size();
+		moduleInfo.pCode =
+			reinterpret_cast<const std::uint32_t*>(
+				shaderBytes.data());
+		VkShaderModule module = VK_NULL_HANDLE;
+		if(vkCreateShaderModule(
+			device,
+			&moduleInfo,
+			nullptr,
+			&module) != VK_SUCCESS)
+		{
+			return false;
+		}
+		VkPipelineShaderStageCreateInfo stageInfo{};
+		stageInfo.sType =
+			VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+		stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+		stageInfo.module = module;
+		stageInfo.pName = "main";
+		VkComputePipelineCreateInfo pipelineInfo{};
+		pipelineInfo.sType =
+			VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+		pipelineInfo.stage = stageInfo;
+		pipelineInfo.layout =
+			deformationComputePipelines.layout;
+		VkPipeline& pipeline =
+			deformationComputePipelines.byStage[
+				static_cast<std::size_t>(stage)];
+		const VkResult result = vkCreateComputePipelines(
+			device,
+			VK_NULL_HANDLE,
+			1u,
+			&pipelineInfo,
+			nullptr,
+			&pipeline);
+		vkDestroyShaderModule(device, module, nullptr);
+		return result == VK_SUCCESS;
+	};
+	const bool created =
+		CreatePipeline(
+			Stage::Deform,
+			"Shaders/VirtualGeometry/AnimatedPageDeform.comp.spv")
+		&& CreatePipeline(
+			Stage::Bounds,
+			"Shaders/VirtualGeometry/AnimatedClusterBounds.comp.spv")
+		&& CreatePipeline(
+			Stage::Refinement,
+			"Shaders/VirtualGeometry/AnimatedRefinement.comp.spv");
+	if(!created)
+	{
+		TERRAENGINE_LOG(
+			LogLevel::Warning,
+			"Animated virtual geometry compute shaders are unavailable; "
+			"the renderer will retain conservative owner coverage.");
+		DestroyVulkanDeformationComputePipelines();
+		return false;
+	}
+	return true;
+}
+
+void VulkanContext::Impl::DestroyVulkanDeformationComputePipelines()
+{
+	if(device != VK_NULL_HANDLE)
+	{
+		for(VkPipeline& pipeline :
+			deformationComputePipelines.byStage)
+		{
+			if(pipeline != VK_NULL_HANDLE)
+			{
+				vkDestroyPipeline(device, pipeline, nullptr);
+			}
+			pipeline = VK_NULL_HANDLE;
+		}
+		if(deformationComputePipelines.layout != VK_NULL_HANDLE)
+		{
+			vkDestroyPipelineLayout(
+				device,
+				deformationComputePipelines.layout,
+				nullptr);
+		}
+	}
+	deformationComputePipelines = {};
+}
+
 // VulkanContext::Impl::Cleanup is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 	std::lock_guard<std::recursive_mutex> stateLock(deviceStateMutex);
@@ -396,6 +553,46 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 	// Animation frame buffers are not part of meshCache. Destroy them while the
 	// allocator remains valid, then release the dependent pipelines before their
 	// descriptor-set layout and pool are torn down below.
+	DestroyVulkanDeformationComputePipelines();
+	for(VulkanDeformationFrameResources& resources :
+		deformationFrameResources)
+	{
+		for(VulkanBuffer& buffer : resources.buffers)
+		{
+			DestroyBufferImmediate(buffer);
+		}
+		DestroyBufferImmediate(resources.graphicsBridgeBuffer);
+		resources = {};
+	}
+	deformationFrameResources.clear();
+	pendingDeformationImmutablePlan.reset();
+	pendingDeformationCommandPlan = {};
+	deformationComputeRecordedForCurrentFrame = false;
+	recordedDeformationDispatchCountForCurrentFrame = 0u;
+	activeDeformationGraphicsBufferIndex =
+		INVALID_BINDLESS_BUFFER_INDEX;
+	if(device != VK_NULL_HANDLE
+		&& descriptorPool != VK_NULL_HANDLE
+		&& !deformationDescriptorSets.empty())
+	{
+		vkFreeDescriptorSets(
+			device,
+			descriptorPool,
+			static_cast<std::uint32_t>(
+				deformationDescriptorSets.size()),
+			deformationDescriptorSets.data());
+	}
+	deformationDescriptorSets.clear();
+	if(device != VK_NULL_HANDLE
+		&& deformationDescriptorSetLayout != VK_NULL_HANDLE)
+	{
+		vkDestroyDescriptorSetLayout(
+			device,
+			deformationDescriptorSetLayout,
+			nullptr);
+	}
+	deformationDescriptorSetLayout = VK_NULL_HANDLE;
+
 	DestroyVulkanAnimationComputePipelines();
 	for (VulkanAnimationFrameResources& resources : animationFrameResources) {
 		for (VulkanBuffer& buffer : resources.buffers) {

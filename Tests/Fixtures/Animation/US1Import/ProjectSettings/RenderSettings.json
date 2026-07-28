@@ -1,21 +1,36 @@
 {
-	"preset": 2,
-	"validationEnabled": true,
-	"debugEnabled": true,
-	"settings": {
-		"shadowResolution": 1536,
-		"shadowFilteringSize": 5,
-		"maxUploadedLights": 128,
-		"maxDynamicLights": 64,
-		"maxShadowLights": 4,
-		"maxAreaLights": 2,
-		"enableLTC": 1,
-		"enableIBL": 1,
-		"indirectStrength": 1.0,
-		"ambientOcclusionStrength": 1.0,
-		"ambientOcclusionQuality": 2,
-		"anisotropicFiltering": 8,
-		"textureBudgetMb": 256,
-		"resolutionScale": 1.0
-	}
+    "debugEnabled": true,
+    "preset": 4,
+    "settings": {
+        "ambientOcclusionQuality": 2,
+        "ambientOcclusionStrength": 1.0,
+        "anisotropicFiltering": 8,
+        "enableIBL": 1,
+        "enableLTC": 1,
+        "indirectStrength": 1.0,
+        "maxAreaLights": 2,
+        "maxDynamicLights": 64,
+        "maxShadowLights": 4,
+        "maxUploadedLights": 128,
+        "shadowFilteringSize": 5,
+        "shadowResolution": 1536,
+        "variableRateShading": 0,
+        "virtualGeometry": {
+            "debugVisualizationMode": 0,
+            "deformationBoundsBudgetBytes": 0,
+            "deformationCurrentBudgetBytes": 0,
+            "deformationHistoryBudgetBytes": 0,
+            "geometryBudgetBytes": 0,
+            "hiZNearPlaneGuardEnabled": true,
+            "hiZOcclusionEnabled": true,
+            "hiZSelfOcclusionGuardEnabled": true,
+            "hiZThinGeometryGuardEnabled": true,
+            "lodErrorScale": 1.0,
+            "lodTransitionHysteresisPixels": 0.3499999940395355,
+            "lodTransitionStableFrames": 3,
+            "maxLodDrop": 0,
+            "preloadBias": 1.0
+        }
+    },
+    "validationEnabled": true
 }

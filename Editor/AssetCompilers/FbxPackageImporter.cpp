@@ -120,6 +120,24 @@ namespace TerraEngine::AssetPipeline
 			return generatedSettings;
 		}
 
+		const GeneratedModelMeshVirtualGeometrySettings*
+			FindMeshVirtualGeometrySettings(
+				const FbxPackageImportOptions& options,
+				const TerraEngine::UUID& meshGuid)
+		{
+			for (const ModelPackageMeshVirtualGeometryOverride& override :
+				options.virtualGeometryMeshOverrides)
+			{
+				if (override.meshGuid == meshGuid)
+				{
+					return &override.settings;
+				}
+			}
+			return options.hasVirtualGeometrySettings
+				? &options.virtualGeometrySettings
+				: nullptr;
+		}
+
 		void PopulateVirtualGeometryTargetDiagnostics(const MeshCompileReport& report, GeneratedModelMeshAsset& mesh)
 		{
 			mesh.virtualGeometryTargets.clear();
@@ -1150,6 +1168,54 @@ namespace TerraEngine::AssetPipeline
 			}};
 		}
 
+		aiMatrix4x4 ToAssimpMatrix(
+			const TerraEngine::Animation::AnimationMatrix4x4& matrix)
+		{
+			const auto& values = matrix.values;
+			return {
+				values[0u], values[1u], values[2u], values[3u],
+				values[4u], values[5u], values[6u], values[7u],
+				values[8u], values[9u], values[10u], values[11u],
+				values[12u], values[13u], values[14u], values[15u]
+			};
+		}
+
+		aiMatrix4x4 ToAssimpMatrix(
+			const TerraEngine::Animation::AnimationTransform& transform)
+		{
+			// Animation runtime palettes compose local transforms as T * R * S.
+			// Rebuild that exact affine matrix here so the imported bind hierarchy
+			// is checked in the same representable space used by CPU and GPU skinning.
+			const float x = transform.rotation.x;
+			const float y = transform.rotation.y;
+			const float z = transform.rotation.z;
+			const float w = transform.rotation.w;
+			const float xx = x * x;
+			const float yy = y * y;
+			const float zz = z * z;
+			const float xy = x * y;
+			const float xz = x * z;
+			const float yz = y * z;
+			const float wx = w * x;
+			const float wy = w * y;
+			const float wz = w * z;
+			return {
+				(1.0f - 2.0f * (yy + zz)) * transform.scale.x,
+				(2.0f * (xy - wz)) * transform.scale.y,
+				(2.0f * (xz + wy)) * transform.scale.z,
+				transform.translation.x,
+				(2.0f * (xy + wz)) * transform.scale.x,
+				(1.0f - 2.0f * (xx + zz)) * transform.scale.y,
+				(2.0f * (yz - wx)) * transform.scale.z,
+				transform.translation.y,
+				(2.0f * (xz - wy)) * transform.scale.x,
+				(2.0f * (yz + wx)) * transform.scale.y,
+				(1.0f - 2.0f * (xx + yy)) * transform.scale.z,
+				transform.translation.z,
+				0.0f, 0.0f, 0.0f, 1.0f
+			};
+		}
+
 		TerraEngine::Animation::AnimationMatrix4x4 IdentityAnimationMatrix()
 		{
 			return {{
@@ -1725,6 +1791,69 @@ namespace TerraEngine::AssetPipeline
 			return true;
 		}
 
+		bool TryBuildAuthoredBindTransforms(
+			const std::vector<FbxAnimatedNode>& nodes,
+			const std::vector<bool>& deformingNodes,
+			const std::vector<TerraEngine::Animation::AnimationMatrix4x4>& inverseBinds,
+			std::vector<TerraEngine::Animation::AnimationTransform>& output,
+			ModelPackageImportResult& package)
+		{
+			if (nodes.size() != deformingNodes.size()
+				|| nodes.size() != inverseBinds.size())
+			{
+				return false;
+			}
+
+			output.resize(nodes.size());
+			std::vector<aiMatrix4x4> resolvedGlobals(nodes.size());
+			for (std::size_t index = 0u; index < nodes.size(); ++index)
+			{
+				const std::int32_t parentIndex = nodes[index].parentIndex;
+				if (parentIndex >= static_cast<std::int32_t>(index)
+					|| parentIndex < -1)
+				{
+					AddDiagnostic(
+						package,
+						ModelDiagnosticSeverity::Error,
+						"FbxSkeletonBindHierarchyInvalid",
+						nodes[index].semanticKey,
+						"The FBX bind hierarchy does not place each parent before its child.",
+						"Re-export one acyclic parent-first skeleton hierarchy.");
+					return false;
+				}
+
+				const aiMatrix4x4 parentGlobal = parentIndex < 0
+					? aiMatrix4x4()
+					: resolvedGlobals[static_cast<std::size_t>(parentIndex)];
+				if (!deformingNodes[index])
+				{
+					// Non-deforming hierarchy nodes retain their authored local TRS.
+					// They still inherit any corrected deforming ancestor so sockets
+					// and animated descendants remain attached to the resolved bind.
+					output[index] = nodes[index].localTransform;
+					resolvedGlobals[index] = ComposeSourceGlobalTransform(
+						parentGlobal,
+						ToAssimpMatrix(output[index]));
+					continue;
+				}
+
+				// Assimp's offset is the authoritative mesh-to-bone bind transform.
+				// Its inverse is therefore the bone's package-space bind model. Derive
+				// the local joint from that model instead of treating the FBX scene's
+				// frame-zero transform as the skin bind pose.
+				aiMatrix4x4 desiredGlobal = ToAssimpMatrix(inverseBinds[index]);
+				desiredGlobal.Inverse();
+				aiMatrix4x4 inverseParent = parentGlobal;
+				inverseParent.Inverse();
+				const aiMatrix4x4 desiredLocal = inverseParent * desiredGlobal;
+				output[index] = ToAnimationTransform(desiredLocal);
+				resolvedGlobals[index] = ComposeSourceGlobalTransform(
+					parentGlobal,
+					ToAssimpMatrix(output[index]));
+			}
+			return true;
+		}
+
 		std::unordered_map<std::string, std::vector<std::size_t>> ExtractMorphTargets(
 			const FbxPackageImportOptions& options,
 			const aiScene& scene,
@@ -2069,6 +2198,17 @@ namespace TerraEngine::AssetPipeline
 			SkinnedMeshCookSettings settings;
 			settings.sourceSkeletonJointCount = static_cast<std::uint32_t>(skeleton.asset.joints.size());
 			settings.skeletonCompatibilityFingerprint = skeleton.asset.compatibilityFingerprint;
+			const GeneratedModelMeshVirtualGeometrySettings* meshSettings =
+				FindMeshVirtualGeometrySettings(
+					options,
+					package.generatedMeshes.front().guid);
+			if (meshSettings != nullptr)
+			{
+				// The deformable recook publishes the final TEMF, so it must use
+				// the exact per-child LOD thresholds selected for this mesh.
+				settings.virtualGeometrySettings =
+					ToCompileSettings(*meshSettings);
+			}
 			SkinnedMeshCookReport report;
 			const std::filesystem::path compiledPath = options.buildRoot / package.generatedMeshes.front().compiledPath;
 			if (!CompileSkinnedMeshFromRaw(options.sourceRelativePath, compiledPath, cookInput, &report, settings))
@@ -2144,14 +2284,15 @@ namespace TerraEngine::AssetPipeline
 		std::uint64_t BuildSkeletonCompatibilityFingerprint(
 			const std::vector<FbxAnimatedNode>& nodes,
 			const std::vector<bool>& deformingNodes,
-			const std::vector<TerraEngine::Animation::AnimationMatrix4x4>& inverseBinds)
+			const std::vector<TerraEngine::Animation::AnimationMatrix4x4>& inverseBinds,
+			const std::vector<TerraEngine::Animation::AnimationTransform>& bindTransforms)
 		{
 			std::uint64_t hash = 1469598103934665603ull;
 			for (std::size_t index = 0u; index < nodes.size(); ++index)
 			{
 				hash = AppendStablePodHash(hash, nodes[index].stableId);
 				hash = AppendStablePodHash(hash, nodes[index].parentIndex);
-				hash = AppendStablePodHash(hash, nodes[index].localTransform);
+				hash = AppendStablePodHash(hash, bindTransforms[index]);
 				const std::uint8_t deforming = deformingNodes[index] ? 1u : 0u;
 				hash = AppendStablePodHash(hash, deforming);
 				hash = AppendStablePodHash(hash, inverseBinds[index]);
@@ -2208,6 +2349,16 @@ namespace TerraEngine::AssetPipeline
 					"Split the character into supported skeletons before reimporting.");
 				return std::nullopt;
 			}
+			std::vector<AnimationTransform> bindTransforms;
+			if (!TryBuildAuthoredBindTransforms(
+				nodes,
+				deformingNodes,
+				inverseBinds,
+				bindTransforms,
+				package))
+			{
+				return std::nullopt;
+			}
 
 			FbxGeneratedSkeleton generated;
 			generated.semanticKey = "skeleton:scene";
@@ -2220,7 +2371,11 @@ namespace TerraEngine::AssetPipeline
 
 			SkeletonAsset skeleton;
 			skeleton.assetId = ToAnimationGuid(generated.guid);
-			skeleton.compatibilityFingerprint = BuildSkeletonCompatibilityFingerprint(nodes, deformingNodes, inverseBinds);
+			skeleton.compatibilityFingerprint = BuildSkeletonCompatibilityFingerprint(
+				nodes,
+				deformingNodes,
+				inverseBinds,
+				bindTransforms);
 			skeleton.referencePoseHash = skeleton.compatibilityFingerprint;
 			skeleton.rootJointIndex = 0u;
 			skeleton.source.unitScaleMeters = conversion.unitScaleMeters;
@@ -2234,7 +2389,7 @@ namespace TerraEngine::AssetPipeline
 				SkeletonJoint joint;
 				joint.stableId = nodes[index].stableId;
 				joint.parentIndex = nodes[index].parentIndex;
-				joint.localBindTransform = nodes[index].localTransform;
+				joint.localBindTransform = bindTransforms[index];
 				joint.deformsMesh = deformingNodes[index];
 				joint.displayName = nodes[index].displayName;
 				joint.normalizedSourcePath = nodes[index].semanticKey;
@@ -2516,6 +2671,7 @@ namespace TerraEngine::AssetPipeline
 			const FbxPackageImportOptions& options,
 			const aiScene& scene,
 			const FbxNodeLookup& lookup,
+			const std::vector<FbxAnimatedNode>& nodes,
 			const std::vector<bool>& deformingNodes,
 			const std::unordered_map<std::string, std::vector<std::size_t>>& morphTargetsByMeshName,
 			const std::vector<FbxGeneratedMorphTarget>& morphTargets,
@@ -2657,20 +2813,44 @@ namespace TerraEngine::AssetPipeline
 					FbxNodeAnimationChannel channel;
 					channel.targetStableId = skeleton.asset.joints[*nodeIndex].stableId;
 					channel.targetSemanticKey = skeleton.asset.joints[*nodeIndex].normalizedSourcePath;
+					// Assimp animation keys are absolute locals relative to the
+					// exported scene/node pose. The skeleton bind locals above are
+					// reconstructed from the authoritative skin offsets. Apply the
+					// fixed B * inverse(S) correction so every animated key carries
+					// the same motion from the authored skin bind instead of snapping
+					// selected bones back into the exporter frame-zero hierarchy.
+					aiMatrix4x4 inverseSourceLocal = ToAssimpMatrix(
+						nodes[*nodeIndex].localTransform);
+					inverseSourceLocal.Inverse();
+					const aiMatrix4x4 localBindCorrection =
+						ToAssimpMatrix(
+							skeleton.asset.joints[*nodeIndex].localBindTransform)
+						* inverseSourceLocal;
+					aiVector3D correctionScale;
+					aiVector3D correctionTranslation;
+					aiQuaternion correctionRotation;
+					localBindCorrection.Decompose(
+						correctionScale,
+						correctionRotation,
+						correctionTranslation);
 					for (unsigned int keyIndex = 0u; keyIndex < sourceChannel->mNumPositionKeys; ++keyIndex)
 					{
 						const aiVectorKey& sourceKey = sourceChannel->mPositionKeys[keyIndex];
+						const aiVector3D rebased =
+							TransformPoint(localBindCorrection, sourceKey.mValue);
 						AppendOrReplaceCollapsedKey(channel.translations, FbxVectorKey{
 							ToFixedAnimationTick(sourceKey.mTime, ticksPerSecond, sourceOrigin),
-							{ sourceKey.mValue.x, sourceKey.mValue.y, sourceKey.mValue.z }
+							{ rebased.x, rebased.y, rebased.z }
 						}, collapsedTimestamp);
 					}
 					for (unsigned int keyIndex = 0u; keyIndex < sourceChannel->mNumRotationKeys; ++keyIndex)
 					{
 						const aiQuatKey& sourceKey = sourceChannel->mRotationKeys[keyIndex];
+						const aiQuaternion rebased =
+							correctionRotation * sourceKey.mValue;
 						AppendOrReplaceCollapsedKey(channel.rotations, FbxQuaternionKey{
 							ToFixedAnimationTick(sourceKey.mTime, ticksPerSecond, sourceOrigin),
-							NormalizeAnimationQuaternion(sourceKey.mValue)
+							NormalizeAnimationQuaternion(rebased)
 						}, collapsedTimestamp);
 					}
 					for (unsigned int keyIndex = 0u; keyIndex < sourceChannel->mNumScalingKeys; ++keyIndex)
@@ -2678,7 +2858,11 @@ namespace TerraEngine::AssetPipeline
 						const aiVectorKey& sourceKey = sourceChannel->mScalingKeys[keyIndex];
 						AppendOrReplaceCollapsedKey(channel.scales, FbxVectorKey{
 							ToFixedAnimationTick(sourceKey.mTime, ticksPerSecond, sourceOrigin),
-							{ sourceKey.mValue.x, sourceKey.mValue.y, sourceKey.mValue.z }
+							{
+								correctionScale.x * sourceKey.mValue.x,
+								correctionScale.y * sourceKey.mValue.y,
+								correctionScale.z * sourceKey.mValue.z
+							}
 						}, collapsedTimestamp);
 					}
 
@@ -3107,8 +3291,14 @@ namespace TerraEngine::AssetPipeline
 		{
 			const std::filesystem::path compiledMeshPath = options.buildRoot / packageMesh.compiledPath;
 			MeshCompileReport compileReport{};
-			const VirtualGeometryAdaptiveCompileSettings compileSettings = ToCompileSettings(options.virtualGeometrySettings);
-			const VirtualGeometryAdaptiveCompileSettings* compileSettingsPtr = options.hasVirtualGeometrySettings ? &compileSettings : nullptr;
+			const GeneratedModelMeshVirtualGeometrySettings* resolvedSettings =
+				FindMeshVirtualGeometrySettings(options, packageMesh.guid);
+			const VirtualGeometryAdaptiveCompileSettings compileSettings =
+				resolvedSettings != nullptr
+					? ToCompileSettings(*resolvedSettings)
+					: MakeDefaultVirtualGeometryAdaptiveCompileSettings();
+			const VirtualGeometryAdaptiveCompileSettings* compileSettingsPtr =
+				resolvedSettings != nullptr ? &compileSettings : nullptr;
 			VirtualGeometryConeSafetyCookSettings coneSafetySettings{};
 			coneSafetySettings.proveOneSidedOpaqueClusters = false;
 			coneSafetySettings.disabledReason = "FBX package meshes currently merge material safety, so cone culling waits for per-cluster material proof.";
@@ -3118,7 +3308,9 @@ namespace TerraEngine::AssetPipeline
 				AddDiagnostic(result, ModelDiagnosticSeverity::Error, "MeshCompileFailed", packageMesh.compiledPath.generic_string(), "Extracted FBX geometry failed Terra mesh compilation.");
 			}
 			ReportProgress(options, 0.90f, "Mesh Metadata", "Reading compiled mesh metadata.");
-			packageMesh.virtualGeometrySettings = ToGeneratedSettings(compileReport.virtualGeometry.adaptiveSettings, options.hasVirtualGeometrySettings);
+			packageMesh.virtualGeometrySettings = ToGeneratedSettings(
+				compileReport.virtualGeometry.adaptiveSettings,
+				resolvedSettings != nullptr);
 			PopulateVirtualGeometryTargetDiagnostics(compileReport, packageMesh);
 			PopulateGeneratedMeshVirtualGeometryMetadata(compiledMeshPath, packageMesh, result.diagnostics);
 			const std::uint32_t materialAssignmentCount = CountMaterialAssignmentsForMesh(result, packageMesh.guid);
@@ -3139,11 +3331,13 @@ namespace TerraEngine::AssetPipeline
 		result.package.animationManifest.packageGuid = options.packageGuid;
 		result.package.animationManifest.sourceHashHex = result.package.package.sourceHashHex;
 		result.package.animationManifest.importerName = "AssimpFbxPackageImporter";
-		// Version 4 preserves the authored FBX skin-bind matrices instead of
-		// rebuilding them from scene-node transforms. The AssetDatabase compares
-		// this importer recipe version during startup so version-3 packages recook.
-		result.package.animationManifest.importerVersion = "4";
-		result.package.animationManifest.settingsFingerprintHex = "fbx-meters-pivots-authored-skin-bind-v4";
+		// Keep the generated animation manifest on the same recipe version used by
+		// AssetDatabase invalidation. Version 6 aligns both the skeleton bind locals
+		// and absolute clip keys to the authored Assimp skin-offset hierarchy.
+		result.package.animationManifest.importerVersion =
+			GetModelPackageImporterVersion(options.sourcePath);
+		result.package.animationManifest.settingsFingerprintHex =
+			"fbx-meters-pivots-authored-skin-bind-and-clip-v6";
 
 		if (result.package.status == ModelImportStatus::Failed)
 		{
@@ -3297,6 +3491,7 @@ namespace TerraEngine::AssetPipeline
 					options,
 					*scene,
 					nodeLookup,
+					result.animation.nodes,
 					deformingNodes,
 					morphTargetsByMeshName,
 					result.animation.morphTargets,

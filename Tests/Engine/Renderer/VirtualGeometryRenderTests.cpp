@@ -576,6 +576,28 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(4u, farRange.meshletCount, "Selected LOD range should preserve cooked meshlet count.");
 		});
 
+		registry.Add("VirtualGeometry.Render.LodSelection.MeshLodScalePreservesDetailLonger", [](TestContext& context) {
+			VirtualGeometryAssetRuntime asset{};
+			asset.detailLevels = {
+				{ 0u, 0u, 16u, 1024u, 0.0f, 1.0f, glm::vec3(-1.0f), glm::vec3(1.0f) },
+				{ 1u, 16u, 8u, 512u, 0.01f, 0.5f, glm::vec3(-1.0f), glm::vec3(1.0f) },
+				{ 2u, 24u, 4u, 128u, 0.02f, 0.125f, glm::vec3(-1.0f), glm::vec3(1.0f) }
+			};
+
+			VirtualGeometryQualityProfile defaultQuality = MakeDefaultVirtualGeometryQualityProfile();
+			defaultQuality.maxLodDrop = 2u;
+			VirtualGeometryQualityProfile highDetailQuality = defaultQuality;
+			highDetailQuality.lodErrorScale = 5.0f;
+
+			const TerraEngine::Renderer::VirtualGeometryDrawRange defaultRange =
+				RenderSystem::SelectVirtualGeometryLodRange(asset, defaultQuality, 160.0f, true, true);
+			const TerraEngine::Renderer::VirtualGeometryDrawRange highDetailRange =
+				RenderSystem::SelectVirtualGeometryLodRange(asset, highDetailQuality, 160.0f, true, true);
+
+			context.ExpectEqual(2u, defaultRange.selectedLodIndex, "Default quality should select the coarse range at this projected size.");
+			context.ExpectEqual(0u, highDetailRange.selectedLodIndex, "A larger Mesh LOD Scale should retain LOD0 at the same projected size.");
+		});
+
 		registry.Add("VirtualGeometry.Render.LodSelection.ReachesEveryCookedDetailLevel", [](TestContext& context) {
 			VirtualGeometryAssetRuntime asset{};
 			asset.detailLevels = {

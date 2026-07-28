@@ -110,6 +110,7 @@ add_executable(TerraEngine-EditorTests
 	AssetPipeline/VirtualGeometryInspectorTests.cpp
 	AssetPipeline/VirtualGeometryScalingAssetPipelineTests.cpp
 	AssetPipeline/VirtualGeometryMeshCompilerTests.cpp
+	AssetPipeline/AnimatedVirtualPageFormatTests.cpp
 	AssetPipeline/VirtualGeometryPackageImportTests.cpp
 	Renderer/GameViewStatsOverlayTests.cpp
 	Renderer/CheckedImGuiVulkanBridgeTests.cpp
@@ -255,7 +256,10 @@ set_target_properties(TerraEngine-EditorTests PROPERTIES
 )
 
 if(MSVC)
-	target_compile_options(TerraEngine-EditorTests PRIVATE /FS)
+	# The editor test binary intentionally compiles production translation units with
+	# extensive reflection and automation coverage, which can exceed COFF's default
+	# section count in optimized builds. /bigobj preserves that coverage.
+	target_compile_options(TerraEngine-EditorTests PRIVATE /FS /bigobj)
 endif()
 
 target_compile_definitions(TerraEngine-EditorTests

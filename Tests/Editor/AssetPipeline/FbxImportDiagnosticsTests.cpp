@@ -320,6 +320,7 @@ namespace TerraEngine::EditorTests
 			std::size_t verifiedMeshCount = 0u;
 			std::size_t verifiedVertexCount = 0u;
 			float largestBindError = 0.0f;
+			std::vector<std::pair<std::size_t, float>> meshBindErrors;
 			for (const auto& skin : result.animation.skinnedMeshes)
 			{
 				context.Expect(skin.sourceMeshIndex < scene->mNumMeshes
@@ -333,6 +334,7 @@ namespace TerraEngine::EditorTests
 
 				const aiMesh& mesh = *scene->mMeshes[skin.sourceMeshIndex];
 				const Matrix4& placement = meshPlacements[static_cast<unsigned int>(skin.sourceMeshIndex)].front();
+				float meshBindError = 0.0f;
 				std::vector<std::vector<std::pair<std::size_t, float>>> influences(mesh.mNumVertices);
 				for (const auto& sourceInfluence : skin.influences)
 				{
@@ -369,20 +371,30 @@ namespace TerraEngine::EditorTests
 							deformedVertex[component] += transformed[component] * normalizedWeight;
 						}
 					}
-					largestBindError = std::max(largestBindError, Distance(cookedVertex, deformedVertex));
+					const float bindError = Distance(cookedVertex, deformedVertex);
+					meshBindError = std::max(meshBindError, bindError);
+					largestBindError = std::max(largestBindError, bindError);
 					++verifiedVertexCount;
 				}
+				meshBindErrors.push_back({ skin.sourceMeshIndex, meshBindError });
 				++verifiedMeshCount;
 			}
 
 			// Keep the measured counts and maximum displacement in the failure so a
 			// future real-model regression identifies transform error versus missing
 			// corpus coverage without requiring another instrumented build.
+			std::string sectionErrors;
+			for (const auto& [sourceMeshIndex, error] : meshBindErrors)
+			{
+				sectionErrors += " mesh[" + std::to_string(sourceMeshIndex)
+					+ "]=" + std::to_string(error);
+			}
 			context.Expect(verifiedMeshCount == 2u && verifiedVertexCount > 0u && largestBindError < 0.002f,
 				"At bind pose, every weighted package-space vertex must remain fixed after the cooked global-bone/inverse-bind palette is applied. "
 				"Verified meshes=" + std::to_string(verifiedMeshCount)
 				+ ", vertices=" + std::to_string(verifiedVertexCount)
-				+ ", cooked maximum error=" + std::to_string(largestBindError) + ".");
+				+ ", cooked maximum error=" + std::to_string(largestBindError)
+				+ ", section errors:" + sectionErrors + ".");
 		});
 	}
 }

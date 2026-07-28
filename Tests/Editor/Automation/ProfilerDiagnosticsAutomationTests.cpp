@@ -61,6 +61,17 @@ namespace TerraEngine::EditorTests
 			context.Expect(source.find("renderer.virtualGeometry.stats") != std::string::npos, "Automation should retain the structured virtual geometry stats tool.");
 			context.Expect(source.find("\"meshletsSelected\"") != std::string::npos, "Virtual geometry automation should expose meshlet counters as fields.");
 			context.Expect(source.find("\"pageResidency\"") != std::string::npos, "Virtual geometry automation should expose page residency as structured data.");
+			context.Expect(source.find("\"animatedVirtualGeometry\"") != std::string::npos,
+				"Direct virtual geometry stats must expose the bounded animated-page snapshot.");
+			context.Expect(source.find("\"diagnosticCoalesced\"") != std::string::npos
+					&& source.find("\"diagnosticDropped\"") != std::string::npos,
+				"Animated-page automation must preserve bounded coalesced and dropped diagnostic counters.");
+			context.Expect(source.find("\"animatedPageDirectoryAvailable\"") != std::string::npos
+					&& source.find("\"animatedPageEntryCount\"") != std::string::npos
+					&& source.find("\"animatedPageSectionSetCount\"") != std::string::npos,
+				"Animation diagnostics must explain loaded-mesh page-demand eligibility without exposing page bytes.");
+			context.Expect(source.find("\"animatedPageDemandCount\"") != std::string::npos,
+				"Animation diagnostics must expose the immutable frame's resulting animated-page demand count.");
 		});
 
 		registry.Add("ProfilerDiagnosticsAutomation.SceneViewPerformanceState.IsAdditiveAndStructured", [](TestContext& context) {

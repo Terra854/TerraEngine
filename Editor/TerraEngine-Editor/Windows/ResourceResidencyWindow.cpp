@@ -1136,6 +1136,84 @@ void ResourceResidencyWindow::DrawVirtualGeometrySummary()
 		ImGui::EndTable();
 	}
 
+	if(ImGui::BeginTable(
+		"ResourceAnimatedVirtualGeometrySummary",
+		10,
+		ImGuiTableFlags_Borders
+			| ImGuiTableFlags_RowBg
+			| ImGuiTableFlags_SizingStretchProp))
+	{
+		ImGui::TableSetupColumn("View");
+		ImGui::TableSetupColumn("Animated Mode");
+		ImGui::TableSetupColumn("Demand/Dispatch");
+		ImGui::TableSetupColumn("Reuse/Fallback");
+		ImGui::TableSetupColumn("Current Bytes");
+		ImGui::TableSetupColumn("History Bytes");
+		ImGui::TableSetupColumn("Bounds Bytes");
+		ImGui::TableSetupColumn("High Water");
+		ImGui::TableSetupColumn("Diagnostics E/C/D");
+		ImGui::TableSetupColumn("Shader/Fallback");
+		ImGui::TableHeadersRow();
+		for(const auto& snapshot : snapshots)
+		{
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			ImGui::TextUnformatted(ToString(snapshot.viewType));
+			ImGui::TableSetColumnIndex(1);
+			ImGui::TextUnformatted(
+				snapshot.animatedPageDemandCount == 0u
+					? "static/dormant"
+					: "compute + streamed pages");
+			ImGui::TableSetColumnIndex(2);
+			ImGui::Text(
+				"%u/%u",
+				snapshot.animatedPageDemandCount,
+				snapshot.animatedUniqueDispatchCount);
+			ImGui::TableSetColumnIndex(3);
+			ImGui::Text(
+				"%u/%u",
+				snapshot.animatedReuseCount,
+				snapshot.animatedFallbackCount);
+			ImGui::TableSetColumnIndex(4);
+			ImGui::Text(
+				"%llu",
+				static_cast<unsigned long long>(
+					snapshot.deformationCurrentBytes));
+			ImGui::TableSetColumnIndex(5);
+			ImGui::Text(
+				"%llu",
+				static_cast<unsigned long long>(
+					snapshot.deformationHistoryBytes));
+			ImGui::TableSetColumnIndex(6);
+			ImGui::Text(
+				"%llu",
+				static_cast<unsigned long long>(
+					snapshot.deformationBoundsBytes));
+			ImGui::TableSetColumnIndex(7);
+			ImGui::Text(
+				"%llu",
+				static_cast<unsigned long long>(
+					snapshot.deformationHighWaterBytes));
+			ImGui::TableSetColumnIndex(8);
+			ImGui::Text(
+				"%u/%u/%u",
+				snapshot.animatedDiagnosticEmitted,
+				snapshot.animatedDiagnosticCoalesced,
+				snapshot.animatedDiagnosticDropped);
+			ImGui::TableSetColumnIndex(9);
+			ImGui::Text(
+				"%s%s%s",
+				snapshot.animatedShaderContractValid
+					? "contract ok"
+					: "contract rejected",
+				snapshot.animatedFallbackReason.empty()
+					? ""
+					: ": ",
+				snapshot.animatedFallbackReason.c_str());
+		}
+		ImGui::EndTable();
+	}
+
 	if (ImGui::BeginTable("ResourceVirtualGeometryRuntimeCounters", 11, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
 	{
 		ImGui::TableSetupColumn("View");

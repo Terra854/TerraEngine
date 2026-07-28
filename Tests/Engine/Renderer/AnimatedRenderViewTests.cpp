@@ -256,10 +256,38 @@ namespace TerraEngine::Tests
 				"A fully identified Visual GPU packet must bind without manufacturing a CPU pose.");
 		});
 
-		registry.Add("Renderer.AnimationView.ActiveDeformationRequiresWholeOwnerFallback", [](TestContext& context) {
+		registry.Add("Renderer.AnimationView.PageCapabilitySurvivesPoseBindingResolution", [](TestContext& context) {
 			using namespace TerraEngine::Renderer;
 			auto request = BuildGpuVisualBindingRequest();
 			request.gpuVisualIdentity = BuildGpuVisualIdentity();
+			const AnimationRenderBinding legacy =
+				RenderSystem::ResolveAnimationRenderBinding(request);
+			request.pageLocalDeformationAvailable = true;
+			const AnimationRenderBinding pageLocal =
+				RenderSystem::ResolveAnimationRenderBinding(request);
+
+			AnimationRenderBinding bindPose = legacy;
+			bindPose.source = AnimationRenderPoseSource::BindPose;
+			AnimationRenderBinding safePose = legacy;
+			safePose.safePose = true;
+			safePose.status = AnimationRenderBindingStatus::SafePose;
+			AnimationRenderBinding staticBinding{};
+
+			context.Expect(
+				legacy.RequiresOwnerMeshDeformationFallback()
+					&& pageLocal.pageLocalDeformationAvailable
+					&& !pageLocal.RequiresOwnerMeshDeformationFallback()
+					&& !bindPose.RequiresOwnerMeshDeformationFallback()
+					&& !safePose.RequiresOwnerMeshDeformationFallback()
+					&& !staticBinding.RequiresOwnerMeshDeformationFallback(),
+				"Pose binding must preserve the mesh's AVPB capability while legacy animated assets retain the complete-owner fallback.");
+		});
+
+		registry.Add("Renderer.AnimationView.ActiveDeformationFailsOpenAtCpuBroadphase", [](TestContext& context) {
+			using namespace TerraEngine::Renderer;
+			auto request = BuildGpuVisualBindingRequest();
+			request.gpuVisualIdentity = BuildGpuVisualIdentity();
+			request.pageLocalDeformationAvailable = true;
 			const AnimationRenderBinding active =
 				RenderSystem::ResolveAnimationRenderBinding(request);
 
@@ -271,11 +299,13 @@ namespace TerraEngine::Tests
 			AnimationRenderBinding staticBinding{};
 
 			context.Expect(
-				active.RequiresOwnerMeshDeformationFallback()
-					&& !bindPose.RequiresOwnerMeshDeformationFallback()
-					&& !safePose.RequiresOwnerMeshDeformationFallback()
-					&& !staticBinding.RequiresOwnerMeshDeformationFallback(),
-				"Only a complete non-bind-pose deformation may replace page-local virtual geometry with one whole owner-mesh draw.");
+				active.RequiresConservativeCoarseVisibility(),
+				"An active compute-deformed mesh must survive static CPU broadphase culling so current page bounds can decide visibility.");
+			context.Expect(
+				!bindPose.RequiresConservativeCoarseVisibility()
+					&& !safePose.RequiresConservativeCoarseVisibility()
+					&& !staticBinding.RequiresConservativeCoarseVisibility(),
+				"Bind pose, safe pose, and static meshes may continue using their CPU spatial bounds.");
 		});
 
 		registry.Add("Renderer.AnimationView.HybridAndMismatchedGpuIdentityFailOpen", [](TestContext& context) {

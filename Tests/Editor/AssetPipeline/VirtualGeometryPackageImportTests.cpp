@@ -173,6 +173,34 @@ namespace TerraEngine::EditorTests
 				context.Expect(mesh.virtualGeometryConeSafetySummary.metadataValid, "Package mesh should preserve cone safety metadata from the compiled TEMF.");
 				context.Expect(mesh.virtualGeometryConeSafetySummary.disabledClusterCount > 0u, "Merged package mesh cone culling should stay disabled until per-cluster material proof exists.");
 			}
+			TerraEngine::AssetPipeline::GeneratedModelMeshAsset refreshedMesh =
+				result.generatedMeshes.front();
+			refreshedMesh.virtualGeometryTargets.assign(
+				refreshedMesh.virtualGeometryDetailLevels + 2u,
+				{});
+			for(auto& staleTarget : refreshedMesh.virtualGeometryTargets)
+			{
+				staleTarget.status = "Generated";
+			}
+			std::vector<TerraEngine::AssetPipeline::ModelImportDiagnostic>
+				refreshDiagnostics;
+			TerraEngine::AssetPipeline::
+				PopulateGeneratedMeshVirtualGeometryMetadata(
+					options.buildRoot / refreshedMesh.compiledPath,
+					refreshedMesh,
+					refreshDiagnostics);
+			const std::size_t publishedGeneratedTargetCount =
+				static_cast<std::size_t>(std::count_if(
+					refreshedMesh.virtualGeometryTargets.begin(),
+					refreshedMesh.virtualGeometryTargets.end(),
+					[](const auto& target) {
+						return target.status == "Generated";
+					}));
+			context.ExpectEqual(
+				static_cast<std::size_t>(
+					refreshedMesh.virtualGeometryDetailLevels),
+				publishedGeneratedTargetCount,
+				"Final TEMF inspection must replace stale inventory rows so the reported generated LOD count matches the renderable detail count.");
 			const std::filesystem::path generatedPrefabPath = options.assetRoot / result.generatedPrefabs.front().sourcePath;
 			context.Expect(std::filesystem::exists(generatedPrefabPath), "Generated package prefab should be written beside package child assets.");
 			const nlohmann::json prefabJson = nlohmann::json::parse(ReadTextFile(generatedPrefabPath));
@@ -355,6 +383,73 @@ namespace TerraEngine::EditorTests
 			context.Expect(TerraEngine::AssetPipeline::LoadModelPackageImportResult(sourceAssetPath, loaded), "Override package sidecar should reload.");
 			context.Expect(loaded.generatedMeshes.front().virtualGeometrySettings.hasOverride, "Generated mesh override flag should round-trip through the sidecar.");
 			context.ExpectEqual(static_cast<std::size_t>(2u), loaded.generatedMeshes.front().virtualGeometrySettings.targetRatios.size(), "Generated mesh override ratios should round-trip through the sidecar.");
+		});
+
+		registry.Add("VirtualGeometry.Editor.PackageImport.AppliesPercentageOverridesPerGeneratedMesh", [](TestContext& context) {
+			const std::filesystem::path tempRoot =
+				MakeVirtualGeometryPackageTempRoot("PerGeneratedMeshOverrides");
+			nlohmann::json document = LoadBaseGltfFixture();
+			nlohmann::json secondMesh = document["meshes"][0];
+			secondMesh["name"] = "Threshold_B";
+			document["meshes"][0]["name"] = "Threshold_A";
+			document["meshes"].push_back(secondMesh);
+			document["nodes"] = nlohmann::json::array({
+				{ { "name", "Node_A" }, { "mesh", 0 } },
+				{ { "name", "Node_B" }, { "mesh", 1 } }
+			});
+			document["scenes"][0]["nodes"] =
+				nlohmann::json::array({0, 1});
+
+			const std::filesystem::path fixturePath = WriteGltfFixture(
+				tempRoot,
+				"per-generated-mesh-overrides.gltf",
+				document);
+			const TerraEngine::UUID packageGuid = TerraEngine::GenerateUUID();
+			auto options = BuildPackageOptions(
+				tempRoot,
+				fixturePath,
+				"Models/per-generated-mesh-overrides.gltf",
+				packageGuid);
+			for(std::uint32_t meshIndex = 0U; meshIndex < 2U; ++meshIndex) {
+				TerraEngine::AssetPipeline::
+					ModelPackageMeshVirtualGeometryOverride override;
+				override.meshGuid =
+					TerraEngine::AssetPipeline::BuildStableGeneratedModelUuid(
+						packageGuid,
+						"gltf-mesh",
+						meshIndex);
+				override.settings.hasOverride = true;
+				override.settings.settingsSource = "PerMeshOverride";
+				override.settings.targetRatios = {1.0F, 0.5F};
+				override.settings.minimumUsefulTriangleReduction =
+					meshIndex == 0U ? 0.10F : 0.80F;
+				override.settings.minimumUsefulMeshletReduction =
+					meshIndex == 0U ? 0.20F : 0.90F;
+				options.virtualGeometryMeshOverrides.push_back(
+					std::move(override));
+			}
+
+			const auto result =
+				TerraEngine::AssetPipeline::ImportModelPackage(options);
+			context.Expect(result.status
+					!= TerraEngine::AssetPipeline::ModelImportStatus::Failed,
+				"A package with independent child thresholds should import.");
+			context.ExpectEqual(
+				static_cast<std::size_t>(2U),
+				result.generatedMeshes.size(),
+				"Both generated children should remain present.");
+			if(result.generatedMeshes.size() == 2U) {
+				context.ExpectEqual(
+					0.10F,
+					result.generatedMeshes[0].virtualGeometrySettings
+						.minimumUsefulTriangleReduction,
+					"The first generated mesh should keep its own triangle percentage.");
+				context.ExpectEqual(
+					0.90F,
+					result.generatedMeshes[1].virtualGeometrySettings
+						.minimumUsefulMeshletReduction,
+					"The second generated mesh should keep its own meshlet percentage.");
+			}
 		});
 
 		registry.Add("VirtualGeometry.Editor.PackageImport.UnsupportedContentStaysNonBlocking", [](TestContext& context) {

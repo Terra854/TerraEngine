@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include "Renderer/Deformation/GpuDeformationPlan.h"
 #include "Renderer/RenderTypes.h"
 #include "Utilities/UUID.h"
 #include "Core/Export.h"
@@ -320,6 +321,9 @@ namespace TerraEngine::Renderer {
 		std::vector<RenderFrameResourceRecord> textures;
 		std::vector<VirtualGeometryViewSelectionState> virtualGeometryViewSelections;
 		std::vector<VirtualGeometryViewVisibilitySnapshot> virtualGeometryVisibilitySnapshots;
+		// Every view contributes page demands here. Worker preparation sorts and
+		// deduplicates them into one renderer-owned deformation plan.
+		std::vector<DeformationPageDemand> animatedGeometryPageDemands;
 		RenderSettings renderSettings;
 		std::uint64_t resourceRevision = 0u;
 		std::uint64_t sceneRevision = 0u;
@@ -342,6 +346,11 @@ namespace TerraEngine::Renderer {
 	TERRAENGINE_API std::uint64_t BuildRenderInvalidationGenerationHash(const RenderInvalidationGenerationRecord& record);
 	TERRAENGINE_API std::uint64_t BuildSnapshotDeterministicHash(const RenderFrameSnapshot& snapshot);
 	TERRAENGINE_API std::uint64_t EstimateSnapshotWorkload(const RenderFrameSnapshot& snapshot);
+	// Resolves the union of physical animated pages selected by all prepared
+	// views. The returned demands preserve immutable generation identities while
+	// narrowing requestedViewMask to the views that can actually draw each page.
+	TERRAENGINE_API std::vector<DeformationPageDemand>
+		SelectAnimatedGeometryPageDemands(const RenderFrameSnapshot& snapshot);
 	TERRAENGINE_API VirtualGeometryViewSelectionState BuildVirtualGeometryViewSelectionState(const RenderFrameViewRequest& view, const std::vector<RenderFrameRenderableRecord>& renderables);
 	TERRAENGINE_API std::vector<VirtualGeometryViewSelectionState> BuildVirtualGeometryViewSelectionStates(const RenderFrameSnapshot& snapshot);
 	TERRAENGINE_API VirtualGeometryCounterSnapshot BuildVirtualGeometryCounterSnapshot(const VirtualGeometryViewSelectionState& state, VirtualGeometryCounterSource source);

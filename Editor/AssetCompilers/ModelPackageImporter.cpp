@@ -160,6 +160,37 @@ namespace TerraEngine::AssetPipeline
 			return stream.str();
 		}
 
+		std::string BuildVirtualGeometrySettingsFingerprint(
+			const ModelPackageImportOptions& options)
+		{
+			nlohmann::json document;
+			document["global"] = ToJson(options.virtualGeometrySettings);
+			document["hasGlobal"] = options.hasVirtualGeometrySettings;
+			std::vector<const ModelPackageMeshVirtualGeometryOverride*> overrides;
+			overrides.reserve(options.virtualGeometryMeshOverrides.size());
+			for (const ModelPackageMeshVirtualGeometryOverride& override :
+				options.virtualGeometryMeshOverrides)
+			{
+				overrides.push_back(&override);
+			}
+			std::sort(
+				overrides.begin(),
+				overrides.end(),
+				[](const auto* left, const auto* right)
+				{
+					return left->meshGuid < right->meshGuid;
+				});
+			document["meshes"] = nlohmann::json::array();
+			for (const ModelPackageMeshVirtualGeometryOverride* override :
+				overrides)
+			{
+				document["meshes"].push_back({
+					{ "meshGuid", TerraEngine::ToHexString(override->meshGuid) },
+					{ "settings", ToJson(override->settings) } });
+			}
+			return HashTextHex(document.dump());
+		}
+
 		void AddManifestSubAssetIfMissing(
 			AnimationImportManifest& manifest,
 			GeneratedAnimationSubAsset subAsset)
@@ -295,7 +326,10 @@ namespace TerraEngine::AssetPipeline
 			manifest.sourceHashHex = result.package.sourceHashHex;
 			manifest.importerName = GetModelPackageImporterName(liveOptions.sourcePath);
 			manifest.importerVersion = GetModelPackageImporterVersion(liveOptions.sourcePath);
-			manifest.settingsFingerprintHex = HashTextHex(ToJson(liveOptions.virtualGeometrySettings).dump());
+			// Include every package-child override so changing one animated mesh's
+			// percentage threshold invalidates exactly the published recipe.
+			manifest.settingsFingerprintHex =
+				BuildVirtualGeometrySettingsFingerprint(liveOptions);
 			manifest.lastKnownGoodGeneration = priorGeneration;
 			manifest.candidateGeneration = priorGeneration + 1u;
 			manifest.publishedGeneration = manifest.candidateGeneration;
@@ -835,7 +869,7 @@ namespace TerraEngine::AssetPipeline
 		// versions. Only importer recipe changes belong here.
 		if (IsFbxPackageSourceExtension(filePath))
 		{
-			return "4";
+			return "6";
 		}
 		if (IsGltfPackageSourceExtension(filePath))
 		{

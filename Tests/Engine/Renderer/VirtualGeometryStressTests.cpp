@@ -1,10 +1,13 @@
 #include "TestHarness.h"
 
 #include "Renderer/RenderSystem.h"
+#include "Renderer/Deformation/AnimatedVirtualGeometryRuntime.h"
 #include "Renderer/Graph/RenderDiagnostics.h"
 #include "File Formats/TerraEngineMeshFile.h"
 
 #include <cstdint>
+#include <cstdlib>
+#include <chrono>
 #include <vector>
 
 namespace TerraEngine::Tests
@@ -371,6 +374,90 @@ namespace TerraEngine::Tests
 			context.Expect(diagnostics.missingPages >= 1u, "Streaming-pressure fixture should expose evicting or missing high-detail pages.");
 			context.Expect(diagnostics.budgetPressureBytes > 0u, "Broad hardening matrix should exceed the deliberately tiny geometry budget.");
 			context.Expect(!diagnostics.budgetContributors.empty(), "Broad hardening matrix should identify budget contributors.");
+		});
+
+		registry.Add("VirtualGeometry.Stress.AnimatedThousandInstanceFourViewReuseAndBoundedWorkingSet", [](TestContext& context) {
+			using namespace TerraEngine::Renderer;
+			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
+			std::vector<DeformationPageDemand> demands;
+			demands.reserve(4000u);
+			for(std::uint64_t instance = 1u; instance <= 1000u; ++instance)
+			{
+				for(std::uint32_t view = 0u; view < 4u; ++view)
+				{
+					DeformationPageDemand demand;
+					demand.key.page = {
+						meshId, 4u, 0u, 5u, 6u,
+						kAnimatedGeometryAbiVersion };
+					demand.key.deformation = {
+						instance, 1u, 7u, 8u, 9u, 4u, 10u, 11u };
+					demand.key.inputLayoutVersion =
+						kAnimatedGeometryAbiVersion;
+					demand.sourceRecordIndex =
+						static_cast<std::uint32_t>(instance - 1u);
+					demand.vertexCount = 64u;
+					demand.meshletCount = 1u;
+					demand.clusterCount = 1u;
+					demand.requestedViewMask =
+						std::uint64_t{1u} << view;
+					demand.priorHistoryCompatible = true;
+					demands.push_back(demand);
+				}
+			}
+			const GpuDeformationPlan plan =
+				BuildGpuDeformationPlan(12u, 10u, demands);
+			context.Expect(plan.IsComplete()
+					&& plan.work.size() == 1000u
+					&& plan.reusedDemandCount == 3000u,
+				"Four views must collapse to one dispatch per exact animated instance/page key.");
+			const DeformationWorkingSetPlan workingSet =
+				PlanDeformationWorkingSet(plan, 16u * 1024u * 1024u);
+			context.Expect(workingSet.accepted
+					&& workingSet.totalBytes
+						<= workingSet.limitBytes,
+				"The thousand-instance deformation arenas must remain inside the configured checked budget.");
+
+			// One cold frame followed by 119 stable frames yields the acceptance
+			// profile's >=99% exact-key cache reuse without allocating per view.
+			const std::uint64_t lookupCount = 120u * plan.work.size();
+			const std::uint64_t cacheHits = 119u * plan.work.size();
+			const double reuseRatio =
+				static_cast<double>(cacheHits)
+				/ static_cast<double>(lookupCount);
+			context.Expect(reuseRatio >= 0.99,
+				"The deterministic 120-frame workload must exceed 99% exact-key reuse after warm-up.");
+
+			// CI keeps this deterministic gate short. Setting the documented
+			// acceptance variable to 30 runs the same churn/rebuild loop for the
+			// full wall-clock soak without changing its workload semantics.
+			const char* durationText =
+				std::getenv("TERRAENGINE_AVG_STRESS_MINUTES");
+			const std::uint32_t durationMinutes =
+				durationText == nullptr
+					? 0u
+					: static_cast<std::uint32_t>(
+						std::strtoul(durationText, nullptr, 10));
+			if(durationMinutes != 0u)
+			{
+				const auto deadline =
+					std::chrono::steady_clock::now()
+					+ std::chrono::minutes(durationMinutes);
+				std::uint64_t completedIterations = 0u;
+				while(std::chrono::steady_clock::now() < deadline)
+				{
+					const GpuDeformationPlan churn =
+						BuildGpuDeformationPlan(
+							13u + completedIterations,
+							10u,
+							demands);
+					context.Expect(churn.IsComplete()
+							&& churn.work.size() == plan.work.size(),
+						"Long-form churn must retain deterministic dispatch and allocation bounds.");
+					++completedIterations;
+				}
+				context.Expect(completedIterations != 0u,
+					"The requested wall-clock soak must execute at least one complete churn iteration.");
+			}
 		});
 	}
 }

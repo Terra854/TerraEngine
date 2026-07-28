@@ -3,6 +3,8 @@
 
 #include <cmath>
 #include <functional>
+#include <map>
+#include <unordered_map>
 #include <utility>
 
 namespace TerraEngine::Renderer {
@@ -797,6 +799,16 @@ namespace TerraEngine::Renderer {
 		SortByUuid(snapshot.materials, &RenderFrameResourceRecord::resourceId);
 		SortByUuid(snapshot.meshes, &RenderFrameResourceRecord::resourceId);
 		SortByUuid(snapshot.textures, &RenderFrameResourceRecord::resourceId);
+		std::sort(snapshot.animatedGeometryPageDemands.begin(),
+			snapshot.animatedGeometryPageDemands.end(),
+			[](const DeformationPageDemand& left, const DeformationPageDemand& right)
+			{
+				if(left.key != right.key)
+				{
+					return left.key < right.key;
+				}
+				return left.requestedViewMask < right.requestedViewMask;
+			});
 		std::sort(snapshot.virtualGeometryViewSelections.begin(), snapshot.virtualGeometryViewSelections.end(), [](const VirtualGeometryViewSelectionState& left, const VirtualGeometryViewSelectionState& right) {
 			if (left.outputId != right.outputId)
 			{
@@ -996,6 +1008,22 @@ namespace TerraEngine::Renderer {
 			HashCombine(hash, BuildAnimationRenderGenerationHash(renderable.animation));
 			HashCombine(hash, BuildRenderInvalidationGenerationHash(renderable.invalidation));
 		}
+		for(const DeformationPageDemand& demand : snapshot.animatedGeometryPageDemands)
+		{
+			HashCombine(hash, HashUuid(demand.key.page.meshId));
+			HashCombine(hash, demand.key.page.meshPayloadGeneration);
+			HashCombine(hash, demand.key.page.pageId);
+			HashCombine(hash, demand.key.page.pageContentGeneration);
+			HashCombine(hash, demand.key.page.residencyGeneration);
+			HashCombine(hash, demand.key.deformation.stableInstanceId);
+			HashCombine(hash, demand.key.deformation.animationPublicationGeneration);
+			HashCombine(hash, demand.key.deformation.rendererGeneration);
+			HashCombine(hash, demand.key.deformation.sceneGeneration);
+			HashCombine(hash, demand.requestedViewMask);
+			HashCombine(hash, demand.vertexCount);
+			HashCombine(hash, demand.meshletCount);
+			HashCombine(hash, demand.clusterCount);
+		}
 		for (const VirtualGeometryViewSelectionState& state : snapshot.virtualGeometryViewSelections)
 		{
 			HashCombine(hash, state.outputId);
@@ -1190,6 +1218,85 @@ namespace TerraEngine::Renderer {
 			+ static_cast<std::uint64_t>(snapshot.viewRequests.size() * 8u)
 			+ static_cast<std::uint64_t>(snapshot.virtualGeometryViewSelections.size() * 4u)
 			+ virtualGeometryClusterWork;
+	}
+
+	std::vector<DeformationPageDemand>
+	SelectAnimatedGeometryPageDemands(const RenderFrameSnapshot& snapshot)
+	{
+		// Resolve object ids through copied renderable publications. View
+		// selections deliberately do not retain animation pointers or live
+		// component handles, so this join is deterministic and worker-safe.
+		std::unordered_map<TerraEngine::UUID, std::uint64_t> stableInstances;
+		stableInstances.reserve(snapshot.renderables.size());
+		for(const RenderFrameRenderableRecord& renderable : snapshot.renderables)
+		{
+			if(renderable.objectId != TerraEngine::EMPTY_UUID
+				&& renderable.animation.stableInstanceId != 0u)
+			{
+				stableInstances.insert_or_assign(
+					renderable.objectId,
+					renderable.animation.stableInstanceId);
+			}
+		}
+
+		using SelectedPageKey = std::pair<std::uint64_t, std::uint32_t>;
+		std::map<SelectedPageKey, std::uint64_t> selectedViewMasks;
+		for(std::size_t viewIndex = 0u;
+			viewIndex < snapshot.virtualGeometryViewSelections.size();
+			++viewIndex)
+		{
+			// The ABI exposes a 64-bit view union. Additional diagnostic/capture
+			// views share the final overflow bit instead of silently losing their
+			// page demand.
+			const std::uint64_t viewMask =
+				std::uint64_t{1u} << std::min<std::size_t>(viewIndex, 63u);
+			const VirtualGeometryViewSelectionState& view =
+				snapshot.virtualGeometryViewSelections[viewIndex];
+			for(const GpuVirtualGeometryPacketRecord& packet :
+				view.gpuPacketRecords)
+			{
+				const bool residentPage =
+					packet.payloadSource
+						== VirtualGeometryPagePayloadSource::ResidentPagePayload
+					|| packet.payloadSource
+						== VirtualGeometryPagePayloadSource::ResidentFallbackPayload;
+				const auto stableInstance =
+					stableInstances.find(packet.objectId);
+				if(!residentPage || stableInstance == stableInstances.end())
+				{
+					continue;
+				}
+				// One coarse draw can expand into several independently resident
+				// page packets. Deformation must follow the emitted packet pages,
+				// otherwise only the draw's first page moves while every other
+				// page remains in bind pose.
+				selectedViewMasks[{
+					stableInstance->second,
+					packet.pageId
+				}] |= viewMask;
+			}
+		}
+
+		std::vector<DeformationPageDemand> selectedDemands;
+		selectedDemands.reserve(std::min(
+			snapshot.animatedGeometryPageDemands.size(),
+			selectedViewMasks.size()));
+		for(const DeformationPageDemand& demand :
+			snapshot.animatedGeometryPageDemands)
+		{
+			const auto selected = selectedViewMasks.find({
+				demand.key.deformation.stableInstanceId,
+				demand.key.page.pageId
+			});
+			if(selected == selectedViewMasks.end())
+			{
+				continue;
+			}
+			DeformationPageDemand selectedDemand = demand;
+			selectedDemand.requestedViewMask = selected->second;
+			selectedDemands.push_back(std::move(selectedDemand));
+		}
+		return selectedDemands;
 	}
 
 	VirtualGeometryViewSelectionState BuildVirtualGeometryViewSelectionState(const RenderFrameViewRequest& view, const std::vector<RenderFrameRenderableRecord>& renderables)
@@ -1541,6 +1648,54 @@ namespace TerraEngine::Renderer {
 		VirtualGeometryInactiveReason inactiveReason)
 	{
 		const VirtualGeometryQualityProfile quality = SanitizeVirtualGeometryQualityProfile(qualityProfile);
+		const auto ApplyAnimatedGeometryDiagnostics =
+			[&snapshot](VirtualGeometryViewDiagnosticsSnapshot& viewDiagnostics)
+		{
+			// Visibility snapshots are the preferred live path, while prepared
+			// selection states are the fallback path. Both must be enriched from
+			// the same frame-wide deformation demand list or MCP/editor views can
+			// incorrectly report zero work after compute deformation was accepted.
+			viewDiagnostics.animatedPageDemandCount =
+				static_cast<std::uint32_t>(
+					snapshot.animatedGeometryPageDemands.size());
+			if(snapshot.animatedGeometryPageDemands.empty())
+			{
+				return;
+			}
+			const std::uint64_t rendererGeneration =
+				snapshot.animatedGeometryPageDemands.front()
+					.key.deformation.rendererGeneration;
+			const GpuDeformationPlan deformation = BuildGpuDeformationPlan(
+				snapshot.frameId,
+				rendererGeneration,
+				snapshot.animatedGeometryPageDemands);
+			if(deformation.IsComplete())
+			{
+				viewDiagnostics.animatedUniqueDispatchCount =
+					static_cast<std::uint32_t>(deformation.work.size());
+				viewDiagnostics.animatedReuseCount =
+					deformation.reusedDemandCount;
+				viewDiagnostics.deformationCurrentBytes =
+					static_cast<std::uint64_t>(deformation.totalVertexCount)
+						* sizeof(GpuDeformedVertexRecord);
+				viewDiagnostics.deformationHistoryBytes =
+					viewDiagnostics.deformationCurrentBytes;
+				viewDiagnostics.deformationBoundsBytes =
+					static_cast<std::uint64_t>(
+						deformation.totalMeshletBoundsCount
+							+ deformation.totalClusterBoundsCount)
+						* sizeof(GpuDynamicBoundsRecord);
+				viewDiagnostics.deformationHighWaterBytes =
+					viewDiagnostics.deformationCurrentBytes
+						+ viewDiagnostics.deformationHistoryBytes
+						+ viewDiagnostics.deformationBoundsBytes;
+				return;
+			}
+			viewDiagnostics.animatedFallbackCount =
+				viewDiagnostics.animatedPageDemandCount;
+			viewDiagnostics.animatedFallbackReason =
+				deformation.rejectionReason;
+		};
 		if (!snapshot.virtualGeometryVisibilitySnapshots.empty())
 		{
 			std::vector<VirtualGeometryViewDiagnosticsSnapshot> diagnostics;
@@ -1549,6 +1704,7 @@ namespace TerraEngine::Renderer {
 			{
 				VirtualGeometryViewDiagnosticsSnapshot viewDiagnostics =
 					BuildVirtualGeometryDiagnosticsFromVisibilitySnapshot(visibility);
+				ApplyAnimatedGeometryDiagnostics(viewDiagnostics);
 				if (inactiveReason != VirtualGeometryInactiveReason::None)
 				{
 					viewDiagnostics.active = false;
@@ -1567,6 +1723,7 @@ namespace TerraEngine::Renderer {
 		{
 			VirtualGeometryViewDiagnosticsSnapshot viewDiagnostics;
 			viewDiagnostics.viewType = state.viewType;
+			viewDiagnostics.viewId = state.outputId;
 			viewDiagnostics.frameId = snapshot.frameId;
 			viewDiagnostics.active = true;
 			viewDiagnostics.inactiveReason = VirtualGeometryInactiveReason::None;
@@ -1599,6 +1756,7 @@ namespace TerraEngine::Renderer {
 			viewDiagnostics.lodTransitionHysteresisPixels = quality.lodTransitionHysteresisPixels;
 			viewDiagnostics.lodTransitionStableFrames = quality.lodTransitionStableFrames;
 			viewDiagnostics.geometryBudgetBytes = quality.geometryBudgetBytes;
+			ApplyAnimatedGeometryDiagnostics(viewDiagnostics);
 			viewDiagnostics.clusterSelection.selectedClusters = static_cast<std::uint32_t>(state.selectedClusters.size());
 			viewDiagnostics.clusterPacketCount = static_cast<std::uint32_t>(state.clusterPackets.size());
 			// Lightweight frame stats must expose the same packet and batch

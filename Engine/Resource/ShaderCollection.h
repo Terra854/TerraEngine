@@ -6,11 +6,22 @@
 
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
+#include <string>
 #include <vector>
 
 #include "Utilities/UUID.h"
 #include "File Formats/TerraEngineShaderFile.h"
+
+// EngineManaged collections author only surface behavior. A compatible
+// replacement may provide geometry stages after reflection proves it consumes
+// the same engine-owned static/animated geometry contract.
+enum class ShaderGeometryPolicy : std::uint32_t
+{
+	EngineManaged = 0u,
+	CompatibleReplacement = 1u
+};
 
 // Grouped shaders keyed by stage so render code can bind a single UUID and pull
 // every stage needed for a pipeline. Entries only store shader UUIDs; paths are
@@ -24,4 +35,11 @@ struct ShaderCollection
 	};
 
 	std::vector<StageBinding> stages;
+	std::uint32_t geometryAbiVersion = 1u;
+	ShaderGeometryPolicy geometryPolicy = ShaderGeometryPolicy::EngineManaged;
+	std::uint64_t collectionGeneration = 0u;
+	bool reflectionComplete = false;
+	bool usesReservedBindings = false;
+	bool usesAnimationBindings = false;
+	std::string geometryContractDiagnostic;
 };

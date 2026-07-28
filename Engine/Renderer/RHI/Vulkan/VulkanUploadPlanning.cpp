@@ -1,5 +1,6 @@
 #include "VulkanUploadPlanning.h"
 
+#include <algorithm>
 #include <functional>
 #include <limits>
 #include <utility>
@@ -71,6 +72,121 @@ namespace TerraEngine::Renderer::Vulkan {
 		bool bufferAvailable)
 	{
 		return cacheValid && bufferAvailable && cachedSignature == currentSignature;
+	}
+
+	PersistentPhysicalPageUploadPlan
+	BuildPersistentPhysicalPageUploadPlan(
+		std::vector<PersistentPhysicalPageUploadInput> inputs,
+		std::uint64_t poolCapacityBytes,
+		std::uint64_t uploadBudgetBytes,
+		std::uint64_t allocationGeneration)
+	{
+		PersistentPhysicalPageUploadPlan plan;
+		if(allocationGeneration == 0u)
+		{
+			plan.rejectionReason =
+				"Persistent page allocation generation is missing.";
+			return plan;
+		}
+		std::sort(inputs.begin(), inputs.end(),
+			[](const PersistentPhysicalPageUploadInput& left,
+				const PersistentPhysicalPageUploadInput& right)
+			{
+				if(left.pinnedFallback != right.pinnedFallback)
+				{
+					return left.pinnedFallback;
+				}
+				if(left.meshId != right.meshId)
+				{
+					return std::lexicographical_compare(
+						left.meshId.begin(), left.meshId.end(),
+						right.meshId.begin(), right.meshId.end());
+				}
+				if(left.pageId != right.pageId)
+				{
+					return left.pageId < right.pageId;
+				}
+				return left.contentGeneration
+					< right.contentGeneration;
+			});
+		std::uint64_t cursor = 0u;
+		std::uint64_t uploadedBytes = 0u;
+		for(const PersistentPhysicalPageUploadInput& input : inputs)
+		{
+			if(input.meshId == TerraEngine::EMPTY_UUID
+				|| input.pageId == 0xffffffffu
+				|| input.contentGeneration == 0u
+				|| input.residencyGeneration == 0u
+				|| input.byteSize == 0u)
+			{
+				plan.uploads.clear();
+				plan.rejectionReason =
+					"Persistent page upload input is incomplete.";
+				return plan;
+			}
+			if(!input.eligibleForNewWork && !input.pinnedFallback)
+			{
+				// Eviction first removes eligibility. Such a page may remain
+				// alive for old fences but cannot enter this generation's plan.
+				continue;
+			}
+			PersistentPhysicalPageUpload upload;
+			upload.input = input;
+			upload.reuseExisting =
+				input.existingAllocationId != 0u;
+			upload.allocationId =
+				upload.reuseExisting
+					? input.existingAllocationId
+					: (allocationGeneration << 32u)
+						^ static_cast<std::uint64_t>(
+							input.pageId + 1u);
+			if(upload.reuseExisting)
+			{
+				++plan.reusedPages;
+				plan.uploads.push_back(upload);
+				continue;
+			}
+			if(cursor > std::numeric_limits<std::uint64_t>::max()
+					- 255u)
+			{
+				plan.uploads.clear();
+				plan.rejectionReason =
+					"Persistent page pool alignment overflowed.";
+				return plan;
+			}
+			cursor = (cursor + 255u) & ~std::uint64_t{255u};
+			if(input.byteSize
+					> std::numeric_limits<std::uint64_t>::max()
+						- cursor
+				|| input.byteSize
+					> std::numeric_limits<std::uint64_t>::max()
+						- uploadedBytes)
+			{
+				plan.uploads.clear();
+				plan.rejectionReason =
+					"Persistent page pool byte range overflowed.";
+				return plan;
+			}
+			upload.poolByteOffset = cursor;
+			cursor += input.byteSize;
+			uploadedBytes += input.byteSize;
+			plan.requestedBytes = cursor;
+			if((poolCapacityBytes != 0u
+					&& cursor > poolCapacityBytes)
+				|| (uploadBudgetBytes != 0u
+					&& uploadedBytes > uploadBudgetBytes))
+			{
+				plan.uploads.clear();
+				plan.rejectionReason =
+					"Persistent page upload exceeds the configured "
+					"pool or per-frame upload budget.";
+				return plan;
+			}
+			plan.uploads.push_back(upload);
+		}
+		plan.committedBytes = cursor;
+		plan.valid = true;
+		return plan;
 	}
 
 	UploadPreparationPlan BuildUploadPreparationPlan(const RenderFrameSnapshot& snapshot, std::size_t payloadBudget)

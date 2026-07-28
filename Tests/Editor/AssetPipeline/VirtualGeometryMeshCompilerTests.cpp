@@ -138,6 +138,9 @@ namespace
 			context.Expect(report.virtualGeometry.status == VirtualGeometryCompileStatus::Cooked, "Large fixture should cook adaptive virtual geometry.");
 			context.ExpectEqual(static_cast<std::size_t>(8u), report.virtualGeometry.adaptiveSettings.targetRatios.size(), "Default adaptive cook settings should expose eight half-octave ratios.");
 			context.Expect(std::abs(report.virtualGeometry.adaptiveSettings.targetRatios[1] - 0.70710677f) < 0.0001f, "Second default target should be a half-octave ratio.");
+			context.ExpectEqual(0.0f, report.virtualGeometry.adaptiveSettings.minimumUsefulTriangleReduction, "Default imports should not require a minimum triangle-reduction percentage.");
+			context.ExpectEqual(0.0f, report.virtualGeometry.adaptiveSettings.minimumUsefulMeshletReduction, "Default imports should not require a minimum meshlet-reduction percentage.");
+			context.ExpectEqual(1u, report.virtualGeometry.adaptiveSettings.minimumSourceTriangles, "Default imports should attempt valid simplification for every nonempty mesh.");
 			context.ExpectEqual(report.virtualGeometry.adaptiveSettings.targetRatios.size(), report.virtualGeometry.requestedTargets.size(), "Every requested target should be represented in cook diagnostics.");
 			context.Expect(report.virtualGeometry.generatedLevels.size() >= 4u, "Large fixture should generate smoother intermediate detail levels.");
 
@@ -146,6 +149,21 @@ namespace
 			context.ExpectEqual(report.virtualGeometry.requestedTargets.size(), mesh->virtualGeometryRequestedTargets.size(), "TEMF should serialize every requested adaptive target.");
 			context.Expect(mesh->virtualGeometryDetailLevels.size() >= 4u, "Loaded TEMF should contain the generated adaptive detail levels.");
 			context.Expect(mesh->virtualGeometryDetailLevels[1].requestedTargetIndex >= 1u, "Generated detail should retain the requested target index that produced it.");
+			bool verifiedCoarseSpacingFloor = false;
+			for (std::size_t detailIndex = 1u; detailIndex < mesh->virtualGeometryDetailLevels.size(); ++detailIndex)
+			{
+				const VirtualGeometryDetailLevelRecord& detail = mesh->virtualGeometryDetailLevels[detailIndex];
+				const VirtualGeometryDetailLevelRecord& previousDetail = mesh->virtualGeometryDetailLevels[detailIndex - 1u];
+				const float retainedRatio = std::clamp(detail.targetRatio, 0.001f, 1.0f);
+				const float expectedSpacingFloor = std::clamp(((1.0f - retainedRatio) / retainedRatio) * 0.0075f, 0.0f, 0.1f);
+				context.Expect(detail.geometricError + 0.00001f >= expectedSpacingFloor, "Cooked error metadata should space progressively coarser LOD transitions instead of saturating at one threshold.");
+				const float expectedAdjacentSpacingFloor = std::min(previousDetail.geometricError * 1.5f, 0.05f);
+				context.Expect(detail.geometricError + 0.00001f >= expectedAdjacentSpacingFloor, "Adjacent cooked LODs should keep their screen-error transitions spatially separated even when simplification returns the same error.");
+				context.Expect(detail.primitiveCount < previousDetail.primitiveCount || detail.meshletCount < previousDetail.meshletCount, "Every emitted LOD should reduce triangles or meshlets; exact regional duplicates belong in merged-target diagnostics.");
+				verifiedCoarseSpacingFloor = verifiedCoarseSpacingFloor || retainedRatio <= 0.5f;
+			}
+			context.Expect(verifiedCoarseSpacingFloor, "Transition-spacing regression should inspect at least one half-resolution-or-coarser detail.");
+			context.ExpectEqual(mesh->virtualGeometryDetailLevels.size(), report.virtualGeometry.generatedLevels.size(), "Inspector generated-level rows should match the distinct runtime LOD count after duplicate regional candidates are merged.");
 		});
 
 		registry.Add("Editor.AssetPipeline.VirtualGeometry.MeshCompiler.GeneratesLodChainForHighDetailMesh", [](TestContext& context) {
@@ -168,8 +186,8 @@ namespace
 			context.Expect((mesh->header.meshletFlags & kMeshletHeaderFlagHasVirtualGeometry) != 0u, "TEMF header should carry the virtual geometry flag.");
 			context.ExpectEqual(static_cast<std::size_t>(report.virtualGeometry.detailLevelCount), mesh->virtualGeometryDetailLevels.size(), "Loaded detail table should match the cook report.");
 			context.Expect(mesh->virtualGeometryDetailLevels.back().primitiveCount < mesh->virtualGeometryDetailLevels.front().primitiveCount, "Last detail level should use fewer primitives than the source detail.");
-			context.ExpectEqual(mesh->virtualGeometryDetailLevels.size(), mesh->virtualGeometryPages.size(), "Cooked page table should publish one MVP page per detail level.");
-			context.Expect(mesh->virtualGeometryClusters.size() >= mesh->virtualGeometryPages.size(), "Cooked cluster table should publish spatial clusters for every page.");
+			context.Expect(mesh->virtualGeometryPages.size() > mesh->virtualGeometryDetailLevels.size(), "Dense detail levels should split into bounded spatial physical pages.");
+			context.ExpectEqual(mesh->virtualGeometryClusters.size(), mesh->virtualGeometryPages.size(), "Every independently streamable page should own one hierarchy cluster.");
 			context.ExpectEqual(mesh->virtualGeometryClusters.size(), mesh->virtualGeometryClusterPageLinks.size(), "Every cooked spatial cluster should carry explicit cluster-page coverage.");
 			context.Expect((mesh->virtualGeometryHeader.flags & kVirtualGeometryValidationFlagClusterCoverageValidated) != 0u, "Regional virtual geometry cooks should prove cluster coverage before enabling sparse mixed-detail cuts.");
 			context.Expect(std::all_of(report.virtualGeometry.clusters.begin(), report.virtualGeometry.clusters.end(), [](const VirtualGeometryClusterCompileReport& cluster) {
@@ -181,7 +199,7 @@ namespace
 			const auto fallbackPage = std::find_if(mesh->virtualGeometryPages.begin(), mesh->virtualGeometryPages.end(), [](const VirtualGeometryPageRecord& page) {
 				return page.fallbackPageId == page.pageId;
 			});
-			context.Expect(fallbackPage != mesh->virtualGeometryPages.end(), "Cooked pages should declare one explicit resident fallback page.");
+			context.Expect(fallbackPage != mesh->virtualGeometryPages.end(), "Cooked pages should declare explicit resident spatial fallback roots.");
 			if (fallbackPage != mesh->virtualGeometryPages.end())
 			{
 				context.ExpectEqual(mesh->virtualGeometryDetailLevels.back().lodIndex, fallbackPage->firstLodIndex, "The coarsest generated detail should be the protected fallback page.");
@@ -208,13 +226,17 @@ namespace
 			context.Expect(sawParentChildLink, "High-detail fixtures should publish at least one source-coverage parent/child link.");
 		});
 
-		registry.Add("Editor.AssetPipeline.VirtualGeometry.MeshCompiler.SkipsSimplificationForSmallMeshes", [](TestContext& context) {
+		registry.Add("Editor.AssetPipeline.VirtualGeometry.MeshCompiler.PerMeshMinimumSourceOverrideCanSkipSmallMeshes", [](TestContext& context) {
 			const RawMeshFixture fixture = MakeSmallMesh();
 			const std::filesystem::path output = MakeTempOutputPath("SmallQuad");
 			MeshCompileReport report{};
+			VirtualGeometryAdaptiveCompileSettings settings =
+				MakeDefaultVirtualGeometryAdaptiveCompileSettings();
+			settings.minimumSourceTriangles = 512u;
+			settings.settingsSource = "PerMeshOverride";
 
-			context.Expect(CompileMeshFromRaw("VirtualGeometry/SmallQuad.obj", output, fixture.vertices, fixture.indices, true, &report), "Small virtual geometry fixture should still compile.");
-			context.Expect(report.virtualGeometry.status == VirtualGeometryCompileStatus::Skipped, "Small meshes should report an intentional simplification skip.");
+			context.Expect(CompileMeshFromRaw("VirtualGeometry/SmallQuad.obj", output, fixture.vertices, fixture.indices, true, &report, 60.0f, 1e-6f, &settings), "Small virtual geometry fixture should still compile with a per-mesh threshold.");
+			context.Expect(report.virtualGeometry.status == VirtualGeometryCompileStatus::Skipped, "An explicit minimum-source override should report an intentional simplification skip.");
 			context.ExpectEqual(1u, report.virtualGeometry.detailLevelCount, "Skipped simplification should still publish the fallback detail.");
 			context.Expect(report.virtualGeometry.selectedFallbackAvailable != 0u, "Small meshes should remain renderable through their fallback detail.");
 			context.Expect(HasWarningContaining(report.virtualGeometry, "skipped"), "Small mesh cook report should explain that simplification was skipped.");
@@ -466,7 +488,8 @@ namespace
 			Mesh* mesh = LoadCompiledMeshForInspection(firstOutput);
 			context.Expect(mesh != nullptr, "Deterministic large fixture should load through ResourceManager.");
 			context.Expect(mesh->hasVirtualGeometry, "Loaded deterministic fixture should advertise virtual geometry.");
-			context.ExpectEqual(mesh->virtualGeometryDetailLevels.size(), mesh->virtualGeometryPages.size(), "Current MVP clean-checkout fixture should emit one page per detail level.");
+			context.Expect(mesh->virtualGeometryPages.size() > mesh->virtualGeometryDetailLevels.size(), "The physical-page cook should spatially subdivide dense detail levels.");
+			context.ExpectEqual(mesh->virtualGeometryClusters.size(), mesh->virtualGeometryPages.size(), "Deterministic spatial pages should preserve one cluster identity per page.");
 		});
 	}
 }

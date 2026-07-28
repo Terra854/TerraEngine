@@ -120,6 +120,7 @@ struct TaskPayload
 [[vk::binding(9, 0)]] StructuredBuffer<uint> globalBuffers[];
 [[vk::binding(10, 0)]] Texture2D<float> hiZPyramids[2];
 [[vk::binding(11, 0)]] SamplerState hiZSampler;
+#include "../VirtualGeometry/AnimatedDeformedGeometry.hlsli"
 
 void FlushMeshletCullingCounters(const uint statsIndex, const MeshletCullingCounters counters)
 {
@@ -1165,11 +1166,18 @@ void main(uint3 groupId : SV_GroupID)
 {
 	DefaultGpuAnimationGraphicsRecord animationRecord;
 	const bool gpuDeformationAvailable = TryLoadGpuAnimationGraphicsRecord(animationRecord);
+	TeAnimatedGraphicsBridge canonicalDeformation;
+	const bool canonicalDeformationAvailable =
+		TeTryLoadAnimatedGraphicsBridge(
+			SceneUniforms.meshDataIndex,
+			SceneUniforms.textureIndex,
+			canonicalDeformation);
 	PageLocalPayloadDescriptor pageDescriptor;
-	// Page-local packet payloads currently omit skinning and target-major morph
-	// streams. Owner/fallback coverage is therefore the only safe route for GPU
-	// deformation; task indices must match the mesh-stage source selection.
-	const bool pageLocalGeometry = !gpuDeformationAvailable
+	// The compute bridge makes animated pages self-contained. Legacy owner
+	// deformation still suppresses page-local selection because it has no
+	// matching page publication.
+	const bool pageLocalGeometry =
+		(canonicalDeformationAvailable || !gpuDeformationAvailable)
 		&& TryUsePageLocalGeometry(pageDescriptor);
 	// Do not touch the owner decode buffer for resident page packets. Page-local
 	// descriptors carry a complete decode record and must remain independently
@@ -1212,10 +1220,10 @@ void main(uint3 groupId : SV_GroupID)
 	const bool cullingEnabled = (SceneUniforms.taskCullingEnabled != 0u)
 		&& (frameData.globalTaskCullingEnabled != 0u)
 		&& (frameData.taskShaderSupported != 0u)
-		// The graphics bridge has no per-cluster dynamic-bounds address in this
-		// frozen pass. Bind-pose rejection is unsafe, so deformable work fails
-		// open to the owner/fallback range until that proof is published.
-		&& !gpuDeformationAvailable;
+		// Canonical animated pages publish current dynamic cluster bounds. The
+		// rejection code below still fails open whenever that proof is missing,
+		// stale, or corrupt; only legacy owner deformation disables culling.
+		&& (!gpuDeformationAvailable || canonicalDeformationAvailable);
 
 	for (uint localIndex = 0u; localIndex < kTaskBatchSize; ++localIndex)
 	{
@@ -1248,9 +1256,35 @@ void main(uint3 groupId : SV_GroupID)
 			// Load bounds from exactly one source so a page-local culling pass does
 			// not issue a speculative read through the owner mesh descriptor.
 			MeshletBounds bounds;
+			bool currentDynamicProof = false;
 			if (pageLocalGeometry)
 			{
 				bounds = LoadPageLocalMeshletBounds(activePageDescriptor, meshletIndex);
+				if(canonicalDeformationAvailable)
+				{
+					const uint pageId =
+						LoadVirtualGeometryPagePayloadDescriptorWordAt(
+							packetDescriptorIndex,
+							0u,
+							0xffffffffu);
+					TeAnimatedGraphicsPage animatedPage;
+					TeAnimatedDynamicBounds animatedBounds;
+					currentDynamicProof =
+						TeTryResolveAnimatedGraphicsPage(
+							SceneUniforms.meshDataIndex,
+							canonicalDeformation,
+							pageId,
+							animatedPage)
+						&& TeTryLoadAnimatedBounds(
+							canonicalDeformation,
+							animatedPage,
+							animatedBounds);
+					if(currentDynamicProof)
+					{
+						bounds.center = animatedBounds.sphere.xyz;
+						bounds.radius = animatedBounds.sphere.w;
+					}
+				}
 			}
 			else
 			{
@@ -1263,13 +1297,23 @@ void main(uint3 groupId : SV_GroupID)
 			const float maxScale = max(length(worldAxisX), max(length(worldAxisY), length(worldAxisZ)));
 			const float worldRadius = bounds.radius * max(maxScale, 1e-6f);
 
-			culled = IsFrustumCulled(worldCenter, worldRadius, frameData, epsilon);
+			// Missing, stale, or corrupt animated bounds fail open. Static page
+			// bounds are never used to reject a deformed publication.
+			const bool rejectionProofAvailable =
+				!canonicalDeformationAvailable || currentDynamicProof;
+			culled = rejectionProofAvailable
+				&& IsFrustumCulled(
+					worldCenter,
+					worldRadius,
+					frameData,
+					epsilon);
 			// Cone backface culling is only armed by RenderSystem when every
 			// selected cluster has cooked proof for one-sided opaque materials,
 			// consistent winding, low thin-shell risk, and valid cone bounds.
 			// Imported GLB/FBX package meshes currently leave this bit off until
 			// per-cluster material proof exists, so risky content still fails open.
-			if (!culled && coneCullingSafe)
+			if (!culled && coneCullingSafe
+				&& !canonicalDeformationAvailable)
 			{
 				const float3 worldConeApex = mul(SceneUniforms.model, float4(bounds.coneApex, 1.0f)).xyz;
 				const float3 worldConeAxis = mul((float3x3)SceneUniforms.model, bounds.coneAxis);
@@ -1280,7 +1324,15 @@ void main(uint3 groupId : SV_GroupID)
 			// being validated against the accepted Hi-Z baseline. Shadow passes
 			// consume their light-view meshlet ranges with this gate off, because
 			// camera Hi-Z cannot answer light visibility.
-			if (!culled && hiZPyramidAvailable)
+			if (!culled && hiZPyramidAvailable
+				&& rejectionProofAvailable
+				// The current compute publication contains one conservative
+				// bound for the whole animated page. IsOccluded still projects
+				// individual packed page vertices, which remain in bind pose.
+				// Using those stale positions could reject visible moving
+				// meshlets, so animated pages fail open for Hi-Z until the ABI
+				// publishes current per-meshlet projection geometry.
+				&& !canonicalDeformationAvailable)
 			{
 				MeshDecodeInfo activeDecode = decode;
 				// HLSL cannot select structure values with the conditional operator,

@@ -122,6 +122,43 @@ namespace TerraEngine::AssetPipeline
 			}
 			return static_cast<std::uint32_t>(sectionIds.size());
 		}
+
+		const char* VirtualGeometryTargetStatusText(std::uint32_t status)
+		{
+			switch(static_cast<VirtualGeometryDetailTargetRecordStatus>(status))
+			{
+			case VirtualGeometryDetailTargetRecordStatus::Requested: return "Requested";
+			case VirtualGeometryDetailTargetRecordStatus::Generated: return "Generated";
+			case VirtualGeometryDetailTargetRecordStatus::Merged: return "Merged";
+			case VirtualGeometryDetailTargetRecordStatus::Skipped: return "Skipped";
+			case VirtualGeometryDetailTargetRecordStatus::Rejected: return "Rejected";
+			}
+			return "Rejected";
+		}
+
+		const char* VirtualGeometrySkippedReasonText(std::uint32_t reason)
+		{
+			switch(static_cast<VirtualGeometrySkippedDetailRecordReason>(reason))
+			{
+			case VirtualGeometrySkippedDetailRecordReason::None: return "";
+			case VirtualGeometrySkippedDetailRecordReason::MeshTooSmall: return "MeshTooSmall";
+			case VirtualGeometrySkippedDetailRecordReason::TooFewTriangles: return "TooFewTriangles";
+			case VirtualGeometrySkippedDetailRecordReason::TooFewMeshlets: return "TooFewMeshlets";
+			case VirtualGeometrySkippedDetailRecordReason::InsufficientTriangleReduction:
+				return "InsufficientTriangleReduction";
+			case VirtualGeometrySkippedDetailRecordReason::InsufficientMeshletReduction:
+				return "InsufficientMeshletReduction";
+			case VirtualGeometrySkippedDetailRecordReason::InvalidSimplificationOutput:
+				return "InvalidSimplificationOutput";
+			case VirtualGeometrySkippedDetailRecordReason::MaterialSafetyRejected:
+				return "MaterialSafetyRejected";
+			case VirtualGeometrySkippedDetailRecordReason::GeometricErrorRejected:
+				return "GeometricErrorRejected";
+			case VirtualGeometrySkippedDetailRecordReason::DuplicateOfPreviousLevel:
+				return "DuplicateOfPreviousLevel";
+			}
+			return "InvalidSimplificationOutput";
+		}
 	}
 
 	TerraEngine::UUID BuildStableGeneratedModelUuid(const TerraEngine::UUID& packageGuid, std::string_view role, std::size_t index)
@@ -841,6 +878,118 @@ namespace TerraEngine::AssetPipeline
 		{
 			mesh.virtualGeometryConeSafetySummary.metadataValid = false;
 			mesh.virtualGeometryWarnings.push_back("Virtual geometry cone safety metadata could not be read.");
+		}
+
+		std::vector<VirtualGeometryRequestedTargetRecord> requestedTargets;
+		std::vector<VirtualGeometryDetailLevelRecord> detailLevels;
+		std::vector<VirtualGeometrySkippedDetailRecord> skippedDetails;
+		if(ReadVirtualGeometryTable(
+				input,
+				virtualHeader.requestedTargetTableOffset,
+				virtualHeader.requestedTargetCount,
+				requestedTargets)
+			&& ReadVirtualGeometryTable(
+				input,
+				virtualHeader.detailLevelTableOffset,
+				virtualHeader.detailLevelCount,
+				detailLevels)
+			&& ReadVirtualGeometryTable(
+				input,
+				virtualHeader.skippedDetailTableOffset,
+				virtualHeader.skippedDetailCount,
+				skippedDetails))
+		{
+			std::vector<GeneratedModelMeshVirtualGeometryTarget> finalTargets;
+			finalTargets.reserve(requestedTargets.size());
+			for(const VirtualGeometryRequestedTargetRecord& requested
+				: requestedTargets)
+			{
+				GeneratedModelMeshVirtualGeometryTarget target{};
+				target.targetIndex = requested.targetIndex;
+				target.requestedRatio = requested.requestedRatio;
+				target.status = VirtualGeometryTargetStatusText(requested.status);
+				target.desiredTriangleCount = requested.desiredTriangleCount;
+				target.desiredMeshletCount = requested.desiredMeshletCount;
+				target.actualRatio = requested.requestedRatio;
+				target.triangleCount = requested.desiredTriangleCount;
+				target.meshletCount = requested.desiredMeshletCount;
+
+				const auto generated = std::find_if(
+					detailLevels.begin(),
+					detailLevels.end(),
+					[&requested](
+						const VirtualGeometryDetailLevelRecord& detail) {
+						return detail.requestedTargetIndex
+							== requested.targetIndex;
+					});
+				if(generated != detailLevels.end())
+				{
+					target.status = "Generated";
+					target.actualRatio = generated->targetRatio;
+					target.actualTriangleCount = generated->primitiveCount;
+					target.actualMeshletCount = generated->meshletCount;
+					target.triangleCount = generated->primitiveCount;
+					target.meshletCount = generated->meshletCount;
+					target.nearestGeneratedLevelIndex =
+						generated->lodIndex;
+					target.geometricError = generated->geometricError;
+				}
+
+				const auto skipped = std::find_if(
+					skippedDetails.begin(),
+					skippedDetails.end(),
+					[&requested](
+						const VirtualGeometrySkippedDetailRecord& record) {
+						return record.targetIndex == requested.targetIndex;
+					});
+				if(skipped != skippedDetails.end())
+				{
+					target.status =
+						VirtualGeometryTargetStatusText(skipped->status);
+					target.reason =
+						VirtualGeometrySkippedReasonText(skipped->reason);
+					target.nearestGeneratedLevelIndex =
+						skipped->nearestGeneratedLodIndex;
+					target.actualRatio =
+						skipped->actualCandidateRatio > 0.0f
+							? skipped->actualCandidateRatio
+							: skipped->actualNearestRatio;
+					target.actualTriangleCount =
+						skipped->candidateTriangleCount;
+					target.actualMeshletCount =
+						skipped->candidateMeshletCount;
+					if(target.actualTriangleCount > 0u)
+					{
+						target.triangleCount =
+							target.actualTriangleCount;
+					}
+					if(target.actualMeshletCount > 0u)
+					{
+						target.meshletCount =
+							target.actualMeshletCount;
+					}
+					const std::size_t messageEnd =
+						static_cast<std::size_t>(
+							skipped->messageStringOffset)
+						+ skipped->messageStringSize;
+					if(messageEnd <= stringTable.size())
+					{
+						target.message = stringTable.substr(
+							skipped->messageStringOffset,
+							skipped->messageStringSize);
+					}
+				}
+				finalTargets.push_back(std::move(target));
+			}
+			// Static inventory cooking runs before the final skinned recook. Always
+			// replace its advisory rows with the tables embedded in the published
+			// TEMF so Inspector and automation report exactly what can render.
+			mesh.virtualGeometryTargets = std::move(finalTargets);
+		}
+		else
+		{
+			mesh.virtualGeometryWarnings.push_back(
+				"Final virtual geometry target diagnostics could not be read.");
 		}
 		if (virtualHeader.detailLevelCount == 0u || virtualHeader.cullableGroupCount == 0u)
 		{

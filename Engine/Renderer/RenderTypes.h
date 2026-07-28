@@ -278,6 +278,9 @@ namespace TerraEngine::Renderer {
 		std::shared_ptr<const CpuAnimationDeformationData> cpuDeformation;
 		std::uint32_t cpuDeformationRecordIndex =
 			std::numeric_limits<std::uint32_t>::max();
+		// This bit is published only when a physical page carries complete
+		// skin/morph inputs and an exact deformed-page publication is available.
+		bool pageLocalDeformationAvailable = false;
 
 		[[nodiscard]] bool HasCpuPose() const noexcept
 		{
@@ -293,17 +296,25 @@ namespace TerraEngine::Renderer {
 					!= std::numeric_limits<std::uint32_t>::max();
 		}
 
-		[[nodiscard]] bool RequiresOwnerMeshDeformationFallback() const noexcept
+		[[nodiscard]] bool RequiresConservativeCoarseVisibility() const noexcept
 		{
-			// Version-one streamed virtual-geometry pages contain positions and
-			// indices, but not the matching skin/morph streams. A complete CPU or
-			// GPU deformation must therefore render one whole owner payload until
-			// page-local deformation records are published by a later format.
+			// CPU broadphase bounds cannot follow GPU skinning or morph output.
+			// Keep an actively deformed object in the candidate set and let the
+			// current compute-published page bounds make the precise decision.
 			return deformablePayloadGeneration != 0U
 				&& posePublicationGeneration != 0U
 				&& status == AnimationRenderBindingStatus::Ready
 				&& !safePose
 				&& source != AnimationRenderPoseSource::BindPose;
+		}
+
+		[[nodiscard]] bool RequiresOwnerMeshDeformationFallback() const noexcept
+		{
+			// Legacy or rejected assets have no independently verifiable AVPB
+			// skin/morph inputs. Only those compatibility cases collapse to the
+			// complete owner; healthy animated pages stay independently refinable.
+			return !pageLocalDeformationAvailable
+				&& RequiresConservativeCoarseVisibility();
 		}
 	};
 
@@ -324,6 +335,10 @@ namespace TerraEngine::Renderer {
 		std::uint32_t componentGeneration = 0U;
 		std::uint32_t skeletonGeneration = 0U;
 		std::uint64_t skeletonCompatibilityFingerprint = 0U;
+		// The renderer resolves this capability from the current mesh/page
+		// publication, not from an animator. Carry it through binding resolution
+		// so accepting a new CPU/GPU pose cannot accidentally erase AVPB support.
+		bool pageLocalDeformationAvailable = false;
 		// This exact record names the render-side mesh and protected renderer/scene
 		// publication that a GPU-only packet was lowered against. It complements
 		// shader-visible generations without truncating a 64-bit payload lifetime.
@@ -1286,6 +1301,9 @@ struct PageResidencyRecord
 {
 	TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
 	std::uint32_t pageId = 0u;
+	std::uint64_t meshPayloadGeneration = 0u;
+	std::uint64_t pageContentGeneration = 0u;
+	std::uint64_t residencyGeneration = 0u;
 	std::uint32_t coveredClusterOffset = 0u;
 	std::uint32_t coveredClusterCount = 0u;
 	std::vector<std::uint32_t> coveredClusters;
@@ -1329,6 +1347,16 @@ struct VirtualGeometryPagePayloadRecord
 	std::uint32_t payloadBufferIndex = 0xffffffffu;
 	std::uint32_t payloadDescriptorIndex = 0xffffffffu;
 	std::uint64_t allocationId = 0u;
+	std::uint64_t meshPayloadGeneration = 0u;
+	std::uint64_t pageContentGeneration = 0u;
+	std::uint64_t residencyGeneration = 0u;
+	std::uint64_t publicationGeneration = 0u;
+	std::uint64_t safeRetirementFrame = 0u;
+	std::uint32_t animatedGeometryAbiVersion = 0u;
+	bool pageLocalDeformationReady = false;
+	bool currentGeometryValid = false;
+	bool historyValid = false;
+	bool dynamicBoundsValid = false;
 	bool resident = false;
 	bool pinnedFallback = false;
 	bool valid = false;
@@ -1710,11 +1738,13 @@ struct AdaptiveVirtualGeometryCookProfile
 	VirtualGeometryFallbackPolicy fallbackPolicy = VirtualGeometryFallbackPolicy::PreserveHighestSafeFallback;
 	std::array<float, kVirtualGeometryAdaptiveTargetCapacity> targetRatios = kVirtualGeometryDefaultHalfOctaveRatios;
 	std::uint32_t targetRatioCount = kVirtualGeometryAdaptiveTargetCapacity;
-	std::uint32_t minimumSourceTriangles = 512u;
-	std::uint32_t minimumGeneratedTriangles = 64u;
-	std::uint32_t minimumMeshletsPerGeneratedLevel = 2u;
-	float minimumUsefulTriangleReduction = 0.15f;
-	float minimumUsefulMeshletReduction = 0.15f;
+	// Import defaults do not discard valid LODs. These gates remain available
+	// as per-mesh overrides when an asset benefits from stronger merging.
+	std::uint32_t minimumSourceTriangles = 1u;
+	std::uint32_t minimumGeneratedTriangles = 1u;
+	std::uint32_t minimumMeshletsPerGeneratedLevel = 1u;
+	float minimumUsefulTriangleReduction = 0.0f;
+	float minimumUsefulMeshletReduction = 0.0f;
 	float maximumGeometricError = 0.1f;
 	bool allowCustomTargetRatios = false;
 };
@@ -1755,10 +1785,10 @@ inline AdaptiveVirtualGeometryCookProfile SanitizeAdaptiveVirtualGeometryCookPro
 	sanitized.minimumMeshletsPerGeneratedLevel = std::max(sanitized.minimumMeshletsPerGeneratedLevel, 1u);
 	sanitized.minimumUsefulTriangleReduction = std::isfinite(sanitized.minimumUsefulTriangleReduction)
 		? glm::clamp(sanitized.minimumUsefulTriangleReduction, 0.0f, 0.95f)
-		: 0.15f;
+		: 0.0f;
 	sanitized.minimumUsefulMeshletReduction = std::isfinite(sanitized.minimumUsefulMeshletReduction)
 		? glm::clamp(sanitized.minimumUsefulMeshletReduction, 0.0f, 0.95f)
-		: 0.15f;
+		: 0.0f;
 	sanitized.maximumGeometricError = std::isfinite(sanitized.maximumGeometricError)
 		? glm::clamp(sanitized.maximumGeometricError, 0.0f, 1000.0f)
 		: 0.1f;
@@ -1782,6 +1812,11 @@ struct VirtualGeometryQualityProfile
 	bool hiZThinGeometryGuardEnabled = true;
 	VirtualGeometryDebugVisualizationMode debugVisualizationMode = VirtualGeometryDebugVisualizationMode::None;
 	std::uint64_t geometryBudgetBytes = 0u;
+	// Separate limits prevent animated outputs from silently consuming the
+	// static page pool. Zero retains the existing developer "unlimited" mode.
+	std::uint64_t deformationCurrentBudgetBytes = 0u;
+	std::uint64_t deformationHistoryBudgetBytes = 0u;
+	std::uint64_t deformationBoundsBudgetBytes = 0u;
 	float preloadBias = 1.0f;
 	// Transition stability is a runtime selection aid, not a cook setting. The
 	// pixel band keeps tiny camera jitter from swapping cluster cuts every
@@ -1802,6 +1837,9 @@ inline VirtualGeometryQualityProfile MakeDefaultVirtualGeometryQualityProfile()
 	profile.hiZThinGeometryGuardEnabled = true;
 	profile.debugVisualizationMode = VirtualGeometryDebugVisualizationMode::None;
 	profile.geometryBudgetBytes = 0u;
+	profile.deformationCurrentBudgetBytes = 0u;
+	profile.deformationHistoryBudgetBytes = 0u;
+	profile.deformationBoundsBudgetBytes = 0u;
 	profile.preloadBias = 1.0f;
 	profile.lodTransitionHysteresisPixels = 0.35f;
 	profile.lodTransitionStableFrames = 3u;
@@ -1850,6 +1888,12 @@ inline std::uint64_t BuildVirtualGeometryQualityProfileSignature(const VirtualGe
 	HashVirtualGeometryQualityValue(seed, sanitized.maxLodDrop);
 	HashVirtualGeometryQualityValue(seed, static_cast<std::uint64_t>(static_cast<std::uint32_t>(sanitized.debugVisualizationMode)));
 	HashVirtualGeometryQualityValue(seed, sanitized.geometryBudgetBytes);
+	HashVirtualGeometryQualityValue(
+		seed, sanitized.deformationCurrentBudgetBytes);
+	HashVirtualGeometryQualityValue(
+		seed, sanitized.deformationHistoryBudgetBytes);
+	HashVirtualGeometryQualityValue(
+		seed, sanitized.deformationBoundsBudgetBytes);
 	HashVirtualGeometryQualityValue(seed, HashVirtualGeometryQualityFloat(sanitized.preloadBias));
 	HashVirtualGeometryQualityValue(seed, HashVirtualGeometryQualityFloat(sanitized.lodTransitionHysteresisPixels));
 	HashVirtualGeometryQualityValue(seed, sanitized.lodTransitionStableFrames);
@@ -1944,6 +1988,7 @@ struct VirtualGeometryClusterRuntime
 	std::uint32_t pageId = 0u;
 	std::uint32_t fallbackClusterId = 0xffffffffu;
 	float geometricError = 0.0f;
+	float deformationError = 0.0f;
 	glm::vec3 boundsCenter = glm::vec3(0.0f);
 	float boundsRadius = 0.0f;
 };
@@ -1992,6 +2037,15 @@ struct GeometryPageRuntime
 	std::uint32_t clusterCount = 0u;
 	std::uint64_t payloadByteOffset = 0u;
 	std::uint64_t payloadByteSize = 0u;
+	std::uint64_t meshPayloadGeneration = 0u;
+	std::uint64_t pageContentGeneration = 0u;
+	std::uint64_t residencyGeneration = 0u;
+	std::uint64_t publicationGeneration = 0u;
+	std::uint64_t allocationId = 0u;
+	std::uint64_t safeRetirementFrame = 0u;
+	std::uint32_t animatedGeometryAbiVersion = 0u;
+	bool eligibleForNewWork = false;
+	bool pageLocalDeformationReady = false;
 	// These indices are assigned by the protected renderer/resource boundary
 	// once a page payload has a shader-visible storage-buffer binding. Keeping
 	// them with the page snapshot lets worker-safe cluster selection propagate

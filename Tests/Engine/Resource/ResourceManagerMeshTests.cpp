@@ -83,6 +83,20 @@ namespace TerraEngine::Tests
 			context.Expect(source.find("TEMF virtual geometry page table does not declare a resident fallback page") != std::string::npos, "Runtime loader should require explicit resident fallback coverage for page-streamed assets.");
 		});
 
+		registry.Add("Resource.Manager.Mesh.DeformableSpatialBoundsUseWholeAnimationEnvelope", [](TestContext& context) {
+			const std::string source = ReadResourceManagerMeshSource();
+
+			context.Expect(
+				source.find("if (mesh->hasDeformablePayload)") != std::string::npos
+					&& source.find("mesh->deformableMetadata.deformationBoundsMin") != std::string::npos
+					&& source.find("mesh->deformableMetadata.deformationBoundsMax") != std::string::npos,
+				"Loaded deformable meshes must publish the checked whole-animation envelope to CPU spatial queries.");
+			context.Expect(
+				source.find("glm::min(bounds.min, deformationBounds.min)") != std::string::npos
+					&& source.find("glm::max(bounds.max, deformationBounds.max)") != std::string::npos,
+				"The deformable spatial box must conservatively include both bind pose and the complete animation envelope.");
+		});
+
 		registry.Add("Resource.Manager.Mesh.ExactResidencyGeneratedChildrenOwnGpuBytes", [](TestContext& context) {
 			ResourceManager& resourceManager = ResourceManager::Instance();
 			resourceManager.SetStreamingDiagnosticsEnabled(true);

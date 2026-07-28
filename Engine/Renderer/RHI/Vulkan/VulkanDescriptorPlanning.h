@@ -3,6 +3,7 @@
 #pragma once
 
 #include "Animation/Gpu/GpuAnimationPlan.h"
+#include "Renderer/Deformation/AnimatedVirtualGeometryRuntime.h"
 #include "Renderer/Graph/RenderFrameSnapshot.h"
 #include "Core/Export.h"
 
@@ -69,5 +70,56 @@ namespace TerraEngine::Renderer::Vulkan {
 	// perform no allocation, upload, descriptor mutation, or queue submission.
 	TERRAENGINE_API VulkanAnimationDescriptorSetPlan BuildVulkanAnimationDescriptorSetPlan(
 		const Animation::GpuAnimationPlan& plan);
+
+	enum class VulkanDeformationDescriptorBinding : std::uint8_t
+	{
+		Generations,
+		Work,
+		StaticPageBytes,
+		Palettes,
+		MorphWeights,
+		CurrentVertices,
+		PreviousVertices,
+		MeshletBounds,
+		ClusterBounds,
+		Refinement,
+		Diagnostics,
+		Count
+	};
+
+	inline constexpr std::uint32_t kVulkanDeformationDescriptorSet = 2u;
+	inline constexpr std::size_t kVulkanDeformationDescriptorBindingCount =
+		static_cast<std::size_t>(VulkanDeformationDescriptorBinding::Count);
+
+	struct VulkanDeformationDescriptorBindingPlan
+	{
+		VulkanDeformationDescriptorBinding binding =
+			VulkanDeformationDescriptorBinding::Generations;
+		VulkanAnimationDescriptorAccess access =
+			VulkanAnimationDescriptorAccess::ReadOnly;
+		VulkanAnimationDescriptorSource source =
+			VulkanAnimationDescriptorSource::FrameUpload;
+		std::uint64_t minimumByteCount = 0u;
+	};
+
+	struct VulkanDeformationDescriptorSetPlan
+	{
+		std::uint32_t set = kVulkanDeformationDescriptorSet;
+		std::uint32_t layoutVersion = kAnimatedGeometryAbiVersion;
+		std::array<VulkanDeformationDescriptorBindingPlan,
+			kVulkanDeformationDescriptorBindingCount> bindings{};
+		DeformationWorkingSetPlan workingSet{};
+		bool hasWork = false;
+		bool valid = false;
+		std::string rejectionReason;
+	};
+
+	// Descriptor sizing is calculated before protected Vulkan allocation. This
+	// keeps overflow and budget rejection atomic and makes zero-work frames a
+	// true no-op for descriptors and device memory.
+	TERRAENGINE_API VulkanDeformationDescriptorSetPlan
+		BuildVulkanDeformationDescriptorSetPlan(
+			const GpuDeformationPlan& plan,
+			std::uint64_t workingSetLimitBytes = 0u);
 
 }

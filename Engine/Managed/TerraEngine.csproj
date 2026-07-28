@@ -7,6 +7,11 @@
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <EnableDynamicLoading>true</EnableDynamicLoading>
+    <!-- Visual Studio may perform an implicit restore outside CMake. Give that
+         restore the same host RID as the self-contained CMake publish so it
+         cannot replace project.assets.json with a framework-only graph. -->
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == '' and '$(OS)' == 'Windows_NT'">win-x64</RuntimeIdentifier>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == '' and '$(OS)' != 'Windows_NT'">linux-x64</RuntimeIdentifier>
   </PropertyGroup>
 
   <!-- Export sources (ExportBridge, ExportVTable) are now part of the core 

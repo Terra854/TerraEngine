@@ -5,7 +5,9 @@
 #include "File Formats/TerraEngineMeshFile.h"
 #include "MeshCompiler.h"
 #include "Resource/ResourceManager.h"
+#include "Resource/ResourceStreaming.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -62,6 +64,63 @@ namespace TerraEngine::EditorTests {
 				input.indices.push_back(index);
 			}
 			return input;
+		}
+
+		SkinnedMeshCookInput MakeSkinnedGridInput(std::uint32_t quadsPerSide) {
+			SkinnedMeshCookInput input;
+			const std::uint32_t verticesPerSide = quadsPerSide + 1U;
+			input.vertices.reserve(
+				static_cast<std::size_t>(verticesPerSide) * verticesPerSide);
+			input.indices.reserve(
+				static_cast<std::size_t>(quadsPerSide) * quadsPerSide * 6U);
+			for(std::uint32_t y = 0U; y < verticesPerSide; ++y) {
+				for(std::uint32_t x = 0U; x < verticesPerSide; ++x) {
+					const float fx = static_cast<float>(x)
+						/ static_cast<float>(quadsPerSide);
+					const float fy = static_cast<float>(y)
+						/ static_cast<float>(quadsPerSide);
+					SkinnedMeshCookVertex vertex;
+					vertex.baseVertex.position = {
+						fx * 2.0F - 1.0F,
+						fy * 2.0F - 1.0F,
+						0.05F * std::sin(fx * 12.0F)
+							* std::cos(fy * 10.0F) };
+					vertex.baseVertex.normal = {0.0F, 0.0F, 1.0F};
+					vertex.baseVertex.uv = {fx, fy};
+					vertex.influences = {{0U, 1.0F}};
+					input.vertices.push_back(std::move(vertex));
+				}
+			}
+			const auto VertexIndex = [verticesPerSide](
+				std::uint32_t x,
+				std::uint32_t y) {
+				return y * verticesPerSide + x;
+			};
+			for(std::uint32_t y = 0U; y < quadsPerSide; ++y) {
+				for(std::uint32_t x = 0U; x < quadsPerSide; ++x) {
+					const std::uint32_t a = VertexIndex(x, y);
+					const std::uint32_t b = VertexIndex(x + 1U, y);
+					const std::uint32_t c = VertexIndex(x, y + 1U);
+					const std::uint32_t d = VertexIndex(x + 1U, y + 1U);
+					input.indices.insert(
+						input.indices.end(),
+						{a, c, b, b, c, d});
+				}
+			}
+			return input;
+		}
+
+		SkinnedMeshCookInput MakeDeindexedSkinnedGridInput(std::uint32_t quadsPerSide) {
+			const SkinnedMeshCookInput indexed = MakeSkinnedGridInput(quadsPerSide);
+			SkinnedMeshCookInput deindexed;
+			deindexed.vertices.reserve(indexed.indices.size());
+			deindexed.indices.reserve(indexed.indices.size());
+			for(const std::uint32_t sourceIndex : indexed.indices) {
+				deindexed.vertices.push_back(indexed.vertices[sourceIndex]);
+				deindexed.indices.push_back(
+					static_cast<std::uint32_t>(deindexed.indices.size()));
+			}
+			return deindexed;
 		}
 
 		std::vector<std::uint8_t> ReadBytes(const std::filesystem::path& path) {
@@ -305,7 +364,39 @@ namespace TerraEngine::EditorTests {
 					&& loadedMesh->deformableVirtualGeometryMorphs.size() == 1U
 					&& loadedMesh->deformableVirtualGeometryMorphVertices.size() == input.vertices.size(),
 					"The loader must copy validated cluster coverage and 48-byte GPU morph records atomically into the immutable mesh.");
+				context.Expect(loadedMesh->hasAnimatedVirtualPageDirectory
+					&& loadedMesh->virtualGeometryPageStreamingReady
+					&& !loadedMesh->animatedVirtualPageEntries.empty()
+					&& loadedMesh->animatedVirtualPageEntries.size()
+						== loadedMesh->animatedVirtualPageSections.size()
+					&& !loadedMesh->animatedVirtualPageRoots.empty(),
+					"The skinned cooker must append independently verifiable AVPD/AVPB pages and the loader must expose page streaming readiness.");
+				if(!loadedMesh->animatedVirtualPageEntries.empty())
+				{
+					const AnimatedVirtualPageDirectoryEntry& page =
+						loadedMesh->animatedVirtualPageEntries.front();
+					context.Expect(page.blobOffset != 0U
+						&& page.blobSize >= sizeof(AnimatedVirtualPageBlobHeader)
+						&& page.blobHash != 0U
+						&& page.contentGeneration != 0U
+						&& page.skeletonCompatibilityFingerprint
+							== kTestSkeletonCompatibilityFingerprint,
+						"Each physical page must carry an exact range, integrity hash, content generation, and skeleton fingerprint.");
+				}
 			}
+			const auto directoryOnly =
+				TerraEngine::Resource::
+					ReadAnimatedVirtualPageDirectoryOnly(
+						outputPath,
+						loadedMesh != nullptr
+							? loadedMesh->
+								deformablePayloadGeneration
+							: 0u);
+			context.Expect(directoryOnly.valid
+					&& !directoryOnly.entries.empty()
+					&& directoryOnly.directoryOffset
+						> meshHeader.headerSize,
+				"Directory-only IO must discover and validate AVPD without reading owner streams or AVPB payloads.");
 
 			const std::filesystem::path corruptPath = TestRoot() / "deformable-sidecar-corrupt.temf";
 			std::filesystem::copy_file(outputPath, corruptPath, std::filesystem::copy_options::overwrite_existing);
@@ -365,6 +456,174 @@ namespace TerraEngine::EditorTests {
 					== std::vector<std::uint32_t>{0U}
 				&& morphOnlyReport.skeletonCompatibilityFingerprint == 0U,
 				"A morph-only mesh must use a nonempty identity palette while remaining unbound to a skeleton fingerprint.");
+		});
+
+		registry.Add("Editor.Animation.SkinnedMeshCook.PreservesAdaptiveLodsAndPerMeshPercentageThresholds", [](TestContext& context) {
+			const SkinnedMeshCookInput input = MakeSkinnedGridInput(24U);
+			const std::filesystem::path defaultPath =
+				TestRoot() / "animated-adaptive-lods.temf";
+			SkinnedMeshCookSettings defaultSettings =
+				MakeBoundCookSettings(1U);
+			context.Expect(CompileSkinnedMeshFromRaw(
+				"animated-adaptive-lods",
+				defaultPath,
+				input,
+				nullptr,
+				defaultSettings),
+				"A deformable mesh should publish with the permissive default LOD recipe.");
+
+			ResourceManager& resources = ResourceManager::Instance();
+			resources.ClearCaches();
+			const TerraEngine::UUID defaultMeshId =
+				resources.LoadDeformableMesh(
+					defaultPath,
+					1U,
+					kTestSkeletonCompatibilityFingerprint);
+			const Mesh* defaultMesh = resources.GetMesh(defaultMeshId);
+			context.Expect(defaultMesh != nullptr
+					&& defaultMesh->virtualGeometryDetailLevels.size() > 1U,
+				"The final deformable TEMF must retain generated levels beyond LOD0.");
+			if(defaultMesh != nullptr) {
+				const bool hasCoarserAnimatedPage = std::any_of(
+					defaultMesh->virtualGeometryPages.begin(),
+					defaultMesh->virtualGeometryPages.end(),
+					[defaultMesh](const VirtualGeometryPageRecord& page) {
+						if(page.firstLodIndex == 0U) {
+							return false;
+						}
+						return std::any_of(
+							defaultMesh->animatedVirtualPageEntries.begin(),
+							defaultMesh->animatedVirtualPageEntries.end(),
+							[&page](const AnimatedVirtualPageDirectoryEntry& entry) {
+								return entry.pageId == page.pageId;
+							});
+					});
+				context.Expect(hasCoarserAnimatedPage,
+					"Animated physical-page data must cover at least one generated LOD beyond LOD0.");
+			}
+
+			SkinnedMeshCookSettings thresholdSettings =
+				MakeBoundCookSettings(1U);
+			thresholdSettings.virtualGeometrySettings =
+				MakeDefaultVirtualGeometryAdaptiveCompileSettings();
+			thresholdSettings.virtualGeometrySettings
+				.minimumUsefulTriangleReduction = 0.95F;
+			thresholdSettings.virtualGeometrySettings
+				.minimumUsefulMeshletReduction = 0.95F;
+			thresholdSettings.virtualGeometrySettings.settingsSource =
+				"PerMeshOverride";
+			const std::filesystem::path thresholdPath =
+				TestRoot() / "animated-threshold-override.temf";
+			context.Expect(CompileSkinnedMeshFromRaw(
+				"animated-threshold-override",
+				thresholdPath,
+				input,
+				nullptr,
+				thresholdSettings),
+				"A deformable mesh should accept a per-mesh percentage threshold.");
+			resources.ClearCaches();
+			const TerraEngine::UUID thresholdMeshId =
+				resources.LoadDeformableMesh(
+					thresholdPath,
+					1U,
+					kTestSkeletonCompatibilityFingerprint);
+			const Mesh* thresholdMesh = resources.GetMesh(thresholdMeshId);
+			context.Expect(thresholdMesh != nullptr
+					&& thresholdMesh->virtualGeometryDetailLevels.size() == 1U,
+				"A strict per-mesh percentage override should still be able to merge lower LOD candidates.");
+
+			SkinnedMeshCookSettings compactSettings =
+				MakeBoundCookSettings(1U);
+			compactSettings.virtualGeometrySettings =
+				MakeDefaultVirtualGeometryAdaptiveCompileSettings();
+			compactSettings.virtualGeometrySettings.targetRatios = {
+				1.0F, 0.98F, 0.96F, 0.94F, 0.92F, 0.90F
+			};
+			const std::filesystem::path compactPath =
+				TestRoot() / "animated-compacted-lods.temf";
+			context.Expect(CompileSkinnedMeshFromRaw(
+				"animated-compacted-lods",
+				compactPath,
+				input,
+				nullptr,
+				compactSettings),
+				"Closely spaced animated LOD requests should publish after regional duplicate compaction.");
+			resources.ClearCaches();
+			const TerraEngine::UUID compactMeshId =
+				resources.LoadDeformableMesh(
+					compactPath,
+					1U,
+					kTestSkeletonCompatibilityFingerprint);
+			const Mesh* compactMesh = resources.GetMesh(compactMeshId);
+			context.Expect(compactMesh != nullptr,
+				"Regional LOD compaction must not leave a skipped target pointing at a removed detail.");
+			if(compactMesh != nullptr) {
+				const bool skippedFallbacksValid = std::all_of(
+					compactMesh->virtualGeometrySkippedDetails.begin(),
+					compactMesh->virtualGeometrySkippedDetails.end(),
+					[compactMesh](
+						const VirtualGeometrySkippedDetailRecord& skipped) {
+						return skipped.nearestGeneratedLodIndex
+							< compactMesh->virtualGeometryDetailLevels.size();
+					});
+				context.Expect(skippedFallbacksValid,
+					"Every skipped animated target must reference the compact emitted LOD table.");
+			}
+		});
+
+		registry.Add("Editor.Animation.SkinnedMeshCook.CanonicalizesDeindexedTopologyWithoutMergingDifferentSkinning", [](TestContext& context) {
+			constexpr std::uint32_t kQuadsPerSide = 24U;
+			SkinnedMeshCookInput input =
+				MakeDeindexedSkinnedGridInput(kQuadsPerSide);
+
+			// Give one otherwise identical interior corner a different joint.
+			// A deformation-safe canonicalizer must preserve that record while
+			// merging all other byte-identical triangle corners.
+			const std::array<float, 3U> interiorPosition =
+				input.vertices[2U].baseVertex.position;
+			std::size_t changedVertex = input.vertices.size();
+			for(std::size_t index = 3U; index < input.vertices.size(); ++index) {
+				if(input.vertices[index].baseVertex.position == interiorPosition) {
+					changedVertex = index;
+					break;
+				}
+			}
+			context.Expect(changedVertex < input.vertices.size(),
+				"The deindexed regression fixture must contain a repeated interior corner.");
+			if(changedVertex < input.vertices.size()) {
+				input.vertices[changedVertex].influences = {{1U, 1.0F}};
+			}
+
+			const std::filesystem::path outputPath =
+				TestRoot() / "animated-deindexed-topology.temf";
+			context.Expect(CompileSkinnedMeshFromRaw(
+				"animated-deindexed-topology",
+				outputPath,
+				input,
+				nullptr,
+				MakeBoundCookSettings(2U)),
+				"An unindexed deformable mesh should cook after safe deformation-aware canonicalization.");
+
+			std::ifstream output(outputPath, std::ios::binary);
+			MeshHeader header{};
+			output.read(reinterpret_cast<char*>(&header), sizeof(header));
+			const std::uint32_t gridVertexCount =
+				(kQuadsPerSide + 1U) * (kQuadsPerSide + 1U);
+			context.Expect(output
+					&& header.meshletVertexCount == gridVertexCount + 1U,
+				"Equivalent corners should weld, while the corner with different skinning must remain distinct.");
+
+			ResourceManager& resources = ResourceManager::Instance();
+			resources.ClearCaches();
+			const TerraEngine::UUID meshId =
+				resources.LoadDeformableMesh(
+					outputPath,
+					2U,
+					kTestSkeletonCompatibilityFingerprint);
+			const Mesh* mesh = resources.GetMesh(meshId);
+			context.Expect(mesh != nullptr
+					&& mesh->virtualGeometryDetailLevels.size() > 1U,
+				"Deindexed animated geometry must retain a usable LOD transition beyond LOD0.");
 		});
 	}
 }

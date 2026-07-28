@@ -109,6 +109,12 @@ namespace TerraEngine::Scheduling {
 	inline constexpr const char kResourceVirtualGeometryShadowVisibilitySnapshots[] = "VirtualGeometryShadowVisibilitySnapshots";
 	inline constexpr const char kResourceVirtualGeometryDiagnostics[] = "VirtualGeometryDiagnostics";
 	inline constexpr const char kResourceVisibleCommandReuseDiagnostics[] = "VisibleCommandReuseDiagnostics";
+	inline constexpr const char kResourceAnimatedGeometryPageDemands[] = "AnimatedGeometryPageDemands";
+	inline constexpr const char kResourceAnimatedGeometryDeformationPlans[] = "AnimatedGeometryDeformationPlans";
+	inline constexpr const char kResourceAnimatedGeometryOutputs[] = "AnimatedGeometryOutputs";
+	inline constexpr const char kResourceAnimatedGeometryDynamicBounds[] = "AnimatedGeometryDynamicBounds";
+	inline constexpr const char kResourceAnimatedGeometryPublications[] = "AnimatedGeometryPublications";
+	inline constexpr const char kResourceAnimatedGeometryRetirements[] = "AnimatedGeometryRetirements";
 	// Managed gameplay publishes copied runtime rendering requests into this
 	// queue; RenderSystem owns the effective settings publication at its boundary.
 	inline constexpr const char kResourceRuntimeRenderSettingsQueue[] = "RuntimeRenderSettingsQueue";

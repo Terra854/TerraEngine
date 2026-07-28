@@ -27,11 +27,13 @@ enum class VirtualGeometryCompileStatus : std::uint32_t
 struct VirtualGeometryAdaptiveCompileSettings
 {
 	std::vector<float> targetRatios;
-	std::uint32_t minimumSourceTriangles = 512u;
-	std::uint32_t minimumGeneratedTriangles = 64u;
-	std::uint32_t minimumMeshletsPerGeneratedLevel = 2u;
-	float minimumUsefulTriangleReduction = 0.15f;
-	float minimumUsefulMeshletReduction = 0.15f;
+	// Defaults keep every valid simplification. Artists can opt into stronger
+	// percentage or count gates through an individual mesh override.
+	std::uint32_t minimumSourceTriangles = 1u;
+	std::uint32_t minimumGeneratedTriangles = 1u;
+	std::uint32_t minimumMeshletsPerGeneratedLevel = 1u;
+	float minimumUsefulTriangleReduction = 0.0f;
+	float minimumUsefulMeshletReduction = 0.0f;
 	float maximumGeometricError = 0.1f;
 	std::string settingsSource = "ProjectDefaults";
 };
@@ -205,6 +207,9 @@ struct SkinnedMeshCookSettings
 	// SkeletonAsset. Zero is valid only when every retained weight is zero and
 	// the TEMF is therefore an unbound morph-only/identity payload.
 	std::uint64_t skeletonCompatibilityFingerprint = 0u;
+	// Deformable meshes must use the same LOD recipe as their inventory pass.
+	// Otherwise the final skinning cook can silently replace it with LOD0 only.
+	VirtualGeometryAdaptiveCompileSettings virtualGeometrySettings;
 };
 
 enum class SkinnedMeshCookFailure : std::uint8_t

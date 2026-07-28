@@ -146,9 +146,9 @@ namespace TerraEngine::EditorTests
 	{
 		registry.Add("Editor.Animation.FbxImport.UsesCurrentImporterRecipeVersion", [](TestContext& context) {
 			context.ExpectEqual(
-				std::string("4"),
+				std::string("6"),
 				std::string(TerraEngine::AssetPipeline::GetModelPackageImporterVersion("fixture.fbx")),
-				"FBX packages must use the authored-skin-bind importer recipe version.");
+				"FBX packages must use the authored skin-bind hierarchy importer recipe version.");
 			context.ExpectEqual(
 				std::string("1"),
 				std::string(TerraEngine::AssetPipeline::GetModelPackageImporterVersion("fixture.gltf")),
@@ -178,6 +178,8 @@ namespace TerraEngine::EditorTests
 				"The FBX authored skin-bind contract");
 			context.Expect(result.animation.skeletons.size() == 1u,
 				"The representative animated FBX should publish one inspectable skeleton.");
+			context.Expect(result.package.animationManifest.importerVersion == "6",
+				"The generated FBX animation manifest must use the same bind-and-clip recipe version as AssetDatabase invalidation.");
 			if (result.animation.skeletons.size() != 1u)
 			{
 				return;
@@ -186,7 +188,10 @@ namespace TerraEngine::EditorTests
 			const TerraEngine::Animation::SkeletonAsset& skeleton =
 				result.animation.skeletons.front().asset;
 			std::vector<AnimationMatrix> modelBind(skeleton.joints.size());
-			bool foundAuthoredBindDifferentFromNodePose = false;
+			std::vector<AnimationMatrix> sourceNodeModels(skeleton.joints.size());
+			bool foundAuthoredOffset = false;
+			bool foundSourceNodePoseDifferentFromBind = false;
+			bool allCookedBindPalettesAreIdentity = true;
 			for (std::size_t index = 0u; index < skeleton.joints.size(); ++index)
 			{
 				const AnimationMatrix local =
@@ -197,18 +202,34 @@ namespace TerraEngine::EditorTests
 					: Multiply(
 						modelBind[static_cast<std::size_t>(parent)],
 						local);
+				const AnimationMatrix sourceLocal =
+					MatrixFromTransform(result.animation.nodes[index].localTransform);
+				sourceNodeModels[index] = parent < 0
+					? sourceLocal
+					: Multiply(
+						sourceNodeModels[static_cast<std::size_t>(parent)],
+						sourceLocal);
 				if (!skeleton.joints[index].deformsMesh)
 				{
 					continue;
 				}
-				foundAuthoredBindDifferentFromNodePose =
-					foundAuthoredBindDifferentFromNodePose
+				foundAuthoredOffset = foundAuthoredOffset
+					|| !IsIdentity(skeleton.inverseBindMatrices[index].values);
+				foundSourceNodePoseDifferentFromBind =
+					foundSourceNodePoseDifferentFromBind
 					|| !IsIdentity(Multiply(
+						sourceNodeModels[index],
+						skeleton.inverseBindMatrices[index].values));
+				allCookedBindPalettesAreIdentity =
+					allCookedBindPalettesAreIdentity
+					&& IsIdentity(Multiply(
 						modelBind[index],
 						skeleton.inverseBindMatrices[index].values));
 			}
-			context.Expect(foundAuthoredBindDifferentFromNodePose,
-				"An FBX skin bind that differs from the exported node pose must retain its authored offset instead of being normalized to identity.");
+			context.Expect(foundAuthoredOffset
+					&& foundSourceNodePoseDifferentFromBind
+					&& allCookedBindPalettesAreIdentity,
+				"An FBX skin bind that differs from the exported node pose must retain its authored non-identity offset while the cooked local bind hierarchy composes back to identity.");
 		});
 
 	}

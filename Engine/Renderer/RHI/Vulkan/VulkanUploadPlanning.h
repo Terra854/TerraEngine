@@ -59,6 +59,37 @@ namespace TerraEngine::Renderer::Vulkan {
 		std::string reason;
 	};
 
+	struct PersistentPhysicalPageUploadInput
+	{
+		TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+		std::uint32_t pageId = 0xffffffffu;
+		std::uint64_t contentGeneration = 0u;
+		std::uint64_t residencyGeneration = 0u;
+		std::uint64_t byteSize = 0u;
+		std::uint64_t existingAllocationId = 0u;
+		std::uint64_t completionFence = 0u;
+		bool pinnedFallback = false;
+		bool eligibleForNewWork = true;
+	};
+
+	struct PersistentPhysicalPageUpload
+	{
+		PersistentPhysicalPageUploadInput input;
+		std::uint64_t poolByteOffset = 0u;
+		std::uint64_t allocationId = 0u;
+		bool reuseExisting = false;
+	};
+
+	struct PersistentPhysicalPageUploadPlan
+	{
+		std::vector<PersistentPhysicalPageUpload> uploads;
+		std::uint64_t requestedBytes = 0u;
+		std::uint64_t committedBytes = 0u;
+		std::uint32_t reusedPages = 0u;
+		bool valid = false;
+		std::string rejectionReason;
+	};
+
 	TERRAENGINE_API UploadPreparationPlan BuildUploadPreparationPlan(const RenderFrameSnapshot& snapshot, std::size_t payloadBudget = 64u);
 	TERRAENGINE_API VirtualGeometryPageUploadPublication PlanVirtualGeometryPageUploadPublication(const GeometryPageRuntime& page);
 	TERRAENGINE_API VirtualGeometryPageRetirementPlan PlanVirtualGeometryPageRetirement(const GeometryPageRuntime& page, std::uint64_t frameId, std::uint64_t safeFrameLag = 2u);
@@ -70,5 +101,13 @@ namespace TerraEngine::Renderer::Vulkan {
 	// Reuse is safe only when the prior upload completed into a live buffer and
 	// its exact packet signature still matches the current render snapshot.
 	TERRAENGINE_API bool CanReuseVirtualGeometryPagePayload(std::uint64_t cachedSignature, std::uint64_t currentSignature, bool cacheValid, bool bufferAvailable);
+	// Produces one checked persistent pool allocation per exact page generation.
+	// Existing allocations are reused and therefore consume no upload budget.
+	TERRAENGINE_API PersistentPhysicalPageUploadPlan
+		BuildPersistentPhysicalPageUploadPlan(
+			std::vector<PersistentPhysicalPageUploadInput> inputs,
+			std::uint64_t poolCapacityBytes,
+			std::uint64_t uploadBudgetBytes,
+			std::uint64_t allocationGeneration);
 
 }

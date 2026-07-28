@@ -6,6 +6,7 @@
 
 #include "VulkanContextImpl.h"
 #include "Profiling/ProfilerScope.h"
+#include "Resource/ResourceStreaming.h"
 
 #include <algorithm>
 #include <cctype>
@@ -17,6 +18,7 @@
 #include <iomanip>
 #include <limits>
 #include <new>
+#include <numeric>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -227,6 +229,24 @@ namespace
 				hashValue(mesh->meshletRecords.size());
 				hashValue(mesh->meshletBounds.size());
 				hashValue(mesh->virtualGeometryPayloadGeneration);
+				hashValue(mesh->deformablePayloadGeneration);
+				hashValue(
+					mesh->animatedVirtualPageDirectory.directoryHash);
+				const auto page = std::find_if(
+					mesh->animatedVirtualPageEntries.begin(),
+					mesh->animatedVirtualPageEntries.end(),
+					[&packet](
+						const AnimatedVirtualPageDirectoryEntry&
+							entry)
+					{
+						return entry.pageId == packet.pageId;
+					});
+				if(page
+					!= mesh->animatedVirtualPageEntries.end())
+				{
+					hashValue(page->contentGeneration);
+					hashValue(page->blobHash);
+				}
 			}
 		}
 		return signature;
@@ -325,8 +345,216 @@ namespace
 
 		const Mesh* cpuMesh = ResourceManager::Instance().GetMesh(packet.meshId);
 		if (cpuMesh == nullptr
-			|| cpuMesh->header.layout.strideBytes != kMeshletPackedVertexStrideBytes
-			|| packet.meshletCount == 0u
+			|| cpuMesh->header.layout.strideBytes != kMeshletPackedVertexStrideBytes)
+		{
+			return false;
+		}
+
+		// Prefer the independently validated AVPB allocation. Its streams are
+		// already page-local, so this path never walks or repacks the full owner
+		// vertex/remap/primitive payload. Legacy TEMF files continue through the
+		// compatibility path below.
+		if (cpuMesh->hasAnimatedVirtualPageDirectory)
+		{
+			const auto entryIt = std::find_if(
+				cpuMesh->animatedVirtualPageEntries.begin(),
+				cpuMesh->animatedVirtualPageEntries.end(),
+				[&packet](const AnimatedVirtualPageDirectoryEntry& entry)
+				{
+					return entry.pageId == packet.pageId;
+				});
+			if (entryIt != cpuMesh->animatedVirtualPageEntries.end()
+				&& entryIt->blobOffset >= cpuMesh->header.headerSize)
+			{
+				const std::uint64_t storageOffset =
+					entryIt->blobOffset - cpuMesh->header.headerSize;
+				if (storageOffset <= cpuMesh->storage.size()
+					&& entryIt->blobSize
+						<= cpuMesh->storage.size() - storageOffset)
+				{
+					const std::span<const std::uint8_t> blobBytes(
+						cpuMesh->storage.data()
+							+ static_cast<std::size_t>(storageOffset),
+						static_cast<std::size_t>(entryIt->blobSize));
+					const TerraEngine::Resource::AnimatedVirtualPageBlob blob =
+						TerraEngine::Resource::ParseAnimatedVirtualPageBlob(
+							blobBytes,
+							*entryIt,
+							cpuMesh->deformablePayloadGeneration);
+					const auto FindSection = [&blob](
+						AnimatedVirtualPageSectionType type)
+						-> const AnimatedVirtualPageSectionRecord*
+					{
+						const auto sectionIt = std::find_if(
+							blob.sections.begin(),
+							blob.sections.end(),
+							[type](
+								const AnimatedVirtualPageSectionRecord& section)
+							{
+								return section.type
+									== static_cast<std::uint32_t>(type);
+							});
+						return sectionIt == blob.sections.end()
+							? nullptr
+							: &*sectionIt;
+					};
+					const AnimatedVirtualPageSectionRecord* vertexSection =
+						FindSection(
+							AnimatedVirtualPageSectionType::PackedVertices);
+					const AnimatedVirtualPageSectionRecord* primitiveSection =
+						FindSection(
+							AnimatedVirtualPageSectionType::PrimitiveBytes);
+					const AnimatedVirtualPageSectionRecord* remapSection =
+						FindSection(
+							AnimatedVirtualPageSectionType::VertexRemap);
+					const AnimatedVirtualPageSectionRecord* meshletSection =
+						FindSection(
+							AnimatedVirtualPageSectionType::Meshlets);
+					const AnimatedVirtualPageSectionRecord* boundsSection =
+						FindSection(
+							AnimatedVirtualPageSectionType::MeshletBounds);
+					const AnimatedVirtualPageSectionRecord* decodeSection =
+						FindSection(
+							AnimatedVirtualPageSectionType::DecodeConstants);
+					if (blob.valid
+						&& vertexSection != nullptr
+						&& primitiveSection != nullptr
+						&& remapSection != nullptr
+						&& meshletSection != nullptr
+						&& boundsSection != nullptr
+						&& decodeSection != nullptr
+						&& decodeSection->byteSize
+							== sizeof(QuantizationInfo))
+					{
+						QuantizationInfo quantization{};
+						std::memcpy(
+							&quantization,
+							blobBytes.data()
+								+ static_cast<std::size_t>(
+									decodeSection->byteOffset),
+							sizeof(quantization));
+						VirtualGeometryPageLocalMeshDecodeInfo decodeInfo{};
+						std::copy_n(
+							quantization.positionOffset,
+							3u,
+							decodeInfo.positionOffset);
+						std::copy_n(
+							quantization.positionScale,
+							3u,
+							decodeInfo.positionScale);
+						decodeInfo.uvOffsetScale[0] =
+							quantization.uvOffset[0];
+						decodeInfo.uvOffsetScale[1] =
+							quantization.uvOffset[1];
+						decodeInfo.uvOffsetScale[2] =
+							quantization.uvScale[0];
+						decodeInfo.uvOffsetScale[3] =
+							quantization.uvScale[1];
+						decodeInfo.counts[0] =
+							vertexSection->elementCount;
+						decodeInfo.counts[1] =
+							remapSection->elementCount;
+						decodeInfo.counts[2] =
+							primitiveSection->elementCount;
+						decodeInfo.counts[3] =
+							meshletSection->elementCount;
+
+						const auto AppendSection = [
+							&words,
+							&blobBytes](
+							const AnimatedVirtualPageSectionRecord& section)
+						{
+							return AppendVirtualGeometryPayloadBytesAsWords(
+								words,
+								blobBytes.data()
+									+ static_cast<std::size_t>(
+										section.byteOffset),
+								static_cast<std::size_t>(section.byteSize));
+						};
+						const std::size_t payloadStartWords = words.size();
+						const std::uint32_t vertexWordOffset =
+							AppendSection(*vertexSection);
+						const std::uint32_t primitiveWordOffset =
+							AppendSection(*primitiveSection);
+						const std::uint32_t remapWordOffset =
+							AppendSection(*remapSection);
+						const std::uint32_t meshletWordOffset =
+							AppendSection(*meshletSection);
+						const std::uint32_t boundsWordOffset =
+							AppendSection(*boundsSection);
+						const std::uint32_t decodeWordOffset =
+							AppendVirtualGeometryPayloadBytesAsWords(
+								words,
+								&decodeInfo,
+								sizeof(decodeInfo));
+						std::uint32_t* descriptor = words.data()
+							+ descriptorWordOffset;
+						descriptor[
+							kVirtualGeometryPagePayloadDescriptorVertexWordOffset]
+							= vertexWordOffset;
+						descriptor[
+							kVirtualGeometryPagePayloadDescriptorVertexWordSize]
+							= static_cast<std::uint32_t>(
+								(vertexSection->byteSize
+									+ sizeof(std::uint32_t) - 1u)
+								/ sizeof(std::uint32_t));
+						descriptor[
+							kVirtualGeometryPagePayloadDescriptorPrimitiveWordOffset]
+							= primitiveWordOffset;
+						descriptor[
+							kVirtualGeometryPagePayloadDescriptorPrimitiveByteSize]
+							= static_cast<std::uint32_t>(
+								primitiveSection->byteSize);
+						descriptor[
+							kVirtualGeometryPagePayloadDescriptorRemapWordOffset]
+							= remapWordOffset;
+						descriptor[
+							kVirtualGeometryPagePayloadDescriptorRemapCount]
+							= remapSection->elementCount;
+						descriptor[
+							kVirtualGeometryPagePayloadDescriptorMeshletWordOffset]
+							= meshletWordOffset;
+						descriptor[
+							kVirtualGeometryPagePayloadDescriptorMeshletCount]
+							= meshletSection->elementCount;
+						descriptor[
+							kVirtualGeometryPagePayloadDescriptorBoundsWordOffset]
+							= boundsWordOffset;
+						descriptor[
+							kVirtualGeometryPagePayloadDescriptorBoundsCount]
+							= boundsSection->elementCount;
+						descriptor[
+							kVirtualGeometryPagePayloadDescriptorDecodeWordOffset]
+							= decodeWordOffset;
+						descriptor[
+							kVirtualGeometryPagePayloadDescriptorMaterialWordOffset]
+							= 0u;
+						descriptor[
+							kVirtualGeometryPagePayloadDescriptorMaterialCount]
+							= 0u;
+						descriptor[
+							kVirtualGeometryPagePayloadDescriptorLocalVertexCount]
+							= vertexSection->elementCount;
+						descriptor[
+							kVirtualGeometryPagePayloadDescriptorLocalPrimitiveByteCount]
+							= primitiveSection->elementCount;
+						descriptor[
+							kVirtualGeometryPagePayloadDescriptorLocalRemapEncoding]
+							= 0u;
+						if (outAppendedGpuBytes != nullptr)
+						{
+							*outAppendedGpuBytes =
+								static_cast<std::uint64_t>(
+									words.size() - payloadStartWords)
+								* sizeof(std::uint32_t);
+						}
+						return true;
+					}
+				}
+			}
+		}
+
+		if (packet.meshletCount == 0u
 			|| packet.meshletOffset >= cpuMesh->meshletRecords.size())
 		{
 			return false;
@@ -1175,6 +1403,931 @@ bool VulkanContext::Impl::EnsureVulkanAnimationDescriptorSets()
 		animationDescriptorSets.clear();
 		return false;
 	}
+	return true;
+}
+
+bool VulkanContext::Impl::EnsureVulkanDeformationDescriptorSets()
+{
+	if(deformationDescriptorSetLayout != VK_NULL_HANDLE
+		&& deformationDescriptorSets.size()
+			== MAX_FRAMES_IN_FLIGHT)
+	{
+		return true;
+	}
+	if(device == VK_NULL_HANDLE || descriptorPool == VK_NULL_HANDLE)
+	{
+		return false;
+	}
+	std::array<
+		VkDescriptorSetLayoutBinding,
+		TerraEngine::Renderer::Vulkan::
+			kVulkanDeformationDescriptorBindingCount> bindings{};
+	for(std::uint32_t binding = 0u;
+		binding < bindings.size();
+		++binding)
+	{
+		bindings[binding].binding = binding;
+		bindings[binding].descriptorType =
+			VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		bindings[binding].descriptorCount = 1u;
+		bindings[binding].stageFlags =
+			VK_SHADER_STAGE_COMPUTE_BIT;
+	}
+	VkDescriptorSetLayoutCreateInfo layoutInfo{};
+	layoutInfo.sType =
+		VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+	layoutInfo.bindingCount =
+		static_cast<std::uint32_t>(bindings.size());
+	layoutInfo.pBindings = bindings.data();
+	if(vkCreateDescriptorSetLayout(
+		device,
+		&layoutInfo,
+		nullptr,
+		&deformationDescriptorSetLayout) != VK_SUCCESS)
+	{
+		deformationDescriptorSetLayout = VK_NULL_HANDLE;
+		return false;
+	}
+	std::array<VkDescriptorSetLayout, MAX_FRAMES_IN_FLIGHT>
+		layouts{};
+	layouts.fill(deformationDescriptorSetLayout);
+	deformationDescriptorSets.assign(
+		MAX_FRAMES_IN_FLIGHT,
+		VK_NULL_HANDLE);
+	VkDescriptorSetAllocateInfo allocateInfo{};
+	allocateInfo.sType =
+		VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+	allocateInfo.descriptorPool = descriptorPool;
+	allocateInfo.descriptorSetCount = MAX_FRAMES_IN_FLIGHT;
+	allocateInfo.pSetLayouts = layouts.data();
+	if(vkAllocateDescriptorSets(
+		device,
+		&allocateInfo,
+		deformationDescriptorSets.data()) != VK_SUCCESS)
+	{
+		vkDestroyDescriptorSetLayout(
+			device,
+			deformationDescriptorSetLayout,
+			nullptr);
+		deformationDescriptorSetLayout = VK_NULL_HANDLE;
+		deformationDescriptorSets.clear();
+		return false;
+	}
+	return true;
+}
+
+void VulkanContext::Impl::RetireVulkanDeformationFrameResources(
+	VulkanDeformationFrameResources& resources)
+{
+	for(VulkanBuffer& buffer : resources.buffers)
+	{
+		RetireBuffer(buffer);
+	}
+	RetireBuffer(resources.graphicsBridgeBuffer);
+	const std::array<std::uint32_t, 4u> bindlessIndices{
+		resources.currentVerticesBindlessIndex,
+		resources.boundsBindlessIndex,
+		resources.refinementBindlessIndex,
+		resources.graphicsBridgeBindlessIndex };
+	for(const std::uint32_t index : bindlessIndices)
+	{
+		if(index != INVALID_BINDLESS_BUFFER_INDEX)
+		{
+			freeBufferIndices.push_back(index);
+		}
+	}
+	if(activeDeformationGraphicsBufferIndex
+		== resources.graphicsBridgeBindlessIndex)
+	{
+		activeDeformationGraphicsBufferIndex =
+			INVALID_BINDLESS_BUFFER_INDEX;
+	}
+	resources = {};
+}
+
+bool VulkanContext::Impl::PublishVulkanDeformationResources(
+	const TerraEngine::Renderer::GpuDeformationPlan& plan)
+{
+	using DescriptorBinding =
+		TerraEngine::Renderer::Vulkan::
+			VulkanDeformationDescriptorBinding;
+	if(plan.work.empty())
+	{
+		return plan.valid;
+	}
+	if(!plan.IsComplete()
+		|| currentFrame >= MAX_FRAMES_IN_FLIGHT
+		|| (currentFrame < pendingPrimaryCommandBuffers.size()
+			&& !pendingPrimaryCommandBuffers[currentFrame].empty())
+		|| (currentFrame
+				< pendingPrimaryCommandBuffersSubmitted.size()
+			&& pendingPrimaryCommandBuffersSubmitted[currentFrame]
+				!= 0u))
+	{
+		return false;
+	}
+	const auto descriptorPlan =
+		TerraEngine::Renderer::Vulkan::
+			BuildVulkanDeformationDescriptorSetPlan(
+				plan,
+				maximumStorageBufferRange);
+	if(!descriptorPlan.valid || !descriptorPlan.hasWork
+		|| !EnsureVulkanDeformationDescriptorSets())
+	{
+		return false;
+	}
+
+	enum class PaletteAuthority
+	{
+		Unknown,
+		Gpu,
+		Cpu
+	};
+	PaletteAuthority authority = PaletteAuthority::Unknown;
+	VkBuffer paletteBuffer = VK_NULL_HANDLE;
+	VkDeviceSize paletteBytes = 0u;
+	VkBuffer morphBuffer = VK_NULL_HANDLE;
+	VkDeviceSize morphBytes = 0u;
+	std::vector<TerraEngine::Renderer::
+		GpuDeformationGenerationRecord> generations;
+	std::vector<TerraEngine::Renderer::
+		GpuDeformationShaderWorkRecord> shaderWork;
+	std::vector<std::uint8_t> staticPageBytes;
+	std::vector<TerraEngine::Renderer::DeformedPageKey> workKeys;
+	struct RefinementRecord
+	{
+		std::uint32_t parentWorkIndex = 0u;
+		std::uint32_t firstChildWorkIndex = 0u;
+		std::uint32_t childCount = 0u;
+		std::uint32_t selectedWorkIndex = 0u;
+		float geometricError = 0.0f;
+		float deformationError = 0.0f;
+		float projectedScale = 1.0f;
+		float thresholdPixels = 1.0f;
+		std::uint32_t flags = 0x03u;
+		std::uint32_t requestFeedbackIndex = 0u;
+		std::array<std::uint32_t, 2u> reserved{};
+	};
+	static_assert(sizeof(RefinementRecord) == 48u);
+	std::vector<RefinementRecord> refinement;
+	try
+	{
+		generations.reserve(plan.work.size());
+		shaderWork.reserve(plan.work.size());
+		workKeys.reserve(plan.work.size());
+		refinement.reserve(plan.totalClusterBoundsCount);
+	}
+	catch(const std::bad_alloc&)
+	{
+		return false;
+	}
+
+	const auto FindSection = [](
+		const TerraEngine::Resource::AnimatedVirtualPageBlob& blob,
+		AnimatedVirtualPageSectionType type)
+		-> const AnimatedVirtualPageSectionRecord*
+	{
+		const auto found = std::find_if(
+			blob.sections.begin(),
+			blob.sections.end(),
+			[type](
+				const AnimatedVirtualPageSectionRecord& section)
+			{
+				return section.type
+					== static_cast<std::uint32_t>(type);
+			});
+		return found == blob.sections.end() ? nullptr : &*found;
+	};
+	for(std::uint32_t workIndex = 0u;
+		workIndex < plan.work.size();
+		++workIndex)
+	{
+		const TerraEngine::Renderer::DeformationWorkRecord& source =
+			plan.work[workIndex];
+		const Mesh* mesh =
+			ResourceManager::Instance().GetMesh(source.key.page.meshId);
+		if(mesh == nullptr
+			|| !mesh->hasAnimatedVirtualPageDirectory)
+		{
+			return false;
+		}
+		const auto entryIt = std::find_if(
+			mesh->animatedVirtualPageEntries.begin(),
+			mesh->animatedVirtualPageEntries.end(),
+			[&source](
+				const AnimatedVirtualPageDirectoryEntry& entry)
+			{
+				return entry.pageId == source.key.page.pageId
+					&& entry.contentGeneration
+						== source.key.page.pageContentGeneration;
+			});
+		if(entryIt == mesh->animatedVirtualPageEntries.end()
+			|| entryIt->blobOffset < mesh->header.headerSize)
+		{
+			return false;
+		}
+		const std::uint64_t storageOffset =
+			entryIt->blobOffset - mesh->header.headerSize;
+		if(storageOffset > mesh->storage.size()
+			|| entryIt->blobSize
+				> mesh->storage.size() - storageOffset
+			|| staticPageBytes.size()
+				> std::numeric_limits<std::uint32_t>::max())
+		{
+			return false;
+		}
+		const std::span<const std::uint8_t> blobBytes(
+			mesh->storage.data()
+				+ static_cast<std::size_t>(storageOffset),
+			static_cast<std::size_t>(entryIt->blobSize));
+		const TerraEngine::Resource::AnimatedVirtualPageBlob blob =
+			TerraEngine::Resource::ParseAnimatedVirtualPageBlob(
+				blobBytes,
+				*entryIt,
+				mesh->deformablePayloadGeneration);
+		const AnimatedVirtualPageSectionRecord* vertices =
+			FindSection(
+				blob,
+				AnimatedVirtualPageSectionType::PackedVertices);
+		const AnimatedVirtualPageSectionRecord* skin =
+			FindSection(
+				blob,
+				AnimatedVirtualPageSectionType::SkinRecords);
+		const AnimatedVirtualPageSectionRecord* joints =
+			FindSection(
+				blob,
+				AnimatedVirtualPageSectionType::JointPalette);
+		const AnimatedVirtualPageSectionRecord* morphTargets =
+			FindSection(
+				blob,
+				AnimatedVirtualPageSectionType::MorphTargets);
+		const AnimatedVirtualPageSectionRecord* morphDeltas =
+			FindSection(
+				blob,
+				AnimatedVirtualPageSectionType::MorphDeltas);
+		const AnimatedVirtualPageSectionRecord* decode =
+			FindSection(
+				blob,
+				AnimatedVirtualPageSectionType::DecodeConstants);
+		if(!blob.valid
+			|| vertices == nullptr
+			|| skin == nullptr
+			|| joints == nullptr
+			|| decode == nullptr
+			|| decode->byteSize != sizeof(QuantizationInfo)
+			|| vertices->elementCount != source.vertexCount
+			|| skin->elementCount != source.vertexCount)
+		{
+			return false;
+		}
+		const std::size_t alignedBase =
+			(staticPageBytes.size() + 15u) & ~std::size_t{15u};
+		if(alignedBase
+				> std::numeric_limits<std::uint32_t>::max()
+			|| blobBytes.size()
+				> std::numeric_limits<std::uint32_t>::max()
+					- alignedBase)
+		{
+			return false;
+		}
+		staticPageBytes.resize(alignedBase, 0u);
+		const std::uint32_t blobBase =
+			static_cast<std::uint32_t>(alignedBase);
+		staticPageBytes.insert(
+			staticPageBytes.end(),
+			blobBytes.begin(),
+			blobBytes.end());
+
+		std::uint64_t paletteOffsetBytes = 0u;
+		std::uint64_t morphOffsetBytes = 0u;
+		if(pendingAnimationImmutablePlan != nullptr
+			&& source.sourceRecordIndex
+				< pendingAnimationImmutablePlan->workPackets.size()
+			&& currentFrame < animationFrameResources.size())
+		{
+			if(authority == PaletteAuthority::Cpu)
+			{
+				return false;
+			}
+			authority = PaletteAuthority::Gpu;
+			const auto& packet =
+				pendingAnimationImmutablePlan->workPackets[
+					source.sourceRecordIndex];
+			paletteOffsetBytes = packet.paletteOffsetBytes;
+			morphOffsetBytes = packet.morphOutputOffsetBytes;
+			const auto& animationResources =
+				animationFrameResources[currentFrame];
+			const std::size_t paletteBinding =
+				static_cast<std::size_t>(
+					TerraEngine::Animation::
+						GpuAnimationDescriptorBinding::
+							PaletteMatrices);
+			const std::size_t morphBinding =
+				static_cast<std::size_t>(
+					TerraEngine::Animation::
+						GpuAnimationDescriptorBinding::
+							MorphOutputs);
+			paletteBuffer =
+				animationResources.buffers[paletteBinding].buffer;
+			paletteBytes =
+				animationResources.buffers[paletteBinding].size;
+			morphBuffer =
+				animationResources.buffers[morphBinding].buffer;
+			morphBytes =
+				animationResources.buffers[morphBinding].size;
+		}
+		else if(pendingCpuAnimationPlan != nullptr
+			&& currentFrame < cpuAnimationFrameResources.size())
+		{
+			if(authority == PaletteAuthority::Gpu)
+			{
+				return false;
+			}
+			authority = PaletteAuthority::Cpu;
+			std::size_t recordIndex = 0u;
+			for(;
+				recordIndex
+					< pendingCpuAnimationPlan->records.size();
+				++recordIndex)
+			{
+				const auto& record =
+					pendingCpuAnimationPlan->records[recordIndex];
+				if(record.stableInstanceId
+					== source.key.deformation.stableInstanceId)
+				{
+					break;
+				}
+				paletteOffsetBytes +=
+					record.data->paletteMatrices.size()
+					* sizeof(
+						TerraEngine::Animation::
+							GpuAnimationPaletteRecord);
+				morphOffsetBytes +=
+					record.data->morphWeights.size()
+					* sizeof(float);
+			}
+			if(recordIndex
+				== pendingCpuAnimationPlan->records.size())
+			{
+				return false;
+			}
+			const auto& cpuResources =
+				cpuAnimationFrameResources[currentFrame];
+			paletteBuffer = cpuResources.paletteBuffer.buffer;
+			paletteBytes = cpuResources.paletteBuffer.size;
+			morphBuffer = cpuResources.morphWeightBuffer.buffer;
+			morphBytes = cpuResources.morphWeightBuffer.size;
+		}
+		else
+		{
+			return false;
+		}
+		if(paletteBuffer == VK_NULL_HANDLE
+			|| paletteOffsetBytes % 16u != 0u
+			|| morphOffsetBytes % sizeof(float) != 0u)
+		{
+			return false;
+		}
+
+		QuantizationInfo quantization{};
+		std::memcpy(
+			&quantization,
+			blobBytes.data()
+				+ static_cast<std::size_t>(decode->byteOffset),
+			sizeof(quantization));
+		TerraEngine::Renderer::GpuDeformationGenerationRecord
+			generation{};
+		generation.stableInstanceId =
+			source.key.deformation.stableInstanceId;
+		generation.animationPublicationGeneration =
+			source.key.deformation.animationPublicationGeneration;
+		generation.pageContentGeneration =
+			source.key.page.pageContentGeneration;
+		generation.residencyGeneration =
+			source.key.page.residencyGeneration;
+		generation.rendererGeneration =
+			source.key.deformation.rendererGeneration;
+		generation.sceneGeneration =
+			source.key.deformation.sceneGeneration;
+		generation.meshPayloadGeneration =
+			source.key.deformation.meshPayloadGeneration;
+		generations.push_back(generation);
+
+		TerraEngine::Renderer::GpuDeformationShaderWorkRecord
+			work{};
+		work.generationRecordIndex = workIndex;
+		work.inputVertexByteOffset =
+			blobBase
+			+ static_cast<std::uint32_t>(vertices->byteOffset);
+		work.skinRecordByteOffset =
+			blobBase
+			+ static_cast<std::uint32_t>(skin->byteOffset);
+		work.morphDeltaByteOffset = morphDeltas == nullptr
+			? 0u
+			: blobBase
+				+ static_cast<std::uint32_t>(
+					morphDeltas->byteOffset);
+		work.vertexCount = source.vertexCount;
+		work.jointCount = joints->elementCount;
+		work.morphTargetCount = morphTargets == nullptr
+			? 0u
+			: morphTargets->elementCount;
+		work.paletteRowOffset =
+			static_cast<std::uint32_t>(
+				paletteOffsetBytes / 16u);
+		work.morphWeightOffset =
+			static_cast<std::uint32_t>(
+				morphOffsetBytes / sizeof(float));
+		work.currentOutputOffset = source.vertexOffset;
+		work.previousOutputOffset = source.vertexOffset;
+		work.jointPaletteByteOffset =
+			blobBase
+			+ static_cast<std::uint32_t>(joints->byteOffset);
+		std::copy_n(
+			quantization.positionOffset,
+			3u,
+			work.positionOffset.begin());
+		std::copy_n(
+			quantization.positionScale,
+			3u,
+			work.positionScale.begin());
+		shaderWork.push_back(work);
+		workKeys.push_back(source.key);
+		for(std::uint32_t cluster = 0u;
+			cluster < source.clusterCount;
+			++cluster)
+		{
+			RefinementRecord record{};
+			record.parentWorkIndex = workIndex;
+			record.selectedWorkIndex = workIndex;
+			record.requestFeedbackIndex =
+				source.clusterBoundsOffset + cluster;
+			record.geometricError = entryIt->geometricError;
+			record.deformationError =
+				entryIt->deformationError;
+			refinement.push_back(record);
+		}
+	}
+	if(staticPageBytes.empty()
+		|| generations.size() != plan.work.size()
+		|| shaderWork.size() != plan.work.size()
+		|| refinement.size()
+			!= plan.totalClusterBoundsCount
+		|| paletteBytes == 0u)
+	{
+		return false;
+	}
+
+	if(deformationFrameResources.size()
+		< MAX_FRAMES_IN_FLIGHT)
+	{
+		deformationFrameResources.resize(
+			MAX_FRAMES_IN_FLIGHT);
+	}
+	VulkanDeformationFrameResources& resources =
+		deformationFrameResources[currentFrame];
+	if(resources.live
+		&& resources.rendererGeneration
+			!= plan.rendererGeneration)
+	{
+		RetireVulkanDeformationFrameResources(resources);
+	}
+	const std::uint32_t previousFrame =
+		(currentFrame + MAX_FRAMES_IN_FLIGHT - 1u)
+		% MAX_FRAMES_IN_FLIGHT;
+	const VulkanDeformationFrameResources* previousResources =
+		previousFrame < deformationFrameResources.size()
+			? &deformationFrameResources[previousFrame]
+			: nullptr;
+	const bool historyCompatible =
+		previousResources != nullptr
+		&& previousResources->live
+		&& previousResources->rendererGeneration
+			== plan.rendererGeneration
+		&& previousResources->workKeys == workKeys;
+	for(std::size_t index = 0u;
+		index < shaderWork.size();
+		++index)
+	{
+		if(historyCompatible && plan.work[index].historyValid)
+		{
+			shaderWork[index].flags |= 0x01u;
+		}
+	}
+	const auto EnsureBuffer = [this, &resources](
+		std::size_t binding,
+		VkDeviceSize requiredBytes,
+		const char* name)
+	{
+		const VkDeviceSize safeBytes =
+			std::max<VkDeviceSize>(requiredBytes, 16u);
+		VulkanBuffer& buffer = resources.buffers[binding];
+		if(buffer.buffer == VK_NULL_HANDLE
+			|| resources.capacities[binding] < safeBytes)
+		{
+			RetireBuffer(buffer);
+			buffer = CreateBuffer(
+				safeBytes,
+				VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+				VMA_MEMORY_USAGE_CPU_TO_GPU,
+				name);
+			resources.capacities[binding] = safeBytes;
+		}
+		return buffer.buffer != VK_NULL_HANDLE;
+	};
+	const auto BindingIndex = [](DescriptorBinding binding)
+	{
+		return static_cast<std::size_t>(binding);
+	};
+	for(std::size_t binding = 0u;
+		binding
+			< TerraEngine::Renderer::Vulkan::
+				kVulkanDeformationDescriptorBindingCount;
+		++binding)
+	{
+		if(binding == BindingIndex(DescriptorBinding::Palettes)
+			|| binding
+				== BindingIndex(
+					DescriptorBinding::MorphWeights)
+			|| binding
+				== BindingIndex(
+					DescriptorBinding::PreviousVertices))
+		{
+			continue;
+		}
+		VkDeviceSize requiredBytes =
+			descriptorPlan.bindings[binding].minimumByteCount;
+		if(binding
+			== BindingIndex(
+				DescriptorBinding::StaticPageBytes))
+		{
+			requiredBytes = staticPageBytes.size();
+		}
+		else if(binding
+			== BindingIndex(
+				DescriptorBinding::Refinement))
+		{
+			requiredBytes =
+				refinement.size() * sizeof(RefinementRecord);
+		}
+		if(!EnsureBuffer(
+			binding,
+			requiredBytes,
+			"Animated Virtual Geometry Frame Buffer"))
+		{
+			RetireVulkanDeformationFrameResources(resources);
+			return false;
+		}
+		if(!ClearMappedBuffer(
+			allocator,
+			resources.buffers[binding]))
+		{
+			RetireVulkanDeformationFrameResources(resources);
+			return false;
+		}
+	}
+	const auto Upload = [this, &resources](
+		DescriptorBinding binding,
+		const void* bytes,
+		VkDeviceSize byteCount)
+	{
+		return byteCount == 0u
+			|| WriteMappedBuffer(
+				allocator,
+				resources.buffers[
+					static_cast<std::size_t>(binding)],
+				bytes,
+				byteCount);
+	};
+	if(!Upload(
+			DescriptorBinding::Generations,
+			generations.data(),
+			generations.size() * sizeof(generations.front()))
+		|| !Upload(
+			DescriptorBinding::Work,
+			shaderWork.data(),
+			shaderWork.size() * sizeof(shaderWork.front()))
+		|| !Upload(
+			DescriptorBinding::StaticPageBytes,
+			staticPageBytes.data(),
+			staticPageBytes.size())
+		|| !Upload(
+			DescriptorBinding::Refinement,
+			refinement.data(),
+			refinement.size() * sizeof(refinement.front())))
+	{
+		RetireVulkanDeformationFrameResources(resources);
+		return false;
+	}
+
+	std::array<
+		VkDescriptorBufferInfo,
+		TerraEngine::Renderer::Vulkan::
+			kVulkanDeformationDescriptorBindingCount> infos{};
+	std::array<
+		VkWriteDescriptorSet,
+		TerraEngine::Renderer::Vulkan::
+			kVulkanDeformationDescriptorBindingCount> writes{};
+	for(std::uint32_t binding = 0u;
+		binding < infos.size();
+		++binding)
+	{
+		infos[binding].buffer =
+			resources.buffers[binding].buffer;
+		infos[binding].offset = 0u;
+		infos[binding].range =
+			std::max<VkDeviceSize>(
+				16u,
+				resources.buffers[binding].size);
+		if(binding == BindingIndex(DescriptorBinding::Palettes))
+		{
+			infos[binding].buffer = paletteBuffer;
+			infos[binding].range = paletteBytes;
+		}
+		else if(binding
+			== BindingIndex(DescriptorBinding::MorphWeights))
+		{
+			infos[binding].buffer =
+				morphBuffer != VK_NULL_HANDLE
+					? morphBuffer
+					: paletteBuffer;
+			infos[binding].range =
+				morphBuffer != VK_NULL_HANDLE
+					? std::max<VkDeviceSize>(16u, morphBytes)
+					: 16u;
+		}
+		else if(binding
+			== BindingIndex(
+				DescriptorBinding::PreviousVertices))
+		{
+			const VulkanBuffer& previousBuffer =
+				historyCompatible
+					? previousResources->buffers[
+						BindingIndex(
+							DescriptorBinding::
+								CurrentVertices)]
+					: resources.buffers[
+						BindingIndex(
+							DescriptorBinding::
+								CurrentVertices)];
+			infos[binding].buffer = previousBuffer.buffer;
+			infos[binding].range = previousBuffer.size;
+		}
+		if(infos[binding].buffer == VK_NULL_HANDLE
+			|| infos[binding].range == 0u
+			|| infos[binding].range > maximumStorageBufferRange)
+		{
+			RetireVulkanDeformationFrameResources(resources);
+			return false;
+		}
+		writes[binding].sType =
+			VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[binding].dstSet =
+			deformationDescriptorSets[currentFrame];
+		writes[binding].dstBinding = binding;
+		writes[binding].descriptorType =
+			VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		writes[binding].descriptorCount = 1u;
+		writes[binding].pBufferInfo = &infos[binding];
+	}
+	vkUpdateDescriptorSets(
+		device,
+		static_cast<std::uint32_t>(writes.size()),
+		writes.data(),
+		0u,
+		nullptr);
+
+	// Publish only the canonical current/history/bounds/refinement products to
+	// graphics. The bridge deliberately omits palettes, skin records, and morph
+	// weights, keeping custom surface stages animation-agnostic.
+	const std::size_t currentBinding =
+		BindingIndex(DescriptorBinding::CurrentVertices);
+	const std::size_t boundsBinding =
+		BindingIndex(DescriptorBinding::ClusterBounds);
+	const std::size_t refinementBinding =
+		BindingIndex(DescriptorBinding::Refinement);
+	if(resources.currentVerticesBindlessIndex
+		== INVALID_BINDLESS_BUFFER_INDEX)
+	{
+		resources.currentVerticesBindlessIndex =
+			AllocateBufferIndex();
+	}
+	if(resources.boundsBindlessIndex
+		== INVALID_BINDLESS_BUFFER_INDEX)
+	{
+		resources.boundsBindlessIndex = AllocateBufferIndex();
+	}
+	if(resources.refinementBindlessIndex
+		== INVALID_BINDLESS_BUFFER_INDEX)
+	{
+		resources.refinementBindlessIndex =
+			AllocateBufferIndex();
+	}
+	UpdateGlobalBufferForFrame(
+		currentFrame,
+		resources.currentVerticesBindlessIndex,
+		resources.buffers[currentBinding].buffer,
+		0u,
+		resources.buffers[currentBinding].size);
+	UpdateGlobalBufferForFrame(
+		currentFrame,
+		resources.boundsBindlessIndex,
+		resources.buffers[boundsBinding].buffer,
+		0u,
+		resources.buffers[boundsBinding].size);
+	UpdateGlobalBufferForFrame(
+		currentFrame,
+		resources.refinementBindlessIndex,
+		resources.buffers[refinementBinding].buffer,
+		0u,
+		resources.buffers[refinementBinding].size);
+	const std::uint32_t previousVerticesBindlessIndex =
+		historyCompatible
+			? previousResources->currentVerticesBindlessIndex
+			: resources.currentVerticesBindlessIndex;
+	if(previousVerticesBindlessIndex
+		== INVALID_BINDLESS_BUFFER_INDEX)
+	{
+		RetireVulkanDeformationFrameResources(resources);
+		return false;
+	}
+
+	std::vector<std::uint32_t> orderedWork(plan.work.size());
+	std::iota(orderedWork.begin(), orderedWork.end(), 0u);
+	std::sort(
+		orderedWork.begin(),
+		orderedWork.end(),
+		[&plan](std::uint32_t left, std::uint32_t right)
+		{
+			const auto& leftWork = plan.work[left];
+			const auto& rightWork = plan.work[right];
+			if(leftWork.key.deformation.stableInstanceId
+				!= rightWork.key.deformation.stableInstanceId)
+			{
+				return leftWork.key.deformation.stableInstanceId
+					< rightWork.key.deformation.stableInstanceId;
+			}
+			if(leftWork.key.page.meshId
+				!= rightWork.key.page.meshId)
+			{
+				return leftWork.key.page.meshId
+					< rightWork.key.page.meshId;
+			}
+			return leftWork.key.page.pageId
+				< rightWork.key.page.pageId;
+		});
+	struct GroupRange
+	{
+		std::uint64_t stableInstanceId = 0u;
+		TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+		std::size_t begin = 0u;
+		std::size_t count = 0u;
+	};
+	std::vector<GroupRange> groups;
+	for(std::size_t orderedIndex = 0u;
+		orderedIndex < orderedWork.size();
+		++orderedIndex)
+	{
+		const auto& work = plan.work[orderedWork[orderedIndex]];
+		if(groups.empty()
+			|| groups.back().stableInstanceId
+				!= work.key.deformation.stableInstanceId
+			|| groups.back().meshId != work.key.page.meshId)
+		{
+			groups.push_back({
+				work.key.deformation.stableInstanceId,
+				work.key.page.meshId,
+				orderedIndex,
+				0u });
+		}
+		++groups.back().count;
+	}
+	constexpr std::uint32_t kBridgeHeaderWords = 16u;
+	constexpr std::uint32_t kBridgeRecordWords = 4u;
+	constexpr std::uint32_t kBridgeMarker = 0x4445464du;
+	std::vector<std::uint32_t> bridgeWords(
+		groups.size() * kBridgeHeaderWords
+			+ orderedWork.size() * kBridgeRecordWords,
+		0u);
+	resources.graphicsGroups.clear();
+	resources.graphicsGroups.reserve(groups.size());
+	for(std::uint32_t groupIndex = 0u;
+		groupIndex < groups.size();
+		++groupIndex)
+	{
+		const GroupRange& group = groups[groupIndex];
+		const std::size_t headerOffset =
+			static_cast<std::size_t>(groupIndex)
+				* kBridgeHeaderWords;
+		const std::uint32_t recordWordOffset =
+			static_cast<std::uint32_t>(
+				groups.size() * kBridgeHeaderWords
+				+ group.begin * kBridgeRecordWords);
+		const auto& firstWork =
+			plan.work[orderedWork[group.begin]];
+		bridgeWords[headerOffset + 0u] =
+			TerraEngine::Renderer::kAnimatedGeometryAbiVersion;
+		bridgeWords[headerOffset + 1u] =
+			static_cast<std::uint32_t>(
+				plan.rendererGeneration);
+		bridgeWords[headerOffset + 2u] = recordWordOffset;
+		bridgeWords[headerOffset + 3u] =
+			static_cast<std::uint32_t>(group.count);
+		bridgeWords[headerOffset + 4u] =
+			resources.currentVerticesBindlessIndex;
+		bridgeWords[headerOffset + 5u] =
+			previousVerticesBindlessIndex;
+		bridgeWords[headerOffset + 6u] =
+			resources.boundsBindlessIndex;
+		bridgeWords[headerOffset + 7u] =
+			resources.refinementBindlessIndex;
+		bridgeWords[headerOffset + 8u] =
+			static_cast<std::uint32_t>(
+				group.stableInstanceId);
+		bridgeWords[headerOffset + 9u] =
+			static_cast<std::uint32_t>(
+				group.stableInstanceId >> 32u);
+		bridgeWords[headerOffset + 10u] =
+			static_cast<std::uint32_t>(
+				firstWork.key.page.meshPayloadGeneration);
+		bridgeWords[headerOffset + 11u] =
+			static_cast<std::uint32_t>(
+				firstWork.key.page.meshPayloadGeneration
+					>> 32u);
+		bridgeWords[headerOffset + 12u] = 0x05u
+			| (historyCompatible ? 0x02u : 0u);
+		bridgeWords[headerOffset + 13u] =
+			plan.totalVertexCount;
+		bridgeWords[headerOffset + 14u] = groupIndex;
+		bridgeWords[headerOffset + 15u] = kBridgeMarker;
+		resources.graphicsGroups.push_back({
+			group.stableInstanceId,
+			group.meshId,
+			groupIndex });
+		for(std::size_t localRecord = 0u;
+			localRecord < group.count;
+			++localRecord)
+		{
+			const std::uint32_t workIndex =
+				orderedWork[group.begin + localRecord];
+			const auto& work = plan.work[workIndex];
+			const std::size_t outputOffset =
+				static_cast<std::size_t>(recordWordOffset)
+					+ localRecord * kBridgeRecordWords;
+			bridgeWords[outputOffset + 0u] =
+				work.key.page.pageId;
+			bridgeWords[outputOffset + 1u] =
+				work.vertexOffset;
+			bridgeWords[outputOffset + 2u] =
+				workIndex;
+			bridgeWords[outputOffset + 3u] = 0x05u
+				| (shaderWork[workIndex].flags & 0x01u
+					? 0x02u
+					: 0u);
+		}
+	}
+	const VkDeviceSize bridgeBytes =
+		bridgeWords.size() * sizeof(std::uint32_t);
+	if(resources.graphicsBridgeBuffer.buffer == VK_NULL_HANDLE
+		|| resources.graphicsBridgeCapacityBytes < bridgeBytes)
+	{
+		RetireBuffer(resources.graphicsBridgeBuffer);
+		resources.graphicsBridgeBuffer = CreateBuffer(
+			bridgeBytes,
+			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+			VMA_MEMORY_USAGE_CPU_TO_GPU,
+			"Animated Virtual Geometry Graphics Bridge");
+		resources.graphicsBridgeCapacityBytes = bridgeBytes;
+	}
+	if(resources.graphicsBridgeBuffer.buffer == VK_NULL_HANDLE
+		|| !WriteMappedBuffer(
+			allocator,
+			resources.graphicsBridgeBuffer,
+			bridgeWords.data(),
+			bridgeBytes))
+	{
+		RetireVulkanDeformationFrameResources(resources);
+		return false;
+	}
+	if(resources.graphicsBridgeBindlessIndex
+		== INVALID_BINDLESS_BUFFER_INDEX)
+	{
+		resources.graphicsBridgeBindlessIndex =
+			AllocateBufferIndex();
+	}
+	UpdateGlobalBufferForFrame(
+		currentFrame,
+		resources.graphicsBridgeBindlessIndex,
+		resources.graphicsBridgeBuffer.buffer,
+		0u,
+		bridgeBytes);
+	resources.descriptorPlan = descriptorPlan;
+	resources.workKeys = std::move(workKeys);
+	resources.frameId = plan.frameId;
+	resources.rendererGeneration = plan.rendererGeneration;
+	resources.live = true;
+	activeDeformationGraphicsBufferIndex =
+		resources.graphicsBridgeBindlessIndex;
 	return true;
 }
 
@@ -3345,20 +4498,78 @@ bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collectio
 	return true;
 }
 
+std::optional<PipelineKey> VulkanContext::Impl::BuildPipelineKey(
+	TerraEngine::UUID shaderCollectionId,
+	uint32_t materialFlags) const
+{
+	// Pipeline lookup must use every generation and ABI field used by insertion.
+	// Otherwise a successfully-created pipeline is unreachable as soon as the
+	// cache key grows beyond the collection UUID and material flags.
+	ShaderCollection* collection =
+		ResourceManager::Instance().GetShaderCollection(shaderCollectionId);
+	if(collection == nullptr)
+	{
+		return std::nullopt;
+	}
+
+	std::uint64_t shaderModuleGeneration = 1469598103934665603ull;
+	for(const ShaderCollection::StageBinding& binding : collection->stages)
+	{
+		for(const std::uint8_t byte : binding.shaderId)
+		{
+			shaderModuleGeneration ^= byte;
+			shaderModuleGeneration *= 1099511628211ull;
+		}
+		const Shader* shader = ResourceManager::Instance().GetShader(binding.shaderId);
+		if(shader == nullptr)
+		{
+			return std::nullopt;
+		}
+		shaderModuleGeneration ^= shader->bytecode.size();
+		shaderModuleGeneration *= 1099511628211ull;
+	}
+
+	return PipelineKey{
+		shaderCollectionId,
+		materialFlags,
+		collection->collectionGeneration,
+		shaderModuleGeneration,
+		collection->geometryAbiVersion,
+		static_cast<std::uint32_t>(collection->geometryPolicy)
+	};
+}
+
 // VulkanContext::Impl::EnsurePipeline is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, VkRenderPass renderPass, uint32_t materialFlags) {
-	PipelineKey key = { shaderCollectionId, materialFlags };
-
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (renderPass == VK_NULL_HANDLE) {
 		TERRAENGINE_LOG(LogLevel::Error, "Cannot ensure pipeline: render pass handle is null.");
+		return;
+	}
+	ShaderCollection* collection =
+		ResourceManager::Instance().GetShaderCollection(shaderCollectionId);
+	if(collection == nullptr || !collection->reflectionComplete
+		|| collection->usesReservedBindings
+		|| collection->usesAnimationBindings
+		|| collection->geometryAbiVersion != 1u
+		|| collection->collectionGeneration == 0u)
+	{
+		TERRAENGINE_LOG(LogLevel::Error,
+			"Failed to build graphics pipeline: shader geometry contract is incomplete or incompatible.");
+		return;
+	}
+	const std::optional<PipelineKey> key = BuildPipelineKey(shaderCollectionId, materialFlags);
+	if(!key.has_value())
+	{
+		TERRAENGINE_LOG(LogLevel::Error,
+			"Failed to build graphics pipeline: shader module generation is missing.");
 		return;
 	}
 
 	auto passIt = pipelineCache.find(renderPass);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (passIt != pipelineCache.end()) {
-		auto cachedPipelineIt = passIt->second.find(key);
+		auto cachedPipelineIt = passIt->second.find(*key);
 		if (cachedPipelineIt != passIt->second.end()) {
 			VulkanPipeline& cached = cachedPipelineIt->second;
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -3393,13 +4604,6 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 	// broad resource-preparation sample cannot distinguish.
 	TERRAENGINE_PROFILE_SCOPE("Vulkan: Build Graphics Pipeline", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 	
-	ShaderCollection* collection = ResourceManager::Instance().GetShaderCollection(shaderCollectionId);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!collection) {
-		TERRAENGINE_LOG(LogLevel::Error, "Failed to build graphics pipeline: shader collection not found.");
-		return;
-	}
-
 	const bool shadowPipeline = (renderPass == shadowRenderPass);
 	std::vector<VkPipelineShaderStageCreateInfo> shaderStages;
 	bool hasMeshStage = false;
@@ -3703,7 +4907,7 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 	pipeline.defaultPushConstantStages = defaultPushConstantStages;
 	pipeline.hasTaskStage = hasTaskStage;
 
-	pipelineCache[renderPass][key] = std::move(pipeline);
+	pipelineCache[renderPass][*key] = std::move(pipeline);
 }
 
 // VulkanContext::Impl::CreateGlobalDescriptorResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

@@ -392,16 +392,14 @@ target, then decides whether it became:
   small to be useful.
 - `Rejected`: simplification produced invalid output or exceeded safety limits.
 
-Small meshes stay renderable by emitting only the highest-detail fallback. By
-default, meshes below `512` source triangles skip simplification with
-`MeshTooSmall`; generated candidates below `64` triangles, below `2` meshlets,
-or below the `15%` useful triangle/meshlet reduction threshold are skipped or
-merged. Candidates with non-finite error or geometric error above `0.1` are
-rejected, and the nearest valid generated detail remains the fallback. Skipped
-and merged rows include the actual source or candidate counts plus the threshold
-that made the level non-useful, so a row such as `InsufficientTriangleReduction`
-means the candidate did not reduce triangles enough compared with the previous
-generated level.
+Small meshes stay renderable by emitting at least the highest-detail fallback.
+The default count gates are `1` source triangle, `1` generated triangle, and
+`1` meshlet, while both useful-reduction percentage gates default to `0%`.
+Therefore, import keeps every smaller valid simplification that stays within the
+default `0.1` geometric-error limit. Invalid or duplicate simplifier output is
+still rejected safely. Artists can set nonzero triangle and meshlet reduction
+percentages per mesh; skipped and merged diagnostics record the actual candidate
+counts and the selected threshold.
 
 ### Inspector Per-Mesh Overrides
 
@@ -412,8 +410,8 @@ sidecar override. The source glTF/GLB/FBX package row itself, materials,
 textures, scripts, scenes, and other non-mesh assets do not show these controls.
 
 The Inspector override panel stages the resolved project defaults first. Enable
-`Per-Mesh Override`, tune the target count, ratios, thresholds, useful
-reduction limits, and maximum geometric error, then choose `Save Settings` or
+`Per-Mesh Override`, tune the target count, ratios, count thresholds, minimum
+triangle/meshlet reduction percentages, and maximum geometric error, then choose `Save Settings` or
 `Rebuild`. Rebuild requests go through the normal AssetDatabase import boundary,
 so compiled mesh publication remains atomic and failed rebuilds leave the last
 usable compiled mesh intact. `Reset` removes the override and returns the mesh

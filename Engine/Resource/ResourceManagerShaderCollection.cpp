@@ -6,6 +6,7 @@
 
 #include "Resource/ResourceManager.h"
 
+#include <algorithm>
 #include <sstream>
 #include <unordered_map>
 #include <utility>
@@ -117,8 +118,45 @@ namespace
 			collection->stages.push_back(binding);
 		}
 
+		const bool hasFragment = std::any_of(
+			collection->stages.begin(), collection->stages.end(),
+			[](const ShaderCollection::StageBinding& binding)
+			{
+				return binding.stage == ShaderStage::Fragment;
+			});
+		bool hasGeometryProvider = std::any_of(
+			collection->stages.begin(), collection->stages.end(),
+			[](const ShaderCollection::StageBinding& binding)
+			{
+				return binding.stage == ShaderStage::Vertex
+					|| binding.stage == ShaderStage::Mesh;
+			});
+		if(hasFragment && !hasGeometryProvider)
+		{
+			// Surface-only collections inherit canonical engine geometry. Shader
+			// authors therefore never bind palettes, skin streams, morph inputs,
+			// or virtual-page resources.
+			const TerraEngine::UUID taskId =
+				manager.LoadShader("Shaders/Default.task.tspf");
+			const TerraEngine::UUID meshId =
+				manager.LoadShader("Shaders/Default.mesh.tspf");
+			if(taskId == TerraEngine::EMPTY_UUID
+				|| meshId == TerraEngine::EMPTY_UUID)
+			{
+				TERRAENGINE_LOG(LogLevel::Error,
+					"Engine-managed surface collection cannot load canonical task/mesh stages.");
+				return nullptr;
+			}
+			collection->stages.insert(collection->stages.begin(),
+				{ ShaderStage::Mesh, meshId });
+			collection->stages.insert(collection->stages.begin(),
+				{ ShaderStage::Task, taskId });
+			hasGeometryProvider = true;
+		}
+
 		// If both vertex and fragment stages are present, verify their interfaces match.
 		Shader* vertexShader = nullptr;
+		Shader* meshShader = nullptr;
 		Shader* fragmentShader = nullptr;
 		for (const ShaderCollection::StageBinding& binding : collection->stages)
 		{
@@ -126,6 +164,10 @@ namespace
 			if (binding.stage == ShaderStage::Vertex)
 			{
 				vertexShader = manager.GetShader(binding.shaderId);
+			}
+			else if(binding.stage == ShaderStage::Mesh)
+			{
+				meshShader = manager.GetShader(binding.shaderId);
 			}
 			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 			else if (binding.stage == ShaderStage::Fragment)
@@ -135,9 +177,36 @@ namespace
 		}
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (vertexShader && fragmentShader && !ValidateInterfaceCompatibility(*vertexShader, *fragmentShader))
+		Shader* geometryOutputShader =
+			meshShader != nullptr ? meshShader : vertexShader;
+		if (geometryOutputShader && fragmentShader
+			&& !ValidateInterfaceCompatibility(
+				*geometryOutputShader, *fragmentShader))
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "Vertex and fragment stages in shader collection are incompatible; collection will not be created.");
+			return nullptr;
+		}
+
+		collection->geometryAbiVersion = 1u;
+		collection->geometryPolicy = ShaderGeometryPolicy::EngineManaged;
+		collection->reflectionComplete = hasGeometryProvider
+			&& (!hasFragment || fragmentShader != nullptr);
+		std::uint64_t generation = 1469598103934665603ull;
+		for(const ShaderCollection::StageBinding& binding : collection->stages)
+		{
+			generation ^= static_cast<std::uint32_t>(binding.stage);
+			generation *= 1099511628211ull;
+			for(const std::uint8_t byte : binding.shaderId)
+			{
+				generation ^= byte;
+				generation *= 1099511628211ull;
+			}
+		}
+		collection->collectionGeneration = generation == 0u ? 1u : generation;
+		if(!collection->reflectionComplete)
+		{
+			collection->geometryContractDiagnostic =
+				"Shader collection reflection is incomplete.";
 			return nullptr;
 		}
 

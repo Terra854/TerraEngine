@@ -1,0 +1,21 @@
+{
+	"schemaVersion": 1,
+	"activeInstances": 1000,
+	"viewCount": 4,
+	"durationMinutes": 30,
+	"continuousResidencyChurn": true,
+	"minimumReuseRatio": 0.99,
+	"requiredFalseRejections": 0,
+	"evidenceFields": [
+		"adapter",
+		"driver",
+		"resolution",
+		"qualityProfile",
+		"staticPageBudgetBytes",
+		"deformationBudgetBytes",
+		"buildRevision",
+		"highWaterBytes",
+		"fallbackCounts",
+		"unrecoveredFailures"
+	]
+}

@@ -65,11 +65,13 @@ struct VirtualGeometryAdaptiveSettingsMetadata {
 	bool overridePresent = false;
 	std::string settingsSource = "ProjectDefaults";
 	std::vector<float> targetRatios;
-	std::uint32_t minimumSourceTriangles = 512u;
-	std::uint32_t minimumGeneratedTriangles = 64u;
-	std::uint32_t minimumMeshletsPerGeneratedLevel = 2u;
-	float minimumUsefulTriangleReduction = 0.15f;
-	float minimumUsefulMeshletReduction = 0.15f;
+	// Project defaults preserve every valid LOD. The inspector can persist
+	// stricter percentage or count thresholds for an individual mesh.
+	std::uint32_t minimumSourceTriangles = 1u;
+	std::uint32_t minimumGeneratedTriangles = 1u;
+	std::uint32_t minimumMeshletsPerGeneratedLevel = 1u;
+	float minimumUsefulTriangleReduction = 0.0f;
+	float minimumUsefulMeshletReduction = 0.0f;
 	float maximumGeometricError = 0.1f;
 	std::vector<std::string> validationErrors;
 };

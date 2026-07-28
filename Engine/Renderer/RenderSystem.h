@@ -129,6 +129,10 @@ public:
 	// immutable CPU/GPU deformation generation without exposing live render data.
 	std::vector<TerraEngine::Renderer::RenderFrameRenderableRecord>
 		GetLatestRenderablesSnapshot() const;
+	// Return only the demand count from the protected render-frame snapshot.
+	// Automation can explain page-deformation eligibility without copying page
+	// identities or backend-owned work records.
+	std::size_t GetLatestAnimatedGeometryPageDemandCount() const;
 	void SetRendererRecoveryPolicy(const TerraEngine::Renderer::RendererRecoveryPolicy& policy);
 	TerraEngine::Renderer::RendererRecoveryPolicy GetRendererRecoveryPolicy() const;
 	std::vector<TerraEngine::Renderer::OcclusionDebugSample> GetLatestVirtualGeometryOcclusionDebugSamples(RenderViewType viewType, std::size_t maxCount = TerraEngine::Renderer::kVirtualGeometryOcclusionDebugSampleCapacity) const;

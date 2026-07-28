@@ -353,7 +353,7 @@ namespace TerraEngine::Tests
 
 			const std::size_t pageIndex = meshShader.find("const uint pageLocalMeshletIndex = taskPayload.meshletIndices[visibleIndex];");
 			const std::size_t pageIndexValidation = meshShader.find("if (pageLocalMeshletIndex >= pageDescriptor.meshletCount)", pageIndex);
-			const std::size_t pageEmit = meshShader.find("EmitPageLocalMeshlet(pageDescriptor, pageLocalMeshletIndex, outputVertices, outputTriangles);", pageIndexValidation);
+			const std::size_t pageEmit = meshShader.find("EmitPageLocalMeshlet(", pageIndexValidation);
 			const std::size_t branchReturn = pageEmit == std::string::npos ? std::string::npos : meshShader.find("return;", pageEmit);
 			const std::size_t ownerEmit = meshShader.find("EmitMeshlet(meshletIndex, outputVertices, outputTriangles);", pageEmit);
 			context.Expect(
@@ -380,9 +380,10 @@ namespace TerraEngine::Tests
 			context.Expect(ShaderContains(vulkanSource, "std::min(command.virtualMeshletOffset, mesh.meshletCount)"), "Owner-mesh fallback draws should still clamp their global meshlet offset to the resident owner payload.");
 		});
 
-		registry.Add("VirtualGeometry.ShaderLayout.AnimatedPagePacketsCollapseToWholeOwner", [](TestContext& context) {
+		registry.Add("VirtualGeometry.ShaderLayout.AnimatedPagesUseCanonicalComputeOutput", [](TestContext& context) {
 			const std::string renderSystemSource = ReadRenderSystemSource();
 			const std::string meshShader = ReadDefaultMeshShader();
+			const std::string taskShader = ReadDefaultTaskShader();
 			const std::string vulkanSource = ReadVulkanContextSource();
 
 			const std::size_t ownerFallback = renderSystemSource.find(
@@ -397,11 +398,25 @@ namespace TerraEngine::Tests
 					&& packetExpansion != std::string::npos
 					&& ownerFallback < wholeOwnerCount
 					&& wholeOwnerCount < packetExpansion,
-				"Active deformation must publish one complete owner-mesh draw before page packets can be expanded into partial owner ranges.");
+				"Legacy animated assets without AVPB inputs must publish one complete owner-mesh fallback before page packets can be expanded.");
 			context.Expect(
-				ShaderContains(vulkanSource, "const bool wholeOwnerDeformationFallback =")
-					&& ShaderContains(vulkanSource, "? mesh.meshletCount"),
-				"Vulkan must defensively recover the complete owner mesh when a page-local animated command reaches the backend.");
+				!ShaderContains(vulkanSource, "const bool wholeOwnerDeformationFallback =")
+					&& ShaderContains(vulkanSource,
+						"requestedPageLocalGeometry\n\t\t\t&& impl->activeVirtualGeometryPagePayloadBufferIndex"),
+				"Vulkan should preserve a validated animated page packet instead of collapsing canonical compute output to the owner mesh.");
+			context.Expect(
+				ShaderContains(meshShader, "TeTryLoadAnimatedGraphicsBridge(")
+					&& ShaderContains(meshShader,
+						"&& (canonicalDeformationAvailable || !gpuDeformationAvailable)"),
+				"The mesh shader should consume canonical compute output for a matching page while keeping legacy owner deformation on its compatibility path.");
+			context.Expect(
+				ShaderContains(taskShader,
+					"&& (!gpuDeformationAvailable || canonicalDeformationAvailable)")
+					&& ShaderContains(taskShader,
+						"!canonicalDeformationAvailable || currentDynamicProof")
+					&& ShaderContains(taskShader,
+						"&& !canonicalDeformationAvailable)"),
+				"Task culling should use current animated bounds, fail open when canonical bounds proof is unavailable, and avoid projecting bind-pose vertices into Hi-Z for moving pages.");
 			context.ExpectEqual(
 				static_cast<std::uint32_t>(1u << 6u),
 				::kVirtualGeometryFlagTaskPayloadValid,
@@ -559,6 +574,42 @@ namespace TerraEngine::Tests
 			context.Expect(ShaderContains(vulkanInit, "validation layers requested, but not available; continuing without validation layers."), "Missing Vulkan SDK validation layers should warn and continue booting.");
 		});
 
+		registry.Add("VirtualGeometry.Diagnostics.DetailedInventoryMergePreservesAnimatedFrameFacts", [](TestContext& context) {
+			const std::string renderSystem = ReadRenderSystemSource();
+
+			context.Expect(
+				ShaderContains(renderSystem,
+					"target.animatedPageDemandCount =")
+					&& ShaderContains(renderSystem,
+						"selection.animatedPageDemandCount;"),
+				"Detailed cooked-asset diagnostics must retain live animated page demands.");
+			context.Expect(
+				ShaderContains(renderSystem,
+					"target.deformationCurrentBytes =")
+					&& ShaderContains(renderSystem,
+						"target.deformationHistoryBytes =")
+					&& ShaderContains(renderSystem,
+						"target.deformationBoundsBytes ="),
+				"Detailed diagnostics must retain the live deformation working-set buckets.");
+		});
+
+		registry.Add("Renderer.VulkanPipelineCache.LookupUsesCompleteGenerationKey", [](TestContext& context) {
+			const std::string vulkanContext = ReadVulkanContextSource();
+			const std::string vulkanResources = ReadVulkanContextResourcesSource();
+			context.Expect(
+				ShaderContains(vulkanResources, "std::optional<PipelineKey> VulkanContext::Impl::BuildPipelineKey"),
+				"Pipeline creation and lookup should share one complete key builder.");
+			context.Expect(
+				ShaderContains(vulkanContext, "impl->BuildPipelineKey(collectionId, material->header.flags)"),
+				"Prepared-resource fallback checks should use the generation-aware pipeline key.");
+			context.Expect(
+				ShaderContains(vulkanContext, "impl->BuildPipelineKey(shaderCollectionId, materialFlags)"),
+				"Draw-time pipeline resolution should use the generation-aware pipeline key.");
+			context.Expect(
+				!ShaderContains(vulkanContext, "PipelineKey pipeKey = {"),
+				"Vulkan pipeline lookups must not silently zero generation and geometry-contract fields.");
+		});
+
 		registry.Add("VirtualGeometry.ShaderLayout.TextureUploadsUseDedicatedImmediateCommands", [](TestContext& context) {
 			const std::string vulkanImpl = ReadVulkanContextImplSource();
 			const std::string vulkanInit = ReadVulkanContextInitSource();
@@ -604,7 +655,10 @@ namespace TerraEngine::Tests
 			context.Expect(!taskShader.empty(), "The task shader should remain readable for Hi-Z preservation checks.");
 			context.Expect(ShaderContains(taskShader, "LoadVirtualGeometryPacketRunSeed"), "Packet-buffer consumption should coexist with the existing task-shader Hi-Z path.");
 			context.Expect(ShaderContains(taskShader, "Feature 030 preserves this single current-pyramid decision path"), "The shader should document that packet batching keeps the accepted Hi-Z path.");
-			context.Expect(ShaderContains(taskShader, "if (!culled && hiZPyramidAvailable)"), "Task-shader Hi-Z should still be gated only by the current pyramid availability flag.");
+			context.Expect(ShaderContains(taskShader, "if (!culled && hiZPyramidAvailable")
+				&& ShaderContains(taskShader, "&& rejectionProofAvailable")
+				&& ShaderContains(taskShader, "&& !canonicalDeformationAvailable)"),
+				"Task-shader Hi-Z must retain the current pyramid and rejection-proof gates while animated pages fail open until current per-meshlet projection geometry is published.");
 			context.Expect(!ShaderContains(taskShader, "HiZQuality"), "Task shader should not expose a selectable Hi-Z quality tier.");
 			context.Expect(!ShaderContains(taskShader, "hiZQuality"), "Task shader should not add a lower-case Hi-Z quality control.");
 			context.Expect(!ShaderContains(taskShader, "VirtualGeometryHiZQuality"), "Task shader should not mirror a C++ Hi-Z quality enum.");

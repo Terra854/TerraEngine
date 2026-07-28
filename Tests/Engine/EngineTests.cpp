@@ -106,6 +106,9 @@ namespace TerraEngine::Tests {
 	void RegisterVirtualGeometryResidencyTests(TestRegistry& registry);
 	void RegisterRenderTypesTests(TestRegistry& registry);
 	void RegisterAnimatedRenderViewTests(TestRegistry& registry);
+	void RegisterAnimatedVirtualGeometryAbiTests(TestRegistry& registry);
+	void RegisterAnimatedVirtualGeometryRuntimeTests(TestRegistry& registry);
+	void RegisterAnimatedVirtualGeometrySchedulerTests(TestRegistry& registry);
 	void RegisterDeformableVirtualGeometryTests(TestRegistry& registry);
 	void RegisterRendererGraphSmokeTests(TestRegistry& registry);
 	void RegisterRenderDiagnosticsTests(TestRegistry& registry);
@@ -330,6 +333,9 @@ int main() {
 	TerraEngine::Tests::RegisterVirtualGeometryResidencyTests(registry);
 	TerraEngine::Tests::RegisterRenderTypesTests(registry);
 	TerraEngine::Tests::RegisterAnimatedRenderViewTests(registry);
+	TerraEngine::Tests::RegisterAnimatedVirtualGeometryAbiTests(registry);
+	TerraEngine::Tests::RegisterAnimatedVirtualGeometryRuntimeTests(registry);
+	TerraEngine::Tests::RegisterAnimatedVirtualGeometrySchedulerTests(registry);
 	TerraEngine::Tests::RegisterDeformableVirtualGeometryTests(registry);
 	TerraEngine::Tests::RegisterRendererGraphSmokeTests(registry);
 	TerraEngine::Tests::RegisterRenderDiagnosticsTests(registry);

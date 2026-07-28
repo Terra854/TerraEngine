@@ -1,5 +1,6 @@
 #pragma pack_matrix(column_major)
 #include "DefaultDeformation.hlsli"
+#include "../Geometry/TerraGeometryContract.hlsli"
 
 // Meshlet table emitted by the mesh compiler and mirrored from TerraEngineMeshFile.h.
 struct MeshletRecord
@@ -71,6 +72,7 @@ struct TaskPayload
 // safe sentinel for static meshes, which never enter the GPU bridge path.
 [[vk::binding(7, 1)]] ByteAddressBuffer meshMorphDeltaBytes;
 [[vk::binding(9, 0)]] StructuredBuffer<uint> globalBuffers[];
+#include "../VirtualGeometry/AnimatedDeformedGeometry.hlsli"
 
 struct PushConstants
 {
@@ -108,18 +110,9 @@ struct PushConstants
 
 [[vk::push_constant]] ConstantBuffer<PushConstants> SceneUniforms;
 
-struct PSIn
-{
-	float4 position : SV_Position;
-	float2 uv : TEXCOORD0;
-	float3 worldPosition : TEXCOORD1;
-	float3 normal : NORMAL;
-	float4 tangent : TANGENT;
-	nointerpolation uint meshletIndex : TEXCOORD2;
-	nointerpolation float meshletBoundsRadius : TEXCOORD3;
-	nointerpolation uint meshletCullFlags : TEXCOORD4;
-	nointerpolation uint virtualGeometryDebugData : TEXCOORD5;
-};
+// Canonical engine geometry assembly and authored surface stages share this
+// installed ABI. Keep the local alias while existing helper names migrate.
+#define PSIn TerraSurfaceInput
 
 static const uint kMaxMeshletVertices = 64;
 static const uint kMaxMeshletTriangles = 124;
@@ -993,11 +986,24 @@ void EmitMeshlet(
 
 void EmitPageLocalMeshlet(
 	PageLocalPayloadDescriptor descriptor,
+	uint pageId,
 	uint meshletIndex,
 	out vertices PSIn outputVertices[kMaxMeshletVertices],
 	out indices uint3 outputTriangles[kMaxMeshletTriangles])
 {
 	const MeshDecodeInfo decode = LoadPageLocalDecodeInfo(descriptor);
+	TeAnimatedGraphicsBridge deformationBridge;
+	TeAnimatedGraphicsPage deformationPage;
+	const bool hasCanonicalDeformation =
+		TeTryLoadAnimatedGraphicsBridge(
+			SceneUniforms.meshDataIndex,
+			SceneUniforms.textureIndex,
+			deformationBridge)
+		&& TeTryResolveAnimatedGraphicsPage(
+			SceneUniforms.meshDataIndex,
+			deformationBridge,
+			pageId,
+			deformationPage);
 	const uint meshletCount = descriptor.meshletCount;
 	if (meshletIndex >= meshletCount)
 	{
@@ -1039,11 +1045,25 @@ void EmitPageLocalMeshlet(
 			DecodeSnorm10(packedPosition, 0u),
 			DecodeSnorm10(packedPosition, 10u),
 			DecodeSnorm10(packedPosition, 20u));
-		const float3 position = decode.positionOffset.xyz + qPosition * decode.positionScale.xyz;
+		float3 position = decode.positionOffset.xyz + qPosition * decode.positionScale.xyz;
 		const int rawTangentSign = (int(packedPosition >> 30) << 30) >> 30;
 		const float tangentW = rawTangentSign < 0 ? -1.0f : 1.0f;
-		const float3 normal = DecodeOct32Normal(packedNormal);
-		const float3 tangent = DecodeOct32Normal(packedTangent);
+		float3 normal = DecodeOct32Normal(packedNormal);
+		float3 tangent = DecodeOct32Normal(packedTangent);
+		if (hasCanonicalDeformation)
+		{
+			TeAnimatedDeformedVertex deformedVertex;
+			if (TeTryLoadAnimatedVertex(
+				deformationBridge,
+				deformationPage,
+				localVertexIndex,
+				deformedVertex))
+			{
+				position = deformedVertex.currentPosition.xyz;
+				normal = deformedVertex.normal.xyz;
+				tangent = deformedVertex.tangentAndSign.xyz;
+			}
+		}
 		const float2 qUv = float2(
 			DecodeUnorm16(packedUv, 0u),
 			DecodeUnorm16(packedUv, 16u));
@@ -1098,12 +1118,18 @@ void main(
 	const uint packetDescriptorIndex = taskPayload.packetDescriptorIndices[visibleIndex];
 	DefaultGpuAnimationGraphicsRecord animationRecord;
 	const bool gpuDeformationAvailable = TryLoadGpuAnimationGraphicsRecord(animationRecord);
+	TeAnimatedGraphicsBridge canonicalDeformation;
+	const bool canonicalDeformationAvailable =
+		TeTryLoadAnimatedGraphicsBridge(
+			SceneUniforms.meshDataIndex,
+			SceneUniforms.textureIndex,
+			canonicalDeformation);
 	PageLocalPayloadDescriptor pageDescriptor;
 	const bool pageLocalGeometry = IsVirtualGeometryPageLocalSource(SceneUniforms.virtualGeometryPayloadSource)
-		// Page packets do not yet carry their matching skin/morph streams. Use
-		// the owner payload (or its CPU-selected fallback) for GPU-deformed work
-		// rather than rendering a visually plausible but undeformed detail page.
-		&& !gpuDeformationAvailable
+		// Canonical compute output is keyed by the same physical page id as this
+		// packet. Legacy owner deformation has no such publication and therefore
+		// keeps using the complete owner payload.
+		&& (canonicalDeformationAvailable || !gpuDeformationAvailable)
 		&& TryLoadPageLocalPayloadDescriptorAt(packetDescriptorIndex, pageDescriptor);
 	// Choose the payload source before reading decode metadata. Resident page
 	// packets are self-contained and must not require a valid full-owner decode
@@ -1145,7 +1171,17 @@ void main(
 			SetMeshOutputCounts(0, 0);
 			return;
 		}
-		EmitPageLocalMeshlet(pageDescriptor, pageLocalMeshletIndex, outputVertices, outputTriangles);
+		const uint pageId =
+			LoadVirtualGeometryPagePayloadDescriptorWordAt(
+				packetDescriptorIndex,
+				0u,
+				0xffffffffu);
+		EmitPageLocalMeshlet(
+			pageDescriptor,
+			pageId,
+			pageLocalMeshletIndex,
+			outputVertices,
+			outputTriangles);
 		return;
 	}
 

@@ -753,11 +753,36 @@ void DrawVirtualGeometrySettingsFields(VirtualGeometryAdaptiveSettingsMetadata& 
 		drawU32("Min Generated Tris", "##VirtualGeometryMinGeneratedTriangles", settings.minimumGeneratedTriangles, 1, 10000000);
 		drawU32("Min Meshlets", "##VirtualGeometryMinMeshlets", settings.minimumMeshletsPerGeneratedLevel, 1, 1000000);
 
-		drawLabeled("Triangle Reduction", [&]() {
-			ImGui::DragFloat("##VirtualGeometryTriangleReduction", &settings.minimumUsefulTriangleReduction, 0.005f, 0.0f, 0.95f, "%.3f");
+		drawLabeled("Min Triangle Reduction %", [&]() {
+			float percentage =
+				settings.minimumUsefulTriangleReduction * 100.0f;
+			if (ImGui::DragFloat(
+				"##VirtualGeometryTriangleReduction",
+				&percentage,
+				0.5f,
+				0.0f,
+				95.0f,
+				"%.1f%%"))
+			{
+				// Persistence and the cooker use a normalized [0,1] fraction.
+				settings.minimumUsefulTriangleReduction =
+					percentage / 100.0f;
+			}
 		});
-		drawLabeled("Meshlet Reduction", [&]() {
-			ImGui::DragFloat("##VirtualGeometryMeshletReduction", &settings.minimumUsefulMeshletReduction, 0.005f, 0.0f, 0.95f, "%.3f");
+		drawLabeled("Min Meshlet Reduction %", [&]() {
+			float percentage =
+				settings.minimumUsefulMeshletReduction * 100.0f;
+			if (ImGui::DragFloat(
+				"##VirtualGeometryMeshletReduction",
+				&percentage,
+				0.5f,
+				0.0f,
+				95.0f,
+				"%.1f%%"))
+			{
+				settings.minimumUsefulMeshletReduction =
+					percentage / 100.0f;
+			}
 		});
 		drawLabeled("Max Error", [&]() {
 			ImGui::DragFloat("##VirtualGeometryMaxError", &settings.maximumGeometricError, 0.005f, 0.0f, 1000.0f, "%.3f");

@@ -7,6 +7,7 @@
 #include "Resource/ResourceManager.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstring>
 
@@ -15,6 +16,144 @@
 
 namespace
 {
+	std::string_view ShaderStringAt(
+		const Shader& shader,
+		std::uint32_t offset)
+	{
+		if(offset == kInvalidStringOffset || offset >= shader.stringTable.size())
+		{
+			return {};
+		}
+		const char* begin = shader.stringTable.data() + offset;
+		const char* end = static_cast<const char*>(
+			std::memchr(begin, '\0', shader.stringTable.size() - offset));
+		return end != nullptr
+			? std::string_view(begin, static_cast<std::size_t>(end - begin))
+			: std::string_view{};
+	}
+
+	bool ValidateRuntimeGeometryContract(
+		const Shader& shader,
+		const std::filesystem::path& path)
+	{
+		if(shader.reflection.descriptorSetCount != shader.header.descriptorSetCount
+			|| shader.reflection.pushConstantCount
+				!= shader.header.pushConstantCount
+			|| shader.reflection.inputCount != shader.header.stageInputCount
+			|| shader.reflection.outputCount != shader.header.stageOutputCount
+			|| shader.binary.format
+				!= static_cast<std::uint32_t>(ShaderBinaryFormat::SPIRV)
+			|| shader.bytecode.empty())
+		{
+			TERRAENGINE_LOG(LogLevel::Error,
+				"Shader reflection is incomplete for " << path);
+			return false;
+		}
+		for(const DescriptorSetLayoutDesc& set : shader.descriptorSets)
+		{
+			if(set.firstBinding > shader.descriptorBindings.size()
+				|| set.bindingCount
+					> shader.descriptorBindings.size() - set.firstBinding)
+			{
+				TERRAENGINE_LOG(LogLevel::Error,
+					"Shader descriptor reflection is out of range for " << path);
+				return false;
+			}
+		}
+
+		std::string source(ShaderStringAt(
+			shader, shader.reflection.source.pathOffset));
+		std::transform(source.begin(), source.end(), source.begin(),
+			[](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+		if(source.find("engine/shaders/") != std::string::npos
+			|| source.find("editor/shaders/") != std::string::npos)
+		{
+			return true;
+		}
+		const ShaderStage stage =
+			static_cast<ShaderStage>(shader.reflection.source.stage);
+		if(stage == ShaderStage::Mesh || stage == ShaderStage::Task)
+		{
+			TERRAENGINE_LOG(LogLevel::Error,
+				"Custom geometry stage lacks the CompatibleReplacement ABI: "
+					<< path);
+			return false;
+		}
+		if(stage != ShaderStage::Fragment)
+		{
+			return true;
+		}
+		if(!shader.pushConstants.empty())
+		{
+			TERRAENGINE_LOG(LogLevel::Error,
+				"Custom surface shader declares incompatible push constants: "
+					<< path);
+			return false;
+		}
+		for(const DescriptorSetLayoutDesc& set : shader.descriptorSets)
+		{
+			if(set.setIndex <= 2u)
+			{
+				TERRAENGINE_LOG(LogLevel::Error,
+					"Custom surface shader uses a renderer-reserved descriptor set: "
+						<< path);
+				return false;
+			}
+			for(std::uint32_t bindingIndex = 0u;
+				bindingIndex < set.bindingCount;
+				++bindingIndex)
+			{
+				const DescriptorBinding& binding =
+					shader.descriptorBindings[set.firstBinding + bindingIndex];
+				std::string name(ShaderStringAt(shader, binding.nameOffset));
+				std::transform(name.begin(), name.end(), name.begin(),
+					[](unsigned char value)
+					{
+						return static_cast<char>(std::tolower(value));
+					});
+				if(name.find("animation") != std::string::npos
+					|| name.find("palette") != std::string::npos
+					|| name.find("morph") != std::string::npos
+					|| name.find("skin") != std::string::npos)
+				{
+					TERRAENGINE_LOG(LogLevel::Error,
+						"Custom surface shader declares an animation resource: "
+							<< path);
+					return false;
+				}
+			}
+		}
+		constexpr std::array<std::uint32_t, 8> widths{
+			2u, 3u, 3u, 4u, 1u, 1u, 1u, 1u
+		};
+		constexpr std::array<IoComponentType, 8> types{
+			IoComponentType::Float, IoComponentType::Float,
+			IoComponentType::Float, IoComponentType::Float,
+			IoComponentType::UInt, IoComponentType::Float,
+			IoComponentType::UInt, IoComponentType::UInt
+		};
+		if(shader.inputs.size() != widths.size())
+		{
+			TERRAENGINE_LOG(LogLevel::Error,
+				"Custom surface shader does not consume TerraSurfaceInput: "
+					<< path);
+			return false;
+		}
+		for(const StageIOAttribute& input : shader.inputs)
+		{
+			if(input.location >= widths.size()
+				|| input.componentCount != widths[input.location]
+				|| input.componentType
+					!= static_cast<std::uint32_t>(types[input.location]))
+			{
+				TERRAENGINE_LOG(LogLevel::Error,
+					"Custom surface shader input ABI mismatch: " << path);
+				return false;
+			}
+		}
+		return true;
+	}
+
 	// Validate the range described by a file offset and size and return a
 	// pointer into the payload. Returning nullptr signals that the range
 	// would overrun the buffer.
@@ -204,6 +343,10 @@ namespace
 		}
 
 		shader->bytecode = std::span<const std::uint8_t>(bytecodePtr, shader->binary.bytecodeSize);
+		if(!ValidateRuntimeGeometryContract(*shader, resolvedPath))
+		{
+			return nullptr;
+		}
 
 		return shader;
 	}

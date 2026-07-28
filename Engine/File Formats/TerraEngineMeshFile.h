@@ -67,6 +67,19 @@ constexpr std::uint32_t kVirtualGeometryValidationFlagClusterCoverageValidated =
 constexpr std::uint32_t kVirtualGeometryValidationFlagConeSafetyMetadataValidated = 1u << 5u;
 constexpr std::uint32_t kVirtualGeometryConeSafetyFlagConeValid = 1u << 0u;
 constexpr std::uint32_t kVirtualGeometryConeSafetyFlagEligible = 1u << 1u;
+// AVPD/AVPB version the physical page directory and each independently
+// streamable blob without changing the frozen TDEF/TDFV v1 payloads.
+constexpr std::uint32_t kAnimatedVirtualPageDirectoryMagicValue = 0x44505641u; // 'AVPD' little endian
+constexpr std::uint32_t kAnimatedVirtualPageBlobMagicValue = 0x42505641u; // 'AVPB' little endian
+constexpr std::uint16_t kAnimatedVirtualPageFormatVersion = 1u;
+constexpr std::uint32_t kAnimatedVirtualPageMaximumSections = 16u;
+constexpr std::uint32_t kAnimatedVirtualPageMaximumLocalJoints = 256u;
+constexpr std::uint32_t kAnimatedVirtualPageFlagAnimated = 1u << 0u;
+constexpr std::uint32_t kAnimatedVirtualPageFlagPinnedFallback = 1u << 1u;
+constexpr std::uint32_t kAnimatedVirtualPageFlagHasSkinning = 1u << 2u;
+constexpr std::uint32_t kAnimatedVirtualPageFlagHasMorphs = 1u << 3u;
+constexpr std::uint32_t kAnimatedVirtualPageFlagHasErrorSamples = 1u << 4u;
+constexpr std::uint32_t kAnimatedVirtualPageFlagAll = 0x1fu;
 
 // Detail target status mirrors the renderer diagnostics. Records store integer
 // values so the unstable TEMF v1 payload can be read by simple tools without
@@ -564,6 +577,112 @@ struct DeformableVirtualGeometryMorphVertex
 	float normalDelta[4];
 	float tangentDelta[4];
 };
+
+// The directory remains resident while individual AVPB blobs stream. Exact
+// offsets and hashes let ResourceStreaming validate a page without retaining
+// the complete owner vertex, skin, or morph streams.
+struct AnimatedVirtualPageDirectoryHeader
+{
+	std::uint32_t magic;
+	std::uint16_t version;
+	std::uint16_t headerSize;
+	std::uint32_t payloadSize;
+	std::uint32_t pageCount;
+	std::uint32_t pageTableOffset;
+	std::uint32_t rootPageCount;
+	std::uint32_t rootPageTableOffset;
+	std::uint32_t flags;
+	std::uint64_t meshPayloadGeneration;
+	std::uint64_t directoryHash;
+	std::uint32_t reserved;
+};
+
+struct AnimatedVirtualPageDirectoryEntry
+{
+	std::uint32_t pageId;
+	std::uint32_t parentPageId;
+	std::uint32_t fallbackPageId;
+	std::uint32_t flags;
+	std::uint64_t blobOffset;
+	std::uint64_t blobSize;
+	std::uint64_t blobHash;
+	std::uint64_t contentGeneration;
+	std::uint32_t clusterOffset;
+	std::uint32_t clusterCount;
+	std::uint32_t materialSectionId;
+	std::uint64_t skeletonCompatibilityFingerprint;
+	float conservativeBoundsMin[3];
+	float conservativeBoundsMax[3];
+	float geometricError;
+	float deformationError;
+};
+
+// Section types keep blob validation table-driven. Unknown optional sections
+// may be skipped, while unknown required sections reject the whole candidate.
+enum class AnimatedVirtualPageSectionType : std::uint32_t
+{
+	PackedVertices = 0u,
+	PrimitiveBytes = 1u,
+	VertexRemap = 2u,
+	Meshlets = 3u,
+	MeshletBounds = 4u,
+	DecodeConstants = 5u,
+	Materials = 6u,
+	SkinRecords = 7u,
+	JointPalette = 8u,
+	MorphTargets = 9u,
+	MorphDeltas = 10u,
+	SourceVertexIds = 11u,
+	Clusters = 12u,
+	ErrorSamples = 13u
+};
+
+struct AnimatedVirtualPageBlobHeader
+{
+	std::uint32_t magic;
+	std::uint16_t version;
+	std::uint16_t headerSize;
+	std::uint32_t byteSize;
+	std::uint32_t flags;
+	std::uint32_t pageId;
+	std::uint32_t sectionCount;
+	std::uint32_t sectionTableOffset;
+	std::uint64_t meshPayloadGeneration;
+	std::uint64_t contentGeneration;
+	std::uint64_t skeletonCompatibilityFingerprint;
+	std::uint64_t contentHash;
+	std::uint32_t reserved;
+};
+
+struct AnimatedVirtualPageSectionRecord
+{
+	std::uint32_t type;
+	std::uint32_t flags;
+	std::uint64_t byteOffset;
+	std::uint64_t byteSize;
+	std::uint32_t elementCount;
+	std::uint32_t elementStride;
+};
+
+struct AnimatedVirtualPageSkinRecord
+{
+	std::uint8_t localJointIndices[4];
+	std::uint8_t normalizedWeights[4];
+};
+
+struct AnimatedVirtualPageMorphRecord
+{
+	std::uint32_t stableTargetId;
+	std::uint32_t deltaOffset;
+	std::uint32_t deltaCount;
+	std::uint32_t deltaStrideBytes;
+	std::uint32_t flags;
+};
+
+struct AnimatedVirtualPageSourceVertexRecord
+{
+	std::uint64_t stableSourceVertexId;
+};
 #pragma pack(pop)
 
 static_assert(sizeof(MeshHeader) <= 640, "TEMF header should remain compact");
@@ -576,6 +695,13 @@ static_assert(sizeof(DeformableVirtualGeometrySidecarHeader) == 48u, "TDFV v1 he
 static_assert(sizeof(DeformableVirtualGeometryClusterRecord) == 68u, "TDFV v1 cluster layout is frozen");
 static_assert(sizeof(DeformableVirtualGeometryMorphRecord) == 20u, "TDFV v1 morph target layout is frozen");
 static_assert(sizeof(DeformableVirtualGeometryMorphVertex) == 48u, "TDFV GPU morph records use a fixed 48-byte stride");
+static_assert(sizeof(AnimatedVirtualPageDirectoryHeader) == 52u, "AVPD v1 directory header must stay byte exact");
+static_assert(sizeof(AnimatedVirtualPageDirectoryEntry) == 100u, "AVPD v1 directory entries must stay byte exact");
+static_assert(sizeof(AnimatedVirtualPageBlobHeader) == 64u, "AVPB v1 blob header must stay byte exact");
+static_assert(sizeof(AnimatedVirtualPageSectionRecord) == 32u, "AVPB v1 section records must stay byte exact");
+static_assert(sizeof(AnimatedVirtualPageSkinRecord) == 8u, "AVPB skin records match the existing compact skin stream");
+static_assert(sizeof(AnimatedVirtualPageMorphRecord) == 20u, "AVPB morph records use a fixed v1 layout");
+static_assert(sizeof(AnimatedVirtualPageSourceVertexRecord) == 8u, "AVPB source identities are full-width");
 
 // In-memory representation of an entire .temf payload.
 // Raw byte storage keeps payload ownership in one place while spans/vectors expose typed views.
@@ -612,6 +738,16 @@ struct Mesh
 	std::vector<std::uint32_t> deformableVirtualGeometryPaletteIndices;
 	std::vector<DeformableVirtualGeometryMorphRecord> deformableVirtualGeometryMorphs;
 	std::vector<DeformableVirtualGeometryMorphVertex> deformableVirtualGeometryMorphVertices;
+	// AVPD is copied independently from the owner streams. The entries are
+	// sufficient for conservative request generation and exact-range IO.
+	bool hasAnimatedVirtualPageDirectory = false;
+	AnimatedVirtualPageDirectoryHeader animatedVirtualPageDirectory{};
+	std::vector<AnimatedVirtualPageDirectoryEntry> animatedVirtualPageEntries;
+	std::vector<std::uint32_t> animatedVirtualPageRoots;
+	std::vector<std::vector<AnimatedVirtualPageSectionRecord>>
+		animatedVirtualPageSections;
+	std::uint64_t animatedVirtualPageDirectoryOffset = 0u;
+	std::string animatedVirtualPageDirectoryDiagnostic;
 	std::vector<MeshletRecord> meshletRecords;
 	std::vector<MeshletSection> meshletSections;
 	std::vector<MeshletBounds> meshletBounds;

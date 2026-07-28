@@ -8,6 +8,10 @@
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
     <EnableDynamicLoading>true</EnableDynamicLoading>
+    <!-- Keep IDE/background restores compatible with the runtime-specific,
+         self-contained publish issued by CMake on supported hosts. -->
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == '' and '$(OS)' == 'Windows_NT'">win-x64</RuntimeIdentifier>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == '' and '$(OS)' != 'Windows_NT'">linux-x64</RuntimeIdentifier>
   </PropertyGroup>
 
   <!-- Keep the editor's managed sources in their own project folder so the SDK

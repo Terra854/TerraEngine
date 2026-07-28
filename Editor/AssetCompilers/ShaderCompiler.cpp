@@ -189,7 +189,37 @@ namespace {
 	}
 
 	// RunDxc is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+	std::vector<std::filesystem::path> FindShaderIncludeRoots(
+		const std::filesystem::path& input)
+	{
+		std::vector<std::filesystem::path> roots;
+		roots.push_back(input.parent_path());
+		std::filesystem::path cursor = std::filesystem::absolute(input).parent_path();
+		for(std::size_t depth = 0u; !cursor.empty() && depth < 16u; ++depth)
+		{
+			const std::filesystem::path shaderRoot = cursor / "Engine" / "Shaders";
+			if(std::filesystem::exists(shaderRoot / "Geometry" / "TerraGeometryContract.hlsli"))
+			{
+				roots.push_back(shaderRoot);
+				roots.push_back(shaderRoot / "Geometry");
+				roots.push_back(shaderRoot / "VirtualGeometry");
+				break;
+			}
+			if(cursor == cursor.parent_path())
+			{
+				break;
+			}
+			cursor = cursor.parent_path();
+		}
+		return roots;
+	}
+
+	// RunDxc supplies the public include root in addition to the authored
+	// shader's directory. DXC performs transitive dependency resolution and
+	// fails compilation when any include is missing.
 	bool RunDxc(const std::filesystem::path& input, const std::filesystem::path& dxcPath, const std::filesystem::path& tempSpv, const std::string& target, const std::string& entryPoint) {
+		const std::vector<std::filesystem::path> includeRoots =
+			FindShaderIncludeRoots(input);
 #if defined(_WIN32)
 		auto ToWide = [](const std::filesystem::path& p) -> std::wstring {
 			return p.wstring();
@@ -208,6 +238,11 @@ namespace {
 		wideArgs.push_back(ToWideStr(entryPoint));
 		wideArgs.push_back(L"-Fo");
 		wideArgs.push_back(ToWide(tempSpv));
+		for(const std::filesystem::path& includeRoot : includeRoots)
+		{
+			wideArgs.push_back(L"-I");
+			wideArgs.push_back(ToWide(includeRoot));
+		}
 		wideArgs.push_back(ToWide(input));
 
 		std::vector<const wchar_t*> cargs;
@@ -230,8 +265,12 @@ namespace {
 		cmd << Quote(dxcPath) << " -spirv -fspv-target-env=vulkan1.3"
 			<< " -T " << target
 			<< " -E " << entryPoint
-			<< " -Fo " << Quote(tempSpv)
-			<< " " << Quote(input);
+			<< " -Fo " << Quote(tempSpv);
+		for(const std::filesystem::path& includeRoot : includeRoots)
+		{
+			cmd << " -I " << Quote(includeRoot);
+		}
+		cmd << " " << Quote(input);
 
 		const int code = std::system(cmd.str().c_str());
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -275,6 +314,7 @@ namespace {
 		std::optional<std::uint32_t> location;
 		std::optional<std::uint32_t> binding;
 		std::optional<std::uint32_t> descriptorSet;
+		std::optional<std::uint32_t> offset;
 		bool builtIn = false;
 	};
 
@@ -298,6 +338,7 @@ namespace {
 		std::vector<IoEntry> inputs;
 		std::vector<IoEntry> outputs;
 		std::vector<DescriptorBindingEntry> descriptorBindings;
+		std::vector<PushConstantRange> pushConstants;
 	};
 
 	// class SpirvReflection groups related state and operations so callers have one documented contract.
@@ -376,6 +417,7 @@ namespace {
 						Decorations& dec = memberDecorations[tid][midx];
 						if (words[i + 3] == 30 && count >= 5) dec.location = words[i + 4];
 						else if (words[i + 3] == 11) dec.builtIn = true;
+						else if (words[i + 3] == 35 && count >= 5) dec.offset = words[i + 4];
 					}
 					break;
 				case 59: // OpVariable
@@ -462,10 +504,79 @@ namespace {
 
 			const StageVisibilityMask visibilityMask = StageToMask(stage);
 
+			std::function<std::optional<std::uint32_t>(std::uint32_t)> resolveByteSize;
+			resolveByteSize = [&](std::uint32_t typeId) -> std::optional<std::uint32_t> {
+				const auto typeIt = types.find(typeId);
+				if(typeIt == types.end()) return std::nullopt;
+				const TypeInfo& info = typeIt->second;
+				switch(info.kind) {
+				case TypeInfo::Kind::Bool:
+				case TypeInfo::Kind::Int:
+				case TypeInfo::Kind::UInt:
+				case TypeInfo::Kind::Float:
+					return 4u;
+				case TypeInfo::Kind::Vector:
+				{
+					const auto scalarSize = resolveByteSize(info.typeId);
+					if(!scalarSize || info.componentCount > UINT32_MAX / *scalarSize) return std::nullopt;
+					return *scalarSize * info.componentCount;
+				}
+				case TypeInfo::Kind::Matrix:
+				{
+					const auto columnSize = resolveByteSize(info.typeId);
+					if(!columnSize || info.componentCount > UINT32_MAX / *columnSize) return std::nullopt;
+					return *columnSize * info.componentCount;
+				}
+				case TypeInfo::Kind::Array:
+				{
+					const auto elementSize = resolveByteSize(info.typeId);
+					const auto countIt = constants.find(info.arrayLengthId);
+					if(!elementSize || countIt == constants.end()
+						|| countIt->second > UINT32_MAX / *elementSize) return std::nullopt;
+					return *elementSize * countIt->second;
+				}
+				case TypeInfo::Kind::Pointer:
+					return resolveByteSize(info.typeId);
+				case TypeInfo::Kind::Struct:
+				{
+					std::uint32_t end = 0u;
+					const auto decorationIt = memberDecorations.find(typeId);
+					for(std::size_t member = 0u; member < info.members.size(); ++member)
+					{
+						const auto memberSize = resolveByteSize(info.members[member]);
+						if(!memberSize) return std::nullopt;
+						std::uint32_t offset = end;
+						if(decorationIt != memberDecorations.end()
+							&& member < decorationIt->second.size()
+							&& decorationIt->second[member].offset)
+						{
+							offset = *decorationIt->second[member].offset;
+						}
+						if(offset > UINT32_MAX - *memberSize) return std::nullopt;
+						end = std::max(end, offset + *memberSize);
+					}
+					return end;
+				}
+				default:
+					return std::nullopt;
+				}
+			};
+
 			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (const VariableInfo& var : variables) {
 				const Decorations varDeco = idDecorations[var.id];
 				if (varDeco.builtIn) continue;
+
+				if(var.storageClass == 9u)
+				{
+					const auto byteSize = resolveByteSize(var.typeId);
+					if(!byteSize || *byteSize == 0u)
+					{
+						return false;
+					}
+					out.pushConstants.push_back({ 0u, *byteSize, visibilityMask });
+					continue;
+				}
 
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (varDeco.binding && varDeco.descriptorSet && (var.storageClass == 2 || var.storageClass == 0 || var.storageClass == 12)) {
@@ -535,6 +646,89 @@ namespace {
 			return true;
 		}
 	};
+
+	bool IsEngineOwnedShader(const std::filesystem::path& input)
+	{
+		std::string path = input.lexically_normal().generic_string();
+		std::transform(path.begin(), path.end(), path.begin(),
+			[](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+		return path.find("/engine/shaders/") != std::string::npos
+			|| path.find("/editor/shaders/") != std::string::npos;
+	}
+
+	bool ValidateAuthoredGeometryContract(
+		const std::filesystem::path& input,
+		ShaderStage stage,
+		const ReflectionResult& reflected)
+	{
+		if(IsEngineOwnedShader(input)
+			|| (stage != ShaderStage::Fragment
+				&& stage != ShaderStage::Mesh
+				&& stage != ShaderStage::Task))
+		{
+			return true;
+		}
+		if(stage == ShaderStage::Mesh || stage == ShaderStage::Task)
+		{
+			std::cerr << "Authored geometry stages require the CompatibleReplacement ABI: "
+				<< input << "\n";
+			return false;
+		}
+		if(!reflected.pushConstants.empty())
+		{
+			std::cerr << "Authored surface shaders may not replace engine push constants: "
+				<< input << "\n";
+			return false;
+		}
+		for(const DescriptorBindingEntry& descriptor : reflected.descriptorBindings)
+		{
+			// Sets zero through two are renderer-owned. Animation/palette names
+			// are also rejected even if an author moves them to a later set.
+			std::string name = descriptor.name;
+			std::transform(name.begin(), name.end(), name.begin(),
+				[](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+			if(descriptor.set <= 2u || name.find("animation") != std::string::npos
+				|| name.find("palette") != std::string::npos
+				|| name.find("morph") != std::string::npos
+				|| name.find("skin") != std::string::npos)
+			{
+				std::cerr << "Authored surface shader uses an engine/animation binding: "
+					<< input << "\n";
+				return false;
+			}
+		}
+		constexpr std::array<std::uint32_t, 8> widths{
+			2u, 3u, 3u, 4u, 1u, 1u, 1u, 1u
+		};
+		constexpr std::array<IoComponentType, 8> types{
+			IoComponentType::Float,
+			IoComponentType::Float,
+			IoComponentType::Float,
+			IoComponentType::Float,
+			IoComponentType::UInt,
+			IoComponentType::Float,
+			IoComponentType::UInt,
+			IoComponentType::UInt
+		};
+		if(reflected.inputs.size() != widths.size())
+		{
+			std::cerr << "Authored surface shader does not consume TerraSurfaceInput: "
+				<< input << "\n";
+			return false;
+		}
+		for(const IoEntry& inputAttribute : reflected.inputs)
+		{
+			if(inputAttribute.location >= widths.size()
+				|| inputAttribute.componentType != types[inputAttribute.location]
+				|| inputAttribute.componentCount != widths[inputAttribute.location])
+			{
+				std::cerr << "Authored surface shader input ABI is incompatible: "
+					<< input << "\n";
+				return false;
+			}
+		}
+		return true;
+	}
 } // namespace
 
 // CompileShader is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -602,7 +796,14 @@ bool CompileShader(const std::filesystem::path& input, const std::filesystem::pa
 	ReflectionResult reflected{};
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!reflector.Reflect(bytecode, *stageOpt, reflected)) {
-		std::cerr << "Reflection failed; writing minimal metadata instead.\n";
+		std::cerr << "Reflection failed; shader packaging is fail-closed.\n";
+		CleanupTempSpv();
+		return false;
+	}
+	if(!ValidateAuthoredGeometryContract(input, *stageOpt, reflected))
+	{
+		CleanupTempSpv();
+		return false;
 	}
 
 	std::vector<StageIOAttribute> stageInputs;
@@ -646,6 +847,8 @@ bool CompileShader(const std::filesystem::path& input, const std::filesystem::pa
 	const std::uint64_t descriptorBindingsBytes = static_cast<std::uint64_t>(descriptorBindings.size()) * sizeof(DescriptorBinding);
 	const std::uint64_t stageInputsBytes = static_cast<std::uint64_t>(stageInputs.size()) * sizeof(StageIOAttribute);
 	const std::uint64_t stageOutputsBytes = static_cast<std::uint64_t>(stageOutputs.size()) * sizeof(StageIOAttribute);
+	const std::uint64_t pushConstantBytes = static_cast<std::uint64_t>(
+		reflected.pushConstants.size()) * sizeof(PushConstantRange);
 	const std::uint64_t bytecodeBytes = static_cast<std::uint64_t>(bytecode.size());
 	const std::uint64_t stringsBytes = static_cast<std::uint64_t>(strings.data.size());
 
@@ -671,6 +874,7 @@ bool CompileShader(const std::filesystem::path& input, const std::filesystem::pa
 	std::uint32_t descriptorBindingsOffset = 0;
 	std::uint32_t stageInputsOffset = 0;
 	std::uint32_t stageOutputsOffset = 0;
+	std::uint32_t pushConstantsOffset = 0;
 	std::uint32_t compiledBinaryOffset = 0;
 	std::uint32_t stringOffset = 0;
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -678,6 +882,7 @@ bool CompileShader(const std::filesystem::path& input, const std::filesystem::pa
 		|| !ReservePayloadBlock(descriptorBindingsBytes, descriptorBindingsOffset)
 		|| !ReservePayloadBlock(stageInputsBytes, stageInputsOffset)
 		|| !ReservePayloadBlock(stageOutputsBytes, stageOutputsOffset)
+		|| !ReservePayloadBlock(pushConstantBytes, pushConstantsOffset)
 		|| !ReservePayloadBlock(sizeof(CompiledStageBinary) + bytecodeBytes, compiledBinaryOffset)
 		|| !ReservePayloadBlock(stringsBytes, stringOffset)) {
 		std::cerr << "Shader payload layout overflowed 32-bit file offsets for " << input << "\n";
@@ -697,6 +902,9 @@ bool CompileShader(const std::filesystem::path& input, const std::filesystem::pa
 	reflection.inputCount = static_cast<std::uint32_t>(stageInputs.size());
 	reflection.outputOffset = stageOutputsOffset;
 	reflection.outputCount = static_cast<std::uint32_t>(stageOutputs.size());
+	reflection.pushConstantOffset = pushConstantsOffset;
+	reflection.pushConstantCount = static_cast<std::uint32_t>(
+		reflected.pushConstants.size());
 
 	CompiledStageBinary binary{};
 	binary.format = static_cast<uint32_t>(ShaderBinaryFormat::SPIRV);
@@ -713,6 +921,8 @@ bool CompileShader(const std::filesystem::path& input, const std::filesystem::pa
 	header.descriptorBindingCount = static_cast<uint32_t>(descriptorBindings.size());
 	header.stageInputCount = static_cast<uint32_t>(stageInputs.size());
 	header.stageOutputCount = static_cast<uint32_t>(stageOutputs.size());
+	header.pushConstantCount = static_cast<std::uint32_t>(
+		reflected.pushConstants.size());
 	header.stringTableOffset = stringOffset;
 	header.stringTableSize = static_cast<uint32_t>(strings.data.size());
 	header.reflectionOffset = headerSize;
@@ -720,6 +930,7 @@ bool CompileShader(const std::filesystem::path& input, const std::filesystem::pa
 	header.descriptorBindingsOffset = descriptorBindingsOffset;
 	header.stageInputsOffset = stageInputsOffset;
 	header.stageOutputsOffset = stageOutputsOffset;
+	header.pushConstantsOffset = pushConstantsOffset;
 	header.compiledBinaryOffset = compiledBinaryOffset;
 	header.compiledBinarySize = binary.bytecodeSize;
 
@@ -749,6 +960,10 @@ bool CompileShader(const std::filesystem::path& input, const std::filesystem::pa
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!stageOutputs.empty()) {
 		out.write(reinterpret_cast<const char*>(stageOutputs.data()), static_cast<std::streamsize>(stageOutputsBytes));
+	}
+	if(!reflected.pushConstants.empty()) {
+		out.write(reinterpret_cast<const char*>(reflected.pushConstants.data()),
+			static_cast<std::streamsize>(pushConstantBytes));
 	}
 	out.write(reinterpret_cast<const char*>(&binary), sizeof(binary));
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.

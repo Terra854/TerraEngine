@@ -192,9 +192,18 @@ struct alignas(16) MaterialData {
 struct PipelineKey {
 	TerraEngine::UUID shaderCollectionId;
 	uint32_t materialFlags;
+	std::uint64_t collectionGeneration = 0u;
+	std::uint64_t shaderModuleGeneration = 0u;
+	std::uint32_t geometryAbiVersion = 0u;
+	std::uint32_t geometryPolicy = 0u;
 
 	bool operator==(const PipelineKey& other) const {
-		return shaderCollectionId == other.shaderCollectionId && materialFlags == other.materialFlags;
+		return shaderCollectionId == other.shaderCollectionId
+			&& materialFlags == other.materialFlags
+			&& collectionGeneration == other.collectionGeneration
+			&& shaderModuleGeneration == other.shaderModuleGeneration
+			&& geometryAbiVersion == other.geometryAbiVersion
+			&& geometryPolicy == other.geometryPolicy;
 	}
 };
 
@@ -203,7 +212,12 @@ struct PipelineKeyHash {
 	std::size_t operator()(const PipelineKey& k) const {
 		std::size_t h1 = std::hash<TerraEngine::UUID>{}(k.shaderCollectionId);
 		std::size_t h2 = std::hash<uint32_t>{}(k.materialFlags);
-		return h1 ^ (h2 << 1);
+		std::size_t hash = h1 ^ (h2 << 1);
+		hash ^= std::hash<std::uint64_t>{}(k.collectionGeneration) << 2u;
+		hash ^= std::hash<std::uint64_t>{}(k.shaderModuleGeneration) << 3u;
+		hash ^= std::hash<std::uint32_t>{}(k.geometryAbiVersion) << 4u;
+		hash ^= std::hash<std::uint32_t>{}(k.geometryPolicy) << 5u;
+		return hash;
 	}
 };
 
@@ -1148,6 +1162,56 @@ struct VulkanContext::Impl {
 	std::uint32_t activeAnimationGraphicsBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 	std::uint32_t activeCpuAnimationGraphicsBufferIndex =
 		INVALID_BINDLESS_BUFFER_INDEX;
+	// Animated virtual geometry owns a second compute envelope after animation
+	// evaluation. Static AVPB bytes and output arenas are frame-fence owned; no
+	// material shader or animator owns Vulkan resources in this path.
+	struct VulkanDeformationFrameResources
+	{
+		std::array<VulkanBuffer,
+			TerraEngine::Renderer::Vulkan::
+				kVulkanDeformationDescriptorBindingCount> buffers{};
+		std::array<VkDeviceSize,
+			TerraEngine::Renderer::Vulkan::
+				kVulkanDeformationDescriptorBindingCount> capacities{};
+		TerraEngine::Renderer::Vulkan::
+			VulkanDeformationDescriptorSetPlan descriptorPlan{};
+		struct GraphicsGroup
+		{
+			std::uint64_t stableInstanceId = 0u;
+			TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+			std::uint32_t groupIndex = 0u;
+		};
+		std::vector<GraphicsGroup> graphicsGroups;
+		std::vector<TerraEngine::Renderer::DeformedPageKey> workKeys;
+		VulkanBuffer graphicsBridgeBuffer{};
+		VkDeviceSize graphicsBridgeCapacityBytes = 0u;
+		std::uint32_t currentVerticesBindlessIndex =
+			INVALID_BINDLESS_BUFFER_INDEX;
+		std::uint32_t boundsBindlessIndex =
+			INVALID_BINDLESS_BUFFER_INDEX;
+		std::uint32_t refinementBindlessIndex =
+			INVALID_BINDLESS_BUFFER_INDEX;
+		std::uint32_t graphicsBridgeBindlessIndex =
+			INVALID_BINDLESS_BUFFER_INDEX;
+		std::uint64_t frameId = 0u;
+		std::uint64_t rendererGeneration = 0u;
+		bool live = false;
+	};
+	VkDescriptorSetLayout deformationDescriptorSetLayout =
+		VK_NULL_HANDLE;
+	std::vector<VkDescriptorSet> deformationDescriptorSets;
+	std::vector<VulkanDeformationFrameResources>
+		deformationFrameResources;
+	TerraEngine::Renderer::Vulkan::
+		VulkanDeformationComputePipelines deformationComputePipelines{};
+	TerraEngine::Renderer::Vulkan::
+		VulkanDeformationCommandPlan pendingDeformationCommandPlan{};
+	std::shared_ptr<const TerraEngine::Renderer::GpuDeformationPlan>
+		pendingDeformationImmutablePlan;
+	bool deformationComputeRecordedForCurrentFrame = false;
+	std::uint32_t recordedDeformationDispatchCountForCurrentFrame = 0u;
+	std::uint32_t activeDeformationGraphicsBufferIndex =
+		INVALID_BINDLESS_BUFFER_INDEX;
 	std::vector<std::vector<size_t>> workerBufferUsage; // Tracks next available secondary buffer index per worker per frame
 	std::atomic_bool swapchainImageAcquired = false;
 	// A descriptor-safety flush may submit a runtime prefix and consume the
@@ -1315,6 +1379,13 @@ struct VulkanContext::Impl {
 	bool EnsureVulkanAnimationDescriptorSets();
 	bool EnsureVulkanAnimationComputePipelines();
 	void DestroyVulkanAnimationComputePipelines();
+	bool EnsureVulkanDeformationDescriptorSets();
+	bool EnsureVulkanDeformationComputePipelines();
+	void DestroyVulkanDeformationComputePipelines();
+	bool PublishVulkanDeformationResources(
+		const TerraEngine::Renderer::GpuDeformationPlan& plan);
+	void RetireVulkanDeformationFrameResources(
+		VulkanDeformationFrameResources& resources);
 	void MarkVulkanAnimationGenerationSubmitted(std::uint32_t rendererGeneration);
 	void CompleteVulkanAnimationFrameResources(std::uint32_t frameIndex);
 	void RetireVulkanAnimationFrameResources(VulkanAnimationFrameResources& resources);
@@ -1335,6 +1406,9 @@ struct VulkanContext::Impl {
 	void InvalidateTexture(TerraEngine::UUID textureId, bool reloadAfterInvalidate = true);
 	void InvalidateResource(TerraEngine::UUID id, bool reloadTexturesAfterInvalidate = true);
 	void EnsureMesh(TerraEngine::UUID meshId);
+	std::optional<PipelineKey> BuildPipelineKey(
+		TerraEngine::UUID shaderCollectionId,
+		uint32_t materialFlags) const;
 	void EnsurePipeline(TerraEngine::UUID shaderCollectionId, VkRenderPass renderPass, uint32_t materialFlags);
 	VkDescriptorSet EnsureMeshDescriptorSet(TerraEngine::UUID meshId, const VulkanPipeline& pipeline);
 

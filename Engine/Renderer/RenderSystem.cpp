@@ -2729,6 +2729,8 @@ TerraEngine::Renderer::AnimationRenderBinding RenderSystem::ResolveAnimationRend
 	result.componentGeneration = request.componentGeneration;
 	result.skeletonGeneration = request.skeletonGeneration;
 	result.skeletonCompatibilityFingerprint = request.skeletonCompatibilityFingerprint;
+	result.pageLocalDeformationAvailable =
+		request.pageLocalDeformationAvailable;
 	result.invalidation = request.invalidation;
 
 	// A current safe/error publication is an explicit dependency result even if
@@ -3329,6 +3331,9 @@ void RenderSystem::Update(float deltaTime)
 								runtimeMesh->deformablePayloadGeneration;
 							animationBinding.skeletonCompatibilityFingerprint =
 								runtimeMesh->deformableMetadata.skeletonCompatibilityFingerprint;
+							animationBinding.pageLocalDeformationAvailable =
+								runtimeMesh->hasAnimatedVirtualPageDirectory
+								&& runtimeMesh->virtualGeometryPageStreamingReady;
 
 							std::optional<Object> nearestAnimatorObject;
 							TerraEngine::UUID skeletonOverrideAssetId = TerraEngine::EMPTY_UUID;
@@ -3401,6 +3406,9 @@ void RenderSystem::Update(float deltaTime)
 									request.componentGeneration = componentGeneration;
 									request.skeletonCompatibilityFingerprint =
 										effectiveSkeletonFingerprint;
+									request.pageLocalDeformationAvailable =
+										runtimeMesh->hasAnimatedVirtualPageDirectory
+										&& runtimeMesh->virtualGeometryPageStreamingReady;
 									request.expectedGpuRenderIdentity.meshId = meshId;
 									request.expectedGpuRenderIdentity.meshHeaderVersion =
 										runtimeMesh->header.version;
@@ -3970,6 +3978,108 @@ void RenderSystem::Update(float deltaTime)
 			false
 		});
 	}
+	// Build one conservative frame-wide animated page union before any backend
+	// plan is created. View/material identities are deliberately excluded: every
+	// Scene, Game, capture, shadow, picking, and secondary consumer references
+	// the same deformed page generation.
+	const std::size_t deformationViewCount = std::min<std::size_t>(
+		renderFrameSnapshot.viewRequests.size(), 64u);
+	const std::uint64_t deformationViewMask = deformationViewCount == 64u
+		? std::numeric_limits<std::uint64_t>::max()
+		: ((std::uint64_t{1u} << deformationViewCount) - 1u);
+	for(const TerraEngine::Renderer::RenderFrameRenderableRecord& renderable :
+		renderFrameSnapshot.renderables)
+	{
+		if(!renderable.animation.complete
+			|| renderable.animation.safeFallback
+			|| renderable.animation.stableInstanceId == 0u
+			|| deformationViewMask == 0u)
+		{
+			continue;
+		}
+		const Mesh* mesh =
+			ResourceManager::Instance().GetMesh(renderable.meshId);
+		if(mesh == nullptr || !mesh->hasAnimatedVirtualPageDirectory
+			|| mesh->animatedVirtualPageEntries.size()
+				!= mesh->animatedVirtualPageSections.size())
+		{
+			continue;
+		}
+		for(std::size_t pageIndex = 0u;
+			pageIndex < mesh->animatedVirtualPageEntries.size();
+			++pageIndex)
+		{
+			const AnimatedVirtualPageDirectoryEntry& page =
+				mesh->animatedVirtualPageEntries[pageIndex];
+			std::uint32_t vertexCount = 0u;
+			std::uint32_t meshletCount = 0u;
+			for(const AnimatedVirtualPageSectionRecord& section :
+				mesh->animatedVirtualPageSections[pageIndex])
+			{
+				if(section.type == static_cast<std::uint32_t>(
+					AnimatedVirtualPageSectionType::PackedVertices))
+				{
+					vertexCount = section.elementCount;
+				}
+				else if(section.type == static_cast<std::uint32_t>(
+					AnimatedVirtualPageSectionType::Meshlets))
+				{
+					meshletCount = section.elementCount;
+				}
+			}
+			if(vertexCount == 0u || meshletCount == 0u
+				|| page.clusterCount == 0u)
+			{
+				continue;
+			}
+			TerraEngine::Renderer::DeformationPageDemand demand;
+			demand.key.page.meshId = renderable.meshId;
+			demand.key.page.meshPayloadGeneration =
+				renderable.animation.deformablePayloadGeneration;
+			demand.key.page.pageId = page.pageId;
+			demand.key.page.pageContentGeneration =
+				page.contentGeneration;
+			demand.key.page.residencyGeneration =
+				page.contentGeneration;
+			demand.key.page.layoutVersion =
+				TerraEngine::Renderer::kAnimatedGeometryAbiVersion;
+			demand.key.deformation.stableInstanceId =
+				renderable.animation.stableInstanceId;
+			demand.key.deformation.objectGeneration =
+				std::max<std::uint64_t>(1u,
+					renderable.invalidation.asset);
+			demand.key.deformation.animationPublicationGeneration =
+				renderable.animation.poseGeneration;
+			demand.key.deformation.skeletonGeneration =
+				std::max<std::uint64_t>(1u,
+					renderable.animation.programGeneration);
+			demand.key.deformation.morphGeneration =
+				renderable.animation.morphGeneration;
+			demand.key.deformation.meshPayloadGeneration =
+				renderable.animation.deformablePayloadGeneration;
+			demand.key.deformation.rendererGeneration =
+				snapshotRendererGeneration;
+			demand.key.deformation.sceneGeneration =
+				std::max<std::uint64_t>(1u, protectedSceneGeneration);
+			demand.key.inputLayoutVersion =
+				TerraEngine::Renderer::kAnimatedGeometryAbiVersion;
+			demand.sourceRecordIndex =
+				renderable.animation.gpuWorkPacketCount != 0u
+					? renderable.animation.firstGpuWorkPacket
+					: 0u;
+			demand.vertexCount = vertexCount;
+			demand.meshletCount = meshletCount;
+			demand.clusterCount = page.clusterCount;
+			demand.requestedViewMask = deformationViewMask;
+			demand.priorHistoryCompatible =
+				renderable.invalidation.pose
+					== renderable.animation.poseGeneration
+				&& renderable.invalidation.morph
+					== renderable.animation.morphGeneration;
+			renderFrameSnapshot.animatedGeometryPageDemands.push_back(
+				std::move(demand));
+		}
+	}
 	TerraEngine::Renderer::SortSnapshotDeterministically(renderFrameSnapshot);
 	const std::vector<TerraEngine::Renderer::RenderPassNode> renderGraphPasses = TerraEngine::Renderer::BuildDefaultRenderPasses(renderFrameSnapshot, backendCapabilities);
 	const TerraEngine::Renderer::RenderWorkPacketPlan renderPacketPlan = TerraEngine::Renderer::BuildRenderWorkPacketPlan(renderFrameSnapshot, renderGraphPasses, backendCapabilities);
@@ -4167,13 +4277,27 @@ void RenderSystem::Update(float deltaTime)
 
 	auto collectCandidateIndices = [&](const TerraEngine::Scene::SpatialQueryResult& query) {
 		std::vector<std::size_t> candidateIndices;
-		candidateIndices.reserve(query.hits.size());
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+		candidateIndices.reserve(std::min<std::size_t>(
+			renderables.size(),
+			query.hits.size() + renderables.size()));
+		std::vector<bool> spatiallyVisible(renderables.size(), false);
+		// Convert the spatial result to a stable renderable-order mask. Animated
+		// objects are added below because this CPU query only knows cooked/static
+		// bounds and must not reject current GPU-deformed geometry.
 		for (const TerraEngine::Scene::SpatialQueryHit& hit : query.hits)
 		{
 			if (const auto lookup = renderableLookup.find(hit.entity); lookup != renderableLookup.end())
 			{
-				candidateIndices.push_back(lookup->second);
+				spatiallyVisible[lookup->second] = true;
+			}
+		}
+		for (std::size_t index = 0u; index < renderables.size(); ++index)
+		{
+			if (spatiallyVisible[index]
+				|| renderables[index].animationBinding
+					.RequiresConservativeCoarseVisibility())
+			{
+				candidateIndices.push_back(index);
 			}
 		}
 		return candidateIndices;
@@ -4587,11 +4711,9 @@ void RenderSystem::Update(float deltaTime)
 
 			if (command.animationBinding.RequiresOwnerMeshDeformationFallback())
 			{
-				// Streamed page packets currently omit their matching skin and
-				// morph records. Do not reinterpret a page-local cluster range as
-				// an owner-mesh range: that rendered only whichever meshlets were
-				// present in the first packet and could remove an animated model's
-				// opposite side. Publish one complete owner draw instead.
+				// Legacy/unsupported pages have no accepted compute publication.
+				// Do not reinterpret their page-local cluster range as an owner
+				// range; retain complete conservative coverage instead.
 				command.virtualMeshletOffset = 0U;
 				command.virtualMeshletCount = mesh->header.meshletCount;
 				command.selectedVirtualLod = range.selectedLodIndex;
@@ -5637,18 +5759,6 @@ void RenderSystem::Update(float deltaTime)
 	}
 
 	rhi->SetGlobalTaskShaderCullingEnabled(taskShaderCullingEnabled);
-	{
-		TERRAENGINE_PROFILE_SCOPE("RenderSystem: RHI Begin Frame", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		rhi->BeginFrame();
-	}
-	// BeginFrame first retires and clears the reused backend frame slot. Publish
-	// this frame's immutable animation plan only after that reset; publishing it
-	// earlier would let Vulkan erase the pending compute work before RenderFrame
-	// can record it and could rewrite descriptors still owned by the prior slot.
-	if (!rhi->ConsumeRenderSubmissionPlan(renderSubmissionPlan))
-	{
-		TERRAENGINE_LOG(LogLevel::Error, "Render graph rejected frame " << activeRenderFrameId << " before backend submission.");
-	}
 
 	TerraEngine::Scene::SpatialDiagnosticsSnapshot sceneSpatialDiagnostics{};
 	TerraEngine::Scene::SpatialDiagnosticsSnapshot gameSpatialDiagnostics{};
@@ -5675,6 +5785,20 @@ void RenderSystem::Update(float deltaTime)
 		request.outputId = outputId;
 		return request;
 	};
+	struct PreparedRenderSubmission
+	{
+		// Visibility is prepared for every view before the backend plan is sealed.
+		// Each value owns its copied command/page packets until the protected RHI
+		// submission boundary below, so no later view can mutate earlier work.
+		FrameRenderData frame;
+		RenderOutputRequest output;
+	};
+	std::vector<PreparedRenderSubmission> preparedRenderSubmissions;
+	preparedRenderSubmissions.reserve(
+		static_cast<std::size_t>(hasSceneViewCamera ? 1u : 0u)
+		+ gameViewCameras.size()
+		+ cameras.size()
+		+ captureLimits.maxConcurrentCaptures);
 	auto copyVirtualGeometryFramePayload = [](FrameRenderData& target, const VisibleCommandBuildResult& source) {
 		target.virtualGeometryGpuPackets = source.gpuPacketRecords;
 		target.virtualGeometryGpuBatches = source.gpuBatchDescriptors;
@@ -5729,8 +5853,11 @@ void RenderSystem::Update(float deltaTime)
 			frameData.shadowDrawLists = buildShadowDrawLists(frameData.cameraWorldPosition);
 		}
 		{
-			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Scene View RHI RenderFrame", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-			rhi->RenderFrame(frameData, makeOutputRequest(RenderOutputKind::SceneView, RenderViewType::Scene, 1u));
+			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Queue Scene View Submission", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			preparedRenderSubmissions.push_back({
+				frameData,
+				makeOutputRequest(RenderOutputKind::SceneView, RenderViewType::Scene, 1u)
+			});
 		}
 	}
 	else if (TerraEngine::Renderer::RenderDiagnosticsRequested())
@@ -5769,8 +5896,11 @@ void RenderSystem::Update(float deltaTime)
 				frameData.shadowDrawLists = buildShadowDrawLists(frameData.cameraWorldPosition);
 			}
 			{
-				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Game View RHI RenderFrame", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-				rhi->RenderFrame(frameData, makeOutputRequest(RenderOutputKind::GameView, RenderViewType::Game, 2u));
+				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Queue Game View Submission", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+				preparedRenderSubmissions.push_back({
+					frameData,
+					makeOutputRequest(RenderOutputKind::GameView, RenderViewType::Game, 2u)
+				});
 			}
 			latestGameViewFrameId = activeRenderFrameId;
 		}
@@ -5801,7 +5931,10 @@ void RenderSystem::Update(float deltaTime)
 				blankData.virtualGeometryGpuFallbackRecords.clear();
 				blankData.virtualGeometryPageRetirements.clear();
 				blankData.shadowDrawLists.clear();
-			rhi->RenderFrame(blankData, makeOutputRequest(RenderOutputKind::GameView, RenderViewType::Game, 2u));
+			preparedRenderSubmissions.push_back({
+				std::move(blankData),
+				makeOutputRequest(RenderOutputKind::GameView, RenderViewType::Game, 2u)
+			});
 			latestGameViewFrameId = activeRenderFrameId;
 	}
 	else if (!gameViewSuppressed && gameViewTargetReady)
@@ -5858,7 +5991,10 @@ void RenderSystem::Update(float deltaTime)
 			gameSpatialDiagnostics = visibleCommands.diagnostics;
 			frameData.shadowDrawLists = buildShadowDrawLists(frameData.cameraWorldPosition);
 
-			rhi->RenderFrame(frameData, makeOutputRequest(RenderOutputKind::MainRuntimeView, RenderViewType::Game, 2u));
+			preparedRenderSubmissions.push_back({
+				frameData,
+				makeOutputRequest(RenderOutputKind::MainRuntimeView, RenderViewType::Game, 2u)
+			});
 			latestGameViewFrameId = activeRenderFrameId;
 		}
 	}
@@ -5917,7 +6053,48 @@ void RenderSystem::Update(float deltaTime)
 
 		RenderOutputRequest captureOutputRequest = makeOutputRequest(RenderOutputKind::OffscreenTexture, RenderViewType::Game, 9000u);
 		captureOutputRequest.targetSize = captureRequest.targetSize;
-		rhi->RenderFrame(captureFrameData, captureOutputRequest);
+		preparedRenderSubmissions.push_back({
+			std::move(captureFrameData),
+			std::move(captureOutputRequest)
+		});
+	}
+
+	// Every camera, shadow set, and dedicated capture has now published its
+	// immutable page selection. Seal deformation from that union so animation
+	// runs once per visible physical page/instance generation rather than once
+	// for every page contained by an animated asset.
+	renderFrameSnapshot.animatedGeometryPageDemands =
+		TerraEngine::Renderer::SelectAnimatedGeometryPageDemands(
+			renderFrameSnapshot);
+	const TerraEngine::Renderer::DeformationBackendWorkPlan selectedDeformation =
+		TerraEngine::Renderer::BuildDeformationBackendWorkPlan(
+			renderFrameSnapshot);
+	renderSubmissionPlan.deformationWork = selectedDeformation.immutablePlan;
+	if(!TerraEngine::Renderer::ValidateRenderSubmissionPlan(
+		renderSubmissionPlan,
+		activeRenderFrameId))
+	{
+		TERRAENGINE_LOG(
+			LogLevel::Error,
+			"Render graph rejected selected animated page work for frame "
+				<< activeRenderFrameId << ".");
+	}
+
+	{
+		TERRAENGINE_PROFILE_SCOPE("RenderSystem: RHI Begin Frame", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		rhi->BeginFrame();
+	}
+	// BeginFrame first retires and clears the reused backend frame slot. Publish
+	// the sealed all-view plan only after that reset; publishing it earlier would
+	// let Vulkan erase pending compute work before the first view records it.
+	if(!rhi->ConsumeRenderSubmissionPlan(renderSubmissionPlan))
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Render graph rejected frame " << activeRenderFrameId << " before backend submission.");
+	}
+	for(PreparedRenderSubmission& prepared : preparedRenderSubmissions)
+	{
+		TERRAENGINE_PROFILE_SCOPE("RenderSystem: RHI Render Prepared View", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		rhi->RenderFrame(prepared.frame, prepared.output);
 	}
 	if (!captureRequestsForReadback.empty())
 	{
@@ -6011,6 +6188,36 @@ void RenderSystem::Update(float deltaTime)
 				target.hiZFalseOcclusionRiskWarnings += selection.hiZFalseOcclusionRiskWarnings;
 				target.clusterSelection = selection.clusterSelection;
 				target.hiZValidation = selection.hiZValidation;
+				// Animated-page facts come from the same live selection snapshot.
+				// Preserve them when detailed cooked-asset inventory is enabled;
+				// otherwise opening diagnostics would replace accepted compute work
+				// with the inventory snapshot's default zero values.
+				target.animatedPageDemandCount =
+					selection.animatedPageDemandCount;
+				target.animatedUniqueDispatchCount =
+					selection.animatedUniqueDispatchCount;
+				target.animatedReuseCount =
+					selection.animatedReuseCount;
+				target.animatedFallbackCount =
+					selection.animatedFallbackCount;
+				target.deformationCurrentBytes =
+					selection.deformationCurrentBytes;
+				target.deformationHistoryBytes =
+					selection.deformationHistoryBytes;
+				target.deformationBoundsBytes =
+					selection.deformationBoundsBytes;
+				target.deformationHighWaterBytes =
+					selection.deformationHighWaterBytes;
+				target.animatedDiagnosticEmitted =
+					selection.animatedDiagnosticEmitted;
+				target.animatedDiagnosticCoalesced =
+					selection.animatedDiagnosticCoalesced;
+				target.animatedDiagnosticDropped =
+					selection.animatedDiagnosticDropped;
+				target.animatedShaderContractValid =
+					selection.animatedShaderContractValid;
+				target.animatedFallbackReason =
+					selection.animatedFallbackReason;
 				target.virtualGeometryPerformanceGates.insert(
 					target.virtualGeometryPerformanceGates.end(),
 					selection.virtualGeometryPerformanceGates.begin(),
@@ -6316,7 +6523,11 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 		TerraEngine::Scheduling::kResourceVisibleStreamingTouchSets,
 		TerraEngine::Scheduling::kResourceRendererRecoveryStateSnapshot,
 		TerraEngine::Scheduling::kResourceRendererDeviceIncidentLog,
-		TerraEngine::Scheduling::kResourceRuntimeRenderSettingsQueue
+		TerraEngine::Scheduling::kResourceRuntimeRenderSettingsQueue,
+		TerraEngine::Scheduling::kResourceAnimatedGeometryPageDemands,
+		TerraEngine::Scheduling::kResourceAnimatedGeometryOutputs,
+		TerraEngine::Scheduling::kResourceAnimatedGeometryDynamicBounds,
+		TerraEngine::Scheduling::kResourceAnimatedGeometryPublications
 	};
 	declaration.writes = {
 		"Renderer",
@@ -6350,7 +6561,13 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 		TerraEngine::Scheduling::kResourceVisibleStreamingTouchSets,
 		TerraEngine::Scheduling::kResourceRendererRecoveryStateSnapshot,
 		TerraEngine::Scheduling::kResourceRendererDeviceIncidentLog,
-		TerraEngine::Scheduling::kResourceRuntimeRenderSettings
+		TerraEngine::Scheduling::kResourceRuntimeRenderSettings,
+		TerraEngine::Scheduling::kResourceAnimatedGeometryPageDemands,
+		TerraEngine::Scheduling::kResourceAnimatedGeometryDeformationPlans,
+		TerraEngine::Scheduling::kResourceAnimatedGeometryOutputs,
+		TerraEngine::Scheduling::kResourceAnimatedGeometryDynamicBounds,
+		TerraEngine::Scheduling::kResourceAnimatedGeometryPublications,
+		TerraEngine::Scheduling::kResourceAnimatedGeometryRetirements
 	};
 	// Live ECS collection still runs protected inside RenderSystem, while draw,
 	// light, upload, adaptive virtual geometry LOD/cluster/page intent, and
@@ -6363,8 +6580,8 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 	declaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::WorkerPrepare;
 	declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::PartiallyWorkerSafe;
 	declaration.hardBoundary = true;
-	declaration.safeSubwork = "Immutable render snapshots, generation-validated animation pose bindings, visible-command cache lookup, draw packets, culling and lighting preparation, generation-tagged submission plans, virtual geometry LOD/page preparation, page request planning, page payload source planning, resource readiness, secondary command buffers, and submit descriptions.";
-	declaration.protectedCommit = "Runtime render-settings queue application, live hierarchy/AnimatorComponent/deformable-resource capture, immutable AnimationRuntimeState pose capture, Swapchain acquire, acquired-image generation validation, command/fence ownership, queue submit/present, presentation recreation, completion publication, ResourceManager visible streaming touch publication, virtual geometry page payload publication, page retirement draining, virtual geometry GPU publication, virtual geometry diagnostics publication, renderer diagnostics, and device-loss containment.";
+	declaration.safeSubwork = "Immutable render snapshots, generation-validated animation pose bindings, frame-wide animated page demand union, checked deformation prefix planning, history compatibility lookup, visible-command cache lookup, draw packets, culling and lighting preparation, generation-tagged submission plans, virtual geometry LOD/page preparation, page request planning, page payload source planning, resource readiness, secondary command buffers, and submit descriptions.";
+	declaration.protectedCommit = "Runtime render-settings queue application, live hierarchy/AnimatorComponent/deformable-resource capture, immutable AnimationRuntimeState pose capture, Swapchain acquire, acquired-image generation validation, animated geometry allocation and atomic geometry/history/bounds publication, descriptor writes, deformation command recording, fence-delayed animated output retirement, command/fence ownership, queue submit/present, presentation recreation, completion publication, ResourceManager visible streaming touch publication, virtual geometry page payload publication, page retirement draining, virtual geometry GPU publication, virtual geometry diagnostics publication, renderer diagnostics, and device-loss containment.";
 	declaration.protectedReason = "Live GPU queue and presentation ownership remain protected after worker preparation.";
 	declaration.profilingLabel = declaration.name;
 	declaration.usesDefaultMetadata = false;
@@ -6496,6 +6713,11 @@ TerraEngine::Renderer::VirtualGeometryDrawRange RenderSystem::SelectVirtualGeome
 	const float finiteProjectedRadiusPixels = std::isfinite(projectedRadiusPixels)
 		? std::max(projectedRadiusPixels, 0.0f)
 		: 512.0f;
+	// Mesh LOD Scale is documented as preserving detail for longer when raised.
+	// Apply it to the whole-mesh screen-size bands as well as cluster error so
+	// fallback and sparse-cluster paths obey the same project quality control.
+	const float scaledProjectedRadiusPixels =
+		finiteProjectedRadiusPixels * sanitized.lodErrorScale;
 	constexpr float kFirstVirtualGeometryLodTransitionPixels = 480.0f;
 	constexpr float kVirtualGeometryLodTransitionScale = 0.5f;
 	// Walk every cooked detail level instead of using two fixed buckets. Each
@@ -6506,7 +6728,7 @@ TerraEngine::Renderer::VirtualGeometryDrawRange RenderSystem::SelectVirtualGeome
 	{
 		const float transitionPixels = kFirstVirtualGeometryLodTransitionPixels
 			* std::pow(kVirtualGeometryLodTransitionScale, static_cast<float>(detailIndex - 1u));
-		if (finiteProjectedRadiusPixels >= transitionPixels)
+		if (scaledProjectedRadiusPixels >= transitionPixels)
 		{
 			break;
 		}
@@ -7172,6 +7394,14 @@ RenderSystem::GetLatestRenderablesSnapshot() const
 	// and prevents them from retaining references into the next render update.
 	std::lock_guard<std::mutex> lock(statsMutex);
 	return latestRenderFrameSnapshot.renderables;
+}
+
+std::size_t RenderSystem::GetLatestAnimatedGeometryPageDemandCount() const
+{
+	// Read the same immutable frame publication as renderable diagnostics so the
+	// count cannot be paired with a newer or partially prepared demand list.
+	std::lock_guard<std::mutex> lock(statsMutex);
+	return latestRenderFrameSnapshot.animatedGeometryPageDemands.size();
 }
 
 std::vector<TerraEngine::Renderer::OcclusionDebugSample> RenderSystem::GetLatestVirtualGeometryOcclusionDebugSamples(RenderViewType viewType, std::size_t maxCount) const
@@ -7970,6 +8200,18 @@ void RenderSystem::LoadSettings()
 			currentSettings.virtualGeometry.debugVisualizationMode = static_cast<VirtualGeometryDebugVisualizationMode>(
 				virtualGeometry.value("debugVisualizationMode", static_cast<std::uint32_t>(VirtualGeometryDebugVisualizationMode::None)));
 			currentSettings.virtualGeometry.geometryBudgetBytes = virtualGeometry.value("geometryBudgetBytes", static_cast<std::uint64_t>(0u));
+			currentSettings.virtualGeometry.deformationCurrentBudgetBytes =
+				virtualGeometry.value(
+					"deformationCurrentBudgetBytes",
+					static_cast<std::uint64_t>(0u));
+			currentSettings.virtualGeometry.deformationHistoryBudgetBytes =
+				virtualGeometry.value(
+					"deformationHistoryBudgetBytes",
+					static_cast<std::uint64_t>(0u));
+			currentSettings.virtualGeometry.deformationBoundsBudgetBytes =
+				virtualGeometry.value(
+					"deformationBoundsBudgetBytes",
+					static_cast<std::uint64_t>(0u));
 			currentSettings.virtualGeometry.preloadBias = virtualGeometry.value("preloadBias", 1.0f);
 			currentSettings.virtualGeometry.lodTransitionHysteresisPixels = virtualGeometry.value("lodTransitionHysteresisPixels", 0.35f);
 			currentSettings.virtualGeometry.lodTransitionStableFrames = virtualGeometry.value("lodTransitionStableFrames", 3u);
@@ -8033,6 +8275,12 @@ void RenderSystem::SaveSettings()
 		virtualGeometry["hiZThinGeometryGuardEnabled"] = virtualGeometryProfile.hiZThinGeometryGuardEnabled;
 		virtualGeometry["debugVisualizationMode"] = static_cast<std::uint32_t>(virtualGeometryProfile.debugVisualizationMode);
 		virtualGeometry["geometryBudgetBytes"] = virtualGeometryProfile.geometryBudgetBytes;
+		virtualGeometry["deformationCurrentBudgetBytes"] =
+			virtualGeometryProfile.deformationCurrentBudgetBytes;
+		virtualGeometry["deformationHistoryBudgetBytes"] =
+			virtualGeometryProfile.deformationHistoryBudgetBytes;
+		virtualGeometry["deformationBoundsBudgetBytes"] =
+			virtualGeometryProfile.deformationBoundsBudgetBytes;
 		virtualGeometry["preloadBias"] = virtualGeometryProfile.preloadBias;
 		virtualGeometry["lodTransitionHysteresisPixels"] = virtualGeometryProfile.lodTransitionHysteresisPixels;
 		virtualGeometry["lodTransitionStableFrames"] = virtualGeometryProfile.lodTransitionStableFrames;

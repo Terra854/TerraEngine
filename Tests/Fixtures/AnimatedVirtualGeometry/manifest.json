@@ -1,0 +1,35 @@
+{
+	"schemaVersion": 1,
+	"name": "AnimatedVirtualGeometryDeterministic",
+	"source": "procedural-grid",
+	"gridVerticesPerAxis": 17,
+	"pageTriangleLimit": 128,
+	"lodCount": 3,
+	"jointCount": 4,
+	"morphTargets": [
+		{
+			"stableTargetId": 7001,
+			"name": "RaiseCenter",
+			"weight": 0.75
+		}
+	],
+	"views": [
+		"Game",
+		"Scene",
+		"Shadow",
+		"Picking"
+	],
+	"transitions": [
+		"near-to-far",
+		"far-to-near",
+		"teleport",
+		"page-eviction",
+		"device-recovery"
+	],
+	"expected": {
+		"maximumPositionErrorMeters": 0.0005,
+		"maximumDirectionErrorDegrees": 0.1,
+		"minimumIntraFrameReuseRatio": 0.99,
+		"steadyStateOwnerSubstitutions": 0
+	}
+}

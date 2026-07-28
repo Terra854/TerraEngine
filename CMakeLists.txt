@@ -195,6 +195,8 @@ set(ENGINE_SOURCES
 	Engine/Renderer/RenderCaptureEncoding.cpp
 	Engine/Renderer/RendererRecovery.cpp
 	Engine/Renderer/RendererRecoveryPolicy.cpp
+	Engine/Renderer/Deformation/GpuDeformationPlan.cpp
+	Engine/Renderer/Deformation/AnimatedVirtualGeometryRuntime.cpp
 	Engine/Renderer/RenderSystem.cpp
 	Engine/Renderer/Graph/RenderDiagnostics.cpp
 	Engine/Renderer/Graph/RenderFrameBreakdown.cpp
@@ -320,6 +322,8 @@ set(ENGINE_HEADERS
 	Engine/Renderer/RenderCaptureEncoding.h
 	Engine/Renderer/RendererRecovery.h
 	Engine/Renderer/RendererRecoveryPolicy.h
+	Engine/Renderer/Deformation/GpuDeformationPlan.h
+	Engine/Renderer/Deformation/AnimatedVirtualGeometryRuntime.h
 	Engine/Renderer/RenderSystem.h
 	Engine/Renderer/RenderTypes.h
 	Engine/Renderer/Graph/RenderDiagnostics.h
@@ -1374,10 +1378,11 @@ target_compile_definitions(TerraEngine-Editor PRIVATE
 
 # Configure-time guard: select platform or option behavior before generating build files.
 if(MSVC)
-	# The editor target builds a large number of C++ files directly, including
-	# vendored sources, so /FS avoids transient Debug PDB write races on Windows.
+	# The editor target builds large automation/diagnostic translation units.
+	# /bigobj keeps their COFF section count valid, while /FS avoids transient
+	# parallel PDB write races on Windows.
 	# Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
-	target_compile_options(TerraEngine-Editor PRIVATE /FS)
+	target_compile_options(TerraEngine-Editor PRIVATE /FS /bigobj)
 endif()
 
 # Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
@@ -1498,6 +1503,20 @@ else()
 endif()
 
 set(ENGINE_INSTALL_DESTINATION ${CMAKE_BINARY_DIR}/Build)
+
+# Public geometry/deformation includes are installed beside compiled shaders so
+# authored surface shaders and offline validation use the same versioned ABI as
+# the runtime. These are source contracts, not embedded shader strings.
+install(FILES
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/Geometry/TerraGeometryContract.hlsli"
+	DESTINATION "${ENGINE_INSTALL_DESTINATION}/Editor/Shaders/Includes/Geometry"
+)
+install(FILES
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/VirtualGeometry/AnimatedVirtualGeometryAbi.hlsli"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/VirtualGeometry/AnimatedDeformedGeometry.hlsli"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/VirtualGeometry/DeformableVirtualGeometry.hlsli"
+	DESTINATION "${ENGINE_INSTALL_DESTINATION}/Editor/Shaders/Includes/VirtualGeometry"
+)
 
 # Install only provider-neutral physics contracts. The Jolt job and allocator
 # adapters remain private implementation details of the engine DLL.
@@ -1742,6 +1761,33 @@ foreach(animation_shader_name IN LISTS animation_compute_shader_names)
 	if(NOT compile_animation_shader EQUAL 0)
 		message(FATAL_ERROR
 			\"Failed to compile \${animation_shader_name}.comp.hlsl during install\")
+	endif()
+endforeach()
+
+# Compile the engine-owned animated-page deformation stage separately from
+# animation evaluation. Its public ABI include lives beside the shader so
+# custom surface shaders never need animation-specific resources.
+execute_process(
+	COMMAND \"\${DXC_PATH}\" -T cs_6_0 -E main
+		-Fo \"\${virtualgeometry_out_dir}/AnimatedPageDeform.comp.spv\"
+		-spirv -I \"\${virtualgeometry_src_dir}\"
+		\"\${virtualgeometry_src_dir}/AnimatedPageDeform.comp.hlsl\"
+	RESULT_VARIABLE compile_animated_page_deform)
+if(NOT compile_animated_page_deform EQUAL 0)
+	message(FATAL_ERROR
+		\"Failed to compile AnimatedPageDeform.comp.hlsl during install\")
+endif()
+
+foreach(animated_virtual_shader_name IN ITEMS AnimatedClusterBounds AnimatedRefinement)
+	execute_process(
+		COMMAND \"\${DXC_PATH}\" -T cs_6_0 -E main
+			-Fo \"\${virtualgeometry_out_dir}/\${animated_virtual_shader_name}.comp.spv\"
+			-spirv -I \"\${virtualgeometry_src_dir}\"
+			\"\${virtualgeometry_src_dir}/\${animated_virtual_shader_name}.comp.hlsl\"
+		RESULT_VARIABLE compile_animated_virtual_shader)
+	if(NOT compile_animated_virtual_shader EQUAL 0)
+		message(FATAL_ERROR
+			\"Failed to compile \${animated_virtual_shader_name}.comp.hlsl during install\")
 	endif()
 endforeach()
 

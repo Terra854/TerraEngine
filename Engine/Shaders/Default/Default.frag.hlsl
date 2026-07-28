@@ -85,6 +85,7 @@ struct ClusterData
 [[vk::binding(20, 0)]] TextureCube pointShadowCubes[32];
 
 #pragma pack_matrix(column_major)
+#include "../Geometry/TerraGeometryContract.hlsli"
 
 struct PushConstants
 {
@@ -122,18 +123,9 @@ struct PushConstants
 
 [[vk::push_constant]] ConstantBuffer<PushConstants> SceneUniforms;
 
-struct PSIn
-{
-	float4 position : SV_Position;
-	float2 uv : TEXCOORD0;
-	float3 worldPosition : TEXCOORD1;
-	float3 normal : NORMAL;
-	float4 tangent : TANGENT;
-	nointerpolation uint meshletIndex : TEXCOORD2;
-	nointerpolation float meshletBoundsRadius : TEXCOORD3;
-	nointerpolation uint meshletCullFlags : TEXCOORD4;
-	nointerpolation uint virtualGeometryDebugData : TEXCOORD5;
-};
+// The mesh stage and every compatible authored surface shader consume one
+// installed geometry contract for static and animated page output.
+#define PSIn TerraSurfaceInput
 
 static const uint kLightTypeDirectional = 0u;
 static const uint kLightTypePoint = 1u;

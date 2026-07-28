@@ -248,6 +248,21 @@ namespace TerraEngine::Renderer {
 		std::uint32_t embeddedFallbackPayloadCount = 0u;
 		std::uint32_t pageRequestCount = 0u;
 		std::uint32_t pageRetirementCount = 0u;
+		// Animated page facts use the same immutable frame snapshot as ordinary
+		// virtual-geometry diagnostics, so automation never races live arenas.
+		std::uint32_t animatedPageDemandCount = 0u;
+		std::uint32_t animatedUniqueDispatchCount = 0u;
+		std::uint32_t animatedReuseCount = 0u;
+		std::uint32_t animatedFallbackCount = 0u;
+		std::uint64_t deformationCurrentBytes = 0u;
+		std::uint64_t deformationHistoryBytes = 0u;
+		std::uint64_t deformationBoundsBytes = 0u;
+		std::uint64_t deformationHighWaterBytes = 0u;
+		std::uint32_t animatedDiagnosticEmitted = 0u;
+		std::uint32_t animatedDiagnosticCoalesced = 0u;
+		std::uint32_t animatedDiagnosticDropped = 0u;
+		bool animatedShaderContractValid = true;
+		std::string animatedFallbackReason;
 		std::uint32_t shadowViewCount = 0u;
 		VirtualGeometryAdaptiveSettingsDiagnostics adaptiveSettings;
 		VirtualGeometryCookOutputDiagnostics cookOutput;

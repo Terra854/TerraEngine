@@ -1,0 +1,108 @@
+{
+    "animationBindings": {
+        "clipAssetIds": [
+            "9dae9362137785aea86bbc574f64d671"
+        ],
+        "defaultClipAssetId": "9dae9362137785aea86bbc574f64d671",
+        "deformableMeshAssetIds": [
+            "3ce0c4c32b4c190edd4cb4371e9b055b"
+        ],
+        "morphTargetAssetIds": [
+            "ff7918ad8a13b95a604bfaf7425ec03f"
+        ],
+        "primarySkeletonAssetId": "38c018a909d627cc2df445e0b5c99cdd",
+        "schemaVersion": 1,
+        "skeletonAssetIds": [
+            "38c018a909d627cc2df445e0b5c99cdd"
+        ]
+    },
+    "name": "US1Hero",
+    "objects": [
+        {
+            "active": true,
+            "children": [
+                {
+                    "active": true,
+                    "components": {
+                        "MeshRenderComponent": {
+                            "materialId": "2b611b72eec7bdb66b0da4fe40360f82",
+                            "meshId": "3ce0c4c32b4c190edd4cb4371e9b055b",
+                            "spatialObjectId": "00000000000000000000000000000000",
+                            "taskShaderCullingEnabled": true
+                        },
+                        "Transform": {
+                            "Position": [
+                                0.0,
+                                0.0,
+                                0.0
+                            ],
+                            "Rotation": [
+                                1.0,
+                                0.0,
+                                0.0,
+                                0.0
+                            ],
+                            "Scale": [
+                                1.0,
+                                1.0,
+                                1.0
+                            ]
+                        }
+                    },
+                    "isStatic": false,
+                    "layer": "Default",
+                    "name": "US1HeroBody",
+                    "tag": "Untagged",
+                    "uuid": "1a07c44414a1b13be80d17186b67a90e"
+                }
+            ],
+            "components": {
+                "AnimatorComponent": {
+                    "active": true,
+                    "avatarOverrideAssetId": "00000000000000000000000000000000",
+                    "controllerAssetId": "00000000000000000000000000000000",
+                    "cullingPolicy": 0,
+                    "defaultClipAssetId": "9dae9362137785aea86bbc574f64d671",
+                    "defaultClipStartFrame": 0,
+                    "diagnosticOverrides": 0,
+                    "eventPolicy": 0,
+                    "initialParameters": "{}",
+                    "loopDefaultClip": true,
+                    "motionDatabaseOverrideAssetId": "00000000000000000000000000000000",
+                    "playAutomatically": true,
+                    "ragdollProfileOverrideAssetId": "00000000000000000000000000000000",
+                    "requestedMode": 0,
+                    "retargetProfileOverrideAssetId": "00000000000000000000000000000000",
+                    "rootMotionPolicy": 1,
+                    "schemaVersion": 3,
+                    "skeletonOverrideAssetId": "38c018a909d627cc2df445e0b5c99cdd",
+                    "timePolicy": 0,
+                    "updatePolicy": 0
+                },
+                "Transform": {
+                    "Position": [
+                        0.0,
+                        0.0,
+                        0.0
+                    ],
+                    "Rotation": [
+                        1.0,
+                        0.0,
+                        0.0,
+                        0.0
+                    ],
+                    "Scale": [
+                        1.0,
+                        1.0,
+                        1.0
+                    ]
+                }
+            },
+            "isStatic": false,
+            "layer": "Default",
+            "name": "US1Hero",
+            "tag": "Untagged",
+            "uuid": "5ba749441aa9ade4ebcefeae8246ee66"
+        }
+    ]
+}

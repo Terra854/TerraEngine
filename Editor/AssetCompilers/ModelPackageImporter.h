@@ -10,12 +10,19 @@
 #include <filesystem>
 #include <functional>
 #include <string_view>
+#include <vector>
 
 #include "ModelPackageImportTypes.h"
 #include "Utilities/UUID.h"
 
 namespace TerraEngine::AssetPipeline
 {
+	struct ModelPackageMeshVirtualGeometryOverride
+	{
+		TerraEngine::UUID meshGuid = TerraEngine::EMPTY_UUID;
+		GeneratedModelMeshVirtualGeometrySettings settings;
+	};
+
 	struct ModelPackageImportOptions
 	{
 		std::filesystem::path sourcePath;
@@ -26,6 +33,10 @@ namespace TerraEngine::AssetPipeline
 		TerraEngine::UUID shaderCollectionId = TerraEngine::EMPTY_UUID;
 		GeneratedModelMeshVirtualGeometrySettings virtualGeometrySettings;
 		bool hasVirtualGeometrySettings = false;
+		// Package children need independent recipes. The process-isolated compiler
+		// restores these records from the previous sidecar before rebuilding.
+		std::vector<ModelPackageMeshVirtualGeometryOverride>
+			virtualGeometryMeshOverrides;
 		bool forceReimport = false;
 		// progressCallback may be invoked from a background import worker. The
 		// receiver must copy the values into thread-safe UI state before drawing.

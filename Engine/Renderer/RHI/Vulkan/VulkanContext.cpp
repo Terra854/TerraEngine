@@ -1247,6 +1247,12 @@ bool VulkanContext::Impl::MarkDeviceLost(VkResult result, std::string_view opera
 	animationComputeRecordedForCurrentFrame = false;
 	animationComputeSubmissionMarkedForCurrentFrame = false;
 	recordedAnimationDispatchCountForCurrentFrame = 0U;
+	pendingDeformationCommandPlan = {};
+	pendingDeformationImmutablePlan.reset();
+	deformationComputeRecordedForCurrentFrame = false;
+	recordedDeformationDispatchCountForCurrentFrame = 0u;
+	activeDeformationGraphicsBufferIndex =
+		INVALID_BINDLESS_BUFFER_INDEX;
 	{
 		std::lock_guard<std::mutex> lock(statsMutex);
 		latestAnimationGpuBackendExecution = {};
@@ -1511,6 +1517,12 @@ void VulkanContext::BeginFrame() {
 	impl->pendingAnimationFrameId = 0U;
 	impl->activeAnimationGraphicsBufferIndex = VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
 	impl->activeCpuAnimationGraphicsBufferIndex =
+		VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
+	impl->pendingDeformationCommandPlan = {};
+	impl->pendingDeformationImmutablePlan.reset();
+	impl->deformationComputeRecordedForCurrentFrame = false;
+	impl->recordedDeformationDispatchCountForCurrentFrame = 0u;
+	impl->activeDeformationGraphicsBufferIndex =
 		VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
 	if (impl->editorMode) {
 		// This is the only point where the current frame slot's UI fence is
@@ -3207,9 +3219,12 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		// Fallback for failed task pipeline
 		auto passIt = impl->pipelineCache.find(currentPass);
 		if (passIt != impl->pipelineCache.end()) {
-			PipelineKey pipeKey = {collectionId, material->header.flags};
+			const std::optional<PipelineKey> pipeKey =
+				impl->BuildPipelineKey(collectionId, material->header.flags);
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (passIt->second.find(pipeKey) == passIt->second.end() || passIt->second[pipeKey].pipeline == VK_NULL_HANDLE) {
+			if (!pipeKey.has_value()
+				|| passIt->second.find(*pipeKey) == passIt->second.end()
+				|| passIt->second.at(*pipeKey).pipeline == VK_NULL_HANDLE) {
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (collectionId == defaultTaskCollectionId) {
 					impl->EnsurePipeline(defaultMeshCollectionId, currentPass, material->header.flags);
@@ -3350,6 +3365,47 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			impl->pendingAnimationCommandPlan = {};
 			impl->pendingAnimationImmutablePlan.reset();
 			impl->pendingAnimationFrameId = 0U;
+			impl->pendingDeformationCommandPlan = {};
+			impl->pendingDeformationImmutablePlan.reset();
+			impl->activeDeformationGraphicsBufferIndex =
+				VulkanContext::Impl::
+					INVALID_BINDLESS_BUFFER_INDEX;
+		}
+	}
+	if(useMainCommandBuffer
+		&& !impl->deformationComputeRecordedForCurrentFrame
+		&& impl->pendingDeformationCommandPlan.hasWork
+		&& impl->pendingDeformationCommandPlan.valid
+		&& impl->pendingDeformationImmutablePlan != nullptr
+		&& impl->currentFrame
+			< impl->deformationDescriptorSets.size())
+	{
+		// Deformation, exact dynamic bounds, and refinement share this primary
+		// command buffer with animation and every view. The recorder emits all
+		// compute-to-compute and compute-to-graphics visibility boundaries with
+		// no queue submit or CPU wait between stages.
+		const auto result =
+			TerraEngine::Renderer::Vulkan::
+				RecordVulkanDeformationCommands(
+					cmd,
+					impl->pendingDeformationCommandPlan,
+					*impl->pendingDeformationImmutablePlan,
+					impl->deformationComputePipelines,
+					impl->deformationDescriptorSets[
+						impl->currentFrame]);
+		if(result.recorded)
+		{
+			impl->deformationComputeRecordedForCurrentFrame =
+				true;
+			impl->recordedDeformationDispatchCountForCurrentFrame =
+				result.deformationDispatchCount;
+		}
+		else
+		{
+			// A partial generation is never visible. Graphics remains on the
+			// existing conservative owner/fallback route for this frame.
+			impl->pendingDeformationCommandPlan = {};
+			impl->pendingDeformationImmutablePlan.reset();
 		}
 	}
 	if (impl->validationLayersEnabled && vkSetDebugUtilsObjectNameEXT != nullptr) {
@@ -4287,8 +4343,12 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			return nullptr;
 		}
 
-		PipelineKey pipeKey = {shaderCollectionId, materialFlags};
-		auto pipelineIt = passIt->second.find(pipeKey);
+		const std::optional<PipelineKey> pipeKey =
+			impl->BuildPipelineKey(shaderCollectionId, materialFlags);
+		if (!pipeKey.has_value()) {
+			return nullptr;
+		}
+		auto pipelineIt = passIt->second.find(*pipeKey);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (pipelineIt == passIt->second.end()
 			|| pipelineIt->second.pipeline == VK_NULL_HANDLE
@@ -4340,6 +4400,54 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		push.textureIndex = VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
 		const TerraEngine::Renderer::AnimationRenderBinding& binding =
 			command.animationBinding;
+		if(impl->deformationComputeRecordedForCurrentFrame
+			&& impl->pendingDeformationImmutablePlan != nullptr
+			&& impl->activeDeformationGraphicsBufferIndex
+				!= VulkanContext::Impl::
+					INVALID_BINDLESS_BUFFER_INDEX
+			&& impl->currentFrame
+				< impl->deformationFrameResources.size())
+		{
+			const std::uint64_t stableInstanceId =
+				binding.gpu.IsComplete()
+					? binding.gpu.stableInstanceId
+					: (static_cast<std::uint64_t>(
+						binding.animatorSlotIndex)
+							<< 32u)
+						| binding.animatorGeneration;
+			const auto& deformationResources =
+				impl->deformationFrameResources[
+					impl->currentFrame];
+			const auto group = std::find_if(
+				deformationResources.graphicsGroups.begin(),
+				deformationResources.graphicsGroups.end(),
+				[&](const VulkanContext::Impl::
+					VulkanDeformationFrameResources::
+						GraphicsGroup& candidate)
+				{
+					return candidate.stableInstanceId
+							== stableInstanceId
+						&& candidate.meshId
+							== command.meshId;
+				});
+			if(deformationResources.live
+				&& deformationResources.frameId
+					== impl->pendingDeformationImmutablePlan->
+						frameId
+				&& group
+					!= deformationResources.graphicsGroups.end()
+				&& deformationResources.
+					graphicsBridgeBindlessIndex
+					== impl->
+						activeDeformationGraphicsBufferIndex)
+			{
+				push.meshDataIndex =
+					impl->
+						activeDeformationGraphicsBufferIndex;
+				push.textureIndex = group->groupIndex;
+				return;
+			}
+		}
 		if(binding.HasCpuDeformation()
 			&& impl->pendingCpuAnimationPlan != nullptr
 			&& impl->activeCpuAnimationGraphicsBufferIndex
@@ -4545,29 +4653,19 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		const bool requestedPageLocalGeometry =
 			command.virtualGeometryPayloadSource == VirtualGeometryPagePayloadSource::ResidentPagePayload
 			|| command.virtualGeometryPayloadSource == VirtualGeometryPagePayloadSource::ResidentFallbackPayload;
-		const bool graphicsBridgeActive =
-			push.meshDataIndex != VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
 		const bool pageLocalGeometry =
 			requestedPageLocalGeometry
-			&& impl->activeVirtualGeometryPagePayloadBufferIndex != VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX
-			// Resident page packets currently omit the owner skin/morph streams.
-			// Select the owner/fallback payload for a graphics-bridge draw instead
-			// of rendering high-detail geometry without its published deformation.
-			&& !graphicsBridgeActive;
-		// RenderSystem normally collapses animated page packets before backend
-		// submission. Keep this second boundary defensive: stale/cross-version
-		// command producers must never reinterpret a packet-local offset as a
-		// partial owner range and remove visible animated meshlets.
-		const bool wholeOwnerDeformationFallback =
-			graphicsBridgeActive && requestedPageLocalGeometry;
-		const uint32_t ownerMeshletOffset = wholeOwnerDeformationFallback
-			? 0u
-			: std::min(command.virtualMeshletOffset, mesh.meshletCount);
-		const uint32_t ownerMeshletCount = wholeOwnerDeformationFallback
-			? mesh.meshletCount
-			: (command.virtualMeshletCount == 0u
+			&& impl->activeVirtualGeometryPagePayloadBufferIndex != VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
+		// A validated compute bridge is compatible with a self-contained AVPB
+		// packet: the mesh shader resolves the packet's page id through that
+		// bridge and reads current deformed vertices. Only an absent/corrupt page
+		// descriptor falls back to the owner range below.
+		const uint32_t ownerMeshletOffset =
+			std::min(command.virtualMeshletOffset, mesh.meshletCount);
+		const uint32_t ownerMeshletCount =
+			command.virtualMeshletCount == 0u
 				? (mesh.meshletCount - ownerMeshletOffset)
-				: std::min(command.virtualMeshletCount, mesh.meshletCount - ownerMeshletOffset));
+				: std::min(command.virtualMeshletCount, mesh.meshletCount - ownerMeshletOffset);
 		const uint32_t selectedMeshletCount = pageLocalGeometry
 			? command.virtualMeshletCount
 			: ownerMeshletCount;
@@ -4592,11 +4690,6 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			// are still unavailable.  Mark the visible fail-open policy and remove
 			// cone proof so every task/mesh pass agrees that it must not reject a
 			// moving cluster before the shader-visible bounds generation arrives.
-			push.virtualGeometryFlags |= kVirtualGeometryFlagFailOpen;
-			push.virtualGeometryFlags &= ~kVirtualGeometryFlagConeCullingSafe;
-		}
-		if (graphicsBridgeActive && requestedPageLocalGeometry)
-		{
 			push.virtualGeometryFlags |= kVirtualGeometryFlagFailOpen;
 			push.virtualGeometryFlags &= ~kVirtualGeometryFlagConeCullingSafe;
 		}
@@ -7041,7 +7134,12 @@ bool VulkanContext::ConsumeRenderSubmissionPlan(const TerraEngine::Renderer::Ren
 	// The renderer graph has already validated packet identity. Recheck the
 	// immutable animation hand-off at Vulkan's protected boundary because this
 	// code owns descriptor writes and must never follow live animator state.
-	if (!plan.valid || !plan.animationWork.valid) return false;
+	if (!plan.valid || !plan.animationWork.valid
+		|| (plan.deformationWork != nullptr
+			&& !plan.deformationWork->IsComplete()))
+	{
+		return false;
+	}
 	impl->activeAnimationGraphicsBufferIndex = VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
 	impl->activeCpuAnimationGraphicsBufferIndex =
 		VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
@@ -7052,10 +7150,43 @@ bool VulkanContext::ConsumeRenderSubmissionPlan(const TerraEngine::Renderer::Ren
 	impl->animationComputeRecordedForCurrentFrame = false;
 	impl->animationComputeSubmissionMarkedForCurrentFrame = false;
 	impl->recordedAnimationDispatchCountForCurrentFrame = 0U;
+	impl->pendingDeformationCommandPlan = {};
+	impl->pendingDeformationImmutablePlan.reset();
+	impl->deformationComputeRecordedForCurrentFrame = false;
+	impl->recordedDeformationDispatchCountForCurrentFrame = 0u;
+	impl->activeDeformationGraphicsBufferIndex =
+		VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
+	const auto PublishDeformation = [&]()
+	{
+		if(plan.deformationWork == nullptr
+			|| plan.deformationWork->work.empty())
+		{
+			return true;
+		}
+		const TerraEngine::Renderer::Vulkan::
+			VulkanDeformationCommandPlan commandPlan =
+				TerraEngine::Renderer::Vulkan::
+					BuildVulkanDeformationCommandPlan(
+						*plan.deformationWork);
+		if(!commandPlan.valid || !commandPlan.hasWork
+			|| !impl->PublishVulkanDeformationResources(
+				*plan.deformationWork)
+			|| !impl->EnsureVulkanDeformationComputePipelines())
+		{
+			return false;
+		}
+		impl->pendingDeformationCommandPlan = commandPlan;
+		impl->pendingDeformationImmutablePlan =
+			plan.deformationWork;
+		return true;
+	};
 	const bool hasGpuAnimationWork = !plan.animationWork.ranges.empty();
 	const bool hasCpuAnimationWork =
 		plan.animationWork.cpuDeformationPlan != nullptr;
-	if(!hasGpuAnimationWork && !hasCpuAnimationWork) return true;
+	if(!hasGpuAnimationWork && !hasCpuAnimationWork)
+	{
+		return PublishDeformation();
+	}
 
 	if(hasCpuAnimationWork) {
 		const std::shared_ptr<const TerraEngine::Renderer::CpuAnimationDeformationPlan>&
@@ -7069,7 +7200,10 @@ bool VulkanContext::ConsumeRenderSubmissionPlan(const TerraEngine::Renderer::Ren
 		}
 		impl->pendingCpuAnimationPlan = cpuPlan;
 	}
-	if(!hasGpuAnimationWork) return true;
+	if(!hasGpuAnimationWork)
+	{
+		return PublishDeformation();
+	}
 
 	const std::shared_ptr<const TerraEngine::Animation::GpuAnimationPlan>& immutablePlan =
 		plan.animationWork.immutablePlan;
@@ -7111,7 +7245,7 @@ bool VulkanContext::ConsumeRenderSubmissionPlan(const TerraEngine::Renderer::Ren
 	impl->pendingAnimationCommandPlan = commandPlan;
 	impl->pendingAnimationImmutablePlan = immutablePlan;
 	impl->pendingAnimationFrameId = plan.animationWork.frameId;
-	return true;
+	return PublishDeformation();
 }
 
 TerraEngine::Renderer::RenderCaptureResult VulkanContext::ReadbackCapture(const TerraEngine::Renderer::RenderCaptureRequest& request)
@@ -8837,6 +8971,12 @@ void VulkanContext::Impl::ClearResources() {
 	recordedAnimationDispatchCountForCurrentFrame = 0U;
 	activeAnimationGraphicsBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 	activeCpuAnimationGraphicsBufferIndex =
+		INVALID_BINDLESS_BUFFER_INDEX;
+	pendingDeformationCommandPlan = {};
+	pendingDeformationImmutablePlan.reset();
+	deformationComputeRecordedForCurrentFrame = false;
+	recordedDeformationDispatchCountForCurrentFrame = 0u;
+	activeDeformationGraphicsBufferIndex =
 		INVALID_BINDLESS_BUFFER_INDEX;
 	{
 		std::lock_guard<std::mutex> lock(statsMutex);

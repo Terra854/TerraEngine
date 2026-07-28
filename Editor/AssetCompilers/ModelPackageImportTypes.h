@@ -127,11 +127,13 @@ namespace TerraEngine::AssetPipeline
 	{
 		bool hasOverride = false;
 		std::vector<float> targetRatios;
-		std::uint32_t minimumSourceTriangles = 512u;
-		std::uint32_t minimumGeneratedTriangles = 64u;
-		std::uint32_t minimumMeshletsPerGeneratedLevel = 2u;
-		float minimumUsefulTriangleReduction = 0.15f;
-		float minimumUsefulMeshletReduction = 0.15f;
+		// Generated meshes inherit permissive defaults, while a saved per-mesh
+		// override can still require a chosen percentage reduction.
+		std::uint32_t minimumSourceTriangles = 1u;
+		std::uint32_t minimumGeneratedTriangles = 1u;
+		std::uint32_t minimumMeshletsPerGeneratedLevel = 1u;
+		float minimumUsefulTriangleReduction = 0.0f;
+		float minimumUsefulMeshletReduction = 0.0f;
 		float maximumGeometricError = 0.1f;
 		std::string settingsSource = "ProjectDefaults";
 	};

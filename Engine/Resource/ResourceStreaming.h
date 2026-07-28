@@ -8,7 +8,11 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
+#include <filesystem>
+#include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -18,6 +22,7 @@
 
 #include "Core/Export.h"
 #include "Core/Scheduling/FrameWorkload.h"
+#include "File Formats/TerraEngineMeshFile.h"
 #include "Renderer/Graph/RenderFrameSnapshot.h"
 #include "Utilities/UUID.h"
 
@@ -282,6 +287,57 @@ namespace TerraEngine::Resource
 		std::uint64_t budgetPressureBytes = 0u;
 	};
 
+	// The small directory is valid without owner vertex streams. Physical page
+	// blobs remain independent owned byte arrays after exact-range IO.
+	struct AnimatedVirtualPageCatalog
+	{
+		AnimatedVirtualPageDirectoryHeader header{};
+		std::vector<AnimatedVirtualPageDirectoryEntry> entries;
+		std::vector<std::uint32_t> rootPageIds;
+		std::uint64_t directoryOffset = 0u;
+		bool valid = false;
+		std::string rejectionReason;
+	};
+
+	struct AnimatedVirtualPageBlob
+	{
+		AnimatedVirtualPageBlobHeader header{};
+		std::vector<AnimatedVirtualPageSectionRecord> sections;
+		std::vector<std::uint8_t> bytes;
+		bool valid = false;
+		std::string rejectionReason;
+	};
+
+	enum class AnimatedVirtualPageReadStatus : std::uint8_t
+	{
+		Completed,
+		Cancelled,
+		InvalidRequest,
+		IoFailure,
+		IntegrityFailure,
+		StaleGeneration,
+		InvalidBlob
+	};
+
+	struct AnimatedVirtualPageReadRequest
+	{
+		std::filesystem::path path;
+		AnimatedVirtualPageDirectoryEntry entry{};
+		std::uint64_t expectedMeshPayloadGeneration = 0u;
+		std::uint64_t requestGeneration = 0u;
+		std::shared_ptr<const std::atomic_bool> cancellation;
+	};
+
+	struct AnimatedVirtualPageReadCompletion
+	{
+		AnimatedVirtualPageReadStatus status =
+			AnimatedVirtualPageReadStatus::InvalidRequest;
+		std::uint32_t pageId = kVirtualGeometryInvalidIndex;
+		std::uint64_t requestGeneration = 0u;
+		AnimatedVirtualPageBlob blob;
+		std::string diagnostic;
+	};
+
 	struct StreamingView
 	{
 		std::string viewId;
@@ -419,6 +475,24 @@ namespace TerraEngine::Resource
 	TERRAENGINE_API VirtualGeometryPageRequestPlan BuildVirtualGeometryPageRequestPlan(const std::vector<VirtualGeometryPageNeedInput>& inputs, const StreamingPolicy& policy);
 	TERRAENGINE_API std::vector<VirtualGeometryPageRequestPacket> BuildVirtualGeometryPageRequestPackets(const std::vector<VirtualGeometryPageNeedInput>& inputs, const StreamingPolicy& policy);
 	TERRAENGINE_API VirtualGeometryPageRequestQueuePlan BuildVirtualGeometryPageRequestQueuePlan(const VirtualGeometryPageRequestPlan& requestPlan, const std::vector<VirtualGeometryQueuedPageRequest>& previousQueue, const VirtualGeometryPageRetryPolicy& retryPolicy, std::uint64_t frameId);
+	TERRAENGINE_API std::uint64_t HashAnimatedVirtualPageBytes(
+		std::span<const std::uint8_t> bytes);
+	TERRAENGINE_API AnimatedVirtualPageCatalog ParseAnimatedVirtualPageDirectory(
+		std::span<const std::uint8_t> fileBytes,
+		std::uint64_t directoryOffset);
+	// Scans only small fixed-size file windows and then reads the AVPD tables.
+	// Physical pages and legacy owner streams remain untouched until requested.
+	TERRAENGINE_API AnimatedVirtualPageCatalog
+		ReadAnimatedVirtualPageDirectoryOnly(
+			const std::filesystem::path& path,
+			std::uint64_t expectedMeshPayloadGeneration = 0u);
+	TERRAENGINE_API AnimatedVirtualPageBlob ParseAnimatedVirtualPageBlob(
+		std::span<const std::uint8_t> bytes,
+		const AnimatedVirtualPageDirectoryEntry& expected,
+		std::uint64_t expectedMeshPayloadGeneration);
+	TERRAENGINE_API AnimatedVirtualPageReadCompletion ReadAnimatedVirtualPageRange(
+		const AnimatedVirtualPageReadRequest& request,
+		std::uint64_t currentRequestGeneration);
 	TERRAENGINE_API std::vector<StreamingNeed> MergeStreamingNeeds(std::vector<StreamingNeed> needs, double nowSeconds = 0.0);
 	// This declaration describes the worker-safe planning phase. The actual
 	// ResourceManager registration and load/upload mutation still happens later

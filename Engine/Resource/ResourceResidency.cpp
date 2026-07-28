@@ -1147,6 +1147,81 @@ namespace TerraEngine::Resource
 		return summary;
 	}
 
+	AnimatedVirtualPageResidencyPublication
+	PublishAnimatedVirtualPageResidencySnapshot(
+		const AnimatedVirtualPageResidencySnapshot& prior,
+		AnimatedVirtualPageResidencySnapshot candidate,
+		std::uint64_t completedFence)
+	{
+		AnimatedVirtualPageResidencyPublication result;
+		result.visible = prior;
+		if(candidate.publicationGeneration == 0u
+			|| candidate.catalogGeneration == 0u
+			|| candidate.publicationGeneration
+				<= prior.publicationGeneration
+			|| candidate.pages.empty())
+		{
+			result.rejectionReason =
+				"Animated page residency candidate has a stale or "
+				"incomplete generation.";
+			return result;
+		}
+		std::sort(candidate.pages.begin(), candidate.pages.end(),
+			[](const AnimatedVirtualPageResidencyRow& left,
+				const AnimatedVirtualPageResidencyRow& right)
+			{
+				if(left.assetId != right.assetId)
+				{
+					return std::lexicographical_compare(
+						left.assetId.begin(), left.assetId.end(),
+						right.assetId.begin(), right.assetId.end());
+				}
+				return left.pageId < right.pageId;
+			});
+		for(std::size_t index = 0u;
+			index < candidate.pages.size(); ++index)
+		{
+			const AnimatedVirtualPageResidencyRow& page =
+				candidate.pages[index];
+			if(page.assetId == TerraEngine::EMPTY_UUID
+				|| page.pageId == 0xffffffffu
+				|| page.contentGeneration == 0u
+				|| page.residencyGeneration == 0u
+				|| page.staticAllocationId == 0u
+				|| page.byteSize == 0u
+				|| !page.resident
+				|| (index != 0u
+					&& page.assetId
+						== candidate.pages[index - 1u].assetId
+					&& page.pageId
+						== candidate.pages[index - 1u].pageId))
+			{
+				result.rejectionReason =
+					"Animated page residency batch contains an "
+					"invalid or duplicate page.";
+				return result;
+			}
+			if(page.completionFence > completedFence)
+			{
+				result.rejectionReason =
+					"Animated page residency allocation is still "
+					"in flight.";
+				return result;
+			}
+			if(page.pinnedFallback && !page.eligibleForNewWork)
+			{
+				result.rejectionReason =
+					"Pinned animated fallback pages must remain "
+					"eligible for new work.";
+				return result;
+			}
+		}
+		candidate.valid = true;
+		result.visible = std::move(candidate);
+		result.accepted = true;
+		return result;
+	}
+
 	AnimationResidencyTracker::AnimationResidencyTracker(std::size_t maximumTrackedGenerations)
 		: m_maximumTrackedGenerations(std::max<std::size_t>(1u, maximumTrackedGenerations))
 	{

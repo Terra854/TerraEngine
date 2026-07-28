@@ -99,6 +99,24 @@ namespace TerraEngine::AssetPipeline
 			return generatedSettings;
 		}
 
+		const GeneratedModelMeshVirtualGeometrySettings*
+			FindMeshVirtualGeometrySettings(
+				const GltfPackageImportOptions& options,
+				const TerraEngine::UUID& meshGuid)
+		{
+			for (const ModelPackageMeshVirtualGeometryOverride& override :
+				options.virtualGeometryMeshOverrides)
+			{
+				if (override.meshGuid == meshGuid)
+				{
+					return &override.settings;
+				}
+			}
+			return options.hasVirtualGeometrySettings
+				? &options.virtualGeometrySettings
+				: nullptr;
+		}
+
 		void PopulateVirtualGeometryTargetDiagnostics(const MeshCompileReport& report, GeneratedModelMeshAsset& mesh)
 		{
 			mesh.virtualGeometryTargets.clear();
@@ -2879,6 +2897,17 @@ namespace TerraEngine::AssetPipeline
 				settings.skeletonCompatibilityFingerprint = skeleton != nullptr
 					? skeleton->asset.compatibilityFingerprint
 					: 0U;
+				const GeneratedModelMeshVirtualGeometrySettings* meshSettings =
+					FindMeshVirtualGeometrySettings(
+						options,
+						result.generatedMeshes[generatedMeshIndex].guid);
+				if (meshSettings != nullptr)
+				{
+					// This deformable cook replaces the temporary static TEMF.
+					// Carry the child recipe forward so its LOD chain survives.
+					settings.virtualGeometrySettings =
+						ToCompileSettings(*meshSettings);
+				}
 				SkinnedMeshCookReport report;
 				if (!CompileSkinnedMeshFromRaw(options.sourceRelativePath, prepared.candidatePath, input, &report, settings))
 				{
@@ -3574,8 +3603,6 @@ namespace TerraEngine::AssetPipeline
 		}
 		else
 		{
-			const VirtualGeometryAdaptiveCompileSettings compileSettings = ToCompileSettings(options.virtualGeometrySettings);
-			const VirtualGeometryAdaptiveCompileSettings* compileSettingsPtr = options.hasVirtualGeometrySettings ? &compileSettings : nullptr;
 			VirtualGeometryConeSafetyCookSettings coneSafetySettings{};
 			coneSafetySettings.proveOneSidedOpaqueClusters = false;
 			coneSafetySettings.disabledReason = "glTF generated meshes wait for per-cluster material sidedness proof before cone culling is enabled.";
@@ -3603,6 +3630,14 @@ namespace TerraEngine::AssetPipeline
 
 				MeshCompileReport compileReport{};
 				const bool requiresDeformableCook = MeshRequiresDeformableCook(asset, mesh.sourceMeshIndex);
+				const GeneratedModelMeshVirtualGeometrySettings* resolvedSettings =
+					FindMeshVirtualGeometrySettings(options, mesh.guid);
+				const VirtualGeometryAdaptiveCompileSettings compileSettings =
+					resolvedSettings != nullptr
+						? ToCompileSettings(*resolvedSettings)
+						: MakeDefaultVirtualGeometryAdaptiveCompileSettings();
+				const VirtualGeometryAdaptiveCompileSettings* compileSettingsPtr =
+					resolvedSettings != nullptr ? &compileSettings : nullptr;
 				const std::filesystem::path compiledMeshOutputPath = requiresDeformableCook
 					? StaticDeformableCandidatePath(options, mesh.compiledPath)
 					: options.buildRoot / mesh.compiledPath;
@@ -3623,7 +3658,9 @@ namespace TerraEngine::AssetPipeline
 					continue;
 				}
 
-				mesh.virtualGeometrySettings = ToGeneratedSettings(compileReport.virtualGeometry.adaptiveSettings, options.hasVirtualGeometrySettings);
+				mesh.virtualGeometrySettings = ToGeneratedSettings(
+					compileReport.virtualGeometry.adaptiveSettings,
+					resolvedSettings != nullptr);
 				PopulateVirtualGeometryTargetDiagnostics(compileReport, mesh);
 				PopulateGeneratedMeshVirtualGeometryMetadata(compiledMeshOutputPath, mesh, result.diagnostics);
 				const std::uint32_t materialAssignmentCount = CountMaterialAssignmentsForMesh(result, mesh.guid);

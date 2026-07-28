@@ -4,6 +4,7 @@
 
 #include "RenderGraph.h"
 #include "RenderWorkPacket.h"
+#include "Renderer/Deformation/GpuDeformationPlan.h"
 #include "Core/Export.h"
 
 #include <cstdint>
@@ -19,6 +20,9 @@ namespace TerraEngine::Renderer {
 		std::vector<RenderPassNode> orderedPasses;
 		std::vector<RenderWorkPacket> recordedWork;
 		AnimationBackendWorkPlan animationWork;
+		// Renderer deformation is separate from animation evaluation because its
+		// work set is the union of resident page demands from every render view.
+		std::shared_ptr<const GpuDeformationPlan> deformationWork;
 		std::vector<RenderResourceState> resourceTransitions;
 		std::vector<RenderQueueReadiness> queueReadiness;
 		std::vector<std::string> fallbacksUsed;

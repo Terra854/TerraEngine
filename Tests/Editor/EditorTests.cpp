@@ -127,6 +127,7 @@ namespace TerraEngine::EditorTests {
 	void RegisterVirtualGeometryInspectorTests(TestRegistry& registry);
 	void RegisterVirtualGeometryScalingAssetPipelineTests(TestRegistry& registry);
 	void RegisterVirtualGeometryMeshCompilerTests(TestRegistry& registry);
+	void RegisterAnimatedVirtualPageFormatTests(TestRegistry& registry);
 	void RegisterVirtualGeometryPackageImportTests(TestRegistry& registry);
 	void RegisterResourceResidencyWindowTests(TestRegistry& registry);
 	void RegisterGameViewStatsOverlayTests(TestRegistry& registry);
@@ -298,6 +299,7 @@ int main() {
 	TerraEngine::EditorTests::RegisterVirtualGeometryInspectorTests(registry);
 	TerraEngine::EditorTests::RegisterVirtualGeometryScalingAssetPipelineTests(registry);
 	TerraEngine::EditorTests::RegisterVirtualGeometryMeshCompilerTests(registry);
+	TerraEngine::EditorTests::RegisterAnimatedVirtualPageFormatTests(registry);
 	TerraEngine::EditorTests::RegisterVirtualGeometryPackageImportTests(registry);
 	TerraEngine::EditorTests::RegisterGameViewStatsOverlayTests(registry);
 	TerraEngine::EditorTests::RegisterRendererRecoveryEditorTests(registry);

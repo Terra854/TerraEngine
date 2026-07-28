@@ -1,4 +1,5 @@
 #include "VulkanCommandRecording.h"
+#include "VulkanDescriptorPlanning.h"
 
 #include <limits>
 
@@ -33,6 +34,54 @@ namespace TerraEngine::Renderer::Vulkan {
 					? VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT
 					: VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 				0U, 1U, &barrier, 0U, nullptr, 0U, nullptr);
+		}
+
+		void RecordDeformationBarrier(
+			VkCommandBuffer commandBuffer,
+			VulkanDeformationBarrierKind kind)
+		{
+			VkMemoryBarrier barrier{};
+			barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+			VkPipelineStageFlags sourceStage =
+				VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+			VkPipelineStageFlags destinationStage =
+				VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+			barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+			barrier.dstAccessMask =
+				VK_ACCESS_SHADER_READ_BIT
+				| VK_ACCESS_SHADER_WRITE_BIT;
+			if(kind
+				== VulkanDeformationBarrierKind::
+					AnimationOrUploadToDeform)
+			{
+				sourceStage =
+					VK_PIPELINE_STAGE_TRANSFER_BIT
+					| VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+					| VK_PIPELINE_STAGE_HOST_BIT;
+				barrier.srcAccessMask =
+					VK_ACCESS_TRANSFER_WRITE_BIT
+					| VK_ACCESS_SHADER_WRITE_BIT
+					| VK_ACCESS_HOST_WRITE_BIT;
+			}
+			else if(kind
+				== VulkanDeformationBarrierKind::
+					RefinementToGraphics)
+			{
+				destinationStage =
+					VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
+				barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+			}
+			vkCmdPipelineBarrier(
+				commandBuffer,
+				sourceStage,
+				destinationStage,
+				0u,
+				1u,
+				&barrier,
+				0u,
+				nullptr,
+				0u,
+				nullptr);
 		}
 	}
 
@@ -237,6 +286,210 @@ namespace TerraEngine::Renderer::Vulkan {
 			++result.emittedBarrierCount;
 		}
 		result.status = VulkanAnimationRecordingStatus::Recorded;
+		return result;
+	}
+
+	VulkanDeformationCommandPlan BuildVulkanDeformationCommandPlan(
+		const GpuDeformationPlan& plan)
+	{
+		VulkanDeformationCommandPlan output;
+		output.frameId = plan.frameId;
+		output.rendererGeneration = plan.rendererGeneration;
+		output.hasWork = !plan.work.empty();
+		if(!output.hasWork)
+		{
+			output.valid = plan.valid;
+			if(!plan.valid)
+			{
+				output.rejectionReason = plan.rejectionReason;
+			}
+			return output;
+		}
+		if(!plan.IsComplete())
+		{
+			output.rejectionReason = "Deformation commands require a complete immutable plan.";
+			return output;
+		}
+		output.deformationDispatches.reserve(plan.work.size());
+		for(std::uint32_t index = 0u; index < plan.work.size(); ++index)
+		{
+			const std::uint32_t vertexCount = plan.work[index].vertexCount;
+			const std::uint32_t groups = (vertexCount + 63u) / 64u;
+			if(groups == 0u)
+			{
+				output.deformationDispatches.clear();
+				output.rejectionReason = "Deformation dispatch has no workgroups.";
+				return output;
+			}
+			output.deformationDispatches.push_back({ index, groups });
+		}
+		// The complete frame union is synchronized once, regardless of view count.
+		output.barriers = {
+			VulkanDeformationBarrierKind::AnimationOrUploadToDeform,
+			VulkanDeformationBarrierKind::DeformToBounds,
+			VulkanDeformationBarrierKind::BoundsToRefinement,
+			VulkanDeformationBarrierKind::RefinementToGraphics
+		};
+		output.valid = true;
+		return output;
+	}
+
+	VulkanDeformationRecordingResult
+		RecordVulkanDeformationCommands(
+			VkCommandBuffer commandBuffer,
+			const VulkanDeformationCommandPlan& commandPlan,
+			const GpuDeformationPlan& immutablePlan,
+			const VulkanDeformationComputePipelines& pipelines,
+			VkDescriptorSet descriptorSet)
+	{
+		VulkanDeformationRecordingResult result;
+		if(!commandPlan.hasWork)
+		{
+			return result;
+		}
+		const auto Pipeline = [&pipelines](
+			VulkanDeformationPipelineStage stage)
+		{
+			return pipelines.byStage[
+				static_cast<std::size_t>(stage)];
+		};
+		if(!commandPlan.valid
+			|| !immutablePlan.IsComplete()
+			|| commandBuffer == VK_NULL_HANDLE
+			|| descriptorSet == VK_NULL_HANDLE
+			|| pipelines.layout == VK_NULL_HANDLE
+			|| Pipeline(VulkanDeformationPipelineStage::Deform)
+				== VK_NULL_HANDLE
+			|| Pipeline(VulkanDeformationPipelineStage::Bounds)
+				== VK_NULL_HANDLE
+			|| Pipeline(VulkanDeformationPipelineStage::Refinement)
+				== VK_NULL_HANDLE)
+		{
+			return result;
+		}
+
+		struct PushConstants
+		{
+			std::uint32_t workRecordIndex = 0u;
+			std::uint32_t workRecordCount = 0u;
+			std::uint32_t abiVersion =
+				kAnimatedGeometryAbiVersion;
+			std::uint32_t identity = 0u;
+		};
+		vkCmdBindDescriptorSets(
+			commandBuffer,
+			VK_PIPELINE_BIND_POINT_COMPUTE,
+			pipelines.layout,
+			kVulkanDeformationDescriptorSet,
+			1u,
+			&descriptorSet,
+			0u,
+			nullptr);
+
+		RecordDeformationBarrier(
+			commandBuffer,
+			VulkanDeformationBarrierKind::
+				AnimationOrUploadToDeform);
+		++result.barrierCount;
+		vkCmdBindPipeline(
+			commandBuffer,
+			VK_PIPELINE_BIND_POINT_COMPUTE,
+			Pipeline(VulkanDeformationPipelineStage::Deform));
+		for(const VulkanDeformationDispatch& dispatch :
+			commandPlan.deformationDispatches)
+		{
+			PushConstants push{
+				dispatch.workRecordIndex,
+				static_cast<std::uint32_t>(
+					immutablePlan.work.size()),
+				kAnimatedGeometryAbiVersion,
+				0u };
+			vkCmdPushConstants(
+				commandBuffer,
+				pipelines.layout,
+				VK_SHADER_STAGE_COMPUTE_BIT,
+				0u,
+				sizeof(push),
+				&push);
+			vkCmdDispatch(
+				commandBuffer,
+				dispatch.groupCountX,
+				1u,
+				1u);
+			++result.deformationDispatchCount;
+		}
+
+		RecordDeformationBarrier(
+			commandBuffer,
+			VulkanDeformationBarrierKind::DeformToBounds);
+		++result.barrierCount;
+		vkCmdBindPipeline(
+			commandBuffer,
+			VK_PIPELINE_BIND_POINT_COMPUTE,
+			Pipeline(VulkanDeformationPipelineStage::Bounds));
+		for(std::uint32_t workIndex = 0u;
+			workIndex < immutablePlan.work.size();
+			++workIndex)
+		{
+			PushConstants push{
+				workIndex,
+				static_cast<std::uint32_t>(
+					immutablePlan.work.size()),
+				kAnimatedGeometryAbiVersion,
+				immutablePlan.work[workIndex].key.page.pageId };
+			vkCmdPushConstants(
+				commandBuffer,
+				pipelines.layout,
+				VK_SHADER_STAGE_COMPUTE_BIT,
+				0u,
+				sizeof(push),
+				&push);
+			vkCmdDispatch(commandBuffer, 1u, 1u, 1u);
+			++result.boundsDispatchCount;
+		}
+
+		RecordDeformationBarrier(
+			commandBuffer,
+			VulkanDeformationBarrierKind::
+				BoundsToRefinement);
+		++result.barrierCount;
+		if(immutablePlan.totalClusterBoundsCount != 0u)
+		{
+			vkCmdBindPipeline(
+				commandBuffer,
+				VK_PIPELINE_BIND_POINT_COMPUTE,
+				Pipeline(
+					VulkanDeformationPipelineStage::Refinement));
+			PushConstants push{
+				0u,
+				immutablePlan.totalClusterBoundsCount,
+				kAnimatedGeometryAbiVersion,
+				0u };
+			vkCmdPushConstants(
+				commandBuffer,
+				pipelines.layout,
+				VK_SHADER_STAGE_COMPUTE_BIT,
+				0u,
+				sizeof(push),
+				&push);
+			vkCmdDispatch(
+				commandBuffer,
+				(immutablePlan.totalClusterBoundsCount + 63u)
+					/ 64u,
+				1u,
+				1u);
+			result.refinementDispatchCount = 1u;
+		}
+		RecordDeformationBarrier(
+			commandBuffer,
+			VulkanDeformationBarrierKind::
+				RefinementToGraphics);
+		++result.barrierCount;
+		result.recorded =
+			result.deformationDispatchCount
+				== immutablePlan.work.size()
+			&& result.boundsDispatchCount
+				== immutablePlan.work.size();
 		return result;
 	}
 

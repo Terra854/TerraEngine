@@ -54,6 +54,7 @@
 #include "Engine/Animation/Assets/AnimationClipAsset.h"
 #include "Engine/Animation/Assets/AnimationControllerAsset.h"
 #include "Engine/Animation/Diagnostics/AnimationDiagnostics.h"
+#include "Engine/File Formats/TerraEngineMeshFile.h"
 #include "Engine/Profiling/Profiler.h"
 #include "Engine/Renderer/RendererRecovery.h"
 #include "Engine/Renderer/RenderSystem.h"
@@ -1412,6 +1413,21 @@ namespace TerraEngine::Editor::Automation
 				{"fallbackSelections", view.clusterSelection.fallbackClusters},
 				{"geometryBudgetBytes", view.geometryBudgetBytes},
 				{"budgetPressureBytes", view.budgetPressureBytes},
+				{"animatedVirtualGeometry", {
+					{"pageDemands", view.animatedPageDemandCount},
+					{"uniqueDispatches", view.animatedUniqueDispatchCount},
+					{"reuseCount", view.animatedReuseCount},
+					{"fallbackCount", view.animatedFallbackCount},
+					{"currentBytes", view.deformationCurrentBytes},
+					{"historyBytes", view.deformationHistoryBytes},
+					{"boundsBytes", view.deformationBoundsBytes},
+					{"highWaterBytes", view.deformationHighWaterBytes},
+					{"shaderContractValid", view.animatedShaderContractValid},
+					{"fallbackReason", view.animatedFallbackReason},
+					{"diagnosticEmitted", view.animatedDiagnosticEmitted},
+					{"diagnosticCoalesced", view.animatedDiagnosticCoalesced},
+					{"diagnosticDropped", view.animatedDiagnosticDropped}
+				}},
 				{"performanceGates", std::move(performanceGates)},
 				{"shadowVisibilitySelections", std::move(shadowSelections)},
 				{"warnings", view.warnings}
@@ -3459,6 +3475,8 @@ namespace TerraEngine::Editor::Automation
 				}
 				// Keep this record identity-only and bounded. It deliberately omits
 				// matrices, palettes, morph arrays, and backend handles.
+				const Mesh* runtimeMesh =
+					ResourceManager::Instance().GetMesh(renderable.meshId);
 				renderableBindings.push_back({
 					{"objectId", TerraEngine::ToHexString(renderable.objectId)},
 					{"meshId", TerraEngine::ToHexString(renderable.meshId)},
@@ -3473,7 +3491,26 @@ namespace TerraEngine::Editor::Automation
 					{"rendererGeneration", animation.rendererGeneration},
 					{"firstGpuWorkPacket", animation.firstGpuWorkPacket},
 					{"gpuWorkPacketCount", animation.gpuWorkPacketCount},
-					{"gpuStageMask", animation.gpuStageMask}
+					{"gpuStageMask", animation.gpuStageMask},
+					// These small resource facts explain why an otherwise complete
+					// animation binding did or did not produce virtual-page work.
+					// They never expose page bytes or mutable backend handles.
+					{"meshLoaded", runtimeMesh != nullptr},
+					{"animatedPageDirectoryAvailable",
+						runtimeMesh != nullptr
+							&& runtimeMesh->hasAnimatedVirtualPageDirectory},
+					{"animatedPageEntryCount",
+						runtimeMesh != nullptr
+							? runtimeMesh->animatedVirtualPageEntries.size()
+							: 0U},
+					{"animatedPageSectionSetCount",
+						runtimeMesh != nullptr
+							? runtimeMesh->animatedVirtualPageSections.size()
+							: 0U},
+					{"animatedPageDirectoryDiagnostic",
+						runtimeMesh != nullptr
+							? runtimeMesh->animatedVirtualPageDirectoryDiagnostic
+							: "Mesh is not loaded."}
 				});
 			}
 			if (!summary)
@@ -3641,7 +3678,10 @@ namespace TerraEngine::Editor::Automation
 				{"renderableBindings", {
 					{"records", std::move(renderableBindings)},
 					{"totalAnimatedRenderables", animatedRenderableCount},
-					{"recordsTruncated", animatedRenderableCount > maximumItems}
+					{"recordsTruncated", animatedRenderableCount > maximumItems},
+					{"animatedPageDemandCount",
+						RenderSystem::Instance()
+							.GetLatestAnimatedGeometryPageDemandCount()}
 				}},
 				{"gpuBackendExecution", {
 					{"submitted", backendExecution.HasSubmittedWork()},
@@ -7845,6 +7885,24 @@ namespace TerraEngine::Editor::Automation
 		// guess which path it is observing.
 		nlohmann::json performanceGates = nlohmann::json::array();
 		nlohmann::json pageResidency = nlohmann::json::object();
+		nlohmann::json animatedVirtualGeometry = {
+			{"pageDemands", 0u},
+			{"uniqueDispatches", 0u},
+			{"reuseCount", 0u},
+			{"fallbackCount", 0u},
+			{"currentBytes", 0u},
+			{"historyBytes", 0u},
+			{"boundsBytes", 0u},
+			{"highWaterBytes", 0u},
+			{"shaderContractValid", true},
+			{"fallbackReason", ""},
+			{"diagnosticEmitted", 0u},
+			{"diagnosticCoalesced", 0u},
+			{"diagnosticDropped", 0u}
+		};
+		std::uint32_t selectedClusters = 0u;
+		std::uint32_t fallbackSelections = 0u;
+		nlohmann::json selectedLodHistogram = nlohmann::json::array();
 		const TerraEngine::Renderer::RenderDiagnosticsSummary diagnostics = renderSystem->GetLatestRenderGraphDiagnostics();
 		for (const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& view : diagnostics.virtualGeometryViews)
 		{
@@ -7871,6 +7929,32 @@ namespace TerraEngine::Editor::Automation
 				{"evictedBytes", view.pageResidency.evictedBytes},
 				{"retiringBytes", view.pageResidency.retiringBytes}
 			};
+			// The direct stats tool must expose the same immutable animated-page
+			// snapshot as asset inspection. Keeping one bounded nested object avoids
+			// forcing MCP clients to scrape the Resource Residency window.
+			animatedVirtualGeometry = {
+				{"pageDemands", view.animatedPageDemandCount},
+				{"uniqueDispatches", view.animatedUniqueDispatchCount},
+				{"reuseCount", view.animatedReuseCount},
+				{"fallbackCount", view.animatedFallbackCount},
+				{"currentBytes", view.deformationCurrentBytes},
+				{"historyBytes", view.deformationHistoryBytes},
+				{"boundsBytes", view.deformationBoundsBytes},
+				{"highWaterBytes", view.deformationHighWaterBytes},
+				{"shaderContractValid", view.animatedShaderContractValid},
+				{"fallbackReason", view.animatedFallbackReason},
+				{"diagnosticEmitted", view.animatedDiagnosticEmitted},
+				{"diagnosticCoalesced", view.animatedDiagnosticCoalesced},
+				{"diagnosticDropped", view.animatedDiagnosticDropped}
+			};
+			selectedClusters = view.clusterSelection.selectedClusters;
+			fallbackSelections = view.clusterSelection.fallbackClusters;
+			// Publish the renderer's final per-LOD cluster counts so live MCP
+			// validation can prove that distance selection reached a coarse LOD.
+			for (const std::uint32_t selectedCount : view.selectedLodHistogram)
+			{
+				selectedLodHistogram.push_back(selectedCount);
+			}
 			break;
 		}
 		for (const PerformanceGateResult& gate : TerraEngine::Renderer::BuildVisibleCommandReusePerformanceGates(stats))
@@ -7945,6 +8029,10 @@ namespace TerraEngine::Editor::Automation
 			{"fallbackPayloadBytes", stats.virtualGeometryFallbackPagePayloadBytes},
 			{"embeddedFallbackBytes", stats.virtualGeometryEmbeddedFallbackBytes},
 			{"pageResidency", std::move(pageResidency)},
+			{"selectedClusters", selectedClusters},
+			{"selectedLodHistogram", std::move(selectedLodHistogram)},
+			{"fallbackSelections", fallbackSelections},
+			{"animatedVirtualGeometry", std::move(animatedVirtualGeometry)},
 			{"counterSource", ToString(stats.meshletCounterSource)},
 			{"counterFrameId", stats.meshletCounterFrameId},
 			{"counterLatencyFrames", stats.meshletCounterLatencyFrames},

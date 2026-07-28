@@ -30,6 +30,9 @@ namespace TerraEngine::Renderer {
 		plan.orderedPasses = passes;
 		plan.recordedWork = packetPlan.packets;
 		plan.animationWork = BuildAnimationBackendWorkPlan(snapshot, std::move(animationPlan));
+		const DeformationBackendWorkPlan deformation =
+			BuildDeformationBackendWorkPlan(snapshot);
+		plan.deformationWork = deformation.immutablePlan;
 		plan.fallbacksUsed = packetPlan.serializedReasons;
 
 		for (const RenderPassNode& pass : passes)
@@ -90,6 +93,14 @@ namespace TerraEngine::Renderer {
 			AddSubmissionDiagnostic(plan, "invalid-cpu-animation-deformation",
 				"CPU animation deformation data is incomplete or belongs to another frame.",
 				"Discard the CPU palette upload and render the authored bind pose.");
+		}
+		if(plan.deformationWork != nullptr
+			&& (!plan.deformationWork->IsComplete()
+				|| plan.deformationWork->frameId != plan.frameId))
+		{
+			AddSubmissionDiagnostic(plan, "invalid-animated-geometry-deformation",
+				"Animated geometry deformation work is incomplete or belongs to another frame.",
+				"Discard the candidate deformation publication and keep compatible fallback coverage.");
 		}
 		if (!plan.frameOverlapAllowed && plan.frameOverlapBlockedReasons.empty())
 		{

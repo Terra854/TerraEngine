@@ -7,6 +7,7 @@
 #pragma once
 
 #include <array>
+#include <compare>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -360,6 +361,38 @@ namespace TerraEngine::Resource
 		std::string reason;
 	};
 
+	struct AnimatedVirtualPageResidencyRow
+	{
+		TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+		std::uint32_t pageId = 0xffffffffu;
+		std::uint64_t contentGeneration = 0u;
+		std::uint64_t residencyGeneration = 0u;
+		std::uint64_t staticAllocationId = 0u;
+		std::uint64_t byteSize = 0u;
+		std::uint64_t completionFence = 0u;
+		bool resident = false;
+		bool pinnedFallback = false;
+		bool eligibleForNewWork = false;
+
+		auto operator<=>(const AnimatedVirtualPageResidencyRow&) const =
+			default;
+	};
+
+	struct AnimatedVirtualPageResidencySnapshot
+	{
+		std::uint64_t publicationGeneration = 0u;
+		std::uint64_t catalogGeneration = 0u;
+		std::vector<AnimatedVirtualPageResidencyRow> pages;
+		bool valid = false;
+	};
+
+	struct AnimatedVirtualPageResidencyPublication
+	{
+		AnimatedVirtualPageResidencySnapshot visible;
+		bool accepted = false;
+		std::string rejectionReason;
+	};
+
 	struct VirtualGeometryPageEvictionCandidate
 	{
 		TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
@@ -616,4 +649,9 @@ namespace TerraEngine::Resource
 	TERRAENGINE_API std::uint32_t ProtectVirtualGeometryFallbackPages(std::vector<VirtualGeometryResidentPage>& pages, std::uint64_t frameId, std::string_view reason = {});
 	TERRAENGINE_API std::vector<VirtualGeometryPageEvictionCandidate> BuildVirtualGeometryPageEvictionCandidates(const std::vector<VirtualGeometryResidentPage>& pages, const VirtualGeometryPageBudget& budget);
 	TERRAENGINE_API VirtualGeometryPageBudgetPressureSummary BuildVirtualGeometryPageBudgetPressureSummary(const std::vector<VirtualGeometryResidentPage>& pages, const VirtualGeometryPageBudget& budget);
+	TERRAENGINE_API AnimatedVirtualPageResidencyPublication
+		PublishAnimatedVirtualPageResidencySnapshot(
+			const AnimatedVirtualPageResidencySnapshot& prior,
+			AnimatedVirtualPageResidencySnapshot candidate,
+			std::uint64_t completedFence);
 }

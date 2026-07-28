@@ -122,4 +122,102 @@ namespace TerraEngine::Renderer::Vulkan {
 		return output;
 	}
 
+	VulkanDeformationDescriptorSetPlan BuildVulkanDeformationDescriptorSetPlan(
+		const GpuDeformationPlan& plan,
+		std::uint64_t workingSetLimitBytes)
+	{
+		VulkanDeformationDescriptorSetPlan output;
+		output.hasWork = !plan.work.empty();
+		if(!output.hasWork)
+		{
+			// Static or dormant frames must not allocate deformation resources.
+			output.valid = plan.valid;
+			if(!plan.valid)
+			{
+				output.rejectionReason = plan.rejectionReason;
+			}
+			return output;
+		}
+
+		output.workingSet = PlanDeformationWorkingSet(plan, workingSetLimitBytes);
+		if(!output.workingSet.accepted)
+		{
+			output.rejectionReason = output.workingSet.rejectionReason;
+			return output;
+		}
+
+		auto configure = [&output](
+			VulkanDeformationDescriptorBinding binding,
+			VulkanAnimationDescriptorAccess access,
+			VulkanAnimationDescriptorSource source,
+			std::uint64_t byteCount)
+		{
+			auto& record = output.bindings[static_cast<std::size_t>(binding)];
+			record.binding = binding;
+			record.access = access;
+			record.source = source;
+			record.minimumByteCount = byteCount;
+		};
+
+		std::uint64_t generationBytes = 0u;
+		std::uint64_t workBytes = 0u;
+		if(!AddBytes(
+				0u,
+				plan.work.size(),
+				sizeof(GpuDeformationGenerationRecord),
+				generationBytes)
+			|| !AddBytes(
+				0u,
+				plan.work.size(),
+				sizeof(GpuDeformationShaderWorkRecord),
+				workBytes))
+		{
+			output.rejectionReason = "Deformation descriptor upload range overflowed.";
+			return output;
+		}
+		configure(VulkanDeformationDescriptorBinding::Generations,
+			VulkanAnimationDescriptorAccess::ReadOnly,
+			VulkanAnimationDescriptorSource::FrameUpload, generationBytes);
+		configure(VulkanDeformationDescriptorBinding::Work,
+			VulkanAnimationDescriptorAccess::ReadOnly,
+			VulkanAnimationDescriptorSource::FrameUpload, workBytes);
+		configure(VulkanDeformationDescriptorBinding::StaticPageBytes,
+			VulkanAnimationDescriptorAccess::ReadOnly,
+			VulkanAnimationDescriptorSource::ResidentInput, 16u);
+		configure(VulkanDeformationDescriptorBinding::Palettes,
+			VulkanAnimationDescriptorAccess::ReadOnly,
+			VulkanAnimationDescriptorSource::ResidentInput, 16u);
+		configure(VulkanDeformationDescriptorBinding::MorphWeights,
+			VulkanAnimationDescriptorAccess::ReadOnly,
+			VulkanAnimationDescriptorSource::ResidentInput, 16u);
+		configure(VulkanDeformationDescriptorBinding::CurrentVertices,
+			VulkanAnimationDescriptorAccess::ReadWrite,
+			VulkanAnimationDescriptorSource::ComputeOutput,
+			output.workingSet.committed.currentBytes);
+		configure(VulkanDeformationDescriptorBinding::PreviousVertices,
+			VulkanAnimationDescriptorAccess::ReadOnly,
+			VulkanAnimationDescriptorSource::ComputeOutput,
+			output.workingSet.committed.historyBytes);
+		configure(VulkanDeformationDescriptorBinding::MeshletBounds,
+			VulkanAnimationDescriptorAccess::ReadWrite,
+			VulkanAnimationDescriptorSource::ComputeOutput,
+			static_cast<std::uint64_t>(plan.totalMeshletBoundsCount)
+				* sizeof(GpuDynamicBoundsRecord));
+		configure(VulkanDeformationDescriptorBinding::ClusterBounds,
+			VulkanAnimationDescriptorAccess::ReadWrite,
+			VulkanAnimationDescriptorSource::ComputeOutput,
+			static_cast<std::uint64_t>(plan.totalClusterBoundsCount)
+				* sizeof(GpuDynamicBoundsRecord));
+		configure(VulkanDeformationDescriptorBinding::Refinement,
+			VulkanAnimationDescriptorAccess::ReadWrite,
+			VulkanAnimationDescriptorSource::ComputeOutput,
+			std::max<std::uint64_t>(16u,
+				static_cast<std::uint64_t>(plan.totalClusterBoundsCount) * 16u));
+		configure(VulkanDeformationDescriptorBinding::Diagnostics,
+			VulkanAnimationDescriptorAccess::ReadWrite,
+			VulkanAnimationDescriptorSource::ComputeOutput, 16u);
+		output.valid = true;
+		return output;
+	}
+
 }

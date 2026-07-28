@@ -153,4 +153,28 @@ namespace TerraEngine::Renderer {
 		return plan;
 	}
 
+	DeformationBackendWorkPlan BuildDeformationBackendWorkPlan(
+		const RenderFrameSnapshot& snapshot)
+	{
+		DeformationBackendWorkPlan result;
+		result.frameId = snapshot.frameId;
+		if(snapshot.animatedGeometryPageDemands.empty())
+		{
+			return result;
+		}
+
+		const std::uint64_t rendererGeneration =
+			snapshot.animatedGeometryPageDemands.front().key.deformation.rendererGeneration;
+		auto plan = std::make_shared<GpuDeformationPlan>(BuildGpuDeformationPlan(
+			snapshot.frameId,
+			rendererGeneration,
+			snapshot.animatedGeometryPageDemands));
+		result.valid = plan->IsComplete();
+		result.rejectionReason = plan->rejectionReason;
+		result.uniquePageCount = plan->work.size();
+		result.reusedDemandCount = plan->reusedDemandCount;
+		result.immutablePlan = std::move(plan);
+		return result;
+	}
+
 }

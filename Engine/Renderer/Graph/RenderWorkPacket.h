@@ -79,6 +79,16 @@ namespace TerraEngine::Renderer {
 		std::string rejectionReason;
 	};
 
+	struct DeformationBackendWorkPlan
+	{
+		std::uint64_t frameId = 0u;
+		std::size_t uniquePageCount = 0u;
+		std::size_t reusedDemandCount = 0u;
+		std::shared_ptr<const GpuDeformationPlan> immutablePlan;
+		bool valid = true;
+		std::string rejectionReason;
+	};
+
 	TERRAENGINE_API const char* ToString(RenderBackendWorkKind workKind);
 	TERRAENGINE_API BackendRecordingBatchPlan BuildBackendRecordingBatchPlan(
 		const RenderFrameSnapshot& snapshot,
@@ -88,5 +98,7 @@ namespace TerraEngine::Renderer {
 	TERRAENGINE_API AnimationBackendWorkPlan BuildAnimationBackendWorkPlan(
 		const RenderFrameSnapshot& snapshot,
 		std::shared_ptr<const TerraEngine::Animation::GpuAnimationPlan> immutablePlan = {});
+	TERRAENGINE_API DeformationBackendWorkPlan BuildDeformationBackendWorkPlan(
+		const RenderFrameSnapshot& snapshot);
 
 }

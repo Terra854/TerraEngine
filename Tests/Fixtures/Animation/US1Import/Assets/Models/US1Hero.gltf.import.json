@@ -1,0 +1,427 @@
+{
+    "animationManifest": {
+        "cancelled": false,
+        "candidateGeneration": 1,
+        "dependencyFingerprint": "415ad0bec740cb3f",
+        "importerName": "GltfPackageImporter",
+        "importerVersion": "1",
+        "lastKnownGoodGeneration": 0,
+        "packageGuid": "da35202f311bd5ea56e23beb0aafbd9a",
+        "preservedLastKnownGood": false,
+        "publishedAtomically": true,
+        "publishedGeneration": 1,
+        "schemaVersion": 1,
+        "settingsFingerprint": "00d6c1f6ab29e96c",
+        "sourceHash": "79f6bc9566288e33",
+        "subAssets": [
+            {
+                "compatibilityFingerprint": 16568118120988306773,
+                "compiledPath": "Models/US1Hero_Generated/Animation/US1HeroSkeleton_b7d2176c.teskel",
+                "contentHash": "d7aa66807a38e4f4",
+                "dependencies": [],
+                "guid": "38c018a909d627cc2df445e0b5c99cdd",
+                "kind": "Skeleton",
+                "name": "US1HeroSkeleton",
+                "readOnlyPackageChild": true,
+                "semanticKey": "skeleton/skin/us1heroskeleton/c8cb64677d759ca9",
+                "sourcePath": "Models/US1Hero.gltf"
+            },
+            {
+                "compatibilityFingerprint": 16568118120988306773,
+                "compiledPath": "Models/US1Hero_Generated/Animation/US1HeroIdle_fad19fd5.teanim",
+                "contentHash": "9fab124cb81fd8cb",
+                "dependencies": [
+                    {
+                        "assetGuid": "38c018a909d627cc2df445e0b5c99cdd",
+                        "compatibilityFingerprint": 16568118120988306773,
+                        "required": true
+                    }
+                ],
+                "guid": "9dae9362137785aea86bbc574f64d671",
+                "kind": "AnimationClip",
+                "name": "US1HeroIdle",
+                "readOnlyPackageChild": true,
+                "semanticKey": "animation/us1heroidle/5a77af6cae3cb0b6/for/skeleton/skin/us1heroskeleton/c8cb64677d759ca9",
+                "sourcePath": "Models/US1Hero.gltf"
+            },
+            {
+                "compatibilityFingerprint": 16568118120988306773,
+                "compiledPath": "Models/US1Hero_Generated/US1HeroBody.temf",
+                "contentHash": "a5035e6484ce59ec",
+                "dependencies": [
+                    {
+                        "assetGuid": "38c018a909d627cc2df445e0b5c99cdd",
+                        "compatibilityFingerprint": 16568118120988306773,
+                        "required": true
+                    }
+                ],
+                "guid": "3ce0c4c32b4c190edd4cb4371e9b055b",
+                "kind": "DeformableMesh",
+                "name": "US1HeroBody",
+                "readOnlyPackageChild": true,
+                "semanticKey": "deformable_mesh/us1herobody/f59274ded72762f4/skeleton/skin/us1heroskeleton/c8cb64677d759ca9",
+                "sourcePath": "Models/US1Hero.gltf"
+            },
+            {
+                "compatibilityFingerprint": 16568118120988306773,
+                "compiledPath": "Models/US1Hero_Generated/US1HeroBody.temf",
+                "contentHash": "a5035e6484ce59ec",
+                "dependencies": [
+                    {
+                        "assetGuid": "38c018a909d627cc2df445e0b5c99cdd",
+                        "compatibilityFingerprint": 16568118120988306773,
+                        "required": true
+                    },
+                    {
+                        "assetGuid": "3ce0c4c32b4c190edd4cb4371e9b055b",
+                        "compatibilityFingerprint": 16568118120988306773,
+                        "required": true
+                    }
+                ],
+                "guid": "ff7918ad8a13b95a604bfaf7425ec03f",
+                "kind": "MorphTarget",
+                "name": "Smile",
+                "readOnlyPackageChild": true,
+                "semanticKey": "mesh/us1herobody/primitive/6bb928195603a161/morph/smile/e9b50a87df9fa80b/payload/deformable_mesh/us1herobody/f59274ded72762f4/skeleton/skin/us1heroskeleton/c8cb64677d759ca9",
+                "sourcePath": "Models/US1Hero.gltf"
+            },
+            {
+                "compatibilityFingerprint": 0,
+                "compiledPath": "Models/US1Hero_Generated/US1HeroMaterial.tmat",
+                "contentHash": "2c506bf89646f2b2",
+                "dependencies": [],
+                "guid": "2b611b72eec7bdb66b0da4fe40360f82",
+                "kind": "Material",
+                "name": "US1HeroMaterial",
+                "readOnlyPackageChild": true,
+                "semanticKey": "material/0",
+                "sourcePath": "Models/US1Hero_Generated/US1HeroMaterial.tmat"
+            },
+            {
+                "compatibilityFingerprint": 0,
+                "compiledPath": "",
+                "contentHash": "79037639bd03428c",
+                "dependencies": [
+                    {
+                        "assetGuid": "2b611b72eec7bdb66b0da4fe40360f82",
+                        "compatibilityFingerprint": 0,
+                        "required": true
+                    },
+                    {
+                        "assetGuid": "38c018a909d627cc2df445e0b5c99cdd",
+                        "compatibilityFingerprint": 16568118120988306773,
+                        "required": true
+                    },
+                    {
+                        "assetGuid": "3ce0c4c32b4c190edd4cb4371e9b055b",
+                        "compatibilityFingerprint": 16568118120988306773,
+                        "required": true
+                    },
+                    {
+                        "assetGuid": "9dae9362137785aea86bbc574f64d671",
+                        "compatibilityFingerprint": 16568118120988306773,
+                        "required": true
+                    },
+                    {
+                        "assetGuid": "ff7918ad8a13b95a604bfaf7425ec03f",
+                        "compatibilityFingerprint": 16568118120988306773,
+                        "required": true
+                    }
+                ],
+                "guid": "80cc2dce6a2006a29aed045b8d509ca4",
+                "kind": "Prefab",
+                "name": "US1Hero",
+                "readOnlyPackageChild": true,
+                "semanticKey": "prefab/package-root",
+                "sourcePath": "Models/US1Hero_Generated/US1Hero.teprefab"
+            }
+        ]
+    },
+    "diagnostics": [
+        {
+            "code": "AnimatedPackageImported",
+            "fallback": "",
+            "message": "Preserved 1 skeleton, 1 clip, and 1 morph target.",
+            "severity": "Info",
+            "source": "animation"
+        }
+    ],
+    "generatedMaterials": [
+        {
+            "baseColorFactor": [
+                0.15000000596046448,
+                0.550000011920929,
+                0.8999999761581421,
+                1.0
+            ],
+            "compiledPath": "Models/US1Hero_Generated/US1HeroMaterial.tmat",
+            "doubleSided": false,
+            "emissiveFactor": [
+                0.0,
+                0.0,
+                0.0
+            ],
+            "guid": "2b611b72eec7bdb66b0da4fe40360f82",
+            "metallicFactor": 0.0,
+            "name": "US1HeroMaterial",
+            "normalScale": 1.0,
+            "occlusionStrength": 1.0,
+            "roughnessFactor": 0.6000000238418579,
+            "sourceMaterialIndex": 0,
+            "sourcePath": "Models/US1Hero_Generated/US1HeroMaterial.tmat",
+            "textureGuids": []
+        }
+    ],
+    "generatedMeshes": [
+        {
+            "animationSkeletonGuid": "38c018a909d627cc2df445e0b5c99cdd",
+            "compiledPath": "Models/US1Hero_Generated/US1HeroBody.temf",
+            "guid": "3ce0c4c32b4c190edd4cb4371e9b055b",
+            "localBounds": {
+                "max": [
+                    0.5,
+                    1.0,
+                    0.0
+                ],
+                "min": [
+                    -0.5,
+                    0.0,
+                    0.0
+                ]
+            },
+            "localBoundsMax": [
+                0.5,
+                1.0,
+                0.0
+            ],
+            "localBoundsMin": [
+                -0.5,
+                0.0,
+                0.0
+            ],
+            "name": "US1HeroBody",
+            "sourceMeshIndex": 0,
+            "sourceNodePath": "",
+            "sourcePath": "Models/US1Hero.gltf",
+            "sourcePrimitiveIndex": null,
+            "virtualGeometry": {
+                "clusterSummary": {
+                    "clusterCount": 1,
+                    "clusterMaterialSectionCount": 1,
+                    "fallbackCoverageValid": true,
+                    "materialCoverageValid": true,
+                    "materialSectionCount": 1,
+                    "pageLinkCount": 1,
+                    "sourceMaterialAssignmentCount": 1
+                },
+                "coneSafety": {
+                    "disabledClusterCount": 0,
+                    "disabledReasons": [],
+                    "eligibleClusterCount": 1,
+                    "metadataValid": true,
+                    "recordCount": 1
+                },
+                "cooked": true,
+                "coverageTags": [
+                    "package-static-geometry",
+                    "package-gltf",
+                    "adaptive-targets",
+                    "package-imported",
+                    "cluster-hierarchy",
+                    "fallback-coverage",
+                    "page-links",
+                    "cone-safety-metadata",
+                    "cone-culling-disabled"
+                ],
+                "detailLevels": 1,
+                "meshlets": 1,
+                "requested": true,
+                "settings": {
+                    "hasOverride": false,
+                    "maximumGeometricError": 0.10000000149011612,
+                    "minimumGeneratedTriangles": 64,
+                    "minimumMeshletsPerGeneratedLevel": 2,
+                    "minimumSourceTriangles": 512,
+                    "minimumUsefulMeshletReduction": 0.15000000596046448,
+                    "minimumUsefulTriangleReduction": 0.15000000596046448,
+                    "settingsSource": "ProjectDefaults",
+                    "targetRatios": [
+                        1.0,
+                        0.7071067690849304,
+                        0.5,
+                        0.3535533845424652,
+                        0.25,
+                        0.1767766922712326,
+                        0.125,
+                        0.0883883535861969
+                    ]
+                },
+                "sourceTriangles": 1,
+                "status": "Cooked",
+                "targets": [
+                    {
+                        "actualMeshletCount": 1,
+                        "actualRatio": 1.0,
+                        "actualTriangleCount": 1,
+                        "desiredMeshletCount": 1,
+                        "desiredTriangleCount": 1,
+                        "geometricError": 0.0,
+                        "meshletCount": 1,
+                        "message": "",
+                        "nearestGeneratedLevelIndex": 0,
+                        "reason": "",
+                        "requestedRatio": 1.0,
+                        "status": "Generated",
+                        "targetIndex": 0,
+                        "triangleCount": 1
+                    },
+                    {
+                        "actualMeshletCount": 0,
+                        "actualRatio": 0.7071067690849304,
+                        "actualTriangleCount": 0,
+                        "desiredMeshletCount": 1,
+                        "desiredTriangleCount": 1,
+                        "geometricError": 0.0,
+                        "meshletCount": 1,
+                        "message": "source mesh has 1 triangles, below the minimum source threshold of 512; extra adaptive detail levels would add switches without useful reduction",
+                        "nearestGeneratedLevelIndex": 0,
+                        "reason": "MeshTooSmall",
+                        "requestedRatio": 0.7071067690849304,
+                        "status": "Skipped",
+                        "targetIndex": 1,
+                        "triangleCount": 1
+                    },
+                    {
+                        "actualMeshletCount": 0,
+                        "actualRatio": 0.5,
+                        "actualTriangleCount": 0,
+                        "desiredMeshletCount": 1,
+                        "desiredTriangleCount": 1,
+                        "geometricError": 0.0,
+                        "meshletCount": 1,
+                        "message": "source mesh has 1 triangles, below the minimum source threshold of 512; extra adaptive detail levels would add switches without useful reduction",
+                        "nearestGeneratedLevelIndex": 0,
+                        "reason": "MeshTooSmall",
+                        "requestedRatio": 0.5,
+                        "status": "Skipped",
+                        "targetIndex": 2,
+                        "triangleCount": 1
+                    },
+                    {
+                        "actualMeshletCount": 0,
+                        "actualRatio": 0.3535533845424652,
+                        "actualTriangleCount": 0,
+                        "desiredMeshletCount": 1,
+                        "desiredTriangleCount": 1,
+                        "geometricError": 0.0,
+                        "meshletCount": 1,
+                        "message": "source mesh has 1 triangles, below the minimum source threshold of 512; extra adaptive detail levels would add switches without useful reduction",
+                        "nearestGeneratedLevelIndex": 0,
+                        "reason": "MeshTooSmall",
+                        "requestedRatio": 0.3535533845424652,
+                        "status": "Skipped",
+                        "targetIndex": 3,
+                        "triangleCount": 1
+                    },
+                    {
+                        "actualMeshletCount": 0,
+                        "actualRatio": 0.25,
+                        "actualTriangleCount": 0,
+                        "desiredMeshletCount": 1,
+                        "desiredTriangleCount": 1,
+                        "geometricError": 0.0,
+                        "meshletCount": 1,
+                        "message": "source mesh has 1 triangles, below the minimum source threshold of 512; extra adaptive detail levels would add switches without useful reduction",
+                        "nearestGeneratedLevelIndex": 0,
+                        "reason": "MeshTooSmall",
+                        "requestedRatio": 0.25,
+                        "status": "Skipped",
+                        "targetIndex": 4,
+                        "triangleCount": 1
+                    },
+                    {
+                        "actualMeshletCount": 0,
+                        "actualRatio": 0.1767766922712326,
+                        "actualTriangleCount": 0,
+                        "desiredMeshletCount": 1,
+                        "desiredTriangleCount": 1,
+                        "geometricError": 0.0,
+                        "meshletCount": 1,
+                        "message": "source mesh has 1 triangles, below the minimum source threshold of 512; extra adaptive detail levels would add switches without useful reduction",
+                        "nearestGeneratedLevelIndex": 0,
+                        "reason": "MeshTooSmall",
+                        "requestedRatio": 0.1767766922712326,
+                        "status": "Skipped",
+                        "targetIndex": 5,
+                        "triangleCount": 1
+                    },
+                    {
+                        "actualMeshletCount": 0,
+                        "actualRatio": 0.125,
+                        "actualTriangleCount": 0,
+                        "desiredMeshletCount": 1,
+                        "desiredTriangleCount": 1,
+                        "geometricError": 0.0,
+                        "meshletCount": 1,
+                        "message": "source mesh has 1 triangles, below the minimum source threshold of 512; extra adaptive detail levels would add switches without useful reduction",
+                        "nearestGeneratedLevelIndex": 0,
+                        "reason": "MeshTooSmall",
+                        "requestedRatio": 0.125,
+                        "status": "Skipped",
+                        "targetIndex": 6,
+                        "triangleCount": 1
+                    },
+                    {
+                        "actualMeshletCount": 0,
+                        "actualRatio": 0.0883883535861969,
+                        "actualTriangleCount": 0,
+                        "desiredMeshletCount": 1,
+                        "desiredTriangleCount": 1,
+                        "geometricError": 0.0,
+                        "meshletCount": 1,
+                        "message": "source mesh has 1 triangles, below the minimum source threshold of 512; extra adaptive detail levels would add switches without useful reduction",
+                        "nearestGeneratedLevelIndex": 0,
+                        "reason": "MeshTooSmall",
+                        "requestedRatio": 0.0883883535861969,
+                        "status": "Skipped",
+                        "targetIndex": 7,
+                        "triangleCount": 1
+                    }
+                ],
+                "warnings": []
+            }
+        }
+    ],
+    "generatedPrefabs": [
+        {
+            "guid": "80cc2dce6a2006a29aed045b8d509ca4",
+            "materialGuids": [
+                "2b611b72eec7bdb66b0da4fe40360f82"
+            ],
+            "meshGuids": [
+                "3ce0c4c32b4c190edd4cb4371e9b055b"
+            ],
+            "name": "US1Hero",
+            "sourcePath": "Models/US1Hero_Generated/US1Hero.teprefab"
+        }
+    ],
+    "generatedTextures": [],
+    "materialAssignments": [
+        {
+            "materialGuid": "2b611b72eec7bdb66b0da4fe40360f82",
+            "meshGuid": "3ce0c4c32b4c190edd4cb4371e9b055b",
+            "slotName": "US1HeroBody_Primitive0",
+            "sourceMeshIndex": 0,
+            "sourcePrimitiveIndex": 0
+        }
+    ],
+    "package": {
+        "externalDependencies": [],
+        "importRoot": "Models/US1Hero_Generated",
+        "packageKind": "GltfText",
+        "sourceHash": "79f6bc9566288e33",
+        "sourcePath": "Models/US1Hero.gltf"
+    },
+    "packageGuid": "da35202f311bd5ea56e23beb0aafbd9a",
+    "status": "Succeeded"
+}

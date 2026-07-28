@@ -2160,7 +2160,15 @@ namespace
 		{
 			return 0.0f;
 		}
-		return std::max(0.0f, 1.0f - std::clamp(targetRatio, 0.0f, 1.0f)) * 0.01f;
+
+		const float retainedRatio = std::clamp(targetRatio, 0.001f, 1.0f);
+		const float removedToRetainedRatio = (1.0f - retainedRatio) / retainedRatio;
+		// A plain (1 - ratio) floor converges toward one, so deep LODs receive
+		// nearly identical screen-error values and can all transition within a
+		// tiny camera movement. Scaling by removed geometry relative to what
+		// remains keeps the first half-octave transition near 480 pixels while
+		// progressively spacing coarser levels farther apart.
+		return std::clamp(removedToRetainedRatio * 0.0075f, 0.0f, 0.1f);
 	}
 
 	std::vector<std::uint32_t> SimplifyVirtualGeometryCoverageCluster(
@@ -2279,8 +2287,15 @@ namespace
 		const VirtualGeometryLodSource& lod,
 		const std::vector<VertexRaw>& vertices,
 		bool includeBounds,
+		float previousDetailGeometricError,
+		bool& outDetailEmitted,
+		std::uint32_t& outCandidatePrimitiveCount,
+		std::uint32_t& outCandidateMeshletCount,
 		VirtualGeometryBuildOutput& output)
 	{
+		outDetailEmitted = false;
+		outCandidatePrimitiveCount = 0u;
+		outCandidateMeshletCount = 0u;
 		if (fineRegions.empty())
 		{
 			std::cerr << "Virtual geometry source coverage regions are empty.\n";
@@ -2331,7 +2346,21 @@ namespace
 			payload.targetRatio = sourceCoverageIndices.empty()
 				? 1.0f
 				: static_cast<float>(clusterIndices.size()) / static_cast<float>(sourceCoverageIndices.size());
-			payload.geometricError = std::max(simplificationError, ComputeVirtualGeometrySelectionErrorFloor(lod.targetRatio));
+			const float ratioSpacingFloor = ComputeVirtualGeometrySelectionErrorFloor(lod.targetRatio);
+			// Different simplification requests can produce the same topology
+			// and error estimate. Give every coarser emitted detail a meaningfully
+			// larger screen-error threshold so several LODs cannot switch over a
+			// few centimeters of camera travel. Cap the synthetic spacing input
+			// at the renderer's conservative visual-error tolerance; the actual
+			// simplifier error remains authoritative when it is larger.
+			const float previousDetailSpacingFloor = lodIndex == 0u
+				? 0.0f
+				: std::min(previousDetailGeometricError * 1.5f, 0.05f);
+			payload.geometricError = std::max({
+				simplificationError,
+				ratioSpacingFloor,
+				previousDetailSpacingFloor
+			});
 			if (!BuildMeshletPayload(vertices, clusterIndices, includeBounds, payload.meshlets))
 			{
 				std::cerr << "Virtual geometry coverage cluster meshlet generation failed.\n";
@@ -2350,6 +2379,22 @@ namespace
 			clusterPayloads.push_back(std::move(payload));
 		}
 
+		outCandidatePrimitiveCount = totalPrimitiveCount;
+		outCandidateMeshletCount = totalMeshletCount;
+		if (lodIndex > 0u && !output.detailLevels.empty())
+		{
+			const VirtualGeometryDetailLevelRecord& previousDetail = output.detailLevels.back();
+			// A zero percentage threshold means every real reduction is valid;
+			// it does not make an identical regional result a useful LOD. Merge
+			// candidates that reduce neither triangles nor meshlets so the
+			// Inspector and runtime cannot expose duplicate transition colors.
+			if (totalPrimitiveCount >= previousDetail.primitiveCount
+				&& totalMeshletCount >= previousDetail.meshletCount)
+			{
+				return true;
+			}
+		}
+
 		std::uint32_t meshletOffset = 0u;
 		std::uint32_t primitiveOffset = 0u;
 		std::uint32_t groupOffset = 0u;
@@ -2361,8 +2406,7 @@ namespace
 		}
 
 		const std::uint32_t sectionRangeIndex = static_cast<std::uint32_t>(output.sectionRanges.size());
-		const std::uint32_t pageIndex = static_cast<std::uint32_t>(output.pages.size());
-		const std::uint32_t clusterLinkOffset = static_cast<std::uint32_t>(output.clusterPageLinks.size());
+		const std::uint32_t pageRangeOffset = static_cast<std::uint32_t>(output.pages.size());
 
 		MeshletSection meshletSection{};
 		meshletSection.meshletOffset = meshletOffset;
@@ -2388,8 +2432,8 @@ namespace
 		detail.primitiveCount = totalPrimitiveCount;
 		detail.sectionRangeOffset = sectionRangeIndex;
 		detail.sectionRangeCount = 1u;
-		detail.pageRangeOffset = pageIndex;
-		detail.pageRangeCount = 1u;
+		detail.pageRangeOffset = pageRangeOffset;
+		detail.pageRangeCount = static_cast<std::uint32_t>(clusterPayloads.size());
 		detail.geometricError = maxClusterError;
 		detail.targetRatio = lod.targetRatio;
 		BuildPositionBounds(vertices, detail.boundsMin, detail.boundsMax);
@@ -2397,6 +2441,13 @@ namespace
 
 		for (VirtualGeometryClusterCookPayload& payload : clusterPayloads)
 		{
+			// Each spatial coverage cluster owns one independently addressable page.
+			// Keeping page boundaries aligned with hierarchy nodes lets streaming
+			// select a compatible parent without loading an unrelated whole LOD.
+			const std::uint32_t clusterPageId =
+				static_cast<std::uint32_t>(output.pages.size());
+			const std::uint32_t clusterLinkOffset =
+				static_cast<std::uint32_t>(output.clusterPageLinks.size());
 			std::uint32_t clusterMeshletOffset = 0u;
 			std::uint32_t clusterRemapOffset = 0u;
 			std::uint32_t clusterPrimitiveOffset = 0u;
@@ -2443,7 +2494,7 @@ namespace
 				group.primitiveOffset = record.primitiveIndexOffset;
 				group.primitiveCount = record.primitiveIndexCount / 3u;
 				group.sectionId = sectionId;
-				group.pageId = pageIndex;
+				group.pageId = clusterPageId;
 
 				const std::size_t localBoundsIndex = static_cast<std::size_t>(boundsOffset) + localMeshlet;
 				if (localBoundsIndex < output.meshletPayload.meshletBounds.size())
@@ -2480,7 +2531,7 @@ namespace
 			cluster.groupOffset = clusterGroupOffset;
 			cluster.groupCount = static_cast<std::uint32_t>(output.cullableGroups.size()) - clusterGroupOffset;
 			cluster.materialSectionId = sectionId;
-			cluster.pageId = pageIndex;
+			cluster.pageId = clusterPageId;
 			cluster.fallbackClusterId = cluster.clusterId;
 			cluster.geometricError = payload.geometricError;
 			ComputeVirtualGeometryClusterBounds(output.cullableGroups, cluster.groupOffset, cluster.groupCount, cluster.boundsCenter, cluster.boundsRadius);
@@ -2489,31 +2540,41 @@ namespace
 
 			VirtualGeometryClusterPageLinkRecord link{};
 			link.clusterId = cluster.clusterId;
-			link.pageId = pageIndex;
+			link.pageId = clusterPageId;
 			link.firstGroup = cluster.groupOffset;
 			link.groupCount = cluster.groupCount;
 			link.flags = lodIndex == 0u ? 0x3u : 0x1u;
 			output.clusterPageLinks.push_back(link);
-		}
 
-		VirtualGeometryPageRecord page{};
-		page.pageId = pageIndex;
-		page.firstLodIndex = lodIndex;
-		page.lodCount = 1u;
-		page.groupOffset = groupOffset;
-		page.groupCount = static_cast<std::uint32_t>(output.cullableGroups.size()) - groupOffset;
-		// The final fallback page is assigned after all detail levels are known.
-		// Until then, point at self so partially-built diagnostics stay valid.
-		page.fallbackPageId = page.pageId;
-		page.clusterPageLinkOffset = clusterLinkOffset;
-		page.clusterPageLinkCount = static_cast<std::uint32_t>(output.clusterPageLinks.size()) - clusterLinkOffset;
-		page.priority = lodIndex == 0u ? 1000u : std::max<std::uint32_t>(1u, 1000u - (lodIndex * 100u));
-		page.byteOffset = static_cast<std::uint64_t>(meshletOffset) * sizeof(MeshletRecord);
-		page.byteSize =
-			static_cast<std::uint64_t>(totalMeshletCount) * (sizeof(MeshletRecord) + sizeof(MeshletBounds))
-			+ static_cast<std::uint64_t>(totalPrimitiveCount) * 3u * sizeof(std::uint8_t)
-			+ static_cast<std::uint64_t>(vertices.size()) * kMeshletPackedVertexStrideBytes;
-		output.pages.push_back(page);
+			VirtualGeometryPageRecord page{};
+			page.pageId = clusterPageId;
+			page.firstLodIndex = lodIndex;
+			page.lodCount = 1u;
+			page.groupOffset = clusterGroupOffset;
+			page.groupCount = cluster.groupCount;
+			// Hierarchy linking resolves this temporary self-reference to the
+			// matching coarser spatial ancestor after all LODs are available.
+			page.fallbackPageId = page.pageId;
+			page.clusterPageLinkOffset = clusterLinkOffset;
+			page.clusterPageLinkCount = 1u;
+			page.priority = lodIndex == 0u
+				? 1000u
+				: std::max<std::uint32_t>(1u, 1000u - (lodIndex * 100u));
+			page.byteOffset =
+				static_cast<std::uint64_t>(clusterMeshletOffset)
+				* sizeof(MeshletRecord);
+			page.byteSize =
+				static_cast<std::uint64_t>(payload.meshlets.meshletRecords.size())
+					* (sizeof(MeshletRecord) + sizeof(MeshletBounds))
+				+ static_cast<std::uint64_t>(payload.meshlets.primitiveIndices.size())
+					* sizeof(std::uint8_t)
+				+ static_cast<std::uint64_t>(payload.meshlets.vertexRemapIndices.size())
+					* sizeof(std::uint32_t)
+				+ static_cast<std::uint64_t>(payload.meshlets.vertexRemapIndices.size())
+					* kMeshletPackedVertexStrideBytes;
+			output.pages.push_back(page);
+		}
+		outDetailEmitted = true;
 		return true;
 	}
 
@@ -2732,8 +2793,11 @@ namespace
 				report.virtualGeometry.generatedLevels.begin(),
 				report.virtualGeometry.generatedLevels.end(),
 				[&detail](const VirtualGeometryGeneratedLevelCompileReport& candidate) {
-					return candidate.lodIndex == detail.lodIndex
-						&& candidate.requestedTargetIndex == detail.requestedTargetIndex;
+					// Regional cooking can merge an earlier candidate and compact
+					// every later emitted LOD index. The requested target remains
+					// stable across both stages and is therefore the safe identity.
+					return candidate.requestedTargetIndex
+						== detail.requestedTargetIndex;
 				});
 			if (generated == report.virtualGeometry.generatedLevels.end())
 			{
@@ -2753,6 +2817,29 @@ namespace
 			generated->triangleCount = detail.primitiveCount;
 			generated->meshletCount = detail.meshletCount;
 			generated->geometricError = detail.geometricError;
+		}
+
+		for(VirtualGeometrySkippedLevelCompileReport& skipped
+			: report.virtualGeometry.skippedLevels) {
+			if(emittedDetails.empty()) {
+				continue;
+			}
+			std::size_t nearestDetailIndex = 0U;
+			for(std::size_t detailIndex = 0U;
+				detailIndex < emittedDetails.size(); ++detailIndex) {
+				const VirtualGeometryDetailLevelRecord& detail =
+					emittedDetails[detailIndex];
+				if(detail.requestedTargetIndex > skipped.targetIndex) {
+					break;
+				}
+				nearestDetailIndex = detailIndex;
+			}
+			// The simplification stage records fallback indices before regional
+			// meshlet cooking. If that later stage merges a duplicate candidate,
+			// remap every skipped target to the compact emitted table so the TEMF
+			// loader never observes an index for a detail that was removed.
+			skipped.nearestGeneratedLevelIndex =
+				static_cast<std::uint32_t>(nearestDetailIndex);
 		}
 	}
 
@@ -2782,36 +2869,93 @@ namespace
 
 		for (std::size_t lodIndex = 0; lodIndex < lods.size(); ++lodIndex)
 		{
+			const float previousDetailGeometricError = output.detailLevels.empty()
+				? 0.0f
+				: output.detailLevels.back().geometricError;
+			bool detailEmitted = false;
+			std::uint32_t candidatePrimitiveCount = 0u;
+			std::uint32_t candidateMeshletCount = 0u;
 			if (!AppendRegionalLodMeshlets(
 				fineRegions,
-				static_cast<std::uint32_t>(lodIndex),
+				static_cast<std::uint32_t>(output.detailLevels.size()),
 				sectionId,
 				lods[lodIndex],
 				vertices,
 				includeBounds,
+				previousDetailGeometricError,
+				detailEmitted,
+				candidatePrimitiveCount,
+				candidateMeshletCount,
 				output))
 			{
 				report.virtualGeometry.status = VirtualGeometryCompileStatus::Failed;
 				report.virtualGeometry.errors.push_back("virtual geometry regional meshlet generation failed for LOD " + std::to_string(lodIndex));
 				return false;
 			}
-		}
-
-		if (!output.pages.empty())
-		{
-			const std::uint32_t fallbackPageId = output.pages.back().pageId;
-			for (VirtualGeometryPageRecord& page : output.pages)
+			if (!detailEmitted)
 			{
-				// LOD indices increase as the cook moves toward coarser detail.
-				// The last emitted page is therefore the cheapest complete
-				// coverage fallback; high-detail pages reference it instead of
-				// pretending LOD0 is fallback geometry.
-				page.fallbackPageId = fallbackPageId;
+				const std::uint32_t requestedTargetIndex = lods[lodIndex].requestedTargetIndex;
+				auto requestedTarget = std::find_if(
+					report.virtualGeometry.requestedTargets.begin(),
+					report.virtualGeometry.requestedTargets.end(),
+					[requestedTargetIndex](const VirtualGeometryRequestedTargetCompileReport& target) {
+						return target.targetIndex == requestedTargetIndex;
+					});
+				if (requestedTarget != report.virtualGeometry.requestedTargets.end())
+				{
+					requestedTarget->status = ToCompileTargetStatusText(VirtualGeometryDetailTargetRecordStatus::Merged);
+				}
+				report.virtualGeometry.generatedLevels.erase(
+					std::remove_if(
+						report.virtualGeometry.generatedLevels.begin(),
+						report.virtualGeometry.generatedLevels.end(),
+						[requestedTargetIndex](const VirtualGeometryGeneratedLevelCompileReport& generated) {
+							return generated.requestedTargetIndex == requestedTargetIndex;
+						}),
+					report.virtualGeometry.generatedLevels.end());
+				const std::uint32_t nearestGeneratedLevelIndex = output.detailLevels.empty()
+					? 0u
+					: static_cast<std::uint32_t>(output.detailLevels.size() - 1u);
+				const float actualCandidateRatio = sourcePrimitiveCount > 0u
+					? static_cast<float>(candidatePrimitiveCount) / static_cast<float>(sourcePrimitiveCount)
+					: 1.0f;
+				AppendSkippedTargetReport(
+					report,
+					requestedTargetIndex,
+					lods[lodIndex].targetRatio,
+					VirtualGeometryDetailTargetRecordStatus::Merged,
+					VirtualGeometrySkippedDetailRecordReason::DuplicateOfPreviousLevel,
+					nearestGeneratedLevelIndex,
+					"regional virtual-geometry cook produced no triangle or meshlet reduction; target was merged into the previous detail",
+					candidatePrimitiveCount,
+					candidateMeshletCount,
+					actualCandidateRatio);
 			}
 		}
 
 		const bool hierarchyLinked = LinkVirtualGeometryClusterHierarchy(output.clusters, output.clusterCoverage);
 		const bool coverageValidated = hierarchyLinked && ValidateVirtualGeometryClusterCoverage(output.clusters, output.clusterCoverage);
+		if (hierarchyLinked)
+		{
+			// A physical page follows the same spatial parent chain as its cluster.
+			// Coarsest roots remain self-fallback and are pinned by the runtime;
+			// every finer page names the compatible ancestor that covers the same
+			// source region, avoiding a whole-owner fallback dependency.
+			for (const VirtualGeometryClusterRecord& cluster : output.clusters)
+			{
+				if (cluster.pageId >= output.pages.size()
+					|| cluster.fallbackClusterId >= output.clusters.size())
+				{
+					report.virtualGeometry.status =
+						VirtualGeometryCompileStatus::Failed;
+					report.virtualGeometry.errors.push_back(
+						"virtual geometry cluster fallback page link is out of range");
+					return false;
+				}
+				output.pages[cluster.pageId].fallbackPageId =
+					output.clusters[cluster.fallbackClusterId].pageId;
+			}
+		}
 		if (!coverageValidated)
 		{
 			report.virtualGeometry.warnings.push_back("virtual geometry cluster coverage validation failed; renderer will use conservative complete-detail fallback");
@@ -3044,11 +3188,13 @@ VirtualGeometryAdaptiveCompileSettings MakeDefaultVirtualGeometryAdaptiveCompile
 		0.125f,
 		0.08838835f
 	};
-	settings.minimumSourceTriangles = 512u;
-	settings.minimumGeneratedTriangles = 64u;
-	settings.minimumMeshletsPerGeneratedLevel = 2u;
-	settings.minimumUsefulTriangleReduction = 0.15f;
-	settings.minimumUsefulMeshletReduction = 0.15f;
+	// Accept every valid simplification by default. Per-mesh overrides remain
+	// available for projects that want to merge small percentage reductions.
+	settings.minimumSourceTriangles = 1u;
+	settings.minimumGeneratedTriangles = 1u;
+	settings.minimumMeshletsPerGeneratedLevel = 1u;
+	settings.minimumUsefulTriangleReduction = 0.0f;
+	settings.minimumUsefulMeshletReduction = 0.0f;
 	settings.maximumGeometricError = 0.1f;
 	settings.settingsSource = "ProjectDefaults";
 	return settings;
@@ -3093,10 +3239,10 @@ VirtualGeometryAdaptiveCompileSettings SanitizeVirtualGeometryAdaptiveCompileSet
 	sanitized.minimumMeshletsPerGeneratedLevel = std::max(1u, sanitized.minimumMeshletsPerGeneratedLevel);
 	sanitized.minimumUsefulTriangleReduction = std::isfinite(sanitized.minimumUsefulTriangleReduction)
 		? std::clamp(sanitized.minimumUsefulTriangleReduction, 0.0f, 0.95f)
-		: 0.15f;
+		: 0.0f;
 	sanitized.minimumUsefulMeshletReduction = std::isfinite(sanitized.minimumUsefulMeshletReduction)
 		? std::clamp(sanitized.minimumUsefulMeshletReduction, 0.0f, 0.95f)
-		: 0.15f;
+		: 0.0f;
 	sanitized.maximumGeometricError = std::isfinite(sanitized.maximumGeometricError)
 		? std::clamp(sanitized.maximumGeometricError, 0.0f, 1000.0f)
 		: 0.1f;
@@ -3145,7 +3291,8 @@ static bool CompileMeshInternal(
 	const VirtualGeometryAdaptiveCompileSettings* adaptiveSettings,
 	MeshCompileProgressCallback progressCallback,
 	const VirtualGeometryConeSafetyCookSettings* coneSafetySettings,
-	const std::vector<std::uint32_t>* rawVertexWeldIdentities)
+	const std::vector<std::uint32_t>* rawVertexWeldIdentities,
+	std::vector<std::uint32_t>* outFinalWeldIdentities)
 {
 	MeshCompileReport report{};
 	report.assetPath = input;
@@ -3224,6 +3371,19 @@ static bool CompileMeshInternal(
 	ReportMeshProgress(progressCallback, 0.28f, "Mesh Remap", "Building optimized indexed vertex buffers.");
 	meshopt_remapIndexBuffer(indices.data(), rawIndices.data(), rawIndices.size(), finalRemap.data());
 	meshopt_remapVertexBuffer(vertices.data(), rawVertices.data(), rawVertices.size(), sizeof(VertexRaw), finalRemap.data());
+	if (outFinalWeldIdentities != nullptr)
+	{
+		// Deformable cooks need the final cleanup order because generated normals
+		// or tangents may split one safely canonicalized source vertex into several
+		// static vertices. The caller duplicates the same skin/morph record onto
+		// every resulting vertex before appending the TDEF/TDFV payload.
+		outFinalWeldIdentities->clear();
+		outFinalWeldIdentities->reserve(vertices.size());
+		for (const VertexRaw& vertex : vertices)
+		{
+			outFinalWeldIdentities->push_back(vertex.weldIdentity);
+		}
+	}
 
 	// The unindexed import buffers are no longer needed once the final indexed
 	// mesh exists, so release them before the meshlet and packing stages begin.
@@ -3555,7 +3715,7 @@ bool CompileMesh(
 {
 	return CompileMeshInternal(
 		input, output, includeMeshletBounds, outReport, smoothingAngle, weldThreshold,
-		adaptiveSettings, std::move(progressCallback), coneSafetySettings, nullptr);
+		adaptiveSettings, std::move(progressCallback), coneSafetySettings, nullptr, nullptr);
 }
 
 static bool CompileMeshFromRawInternal(
@@ -3570,7 +3730,8 @@ static bool CompileMeshFromRawInternal(
 	float weldThreshold,
 	const VirtualGeometryAdaptiveCompileSettings* adaptiveSettings,
 	MeshCompileProgressCallback progressCallback,
-	const VirtualGeometryConeSafetyCookSettings* coneSafetySettings)
+	const VirtualGeometryConeSafetyCookSettings* coneSafetySettings,
+	std::vector<std::uint32_t>* outFinalSourceVertexIndices)
 {
 	if (vertices.empty() || indices.empty() || (indices.size() % 3u) != 0u)
 	{
@@ -3657,7 +3818,8 @@ static bool CompileMeshFromRawInternal(
 	const bool compiled = CompileMeshInternal(
 		stagedObj, output, includeMeshletBounds, outReport, smoothingAngle, weldThreshold,
 		adaptiveSettings, std::move(progressCallback), coneSafetySettings,
-		preserveSourceVertexIdentity ? &rawVertexWeldIdentities : nullptr);
+		preserveSourceVertexIdentity ? &rawVertexWeldIdentities : nullptr,
+		outFinalSourceVertexIndices);
 	std::error_code removeError;
 	std::filesystem::remove(stagedObj, removeError);
 	if (outReport != nullptr)
@@ -3682,7 +3844,7 @@ bool CompileMeshFromRaw(
 {
 	return CompileMeshFromRawInternal(
 		logicalSource, output, vertices, indices, false, includeMeshletBounds, outReport,
-		smoothingAngle, weldThreshold, adaptiveSettings, std::move(progressCallback), coneSafetySettings);
+		smoothingAngle, weldThreshold, adaptiveSettings, std::move(progressCallback), coneSafetySettings, nullptr);
 }
 
 namespace
@@ -4067,6 +4229,839 @@ namespace
 		return outHeader.clusterCount != 0u && outHeader.paletteIndexCount != 0u;
 	}
 
+	struct AnimatedVirtualPageCookedBlob
+	{
+		AnimatedVirtualPageDirectoryEntry entry{};
+		std::vector<std::uint8_t> bytes;
+	};
+
+	struct AnimatedVirtualPageCookedSection
+	{
+		AnimatedVirtualPageSectionType type =
+			AnimatedVirtualPageSectionType::PackedVertices;
+		std::uint32_t flags = 1u;
+		std::uint32_t elementCount = 0u;
+		std::uint32_t elementStride = 0u;
+		std::vector<std::uint8_t> bytes;
+	};
+
+	std::uint64_t HashAnimatedVirtualCookBytes(
+		const std::uint8_t* bytes,
+		std::size_t byteCount,
+		std::uint64_t seed = 1469598103934665603ull)
+	{
+		std::uint64_t hash = seed;
+		for (std::size_t index = 0u; index < byteCount; ++index)
+		{
+			hash ^= bytes[index];
+			hash *= 1099511628211ull;
+		}
+		return hash == 0u ? 1u : hash;
+	}
+
+	template <typename Record>
+	std::vector<std::uint8_t> CopyAnimatedVirtualPageRecords(
+		const std::vector<Record>& records)
+	{
+		std::vector<std::uint8_t> bytes(
+			records.size() * sizeof(Record));
+		if (!bytes.empty())
+		{
+			std::memcpy(bytes.data(), records.data(), bytes.size());
+		}
+		return bytes;
+	}
+
+	template <typename Record>
+	bool TryReadAnimatedVirtualPageTable(
+		std::fstream& stream,
+		std::uint32_t offset,
+		std::uint32_t count,
+		std::vector<Record>& output)
+	{
+		output.resize(count);
+		if (output.empty())
+		{
+			return true;
+		}
+		stream.clear();
+		stream.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+		stream.read(
+			reinterpret_cast<char*>(output.data()),
+			static_cast<std::streamsize>(output.size() * sizeof(Record)));
+		return static_cast<bool>(stream);
+	}
+
+	bool TryBuildAnimatedVirtualPageBlobs(
+		std::fstream& stream,
+		const MeshHeader& meshHeader,
+		const SkinnedMeshCookInput& input,
+		const SkinnedMeshCookSettings& settings,
+		const std::vector<SkinnedMeshPalettePartition>& palettes,
+		const std::vector<std::uint32_t>& vertexPaletteIndices,
+		const std::vector<std::uint8_t>& skinningBytes,
+		const std::vector<const SkinnedMeshMorphTarget*>& orderedMorphs,
+		const std::vector<DeformableVirtualGeometryClusterRecord>&
+			deformableClusters,
+		std::uint64_t meshPayloadGeneration,
+		std::vector<AnimatedVirtualPageCookedBlob>& output,
+		std::vector<std::uint32_t>& rootPageIds)
+	{
+		if (meshPayloadGeneration == 0u
+			|| meshHeader.virtualGeometryHeaderOffset == 0u
+			|| meshHeader.layout.strideBytes != kMeshletPackedVertexStrideBytes
+			|| vertexPaletteIndices.size() != input.vertices.size()
+			|| skinningBytes.size()
+				!= input.vertices.size() * sizeof(AnimatedVirtualPageSkinRecord))
+		{
+			return false;
+		}
+
+		VirtualGeometryHeader virtualHeader{};
+		if (!TryReadStagedRecord(
+				stream, meshHeader.virtualGeometryHeaderOffset, virtualHeader)
+			|| virtualHeader.payloadGeneration
+				!= kVirtualGeometryPayloadGeneration)
+		{
+			return false;
+		}
+		std::vector<VirtualGeometryPageRecord> pages;
+		std::vector<VirtualGeometryClusterRecord> clusters;
+		std::vector<VirtualGeometryCullableGroupRecord> groups;
+		std::vector<MeshletRecord> meshlets;
+		std::vector<MeshletBounds> bounds;
+		if (!TryReadAnimatedVirtualPageTable(
+				stream, virtualHeader.pageTableOffset,
+				virtualHeader.pageCount, pages)
+			|| !TryReadAnimatedVirtualPageTable(
+				stream, virtualHeader.clusterTableOffset,
+				virtualHeader.clusterCount, clusters)
+			|| !TryReadAnimatedVirtualPageTable(
+				stream, virtualHeader.cullableGroupTableOffset,
+				virtualHeader.cullableGroupCount, groups)
+			|| !TryReadAnimatedVirtualPageTable(
+				stream, meshHeader.meshletTableOffset,
+				meshHeader.meshletCount, meshlets)
+			|| !TryReadAnimatedVirtualPageTable(
+				stream, meshHeader.meshletBoundsOffset,
+				meshHeader.meshletBoundsCount, bounds)
+			|| pages.empty()
+			|| clusters.size() != deformableClusters.size())
+		{
+			return false;
+		}
+
+		const std::uint32_t remapStride = GetRemapElementSizeBytes(
+			static_cast<MeshletRemapEncoding>(
+				meshHeader.meshletVertexRemapEncoding));
+		if (remapStride == 0u)
+		{
+			return false;
+		}
+		std::vector<std::uint8_t> remapBytes(
+			static_cast<std::size_t>(meshHeader.meshletVertexRemapCount)
+				* remapStride);
+		std::vector<std::uint8_t> primitiveBytes(
+			meshHeader.meshletPrimitiveIndexCount);
+		std::vector<std::uint8_t> packedVertices(
+			static_cast<std::size_t>(meshHeader.meshletVertexCount)
+				* meshHeader.layout.strideBytes);
+		const auto ReadBytes = [&stream](
+			std::uint32_t offset, std::vector<std::uint8_t>& bytes)
+		{
+			if (bytes.empty())
+			{
+				return true;
+			}
+			stream.clear();
+			stream.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+			stream.read(
+				reinterpret_cast<char*>(bytes.data()),
+				static_cast<std::streamsize>(bytes.size()));
+			return static_cast<bool>(stream);
+		};
+		if (!ReadBytes(meshHeader.meshletVertexRemapDataOffset, remapBytes)
+			|| !ReadBytes(
+				meshHeader.meshletPrimitiveIndexDataOffset, primitiveBytes)
+			|| !ReadBytes(meshHeader.meshletVertexDataOffset, packedVertices))
+		{
+			return false;
+		}
+		const auto DecodeRemap = [&](std::uint32_t index,
+			std::uint32_t& sourceVertex)
+		{
+			if (index >= meshHeader.meshletVertexRemapCount)
+			{
+				return false;
+			}
+			const std::size_t byteOffset =
+				static_cast<std::size_t>(index) * remapStride;
+			if (remapStride == sizeof(std::uint16_t))
+			{
+				std::uint16_t compact = 0u;
+				std::memcpy(
+					&compact, remapBytes.data() + byteOffset,
+					sizeof(compact));
+				sourceVertex = compact;
+			}
+			else
+			{
+				std::memcpy(
+					&sourceVertex, remapBytes.data() + byteOffset,
+					sizeof(sourceVertex));
+			}
+			return sourceVertex < meshHeader.meshletVertexCount;
+		};
+
+		output.clear();
+		rootPageIds.clear();
+		output.reserve(pages.size());
+		for (const VirtualGeometryPageRecord& page : pages)
+		{
+			if (page.pageId >= pages.size()
+				|| page.groupOffset > groups.size()
+				|| page.groupCount == 0u
+				|| page.groupCount > groups.size() - page.groupOffset)
+			{
+				return false;
+			}
+			const auto clusterIt = std::find_if(
+				clusters.begin(), clusters.end(),
+				[&page](const VirtualGeometryClusterRecord& cluster)
+				{
+					return cluster.pageId == page.pageId;
+				});
+			if (clusterIt == clusters.end()
+				|| clusterIt->clusterId >= deformableClusters.size())
+			{
+				return false;
+			}
+
+			std::vector<std::uint32_t> sourceVertices;
+			std::unordered_map<std::uint32_t, std::uint32_t> localVertexBySource;
+			std::vector<std::uint32_t> localRemap;
+			std::vector<MeshletRecord> localMeshlets;
+			std::vector<MeshletBounds> localBounds;
+			std::vector<std::uint8_t> localPrimitives;
+			for (std::uint32_t groupIndex = page.groupOffset;
+				groupIndex < page.groupOffset + page.groupCount; ++groupIndex)
+			{
+				const VirtualGeometryCullableGroupRecord& group =
+					groups[groupIndex];
+				if (group.groupIndex >= meshlets.size())
+				{
+					return false;
+				}
+				MeshletRecord localMeshlet = meshlets[group.groupIndex];
+				if (localMeshlet.vertexOffset
+						> meshHeader.meshletVertexRemapCount
+					|| localMeshlet.vertexCount
+						> meshHeader.meshletVertexRemapCount
+							- localMeshlet.vertexOffset
+					|| localMeshlet.primitiveIndexOffset
+						> primitiveBytes.size()
+					|| localMeshlet.primitiveIndexCount
+						> primitiveBytes.size()
+							- localMeshlet.primitiveIndexOffset)
+				{
+					return false;
+				}
+				localMeshlet.vertexOffset =
+					static_cast<std::uint32_t>(localRemap.size());
+				for (std::uint32_t vertex = 0u;
+					vertex < meshlets[group.groupIndex].vertexCount; ++vertex)
+				{
+					std::uint32_t sourceVertex = 0u;
+					if (!DecodeRemap(
+						meshlets[group.groupIndex].vertexOffset + vertex,
+						sourceVertex))
+					{
+						return false;
+					}
+					auto [iterator, inserted] = localVertexBySource.emplace(
+						sourceVertex,
+						static_cast<std::uint32_t>(sourceVertices.size()));
+					if (inserted)
+					{
+						sourceVertices.push_back(sourceVertex);
+					}
+					localRemap.push_back(iterator->second);
+				}
+				localMeshlet.primitiveIndexOffset =
+					static_cast<std::uint32_t>(localPrimitives.size());
+				const std::size_t primitiveBegin =
+					meshlets[group.groupIndex].primitiveIndexOffset;
+				localPrimitives.insert(
+					localPrimitives.end(),
+					primitiveBytes.begin()
+						+ static_cast<std::ptrdiff_t>(primitiveBegin),
+					primitiveBytes.begin()
+						+ static_cast<std::ptrdiff_t>(
+							primitiveBegin
+							+ meshlets[group.groupIndex]
+								.primitiveIndexCount));
+				localMeshlets.push_back(localMeshlet);
+				if (group.groupIndex < bounds.size())
+				{
+					localBounds.push_back(bounds[group.groupIndex]);
+				}
+			}
+			if (sourceVertices.empty() || localMeshlets.empty()
+				|| localPrimitives.empty())
+			{
+				return false;
+			}
+
+			std::vector<std::uint8_t> localPackedVertices;
+			std::vector<AnimatedVirtualPageSourceVertexRecord> sourceIds;
+			localPackedVertices.reserve(
+				sourceVertices.size() * meshHeader.layout.strideBytes);
+			sourceIds.reserve(sourceVertices.size());
+			for (std::uint32_t sourceVertex : sourceVertices)
+			{
+				const std::size_t begin =
+					static_cast<std::size_t>(sourceVertex)
+						* meshHeader.layout.strideBytes;
+				localPackedVertices.insert(
+					localPackedVertices.end(),
+					packedVertices.begin()
+						+ static_cast<std::ptrdiff_t>(begin),
+					packedVertices.begin()
+						+ static_cast<std::ptrdiff_t>(
+							begin + meshHeader.layout.strideBytes));
+				sourceIds.push_back({ sourceVertex });
+			}
+
+			// Rewrite partition-local influences into one page-local joint palette.
+			// This makes the blob independent of the owner TDEF palette tables.
+			std::vector<std::uint32_t> pageJointPalette;
+			std::unordered_map<std::uint32_t, std::uint8_t>
+				localJointByPaletteEntry;
+			std::vector<AnimatedVirtualPageSkinRecord> localSkin;
+			std::uint32_t pagePalettePartition =
+				kVirtualGeometryInvalidIndex;
+			localSkin.reserve(sourceVertices.size());
+			for (std::uint32_t sourceVertex : sourceVertices)
+			{
+				const std::uint32_t partition =
+					vertexPaletteIndices[sourceVertex];
+				if (partition >= palettes.size())
+				{
+					return false;
+				}
+				if (pagePalettePartition
+					== kVirtualGeometryInvalidIndex)
+				{
+					pagePalettePartition = partition;
+				}
+				else if (pagePalettePartition != partition)
+				{
+					// Version one animation palette dispatches one cooked
+					// partition per work packet. A physical page must therefore
+					// be split by the cooker before it crosses that boundary.
+					return false;
+				}
+				AnimatedVirtualPageSkinRecord record{};
+				const std::uint8_t* sourceSkin =
+					skinningBytes.data()
+					+ static_cast<std::size_t>(sourceVertex)
+						* sizeof(AnimatedVirtualPageSkinRecord);
+				for (std::uint32_t influence = 0u; influence < 4u;
+					++influence)
+				{
+					record.normalizedWeights[influence] =
+						sourceSkin[4u + influence];
+					if (record.normalizedWeights[influence] == 0u)
+					{
+						continue;
+					}
+					const std::uint32_t partitionJoint =
+						sourceSkin[influence];
+					if (partitionJoint
+						>= palettes[partition].sourceJointIds.size())
+					{
+						return false;
+					}
+					auto found =
+						localJointByPaletteEntry.find(partitionJoint);
+					if (found
+						== localJointByPaletteEntry.end())
+					{
+						if (pageJointPalette.size()
+							>= kAnimatedVirtualPageMaximumLocalJoints)
+						{
+							return false;
+						}
+						const std::uint8_t localJoint =
+							static_cast<std::uint8_t>(
+								pageJointPalette.size());
+						// Store the evaluator palette entry, not the skeleton
+						// joint id. Compute can then gather the correct 3x4
+						// matrix without owner TDEF tables or CPU readback.
+						pageJointPalette.push_back(partitionJoint);
+						found =
+							localJointByPaletteEntry.emplace(
+								partitionJoint, localJoint).first;
+					}
+					record.localJointIndices[influence] = found->second;
+				}
+				localSkin.push_back(record);
+			}
+
+			std::vector<AnimatedVirtualPageMorphRecord> localMorphs;
+			std::vector<DeformableVirtualGeometryMorphVertex> localMorphDeltas;
+			for (const SkinnedMeshMorphTarget* morph : orderedMorphs)
+			{
+				const std::size_t deltaStart = localMorphDeltas.size();
+				bool affected = false;
+				for (std::uint32_t sourceVertex : sourceVertices)
+				{
+					DeformableVirtualGeometryMorphVertex delta{};
+					std::copy_n(
+						morph->positionDeltas[sourceVertex].begin(),
+						3u, delta.positionDelta);
+					if (!morph->normalDeltas.empty())
+					{
+						std::copy_n(
+							morph->normalDeltas[sourceVertex].begin(),
+							3u, delta.normalDelta);
+					}
+					if (!morph->tangentDeltas.empty())
+					{
+						std::copy_n(
+							morph->tangentDeltas[sourceVertex].begin(),
+							3u, delta.tangentDelta);
+					}
+					const std::uint8_t* deltaBytes =
+						reinterpret_cast<const std::uint8_t*>(&delta);
+					affected = affected || std::any_of(
+						deltaBytes,
+						deltaBytes + sizeof(delta),
+						[](std::uint8_t value) { return value != 0u; });
+					localMorphDeltas.push_back(delta);
+				}
+				if (!affected)
+				{
+					localMorphDeltas.resize(deltaStart);
+					continue;
+				}
+				std::uint32_t flags =
+					kDeformableVirtualGeometryMorphFlagPosition;
+				if (!morph->normalDeltas.empty())
+				{
+					flags |=
+						kDeformableVirtualGeometryMorphFlagNormal;
+				}
+				if (!morph->tangentDeltas.empty())
+				{
+					flags |=
+						kDeformableVirtualGeometryMorphFlagTangent;
+				}
+				localMorphs.push_back({
+					morph->stableTargetId,
+					static_cast<std::uint32_t>(
+						deltaStart
+						* sizeof(
+							DeformableVirtualGeometryMorphVertex)),
+					static_cast<std::uint32_t>(sourceVertices.size()),
+					static_cast<std::uint32_t>(
+						sizeof(
+							DeformableVirtualGeometryMorphVertex)),
+					flags });
+			}
+
+			std::vector<AnimatedVirtualPageCookedSection> sections;
+			const auto AddSection = [&sections](
+				AnimatedVirtualPageSectionType type,
+				std::uint32_t count,
+				std::uint32_t stride,
+				std::vector<std::uint8_t> bytes)
+			{
+				if (count == 0u || stride == 0u || bytes.empty())
+				{
+					return;
+				}
+				sections.push_back({
+					type, 1u, count, stride, std::move(bytes) });
+			};
+			AddSection(
+				AnimatedVirtualPageSectionType::PackedVertices,
+				static_cast<std::uint32_t>(sourceVertices.size()),
+				meshHeader.layout.strideBytes,
+				std::move(localPackedVertices));
+			// Capture the count before moving the byte vector. C++ does not
+			// guarantee function-argument evaluation order, so reading size()
+			// in the same call as a by-value move can otherwise observe zero.
+			const std::uint32_t localPrimitiveByteCount =
+				static_cast<std::uint32_t>(localPrimitives.size());
+			AddSection(
+				AnimatedVirtualPageSectionType::PrimitiveBytes,
+				localPrimitiveByteCount,
+				sizeof(std::uint8_t), std::move(localPrimitives));
+			AddSection(
+				AnimatedVirtualPageSectionType::VertexRemap,
+				static_cast<std::uint32_t>(localRemap.size()),
+				sizeof(std::uint32_t),
+				CopyAnimatedVirtualPageRecords(localRemap));
+			AddSection(
+				AnimatedVirtualPageSectionType::Meshlets,
+				static_cast<std::uint32_t>(localMeshlets.size()),
+				sizeof(MeshletRecord),
+				CopyAnimatedVirtualPageRecords(localMeshlets));
+			AddSection(
+				AnimatedVirtualPageSectionType::MeshletBounds,
+				static_cast<std::uint32_t>(localBounds.size()),
+				sizeof(MeshletBounds),
+				CopyAnimatedVirtualPageRecords(localBounds));
+			std::vector<QuantizationInfo> decodeConstants{
+				meshHeader.quantization };
+			AddSection(
+				AnimatedVirtualPageSectionType::DecodeConstants,
+				1u, sizeof(QuantizationInfo),
+				CopyAnimatedVirtualPageRecords(decodeConstants));
+			std::vector<std::uint32_t> materialIds{
+				clusterIt->materialSectionId };
+			AddSection(
+				AnimatedVirtualPageSectionType::Materials,
+				1u, sizeof(std::uint32_t),
+				CopyAnimatedVirtualPageRecords(materialIds));
+			AddSection(
+				AnimatedVirtualPageSectionType::SkinRecords,
+				static_cast<std::uint32_t>(localSkin.size()),
+				sizeof(AnimatedVirtualPageSkinRecord),
+				CopyAnimatedVirtualPageRecords(localSkin));
+			AddSection(
+				AnimatedVirtualPageSectionType::JointPalette,
+				static_cast<std::uint32_t>(pageJointPalette.size()),
+				sizeof(std::uint32_t),
+				CopyAnimatedVirtualPageRecords(pageJointPalette));
+			AddSection(
+				AnimatedVirtualPageSectionType::MorphTargets,
+				static_cast<std::uint32_t>(localMorphs.size()),
+				sizeof(AnimatedVirtualPageMorphRecord),
+				CopyAnimatedVirtualPageRecords(localMorphs));
+			AddSection(
+				AnimatedVirtualPageSectionType::MorphDeltas,
+				static_cast<std::uint32_t>(localMorphDeltas.size()),
+				sizeof(DeformableVirtualGeometryMorphVertex),
+				CopyAnimatedVirtualPageRecords(localMorphDeltas));
+			AddSection(
+				AnimatedVirtualPageSectionType::SourceVertexIds,
+				static_cast<std::uint32_t>(sourceIds.size()),
+				sizeof(AnimatedVirtualPageSourceVertexRecord),
+				CopyAnimatedVirtualPageRecords(sourceIds));
+			std::vector<VirtualGeometryClusterRecord> localClusters{
+				*clusterIt };
+			AddSection(
+				AnimatedVirtualPageSectionType::Clusters,
+				1u, sizeof(VirtualGeometryClusterRecord),
+				CopyAnimatedVirtualPageRecords(localClusters));
+			std::vector<std::array<float, 2>> errorSamples{ {
+				clusterIt->geometricError,
+				deformableClusters[clusterIt->clusterId]
+					.deformationError } };
+			AddSection(
+				AnimatedVirtualPageSectionType::ErrorSamples,
+				1u, sizeof(std::array<float, 2>),
+				CopyAnimatedVirtualPageRecords(errorSamples));
+			if (sections.size()
+				> kAnimatedVirtualPageMaximumSections)
+			{
+				return false;
+			}
+
+			AnimatedVirtualPageCookedBlob cooked;
+			AnimatedVirtualPageBlobHeader blobHeader{};
+			blobHeader.magic =
+				kAnimatedVirtualPageBlobMagicValue;
+			blobHeader.version =
+				kAnimatedVirtualPageFormatVersion;
+			blobHeader.headerSize =
+				sizeof(AnimatedVirtualPageBlobHeader);
+			blobHeader.flags =
+				kAnimatedVirtualPageFlagAnimated
+				| kAnimatedVirtualPageFlagHasSkinning
+				| (localMorphs.empty()
+					? 0u
+					: kAnimatedVirtualPageFlagHasMorphs)
+				| kAnimatedVirtualPageFlagHasErrorSamples;
+			if (page.fallbackPageId == page.pageId)
+			{
+				blobHeader.flags |=
+					kAnimatedVirtualPageFlagPinnedFallback;
+				rootPageIds.push_back(page.pageId);
+			}
+			blobHeader.pageId = page.pageId;
+			blobHeader.sectionCount =
+				static_cast<std::uint32_t>(sections.size());
+			blobHeader.sectionTableOffset =
+				sizeof(AnimatedVirtualPageBlobHeader);
+			blobHeader.meshPayloadGeneration =
+				meshPayloadGeneration;
+			std::uint64_t contentGeneration =
+				HashAnimatedVirtualCookBytes(
+					reinterpret_cast<const std::uint8_t*>(
+						&page.pageId),
+					sizeof(page.pageId),
+					meshPayloadGeneration);
+			for (const AnimatedVirtualPageCookedSection& section :
+				sections)
+			{
+				contentGeneration = HashAnimatedVirtualCookBytes(
+					section.bytes.data(), section.bytes.size(),
+					contentGeneration);
+			}
+			blobHeader.contentGeneration = contentGeneration;
+			blobHeader.skeletonCompatibilityFingerprint =
+				settings.skeletonCompatibilityFingerprint;
+			blobHeader.contentHash = contentGeneration;
+
+			std::uint32_t blobCursor = AlignUp(
+				static_cast<std::uint32_t>(
+					sizeof(AnimatedVirtualPageBlobHeader)
+					+ sections.size()
+						* sizeof(AnimatedVirtualPageSectionRecord)),
+				16u);
+			std::vector<AnimatedVirtualPageSectionRecord>
+				sectionRecords;
+			sectionRecords.reserve(sections.size());
+			for (const AnimatedVirtualPageCookedSection& section :
+				sections)
+			{
+				blobCursor = AlignUp(blobCursor, 16u);
+				sectionRecords.push_back({
+					static_cast<std::uint32_t>(section.type),
+					section.flags,
+					blobCursor,
+					section.bytes.size(),
+					section.elementCount,
+					section.elementStride });
+				if (section.bytes.size()
+					> std::numeric_limits<std::uint32_t>::max()
+						- blobCursor)
+				{
+					return false;
+				}
+				blobCursor +=
+					static_cast<std::uint32_t>(section.bytes.size());
+			}
+			blobHeader.byteSize = blobCursor;
+			cooked.bytes.resize(blobCursor, 0u);
+			std::memcpy(
+				cooked.bytes.data(), &blobHeader,
+				sizeof(blobHeader));
+			std::memcpy(
+				cooked.bytes.data()
+					+ blobHeader.sectionTableOffset,
+				sectionRecords.data(),
+				sectionRecords.size()
+					* sizeof(AnimatedVirtualPageSectionRecord));
+			for (std::size_t index = 0u;
+				index < sections.size(); ++index)
+			{
+				std::memcpy(
+					cooked.bytes.data()
+						+ sectionRecords[index].byteOffset,
+					sections[index].bytes.data(),
+					sections[index].bytes.size());
+			}
+
+			const DeformableVirtualGeometryClusterRecord&
+				deformable =
+					deformableClusters[clusterIt->clusterId];
+			cooked.entry.pageId = page.pageId;
+			cooked.entry.parentPageId =
+				clusterIt->parentClusterId
+					== kVirtualGeometryInvalidIndex
+				? kVirtualGeometryInvalidIndex
+				: clusters[clusterIt->parentClusterId].pageId;
+			cooked.entry.fallbackPageId =
+				page.fallbackPageId;
+			cooked.entry.flags = blobHeader.flags;
+			cooked.entry.blobSize = cooked.bytes.size();
+			cooked.entry.blobHash =
+				HashAnimatedVirtualCookBytes(
+					cooked.bytes.data(), cooked.bytes.size());
+			cooked.entry.contentGeneration =
+				contentGeneration;
+			cooked.entry.clusterOffset =
+				clusterIt->clusterId;
+			cooked.entry.clusterCount = 1u;
+			cooked.entry.materialSectionId =
+				clusterIt->materialSectionId;
+			cooked.entry.skeletonCompatibilityFingerprint =
+				settings.skeletonCompatibilityFingerprint;
+			std::copy_n(
+				deformable.deformationBoundsMin, 3u,
+				cooked.entry.conservativeBoundsMin);
+			std::copy_n(
+				deformable.deformationBoundsMax, 3u,
+				cooked.entry.conservativeBoundsMax);
+			cooked.entry.geometricError =
+				clusterIt->geometricError;
+			cooked.entry.deformationError =
+				deformable.deformationError;
+			output.push_back(std::move(cooked));
+		}
+		return !output.empty() && !rootPageIds.empty();
+	}
+
+	bool TryWriteAnimatedVirtualPageDirectory(
+		std::fstream& stream,
+		std::uint64_t extensionEnd,
+		std::uint64_t meshPayloadGeneration,
+		std::vector<AnimatedVirtualPageCookedBlob>& pages,
+		const std::vector<std::uint32_t>& rootPageIds,
+		std::uint64_t& outputEnd)
+	{
+		std::uint32_t directoryOffset = 0u;
+		if (!TryAlignSkinnedOffset(
+			extensionEnd, 16u, directoryOffset)
+			|| pages.empty() || rootPageIds.empty())
+		{
+			return false;
+		}
+		const std::uint64_t pageTableOffset =
+			static_cast<std::uint64_t>(directoryOffset)
+			+ sizeof(AnimatedVirtualPageDirectoryHeader);
+		const std::uint64_t rootTableOffset =
+			pageTableOffset
+			+ pages.size()
+				* sizeof(AnimatedVirtualPageDirectoryEntry);
+		std::uint32_t blobCursor = 0u;
+		if (!TryAlignSkinnedOffset(
+			rootTableOffset
+				+ rootPageIds.size()
+					* sizeof(std::uint32_t),
+			16u, blobCursor))
+		{
+			return false;
+		}
+		for (AnimatedVirtualPageCookedBlob& page : pages)
+		{
+			page.entry.blobOffset = blobCursor;
+			if (page.bytes.size()
+				> std::numeric_limits<std::uint32_t>::max()
+					- blobCursor)
+			{
+				return false;
+			}
+			blobCursor = AlignUp(
+				blobCursor
+					+ static_cast<std::uint32_t>(
+						page.bytes.size()),
+				16u);
+		}
+
+		AnimatedVirtualPageDirectoryHeader directory{};
+		directory.magic =
+			kAnimatedVirtualPageDirectoryMagicValue;
+		directory.version =
+			kAnimatedVirtualPageFormatVersion;
+		directory.headerSize =
+			sizeof(AnimatedVirtualPageDirectoryHeader);
+		directory.payloadSize =
+			static_cast<std::uint32_t>(
+				rootTableOffset
+				+ rootPageIds.size()
+					* sizeof(std::uint32_t)
+				- directoryOffset);
+		directory.pageCount =
+			static_cast<std::uint32_t>(pages.size());
+		directory.pageTableOffset =
+			static_cast<std::uint32_t>(pageTableOffset);
+		directory.rootPageCount =
+			static_cast<std::uint32_t>(rootPageIds.size());
+		directory.rootPageTableOffset =
+			static_cast<std::uint32_t>(rootTableOffset);
+		directory.flags =
+			kAnimatedVirtualPageFlagAnimated
+			| kAnimatedVirtualPageFlagHasSkinning;
+		directory.meshPayloadGeneration =
+			meshPayloadGeneration;
+		std::vector<AnimatedVirtualPageDirectoryEntry> entries;
+		entries.reserve(pages.size());
+		for (const AnimatedVirtualPageCookedBlob& page : pages)
+		{
+			entries.push_back(page.entry);
+		}
+		directory.directoryHash =
+			HashAnimatedVirtualCookBytes(
+				reinterpret_cast<const std::uint8_t*>(
+					entries.data()),
+				entries.size()
+					* sizeof(
+						AnimatedVirtualPageDirectoryEntry));
+		directory.directoryHash =
+			HashAnimatedVirtualCookBytes(
+				reinterpret_cast<const std::uint8_t*>(
+					rootPageIds.data()),
+				rootPageIds.size() * sizeof(std::uint32_t),
+				directory.directoryHash);
+
+		stream.clear();
+		stream.seekp(0, std::ios::end);
+		const std::streamoff current = stream.tellp();
+		if (current < 0
+			|| static_cast<std::uint64_t>(current)
+				> directoryOffset)
+		{
+			return false;
+		}
+		std::vector<char> padding(
+			static_cast<std::size_t>(
+				directoryOffset
+				- static_cast<std::uint64_t>(current)),
+			0);
+		stream.write(
+			padding.data(),
+			static_cast<std::streamsize>(padding.size()));
+		stream.write(
+			reinterpret_cast<const char*>(&directory),
+			sizeof(directory));
+		stream.write(
+			reinterpret_cast<const char*>(entries.data()),
+			static_cast<std::streamsize>(
+				entries.size()
+				* sizeof(
+					AnimatedVirtualPageDirectoryEntry)));
+		stream.write(
+			reinterpret_cast<const char*>(rootPageIds.data()),
+			static_cast<std::streamsize>(
+				rootPageIds.size()
+					* sizeof(std::uint32_t)));
+		for (const AnimatedVirtualPageCookedBlob& page : pages)
+		{
+			const std::streamoff beforePage = stream.tellp();
+			if (beforePage < 0
+				|| static_cast<std::uint64_t>(beforePage)
+					> page.entry.blobOffset)
+			{
+				return false;
+			}
+			padding.assign(
+				static_cast<std::size_t>(
+					page.entry.blobOffset
+						- static_cast<std::uint64_t>(
+							beforePage)),
+				0);
+			stream.write(
+				padding.data(),
+				static_cast<std::streamsize>(padding.size()));
+			stream.write(
+				reinterpret_cast<const char*>(
+					page.bytes.data()),
+				static_cast<std::streamsize>(
+					page.bytes.size()));
+		}
+		stream.flush();
+		outputEnd = static_cast<std::uint64_t>(
+			stream.tellp());
+		return static_cast<bool>(stream)
+			&& outputEnd
+				<= std::numeric_limits<std::uint32_t>::max();
+	}
+
 	bool TryAppendDeformablePayload(
 		const std::filesystem::path& stagedPath,
 		const SkinnedMeshCookInput& input,
@@ -4312,6 +5307,66 @@ namespace
 			}
 		}
 
+		// Match ResourceManager's accepted deformation generation byte-for-byte:
+		// skin stream first, followed by the complete frozen TDEF v1 payload.
+		std::uint64_t meshPayloadGeneration = 14695981039346656037ull;
+		const auto HashGenerationBytes = [&meshPayloadGeneration](
+			const void* bytes, std::size_t byteCount)
+		{
+			const std::uint8_t* values =
+				static_cast<const std::uint8_t*>(bytes);
+			for (std::size_t index = 0u; index < byteCount; ++index)
+			{
+				meshPayloadGeneration ^= values[index];
+				meshPayloadGeneration *= 1099511628211ull;
+			}
+		};
+		HashGenerationBytes(skinningBytes.data(), skinningBytes.size());
+		HashGenerationBytes(&metadata, sizeof(metadata));
+		HashGenerationBytes(
+			paletteRecords.data(),
+			paletteRecords.size() * sizeof(DeformableMeshPaletteRecord));
+		HashGenerationBytes(
+			morphRecords.data(),
+			morphRecords.size() * sizeof(DeformableMeshMorphRecord));
+		for (const SkinnedMeshPalettePartition& palette : palettes)
+		{
+			HashGenerationBytes(
+				palette.sourceJointIds.data(),
+				palette.sourceJointIds.size() * sizeof(std::uint32_t));
+		}
+		HashGenerationBytes(
+			vertexPaletteIndices.data(),
+			vertexPaletteIndices.size() * sizeof(std::uint32_t));
+		for (const SkinnedMeshMorphTarget* morph : orderedMorphs)
+		{
+			HashGenerationBytes(
+				morph->positionDeltas.data(),
+				morph->positionDeltas.size()
+					* sizeof(std::array<float, 3>));
+		}
+		if (meshPayloadGeneration == 0u)
+		{
+			meshPayloadGeneration = 1u;
+		}
+		std::vector<AnimatedVirtualPageCookedBlob>
+			animatedPageBlobs;
+		std::vector<std::uint32_t> animatedRootPageIds;
+		const bool hasAnimatedPhysicalPages =
+			TryBuildAnimatedVirtualPageBlobs(
+			stream,
+			header,
+			input,
+			settings,
+			palettes,
+			vertexPaletteIndices,
+			skinningBytes,
+			orderedMorphs,
+			virtualGeometryClusters,
+			meshPayloadGeneration,
+			animatedPageBlobs,
+			animatedRootPageIds);
+
 		// Append all extension data before rewriting the small root header. A crash
 		// can only damage this private staged file; the published TEMF is untouched.
 		stream.clear();
@@ -4357,6 +5412,23 @@ namespace
 		if (!stream || writtenEnd < 0 || static_cast<std::uint64_t>(writtenEnd) != stagedPayloadEnd)
 		{
 			return false;
+		}
+		if (hasAnimatedPhysicalPages)
+		{
+			std::uint64_t animatedPayloadEnd = 0u;
+			if (!TryWriteAnimatedVirtualPageDirectory(
+				stream,
+				stagedPayloadEnd,
+				meshPayloadGeneration,
+				animatedPageBlobs,
+				animatedRootPageIds,
+				animatedPayloadEnd)
+				|| animatedPayloadEnd <= stagedPayloadEnd)
+			{
+				outFailure =
+					SkinnedMeshCookFailure::StagedPayloadWriteFailed;
+				return false;
+			}
 		}
 
 		// Read the staged header back from disk before publishing its root pointer.
@@ -4962,22 +6034,123 @@ bool CompileSkinnedMeshFromRaw(
 		}
 	}
 
-	// Canonicalize used vertices by first primitive occurrence. The static mesh
-	// optimizer also assigns surviving vertices by first occurrence, so the
-	// appended skin/morph streams stay aligned whenever the static attributes do
-	// not require a deformation-unsafe merge or split. Such a mismatch is rejected
-	// after the static stage rather than publishing misbound animation data.
+	// Canonicalize used vertices by first primitive occurrence. Some glTF assets,
+	// including the Khronos Fox sample, store every triangle corner as a separate
+	// unindexed vertex. Preserving those source indices verbatim makes every edge
+	// look like a locked border and prevents meshoptimizer from generating any LOD.
+	//
+	// Merge only records that are byte-identical in every renderer-visible input:
+	// base geometry, palette-local skinning, and all morph channels. This rebuilds
+	// safe topology without ever borrowing a different vertex's deformation data.
+	// The loop remains sequential because first occurrence defines the stable TEMF
+	// vertex order consumed by the skin, morph, and animated-page tables.
 	SkinnedMeshCookInput stagedInput;
 	stagedInput.indices.reserve(input.indices.size());
 	std::vector<std::uint32_t> sourceToStaged(input.vertices.size(), kInvalidPalettePartition);
 	std::vector<std::uint32_t> stagedToSource;
+	std::unordered_map<std::uint64_t, std::vector<std::uint32_t>> stagedVerticesBySignature;
+	const auto HashSourceVertex = [&](std::uint32_t sourceIndex) {
+		const RawMeshVertex& base = input.vertices[sourceIndex].baseVertex;
+		std::uint64_t hash = HashAnimatedVirtualCookBytes(
+			reinterpret_cast<const std::uint8_t*>(base.position.data()),
+			sizeof(base.position));
+		hash = HashAnimatedVirtualCookBytes(
+			reinterpret_cast<const std::uint8_t*>(base.normal.data()),
+			sizeof(base.normal),
+			hash);
+		hash = HashAnimatedVirtualCookBytes(
+			reinterpret_cast<const std::uint8_t*>(base.uv.data()),
+			sizeof(base.uv),
+			hash);
+		hash = HashAnimatedVirtualCookBytes(
+			reinterpret_cast<const std::uint8_t*>(&vertexPalette[sourceIndex]),
+			sizeof(vertexPalette[sourceIndex]),
+			hash);
+		hash = HashAnimatedVirtualCookBytes(
+			sourceSkinningBytes.data()
+				+ static_cast<std::size_t>(sourceIndex) * kDeformableMeshSkinningStrideBytes,
+			kDeformableMeshSkinningStrideBytes,
+			hash);
+		for (const SkinnedMeshMorphTarget& morph : input.morphTargets)
+		{
+			hash = HashAnimatedVirtualCookBytes(
+				reinterpret_cast<const std::uint8_t*>(morph.positionDeltas[sourceIndex].data()),
+				sizeof(morph.positionDeltas[sourceIndex]),
+				hash);
+			if (!morph.normalDeltas.empty())
+			{
+				hash = HashAnimatedVirtualCookBytes(
+					reinterpret_cast<const std::uint8_t*>(morph.normalDeltas[sourceIndex].data()),
+					sizeof(morph.normalDeltas[sourceIndex]),
+					hash);
+			}
+			if (!morph.tangentDeltas.empty())
+			{
+				hash = HashAnimatedVirtualCookBytes(
+					reinterpret_cast<const std::uint8_t*>(morph.tangentDeltas[sourceIndex].data()),
+					sizeof(morph.tangentDeltas[sourceIndex]),
+					hash);
+			}
+		}
+		return hash;
+	};
+	const auto SourceVerticesMatch = [&](std::uint32_t left, std::uint32_t right) {
+		const RawMeshVertex& leftBase = input.vertices[left].baseVertex;
+		const RawMeshVertex& rightBase = input.vertices[right].baseVertex;
+		if (std::memcmp(leftBase.position.data(), rightBase.position.data(), sizeof(leftBase.position)) != 0
+			|| std::memcmp(leftBase.normal.data(), rightBase.normal.data(), sizeof(leftBase.normal)) != 0
+			|| std::memcmp(leftBase.uv.data(), rightBase.uv.data(), sizeof(leftBase.uv)) != 0
+			|| vertexPalette[left] != vertexPalette[right]
+			|| std::memcmp(
+				sourceSkinningBytes.data() + static_cast<std::size_t>(left) * kDeformableMeshSkinningStrideBytes,
+				sourceSkinningBytes.data() + static_cast<std::size_t>(right) * kDeformableMeshSkinningStrideBytes,
+				kDeformableMeshSkinningStrideBytes) != 0)
+		{
+			return false;
+		}
+		for (const SkinnedMeshMorphTarget& morph : input.morphTargets)
+		{
+			if (std::memcmp(
+					morph.positionDeltas[left].data(),
+					morph.positionDeltas[right].data(),
+					sizeof(morph.positionDeltas[left])) != 0
+				|| (!morph.normalDeltas.empty()
+					&& std::memcmp(
+						morph.normalDeltas[left].data(),
+						morph.normalDeltas[right].data(),
+						sizeof(morph.normalDeltas[left])) != 0)
+				|| (!morph.tangentDeltas.empty()
+					&& std::memcmp(
+						morph.tangentDeltas[left].data(),
+						morph.tangentDeltas[right].data(),
+						sizeof(morph.tangentDeltas[left])) != 0))
+			{
+				return false;
+			}
+		}
+		return true;
+	};
 	for (std::uint32_t sourceIndex : input.indices)
 	{
 		if (sourceToStaged[sourceIndex] == kInvalidPalettePartition)
 		{
-			sourceToStaged[sourceIndex] = static_cast<std::uint32_t>(stagedInput.vertices.size());
-			stagedInput.vertices.push_back(input.vertices[sourceIndex]);
-			stagedToSource.push_back(sourceIndex);
+			const std::uint64_t signature = HashSourceVertex(sourceIndex);
+			std::vector<std::uint32_t>& candidates = stagedVerticesBySignature[signature];
+			for (std::uint32_t candidate : candidates)
+			{
+				if (SourceVerticesMatch(sourceIndex, stagedToSource[candidate]))
+				{
+					sourceToStaged[sourceIndex] = candidate;
+					break;
+				}
+			}
+			if (sourceToStaged[sourceIndex] == kInvalidPalettePartition)
+			{
+				sourceToStaged[sourceIndex] = static_cast<std::uint32_t>(stagedInput.vertices.size());
+				stagedInput.vertices.push_back(input.vertices[sourceIndex]);
+				stagedToSource.push_back(sourceIndex);
+				candidates.push_back(sourceToStaged[sourceIndex]);
+			}
 		}
 		stagedInput.indices.push_back(sourceToStaged[sourceIndex]);
 	}
@@ -5068,6 +6241,7 @@ bool CompileSkinnedMeshFromRaw(
 	std::error_code ignored;
 	std::filesystem::remove(stagePath, ignored);
 	MeshCompileReport staticReport{};
+	std::vector<std::uint32_t> finalVertexToStagedVertex;
 	if (!CompileMeshFromRawInternal(
 		logicalSource,
 		stagePath,
@@ -5078,9 +6252,10 @@ bool CompileSkinnedMeshFromRaw(
 		&staticReport,
 		60.0f,
 		1e-6f,
-		nullptr,
+		&settings.virtualGeometrySettings,
 		{},
-		nullptr))
+		nullptr,
+		&finalVertexToStagedVertex))
 	{
 		std::filesystem::remove(stagePath, ignored);
 		SetDiagnostic(
@@ -5089,14 +6264,77 @@ bool CompileSkinnedMeshFromRaw(
 			"Resolve the reported static geometry error and retry the package cook.");
 		return Finish(false, SkinnedMeshCookFailure::StaticMeshCookFailed);
 	}
+	SkinnedMeshCookInput payloadInput;
+	payloadInput.indices = stagedInput.indices;
+	payloadInput.vertices.reserve(finalVertexToStagedVertex.size());
+	std::vector<std::uint8_t> payloadSkinningBytes;
+	payloadSkinningBytes.reserve(
+		finalVertexToStagedVertex.size()
+			* kDeformableMeshSkinningStrideBytes);
+	std::vector<std::uint32_t> payloadVertexPalettes;
+	payloadVertexPalettes.reserve(finalVertexToStagedVertex.size());
+	for (const SkinnedMeshMorphTarget& stagedMorph : stagedInput.morphTargets)
+	{
+		SkinnedMeshMorphTarget payloadMorph;
+		payloadMorph.stableTargetId = stagedMorph.stableTargetId;
+		payloadMorph.positionDeltas.reserve(finalVertexToStagedVertex.size());
+		payloadMorph.normalDeltas.reserve(
+			stagedMorph.normalDeltas.empty() ? 0u : finalVertexToStagedVertex.size());
+		payloadMorph.tangentDeltas.reserve(
+			stagedMorph.tangentDeltas.empty() ? 0u : finalVertexToStagedVertex.size());
+		payloadInput.morphTargets.push_back(std::move(payloadMorph));
+	}
+	for (const std::uint32_t stagedVertex : finalVertexToStagedVertex)
+	{
+		if (stagedVertex >= stagedInput.vertices.size()
+			|| stagedVertex >= stagedVertexPalettes.size())
+		{
+			std::filesystem::remove(stagePath, ignored);
+			SetDiagnostic(
+				"SkinnedMeshStaticVertexLayoutIncompatible",
+				"Static cleanup emitted a vertex without a valid deformation-source mapping.",
+				"Reimport the source mesh after rebuilding the mesh compiler and runtime from the same revision.");
+			return Finish(false, SkinnedMeshCookFailure::StaticVertexLayoutIncompatible);
+		}
+		payloadInput.vertices.push_back(stagedInput.vertices[stagedVertex]);
+		payloadVertexPalettes.push_back(stagedVertexPalettes[stagedVertex]);
+		const std::uint8_t* skinningRecord = stagedSkinningBytes.data()
+			+ static_cast<std::size_t>(stagedVertex)
+				* kDeformableMeshSkinningStrideBytes;
+		payloadSkinningBytes.insert(
+			payloadSkinningBytes.end(),
+			skinningRecord,
+			skinningRecord + kDeformableMeshSkinningStrideBytes);
+		for (std::size_t morphIndex = 0u;
+			morphIndex < stagedInput.morphTargets.size();
+			++morphIndex)
+		{
+			const SkinnedMeshMorphTarget& stagedMorph =
+				stagedInput.morphTargets[morphIndex];
+			SkinnedMeshMorphTarget& payloadMorph =
+				payloadInput.morphTargets[morphIndex];
+			payloadMorph.positionDeltas.push_back(
+				stagedMorph.positionDeltas[stagedVertex]);
+			if (!stagedMorph.normalDeltas.empty())
+			{
+				payloadMorph.normalDeltas.push_back(
+					stagedMorph.normalDeltas[stagedVertex]);
+			}
+			if (!stagedMorph.tangentDeltas.empty())
+			{
+				payloadMorph.tangentDeltas.push_back(
+					stagedMorph.tangentDeltas[stagedVertex]);
+			}
+		}
+	}
 	SkinnedMeshCookFailure appendFailure = SkinnedMeshCookFailure::StagedPayloadWriteFailed;
 	if (!TryAppendDeformablePayload(
 		stagePath,
-		stagedInput,
+		payloadInput,
 		settings,
 		report.palettePartitions,
-		stagedVertexPalettes,
-		stagedSkinningBytes,
+		payloadVertexPalettes,
+		payloadSkinningBytes,
 		report.deformableTemf,
 		appendFailure))
 	{
