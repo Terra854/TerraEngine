@@ -77,7 +77,7 @@ namespace TerraEngine::EditorTests {
 			context.Expect(!diagnostics.shadowVisibilitySelections.front().reusedCameraHiZ, "Shadow VG diagnostics should not report camera Hi-Z reuse.");
 		});
 
-		registry.Add("VirtualGeometry.Editor.Diagnostics.US2.VisualizerIdentitySurvivesGpuPacketSnapshots", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Editor.Diagnostics.VisualizerIdentitySurvivesGpuPacketSnapshots", [](TestContext& context) {
 			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility;
 			visibility.valid = true;
 			visibility.frameId = 7300u;
@@ -115,7 +115,7 @@ namespace TerraEngine::EditorTests {
 			context.Expect(std::string(GetVirtualGeometryDebugVisualizationLegend(VirtualGeometryDebugVisualizationMode::Cluster)).find("cluster") != std::string::npos, "Cluster visualizer legend should remain the editor-facing identity for packet debug colors.");
 		});
 
-		registry.Add("VirtualGeometry.Editor.Diagnostics.US6.OverlayLabelsGpuPacketSources", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Editor.Diagnostics.OverlayLabelsGpuPacketSources", [](TestContext& context) {
 			const std::string readback = TerraEngine::Renderer::FormatVirtualGeometryCounterOverlayValue(
 				"VG GPU Packet Records",
 				9u,
@@ -139,7 +139,7 @@ namespace TerraEngine::EditorTests {
 			context.Expect(unavailable.find("no packet table") != std::string::npos, "Unavailable GPU packet overlay rows should keep their reason.");
 		});
 
-		registry.Add("VirtualGeometry.Editor.Diagnostics.US6.ProfilingAndOverlaysExposeGpuPacketCounters", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Editor.Diagnostics.ProfilingAndOverlaysExposeGpuPacketCounters", [](TestContext& context) {
 			const std::string renderSystem = ReadSourceForDebugViewContract("Engine/Renderer/RenderSystem.cpp");
 			const std::string profiler = ReadSourceForDebugViewContract("Editor/TerraEngine-Editor/Windows/ProfilerWindow.cpp");
 			const std::string gameView = ReadSourceForDebugViewContract("Editor/TerraEngine-Editor/Windows/GameViewWindow.cpp");
@@ -160,7 +160,7 @@ namespace TerraEngine::EditorTests {
 			context.Expect(sceneView.find("VG Generated Submissions") != std::string::npos, "Scene View overlay should expose generated submission counters.");
 		});
 
-		registry.Add("VirtualGeometry.Editor.Diagnostics.US6.OverlaysAndProfilerExposePageSourceCounters", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Editor.Diagnostics.OverlaysAndProfilerExposePageSourceCounters", [](TestContext& context) {
 			const std::string profiler = ReadSourceForDebugViewContract("Editor/TerraEngine-Editor/Windows/ProfilerWindow.cpp");
 			const std::string gameView = ReadSourceForDebugViewContract("Editor/TerraEngine-Editor/Windows/GameViewWindow.cpp");
 			const std::string sceneView = ReadSourceForDebugViewContract("Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp");
@@ -178,7 +178,7 @@ namespace TerraEngine::EditorTests {
 			context.Expect(residency.find("Requests/Retires") != std::string::npos, "Resource Residency should expose page request and retirement counts.");
 		});
 
-		registry.Add("VirtualGeometry.Editor.Diagnostics.US3.ToolbarModeSwitchesPublishImmediately", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Editor.Diagnostics.ToolbarModeSwitchesPublishImmediately", [](TestContext& context) {
 			const std::string gameView = ReadSourceForDebugViewContract("Editor/TerraEngine-Editor/Windows/GameViewWindow.cpp");
 			const std::string sceneView = ReadSourceForDebugViewContract("Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp");
 			const std::string renderSystem = ReadSourceForDebugViewContract("Engine/Renderer/RenderSystem.cpp");

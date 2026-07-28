@@ -8,7 +8,7 @@ namespace TerraEngine::Tests
 {
 	void RegisterVirtualGeometryShadowTests(TestRegistry& registry)
 	{
-		registry.Add("VirtualGeometry.Render.Shadow.US5.PublishesLightViewPacketSelectionWithoutCameraHiZ", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Render.Shadow.PublishesLightViewPacketSelectionWithoutCameraHiZ", [](TestContext& context) {
 			TerraEngine::Renderer::RenderFrameSnapshot frame{};
 			frame.frameId = 8101u;
 

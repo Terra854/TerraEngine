@@ -20,7 +20,7 @@ namespace TerraEngine::Animation {
 	inline constexpr std::string_view kAnimationBaselineSourceCommit = "6d12e3a99d7c0d41899fc96fa18b02b61e5a0aa9";
 	inline constexpr std::string_view kAnimationBaselineManifestSha256 = "cf4375934729e1afa745d9446faacfc1a7ba53a6d7db79b3d1e0e8164a5ced8f";
 	inline constexpr std::string_view kAnimationBaselineEvidenceSha256 = "4020949bd881f94f0395853e947e4512fb587c7bdd1ce5592317e75c01b5fcb5";
-	inline constexpr std::string_view kAnimationPerformanceWorkloadsSha256 = "f304b2f2c31addf3301f77260b686caf7b4c87abdbb9756bcc6e481ba0a180f6";
+	inline constexpr std::string_view kAnimationPerformanceWorkloadsSha256 = "dd297ef96f629b290be03bce64dec19612726cd5931e886fb722d80970d49dba";
 
 	// Capture identity travels with every snapshot so a saved profiler result can
 	// prove which immutable reference and threshold manifest it was compared to.

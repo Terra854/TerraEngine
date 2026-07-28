@@ -85,7 +85,7 @@ namespace TerraEngine::Tests {
 			context.Expect(summary.retiringBytes == 2048u, "Retiring byte totals help verify deferred release drains over time.");
 		});
 
-		registry.Add("VirtualGeometryPageResidency.US2.PinnedFallbacksAreExcludedFromEvictionCandidates", [](TestContext& context) {
+		registry.Add("VirtualGeometryPageResidency.PinnedFallbacksAreExcludedFromEvictionCandidates", [](TestContext& context) {
 			Resource::VirtualGeometryResidentPage fallback;
 			fallback.assetId = TerraEngine::GenerateUUID();
 			fallback.pageId = 0u;
@@ -116,7 +116,7 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(1u, candidates.front().pageId, "The high-detail page should be selected before protected fallback coverage.");
 		});
 
-		registry.Add("VirtualGeometryPageResidency.US2.ProtectionRestoresFallbacksTouchedByEviction", [](TestContext& context) {
+		registry.Add("VirtualGeometryPageResidency.ProtectionRestoresFallbacksTouchedByEviction", [](TestContext& context) {
 			Resource::VirtualGeometryResidentPage fallback;
 			fallback.pageId = 0u;
 			fallback.fallbackPageId = 0u;
@@ -133,7 +133,7 @@ namespace TerraEngine::Tests {
 			context.Expect(pages.front().requestReason.find("fallback") != std::string::npos, "Protection should preserve an editor-readable reason.");
 		});
 
-		registry.Add("VirtualGeometryPageResidency.US3.BudgetPressureEvictsOldHighDetailBeforeFallback", [](TestContext& context) {
+		registry.Add("VirtualGeometryPageResidency.BudgetPressureEvictsOldHighDetailBeforeFallback", [](TestContext& context) {
 			const TerraEngine::UUID assetId = TerraEngine::GenerateUUID();
 
 			Resource::VirtualGeometryResidentPage fallback;

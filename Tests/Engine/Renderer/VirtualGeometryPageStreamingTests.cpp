@@ -230,7 +230,7 @@ namespace TerraEngine::Tests {
 			context.Expect(highDetailHash != fallbackHash, "Snapshot hashes should include payload source and page-local byte identity.");
 		});
 
-		registry.Add("VirtualGeometryPageStreaming.US1.FallbackOnlyResidentPagesEmitFallbackSources", [](TestContext& context) {
+		registry.Add("VirtualGeometryPageStreaming.FallbackOnlyResidentPagesEmitFallbackSources", [](TestContext& context) {
 			using namespace TerraEngine::Renderer;
 
 			VirtualGeometryAssetRuntime asset = BuildFallbackOnlyResidentAsset();
@@ -294,7 +294,7 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(0u, diagnostics.pageSources.highDetailPayloads, "Fallback-only visibility must not imply high-detail page residency.");
 		});
 
-		registry.Add("VirtualGeometryPageStreaming.US2.FailedHighDetailPageSubstitutesResidentFallback", [](TestContext& context) {
+		registry.Add("VirtualGeometryPageStreaming.FailedHighDetailPageSubstitutesResidentFallback", [](TestContext& context) {
 			using namespace TerraEngine::Renderer;
 
 			VirtualGeometryAssetRuntime asset = BuildFailedHighDetailWithFallbackAsset();
@@ -331,7 +331,7 @@ namespace TerraEngine::Tests {
 			context.Expect(packets.front().emittedSource == VirtualGeometryEmittedPageSource::FallbackPage, "Failed high-detail pages should emit fallback page geometry, not holes.");
 		});
 
-		registry.Add("VirtualGeometryPageStreaming.US2.MissingPendingFailedAndEvictedPagesKeepFallbackCoverage", [](TestContext& context) {
+		registry.Add("VirtualGeometryPageStreaming.MissingPendingFailedAndEvictedPagesKeepFallbackCoverage", [](TestContext& context) {
 			using namespace TerraEngine::Renderer;
 
 			const std::array<GeometryPageState, 5u> unavailableStates = {
@@ -377,7 +377,7 @@ namespace TerraEngine::Tests {
 			}
 		});
 
-		registry.Add("VirtualGeometryPageStreaming.US3.EvictedHighDetailPageRequestsAgainWithFallbackVisible", [](TestContext& context) {
+		registry.Add("VirtualGeometryPageStreaming.EvictedHighDetailPageRequestsAgainWithFallbackVisible", [](TestContext& context) {
 			const UUID meshId = MakeTestUuid(60u);
 			const UUID objectId = MakeTestUuid(61u);
 

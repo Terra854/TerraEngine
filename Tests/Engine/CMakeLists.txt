@@ -311,51 +311,51 @@ set_tests_properties(Engine.PhysicsFoundation PROPERTIES
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Physics.Handle,Physics.Settings,Physics.BackendBoundary,Physics.JobAdapter,Physics.CommandQueue,Physics.Transaction"
 )
 
-add_test(NAME Engine.PhysicsUS1 COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
-set_tests_properties(Engine.PhysicsUS1 PROPERTIES
-	LABELS "Engine;Physics;US1"
+add_test(NAME Engine.PhysicsSimulationComponents COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.PhysicsSimulationComponents PROPERTIES
+	LABELS "Engine;Physics;Simulation;Components"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Physics.Components,Physics.Serialization,Physics.Material,Physics.FixedStep,Physics.RigidBody,Physics.Scheduler"
 )
 
-add_test(NAME Engine.PhysicsUS2 COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
-set_tests_properties(Engine.PhysicsUS2 PROPERTIES
-	LABELS "Engine;Physics;US2"
+add_test(NAME Engine.PhysicsCookedShapes COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.PhysicsCookedShapes PROPERTIES
+	LABELS "Engine;Physics;Cooking"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Physics.ColliderRecipe,Physics.CookedColliderAsset,Physics.CookedShapeSimulation,Physics.CookedShapeCache"
 )
 
-add_test(NAME Engine.PhysicsUS3 COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
-set_tests_properties(Engine.PhysicsUS3 PROPERTIES
-	LABELS "Engine;Physics;US3"
+add_test(NAME Engine.PhysicsQueriesAndEvents COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.PhysicsQueriesAndEvents PROPERTIES
+	LABELS "Engine;Physics;Queries;Events"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Physics.GameplayCommand,Physics.Query,Physics.Event,Physics.StalePublication,Physics.Provider"
 )
 
-add_test(NAME Engine.PhysicsUS4 COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
-set_tests_properties(Engine.PhysicsUS4 PROPERTIES
-	LABELS "Engine;Physics;US4"
+add_test(NAME Engine.PhysicsConstraintsAndCharacters COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.PhysicsConstraintsAndCharacters PROPERTIES
+	LABELS "Engine;Physics;Constraints;Characters"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Physics.ConstraintComponent,Physics.CharacterComponent,Physics.Serialization.ConstraintAndCharacter,Physics.ConstraintSimulation,Physics.CharacterSimulation,Physics.ConstraintWorld,Physics.CharacterWorld"
 )
 
-add_test(NAME Engine.PhysicsUS5 COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
-set_tests_properties(Engine.PhysicsUS5 PROPERTIES
-	LABELS "Engine;Physics;US5;Diagnostics;Profiler"
+add_test(NAME Engine.PhysicsDiagnostics COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.PhysicsDiagnostics PROPERTIES
+	LABELS "Engine;Physics;Diagnostics;Profiler"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Physics.Scheduler,Engine.Profiler"
 )
 
 add_test(NAME Engine.PhysicsPerformance COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
 set_tests_properties(Engine.PhysicsPerformance PROPERTIES
-	LABELS "Engine;Physics;US5;Performance"
+	LABELS "Engine;Physics;Performance"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Physics.Performance"
 )
 
-add_test(NAME Engine.PhysicsUS6 COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
-set_tests_properties(Engine.PhysicsUS6 PROPERTIES
-	LABELS "Engine;Physics;US6;Managed"
+add_test(NAME Engine.PhysicsManaged COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.PhysicsManaged PROPERTIES
+	LABELS "Engine;Physics;Managed"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=PhysicsManaged"
 )
 
-add_test(NAME Engine.PhysicsUS7 COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
-set_tests_properties(Engine.PhysicsUS7 PROPERTIES
-	LABELS "Engine;Physics;US7;Export"
+add_test(NAME Engine.PhysicsExport COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.PhysicsExport PROPERTIES
+	LABELS "Engine;Physics;Export"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=PhysicsExportRuntime"
 )
 
@@ -410,7 +410,7 @@ set_tests_properties(Engine.VirtualGeometryPerformanceGate PROPERTIES
 add_test(NAME Engine.VirtualGeometryShadow COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
 set_tests_properties(Engine.VirtualGeometryShadow PROPERTIES
 	LABELS "Engine;VirtualGeometry;Shadow"
-	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry.Render.Shadow,VirtualGeometry.Diagnostics.US5"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry.Render.Shadow,VirtualGeometry.Diagnostics.PublishesPerShadowViewCountersSeparately"
 )
 
 add_test(NAME Engine.VirtualGeometryResource COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)

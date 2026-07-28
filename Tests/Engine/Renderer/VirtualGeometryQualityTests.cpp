@@ -471,7 +471,7 @@ namespace
 			context.Expect(!SelectionContainsCluster(result, 3u), "Far region should avoid an unnecessary high-detail child when its screen error is below the refinement threshold.");
 		});
 
-		registry.Add("VirtualGeometry.Quality.US4.DoesNotSubstituteWholeObjectLodForMixedClusterCut", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Quality.DoesNotSubstituteWholeObjectLodForMixedClusterCut", [](TestContext& context) {
 			VirtualGeometryAssetRuntime asset = MakeMixedDistanceQualityAsset();
 			VirtualGeometryQualityProfile quality = MakeDefaultVirtualGeometryQualityProfile();
 			quality.lodErrorScale = 1.0f;

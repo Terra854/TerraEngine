@@ -69,7 +69,7 @@ namespace TerraEngine::Tests
 
 	void RegisterResourceManagerMeshTests(TestRegistry& registry)
 	{
-		registry.Add("Resource.Manager.Mesh.US7.RejectsCorruptVirtualGeometryPagePayloads", [](TestContext& context) {
+		registry.Add("Resource.Manager.Mesh.RejectsCorruptVirtualGeometryPagePayloads", [](TestContext& context) {
 			const std::string source = ReadResourceManagerMeshSource();
 
 			context.Expect(source.find("TEMF virtual geometry page table is missing required cluster-page coverage metadata") != std::string::npos, "Runtime loader should reject page tables without cluster-page coverage.");
@@ -134,7 +134,7 @@ namespace TerraEngine::Tests
 			resourceManager.DeleteResource(generatedMeshId, AssetType::Mesh);
 		});
 
-		registry.Add("Resource.Manager.Mesh.US5.PageStreamingUploadPolicyUsesPageLocalPath", [](TestContext& context) {
+		registry.Add("Resource.Manager.Mesh.PageStreamingUploadPolicyUsesPageLocalPath", [](TestContext& context) {
 			const std::string meshSource = ReadResourceManagerMeshSource();
 			const std::string meshHeader = ReadSourceFile("Engine/File Formats/TerraEngineMeshFile.h");
 			const std::string vulkanSource = ReadSourceFile("Engine/Renderer/RHI/Vulkan/VulkanContextResources.cpp");

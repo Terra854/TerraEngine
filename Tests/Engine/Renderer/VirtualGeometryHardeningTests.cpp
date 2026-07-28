@@ -65,7 +65,7 @@ namespace TerraEngine::Tests
 			context.Expect(!diagnostics.hiZInvalidReason.empty(), "Missing-pyramid diagnostics should explain why Hi-Z is unavailable.");
 		});
 
-		registry.Add("VirtualGeometry.Hardening.US5.PageSourceDiagnosticsNameHiZFailOpenReason", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Hardening.PageSourceDiagnosticsNameHiZFailOpenReason", [](TestContext& context) {
 			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
 			visibility.viewType = RenderViewType::Game;
 			visibility.outputId = 12u;
@@ -223,7 +223,7 @@ namespace TerraEngine::Tests
 			context.Expect(blockedAgain.warmupFrames >= unblocked.warmupFrames, "Repeated blocker moves should not reset the current-pyramid warm-up counter.");
 		});
 
-		registry.Add("VirtualGeometry.Hardening.US7.BatchedMovingWallRecoveryKeepsBaselineMatched", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Hardening.BatchedMovingWallRecoveryKeepsBaselineMatched", [](TestContext& context) {
 			VulkanHiZHistoryMetadata history{};
 			history.viewId = 17u;
 			history.viewClass = VulkanHiZViewClass::Game;
@@ -293,7 +293,7 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(validation.warmupFrames, diagnostics.hiZWarmupFrames, "Diagnostics should preserve the backend warm-up/recovery counter.");
 		});
 
-		registry.Add("VirtualGeometry.Hardening.US5.GpuCompactionMovingWallRecoveryKeepsHiZActive", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Hardening.GpuCompactionMovingWallRecoveryKeepsHiZActive", [](TestContext& context) {
 			VulkanHiZHistoryMetadata history{};
 			history.viewId = 21u;
 			history.viewClass = VulkanHiZViewClass::Game;
@@ -418,7 +418,7 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(1u, diagnostics.validGeneratedSubmissionCount, "Valid generated submission work should survive the Hi-Z recovery cycle.");
 		});
 
-		registry.Add("VirtualGeometry.Hardening.US5.PageResidencyRecoveryKeepsMovingOccluderHiZActive", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Hardening.PageResidencyRecoveryKeepsMovingOccluderHiZActive", [](TestContext& context) {
 			VulkanHiZHistoryMetadata history{};
 			history.viewId = 31u;
 			history.viewClass = VulkanHiZViewClass::Game;
@@ -530,7 +530,7 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(1u, diagnostics.pageSources.emittedHighDetailSources, "High-detail page emission should become visible after residency recovery.");
 		});
 
-		registry.Add("VirtualGeometry.Hardening.US4.InvalidGeneratedSubmissionPublishesFallbackDiagnostics", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Hardening.InvalidGeneratedSubmissionPublishesFallbackDiagnostics", [](TestContext& context) {
 			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility;
 			visibility.valid = true;
 			visibility.frameId = 10003u;
@@ -565,7 +565,7 @@ namespace TerraEngine::Tests
 			context.Expect(diagnostics.gpuFallbackReason.find("mismatch") != std::string::npos, "Fallback diagnostics should preserve the generated submission validation reason.");
 		});
 
-		registry.Add("VirtualGeometry.Hardening.US2.FailedPagePublicationKeepsFallbackSource", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Hardening.FailedPagePublicationKeepsFallbackSource", [](TestContext& context) {
 			GeometryPageRuntime failedPage{};
 			failedPage.pageId = 9u;
 			failedPage.fallbackPageId = 1u;

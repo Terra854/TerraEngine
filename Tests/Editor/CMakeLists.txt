@@ -405,39 +405,39 @@ set_tests_properties(Editor.AdaptiveVirtualGeometry PROPERTIES
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=AdaptiveVirtualGeometry;Editor.AssetPipeline.VirtualGeometry;VirtualGeometry.Editor.Inspector;VirtualGeometry.Editor.Automation;VirtualGeometry.Editor.Export;VirtualGeometry.Editor.DebugView"
 )
 
-add_test(NAME Editor.PhysicsUS1 COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
-set_tests_properties(Editor.PhysicsUS1 PROPERTIES
-	LABELS "Editor;Physics;US1"
+add_test(NAME Editor.PhysicsWorkflows COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.PhysicsWorkflows PROPERTIES
+	LABELS "Editor;Physics;Workflows"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Physics.Editor"
 )
 
-add_test(NAME Editor.PhysicsUS2 COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
-set_tests_properties(Editor.PhysicsUS2 PROPERTIES
-	LABELS "Editor;Physics;US2"
-	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Physics.ColliderCompiler,Physics.MaterialAsset"
+add_test(NAME Editor.PhysicsAssetPipeline COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.PhysicsAssetPipeline PROPERTIES
+	LABELS "Editor;Physics;AssetPipeline"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Physics.Editor.ColliderCompiler,Physics.Editor.Material"
 )
 
-add_test(NAME Editor.PhysicsUS5 COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
-set_tests_properties(Editor.PhysicsUS5 PROPERTIES
-	LABELS "Editor;Physics;US5"
+add_test(NAME Editor.PhysicsDiagnostics COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.PhysicsDiagnostics PROPERTIES
+	LABELS "Editor;Physics;Diagnostics"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Editor.PhysicsInspector,Editor.PhysicsPrefabUndo,Editor.PhysicsProjectSettings,Physics.SceneView,Physics.Diagnostics"
 )
 
 add_test(NAME Editor.PhysicsPerformance COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
 set_tests_properties(Editor.PhysicsPerformance PROPERTIES
-	LABELS "Editor;Physics;US5;Performance"
+	LABELS "Editor;Physics;Performance"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Physics.Editor.Performance"
 )
 
-add_test(NAME Editor.PhysicsUS6 COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
-set_tests_properties(Editor.PhysicsUS6 PROPERTIES
-	LABELS "Editor;Physics;US6;Automation"
+add_test(NAME Editor.PhysicsAutomation COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.PhysicsAutomation PROPERTIES
+	LABELS "Editor;Physics;Automation"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Editor.MCP.Physics"
 )
 
-add_test(NAME Editor.PhysicsUS7 COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
-set_tests_properties(Editor.PhysicsUS7 PROPERTIES
-	LABELS "Editor;Physics;US7;Export"
+add_test(NAME Editor.PhysicsExport COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.PhysicsExport PROPERTIES
+	LABELS "Editor;Physics;Export"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=PhysicsExport"
 )
 

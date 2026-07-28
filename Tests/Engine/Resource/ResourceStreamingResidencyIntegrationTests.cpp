@@ -40,7 +40,7 @@ namespace {
 			context.Expect(Resource::BuildReleaseCandidates(snapshot).empty(), "Recently used streamed resources should not churn during the grace window.");
 		});
 
-		registry.Add("Renderer.VisibleStreamingTouches.US2.BatchPublicationMarksUniqueResourcesVisible", [](TestContext& context) {
+		registry.Add("Renderer.VisibleStreamingTouches.BatchPublicationMarksUniqueResourcesVisible", [](TestContext& context) {
 			ResourceManager& resourceManager = ResourceManager::Instance();
 			const TerraEngine::UUID meshId = MakeId(101u);
 			const TerraEngine::UUID materialId = MakeId(102u);

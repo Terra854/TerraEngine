@@ -18,7 +18,7 @@ namespace TerraEngine::Tests {
 			context.Expect(!normalized.disabledReason.empty(), "Unsafe cone metadata should carry a visible disabled reason.");
 		});
 
-		registry.Add("VirtualGeometry.Culling.US6.ProvenOneSidedOpaqueConeSafetyIsEligible", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Culling.ProvenOneSidedOpaqueConeSafetyIsEligible", [](TestContext& context) {
 			ConeSafetyMetadata cone;
 			cone.materialSidedness = VirtualGeometryConeMaterialSidedness::OneSided;
 			cone.windingState = VirtualGeometryConeWindingState::Consistent;
@@ -32,7 +32,7 @@ namespace TerraEngine::Tests {
 			context.Expect(normalized.disabledReason.empty(), "Eligible cone metadata should not expose a disabled reason.");
 		});
 
-		registry.Add("VirtualGeometry.Culling.US6.RiskyOrMissingClusterMetadataFailsOpen", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Culling.RiskyOrMissingClusterMetadataFailsOpen", [](TestContext& context) {
 			VirtualGeometryAssetRuntime asset;
 			ConeSafetyMetadata risky;
 			risky.clusterId = 4u;

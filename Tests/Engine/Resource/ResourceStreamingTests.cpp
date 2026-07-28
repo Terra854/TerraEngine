@@ -59,7 +59,7 @@ namespace TerraEngine::Tests {
 
 	void RegisterResourceStreamingTests(TestRegistry& registry)
 	{
-		registry.Add("Resource.Streaming.US3.SelectionSnapshotsBecomePageNeedInputs", [](TestContext& context) {
+		registry.Add("Resource.Streaming.SelectionSnapshotsBecomePageNeedInputs", [](TestContext& context) {
 			const TerraEngine::UUID assetId = MakeStreamingId(31u);
 			const TerraEngine::UUID objectId = MakeStreamingId(32u);
 
@@ -99,7 +99,7 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(static_cast<std::size_t>(2u), inputs.front().pages.size(), "Catalog pages should be copied into the immutable input.");
 		});
 
-		registry.Add("Resource.Streaming.US3.PageRequestsCoalesceAndPrioritize", [](TestContext& context) {
+		registry.Add("Resource.Streaming.PageRequestsCoalesceAndPrioritize", [](TestContext& context) {
 			const TerraEngine::UUID assetId = MakeStreamingId(33u);
 			const TerraEngine::UUID objectId = MakeStreamingId(34u);
 
@@ -118,7 +118,7 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(5u, plan.packets.front().packetCount, "Merged diagnostics should keep the wider packet range.");
 		});
 
-		registry.Add("Resource.Streaming.US3.RetryQueueDeduplicatesPreviousAndReadyRequests", [](TestContext& context) {
+		registry.Add("Resource.Streaming.RetryQueueDeduplicatesPreviousAndReadyRequests", [](TestContext& context) {
 			const TerraEngine::UUID assetId = MakeStreamingId(35u);
 			const TerraEngine::UUID objectId = MakeStreamingId(36u);
 			Resource::VirtualGeometryPageNeedInput input = MakeNeed(assetId, objectId, 0.8f);

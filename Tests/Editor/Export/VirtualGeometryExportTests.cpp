@@ -481,7 +481,7 @@ namespace TerraEngine::EditorTests
 			context.Expect(error.find("page") != std::string::npos, "The validation error should explain the missing page metadata.");
 		});
 
-		registry.Add("VirtualGeometry.Editor.Export.US6.RejectsMissingConeSafetyMetadata", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Editor.Export.RejectsMissingConeSafetyMetadata", [](TestContext& context) {
 			TempVirtualGeometryExportWorkspace workspace;
 			WriteRequiredRuntimeEntries(workspace);
 			WriteVirtualGeometryManifest(workspace);

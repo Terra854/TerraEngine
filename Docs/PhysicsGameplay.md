@@ -91,7 +91,7 @@ From a Visual Studio x64 developer prompt:
 
 ```powershell
 cmake --build --preset RelWithDebInfo --target TerraEngine-EngineTests
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R '^Engine\.PhysicsUS3$' --output-on-failure
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R '^Engine\.PhysicsQueriesAndEvents$' --output-on-failure
 cmake --build --preset RelWithDebInfo --target install
 ```
 

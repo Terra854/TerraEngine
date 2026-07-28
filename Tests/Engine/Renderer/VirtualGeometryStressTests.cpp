@@ -259,7 +259,7 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(static_cast<std::uint64_t>(0u), pageNeeds, "Fully resident mixed-detail stress fixtures should not request fallback pages.");
 		});
 
-		registry.Add("VirtualGeometry.Stress.US2.MixedDetailGpuPacketsPreservePerClusterRanges", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Stress.MixedDetailGpuPacketsPreservePerClusterRanges", [](TestContext& context) {
 			VirtualGeometryAssetRuntime asset = MakeDenseClusterAsset(77u);
 			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
 			const TerraEngine::UUID objectId = TerraEngine::GenerateUUID();

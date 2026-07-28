@@ -360,7 +360,7 @@ namespace
 			}
 		});
 
-		registry.Add("Editor.AssetPipeline.VirtualGeometry.MeshCompiler.US6.CooksConeSafetyRecordsForClusters", [](TestContext& context) {
+		registry.Add("Editor.AssetPipeline.VirtualGeometry.MeshCompiler.CooksConeSafetyRecordsForClusters", [](TestContext& context) {
 			const RawMeshFixture fixture = MakeGridMesh(20u);
 			const std::filesystem::path output = MakeTempOutputPath("ConeSafetyGrid");
 			MeshCompileReport report{};
@@ -387,7 +387,7 @@ namespace
 			}
 		});
 
-		registry.Add("Editor.AssetPipeline.VirtualGeometry.MeshCompiler.US6.ConservativeCookDisablesConeSafety", [](TestContext& context) {
+		registry.Add("Editor.AssetPipeline.VirtualGeometry.MeshCompiler.ConservativeCookDisablesConeSafety", [](TestContext& context) {
 			const RawMeshFixture fixture = MakeGridMesh(20u);
 			const std::filesystem::path output = MakeTempOutputPath("ConeSafetyConservativeGrid");
 			MeshCompileReport report{};
@@ -456,7 +456,7 @@ namespace
 			for (const VirtualGeometryDetailLevelRecord& detail : mesh->virtualGeometryDetailLevels)
 			{
 				context.Expect(std::isfinite(detail.geometricError) && detail.geometricError >= previousGeometricError, "Geometric error should be finite and monotonic across LODs.");
-				context.Expect(detail.geometricError <= 0.05f, "US2 tolerance should reject overly aggressive simplification error.");
+				context.Expect(detail.geometricError <= 0.05f, "The quality tolerance should reject overly aggressive simplification error.");
 				context.Expect(std::isfinite(detail.targetRatio) && detail.targetRatio > 0.0f && detail.targetRatio <= previousTargetRatio, "Target ratios should move toward lower-detail representations.");
 				context.Expect(detail.primitiveCount < previousPrimitiveCount, "Each later LOD should reduce primitive count.");
 				previousTargetRatio = detail.targetRatio;

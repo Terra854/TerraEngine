@@ -1,4 +1,4 @@
-// AnimationEventCurveTests.cpp - US2 event, snapshot, and root-motion semantics.
+// AnimationEventCurveTests.cpp - event, snapshot, and root-motion semantics.
 
 #include "TestHarness.h"
 

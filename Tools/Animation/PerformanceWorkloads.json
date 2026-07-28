@@ -207,7 +207,7 @@
 				"warmupRuns": 1,
 				"measuredRuns": 5,
 				"tests": [
-					"Engine.PhysicsUS5",
+					"Engine.PhysicsDiagnostics",
 					"Engine.PhysicsPerformance",
 					"Engine.VirtualGeometryPerformanceGate",
 					"Engine.VirtualGeometryResource",

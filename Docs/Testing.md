@@ -236,7 +236,7 @@ workloads or thresholds: runtime contract
 renderer workload manifest
 `397b7cb6ac01714a628c44bab6cb002c034c8d8e5422bf184dc10cddf201b12f`,
 and performance workloads
-`f304b2f2c31addf3301f77260b686caf7b4c87abdbb9756bcc6e481ba0a180f6`.
+`dd297ef96f629b290be03bce64dec19612726cd5931e886fb722d80970d49dba`.
 
 The final live gate rejects that switch and requires both final inputs:
 
@@ -884,7 +884,7 @@ environment:
 ```powershell
 cmake --preset RelWithDebInfo
 cmake --build --preset RelWithDebInfo --target TerraEngine-EngineTests TerraEngine-EditorTests TerraEngineModelPackageCompiler TerraEnginePhysicsColliderCompiler TerraEngine-Export TerraEngine-Editor
-ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R "Editor.ExportUnitTests|Editor.HeadlessExport|Editor.PhysicsUS7|Engine.PhysicsUS7" --output-on-failure
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R "Editor.ExportUnitTests|Editor.HeadlessExport|Editor.PhysicsExport|Engine.PhysicsExport" --output-on-failure
 ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
 cmake --build --preset RelWithDebInfo --target install
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/ExportRuntimeBaseline/RunBaseline.ps1 -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/ci/export-runtime-baseline

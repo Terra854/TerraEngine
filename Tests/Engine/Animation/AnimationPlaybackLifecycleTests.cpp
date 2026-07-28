@@ -1,4 +1,4 @@
-// AnimationPlaybackLifecycleTests.cpp - US2 playback and runtime ownership checks.
+// AnimationPlaybackLifecycleTests.cpp - playback and runtime ownership checks.
 
 #include "TestHarness.h"
 

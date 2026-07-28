@@ -8,7 +8,7 @@ namespace TerraEngine::Tests {
 
 	void RegisterVirtualGeometryCompactionTests(TestRegistry& registry)
 	{
-		registry.Add("VirtualGeometry.Compaction.US2.CompactsRejectedAndFailOpenPackets", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Compaction.CompactsRejectedAndFailOpenPackets", [](TestContext& context) {
 			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
 			const TerraEngine::UUID materialId = TerraEngine::GenerateUUID();
 			std::vector<VirtualGeometryClusterPacket> candidates;
@@ -42,7 +42,7 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(3u, compacted[1].clusterId, "The fallback packet should remain visible.");
 		});
 
-		registry.Add("VirtualGeometry.Compaction.US2.MissingResourceOnlySelectionFailsOpen", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Compaction.MissingResourceOnlySelectionFailsOpen", [](TestContext& context) {
 			std::vector<VirtualGeometryClusterPacket> candidates(3u);
 			for (std::uint32_t index = 0u; index < 3u; ++index)
 			{
@@ -92,7 +92,7 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(2u, diagnostics.submittedBatchCount, "Compaction diagnostics should report submitted batch count.");
 		});
 
-		registry.Add("VirtualGeometry.Compaction.US3.CandidateCompactedRejectedAndFailOpenCountersStayPerView", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Compaction.CandidateCompactedRejectedAndFailOpenCountersStayPerView", [](TestContext& context) {
 			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
 			std::vector<VirtualGeometryClusterPacket> candidates;
 			for (std::uint32_t index = 0u; index < 5u; ++index)
@@ -126,7 +126,7 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(static_cast<std::uint32_t>(VirtualGeometryCounterSource::Prepared), static_cast<std::uint32_t>(counters.source), "Prepared compaction counters should be labeled honestly until GPU readback is available.");
 		});
 
-		registry.Add("VirtualGeometry.Compaction.US3.DispatchPlansFailOpenAndCarryHiZBaseline", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Compaction.DispatchPlansFailOpenAndCarryHiZBaseline", [](TestContext& context) {
 			GpuVirtualGeometryPacketFrameSet validFrameSet;
 			validFrameSet.viewId = 42u;
 			validFrameSet.viewType = RenderViewType::Scene;
@@ -155,7 +155,7 @@ namespace TerraEngine::Tests {
 			context.Expect(!dispatches[1].fallbackReason.empty(), "Invalid frame sets should carry a fail-open fallback reason into compaction dispatch diagnostics.");
 		});
 
-		registry.Add("VirtualGeometry.Compaction.US3.DiagnosticsInterpretCompactionCountersAndFallbackRecords", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Compaction.DiagnosticsInterpretCompactionCountersAndFallbackRecords", [](TestContext& context) {
 			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility;
 			visibility.valid = true;
 			visibility.frameId = 9902u;
@@ -188,7 +188,7 @@ namespace TerraEngine::Tests {
 			context.Expect(diagnostics.gpuFallbackReason.find("missing page") != std::string::npos, "Diagnostics should retain the fallback reason.");
 		});
 
-		registry.Add("VirtualGeometry.Compaction.US4.GeneratedSubmissionsValidateFrameViewAndBatchCompatibility", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Compaction.GeneratedSubmissionsValidateFrameViewAndBatchCompatibility", [](TestContext& context) {
 			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
 			const TerraEngine::UUID materialId = TerraEngine::GenerateUUID();
 			std::vector<GpuVirtualGeometryPacketRecord> packets;
@@ -218,7 +218,7 @@ namespace TerraEngine::Tests {
 			context.Expect(validationReason.empty(), "Successful generated submission validation should not leave stale failure text.");
 		});
 
-		registry.Add("VirtualGeometry.Compaction.US4.InvalidGeneratedSubmissionFailsOpen", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Compaction.InvalidGeneratedSubmissionFailsOpen", [](TestContext& context) {
 			GpuVirtualGeometryBatchDescriptor batch;
 			batch.batchId = 4u;
 			batch.viewId = 61u;

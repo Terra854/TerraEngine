@@ -46,7 +46,7 @@ namespace TerraEngine::Tests
 			context.Expect(snapshot.hiZValidation.inactiveReason.empty(), "Validation diagnostics should only carry inactive reasons for true missing-resource failures.");
 		});
 
-		registry.Add("VirtualGeometry.Diagnostics.US2.PublishesCompactionSourceCounters", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Diagnostics.PublishesCompactionSourceCounters", [](TestContext& context) {
 			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
 			visibility.viewType = RenderViewType::Game;
 			visibility.outputId = 3u;
@@ -74,7 +74,7 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(static_cast<std::uint32_t>(VirtualGeometryCounterSource::Prepared), static_cast<std::uint32_t>(diagnostics.counterSource), "Compaction counters should keep their prepared-source label.");
 		});
 
-		registry.Add("VirtualGeometry.Diagnostics.US6.PublishesGpuPacketCompactionAndGeneratedCounters", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Diagnostics.PublishesGpuPacketCompactionAndGeneratedCounters", [](TestContext& context) {
 			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
 			visibility.viewType = RenderViewType::Game;
 			visibility.outputId = 4u;
@@ -159,7 +159,7 @@ namespace TerraEngine::Tests
 			context.Expect(diagnostics.gpuFallbackReason.find("fallback") != std::string::npos, "Diagnostics should preserve source-labeled fallback reasons.");
 		});
 
-		registry.Add("VirtualGeometry.Diagnostics.US6.PublishesPageSourcePayloadAndEmissionCounters", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Diagnostics.PublishesPageSourcePayloadAndEmissionCounters", [](TestContext& context) {
 			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
 			visibility.viewType = RenderViewType::Scene;
 			visibility.outputId = 8u;
@@ -257,7 +257,7 @@ namespace TerraEngine::Tests
 			context.Expect(!diagnostics.warnings.empty(), "Embedded fallback source use should leave a visible diagnostic warning.");
 		});
 
-		registry.Add("VirtualGeometry.Diagnostics.US7.UnsupportedCounterSourceGatesDoNotPassSilently", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Diagnostics.UnsupportedCounterSourceGatesDoNotPassSilently", [](TestContext& context) {
 			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
 			visibility.viewType = RenderViewType::Game;
 			visibility.outputId = 2u;
@@ -283,7 +283,7 @@ namespace TerraEngine::Tests
 			context.Expect(sourceGate->diagnostic.find("readback unavailable") != std::string::npos, "Unsupported counter-source gates should carry the unavailable reason.");
 		});
 
-		registry.Add("VirtualGeometry.Diagnostics.US5.PublishesPerShadowViewCountersSeparately", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Diagnostics.PublishesPerShadowViewCountersSeparately", [](TestContext& context) {
 			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
 			visibility.viewType = RenderViewType::Shadow;
 			visibility.outputId = 1002u;
@@ -465,7 +465,7 @@ namespace TerraEngine::Tests
 			}
 		});
 
-		registry.Add("VirtualGeometry.Diagnostics.US4.ExactPageResidencyBucketsStaySeparate", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Diagnostics.ExactPageResidencyBucketsStaySeparate", [](TestContext& context) {
 			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
 			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
 			visibility.viewType = RenderViewType::Game;

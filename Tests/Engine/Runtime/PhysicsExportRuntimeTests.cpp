@@ -1,4 +1,4 @@
-// PhysicsExportRuntimeTests.cpp - US7 exported runtime-content contracts.
+// PhysicsExportRuntimeTests.cpp - exported runtime-content contracts.
 
 #include "TestHarness.h"
 

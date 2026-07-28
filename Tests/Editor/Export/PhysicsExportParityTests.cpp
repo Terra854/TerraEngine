@@ -1,4 +1,4 @@
-// PhysicsExportParityTests.cpp - US7 editor Play Mode/export invariant contracts.
+// PhysicsExportParityTests.cpp - editor Play Mode/export invariant contracts.
 
 #include "TestHarness.h"
 #include "Components/Physics/CharacterControllerComponent.h"
@@ -118,7 +118,7 @@ namespace TerraEngine::EditorTests {
 				actualNames.insert(name);
 			}
 			context.Expect(actualNames == requiredNames,
-				"The fixture must cover every durable US7 physics invariant exactly once.");
+				"The fixture must cover every durable physics invariant exactly once.");
 			context.Expect(startupScene.at("physicsExportFixture").at("expectedInvariants") == project.at("physicsExportInvariants"),
 				"The startup scenario must consume the exact versioned invariant vocabulary declared by the project.");
 			context.Expect(startupScene.at("physicsExportFixture").value("sourceCollider", std::string{}) == "Assets/Colliders/Startup.tecollider",

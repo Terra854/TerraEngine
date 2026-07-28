@@ -419,7 +419,7 @@ namespace TerraEngine::EditorTests
 			std::filesystem::remove_all(root);
 		});
 
-		registry.Add("VirtualGeometry.Editor.Inspector.US7.ReportsSmallMeshSkippedStreamingReason", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Editor.Inspector.ReportsSmallMeshSkippedStreamingReason", [](TestContext& context) {
 			const std::filesystem::path root = MakeVirtualGeometryInspectorProjectRoot();
 			AssetDatabase::Instance().Initialize(root);
 
@@ -747,7 +747,7 @@ namespace TerraEngine::EditorTests
 			std::filesystem::remove_all(root);
 		});
 
-		registry.Add("VirtualGeometry.Editor.Inspector.US7.HidesPageStreamingReadinessForNonMeshAssets", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Editor.Inspector.HidesPageStreamingReadinessForNonMeshAssets", [](TestContext& context) {
 			const std::filesystem::path root = MakeVirtualGeometryInspectorProjectRoot();
 			AssetDatabase::Instance().Initialize(root);
 

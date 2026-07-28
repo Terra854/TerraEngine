@@ -211,7 +211,7 @@ namespace TerraEngine::Tests
 			context.Expect(gameIt->cameraSignature != sceneIt->cameraSignature, "Different debug modes should still remain tied to separate view snapshots.");
 		});
 
-		registry.Add("VirtualGeometry.Render.MultiView.US7.KeepsHiZBaselineDiagnosticsPerView", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Render.MultiView.KeepsHiZBaselineDiagnosticsPerView", [](TestContext& context) {
 			TerraEngine::Renderer::RenderFrameSnapshot snapshot;
 			snapshot.frameId = 890u;
 
@@ -271,7 +271,7 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(1u, sceneIt->hiZFalseOcclusionRiskWarnings, "Scene View should report only its own baseline risk warning.");
 		});
 
-		registry.Add("VirtualGeometry.Render.MultiView.US5.GpuPacketsKeepHiZStatePerView", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Render.MultiView.GpuPacketsKeepHiZStatePerView", [](TestContext& context) {
 			TerraEngine::Renderer::RenderFrameSnapshot snapshot;
 			snapshot.frameId = 891u;
 
@@ -385,7 +385,7 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(720u, sceneIt->hiZPyramidSize.y, "Scene View should keep its own Hi-Z pyramid height.");
 		});
 
-		registry.Add("VirtualGeometry.Render.MultiView.US5.PageResidencyAndHiZSignaturesStayPerView", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Render.MultiView.PageResidencyAndHiZSignaturesStayPerView", [](TestContext& context) {
 			TerraEngine::Renderer::RenderFrameSnapshot snapshot;
 			snapshot.frameId = 893u;
 
@@ -499,7 +499,7 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(1u, sceneIt->pageSources.emittedFallbackSources, "Scene View should report its fallback page source.");
 		});
 
-		registry.Add("VirtualGeometry.Render.MultiView.US6.KeepsGpuPacketCountersPerView", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Render.MultiView.KeepsGpuPacketCountersPerView", [](TestContext& context) {
 			TerraEngine::Renderer::RenderFrameSnapshot snapshot;
 			snapshot.frameId = 892u;
 
@@ -577,7 +577,7 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(1u, sceneIt->validGeneratedSubmissionCount, "Scene View should report its generated submission independently.");
 		});
 
-		registry.Add("VirtualGeometry.Render.MultiView.US7.KeepsPerformanceGateViewIdentityFor300Frames", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Render.MultiView.KeepsPerformanceGateViewIdentityFor300Frames", [](TestContext& context) {
 			std::uint32_t checkedGatePairs = 0u;
 			for (std::uint64_t frame = 0u; frame < 300u; ++frame)
 			{
@@ -638,7 +638,7 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(300u, checkedGatePairs, "The multi-view gate fixture should exercise 300 independent frames.");
 		});
 
-		registry.Add("VirtualGeometry.Render.MultiView.US8.KeepsPageSourcePerformanceGatesPerView", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Render.MultiView.KeepsPageSourcePerformanceGatesPerView", [](TestContext& context) {
 			TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot gameDiagnostics;
 			gameDiagnostics.viewType = RenderViewType::Game;
 			gameDiagnostics.viewId = 2u;
@@ -704,7 +704,7 @@ namespace TerraEngine::Tests
 			}
 		});
 
-		registry.Add("VirtualGeometry.Render.MultiView.US3.ResizePageSourcesAndCullingStayPerView", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Render.MultiView.ResizePageSourcesAndCullingStayPerView", [](TestContext& context) {
 			TerraEngine::Renderer::RenderFrameSnapshot snapshot;
 			snapshot.frameId = 903u;
 

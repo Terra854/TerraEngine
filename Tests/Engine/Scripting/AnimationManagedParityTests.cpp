@@ -156,7 +156,7 @@ namespace TerraEngine::Tests {
 				&& animator.find("ReadSockets") != std::string::npos
 				&& animator.find("ReadEvents") != std::string::npos
 				&& animator.find("ReadRootMotionResults") != std::string::npos,
-				"Animator queries must return copied parity snapshots for every US5 gameplay observation family.");
+				"Animator queries must return copied parity snapshots for every gameplay observation family.");
 			context.Expect(calls.find("Native_Animation_SubmitCommand") != std::string::npos
 				&& calls.find("Native_Animation_QueryCapability") != std::string::npos
 				&& calls.find("Native_Animation_CopySockets") != std::string::npos

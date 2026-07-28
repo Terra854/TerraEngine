@@ -60,7 +60,7 @@ namespace {
 
 	void RegisterVirtualGeometryBatchingTests(TestRegistry& registry)
 	{
-		registry.Add("VirtualGeometry.Batching.US1.DenseSelectedClustersCollapseIntoBoundedBatches", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Batching.DenseSelectedClustersCollapseIntoBoundedBatches", [](TestContext& context) {
 			const TerraEngine::UUID objectId = TerraEngine::GenerateUUID();
 			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
 			const TerraEngine::UUID materialId = TerraEngine::GenerateUUID();
@@ -218,7 +218,7 @@ namespace {
 				"A matching signature must not reuse a Vulkan buffer that was retired or never created.");
 		});
 
-		registry.Add("VirtualGeometry.Batching.US1.GpuPacketRecordsMirrorCpuClusterPackets", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Batching.GpuPacketRecordsMirrorCpuClusterPackets", [](TestContext& context) {
 			const TerraEngine::UUID objectId = TerraEngine::GenerateUUID();
 			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
 			const TerraEngine::UUID materialId = TerraEngine::GenerateUUID();
@@ -270,7 +270,7 @@ namespace {
 			context.Expect(((records.front().flags >> 8u) & 0xffu) == static_cast<std::uint32_t>(VirtualGeometryDebugVisualizationMode::Cluster), "GPU packet flags should mirror the view debug mode.");
 		});
 
-		registry.Add("VirtualGeometry.Batching.US1.VulkanPageSourcePreparationUsesPageLocalRanges", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Batching.VulkanPageSourcePreparationUsesPageLocalRanges", [](TestContext& context) {
 			TerraEngine::Renderer::RenderFrameSnapshot snapshot;
 			snapshot.frameId = 3033u;
 			TerraEngine::Renderer::VirtualGeometryViewSelectionState state = MakeBatchedSelectionState();
@@ -301,7 +301,7 @@ namespace {
 			context.Expect(records.front().pinnedFallback, "Fallback payload records should remain marked as protected.");
 		});
 
-		registry.Add("VirtualGeometry.Batching.US2.UploadPlanningRejectsIncompletePhysicalPayloadBindings", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Batching.UploadPlanningRejectsIncompletePhysicalPayloadBindings", [](TestContext& context) {
 			TerraEngine::Renderer::RenderFrameSnapshot snapshot;
 			snapshot.frameId = 3034u;
 			TerraEngine::Renderer::VirtualGeometryViewSelectionState state = MakeBatchedSelectionState();
@@ -325,7 +325,7 @@ namespace {
 			context.Expect(records.front().reason.find("physical descriptor binding") != std::string::npos, "Rejected resident page uploads should explain the missing physical binding.");
 		});
 
-		registry.Add("VirtualGeometry.Batching.US1.GpuBatchDescriptorsSplitOnCompatibilityKeys", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Batching.GpuBatchDescriptorsSplitOnCompatibilityKeys", [](TestContext& context) {
 			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
 			const TerraEngine::UUID materialA = TerraEngine::GenerateUUID();
 			const TerraEngine::UUID materialB = TerraEngine::GenerateUUID();
@@ -362,7 +362,7 @@ namespace {
 			context.ExpectEqual(static_cast<std::uint32_t>(VirtualGeometryBatchFallbackMode::SinglePacketDraw), static_cast<std::uint32_t>(batches[2].fallbackMode), "Single-packet fallback batches should stay explicitly labeled.");
 		});
 
-		registry.Add("VirtualGeometry.Batching.US1.SparsePacketsKeepExplicitSinglePacketFallback", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Batching.SparsePacketsKeepExplicitSinglePacketFallback", [](TestContext& context) {
 			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
 			const TerraEngine::UUID materialId = TerraEngine::GenerateUUID();
 			std::vector<VirtualGeometryClusterPacket> packets;
@@ -408,7 +408,7 @@ namespace {
 			context.ExpectEqual(8u, diagnostics.submittedMeshlets, "Diagnostics should report submitted meshlets from the batch.");
 		});
 
-		registry.Add("VirtualGeometry.Batching.US1.CopiesGpuPacketTablesIntoVisibilitySnapshots", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Batching.CopiesGpuPacketTablesIntoVisibilitySnapshots", [](TestContext& context) {
 			TerraEngine::Renderer::RenderFrameSnapshot snapshot;
 			snapshot.frameId = 3010u;
 			TerraEngine::Renderer::VirtualGeometryViewSelectionState state = MakeBatchedSelectionState();
@@ -478,7 +478,7 @@ namespace {
 				"Packet-table changes should invalidate deterministic snapshot hashes.");
 		});
 
-		registry.Add("VirtualGeometry.Batching.US2.GpuPacketMetadataInvalidatesSnapshotAndPreparationSignatures", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Batching.GpuPacketMetadataInvalidatesSnapshotAndPreparationSignatures", [](TestContext& context) {
 			TerraEngine::Renderer::RenderFrameSnapshot first;
 			first.frameId = 3020u;
 			first.renderables.push_back({ TerraEngine::GenerateUUID(), TerraEngine::GenerateUUID(), TerraEngine::GenerateUUID() });
@@ -523,7 +523,7 @@ namespace {
 				"Vulkan preparation signatures should include GPU packet ownership and debug metadata.");
 		});
 
-		registry.Add("VirtualGeometry.Batching.US4.GeneratedSubmissionsReduceDenseClusterExpansion", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Batching.GeneratedSubmissionsReduceDenseClusterExpansion", [](TestContext& context) {
 			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
 			const TerraEngine::UUID materialId = TerraEngine::GenerateUUID();
 			std::vector<GpuVirtualGeometryPacketRecord> packets;
@@ -572,7 +572,7 @@ namespace {
 			context.Expect(plan.virtualGeometryBatchPacketSignature != 0u, "Vulkan prep should publish a stable packet-table signature.");
 		});
 
-		registry.Add("VirtualGeometry.Batching.US1.VulkanPreparationCountsGpuPacketTables", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Batching.VulkanPreparationCountsGpuPacketTables", [](TestContext& context) {
 			TerraEngine::Renderer::RenderFrameSnapshot snapshot;
 			snapshot.frameId = 3011u;
 			snapshot.renderables.push_back({ TerraEngine::GenerateUUID(), TerraEngine::GenerateUUID(), TerraEngine::GenerateUUID() });

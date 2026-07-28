@@ -317,7 +317,7 @@ namespace TerraEngine::EditorTests
 			constexpr std::size_t kLargeSceneObjectCount = 10000U;
 			// These fixed limits intentionally avoid percentile sampling and machine-
 			// relative comparisons. Cold is a generous stall detector (10 seconds),
-			// while the 2.5-second warm limit is the US4 acceptance requirement from
+			// while the 2.5-second warm limit is the documented acceptance requirement from
 			// quickstart.md. The fixture uses only deterministic JSON/decode/cache I/O.
 			constexpr auto kColdReadinessMaximum = std::chrono::seconds(10);
 			constexpr auto kWarmReadinessMaximum = std::chrono::milliseconds(2500);
@@ -348,7 +348,7 @@ namespace TerraEngine::EditorTests
 			context.ExpectEqual(static_cast<std::uint64_t>(kLargeSceneObjectCount), warm.preparedScene.objectCount,
 				"Warm readiness must retain the same complete deterministic scene content as cold readiness.");
 			context.Expect(warmElapsed <= kWarmReadinessMaximum,
-				"Warm large-scene readiness exceeded the documented 2.5-second US4 acceptance limit.");
+				"Warm large-scene readiness exceeded the documented 2.5-second acceptance limit.");
 		});
 	}
 }

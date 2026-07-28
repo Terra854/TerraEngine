@@ -49,7 +49,7 @@ namespace TerraEngine::Tests {
 			context.Expect(gate.source == VirtualGeometryPerformanceGateSource::Prepared, "Failure reports should carry the counter source.");
 		});
 
-		registry.Add("Renderer.VisibleCommandReuse.US1.CopyCountGateUsesCompletedStats", [](TestContext& context) {
+		registry.Add("Renderer.VisibleCommandReuse.CopyCountGateUsesCompletedStats", [](TestContext& context) {
 			RenderStatsSnapshot stats;
 			stats.viewType = RenderViewType::Game;
 			stats.valid = true;
@@ -69,7 +69,7 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(std::string("visible-command-reuse-static"), copyGate->fixtureId, "Gate should identify the visible-command reuse fixture.");
 		});
 
-		registry.Add("Renderer.VisibleCommandReuse.US6.ConservativeRefreshPublishesWarningGate", [](TestContext& context) {
+		registry.Add("Renderer.VisibleCommandReuse.ConservativeRefreshPublishesWarningGate", [](TestContext& context) {
 			RenderStatsSnapshot stats;
 			stats.viewType = RenderViewType::Scene;
 			stats.valid = true;
@@ -86,7 +86,7 @@ namespace TerraEngine::Tests {
 			context.Expect(warningGate->diagnostic.find("touch set") != std::string::npos, "Warning should explain the fallback reason.");
 		});
 
-		registry.Add("VirtualGeometry.PerformanceGate.US4.BuildsDenseAndHiZGatesFromViewDiagnostics", [](TestContext& context) {
+		registry.Add("VirtualGeometry.PerformanceGate.BuildsDenseAndHiZGatesFromViewDiagnostics", [](TestContext& context) {
 			TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics;
 			diagnostics.viewType = RenderViewType::Game;
 			diagnostics.counterSource = VirtualGeometryCounterSource::Prepared;
@@ -114,7 +114,7 @@ namespace TerraEngine::Tests {
 			context.Expect(!denseGate->fixtureId.empty() && !denseGate->metricName.empty(), "Generated gates should identify fixture and metric names.");
 		});
 
-		registry.Add("VirtualGeometry.PerformanceGate.US4.FailsAndSummarizesExceededThresholds", [](TestContext& context) {
+		registry.Add("VirtualGeometry.PerformanceGate.FailsAndSummarizesExceededThresholds", [](TestContext& context) {
 			TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics;
 			diagnostics.viewType = RenderViewType::Game;
 			diagnostics.active = true;
@@ -140,7 +140,7 @@ namespace TerraEngine::Tests {
 			context.Expect(summary.resourceWarnings.front().find("actual") != std::string::npos, "Gate warnings should include actual metric text.");
 		});
 
-		registry.Add("VirtualGeometry.PerformanceGate.US4.UnsupportedMetricsAreExplicit", [](TestContext& context) {
+		registry.Add("VirtualGeometry.PerformanceGate.UnsupportedMetricsAreExplicit", [](TestContext& context) {
 			TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics;
 			diagnostics.viewType = RenderViewType::Scene;
 			diagnostics.clusterPacketCount = 8u;
@@ -158,7 +158,7 @@ namespace TerraEngine::Tests {
 			}), "Unsupported gates should explain which fixture data is required.");
 		});
 
-		registry.Add("VirtualGeometry.PerformanceGate.US7.DenseGpuPacketAndPrepBudgetGatesCarryViewSource", [](TestContext& context) {
+		registry.Add("VirtualGeometry.PerformanceGate.DenseGpuPacketAndPrepBudgetGatesCarryViewSource", [](TestContext& context) {
 			TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics;
 			diagnostics.viewType = RenderViewType::Game;
 			diagnostics.viewId = 2u;
@@ -186,7 +186,7 @@ namespace TerraEngine::Tests {
 			context.Expect(gpuGate->source == VirtualGeometryPerformanceGateSource::GPUReadback, "GPU packet gates should preserve the GPU readback source.");
 		});
 
-		registry.Add("VirtualGeometry.PerformanceGate.US7.CompactionTruthAndGeneratedSubmissionValidityGates", [](TestContext& context) {
+		registry.Add("VirtualGeometry.PerformanceGate.CompactionTruthAndGeneratedSubmissionValidityGates", [](TestContext& context) {
 			TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics;
 			diagnostics.viewType = RenderViewType::Scene;
 			diagnostics.viewId = 1u;
@@ -219,7 +219,7 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(1u, failingGeneratedGate->viewId, "Failing generated submission gates should keep the Scene View id.");
 		});
 
-		registry.Add("VirtualGeometry.PerformanceGate.US8.DensePageBudgetGatesResidentBytesAndCoverage", [](TestContext& context) {
+		registry.Add("VirtualGeometry.PerformanceGate.DensePageBudgetGatesResidentBytesAndCoverage", [](TestContext& context) {
 			TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics;
 			diagnostics.viewType = RenderViewType::Game;
 			diagnostics.viewId = 3u;
@@ -290,7 +290,7 @@ namespace TerraEngine::Tests {
 			}
 		});
 
-		registry.Add("VirtualGeometry.PerformanceGate.US8.FailsFullOwningMeshResidencyRegression", [](TestContext& context) {
+		registry.Add("VirtualGeometry.PerformanceGate.FailsFullOwningMeshResidencyRegression", [](TestContext& context) {
 			TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics;
 			diagnostics.viewType = RenderViewType::Game;
 			diagnostics.viewId = 4u;

@@ -184,7 +184,7 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(static_cast<std::size_t>(48u), sizeof(MeshletCullingCountersGPU), "Meshlet GPU counters should include the Hi-Z diagnostic breakdown while remaining 16-byte aligned.");
 		});
 
-		registry.Add("VirtualGeometry.ShaderLayout.US1.GpuPacketAndBatchRecordsStayUploadable", [](TestContext& context) {
+		registry.Add("VirtualGeometry.ShaderLayout.GpuPacketAndBatchRecordsStayUploadable", [](TestContext& context) {
 			context.Expect(std::is_copy_constructible_v<GpuVirtualGeometryPacketRecord>, "GPU virtual geometry packet records should remain value-copyable for immutable frame snapshots.");
 			context.Expect(std::is_copy_constructible_v<GpuVirtualGeometryBatchDescriptor>, "GPU virtual geometry batch descriptors should remain value-copyable for immutable frame snapshots.");
 			context.Expect(sizeof(GpuVirtualGeometryPacketRecord) <= 224u, "GPU packet mirrors should stay compact enough for dense per-view packet buffers.");
@@ -199,7 +199,7 @@ namespace TerraEngine::Tests
 			context.Expect(offsetof(VirtualGeometrySelectedClusterRecord, usingFallback) > offsetof(VirtualGeometrySelectedClusterRecord, fallbackClusterId), "Fallback state should travel with each sparse cluster record.");
 		});
 
-		registry.Add("VirtualGeometry.ShaderLayout.US1.PacketBatchMetadataStaysVisible", [](TestContext& context) {
+		registry.Add("VirtualGeometry.ShaderLayout.PacketBatchMetadataStaysVisible", [](TestContext& context) {
 			const std::string taskShader = ReadDefaultTaskShader();
 			const std::string meshShader = ReadDefaultMeshShader();
 
@@ -214,7 +214,7 @@ namespace TerraEngine::Tests
 			context.Expect(ShaderContains(meshShader, "SceneUniforms.selectedVirtualClusterCount"), "Mesh shader should continue packing the selected packet count into debug data.");
 		});
 
-		registry.Add("VirtualGeometry.ShaderLayout.US3.PacketCompactionComputeShaderKeepsFailOpenContract", [](TestContext& context) {
+		registry.Add("VirtualGeometry.ShaderLayout.PacketCompactionComputeShaderKeepsFailOpenContract", [](TestContext& context) {
 			const std::string shader = ReadVirtualGeometryPacketCompactionShader();
 
 			context.Expect(!shader.empty(), "Virtual geometry packet compaction shader should be present in Engine/Shaders/VirtualGeometry.");
@@ -228,7 +228,7 @@ namespace TerraEngine::Tests
 			context.Expect(ShaderContains(shader, "[numthreads(64, 1, 1)]"), "Compaction shader should use an explicit, bounded thread-group size.");
 		});
 
-		registry.Add("VirtualGeometry.ShaderLayout.US4.PageLocalPacketsPreserveMaterialAndPayloadIdentity", [](TestContext& context) {
+		registry.Add("VirtualGeometry.ShaderLayout.PageLocalPacketsPreserveMaterialAndPayloadIdentity", [](TestContext& context) {
 			const std::string shader = ReadVirtualGeometryPacketCompactionShader();
 			const std::string fragmentShader = ReadDefaultFragmentShader();
 
@@ -252,7 +252,7 @@ namespace TerraEngine::Tests
 			context.Expect(ShaderContains(fragmentShader, "uint virtualGeometryPacketDescriptorIndex;"), "Fragment push constants should mirror the packet descriptor id so all default stages share one layout.");
 		});
 
-		registry.Add("VirtualGeometry.ShaderLayout.US2.PhysicalPagePayloadDescriptorWordsAreStable", [](TestContext& context) {
+		registry.Add("VirtualGeometry.ShaderLayout.PhysicalPagePayloadDescriptorWordsAreStable", [](TestContext& context) {
 			const std::string taskShader = ReadDefaultTaskShader();
 			const std::string meshShader = ReadDefaultMeshShader();
 			const std::string vulkanResources = ReadVulkanContextResourcesSource();
@@ -269,7 +269,7 @@ namespace TerraEngine::Tests
 			context.Expect(ShaderContains(vulkanResources, "packet.payloadDescriptorIndex"), "Vulkan descriptor publication should include packet payload descriptor indices.");
 		});
 
-		registry.Add("VirtualGeometry.ShaderLayout.US2.PageLocalGeometryStreamsAreShaderDecodable", [](TestContext& context) {
+		registry.Add("VirtualGeometry.ShaderLayout.PageLocalGeometryStreamsAreShaderDecodable", [](TestContext& context) {
 			const std::string taskShader = ReadDefaultTaskShader();
 			const std::string meshShader = ReadDefaultMeshShader();
 			const std::string vulkanResources = ReadVulkanContextResourcesSource();
@@ -304,7 +304,7 @@ namespace TerraEngine::Tests
 			context.Expect(ShaderContains(renderSystem, "record.packetId = packet.packetId"), "GPU packet publication should preserve CPU packet ids so page-local descriptors stay aligned after compaction.");
 		});
 
-		registry.Add("VirtualGeometry.ShaderLayout.US2.PageLocalBranchesDoNotEagerlyReadOwnerStreams", [](TestContext& context) {
+		registry.Add("VirtualGeometry.ShaderLayout.PageLocalBranchesDoNotEagerlyReadOwnerStreams", [](TestContext& context) {
 			const std::string taskShader = ReadDefaultTaskShader();
 			const std::string meshShader = ReadDefaultMeshShader();
 
@@ -369,7 +369,7 @@ namespace TerraEngine::Tests
 				"Page-local mesh emission should validate the resolved local index and return before owner-mesh emission can execute.");
 		});
 
-		registry.Add("VirtualGeometry.ShaderLayout.US2.PageLocalDrawsLaunchLocalMeshletRanges", [](TestContext& context) {
+		registry.Add("VirtualGeometry.ShaderLayout.PageLocalDrawsLaunchLocalMeshletRanges", [](TestContext& context) {
 			const std::string vulkanSource = ReadVulkanContextSource();
 
 			context.Expect(ShaderContains(vulkanSource, "const bool pageLocalGeometry ="), "Vulkan draw preparation should classify resident page/fallback payload draws before clamping meshlet ranges.");
@@ -477,7 +477,7 @@ namespace TerraEngine::Tests
 			}
 		});
 
-		registry.Add("VirtualGeometry.ShaderLayout.US2.PageLocalDescriptorUpdatesDrainRecordedViews", [](TestContext& context) {
+		registry.Add("VirtualGeometry.ShaderLayout.PageLocalDescriptorUpdatesDrainRecordedViews", [](TestContext& context) {
 			const std::string vulkanResources = ReadVulkanContextResourcesSource();
 
 			context.Expect(ShaderContains(vulkanResources, "publication.buffer == buffer.buffer"), "View-local VG bindless descriptors should skip redundant descriptor-set updates when the published buffer did not change.");
@@ -648,7 +648,7 @@ namespace TerraEngine::Tests
 			context.Expect(ShaderContains(vulkanSource, "fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT"), "Failed UI submits should restore a signaled frame fence after the pre-submit reset.");
 		});
 
-		registry.Add("VirtualGeometry.ShaderLayout.US5.NoSelectableHiZQualityTierWasIntroduced", [](TestContext& context) {
+		registry.Add("VirtualGeometry.ShaderLayout.NoSelectableHiZQualityTierWasIntroduced", [](TestContext& context) {
 			const std::string taskShader = ReadDefaultTaskShader();
 			const std::string compactionShader = ReadVirtualGeometryPacketCompactionShader();
 

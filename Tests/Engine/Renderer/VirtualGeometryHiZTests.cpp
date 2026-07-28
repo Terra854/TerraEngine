@@ -74,7 +74,7 @@ namespace TerraEngine::Tests
 
 	void RegisterVirtualGeometryHiZTests(TestRegistry& registry)
 	{
-		registry.Add("VirtualGeometry.HiZ.US5.GpuPacketsAndGeneratedSubmissionsPreserveBaselineMatch", [](TestContext& context) {
+		registry.Add("VirtualGeometry.HiZ.GpuPacketsAndGeneratedSubmissionsPreserveBaselineMatch", [](TestContext& context) {
 			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
 			visibility.viewType = RenderViewType::Game;
 			visibility.outputId = 6u;
@@ -149,7 +149,7 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(0u, diagnostics.hiZFalseOcclusionRiskWarnings, "Matched GPU packet Hi-Z baselines should not publish false-occlusion risk warnings.");
 		});
 
-		registry.Add("VirtualGeometry.HiZ.US5.PageSourceTransitionsStayDiagnosticOnly", [](TestContext& context) {
+		registry.Add("VirtualGeometry.HiZ.PageSourceTransitionsStayDiagnosticOnly", [](TestContext& context) {
 			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
 			visibility.viewType = RenderViewType::Game;
 			visibility.outputId = 9u;
@@ -235,7 +235,7 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(1u, diagnostics.pageSources.emittedFallbackSources, "Fallback emission should be counted independently of high-detail emission.");
 		});
 
-		registry.Add("VirtualGeometry.HiZ.US3.PagePayloadSourcesDoNotChangeAcceptedBaseline", [](TestContext& context) {
+		registry.Add("VirtualGeometry.HiZ.PagePayloadSourcesDoNotChangeAcceptedBaseline", [](TestContext& context) {
 			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
 			visibility.viewType = RenderViewType::Game;
 			visibility.outputId = 12u;
@@ -327,7 +327,7 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(1u, diagnostics.pageSources.emittedEmbeddedFallbackSources, "Owning-mesh conservative fallback emission should be explicit instead of mutating Hi-Z policy.");
 		});
 
-		registry.Add("VirtualGeometry.HiZ.US5.PageIdentityIsHashedButTaskPathHasNoQualityTier", [](TestContext& context) {
+		registry.Add("VirtualGeometry.HiZ.PageIdentityIsHashedButTaskPathHasNoQualityTier", [](TestContext& context) {
 			const std::string vulkanSource = ReadSourceFile("Engine/Renderer/RHI/Vulkan/VulkanContext.cpp");
 			const std::string taskShader = ReadSourceFile("Engine/Shaders/Default/Default.task.hlsl");
 
@@ -342,7 +342,7 @@ namespace TerraEngine::Tests
 			context.Expect(!ContainsText(taskShader, "HiZQuality"), "Task shader should still avoid selectable Hi-Z quality tiers.");
 		});
 
-		registry.Add("VirtualGeometry.HiZ.US5.PagePayloadSizeDoesNotBroadenClusterPacketBounds", [](TestContext& context) {
+		registry.Add("VirtualGeometry.HiZ.PagePayloadSizeDoesNotBroadenClusterPacketBounds", [](TestContext& context) {
 			VirtualGeometryAssetRuntime asset{};
 			asset.assetId = TerraEngine::GenerateUUID();
 			asset.cullableGroups.resize(4u);
@@ -402,7 +402,7 @@ namespace TerraEngine::Tests
 			context.Expect(firstPackets.front().boundsMax == cluster.boundsCenter + glm::vec3(cluster.boundsRadius), "Packet maximum bounds should come from the selected cluster.");
 		});
 
-		registry.Add("VirtualGeometry.HiZ.US7.BatchedPathPublishesBaselineMatch", [](TestContext& context) {
+		registry.Add("VirtualGeometry.HiZ.BatchedPathPublishesBaselineMatch", [](TestContext& context) {
 			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
 			visibility.viewType = RenderViewType::Game;
 			visibility.outputId = 2u;
@@ -453,7 +453,7 @@ namespace TerraEngine::Tests
 			context.Expect(diagnostics.hiZActive, "Active validation state should keep Hi-Z active for the batched diagnostics path.");
 		});
 
-		registry.Add("VirtualGeometry.HiZ.US7.BaselineMismatchFailsPerformanceGate", [](TestContext& context) {
+		registry.Add("VirtualGeometry.HiZ.BaselineMismatchFailsPerformanceGate", [](TestContext& context) {
 			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
 			visibility.viewType = RenderViewType::Game;
 			visibility.outputId = 2u;

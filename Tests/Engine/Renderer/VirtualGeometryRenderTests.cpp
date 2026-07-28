@@ -191,7 +191,7 @@ namespace TerraEngine::Tests
 
 	void RegisterVirtualGeometryRenderTests(TestRegistry& registry)
 	{
-		registry.Add("VirtualGeometry.Render.US1.GpuPacketDescriptorsPreserveMaterialAndFallbackRuns", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Render.GpuPacketDescriptorsPreserveMaterialAndFallbackRuns", [](TestContext& context) {
 			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
 			const TerraEngine::UUID materialA = TerraEngine::GenerateUUID();
 			const TerraEngine::UUID materialB = TerraEngine::GenerateUUID();
@@ -235,7 +235,7 @@ namespace TerraEngine::Tests
 			context.Expect((batches[2].flags & 1u) != 0u, "Fallback GPU batch should carry fail-open packet flags.");
 		});
 
-		registry.Add("VirtualGeometry.Render.US2.GpuPacketsValidateAgainstCpuClusterOracle", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Render.GpuPacketsValidateAgainstCpuClusterOracle", [](TestContext& context) {
 			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
 			const TerraEngine::UUID objectId = TerraEngine::GenerateUUID();
 			const TerraEngine::UUID materialId = TerraEngine::GenerateUUID();
@@ -293,7 +293,7 @@ namespace TerraEngine::Tests
 			context.Expect(validationReason.find("cluster") != std::string::npos, "Validation failure should explain that cluster identity drifted.");
 		});
 
-		registry.Add("VirtualGeometry.Render.US2.SnapshotPreservesGpuPacketMaterialFallbackAndRangeIdentity", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Render.SnapshotPreservesGpuPacketMaterialFallbackAndRangeIdentity", [](TestContext& context) {
 			TerraEngine::Renderer::RenderFrameSnapshot snapshot;
 			snapshot.frameId = 8801u;
 			TerraEngine::Renderer::VirtualGeometryViewSelectionState state;
@@ -336,7 +336,7 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(2u, visibility.front().gpuPacketRecords.front().selectedLod, "GPU packet snapshot should preserve selected LOD.");
 		});
 
-		registry.Add("VirtualGeometry.Render.US1.HighDetailResidentPagesBecomeEmittedSources", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Render.HighDetailResidentPagesBecomeEmittedSources", [](TestContext& context) {
 			using namespace TerraEngine::Renderer;
 
 			VirtualGeometryAssetRuntime asset = MakeMixedClusterAsset();
@@ -416,7 +416,7 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(0u, diagnostics.embeddedFallbackPayloadCount, "High-detail page emission should not be reported as conservative embedded fallback.");
 		});
 
-		registry.Add("VirtualGeometry.Render.US2.ResidentPagePacketsKeepPhysicalPayloadBindings", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Render.ResidentPagePacketsKeepPhysicalPayloadBindings", [](TestContext& context) {
 			using namespace TerraEngine::Renderer;
 
 			VirtualGeometryAssetRuntime asset = MakeMixedClusterAsset();
@@ -453,7 +453,7 @@ namespace TerraEngine::Tests
 			}
 		});
 
-		registry.Add("VirtualGeometry.Render.US2.ResidentAndFallbackPacketsDoNotRequireOwnerDecodeStreams", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Render.ResidentAndFallbackPacketsDoNotRequireOwnerDecodeStreams", [](TestContext& context) {
 			const std::string taskShader = ReadRendererSourceFile("Engine/Shaders/Default/Default.task.hlsl");
 			const std::string meshShader = ReadRendererSourceFile("Engine/Shaders/Default/Default.mesh.hlsl");
 			const std::string vulkanResources = ReadRendererSourceFile("Engine/Renderer/RHI/Vulkan/VulkanContextResources.cpp");
@@ -466,7 +466,7 @@ namespace TerraEngine::Tests
 			context.Expect(SourceContains(vulkanResources, "owner mesh buffers are skipped for page-local virtual geometry"), "Vulkan mesh-cache policy should document that resident pages no longer require full owner streams.");
 		});
 
-		registry.Add("VirtualGeometry.Render.US5.OwningMeshFallbackDiagnosticsCarryExactBytesAndReason", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Render.OwningMeshFallbackDiagnosticsCarryExactBytesAndReason", [](TestContext& context) {
 			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
 			visibility.valid = true;
 			visibility.viewType = RenderViewType::Game;
@@ -944,7 +944,7 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(1u, diagnostics.front().selectedLodHistogram[1], "Sparse draw diagnostics should count the coarse cluster draw.");
 		});
 
-		registry.Add("VirtualGeometry.Render.US1.MultiMaterialPacketsRemainSeparateBatches", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Render.MultiMaterialPacketsRemainSeparateBatches", [](TestContext& context) {
 			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
 			const TerraEngine::UUID materialA = TerraEngine::GenerateUUID();
 			const TerraEngine::UUID materialB = TerraEngine::GenerateUUID();
@@ -970,7 +970,7 @@ namespace TerraEngine::Tests
 			context.Expect(batches[0].materialId != batches[1].materialId, "Submitted batches should retain separate material ownership.");
 		});
 
-		registry.Add("VirtualGeometry.Render.US2.CompactionRejectsOffscreenButFailsOpenMissingResources", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Render.CompactionRejectsOffscreenButFailsOpenMissingResources", [](TestContext& context) {
 			VirtualGeometryClusterPacket offscreen;
 			offscreen.packetId = 0u;
 			offscreen.clusterId = 7u;
@@ -997,7 +997,7 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(static_cast<std::size_t>(1u), compacted.size(), "Fail-open packets should be submitted after restoration.");
 		});
 
-		registry.Add("VirtualGeometry.Render.US3.FallbackCoverageChainsPublishThroughSnapshots", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Render.FallbackCoverageChainsPublishThroughSnapshots", [](TestContext& context) {
 			TerraEngine::Renderer::RenderFrameSnapshot snapshot{};
 			TerraEngine::Renderer::VirtualGeometryViewSelectionState state{};
 			state.viewType = RenderViewType::Game;
@@ -1022,7 +1022,7 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(6u, visibility.front().fallbackCoverage.front().substitutedMeshlets, "Fallback coverage should report substituted meshlets.");
 		});
 
-		registry.Add("VirtualGeometry.Render.US4.MixedDetailClusterCutBuildsPageLocalPackets", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Render.MixedDetailClusterCutBuildsPageLocalPackets", [](TestContext& context) {
 			VirtualGeometryAssetRuntime asset = MakeTwoRegionClusterAsset();
 			asset.pages[0].payloadByteOffset = 4096u;
 			asset.pages[0].byteSize = 1536u;
@@ -1062,7 +1062,7 @@ namespace TerraEngine::Tests
 			context.Expect(farPacket != packets.end() && farPacket->pagePayloadByteOffset == 16384u, "Coarse packet should point at its own resident page byte range.");
 		});
 
-		registry.Add("VirtualGeometry.Render.US4.PagePayloadIdentityInvalidatesPreparedSignatures", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Render.PagePayloadIdentityInvalidatesPreparedSignatures", [](TestContext& context) {
 			TerraEngine::Renderer::RenderFrameRenderableRecord record{};
 			record.objectId = TerraEngine::GenerateUUID();
 			record.meshId = TerraEngine::GenerateUUID();
@@ -1090,7 +1090,7 @@ namespace TerraEngine::Tests
 			context.Expect(highDetailHash != fallbackHash, "Prepared visible-command signatures should change when a draw swaps resident page payload identity.");
 		});
 
-		registry.Add("VirtualGeometry.Render.US4.DiagnosticsCountMaterialPageBoundaries", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Render.DiagnosticsCountMaterialPageBoundaries", [](TestContext& context) {
 			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
 			visibility.valid = true;
 			visibility.viewType = RenderViewType::Game;
@@ -1111,7 +1111,7 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(1u, diagnostics.pageSources.emittedMultiMaterialPages, "Diagnostics should identify a page that emitted multiple material sections.");
 		});
 
-		registry.Add("VirtualGeometry.Render.US4.ZeroSurvivorGeneratedSubmissionsRemainValidZeroWork", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Render.ZeroSurvivorGeneratedSubmissionsRemainValidZeroWork", [](TestContext& context) {
 			const std::vector<GpuVirtualGeometryBatchDescriptor> batches;
 			const std::vector<GpuVirtualGeometryPacketRecord> packets;
 			const std::vector<GeneratedVirtualGeometrySubmissionRecord> submissions =

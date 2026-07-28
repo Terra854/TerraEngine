@@ -92,7 +92,7 @@ namespace TerraEngine::EditorTests {
 			context.Expect(diagnostics.hiZBaselineMatched, "Automation diagnostics should report the preserved Hi-Z baseline state.");
 		});
 
-		registry.Add("VirtualGeometry.Editor.Automation.US6.CullingStatsExposeGpuPacketCounters", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Editor.Automation.CullingStatsExposeGpuPacketCounters", [](TestContext& context) {
 			TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics;
 			diagnostics.counterSource = VirtualGeometryCounterSource::GPUReadback;
 			diagnostics.gpuPacketRecordCount = 8u;
@@ -121,7 +121,7 @@ namespace TerraEngine::EditorTests {
 			context.Expect(diagnostics.gpuFallbackReason.find("fallback") != std::string::npos, "Automation diagnostics should carry fallback explanations.");
 		});
 
-		registry.Add("VirtualGeometry.Editor.Automation.US6.CullingStatsExposePageSourceCounters", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Editor.Automation.CullingStatsExposePageSourceCounters", [](TestContext& context) {
 			TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics;
 			diagnostics.pageSources.residentPayloads = 3u;
 			diagnostics.pageSources.emittedHighDetailSources = 1u;
@@ -153,7 +153,7 @@ namespace TerraEngine::EditorTests {
 			context.ExpectEqual(static_cast<std::uint64_t>(4096u), diagnostics.pageSources.residentPayloadBytes, "Automation diagnostics should carry resident payload byte counts.");
 		});
 
-		registry.Add("VirtualGeometry.Editor.Automation.US7.CullingStatsExposePerformanceGateSummaries", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Editor.Automation.CullingStatsExposePerformanceGateSummaries", [](TestContext& context) {
 			PerformanceGateResult gate;
 			gate.gateId = "gpu-packet-batch-ratio";
 			gate.fixtureId = "gpu-packet-buffer-batching";
@@ -175,7 +175,7 @@ namespace TerraEngine::EditorTests {
 			context.Expect(gate.source == VirtualGeometryPerformanceGateSource::GPUReadback, "Automation gate fixtures should preserve GPU readback gate sources.");
 		});
 
-		registry.Add("VirtualGeometry.Editor.Automation.US7.AssetDetailsExposePageIntegrityAndSkippedStreaming", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Editor.Automation.AssetDetailsExposePageIntegrityAndSkippedStreaming", [](TestContext& context) {
 			const std::string source = ReadAutomationServiceSource();
 
 			context.Expect(source.find("\"pageStreamingReady\"") != std::string::npos, "Automation asset details should expose page-streaming readiness.");
