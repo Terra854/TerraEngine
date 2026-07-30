@@ -117,6 +117,14 @@ namespace TerraEngine::EditorTests
 				context.Expect(SchemaHasProperty(start->descriptor.inputSchema, "captureLevel"), "Capture start should accept an optional detail level.");
 				context.Expect(SchemaHasProperty(start->descriptor.inputSchema, "payloadVersion"), "Capture start should declare its emitted capture version.");
 				context.Expect(SchemaHasProperty(start->descriptor.inputSchema, "maximumChunkFrames"), "Capture start should accept a bounded chunk-frame limit.");
+				context.Expect(SchemaHasProperty(start->descriptor.inputSchema, "maxFrames"), "Capture start should expose the bounded rolling-history limit instead of silently retaining ten thousand detailed frames.");
+				if (SchemaHasProperty(start->descriptor.inputSchema, "maxFrames"))
+				{
+					context.ExpectEqual(
+						TerraEngine::Profiling::kDefaultProfilerRollingFrameLimit,
+						start->descriptor.inputSchema["properties"]["maxFrames"].value("default", 0u),
+						"Profiler discovery should publish the same rolling-history default used at runtime.");
+				}
 				context.Expect(SchemaHasProperty(start->descriptor.resultSchema, "bounds"), "Capture start should return effective bounds without changing durable job fields.");
 				context.Expect(SchemaHasProperty(start->descriptor.resultSchema, "jobId"), "V2 capture start must retain the existing durable job identifier.");
 			}

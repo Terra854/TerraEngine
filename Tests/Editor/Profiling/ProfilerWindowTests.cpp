@@ -117,7 +117,7 @@ namespace TerraEngine::EditorTests
 			context.Expect(source.find("unavailable") != std::string::npos, "Unavailable typed streams should be labelled instead of shown as zero.");
 		});
 
-		registry.Add("ProfilerWindow.Recording.UsesBoundedSampledCaptureForScopeEvidence", [](TestContext& context) {
+		registry.Add("ProfilerWindow.Recording.UsesBoundedDetailedCaptureForEveryFrameScopeEvidence", [](TestContext& context) {
 			const std::string source = ReadProfilerWindowSource();
 			const std::string serviceSource = ReadEditorProfilerServiceSource();
 			const std::size_t timingDisclosure = source.find("TreeNode(\"Timing Distribution\")");
@@ -125,16 +125,19 @@ namespace TerraEngine::EditorTests
 			const std::size_t evidenceDisclosure = source.find("TreeNode(\"Whole Capture Analysis\")");
 			const std::size_t documentCopy = source.find("GetDocumentSnapshot()", evidenceDisclosure);
 
-			context.Expect(serviceSource.find("detailLevel = TerraEngine::Profiling::ProfilerCaptureDetailLevel::Sampled") != std::string::npos
-				&& serviceSource.find("sampleIntervalFrames = 4u") != std::string::npos,
-				"The ordinary Record action should retain scope evidence on a bounded four-frame cadence.");
+			context.Expect(serviceSource.find("detailLevel = TerraEngine::Profiling::ProfilerCaptureDetailLevel::Detailed") != std::string::npos
+				&& serviceSource.find("Thread-owned fixed buffers") != std::string::npos,
+				"The ordinary Record action should retain every-frame scope evidence through bounded thread-owned buffers.");
 			context.Expect(serviceSource.find("recordMarkers = true") != std::string::npos
 				&& serviceSource.find("taskExecutionEnabled = true") != std::string::npos
 				&& serviceSource.find("recordTaskContext = true") != std::string::npos,
-				"The sampled toolbar capture should retain marker and task context needed to build useful scope trees.");
-			context.Expect(serviceSource.find("keeping the") != std::string::npos
-				&& serviceSource.find("artifact size bounded") != std::string::npos,
-				"The service should document the sampled-versus-detailed capture tradeoff for future maintainers.");
+				"The detailed toolbar capture should retain marker and task context needed to build useful scope trees.");
+			context.Expect(serviceSource.find("settings.maxFrames = TerraEngine::Profiling::kDefaultProfilerRollingFrameLimit") != std::string::npos
+				&& source.find("Record Every Frame") != std::string::npos,
+				"The every-frame toolbar action should clearly identify itself and retain a bounded detailed history.");
+			context.Expect(serviceSource.find("no shared profiler mutex") != std::string::npos
+				&& serviceSource.find("reports drops") != std::string::npos,
+				"The service should document why every-frame detailed capture remains bounded.");
 			context.Expect(timingDisclosure != std::string::npos && frameCopy != std::string::npos && timingDisclosure < frameCopy,
 				"Rolling timing distributions should copy the complete capture only after the user expands them.");
 			context.Expect(evidenceDisclosure != std::string::npos && documentCopy != std::string::npos && evidenceDisclosure < documentCopy,
@@ -152,6 +155,19 @@ namespace TerraEngine::EditorTests
 				"The profiler window should copy its frame list only in the snapshot refresh path.");
 			context.ExpectEqual(static_cast<std::size_t>(1u), CountOccurrences(source, "GetSelectedFrameSnapshot()"),
 				"The profiler window should copy its selected frame only in the snapshot refresh path.");
+			context.Expect(source.find("kProfilerStatsRefreshInterval") != std::string::npos
+				&& source.find("now >= cache->nextProfilerStatsRefresh") != std::string::npos,
+				"Whole-history percentile sorting should update more slowly than compact live rows.");
+			context.Expect(source.find("const std::vector<ProfilerFrameListItem>& displayedFrames = frameIndexOrder ? frames : sortedFrames") != std::string::npos
+				&& source.find("if (!frameIndexOrder && (cache->frameOrderDirty || sortSpecs->SpecsDirty))") != std::string::npos,
+				"The default frame-index order should traverse the chronological snapshot directly and sort only explicit timing orders.");
+			const std::size_t pinGuard = source.find("cache->pinnedFrameIndex.has_value()");
+			const std::size_t selectedFrameCopy = source.find("GetSelectedFrameSnapshot()", pinGuard);
+			context.Expect(pinGuard != std::string::npos
+				&& selectedFrameCopy != std::string::npos
+				&& pinGuard < selectedFrameCopy
+				&& source.find("Live timings are updating in the frame list") != std::string::npos,
+				"Live recording should remain compact until the user explicitly pins a frame for detailed inspection.");
 			context.ExpectEqual(static_cast<std::size_t>(1u), CountOccurrences(source, "BuildSampleTree(frame, selectedModule)"),
 				"Top offenders and the sample hierarchy should share one cached sample-tree analysis.");
 			context.Expect(source.find("GetLatestRenderGraphDiagnostics()") == std::string::npos
@@ -165,8 +181,9 @@ namespace TerraEngine::EditorTests
 				&& source.find("timingDistributionFrameIndex") == std::string::npos,
 				"Expanded whole-capture disclosures should reuse cached analysis until the user requests a refresh.");
 			context.Expect(source.find("TreeNode(\"Sample Hierarchy\")") != std::string::npos
+				&& source.find("TreeNode(\"Top Offenders\")") != std::string::npos
 				&& source.find("GetBool(openStateId, false)") != std::string::npos,
-				"Large scope hierarchies should be opt-in and start collapsed.");
+				"Sorting and drawing large scope hierarchies should be opt-in and start collapsed.");
 		});
 	}
 }

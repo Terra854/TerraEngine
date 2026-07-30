@@ -14,6 +14,11 @@
 
 namespace TerraEngine::Profiling
 {
+// Interactive captures keep enough per-frame history for meaningful percentile
+// analysis without allowing an accidental long recording to retain gigabytes of
+// detailed strings and vectors.
+inline constexpr std::uint32_t kDefaultProfilerRollingFrameLimit = 2048u;
+
 // ProfilerSessionState names the supported states explicitly so serialization and switches stay readable.
 enum class ProfilerSessionState : std::uint8_t
 {
@@ -89,7 +94,7 @@ struct ProfilerCaptureSettings
 	bool taskExecutionEnabled = true;
 	bool recordMarkers = true;
 	bool recordTaskContext = true;
-	std::uint32_t maxFrames = 10000u;
+	std::uint32_t maxFrames = kDefaultProfilerRollingFrameLimit;
 	double maxDurationSeconds = 0.0;
 	ProfilerCaptureMode captureMode = ProfilerCaptureMode::LiveRolling;
 	ProfilerCaptureDetailLevel detailLevel = ProfilerCaptureDetailLevel::Detailed;

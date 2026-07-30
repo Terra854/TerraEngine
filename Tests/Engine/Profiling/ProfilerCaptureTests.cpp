@@ -539,6 +539,78 @@ namespace TerraEngine::Tests {
 			profiler.Clear();
 		});
 
+		registry.Add("Engine.Profiler.RollingHistoryRetainsNewestFramesWithoutShiftingPayloads", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+
+			Profiler& profiler = Profiler::Instance();
+			profiler.Clear();
+			ProfilerCaptureMetadata metadata;
+			metadata.projectName = "Rolling deque history";
+			ProfilerCaptureSettings settings;
+			settings.maxFrames = 3U;
+
+			profiler.StartRecording(metadata, settings);
+			for (std::uint64_t frameIndex = 0U; frameIndex < 9U; ++frameIndex)
+			{
+				profiler.BeginFrame(true);
+				const bool sampleActive = profiler.BeginSample("Detailed Rolling Sample", ProfilerModuleId::CpuEngine);
+				if (sampleActive)
+				{
+					profiler.EndSample();
+				}
+				profiler.EndFrame();
+			}
+
+			const std::vector<ProfilerFrameRecord> frames = profiler.GetFramesSnapshot();
+			const std::vector<ProfilerFrameListItem> compactFrames = profiler.GetFrameListSnapshot();
+			context.ExpectEqual(std::size_t(3U), frames.size(),
+				"Rolling detailed history should remain at the exact configured frame limit.");
+			context.ExpectEqual(std::size_t(3U), compactFrames.size(),
+				"Compact frame snapshots should expose the same bounded retained history.");
+			if (frames.size() == 3U && compactFrames.size() == 3U)
+			{
+				context.ExpectEqual(std::uint64_t(6U), frames.front().frameIndex,
+					"Constant-time eviction should discard the oldest detailed frames first.");
+				context.ExpectEqual(std::uint64_t(8U), frames.back().frameIndex,
+					"Constant-time eviction should preserve the newest completed frame.");
+				context.ExpectEqual(frames.front().frameIndex, compactFrames.front().frameIndex,
+					"Detailed and compact snapshots should retain the same chronological order.");
+			}
+
+			const ProfilerCaptureDocument finished = profiler.FinishRecording();
+			context.ExpectEqual(std::size_t(3U), finished.frames.size(),
+				"Finishing should materialize the deque-backed rolling history into the stable vector artifact schema.");
+			profiler.Clear();
+		});
+
+		registry.Add("Engine.Profiler.LoadedHistoryNormalizesFrameIndexOrder", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+
+			ProfilerCaptureDocument loaded;
+			loaded.metadata.projectName = "Recovered out-of-order capture";
+			loaded.frames = {
+				{.frameIndex = 9U, .durationMs = 9.0, .complete = true},
+				{.frameIndex = 3U, .durationMs = 3.0, .complete = true},
+				{.frameIndex = 7U, .durationMs = 7.0, .complete = true}};
+
+			Profiler& profiler = Profiler::Instance();
+			profiler.Clear();
+			profiler.LoadDocument(loaded);
+			const std::vector<ProfilerFrameListItem> frames = profiler.GetFrameListSnapshot();
+			context.ExpectEqual(std::size_t(3U), frames.size(),
+				"Loading should retain every readable recovered frame.");
+			if (frames.size() == 3U)
+			{
+				context.ExpectEqual(std::uint64_t(3U), frames[0].frameIndex,
+					"Loaded compact history should begin with the smallest frame index.");
+				context.ExpectEqual(std::uint64_t(7U), frames[1].frameIndex,
+					"Loaded compact history should remain monotonically ordered.");
+				context.ExpectEqual(std::uint64_t(9U), frames[2].frameIndex,
+					"Loaded compact history should end with the largest frame index.");
+			}
+			profiler.Clear();
+		});
+
 		registry.Add("Engine.Profiler.CaptureDetailControlsLiveInstrumentationCost", [](TestContext& context) {
 			using namespace TerraEngine::Profiling;
 
@@ -597,6 +669,8 @@ namespace TerraEngine::Tests {
 			for (std::uint32_t frameIndex = 0U; frameIndex < 5U; ++frameIndex)
 			{
 				profiler.BeginFrame(true);
+				profiler.RecordTaskQueued();
+				const bool taskSampleActive = profiler.RecordTaskStarted("Sampled Task");
 				const bool sampleActive = profiler.BeginSample("Sampled Scope", ProfilerModuleId::CpuEngine);
 				context.ExpectEqual(frameIndex == 0U || frameIndex == 4U, sampleActive,
 					"Sampled captures should enable optional scopes only on their deterministic cadence.");
@@ -604,6 +678,7 @@ namespace TerraEngine::Tests {
 				{
 					profiler.EndSample();
 				}
+				profiler.RecordTaskFinished(taskSampleActive);
 				profiler.EndFrame();
 			}
 			const std::vector<ProfilerFrameRecord> sampledFrames = profiler.GetFramesSnapshot();
@@ -615,6 +690,19 @@ namespace TerraEngine::Tests {
 				&& sampledFrames[3].samples.empty()
 				&& HasSampleNamed(sampledFrames[4], "Sampled Scope"),
 				"Only cadence frames should retain sampled optional markers.");
+			context.Expect(std::all_of(sampledFrames.begin(), sampledFrames.end(), [](const ProfilerFrameRecord& frame) {
+				const ProfilerModuleSummary* taskModule =
+					FindModule(frame.moduleSummaries, ProfilerModuleId::TaskExecution);
+				const ProfilerMetric* queuedMetric =
+					taskModule != nullptr ? FindMetric(*taskModule, "Queued tasks") : nullptr;
+				const ProfilerMetric* startedMetric =
+					taskModule != nullptr ? FindMetric(*taskModule, "Started tasks") : nullptr;
+				const ProfilerMetric* finishedMetric =
+					taskModule != nullptr ? FindMetric(*taskModule, "Finished tasks") : nullptr;
+				return queuedMetric != nullptr && queuedMetric->value == 1.0
+					&& startedMetric != nullptr && startedMetric->value == 1.0
+					&& finishedMetric != nullptr && finishedMetric->value == 1.0;
+			}), "Sampled captures should retain compact task counters on every frame, including off-cadence frames.");
 			profiler.Clear();
 		});
 
@@ -655,6 +743,386 @@ namespace TerraEngine::Tests {
 				"Leaving Play Mode should keep the recording armed without appending editor frames.");
 			context.Expect(profiler.GetState() == ProfilerSessionState::Recording,
 				"Leaving Play Mode should not finish the armed recording session.");
+			profiler.Clear();
+		});
+
+		registry.Add("Engine.Profiler.DetailedCaptureRetainsScopesOnEveryFrame", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+
+			Profiler& profiler = Profiler::Instance();
+			profiler.Clear();
+			ProfilerCaptureMetadata metadata;
+			metadata.projectName = "Every-frame detailed scopes";
+			ProfilerCaptureSettings settings;
+			settings.detailLevel = ProfilerCaptureDetailLevel::Detailed;
+			settings.maxFrames = 16U;
+			profiler.StartRecording(metadata, settings);
+
+			for (std::uint32_t frameIndex = 0U; frameIndex < 8U; ++frameIndex)
+			{
+				profiler.BeginFrame(true);
+				const bool sampleActive =
+					profiler.BeginSample("Every Frame Scope", ProfilerModuleId::CpuEngine);
+				context.Expect(sampleActive,
+					"Detailed capture should arm the bounded scope buffer on every frame.");
+				if (sampleActive)
+				{
+					profiler.EndSample();
+				}
+				profiler.EndFrame();
+			}
+
+			const std::vector<ProfilerFrameRecord> frames = profiler.GetFramesSnapshot();
+			context.ExpectEqual(std::size_t(8U), frames.size(),
+				"Every detailed frame should retain its lightweight timing record and scope evidence.");
+			context.Expect(std::all_of(frames.begin(), frames.end(), [](const ProfilerFrameRecord& frame) {
+				return HasSampleNamed(frame, "Every Frame Scope")
+					&& std::any_of(frame.timingStreams.begin(), frame.timingStreams.end(), [](const ProfilerTimingStreamSample& timing) {
+						return timing.id == "engine_cpu" && timing.status == ProfilerTimingStreamStatus::Valid;
+					});
+			}), "Detailed capture should publish both timing and scope data for every frame.");
+			profiler.Clear();
+		});
+
+		registry.Add("Engine.Profiler.ThreadOwnedBuffersMergeWorkerScopesAndTaskCounters", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+
+			Profiler& profiler = Profiler::Instance();
+			profiler.Clear();
+			ProfilerCaptureMetadata metadata;
+			metadata.projectName = "Thread-owned profiler buffers";
+			ProfilerCaptureSettings settings;
+			settings.detailLevel = ProfilerCaptureDetailLevel::Detailed;
+			settings.maxFrames = 4U;
+			profiler.StartRecording(metadata, settings);
+			profiler.BeginFrame(true);
+
+			constexpr std::uint32_t workerCount = 4U;
+			constexpr std::uint32_t tasksPerWorker = 128U;
+			std::vector<std::thread> workers;
+			workers.reserve(workerCount);
+			for (std::uint32_t workerIndex = 0U; workerIndex < workerCount; ++workerIndex)
+			{
+				workers.emplace_back([&profiler, workerIndex]() {
+					const std::string taskLabel = "Profiler Worker " + std::to_string(workerIndex);
+					for (std::uint32_t taskIndex = 0U; taskIndex < tasksPerWorker; ++taskIndex)
+					{
+						profiler.RecordTaskQueued();
+						const bool taskSampleActive = profiler.RecordTaskStarted(taskLabel.c_str());
+						profiler.RecordTaskFinished(taskSampleActive);
+					}
+				});
+			}
+			for (std::thread& worker : workers)
+			{
+				worker.join();
+			}
+			profiler.EndFrame();
+
+			const std::vector<ProfilerFrameRecord> frames = profiler.GetFramesSnapshot();
+			context.ExpectEqual(std::size_t(1U), frames.size(),
+				"The protected frame boundary should merge one immutable worker-scope frame.");
+			if (!frames.empty())
+			{
+				const ProfilerFrameRecord& frame = frames.front();
+				const std::size_t expectedTaskCount =
+					static_cast<std::size_t>(workerCount * tasksPerWorker);
+				const std::size_t retainedTaskCount = static_cast<std::size_t>(std::count_if(
+					frame.samples.begin(),
+					frame.samples.end(),
+					[](const ProfilerSample& sample) {
+						return sample.moduleId == ProfilerModuleId::TaskExecution
+							&& sample.name == "ThreadPool Task";
+					}));
+				context.ExpectEqual(expectedTaskCount, retainedTaskCount,
+					"Each worker should publish into its own bounded buffer without losing task scopes.");
+
+				std::vector<std::uint64_t> sampleIds;
+				sampleIds.reserve(frame.samples.size());
+				for (const ProfilerSample& sample : frame.samples)
+				{
+					sampleIds.push_back(sample.sampleId);
+				}
+				std::sort(sampleIds.begin(), sampleIds.end());
+				context.Expect(std::adjacent_find(sampleIds.begin(), sampleIds.end()) == sampleIds.end(),
+					"Merged worker samples must retain globally unique identifiers.");
+
+				const ProfilerModuleSummary* taskModule =
+					FindModule(frame.moduleSummaries, ProfilerModuleId::TaskExecution);
+				const ProfilerMetric* queuedMetric =
+					taskModule != nullptr ? FindMetric(*taskModule, "Queued tasks") : nullptr;
+				const ProfilerMetric* startedMetric =
+					taskModule != nullptr ? FindMetric(*taskModule, "Started tasks") : nullptr;
+				const ProfilerMetric* finishedMetric =
+					taskModule != nullptr ? FindMetric(*taskModule, "Finished tasks") : nullptr;
+				context.Expect(queuedMetric != nullptr && queuedMetric->value == static_cast<double>(expectedTaskCount),
+					"Per-thread queued-task counters should merge exactly once at EndFrame.");
+				context.Expect(startedMetric != nullptr && startedMetric->value == static_cast<double>(expectedTaskCount),
+					"Per-thread started-task counters should merge exactly once at EndFrame.");
+				context.Expect(finishedMetric != nullptr && finishedMetric->value == static_cast<double>(expectedTaskCount),
+					"Per-thread finished-task counters should merge exactly once at EndFrame.");
+
+				const ProfilerModuleSummary* cpuModule =
+					FindModule(frame.moduleSummaries, ProfilerModuleId::CpuEngine);
+				const ProfilerMetric* droppedMetric =
+					cpuModule != nullptr ? FindMetric(*cpuModule, "Profiler dropped scopes") : nullptr;
+				const ProfilerMetric* lateMetric =
+					cpuModule != nullptr ? FindMetric(*cpuModule, "Profiler late scopes") : nullptr;
+				context.Expect(droppedMetric != nullptr && droppedMetric->value == 0.0,
+					"A bounded worker burst below capacity should not drop scopes.");
+				context.Expect(lateMetric != nullptr && lateMetric->value == 0.0,
+					"Joined worker scopes should publish before the protected merge boundary.");
+			}
+			profiler.Clear();
+		});
+
+		registry.Add("Engine.Profiler.TransientThreadBuffersAreReclaimedBetweenFrames", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+
+			Profiler& profiler = Profiler::Instance();
+			profiler.Clear();
+			ProfilerCaptureMetadata metadata;
+			metadata.projectName = "Transient profiler workers";
+			ProfilerCaptureSettings settings;
+			settings.detailLevel = ProfilerCaptureDetailLevel::Detailed;
+			settings.maxFrames = 4U;
+			profiler.StartRecording(metadata, settings);
+
+			constexpr std::size_t workersPerFrame = 80u;
+			for (std::size_t frameIndex = 0u; frameIndex < 2u; ++frameIndex)
+			{
+				profiler.BeginFrame(true);
+				std::vector<std::thread> workers;
+				workers.reserve(workersPerFrame);
+				for (std::size_t workerIndex = 0u; workerIndex < workersPerFrame; ++workerIndex)
+				{
+					workers.emplace_back([&profiler]() {
+						const bool active =
+							profiler.BeginSample("Transient Worker", ProfilerModuleId::CpuEngine);
+						if (active)
+						{
+							profiler.EndSample();
+						}
+					});
+				}
+				for (std::thread& worker : workers)
+				{
+					worker.join();
+				}
+				profiler.EndFrame();
+			}
+
+			const std::vector<ProfilerFrameRecord> frames = profiler.GetFramesSnapshot();
+			context.ExpectEqual(std::size_t(2u), frames.size(),
+				"Both transient-worker frames should be committed.");
+			for (const ProfilerFrameRecord& frame : frames)
+			{
+				const std::size_t retained = static_cast<std::size_t>(std::count_if(
+					frame.samples.begin(),
+					frame.samples.end(),
+					[](const ProfilerSample& sample) {
+						return sample.name == "Transient Worker";
+					}));
+				context.ExpectEqual(workersPerFrame, retained,
+					"Drained exited-thread buffers should release registry slots before the next frame.");
+				const ProfilerModuleSummary* cpuModule =
+					FindModule(frame.moduleSummaries, ProfilerModuleId::CpuEngine);
+				const ProfilerMetric* droppedMetric =
+					cpuModule != nullptr ? FindMetric(*cpuModule, "Profiler dropped scopes") : nullptr;
+				context.Expect(droppedMetric != nullptr && droppedMetric->value == 0.0,
+					"Reclaimed transient slots should prevent later frames from rejecting worker registration.");
+			}
+			profiler.Clear();
+		});
+
+		registry.Add("Engine.Profiler.BoundedThreadBufferReportsOverflow", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+
+			Profiler& profiler = Profiler::Instance();
+			profiler.Clear();
+			ProfilerCaptureMetadata metadata;
+			metadata.projectName = "Bounded profiler overflow";
+			ProfilerCaptureSettings settings;
+			settings.detailLevel = ProfilerCaptureDetailLevel::Detailed;
+			settings.maxFrames = 2U;
+			profiler.StartRecording(metadata, settings);
+			profiler.BeginFrame(true);
+			for (std::uint32_t sampleIndex = 0U; sampleIndex < 1200U; ++sampleIndex)
+			{
+				const bool active = profiler.BeginSample("Bounded Scope", ProfilerModuleId::CpuEngine);
+				if (active)
+				{
+					profiler.EndSample();
+				}
+			}
+			profiler.EndFrame();
+
+			const std::vector<ProfilerFrameRecord> frames = profiler.GetFramesSnapshot();
+			context.ExpectEqual(std::size_t(1U), frames.size(),
+				"Overflow should preserve the frame instead of rejecting the capture.");
+			if (!frames.empty())
+			{
+				const ProfilerModuleSummary* cpuModule =
+					FindModule(frames.front().moduleSummaries, ProfilerModuleId::CpuEngine);
+				const ProfilerMetric* droppedMetric =
+					cpuModule != nullptr ? FindMetric(*cpuModule, "Profiler dropped scopes") : nullptr;
+				context.Expect(droppedMetric != nullptr && droppedMetric->value > 0.0,
+					"A full thread-owned ring should expose an explicit dropped-scope count.");
+				context.Expect(frames.front().samples.size() < 1200U,
+					"The fixed ring must remain bounded when a producer exceeds its per-frame capacity.");
+			}
+			profiler.Clear();
+		});
+
+		registry.Add("Engine.Profiler.OverflowNeverRetainsOrphanedChildScopes", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+
+			Profiler& profiler = Profiler::Instance();
+			profiler.Clear();
+			ProfilerCaptureMetadata metadata;
+			metadata.projectName = "Profiler hierarchy overflow";
+			ProfilerCaptureSettings settings;
+			settings.detailLevel = ProfilerCaptureDetailLevel::Detailed;
+			settings.maxFrames = 2U;
+			profiler.StartRecording(metadata, settings);
+			profiler.BeginFrame(true);
+			const bool parentActive =
+				profiler.BeginSample("Overflow Parent", ProfilerModuleId::CpuEngine);
+			for (std::uint32_t childIndex = 0U; childIndex < 1200U; ++childIndex)
+			{
+				const bool childActive =
+					profiler.BeginSample("Overflow Child", ProfilerModuleId::CpuEngine);
+				if (childActive)
+				{
+					profiler.EndSample();
+				}
+			}
+			if (parentActive)
+			{
+				profiler.EndSample();
+			}
+			profiler.EndFrame();
+
+			const std::vector<ProfilerFrameRecord> frames = profiler.GetFramesSnapshot();
+			context.ExpectEqual(std::size_t(1U), frames.size(),
+				"Hierarchy overflow should preserve its containing frame.");
+			if (!frames.empty())
+			{
+				std::vector<std::uint64_t> retainedIds;
+				retainedIds.reserve(frames.front().samples.size());
+				for (const ProfilerSample& sample : frames.front().samples)
+				{
+					retainedIds.push_back(sample.sampleId);
+				}
+				context.Expect(std::all_of(
+					frames.front().samples.begin(),
+					frames.front().samples.end(),
+					[&retainedIds](const ProfilerSample& sample) {
+						return sample.parentSampleId == 0u
+							|| std::find(
+								retainedIds.begin(),
+								retainedIds.end(),
+								sample.parentSampleId) != retainedIds.end();
+					}),
+					"Every retained child scope must resolve to a retained parent after ring overflow.");
+				context.Expect(HasSampleNamed(frames.front(), "Overflow Parent"),
+					"The ring should reserve the final slot needed to publish an accepted parent scope.");
+			}
+			profiler.Clear();
+		});
+
+		registry.Add("Engine.Profiler.NewSessionDiscardsPublishedOldSessionData", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+
+			Profiler& profiler = Profiler::Instance();
+			profiler.Clear();
+			ProfilerCaptureMetadata metadata;
+			metadata.projectName = "Profiler session generation";
+			ProfilerCaptureSettings settings;
+			settings.detailLevel = ProfilerCaptureDetailLevel::Detailed;
+			settings.maxFrames = 2U;
+
+			profiler.StartRecording(metadata, settings);
+			profiler.BeginFrame(true);
+			profiler.RecordTaskQueued();
+			const bool staleSampleActive =
+				profiler.BeginSample("Old Session Scope", ProfilerModuleId::CpuEngine);
+			if (staleSampleActive)
+			{
+				profiler.EndSample();
+			}
+
+			// Replace the active session before EndFrame. Already-published ring
+			// entries and compact counters must not leak into the new document.
+			profiler.Clear();
+			profiler.StartRecording(metadata, settings);
+			profiler.BeginFrame(true);
+			profiler.EndFrame();
+
+			const std::vector<ProfilerFrameRecord> frames = profiler.GetFramesSnapshot();
+			context.ExpectEqual(std::size_t(1U), frames.size(),
+				"The replacement session should publish only its own first frame.");
+			if (!frames.empty())
+			{
+				context.Expect(!HasSampleNamed(frames.front(), "Old Session Scope"),
+					"A completed old-session scope must be discarded during session replacement.");
+				const ProfilerModuleSummary* taskModule =
+					FindModule(frames.front().moduleSummaries, ProfilerModuleId::TaskExecution);
+				const ProfilerMetric* queuedMetric =
+					taskModule != nullptr ? FindMetric(*taskModule, "Queued tasks") : nullptr;
+				context.Expect(queuedMetric != nullptr && queuedMetric->value == 0.0,
+					"Old-session task counters must not appear in the replacement frame.");
+			}
+			profiler.Clear();
+		});
+
+		registry.Add("Engine.Profiler.PauseFinalizesAnExplicitPartialFrame", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+
+			Profiler& profiler = Profiler::Instance();
+			profiler.Clear();
+			ProfilerCaptureMetadata metadata;
+			metadata.projectName = "Profiler pause boundary";
+			ProfilerCaptureSettings settings;
+			settings.detailLevel = ProfilerCaptureDetailLevel::Detailed;
+			settings.maxFrames = 4U;
+			profiler.StartRecording(metadata, settings);
+			profiler.BeginFrame(true);
+			const bool active =
+				profiler.BeginSample("Before Pause", ProfilerModuleId::CpuEngine);
+			if (active)
+			{
+				profiler.EndSample();
+			}
+			profiler.PauseRecording();
+
+			const std::vector<ProfilerFrameRecord> pausedFrames = profiler.GetFramesSnapshot();
+			context.ExpectEqual(std::size_t(1U), pausedFrames.size(),
+				"Pausing during a frame should publish its elapsed evidence immediately.");
+			if (!pausedFrames.empty())
+			{
+				context.Expect(!pausedFrames.front().complete,
+					"A frame interrupted by Pause should be labelled partial.");
+				context.Expect(pausedFrames.front().durationMs >= 0.0,
+					"The partial frame should receive a measured non-negative duration.");
+				context.Expect(HasSampleNamed(pausedFrames.front(), "Before Pause"),
+					"Scopes completed before Pause should remain inspectable.");
+			}
+
+			profiler.ResumeRecording();
+			profiler.BeginFrame(true);
+			const bool resumedActive =
+				profiler.BeginSample("After Resume", ProfilerModuleId::CpuEngine);
+			if (resumedActive)
+			{
+				profiler.EndSample();
+			}
+			profiler.EndFrame();
+			const std::vector<ProfilerFrameRecord> resumedFrames = profiler.GetFramesSnapshot();
+			context.ExpectEqual(std::size_t(2U), resumedFrames.size(),
+				"Resume should begin capturing again at the next declared frame boundary.");
+			context.Expect(HasSampleNamed(resumedFrames.back(), "After Resume"),
+				"The first complete frame after Resume should retain detailed scopes.");
 			profiler.Clear();
 		});
 

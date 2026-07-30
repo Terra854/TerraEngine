@@ -23,6 +23,17 @@ using TerraEngine::Profiling::ProfilerSessionState;
 
 namespace
 {
+std::string MakeRecordingStatus(const ProfilerCaptureSettings& settings)
+{
+	if (settings.detailLevel != TerraEngine::Profiling::ProfilerCaptureDetailLevel::Detailed)
+	{
+		return "Recording";
+	}
+	return "Recording every frame (detailed, "
+		+ std::to_string(settings.maxFrames)
+		+ "-frame rolling limit)";
+}
+
 // PercentileFromSorted deliberately interpolates between neighbouring samples.
 // This produces a stable answer for small captures instead of rounding a P95
 // to a different whole frame as capture length changes.
@@ -181,17 +192,16 @@ void EditorProfilerService::Update(float)
 void EditorProfilerService::StartRecording()
 {
 	ProfilerCaptureSettings settings{};
-	// The ordinary toolbar action must preserve useful scope trees in the saved
-	// capture without serializing every worker scope on every frame. Sampling
-	// every fourth frame gives users actionable hot samples while keeping the
-	// profiler mutex and artifact size bounded; callers that need every scope
-	// can still explicitly request a detailed capture.
-	settings.detailLevel = TerraEngine::Profiling::ProfilerCaptureDetailLevel::Sampled;
-	settings.sampleIntervalFrames = 4u;
+	// Thread-owned fixed buffers make ordinary detailed capture safe to run on
+	// every frame: hot scopes take no shared profiler mutex and a full producer
+	// reports drops instead of growing without limit.
+	settings.detailLevel = TerraEngine::Profiling::ProfilerCaptureDetailLevel::Detailed;
 	settings.recordMarkers = true;
 	settings.taskExecutionEnabled = true;
 	settings.recordTaskContext = true;
-	settings.maxFrames = 10000u;
+	// Use the shared bounded default so toolbar and automation recording cannot
+	// silently diverge into very different memory/eviction behavior.
+	settings.maxFrames = TerraEngine::Profiling::kDefaultProfilerRollingFrameLimit;
 	settings.maxDurationSeconds = 0.0;
 	StartRecording(settings);
 }
@@ -208,7 +218,7 @@ void EditorProfilerService::StartRecording(const ProfilerCaptureSettings& settin
 
 	Profiler::Instance().StartRecording(MakeMetadata(), settings);
 	std::lock_guard<std::mutex> lock(mutex);
-	statusText = "Recording";
+	statusText = MakeRecordingStatus(settings);
 	lastError.clear();
 }
 
@@ -224,8 +234,9 @@ void EditorProfilerService::PauseRecording()
 void EditorProfilerService::ResumeRecording()
 {
 	Profiler::Instance().ResumeRecording();
+	const ProfilerCaptureSettings settings = Profiler::Instance().GetSettings();
 	std::lock_guard<std::mutex> lock(mutex);
-	statusText = "Recording";
+	statusText = MakeRecordingStatus(settings);
 }
 
 // EditorProfilerService::FinishCapture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

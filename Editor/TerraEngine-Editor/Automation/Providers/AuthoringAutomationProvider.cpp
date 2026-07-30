@@ -3,6 +3,7 @@
 #include "AuthoringAutomationProvider.h"
 #include "../../Project/EditorPreferences.h"
 #include "../../Project/ProjectSettings.h"
+#include "Engine/Profiling/ProfilerCapture.h"
 
 #include <utility>
 
@@ -168,7 +169,7 @@ namespace TerraEngine::Editor::Automation
 				resolver,
 				"profiler.capture.start",
 				"profiler",
-				{"captureLevel", "payloadVersion", "maximumChunkFrames", "maximumChunkBytes", "sampleIntervalFrames"},
+				{"captureLevel", "payloadVersion", "maximumChunkFrames", "maximumChunkBytes", "sampleIntervalFrames", "maxFrames"},
 				{"jobId", "state", "captureLevel", "payloadVersion", "bounds"},
 				AutomationPermission::ProjectWrite,
 				AutomationApprovalPolicy::None,
@@ -180,6 +181,11 @@ namespace TerraEngine::Editor::Automation
 			registration.descriptor.inputSchema["properties"]["maximumChunkFrames"] = {{"type", "integer"}, {"minimum", 1}, {"maximum", 4096}};
 			registration.descriptor.inputSchema["properties"]["maximumChunkBytes"] = {{"type", "integer"}, {"minimum", 1024}, {"maximum", 8388608}};
 			registration.descriptor.inputSchema["properties"]["sampleIntervalFrames"] = {{"type", "integer"}, {"minimum", 1}, {"maximum", 1024}};
+			registration.descriptor.inputSchema["properties"]["maxFrames"] = {
+				{"type", "integer"},
+				{"minimum", 1},
+				{"maximum", 4096},
+				{"default", TerraEngine::Profiling::kDefaultProfilerRollingFrameLimit}};
 			return registration;
 		}
 	}

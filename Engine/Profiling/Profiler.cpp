@@ -10,32 +10,297 @@
 #include "ThreadPool/ThreadPool.h"
 
 #include <algorithm>
+#include <array>
+#include <cstring>
 #include <numeric>
 #include <sstream>
 #include <thread>
-#include <unordered_set>
 
 namespace TerraEngine::Profiling
 {
 namespace
 {
-// struct ThreadSampleState groups related state and operations so callers have one documented contract.
-struct ThreadSampleState
+constexpr std::size_t kProfilerThreadSampleCapacity = 1024u;
+constexpr std::size_t kProfilerMaximumOpenSampleDepth = 64u;
+constexpr std::size_t kProfilerMaximumThreadBuffers = 128u;
+constexpr std::size_t kProfilerSampleNameCapacity = 128u;
+constexpr std::size_t kProfilerTaskLabelCapacity = 128u;
+
+std::int64_t SteadyNowNanoseconds()
 {
-	std::vector<ProfilerSample> openSamples;
-	std::unordered_set<std::uint64_t> fullyExcludedSamples;
-	std::chrono::steady_clock::time_point editorWorkStart{};
-	std::uint32_t editorWorkDepth = 0u;
-};
+	return std::chrono::duration_cast<std::chrono::nanoseconds>(
+		std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
-thread_local ThreadSampleState t_sampleState;
+double NanosecondsToMilliseconds(std::int64_t nanoseconds)
+{
+	return static_cast<double>(std::max<std::int64_t>(0, nanoseconds)) / 1000000.0;
+}
 
-// CurrentThreadLabel is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string CurrentThreadLabel()
 {
 	std::ostringstream stream;
 	stream << std::this_thread::get_id();
 	return stream.str();
+}
+
+template <std::size_t Capacity>
+bool CopyInlineText(std::array<char, Capacity>& destination, const char* source, const char* fallback)
+{
+	static_assert(Capacity >= 2u);
+	const char* selected = source != nullptr ? source : fallback;
+	std::size_t index = 0u;
+	while (index + 1u < Capacity && selected[index] != '\0')
+	{
+		destination[index] = selected[index];
+		++index;
+	}
+	const bool truncated = selected[index] != '\0';
+	destination[index] = '\0';
+	return truncated;
+}
+
+struct BufferedProfilerSample
+{
+	std::uint64_t sessionGeneration = 0u;
+	std::uint64_t frameToken = 0u;
+	std::uint64_t sampleId = 0u;
+	std::uint64_t parentSampleId = 0u;
+	ProfilerModuleId moduleId = ProfilerModuleId::CpuEngine;
+	std::array<char, kProfilerSampleNameCapacity> name{};
+	std::array<char, kProfilerTaskLabelCapacity> taskLabel{};
+	std::int64_t startNanoseconds = 0;
+	std::int64_t durationNanoseconds = 0;
+	std::uint32_t depth = 0u;
+	bool complete = true;
+};
+
+struct OpenProfilerSample
+{
+	BufferedProfilerSample sample;
+	bool fullyExcluded = false;
+};
+
+struct ProfilerThreadBuffer
+{
+	// Only the owning producer thread reads or writes the open stack. Completed
+	// entries use a bounded single-producer/single-consumer ring so EndFrame can
+	// merge published records without taking a lock in BeginSample/EndSample.
+	std::array<OpenProfilerSample, kProfilerMaximumOpenSampleDepth> openSamples{};
+	std::size_t openSampleCount = 0u;
+	std::array<BufferedProfilerSample, kProfilerThreadSampleCapacity> completedSamples{};
+	std::atomic_uint64_t writeSequence = 0u;
+	std::atomic_uint64_t readSequence = 0u;
+	std::atomic_uint64_t droppedSamples = 0u;
+	std::atomic_uint64_t truncatedLabels = 0u;
+	std::atomic_uint64_t lateSamples = 0u;
+	std::atomic_uint64_t queuedTasks = 0u;
+	std::atomic_uint64_t startedTasks = 0u;
+	std::atomic_uint64_t finishedTasks = 0u;
+	// Compact counters and diagnostics carry the unique frame token that owns
+	// them. A producer already past the fast flag during Clear/Start can finish
+	// safely without its stale atomic increment entering a later session.
+	std::atomic_uint64_t counterFrameToken = 0u;
+	std::atomic_uint64_t diagnosticFrameToken = 0u;
+	std::uint64_t boundSessionGeneration = 0u;
+	std::uint64_t boundFrameToken = 0u;
+	std::int64_t editorWorkStartNanoseconds = 0;
+	std::uint32_t editorWorkDepth = 0u;
+	std::string threadLabel;
+};
+}
+
+struct ProfilerHotPathState
+{
+	// Registration occurs once per participating thread. Normal scope recording
+	// uses only the thread-owned buffer and never touches this mutex.
+	std::mutex registryMutex;
+	// Keep enrolled buffers alive after short-lived workers exit so their
+	// release-published samples survive until the protected EndFrame merge.
+	std::vector<std::shared_ptr<ProfilerThreadBuffer>> registeredBuffers;
+	std::atomic_uint64_t sessionGeneration = 1u;
+	std::atomic_uint64_t activeFrameToken = 0u;
+	std::atomic_uint64_t nextFrameToken = 1u;
+	std::atomic_int64_t activeFrameStartNanoseconds = 0;
+	std::atomic_int64_t excludedEditorNanoseconds = 0;
+	std::atomic_uint64_t nextSampleId = 1u;
+	std::atomic_uint64_t rejectedThreadBuffers = 0u;
+	std::atomic_uint64_t rejectedThreadBufferFrameToken = 0u;
+};
+
+namespace
+{
+struct ProfilerThreadBinding
+{
+	ProfilerHotPathState* owner = nullptr;
+	// A live thread owns one strong reference. EndFrame can therefore distinguish
+	// it from an exited transient worker after the worker's published ring drains.
+	std::shared_ptr<ProfilerThreadBuffer> buffer;
+	bool registrationRejected = false;
+	std::uint64_t rejectedFrameToken = 0u;
+};
+
+thread_local ProfilerThreadBinding t_profilerThreadBinding;
+
+ProfilerThreadBuffer* AcquireThreadBuffer(ProfilerHotPathState& state, std::uint64_t frameToken)
+{
+	if (t_profilerThreadBinding.owner == &state && t_profilerThreadBinding.buffer)
+	{
+		return t_profilerThreadBinding.buffer.get();
+	}
+	if (t_profilerThreadBinding.owner == &state
+		&& t_profilerThreadBinding.registrationRejected
+		&& t_profilerThreadBinding.rejectedFrameToken == frameToken)
+	{
+		return {};
+	}
+
+	std::shared_ptr<ProfilerThreadBuffer> buffer;
+	{
+		std::lock_guard<std::mutex> lock(state.registryMutex);
+		if (state.activeFrameToken.load(std::memory_order_acquire) != frameToken)
+		{
+			// A caller can pass the hot flag immediately before Pause/Clear. Once
+			// registration reaches the serialized registry, reject that stale
+			// attempt without retagging the current frame's shared diagnostics.
+			return nullptr;
+		}
+		// EndFrame normally removes drained transient workers. This small
+		// registration-time sweep also recovers slots after a Clear or another
+		// protected operation that consumed their final published records.
+		state.registeredBuffers.erase(
+			std::remove_if(
+				state.registeredBuffers.begin(),
+				state.registeredBuffers.end(),
+				[](const std::shared_ptr<ProfilerThreadBuffer>& registeredBuffer) {
+					return registeredBuffer.use_count() == 1u
+						&& registeredBuffer->readSequence.load(std::memory_order_acquire)
+							== registeredBuffer->writeSequence.load(std::memory_order_acquire);
+				}),
+			state.registeredBuffers.end());
+		if (state.registeredBuffers.size() >= kProfilerMaximumThreadBuffers)
+		{
+			if (state.rejectedThreadBufferFrameToken.load(std::memory_order_relaxed) != frameToken)
+			{
+				state.rejectedThreadBuffers.store(0u, std::memory_order_relaxed);
+				state.rejectedThreadBufferFrameToken.store(frameToken, std::memory_order_release);
+			}
+			state.rejectedThreadBuffers.fetch_add(1u, std::memory_order_relaxed);
+			t_profilerThreadBinding.owner = &state;
+			t_profilerThreadBinding.buffer.reset();
+			t_profilerThreadBinding.registrationRejected = true;
+			t_profilerThreadBinding.rejectedFrameToken = frameToken;
+			return nullptr;
+		}
+		buffer = std::make_shared<ProfilerThreadBuffer>();
+		buffer->threadLabel = CurrentThreadLabel();
+		state.registeredBuffers.push_back(buffer);
+	}
+	t_profilerThreadBinding.owner = &state;
+	t_profilerThreadBinding.buffer = std::move(buffer);
+	t_profilerThreadBinding.registrationRejected = false;
+	t_profilerThreadBinding.rejectedFrameToken = 0u;
+	return t_profilerThreadBinding.buffer.get();
+}
+
+void PrepareThreadBufferForFrame(
+	ProfilerThreadBuffer& buffer,
+	std::uint64_t sessionGeneration,
+	std::uint64_t frameToken)
+{
+	if (buffer.counterFrameToken.load(std::memory_order_acquire) != frameToken)
+	{
+		buffer.queuedTasks.store(0u, std::memory_order_relaxed);
+		buffer.startedTasks.store(0u, std::memory_order_relaxed);
+		buffer.finishedTasks.store(0u, std::memory_order_relaxed);
+		buffer.counterFrameToken.store(frameToken, std::memory_order_release);
+	}
+	if (buffer.diagnosticFrameToken.load(std::memory_order_acquire) != frameToken)
+	{
+		buffer.droppedSamples.store(0u, std::memory_order_relaxed);
+		buffer.truncatedLabels.store(0u, std::memory_order_relaxed);
+		buffer.lateSamples.store(0u, std::memory_order_relaxed);
+		buffer.diagnosticFrameToken.store(frameToken, std::memory_order_release);
+	}
+	if (buffer.boundSessionGeneration == sessionGeneration && buffer.boundFrameToken == frameToken)
+	{
+		return;
+	}
+	if (buffer.openSampleCount != 0u || buffer.editorWorkDepth != 0u)
+	{
+		// A stale open scope cannot be attached to a new capture/frame. Count it
+		// and reset only producer-owned stack state; published ring entries remain
+		// available for the consumer to classify at the protected merge boundary.
+		buffer.lateSamples.fetch_add(
+			static_cast<std::uint64_t>(buffer.openSampleCount) + (buffer.editorWorkDepth != 0u ? 1u : 0u),
+			std::memory_order_relaxed);
+	}
+	buffer.openSampleCount = 0u;
+	buffer.editorWorkDepth = 0u;
+	buffer.boundSessionGeneration = sessionGeneration;
+	buffer.boundFrameToken = frameToken;
+}
+
+bool PublishCompletedSample(ProfilerThreadBuffer& buffer, BufferedProfilerSample sample)
+{
+	const std::uint64_t writeSequence = buffer.writeSequence.load(std::memory_order_relaxed);
+	const std::uint64_t readSequence = buffer.readSequence.load(std::memory_order_acquire);
+	if (writeSequence - readSequence >= kProfilerThreadSampleCapacity)
+	{
+		buffer.droppedSamples.fetch_add(1u, std::memory_order_relaxed);
+		return false;
+	}
+
+	buffer.completedSamples[writeSequence % kProfilerThreadSampleCapacity] = std::move(sample);
+	buffer.writeSequence.store(writeSequence + 1u, std::memory_order_release);
+	return true;
+}
+
+void DiscardPublishedThreadData(ProfilerHotPathState& state)
+{
+	std::vector<std::shared_ptr<ProfilerThreadBuffer>> buffers;
+	{
+		std::lock_guard<std::mutex> lock(state.registryMutex);
+		buffers = state.registeredBuffers;
+	}
+	for (const std::shared_ptr<ProfilerThreadBuffer>& buffer : buffers)
+	{
+		// Session replacement is a protected control operation. Consume any
+		// already-published old-session entries and counters so they cannot appear
+		// in the first frame of the next recording.
+		const std::uint64_t writeSequence = buffer->writeSequence.load(std::memory_order_acquire);
+		buffer->readSequence.store(writeSequence, std::memory_order_release);
+		buffer->queuedTasks.exchange(0u, std::memory_order_acq_rel);
+		buffer->startedTasks.exchange(0u, std::memory_order_acq_rel);
+		buffer->finishedTasks.exchange(0u, std::memory_order_acq_rel);
+		buffer->droppedSamples.exchange(0u, std::memory_order_acq_rel);
+		buffer->truncatedLabels.exchange(0u, std::memory_order_acq_rel);
+		buffer->lateSamples.exchange(0u, std::memory_order_acq_rel);
+	}
+	state.rejectedThreadBuffers.exchange(0u, std::memory_order_acq_rel);
+	state.rejectedThreadBufferFrameToken.store(0u, std::memory_order_release);
+
+	// A dead transient thread has no binding reference, leaving only the
+	// registry and this inspection snapshot. Remove it after its ring is empty;
+	// live fixed workers keep their TLS-owned reference and reuse the allocation.
+	std::lock_guard<std::mutex> lock(state.registryMutex);
+	state.registeredBuffers.erase(
+		std::remove_if(
+			state.registeredBuffers.begin(),
+			state.registeredBuffers.end(),
+			[&buffers](const std::shared_ptr<ProfilerThreadBuffer>& registeredBuffer) {
+				const bool inspected = std::any_of(
+					buffers.begin(),
+					buffers.end(),
+					[&registeredBuffer](const std::shared_ptr<ProfilerThreadBuffer>& candidate) {
+						return candidate.get() == registeredBuffer.get();
+					});
+				return inspected
+					&& registeredBuffer.use_count() == 2u
+					&& registeredBuffer->readSequence.load(std::memory_order_acquire)
+						== registeredBuffer->writeSequence.load(std::memory_order_acquire);
+			}),
+		state.registeredBuffers.end());
 }
 
 // FindModule is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -289,10 +554,28 @@ Profiler& Profiler::Instance()
 	return profiler;
 }
 
+Profiler::Profiler()
+	: hotPath(std::make_unique<ProfilerHotPathState>())
+{
+}
+
+Profiler::~Profiler() = default;
+
 // Profiler::StartRecording is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Profiler::StartRecording(const ProfilerCaptureMetadata& metadata, const ProfilerCaptureSettings& requestedSettings)
 {
 	std::lock_guard<std::mutex> lock(mutex);
+	// Stop hot producers before replacing the capture document. An in-flight
+	// scope will fail its generation check and be counted instead of writing into
+	// the new session.
+	frameRecordingActive.store(false, std::memory_order_release);
+	markerRecordingActive.store(false, std::memory_order_release);
+	taskRecordingActive.store(false, std::memory_order_release);
+	hotPath->activeFrameToken.store(0u, std::memory_order_release);
+	hotPath->sessionGeneration.fetch_add(1u, std::memory_order_acq_rel);
+	hotPath->excludedEditorNanoseconds.store(0, std::memory_order_release);
+	hotPath->nextSampleId.store(1u, std::memory_order_release);
+	DiscardPublishedThreadData(*hotPath);
 	settings = requestedSettings;
 	settings.captureMode = ProfilerCaptureMode::LiveRolling;
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -306,17 +589,18 @@ void Profiler::StartRecording(const ProfilerCaptureMetadata& metadata, const Pro
 	document.metadata.settings = settings;
 	document.metadata.startedAt = document.metadata.startedAt.empty() ? MakeReadableTimestamp() : document.metadata.startedAt;
 	document.frames.clear();
+	retainedFrames.clear();
 	document.sourcePath.reset();
 	currentFrame.reset();
 	selectedFrameIndex.reset();
 	sessionStart = std::chrono::steady_clock::now();
-	currentFrameStart = sessionStart;
-	currentExcludedEditorMs = 0.0;
 	nextFrameIndex = 0u;
-	nextSampleId = 1u;
 	queuedTaskCount = 0u;
 	startedTaskCount = 0u;
 	finishedTaskCount = 0u;
+	droppedSampleCount = 0u;
+	truncatedSampleLabelCount = 0u;
+	lateSampleCount = 0u;
 	lastError.clear();
 	statusText = "Recording";
 	state = ProfilerSessionState::Recording;
@@ -331,6 +615,10 @@ void Profiler::PauseRecording()
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (state == ProfilerSessionState::Recording)
 	{
+		frameRecordingActive.store(false, std::memory_order_release);
+		markerRecordingActive.store(false, std::memory_order_release);
+		taskRecordingActive.store(false, std::memory_order_release);
+		FinalizePartialFrameLocked();
 		state = ProfilerSessionState::Paused;
 		statusText = "Paused";
 		UpdateFastRecordingFlagsLocked();
@@ -356,16 +644,11 @@ void Profiler::ResumeRecording()
 ProfilerCaptureDocument Profiler::FinishRecording()
 {
 	std::lock_guard<std::mutex> lock(mutex);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (currentFrame.has_value())
-	{
-		currentFrame->complete = false;
-		AggregateSamplesForFrame(*currentFrame);
-		document.frames.push_back(*currentFrame);
-		currentFrame.reset();
-	}
+	frameRecordingActive.store(false, std::memory_order_release);
+	markerRecordingActive.store(false, std::memory_order_release);
+	taskRecordingActive.store(false, std::memory_order_release);
+	FinalizePartialFrameLocked();
 
-	TrimFrameBuffer(document.frames, settings);
 	document.metadata.savedAt = MakeReadableTimestamp();
 	document.metadata.settings.captureMode = ProfilerCaptureMode::FinalizingToArtifact;
 	state = ProfilerSessionState::Finalizing;
@@ -373,6 +656,7 @@ ProfilerCaptureDocument Profiler::FinishRecording()
 	UpdateFastRecordingFlagsLocked();
 	snapshotRevision.fetch_add(1u, std::memory_order_release);
 	ProfilerCaptureDocument snapshot = document;
+	snapshot.frames.assign(retainedFrames.begin(), retainedFrames.end());
 	MaterializeAnimationDiagnosticsMetrics(snapshot);
 	return snapshot;
 }
@@ -381,13 +665,23 @@ ProfilerCaptureDocument Profiler::FinishRecording()
 void Profiler::Clear()
 {
 	std::lock_guard<std::mutex> lock(mutex);
+	frameRecordingActive.store(false, std::memory_order_release);
+	markerRecordingActive.store(false, std::memory_order_release);
+	taskRecordingActive.store(false, std::memory_order_release);
+	hotPath->activeFrameToken.store(0u, std::memory_order_release);
+	hotPath->sessionGeneration.fetch_add(1u, std::memory_order_acq_rel);
+	hotPath->excludedEditorNanoseconds.store(0, std::memory_order_release);
+	DiscardPublishedThreadData(*hotPath);
 	document = {};
+	retainedFrames.clear();
 	currentFrame.reset();
 	selectedFrameIndex.reset();
-	t_sampleState.openSamples.clear();
-	t_sampleState.fullyExcludedSamples.clear();
-	t_sampleState.editorWorkDepth = 0u;
-	currentExcludedEditorMs = 0.0;
+	queuedTaskCount = 0u;
+	startedTaskCount = 0u;
+	finishedTaskCount = 0u;
+	droppedSampleCount = 0u;
+	truncatedSampleLabelCount = 0u;
+	lateSampleCount = 0u;
 	state = ProfilerSessionState::Idle;
 	statusText = "Idle";
 	lastError.clear();
@@ -399,11 +693,26 @@ void Profiler::Clear()
 void Profiler::LoadDocument(const ProfilerCaptureDocument& loadedDocument)
 {
 	std::lock_guard<std::mutex> lock(mutex);
+	frameRecordingActive.store(false, std::memory_order_release);
+	markerRecordingActive.store(false, std::memory_order_release);
+	taskRecordingActive.store(false, std::memory_order_release);
+	hotPath->activeFrameToken.store(0u, std::memory_order_release);
+	hotPath->sessionGeneration.fetch_add(1u, std::memory_order_acq_rel);
+	hotPath->excludedEditorNanoseconds.store(0, std::memory_order_release);
+	DiscardPublishedThreadData(*hotPath);
 	document = loadedDocument;
+	retainedFrames.assign(document.frames.begin(), document.frames.end());
+	// Capture readers are tolerant of older or recovered artifacts, but every
+	// presentation API promises chronological frame-index order. Normalize once
+	// on load so the Profiler window can use its no-sort fast path safely.
+	std::stable_sort(retainedFrames.begin(), retainedFrames.end(), [](const ProfilerFrameRecord& left, const ProfilerFrameRecord& right) {
+		return left.frameIndex < right.frameIndex;
+	});
+	document.frames.clear();
 	settings = document.metadata.settings;
 	settings.captureMode = ProfilerCaptureMode::LoadedReadOnly;
 	currentFrame.reset();
-	selectedFrameIndex = document.frames.empty() ? std::optional<std::uint64_t>{} : std::optional<std::uint64_t>{document.frames.front().frameIndex};
+	selectedFrameIndex = retainedFrames.empty() ? std::optional<std::uint64_t>{} : std::optional<std::uint64_t>{retainedFrames.front().frameIndex};
 	state = ProfilerSessionState::Loaded;
 	statusText = "Loaded capture";
 	lastError.clear();
@@ -424,11 +733,12 @@ void Profiler::BeginFrame(bool playModeActive)
 	{
 		// Record remains armed outside Play Mode, but no partial editor-preview
 		// frame or hot-path instrumentation is allowed to survive this boundary.
+		frameRecordingActive.store(false, std::memory_order_release);
+		markerRecordingActive.store(false, std::memory_order_release);
+		taskRecordingActive.store(false, std::memory_order_release);
+		hotPath->activeFrameToken.store(0u, std::memory_order_release);
+		hotPath->excludedEditorNanoseconds.store(0, std::memory_order_release);
 		currentFrame.reset();
-		t_sampleState.openSamples.clear();
-		t_sampleState.fullyExcludedSamples.clear();
-		t_sampleState.editorWorkDepth = 0u;
-		currentExcludedEditorMs = 0.0;
 		statusText = "Recording (waiting for Play Mode)";
 		UpdateFastRecordingFlagsLocked();
 		return;
@@ -437,22 +747,34 @@ void Profiler::BeginFrame(bool playModeActive)
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (currentFrame.has_value())
 	{
+		MergeThreadSamplesForFrameLocked(
+			hotPath->sessionGeneration.load(std::memory_order_acquire),
+			hotPath->activeFrameToken.load(std::memory_order_acquire));
 		currentFrame->complete = false;
 		AggregateSamplesForFrame(*currentFrame);
-		document.frames.push_back(*currentFrame);
+		CommitCurrentFrameLocked();
 	}
 
-	currentFrameStart = std::chrono::steady_clock::now();
-	currentExcludedEditorMs = 0.0;
+	const std::int64_t frameStartNanoseconds = SteadyNowNanoseconds();
+	hotPath->excludedEditorNanoseconds.store(0, std::memory_order_release);
 	ProfilerFrameRecord frame;
 	frame.frameIndex = nextFrameIndex++;
 	frame.frameStartMs = NowMs();
 	frame.complete = true;
 	frame.moduleSummaries = MakeDefaultModuleSummaries(settings);
+	// Tokens never repeat across recording sessions. This lets the lock-free
+	// counter merge reject a late producer from an earlier Clear/Start cycle.
+	const std::uint64_t frameToken =
+		hotPath->nextFrameToken.fetch_add(1u, std::memory_order_relaxed);
 	currentFrame = std::move(frame);
-	t_sampleState.openSamples.clear();
-	t_sampleState.fullyExcludedSamples.clear();
-	t_sampleState.editorWorkDepth = 0u;
+	queuedTaskCount = 0u;
+	startedTaskCount = 0u;
+	finishedTaskCount = 0u;
+	droppedSampleCount = 0u;
+	truncatedSampleLabelCount = 0u;
+	lateSampleCount = 0u;
+	hotPath->activeFrameStartNanoseconds.store(frameStartNanoseconds, std::memory_order_release);
+	hotPath->activeFrameToken.store(frameToken, std::memory_order_release);
 	statusText = "Recording";
 	UpdateFastRecordingFlagsLocked();
 }
@@ -467,12 +789,26 @@ void Profiler::EndFrame()
 		return;
 	}
 
-	const double wallDurationMs = std::chrono::duration<double, std::milli>(
-		std::chrono::steady_clock::now() - currentFrameStart).count();
-	const double excludedEditorMs = std::clamp(currentExcludedEditorMs, 0.0, wallDurationMs);
+	// The scheduler has completed its worker-safe work before this protected
+	// boundary. Disarm producers first, then consume their release-published
+	// rings without making scope begin/end wait on the document mutex.
+	frameRecordingActive.store(false, std::memory_order_release);
+	markerRecordingActive.store(false, std::memory_order_release);
+	taskRecordingActive.store(false, std::memory_order_release);
+	const std::uint64_t sessionGeneration = hotPath->sessionGeneration.load(std::memory_order_acquire);
+	const std::uint64_t frameToken = hotPath->activeFrameToken.load(std::memory_order_acquire);
+	const std::int64_t frameStartNanoseconds =
+		hotPath->activeFrameStartNanoseconds.load(std::memory_order_acquire);
+	const std::int64_t wallDurationNanoseconds =
+		std::max<std::int64_t>(0, SteadyNowNanoseconds() - frameStartNanoseconds);
+	const std::int64_t excludedEditorNanoseconds = std::clamp<std::int64_t>(
+		hotPath->excludedEditorNanoseconds.load(std::memory_order_acquire),
+		0,
+		wallDurationNanoseconds);
 	// Profiler frame statistics intentionally describe the runnable game/engine
 	// portion of the frame. Editor UI time is internal subtraction bookkeeping.
-	currentFrame->durationMs = std::max(0.0, wallDurationMs - excludedEditorMs);
+	currentFrame->durationMs =
+		NanosecondsToMilliseconds(wallDurationNanoseconds - excludedEditorNanoseconds);
 	AddOrReplaceTimingStreamSample(*currentFrame, MakeTimingSample(
 		"engine_cpu",
 		"Engine CPU",
@@ -480,22 +816,7 @@ void Profiler::EndFrame()
 		ProfilerTimingStreamSource::ProfilerClock,
 		ProfilerTimingStreamStatus::Valid,
 		currentFrame->durationMs));
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	while (!t_sampleState.openSamples.empty())
-	{
-		ProfilerSample sample = t_sampleState.openSamples.back();
-		t_sampleState.openSamples.pop_back();
-		sample.complete = false;
-		const bool fullyExcluded = t_sampleState.fullyExcludedSamples.erase(sample.sampleId) != 0u;
-		// Sample starts use the same compressed, editor-excluded clock as the
-		// frame duration, so incomplete samples cannot extend past the frame.
-		sample.durationMs = std::max(0.0, currentFrame->durationMs - sample.startMs);
-		if (fullyExcluded)
-		{
-			continue;
-		}
-		currentFrame->samples.push_back(std::move(sample));
-	}
+	MergeThreadSamplesForFrameLocked(sessionGeneration, frameToken);
 	double viewportCpuMs = 0.0;
 	if (TryMeasureViewportCpuMilliseconds(*currentFrame, viewportCpuMs))
 	{
@@ -611,7 +932,7 @@ void Profiler::EndFrame()
 		// Keep one fixed root sample so a valid frame timing never produces an
 		// empty timeline, while system and worker scope contention remains absent.
 		ProfilerSample frameRoot;
-		frameRoot.sampleId = nextSampleId++;
+		frameRoot.sampleId = hotPath->nextSampleId.fetch_add(1u, std::memory_order_relaxed);
 		frameRoot.moduleId = ProfilerModuleId::CpuEngine;
 		frameRoot.name = "Engine Frame";
 		frameRoot.threadLabel = "main";
@@ -620,9 +941,8 @@ void Profiler::EndFrame()
 		currentFrame->samples.push_back(std::move(frameRoot));
 	}
 	AggregateSamplesForFrame(*currentFrame);
-	document.frames.push_back(*currentFrame);
-	TrimFrameBuffer(document.frames, settings);
-	currentFrame.reset();
+	CommitCurrentFrameLocked();
+	hotPath->activeFrameToken.store(0u, std::memory_order_release);
 	UpdateFastRecordingFlagsLocked();
 	// Publish after the complete frame is immutable so UI readers never need to
 	// contend with marker producers for an in-progress sample vector.
@@ -823,27 +1143,36 @@ void Profiler::RecordSceneViewStages(std::span<const PerformanceStageRecord> sta
 
 bool Profiler::BeginEditorWork()
 {
-	// The atomic check keeps the normal non-recording editor path lock-free.
 	if (!frameRecordingActive.load(std::memory_order_acquire))
 	{
 		return false;
 	}
 
-	std::lock_guard<std::mutex> lock(mutex);
-	if (state != ProfilerSessionState::Recording || !currentFrame.has_value())
+	const std::uint64_t sessionGeneration = hotPath->sessionGeneration.load(std::memory_order_acquire);
+	const std::uint64_t frameToken = hotPath->activeFrameToken.load(std::memory_order_acquire);
+	if (frameToken == 0u)
 	{
 		return false;
 	}
-	if (t_sampleState.editorWorkDepth++ == 0u)
+
+	ProfilerThreadBuffer* buffer = AcquireThreadBuffer(*hotPath, frameToken);
+	if (!buffer)
 	{
-		t_sampleState.editorWorkStart = std::chrono::steady_clock::now();
-		if (!t_sampleState.openSamples.empty()
-			&& t_sampleState.openSamples.back().taskLabel == "EditorSystem")
+		return false;
+	}
+	PrepareThreadBufferForFrame(*buffer, sessionGeneration, frameToken);
+	if (buffer->editorWorkDepth++ == 0u)
+	{
+		buffer->editorWorkStartNanoseconds = SteadyNowNanoseconds();
+		if (buffer->openSampleCount != 0u
+			&& std::strcmp(
+				buffer->openSamples[buffer->openSampleCount - 1u].sample.taskLabel.data(),
+				"EditorSystem") == 0)
 		{
 			// The immediate enclosing scheduler scope represents EditorSystem itself.
 			// Drop that wrapper completely; its parent remains an engine sample whose
 			// duration is reduced by the excluded editor interval below.
-			t_sampleState.fullyExcludedSamples.insert(t_sampleState.openSamples.back().sampleId);
+			buffer->openSamples[buffer->openSampleCount - 1u].fullyExcluded = true;
 		}
 	}
 	return true;
@@ -856,93 +1185,144 @@ void Profiler::EndEditorWork(bool active)
 		return;
 	}
 
-	std::lock_guard<std::mutex> lock(mutex);
-	if (t_sampleState.editorWorkDepth == 0u)
+	if (t_profilerThreadBinding.owner != hotPath.get() || !t_profilerThreadBinding.buffer)
 	{
 		return;
 	}
-	if (--t_sampleState.editorWorkDepth != 0u)
+	ProfilerThreadBuffer& buffer = *t_profilerThreadBinding.buffer;
+	if (buffer.editorWorkDepth == 0u || --buffer.editorWorkDepth != 0u)
 	{
 		return;
 	}
-	const double durationMs = std::chrono::duration<double, std::milli>(
-		std::chrono::steady_clock::now() - t_sampleState.editorWorkStart).count();
-	if (state == ProfilerSessionState::Recording && currentFrame.has_value())
+	const std::uint64_t sessionGeneration = hotPath->sessionGeneration.load(std::memory_order_acquire);
+	const std::uint64_t frameToken = hotPath->activeFrameToken.load(std::memory_order_acquire);
+	if (buffer.boundSessionGeneration != sessionGeneration
+		|| buffer.boundFrameToken != frameToken
+		|| frameToken == 0u)
 	{
-		currentExcludedEditorMs += std::max(0.0, durationMs);
+		buffer.lateSamples.fetch_add(1u, std::memory_order_relaxed);
+		return;
 	}
+	const std::int64_t durationNanoseconds =
+		std::max<std::int64_t>(0, SteadyNowNanoseconds() - buffer.editorWorkStartNanoseconds);
+	hotPath->excludedEditorNanoseconds.fetch_add(durationNanoseconds, std::memory_order_relaxed);
 }
 
 // Profiler::BeginSample is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool Profiler::BeginSample(const char* name, ProfilerModuleId moduleId, const char* taskLabel)
 {
-	// Most frames run with profiling idle. Check the cheap flag first so the
-	// many RAII scope markers compiled into engine systems avoid a mutex round
-	// trip until a real capture is recording.
 	if (!markerRecordingActive.load(std::memory_order_acquire))
 	{
 		return false;
 	}
-	if (t_sampleState.editorWorkDepth != 0u)
+
+	const std::uint64_t sessionGeneration = hotPath->sessionGeneration.load(std::memory_order_acquire);
+	const std::uint64_t frameToken = hotPath->activeFrameToken.load(std::memory_order_acquire);
+	if (frameToken == 0u)
+	{
+		return false;
+	}
+
+	ProfilerThreadBuffer* buffer = AcquireThreadBuffer(*hotPath, frameToken);
+	if (!buffer)
+	{
+		return false;
+	}
+	PrepareThreadBufferForFrame(*buffer, sessionGeneration, frameToken);
+	if (buffer->editorWorkDepth != 0u)
 	{
 		// Editor work is outside the game profiler. Do not let nested ImGui,
 		// managed editor, or editor-presentation scopes enter CPU Engine tables.
 		return false;
 	}
-
-	std::lock_guard<std::mutex> lock(mutex);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (state != ProfilerSessionState::Recording || !currentFrame.has_value() || !settings.recordMarkers)
+	if (buffer->openSampleCount >= kProfilerMaximumOpenSampleDepth)
 	{
+		buffer->droppedSamples.fetch_add(1u, std::memory_order_relaxed);
+		return false;
+	}
+	const std::uint64_t writeSequence =
+		buffer->writeSequence.load(std::memory_order_relaxed);
+	const std::uint64_t readSequence =
+		buffer->readSequence.load(std::memory_order_acquire);
+	const std::uint64_t reservedAncestorSlots =
+		static_cast<std::uint64_t>(buffer->openSampleCount + 1u);
+	if (writeSequence - readSequence + reservedAncestorSlots
+		> kProfilerThreadSampleCapacity)
+	{
+		// Every accepted child reserves enough ring space for itself and all
+		// still-open ancestors. A saturated ring can therefore drop a new subtree
+		// atomically, but never retain a child whose parent cannot be published.
+		buffer->droppedSamples.fetch_add(1u, std::memory_order_relaxed);
 		return false;
 	}
 
-	ProfilerSample sample;
-	sample.sampleId = nextSampleId++;
-	sample.parentSampleId = t_sampleState.openSamples.empty() ? 0u : t_sampleState.openSamples.back().sampleId;
-	sample.moduleId = moduleId;
-	sample.name = name != nullptr ? name : "Unnamed Sample";
-	sample.threadLabel = CurrentThreadLabel();
-	sample.taskLabel = taskLabel != nullptr ? taskLabel : "";
-	const double wallStartMs = std::chrono::duration<double, std::milli>(
-		std::chrono::steady_clock::now() - currentFrameStart).count();
-	// Compress the timeline by editor time already completed this frame. Every
-	// sample start and duration then shares the same game-only frame clock.
-	sample.startMs = std::max(0.0, wallStartMs - currentExcludedEditorMs);
-	sample.depth = static_cast<std::uint32_t>(t_sampleState.openSamples.size());
-	t_sampleState.openSamples.push_back(std::move(sample));
+	OpenProfilerSample& opened = buffer->openSamples[buffer->openSampleCount];
+	opened = {};
+	opened.sample.sessionGeneration = sessionGeneration;
+	opened.sample.frameToken = frameToken;
+	opened.sample.sampleId = hotPath->nextSampleId.fetch_add(1u, std::memory_order_relaxed);
+	opened.sample.parentSampleId = buffer->openSampleCount == 0u
+		? 0u
+		: buffer->openSamples[buffer->openSampleCount - 1u].sample.sampleId;
+	opened.sample.moduleId = moduleId;
+	const bool nameTruncated =
+		CopyInlineText(opened.sample.name, name, "Unnamed Sample");
+	const bool taskTruncated =
+		CopyInlineText(opened.sample.taskLabel, taskLabel, "");
+	if (nameTruncated || taskTruncated)
+	{
+		buffer->truncatedLabels.fetch_add(1u, std::memory_order_relaxed);
+	}
+	const std::int64_t frameStartNanoseconds =
+		hotPath->activeFrameStartNanoseconds.load(std::memory_order_acquire);
+	const std::int64_t excludedEditorNanoseconds =
+		hotPath->excludedEditorNanoseconds.load(std::memory_order_acquire);
+	opened.sample.startNanoseconds = std::max<std::int64_t>(
+		0,
+		SteadyNowNanoseconds() - frameStartNanoseconds - excludedEditorNanoseconds);
+	opened.sample.depth = static_cast<std::uint32_t>(buffer->openSampleCount);
+	++buffer->openSampleCount;
 	return true;
 }
 
 // Profiler::EndSample is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Profiler::EndSample()
 {
-	std::lock_guard<std::mutex> lock(mutex);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!currentFrame.has_value() || t_sampleState.openSamples.empty())
+	if (t_profilerThreadBinding.owner != hotPath.get() || !t_profilerThreadBinding.buffer)
 	{
 		return;
 	}
 
-	ProfilerSample sample = t_sampleState.openSamples.back();
-	t_sampleState.openSamples.pop_back();
-	const bool fullyExcluded = t_sampleState.fullyExcludedSamples.erase(sample.sampleId) != 0u;
-	// If recording stopped while a worker-owned scope was open, discard that
-	// unfinished sample after popping it so thread-local stacks do not leak
-	// stale parent ids into a later capture.
-	if (state != ProfilerSessionState::Recording)
+	ProfilerThreadBuffer& buffer = *t_profilerThreadBinding.buffer;
+	if (buffer.openSampleCount == 0u)
 	{
 		return;
 	}
-	const double wallEndMs = std::chrono::duration<double, std::milli>(
-		std::chrono::steady_clock::now() - currentFrameStart).count();
-	const double gameEndMs = std::max(0.0, wallEndMs - currentExcludedEditorMs);
-	sample.durationMs = std::max(0.0, gameEndMs - sample.startMs);
-	if (fullyExcluded)
+
+	OpenProfilerSample opened = buffer.openSamples[--buffer.openSampleCount];
+	const std::uint64_t sessionGeneration = hotPath->sessionGeneration.load(std::memory_order_acquire);
+	const std::uint64_t frameToken = hotPath->activeFrameToken.load(std::memory_order_acquire);
+	if (opened.sample.sessionGeneration != sessionGeneration
+		|| opened.sample.frameToken != frameToken
+		|| frameToken == 0u)
+	{
+		buffer.lateSamples.fetch_add(1u, std::memory_order_relaxed);
+		return;
+	}
+	const std::int64_t frameStartNanoseconds =
+		hotPath->activeFrameStartNanoseconds.load(std::memory_order_acquire);
+	const std::int64_t excludedEditorNanoseconds =
+		hotPath->excludedEditorNanoseconds.load(std::memory_order_acquire);
+	const std::int64_t gameEndNanoseconds = std::max<std::int64_t>(
+		0,
+		SteadyNowNanoseconds() - frameStartNanoseconds - excludedEditorNanoseconds);
+	opened.sample.durationNanoseconds =
+		std::max<std::int64_t>(0, gameEndNanoseconds - opened.sample.startNanoseconds);
+	if (opened.fullyExcluded)
 	{
 		return;
 	}
-	currentFrame->samples.push_back(std::move(sample));
+	PublishCompletedSample(buffer, std::move(opened.sample));
 }
 
 // Profiler::RecordRenderStats is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1016,12 +1396,19 @@ void Profiler::RecordTaskQueued()
 		return;
 	}
 
-	std::lock_guard<std::mutex> lock(mutex);
-	if (state != ProfilerSessionState::Recording || !settings.taskExecutionEnabled)
+	const std::uint64_t sessionGeneration = hotPath->sessionGeneration.load(std::memory_order_acquire);
+	const std::uint64_t frameToken = hotPath->activeFrameToken.load(std::memory_order_acquire);
+	if (frameToken == 0u)
 	{
 		return;
 	}
-	++queuedTaskCount;
+	ProfilerThreadBuffer* buffer = AcquireThreadBuffer(*hotPath, frameToken);
+	if (!buffer)
+	{
+		return;
+	}
+	PrepareThreadBufferForFrame(*buffer, sessionGeneration, frameToken);
+	buffer->queuedTasks.fetch_add(1u, std::memory_order_relaxed);
 }
 
 // Profiler::RecordTaskStarted is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1032,14 +1419,19 @@ bool Profiler::RecordTaskStarted(const char* taskLabel)
 		return false;
 	}
 
+	const std::uint64_t sessionGeneration = hotPath->sessionGeneration.load(std::memory_order_acquire);
+	const std::uint64_t frameToken = hotPath->activeFrameToken.load(std::memory_order_acquire);
+	if (frameToken == 0u)
 	{
-		std::lock_guard<std::mutex> lock(mutex);
-		if (state != ProfilerSessionState::Recording || !settings.taskExecutionEnabled)
-		{
-			return false;
-		}
-		++startedTaskCount;
+		return false;
 	}
+	ProfilerThreadBuffer* buffer = AcquireThreadBuffer(*hotPath, frameToken);
+	if (!buffer)
+	{
+		return false;
+	}
+	PrepareThreadBufferForFrame(*buffer, sessionGeneration, frameToken);
+	buffer->startedTasks.fetch_add(1u, std::memory_order_relaxed);
 	return BeginSample("ThreadPool Task", ProfilerModuleId::TaskExecution, taskLabel);
 }
 
@@ -1055,12 +1447,19 @@ void Profiler::RecordTaskFinished(bool sampleActive)
 		return;
 	}
 
-	std::lock_guard<std::mutex> lock(mutex);
-	if (state != ProfilerSessionState::Recording || !settings.taskExecutionEnabled)
+	const std::uint64_t sessionGeneration = hotPath->sessionGeneration.load(std::memory_order_acquire);
+	const std::uint64_t frameToken = hotPath->activeFrameToken.load(std::memory_order_acquire);
+	if (frameToken == 0u)
 	{
 		return;
 	}
-	++finishedTaskCount;
+	ProfilerThreadBuffer* buffer = AcquireThreadBuffer(*hotPath, frameToken);
+	if (!buffer)
+	{
+		return;
+	}
+	PrepareThreadBufferForFrame(*buffer, sessionGeneration, frameToken);
+	buffer->finishedTasks.fetch_add(1u, std::memory_order_relaxed);
 }
 
 // Profiler::SelectFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1097,6 +1496,7 @@ ProfilerCaptureDocument Profiler::GetDocumentSnapshot() const
 		// after releasing it so a long dormant capture cannot block recording.
 		std::lock_guard<std::mutex> lock(mutex);
 		snapshot = document;
+		snapshot.frames.assign(retainedFrames.begin(), retainedFrames.end());
 		if (currentFrame.has_value())
 		{
 			snapshot.frames.push_back(*currentFrame);
@@ -1111,7 +1511,7 @@ std::vector<ProfilerFrameListItem> Profiler::GetFrameListSnapshot() const
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	std::vector<ProfilerFrameListItem> frames;
-	frames.reserve(document.frames.size() + (currentFrame.has_value() ? 1u : 0u));
+	frames.reserve(retainedFrames.size() + (currentFrame.has_value() ? 1u : 0u));
 	auto appendFrame = [&frames](const ProfilerFrameRecord& frame) {
 		ProfilerFrameListItem item;
 		item.frameIndex = frame.frameIndex;
@@ -1119,7 +1519,7 @@ std::vector<ProfilerFrameListItem> Profiler::GetFrameListSnapshot() const
 		item.complete = frame.complete;
 		frames.push_back(item);
 	};
-	for (const ProfilerFrameRecord& frame : document.frames)
+	for (const ProfilerFrameRecord& frame : retainedFrames)
 	{
 		appendFrame(frame);
 	}
@@ -1138,7 +1538,7 @@ std::vector<ProfilerFrameRecord> Profiler::GetFramesSnapshot() const
 		// Copy the retained records while synchronized. String materialization below
 		// is intentionally outside this lock because it is presentation-only work.
 		std::lock_guard<std::mutex> lock(mutex);
-		frames = document.frames;
+		frames.assign(retainedFrames.begin(), retainedFrames.end());
 		if (currentFrame.has_value())
 		{
 			frames.push_back(*currentFrame);
@@ -1159,9 +1559,9 @@ std::optional<ProfilerFrameRecord> Profiler::GetSelectedFrameSnapshot() const
 		std::lock_guard<std::mutex> lock(mutex);
 		if (!selectedFrameIndex.has_value())
 		{
-			if (!document.frames.empty())
+			if (!retainedFrames.empty())
 			{
-				snapshot = document.frames.back();
+				snapshot = retainedFrames.back();
 			}
 			else if (currentFrame.has_value())
 			{
@@ -1170,7 +1570,7 @@ std::optional<ProfilerFrameRecord> Profiler::GetSelectedFrameSnapshot() const
 		}
 		else
 		{
-			for (const ProfilerFrameRecord& frame : document.frames)
+			for (const ProfilerFrameRecord& frame : retainedFrames)
 			{
 				if (frame.frameIndex == *selectedFrameIndex)
 				{
@@ -1230,6 +1630,206 @@ double Profiler::NowMs() const
 	return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - sessionStart).count();
 }
 
+void Profiler::CommitCurrentFrameLocked()
+{
+	if (!currentFrame.has_value())
+	{
+		return;
+	}
+
+	// Move the string-heavy detailed record instead of duplicating every sample
+	// allocation at the protected frame boundary.
+	retainedFrames.push_back(std::move(*currentFrame));
+	currentFrame.reset();
+
+	const std::size_t maximumFrames = std::max<std::size_t>(1u, settings.maxFrames);
+	while (retainedFrames.size() > maximumFrames)
+	{
+		retainedFrames.pop_front();
+	}
+
+	if (settings.maxDurationSeconds <= 0.0 || retainedFrames.empty())
+	{
+		return;
+	}
+
+	// A deque makes duration-based rolling eviction proportional only to records
+	// actually removed; surviving detailed frames are never shifted.
+	const double cutoff = retainedFrames.back().frameStartMs - settings.maxDurationSeconds * 1000.0;
+	while (!retainedFrames.empty() && retainedFrames.front().frameStartMs < cutoff)
+	{
+		retainedFrames.pop_front();
+	}
+}
+
+void Profiler::FinalizePartialFrameLocked()
+{
+	if (!currentFrame.has_value())
+	{
+		hotPath->activeFrameToken.store(0u, std::memory_order_release);
+		return;
+	}
+
+	const std::uint64_t sessionGeneration =
+		hotPath->sessionGeneration.load(std::memory_order_acquire);
+	const std::uint64_t frameToken =
+		hotPath->activeFrameToken.load(std::memory_order_acquire);
+	const std::int64_t frameStartNanoseconds =
+		hotPath->activeFrameStartNanoseconds.load(std::memory_order_acquire);
+	const std::int64_t nowNanoseconds = SteadyNowNanoseconds();
+	std::int64_t interruptedEditorNanoseconds = 0;
+	if (t_profilerThreadBinding.owner == hotPath.get()
+		&& t_profilerThreadBinding.buffer)
+	{
+		ProfilerThreadBuffer& buffer = *t_profilerThreadBinding.buffer;
+		if (buffer.boundSessionGeneration == sessionGeneration
+			&& buffer.boundFrameToken == frameToken
+			&& buffer.editorWorkDepth != 0u)
+		{
+			// Pause/Finish are invoked from EditorSystem's protected ImGui
+			// boundary on this same thread. Close only its own TLS interval at the
+			// action time; never inspect another producer's non-atomic stack state.
+			interruptedEditorNanoseconds += std::max<std::int64_t>(
+				0,
+				nowNanoseconds - buffer.editorWorkStartNanoseconds);
+			buffer.editorWorkDepth = 0u;
+		}
+	}
+	hotPath->excludedEditorNanoseconds.fetch_add(
+		interruptedEditorNanoseconds,
+		std::memory_order_acq_rel);
+	const std::int64_t wallDurationNanoseconds =
+		std::max<std::int64_t>(0, nowNanoseconds - frameStartNanoseconds);
+	const std::int64_t excludedEditorNanoseconds = std::clamp<std::int64_t>(
+		hotPath->excludedEditorNanoseconds.load(std::memory_order_acquire),
+		0,
+		wallDurationNanoseconds);
+	currentFrame->durationMs =
+		NanosecondsToMilliseconds(wallDurationNanoseconds - excludedEditorNanoseconds);
+	AddOrReplaceTimingStreamSample(*currentFrame, MakeTimingSample(
+		"engine_cpu",
+		"Engine CPU",
+		ProfilerTimingStreamScope::EngineCpu,
+		ProfilerTimingStreamSource::ProfilerClock,
+		ProfilerTimingStreamStatus::Valid,
+		currentFrame->durationMs));
+	MergeThreadSamplesForFrameLocked(sessionGeneration, frameToken);
+	double viewportCpuMs = 0.0;
+	if (TryMeasureViewportCpuMilliseconds(*currentFrame, viewportCpuMs))
+	{
+		AddOrReplaceTimingStreamSample(*currentFrame, MakeTimingSample(
+			"viewport_cpu",
+			"Viewport CPU",
+			ProfilerTimingStreamScope::ViewportCpu,
+			ProfilerTimingStreamSource::ProfilerClock,
+			ProfilerTimingStreamStatus::Valid,
+			viewportCpuMs));
+	}
+
+	// A toolbar action can interrupt the current protected editor frame. Preserve
+	// the elapsed evidence but label it partial so percentiles and UI rows can
+	// distinguish it from a naturally completed EndFrame record.
+	currentFrame->complete = false;
+	AggregateSamplesForFrame(*currentFrame);
+	CommitCurrentFrameLocked();
+	hotPath->activeFrameToken.store(0u, std::memory_order_release);
+}
+
+void Profiler::MergeThreadSamplesForFrameLocked(
+	std::uint64_t sessionGeneration,
+	std::uint64_t frameToken)
+{
+	if (!currentFrame.has_value() || frameToken == 0u)
+	{
+		return;
+	}
+
+	std::vector<std::shared_ptr<ProfilerThreadBuffer>> buffers;
+	{
+		// Thread enrollment is rare and separate from the scope hot path. Copy
+		// strong references at the protected boundary so transient workers that
+		// already exited still contribute their completed samples.
+		std::lock_guard<std::mutex> registryLock(hotPath->registryMutex);
+		buffers = hotPath->registeredBuffers;
+	}
+
+	if (hotPath->rejectedThreadBufferFrameToken.load(std::memory_order_acquire) == frameToken)
+	{
+		droppedSampleCount +=
+			hotPath->rejectedThreadBuffers.exchange(0u, std::memory_order_acq_rel);
+	}
+	for (const std::shared_ptr<ProfilerThreadBuffer>& buffer : buffers)
+	{
+		if (buffer->counterFrameToken.load(std::memory_order_acquire) == frameToken)
+		{
+			queuedTaskCount += buffer->queuedTasks.exchange(0u, std::memory_order_acq_rel);
+			startedTaskCount += buffer->startedTasks.exchange(0u, std::memory_order_acq_rel);
+			finishedTaskCount += buffer->finishedTasks.exchange(0u, std::memory_order_acq_rel);
+		}
+
+		const std::uint64_t readSequence = buffer->readSequence.load(std::memory_order_relaxed);
+		const std::uint64_t writeSequence = buffer->writeSequence.load(std::memory_order_acquire);
+		currentFrame->samples.reserve(
+			currentFrame->samples.size() + static_cast<std::size_t>(writeSequence - readSequence));
+		for (std::uint64_t sequence = readSequence; sequence < writeSequence; ++sequence)
+		{
+			const BufferedProfilerSample& buffered =
+				buffer->completedSamples[sequence % kProfilerThreadSampleCapacity];
+			if (buffered.sessionGeneration != sessionGeneration || buffered.frameToken != frameToken)
+			{
+				++lateSampleCount;
+				continue;
+			}
+
+			ProfilerSample sample;
+			sample.sampleId = buffered.sampleId;
+			sample.parentSampleId = buffered.parentSampleId;
+			sample.moduleId = buffered.moduleId;
+			sample.name = buffered.name.data();
+			sample.threadLabel = buffer->threadLabel;
+			sample.taskLabel = buffered.taskLabel.data();
+			sample.startMs = std::min(
+				currentFrame->durationMs,
+				NanosecondsToMilliseconds(buffered.startNanoseconds));
+			sample.durationMs = std::min(
+				NanosecondsToMilliseconds(buffered.durationNanoseconds),
+				std::max(0.0, currentFrame->durationMs - sample.startMs));
+			sample.depth = buffered.depth;
+			sample.complete = buffered.complete;
+			currentFrame->samples.push_back(std::move(sample));
+		}
+		buffer->readSequence.store(writeSequence, std::memory_order_release);
+		if (buffer->diagnosticFrameToken.load(std::memory_order_acquire) == frameToken)
+		{
+			droppedSampleCount += buffer->droppedSamples.exchange(0u, std::memory_order_acq_rel);
+			truncatedSampleLabelCount += buffer->truncatedLabels.exchange(0u, std::memory_order_acq_rel);
+			lateSampleCount += buffer->lateSamples.exchange(0u, std::memory_order_acq_rel);
+		}
+	}
+
+	// Retire only buffers that were part of this merge, are now drained, and no
+	// longer have a TLS owner. A thread that enrolled concurrently is absent from
+	// the local snapshot and cannot be mistaken for an exited worker.
+	std::lock_guard<std::mutex> registryLock(hotPath->registryMutex);
+	hotPath->registeredBuffers.erase(
+		std::remove_if(
+			hotPath->registeredBuffers.begin(),
+			hotPath->registeredBuffers.end(),
+			[&buffers](const std::shared_ptr<ProfilerThreadBuffer>& registeredBuffer) {
+				const bool merged = std::any_of(
+					buffers.begin(),
+					buffers.end(),
+					[&registeredBuffer](const std::shared_ptr<ProfilerThreadBuffer>& candidate) {
+						return candidate.get() == registeredBuffer.get();
+					});
+				return merged
+					&& registeredBuffer.use_count() == 2u
+					&& registeredBuffer->readSequence.load(std::memory_order_acquire)
+						== registeredBuffer->writeSequence.load(std::memory_order_acquire);
+			}),
+		hotPath->registeredBuffers.end());
+}
+
 // Profiler::AggregateSamplesForFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Profiler::AggregateSamplesForFrame(ProfilerFrameRecord& frame) const
 {
@@ -1256,6 +1856,9 @@ void Profiler::AggregateSamplesForFrame(ProfilerFrameRecord& frame) const
 		AddOrReplaceMetric(*engineCpu, "Engine sample count", static_cast<double>(std::count_if(frame.samples.begin(), frame.samples.end(), [](const ProfilerSample& sample) {
 			return sample.moduleId == ProfilerModuleId::CpuEngine;
 		})), "count");
+		AddOrReplaceMetric(*engineCpu, "Profiler dropped scopes", static_cast<double>(droppedSampleCount), "count");
+		AddOrReplaceMetric(*engineCpu, "Profiler truncated labels", static_cast<double>(truncatedSampleLabelCount), "count");
+		AddOrReplaceMetric(*engineCpu, "Profiler late scopes", static_cast<double>(lateSampleCount), "count");
 	}
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ProfilerModuleSummary* tasks = FindModule(frame.moduleSummaries, ProfilerModuleId::TaskExecution))
@@ -1282,16 +1885,20 @@ void Profiler::UpdateFastRecordingFlagsLocked()
 	// An armed recording outside Play Mode owns no current frame. Keeping all
 	// fast flags false there prevents editor-preview instrumentation from paying
 	// profiler synchronization costs or leaking counters into the next play frame.
-	const bool frameActive = state == ProfilerSessionState::Recording && currentFrame.has_value();
+	const bool frameActive = state == ProfilerSessionState::Recording
+		&& currentFrame.has_value()
+		&& hotPath->activeFrameToken.load(std::memory_order_acquire) != 0u;
 	const bool retainOptionalDetails = frameActive
 		&& (settings.detailLevel == ProfilerCaptureDetailLevel::Detailed
 			|| (settings.detailLevel == ProfilerCaptureDetailLevel::Sampled
 				&& currentFrame->frameIndex % std::max(1u, settings.sampleIntervalFrames) == 0u));
 	frameRecordingActive.store(frameActive, std::memory_order_release);
 	// Optional scopes span every worker and contend on the profiler's capture
-	// mutex. Apply the selected detail level during collection instead of paying
-	// that cost on every frame and discarding samples only during serialization.
+	// buffers. Apply the selected detail level during collection instead of
+	// filling those bounded rings on frames whose hierarchy will not be retained.
 	markerRecordingActive.store(retainOptionalDetails && settings.recordMarkers, std::memory_order_release);
-	taskRecordingActive.store(retainOptionalDetails && settings.taskExecutionEnabled, std::memory_order_release);
+	// Queue/start/finish counters are compact per-thread atomics and remain useful
+	// every frame. Task scope strings still follow marker sampling above.
+	taskRecordingActive.store(frameActive && settings.taskExecutionEnabled, std::memory_order_release);
 }
 }

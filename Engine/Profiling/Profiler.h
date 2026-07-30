@@ -6,6 +6,8 @@
 
 #include <atomic>
 #include <chrono>
+#include <deque>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -21,6 +23,8 @@ namespace TerraEngine::Animation
 
 namespace TerraEngine::Profiling
 {
+struct ProfilerHotPathState;
+
 // class Profiler groups related state and operations so callers have one documented contract.
 class Profiler
 {
@@ -82,29 +86,44 @@ public:
 	std::uint64_t GetSnapshotRevision() const noexcept;
 
 private:
-	Profiler() = default;
+	Profiler();
+	~Profiler();
 
 	double NowMs() const;
+	// Pause and Finish are protected scheduler-boundary operations. When either
+	// interrupts a live frame, retain the elapsed measurements as one explicitly
+	// partial record instead of publishing zero-duration samples.
+	void FinalizePartialFrameLocked();
+	// Completed frames move into a deque-backed rolling history. Removing the
+	// oldest detailed frame is therefore constant-time and never shifts every
+	// retained string/vector payload on the editor thread.
+	void CommitCurrentFrameLocked();
+	void MergeThreadSamplesForFrameLocked(std::uint64_t sessionGeneration, std::uint64_t frameToken);
 	void RebuildCurrentFrameModules();
 	void AggregateSamplesForFrame(ProfilerFrameRecord& frame) const;
 	void UpdateFastRecordingFlagsLocked();
 
 	mutable std::mutex mutex;
+	// Scope producers write only to thread-owned fixed buffers. The opaque state
+	// keeps those implementation details out of every translation unit that
+	// includes the public profiler API.
+	std::unique_ptr<ProfilerHotPathState> hotPath;
 	ProfilerSessionState state = ProfilerSessionState::Idle;
+	// The public capture document keeps the stable serialization schema, while
+	// live retention uses a deque so every-frame eviction stays O(1).
 	ProfilerCaptureDocument document;
+	std::deque<ProfilerFrameRecord> retainedFrames;
 	ProfilerCaptureSettings settings;
 	std::optional<ProfilerFrameRecord> currentFrame;
 	std::optional<std::uint64_t> selectedFrameIndex;
 	std::chrono::steady_clock::time_point sessionStart{};
-	std::chrono::steady_clock::time_point currentFrameStart{};
 	std::uint64_t nextFrameIndex = 0u;
-	std::uint64_t nextSampleId = 1u;
 	std::uint64_t queuedTaskCount = 0u;
 	std::uint64_t startedTaskCount = 0u;
 	std::uint64_t finishedTaskCount = 0u;
-	// Editor time is tracked only long enough to subtract it from the game-facing
-	// frame duration. It is never published as a profiler timing stream.
-	double currentExcludedEditorMs = 0.0;
+	std::uint64_t droppedSampleCount = 0u;
+	std::uint64_t truncatedSampleLabelCount = 0u;
+	std::uint64_t lateSampleCount = 0u;
 	std::string statusText = "Idle";
 	std::string lastError;
 	// These atomics are read by hot instrumentation sites before they touch the

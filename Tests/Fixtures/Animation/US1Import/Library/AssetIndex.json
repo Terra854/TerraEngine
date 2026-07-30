@@ -34,7 +34,7 @@
             "sourcePath": "Models/US1Hero.gltf"
         },
         {
-            "compiledPath": "Models/US1Hero_Generated/US1Hero.teprefab",
+            "compiledPath": "",
             "guid": "80cc2dce6a2006a29aed045b8d509ca4",
             "importerName": "PrefabImporter",
             "lastModified": 134296896822862062,

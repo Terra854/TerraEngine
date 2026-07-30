@@ -212,7 +212,7 @@ ProfilerCaptureSettings SettingsFromJson(const nlohmann::json& json)
 	settings.taskExecutionEnabled = json.value("taskExecutionEnabled", true);
 	settings.recordMarkers = json.value("recordMarkers", true);
 	settings.recordTaskContext = json.value("recordTaskContext", true);
-	settings.maxFrames = std::max(1u, json.value("maxFrames", 10000u));
+	settings.maxFrames = std::max(1u, json.value("maxFrames", kDefaultProfilerRollingFrameLimit));
 	settings.maxDurationSeconds = std::max(0.0, json.value("maxDurationSeconds", 0.0));
 	return settings;
 }

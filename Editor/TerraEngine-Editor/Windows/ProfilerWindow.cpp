@@ -43,6 +43,9 @@ namespace
 // ten-Hz UI still feels live while keeping deep capture and renderer snapshots
 // off the producer-critical path.
 constexpr auto kProfilerWindowRefreshInterval = std::chrono::milliseconds(100);
+// Percentiles require sorting the retained history. They may trail compact live
+// rows slightly while recording so an open profiler never sorts at render rate.
+constexpr auto kProfilerStatsRefreshInterval = std::chrono::milliseconds(500);
 
 // struct SampleTreeNode groups related state and operations so callers have one documented contract.
 struct SampleTreeNode
@@ -513,6 +516,10 @@ struct ProfilerWindowCache
 	std::vector<ProfilerFrameListItem> frames;
 	std::vector<ProfilerFrameListItem> sortedFrames;
 	FrameDurationStats frameDurationStats;
+	// Detailed frame payloads remain outside the live refresh path until the user
+	// explicitly pins a row. Completed frames are immutable, so one copy can be
+	// reused while newer compact frame-list entries continue arriving.
+	std::optional<std::uint64_t> pinnedFrameIndex;
 	std::optional<ProfilerFrameRecord> selectedFrame;
 	bool frameOrderDirty = true;
 	bool sampleAnalysisValid = false;
@@ -534,6 +541,7 @@ struct ProfilerWindowCache
 	std::vector<TerraEngine::Renderer::BackendStageTiming> backendStageTimings;
 	RenderStatsSnapshot gameStats;
 	RenderStatsSnapshot sceneStats;
+	std::chrono::steady_clock::time_point nextProfilerStatsRefresh{};
 };
 
 ProfilerWindow::ProfilerWindow(MainEditorSubsystem* windowOwner)
@@ -559,12 +567,39 @@ void ProfilerWindow::RefreshLiveSnapshot()
 		cache->state = profiler.GetState();
 		cache->settings = profiler.GetSettings();
 		cache->frames = profiler.GetFrameListSnapshot();
-		cache->sortedFrames = cache->frames;
-		cache->frameDurationStats = BuildFrameDurationStats(cache->frames);
 		const std::optional<std::uint64_t> previousSelectedFrameIndex = cache->selectedFrame.has_value()
 			? std::optional<std::uint64_t>{cache->selectedFrame->frameIndex}
 			: std::nullopt;
-		cache->selectedFrame = profiler.GetSelectedFrameSnapshot();
+		const bool liveCapture = cache->state == ProfilerSessionState::Recording
+			|| cache->state == ProfilerSessionState::Paused;
+		if (!liveCapture
+			|| previousState != cache->state
+			|| now >= cache->nextProfilerStatsRefresh)
+		{
+			cache->frameDurationStats = BuildFrameDurationStats(cache->frames);
+			cache->nextProfilerStatsRefresh = now + kProfilerStatsRefreshInterval;
+		}
+		bool shouldCopySelectedFrame = false;
+		if (cache->pinnedFrameIndex.has_value())
+		{
+			shouldCopySelectedFrame = !cache->selectedFrame.has_value()
+				|| cache->selectedFrame->frameIndex != *cache->pinnedFrameIndex;
+		}
+		else if (!liveCapture)
+		{
+			// Loaded and completed captures retain the established default frame
+			// selection. Live recording intentionally stays list-only until a row
+			// is pinned, avoiding a deep frame copy on every published revision.
+			shouldCopySelectedFrame = true;
+		}
+		else
+		{
+			cache->selectedFrame.reset();
+		}
+		if (shouldCopySelectedFrame)
+		{
+			cache->selectedFrame = profiler.GetSelectedFrameSnapshot();
+		}
 		cache->frameOrderDirty = true;
 		const std::optional<std::uint64_t> refreshedSelectedFrameIndex = cache->selectedFrame.has_value()
 			? std::optional<std::uint64_t>{cache->selectedFrame->frameIndex}
@@ -693,8 +728,11 @@ void ProfilerWindow::DrawToolbar()
 		: (!hasProject ? "Open a project before recording profiler captures." : (busy ? "Profiler service is finishing another action." : ""));
 
 	DrawToolbarGroupLabel("Live");
-	if (ToolbarButton(recording ? "Recording" : "Record", canUseProject && !recording, unavailableReason))
+	if (ToolbarButton(recording ? "Recording Every Frame" : "Record Every Frame", canUseProject && !recording, unavailableReason))
 	{
+		cache->pinnedFrameIndex.reset();
+		cache->selectedFrame.reset();
+		cache->sampleAnalysisValid = false;
 		service->StartRecording();
 	}
 	ImGui::SameLine();
@@ -723,6 +761,9 @@ void ProfilerWindow::DrawToolbar()
 	ImGui::SameLine();
 	if (ToolbarButton("Clear", canUseProject && hasFrames, hasFrames ? "" : "No captured frames are available to clear."))
 	{
+		cache->pinnedFrameIndex.reset();
+		cache->selectedFrame.reset();
+		cache->sampleAnalysisValid = false;
 		service->Clear();
 	}
 	ImGui::SameLine();
@@ -756,6 +797,9 @@ void ProfilerWindow::DrawCaptureList()
 	{
 		if (ImGui::Selectable(capture.fileName.c_str()))
 		{
+			cache->pinnedFrameIndex.reset();
+			cache->selectedFrame.reset();
+			cache->sampleAnalysisValid = false;
 			service->LoadCapture(capture.absolutePath);
 		}
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -791,27 +835,19 @@ void ProfilerWindow::DrawFrameList()
 		ImGui::TableSetupColumn("Time", ImGuiTableColumnFlags_PreferSortDescending | ImGuiTableColumnFlags_WidthFixed, 82.0f);
 		ImGui::TableSetupColumn("Load", ImGuiTableColumnFlags_PreferSortDescending | ImGuiTableColumnFlags_WidthStretch);
 		ImGui::TableHeadersRow();
+		bool frameIndexOrder = true;
+		bool frameIndexAscending = false;
 		if (ImGuiTableSortSpecs* sortSpecs = ImGui::TableGetSortSpecs(); sortSpecs && sortSpecs->SpecsCount > 0)
 		{
 			const ImGuiTableColumnSortSpecs& spec = sortSpecs->Specs[0];
-			if (cache->frameOrderDirty || sortSpecs->SpecsDirty)
+			frameIndexOrder = spec.ColumnIndex == 0;
+			frameIndexAscending = spec.SortDirection == ImGuiSortDirection_Ascending;
+			if (!frameIndexOrder && (cache->frameOrderDirty || sortSpecs->SpecsDirty))
 			{
 				const bool ascending = spec.SortDirection == ImGuiSortDirection_Ascending;
+				sortedFrames = frames;
 				std::sort(sortedFrames.begin(), sortedFrames.end(), [&](const ProfilerFrameListItem& left, const ProfilerFrameListItem& right) {
-					int result = 0;
-					switch (spec.ColumnIndex)
-					{
-					case 0:
-						result = left.frameIndex < right.frameIndex ? -1 : (left.frameIndex > right.frameIndex ? 1 : 0);
-						break;
-					case 1:
-					case 2:
-						result = left.durationMs < right.durationMs ? -1 : (left.durationMs > right.durationMs ? 1 : 0);
-						break;
-					default:
-						result = left.frameIndex < right.frameIndex ? -1 : (left.frameIndex > right.frameIndex ? 1 : 0);
-						break;
-					}
+					int result = left.durationMs < right.durationMs ? -1 : (left.durationMs > right.durationMs ? 1 : 0);
 					if (result == 0)
 					{
 						// Stable tie-breaks keep rows from jumping when two frames
@@ -821,27 +857,34 @@ void ProfilerWindow::DrawFrameList()
 					return ascending ? result < 0 : result > 0;
 				});
 				cache->frameOrderDirty = false;
-				sortSpecs->SpecsDirty = false;
 			}
+			sortSpecs->SpecsDirty = false;
 		}
+		// The compact snapshot is already chronological. Frame-index sorting is
+		// therefore a direct or reverse view and never needs an O(H log H) copy.
+		const std::vector<ProfilerFrameListItem>& displayedFrames = frameIndexOrder ? frames : sortedFrames;
 		// The rolling capture can hold thousands of frames. Clip visible rows so
 		// opening the profiler does not spend every editor frame formatting labels
 		// that are outside the scroll viewport.
 		ImGuiListClipper clipper;
-		clipper.Begin(static_cast<int>(sortedFrames.size()));
+		clipper.Begin(static_cast<int>(displayedFrames.size()));
 		while (clipper.Step())
 		{
 			for (int rowIndex = clipper.DisplayStart; rowIndex < clipper.DisplayEnd; ++rowIndex)
 			{
-				const ProfilerFrameListItem& frame = sortedFrames[static_cast<std::size_t>(rowIndex)];
+				const std::size_t displayIndex = frameIndexOrder && !frameIndexAscending
+					? displayedFrames.size() - 1u - static_cast<std::size_t>(rowIndex)
+					: static_cast<std::size_t>(rowIndex);
+				const ProfilerFrameListItem& frame = displayedFrames[displayIndex];
 				ImGui::TableNextRow();
 				ImGui::TableSetColumnIndex(0);
 				char label[64];
 				std::snprintf(label, sizeof(label), "#%llu%s",
 					static_cast<unsigned long long>(frame.frameIndex),
 					frame.complete ? "" : "*");
-				const bool selected = cache->selectedFrame.has_value()
-					&& cache->selectedFrame->frameIndex == frame.frameIndex;
+				const bool selected = cache->pinnedFrameIndex == frame.frameIndex
+					|| (cache->selectedFrame.has_value()
+						&& cache->selectedFrame->frameIndex == frame.frameIndex);
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (ImGui::Selectable(label, selected, ImGuiSelectableFlags_SpanAllColumns))
 				{
@@ -858,7 +901,11 @@ void ProfilerWindow::DrawFrameList()
 	if (requestedFrameSelection.has_value())
 	{
 		// Selection publishes a new profiler revision. The next OnGui call takes
-		// one coherent selected-frame copy after this table has finished reading.
+		// one coherent detailed copy, then pins that immutable frame while the
+		// compact live list continues to grow without repeated payload copies.
+		cache->pinnedFrameIndex = *requestedFrameSelection;
+		cache->selectedFrame.reset();
+		cache->sampleAnalysisValid = false;
 		Profiler::Instance().SelectFrame(*requestedFrameSelection);
 	}
 	ImGui::EndChild();
@@ -874,8 +921,21 @@ void ProfilerWindow::DrawFrameDetails()
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!selectedFrame.has_value())
 	{
-		ImGui::TextDisabled("Select a frame to inspect.");
+		ImGui::TextDisabled("Live timings are updating in the frame list. Select a frame to inspect detailed scopes.");
 		return;
+	}
+	if (cache->pinnedFrameIndex.has_value())
+	{
+		ImGui::TextDisabled("Pinned frame #%llu; live frame-list updates remain compact.",
+			static_cast<unsigned long long>(*cache->pinnedFrameIndex));
+		ImGui::SameLine();
+		if (ImGui::SmallButton("Return to Live List"))
+		{
+			cache->pinnedFrameIndex.reset();
+			cache->selectedFrame.reset();
+			cache->sampleAnalysisValid = false;
+			return;
+		}
 	}
 
 	DrawFrameOverview(*selectedFrame);
@@ -1327,12 +1387,20 @@ void ProfilerWindow::DrawModuleSummary(const ProfilerFrameRecord& frame)
 // ProfilerWindow::DrawHotSamples is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ProfilerWindow::DrawHotSamples(const ProfilerFrameRecord& frame)
 {
-	ImGui::SeparatorText("Top Offenders");
+	// Sorting every captured scope is analysis work, not ordinary live display.
+	// Keep it behind an explicit disclosure and reuse the result for the full
+	// hierarchy if the user opens both sections for the same pinned frame.
+	if (!ImGui::TreeNode("Top Offenders"))
+	{
+		ImGui::TextDisabled("Expand to sort the cached frame's hottest scopes.");
+		return;
+	}
 	RefreshSampleAnalysis(frame);
 	const std::vector<HotSampleRow>& rows = cache->hotSampleRows;
 	if (rows.empty())
 	{
 		ImGui::TextDisabled("No hot samples for this module.");
+		ImGui::TreePop();
 		return;
 	}
 	// Inclusive rows contain their child scopes, so adding rows would count the
@@ -1368,6 +1436,7 @@ void ProfilerWindow::DrawHotSamples(const ProfilerFrameRecord& frame)
 		}
 		ImGui::EndTable();
 	}
+	ImGui::TreePop();
 }
 
 // ProfilerWindow::DrawSamples is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

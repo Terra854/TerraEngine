@@ -5850,7 +5850,6 @@ namespace TerraEngine::Editor::Automation
 			if (operation == AutomationOperation("profiler.capture.start"))
 			{
 				TerraEngine::Profiling::ProfilerCaptureSettings settings{};
-				settings.maxFrames = 10000u;
 				settings.maxDurationSeconds = 0.0;
 				try
 				{
@@ -5864,12 +5863,32 @@ namespace TerraEngine::Editor::Automation
 					settings.maximumChunkFrames = arguments.value("maximumChunkFrames", settings.maximumChunkFrames);
 					settings.maximumChunkBytes = arguments.value("maximumChunkBytes", settings.maximumChunkBytes);
 					settings.sampleIntervalFrames = arguments.value("sampleIntervalFrames", settings.sampleIntervalFrames);
+					if (arguments.contains("maxFrames"))
+					{
+						const nlohmann::json& requestedMaxFrames = arguments["maxFrames"];
+						if (!requestedMaxFrames.is_number_integer() && !requestedMaxFrames.is_number_unsigned())
+							return BuildError(requestId, ErrorCategory::Validation, "maxFrames must be an integer.");
+						if (requestedMaxFrames.is_number_unsigned())
+						{
+							const std::uint64_t value = requestedMaxFrames.get<std::uint64_t>();
+							if (value == 0u || value > 4096u)
+								return BuildError(requestId, ErrorCategory::Validation, "maxFrames must be between 1 and 4096.");
+							settings.maxFrames = static_cast<std::uint32_t>(value);
+						}
+						else
+						{
+							const std::int64_t value = requestedMaxFrames.get<std::int64_t>();
+							if (value <= 0 || value > 4096)
+								return BuildError(requestId, ErrorCategory::Validation, "maxFrames must be between 1 and 4096.");
+							settings.maxFrames = static_cast<std::uint32_t>(value);
+						}
+					}
 				}
 				catch (const nlohmann::json::exception&)
 				{
 					return BuildError(requestId, ErrorCategory::Validation, "Profiler capture options have invalid types.");
 				}
-				if (settings.maximumChunkFrames == 0u || settings.maximumChunkFrames > 4096u || settings.maximumChunkBytes < 1024u || settings.maximumChunkBytes > 8388608u || settings.sampleIntervalFrames == 0u || settings.sampleIntervalFrames > 1024u)
+				if (settings.maximumChunkFrames == 0u || settings.maximumChunkFrames > 4096u || settings.maximumChunkBytes < 1024u || settings.maximumChunkBytes > 8388608u || settings.sampleIntervalFrames == 0u || settings.sampleIntervalFrames > 1024u || settings.maxFrames == 0u || settings.maxFrames > 4096u)
 					return BuildError(requestId, ErrorCategory::Validation, "Profiler capture bounds are outside the supported range.");
 				editorContext->editorProfiler->StartRecording(settings);
 				if (editorContext->editorProfiler->GetState() != TerraEngine::Profiling::ProfilerSessionState::Recording)
@@ -5879,7 +5898,7 @@ namespace TerraEngine::Editor::Automation
 				(void)jobService.CompleteSucceeded(job.jobId, {{"state", "recording"}});
 				return BuildSuccess(requestId, "Started profiler capture.", {{"jobId", job.jobId}, {"state", "succeeded"},
 					{"captureLevel", TerraEngine::Profiling::ToString(settings.detailLevel)}, {"payloadVersion", 2u},
-					{"bounds", {{"maximumChunkFrames", settings.maximumChunkFrames}, {"maximumChunkBytes", settings.maximumChunkBytes}, {"sampleIntervalFrames", settings.sampleIntervalFrames}}}});
+					{"bounds", {{"maximumChunkFrames", settings.maximumChunkFrames}, {"maximumChunkBytes", settings.maximumChunkBytes}, {"sampleIntervalFrames", settings.sampleIntervalFrames}, {"maxFrames", settings.maxFrames}}}});
 			}
 			if (operation == AutomationOperation("profiler.capture.stop"))
 			{
