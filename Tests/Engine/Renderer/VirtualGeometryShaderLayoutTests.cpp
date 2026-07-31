@@ -863,6 +863,13 @@ namespace TerraEngine::Tests
 			context.Expect(ShaderContains(vulkanSource, "impl->readableHiZHistoryByViewFrame[hiZViewIndex][impl->currentFrame] = impl->CurrentHiZ(hiZViewIndex).history;"), "Readable Hi-Z history should be refreshed after resize before the validation gate is evaluated.");
 			context.Expect(ShaderContains(vulkanResourcesSource, "const auto hasReadableCompletedHiZ"), "Completed stats should verify the readable Hi-Z resource, not only a raw image handle.");
 			context.Expect(ShaderContains(vulkanResourcesSource, "hiZ.width == stats.renderSize.x && hiZ.height == stats.renderSize.y"), "Completed stats should mark Hi-Z active only when the backend pyramid matches the completed view size.");
+			const std::size_t updateGlobalHiZStart = vulkanResourcesSource.find("void VulkanContext::Impl::UpdateGlobalHiZ");
+			const std::size_t descriptorIdleStart = vulkanResourcesSource.find("void VulkanContext::Impl::WaitForDescriptorMutationIdle");
+			context.Expect(updateGlobalHiZStart != std::string::npos && descriptorIdleStart > updateGlobalHiZStart, "The Hi-Z descriptor publisher should remain independently inspectable from the general descriptor-mutation synchronization path.");
+			if (updateGlobalHiZStart != std::string::npos && descriptorIdleStart > updateGlobalHiZStart) {
+				const std::string updateGlobalHiZBody = vulkanResourcesSource.substr(updateGlobalHiZStart, descriptorIdleStart - updateGlobalHiZStart);
+				context.Expect(!ShaderContains(updateGlobalHiZBody, "WaitForDescriptorMutationIdle();"), "Fence-safe per-frame Hi-Z descriptor publication must not wait for unrelated graphics-queue work.");
+			}
 		});
 
 		registry.Add("VirtualGeometry.ShaderLayout.FrameCullingDataCarriesHiZAvailabilityGate", [](TestContext& context) {

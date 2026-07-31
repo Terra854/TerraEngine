@@ -2801,6 +2801,10 @@ struct FrameRenderData
 	std::vector<GpuVirtualGeometryPacketRecord> virtualGeometryGpuPackets;
 	std::vector<GpuVirtualGeometryBatchDescriptor> virtualGeometryGpuBatches;
 	std::vector<GpuVirtualGeometryPacketFrameSet> virtualGeometryGpuFrameSets;
+	// Compute-raster visibility is a diagnostic mirror of the ordinary graphics
+	// result, not a prerequisite for dense VG rendering. The producer enables it
+	// only while detailed diagnostics or a view-local visualizer needs that data.
+	bool virtualGeometryVisibilityDiagnosticsRequested = false;
 	std::vector<GpuPacketCompactionDispatch> virtualGeometryGpuCompactionDispatches;
 		std::vector<GeneratedVirtualGeometrySubmissionRecord> virtualGeometryGeneratedSubmissions;
 		std::vector<VirtualGeometryCounterReadbackRecord> virtualGeometryCounterReadbacks;

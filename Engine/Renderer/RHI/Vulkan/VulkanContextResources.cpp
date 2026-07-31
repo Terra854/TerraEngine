@@ -3097,6 +3097,7 @@ void VulkanContext::Impl::CompleteVulkanVirtualGeometryProductionDecode(std::uin
 	if(!resources.completionPending) {
 		return;
 	}
+	TERRAENGINE_PROFILE_SCOPE("Vulkan: Complete Virtual Geometry Production Decode", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 	resources.completionPending = false;
 	TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryProductionDecodeResult result{};
 	std::vector<std::uint8_t> decodedBytes(resources.plan.request.decodedByteCount);
@@ -3543,6 +3544,17 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 			TerraEngine::Renderer::Vulkan::BuildVulkanVirtualGeometryFailureReceipt(
 				latestVirtualGeometryExecutorPlan,
 				TerraEngine::Renderer::VirtualGeometryBackendStage::Compaction);
+	}
+
+	if(!frameData.virtualGeometryVisibilityDiagnosticsRequested)
+	{
+		// Dense VG already has a complete mesh-task graphics route. Compute raster,
+		// resolve, and shading bins are a diagnostic mirror, and preparing them
+		// requires CPU triangle expansion plus two target-sized buffer clears. Keep
+		// that cost at zero until a visualizer or detailed diagnostics requests it.
+		virtualGeometryVisibilityUnavailableReason =
+			"Virtual-geometry visibility diagnostics were not requested for this view.";
+		return;
 	}
 
 	// Decode the selected owner meshlets into the exact RasterTriangle ABI.
@@ -8949,7 +8961,12 @@ void VulkanContext::Impl::UpdateGlobalHiZ(uint32_t frameIndex) {
 		return;
 	}
 
-	WaitForDescriptorMutationIdle();
+	// Each global descriptor set belongs to one frame slot. Initialization has
+	// no submitted work, swapchain recreation already idles the device, and the
+	// runtime callers publish only after BeginFrame waits this slot's fence.
+	// Waiting for the entire graphics queue here would unnecessarily serialize
+	// another in-flight slot to the CPU, with dense virtual geometry paying the
+	// full outstanding GPU duration on every Hi-Z promotion.
 	VkDescriptorImageInfo samplerInfo{};
 	samplerInfo.sampler = samplerOwner->sampler;
 

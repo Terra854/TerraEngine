@@ -7029,6 +7029,17 @@ void RenderSystem::Update(float deltaTime)
 		target.virtualGeometryGpuPackets = source.gpuPacketRecords;
 		target.virtualGeometryGpuBatches = source.gpuBatchDescriptors;
 		target.virtualGeometryGpuFrameSets = source.gpuPacketFrameSets;
+		// The compute visibility mirror is intentionally opt-in. Ordinary dense VG
+		// already renders through mesh tasks, so rebuilding CPU triangles and full
+		// pixel buffers without a diagnostics consumer only duplicates frame work.
+		target.virtualGeometryVisibilityDiagnosticsRequested =
+			TerraEngine::Renderer::RenderDiagnosticsRequested()
+			|| std::any_of(source.gpuPacketFrameSets.begin(),
+				source.gpuPacketFrameSets.end(),
+				[](const GpuVirtualGeometryPacketFrameSet& frameSet) {
+					return frameSet.debugMode
+						!= VirtualGeometryDebugVisualizationMode::None;
+				});
 		target.virtualGeometryGpuCompactionDispatches = source.gpuCompactionDispatches;
 		target.virtualGeometryGeneratedSubmissions = source.generatedSubmissions;
 		target.virtualGeometryCounterReadbacks = source.gpuCounterReadbacks;

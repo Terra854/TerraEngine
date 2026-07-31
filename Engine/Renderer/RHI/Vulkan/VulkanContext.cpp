@@ -1509,30 +1509,36 @@ void VulkanContext::BeginFrame() {
 	// is the first point at which both its bytes and bindless descriptor are
 	// proven complete. Queue complete value candidates now; the streaming
 	// system's next protected PagePublish boundary performs the atomic swap.
-	if (impl->currentFrame < impl->pendingVirtualGeometryPublicationsByFrame.size())
 	{
-		auto& completedCandidates =
-			impl->pendingVirtualGeometryPublicationsByFrame[impl->currentFrame];
-		if (!completedCandidates.empty())
+		TERRAENGINE_PROFILE_SCOPE("Vulkan: BeginFrame Complete Virtual Geometry Resources", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		if (impl->currentFrame < impl->pendingVirtualGeometryPublicationsByFrame.size())
 		{
-			for (auto& candidate : completedCandidates)
+			auto& completedCandidates =
+				impl->pendingVirtualGeometryPublicationsByFrame[impl->currentFrame];
+			if (!completedCandidates.empty())
 			{
-				candidate.descriptor.uploadCompleted = true;
+				for (auto& candidate : completedCandidates)
+				{
+					candidate.descriptor.uploadCompleted = true;
+				}
+				TerraEngine::Resource::VirtualGeometryStreamingSystem::Instance()
+					.SubmitCompletedPublicationCandidates(
+						std::move(completedCandidates));
+				completedCandidates.clear();
 			}
-			TerraEngine::Resource::VirtualGeometryStreamingSystem::Instance()
-				.SubmitCompletedPublicationCandidates(
-					std::move(completedCandidates));
-			completedCandidates.clear();
 		}
+		// The slot fence has completed above. Consume the decoder's host-visible
+		// receipt here without a second wait, retaining a prior proven generation on
+		// any mismatch or mapping failure.
+		impl->CompleteVulkanVirtualGeometryProductionDecode(impl->currentFrame);
 	}
-	// The slot fence has completed above. Consume the decoder's host-visible
-	// receipt here without a second wait, retaining a prior proven generation on
-	// any mismatch or mapping failure.
-	impl->CompleteVulkanVirtualGeometryProductionDecode(impl->currentFrame);
 	// Reusing a frame slot is the sole completion boundary for its animation
 	// generation. No pose data is read back: the completed receipt only records
 	// that the existing graphics submission and its compute prefix are finished.
-	impl->CompleteVulkanAnimationFrameResources(impl->currentFrame);
+	{
+		TERRAENGINE_PROFILE_SCOPE("Vulkan: BeginFrame Complete Animation Resources", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		impl->CompleteVulkanAnimationFrameResources(impl->currentFrame);
+	}
 	impl->animationComputeRecordedForCurrentFrame = false;
 	impl->animationComputeSubmissionMarkedForCurrentFrame = false;
 	impl->recordedAnimationDispatchCountForCurrentFrame = 0U;
@@ -1550,6 +1556,7 @@ void VulkanContext::BeginFrame() {
 	impl->activeDeformationGraphicsBufferIndex =
 		VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
 	if (impl->editorMode) {
+		TERRAENGINE_PROFILE_SCOPE("Vulkan: BeginFrame Complete Editor Resources", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		// This is the only point where the current frame slot's UI fence is
 		// known complete before any new Scene/Game command buffers are recorded.
 		// Publish completion and retire resources here; PresentEditor runs after
@@ -1563,6 +1570,7 @@ void VulkanContext::BeginFrame() {
 		ElapsedMilliseconds(fenceStart),
 		0.25f);
 	if (impl->editorMode && impl->editorRenderSubmitted) {
+		TERRAENGINE_PROFILE_SCOPE("Vulkan: BeginFrame Drain Stranded Editor Render", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		// Editor rendering normally hands renderFinishedSemaphores[currentFrame]
 		// to PresentEditor, where the ImGui submit waits on it before the frame
 		// slot advances. If the editor UI path was skipped after EndFrame, the
@@ -1606,14 +1614,17 @@ void VulkanContext::BeginFrame() {
 	// longer in flight. Promote each view before descriptors are frozen so Scene
 	// and Game command buffers sample their own stable completed Hi-Z pyramids
 	// while compute writes the other image for the next reuse of this slot.
-	bool promotedHiZ = false;
-	for (uint32_t hiZViewIndex = 0u; hiZViewIndex < VulkanContext::Impl::kHiZViewCount; ++hiZViewIndex)
 	{
-		promotedHiZ = impl->PromoteCompletedHiZWrite(hiZViewIndex, impl->currentFrame) || promotedHiZ;
-	}
-	if (promotedHiZ)
-	{
-		impl->UpdateGlobalHiZ(impl->currentFrame);
+		TERRAENGINE_PROFILE_SCOPE("Vulkan: BeginFrame Promote HiZ Resources", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		bool promotedHiZ = false;
+		for (uint32_t hiZViewIndex = 0u; hiZViewIndex < VulkanContext::Impl::kHiZViewCount; ++hiZViewIndex)
+		{
+			promotedHiZ = impl->PromoteCompletedHiZWrite(hiZViewIndex, impl->currentFrame) || promotedHiZ;
+		}
+		if (promotedHiZ)
+		{
+			impl->UpdateGlobalHiZ(impl->currentFrame);
+		}
 	}
 	{
 		TERRAENGINE_PROFILE_SCOPE("Vulkan: BeginFrame Publish Completed Stats", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);

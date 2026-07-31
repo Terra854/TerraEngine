@@ -124,5 +124,29 @@ namespace TerraEngine::Tests
 						&& source.find("rejected-publication") != std::string::npos,
 					"Vulkan must reject immutable packet input from another Scene, Game, reflection, or capture view before frame-owned resources are published.");
 			});
+
+		r.Add("Vulkan.VirtualGeometry.VisibilityDiagnosticsAreOptIn",
+			[](TestContext &context)
+			{
+				FrameRenderData frameData{};
+				context.Expect(!frameData.virtualGeometryVisibilityDiagnosticsRequested,
+					"Ordinary dense VG frames must not pay for the diagnostic compute-visibility mirror.");
+
+				const std::filesystem::path sourcePath =
+					std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+						/ "Engine/Renderer/RHI/Vulkan/VulkanContextResources.cpp";
+				std::ifstream sourceStream(sourcePath, std::ios::binary);
+				const std::string source{
+					std::istreambuf_iterator<char>(sourceStream),
+					std::istreambuf_iterator<char>() };
+				const std::size_t gate = source.find(
+					"if(!frameData.virtualGeometryVisibilityDiagnosticsRequested)");
+				const std::size_t triangleExpansion = source.find(
+					"std::vector<VirtualGeometryRasterTriangleUpload> visibilityTriangles");
+				context.Expect(gate != std::string::npos
+						&& triangleExpansion != std::string::npos
+						&& gate < triangleExpansion,
+					"The opt-in gate must run before CPU triangle expansion and pixel-buffer preparation.");
+			});
 	}
 } // namespace TerraEngine::Tests
