@@ -1,6 +1,6 @@
 {
 	"schemaVersion": 1,
-	"feature": "043-complete-animation-system",
+	"feature": "complete-animation-system",
 	"manifestStatus": "verified",
 	"manifestStatusReason": "Every source artifact and authoritative model-specific license record was downloaded independently on 2026-07-18 and pinned by SHA-256. Repository-backed sources use the exact glTF-Sample-Assets commit; the Quaternius Drive files use stable file IDs plus byte hashes.",
 	"models": [

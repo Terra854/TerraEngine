@@ -20,7 +20,7 @@ param(
 	[ValidateNotNullOrEmpty()]
 	[string]$CoverageMatrixPath = "Tools/Animation/PerformanceCoverageMatrix.json",
 
-	# T284 must opt in explicitly. Before the final phase the comparator validates
+	# AnimationValidationInvokeFinalOnlyTTComparatorEveryPreparedControlIncluding must opt in explicitly. Before the final phase the comparator validates
 	# matrix readiness but does not claim the whole-engine comparison was run.
 	[Parameter(ParameterSetName = "Compare")]
 	[switch]$FinalPhaseMatrix,
@@ -59,7 +59,7 @@ $script:BaselineRoot = [System.IO.Path]::GetFullPath((Join-Path $script:RepoRoot
 $script:DefaultBaselinePath = [System.IO.Path]::GetFullPath((Join-Path $script:RepoRoot "out/validation/animation/baseline/locked-baseline.json"))
 $script:DefaultWorkloadsPath = [System.IO.Path]::GetFullPath((Join-Path $script:RepoRoot "Tools/Animation/PerformanceWorkloads.json"))
 $script:DefaultCoverageMatrixPath = [System.IO.Path]::GetFullPath((Join-Path $script:RepoRoot "Tools/Animation/PerformanceCoverageMatrix.json"))
-$script:ContractPath = [System.IO.Path]::GetFullPath((Join-Path $script:RepoRoot "specs/043-complete-animation-system/contracts/runtime-limits-and-validation.md"))
+$script:ContractPath = [System.IO.Path]::GetFullPath((Join-Path $script:RepoRoot "Docs/Animation/README.md"))
 $script:RendererManifestPath = [System.IO.Path]::GetFullPath((Join-Path $script:RepoRoot "Tests/Fixtures/RendererPerformanceBaseline/workloads.json"))
 $script:EvidenceLockPath = [System.IO.Path]::GetFullPath((Join-Path $script:RepoRoot "out/validation/animation/baseline/evidence-lock.json"))
 
@@ -420,7 +420,7 @@ function Get-BaselineEvidenceInventory {
 		$relativePath = $_.FullName.Substring($script:BaselineRoot.Length + 1).Replace("\", "/")
 		$relativePath -cne "evidence-lock.json" -and $relativePath -notmatch "(^|/)project/"
 	})
-	# The T001 lock used PowerShell's stable Sort-Object ordering. Reuse it byte
+	# The AnimationValidationIsCompletedImmutablePreFeatureReferenceCaptureRemainsSolePre lock used PowerShell's stable Sort-Object ordering. Reuse it byte
 	# for byte so the documented aggregate can be independently reproduced.
 	$relativePaths = [string[]]@($files | ForEach-Object { $_.FullName.Substring($script:BaselineRoot.Length + 1).Replace("\", "/") } | Sort-Object)
 	$aggregateBuilder = New-Object System.Text.StringBuilder
@@ -763,12 +763,12 @@ function Invoke-PerformanceComparison {
 	if ($inputRecords.Contains("lockedBaseline")) {
 		$passed = [string]$inputRecords.lockedBaseline.sha256 -ceq $script:ExpectedBaselineSha256
 		$thresholdChecks += ,(New-Check -Id "locked-baseline-sha256" -Passed $passed -Actual $inputRecords.lockedBaseline.sha256 -Limit $script:ExpectedBaselineSha256)
-		if (-not $passed) { Add-UniqueDiagnostic -List $invalidDiagnostics -Message "The locked baseline SHA-256 does not match T001." }
+		if (-not $passed) { Add-UniqueDiagnostic -List $invalidDiagnostics -Message "The locked baseline SHA-256 does not match AnimationValidationIsCompletedImmutablePreFeatureReferenceCaptureRemainsSolePre." }
 	}
 	if ($inputRecords.Contains("evidenceLock")) {
 		$passed = [string]$inputRecords.evidenceLock.sha256 -ceq $script:ExpectedEvidenceLockSha256
 		$thresholdChecks += ,(New-Check -Id "evidence-lock-sha256" -Passed $passed -Actual $inputRecords.evidenceLock.sha256 -Limit $script:ExpectedEvidenceLockSha256)
-		if (-not $passed) { Add-UniqueDiagnostic -List $invalidDiagnostics -Message "The evidence-lock SHA-256 does not match T001." }
+		if (-not $passed) { Add-UniqueDiagnostic -List $invalidDiagnostics -Message "The evidence-lock SHA-256 does not match AnimationValidationIsCompletedImmutablePreFeatureReferenceCaptureRemainsSolePre." }
 	}
 	if ($inputRecords.Contains("runtimeContract")) {
 		$passed = [string]$inputRecords.runtimeContract.sha256 -ceq $script:ExpectedContractSha256
@@ -829,8 +829,8 @@ function Invoke-PerformanceComparison {
 			$requiredDomainIds = @("renderer", "camera", "ui", "physics", "scripting", "resource", "virtual-geometry", "scheduler", "profiler", "mcp", "startup", "export")
 			$matrixDomains = @($coverageMatrix.domains)
 			$actualDomainIds = @($matrixDomains | ForEach-Object { [string]$_.id })
-			if ($coverageMatrix.schemaVersion -ne 1 -or $coverageMatrix.feature -cne "043-complete-animation-system" -or
-				$coverageMatrix.task -cne "T131" -or $coverageMatrix.comparisonTask -cne "T284" -or
+			if ($coverageMatrix.schemaVersion -ne 1 -or $coverageMatrix.feature -cne "complete-animation-system" -or
+				$coverageMatrix.task -cne "AnimationValidationUsExtendFinalOnlyToolsAnimationCompareanimationperformancePsMatrixCover" -or $coverageMatrix.comparisonTask -cne "AnimationValidationInvokeFinalOnlyTTComparatorEveryPreparedControlIncluding" -or
 				-not $coverageMatrix.finalPhaseOnly -or $matrixDomains.Count -ne $requiredDomainIds.Count) {
 				throw "The whole-engine matrix identity, phase guard, or domain count is invalid."
 			}
@@ -854,7 +854,7 @@ function Invoke-PerformanceComparison {
 				$domain = $domainMatches[0]
 				$controlMatches = @($config.setupBaselineControls | Where-Object { $_.id -ceq [string]$domain.baselineControlId })
 				if ($controlMatches.Count -ne 1 -or -not $controlMatches[0].required) {
-					throw "Coverage domain '$requiredDomainId' does not map to one required T001 control."
+					throw "Coverage domain '$requiredDomainId' does not map to one required AnimationValidationIsCompletedImmutablePreFeatureReferenceCaptureRemainsSolePre control."
 				}
 				$availableMetricIds = @($controlMatches[0].metrics | ForEach-Object { [string]$_.id })
 				foreach ($metricId in @($domain.requiredMetricIds)) {
@@ -875,18 +875,18 @@ function Invoke-PerformanceComparison {
 			Add-UniqueDiagnostic -List $invalidDiagnostics -Message "Whole-engine coverage matrix is invalid: $($_.Exception.Message)"
 		}
 		$coverageMatrixReady = $invalidDiagnostics.Count -eq $coverageInvalidStart
-		$thresholdChecks += ,(New-Check -Id "whole-engine-coverage-contract" -Passed $coverageMatrixReady -Actual "parsed T131 coverage matrix" -Limit "12 fail-closed domains mapped to immutable T001 controls")
+		$thresholdChecks += ,(New-Check -Id "whole-engine-coverage-contract" -Passed $coverageMatrixReady -Actual "parsed AnimationValidationUsExtendFinalOnlyToolsAnimationCompareanimationperformancePsMatrixCover coverage matrix" -Limit "12 fail-closed domains mapped to immutable AnimationValidationIsCompletedImmutablePreFeatureReferenceCaptureRemainsSolePre controls")
 	}
 
 	if ($null -ne $baseline) {
-		$baselineContractPassed = $baseline.schemaVersion -eq 1 -and $baseline.feature -eq "043-complete-animation-system" -and $baseline.task -eq "T001" -and $baseline.state -eq "locked" -and $baseline.result.passed -and $baseline.result.warmupsPassed -and $baseline.result.measuredRunsPerControl -eq 5 -and $baseline.comparisonContract.immutable -and $baseline.comparisonContract.minimumCandidateRuns -eq 5 -and $baseline.comparisonContract.pairedWarmupRequired -and $baseline.comparisonContract.missingRequiredMetric -eq "reject" -and $baseline.comparisonContract.identityMismatch -eq "reject" -and $baseline.comparisonContract.thresholdWeakening -eq "reject" -and $baseline.comparisonContract.candidateMayNotOverwriteThisFile
+		$baselineContractPassed = $baseline.schemaVersion -eq 1 -and $baseline.feature -eq "complete-animation-system" -and $baseline.task -eq "AnimationValidationIsCompletedImmutablePreFeatureReferenceCaptureRemainsSolePre" -and $baseline.state -eq "locked" -and $baseline.result.passed -and $baseline.result.warmupsPassed -and $baseline.result.measuredRunsPerControl -eq 5 -and $baseline.comparisonContract.immutable -and $baseline.comparisonContract.minimumCandidateRuns -eq 5 -and $baseline.comparisonContract.pairedWarmupRequired -and $baseline.comparisonContract.missingRequiredMetric -eq "reject" -and $baseline.comparisonContract.identityMismatch -eq "reject" -and $baseline.comparisonContract.thresholdWeakening -eq "reject" -and $baseline.comparisonContract.candidateMayNotOverwriteThisFile
 		$thresholdChecks += ,(New-Check -Id "locked-baseline-contract" -Passed $baselineContractPassed -Actual "parsed locked baseline contract" -Limit "immutable, warm-up, five runs, and fail-closed rules")
 		if (-not $baselineContractPassed) { Add-UniqueDiagnostic -List $invalidDiagnostics -Message "The locked baseline comparison contract is incomplete or weakened." }
 	}
 	if ($null -ne $evidenceLock) {
-		$lockMatches = $evidenceLock.schemaVersion -eq 1 -and $evidenceLock.feature -eq "043-complete-animation-system" -and $evidenceLock.task -eq "T001" -and $evidenceLock.fileCount -eq 178 -and [uint64]$evidenceLock.totalBytes -eq [uint64]371567204 -and $evidenceLock.aggregateSha256 -eq $script:ExpectedEvidenceAggregateSha256 -and $evidenceLock.lockedBaselineSha256 -eq $script:ExpectedBaselineSha256
-		$thresholdChecks += ,(New-Check -Id "evidence-lock-contract" -Passed $lockMatches -Actual "parsed evidence lock" -Limit "T001 locked aggregate identity")
-		if (-not $lockMatches) { Add-UniqueDiagnostic -List $invalidDiagnostics -Message "evidence-lock.json does not describe the immutable T001 selection." }
+		$lockMatches = $evidenceLock.schemaVersion -eq 1 -and $evidenceLock.feature -eq "complete-animation-system" -and $evidenceLock.task -eq "AnimationValidationIsCompletedImmutablePreFeatureReferenceCaptureRemainsSolePre" -and $evidenceLock.fileCount -eq 178 -and [uint64]$evidenceLock.totalBytes -eq [uint64]371567204 -and $evidenceLock.aggregateSha256 -eq $script:ExpectedEvidenceAggregateSha256 -and $evidenceLock.lockedBaselineSha256 -eq $script:ExpectedBaselineSha256
+		$thresholdChecks += ,(New-Check -Id "evidence-lock-contract" -Passed $lockMatches -Actual "parsed evidence lock" -Limit "AnimationValidationIsCompletedImmutablePreFeatureReferenceCaptureRemainsSolePre locked aggregate identity")
+		if (-not $lockMatches) { Add-UniqueDiagnostic -List $invalidDiagnostics -Message "evidence-lock.json does not describe the immutable AnimationValidationIsCompletedImmutablePreFeatureReferenceCaptureRemainsSolePre selection." }
 	}
 
 	if ($null -ne $candidate -and $null -ne $config) {
@@ -895,7 +895,7 @@ function Invoke-PerformanceComparison {
 			Add-UniqueDiagnostic -List $invalidDiagnostics -Message "Candidate evidence contains forbidden threshold or policy properties: $($forbiddenProperties -join ', ')."
 		}
 		try {
-			if ($candidate.schemaVersion -ne 1 -or $candidate.feature -ne "043-complete-animation-system") {
+			if ($candidate.schemaVersion -ne 1 -or $candidate.feature -ne "complete-animation-system") {
 				Add-UniqueDiagnostic -List $invalidDiagnostics -Message "Candidate manifest schemaVersion or feature identity is not supported."
 			}
 			$expectedReference = [ordered]@{}
@@ -1141,7 +1141,7 @@ function Invoke-PerformanceComparison {
 		}
 	}
 	elseif ($RequireWholeEngineCoverage) {
-		Add-UniqueDiagnostic -List $invalidDiagnostics -Message "Final whole-engine coverage was requested without a readable T131 matrix."
+		Add-UniqueDiagnostic -List $invalidDiagnostics -Message "Final whole-engine coverage was requested without a readable AnimationValidationUsExtendFinalOnlyToolsAnimationCompareanimationperformancePsMatrixCover matrix."
 	}
 	if ($RequireWholeEngineCoverage -and -not $coverageMatrixReady) {
 		Add-UniqueDiagnostic -List $invalidDiagnostics -Message "Final whole-engine coverage cannot run because matrix readiness failed."
@@ -1167,8 +1167,8 @@ function Invoke-PerformanceComparison {
 	$result = [ordered]@{
 		schemaVersion = 1
 		tool = "CompareAnimationPerformance"
-		feature = "043-complete-animation-system"
-		task = "T003"
+		feature = "complete-animation-system"
+		task = "AnimationValidationLaterPerformanceRelatedTasksMayConstructComparatorsFixturesInstrumentationSchemas"
 		mode = if ($RequireWholeEngineCoverage) { "final-phase-whole-engine-comparison" } elseif ($IsValidationOnly) { "validate-only-with-full-gates" } else { "comparison" }
 		outcome = $outcome
 		passed = $exitCode -eq $script:ExitAccepted
@@ -1295,7 +1295,7 @@ function Invoke-ComparatorSelfTest {
 
 	$passManifest = [ordered]@{
 		schemaVersion = 1
-		feature = "043-complete-animation-system"
+		feature = "complete-animation-system"
 		reference = $expectedReference
 		comparisonIdentity = $config.candidateTemplate.comparisonIdentity
 		comparisonSettings = $config.candidateTemplate.comparisonSettings
@@ -1373,8 +1373,8 @@ catch {
 			Write-DeterministicJson -Path $resolvedFailureOutput -Value ([ordered]@{
 				schemaVersion = 1
 				tool = "CompareAnimationPerformance"
-				feature = "043-complete-animation-system"
-				task = "T003"
+				feature = "complete-animation-system"
+				task = "AnimationValidationLaterPerformanceRelatedTasksMayConstructComparatorsFixturesInstrumentationSchemas"
 				outcome = "error"
 				passed = $false
 				exitCode = $script:ExitToolFailure

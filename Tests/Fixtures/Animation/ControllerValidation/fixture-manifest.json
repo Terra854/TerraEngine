@@ -1,0 +1,42 @@
+{
+	"schemaVersion": 1,
+	"fixture": "ControllerValidation",
+	"controller": {
+		"path": "Assets/Controllers/ControllerLocomotionAction.teanimctrl",
+		"assetId": "3132333435363738393a3b3c3d3e3f40",
+		"sha256": "d0839ec384ce55ab1fbda3ae7606689f4656d20669594c76f6b4e9f575ba77d8",
+		"compatibilityFingerprint": "0x4354524C00000001",
+		"writer": "Tools/Animation/Controller ValidationCreateControllerFixture.cpp",
+		"validGraph": {
+			"parameters": ["Speed", "PlayAction", "Direction", "Grounded", "Surface", "AimTarget", "ActionCount"],
+			"blendTrees": ["1D", "2D", "nested-1D"],
+			"layers": ["base-override", "masked-additive"],
+			"transitions": ["400->401", "401->400"],
+			"syncGroup": "Locomotion"
+		}
+	},
+	"mask": {
+		"path": "Assets/Masks/ControllerUpperBody.teanimmask",
+		"assetId": "5152535455565758595a5b5c5d5e5f60",
+		"sha256": "0cbf8bde0fdd9b8c853da45d687c970cecacd53e0feae70c05d15c04e5d60745",
+		"selectors": ["joint", "branch", "morph", "curve"],
+		"rootMotionWeight": 0.0
+	},
+	"visualSource": {
+		"path": "Assets/Models/ControllerHero.gltf",
+		"sha256": "26f596bf5de655679e0bbfbe67c1abde0c5e478807200f3e4dc3d2faa9a256c2",
+		"generatedPrefabPath": "Assets/Models/ControllerHero_Generated/ControllerHero.teprefab"
+	},
+	"automationContract": {
+		"initialExpectedGeneration": 1,
+		"successfulEditResponseGeneration": 2,
+		"followingInvalidEditExpectedGeneration": 2,
+		"note": "A successful controller edit reports generation 2 and advances the editor service generation to 2. The following invalid edit therefore uses expectedGeneration 2 so it reaches semantic validation instead of failing as stale."
+	},
+	"knownGateLimitations": [
+		"The phase-gate schema cannot create a controller or attach a cooked controller to the imported prefab.",
+		"The phase-gate schema cannot assert runtime transition state, blend weight, pose, event, or root-motion values from an AnimationGraphInstance.",
+		"The invalid controller edit is intentionally expected to fail; preservation is proved only by before/after asset inspection and validation receipts.",
+		"Each manual checklist item accepts one human action request after the described workflow and captures one gate-owned native screenshot at that time; it does not provide evidence for every individual click or keystroke."
+	]
+}

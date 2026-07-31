@@ -1,0 +1,857 @@
+{
+	"schemaVersion": 2,
+	"phase": "ragdoll-validation",
+	"fixtureOverlays": [
+		{
+			"source": "Tests/Fixtures/Animation/AdvancedAssets",
+			"destination": "Assets/Advanced"
+		},
+		{
+			"source": "Tests/Fixtures/Animation/AdvancedRuntimeActors",
+			"destination": "Assets/AdvancedActors"
+		}
+	],
+	"requiredTools": [
+		"asset.import",
+		"asset.list",
+		"asset.inspect",
+		"prefab.instantiate",
+		"scene.list_objects",
+		"play.state",
+		"play.pause",
+		"play.step",
+		"play.resume",
+		"physics.state",
+		"animation.runtime.ragdoll.request",
+		"animation.runtime.ragdoll.read",
+		"animation.runtime.diagnostics",
+		"animation.runtime.profiler",
+		"camera.capture_custom",
+		"game_view.capture",
+		"camera.capture_object"
+	],
+	"requiredEvidence": [
+		"editor/mcp-operations.json",
+		"editor/operations/ragdoll-validation-import-ragdoll-fixture.json",
+		"editor/operations/ragdoll-validation-list-ragdoll-assets.json",
+		"editor/operations/ragdoll-validation-inspect-ragdoll-source.json",
+		"editor/operations/ragdoll-validation-instantiate-ragdoll-hero.json",
+		"editor/operations/ragdoll-validation-instantiate-runtime-actor.json",
+		"editor/operations/ragdoll-validation-observe-ragdoll-hero.json",
+		"editor/operations/ragdoll-validation-observe-runtime-actor.json",
+		"editor/operations/ragdoll-validation-diagnostics-preplay.json",
+		"editor/operations/ragdoll-validation-play-state.json",
+		"editor/operations/ragdoll-validation-pause-runtime.json",
+		"editor/operations/ragdoll-validation-read-physics-baseline.json",
+		"editor/operations/ragdoll-validation-activate-ragdoll.json",
+		"editor/operations/ragdoll-validation-step-ragdoll-activation.json",
+		"editor/operations/ragdoll-validation-step-ragdoll-activation-settle.json",
+		"editor/operations/ragdoll-validation-read-active-ragdoll.json",
+		"editor/operations/ragdoll-validation-request-ragdoll-recovery.json",
+		"editor/operations/ragdoll-validation-step-ragdoll-recovery.json",
+		"editor/operations/ragdoll-validation-read-recovering-ragdoll.json",
+		"editor/operations/ragdoll-validation-deactivate-ragdoll.json",
+		"editor/operations/ragdoll-validation-step-ragdoll-deactivation.json",
+		"editor/operations/ragdoll-validation-step-ragdoll-deactivation-settle.json",
+		"editor/operations/ragdoll-validation-read-inactive-ragdoll.json",
+		"editor/operations/ragdoll-validation-diagnostics-runtime.json",
+		"editor/operations/ragdoll-validation-profiler.json",
+		"editor/operations/ragdoll-validation-resume-runtime.json",
+		"editor/operations/ragdoll-validation-diagnostics-restored.json",
+		"editor/operations/ragdoll-validation-observe-restored-ragdoll-hero.json",
+		"editor/operations/ragdoll-validation-observe-restored-runtime-actor.json"
+	],
+	"operations": [
+		{
+			"id": "ragdoll-validation-import-ragdoll-fixture",
+			"stage": "prePlay",
+			"order": 10,
+			"tool": "asset.import",
+			"arguments": {
+				"path": "Models/ImportedHero.gltf",
+				"force": true
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.importResult.animationManifest",
+					"data.importResult.generatedPrefabs"
+				],
+				"fieldOneOf": {
+					"data.status": [
+						"Succeeded",
+						"SucceededWithWarnings"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/ragdoll-validation-import-ragdoll-fixture.json"
+		},
+		{
+			"id": "ragdoll-validation-list-ragdoll-assets",
+			"stage": "prePlay",
+			"order": 20,
+			"tool": "asset.list",
+			"arguments": {
+				"search": "ImportedHero"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.assets"
+				]
+			},
+			"evidencePath": "editor/operations/ragdoll-validation-list-ragdoll-assets.json"
+		},
+		{
+			"id": "ragdoll-validation-inspect-ragdoll-source",
+			"stage": "prePlay",
+			"order": 30,
+			"tool": "asset.inspect",
+			"arguments": {
+				"asset": "Assets/Models/ImportedHero.gltf"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data"
+				]
+			},
+			"evidencePath": "editor/operations/ragdoll-validation-inspect-ragdoll-source.json"
+		},
+		{
+			"id": "ragdoll-validation-instantiate-ragdoll-hero",
+			"stage": "prePlay",
+			"order": 40,
+			"tool": "prefab.instantiate",
+			"arguments": {
+				"prefab": "Assets/Models/ImportedHero_Generated/ImportedHero.teprefab",
+				"name": "Ragdoll Validation Ragdoll Hero"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.instanceId",
+					"data.prefabId"
+				]
+			},
+			"evidencePath": "editor/operations/ragdoll-validation-instantiate-ragdoll-hero.json"
+		},
+		{
+			"id": "ragdoll-validation-instantiate-runtime-actor",
+			"stage": "prePlay",
+			"order": 50,
+			"tool": "prefab.instantiate",
+			"arguments": {
+				"prefab": "Assets/AdvancedActors/TargetRagdollActor.teprefab",
+				"name": "Ragdoll Validation Ragdoll Runtime Actor"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.instanceId",
+					"data.prefabId"
+				]
+			},
+			"evidencePath": "editor/operations/ragdoll-validation-instantiate-runtime-actor.json"
+		},
+		{
+			"id": "ragdoll-validation-observe-ragdoll-hero",
+			"stage": "prePlay",
+			"order": 60,
+			"tool": "scene.list_objects",
+			"arguments": {
+				"includeComponents": true,
+				"search": "Ragdoll Validation Ragdoll Hero"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.objects"
+				]
+			},
+			"evidencePath": "editor/operations/ragdoll-validation-observe-ragdoll-hero.json"
+		},
+		{
+			"id": "ragdoll-validation-observe-runtime-actor",
+			"stage": "prePlay",
+			"order": 70,
+			"tool": "scene.list_objects",
+			"arguments": {
+				"includeComponents": true,
+				"search": "Ragdoll Validation Ragdoll Runtime Actor"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.objects"
+				]
+			},
+			"evidencePath": "editor/operations/ragdoll-validation-observe-runtime-actor.json"
+		},
+		{
+			"id": "ragdoll-validation-diagnostics-preplay",
+			"stage": "prePlay",
+			"order": 80,
+			"tool": "animation.runtime.diagnostics",
+			"arguments": {
+				"includeDetails": true,
+				"maximumItems": 64,
+				"correlationId": "ragdoll-validation-preplay"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data"
+				]
+			},
+			"evidencePath": "editor/operations/ragdoll-validation-diagnostics-preplay.json"
+		},
+		{
+			"id": "ragdoll-validation-play-state",
+			"stage": "play",
+			"order": 100,
+			"tool": "play.state",
+			"arguments": {},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState"
+				],
+				"fieldEquals": {
+					"data.currentState": "playing"
+				}
+			},
+			"evidencePath": "editor/operations/ragdoll-validation-play-state.json"
+		},
+		{
+			"id": "ragdoll-validation-pause-runtime",
+			"stage": "play",
+			"order": 110,
+			"tool": "play.pause",
+			"arguments": {
+				"expectedState": "playing",
+				"correlationId": "ragdoll-validation-pause-runtime"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState"
+				],
+				"fieldEquals": {
+					"data.currentState": "paused"
+				}
+			},
+			"evidencePath": "editor/operations/ragdoll-validation-pause-runtime.json"
+		},
+		{
+			"id": "ragdoll-validation-read-physics-baseline",
+			"stage": "play",
+			"order": 120,
+			"tool": "physics.state",
+			"arguments": {},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.data.worldId",
+					"data.worldGeneration",
+					"data.tick",
+					"data.data.state",
+					"data.data.bodyCount"
+				]
+			},
+			"evidencePath": "editor/operations/ragdoll-validation-read-physics-baseline.json"
+		},
+		{
+			"id": "ragdoll-validation-activate-ragdoll",
+			"stage": "play",
+			"order": 130,
+			"tool": "animation.runtime.ragdoll.request",
+			"arguments": {
+				"target": {
+					"objectId": null
+				},
+				"action": "activate",
+				"assetId": "5445414e303433414456464958000007",
+				"assetGeneration": 1,
+				"physicsWorldGeneration": null,
+				"blendWeight": 1.0,
+				"flags": 0,
+				"targetTick": 0,
+				"idempotencyKey": "ragdoll-validation-activate-v1",
+				"correlationId": "ragdoll-validation-activate",
+				"expectedGeneration": 1
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "ragdoll-validation-instantiate-runtime-actor",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "target.objectId",
+					"valueType": "uuid"
+				},
+				{
+					"sourceOperationId": "ragdoll-validation-read-physics-baseline",
+					"sourceResponsePath": "data.worldGeneration",
+					"destinationArgumentPath": "physicsWorldGeneration",
+					"valueType": "integer"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.status",
+					"data.acknowledgement",
+					"data.visibilityBoundary"
+				],
+				"fieldEquals": {
+					"data.acknowledgement": "queued_not_yet_published",
+					"data.visibilityBoundary": "animation_protected_capture_then_publication"
+				},
+				"fieldOneOf": {
+					"data.status": [
+						"queued",
+						"ok"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/ragdoll-validation-activate-ragdoll.json"
+		},
+		{
+			"id": "ragdoll-validation-step-ragdoll-activation",
+			"stage": "play",
+			"order": 140,
+			"tool": "play.step",
+			"arguments": {
+				"expectedState": "paused",
+				"correlationId": "ragdoll-validation-step-ragdoll-activation"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState",
+					"data.stepsCompleted"
+				],
+				"fieldEquals": {
+					"data.currentState": "paused",
+					"data.stepsCompleted": 1
+				}
+			},
+			"evidencePath": "editor/operations/ragdoll-validation-step-ragdoll-activation.json"
+		},
+		{
+			"id": "ragdoll-validation-step-ragdoll-activation-settle",
+			"stage": "play",
+			"order": 150,
+			"tool": "play.step",
+			"arguments": {
+				"expectedState": "paused",
+				"correlationId": "ragdoll-validation-step-ragdoll-activation-settle"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState",
+					"data.stepsCompleted"
+				],
+				"fieldEquals": {
+					"data.currentState": "paused",
+					"data.stepsCompleted": 1
+				}
+			},
+			"evidencePath": "editor/operations/ragdoll-validation-step-ragdoll-activation-settle.json"
+		},
+		{
+			"id": "ragdoll-validation-read-active-ragdoll",
+			"stage": "play",
+			"order": 160,
+			"tool": "animation.runtime.ragdoll.read",
+			"arguments": {
+				"target": {
+					"objectId": null
+				},
+				"maximumItems": 8,
+				"correlationId": "ragdoll-validation-read-active-ragdoll"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "ragdoll-validation-instantiate-runtime-actor",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "target.objectId",
+					"valueType": "uuid"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.snapshotCount",
+					"data.latestSnapshot.status",
+					"data.latestSnapshot.profileGeneration",
+					"data.latestSnapshot.physicsWorldGeneration",
+					"data.latestSnapshot.lifecycle",
+					"data.latestSnapshot.bodyCount",
+					"data.latestSnapshot.blendWeight",
+					"data.latestSnapshot.recoveryBlocked",
+					"data.latestSnapshot.publicationGeneration",
+					"data.visibilityBoundary"
+				],
+				"fieldEquals": {
+					"data.latestSnapshot.status": "ok",
+					"data.latestSnapshot.profileGeneration": 1,
+					"data.latestSnapshot.blendWeight": 1.0,
+					"data.latestSnapshot.recoveryBlocked": false,
+					"data.visibilityBoundary": "immutable_ragdoll_store_copies"
+				}
+			},
+			"evidencePath": "editor/operations/ragdoll-validation-read-active-ragdoll.json"
+		},
+		{
+			"id": "ragdoll-validation-request-ragdoll-recovery",
+			"stage": "play",
+			"order": 170,
+			"tool": "animation.runtime.ragdoll.request",
+			"arguments": {
+				"target": {
+					"objectId": null
+				},
+				"action": "request_recovery",
+				"assetId": "5445414e303433414456464958000007",
+				"assetGeneration": 1,
+				"physicsWorldGeneration": null,
+				"blendWeight": 0.25,
+				"flags": 257,
+				"targetTick": 0,
+				"idempotencyKey": "ragdoll-validation-recovery-v1",
+				"correlationId": "ragdoll-validation-recovery",
+				"expectedGeneration": 2
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "ragdoll-validation-instantiate-runtime-actor",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "target.objectId",
+					"valueType": "uuid"
+				},
+				{
+					"sourceOperationId": "ragdoll-validation-read-physics-baseline",
+					"sourceResponsePath": "data.worldGeneration",
+					"destinationArgumentPath": "physicsWorldGeneration",
+					"valueType": "integer"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.status",
+					"data.acknowledgement",
+					"data.visibilityBoundary"
+				],
+				"fieldEquals": {
+					"data.acknowledgement": "queued_not_yet_published",
+					"data.visibilityBoundary": "animation_protected_capture_then_publication"
+				},
+				"fieldOneOf": {
+					"data.status": [
+						"queued",
+						"ok"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/ragdoll-validation-request-ragdoll-recovery.json"
+		},
+		{
+			"id": "ragdoll-validation-step-ragdoll-recovery",
+			"stage": "play",
+			"order": 180,
+			"tool": "play.step",
+			"arguments": {
+				"expectedState": "paused",
+				"correlationId": "ragdoll-validation-step-ragdoll-recovery"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState",
+					"data.stepsCompleted"
+				],
+				"fieldEquals": {
+					"data.currentState": "paused",
+					"data.stepsCompleted": 1
+				}
+			},
+			"evidencePath": "editor/operations/ragdoll-validation-step-ragdoll-recovery.json"
+		},
+		{
+			"id": "ragdoll-validation-read-recovering-ragdoll",
+			"stage": "play",
+			"order": 190,
+			"tool": "animation.runtime.ragdoll.read",
+			"arguments": {
+				"target": {
+					"objectId": null
+				},
+				"maximumItems": 8,
+				"correlationId": "ragdoll-validation-read-recovering-ragdoll"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "ragdoll-validation-instantiate-runtime-actor",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "target.objectId",
+					"valueType": "uuid"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.snapshotCount",
+					"data.latestSnapshot.status",
+					"data.latestSnapshot.profileGeneration",
+					"data.latestSnapshot.physicsWorldGeneration",
+					"data.latestSnapshot.lifecycle",
+					"data.latestSnapshot.bodyCount",
+					"data.latestSnapshot.blendWeight",
+					"data.latestSnapshot.recoveryBlocked",
+					"data.latestSnapshot.publicationGeneration",
+					"data.visibilityBoundary"
+				],
+				"fieldEquals": {
+					"data.latestSnapshot.status": "ok",
+					"data.latestSnapshot.profileGeneration": 1,
+					"data.latestSnapshot.blendWeight": 0.25,
+					"data.latestSnapshot.recoveryBlocked": false,
+					"data.visibilityBoundary": "immutable_ragdoll_store_copies"
+				}
+			},
+			"evidencePath": "editor/operations/ragdoll-validation-read-recovering-ragdoll.json"
+		},
+		{
+			"id": "ragdoll-validation-deactivate-ragdoll",
+			"stage": "play",
+			"order": 200,
+			"tool": "animation.runtime.ragdoll.request",
+			"arguments": {
+				"target": {
+					"objectId": null
+				},
+				"action": "deactivate",
+				"assetId": "5445414e303433414456464958000007",
+				"assetGeneration": 1,
+				"physicsWorldGeneration": null,
+				"blendWeight": 0.0,
+				"flags": 0,
+				"targetTick": 0,
+				"idempotencyKey": "ragdoll-validation-deactivate-v1",
+				"correlationId": "ragdoll-validation-deactivate",
+				"expectedGeneration": 3
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "ragdoll-validation-instantiate-runtime-actor",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "target.objectId",
+					"valueType": "uuid"
+				},
+				{
+					"sourceOperationId": "ragdoll-validation-read-physics-baseline",
+					"sourceResponsePath": "data.worldGeneration",
+					"destinationArgumentPath": "physicsWorldGeneration",
+					"valueType": "integer"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.status",
+					"data.acknowledgement",
+					"data.visibilityBoundary"
+				],
+				"fieldEquals": {
+					"data.acknowledgement": "queued_not_yet_published",
+					"data.visibilityBoundary": "animation_protected_capture_then_publication"
+				},
+				"fieldOneOf": {
+					"data.status": [
+						"queued",
+						"ok"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/ragdoll-validation-deactivate-ragdoll.json"
+		},
+		{
+			"id": "ragdoll-validation-step-ragdoll-deactivation",
+			"stage": "play",
+			"order": 210,
+			"tool": "play.step",
+			"arguments": {
+				"expectedState": "paused",
+				"correlationId": "ragdoll-validation-step-ragdoll-deactivation"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState",
+					"data.stepsCompleted"
+				],
+				"fieldEquals": {
+					"data.currentState": "paused",
+					"data.stepsCompleted": 1
+				}
+			},
+			"evidencePath": "editor/operations/ragdoll-validation-step-ragdoll-deactivation.json"
+		},
+		{
+			"id": "ragdoll-validation-step-ragdoll-deactivation-settle",
+			"stage": "play",
+			"order": 220,
+			"tool": "play.step",
+			"arguments": {
+				"expectedState": "paused",
+				"correlationId": "ragdoll-validation-step-ragdoll-deactivation-settle"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState",
+					"data.stepsCompleted"
+				],
+				"fieldEquals": {
+					"data.currentState": "paused",
+					"data.stepsCompleted": 1
+				}
+			},
+			"evidencePath": "editor/operations/ragdoll-validation-step-ragdoll-deactivation-settle.json"
+		},
+		{
+			"id": "ragdoll-validation-read-inactive-ragdoll",
+			"stage": "play",
+			"order": 230,
+			"tool": "animation.runtime.ragdoll.read",
+			"arguments": {
+				"target": {
+					"objectId": null
+				},
+				"maximumItems": 8,
+				"correlationId": "ragdoll-validation-read-inactive-ragdoll"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "ragdoll-validation-instantiate-runtime-actor",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "target.objectId",
+					"valueType": "uuid"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.snapshotCount",
+					"data.latestSnapshot.status",
+					"data.latestSnapshot.profileGeneration",
+					"data.latestSnapshot.physicsWorldGeneration",
+					"data.latestSnapshot.lifecycle",
+					"data.latestSnapshot.bodyCount",
+					"data.latestSnapshot.blendWeight",
+					"data.latestSnapshot.recoveryBlocked",
+					"data.latestSnapshot.publicationGeneration",
+					"data.visibilityBoundary"
+				],
+				"fieldEquals": {
+					"data.latestSnapshot.status": "ok",
+					"data.latestSnapshot.profileGeneration": 1,
+					"data.latestSnapshot.blendWeight": 0.0,
+					"data.latestSnapshot.recoveryBlocked": false,
+					"data.visibilityBoundary": "immutable_ragdoll_store_copies"
+				}
+			},
+			"evidencePath": "editor/operations/ragdoll-validation-read-inactive-ragdoll.json"
+		},
+		{
+			"id": "ragdoll-validation-diagnostics-runtime",
+			"stage": "play",
+			"order": 240,
+			"tool": "animation.runtime.diagnostics",
+			"arguments": {
+				"includeDetails": true,
+				"maximumItems": 64,
+				"correlationId": "ragdoll-validation-runtime",
+				"rendererAvailable": true
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data"
+				]
+			},
+			"evidencePath": "editor/operations/ragdoll-validation-diagnostics-runtime.json"
+		},
+		{
+			"id": "ragdoll-validation-profiler",
+			"stage": "play",
+			"order": 250,
+			"tool": "animation.runtime.profiler",
+			"arguments": {
+				"includeDetails": true,
+				"maximumItems": 64,
+				"correlationId": "ragdoll-validation-runtime"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.collectionPromotedByRequest"
+				]
+			},
+			"evidencePath": "editor/operations/ragdoll-validation-profiler.json"
+		},
+		{
+			"id": "ragdoll-validation-resume-runtime",
+			"stage": "play",
+			"order": 260,
+			"tool": "play.resume",
+			"arguments": {
+				"expectedState": "paused",
+				"correlationId": "ragdoll-validation-resume-runtime"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState"
+				],
+				"fieldEquals": {
+					"data.currentState": "playing"
+				}
+			},
+			"evidencePath": "editor/operations/ragdoll-validation-resume-runtime.json"
+		},
+		{
+			"id": "ragdoll-validation-diagnostics-restored",
+			"stage": "postPlay",
+			"order": 280,
+			"tool": "animation.runtime.diagnostics",
+			"arguments": {
+				"includeDetails": true,
+				"maximumItems": 64,
+				"correlationId": "ragdoll-validation-restored"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data"
+				]
+			},
+			"evidencePath": "editor/operations/ragdoll-validation-diagnostics-restored.json"
+		},
+		{
+			"id": "ragdoll-validation-observe-restored-ragdoll-hero",
+			"stage": "postPlay",
+			"order": 290,
+			"tool": "scene.list_objects",
+			"arguments": {
+				"includeComponents": true,
+				"search": "Ragdoll Validation Ragdoll Hero"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.objects"
+				]
+			},
+			"evidencePath": "editor/operations/ragdoll-validation-observe-restored-ragdoll-hero.json"
+		},
+		{
+			"id": "ragdoll-validation-observe-restored-runtime-actor",
+			"stage": "postPlay",
+			"order": 300,
+			"tool": "scene.list_objects",
+			"arguments": {
+				"includeComponents": true,
+				"search": "Ragdoll Validation Ragdoll Runtime Actor"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.objects"
+				]
+			},
+			"evidencePath": "editor/operations/ragdoll-validation-observe-restored-runtime-actor.json"
+		}
+	],
+	"captures": [
+		{
+			"id": "ragdoll-validationragdoll-scene-view",
+			"view": "SceneView",
+			"stage": "prePlay",
+			"order": 90,
+			"tool": "camera.capture_custom",
+			"arguments": {
+				"name": "Ragdoll Validation Ragdoll Scene",
+				"position": [0, 1, 4],
+				"target": [0, 0.5, 0],
+				"up": [0, 1, 0],
+				"projection": "perspective",
+				"verticalFovDegrees": 60,
+				"nearPlane": 0.1,
+				"farPlane": 100
+			}
+		},
+		{
+			"id": "ragdoll-validationragdoll-game-view",
+			"view": "GameView",
+			"stage": "play",
+			"order": 270,
+			"tool": "game_view.capture",
+			"arguments": {
+				"includeOverlays": false,
+				"transparentBackground": false
+			}
+		},
+		{
+			"id": "ragdoll-validationragdoll-ingame-camera",
+			"view": "InGameCamera",
+			"stage": "postPlay",
+			"order": 310,
+			"tool": "camera.capture_object",
+			"arguments": {
+				"object": "Import Validation Capture Camera",
+				"includeDisabled": false,
+				"transparentBackground": false
+			}
+		}
+	],
+	"visualExpectations": [
+		{
+			"captureId": "ragdoll-validationragdoll-scene-view",
+			"contentPolicy": "visible-geometry-required"
+		},
+		{
+			"captureId": "ragdoll-validationragdoll-game-view",
+			"contentPolicy": "visible-geometry-required"
+		},
+		{
+			"captureId": "ragdoll-validationragdoll-ingame-camera",
+			"contentPolicy": "visible-geometry-required"
+		}
+	],
+	"visualIdentityExceptions": [
+		{
+			"captureIds": [
+				"ragdoll-validationragdoll-game-view",
+				"ragdoll-validationragdoll-ingame-camera"
+			],
+			"reason": "Game View and the authored in-game camera intentionally resolve the same active camera, so matching pixels are valid evidence."
+		}
+	],
+	"manualChecklist": [
+		{
+			"id": "ragdoll-validation-mouse-activate-partial-motors-recover",
+			"input": "mouse",
+			"required": true,
+			"instruction": "Using real mouse input in the installed editor, use the visible Ragdoll Validation Ragdoll Hero for camera evidence and the separate mesh-free Ragdoll Validation Ragdoll Runtime Actor for copied lifecycle proof. Select the ragdoll profile, activate from an animated pose, apply an impact through supported physics or editor controls, demonstrate full and partial branch or mask blending, inspect continuous animated and simulated boundaries, enable motors, and request valid and blocked recoveries. Capture physics overlays and do not attribute visible mesh deformation to the diagnostic actor."
+		},
+		{
+			"id": "ragdoll-validation-keyboard-stale-physics-and-play-restore",
+			"input": "keyboard",
+			"required": true,
+			"instruction": "Use keyboard input to exercise deactivate, rebuild, recovery, and a stale world, body, or profile generation result while Play Mode is active; verify the stale result cannot publish into the current pose and the fallback or previous pose remains valid. Compare GPU visual blend with physics-authoritative diagnostics, exit Play Mode, and prove authored ragdoll state restores without runtime transforms or motors leaking into the scene."
+		}
+	]
+}

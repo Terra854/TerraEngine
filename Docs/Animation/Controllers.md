@@ -151,7 +151,7 @@ the graph path, node/parameter/transition, reason, and correction where
 possible.
 
 The version-1 hard limits are fixed by
-`specs/043-complete-animation-system/contracts/runtime-limits-and-validation.md`:
+`Docs/Animation/README.md`:
 
 | Quantity | Operational default | Hard limit |
 |---|---:|---:|

@@ -293,7 +293,7 @@ $hardLimits = @(
 try {
 	$limitContract = [ordered]@{
 		schema = "terra.animation.runtime-limits/v1"
-		source = "specs/043-complete-animation-system/contracts/runtime-limits-and-validation.md"
+		source = "Docs/Animation/README.md"
 		arithmetic = [ordered]@{
 			serializedRangeWidthBits = 64
 			checkedBefore = @("allocation", "multiplication", "decompression", "gpu-upload", "graph-compilation", "publication")
@@ -305,11 +305,11 @@ try {
 			priorGenerationPreserved = $true
 		}
 	}
-	Write-FixtureDocument -StagingRoot $stagingRoot -RelativePath "contracts/runtime-limits-v1.json" -Document $limitContract -FixtureId "runtime-limits-v1" -Role "frozen-contract" -Requirements @("FR-007", "FR-009", "FR-174", "FR-209")
+	Write-FixtureDocument -StagingRoot $stagingRoot -RelativePath "contracts/runtime-limits-v1.json" -Document $limitContract -FixtureId "runtime-limits-v1" -Role "frozen-contract" -Requirements @("animation-contract-validate-skeleton-topology-transform-validity-bind-data-influence-data-channel-targets-timestamps", "animation-contract-reject-content-exceeds-hard-limits-safe-deterministic-reduction-unavailable", "animation-contract-streaming-residency-retained-histories-have-explicit-memory-time-bounds-pressure-behavior-diagnostics", "animation-contract-feature-include-reproducible-correctness-corruption-rollback-scheduler-transaction-multithreaded-stress-soak-performance")
 
 	$toleranceContract = [ordered]@{
 		schema = "terra.animation.validation-tolerances/v1"
-		source = "specs/043-complete-animation-system/contracts/runtime-limits-and-validation.md"
+		source = "Docs/Animation/README.md"
 		exact = @("state", "transition-choice", "event-identity-and-order", "root-motion-interval-identity", "motion-match-selection", "command-status", "generation-identity", "deterministic-hash")
 		maximumDifference = [ordered]@{
 			gpuJointTranslationMillimetres = 0.5
@@ -323,7 +323,7 @@ try {
 			deformationBoundsRule = "never-underestimate"
 		}
 	}
-	Write-FixtureDocument -StagingRoot $stagingRoot -RelativePath "contracts/validation-tolerances-v1.json" -Document $toleranceContract -FixtureId "validation-tolerances-v1" -Role "frozen-contract" -Requirements @("SC-007", "SC-008", "SC-020", "SC-029")
+	Write-FixtureDocument -StagingRoot $stagingRoot -RelativePath "contracts/validation-tolerances-v1.json" -Document $toleranceContract -FixtureId "validation-tolerances-v1" -Role "frozen-contract" -Requirements @("animation-outcome-retarget-fixtures-preserve-required-contacts-facing-timing-root-displacement-within-documented-per", "animation-outcome-reachable-ik-fixtures-meet-declared-end-effector-tolerance-unreachable-singular-fixtures-remain", "animation-outcome-installed-editor-exported-runtime-fixtures-produce-same-discrete-animation-states-events-root", "animation-outcome-gpu-visual-hybrid-authoritative-poses-match-cpu-reference-poses-within-declared-visual")
 
 	$sourceSkeleton = New-AssetFixture -FixtureId "minimal-source-skeleton" -AssetType "Skeleton" -IntendedExtension ".teskel" -AssetId $sourceSkeletonId -CompatibilityFingerprint $sourceSkeletonFingerprint -Dependencies @() -Payload ([ordered]@{
 		formatVersion = [ordered]@{ major = 1; minor = 0 }
@@ -342,7 +342,7 @@ try {
 		referencePoseHash = "0000000000000001"
 		sourceMetadata = [ordered]@{ coordinateConvention = "TerraEngineProject"; units = "metres"; sourcePathRequired = $false }
 	})
-	Write-FixtureDocument -StagingRoot $stagingRoot -RelativePath "valid/minimal-source-skeleton.fixture.json" -Document $sourceSkeleton -FixtureId "minimal-source-skeleton" -Role "valid-asset" -Requirements @("FR-001", "FR-007", "FR-013", "FR-016")
+	Write-FixtureDocument -StagingRoot $stagingRoot -RelativePath "valid/minimal-source-skeleton.fixture.json" -Document $sourceSkeleton -FixtureId "minimal-source-skeleton" -Role "valid-asset" -Requirements @("animation-contract-represent-skeletons-animation-clips-animation-controllers-masks-retarget-mappings-motion-databases-ragdoll", "animation-contract-validate-skeleton-topology-transform-validity-bind-data-influence-data-channel-targets-timestamps", "animation-contract-generated-runtime-assets-require-source-gltf-fbx-dcc-editor-files-after-cooking", "animation-contract-distinguish-semantic-joint-identity-display-names-so-duplicate-renamed-display-names-do")
 
 	$targetSkeleton = New-AssetFixture -FixtureId "minimal-target-skeleton" -AssetType "Skeleton" -IntendedExtension ".teskel" -AssetId $targetSkeletonId -CompatibilityFingerprint $targetSkeletonFingerprint -Dependencies @() -Payload ([ordered]@{
 		formatVersion = [ordered]@{ major = 1; minor = 0 }
@@ -361,7 +361,7 @@ try {
 		referencePoseHash = "0000000000000002"
 		sourceMetadata = [ordered]@{ coordinateConvention = "TerraEngineProject"; units = "metres"; sourcePathRequired = $false }
 	})
-	Write-FixtureDocument -StagingRoot $stagingRoot -RelativePath "valid/minimal-target-skeleton.fixture.json" -Document $targetSkeleton -FixtureId "minimal-target-skeleton" -Role "valid-asset" -Requirements @("FR-001", "FR-007", "FR-013", "FR-016")
+	Write-FixtureDocument -StagingRoot $stagingRoot -RelativePath "valid/minimal-target-skeleton.fixture.json" -Document $targetSkeleton -FixtureId "minimal-target-skeleton" -Role "valid-asset" -Requirements @("animation-contract-represent-skeletons-animation-clips-animation-controllers-masks-retarget-mappings-motion-databases-ragdoll", "animation-contract-validate-skeleton-topology-transform-validity-bind-data-influence-data-channel-targets-timestamps", "animation-contract-generated-runtime-assets-require-source-gltf-fbx-dcc-editor-files-after-cooking", "animation-contract-distinguish-semantic-joint-identity-display-names-so-duplicate-renamed-display-names-do")
 
 	$clip = New-AssetFixture -FixtureId "minimal-clip" -AssetType "AnimationClip" -IntendedExtension ".teanim" -AssetId $clipId -CompatibilityFingerprint $sourceSkeletonFingerprint -Dependencies @(
 		(New-Dependency -AssetId $sourceSkeletonId -AssetType "Skeleton" -CompatibilityFingerprint $sourceSkeletonFingerprint)
@@ -382,7 +382,7 @@ try {
 		rootMotion = [ordered]@{ jointId = "root"; extractTranslation = $true; extractYaw = $true; accumulatedCycleTranslation = @(1, 0, 0); accumulatedCycleYawDegrees = 0 }
 		compression = [ordered]@{ representation = "semantic-source-for-production-codec"; decoderVersion = 1; measuredErrorsRequired = $true }
 	})
-	Write-FixtureDocument -StagingRoot $stagingRoot -RelativePath "valid/minimal-clip.fixture.json" -Document $clip -FixtureId "minimal-clip" -Role "valid-asset" -Requirements @("FR-001", "FR-013", "FR-022", "FR-024", "FR-032")
+	Write-FixtureDocument -StagingRoot $stagingRoot -RelativePath "valid/minimal-clip.fixture.json" -Document $clip -FixtureId "minimal-clip" -Role "valid-asset" -Requirements @("animation-contract-represent-skeletons-animation-clips-animation-controllers-masks-retarget-mappings-motion-databases-ragdoll", "animation-contract-generated-runtime-assets-require-source-gltf-fbx-dcc-editor-files-after-cooking", "animation-contract-evaluate-translation-rotation-scale-morph-weight-root-motion-event-custom-curve-channels", "animation-contract-support-step-linear-smooth-cubic-interpolation-finite-normalized-continuity-preserving-rotation-results", "animation-contract-support-deterministic-ordered-animation-events-stable-identifier-time-payload-source-state-layer")
 
 	$controller = New-AssetFixture -FixtureId "minimal-controller" -AssetType "AnimationController" -IntendedExtension ".teanimctrl" -AssetId $controllerId -CompatibilityFingerprint $sourceSkeletonFingerprint -Dependencies @(
 		(New-Dependency -AssetId $sourceSkeletonId -AssetType "Skeleton" -CompatibilityFingerprint $sourceSkeletonFingerprint),
@@ -401,7 +401,7 @@ try {
 			programHash = "0000000000000001"
 		}
 	})
-	Write-FixtureDocument -StagingRoot $stagingRoot -RelativePath "valid/minimal-controller.fixture.json" -Document $controller -FixtureId "minimal-controller" -Role "valid-asset" -Requirements @("FR-001", "FR-017", "FR-038", "FR-049")
+	Write-FixtureDocument -StagingRoot $stagingRoot -RelativePath "valid/minimal-controller.fixture.json" -Document $controller -FixtureId "minimal-controller" -Role "valid-asset" -Requirements @("animation-contract-represent-skeletons-animation-clips-animation-controllers-masks-retarget-mappings-motion-databases-ragdoll", "animation-contract-preserve-compatibility-identity-prevents-clip-controller-retarget-map-ragdoll-motion-database-binding", "animation-contract-support-typed-float-integer-boolean-trigger-vector-transform-tag-parameters-declared-defaults", "animation-contract-support-graph-variables-reusable-parameter-bindings-without-allowing-unbounded-recursive-evaluation")
 
 	$mask = New-AssetFixture -FixtureId "minimal-mask" -AssetType "AnimationMask" -IntendedExtension ".teanimmask" -AssetId $maskId -CompatibilityFingerprint $sourceSkeletonFingerprint -Dependencies @(
 		(New-Dependency -AssetId $sourceSkeletonId -AssetType "Skeleton" -CompatibilityFingerprint $sourceSkeletonFingerprint)
@@ -412,7 +412,7 @@ try {
 		morphTargetIds = @()
 		compiledJointWeights = @(1.0)
 	})
-	Write-FixtureDocument -StagingRoot $stagingRoot -RelativePath "valid/minimal-mask.fixture.json" -Document $mask -FixtureId "minimal-mask" -Role "valid-asset" -Requirements @("FR-001", "FR-017", "FR-044", "FR-045")
+	Write-FixtureDocument -StagingRoot $stagingRoot -RelativePath "valid/minimal-mask.fixture.json" -Document $mask -FixtureId "minimal-mask" -Role "valid-asset" -Requirements @("animation-contract-represent-skeletons-animation-clips-animation-controllers-masks-retarget-mappings-motion-databases-ragdoll", "animation-contract-preserve-compatibility-identity-prevents-clip-controller-retarget-map-ragdoll-motion-database-binding", "animation-contract-support-multiple-ordered-layers-override-additive-composition", "animation-contract-layers-support-reusable-masks-over-joints-hierarchy-branches-morph-channels-curves-root")
 
 	$retarget = New-AssetFixture -FixtureId "minimal-retarget-profile" -AssetType "RetargetProfile" -IntendedExtension ".teretarget" -AssetId $retargetId -CompatibilityFingerprint $runtimeSetFingerprint -Dependencies @(
 		(New-Dependency -AssetId $sourceSkeletonId -AssetType "Skeleton" -CompatibilityFingerprint $sourceSkeletonFingerprint),
@@ -427,7 +427,7 @@ try {
 		chains = @()
 		validation = [ordered]@{ expectedContactToleranceMillimetres = 20; reducedFidelity = $false }
 	})
-	Write-FixtureDocument -StagingRoot $stagingRoot -RelativePath "valid/minimal-retarget-profile.fixture.json" -Document $retarget -FixtureId "minimal-retarget-profile" -Role "valid-asset" -Requirements @("FR-001", "FR-017", "FR-099", "SC-007")
+	Write-FixtureDocument -StagingRoot $stagingRoot -RelativePath "valid/minimal-retarget-profile.fixture.json" -Document $retarget -FixtureId "minimal-retarget-profile" -Role "valid-asset" -Requirements @("animation-contract-represent-skeletons-animation-clips-animation-controllers-masks-retarget-mappings-motion-databases-ragdoll", "animation-contract-preserve-compatibility-identity-prevents-clip-controller-retarget-map-ragdoll-motion-database-binding", "animation-contract-support-explicit-source-target-retarget-mappings-reusable-semantic-rig-profiles", "animation-outcome-retarget-fixtures-preserve-required-contacts-facing-timing-root-displacement-within-documented-per")
 
 	$motionDatabase = New-AssetFixture -FixtureId "minimal-motion-database" -AssetType "MotionDatabase" -IntendedExtension ".temotiondb" -AssetId $motionDatabaseId -CompatibilityFingerprint $sourceSkeletonFingerprint -Dependencies @(
 		(New-Dependency -AssetId $sourceSkeletonId -AssetType "Skeleton" -CompatibilityFingerprint $sourceSkeletonFingerprint),
@@ -441,7 +441,7 @@ try {
 		cpuReferenceLayout = [ordered]@{ ordering = "StableSampleId" }
 		sourceHashes = @("3333333333333333333333333333333333333333333333333333333333333333")
 	})
-	Write-FixtureDocument -StagingRoot $stagingRoot -RelativePath "valid/minimal-motion-database.fixture.json" -Document $motionDatabase -FixtureId "minimal-motion-database" -Role "valid-asset" -Requirements @("FR-001", "FR-017", "FR-113", "FR-120")
+	Write-FixtureDocument -StagingRoot $stagingRoot -RelativePath "valid/minimal-motion-database.fixture.json" -Document $motionDatabase -FixtureId "minimal-motion-database" -Role "valid-asset" -Requirements @("animation-contract-represent-skeletons-animation-clips-animation-controllers-masks-retarget-mappings-motion-databases-ragdoll", "animation-contract-preserve-compatibility-identity-prevents-clip-controller-retarget-map-ragdoll-motion-database-binding", "animation-contract-build-versioned-motion-databases-selected-clips-retargeted-clips-tags-contacts-trajectory-samples", "animation-contract-motion-matching-support-rollback-replay-network-authority-retargeting-root-motion-ik-post")
 
 	$ragdoll = New-AssetFixture -FixtureId "minimal-ragdoll-profile" -AssetType "RagdollProfile" -IntendedExtension ".teragdoll" -AssetId $ragdollId -CompatibilityFingerprint $sourceSkeletonFingerprint -Dependencies @(
 		(New-Dependency -AssetId $sourceSkeletonId -AssetType "Skeleton" -CompatibilityFingerprint $sourceSkeletonFingerprint)
@@ -453,7 +453,7 @@ try {
 		blendMask = @([ordered]@{ jointId = "root"; weight = 1.0 })
 		getUp = [ordered]@{ enabled = $false }
 	})
-	Write-FixtureDocument -StagingRoot $stagingRoot -RelativePath "valid/minimal-ragdoll-profile.fixture.json" -Document $ragdoll -FixtureId "minimal-ragdoll-profile" -Role "valid-asset" -Requirements @("FR-001", "FR-017", "FR-122", "FR-126")
+	Write-FixtureDocument -StagingRoot $stagingRoot -RelativePath "valid/minimal-ragdoll-profile.fixture.json" -Document $ragdoll -FixtureId "minimal-ragdoll-profile" -Role "valid-asset" -Requirements @("animation-contract-represent-skeletons-animation-clips-animation-controllers-masks-retarget-mappings-motion-databases-ragdoll", "animation-contract-preserve-compatibility-identity-prevents-clip-controller-retarget-map-ragdoll-motion-database-binding", "animation-contract-represent-ragdoll-body-collider-mass-constraint-motor-limit-collision-skeleton-mapping-reusable", "animation-contract-support-full-body-partial-ragdoll-per-joint-per-branch-layered-masked-time")
 
 	$recording = New-AssetFixture -FixtureId "minimal-recording" -AssetType "AnimationRecording" -IntendedExtension ".teanim" -AssetId $recordingId -CompatibilityFingerprint $sourceSkeletonFingerprint -Dependencies @(
 		(New-Dependency -AssetId $sourceSkeletonId -AssetType "Skeleton" -CompatibilityFingerprint $sourceSkeletonFingerprint),
@@ -466,7 +466,7 @@ try {
 		samples = @([ordered]@{ tick = 0; rootTranslation = @(0, 0, 0) }, [ordered]@{ tick = 1; rootTranslation = @(0.016666667, 0, 0) })
 		reduction = [ordered]@{ requested = $true; measuredErrorsRequired = $true }
 	})
-	Write-FixtureDocument -StagingRoot $stagingRoot -RelativePath "valid/minimal-recording.fixture.json" -Document $recording -FixtureId "minimal-recording" -Role "valid-asset" -Requirements @("FR-001", "FR-138", "FR-147", "SC-003")
+	Write-FixtureDocument -StagingRoot $stagingRoot -RelativePath "valid/minimal-recording.fixture.json" -Document $recording -FixtureId "minimal-recording" -Role "valid-asset" -Requirements @("animation-contract-represent-skeletons-animation-clips-animation-controllers-masks-retarget-mappings-motion-databases-ragdoll", "animation-contract-editor-provide-controller-authoring-states-nested-machines-blend-trees-layers-masks-synchronization", "animation-contract-animation-assets-component-data-participate-prefab-overrides-apply-revert-connected-duplication-stable", "animation-outcome-invalid-cancelled-import-graph-publication-recording-motion-database-build-retarget-edit-ragdoll")
 
 	$mesh = New-AssetFixture -FixtureId "minimal-deformable-mesh" -AssetType "DeformableMesh" -IntendedExtension ".temf" -AssetId $meshId -CompatibilityFingerprint $sourceSkeletonFingerprint -Dependencies @(
 		(New-Dependency -AssetId $sourceSkeletonId -AssetType "Skeleton" -CompatibilityFingerprint $sourceSkeletonFingerprint)
@@ -483,7 +483,7 @@ try {
 		deformationEnvelope = [ordered]@{ minimum = @(-0.1, -0.1, -0.1); maximum = @(1.1, 1.1, 0.1); conservative = $true }
 		virtualGeometry = [ordered]@{ deformable = $true; completeVisibleFallback = $true; unsafeConeCullingDisabled = $true }
 	})
-	Write-FixtureDocument -StagingRoot $stagingRoot -RelativePath "valid/minimal-deformable-mesh.fixture.json" -Document $mesh -FixtureId "minimal-deformable-mesh" -Role "valid-asset" -Requirements @("FR-008", "FR-013", "FR-056", "FR-068")
+	Write-FixtureDocument -StagingRoot $stagingRoot -RelativePath "valid/minimal-deformable-mesh.fixture.json" -Document $mesh -FixtureId "minimal-deformable-mesh" -Role "valid-asset" -Requirements @("animation-contract-reduce-excessive-vertex-influences-deterministically-according-documented-policy-normalize-retained-weights-report", "animation-contract-generated-runtime-assets-require-source-gltf-fbx-dcc-editor-files-after-cooking", "animation-contract-render-skeletal-deformation-correctly-positions-normals-tangents-supported-render-pass", "animation-contract-deformable-virtual-geometry-page-loss-late-residency-retain-complete-conservative-fallback-coverage")
 
 	$runtimeSet = [ordered]@{
 		schema = "terra.animation.source-independent-runtime-set/v1"
@@ -504,139 +504,139 @@ try {
 		)
 		publication = [ordered]@{ atomic = $true; preservePriorGenerationOnFailure = $true; mixedGenerationsAllowed = $false }
 	}
-	Write-FixtureDocument -StagingRoot $stagingRoot -RelativePath "valid/minimal-runtime-set.fixture.json" -Document $runtimeSet -FixtureId "minimal-runtime-set" -Role "valid-set" -Requirements @("FR-001", "FR-011", "FR-013", "FR-017")
+	Write-FixtureDocument -StagingRoot $stagingRoot -RelativePath "valid/minimal-runtime-set.fixture.json" -Document $runtimeSet -FixtureId "minimal-runtime-set" -Role "valid-set" -Requirements @("animation-contract-represent-skeletons-animation-clips-animation-controllers-masks-retarget-mappings-motion-databases-ragdoll", "animation-contract-multi-asset-import-recook-publish-mutually-dependent-outputs-atomically-publish-none-them", "animation-contract-generated-runtime-assets-require-source-gltf-fbx-dcc-editor-files-after-cooking", "animation-contract-preserve-compatibility-identity-prevents-clip-controller-retarget-map-ragdoll-motion-database-binding")
 
 	$seedDefinitions = @(
 		[ordered]@{
 			path = "seeds/truncation/truncated-header.seed.json"
 			id = "truncated-header"
-			requirements = @("FR-007", "FR-010", "FR-209")
+			requirements = @("animation-contract-validate-skeleton-topology-transform-validity-bind-data-influence-data-channel-targets-timestamps", "animation-contract-preserve-last-known-good-generated-asset-set-import-cooking-validation-publication-fails", "animation-contract-feature-include-reproducible-correctness-corruption-rollback-scheduler-transaction-multithreaded-stress-soak-performance")
 			document = New-SeedFixture -FixtureId "truncated-header" -Category "truncation" -BaseFixture "valid/minimal-source-skeleton.fixture.json" -ApplicationStage "after-production-serialization" -Operations @([ordered]@{ operator = "truncate-before-envelope-header-completes"; boundary = "productionHeaderSize-1" }) -Expected (New-ExpectedRejection -DiagnosticCode "Animation.Asset.TruncatedHeader")
 		},
 		[ordered]@{
 			path = "seeds/truncation/truncated-dependency-table.seed.json"
 			id = "truncated-dependency-table"
-			requirements = @("FR-007", "FR-010", "FR-175")
+			requirements = @("animation-contract-validate-skeleton-topology-transform-validity-bind-data-influence-data-channel-targets-timestamps", "animation-contract-preserve-last-known-good-generated-asset-set-import-cooking-validation-publication-fails", "animation-contract-export-dependency-discovery-include-transitive-skeleton-mesh-clip-controller-mask-retarget-map")
 			document = New-SeedFixture -FixtureId "truncated-dependency-table" -Category "truncation" -BaseFixture "valid/minimal-controller.fixture.json" -ApplicationStage "after-production-serialization" -Operations @([ordered]@{ operator = "truncate-inside-dependency-table"; retainedEntries = 1; declaredEntries = 2 }) -Expected (New-ExpectedRejection -DiagnosticCode "Animation.Asset.TruncatedDependencyTable")
 		},
 		[ordered]@{
 			path = "seeds/truncation/truncated-payload.seed.json"
 			id = "truncated-payload"
-			requirements = @("FR-007", "FR-010", "FR-209")
+			requirements = @("animation-contract-validate-skeleton-topology-transform-validity-bind-data-influence-data-channel-targets-timestamps", "animation-contract-preserve-last-known-good-generated-asset-set-import-cooking-validation-publication-fails", "animation-contract-feature-include-reproducible-correctness-corruption-rollback-scheduler-transaction-multithreaded-stress-soak-performance")
 			document = New-SeedFixture -FixtureId "truncated-payload" -Category "truncation" -BaseFixture "valid/minimal-clip.fixture.json" -ApplicationStage "after-production-serialization" -Operations @([ordered]@{ operator = "truncate-before-declared-payload-end"; boundary = "declaredPayloadEnd-1" }) -Expected (New-ExpectedRejection -DiagnosticCode "Animation.Asset.TruncatedPayload")
 		},
 		[ordered]@{
 			path = "seeds/range/payload-range-past-end.seed.json"
 			id = "payload-range-past-end"
-			requirements = @("FR-007", "FR-009", "FR-209")
+			requirements = @("animation-contract-validate-skeleton-topology-transform-validity-bind-data-influence-data-channel-targets-timestamps", "animation-contract-reject-content-exceeds-hard-limits-safe-deterministic-reduction-unavailable", "animation-contract-feature-include-reproducible-correctness-corruption-rollback-scheduler-transaction-multithreaded-stress-soak-performance")
 			document = New-SeedFixture -FixtureId "payload-range-past-end" -Category "range" -BaseFixture "valid/minimal-clip.fixture.json" -ApplicationStage "after-production-serialization" -Operations @([ordered]@{ operator = "set-range-past-file-end"; range = "payload"; offset = "fileSize-1"; size = 2 }) -Expected (New-ExpectedRejection -DiagnosticCode "Animation.Asset.RangePastEnd")
 		},
 		[ordered]@{
 			path = "seeds/range/checked-arithmetic-overflow.seed.json"
 			id = "checked-arithmetic-overflow"
-			requirements = @("FR-007", "FR-009", "FR-209")
+			requirements = @("animation-contract-validate-skeleton-topology-transform-validity-bind-data-influence-data-channel-targets-timestamps", "animation-contract-reject-content-exceeds-hard-limits-safe-deterministic-reduction-unavailable", "animation-contract-feature-include-reproducible-correctness-corruption-rollback-scheduler-transaction-multithreaded-stress-soak-performance")
 			document = New-SeedFixture -FixtureId "checked-arithmetic-overflow" -Category "range" -BaseFixture "valid/minimal-motion-database.fixture.json" -ApplicationStage "after-production-serialization" -Operations @([ordered]@{ operator = "set-range-arithmetic-operands"; operation = "multiply-count-by-stride"; leftUnsigned64 = "18446744073709551615"; rightUnsigned64 = "2" }) -Expected (New-ExpectedRejection -DiagnosticCode "Animation.Asset.CheckedArithmeticOverflow")
 		},
 		[ordered]@{
 			path = "seeds/range/every-hard-limit-overflow.seed.json"
 			id = "every-hard-limit-overflow"
-			requirements = @("FR-009", "FR-174", "FR-209")
+			requirements = @("animation-contract-reject-content-exceeds-hard-limits-safe-deterministic-reduction-unavailable", "animation-contract-streaming-residency-retained-histories-have-explicit-memory-time-bounds-pressure-behavior-diagnostics", "animation-contract-feature-include-reproducible-correctness-corruption-rollback-scheduler-transaction-multithreaded-stress-soak-performance")
 			document = New-SeedFixture -FixtureId "every-hard-limit-overflow" -Category "range" -BaseFixture "valid/minimal-runtime-set.fixture.json" -ApplicationStage "semantic-validation-before-allocation" -Operations @(New-HardLimitOverflowOperations -Limits $hardLimits) -Expected (New-ExpectedRejection -DiagnosticCode "Animation.Asset.HardLimitExceeded") -OperationMode "each-operation-is-an-independent-case"
 		},
 		[ordered]@{
 			path = "seeds/versioning/bad-magic.seed.json"
 			id = "bad-magic"
-			requirements = @("FR-001", "FR-007", "FR-209")
+			requirements = @("animation-contract-represent-skeletons-animation-clips-animation-controllers-masks-retarget-mappings-motion-databases-ragdoll", "animation-contract-validate-skeleton-topology-transform-validity-bind-data-influence-data-channel-targets-timestamps", "animation-contract-feature-include-reproducible-correctness-corruption-rollback-scheduler-transaction-multithreaded-stress-soak-performance")
 			document = New-SeedFixture -FixtureId "bad-magic" -Category "versioning" -BaseFixture "valid/minimal-source-skeleton.fixture.json" -ApplicationStage "after-production-serialization" -Operations @([ordered]@{ operator = "replace-envelope-magic"; value = "not-the-production-magic" }) -Expected (New-ExpectedRejection -DiagnosticCode "Animation.Asset.BadMagic")
 		},
 		[ordered]@{
 			path = "seeds/versioning/unsupported-major-version.seed.json"
 			id = "unsupported-major-version"
-			requirements = @("FR-001", "FR-007", "FR-209")
+			requirements = @("animation-contract-represent-skeletons-animation-clips-animation-controllers-masks-retarget-mappings-motion-databases-ragdoll", "animation-contract-validate-skeleton-topology-transform-validity-bind-data-influence-data-channel-targets-timestamps", "animation-contract-feature-include-reproducible-correctness-corruption-rollback-scheduler-transaction-multithreaded-stress-soak-performance")
 			document = New-SeedFixture -FixtureId "unsupported-major-version" -Category "versioning" -BaseFixture "valid/minimal-clip.fixture.json" -ApplicationStage "after-production-serialization" -Operations @([ordered]@{ operator = "set-envelope-major-version"; value = "currentSupportedMajor+1" }) -Expected (New-ExpectedRejection -DiagnosticCode "Animation.Asset.UnsupportedMajorVersion")
 		},
 		[ordered]@{
 			path = "seeds/versioning/unknown-required-chunk.seed.json"
 			id = "unknown-required-chunk"
-			requirements = @("FR-001", "FR-007", "FR-209")
+			requirements = @("animation-contract-represent-skeletons-animation-clips-animation-controllers-masks-retarget-mappings-motion-databases-ragdoll", "animation-contract-validate-skeleton-topology-transform-validity-bind-data-influence-data-channel-targets-timestamps", "animation-contract-feature-include-reproducible-correctness-corruption-rollback-scheduler-transaction-multithreaded-stress-soak-performance")
 			document = New-SeedFixture -FixtureId "unknown-required-chunk" -Category "versioning" -BaseFixture "valid/minimal-clip.fixture.json" -ApplicationStage "after-production-serialization" -Operations @([ordered]@{ operator = "append-unknown-chunk"; required = $true; recordedSize = 4; payloadPattern = "00000000" }) -Expected (New-ExpectedRejection -DiagnosticCode "Animation.Asset.UnknownRequiredChunk")
 		},
 		[ordered]@{
 			path = "seeds/versioning/unknown-optional-minor-chunk.seed.json"
 			id = "unknown-optional-minor-chunk"
-			requirements = @("FR-001", "FR-007")
+			requirements = @("animation-contract-represent-skeletons-animation-clips-animation-controllers-masks-retarget-mappings-motion-databases-ragdoll", "animation-contract-validate-skeleton-topology-transform-validity-bind-data-influence-data-channel-targets-timestamps")
 			document = New-SeedFixture -FixtureId "unknown-optional-minor-chunk" -Category "versioning" -BaseFixture "valid/minimal-clip.fixture.json" -ApplicationStage "after-production-serialization" -Operations @([ordered]@{ operator = "append-unknown-chunk"; required = $false; recordedSize = 4; payloadPattern = "00000000" }) -Expected ([ordered]@{ status = "Ok"; diagnosticCode = "Animation.Asset.OptionalChunkSkipped"; optionalChunkSkipped = $true; publicationAllowed = $true })
 		},
 		[ordered]@{
 			path = "seeds/dependency/missing-dependency.seed.json"
 			id = "missing-dependency"
-			requirements = @("FR-010", "FR-017", "FR-031", "FR-175")
+			requirements = @("animation-contract-preserve-last-known-good-generated-asset-set-import-cooking-validation-publication-fails", "animation-contract-preserve-compatibility-identity-prevents-clip-controller-retarget-map-ragdoll-motion-database-binding", "animation-contract-incompatible-unavailable-dependency-produce-documented-safe-pose-diagnostic-without-partially-mixing-generations", "animation-contract-export-dependency-discovery-include-transitive-skeleton-mesh-clip-controller-mask-retarget-map")
 			document = New-SeedFixture -FixtureId "missing-dependency" -Category "dependency" -BaseFixture "valid/minimal-controller.fixture.json" -ApplicationStage "dependency-resolution" -Operations @([ordered]@{ operator = "remove-dependency"; assetId = $clipId }) -Expected (New-ExpectedRejection -DiagnosticCode "Animation.Dependency.Missing")
 		},
 		[ordered]@{
 			path = "seeds/dependency/incompatible-fingerprint.seed.json"
 			id = "incompatible-fingerprint"
-			requirements = @("FR-017", "FR-031", "SC-018")
+			requirements = @("animation-contract-preserve-compatibility-identity-prevents-clip-controller-retarget-map-ragdoll-motion-database-binding", "animation-contract-incompatible-unavailable-dependency-produce-documented-safe-pose-diagnostic-without-partially-mixing-generations", "animation-outcome-hot-reload-switches-compatible-asset-sets-without-mixed-generations-retains-previous-valid")
 			document = New-SeedFixture -FixtureId "incompatible-fingerprint" -Category "dependency" -BaseFixture "valid/minimal-clip.fixture.json" -ApplicationStage "dependency-resolution" -Operations @([ordered]@{ operator = "replace-dependency-compatibility-fingerprint"; assetId = $sourceSkeletonId; value = $targetSkeletonFingerprint }) -Expected (New-ExpectedRejection -DiagnosticCode "Animation.Dependency.IncompatibleFingerprint")
 		},
 		[ordered]@{
 			path = "seeds/dependency/cyclic-dependency.seed.json"
 			id = "cyclic-dependency"
-			requirements = @("FR-007", "FR-011", "FR-175")
+			requirements = @("animation-contract-validate-skeleton-topology-transform-validity-bind-data-influence-data-channel-targets-timestamps", "animation-contract-multi-asset-import-recook-publish-mutually-dependent-outputs-atomically-publish-none-them", "animation-contract-export-dependency-discovery-include-transitive-skeleton-mesh-clip-controller-mask-retarget-map")
 			document = New-SeedFixture -FixtureId "cyclic-dependency" -Category "dependency" -BaseFixture "valid/minimal-controller.fixture.json" -ApplicationStage "dependency-resolution" -Operations @([ordered]@{ operator = "add-dependency-cycle"; path = @($controllerId, $clipId, $controllerId) }) -Expected (New-ExpectedRejection -DiagnosticCode "Animation.Dependency.Cycle")
 		},
 		[ordered]@{
 			path = "seeds/dependency/corrupt-transitive-export-dependency.seed.json"
 			id = "corrupt-transitive-export-dependency"
-			requirements = @("FR-175", "FR-176", "SC-019")
+			requirements = @("animation-contract-export-dependency-discovery-include-transitive-skeleton-mesh-clip-controller-mask-retarget-map", "animation-contract-export-validation-reject-unresolved-editor-source-corrupt-incompatible-stale-unsupported-animation-dependencies", "animation-outcome-export-validation-identifies-deliberately-removed-corrupted-transitive-animation-dependencies-before-publication")
 			document = New-SeedFixture -FixtureId "corrupt-transitive-export-dependency" -Category "dependency" -BaseFixture "valid/minimal-runtime-set.fixture.json" -ApplicationStage "export-dependency-validation" -Operations @([ordered]@{ operator = "mark-transitive-dependency-corrupt"; assetId = $clipId; corruption = "content-hash-mismatch" }) -Expected (New-ExpectedRejection -DiagnosticCode "Animation.Export.CorruptDependency" -SafeFallback "no-export-publication")
 		},
 		[ordered]@{
 			path = "seeds/corruption/content-hash-mismatch.seed.json"
 			id = "content-hash-mismatch"
-			requirements = @("FR-007", "FR-010", "FR-173", "FR-209")
+			requirements = @("animation-contract-validate-skeleton-topology-transform-validity-bind-data-influence-data-channel-targets-timestamps", "animation-contract-preserve-last-known-good-generated-asset-set-import-cooking-validation-publication-fails", "animation-contract-failed-incompatible-hot-reload-retain-previous-valid-generation-expose-reason", "animation-contract-feature-include-reproducible-correctness-corruption-rollback-scheduler-transaction-multithreaded-stress-soak-performance")
 			document = New-SeedFixture -FixtureId "content-hash-mismatch" -Category "corruption" -BaseFixture "valid/minimal-clip.fixture.json" -ApplicationStage "after-production-serialization" -Operations @([ordered]@{ operator = "flip-one-payload-bit-without-updating-content-hash"; target = "first-required-payload-byte" }) -Expected (New-ExpectedRejection -DiagnosticCode "Animation.Asset.ContentHashMismatch")
 		},
 		[ordered]@{
 			path = "seeds/corruption/non-finite-bind-transform.seed.json"
 			id = "non-finite-bind-transform"
-			requirements = @("FR-007", "FR-030", "FR-208")
+			requirements = @("animation-contract-validate-skeleton-topology-transform-validity-bind-data-influence-data-channel-targets-timestamps", "animation-contract-runtime-evaluation-never-publish-non-finite-pose-morph-bound-curve-event-root", "animation-contract-recoverable-allocation-import-resource-renderer-physics-automation-managed-export-validation-failures-preserve")
 			document = New-SeedFixture -FixtureId "non-finite-bind-transform" -Category "corruption" -BaseFixture "valid/minimal-source-skeleton.fixture.json" -ApplicationStage "semantic-validation" -Operations @([ordered]@{ operator = "replace-semantic-number"; jsonPointer = "/payload/joints/0/localBindTransform/translation/0"; valueToken = "positive-infinity" }) -Expected (New-ExpectedRejection -DiagnosticCode "Animation.Skeleton.NonFiniteTransform")
 		},
 		[ordered]@{
 			path = "seeds/corruption/hierarchy-cycle.seed.json"
 			id = "hierarchy-cycle"
-			requirements = @("FR-007", "FR-010", "FR-208")
+			requirements = @("animation-contract-validate-skeleton-topology-transform-validity-bind-data-influence-data-channel-targets-timestamps", "animation-contract-preserve-last-known-good-generated-asset-set-import-cooking-validation-publication-fails", "animation-contract-recoverable-allocation-import-resource-renderer-physics-automation-managed-export-validation-failures-preserve")
 			document = New-SeedFixture -FixtureId "hierarchy-cycle" -Category "corruption" -BaseFixture "valid/minimal-source-skeleton.fixture.json" -ApplicationStage "semantic-validation" -Operations @([ordered]@{ operator = "replace-parent-index"; jointIndex = 0; parentIndex = 0 }) -Expected (New-ExpectedRejection -DiagnosticCode "Animation.Skeleton.HierarchyCycle")
 		},
 		[ordered]@{
 			path = "seeds/corruption/descending-track-time.seed.json"
 			id = "descending-track-time"
-			requirements = @("FR-007", "FR-025", "FR-208")
+			requirements = @("animation-contract-validate-skeleton-topology-transform-validity-bind-data-influence-data-channel-targets-timestamps", "animation-contract-support-exact-clip-boundaries-zero-duration-clips-repeated-timestamps-reverse-traversal-multi", "animation-contract-recoverable-allocation-import-resource-renderer-physics-automation-managed-export-validation-failures-preserve")
 			document = New-SeedFixture -FixtureId "descending-track-time" -Category "corruption" -BaseFixture "valid/minimal-clip.fixture.json" -ApplicationStage "semantic-validation" -Operations @([ordered]@{ operator = "replace-key-ticks"; track = "root.translation"; values = @(60, 0) }) -Expected (New-ExpectedRejection -DiagnosticCode "Animation.Clip.UnorderedKeyTimes")
 		},
 		[ordered]@{
 			path = "seeds/corruption/invalid-weight-sum.seed.json"
 			id = "invalid-weight-sum"
-			requirements = @("FR-007", "FR-008", "FR-009")
+			requirements = @("animation-contract-validate-skeleton-topology-transform-validity-bind-data-influence-data-channel-targets-timestamps", "animation-contract-reduce-excessive-vertex-influences-deterministically-according-documented-policy-normalize-retained-weights-report", "animation-contract-reject-content-exceeds-hard-limits-safe-deterministic-reduction-unavailable")
 			document = New-SeedFixture -FixtureId "invalid-weight-sum" -Category "corruption" -BaseFixture "valid/minimal-deformable-mesh.fixture.json" -ApplicationStage "semantic-validation" -Operations @([ordered]@{ operator = "replace-unorm8-weights"; vertexIndex = 0; values = @(200, 0, 0, 0); expectedSum = 255 }) -Expected (New-ExpectedRejection -DiagnosticCode "Animation.Mesh.InvalidWeightSum")
 		},
 		[ordered]@{
 			path = "seeds/lifecycle/cancel-before-publication.seed.json"
 			id = "cancel-before-publication"
-			requirements = @("FR-010", "FR-011", "FR-164", "FR-202", "SC-003")
+			requirements = @("animation-contract-preserve-last-known-good-generated-asset-set-import-cooking-validation-publication-fails", "animation-contract-multi-asset-import-recook-publish-mutually-dependent-outputs-atomically-publish-none-them", "animation-contract-automation-rejection-cancellation-timeout-disconnect-validation-failure-leave-no-partial-asset-graph", "animation-contract-scene-unload-object-reuse-component-removal-asset-reload-script-reload-play-mode", "animation-outcome-invalid-cancelled-import-graph-publication-recording-motion-database-build-retarget-edit-ragdoll")
 			document = New-SeedFixture -FixtureId "cancel-before-publication" -Category "lifecycle" -BaseFixture "valid/minimal-runtime-set.fixture.json" -ApplicationStage "staged-publication" -Operations @([ordered]@{ operator = "signal-cancellation"; checkpoint = "after-validation-before-protected-publish"; tokenGeneration = 1 }) -Expected (New-ExpectedRejection -DiagnosticCode "Animation.Publication.Cancelled")
 		},
 		[ordered]@{
 			path = "seeds/lifecycle/stale-source-generation.seed.json"
 			id = "stale-source-generation"
-			requirements = @("FR-010", "FR-029", "FR-173", "FR-202", "SC-017")
+			requirements = @("animation-contract-preserve-last-known-good-generated-asset-set-import-cooking-validation-publication-fails", "animation-contract-runtime-evaluation-reject-stale-object-component-asset-scene-physics-world-command-generations", "animation-contract-failed-incompatible-hot-reload-retain-previous-valid-generation-expose-reason", "animation-contract-scene-unload-object-reuse-component-removal-asset-reload-script-reload-play-mode", "animation-outcome-stale-object-component-scene-script-asset-renderer-physics-automation-managed-rollback-identities")
 			document = New-SeedFixture -FixtureId "stale-source-generation" -Category "lifecycle" -BaseFixture "valid/minimal-runtime-set.fixture.json" -ApplicationStage "staged-publication" -Operations @([ordered]@{ operator = "advance-source-generation-before-publish"; capturedGeneration = 1; liveGeneration = 2 }) -Expected (New-ExpectedRejection -DiagnosticCode "Animation.Publication.StaleSourceGeneration")
 		},
 		[ordered]@{
 			path = "seeds/lifecycle/stale-work-completion.seed.json"
 			id = "stale-work-completion"
-			requirements = @("FR-029", "FR-069", "FR-202", "FR-224", "SC-017")
+			requirements = @("animation-contract-runtime-evaluation-reject-stale-object-component-asset-scene-physics-world-command-generations", "animation-contract-pose-morph-asset-page-view-generation-changes-invalidate-cached-visibility-submission-decision", "animation-contract-scene-unload-object-reuse-component-removal-asset-reload-script-reload-play-mode", "animation-contract-unsupported-capabilities-gpu-budget-exhaustion-stale-gpu-work-renderer-loss-gpu-evaluation", "animation-outcome-stale-object-component-scene-script-asset-renderer-physics-automation-managed-rollback-identities")
 			document = New-SeedFixture -FixtureId "stale-work-completion" -Category "lifecycle" -BaseFixture "valid/minimal-runtime-set.fixture.json" -ApplicationStage "runtime-work-completion" -Operations @([ordered]@{ operator = "complete-work-with-stale-generations"; captured = [ordered]@{ instance = 1; asset = 1; renderer = 1 }; live = [ordered]@{ instance = 2; asset = 2; renderer = 2 } }) -Expected (New-ExpectedRejection -DiagnosticCode "Animation.Runtime.StaleWork")
 		}
 	)

@@ -1,0 +1,20 @@
+{
+    "name": "ImportValidation",
+    "streamingPolicy": {
+        "deferScenePayloadsOnLoad": true,
+        "diagnosticsEnabled": false,
+        "enabled": true,
+        "maxLoadsPerUpdate": 0,
+        "memoryBudgetInteraction": "use-residency-policy",
+        "neededRetentionSeconds": 5.0,
+        "streamingDistance": 300.0,
+        "textureMaxStreamMip": 8,
+        "textureMinStreamMip": 0,
+        "textureMipStreamingEnabled": true,
+        "virtualGeometryPageMemoryBudgetBytes": 0,
+        "virtualGeometryPageRetirementBudgetBytes": 0,
+        "virtualGeometryPageUploadBudgetBytes": 0,
+        "visibleRetentionSeconds": 2.0
+    },
+    "version": "1.0.0"
+}

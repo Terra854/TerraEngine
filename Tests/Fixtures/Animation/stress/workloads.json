@@ -1,14 +1,14 @@
 {
 	"schemaVersion": 1,
-	"feature": "043-complete-animation-system",
-	"task": "T129",
+	"feature": "complete-animation-system",
+	"task": "animation-validation-us-hash-locked-frozen-character-crowd-complex-hero-mode-churn",
 	"purpose": "reproducible-generation-and-final-phase-readiness",
 	"performanceAcceptancePhase": 18,
 	"performanceExecutionDeferred": true,
 	"definitionHashAlgorithm": "sha256-canonical-json-v1",
 	"authority": {
 		"runtimeContract": {
-			"path": "specs/043-complete-animation-system/contracts/runtime-limits-and-validation.md",
+			"path": "Docs/Animation/README.md",
 			"sha256": "1bb8bb3d0affa53d146b717171a7b23d72437af88449c273e8cb1a2fe4869279"
 		},
 		"performanceWorkloads": {

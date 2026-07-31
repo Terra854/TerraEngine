@@ -61,4 +61,4 @@ ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure
 cmake --build --preset RelWithDebInfo --target install
 ```
 
-Use `Tools/Animation/RunAnimationPhaseGate.ps1` for installed-editor evidence and `Tools/Animation/TestValidationModels.ps1` for acquired model validation. Never mark a manual click, camera capture, performance result, cross-platform run, or soak as passed when its evidence is unavailable.
+Use `Tools/Animation/RunAnimationValidationGate.ps1` for installed-editor evidence and `Tools/Animation/TestValidationModels.ps1` for acquired model validation. Never mark a manual click, camera capture, performance result, cross-platform run, or soak as passed when its evidence is unavailable.

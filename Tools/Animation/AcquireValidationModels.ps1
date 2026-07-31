@@ -75,7 +75,7 @@ function Test-ExternalUnavailable($Exception) {
 }
 
 function Assert-Manifest($Document) {
-	if ([int](Get-Property $Document 'schemaVersion') -ne 1 -or [string](Get-Property $Document 'feature') -ne '043-complete-animation-system') { throw 'Manifest has an unsupported identity.' }
+	if ([int](Get-Property $Document 'schemaVersion') -ne 1 -or [string](Get-Property $Document 'feature') -ne 'complete-animation-system') { throw 'Manifest has an unsupported identity.' }
 	$entries = @((Get-Property $Document 'models'))
 	if ($entries.Count -lt 1 -or $entries.Count -gt $MaximumEntryCount) { throw "Manifest model count must be 1..$MaximumEntryCount." }
 	$ids = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -151,7 +151,7 @@ function Expand-SafeZip([string]$Archive, [string]$Destination) {
 $repoRoot = (Get-Location).Path
 $manifestPath = Get-AbsolutePath $Manifest $repoRoot
 $cachePath = Get-AbsolutePath $CacheRoot $repoRoot
-$result = [ordered]@{ schemaVersion = 1; tool = 'AcquireValidationModels'; task = 'T275'; feature = '043-complete-animation-system'; mode = if ($DryRun) { 'dry-run' } else { 'execute' }; status = 'failed'; failClosed = $true; cacheRoot = $cachePath; models = @(); reason = '' }
+$result = [ordered]@{ schemaVersion = 1; tool = 'AcquireValidationModels'; task = 'AnimationValidationTraversalSafeSizeCountBoundedHashLicenseVerifyingProvenanceRecording'; feature = 'complete-animation-system'; mode = if ($DryRun) { 'dry-run' } else { 'execute' }; status = 'failed'; failClosed = $true; cacheRoot = $cachePath; models = @(); reason = '' }
 try {
 	Assert-AtOrBelow (Join-Path $repoRoot 'out') $cachePath 'Validation model cache root'
 	if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw "Manifest is missing: '$manifestPath'." }

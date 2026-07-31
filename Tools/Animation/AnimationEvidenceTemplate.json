@@ -1,0 +1,160 @@
+{
+	"schemaVersion": 1,
+	"feature": "complete-animation-system",
+	"phase": "",
+	"gateTask": "",
+	"status": "not-run",
+	"authorizedPerformanceDeferral": false,
+	"finalIntegrationBlockedOnPerformance": false,
+	"outstandingPerformanceTasks": [],
+	"startedAt": "",
+	"completedAt": "",
+	"source": {
+		"branch": "",
+		"commit": "",
+		"configuration": "RelWithDebInfo",
+		"dirtyPaths": []
+	},
+	"lockedBaseline": {
+		"manifest": "out/validation/animation/baseline/locked-baseline.json",
+		"lock": "out/validation/animation/baseline/evidence-lock.json",
+		"aggregateSha256": "4020949bd881f94f0395853e947e4512fb587c7bdd1ce5592317e75c01b5fcb5",
+		"runtimeContractSha256": "1bb8bb3d0affa53d146b717171a7b23d72437af88449c273e8cb1a2fe4869279",
+		"rendererWorkloadManifestSha256": "397b7cb6ac01714a628c44bab6cb002c034c8d8e5422bf184dc10cddf201b12f",
+		"performanceWorkloadsSha256": "dd297ef96f629b290be03bce64dec19612726cd5931e886fb722d80970d49dba",
+		"identityMatched": false,
+		"digestMatched": false,
+		"mismatchReasons": []
+	},
+	"environment": {
+		"host": "",
+		"operatingSystem": "",
+		"cpu": "",
+		"logicalProcessors": 0,
+		"gpu": "",
+		"gpuDriver": "",
+		"vulkanLoader": "",
+		"vulkanDeviceApi": "",
+		"displayMode": "",
+		"referenceResolution": "1920x1080",
+		"vsync": false,
+		"powerPlan": "Performance",
+		"acConnected": false,
+		"thermalSnapshot": {},
+		"workerCount": 31,
+		"ambientProcesses": []
+	},
+	"toolchain": {
+		"cmake": "",
+		"generator": "Ninja",
+		"compiler": "",
+		"dotnetSdk": ""
+	},
+	"inputs": {
+		"isolatedProjectRoot": "",
+		"editorPreferencesSha256": "",
+		"workloadManifestSha256": "",
+		"fixtureManifestSha256": "",
+		"performanceCandidateManifestSha256": "",
+		"finalAnimationPerformanceEvidenceManifestSha256": "",
+		"additionalHashes": []
+	},
+	"commands": [],
+	"focusedValidation": {
+		"tests": [],
+		"corruption": [],
+		"rollback": [],
+		"scheduler": [],
+		"transactions": [],
+		"stress": [],
+		"repairs": []
+	},
+	"integratedBuild": {
+		"command": "cmake --build --preset RelWithDebInfo",
+		"log": "",
+		"exitCode": null,
+		"passed": false
+	},
+	"install": {
+		"command": "cmake --build --preset RelWithDebInfo --target install",
+		"log": "",
+		"exitCode": null,
+		"passed": false,
+		"root": "out/build/RelWithDebInfo/Build",
+		"inventory": [],
+		"missingRequiredArtifacts": []
+	},
+	"installedEditor": {
+		"executable": "",
+		"executableSha256": "",
+		"installedTreeOnly": false,
+		"launchArguments": [],
+		"normalShutdown": false,
+		"clickTranscript": "",
+		"mcpTranscript": "",
+		"playMode": {
+			"entered": false,
+			"exited": false,
+			"authoredStateRestored": false,
+			"beforeSha256": "",
+			"afterSha256": ""
+		},
+		"cameraEvidence": {
+			"sceneView": [],
+			"gameView": [],
+			"inGame": [],
+			"missingRequiredViews": []
+		},
+		"profilerCaptures": [],
+		"diagnostics": []
+	},
+	"performance": {
+		"executionStatus": "not-run",
+		"authorizedPerformanceDeferral": false,
+		"finalIntegrationBlockedOnPerformance": false,
+		"outstandingTasks": [],
+		"deferralEvidence": "",
+		"finalAnimationPerformanceEvidence": null,
+		"warmup": {},
+		"minimumMeasuredRuns": 5,
+		"measuredRuns": [],
+		"metrics": [],
+		"requiredMetricsMissing": [],
+		"identityComparable": null,
+		"thresholdsUnchanged": false,
+		"repeatabilityAccepted": null,
+		"passed": null
+	},
+	"exportRuntime": {
+		"requested": false,
+		"installedToolsOnly": false,
+		"packageInventory": [],
+		"editorRuntimeParity": {},
+		"normalShutdown": false,
+		"passed": false
+	},
+	"acceptance": {
+		"matrix": "specs/complete-animation-system/acceptance-matrix.md",
+		"rowsEvaluated": [],
+		"rowsAccepted": [],
+		"rowsBlocked": [],
+		"updateApplied": false
+	},
+	"defects": [],
+	"artifacts": [],
+	"completeness": {
+		"requiredFieldsPresent": false,
+		"requiredArtifactsPresent": false,
+		"unexpectedUnavailableEvidence": [],
+		"failClosed": true
+	},
+	"result": {
+		"passed": false,
+		"failureCategory": "not-run",
+		"message": "Phase evidence has not been collected.",
+		"nextPhaseUnblocked": false,
+		"authorizedPerformanceDeferral": false,
+		"finalIntegrationBlockedOnPerformance": false,
+		"outstandingPerformanceTasks": []
+	}
+}

@@ -1,0 +1,64 @@
+{
+	"schemaVersion": 1,
+	"phase": "import-validation",
+	"acceptedEvidence": {
+		"statement": "The accepted Import Validation rows are bound to every reviewed import, reimport, query, prefab, runtime, native camera, manual input, and focused test artifact produced by this installed gate.",
+		"requirementIds": [
+			"animation-contract-represent-skeletons-animation-clips-animation-controllers-masks-retarget-mappings-motion-databases-ragdoll", "animation-contract-import-supported-skeletal-hierarchy-rest-pose-bind-pose-skin-influences-animation-tracks", "animation-contract-provide-behaviorally-equivalent-import-coverage-supported-fbx-content", "animation-contract-generate-stable-subasset-identities-survive-source-move-rename-reimport-project-reload-source", "animation-contract-preserve-scene-prefab-controller-retarget-motion-database-gameplay-references-across-valid-asset", "animation-contract-convert-source-units-handedness-axes-inherited-transforms-joint-orientations-skin-matrices-animation",
+			"animation-contract-validate-skeleton-topology-transform-validity-bind-data-influence-data-channel-targets-timestamps", "animation-contract-reduce-excessive-vertex-influences-deterministically-according-documented-policy-normalize-retained-weights-report", "animation-contract-reject-content-exceeds-hard-limits-safe-deterministic-reduction-unavailable", "animation-contract-preserve-last-known-good-generated-asset-set-import-cooking-validation-publication-fails", "animation-contract-multi-asset-import-recook-publish-mutually-dependent-outputs-atomically-publish-none-them", "animation-contract-import-diagnostics-identify-source-package-node-joint-path-channel-target-severity-reason",
+			"animation-contract-generated-runtime-assets-require-source-gltf-fbx-dcc-editor-files-after-cooking", "animation-contract-expose-import-summaries-joint-counts-influences-clips-tracks-morph-targets-events-bounds", "animation-contract-support-multiple-skeletons-skins-animated-nodes-clips-generated-prefabs-one-source-package", "animation-contract-distinguish-semantic-joint-identity-display-names-so-duplicate-renamed-display-names-do", "animation-contract-preserve-compatibility-identity-prevents-clip-controller-retarget-map-ragdoll-motion-database-binding", "animation-contract-asset-validation-available-independently-scene-playback-produce-reproducible-results-identical-source-content",
+			"animation-outcome-one-hundred-percent-supported-import-fixtures-preserve-generated-asset-references-after-move"
+		],
+		"operationIds": [
+			"import-validation-first",
+			"import-validation-repeat",
+			"import-validation-query-package",
+			"import-validation-inspect-package-impact",
+			"import-validation-failed-reimport-preserves-generation",
+			"import-validation-recover-valid-source",
+			"import-validation-instantiate-playable-prefab",
+			"import-validation-scene-bind-query",
+			"import-validation-play-diagnostics",
+			"import-validation-post-play-scene-query"
+		],
+		"captureIds": [
+			"import-validation-scene-view",
+			"import-validation-game-view",
+			"import-validation-in-game-camera"
+		],
+		"manualChecklistIds": [
+			"import-validation-mouse-asset-inspection",
+			"import-validation-keyboard-save-check"
+		],
+		"requiredArtifacts": [
+			"editor/mcp-operations.json",
+			"editor/manual-evidence.json",
+			"editor/camera-evidence.json",
+			"editor/play-mode.json",
+			"tests/focused-tests.command.json"
+		]
+	},
+	"updates": [
+		{ "id": "animation-contract-represent-skeletons-animation-clips-animation-controllers-masks-retarget-mappings-motion-databases-ragdoll", "status": "Accepted" },
+		{ "id": "animation-contract-import-supported-skeletal-hierarchy-rest-pose-bind-pose-skin-influences-animation-tracks", "status": "Accepted" },
+		{ "id": "animation-contract-provide-behaviorally-equivalent-import-coverage-supported-fbx-content", "status": "Accepted" },
+		{ "id": "animation-contract-generate-stable-subasset-identities-survive-source-move-rename-reimport-project-reload-source", "status": "Accepted" },
+		{ "id": "animation-contract-preserve-scene-prefab-controller-retarget-motion-database-gameplay-references-across-valid-asset", "status": "Accepted" },
+		{ "id": "animation-contract-convert-source-units-handedness-axes-inherited-transforms-joint-orientations-skin-matrices-animation", "status": "Accepted" },
+		{ "id": "animation-contract-validate-skeleton-topology-transform-validity-bind-data-influence-data-channel-targets-timestamps", "status": "Accepted" },
+		{ "id": "animation-contract-reduce-excessive-vertex-influences-deterministically-according-documented-policy-normalize-retained-weights-report", "status": "Accepted" },
+		{ "id": "animation-contract-reject-content-exceeds-hard-limits-safe-deterministic-reduction-unavailable", "status": "Accepted" },
+		{ "id": "animation-contract-preserve-last-known-good-generated-asset-set-import-cooking-validation-publication-fails", "status": "Accepted" },
+		{ "id": "animation-contract-multi-asset-import-recook-publish-mutually-dependent-outputs-atomically-publish-none-them", "status": "Accepted" },
+		{ "id": "animation-contract-import-diagnostics-identify-source-package-node-joint-path-channel-target-severity-reason", "status": "Accepted" },
+		{ "id": "animation-contract-generated-runtime-assets-require-source-gltf-fbx-dcc-editor-files-after-cooking", "status": "Accepted" },
+		{ "id": "animation-contract-expose-import-summaries-joint-counts-influences-clips-tracks-morph-targets-events-bounds", "status": "Accepted" },
+		{ "id": "animation-contract-support-multiple-skeletons-skins-animated-nodes-clips-generated-prefabs-one-source-package", "status": "Accepted" },
+		{ "id": "animation-contract-distinguish-semantic-joint-identity-display-names-so-duplicate-renamed-display-names-do", "status": "Accepted" },
+		{ "id": "animation-contract-preserve-compatibility-identity-prevents-clip-controller-retarget-map-ragdoll-motion-database-binding", "status": "Accepted" },
+		{ "id": "animation-contract-asset-validation-available-independently-scene-playback-produce-reproducible-results-identical-source-content", "status": "Accepted" },
+		{ "id": "animation-outcome-creator-import-representative-animated-gltf-fbx-package-obtain-correctly-referenced-playable-prefab", "status": "Evidence incomplete" },
+		{ "id": "animation-outcome-one-hundred-percent-supported-import-fixtures-preserve-generated-asset-references-after-move", "status": "Accepted" },
+		{ "id": "animation-outcome-invalid-cancelled-import-graph-publication-recording-motion-database-build-retarget-edit-ragdoll", "status": "In progress" }
+	]
+}

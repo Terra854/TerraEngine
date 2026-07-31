@@ -47,7 +47,7 @@ The engine-owned codec uses:
 
 Runtime validation opens every declared codec track before publication. A bad segment range, decoder version, encoded stride, timestamp ordering, or fingerprint rejects the complete clip. Default authoring tolerances are 0.5 mm translation, 0.1 degrees rotation, 0.05% scale, and 0.0005 absolute morph weight; a source may request tighter limits.
 
-The version-1 hard limits include 24 hours per clip, 65,536 channels, 16,777,216 total keys, and 1,048,576 authored events. See [the frozen runtime limits](../../specs/043-complete-animation-system/contracts/runtime-limits-and-validation.md) for the complete table.
+The version-1 hard limits include 24 hours per clip, 65,536 channels, 16,777,216 total keys, and 1,048,576 authored events. See [the frozen runtime limits](../../Docs/Animation/README.md) for the complete table.
 
 ## Deformable TEMF and TDEF
 
@@ -111,4 +111,4 @@ cmake --build --preset RelWithDebInfo --target install
 
 All dependencies come from the repository; configuring, building, testing, and installing do not download animation models or require a global package manager. The install step is mandatory because editor/runtime validation uses installed binaries and assets.
 
-These commands are correctness checks. Spec 043 intentionally runs all candidate benchmarks, workflow timing, diagnostics-overhead measurements, performance comparisons, and acceptance decisions only in final tasks T283, T284, and T288. That schedule defers measurement; it does not waive any performance threshold.
+These commands are correctness checks. Spec 043 intentionally runs all candidate benchmarks, workflow timing, diagnostics-overhead measurements, performance comparisons, and acceptance decisions only in final tasks animation-validation-runs-every-accumulated-feature-workflow-benchmark-t-runs-every-unrelated, animation-validation-invoke-final-only-t-t-comparator-every-prepared-control-including, and animation-validation-repair-capable-final-checks-t-t-are-clean-final-blocking. That schedule defers measurement; it does not waive any performance threshold.

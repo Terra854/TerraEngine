@@ -3,8 +3,8 @@
 This document defines how TerraEngine animation performance evidence is prepared,
 captured, interpreted, and compared. It does not report a performance pass.
 All candidate wall-clock timing, throughput, latency, diagnostics-overhead, and
-whole-engine regression acceptance is deferred to final Phase 18 tasks T283 and
-T284. The continuous 24-hour acceptance soak is deferred to T285.
+whole-engine regression acceptance is deferred to final Phase 18 tasks animation-validation-runs-every-accumulated-feature-workflow-benchmark-t-runs-every-unrelated and
+animation-validation-invoke-final-only-t-t-comparator-every-prepared-control-including. The continuous 24-hour acceptance soak is deferred to animation-validation-continuous-hour-mixed-animation-soak-renderer-physics-reload-cancellation-streaming.
 
 Intermediate work may compile the harnesses, verify hashes and schemas, generate
 deterministic project descriptors, and exercise non-timed correctness or
@@ -18,15 +18,15 @@ it must not be accepted by weakening a nearby constant.
 | Authority | Identity |
 |---|---|
 | Pre-animation source commit | `6d12e3a99d7c0d41899fc96fa18b02b61e5a0aa9` |
-| Locked T001 baseline | `out/validation/animation/baseline/locked-baseline.json` — SHA-256 `cf4375934729e1afa745d9446faacfc1a7ba53a6d7db79b3d1e0e8164a5ced8f` |
-| T001 evidence selection | 178 files, 371,567,204 bytes — aggregate SHA-256 `4020949bd881f94f0395853e947e4512fb587c7bdd1ce5592317e75c01b5fcb5` |
-| Runtime limits contract | `specs/043-complete-animation-system/contracts/runtime-limits-and-validation.md` — SHA-256 `1bb8bb3d0affa53d146b717171a7b23d72437af88449c273e8cb1a2fe4869279` |
-| T001 workload configuration | `Tools/Animation/PerformanceWorkloads.json` — SHA-256 `dd297ef96f629b290be03bce64dec19612726cd5931e886fb722d80970d49dba` |
+| Locked animation-validation-is-completed-immutable-pre-feature-reference-capture-remains-sole-pre baseline | `out/validation/animation/baseline/locked-baseline.json` — SHA-256 `cf4375934729e1afa745d9446faacfc1a7ba53a6d7db79b3d1e0e8164a5ced8f` |
+| animation-validation-is-completed-immutable-pre-feature-reference-capture-remains-sole-pre evidence selection | 178 files, 371,567,204 bytes — aggregate SHA-256 `4020949bd881f94f0395853e947e4512fb587c7bdd1ce5592317e75c01b5fcb5` |
+| Runtime limits contract | `Docs/Animation/README.md` — SHA-256 `1bb8bb3d0affa53d146b717171a7b23d72437af88449c273e8cb1a2fe4869279` |
+| animation-validation-is-completed-immutable-pre-feature-reference-capture-remains-sole-pre workload configuration | `Tools/Animation/PerformanceWorkloads.json` — SHA-256 `dd297ef96f629b290be03bce64dec19612726cd5931e886fb722d80970d49dba` |
 | Animation stress definitions | `Tests/Fixtures/Animation/stress/workloads.json` — SHA-256 `c5652867707f46b2db388a3fc27af14c71db6b13a431dc64a52d6584f555a891` |
 | Whole-engine coverage matrix | `Tools/Animation/PerformanceCoverageMatrix.json` — SHA-256 `1e1f4a158b99a636faef1ec0679bf21aa1b30446352ece59483791bde024dbd1` |
 | Soak iteration schema | `Tests/Fixtures/Animation/stress/soak-result.schema.json` — SHA-256 `fa1b6548872e9ca70a8e1d5aeef9e810d82cc8bcd45e386c2a29744df8991659` |
 
-Candidate tools may write only below `out/` and may never overwrite the T001
+Candidate tools may write only below `out/` and may never overwrite the animation-validation-is-completed-immutable-pre-feature-reference-capture-remains-sole-pre
 baseline tree. A candidate build is not allowed to become its own reference.
 
 ## Frozen reference host and platform
@@ -45,12 +45,12 @@ Final animation measurements use exactly this profile:
   and the same quality settings and editor layout for both sides of a pair.
 - Windows Performance power plan, stable performance/fan profile, completed
   warm-up, and a recorded materially comparable ambient-process set.
-- 31 TerraEngine workers unless a pre-existing T001 control has its own locked
+- 31 TerraEngine workers unless a pre-existing animation-validation-is-completed-immutable-pre-feature-reference-capture-remains-sole-pre control has its own locked
   worker count.
 
 The exact firmware-visible device, Vulkan API/driver, toolchain, executable,
 project, fixture, display, hybrid-routing, power, thermal, and ambient-process
-facts recorded by T001 must match. Missing or unknown identity is not a warning;
+facts recorded by animation-validation-is-completed-immutable-pre-feature-reference-capture-remains-sole-pre must match. Missing or unknown identity is not a warning;
 it rejects the comparison.
 
 ## Frozen content profiles
@@ -72,36 +72,36 @@ replace these repository-owned, deterministic workload definitions.
 
 ## Exact acceptance thresholds
 
-All thresholds come from the runtime contract or immutable T001 configuration:
+All thresholds come from the runtime contract or immutable animation-validation-is-completed-immutable-pre-feature-reference-capture-remains-sole-pre configuration:
 
-- SC-001: each of three clean import-workflow trials finishes in under 300
+- animation-outcome-creator-import-representative-animated-gltf-fbx-package-obtain-correctly-referenced-playable-prefab: each of three clean import-workflow trials finishes in under 300
   seconds, measured from the installed-editor import command until the prefab is
   visible and selectable in Scene and Game views.
-- SC-006: each of three clean authoring trials finishes in under 900 seconds.
-- SC-009: at least 99.9% of 100,000 motion queries publish an eligible result in
+- animation-outcome-creator-build-preview-save-reload-run-locomotion-plus-action-controller-nested-states: each of three clean authoring trials finishes in under 900 seconds.
+- animation-outcome-motion-matching-queries-over-reference-production-size-database-return-eligible-result-within: at least 99.9% of 100,000 motion queries publish an eligible result in
   the next 16.667 ms update; every remainder uses the bounded fallback.
-- SC-013: the crowd sustains at least 60 updates per second and has no
+- animation-outcome-reference-scene-containing-concurrently-active-joint-characters-two-blended-clips-sustains-least: the crowd sustains at least 60 updates per second and has no
   animation-attributed frame above 50 ms.
-- SC-014: the complex hero sustains at least 60 updates per second and memory is
+- animation-outcome-reference-hero-scene-combining-layered-graphs-morphs-ik-motion-matching-deformable-virtual: the complex hero sustains at least 60 updates per second and memory is
   bounded after warm-up.
-- SC-015: enabled-but-collapsed diagnostics add no more than 2% to disabled
+- animation-outcome-optional-animation-profiling-detailed-diagnostics-disabled-versus-enabled-but-collapsed-differ-no: enabled-but-collapsed diagnostics add no more than 2% to disabled
   median frame time. The comparison uses paired medians, not an average.
-- SC-027: crowd GPU Visual reduces animation-related CPU evaluation time by at
-  least 75% versus CPU Deterministic/Fallback while still satisfying SC-013.
-- SC-028: complete-pose GPU-to-CPU transfers are exactly zero and
+- animation-outcome-character-reference-scene-gpu-visual-mode-reduces-animation-related-cpu-evaluation-time: crowd GPU Visual reduces animation-related CPU evaluation time by at
+  least 75% versus CPU Deterministic/Fallback while still satisfying animation-outcome-reference-scene-containing-concurrently-active-joint-characters-two-blended-clips-sustains-least.
+- animation-outcome-instrumented-ordinary-gpu-visual-hybrid-authoritative-frames-perform-zero-complete-pose-gpu: complete-pose GPU-to-CPU transfers are exactly zero and
   animation-caused CPU waits for ordinary GPU pose completion are exactly zero.
-- SC-029: discrete state, event order, root-motion interval, motion selection,
+- animation-outcome-gpu-visual-hybrid-authoritative-poses-match-cpu-reference-poses-within-declared-visual: discrete state, event order, root-motion interval, motion selection,
   generation, and deterministic hashes are exact. GPU visual tolerances are
   0.5 mm joint translation, 0.1 degrees rotation, 0.05% scale, and 0.0005
   absolute morph weight. Root motion uses 0.5 mm / 0.1 degrees unless physics
   reports the exact adjusted result.
-- SC-030 and SC-034: all 10,000 mode changes have zero bind flashes, state loss,
+- animation-outcome-ten-thousand-forced-transitions-among-gpu-visual-hybrid-authoritative-cpu-deterministic-fallback and animation-outcome-ten-thousand-rapid-visibility-short-lived-budget-changes-produce-zero-effective-mode: all 10,000 mode changes have zero bind flashes, state loss,
   duplicate/lost events, root discontinuities, stale generations, mixed
   generations, and hysteresis-violating frame oscillation.
-- SC-031: GPU motion search reduces animation-related CPU search time by at
+- animation-outcome-gpu-motion-matching-scoring-reduces-animation-related-cpu-search-time-least-reference: GPU motion search reduces animation-related CPU search time by at
   least 80% and returns the same authoritative selection for every deterministic
   fixture.
-- SC-025: the continuous 24-hour mixed soak has zero deadlock, crash, stale or
+- animation-outcome-continuous-hour-mixed-animation-soak-completes-without-deadlock-crash-stale-publication-unbounded: the continuous 24-hour mixed soak has zero deadlock, crash, stale or
   partial publication, unrecoverable renderer/physics failure, and unbounded
   retained history or resource growth.
 
@@ -153,13 +153,13 @@ mutex or detail allocation.
 
 ## Whole-engine regression matrix
 
-T284 opts into `CompareAnimationPerformance.ps1 -FinalPhaseMatrix`. Without that
+animation-validation-invoke-final-only-t-t-comparator-every-prepared-control-including opts into `CompareAnimationPerformance.ps1 -FinalPhaseMatrix`. Without that
 switch, the tool verifies matrix readiness and explicitly reports performance
 execution as deferred. The final matrix covers renderer, camera, UI, physics,
 scripting, resource streaming/residency, virtual geometry, scheduler, profiler,
 MCP/editor automation, startup, and export.
 
-Each domain maps to one immutable T001 control and lists the metrics/facts that
+Each domain maps to one immutable animation-validation-is-completed-immutable-pre-feature-reference-capture-remains-sole-pre control and lists the metrics/facts that
 must survive the mapping. All mapped candidate workloads still require the same
 warm-up, five measured results, raw result paths, installed artifact identity,
 and source-controlled settings hash used by the original comparator. The matrix
@@ -197,8 +197,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Animation/Generate
   -OutputRoot out/generated/animation-stress
 ```
 
-T283 supplies fresh installed-run candidate evidence to the existing capture
-pipeline. T284 performs the final comparison explicitly:
+animation-validation-runs-every-accumulated-feature-workflow-benchmark-t-runs-every-unrelated supplies fresh installed-run candidate evidence to the existing capture
+pipeline. animation-validation-invoke-final-only-t-t-comparator-every-prepared-control-including performs the final comparison explicitly:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Animation/CompareAnimationPerformance.ps1 `

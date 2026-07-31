@@ -126,7 +126,7 @@ non-finite values.
 
 Root motion is extracted over an explicit source tick interval. The result
 contains translation, yaw, complete-cycle accumulation, direction, and source
-generation. US2 only extracts and publishes this value; gameplay, character,
+generation. Playback Validation only extracts and publishes this value; gameplay, character,
 and physics application use typed deferred queues introduced by later phases.
 
 ## Residency, generations, and fallback

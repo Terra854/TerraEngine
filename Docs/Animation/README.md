@@ -6,13 +6,13 @@ ragdoll, editor, streaming/export, automation, determinism, and performance
 guides in this directory, use [Troubleshooting](Troubleshooting.md) for failure
 diagnosis and [Migration](Migration.md) when converting older projects or APIs.
 
-Spec 043 is accepted phase by phase. Every phase stores its evidence below `out/validation/animation/` and updates `specs/043-complete-animation-system/acceptance-matrix.md` only for requirements proven by both automated and installed-tree live validation.
+Spec 043 is accepted phase by phase. Every phase stores its evidence below `out/validation/animation/` and updates `specs/complete-animation-system/acceptance-matrix.md` only for requirements proven by both automated and installed-tree live validation.
 
-`Tools/Animation/PhaseEvidenceTemplate.json` is the canonical evidence shape. Copy it into the phase evidence directory before a run, fill identity and command fields before execution, and update results as each bounded step finishes. The phase-gate script must leave a durable failed result when a required command, artifact, metric, click, MCP response, camera capture, or shutdown signal is missing.
+`Tools/Animation/AnimationEvidenceTemplate.json` is the canonical evidence shape. Copy it into the phase evidence directory before a run, fill identity and command fields before execution, and update results as each bounded step finishes. The phase-gate script must leave a durable failed result when a required command, artifact, metric, click, MCP response, camera capture, or shutdown signal is missing.
 
 ## Required phase sequence
 
-1. Verify the locked T001 baseline identity and digest without modifying it.
+1. Verify the locked animation-validation-is-completed-immutable-pre-feature-reference-capture-remains-sole-pre baseline identity and digest without modifying it.
 2. Record the source revision, build configuration, host, power state, graphics route, toolchain, workload hashes, editor settings, and ambient-process checklist.
 3. Run focused correctness, corruption, rollback, scheduler, mutation, stress, and repair work for the phase. Intermediate phases do not run a measured performance case.
 4. Build the integrated phase and run the CMake install target.
@@ -92,7 +92,7 @@ evidence document.
 - A row remains `Evidence incomplete` or `Blocked` when its live proof is unavailable, even if a unit test passes.
 - An acceptance update must contain at least one unique row and at least one row whose exact status is `Accepted`; a batch that only records incomplete or blocked rows cannot unblock the next phase. Accepted rows require one `acceptedEvidence` binding whose requirement IDs exactly match the accepted rows and whose operation, capture, and required manual IDs exactly match their reviewed passing scenario evidence. The binding also names at least four retained proof artifacts and includes a specific explanatory statement.
 
-The final T289 audit reconciles this accumulated evidence; it does not create replacement proof for an earlier phase.
+The final animation-validation-reconciliation-animation-semantic-timing-correctness-remains-intermediate-work audit reconciles this accumulated evidence; it does not create replacement proof for an earlier phase.
 
 For a successful gate with acceptance updates, the immutable run-root
 `result.json` deliberately records the pre-commit validation state and keeps
@@ -105,13 +105,13 @@ matrix before/after hashes and rows, and alone sets
 
 ## Intermediate gate invocation
 
-Use the explicit deferral switch for T024 and every later non-final phase gate. The authority must name the reviewed decision that permits execution to wait for final integration; a generic empty approval is rejected. Do not pass either performance manifest in this mode.
+Use the explicit deferral switch for animation-validation-foundational-focused-non-performance-tests-integrated-build-install-installed-editor and every later non-final phase gate. The authority must name the reviewed decision that permits execution to wait for final integration; a generic empty approval is rejected. Do not pass either performance manifest in this mode.
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
-	-File Tools/Animation/RunAnimationPhaseGate.ps1 `
+	-File Tools/Animation/RunAnimationValidationGate.ps1 `
 	-Phase foundation `
-	-GateTask T024 `
+	-GateTask animation-validation-foundational-focused-non-performance-tests-integrated-build-install-installed-editor `
 	-FixtureRoot <fixture-project> `
 	-ScenarioManifest <foundation-scenario.json> `
 	-AcceptanceUpdateManifest <foundation-acceptance-update.json> `
@@ -120,25 +120,25 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 	-Execute
 ```
 
-Deferred focused testing excludes standalone CTests matching `Performance` or exact `Editor.ExportBaseline`. Broad registries also receive exact `TERRAENGINE_TEST_EXCLUDE_FILTER` tokens for the animation benchmark namespaces and every currently audited measured profiler, virtual-geometry, physics, and editor timing/load case. The gate deliberately avoids generic harness tokens such as `Performance`, `PerformanceGate`, `Timing`, or `Overhead`, which would also hide structural result-schema, aggregation, and diagnostics checks. This policy retains the non-timed `Animation.Dormant.*` structural invariants and untimed stress/safety coverage. The gate still verifies the immutable T001 baseline and the reviewed schedule authority without changing a workload or threshold: runtime contract `1bb8bb3d0affa53d146b717171a7b23d72437af88449c273e8cb1a2fe4869279`, renderer workload manifest `397b7cb6ac01714a628c44bab6cb002c034c8d8e5422bf184dc10cddf201b12f`, and performance workloads `dd297ef96f629b290be03bce64dec19612726cd5931e886fb722d80970d49dba`. A passing intermediate result means correctness may unblock the next phase while `finalIntegrationBlockedOnPerformance` remains true for T283, T284, and T288.
+Deferred focused testing excludes standalone CTests matching `Performance` or exact `Editor.ExportBaseline`. Broad registries also receive exact `TERRAENGINE_TEST_EXCLUDE_FILTER` tokens for the animation benchmark namespaces and every currently audited measured profiler, virtual-geometry, physics, and editor timing/load case. The gate deliberately avoids generic harness tokens such as `Performance`, `PerformanceGate`, `Timing`, or `Overhead`, which would also hide structural result-schema, aggregation, and diagnostics checks. This policy retains the non-timed `Animation.Dormant.*` structural invariants and untimed stress/safety coverage. The gate still verifies the immutable animation-validation-is-completed-immutable-pre-feature-reference-capture-remains-sole-pre baseline and the reviewed schedule authority without changing a workload or threshold: runtime contract `1bb8bb3d0affa53d146b717171a7b23d72437af88449c273e8cb1a2fe4869279`, renderer workload manifest `397b7cb6ac01714a628c44bab6cb002c034c8d8e5422bf184dc10cddf201b12f`, and performance workloads `dd297ef96f629b290be03bce64dec19612726cd5931e886fb722d80970d49dba`. A passing intermediate result means correctness may unblock the next phase while `finalIntegrationBlockedOnPerformance` remains true for animation-validation-runs-every-accumulated-feature-workflow-benchmark-t-runs-every-unrelated, animation-validation-invoke-final-only-t-t-comparator-every-prepared-control-including, and animation-validation-repair-capable-final-checks-t-t-are-clean-final-blocking.
 
 ## Final Phase 18 invocation
 
-Final phases and every numeric gate task from T272 onward reject deferral. T288 requires both the T283 animation-performance manifest and the engine-wide candidate that the gate sends through the T284 comparator.
+Final phases and every numeric gate task from animation-validation-audit-every-fr-fr-sc-sc-against-incrementally-maintained-implementation onward reject deferral. animation-validation-repair-capable-final-checks-t-t-are-clean-final-blocking requires both the animation-validation-runs-every-accumulated-feature-workflow-benchmark-t-runs-every-unrelated animation-performance manifest and the engine-wide candidate that the gate sends through the animation-validation-invoke-final-only-t-t-comparator-every-prepared-control-including comparator.
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
-	-File Tools/Animation/RunAnimationPhaseGate.ps1 `
+	-File Tools/Animation/RunAnimationValidationGate.ps1 `
 	-Phase final-live `
-	-GateTask T288 `
+	-GateTask animation-validation-repair-capable-final-checks-t-t-are-clean-final-blocking `
 	-FixtureRoot <final-fixture-project> `
 	-ScenarioManifest <final-scenario.json> `
 	-AcceptanceUpdateManifest <final-acceptance-update.json> `
-	-FinalAnimationPerformanceEvidenceManifest out/validation/animation/final/animation-performance/t283-manifest.json `
+	-FinalAnimationPerformanceEvidenceManifest out/validation/animation/final/animation-performance/animation-validation-runs-every-accumulated-feature-workflow-benchmark-t-runs-every-unrelated-manifest.json `
 	-PerformanceCandidateManifest out/validation/animation/final/engine-performance/candidate-manifest.json `
 	-Execute
 ```
 
-There is not yet a separate canonical T283 JSON schema. Until T283 publishes one, the gate fails closed unless its manifest explicitly provides feature `043-complete-animation-system`, task `T283`, `passed: true`, a pass status/outcome, `deferred: false`, final-animation-performance scope, and exactly one object for each of SC-001, SC-006, SC-009, SC-013 through SC-015, and SC-027 through SC-031. Every criterion object must carry the actual JSON Boolean `passed: true`, a passing status, and non-empty metrics, measurements, evidence, or result data; a bare criterion ID is never proof. The validated file is hash-bound and copied into the live-gate evidence. This proves the supplied T283 result is non-deferred, but the current schema cannot independently prove capture time or bind every measurement to the live editor's executable; T283 should add those fields rather than having T288 infer them.
+There is not yet a separate canonical animation-validation-runs-every-accumulated-feature-workflow-benchmark-t-runs-every-unrelated JSON schema. Until animation-validation-runs-every-accumulated-feature-workflow-benchmark-t-runs-every-unrelated publishes one, the gate fails closed unless its manifest explicitly provides feature `complete-animation-system`, task `animation-validation-runs-every-accumulated-feature-workflow-benchmark-t-runs-every-unrelated`, `passed: true`, a pass status/outcome, `deferred: false`, final-animation-performance scope, and exactly one object for each of animation-outcome-creator-import-representative-animated-gltf-fbx-package-obtain-correctly-referenced-playable-prefab, animation-outcome-creator-build-preview-save-reload-run-locomotion-plus-action-controller-nested-states, animation-outcome-motion-matching-queries-over-reference-production-size-database-return-eligible-result-within, animation-outcome-reference-scene-containing-concurrently-active-joint-characters-two-blended-clips-sustains-least through animation-outcome-optional-animation-profiling-detailed-diagnostics-disabled-versus-enabled-but-collapsed-differ-no, and animation-outcome-character-reference-scene-gpu-visual-mode-reduces-animation-related-cpu-evaluation-time through animation-outcome-gpu-motion-matching-scoring-reduces-animation-related-cpu-search-time-least-reference. Every criterion object must carry the actual JSON Boolean `passed: true`, a passing status, and non-empty metrics, measurements, evidence, or result data; a bare criterion ID is never proof. The validated file is hash-bound and copied into the live-gate evidence. This proves the supplied animation-validation-runs-every-accumulated-feature-workflow-benchmark-t-runs-every-unrelated result is non-deferred, but the current schema cannot independently prove capture time or bind every measurement to the live editor's executable; animation-validation-runs-every-accumulated-feature-workflow-benchmark-t-runs-every-unrelated should add those fields rather than having animation-validation-repair-capable-final-checks-t-t-are-clean-final-blocking infer them.
 
-T285's 24-hour soak remains an independent mandatory final task. No canonical T130/T285 soak manifest exists yet, so this phase-gate change does not fabricate a soak pass; the future soak contract must add explicit final evidence before T288/T289 can claim complete feature acceptance.
+animation-validation-continuous-hour-mixed-animation-soak-renderer-physics-reload-cancellation-streaming's 24-hour soak remains an independent mandatory final task. No canonical animation-validation-us-cancellable-long-soak-execution-leak-deadlock-stale-publication-checks/animation-validation-continuous-hour-mixed-animation-soak-renderer-physics-reload-cancellation-streaming soak manifest exists yet, so this phase-gate change does not fabricate a soak pass; the future soak contract must add explicit final evidence before animation-validation-repair-capable-final-checks-t-t-are-clean-final-blocking/animation-validation-reconciliation-animation-semantic-timing-correctness-remains-intermediate-work can claim complete feature acceptance.

@@ -285,7 +285,7 @@ function Invoke-RunnerSlice {
 
 $resolvedManifest = Resolve-RepoPath $ManifestPath
 $resolvedSchema = Resolve-RepoPath $ResultSchemaPath
-if ((Get-Sha256 $resolvedManifest) -cne $script:ExpectedManifestSha256) { throw "The T129 stress manifest identity changed." }
+if ((Get-Sha256 $resolvedManifest) -cne $script:ExpectedManifestSha256) { throw "The AnimationValidationUsHashLockedFrozenCharacterCrowdComplexHeroModeChurn stress manifest identity changed." }
 if ((Get-Sha256 $resolvedSchema) -cne $script:ExpectedResultSchemaSha256) { throw "The soak result schema identity changed." }
 $manifest = Read-Json $resolvedManifest
 $schema = Read-Json $resolvedSchema

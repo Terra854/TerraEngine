@@ -1,0 +1,1381 @@
+{
+	"schemaVersion": 2,
+	"phase": "motion-matching-validation",
+	"fixtureOverlays": [
+		{
+			"source": "Tests/Fixtures/Animation/AdvancedAssets",
+			"destination": "Assets/Advanced"
+		},
+		{
+			"source": "Tests/Fixtures/Animation/AdvancedRuntimeActors",
+			"destination": "Assets/AdvancedActors"
+		}
+	],
+	"requiredTools": [
+		"asset.import",
+		"asset.list",
+		"asset.inspect",
+		"prefab.instantiate",
+		"scene.list_objects",
+		"animation.motion_database.build",
+		"animation.job.cancel",
+		"animation.job.get",
+		"play.state",
+		"play.pause",
+		"play.step",
+		"play.resume",
+		"animation.runtime.motion_match.request",
+		"animation.runtime.motion_match.read",
+		"animation.runtime.diagnostics",
+		"animation.runtime.residency",
+		"animation.runtime.profiler",
+		"camera.capture_custom",
+		"game_view.capture",
+		"camera.capture_object"
+	],
+	"requiredEvidence": [
+		"editor/mcp-operations.json",
+		"editor/operations/motion-matching-validation-import-motion-fixture.json",
+		"editor/operations/motion-matching-validation-list-motion-assets.json",
+		"editor/operations/motion-matching-validation-inspect-motion-source.json",
+		"editor/operations/motion-matching-validation-instantiate-motion-hero.json",
+		"editor/operations/motion-matching-validation-instantiate-runtime-actor.json",
+		"editor/operations/motion-matching-validation-observe-motion-hero.json",
+		"editor/operations/motion-matching-validation-observe-runtime-actor.json",
+		"editor/operations/motion-matching-validation-diagnostics-preplay.json",
+		"editor/operations/motion-matching-validation-start-cancelled-database-build.json",
+		"editor/operations/motion-matching-validation-cancel-database-build.json",
+		"editor/operations/motion-matching-validation-read-cancelled-build-1.json",
+		"editor/operations/motion-matching-validation-read-cancelled-build-2.json",
+		"editor/operations/motion-matching-validation-read-cancelled-build-3.json",
+		"editor/operations/motion-matching-validation-read-cancelled-build-4.json",
+		"editor/operations/motion-matching-validation-read-cancelled-build-final.json",
+		"editor/operations/motion-matching-validation-retry-database-build.json",
+		"editor/operations/motion-matching-validation-read-retry-build-1.json",
+		"editor/operations/motion-matching-validation-read-retry-build-2.json",
+		"editor/operations/motion-matching-validation-read-retry-build-3.json",
+		"editor/operations/motion-matching-validation-read-retry-build-4.json",
+		"editor/operations/motion-matching-validation-read-retry-build-5.json",
+		"editor/operations/motion-matching-validation-read-retry-build-6.json",
+		"editor/operations/motion-matching-validation-read-retry-build-7.json",
+		"editor/operations/motion-matching-validation-read-retry-build-8.json",
+		"editor/operations/motion-matching-validation-read-retry-build-9.json",
+		"editor/operations/motion-matching-validation-read-retry-build-10.json",
+		"editor/operations/motion-matching-validation-read-retry-build-11.json",
+		"editor/operations/motion-matching-validation-read-retry-build-final.json",
+		"editor/operations/motion-matching-validation-play-state.json",
+		"editor/operations/motion-matching-validation-pause-runtime.json",
+		"editor/operations/motion-matching-validation-set-built-database.json",
+		"editor/operations/motion-matching-validation-step-set-database.json",
+		"editor/operations/motion-matching-validation-query-built-database.json",
+		"editor/operations/motion-matching-validation-step-motion-query.json",
+		"editor/operations/motion-matching-validation-read-motion-query.json",
+		"editor/operations/motion-matching-validation-diagnostics-runtime.json",
+		"editor/operations/motion-matching-validation-gpu-residency.json",
+		"editor/operations/motion-matching-validation-gpu-profiler.json",
+		"editor/operations/motion-matching-validation-resume-runtime.json",
+		"editor/operations/motion-matching-validation-diagnostics-restored.json",
+		"editor/operations/motion-matching-validation-observe-restored-motion-hero.json",
+		"editor/operations/motion-matching-validation-observe-restored-runtime-actor.json"
+	],
+	"operations": [
+		{
+			"id": "motion-matching-validation-import-motion-fixture",
+			"stage": "prePlay",
+			"order": 10,
+			"tool": "asset.import",
+			"arguments": {
+				"path": "Models/ImportedHero.gltf",
+				"force": true
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.importResult.animationManifest",
+					"data.importResult.generatedPrefabs"
+				],
+				"fieldOneOf": {
+					"data.status": [
+						"Succeeded",
+						"SucceededWithWarnings"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-import-motion-fixture.json"
+		},
+		{
+			"id": "motion-matching-validation-list-motion-assets",
+			"stage": "prePlay",
+			"order": 20,
+			"tool": "asset.list",
+			"arguments": {
+				"search": "ImportedHero"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.assets"
+				]
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-list-motion-assets.json"
+		},
+		{
+			"id": "motion-matching-validation-inspect-motion-source",
+			"stage": "prePlay",
+			"order": 30,
+			"tool": "asset.inspect",
+			"arguments": {
+				"asset": "Assets/Models/ImportedHero.gltf"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data"
+				]
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-inspect-motion-source.json"
+		},
+		{
+			"id": "motion-matching-validation-instantiate-motion-hero",
+			"stage": "prePlay",
+			"order": 40,
+			"tool": "prefab.instantiate",
+			"arguments": {
+				"prefab": "Assets/Models/ImportedHero_Generated/ImportedHero.teprefab",
+				"name": "Motion Matching Validation Motion Matching Hero"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.instanceId",
+					"data.prefabId"
+				]
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-instantiate-motion-hero.json"
+		},
+		{
+			"id": "motion-matching-validation-instantiate-runtime-actor",
+			"stage": "prePlay",
+			"order": 50,
+			"tool": "prefab.instantiate",
+			"arguments": {
+				"prefab": "Assets/AdvancedActors/SourceBuiltMotionActor.teprefab",
+				"name": "Motion Matching Validation Motion Runtime Actor"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.instanceId",
+					"data.prefabId"
+				]
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-instantiate-runtime-actor.json"
+		},
+		{
+			"id": "motion-matching-validation-observe-motion-hero",
+			"stage": "prePlay",
+			"order": 60,
+			"tool": "scene.list_objects",
+			"arguments": {
+				"includeComponents": true,
+				"search": "Motion Matching Validation Motion Matching Hero"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.objects"
+				]
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-observe-motion-hero.json"
+		},
+		{
+			"id": "motion-matching-validation-observe-runtime-actor",
+			"stage": "prePlay",
+			"order": 70,
+			"tool": "scene.list_objects",
+			"arguments": {
+				"includeComponents": true,
+				"search": "Motion Matching Validation Motion Runtime Actor"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.objects"
+				]
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-observe-runtime-actor.json"
+		},
+		{
+			"id": "motion-matching-validation-diagnostics-preplay",
+			"stage": "prePlay",
+			"order": 80,
+			"tool": "animation.runtime.diagnostics",
+			"arguments": {
+				"includeDetails": true,
+				"maximumItems": 64,
+				"correlationId": "motion-matching-validation-motion-preplay"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data"
+				]
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-diagnostics-preplay.json"
+		},
+		{
+			"id": "motion-matching-validation-start-cancelled-database-build",
+			"stage": "prePlay",
+			"order": 90,
+			"tool": "animation.motion_database.build",
+			"arguments": {
+				"authoringPath": "AdvancedActors/source-locomotion.motiondb-authoring.json",
+				"outputPath": "AdvancedActors/source-locomotion-built.temotiondb",
+				"idempotencyKey": "motion-matching-validation-motion-build-cancel-v1",
+				"correlationId": "motion-matching-validation-motion-build-cancel",
+				"expectedGeneration": 1
+			},
+			"approval": {
+				"policy": "high_impact"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.authoringGeneration",
+					"data.outputPath",
+					"data.visibilityBoundary"
+				],
+				"fieldEquals": {
+					"data.state": "queued",
+					"data.authoringGeneration": 1,
+					"data.visibilityBoundary": "motion_database_worker_then_atomic_publish"
+				}
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-start-cancelled-database-build.json"
+		},
+		{
+			"id": "motion-matching-validation-cancel-database-build",
+			"stage": "prePlay",
+			"order": 100,
+			"tool": "animation.job.cancel",
+			"arguments": {
+				"jobId": null,
+				"idempotencyKey": "motion-matching-validation-motion-build-cancel-request-v1",
+				"correlationId": "motion-matching-validation-motion-build-cancel-request"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "motion-matching-validation-start-cancelled-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.cancelRequested",
+					"data.idempotencyDisposition"
+				],
+				"fieldEquals": {
+					"data.cancelRequested": true,
+					"data.idempotencyDisposition": "new"
+				}
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-cancel-database-build.json"
+		},
+		{
+			"id": "motion-matching-validation-read-cancelled-build-1",
+			"stage": "prePlay",
+			"order": 110,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "motion-matching-validation-read-cancelled-build-1"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "motion-matching-validation-start-cancelled-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.cancelRequested",
+					"data.result"
+				],
+				"fieldOneOf": {
+					"data.state": [
+						"running",
+						"cancel_requested",
+						"canceled"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-read-cancelled-build-1.json"
+		},
+		{
+			"id": "motion-matching-validation-read-cancelled-build-2",
+			"stage": "prePlay",
+			"order": 120,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "motion-matching-validation-read-cancelled-build-2"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "motion-matching-validation-start-cancelled-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.cancelRequested",
+					"data.result"
+				],
+				"fieldOneOf": {
+					"data.state": [
+						"running",
+						"cancel_requested",
+						"canceled"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-read-cancelled-build-2.json"
+		},
+		{
+			"id": "motion-matching-validation-read-cancelled-build-3",
+			"stage": "prePlay",
+			"order": 130,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "motion-matching-validation-read-cancelled-build-3"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "motion-matching-validation-start-cancelled-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.cancelRequested",
+					"data.result"
+				],
+				"fieldOneOf": {
+					"data.state": [
+						"running",
+						"cancel_requested",
+						"canceled"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-read-cancelled-build-3.json"
+		},
+		{
+			"id": "motion-matching-validation-read-cancelled-build-4",
+			"stage": "prePlay",
+			"order": 140,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "motion-matching-validation-read-cancelled-build-4"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "motion-matching-validation-start-cancelled-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.cancelRequested",
+					"data.result"
+				],
+				"fieldOneOf": {
+					"data.state": [
+						"running",
+						"cancel_requested",
+						"canceled"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-read-cancelled-build-4.json"
+		},
+		{
+			"id": "motion-matching-validation-read-cancelled-build-final",
+			"stage": "prePlay",
+			"order": 150,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "motion-matching-validation-read-cancelled-build-final"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "motion-matching-validation-start-cancelled-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.cancelRequested",
+					"data.result.status",
+					"data.result.lastGoodPreserved"
+				],
+				"fieldEquals": {
+					"data.state": "canceled",
+					"data.cancelRequested": true,
+					"data.result.status": "cancelled",
+					"data.result.lastGoodPreserved": true
+				}
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-read-cancelled-build-final.json"
+		},
+		{
+			"id": "motion-matching-validation-retry-database-build",
+			"stage": "prePlay",
+			"order": 160,
+			"tool": "animation.motion_database.build",
+			"arguments": {
+				"authoringPath": "AdvancedActors/source-locomotion.motiondb-authoring.json",
+				"outputPath": "AdvancedActors/source-locomotion-built.temotiondb",
+				"idempotencyKey": "motion-matching-validation-motion-build-retry-v1",
+				"correlationId": "motion-matching-validation-motion-build-retry",
+				"expectedGeneration": 2
+			},
+			"approval": {
+				"policy": "high_impact"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.authoringGeneration",
+					"data.outputPath",
+					"data.visibilityBoundary"
+				],
+				"fieldEquals": {
+					"data.state": "queued",
+					"data.authoringGeneration": 1,
+					"data.visibilityBoundary": "motion_database_worker_then_atomic_publish"
+				}
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-retry-database-build.json"
+		},
+		{
+			"id": "motion-matching-validation-read-retry-build-1",
+			"stage": "prePlay",
+			"order": 170,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "motion-matching-validation-read-retry-build-1"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "motion-matching-validation-retry-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.progress",
+					"data.result"
+				],
+				"fieldOneOf": {
+					"data.state": [
+						"queued",
+						"preparing",
+						"running",
+						"succeeded"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-read-retry-build-1.json"
+		},
+		{
+			"id": "motion-matching-validation-read-retry-build-2",
+			"stage": "prePlay",
+			"order": 180,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "motion-matching-validation-read-retry-build-2"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "motion-matching-validation-retry-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.progress",
+					"data.result"
+				],
+				"fieldOneOf": {
+					"data.state": [
+						"queued",
+						"preparing",
+						"running",
+						"succeeded"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-read-retry-build-2.json"
+		},
+		{
+			"id": "motion-matching-validation-read-retry-build-3",
+			"stage": "prePlay",
+			"order": 190,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "motion-matching-validation-read-retry-build-3"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "motion-matching-validation-retry-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.progress",
+					"data.result"
+				],
+				"fieldOneOf": {
+					"data.state": [
+						"queued",
+						"preparing",
+						"running",
+						"succeeded"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-read-retry-build-3.json"
+		},
+		{
+			"id": "motion-matching-validation-read-retry-build-4",
+			"stage": "prePlay",
+			"order": 200,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "motion-matching-validation-read-retry-build-4"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "motion-matching-validation-retry-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.progress",
+					"data.result"
+				],
+				"fieldOneOf": {
+					"data.state": [
+						"queued",
+						"preparing",
+						"running",
+						"succeeded"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-read-retry-build-4.json"
+		},
+		{
+			"id": "motion-matching-validation-read-retry-build-5",
+			"stage": "prePlay",
+			"order": 210,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "motion-matching-validation-read-retry-build-5"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "motion-matching-validation-retry-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.progress",
+					"data.result"
+				],
+				"fieldOneOf": {
+					"data.state": [
+						"queued",
+						"preparing",
+						"running",
+						"succeeded"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-read-retry-build-5.json"
+		},
+		{
+			"id": "motion-matching-validation-read-retry-build-6",
+			"stage": "prePlay",
+			"order": 220,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "motion-matching-validation-read-retry-build-6"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "motion-matching-validation-retry-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.progress",
+					"data.result"
+				],
+				"fieldOneOf": {
+					"data.state": [
+						"queued",
+						"preparing",
+						"running",
+						"succeeded"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-read-retry-build-6.json"
+		},
+		{
+			"id": "motion-matching-validation-read-retry-build-7",
+			"stage": "prePlay",
+			"order": 230,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "motion-matching-validation-read-retry-build-7"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "motion-matching-validation-retry-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.progress",
+					"data.result"
+				],
+				"fieldOneOf": {
+					"data.state": [
+						"queued",
+						"preparing",
+						"running",
+						"succeeded"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-read-retry-build-7.json"
+		},
+		{
+			"id": "motion-matching-validation-read-retry-build-8",
+			"stage": "prePlay",
+			"order": 240,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "motion-matching-validation-read-retry-build-8"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "motion-matching-validation-retry-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.progress",
+					"data.result"
+				],
+				"fieldOneOf": {
+					"data.state": [
+						"queued",
+						"preparing",
+						"running",
+						"succeeded"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-read-retry-build-8.json"
+		},
+		{
+			"id": "motion-matching-validation-read-retry-build-9",
+			"stage": "prePlay",
+			"order": 250,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "motion-matching-validation-read-retry-build-9"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "motion-matching-validation-retry-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.progress",
+					"data.result"
+				],
+				"fieldOneOf": {
+					"data.state": [
+						"queued",
+						"preparing",
+						"running",
+						"succeeded"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-read-retry-build-9.json"
+		},
+		{
+			"id": "motion-matching-validation-read-retry-build-10",
+			"stage": "prePlay",
+			"order": 260,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "motion-matching-validation-read-retry-build-10"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "motion-matching-validation-retry-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.progress",
+					"data.result"
+				],
+				"fieldOneOf": {
+					"data.state": [
+						"queued",
+						"preparing",
+						"running",
+						"succeeded"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-read-retry-build-10.json"
+		},
+		{
+			"id": "motion-matching-validation-read-retry-build-11",
+			"stage": "prePlay",
+			"order": 270,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "motion-matching-validation-read-retry-build-11"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "motion-matching-validation-retry-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.progress",
+					"data.result"
+				],
+				"fieldOneOf": {
+					"data.state": [
+						"queued",
+						"preparing",
+						"running",
+						"succeeded"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-read-retry-build-11.json"
+		},
+		{
+			"id": "motion-matching-validation-read-retry-build-final",
+			"stage": "prePlay",
+			"order": 280,
+			"tool": "animation.job.get",
+			"arguments": {
+				"jobId": null,
+				"correlationId": "motion-matching-validation-read-retry-build-final"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "motion-matching-validation-retry-database-build",
+					"sourceResponsePath": "data.jobId",
+					"destinationArgumentPath": "jobId",
+					"valueType": "string"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.jobId",
+					"data.state",
+					"data.progress",
+					"data.result.status",
+					"data.result.assetId",
+					"data.result.databaseGeneration",
+					"data.result.outputPath"
+				],
+				"fieldEquals": {
+					"data.state": "succeeded",
+					"data.result.status": "published"
+				}
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-read-retry-build-final.json"
+		},
+		{
+			"id": "motion-matching-validation-play-state",
+			"stage": "play",
+			"order": 300,
+			"tool": "play.state",
+			"arguments": {},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState"
+				],
+				"fieldEquals": {
+					"data.currentState": "playing"
+				}
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-play-state.json"
+		},
+		{
+			"id": "motion-matching-validation-pause-runtime",
+			"stage": "play",
+			"order": 310,
+			"tool": "play.pause",
+			"arguments": {
+				"expectedState": "playing",
+				"correlationId": "motion-matching-validation-pause-runtime"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState"
+				],
+				"fieldEquals": {
+					"data.currentState": "paused"
+				}
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-pause-runtime.json"
+		},
+		{
+			"id": "motion-matching-validation-set-built-database",
+			"stage": "play",
+			"order": 320,
+			"tool": "animation.runtime.motion_match.request",
+			"arguments": {
+				"target": {
+					"objectId": null
+				},
+				"action": "set_database",
+				"assetId": null,
+				"assetGeneration": null,
+				"featureCount": 48,
+				"flags": 0,
+				"targetTick": 0,
+				"idempotencyKey": "motion-matching-validation-set-built-database-v1",
+				"correlationId": "motion-matching-validation-set-built-database",
+				"expectedGeneration": 3
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "motion-matching-validation-instantiate-runtime-actor",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "target.objectId",
+					"valueType": "uuid"
+				},
+				{
+					"sourceOperationId": "motion-matching-validation-read-retry-build-final",
+					"sourceResponsePath": "data.result.assetId",
+					"destinationArgumentPath": "assetId",
+					"valueType": "uuid"
+				},
+				{
+					"sourceOperationId": "motion-matching-validation-read-retry-build-final",
+					"sourceResponsePath": "data.result.databaseGeneration",
+					"destinationArgumentPath": "assetGeneration",
+					"valueType": "integer"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.status",
+					"data.acknowledgement",
+					"data.queryId",
+					"data.visibilityBoundary"
+				],
+				"fieldEquals": {
+					"data.acknowledgement": "queued_not_yet_published",
+					"data.queryId": 0,
+					"data.visibilityBoundary": "animation_protected_capture_then_publication"
+				},
+				"fieldOneOf": {
+					"data.status": [
+						"queued",
+						"ok"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-set-built-database.json"
+		},
+		{
+			"id": "motion-matching-validation-step-set-database",
+			"stage": "play",
+			"order": 330,
+			"tool": "play.step",
+			"arguments": {
+				"expectedState": "paused",
+				"correlationId": "motion-matching-validation-step-set-database"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState",
+					"data.stepsCompleted"
+				],
+				"fieldEquals": {
+					"data.currentState": "paused",
+					"data.stepsCompleted": 1
+				}
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-step-set-database.json"
+		},
+		{
+			"id": "motion-matching-validation-query-built-database",
+			"stage": "play",
+			"order": 340,
+			"tool": "animation.runtime.motion_match.request",
+			"arguments": {
+				"target": {
+					"objectId": null
+				},
+				"action": "query",
+				"assetId": null,
+				"assetGeneration": null,
+				"featureCount": 48,
+				"queryId": 8001,
+				"flags": 0,
+				"targetTick": 0,
+				"idempotencyKey": "motion-matching-validation-query-built-database-v1",
+				"correlationId": "motion-matching-validation-query-built-database",
+				"expectedGeneration": 4
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "motion-matching-validation-instantiate-runtime-actor",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "target.objectId",
+					"valueType": "uuid"
+				},
+				{
+					"sourceOperationId": "motion-matching-validation-read-retry-build-final",
+					"sourceResponsePath": "data.result.assetId",
+					"destinationArgumentPath": "assetId",
+					"valueType": "uuid"
+				},
+				{
+					"sourceOperationId": "motion-matching-validation-read-retry-build-final",
+					"sourceResponsePath": "data.result.databaseGeneration",
+					"destinationArgumentPath": "assetGeneration",
+					"valueType": "integer"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.status",
+					"data.acknowledgement",
+					"data.queryId",
+					"data.visibilityBoundary"
+				],
+				"fieldEquals": {
+					"data.acknowledgement": "queued_not_yet_published",
+					"data.queryId": 8001,
+					"data.visibilityBoundary": "animation_protected_capture_then_publication"
+				},
+				"fieldOneOf": {
+					"data.status": [
+						"queued",
+						"ok"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-query-built-database.json"
+		},
+		{
+			"id": "motion-matching-validation-step-motion-query",
+			"stage": "play",
+			"order": 350,
+			"tool": "play.step",
+			"arguments": {
+				"expectedState": "paused",
+				"correlationId": "motion-matching-validation-step-motion-query"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState",
+					"data.stepsCompleted"
+				],
+				"fieldEquals": {
+					"data.currentState": "paused",
+					"data.stepsCompleted": 1
+				}
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-step-motion-query.json"
+		},
+		{
+			"id": "motion-matching-validation-read-motion-query",
+			"stage": "play",
+			"order": 360,
+			"tool": "animation.runtime.motion_match.read",
+			"arguments": {
+				"target": {
+					"objectId": null
+				},
+				"maximumItems": 8,
+				"correlationId": "motion-matching-validation-read-motion-query"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "motion-matching-validation-instantiate-runtime-actor",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "target.objectId",
+					"valueType": "uuid"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.snapshotCount",
+					"data.latestSnapshot.status",
+					"data.latestSnapshot.queryId",
+					"data.latestSnapshot.selectedSampleId",
+					"data.latestSnapshot.totalScore",
+					"data.latestSnapshot.trajectoryScore",
+					"data.latestSnapshot.poseScore",
+					"data.latestSnapshot.usedFallback",
+					"data.latestSnapshot.publicationGeneration",
+					"data.visibilityBoundary"
+				],
+				"fieldEquals": {
+					"data.latestSnapshot.status": "ok",
+					"data.latestSnapshot.queryId": 8001,
+					"data.visibilityBoundary": "immutable_motion_match_store_copies"
+				}
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-read-motion-query.json"
+		},
+		{
+			"id": "motion-matching-validation-diagnostics-runtime",
+			"stage": "play",
+			"order": 370,
+			"tool": "animation.runtime.diagnostics",
+			"arguments": {
+				"includeDetails": true,
+				"maximumItems": 64,
+				"correlationId": "motion-matching-validation-motion-runtime",
+				"rendererAvailable": true
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data"
+				]
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-diagnostics-runtime.json"
+		},
+		{
+			"id": "motion-matching-validation-gpu-residency",
+			"stage": "play",
+			"order": 380,
+			"tool": "animation.runtime.residency",
+			"arguments": {
+				"includeDetails": true,
+				"maximumItems": 64,
+				"correlationId": "motion-matching-validation-gpu-top-k"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.collectionPromotedByRequest"
+				]
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-gpu-residency.json"
+		},
+		{
+			"id": "motion-matching-validation-gpu-profiler",
+			"stage": "play",
+			"order": 390,
+			"tool": "animation.runtime.profiler",
+			"arguments": {
+				"includeDetails": true,
+				"maximumItems": 64,
+				"correlationId": "motion-matching-validation-gpu-top-k"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.collectionPromotedByRequest"
+				]
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-gpu-profiler.json"
+		},
+		{
+			"id": "motion-matching-validation-resume-runtime",
+			"stage": "play",
+			"order": 400,
+			"tool": "play.resume",
+			"arguments": {
+				"expectedState": "paused",
+				"correlationId": "motion-matching-validation-resume-runtime"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState"
+				],
+				"fieldEquals": {
+					"data.currentState": "playing"
+				}
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-resume-runtime.json"
+		},
+		{
+			"id": "motion-matching-validation-diagnostics-restored",
+			"stage": "postPlay",
+			"order": 420,
+			"tool": "animation.runtime.diagnostics",
+			"arguments": {
+				"includeDetails": true,
+				"maximumItems": 64,
+				"correlationId": "motion-matching-validation-motion-restored"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data"
+				]
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-diagnostics-restored.json"
+		},
+		{
+			"id": "motion-matching-validation-observe-restored-motion-hero",
+			"stage": "postPlay",
+			"order": 430,
+			"tool": "scene.list_objects",
+			"arguments": {
+				"includeComponents": true,
+				"search": "Motion Matching Validation Motion Matching Hero"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.objects"
+				]
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-observe-restored-motion-hero.json"
+		},
+		{
+			"id": "motion-matching-validation-observe-restored-runtime-actor",
+			"stage": "postPlay",
+			"order": 440,
+			"tool": "scene.list_objects",
+			"arguments": {
+				"includeComponents": true,
+				"search": "Motion Matching Validation Motion Runtime Actor"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.objects"
+				]
+			},
+			"evidencePath": "editor/operations/motion-matching-validation-observe-restored-runtime-actor.json"
+		}
+	],
+	"captures": [
+		{
+			"id": "motion-matching-validationmotionmatching-scene-view",
+			"view": "SceneView",
+			"stage": "prePlay",
+			"order": 290,
+			"tool": "camera.capture_custom",
+			"arguments": {
+				"name": "Motion Matching Validation Motion Matching Scene",
+				"position": [0, 1, 4],
+				"target": [0, 0.5, 0],
+				"up": [0, 1, 0],
+				"projection": "perspective",
+				"verticalFovDegrees": 60,
+				"nearPlane": 0.1,
+				"farPlane": 100
+			}
+		},
+		{
+			"id": "motion-matching-validationmotionmatching-game-view",
+			"view": "GameView",
+			"stage": "play",
+			"order": 410,
+			"tool": "game_view.capture",
+			"arguments": {
+				"includeOverlays": false,
+				"transparentBackground": false
+			}
+		},
+		{
+			"id": "motion-matching-validationmotionmatching-ingame-camera",
+			"view": "InGameCamera",
+			"stage": "postPlay",
+			"order": 450,
+			"tool": "camera.capture_object",
+			"arguments": {
+				"object": "Import Validation Capture Camera",
+				"includeDisabled": false,
+				"transparentBackground": false
+			}
+		}
+	],
+	"visualExpectations": [
+		{
+			"captureId": "motion-matching-validationmotionmatching-scene-view",
+			"contentPolicy": "visible-geometry-required"
+		},
+		{
+			"captureId": "motion-matching-validationmotionmatching-game-view",
+			"contentPolicy": "visible-geometry-required"
+		},
+		{
+			"captureId": "motion-matching-validationmotionmatching-ingame-camera",
+			"contentPolicy": "visible-geometry-required"
+		}
+	],
+	"visualIdentityExceptions": [
+		{
+			"captureIds": [
+				"motion-matching-validationmotionmatching-game-view",
+				"motion-matching-validationmotionmatching-ingame-camera"
+			],
+			"reason": "Game View and the authored in-game camera intentionally resolve the same active camera, so matching pixels are valid evidence."
+		}
+	],
+	"manualChecklist": [
+		{
+			"id": "motion-matching-validation-mouse-build-cancel-query-and-topk",
+			"input": "mouse",
+			"required": true,
+			"instruction": "Using real mouse input in the installed editor, use the visible Motion Matching Validation Motion Matching Hero for camera evidence and the separate mesh-free Motion Matching Validation Motion Runtime Actor for copied runtime proof. Inspect the motion-database authoring input, retained canceled job, atomically published retry, candidates, hard exclusions, contacts, phase, tags, fallback, score breakdown, database generation, and GPU top-K evidence. Capture the database window and candidate diagnostics, and do not attribute visible mesh deformation to the diagnostic actor."
+		},
+		{
+			"id": "motion-matching-validation-keyboard-deterministic-parity-and-restore",
+			"input": "keyboard",
+			"required": true,
+			"instruction": "Use keyboard input to replay identical trajectory, pose, contact, and tag query streams in Play Mode and compare CPU-authoritative selection with GPU top-K candidates, tie-breaking, fallback, rollback-safe generation rejection, and continuity. Do not claim timing or CPU-reduction acceptance. Exit Play Mode, confirm the authored database and scene restore, and retain parity and restored-state screenshots beneath the gate run root."
+		}
+	]
+}

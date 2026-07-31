@@ -116,10 +116,10 @@ function Assert-FrozenManifest {
 		[Parameter(Mandatory = $true)][string]$ResolvedManifestPath
 	)
 	if ((Get-Sha256 $ResolvedManifestPath) -cne $script:ExpectedManifestSha256) {
-		throw "The stress workload manifest bytes differ from the reviewed T129 identity."
+		throw "The stress workload manifest bytes differ from the reviewed AnimationValidationUsHashLockedFrozenCharacterCrowdComplexHeroModeChurn identity."
 	}
-	if ($Manifest.schemaVersion -ne 1 -or $Manifest.feature -ne "043-complete-animation-system" -or
-		$Manifest.task -ne "T129" -or $Manifest.performanceAcceptancePhase -ne 18 -or
+	if ($Manifest.schemaVersion -ne 1 -or $Manifest.feature -ne "complete-animation-system" -or
+		$Manifest.task -ne "AnimationValidationUsHashLockedFrozenCharacterCrowdComplexHeroModeChurn" -or $Manifest.performanceAcceptancePhase -ne 18 -or
 		-not $Manifest.performanceExecutionDeferred) {
 		throw "The stress manifest identity or final-phase execution guard is invalid."
 	}

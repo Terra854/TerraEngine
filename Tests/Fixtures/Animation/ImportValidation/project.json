@@ -1,0 +1,5 @@
+{
+	"name": "Animation Import Validation Import Gate",
+	"version": "1.0.0",
+	"startupScene": "Scenes/ImportValidation.tescene"
+}

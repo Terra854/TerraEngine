@@ -3,7 +3,7 @@
 # This collector measures the current installed tree only. It never reads a prior
 # candidate as input and it refuses to synthesize a measurement that a workload
 # did not publish. The result is therefore suitable as the candidate input to
-# CompareAnimationPerformance.ps1 and RunAnimationPhaseGate.ps1.
+# CompareAnimationPerformance.ps1 and RunAnimationValidationGate.ps1.
 
 [CmdletBinding()]
 param(
@@ -66,7 +66,7 @@ function Get-TextSha256 {
 
 function Get-BaselineEvidenceState {
 	param([Parameter(Mandatory = $true)][string]$BaselineRoot)
-	# Match the T001 lock selection exactly: generated project trees and the lock
+	# Match the AnimationValidationIsCompletedImmutablePreFeatureReferenceCaptureRemainsSolePre lock selection exactly: generated project trees and the lock
 	# file itself are excluded, while every other evidence byte is re-hashed.
 	$rootPrefix = [System.IO.Path]::GetFullPath($BaselineRoot).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
 	$lines = [System.Collections.Generic.List[string]]::new()
@@ -397,16 +397,16 @@ function Convert-PhysicsRun {
 	$facts = [ordered]@{
 		determinismHash = [string](Get-RequiredProperty $summary 'determinismHash' 'Physics summary')
 		normalShutdown = -not [bool]$summary.forcedTermination
-		profilerMetricGatePassed = [bool](Get-RequiredProperty $summary.us5Profiler.metricAvailability 'gatePassed' 'Physics profiler gates')
-		profilerDurationGatePassed = [bool](Get-RequiredProperty $summary.us5Profiler 'durationGatePassed' 'Physics profiler gates')
-		profilerSizeGatePassed = [bool](Get-RequiredProperty $summary.us5Profiler 'sizeGatePassed' 'Physics profiler gates')
+		profilerMetricGatePassed = [bool](Get-RequiredProperty $summary.gameplay-animation-validationProfiler.metricAvailability 'gatePassed' 'Physics profiler gates')
+		profilerDurationGatePassed = [bool](Get-RequiredProperty $summary.gameplay-animation-validationProfiler 'durationGatePassed' 'Physics profiler gates')
+		profilerSizeGatePassed = [bool](Get-RequiredProperty $summary.gameplay-animation-validationProfiler 'sizeGatePassed' 'Physics profiler gates')
 	}
 	$metrics = [ordered]@{
 		durationMs = New-Metric 'milliseconds' ([double](Get-RequiredProperty $summary 'monotonicDurationMs' 'Physics summary'))
 		frameMedianMs = New-Metric 'milliseconds' $normalizedProfiler.frameMedianMs; frameP95Ms = New-Metric 'milliseconds' $normalizedProfiler.frameP95Ms; frameP99Ms = New-Metric 'milliseconds' $normalizedProfiler.frameP99Ms; frameWorstMs = New-Metric 'milliseconds' $normalizedProfiler.frameWorstMs
 		engineMeanMs = New-Metric 'milliseconds' $normalizedProfiler.engineMeanMs; viewportCpuP95Ms = New-Metric 'milliseconds' $normalizedProfiler.viewportCpuP95Ms; viewportGpuP95Ms = New-Metric 'milliseconds' $normalizedProfiler.viewportGpuP95Ms
 		stepMedianMs = New-Metric 'milliseconds' (Get-Percentile $steps 0.50); stepP95Ms = New-Metric 'milliseconds' (Get-Percentile $steps 0.95); stepP99Ms = New-Metric 'milliseconds' (Get-Percentile $steps 0.99); stepWorstMs = New-Metric 'milliseconds' ((@($steps | Measure-Object -Maximum).Maximum))
-		profilerBytes = New-Metric 'bytes' ([double](Get-RequiredProperty $summary.us5Profiler 'artifactBytes' 'Physics profiler gates'))
+		profilerBytes = New-Metric 'bytes' ([double](Get-RequiredProperty $summary.gameplay-animation-validationProfiler 'artifactBytes' 'Physics profiler gates'))
 		maxWorkingSetBytes = New-Metric 'bytes' ([double](@($memory | Measure-Object workingSetBytes -Maximum).Maximum)); maxPrivateBytes = New-Metric 'bytes' ([double](@($memory | Measure-Object privateBytes -Maximum).Maximum))
 	}
 	$record = [ordered]@{ schemaVersion = 1; workloadId = $Control.id; runKind = $RunKind; runIndex = $RunIndex; succeeded = $true; settingsHash = $Control.settingsHash; sourceResultPaths = @((Get-RelativeRepoPath $summaryPath), (Get-RelativeRepoPath $metricsPath), (Get-RelativeRepoPath $artifactPath)); facts = $facts; metrics = $metrics }
@@ -492,7 +492,7 @@ try {
 	$evidenceLock = Read-Json $evidenceLockPath
 	$baselineEvidence = Get-BaselineEvidenceState -BaselineRoot $baselineRoot
 	$expectedAggregate = [string]$config.authority.lockedBaseline.evidenceAggregateSha256
-	if ([string]$evidenceLock.aggregateSha256 -cne $expectedAggregate -or [string]$baselineEvidence.aggregateSha256 -cne $expectedAggregate -or [int]$baselineEvidence.fileCount -ne [int]$evidenceLock.fileCount -or [UInt64]$baselineEvidence.totalBytes -ne [UInt64]$evidenceLock.totalBytes) { throw 'The protected T001 evidence selection changed; candidate collection is incomparable.' }
+	if ([string]$evidenceLock.aggregateSha256 -cne $expectedAggregate -or [string]$baselineEvidence.aggregateSha256 -cne $expectedAggregate -or [int]$baselineEvidence.fileCount -ne [int]$evidenceLock.fileCount -or [UInt64]$baselineEvidence.totalBytes -ne [UInt64]$evidenceLock.totalBytes) { throw 'The protected AnimationValidationIsCompletedImmutablePreFeatureReferenceCaptureRemainsSolePre evidence selection changed; candidate collection is incomparable.' }
 	$hostEvidence = Get-CurrentHostEvidence -ExpectedKnownAmbientProcesses @($config.candidateTemplate.comparisonSettings.knownAmbientProcessesPresent)
 	# Compare required facts individually because the raw host snapshot contains
 	# additional diagnostic fields while candidate identity has the locked shape.
@@ -510,7 +510,7 @@ try {
 	$runSpecs = @(for ($index = 0; $index -le 5; ++$index) {
 		[ordered]@{ index = $index; kind = if ($index -eq 0) { 'warmup' } else { 'measured' }; run = if ($index -eq 0) { 0 } else { $index }; label = if ($index -eq 0) { 'w' } else { "m$index" } }
 	})
-	# T001 measured each control as a contiguous warmup-plus-five batch. Preserve
+	# AnimationValidationIsCompletedImmutablePreFeatureReferenceCaptureRemainsSolePre measured each control as a contiguous warmup-plus-five batch. Preserve
 	# that order so thermal state and cache reuse are paired with the locked run.
 	foreach ($spec in $runSpecs) {
 		$focusedRoot = Join-Path $output ("f/{0}" -f $spec.label); $focusedLog = Join-Path $focusedRoot 'ctest.log'
@@ -550,7 +550,7 @@ try {
 	$manifestWorkloads = @(); foreach ($control in $controls) { $paths = @($normalized[$control.id]); if ($paths.Count -ne 6) { throw "Collector did not produce exactly one warmup plus five measured '$($control.id)' records." }; $manifestWorkloads += [ordered]@{ id = $control.id; settingsHash = $control.settingsHash; settings = $control.settings; warmupResultPath = Get-RelativeRepoPath $paths[0]; measuredResultPaths = @($paths[1..5] | ForEach-Object { Get-RelativeRepoPath $_ }) } }
 	$reference = [ordered]@{}; foreach ($property in $config.candidateTemplate.reference.PSObject.Properties) { $reference[$property.Name] = $property.Value }; $reference.performanceWorkloadsSha256 = Get-Sha256 $workloadsPath
 	$candidatePath = Join-Path $output 'candidate-manifest.json'
-	Write-Json $candidatePath ([ordered]@{ schemaVersion = 1; feature = '043-complete-animation-system'; reference = $reference; comparisonIdentity = $config.candidateTemplate.comparisonIdentity; comparisonSettings = $config.candidateTemplate.comparisonSettings; observations = $config.candidateTemplate.requiredObservations; candidateBuild = [ordered]@{ sourceCommit = $source.sourceCommit; sourceTreeDirty = $source.sourceTreeDirty; sourceDiffSha256 = $source.sourceDiffSha256; buildConfiguration = 'RelWithDebInfo'; installedTreeRoot = Get-RelativeRepoPath $install; artifacts = @([ordered]@{ path = Get-RelativeRepoPath $editor; sha256 = Get-Sha256 $editor }, [ordered]@{ path = Get-RelativeRepoPath $engine; sha256 = Get-Sha256 $engine }) }; rawInputPaths = @((Get-RelativeRepoPath $rawHostPath), (Get-RelativeRepoPath $sourcePath)); workloads = $manifestWorkloads })
+	Write-Json $candidatePath ([ordered]@{ schemaVersion = 1; feature = 'complete-animation-system'; reference = $reference; comparisonIdentity = $config.candidateTemplate.comparisonIdentity; comparisonSettings = $config.candidateTemplate.comparisonSettings; observations = $config.candidateTemplate.requiredObservations; candidateBuild = [ordered]@{ sourceCommit = $source.sourceCommit; sourceTreeDirty = $source.sourceTreeDirty; sourceDiffSha256 = $source.sourceDiffSha256; buildConfiguration = 'RelWithDebInfo'; installedTreeRoot = Get-RelativeRepoPath $install; artifacts = @([ordered]@{ path = Get-RelativeRepoPath $editor; sha256 = Get-Sha256 $editor }, [ordered]@{ path = Get-RelativeRepoPath $engine; sha256 = Get-Sha256 $engine }) }; rawInputPaths = @((Get-RelativeRepoPath $rawHostPath), (Get-RelativeRepoPath $sourcePath)); workloads = $manifestWorkloads })
 	$comparisonPath = Join-Path $output 'comparison.json'; & $powershell -NoProfile -ExecutionPolicy Bypass -File $comparatorPath -CandidateManifest (Get-RelativeRepoPath $candidatePath) -OutputPath (Get-RelativeRepoPath $comparisonPath); exit $LASTEXITCODE
 }
 catch {

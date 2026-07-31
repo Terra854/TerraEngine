@@ -1,11 +1,11 @@
 {
 	"schemaVersion": 1,
-	"feature": "043-complete-animation-system",
-	"task": "T003",
+	"feature": "complete-animation-system",
+	"task": "animation-validation-later-performance-related-tasks-may-construct-comparators-fixtures-instrumentation-schemas",
 	"description": "Source-controlled performance identities, controls, thresholds, and frozen animation reference profiles. Candidate evidence may reference these values but may not replace or override them.",
 	"authority": {
 		"runtimeContract": {
-			"path": "specs/043-complete-animation-system/contracts/runtime-limits-and-validation.md",
+			"path": "Docs/Animation/README.md",
 			"sha256": "1bb8bb3d0affa53d146b717171a7b23d72437af88449c273e8cb1a2fe4869279"
 		},
 		"lockedBaseline": {
@@ -48,7 +48,7 @@
 	},
 	"candidateTemplate": {
 		"reference": {
-			"feature": "043-complete-animation-system",
+			"feature": "complete-animation-system",
 			"baselineState": "locked",
 			"baselineSourceCommit": "6d12e3a99d7c0d41899fc96fa18b02b61e5a0aa9",
 			"baselineSha256": "cf4375934729e1afa745d9446faacfc1a7ba53a6d7db79b3d1e0e8164a5ced8f",
@@ -393,7 +393,7 @@
 				"prefabs": 1
 			},
 			"acceptance": {
-				"successCriterion": "SC-001",
+				"successCriterion": "animation-outcome-creator-import-representative-animated-gltf-fbx-package-obtain-correctly-referenced-playable-prefab",
 				"cleanTrials": 3,
 				"maximumSecondsPerTrial": 300
 			}
@@ -409,7 +409,7 @@
 				"measuredSecondsAfterWarmup": 60
 			},
 			"acceptance": {
-				"successCriteria": ["SC-013", "SC-027", "SC-028"],
+				"successCriteria": ["animation-outcome-reference-scene-containing-concurrently-active-joint-characters-two-blended-clips-sustains-least", "animation-outcome-character-reference-scene-gpu-visual-mode-reduces-animation-related-cpu-evaluation-time", "animation-outcome-instrumented-ordinary-gpu-visual-hybrid-authoritative-frames-perform-zero-complete-pose-gpu"],
 				"minimumUpdatesPerSecond": 60,
 				"maximumAnimationFrameMilliseconds": 50,
 				"minimumGpuVisualCpuReductionPercent": 75,
@@ -432,7 +432,7 @@
 				"shadows": true
 			},
 			"acceptance": {
-				"successCriterion": "SC-014",
+				"successCriterion": "animation-outcome-reference-hero-scene-combining-layered-graphs-morphs-ik-motion-matching-deformable-virtual",
 				"minimumUpdatesPerSecond": 60,
 				"memoryAfterWarmup": "bounded"
 			}
@@ -447,7 +447,7 @@
 				"fixedQueryRecords": 100000
 			},
 			"acceptance": {
-				"successCriteria": ["SC-009", "SC-010", "SC-031"],
+				"successCriteria": ["animation-outcome-motion-matching-queries-over-reference-production-size-database-return-eligible-result-within", "animation-outcome-identical-motion-matching-query-streams-select-identical-source-samples-expose-identical-score", "animation-outcome-gpu-motion-matching-scoring-reduces-animation-related-cpu-search-time-least-reference"],
 				"minimumOnTimePercent": 99.9,
 				"deadlineMilliseconds": 16.667,
 				"minimumGpuSearchCpuReductionPercent": 80,
@@ -461,7 +461,7 @@
 				"changeKinds": ["requested", "capability", "budget", "visibility"]
 			},
 			"acceptance": {
-				"successCriteria": ["SC-030", "SC-033", "SC-034", "SC-035"],
+				"successCriteria": ["animation-outcome-ten-thousand-forced-transitions-among-gpu-visual-hybrid-authoritative-cpu-deterministic-fallback", "animation-outcome-auto-selects-expected-effective-mode-preserves-declared-authoritative-outcome-visual-gameplay-physics", "animation-outcome-ten-thousand-rapid-visibility-short-lived-budget-changes-produce-zero-effective-mode", "animation-outcome-unsafe-unavailable-manual-force-request-validation-matrix-rejected-falls-back-documented-explicit"],
 				"maximumContinuityFailures": 0,
 				"maximumStaleGenerations": 0,
 				"maximumHysteresisViolations": 0
@@ -475,7 +475,7 @@
 				"cleanInstalledEditorLayout": true
 			},
 			"acceptance": {
-				"successCriterion": "SC-006",
+				"successCriterion": "animation-outcome-creator-build-preview-save-reload-run-locomotion-plus-action-controller-nested-states",
 				"cleanTrials": 3,
 				"maximumSecondsPerTrial": 900
 			}

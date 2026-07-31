@@ -1,0 +1,40 @@
+{
+	"name": "Animation Import Validation Import Gate",
+	"sceneSettings": {
+		"renderSettings": {
+			"ambientLight": [0.08, 0.09, 0.11],
+			"exposure": 1.0
+		}
+	},
+	"objects": [
+		{
+			"uuid": "43000000000000000000000000000101",
+			"name": "Import Validation Capture Camera",
+			"components": {
+				"Transform": {
+					"Position": [0.0, 1.0, 4.0],
+					"Rotation": [1.0, 0.0, 0.0, 0.0],
+					"Scale": [1.0, 1.0, 1.0]
+				},
+				"CameraComponent": {
+					"verticalFovDegrees": 60.0,
+					"aspectRatio": 1.7777777777777777,
+					"nearPlane": 0.1,
+					"farPlane": 100.0,
+					"up": [0.0, 1.0, 0.0]
+				}
+			}
+		},
+		{
+			"uuid": "43000000000000000000000000000102",
+			"name": "Import Validation Import Reference",
+			"components": {
+				"Transform": {
+					"Position": [0.0, 0.0, 0.0],
+					"Rotation": [1.0, 0.0, 0.0, 0.0],
+					"Scale": [1.0, 1.0, 1.0]
+				}
+			}
+		}
+	]
+}

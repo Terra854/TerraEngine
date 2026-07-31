@@ -173,7 +173,7 @@ function Find-PlayableValidationPrefab([string]$ProjectRoot, [string[]]$Preferre
 }
 
 function Assert-Manifest($Document) {
-	if ([int](Get-Property $Document 'schemaVersion') -ne 1 -or [string](Get-Property $Document 'feature') -ne '043-complete-animation-system' -or [string](Get-Property $Document 'manifestStatus') -ne 'verified') { throw 'Manifest has an unsupported or unverified identity.' }
+	if ([int](Get-Property $Document 'schemaVersion') -ne 1 -or [string](Get-Property $Document 'feature') -ne 'complete-animation-system' -or [string](Get-Property $Document 'manifestStatus') -ne 'verified') { throw 'Manifest has an unsupported or unverified identity.' }
 	$models = @((Get-Property $Document 'models'))
 	if ($models.Count -ne $script:RequiredValidationModelArchives.Count) { throw "The real-model gate requires exactly $($script:RequiredValidationModelArchives.Count) manifest-pinned model payloads." }
 	$ids = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
@@ -225,7 +225,7 @@ function Invoke-AnimationMutation([string]$Name, $Arguments, [ref]$Generation, $
 	$expected = [UInt64]$Generation.Value
 	if ($expected -lt 1) { throw "Animation mutation '$Name' has no valid expected generation." }
 	$script:AnimationMutationSequence++
-	$key = 't281-{0:d4}-{1}' -f $script:AnimationMutationSequence, $Name.Replace('.', '-')
+	$key = 'AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp{0:d4}-{1}' -f $script:AnimationMutationSequence, $Name.Replace('.', '-')
 	$payload = [ordered]@{}
 	foreach ($argumentName in @($Arguments.Keys)) { $payload[$argumentName] = $Arguments[$argumentName] }
 	$payload['idempotencyKey'] = $key
@@ -246,7 +246,7 @@ function Invoke-AnimationMutation([string]$Name, $Arguments, [ref]$Generation, $
 		# deliberately different checked value so this run still proves one real,
 		# atomic authored mutation instead of accepting or manufacturing success.
 		$script:AnimationMutationSequence++
-		$fallbackKey = 't281-{0:d4}-{1}-resume-fallback' -f $script:AnimationMutationSequence, $Name.Replace('.', '-')
+		$fallbackKey = 'AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp{0:d4}-{1}-resume-fallback' -f $script:AnimationMutationSequence, $Name.Replace('.', '-')
 		$fallbackPayload = [ordered]@{}
 		foreach ($argumentName in @($NoOpFallbackArguments.Keys)) {
 			$fallbackPayload[$argumentName] = $NoOpFallbackArguments[$argumentName]
@@ -900,7 +900,7 @@ function Compare-AnimationParityReports($Rendered, $Headless) {
 	}
 }
 
-function Get-T281AuthoringAssetId($Object, [string]$Name, [string]$Description) {
+function Get-AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpAuthoringAssetId($Object, [string]$Name, [string]$Description) {
 	$value = [string](Get-RequiredJsonProperty $Object $Name $Description)
 	if ($value -notmatch '^[0-9a-f]{32}$' -or $value -ceq ('0' * 32)) {
 		throw "$Description property '$Name' must be one nonzero lowercase UUID."
@@ -908,7 +908,7 @@ function Get-T281AuthoringAssetId($Object, [string]$Name, [string]$Description) 
 	return $value
 }
 
-function Wait-ForT281AuthoringReady(
+function Wait-ForAnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpAuthoringReady(
 	[string]$RunRoot,
 	[object[]]$AssetModels,
 	$RuntimePrefab,
@@ -917,21 +917,21 @@ function Wait-ForT281AuthoringReady(
 	[UInt64]$Generation) {
 	$fox = @($AssetModels | Where-Object { [string]$_.id -ceq 'khronos-fox-multiple-clips' })
 	$quaternius = @($AssetModels | Where-Object { [string]$_.id -ceq 'quaternius-ultimate-animated-character-pack' })
-	if ($fox.Count -ne 1 -or $quaternius.Count -ne 1) { throw 'T281 authoring requires exactly one Fox and one Quaternius package record.' }
+	if ($fox.Count -ne 1 -or $quaternius.Count -ne 1) { throw 'AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp authoring requires exactly one Fox and one Quaternius package record.' }
 	$foxClips = @(Get-AnimationSubassets $fox[0] 'animation_clip')
 	$foxSkeletons = @(Get-AnimationSubassets $fox[0] 'skeleton')
 	$quaterniusSkeletons = @(Get-AnimationSubassets $quaternius[0] 'skeleton')
 	$runtimeSkeleton = @($foxSkeletons | Where-Object { [string]$_.assetId -ceq [string]$RuntimePrefab.skeletonAssetId })
 	if ($foxClips.Count -lt 2 -or $runtimeSkeleton.Count -ne 1 -or $quaterniusSkeletons.Count -lt 1) {
-		throw 'T281 authoring prerequisites do not expose two Fox clips plus exact Fox and Quaternius skeleton publications.'
+		throw 'AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp authoring prerequisites do not expose two Fox clips plus exact Fox and Quaternius skeleton publications.'
 	}
 
 	$requestPath = Join-Path $RunRoot 'editor/authoring-request.json'
 	$readyPath = Join-Path $RunRoot 'editor/authoring-ready.json'
 	$request = [ordered]@{
 		schemaVersion = 1
-		task = 'T281'
-		instruction = 'Use only the launched installed editor and real UI controls. Create or duplicate the requested production animation assets beneath Assets/Validation/T281, bind them to the exact real-model assets below, save/import them, then write authoring-ready.json. Decimal stable IDs must be copied exactly as strings. Do not use repository semantic JSON fixtures or rename JSON as a cooked asset.'
+		task = 'AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp'
+		instruction = 'Use only the launched installed editor and real UI controls. Create or duplicate the requested production animation assets beneath Assets/Validation/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp, bind them to the exact real-model assets below, save/import them, then write authoring-ready.json. Decimal stable IDs must be copied exactly as strings. Do not use repository semantic JSON fixtures or rename JSON as a cooked asset.'
 		nativeWindow = $NativeWindow
 		realModelBindings = [ordered]@{
 			fox = [ordered]@{
@@ -945,12 +945,12 @@ function Wait-ForT281AuthoringReady(
 			}
 		}
 		requiredAssets = @(
-			[ordered]@{ kind = 'controller'; path = 'Assets/Validation/T281/T281FoxController.teanimctrl'; requirement = 'Bind the Fox skeleton/fingerprint, author two distinct Fox clip states, a Boolean transition parameter, and a transition between those states.' },
-			[ordered]@{ kind = 'skeleton'; path = 'Assets/Validation/T281/T281FoxSkeleton.teskel'; requirement = 'Duplicate the generated Fox skeleton into an editable standalone skeleton, preserve every joint in index order, and report the root joint stable ID.' },
-			[ordered]@{ kind = 'retarget'; path = 'Assets/Validation/T281/T281QuaterniusToFox.teretarget'; requirement = 'Bind Quaternius as source and Fox as target, author at least one required mapping and one reachable IK/contact rule.' },
-			[ordered]@{ kind = 'motionDatabase'; path = 'Assets/Validation/T281/T281FoxMotion.temotiondb'; requirement = 'Build a real database from Fox clips with at least one retained sample.' },
-			[ordered]@{ kind = 'ragdoll'; path = 'Assets/Validation/T281/T281FoxRagdoll.teragdoll'; requirement = 'Bind the Fox skeleton, generate at least one body, and author at least one joint blend record.' },
-			[ordered]@{ kind = 'recording'; path = 'Assets/Validation/T281/T281FoxRecording.teanim'; requirement = 'Create a registered Animation Clip starter at the exact recording destination so its durable .meta GUID already matches the recorder assetId.' }
+			[ordered]@{ kind = 'controller'; path = 'Assets/Validation/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpFoxController.teanimctrl'; requirement = 'Bind the Fox skeleton/fingerprint, author two distinct Fox clip states, a Boolean transition parameter, and a transition between those states.' },
+			[ordered]@{ kind = 'skeleton'; path = 'Assets/Validation/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpFoxSkeleton.teskel'; requirement = 'Duplicate the generated Fox skeleton into an editable standalone skeleton, preserve every joint in index order, and report the root joint stable ID.' },
+			[ordered]@{ kind = 'retarget'; path = 'Assets/Validation/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpQuaterniusToFox.teretarget'; requirement = 'Bind Quaternius as source and Fox as target, author at least one required mapping and one reachable IK/contact rule.' },
+			[ordered]@{ kind = 'motionDatabase'; path = 'Assets/Validation/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpFoxMotion.temotiondb'; requirement = 'Build a real database from Fox clips with at least one retained sample.' },
+			[ordered]@{ kind = 'ragdoll'; path = 'Assets/Validation/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpFoxRagdoll.teragdoll'; requirement = 'Bind the Fox skeleton, generate at least one body, and author at least one joint blend record.' },
+			[ordered]@{ kind = 'recording'; path = 'Assets/Validation/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpFoxRecording.teanim'; requirement = 'Create a registered Animation Clip starter at the exact recording destination so its durable .meta GUID already matches the recorder assetId.' }
 		)
 		readyFile = [ordered]@{
 			path = 'editor/authoring-ready.json'
@@ -967,13 +967,13 @@ function Wait-ForT281AuthoringReady(
 		}
 	}
 	Write-Json $requestPath $request
-	Write-Host "Complete the installed-editor T281 authoring request at: $requestPath"
+	Write-Host "Complete the installed-editor AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp authoring request at: $requestPath"
 	Write-Host "Then write the checked asset identities to: $readyPath"
 
 	$deadline = (Get-Date).AddSeconds($ManualEvidenceTimeoutSeconds)
 	while ((Get-Date) -lt $deadline) {
 		$Editor.Refresh()
-		if ($Editor.HasExited) { throw "Installed editor exited before T281 authored assets were ready." }
+		if ($Editor.HasExited) { throw "Installed editor exited before AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp authored assets were ready." }
 		if (Test-Path -LiteralPath $readyPath -PathType Leaf) {
 			try {
 				$candidate = Get-Content -Raw -LiteralPath $readyPath | ConvertFrom-Json
@@ -1003,18 +1003,18 @@ function Wait-ForT281AuthoringReady(
 	$recording = Get-RequiredJsonProperty $ready 'recording' 'authoring-ready.json'
 	$normalized = [ordered]@{
 		controller = [ordered]@{
-			assetId = Get-T281AuthoringAssetId $controller 'assetId' 'authoring-ready controller'
+			assetId = Get-AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpAuthoringAssetId $controller 'assetId' 'authoring-ready controller'
 			parameterStableId = Get-PositiveUInt64 $controller 'parameterStableId' 'authoring-ready controller'
 			sourceStateId = Get-PositiveUInt64 $controller 'sourceStateId' 'authoring-ready controller'
 			destinationStateId = Get-PositiveUInt64 $controller 'destinationStateId' 'authoring-ready controller'
 			transitionStableId = Get-PositiveUInt64 $controller 'transitionStableId' 'authoring-ready controller'
 		}
 		skeleton = [ordered]@{
-			assetId = Get-T281AuthoringAssetId $skeleton 'assetId' 'authoring-ready skeleton'
+			assetId = Get-AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpAuthoringAssetId $skeleton 'assetId' 'authoring-ready skeleton'
 			rootStableJointId = Get-PositiveUInt64 $skeleton 'rootStableJointId' 'authoring-ready skeleton'
 		}
 		retarget = [ordered]@{
-			assetId = Get-T281AuthoringAssetId $retarget 'assetId' 'authoring-ready retarget'
+			assetId = Get-AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpAuthoringAssetId $retarget 'assetId' 'authoring-ready retarget'
 			mappingStableId = Get-PositiveUInt64 $retarget 'mappingStableId' 'authoring-ready retarget'
 			sourceJointId = Get-PositiveUInt64 $retarget 'sourceJointId' 'authoring-ready retarget'
 			targetJointId = Get-PositiveUInt64 $retarget 'targetJointId' 'authoring-ready retarget'
@@ -1022,16 +1022,16 @@ function Wait-ForT281AuthoringReady(
 			targetChainId = Get-PositiveUInt64 $retarget 'targetChainId' 'authoring-ready retarget'
 		}
 		motionDatabase = [ordered]@{
-			assetId = Get-T281AuthoringAssetId $motion 'assetId' 'authoring-ready motion database'
+			assetId = Get-AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpAuthoringAssetId $motion 'assetId' 'authoring-ready motion database'
 			sampleStableId = Get-PositiveUInt64 $motion 'sampleStableId' 'authoring-ready motion database'
 		}
 		ragdoll = [ordered]@{
-			assetId = Get-T281AuthoringAssetId $ragdoll 'assetId' 'authoring-ready ragdoll'
+			assetId = Get-AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpAuthoringAssetId $ragdoll 'assetId' 'authoring-ready ragdoll'
 			bodyStableId = Get-PositiveUInt64 $ragdoll 'bodyStableId' 'authoring-ready ragdoll'
 			blendStableId = Get-PositiveUInt64 $ragdoll 'blendStableId' 'authoring-ready ragdoll'
 		}
 		recording = [ordered]@{
-			assetId = Get-T281AuthoringAssetId $recording 'assetId' 'authoring-ready recording'
+			assetId = Get-AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpAuthoringAssetId $recording 'assetId' 'authoring-ready recording'
 			compatibilityFingerprint = Get-PositiveUInt64 $recording 'compatibilityFingerprint' 'authoring-ready recording'
 			jointStableIds = @()
 		}
@@ -1071,12 +1071,12 @@ function Wait-ForT281AuthoringReady(
 		recording = 'AnimationClipAssetImporter'
 	}
 	$expectedSources = [ordered]@{
-		controller = 'Validation/T281/T281FoxController.teanimctrl'
-		skeleton = 'Validation/T281/T281FoxSkeleton.teskel'
-		retarget = 'Validation/T281/T281QuaterniusToFox.teretarget'
-		motionDatabase = 'Validation/T281/T281FoxMotion.temotiondb'
-		ragdoll = 'Validation/T281/T281FoxRagdoll.teragdoll'
-		recording = 'Validation/T281/T281FoxRecording.teanim'
+		controller = 'Validation/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpFoxController.teanimctrl'
+		skeleton = 'Validation/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpFoxSkeleton.teskel'
+		retarget = 'Validation/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpQuaterniusToFox.teretarget'
+		motionDatabase = 'Validation/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpFoxMotion.temotiondb'
+		ragdoll = 'Validation/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpFoxRagdoll.teragdoll'
+		recording = 'Validation/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpFoxRecording.teanim'
 	}
 	$inspections = [ordered]@{}
 	foreach ($kind in @($importers.Keys)) {
@@ -1084,7 +1084,7 @@ function Wait-ForT281AuthoringReady(
 		$inspection = Invoke-McpTool 'animation.asset.inspect' ([ordered]@{
 			assetId = $assetId
 			maximumItems = 64
-			correlationId = "t281-authoring-inspect-$kind"
+			correlationId = "AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpAuthoringInspect$kind"
 		})
 		if ([string](Get-NestedValue $inspection 'data.importer') -cne [string]$importers[$kind]) {
 			throw "Authored '$kind' asset '$assetId' is not registered through '$($importers[$kind])'."
@@ -1110,21 +1110,21 @@ function Wait-ForT281AuthoringReady(
 	return $normalized
 }
 
-function Invoke-T281AuthoredMutationMatrix($Ready, [UInt64]$Generation, [string]$RunRoot) {
+function Invoke-AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpAuthoredMutationMatrix($Ready, [UInt64]$Generation, [string]$RunRoot) {
 	$operations = [System.Collections.Generic.List[object]]::new()
 	$requests = @(
 		# The installed-editor authoring flow deliberately created a Trigger. Its
 		# value is monostate, so true/false payload members are correctly ignored.
 		# Rename the stable parameter to exercise a real persisted edit without
 		# changing its type or breaking the transition that references its ID.
-		[ordered]@{ name = 'animation.controller.edit'; assetId = $Ready.controller.assetId; payload = [ordered]@{ action = 'set_parameter_default'; stableId = $Ready.controller.parameterStableId; name = 'T281ShouldWalk' }; fallbackPayload = [ordered]@{ action = 'set_parameter_default'; stableId = $Ready.controller.parameterStableId; name = 'T281ShouldWalkResumed' } },
+		[ordered]@{ name = 'animation.controller.edit'; assetId = $Ready.controller.assetId; payload = [ordered]@{ action = 'set_parameter_default'; stableId = $Ready.controller.parameterStableId; name = 'AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpShouldWalk' }; fallbackPayload = [ordered]@{ action = 'set_parameter_default'; stableId = $Ready.controller.parameterStableId; name = 'AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpShouldWalkResumed' } },
 		[ordered]@{ name = 'animation.controller.edit'; assetId = $Ready.controller.assetId; payload = [ordered]@{ action = 'set_transition'; stableId = $Ready.controller.transitionStableId; sourceStateId = $Ready.controller.sourceStateId; destinationStateId = $Ready.controller.destinationStateId; conditionParameterId = $Ready.controller.parameterStableId; durationTicks = 15; exitTimeTicks = 1; destinationOffsetNormalized = 0.0; priority = 43 }; fallbackPayload = [ordered]@{ action = 'set_transition'; stableId = $Ready.controller.transitionStableId; sourceStateId = $Ready.controller.sourceStateId; destinationStateId = $Ready.controller.destinationStateId; conditionParameterId = $Ready.controller.parameterStableId; durationTicks = 16; exitTimeTicks = 1; destinationOffsetNormalized = 0.0; priority = 44 } },
-		[ordered]@{ name = 'animation.advanced.edit'; assetId = $Ready.skeleton.assetId; payload = [ordered]@{ action = 'skeleton.set_joint'; stableId = $Ready.skeleton.rootStableJointId; semantic = 'root' }; fallbackPayload = [ordered]@{ action = 'skeleton.set_joint'; stableId = $Ready.skeleton.rootStableJointId; semantic = 't281_verified_root' } },
+		[ordered]@{ name = 'animation.advanced.edit'; assetId = $Ready.skeleton.assetId; payload = [ordered]@{ action = 'skeleton.set_joint'; stableId = $Ready.skeleton.rootStableJointId; semantic = 'root' }; fallbackPayload = [ordered]@{ action = 'skeleton.set_joint'; stableId = $Ready.skeleton.rootStableJointId; semantic = 'AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp_verified_root' } },
 		[ordered]@{ name = 'animation.advanced.edit'; assetId = $Ready.retarget.assetId; payload = [ordered]@{ action = 'retarget.set_mapping'; stableId = $Ready.retarget.mappingStableId; sourceJointId = $Ready.retarget.sourceJointId; targetJointId = $Ready.retarget.targetJointId; required = $true }; fallbackPayload = [ordered]@{ action = 'retarget.set_mapping'; stableId = $Ready.retarget.mappingStableId; sourceJointId = $Ready.retarget.sourceJointId; targetJointId = $Ready.retarget.targetJointId; required = $false } },
 		[ordered]@{ name = 'animation.advanced.edit'; assetId = $Ready.retarget.assetId; payload = [ordered]@{ action = 'retarget.set_contact'; stableId = $Ready.retarget.contactStableId; sourceJointId = $Ready.retarget.sourceJointId; targetJointId = $Ready.retarget.targetJointId; targetChainId = $Ready.retarget.targetChainId; toleranceMeters = 0.02; preservePosition = $true; preserveOrientation = $true; required = $true }; fallbackPayload = [ordered]@{ action = 'retarget.set_contact'; stableId = $Ready.retarget.contactStableId; sourceJointId = $Ready.retarget.sourceJointId; targetJointId = $Ready.retarget.targetJointId; targetChainId = $Ready.retarget.targetChainId; toleranceMeters = 0.02; preservePosition = $true; preserveOrientation = $true; required = $false } },
 		# The operator authors one checked mapping/contact pair, not necessarily a
 		# complete rig map. Do not manufacture a full-coverage metric here.
-		[ordered]@{ name = 'animation.advanced.edit'; assetId = $Ready.retarget.assetId; payload = [ordered]@{ action = 'retarget.set_quality'; reachableToleranceMeters = 0.005; reviewReason = 'T281 installed-editor Quaternius-to-Fox mapping and stricter reachable IK tolerance reviewed.' }; fallbackPayload = [ordered]@{ action = 'retarget.set_quality'; reachableToleranceMeters = 0.006; reviewReason = 'T281 resumed installed-editor Quaternius-to-Fox mapping review.' } },
+		[ordered]@{ name = 'animation.advanced.edit'; assetId = $Ready.retarget.assetId; payload = [ordered]@{ action = 'retarget.set_quality'; reachableToleranceMeters = 0.005; reviewReason = 'AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp installed-editor Quaternius-to-Fox mapping and stricter reachable IK tolerance reviewed.' }; fallbackPayload = [ordered]@{ action = 'retarget.set_quality'; reachableToleranceMeters = 0.006; reviewReason = 'AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp resumed installed-editor Quaternius-to-Fox mapping review.' } },
 		# Continuity groups are topology: changing only one linked sample would
 		# correctly invalidate its predecessor/successor references. Exercise the
 		# independently editable query metadata while preserving that checked graph.
@@ -1159,17 +1159,17 @@ function Invoke-T281AuthoredMutationMatrix($Ready, [UInt64]$Generation, [string]
 	$validation = Invoke-McpTool 'animation.controller.validate' ([ordered]@{
 		assetId = [string]$Ready.controller.assetId
 		maximumDiagnostics = 64
-		correlationId = 't281-controller-validation'
+		correlationId = 'AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpControllerValidation'
 	})
 	if ([bool](Get-NestedValue $validation 'data.valid') -ne $true -or [string](Get-NestedValue $validation 'data.status') -cne 'ok') {
-		throw 'The fully edited T281 controller failed checked controller validation.'
+		throw 'The fully edited AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp controller failed checked controller validation.'
 	}
 	if ([UInt64](Get-NestedValue $validation 'data.generation') -ne $Generation) {
 		throw 'Read-only controller validation unexpectedly changed the animation generation.'
 	}
 	$evidence = [ordered]@{
 		schemaVersion = 1
-		task = 'T281'
+		task = 'AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp'
 		generation = $Generation
 		operations = @($operations)
 		controllerValidation = Get-Property $validation 'data'
@@ -1179,7 +1179,7 @@ function Invoke-T281AuthoredMutationMatrix($Ready, [UInt64]$Generation, [string]
 	return [ordered]@{ generation = $Generation; evidencePath = $path; evidenceSha256 = Get-Sha256 $path; operations = @($operations); controllerValidation = Get-Property $validation 'data' }
 }
 
-function Invoke-T281RuntimeRecording(
+function Invoke-AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpRuntimeRecording(
 	[string]$RunRoot,
 	[string]$RuntimeObjectId,
 	$AuthoringReady,
@@ -1195,7 +1195,7 @@ function Invoke-T281RuntimeRecording(
 	while ((Get-Date) -lt $deadline) {
 		$diagnostics = Invoke-McpTool 'animation.runtime.diagnostics' ([ordered]@{
 			assetId = [string]$AuthoringReady.runtime.defaultClipAssetId
-			correlationId = 't281-recording-initial-publication'
+			correlationId = 'AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpRecordingInitialPublication'
 			maximumItems = 64
 			includeDetails = $false
 		})
@@ -1229,7 +1229,7 @@ function Invoke-T281RuntimeRecording(
 	while ((Get-Date) -lt $deadline) {
 		$diagnostics = Invoke-McpTool 'animation.runtime.diagnostics' ([ordered]@{
 			assetId = [string]$AuthoringReady.runtime.defaultClipAssetId
-			correlationId = 't281-recording-seek-settle'
+			correlationId = 'AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpRecordingSeekSettle'
 			maximumItems = 64
 			includeDetails = $false
 		})
@@ -1252,7 +1252,7 @@ function Invoke-T281RuntimeRecording(
 	if ($null -eq $settledDiagnostics) { throw 'The deterministic recording seek did not reach its protected animation publication boundary.' }
 
 	$recordingAssetId = [string]$AuthoringReady.recording.assetId
-	$correlation = 't281-real-model-recording'
+	$correlation = 'AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpRealModelRecording'
 	$recordingEnvelope = Invoke-McpToolEnvelope 'animation.recording.start' ([ordered]@{
 		target = [ordered]@{ objectId = $RuntimeObjectId }
 		assetId = $recordingAssetId
@@ -1266,7 +1266,7 @@ function Invoke-T281RuntimeRecording(
 		bindCurrentPublication = $true
 		publicationGeneration = [UInt32]0
 		jointStableIds = $jointIds
-		destinationPath = 'Validation/T281/T281FoxRecording.teanim'
+		destinationPath = 'Validation/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpFoxRecording.teanim'
 		# Bind-current replaces this schema-compatible placeholder range with the
 		# retained snapshot's [max(0,tick-1), tick] one-shot range.
 		firstTick = 0
@@ -1276,12 +1276,12 @@ function Invoke-T281RuntimeRecording(
 		channels = @([ordered]@{
 			stableChannelId = [UInt64]430281
 			stableTargetId = [UInt64]$jointIds[0]
-			name = 'T281 Root Translation'
+			name = 'AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp Root Translation'
 			kind = 'bone_translation'
 			interpolation = 'linear'
 		})
 		sourceSceneIdentity = 'Assets/Scenes/ValidationModels.tescene'
-		sourceSessionIdentity = 't281-installed-editor-real-model'
+		sourceSessionIdentity = 'AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpInstalledEditorRealModel'
 		samplesPerChunk = 1
 		maximumCapturedSamples = 2
 		maximumStagedBytes = 16777216
@@ -1305,11 +1305,11 @@ function Invoke-T281RuntimeRecording(
 		[UInt64](Get-Property $recordingResult 'capturedSamples') -lt 1) {
 		throw 'The approved recording job omitted or contradicted its exact bind-current publication, tick, joint, or publication evidence.'
 	}
-	$destination = Join-Path $RunRoot 'project/Assets/Validation/T281/T281FoxRecording.teanim'
+	$destination = Join-Path $RunRoot 'project/Assets/Validation/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpFoxRecording.teanim'
 	if (-not (Test-Path -LiteralPath $destination -PathType Leaf) -or (Get-Item -LiteralPath $destination).Length -eq 0) {
-		throw 'The approved recording job did not atomically publish Validation/T281/T281FoxRecording.teanim.'
+		throw 'The approved recording job did not atomically publish Validation/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpFoxRecording.teanim.'
 	}
-	$imported = Invoke-McpTool 'asset.import' ([ordered]@{ path = 'Validation/T281/T281FoxRecording.teanim'; force = $true })
+	$imported = Invoke-McpTool 'asset.import' ([ordered]@{ path = 'Validation/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpFoxRecording.teanim'; force = $true })
 	$importStatus = [string](Get-NestedValue $imported 'data.status')
 	if ($importStatus -cnotin @('queued', 'imported')) {
 		throw "The published recording did not enter the generic asset import pipeline; status was '$importStatus'."
@@ -1318,7 +1318,7 @@ function Invoke-T281RuntimeRecording(
 	# rather than the model package's synchronous importResult sidecar. Wait until
 	# the internal compiler has atomically copied the exact recorded bytes before
 	# accepting registry inspection or opening the clip in the preview decoder.
-	$compiledRecording = Join-Path $RunRoot 'project/Build/Assets/Validation/T281/T281FoxRecording.teanim'
+	$compiledRecording = Join-Path $RunRoot 'project/Build/Assets/Validation/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpFoxRecording.teanim'
 	$sourceHash = Get-Sha256 $destination
 	$deadline = (Get-Date).AddSeconds(30)
 	while ((Get-Date) -lt $deadline) {
@@ -1332,19 +1332,19 @@ function Invoke-T281RuntimeRecording(
 		(Get-Sha256 $compiledRecording) -cne $sourceHash) {
 		throw 'The queued recording import did not atomically publish identical compiled clip bytes.'
 	}
-	$listed = Invoke-McpTool 'asset.list' ([ordered]@{ search = 'T281FoxRecording.teanim' })
-	$matches = @((Get-NestedValue $listed 'data.assets') | Where-Object { [string]$_.path -ceq 'Validation/T281/T281FoxRecording.teanim' })
+	$listed = Invoke-McpTool 'asset.list' ([ordered]@{ search = 'AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpFoxRecording.teanim' })
+	$matches = @((Get-NestedValue $listed 'data.assets') | Where-Object { [string]$_.path -ceq 'Validation/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpFoxRecording.teanim' })
 	if ($matches.Count -ne 1 -or [string](Get-Property $matches[0] 'guid') -cne $recordingAssetId) {
 		throw 'The published recording was not uniquely registered under its deterministic asset ID.'
 	}
 	$inspection = Invoke-McpTool 'animation.asset.inspect' ([ordered]@{
 		assetId = $recordingAssetId
 		maximumItems = 64
-		correlationId = 't281-recording-published-inspection'
+		correlationId = 'AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpRecordingPublishedInspection'
 	})
 	if ([string](Get-NestedValue $inspection 'data.registeredAssetId') -cne $recordingAssetId -or
 		[string](Get-NestedValue $inspection 'data.importer') -cne 'AnimationClipAssetImporter' -or
-		([string](Get-NestedValue $inspection 'data.sourcePath')).Replace('\', '/') -cne 'Validation/T281/T281FoxRecording.teanim' -or
+		([string](Get-NestedValue $inspection 'data.sourcePath')).Replace('\', '/') -cne 'Validation/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp/AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpFoxRecording.teanim' -or
 		[UInt64](Get-NestedValue $inspection 'data.generation') -ne $Generation) {
 		throw 'The published recording did not retain its checked clip identity, importer, path, and animation generation.'
 	}
@@ -1353,11 +1353,11 @@ function Invoke-T281RuntimeRecording(
 	# real joint data and that preview transport does not need to touch the Play
 	# world in order to seek, reverse, tick, and close the recorded clip.
 	$recordedPreview = Invoke-AnimationPreviewMatrix @([ordered]@{
-		id = 't281-recorded-fox'
+		id = 'AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpRecordedFox'
 		subassets = @([ordered]@{
 			kind = 'animation_clip'
 			assetId = $recordingAssetId
-			displayName = 'T281FoxRecording.teanim'
+			displayName = 'AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpFoxRecording.teanim'
 			publishedGeneration = $Generation
 		})
 	}) $Generation
@@ -1481,18 +1481,18 @@ function Wait-ForEditorMainWindow([System.Diagnostics.Process]$Editor, [int]$Tim
 	throw "Installed editor did not expose a native main window within $TimeoutSeconds seconds."
 }
 
-function Write-T281ManualChecklist([string]$RunRoot, [object[]]$Models, $NativeWindow) {
+function Write-AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpManualChecklist([string]$RunRoot, [object[]]$Models, $NativeWindow) {
 	$items = [System.Collections.Generic.List[object]]::new()
 	foreach ($global in @(
-		[ordered]@{ id = 't281-author-controller-transition'; input = 'mouse'; instruction = 'In Animation Controller Editor, show the exact Fox-bound controller, two distinct clip states, Boolean condition, deterministic transition, and root-motion policy/result controls.' },
-		[ordered]@{ id = 't281-author-skeleton-retarget-ik'; input = 'mouse'; instruction = 'In Skeleton and Retarget editors, show the duplicated Fox skeleton stable IDs plus the Quaternius-to-Fox mapping, reachable IK/contact rule, and accepted quality result.' },
-		[ordered]@{ id = 't281-author-motion-match'; input = 'mouse'; instruction = 'In Motion Matching Database Editor, show the real Fox clip sources, built sample inventory, metadata, and a successful query/result view.' },
-		[ordered]@{ id = 't281-author-ragdoll'; input = 'mouse'; instruction = 'In Ragdoll Editor, show the Fox skeleton binding, generated body/collider records, joint blend, activate/recover controls, and stable visual result.' },
-		[ordered]@{ id = 't281-recording-and-clip-review'; input = 'mouse'; instruction = 'Approve the typed recording request, then open the published T281FoxRecording.teanim in Animation Clip Editor and show its Recording provenance/channels.' },
-		[ordered]@{ id = 't281-animation-windows-controls'; input = 'mouse'; instruction = 'Open and exercise Animation Clip, Skeleton, Controller, Blend Tree, State Machine, Transition, Layer/Mask, Retarget, Motion Matching, Ragdoll, and Diagnostics windows using their real controls.' },
-		[ordered]@{ id = 't281-play-scene-game-camera-culling-shadows'; input = 'mouse'; instruction = 'In Play Mode, inspect Scene View, Game View, authored camera, and custom camera while toggling/observing animation culling, visibility return, deformation, lighting, and shadows.' },
-		[ordered]@{ id = 't281-export-source-free-runtime-review'; input = 'keyboard'; instruction = 'Use the installed editor export approval/controls, then inspect the completed source-free rendered/headless parity artifacts and the non-vacuous Vulkan capture.' },
-		[ordered]@{ id = 't281-play-restoration'; input = 'keyboard'; instruction = 'After the full matrix, leave Play Mode stopped and verify authored scene/editor state was restored without preview leakage.' }
+		[ordered]@{ id = 'AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpAuthorControllerTransition'; input = 'mouse'; instruction = 'In Animation Controller Editor, show the exact Fox-bound controller, two distinct clip states, Boolean condition, deterministic transition, and root-motion policy/result controls.' },
+		[ordered]@{ id = 'AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpAuthorSkeletonRetargetIk'; input = 'mouse'; instruction = 'In Skeleton and Retarget editors, show the duplicated Fox skeleton stable IDs plus the Quaternius-to-Fox mapping, reachable IK/contact rule, and accepted quality result.' },
+		[ordered]@{ id = 'AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpAuthorMotionMatch'; input = 'mouse'; instruction = 'In Motion Matching Database Editor, show the real Fox clip sources, built sample inventory, metadata, and a successful query/result view.' },
+		[ordered]@{ id = 'AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpAuthorRagdoll'; input = 'mouse'; instruction = 'In Ragdoll Editor, show the Fox skeleton binding, generated body/collider records, joint blend, activate/recover controls, and stable visual result.' },
+		[ordered]@{ id = 'AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpRecordingAndClipReview'; input = 'mouse'; instruction = 'Approve the typed recording request, then open the published AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpFoxRecording.teanim in Animation Clip Editor and show its Recording provenance/channels.' },
+		[ordered]@{ id = 'AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpAnimationWindowsControls'; input = 'mouse'; instruction = 'Open and exercise Animation Clip, Skeleton, Controller, Blend Tree, State Machine, Transition, Layer/Mask, Retarget, Motion Matching, Ragdoll, and Diagnostics windows using their real controls.' },
+		[ordered]@{ id = 'AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpPlaySceneGameCameraCullingShadows'; input = 'mouse'; instruction = 'In Play Mode, inspect Scene View, Game View, authored camera, and custom camera while toggling/observing animation culling, visibility return, deformation, lighting, and shadows.' },
+		[ordered]@{ id = 'AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpExportSourceFreeRuntimeReview'; input = 'keyboard'; instruction = 'Use the installed editor export approval/controls, then inspect the completed source-free rendered/headless parity artifacts and the non-vacuous Vulkan capture.' },
+		[ordered]@{ id = 'AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpPlayRestoration'; input = 'keyboard'; instruction = 'After the full matrix, leave Play Mode stopped and verify authored scene/editor state was restored without preview leakage.' }
 	)) {
 		$global['required'] = $true
 		$items.Add($global)
@@ -1511,7 +1511,7 @@ function Write-T281ManualChecklist([string]$RunRoot, [object[]]$Models, $NativeW
 	}
 	$checklist = [ordered]@{
 		schemaVersion = 3
-		task = 'T281'
+		task = 'AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp'
 		instruction = 'Use real human or Win32SendInput mouse/keyboard input in this installed editor. Append one clicks.jsonl object for every exact item ID. Each passing action requires non-empty observed text and at least one distinct, newly captured native-window-screenshot PNG bound by actionId/actionSequence. PrintWindow process/window metadata and strictly increasing capture timestamps are mandatory. Only after every machine and UI action is complete write {"completed":true,"defects":[]} to manual-complete.json.'
 		nativeWindow = $NativeWindow
 		items = @($items)
@@ -1521,7 +1521,7 @@ function Write-T281ManualChecklist([string]$RunRoot, [object[]]$Models, $NativeW
 	return $checklist
 }
 
-function Read-AndValidateT281ManualEvidence(
+function Read-AndValidateAnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpManualEvidence(
 	[string]$RunRoot,
 	$Checklist,
 	[System.Diagnostics.Process]$Editor) {
@@ -1650,7 +1650,7 @@ function Read-AndValidateT281ManualEvidence(
 	foreach ($requiredId in $declaredIds) {
 		if (-not $recordIds.Contains($requiredId)) { throw "Manual checklist item '$requiredId' lacks exactly one passing action record." }
 	}
-	if ($recordIds.Count -ne $declaredIds.Count) { throw 'Manual transcript action set does not exactly match the T281 checklist.' }
+	if ($recordIds.Count -ne $declaredIds.Count) { throw 'Manual transcript action set does not exactly match the AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp checklist.' }
 	return [ordered]@{
 		schemaVersion = 2
 		completed = $true
@@ -1681,7 +1681,7 @@ function Wait-ForManualEvidence([string]$RunRoot, $Checklist, [System.Diagnostic
 		Start-Sleep -Milliseconds 500
 	}
 	if (-not (Test-Path -LiteralPath $proofPath -PathType Leaf)) { throw "Timed out after $ManualEvidenceTimeoutSeconds seconds waiting for real installed-editor manual proof." }
-	$validated = Read-AndValidateT281ManualEvidence $RunRoot $Checklist $Editor
+	$validated = Read-AndValidateAnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpManualEvidence $RunRoot $Checklist $Editor
 	$validatedPath = Join-Path $RunRoot 'editor/manual-evidence.json'
 	Write-Json $validatedPath $validated
 	$validated['evidencePath'] = $validatedPath
@@ -1689,76 +1689,76 @@ function Wait-ForManualEvidence([string]$RunRoot, $Checklist, [System.Diagnostic
 	return $validated
 }
 
-function Publish-T282RuntimeEvidence(
+function Publish-AnimationValidationExportAcquiredModelProjectTepakLaunchInstalledRuntimeHeadlessRuntimeRuntimeEvidence(
 	[string]$RunRoot,
 	[string]$ExportRuntimeResultsPath,
 	$MachineEvidence) {
-	# T282 has an independent evidence location from the broader T281 editor
+	# AnimationValidationExportAcquiredModelProjectTepakLaunchInstalledRuntimeHeadlessRuntime has an independent evidence location from the broader AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp editor
 	# matrix. Copy only the approved export and source-free runtime proof after
 	# both parity lanes pass; the disposable source project is intentionally not
 	# duplicated into this evidence tree.
 	$runId = Split-Path -Leaf $RunRoot
-	$t282Root = Join-Path $ExportRuntimeResultsPath $runId
-	Assert-AtOrBelow $ExportRuntimeResultsPath $t282Root 'T282 export-runtime evidence root'
-	if (Test-Path -LiteralPath $t282Root) {
-		# Manual T281 proof can be retried after this independently published T282
+	$AnimationValidationExportAcquiredModelProjectTepakLaunchInstalledRuntimeHeadlessRuntimeRoot = Join-Path $ExportRuntimeResultsPath $runId
+	Assert-AtOrBelow $ExportRuntimeResultsPath $AnimationValidationExportAcquiredModelProjectTepakLaunchInstalledRuntimeHeadlessRuntimeRoot 'AnimationValidationExportAcquiredModelProjectTepakLaunchInstalledRuntimeHeadlessRuntime export-runtime evidence root'
+	if (Test-Path -LiteralPath $AnimationValidationExportAcquiredModelProjectTepakLaunchInstalledRuntimeHeadlessRuntimeRoot) {
+		# Manual AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp proof can be retried after this independently published AnimationValidationExportAcquiredModelProjectTepakLaunchInstalledRuntimeHeadlessRuntime
 		# lane has already passed. Reuse only an exact, readable success record for
 		# this same run root; any partial, foreign, or malformed directory still
 		# fails closed instead of being silently overwritten.
-		$existingSummaryPath = Join-Path $t282Root 'result.json'
+		$existingSummaryPath = Join-Path $AnimationValidationExportAcquiredModelProjectTepakLaunchInstalledRuntimeHeadlessRuntimeRoot 'result.json'
 		if (-not (Test-Path -LiteralPath $existingSummaryPath -PathType Leaf)) {
-			throw "Existing T282 export-runtime evidence for run '$runId' has no result.json."
+			throw "Existing AnimationValidationExportAcquiredModelProjectTepakLaunchInstalledRuntimeHeadlessRuntime export-runtime evidence for run '$runId' has no result.json."
 		}
 		try {
 			$existingSummary = Get-Content -Raw -LiteralPath $existingSummaryPath | ConvertFrom-Json
 		} catch {
-			throw "Existing T282 export-runtime evidence for run '$runId' has invalid result.json: $($_.Exception.Message)"
+			throw "Existing AnimationValidationExportAcquiredModelProjectTepakLaunchInstalledRuntimeHeadlessRuntime export-runtime evidence for run '$runId' has invalid result.json: $($_.Exception.Message)"
 		}
 		$expectedRunRoot = [System.IO.Path]::GetFullPath($RunRoot).TrimEnd('\', '/')
-		$recordedRunRoot = [System.IO.Path]::GetFullPath([string](Get-Property $existingSummary 'sourceT281RunRoot')).TrimEnd('\', '/')
+		$recordedRunRoot = [System.IO.Path]::GetFullPath([string](Get-Property $existingSummary 'sourceAnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpRunRoot')).TrimEnd('\', '/')
 		if ([int](Get-Property $existingSummary 'schemaVersion') -ne 1 -or
-			[string](Get-Property $existingSummary 'task') -cne 'T282' -or
+			[string](Get-Property $existingSummary 'task') -cne 'AnimationValidationExportAcquiredModelProjectTepakLaunchInstalledRuntimeHeadlessRuntime' -or
 			[string](Get-Property $existingSummary 'status') -cne 'machine-parity-passed' -or
 			-not $recordedRunRoot.Equals($expectedRunRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
-			throw "Existing T282 export-runtime evidence for run '$runId' is not an exact successful record for this run."
+			throw "Existing AnimationValidationExportAcquiredModelProjectTepakLaunchInstalledRuntimeHeadlessRuntime export-runtime evidence for run '$runId' is not an exact successful record for this run."
 		}
-		return [ordered]@{ root = $t282Root; result = $existingSummaryPath; resultSha256 = Get-Sha256 $existingSummaryPath }
+		return [ordered]@{ root = $AnimationValidationExportAcquiredModelProjectTepakLaunchInstalledRuntimeHeadlessRuntimeRoot; result = $existingSummaryPath; resultSha256 = Get-Sha256 $existingSummaryPath }
 	}
-	[System.IO.Directory]::CreateDirectory($t282Root) | Out-Null
+	[System.IO.Directory]::CreateDirectory($AnimationValidationExportAcquiredModelProjectTepakLaunchInstalledRuntimeHeadlessRuntimeRoot) | Out-Null
 	foreach ($relativeDirectory in @('export', 'runtime')) {
 		$source = Join-Path $RunRoot $relativeDirectory
-		if (-not (Test-Path -LiteralPath $source -PathType Container)) { throw "T282 source evidence directory '$relativeDirectory' is missing." }
-		Copy-Item -LiteralPath $source -Destination $t282Root -Recurse
+		if (-not (Test-Path -LiteralPath $source -PathType Container)) { throw "AnimationValidationExportAcquiredModelProjectTepakLaunchInstalledRuntimeHeadlessRuntime source evidence directory '$relativeDirectory' is missing." }
+		Copy-Item -LiteralPath $source -Destination $AnimationValidationExportAcquiredModelProjectTepakLaunchInstalledRuntimeHeadlessRuntimeRoot -Recurse
 	}
-	$editorDestination = Join-Path $t282Root 'editor'
+	$editorDestination = Join-Path $AnimationValidationExportAcquiredModelProjectTepakLaunchInstalledRuntimeHeadlessRuntimeRoot 'editor'
 	[System.IO.Directory]::CreateDirectory($editorDestination) | Out-Null
 	foreach ($fileName in @('mcp.jsonl', 'approval-requests.jsonl')) {
 		$source = Join-Path (Join-Path $RunRoot 'editor') $fileName
-		if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "T282 required editor evidence '$fileName' is missing." }
+		if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "AnimationValidationExportAcquiredModelProjectTepakLaunchInstalledRuntimeHeadlessRuntime required editor evidence '$fileName' is missing." }
 		Copy-Item -LiteralPath $source -Destination (Join-Path $editorDestination $fileName)
 	}
-	$summaryPath = Join-Path $t282Root 'result.json'
+	$summaryPath = Join-Path $AnimationValidationExportAcquiredModelProjectTepakLaunchInstalledRuntimeHeadlessRuntimeRoot 'result.json'
 	Write-Json $summaryPath ([ordered]@{
 		schemaVersion = 1
-		task = 'T282'
-		feature = '043-complete-animation-system'
+		task = 'AnimationValidationExportAcquiredModelProjectTepakLaunchInstalledRuntimeHeadlessRuntime'
+		feature = 'complete-animation-system'
 		status = 'machine-parity-passed'
 		failClosed = $true
-		sourceT281RunRoot = $RunRoot
-		manualT281Gate = 'pending_or_separately_recorded'
+		sourceAnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpRunRoot = $RunRoot
+		manualAnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpGate = 'pending_or_separately_recorded'
 		machineEvidence = $MachineEvidence
-		reason = 'Approved acquired-model TEPAK export, isolated source-free bootstrap, rendered Vulkan capture, and 120-tick rendered/headless authoritative parity passed. This record does not claim the separate real-click T281 matrix passed.'
+		reason = 'Approved acquired-model TEPAK export, isolated source-free bootstrap, rendered Vulkan capture, and 120-tick rendered/headless authoritative parity passed. This record does not claim the separate real-click AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp matrix passed.'
 	})
-	return [ordered]@{ root = $t282Root; result = $summaryPath; resultSha256 = Get-Sha256 $summaryPath }
+	return [ordered]@{ root = $AnimationValidationExportAcquiredModelProjectTepakLaunchInstalledRuntimeHeadlessRuntimeRoot; result = $summaryPath; resultSha256 = Get-Sha256 $summaryPath }
 }
 
 $repoRoot = (Get-Location).Path; $manifestPath = Get-AbsolutePath $Manifest $repoRoot; $cachePath = Get-AbsolutePath $CacheRoot $repoRoot; $installPath = Get-AbsolutePath $InstallRoot $repoRoot; $resultsPath = Get-AbsolutePath $ResultsRoot $repoRoot; $exportRuntimeResultsPath = Get-AbsolutePath $ExportRuntimeResultsRoot $repoRoot
-$result = [ordered]@{ schemaVersion = 3; tool = 'TestValidationModels'; tasks = @('T281', 'T282'); feature = '043-complete-animation-system'; status = 'failed'; failClosed = $true; runRoot = ''; models = @(); reason = '' }
+$result = [ordered]@{ schemaVersion = 3; tool = 'TestValidationModels'; tasks = @('AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp', 'AnimationValidationExportAcquiredModelProjectTepakLaunchInstalledRuntimeHeadlessRuntime'); feature = 'complete-animation-system'; status = 'failed'; failClosed = $true; runRoot = ''; models = @(); reason = '' }
 $editor = $null
 try {
 	Assert-AtOrBelow (Join-Path $repoRoot 'out') $cachePath 'Validation model cache root'
 	Assert-AtOrBelow (Join-Path $repoRoot 'out') $resultsPath 'Validation model results root'
-	Assert-AtOrBelow (Join-Path $repoRoot 'out') $exportRuntimeResultsPath 'T282 export-runtime results root'
+	Assert-AtOrBelow (Join-Path $repoRoot 'out') $exportRuntimeResultsPath 'AnimationValidationExportAcquiredModelProjectTepakLaunchInstalledRuntimeHeadlessRuntime export-runtime results root'
 	if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw "Validation-model manifest is missing: '$manifestPath'." }
 	$manifestText = [System.IO.File]::ReadAllText($manifestPath, $script:Utf8NoBom)
 	$models = Assert-Manifest ($manifestText | ConvertFrom-Json)
@@ -1817,12 +1817,12 @@ try {
 		suppressRecentProjects = $true
 		editorMcpEnabled = $true
 		editorMcpWriteModeDefault = 'writes_enabled'
-		editorMcpRecentSession = 'animation-validation-models'
+		editorMcpRecentSession = 'AnimationValidationModels'
 		editorMcpListenPort = $McpPort
 	})
 	$script:McpEndpoint = "http://127.0.0.1:$McpPort/mcp"; $script:McpTranscript = Join-Path $runRoot 'editor/mcp.jsonl'
 	$start = [System.Diagnostics.ProcessStartInfo]::new(); $start.FileName = $editorPath; $start.Arguments = "--project `"$(Join-Path $runRoot 'project')`""; $start.WorkingDirectory = Split-Path -Parent $editorPath; $start.UseShellExecute = $false; $start.EnvironmentVariables['TERRAENGINE_EDITOR_PREFS_PATH'] = $preferencesPath; $start.EnvironmentVariables['TERRAENGINE_SUPPRESS_PROJECT_RECENTS'] = '1'; $editor = [System.Diagnostics.Process]::Start($start); if ($null -eq $editor) { throw 'Installed editor failed to start.' }
-	$deadline = (Get-Date).AddSeconds($EditorStartupTimeoutSeconds); $tools = @(); $toolDescriptors = @(); while ((Get-Date) -lt $deadline) { $editor.Refresh(); if ($editor.HasExited) { throw "Installed editor exited before MCP readiness with code $($editor.ExitCode)." }; try { $ready = Invoke-McpRpc 'initialize' ([ordered]@{ protocolVersion = '2025-03-26'; clientInfo = [ordered]@{ name = 'animation-validation-models'; version = '1' } }); if ([string]$ready.result.serverInfo.name -eq 'TerraEngine Editor') { $candidateDescriptors = @((Invoke-McpRpc 'tools/list').result.tools); $projectImport = @($candidateDescriptors | Where-Object { [string]$_.name -eq 'asset.import' }); $sceneOpen = @($candidateDescriptors | Where-Object { [string]$_.name -eq 'scene.open' }); if ($projectImport.Count -eq 1 -and [bool](Get-NestedValue $projectImport[0] 'availability.available') -and $sceneOpen.Count -eq 1 -and [bool](Get-NestedValue $sceneOpen[0] 'availability.available')) { $toolDescriptors = $candidateDescriptors; $tools = @($toolDescriptors | ForEach-Object { [string]$_.name }); break } } } catch {}; Start-Sleep -Milliseconds 500 }; if ($tools.Count -eq 0) { throw 'Installed editor MCP and project-scoped tools did not become ready.' }
+	$deadline = (Get-Date).AddSeconds($EditorStartupTimeoutSeconds); $tools = @(); $toolDescriptors = @(); while ((Get-Date) -lt $deadline) { $editor.Refresh(); if ($editor.HasExited) { throw "Installed editor exited before MCP readiness with code $($editor.ExitCode)." }; try { $ready = Invoke-McpRpc 'initialize' ([ordered]@{ protocolVersion = '2025-03-26'; clientInfo = [ordered]@{ name = 'AnimationValidationModels'; version = '1' } }); if ([string]$ready.result.serverInfo.name -eq 'TerraEngine Editor') { $candidateDescriptors = @((Invoke-McpRpc 'tools/list').result.tools); $projectImport = @($candidateDescriptors | Where-Object { [string]$_.name -eq 'asset.import' }); $sceneOpen = @($candidateDescriptors | Where-Object { [string]$_.name -eq 'scene.open' }); if ($projectImport.Count -eq 1 -and [bool](Get-NestedValue $projectImport[0] 'availability.available') -and $sceneOpen.Count -eq 1 -and [bool](Get-NestedValue $sceneOpen[0] 'availability.available')) { $toolDescriptors = $candidateDescriptors; $tools = @($toolDescriptors | ForEach-Object { [string]$_.name }); break } } } catch {}; Start-Sleep -Milliseconds 500 }; if ($tools.Count -eq 0) { throw 'Installed editor MCP and project-scoped tools did not become ready.' }
 	foreach ($tool in @('asset.list', 'asset.import', 'asset.inspect', 'prefab.instantiate', 'scene.open', 'scene.save', 'scene.list_objects', 'component.get', 'component.set_property', 'animation.asset.import', 'animation.asset.reimport', 'animation.asset.inspect', 'animation.controller.edit', 'animation.controller.validate', 'animation.advanced.edit', 'animation.preview.play', 'animation.recording.start', 'animation.runtime.parameters', 'animation.runtime.diagnostics', 'animation.camera.capture', 'animation.job.get', 'play.state', 'play.enter', 'play.exit', 'game_view.capture', 'camera.capture_custom', 'camera.capture_object', 'export.validate', 'export.start', 'jobs.get')) { Assert-Tool $tools $tool }
 	Assert-TypedMutationDescriptor @($toolDescriptors | Where-Object { [string]$_.name -eq 'animation.asset.import' })[0] 'animation.asset.import'
 	Assert-TypedMutationDescriptor @($toolDescriptors | Where-Object { [string]$_.name -eq 'animation.asset.reimport' })[0] 'animation.asset.reimport'
@@ -1837,7 +1837,7 @@ try {
 	$nativeWindow = Wait-ForEditorMainWindow $editor $EditorStartupTimeoutSeconds
 	Write-Json (Join-Path $runRoot 'editor/native-window.json') ([ordered]@{
 		schemaVersion = 1
-		task = 'T281'
+		task = 'AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp'
 		processId = $nativeWindow.processId
 		windowHandle = $nativeWindow.windowHandle
 		windowTitle = $nativeWindow.windowTitle
@@ -1908,14 +1908,14 @@ try {
 	if ($foxAssets.Count -ne 1) { throw 'The generated Fox package was not uniquely available for the runtime fixture.' }
 	$foxSkeletonIds = @(Get-AnimationSubassets $foxAssets[0] 'skeleton' | ForEach-Object { [string]$_.assetId })
 	$runtimeFixturePrefab = Find-PlayableValidationPrefab (Join-Path $runRoot 'project') $foxSkeletonIds
-	$manualChecklist = Write-T281ManualChecklist $runRoot $models $nativeWindow
+	$manualChecklist = Write-AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpManualChecklist $runRoot $models $nativeWindow
 
 	if ($AutomationOnly) {
 		$authoringEvidence = [ordered]@{ completed = $false; status = 'skipped'; reason = 'AutomationOnly cannot create and inspect production animation assets through real editor controls.' }
 		Write-Json (Join-Path $runRoot 'editor/authoring-status.json') $authoringEvidence
 	} else {
-		$authoringReady = Wait-ForT281AuthoringReady $runRoot @($animationModelAssets) $runtimeFixturePrefab $nativeWindow $editor $animationGeneration
-		$authoringEvidence = Invoke-T281AuthoredMutationMatrix $authoringReady $animationGeneration $runRoot
+		$authoringReady = Wait-ForAnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpAuthoringReady $runRoot @($animationModelAssets) $runtimeFixturePrefab $nativeWindow $editor $animationGeneration
+		$authoringEvidence = Invoke-AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpAuthoredMutationMatrix $authoringReady $animationGeneration $runRoot
 		$animationGeneration = [UInt64]$authoringEvidence.generation
 	}
 
@@ -2047,7 +2047,7 @@ try {
 		if ($AutomationOnly) {
 			$recordingEvidence = [ordered]@{ completed = $false; status = 'skipped'; reason = 'A checked full skeleton joint list requires the installed-editor authoring step.' }
 		} else {
-			$recordingEvidence = Invoke-T281RuntimeRecording $runRoot $runtimeFixtureInstanceId $authoringReady $animationGeneration
+			$recordingEvidence = Invoke-AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcpRuntimeRecording $runRoot $runtimeFixtureInstanceId $authoringReady $animationGeneration
 			$animationGeneration = [UInt64]$recordingEvidence.generation
 			Write-Json (Join-Path $runRoot 'editor/recording-evidence.json') $recordingEvidence
 		}
@@ -2114,7 +2114,7 @@ try {
 		throw "Installed-editor Play/recording/camera proof failed: $playValidationError"
 	}
 	$afterPlay = Invoke-McpTool 'play.state'
-	if ([string](Get-NestedValue $afterPlay 'data.currentState') -cne 'stopped') { throw 'The installed editor did not restore stopped state after T281 Play validation.' }
+	if ([string](Get-NestedValue $afterPlay 'data.currentState') -cne 'stopped') { throw 'The installed editor did not restore stopped state after AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp Play validation.' }
 	# Manual policy is a recorder-only fixture constraint. Restore normal
 	# EveryFrame playback before saving/exporting so the TEPAK parity lanes still
 	# exercise advancing animation rather than a static pose.
@@ -2293,10 +2293,10 @@ try {
 			normalBootstrap = $normalBootstrap
 			parity = $parityComparison
 		}
-		# Preserve T282's complete source-free export and runtime artifacts before
-		# waiting on the separate T281 mouse/keyboard matrix. A later manual timeout
+		# Preserve AnimationValidationExportAcquiredModelProjectTepakLaunchInstalledRuntimeHeadlessRuntime's complete source-free export and runtime artifacts before
+		# waiting on the separate AnimationValidationRealModelInstalledEditorMatrixRealClicksAnimationWindowsMcp mouse/keyboard matrix. A later manual timeout
 		# therefore cannot fabricate or erase the already observed parity outcome.
-		$machineEvidence['t282Evidence'] = Publish-T282RuntimeEvidence $runRoot $exportRuntimeResultsPath $machineEvidence
+		$machineEvidence['AnimationValidationExportAcquiredModelProjectTepakLaunchInstalledRuntimeHeadlessRuntimeEvidence'] = Publish-AnimationValidationExportAcquiredModelProjectTepakLaunchInstalledRuntimeHeadlessRuntimeRuntimeEvidence $runRoot $exportRuntimeResultsPath $machineEvidence
 		# Ask for real installed-editor mouse/keyboard proof only after Play,
 		# cameras, approved export, isolated bootstrap, and both runtime parity
 		# lanes are complete. This keeps every checklist assertion temporally true.

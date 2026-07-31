@@ -1,0 +1,239 @@
+{
+	"schemaVersion": 2,
+	"phase": "playback-validation",
+	"requiredTools": [
+		"asset.import",
+		"asset.list",
+		"prefab.instantiate",
+		"diagnostics.get_summary"
+	],
+	"requiredEvidence": [
+		"editor/mcp-operations.json",
+		"editor/operations/playback-validation-import-playback-package.json",
+		"editor/operations/playback-validation-query-generated-animation.json",
+		"editor/operations/playback-validation-instantiate-playback-prefab.json",
+		"editor/operations/playback-validation-preplay-scene-query.json",
+		"editor/operations/playback-validation-diagnostics.json",
+		"editor/operations/playback-validation-postplay-restoration-query.json",
+		"editor/operations/playback-validation-postplay-diagnostics.json"
+	],
+	"operations": [
+		{
+			"id": "playback-validation-import-playback-package",
+			"stage": "prePlay",
+			"order": 10,
+			"tool": "asset.import",
+			"arguments": {
+				"path": "Models/ImportedHero.gltf",
+				"force": true
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.importResult.animationManifest",
+					"data.importResult.generatedPrefabs"
+				],
+				"fieldOneOf": {
+					"data.status": [
+						"Succeeded",
+						"SucceededWithWarnings"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/playback-validation-import-playback-package.json"
+		},
+		{
+			"id": "playback-validation-query-generated-animation",
+			"stage": "prePlay",
+			"order": 20,
+			"tool": "asset.list",
+			"arguments": {
+				"search": "ImportedHero"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.assets"
+				]
+			},
+			"evidencePath": "editor/operations/playback-validation-query-generated-animation.json"
+		},
+		{
+			"id": "playback-validation-instantiate-playback-prefab",
+			"stage": "prePlay",
+			"order": 30,
+			"tool": "prefab.instantiate",
+			"arguments": {
+				"prefab": "Assets/Models/ImportedHero_Generated/ImportedHero.teprefab",
+				"name": "Playback Validation Playback Hero"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.instanceId",
+					"data.prefabId"
+				]
+			},
+			"evidencePath": "editor/operations/playback-validation-instantiate-playback-prefab.json"
+		},
+		{
+			"id": "playback-validation-preplay-scene-query",
+			"stage": "prePlay",
+			"order": 40,
+			"tool": "scene.list_objects",
+			"arguments": {
+				"includeComponents": true,
+				"search": "Playback Validation Playback Hero"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.objects"
+				]
+			},
+			"evidencePath": "editor/operations/playback-validation-preplay-scene-query.json"
+		},
+		{
+			"id": "playback-validation-diagnostics",
+			"stage": "play",
+			"order": 70,
+			"tool": "diagnostics.get_summary",
+			"arguments": {
+				"includeDetails": true,
+				"surface": "playback-validation-cpu-reference-playback"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data"
+				]
+			},
+			"evidencePath": "editor/operations/playback-validation-diagnostics.json"
+		},
+		{
+			"id": "playback-validation-postplay-restoration-query",
+			"stage": "postPlay",
+			"order": 90,
+			"tool": "scene.list_objects",
+			"arguments": {
+				"includeComponents": true,
+				"search": "Playback Validation Playback Hero"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.objects"
+				]
+			},
+			"evidencePath": "editor/operations/playback-validation-postplay-restoration-query.json"
+		},
+		{
+			"id": "playback-validation-postplay-diagnostics",
+			"stage": "postPlay",
+			"order": 100,
+			"tool": "diagnostics.get_summary",
+			"arguments": {
+				"includeDetails": true,
+				"surface": "playback-validation-play-mode-restored"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data"
+				]
+			},
+			"evidencePath": "editor/operations/playback-validation-postplay-diagnostics.json"
+		}
+	],
+	"captures": [
+		{
+			"id": "playback-validation-scene-view",
+			"view": "SceneView",
+			"stage": "prePlay",
+			"order": 50,
+			"tool": "camera.capture_custom",
+			"arguments": {
+				"name": "Playback Validation Playback Scene View",
+				"position": [
+					0,
+					1,
+					4
+				],
+				"target": [
+					0,
+					0.5,
+					0
+				],
+				"up": [
+					0,
+					1,
+					0
+				],
+				"projection": "perspective",
+				"verticalFovDegrees": 60,
+				"nearPlane": 0.1,
+				"farPlane": 100
+			}
+		},
+		{
+			"id": "playback-validation-game-view",
+			"view": "GameView",
+			"stage": "play",
+			"order": 80,
+			"tool": "game_view.capture",
+			"arguments": {
+				"includeOverlays": false,
+				"transparentBackground": false
+			}
+		},
+		{
+			"id": "playback-validation-in-game-camera",
+			"view": "InGameCamera",
+			"stage": "postPlay",
+			"order": 110,
+			"tool": "camera.capture_object",
+			"arguments": {
+				"object": "Import Validation Capture Camera",
+				"includeDisabled": false,
+				"transparentBackground": false
+			}
+		}
+	],
+	"visualExpectations": [
+		{
+			"captureId": "playback-validation-scene-view",
+			"contentPolicy": "visible-geometry-required"
+		},
+		{
+			"captureId": "playback-validation-game-view",
+			"contentPolicy": "visible-geometry-required"
+		},
+		{
+			"captureId": "playback-validation-in-game-camera",
+			"contentPolicy": "visible-geometry-required"
+		}
+	],
+	"visualIdentityExceptions": [
+		{
+			"captureIds": [
+				"playback-validation-game-view",
+				"playback-validation-in-game-camera"
+			],
+			"reason": "Game View and the authored in-game capture intentionally resolve the same active camera, so exact visual parity is valid."
+		}
+	],
+	"manualChecklist": [
+		{
+			"id": "playback-validation-mouse-clip-playback-preview",
+			"input": "mouse",
+			"required": true,
+			"instruction": "Using the installed editor and real mouse input, select Models/ImportedHero.gltf, open its generated AnimationClip child, and exercise Play, Pause/Resume, Stop, seek, Loop, Reverse, and Speed controls. Confirm the displayed fixed tick and normalized time change consistently and that stopping returns the preview to its documented initial pose. Save real screenshots beneath the gate run root and reference them from this clicks.jsonl record."
+		},
+		{
+			"id": "playback-validation-keyboard-save-and-restoration",
+			"input": "keyboard",
+			"required": true,
+			"instruction": "After ending clip preview, use the installed editor Ctrl+S shortcut, enter and exit Play Mode once, and confirm the editor returns to stopped state with no transient preview cursor serialized into the scene or source asset. Save a real screenshot beneath the gate run root and reference it from this clicks.jsonl record."
+		}
+	]
+}

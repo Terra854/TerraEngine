@@ -124,7 +124,7 @@ $validationRoot = Join-Path $repoRoot 'out/validation/animation'
 $snapshotRoot = Get-AbsolutePath $OutputRoot $repoRoot
 Assert-AtOrBelow $validationRoot $snapshotRoot 'Snapshot output'
 
-$bundlePath = Join-Path $snapshotRoot "spec043-$RunId.bundle"
+$bundlePath = Join-Path $snapshotRoot "animation-validation-$RunId.bundle"
 $manifestPath = Join-Path $snapshotRoot 'snapshot-manifest.json'
 $worktreePath = Join-Path $snapshotRoot 'worktree'
 if((Test-Path -LiteralPath $bundlePath) -or (Test-Path -LiteralPath $manifestPath) -or ($MaterializeWorktree -and (Test-Path -LiteralPath $worktreePath))) {
@@ -159,8 +159,8 @@ $excludedLocalRoots = @('.agents', '.gemini', '.specify', 'dump', 'out',
 	'Screenshot 2026-07-18 021850.png', 'crash_analysis_report.md')
 
 $temporaryIndex = Join-Path -Path ([System.IO.Path]::GetTempPath()) `
-	-ChildPath ("terraengine-spec043-$RunId-$([Guid]::NewGuid().ToString('N')).index")
-$temporaryRef = "refs/codex-validation/spec043-$RunId-$([Guid]::NewGuid().ToString('N'))"
+	-ChildPath ("terraengine-animation-validation-$RunId-$([Guid]::NewGuid().ToString('N')).index")
+$temporaryRef = "refs/codex-validation/animation-validation-$RunId-$([Guid]::NewGuid().ToString('N'))"
 $previousIndex = [Environment]::GetEnvironmentVariable('GIT_INDEX_FILE', 'Process')
 $refCreated = $false
 try {
@@ -221,7 +221,7 @@ try {
 	$submoduleStatus = Invoke-Git @('submodule', 'status', '--recursive') $repoRoot
 	$manifest = [ordered]@{
 		schemaVersion = 1
-		feature = '043-complete-animation-system'
+		feature = 'complete-animation-system'
 		runId = $RunId
 		createdAt = (Get-Date).ToString('o')
 		baseCommit = $baseCommit

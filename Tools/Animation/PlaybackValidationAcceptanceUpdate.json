@@ -1,0 +1,149 @@
+{
+	"schemaVersion": 1,
+	"phase": "playback-validation",
+	"acceptedEvidence": {
+		"statement": "The accepted playback-validation rows are bound to every reviewed phase-specific MCP operation, native camera capture, required manual input action, and retained focused test artifact.",
+		"requirementIds": [
+			"animation-contract-provide-authored-animator-component-follows-engine-component-lifecycle-stores-no-transient-runtime",
+			"animation-contract-maintain-generation-safe-runtime-animation-instances-separately-authored-component-data",
+			"animation-contract-support-play-stop-pause-resume-seek-loop-reverse-playback-speed-scaled-time",
+			"animation-contract-evaluate-translation-rotation-scale-morph-weight-root-motion-event-custom-curve-channels",
+			"animation-contract-missing-channels-use-explicitly-defined-fallback-derived-compatible-reference-pose-default-channel",
+			"animation-contract-support-step-linear-smooth-cubic-interpolation-finite-normalized-continuity-preserving-rotation-results",
+			"animation-contract-support-exact-clip-boundaries-zero-duration-clips-repeated-timestamps-reverse-traversal-multi",
+			"animation-contract-blend-any-compatible-evaluated-poses-stable-normalization-documented-fallback-effective-total-weight",
+			"animation-contract-support-timed-normalized-crossfades-transition-curves-source-destination-offsets-explicit-interruption-behavior",
+			"animation-contract-expose-immutable-snapshots-current-state-previous-state-transition-progress-normalized-time-loop",
+			"animation-contract-runtime-evaluation-never-publish-non-finite-pose-morph-bound-curve-event-root",
+			"animation-contract-incompatible-unavailable-dependency-produce-documented-safe-pose-diagnostic-without-partially-mixing-generations",
+			"animation-contract-support-deterministic-ordered-animation-events-stable-identifier-time-payload-source-state-layer",
+			"animation-contract-event-traversal-deliver-eligible-event-exactly-once-update-crosses-multiple-events-loop",
+			"animation-contract-rollback-seek-preview-late-join-operations-define-whether-historical-events-suppressed-replayed",
+			"animation-contract-support-custom-animation-curves-gameplay-graph-logic-read-immutable-evaluated-snapshots",
+			"animation-outcome-playback-fixtures-covering-forward-reverse-seek-loop-variable-rate-fixed-rate-multi"
+		],
+		"operationIds": [
+			"playback-validation-import-playback-package",
+			"playback-validation-query-generated-animation",
+			"playback-validation-instantiate-playback-prefab",
+			"playback-validation-preplay-scene-query",
+			"playback-validation-diagnostics",
+			"playback-validation-postplay-restoration-query",
+			"playback-validation-postplay-diagnostics"
+		],
+		"captureIds": [
+			"playback-validation-scene-view",
+			"playback-validation-game-view",
+			"playback-validation-in-game-camera"
+		],
+		"manualChecklistIds": [
+			"playback-validation-mouse-clip-playback-preview",
+			"playback-validation-keyboard-save-and-restoration"
+		],
+		"requiredArtifacts": [
+			"editor/mcp-operations.json",
+			"editor/manual-evidence.json",
+			"editor/camera-evidence.json",
+			"editor/play-mode.json",
+			"tests/focused-tests.command.json"
+		]
+	},
+	"updates": [
+		{
+			"id": "animation-contract-provide-authored-animator-component-follows-engine-component-lifecycle-stores-no-transient-runtime",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-maintain-generation-safe-runtime-animation-instances-separately-authored-component-data",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-support-play-stop-pause-resume-seek-loop-reverse-playback-speed-scaled-time",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-evaluate-translation-rotation-scale-morph-weight-root-motion-event-custom-curve-channels",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-missing-channels-use-explicitly-defined-fallback-derived-compatible-reference-pose-default-channel",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-support-step-linear-smooth-cubic-interpolation-finite-normalized-continuity-preserving-rotation-results",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-support-exact-clip-boundaries-zero-duration-clips-repeated-timestamps-reverse-traversal-multi",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-blend-any-compatible-evaluated-poses-stable-normalization-documented-fallback-effective-total-weight",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-support-timed-normalized-crossfades-transition-curves-source-destination-offsets-explicit-interruption-behavior",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-expose-immutable-snapshots-current-state-previous-state-transition-progress-normalized-time-loop",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-runtime-evaluation-reject-stale-object-component-asset-scene-physics-world-command-generations",
+			"status": "In progress"
+		},
+		{
+			"id": "animation-contract-runtime-evaluation-never-publish-non-finite-pose-morph-bound-curve-event-root",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-incompatible-unavailable-dependency-produce-documented-safe-pose-diagnostic-without-partially-mixing-generations",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-support-deterministic-ordered-animation-events-stable-identifier-time-payload-source-state-layer",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-event-traversal-deliver-eligible-event-exactly-once-update-crosses-multiple-events-loop",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-rollback-seek-preview-late-join-operations-define-whether-historical-events-suppressed-replayed",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-support-custom-animation-curves-gameplay-graph-logic-read-immutable-evaluated-snapshots",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-expose-named-bone-socket-transforms-latest-complete-pose-without-exposing-mutable-pose",
+			"status": "In progress"
+		},
+		{
+			"id": "animation-contract-preview-runtime-recording-deterministic-exported-runtime-evaluation-share-same-documented-animation-semantics",
+			"status": "In progress"
+		},
+		{
+			"id": "animation-outcome-playback-fixtures-covering-forward-reverse-seek-loop-variable-rate-fixed-rate-multi",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-outcome-crossfades-layered-blends-additive-blends-masks-synchronization-interruption-ik-retargeting-motion-matching",
+			"status": "In progress"
+		},
+		{
+			"id": "animation-outcome-stale-object-component-scene-script-asset-renderer-physics-automation-managed-rollback-identities",
+			"status": "In progress"
+		},
+		{
+			"id": "animation-outcome-editor-preview-scrub-recording-play-mode-undo-redo-prefab-apply-revert-automation",
+			"status": "In progress"
+		},
+		{
+			"id": "animation-outcome-required-animation-workflows-configured-built-tested-installed-launched-reproduced-clean-checkout-using",
+			"status": "In progress"
+		}
+	]
+}

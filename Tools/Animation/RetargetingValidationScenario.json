@@ -1,0 +1,740 @@
+{
+	"schemaVersion": 2,
+	"phase": "retargeting-validation",
+	"fixtureOverlays": [
+		{
+			"source": "Tests/Fixtures/Animation/AdvancedAssets",
+			"destination": "Assets/Advanced"
+		},
+		{
+			"source": "Tests/Fixtures/Animation/AdvancedRuntimeActors",
+			"destination": "Assets/AdvancedActors"
+		}
+	],
+	"requiredTools": [
+		"asset.import",
+		"asset.list",
+		"asset.inspect",
+		"prefab.instantiate",
+		"scene.list_objects",
+		"play.state",
+		"play.pause",
+		"play.step",
+		"play.resume",
+		"animation.runtime.retarget.request",
+		"animation.runtime.retarget.read",
+		"animation.runtime.diagnostics",
+		"camera.capture_custom",
+		"game_view.capture",
+		"camera.capture_object"
+	],
+	"requiredEvidence": [
+		"editor/mcp-operations.json",
+		"editor/operations/retargeting-validation-import-source-target.json",
+		"editor/operations/retargeting-validation-list-retarget-assets.json",
+		"editor/operations/retargeting-validation-inspect-source-package.json",
+		"editor/operations/retargeting-validation-failed-reload-preserves-generation.json",
+		"editor/operations/retargeting-validation-recover-valid-source.json",
+		"editor/operations/retargeting-validation-instantiate-retarget-hero.json",
+		"editor/operations/retargeting-validation-instantiate-runtime-actor.json",
+		"editor/operations/retargeting-validation-observe-retarget-hero.json",
+		"editor/operations/retargeting-validation-observe-runtime-actor.json",
+		"editor/operations/retargeting-validation-play-state.json",
+		"editor/operations/retargeting-validation-pause-runtime.json",
+		"editor/operations/retargeting-validation-read-retarget-baseline.json",
+		"editor/operations/retargeting-validation-activate-retarget-profile.json",
+		"editor/operations/retargeting-validation-step-retarget-activation.json",
+		"editor/operations/retargeting-validation-read-retarget-activation.json",
+		"editor/operations/retargeting-validation-request-retarget-rebuild.json",
+		"editor/operations/retargeting-validation-step-retarget-rebuild.json",
+		"editor/operations/retargeting-validation-read-retarget-rebuild.json",
+		"editor/operations/retargeting-validation-diagnostics-runtime.json",
+		"editor/operations/retargeting-validation-resume-runtime.json",
+		"editor/operations/retargeting-validation-diagnostics-restored.json",
+		"editor/operations/retargeting-validation-observe-restored-retarget-hero.json",
+		"editor/operations/retargeting-validation-observe-restored-runtime-actor.json"
+	],
+	"operations": [
+		{
+			"id": "retargeting-validation-import-source-target",
+			"stage": "prePlay",
+			"order": 10,
+			"tool": "asset.import",
+			"arguments": {
+				"path": "Models/ImportedHero.gltf",
+				"force": true
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.importResult.animationManifest",
+					"data.importResult.generatedPrefabs"
+				],
+				"fieldOneOf": {
+					"data.status": [
+						"Succeeded",
+						"SucceededWithWarnings"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/retargeting-validation-import-source-target.json"
+		},
+		{
+			"id": "retargeting-validation-list-retarget-assets",
+			"stage": "prePlay",
+			"order": 20,
+			"tool": "asset.list",
+			"arguments": {
+				"search": "ImportedHero"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.assets"
+				]
+			},
+			"evidencePath": "editor/operations/retargeting-validation-list-retarget-assets.json"
+		},
+		{
+			"id": "retargeting-validation-inspect-source-package",
+			"stage": "prePlay",
+			"order": 30,
+			"tool": "asset.inspect",
+			"arguments": {
+				"asset": "Assets/Models/ImportedHero.gltf"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data"
+				]
+			},
+			"evidencePath": "editor/operations/retargeting-validation-inspect-source-package.json"
+		},
+		{
+			"id": "retargeting-validation-failed-reload-preserves-generation",
+			"stage": "prePlay",
+			"order": 40,
+			"tool": "asset.import",
+			"arguments": {
+				"path": "Models/ImportedHero.gltf",
+				"force": true
+			},
+			"fileTransition": {
+				"target": "Assets/Models/ImportedHero.gltf",
+				"replacement": "GateInputs/ImportedHero.invalid.gltf",
+				"preserveRoots": [
+					"Assets/Models/ImportedHero_Generated",
+					"Build/Assets/Models/ImportedHero_Generated"
+				]
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.importResult.diagnostics"
+				],
+				"fieldEquals": {
+					"data.status": "Failed"
+				}
+			},
+			"evidencePath": "editor/operations/retargeting-validation-failed-reload-preserves-generation.json"
+		},
+		{
+			"id": "retargeting-validation-recover-valid-source",
+			"stage": "prePlay",
+			"order": 50,
+			"tool": "asset.import",
+			"arguments": {
+				"path": "Models/ImportedHero.gltf",
+				"force": true
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.importResult.generatedPrefabs"
+				],
+				"fieldOneOf": {
+					"data.status": [
+						"Succeeded",
+						"SucceededWithWarnings"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/retargeting-validation-recover-valid-source.json"
+		},
+		{
+			"id": "retargeting-validation-instantiate-retarget-hero",
+			"stage": "prePlay",
+			"order": 60,
+			"tool": "prefab.instantiate",
+			"arguments": {
+				"prefab": "Assets/Models/ImportedHero_Generated/ImportedHero.teprefab",
+				"name": "Retargeting Validation Retarget Hero"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.instanceId",
+					"data.prefabId"
+				]
+			},
+			"evidencePath": "editor/operations/retargeting-validation-instantiate-retarget-hero.json"
+		},
+		{
+			"id": "retargeting-validation-instantiate-runtime-actor",
+			"stage": "prePlay",
+			"order": 70,
+			"tool": "prefab.instantiate",
+			"arguments": {
+				"prefab": "Assets/AdvancedActors/TargetRetargetActor.teprefab",
+				"name": "Retargeting Validation Retarget Runtime Actor"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.instanceId",
+					"data.prefabId"
+				]
+			},
+			"evidencePath": "editor/operations/retargeting-validation-instantiate-runtime-actor.json"
+		},
+		{
+			"id": "retargeting-validation-observe-retarget-hero",
+			"stage": "prePlay",
+			"order": 80,
+			"tool": "scene.list_objects",
+			"arguments": {
+				"includeComponents": true,
+				"search": "Retargeting Validation Retarget Hero"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.objects"
+				]
+			},
+			"evidencePath": "editor/operations/retargeting-validation-observe-retarget-hero.json"
+		},
+		{
+			"id": "retargeting-validation-observe-runtime-actor",
+			"stage": "prePlay",
+			"order": 90,
+			"tool": "scene.list_objects",
+			"arguments": {
+				"includeComponents": true,
+				"search": "Retargeting Validation Retarget Runtime Actor"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.objects"
+				]
+			},
+			"evidencePath": "editor/operations/retargeting-validation-observe-runtime-actor.json"
+		},
+		{
+			"id": "retargeting-validation-play-state",
+			"stage": "play",
+			"order": 110,
+			"tool": "play.state",
+			"arguments": {},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState"
+				],
+				"fieldEquals": {
+					"data.currentState": "playing"
+				}
+			},
+			"evidencePath": "editor/operations/retargeting-validation-play-state.json"
+		},
+		{
+			"id": "retargeting-validation-pause-runtime",
+			"stage": "play",
+			"order": 120,
+			"tool": "play.pause",
+			"arguments": {
+				"expectedState": "playing",
+				"correlationId": "retargeting-validation-pause-runtime"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState"
+				],
+				"fieldEquals": {
+					"data.currentState": "paused"
+				}
+			},
+			"evidencePath": "editor/operations/retargeting-validation-pause-runtime.json"
+		},
+		{
+			"id": "retargeting-validation-read-retarget-baseline",
+			"stage": "play",
+			"order": 130,
+			"tool": "animation.runtime.retarget.read",
+			"arguments": {
+				"target": {
+					"objectId": null
+				},
+				"maximumItems": 8,
+				"correlationId": "retargeting-validation-baseline"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "retargeting-validation-instantiate-runtime-actor",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "target.objectId",
+					"valueType": "uuid"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentPublication.available",
+					"data.currentPublication.poseGeneration",
+					"data.currentPublication.authorityPublicationGeneration",
+					"data.currentPublication.tick",
+					"data.visibilityBoundary"
+				],
+				"fieldEquals": {
+					"data.currentPublication.available": true,
+					"data.visibilityBoundary": "immutable_retarget_store_copies"
+				}
+			},
+			"evidencePath": "editor/operations/retargeting-validation-read-retarget-baseline.json"
+		},
+		{
+			"id": "retargeting-validation-activate-retarget-profile",
+			"stage": "play",
+			"order": 140,
+			"tool": "animation.runtime.retarget.request",
+			"arguments": {
+				"target": {
+					"objectId": null
+				},
+				"action": "activate_profile",
+				"profileAssetId": "5445414e303433414456464958000005",
+				"profileGeneration": 1,
+				"layerIndex": 0,
+				"expectedPoseGeneration": null,
+				"expectedPublicationGeneration": null,
+				"targetTick": 0,
+				"idempotencyKey": "retargeting-validation-activate-v1",
+				"correlationId": "retargeting-validation-activate",
+				"expectedGeneration": 1
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "retargeting-validation-instantiate-runtime-actor",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "target.objectId",
+					"valueType": "uuid"
+				},
+				{
+					"sourceOperationId": "retargeting-validation-read-retarget-baseline",
+					"sourceResponsePath": "data.currentPublication.poseGeneration",
+					"destinationArgumentPath": "expectedPoseGeneration",
+					"valueType": "integer"
+				},
+				{
+					"sourceOperationId": "retargeting-validation-read-retarget-baseline",
+					"sourceResponsePath": "data.currentPublication.authorityPublicationGeneration",
+					"destinationArgumentPath": "expectedPublicationGeneration",
+					"valueType": "integer"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.status",
+					"data.acknowledgement",
+					"data.receipt.profileGeneration",
+					"data.receipt.observableTick",
+					"data.receipt.publicationGeneration",
+					"data.visibilityBoundary"
+				],
+				"fieldEquals": {
+					"data.acknowledgement": "queued_not_yet_published",
+					"data.receipt.profileGeneration": 1,
+					"data.visibilityBoundary": "animation_protected_capture_then_publication"
+				},
+				"fieldOneOf": {
+					"data.status": [
+						"queued",
+						"ok"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/retargeting-validation-activate-retarget-profile.json"
+		},
+		{
+			"id": "retargeting-validation-step-retarget-activation",
+			"stage": "play",
+			"order": 150,
+			"tool": "play.step",
+			"arguments": {
+				"expectedState": "paused",
+				"correlationId": "retargeting-validation-step-retarget-activation"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState",
+					"data.stepsCompleted"
+				],
+				"fieldEquals": {
+					"data.currentState": "paused",
+					"data.stepsCompleted": 1
+				}
+			},
+			"evidencePath": "editor/operations/retargeting-validation-step-retarget-activation.json"
+		},
+		{
+			"id": "retargeting-validation-read-retarget-activation",
+			"stage": "play",
+			"order": 160,
+			"tool": "animation.runtime.retarget.read",
+			"arguments": {
+				"target": {
+					"objectId": null
+				},
+				"maximumItems": 8,
+				"correlationId": "retargeting-validation-activation-result"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "retargeting-validation-instantiate-runtime-actor",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "target.objectId",
+					"valueType": "uuid"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentPublication.poseGeneration",
+					"data.currentPublication.authorityPublicationGeneration",
+					"data.snapshotCount",
+					"data.latestSnapshot.status",
+					"data.latestSnapshot.profileAssetId",
+					"data.latestSnapshot.profileGeneration",
+					"data.latestSnapshot.sourceSkeletonGeneration",
+					"data.latestSnapshot.targetSkeletonGeneration",
+					"data.latestSnapshot.poseGeneration",
+					"data.latestSnapshot.contactErrorMeters",
+					"data.latestSnapshot.reachableIkErrorMeters",
+					"data.latestSnapshot.observationTick",
+					"data.latestSnapshot.publicationGeneration",
+					"data.visibilityBoundary"
+				],
+				"fieldEquals": {
+					"data.latestSnapshot.status": "ok",
+					"data.latestSnapshot.profileAssetId": "5445414e303433414456464958000005",
+					"data.latestSnapshot.profileGeneration": 1,
+					"data.visibilityBoundary": "immutable_retarget_store_copies"
+				}
+			},
+			"evidencePath": "editor/operations/retargeting-validation-read-retarget-activation.json"
+		},
+		{
+			"id": "retargeting-validation-request-retarget-rebuild",
+			"stage": "play",
+			"order": 170,
+			"tool": "animation.runtime.retarget.request",
+			"arguments": {
+				"target": {
+					"objectId": null
+				},
+				"action": "request_rebuild",
+				"profileAssetId": "5445414e303433414456464958000005",
+				"profileGeneration": 1,
+				"layerIndex": 0,
+				"expectedPoseGeneration": null,
+				"expectedPublicationGeneration": null,
+				"targetTick": 0,
+				"idempotencyKey": "retargeting-validation-rebuild-v1",
+				"correlationId": "retargeting-validation-rebuild",
+				"expectedGeneration": 2
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "retargeting-validation-instantiate-runtime-actor",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "target.objectId",
+					"valueType": "uuid"
+				},
+				{
+					"sourceOperationId": "retargeting-validation-read-retarget-activation",
+					"sourceResponsePath": "data.currentPublication.poseGeneration",
+					"destinationArgumentPath": "expectedPoseGeneration",
+					"valueType": "integer"
+				},
+				{
+					"sourceOperationId": "retargeting-validation-read-retarget-activation",
+					"sourceResponsePath": "data.currentPublication.authorityPublicationGeneration",
+					"destinationArgumentPath": "expectedPublicationGeneration",
+					"valueType": "integer"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.status",
+					"data.acknowledgement",
+					"data.receipt.profileGeneration",
+					"data.receipt.observableTick",
+					"data.receipt.publicationGeneration",
+					"data.visibilityBoundary"
+				],
+				"fieldEquals": {
+					"data.acknowledgement": "queued_not_yet_published",
+					"data.receipt.profileGeneration": 1,
+					"data.visibilityBoundary": "animation_protected_capture_then_publication"
+				},
+				"fieldOneOf": {
+					"data.status": [
+						"queued",
+						"ok"
+					]
+				}
+			},
+			"evidencePath": "editor/operations/retargeting-validation-request-retarget-rebuild.json"
+		},
+		{
+			"id": "retargeting-validation-step-retarget-rebuild",
+			"stage": "play",
+			"order": 180,
+			"tool": "play.step",
+			"arguments": {
+				"expectedState": "paused",
+				"correlationId": "retargeting-validation-step-retarget-rebuild"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState",
+					"data.stepsCompleted"
+				],
+				"fieldEquals": {
+					"data.currentState": "paused",
+					"data.stepsCompleted": 1
+				}
+			},
+			"evidencePath": "editor/operations/retargeting-validation-step-retarget-rebuild.json"
+		},
+		{
+			"id": "retargeting-validation-read-retarget-rebuild",
+			"stage": "play",
+			"order": 190,
+			"tool": "animation.runtime.retarget.read",
+			"arguments": {
+				"target": {
+					"objectId": null
+				},
+				"maximumItems": 8,
+				"correlationId": "retargeting-validation-rebuild-result"
+			},
+			"argumentBindings": [
+				{
+					"sourceOperationId": "retargeting-validation-instantiate-runtime-actor",
+					"sourceResponsePath": "data.instanceId",
+					"destinationArgumentPath": "target.objectId",
+					"valueType": "uuid"
+				}
+			],
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.snapshotCount",
+					"data.latestSnapshot.status",
+					"data.latestSnapshot.profileAssetId",
+					"data.latestSnapshot.profileGeneration",
+					"data.latestSnapshot.contactErrorMeters",
+					"data.latestSnapshot.reachableIkErrorMeters",
+					"data.latestSnapshot.observationTick",
+					"data.latestSnapshot.publicationGeneration",
+					"data.visibilityBoundary"
+				],
+				"fieldEquals": {
+					"data.latestSnapshot.status": "ok",
+					"data.latestSnapshot.profileAssetId": "5445414e303433414456464958000005",
+					"data.latestSnapshot.profileGeneration": 1,
+					"data.visibilityBoundary": "immutable_retarget_store_copies"
+				}
+			},
+			"evidencePath": "editor/operations/retargeting-validation-read-retarget-rebuild.json"
+		},
+		{
+			"id": "retargeting-validation-diagnostics-runtime",
+			"stage": "play",
+			"order": 200,
+			"tool": "animation.runtime.diagnostics",
+			"arguments": {
+				"includeDetails": true,
+				"maximumItems": 64,
+				"correlationId": "retargeting-validation-runtime",
+				"rendererAvailable": true
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data"
+				]
+			},
+			"evidencePath": "editor/operations/retargeting-validation-diagnostics-runtime.json"
+		},
+		{
+			"id": "retargeting-validation-resume-runtime",
+			"stage": "play",
+			"order": 210,
+			"tool": "play.resume",
+			"arguments": {
+				"expectedState": "paused",
+				"correlationId": "retargeting-validation-resume-runtime"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.currentState"
+				],
+				"fieldEquals": {
+					"data.currentState": "playing"
+				}
+			},
+			"evidencePath": "editor/operations/retargeting-validation-resume-runtime.json"
+		},
+		{
+			"id": "retargeting-validation-diagnostics-restored",
+			"stage": "postPlay",
+			"order": 230,
+			"tool": "animation.runtime.diagnostics",
+			"arguments": {
+				"includeDetails": true,
+				"maximumItems": 64,
+				"correlationId": "retargeting-validation-restored"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data"
+				]
+			},
+			"evidencePath": "editor/operations/retargeting-validation-diagnostics-restored.json"
+		},
+		{
+			"id": "retargeting-validation-observe-restored-retarget-hero",
+			"stage": "postPlay",
+			"order": 240,
+			"tool": "scene.list_objects",
+			"arguments": {
+				"includeComponents": true,
+				"search": "Retargeting Validation Retarget Hero"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.objects"
+				]
+			},
+			"evidencePath": "editor/operations/retargeting-validation-observe-restored-retarget-hero.json"
+		},
+		{
+			"id": "retargeting-validation-observe-restored-runtime-actor",
+			"stage": "postPlay",
+			"order": 250,
+			"tool": "scene.list_objects",
+			"arguments": {
+				"includeComponents": true,
+				"search": "Retargeting Validation Retarget Runtime Actor"
+			},
+			"expect": {
+				"ok": true,
+				"requiredFields": [
+					"data.objects"
+				]
+			},
+			"evidencePath": "editor/operations/retargeting-validation-observe-restored-runtime-actor.json"
+		}
+	],
+	"captures": [
+		{
+			"id": "retargeting-validationretarget-scene-view",
+			"view": "SceneView",
+			"stage": "prePlay",
+			"order": 100,
+			"tool": "camera.capture_custom",
+			"arguments": {
+				"name": "Retargeting Validation Retarget Scene",
+				"position": [0, 1, 4],
+				"target": [0, 0.5, 0],
+				"up": [0, 1, 0],
+				"projection": "perspective",
+				"verticalFovDegrees": 60,
+				"nearPlane": 0.1,
+				"farPlane": 100
+			}
+		},
+		{
+			"id": "retargeting-validationretarget-game-view",
+			"view": "GameView",
+			"stage": "play",
+			"order": 220,
+			"tool": "game_view.capture",
+			"arguments": {
+				"includeOverlays": false,
+				"transparentBackground": false
+			}
+		},
+		{
+			"id": "retargeting-validationretarget-ingame-camera",
+			"view": "InGameCamera",
+			"stage": "postPlay",
+			"order": 260,
+			"tool": "camera.capture_object",
+			"arguments": {
+				"object": "Import Validation Capture Camera",
+				"includeDisabled": false,
+				"transparentBackground": false
+			}
+		}
+	],
+	"visualExpectations": [
+		{
+			"captureId": "retargeting-validationretarget-scene-view",
+			"contentPolicy": "visible-geometry-required"
+		},
+		{
+			"captureId": "retargeting-validationretarget-game-view",
+			"contentPolicy": "visible-geometry-required"
+		},
+		{
+			"captureId": "retargeting-validationretarget-ingame-camera",
+			"contentPolicy": "visible-geometry-required"
+		}
+	],
+	"visualIdentityExceptions": [
+		{
+			"captureIds": [
+				"retargeting-validationretarget-game-view",
+				"retargeting-validationretarget-ingame-camera"
+			],
+			"reason": "Game View and the authored in-game camera intentionally resolve the same active camera, so matching pixels are valid evidence."
+		}
+	],
+	"manualChecklist": [
+		{
+			"id": "retargeting-validation-mouse-map-preview-and-reload",
+			"input": "mouse",
+			"required": true,
+			"instruction": "Using real mouse input in the installed editor, use the visible Retargeting Validation Retarget Hero for camera evidence and the separate mesh-free Retargeting Validation Retarget Runtime Actor for copied runtime proof. Open the source and target rigs and saved retarget profile; inspect semantic and explicit mappings, required or optional chains, orientation, scale, root, contact, twist, fallback policies, source-target preview, and quantitative errors. Perform an incompatible mapping reload, verify the actionable diagnostic and last-known-good generation, restore a valid mapping, and do not attribute visible mesh deformation to the diagnostic actor."
+		},
+		{
+			"id": "retargeting-validation-keyboard-runtime-parity-and-restore",
+			"input": "keyboard",
+			"required": true,
+			"instruction": "Use keyboard input to run the mapped animation in Play Mode, exercise native and managed runtime retarget controls, compare source and target timing, facing, contacts, root motion, socket queries, and deterministic mode output, then exit Play Mode and confirm profile identity and the authored scene restore. Save evidence screenshots and receipts beneath the gate run root."
+		}
+	]
+}

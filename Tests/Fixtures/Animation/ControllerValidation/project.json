@@ -1,0 +1,5 @@
+{
+	"name": "Animation Controller Validation Controller Authoring Gate",
+	"version": "1.0.0",
+	"startupScene": "Scenes/ControllerValidation.tescene"
+}

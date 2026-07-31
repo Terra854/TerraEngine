@@ -25,7 +25,7 @@ updates only its copied sidecar timestamp while preserving the stable GUID.
 | Prefab | Prefab GUID | Root object UUID | Authored animation bindings |
 |---|---|---|---|
 | `SourceMotionActor.teprefab` | `5445414e303433414456414354000001` | `5445414e3034334143544f424a000001` | Source skeleton `...000001`, locomotion clip `...000003`, and motion database `...000006` |
-| `SourceBuiltMotionActor.teprefab` | `5445414e303433414456414354000005` | `5445414e3034334143544f424a000004` | Source skeleton `...000001`, locomotion clip `...000003`, and the US8-built motion database `...ACT000004` |
+| `SourceBuiltMotionActor.teprefab` | `5445414e303433414456414354000005` | `5445414e3034334143544f424a000004` | Source skeleton `...000001`, locomotion clip `...000003`, and the Motion Matching Validation-built motion database `...ACT000004` |
 | `TargetRetargetActor.teprefab` | `5445414e303433414456414354000002` | `5445414e3034334143544f424a000002` | Target skeleton `...000002`, source locomotion clip `...000003`, and retarget profile `...000005` |
 | `TargetRagdollActor.teprefab` | `5445414e303433414456414354000003` | `5445414e3034334143544f424a000003` | Target skeleton `...000002`, target recovery clip `...000004`, and ragdoll profile `...000007` |
 
@@ -38,12 +38,12 @@ responsible for retarget commands, motion queries, ragdoll activation/impacts,
 and recovery requests.
 
 `SourceBuiltMotionActor.teprefab` is intentionally separate from the ordinary
-source actor. US8 instantiates it before starting Play Mode, after its pre-Play
+source actor. Motion Matching Validation instantiates it before starting Play Mode, after its pre-Play
 build has atomically published `source-locomotion-built.temotiondb`. The
 animation system therefore binds the same database UUID and generation later
 submitted by the live `set_database` and `query` operations. Other scenarios
 continue using `SourceMotionActor.teprefab` and the checked-in database, so a
-missing US8 build output cannot invalidate their otherwise independent actors.
+missing Motion Matching Validation build output cannot invalidate their otherwise independent actors.
 
 The retarget and ragdoll roles are deliberately separate. The binding
 coordinator treats `skeletonOverrideAssetId` as the output skeleton, samples

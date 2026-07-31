@@ -1,8 +1,8 @@
 {
 	"schemaVersion": 1,
-	"feature": "043-complete-animation-system",
-	"task": "T131",
-	"comparisonTask": "T284",
+	"feature": "complete-animation-system",
+	"task": "animation-validation-us-extend-final-only-tools-animation-compareanimationperformance-ps-matrix-cover",
+	"comparisonTask": "animation-validation-invoke-final-only-t-t-comparator-every-prepared-control-including",
 	"finalPhaseOnly": true,
 	"performanceWorkloads": {
 		"path": "Tools/Animation/PerformanceWorkloads.json",

@@ -111,7 +111,7 @@ validation failure even when a positional tolerance would otherwise pass.
 The validation fixture and per-profile manifest are the source of truth for
 supported proportions, rest poses, optional limbs, twist chains, and tightened
 tolerances. The general limits are frozen in
-[`runtime-limits-and-validation.md`](../../specs/043-complete-animation-system/contracts/runtime-limits-and-validation.md).
+[`runtime-limits-and-validation.md`](../../Docs/Animation/README.md).
 
 ## Runtime and authoring use
 

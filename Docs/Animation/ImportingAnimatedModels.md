@@ -89,7 +89,7 @@ Mirrored or negative-scale hierarchies are retained only when the resulting tran
 - A bound deformable mesh must carry the exact nonzero skeleton compatibility fingerprint.
 - TDEF v1 stores dense morph position deltas. Normal/tangent morph deltas are not yet represented and must not be silently claimed as complete.
 
-The hard source-package limits are 1,024 skins/skeletons and 4,096 clips; the normal operational defaults are 64 and 256. See [Animation Assets](AnimationAssets.md) and the [frozen limits contract](../../specs/043-complete-animation-system/contracts/runtime-limits-and-validation.md) for all limits.
+The hard source-package limits are 1,024 skins/skeletons and 4,096 clips; the normal operational defaults are 64 and 256. See [Animation Assets](AnimationAssets.md) and the [frozen limits contract](../../Docs/Animation/README.md) for all limits.
 
 ## Atomic staging and cancellation
 
@@ -131,4 +131,4 @@ Then import the deterministic fixtures through the installed editor, inspect gen
 
 No source model is downloaded during configure, build, test, install, editor startup, or normal import validation. Licensed real-model acquisition happens explicitly in final Phase 18.
 
-All measured import/authoring timing, animation benchmarks, diagnostics-overhead measurements, engine-wide baseline comparisons, and performance acceptance remain reserved for T283, T284, and T288. Correctness and source-free import validation must pass now; performance testing is deferred, not waived.
+All measured import/authoring timing, animation benchmarks, diagnostics-overhead measurements, engine-wide baseline comparisons, and performance acceptance remain reserved for animation-validation-runs-every-accumulated-feature-workflow-benchmark-t-runs-every-unrelated, animation-validation-invoke-final-only-t-t-comparator-every-prepared-control-including, and animation-validation-repair-capable-final-checks-t-t-are-clean-final-blocking. Correctness and source-free import validation must pass now; performance testing is deferred, not waived.

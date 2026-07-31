@@ -1,0 +1,188 @@
+{
+	"schemaVersion": 1,
+	"phase": "gameplay-animation-validation",
+	"acceptedEvidence": {
+		"statement": "The accepted gameplay-animation-validation rows bind dynamic Terra UUIDs to native typed play/speed/looping/parameter batches at exact automation generations 1 and 2, an idempotent replay, protected pause/step publication reads, root-motion-policy set/get evidence, stale Play-handle rejection, managed readiness identities, native camera captures, full Play restoration, required manual gameplay review, and retained native/C# focused tests. script.status is managed-facing readiness evidence, not a claim that MCP directly invoked managed callbacks; event, applied root-motion, and attachment parity without a public automation endpoint remains bound to the manual and focused-test artifacts. Performance-regression measurement is explicitly deferred under the active power limit.",
+		"requirementIds": [
+			"animation-contract-native-c-gameplay-have-behaviorally-equivalent-access-animator-lookup-commands-parameters-snapshots",
+			"animation-contract-gameplay-writes-use-bounded-copied-generation-validated-command-transactional-paths-rather-than",
+			"animation-contract-animation-command-return-stable-status-receipt-distinguishes-accepted-applied-adjusted-deferred-cancelled",
+			"animation-contract-accepted-asynchronous-commands-expose-results-become-observable",
+			"animation-contract-managed-reload-invalidate-stale-wrappers-subscriptions-without-affecting-newly-created-animation-instances",
+			"animation-contract-exceptions-managed-animation-callbacks-contained-correlated-reported-without-aborting-publication-unrelated-animators",
+			"animation-contract-root-motion-expose-translation-rotation-source-interval-source-state-loop-layer-contribution",
+			"animation-contract-root-motion-support-transform-driven-character-controller-driven-physics-command-driven-extracted",
+			"animation-contract-root-motion-application-coordinate-collision-response-support-motion-parent-transforms-teleports-rollback",
+			"animation-contract-gameplay-receive-actual-applied-adjusted-rejected-root-motion-result-rather-than-assuming",
+			"animation-contract-bone-socket-attachments-preserve-declared-local-offsets-hierarchy-behavior-following-complete-published",
+			"animation-contract-attachment-mutation-removal-stale-targets-scene-reload-publish-transforms-into-reused-objects",
+			"animation-contract-gameplay-event-subscriptions-support-filtering-animator-controller-state-layer-event-identifier-tag",
+			"animation-contract-event-queues-retained-event-history-bounded-explicit-overflow-diagnostics-deterministic-retention",
+			"animation-contract-gameplay-able-query-whether-animator-satisfy-requested-state-clip-retarget-ik-motion",
+			"animation-contract-animation-commands-concurrent-producers-merge-deterministic-documented-order",
+			"animation-contract-commands-support-cancellation-idempotency-retries-durable-jobs-otherwise-repeat-logical-action",
+			"animation-contract-gameplay-queries-return-copied-snapshots-explicit-generation-age-rather-than-aliasing-mutable",
+			"animation-contract-native-c-animation-interfaces-validate-compatibility-before-exchanging-animation-requests-results-across",
+			"animation-contract-c-component-properties-follow-engine-s-deferred-transactional-visibility-rules-imply-same",
+			"animation-contract-c-commands-snapshots-event-packets-motion-match-results-root-motion-results-ik",
+			"animation-contract-managed-event-subscriptions-have-bounded-lifetime-explicit-disposal-reload-invalidation-exception-containment",
+			"animation-contract-exported-runtimes-expose-same-supported-c-animation-behavior-editor-runtime",
+			"animation-outcome-native-c-gameplay-fixtures-produce-equivalent-command-statuses-state-snapshots-event-packets"
+		],
+		"operationIds": [
+			"gameplay-animation-validation-import-gameplay-package",
+			"gameplay-animation-validation-inspect-gameplay-package",
+			"gameplay-animation-validation-instantiate-gameplay-hero",
+			"gameplay-animation-validation-instantiate-runtime-actor",
+			"gameplay-animation-validation-observe-gameplay-hero",
+			"gameplay-animation-validation-observe-runtime-actor",
+			"gameplay-animation-validation-read-authored-gameplay-animator",
+			"gameplay-animation-validation-read-authored-runtime-animator",
+			"gameplay-animation-validation-script-status-preplay",
+			"gameplay-animation-validation-diagnostics-preplay",
+			"gameplay-animation-validation-history-before-play",
+			"gameplay-animation-validation-play-state",
+			"gameplay-animation-validation-pause-runtime",
+			"gameplay-animation-validation-read-publication-baseline",
+			"gameplay-animation-validation-submit-live-parameters-v1",
+			"gameplay-animation-validation-replay-live-parameters-v1",
+			"gameplay-animation-validation-step-live-parameters-v1",
+			"gameplay-animation-validation-read-publication-v1",
+			"gameplay-animation-validation-request-apply-root-motion",
+			"gameplay-animation-validation-read-apply-root-motion",
+			"gameplay-animation-validation-step-root-motion-policy",
+			"gameplay-animation-validation-submit-live-parameters-v2",
+			"gameplay-animation-validation-step-live-parameters-v2",
+			"gameplay-animation-validation-read-publication-v2",
+			"gameplay-animation-validation-diagnostics-runtime",
+			"gameplay-animation-validation-animation-residency",
+			"gameplay-animation-validation-animation-profiler",
+			"gameplay-animation-validation-script-status-runtime",
+			"gameplay-animation-validation-resume-runtime",
+			"gameplay-animation-validation-reject-stale-play-handle",
+			"gameplay-animation-validation-read-restored-gameplay-animator",
+			"gameplay-animation-validation-read-restored-runtime-animator",
+			"gameplay-animation-validation-reimport-gameplay-package",
+			"gameplay-animation-validation-read-gameplay-animator-after-reimport",
+			"gameplay-animation-validation-script-status-restored",
+			"gameplay-animation-validation-diagnostics-restored",
+			"gameplay-animation-validation-observe-restored-gameplay-scene",
+			"gameplay-animation-validation-history-restored"
+		],
+		"captureIds": [
+			"gameplay-animation-validation-scene-view",
+			"gameplay-animation-validation-game-view",
+			"gameplay-animation-validation-camera"
+		],
+		"manualChecklistIds": [
+			"gameplay-animation-validation-mouse-native-managed-parity",
+			"gameplay-animation-validation-mouse-reload-and-stale-handles",
+			"gameplay-animation-validation-keyboard-play-restore"
+		],
+		"requiredArtifacts": [
+			"editor/mcp-operations.json",
+			"editor/manual-evidence.json",
+			"editor/camera-evidence.json",
+			"editor/play-mode.json",
+			"tests/focused-tests.command.json"
+		]
+	},
+	"updates": [
+		{
+			"id": "animation-contract-native-c-gameplay-have-behaviorally-equivalent-access-animator-lookup-commands-parameters-snapshots",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-gameplay-writes-use-bounded-copied-generation-validated-command-transactional-paths-rather-than",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-animation-command-return-stable-status-receipt-distinguishes-accepted-applied-adjusted-deferred-cancelled",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-accepted-asynchronous-commands-expose-results-become-observable",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-managed-reload-invalidate-stale-wrappers-subscriptions-without-affecting-newly-created-animation-instances",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-exceptions-managed-animation-callbacks-contained-correlated-reported-without-aborting-publication-unrelated-animators",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-root-motion-expose-translation-rotation-source-interval-source-state-loop-layer-contribution",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-root-motion-support-transform-driven-character-controller-driven-physics-command-driven-extracted",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-root-motion-application-coordinate-collision-response-support-motion-parent-transforms-teleports-rollback",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-gameplay-receive-actual-applied-adjusted-rejected-root-motion-result-rather-than-assuming",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-bone-socket-attachments-preserve-declared-local-offsets-hierarchy-behavior-following-complete-published",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-attachment-mutation-removal-stale-targets-scene-reload-publish-transforms-into-reused-objects",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-gameplay-event-subscriptions-support-filtering-animator-controller-state-layer-event-identifier-tag",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-event-queues-retained-event-history-bounded-explicit-overflow-diagnostics-deterministic-retention",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-gameplay-able-query-whether-animator-satisfy-requested-state-clip-retarget-ik-motion",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-animation-commands-concurrent-producers-merge-deterministic-documented-order",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-commands-support-cancellation-idempotency-retries-durable-jobs-otherwise-repeat-logical-action",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-gameplay-queries-return-copied-snapshots-explicit-generation-age-rather-than-aliasing-mutable",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-native-c-animation-interfaces-validate-compatibility-before-exchanging-animation-requests-results-across",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-c-component-properties-follow-engine-s-deferred-transactional-visibility-rules-imply-same",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-c-commands-snapshots-event-packets-motion-match-results-root-motion-results-ik",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-managed-event-subscriptions-have-bounded-lifetime-explicit-disposal-reload-invalidation-exception-containment",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-contract-exported-runtimes-expose-same-supported-c-animation-behavior-editor-runtime",
+			"status": "Accepted"
+		},
+		{
+			"id": "animation-outcome-native-c-gameplay-fixtures-produce-equivalent-command-statuses-state-snapshots-event-packets",
+			"status": "Accepted"
+		}
+	]
+}

@@ -36,7 +36,7 @@
     "reductionTileSize": 1024
   },
   "performanceAcceptance": {
-    "deferredUntil": "T283",
+    "deferredUntil": "animation-validation-runs-every-accumulated-feature-workflow-benchmark-t-runs-every-unrelated",
     "timingMayNotRunBeforeFinalPhase": true
   }
 }

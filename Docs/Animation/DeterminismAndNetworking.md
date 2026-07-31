@@ -50,6 +50,6 @@ TERRAENGINE_ANIMATION_DETERMINISM_TICKS=100000 \
 Each real platform process reports only the acceptance lanes it actually
 executes. Every worker count must match the source-controlled MSVC golden hash;
 an unrecognized tick-count value fails closed instead of silently running the
-short developer profile. T270 additionally requires the installed editor/MCP,
+short developer profile. animation-validation-us-blocking-e-us-installed-headless-correctness-gate-across-exact additionally requires the installed editor/MCP,
 exported runtime, correction, late-join, replay-seek, and camera-continuity
 evidence, so this native matrix is necessary but is not the whole live gate.
