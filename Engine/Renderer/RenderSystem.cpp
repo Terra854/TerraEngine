@@ -178,8 +178,19 @@ namespace
 
 		facts.complete = true;
 		facts.representationFlags = header.representationFlags;
-		facts.packedMeshletCount = mesh.runtimeLayout.meshletCount;
-		facts.sourceTriangleCount = static_cast<std::uint32_t>(primitiveCount / 3u);
+		// The direct payload may contain several resident LOD ranges. Route cost and
+		// draw batching describe one selected range, not the sum of every alternative
+		// detail packed beside it.
+		const VirtualGeometryDetailLevelRecord* baseDetail =
+			mesh.virtualGeometryDetailLevels.empty()
+				? nullptr
+				: &mesh.virtualGeometryDetailLevels.front();
+		facts.packedMeshletCount = !declaresVirtual && baseDetail != nullptr
+			? baseDetail->meshletCount
+			: mesh.runtimeLayout.meshletCount;
+		facts.sourceTriangleCount = baseDetail != nullptr
+			? baseDetail->primitiveCount
+			: static_cast<std::uint32_t>(primitiveCount / 3u);
 		facts.physicalPageCount = header.pageCount;
 		facts.physicalBlockCount = header.blockCount;
 		facts.calibrationIdentity = header.buildRecipeHash
@@ -508,8 +519,14 @@ namespace
 			TerraEngine::Resource::VirtualGeometryStreamingSystem::Instance().PublishedPages();
 		runtime.assetId = meshId;
 		runtime.cookStatus = mesh.hasVirtualGeometry ? VirtualGeometryCookStatus::Cooked : VirtualGeometryCookStatus::NeedsRebuild;
-		runtime.sourceTriangleCount = mesh.virtualGeometryHeader.sourceTriangleCount;
-		runtime.sourceVertexCount = mesh.virtualGeometryHeader.sourceVertexCount;
+		runtime.sourceTriangleCount = mesh.hasVirtualGeometry
+			? mesh.virtualGeometryHeader.sourceTriangleCount
+			: (mesh.virtualGeometryDetailLevels.empty()
+				? 0u : mesh.virtualGeometryDetailLevels.front().primitiveCount);
+		runtime.sourceVertexCount = mesh.hasVirtualGeometry
+			? mesh.virtualGeometryHeader.sourceVertexCount
+			: (mesh.virtualGeometryDetailLevels.empty()
+				? 0u : mesh.virtualGeometryDetailLevels.front().vertexCount);
 		runtime.clusterCoverageValidated =
 			(mesh.virtualGeometryHeader.flags & kVirtualGeometryValidationFlagClusterCoverageValidated) != 0u;
 
@@ -4866,7 +4883,18 @@ void RenderSystem::Update(float deltaTime)
 			value.geometryIdentity = geometryIdentity;
 			value.geometryGeneration = snapshotRendererGeneration;
 			value.materialIdentity = materialIdentity;
-			value.meshletCount = renderable.geometryRouteInput.packedMeshletCount;
+			const Mesh* directMesh = ResourceManager::Instance().GetMesh(renderable.meshId);
+			if (directMesh != nullptr && !directMesh->virtualGeometryDetailLevels.empty())
+			{
+				const VirtualGeometryDetailLevelRecord& baseDetail =
+					directMesh->virtualGeometryDetailLevels.front();
+				value.firstMeshlet = baseDetail.meshletOffset;
+				value.meshletCount = baseDetail.meshletCount;
+			}
+			else
+			{
+				value.meshletCount = renderable.geometryRouteInput.packedMeshletCount;
+			}
 			renderFrameSnapshot.directMeshletBatches.push_back(std::move(value));
 			batch = std::prev(renderFrameSnapshot.directMeshletBatches.end());
 		}
@@ -5623,7 +5651,42 @@ void RenderSystem::Update(float deltaTime)
 		expandedCommands.reserve(commands.size());
 		for (DrawCommand& command : commands)
 		{
+			// Visualizer ownership belongs to the view, not the geometry route. Stamp
+			// the selected mode before routing so low-poly direct draws, fail-open
+			// fallbacks, and adaptive virtual geometry all reach Vulkan consistently.
+			const std::uint32_t debugMode =
+				static_cast<std::uint32_t>(viewVirtualGeometryQuality.debugVisualizationMode)
+				& kVirtualGeometryDebugModeMask;
+			command.virtualGeometryFlags &=
+				~(kVirtualGeometryDebugModeMask << kVirtualGeometryDebugModeShift);
+			command.virtualGeometryFlags |= debugMode << kVirtualGeometryDebugModeShift;
 			Mesh* mesh = ResourceManager::Instance().GetMesh(command.meshId);
+			if (mesh != nullptr
+				&& !mesh->hasVirtualGeometry
+				&& command.geometryRoute == TerraEngine::Renderer::GeometryRoute::DirectMeshlet
+				&& !mesh->virtualGeometryDetailLevels.empty())
+			{
+				// Low-poly assets select one compact owner-mesh range per camera. This is
+				// conventional resident work: no virtual flags, packets, feedback, or
+				// page requests are manufactured for the direct path.
+				const VirtualGeometryAssetRuntime runtime =
+					BuildVirtualGeometryRuntimeFromMesh(command.meshId, *mesh);
+				const float projectedRadiusPixels = EstimateProjectedMeshRadiusPixels(
+					*mesh,
+					command.modelMatrix,
+					cameraPosition,
+					targetSize);
+				const TerraEngine::Renderer::VirtualGeometryDrawRange range =
+					RenderSystem::SelectDirectResidentLodRange(
+						runtime,
+						viewVirtualGeometryQuality,
+						projectedRadiusPixels);
+				command.virtualMeshletOffset = range.meshletOffset;
+				command.virtualMeshletCount = range.meshletCount;
+				command.selectedVirtualLod = range.selectedLodIndex;
+				expandedCommands.push_back(command);
+				continue;
+			}
 			if (mesh == nullptr || !mesh->hasVirtualGeometry
 				|| !command.UsesVirtualGeometryRoute())
 			{
@@ -5665,7 +5728,6 @@ void RenderSystem::Update(float deltaTime)
 			range.pageNeedOffset = static_cast<std::uint32_t>(packet.pageNeeds.size());
 			range.selectedClusterCount = static_cast<std::uint32_t>(selection.selectedClusters.size());
 			range.pageNeedCount = static_cast<std::uint32_t>(selection.pageNeeds.size());
-			const std::uint32_t debugMode = static_cast<std::uint32_t>(viewVirtualGeometryQuality.debugVisualizationMode) & kVirtualGeometryDebugModeMask;
 			std::string coneDisabledReason;
 			const bool coneCullingSafe = AreVirtualGeometryClustersConeCullingEligible(runtime, selection.selectedClusters, &coneDisabledReason);
 			const std::uint32_t virtualGeometryFlags = (range.virtualGeometryActive ? kVirtualGeometryFlagActive : 0u)
@@ -6147,6 +6209,20 @@ void RenderSystem::Update(float deltaTime)
 		for (DrawCommand& command : commands)
 		{
 			Mesh* mesh = ResourceManager::Instance().GetMesh(command.meshId);
+			if (mesh != nullptr
+				&& !mesh->hasVirtualGeometry
+				&& command.geometryRoute == TerraEngine::Renderer::GeometryRoute::DirectMeshlet
+				&& !mesh->virtualGeometryDetailLevels.empty())
+			{
+				// Shadow silhouettes use direct LOD0 conservatively while camera views
+				// remain free to choose a cheaper resident range.
+				const VirtualGeometryDetailLevelRecord& baseDetail =
+					mesh->virtualGeometryDetailLevels.front();
+				command.virtualMeshletOffset = baseDetail.meshletOffset;
+				command.virtualMeshletCount = baseDetail.meshletCount;
+				command.selectedVirtualLod = baseDetail.lodIndex;
+				continue;
+			}
 			if (mesh == nullptr || !mesh->hasVirtualGeometry
 				|| !command.UsesVirtualGeometryRoute())
 			{
@@ -8375,6 +8451,32 @@ TerraEngine::Renderer::VirtualGeometryDrawRange RenderSystem::SelectVirtualGeome
 	}
 
 	ApplyDetail(desiredIndex);
+	return range;
+}
+
+TerraEngine::Renderer::VirtualGeometryDrawRange RenderSystem::SelectDirectResidentLodRange(
+	const VirtualGeometryAssetRuntime& asset,
+	const VirtualGeometryQualityProfile& quality,
+	float projectedRadiusPixels)
+{
+	// Reuse the same artist-facing screen-size and error policy as paged VG, then
+	// remove every virtual-only state bit. Direct LODs are ordinary ranges inside
+	// an already-resident owner mesh and must never create hierarchy or streaming
+	// work merely because they share the detail-record structure.
+	TerraEngine::Renderer::VirtualGeometryDrawRange range =
+		SelectVirtualGeometryLodRange(
+			asset,
+			quality,
+			projectedRadiusPixels,
+			true,
+			true);
+	range.virtualGeometryActive = false;
+	range.failOpen = false;
+	range.fallbackReason.clear();
+	range.hiZSelfOcclusionGuardPassed = false;
+	range.hiZNearPlaneGuardPassed = false;
+	range.hiZThinGeometryGuardPassed = false;
+	range.hiZInactiveReason.clear();
 	return range;
 }
 

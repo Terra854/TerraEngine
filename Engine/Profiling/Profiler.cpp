@@ -1642,8 +1642,10 @@ void Profiler::CommitCurrentFrameLocked()
 	retainedFrames.push_back(std::move(*currentFrame));
 	currentFrame.reset();
 
-	const std::size_t maximumFrames = std::max<std::size_t>(1u, settings.maxFrames);
-	while (retainedFrames.size() > maximumFrames)
+	// Zero means the user requested the complete capture. A non-zero value keeps
+	// the existing rolling policy for explicitly bounded recording clients.
+	const std::size_t maximumFrames = settings.maxFrames;
+	while (maximumFrames > 0u && retainedFrames.size() > maximumFrames)
 	{
 		retainedFrames.pop_front();
 	}

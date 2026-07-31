@@ -117,7 +117,7 @@ namespace TerraEngine::EditorTests
 			context.Expect(source.find("unavailable") != std::string::npos, "Unavailable typed streams should be labelled instead of shown as zero.");
 		});
 
-		registry.Add("ProfilerWindow.Recording.UsesBoundedDetailedCaptureForEveryFrameScopeEvidence", [](TestContext& context) {
+		registry.Add("ProfilerWindow.Recording.KeepsUnlimitedDetailedCaptureAndDefersFramePresentation", [](TestContext& context) {
 			const std::string source = ReadProfilerWindowSource();
 			const std::string serviceSource = ReadEditorProfilerServiceSource();
 			const std::size_t timingDisclosure = source.find("TreeNode(\"Timing Distribution\")");
@@ -132,12 +132,15 @@ namespace TerraEngine::EditorTests
 				&& serviceSource.find("taskExecutionEnabled = true") != std::string::npos
 				&& serviceSource.find("recordTaskContext = true") != std::string::npos,
 				"The detailed toolbar capture should retain marker and task context needed to build useful scope trees.");
-			context.Expect(serviceSource.find("settings.maxFrames = TerraEngine::Profiling::kDefaultProfilerRollingFrameLimit") != std::string::npos
+			context.Expect(serviceSource.find("settings.maxFrames = 0u") != std::string::npos
 				&& source.find("Record Every Frame") != std::string::npos,
-				"The every-frame toolbar action should clearly identify itself and retain a bounded detailed history.");
+				"The every-frame toolbar action should clearly identify itself and retain the complete detailed history.");
 			context.Expect(serviceSource.find("no shared profiler mutex") != std::string::npos
 				&& serviceSource.find("reports drops") != std::string::npos,
-				"The service should document why every-frame detailed capture remains bounded.");
+				"The service should document why every-frame detailed capture keeps producer work bounded.");
+			context.Expect(source.find("if (!liveCapture)") != std::string::npos
+				&& source.find("Frame history will appear after the recording is finished.") != std::string::npos,
+				"The Frames subwindow should not refresh or expose rows until recording has finished.");
 			context.Expect(timingDisclosure != std::string::npos && frameCopy != std::string::npos && timingDisclosure < frameCopy,
 				"Rolling timing distributions should copy the complete capture only after the user expands them.");
 			context.Expect(evidenceDisclosure != std::string::npos && documentCopy != std::string::npos && evidenceDisclosure < documentCopy,
@@ -155,9 +158,12 @@ namespace TerraEngine::EditorTests
 				"The profiler window should copy its frame list only in the snapshot refresh path.");
 			context.ExpectEqual(static_cast<std::size_t>(1u), CountOccurrences(source, "GetSelectedFrameSnapshot()"),
 				"The profiler window should copy its selected frame only in the snapshot refresh path.");
-			context.Expect(source.find("kProfilerStatsRefreshInterval") != std::string::npos
-				&& source.find("now >= cache->nextProfilerStatsRefresh") != std::string::npos,
-				"Whole-history percentile sorting should update more slowly than compact live rows.");
+			const std::size_t finishedCaptureGuard = source.find("if (!liveCapture)");
+			const std::size_t frameListCopy = source.find("GetFrameListSnapshot()", finishedCaptureGuard);
+			context.Expect(finishedCaptureGuard != std::string::npos
+				&& frameListCopy != std::string::npos
+				&& finishedCaptureGuard < frameListCopy,
+				"Whole-history frame copying and percentile sorting should occur only after capture activity ends.");
 			context.Expect(source.find("const std::vector<ProfilerFrameListItem>& displayedFrames = frameIndexOrder ? frames : sortedFrames") != std::string::npos
 				&& source.find("if (!frameIndexOrder && (cache->frameOrderDirty || sortSpecs->SpecsDirty))") != std::string::npos,
 				"The default frame-index order should traverse the chronological snapshot directly and sort only explicit timing orders.");
@@ -166,8 +172,8 @@ namespace TerraEngine::EditorTests
 			context.Expect(pinGuard != std::string::npos
 				&& selectedFrameCopy != std::string::npos
 				&& pinGuard < selectedFrameCopy
-				&& source.find("Live timings are updating in the frame list") != std::string::npos,
-				"Live recording should remain compact until the user explicitly pins a frame for detailed inspection.");
+				&& source.find("Frame analysis will become available after the recording is finished.") != std::string::npos,
+				"Detailed frame inspection should remain unavailable until the recording is finalized.");
 			context.ExpectEqual(static_cast<std::size_t>(1u), CountOccurrences(source, "BuildSampleTree(frame, selectedModule)"),
 				"Top offenders and the sample hierarchy should share one cached sample-tree analysis.");
 			context.Expect(source.find("GetLatestRenderGraphDiagnostics()") == std::string::npos

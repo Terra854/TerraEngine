@@ -212,7 +212,9 @@ ProfilerCaptureSettings SettingsFromJson(const nlohmann::json& json)
 	settings.taskExecutionEnabled = json.value("taskExecutionEnabled", true);
 	settings.recordMarkers = json.value("recordMarkers", true);
 	settings.recordTaskContext = json.value("recordTaskContext", true);
-	settings.maxFrames = std::max(1u, json.value("maxFrames", kDefaultProfilerRollingFrameLimit));
+	// Zero is the durable unlimited sentinel. Preserve it when loading settings
+	// instead of silently converting an unlimited recording into a one-frame cap.
+	settings.maxFrames = json.value("maxFrames", 0u);
 	settings.maxDurationSeconds = std::max(0.0, json.value("maxDurationSeconds", 0.0));
 	return settings;
 }
@@ -313,7 +315,7 @@ public:
 		}
 		else if (ParentIsNamedObject("settings") && key == "maxFrames")
 		{
-			outArtifact.metadata.settings.maxFrames = std::max<std::uint32_t>(1u, static_cast<std::uint32_t>(value));
+			outArtifact.metadata.settings.maxFrames = static_cast<std::uint32_t>(value);
 		}
 		return true;
 	}
@@ -776,9 +778,10 @@ std::vector<ProfilerModuleSummary> MakeDefaultModuleSummaries(const ProfilerCapt
 // TrimFrameBuffer is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void TrimFrameBuffer(std::vector<ProfilerFrameRecord>& frames, const ProfilerCaptureSettings& settings)
 {
-	const std::size_t maxFrames = std::max<std::size_t>(1u, settings.maxFrames);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (frames.size() > maxFrames)
+	// A zero frame limit is intentionally unlimited. Explicit non-zero limits
+	// retain the rolling-buffer behavior used by bounded tools and tests.
+	const std::size_t maxFrames = settings.maxFrames;
+	if (maxFrames > 0u && frames.size() > maxFrames)
 	{
 		frames.erase(frames.begin(), frames.begin() + static_cast<std::ptrdiff_t>(frames.size() - maxFrames));
 	}

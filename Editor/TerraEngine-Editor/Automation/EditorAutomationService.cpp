@@ -5871,15 +5871,15 @@ namespace TerraEngine::Editor::Automation
 						if (requestedMaxFrames.is_number_unsigned())
 						{
 							const std::uint64_t value = requestedMaxFrames.get<std::uint64_t>();
-							if (value == 0u || value > 4096u)
-								return BuildError(requestId, ErrorCategory::Validation, "maxFrames must be between 1 and 4096.");
+							if (value > 4096u)
+								return BuildError(requestId, ErrorCategory::Validation, "maxFrames must be zero (unlimited) or between 1 and 4096.");
 							settings.maxFrames = static_cast<std::uint32_t>(value);
 						}
 						else
 						{
 							const std::int64_t value = requestedMaxFrames.get<std::int64_t>();
-							if (value <= 0 || value > 4096)
-								return BuildError(requestId, ErrorCategory::Validation, "maxFrames must be between 1 and 4096.");
+							if (value < 0 || value > 4096)
+								return BuildError(requestId, ErrorCategory::Validation, "maxFrames must be zero (unlimited) or between 1 and 4096.");
 							settings.maxFrames = static_cast<std::uint32_t>(value);
 						}
 					}
@@ -5888,7 +5888,7 @@ namespace TerraEngine::Editor::Automation
 				{
 					return BuildError(requestId, ErrorCategory::Validation, "Profiler capture options have invalid types.");
 				}
-				if (settings.maximumChunkFrames == 0u || settings.maximumChunkFrames > 4096u || settings.maximumChunkBytes < 1024u || settings.maximumChunkBytes > 8388608u || settings.sampleIntervalFrames == 0u || settings.sampleIntervalFrames > 1024u || settings.maxFrames == 0u || settings.maxFrames > 4096u)
+				if (settings.maximumChunkFrames == 0u || settings.maximumChunkFrames > 4096u || settings.maximumChunkBytes < 1024u || settings.maximumChunkBytes > 8388608u || settings.sampleIntervalFrames == 0u || settings.sampleIntervalFrames > 1024u || settings.maxFrames > 4096u)
 					return BuildError(requestId, ErrorCategory::Validation, "Profiler capture bounds are outside the supported range.");
 				editorContext->editorProfiler->StartRecording(settings);
 				if (editorContext->editorProfiler->GetState() != TerraEngine::Profiling::ProfilerSessionState::Recording)

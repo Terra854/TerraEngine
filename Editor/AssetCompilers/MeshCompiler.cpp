@@ -57,15 +57,18 @@ namespace
 	bool ReplaceStagedTemf(const std::filesystem::path& stagedPath, const std::filesystem::path& outputPath);
 
 	constexpr float kPi = 3.14159265358979323846f;
-	// meshoptimizer stops simplifying once this error budget is reached. The
-	// adaptive cook then applies the user-facing maximumGeometricError gate so
-	// bad candidates are rejected without changing the renderer-facing fallback.
-	constexpr float kSimplificationTargetError = 0.01f;
 	// Virtual geometry LODs are rendered directly at distance, so preserve open
 	// borders during simplification. GLB/FBX hard-surface assets often split UVs,
 	// materials, and thin parts into many seams; letting those borders collapse can
 	// pass the numeric error gate while visibly shredding silhouettes.
 	constexpr unsigned int kVirtualGeometrySimplifyOptions = meshopt_SimplifyLockBorder;
+	// Whole-mesh assets can contain many legitimate open borders: separate props,
+	// hard-surface panels, and imported attribute seams. If the conservative pass
+	// cannot reach its requested count, retry without globally freezing those
+	// borders and let the weighted attribute error decide which collapses are safe.
+	// Explicit deformation and mirrored-tangent locks remain authoritative because
+	// they are supplied through the per-vertex lock stream in both passes.
+	constexpr unsigned int kVirtualGeometryFallbackSimplifyOptions = meshopt_SimplifyPermissive;
 	constexpr std::array<std::string_view, 4> kSupportedMeshSourceExtensions = {
 		".obj",
 		".dae",
@@ -1879,6 +1882,12 @@ namespace
 
 		for (std::uint32_t targetIndex = 1u; targetIndex < settings.targetRatios.size(); ++targetIndex)
 		{
+			// maximumGeometricError is both the simplifier stopping budget and the
+			// postcondition checked below. Keeping those values identical prevents a
+			// hidden hardcoded ceiling from making valid project/per-mesh profiles
+			// ineffective while still rejecting every result outside the authored
+			// quality contract.
+			const float simplificationTargetError = settings.maximumGeometricError;
 			const float targetRatio = settings.targetRatios[targetIndex];
 			const std::uint32_t desiredTriangleCount = std::max(1u, static_cast<std::uint32_t>(static_cast<float>(sourceTriangleCount) * targetRatio));
 			const std::uint32_t desiredMeshletCount = std::max(1u, static_cast<std::uint32_t>(static_cast<float>(sourceMeshletCount) * targetRatio));
@@ -1933,10 +1942,48 @@ namespace
 				kVirtualGeometrySimplifyAttributeCount,
 				simplificationLocks.data(),
 				targetIndexCount,
-				kSimplificationTargetError,
+				simplificationTargetError,
 				kVirtualGeometrySimplifyOptions,
 				&resultError);
 			simplifiedIndexCount = (simplifiedIndexCount / 3u) * 3u;
+
+			// Border locking is the safest first choice, but on an assembly-like
+			// mesh it can classify most vertices as immutable and return almost the
+			// original topology. Retry only when that pass stopped short of the
+			// requested target, then accept the retry only when it is both smaller
+			// and inside the exact same simplification-error budget.
+			if (simplifiedIndexCount > targetIndexCount)
+			{
+				std::vector<std::uint32_t> permissive(currentIndices.size());
+				float permissiveError = 0.0f;
+				std::size_t permissiveIndexCount = meshopt_simplifyWithAttributes(
+					permissive.data(),
+					currentIndices.data(),
+					currentIndices.size(),
+					positions,
+					vertices.size(),
+					sizeof(VertexRaw),
+					attributes,
+					sizeof(VertexRaw),
+					kVirtualGeometrySimplifyAttributeWeights.data(),
+					kVirtualGeometrySimplifyAttributeCount,
+					simplificationLocks.data(),
+					targetIndexCount,
+					simplificationTargetError,
+					kVirtualGeometryFallbackSimplifyOptions,
+					&permissiveError);
+				permissiveIndexCount = (permissiveIndexCount / 3u) * 3u;
+				if (permissiveIndexCount >= 3u
+					&& permissiveIndexCount < simplifiedIndexCount
+					&& std::isfinite(permissiveError)
+					&& permissiveError <= simplificationTargetError)
+				{
+					permissive.resize(permissiveIndexCount);
+					simplified = std::move(permissive);
+					simplifiedIndexCount = permissiveIndexCount;
+					resultError = permissiveError;
+				}
+			}
 
 			if (simplifiedIndexCount < 3u || simplifiedIndexCount >= currentIndices.size())
 			{
@@ -2289,6 +2336,7 @@ namespace
 		const std::vector<VertexRaw>& vertices,
 		const std::vector<std::uint32_t>& sourceIndices,
 		float targetRatio,
+		float maximumGeometricError,
 		float& outGeometricError)
 	{
 		outGeometricError = 0.0f;
@@ -2323,10 +2371,42 @@ namespace
 			kVirtualGeometrySimplifyAttributeCount,
 			simplificationLocks.data(),
 			targetIndexCount,
-			kSimplificationTargetError,
+			maximumGeometricError,
 			kVirtualGeometrySimplifyOptions,
 			&resultError);
 		simplifiedIndexCount = (simplifiedIndexCount / 3u) * 3u;
+		if (simplifiedIndexCount > targetIndexCount)
+		{
+			std::vector<std::uint32_t> permissive(sourceIndices.size());
+			float permissiveError = 0.0f;
+			std::size_t permissiveIndexCount = meshopt_simplifyWithAttributes(
+				permissive.data(),
+				sourceIndices.data(),
+				sourceIndices.size(),
+				positions,
+				vertices.size(),
+				sizeof(VertexRaw),
+				attributes,
+				sizeof(VertexRaw),
+				kVirtualGeometrySimplifyAttributeWeights.data(),
+				kVirtualGeometrySimplifyAttributeCount,
+				simplificationLocks.data(),
+				targetIndexCount,
+				maximumGeometricError,
+				kVirtualGeometryFallbackSimplifyOptions,
+				&permissiveError);
+			permissiveIndexCount = (permissiveIndexCount / 3u) * 3u;
+			if (permissiveIndexCount >= 3u
+				&& permissiveIndexCount < simplifiedIndexCount
+				&& std::isfinite(permissiveError)
+				&& permissiveError <= maximumGeometricError)
+			{
+				permissive.resize(permissiveIndexCount);
+				simplified = std::move(permissive);
+				simplifiedIndexCount = permissiveIndexCount;
+				resultError = permissiveError;
+			}
+		}
 
 		if (simplifiedIndexCount < 3u || simplifiedIndexCount >= sourceIndices.size() || !std::isfinite(resultError))
 		{
@@ -2454,6 +2534,7 @@ namespace
 				vertices,
 				sourceCoverageIndices,
 				lod.targetRatio,
+				maximumGeometricError,
 				simplificationError);
 
 			VirtualGeometryClusterCookPayload payload{};
@@ -3965,13 +4046,16 @@ static bool CompileMeshInternal(
 		addRecords(kTemfMetadataMeshletRecords, meshletPayload.meshletRecords, compactMetadataProfile);
 		addRecords(kTemfMetadataMeshletSections, meshletPayload.meshletSections);
 		addRecords(kTemfMetadataMeshletBounds, meshletPayload.meshletBounds);
+		// Every representation needs the compact LOD range table. Direct-resident
+		// meshes use it to select one already-resident meshlet span per view without
+		// allocating virtual pages, streaming records, or hierarchy traversal.
+		addRecords(kTemfMetadataVirtualDetailLevels, virtualGeometryPayload.detailLevels);
 		if (denseProduction)
 		{
 		addBytes(TemfStreamKind::Metadata, kTemfMetadataVirtualHeader,
 			metadataDomainId, 1u,
 			static_cast<std::uint32_t>(sizeof(virtualGeometryPayload.header)),
 			std::as_bytes(std::span(&virtualGeometryPayload.header, 1u)));
-		addRecords(kTemfMetadataVirtualDetailLevels, virtualGeometryPayload.detailLevels);
 		addRecords(kTemfMetadataVirtualMaterialSections, virtualGeometryPayload.materialSections);
 		addRecords(kTemfMetadataVirtualSectionRanges, virtualGeometryPayload.sectionRanges);
 		addRecords(kTemfMetadataVirtualCullableGroups, virtualGeometryPayload.cullableGroups);

@@ -167,7 +167,7 @@ namespace TerraEngine::EditorTests
 				context.Expect(mesh.virtualGeometryRequested, "Package mesh records should state that virtual geometry was requested.");
 				context.Expect(!mesh.virtualGeometryCooked, "A triangle package mesh must not claim virtual-page cooking.");
 				context.ExpectEqual(std::string("Skipped"), mesh.virtualGeometryStatus, "A triangle package mesh must publish the canonical direct-meshlet route.");
-				context.ExpectEqual(0u, mesh.virtualGeometryDetailLevels, "Direct meshlets must not publish virtual detail levels.");
+				context.ExpectEqual(1u, mesh.virtualGeometryDetailLevels, "Direct meshlets must publish their selectable resident LOD0 range.");
 				context.Expect(mesh.virtualGeometryMeshlets > 0u, "Cooked package mesh should expose a meshlet count.");
 				context.Expect(std::any_of(mesh.virtualGeometryWarnings.begin(), mesh.virtualGeometryWarnings.end(), [](const std::string& warning) {
 					return warning.find("direct-resident") != std::string::npos;
@@ -197,10 +197,9 @@ namespace TerraEngine::EditorTests
 						return target.status == "Generated";
 					}));
 			context.ExpectEqual(
-				static_cast<std::size_t>(
-					refreshedMesh.virtualGeometryDetailLevels),
+				static_cast<std::size_t>(refreshedMesh.virtualGeometryDetailLevels - 1u),
 				publishedGeneratedTargetCount,
-				"Final TEMF inspection must replace stale inventory rows so the reported generated LOD count matches the renderable detail count.");
+				"Final TEMF inspection must replace stale inventory rows; direct LOD0 is renderable without pretending it came from an adaptive target.");
 			const std::filesystem::path generatedPrefabPath = options.assetRoot / result.generatedPrefabs.front().sourcePath;
 			context.Expect(std::filesystem::exists(generatedPrefabPath), "Generated package prefab should be written beside package child assets.");
 			const nlohmann::json prefabJson = nlohmann::json::parse(ReadTextFile(generatedPrefabPath));

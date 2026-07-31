@@ -986,6 +986,9 @@ struct Mesh
 	bool hasVirtualGeometry = false;
 	std::uint32_t virtualGeometryPayloadGeneration = 0u;
 	VirtualGeometryHeader virtualGeometryHeader{};
+	// Direct-resident and paged meshes share the same compact detail record.
+	// Direct meshes consume only meshlet ranges and error values; they never
+	// interpret the page, cluster, or hierarchy fields below.
 	std::vector<VirtualGeometryDetailLevelRecord> virtualGeometryDetailLevels;
 	std::vector<VirtualGeometryMaterialSectionRecord> virtualGeometryMaterialSections;
 	std::vector<VirtualGeometrySectionRangeRecord> virtualGeometrySectionRanges;

@@ -1,5 +1,6 @@
 #include "TestHarness.h"
 
+#include "Renderer/RenderSystem.h"
 #include "Renderer/RenderTypes.h"
 #include "Renderer/VirtualGeometry/Selection/GeometryRoutePolicy.h"
 #include "Resource/VirtualGeometryStreamingDiagnostics.h"
@@ -55,6 +56,36 @@ namespace TerraEngine::Tests
 				compute.geometryRoute = Renderer::GeometryRoute::VirtualGeometryCompute;
 				context.Expect(compute.UsesVirtualGeometryRoute(),
 					"Compute virtual geometry must enter view-local VG selection.");
+			});
+
+		registry.Add("VirtualGeometry.DirectRoute.SelectsOneResidentLodWithoutVirtualWork",
+			[](TestContext& context)
+			{
+				VirtualGeometryAssetRuntime asset{};
+				asset.detailLevels = {
+					{ 0u, 0u, 8u, 512u, 0.0f, 1.0f },
+					{ 1u, 8u, 4u, 256u, 0.02f, 0.5f },
+					{ 2u, 12u, 2u, 128u, 0.04f, 0.25f }
+				};
+				VirtualGeometryQualityProfile quality =
+					MakeDefaultVirtualGeometryQualityProfile();
+				quality.maxLodDrop = 2u;
+
+				const Renderer::VirtualGeometryDrawRange nearRange =
+					RenderSystem::SelectDirectResidentLodRange(asset, quality, 640.0f);
+				const Renderer::VirtualGeometryDrawRange farRange =
+					RenderSystem::SelectDirectResidentLodRange(asset, quality, 80.0f);
+
+				context.ExpectEqual(0u, nearRange.selectedLodIndex,
+					"A nearby direct mesh must retain its source-detail range.");
+				context.ExpectEqual(2u, farRange.selectedLodIndex,
+					"A distant direct mesh must select the coarse resident range.");
+				context.ExpectEqual(12u, farRange.meshletOffset,
+					"Direct LOD selection must preserve the cooked range offset.");
+				context.ExpectEqual(2u, farRange.meshletCount,
+					"Direct LOD selection must submit only the selected range.");
+				context.Expect(!farRange.virtualGeometryActive && !farRange.failOpen,
+					"Direct LOD selection must not manufacture virtual hierarchy or fallback work.");
 			});
 
 		registry.Add("VirtualGeometry.DirectRoute.SuppressionDiagnosticsRemainExplicit",

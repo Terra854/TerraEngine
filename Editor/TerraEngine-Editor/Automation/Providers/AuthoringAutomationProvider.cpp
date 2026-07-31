@@ -183,9 +183,10 @@ namespace TerraEngine::Editor::Automation
 			registration.descriptor.inputSchema["properties"]["sampleIntervalFrames"] = {{"type", "integer"}, {"minimum", 1}, {"maximum", 1024}};
 			registration.descriptor.inputSchema["properties"]["maxFrames"] = {
 				{"type", "integer"},
-				{"minimum", 1},
+				{"minimum", 0},
 				{"maximum", 4096},
-				{"default", TerraEngine::Profiling::kDefaultProfilerRollingFrameLimit}};
+				{"default", 0},
+				{"description", "Maximum retained frames; zero keeps the complete capture."}};
 			return registration;
 		}
 	}

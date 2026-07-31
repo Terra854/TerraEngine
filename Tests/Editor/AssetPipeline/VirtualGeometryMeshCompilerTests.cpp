@@ -88,6 +88,57 @@ namespace
 		return fixture;
 	}
 
+	RawMeshFixture MakeDisconnectedPanelMesh(
+		std::uint32_t panelCount,
+		std::uint32_t quadsPerSide)
+	{
+		RawMeshFixture fixture;
+		// Imported environments commonly contain many disconnected props and
+		// hard-surface panels. Build each panel with unique vertices so every
+		// island has a real open border and exercises the whole-mesh fallback
+		// instead of accidentally sharing topology with its neighbor.
+		for (std::uint32_t panel = 0u; panel < panelCount; ++panel)
+		{
+			const std::uint32_t vertexBase = static_cast<std::uint32_t>(fixture.vertices.size());
+			const std::uint32_t verticesPerSide = quadsPerSide + 1u;
+			const float panelOffsetX = static_cast<float>(panel % 4u) * 3.0f;
+			const float panelOffsetY = static_cast<float>(panel / 4u) * 3.0f;
+			for (std::uint32_t y = 0u; y < verticesPerSide; ++y)
+			{
+				for (std::uint32_t x = 0u; x < verticesPerSide; ++x)
+				{
+					const float fx = static_cast<float>(x) / static_cast<float>(quadsPerSide);
+					const float fy = static_cast<float>(y) / static_cast<float>(quadsPerSide);
+					RawMeshVertex vertex{};
+					vertex.position = {
+						panelOffsetX + fx * 2.0f,
+						panelOffsetY + fy * 2.0f,
+						0.03f * std::sin((fx + static_cast<float>(panel)) * 9.0f) * std::cos(fy * 7.0f)
+					};
+					vertex.normal = { 0.0f, 0.0f, 1.0f };
+					vertex.uv = { fx, fy };
+					fixture.vertices.push_back(vertex);
+				}
+			}
+
+			const auto VertexIndex = [vertexBase, verticesPerSide](std::uint32_t x, std::uint32_t y) {
+				return vertexBase + y * verticesPerSide + x;
+			};
+			for (std::uint32_t y = 0u; y < quadsPerSide; ++y)
+			{
+				for (std::uint32_t x = 0u; x < quadsPerSide; ++x)
+				{
+					const std::uint32_t a = VertexIndex(x, y);
+					const std::uint32_t b = VertexIndex(x + 1u, y);
+					const std::uint32_t c = VertexIndex(x, y + 1u);
+					const std::uint32_t d = VertexIndex(x + 1u, y + 1u);
+					fixture.indices.insert(fixture.indices.end(), { a, c, b, b, c, d });
+				}
+			}
+		}
+		return fixture;
+	}
+
 	RawMeshFixture MakeSmallMesh()
 	{
 		RawMeshFixture fixture;
@@ -187,6 +238,17 @@ namespace
 			context.Expect(mesh != nullptr, "Compiled virtual geometry TEMF should load through ResourceManager.");
 			context.Expect(mesh->hasVirtualGeometry, "Loaded mesh should advertise virtual geometry metadata.");
 			context.Expect((mesh->runtimeLayout.meshletFlags & kMeshletHeaderFlagHasVirtualGeometry) != 0u, "TEMF header should carry the virtual geometry flag.");
+			context.Expect(!mesh->virtualGeometryPageStreamingReady,
+				"Whole-stream codec pages must not masquerade as spatial hierarchy pages when their mappings differ.");
+			context.Expect(mesh->virtualGeometryOwnerFallbackReason.find("do not map one-to-one") != std::string::npos,
+				"A page-identity mismatch should explain why the validated owning-mesh payload is active.");
+			context.Expect(std::all_of(
+				mesh->virtualGeometryPhysicalPageStates.begin(),
+				mesh->virtualGeometryPhysicalPageStates.end(),
+				[](std::uint32_t state) {
+					return state == static_cast<std::uint32_t>(::GeometryPageState::Resident)
+						|| state == static_cast<std::uint32_t>(::GeometryPageState::Pinned);
+				}), "Owning-mesh fallback should keep every decoded hierarchy page selectable without fake streaming requests.");
 			context.ExpectEqual(static_cast<std::size_t>(report.virtualGeometry.detailLevelCount), mesh->virtualGeometryDetailLevels.size(), "Loaded detail table should match the cook report.");
 			context.Expect(mesh->virtualGeometryDetailLevels.back().primitiveCount < mesh->virtualGeometryDetailLevels.front().primitiveCount, "Last detail level should use fewer primitives than the source detail.");
 			context.Expect(mesh->virtualGeometryPages.size() > mesh->virtualGeometryDetailLevels.size(), "Dense detail levels should split into bounded spatial physical pages.");
@@ -227,6 +289,33 @@ namespace
 				}
 			}
 			context.Expect(sawParentChildLink, "High-detail fixtures should publish at least one source-coverage parent/child link.");
+		});
+
+		registry.Add("Editor.AssetPipeline.VirtualGeometry.MeshCompiler.DisconnectedBordersStillGenerateUsefulLods", [](TestContext& context) {
+			const RawMeshFixture fixture = MakeDisconnectedPanelMesh(16u, 12u);
+			const std::filesystem::path output = MakeTempOutputPath("DisconnectedBorderPanels");
+			MeshCompileReport report{};
+
+			context.Expect(CompileMeshFromRaw(
+				"VirtualGeometry/DisconnectedBorderPanels.obj",
+				output,
+				fixture.vertices,
+				fixture.indices,
+				true,
+				&report), "Disconnected panel fixture should compile through the adaptive route.");
+			context.Expect(report.virtualGeometry.detailLevelCount >= 4u,
+				"Open borders must not freeze a whole environment mesh at one nearly identical LOD.");
+			context.Expect(!report.virtualGeometry.generatedLevels.empty(),
+				"Disconnected panel cook should publish generated-level diagnostics.");
+			if (!report.virtualGeometry.generatedLevels.empty())
+			{
+				const auto& coarsest = report.virtualGeometry.generatedLevels.back();
+				const std::uint32_t sourceTriangles = static_cast<std::uint32_t>(fixture.indices.size() / 3u);
+				context.Expect(coarsest.triangleCount < (sourceTriangles * 3u) / 4u,
+					"The coarsest disconnected-panel LOD should remove at least one quarter of source triangles.");
+				context.Expect(coarsest.geometricError <= report.virtualGeometry.adaptiveSettings.maximumGeometricError,
+					"Permissive fallback output must remain inside the authored geometric-error ceiling.");
+			}
 		});
 
 		registry.Add("Editor.AssetPipeline.VirtualGeometry.MeshCompiler.WritesCanonicalProductionDirectory", [](TestContext& context) {
@@ -285,8 +374,50 @@ namespace
 			Mesh* mesh = LoadCompiledMeshForInspection(output);
 			context.Expect(mesh != nullptr, "Direct-resident small-mesh TEMF should still load.");
 			context.Expect(!mesh->hasVirtualGeometry, "Small meshes must not expose virtual pages to the renderer path.");
-			context.Expect(mesh->virtualGeometryDetailLevels.empty(), "Direct-resident meshes must not deserialize virtual detail levels.");
+			context.ExpectEqual(1u, static_cast<std::uint32_t>(mesh->virtualGeometryDetailLevels.size()),
+				"Direct-resident meshes must retain the lightweight LOD0 range without publishing virtual pages.");
+			if (!mesh->virtualGeometryDetailLevels.empty())
+			{
+				context.ExpectEqual(0u, mesh->virtualGeometryDetailLevels.front().meshletOffset,
+					"Direct-resident LOD0 must begin at the owner meshlet allocation.");
+				context.ExpectEqual(mesh->runtimeLayout.meshletCount,
+					mesh->virtualGeometryDetailLevels.front().meshletCount,
+					"A one-level direct cook must cover the complete owner meshlet allocation.");
+			}
 			context.Expect(mesh->virtualGeometrySkippedDetails.empty(), "Direct-resident TEMF must not serialize virtual adaptive-detail records.");
+		});
+
+		registry.Add("Editor.AssetPipeline.VirtualGeometry.MeshCompiler.DirectResidentMeshRetainsGeneratedLodRanges", [](TestContext& context) {
+			const RawMeshFixture fixture = MakeGridMesh(24u);
+			const std::filesystem::path output = MakeTempOutputPath("DirectResidentLodGrid");
+			MeshCompileReport report{};
+
+			context.Expect(CompileMeshFromRaw(
+				"VirtualGeometry/DirectResidentLodGrid.obj",
+				output,
+				fixture.vertices,
+				fixture.indices,
+				true,
+				&report),
+				"A low-poly direct-resident grid should compile with automatic LODs.");
+			Mesh* mesh = LoadCompiledMeshForInspection(output);
+			context.Expect(mesh != nullptr && !mesh->hasVirtualGeometry,
+				"The sub-4096-triangle fixture must stay on the direct-resident route.");
+			if (mesh == nullptr)
+			{
+				return;
+			}
+			context.Expect(mesh->virtualGeometryDetailLevels.size() >= 2u,
+				"A reducible direct-resident mesh must retain more than one selectable LOD range.");
+			std::uint32_t expectedOffset = 0u;
+			for (const VirtualGeometryDetailLevelRecord& detail : mesh->virtualGeometryDetailLevels)
+			{
+				context.ExpectEqual(expectedOffset, detail.meshletOffset,
+					"Direct-resident LOD ranges must remain contiguous in the owner allocation.");
+				expectedOffset += detail.meshletCount;
+			}
+			context.ExpectEqual(mesh->runtimeLayout.meshletCount, expectedOffset,
+				"Direct-resident LOD ranges must cover the packed allocation exactly once.");
 		});
 
 		registry.Add("Editor.AssetPipeline.VirtualGeometry.MeshCompiler.SanitizesUnsafeAdaptiveSettings", [](TestContext& context) {

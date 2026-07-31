@@ -866,8 +866,43 @@ namespace TerraEngine::AssetPipeline
 
 		if ((validated.directory.header.representationFlags & kTemfRepresentationVirtualGeometry) == 0u)
 		{
+			std::vector<VirtualGeometryDetailLevelRecord> directDetailLevels;
+			if (!DecodeRecords(kTemfMetadataVirtualDetailLevels, directDetailLevels)
+				|| directDetailLevels.empty())
+			{
+				mesh.virtualGeometryStatus = "NeedsRebuild";
+				mesh.virtualGeometryWarnings.push_back("Canonical direct-resident LOD ranges are missing or malformed.");
+				return;
+			}
+
+			std::uint64_t coveredMeshlets = 0u;
+			bool rangesValid = true;
+			for (std::size_t detailIndex = 0u; detailIndex < directDetailLevels.size(); ++detailIndex)
+			{
+				const VirtualGeometryDetailLevelRecord& detail = directDetailLevels[detailIndex];
+				// Direct-resident levels share one packed meshlet allocation. Requiring
+				// dense, ordered ranges keeps tooling aligned with the runtime loader and
+				// prevents a corrupt report from hiding meshlets or reading past the buffer.
+				if (detail.lodIndex != detailIndex
+					|| detail.meshletOffset != coveredMeshlets
+					|| detail.meshletCount == 0u)
+				{
+					rangesValid = false;
+					break;
+				}
+				coveredMeshlets += detail.meshletCount;
+			}
+			if (!rangesValid || coveredMeshlets != runtime.meshletCount)
+			{
+				mesh.virtualGeometryStatus = "NeedsRebuild";
+				mesh.virtualGeometryWarnings.push_back("Canonical direct-resident LOD ranges do not cover the packed meshlet allocation.");
+				return;
+			}
+
+			mesh.virtualGeometryDetailLevels = static_cast<std::uint32_t>(directDetailLevels.size());
+			mesh.virtualGeometrySourceTriangles = directDetailLevels.front().primitiveCount;
 			mesh.virtualGeometryStatus = "Skipped";
-			mesh.virtualGeometryWarnings.push_back("Compiled mesh uses the canonical direct-resident meshlet route; no virtual pages were built.");
+			mesh.virtualGeometryWarnings.push_back("Compiled mesh uses selectable direct-resident LOD ranges; no virtual pages were built.");
 			return;
 		}
 

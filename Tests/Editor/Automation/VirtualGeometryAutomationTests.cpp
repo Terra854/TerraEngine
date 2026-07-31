@@ -92,7 +92,7 @@ namespace TerraEngine::EditorTests
 			const nlohmann::json& mesh = result["data"]["generatedMeshes"].front();
 			context.Expect(mesh.value("usable", false), "Cooked generated meshes should be marked usable.");
 			context.ExpectEqual(std::string("skipped"), mesh.value("virtualGeometryStatus", std::string()), "The triangle fixture must report the canonical direct-meshlet route.");
-			context.ExpectEqual(0u, mesh.value("detailLevelCount", 0u), "Direct meshlets must not report virtual detail levels.");
+			context.ExpectEqual(1u, mesh.value("detailLevelCount", 0u), "Direct meshlets must report their selectable resident LOD0 range.");
 			context.Expect(mesh.value("sourceTriangleCount", 0u) > 0u, "Generated mesh should report source triangle count.");
 			context.Expect(mesh.contains("settings"), "Generated mesh import response should include resolved adaptive settings.");
 			context.Expect(mesh.contains("cookDiagnostics"), "Generated mesh import response should include cook diagnostics.");
@@ -163,7 +163,7 @@ namespace TerraEngine::EditorTests
 			// A package is usable when all generated mesh children are usable. The
 			// aggregate therefore remains cooked even when its tiny child uses direct meshlets.
 			context.ExpectEqual(std::string("cooked"), inspect["data"].value("virtualGeometryStatus", std::string()), "Inspect should report a usable imported package.");
-			context.ExpectEqual(0u, inspect["data"].value("detailLevels", 0u), "Direct meshlets must not expose virtual detail levels.");
+			context.ExpectEqual(1u, inspect["data"].value("detailLevels", 0u), "Direct meshlets must expose their selectable resident LOD0 range.");
 			context.Expect(inspect["data"].contains("runtimeDiagnostics"), "Inspect should include runtime diagnostics container.");
 			context.Expect(inspect["data"].contains("residencyDiagnostics"), "Inspect should include residency diagnostics container.");
 			context.Expect(inspect["data"].contains("settings"), "Inspect should include resolved adaptive settings.");
@@ -178,7 +178,7 @@ namespace TerraEngine::EditorTests
 			const nlohmann::json& packageMeshes = inspect["data"]["packageVirtualGeometry"].value("generatedMeshes", nlohmann::json::array());
 			context.Expect(!packageMeshes.empty()
 				&& packageMeshes.front().value("virtualGeometryStatus", std::string()) == "skipped"
-				&& packageMeshes.front().value("detailLevelCount", 1u) == 0u,
+				&& packageMeshes.front().value("detailLevelCount", 0u) == 1u,
 				"The triangle package child must explicitly report the canonical direct-meshlet route.");
 			context.Expect(inspect["data"].contains("assetRegistrationBoundary"), "Inspect should state the asset publication boundary.");
 		});

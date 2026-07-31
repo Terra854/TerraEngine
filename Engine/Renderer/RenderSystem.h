@@ -208,6 +208,7 @@ public:
 			std::span<const std::uint32_t> paletteJoints,
 			std::span<const std::uint64_t> morphTargetIds) noexcept;
 	static TerraEngine::Renderer::VirtualGeometryDrawRange SelectVirtualGeometryLodRange(const VirtualGeometryAssetRuntime& asset, const VirtualGeometryQualityProfile& quality, float projectedRadiusPixels, bool taskShaderCullingEnabled, bool boundsValid);
+	static TerraEngine::Renderer::VirtualGeometryDrawRange SelectDirectResidentLodRange(const VirtualGeometryAssetRuntime& asset, const VirtualGeometryQualityProfile& quality, float projectedRadiusPixels);
 	static TerraEngine::Renderer::VirtualGeometryDrawRange SelectVirtualGeometryResidentLodRange(const VirtualGeometryAssetRuntime& asset, const VirtualGeometryQualityProfile& quality, float projectedRadiusPixels, bool taskShaderCullingEnabled, bool boundsValid);
 	static TerraEngine::Renderer::VirtualGeometryDrawRange SelectVirtualGeometryShadowLodRange(const VirtualGeometryAssetRuntime& asset, const VirtualGeometryQualityProfile& quality, bool boundsValid);
 	static TerraEngine::Renderer::VirtualGeometryClusterSelectionResult SelectVirtualGeometryClusterCut(const VirtualGeometryAssetRuntime& asset, const TerraEngine::UUID& meshId, const TerraEngine::UUID& objectId, const VirtualGeometryQualityProfile& quality, float projectedRadiusPixels, bool taskShaderCullingEnabled, bool boundsValid);

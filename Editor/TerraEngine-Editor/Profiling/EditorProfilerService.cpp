@@ -29,9 +29,11 @@ std::string MakeRecordingStatus(const ProfilerCaptureSettings& settings)
 	{
 		return "Recording";
 	}
-	return "Recording every frame (detailed, "
-		+ std::to_string(settings.maxFrames)
-		+ "-frame rolling limit)";
+	if (settings.maxFrames == 0u)
+	{
+		return "Recording every frame (detailed, unlimited history)";
+	}
+	return "Recording every frame (detailed, " + std::to_string(settings.maxFrames) + "-frame rolling limit)";
 }
 
 // PercentileFromSorted deliberately interpolates between neighbouring samples.
@@ -199,9 +201,10 @@ void EditorProfilerService::StartRecording()
 	settings.recordMarkers = true;
 	settings.taskExecutionEnabled = true;
 	settings.recordTaskContext = true;
-	// Use the shared bounded default so toolbar and automation recording cannot
-	// silently diverge into very different memory/eviction behavior.
-	settings.maxFrames = TerraEngine::Profiling::kDefaultProfilerRollingFrameLimit;
+	// The editor's primary Record action keeps the complete session. The Frames
+	// presentation remains frozen until Finish, so history growth does not turn
+	// the open profiler window into a frame-rate consumer.
+	settings.maxFrames = 0u;
 	settings.maxDurationSeconds = 0.0;
 	StartRecording(settings);
 }

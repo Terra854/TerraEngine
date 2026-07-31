@@ -173,6 +173,12 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(2u, static_cast<unsigned int>(frameLimited.size()), "Frame trimming should cap the rolling buffer to maxFrames.");
 			context.ExpectEqual(2ULL, frameLimited.front().frameIndex, "Frame trimming should discard the oldest records first.");
 
+			settings.maxFrames = 0U;
+			std::vector<ProfilerFrameRecord> unlimited{{1U}, {2U}, {3U}};
+			TrimFrameBuffer(unlimited, settings);
+			context.ExpectEqual(3u, static_cast<unsigned int>(unlimited.size()), "A zero maxFrames value should retain the complete capture.");
+			context.ExpectEqual(1ULL, unlimited.front().frameIndex, "Unlimited capture history should preserve the oldest recorded frame.");
+
 			settings.maxFrames = 10U;
 			settings.maxDurationSeconds = 1.0;
 			std::vector<ProfilerFrameRecord> durationLimited;
@@ -182,6 +188,36 @@ namespace TerraEngine::Tests {
 			TrimFrameBuffer(durationLimited, settings);
 			context.ExpectEqual(1u, static_cast<unsigned int>(durationLimited.size()), "Duration trimming should discard frames outside the rolling time window.");
 			context.ExpectEqual(3ULL, durationLimited.front().frameIndex, "Duration trimming should keep the newest frame in the time window.");
+		});
+
+		registry.Add("Engine.ProfilerCapture.UnlimitedHistoryRetainsMoreThanLegacyCap", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+
+			Profiler& profiler = Profiler::Instance();
+			profiler.Clear();
+			ProfilerCaptureMetadata metadata;
+			metadata.projectName = "Unlimited History";
+			ProfilerCaptureSettings settings;
+			settings.detailLevel = ProfilerCaptureDetailLevel::Aggregate;
+			settings.maxFrames = 0u;
+			profiler.StartRecording(metadata, settings);
+			// Cross the former 2,048-frame boundary so this test detects any hidden
+			// rolling eviction in the live Profiler path, not only helper trimming.
+			for (std::uint32_t frame = 0u; frame < 2050u; ++frame)
+			{
+				profiler.BeginFrame();
+				profiler.EndFrame();
+			}
+			const ProfilerCaptureDocument capture = profiler.FinishRecording();
+			context.ExpectEqual(
+				static_cast<std::size_t>(2050u),
+				capture.frames.size(),
+				"Unlimited recording should retain frames beyond the former 2,048-frame cap.");
+			context.Expect(!capture.frames.empty()
+				&& capture.frames.front().frameIndex == 0u
+				&& capture.frames.back().frameIndex == 2049u,
+				"Unlimited recording should preserve the complete chronological frame range.");
+			profiler.Clear();
 		});
 
 		registry.Add("Engine.ProfilerCapture.SaveLoadAndArtifactRoundTripPreservesFrameData", [](TestContext& context) {

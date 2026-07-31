@@ -33,6 +33,15 @@ namespace TerraEngine::Tests
 			MeshletBounds bounds{};
 			bounds.radius = 1.0f;
 			bounds.coneCutoff = 2.0f;
+			VirtualGeometryDetailLevelRecord detail{};
+			detail.lodIndex = 0u;
+			detail.targetStatus = static_cast<std::uint32_t>(
+				VirtualGeometryDetailTargetRecordStatus::Generated);
+			detail.meshletOffset = 0u;
+			detail.meshletCount = 1u;
+			detail.vertexCount = 1u;
+			detail.primitiveCount = 1u;
+			detail.targetRatio = 1.0f;
 			TemfRuntimeDecodeMetadata runtime{};
 			runtime.formatVersion = kMeshCurrentVersion;
 			runtime.meshletVertexCount = 1u;
@@ -67,7 +76,7 @@ namespace TerraEngine::Tests
 			input.decodedBytes = bytes;
 			return input;
 		};
-		const std::array<TemfProductionStreamInput, 9> streams = {
+		const std::array<TemfProductionStreamInput, 10> streams = {
 			stream(TemfStreamKind::Position, 0u, 1u, 6u, positions),
 			stream(TemfStreamKind::NormalTangent, 0u, 1u, 6u, normalTangents),
 			stream(TemfStreamKind::TextureColor, 0u, 1u, 4u, textureColors),
@@ -76,7 +85,8 @@ namespace TerraEngine::Tests
 			stream(TemfStreamKind::Metadata, kTemfMetadataRuntimeLayout, 1u, sizeof(runtime), { reinterpret_cast<const std::uint8_t*>(&runtime), sizeof(runtime) }),
 			stream(TemfStreamKind::Metadata, kTemfMetadataMeshletRecords, 1u, sizeof(record), { reinterpret_cast<const std::uint8_t*>(&record), sizeof(record) }),
 			stream(TemfStreamKind::Metadata, kTemfMetadataMeshletSections, 1u, sizeof(section), { reinterpret_cast<const std::uint8_t*>(&section), sizeof(section) }),
-			stream(TemfStreamKind::Metadata, kTemfMetadataMeshletBounds, 1u, sizeof(bounds), { reinterpret_cast<const std::uint8_t*>(&bounds), sizeof(bounds) })
+			stream(TemfStreamKind::Metadata, kTemfMetadataMeshletBounds, 1u, sizeof(bounds), { reinterpret_cast<const std::uint8_t*>(&bounds), sizeof(bounds) }),
+			stream(TemfStreamKind::Metadata, kTemfMetadataVirtualDetailLevels, 1u, sizeof(detail), { reinterpret_cast<const std::uint8_t*>(&detail), sizeof(detail) })
 		};
 		TemfProductionBuildRequest request{};
 		request.representationFlags = kTemfRepresentationDirectMeshlets;
@@ -118,6 +128,8 @@ namespace TerraEngine::Tests
 				context.ExpectEqual(1u, mesh->runtimeLayout.meshletCount, "Runtime decode metadata should reconstruct meshlet counts.");
 				context.ExpectEqual(static_cast<std::size_t>(16u), mesh->meshletVertexData.size(), "The position block should be upload-ready after decoding.");
 				context.ExpectEqual(static_cast<std::size_t>(1u), mesh->meshletRecords.size(), "Meshlet record blocks should reconstruct typed runtime vectors.");
+				context.ExpectEqual(static_cast<std::size_t>(1u), mesh->virtualGeometryDetailLevels.size(),
+					"Direct production meshes should reconstruct their lightweight LOD range table.");
 			}
 			manager.ClearCaches();
 			std::filesystem::remove(path);

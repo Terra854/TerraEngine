@@ -233,6 +233,71 @@ namespace
 		return true;
 	}
 
+	bool ValidateDirectResidentDetailLevels(
+		const MeshletRuntimeLayout& layout,
+		const std::vector<VirtualGeometryDetailLevelRecord>& details,
+		const std::filesystem::path& resolvedPath)
+	{
+		// A direct cook keeps all LOD spans resident in one immutable payload. The
+		// ranges must therefore be ordered, contiguous, and cover the packed meshlet
+		// table exactly; otherwise a per-view selection could address another LOD or
+		// silently draw several levels at once.
+		if (details.empty())
+		{
+			TERRAENGINE_LOG(LogLevel::Error,
+				"TEMF direct-resident mesh has no LOD range table in " << resolvedPath
+				<< ". Reimport the source model with the current mesh cooker.");
+			return false;
+		}
+
+		std::uint32_t expectedMeshletOffset = 0u;
+		for (std::size_t detailIndex = 0u; detailIndex < details.size(); ++detailIndex)
+		{
+			const VirtualGeometryDetailLevelRecord& detail = details[detailIndex];
+			if (detail.lodIndex != detailIndex
+				|| detail.meshletOffset != expectedMeshletOffset
+				|| detail.meshletCount == 0u
+				|| detail.primitiveCount == 0u
+				|| !ValidateVirtualGeometryAddRange(
+					detail.meshletOffset,
+					detail.meshletCount,
+					layout.meshletCount,
+					resolvedPath,
+					"direct-resident LOD meshlet range")
+				|| !IsFiniteFloat(detail.geometricError)
+				|| detail.geometricError < 0.0f
+				|| !IsFiniteFloat(detail.targetRatio)
+				|| detail.targetRatio <= 0.0f)
+			{
+				TERRAENGINE_LOG(LogLevel::Error,
+					"TEMF direct-resident LOD metadata is invalid in " << resolvedPath);
+				return false;
+			}
+
+			for (int component = 0; component < 3; ++component)
+			{
+				if (!IsFiniteFloat(detail.boundsMin[component])
+					|| !IsFiniteFloat(detail.boundsMax[component])
+					|| detail.boundsMin[component] > detail.boundsMax[component])
+				{
+					TERRAENGINE_LOG(LogLevel::Error,
+						"TEMF direct-resident LOD bounds are invalid in " << resolvedPath);
+					return false;
+				}
+			}
+			expectedMeshletOffset += detail.meshletCount;
+		}
+
+		if (expectedMeshletOffset != layout.meshletCount)
+		{
+			TERRAENGINE_LOG(LogLevel::Error,
+				"TEMF direct-resident LOD ranges do not cover the packed meshlet table in "
+				<< resolvedPath);
+			return false;
+		}
+		return true;
+	}
+
 	bool ValidateAdaptiveVirtualGeometryPayloadTables(const Mesh& mesh, const std::filesystem::path& resolvedPath, AdaptiveVirtualMeshRejectionReason& outReason)
 	{
 		outReason = AdaptiveVirtualMeshRejectionReason::None;
@@ -627,7 +692,9 @@ namespace
 		return bytes;
 	}
 
-	void ResolveVirtualGeometryUploadPolicy(Mesh& mesh)
+	void ResolveVirtualGeometryUploadPolicy(
+		Mesh& mesh,
+		std::size_t canonicalProductionPageCount)
 	{
 		mesh.virtualGeometryPageStreamingReady = false;
 		mesh.virtualGeometryFullOwnerPayloadBytes = 0u;
@@ -669,6 +736,28 @@ namespace
 			}
 			// Non-fallback page bytes are catalogued but not published resident.
 			// A later typed streaming transaction owns the state transition.
+		}
+
+		// The production directory currently packs whole decoded streams into
+		// physical codec pages, while the hierarchy table assigns one logical page
+		// to each independently selectable spatial cluster. Those page IDs are not
+		// interchangeable when their counts differ. Failing open to the already
+		// decoded owning-mesh payload keeps every cooked LOD selectable and prevents
+		// requests for unrelated codec pages; it also makes diagnostics admit that
+		// no page-local byte ownership exists for this asset generation.
+		if (canonicalProductionPageCount != mesh.virtualGeometryPages.size())
+		{
+			for (const VirtualGeometryPageRecord& page : mesh.virtualGeometryPages)
+			{
+				if (page.pageId != page.fallbackPageId)
+				{
+					mesh.virtualGeometryPhysicalPageStates[page.pageId] =
+						static_cast<std::uint32_t>(GeometryPageState::Resident);
+				}
+			}
+			mesh.virtualGeometryOwnerFallbackReason =
+				"canonical production pages do not map one-to-one to virtual hierarchy pages; using the validated owning-mesh payload";
+			return;
 		}
 
 		mesh.virtualGeometryPageStreamingReady =
@@ -930,7 +1019,28 @@ namespace
 			{
 				return nullptr;
 			}
-			ResolveVirtualGeometryUploadPolicy(*productionMesh);
+			ResolveVirtualGeometryUploadPolicy(
+				*productionMesh,
+				validated.directory.pages.size());
+		}
+		else
+		{
+			// Direct-resident meshes still retain a tiny LOD directory. It contains no
+			// virtual pages or hierarchy and is consumed only to select one range from
+			// the already-uploaded owner mesh payload.
+			if (!copyRecords(
+					kTemfMetadataVirtualDetailLevels,
+					productionMesh->virtualGeometryDetailLevels)
+				|| !ValidateDirectResidentDetailLevels(
+					productionMesh->runtimeLayout,
+					productionMesh->virtualGeometryDetailLevels,
+					resolvedPath))
+			{
+				TERRAENGINE_LOG(LogLevel::Error,
+					"TEMFPRD1 recook required for " << resolvedPath
+					<< ": direct-resident LOD ranges are missing or invalid.");
+				return nullptr;
+			}
 		}
 		if ((validated.directory.header.representationFlags
 			& kTemfRepresentationDeformableStreams) != 0u)

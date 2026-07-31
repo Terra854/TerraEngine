@@ -1034,6 +1034,7 @@ namespace TerraEngine::Renderer {
 			HashCombine(hash, batch.geometryIdentity);
 			HashCombine(hash, batch.geometryGeneration);
 			HashCombine(hash, batch.materialIdentity);
+			HashCombine(hash, batch.firstMeshlet);
 			HashCombine(hash, batch.meshletCount);
 			for(const std::uint64_t instance : batch.instanceIdentities) HashCombine(hash, instance);
 		}
