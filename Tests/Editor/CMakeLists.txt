@@ -52,7 +52,7 @@ add_executable(TerraEngine-EditorTests
 	Core/EditorStartupRendererConfigurationTests.cpp
 	Core/EditorPostFrameBoundaryTests.cpp
 	Core/MainEditorToolbarTests.cpp
-	Feature045/VirtualGeometryFeatureScaffoldingTests.cpp
+	VirtualGeometry/VirtualGeometryProductionScaffoldingTests.cpp
 	Automation/EditorAutomationServiceTests.cpp
 	Automation/EditorAutomationRegistryTests.cpp
 	Automation/EditorAutomationJobTests.cpp
@@ -118,10 +118,14 @@ add_executable(TerraEngine-EditorTests
 	AssetPipeline/VirtualGeometryMeshCompilerTests.cpp
 	AssetPipeline/VirtualGeometryPageProfileTests.cpp
 	AssetPipeline/VirtualGeometryStableIdentityTests.cpp
-	AssetPipeline/AnimatedVirtualPageFormatTests.cpp
-	AssetPipeline/AnimatedVirtualGeometryCompactFormatTests.cpp
+	AssetPipeline/VirtualGeometryQuantizationProfileTests.cpp
+	AssetPipeline/VirtualGeometryQuantizationBoundaryTests.cpp
+	AssetPipeline/VirtualGeometryProductionBlockTests.cpp
+	AssetPipeline/VirtualGeometryRecookPublicationTests.cpp
+	AssetPipeline/VirtualGeometryDirectRouteCookTests.cpp
+	AssetPipeline/DeformableDemandedPageFormatTests.cpp
 	AssetPipeline/VirtualGeometryPackageImportTests.cpp
-	AssetPipeline/VirtualGeometryMigrationTests.cpp
+	AssetPipeline/VirtualGeometryCanonicalRejectionTests.cpp
 	Automation/VirtualGeometryProductionAutomationTests.cpp
 	Export/VirtualGeometryBenchmarkExportTests.cpp
 	Renderer/GameViewStatsOverlayTests.cpp
@@ -373,10 +377,10 @@ set_tests_properties(Editor.VirtualGeometryFoundation PROPERTIES
 # Keep the installed/package contract selectable without running the complete
 # editor registry. The filter also covers migration, benchmark-claim, and
 # automation contract cases introduced for the production-readiness phase.
-add_test(NAME Editor.VirtualGeometryFeature045Contracts COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
-set_tests_properties(Editor.VirtualGeometryFeature045Contracts PROPERTIES
-	LABELS "Editor;VirtualGeometry;Feature045;Contract"
-	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Feature045;VirtualGeometry.Editor.AssetPipeline.Migration;VirtualGeometry.Editor.Export.Benchmark;VirtualGeometry.Editor.Automation"
+add_test(NAME Editor.VirtualGeometryProductionContracts COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.VirtualGeometryProductionContracts PROPERTIES
+	LABELS "Editor;VirtualGeometry;Production;Contract"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Production;VirtualGeometry.Editor.AssetPipeline.CanonicalProduction;VirtualGeometry.Editor.Export.Benchmark;VirtualGeometry.Editor.Automation"
 )
 
 add_test(NAME Editor.VirtualGeometryHardening COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)

@@ -37,4 +37,12 @@ namespace TerraEngine::Editor
 		const std::uint64_t pageKey = BuildVirtualGeometryStableId("page", clusterId, 0u);
 		return { primitiveId, clusterId, pageCount == 0u ? 0u : static_cast<std::uint32_t>(pageKey % pageCount) };
 	}
+
+	VirtualGeometryBoundaryGroup AssignVirtualGeometryBoundaryGroup(
+		std::uint64_t assetHash, std::uint32_t primitiveOrdinal, std::uint32_t sourceVertexOrdinal) noexcept
+	{
+		const std::uint64_t sourcePrimitiveId = BuildVirtualGeometryStableId("source-primitive", assetHash, primitiveOrdinal);
+		const std::uint64_t groupId = BuildVirtualGeometryStableId("quantization-boundary", sourcePrimitiveId, sourceVertexOrdinal);
+		return { groupId, sourcePrimitiveId, sourceVertexOrdinal };
+	}
 } // namespace TerraEngine::Editor

@@ -134,7 +134,7 @@ namespace TerraEngine::Editor::Animation {
 
 	// These are correctness counters, not measured performance evidence. They let
 	// intermediate tests prove disabled/collapsed paths requested zero expensive
-	// records while Phase 18 remains the only timing-acceptance phase.
+	// records while ImplementationStage remains the only timing-acceptance phase.
 	struct AnimationDiagnosticsInstrumentation {
 		std::uint64_t summaryCopies = 0U;
 		std::uint64_t detailedCollectionRequests = 0U;

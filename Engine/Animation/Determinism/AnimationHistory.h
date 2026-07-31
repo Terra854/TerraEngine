@@ -57,7 +57,7 @@ namespace TerraEngine::Animation {
 			const AnimationRollbackRestoreRequirements& requirements,
 			AnimationRollbackSnapshot& output) const noexcept;
 
-		// Compatibility lookup retains the existing status-only T262+ API.
+		// Compatibility lookup retains the existing status-only ImplementationCheck+ API.
 		[[nodiscard]] AnimationStatus Lookup(
 			AnimatorInstanceHandle animator,
 			AnimationFixedTick tick,

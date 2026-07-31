@@ -229,7 +229,7 @@ namespace TerraEngine::Tests {
 			profile.supportsRenderTaskGroups = true;
 
 			const auto plan = TerraEngine::Renderer::Vulkan::BuildVulkanRendererThreadingPlan(snapshot, profile);
-			// Phase 6 adds four explicit animation stages: two worker-safe planning
+			// ImplementationStage adds four explicit animation stages: two worker-safe planning
 			// stages and two protected recording/completion stages. Keeping them in
 			// this count makes scheduler ownership changes visible to diagnostics.
 			context.ExpectEqual(static_cast<std::size_t>(24u), plan.stages.size(), "The Vulkan threading plan should cover all selected renderer and animation threading opportunities.");

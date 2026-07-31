@@ -1813,6 +1813,20 @@ void SceneViewWindow::PublishSceneViewDiagnostics(bool rendererAvailable, const 
 	snapshot.physicsDebugPrimitiveCount = m_PhysicsDebugPrimitiveCount;
 	snapshot.physicsDebugVisible = m_PhysicsDebugVisible;
 	snapshot.gameViewAffected = false;
+	// RenderStats is a completed immutable snapshot, so copying route evidence
+	// here cannot expose in-flight policy or Vulkan resource state to the UI.
+	const RenderStatsSnapshot sceneStats = RenderSystem::Instance().GetLatestRenderStats(RenderViewType::Scene);
+	snapshot.geometryRoute = sceneStats.geometryRoute;
+	snapshot.geometryRouteSource = sceneStats.geometryRouteSource;
+	snapshot.geometryRoutePolicyIdentity = sceneStats.geometryRoutePolicyIdentity;
+	snapshot.geometryRouteCalibrationIdentity = sceneStats.geometryRouteCalibrationIdentity;
+	snapshot.geometryRouteHysteresisFrames = sceneStats.geometryRouteHysteresisFrames;
+	snapshot.geometryRouteDirectBatchCount = sceneStats.geometryRouteDirectBatchCount;
+	snapshot.geometryRouteSharedInstanceCount = sceneStats.geometryRouteSharedInstanceCount;
+	snapshot.geometryRouteSuppressedPageRequests = sceneStats.geometryRouteSuppressedPageRequests;
+	snapshot.geometryRouteSuppressedDecodeBlocks = sceneStats.geometryRouteSuppressedDecodeBlocks;
+	snapshot.geometryRouteSuppressedResidencyRecords = sceneStats.geometryRouteSuppressedResidencyRecords;
+	snapshot.geometryRouteFallbackReason = sceneStats.geometryRouteFallbackReason;
 	snapshot.largeSceneState = SceneOverlay::ResolveLargeSceneState(m_OverlayPreference, m_MarkerFrame.candidates.sourceCount);
 	snapshot.sourceMarkerCount = m_MarkerFrame.candidates.sourceCount;
 	snapshot.spatialRecordCount = m_MarkerSpatialSnapshot
@@ -1987,7 +2001,7 @@ void SceneViewWindow::OnGui() {
 		ImGui::Text("Scene rendering not available.");
 	}
 	RenderStatsSnapshot sceneStats = RenderSystem::Instance().GetLatestRenderStats(RenderViewType::Scene);
-	if (m_ShowVirtualGeometryDiagnostics && sceneStats.valid && (sceneStats.meshletsTotal > 0u || sceneStats.virtualGeometryClusterPackets > 0u || sceneStats.virtualGeometrySubmittedBatches > 0u || sceneStats.virtualGeometryResidentPagePayloads > 0u || sceneStats.virtualGeometryEmittedHighDetailPages > 0u || sceneStats.virtualGeometryEmittedFallbackPages > 0u))
+	if (m_ShowVirtualGeometryDiagnostics && sceneStats.valid && (sceneStats.meshletsTotal > 0u || sceneStats.virtualGeometryClusterPackets > 0u || sceneStats.virtualGeometrySubmittedBatches > 0u || sceneStats.virtualGeometryResidentPagePayloads > 0u || sceneStats.virtualGeometryEmittedHighDetailPages > 0u || sceneStats.virtualGeometryEmittedFallbackPages > 0u || !sceneStats.geometryRoute.empty()))
 	{
 		// Meshlet counters are resolved from the completed Scene View frame slot.
 		// Keep the source label on the primary rows so delayed or unavailable GPU
@@ -2087,7 +2101,22 @@ void SceneViewWindow::OnGui() {
 			+ std::to_string(sceneStats.virtualGeometryPageSourceRequests)
 			+ "/"
 			+ std::to_string(sceneStats.virtualGeometryPageSourceRetirements);
-		const char* lines[] = { meshletsConsideredText.c_str(), meshletsSentText.c_str(), meshletsCulledText.c_str(), meshletsCulledHiZText.c_str(), hiZOutcomeText.c_str(), hiZProofText.c_str(), hiZProjectionText.c_str(), packetText.c_str(), batchText.c_str(), gpuPacketText.c_str(), generatedText.c_str(), dispatchText.c_str(), gpuFallbackText.c_str(), compactText.c_str(), rejectedText.c_str(), fallbackText.c_str(), pageSourceText.c_str(), pagePayloadText.c_str(), pageRequestText.c_str(), reuseText.c_str(), hiZBaselineText.c_str() };
+		const std::string routeText = "Geometry Route: " + (sceneStats.geometryRoute.empty() ? "unavailable" : sceneStats.geometryRoute)
+			+ " (" + sceneStats.geometryRouteSource + ")";
+		const std::string routePolicyText = "Route Policy/Calibration/Hysteresis: "
+			+ std::to_string(sceneStats.geometryRoutePolicyIdentity) + "/"
+			+ std::to_string(sceneStats.geometryRouteCalibrationIdentity) + "/"
+			+ std::to_string(sceneStats.geometryRouteHysteresisFrames);
+		const std::string routeSharedText = "Route Direct Batches/Shared Instances: "
+			+ std::to_string(sceneStats.geometryRouteDirectBatchCount) + "/"
+			+ std::to_string(sceneStats.geometryRouteSharedInstanceCount);
+		const std::string routeSuppressionText = "Route Suppressed Page/Decode/Residency: "
+			+ std::to_string(sceneStats.geometryRouteSuppressedPageRequests) + "/"
+			+ std::to_string(sceneStats.geometryRouteSuppressedDecodeBlocks) + "/"
+			+ std::to_string(sceneStats.geometryRouteSuppressedResidencyRecords);
+		const std::string routeFallbackText = "Route Fallback: "
+			+ (sceneStats.geometryRouteFallbackReason.empty() ? "none" : sceneStats.geometryRouteFallbackReason);
+		const char* lines[] = { meshletsConsideredText.c_str(), meshletsSentText.c_str(), meshletsCulledText.c_str(), meshletsCulledHiZText.c_str(), hiZOutcomeText.c_str(), hiZProofText.c_str(), hiZProjectionText.c_str(), packetText.c_str(), batchText.c_str(), gpuPacketText.c_str(), generatedText.c_str(), dispatchText.c_str(), gpuFallbackText.c_str(), compactText.c_str(), rejectedText.c_str(), fallbackText.c_str(), pageSourceText.c_str(), pagePayloadText.c_str(), pageRequestText.c_str(), reuseText.c_str(), hiZBaselineText.c_str(), routeText.c_str(), routePolicyText.c_str(), routeSharedText.c_str(), routeSuppressionText.c_str(), routeFallbackText.c_str() };
 		float textWidth = 0.0f;
 		for (const char* line : lines)
 		{
@@ -2298,14 +2327,14 @@ void SceneViewWindow::RequestPhysicsColliderFitToRenderMesh(entt::entity entity)
 	// values into preview state only; the live collider stays untouched until
 	// the explicit Apply action creates a protected transaction.
 	m_PhysicsShapePreview->localCenter = {
-		mesh->header.quantization.positionOffset[0],
-		mesh->header.quantization.positionOffset[1],
-		mesh->header.quantization.positionOffset[2]
+		mesh->runtimeLayout.quantization.positionOffset[0],
+		mesh->runtimeLayout.quantization.positionOffset[1],
+		mesh->runtimeLayout.quantization.positionOffset[2]
 	};
 	m_PhysicsShapePreview->localExtents = glm::max(glm::abs(glm::vec3(
-		mesh->header.quantization.positionScale[0],
-		mesh->header.quantization.positionScale[1],
-		mesh->header.quantization.positionScale[2])), glm::vec3(0.001f));
+		mesh->runtimeLayout.quantization.positionScale[0],
+		mesh->runtimeLayout.quantization.positionScale[1],
+		mesh->runtimeLayout.quantization.positionScale[2])), glm::vec3(0.001f));
 	m_PhysicsShapePreview->fitToRenderMeshRequested = true;
 	m_PhysicsPreviewStatus = "Render-mesh bounds are staged for the collider edit.";
 }
@@ -2803,14 +2832,14 @@ void SceneViewWindow::HandlePicking(const glm::mat4& view, const glm::mat4& proj
 				glm::vec3 localRayDir = glm::normalize(glm::vec3(invWorld * glm::vec4(rayDirection, 0.0f)));
 
 				glm::vec3 aabbMin(
-					mesh->header.quantization.positionOffset[0] - mesh->header.quantization.positionScale[0],
-					mesh->header.quantization.positionOffset[1] - mesh->header.quantization.positionScale[1],
-					mesh->header.quantization.positionOffset[2] - mesh->header.quantization.positionScale[2]
+					mesh->runtimeLayout.quantization.positionOffset[0] - mesh->runtimeLayout.quantization.positionScale[0],
+					mesh->runtimeLayout.quantization.positionOffset[1] - mesh->runtimeLayout.quantization.positionScale[1],
+					mesh->runtimeLayout.quantization.positionOffset[2] - mesh->runtimeLayout.quantization.positionScale[2]
 				);
 				glm::vec3 aabbMax(
-					mesh->header.quantization.positionOffset[0] + mesh->header.quantization.positionScale[0],
-					mesh->header.quantization.positionOffset[1] + mesh->header.quantization.positionScale[1],
-					mesh->header.quantization.positionOffset[2] + mesh->header.quantization.positionScale[2]
+					mesh->runtimeLayout.quantization.positionOffset[0] + mesh->runtimeLayout.quantization.positionScale[0],
+					mesh->runtimeLayout.quantization.positionOffset[1] + mesh->runtimeLayout.quantization.positionScale[1],
+					mesh->runtimeLayout.quantization.positionOffset[2] + mesh->runtimeLayout.quantization.positionScale[2]
 				);
 
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.

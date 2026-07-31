@@ -121,7 +121,7 @@ namespace TerraEngine::Animation {
 		auto operator<=>(const AnimationDeterministicFingerprint&) const = default;
 	};
 
-	// FR-185 requires more than the animator slot generation. This stamp names
+	// FunctionalContract requires more than the animator slot generation. This stamp names
 	// every live authority that can make an otherwise valid snapshot stale.
 	struct AnimationRollbackGenerationStamp {
 		AnimationGeneration objectGeneration = 0U;

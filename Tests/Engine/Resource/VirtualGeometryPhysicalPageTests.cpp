@@ -25,7 +25,7 @@ namespace TerraEngine::Tests
 				request.path = path;
 				request.pageId = 3u;
 				request.byteSize = bytes.size();
-				request.expectedHash = Resource::HashAnimatedVirtualPageBytes(bytes);
+				request.expectedHash = Resource::HashVirtualGeometryPageBytes(bytes);
 				request.requestGeneration = 9u;
 				const auto read = Resource::ReadVirtualGeometryStaticPageRange(request, 9u);
 				context.Expect(

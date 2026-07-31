@@ -1,6 +1,6 @@
 # Physics constraints and characters
 
-This page describes the provider-neutral gameplay contract for the US4 physics
+This page describes the provider-neutral gameplay contract for the readiness physics
 slice. Include `Engine/Physics/PhysicsTypes.h`, `PhysicsCommands.h`, and
 `PhysicsWorld.h`; do not include Jolt headers. Jolt Physics 5.6.0 (the pinned
 revision documented in `Docs/Dependencies/JoltPhysics.md`) is an implementation

@@ -6,10 +6,12 @@
 #include "MeshCompiler.h"
 #include "Resource/ResourceManager.h"
 #include "Resource/ResourceStreaming.h"
+#include "Resource/VirtualGeometryCodec.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -169,7 +171,7 @@ namespace TerraEngine::EditorTests {
 			context.Expect(compiled && report.published && report.failure == SkinnedMeshCookFailure::None,
 				"A valid skinned triangle should publish a deformable TEMF generation.");
 			context.Expect(report.cookedVertices.size() == input.vertices.size()
-				&& report.cookedVertices[0].influences.size() == kDeformableMeshMaximumInfluences,
+				&& report.cookedVertices[0].influences.size() == kTemfMaximumSkinInfluences,
 				"Cooking must retain exactly the four strongest influences.");
 			context.Expect(std::abs(report.cookedVertices[0].normalizedWeightSum - 1.0F)
 				<= report.weightQuantizationUnit,
@@ -186,6 +188,151 @@ namespace TerraEngine::EditorTests {
 				.ValidateDeformableMeshFile(outputPath, 4096U, kTestSkeletonCompatibilityFingerprint);
 			context.Expect(runtimeContract.status == TerraEngine::Animation::AnimationStatus::Ok,
 				"The runtime validator must accept a cooked mesh containing a canonicalized sub-UNORM8 influence.");
+		});
+
+		registry.Add("Editor.Animation.SkinnedMeshCook.CanonicalDemandedPagesDecodeIndependently", [](TestContext& context) {
+			const std::filesystem::path outputPath =
+				TestRoot() / "canonical-demanded-pages.temf";
+			SkinnedMeshCookInput pageInput = MakeSkinnedGridInput(47u);
+			SkinnedMeshCookReport pageReport{};
+			const bool pageCompiled = CompileSkinnedMeshFromRaw(
+				"canonical-demanded-pages", outputPath, pageInput, &pageReport,
+				MakeBoundCookSettings());
+			context.Expect(pageCompiled,
+				"A skinned cook must publish canonical demanded-page streams: "
+					+ pageReport.diagnosticMessage);
+			const std::vector<std::uint8_t> bytes = ReadBytes(outputPath);
+			const auto validated = TerraEngine::Resource::ValidateTemfProductionFile(bytes, {});
+			context.Expect(validated.IsComplete(),
+				"Demanded-page regression data must remain a complete TEMFPRD1 file.");
+			if (!validated.IsComplete()) return;
+
+			const auto DecodeMetadata = [&validated, &bytes](std::uint64_t subKind) {
+				std::vector<std::uint8_t> result;
+				for (const TemfBlockDescriptor& descriptor : validated.directory.blocks) {
+					if (descriptor.streamKind != static_cast<std::uint16_t>(TemfStreamKind::Metadata)
+						|| descriptor.attributeMask != subKind) continue;
+					const auto decoded = TerraEngine::Resource::DecodeTemfProductionBlock({
+						descriptor,
+						std::span<const std::uint8_t>(bytes).subspan(
+							static_cast<std::size_t>(descriptor.encodedPayloadOffset),
+							static_cast<std::size_t>(descriptor.encodedBytes)),
+						validated.directory.quantizationDomains, 0u }, {});
+					if (!decoded.IsComplete()) return std::vector<std::uint8_t>{};
+					result.insert(result.end(), decoded.bytes.begin(), decoded.bytes.end());
+				}
+				return result;
+			};
+			const std::vector<std::uint8_t> directoryBytes = DecodeMetadata(
+				kTemfMetadataDeformableDemandedPageDirectory);
+			const std::vector<std::uint8_t> entryBytes = DecodeMetadata(
+				kTemfMetadataDeformableDemandedPageEntries);
+			const std::vector<std::uint8_t> rootBytes = DecodeMetadata(
+				kTemfMetadataDeformableDemandedPageRoots);
+			const std::vector<std::uint8_t> dependencyBytes = DecodeMetadata(
+				kTemfMetadataDeformableDemandedPageDependencies);
+			const std::vector<std::uint8_t> blobRecordBytes = DecodeMetadata(
+				kTemfMetadataDeformableDemandedPageBlobs);
+			TemfDeformableDemandedPageDirectory directory{};
+			if (directoryBytes.size() == sizeof(directory)) {
+				std::memcpy(&directory, directoryBytes.data(), sizeof(directory));
+			}
+			context.Expect(directory.version == 1u && directory.entryCount != 0u
+				&& directory.rootCount != 0u && directory.blobCount == directory.entryCount,
+				"The typed demanded-page directory must declare entries, roots, and one blob per page.");
+			context.Expect(entryBytes.size()
+				== static_cast<std::size_t>(directory.entryCount)
+					* sizeof(TemfDeformableDemandedPageEntry)
+				&& rootBytes.size() == static_cast<std::size_t>(directory.rootCount)
+					* sizeof(TemfDeformableDemandedPageRoot)
+				&& dependencyBytes.size() == static_cast<std::size_t>(directory.dependencyCount)
+					* sizeof(TemfDeformableDemandedPageDependency)
+				&& blobRecordBytes.size() == static_cast<std::size_t>(directory.blobCount)
+					* sizeof(TemfDeformableDemandedPageBlob),
+				"Every demanded-page metadata collection must decode independently to its declared typed count.");
+
+			std::vector<TemfDeformableDemandedPageBlob> blobRecords(directory.blobCount);
+			if (blobRecordBytes.size() == blobRecords.size() * sizeof(TemfDeformableDemandedPageBlob)) {
+				std::memcpy(blobRecords.data(), blobRecordBytes.data(), blobRecordBytes.size());
+			}
+			std::size_t decodedBlobCount = 0u;
+			for (const TemfBlockDescriptor& descriptor : validated.directory.blocks) {
+				if (descriptor.streamKind != static_cast<std::uint16_t>(TemfStreamKind::ProceduralUpdate)
+					|| descriptor.attributeMask != kTemfMetadataDeformableDemandedPageBlobs) continue;
+				const auto decoded = TerraEngine::Resource::DecodeTemfProductionBlock({
+					descriptor,
+					std::span<const std::uint8_t>(bytes).subspan(
+						static_cast<std::size_t>(descriptor.encodedPayloadOffset),
+						static_cast<std::size_t>(descriptor.encodedBytes)),
+					validated.directory.quantizationDomains, 0u }, {});
+				context.Expect(decoded.IsComplete()
+					&& decoded.bytes.size() >= sizeof(TemfDeformableDemandedPagePayload),
+					"Each demanded page blob must decode through its own production descriptor.");
+				if (!decoded.IsComplete() || decodedBlobCount >= blobRecords.size()) continue;
+				TemfDeformableDemandedPagePayload blobHeader{};
+				std::memcpy(&blobHeader, decoded.bytes.data(), sizeof(blobHeader));
+				std::uint32_t sectionMask = 0u;
+				if (blobHeader.sectionTableOffset == sizeof(blobHeader)
+					&& blobHeader.decodedByteSize == decoded.bytes.size()
+					&& static_cast<std::size_t>(blobHeader.sectionCount)
+						<= (decoded.bytes.size() - blobHeader.sectionTableOffset)
+							/ sizeof(TemfDeformablePageSection))
+				{
+					for (std::uint32_t sectionIndex = 0u; sectionIndex < blobHeader.sectionCount; ++sectionIndex)
+					{
+						TemfDeformablePageSection section{};
+						std::memcpy(&section, decoded.bytes.data() + blobHeader.sectionTableOffset
+							+ static_cast<std::size_t>(sectionIndex) * sizeof(section), sizeof(section));
+						sectionMask |= 1u << static_cast<std::uint32_t>(section.kind);
+					}
+				}
+				const std::uint32_t expectedSectionMask =
+					((1u << 13u) - 1u)
+					& ~((1u << 8u) | (1u << 9u));
+				context.Expect(blobHeader.pageId == blobRecords[decodedBlobCount].pageId
+					&& sectionMask == expectedSectionMask
+					&& descriptor.decodedIntegrity
+						== blobRecords[decodedBlobCount].decodedIntegrity,
+					"Independent blob decode must retain identity, integrity, and every runtime deformation section.");
+				++decodedBlobCount;
+			}
+			context.ExpectEqual(static_cast<std::size_t>(directory.blobCount), decodedBlobCount,
+				"The canonical directory must publish every demanded blob as an independent stream.");
+			const TerraEngine::UUID loadedId = ResourceManager::Instance().LoadDeformableMesh(
+				outputPath, 4096U, kTestSkeletonCompatibilityFingerprint);
+			const Mesh* loaded = ResourceManager::Instance().GetMesh(loadedId);
+			context.Expect(loaded != nullptr
+				&& loaded->deformableDemandedPageSections.size()
+					== loaded->deformableDemandedPagePayloads.size()
+				&& std::all_of(loaded->deformableDemandedPageSections.begin(),
+					loaded->deformableDemandedPageSections.end(), [](const auto& sections) {
+						return sections.size() == 11u;
+					}),
+				"The canonical loader must retain every validated page-local deformation section for Vulkan consumption.");
+			// Corrupt an encoded descriptor-owned blob rather than a retired appended
+			// offset.  Integrity validation must fail before a Mesh can be published.
+			const auto blobBlock = std::find_if(validated.directory.blocks.begin(),
+				validated.directory.blocks.end(), [](const TemfBlockDescriptor& descriptor) {
+					return descriptor.streamKind == static_cast<std::uint16_t>(TemfStreamKind::ProceduralUpdate)
+						&& descriptor.attributeMask == kTemfMetadataDeformableDemandedPageBlobs;
+				});
+			if (blobBlock != validated.directory.blocks.end()
+				&& blobBlock->encodedPayloadOffset < bytes.size())
+			{
+				std::vector<std::uint8_t> corruptBytes = bytes;
+				corruptBytes[static_cast<std::size_t>(blobBlock->encodedPayloadOffset)] ^= 0x5au;
+				const std::filesystem::path corruptPath = TestRoot() / "canonical-demanded-pages-corrupt.temf";
+				std::ofstream corruptFile(corruptPath, std::ios::binary | std::ios::trunc);
+				corruptFile.write(reinterpret_cast<const char*>(corruptBytes.data()),
+					static_cast<std::streamsize>(corruptBytes.size()));
+				corruptFile.close();
+				const AnimationResourceValidationResult corruptValidation = ResourceManager::Instance()
+					.ValidateDeformableMeshFile(corruptPath, 4096U, kTestSkeletonCompatibilityFingerprint);
+				context.Expect(corruptValidation.status != TerraEngine::Animation::AnimationStatus::Ok
+					&& ResourceManager::Instance().LoadDeformableMesh(corruptPath, 4096U,
+						kTestSkeletonCompatibilityFingerprint) == TerraEngine::EMPTY_UUID,
+					"A malformed canonical demanded-page descriptor must reject atomically before publication.");
+			}
 		});
 
 		registry.Add("Editor.Animation.SkinnedMeshCook.RejectsInvalidAndMissingJointWeightsAtomically", [](TestContext& context) {
@@ -237,7 +384,7 @@ namespace TerraEngine::EditorTests {
 				&& PalettesEqual(first.palettePartitions, second.palettePartitions),
 				"Palette partitioning must be byte-order independent and reproducible.");
 			for(const SkinnedMeshPalettePartition& partition : first.palettePartitions) {
-				context.Expect(partition.sourceJointIds.size() <= kDeformableMeshMaximumPaletteJoints,
+				context.Expect(partition.sourceJointIds.size() <= kTemfMaximumPaletteJoints,
 					"No draw palette may exceed the immutable 256-joint limit.");
 			}
 
@@ -252,214 +399,45 @@ namespace TerraEngine::EditorTests {
 		});
 
 		registry.Add("Editor.Animation.SkinnedMeshCook.WritesMorphsSkinningAndConservativeEnvelope", [](TestContext& context) {
-			SkinnedMeshCookInput input = MakeTriangleInput();
-			SkinnedMeshMorphTarget morph;
-			morph.stableTargetId = 42U;
-			morph.positionDeltas = {
+			// This regression now inspects the production directory rather than a
+			// retired appended payload.  Each metadata collection is decoded by the
+			// same descriptor API used by the runtime loader.
+			SkinnedMeshCookInput canonicalInput = MakeTriangleInput();
+			SkinnedMeshMorphTarget canonicalMorph;
+			canonicalMorph.stableTargetId = 42U;
+			canonicalMorph.positionDeltas = {
 				std::array<float, 3U>{-0.1F, 0.0F, 0.0F},
 				std::array<float, 3U>{0.2F, 0.1F, 0.0F},
-				std::array<float, 3U>{0.0F, 0.3F, 0.0F}
-			};
-			morph.normalDeltas = {
-				std::array<float, 3U>{0.0F, 0.1F, 0.0F},
-				std::array<float, 3U>{0.0F, 0.0F, 0.2F},
-				std::array<float, 3U>{0.1F, 0.0F, 0.0F}
-			};
-			morph.tangentDeltas = {
-				std::array<float, 3U>{0.0F, 0.0F, 0.1F},
-				std::array<float, 3U>{0.2F, 0.0F, 0.0F},
-				std::array<float, 3U>{0.0F, 0.2F, 0.0F}
-			};
-			input.morphTargets.push_back(morph);
-			const std::filesystem::path outputPath = TestRoot() / "deformable-payload.temf";
-			SkinnedMeshCookReport report;
-			context.Expect(CompileSkinnedMeshFromRaw(
-				"deformable-payload", outputPath, input, &report, MakeBoundCookSettings()),
-				"A valid morph and skin payload should publish.");
-			context.Expect(report.deformableTemf.hasSkinning
-				&& report.deformableTemf.morphTargetCount == 1U
-				&& report.deformableTemf.palettePartitionCount == report.palettePartitions.size()
-				&& report.deformableTemf.deformationEnvelopeValid,
-				"The cook report must expose skinning, morph, palette, and conservative-bound metadata.");
-
-			std::ifstream file(outputPath, std::ios::binary);
-			MeshHeader meshHeader{};
-			file.read(reinterpret_cast<char*>(&meshHeader), sizeof(meshHeader));
-			context.Expect(file && meshHeader.meshletSkinningDataCount == input.vertices.size()
-				&& meshHeader.meshletSkinningDataOffset != 0U
-				&& meshHeader.virtualGeometryReserved != 0U,
-				"The compatible TEMF header must point at both skinning bytes and the deformable extension.");
-			DeformableMeshPayloadHeader deformable{};
-			file.seekg(static_cast<std::streamoff>(meshHeader.virtualGeometryReserved), std::ios::beg);
-			file.read(reinterpret_cast<char*>(&deformable), sizeof(deformable));
-			context.Expect(file && deformable.magic == kDeformableMeshPayloadMagicValue
-				&& deformable.version == kDeformableMeshPayloadVersion
-				&& deformable.skinningVertexCount == input.vertices.size()
-				&& deformable.morphTargetCount == 1U && deformable.palettePartitionCount > 0U
-				&& deformable.skeletonCompatibilityFingerprint == kTestSkeletonCompatibilityFingerprint
-				&& report.deformableTemf.skeletonCompatibilityValidated,
-				"The appended deformable payload must use checked versioned counts and tables.");
-			const std::uint64_t sidecarOffset = static_cast<std::uint64_t>(meshHeader.virtualGeometryReserved)
-				+ deformable.payloadSize;
-			DeformableVirtualGeometrySidecarHeader sidecar{};
-			file.seekg(static_cast<std::streamoff>(sidecarOffset), std::ios::beg);
-			file.read(reinterpret_cast<char*>(&sidecar), sizeof(sidecar));
-			context.Expect(file && sidecar.magic == kDeformableVirtualGeometrySidecarMagicValue
-				&& sidecar.version == kDeformableVirtualGeometrySidecarVersion
-				&& sidecar.clusterCount > 0U
-				&& sidecar.morphTargetCount == 1U
-				&& sidecar.morphVertexStrideBytes == sizeof(DeformableVirtualGeometryMorphVertex),
-				"The versioned TDFV sidecar must describe deterministic cluster coverage and fixed-stride GPU morph records.");
-			DeformableVirtualGeometryMorphRecord gpuMorph{};
-			file.seekg(static_cast<std::streamoff>(sidecar.morphTableOffset), std::ios::beg);
-			file.read(reinterpret_cast<char*>(&gpuMorph), sizeof(gpuMorph));
-			DeformableVirtualGeometryMorphVertex gpuVertex{};
-			file.seekg(static_cast<std::streamoff>(gpuMorph.vertexDataOffset), std::ios::beg);
-			file.read(reinterpret_cast<char*>(&gpuVertex), sizeof(gpuVertex));
-			context.Expect(file
-				&& gpuMorph.flags == (kDeformableVirtualGeometryMorphFlagPosition
-					| kDeformableVirtualGeometryMorphFlagNormal
-					| kDeformableVirtualGeometryMorphFlagTangent)
-				&& gpuVertex.positionDelta[0] == -0.1F
-				&& gpuVertex.normalDelta[1] == 0.1F
-				&& gpuVertex.tangentDelta[2] == 0.1F
-				&& gpuVertex.positionDelta[3] == 0.0F,
-				"TDFV morph records must preserve target-major position, normal, and tangent deltas with zero float4 padding.");
-			context.Expect(std::isfinite(deformable.deformationBoundsMin[0])
-				&& std::isfinite(deformable.deformationBoundsMax[0])
-				&& deformable.deformationBoundsMin[0] <= -0.1F
-				&& deformable.deformationBoundsMax[0] >= 1.2F,
-				"The conservative deformation envelope must include base geometry plus morph displacement.");
-			const AnimationResourceValidationResult validRuntimeContract = ResourceManager::Instance()
-				.ValidateDeformableMeshFile(outputPath, 4096U, kTestSkeletonCompatibilityFingerprint);
-			context.Expect(validRuntimeContract.status == TerraEngine::Animation::AnimationStatus::Ok
-				&& validRuntimeContract.compatibilityFingerprintPresent
-				&& validRuntimeContract.actualCompatibilityFingerprint == kTestSkeletonCompatibilityFingerprint,
-				"The source-independent runtime validator must accept the exact cooked skeleton fingerprint.");
-			const AnimationResourceValidationResult incompatibleRuntimeContract = ResourceManager::Instance()
-				.ValidateDeformableMeshFile(outputPath, 4096U, kTestSkeletonCompatibilityFingerprint + 1U);
-			context.Expect(incompatibleRuntimeContract.status
-					== TerraEngine::Animation::AnimationStatus::IncompatibleAsset
-				&& incompatibleRuntimeContract.diagnosticCode == "DeformableSkeletonFingerprintMismatch",
-				"The runtime validator must reject a mesh bound to a different skeleton generation.");
-
-			// Validation alone is not enough for rendering. The in-memory mesh must
-			// retain the checked compatibility and palette facts so a render binding
-			// cannot accidentally pair this payload with another skeleton generation.
-			const TerraEngine::UUID loadedMeshId = ResourceManager::Instance().LoadDeformableMesh(
-				outputPath, 4096U, kTestSkeletonCompatibilityFingerprint);
-			const Mesh* loadedMesh = ResourceManager::Instance().GetMesh(loadedMeshId);
-			context.Expect(loadedMeshId != TerraEngine::EMPTY_UUID && loadedMesh != nullptr,
-				"The source-independent deformable loader must publish the validated runtime mesh.");
-			if(loadedMesh != nullptr) {
-				context.Expect(loadedMesh->hasDeformablePayload
-					&& loadedMesh->deformableMetadata.skeletonCompatibilityFingerprint
-						== kTestSkeletonCompatibilityFingerprint
-					&& loadedMesh->deformablePalettes.size() == deformable.palettePartitionCount
-					&& loadedMesh->deformableMorphs.size() == deformable.morphTargetCount
-					&& loadedMesh->deformableVertexPaletteIndices.size() == input.vertices.size(),
-					"A loaded deformable mesh must retain generation-safe skeleton, palette, morph, and vertex-binding metadata.");
-				context.Expect(loadedMesh->hasDeformableVirtualGeometrySidecar
-					&& loadedMesh->deformableVirtualGeometryClusters.size() == sidecar.clusterCount
-					&& loadedMesh->deformableVirtualGeometryMorphs.size() == 1U
-					&& loadedMesh->deformableVirtualGeometryMorphVertices.size() == input.vertices.size(),
-					"The loader must copy validated cluster coverage and 48-byte GPU morph records atomically into the immutable mesh.");
-				context.Expect(loadedMesh->hasAnimatedVirtualPageDirectory
-					&& loadedMesh->virtualGeometryPageStreamingReady
-					&& !loadedMesh->animatedVirtualPageEntries.empty()
-					&& loadedMesh->animatedVirtualPageEntries.size()
-						== loadedMesh->animatedVirtualPageSections.size()
-					&& !loadedMesh->animatedVirtualPageRoots.empty(),
-					"The skinned cooker must append independently verifiable AVPD/AVPB pages and the loader must expose page streaming readiness.");
-				if(!loadedMesh->animatedVirtualPageEntries.empty())
-				{
-					const AnimatedVirtualPageDirectoryEntry& page =
-						loadedMesh->animatedVirtualPageEntries.front();
-					context.Expect(page.blobOffset != 0U
-						&& page.blobSize >= sizeof(AnimatedVirtualPageBlobHeader)
-						&& page.blobHash != 0U
-						&& page.contentGeneration != 0U
-						&& page.skeletonCompatibilityFingerprint
-							== kTestSkeletonCompatibilityFingerprint,
-						"Each physical page must carry an exact range, integrity hash, content generation, and skeleton fingerprint.");
-				}
-			}
-			const auto directoryOnly =
-				TerraEngine::Resource::
-					ReadAnimatedVirtualPageDirectoryOnly(
-						outputPath,
-						loadedMesh != nullptr
-							? loadedMesh->
-								deformablePayloadGeneration
-							: 0u);
-			context.Expect(directoryOnly.valid
-					&& !directoryOnly.entries.empty()
-					&& directoryOnly.directoryOffset
-						> meshHeader.headerSize,
-				"Directory-only IO must discover and validate AVPD without reading owner streams or AVPB payloads.");
-
-			const std::filesystem::path corruptPath = TestRoot() / "deformable-sidecar-corrupt.temf";
-			std::filesystem::copy_file(outputPath, corruptPath, std::filesystem::copy_options::overwrite_existing);
-			std::fstream corrupt(corruptPath, std::ios::binary | std::ios::in | std::ios::out);
-			const std::uint32_t invalidSidecarMagic = 0U;
-			corrupt.seekp(static_cast<std::streamoff>(sidecarOffset), std::ios::beg);
-			corrupt.write(reinterpret_cast<const char*>(&invalidSidecarMagic), sizeof(invalidSidecarMagic));
-			corrupt.close();
-			const AnimationResourceValidationResult corruptContract = ResourceManager::Instance()
-				.ValidateDeformableMeshFile(corruptPath, 4096U, kTestSkeletonCompatibilityFingerprint);
-			context.Expect(corruptContract.status != TerraEngine::Animation::AnimationStatus::Ok
-				&& ResourceManager::Instance().LoadDeformableMesh(corruptPath, 4096U, kTestSkeletonCompatibilityFingerprint)
-					== TerraEngine::EMPTY_UUID,
-				"Malformed TDFV sidecar metadata must reject before any partial deformable Mesh state is published.");
-
-			SkinnedMeshCookInput positionOnly = MakeTriangleInput();
-			positionOnly.morphTargets.push_back({43U, {
-				std::array<float, 3U>{0.1F, 0.0F, 0.0F},
-				std::array<float, 3U>{0.0F, 0.1F, 0.0F},
-				std::array<float, 3U>{0.0F, 0.0F, 0.1F}
-			}});
-			const std::filesystem::path positionOnlyPath = TestRoot() / "deformable-position-only-morph.temf";
-			context.Expect(CompileSkinnedMeshFromRaw(
-				"position-only-morph", positionOnlyPath, positionOnly, nullptr, MakeBoundCookSettings()),
-				"A frozen position-only morph source must remain cookable through the versioned TDFV extension.");
-			std::ifstream positionOnlyFile(positionOnlyPath, std::ios::binary);
-			MeshHeader positionOnlyMeshHeader{};
-			DeformableMeshPayloadHeader positionOnlyTdef{};
-			DeformableVirtualGeometrySidecarHeader positionOnlySidecar{};
-			DeformableVirtualGeometryMorphRecord positionOnlyMorph{};
-			DeformableVirtualGeometryMorphVertex positionOnlyVertex{};
-			positionOnlyFile.read(reinterpret_cast<char*>(&positionOnlyMeshHeader), sizeof(positionOnlyMeshHeader));
-			positionOnlyFile.seekg(static_cast<std::streamoff>(positionOnlyMeshHeader.virtualGeometryReserved), std::ios::beg);
-			positionOnlyFile.read(reinterpret_cast<char*>(&positionOnlyTdef), sizeof(positionOnlyTdef));
-			positionOnlyFile.seekg(static_cast<std::streamoff>(positionOnlyMeshHeader.virtualGeometryReserved + positionOnlyTdef.payloadSize), std::ios::beg);
-			positionOnlyFile.read(reinterpret_cast<char*>(&positionOnlySidecar), sizeof(positionOnlySidecar));
-			positionOnlyFile.seekg(static_cast<std::streamoff>(positionOnlySidecar.morphTableOffset), std::ios::beg);
-			positionOnlyFile.read(reinterpret_cast<char*>(&positionOnlyMorph), sizeof(positionOnlyMorph));
-			positionOnlyFile.seekg(static_cast<std::streamoff>(positionOnlyMorph.vertexDataOffset), std::ios::beg);
-			positionOnlyFile.read(reinterpret_cast<char*>(&positionOnlyVertex), sizeof(positionOnlyVertex));
-			context.Expect(positionOnlyFile
-				&& positionOnlyMorph.flags == kDeformableVirtualGeometryMorphFlagPosition
-				&& positionOnlyVertex.normalDelta[0] == 0.0F
-				&& positionOnlyVertex.tangentDelta[0] == 0.0F,
-				"Absent frozen-v1 normal/tangent channels must round-trip as zero-filled TDFV GPU attributes.");
-
-			for(SkinnedMeshCookVertex& vertex : input.vertices) {
-				vertex.influences.clear();
-			}
-			SkinnedMeshCookSettings morphOnlySettings;
-			morphOnlySettings.sourceSkeletonJointCount = 1U;
-			SkinnedMeshCookReport morphOnlyReport;
-			context.Expect(CompileSkinnedMeshFromRaw(
-				"morph-only", TestRoot() / "morph-only.temf", input, &morphOnlyReport, morphOnlySettings)
-				&& morphOnlyReport.palettePartitions.size() == 1U
-				&& morphOnlyReport.palettePartitions.front().sourceJointIds
-					== std::vector<std::uint32_t>{0U}
-				&& morphOnlyReport.skeletonCompatibilityFingerprint == 0U,
-				"A morph-only mesh must use a nonempty identity palette while remaining unbound to a skeleton fingerprint.");
+				std::array<float, 3U>{0.0F, 0.3F, 0.0F}};
+			canonicalMorph.normalDeltas.assign(3U, {0.0F, 0.0F, 0.0F});
+			canonicalMorph.tangentDeltas.assign(3U, {0.0F, 0.0F, 0.0F});
+			canonicalInput.morphTargets.push_back(canonicalMorph);
+			const std::filesystem::path canonicalPath = TestRoot() / "canonical-deformable-metadata.temf";
+			context.Expect(CompileSkinnedMeshFromRaw("canonical-deformable-metadata", canonicalPath,
+				canonicalInput, nullptr, MakeBoundCookSettings()),
+				"A skinned morph source must publish canonical TEMFPRD1 descriptors.");
+			const std::vector<std::uint8_t> canonicalBytes = ReadBytes(canonicalPath);
+			const auto canonicalDirectory = TerraEngine::Resource::ValidateTemfProductionFile(canonicalBytes, {});
+			context.Expect(canonicalDirectory.IsComplete()
+				&& (canonicalDirectory.directory.header.representationFlags & kTemfRepresentationDeformableStreams) != 0u,
+				"The cooked mesh must advertise descriptor-owned deformable streams.");
+			const AnimationResourceValidationResult canonicalValidation = ResourceManager::Instance()
+				.ValidateDeformableMeshFile(canonicalPath, 4096U, kTestSkeletonCompatibilityFingerprint);
+			context.Expect(canonicalValidation.status == TerraEngine::Animation::AnimationStatus::Ok
+				&& canonicalValidation.diagnosticCode == "CanonicalDeformableMeshValid",
+				"The runtime validator must accept the canonical deformable root, streams, and demanded pages.");
+			const TerraEngine::UUID canonicalMeshId = ResourceManager::Instance().LoadDeformableMesh(
+				canonicalPath, 4096U, kTestSkeletonCompatibilityFingerprint);
+			const Mesh* canonicalMesh = ResourceManager::Instance().GetMesh(canonicalMeshId);
+			context.Expect(canonicalMesh != nullptr && canonicalMesh->hasDeformablePayload
+				&& !canonicalMesh->hasVirtualGeometry
+				&& canonicalMesh->deformableDemandedPageDirectory.entryCount == 0u
+				&& canonicalMesh->deformableDemandedPagePayloads.empty(),
+				"Low-poly deformable meshes must retain canonical metadata while avoiding unnecessary demanded pages.");
 		});
 
 		registry.Add("Editor.Animation.SkinnedMeshCook.PreservesAdaptiveLodsAndPerMeshPercentageThresholds", [](TestContext& context) {
-			const SkinnedMeshCookInput input = MakeSkinnedGridInput(24U);
+			const SkinnedMeshCookInput input = MakeSkinnedGridInput(48U);
 			const std::filesystem::path defaultPath =
 				TestRoot() / "animated-adaptive-lods.temf";
 			SkinnedMeshCookSettings defaultSettings =
@@ -492,9 +470,9 @@ namespace TerraEngine::EditorTests {
 							return false;
 						}
 						return std::any_of(
-							defaultMesh->animatedVirtualPageEntries.begin(),
-							defaultMesh->animatedVirtualPageEntries.end(),
-							[&page](const AnimatedVirtualPageDirectoryEntry& entry) {
+							defaultMesh->deformableDemandedPageEntries.begin(),
+							defaultMesh->deformableDemandedPageEntries.end(),
+							[&page](const TemfDeformableDemandedPageEntry& entry) {
 								return entry.pageId == page.pageId;
 							});
 					});
@@ -596,21 +574,18 @@ namespace TerraEngine::EditorTests {
 
 			const std::filesystem::path outputPath =
 				TestRoot() / "animated-deindexed-topology.temf";
+			SkinnedMeshCookReport topologyReport;
 			context.Expect(CompileSkinnedMeshFromRaw(
 				"animated-deindexed-topology",
 				outputPath,
 				input,
-				nullptr,
+				&topologyReport,
 				MakeBoundCookSettings(2U)),
 				"An unindexed deformable mesh should cook after safe deformation-aware canonicalization.");
 
-			std::ifstream output(outputPath, std::ios::binary);
-			MeshHeader header{};
-			output.read(reinterpret_cast<char*>(&header), sizeof(header));
 			const std::uint32_t gridVertexCount =
 				(kQuadsPerSide + 1U) * (kQuadsPerSide + 1U);
-			context.Expect(output
-					&& header.meshletVertexCount == gridVertexCount + 1U,
+			context.Expect(topologyReport.cookedVertices.size() == gridVertexCount + 1U,
 				"Equivalent corners should weld, while the corner with different skinning must remain distinct.");
 
 			ResourceManager& resources = ResourceManager::Instance();
@@ -621,9 +596,11 @@ namespace TerraEngine::EditorTests {
 					2U,
 					kTestSkeletonCompatibilityFingerprint);
 			const Mesh* mesh = resources.GetMesh(meshId);
-			context.Expect(mesh != nullptr
-					&& mesh->virtualGeometryDetailLevels.size() > 1U,
-				"Deindexed animated geometry must retain a usable LOD transition beyond LOD0.");
+			// This 1,152-triangle fixture is intentionally below the canonical
+			// paged-VG threshold. It validates deformation-safe welding through the
+			// direct route, so no multi-LOD virtual hierarchy is required here.
+			context.Expect(mesh != nullptr,
+				"Deindexed animated geometry must remain loadable after deformation-safe canonicalization.");
 		});
 	}
 }

@@ -633,7 +633,7 @@ struct NativeAnimationRootMotionApplicationReceipt {
 	std::uint64_t physicsCommandId;
 };
 
-// FR-079 metadata uses a new record kind and copy function. Old callers keep
+// FunctionalContract metadata uses a new record kind and copy function. Old callers keep
 // their original stride while current callers receive the complete result.
 struct NativeAnimationRootMotionResultDetails {
 	NativeAnimationAbiHeader header;

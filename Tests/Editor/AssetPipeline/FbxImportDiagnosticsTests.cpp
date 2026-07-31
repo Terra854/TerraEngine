@@ -154,7 +154,7 @@ namespace TerraEngine::EditorTests
 		TerraEngine::AssetPipeline::FbxAnimatedImportResult ImportQuaterniusBaseCharacter(
 			const TerraEngine::UUID& packageGuid)
 		{
-			// The Spec 043 validation corpus retains the exact CC0 Quaternius source
+			// The animation production validation validation corpus retains the exact CC0 Quaternius source
 			// used to reproduce this importer bug. Keep the path outside committed
 			// fixtures because it is a 2 MiB validation input, while the test pins the
 			// behavior whenever that reproducible corpus is provisioned.

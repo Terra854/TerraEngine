@@ -6,7 +6,7 @@ ragdoll, editor, streaming/export, automation, determinism, and performance
 guides in this directory, use [Troubleshooting](Troubleshooting.md) for failure
 diagnosis and [Migration](Migration.md) when converting older projects or APIs.
 
-Spec 043 is accepted phase by phase. Every phase stores its evidence below `out/validation/animation/` and updates `specs/complete-animation-system/acceptance-matrix.md` only for requirements proven by both automated and installed-tree live validation.
+animation production validation is accepted phase by phase. Every phase stores its evidence below `out/validation/animation/` and updates `specs/complete-animation-system/acceptance-matrix.md` only for requirements proven by both automated and installed-tree live validation.
 
 `Tools/Animation/AnimationEvidenceTemplate.json` is the canonical evidence shape. Copy it into the phase evidence directory before a run, fill identity and command fields before execution, and update results as each bounded step finishes. The phase-gate script must leave a durable failed result when a required command, artifact, metric, click, MCP response, camera capture, or shutdown signal is missing.
 
@@ -18,7 +18,7 @@ Spec 043 is accepted phase by phase. Every phase stores its evidence below `out/
 4. Build the integrated phase and run the CMake install target.
 5. Launch only the installed editor and installed runtime artifacts against an isolated project copy below `out/`.
 6. Preserve real-click actions, MCP JSONL traffic, Play Mode transitions, authored-state restoration, Scene View, Game View, custom in-game camera evidence, profiler captures, export/runtime results, and orderly shutdown.
-7. For an intermediate phase, write `performance/deferral.json` with explicit authority and leave performance pass/comparability/repeatability as `null` (deliberately not measured, not failed). Only final Phase 18 runs the comparable warm-up, candidate capture, feature benchmarks, and paired measurements.
+7. For an intermediate phase, write `performance/deferral.json` with explicit authority and leave performance pass/comparability/repeatability as `null` (deliberately not measured, not failed). Only final implementation stage runs the comparable warm-up, candidate capture, feature benchmarks, and paired measurements.
 8. Record defects and fixes, then rerun every affected focused and integrated gate cleanly.
 9. Update only acceptance rows supported by the retained evidence and write the final pass/fail result.
 
@@ -111,20 +111,20 @@ Use the explicit deferral switch for animation-validation-foundational-focused-n
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
 	-File Tools/Animation/RunAnimationValidationGate.ps1 `
 	-Phase foundation `
-	-GateTask animation-validation-foundational-focused-non-performance-tests-integrated-build-install-installed-editor `
+	-GateTask foundation-validation `
 	-FixtureRoot <fixture-project> `
 	-ScenarioManifest <foundation-scenario.json> `
 	-AcceptanceUpdateManifest <foundation-acceptance-update.json> `
 	-DeferPerformanceExecutionToFinalIntegration `
-	-PerformanceDeferralAuthority "Spec 043 final-only performance schedule amendment (2026-07-17)" `
+	-PerformanceDeferralAuthority "animation production validation final-only performance schedule amendment (2026-07-17)" `
 	-Execute
 ```
 
-Deferred focused testing excludes standalone CTests matching `Performance` or exact `Editor.ExportBaseline`. Broad registries also receive exact `TERRAENGINE_TEST_EXCLUDE_FILTER` tokens for the animation benchmark namespaces and every currently audited measured profiler, virtual-geometry, physics, and editor timing/load case. The gate deliberately avoids generic harness tokens such as `Performance`, `PerformanceGate`, `Timing`, or `Overhead`, which would also hide structural result-schema, aggregation, and diagnostics checks. This policy retains the non-timed `Animation.Dormant.*` structural invariants and untimed stress/safety coverage. The gate still verifies the immutable animation-validation-is-completed-immutable-pre-feature-reference-capture-remains-sole-pre baseline and the reviewed schedule authority without changing a workload or threshold: runtime contract `1bb8bb3d0affa53d146b717171a7b23d72437af88449c273e8cb1a2fe4869279`, renderer workload manifest `397b7cb6ac01714a628c44bab6cb002c034c8d8e5422bf184dc10cddf201b12f`, and performance workloads `dd297ef96f629b290be03bce64dec19612726cd5931e886fb722d80970d49dba`. A passing intermediate result means correctness may unblock the next phase while `finalIntegrationBlockedOnPerformance` remains true for animation-validation-runs-every-accumulated-feature-workflow-benchmark-t-runs-every-unrelated, animation-validation-invoke-final-only-t-t-comparator-every-prepared-control-including, and animation-validation-repair-capable-final-checks-t-t-are-clean-final-blocking.
+Deferred focused testing excludes standalone CTests matching `Performance` or exact `Editor.ExportBaseline`. Broad registries also receive exact `TERRAENGINE_TEST_EXCLUDE_FILTER` tokens for the animation benchmark namespaces and currently audited measured profiler, virtual-geometry, physics, and editor timing/load cases. The gate deliberately avoids generic harness tokens such as `Performance`, `PerformanceGate`, `Timing`, or `Overhead`, which would also hide structural result-schema, aggregation, and diagnostics checks. This policy retains the non-timed `Animation.Dormant.*` structural invariants and untimed stress/safety coverage. The gate verifies the locked pre-change baseline, runtime contract, renderer workload manifest, and performance workload manifest without weakening any workload or threshold. A passing intermediate result may unblock later correctness work, but final integration remains blocked until all deferred performance comparisons pass.
 
-## Final Phase 18 invocation
+## Final integration invocation
 
-Final phases and every numeric gate task from animation-validation-audit-every-fr-fr-sc-sc-against-incrementally-maintained-implementation onward reject deferral. animation-validation-repair-capable-final-checks-t-t-are-clean-final-blocking requires both the animation-validation-runs-every-accumulated-feature-workflow-benchmark-t-runs-every-unrelated animation-performance manifest and the engine-wide candidate that the gate sends through the animation-validation-invoke-final-only-t-t-comparator-every-prepared-control-including comparator.
+Final integration rejects performance deferral. It requires both the animation-performance manifest and the engine-wide candidate, and validates them through the same locked comparator.
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `

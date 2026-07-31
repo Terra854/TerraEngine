@@ -1,4 +1,4 @@
-// T049 tests exercise the public provider-neutral recipe contract.
+// ImplementationCheck tests exercise the public provider-neutral recipe contract.
 #include "../TestHarness.h"
 #include "Physics/Assets/ColliderRecipe.h"
 

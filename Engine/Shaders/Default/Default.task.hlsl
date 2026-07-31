@@ -1,5 +1,6 @@
 #pragma pack_matrix(column_major)
 #include "DefaultDeformation.hlsli"
+#include "../VirtualGeometry/VirtualGeometryPackedVertex.hlsli"
 
 // Default.task.hlsl is the task-stage visibility filter for the default
 // mesh-shader route. It consumes TEMF meshlet bounds plus the selected
@@ -629,12 +630,15 @@ bool TryLoadMeshletGlobalVertexIndex(const MeshDecodeInfo decode, const MeshletR
 float3 DecodeMeshletPosition(const MeshDecodeInfo decode, const uint globalVertexIndex)
 {
 	const uint packedVertexByteOffset = globalVertexIndex * 16u;
-	const uint packedPosition = meshletVertexBytes.Load(packedVertexByteOffset + 0u);
-	const float3 qPosition = float3(
-		DecodeSnorm10(packedPosition, 0u),
-		DecodeSnorm10(packedPosition, 10u),
-		DecodeSnorm10(packedPosition, 20u));
-	return decode.positionOffset.xyz + qPosition * decode.positionScale.xyz;
+	const uint4 packedVertex = uint4(
+		meshletVertexBytes.Load(packedVertexByteOffset + 0u),
+		meshletVertexBytes.Load(packedVertexByteOffset + 4u),
+		meshletVertexBytes.Load(packedVertexByteOffset + 8u),
+		meshletVertexBytes.Load(packedVertexByteOffset + 12u));
+	const TeDecodedPackedVertex decodedVertex =
+		TeDecodePackedVertex(packedVertex);
+	return decode.positionOffset.xyz
+		+ decodedVertex.normalizedPosition * decode.positionScale.xyz;
 }
 
 bool TryLoadPageLocalMeshletGlobalVertexIndex(PageLocalPayloadDescriptor descriptor, const MeshDecodeInfo decode, const MeshletRecord record, const uint vertexIndex, out uint globalVertexIndex)
@@ -657,12 +661,17 @@ bool TryLoadPageLocalMeshletGlobalVertexIndex(PageLocalPayloadDescriptor descrip
 
 float3 DecodePageLocalMeshletPosition(PageLocalPayloadDescriptor descriptor, const MeshDecodeInfo decode, const uint globalVertexIndex)
 {
-	const uint packedPosition = LoadPageLocalPayloadWord(descriptor.vertexWordOffset + globalVertexIndex * 4u + 0u, 0u);
-	const float3 qPosition = float3(
-		DecodeSnorm10(packedPosition, 0u),
-		DecodeSnorm10(packedPosition, 10u),
-		DecodeSnorm10(packedPosition, 20u));
-	return decode.positionOffset.xyz + qPosition * decode.positionScale.xyz;
+	const uint firstWord = descriptor.vertexWordOffset
+		+ globalVertexIndex * 4u;
+	const uint4 packedVertex = uint4(
+		LoadPageLocalPayloadWord(firstWord + 0u, 0u),
+		LoadPageLocalPayloadWord(firstWord + 1u, 0u),
+		LoadPageLocalPayloadWord(firstWord + 2u, 0u),
+		LoadPageLocalPayloadWord(firstWord + 3u, 0u));
+	const TeDecodedPackedVertex decodedVertex =
+		TeDecodePackedVertex(packedVertex);
+	return decode.positionOffset.xyz
+		+ decodedVertex.normalizedPosition * decode.positionScale.xyz;
 }
 
 bool TryProjectMeshletVertex(const MeshDecodeInfo decode, const MeshletRecord record, const uint vertexIndex, out float2 uv, out float depth)
@@ -1338,7 +1347,7 @@ void main(uint3 groupId : SV_GroupID)
 				const float3 worldConeAxis = mul((float3x3)SceneUniforms.model, bounds.coneAxis);
 				culled = IsConeBackfacing(worldConeApex, worldConeAxis, bounds.coneCutoff, worldRadius, cameraPosition, epsilon);
 			}
-			// Feature 030 preserves this single current-pyramid decision path:
+			// The validated renderer contract preserves this single current-pyramid decision path:
 			// no shader quality tiers are introduced while cluster batches are
 			// being validated against the accepted Hi-Z baseline. Shadow passes
 			// consume their light-view meshlet ranges with this gate off, because

@@ -1,6 +1,6 @@
 # TerraEngine Virtual Geometry
 
-## Feature 045 production workflow
+## Production virtual-geometry workflow
 
 Clean-checkout validation always configures, builds, tests, and installs:
 
@@ -13,8 +13,8 @@ ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R "Engine.VirtualGe
 
 Use installed editor automation (`asset.virtualGeometry.inspect`,
 `asset.virtualGeometry.settings.get`, `renderer.virtualGeometry.stats`) for
-read-only codec/profile/hash/cache/page/error presentation. Rebuild, cancel,
-migration, and targeted repair must preserve last-known-good output; canceled or
+read-only codec/profile/hash/cache/page/error presentation. Rebuild, cancel, and
+targeted repair must preserve last-known-good output; canceled or
 failed work is never a successful repair. Missing identities remain
 `unavailable`, not estimated.
 
@@ -28,10 +28,10 @@ tools, images, hashes, or raw samples fail closed.
 `RunBackendParityMatrix.ps1`, `RunAnimatedVirtualGeometryBenchmark.ps1`,
 `RunVirtualGeometryStreamingSoak.ps1`, and
 `RunVirtualGeometryProductionSoak.ps1` cover backend, animation, residency, and
-bounded-growth validation. Unattached AMD/NVIDIA/Intel Vulkan lanes are
-explicitly unavailable and excluded from pass counts; D3D12/DXIL lanes are
-deferred beyond feature 045. The installed phase gate
-(`RunVirtualGeometryPhaseGate.ps1`) consumes `PhaseScenarios/*.json`; `not-run`
+bounded-growth validation. Unattached Vulkan vendor lanes are explicitly
+unavailable and excluded from pass counts; unsupported backend routes are
+outside this production workflow. The installed production gate
+(`RunVirtualGeometryCapabilityGate.ps1`) consumes `CapabilityScenarios/*.json`; `not-run`
 is incomplete, never passing.
 
 This guide tracks the staged implementation of TerraEngine virtual geometry.
@@ -76,14 +76,14 @@ an adaptive, page-streamed system. The order is intentionally conservative:
    can use high detail nearby and coarser resident fallback detail farther away.
 
 Validation for this milestone is phased the same way: each setup, foundation,
-and user-story slice must pass its focused tests before the next slice begins.
+and focused validation slice must pass its tests before the next slice begins.
 Final acceptance still requires the full compile, focused CTest, regression,
 and install flow so the installed editor/runtime tree contains matching docs,
 shaders, binaries, and generated metadata.
 
-## Feature 045 measurement semantics
+## Production measurement semantics
 
-Feature 045 benchmark captures are versioned evidence, not estimates. A
+Production benchmark captures are versioned evidence, not estimates. A
 capability may be planned or supported without executing; only a completed
 live command with generation-safe readback can be marked executed, and only a
 capture with validation artifacts can be marked validated. Timing states are
@@ -101,8 +101,8 @@ claim.
 
 ## Virtual Geometry Hardening Roadmap
 
-Feature `specs/029-virtual-geometry-hardening` turns the current adaptive
-baseline into a validation-ready system. The hardening order is deliberately
+The virtual-geometry hardening milestone turns the current adaptive baseline
+into a validation-ready system. The hardening order is deliberately
 correctness-first:
 
 1. Make Hi-Z occlusion conservative enough that visible meshlets fail open
@@ -132,7 +132,7 @@ regression tests and the install target.
 
 ## GPU-Driven Batching And Streaming Scaling Roadmap
 
-Feature `specs/030-vg-gpu-driven-batching` moves the hardening baseline toward
+The GPU-driven batching milestone moves the hardening baseline toward
 a scalable virtual geometry renderer. The goal is not to change the working
 Hi-Z behavior; it is to reduce command pressure, make residency more explicit,
 and add gates that keep the renderer from regressing while future GPU-driven
@@ -174,7 +174,7 @@ tier controls in this milestone.
 
 ## Visible Command Reuse Optimization
 
-Feature `specs/032-visible-command-reuse` keeps the existing virtual geometry
+The visible-command reuse milestone keeps the existing virtual geometry
 selection and Hi-Z behavior unchanged while reducing static-frame reuse cost.
 When a visible-command cache record is rebuilt, the renderer now derives a
 deduplicated touch set for visible meshes, materials, and textures. Cache-hit
@@ -210,17 +210,17 @@ new occlusion policy.
 ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryBatching|Engine.VirtualGeometryCompaction|Engine.VirtualGeometryPerformanceGate|Engine.VirtualGeometryShadow|Engine.VirtualGeometryCulling|Engine.VirtualGeometryRenderer|Engine.VirtualGeometryResource|Editor.VirtualGeometryAssetPipeline|Editor.VirtualGeometryAutomation|Editor.VirtualGeometryExport|Editor.VirtualGeometryDiagnostics" --output-on-failure -C Debug
 ```
 
-Implementation must complete and test one phase or user story before the next
+Implementation must complete and test one capability slice before the next
 one starts. Final acceptance still requires the broader virtual geometry
 regression pass, affected target build, and install target so the installed
 editor/runtime tree contains matching shaders, binaries, docs, and metadata.
 
 ## GPU Packet Compaction Roadmap
 
-Feature `specs/031-vg-gpu-compaction` takes the packet and batching foundation
-from feature `030` and moves the hot submission path toward GPU-consumed packet
+The GPU packet compaction milestone takes the packet and batching foundation
+and moves the hot submission path toward GPU-consumed packet
 buffers and GPU-generated compacted submission records. The current
-CPU-selected cluster cut remains the correctness oracle while this migration is
+CPU-selected cluster cut remains the correctness oracle while this transition is
 validated. This keeps coverage, LOD selection, material ownership, residency
 fallbacks, and debug visualizer identity diagnosable while reducing CPU command
 pressure.
@@ -273,7 +273,7 @@ metric, threshold, actual value, source, status, and diagnostic text.
 ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryBatching|Engine.VirtualGeometryCompaction|Engine.VirtualGeometryPerformanceGate|Engine.VirtualGeometryHiZ|Engine.VirtualGeometryMultiView|Engine.VirtualGeometryRenderer|Engine.Renderer|Engine.SystemScheduler" --output-on-failure -C Debug
 ```
 
-Implementation must complete and test one phase or user story before the next
+Implementation must complete and test one capability slice before the next
 one starts. Final acceptance also requires the broader virtual geometry
 regression pass, affected target build, and install target so the installed
 editor/runtime tree contains matching shader assets, binaries, docs, and
@@ -281,7 +281,7 @@ diagnostics.
 
 ## Page-Sourced Geometry Streaming Roadmap
 
-Feature `specs/033-vg-page-streaming` changes the virtual geometry payload
+The page-sourced geometry streaming milestone changes the virtual geometry payload
 contract from selected meshlet ranges inside the fully resident owning mesh to
 selected clusters resolving to resident streamed page payloads. The current
 cluster selection, GPU packet batching, generated submission validation, and
@@ -318,14 +318,14 @@ Use the page-streaming fixture slice while implementing this feature:
 ctest --test-dir out/build/Debug -R "VirtualGeometryPageStreaming|VirtualGeometryPageResidency|Engine.VirtualGeometryResource|Engine.VirtualGeometryHiZ|Engine.VirtualGeometryMultiView|Engine.VirtualGeometryPerformanceGate" --output-on-failure -C Debug
 ```
 
-US4 page-local mixed-detail validation uses the registered
+Page-local mixed-detail validation uses the registered
 `Engine.VirtualGeometryRenderer` CTest target. The literal
 `VirtualGeometry.Render` regex currently matches no top-level CTest entry, so
 the renderer target is the canonical checkpoint for sparse cluster cuts,
 material/page boundary diagnostics, page-payload cache invalidation, and shader
 packet source identity.
 
-Each phase or user story must run its focused CTest slice before the next one
+Each capability slice must run its focused CTest slice before the next one
 starts. Final acceptance still requires the broader virtual geometry and
 resource labels plus the install target so the installed editor/runtime tree
 contains matching shaders, diagnostics, docs, and page payload metadata.
@@ -353,7 +353,7 @@ At runtime, virtual geometry follows one view-local immutable path:
 
 ## True Page Residency And Exact Memory Accounting
 
-Feature `specs/034-vg-true-page-residency` tightens the page-streaming contract
+The true page residency milestone tightens the page-streaming contract
 from "page-aware diagnostics" to "page-owned rendering and exact residency."
 `Stream CPU Bytes` and `Render GPU Bytes` must describe current live ownership
 for the specific asset row only. They must not include estimates, desired load
@@ -590,7 +590,7 @@ child, the ancestor suppresses sibling child selections for that subtree so the
 frame keeps coverage without cracks or double-drawn parent/child regions.
 
 The current hardening renderer can expand the selected cluster cut into one
-draw command per selected cluster. Feature `030` replaces that scaling shape
+draw command per selected cluster. GPU-driven batching replaces that scaling shape
 with cluster packets grouped into bounded batches while preserving the old path
 as a correctness fallback. Each packet still describes the selected cluster's
 meshlet offset/count and selected-cluster metadata, so the task and mesh shaders
@@ -671,7 +671,7 @@ whenever the frame culling payload says the pyramid exists. If sampled depth is
 invalid or cannot conservatively prove occlusion for a meshlet's projected
 bounds, that meshlet stays visible and records no Hi-Z cull.
 
-US1 hardening adds explicit per-view Hi-Z validation state to immutable
+Hi-Z hardening adds explicit per-view Hi-Z validation state to immutable
 visibility snapshots. Each view reports whether a current pyramid is ready, the
 sampled pyramid size, render size, camera/depth-scene signatures, fail-open
 reason, and warm-up frame count. A moving opaque blocker must cull only meshlets
@@ -680,7 +680,7 @@ blocker moves away, and resume culling when the blocker returns. Meshlets whose
 projected sphere crosses the near plane or screen edge fail open instead of
 sampling a clipped Hi-Z rectangle.
 
-US2 adds bounded `OcclusionDebugSample` records to the same per-view snapshots.
+Bounded `OcclusionDebugSample` records are added to the same per-view snapshots.
 Each sample identifies a representative object, mesh, cluster, meshlet, cull
 outcome, sampled mip category, projected bounds placeholder, and explanation
 string. The current renderer synthesizes these records from selected draw
@@ -988,7 +988,7 @@ identify which virtual geometry assets create the most pressure.
 
 ## Multi-View, Shadow, And Export Correctness
 
-US9 stores virtual geometry selection state per view. Scene View, Game View,
+Virtual geometry stores selection state per view. Scene View, Game View,
 shadow passes, and exported runtime views each receive their own copied meshlet
 range records in the render snapshot. A view can select a different LOD for the
 same object without mutating another view's decision, and diagnostics are built
@@ -1007,7 +1007,7 @@ budget. The block also serializes the adaptive quality controls used by export:
 `geometryBudgetBytes`, `lodErrorScale`, `maxLodDrop`, `preloadBias`, and the required metadata list
 `adaptiveTargets`, `fallbackCoverage`, `clusterHierarchy`, `pageLinks`, and
 `coneSafety`.
-Feature `029` export validation also requires a `coverage` object that names
+Export validation also requires a `coverage` object that names
 `Tests/Fixtures/VirtualGeometry/hardening-fixtures.json` and includes the
 `export` category in `requiredCategories`. That coverage block is diagnostic
 metadata for QA; TEMF headers and validation flags remain the runtime source of
@@ -1024,8 +1024,8 @@ warning after the fallback path remains complete and renderable.
 
 ## Verification Checkpoints
 
-Each phase or user story should finish with focused tests before moving to the
-next phase. Any milestone that changes C++ or shaders must also compile the
+Each capability slice should finish with focused tests before moving to the
+next capability slice. Any milestone that changes C++ or shaders must also compile the
 affected targets and run the install target so the installed editor/runtime tree
 contains the matching binaries and shader assets.
 
@@ -1149,7 +1149,7 @@ thin/self-occluding Hi-Z cases, a dense camera-motion stress scene, and a
 streaming-pressure scene whose high-detail pages exceed a small geometry
 budget while page `0` fallback remains resident.
 
-Feature `029` expands that fixture set with the manifest in
+The virtual geometry hardening baseline expands that fixture set with the manifest in
 `Tests/Fixtures/VirtualGeometry/hardening-fixtures.json`. The committed manifest
 describes required deterministic categories, importer/export coverage tags,
 package formats, expected diagnostics, and whether a fixture is clean-checkout

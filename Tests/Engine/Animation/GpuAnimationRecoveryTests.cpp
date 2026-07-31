@@ -1,6 +1,6 @@
 // GpuAnimationRecoveryTests.cpp - GPU animation recovery contract tests.
 //
-// T096 will provide the production GPU-animation resource controller. Until it
+// ImplementationCheck will provide the production GPU-animation resource controller. Until it
 // exists, the small fixture below documents its required state transitions in
 // deterministic CPU-only tests. The fixture deliberately uses the public
 // generation, renderer-recovery, planning, and retirement contracts instead of
@@ -29,7 +29,7 @@ namespace TerraEngine::Tests {
 			RejectedStaleCompletion
 		};
 
-		// This is intentionally a test-local description of T096's missing resource
+		// This is intentionally a test-local description of ImplementationCheck's missing resource
 		// controller. It makes the required atomic lifecycle observable without
 		// pretending that a renderer handle can be safely recreated in a unit test.
 		class GpuAnimationRecoveryContractFixture {
@@ -100,7 +100,7 @@ namespace TerraEngine::Tests {
 
 			void BeginRecoveredRenderer(std::uint32_t rendererGeneration)
 			{
-				// T096 must create a distinct renderer generation after recovery. Reusing
+				// ImplementationCheck must create a distinct renderer generation after recovery. Reusing
 				// the old number could allow an old queue completion to look current.
 				rendererGeneration_ = rendererGeneration;
 				recovery_ = MakeActiveRecoverySnapshot(rendererGeneration);

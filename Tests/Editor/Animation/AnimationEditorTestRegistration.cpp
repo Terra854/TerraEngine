@@ -4,7 +4,7 @@
 
 namespace TerraEngine::EditorTests {
 	// Keep task-specific registrations explicit so an unreferenced source file
-	// cannot silently make the Phase 3 deformation contract disappear.
+	// cannot silently make the ImplementationStage deformation contract disappear.
 	void RegisterSkinnedMeshCookTests(TestRegistry& registry);
 
 	void RegisterAnimationEditorTestScaffolding(TestRegistry& registry)

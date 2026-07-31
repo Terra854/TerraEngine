@@ -2,7 +2,7 @@
 
 TerraEngine cooks animated model packages into source-independent runtime assets. The runtime never parses glTF or FBX files: it reads checked `.teskel`, `.teanim`, and `.temf` artifacts from the project build or installed/exported content tree.
 
-This document describes the first frozen animation asset family used by Spec 043. Later controller, mask, retarget, motion-database, and ragdoll formats use the same common envelope and compatibility rules.
+This document describes the first frozen animation asset family used by animation production validation. Later controller, mask, retarget, motion-database, and ragdoll formats use the same common envelope and compatibility rules.
 
 ## Common identity and envelope
 
@@ -49,15 +49,19 @@ Runtime validation opens every declared codec track before publication. A bad se
 
 The version-1 hard limits include 24 hours per clip, 65,536 channels, 16,777,216 total keys, and 1,048,576 authored events. See [the frozen runtime limits](../../Docs/Animation/README.md) for the complete table.
 
-## Deformable TEMF and TDEF
+## Deformable TEMF
 
-Static TEMF v1 remains readable without deformation metadata. A skinned or morphed mesh appends a checked `TDEF` extension and records its absolute offset in the existing TEMF header. Older static readers can ignore the appended extension; animation-aware readers validate it before exposing the mesh.
+Static and deformable meshes use the same canonical TEMF v1 production
+directory. A skinned or morphed mesh declares descriptor-owned skin, palette,
+morph, and demanded-page blocks; it does not append an extension or carry a
+second reader contract. Cooked data from earlier layouts is rejected with a
+recook-required diagnostic.
 
-The frozen TDEF v1 header is 108 bytes. Its skeleton compatibility fingerprint is a 64-bit field at byte offset 68. The header records:
+Canonical deformable metadata records:
 
 - skinning vertex count and 8-byte skinning-stream range;
 - deterministic palette partition and per-vertex palette tables;
-- dense morph-position records and stable morph target IDs;
+- dense morph position, normal, and tangent records with stable target IDs;
 - source skeleton joint count and compatibility fingerprint;
 - conservative whole-mesh deformation bounds; and
 - fail-open virtual-geometry flags that disable unproven cone culling and require complete fallback coverage.
@@ -68,7 +72,9 @@ Four zero weights encode identity deformation. The runtime must not sample a pal
 
 Topology-connected vertices share one palette-local index space. Partitions are created deterministically and contain at most 256 source joints. A connected region that cannot fit is rejected with an actionable diagnostic instead of silently truncating joint indices.
 
-The current TDEF morph stream stores one finite position delta per cooked vertex. Normal and tangent morph streams are not yet present in this version and source data requiring them must be diagnosed rather than silently represented as complete.
+Morph streams store finite position, normal, and tangent deltas. Each demanded
+page carries only the deltas and identities needed by that independently
+validated page.
 
 ## Runtime validation and loading
 
@@ -88,7 +94,8 @@ TerraEngine::UUID mesh = resources.LoadDeformableMesh(
 
 Validation reports the detected version, actual and expected fingerprint, relevant counts, stable diagnostic code, and a corrective message. It does not reserve UUIDs or mutate a live cache. Loading repeats the same checks, verifies the cooked GUID, and publishes only a complete immutable cache entry.
 
-`LoadMesh` remains compatible with static TEMF. Use `LoadDeformableMesh` when a TDEF extension is mandatory.
+Use `LoadMesh` for a canonical static TEMF and `LoadDeformableMesh` when the
+canonical deformable descriptor set is mandatory.
 
 ## Compatibility and publication
 
@@ -111,4 +118,4 @@ cmake --build --preset RelWithDebInfo --target install
 
 All dependencies come from the repository; configuring, building, testing, and installing do not download animation models or require a global package manager. The install step is mandatory because editor/runtime validation uses installed binaries and assets.
 
-These commands are correctness checks. Spec 043 intentionally runs all candidate benchmarks, workflow timing, diagnostics-overhead measurements, performance comparisons, and acceptance decisions only in final tasks animation-validation-runs-every-accumulated-feature-workflow-benchmark-t-runs-every-unrelated, animation-validation-invoke-final-only-t-t-comparator-every-prepared-control-including, and animation-validation-repair-capable-final-checks-t-t-are-clean-final-blocking. That schedule defers measurement; it does not waive any performance threshold.
+These commands are correctness checks. animation production validation intentionally runs all candidate benchmarks, workflow timing, diagnostics-overhead measurements, performance comparisons, and acceptance decisions only in final tasks animation-validation-runs-every-accumulated-feature-workflow-benchmark-t-runs-every-unrelated, animation-validation-invoke-final-only-t-t-comparator-every-prepared-control-including, and animation-validation-repair-capable-final-checks-t-t-are-clean-final-blocking. That schedule defers measurement; it does not waive any performance threshold.

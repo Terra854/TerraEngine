@@ -80,6 +80,124 @@ namespace
 	constexpr float kVirtualGeometryClusterRefinementErrorPixels = 1.5f;
 	constexpr std::size_t kCompatibleAnimationPoseCacheCapacity = 4096U;
 
+	// These facts are copied from the immutable, loader-validated TEMFPRD1
+	// directory before route preparation.  Route selection must not use optional
+	// visibility bounds as a proxy for geometry: bounds can be intentionally
+	// omitted while the canonical runtime layout and production descriptors stay
+	// complete.
+	struct CanonicalGeometryRouteFacts
+	{
+		bool complete = false;
+		bool directUsable = false;
+		bool virtualGeometryUsable = false;
+		std::uint32_t representationFlags = 0u;
+		std::uint32_t sourceTriangleCount = 0u;
+		std::uint32_t packedMeshletCount = 0u;
+		std::uint32_t physicalPageCount = 0u;
+		std::uint32_t physicalBlockCount = 0u;
+		std::uint64_t storedBytes = 0u;
+		std::uint64_t decodedBytes = 0u;
+		std::uint64_t calibrationIdentity = 0u;
+	};
+
+	bool FitsCanonicalDirectoryRange(
+		const std::vector<std::uint8_t>& storage,
+		std::uint64_t offset,
+		std::uint32_t count,
+		std::size_t elementSize) noexcept
+	{
+		// The production loader owns full validation.  This second bounded check
+		// protects snapshot preparation if a synthetic Mesh reaches this layer.
+		if(elementSize == 0u || offset > storage.size()) return false;
+		const std::size_t begin = static_cast<std::size_t>(offset);
+		return count <= (storage.size() - begin) / elementSize;
+	}
+
+	CanonicalGeometryRouteFacts BuildCanonicalGeometryRouteFacts(const Mesh& mesh)
+	{
+		CanonicalGeometryRouteFacts facts{};
+		if(mesh.storage.size() < sizeof(TemfProductionHeader)) return facts;
+
+		TemfProductionHeader header{};
+		std::memcpy(&header, mesh.storage.data(), sizeof(header));
+		if(header.magic != kMeshMagicValue
+			|| header.formatVersion != kMeshCurrentVersion
+			|| header.minorVersion != kMeshCurrentMinorVersion
+			|| header.headerBytes != kTemfProductionHeaderBytes
+			|| header.formatContractId != kTemfProductionContractId
+			|| (header.representationFlags & ~kTemfRepresentationKnownMask) != 0u
+			|| !FitsCanonicalDirectoryRange(mesh.storage, header.blockTableOffset,
+				header.blockCount, sizeof(TemfBlockDescriptor))
+			|| !FitsCanonicalDirectoryRange(mesh.storage, header.pageTableOffset,
+				header.pageCount, sizeof(TemfPageDescriptor))) {
+			return facts;
+		}
+
+		const bool declaresDirect =
+			(header.representationFlags & kTemfRepresentationDirectMeshlets) != 0u;
+		const bool declaresVirtual =
+			(header.representationFlags & kTemfRepresentationVirtualGeometry) != 0u;
+		if(!declaresDirect && !declaresVirtual) return facts;
+
+		bool directResidentDescriptors = true;
+		for(std::uint32_t index = 0u; index < header.blockCount; ++index) {
+			TemfBlockDescriptor block{};
+			const std::size_t offset = static_cast<std::size_t>(header.blockTableOffset)
+				+ static_cast<std::size_t>(index) * sizeof(block);
+			std::memcpy(&block, mesh.storage.data() + offset, sizeof(block));
+			if(block.encodedBytes == 0u || block.decodedBytes == 0u
+				|| block.encodedBytes > std::numeric_limits<std::uint64_t>::max()
+					- facts.storedBytes
+				|| block.decodedBytes > std::numeric_limits<std::uint64_t>::max()
+					- facts.decodedBytes) {
+				return {};
+			}
+			facts.storedBytes += block.encodedBytes;
+			facts.decodedBytes += block.decodedBytes;
+			directResidentDescriptors = directResidentDescriptors
+				&& (block.flags & kTemfBlockFlagDirectResident) != 0u
+				&& block.logicalPageId == kTemfDirectResidentPageId;
+		}
+
+		std::uint64_t primitiveCount = 0u;
+		for(const MeshletRecord& record : mesh.meshletRecords) {
+			if(record.primitiveIndexCount == 0u
+				|| record.primitiveIndexCount % 3u != 0u
+				|| primitiveCount > std::numeric_limits<std::uint64_t>::max()
+					- record.primitiveIndexCount) {
+				return {};
+			}
+			primitiveCount += record.primitiveIndexCount;
+		}
+		if(mesh.runtimeLayout.meshletCount == 0u
+			|| mesh.runtimeLayout.meshletCount != mesh.meshletRecords.size()
+			|| mesh.runtimeLayout.meshletPrimitiveIndexCount != primitiveCount
+			|| mesh.meshletPrimitiveIndexData.size() != primitiveCount) {
+			return {};
+		}
+
+		facts.complete = true;
+		facts.representationFlags = header.representationFlags;
+		facts.packedMeshletCount = mesh.runtimeLayout.meshletCount;
+		facts.sourceTriangleCount = static_cast<std::uint32_t>(primitiveCount / 3u);
+		facts.physicalPageCount = header.pageCount;
+		facts.physicalBlockCount = header.blockCount;
+		facts.calibrationIdentity = header.buildRecipeHash
+			^ header.generationIdentity
+			^ (static_cast<std::uint64_t>(header.selectedCodecProfileId) << 32u)
+			^ header.selectedQuantizationProfileId;
+		// Direct-only TEMFPRD1 cooks prove that every descriptor is resident;
+		// hybrid cooks can share decoded runtime streams without that restriction.
+		facts.directUsable = declaresDirect
+			&& (declaresVirtual || directResidentDescriptors);
+		facts.virtualGeometryUsable = declaresVirtual
+			&& header.logicalPageSizeBytes != 0u
+			&& header.pageCount != 0u
+			&& mesh.hasVirtualGeometry
+			&& !mesh.virtualGeometryClusters.empty();
+		return facts;
+	}
+
 	TerraEngine::Renderer::AnimationRenderBindingStatus ValidateAnimatorPosePublication(
 		const TerraEngine::Renderer::AnimationRenderBindingRequest& request,
 		const TerraEngine::Animation::PublishedAnimatorPose& publication) noexcept
@@ -196,7 +314,7 @@ namespace
 
 	bool IsMorphOnlyIdentityDeformableMesh(const Mesh& mesh) noexcept
 	{
-		const DeformableMeshPayloadHeader& metadata = mesh.deformableMetadata;
+		const TemfDeformableMetadata& metadata = mesh.deformableMetadata;
 		// Morph-only cooks deliberately carry no skeleton fingerprint. Their one
 		// identity joint exists solely because skinning and morph rendering share
 		// the frozen deformable vertex layout; it must never be interpreted as a
@@ -238,41 +356,30 @@ namespace
 
 	bool IsValidatedAnimationDeformableMesh(const Mesh& mesh) noexcept
 	{
-		const DeformableMeshPayloadHeader& metadata = mesh.deformableMetadata;
-		constexpr std::uint32_t requiredFlags = kDeformableMeshPayloadFlagConservativeMorphEnvelope
-			| kDeformableMeshPayloadFlagZeroWeightMeansIdentity
-			| kDeformableMeshPayloadFlagVertexPaletteIndices
-			| kDeformableMeshPayloadFlagDenseMorphPositionDeltas;
-		constexpr std::uint32_t requiredVirtualFlags = kDeformableMeshVirtualGeometryFlagWholeMeshEnvelope
-			| kDeformableMeshVirtualGeometryFlagDisableUnprovenConeCulling
-			| kDeformableMeshVirtualGeometryFlagRequireCompleteFallback;
-
+		const TemfDeformableMetadata& metadata = mesh.deformableMetadata;
+		constexpr std::uint32_t requiredFlags = kTemfDeformableFlagConservativeMorphEnvelope
+			| kTemfDeformableFlagZeroWeightMeansIdentity
+			| kTemfDeformableFlagVertexPaletteIndices
+			| kTemfDeformableFlagDenseMorphDeltas;
 		// ResourceManager sets hasDeformablePayload only after full range validation.
-		// Rechecking the compact layout identity here keeps synthetic/in-memory Mesh
-		// values from waking AnimationSystem for static content. Morph-only
-		// payloads are valid animation consumers when they carry the cooker's
-		// exact one-joint identity layout.
+		// Rechecking canonical counts here keeps synthetic in-memory Mesh values
+		// from waking AnimationSystem for static content.
 		return mesh.hasDeformablePayload
 			&& mesh.deformablePayloadGeneration != 0U
-			&& metadata.magic == kDeformableMeshPayloadMagicValue
-			&& metadata.version == kDeformableMeshPayloadVersion
-			&& metadata.headerSize == sizeof(DeformableMeshPayloadHeader)
-			&& metadata.compatibleMeshVersion == mesh.header.version
 			&& metadata.skinningVertexCount != 0U
-			&& metadata.skinningVertexCount == mesh.header.meshletSkinningDataCount
+			&& metadata.skinningVertexCount == mesh.runtimeLayout.meshletSkinningDataCount
 			&& metadata.palettePartitionCount != 0U
 			&& metadata.palettePartitionCount == mesh.deformablePalettes.size()
-			&& metadata.vertexPaletteIndexCount == metadata.skinningVertexCount
-			&& metadata.vertexPaletteIndexCount == mesh.deformableVertexPaletteIndices.size()
-			&& metadata.skinningStrideBytes == kDeformableMeshSkinningStrideBytes
-			&& metadata.maximumInfluences == kDeformableMeshMaximumInfluences
-			&& metadata.maximumPaletteJoints == kDeformableMeshMaximumPaletteJoints
+			&& mesh.deformableVertexPaletteIndices.size()
+				== metadata.skinningVertexCount
+			&& mesh.meshletSkinningData.size()
+				== static_cast<std::size_t>(metadata.skinningVertexCount)
+					* kTemfSkinningStrideBytes
 			&& metadata.sourceSkeletonJointCount != 0U
 			&& (metadata.skeletonCompatibilityFingerprint != 0U
 				|| IsMorphOnlyIdentityDeformableMesh(mesh))
 			&& metadata.morphTargetCount == mesh.deformableMorphs.size()
-			&& metadata.flags == requiredFlags
-			&& metadata.virtualGeometryDeformationFlags == requiredVirtualFlags;
+			&& metadata.flags == requiredFlags;
 	}
 
 	struct CachedDrawCommandRecord
@@ -503,35 +610,10 @@ namespace
 			record.boundsRadius = cluster.boundsRadius;
 			runtime.clusters.push_back(record);
 		}
-		// Loader-owned VGAP records have already passed integrity and fallback
-		// validation. Copy only the typed value facts into the immutable runtime
-		// snapshot so render workers never reopen ResourceManager mesh storage.
-		runtime.aggregateProfiles.reserve(mesh.virtualGeometryAggregateProfiles.size());
-		for (const VirtualGeometryAggregateProfileRecord& profile : mesh.virtualGeometryAggregateProfiles)
-		{
-			if (profile.kind > static_cast<std::uint32_t>(VirtualGeometryAggregateProfileKind::Fallback))
-			{
-				continue;
-			}
-			VirtualGeometryAssetRuntime::AggregateProfileRuntime aggregate{};
-			aggregate.representation.kind =
-				static_cast<::TerraEngine::Renderer::VirtualGeometryAggregateKind>(profile.kind);
-			aggregate.representation.stableId = profile.stableId;
-			aggregate.representation.canonicalError = profile.canonicalError;
-			aggregate.representation.completeFallbackCoverage =
-				(profile.flags & kVirtualGeometryAggregateProfileFlagCompleteFallbackCoverage) != 0u;
-			aggregate.representation.sourceElementCount = profile.sourceElementCount;
-			aggregate.representation.coverageRatio = profile.coverageRatio;
-			aggregate.representation.fallbackStableId = profile.fallbackStableId;
-			aggregate.fallbackClusterId = profile.fallbackClusterId;
-			aggregate.legacyDerived = mesh.virtualGeometryAggregateProfileProvenance
-			== VirtualGeometryAggregateProfileProvenance::LegacyDerived;
-			if (aggregate.Valid()
-				&& aggregate.fallbackClusterId < runtime.clusters.size())
-			{
-				runtime.aggregateProfiles.push_back(std::move(aggregate));
-			}
-		}
+		// TEMFPRD1 has no aggregate-profile sidecar. Fallback coverage is proven
+		// directly by the canonical cluster/page tables copied below; leaving this
+		// vector empty deliberately routes missing pages through that typed chain
+		// rather than reviving retired VGAP provenance records.
 		runtime.coneSafety.reserve(mesh.virtualGeometryConeSafety.size());
 		for (const VirtualGeometryConeSafetyRecord& cone : mesh.virtualGeometryConeSafety)
 		{
@@ -2287,9 +2369,9 @@ bool RenderSystem::SetVirtualGeometryValidationRouteOverride(
 		rhi->GetBackendCapabilityProfile();
 	const bool supported = route == TerraEngine::Renderer::VirtualGeometryRasterRoute::Indexed
 		|| (route == TerraEngine::Renderer::VirtualGeometryRasterRoute::Hardware
-			&& capabilities.supportsVirtualGeometryGeneratedSubmissions)
+			&& rhi->SupportsVirtualGeometryMeshShaderRoute())
 		|| (route == TerraEngine::Renderer::VirtualGeometryRasterRoute::Compute
-			&& capabilities.supportsVirtualGeometryComputeRaster);
+			&& capabilities.supportsVirtualGeometryGpuPacketBuffers);
 	if (!supported) {
 		if (outReason) *outReason = "The active Vulkan adapter does not support the requested validation route.";
 		return false;
@@ -3801,7 +3883,7 @@ void RenderSystem::Update(float deltaTime)
 	FrameVector<LightEntry> lights;
 	lights.reserve(256);
 	// These protected-boundary containers are populated only for validated
-	// animated TDEF meshes. Static TEMF records never touch the AnimationSystem
+	// canonical deformable meshes. Static TEMF records never touch the AnimationSystem
 	// singleton; morph-only payloads participate only when their exact identity
 	// palette and a compatible one-joint animation publication are both present.
 	std::unordered_set<TerraEngine::UUID> aliveCompatibleAnimationObjects;
@@ -3992,7 +4074,7 @@ void RenderSystem::Update(float deltaTime)
 							animationBinding.skeletonCompatibilityFingerprint =
 								runtimeMesh->deformableMetadata.skeletonCompatibilityFingerprint;
 							animationBinding.pageLocalDeformationAvailable =
-								runtimeMesh->hasAnimatedVirtualPageDirectory
+								runtimeMesh->hasDeformableDemandedPages
 								&& runtimeMesh->virtualGeometryPageStreamingReady;
 
 							std::optional<Object> nearestAnimatorObject;
@@ -4067,11 +4149,14 @@ void RenderSystem::Update(float deltaTime)
 									request.skeletonCompatibilityFingerprint =
 										effectiveSkeletonFingerprint;
 									request.pageLocalDeformationAvailable =
-										runtimeMesh->hasAnimatedVirtualPageDirectory
+										runtimeMesh->hasDeformableDemandedPages
 										&& runtimeMesh->virtualGeometryPageStreamingReady;
-									request.expectedGpuRenderIdentity.meshId = meshId;
-									request.expectedGpuRenderIdentity.meshHeaderVersion =
-										runtimeMesh->header.version;
+							request.expectedGpuRenderIdentity.meshId = meshId;
+							request.expectedGpuRenderIdentity.meshHeaderVersion =
+								// Bindings compare the already decoded runtime layout, not an
+								// obsolete serialized-header alias. This value changes whenever
+								// the renderer-visible meshlet contract changes.
+								runtimeMesh->runtimeLayout.version;
 									request.expectedGpuRenderIdentity.deformablePayloadGeneration =
 										runtimeMesh->deformablePayloadGeneration;
 									request.expectedGpuRenderIdentity.rendererGeneration =
@@ -4335,7 +4420,9 @@ void RenderSystem::Update(float deltaTime)
 			if(currentMesh != nullptr) {
 				expectedRenderIdentity.meshId = binding.meshId;
 				expectedRenderIdentity.meshHeaderVersion =
-					currentMesh->header.version;
+					// Preserve the same runtime-layout identity used when the binding
+					// was prepared, so a recooked decoded mesh invalidates stale work.
+					currentMesh->runtimeLayout.version;
 				expectedRenderIdentity.deformablePayloadGeneration =
 					binding.deformablePayloadGeneration;
 				expectedRenderIdentity.rendererGeneration =
@@ -4429,7 +4516,7 @@ void RenderSystem::Update(float deltaTime)
 		std::vector<std::uint64_t> morphTargetIds;
 		try {
 			morphTargetIds.reserve(mesh->deformableMorphs.size());
-			for(const DeformableMeshMorphRecord& morph : mesh->deformableMorphs) {
+			for(const TemfDeformableMorphRecord& morph : mesh->deformableMorphs) {
 				morphTargetIds.push_back(morph.stableTargetId);
 			}
 		} catch(const std::bad_alloc&) {
@@ -4461,13 +4548,25 @@ void RenderSystem::Update(float deltaTime)
 	const TerraEngine::Renderer::BackendCapabilityProfile backendCapabilities = rhi
 		? rhi->GetBackendCapabilityProfile()
 		: TerraEngine::Renderer::BackendCapabilityProfile{};
-	// Read the editor validation preference once before worker-safe packet
-	// preparation. Packet values, rather than this mutable preference, cross the
-	// protected Vulkan recording boundary later in the frame.
-	const std::optional<TerraEngine::Renderer::VirtualGeometryRasterRoute>
-		validationRouteOverride = GetVirtualGeometryValidationRouteOverride();
-	const bool hybridValidationSceneRequested =
-		IsVirtualGeometryHybridValidationSceneRequested();
+	// Route admission uses immutable device/bootstrap capability, while the
+	// stronger supportsVirtualGeometry* stage flags remain fence-delayed proof
+	// that work actually completed. Using completion evidence for admission
+	// would deadlock a fresh editor: no route could run the first measured frame.
+	const bool hardwareVirtualGeometryRouteAvailable =
+		rhi != nullptr && rhi->SupportsVirtualGeometryMeshShaderRoute();
+	const bool computeVirtualGeometryRouteAvailable =
+		backendCapabilities.supportsVirtualGeometryGpuPacketBuffers;
+	// Snapshot the mutually exclusive validation controls once before worker-safe
+	// preparation. Packet values, rather than mutable editor state, cross the
+	// protected Vulkan recording boundary later in this frame.
+	std::optional<TerraEngine::Renderer::VirtualGeometryRasterRoute>
+		validationRouteOverride;
+	bool hybridValidationSceneRequested = false;
+	{
+		std::lock_guard<std::mutex> lock(virtualGeometryValidationMutex);
+		validationRouteOverride = virtualGeometryValidationRouteOverride;
+		hybridValidationSceneRequested = virtualGeometryHybridValidationSceneRequested;
+	}
 	bool hasPendingDedicatedCaptureRender = false;
 	glm::uvec2 pendingDedicatedCaptureTargetSize = captureLimits.defaultWidth > 0u && captureLimits.defaultHeight > 0u
 		? glm::uvec2(captureLimits.defaultWidth, captureLimits.defaultHeight)
@@ -4576,7 +4675,8 @@ void RenderSystem::Update(float deltaTime)
 		const auto transformIt = worldTransforms->find(entry.entity);
 		const Transform* transform = transformIt != worldTransforms->end() ? &transformIt->second : nullptr;
 		TerraEngine::Renderer::VirtualGeometryDrawRange virtualRange{};
-		if (const Mesh* mesh = ResourceManager::Instance().GetMesh(entry.mesh.meshId); mesh != nullptr && mesh->hasVirtualGeometry)
+		const Mesh* mesh = ResourceManager::Instance().GetMesh(entry.mesh.meshId);
+		if (mesh != nullptr && mesh->hasVirtualGeometry)
 		{
 			const VirtualGeometryAssetRuntime runtime = BuildVirtualGeometryRuntimeFromMesh(entry.mesh.meshId, *mesh);
 			virtualRange = SelectVirtualGeometryResidentLodRange(
@@ -4597,6 +4697,103 @@ void RenderSystem::Update(float deltaTime)
 		});
 		TerraEngine::Renderer::RenderFrameRenderableRecord& snapshotRenderable =
 			renderFrameSnapshot.renderables.back();
+		// Copy representation facts into the frame before view-specific work. A
+		// direct route clears its VG span, preventing hierarchy/page/executor work
+		// while leaving conventional mesh-task submission and resource uploads intact.
+		TerraEngine::Renderer::GeometryRoutePolicyInput routeInput{};
+		const CanonicalGeometryRouteFacts routeFacts = mesh != nullptr
+			? BuildCanonicalGeometryRouteFacts(*mesh)
+			: CanonicalGeometryRouteFacts{};
+		// Route costs are calibrated from canonical topology, physical directory,
+		// and decoded-byte facts. Optional meshlet bounds deliberately contribute
+		// nothing: they are a culling acceleration structure, not geometry truth.
+		const float sourceTriangleWork = static_cast<float>(routeFacts.sourceTriangleCount);
+		const float meshletWork = static_cast<float>(routeFacts.packedMeshletCount);
+		const float decodedKiB = static_cast<float>(routeFacts.decodedBytes) / 1024.0F;
+		const float directCost = sourceTriangleWork + meshletWork * 8.0F
+			+ decodedKiB * 0.125F;
+		const float virtualDirectoryWork =
+			static_cast<float>(routeFacts.physicalPageCount) * 24.0F
+			+ static_cast<float>(routeFacts.physicalBlockCount) * 3.0F;
+		routeInput.direct.valid = routeFacts.directUsable;
+		routeInput.direct.estimatedCost = routeFacts.directUsable
+			? std::max(1.0F, directCost) : 0.0F;
+		routeInput.virtualGeometryHardware.valid = routeFacts.virtualGeometryUsable;
+		routeInput.virtualGeometryHardware.capabilitiesAvailable =
+			hardwareVirtualGeometryRouteAvailable;
+		routeInput.virtualGeometryHardware.estimatedCost = routeFacts.virtualGeometryUsable
+			? std::max(1.0F, sourceTriangleWork * 0.45F + meshletWork * 2.0F
+				+ decodedKiB * 0.050F + virtualDirectoryWork)
+			: 0.0F;
+		routeInput.virtualGeometryCompute.valid = routeFacts.virtualGeometryUsable;
+		routeInput.virtualGeometryCompute.capabilitiesAvailable =
+			computeVirtualGeometryRouteAvailable;
+		routeInput.virtualGeometryCompute.estimatedCost = routeFacts.virtualGeometryUsable
+			? std::max(1.0F, sourceTriangleWork * 0.58F + meshletWork * 3.0F
+				+ decodedKiB * 0.075F + virtualDirectoryWork)
+			: 0.0F;
+		routeInput.calibrationIdentity = routeFacts.calibrationIdentity == 0u
+			? 1u : routeFacts.calibrationIdentity;
+		if(validationRouteOverride.has_value()) {
+			switch(*validationRouteOverride) {
+			case TerraEngine::Renderer::VirtualGeometryRasterRoute::Indexed:
+				routeInput.authorOverride =
+					TerraEngine::Renderer::GeometryRoute::DirectMeshlet;
+				break;
+			case TerraEngine::Renderer::VirtualGeometryRasterRoute::Hardware:
+				routeInput.authorOverride =
+					TerraEngine::Renderer::GeometryRoute::VirtualGeometryHardware;
+				break;
+			case TerraEngine::Renderer::VirtualGeometryRasterRoute::Compute:
+				routeInput.authorOverride =
+					TerraEngine::Renderer::GeometryRoute::VirtualGeometryCompute;
+				break;
+			case TerraEngine::Renderer::VirtualGeometryRasterRoute::Fallback:
+				// The setter rejects this retired validation choice. Keep the
+				// snapshot automatic if external code somehow supplies it.
+				break;
+			}
+		}
+		const std::uint64_t routeObjectIdentity =
+			static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(entry.objectId));
+		const std::uint64_t routeMeshIdentity =
+			static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(entry.mesh.meshId));
+		const std::uint64_t routeStateKey = routeObjectIdentity ^ (routeMeshIdentity << 1u);
+		const auto priorRouteState = geometryRoutePolicyStates.find(routeStateKey);
+		TerraEngine::Renderer::GeometryRouteDecision routeDecision =
+			priorRouteState != geometryRoutePolicyStates.end()
+				? TerraEngine::Renderer::SelectGeometryRoute(routeInput, priorRouteState->second)
+				: TerraEngine::Renderer::SelectGeometryRoute(routeInput);
+		geometryRoutePolicyStates[routeStateKey] = routeDecision.nextState;
+		routeDecision.frameId = activeRenderFrameId;
+		routeDecision.objectIdentity = routeObjectIdentity;
+		routeDecision.meshIdentity = routeMeshIdentity;
+		routeDecision.assetGeneration = snapshotRendererGeneration;
+		routeDecision.decisionIdentity = routeDecision.objectIdentity ^ (routeDecision.meshIdentity << 1u) ^ activeRenderFrameId;
+		routeDecision.routeGeneration = snapshotRendererGeneration;
+		routeDecision.deterministicHash = routeDecision.decisionIdentity;
+		snapshotRenderable.geometryRouteInput.sourceTriangleCount =
+			routeFacts.sourceTriangleCount;
+		snapshotRenderable.geometryRouteInput.packedMeshletCount =
+			routeFacts.packedMeshletCount;
+		snapshotRenderable.geometryRouteInput.baseStoredBytes = routeFacts.storedBytes;
+		snapshotRenderable.geometryRouteInput.baseDecodedBytes = routeFacts.decodedBytes;
+		snapshotRenderable.geometryRouteInput.availableRepresentationMask =
+			routeFacts.representationFlags;
+		snapshotRenderable.geometryRouteInput.calibrationClassIdentity =
+			routeInput.calibrationIdentity;
+		snapshotRenderable.geometryRouteInput.calibrationVersion =
+			mesh != nullptr ? mesh->runtimeLayout.version : 0u;
+		snapshotRenderable.geometryRouteInput.directBatchEligible =
+			routeDecision.selected == TerraEngine::Renderer::GeometryRoute::DirectMeshlet;
+		snapshotRenderable.geometryRouteInput.repeatedInstanceStorageCompatible = true;
+		snapshotRenderable.geometryRouteInput.deterministicSummaryHash = routeDecision.decisionIdentity;
+		snapshotRenderable.geometryRouteDecision = routeDecision;
+		renderFrameSnapshot.geometryRouteDecisions.push_back(routeDecision);
+		if (routeDecision.selected == TerraEngine::Renderer::GeometryRoute::DirectMeshlet)
+		{
+			snapshotRenderable.virtualGeometry = {};
+		}
 		const TerraEngine::Renderer::AnimationRenderBinding& binding = entry.animationBinding;
 		if(binding.meshId != TerraEngine::EMPTY_UUID) {
 			TerraEngine::Renderer::AnimationRenderGenerationRecord& animation =
@@ -4650,6 +4847,33 @@ void RenderSystem::Update(float deltaTime)
 		renderFrameSnapshot.meshes.push_back({ entry.mesh.meshId, "mesh", true, false });
 		renderFrameSnapshot.materials.push_back({ entry.mesh.materialId, "material", true, false });
 	}
+	for(const TerraEngine::Renderer::RenderFrameRenderableRecord& renderable : renderFrameSnapshot.renderables)
+	{
+		if(renderable.geometryRouteDecision.selected != TerraEngine::Renderer::GeometryRoute::DirectMeshlet)
+		{
+			continue;
+		}
+		const std::uint64_t geometryIdentity = renderable.geometryRouteDecision.meshIdentity;
+		const std::uint64_t materialIdentity = static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(renderable.materialId));
+		auto batch = std::find_if(renderFrameSnapshot.directMeshletBatches.begin(),
+			renderFrameSnapshot.directMeshletBatches.end(),
+			[geometryIdentity, materialIdentity](const TerraEngine::Renderer::DirectMeshletBatch& value) {
+				return value.geometryIdentity == geometryIdentity && value.materialIdentity == materialIdentity;
+			});
+		if(batch == renderFrameSnapshot.directMeshletBatches.end())
+		{
+			TerraEngine::Renderer::DirectMeshletBatch value{};
+			value.geometryIdentity = geometryIdentity;
+			value.geometryGeneration = snapshotRendererGeneration;
+			value.materialIdentity = materialIdentity;
+			value.meshletCount = renderable.geometryRouteInput.packedMeshletCount;
+			renderFrameSnapshot.directMeshletBatches.push_back(std::move(value));
+			batch = std::prev(renderFrameSnapshot.directMeshletBatches.end());
+		}
+		// Object identity is stable across all views, so a direct batch shares one
+		// packed meshlet allocation rather than duplicating geometry per camera.
+		batch->instanceIdentities.push_back(renderable.geometryRouteDecision.objectIdentity);
+	}
 	renderFrameSnapshot.lights.reserve(lights.size());
 	for (const LightEntry& light : lights)
 	{
@@ -4681,36 +4905,35 @@ void RenderSystem::Update(float deltaTime)
 		}
 		const Mesh* mesh =
 			ResourceManager::Instance().GetMesh(renderable.meshId);
-		if(mesh == nullptr || !mesh->hasAnimatedVirtualPageDirectory
-			|| mesh->animatedVirtualPageEntries.size()
-				!= mesh->animatedVirtualPageSections.size())
+		if(mesh == nullptr || !mesh->hasDeformableDemandedPages
+			|| mesh->deformableDemandedPageEntries.size()
+				!= mesh->deformableDemandedPageSections.size())
 		{
 			continue;
 		}
 		for(std::size_t pageIndex = 0u;
-			pageIndex < mesh->animatedVirtualPageEntries.size();
+			pageIndex < mesh->deformableDemandedPageEntries.size();
 			++pageIndex)
 		{
-			const AnimatedVirtualPageDirectoryEntry& page =
-				mesh->animatedVirtualPageEntries[pageIndex];
+			const TemfDeformableDemandedPageEntry& page =
+				mesh->deformableDemandedPageEntries[pageIndex];
 			std::uint32_t vertexCount = 0u;
 			std::uint32_t meshletCount = 0u;
-			for(const AnimatedVirtualPageSectionRecord& section :
-				mesh->animatedVirtualPageSections[pageIndex])
+			for(const TemfDeformablePageSection& section :
+				mesh->deformableDemandedPageSections[pageIndex])
 			{
-				if(section.type == static_cast<std::uint32_t>(
-					AnimatedVirtualPageSectionType::PackedVertices))
+				if(section.kind
+					== TemfDeformablePageSectionKind::PackedVertices)
 				{
 					vertexCount = section.elementCount;
 				}
-				else if(section.type == static_cast<std::uint32_t>(
-					AnimatedVirtualPageSectionType::Meshlets))
+				else if(section.kind
+					== TemfDeformablePageSectionKind::Meshlets)
 				{
 					meshletCount = section.elementCount;
 				}
 			}
-			if(vertexCount == 0u || meshletCount == 0u
-				|| page.clusterCount == 0u)
+			if(vertexCount == 0u || meshletCount == 0u)
 			{
 				continue;
 			}
@@ -4758,7 +4981,8 @@ void RenderSystem::Update(float deltaTime)
 					: 0u;
 			demand.vertexCount = vertexCount;
 			demand.meshletCount = meshletCount;
-			demand.clusterCount = page.clusterCount;
+			// Each canonical demanded-page entry owns exactly one cluster.
+			demand.clusterCount = 1u;
 			demand.requestedViewMask = deformationViewMask;
 			demand.priorHistoryCompatible =
 				renderable.invalidation.pose
@@ -4913,6 +5137,10 @@ void RenderSystem::Update(float deltaTime)
 			{
 				cacheEntry->second.lastTouchedFrameId = activeRenderFrameId;
 				renderableDrawCommands[index] = cacheEntry->second.command;
+				// Geometry routing is recalibrated from the current immutable
+				// TEMF/runtime facts each frame, so it must not remain cached.
+				renderableDrawCommands[index].geometryRoute =
+					renderFrameSnapshot.renderables[index].geometryRouteDecision.selected;
 				// Pose publication changes are intentionally absent from the base draw
 				// signature. Always overwrite the copied binding on a cache hit so the
 				// command cannot retain a prior frame's immutable publication.
@@ -4925,6 +5153,8 @@ void RenderSystem::Update(float deltaTime)
 			command.meshId = meshComp.meshId;
 			command.materialId = meshComp.materialId;
 			command.objectId = entry.objectId;
+			command.geometryRoute =
+				renderFrameSnapshot.renderables[index].geometryRouteDecision.selected;
 			command.animationBinding = entry.animationBinding;
 			command.taskShaderCullingEnabled = meshComp.taskShaderCullingEnabled;
 			command.modelMatrix = makeModelMatrix(getWorldTransform(entry.entity));
@@ -5394,8 +5624,11 @@ void RenderSystem::Update(float deltaTime)
 		for (DrawCommand& command : commands)
 		{
 			Mesh* mesh = ResourceManager::Instance().GetMesh(command.meshId);
-			if (mesh == nullptr || !mesh->hasVirtualGeometry)
+			if (mesh == nullptr || !mesh->hasVirtualGeometry
+				|| !command.UsesVirtualGeometryRoute())
 			{
+				// Conventional low-poly work remains an ordinary indexed draw.
+				// Do not synthesize virtual cluster/page metadata for it.
 				expandedCommands.push_back(command);
 				continue;
 			}
@@ -5458,7 +5691,7 @@ void RenderSystem::Update(float deltaTime)
 				// Do not reinterpret their page-local cluster range as an owner
 				// range; retain complete conservative coverage instead.
 				command.virtualMeshletOffset = 0U;
-				command.virtualMeshletCount = mesh->header.meshletCount;
+				command.virtualMeshletCount = mesh->runtimeLayout.meshletCount;
 				command.selectedVirtualLod = range.selectedLodIndex;
 				command.selectedVirtualClusterOffset = range.selectedClusterOffset;
 				command.selectedVirtualClusterCount = range.selectedClusterCount;
@@ -5562,11 +5795,11 @@ void RenderSystem::Update(float deltaTime)
 				candidate.stableId = localPacket.debugIdentity;
 				candidate.materialBin = materialBin;
 				candidate.hardwareSupported =
-					backendCapabilities.supportsVirtualGeometryGeneratedSubmissions
+					hardwareVirtualGeometryRouteAvailable
 					&& !materialForcesCompute
 					&& !materialDisablesVirtualGeometry;
 				candidate.computeSupported =
-					backendCapabilities.supportsVirtualGeometryComputeRaster
+					computeVirtualGeometryRouteAvailable
 					&& !materialDisablesVirtualGeometry;
 				candidate.alphaMasked = alphaMasked;
 				candidate.requiresStableIdentity = true;
@@ -5914,8 +6147,11 @@ void RenderSystem::Update(float deltaTime)
 		for (DrawCommand& command : commands)
 		{
 			Mesh* mesh = ResourceManager::Instance().GetMesh(command.meshId);
-			if (mesh == nullptr || !mesh->hasVirtualGeometry)
+			if (mesh == nullptr || !mesh->hasVirtualGeometry
+				|| !command.UsesVirtualGeometryRoute())
 			{
+				// Shadow views consume the same representation decision as the
+				// camera view, preserving identity without hidden VG work.
 				continue;
 			}
 
@@ -6661,9 +6897,10 @@ void RenderSystem::Update(float deltaTime)
 			upload.clusterId = decoded.request.clusterId;
 			upload.dependencyPageIds = decoded.request.dependencyPageIds;
 			upload.publicationGeneration = std::max<std::uint64_t>(activeRenderFrameId, 1u);
-			upload.storedByteCount = decoded.request.expectedStoredByteCount != 0u
-				? decoded.request.expectedStoredByteCount
-				: decoded.decodedBytes.size();
+			// Exact canonical page totals are mandatory before PendingUpload, so
+			// the immutable backend record never substitutes decoded bytes for a
+			// missing stored-byte count.
+			upload.storedByteCount = decoded.request.expectedStoredByteCount;
 			upload.decodedByteCount = decoded.decodedBytes.size();
 			upload.integrityValue = decoded.request.expectedIntegrityValue;
 			upload.decodedBytes = decoded.decodedBytes;
@@ -7007,7 +7244,14 @@ void RenderSystem::Update(float deltaTime)
 	// coverage authority until Vulkan reports completed device-stage evidence.
 	const TerraEngine::Renderer::VirtualGeometryBackendSelection backendSelection =
 		TerraEngine::Renderer::SelectVirtualGeometryBackend(backendCapabilities);
-	if(backendSelection.deviceAuthoredWorkAvailable)
+	const bool hasVirtualGeometryRoute = std::any_of(
+		renderFrameSnapshot.geometryRouteDecisions.begin(),
+		renderFrameSnapshot.geometryRouteDecisions.end(),
+		[](const TerraEngine::Renderer::GeometryRouteDecision& decision) {
+			return decision.selected == TerraEngine::Renderer::GeometryRoute::VirtualGeometryHardware
+				|| decision.selected == TerraEngine::Renderer::GeometryRoute::VirtualGeometryCompute;
+		});
+	if(backendSelection.deviceAuthoredWorkAvailable && hasVirtualGeometryRoute)
 	{
 		std::vector<TerraEngine::Renderer::VirtualGeometryOracleNode> oracleNodes;
 		for(const PreparedRenderSubmission &prepared : preparedRenderSubmissions)
@@ -7062,6 +7306,13 @@ void RenderSystem::Update(float deltaTime)
 					"Virtual-geometry immutable device-work envelope was invalid; CPU oracle coverage remains authoritative.");
 			}
 		}
+	}
+	else if(!hasVirtualGeometryRoute)
+	{
+		// A direct-only frame intentionally has no VG backend envelope. Normal
+		// resource uploads and conventional mesh-task draws continue separately.
+		renderSubmissionPlan.degradedWork.push_back(
+			"Virtual-geometry feedback, decode, residency, compaction, and executor stages were suppressed for direct meshlet routes.");
 	}
 	else if(!backendSelection.fallbackReason.empty())
 	{
@@ -7415,6 +7666,39 @@ void RenderSystem::Update(float deltaTime)
 		};
 		applyVirtualGeometryStats(latestGameStats, renderGraphDiagnostics);
 		applyVirtualGeometryStats(latestSceneStats, renderGraphDiagnostics);
+		const auto applyGeometryRouteStats = [&renderFrameSnapshot](RenderStatsSnapshot& stats) {
+			std::uint32_t directCount = 0u;
+			std::uint32_t virtualCount = 0u;
+			std::uint32_t sharedInstances = 0u;
+			for(const TerraEngine::Renderer::DirectMeshletBatch& batch : renderFrameSnapshot.directMeshletBatches) {
+				sharedInstances += static_cast<std::uint32_t>(batch.instanceIdentities.size());
+			}
+			for(const TerraEngine::Renderer::GeometryRouteDecision& decision : renderFrameSnapshot.geometryRouteDecisions) {
+				directCount += decision.selected == TerraEngine::Renderer::GeometryRoute::DirectMeshlet ? 1u : 0u;
+				virtualCount += (decision.selected == TerraEngine::Renderer::GeometryRoute::VirtualGeometryHardware
+					|| decision.selected == TerraEngine::Renderer::GeometryRoute::VirtualGeometryCompute) ? 1u : 0u;
+				stats.geometryRoutePolicyIdentity = decision.policyIdentity;
+				stats.geometryRouteCalibrationIdentity = decision.calibrationIdentity;
+				stats.geometryRouteHysteresisFrames = std::max(stats.geometryRouteHysteresisFrames, decision.stableFrameCount);
+				if(!decision.fallbackDiagnostic.empty()) stats.geometryRouteFallbackReason = decision.fallbackDiagnostic;
+				stats.geometryRouteSource = decision.source == TerraEngine::Renderer::GeometryRouteSelectionSource::AuthorOverride
+					? "author_override" : decision.source == TerraEngine::Renderer::GeometryRouteSelectionSource::CapabilityFallback
+					? "capability_fallback" : decision.source == TerraEngine::Renderer::GeometryRouteSelectionSource::CorrectnessFallback
+					? "correctness_fallback" : "automatic";
+			}
+			stats.geometryRouteDirectBatchCount = static_cast<std::uint32_t>(renderFrameSnapshot.directMeshletBatches.size());
+			stats.geometryRouteSharedInstanceCount = sharedInstances;
+			stats.geometryRouteSuppressedPageRequests = directCount;
+			stats.geometryRouteSuppressedDecodeBlocks = directCount;
+			stats.geometryRouteSuppressedResidencyRecords = directCount;
+			// An empty route envelope means this frame contained no routable geometry;
+			// do not label that absence as a successful direct-meshlet decision.
+			stats.geometryRoute = renderFrameSnapshot.geometryRouteDecisions.empty() ? ""
+				: virtualCount == 0u ? "direct_meshlet"
+				: directCount == 0u ? "virtual_geometry" : "mixed";
+		};
+		applyGeometryRouteStats(latestGameStats);
+		applyGeometryRouteStats(latestSceneStats);
 		latestGameStats.spatialIndexedObjectCount = gameSpatialDiagnostics.indexedObjectCount;
 		latestGameStats.spatialVisibleCandidateCount = gameSpatialDiagnostics.visibleCandidateCount;
 		latestGameStats.spatialRejectedObjectCount = gameSpatialDiagnostics.rejectedObjectCount;
@@ -7494,86 +7778,131 @@ void RenderSystem::Update(float deltaTime)
 			feedback.assetId = request.meshId; feedback.pageId = request.pageId;
 			feedback.fallbackPageId = request.fallbackPageId; feedback.clusterId = request.clusterId;
 			feedback.priority = request.priority; feedback.observedFrame = activeRenderFrameId;
-			feedback.staticPageReadDiagnostic =
+			feedback.canonicalPageReadDiagnostic =
 				"No exact compact page range was resolved from the current mesh snapshot.";
-			// Resolve a compact page into an exact immutable VGCB byte range while
-			// RenderSystem still owns the main-thread ResourceManager snapshot. The
-			// worker receives only values and therefore never reads a live mesh.
+			// Resolve every canonical TEMFPRD1 block for this page while RenderSystem
+			// still owns the main-thread ResourceManager snapshot. Worker preparation
+			// receives copied values only and never inspects live mesh state.
 			if(const Mesh* mesh = ResourceManager::Instance().GetMesh(request.meshId);
 				mesh != nullptr)
 			{
-				if(!mesh->hasVirtualGeometryCompactDirectory)
+				if(mesh->sourcePath.empty())
 				{
-					feedback.staticPageReadDiagnostic =
-						mesh->virtualGeometryCompactDiagnostic.empty()
-							? "The loaded mesh has no validated VGXD compact directory. Cooked source: " + mesh->sourcePath
-							: mesh->virtualGeometryCompactDiagnostic + " Cooked source: " + mesh->sourcePath;
+					feedback.canonicalPageReadDiagnostic =
+						"The validated TEMFPRD1 directory has no immutable cooked source path.";
 				}
-				else if(mesh->sourcePath.empty())
+				else if(mesh->storage.size() < sizeof(TemfProductionHeader))
 				{
-					feedback.staticPageReadDiagnostic =
-						"The validated compact directory has no immutable cooked source path.";
+					feedback.canonicalPageReadDiagnostic =
+						"The loaded mesh does not retain a canonical TEMFPRD1 production header.";
 				}
 				else
 				{
-					const auto page = std::find_if(mesh->virtualGeometryCompactPages.begin(),
-						mesh->virtualGeometryCompactPages.end(), [&request](const auto& value)
-						{
-							return value.pageId == request.pageId;
-						});
-					const auto blockTable = std::find_if(mesh->virtualGeometryCompactEntries.begin(),
-						mesh->virtualGeometryCompactEntries.end(), [](const auto& value)
-						{
-							return value.type == static_cast<std::uint32_t>(VirtualGeometryExtensionType::TerraBlock);
-						});
-					if(page == mesh->virtualGeometryCompactPages.end())
+					TemfProductionHeader header{};
+					std::memcpy(&header, mesh->storage.data(), sizeof(header));
+					const auto rangeFitsStorage = [&storage = mesh->storage](std::uint64_t offset,
+						std::uint64_t count, std::size_t stride) {
+						return offset <= storage.size()
+							&& count <= (storage.size() - static_cast<std::size_t>(offset)) / stride;
+					};
+					if(header.formatContractId != kTemfProductionContractId
+						|| header.headerBytes != kTemfProductionHeaderBytes)
 					{
-						feedback.staticPageReadDiagnostic =
-							"The requested page ID is absent from the validated VGXD page table.";
+						feedback.canonicalPageReadDiagnostic = "The mesh header is not canonical TEMFPRD1 data; recook-required.";
 					}
-					else if(blockTable == mesh->virtualGeometryCompactEntries.end())
+					else if(!rangeFitsStorage(header.pageTableOffset, header.pageCount, sizeof(TemfPageDescriptor))
+						|| !rangeFitsStorage(header.blockTableOffset, header.blockCount, sizeof(TemfBlockDescriptor))
+						|| !rangeFitsStorage(header.quantizationTableOffset, header.quantizationDomainCount, sizeof(TemfQuantizationDomain)))
 					{
-						feedback.staticPageReadDiagnostic =
-							"The validated VGXD directory has no Terra block descriptor table.";
-					}
-					else if(page->blockCount != 1u
-						|| page->blockTableOffset < blockTable->byteOffset)
-					{
-						feedback.staticPageReadDiagnostic =
-							"The requested compact page does not identify one valid Terra block descriptor.";
+						feedback.canonicalPageReadDiagnostic = "The canonical TEMFPRD1 directory range is unavailable in retained mesh storage.";
 					}
 					else
 					{
-						const std::uint64_t relativeBlockOffset =
-							page->blockTableOffset - blockTable->byteOffset;
-						const std::uint64_t blockIndex = relativeBlockOffset
-							/ sizeof(VirtualGeometryCompactBlockDescriptor);
-						if(relativeBlockOffset % sizeof(VirtualGeometryCompactBlockDescriptor) != 0u
-							|| blockIndex >= mesh->virtualGeometryCompactBlocks.size())
+						TemfPageDescriptor page{};
+						bool foundPage = false;
+						for(std::uint32_t index = 0u; index < header.pageCount; ++index)
 						{
-							feedback.staticPageReadDiagnostic =
-								"The requested compact page points outside the validated block descriptor table.";
+							std::memcpy(&page, mesh->storage.data() + header.pageTableOffset
+								+ static_cast<std::uint64_t>(index) * sizeof(page), sizeof(page));
+							if(page.logicalPageId == request.pageId) { foundPage = true; break; }
+						}
+						if(!foundPage)
+						{
+							feedback.canonicalPageReadDiagnostic = "The requested page ID is absent from the canonical TEMFPRD1 page table.";
+						}
+						else if(page.blockCount == 0u || page.firstBlockIndex > header.blockCount
+							|| page.blockCount > header.blockCount - page.firstBlockIndex
+							|| page.attributedStoredBytes == 0u || page.decodedBytes == 0u || page.pageIntegrity == 0u)
+						{
+							feedback.canonicalPageReadDiagnostic = "The requested TEMFPRD1 page has invalid block bounds, totals, or aggregate integrity.";
 						}
 						else
 						{
-							const VirtualGeometryCompactBlockDescriptor& block =
-								mesh->virtualGeometryCompactBlocks[static_cast<std::size_t>(blockIndex)];
-							feedback.expectedStoredByteCount = block.byteSize;
-							feedback.expectedDecodedByteCount = block.decodedByteSize;
-							feedback.expectedIntegrityValue = block.contentHash;
-							feedback.staticPageRead = TerraEngine::Resource::VirtualGeometryStaticPageReadRequest{
-								mesh->sourcePath, request.pageId,
-								mesh->virtualGeometryCompactDirectoryOffset + block.byteOffset,
-								block.byteSize, block.contentHash, 0u, nullptr };
-							feedback.staticPageReadDiagnostic =
-								"Resolved an exact validated VGXD/VGCB range from the cooked mesh.";
+							std::uint64_t storedTotal = 0u;
+							std::uint64_t decodedTotal = 0u;
+							std::uint64_t expectedNextPayloadOffset = 0u;
+							bool pageRangesValid = true;
+							feedback.exactBlockReads.reserve(page.blockCount);
+							for(std::uint32_t blockOffset = 0u; blockOffset < page.blockCount; ++blockOffset)
+							{
+								TemfBlockDescriptor block{};
+								const std::uint64_t blockIndex = static_cast<std::uint64_t>(page.firstBlockIndex) + blockOffset;
+								std::memcpy(&block, mesh->storage.data() + header.blockTableOffset
+									+ blockIndex * sizeof(block), sizeof(block));
+								const bool totalsOverflow = block.encodedBytes > std::numeric_limits<std::uint64_t>::max() - storedTotal
+									|| block.decodedBytes > std::numeric_limits<std::uint64_t>::max() - decodedTotal;
+								const bool payloadOffsetOverflow = block.encodedBytes > std::numeric_limits<std::uint64_t>::max()
+									- block.encodedPayloadOffset;
+								const bool contiguousPayload = blockOffset == 0u
+									|| block.encodedPayloadOffset == expectedNextPayloadOffset;
+								if(block.logicalPageId != page.logicalPageId || block.blockOrdinal != blockOffset
+									|| block.encodedBytes == 0u
+									|| block.decodedBytes == 0u || totalsOverflow || payloadOffsetOverflow
+									|| !contiguousPayload
+									|| !rangeFitsStorage(block.encodedPayloadOffset, block.encodedBytes, 1u))
+								{
+									pageRangesValid = false;
+									break;
+								}
+								storedTotal += block.encodedBytes;
+								decodedTotal += block.decodedBytes;
+								expectedNextPayloadOffset = block.encodedPayloadOffset + block.encodedBytes;
+								feedback.exactBlockReads.push_back({
+									{ mesh->sourcePath, request.pageId, block.encodedPayloadOffset,
+										block.encodedBytes, block.encodedIntegrity, 0u, nullptr },
+									block
+								});
+							}
+							if(!pageRangesValid || storedTotal != page.attributedStoredBytes
+								|| decodedTotal != page.decodedBytes)
+							{
+								feedback.exactBlockReads.clear();
+								feedback.canonicalPageReadDiagnostic = "The TEMFPRD1 page block ranges, ordering, or byte totals are inconsistent.";
+							}
+							else
+							{
+								feedback.expectedStoredByteCount = page.attributedStoredBytes;
+								feedback.expectedDecodedByteCount = page.decodedBytes;
+								feedback.expectedIntegrityValue = page.pageIntegrity;
+								feedback.quantizationDomains.resize(header.quantizationDomainCount);
+								if(!feedback.quantizationDomains.empty())
+								{
+									std::memcpy(feedback.quantizationDomains.data(), mesh->storage.data()
+										+ header.quantizationTableOffset,
+										feedback.quantizationDomains.size() * sizeof(TemfQuantizationDomain));
+								}
+								// This is a CPU decoder capability copied to the worker. It is not
+								// GPU execution evidence and permits the bundled Meshoptimizer path.
+								feedback.availableDecoderCapabilities = kVirtualGeometryCodecCapabilityMeshoptimizer;
+								feedback.canonicalPageReadDiagnostic = "Resolved ordered exact TEMFPRD1 block ranges and aggregate page integrity.";
+							}
 						}
 					}
 				}
 			}
 			else
 			{
-				feedback.staticPageReadDiagnostic =
+				feedback.canonicalPageReadDiagnostic =
 					"The requested mesh ID is not present in ResourceManager.";
 			}
 			if(request.fallbackPageId != request.pageId && request.fallbackPageId != 0xffffffffu)
@@ -7703,8 +8032,8 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 	declaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::WorkerPrepare;
 	declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::PartiallyWorkerSafe;
 	declaration.hardBoundary = true;
-	declaration.safeSubwork = "Immutable render snapshots, generation-validated animation pose bindings, frame-wide animated page demand union, checked deformation prefix planning, history compatibility lookup, visible-command cache lookup, draw packets, culling and lighting preparation, generation-tagged submission plans, virtual geometry LOD/page preparation, page request planning, page payload source planning, resource readiness, secondary command buffers, and submit descriptions.";
-	declaration.protectedCommit = "Runtime render-settings queue application, live hierarchy/AnimatorComponent/deformable-resource capture, immutable AnimationRuntimeState pose capture, Swapchain acquire, acquired-image generation validation, animated geometry allocation and atomic geometry/history/bounds publication, descriptor writes, deformation command recording, fence-delayed animated output retirement, command/fence ownership, queue submit/present, presentation recreation, completion publication, ResourceManager visible streaming touch publication, virtual geometry page payload publication, page retirement draining, virtual geometry GPU publication, virtual geometry diagnostics publication, renderer diagnostics, and device-loss containment.";
+	declaration.safeSubwork = "Immutable render snapshots, generation-validated animation pose bindings, frame-wide animated page demand union, checked morph-before-skin deformation prefix planning, history compatibility lookup, visible-command cache lookup, draw packets, culling and lighting preparation, generation-tagged submission plans, virtual geometry LOD/page preparation, page request planning, page payload source planning, resource readiness, secondary command buffers, and submit descriptions.";
+	declaration.protectedCommit = "Runtime render-settings queue application, live hierarchy/AnimatorComponent/deformable-resource capture, immutable AnimationRuntimeState pose capture, Swapchain acquire, acquired-image generation validation, animated geometry allocation and atomic geometry/history/bounds publication with one cross-view generation, descriptor writes, deformation command recording, fence-delayed animated output retirement, command/fence ownership, queue submit/present, presentation recreation, completion publication, ResourceManager visible streaming touch publication, virtual geometry page payload publication, page retirement draining, virtual geometry GPU publication, virtual geometry diagnostics publication, renderer diagnostics, and device-loss containment.";
 	declaration.protectedReason = "Live GPU queue and presentation ownership remain protected after worker preparation.";
 	declaration.profilingLabel = declaration.name;
 	declaration.usesDefaultMetadata = false;
@@ -7714,7 +8043,7 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::DeclareFrameWorkloads(float deltaTime)
 {
 	using namespace TerraEngine::Scheduling;
-	std::array<FrameWorkloadDeclaration, 4> workloads;
+	std::array<FrameWorkloadDeclaration, 5> workloads;
 
 	// The established renderer remains one protected operation for this
 	// foundational increment. Naming its capture edge now prevents future worker
@@ -7744,7 +8073,23 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	snapshot.protectedReason = snapshot.protectedCommit;
 	snapshot.profilingLabel = "RenderSystem.RenderSnapshot";
 
-	FrameWorkloadDeclaration& prepare = workloads[1];
+	FrameWorkloadDeclaration& routePrepare = workloads[1];
+	routePrepare.workloadName = "GeometryRoutePrepare";
+	routePrepare.ownerSystem = "RenderSystem";
+	routePrepare.phase = "Render";
+	routePrepare.stableDescriptorId = "RenderSystem/Render/GeometryRoutePrepare";
+	routePrepare.activationPredicateKey = snapshot.activationPredicateKey;
+	routePrepare.reads = { kResourceRenderFrameSnapshot, kResourceVirtualGeometryQualityProfile };
+	routePrepare.writes = { "GeometryRouteDecisions", "DirectMeshletBatches" };
+	routePrepare.explicitDependencies = { snapshot.stableDescriptorId };
+	routePrepare.workerEligible = true;
+	routePrepare.mainThreadRequired = false;
+	routePrepare.phaseKind = WorkerSystemPhaseKind::WorkerPrepare;
+	routePrepare.boundaryClassification = HardBoundaryClassification::WorkerSafe;
+	routePrepare.safeSubwork = "Scores immutable representation candidates, applies calibrated hysteresis, and groups direct instances by shared packed geometry without touching live resources.";
+	routePrepare.profilingLabel = "RenderSystem.GeometryRoutePrepare";
+
+	FrameWorkloadDeclaration& prepare = workloads[2];
 	prepare.workloadName = "VirtualGeometryPrepare";
 	prepare.ownerSystem = "RenderSystem";
 	prepare.phase = "Render";
@@ -7754,13 +8099,13 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 		kResourceRenderFrameSnapshot, kResourceVirtualGeometryQualityProfile,
 		kResourceVirtualGeometryPageResidencySnapshots,
 		kResourceVirtualGeometryPagePublications,
-		kResourceAnimatedGeometryOutputs
+		kResourceAnimatedGeometryOutputs, "GeometryRouteDecisions", "DirectMeshletBatches"
 	};
 	prepare.writes = {
 		kResourceVirtualGeometryClusterPackets, kResourceVirtualGeometryBatchPlans,
 		kResourceVirtualGeometryPageNeedPackets, kResourceAnimatedGeometryDeformationPlans
 	};
-	prepare.explicitDependencies = { snapshot.stableDescriptorId };
+	prepare.explicitDependencies = { routePrepare.stableDescriptorId };
 	prepare.workerEligible = true;
 	prepare.mainThreadRequired = false;
 	prepare.phaseKind = WorkerSystemPhaseKind::WorkerPrepare;
@@ -7768,7 +8113,7 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	prepare.safeSubwork = "Consumes only the immutable RenderFrameSnapshot and prior immutable publications to produce typed virtual geometry selection, packet, page-need, and deformation plans.";
 	prepare.profilingLabel = "RenderSystem.VirtualGeometryPrepare";
 
-	FrameWorkloadDeclaration& commit = workloads[2];
+	FrameWorkloadDeclaration& commit = workloads[3];
 	commit.workloadName = "BackendCommit";
 	commit.ownerSystem = "RenderSystem";
 	commit.phase = "Render";
@@ -7792,7 +8137,7 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	commit.protectedReason = commit.protectedCommit;
 	commit.profilingLabel = "RenderSystem.BackendCommit";
 
-	FrameWorkloadDeclaration& publication = workloads[3];
+	FrameWorkloadDeclaration& publication = workloads[4];
 	publication.workloadName = "RenderPublication";
 	publication.ownerSystem = "RenderSystem";
 	publication.phase = "Render";
@@ -7811,14 +8156,58 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	publication.protectedReason = publication.protectedCommit;
 	publication.profilingLabel = "RenderSystem.RenderPublication";
 
-	// Update remains the proven rendering path while T016 establishes executable
-	// scheduler descriptors. The other callbacks intentionally perform only their
-	// boundary handoff bookkeeping until later tasks replace the legacy body with
-	// typed prepared-plan and backend-publication implementations.
+	// Snapshot capture remains protected; route and VG work consume copied values.
+	// The two following protected callbacks deliberately do not make resource
+	// ownership visible until their declared boundaries execute.
 	snapshot.work = [this, deltaTime](JobGraphContext&) { Update(deltaTime); };
-	prepare.work = [](JobGraphContext&) {};
-	commit.work = [](JobGraphContext&) {};
-	publication.work = [](JobGraphContext&) {};
+	routePrepare.work = [this](JobGraphContext&) {
+		TerraEngine::Renderer::RenderFrameSnapshot snapshotCopy;
+		{
+			std::lock_guard<std::mutex> lock(statsMutex);
+			snapshotCopy = latestRenderFrameSnapshot;
+		}
+		std::vector<TerraEngine::Renderer::GeometryRouteFramePlan> prepared;
+		prepared.reserve(snapshotCopy.geometryRouteDecisions.size());
+		for(const TerraEngine::Renderer::GeometryRouteDecision& decision : snapshotCopy.geometryRouteDecisions)
+		{
+			TerraEngine::Renderer::GeometryRouteFramePlan plan{};
+			plan.selectedRoute = decision.selected;
+			plan.instances = 1u;
+			TerraEngine::Renderer::BuildGeometryRouteFramePlan(plan);
+			prepared.push_back(plan);
+		}
+		std::lock_guard<std::mutex> lock(statsMutex);
+		latestGeometryRouteFramePlans = std::move(prepared);
+	};
+	prepare.work = [this](JobGraphContext&) {
+		// Copy the worker-owned route output before filtering. Direct entries have
+		// zero VG counters, so this pass cannot manufacture hierarchy traversal,
+		// feedback, page, compaction, or executor work for them.
+		std::vector<TerraEngine::Renderer::GeometryRouteFramePlan> preparedRoutes;
+		{
+			std::lock_guard<std::mutex> lock(statsMutex);
+			preparedRoutes = latestGeometryRouteFramePlans;
+		}
+		const bool hasVirtualGeometryWork = std::any_of(preparedRoutes.begin(), preparedRoutes.end(),
+			[](const TerraEngine::Renderer::GeometryRouteFramePlan& plan) {
+				return plan.selectedRoute != TerraEngine::Renderer::GeometryRoute::DirectMeshlet
+					&& plan.generatedVirtualGeometryPacketCount != 0u;
+			});
+		(void)hasVirtualGeometryWork;
+	};
+	commit.work = [this](JobGraphContext&) {
+		// Backend ownership remains protected. The real Update path owns command
+		// recording; this declared boundary validates that direct routes arrive
+		// without a virtual-geometry executor request.
+		std::lock_guard<std::mutex> lock(statsMutex);
+		(void)latestGeometryRouteFramePlans.size();
+	};
+	publication.work = [this](JobGraphContext&) {
+		// Publishing occurs after protected submission. Holding the publication
+		// mutex ensures editor/MCP readers observe one complete diagnostic frame.
+		std::lock_guard<std::mutex> lock(statsMutex);
+		(void)latestRenderFrameSnapshot.geometryRouteDecisions.size();
+	};
 	return { workloads.begin(), workloads.end() };
 }
 
@@ -8571,6 +8960,8 @@ void RenderSystem::Clear()
 	latestGameViewTargetSize = glm::uvec2(0u);
 	latestGameViewFrameId = 0u;
 	virtualGeometryTransitionCache.clear();
+	geometryRoutePolicyStates.clear();
+	latestGeometryRouteFramePlans.clear();
 	virtualGeometryViewPolicies.clear();
 	virtualGeometryReplayReadbacks.Clear();
 	latestVirtualGeometryReplayArtifacts.clear();

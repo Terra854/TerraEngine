@@ -452,7 +452,7 @@ namespace TerraEngine::Tests
 			const std::size_t ownerFallback = renderSystemSource.find(
 				"command.animationBinding.RequiresOwnerMeshDeformationFallback()");
 			const std::size_t wholeOwnerCount = renderSystemSource.find(
-				"command.virtualMeshletCount = mesh->header.meshletCount", ownerFallback);
+				"command.virtualMeshletCount = mesh->runtimeLayout.meshletCount", ownerFallback);
 			const std::size_t packetExpansion = renderSystemSource.find(
 				"BuildVirtualGeometryClusterPackets(", ownerFallback);
 			context.Expect(
@@ -461,7 +461,7 @@ namespace TerraEngine::Tests
 					&& packetExpansion != std::string::npos
 					&& ownerFallback < wholeOwnerCount
 					&& wholeOwnerCount < packetExpansion,
-				"Legacy animated assets without AVPB inputs must publish one complete owner-mesh fallback before page packets can be expanded.");
+				"A rejected demanded-page input must publish one fail-open owner-mesh fallback before page packets can be expanded.");
 			context.Expect(
 				ShaderContains(vulkanSource,
 					"&& !command.animationBinding.RequiresOwnerMeshDeformationFallback()"),
@@ -743,7 +743,7 @@ namespace TerraEngine::Tests
 
 			context.Expect(!taskShader.empty(), "The task shader should remain readable for Hi-Z preservation checks.");
 			context.Expect(ShaderContains(taskShader, "LoadVirtualGeometryPacketRunSeed"), "Packet-buffer consumption should coexist with the existing task-shader Hi-Z path.");
-			context.Expect(ShaderContains(taskShader, "Feature 030 preserves this single current-pyramid decision path"), "The shader should document that packet batching keeps the accepted Hi-Z path.");
+			context.Expect(ShaderContains(taskShader, "no shader quality tiers are introduced while cluster batches are"), "The shader should document that packet batching keeps one accepted Hi-Z quality path.");
 			context.Expect(ShaderContains(taskShader, "if (!culled && hiZPyramidAvailable")
 				&& ShaderContains(taskShader, "&& rejectionProofAvailable")
 				&& ShaderContains(taskShader, "&& !canonicalDeformationAvailable)"),
@@ -798,8 +798,8 @@ namespace TerraEngine::Tests
 			// runtime deformation branch. These source contracts keep every
 			// reflected binding 6 valid and preserve real deformable owner data.
 			context.Expect(ShaderContains(vulkanResourcesSource, "&& !cpuMesh->hasDeformablePayload;"), "Page-local virtual geometry must retain full owner buffers for deformable draws until page-local skinning is implemented.");
-			context.Expect(ShaderContains(vulkanResourcesSource, "createPlaceholderStorageBuffer(kDeformableMeshSkinningStrideBytes, \"Virtual Geometry Owner Placeholder Skinning Buffer\")"), "Page-local static meshes should own an explicit zero skinning record.");
-			context.Expect(ShaderContains(vulkanResourcesSource, "createPlaceholderStorageBuffer(kDeformableMeshSkinningStrideBytes, \"Static Mesh Skinning Fallback Buffer\")"), "Owning static meshes should own the same stride-correct zero skinning record.");
+			context.Expect(ShaderContains(vulkanResourcesSource, "createPlaceholderStorageBuffer(kTemfSkinningStrideBytes, \"Virtual Geometry Owner Placeholder Skinning Buffer\")"), "Page-local static meshes should own an explicit zero skinning record.");
+			context.Expect(ShaderContains(vulkanResourcesSource, "createPlaceholderStorageBuffer(kTemfSkinningStrideBytes, \"Static Mesh Skinning Fallback Buffer\")"), "Owning static meshes should own the same stride-correct zero skinning record.");
 			context.Expect(ShaderContains(vulkanResourcesSource, "if (HasStorageBinding(6) && mesh.meshSkinningBuffer.buffer == VK_NULL_HANDLE)"), "Descriptor creation should fail closed if the required skinning owner could not be created.");
 			context.Expect(ShaderContains(vulkanResourcesSource, "if (HasStorageBinding(6))"), "Reflected skinning binding 6 should always be written, including for static meshes.");
 			context.Expect(!ShaderContains(vulkanResourcesSource, "if (hasSkinning && HasStorageBinding(6))"), "Descriptor publication must not silently skip a statically used skinning binding.");

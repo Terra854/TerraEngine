@@ -11,7 +11,7 @@ namespace TerraEngine::Editor
 		return hash == 0 ? 1 : hash;
 	}
 
-	std::vector<TerraEngine::Renderer::VirtualGeometryAggregateRepresentation> BuildVirtualGeometryAssemblyPrototypes(std::vector<std::uint64_t> ids)
+	std::vector<TerraEngine::Renderer::VirtualGeometryAggregateRepresentation> BuildVirtualGeometryAssemblyCandidates(std::vector<std::uint64_t> ids)
 	{
 		std::sort(ids.begin(), ids.end());
 		std::vector<TerraEngine::Renderer::VirtualGeometryAggregateRepresentation> r;
@@ -21,7 +21,8 @@ namespace TerraEngine::Editor
 		{
 			const auto id = StableAssemblyId(ids[ordinal], ordinal);
 			r.push_back({ TerraEngine::Renderer::VirtualGeometryAggregateKind::Assembly, id,
-				0.01f * static_cast<float>(ordinal + 1), true, 1u, 1.0f, id });
+				0.01f * static_cast<float>(ordinal + 1), true, 1u, 1.0f, id,
+				ids[ordinal], id, true, true });
 		}
 		return r;
 	}

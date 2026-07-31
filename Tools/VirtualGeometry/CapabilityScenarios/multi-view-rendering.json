@@ -1,7 +1,6 @@
 {
 	"schemaVersion": 2,
-	"phase": 6,
-	"id": "phase-6",
+	"id": "multi-view-rendering",
 	"title": "Materials, occlusion, and every Vulkan view",
 	"requiredTools": ["renderer.virtualGeometry.capabilityEvidence", "renderer.virtualGeometry.stats", "diagnostics.get_summary", "camera.capture_custom", "game_view.capture"],
 	"operations": [

@@ -17,6 +17,31 @@
 constexpr std::uint32_t kMeshMagicValue = 0x464d4554u; // 'TEMF' little endian
 constexpr std::size_t kMaxVertexAttributes = 8;
 constexpr std::uint16_t kMeshCurrentVersion = 1;
+constexpr std::uint16_t kMeshCurrentMinorVersion = 0;
+// TEMFPRD1 is a semantic contract identity, not a planning or feature number.
+// Readers use it together with the 192-byte header size to reject every
+// pre-production TEMF layout before allocating table or payload storage.
+constexpr std::uint64_t kTemfProductionContractId = 0x31445250464d4554ull;
+constexpr std::uint32_t kTemfProductionHeaderBytes = 192u;
+constexpr std::uint32_t kTemfRepresentationDirectMeshlets = 1u << 0u;
+constexpr std::uint32_t kTemfRepresentationVirtualGeometry = 1u << 1u;
+constexpr std::uint32_t kTemfRepresentationDeformableStreams = 1u << 2u;
+constexpr std::uint32_t kTemfRepresentationKnownMask =
+	kTemfRepresentationDirectMeshlets
+	| kTemfRepresentationVirtualGeometry
+	| kTemfRepresentationDeformableStreams;
+constexpr std::uint32_t kTemfDirectResidentPageId = 0xffffffffu;
+constexpr std::uint32_t kTemfBlockFlagDirectResident = 1u << 0u;
+constexpr std::uint32_t kTemfBlockKnownFlags = kTemfBlockFlagDirectResident;
+constexpr std::uint32_t kTemfPageSize32KiB = 32u * 1024u;
+constexpr std::uint32_t kTemfPageSize64KiB = 64u * 1024u;
+constexpr std::uint32_t kTemfPageSize128KiB = 128u * 1024u;
+constexpr std::uint32_t kTemfMaximumPageCount = (1u << 24u) - 1u;
+constexpr std::uint32_t kTemfMaximumBlockCount = (1u << 26u) - 1u;
+constexpr std::uint32_t kTemfMaximumQuantizationDomainCount = (1u << 20u) - 1u;
+constexpr std::uint32_t kTemfMaximumDependencyCount = (1u << 28u) - 1u;
+constexpr std::uint64_t kTemfMaximumDecodedBlockBytes = 256ull * 1024ull * 1024ull;
+constexpr std::uint32_t kTemfDirectoryAlignment = 16u;
 constexpr std::uint32_t kMeshletPackedVertexStrideBytes = 16u;
 constexpr std::uint32_t kMeshletPrimitiveIndexSizeBytes = sizeof(std::uint8_t);
 constexpr std::uint32_t kMeshletVertexRemapDecodedElementSizeBytes = sizeof(std::uint32_t);
@@ -26,37 +51,13 @@ constexpr std::uint32_t kMeshletMaxVertices = 64;
 constexpr std::uint32_t kMeshletMaxTriangles = 124;
 constexpr std::uint32_t kMeshletHeaderFlagHasBounds = 1u << 0u;
 constexpr std::uint32_t kMeshletHeaderFlagHasVirtualGeometry = 1u << 1u;
-constexpr std::uint32_t kDeformableMeshPayloadMagicValue = 0x46454454u; // 'TDEF' little endian
-constexpr std::uint16_t kDeformableMeshPayloadVersion = 1u;
-constexpr std::uint32_t kDeformableMeshMaximumInfluences = 4u;
-constexpr std::uint32_t kDeformableMeshMaximumPaletteJoints = 256u;
-constexpr std::uint32_t kDeformableMeshSkinningStrideBytes = 8u;
-constexpr std::uint32_t kDeformableMeshPayloadFlagConservativeMorphEnvelope = 1u << 0u;
-constexpr std::uint32_t kDeformableMeshPayloadFlagZeroWeightMeansIdentity = 1u << 1u;
-constexpr std::uint32_t kDeformableMeshPayloadFlagVertexPaletteIndices = 1u << 2u;
-constexpr std::uint32_t kDeformableMeshPayloadFlagDenseMorphPositionDeltas = 1u << 3u;
-constexpr std::uint32_t kDeformableMeshVirtualGeometryFlagWholeMeshEnvelope = 1u << 0u;
-constexpr std::uint32_t kDeformableMeshVirtualGeometryFlagDisableUnprovenConeCulling = 1u << 1u;
-constexpr std::uint32_t kDeformableMeshVirtualGeometryFlagRequireCompleteFallback = 1u << 2u;
-// TDFV is an optional payload appended after the frozen TDEF v1 range. Older
-// readers stop at TDEF's payloadSize, while current readers use this separately
-// versioned sidecar for immutable deformable virtual-geometry cluster facts.
-constexpr std::uint32_t kDeformableVirtualGeometrySidecarMagicValue = 0x56464454u; // 'TDFV' little endian
-constexpr std::uint16_t kDeformableVirtualGeometrySidecarVersion = 1u;
-constexpr std::uint32_t kDeformableVirtualGeometrySidecarFlagDerivedFromClusters = 1u << 0u;
-constexpr std::uint32_t kDeformableVirtualGeometryClusterFlagActive = 1u << 0u;
-constexpr std::uint32_t kDeformableVirtualGeometryClusterFlagDynamicBoundsValid = 1u << 1u;
-constexpr std::uint32_t kDeformableVirtualGeometryClusterFlagConservativeEnvelopeValid = 1u << 2u;
-constexpr std::uint32_t kDeformableVirtualGeometryClusterFlagFrustumCullingSafe = 1u << 3u;
-constexpr std::uint32_t kDeformableVirtualGeometryClusterFlagConeCullingSafe = 1u << 4u;
-constexpr std::uint32_t kDeformableVirtualGeometryClusterFlagHiZCullingSafe = 1u << 5u;
-constexpr std::uint32_t kDeformableVirtualGeometryClusterFlagFallbackCoverageComplete = 1u << 6u;
-constexpr std::uint32_t kDeformableVirtualGeometryClusterFlagFallbackActive = 1u << 7u;
-constexpr std::uint32_t kDeformableVirtualGeometryClusterFlagRefinementSafe = 1u << 8u;
-constexpr std::uint32_t kDeformableVirtualGeometryClusterFlagAll = 0x1ffu;
-constexpr std::uint32_t kDeformableVirtualGeometryMorphFlagPosition = 1u << 0u;
-constexpr std::uint32_t kDeformableVirtualGeometryMorphFlagNormal = 1u << 1u;
-constexpr std::uint32_t kDeformableVirtualGeometryMorphFlagTangent = 1u << 2u;
+constexpr std::uint32_t kTemfMaximumSkinInfluences = 4u;
+constexpr std::uint32_t kTemfMaximumPaletteJoints = 256u;
+constexpr std::uint32_t kTemfSkinningStrideBytes = 8u;
+constexpr std::uint32_t kTemfDeformableFlagConservativeMorphEnvelope = 1u << 0u;
+constexpr std::uint32_t kTemfDeformableFlagZeroWeightMeansIdentity = 1u << 1u;
+constexpr std::uint32_t kTemfDeformableFlagVertexPaletteIndices = 1u << 2u;
+constexpr std::uint32_t kTemfDeformableFlagDenseMorphDeltas = 1u << 3u;
 constexpr std::uint32_t kVirtualGeometryPayloadGeneration = 2u;
 constexpr std::uint32_t kVirtualGeometryInvalidIndex = 0xffffffffu;
 constexpr std::uint32_t kVirtualGeometryValidationFlagAdaptiveTargetsPresent = 1u << 0u;
@@ -67,37 +68,7 @@ constexpr std::uint32_t kVirtualGeometryValidationFlagClusterCoverageValidated =
 constexpr std::uint32_t kVirtualGeometryValidationFlagConeSafetyMetadataValidated = 1u << 5u;
 constexpr std::uint32_t kVirtualGeometryConeSafetyFlagConeValid = 1u << 0u;
 constexpr std::uint32_t kVirtualGeometryConeSafetyFlagEligible = 1u << 1u;
-// AVPD/AVPB version the physical page directory and each independently
-// streamable blob without changing the frozen TDEF/TDFV v1 payloads.
-constexpr std::uint32_t kAnimatedVirtualPageDirectoryMagicValue = 0x44505641u; // 'AVPD' little endian
-constexpr std::uint32_t kAnimatedVirtualPageBlobMagicValue = 0x42505641u; // 'AVPB' little endian
-constexpr std::uint16_t kAnimatedVirtualPageFormatVersion = 1u;
-constexpr std::uint32_t kAnimatedVirtualPageMaximumSections = 16u;
-constexpr std::uint32_t kAnimatedVirtualPageMaximumLocalJoints = 256u;
-constexpr std::uint32_t kAnimatedVirtualPageFlagAnimated = 1u << 0u;
-constexpr std::uint32_t kAnimatedVirtualPageFlagPinnedFallback = 1u << 1u;
-constexpr std::uint32_t kAnimatedVirtualPageFlagHasSkinning = 1u << 2u;
-constexpr std::uint32_t kAnimatedVirtualPageFlagHasMorphs = 1u << 3u;
-constexpr std::uint32_t kAnimatedVirtualPageFlagHasErrorSamples = 1u << 4u;
-constexpr std::uint32_t kAnimatedVirtualPageFlagAll = 0x1fu;
-// VGXD is an optional compact virtual-geometry extension appended after TEMF
-// v1 payloads. Legacy readers stop at their known sections, while newer tools
-// can discover independently versioned blocks through this directory.
-constexpr std::uint32_t kVirtualGeometryExtensionDirectoryMagicValue = 0x44584756u; // 'VGXD' little endian
-constexpr std::uint16_t kVirtualGeometryExtensionDirectoryVersion = 1u;
-// VGAP is an independently versioned aggregate-profile sidecar. Keeping it
-// outside the frozen VGXD v1 footer lets older compact cooks remain readable
-// while one targeted recook can publish the canonical aggregate fallback.
-constexpr std::uint32_t kVirtualGeometryAggregateProfileMagicValue = 0x50414756u; // 'VGAP' little endian
-constexpr std::uint16_t kVirtualGeometryAggregateProfileVersion = 1u;
-constexpr std::uint32_t kVirtualGeometryAggregateProfileFlagCompleteFallbackCoverage = 1u << 0u;
-constexpr std::uint32_t kVirtualGeometryCompactBlockMagicValue = 0x42434756u; // 'VGCB' little endian
-constexpr std::uint16_t kVirtualGeometryCompactBlockVersion = 1u;
-constexpr std::uint32_t kVirtualGeometryExtensionFlagRequired = 1u << 0u;
-constexpr std::uint32_t kVirtualGeometryExtensionFlagPageLocal = 1u << 1u;
-constexpr std::uint32_t kVirtualGeometryExtensionFlagPinnedFallback = 1u << 2u;
-constexpr std::uint32_t kVirtualGeometryCompactBlockFlagMeshoptIndexStream = 1u << 0u;
-constexpr std::uint32_t kVirtualGeometryCompactBlockFlagMeshoptVertexStream = 1u << 1u;
+constexpr std::uint32_t kTemfDemandedPageMaximumSections = 16u;
 constexpr std::uint64_t kVirtualGeometryCodecCapabilityExpanded = 1ull << 0u;
 constexpr std::uint64_t kVirtualGeometryCodecCapabilityTerra = 1ull << 1u;
 constexpr std::uint64_t kVirtualGeometryCodecCapabilityMeshoptimizer = 1ull << 2u;
@@ -154,7 +125,13 @@ enum class AttributeFormat : std::uint32_t
 	R10G10B10A2Snorm = 1,
 	R10G10B10A2Unorm = 2,
 	R16G16Unorm = 3,
-	Oct32 = 4
+	Oct32 = 4,
+	// The canonical production vertex is a fixed 128-bit container. These
+	// formats describe byte-addressable fields within that container so tools
+	// and diagnostics can validate the exact Vulkan shader ABI.
+	R16G16B16Unorm = 5,
+	Oct12x2 = 6,
+	Oct10x2TangentSign = 7
 };
 
 // Remap stream encoding tells loaders whether on-disk remap elements are 16-bit
@@ -163,6 +140,237 @@ enum class MeshletRemapEncoding : std::uint32_t
 {
 	Uint32 = 0,
 	Uint16 = 1
+};
+
+// Production streams are separated so a request can decode only the data a
+// page and render route need. Topology references page-local indices and must
+// depend on the matching stable-identity/remap stream.
+enum class TemfStreamKind : std::uint16_t
+{
+	Topology = 0u,
+	VertexRemapStableIdentity = 1u,
+	Position = 2u,
+	NormalTangent = 3u,
+	TextureColor = 4u,
+	Material = 5u,
+	Skinning = 6u,
+	MorphDeformation = 7u,
+	ProceduralUpdate = 8u,
+	Metadata = 9u
+};
+
+// Metadata blocks are independently addressable records rather than a retired
+// monolithic payload. The attribute mask names the exact decoded runtime data.
+inline constexpr std::uint64_t kTemfMetadataRuntimeLayout = 1ull << 0u;
+inline constexpr std::uint64_t kTemfMetadataMeshletRecords = 1ull << 1u;
+inline constexpr std::uint64_t kTemfMetadataMeshletSections = 1ull << 2u;
+inline constexpr std::uint64_t kTemfMetadataMeshletBounds = 1ull << 3u;
+inline constexpr std::uint64_t kTemfMetadataVirtualHeader = 1ull << 4u;
+inline constexpr std::uint64_t kTemfMetadataVirtualDetailLevels = 1ull << 5u;
+inline constexpr std::uint64_t kTemfMetadataVirtualMaterialSections = 1ull << 6u;
+inline constexpr std::uint64_t kTemfMetadataVirtualSectionRanges = 1ull << 7u;
+inline constexpr std::uint64_t kTemfMetadataVirtualCullableGroups = 1ull << 8u;
+inline constexpr std::uint64_t kTemfMetadataVirtualPages = 1ull << 9u;
+inline constexpr std::uint64_t kTemfMetadataVirtualRequestedTargets = 1ull << 10u;
+inline constexpr std::uint64_t kTemfMetadataVirtualSkippedDetails = 1ull << 11u;
+inline constexpr std::uint64_t kTemfMetadataVirtualClusters = 1ull << 12u;
+inline constexpr std::uint64_t kTemfMetadataVirtualClusterPageLinks = 1ull << 13u;
+inline constexpr std::uint64_t kTemfMetadataVirtualConeSafety = 1ull << 14u;
+inline constexpr std::uint64_t kTemfMetadataVirtualValidationFlags = 1ull << 15u;
+inline constexpr std::uint64_t kTemfMetadataVirtualDiagnostics = 1ull << 16u;
+inline constexpr std::uint64_t kTemfMetadataVirtualDiagnosticStrings = 1ull << 17u;
+inline constexpr std::uint64_t kTemfMetadataDeformableRoot = 1ull << 18u;
+inline constexpr std::uint64_t kTemfMetadataDeformablePalettes = 1ull << 19u;
+inline constexpr std::uint64_t kTemfMetadataDeformablePaletteJoints = 1ull << 20u;
+inline constexpr std::uint64_t kTemfMetadataDeformableVertexPalettes = 1ull << 21u;
+inline constexpr std::uint64_t kTemfMetadataDeformableMorphs = 1ull << 22u;
+inline constexpr std::uint64_t kTemfMetadataDeformableDemandedPages = 1ull << 23u;
+inline constexpr std::uint64_t kTemfMetadataDeformableMorphPositions = 1ull << 24u;
+inline constexpr std::uint64_t kTemfMetadataDeformableMorphNormals = 1ull << 25u;
+inline constexpr std::uint64_t kTemfMetadataDeformableMorphTangents = 1ull << 26u;
+// Demanded animated pages remain independently decodable in TEMFPRD1.  The
+// directory names logical identities only; each blob uses its own descriptor
+// owned range and integrity value instead of inheriting a monolithic offset.
+inline constexpr std::uint64_t kTemfMetadataDeformableDemandedPageDirectory = 1ull << 27u;
+inline constexpr std::uint64_t kTemfMetadataDeformableDemandedPageEntries = 1ull << 28u;
+inline constexpr std::uint64_t kTemfMetadataDeformableDemandedPageRoots = 1ull << 29u;
+inline constexpr std::uint64_t kTemfMetadataDeformableDemandedPageDependencies = 1ull << 30u;
+inline constexpr std::uint64_t kTemfMetadataDeformableDemandedPageBlobs = 1ull << 31u;
+// Canonical demanded-page capability bits are decoded from typed TEMFPRD1
+// metadata, never from an appended virtual-page container.
+inline constexpr std::uint32_t kTemfDeformablePageFlagSkinned = 1u << 0u;
+inline constexpr std::uint32_t kTemfDeformablePageFlagMorphed = 1u << 1u;
+
+// Canonical deformable root has no file offsets or magic: all variable data is
+// named by adjacent TEMFPRD1 stream descriptors.
+struct TemfDeformableMetadata
+{
+	std::uint32_t skinningVertexCount;
+	std::uint32_t palettePartitionCount;
+	std::uint32_t morphTargetCount;
+	std::uint32_t demandedPageCount;
+	std::uint32_t sourceSkeletonJointCount;
+	std::uint32_t flags;
+	std::uint64_t skeletonCompatibilityFingerprint;
+	float deformationBoundsMin[3];
+	float deformationBoundsMax[3];
+};
+
+// The page directory is a compact identity index.  It deliberately contains
+// no byte offsets: TEMFPRD1 block descriptors own every encoded blob range.
+struct TemfDeformableDemandedPageDirectory
+{
+	std::uint32_t version;
+	std::uint32_t entryCount;
+	std::uint32_t rootCount;
+	std::uint32_t dependencyCount;
+	std::uint32_t blobCount;
+	std::uint32_t flags;
+	std::uint64_t meshPayloadGeneration;
+	std::uint64_t skeletonCompatibilityFingerprint;
+};
+
+struct TemfDeformableDemandedPageEntry
+{
+	std::uint32_t pageId;
+	std::uint32_t parentPageId;
+	std::uint32_t fallbackPageId;
+	std::uint32_t clusterId;
+	std::uint32_t materialSectionId;
+	std::uint32_t flags;
+	std::uint32_t dependencyOffset;
+	std::uint32_t dependencyCount;
+	std::uint64_t blobId;
+	std::uint64_t contentGeneration;
+	float conservativeBoundsMin[3];
+	float conservativeBoundsMax[3];
+	float geometricError;
+	float deformationError;
+};
+
+struct TemfDeformableDemandedPageRoot
+{
+	std::uint32_t pageId;
+	std::uint32_t reserved;
+};
+
+struct TemfDeformableDemandedPageDependency
+{
+	std::uint32_t pageId;
+	std::uint32_t requiredPageId;
+	std::uint32_t flags;
+	std::uint32_t reserved;
+};
+
+// Blob records pair a logical page with one independently decoded production
+// block.  The payload bytes, stored size, and encoded integrity are supplied
+// by that block descriptor, so this record remains relocation-free.
+struct TemfDeformableDemandedPageBlob
+{
+	std::uint64_t blobId;
+	std::uint64_t contentGeneration;
+	std::uint64_t decodedIntegrity;
+	std::uint32_t pageId;
+	std::uint32_t decodedBytes;
+	std::uint32_t flags;
+	std::uint32_t reserved;
+};
+
+// A demanded-page payload is a self-contained, independently decoded runtime
+// packet.  TEMFPRD1 owns its outer byte range and integrity; inner section
+// offsets are relative to this decoded packet and never address the file.
+enum class TemfDeformablePageSectionKind : std::uint32_t
+{
+	PackedVertices = 0u,
+	Topology = 1u,
+	VertexRemap = 2u,
+	Meshlets = 3u,
+	MeshletBounds = 4u,
+	DecodeConstants = 5u,
+	SkinRecords = 6u,
+	JointPalette = 7u,
+	MorphTargets = 8u,
+	MorphDeltas = 9u,
+	SourceVertexIdentities = 10u,
+	Clusters = 11u,
+	ErrorSamples = 12u
+};
+
+struct TemfDeformablePageSection
+{
+	TemfDeformablePageSectionKind kind;
+	std::uint32_t flags;
+	std::uint32_t relativeByteOffset;
+	std::uint32_t byteSize;
+	std::uint32_t elementCount;
+	std::uint32_t elementStride;
+};
+
+struct TemfDeformableDemandedPagePayload
+{
+	std::uint32_t pageId;
+	std::uint32_t clusterId;
+	std::uint32_t materialSectionId;
+	std::uint32_t flags;
+	std::uint32_t sectionCount;
+	std::uint32_t sectionTableOffset;
+	std::uint32_t decodedByteSize;
+	std::uint32_t reserved;
+	std::uint64_t meshPayloadGeneration;
+	std::uint64_t contentGeneration;
+	std::uint64_t skeletonCompatibilityFingerprint;
+};
+
+struct TemfDeformablePageSkinRecord
+{
+	std::uint8_t localJointIndices[4];
+	std::uint8_t normalizedWeights[4];
+};
+
+struct TemfDeformablePageMorphRecord
+{
+	std::uint32_t stableTargetId;
+	std::uint32_t firstDeltaIndex;
+	std::uint32_t deltaCount;
+	std::uint32_t flags;
+};
+
+struct TemfDeformablePageMorphVertex
+{
+	float positionDelta[4];
+	float normalDelta[4];
+	float tangentDelta[4];
+};
+
+struct TemfDeformablePageSourceIdentity
+{
+	std::uint64_t stableSourceVertexId;
+};
+
+enum class TemfQuantizationDomainScope : std::uint16_t
+{
+	SharedBoundary = 0u,
+	PageInterior = 1u,
+	Asset = 2u,
+	DeformableEnvelope = 3u
+};
+
+// Profile IDs are persistent ABI values. ExpandedProduction is the bounded
+// upload-ready oracle and the only valid codec for direct-resident blocks.
+enum class TemfCodecProfile : std::uint32_t
+{
+	ExpandedProduction = 1u,
+	MeshoptimizerProductionStatic = 2u,
+	MeshoptimizerProductionUpdateable = 3u
+};
+
+// Quantization profile IDs are persistent cook-recipe values. The profiles
+// deliberately start at one so zero remains an invalid or uninitialized file.
+enum class TemfQuantizationProfile : std::uint32_t
+{
+	Cinematic = 1u,
+	Balanced = 2u,
+	Memory = 3u
 };
 
 // GetRemapElementSizeBytes is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -454,9 +662,130 @@ struct VirtualGeometryDiagnosticRecord
 	std::uint32_t messageStringSize;
 };
 
-// Final on-disk header that prefixes every meshlet-only TEMF file.
-// struct MeshHeader groups related state and operations so callers have one documented contract.
-struct MeshHeader
+// Canonical TEMF production records use byte packing and 64-bit file-relative
+// offsets. These declarations are independent from the temporary payload
+// structures below so the cooker and runtime validator share one exact ABI.
+struct TemfProductionHeader
+{
+	std::uint32_t magic = kMeshMagicValue;
+	std::uint16_t formatVersion = kMeshCurrentVersion;
+	std::uint16_t minorVersion = kMeshCurrentMinorVersion;
+	std::uint32_t headerBytes = kTemfProductionHeaderBytes;
+	std::uint32_t representationFlags;
+	std::uint64_t assetIdentity;
+	std::uint64_t sourceContentHash;
+	std::uint64_t buildRecipeHash;
+	std::uint64_t toolIdentity;
+	std::uint64_t generationIdentity;
+	std::uint32_t selectedCodecProfileId;
+	std::uint32_t selectedQuantizationProfileId;
+	std::uint32_t logicalPageSizeBytes;
+	std::uint32_t pageCount;
+	std::uint32_t blockCount;
+	std::uint32_t quantizationDomainCount;
+	std::uint32_t dependencyCount;
+	std::uint32_t reserved0;
+	std::uint64_t pageTableOffset;
+	std::uint64_t blockTableOffset;
+	std::uint64_t quantizationTableOffset;
+	std::uint64_t dependencyTableOffset;
+	std::uint64_t payloadOffset;
+	std::uint64_t payloadBytes;
+	std::uint64_t directoryHash;
+	std::uint64_t payloadHash;
+	std::uint64_t requiredCapabilityMask;
+	std::uint64_t attributeCoverageMask;
+	std::uint64_t formatContractId = kTemfProductionContractId;
+	std::uint64_t directoryBytes;
+	std::uint64_t reserved1;
+};
+
+struct TemfPageDescriptor
+{
+	std::uint32_t logicalPageId;
+	std::uint32_t flags;
+	std::uint32_t firstBlockIndex;
+	std::uint32_t blockCount;
+	std::uint32_t firstDependencyIndex;
+	std::uint32_t dependencyCount;
+	std::uint64_t attributedStoredBytes;
+	std::uint64_t decodedBytes;
+	std::uint64_t pageIntegrity;
+	std::uint64_t reserved[2];
+};
+
+struct TemfBlockDescriptor
+{
+	std::uint64_t blockId;
+	std::uint32_t logicalPageId;
+	std::uint16_t blockOrdinal;
+	std::uint16_t streamKind;
+	std::uint64_t attributeMask;
+	std::uint32_t codecProfileId;
+	std::uint32_t codecVersion;
+	std::uint32_t quantizationDomainId;
+	std::uint32_t flags;
+	std::uint64_t encodedPayloadOffset;
+	std::uint64_t encodedBytes;
+	std::uint64_t decodedBytes;
+	std::uint32_t decodedElementCount;
+	std::uint32_t decodedStride;
+	std::uint32_t requiredAlignment;
+	std::uint32_t firstDependencyIndex;
+	std::uint32_t dependencyCount;
+	std::uint32_t reserved;
+	std::uint64_t requiredCapabilityMask;
+	std::uint64_t encodedIntegrity;
+	std::uint64_t decodedIntegrity;
+};
+
+struct TemfQuantizationDomain
+{
+	std::uint32_t domainId;
+	std::uint16_t domainVersion;
+	std::uint16_t domainScope;
+	std::uint16_t streamKind;
+	std::uint8_t componentCount;
+	std::uint8_t signedness;
+	std::uint32_t flags;
+	std::uint8_t componentBitWidths[4];
+	std::uint32_t reserved;
+	double origin[4];
+	double extent[4];
+	double quantizationStep[4];
+	std::uint64_t domainHash;
+};
+
+struct TemfBlockDependency
+{
+	std::uint64_t targetBlockId;
+	std::uint32_t flags;
+	std::uint32_t reserved;
+};
+
+// This block-local record contains only the constants needed to rebuild the
+// runtime view. It deliberately omits legacy file offsets: TEMFPRD1 owns data
+// through typed descriptors, not an implicit monolithic byte layout.
+struct TemfRuntimeDecodeMetadata
+{
+	std::uint16_t formatVersion;
+	std::uint16_t reserved;
+	std::uint32_t meshletVertexCount;
+	std::uint32_t meshletVertexRemapCount;
+	std::uint32_t meshletPrimitiveIndexCount;
+	std::uint32_t meshletCount;
+	std::uint32_t meshletSectionCount;
+	std::uint32_t meshletBoundsCount;
+	std::uint32_t meshletVertexRemapEncoding;
+	std::uint32_t meshletFlags;
+	VertexLayout layout;
+	QuantizationInfo quantization;
+};
+
+// This is decoded runtime-only meshlet state retained while renderer consumers
+// migrate to production block packets. It is never serialized: TEMFPRD1 files
+// always begin with the 192-byte TemfProductionHeader declared above.
+struct MeshletRuntimeLayout
 {
 	char magic[4];
 	std::uint16_t version;
@@ -489,118 +818,20 @@ struct MeshHeader
 	QuantizationInfo quantization;
 };
 
-// The deformable extension is appended after the existing TEMF payload instead
-// of growing MeshHeader. This preserves static v1 files and lets loaders that
-// do not yet need deformation continue using the original header contract.
-struct DeformableMeshPayloadHeader
+// Canonical deformable records are descriptor-owned TEMFPRD1 metadata. Their
+// indices are relative to decoded companion streams and never file offsets.
+struct TemfDeformablePaletteRecord
 {
-	std::uint32_t magic;
-	std::uint16_t version;
-	std::uint16_t headerSize;
-	// payloadSize covers the complete extension beginning at this header. A
-	// loader validates this range before allocating any palette or morph table.
-	std::uint32_t payloadSize;
-	std::uint16_t compatibleMeshVersion;
-	std::uint16_t reserved;
-	std::uint32_t skinningVertexCount;
-	std::uint32_t palettePartitionCount;
-	std::uint32_t morphTargetCount;
-	std::uint32_t paletteTableOffset;
-	std::uint32_t morphTableOffset;
-	std::uint32_t vertexPaletteIndexOffset;
-	std::uint32_t vertexPaletteIndexCount;
-	std::uint32_t skinningDataOffset;
-	std::uint32_t skinningDataSize;
-	std::uint32_t skinningStrideBytes;
-	std::uint32_t maximumInfluences;
-	std::uint32_t maximumPaletteJoints;
-	std::uint32_t sourceSkeletonJointCount;
-	// Zero is reserved for genuinely unbound morph-only or identity payloads.
-	// Any payload containing nonzero skin influences must carry the exact
-	// fingerprint emitted by its compatible SkeletonAsset generation.
-	std::uint64_t skeletonCompatibilityFingerprint;
-	std::uint32_t flags;
-	// These fail-open rules apply to every deformable meshlet/cluster until a
-	// later cook proves tighter per-cluster bounds and cone safety.
-	std::uint32_t virtualGeometryDeformationFlags;
-	float deformationBoundsMin[3];
-	float deformationBoundsMax[3];
-};
-
-struct DeformableMeshPaletteRecord
-{
-	std::uint32_t jointTableOffset;
+	std::uint32_t firstJointIndex;
 	std::uint32_t jointCount;
 };
 
-struct DeformableMeshMorphRecord
+struct TemfDeformableMorphRecord
 {
 	std::uint32_t stableTargetId;
-	std::uint32_t positionDeltaOffset;
-	std::uint32_t positionDeltaCount;
-	std::uint32_t positionDeltaStrideBytes;
+	std::uint32_t firstDeltaIndex;
+	std::uint32_t deltaCount;
 	std::uint32_t flags;
-};
-
-// This optional sidecar begins immediately after the frozen TDEF v1 payload.
-// Keeping it out of DeformableMeshPayloadHeader preserves old TDEF readers and
-// lets corrupt/newer cluster metadata be rejected without weakening base-skin
-// validation. Every offset is absolute and checked before runtime publication.
-struct DeformableVirtualGeometrySidecarHeader
-{
-	std::uint32_t magic;
-	std::uint16_t version;
-	std::uint16_t headerSize;
-	std::uint32_t payloadSize;
-	std::uint32_t flags;
-	std::uint32_t clusterCount;
-	std::uint32_t clusterTableOffset;
-	std::uint32_t paletteIndexCount;
-	std::uint32_t paletteIndexTableOffset;
-	std::uint32_t morphTargetCount;
-	std::uint32_t morphTableOffset;
-	std::uint32_t morphVertexDataOffset;
-	std::uint32_t morphVertexStrideBytes;
-};
-
-// One record mirrors a cooked virtual-geometry cluster. Palette indices point
-// into the shared TDEF palette table, so no source-joint list is duplicated.
-// Bounds are conservative for the stored morph envelope only; the proof flags
-// explicitly prevent culling/refinement when skinning makes that unsafe.
-struct DeformableVirtualGeometryClusterRecord
-{
-	std::uint32_t clusterId;
-	std::uint32_t paletteIndexOffset;
-	std::uint32_t paletteIndexCount;
-	std::uint32_t morphTargetCount;
-	std::uint32_t flags;
-	std::uint32_t fallbackClusterId;
-	std::uint32_t parentClusterId;
-	std::uint32_t firstChildClusterId;
-	std::uint32_t childCount;
-	float deformationBoundsMin[3];
-	float deformationBoundsMax[3];
-	float geometricError;
-	float deformationError;
-};
-
-// Target-major records make the GPU contract a single 48-byte fetch per
-// target/vertex. Position is always present; missing source normal/tangent
-// channels are encoded as zero float4 values rather than changing the stride.
-struct DeformableVirtualGeometryMorphRecord
-{
-	std::uint32_t stableTargetId;
-	std::uint32_t vertexDataOffset;
-	std::uint32_t vertexCount;
-	std::uint32_t vertexStrideBytes;
-	std::uint32_t flags;
-};
-
-struct DeformableVirtualGeometryMorphVertex
-{
-	float positionDelta[4];
-	float normalDelta[4];
-	float tangentDelta[4];
 };
 
 // Page sizes are explicit experiment profiles rather than an implicit cooker
@@ -660,289 +891,62 @@ enum class VirtualGeometryExtensionType : std::uint32_t
 	MeshoptimizerBlock = 3u
 };
 
-// The file-format enum deliberately mirrors the renderer-facing aggregate
-// kinds without making Resource or cooker code depend on renderer headers.
-enum class VirtualGeometryAggregateProfileKind : std::uint32_t
-{
-	Assembly = 0u,
-	Foliage = 1u,
-	Curve = 2u,
-	Voxel = 3u,
-	Impostor = 4u,
-	Fallback = 5u
-};
-
-enum class VirtualGeometryAggregateProfileProvenance : std::uint8_t
-{
-	None = 0u,
-	LegacyDerived = 1u,
-	CookedSidecar = 2u
-};
-
-// Block kinds keep independently decoded topology and attribute streams
-// discoverable without coupling the compact prototype to one vertex layout.
-enum class VirtualGeometryCompactBlockKind : std::uint32_t
-{
-	Topology = 0u,
-	Positions = 1u,
-	NormalsTangents = 2u,
-	TextureCoordinatesColors = 3u,
-	MaterialIdentities = 4u,
-	SkinWeights = 5u,
-	MorphTargets = 6u,
-	Deformation = 7u,
-	DecodeConstants = 8u
-};
-
-// The directory remains resident while individual AVPB blobs stream. Exact
-// offsets and hashes let ResourceStreaming validate a page without retaining
-// the complete owner vertex, skin, or morph streams.
-struct AnimatedVirtualPageDirectoryHeader
-{
-	std::uint32_t magic;
-	std::uint16_t version;
-	std::uint16_t headerSize;
-	std::uint32_t payloadSize;
-	std::uint32_t pageCount;
-	std::uint32_t pageTableOffset;
-	std::uint32_t rootPageCount;
-	std::uint32_t rootPageTableOffset;
-	std::uint32_t flags;
-	std::uint64_t meshPayloadGeneration;
-	std::uint64_t directoryHash;
-	std::uint32_t reserved;
-};
-
-struct AnimatedVirtualPageDirectoryEntry
-{
-	std::uint32_t pageId;
-	std::uint32_t parentPageId;
-	std::uint32_t fallbackPageId;
-	std::uint32_t flags;
-	std::uint64_t blobOffset;
-	std::uint64_t blobSize;
-	std::uint64_t blobHash;
-	std::uint64_t contentGeneration;
-	std::uint32_t clusterOffset;
-	std::uint32_t clusterCount;
-	std::uint32_t materialSectionId;
-	std::uint64_t skeletonCompatibilityFingerprint;
-	float conservativeBoundsMin[3];
-	float conservativeBoundsMax[3];
-	float geometricError;
-	float deformationError;
-};
-
-// Section types keep blob validation table-driven. Unknown optional sections
-// may be skipped, while unknown required sections reject the whole candidate.
-enum class AnimatedVirtualPageSectionType : std::uint32_t
-{
-	PackedVertices = 0u,
-	PrimitiveBytes = 1u,
-	VertexRemap = 2u,
-	Meshlets = 3u,
-	MeshletBounds = 4u,
-	DecodeConstants = 5u,
-	Materials = 6u,
-	SkinRecords = 7u,
-	JointPalette = 8u,
-	MorphTargets = 9u,
-	MorphDeltas = 10u,
-	SourceVertexIds = 11u,
-	Clusters = 12u,
-	ErrorSamples = 13u,
-	CompactAnimationStreams = 14u
-};
-
-struct AnimatedVirtualPageBlobHeader
-{
-	std::uint32_t magic;
-	std::uint16_t version;
-	std::uint16_t headerSize;
-	std::uint32_t byteSize;
-	std::uint32_t flags;
-	std::uint32_t pageId;
-	std::uint32_t sectionCount;
-	std::uint32_t sectionTableOffset;
-	std::uint64_t meshPayloadGeneration;
-	std::uint64_t contentGeneration;
-	std::uint64_t skeletonCompatibilityFingerprint;
-	std::uint64_t contentHash;
-	std::uint32_t reserved;
-};
-
-struct AnimatedVirtualPageSectionRecord
-{
-	std::uint32_t type;
-	std::uint32_t flags;
-	std::uint64_t byteOffset;
-	std::uint64_t byteSize;
-	std::uint32_t elementCount;
-	std::uint32_t elementStride;
-};
-
-struct AnimatedVirtualPageSkinRecord
-{
-	std::uint8_t localJointIndices[4];
-	std::uint8_t normalizedWeights[4];
-};
-
-struct AnimatedVirtualPageMorphRecord
-{
-	std::uint32_t stableTargetId;
-	std::uint32_t deltaOffset;
-	std::uint32_t deltaCount;
-	std::uint32_t deltaStrideBytes;
-	std::uint32_t flags;
-};
-
-struct AnimatedVirtualPageSourceVertexRecord
-{
-	std::uint64_t stableSourceVertexId;
-};
-
-// The compact directory is a small immutable index. It is deliberately outside
-// the TEMF v1 root header so adding block codecs never changes legacy offsets.
-struct VirtualGeometryExtensionDirectoryHeader
-{
-	std::uint32_t magic;
-	std::uint16_t version;
-	std::uint16_t headerSize;
-	std::uint32_t byteSize;
-	std::uint32_t entryCount;
-	std::uint32_t entryTableOffset;
-	std::uint64_t directoryHash;
-	std::uint64_t requiredCapabilities;
-};
-
-// Entries identify one independently validatable block or page. All byte
-// offsets are relative to the directory's first byte, avoiding file-global
-// pointer ambiguity when a TEMF gains multiple future extensions.
-struct VirtualGeometryExtensionDirectoryEntry
-{
-	std::uint32_t type;
-	std::uint32_t flags;
-	std::uint32_t pageId;
-	std::uint32_t profile;
-	std::uint64_t byteOffset;
-	std::uint32_t byteSize;
-	std::uint32_t decodedByteSize;
-	std::uint64_t contentHash;
-	std::uint64_t requiredCapabilities;
-};
-
-// VGAP contains value-only selection data. The fallback cluster remains a
-// normal validated cluster id, so rendering never treats a profile as geometry
-// or dereferences a profile-owned resource during worker preparation.
-struct VirtualGeometryAggregateProfileHeader
-{
-	std::uint32_t magic;
-	std::uint16_t version;
-	std::uint16_t headerSize;
-	std::uint32_t byteSize;
-	std::uint32_t profileCount;
-	std::uint64_t contentHash;
-};
-
-struct VirtualGeometryAggregateProfileRecord
-{
-	std::uint32_t kind;
-	std::uint32_t flags;
-	std::uint64_t stableId;
-	float canonicalError;
-	std::uint32_t sourceElementCount;
-	float coverageRatio;
-	std::uint64_t fallbackStableId;
-	std::uint32_t fallbackClusterId;
-	std::uint32_t reserved;
-};
-
-// The page descriptor owns only bounded page-local facts. The directory entry
-// provides physical placement, while this record supplies decode and fallback
-// ownership without reopening the complete TEMF payload.
-struct VirtualGeometryCompactPageDescriptor
-{
-	std::uint32_t pageId;
-	std::uint32_t fallbackPageId;
-	std::uint32_t profile;
-	std::uint32_t blockCount;
-	std::uint64_t blockTableOffset;
-	std::uint32_t decodedByteSize;
-	std::uint32_t flags;
-	std::uint64_t requiredCapabilities;
-};
-
-// Block descriptors are the page-local indirection table. A decoder validates
-// this record before touching the corresponding self-describing block bytes.
-struct VirtualGeometryCompactBlockDescriptor
-{
-	std::uint32_t kind;
-	std::uint32_t codec;
-	std::uint32_t flags;
-	std::uint32_t elementCount;
-	std::uint32_t elementStride;
-	std::uint32_t reserved;
-	std::uint64_t byteOffset;
-	std::uint32_t byteSize;
-	std::uint32_t decodedByteSize;
-	std::uint64_t contentHash;
-	std::uint64_t requiredCapabilities;
-};
-
-// Every codec emits this common block header before its bytes. The decoder can
-// bound allocations and validate required features without knowing editor-side
-// recipe objects or trusting the directory alone.
-struct VirtualGeometryCompactBlockHeader
-{
-	std::uint32_t magic;
-	std::uint16_t version;
-	std::uint16_t headerSize;
-	std::uint32_t codec;
-	std::uint32_t flags;
-	std::uint32_t decodedByteSize;
-	std::uint32_t encodedByteSize;
-	std::uint32_t elementCount;
-	std::uint32_t elementStride;
-	std::uint64_t requiredCapabilities;
-	std::uint64_t decodedHash;
-};
 #pragma pack(pop)
 
-static_assert(sizeof(MeshHeader) <= 640, "TEMF header should remain compact");
-static_assert(sizeof(DeformableMeshPayloadHeader) == 108u, "The finalized TDEF v1 header layout is frozen");
-static_assert(offsetof(DeformableMeshPayloadHeader, skeletonCompatibilityFingerprint) == 68u,
-	"The TDEF v1 skeleton compatibility fingerprint offset is shared with runtime validators");
-static_assert(sizeof(DeformableMeshPaletteRecord) == 8u, "Deformable palette records have a frozen v1 layout");
-static_assert(sizeof(DeformableMeshMorphRecord) == 20u, "Deformable morph records have a frozen v1 layout");
-static_assert(sizeof(DeformableVirtualGeometrySidecarHeader) == 48u, "TDFV v1 header layout is frozen");
-static_assert(sizeof(DeformableVirtualGeometryClusterRecord) == 68u, "TDFV v1 cluster layout is frozen");
-static_assert(sizeof(DeformableVirtualGeometryMorphRecord) == 20u, "TDFV v1 morph target layout is frozen");
-static_assert(sizeof(DeformableVirtualGeometryMorphVertex) == 48u, "TDFV GPU morph records use a fixed 48-byte stride");
-static_assert(sizeof(AnimatedVirtualPageDirectoryHeader) == 52u, "AVPD v1 directory header must stay byte exact");
-static_assert(sizeof(AnimatedVirtualPageDirectoryEntry) == 100u, "AVPD v1 directory entries must stay byte exact");
-static_assert(sizeof(AnimatedVirtualPageBlobHeader) == 64u, "AVPB v1 blob header must stay byte exact");
-static_assert(sizeof(AnimatedVirtualPageSectionRecord) == 32u, "AVPB v1 section records must stay byte exact");
-static_assert(sizeof(AnimatedVirtualPageSkinRecord) == 8u, "AVPB skin records match the existing compact skin stream");
-static_assert(sizeof(AnimatedVirtualPageMorphRecord) == 20u, "AVPB morph records use a fixed v1 layout");
-static_assert(sizeof(AnimatedVirtualPageSourceVertexRecord) == 8u, "AVPB source identities are full-width");
-
-static_assert(sizeof(VirtualGeometryExtensionDirectoryHeader) == 36u, "VGXD v1 header must stay byte exact");
-static_assert(sizeof(VirtualGeometryExtensionDirectoryEntry) == 48u, "VGXD v1 entries must stay byte exact");
-static_assert(sizeof(VirtualGeometryAggregateProfileHeader) == 24u, "VGAP v1 header must stay byte exact");
-static_assert(sizeof(VirtualGeometryAggregateProfileRecord) == 44u, "VGAP v1 records must stay byte exact");
-static_assert(sizeof(VirtualGeometryCompactPageDescriptor) == 40u, "VGXD v1 page descriptors must stay byte exact");
-static_assert(sizeof(VirtualGeometryCompactBlockDescriptor) == 56u, "VGXD v1 block descriptors must stay byte exact");
-static_assert(sizeof(VirtualGeometryCompactBlockHeader) == 48u, "VGCB v1 block headers must stay byte exact");
+static_assert(sizeof(TemfProductionHeader) == 192u, "Canonical TEMF v1 production headers must stay byte exact");
+static_assert(offsetof(TemfProductionHeader, representationFlags) == 12u, "TEMF representation flags have a persistent byte offset");
+static_assert(offsetof(TemfProductionHeader, formatContractId) == 168u, "TEMFPRD1 has a persistent byte offset");
+static_assert(sizeof(TemfPageDescriptor) == 64u, "TEMF production page descriptors must stay byte exact");
+static_assert(sizeof(TemfBlockDescriptor) == 112u, "TEMF production block descriptors must stay byte exact");
+static_assert(sizeof(TemfQuantizationDomain) == 128u, "TEMF production quantization domains must stay byte exact");
+static_assert(sizeof(TemfBlockDependency) == 16u, "TEMF production dependency records must stay byte exact");
+static_assert(sizeof(TemfDeformableDemandedPageDirectory) == 40u,
+	"Demanded-page directory metadata must stay byte exact");
+static_assert(sizeof(TemfDeformableDemandedPageEntry) == 80u,
+	"Demanded-page entry metadata must stay byte exact");
+static_assert(sizeof(TemfDeformableDemandedPageRoot) == 8u,
+	"Demanded-page root metadata must stay byte exact");
+static_assert(sizeof(TemfDeformableDemandedPageDependency) == 16u,
+	"Demanded-page dependency metadata must stay byte exact");
+static_assert(sizeof(TemfDeformableDemandedPageBlob) == 40u,
+	"Demanded-page blob metadata must stay byte exact");
+static_assert(sizeof(TemfDeformablePageSection) == 24u,
+	"Demanded-page section records must stay byte exact");
+static_assert(sizeof(TemfDeformableDemandedPagePayload) == 56u,
+	"Demanded-page payload identity must stay byte exact");
+static_assert(sizeof(TemfDeformablePageSkinRecord) == 8u,
+	"Demanded-page skin records use fixed compact influences");
+static_assert(sizeof(TemfDeformablePageMorphRecord) == 16u,
+	"Demanded-page morph records use relative delta indices");
+static_assert(sizeof(TemfDeformablePageMorphVertex) == 48u,
+	"Demanded-page morph vertices use fixed float4 channels");
+static_assert(sizeof(TemfDeformablePageSourceIdentity) == 8u,
+	"Demanded-page source identities are full width");
+static_assert(sizeof(MeshletRuntimeLayout) <= 640, "Runtime meshlet layout should remain compact");
+static_assert(sizeof(TemfDeformablePaletteRecord) == 8u,
+	"Canonical deformable palette records must stay byte exact");
+static_assert(sizeof(TemfDeformableMorphRecord) == 16u,
+	"Canonical deformable morph records must stay byte exact");
+// MeshHeader is the sole on-disk root ABI. Historical meshlet fields live only
+// in MeshletRuntimeLayout after validated production block reconstruction.
+using MeshHeader = TemfProductionHeader;
 
 // In-memory representation of an entire .temf payload.
 // Raw byte storage keeps payload ownership in one place while spans/vectors expose typed views.
 struct Mesh
 {
-	MeshHeader header{};
+	// This decoded layout is populated only after production-directory
+	// validation; it is intentionally distinct from the serialized root header.
+	MeshletRuntimeLayout runtimeLayout{};
 	// The loader records the immutable cooked-file location so streaming can
 	// issue exact compact-page reads without reopening ResourceManager state.
 	std::string sourcePath;
 	std::vector<std::uint8_t> storage;
+	// Decoded canonical blocks own the byte spans consumed by the renderer.
+	std::vector<std::uint8_t> decodedProductionStorage;
+	// Attribute production blocks are independently decoded and then
+	// interleaved once into this upload-ready fixed-stride runtime buffer.
+	std::vector<std::uint8_t> reconstructedVertexData;
 	std::span<const std::uint8_t> meshletVertexData;
 	// Runtime always works with uint32 remap entries even if on-disk storage used uint16.
 	std::vector<std::uint32_t> meshletVertexRemapDecoded;
@@ -954,53 +958,28 @@ struct Mesh
 	// and palette belong to the same cooked generation without reopening the
 	// source file or retaining pointers into temporary loader storage.
 	bool hasDeformablePayload = false;
-	// The loader derives this 64-bit token from the checked skinning stream and
-	// every validated TDEF extension byte. A recook therefore invalidates prior
-	// render bindings without changing the frozen on-disk v1 header or depending
-	// on process-local load order.
+	// The loader derives this 64-bit token from the checked canonical streams.
+	// A recook therefore invalidates prior render bindings without process-local
+	// load order becoming part of the identity.
 	std::uint64_t deformablePayloadGeneration = 0U;
-	DeformableMeshPayloadHeader deformableMetadata{};
-	std::vector<DeformableMeshPaletteRecord> deformablePalettes;
-	std::vector<DeformableMeshMorphRecord> deformableMorphs;
+	TemfDeformableMetadata deformableMetadata{};
+	std::vector<TemfDeformablePaletteRecord> deformablePalettes;
+	std::vector<TemfDeformableMorphRecord> deformableMorphs;
 	std::vector<std::uint32_t> deformablePaletteJoints;
 	std::vector<std::uint32_t> deformableVertexPaletteIndices;
-	// TDFV records are copied only after the base TDEF and the complete sidecar
-	// validate together, so render preparation sees no partially trusted facts.
-	bool hasDeformableVirtualGeometrySidecar = false;
-	DeformableVirtualGeometrySidecarHeader deformableVirtualGeometrySidecar{};
-	std::vector<DeformableVirtualGeometryClusterRecord> deformableVirtualGeometryClusters;
-	std::vector<std::uint32_t> deformableVirtualGeometryPaletteIndices;
-	std::vector<DeformableVirtualGeometryMorphRecord> deformableVirtualGeometryMorphs;
-	std::vector<DeformableVirtualGeometryMorphVertex> deformableVirtualGeometryMorphVertices;
-	// AVPD is copied independently from the owner streams. The entries are
-	// sufficient for conservative request generation and exact-range IO.
-	bool hasAnimatedVirtualPageDirectory = false;
-	AnimatedVirtualPageDirectoryHeader animatedVirtualPageDirectory{};
-	std::vector<AnimatedVirtualPageDirectoryEntry> animatedVirtualPageEntries;
-	std::vector<std::uint32_t> animatedVirtualPageRoots;
-	std::vector<std::vector<AnimatedVirtualPageSectionRecord>>
-		animatedVirtualPageSections;
-	std::uint64_t animatedVirtualPageDirectoryOffset = 0u;
-	std::string animatedVirtualPageDirectoryDiagnostic;
-	// Optional VGXD metadata is retained separately from legacy expanded pages;
-	// a failed compact validation leaves these fields empty so callers keep the
-	// already validated triangle/page fallback.
-	bool hasVirtualGeometryCompactDirectory = false;
-	VirtualGeometryExtensionDirectoryHeader virtualGeometryCompactDirectory{};
-	std::vector<VirtualGeometryExtensionDirectoryEntry> virtualGeometryCompactEntries;
-	std::vector<VirtualGeometryCompactPageDescriptor> virtualGeometryCompactPages;
-	std::vector<VirtualGeometryCompactBlockDescriptor> virtualGeometryCompactBlocks;
-	std::uint64_t virtualGeometryCompactDirectoryOffset = 0u;
-	std::string virtualGeometryCompactDiagnostic;
-	// A current VGAP sidecar is preferred. Legacy TEMF cooks receive one
-	// derived complete fallback profile after their cluster/page tables validate,
-	// allowing runtime to remain safe while the editor schedules a targeted recook.
-	bool hasVirtualGeometryAggregateProfile = false;
-	VirtualGeometryAggregateProfileProvenance virtualGeometryAggregateProfileProvenance =
-		VirtualGeometryAggregateProfileProvenance::None;
-	std::vector<VirtualGeometryAggregateProfileRecord> virtualGeometryAggregateProfiles;
-	std::uint64_t virtualGeometryAggregateProfileOffset = 0u;
-	std::string virtualGeometryAggregateProfileDiagnostic;
+	std::vector<std::array<float, 3>> deformableMorphPositions;
+	std::vector<std::array<float, 3>> deformableMorphNormals;
+	std::vector<std::array<float, 3>> deformableMorphTangents;
+	// The decoder copies canonical demanded-page records only after every
+	// descriptor-owned blob and dependency has been validated.
+	bool hasDeformableDemandedPages = false;
+	TemfDeformableDemandedPageDirectory deformableDemandedPageDirectory{};
+	std::vector<TemfDeformableDemandedPageEntry> deformableDemandedPageEntries;
+	std::vector<TemfDeformableDemandedPageRoot> deformableDemandedPageRoots;
+	std::vector<TemfDeformableDemandedPageDependency> deformableDemandedPageDependencies;
+	std::vector<TemfDeformableDemandedPageBlob> deformableDemandedPageBlobs;
+	std::vector<std::vector<TemfDeformablePageSection>> deformableDemandedPageSections;
+	std::vector<std::vector<std::uint8_t>> deformableDemandedPagePayloads;
 	std::vector<MeshletRecord> meshletRecords;
 	std::vector<MeshletSection> meshletSections;
 	std::vector<MeshletBounds> meshletBounds;
@@ -1044,33 +1023,3 @@ struct Mesh
 	float localBoundsMin[3] = { 0.0f, 0.0f, 0.0f };
 	float localBoundsMax[3] = { 0.0f, 0.0f, 0.0f };
 };
-
-// Version-two optional compact animation blocks are deliberately separate from
-// frozen TDEF/TDFV/AVPD/AVPB layouts. Readers can retain legacy sidecars when
-// this directory is absent and reject only unknown required capabilities.
-inline constexpr std::uint32_t kAnimatedVirtualGeometryCompactStreamVersion = 1u;
-enum class AnimatedVirtualGeometryCompactStreamKind : std::uint32_t { Position = 0u, Normal = 1u, Tangent = 2u };
-struct AnimatedVirtualGeometryCompactStreamDescriptor
-{
-	std::uint32_t version = kAnimatedVirtualGeometryCompactStreamVersion;
-	AnimatedVirtualGeometryCompactStreamKind kind = AnimatedVirtualGeometryCompactStreamKind::Position;
-	std::uint32_t requiredCapabilityMask = 0u;
-	std::uint32_t stableTopologyId = 0u;
-	std::uint64_t stableIdentityHash = 0u;
-	std::uint64_t byteOffset = 0u;
-	std::uint32_t storedByteSize = 0u;
-	std::uint32_t decodedByteSize = 0u;
-};
-static_assert(sizeof(AnimatedVirtualGeometryCompactStreamDescriptor) == 40u, "Compact animated stream layout is versioned and byte-stable.");
-
-inline bool IsValidAnimatedVirtualGeometryCompactStreamDescriptor(
-	const AnimatedVirtualGeometryCompactStreamDescriptor& descriptor) noexcept
-{
-	return descriptor.version == kAnimatedVirtualGeometryCompactStreamVersion
-		&& static_cast<std::uint32_t>(descriptor.kind) <= static_cast<std::uint32_t>(AnimatedVirtualGeometryCompactStreamKind::Tangent)
-		&& descriptor.requiredCapabilityMask != 0u
-		&& descriptor.stableTopologyId != 0u
-		&& descriptor.stableIdentityHash != 0u
-		&& descriptor.storedByteSize != 0u
-		&& descriptor.decodedByteSize >= descriptor.storedByteSize;
-}

@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-	[string]$OutputDirectory = 'out/evidence/045/phase-gate',
+	[string]$OutputDirectory = 'out/evidence/virtual-geometry/production-gates',
 	[string]$BuildDirectory = 'out/build/RelWithDebInfo',
 	[string]$InstalledRoot = 'out/build/RelWithDebInfo/Build',
 	[string]$CodecInputMesh = '',
@@ -12,7 +12,6 @@ param(
 	[string]$MillionDecisionEvidence = '',
 	[string]$BenchmarkBaseline = '',
 	[string]$BenchmarkCandidate = '',
-	[string]$MigrationInput = '',
 	[string]$PackageEvidence = '',
 	[string]$RuntimeAdapter = '',
 	[switch]$SkipBuildInstallPackage,
@@ -112,15 +111,15 @@ function Get-TextSha256([string]$Text)
 }
 
 function Invoke-GateCommand(
-	[int]$Phase,
+	[string]$Scenario,
 	[string]$Id,
 	[string]$Command,
 	[string[]]$Arguments,
 	[hashtable]$Environment = @{},
 	[bool]$RequirePassRecords = $false)
 {
-	$phaseRoot = Join-Path $outputRoot ("phase-{0}" -f $Phase)
-	$commandRoot = Join-Path $phaseRoot 'commands'
+	$scenarioRoot = Join-Path $outputRoot $Scenario
+	$commandRoot = Join-Path $scenarioRoot 'commands'
 	[IO.Directory]::CreateDirectory($commandRoot) | Out-Null
 	$stdoutPath = Join-Path $commandRoot "$Id.stdout.log"
 	$stderrPath = Join-Path $commandRoot "$Id.stderr.log"
@@ -132,7 +131,7 @@ function Invoke-GateCommand(
 	$previousErrorPreference = $ErrorActionPreference
 	$previousEnvironment = @{}
 	# Child scripts own their JSON files, but they intentionally do not assume
-	# that a nested phase directory already exists. Prepare every declared
+	# that a nested scenario directory already exists. Prepare every declared
 	# output destination before launch so a valid comparison cannot fail merely
 	# because this is the first release-gate run in a clean evidence directory.
 	for($argumentIndex = 0;
@@ -217,7 +216,7 @@ function Invoke-GateCommand(
 		status = if($acceptedExit) { 'passed' } else { 'failed' }
 		identity = [ordered]@{
 			executionId = $executionId
-			phase = $Phase
+			scenario = $Scenario
 			gate = $Id
 			startedUtc = $startedUtc.ToString('o')
 		}
@@ -250,18 +249,17 @@ function Invoke-GateCommand(
 }
 
 function Publish-Unavailable(
-	[int]$Phase,
+	[string]$Scenario,
 	[string]$Id,
 	[string]$Reason,
 	[string]$RequestedPath = '')
 {
-	$path = Join-Path $outputRoot (
-		"phase-{0}/gates/{1}.json" -f $Phase, $Id)
+	$path = Join-Path $outputRoot "$Scenario/gates/$Id.json"
 	$record = [ordered]@{
 		schemaVersion = 2
 		status = 'unavailable'
 		identity = [ordered]@{
-			phase = $Phase
+			scenario = $Scenario
 			gate = $Id
 		}
 		requestedPath = $RequestedPath
@@ -273,7 +271,7 @@ function Publish-Unavailable(
 }
 
 function Test-AcceptedJsonEvidence(
-	[int]$Phase,
+	[string]$Scenario,
 	[string]$Id,
 	[string]$Path,
 	[string[]]$AcceptedStatuses)
@@ -282,7 +280,7 @@ function Test-AcceptedJsonEvidence(
 	if([string]::IsNullOrWhiteSpace($resolvedPath) -or
 		-not (Test-Path -LiteralPath $resolvedPath -PathType Leaf))
 	{
-		return Publish-Unavailable $Phase $Id (
+		return Publish-Unavailable $Scenario $Id (
 			"A real JSON artifact is required for the $Id gate.") $Path
 	}
 	try
@@ -292,7 +290,7 @@ function Test-AcceptedJsonEvidence(
 	}
 	catch
 	{
-		return Publish-Unavailable $Phase $Id (
+		return Publish-Unavailable $Scenario $Id (
 			"The supplied artifact is not readable JSON: $($_.Exception.Message)") $Path
 	}
 	$status = [string](Get-OptionalProperty $document 'status')
@@ -308,7 +306,7 @@ function Test-AcceptedJsonEvidence(
 		schemaVersion = 2
 		status = if($accepted) { 'accepted' } else { 'incomplete' }
 		identity = [ordered]@{
-			phase = $Phase
+			scenario = $Scenario
 			gate = $Id
 			sourceExecutionId = $executionId
 		}
@@ -322,18 +320,20 @@ function Test-AcceptedJsonEvidence(
 			'The artifact must publish an accepted status and a non-empty execution identity.'
 		}
 	}
-	Write-JsonFile (Join-Path $outputRoot (
-		"phase-{0}/gates/{1}.json" -f $Phase, $Id)) $record
+	Write-JsonFile (Join-Path $outputRoot "$Scenario/gates/$Id.json") $record
 	return $record
 }
 
-function Test-BenchmarkCapture([string]$Path, [string]$Id, [int]$Phase = 9)
+function Test-BenchmarkCapture(
+	[string]$Path,
+	[string]$Id,
+	[string]$Scenario = 'production-readiness')
 {
 	$resolvedPath = Resolve-RepositoryPath $Path
 	if([string]::IsNullOrWhiteSpace($resolvedPath) -or
 		-not (Test-Path -LiteralPath $resolvedPath -PathType Leaf))
 	{
-		return Publish-Unavailable $Phase $Id (
+		return Publish-Unavailable $Scenario $Id (
 			"Measured benchmark capture '$Id' is required.") $Path
 	}
 	$document = Get-Content -Raw -LiteralPath $resolvedPath | ConvertFrom-Json
@@ -364,7 +364,7 @@ function Test-BenchmarkCapture([string]$Path, [string]$Id, [int]$Phase = 9)
 		schemaVersion = 2
 		status = if($accepted) { 'accepted' } else { 'incomplete' }
 		identity = [ordered]@{
-			phase = $Phase
+			scenario = $Scenario
 			gate = $Id
 			sourceExecutionId = $executionId
 		}
@@ -381,13 +381,12 @@ function Test-BenchmarkCapture([string]$Path, [string]$Id, [int]$Phase = 9)
 			'Benchmark evidence requires one execution identity, at least five matching measured samples, measured/comparable status, and real 64-hex artifact/integrity hashes.'
 		}
 	}
-	Write-JsonFile (Join-Path $outputRoot (
-		"phase-{0}/gates/{1}.json" -f $Phase, $Id)) $record
+	Write-JsonFile (Join-Path $outputRoot "$Scenario/gates/$Id.json") $record
 	return $record
 }
 
 function Publish-TestRecordEvidence(
-	[int]$Phase,
+	[string]$Scenario,
 	[string]$Id,
 	[object[]]$CommandRows,
 	[string[]]$RequiredPassNames)
@@ -446,7 +445,7 @@ function Publish-TestRecordEvidence(
 		status = if($accepted) { 'accepted' } else { 'incomplete' }
 		identity = [ordered]@{
 			executionId = [Guid]::NewGuid().ToString('D')
-			phase = $Phase
+			scenario = $Scenario
 			gate = $Id
 		}
 		requiredPassRecords = $passRecords
@@ -454,8 +453,7 @@ function Publish-TestRecordEvidence(
 			'Every named full-reference or million-decision test must publish a selected PASS record.'
 		}
 	}
-	Write-JsonFile (Join-Path $outputRoot (
-		"phase-{0}/gates/{1}.json" -f $Phase, $Id)) $record
+	Write-JsonFile (Join-Path $outputRoot "$Scenario/gates/$Id.json") $record
 	return $record
 }
 
@@ -466,7 +464,6 @@ $engineTests = Join-Path $buildRoot 'TerraEngine-EngineTests.exe'
 $editorTests = Join-Path $buildRoot 'TerraEngine-EditorTests.exe'
 $codecRunner = Join-Path $installedTree (
 	'Tools/TerraEngineVirtualGeometryCodecExperiment.exe')
-$assetTool = Join-Path $installedTree 'Tools/TerraEngineVirtualGeometryAssetTool.exe'
 $benchmarkCompare = Join-Path $PSScriptRoot 'CompareVirtualGeometryPerformance.ps1'
 $imageCompare = Join-Path $PSScriptRoot 'CompareVisibilityImages.ps1'
 $backendMatrix = Join-Path $PSScriptRoot 'RunBackendParityMatrix.ps1'
@@ -480,7 +477,7 @@ if($DryRun)
 			throw "Release-gate helper missing: $requiredScript"
 		}
 	}
-	Write-Output 'validated Vulkan-only phase 0-9 release-gate orchestration (dry run)'
+	Write-Output 'validated Vulkan-only production capability-gate orchestration (dry run)'
 	exit 0
 }
 
@@ -488,30 +485,30 @@ if($DryRun)
 $rows = [Collections.Generic.List[object]]::new()
 
 $testGates = @(
-	@{ Phase = 0; Id = 'capability-tests'; Executable = $engineTests; Filter = 'VirtualGeometry.Capability;VirtualGeometry.Diagnostics;VirtualGeometry.GpuTiming;VulkanFrameDiagnostics' },
-	@{ Phase = 1; Id = 'codec-editor-tests'; Executable = $editorTests; Filter = 'VirtualGeometry;ClusterDag;Codec;PageFormat;Determinism' },
-	@{ Phase = 1; Id = 'codec-runtime-tests'; Executable = $engineTests; Filter = 'VirtualGeometry;ClusterDag;Codec;PageFormat;Determinism' },
-	@{ Phase = 2; Id = 'traversal-million-decision-tests'; Executable = $engineTests; Filter = 'VirtualGeometry.Traversal;VirtualGeometry.Compaction;VirtualGeometry.Culling;VirtualGeometry.Indirect;VirtualGeometry.Scheduler;VirtualGeometry.GpuDriven' },
-	@{ Phase = 3; Id = 'visibility-tests'; Executable = $engineTests; Filter = 'VirtualGeometry.Visibility;VirtualGeometry.Picking;VirtualGeometry.Material;VulkanImageReadback' },
-	@{ Phase = 3; Id = 'visibility-editor-tests'; Executable = $editorTests; Filter = 'VirtualGeometry.Editor.Automation.ValidationRoutes;VirtualGeometry.Editor.Automation.AuthoritativePick;VirtualGeometry.Editor.Feature045.LiveHarnessLocksValidationRoutes' },
-	@{ Phase = 4; Id = 'streaming-tests'; Executable = $engineTests; Filter = 'VirtualGeometry.PageStreaming;VirtualGeometry.PageResidency;VirtualGeometry.Publication;Resource.Streaming' },
-	@{ Phase = 5; Id = 'hybrid-raster-tests'; Executable = $engineTests; Filter = 'VirtualGeometry.ComputeRaster;VirtualGeometry.HybridRaster;VirtualGeometry.Visibility' },
-	@{ Phase = 6; Id = 'views-materials-tests'; Executable = $engineTests; Filter = 'VirtualGeometry.Shadow;VirtualGeometry.MultiView;VirtualGeometry.Material;VirtualGeometry.Occlusion;VirtualGeometry.Capture' },
-	@{ Phase = 6; Id = 'views-editor-tests'; Executable = $editorTests; Filter = 'VirtualGeometry.Editor.Diagnostics.Foundation.ShadowSelectionsRemainSeparate;VirtualGeometry.Editor.Diagnostics.VisualizerIdentitySurvivesGpuPacketSnapshots;VirtualGeometry.Editor.Diagnostics.OverlayLabelsGpuPacketSources' },
-	@{ Phase = 7; Id = 'animation-runtime-tests'; Executable = $engineTests; Filter = 'AnimatedVirtualGeometry;DeformableVirtualGeometry;Renderer.AnimationView;ShaderGeometryContract' },
-	@{ Phase = 7; Id = 'animation-editor-tests'; Executable = $editorTests; Filter = 'SkinnedMeshCook;AnimatedVirtualPageFormat;VirtualGeometry' },
-	@{ Phase = 8; Id = 'aggregate-portability-tests'; Executable = $engineTests; Filter = 'VirtualGeometry.Aggregate;VirtualGeometry.Backend;VirtualGeometry.Capability' },
-	@{ Phase = 9; Id = 'production-editor-tests'; Executable = $editorTests; Filter = 'VirtualGeometry.Editor.Automation.Production;VirtualGeometry.Editor.PackageImport;VirtualGeometry.Editor.Export.Benchmark;VirtualGeometry.Editor.AssetPipeline.Migration' }
+	@{ Scenario = 'capability-contract'; Id = 'capability-tests'; Executable = $engineTests; Filter = 'VirtualGeometry.Capability;VirtualGeometry.Diagnostics;VirtualGeometry.GpuTiming;VulkanFrameDiagnostics' },
+	@{ Scenario = 'codec-storage'; Id = 'codec-editor-tests'; Executable = $editorTests; Filter = 'VirtualGeometry;ClusterDag;Codec;PageFormat;Determinism' },
+	@{ Scenario = 'codec-storage'; Id = 'codec-runtime-tests'; Executable = $engineTests; Filter = 'VirtualGeometry;ClusterDag;Codec;PageFormat;Determinism' },
+	@{ Scenario = 'device-submission'; Id = 'traversal-million-decision-tests'; Executable = $engineTests; Filter = 'VirtualGeometry.Traversal;VirtualGeometry.Compaction;VirtualGeometry.Culling;VirtualGeometry.Indirect;VirtualGeometry.Scheduler;VirtualGeometry.GpuDriven' },
+	@{ Scenario = 'visibility-parity'; Id = 'visibility-tests'; Executable = $engineTests; Filter = 'VirtualGeometry.Visibility;VirtualGeometry.Picking;VirtualGeometry.Material;VulkanImageReadback' },
+	@{ Scenario = 'visibility-parity'; Id = 'visibility-editor-tests'; Executable = $editorTests; Filter = 'VirtualGeometry.Editor.Automation.ValidationRoutes;VirtualGeometry.Editor.Automation.AuthoritativePick;VirtualGeometry.Editor.Production.LiveHarnessLocksValidationRoutes' },
+	@{ Scenario = 'streaming-publication'; Id = 'streaming-tests'; Executable = $engineTests; Filter = 'VirtualGeometry.PageStreaming;VirtualGeometry.PageResidency;VirtualGeometry.Publication;Resource.Streaming' },
+	@{ Scenario = 'hybrid-rasterization'; Id = 'hybrid-raster-tests'; Executable = $engineTests; Filter = 'VirtualGeometry.ComputeRaster;VirtualGeometry.HybridRaster;VirtualGeometry.Visibility' },
+	@{ Scenario = 'multi-view-rendering'; Id = 'views-materials-tests'; Executable = $engineTests; Filter = 'VirtualGeometry.Shadow;VirtualGeometry.MultiView;VirtualGeometry.Material;VirtualGeometry.Occlusion;VirtualGeometry.Capture' },
+	@{ Scenario = 'multi-view-rendering'; Id = 'views-editor-tests'; Executable = $editorTests; Filter = 'VirtualGeometry.Editor.Diagnostics.Foundation.ShadowSelectionsRemainSeparate;VirtualGeometry.Editor.Diagnostics.VisualizerIdentitySurvivesGpuPacketSnapshots;VirtualGeometry.Editor.Diagnostics.OverlayLabelsGpuPacketSources' },
+	@{ Scenario = 'animated-geometry'; Id = 'animation-runtime-tests'; Executable = $engineTests; Filter = 'AnimatedVirtualGeometry;DeformableVirtualGeometry;Renderer.AnimationView;ShaderGeometryContract' },
+	@{ Scenario = 'animated-geometry'; Id = 'animation-editor-tests'; Executable = $editorTests; Filter = 'SkinnedMeshCook;DeformableDemandedPageFormat;VirtualGeometry' },
+	@{ Scenario = 'vendor-portability'; Id = 'aggregate-portability-tests'; Executable = $engineTests; Filter = 'VirtualGeometry.Aggregate;VirtualGeometry.Backend;VirtualGeometry.Capability' },
+	@{ Scenario = 'production-readiness'; Id = 'production-editor-tests'; Executable = $editorTests; Filter = 'VirtualGeometry.Editor.Automation.Production;VirtualGeometry.Editor.PackageImport;VirtualGeometry.Editor.Export.Benchmark' }
 )
 foreach($gate in $testGates)
 {
 	if(-not (Test-Path -LiteralPath $gate.Executable -PathType Leaf))
 	{
-		$rows.Add((Publish-Unavailable $gate.Phase $gate.Id (
+		$rows.Add((Publish-Unavailable $gate.Scenario $gate.Id (
 			"Required test executable is missing: $($gate.Executable)") $gate.Executable))
 		continue
 	}
-	$rows.Add((Invoke-GateCommand $gate.Phase $gate.Id $gate.Executable @() @{
+	$rows.Add((Invoke-GateCommand $gate.Scenario $gate.Id $gate.Executable @() @{
 		TERRAENGINE_TEST_FILTER = $gate.Filter
 	} $true))
 }
@@ -519,19 +516,19 @@ foreach($gate in $testGates)
 if([string]::IsNullOrWhiteSpace($CodecInputMesh) -or
 	-not (Test-Path -LiteralPath (Resolve-RepositoryPath $CodecInputMesh) -PathType Leaf))
 {
-	$rows.Add((Publish-Unavailable 1 'codec-page-size-experiment' `
+	$rows.Add((Publish-Unavailable 'codec-storage' 'codec-page-size-experiment' `
 		'A real compiled mesh is required to run the 32/64/128 KiB codec experiment.' `
 		$CodecInputMesh))
 }
 elseif(-not (Test-Path -LiteralPath $codecRunner -PathType Leaf))
 {
-	$rows.Add((Publish-Unavailable 1 'codec-page-size-experiment' `
+	$rows.Add((Publish-Unavailable 'codec-storage' 'codec-page-size-experiment' `
 		"Installed codec experiment executable is missing: $codecRunner" $codecRunner))
 }
 else
 {
-	$codecOutput = Join-Path $outputRoot 'phase-1/codec'
-	$rows.Add((Invoke-GateCommand 1 'codec-page-size-experiment' 'powershell' @(
+	$codecOutput = Join-Path $outputRoot 'codec-storage/codec'
+	$rows.Add((Invoke-GateCommand 'codec-storage' 'codec-page-size-experiment' 'powershell' @(
 		'-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
 		(Join-Path $PSScriptRoot 'RunCodecExperiment.ps1'),
 		'-InputMesh', (Resolve-RepositoryPath $CodecInputMesh),
@@ -555,14 +552,18 @@ foreach($route in @('compute', 'hybrid', 'indexed'))
 		-not (Test-Path -LiteralPath $baselinePath -PathType Leaf) -or
 		-not (Test-Path -LiteralPath $candidatePath -PathType Leaf))
 	{
-		$rows.Add((Publish-Unavailable 3 $id (
+		$rows.Add((Publish-Unavailable 'visibility-parity' $id (
 			"Matched hardware and $route route images are required.") (
 			"$HardwareImage|$($routeImages[$route])")))
 		continue
 	}
-	$routePhase = if($route -eq 'hybrid') { 5 } else { 3 }
-	$output = Join-Path $outputRoot "phase-$routePhase/parity/$id.json"
-	$rows.Add((Invoke-GateCommand $routePhase $id 'powershell' @(
+	$routeScenario = if($route -eq 'hybrid') {
+		'hybrid-rasterization'
+	} else {
+		'visibility-parity'
+	}
+	$output = Join-Path $outputRoot "$routeScenario/parity/$id.json"
+	$rows.Add((Invoke-GateCommand $routeScenario $id 'powershell' @(
 		'-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $imageCompare,
 		'-Baseline', $baselinePath, '-Candidate', $candidatePath,
 		'-BaselineRoute', 'hardware', '-CandidateRoute', $route,
@@ -571,27 +572,27 @@ foreach($route in @('compute', 'hybrid', 'indexed'))
 
 if([string]::IsNullOrWhiteSpace($FullReferenceEvidence))
 {
-	$rows.Add((Publish-TestRecordEvidence 7 'full-reference' $rows @(
+	$rows.Add((Publish-TestRecordEvidence 'animated-geometry' 'full-reference' $rows @(
 		'AnimatedVirtualGeometry.MorphParity.PositionNormalTangentBeforeSkin')))
 }
 else
 {
-	$rows.Add((Test-AcceptedJsonEvidence 7 'full-reference' `
+	$rows.Add((Test-AcceptedJsonEvidence 'animated-geometry' 'full-reference' `
 		$FullReferenceEvidence @('accepted', 'complete', 'measured', 'passed', 'validated')))
 }
 if([string]::IsNullOrWhiteSpace($MillionDecisionEvidence))
 {
-	$rows.Add((Publish-TestRecordEvidence 7 'million-decision' $rows @(
+	$rows.Add((Publish-TestRecordEvidence 'animated-geometry' 'million-decision' $rows @(
 		'VirtualGeometry.GpuDriven.DeterministicMillionReplay',
 		'AnimatedVirtualGeometry.Runtime.MillionDecisionExtremePoseVisibilityHasNoFalseRejections')))
 }
 else
 {
-	$rows.Add((Test-AcceptedJsonEvidence 7 'million-decision' `
+	$rows.Add((Test-AcceptedJsonEvidence 'animated-geometry' 'million-decision' `
 		$MillionDecisionEvidence @('accepted', 'complete', 'measured', 'passed', 'validated')))
 }
 
-$matrixOutput = Join-Path $outputRoot 'phase-8/vendor/backend-parity.json'
+$matrixOutput = Join-Path $outputRoot 'vendor-portability/vendor/backend-parity.json'
 $matrixArguments = @(
 	'-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $backendMatrix,
 	'-Matrix', (Join-Path $PSScriptRoot 'hardware-matrix.json'),
@@ -603,18 +604,18 @@ if(-not [string]::IsNullOrWhiteSpace($RuntimeAdapter))
 {
 	$matrixArguments += @('-RuntimeAdapter', $RuntimeAdapter)
 }
-$rows.Add((Invoke-GateCommand 8 'vulkan-vendor-matrix' 'powershell' `
+$rows.Add((Invoke-GateCommand 'vendor-portability' 'vulkan-vendor-matrix' 'powershell' `
 	$matrixArguments))
 
 $baselineRecord = Test-BenchmarkCapture $BenchmarkBaseline 'benchmark-baseline'
 $candidateRecord = Test-BenchmarkCapture $BenchmarkCandidate 'benchmark-candidate'
-$rows.Add((Test-BenchmarkCapture $BenchmarkBaseline 'baseline-capture' 0))
+$rows.Add((Test-BenchmarkCapture $BenchmarkBaseline 'baseline-capture' 'capability-contract'))
 $rows.Add($baselineRecord)
 $rows.Add($candidateRecord)
 if($baselineRecord.status -eq 'accepted' -and $candidateRecord.status -eq 'accepted')
 {
-	$comparisonOutput = Join-Path $outputRoot 'phase-9/benchmark/comparison.json'
-	$rows.Add((Invoke-GateCommand 9 'benchmark-comparison' 'powershell' @(
+	$comparisonOutput = Join-Path $outputRoot 'production-readiness/benchmark/comparison.json'
+	$rows.Add((Invoke-GateCommand 'production-readiness' 'benchmark-comparison' 'powershell' @(
 		'-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $benchmarkCompare,
 		'-BaselineDirectory', (Split-Path -Parent (
 			Resolve-RepositoryPath $BenchmarkBaseline)),
@@ -624,34 +625,16 @@ if($baselineRecord.status -eq 'accepted' -and $candidateRecord.status -eq 'accep
 }
 else
 {
-	$rows.Add((Publish-Unavailable 9 'benchmark-comparison' `
+	$rows.Add((Publish-Unavailable 'production-readiness' 'benchmark-comparison' `
 		'Accepted baseline and candidate benchmark captures are required.'))
-}
-
-$migrationPath = Resolve-RepositoryPath $MigrationInput
-if([string]::IsNullOrWhiteSpace($migrationPath) -or
-	-not (Test-Path -LiteralPath $migrationPath -PathType Leaf) -or
-	-not (Test-Path -LiteralPath $assetTool -PathType Leaf))
-{
-	$rows.Add((Publish-Unavailable 9 'migration' `
-		'A real migration input and the installed asset tool are required.' `
-		$MigrationInput))
-}
-else
-{
-	$migrationCopy = Join-Path $outputRoot 'phase-9/migration/input.json'
-	[IO.Directory]::CreateDirectory((Split-Path -Parent $migrationCopy)) | Out-Null
-	Copy-Item -LiteralPath $migrationPath -Destination $migrationCopy -Force
-	$rows.Add((Invoke-GateCommand 9 'migration' $assetTool @(
-		'--migrate', '--target', $migrationCopy, '--confirm')))
 }
 
 if(-not $SkipBuildInstallPackage)
 {
-	$rows.Add((Invoke-GateCommand 9 'install' 'cmake' @(
+	$rows.Add((Invoke-GateCommand 'production-readiness' 'install' 'cmake' @(
 		'--build', $buildRoot, '--config', 'RelWithDebInfo',
 		'--target', 'install')))
-	$inventoryPath = Join-Path $outputRoot 'phase-9/package/install-inventory.json'
+	$inventoryPath = Join-Path $outputRoot 'production-readiness/package/install-inventory.json'
 	$inventory = @()
 	if(Test-Path -LiteralPath $installedTree -PathType Container)
 	{
@@ -674,20 +657,20 @@ if(-not $SkipBuildInstallPackage)
 		}
 		files = $inventory
 	})
-	$rows.Add((Test-AcceptedJsonEvidence 9 'installed-package-inventory' `
+	$rows.Add((Test-AcceptedJsonEvidence 'production-readiness' 'installed-package-inventory' `
 		$inventoryPath @('accepted')))
-	$rows.Add((Test-AcceptedJsonEvidence 9 'package' `
+	$rows.Add((Test-AcceptedJsonEvidence 'production-readiness' 'package' `
 		$inventoryPath @('accepted')))
 }
 else
 {
-	$rows.Add((Publish-Unavailable 9 'install' `
+	$rows.Add((Publish-Unavailable 'production-readiness' 'install' `
 		'Build/install/package execution was explicitly skipped.'))
-	$rows.Add((Test-AcceptedJsonEvidence 9 'package' `
+	$rows.Add((Test-AcceptedJsonEvidence 'production-readiness' 'package' `
 		$PackageEvidence @('accepted', 'complete', 'passed', 'validated')))
 }
 
-# The quickstart gate is a hash-bound rollup of the phase-specific test
+# The quickstart gate is a hash-bound rollup of the capability-specific test
 # commands above. This explicitly rejects an exit-zero harness that selected no
 # tests, and gives the installed workflow one stable artifact to cite.
 $quickstartCommands = @($rows | Where-Object {
@@ -701,19 +684,19 @@ $quickstartAccepted = $quickstartCommands.Count -eq $testGates.Count -and
 		$_.status -ne 'passed' -or
 		[int]$_.result.selectedPassRecords -le 0
 	}).Count -eq 0
-$quickstartPath = Join-Path $outputRoot 'phase-9/quickstart/validation.json'
+$quickstartPath = Join-Path $outputRoot 'production-readiness/quickstart/validation.json'
 $quickstartDocument = [ordered]@{
 	schemaVersion = 2
 	status = if($quickstartAccepted) { 'accepted' } else { 'incomplete' }
 	identity = [ordered]@{
 		executionId = [Guid]::NewGuid().ToString('D')
-		scope = 'feature-045-quickstart-phases-0-9'
+		scope = 'virtual-geometry-production-quickstart'
 	}
 	commandCount = $quickstartCommands.Count
 	requiredCommandCount = $testGates.Count
 	commands = @($quickstartCommands | ForEach-Object {
 		[ordered]@{
-			phase = $_.identity.phase
+			scenario = $_.identity.scenario
 			gate = $_.identity.gate
 			executionId = $_.identity.executionId
 			executableSha256 = $_.command.sha256
@@ -726,30 +709,30 @@ $quickstartDocument = [ordered]@{
 	note = 'Selected PASS records, rather than the harness registry total, determine quickstart test coverage.'
 }
 Write-JsonFile $quickstartPath $quickstartDocument
-$rows.Add((Test-AcceptedJsonEvidence 9 'quickstart' `
+$rows.Add((Test-AcceptedJsonEvidence 'production-readiness' 'quickstart' `
 	$quickstartPath @('accepted')))
 
 $scenarioFiles = @(Get-ChildItem -LiteralPath (
-	Join-Path $PSScriptRoot 'PhaseScenarios') -Filter '*.json' -File)
-foreach($phase in 0..9)
+	Join-Path $PSScriptRoot 'CapabilityScenarios') -Filter '*.json' -File)
+foreach($scenarioFile in $scenarioFiles)
 {
-	$scenario = @($scenarioFiles | ForEach-Object {
-		Get-Content -Raw -LiteralPath $_.FullName | ConvertFrom-Json
-	} | Where-Object { [int]$_.phase -eq $phase })
-	if($scenario.Count -ne 1)
+	$scenario = Get-Content -Raw -LiteralPath $scenarioFile.FullName |
+		ConvertFrom-Json
+	$scenarioId = [string](Get-OptionalProperty $scenario 'id')
+	if([string]::IsNullOrWhiteSpace($scenarioId))
 	{
-		throw "Expected exactly one release manifest for phase $phase."
+		throw "Release manifest has no semantic capability identifier: $($scenarioFile.FullName)"
 	}
-	$expectedGates = @($scenario[0].releaseGates)
-	$phaseRows = @()
+	$expectedGates = @($scenario.releaseGates)
+	$scenarioRows = @()
 	foreach($gateId in $expectedGates)
 	{
 		$matching = @($rows | Where-Object {
 			$identity = Get-OptionalProperty $_ 'identity'
-			[int](Get-OptionalProperty $identity 'phase') -eq $phase -and
+			[string](Get-OptionalProperty $identity 'scenario') -eq $scenarioId -and
 			[string](Get-OptionalProperty $identity 'gate') -eq [string]$gateId
 		})
-		$phaseRows += [ordered]@{
+		$scenarioRows += [ordered]@{
 			gate = [string]$gateId
 			status = if($matching.Count -eq 1) {
 				[string]$matching[0].status
@@ -761,15 +744,14 @@ foreach($phase in 0..9)
 			evidence = $matching
 		}
 	}
-	$phaseAccepted = @($phaseRows | Where-Object {
+	$scenarioAccepted = @($scenarioRows | Where-Object {
 		$_.status -notin @('passed', 'accepted')
 	}).Count -eq 0
-	Write-JsonFile (Join-Path $outputRoot (
-		"phase-{0}/phase-release-result.json" -f $phase)) ([ordered]@{
+	Write-JsonFile (Join-Path $outputRoot "$scenarioId/capability-release-result.json") ([ordered]@{
 		schemaVersion = 2
-		phase = $phase
-		status = if($phaseAccepted) { 'accepted' } else { 'incomplete' }
-		gates = $phaseRows
+		scenario = $scenarioId
+		status = if($scenarioAccepted) { 'accepted' } else { 'incomplete' }
+		gates = $scenarioRows
 	})
 }
 

@@ -1,5 +1,5 @@
 @echo off
-rem Feature 045 runtime adapter entry point.
+rem Production virtual-geometry runtime adapter entry point.
 rem
 rem The native benchmark invokes this file with --output, --workload,
 rem --backend, and --sample-index. PowerShell owns the typed validation and

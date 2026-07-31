@@ -20,7 +20,7 @@ namespace TerraEngine::Animation {
 	inline constexpr std::string_view kAnimationBaselineSourceCommit = "6d12e3a99d7c0d41899fc96fa18b02b61e5a0aa9";
 	inline constexpr std::string_view kAnimationBaselineManifestSha256 = "cf4375934729e1afa745d9446faacfc1a7ba53a6d7db79b3d1e0e8164a5ced8f";
 	inline constexpr std::string_view kAnimationBaselineEvidenceSha256 = "4020949bd881f94f0395853e947e4512fb587c7bdd1ce5592317e75c01b5fcb5";
-	inline constexpr std::string_view kAnimationPerformanceWorkloadsSha256 = "dd297ef96f629b290be03bce64dec19612726cd5931e886fb722d80970d49dba";
+	inline constexpr std::string_view kAnimationPerformanceWorkloadsSha256 = "d99199c796368fa7706af363985ce3e0b75a71fa5fa2c29238bce65343e943a6";
 
 	// Capture identity travels with every snapshot so a saved profiler result can
 	// prove which immutable reference and threshold manifest it was compared to.
@@ -118,7 +118,7 @@ namespace TerraEngine::Animation {
 	};
 
 	// Detailed records are opt-in and copied only at the protected diagnostics
-	// boundary. They expose every FR-225 decision/work field without retaining a
+	// boundary. They expose every FunctionalContract decision/work field without retaining a
 	// live animator, renderer allocation, or producer-owned string.
 	struct AnimationAnimatorDiagnosticRecord {
 		std::uint64_t stableInstanceId = 0U;

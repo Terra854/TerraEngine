@@ -32,7 +32,7 @@ To allow C# to issue commands to the same ImGui context initialized by C++:
 
 ## 2. Implementation Steps
 
-### Phase 1: Build System & Dependencies
+### implementation stage: Build System & Dependencies
 **Goal**: Build `cimgui` as a shared library that exposes the C-API required by `Hexa.NET.ImGui`.
 
 1.  **CMake Update**:
@@ -44,7 +44,7 @@ To allow C# to issue commands to the same ImGui context initialized by C++:
     *   `TerraEngine.Editor` will reference `Hexa.NET.ImGui` (likely via project reference or direct source inclusion if vendored in `External`).
     *   *Note*: Since `External/Hexa.NET.ImGui` is present, we can include it as a source project or build it.
 
-### Phase 2: Managed Editor Project
+### implementation stage: Managed Editor Project
 **Goal**: Create the C# project structure.
 
 1.  **Project File**: Create `Managed/TerraEngine.Editor/TerraEngine.Editor.csproj`.
@@ -55,7 +55,7 @@ To allow C# to issue commands to the same ImGui context initialized by C++:
     *   `public static void Update(float deltaTime)`
     *   `public static void Shutdown()`
 
-### Phase 3: C++ Integration
+### implementation stage: C++ Integration
 **Goal**: Hook the C# methods into the C++ Editor loop.
 
 1.  **EditorSystem.cpp**:

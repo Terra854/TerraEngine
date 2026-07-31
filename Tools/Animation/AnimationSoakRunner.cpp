@@ -1,4 +1,4 @@
-// AnimationSoakRunner.cpp - headless non-performance stability slices for Spec 043.
+// AnimationSoakRunner.cpp - headless non-performance stability slices for animation production validation.
 //
 // RunAnimationSoak.ps1 launches this executable repeatedly. Each process owns a
 // short, bounded slice so a timeout identifies a deadlock and a fresh process

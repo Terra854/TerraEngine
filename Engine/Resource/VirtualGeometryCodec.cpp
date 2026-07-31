@@ -4,7 +4,10 @@
 
 #include "meshoptimizer.h"
 
+#include <algorithm>
+#include <array>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <utility>
 
@@ -14,10 +17,45 @@ namespace TerraEngine::Resource
 	{
 		bool IsRangeInside(std::size_t offset, std::size_t size, std::size_t total) { return offset <= total && size <= total - offset; }
 
-		void SetError(VirtualGeometryCodecDecodeResult &result, std::string error)
+		bool IsPowerOfTwo(std::uint32_t value)
+		{
+			return value != 0u && (value & (value - 1u)) == 0u;
+		}
+
+		bool IsSupportedPageSize(std::uint32_t value)
+		{
+			return value == kTemfPageSize32KiB || value == kTemfPageSize64KiB
+				|| value == kTemfPageSize128KiB;
+		}
+
+		bool TryByteCount(std::uint32_t count, std::size_t stride, std::size_t& outBytes)
+		{
+			if(count > std::numeric_limits<std::size_t>::max() / stride)
+			{
+				return false;
+			}
+			outBytes = static_cast<std::size_t>(count) * stride;
+			return true;
+		}
+
+		void SetProductionError(
+			TemfProductionValidationResult& result,
+			TemfProductionValidationCode code,
+			std::string message)
+		{
+			result.code = code;
+			result.directory = {};
+			result.diagnostic = std::move(message);
+		}
+
+		void SetProductionDecodeError(
+			TemfProductionBlockDecodeResult& result,
+			TemfProductionValidationCode code,
+			std::string message)
 		{
 			result.bytes.clear();
-			result.error = std::move(error);
+			result.code = code;
+			result.diagnostic = std::move(message);
 		}
 
 		bool DecodeTerraRunLength(std::span<const std::uint8_t> payload, std::size_t decodedSize, std::vector<std::uint8_t> &output)
@@ -55,150 +93,371 @@ namespace TerraEngine::Resource
 		}
 	} // namespace
 
-	VirtualGeometryCodecDecodeResult DecodeVirtualGeometryCompactBlock(std::span<const std::uint8_t> block, const VirtualGeometryCodecDecodeLimits &limits)
+	TemfProductionValidationResult ValidateTemfProductionFile(
+		std::span<const std::uint8_t> fileBytes,
+		const TemfProductionValidationLimits& limits)
 	{
-		VirtualGeometryCodecDecodeResult result;
-		if (block.size() < sizeof(VirtualGeometryCompactBlockHeader))
+		TemfProductionValidationResult result;
+		if(fileBytes.size() < sizeof(TemfProductionHeader))
 		{
-			SetError(result, "Virtual geometry compact block is smaller than its header.");
-			return result;
-		}
-		std::memcpy(&result.header, block.data(), sizeof(result.header));
-		const VirtualGeometryCompactBlockHeader &header = result.header;
-		if (header.magic != kVirtualGeometryCompactBlockMagicValue || header.version != kVirtualGeometryCompactBlockVersion ||
-			header.headerSize != sizeof(VirtualGeometryCompactBlockHeader))
-		{
-			SetError(result, "Virtual geometry compact block has an unsupported header identity.");
-			return result;
-		}
-		if (header.encodedByteSize > limits.maximumEncodedBytes || header.decodedByteSize > limits.maximumDecodedBytes || header.elementCount == 0u ||
-			header.elementCount > limits.maximumElementCount || header.elementStride == 0u ||
-			header.elementCount > header.decodedByteSize / header.elementStride ||
-			static_cast<std::size_t>(header.elementCount) * header.elementStride != header.decodedByteSize)
-		{
-			SetError(result, "Virtual geometry compact block exceeds its declared decode limits.");
-			return result;
-		}
-		if (!IsRangeInside(header.headerSize, header.encodedByteSize, block.size()) ||
-			static_cast<std::size_t>(header.headerSize) + header.encodedByteSize != block.size())
-		{
-			SetError(result, "Virtual geometry compact block payload range is malformed.");
-			return result;
-		}
-		if ((header.requiredCapabilities & ~limits.availableCapabilities) != 0u)
-		{
-			SetError(result, "Virtual geometry compact block requires unavailable decoder capabilities.");
+			SetProductionError(result, TemfProductionValidationCode::RecookRequired,
+				"The geometry file does not contain the canonical TEMF production header; recook-required.");
 			return result;
 		}
 
-		const std::span<const std::uint8_t> payload = block.subspan(header.headerSize, header.encodedByteSize);
-		result.bytes.reserve(header.decodedByteSize);
-		switch (static_cast<VirtualGeometryCompactCodec>(header.codec))
+		TemfProductionHeader header{};
+		std::memcpy(&header, fileBytes.data(), sizeof(header));
+		if(header.magic != kMeshMagicValue || header.formatVersion != kMeshCurrentVersion
+			|| header.minorVersion != kMeshCurrentMinorVersion
+			|| header.headerBytes != kTemfProductionHeaderBytes
+			|| header.formatContractId != kTemfProductionContractId)
 		{
-		case VirtualGeometryCompactCodec::Expanded:
-			if (header.requiredCapabilities != kVirtualGeometryCodecCapabilityExpanded || payload.size() != header.decodedByteSize)
-			{
-				SetError(result, "Expanded virtual geometry block metadata is inconsistent.");
-				return result;
-			}
-			result.bytes.assign(payload.begin(), payload.end());
-			break;
-		case VirtualGeometryCompactCodec::Terra:
-			if (header.requiredCapabilities != kVirtualGeometryCodecCapabilityTerra || !DecodeTerraRunLength(payload, header.decodedByteSize, result.bytes))
-			{
-				SetError(result, "Terra virtual geometry run-length stream is malformed.");
-				return result;
-			}
-			break;
-		case VirtualGeometryCompactCodec::Meshoptimizer:
-			if (header.requiredCapabilities != kVirtualGeometryCodecCapabilityMeshoptimizer)
-			{
-				SetError(result, "meshoptimizer virtual geometry block metadata is inconsistent.");
-				return result;
-			}
-			result.bytes.resize(header.decodedByteSize);
-			if ((header.flags & kVirtualGeometryCompactBlockFlagMeshoptIndexStream) != 0u)
-			{
-				if (header.elementStride != sizeof(std::uint32_t) || (header.flags & kVirtualGeometryCompactBlockFlagMeshoptVertexStream) != 0u ||
-					meshopt_decodeIndexBuffer(result.bytes.data(), header.elementCount, header.elementStride, payload.data(), payload.size()) != 0)
-				{
-					SetError(result, "meshoptimizer virtual geometry index stream is malformed.");
-					return result;
-				}
-			}
-			else if ((header.flags & kVirtualGeometryCompactBlockFlagMeshoptVertexStream) != 0u)
-			{
-				if (meshopt_decodeVertexBuffer(result.bytes.data(), header.elementCount, header.elementStride, payload.data(), payload.size()) != 0)
-				{
-					SetError(result, "meshoptimizer virtual geometry attribute stream is malformed.");
-					return result;
-				}
-			}
-			else
-			{
-				SetError(result, "meshoptimizer virtual geometry block does not identify its stream kind.");
-				return result;
-			}
-			break;
-		default:
-			SetError(result, "Virtual geometry compact block names an unknown codec.");
+			SetProductionError(result, TemfProductionValidationCode::RecookRequired,
+				"The geometry file is not TEMFPRD1 canonical data; recook-required.");
+			return result;
+		}
+		if((header.representationFlags & ~kTemfRepresentationKnownMask) != 0u
+			|| (header.representationFlags & (kTemfRepresentationDirectMeshlets | kTemfRepresentationVirtualGeometry)) == 0u)
+		{
+			SetProductionError(result, TemfProductionValidationCode::InvalidRepresentation,
+				"TEMFPRD1 representation flags are unknown or do not select a renderable representation.");
+			return result;
+		}
+		const bool directOnly = (header.representationFlags & kTemfRepresentationDirectMeshlets) != 0u
+			&& (header.representationFlags & kTemfRepresentationVirtualGeometry) == 0u;
+		if((directOnly && (header.logicalPageSizeBytes != 0u || header.pageCount != 0u
+				|| header.pageTableOffset != 0u))
+			|| (!directOnly && !IsSupportedPageSize(header.logicalPageSizeBytes))
+			|| header.pageCount > limits.maximumPageCount
+			|| header.blockCount == 0u || header.blockCount > limits.maximumBlockCount
+			|| header.quantizationDomainCount > limits.maximumQuantizationDomainCount
+			|| header.dependencyCount > limits.maximumDependencyCount)
+		{
+			SetProductionError(result, TemfProductionValidationCode::LimitExceeded,
+				"TEMFPRD1 page, block, domain, dependency, or page-size limits are invalid.");
+			return result;
+		}
+		if((header.requiredCapabilityMask & ~limits.availableCapabilities) != 0u)
+		{
+			SetProductionError(result, TemfProductionValidationCode::UnknownRequiredCapability,
+				"TEMFPRD1 requires a decoder capability unavailable on this runtime.");
 			return result;
 		}
 
-		if (CalculateVirtualGeometryCompactHash(result.bytes) != header.decodedHash)
+		std::size_t pageBytes = 0u;
+		std::size_t blockBytes = 0u;
+		std::size_t domainBytes = 0u;
+		std::size_t dependencyBytes = 0u;
+		if(!TryByteCount(header.pageCount, sizeof(TemfPageDescriptor), pageBytes)
+			|| !TryByteCount(header.blockCount, sizeof(TemfBlockDescriptor), blockBytes)
+			|| !TryByteCount(header.quantizationDomainCount, sizeof(TemfQuantizationDomain), domainBytes)
+			|| !TryByteCount(header.dependencyCount, sizeof(TemfBlockDependency), dependencyBytes)
+			|| header.pageTableOffset > std::numeric_limits<std::size_t>::max()
+			|| header.blockTableOffset > std::numeric_limits<std::size_t>::max()
+			|| header.quantizationTableOffset > std::numeric_limits<std::size_t>::max()
+			|| header.dependencyTableOffset > std::numeric_limits<std::size_t>::max()
+			|| header.payloadOffset > std::numeric_limits<std::size_t>::max()
+			|| header.payloadBytes > std::numeric_limits<std::size_t>::max())
 		{
-			SetError(result, "Virtual geometry compact block failed its decoded integrity hash.");
+			SetProductionError(result, TemfProductionValidationCode::ArithmeticOverflow,
+				"TEMFPRD1 table arithmetic cannot be represented by this runtime.");
+			return result;
 		}
+
+		const std::size_t payloadOffset = static_cast<std::size_t>(header.payloadOffset);
+		const std::size_t payloadBytes = static_cast<std::size_t>(header.payloadBytes);
+		const std::array<std::pair<std::size_t, std::size_t>, 5u> ranges = {{
+			{ 0u, sizeof(TemfProductionHeader) },
+			{ static_cast<std::size_t>(header.pageTableOffset), pageBytes },
+			{ static_cast<std::size_t>(header.blockTableOffset), blockBytes },
+			{ static_cast<std::size_t>(header.quantizationTableOffset), domainBytes },
+			{ static_cast<std::size_t>(header.dependencyTableOffset), dependencyBytes }
+		}};
+		for(const auto& range : ranges)
+		{
+			if(range.second != 0u && ((range.first % kTemfDirectoryAlignment) != 0u
+				|| !IsRangeInside(range.first, range.second, fileBytes.size())))
+			{
+				SetProductionError(result, (range.first % kTemfDirectoryAlignment) != 0u
+					? TemfProductionValidationCode::MisalignedRange : TemfProductionValidationCode::RangeOutOfBounds,
+					"TEMFPRD1 directory table is misaligned or outside the file.");
+				return result;
+			}
+		}
+		if((payloadOffset % kTemfDirectoryAlignment) != 0u
+			|| !IsRangeInside(payloadOffset, payloadBytes, fileBytes.size())
+			|| payloadOffset < sizeof(TemfProductionHeader)
+			|| header.directoryBytes != payloadOffset - sizeof(TemfProductionHeader))
+		{
+			SetProductionError(result, TemfProductionValidationCode::RangeOutOfBounds,
+				"TEMFPRD1 directory or payload bounds are inconsistent.");
+			return result;
+		}
+		for(std::size_t left = 0u; left < ranges.size(); ++left)
+		{
+			for(std::size_t right = left + 1u; right < ranges.size(); ++right)
+			{
+				if(ranges[left].second != 0u && ranges[right].second != 0u
+					&& ranges[left].first < ranges[right].first + ranges[right].second
+					&& ranges[right].first < ranges[left].first + ranges[left].second)
+				{
+					SetProductionError(result, TemfProductionValidationCode::OverlappingRange,
+						"TEMFPRD1 directory tables overlap.");
+					return result;
+				}
+			}
+		}
+		if(CalculateVirtualGeometryCompactHash(fileBytes.subspan(sizeof(TemfProductionHeader),
+			payloadOffset - sizeof(TemfProductionHeader))) != header.directoryHash
+			|| CalculateVirtualGeometryCompactHash(fileBytes.subspan(payloadOffset, payloadBytes)) != header.payloadHash)
+		{
+			SetProductionError(result, TemfProductionValidationCode::IntegrityMismatch,
+				"TEMFPRD1 directory or payload integrity does not match its header.");
+			return result;
+		}
+
+		const auto pages = std::span<const TemfPageDescriptor>(reinterpret_cast<const TemfPageDescriptor*>(
+			fileBytes.data() + header.pageTableOffset), header.pageCount);
+		const auto blocks = std::span<const TemfBlockDescriptor>(reinterpret_cast<const TemfBlockDescriptor*>(
+			fileBytes.data() + header.blockTableOffset), header.blockCount);
+		const auto domains = std::span<const TemfQuantizationDomain>(reinterpret_cast<const TemfQuantizationDomain*>(
+			fileBytes.data() + header.quantizationTableOffset), header.quantizationDomainCount);
+		const auto dependencies = std::span<const TemfBlockDependency>(reinterpret_cast<const TemfBlockDependency*>(
+			fileBytes.data() + header.dependencyTableOffset), header.dependencyCount);
+
+		std::vector<std::uint64_t> blockIds;
+		blockIds.reserve(blocks.size());
+		for(const TemfQuantizationDomain& domain : domains)
+		{
+			if(domain.domainId >= domains.size() || domain.componentCount == 0u || domain.componentCount > 4u
+				|| domain.domainVersion == 0u || static_cast<std::uint32_t>(domain.domainScope) > static_cast<std::uint32_t>(TemfQuantizationDomainScope::DeformableEnvelope)
+				|| static_cast<std::uint32_t>(domain.streamKind) > static_cast<std::uint32_t>(TemfStreamKind::Metadata)
+				|| domain.reserved != 0u || domain.domainHash == 0u)
+			{
+				SetProductionError(result, TemfProductionValidationCode::InvalidQuantizationDomain,
+					"TEMFPRD1 quantization-domain metadata is invalid.");
+				return result;
+			}
+		}
+		for(const TemfBlockDescriptor& block : blocks)
+		{
+			if(block.blockId == 0u || std::find(blockIds.begin(), blockIds.end(), block.blockId) != blockIds.end()
+				|| block.quantizationDomainId >= domains.size() || block.encodedBytes == 0u
+				|| block.decodedBytes == 0u || block.decodedBytes > limits.maximumDecodedBlockBytes
+				|| block.decodedElementCount == 0u || block.decodedStride == 0u
+				|| block.decodedElementCount > block.decodedBytes / block.decodedStride
+				|| block.decodedElementCount * static_cast<std::uint64_t>(block.decodedStride) != block.decodedBytes
+				|| !IsPowerOfTwo(block.requiredAlignment)
+				|| (!directOnly && block.requiredAlignment > header.logicalPageSizeBytes)
+				|| (block.encodedPayloadOffset % block.requiredAlignment) != 0u
+				|| !IsRangeInside(static_cast<std::size_t>(block.encodedPayloadOffset), static_cast<std::size_t>(block.encodedBytes), fileBytes.size())
+				|| block.firstDependencyIndex > dependencies.size()
+				|| block.dependencyCount > dependencies.size() - block.firstDependencyIndex
+				|| block.reserved != 0u || (block.flags & ~kTemfBlockKnownFlags) != 0u
+				|| static_cast<std::uint32_t>(block.streamKind) > static_cast<std::uint32_t>(TemfStreamKind::Metadata)
+				|| block.codecProfileId < static_cast<std::uint32_t>(TemfCodecProfile::ExpandedProduction)
+				|| block.codecProfileId > static_cast<std::uint32_t>(TemfCodecProfile::MeshoptimizerProductionUpdateable)
+				|| block.codecVersion != 1u || (block.requiredCapabilityMask & ~limits.availableCapabilities) != 0u)
+			{
+				SetProductionError(result, TemfProductionValidationCode::LimitExceeded,
+					"TEMFPRD1 block metadata is malformed or exceeds a declared limit.");
+				return result;
+			}
+			if((block.flags & kTemfBlockFlagDirectResident) != 0u
+				&& (block.logicalPageId != kTemfDirectResidentPageId
+					|| block.codecProfileId != static_cast<std::uint32_t>(TemfCodecProfile::ExpandedProduction)))
+			{
+				SetProductionError(result, TemfProductionValidationCode::ProfileMismatch,
+					"Direct-resident TEMFPRD1 blocks must use ExpandedProduction.");
+				return result;
+			}
+			if(CalculateVirtualGeometryCompactHash(fileBytes.subspan(
+				static_cast<std::size_t>(block.encodedPayloadOffset), static_cast<std::size_t>(block.encodedBytes))) != block.encodedIntegrity)
+			{
+				SetProductionError(result, TemfProductionValidationCode::IntegrityMismatch,
+					"TEMFPRD1 block encoded integrity does not match its payload.");
+				return result;
+			}
+			blockIds.push_back(block.blockId);
+		}
+		for(std::size_t blockIndex = 0u; blockIndex < blocks.size(); ++blockIndex)
+		{
+			for(std::size_t priorIndex = 0u; priorIndex < blockIndex; ++priorIndex)
+			{
+				if(blocks[blockIndex].logicalPageId == blocks[priorIndex].logicalPageId
+					&& blocks[blockIndex].streamKind == blocks[priorIndex].streamKind
+					&& blocks[blockIndex].blockOrdinal == blocks[priorIndex].blockOrdinal)
+				{
+					SetProductionError(result, TemfProductionValidationCode::DuplicateIdentity,
+						"TEMFPRD1 duplicates a persistent page, stream, and block-ordinal slot.");
+					return result;
+				}
+			}
+		}
+		for(const TemfPageDescriptor& page : pages)
+		{
+			if(page.logicalPageId == kTemfDirectResidentPageId || page.blockCount == 0u
+				|| page.firstBlockIndex >= blocks.size()
+				|| page.blockCount > blocks.size() - page.firstBlockIndex
+				|| page.firstDependencyIndex > dependencies.size()
+				|| page.dependencyCount > dependencies.size() - page.firstDependencyIndex
+				|| page.reserved[0] != 0u || page.reserved[1] != 0u)
+			{
+				SetProductionError(result, TemfProductionValidationCode::InvalidDependency,
+					"TEMFPRD1 page metadata has an invalid block or dependency range.");
+				return result;
+			}
+			std::uint64_t storedBytes = 0u;
+			std::uint64_t decodedBytes = 0u;
+			std::size_t expectedPayloadOffset = 0u;
+			for(std::uint32_t blockIndex = page.firstBlockIndex; blockIndex < page.firstBlockIndex + page.blockCount; ++blockIndex)
+			{
+				if(blocks[blockIndex].logicalPageId != page.logicalPageId)
+				{
+					SetProductionError(result, TemfProductionValidationCode::InvalidDependency,
+						"TEMFPRD1 page ranges must reference blocks with the same page identity.");
+					return result;
+				}
+				if(blockIndex == page.firstBlockIndex)
+				{
+					expectedPayloadOffset = static_cast<std::size_t>(blocks[blockIndex].encodedPayloadOffset);
+				}
+				if(static_cast<std::size_t>(blocks[blockIndex].encodedPayloadOffset) != expectedPayloadOffset)
+				{
+					SetProductionError(result, TemfProductionValidationCode::RangeOutOfBounds,
+						"TEMFPRD1 page blocks must occupy one contiguous payload range.");
+					return result;
+				}
+				expectedPayloadOffset += static_cast<std::size_t>(blocks[blockIndex].encodedBytes);
+				storedBytes += blocks[blockIndex].encodedBytes;
+				decodedBytes += blocks[blockIndex].decodedBytes;
+			}
+			const std::size_t pagePayloadOffset = static_cast<std::size_t>(blocks[page.firstBlockIndex].encodedPayloadOffset);
+			if(page.blockCount == 0u || storedBytes != page.attributedStoredBytes
+				|| decodedBytes != page.decodedBytes
+				|| CalculateVirtualGeometryCompactHash(fileBytes.subspan(pagePayloadOffset,
+					static_cast<std::size_t>(storedBytes))) != page.pageIntegrity)
+			{
+				SetProductionError(result, TemfProductionValidationCode::IntegrityMismatch,
+					"TEMFPRD1 page size or integrity does not match its blocks.");
+				return result;
+			}
+		}
+		for(const TemfBlockDependency& dependency : dependencies)
+		{
+			if(dependency.targetBlockId == 0u || dependency.reserved != 0u
+				|| std::find(blockIds.begin(), blockIds.end(), dependency.targetBlockId) == blockIds.end())
+			{
+				SetProductionError(result, TemfProductionValidationCode::InvalidDependency,
+					"TEMFPRD1 dependency targets a missing block.");
+				return result;
+			}
+		}
+		// Dependencies are file-owned identities, so detect cycles before any
+		// decoder publishes bytes. A rejected graph leaves the prior generation
+		// untouched and cannot expose partially decoded geometry.
+		std::vector<std::uint8_t> visitState(blocks.size(), 0u);
+		const auto findBlockIndex = [&blockIds](std::uint64_t id) -> std::size_t
+		{
+			return static_cast<std::size_t>(std::find(blockIds.begin(), blockIds.end(), id) - blockIds.begin());
+		};
+		std::function<bool(std::size_t)> visitBlock;
+		visitBlock = [&](std::size_t index)
+		{
+			if(visitState[index] == 1u)
+			{
+				return false;
+			}
+			if(visitState[index] == 2u)
+			{
+				return true;
+			}
+			visitState[index] = 1u;
+			const TemfBlockDescriptor& block = blocks[index];
+			for(std::uint32_t dependencyIndex = block.firstDependencyIndex;
+				dependencyIndex < block.firstDependencyIndex + block.dependencyCount; ++dependencyIndex)
+			{
+				if(!visitBlock(findBlockIndex(dependencies[dependencyIndex].targetBlockId)))
+				{
+					return false;
+				}
+			}
+			visitState[index] = 2u;
+			return true;
+		};
+		for(std::size_t blockIndex = 0u; blockIndex < blocks.size(); ++blockIndex)
+		{
+			if(!visitBlock(blockIndex))
+			{
+				SetProductionError(result, TemfProductionValidationCode::DependencyCycle,
+					"TEMFPRD1 block dependencies contain a cycle.");
+				return result;
+			}
+		}
+
+		result.code = TemfProductionValidationCode::Accepted;
+		result.directory = { header, pages, blocks, domains, dependencies,
+			fileBytes.subspan(payloadOffset, payloadBytes) };
 		return result;
 	}
 
-	bool ValidateVirtualGeometryExtensionDirectory(
-		std::span<const std::uint8_t> directory, const VirtualGeometryCodecDecodeLimits &limits, std::string *outError)
+	TemfProductionBlockDecodeResult DecodeTemfProductionBlock(
+		const TemfProductionBlockDecodeRequest& request,
+		const TemfProductionValidationLimits& limits)
 	{
-		auto Fail = [outError](std::string message)
+		TemfProductionBlockDecodeResult result;
+		const TemfBlockDescriptor& block = request.descriptor;
+		if(request.encodedBytes.size() != block.encodedBytes || block.decodedBytes == 0u
+			|| block.decodedBytes > limits.maximumDecodedBlockBytes
+			|| (block.requiredCapabilityMask & ~request.availableCapabilities) != 0u
+			|| CalculateVirtualGeometryCompactHash(request.encodedBytes) != block.encodedIntegrity)
 		{
-			if (outError != nullptr)
+			SetProductionDecodeError(result, TemfProductionValidationCode::IntegrityMismatch,
+				"TEMFPRD1 block bytes, capability requirements, or encoded integrity are invalid.");
+			return result;
+		}
+		result.bytes.resize(static_cast<std::size_t>(block.decodedBytes));
+		const TemfCodecProfile profile = static_cast<TemfCodecProfile>(block.codecProfileId);
+		if(profile == TemfCodecProfile::ExpandedProduction)
+		{
+			if(request.encodedBytes.size() != result.bytes.size())
 			{
-				*outError = std::move(message);
+				SetProductionDecodeError(result, TemfProductionValidationCode::ProfileMismatch,
+					"ExpandedProduction blocks must store exactly their decoded bytes.");
+				return result;
 			}
-			return false;
-		};
-		if (directory.size() < sizeof(VirtualGeometryExtensionDirectoryHeader))
-		{
-			return Fail("Virtual geometry extension directory is smaller than its header.");
+			std::memcpy(result.bytes.data(), request.encodedBytes.data(), result.bytes.size());
 		}
-		VirtualGeometryExtensionDirectoryHeader header{};
-		std::memcpy(&header, directory.data(), sizeof(header));
-		if (header.magic != kVirtualGeometryExtensionDirectoryMagicValue || header.version != kVirtualGeometryExtensionDirectoryVersion ||
-			header.headerSize != sizeof(VirtualGeometryExtensionDirectoryHeader) || header.byteSize != directory.size())
+		else if(profile == TemfCodecProfile::MeshoptimizerProductionStatic
+			|| profile == TemfCodecProfile::MeshoptimizerProductionUpdateable)
 		{
-			return Fail("Virtual geometry extension directory header is inconsistent.");
-		}
-		const std::size_t entryBytes = static_cast<std::size_t>(header.entryCount) * sizeof(VirtualGeometryExtensionDirectoryEntry);
-		if ((header.requiredCapabilities & ~limits.availableCapabilities) != 0u || header.entryCount > limits.maximumElementCount ||
-			header.entryTableOffset < header.headerSize || !IsRangeInside(header.entryTableOffset, entryBytes, directory.size()))
-		{
-			return Fail("Virtual geometry extension directory exceeds bounds or required capabilities.");
-		}
-		const std::span<const std::uint8_t> entryBytesView = directory.subspan(header.entryTableOffset, entryBytes);
-		if (header.directoryHash != CalculateVirtualGeometryCompactHash(entryBytesView))
-		{
-			return Fail("Virtual geometry extension directory failed its entry-table integrity hash.");
-		}
-		for (std::uint32_t index = 0u; index < header.entryCount; ++index)
-		{
-			VirtualGeometryExtensionDirectoryEntry entry{};
-			const std::size_t entryOffset = static_cast<std::size_t>(header.entryTableOffset) + static_cast<std::size_t>(index) * sizeof(entry);
-			std::memcpy(&entry, directory.data() + entryOffset, sizeof(entry));
-			const bool knownType = entry.type <= static_cast<std::uint32_t>(VirtualGeometryExtensionType::MeshoptimizerBlock);
-			if (entry.byteSize == 0u || entry.decodedByteSize > limits.maximumDecodedBytes ||
-				!IsRangeInside(static_cast<std::size_t>(entry.byteOffset), entry.byteSize, directory.size()) ||
-				(entry.requiredCapabilities & ~limits.availableCapabilities) != 0u ||
-				(!knownType && (entry.flags & kVirtualGeometryExtensionFlagRequired) != 0u))
+			const bool topology = static_cast<TemfStreamKind>(block.streamKind) == TemfStreamKind::Topology;
+			const int decodeResult = topology
+				? meshopt_decodeIndexBuffer(result.bytes.data(), block.decodedElementCount,
+					block.decodedStride, request.encodedBytes.data(), request.encodedBytes.size())
+				: meshopt_decodeVertexBuffer(result.bytes.data(), block.decodedElementCount,
+					block.decodedStride, request.encodedBytes.data(), request.encodedBytes.size());
+			if(decodeResult != 0)
 			{
-				return Fail("Virtual geometry extension entry is malformed or requires unavailable capabilities.");
+				SetProductionDecodeError(result, TemfProductionValidationCode::ProfileMismatch,
+					"meshoptimizer could not decode the TEMFPRD1 block.");
+				return result;
 			}
 		}
-		return true;
+		else
+		{
+			SetProductionDecodeError(result, TemfProductionValidationCode::ProfileMismatch,
+				"TEMFPRD1 names an unsupported production codec profile.");
+			return result;
+		}
+		if(CalculateVirtualGeometryCompactHash(result.bytes) != block.decodedIntegrity)
+		{
+			SetProductionDecodeError(result, TemfProductionValidationCode::IntegrityMismatch,
+				"TEMFPRD1 decoded bytes do not match the block integrity value.");
+			return result;
+		}
+		result.code = TemfProductionValidationCode::Accepted;
+		return result;
 	}
+
 } // namespace TerraEngine::Resource

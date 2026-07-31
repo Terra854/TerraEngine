@@ -2,7 +2,6 @@
 
 #include "Core/Scheduling/JobGraph.h"
 #include "Resource/ResourceStreaming.h"
-#include "Resource/VirtualGeometryCodec.h"
 #include "Resource/VirtualGeometryStreamingSystem.h"
 #include "TestHarness.h"
 
@@ -11,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <vector>
 
 namespace TerraEngine::Tests
 {
@@ -59,47 +59,53 @@ namespace TerraEngine::Tests
 			feedback.visible = true;
 			feedback.expectedStoredByteCount = sourceBytes.size();
 			feedback.expectedDecodedByteCount = sourceBytes.size();
-			feedback.expectedIntegrityValue = Resource::HashAnimatedVirtualPageBytes(sourceBytes);
-			feedback.staticPageRead = Resource::VirtualGeometryStaticPageReadRequest{
-				sourcePath,
-				feedback.pageId,
-				2u,
-				sourceBytes.size(),
-				feedback.expectedIntegrityValue,
-				0u,
-				std::move(cancellation)
-			};
-			// These test bytes are a deliberately identity-decoded page payload. A
-			// compressed format must leave this false until its decoder completes.
-			feedback.rawPayloadIsDecoded = true;
+			feedback.expectedIntegrityValue = CalculateVirtualGeometryCompactHash(sourceBytes);
+			TemfBlockDescriptor descriptor{};
+			descriptor.blockId = 1u;
+			descriptor.logicalPageId = feedback.pageId;
+			descriptor.streamKind = static_cast<std::uint16_t>(TemfStreamKind::Metadata);
+			descriptor.codecProfileId = static_cast<std::uint32_t>(TemfCodecProfile::ExpandedProduction);
+			descriptor.codecVersion = 1u;
+			descriptor.encodedPayloadOffset = 2u;
+			descriptor.encodedBytes = sourceBytes.size();
+			descriptor.decodedBytes = sourceBytes.size();
+			descriptor.decodedElementCount = static_cast<std::uint32_t>(sourceBytes.size());
+			descriptor.decodedStride = 1u;
+			descriptor.requiredAlignment = 1u;
+			descriptor.encodedIntegrity = CalculateVirtualGeometryCompactHash(sourceBytes);
+			descriptor.decodedIntegrity = descriptor.encodedIntegrity;
+			feedback.exactBlockReads.push_back({
+				{ sourcePath, feedback.pageId, 2u, sourceBytes.size(),
+					descriptor.encodedIntegrity, 0u, std::move(cancellation) },
+				descriptor
+			});
 			return feedback;
 		}
 
-		std::vector<std::uint8_t> MakeTerraCompactBlock(
-			const std::vector<std::uint8_t>& decodedBytes)
+		TemfBlockDescriptor MakeIdentityProductionBlock(
+			std::uint32_t pageId, std::uint64_t blockId,
+			std::uint64_t sourceOffset, const std::vector<std::uint8_t>& bytes)
 		{
-			// The Terra literal control stores one to 128 bytes. This small fixture
-			// exercises the production decoder without treating encoded bytes as raw.
-			std::vector<std::uint8_t> payload;
-			payload.push_back(static_cast<std::uint8_t>(decodedBytes.size() - 1u));
-			payload.insert(payload.end(), decodedBytes.begin(), decodedBytes.end());
-			const VirtualGeometryCompactBlockHeader header{
-				kVirtualGeometryCompactBlockMagicValue,
-				kVirtualGeometryCompactBlockVersion,
-				static_cast<std::uint16_t>(sizeof(VirtualGeometryCompactBlockHeader)),
-				static_cast<std::uint32_t>(VirtualGeometryCompactCodec::Terra),
-				0u,
-				static_cast<std::uint32_t>(decodedBytes.size()),
-				static_cast<std::uint32_t>(payload.size()),
-				1u,
-				static_cast<std::uint32_t>(decodedBytes.size()),
-				kVirtualGeometryCodecCapabilityTerra,
-				CalculateVirtualGeometryCompactHash(decodedBytes) };
-			std::vector<std::uint8_t> block(sizeof(header) + payload.size());
-			std::memcpy(block.data(), &header, sizeof(header));
-			std::memcpy(block.data() + sizeof(header), payload.data(), payload.size());
-			return block;
+			// ExpandedProduction is deliberately identity-coded in this test. That
+			// makes each assertion about ordering and atomic concatenation explicit.
+			TemfBlockDescriptor descriptor{};
+			descriptor.blockId = blockId;
+			descriptor.logicalPageId = pageId;
+			descriptor.blockOrdinal = static_cast<std::uint16_t>(blockId - 1u);
+			descriptor.streamKind = static_cast<std::uint16_t>(TemfStreamKind::Metadata);
+			descriptor.codecProfileId = static_cast<std::uint32_t>(TemfCodecProfile::ExpandedProduction);
+			descriptor.codecVersion = 1u;
+			descriptor.encodedPayloadOffset = sourceOffset;
+			descriptor.encodedBytes = bytes.size();
+			descriptor.decodedBytes = bytes.size();
+			descriptor.decodedElementCount = static_cast<std::uint32_t>(bytes.size());
+			descriptor.decodedStride = 1u;
+			descriptor.requiredAlignment = 1u;
+			descriptor.encodedIntegrity = CalculateVirtualGeometryCompactHash(bytes);
+			descriptor.decodedIntegrity = descriptor.encodedIntegrity;
+			return descriptor;
 		}
+
 	}
 
 	void RegisterVirtualGeometryStreamingEndToEndTests(TestRegistry& registry)
@@ -243,20 +249,20 @@ namespace TerraEngine::Tests
 				system.Shutdown();
 			});
 
-		registry.Add("VirtualGeometry.Streaming.TerraCompactRangeDecodesToPendingUpload",
+		registry.Add("VirtualGeometry.Streaming.CanonicalDecodedRangePublishesToPendingUpload",
 			[](TestContext& context)
 			{
 				auto& system = Resource::VirtualGeometryStreamingSystem::Instance();
 				system.Initialize();
 				const auto asset = TerraEngine::GenerateUUID();
 				const std::vector<std::uint8_t> expectedDecoded{ 7u, 7u, 9u, 11u };
-				const std::vector<std::uint8_t> compactBlock = MakeTerraCompactBlock(expectedDecoded);
+				const std::vector<std::uint8_t> productionPayload = expectedDecoded;
 				const std::filesystem::path sourcePath = std::filesystem::temp_directory_path()
-					/ ("TerraEngine-VGXD-" + TerraEngine::ToHexString(asset) + ".bin");
+					/ ("TerraEngine-TEMFPRD1-" + TerraEngine::ToHexString(asset) + ".bin");
 				{
 					std::ofstream source(sourcePath, std::ios::binary | std::ios::trunc);
-					source.write(reinterpret_cast<const char*>(compactBlock.data()),
-						static_cast<std::streamsize>(compactBlock.size()));
+					source.write(reinterpret_cast<const char*>(productionPayload.data()),
+						static_cast<std::streamsize>(productionPayload.size()));
 				}
 
 				Resource::VirtualGeometryStreamingFeedback feedback;
@@ -266,28 +272,221 @@ namespace TerraEngine::Tests
 				feedback.priority = 8;
 				feedback.observedFrame = 1u;
 				feedback.visible = true;
-				feedback.expectedStoredByteCount = compactBlock.size();
+				feedback.expectedStoredByteCount = productionPayload.size();
 				feedback.expectedDecodedByteCount = expectedDecoded.size();
-				feedback.expectedIntegrityValue = Resource::HashAnimatedVirtualPageBytes(compactBlock);
-				feedback.staticPageRead = { sourcePath, feedback.pageId, 0u,
-					compactBlock.size(), feedback.expectedIntegrityValue, 0u, nullptr };
-				// The compact block must take the decoder path rather than the legacy
-				// identity-upload escape hatch.
-				feedback.rawPayloadIsDecoded = false;
+				feedback.expectedIntegrityValue = CalculateVirtualGeometryCompactHash(productionPayload);
+				TemfBlockDescriptor descriptor{};
+				descriptor.blockId = 1u;
+				descriptor.logicalPageId = feedback.pageId;
+				descriptor.streamKind = static_cast<std::uint16_t>(TemfStreamKind::Metadata);
+				descriptor.codecProfileId = static_cast<std::uint32_t>(TemfCodecProfile::ExpandedProduction);
+				descriptor.codecVersion = 1u;
+				descriptor.encodedBytes = productionPayload.size();
+				descriptor.decodedBytes = productionPayload.size();
+				descriptor.decodedElementCount = static_cast<std::uint32_t>(productionPayload.size());
+				descriptor.decodedStride = 1u;
+				descriptor.requiredAlignment = 1u;
+				descriptor.encodedIntegrity = feedback.expectedIntegrityValue;
+				descriptor.decodedIntegrity = feedback.expectedIntegrityValue;
+				feedback.exactBlockReads.push_back({
+					{ sourcePath, feedback.pageId, 0u, productionPayload.size(),
+						descriptor.encodedIntegrity, 0u, nullptr },
+					descriptor
+				});
 				system.SubmitPriorFrameFeedback({ feedback });
 				auto workloads = system.DeclareFrameWorkloads(0.0f);
 				TerraEngine::Scheduling::JobGraphContext graphContext;
 				workloads.front().work(graphContext);
 				const auto prepared = system.LastPreparedPlan();
 				context.ExpectEqual(static_cast<std::size_t>(1u), prepared.decodedPages.size(),
-					"A compact physical page should prepare exactly one decode result.");
+					"A canonical production page should prepare exactly one upload result.");
 				context.Expect(prepared.decodedPages.front().status == Resource::VirtualGeometryStreamingDecodeStatus::PendingUpload,
-					"A verified Terra compact block must advance directly to PendingUpload.");
+					"A verified canonical decoded range must advance directly to PendingUpload.");
 				context.Expect(prepared.decodedPages.front().decodedBytes == expectedDecoded,
-					"The pending upload must contain decoded page bytes, not the VGCB envelope.");
+					"The pending upload must contain the validated canonical page bytes.");
 				workloads.back().work(graphContext);
 				context.Expect(system.ResidencySnapshot().pages.front().state == Resource::VirtualGeometryPagePublicationState::PendingUpload,
-					"The protected boundary must publish decoded compact CPU work only as PendingUpload.");
+					"The protected boundary must publish canonical CPU work only as PendingUpload.");
+				std::error_code cleanupError;
+				std::filesystem::remove(sourcePath, cleanupError);
+				system.Shutdown();
+			});
+
+		registry.Add("VirtualGeometry.Streaming.MultiBlockPageDecodesAndPublishesOneConcatenatedUpload",
+			[](TestContext& context)
+			{
+				auto& system = Resource::VirtualGeometryStreamingSystem::Instance();
+				system.Initialize();
+				const auto asset = TerraEngine::GenerateUUID();
+				const std::vector<std::uint8_t> firstBlock{ 10u, 20u };
+				const std::vector<std::uint8_t> secondBlock{ 30u, 40u, 50u };
+				const std::vector<std::uint8_t> pageBytes{ 10u, 20u, 30u, 40u, 50u };
+				const std::vector<std::uint8_t> fileBytes{ 99u, 10u, 20u, 30u, 40u, 50u };
+				const std::filesystem::path sourcePath = std::filesystem::temp_directory_path()
+					/ ("TerraEngine-TEMFPRD1-MultiBlock-" + TerraEngine::ToHexString(asset) + ".bin");
+				{
+					std::ofstream source(sourcePath, std::ios::binary | std::ios::trunc);
+					source.write(reinterpret_cast<const char*>(fileBytes.data()),
+						static_cast<std::streamsize>(fileBytes.size()));
+				}
+
+				Resource::VirtualGeometryStreamingFeedback feedback{};
+				feedback.assetId = asset;
+				feedback.pageId = 13u;
+				feedback.fallbackPageId = 13u;
+				feedback.priority = 9;
+				feedback.observedFrame = 1u;
+				feedback.visible = true;
+				feedback.expectedStoredByteCount = pageBytes.size();
+				feedback.expectedDecodedByteCount = pageBytes.size();
+				feedback.expectedIntegrityValue = CalculateVirtualGeometryCompactHash(pageBytes);
+				const TemfBlockDescriptor first = MakeIdentityProductionBlock(
+					feedback.pageId, 1u, 1u, firstBlock);
+				const TemfBlockDescriptor second = MakeIdentityProductionBlock(
+					feedback.pageId, 2u, 3u, secondBlock);
+				feedback.exactBlockReads = {
+					{ { sourcePath, feedback.pageId, 1u, firstBlock.size(), first.encodedIntegrity, 0u, nullptr }, first },
+					{ { sourcePath, feedback.pageId, 3u, secondBlock.size(), second.encodedIntegrity, 0u, nullptr }, second }
+				};
+
+				system.SubmitPriorFrameFeedback({ feedback });
+				auto workloads = system.DeclareFrameWorkloads(0.0f);
+				TerraEngine::Scheduling::JobGraphContext graphContext;
+				workloads.front().work(graphContext);
+				const auto prepared = system.LastPreparedPlan();
+				context.ExpectEqual(static_cast<std::size_t>(2u), prepared.requests.front().exactBlockReads.size(),
+					"The prepared request must preserve every ordered canonical block descriptor.");
+				context.ExpectEqual(static_cast<std::size_t>(1u), prepared.decodedPages.size(),
+					"All blocks for one logical page must produce one decoded-page result.");
+				context.Expect(prepared.decodedPages.front().status == Resource::VirtualGeometryStreamingDecodeStatus::PendingUpload,
+					"A complete multi-block page becomes one pending upload only after every block validates.");
+				context.Expect(prepared.decodedPages.front().decodedBytes == pageBytes,
+					"The pending upload must concatenate decoded blocks in authored page order.");
+				context.ExpectEqual(2u, system.DiagnosticsSnapshot().completedReads,
+					"Completed physical read diagnostics must count each validated block range.");
+				workloads.back().work(graphContext);
+				context.ExpectEqual(static_cast<std::size_t>(1u), system.ResidencySnapshot().pages.size(),
+					"One logical multi-block page publishes exactly one protected pending-upload row.");
+
+				std::error_code cleanupError;
+				std::filesystem::remove(sourcePath, cleanupError);
+				system.Shutdown();
+			});
+
+		registry.Add("VirtualGeometry.Streaming.CorruptLaterBlockDoesNotPublishPartialPage",
+			[](TestContext& context)
+			{
+				auto& system = Resource::VirtualGeometryStreamingSystem::Instance();
+				system.Initialize();
+				const auto asset = TerraEngine::GenerateUUID();
+				const std::vector<std::uint8_t> firstBlock{ 1u, 2u };
+				const std::vector<std::uint8_t> secondBlock{ 3u, 4u };
+				const std::vector<std::uint8_t> pageBytes{ 1u, 2u, 3u, 4u };
+				const std::filesystem::path sourcePath = std::filesystem::temp_directory_path()
+					/ ("TerraEngine-TEMFPRD1-CorruptLater-" + TerraEngine::ToHexString(asset) + ".bin");
+				{
+					std::ofstream source(sourcePath, std::ios::binary | std::ios::trunc);
+					source.write(reinterpret_cast<const char*>(pageBytes.data()),
+						static_cast<std::streamsize>(pageBytes.size()));
+				}
+
+				Resource::VirtualGeometryStreamingFeedback feedback{};
+				feedback.assetId = asset;
+				feedback.pageId = 14u;
+				feedback.fallbackPageId = 14u;
+				feedback.priority = 9;
+				feedback.observedFrame = 1u;
+				feedback.visible = true;
+				feedback.expectedStoredByteCount = pageBytes.size();
+				feedback.expectedDecodedByteCount = pageBytes.size();
+				feedback.expectedIntegrityValue = CalculateVirtualGeometryCompactHash(pageBytes);
+				const TemfBlockDescriptor first = MakeIdentityProductionBlock(
+					feedback.pageId, 1u, 0u, firstBlock);
+				TemfBlockDescriptor corruptSecond = MakeIdentityProductionBlock(
+					feedback.pageId, 2u, 2u, secondBlock);
+				// The physical range is valid, but the later block's decoded proof is
+				// intentionally false. This proves the first decoded prefix is discarded.
+				corruptSecond.decodedIntegrity ^= 1u;
+				feedback.exactBlockReads = {
+					{ { sourcePath, feedback.pageId, 0u, firstBlock.size(), first.encodedIntegrity, 0u, nullptr }, first },
+					{ { sourcePath, feedback.pageId, 2u, secondBlock.size(), corruptSecond.encodedIntegrity, 0u, nullptr }, corruptSecond }
+				};
+
+				system.SubmitPriorFrameFeedback({ feedback });
+				auto workloads = system.DeclareFrameWorkloads(0.0f);
+				TerraEngine::Scheduling::JobGraphContext graphContext;
+				workloads.front().work(graphContext);
+				const auto prepared = system.LastPreparedPlan();
+				context.Expect(prepared.decodedPages.front().status == Resource::VirtualGeometryStreamingDecodeStatus::Failed,
+					"A corrupt later block must fail the aggregate page without accepting an upload.");
+				context.Expect(prepared.decodedPages.front().decodedBytes.empty(),
+					"A corrupt later block must discard all earlier decoded bytes atomically.");
+				context.ExpectEqual(2u, system.DiagnosticsSnapshot().completedReads,
+					"Both physical reads completed before the later decode proof rejected the page.");
+				workloads.back().work(graphContext);
+				context.Expect(system.PublishedPages().empty(),
+					"No renderer-visible page may publish when any later canonical block is corrupt.");
+
+				std::error_code cleanupError;
+				std::filesystem::remove(sourcePath, cleanupError);
+				system.Shutdown();
+			});
+
+		registry.Add("VirtualGeometry.Streaming.CancelledLaterBlockDoesNotPublishPartialPage",
+			[](TestContext& context)
+			{
+				auto& system = Resource::VirtualGeometryStreamingSystem::Instance();
+				system.Initialize();
+				const auto asset = TerraEngine::GenerateUUID();
+				const std::vector<std::uint8_t> firstBlock{ 5u, 6u };
+				const std::vector<std::uint8_t> secondBlock{ 7u, 8u };
+				const std::vector<std::uint8_t> pageBytes{ 5u, 6u, 7u, 8u };
+				const std::filesystem::path sourcePath = std::filesystem::temp_directory_path()
+					/ ("TerraEngine-TEMFPRD1-CancelLater-" + TerraEngine::ToHexString(asset) + ".bin");
+				{
+					std::ofstream source(sourcePath, std::ios::binary | std::ios::trunc);
+					source.write(reinterpret_cast<const char*>(pageBytes.data()),
+						static_cast<std::streamsize>(pageBytes.size()));
+				}
+
+				Resource::VirtualGeometryStreamingFeedback feedback{};
+				feedback.assetId = asset;
+				feedback.pageId = 15u;
+				feedback.fallbackPageId = 15u;
+				feedback.priority = 9;
+				feedback.observedFrame = 1u;
+				feedback.visible = true;
+				feedback.expectedStoredByteCount = pageBytes.size();
+				feedback.expectedDecodedByteCount = pageBytes.size();
+				feedback.expectedIntegrityValue = CalculateVirtualGeometryCompactHash(pageBytes);
+				const TemfBlockDescriptor first = MakeIdentityProductionBlock(
+					feedback.pageId, 1u, 0u, firstBlock);
+				const TemfBlockDescriptor second = MakeIdentityProductionBlock(
+					feedback.pageId, 2u, 2u, secondBlock);
+				const auto cancelled = std::make_shared<std::atomic_bool>(true);
+				feedback.exactBlockReads = {
+					{ { sourcePath, feedback.pageId, 0u, firstBlock.size(), first.encodedIntegrity, 0u, nullptr }, first },
+					{ { sourcePath, feedback.pageId, 2u, secondBlock.size(), second.encodedIntegrity, 0u, cancelled }, second }
+				};
+
+				system.SubmitPriorFrameFeedback({ feedback });
+				auto workloads = system.DeclareFrameWorkloads(0.0f);
+				TerraEngine::Scheduling::JobGraphContext graphContext;
+				workloads.front().work(graphContext);
+				const auto prepared = system.LastPreparedPlan();
+				context.Expect(prepared.decodedPages.front().status == Resource::VirtualGeometryStreamingDecodeStatus::Cancelled,
+					"Cancelling a later physical block must cancel the aggregate logical page.");
+				context.Expect(prepared.decodedPages.front().decodedBytes.empty(),
+					"Cancelled later IO must discard the completed earlier decoded prefix.");
+				const auto diagnostics = system.DiagnosticsSnapshot();
+				context.ExpectEqual(1u, diagnostics.completedReads,
+					"Completed physical reads remain truthful when a later block is cancelled.");
+				context.ExpectEqual(1u, diagnostics.cancelledReads,
+					"Cancelled physical reads remain distinct from completed reads.");
+				workloads.back().work(graphContext);
+				context.Expect(system.PublishedPages().empty(),
+					"Cancelled later IO must not publish a partial renderer-visible page.");
+
 				std::error_code cleanupError;
 				std::filesystem::remove(sourcePath, cleanupError);
 				system.Shutdown();

@@ -2,7 +2,7 @@
 //
 // These tests freeze evidence shape and exercise bounded profiler capture. They
 // deliberately use synthetic values and never perform wall-clock acceptance;
-// measured diagnostics overhead remains owned by final Phase 18 task T283.
+// measured diagnostics overhead remains owned by final ImplementationStage task ImplementationCheck.
 
 #include "TestHarness.h"
 
@@ -30,7 +30,7 @@ namespace TerraEngine::Tests {
 	namespace {
 		inline constexpr double kMaximumCollapsedDiagnosticsMedianOverheadPercent = 2.0;
 		inline constexpr std::string_view kStressManifestSha256 =
-			"c5652867707f46b2db388a3fc27af14c71db6b13a431dc64a52d6584f555a891";
+			"40e3a8b7eb447ad3e3029a81cbc7383b15f92045c4f04ec69f13a35e3c44296a";
 
 		std::filesystem::path SourcePath(std::string_view relativePath)
 		{
@@ -166,7 +166,7 @@ namespace TerraEngine::Tests {
 				"The source-controlled collapsed-diagnostics threshold must remain exactly two percent.");
 			context.Expect(stress.at("performanceAcceptancePhase") == 18
 				&& stress.at("performanceExecutionDeferred").get<bool>(),
-				"Diagnostics measurements must remain explicitly deferred to final Phase 18.");
+				"Diagnostics measurements must remain explicitly deferred to final ImplementationStage.");
 			context.Expect(crowd != stress.at("workloads").end()
 				&& crowd->at("definition").at("diagnosticsModes") == nlohmann::json::array({"Disabled", "EnabledCollapsed"})
 				&& crowd->at("definition").at("pairedMeasuredRuns") == 5,

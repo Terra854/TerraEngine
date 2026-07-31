@@ -3,6 +3,7 @@
 #include "ExportPackageValidator.h"
 #include "File Formats/TerraEngineMeshFile.h"
 #include "TEPAK/PackWriter.h"
+#include "VirtualGeometryProductionBlocks.h"
 
 #include <cstring>
 #include <filesystem>
@@ -131,6 +132,15 @@ namespace TerraEngine::EditorTests
 			return buffer.str();
 		}
 
+		bool IsCanonicalProductionMetadataError(const std::string& error)
+		{
+			// Canonical TEMFPRD1 validates the complete metadata proof as one
+			// contract. Individual fixture corruptions therefore share this precise
+			// production diagnostic instead of exposing retired per-table readers.
+			return error.find("does not prove all required production metadata") != std::string::npos
+				&& error.find("meshes/rock.temf") != std::string::npos;
+		}
+
 		enum class VirtualGeometryTemfVariant
 		{
 			Valid,
@@ -152,17 +162,7 @@ namespace TerraEngine::EditorTests
 
 		std::vector<std::uint8_t> MakeVirtualGeometryTemf(VirtualGeometryTemfVariant variant)
 		{
-			std::vector<std::uint8_t> bytes(sizeof(MeshHeader) + sizeof(VirtualGeometryHeader), 0u);
-			MeshHeader header{};
-			const std::uint32_t magic = kMeshMagicValue;
-			std::memcpy(header.magic, &magic, sizeof(magic));
-			header.version = kMeshCurrentVersion;
-			header.headerSize = sizeof(MeshHeader);
-			header.meshletCount = 1u;
-			header.meshletFlags = kMeshletHeaderFlagHasVirtualGeometry;
-			header.virtualGeometryHeaderOffset = sizeof(MeshHeader);
-			header.virtualGeometryHeaderSize = sizeof(VirtualGeometryHeader);
-			header.virtualGeometryPayloadGeneration = variant == VirtualGeometryTemfVariant::StaleGeneration ? 999u : kVirtualGeometryPayloadGeneration;
+			std::vector<std::uint8_t> bytes(sizeof(VirtualGeometryHeader), 0u);
 
 			VirtualGeometryHeader virtualHeader{};
 			virtualHeader.payloadGeneration = variant == VirtualGeometryTemfVariant::StaleGeneration ? 999u : kVirtualGeometryPayloadGeneration;
@@ -275,9 +275,37 @@ namespace TerraEngine::EditorTests
 				virtualHeader.pageTableOffset = AppendRecord(bytes, page);
 			}
 
-			std::memcpy(bytes.data(), &header, sizeof(header));
-			std::memcpy(bytes.data() + sizeof(MeshHeader), &virtualHeader, sizeof(virtualHeader));
-			return bytes;
+			TemfQuantizationDomain domain{};
+			domain.domainId = 0u;
+			domain.domainVersion = 1u;
+			domain.domainScope = static_cast<std::uint16_t>(
+				TemfQuantizationDomainScope::Asset);
+			domain.streamKind =
+				static_cast<std::uint16_t>(TemfStreamKind::Metadata);
+			domain.componentCount = 1u;
+			domain.componentBitWidths[0u] = 8u;
+			domain.extent[0u] = 1.0;
+			domain.quantizationStep[0u] = 1.0 / 255.0;
+			domain.domainHash = 1u;
+			const TerraEngine::Editor::TemfProductionStreamInput stream{
+				TemfStreamKind::Metadata,
+				TemfCodecProfile::ExpandedProduction,
+				kTemfMetadataVirtualHeader,
+				0u,
+				1u,
+				static_cast<std::uint32_t>(sizeof(virtualHeader)),
+				std::span<const std::uint8_t>(
+					reinterpret_cast<const std::uint8_t*>(&virtualHeader),
+					sizeof(virtualHeader)) };
+			const TerraEngine::Editor::TemfProductionBuildRequest request{
+				.representationFlags = kTemfRepresentationVirtualGeometry,
+				.logicalPageSizeBytes = kTemfPageSize64KiB,
+				.selectedQuantizationProfileId =
+					static_cast<std::uint32_t>(
+						TemfQuantizationProfile::Balanced),
+				.quantizationDomains = std::span(&domain, 1u),
+				.streams = std::span(&stream, 1u) };
+			return TerraEngine::Editor::BuildTemfProductionBlocks(request).bytes;
 		}
 
 		void WriteVirtualGeometryManifest(const TempVirtualGeometryExportWorkspace& workspace, bool includeCoverage = true)
@@ -421,7 +449,7 @@ namespace TerraEngine::EditorTests
 			const bool valid = ValidateExportPackage(workspace.PackPath(), ExportPlatform::Windows, error);
 
 			context.Expect(!valid, "Stale virtual geometry TEMF payloads should fail export validation.");
-			context.Expect(error.find("stale") != std::string::npos || error.find("current") != std::string::npos, "The validation error should explain that the virtual geometry payload must be current.");
+			context.Expect(IsCanonicalProductionMetadataError(error), "The validation error should identify the failed canonical TEMFPRD1 metadata proof.");
 		});
 
 		registry.Add("VirtualGeometry.Editor.Export.RequiresMeshShaderResources", [](TestContext& context) {
@@ -450,7 +478,7 @@ namespace TerraEngine::EditorTests
 			const bool valid = ValidateExportPackage(workspace.PackPath(), ExportPlatform::Windows, error);
 
 			context.Expect(!valid, "Export validation should reject virtual geometry payloads without adaptive target validation.");
-			context.Expect(error.find("adaptive") != std::string::npos, "The validation error should explain the missing adaptive cook metadata.");
+			context.Expect(IsCanonicalProductionMetadataError(error), "The validation error should identify the failed canonical TEMFPRD1 metadata proof.");
 		});
 
 		registry.Add("VirtualGeometry.Editor.Export.RejectsMissingFallbackCoverage", [](TestContext& context) {
@@ -464,7 +492,7 @@ namespace TerraEngine::EditorTests
 			const bool valid = ValidateExportPackage(workspace.PackPath(), ExportPlatform::Windows, error);
 
 			context.Expect(!valid, "Export validation should reject virtual geometry payloads without fallback coverage validation.");
-			context.Expect(error.find("fallback") != std::string::npos, "The validation error should explain the missing fallback coverage.");
+			context.Expect(IsCanonicalProductionMetadataError(error), "The validation error should identify the failed canonical TEMFPRD1 metadata proof.");
 		});
 
 		registry.Add("VirtualGeometry.Editor.Export.RejectsMissingPageData", [](TestContext& context) {
@@ -478,7 +506,7 @@ namespace TerraEngine::EditorTests
 			const bool valid = ValidateExportPackage(workspace.PackPath(), ExportPlatform::Windows, error);
 
 			context.Expect(!valid, "Export validation should reject virtual geometry payloads without page metadata.");
-			context.Expect(error.find("page") != std::string::npos, "The validation error should explain the missing page metadata.");
+			context.Expect(IsCanonicalProductionMetadataError(error), "The validation error should identify the failed canonical TEMFPRD1 metadata proof.");
 		});
 
 		registry.Add("VirtualGeometry.Editor.Export.RejectsMissingConeSafetyMetadata", [](TestContext& context) {
@@ -492,7 +520,7 @@ namespace TerraEngine::EditorTests
 			const bool valid = ValidateExportPackage(workspace.PackPath(), ExportPlatform::Windows, error);
 
 			context.Expect(!valid, "Export validation should reject virtual geometry payloads without cone safety metadata.");
-			context.Expect(error.find("cone") != std::string::npos, "The validation error should explain the missing cone safety metadata.");
+			context.Expect(IsCanonicalProductionMetadataError(error), "The validation error should identify the failed canonical TEMFPRD1 metadata proof.");
 		});
 	}
 }

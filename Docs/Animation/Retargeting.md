@@ -126,7 +126,7 @@ generation, and atomic publication rules described in
 [`Automation.md`](Automation.md).
 
 For reproducible checks, run the focused animation validation after the
-retarget tests and use the installed-editor Phase 10 gate for interactive
+retarget tests and use the installed-editor implementation stage gate for interactive
 mapping, preview, contact/root metrics, runtime queries, and failed hot reload.
-Performance timing is reserved for final Phase 18; intermediate checks prove
+Performance timing is reserved for final implementation stage; intermediate checks prove
 correctness, parity, bounds, generation safety, and fallback behavior only.

@@ -1,7 +1,7 @@
 // GltfAnimationImportTests.cpp - Contract-first coverage for animated glTF packages.
 //
-// These tests deliberately describe the import result required by Spec 043 before
-// T034 extends the production importer.  The legacy importer reports that it
+// These tests deliberately describe the import result required by animation production validation before
+// ImplementationCheck extends the production importer.  The legacy importer reports that it
 // discarded animation and skin data, so each test currently fails for that
 // explicit, actionable reason rather than silently accepting a static fallback.
 
@@ -10,6 +10,7 @@
 #include "GltfPackageImporter.h"
 #include "ModelPackageImporter.h"
 #include "File Formats/TerraEngineMeshFile.h"
+#include "Resource/ResourceManager.h"
 
 #include <algorithm>
 #include <array>
@@ -43,7 +44,7 @@ namespace TerraEngine::EditorTests
 			return nlohmann::json::parse(input);
 		}
 
-		// Add validly-shaped package metadata for the capabilities that T034 must
+		// Add validly-shaped package metadata for the capabilities that ImplementationCheck must
 		// preserve.  The current importer intentionally ignores it, creating the
 		// red state that protects the later implementation from static regressions.
 		void AddAnimatedSkinContractData(nlohmann::json& document, std::string_view interpolation, bool includeSkin = true)
@@ -63,7 +64,7 @@ namespace TerraEngine::EditorTests
 					{ "joints", { 1 } },
 					// The accessor reference is intentionally part of the test input even
 					// though the base fixture does not need its values to demonstrate the
-					// present importer omission.  T034 will validate and consume it.
+					// present importer omission.  ImplementationCheck will validate and consume it.
 					{ "inverseBindMatrices", 0 }
 				} });
 			}
@@ -289,41 +290,12 @@ namespace TerraEngine::EditorTests
 				"The source node quaternion and 100x scale must survive in the skeleton bind pose exactly once.");
 			if(joint == skeleton.joints.end()) return;
 
-			std::ifstream meshFile(root / "Build" / result.generatedMeshes.front().compiledPath, std::ios::binary);
-			MeshHeader meshHeader{};
-			DeformableMeshPayloadHeader deformable{};
-			std::array<std::uint8_t, kDeformableMeshSkinningStrideBytes> firstSkinningRecord{};
-			std::uint32_t firstPaletteIndex = 0U;
-			DeformableMeshPaletteRecord firstPalette{};
-			std::uint32_t paletteSourceJoint = 0U;
-			meshFile.read(reinterpret_cast<char*>(&meshHeader), sizeof(meshHeader));
-			meshFile.seekg(static_cast<std::streamoff>(meshHeader.virtualGeometryReserved), std::ios::beg);
-			meshFile.read(reinterpret_cast<char*>(&deformable), sizeof(deformable));
-			// The first eight bytes are four palette-local joint indices followed by
-			// four UNORM8 weights. Follow its vertex-palette entry back to the global
-			// skeleton joint to prove the importer injected a real source-node weight.
-			meshFile.seekg(static_cast<std::streamoff>(meshHeader.meshletSkinningDataOffset), std::ios::beg);
-			meshFile.read(reinterpret_cast<char*>(firstSkinningRecord.data()), static_cast<std::streamsize>(firstSkinningRecord.size()));
-			meshFile.seekg(static_cast<std::streamoff>(deformable.vertexPaletteIndexOffset), std::ios::beg);
-			meshFile.read(reinterpret_cast<char*>(&firstPaletteIndex), sizeof(firstPaletteIndex));
-			meshFile.seekg(static_cast<std::streamoff>(deformable.paletteTableOffset
-				+ firstPaletteIndex * sizeof(DeformableMeshPaletteRecord)), std::ios::beg);
-			meshFile.read(reinterpret_cast<char*>(&firstPalette), sizeof(firstPalette));
-			meshFile.seekg(static_cast<std::streamoff>(firstPalette.jointTableOffset
-				+ firstSkinningRecord[0U] * sizeof(paletteSourceJoint)), std::ios::beg);
-			meshFile.read(reinterpret_cast<char*>(&paletteSourceJoint), sizeof(paletteSourceJoint));
-			const std::uint32_t animatedMorphCubeJoint = static_cast<std::uint32_t>(
-				std::distance(skeleton.joints.begin(), joint));
-			context.Expect(meshFile && result.generatedMeshes.front().animationSkeletonGuid == skeletonRecord->guid
-				&& deformable.sourceSkeletonJointCount == skeleton.joints.size()
-				&& deformable.skeletonCompatibilityFingerprint == skeleton.compatibilityFingerprint,
-				"TEMF must depend on the same source-node skeleton rather than use an identity palette.");
-			context.Expect(meshFile && firstPaletteIndex < deformable.palettePartitionCount
-				&& firstPalette.jointCount > firstSkinningRecord[0U]
-				&& firstSkinningRecord[4U] == 255U
-				&& firstSkinningRecord[5U] == 0U && firstSkinningRecord[6U] == 0U && firstSkinningRecord[7U] == 0U
-				&& paletteSourceJoint == animatedMorphCubeJoint,
-				"The first TEMF skinning record must carry a full source-node weight through its palette to AnimatedMorphCube's synthetic skeleton joint.");
+			const AnimationResourceValidationResult canonicalMeshValidation =
+				ResourceManager::Instance()
+				.ValidateDeformableMeshFile(root / "Build" / result.generatedMeshes.front().compiledPath,
+					static_cast<std::uint32_t>(skeleton.joints.size()), skeleton.compatibilityFingerprint);
+			context.Expect(canonicalMeshValidation.status == TerraEngine::Animation::AnimationStatus::Ok,
+				"The imported mesh must decode through canonical TEMFPRD1 deformable streams.");
 
 			std::ifstream prefabFile(root / "Assets" / result.generatedPrefabs.front().sourcePath);
 			nlohmann::json prefab = nlohmann::json::parse(prefabFile);

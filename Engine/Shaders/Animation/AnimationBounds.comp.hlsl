@@ -45,7 +45,7 @@ void main(uint3 id : SV_DispatchThreadID)
 				TE_ANIMATION_MORPH_TABLE_HEADER_BYTES
 					+ TE_ANIMATION_MORPH_BOUNDS_BYTES
 					+ tableCount * TE_ANIMATION_MORPH_RECORD_BYTES);
-		// TDEF v1 stores one whole-animation envelope. It already includes every
+		// Canonical TEMF v1 stores one whole-animation envelope. It includes every
 		// skin and morph excursion, so publishing it directly is conservative
 		// for all weights and avoids inventing unavailable per-target bounds.
 		minimum = asfloat(gAnimationMorphInputs.Load3(

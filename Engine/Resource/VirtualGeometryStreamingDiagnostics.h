@@ -33,6 +33,12 @@ namespace TerraEngine::Resource
 		std::uint64_t acceptedPublicationPages = 0u;
 		std::uint64_t rejectedPublications = 0u;
 		std::uint64_t visibleResidentPages = 0u;
+		// Direct meshlet routes intentionally bypass virtual-geometry feedback.
+		// Count suppression separately so an observed zero cannot be mistaken for
+		// an unavailable or silently dropped streaming request.
+		std::uint64_t suppressedDirectRouteFeedback = 0u;
+		std::uint64_t suppressedDirectRouteDecodeIntents = 0u;
+		std::uint64_t suppressedDirectRouteResidencyPublications = 0u;
 		std::uint64_t lastPreparedFrame = 0u;
 		std::uint64_t lastPublicationFrame = 0u;
 		std::string lastRejectionReason;
@@ -43,4 +49,8 @@ namespace TerraEngine::Resource
 		VirtualGeometryStreamingDiagnostics &diagnostics,
 		VirtualGeometryStreamingDiagnosticEvent event,
 		std::size_t maximumEvents = 64u);
+	TERRAENGINE_API void RecordVirtualGeometryDirectRouteSuppression(
+		VirtualGeometryStreamingDiagnostics& diagnostics, std::uint64_t frameId,
+		std::uint32_t feedbackCount, std::uint32_t decodeIntentCount,
+		std::uint32_t residencyPublicationCount);
 } // namespace TerraEngine::Resource

@@ -208,7 +208,7 @@ namespace TerraEngine::Tests {
 			ragdoll.sleeping = false;
 			value.ragdollStates.push_back(ragdoll);
 
-			// The generic extension remains available to T262+ for future opcodes,
+			// The generic extension remains available to ImplementationCheck+ for future opcodes,
 			// but it is no longer the only storage for authoritative domains.
 			value.state = {{AnimationDeterministicStateKind::Controller, 0U, 0U, 1401U, {1U, 2U, 3U, 4U}}};
 			value.eventWatermark = {701U, 704U, tick};

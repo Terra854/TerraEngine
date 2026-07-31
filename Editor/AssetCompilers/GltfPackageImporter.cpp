@@ -2564,7 +2564,7 @@ namespace TerraEngine::AssetPipeline
 				{
 					primitiveVertices[vertexIndex].baseVertex = ConvertDeformableBaseVertex(rawVertices[vertexIndex], converter);
 					// Morph-only geometry has no authored JOINTS_n stream, but the shared
-					// TDEF payload still evaluates through a palette. Bind it to its source
+					// deformable payload still evaluates through a palette. Bind it to its source
 					// node so bind and animated TRS are applied exactly once. Skinned meshes
 					// keep their authored weights and inverse binds instead.
 					if (skin == nullptr && morphOnlySourceJoint.has_value())
@@ -3663,6 +3663,17 @@ namespace TerraEngine::AssetPipeline
 					resolvedSettings != nullptr);
 				PopulateVirtualGeometryTargetDiagnostics(compileReport, mesh);
 				PopulateGeneratedMeshVirtualGeometryMetadata(compiledMeshOutputPath, mesh, result.diagnostics);
+				// Direct-resident TEMFPRD1 meshes intentionally have no virtual
+				// hierarchy, but their automation record still needs the source
+				// triangle fact for truthful import evidence. Recover it from the
+				// immutable extracted index stream when the canonical runtime
+				// metadata does not publish that advisory summary.
+				if(mesh.virtualGeometrySourceTriangles == 0u
+					&& !geometry.indices.empty())
+				{
+					mesh.virtualGeometrySourceTriangles =
+						static_cast<std::uint32_t>(geometry.indices.size() / 3u);
+				}
 				const std::uint32_t materialAssignmentCount = CountMaterialAssignmentsForMesh(result, mesh.guid);
 				PopulatePackageMaterialCoverageDiagnostics(mesh, materialAssignmentCount);
 				PopulateVirtualGeometryCoverageTags(mesh, result.package.packageKind, materialAssignmentCount);

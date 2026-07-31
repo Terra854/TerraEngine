@@ -701,6 +701,27 @@ struct VulkanContext::Impl {
 				TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryExecutorPipelines virtualGeometryExecutorPipelines{};
 				VkDescriptorSetLayout virtualGeometryExecutorDescriptorSetLayout = VK_NULL_HANDLE;
 				std::string virtualGeometryExecutorUnavailableReason;
+				// ExpandedProduction decoding is deliberately isolated from the packet
+				// executor. Each slot owns every buffer the one-request compute ABI may
+				// touch, and publication stays disabled until its fence-delayed parity
+				// receipt matches the CPU reference.
+				struct VirtualGeometryProductionDecodeFrameResources
+				{
+					VulkanBuffer requestBuffer{};
+					VulkanBuffer encodedBuffer{};
+					VulkanBuffer decodedBuffer{};
+					VulkanBuffer resultReadbackBuffer{};
+					VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+					TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryProductionDecodePlan plan{};
+					std::uint64_t preparedFrameId = 0u;
+					bool completionPending = false;
+				};
+				std::array<VirtualGeometryProductionDecodeFrameResources, MAX_FRAMES_IN_FLIGHT> virtualGeometryProductionDecodeResourcesByFrame{};
+				TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryProductionDecodePipelines virtualGeometryProductionDecodePipelines{};
+				VkDescriptorSetLayout virtualGeometryProductionDecodeDescriptorSetLayout = VK_NULL_HANDLE;
+				std::string virtualGeometryProductionDecodeUnavailableReason;
+				bool completedVirtualGeometryProductionDecodeEvidence = false;
+				std::uint64_t publishedVirtualGeometryProductionDecodeGeneration = 0u;
 				TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryVisibilityPlan latestVirtualGeometryVisibilityPlan{};
 				TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryVisibilityResources latestVirtualGeometryVisibilityResources{};
 				TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryVisibilityPipelines virtualGeometryVisibilityPipelines{};
@@ -1045,6 +1066,10 @@ struct VulkanContext::Impl {
 		void DestroyVirtualGeometryGpuPacketResources(VirtualGeometryGpuPacketFrameResources& resources);
 		bool EnsureVulkanVirtualGeometryExecutorPipeline();
 		void DestroyVulkanVirtualGeometryExecutorPipeline();
+		bool EnsureVulkanVirtualGeometryProductionDecodePipeline();
+		void DestroyVulkanVirtualGeometryProductionDecodePipeline();
+		void PrepareVulkanVirtualGeometryProductionDecode(const FrameRenderData& frameData);
+		void CompleteVulkanVirtualGeometryProductionDecode(std::uint32_t frameIndex);
 		bool EnsureVulkanVirtualGeometryVisibilityPipelines();
 		void DestroyVulkanVirtualGeometryVisibilityPipelines();
 		void ResetMeshletCounters(uint32_t statsSlotIndex);
@@ -1286,7 +1311,8 @@ struct VulkanContext::Impl {
 	std::uint32_t activeCpuAnimationGraphicsBufferIndex =
 		INVALID_BINDLESS_BUFFER_INDEX;
 	// Animated virtual geometry owns a second compute envelope after animation
-	// evaluation. Static AVPB bytes and output arenas are frame-fence owned; no
+	// evaluation. Canonical demanded-page bytes and output arenas are
+	// frame-fence owned; no
 	// material shader or animator owns Vulkan resources in this path.
 	struct VulkanDeformationFrameResources
 	{

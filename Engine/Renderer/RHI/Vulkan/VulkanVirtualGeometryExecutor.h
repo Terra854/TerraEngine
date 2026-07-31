@@ -4,12 +4,14 @@
 
 #include "Core/Export.h"
 #include "Renderer/RHI/RHIDefinitions.h"
+#include "Renderer/VirtualGeometry/VirtualGeometryTypes.h"
 #include "VulkanCommonIncludes.h"
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <span>
 #include <type_traits>
 #include <vector>
 
@@ -159,6 +161,90 @@ namespace TerraEngine::Renderer::Vulkan
 		std::string reason;
 	};
 
+	// Direct meshlets use the renderer's existing mesh-task indirect path. This
+	// compact plan is deliberately separate from the VG executor so choosing a
+	// direct route cannot allocate traversal, compaction, feedback, or decode
+	// resources as an accidental side effect.
+	struct VulkanDirectMeshletDrawRecord
+	{
+		std::uint64_t geometryIdentity = 0u;
+		std::uint64_t geometryGeneration = 0u;
+		std::uint64_t materialIdentity = 0u;
+		std::uint32_t taskGroupCount = 0u;
+		std::uint32_t instanceCount = 0u;
+	};
+
+	struct VulkanDirectMeshletBatchPlan
+	{
+		std::vector<VulkanDirectMeshletDrawRecord> draws;
+		std::uint32_t suppressedVirtualGeometryExecutors = 0u;
+		std::uint32_t suppressedPageRequests = 0u;
+		bool valid = false;
+		std::string rejectionReason;
+	};
+
+	// The ABI mirrors VirtualGeometryProductionCodecAbi.hlsli. Keep this plain
+	// 32-bit record byte-exact so CPU validation and shader dispatch agree.
+	struct VulkanVirtualGeometryProductionDecodeRequest
+	{
+		std::uint32_t profileId = 0u;
+		std::uint32_t codecVersion = 0u;
+		std::uint32_t encodedByteOffset = 0u;
+		std::uint32_t encodedByteCount = 0u;
+		std::uint32_t decodedByteOffset = 0u;
+		std::uint32_t decodedByteCount = 0u;
+		std::uint32_t outputCapacityBytes = 0u;
+		std::uint32_t requestIdentity = 0u;
+	};
+	static_assert(sizeof(VulkanVirtualGeometryProductionDecodeRequest) == 32u);
+
+	struct VulkanVirtualGeometryProductionDecodeResult
+	{
+		std::uint32_t requestIdentity = 0u;
+		std::uint32_t status = 0u;
+		std::uint32_t decodedByteCount = 0u;
+		std::uint32_t reserved = 0u;
+	};
+	static_assert(sizeof(VulkanVirtualGeometryProductionDecodeResult) == 16u);
+
+	struct VulkanVirtualGeometryProductionDecodeResources
+	{
+		VkBuffer requestBuffer = VK_NULL_HANDLE;
+		VkBuffer encodedBuffer = VK_NULL_HANDLE;
+		VkBuffer decodedBuffer = VK_NULL_HANDLE;
+		VkBuffer resultReadbackBuffer = VK_NULL_HANDLE;
+		VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+		std::uint32_t encodedCapacityBytes = 0u;
+		std::uint32_t decodedCapacityBytes = 0u;
+		bool resourcesOwnedByFrame = false;
+	};
+
+	struct VulkanVirtualGeometryProductionDecodePipelines
+	{
+		VkPipelineLayout layout = VK_NULL_HANDLE;
+		VkPipeline expandedProductionDecode = VK_NULL_HANDLE;
+	};
+
+	struct VulkanVirtualGeometryProductionDecodePlan
+	{
+		VulkanVirtualGeometryProductionDecodeRequest request{};
+		std::uint64_t generation = 0u;
+		std::uint64_t expectedDecodedHash = 0u;
+		bool supportedProfile = false;
+		bool resourcesReady = false;
+		bool pipelineReady = false;
+		bool valid = false;
+		std::string unavailableReason;
+	};
+
+	struct VulkanVirtualGeometryProductionDecodeParityReceipt
+	{
+		std::uint64_t generation = 0u;
+		bool deviceDecodeAvailable = false;
+		bool acceptedForPublication = false;
+		std::string reason;
+	};
+
 	// Visibility is deliberately a separate readiness chain from generated draw
 	// execution. A missing visibility pipeline must not downgrade the proven
 	// traversal/compaction/indirect gate owned by the renderer.
@@ -245,4 +331,27 @@ namespace TerraEngine::Renderer::Vulkan
 		const VulkanVirtualGeometryExecutorPipelines &pipelines);
 	TERRAENGINE_API VulkanVirtualGeometryFailureReceipt BuildVulkanVirtualGeometryFailureReceipt(
 		const VulkanVirtualGeometryExecutorPlan &plan, VirtualGeometryBackendStage stage);
+	TERRAENGINE_API VulkanDirectMeshletBatchPlan BuildVulkanDirectMeshletBatchPlan(
+		const std::vector<DirectMeshletBatch>& batches, bool meshTaskPathAvailable,
+		std::uint32_t meshletsPerTaskGroup = 32u);
+	TERRAENGINE_API VulkanVirtualGeometryExecutorRecordingResult RecordVulkanDirectMeshletBatches(
+		VkCommandBuffer commandBuffer, const VulkanDirectMeshletBatchPlan& plan,
+		VkBuffer existingIndirectBuffer, VkDeviceSize firstIndirectByteOffset);
+	TERRAENGINE_API VulkanVirtualGeometryProductionDecodePlan
+		BuildVulkanVirtualGeometryProductionDecodePlan(
+			VulkanVirtualGeometryProductionDecodeRequest request,
+			std::uint64_t generation, std::uint64_t expectedDecodedHash,
+			const VulkanVirtualGeometryProductionDecodeResources& resources,
+			const VulkanVirtualGeometryProductionDecodePipelines& pipelines);
+	TERRAENGINE_API VulkanVirtualGeometryExecutorRecordingResult
+		RecordVulkanVirtualGeometryProductionDecode(
+			VkCommandBuffer commandBuffer,
+			const VulkanVirtualGeometryProductionDecodePlan& plan,
+			const VulkanVirtualGeometryProductionDecodeResources& resources,
+			const VulkanVirtualGeometryProductionDecodePipelines& pipelines);
+	TERRAENGINE_API VulkanVirtualGeometryProductionDecodeParityReceipt
+		VerifyVulkanVirtualGeometryProductionDecodeParity(
+			const VulkanVirtualGeometryProductionDecodePlan& plan,
+			const VulkanVirtualGeometryProductionDecodeResult& deviceResult,
+			std::span<const std::uint8_t> readbackBytes);
 } // namespace TerraEngine::Renderer::Vulkan

@@ -273,7 +273,7 @@ AnimationStatus ValidateAnimationControllerAsset(const AnimationControllerAsset 
 				return AnimationStatus::InvalidArgument;
 	}
 	// Entry-state selection is semantic compiler work. Persist incomplete authored
-	// graphs so T065 can issue diagnostics without losing last-known-good data.
+	// graphs so ImplementationCheck can issue diagnostics without losing last-known-good data.
 	ids.clear();
 	for (const auto &value : asset.states) {
 		if (value.stableId == 0U || !ContainsId(asset.nodes, value.nodeId) ||

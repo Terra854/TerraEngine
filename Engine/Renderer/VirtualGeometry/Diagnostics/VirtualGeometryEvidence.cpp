@@ -1,5 +1,6 @@
 #include "Renderer/VirtualGeometry/Diagnostics/VirtualGeometryEvidence.h"
 
+#include <array>
 #include <sstream>
 
 namespace TerraEngine::Renderer
@@ -79,6 +80,33 @@ namespace TerraEngine::Renderer
 			}
 		}
 
+		void AppendRouteDiagnostics(std::ostringstream& output,
+			const std::map<std::string, std::string>& diagnostics)
+		{
+			// Route evidence is retained in the generic capture diagnostic map so old
+			// capture producers remain source compatible. Serializing its stable keys
+			// as one object makes route/source/policy/hysteresis/suppression evidence
+			// directly comparable without treating absent data as a measured zero.
+			constexpr std::array<std::string_view, 11u> keys = {
+				"route", "routeSource", "routePolicyIdentity", "routeCalibrationIdentity",
+				"routeHysteresisFrames", "routeSharedGeometryBytes", "routeDirectBatchCount",
+				"routeSuppressedPageRequests", "routeSuppressedDecodeBlocks",
+				"routeSuppressedResidencyRecords", "routeFallbackReason" };
+			output << '{';
+			bool first = true;
+			for(const std::string_view key : keys)
+			{
+				const auto value = diagnostics.find(std::string(key));
+				if(value == diagnostics.end()) continue;
+				if(!first) output << ',';
+				AppendJsonString(output, key);
+				output << ':';
+				AppendJsonString(output, value->second);
+				first = false;
+			}
+			output << '}';
+		}
+
 		const char *ToString(VirtualGeometryMeasurementAvailability availability)
 		{
 			switch (availability)
@@ -94,6 +122,17 @@ namespace TerraEngine::Renderer
 			default:
 				return "invalid";
 			}
+		}
+
+		void AppendFrameViewIdentity(std::ostringstream& output,
+			const VirtualGeometryFrameViewIdentity& identity)
+		{
+			// Raw benchmark rows must retain the completed frame/view provenance.
+			// A duration without this identity is diagnostic-only and cannot support
+			// a comparison or release claim.
+			output << "{\"frameId\":" << identity.frameId;
+			output << ",\"viewId\":" << identity.viewId;
+			output << ",\"rendererGeneration\":" << identity.rendererGeneration << '}';
 		}
 	} // namespace
 
@@ -199,6 +238,15 @@ namespace TerraEngine::Renderer
 			}
 			output << ",\"rejectionReason\":";
 			AppendJsonString(output, sample.rejectionReason);
+			output << ",\"stage\":" << static_cast<std::uint32_t>(sample.stage);
+			output << ",\"identity\":";
+			AppendFrameViewIdentity(output, sample.identity);
+			output << ",\"queryIdentity\":";
+			AppendJsonString(output, sample.queryIdentity);
+			output << ",\"executionEvidenceId\":";
+			AppendJsonString(output, sample.executionEvidenceId);
+			output << ",\"warmupOrdinal\":" << sample.warmupOrdinal;
+			output << ",\"sampleOrdinal\":" << sample.sampleOrdinal;
 			output << '}';
 		}
 		output << ']';
@@ -226,6 +274,9 @@ namespace TerraEngine::Renderer
 			AppendJsonString(output, capture.statistics.rejectionReasons[index]);
 		}
 		output << "]}";
+
+		output << ",\"route\":";
+		AppendRouteDiagnostics(output, capture.diagnostics);
 
 		output << ",\"geometry\":";
 		AppendStringMap(output, capture.sections.geometry);

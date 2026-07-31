@@ -1,4 +1,4 @@
-// VirtualGeometrySchemas.h - validation entry points for feature 045 manifests.
+// VirtualGeometrySchemas.h - validation entry points for production manifests.
 //
 // Tooling, tests, and the installed benchmark share this small API so a schema
 // failure has the same path and explanation everywhere.
@@ -17,7 +17,9 @@ namespace TerraEngine::Tools::VirtualGeometry
 		Workloads,
 		HardwareMatrix,
 		QualityProfiles,
-		BenchmarkCapture
+		BenchmarkCapture,
+		ReferenceCapture,
+		ComparativeEvidence
 	};
 
 	struct SchemaValidationIssue

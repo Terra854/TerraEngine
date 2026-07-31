@@ -16,7 +16,7 @@ param(
 	[ValidateNotNullOrEmpty()]
 	# Keep the root deliberately short: installed-editor export projects can add
 	# several nested managed and asset paths on Windows.
-	[string]$OutputRoot = ('out/a043/p/' + [DateTime]::UtcNow.ToString('yyMMddHHmmss')),
+	[string]$OutputRoot = ('out/animation-performance/p/' + [DateTime]::UtcNow.ToString('yyMMddHHmmss')),
 
 	# DryRun validates contracts and prerequisites without creating a directory or
 	# launching CTest, an installed editor, an exported runtime, or Vulkan work.
@@ -527,7 +527,7 @@ try {
 	foreach ($spec in $runSpecs) {
 		$physicsRoot = Join-Path $output ("p/{0}" -f $spec.label)
 		$physicsLog = Join-Path $workloadLogRoot ("physics-{0}.log" -f $spec.label)
-		[void](Invoke-CheckedProcess $powershell @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $script:RepoRoot 'Tools/Physics/RunInstalledEditorPhysicsStress.ps1'),'-InstallRoot',$install,'-WorkRoot',$physicsRoot,'-ObjectCount','10000','-McpPort','43127','-ExplicitStepCount','100','-ActiveDynamicCount','1000','-SceneViewScenario','canonical','-StartupTimeoutSeconds','120','-WorkerCount','max','-Us3Scenario','large','-ParallelPreparationThreshold','512','-ParallelExtractionThreshold','512','-CaptureProcessMemory','-RunUs5ProfilerChecks','-CaptureLevel','detailed','-CaptureVersion','v2','-CaptureDurationSeconds','5','-AllowLiveStress') $script:RepoRoot $physicsLog @{})
+		[void](Invoke-CheckedProcess $powershell @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $script:RepoRoot 'Tools/Physics/RunInstalledEditorPhysicsStress.ps1'),'-InstallRoot',$install,'-WorkRoot',$physicsRoot,'-ObjectCount','10000','-McpPort','43127','-ExplicitStepCount','100','-ActiveDynamicCount','1000','-SceneViewScenario','canonical','-StartupTimeoutSeconds','120','-WorkerCount','max','-WorkerScalingScenario','large','-ParallelPreparationThreshold','512','-ParallelExtractionThreshold','512','-CaptureProcessMemory','-RunProfilerCaptureProfilerChecks','-CaptureLevel','detailed','-CaptureVersion','v2','-CaptureDurationSeconds','5','-AllowLiveStress') $script:RepoRoot $physicsLog @{})
 		$physicsDestination = Join-Path $physicsRoot 'normalized'; $physicsNormalized = Convert-PhysicsRun $physicsRoot $physicsDestination $spec.kind $spec.run $physics; if ($null -eq $normalized[$physics.id]) { $normalized[$physics.id] = @() }; $normalized[$physics.id] += $physicsNormalized
 	}
 
@@ -535,7 +535,7 @@ try {
 	foreach ($spec in $runSpecs) {
 		$exportRoot = Join-Path $output ("e/{0}" -f $spec.label)
 		$exportLog = Join-Path $workloadLogRoot ("export-{0}.log" -f $spec.label)
-		[void](Invoke-CheckedProcess $powershell @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $script:RepoRoot 'Tools/ExportRuntimeBaseline/RunBaseline.ps1'),'-BuildDir',$build,'-InstallRoot',$install,'-WorkRoot',$exportRoot,'-FixtureRoot',(Join-Path $script:RepoRoot 'Tests/Fixtures/ExportRuntimeBaseline'),'-PhysicsFixtureRoot',(Join-Path $script:RepoRoot 'Tests/Fixtures/PhysicsExportRuntime'),'-RunId',("a043-{0}" -f $spec.label)) $script:RepoRoot $exportLog @{})
+		[void](Invoke-CheckedProcess $powershell @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $script:RepoRoot 'Tools/ExportRuntimeBaseline/RunBaseline.ps1'),'-BuildDir',$build,'-InstallRoot',$install,'-WorkRoot',$exportRoot,'-FixtureRoot',(Join-Path $script:RepoRoot 'Tests/Fixtures/ExportRuntimeBaseline'),'-PhysicsFixtureRoot',(Join-Path $script:RepoRoot 'Tests/Fixtures/PhysicsExportRuntime'),'-RunId',("animation-performance-{0}" -f $spec.label)) $script:RepoRoot $exportLog @{})
 		$exportDestination = Join-Path $exportRoot 'normalized'; $exportNormalized = Convert-ExportRun $exportRoot $exportDestination $spec.kind $spec.run $export; if ($null -eq $normalized[$export.id]) { $normalized[$export.id] = @() }; $normalized[$export.id] += $exportNormalized
 		if ($spec.index -eq 0) { $rendererProject = Get-WarmupExportProject -WarmupRoot $exportRoot }
 	}

@@ -9,7 +9,7 @@ namespace TerraEngine::Tests
 		r.Add("VirtualGeometry.Aggregate.AssemblyStableOrder",
 			[](TestContext &c)
 			{
-				 auto a = TerraEngine::Editor::BuildVirtualGeometryAssemblyPrototypes({ 3, 1, 2 });
+				 auto a = TerraEngine::Editor::BuildVirtualGeometryAssemblyCandidates({ 3, 1, 2 });
 				c.Expect(a.size() == 3 && a[0].Valid() && a[0].sourceElementCount == 1, "Assembly prototypes are deterministic and covered.");
 				const auto transition = TerraEngine::Renderer::BuildVirtualGeometryAggregateTransition(a[0], a[1]);
 				c.Expect(transition.fromId == a[0].stableId && transition.toId == a[1].stableId, "Transitions retain stable aggregate identities.");
@@ -19,16 +19,16 @@ namespace TerraEngine::Tests
 			[](TestContext &c)
 			{
 				const auto foliage =
-					TerraEngine::Editor::BuildVirtualGeometryFoliageCurvePrototype(
+					TerraEngine::Editor::BuildVirtualGeometryFoliageCurveCandidate(
 						17u, false);
 				const auto curve =
-					TerraEngine::Editor::BuildVirtualGeometryFoliageCurvePrototype(
+					TerraEngine::Editor::BuildVirtualGeometryFoliageCurveCandidate(
 						17u, true);
 				const auto voxel =
-					TerraEngine::Editor::BuildVirtualGeometryVoxelPrototype(
+					TerraEngine::Editor::BuildVirtualGeometryVoxelCandidate(
 						17u, false);
 				const auto impostor =
-					TerraEngine::Editor::BuildVirtualGeometryVoxelPrototype(
+					TerraEngine::Editor::BuildVirtualGeometryVoxelCandidate(
 						17u, true);
 				c.Expect(
 					foliage.Valid() && curve.Valid()

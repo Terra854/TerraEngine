@@ -119,7 +119,7 @@ AnimationStatus DispatchEvaluationProgramCpu(const EvaluationProgram &program, E
 	}
 
 	// This intentionally performs no pose work yet. It is the checked dispatch
-	// seam that later T067-T070 evaluators fill without mutating the program.
+	// seam that later ImplementationCheck-ImplementationCheck evaluators fill without mutating the program.
 	EvaluationDispatchState staged{};
 	for (std::size_t index = 0U; index < program.instructions.size(); ++index) {
 		const EvaluationInstruction &instruction = program.instructions[index];

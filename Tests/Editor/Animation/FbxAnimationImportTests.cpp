@@ -125,7 +125,7 @@ namespace TerraEngine::EditorTests
 			return false;
 		}
 
-		// T035 must replace the legacy static-only downgrade. Keeping this contract
+		// ImplementationCheck must replace the legacy static-only downgrade. Keeping this contract
 		// at the public result boundary lets the future cooker choose its concrete
 		// binary records without coupling these tests to its private implementation.
 		void ExpectAnimatedFbxWasImported(

@@ -1,6 +1,7 @@
 // VulkanVirtualGeometryExecutor.cpp - bounded dispatch recording and barriers.
 
 #include "VulkanVirtualGeometryExecutor.h"
+#include "File Formats/TerraEngineMeshFile.h"
 
 #include <algorithm>
 #include <array>
@@ -35,6 +36,20 @@ namespace TerraEngine::Renderer::Vulkan
 			}
 			vkCmdPipelineBarrier(
 				commandBuffer, source, destination, 0u, 1u, &barrier, 0u, nullptr, 0u, nullptr);
+		}
+
+		void RecordProductionDecodeReadbackBarrier(VkCommandBuffer commandBuffer)
+		{
+			// The decode shader writes both bytes and a compact result row. The
+			// protected owner maps the readback buffer only after this boundary and
+			// its frame fence, never while a worker is still recording commands.
+			VkMemoryBarrier barrier{};
+			barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+			barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+			barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
+			vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+				VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+				0u, 1u, &barrier, 0u, nullptr, 0u, nullptr);
 		}
 	} // namespace
 
@@ -197,6 +212,183 @@ namespace TerraEngine::Renderer::Vulkan
 			plan.commandGeneration,
 			plan.evidenceId,
 			plan.unavailableReason.empty() ? "Vulkan virtual-geometry executor did not submit a command." : plan.unavailableReason };
+	}
+
+	VulkanDirectMeshletBatchPlan BuildVulkanDirectMeshletBatchPlan(
+		const std::vector<DirectMeshletBatch>& batches, bool meshTaskPathAvailable,
+		std::uint32_t meshletsPerTaskGroup)
+	{
+		VulkanDirectMeshletBatchPlan plan{};
+		if(!meshTaskPathAvailable || meshletsPerTaskGroup == 0u)
+		{
+			plan.rejectionReason = "The Vulkan mesh-task path is unavailable for direct meshlet batches.";
+			return plan;
+		}
+		for(const DirectMeshletBatch& batch : batches)
+		{
+			if(batch.geometryIdentity == 0u || batch.geometryGeneration == 0u
+				|| batch.meshletCount == 0u || batch.instanceIdentities.empty())
+			{
+				plan.draws.clear();
+				plan.rejectionReason = "A direct meshlet batch lacks a stable geometry identity, generation, meshlet range, or instance set.";
+				return plan;
+			}
+			if(batch.meshletCount > std::numeric_limits<std::uint32_t>::max()
+				- (meshletsPerTaskGroup - 1u))
+			{
+				plan.draws.clear();
+				plan.rejectionReason = "A direct meshlet batch overflows task-group rounding.";
+				return plan;
+			}
+			VulkanDirectMeshletDrawRecord draw{};
+			draw.geometryIdentity = batch.geometryIdentity;
+			draw.geometryGeneration = batch.geometryGeneration;
+			draw.materialIdentity = batch.materialIdentity;
+			draw.taskGroupCount = (batch.meshletCount + meshletsPerTaskGroup - 1u) / meshletsPerTaskGroup;
+			draw.instanceCount = static_cast<std::uint32_t>(batch.instanceIdentities.size());
+			plan.draws.push_back(draw);
+		}
+		// Every draw here is direct by construction. These counters make a route
+		// audit explicit: recording this plan cannot create a VG executor or page
+		// feedback request, even when the same frame has other VG draws.
+		plan.suppressedVirtualGeometryExecutors = static_cast<std::uint32_t>(plan.draws.size());
+		plan.suppressedPageRequests = static_cast<std::uint32_t>(plan.draws.size());
+		plan.valid = true;
+		return plan;
+	}
+
+	VulkanVirtualGeometryExecutorRecordingResult RecordVulkanDirectMeshletBatches(
+		VkCommandBuffer commandBuffer, const VulkanDirectMeshletBatchPlan& plan,
+		VkBuffer existingIndirectBuffer, VkDeviceSize firstIndirectByteOffset)
+	{
+		VulkanVirtualGeometryExecutorRecordingResult result{};
+		if(!plan.valid || commandBuffer == VK_NULL_HANDLE || existingIndirectBuffer == VK_NULL_HANDLE)
+		{
+			result.failureReason = plan.rejectionReason.empty()
+				? "Direct meshlet batches require a valid plan, command buffer, and existing indirect mesh-task buffer."
+				: plan.rejectionReason;
+			return result;
+		}
+		for(std::size_t index = 0u; index < plan.draws.size(); ++index)
+		{
+			// VulkanContext owns and fills this ordinary frame indirect buffer. Reusing
+			// it keeps direct route submission on the established mesh-task path and
+			// avoids allocating any virtual-geometry executor resource.
+			const VkDeviceSize offset = firstIndirectByteOffset
+				+ static_cast<VkDeviceSize>(index) * sizeof(VkDrawMeshTasksIndirectCommandEXT);
+			vkCmdDrawMeshTasksIndirectEXT(commandBuffer, existingIndirectBuffer, offset, 1u,
+				sizeof(VkDrawMeshTasksIndirectCommandEXT));
+			++result.dispatchCount;
+		}
+		result.recorded = true;
+		return result;
+	}
+
+	VulkanVirtualGeometryProductionDecodePlan BuildVulkanVirtualGeometryProductionDecodePlan(
+		VulkanVirtualGeometryProductionDecodeRequest request, std::uint64_t generation,
+		std::uint64_t expectedDecodedHash,
+		const VulkanVirtualGeometryProductionDecodeResources& resources,
+		const VulkanVirtualGeometryProductionDecodePipelines& pipelines)
+	{
+		constexpr std::uint32_t kExpandedProductionProfile = 1u;
+		constexpr std::uint32_t kMaximumDecodeBytes = 262144u;
+		VulkanVirtualGeometryProductionDecodePlan plan{};
+		plan.request = request;
+		plan.generation = generation;
+		plan.expectedDecodedHash = expectedDecodedHash;
+		plan.supportedProfile = request.profileId == kExpandedProductionProfile;
+		if(!plan.supportedProfile)
+		{
+			plan.unavailableReason = "Only ExpandedProduction has a Vulkan decode kernel; meshoptimizer profiles remain CPU fallback only.";
+			return plan;
+		}
+		const bool invalidRange = generation == 0u || expectedDecodedHash == 0u
+			|| request.codecVersion == 0u || request.requestIdentity == 0u
+			|| request.encodedByteCount != request.decodedByteCount
+			|| request.decodedByteCount == 0u || request.decodedByteCount > kMaximumDecodeBytes
+			|| (request.decodedByteCount & 3u) != 0u
+			|| request.encodedByteOffset > resources.encodedCapacityBytes
+			|| request.encodedByteCount > resources.encodedCapacityBytes - request.encodedByteOffset
+			|| request.decodedByteOffset > resources.decodedCapacityBytes
+			|| request.decodedByteCount > resources.decodedCapacityBytes - request.decodedByteOffset
+			|| request.decodedByteCount > request.outputCapacityBytes;
+		if(invalidRange)
+		{
+			plan.unavailableReason = "ExpandedProduction decode request violates the shared bounded ABI.";
+			return plan;
+		}
+		plan.resourcesReady = resources.resourcesOwnedByFrame
+			&& resources.requestBuffer != VK_NULL_HANDLE && resources.encodedBuffer != VK_NULL_HANDLE
+			&& resources.decodedBuffer != VK_NULL_HANDLE && resources.resultReadbackBuffer != VK_NULL_HANDLE
+			&& resources.descriptorSet != VK_NULL_HANDLE;
+		plan.pipelineReady = pipelines.layout != VK_NULL_HANDLE
+			&& pipelines.expandedProductionDecode != VK_NULL_HANDLE;
+		if(!plan.resourcesReady)
+			plan.unavailableReason = "ExpandedProduction decode has no frame-owned descriptor/readback resources.";
+		else if(!plan.pipelineReady)
+			plan.unavailableReason = "ExpandedProduction decode pipeline has not been created.";
+		else
+			plan.valid = true;
+		return plan;
+	}
+
+	VulkanVirtualGeometryExecutorRecordingResult RecordVulkanVirtualGeometryProductionDecode(
+		VkCommandBuffer commandBuffer, const VulkanVirtualGeometryProductionDecodePlan& plan,
+		const VulkanVirtualGeometryProductionDecodeResources& resources,
+		const VulkanVirtualGeometryProductionDecodePipelines& pipelines)
+	{
+		VulkanVirtualGeometryExecutorRecordingResult result{};
+		if(!plan.valid || commandBuffer == VK_NULL_HANDLE)
+		{
+			result.failureReason = plan.unavailableReason.empty()
+				? "ExpandedProduction decode plan is not ready for protected Vulkan recording."
+				: plan.unavailableReason;
+			return result;
+		}
+		const std::array<std::uint32_t, 4u> constants{
+			// Each protected record call submits one request row, so its descriptor
+			// slice begins at zero. requestIdentity stays an opaque parity token.
+			0u, resources.encodedCapacityBytes,
+			resources.decodedCapacityBytes, 0u };
+		vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines.layout,
+			0u, 1u, &resources.descriptorSet, 0u, nullptr);
+		vkCmdPushConstants(commandBuffer, pipelines.layout, VK_SHADER_STAGE_COMPUTE_BIT,
+			0u, sizeof(constants), constants.data());
+		vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+			pipelines.expandedProductionDecode);
+		vkCmdDispatch(commandBuffer, 1u, 1u, 1u);
+		RecordProductionDecodeReadbackBarrier(commandBuffer);
+		result.recorded = true;
+		result.dispatchCount = 1u;
+		result.barrierCount = 1u;
+		return result;
+	}
+
+	VulkanVirtualGeometryProductionDecodeParityReceipt VerifyVulkanVirtualGeometryProductionDecodeParity(
+		const VulkanVirtualGeometryProductionDecodePlan& plan,
+		const VulkanVirtualGeometryProductionDecodeResult& deviceResult,
+		std::span<const std::uint8_t> readbackBytes)
+	{
+		constexpr std::uint32_t kDecodeComplete = 1u;
+		VulkanVirtualGeometryProductionDecodeParityReceipt receipt{};
+		receipt.generation = plan.generation;
+		if(!plan.valid || deviceResult.requestIdentity != plan.request.requestIdentity
+			|| deviceResult.status != kDecodeComplete
+			|| deviceResult.decodedByteCount != plan.request.decodedByteCount
+			|| readbackBytes.size() != plan.request.decodedByteCount)
+		{
+			receipt.reason = "Device decode did not complete with the requested identity and byte count; retain the prior CPU-published generation.";
+			return receipt;
+		}
+		if(CalculateVirtualGeometryCompactHash(readbackBytes) != plan.expectedDecodedHash)
+		{
+			receipt.reason = "Device decode bytes disagree with the CPU reference hash; retain the prior CPU-published generation.";
+			return receipt;
+		}
+		receipt.deviceDecodeAvailable = true;
+		receipt.acceptedForPublication = true;
+		receipt.reason = "ExpandedProduction Vulkan decode completed and matched the CPU reference hash.";
+		return receipt;
 	}
 
 	VulkanVirtualGeometryVisibilityPlan BuildVulkanVirtualGeometryVisibilityPlan(

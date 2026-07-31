@@ -683,7 +683,7 @@ namespace
 		std::cout << "CompileReport: " << BuildReportJson(report) << "\n";
 		std::cout
 			<< "Summary: directReplacement=true"
-			<< " backwardCompatibility=false"
+			<< " canonicalOnly=true"
 			<< " version=" << report.formatVersion
 			<< " deterministicReady=" << ToBoolText(report.deterministicReady)
 			<< " gpuDirectPass=" << ToBoolText(report.runtimeValidationPass)

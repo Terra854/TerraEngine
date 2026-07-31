@@ -1,7 +1,6 @@
 {
 	"schemaVersion": 2,
-	"phase": 3,
-	"id": "phase-3",
+	"id": "visibility-parity",
 	"title": "Hardware visibility and route parity",
 	"requiredTools": ["renderer.virtualGeometry.capabilityEvidence", "renderer.virtualGeometry.stats", "camera.capture_custom", "game_view.capture"],
 	"operations": [

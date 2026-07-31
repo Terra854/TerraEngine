@@ -95,6 +95,6 @@ ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R '^Engine\.Physics
 cmake --build --preset RelWithDebInfo --target install
 ```
 
-The US3 suite covers concurrent deterministic commands, all query contracts,
+The worker-scaling suite covers concurrent deterministic commands, all query contracts,
 10,000-request bounds, event ordering/filtering/overflow, provider query/contact
 behavior, and stale world/object/slot publication races.

@@ -1,4 +1,4 @@
-// AnimationScaleFoundationIntegrationTests.cpp - production T123-T127 wiring checks.
+// AnimationScaleFoundationIntegrationTests.cpp - production ImplementationCheck-ImplementationCheck wiring checks.
 
 #include "TestHarness.h"
 

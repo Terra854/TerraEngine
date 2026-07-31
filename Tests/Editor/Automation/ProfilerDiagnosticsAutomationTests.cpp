@@ -66,9 +66,9 @@ namespace TerraEngine::EditorTests
 			context.Expect(source.find("\"diagnosticCoalesced\"") != std::string::npos
 					&& source.find("\"diagnosticDropped\"") != std::string::npos,
 				"Animated-page automation must preserve bounded coalesced and dropped diagnostic counters.");
-			context.Expect(source.find("\"animatedPageDirectoryAvailable\"") != std::string::npos
-					&& source.find("\"animatedPageEntryCount\"") != std::string::npos
-					&& source.find("\"animatedPageSectionSetCount\"") != std::string::npos,
+			context.Expect(source.find("\"deformableDemandedPagesAvailable\"") != std::string::npos
+					&& source.find("\"deformableDemandedPageEntryCount\"") != std::string::npos
+					&& source.find("\"deformableDemandedPageSectionSetCount\"") != std::string::npos,
 				"Animation diagnostics must explain loaded-mesh page-demand eligibility without exposing page bytes.");
 			context.Expect(source.find("\"animatedPageDemandCount\"") != std::string::npos,
 				"Animation diagnostics must expose the immutable frame's resulting animated-page demand count.");

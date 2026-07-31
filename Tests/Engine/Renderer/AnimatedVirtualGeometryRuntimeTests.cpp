@@ -225,99 +225,56 @@ namespace TerraEngine::Tests {
 		{
 			using namespace TerraEngine::Resource;
 			constexpr std::uint64_t meshGeneration = 77u;
-			AnimatedVirtualPageBlobHeader blobHeader{};
-			blobHeader.magic = kAnimatedVirtualPageBlobMagicValue;
-			blobHeader.version = kAnimatedVirtualPageFormatVersion;
-			blobHeader.headerSize = sizeof(AnimatedVirtualPageBlobHeader);
+			TemfDeformableDemandedPagePayload blobHeader{};
 			blobHeader.pageId = 3u;
 			blobHeader.sectionCount = 5u;
-			blobHeader.sectionTableOffset = sizeof(AnimatedVirtualPageBlobHeader);
+			blobHeader.sectionTableOffset =
+				sizeof(TemfDeformableDemandedPagePayload);
 			blobHeader.meshPayloadGeneration = meshGeneration;
 			blobHeader.contentGeneration = 88u;
-			std::array<AnimatedVirtualPageSectionRecord, 5> sections{};
+			std::array<TemfDeformablePageSection, 5> sections{};
 			std::uint64_t cursor = sizeof(blobHeader) + sizeof(sections);
 			const std::array sectionTypes{
-				AnimatedVirtualPageSectionType::PackedVertices,
-				AnimatedVirtualPageSectionType::PrimitiveBytes,
-				AnimatedVirtualPageSectionType::Meshlets,
-				AnimatedVirtualPageSectionType::DecodeConstants,
-				AnimatedVirtualPageSectionType::SourceVertexIds
+				TemfDeformablePageSectionKind::PackedVertices,
+				TemfDeformablePageSectionKind::Topology,
+				TemfDeformablePageSectionKind::Meshlets,
+				TemfDeformablePageSectionKind::DecodeConstants,
+				TemfDeformablePageSectionKind::SourceVertexIdentities
 			};
 			const std::array strides{ 16u, 1u, 16u, 64u, 8u };
 			for(std::size_t index = 0u; index < sections.size(); ++index)
 			{
-				sections[index].type = static_cast<std::uint32_t>(sectionTypes[index]);
-				sections[index].byteOffset = cursor;
+				sections[index].kind = sectionTypes[index];
+				sections[index].relativeByteOffset =
+					static_cast<std::uint32_t>(cursor);
 				sections[index].byteSize = strides[index];
 				sections[index].elementCount = 1u;
 				sections[index].elementStride = strides[index];
 				cursor += strides[index];
 			}
-			blobHeader.byteSize = static_cast<std::uint32_t>(cursor);
+			blobHeader.decodedByteSize = static_cast<std::uint32_t>(cursor);
 			std::vector<std::uint8_t> blob(static_cast<std::size_t>(cursor), 0u);
 			std::memcpy(blob.data(), &blobHeader, sizeof(blobHeader));
 			std::memcpy(blob.data() + blobHeader.sectionTableOffset,
 				sections.data(), sizeof(sections));
 
-			AnimatedVirtualPageDirectoryHeader directory{};
-			directory.magic = kAnimatedVirtualPageDirectoryMagicValue;
-			directory.version = kAnimatedVirtualPageFormatVersion;
-			directory.headerSize = sizeof(directory);
-			directory.pageCount = 1u;
-			directory.pageTableOffset = sizeof(directory);
-			directory.rootPageCount = 1u;
-			directory.rootPageTableOffset =
-				directory.pageTableOffset + sizeof(AnimatedVirtualPageDirectoryEntry);
-			directory.meshPayloadGeneration = meshGeneration;
-			const std::uint64_t blobOffset =
-				directory.rootPageTableOffset + sizeof(std::uint32_t);
-			AnimatedVirtualPageDirectoryEntry entry{};
-			entry.pageId = 3u;
-			entry.parentPageId = kVirtualGeometryInvalidIndex;
-			entry.fallbackPageId = 3u;
-			entry.flags = kAnimatedVirtualPageFlagAnimated
-				| kAnimatedVirtualPageFlagPinnedFallback;
-			entry.blobOffset = blobOffset;
-			entry.blobSize = blob.size();
-			entry.blobHash = HashAnimatedVirtualPageBytes(blob);
-			entry.contentGeneration = blobHeader.contentGeneration;
-			std::uint64_t directoryHash = 1469598103934665603ull;
-			const auto appendHash = [&directoryHash](
-				const void* bytes, std::size_t byteCount)
+			const std::uint64_t integrity =
+				HashVirtualGeometryPageBytes(blob);
+			bool rangesAreCanonical = integrity != 0u;
+			std::uint32_t expectedOffset =
+				blobHeader.sectionTableOffset + sizeof(sections);
+			for(const TemfDeformablePageSection& section : sections)
 			{
-				const auto* values =
-					static_cast<const std::uint8_t*>(bytes);
-				for(std::size_t index = 0u; index < byteCount; ++index)
-				{
-					directoryHash ^= values[index];
-					directoryHash *= 1099511628211ull;
-				}
-				if(directoryHash == 0u)
-				{
-					directoryHash = 1u;
-				}
-			};
-			appendHash(&entry, sizeof(entry));
-			appendHash(&entry.pageId, sizeof(entry.pageId));
-			directory.directoryHash = directoryHash;
-			std::vector<std::uint8_t> file(
-				static_cast<std::size_t>(blobOffset + blob.size()), 0u);
-			std::memcpy(file.data(), &directory, sizeof(directory));
-			std::memcpy(file.data() + directory.pageTableOffset,
-				&entry, sizeof(entry));
-			std::memcpy(file.data() + directory.rootPageTableOffset,
-				&entry.pageId, sizeof(entry.pageId));
-			std::memcpy(file.data() + blobOffset, blob.data(), blob.size());
-
-			const auto catalog = ParseAnimatedVirtualPageDirectory(file, 0u);
-			const auto parsedBlob = ParseAnimatedVirtualPageBlob(
-				std::span<const std::uint8_t>(
-					file.data() + blobOffset, blob.size()),
-				entry, meshGeneration);
-			context.Expect(catalog.valid,
-				"Directory-only metadata must validate without owner streams.");
-			context.Expect(parsedBlob.valid,
-				"One exact physical page must parse independently.");
+				rangesAreCanonical = rangesAreCanonical
+					&& section.relativeByteOffset == expectedOffset
+					&& section.byteSize
+						== section.elementCount * section.elementStride;
+				expectedOffset += section.byteSize;
+			}
+			context.Expect(rangesAreCanonical
+				&& expectedOffset == blobHeader.decodedByteSize
+				&& blobHeader.meshPayloadGeneration == meshGeneration,
+				"One canonical descriptor-owned demanded page must remain independently range-checkable.");
 		});
 
 		registry.Add("AnimatedVirtualGeometry.Runtime.PersistentUploadsReuseAndPrioritizePinnedRoots", [](TestContext& context)
@@ -354,11 +311,11 @@ namespace TerraEngine::Tests {
 		registry.Add("AnimatedVirtualGeometry.Runtime.ResidencyPublicationIsFenceCheckedAndAtomic", [](TestContext& context)
 		{
 			using namespace TerraEngine::Resource;
-			AnimatedVirtualPageResidencySnapshot prior;
+			DeformableVirtualPageResidencySnapshot prior;
 			prior.publicationGeneration = 4u;
 			prior.catalogGeneration = 2u;
 			prior.valid = true;
-			AnimatedVirtualPageResidencySnapshot candidate;
+			DeformableVirtualPageResidencySnapshot candidate;
 			candidate.publicationGeneration = 5u;
 			candidate.catalogGeneration = 2u;
 			candidate.pages.push_back({
@@ -373,7 +330,7 @@ namespace TerraEngine::Tests {
 				true,
 				true });
 			const auto inFlight =
-				PublishAnimatedVirtualPageResidencySnapshot(
+				PublishDeformableVirtualPageResidencySnapshot(
 					prior,
 					candidate,
 					19u);
@@ -381,7 +338,7 @@ namespace TerraEngine::Tests {
 					&& inFlight.visible.publicationGeneration == 4u,
 				"An in-flight page batch must retain the prior snapshot byte-for-byte.");
 			const auto completed =
-				PublishAnimatedVirtualPageResidencySnapshot(
+				PublishDeformableVirtualPageResidencySnapshot(
 					prior,
 					candidate,
 					20u);

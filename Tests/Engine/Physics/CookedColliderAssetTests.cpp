@@ -1,4 +1,4 @@
-// T050 tests cover the immutable cooked envelope and its corruption guards.
+// ImplementationCheck tests cover the immutable cooked envelope and its corruption guards.
 #include "../TestHarness.h"
 #include "Physics/Assets/CookedColliderAsset.h"
 

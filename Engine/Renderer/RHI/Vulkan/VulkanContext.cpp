@@ -1525,6 +1525,10 @@ void VulkanContext::BeginFrame() {
 			completedCandidates.clear();
 		}
 	}
+	// The slot fence has completed above. Consume the decoder's host-visible
+	// receipt here without a second wait, retaining a prior proven generation on
+	// any mismatch or mapping failure.
+	impl->CompleteVulkanVirtualGeometryProductionDecode(impl->currentFrame);
 	// Reusing a frame slot is the sole completion boundary for its animation
 	// generation. No pose data is read back: the completed receipt only records
 	// that the existing graphics submission and its compute prefix are finished.
@@ -3551,14 +3555,46 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	// boundary. RenderSystem owns the value records; Vulkan owns the backing
 	// buffers and may reuse them only when the frame slot and view identity match.
 	impl->PublishVirtualGeometryDecodedPageResources(frameData);
+	impl->PrepareVulkanVirtualGeometryProductionDecode(frameData);
+	if(impl->currentFrame < impl->virtualGeometryProductionDecodeResourcesByFrame.size()) {
+		auto& decodeResources = impl->virtualGeometryProductionDecodeResourcesByFrame[impl->currentFrame];
+		if(decodeResources.plan.valid && !decodeResources.completionPending) {
+			TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryProductionDecodeResources recordingResources{};
+			recordingResources.requestBuffer = decodeResources.requestBuffer.buffer;
+			recordingResources.encodedBuffer = decodeResources.encodedBuffer.buffer;
+			recordingResources.decodedBuffer = decodeResources.decodedBuffer.buffer;
+			recordingResources.resultReadbackBuffer = decodeResources.resultReadbackBuffer.buffer;
+			recordingResources.descriptorSet = decodeResources.descriptorSet;
+			recordingResources.encodedCapacityBytes = static_cast<std::uint32_t>(decodeResources.encodedBuffer.size);
+			recordingResources.decodedCapacityBytes = static_cast<std::uint32_t>(decodeResources.decodedBuffer.size);
+			recordingResources.resourcesOwnedByFrame = true;
+			const auto decodeRecording = TerraEngine::Renderer::Vulkan::RecordVulkanVirtualGeometryProductionDecode(
+				cmd, decodeResources.plan, recordingResources, impl->virtualGeometryProductionDecodePipelines);
+			if(decodeRecording.recorded) {
+				// Completion is consumed at the next reuse of this exact frame slot.
+				decodeResources.completionPending = true;
+			}
+			else {
+				impl->virtualGeometryProductionDecodeUnavailableReason = decodeRecording.failureReason;
+			}
+		}
+	}
 	impl->PublishVirtualGeometryGpuPacketResources(frameData, renderViewType, diagnosticViewId, impl->backendFrameSerial);
-	if(!frameData.virtualGeometryGpuPackets.empty()
+	const bool hasDirectGeometryCommands = std::any_of(
+		frameData.commands.begin(),
+		frameData.commands.end(),
+		[](const DrawCommand& command)
+		{
+			return command.geometryRoute == TerraEngine::Renderer::GeometryRoute::DirectMeshlet;
+		});
+	const bool hasVirtualGeometryTimestampWork = !frameData.virtualGeometryGpuPackets.empty()
 		|| !frameData.virtualGeometryGpuBatches.empty()
-		|| !frameData.virtualGeometryGeneratedSubmissions.empty())
+		|| !frameData.virtualGeometryGeneratedSubmissions.empty();
+	if(hasVirtualGeometryTimestampWork || hasDirectGeometryCommands)
 	{
-		// Upload immutable source packets, then record the three GPU-owned stages.
-		// Timestamp evidence is published only after the frame-slot fence, so
-		// diagnostics cannot mistake CPU preparation for completed GPU work.
+		// A direct-only frame still owns a real indexed raster timestamp below.
+		// Start the same fence-delayed query frame for either representation so
+		// route calibration never substitutes CPU submit or wall-clock timing.
 		impl->BeginVirtualGeometryTimestampFrame(
 			impl->currentFrame,
 			view,
@@ -3566,6 +3602,9 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			diagnosticViewId,
 			impl->renderSessionGeneration);
 
+	}
+	if(hasVirtualGeometryTimestampWork)
+	{
 		// Every live compute stage owns its own timestamp interval. The indirect
 		// stage records a real zero-work indirect dispatch when no packets exist;
 		// non-empty validated output is consumed by the mesh-task draw path below.
@@ -4840,7 +4879,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		const bool pageLocalGeometry =
 			requestedPageLocalGeometry
 			&& impl->activeVirtualGeometryPagePayloadBufferIndex != VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
-		// A validated compute bridge is compatible with a self-contained AVPB
+		// A validated compute bridge is compatible with a self-contained demanded-page
 		// packet: the mesh shader resolves the packet's page id through that
 		// bridge and reads current deformed vertices. Only an absent/corrupt page
 		// descriptor falls back to the owner range below.
@@ -5835,6 +5874,21 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			1u, &depthReuseBarrier);
 	}
 	impl->RecordDiagnosticCheckpoint(cmd, view == ViewType::Scene ? "scene.mainpass.begin" : "game.mainpass.begin");
+	if(hasDirectGeometryCommands)
+	{
+		// The direct-resident route uses the ordinary mesh-task/indexed command
+		// stream. Bracket its completed main render pass with a dedicated query so
+		// low-poly calibration compares real GPU work, not CPU command recording.
+		impl->MarkVirtualGeometryTimestampBegin(
+			cmd,
+			impl->currentFrame,
+			view,
+			TerraEngine::Renderer::VirtualGeometryBackendStage::HardwareRaster,
+			TerraEngine::Renderer::VirtualGeometryBackendRoute::Indexed,
+			impl->backendFrameSerial,
+			impl->backendFrameSerial,
+			impl->backendFrameSerial);
+	}
 	vkCmdBeginRenderPass(cmd, &renderPassInfo, contents);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!secondaryBuffers.empty()) {
@@ -5842,6 +5896,14 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	}
 
 	vkCmdEndRenderPass(cmd);
+	if(hasDirectGeometryCommands)
+	{
+		impl->MarkVirtualGeometryTimestampEnd(
+			cmd,
+			impl->currentFrame,
+			view,
+			TerraEngine::Renderer::VirtualGeometryBackendStage::HardwareRaster);
+	}
 	if (impl->editorMode || renderingDedicatedCaptureTarget) {
 		Impl::OffscreenResources& identityTarget = renderingDedicatedCaptureTarget
 			? impl->captureView
@@ -7336,7 +7398,16 @@ TerraEngine::Renderer::BackendCapabilityProfile VulkanContext::GetBackendCapabil
 	profile.supportsWorkerOwnedPreparation = true;
 	profile.supportsImageReadback = true;
 	const bool virtualGeometryMeshShaderReady = SupportsVirtualGeometryMeshShaderRoute();
-	profile.supportsVirtualGeometryGpuPacketBuffers = virtualGeometryMeshShaderReady;
+	// Packet storage and compute execution require a live Vulkan device, not
+	// mesh-shader support. Keeping this bootstrap capability independent lets a
+	// first virtual-geometry frame create and execute the pipelines whose
+	// fence-delayed receipts promote the stronger stage-evidence flags below.
+	// Hardware raster availability remains available separately through
+	// SupportsVirtualGeometryMeshShaderRoute().
+	profile.supportsVirtualGeometryGpuPacketBuffers =
+		impl != nullptr
+		&& impl->device != VK_NULL_HANDLE
+		&& impl->descriptorPool != VK_NULL_HANDLE;
 	// A compaction capability becomes available only for the current view after
 	// all resources, descriptor bindings, and the real compute pipeline are
 	// ready. Completion remains a separate, delayed receipt after the slot fence.
@@ -7380,6 +7451,16 @@ TerraEngine::Renderer::BackendCapabilityProfile VulkanContext::GetBackendCapabil
 		profile.diagnosticCapabilities.push_back(
 			"virtual-geometry-executor-unavailable: "
 				+ impl->latestVirtualGeometryExecutorPlan.unavailableReason);
+	}
+	profile.diagnosticCapabilities.push_back(
+		impl->completedVirtualGeometryProductionDecodeEvidence
+			? "virtual-geometry-expanded-production-device-decode-parity-ready: generation="
+				+ std::to_string(impl->publishedVirtualGeometryProductionDecodeGeneration)
+			: "virtual-geometry-expanded-production-device-decode-cpu-fallback");
+	if(!impl->virtualGeometryProductionDecodeUnavailableReason.empty()) {
+		profile.diagnosticCapabilities.push_back(
+			"virtual-geometry-expanded-production-device-decode-unavailable: "
+				+ impl->virtualGeometryProductionDecodeUnavailableReason);
 	}
 	return profile;
 }
@@ -9340,9 +9421,20 @@ void VulkanContext::Impl::ClearResources() {
 	{
 		candidates.clear();
 	}
+	for(auto& resources : virtualGeometryProductionDecodeResourcesByFrame)
+	{
+		DestroyBufferImmediate(resources.requestBuffer);
+		DestroyBufferImmediate(resources.encodedBuffer);
+		DestroyBufferImmediate(resources.decodedBuffer);
+		DestroyBufferImmediate(resources.resultReadbackBuffer);
+		resources = {};
+	}
+	completedVirtualGeometryProductionDecodeEvidence = false;
+	publishedVirtualGeometryProductionDecodeGeneration = 0u;
 	// The compute pipeline owns a device-local descriptor layout. Tear it down
 	// with the retired per-view sets so a recovery cannot retain old handles.
 	DestroyVulkanVirtualGeometryExecutorPipeline();
+	DestroyVulkanVirtualGeometryProductionDecodePipeline();
 	DestroyVulkanVirtualGeometryVisibilityPipelines();
 
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.

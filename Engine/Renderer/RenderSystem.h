@@ -409,6 +409,10 @@ private:
 	TerraEngine::Renderer::RendererRecoveryPolicy rendererRecoveryPolicy = TerraEngine::Renderer::MakeEditorRendererRecoveryPolicy();
 	TerraEngine::Renderer::RenderDiagnosticsSummary latestRenderGraphDiagnostics{};
 	TerraEngine::Renderer::RenderFrameSnapshot latestRenderFrameSnapshot{};
+	// Worker route preparation publishes only copied counters here. Protected
+	// backend/publication stages consume a snapshot of these records, never a
+	// live mesh or resource-manager object.
+	std::vector<TerraEngine::Renderer::GeometryRouteFramePlan> latestGeometryRouteFramePlans;
 	std::vector<GpuVirtualGeometryPacketRecord> latestGameVirtualGeometryVisibilityRecords;
 	std::vector<GpuVirtualGeometryPacketRecord> latestSceneVirtualGeometryVisibilityRecords;
 	std::optional<VirtualGeometryVisibilityPick> latestSceneAuthoritativeIdentityPick;
@@ -432,6 +436,9 @@ private:
 	// Workers only receive immutable snapshots of the resulting state, so Scene
 	// View, Game View, and future render targets cannot share mutable decisions.
 	std::unordered_map<std::uint64_t, TerraEngine::Renderer::VirtualGeometryClusterSelectionResult> virtualGeometryTransitionCache;
+	// Protected frame capture advances hysteresis only from prior immutable route
+	// decisions. Workers receive the resulting state but never mutate this map.
+	std::unordered_map<std::uint64_t, TerraEngine::Renderer::GeometryRoutePolicyState> geometryRoutePolicyStates;
 	// Each rendered target owns its visibility history policy. Compatible views
 	// may reuse immutable geometry/residency, but never share a mutable Hi-Z
 	// history unless the policy explicitly assigns the same owner.

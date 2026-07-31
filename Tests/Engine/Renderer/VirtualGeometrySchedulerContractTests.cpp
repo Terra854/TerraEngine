@@ -114,5 +114,40 @@ namespace TerraEngine::Tests
 				context.Expect(snapshot != nullptr && Contains(snapshot->explicitDependencies, "VirtualGeometryStreamingSystem/Render/PagePublish"),
 					"RenderSnapshot must wait for the protected page publication descriptor, not a scene-mutation flush.");
 			});
+		registry.Add("VirtualGeometry.Scheduler.RoutePreparationAndSuppressionExecute",
+			[](TestContext &context)
+			{
+				const auto workloads = RenderSystem::Instance().DeclareFrameWorkloads(0.0F);
+				const auto *routePrepare = FindWorkload(workloads, "GeometryRoutePrepare");
+				const auto *vgPrepare = FindWorkload(workloads, "VirtualGeometryPrepare");
+				context.Expect(routePrepare != nullptr, "Route selection must declare a worker-safe GeometryRoutePrepare workload.");
+				context.Expect(vgPrepare != nullptr, "VirtualGeometry traversal must remain a separately declared workload.");
+				if (routePrepare == nullptr || vgPrepare == nullptr)
+					return;
+				context.Expect(routePrepare->workerEligible && !routePrepare->mainThreadRequired && static_cast<bool>(routePrepare->work),
+					"GeometryRoutePrepare must execute immutable route scoring on workers.");
+				context.Expect(Contains(routePrepare->writes, "GeometryRouteDecisions"),
+					"Route preparation must publish typed route decisions.");
+				context.Expect(Contains(vgPrepare->reads, "GeometryRouteDecisions"),
+					"VG traversal must consume route decisions rather than re-evaluate live policy.");
+				context.Expect(Contains(routePrepare->writes, "DirectMeshletBatches"),
+					"Direct routes must publish direct batches without allocating VG executor work.");
+			});
+
+		registry.Add("VirtualGeometry.Scheduler.ProtectedCommitPublishesExecutionEvidence",
+			[](TestContext &context)
+			{
+				const auto workloads = RenderSystem::Instance().DeclareFrameWorkloads(0.0F);
+				const auto *commit = FindWorkload(workloads, "BackendCommit");
+				const auto *publication = FindWorkload(workloads, "RenderPublication");
+				context.Expect(commit != nullptr && publication != nullptr,
+					"Protected backend commit and publication workloads must remain explicit.");
+				if (commit == nullptr || publication == nullptr)
+					return;
+				context.Expect(commit->mainThreadRequired && !commit->workerEligible && static_cast<bool>(commit->work),
+					"BackendCommit must be the executable protected device ownership boundary.");
+				context.Expect(publication->mainThreadRequired && publication->sameFrameVisibilityRequired && static_cast<bool>(publication->work),
+					"RenderPublication must expose an executable protected visibility boundary.");
+			});
 	}
 } // namespace TerraEngine::Tests

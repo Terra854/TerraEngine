@@ -114,5 +114,129 @@ namespace TerraEngine::Renderer
 		std::string integrityHash;
 	};
 
+	enum class VirtualGeometryComparisonClassification : std::uint8_t
+	{
+		Superiority = 0u,
+		Parity = 1u,
+		Regression = 2u,
+		Incomparable = 3u,
+		Insufficient = 4u
+	};
+
+	struct VirtualGeometryRouteEvidence
+	{
+		std::string selectedRoute;
+		std::string selectionSource;
+		std::string policyIdentity;
+		std::string calibrationIdentity;
+		std::optional<double> estimatedCost;
+		std::optional<double> measuredCost;
+		std::optional<double> confidenceMargin;
+		std::uint32_t stableFrameCount = 0u;
+		std::uint64_t sharedGeometryBytes = 0u;
+		std::uint32_t directBatchCount = 0u;
+		std::uint32_t directInstanceCount = 0u;
+		std::uint32_t suppressedPageRequests = 0u;
+		std::uint32_t suppressedDecodeBlocks = 0u;
+		std::uint32_t suppressedResidencyRecords = 0u;
+		std::string fallbackReason;
+	};
+
+	struct VirtualGeometryCodecEvidence
+	{
+		std::string profileIdentity;
+		std::string quantizationProfileIdentity;
+		std::uint32_t pageSizeBytes = 0u;
+		std::uint64_t storedBytes = 0u;
+		std::uint64_t decodedBytes = 0u;
+		std::uint32_t blockCount = 0u;
+		std::uint64_t unusedPageBytes = 0u;
+		std::optional<double> requestAmplification;
+		std::optional<std::uint64_t> buildNanoseconds;
+		std::optional<std::uint64_t> processorDecodeNanoseconds;
+		std::optional<std::uint64_t> deviceDecodeNanoseconds;
+		bool independentDecodePassed = false;
+		bool integrityPassed = false;
+		std::vector<std::string> rejectionReasons;
+	};
+
+	struct VirtualGeometryQuantizationEvidence
+	{
+		std::string profileIdentity;
+		std::string domainSetHash;
+		std::array<std::uint8_t, 4u> positionBits{};
+		std::array<std::uint8_t, 4u> attributeBits{};
+		std::optional<double> maximumObjectError;
+		std::optional<double> p95ObjectError;
+		std::optional<double> rmsObjectError;
+		std::optional<double> maximumScreenError;
+		std::uint64_t sharedBoundaryMismatchCount = 0u;
+		std::uint64_t conservativeBoundsFailureCount = 0u;
+		std::uint64_t detailOrderingFailureCount = 0u;
+		std::vector<std::string> rejectionReasons;
+	};
+
+	struct VirtualGeometryComparativeMetric
+	{
+		std::string name;
+		std::string unit;
+		bool protectedMetric = false;
+		std::vector<double> candidateSamples;
+		std::vector<double> referenceSamples;
+		std::vector<std::string> rejectedSamples;
+		std::optional<double> candidateMedian;
+		std::optional<double> candidateP95;
+		std::optional<double> candidateP99;
+		std::optional<double> referenceMedian;
+		std::optional<double> referenceP95;
+		std::optional<double> referenceP99;
+	};
+
+	struct VirtualGeometryComparativeVisualResult
+	{
+		std::map<std::string, std::string> artifactHashes;
+		bool imageAccepted = false;
+		bool silhouetteAccepted = false;
+		bool coverageAccepted = false;
+		bool materialAccepted = false;
+		bool shadowAccepted = false;
+		bool animationAccepted = false;
+		bool crackAccepted = false;
+		bool identityAccepted = false;
+		std::vector<std::string> rejectionReasons;
+
+		[[nodiscard]] bool IsComplete() const noexcept
+		{
+			return imageAccepted
+				&& silhouetteAccepted
+				&& coverageAccepted
+				&& materialAccepted
+				&& shadowAccepted
+				&& animationAccepted
+				&& crackAccepted
+				&& identityAccepted;
+		}
+	};
+
+	struct VirtualGeometryComparativePair
+	{
+		std::string pairIdentity;
+		std::string workloadIdentity;
+		std::string candidateRevision;
+		std::string referenceProduct;
+		std::string referenceRelease;
+		std::string deviceIdentity;
+		std::string driverIdentity;
+		std::string operatingSystemIdentity;
+		std::string graphicsPath;
+		std::map<std::string, std::string> matchedInputHashes;
+		std::vector<VirtualGeometryComparativeMetric> metrics;
+		VirtualGeometryComparativeVisualResult visual{};
+		VirtualGeometryComparisonClassification classification =
+			VirtualGeometryComparisonClassification::Insufficient;
+		std::vector<std::string> classificationReasons;
+		std::string integrityHash;
+	};
+
 	[[nodiscard]] std::string SerializeVirtualGeometryBenchmarkCapture(const VirtualGeometryBenchmarkCapture &capture);
 } // namespace TerraEngine::Renderer

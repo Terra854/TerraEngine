@@ -100,7 +100,7 @@ cmake --build --preset RelWithDebInfo --target TerraEngine TerraEngine-Editor Te
 cmake --build --preset RelWithDebInfo --target install
 ```
 
-Spec 043 accepts RelWithDebInfo exclusively for compile, test, install, and
+physics validation accepts RelWithDebInfo exclusively for compile, test, install, and
 live-validation completion gates. The canonical stress workload is 10,000
 bodies (1,000 dynamic, 1,000 kinematic, 8,000 static) with 100 exact paused
 steps. Max workers use hardware concurrency; explicit 1/2/4 values are reserved
@@ -118,7 +118,7 @@ The canonical installed tree is `out/build/RelWithDebInfo/Build`. No globally in
 physics SDK is required or permitted. See [Docs/Testing.md](Testing.md) for
 CTest filters and full regression workflows.
 
-## Spec 042 stress, export, and troubleshooting
+## physics foundation stress, export, and troubleshooting
 
 Run the committed deterministic and lifecycle fixtures from the RelWithDebInfo
 test binaries. These tests create the full 10,000-body/1,000-active workload,
@@ -146,7 +146,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Physics/RunInstall
   -AllowLiveStress
 ```
 
-Add `-RunUs6Loopback` for managed/automation reload and idempotency checks, or
+Add `-RunManagedReloadAutomationLoopback` for managed/automation reload and idempotency checks, or
 `-RunAuthoringWalkthrough` for the editor authoring workflow. Keep each run in
 its own disposable `out/validation` directory and use a free `-McpPort`.
 
@@ -157,8 +157,8 @@ for five seconds and must remain at or below 10 MiB. Use the debug-memory
 switches separately so debug primitives and process sampling do not contaminate
 the canonical timing run.
 
-For the Spec 043 incremental matrix, retain each run under
-`out/validation/043-us2/` and include unchanged, active, stale-generation,
+For the physics validation incremental matrix, retain each run under
+`out/validation/collider-cook/` and include unchanged, active, stale-generation,
 reparent, and conflicting tick-wide publication cases. The emitted profiler and
 JSON evidence must record configured batch sizes alongside examined, extracted,
 changed, page-reuse, chunk, rejection, and acknowledgement counts.
@@ -197,4 +197,4 @@ pwsh -NoProfile -File Tools/Physics/BackendSpike/RunBackendSpike.ps1 `
 That lane instruments the provider fixture only; TerraEngine engine/editor,
 Vulkan presentation, managed NativeAOT, and full lifecycle CTest binaries are
 excluded. The orchestrator must record the exact toolchain, outcome, and any
-unsupported lanes in `specs/042-physics-system/evidence/sanitizer-validation.md`.
+unsupported lanes in `Docs/Physics/evidence/sanitizer-validation.md`.

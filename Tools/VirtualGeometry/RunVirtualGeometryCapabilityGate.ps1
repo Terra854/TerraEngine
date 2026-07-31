@@ -1,13 +1,13 @@
 [CmdletBinding()]
 param(
-	[string]$ScenarioDirectory = 'Tools/VirtualGeometry/PhaseScenarios',
-	[string]$OutputDirectory = 'out/evidence/045/phase-gate',
+	[string]$ScenarioDirectory = 'Tools/VirtualGeometry/CapabilityScenarios',
+	[string]$OutputDirectory = 'out/evidence/virtual-geometry/production-gates',
 	[string]$InstalledEditor = 'out/build/RelWithDebInfo/Build/Editor/TerraEngine-Editor.exe',
-	[string]$Project = 'Tests/Fixtures/Animation/US1Import',
-	[string]$Preferences = 'out/validation/virtual-geometry-phase0-live/editor-preferences.json',
-	[string]$Asset = 'Assets/Models/US1Hero.gltf',
-	[string]$FixturePrefab = 'Assets/Models/US1Hero_Generated/US1Hero.teprefab',
-	[string]$FixturePrefabName = 'Feature 045 Installed Phase-Gate Hero',
+	[string]$Project = 'Tests/Fixtures/Animation/ImportValidation',
+	[string]$Preferences = 'out/validation/virtual-geometry/live/editor-preferences.json',
+	[string]$Asset = 'Assets/Models/ImportHero.gltf',
+	[string]$FixturePrefab = 'Assets/Models/ImportHero_Generated/ImportHero.teprefab',
+	[string]$FixturePrefabName = 'Virtual Geometry Installed Validation Hero',
 	[string]$BuildDirectory = 'out/build/RelWithDebInfo',
 	[string]$InstalledRoot = 'out/build/RelWithDebInfo/Build',
 	[string]$CodecInputMesh = '',
@@ -19,7 +19,6 @@ param(
 	[string]$MillionDecisionEvidence = '',
 	[string]$BenchmarkBaseline = '',
 	[string]$BenchmarkCandidate = '',
-	[string]$MigrationInput = '',
 	[string]$PackageEvidence = '',
 	[string]$RuntimeAdapter = '',
 	[int]$McpPort = 43156,
@@ -93,7 +92,7 @@ function Get-RelativeArtifactPath([string]$BasePath, [string]$ArtifactPath)
 	if(-not $artifactFullPath.StartsWith(
 		$childPrefix, [StringComparison]::OrdinalIgnoreCase))
 	{
-		throw "Phase-gate artifact escaped the output directory: $artifactFullPath"
+		throw "Production-gate artifact escaped the output directory: $artifactFullPath"
 	}
 	return $artifactFullPath.Substring($childPrefix.Length)
 }
@@ -191,7 +190,7 @@ $scenarioFiles = @(Get-ChildItem -LiteralPath $scenarioRoot -Filter '*.json' -Fi
 	Sort-Object Name)
 if($scenarioFiles.Count -eq 0)
 {
-	throw 'No phase scenarios were found.'
+	throw 'No capability scenarios were found.'
 }
 
 $scenarios = @()
@@ -200,26 +199,30 @@ foreach($scenarioFile in $scenarioFiles)
 	$scenario = Get-Content -Raw -LiteralPath $scenarioFile.FullName |
 		ConvertFrom-Json
 	if([int](Get-OptionalProperty $scenario 'schemaVersion') -ne 2 -or
-		[string]::IsNullOrWhiteSpace([string](Get-OptionalProperty $scenario 'id')) -or
-		$null -eq (Get-OptionalProperty $scenario 'phase'))
+		[string]::IsNullOrWhiteSpace([string](Get-OptionalProperty $scenario 'id')))
 	{
-		throw "Invalid phase scenario: $($scenarioFile.FullName)"
+		throw "Invalid capability scenario: $($scenarioFile.FullName)"
 	}
 	$scenarios += $scenario
 }
-$phases = @($scenarios | ForEach-Object {
-	[int](Get-OptionalProperty $_ 'phase')
+$requiredScenarioIds = @(
+	'animated-geometry', 'capability-contract', 'codec-storage',
+	'device-submission', 'hybrid-rasterization', 'multi-view-rendering',
+	'production-readiness', 'streaming-publication', 'vendor-portability',
+	'visibility-parity')
+$scenarioIds = @($scenarios | ForEach-Object {
+	[string](Get-OptionalProperty $_ 'id')
 } | Sort-Object)
-if(($phases -join ',') -ne '0,1,2,3,4,5,6,7,8,9')
+if(($scenarioIds -join ',') -ne (($requiredScenarioIds | Sort-Object) -join ','))
 {
-	throw "Phase scenarios must cover each phase 0-9 exactly once; found: $($phases -join ',')."
+	throw "Capability scenarios must cover the complete production set exactly once; found: $($scenarioIds -join ',')."
 }
 $manifestText = ($scenarioFiles | ForEach-Object {
 	Get-Content -Raw -LiteralPath $_.FullName
 }) -join "`n"
 if($manifestText -match '(?i)d3d12|dx12|dxil')
 {
-	throw 'Feature 045 phase scenarios must remain Vulkan-only.'
+	throw 'Production capability scenarios must remain Vulkan-only.'
 }
 
 if($DryRun)
@@ -230,7 +233,7 @@ if($DryRun)
 	{
 		throw 'Release-gate dry-run validation failed.'
 	}
-	Write-Output "validated phases 0-9 and Vulkan-only release gates (dry run)"
+	Write-Output "validated production capability scenarios and Vulkan-only release gates (dry run)"
 	exit 0
 }
 
@@ -254,7 +257,6 @@ if(-not $SkipReleaseGates)
 		@('-MillionDecisionEvidence', $MillionDecisionEvidence),
 		@('-BenchmarkBaseline', $BenchmarkBaseline),
 		@('-BenchmarkCandidate', $BenchmarkCandidate),
-		@('-MigrationInput', $MigrationInput),
 		@('-PackageEvidence', $PackageEvidence),
 		@('-RuntimeAdapter', $RuntimeAdapter)))
 	{
@@ -278,16 +280,16 @@ foreach($requiredFile in @($editorPath, $preferencesPath))
 {
 	if(-not (Test-Path -LiteralPath $requiredFile -PathType Leaf))
 	{
-		throw "Required installed phase-gate input is missing: $requiredFile"
+		throw "Required installed production-gate input is missing: $requiredFile"
 	}
 }
 if(-not (Test-Path -LiteralPath $projectPath -PathType Container))
 {
-	throw "Required phase-gate project is missing: $projectPath"
+	throw "Required production-gate project is missing: $projectPath"
 }
 
 [IO.Directory]::CreateDirectory($outputRoot) | Out-Null
-# Keep the caller's preference file immutable. The phase gate needs its own
+# Keep the caller's preference file immutable. The production gate needs its own
 # listener, so copy the normal editor preferences into the evidence directory
 # and override only the MCP fields required by this installed-editor run.
 $runPreferences = Get-Content -Raw -LiteralPath $preferencesPath |
@@ -299,7 +301,7 @@ $runPreferences | Add-Member -NotePropertyName editorMcpListenPort `
 $runPreferences | Add-Member -NotePropertyName editorMcpWriteModeDefault `
 	-NotePropertyValue 'writes_enabled' -Force
 $runPreferences | Add-Member -NotePropertyName editorMcpRecentSession `
-	-NotePropertyValue 'virtual-geometry-phase-gate' -Force
+	-NotePropertyValue 'virtual-geometry-production-gate' -Force
 $preferencesPath = Join-Path $outputRoot 'editor-preferences.json'
 Write-JsonFile $preferencesPath $runPreferences
 $endpoint = "http://127.0.0.1:$McpPort/mcp"
@@ -436,11 +438,11 @@ function Get-DefaultToolArguments([string]$Tool, $PriorOperation)
 		{
 			# Virtual-geometry rebuild is intentionally synchronous at the
 			# protected asset-registration boundary. Start a real durable compile
-			# job for the phase-9 cancellation exercise instead of inventing a
+			# job for the production-readiness cancellation exercise instead of inventing a
 			# rebuild job identifier that the editor never published.
 			return [ordered]@{
 				profile = 'Debug'
-				correlationId = 'virtual-geometry-phase-gate-cancel'
+			correlationId = 'virtual-geometry-production-gate-cancel'
 			}
 		}
 		'jobs.cancel'
@@ -467,7 +469,7 @@ function Save-Capture(
 	$arguments = if($Tool -eq 'camera.capture_custom')
 	{
 		[ordered]@{
-			name = 'Feature 045 installed phase gate'
+			name = 'Virtual Geometry installed production gate'
 			position = @(0.0, 0.5, 4.0)
 			target = @(0.0, 0.5, 0.0)
 			up = @(0.0, 1.0, 0.0)
@@ -556,7 +558,7 @@ try
 			$initialize = Invoke-McpRpc 'initialize' ([ordered]@{
 				protocolVersion = '2025-03-26'
 				clientInfo = [ordered]@{
-					name = 'virtual-geometry-phase-gate'
+					name = 'virtual-geometry-production-gate'
 					version = '1'
 				}
 			})
@@ -584,19 +586,19 @@ try
 		throw 'Installed editor MCP did not become ready.'
 	}
 
-	# The default US1 fixture startup scene intentionally contains no renderable
+	# The default import-validation fixture startup scene intentionally contains no renderable
 	# hero. Instantiate its generated prefab so custom-camera captures exercise
 	# real geometry instead of accepting a syntactically valid black image.
 	# Other projects can either supply their own generated prefab through the
 	# parameters above, or skip this optional setup when their startup scene is
-	# already renderable. The defaults preserve the established US1 phase gate.
+	# already renderable. The defaults preserve the established production gate.
 	if(-not $SkipFixturePrefabSetup -and $availableTools -contains 'prefab.instantiate')
 	{
 		$setupResult = Invoke-McpTool 'prefab.instantiate' ([ordered]@{
 			prefab = $FixturePrefab
 			name = $FixturePrefabName
 		})
-		Write-JsonFile (Join-Path $outputRoot 'phase-gate-setup.json') (
+		Write-JsonFile (Join-Path $outputRoot 'production-gate-setup.json') (
 			[ordered]@{
 				status = [string](Get-OptionalProperty $setupResult.envelope 'status')
 				operation = 'prefab.instantiate'
@@ -704,7 +706,7 @@ try
 				Where-Object { $null -ne $_ })
 		# Every manifest-declared output is evidence, even when an author omitted
 		# it from requiredArtifacts. Merge those paths into the audit so an
-		# operation such as phase 9 cancellation cannot silently go unchecked.
+		# operation such as production-readiness cancellation cannot silently go unchecked.
 		$declaredOutputs = @(
 			@($operations | ForEach-Object {
 				$path = [string](Get-OptionalProperty $_ 'evidence')
@@ -756,7 +758,7 @@ try
 			}
 			unavailablePolicy = [string](Get-OptionalProperty (
 				$scenario) 'unavailablePolicy')
-			note = 'Executed means evidence was collected; capability and benchmark claims remain fail-closed until their assertions pass.'
+		note = 'Executed means evidence was collected; capability and benchmark claims remain fail-closed until their assertions pass.'
 		}
 		Write-JsonFile (Join-Path $scenarioOutput 'scenario-result.json') $row
 		$scenarioRows += $row
@@ -830,7 +832,7 @@ $overall = [ordered]@{
 	scenarios = $scenarioRows
 	note = 'No unavailable or unmeasured capability is promoted to a pass.'
 }
-Write-JsonFile (Join-Path $outputRoot 'phase-gate.json') $overall
+Write-JsonFile (Join-Path $outputRoot 'production-gate.json') $overall
 $overall | ConvertTo-Json -Depth 64
 if($overall.status -ne 'executed')
 {

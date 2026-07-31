@@ -47,9 +47,9 @@ if(TERRAENGINE_NORMALIZED_INSTALL_PREFIX MATCHES [[/External/[^/]+/install/?$]])
 	set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/install" CACHE PATH "Install prefix" FORCE)
 endif()
 
-# Spec 043 adds many files incrementally beneath dedicated Animation folders.
-# CONFIGURE_DEPENDS keeps those reviewed repository paths registered without
-# requiring every later story to modify this central build file. The additional
+# Animation sources live beneath dedicated domain folders. CONFIGURE_DEPENDS
+# keeps those reviewed repository paths registered without requiring every
+# capability addition to modify this central build file. The additional
 # name-based patterns cover integration files such as AnimatorComponent while
 # leaving unrelated engine and editor sources explicitly listed below.
 file(GLOB_RECURSE TERRAENGINE_ANIMATION_ENGINE_SOURCES CONFIGURE_DEPENDS
@@ -114,7 +114,7 @@ list(APPEND TERRAENGINE_ANIMATION_ASSET_COMPILER_SOURCES
 list(REMOVE_DUPLICATES TERRAENGINE_ANIMATION_EDITOR_SOURCES)
 list(REMOVE_DUPLICATES TERRAENGINE_ANIMATION_ASSET_COMPILER_SOURCES)
 
-# Feature 045 asset-cooking modules are shared by the standalone mesh compiler,
+# Virtual-geometry asset-cooking modules are shared by the standalone mesh compiler,
 # model-package compiler, editor, and editor tests. A configure-dependent glob
 # keeps those four targets on the same deterministic codec/DAG implementation
 # as later phases add narrowly named VirtualGeometry modules.
@@ -133,7 +133,7 @@ file(GLOB_RECURSE TERRAENGINE_ANIMATION_TOOL_SOURCES CONFIGURE_DEPENDS
 	"${CMAKE_CURRENT_SOURCE_DIR}/Tools/Animation/*"
 )
 
-# Feature 045 owns a dedicated backend-neutral renderer module plus typed
+# Virtual geometry owns a dedicated backend-neutral renderer module plus typed
 # streaming/publication files. CONFIGURE_DEPENDS keeps later milestone files in
 # the reviewed feature directories visible to the engine target automatically.
 file(GLOB_RECURSE TERRAENGINE_VIRTUAL_GEOMETRY_ENGINE_SOURCES CONFIGURE_DEPENDS
@@ -993,6 +993,10 @@ source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Launcher PREFIX "TerraEngine-Launc
 add_executable(TerraEngineMeshCompiler
 	Editor/TerraEngineMeshCompiler.cpp
 	Editor/AssetCompilers/MeshCompiler.cpp
+	# The skinned canonical rewriter validates and decodes staged TEMFPRD1
+	# blocks before rebuilding their directory, so this tool owns the shared
+	# bounded production codec implementation.
+	Engine/Resource/VirtualGeometryCodec.cpp
 	${TERRAENGINE_VIRTUAL_GEOMETRY_ASSET_COMPILER_SOURCES}
 )
 
@@ -1072,7 +1076,7 @@ if(MSVC)
 endif()
 
 # The animation soak driver launches this small engine-linked process in bounded
-# slices. Keeping it separate from the editor makes T133/T285 usable headlessly
+# slices. Keeping it separate from the editor makes long-running validation usable headlessly
 # while still exercising the production animation storage and publication code.
 add_executable(TerraEngineAnimationSoakRunner
 	Tools/Animation/AnimationSoakRunner.cpp
@@ -1382,6 +1386,10 @@ add_executable(TerraEngine-Editor
 	${TERRAENGINE_ANIMATION_EDITOR_SOURCES}
 	${TERRAENGINE_VIRTUAL_GEOMETRY_ASSET_COMPILER_SOURCES}
 )
+
+# The tool compiles the bounded codec directly, so its exported result types
+# are local definitions rather than imports from TerraEngine.dll.
+target_compile_definitions(TerraEngineMeshCompiler PRIVATE TERRAENGINE_ENGINE_BUILD)
 set_target_properties(TerraEngine-Editor PROPERTIES
 	BUILD_RPATH "${TERRAENGINE_LOCAL_RPATH}"
 	INSTALL_RPATH "${TERRAENGINE_LOCAL_RPATH}"
@@ -1559,6 +1567,7 @@ install(FILES
 	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/VirtualGeometry/AnimatedVirtualGeometryAbi.hlsli"
 	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/VirtualGeometry/AnimatedDeformedGeometry.hlsli"
 	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/VirtualGeometry/DeformableVirtualGeometry.hlsli"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/VirtualGeometry/VirtualGeometryProductionCodecAbi.hlsli"
 	DESTINATION "${ENGINE_INSTALL_DESTINATION}/Editor/Shaders/Includes/VirtualGeometry"
 )
 
@@ -1805,7 +1814,7 @@ if(NOT compile_vg_packet_compaction EQUAL 0)
     message(FATAL_ERROR \"Failed to compile VirtualGeometryPacketCompaction.comp.hlsl during install\")
 endif()
 
-# Every feature-045 compute stage is compiled during install. Keeping this list
+# Every production virtual-geometry compute stage is compiled during install. Keeping this list
 # explicit makes a missing source, include, entry point, or DXC regression fail
 # the required install gate instead of shipping a partial runtime shader set.
 foreach(virtualgeometry_canonical_shader IN ITEMS
@@ -1814,6 +1823,7 @@ foreach(virtualgeometry_canonical_shader IN ITEMS
 	VirtualGeometryComputeRaster
 	VirtualGeometryGeneratedIndirect
 	VirtualGeometryIndirectArguments
+	VirtualGeometryProductionDecode
 	VirtualGeometryShadingBins
 	VirtualGeometryTraversal
 	VirtualGeometryVisibilityReconstruct
@@ -2118,22 +2128,22 @@ endif()
 		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Docs/Animation"
 		FILES_MATCHING PATTERN "*.md"
 	)
-	# Spec 043's bounded acquisition, fixture, soak, phase-gate, and evidence
-	# drivers are shipped as inspectable command-line tools. They still require
+	# Animation acquisition, fixture, soak, validation, and evidence drivers are
+	# shipped as inspectable command-line tools. They still require
 	# the inputs named by each command, but no validation script should disappear
 	# merely because the editor is being exercised from its installed tree.
 	install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Tools/Animation/"
 		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Tools/Animation"
 		FILES_MATCHING PATTERN "*.ps1" PATTERN "*.json"
 	)
-	# Feature 045 manifests and scripts define the installed validation surface.
+	# Virtual-geometry manifests and scripts define the installed validation surface.
 	# The executable arrives in a later milestone, but its inputs are installable
 	# from the first foundation gate.
-	# Remove only the generated scenario destination before copying. Otherwise a
-	# renamed phase manifest survives an incremental install and the aggregate
-	# phase gate correctly rejects the duplicate phase.
+	# Replace the installed validation-tool directory atomically at install
+	# time. This prevents retired manifest names from surviving an incremental
+	# install and keeps the product-facing layout semantic.
 	install(CODE
-		"file(REMOVE_RECURSE \"${ENGINE_INSTALL_DESTINATION}/Tools/VirtualGeometry/PhaseScenarios\")"
+		"file(REMOVE_RECURSE \"${ENGINE_INSTALL_DESTINATION}/Tools/VirtualGeometry\")"
 	)
 	install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Tools/VirtualGeometry/"
 		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Tools/VirtualGeometry"
@@ -2155,32 +2165,15 @@ endif()
 	install(FILES
 		"${CMAKE_CURRENT_SOURCE_DIR}/Tests/Fixtures/VirtualGeometry/README.md"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Tests/Fixtures/VirtualGeometry/hardening-fixtures.json"
-		"${CMAKE_CURRENT_SOURCE_DIR}/Tests/Fixtures/VirtualGeometry/feature-045-fixtures.json"
+		"${CMAKE_CURRENT_SOURCE_DIR}/Tests/Fixtures/VirtualGeometry/production-validation-fixtures.json"
 		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Tests/Fixtures/VirtualGeometry"
 	)
-	# Feature 045 reuses the deterministic animated-page fixture from feature
-	# 044. Install the complete small fixture so the phase-7 validation command
-	# never reaches back into the source checkout for shaders or manifests.
+	# Install the complete deterministic animated-page fixture so installed
+	# validation never reaches back into the source checkout for inputs.
 	install(DIRECTORY
 		"${CMAKE_CURRENT_SOURCE_DIR}/Tests/Fixtures/AnimatedVirtualGeometry/"
 		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Tests/Fixtures/AnimatedVirtualGeometry"
 	)
-	install(FILES
-		"${CMAKE_CURRENT_SOURCE_DIR}/specs/045-virtual-geometry-alternative/spec.md"
-		"${CMAKE_CURRENT_SOURCE_DIR}/specs/045-virtual-geometry-alternative/plan.md"
-		"${CMAKE_CURRENT_SOURCE_DIR}/specs/045-virtual-geometry-alternative/research.md"
-		"${CMAKE_CURRENT_SOURCE_DIR}/specs/045-virtual-geometry-alternative/data-model.md"
-		"${CMAKE_CURRENT_SOURCE_DIR}/specs/045-virtual-geometry-alternative/quickstart.md"
-		"${CMAKE_CURRENT_SOURCE_DIR}/specs/045-virtual-geometry-alternative/acceptance-matrix.md"
-		"${CMAKE_CURRENT_SOURCE_DIR}/specs/045-virtual-geometry-alternative/compliance-review.md"
-		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Docs/Specs/045-virtual-geometry-alternative"
-	)
-	install(DIRECTORY
-		"${CMAKE_CURRENT_SOURCE_DIR}/specs/045-virtual-geometry-alternative/contracts/"
-		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Docs/Specs/045-virtual-geometry-alternative/contracts"
-		FILES_MATCHING PATTERN "*.md"
-	)
-
 	# Install cimgui (TerraEngine-ImGui)
 	# Install rule: every code change must keep the install tree reproducible for downstream users.
 	install(FILES $<TARGET_FILE:cimgui> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor)

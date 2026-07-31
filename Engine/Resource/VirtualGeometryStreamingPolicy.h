@@ -3,10 +3,10 @@
 #pragma once
 
 #include "Core/Export.h"
+#include "File Formats/TerraEngineMeshFile.h"
 #include "Resource/ResourceStreaming.h"
 
 #include <cstdint>
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -29,17 +29,25 @@ namespace TerraEngine::Resource
 		std::uint64_t expectedStoredByteCount = 0u;
 		std::uint64_t expectedDecodedByteCount = 0u;
 		std::uint64_t expectedIntegrityValue = 0u;
-		// A populated exact-range request authorizes worker IO. Raw identity decode
-		// is explicit because arbitrary encoded bytes must never be called decoded.
-		std::optional<VirtualGeometryStaticPageReadRequest> staticPageRead;
-		bool rawPayloadIsDecoded = false;
-		// Appended after the established aggregate-initialization fields so
-		// existing request producers retain source compatibility.
+		// Each entry is an ordered, value-only description of one physical TEMF
+		// block. The worker reads and decodes every entry before it exposes one
+		// concatenated page. Keeping the exact read next to its descriptor prevents
+		// a later block from accidentally using the first block's byte range.
+		struct ExactBlockReadDescriptor
+		{
+			VirtualGeometryStaticPageReadRequest staticPageRead{};
+			TemfBlockDescriptor productionBlock{};
+		};
+		std::vector<ExactBlockReadDescriptor> exactBlockReads;
+		std::vector<TemfQuantizationDomain> quantizationDomains;
+		std::uint64_t availableDecoderCapabilities = 0u;
+		// The cluster identifier lets diagnostics relate this value-only page
+		// request to the immutable renderer selection that produced it.
 		std::uint32_t clusterId = kVirtualGeometryInvalidIndex;
 		// Diagnostics explain why an exact cooked byte range was or was not
 		// attached while RenderSystem still owned the live mesh snapshot. This
 		// string is copied into worker plans and never grants IO by itself.
-		std::string staticPageReadDiagnostic;
+		std::string canonicalPageReadDiagnostic;
 	};
 
 	struct VirtualGeometryStreamingPolicy
@@ -82,6 +90,10 @@ namespace TerraEngine::Resource
 	{
 		VirtualGeometryStreamingFeedback request{};
 		VirtualGeometryStreamingDecodeStatus status = VirtualGeometryStreamingDecodeStatus::NotRequested;
+		// Counts reflect completed/cancelled physical reads even when a later
+		// block rejects the aggregate page and no decoded bytes are published.
+		std::uint32_t completedPhysicalReadCount = 0u;
+		std::uint32_t cancelledPhysicalReadCount = 0u;
 		std::vector<std::uint8_t> decodedBytes;
 		std::string detail;
 	};

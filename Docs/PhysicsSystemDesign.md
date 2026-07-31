@@ -1128,7 +1128,7 @@ No physics callback may outlive the world or engine.
 
 ## Performance and Memory Requirements
 
-The Spec 043 validation contract fixes the comparison identity: RelWithDebInfo,
+The physics validation contract fixes the comparison identity: RelWithDebInfo,
 the installed tree under `out/build/RelWithDebInfo/Build`, 10,000 mixed bodies
 (1,000 dynamic, 1,000 kinematic, 8,000 static), 100 exact paused steps, and the
 repository-bundled dependencies. Max worker runs use hardware concurrency with
@@ -1264,7 +1264,7 @@ floating-point snapshots.
 
 ## Suggested Implementation Phases
 
-### Phase 1: Backend Research and Foundation
+### implementation stage: Backend Research and Foundation
 
 - Compare viable libraries against the evaluation criteria, prototype the
   highest-risk integrations, document the decision, and vendor the selected
@@ -1273,50 +1273,50 @@ floating-point snapshots.
   assertions, math conversion, and backend lifecycle.
 - Add stable handles, world generation, and a minimal PhysicsWorld.
 
-### Phase 2: Components, Settings, and Serialization
+### implementation stage: Components, Settings, and Serialization
 
 - Rigid body, primitive colliders, materials, project settings, layers, and
   reflection.
 - Scene and prefab round trips.
 
-### Phase 3: Fixed-Step Runtime and Scheduler Integration
+### implementation stage: Fixed-Step Runtime and Scheduler Integration
 
 - PhysicsSystem, workloads, command queue, body registry, simulation, result
   snapshots, transform synchronization, interpolation, pause, and single-step.
 
-### Phase 4: Contacts, Triggers, and Queries
+### implementation stage: Contacts, Triggers, and Queries
 
 - Event collectors and publication.
 - Ray/shape/overlap query APIs and batched results.
 - Native and managed consumers.
 
-### Phase 5: Cooked Geometry and Asset Pipeline
+### implementation stage: Cooked Geometry and Asset Pipeline
 
 - Convex, triangle mesh, compound shapes, caching, asset GUIDs, cook reports,
   headless cooking, and export packaging.
 
-### Phase 6: Constraints and Character Controller
+### implementation stage: Constraints and Character Controller
 
 - Full constraint family, motors/limits/breaking.
 - Production character behaviour and tests.
 
-### Phase 7: Editor and Diagnostics
+### implementation stage: Editor and Diagnostics
 
 - Inspector, Project Settings, Scene View handles/debug drawing, diagnostics
   window, profiler counters, undo/redo, and Play Mode lifecycle.
 
-### Phase 8: C# and MCP Completeness
+### implementation stage: C# and MCP Completeness
 
 - Managed APIs/events/queries.
 - Self-registering physics automation capabilities, approvals, durable jobs,
   logs, and diagnostics.
 
-### Phase 9: Export Parity and Hardening
+### implementation stage: Export Parity and Hardening
 
 - Installed editor/exported runtime validation.
 - Stress, concurrency, lifecycle, performance, and failure-containment fixes.
 
-### Phase 10: Advanced Modules
+### implementation stage: Advanced Modules
 
 - Ragdolls and animation integration.
 - Vehicles.

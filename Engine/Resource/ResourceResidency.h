@@ -361,7 +361,7 @@ namespace TerraEngine::Resource
 		std::string reason;
 	};
 
-	struct AnimatedVirtualPageResidencyRow
+	struct DeformableVirtualPageResidencyRow
 	{
 		TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
 		std::uint32_t pageId = 0xffffffffu;
@@ -374,21 +374,21 @@ namespace TerraEngine::Resource
 		bool pinnedFallback = false;
 		bool eligibleForNewWork = false;
 
-		auto operator<=>(const AnimatedVirtualPageResidencyRow&) const =
+		auto operator<=>(const DeformableVirtualPageResidencyRow&) const =
 			default;
 	};
 
-	struct AnimatedVirtualPageResidencySnapshot
+	struct DeformableVirtualPageResidencySnapshot
 	{
 		std::uint64_t publicationGeneration = 0u;
 		std::uint64_t catalogGeneration = 0u;
-		std::vector<AnimatedVirtualPageResidencyRow> pages;
+		std::vector<DeformableVirtualPageResidencyRow> pages;
 		bool valid = false;
 	};
 
-	struct AnimatedVirtualPageResidencyPublication
+	struct DeformableVirtualPageResidencyPublication
 	{
-		AnimatedVirtualPageResidencySnapshot visible;
+		DeformableVirtualPageResidencySnapshot visible;
 		bool accepted = false;
 		std::string rejectionReason;
 	};
@@ -672,9 +672,9 @@ namespace TerraEngine::Resource
 		const VirtualGeometryPageBudget& budget,
 		const VirtualGeometryPageLifecycleLimits& limits,
 		std::uint64_t frameId);
-	TERRAENGINE_API AnimatedVirtualPageResidencyPublication
-		PublishAnimatedVirtualPageResidencySnapshot(
-			const AnimatedVirtualPageResidencySnapshot& prior,
-			AnimatedVirtualPageResidencySnapshot candidate,
+	TERRAENGINE_API DeformableVirtualPageResidencyPublication
+		PublishDeformableVirtualPageResidencySnapshot(
+			const DeformableVirtualPageResidencySnapshot& prior,
+			DeformableVirtualPageResidencySnapshot candidate,
 			std::uint64_t completedFence);
 }

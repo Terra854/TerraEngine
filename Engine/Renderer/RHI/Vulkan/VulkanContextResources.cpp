@@ -5,7 +5,9 @@
 // It provides specialized caches for meshes, textures, and materials to optimize GPU resource utilization and performance.
 
 #include "VulkanContextImpl.h"
+#include "File Formats/TerraEngineMeshFile.h"
 #include "Profiling/ProfilerScope.h"
+#include "Renderer/VirtualGeometry/Geometry/VirtualGeometryPackedVertex.h"
 #include "Resource/ResourceStreaming.h"
 
 #include <algorithm>
@@ -165,12 +167,11 @@ namespace
 	}
 
 	// Builds the conventional-mesh morph stream in deterministic target-major
-	// order. TDEF v1 guarantees dense position deltas; validated optional sidecar
-	// records may contribute normal/tangent deltas. Missing channels stay zero so
-	// graphics always reads the same 48-byte record shape.
+	// order from the three canonical decoded TEMFPRD1 channels. Graphics always
+	// reads the same 48-byte record shape.
 	bool BuildMeshMorphDeltaRecords(
 		const Mesh& mesh,
-		std::vector<DeformableVirtualGeometryMorphVertex>& output)
+		std::vector<TemfDeformablePageMorphVertex>& output)
 	{
 		output.clear();
 		if(!mesh.hasDeformablePayload || mesh.deformableMorphs.empty()
@@ -179,61 +180,36 @@ namespace
 			return true;
 		}
 
-		std::vector<const DeformableMeshMorphRecord*> targets;
+		std::vector<const TemfDeformableMorphRecord*> targets;
 		targets.reserve(mesh.deformableMorphs.size());
-		for(const DeformableMeshMorphRecord& target : mesh.deformableMorphs) targets.push_back(&target);
-		std::sort(targets.begin(), targets.end(), [](const DeformableMeshMorphRecord* left, const DeformableMeshMorphRecord* right) {
+		for(const TemfDeformableMorphRecord& target : mesh.deformableMorphs) targets.push_back(&target);
+		std::sort(targets.begin(), targets.end(), [](const TemfDeformableMorphRecord* left, const TemfDeformableMorphRecord* right) {
 			return left->stableTargetId < right->stableTargetId;
 		});
 
-		const auto findOptionalSidecarTarget = [&mesh](std::uint32_t stableTargetId) -> const DeformableVirtualGeometryMorphRecord* {
-			if(!mesh.hasDeformableVirtualGeometrySidecar) return nullptr;
-			for(const DeformableVirtualGeometryMorphRecord& target : mesh.deformableVirtualGeometryMorphs) {
-				if(target.stableTargetId == stableTargetId) return &target;
-			}
-			return nullptr;
-		};
-
-		for(const DeformableMeshMorphRecord* target : targets) {
-			if(target == nullptr || target->positionDeltaCount != mesh.deformableMetadata.skinningVertexCount
-				|| target->positionDeltaStrideBytes != sizeof(float) * 3U
-				|| target->positionDeltaOffset > mesh.storage.size()
-				|| target->positionDeltaCount > (mesh.storage.size() - target->positionDeltaOffset) / target->positionDeltaStrideBytes) {
+		for(const TemfDeformableMorphRecord* target : targets) {
+			if(target == nullptr
+				|| target->deltaCount != mesh.deformableMetadata.skinningVertexCount
+				|| target->firstDeltaIndex > mesh.deformableMorphPositions.size()
+				|| target->deltaCount > mesh.deformableMorphPositions.size() - target->firstDeltaIndex
+				|| target->firstDeltaIndex > mesh.deformableMorphNormals.size()
+				|| target->deltaCount > mesh.deformableMorphNormals.size() - target->firstDeltaIndex
+				|| target->firstDeltaIndex > mesh.deformableMorphTangents.size()
+				|| target->deltaCount > mesh.deformableMorphTangents.size() - target->firstDeltaIndex) {
 				output.clear();
 				output.emplace_back();
 				return false;
 			}
 
-			const DeformableVirtualGeometryMorphRecord* optionalTarget = findOptionalSidecarTarget(target->stableTargetId);
-			// TDFV keeps file-relative byte offsets in its target table while the
-			// resource loader materializes the vertex payload as a dense vector.
-			// Translate the validated file offset back into that vector's index.
-			const std::uint64_t optionalPayloadOffset = optionalTarget != nullptr
-				? mesh.deformableVirtualGeometrySidecar.morphVertexDataOffset : 0U;
-			const std::uint64_t optionalRecordOffset = optionalTarget != nullptr
-				? optionalTarget->vertexDataOffset : 0U;
-			const bool optionalOffsetUsable = optionalTarget != nullptr
-				&& optionalRecordOffset >= optionalPayloadOffset
-				&& (optionalRecordOffset - optionalPayloadOffset) % sizeof(DeformableVirtualGeometryMorphVertex) == 0U;
-			const std::size_t optionalVertexStart = optionalOffsetUsable
-				? static_cast<std::size_t>((optionalRecordOffset - optionalPayloadOffset)
-					/ sizeof(DeformableVirtualGeometryMorphVertex)) : 0U;
-			const bool optionalChannelsUsable = optionalTarget != nullptr
-				&& optionalOffsetUsable
-				&& optionalTarget->vertexStrideBytes == sizeof(DeformableVirtualGeometryMorphVertex)
-				&& optionalTarget->vertexCount == target->positionDeltaCount
-				&& optionalVertexStart <= mesh.deformableVirtualGeometryMorphVertices.size()
-				&& optionalTarget->vertexCount <= mesh.deformableVirtualGeometryMorphVertices.size() - optionalVertexStart;
-			for(std::uint32_t vertexIndex = 0U; vertexIndex < target->positionDeltaCount; ++vertexIndex) {
-				DeformableVirtualGeometryMorphVertex record{};
-				std::memcpy(record.positionDelta, mesh.storage.data() + target->positionDeltaOffset
-					+ static_cast<std::size_t>(vertexIndex) * target->positionDeltaStrideBytes, sizeof(float) * 3U);
-				if(optionalChannelsUsable) {
-					const DeformableVirtualGeometryMorphVertex& optionalRecord =
-						mesh.deformableVirtualGeometryMorphVertices[optionalVertexStart + vertexIndex];
-					std::memcpy(record.normalDelta, optionalRecord.normalDelta, sizeof(record.normalDelta));
-					std::memcpy(record.tangentDelta, optionalRecord.tangentDelta, sizeof(record.tangentDelta));
-				}
+			for(std::uint32_t vertexIndex = 0U; vertexIndex < target->deltaCount; ++vertexIndex) {
+				const std::size_t sourceIndex = target->firstDeltaIndex + vertexIndex;
+				TemfDeformablePageMorphVertex record{};
+				std::memcpy(record.positionDelta,
+					mesh.deformableMorphPositions[sourceIndex].data(), sizeof(float) * 3U);
+				std::memcpy(record.normalDelta,
+					mesh.deformableMorphNormals[sourceIndex].data(), sizeof(float) * 3U);
+				std::memcpy(record.tangentDelta,
+					mesh.deformableMorphTangents[sourceIndex].data(), sizeof(float) * 3U);
 				output.push_back(record);
 			}
 		}
@@ -311,21 +287,21 @@ namespace
 				hashValue(mesh->virtualGeometryPayloadGeneration);
 				hashValue(mesh->deformablePayloadGeneration);
 				hashValue(
-					mesh->animatedVirtualPageDirectory.directoryHash);
+					mesh->deformableDemandedPageDirectory.meshPayloadGeneration);
 				const auto page = std::find_if(
-					mesh->animatedVirtualPageEntries.begin(),
-					mesh->animatedVirtualPageEntries.end(),
+					mesh->deformableDemandedPageEntries.begin(),
+					mesh->deformableDemandedPageEntries.end(),
 					[&packet](
-						const AnimatedVirtualPageDirectoryEntry&
+						const TemfDeformableDemandedPageEntry&
 							entry)
 					{
 						return entry.pageId == packet.pageId;
 					});
 				if(page
-					!= mesh->animatedVirtualPageEntries.end())
+					!= mesh->deformableDemandedPageEntries.end())
 				{
 					hashValue(page->contentGeneration);
-					hashValue(page->blobHash);
+					hashValue(page->blobId);
 				}
 			}
 		}
@@ -376,7 +352,7 @@ namespace
 	bool TryReadVirtualGeometryRemapIndex(const Mesh& mesh, std::uint32_t remapIndex, std::uint32_t& outGlobalVertexIndex)
 	{
 		outGlobalVertexIndex = 0u;
-		const MeshletRemapEncoding encoding = static_cast<MeshletRemapEncoding>(mesh.header.meshletVertexRemapEncoding);
+		const MeshletRemapEncoding encoding = static_cast<MeshletRemapEncoding>(mesh.runtimeLayout.meshletVertexRemapEncoding);
 		if (encoding == MeshletRemapEncoding::Uint16)
 		{
 			const std::size_t byteOffset = static_cast<std::size_t>(remapIndex) * sizeof(std::uint16_t);
@@ -387,7 +363,7 @@ namespace
 			std::uint16_t value = 0u;
 			std::memcpy(&value, mesh.meshletVertexRemapData.data() + byteOffset, sizeof(value));
 			outGlobalVertexIndex = value;
-			return outGlobalVertexIndex < mesh.header.meshletVertexCount;
+			return outGlobalVertexIndex < mesh.runtimeLayout.meshletVertexCount;
 		}
 		if (encoding == MeshletRemapEncoding::Uint32)
 		{
@@ -397,7 +373,7 @@ namespace
 				return false;
 			}
 			std::memcpy(&outGlobalVertexIndex, mesh.meshletVertexRemapData.data() + byteOffset, sizeof(outGlobalVertexIndex));
-			return outGlobalVertexIndex < mesh.header.meshletVertexCount;
+			return outGlobalVertexIndex < mesh.runtimeLayout.meshletVertexCount;
 		}
 		return false;
 	}
@@ -425,79 +401,72 @@ namespace
 
 		const Mesh* cpuMesh = ResourceManager::Instance().GetMesh(packet.meshId);
 		if (cpuMesh == nullptr
-			|| cpuMesh->header.layout.strideBytes != kMeshletPackedVertexStrideBytes)
+			|| cpuMesh->runtimeLayout.layout.strideBytes != kMeshletPackedVertexStrideBytes)
 		{
 			return false;
 		}
 
-		// Prefer the independently validated AVPB allocation. Its streams are
-		// already page-local, so this path never walks or repacks the full owner
-		// vertex/remap/primitive payload. Legacy TEMF files continue through the
-		// compatibility path below.
-		if (cpuMesh->hasAnimatedVirtualPageDirectory)
+		// Canonical demanded-page streams are already page-local and validated by
+		// ResourceManager, so this path never walks or repacks the complete mesh.
+		if (cpuMesh->hasDeformableDemandedPages)
 		{
 			const auto entryIt = std::find_if(
-				cpuMesh->animatedVirtualPageEntries.begin(),
-				cpuMesh->animatedVirtualPageEntries.end(),
-				[&packet](const AnimatedVirtualPageDirectoryEntry& entry)
+				cpuMesh->deformableDemandedPageEntries.begin(),
+				cpuMesh->deformableDemandedPageEntries.end(),
+				[&packet](const TemfDeformableDemandedPageEntry& entry)
 				{
 					return entry.pageId == packet.pageId;
 				});
-			if (entryIt != cpuMesh->animatedVirtualPageEntries.end()
-				&& entryIt->blobOffset >= cpuMesh->header.headerSize)
+			if (entryIt != cpuMesh->deformableDemandedPageEntries.end())
 			{
-				const std::uint64_t storageOffset =
-					entryIt->blobOffset - cpuMesh->header.headerSize;
-				if (storageOffset <= cpuMesh->storage.size()
-					&& entryIt->blobSize
-						<= cpuMesh->storage.size() - storageOffset)
+				const std::size_t pageIndex = static_cast<std::size_t>(
+					std::distance(
+						cpuMesh->deformableDemandedPageEntries.begin(),
+						entryIt));
+				if (pageIndex
+						< cpuMesh->deformableDemandedPagePayloads.size()
+					&& pageIndex
+						< cpuMesh->deformableDemandedPageSections.size())
 				{
-					const std::span<const std::uint8_t> blobBytes(
-						cpuMesh->storage.data()
-							+ static_cast<std::size_t>(storageOffset),
-						static_cast<std::size_t>(entryIt->blobSize));
-					const TerraEngine::Resource::AnimatedVirtualPageBlob blob =
-						TerraEngine::Resource::ParseAnimatedVirtualPageBlob(
-							blobBytes,
-							*entryIt,
-							cpuMesh->deformablePayloadGeneration);
-					const auto FindSection = [&blob](
-						AnimatedVirtualPageSectionType type)
-						-> const AnimatedVirtualPageSectionRecord*
+					const std::span<const std::uint8_t> blobBytes =
+						cpuMesh->deformableDemandedPagePayloads[pageIndex];
+					const auto& sections =
+						cpuMesh->deformableDemandedPageSections[pageIndex];
+					const auto FindSection = [&sections](
+						TemfDeformablePageSectionKind kind)
+						-> const TemfDeformablePageSection*
 					{
 						const auto sectionIt = std::find_if(
-							blob.sections.begin(),
-							blob.sections.end(),
-							[type](
-								const AnimatedVirtualPageSectionRecord& section)
+							sections.begin(),
+							sections.end(),
+							[kind](
+								const TemfDeformablePageSection& section)
 							{
-								return section.type
-									== static_cast<std::uint32_t>(type);
+								return section.kind == kind;
 							});
-						return sectionIt == blob.sections.end()
+						return sectionIt == sections.end()
 							? nullptr
 							: &*sectionIt;
 					};
-					const AnimatedVirtualPageSectionRecord* vertexSection =
+					const TemfDeformablePageSection* vertexSection =
 						FindSection(
-							AnimatedVirtualPageSectionType::PackedVertices);
-					const AnimatedVirtualPageSectionRecord* primitiveSection =
+							TemfDeformablePageSectionKind::PackedVertices);
+					const TemfDeformablePageSection* primitiveSection =
 						FindSection(
-							AnimatedVirtualPageSectionType::PrimitiveBytes);
-					const AnimatedVirtualPageSectionRecord* remapSection =
+							TemfDeformablePageSectionKind::Topology);
+					const TemfDeformablePageSection* remapSection =
 						FindSection(
-							AnimatedVirtualPageSectionType::VertexRemap);
-					const AnimatedVirtualPageSectionRecord* meshletSection =
+							TemfDeformablePageSectionKind::VertexRemap);
+					const TemfDeformablePageSection* meshletSection =
 						FindSection(
-							AnimatedVirtualPageSectionType::Meshlets);
-					const AnimatedVirtualPageSectionRecord* boundsSection =
+							TemfDeformablePageSectionKind::Meshlets);
+					const TemfDeformablePageSection* boundsSection =
 						FindSection(
-							AnimatedVirtualPageSectionType::MeshletBounds);
-					const AnimatedVirtualPageSectionRecord* decodeSection =
+							TemfDeformablePageSectionKind::MeshletBounds);
+					const TemfDeformablePageSection* decodeSection =
 						FindSection(
-							AnimatedVirtualPageSectionType::DecodeConstants);
-					if (blob.valid
-						&& vertexSection != nullptr
+							TemfDeformablePageSectionKind::DecodeConstants);
+					if (vertexSection != nullptr
 						&& primitiveSection != nullptr
 						&& remapSection != nullptr
 						&& meshletSection != nullptr
@@ -511,7 +480,7 @@ namespace
 							&quantization,
 							blobBytes.data()
 								+ static_cast<std::size_t>(
-									decodeSection->byteOffset),
+									decodeSection->relativeByteOffset),
 							sizeof(quantization));
 						VirtualGeometryPageLocalMeshDecodeInfo decodeInfo{};
 						std::copy_n(
@@ -542,13 +511,13 @@ namespace
 						const auto AppendSection = [
 							&words,
 							&blobBytes](
-							const AnimatedVirtualPageSectionRecord& section)
+							const TemfDeformablePageSection& section)
 						{
 							return AppendVirtualGeometryPayloadBytesAsWords(
 								words,
 								blobBytes.data()
 									+ static_cast<std::size_t>(
-										section.byteOffset),
+										section.relativeByteOffset),
 								static_cast<std::size_t>(section.byteSize));
 						};
 						const std::size_t payloadStartWords = words.size();
@@ -723,16 +692,16 @@ namespace
 		}
 
 		VirtualGeometryPageLocalMeshDecodeInfo decodeInfo{};
-		decodeInfo.positionOffset[0] = cpuMesh->header.quantization.positionOffset[0];
-		decodeInfo.positionOffset[1] = cpuMesh->header.quantization.positionOffset[1];
-		decodeInfo.positionOffset[2] = cpuMesh->header.quantization.positionOffset[2];
-		decodeInfo.positionScale[0] = cpuMesh->header.quantization.positionScale[0];
-		decodeInfo.positionScale[1] = cpuMesh->header.quantization.positionScale[1];
-		decodeInfo.positionScale[2] = cpuMesh->header.quantization.positionScale[2];
-		decodeInfo.uvOffsetScale[0] = cpuMesh->header.quantization.uvOffset[0];
-		decodeInfo.uvOffsetScale[1] = cpuMesh->header.quantization.uvOffset[1];
-		decodeInfo.uvOffsetScale[2] = cpuMesh->header.quantization.uvScale[0];
-		decodeInfo.uvOffsetScale[3] = cpuMesh->header.quantization.uvScale[1];
+		decodeInfo.positionOffset[0] = cpuMesh->runtimeLayout.quantization.positionOffset[0];
+		decodeInfo.positionOffset[1] = cpuMesh->runtimeLayout.quantization.positionOffset[1];
+		decodeInfo.positionOffset[2] = cpuMesh->runtimeLayout.quantization.positionOffset[2];
+		decodeInfo.positionScale[0] = cpuMesh->runtimeLayout.quantization.positionScale[0];
+		decodeInfo.positionScale[1] = cpuMesh->runtimeLayout.quantization.positionScale[1];
+		decodeInfo.positionScale[2] = cpuMesh->runtimeLayout.quantization.positionScale[2];
+		decodeInfo.uvOffsetScale[0] = cpuMesh->runtimeLayout.quantization.uvOffset[0];
+		decodeInfo.uvOffsetScale[1] = cpuMesh->runtimeLayout.quantization.uvOffset[1];
+		decodeInfo.uvOffsetScale[2] = cpuMesh->runtimeLayout.quantization.uvScale[0];
+		decodeInfo.uvOffsetScale[3] = cpuMesh->runtimeLayout.quantization.uvScale[1];
 		decodeInfo.counts[0] = static_cast<std::uint32_t>(localVertexBytes.size() / kMeshletPackedVertexStrideBytes);
 		decodeInfo.counts[1] = static_cast<std::uint32_t>(localRemap.size());
 		decodeInfo.counts[2] = static_cast<std::uint32_t>(localPrimitiveBytes.size());
@@ -1663,20 +1632,19 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 	}
 
 	const auto FindSection = [](
-		const TerraEngine::Resource::AnimatedVirtualPageBlob& blob,
-		AnimatedVirtualPageSectionType type)
-		-> const AnimatedVirtualPageSectionRecord*
+		const std::vector<TemfDeformablePageSection>& sections,
+		TemfDeformablePageSectionKind kind)
+		-> const TemfDeformablePageSection*
 	{
 		const auto found = std::find_if(
-			blob.sections.begin(),
-			blob.sections.end(),
-			[type](
-				const AnimatedVirtualPageSectionRecord& section)
+			sections.begin(),
+			sections.end(),
+			[kind](
+				const TemfDeformablePageSection& section)
 			{
-				return section.type
-					== static_cast<std::uint32_t>(type);
+				return section.kind == kind;
 			});
-		return found == blob.sections.end() ? nullptr : &*found;
+		return found == sections.end() ? nullptr : &*found;
 	};
 	for(std::uint32_t workIndex = 0u;
 		workIndex < plan.work.size();
@@ -1687,70 +1655,62 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 		const Mesh* mesh =
 			ResourceManager::Instance().GetMesh(source.key.page.meshId);
 		if(mesh == nullptr
-			|| !mesh->hasAnimatedVirtualPageDirectory)
+			|| !mesh->hasDeformableDemandedPages)
 		{
 			return false;
 		}
 		const auto entryIt = std::find_if(
-			mesh->animatedVirtualPageEntries.begin(),
-			mesh->animatedVirtualPageEntries.end(),
+			mesh->deformableDemandedPageEntries.begin(),
+			mesh->deformableDemandedPageEntries.end(),
 			[&source](
-				const AnimatedVirtualPageDirectoryEntry& entry)
+				const TemfDeformableDemandedPageEntry& entry)
 			{
 				return entry.pageId == source.key.page.pageId
 					&& entry.contentGeneration
 						== source.key.page.pageContentGeneration;
 			});
-		if(entryIt == mesh->animatedVirtualPageEntries.end()
-			|| entryIt->blobOffset < mesh->header.headerSize)
+		if(entryIt == mesh->deformableDemandedPageEntries.end())
 		{
 			return false;
 		}
-		const std::uint64_t storageOffset =
-			entryIt->blobOffset - mesh->header.headerSize;
-		if(storageOffset > mesh->storage.size()
-			|| entryIt->blobSize
-				> mesh->storage.size() - storageOffset
+		const std::size_t pageIndex = static_cast<std::size_t>(
+			std::distance(mesh->deformableDemandedPageEntries.begin(), entryIt));
+		if(pageIndex >= mesh->deformableDemandedPagePayloads.size()
+			|| pageIndex >= mesh->deformableDemandedPageSections.size()
 			|| staticPageBytes.size()
 				> std::numeric_limits<std::uint32_t>::max())
 		{
 			return false;
 		}
-		const std::span<const std::uint8_t> blobBytes(
-			mesh->storage.data()
-				+ static_cast<std::size_t>(storageOffset),
-			static_cast<std::size_t>(entryIt->blobSize));
-		const TerraEngine::Resource::AnimatedVirtualPageBlob blob =
-			TerraEngine::Resource::ParseAnimatedVirtualPageBlob(
-				blobBytes,
-				*entryIt,
-				mesh->deformablePayloadGeneration);
-		const AnimatedVirtualPageSectionRecord* vertices =
+		const std::span<const std::uint8_t> blobBytes =
+			mesh->deformableDemandedPagePayloads[pageIndex];
+		const auto& sections =
+			mesh->deformableDemandedPageSections[pageIndex];
+		const TemfDeformablePageSection* vertices =
 			FindSection(
-				blob,
-				AnimatedVirtualPageSectionType::PackedVertices);
-		const AnimatedVirtualPageSectionRecord* skin =
+				sections,
+				TemfDeformablePageSectionKind::PackedVertices);
+		const TemfDeformablePageSection* skin =
 			FindSection(
-				blob,
-				AnimatedVirtualPageSectionType::SkinRecords);
-		const AnimatedVirtualPageSectionRecord* joints =
+				sections,
+				TemfDeformablePageSectionKind::SkinRecords);
+		const TemfDeformablePageSection* joints =
 			FindSection(
-				blob,
-				AnimatedVirtualPageSectionType::JointPalette);
-		const AnimatedVirtualPageSectionRecord* morphTargets =
+				sections,
+				TemfDeformablePageSectionKind::JointPalette);
+		const TemfDeformablePageSection* morphTargets =
 			FindSection(
-				blob,
-				AnimatedVirtualPageSectionType::MorphTargets);
-		const AnimatedVirtualPageSectionRecord* morphDeltas =
+				sections,
+				TemfDeformablePageSectionKind::MorphTargets);
+		const TemfDeformablePageSection* morphDeltas =
 			FindSection(
-				blob,
-				AnimatedVirtualPageSectionType::MorphDeltas);
-		const AnimatedVirtualPageSectionRecord* decode =
+				sections,
+				TemfDeformablePageSectionKind::MorphDeltas);
+		const TemfDeformablePageSection* decode =
 			FindSection(
-				blob,
-				AnimatedVirtualPageSectionType::DecodeConstants);
-		if(!blob.valid
-			|| vertices == nullptr
+				sections,
+				TemfDeformablePageSectionKind::DecodeConstants);
+		if(vertices == nullptr
 			|| skin == nullptr
 			|| joints == nullptr
 			|| decode == nullptr
@@ -1873,7 +1833,7 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 		std::memcpy(
 			&quantization,
 			blobBytes.data()
-				+ static_cast<std::size_t>(decode->byteOffset),
+				+ static_cast<std::size_t>(decode->relativeByteOffset),
 			sizeof(quantization));
 		TerraEngine::Renderer::GpuDeformationGenerationRecord
 			generation{};
@@ -1898,15 +1858,14 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 		work.generationRecordIndex = workIndex;
 		work.inputVertexByteOffset =
 			blobBase
-			+ static_cast<std::uint32_t>(vertices->byteOffset);
+			+ vertices->relativeByteOffset;
 		work.skinRecordByteOffset =
 			blobBase
-			+ static_cast<std::uint32_t>(skin->byteOffset);
+			+ skin->relativeByteOffset;
 		work.morphDeltaByteOffset = morphDeltas == nullptr
-			? 0u
-			: blobBase
-				+ static_cast<std::uint32_t>(
-					morphDeltas->byteOffset);
+				? 0u
+				: blobBase
+					+ morphDeltas->relativeByteOffset;
 		work.vertexCount = source.vertexCount;
 		work.jointCount = joints->elementCount;
 		work.morphTargetCount = morphTargets == nullptr
@@ -1922,7 +1881,7 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 		work.previousOutputOffset = source.vertexOffset;
 		work.jointPaletteByteOffset =
 			blobBase
-			+ static_cast<std::uint32_t>(joints->byteOffset);
+			+ joints->relativeByteOffset;
 		std::copy_n(
 			quantization.positionOffset,
 			3u,
@@ -2999,6 +2958,180 @@ void VulkanContext::Impl::PublishVirtualGeometryDecodedPageResources(const Frame
 	}
 }
 
+// Prepare one bounded ExpandedProduction parity request for this frame slot.
+// The upload record already contains immutable CPU-decoded canonical bytes, so
+// the simple ExpandedProduction kernel can copy those exact bytes and prove
+// that its ABI, descriptor ranges, and host readback contract are sound.
+void VulkanContext::Impl::PrepareVulkanVirtualGeometryProductionDecode(const FrameRenderData& frameData)
+{
+	if(currentFrame >= virtualGeometryProductionDecodeResourcesByFrame.size()) {
+		return;
+	}
+	auto& resources = virtualGeometryProductionDecodeResourcesByFrame[currentFrame];
+	if(resources.preparedFrameId == backendFrameSerial) {
+		return;
+	}
+	resources.preparedFrameId = backendFrameSerial;
+	// A slot may have completed an earlier request. Start this new frame with no
+	// recordable plan so an absent/invalid candidate cannot replay stale bytes.
+	resources.plan = {};
+	resources.completionPending = false;
+
+	constexpr std::size_t kMaximumDecodeBytes = 262144u;
+	const auto candidate = std::find_if(frameData.virtualGeometryDecodedPageUploads.begin(),
+		frameData.virtualGeometryDecodedPageUploads.end(), [kMaximumDecodeBytes](const VirtualGeometryDecodedPageUploadRecord& upload) {
+		return upload.publicationGeneration != 0u
+			&& !upload.decodedBytes.empty()
+			&& upload.decodedBytes.size() <= kMaximumDecodeBytes
+			&& upload.decodedBytes.size() % sizeof(std::uint32_t) == 0u;
+		});
+	if(candidate == frameData.virtualGeometryDecodedPageUploads.end()) {
+		return;
+	}
+	if(!EnsureVulkanVirtualGeometryProductionDecodePipeline()) {
+		return;
+	}
+
+	const auto ensureCapacity = [this](VulkanBuffer& buffer, VkDeviceSize requiredBytes, const char* name) {
+		if(buffer.buffer != VK_NULL_HANDLE && buffer.size >= requiredBytes) {
+			return true;
+		}
+		RetireBuffer(buffer);
+		try {
+			buffer = CreateBuffer(requiredBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+				VMA_MEMORY_USAGE_CPU_TO_GPU, name);
+		}
+		catch(const std::exception&) {
+			return false;
+		}
+		return buffer.buffer != VK_NULL_HANDLE;
+	};
+	const VkDeviceSize decodedBytes = static_cast<VkDeviceSize>(candidate->decodedBytes.size());
+	if(!ensureCapacity(resources.requestBuffer,
+		sizeof(TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryProductionDecodeRequest),
+		"Virtual Geometry Production Decode Request")
+		|| !ensureCapacity(resources.encodedBuffer, decodedBytes,
+			"Virtual Geometry Production Decode Encoded")
+		|| !ensureCapacity(resources.decodedBuffer, decodedBytes,
+			"Virtual Geometry Production Decode Decoded")
+		|| !ensureCapacity(resources.resultReadbackBuffer,
+		sizeof(TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryProductionDecodeResult),
+			"Virtual Geometry Production Decode Result")) {
+		virtualGeometryProductionDecodeUnavailableReason = "Could not allocate bounded ExpandedProduction decode buffers.";
+		return;
+	}
+
+	const std::uint32_t boundedBytes = static_cast<std::uint32_t>(decodedBytes);
+	TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryProductionDecodeRequest request{};
+	request.profileId = 1u;
+	request.codecVersion = 1u;
+	request.encodedByteCount = boundedBytes;
+	request.decodedByteCount = boundedBytes;
+	request.outputCapacityBytes = boundedBytes;
+	request.requestIdentity = static_cast<std::uint32_t>(candidate->publicationGeneration);
+	if(request.requestIdentity == 0u) {
+		request.requestIdentity = 1u;
+	}
+	const TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryProductionDecodeResult clearedResult{};
+	if(!WriteMappedBuffer(allocator, resources.requestBuffer, &request, sizeof(request))
+		|| !WriteMappedBuffer(allocator, resources.encodedBuffer, candidate->decodedBytes.data(), decodedBytes)
+		|| !ClearMappedBuffer(allocator, resources.decodedBuffer)
+		|| !WriteMappedBuffer(allocator, resources.resultReadbackBuffer, &clearedResult, sizeof(clearedResult))) {
+		virtualGeometryProductionDecodeUnavailableReason = "Could not upload bounded ExpandedProduction decode inputs.";
+		return;
+	}
+	if(resources.descriptorSet == VK_NULL_HANDLE) {
+		VkDescriptorSetAllocateInfo allocationInfo{};
+		allocationInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+		allocationInfo.descriptorPool = descriptorPool;
+		allocationInfo.descriptorSetCount = 1u;
+		allocationInfo.pSetLayouts = &virtualGeometryProductionDecodeDescriptorSetLayout;
+		if(vkAllocateDescriptorSets(device, &allocationInfo, &resources.descriptorSet) != VK_SUCCESS) {
+			virtualGeometryProductionDecodeUnavailableReason = "Could not allocate the ExpandedProduction decode descriptor set.";
+			return;
+		}
+	}
+	const std::array<VkDescriptorBufferInfo, 4> bufferInfos{
+		VkDescriptorBufferInfo{ resources.requestBuffer.buffer, 0u, resources.requestBuffer.size },
+		VkDescriptorBufferInfo{ resources.encodedBuffer.buffer, 0u, resources.encodedBuffer.size },
+		VkDescriptorBufferInfo{ resources.decodedBuffer.buffer, 0u, resources.decodedBuffer.size },
+		VkDescriptorBufferInfo{ resources.resultReadbackBuffer.buffer, 0u, resources.resultReadbackBuffer.size } };
+	std::array<VkWriteDescriptorSet, 4> writes{};
+	for(std::uint32_t binding = 0u; binding < writes.size(); ++binding) {
+		writes[binding].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[binding].dstSet = resources.descriptorSet;
+		writes[binding].dstBinding = binding;
+		writes[binding].descriptorCount = 1u;
+		writes[binding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		writes[binding].pBufferInfo = &bufferInfos[binding];
+	}
+	vkUpdateDescriptorSets(device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0u, nullptr);
+
+	TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryProductionDecodeResources decodeResources{};
+	decodeResources.requestBuffer = resources.requestBuffer.buffer;
+	decodeResources.encodedBuffer = resources.encodedBuffer.buffer;
+	decodeResources.decodedBuffer = resources.decodedBuffer.buffer;
+	decodeResources.resultReadbackBuffer = resources.resultReadbackBuffer.buffer;
+	decodeResources.descriptorSet = resources.descriptorSet;
+	decodeResources.encodedCapacityBytes = static_cast<std::uint32_t>(resources.encodedBuffer.size);
+	decodeResources.decodedCapacityBytes = static_cast<std::uint32_t>(resources.decodedBuffer.size);
+	decodeResources.resourcesOwnedByFrame = true;
+	resources.plan = TerraEngine::Renderer::Vulkan::BuildVulkanVirtualGeometryProductionDecodePlan(
+		request, candidate->publicationGeneration,
+		CalculateVirtualGeometryCompactHash(candidate->decodedBytes), decodeResources,
+		virtualGeometryProductionDecodePipelines);
+	if(!resources.plan.valid) {
+		virtualGeometryProductionDecodeUnavailableReason = resources.plan.unavailableReason;
+	}
+}
+
+// BeginFrame has already waited for this slot's fence before calling here.
+// Mapping therefore consumes completed device writes without adding a CPU/GPU
+// wait; failures leave the most recently verified device generation intact.
+void VulkanContext::Impl::CompleteVulkanVirtualGeometryProductionDecode(std::uint32_t frameIndex)
+{
+	if(frameIndex >= virtualGeometryProductionDecodeResourcesByFrame.size()) {
+		return;
+	}
+	auto& resources = virtualGeometryProductionDecodeResourcesByFrame[frameIndex];
+	if(!resources.completionPending) {
+		return;
+	}
+	resources.completionPending = false;
+	TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryProductionDecodeResult result{};
+	std::vector<std::uint8_t> decodedBytes(resources.plan.request.decodedByteCount);
+	void* mappedResult = nullptr;
+	void* mappedDecoded = nullptr;
+	const bool mapped = resources.resultReadbackBuffer.allocation != VK_NULL_HANDLE
+		&& resources.decodedBuffer.allocation != VK_NULL_HANDLE
+		&& vmaInvalidateAllocation(allocator, resources.resultReadbackBuffer.allocation, 0u,
+			resources.resultReadbackBuffer.size) == VK_SUCCESS
+		&& vmaInvalidateAllocation(allocator, resources.decodedBuffer.allocation, 0u,
+			resources.decodedBuffer.size) == VK_SUCCESS
+		&& vmaMapMemory(allocator, resources.resultReadbackBuffer.allocation, &mappedResult) == VK_SUCCESS
+		&& vmaMapMemory(allocator, resources.decodedBuffer.allocation, &mappedDecoded) == VK_SUCCESS;
+	if(mapped) {
+		std::memcpy(&result, mappedResult, sizeof(result));
+		std::memcpy(decodedBytes.data(), mappedDecoded, decodedBytes.size());
+	}
+	if(mappedDecoded != nullptr) vmaUnmapMemory(allocator, resources.decodedBuffer.allocation);
+	if(mappedResult != nullptr) vmaUnmapMemory(allocator, resources.resultReadbackBuffer.allocation);
+	const auto receipt = mapped
+		? TerraEngine::Renderer::Vulkan::VerifyVulkanVirtualGeometryProductionDecodeParity(
+			resources.plan, result, decodedBytes)
+		: TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryProductionDecodeParityReceipt{
+			resources.plan.generation, false, false,
+			"ExpandedProduction decode readback could not be mapped after its completed fence." };
+	if(receipt.acceptedForPublication) {
+		completedVirtualGeometryProductionDecodeEvidence = true;
+		publishedVirtualGeometryProductionDecodeGeneration = receipt.generation;
+		virtualGeometryProductionDecodeUnavailableReason.clear();
+	}
+	else {
+		virtualGeometryProductionDecodeUnavailableReason = receipt.reason;
+	}
+}
+
 void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 	const FrameRenderData& frameData,
 	RenderViewType viewType,
@@ -3422,19 +3555,6 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 	visibilityTriangles.reserve(std::min<std::size_t>(
 		frameData.virtualGeometryGpuPackets.size() * 64u,
 		kMaximumVisibilityPrimitiveCount));
-	const auto decodeSnorm10 = [](std::uint32_t packedValue,
-		std::uint32_t bitOffset) {
-		std::int32_t value =
-			static_cast<std::int32_t>((packedValue >> bitOffset) & 0x3ffu);
-		if((value & 0x200) != 0)
-		{
-			value |= ~0x3ff;
-		}
-		return std::clamp(
-			static_cast<float>(value) / 511.0f,
-			-1.0f,
-			1.0f);
-	};
 	for(const GpuVirtualGeometryPacketRecord& packet :
 		frameData.virtualGeometryGpuPackets)
 	{
@@ -3512,32 +3632,36 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 					const std::size_t vertexByteOffset =
 						static_cast<std::size_t>(globalVertex)
 						* kMeshletPackedVertexStrideBytes;
-					if(vertexByteOffset + sizeof(std::uint32_t)
+					if(vertexByteOffset
+						+ sizeof(TerraEngine::VirtualGeometryPackedVertex)
 						> mesh->meshletVertexData.size())
 					{
 						validTriangle = false;
 						break;
 					}
-					std::uint32_t packedPosition = 0u;
+					TerraEngine::VirtualGeometryPackedVertex packedVertex{};
 					std::memcpy(
-						&packedPosition,
+						&packedVertex,
 						mesh->meshletVertexData.data()
 							+ vertexByteOffset,
-						sizeof(packedPosition));
+						sizeof(packedVertex));
+					const std::array<float, 3u> decodedPosition =
+						TerraEngine::DecodeVirtualGeometryPackedPosition(
+							packedVertex);
 					const glm::vec3 normalizedPosition(
-						decodeSnorm10(packedPosition, 0u),
-						decodeSnorm10(packedPosition, 10u),
-						decodeSnorm10(packedPosition, 20u));
+						decodedPosition[0],
+						decodedPosition[1],
+						decodedPosition[2]);
 					const glm::vec3 localPosition(
-						mesh->header.quantization.positionOffset[0]
+						mesh->runtimeLayout.quantization.positionOffset[0]
 							+ normalizedPosition.x
-								* mesh->header.quantization.positionScale[0],
-						mesh->header.quantization.positionOffset[1]
+								* mesh->runtimeLayout.quantization.positionScale[0],
+						mesh->runtimeLayout.quantization.positionOffset[1]
 							+ normalizedPosition.y
-								* mesh->header.quantization.positionScale[1],
-						mesh->header.quantization.positionOffset[2]
+								* mesh->runtimeLayout.quantization.positionScale[1],
+						mesh->runtimeLayout.quantization.positionOffset[2]
 							+ normalizedPosition.z
-								* mesh->header.quantization.positionScale[2]);
+								* mesh->runtimeLayout.quantization.positionScale[2]);
 					clipPositions[corner] =
 						clipTransform * glm::vec4(localPosition, 1.0f);
 				}
@@ -4735,14 +4859,14 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 		|| primitiveIndexSize == 0
 		|| meshletTableSize == 0
 		|| meshletSectionSize == 0
-		|| cpuMesh->header.meshletCount == 0)
+		|| cpuMesh->runtimeLayout.meshletCount == 0)
 	{
 		TERRAENGINE_LOG(LogLevel::Error, "Mesh payload is missing packed vertex/remap/primitive/table data for UUID " << ToHexString(meshId));
 		return;
 	}
 
-	const uint32_t packedStride = cpuMesh->header.layout.strideBytes;
-	const uint32_t meshletVertexCount = cpuMesh->header.meshletVertexCount;
+	const uint32_t packedStride = cpuMesh->runtimeLayout.layout.strideBytes;
+	const uint32_t meshletVertexCount = cpuMesh->runtimeLayout.meshletVertexCount;
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (packedStride != kMeshletPackedVertexStrideBytes || meshletVertexCount == 0) {
 		TERRAENGINE_LOG(LogLevel::Error, "Mesh payload has invalid packed vertex stride/count for UUID " << ToHexString(meshId));
@@ -4767,26 +4891,26 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 	static_assert(sizeof(MeshDecodeInfo) == 64, "Mesh decode info buffer must keep a stable 64-byte layout.");
 
 	MeshDecodeInfo decodeInfo{};
-	decodeInfo.positionOffset[0] = cpuMesh->header.quantization.positionOffset[0];
-	decodeInfo.positionOffset[1] = cpuMesh->header.quantization.positionOffset[1];
-	decodeInfo.positionOffset[2] = cpuMesh->header.quantization.positionOffset[2];
-	decodeInfo.positionScale[0] = cpuMesh->header.quantization.positionScale[0];
-	decodeInfo.positionScale[1] = cpuMesh->header.quantization.positionScale[1];
-	decodeInfo.positionScale[2] = cpuMesh->header.quantization.positionScale[2];
-	decodeInfo.uvOffsetScale[0] = cpuMesh->header.quantization.uvOffset[0];
-	decodeInfo.uvOffsetScale[1] = cpuMesh->header.quantization.uvOffset[1];
-	decodeInfo.uvOffsetScale[2] = cpuMesh->header.quantization.uvScale[0];
-	decodeInfo.uvOffsetScale[3] = cpuMesh->header.quantization.uvScale[1];
-	decodeInfo.counts[0] = cpuMesh->header.meshletVertexCount;
-	decodeInfo.counts[1] = cpuMesh->header.meshletVertexRemapCount;
-	decodeInfo.counts[2] = cpuMesh->header.meshletPrimitiveIndexCount;
+	decodeInfo.positionOffset[0] = cpuMesh->runtimeLayout.quantization.positionOffset[0];
+	decodeInfo.positionOffset[1] = cpuMesh->runtimeLayout.quantization.positionOffset[1];
+	decodeInfo.positionOffset[2] = cpuMesh->runtimeLayout.quantization.positionOffset[2];
+	decodeInfo.positionScale[0] = cpuMesh->runtimeLayout.quantization.positionScale[0];
+	decodeInfo.positionScale[1] = cpuMesh->runtimeLayout.quantization.positionScale[1];
+	decodeInfo.positionScale[2] = cpuMesh->runtimeLayout.quantization.positionScale[2];
+	decodeInfo.uvOffsetScale[0] = cpuMesh->runtimeLayout.quantization.uvOffset[0];
+	decodeInfo.uvOffsetScale[1] = cpuMesh->runtimeLayout.quantization.uvOffset[1];
+	decodeInfo.uvOffsetScale[2] = cpuMesh->runtimeLayout.quantization.uvScale[0];
+	decodeInfo.uvOffsetScale[3] = cpuMesh->runtimeLayout.quantization.uvScale[1];
+	decodeInfo.counts[0] = cpuMesh->runtimeLayout.meshletVertexCount;
+	decodeInfo.counts[1] = cpuMesh->runtimeLayout.meshletVertexRemapCount;
+	decodeInfo.counts[2] = cpuMesh->runtimeLayout.meshletPrimitiveIndexCount;
 	// counts.w: bits [0:30] = meshletCount, bit 31 = remapEncoding (0=u32, 1=u16)
-	decodeInfo.counts[3] = (cpuMesh->header.meshletCount & 0x7FFFFFFFu) | (cpuMesh->header.meshletVertexRemapEncoding << 31u);
+	decodeInfo.counts[3] = (cpuMesh->runtimeLayout.meshletCount & 0x7FFFFFFFu) | (cpuMesh->runtimeLayout.meshletVertexRemapEncoding << 31u);
 
-	std::vector<DeformableVirtualGeometryMorphVertex> morphDeltaRecords;
+	std::vector<TemfDeformablePageMorphVertex> morphDeltaRecords;
 	const bool hasValidatedMorphDeltas = BuildMeshMorphDeltaRecords(*cpuMesh, morphDeltaRecords);
 	const VkDeviceSize morphDeltaSize = static_cast<VkDeviceSize>(
-		morphDeltaRecords.size() * sizeof(DeformableVirtualGeometryMorphVertex));
+		morphDeltaRecords.size() * sizeof(TemfDeformablePageMorphVertex));
 	if(morphDeltaRecords.empty() || morphDeltaSize == 0U) {
 		TERRAENGINE_LOG(LogLevel::Error, "Mesh morph delta preparation produced no safe fallback record for UUID " << ToHexString(meshId));
 		return;
@@ -4796,9 +4920,9 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 	}
 
 	VulkanMesh vMesh{};
-	vMesh.indexCount = cpuMesh->header.meshletPrimitiveIndexCount;
+	vMesh.indexCount = cpuMesh->runtimeLayout.meshletPrimitiveIndexCount;
 	vMesh.indexType = VK_INDEX_TYPE_UINT16;
-	vMesh.meshletCount = cpuMesh->header.meshletCount;
+	vMesh.meshletCount = cpuMesh->runtimeLayout.meshletCount;
 	auto createPlaceholderStorageBuffer = [&](VkDeviceSize byteSize, const char* name) -> VulkanBuffer {
 		// Reflected storage-buffer descriptors may be statically used even when
 		// this mesh has no corresponding payload. Give those bindings a small,
@@ -4827,12 +4951,12 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 		// full high-detail owning mesh as a hidden residency cost.
 		vMesh.meshShaderVertexBuffer = createPlaceholderStorageBuffer(kMeshletPackedVertexStrideBytes, "Virtual Geometry Owner Placeholder Vertex Buffer");
 		vMesh.meshletVertexRemapBuffer = createPlaceholderStorageBuffer(sizeof(std::uint32_t), "Virtual Geometry Owner Placeholder Remap Buffer");
-		vMesh.meshSkinningBuffer = createPlaceholderStorageBuffer(kDeformableMeshSkinningStrideBytes, "Virtual Geometry Owner Placeholder Skinning Buffer");
+		vMesh.meshSkinningBuffer = createPlaceholderStorageBuffer(kTemfSkinningStrideBytes, "Virtual Geometry Owner Placeholder Skinning Buffer");
 		vMesh.meshDecodeInfoBuffer = createPlaceholderStorageBuffer(sizeof(MeshDecodeInfo), "Virtual Geometry Owner Placeholder Decode Buffer");
 		vMesh.indexBuffer = createPlaceholderStorageBuffer(sizeof(std::uint32_t), "Virtual Geometry Owner Placeholder Primitive Buffer");
 		vMesh.meshletBuffer = createPlaceholderStorageBuffer(sizeof(MeshletRecord), "Virtual Geometry Owner Placeholder Meshlet Buffer");
 		vMesh.meshletBoundsBuffer = createPlaceholderStorageBuffer(sizeof(MeshletBounds), "Virtual Geometry Owner Placeholder Bounds Buffer");
-		vMesh.meshMorphDeltaBuffer = createPlaceholderStorageBuffer(sizeof(DeformableVirtualGeometryMorphVertex), "Virtual Geometry Owner Placeholder Morph Delta Buffer");
+		vMesh.meshMorphDeltaBuffer = createPlaceholderStorageBuffer(sizeof(TemfDeformablePageMorphVertex), "Virtual Geometry Owner Placeholder Morph Delta Buffer");
 		vMesh.hasMeshletBounds = true;
 	}
 	else
@@ -4897,7 +5021,7 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 			// Default mesh shaders statically read binding 6. A zero joint and
 			// zero weight record makes that binding valid while preserving the
 			// shader's identity-deformation behavior for non-skinned meshes.
-			vMesh.meshSkinningBuffer = createPlaceholderStorageBuffer(kDeformableMeshSkinningStrideBytes, "Static Mesh Skinning Fallback Buffer");
+			vMesh.meshSkinningBuffer = createPlaceholderStorageBuffer(kTemfSkinningStrideBytes, "Static Mesh Skinning Fallback Buffer");
 		}
 		vMesh.meshMorphDeltaBuffer = CreateBuffer(morphDeltaSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 		vMesh.meshDecodeInfoBuffer = CreateBuffer(sizeof(MeshDecodeInfo), VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);

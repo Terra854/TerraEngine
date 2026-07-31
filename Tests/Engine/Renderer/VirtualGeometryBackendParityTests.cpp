@@ -17,7 +17,7 @@ namespace TerraEngine::Tests
 				context.Expect(matrix.find("Vulkan") != std::string::npos,
 					"Backend matrix must name the Vulkan route");
 				context.Expect(matrix.find("D3D12-Windows") == std::string::npos,
-					"Feature 045 must not require a deferred D3D12 route");
+					"capability validation must not require a deferred D3D12 route");
 				context.Expect(
 					matrix.find("required-future-lane") != std::string::npos, "Unavailable backend lanes must remain explicit future/unavailable lanes");
 				context.Expect(std::filesystem::exists(root / "Engine/Shaders/VirtualGeometry/VirtualGeometryGeneratedIndirect.comp.hlsl"),

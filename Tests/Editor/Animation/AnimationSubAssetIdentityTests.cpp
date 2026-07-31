@@ -271,7 +271,7 @@ namespace TerraEngine::EditorTests
 					"Moving or renaming the source package must preserve every semantic skeleton/clip child GUID.");
 			}
 
-			// Package identity itself is already persisted. T037 extends this same
+			// Package identity itself is already persisted. ImplementationCheck extends this same
 			// publication/reload route with semantic skeleton and clip children.
 			const std::filesystem::path savedPackagePath = std::filesystem::temp_directory_path() / "TerraEngineAnimationSubAssetIdentityTests" / "Assets/Characters/HeroRenamed.fbx";
 			context.Expect(TerraEngine::AssetPipeline::SaveModelPackageImportResult(savedPackagePath, movedAndRenamed), "Moved package sidecar should save before a simulated project reload.");
@@ -920,7 +920,7 @@ namespace TerraEngine::EditorTests
 		registry.Add("Editor.Animation.SubAssetIdentity.DeepWindowsProjectUsesCompactPrivatePublicationPaths", [](TestContext& context) {
 			using namespace TerraEngine::AssetPipeline;
 			const std::filesystem::path sourcePath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-				/ "Tests/Fixtures/Animation/US1Import/Assets/Models/US1Hero.gltf";
+				/ "Tests/Fixtures/Animation/ImportValidation/Assets/Models/ImportedHero.gltf";
 			const std::filesystem::path testRoot = std::filesystem::temp_directory_path()
 				/ "TerraEngineAnimationDeepPathTests" / TerraEngine::ToHexString(TerraEngine::GenerateUUID());
 			std::filesystem::remove_all(testRoot);
@@ -930,7 +930,7 @@ namespace TerraEngine::EditorTests
 			// names retain useful headroom below it.
 			ModelPackageImportOptions probeOptions{};
 			probeOptions.sourcePath = sourcePath;
-			probeOptions.sourceRelativePath = "Models/US1Hero.gltf";
+			probeOptions.sourceRelativePath = "Models/ImportedHero.gltf";
 			probeOptions.assetRoot = testRoot / "Probe/Assets";
 			probeOptions.buildRoot = testRoot / "Probe/Build";
 			probeOptions.packageGuid = TerraEngine::GenerateUUID();
@@ -1039,8 +1039,8 @@ namespace TerraEngine::EditorTests
 
 			ModelPackageImportOptions options{};
 			options.sourcePath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
-				/ "Tests/Fixtures/Animation/US1Import/Assets/Models/US1Hero.gltf";
-			options.sourceRelativePath = "Models/US1Hero.gltf";
+				/ "Tests/Fixtures/Animation/ImportValidation/Assets/Models/ImportedHero.gltf";
+			options.sourceRelativePath = "Models/ImportedHero.gltf";
 			options.assetRoot = deepProjectRoot / "Assets";
 			options.buildRoot = deepProjectRoot / "Build";
 			options.packageGuid = packageGuid;

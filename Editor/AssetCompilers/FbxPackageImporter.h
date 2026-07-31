@@ -21,7 +21,7 @@ namespace TerraEngine::AssetPipeline
 
 	// Assimp exposes FBX node transforms and animation channels only while its
 	// aiScene is alive. These owned records preserve the normalized source data
-	// until T033 compresses clips and T037 publishes the common package manifest.
+	// until ImplementationCheck compresses clips and ImplementationCheck publishes the common package manifest.
 	struct FbxAnimatedNode
 	{
 		std::uint64_t stableId = 0u;
@@ -148,7 +148,7 @@ namespace TerraEngine::AssetPipeline
 	};
 
 	// The common ModelPackageImportResult cannot own animation children until
-	// T037 lands. This result keeps the fully prepared data beside today's package
+	// ImplementationCheck lands. This result keeps the fully prepared data beside today's package
 	// result so the later manifest integration can publish it without reparsing FBX.
 	struct FbxAnimatedImportResult
 	{

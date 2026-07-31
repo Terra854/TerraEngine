@@ -1,7 +1,6 @@
 {
 	"schemaVersion": 2,
-	"phase": 2,
-	"id": "phase-2",
+	"id": "device-submission",
 	"title": "Vulkan traversal, compaction, and generated submission",
 	"requiredTools": ["renderer.virtualGeometry.capabilityEvidence", "renderer.virtualGeometry.stats", "diagnostics.get_summary"],
 	"operations": [

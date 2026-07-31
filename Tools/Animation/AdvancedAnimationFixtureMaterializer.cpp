@@ -597,7 +597,7 @@ namespace {
 		provenance.sourceAnimatorId =
 			MakeFixtureGuid(FixtureGuidKind::RecordingSourceAnimator);
 		provenance.sourceSceneIdentity = "AdvancedAssets/AdvancedAnimationFixture.tescene";
-		provenance.sourceSessionIdentity = "spec-043-deterministic-recording";
+		provenance.sourceSessionIdentity = "animation-production-validation-deterministic-recording";
 		provenance.sourceFirstTick = 0;
 		provenance.sourceLastTick = clip.durationTicks;
 		provenance.sourceSampleRate = clip.sampleRate;
@@ -734,7 +734,7 @@ namespace {
 		profile.quality.expectedMaximumRotationErrorRadians = 0.01F;
 		profile.quality.validationProfileHash = 0x043a000000007101ULL;
 		profile.quality.reviewReason =
-			"Reviewed synthetic humanoid retarget fixture for Spec 043";
+			"Reviewed synthetic humanoid retarget fixture for animation production validation";
 		return profile;
 	}
 

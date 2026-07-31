@@ -312,9 +312,9 @@ namespace TerraEngine::Renderer {
 
 		[[nodiscard]] bool RequiresOwnerMeshDeformationFallback() const noexcept
 		{
-			// Legacy or rejected assets have no independently verifiable AVPB
-			// skin/morph inputs. Only those compatibility cases collapse to the
-			// complete owner; healthy animated pages stay independently refinable.
+			// A rejected or temporarily unavailable demanded page has no
+			// independently verifiable skin/morph inputs. Only that fail-open
+			// state collapses to the complete owner; healthy pages stay refinable.
 			return !pageLocalDeformationAvailable
 				&& RequiresConservativeCoarseVisibility();
 		}
@@ -339,7 +339,7 @@ namespace TerraEngine::Renderer {
 		std::uint64_t skeletonCompatibilityFingerprint = 0U;
 		// The renderer resolves this capability from the current mesh/page
 		// publication, not from an animator. Carry it through binding resolution
-		// so accepting a new CPU/GPU pose cannot accidentally erase AVPB support.
+		// so accepting a new CPU/GPU pose cannot erase demanded-page support.
 		bool pageLocalDeformationAvailable = false;
 		// This exact record names the render-side mesh and protected renderer/scene
 		// publication that a GPU-only packet was lowered against. It complements
@@ -2386,6 +2386,11 @@ struct DrawCommand
 	std::uint32_t meshDataIndex = 0u;
 	std::uint32_t textureIndex = 0u;
 	TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+	// Route preparation copies the selected representation onto every cached
+	// draw command. View selection must consult this value so a page-less,
+	// direct-resident TEMF never enters hierarchy, page, or VG raster work.
+	TerraEngine::Renderer::GeometryRoute geometryRoute =
+		TerraEngine::Renderer::GeometryRoute::DirectMeshlet;
 	// Animation binding is a copied, immutable generation bundle. Static meshes
 	// leave it at the bind-pose default and pay no animation-system lookup cost.
 	TerraEngine::Renderer::AnimationRenderBinding animationBinding{};
@@ -2421,6 +2426,12 @@ struct DrawCommand
 	// cluster selection and packet compaction no longer have identical offsets.
 	std::uint32_t virtualGeometryPacketDescriptorIndex = 0xffffffffu;
 	bool taskShaderCullingEnabled = true;
+
+	[[nodiscard]] bool UsesVirtualGeometryRoute() const noexcept
+	{
+		return geometryRoute == TerraEngine::Renderer::GeometryRoute::VirtualGeometryHardware
+			|| geometryRoute == TerraEngine::Renderer::GeometryRoute::VirtualGeometryCompute;
+	}
 };
 
 // Each shadow-casting light receives its own filtered draw list so shadow
@@ -3007,6 +3018,20 @@ struct RenderStatsSnapshot
 	std::uint32_t virtualGeometryGpuFallbackAffectedPackets = 0u;
 	std::uint32_t virtualGeometryGpuFallbackAffectedBatches = 0u;
 	std::string virtualGeometryGpuFallbackReason;
+	// Route diagnostics are copied from the immutable frame route envelope. They
+	// let editor/automation distinguish direct suppression from an unavailable
+	// virtual-geometry path without reading renderer-owned mutable state.
+	std::string geometryRoute;
+	std::string geometryRouteSource;
+	std::uint64_t geometryRoutePolicyIdentity = 0u;
+	std::uint64_t geometryRouteCalibrationIdentity = 0u;
+	std::uint32_t geometryRouteHysteresisFrames = 0u;
+	std::uint32_t geometryRouteDirectBatchCount = 0u;
+	std::uint32_t geometryRouteSharedInstanceCount = 0u;
+	std::uint32_t geometryRouteSuppressedPageRequests = 0u;
+	std::uint32_t geometryRouteSuppressedDecodeBlocks = 0u;
+	std::uint32_t geometryRouteSuppressedResidencyRecords = 0u;
+	std::string geometryRouteFallbackReason;
 	// Performance gate summaries stay compact in the stats path. Full gate
 	// records remain in RenderDiagnosticsSummary for profiler and automation
 	// details, while these counts let lightweight readers detect regressions.

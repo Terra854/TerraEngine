@@ -31,7 +31,7 @@ namespace TerraEngine::Animation {
 			const AnimationRollbackRestoreRequirements& requirements,
 			AnimationRollbackSnapshot& restored) const noexcept;
 
-		// This compatibility overload supports existing T262+ callers that have not
+		// This compatibility overload supports existing ImplementationCheck+ callers that have not
 		// yet assembled the complete generation stamp. It still validates snapshot
 		// integrity, asset/program fingerprints, and publication generation.
 		[[nodiscard]] AnimationStatus Restore(

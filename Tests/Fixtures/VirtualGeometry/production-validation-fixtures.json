@@ -1,6 +1,6 @@
 {
 	"schemaVersion": 1,
-	"feature": "045-virtual-geometry-alternative",
+	"suite": "virtual-geometry-production",
 	"status": "setup-inventory",
 	"provenance": {
 		"manifestSource": "Tests/Fixtures/VirtualGeometry/hardening-fixtures.json",

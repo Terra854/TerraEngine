@@ -1,6 +1,7 @@
 #pragma pack_matrix(column_major)
 #include "DefaultDeformation.hlsli"
 #include "../Geometry/TerraGeometryContract.hlsli"
+#include "../VirtualGeometry/VirtualGeometryPackedVertex.hlsli"
 
 // Meshlet table emitted by the mesh compiler and mirrored from TerraEngineMeshFile.h.
 struct MeshletRecord
@@ -360,7 +361,8 @@ bool TryApplyGpuSkinning(
 			continue;
 		}
 		const uint jointIndex = (packedJoints >> (influence * 8u)) & 0xFFu;
-		// TDEF stores palette-local indices, not skeleton-joint indices. A sparse
+		// Canonical deformable streams store palette-local indices, not
+		// skeleton-joint indices. A sparse
 		// cooked palette may contain fewer entries than the complete skeleton; the
 		// palette compaction stage has already mapped each entry to its source joint.
 		if (jointIndex >= record.paletteEntryCount
@@ -931,26 +933,18 @@ void EmitMeshlet(
 		}
 
 		const uint packedVertexByteOffset = globalVertexIndex * 16u;
-		const uint packedPosition = meshletVertexBytes.Load(packedVertexByteOffset + 0u);
-		const uint packedNormal   = meshletVertexBytes.Load(packedVertexByteOffset + 4u);
-		const uint packedTangent  = meshletVertexBytes.Load(packedVertexByteOffset + 8u);
-		const uint packedUv       = meshletVertexBytes.Load(packedVertexByteOffset + 12u);
-
-		const float3 qPosition = float3(
-			DecodeSnorm10(packedPosition, 0u),
-			DecodeSnorm10(packedPosition, 10u),
-			DecodeSnorm10(packedPosition, 20u));
-		const float3 position = decode.positionOffset.xyz + qPosition * decode.positionScale.xyz;
-		
-		// Decode the spare packed-position bits as a bitangent sign. Older mesh
-		// payloads can leave this field as zero, and the previous raw signed
-		// decode could emit 0 or -2. The fragment shader expects only a handedness
-		// sign, so publish a stable +1/-1 contract for all payload variants.
-		const int rawTangentSign = (int(packedPosition >> 30) << 30) >> 30;
-		const float tangentW = rawTangentSign < 0 ? -1.0f : 1.0f;
-		
-		const float3 normal = DecodeOct32Normal(packedNormal);
-		const float3 tangent = DecodeOct32Normal(packedTangent);
+		const uint4 packedVertex = uint4(
+			meshletVertexBytes.Load(packedVertexByteOffset + 0u),
+			meshletVertexBytes.Load(packedVertexByteOffset + 4u),
+			meshletVertexBytes.Load(packedVertexByteOffset + 8u),
+			meshletVertexBytes.Load(packedVertexByteOffset + 12u));
+		const TeDecodedPackedVertex decodedVertex =
+			TeDecodePackedVertex(packedVertex);
+		const float3 position = decode.positionOffset.xyz
+			+ decodedVertex.normalizedPosition * decode.positionScale.xyz;
+		const float tangentW = decodedVertex.tangentSign;
+		const float3 normal = decodedVertex.normal;
+		const float3 tangent = decodedVertex.tangent;
 		float3 deformedPosition = position;
 		float3 deformedNormal = normal;
 		float3 deformedTangent = tangent;
@@ -967,10 +961,9 @@ void EmitMeshlet(
 				deformedTangent);
 		}
 		
-		const float2 qUv = float2(
-			DecodeUnorm16(packedUv, 0u),
-			DecodeUnorm16(packedUv, 16u));
-		const float2 uv = decode.uvOffsetScale.xy + qUv * decode.uvOffsetScale.zw;
+		const float2 uv = decode.uvOffsetScale.xy
+			+ decodedVertex.normalizedTextureCoordinate
+				* decode.uvOffsetScale.zw;
 
 		const float4 worldPosition = mul(SceneUniforms.model, float4(deformedPosition, 1.0f));
 
@@ -1074,20 +1067,18 @@ void EmitPageLocalMeshlet(
 			localVertexIndex = 0u;
 		}
 
-		const uint packedPosition = LoadPageLocalPackedVertexWord(descriptor, localVertexIndex, 0u);
-		const uint packedNormal = LoadPageLocalPackedVertexWord(descriptor, localVertexIndex, 1u);
-		const uint packedTangent = LoadPageLocalPackedVertexWord(descriptor, localVertexIndex, 2u);
-		const uint packedUv = LoadPageLocalPackedVertexWord(descriptor, localVertexIndex, 3u);
-
-		const float3 qPosition = float3(
-			DecodeSnorm10(packedPosition, 0u),
-			DecodeSnorm10(packedPosition, 10u),
-			DecodeSnorm10(packedPosition, 20u));
-		float3 position = decode.positionOffset.xyz + qPosition * decode.positionScale.xyz;
-		const int rawTangentSign = (int(packedPosition >> 30) << 30) >> 30;
-		const float tangentW = rawTangentSign < 0 ? -1.0f : 1.0f;
-		float3 normal = DecodeOct32Normal(packedNormal);
-		float3 tangent = DecodeOct32Normal(packedTangent);
+		const uint4 packedVertex = uint4(
+			LoadPageLocalPackedVertexWord(descriptor, localVertexIndex, 0u),
+			LoadPageLocalPackedVertexWord(descriptor, localVertexIndex, 1u),
+			LoadPageLocalPackedVertexWord(descriptor, localVertexIndex, 2u),
+			LoadPageLocalPackedVertexWord(descriptor, localVertexIndex, 3u));
+		const TeDecodedPackedVertex decodedVertex =
+			TeDecodePackedVertex(packedVertex);
+		float3 position = decode.positionOffset.xyz
+			+ decodedVertex.normalizedPosition * decode.positionScale.xyz;
+		const float tangentW = decodedVertex.tangentSign;
+		float3 normal = decodedVertex.normal;
+		float3 tangent = decodedVertex.tangent;
 		if (hasCanonicalDeformation)
 		{
 			TeAnimatedDeformedVertex deformedVertex;
@@ -1102,10 +1093,9 @@ void EmitPageLocalMeshlet(
 				tangent = deformedVertex.tangentAndSign.xyz;
 			}
 		}
-		const float2 qUv = float2(
-			DecodeUnorm16(packedUv, 0u),
-			DecodeUnorm16(packedUv, 16u));
-		const float2 uv = decode.uvOffsetScale.xy + qUv * decode.uvOffsetScale.zw;
+		const float2 uv = decode.uvOffsetScale.xy
+			+ decodedVertex.normalizedTextureCoordinate
+				* decode.uvOffsetScale.zw;
 
 		const float4 worldPosition = mul(SceneUniforms.model, float4(position, 1.0f));
 

@@ -1,4 +1,4 @@
-# NewAnimationCleanSnapshot.ps1 - Materialize an isolated Spec 043 source snapshot.
+# NewAnimationCleanSnapshot.ps1 - Materialize an isolated animation production validation source snapshot.
 #
 # The implementation branch can be intentionally dirty while a long Spec Kit run
 # is in progress. This tool captures the selected feature tree through a temporary
@@ -153,7 +153,7 @@ $includedUntrackedRoots = @(
 	'cmake',
 	'global.json',
 	'specs',
-	'SPEC_043_PROGRESS.md'
+	'animation-production-validation_PROGRESS.md'
 )
 $excludedLocalRoots = @('.agents', '.gemini', '.specify', 'dump', 'out',
 	'Screenshot 2026-07-18 021850.png', 'crash_analysis_report.md')
@@ -196,7 +196,7 @@ try {
 		'-c', 'user.email=validation@terraengine.invalid',
 		'commit-tree', $tree,
 		'-p', $baseCommit,
-		'-m', "Spec 043 isolated validation snapshot $RunId"
+		'-m', "animation production validation isolated validation snapshot $RunId"
 	) $repoRoot
 	[void](Invoke-Git @('update-ref', $temporaryRef, $commit) $repoRoot)
 	$refCreated = $true

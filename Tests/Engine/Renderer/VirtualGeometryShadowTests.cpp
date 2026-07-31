@@ -98,5 +98,27 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(0u, shadowRange.selectedLodIndex, "Invalid shadow bounds should preserve highest-detail visibility.");
 			context.Expect(shadowRange.hiZSelfOcclusionGuardPassed, "Fail-open shadow visibility should not clear camera Hi-Z diagnostics.");
 		});
+
+		registry.Add("VirtualGeometry.Render.Shadow.PreservesObjectPrimitiveAndRouteIdentity", [](TestContext& context) {
+			const TerraEngine::UUID objectId = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
+			TerraEngine::Renderer::RenderFrameSnapshot snapshot{};
+			TerraEngine::Renderer::RenderFrameRenderableRecord renderable{};
+			renderable.objectId = objectId;
+			renderable.meshId = meshId;
+			renderable.geometryRouteDecision.routeGeneration = 77u;
+			snapshot.renderables.push_back(renderable);
+			TerraEngine::Renderer::VirtualGeometryViewSelectionState shadow{};
+			shadow.viewType = RenderViewType::Shadow;
+			shadow.outputKind = RenderOutputKind::OffscreenTexture;
+			shadow.outputId = 77u;
+			shadow.shadowPass = true;
+			shadow.draws.push_back({ objectId, meshId, {}, true });
+			const auto visibility = TerraEngine::Renderer::BuildVirtualGeometryViewVisibilitySnapshot(
+				snapshot, shadow, VirtualGeometryCounterSource::Prepared);
+			context.Expect(objectId == visibility.drawRanges.front().objectId, "Shadow depth visibility must retain object identity.");
+			context.Expect(meshId == visibility.drawRanges.front().meshId, "Shadow depth visibility must retain primitive identity.");
+			context.ExpectEqual(77u, snapshot.renderables.front().geometryRouteDecision.routeGeneration, "Shadow and camera views must share a stable route generation.");
+		});
 	}
 }

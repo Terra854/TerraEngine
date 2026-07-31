@@ -39,6 +39,12 @@ namespace TerraEngine::Tests {
 			context.Expect(declaration.protectedCommit.find("atomic geometry/history/bounds publication")
 				!= std::string::npos,
 				"The protected boundary must name atomic publication.");
+			context.Expect(declaration.safeSubwork.find("demand union") != std::string::npos,
+				"Animated preparation must union compatible view demands before dispatch.");
+			context.Expect(declaration.safeSubwork.find("morph-before-skin") != std::string::npos,
+				"Animated preparation must document morph-before-skin ordering.");
+			context.Expect(declaration.protectedCommit.find("cross-view generation") != std::string::npos,
+				"Publication must expose one accepted generation to camera, shadow, capture, picking, and editor views.");
 		});
 	}
 

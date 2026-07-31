@@ -3,6 +3,7 @@
 #include "File Formats/TerraEngineMeshFile.h"
 #include "MeshCompiler.h"
 #include "Resource/ResourceManager.h"
+#include "Resource/VirtualGeometryCodec.h"
 
 #include <algorithm>
 #include <cmath>
@@ -127,33 +128,12 @@ namespace
 		return manager.GetMesh(meshId);
 	}
 
-	void RemoveAggregateProfileSidecar(const std::filesystem::path& output)
-	{
-		const std::uintmax_t sidecarBytes =
-			sizeof(VirtualGeometryAggregateProfileHeader)
-			+ sizeof(VirtualGeometryAggregateProfileRecord);
-		const std::uintmax_t fileBytes = std::filesystem::file_size(output);
-		if (fileBytes >= sidecarBytes)
-		{
-			std::filesystem::resize_file(output, fileBytes - sidecarBytes);
-		}
-	}
-
-	void CorruptAggregateProfileSidecar(const std::filesystem::path& output)
-	{
-		// The record hash covers this byte. Altering it preserves TEMF geometry
-		// while proving the optional sidecar reader fails safely to legacy data.
-		std::fstream file(output, std::ios::binary | std::ios::in | std::ios::out);
-		file.seekp(-1, std::ios::end);
-		const char corrupted = '\x7f';
-		file.write(&corrupted, 1);
-	}
 }
 
 	void RegisterVirtualGeometryMeshCompilerTests(TestRegistry& registry)
 	{
 		registry.Add("Editor.AssetPipeline.VirtualGeometry.MeshCompiler.DefaultAdaptiveHalfOctaveTargetsAreRecorded", [](TestContext& context) {
-			const RawMeshFixture fixture = MakeGridMesh(36u);
+			const RawMeshFixture fixture = MakeGridMesh(48u);
 			const std::filesystem::path output = MakeTempOutputPath("AdaptiveHalfOctaveGrid");
 			MeshCompileReport report{};
 
@@ -190,7 +170,7 @@ namespace
 		});
 
 		registry.Add("Editor.AssetPipeline.VirtualGeometry.MeshCompiler.GeneratesLodChainForHighDetailMesh", [](TestContext& context) {
-			const RawMeshFixture fixture = MakeGridMesh(24u);
+			const RawMeshFixture fixture = MakeGridMesh(48u);
 			const std::filesystem::path output = MakeTempOutputPath("HighDetailGrid");
 			MeshCompileReport report{};
 
@@ -206,7 +186,7 @@ namespace
 			Mesh* mesh = LoadCompiledMeshForInspection(output);
 			context.Expect(mesh != nullptr, "Compiled virtual geometry TEMF should load through ResourceManager.");
 			context.Expect(mesh->hasVirtualGeometry, "Loaded mesh should advertise virtual geometry metadata.");
-			context.Expect((mesh->header.meshletFlags & kMeshletHeaderFlagHasVirtualGeometry) != 0u, "TEMF header should carry the virtual geometry flag.");
+			context.Expect((mesh->runtimeLayout.meshletFlags & kMeshletHeaderFlagHasVirtualGeometry) != 0u, "TEMF header should carry the virtual geometry flag.");
 			context.ExpectEqual(static_cast<std::size_t>(report.virtualGeometry.detailLevelCount), mesh->virtualGeometryDetailLevels.size(), "Loaded detail table should match the cook report.");
 			context.Expect(mesh->virtualGeometryDetailLevels.back().primitiveCount < mesh->virtualGeometryDetailLevels.front().primitiveCount, "Last detail level should use fewer primitives than the source detail.");
 			context.Expect(mesh->virtualGeometryPages.size() > mesh->virtualGeometryDetailLevels.size(), "Dense detail levels should split into bounded spatial physical pages.");
@@ -249,41 +229,31 @@ namespace
 			context.Expect(sawParentChildLink, "High-detail fixtures should publish at least one source-coverage parent/child link.");
 		});
 
-		registry.Add("Editor.AssetPipeline.VirtualGeometry.MeshCompiler.AggregateProfileSidecarSupportsCurrentAndLegacyReaders", [](TestContext& context) {
-			// A one-cluster fixture proves the v1 global profile contract without
-			// claiming that one aggregate covers an unrelated multi-root region.
-			const RawMeshFixture fixture = MakeSmallMesh();
-			const std::filesystem::path output = MakeTempOutputPath("AggregateProfileDualReader");
+		registry.Add("Editor.AssetPipeline.VirtualGeometry.MeshCompiler.WritesCanonicalProductionDirectory", [](TestContext& context) {
+			// Virtual-page assertions require enough source triangles to select the
+			// virtual representation. Small fixtures intentionally use direct meshlets.
+			const RawMeshFixture fixture = MakeGridMesh(48u);
+			const std::filesystem::path output = MakeTempOutputPath("CanonicalProductionDirectory");
 			MeshCompileReport report{};
-			context.Expect(CompileMeshFromRaw("VirtualGeometry/AggregateProfileDualReader.obj", output, fixture.vertices, fixture.indices, true, &report), "Aggregate profile fixture should compile.");
+			context.Expect(CompileMeshFromRaw("VirtualGeometry/CanonicalProductionDirectory.obj", output,
+				fixture.vertices, fixture.indices, true, &report),
+				"Canonical production fixture should compile.");
 
-			Mesh* current = LoadCompiledMeshForInspection(output);
-			context.Expect(current != nullptr, "Current aggregate profile fixture should load.");
-			if (current != nullptr)
-			{
-				context.Expect(current->hasVirtualGeometryAggregateProfile, "Current cooks should publish an aggregate profile.");
-				context.Expect(current->virtualGeometryAggregateProfileProvenance == VirtualGeometryAggregateProfileProvenance::CookedSidecar, "Current reader should prefer the validated VGAP sidecar.");
-				context.Expect(!current->virtualGeometryAggregateProfiles.empty(), "Current VGAP sidecar should publish at least one typed fallback profile.");
-			}
-
-			RemoveAggregateProfileSidecar(output);
-			Mesh* legacy = LoadCompiledMeshForInspection(output);
-			context.Expect(legacy != nullptr, "Legacy TEMF without VGAP should remain readable.");
-			if (legacy != nullptr)
-			{
-				context.Expect(legacy->hasVirtualGeometryAggregateProfile, "Single-root legacy TEMF should derive a safe aggregate fallback.");
-				context.Expect(legacy->virtualGeometryAggregateProfileProvenance == VirtualGeometryAggregateProfileProvenance::LegacyDerived, "Legacy reader should label derived fallback provenance.");
-			}
-
-			context.Expect(CompileMeshFromRaw("VirtualGeometry/AggregateProfileDualReader.obj", output, fixture.vertices, fixture.indices, true, &report), "Malformed sidecar fixture should recook before corruption.");
-			CorruptAggregateProfileSidecar(output);
-			Mesh* malformed = LoadCompiledMeshForInspection(output);
-			context.Expect(malformed != nullptr, "Malformed VGAP must preserve the validated TEMF fallback path.");
-			if (malformed != nullptr)
-			{
-				context.Expect(malformed->virtualGeometryAggregateProfileProvenance == VirtualGeometryAggregateProfileProvenance::LegacyDerived, "Malformed VGAP should never publish partially trusted current profile data.");
-				context.Expect(malformed->virtualGeometryAggregateProfileDiagnostic.find("validation") != std::string::npos, "Malformed VGAP should retain an actionable repair diagnostic.");
-			}
+			std::ifstream file(output, std::ios::binary);
+			const std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(file)), {});
+			const auto validation = TerraEngine::Resource::ValidateTemfProductionFile(bytes, {});
+			context.Expect(validation.IsComplete(),
+				"A virtual-geometry cook must publish a complete TEMFPRD1 directory instead of an optional sidecar.");
+			if (!validation.IsComplete()) return;
+			context.Expect(validation.directory.header.formatContractId == kTemfProductionContractId
+				&& (validation.directory.header.representationFlags & kTemfRepresentationVirtualGeometry) != 0u
+				&& !validation.directory.blocks.empty(),
+				"The canonical root must identify TEMFPRD1, virtual geometry, and descriptor-owned blocks.");
+			Mesh* mesh = LoadCompiledMeshForInspection(output);
+			context.Expect(mesh != nullptr && mesh->hasVirtualGeometry
+				&& !mesh->virtualGeometryPages.empty()
+				&& !mesh->virtualGeometryClusters.empty(),
+				"The production decoder must reconstruct virtual hierarchy records without a legacy append payload.");
 		});
 
 		registry.Add("Editor.AssetPipeline.VirtualGeometry.MeshCompiler.PerMeshMinimumSourceOverrideCanSkipSmallMeshes", [](TestContext& context) {
@@ -305,11 +275,18 @@ namespace
 			context.Expect(report.virtualGeometry.skippedLevels.front().message.find("2 triangles") != std::string::npos, "Small mesh skip message should include the actual source triangle count.");
 			context.Expect(report.virtualGeometry.skippedLevels.front().message.find("minimum source threshold") != std::string::npos, "Small mesh skip message should name the threshold that prevented extra LODs.");
 
+			std::ifstream file(output, std::ios::binary);
+			const std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(file)), {});
+			const auto validation = TerraEngine::Resource::ValidateTemfProductionFile(bytes, {});
+			context.Expect(validation.IsComplete()
+				&& (validation.directory.header.representationFlags & kTemfRepresentationDirectMeshlets) != 0u
+				&& (validation.directory.header.representationFlags & kTemfRepresentationVirtualGeometry) == 0u,
+				"A tiny mesh must publish the canonical direct-meshlet TEMF route.");
 			Mesh* mesh = LoadCompiledMeshForInspection(output);
-			context.Expect(mesh != nullptr, "Skipped virtual geometry TEMF should still load.");
-			context.Expect(mesh->hasVirtualGeometry, "Small meshes should still carry one virtual geometry detail for the renderer path.");
-			context.ExpectEqual(static_cast<std::size_t>(1), mesh->virtualGeometryDetailLevels.size(), "Loaded small mesh should contain one virtual geometry detail.");
-			context.Expect(!mesh->virtualGeometrySkippedDetails.empty(), "Small mesh TEMF should serialize skipped adaptive targets.");
+			context.Expect(mesh != nullptr, "Direct-resident small-mesh TEMF should still load.");
+			context.Expect(!mesh->hasVirtualGeometry, "Small meshes must not expose virtual pages to the renderer path.");
+			context.Expect(mesh->virtualGeometryDetailLevels.empty(), "Direct-resident meshes must not deserialize virtual detail levels.");
+			context.Expect(mesh->virtualGeometrySkippedDetails.empty(), "Direct-resident TEMF must not serialize virtual adaptive-detail records.");
 		});
 
 		registry.Add("Editor.AssetPipeline.VirtualGeometry.MeshCompiler.SanitizesUnsafeAdaptiveSettings", [](TestContext& context) {
@@ -336,7 +313,7 @@ namespace
 		});
 
 		registry.Add("Editor.AssetPipeline.VirtualGeometry.MeshCompiler.ReportsGeneratedAndSkippedAdaptiveTargets", [](TestContext& context) {
-			const RawMeshFixture fixture = MakeGridMesh(28u);
+			const RawMeshFixture fixture = MakeGridMesh(48u);
 			const std::filesystem::path output = MakeTempOutputPath("AdaptiveDiagnosticCoverage");
 			MeshCompileReport report{};
 			VirtualGeometryAdaptiveCompileSettings settings = MakeDefaultVirtualGeometryAdaptiveCompileSettings();
@@ -401,7 +378,7 @@ namespace
 		});
 
 		registry.Add("Editor.AssetPipeline.VirtualGeometry.MeshCompiler.ValidatesCullableGroupBounds", [](TestContext& context) {
-			const RawMeshFixture fixture = MakeGridMesh(18u);
+			const RawMeshFixture fixture = MakeGridMesh(48u);
 			const std::filesystem::path output = MakeTempOutputPath("CullableBoundsGrid");
 			MeshCompileReport report{};
 
@@ -421,7 +398,7 @@ namespace
 		});
 
 		registry.Add("Editor.AssetPipeline.VirtualGeometry.MeshCompiler.CooksConeSafetyRecordsForClusters", [](TestContext& context) {
-			const RawMeshFixture fixture = MakeGridMesh(20u);
+			const RawMeshFixture fixture = MakeGridMesh(48u);
 			const std::filesystem::path output = MakeTempOutputPath("ConeSafetyGrid");
 			MeshCompileReport report{};
 
@@ -448,7 +425,7 @@ namespace
 		});
 
 		registry.Add("Editor.AssetPipeline.VirtualGeometry.MeshCompiler.ConservativeCookDisablesConeSafety", [](TestContext& context) {
-			const RawMeshFixture fixture = MakeGridMesh(20u);
+			const RawMeshFixture fixture = MakeGridMesh(48u);
 			const std::filesystem::path output = MakeTempOutputPath("ConeSafetyConservativeGrid");
 			MeshCompileReport report{};
 			VirtualGeometryConeSafetyCookSettings coneSettings;
@@ -471,7 +448,7 @@ namespace
 		});
 
 		registry.Add("Editor.AssetPipeline.VirtualGeometry.MeshCompiler.SectionRangesRemainContinuousAcrossLods", [](TestContext& context) {
-			const RawMeshFixture fixture = MakeGridMesh(22u);
+			const RawMeshFixture fixture = MakeGridMesh(48u);
 			const std::filesystem::path output = MakeTempOutputPath("SectionContinuityGrid");
 			MeshCompileReport report{};
 
@@ -501,11 +478,27 @@ namespace
 		});
 
 		registry.Add("Editor.AssetPipeline.VirtualGeometry.MeshCompiler.VisualErrorMetadataStaysWithinTolerance", [](TestContext& context) {
-			const RawMeshFixture fixture = MakeGridMesh(28u);
+			const RawMeshFixture fixture = MakeGridMesh(48u);
 			const std::filesystem::path output = MakeTempOutputPath("VisualErrorGrid");
 			MeshCompileReport report{};
+			VirtualGeometryAdaptiveCompileSettings settings =
+				MakeDefaultVirtualGeometryAdaptiveCompileSettings();
+			// This regression validates an explicit quality budget. Keep the
+			// fixture above the production VG route threshold while asking the
+			// cooker to reject any candidate beyond five-percent object error.
+			settings.maximumGeometricError = 0.05f;
 
-			context.Expect(CompileMeshFromRaw("VirtualGeometry/VisualErrorGrid.obj", output, fixture.vertices, fixture.indices, true, &report), "Visual-error fixture should compile.");
+			context.Expect(CompileMeshFromRaw(
+				"VirtualGeometry/VisualErrorGrid.obj",
+				output,
+				fixture.vertices,
+				fixture.indices,
+				true,
+				&report,
+				60.0f,
+				1e-6f,
+				&settings),
+				"Visual-error fixture should compile.");
 			Mesh* mesh = LoadCompiledMeshForInspection(output);
 			context.Expect(mesh != nullptr, "Visual-error fixture should load.");
 			context.Expect(mesh->virtualGeometryDetailLevels.size() >= 2u, "Visual-error fixture should produce multiple LODs.");
@@ -526,7 +519,7 @@ namespace
 		});
 
 		registry.Add("Editor.AssetPipeline.VirtualGeometry.MeshCompiler.CleanCheckoutLargeMeshCookIsDeterministic", [](TestContext& context) {
-			const RawMeshFixture fixture = MakeDeterministicLargeStressMesh(36u, 4u);
+			const RawMeshFixture fixture = MakeDeterministicLargeStressMesh(48u, 4u);
 			const std::filesystem::path firstOutput = MakeTempOutputPath("CleanCheckoutLargeMeshA");
 			const std::filesystem::path secondOutput = MakeTempOutputPath("CleanCheckoutLargeMeshB");
 			MeshCompileReport firstReport{};

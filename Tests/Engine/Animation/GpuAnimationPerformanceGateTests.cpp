@@ -1,8 +1,8 @@
 // GpuAnimationPerformanceGateTests.cpp - Non-timed GPU gate contract tests.
 //
-// Phase 6 freezes the workload, counters, and evidence shape but deliberately
+// ImplementationStage freezes the workload, counters, and evidence shape but deliberately
 // does not measure throughput. The real wall-clock comparisons run only in
-// final Phase 18, when the complete animation feature and reference host are
+// final ImplementationStage, when the complete animation feature and reference host are
 // available. These tests therefore validate identities and zero-stall safety
 // without turning a developer machine into performance evidence.
 
@@ -31,9 +31,9 @@ namespace TerraEngine::Tests {
 
 	namespace {
 		inline constexpr std::string_view kFrozenWorkloadHash =
-			"dd297ef96f629b290be03bce64dec19612726cd5931e886fb722d80970d49dba";
+			"d99199c796368fa7706af363985ce3e0b75a71fa5fa2c29238bce65343e943a6";
 		inline constexpr std::string_view kFrozenRuntimeContractHash =
-			"1bb8bb3d0affa53d146b717171a7b23d72437af88449c273e8cb1a2fe4869279";
+			"a2dd5eee95aa1590a927094006d120d2d67f39d2166605f27902dde85dc3566a";
 
 		std::filesystem::path SourcePath(std::string_view relativePath)
 		{
@@ -171,7 +171,7 @@ namespace TerraEngine::Tests {
 
 		// Every field is required in the final JSON result even when its value is
 		// zero. Optional values are reserved for measurements that must remain absent
-		// before Phase 18, preventing a throttled workstation from accepting a gate.
+		// before ImplementationStage, preventing a throttled workstation from accepting a gate.
 		struct GpuGateCountersV1 {
 			std::uint64_t activeCharacters = 0U;
 			std::uint64_t jointsPerCharacter = 0U;
@@ -291,7 +291,7 @@ namespace TerraEngine::Tests {
 			result.counters.cpuSampledJoints = 0U;
 			result.counters.gpuDispatches = 18U;
 			context.Expect(ValidateGpuGateResult(result, false),
-				"Phase 6 may prove the non-timed zero complete-pose transfer and GPU-wait invariants.");
+				"ImplementationStage may prove the non-timed zero complete-pose transfer and GPU-wait invariants.");
 
 			result.counters.completePoseReadbacks = 1U;
 			context.Expect(!ValidateGpuGateResult(result, false),
@@ -319,7 +319,7 @@ namespace TerraEngine::Tests {
 			context.Expect(!ValidateGpuGateResult(result, false),
 				"A pre-final run must reject otherwise passing wall-clock measurements.");
 			context.Expect(ValidateGpuGateResult(result, true),
-				"Final Phase 18 may evaluate exact-boundary measurements with the frozen schema.");
+				"Final ImplementationStage may evaluate exact-boundary measurements with the frozen schema.");
 
 			result.gpuVisualCpuReductionPercent = std::numeric_limits<double>::quiet_NaN();
 			context.Expect(!ValidateGpuGateResult(result, true),

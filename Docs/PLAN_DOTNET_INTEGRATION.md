@@ -37,7 +37,7 @@ The integration will be split into three distinct layers to ensure that CoreCLR 
 
 ## 2. Implementation Plan
 
-### Phase 1: The Shared Host
+### implementation stage: The Shared Host
 **Goal:** Create a standalone C++ module to embed CoreCLR.
 
 1.  **Engine/DotNet Implementation:**
@@ -49,7 +49,7 @@ The integration will be split into three distinct layers to ensure that CoreCLR 
     *   Configure CMake to manage C# projects (using `enable_language(CSharp)` or custom templates).
     *   **Note:** CMake will generate the `.sln` and `.csproj` files in the build directory; do not create them manually in the source tree.
 
-### Phase 2: Foundation (Managed Libraries)
+### implementation stage: Foundation (Managed Libraries)
 **Goal:** Setup the C# source and build logic within the CMake ecosystem.
 
 1.  **Managed Structure:**

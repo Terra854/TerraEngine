@@ -583,24 +583,21 @@ namespace TerraEngine::Tests {
 			if(initializedPool) ThreadPool::instance().shutdown();
 		});
 
-		registry.Add("Animation.AssetFormat.StaticTemfHeaderRemainsBinaryCompatible", [](TestContext& context) {
-			// Deformable TEMF extends the existing header in place. This small raw
-			// round trip protects static meshes while T030 freezes the full skin/morph
-			// cooker behavior and atomic failure policy.
-			MeshHeader header{};
-			std::memcpy(header.magic, "TEMF", 4U);
-			header.version = kMeshCurrentVersion;
-			header.headerSize = sizeof(MeshHeader);
-			header.meshletSkinningDataOffset = 4096U;
-			header.meshletSkinningDataCount = 3U;
-			std::array<std::uint8_t, sizeof(MeshHeader)> bytes{};
+		registry.Add("Animation.AssetFormat.TemfProductionHeaderRemainsBinaryStable", [](TestContext& context) {
+			// Animation sidecars may reference a mesh generation, but production
+			// TEMF never serializes the retired runtime-layout header.
+			TemfProductionHeader header{};
+			header.assetIdentity = 4096U;
+			header.generationIdentity = 3U;
+			std::array<std::uint8_t, sizeof(TemfProductionHeader)> bytes{};
 			std::memcpy(bytes.data(), &header, sizeof(header));
-			MeshHeader restored{};
+			TemfProductionHeader restored{};
 			std::memcpy(&restored, bytes.data(), sizeof(restored));
-			context.Expect(restored.version == kMeshCurrentVersion
-				&& restored.meshletSkinningDataOffset == header.meshletSkinningDataOffset
-				&& restored.meshletSkinningDataCount == header.meshletSkinningDataCount,
-				"Existing static TEMF fields must retain their binary positions as deformation metadata is appended.");
+			context.Expect(restored.formatVersion == kMeshCurrentVersion
+				&& restored.headerBytes == kTemfProductionHeaderBytes
+				&& restored.assetIdentity == header.assetIdentity
+				&& restored.generationIdentity == header.generationIdentity,
+				"TEMFPRD1 keeps its immutable production root stable for animation compatibility checks.");
 		});
 	}
 }

@@ -5,6 +5,7 @@
 // resources consumed here.
 
 #include "AnimatedVirtualGeometryAbi.hlsli"
+#include "VirtualGeometryPackedVertex.hlsli"
 
 [[vk::binding(TE_ANIMATED_GEOMETRY_BINDING_GENERATIONS, TE_ANIMATED_GEOMETRY_DESCRIPTOR_SET)]]
 StructuredBuffer<TeAnimatedGenerationRecord> generationRecords;
@@ -76,7 +77,8 @@ float3 TransformPosition(float3 position, uint localJoint, TeAnimatedDeformation
 	{
 		return position;
 	}
-	// AVPB stores a compact page-local palette whose entries are indices into
+	// The canonical demanded page stores a compact local palette whose entries
+	// are indices into
 	// the animation evaluator's cooked palette. Geometry compute performs this
 	// indirection once; material and canonical graphics stages never bind skin
 	// or palette resources.
@@ -134,17 +136,18 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 	}
 
 	const uint vertexByteOffset = work.inputVertexByteOffset + vertexIndex * 16u;
-	const uint packedPosition = staticPageBytes.Load(vertexByteOffset + 0u);
-	const uint packedNormal = staticPageBytes.Load(vertexByteOffset + 4u);
-	const uint packedTangent = staticPageBytes.Load(vertexByteOffset + 8u);
-	const float tangentSign = ((packedPosition >> 30u) & 0x1u) != 0u ? -1.0F : 1.0F;
-	const float3 normalizedPosition = float3(
-		DecodeSnorm10(packedPosition, 0u),
-		DecodeSnorm10(packedPosition, 10u),
-		DecodeSnorm10(packedPosition, 20u));
-	float3 position = work.positionOffset.xyz + normalizedPosition * work.positionScale.xyz;
-	float3 normal = DecodeOct32(packedNormal);
-	float3 tangent = DecodeOct32(packedTangent);
+	const uint4 packedVertex = uint4(
+		staticPageBytes.Load(vertexByteOffset + 0u),
+		staticPageBytes.Load(vertexByteOffset + 4u),
+		staticPageBytes.Load(vertexByteOffset + 8u),
+		staticPageBytes.Load(vertexByteOffset + 12u));
+	const TeDecodedPackedVertex decodedVertex =
+		TeDecodePackedVertex(packedVertex);
+	const float tangentSign = decodedVertex.tangentSign;
+	float3 position = work.positionOffset.xyz
+		+ decodedVertex.normalizedPosition * work.positionScale.xyz;
+	float3 normal = decodedVertex.normal;
+	float3 tangent = decodedVertex.tangent;
 
 	// Morph storage is target-major: one position/normal/tangent float4 tuple
 	// per local vertex. Zero weights and non-affecting targets are skipped.

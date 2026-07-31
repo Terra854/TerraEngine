@@ -341,7 +341,7 @@ const char* PackageChildPayload(PackageChildKind kind)
 	case PackageChildKind::Skeleton:
 		return "ASSET_GUID";
 	case PackageChildKind::AnimationClip:
-		// T056 preview is read-only; later authoring work may add a typed clip
+		// ImplementationCheck preview is read-only; later authoring work may add a typed clip
 		// drag payload without changing this stable selection identity.
 		return "ASSET_GUID";
 	default:

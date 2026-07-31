@@ -195,13 +195,13 @@ namespace TerraEngine::EditorTests {
 			Assets::AnimationAssetEntry editableClip;
 			Assets::AnimationAssetEntry secondEditableClip;
 			context.Expect(actions.ExtractReadOnlyPackageChild(Assets::AnimationAssetKind::Skeleton,
-				skeletonPath, buildRoot, "Fox Skeleton", "Validation/T281", editableSkeleton)
+				skeletonPath, buildRoot, "Fox Skeleton", "Validation/ImplementationCheck", editableSkeleton)
 				== Animation::AnimationAuthoringStatus::Ok
 				&& actions.ExtractReadOnlyPackageChild(Assets::AnimationAssetKind::Clip,
-					clipPath, buildRoot, "Fox Walk", "Validation/T281", editableClip)
+					clipPath, buildRoot, "Fox Walk", "Validation/ImplementationCheck", editableClip)
 					== Animation::AnimationAuthoringStatus::Ok
 				&& actions.ExtractReadOnlyPackageChild(Assets::AnimationAssetKind::Clip,
-					clipPath, buildRoot, "Fox Walk", "Validation/T281", secondEditableClip)
+					clipPath, buildRoot, "Fox Walk", "Validation/ImplementationCheck", secondEditableClip)
 					== Animation::AnimationAuthoringStatus::Ok
 				&& editableClip.sourcePath != secondEditableClip.sourcePath,
 				"Extracted package children must publish unique loose paths without overwriting a prior copy.");
@@ -234,9 +234,9 @@ namespace TerraEngine::EditorTests {
 			}
 			Assets::AnimationAssetEntry rejected;
 			context.Expect(actions.ExtractReadOnlyPackageChild(Assets::AnimationAssetKind::Clip,
-				outsideSource, buildRoot, "Escaped", "Validation/T281", rejected)
+				outsideSource, buildRoot, "Escaped", "Validation/ImplementationCheck", rejected)
 				== Animation::AnimationAuthoringStatus::InvalidArgument
-				&& !std::filesystem::exists(assetRoot / "Validation" / "T281" / "Escaped.teanim"),
+				&& !std::filesystem::exists(assetRoot / "Validation" / "ImplementationCheck" / "Escaped.teanim"),
 				"Extraction must reject a source outside the generated build root before it changes Assets.");
 			std::error_code error;
 			std::filesystem::remove_all(workspace, error);

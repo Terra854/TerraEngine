@@ -47,7 +47,9 @@ namespace TerraEngine::Editor
 	bool VirtualGeometryBuildRecipe::Complete() const noexcept
 	{
 		return !sourceHash.empty() && !topologyHash.empty() && !attributeHash.empty() && !settingsHash.empty() && !importerVersion.empty() &&
-			   !compilerVersion.empty() && !toolchainVersion.empty() && !codecProfile.empty();
+			   !compilerVersion.empty() && !toolchainVersion.empty() && !codecProfile.empty() && !quantizationProfile.empty()
+			   && quantizationProfileVersion != 0u && !quantizationSettingsHash.empty()
+			   && (pageSizeBytes == 32u * 1024u || pageSizeBytes == 64u * 1024u || pageSizeBytes == 128u * 1024u);
 	}
 
 	std::string VirtualGeometryBuildRecipe::Key() const
@@ -66,6 +68,10 @@ namespace TerraEngine::Editor
 		HashToken(hash, "compiler", compilerVersion);
 		HashToken(hash, "toolchain", toolchainVersion);
 		HashToken(hash, "codec", codecProfile);
+		HashToken(hash, "quantization-profile", quantizationProfile);
+		HashToken(hash, "quantization-version", std::to_string(quantizationProfileVersion));
+		HashToken(hash, "quantization-settings", quantizationSettingsHash);
+		HashToken(hash, "page-size", std::to_string(pageSizeBytes));
 		return "vg-recipe-v1-" + HexHash(hash);
 	}
 

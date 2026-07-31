@@ -1,7 +1,6 @@
 {
 	"schemaVersion": 2,
-	"phase": 1,
-	"id": "phase-1",
+	"id": "codec-storage",
 	"title": "Cluster DAG, compact format, and codec page-size decision",
 	"requiredTools": [],
 	"operations": [],

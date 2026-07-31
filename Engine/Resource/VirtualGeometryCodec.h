@@ -5,8 +5,8 @@
 
 #pragma once
 
-#include "Core/Export.h"
-#include "File Formats/TerraEngineMeshFile.h"
+#include "../Core/Export.h"
+#include "../File Formats/TerraEngineMeshFile.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -16,30 +16,97 @@
 
 namespace TerraEngine::Resource
 {
-	struct TERRAENGINE_API VirtualGeometryCodecDecodeLimits
+	enum class TemfProductionValidationCode : std::uint16_t
 	{
-		std::size_t maximumEncodedBytes = 128u * 1024u;
-		std::size_t maximumDecodedBytes = 128u * 1024u;
-		std::uint32_t maximumElementCount = 1u << 20u;
-		std::uint64_t availableCapabilities = kVirtualGeometryCodecCapabilityAll;
+		Accepted = 0u,
+		RecookRequired = 1u,
+		TruncatedInput = 2u,
+		UnsupportedVersion = 3u,
+		InvalidContract = 4u,
+		InvalidRepresentation = 5u,
+		UnknownRequiredCapability = 6u,
+		LimitExceeded = 7u,
+		ArithmeticOverflow = 8u,
+		MisalignedRange = 9u,
+		RangeOutOfBounds = 10u,
+		OverlappingRange = 11u,
+		DuplicateIdentity = 12u,
+		InvalidDependency = 13u,
+		DependencyCycle = 14u,
+		IntegrityMismatch = 15u,
+		InvalidQuantizationDomain = 16u,
+		ProfileMismatch = 17u
 	};
 
-	struct TERRAENGINE_API VirtualGeometryCodecDecodeResult
+	struct TERRAENGINE_API TemfProductionValidationLimits
+	{
+		std::uint32_t maximumPageCount = kTemfMaximumPageCount;
+		std::uint32_t maximumBlockCount = kTemfMaximumBlockCount;
+		std::uint32_t maximumQuantizationDomainCount = kTemfMaximumQuantizationDomainCount;
+		std::uint32_t maximumDependencyCount = kTemfMaximumDependencyCount;
+		std::uint64_t maximumDecodedBlockBytes = kTemfMaximumDecodedBlockBytes;
+		// The CPU decoder is always bundled with ExpandedProduction and
+		// meshoptimizer support. Callers may pass a narrower explicit mask when
+		// testing device-only or unavailable-capability behavior.
+		std::uint64_t availableCapabilities =
+			kVirtualGeometryCodecCapabilityExpanded
+			| kVirtualGeometryCodecCapabilityMeshoptimizer;
+	};
+
+	// This immutable view points into caller-owned, already validated bytes. The
+	// loader must retain the source storage for as long as any span is consumed.
+	struct TERRAENGINE_API TemfProductionDirectoryView
+	{
+		TemfProductionHeader header{};
+		std::span<const TemfPageDescriptor> pages;
+		std::span<const TemfBlockDescriptor> blocks;
+		std::span<const TemfQuantizationDomain> quantizationDomains;
+		std::span<const TemfBlockDependency> dependencies;
+		std::span<const std::uint8_t> payload;
+	};
+
+	struct TERRAENGINE_API TemfProductionValidationResult
+	{
+		TemfProductionValidationCode code = TemfProductionValidationCode::TruncatedInput;
+		TemfProductionDirectoryView directory{};
+		std::string diagnostic;
+
+		[[nodiscard]] bool IsComplete() const noexcept
+		{
+			return code == TemfProductionValidationCode::Accepted && diagnostic.empty();
+		}
+	};
+
+	struct TERRAENGINE_API TemfProductionBlockDecodeRequest
+	{
+		TemfBlockDescriptor descriptor{};
+		std::span<const std::uint8_t> encodedBytes;
+		std::span<const TemfQuantizationDomain> quantizationDomains;
+		std::uint64_t availableCapabilities = 0u;
+	};
+
+	struct TERRAENGINE_API TemfProductionBlockDecodeResult
 	{
 		std::vector<std::uint8_t> bytes;
-		VirtualGeometryCompactBlockHeader header{};
-		std::string error;
+		TemfProductionValidationCode code = TemfProductionValidationCode::TruncatedInput;
+		std::string diagnostic;
 
-		[[nodiscard]] bool IsComplete() const noexcept { return error.empty() && !bytes.empty(); }
+		[[nodiscard]] bool IsComplete() const noexcept
+		{
+			return code == TemfProductionValidationCode::Accepted
+				&& diagnostic.empty()
+				&& !bytes.empty();
+		}
 	};
 
-	// Decodes an expanded, Terra, or meshoptimizer block after validating sizes,
-	// integrity, and required capabilities. Failure leaves bytes empty.
-	[[nodiscard]] TERRAENGINE_API VirtualGeometryCodecDecodeResult DecodeVirtualGeometryCompactBlock(
-		std::span<const std::uint8_t> block, const VirtualGeometryCodecDecodeLimits &limits);
+	// Validation is fail-closed and performs no allocation based on file-owned
+	// counts until every header/table range passes checked arithmetic.
+	[[nodiscard]] TERRAENGINE_API TemfProductionValidationResult ValidateTemfProductionFile(
+		std::span<const std::uint8_t> fileBytes,
+		const TemfProductionValidationLimits &limits);
 
-	// Validates only the VGXD directory and its entries. Callers may then fetch
-	// page blocks asynchronously using the already-checked relative ranges.
-	[[nodiscard]] TERRAENGINE_API bool ValidateVirtualGeometryExtensionDirectory(
-		std::span<const std::uint8_t> directory, const VirtualGeometryCodecDecodeLimits &limits, std::string *outError = nullptr);
+	[[nodiscard]] TERRAENGINE_API TemfProductionBlockDecodeResult DecodeTemfProductionBlock(
+		const TemfProductionBlockDecodeRequest &request,
+		const TemfProductionValidationLimits &limits);
+
 } // namespace TerraEngine::Resource

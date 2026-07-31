@@ -3,6 +3,8 @@
 #include "Resource/VirtualGeometryStreamingPolicy.h"
 #include "TestHarness.h"
 
+#include <algorithm>
+
 namespace TerraEngine::Tests
 {
 	void RegisterVirtualGeometryStreamingSoakTests(TestRegistry &registry)
@@ -23,6 +25,18 @@ namespace TerraEngine::Tests
 				context.ExpectEqual(first.requests.size(), first.uploadIntents.size(), "The same cap must bound protected upload intents.");
 				context.ExpectEqual(
 					first.requests.front().pageId, second.requests.front().pageId, "Equivalent feedback must produce deterministic priority order.");
+				context.Expect(first.requests.size() == second.requests.size()
+					&& std::equal(first.requests.begin(), first.requests.end(), second.requests.begin(),
+						[](const auto& left, const auto& right) { return left.pageId == right.pageId && left.priority == right.priority; }),
+					"Repeated planning must preserve the complete request ordering.");
+				context.Expect(first.duplicateFeedbackCount > 0u, "Repeated page observations must be counted instead of growing the queue.");
+				context.Expect(first.requests.size() <= policy.maximumRequests
+					&& first.decodeIntents.size() <= policy.maximumRequests
+					&& first.uploadIntents.size() <= policy.maximumRequests,
+					"Sustained feedback must keep requests, decode, and upload work bounded by one cap.");
+				for(const auto& intent : first.uploadIntents)
+					context.Expect(intent.requiresVerifiedDecode && intent.requiresProtectedUploadCommit,
+						"Upload intents must retain verified-decode and protected-commit requirements.");
 			});
 	}
 } // namespace TerraEngine::Tests

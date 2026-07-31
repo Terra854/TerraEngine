@@ -60,10 +60,16 @@ namespace TerraEngine::Tests
 
 		std::string ReadResourceManagerMeshSource()
 		{
-			// ResourceManagerMesh.cpp owns the runtime TEMF rejection path. This
-			// source-contract test keeps the page-integrity checks visible even
-			// when the binary TEMF fixture format changes during v1 development.
+			// ResourceManagerMesh.cpp owns reconstruction checks after the
+			// canonical file validator accepts the complete TEMFPRD1 envelope.
 			return ReadSourceFile("Engine/Resource/ResourceManagerMesh.cpp");
+		}
+
+		std::string ReadVirtualGeometryCodecSource()
+		{
+			// VirtualGeometryCodec.cpp owns whole-file directory, block-range,
+			// dependency, and integrity validation before reconstruction starts.
+			return ReadSourceFile("Engine/Resource/VirtualGeometryCodec.cpp");
 		}
 	}
 
@@ -71,16 +77,18 @@ namespace TerraEngine::Tests
 	{
 		registry.Add("Resource.Manager.Mesh.RejectsCorruptVirtualGeometryPagePayloads", [](TestContext& context) {
 			const std::string source = ReadResourceManagerMeshSource();
+			const std::string codecSource = ReadVirtualGeometryCodecSource();
 
 			context.Expect(source.find("TEMF virtual geometry page table is missing required cluster-page coverage metadata") != std::string::npos, "Runtime loader should reject page tables without cluster-page coverage.");
 			context.Expect(source.find("TEMF virtual geometry page has invalid identity, fallback, or byte-size metadata") != std::string::npos, "Runtime loader should reject invalid page ids, fallback ids, or byte sizes.");
 			context.Expect(source.find("TEMF virtual geometry page does not declare cluster-page coverage metadata") != std::string::npos, "Runtime loader should reject pages without cluster-page links.");
 			context.Expect(source.find("TEMF virtual geometry page fallback points to a higher-detail page") != std::string::npos, "Runtime loader should reject fallback links that point to higher-detail pages.");
-			context.Expect(source.find("TEMF virtual geometry page payload byte range overruns payload") != std::string::npos, "Runtime loader should reject virtual geometry pages whose physical payload range is outside the TEMF payload.");
-			context.Expect(source.find("page.byteOffset > static_cast<std::uint64_t>(payloadSize)") != std::string::npos, "Runtime loader should validate page payload offsets against the loaded payload span.");
+			context.Expect(codecSource.find("TEMFPRD1 block metadata is malformed or exceeds a declared limit.") != std::string::npos, "The canonical validator should reject a block whose physical byte range escapes the TEMF payload.");
+			context.Expect(codecSource.find("TEMFPRD1 page blocks must occupy one contiguous payload range.") != std::string::npos, "The canonical validator should prove every page is backed by one checked block range.");
 			context.Expect(source.find("material section LOD range") != std::string::npos, "Runtime loader should validate material section metadata before publication.");
 			context.Expect(source.find("TEMF virtual geometry cullable group has invalid bounds") != std::string::npos, "Runtime loader should reject invalid page/cluster bounds before rendering.");
 			context.Expect(source.find("TEMF virtual geometry page table does not declare a resident fallback page") != std::string::npos, "Runtime loader should require explicit resident fallback coverage for page-streamed assets.");
+			context.Expect(source.find("ParseVirtualGeometryPayload") == std::string::npos, "The runtime loader must not retain the retired inline virtual-geometry reader.");
 		});
 
 		registry.Add("Resource.Manager.Mesh.DeformableSpatialBoundsUseWholeAnimationEnvelope", [](TestContext& context) {

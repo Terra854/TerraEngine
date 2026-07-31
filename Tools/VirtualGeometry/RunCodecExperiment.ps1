@@ -2,7 +2,7 @@
 param(
 	[Parameter(Mandatory=$true)][string]$InputMesh,
 	[string]$ExperimentExecutable = 'out/build/RelWithDebInfo/Build/Tools/TerraEngineVirtualGeometryCodecExperiment.exe',
-	[string]$OutputDirectory = 'out/evidence/045/codec-experiment',
+	[string]$OutputDirectory = 'out/evidence/virtual-geometry-production/codec-experiment',
 	[int[]]$PageSizesKiB = @(32, 64, 128),
 	[switch]$DryRun
 )
@@ -34,9 +34,15 @@ foreach($pageSize in $PageSizesKiB) {
 		$_.state -eq 'measured' -and $_.integrityValidated -eq $true -and
 		[UInt64]$_.deterministicOutputHash -ne 0
 	})
-	if([int]$document.pageSizeKiB -ne $pageSize -or $measured.Count -lt 3)
+	$offlineOnly = @($document.results | Where-Object {
+		$_.codec -eq 'terra' -and $_.state -eq 'unavailable' -and
+		$_.availability -eq 'offline-only' -and
+		$_.reason -eq 'not-a-production-temf-codec'
+	})
+	if([int]$document.pageSizeKiB -ne $pageSize -or
+		$measured.Count -lt 2 -or $offlineOnly.Count -ne 1)
 	{
-		throw "Codec experiment for ${pageSize}KiB did not publish three integrity-validated measured candidates."
+		throw "Codec experiment for ${pageSize}KiB must publish two integrity-validated production candidates and one explicit offline-only prototype state."
 	}
 	$results.Add([ordered]@{
 		pageSizeKiB = $pageSize
@@ -49,6 +55,7 @@ foreach($pageSize in $PageSizesKiB) {
 				Hash.ToLowerInvariant()
 		}
 		measuredCandidates = $measured.Count
+		offlineOnlyCandidates = $offlineOnly.Count
 	})
 }
 $manifest = [ordered]@{

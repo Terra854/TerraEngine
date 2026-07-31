@@ -2,7 +2,7 @@
 	"format": "TerraEngineProfilerCapture",
 	"payloadVersion": 2,
 	"metadata": {
-		"captureId": "feature-043-truncated-v2"
+		"captureId": "profiling-truncated-v2"
 	},
 	"chunks": [
 		{

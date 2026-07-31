@@ -1,6 +1,6 @@
 # Jolt Physics dependency
 
-This page records the approved Jolt Physics dependency boundary for TerraEngine. T003 passed its Windows, Linux, float, double, sanitizer, determinism, lifecycle, query-bound, dependency-closure, and performance gates. T004 then added the pristine approved submodule.
+This page records the approved Jolt Physics dependency boundary for TerraEngine. implementation check passed its Windows, Linux, float, double, sanitizer, determinism, lifecycle, query-bound, dependency-closure, and performance gates. implementation check then added the pristine approved submodule.
 
 ## Approved source and rationale
 
@@ -56,7 +56,7 @@ These adapters and all CMake choices belong in TerraEngine-owned files. **Do not
 
 The MIT license permits use, modification, and redistribution, provided that the copyright notice and permission notice are included in all copies or substantial portions of the software. Any source or binary redistribution of TerraEngine that includes Jolt must therefore ship the unmodified Jolt `LICENSE` text in the corresponding third-party notices/license bundle. Preserve attribution in source archives and installed documentation.
 
-Jolt's standalone `ENABLE_INSTALL=ON` profile installs the `Jolt` library, public headers, and CMake package export, which the disposable spike audits. The embedded TerraEngine build uses `ENABLE_INSTALL=OFF`; TerraEngine's own install/package rules must include only the core runtime artifacts and required license/notice text. They must exclude Jolt samples, viewer, tests, source-only spike material, and unrelated tools. T008 verifies the resulting installed tree before Phase 1 closes.
+Jolt's standalone `ENABLE_INSTALL=ON` profile installs the `Jolt` library, public headers, and CMake package export, which the disposable spike audits. The embedded TerraEngine build uses `ENABLE_INSTALL=OFF`; TerraEngine's own install/package rules must include only the core runtime artifacts and required license/notice text. They must exclude Jolt samples, viewer, tests, source-only spike material, and unrelated tools. implementation check verifies the resulting installed tree before implementation stage closes.
 
 ## Upgrade and source-integrity policy
 
@@ -73,4 +73,4 @@ Get-Content "$src/LICENSE"
 rg -n "project\(JoltPhysics VERSION|JPH_BUILD_SHARED_LIBS|ENABLE_INSTALL|TARGET_UNIT_TESTS|TARGET_HELLO_WORLD|TARGET_PERFORMANCE_TEST|TARGET_SAMPLES|TARGET_VIEWER|ENABLE_OBJECT_STREAM|DISABLE_CUSTOM_ALLOCATOR|JPH_USE_EXTERNAL_PROFILE|JPH_USE_CPU_COMPUTE" "$src/Build/CMakeLists.txt"
 ```
 
-The first command must print `e77f175595e64cb44218cc9d9d56fc365ad0e36a`; the license check must contain the MIT copyright, permission, and warranty clauses; and the CMake search must show the options documented above. The complete measured selection record is `specs/042-physics-system/evidence/backend-selection.md`.
+The first command must print `e77f175595e64cb44218cc9d9d56fc365ad0e36a`; the license check must contain the MIT copyright, permission, and warranty clauses; and the CMake search must show the options documented above. The planning archive retains the complete measured backend-selection record.

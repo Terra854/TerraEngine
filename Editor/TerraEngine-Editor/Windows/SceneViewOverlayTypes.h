@@ -315,6 +315,19 @@ namespace TerraEngine::Editor::SceneViewOverlay
 		std::uint32_t selectedExemptionCount = 0u;
 		std::uint32_t cameraExemptionCount = 0u;
 		std::uint32_t lightExemptionCount = 0u;
+		// Route fields are copied from a completed RenderStats snapshot. They make
+		// direct suppression visible without exposing live Vulkan resource state.
+		std::string geometryRoute;
+		std::string geometryRouteSource;
+		std::uint64_t geometryRoutePolicyIdentity = 0u;
+		std::uint64_t geometryRouteCalibrationIdentity = 0u;
+		std::uint32_t geometryRouteHysteresisFrames = 0u;
+		std::uint32_t geometryRouteDirectBatchCount = 0u;
+		std::uint32_t geometryRouteSharedInstanceCount = 0u;
+		std::uint32_t geometryRouteSuppressedPageRequests = 0u;
+		std::uint32_t geometryRouteSuppressedDecodeBlocks = 0u;
+		std::uint32_t geometryRouteSuppressedResidencyRecords = 0u;
+		std::string geometryRouteFallbackReason;
 		std::vector<std::string> activeReductions;
 		std::vector<TerraEngine::Profiling::PerformanceStageRecord> stageTimings;
 	};

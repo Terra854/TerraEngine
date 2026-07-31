@@ -1,5 +1,5 @@
 // Physics Project Settings authoring contracts.  These tests are intentionally
-// unregistered until the owning test-registry task integrates Phase 7.
+// unregistered until the owning test-registry task integrates ImplementationStage.
 
 #include "TestHarness.h"
 #include "Editor/TerraEngine-Editor/Project/ProjectSettingsMetadata.h"

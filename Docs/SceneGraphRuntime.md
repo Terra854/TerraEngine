@@ -27,7 +27,7 @@ component iteration is not invalidated halfway through a frame.
 - No shader source was added or embedded.
 - Manual validation should use the fixture files in
   `Tests/Fixtures/SceneGraphRuntime/` plus the quickstart flow in
-  `specs/002-scene-graph-runtime/quickstart.md`.
+  `Docs/Testing.md`.
 - Automated configure, focused build, CTest, and install validation passed
   through the Visual Studio Developer Command Prompt environment. Interactive
   editor clicking was not run in this headless pass.

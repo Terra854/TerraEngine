@@ -8,10 +8,31 @@
 #include <algorithm>
 #include <array>
 #include <iterator>
+#include <limits>
 #include <utility>
 
 namespace TerraEngine::Resource
 {
+	namespace
+	{
+		// Checked totals keep malformed directories from wrapping a page size before
+		// the worker reserves or concatenates any file-controlled byte range.
+		bool AddPageByteCount(std::uint64_t& total, std::uint64_t value) noexcept
+		{
+			if (value > std::numeric_limits<std::uint64_t>::max() - total)
+			{
+				return false;
+			}
+			total += value;
+			return true;
+		}
+
+		bool FitsProcessVector(std::uint64_t byteCount) noexcept
+		{
+			return byteCount <= static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max());
+		}
+	} // namespace
+
 	VirtualGeometryStreamingSystem& VirtualGeometryStreamingSystem::Instance()
 	{
 		// The engine retains singleton lifetime ownership while SystemScheduler owns
@@ -217,57 +238,125 @@ namespace TerraEngine::Resource
 			VirtualGeometryStreamingPlan plan = BuildVirtualGeometryStreamingPlan(std::move(feedback));
 			for (const VirtualGeometryStreamingDecodeIntent& intent : plan.decodeIntents)
 			{
-				if (!intent.request.staticPageRead.has_value())
+				if (intent.request.exactBlockReads.empty())
 				{
 					continue;
 				}
-				VirtualGeometryStaticPageReadRequest readRequest = *intent.request.staticPageRead;
-				readRequest.pageId = intent.request.pageId;
-				readRequest.requestGeneration = preparedFrame;
-				const VirtualGeometryStaticPageReadCompletion read =
-					ReadVirtualGeometryStaticPageRange(readRequest, preparedFrame);
+
 				VirtualGeometryStreamingDecodedPage decoded;
 				decoded.request = intent.request;
-				if (read.status == VirtualGeometryStaticPageReadStatus::Completed)
+				const auto failPage = [&decoded](VirtualGeometryStreamingDecodeStatus status, std::string detail)
 				{
-					if (intent.request.rawPayloadIsDecoded)
-					{
-						decoded.status = VirtualGeometryStreamingDecodeStatus::PendingUpload;
-						decoded.decodedBytes = read.bytes;
-						decoded.detail = "Exact-range bytes passed integrity and are explicitly declared raw decoded payload.";
-					}
-					else
-					{
-						// VGCB pages carry a bounded codec header. Decode only after the
-						// exact source range and its encoded hash have both validated.
-						const VirtualGeometryCodecDecodeResult compact =
-							DecodeVirtualGeometryCompactBlock(read.bytes, {});
-						if(compact.IsComplete()
-							&& (intent.request.expectedDecodedByteCount == 0u
-								|| compact.bytes.size() == intent.request.expectedDecodedByteCount))
-						{
-							decoded.status = VirtualGeometryStreamingDecodeStatus::PendingUpload;
-							decoded.decodedBytes = compact.bytes;
-							decoded.detail = "Validated Terra compact block decoded into a bounded pending GPU upload.";
-						}
-						else
-						{
-							decoded.status = VirtualGeometryStreamingDecodeStatus::PendingDecode;
-							decoded.detail = compact.error.empty()
-								? "Compact static page decoded to a size that disagrees with its catalog."
-								: "Exact-range bytes passed integrity, but no decoder declared this payload complete.";
-						}
-					}
-				}
-				else if (read.status == VirtualGeometryStaticPageReadStatus::Cancelled)
+					// Do not retain a prefix when any later block rejects the page. The
+					// protected boundary must only ever see a whole, verified page value.
+					decoded.status = status;
+					decoded.decodedBytes.clear();
+					decoded.detail = std::move(detail);
+				};
+
+				if (intent.request.expectedStoredByteCount == 0u
+					|| intent.request.expectedDecodedByteCount == 0u
+					|| intent.request.expectedIntegrityValue == 0u
+					|| !FitsProcessVector(intent.request.expectedStoredByteCount)
+					|| !FitsProcessVector(intent.request.expectedDecodedByteCount))
 				{
-					decoded.status = VirtualGeometryStreamingDecodeStatus::Cancelled;
-					decoded.detail = read.diagnostic;
+					failPage(VirtualGeometryStreamingDecodeStatus::Failed,
+						"Canonical TEMFPRD1 page totals or aggregate integrity are invalid.");
 				}
 				else
 				{
-					decoded.status = VirtualGeometryStreamingDecodeStatus::Failed;
-					decoded.detail = read.diagnostic;
+					std::vector<std::uint8_t> aggregateEncodedBytes;
+					std::vector<std::uint8_t> aggregateDecodedBytes;
+					aggregateEncodedBytes.reserve(static_cast<std::size_t>(intent.request.expectedStoredByteCount));
+					aggregateDecodedBytes.reserve(static_cast<std::size_t>(intent.request.expectedDecodedByteCount));
+					std::uint64_t storedTotal = 0u;
+					std::uint64_t decodedTotal = 0u;
+					std::uint64_t expectedNextPayloadOffset = 0u;
+					bool accepted = true;
+
+					for (std::size_t blockOffset = 0u;
+						blockOffset < intent.request.exactBlockReads.size(); ++blockOffset)
+					{
+						const VirtualGeometryStreamingFeedback::ExactBlockReadDescriptor& blockRead =
+							intent.request.exactBlockReads[blockOffset];
+						const TemfBlockDescriptor& block = blockRead.productionBlock;
+						VirtualGeometryStaticPageReadRequest readRequest = blockRead.staticPageRead;
+						// Every copied pair must still agree before physical IO. This prevents
+						// a malformed producer from swapping a legitimate descriptor onto a
+						// different block's exact source range.
+						if (block.logicalPageId != intent.request.pageId
+							|| block.blockOrdinal != blockOffset
+							|| readRequest.pageId != intent.request.pageId
+							|| readRequest.byteOffset != block.encodedPayloadOffset
+							|| readRequest.byteSize != block.encodedBytes
+							|| readRequest.expectedHash != block.encodedIntegrity
+							|| block.encodedBytes == 0u || block.decodedBytes == 0u
+							|| (blockOffset != 0u && block.encodedPayloadOffset != expectedNextPayloadOffset)
+							|| block.encodedBytes > std::numeric_limits<std::uint64_t>::max()
+								- block.encodedPayloadOffset
+							|| !AddPageByteCount(storedTotal, block.encodedBytes)
+							|| !AddPageByteCount(decodedTotal, block.decodedBytes)
+							|| storedTotal > intent.request.expectedStoredByteCount
+							|| decodedTotal > intent.request.expectedDecodedByteCount)
+						{
+							failPage(VirtualGeometryStreamingDecodeStatus::Failed,
+								"Canonical TEMFPRD1 block ranges disagree with their page totals.");
+							accepted = false;
+							break;
+						}
+						expectedNextPayloadOffset = block.encodedPayloadOffset + block.encodedBytes;
+
+						readRequest.requestGeneration = preparedFrame;
+						const VirtualGeometryStaticPageReadCompletion read =
+							ReadVirtualGeometryStaticPageRange(readRequest, preparedFrame);
+						if (read.status == VirtualGeometryStaticPageReadStatus::Cancelled)
+						{
+							++decoded.cancelledPhysicalReadCount;
+							failPage(VirtualGeometryStreamingDecodeStatus::Cancelled, read.diagnostic);
+							accepted = false;
+							break;
+						}
+						if (read.status != VirtualGeometryStaticPageReadStatus::Completed)
+						{
+							failPage(VirtualGeometryStreamingDecodeStatus::Failed, read.diagnostic);
+							accepted = false;
+							break;
+						}
+						++decoded.completedPhysicalReadCount;
+
+						const TemfProductionBlockDecodeResult production = DecodeTemfProductionBlock({
+							block, read.bytes, intent.request.quantizationDomains,
+							intent.request.availableDecoderCapabilities }, {});
+						if (!production.IsComplete() || production.bytes.size() != block.decodedBytes)
+						{
+							failPage(VirtualGeometryStreamingDecodeStatus::Failed,
+								production.diagnostic.empty()
+									? "Canonical TEMFPRD1 block decoded to a size that disagrees with its descriptor."
+									: production.diagnostic);
+							accepted = false;
+							break;
+						}
+						aggregateEncodedBytes.insert(aggregateEncodedBytes.end(), read.bytes.begin(), read.bytes.end());
+						aggregateDecodedBytes.insert(aggregateDecodedBytes.end(), production.bytes.begin(), production.bytes.end());
+					}
+
+					if (accepted && (storedTotal != intent.request.expectedStoredByteCount
+						|| decodedTotal != intent.request.expectedDecodedByteCount
+						|| aggregateEncodedBytes.size() != storedTotal
+						|| aggregateDecodedBytes.size() != decodedTotal
+						|| CalculateVirtualGeometryCompactHash(aggregateEncodedBytes)
+							!= intent.request.expectedIntegrityValue))
+					{
+						failPage(VirtualGeometryStreamingDecodeStatus::Failed,
+							"Canonical TEMFPRD1 aggregate page totals or encoded integrity are invalid.");
+						accepted = false;
+					}
+					if (accepted)
+					{
+						decoded.status = VirtualGeometryStreamingDecodeStatus::PendingUpload;
+						decoded.decodedBytes = std::move(aggregateDecodedBytes);
+						decoded.detail = "All canonical TEMFPRD1 page blocks decoded atomically into one bounded pending GPU upload.";
+					}
 				}
 				plan.decodedPages.push_back(std::move(decoded));
 			}
@@ -281,14 +370,10 @@ namespace TerraEngine::Resource
 				diagnostics.preparedUploadIntents += lastPreparedPlan.uploadIntents.size();
 				for (const VirtualGeometryStreamingDecodedPage& decoded : lastPreparedPlan.decodedPages)
 				{
-					if (decoded.status == VirtualGeometryStreamingDecodeStatus::PendingUpload)
-					{
-						++diagnostics.completedReads;
-					}
-					else if (decoded.status == VirtualGeometryStreamingDecodeStatus::Cancelled)
-					{
-						++diagnostics.cancelledReads;
-					}
+					// These are physical IO facts, not decoded-page success claims. A
+					// corrupt/cancelled later block must not erase completed earlier reads.
+					diagnostics.completedReads += decoded.completedPhysicalReadCount;
+					diagnostics.cancelledReads += decoded.cancelledPhysicalReadCount;
 				}
 				diagnostics.lastPreparedFrame = preparedFrame;
 				RecordVirtualGeometryStreamingEvent(diagnostics, {
@@ -339,13 +424,9 @@ namespace TerraEngine::Resource
 				update.assetId = decoded.request.assetId;
 				update.pageId = decoded.request.pageId;
 				update.residencyGeneration = preparedFrame;
-				// Catalog metadata is preferred, while the exact read range supplies a
-				// trustworthy size when a legacy producer did not populate that field.
+				// Exact TEMFPRD1 page totals are mandatory and were validated before
+				// worker IO, so publication never guesses a size from one block.
 				update.storedByteCount = decoded.request.expectedStoredByteCount;
-				if (update.storedByteCount == 0u && decoded.request.staticPageRead.has_value())
-				{
-					update.storedByteCount = decoded.request.staticPageRead->byteSize;
-				}
 				update.decodedByteCount = !decoded.decodedBytes.empty()
 					? decoded.decodedBytes.size()
 					: decoded.request.expectedDecodedByteCount;

@@ -57,11 +57,13 @@ namespace
 		Json capabilities;
 		Json identity;
 		Json workload;
+		Json visibilityAndShading;
 		std::vector<Json> samples;
 		std::string captureId;
 		std::string executionId;
 		std::string artifactSha256;
 		std::string integritySha256;
+		bool visualGatePassed = false;
 	};
 
 	std::string CurrentUtcCaptureTime()
@@ -480,6 +482,8 @@ namespace
 		const Json environment = capture.value("environment", Json::object());
 		const Json statistics = capture.value("statistics", Json::object());
 		const Json baseline = capture.value("baselineAndComparability", Json::object());
+		const Json visibilityAndShading = capture.value(
+			"visibilityAndShading", Json::object());
 		const std::string captureId = identity.value("captureId", std::string{});
 		const std::string captureExecutionId = identity.value("executionId", std::string{});
 		const std::string backend = LowerAscii(environment.value("backend", std::string{}));
@@ -498,6 +502,12 @@ namespace
 		{
 			throw std::runtime_error("Runtime adapter measurement is not bounded and accepted: " + path.string());
 		}
+		if (!visibilityAndShading.value("visualGatePassed", false))
+		{
+			throw std::runtime_error(
+				"Runtime adapter visual validation did not pass: "
+				+ path.string());
+		}
 		if (!capture.contains("rawSamples") || !capture["rawSamples"].is_array())
 		{
 			throw std::runtime_error("Runtime adapter did not publish raw samples: " + path.string());
@@ -508,6 +518,8 @@ namespace
 		result.capabilities = capture.value("capabilities", Json::array());
 		result.identity = identity;
 		result.workload = capture.value("workload", Json::object());
+		result.visibilityAndShading = visibilityAndShading;
+		result.visualGatePassed = true;
 		result.captureId = captureId;
 		result.executionId = captureExecutionId;
 		result.artifactSha256 = FileSha256Hex(path);
@@ -591,6 +603,7 @@ namespace
 		Json runtimeWorkload;
 		Json rawSamples = Json::array();
 		Json runtimeCaptureArtifacts = Json::array();
+		Json runtimeVisualEvidence = Json::array();
 
 		// Each invocation owns a distinct artifact.  Keeping these files lets a
 		// reviewer trace every duration back to a real installed Vulkan capture.
@@ -650,6 +663,14 @@ namespace
 				{"adapterIntegritySha256", evidence.integritySha256},
 				{"captureId", evidence.captureId},
 				{"executionId", evidence.executionId}});
+			// Visual proof remains bound to each installed-runtime capture.  The
+			// aggregate flag below is only true because every capture was checked
+			// above, while this array lets reviewers inspect the original fields.
+			runtimeVisualEvidence.push_back({
+				{"captureId", evidence.captureId},
+				{"executionId", evidence.executionId},
+				{"visualGatePassed", evidence.visualGatePassed},
+				{"evidence", evidence.visibilityAndShading}});
 			for (Json& sample : evidence.samples)
 			{
 				rawSamples.push_back(std::move(sample));
@@ -717,7 +738,10 @@ namespace
 		};
 		capture["geometry"] = Json::object();
 		capture["residencyAndStreaming"] = {{"boundedCounters", true}, {"runtimeSampleCount", rawSamples.size()}};
-		capture["visibilityAndShading"] = Json::object();
+		capture["visibilityAndShading"] = {
+			{"visualGatePassed", true},
+			{"validatedRuntimeCaptureCount", runtimeVisualEvidence.size()},
+			{"runtimeCaptures", runtimeVisualEvidence}};
 		capture["deformation"] = Json::object();
 		capture["auxiliaryViews"] = Json::object();
 		capture["fallbacksAndFailures"] = {{"runtimeAdapterFailures", 0}};

@@ -47,9 +47,9 @@ $script:ExitToolFailure = 4
 $script:ExpectedBaselineSha256 = "cf4375934729e1afa745d9446faacfc1a7ba53a6d7db79b3d1e0e8164a5ced8f"
 $script:ExpectedEvidenceLockSha256 = "0605b4d4241bda8ba3fd4743b2ba7a6c6b217aaf1c9d83fe669125493ddb4e41"
 $script:ExpectedEvidenceAggregateSha256 = "4020949bd881f94f0395853e947e4512fb587c7bdd1ce5592317e75c01b5fcb5"
-$script:ExpectedContractSha256 = "1bb8bb3d0affa53d146b717171a7b23d72437af88449c273e8cb1a2fe4869279"
-$script:ExpectedRendererManifestSha256 = "397b7cb6ac01714a628c44bab6cb002c034c8d8e5422bf184dc10cddf201b12f"
-$script:ExpectedWorkloadsSha256 = "dd297ef96f629b290be03bce64dec19612726cd5931e886fb722d80970d49dba"
+$script:ExpectedContractSha256 = "a2dd5eee95aa1590a927094006d120d2d67f39d2166605f27902dde85dc3566a"
+$script:ExpectedRendererManifestSha256 = "3230959fab8c628d9396bd31a7923672c3a1ebf5b51ff4998066a8f10c2b3e4c"
+$script:ExpectedWorkloadsSha256 = "d99199c796368fa7706af363985ce3e0b75a71fa5fa2c29238bce65343e943a6"
 $script:ExpectedCoverageMatrixSha256 = "1e1f4a158b99a636faef1ec0679bf21aa1b30446352ece59483791bde024dbd1"
 $script:BaselineInventoryCache = $null
 

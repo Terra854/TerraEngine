@@ -3,6 +3,7 @@
 #include "VirtualGeometrySchemas.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <fstream>
 #include <set>
 #include <sstream>
@@ -83,6 +84,22 @@ namespace TerraEngine::Tools::VirtualGeometry
 			}
 		}
 
+		void ValidateMeasurementPolicy(const Json& document, SchemaValidationResult& result)
+		{
+			const auto policy = document.find("measurementPolicy");
+			if (policy == document.end() || !policy->is_object())
+			{
+				AddIssue(result, "$.measurementPolicy", "Measurement policy is required for reproducible evidence.");
+				return;
+			}
+			const auto samples = policy->find("minimumValidSamplesPerSide");
+			if (samples == policy->end() || !samples->is_number_unsigned() || samples->get<std::uint64_t>() < 6u)
+				AddIssue(result, "$.measurementPolicy.minimumValidSamplesPerSide", "At least six valid samples per comparison side are required.");
+			const auto visual = policy->find("visualFirst");
+			if (visual == policy->end() || !visual->is_boolean() || !visual->get<bool>())
+				AddIssue(result, "$.measurementPolicy.visualFirst", "Comparative evidence must gate performance claims on visual correctness first.");
+		}
+
 		void RequireObject(
 			const Json& document,
 			std::string_view memberName,
@@ -137,6 +154,7 @@ namespace TerraEngine::Tools::VirtualGeometry
 			}
 			RequireArray(document, "capabilities", result);
 			RequireArray(document, "rawSamples", result);
+			RequireObject(document, "route", result);
 
 			const auto identity = document.find("identity");
 			if(identity != document.end() && identity->is_object())
@@ -155,6 +173,74 @@ namespace TerraEngine::Tools::VirtualGeometry
 					AddIssue(result, "$.identity.schemaVersion",
 						"Benchmark identity must use schemaVersion 1.");
 				}
+			}
+			const auto samples = document.find("rawSamples");
+			if(samples != document.end() && samples->is_array())
+			{
+				for(std::size_t index = 0u; index < samples->size(); ++index)
+				{
+					const Json& sample = (*samples)[index];
+					const std::string path = "$.rawSamples[" + std::to_string(index) + "]";
+					if(!sample.is_object()) { AddIssue(result, path, "Each raw sample must be an object."); continue; }
+					const auto availability = sample.find("availability");
+					if(availability == sample.end() || !availability->is_string())
+						AddIssue(result, path + ".availability", "Every raw sample must state its availability.");
+					const bool measured = availability != sample.end() && availability->is_string()
+						&& availability->get_ref<const std::string&>() == "measured";
+					if(measured)
+					{
+						for(const std::string_view member : { "durationNanoseconds", "queryIdentity", "executionEvidenceId", "identity" })
+						{
+							const auto value = sample.find(std::string(member));
+							const bool present = value != sample.end()
+								&& !value->is_null()
+								&& (member == "identity" ? value->is_object()
+									: member == "durationNanoseconds" ? value->is_number_unsigned()
+									: value->is_string() && !value->get_ref<const std::string&>().empty());
+							if(!present) AddIssue(result, path + "." + std::string(member),
+								"Measured samples require complete duration, query, execution, and frame identity provenance.");
+						}
+						const auto sampleIdentity = sample.find("identity");
+						if(sampleIdentity != sample.end() && sampleIdentity->is_object())
+						{
+							for(const std::string_view member : { "frameId", "rendererGeneration" })
+							{
+								const auto value = sampleIdentity->find(std::string(member));
+								if(value == sampleIdentity->end() || !value->is_number_unsigned() || value->get<std::uint64_t>() == 0u)
+									AddIssue(result, path + ".identity." + std::string(member),
+										"Measured samples require a non-zero completed frame identity.");
+							}
+						}
+					}
+				}
+			}
+		}
+
+		void ValidateReferenceCapture(const Json& document, SchemaValidationResult& result)
+		{
+			for(const std::string_view member : { "contentHash", "cameraPathHash", "qualityProfileHash", "hardwareIdentity", "graphicsPath", "runtimeRevision", "commandHash" })
+			{
+				const auto value = document.find(std::string(member));
+				if(value == document.end() || !value->is_string() || value->get_ref<const std::string&>().empty())
+					AddIssue(result, "$." + std::string(member), "Reference provenance requires a non-empty exact identity.");
+			}
+			const auto graphicsPath = document.find("graphicsPath");
+			if(graphicsPath != document.end() && graphicsPath->is_string()
+				&& graphicsPath->get_ref<const std::string&>() != "Vulkan")
+				AddIssue(result, "$.graphicsPath", "Only a supported Vulkan reference path is eligible.");
+			RequireArray(document, "rawSamples", result);
+		}
+
+		void ValidateComparativeEvidence(const Json& document, SchemaValidationResult& result)
+		{
+			for(const std::string_view member : { "pairIdentity", "workloadIdentity", "classification", "visual", "metrics", "rawCandidateSamples", "rawReferenceSamples" })
+			{
+				const auto value = document.find(std::string(member));
+				const bool requiredObject = member == "visual";
+				const bool requiredArray = member == "metrics" || member == "rawCandidateSamples" || member == "rawReferenceSamples";
+				if(value == document.end() || (requiredObject && !value->is_object()) || (requiredArray && !value->is_array())
+					|| (!requiredObject && !requiredArray && (!value->is_string() || value->get_ref<const std::string&>().empty())))
+					AddIssue(result, "$." + std::string(member), "Comparative evidence requires a complete fail-closed pair record.");
 			}
 		}
 	}
@@ -191,6 +277,7 @@ namespace TerraEngine::Tools::VirtualGeometry
 		{
 		case SchemaDocumentKind::Workloads:
 			ValidateIdentifiedArray(document, "workloads", result);
+			ValidateMeasurementPolicy(document, result);
 			break;
 		case SchemaDocumentKind::HardwareMatrix:
 			ValidateIdentifiedArray(document, "hardwareProfiles", result);
@@ -200,6 +287,12 @@ namespace TerraEngine::Tools::VirtualGeometry
 			break;
 		case SchemaDocumentKind::BenchmarkCapture:
 			ValidateBenchmarkCapture(document, result);
+			break;
+		case SchemaDocumentKind::ReferenceCapture:
+			ValidateReferenceCapture(document, result);
+			break;
+		case SchemaDocumentKind::ComparativeEvidence:
+			ValidateComparativeEvidence(document, result);
 			break;
 		}
 

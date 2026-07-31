@@ -50,7 +50,7 @@ clear source attribution instead of committed as heavy binary files.
 - Cone-safety scene: one-sided opaque, double-sided, mixed-winding, thin-shell,
   and alpha-risk clusters used to validate conservative cone eligibility.
 - Hardening manifest: `hardening-fixtures.json` lists the clean-checkout
-  categories required by feature `029`, expected diagnostics for each category,
+  categories required by the hardening contract, expected diagnostics,
   importer/export coverage tags, package formats, and which larger assets are
   optional manual stress coverage.
 
@@ -74,14 +74,14 @@ not enable rendering behavior. Current tags include:
 - `page-sourced-rendering`, `resident-page-payload`,
   `no-owning-mesh-normal-path`, `fallback-page-pinned`,
   `missing-detail-substitution`, `page-budget`, `page-rerequest`, and
-  `page-integrity` for feature `033` page-streamed geometry coverage.
+  `page-integrity` for page-streamed geometry coverage.
 - `cluster-packet-batching`, `runtime-compaction`, `bounded-batches`, and
-  `performance-gate` for feature `030` scaling coverage.
+  `performance-gate` for scaling coverage.
 - `gpu-packet-buffer`, `gpu-compaction`, `generated-submission`,
-  `counter-readback`, and `gpu-fail-open` for feature `031` GPU packet
+  `counter-readback`, and `gpu-fail-open` for GPU packet
   compaction coverage.
 - `shadow-view-selection`, `light-frustum-culling`, `cone-safety`, and
-  `hiz-baseline-preservation` for feature `030` culling coverage.
+  `hiz-baseline-preservation` for culling coverage.
 
 ## Visual Correctness Stress Notes
 
@@ -130,11 +130,10 @@ meshes. Recreate the compiler stress shape with this deterministic recipe:
   invariants: status `Cooked`, at least three detail levels, one MVP page per
   detail level, non-zero cullable groups, and a resident fallback detail.
 
-## Feature 029 Hardening Quickstart
+## virtual geometry baseline Hardening Quickstart
 
-Use `specs/029-virtual-geometry-hardening/quickstart.md` for the staged
-hardening workflow. The clean-checkout pass should use the manifest in this
-directory and the focused CTest slice:
+The clean-checkout hardening pass uses the manifest in this directory and the
+focused CTest slice:
 
 ```powershell
 ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryHardening|Editor.VirtualGeometryHardening" --output-on-failure -C Debug
@@ -144,11 +143,10 @@ Manual stress assets may be downloaded or generated locally, but they are not
 required for the default fixture pass. Keep those optional assets outside the
 critical clean-checkout path unless a later feature explicitly approves them.
 
-## Feature 030 Scaling Quickstart
+## virtual geometry visibility Scaling Quickstart
 
-Use `specs/030-vg-gpu-driven-batching/quickstart.md` for the staged scaling
-workflow. The clean-checkout pass should use this manifest and the focused CTest
-slice:
+The clean-checkout visibility-scaling pass uses this manifest and the focused
+CTest slice:
 
 ```powershell
 ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryBatching|Engine.VirtualGeometryCompaction|Engine.VirtualGeometryPerformanceGate|Engine.VirtualGeometryShadow|Engine.VirtualGeometryCulling|Engine.VirtualGeometryRenderer|Engine.VirtualGeometryResource|Editor.VirtualGeometryAssetPipeline|Editor.VirtualGeometryAutomation|Editor.VirtualGeometryExport|Editor.VirtualGeometryDiagnostics" --output-on-failure -C Debug
@@ -160,10 +158,9 @@ The compaction fixture must expose candidate, compacted, rejected, fail-open,
 and submitted packet counts. The Hi-Z fixture protects the current working
 behavior; it must not introduce or require new quality tiers.
 
-## Feature 031 GPU Packet Compaction Quickstart
+## virtual geometry streaming GPU Packet Compaction Quickstart
 
-Use `specs/031-vg-gpu-compaction/quickstart.md` for the staged GPU packet
-workflow. The clean-checkout pass should use this manifest and the focused CTest
+The clean-checkout GPU-packet pass uses this manifest and the focused CTest
 slice:
 
 ```powershell
@@ -180,17 +177,16 @@ text. Counter rows must label `Prepared`, `GPU Readback`,
 not valid readback data. The Hi-Z fixture remains preservation-only and must not
 add or require quality tiers.
 
-Feature `031` gate thresholds are encoded in `hardening-fixtures.json` and
+GPU-packet gate thresholds are encoded in `hardening-fixtures.json` and
 `Tests/Fixtures/RendererPerformanceBaseline/workloads.json`. Dense packet
 fixtures use `maxGpuBatchDescriptorRatio <= 0.1`; generated submission fixtures
 use `maxInvalidGeneratedSubmissions == 0` and
 `maxCompactionOverflowPackets == 0`. Unsupported or unavailable counter sources
 must publish unsupported gates instead of passing as zero-valued metrics.
 
-## Feature 034 True Page Residency Quickstart
+## virtual geometry diagnostics True Page Residency Quickstart
 
-Use `specs/034-vg-true-page-residency/quickstart.md` for exact-memory and
-true-page-payload validation. The clean-checkout pass should include package
+Exact-memory and true-page-payload validation should include package
 children, unavailable accounting, resident page payloads, protected fallback
 payloads, and explicit owning-mesh fallback diagnostics.
 
@@ -214,10 +210,9 @@ bytes, requested/missing page counts, cone eligible/disabled counts, disabled
 reasons, and whether the object stays visible when high-detail pages are
 missing.
 
-## Feature 033 Page Streaming Quickstart
+## virtual geometry resilience Page Streaming Quickstart
 
-Use `specs/033-vg-page-streaming/quickstart.md` for the staged page-sourced
-geometry workflow. The clean-checkout pass should use this manifest and the
+The clean-checkout page-sourced geometry pass uses this manifest and the
 focused CTest slices:
 
 ```powershell
@@ -232,7 +227,7 @@ the configured budget while exposing requested, resident, evicted, and
 re-requested page counters. The malformed page fixture must fail integrity
 validation before corrupt page payloads become renderable.
 
-For feature `034`, resident high-detail and fallback fixtures must exercise the
+Resident high-detail and fallback fixtures must exercise the
 standalone page-local decode layout. The task and mesh shaders consume local
 vertex, primitive, remap, meshlet, bounds, decode-info, and material streams
 without first reading owner geometry. A fixture that reaches the owner path must
@@ -255,13 +250,13 @@ GPU benchmark; it verifies deterministic counter relationships:
   pressure and sorted budget contributors.
 - Residency pressure tests may evict high-detail pages, but page `0` fallback
   records must never appear in eviction candidates.
-- Feature `030` dense batching tests must keep submitted virtual geometry
+- Dense batching tests must keep submitted virtual geometry
   batches at or below `10%` of selected clusters for the dense clean-checkout
   fixture.
-- Feature `030` shadow-view tests must reduce dispatched shadow meshlets by at
+- Shadow-view tests must reduce dispatched shadow meshlets by at
   least `40%` against the conservative all-selected baseline while preserving
   the expected silhouette.
-- Feature `030` cone-safety tests must reject missing, double-sided,
+- Cone-safety tests must reject missing, double-sided,
   mixed-winding, alpha-risk, and high thin-shell-risk metadata by failing open.
   Only clusters with valid cone data and proven one-sided opaque low-risk
   metadata may set the shader cone-culling flag.

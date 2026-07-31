@@ -1,7 +1,7 @@
 // PhysicsPerformanceTests.cpp - deterministic runtime performance-regression contracts.
 //
 // These tests intentionally verify work counts and published telemetry instead of
-// comparing wall-clock durations. T105 and T106 record machine-specific
+// comparing wall-clock durations. ImplementationCheck and ImplementationCheck record machine-specific
 // RelWithDebInfo budgets; a unit-test clock threshold would be noisy on CI.
 
 #include "../TestHarness.h"

@@ -280,7 +280,7 @@ namespace TerraEngine::Tests
 					&& !bindPose.RequiresOwnerMeshDeformationFallback()
 					&& !safePose.RequiresOwnerMeshDeformationFallback()
 					&& !staticBinding.RequiresOwnerMeshDeformationFallback(),
-				"Pose binding must preserve the mesh's AVPB capability while legacy animated assets retain the complete-owner fallback.");
+				"Pose binding must preserve demanded-page capability while a rejected page state retains fail-open owner coverage.");
 		});
 
 		registry.Add("Renderer.AnimationView.ActiveDeformationFailsOpenAtCpuBroadphase", [](TestContext& context) {

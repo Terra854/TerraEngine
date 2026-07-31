@@ -1,11 +1,16 @@
 [CmdletBinding()]
 param(
 	[string]$BenchmarkExecutable = 'out/build/RelWithDebInfo/Build/Tools/TerraEngineVirtualGeometryBenchmark.exe',
-	[string]$Output = ('out/evidence/045/' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ') + '.json'),
+	[string]$Output = ('out/evidence/virtual-geometry-production/performance/' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ') + '.json'),
 	[string]$Workloads = 'Tools/VirtualGeometry/workloads.json',
 	[string]$Matrix = 'Tools/VirtualGeometry/hardware-matrix.json',
 	[string]$Quality = 'Tools/VirtualGeometry/quality-profiles.json',
 	[string]$WorkloadId = 'baseline-processor-expanded',
+	[string]$RuntimeAdapter = 'out/build/RelWithDebInfo/Build/Tools/VirtualGeometry/VirtualGeometryRuntimeAdapter.cmd',
+	[ValidateRange(1, 86400)]
+	[int]$DurationSeconds = 6,
+	[ValidateRange(1, 600000)]
+	[int]$SampleIntervalMilliseconds = 1000,
 	[string[]]$VisualSummary,
 	[switch]$DryRun
 )
@@ -16,6 +21,7 @@ $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 function Resolve-Repo([string]$Path) { if([IO.Path]::IsPathRooted($Path)){return [IO.Path]::GetFullPath($Path)}; return [IO.Path]::GetFullPath((Join-Path $repo $Path)) }
 $exe = Resolve-Repo $BenchmarkExecutable
 $outputPath = Resolve-Repo $Output
+$runtimeAdapterPath = Resolve-Repo $RuntimeAdapter
 foreach($manifest in @($Workloads,$Matrix,$Quality)) { $path = Resolve-Repo $manifest; if(-not (Test-Path -LiteralPath $path -PathType Leaf)){ throw "Manifest missing: $path" }; Get-Content -Raw $path | ConvertFrom-Json | Out-Null }
 if($VisualSummary -and $VisualSummary.Count -gt 0) {
 	# powershell.exe -File can pass a comma-separated value as one string. Expand
@@ -126,12 +132,21 @@ if($VisualSummary -and $VisualSummary.Count -gt 0) {
 	exit 0
 }
 if(-not $DryRun -and -not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Benchmark executable missing: $exe" }
-if($DryRun) { Write-Output "validated manifests and executable path (dry run; no capture launched): $exe"; exit 0 }
+if(-not (Test-Path -LiteralPath $runtimeAdapterPath -PathType Leaf)) { throw "Runtime adapter missing: $runtimeAdapterPath" }
+if($DryRun) { Write-Output "validated manifests, executable, and runtime adapter (dry run; no capture launched): $exe"; exit 0 }
 $parent = Split-Path -Parent $outputPath; New-Item -ItemType Directory -Force -Path $parent | Out-Null
-$args = @('--workloads', (Resolve-Repo $Workloads), '--matrix', (Resolve-Repo $Matrix), '--quality', (Resolve-Repo $Quality), '--workload', $WorkloadId, '--output', $outputPath)
+$args = @(
+	'--workloads', (Resolve-Repo $Workloads),
+	'--matrix', (Resolve-Repo $Matrix),
+	'--quality', (Resolve-Repo $Quality),
+	'--workload', $WorkloadId,
+	'--runtime-adapter', $runtimeAdapterPath,
+	'--duration-seconds', $DurationSeconds,
+	'--sample-interval-milliseconds', $SampleIntervalMilliseconds,
+	'--output', $outputPath)
 & $exe @args
 if($LASTEXITCODE -ne 0) { throw "Benchmark executable failed with exit code $LASTEXITCODE" }
 $capture = Get-Content -Raw $outputPath | ConvertFrom-Json
 $measured = @($capture.rawSamples | Where-Object { $_.availability -eq 'measured' -and $_.executionId -and $_.durationNanoseconds -gt 0 })
-if($measured.Count -lt 5) { throw "Capture is incomplete: at least five measured samples with execution IDs are required (found $($measured.Count))" }
+if($measured.Count -lt 6) { throw "Capture is incomplete: at least six measured samples with execution IDs are required (found $($measured.Count))" }
 Write-Output "capture written to $outputPath; only runtime-published measurements are accepted"

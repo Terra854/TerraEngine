@@ -165,13 +165,13 @@ namespace TerraEngine::EditorTests
 			{
 				context.Expect(mesh.compiledPath.parent_path().filename().string().find("_Generated") != std::string::npos, "Generated child TEMFs should live beside other package child artifacts.");
 				context.Expect(mesh.virtualGeometryRequested, "Package mesh records should state that virtual geometry was requested.");
-				context.Expect(mesh.virtualGeometryCooked, "Generated package mesh should validate a cooked virtual geometry payload.");
-				context.ExpectEqual(std::string("Cooked"), mesh.virtualGeometryStatus, "Generated package mesh should report a cooked virtual geometry status.");
-				context.Expect(mesh.virtualGeometryDetailLevels > 0u, "Cooked package mesh should expose a detail count.");
+				context.Expect(!mesh.virtualGeometryCooked, "A triangle package mesh must not claim virtual-page cooking.");
+				context.ExpectEqual(std::string("Skipped"), mesh.virtualGeometryStatus, "A triangle package mesh must publish the canonical direct-meshlet route.");
+				context.ExpectEqual(0u, mesh.virtualGeometryDetailLevels, "Direct meshlets must not publish virtual detail levels.");
 				context.Expect(mesh.virtualGeometryMeshlets > 0u, "Cooked package mesh should expose a meshlet count.");
-				context.Expect(mesh.virtualGeometrySourceTriangles > 0u, "Cooked package mesh should expose source triangle count.");
-				context.Expect(mesh.virtualGeometryConeSafetySummary.metadataValid, "Package mesh should preserve cone safety metadata from the compiled TEMF.");
-				context.Expect(mesh.virtualGeometryConeSafetySummary.disabledClusterCount > 0u, "Merged package mesh cone culling should stay disabled until per-cluster material proof exists.");
+				context.Expect(std::any_of(mesh.virtualGeometryWarnings.begin(), mesh.virtualGeometryWarnings.end(), [](const std::string& warning) {
+					return warning.find("direct-resident") != std::string::npos;
+				}), "Direct meshlet metadata must explain why no virtual pages were published.");
 			}
 			TerraEngine::AssetPipeline::GeneratedModelMeshAsset refreshedMesh =
 				result.generatedMeshes.front();
@@ -218,29 +218,23 @@ namespace TerraEngine::EditorTests
 			const nlohmann::json sidecar = TerraEngine::AssetPipeline::ToJson(result);
 			context.ExpectEqual(static_cast<std::size_t>(1), sidecar.value("generatedPrefabs", nlohmann::json::array()).size(), "Sidecar JSON should include generated prefab records.");
 			context.Expect(sidecar["generatedMeshes"][0]["virtualGeometry"].is_object(), "Sidecar JSON should persist virtual geometry metadata for generated meshes.");
-			context.ExpectEqual(std::string("Cooked"), sidecar["generatedMeshes"][0]["virtualGeometry"].value("status", std::string()), "Sidecar JSON should expose the cooked status.");
+			context.ExpectEqual(std::string("Skipped"), sidecar["generatedMeshes"][0]["virtualGeometry"].value("status", std::string()), "Sidecar JSON should preserve the direct-meshlet route.");
 			const nlohmann::json targets = sidecar["generatedMeshes"][0]["virtualGeometry"].value("targets", nlohmann::json::array());
-			context.Expect(!targets.empty(), "Sidecar JSON should persist requested-target diagnostics for generated meshes.");
-			context.Expect(targets.front().contains("desiredTriangleCount"), "Sidecar requested-target diagnostics should include desired triangle counts.");
-			context.Expect(targets.front().contains("actualTriangleCount"), "Sidecar requested-target diagnostics should include actual generated or candidate triangle counts.");
+			context.Expect(targets.empty(), "Direct meshlets must not retain virtual-geometry target diagnostics.");
 			const nlohmann::json coneSafety = sidecar["generatedMeshes"][0]["virtualGeometry"].value("coneSafety", nlohmann::json::object());
-			context.Expect(coneSafety.value("metadataValid", false), "Sidecar JSON should persist cone safety validity.");
-			context.Expect(coneSafety.value("disabledClusterCount", 0u) > 0u, "Sidecar JSON should persist cone safety disabled counts.");
-			context.Expect(!coneSafety.value("disabledReasons", nlohmann::json::array()).empty(), "Sidecar JSON should persist cone safety disabled reasons.");
+			context.Expect(!coneSafety.value("metadataValid", false), "Direct meshlets must not claim virtual cone-safety metadata.");
+			context.ExpectEqual(0u, coneSafety.value("disabledClusterCount", 0u), "Direct meshlets must not retain virtual cone-safety counters.");
+			context.Expect(coneSafety.value("disabledReasons", nlohmann::json::array()).empty(), "Direct meshlets must not retain virtual cone-safety reasons.");
 
 			const std::filesystem::path sourceAssetPath = tempRoot / "Assets/Models/virtual-multi-mesh.gltf";
 			context.Expect(TerraEngine::AssetPipeline::SaveModelPackageImportResult(sourceAssetPath, result), "Virtual geometry package sidecar should save.");
 			TerraEngine::AssetPipeline::ModelPackageImportResult loaded;
 			context.Expect(TerraEngine::AssetPipeline::LoadModelPackageImportResult(sourceAssetPath, loaded), "Virtual geometry package sidecar should reload.");
 			context.ExpectEqual(static_cast<std::size_t>(1), loaded.generatedPrefabs.size(), "Generated prefab records should round-trip through the sidecar loader.");
-			context.ExpectEqual(std::string("Cooked"), loaded.generatedMeshes.front().virtualGeometryStatus, "Virtual geometry status should round-trip through the sidecar loader.");
-			context.Expect(loaded.generatedMeshes.front().virtualGeometryCooked, "Virtual geometry cooked flag should round-trip through the sidecar loader.");
-			context.Expect(loaded.generatedMeshes.front().virtualGeometryClusterSummary.clusterCount > 0u, "Virtual geometry cluster summary should round-trip through the sidecar loader.");
-			context.Expect(!loaded.generatedMeshes.front().virtualGeometryTargets.empty(), "Requested-target diagnostics should round-trip through the sidecar loader.");
-			context.Expect(loaded.generatedMeshes.front().virtualGeometryTargets.front().desiredTriangleCount > 0u, "Desired target counts should round-trip through the sidecar loader.");
-			context.Expect(loaded.generatedMeshes.front().virtualGeometryTargets.front().actualTriangleCount > 0u, "Actual target counts should round-trip through the sidecar loader.");
-			context.Expect(loaded.generatedMeshes.front().virtualGeometryConeSafetySummary.metadataValid, "Cone safety metadata validity should round-trip through the sidecar loader.");
-			context.Expect(loaded.generatedMeshes.front().virtualGeometryConeSafetySummary.disabledClusterCount > 0u, "Cone safety disabled counts should round-trip through the sidecar loader.");
+			context.ExpectEqual(std::string("Skipped"), loaded.generatedMeshes.front().virtualGeometryStatus, "The direct-meshlet route should round-trip through package metadata.");
+			context.Expect(!loaded.generatedMeshes.front().virtualGeometryCooked, "Package metadata must not relabel direct meshlets as virtual-page output.");
+			context.Expect(!loaded.generatedMeshes.front().virtualGeometryConeSafetySummary.metadataValid, "Direct-route sidecars must keep virtual cone-safety metadata absent.");
+			context.ExpectEqual(0u, loaded.generatedMeshes.front().virtualGeometryConeSafetySummary.disabledClusterCount, "Direct-route sidecars must keep virtual cone-safety counts empty.");
 		});
 
 		registry.Add("VirtualGeometry.Editor.PackageImport.PreservesStableGeneratedIdentifiers", [](TestContext& context) {
@@ -336,19 +330,14 @@ namespace TerraEngine::EditorTests
 			context.ExpectEqual(static_cast<std::size_t>(1u), result.generatedMeshes.size(), "One source mesh should produce one generated mesh record.");
 			context.ExpectEqual(static_cast<std::size_t>(2u), result.materialAssignments.size(), "Both authored primitives should produce material assignments.");
 			const TerraEngine::AssetPipeline::GeneratedModelMeshAsset& mesh = result.generatedMeshes.front();
-			context.Expect(mesh.virtualGeometryCooked, "Multi-material fixture should still cook virtual geometry.");
+			context.Expect(!mesh.virtualGeometryCooked && mesh.virtualGeometryStatus == "Skipped", "A tiny multi-material fixture must retain its canonical direct-meshlet route.");
 			context.ExpectEqual(2u, mesh.virtualGeometryClusterSummary.sourceMaterialAssignmentCount, "Cluster summary should remember the authored material assignment count.");
-			context.Expect(mesh.virtualGeometryClusterSummary.materialSectionCount >= 1u, "Cluster summary should report cooked virtual geometry material sections.");
-			context.Expect(mesh.virtualGeometryClusterSummary.clusterMaterialSectionCount >= 1u, "Cluster summary should report cluster material ownership diagnostics.");
-			context.Expect(!mesh.virtualGeometryClusterSummary.materialCoverageValid, "Current TEMF v1 package cook should flag multi-material cluster coverage for review instead of silently claiming full section coverage.");
-			context.Expect(std::any_of(mesh.virtualGeometryWarnings.begin(), mesh.virtualGeometryWarnings.end(), [](const std::string& warning) {
-				return warning.find("material coverage") != std::string::npos;
-			}), "Multi-material package diagnostics should explain material coverage review.");
+			context.Expect(mesh.virtualGeometryClusterSummary.materialSectionCount == 0u, "Direct meshlets must not synthesize virtual material-section tables.");
 
 			const nlohmann::json sidecar = TerraEngine::AssetPipeline::ToJson(result);
 			const nlohmann::json clusterSummary = sidecar["generatedMeshes"][0]["virtualGeometry"]["clusterSummary"];
 			context.ExpectEqual(2u, clusterSummary.value("sourceMaterialAssignmentCount", 0u), "Sidecar JSON should persist source material assignment counts.");
-			context.Expect(!clusterSummary.value("materialCoverageValid", true), "Sidecar JSON should persist material coverage review state.");
+			context.ExpectEqual(std::string("Skipped"), sidecar["generatedMeshes"][0]["virtualGeometry"].value("status", std::string()), "Sidecar JSON should preserve the direct-meshlet route.");
 
 			const std::filesystem::path sourceAssetPath = tempRoot / "Assets/Models/multi-material.gltf";
 			context.Expect(TerraEngine::AssetPipeline::SaveModelPackageImportResult(sourceAssetPath, result), "Multi-material package sidecar should save.");
@@ -534,11 +523,7 @@ namespace TerraEngine::EditorTests
 			context.Expect(HasCoverageTag(gltfMesh, "package-gltf"), "glTF package meshes should publish the package-gltf coverage tag.");
 			context.Expect(HasCoverageTag(gltfMesh, "package-static-geometry"), "Package meshes should publish the static geometry coverage tag.");
 			context.Expect(HasCoverageTag(gltfMesh, "multi-material-package"), "Multi-material package meshes should publish the multi-material coverage tag.");
-			context.Expect(HasCoverageTag(gltfMesh, "adaptive-targets"), "Cooked package meshes should publish adaptive target coverage.");
-			context.Expect(HasCoverageTag(gltfMesh, "fallback-coverage"), "Cooked package meshes should publish fallback coverage.");
-			context.Expect(HasCoverageTag(gltfMesh, "page-links"), "Cooked package meshes should publish page-link coverage.");
-			context.Expect(HasCoverageTag(gltfMesh, "cone-safety-metadata"), "glTF package meshes should publish cone safety metadata coverage.");
-			context.Expect(HasCoverageTag(gltfMesh, "cone-culling-disabled"), "glTF package meshes should state that cone culling remains disabled without per-cluster material proof.");
+			context.Expect(gltfMesh.virtualGeometryStatus == "Skipped", "The tiny glTF coverage fixture must remain direct-resident.");
 
 			const nlohmann::json sidecar = TerraEngine::AssetPipeline::ToJson(gltfResult);
 			const nlohmann::json tags = sidecar["generatedMeshes"][0]["virtualGeometry"].value("coverageTags", nlohmann::json::array());
@@ -560,9 +545,7 @@ namespace TerraEngine::EditorTests
 			context.Expect(!fbxResult.generatedMeshes.empty(), "Coverage-tag FBX package import should produce a generated mesh.");
 			context.Expect(HasCoverageTag(fbxResult.generatedMeshes.front(), "package-fbx"), "FBX package meshes should publish the package-fbx coverage tag.");
 			context.Expect(HasCoverageTag(fbxResult.generatedMeshes.front(), "package-static-geometry"), "FBX package meshes should publish the static geometry coverage tag.");
-			context.Expect(HasCoverageTag(fbxResult.generatedMeshes.front(), "adaptive-targets"), "FBX package meshes should publish adaptive target coverage.");
-			context.Expect(HasCoverageTag(fbxResult.generatedMeshes.front(), "cone-safety-metadata"), "FBX package meshes should publish cone safety metadata coverage.");
-			context.Expect(HasCoverageTag(fbxResult.generatedMeshes.front(), "cone-culling-disabled"), "FBX package meshes should keep cone culling disabled until per-cluster material proof exists.");
+			context.Expect(fbxResult.generatedMeshes.front().virtualGeometryStatus == "Skipped", "The small FBX coverage fixture must remain direct-resident.");
 		});
 	}
 }

@@ -1,6 +1,6 @@
 # Animation Migration Guide
 
-Spec 043 replaces ad-hoc clip playback and mutable pose access with versioned assets, authored `AnimatorComponent` data, generation-safe runtime instances, typed deferred commands, and immutable snapshots. Migration should preserve the old content until the converted dependency set has validated and published atomically.
+animation production validation replaces ad-hoc clip playback and mutable pose access with versioned assets, authored `AnimatorComponent` data, generation-safe runtime instances, typed deferred commands, and immutable snapshots. Migration should preserve the old content until the converted dependency set has validated and published atomically.
 
 ## Project and asset migration
 

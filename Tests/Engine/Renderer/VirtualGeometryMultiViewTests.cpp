@@ -99,6 +99,47 @@ namespace TerraEngine::Tests
 			context.Expect(gameIt->draws.front().range.meshletOffset != sceneIt->draws.front().range.meshletOffset, "Different views should not share one mutable LOD range.");
 		});
 
+		registry.Add("VirtualGeometry.Render.MultiView.PreservesCrossViewIdentityAndRouteGeneration", [](TestContext& context) {
+			const TerraEngine::UUID objectId = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID materialId = TerraEngine::GenerateUUID();
+			TerraEngine::Renderer::RenderFrameSnapshot snapshot{};
+			snapshot.frameId = 9101u;
+			TerraEngine::Renderer::RenderFrameRenderableRecord renderable{};
+			renderable.objectId = objectId;
+			renderable.meshId = meshId;
+			renderable.materialId = materialId;
+			renderable.geometryRouteDecision.objectIdentity = 17u;
+			renderable.geometryRouteDecision.meshIdentity = 23u;
+			renderable.geometryRouteDecision.routeGeneration = 41u;
+			snapshot.renderables.push_back(renderable);
+
+			TerraEngine::Renderer::VirtualGeometryViewSelectionState game{};
+			game.outputKind = RenderOutputKind::GameView;
+			game.viewType = RenderViewType::Game;
+			game.outputId = 1u;
+			game.viewGeneration = 3u;
+			game.draws.push_back({ objectId, meshId, {}, true });
+			TerraEngine::Renderer::VirtualGeometryViewSelectionState picking = game;
+			picking.outputKind = RenderOutputKind::OffscreenTexture;
+			// Picking uses an offscreen Game-family view; RenderViewType has no
+			// synthetic Picking enum, so it cannot diverge from camera routing.
+			picking.viewType = RenderViewType::Game;
+			picking.outputId = 2u;
+			picking.viewGeneration = 4u;
+
+			const auto gameVisibility = TerraEngine::Renderer::BuildVirtualGeometryViewVisibilitySnapshot(
+				snapshot, game, VirtualGeometryCounterSource::Prepared);
+			const auto pickingVisibility = TerraEngine::Renderer::BuildVirtualGeometryViewVisibilitySnapshot(
+				snapshot, picking, VirtualGeometryCounterSource::Prepared);
+			context.Expect(objectId == gameVisibility.drawRanges.front().objectId, "Game view must retain object identity.");
+			context.Expect(objectId == pickingVisibility.drawRanges.front().objectId, "Picking view must retain object identity.");
+			context.Expect(meshId == gameVisibility.drawRanges.front().meshId, "Game view must retain primitive mesh identity.");
+			context.Expect(meshId == pickingVisibility.drawRanges.front().meshId, "Picking view must retain primitive mesh identity.");
+			context.Expect(materialId == snapshot.renderables.front().materialId, "Cross-view snapshot must retain material identity.");
+			context.ExpectEqual(41u, snapshot.renderables.front().geometryRouteDecision.routeGeneration, "All views must consume one stable route generation.");
+		});
+
 		registry.Add("VirtualGeometry.Render.MultiView.BuildsExportRuntimeDiagnosticsSeparately", [](TestContext& context) {
 			TerraEngine::Renderer::RenderFrameSnapshot snapshot;
 			snapshot.frameId = 777u;

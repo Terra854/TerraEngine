@@ -107,8 +107,8 @@ namespace TerraEngine::AssetPipeline
 		std::vector<GltfImportedAnimationTrack> sourceTracks;
 	};
 
-	// T037 will merge these records into the format-neutral manifest. Keeping an
-	// importer-owned aggregate now lets T034 preserve complete source semantics
+	// ImplementationCheck will merge these records into the format-neutral manifest. Keeping an
+	// importer-owned aggregate now lets ImplementationCheck preserve complete source semantics
 	// without racing edits to the shared ModelPackageImportResult contract.
 	struct GltfAnimatedPackageData
 	{

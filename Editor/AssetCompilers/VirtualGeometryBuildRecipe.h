@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <string_view>
 
@@ -19,6 +20,10 @@ namespace TerraEngine::Editor
 		std::string compilerVersion;
 		std::string toolchainVersion;
 		std::string codecProfile;
+		std::string quantizationProfile = "Balanced";
+		std::uint32_t quantizationProfileVersion = 1u;
+		std::string quantizationSettingsHash = "balanced-production-v1";
+		std::uint32_t pageSizeBytes = 64u * 1024u;
 
 		[[nodiscard]] bool Complete() const noexcept;
 		[[nodiscard]] std::string Key() const;

@@ -115,7 +115,7 @@ namespace TerraEngine::Physics::Backend {
 					state.lastError = error;
 				}
 				if(messageIndex >= kMaximumReportedCallbackMessages) {
-					// Keep the newest translated failure for T019 even after logging is
+					// Keep the newest translated failure for ImplementationCheck even after logging is
 					// throttled; only repetitive presentation is suppressed.
 					state.suppressedLogMessages.fetch_add(1U, std::memory_order_relaxed);
 					return;
@@ -256,7 +256,7 @@ namespace TerraEngine::Physics::Backend {
 				message != nullptr ? " - " : "",
 				message != nullptr ? message : "");
 			RecordProviderError(PhysicsProviderErrorCode::AssertionFailure, combinedMessage, sourceFile, static_cast<std::uint32_t>(sourceLine));
-			// Returning false suppresses Jolt's breakpoint. T019 owns the decision to
+			// Returning false suppresses Jolt's breakpoint. ImplementationCheck owns the decision to
 			// contain or stop a world after it observes this translated fatal report.
 			return false;
 		}

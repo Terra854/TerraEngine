@@ -1,8 +1,10 @@
 {
 	"schemaVersion": 1,
-	"feature": "045-virtual-geometry-alternative",
+	"product": "virtual-geometry-production",
 	"status": "setup-inventory",
 	"requiredFamilies": ["AMD", "NVIDIA", "Intel"],
+	"vendorExtrapolation": false,
+	"unsupportedReferenceIsUnavailable": true,
 	"requiredBackends": ["Vulkan"],
 	"hardwareProfiles": [
 		{
@@ -12,7 +14,8 @@
 			"driver": "not-captured",
 			"backend": "not-captured",
 			"availability": "unavailable",
-			"note": "Setup records repository/build state only; no GPU capability probe was run."
+			"note": "Setup records repository/build state only; no GPU capability probe was run.",
+			"evidenceStatus": "unavailable"
 		},
 		{
 			"id": "amd-vulkan",

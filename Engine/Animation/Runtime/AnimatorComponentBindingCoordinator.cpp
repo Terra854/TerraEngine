@@ -415,41 +415,32 @@ namespace TerraEngine::Animation {
 			const Mesh& mesh,
 			const SkeletonAsset& skeleton) noexcept
 		{
-			const DeformableMeshPayloadHeader& metadata = mesh.deformableMetadata;
+			const TemfDeformableMetadata& metadata = mesh.deformableMetadata;
 			constexpr std::uint32_t requiredFlags =
-				kDeformableMeshPayloadFlagConservativeMorphEnvelope
-				| kDeformableMeshPayloadFlagZeroWeightMeansIdentity
-				| kDeformableMeshPayloadFlagVertexPaletteIndices
-				| kDeformableMeshPayloadFlagDenseMorphPositionDeltas;
-			constexpr std::uint32_t requiredVirtualFlags =
-				kDeformableMeshVirtualGeometryFlagWholeMeshEnvelope
-				| kDeformableMeshVirtualGeometryFlagDisableUnprovenConeCulling
-				| kDeformableMeshVirtualGeometryFlagRequireCompleteFallback;
+				kTemfDeformableFlagConservativeMorphEnvelope
+				| kTemfDeformableFlagZeroWeightMeansIdentity
+				| kTemfDeformableFlagVertexPaletteIndices
+				| kTemfDeformableFlagDenseMorphDeltas;
 			if(!mesh.hasDeformablePayload
 				|| mesh.deformablePayloadGeneration == 0U
-				|| metadata.magic != kDeformableMeshPayloadMagicValue
-				|| metadata.version != kDeformableMeshPayloadVersion
-				|| metadata.headerSize != sizeof(DeformableMeshPayloadHeader)
-				|| metadata.compatibleMeshVersion != mesh.header.version
 				|| metadata.skinningVertexCount == 0U
-				|| metadata.skinningVertexCount != mesh.header.meshletSkinningDataCount
+				|| metadata.skinningVertexCount != mesh.runtimeLayout.meshletSkinningDataCount
 				|| metadata.palettePartitionCount != 1U
 				|| mesh.deformablePalettes.size() != 1U
 				|| metadata.morphTargetCount != mesh.deformableMorphs.size()
 				|| metadata.morphTargetCount
 					> kGpuAnimationMaximumMorphTargetsV1
-				|| metadata.vertexPaletteIndexCount != metadata.skinningVertexCount
-				|| metadata.vertexPaletteIndexCount
-					!= mesh.deformableVertexPaletteIndices.size()
-				|| metadata.skinningStrideBytes != kDeformableMeshSkinningStrideBytes
-				|| metadata.maximumInfluences != kDeformableMeshMaximumInfluences
-				|| metadata.maximumPaletteJoints != kDeformableMeshMaximumPaletteJoints
+				|| mesh.deformableVertexPaletteIndices.size()
+					!= metadata.skinningVertexCount
+				|| mesh.meshletSkinningData.size()
+					!= static_cast<std::size_t>(
+						metadata.skinningVertexCount)
+						* kTemfSkinningStrideBytes
 				|| metadata.sourceSkeletonJointCount != skeleton.joints.size()
 				|| metadata.skeletonCompatibilityFingerprint == 0U
 				|| metadata.skeletonCompatibilityFingerprint
 					!= skeleton.compatibilityFingerprint
-				|| metadata.flags != requiredFlags
-				|| metadata.virtualGeometryDeformationFlags != requiredVirtualFlags) {
+				|| metadata.flags != requiredFlags) {
 				return false;
 			}
 			for(std::size_t lane = 0U; lane < 3U; ++lane) {
@@ -461,7 +452,7 @@ namespace TerraEngine::Animation {
 				}
 			}
 
-			const DeformableMeshPaletteRecord& palette =
+			const TemfDeformablePaletteRecord& palette =
 				mesh.deformablePalettes.front();
 			if(palette.jointCount == 0U
 				|| palette.jointCount > kGpuAnimationPaletteEntriesPerPartition
@@ -553,7 +544,7 @@ namespace TerraEngine::Animation {
 					MixRenderIdentityValue(candidateFingerprint, 0U);
 					continue;
 				}
-				MixRenderIdentityValue(candidateFingerprint, mesh->header.version);
+				MixRenderIdentityValue(candidateFingerprint, mesh->runtimeLayout.version);
 				MixRenderIdentityValue(candidateFingerprint,
 					mesh->deformablePayloadGeneration);
 				MixRenderIdentityValue(candidateFingerprint,
@@ -565,7 +556,7 @@ namespace TerraEngine::Animation {
 				++compatibleCandidateCount;
 				if(compatibleCandidateCount == 1U) {
 					result.meshId = component->meshId;
-					result.meshHeaderVersion = mesh->header.version;
+					result.meshHeaderVersion = mesh->runtimeLayout.version;
 					result.deformablePayloadGeneration =
 						mesh->deformablePayloadGeneration;
 					result.skeletonCompatibilityFingerprint =
@@ -574,7 +565,7 @@ namespace TerraEngine::Animation {
 					result.morphStableIds.clear();
 					result.morphStableIds.reserve(
 						mesh->deformableMorphs.size());
-					for(const DeformableMeshMorphRecord& morph
+					for(const TemfDeformableMorphRecord& morph
 						: mesh->deformableMorphs) {
 						result.morphStableIds.push_back(
 							morph.stableTargetId);

@@ -687,7 +687,7 @@ namespace TerraEngine::AssetPipeline
 		void AddUnsupportedDiagnostics(const aiScene& scene, ModelPackageImportResult& result)
 		{
 			// Animation, hierarchy, bones, and morphs are consumed by the animated
-			// sidecar below. Only source features outside T035 remain unsupported.
+			// sidecar below. Only source features outside ImplementationCheck remain unsupported.
 			if (scene.HasCameras())
 			{
 				AddDiagnostic(result, ModelDiagnosticSeverity::Warning, "UnsupportedCameraIgnored", "cameras", "Camera data is not imported by this static FBX feature.", "Renderable meshes were imported.");
@@ -3508,7 +3508,7 @@ namespace TerraEngine::AssetPipeline
 		if (HasImportErrors(result.package))
 		{
 			// A failed skeleton, deformable mesh, morph, or clip candidate must not
-			// expose a subset as a publishable generation. T037 owns the protected
+			// expose a subset as a publishable generation. ImplementationCheck owns the protected
 			// filesystem transaction and can retain the prior canonical manifest.
 			result.package.animationManifest.subAssets.clear();
 			result.package.animationManifest.publishedAtomically = false;

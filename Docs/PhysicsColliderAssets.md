@@ -76,9 +76,9 @@ run the focused physics tests, and install. The install step is required so the
 runtime, editor compiler, cooked assets, and documentation are verified from
 the produced tree rather than from source directories.
 
-US2 validation includes a large cooked-mesh round trip and fixed-step
+collider-cook validation includes a large cooked-mesh round trip and fixed-step
 simulation; results are recorded in
-`specs/042-physics-system/evidence/us2-validation.md`. The later whole-feature
+`Docs/Physics/evidence/collider-cook-validation.md`. The later whole-feature
 stress lane records the required 10,000 mixed bodies and 1,000 active bodies at
 60 Hz, including hardware and build details. Asset-level mesh coverage does not
 by itself prove that full-scene performance target.

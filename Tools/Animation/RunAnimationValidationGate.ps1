@@ -88,9 +88,9 @@ $script:ReferenceWorkerCount = 31
 $script:ExpectedBaselineDigest = "4020949bd881f94f0395853e947e4512fb587c7bdd1ce5592317e75c01b5fcb5"
 $script:ExpectedBaselineManifestSha256 = "cf4375934729e1afa745d9446faacfc1a7ba53a6d7db79b3d1e0e8164a5ced8f"
 $script:ExpectedBaselineEvidenceLockSha256 = "0605b4d4241bda8ba3fd4743b2ba7a6c6b217aaf1c9d83fe669125493ddb4e41"
-$script:ExpectedRuntimeContractSha256 = "1bb8bb3d0affa53d146b717171a7b23d72437af88449c273e8cb1a2fe4869279"
-$script:ExpectedRendererWorkloadManifestSha256 = "397b7cb6ac01714a628c44bab6cb002c034c8d8e5422bf184dc10cddf201b12f"
-$script:ExpectedPerformanceWorkloadsSha256 = "dd297ef96f629b290be03bce64dec19612726cd5931e886fb722d80970d49dba"
+$script:ExpectedRuntimeContractSha256 = "a2dd5eee95aa1590a927094006d120d2d67f39d2166605f27902dde85dc3566a"
+$script:ExpectedRendererWorkloadManifestSha256 = "3230959fab8c628d9396bd31a7923672c3a1ebf5b51ff4998066a8f10c2b3e4c"
+$script:ExpectedPerformanceWorkloadsSha256 = "d99199c796368fa7706af363985ce3e0b75a71fa5fa2c29238bce65343e943a6"
 $script:DeferredPerformanceCTestExcludeRegex = "Performance|^Editor\.ExportBaseline$"
 # Several broad CTest registrations contain both correctness cases and measured
 # workloads. Exact case-name tokens keep correctness/schema coverage active while
@@ -6877,7 +6877,7 @@ try {
 	if (-not $performanceDeferred -and -not [string]::IsNullOrWhiteSpace($PerformanceDeferralAuthority)) { throw '-PerformanceDeferralAuthority is valid only with -DeferPerformanceExecutionToFinalIntegration.' }
 	if ($performanceDeferred -and $isFinalGate) { throw 'Final gates (Phase final* or GateTask AnimationValidationAuditEveryFrFrScScAgainstIncrementallyMaintainedImplementation and later) reject performance deferral.' }
 	if ($performanceDeferred -and (-not [string]::IsNullOrWhiteSpace($PerformanceCandidateManifest) -or -not [string]::IsNullOrWhiteSpace($FinalAnimationPerformanceEvidenceManifest))) { throw 'Deferred gates reject performance candidate and final AnimationValidationRunsEveryAccumulatedFeatureWorkflowBenchmarkTRunsEveryUnrelated evidence manifests.' }
-	if ($Execute -and -not $isFinalGate -and -not $performanceDeferred) { throw 'Intermediate execution requires -DeferPerformanceExecutionToFinalIntegration so no performance workload or comparison can run before Phase 18.' }
+	if ($Execute -and -not $isFinalGate -and -not $performanceDeferred) { throw 'Intermediate execution requires -DeferPerformanceExecutionToFinalIntegration so no performance workload or comparison can run before implementation stage.' }
 	if (-not $isFinalGate -and -not [string]::IsNullOrWhiteSpace($PerformanceCandidateManifest)) { throw 'Intermediate gates reject performance candidate manifests; AnimationValidationInvokeFinalOnlyTTComparatorEveryPreparedControlIncluding owns the final paired comparison.' }
 	if ($isFinalGate -and [string]::IsNullOrWhiteSpace($PerformanceCandidateManifest)) { throw 'Final gates require -PerformanceCandidateManifest for the fresh AnimationValidationInvokeFinalOnlyTTComparatorEveryPreparedControlIncluding engine-wide comparison.' }
 	if ($isFinalGate -and [string]::IsNullOrWhiteSpace($FinalAnimationPerformanceEvidenceManifest)) { throw 'Final gates require -FinalAnimationPerformanceEvidenceManifest for passing non-deferred AnimationValidationRunsEveryAccumulatedFeatureWorkflowBenchmarkTRunsEveryUnrelated evidence.' }

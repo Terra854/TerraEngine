@@ -1,7 +1,6 @@
 {
 	"schemaVersion": 2,
-	"phase": 4,
-	"id": "phase-4",
+	"id": "streaming-publication",
 	"title": "Feedback streaming and atomic publication",
 	"requiredTools": ["asset.virtualGeometry.inspect", "renderer.virtualGeometry.stats", "diagnostics.get_summary", "game_view.capture"],
 	"operations": [

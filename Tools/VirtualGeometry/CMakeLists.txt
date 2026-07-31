@@ -1,5 +1,6 @@
-# Feature 045 schema validation is a small reusable library shared by tests and
-# the installed benchmark. It uses only TerraEngine's vendored JSON header.
+# Virtual-geometry schema validation is a small reusable library shared by
+# tests and the installed benchmark. It uses only TerraEngine's vendored JSON
+# header, so validation never depends on a system package.
 add_library(TerraEngineVirtualGeometrySchemas STATIC
 	VirtualGeometrySchemas.cpp
 	VirtualGeometrySchemas.h
@@ -37,6 +38,32 @@ if(MSVC)
 	target_compile_options(TerraEngineVirtualGeometrySchemas PRIVATE /FS)
 endif()
 
+# Product roots use semantic names only. Keep this audit in CTest so local and
+# installed validation fail immediately when planning metadata leaks into a
+# filename, runtime string, schema, diagnostic, or documentation surface.
+find_program(TERRAENGINE_POWERSHELL_EXECUTABLE
+	NAMES pwsh powershell powershell.exe
+	HINTS
+		"$ENV{SystemRoot}/System32/WindowsPowerShell/v1.0"
+)
+if(TERRAENGINE_POWERSHELL_EXECUTABLE)
+	add_test(NAME Repository.SemanticProductNaming
+		COMMAND "${TERRAENGINE_POWERSHELL_EXECUTABLE}"
+			-NoProfile
+			-ExecutionPolicy Bypass
+			-File "${CMAKE_CURRENT_SOURCE_DIR}/CheckSemanticProductNaming.ps1"
+			-Configuration "${CMAKE_CURRENT_SOURCE_DIR}/semantic-product-naming.json"
+			-ReportPath "${CMAKE_BINARY_DIR}/evidence/semantic-product-naming.json"
+	)
+	set_tests_properties(Repository.SemanticProductNaming PROPERTIES
+		LABELS "Repository;Naming;Contract"
+		WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+	)
+else()
+	message(WARNING
+		"PowerShell is unavailable; Repository.SemanticProductNaming cannot be registered.")
+endif()
+
 add_executable(TerraEngineVirtualGeometryBenchmark
 	TerraEngineVirtualGeometryBenchmark.cpp
 )
@@ -61,6 +88,8 @@ endif()
 
 add_executable(TerraEngineVirtualGeometryCodecExperiment
 	TerraEngineVirtualGeometryCodecExperiment.cpp
+	VirtualGeometryPrototypeCodecOracle.cpp
+	VirtualGeometryPrototypeCodecOracle.h
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/VirtualGeometryCodecs.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/VirtualGeometryMeshoptCodec.cpp
 	${CMAKE_SOURCE_DIR}/Engine/Resource/VirtualGeometryCodec.cpp

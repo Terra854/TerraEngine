@@ -2,7 +2,7 @@
 param(
 	[string]$Runner = 'out/build/RelWithDebInfo/Build/Tools/TerraEngineVirtualGeometryBenchmark.exe',
 	[string]$RuntimeAdapter = '',
-	[string]$Output = 'out/evidence/045/production-soak.json',
+	[string]$Output = 'out/evidence/virtual-geometry-production/production-soak.json',
 	[string]$Workloads = 'Tools/VirtualGeometry/workloads.json',
 	[string]$Matrix = 'Tools/VirtualGeometry/hardware-matrix.json',
 	[string]$Quality = 'Tools/VirtualGeometry/quality-profiles.json',

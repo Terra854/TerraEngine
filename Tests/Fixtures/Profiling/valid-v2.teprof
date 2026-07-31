@@ -2,7 +2,7 @@
 	"format": "TerraEngineProfilerCapture",
 	"payloadVersion": 2,
 	"metadata": {
-		"captureId": "feature-043-valid-v2",
+		"captureId": "profiling-valid-v2",
 		"engineBuild": "fixture",
 		"platform": "fixture",
 		"clock": "monotonic_nanoseconds",

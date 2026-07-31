@@ -2,7 +2,7 @@
 param(
 	[string]$Runner = 'out/build/RelWithDebInfo/Build/Tools/TerraEngineVirtualGeometryBenchmark.exe',
 	[string]$RuntimeAdapter = '',
-	[string]$Output = 'out/evidence/045/animated-benchmark.json',
+	[string]$Output = 'out/evidence/virtual-geometry-production/animated-benchmark.json',
 	[string]$Workloads = 'Tools/VirtualGeometry/workloads.json',
 	[string]$Matrix = 'Tools/VirtualGeometry/hardware-matrix.json',
 	[string]$Quality = 'Tools/VirtualGeometry/quality-profiles.json',
@@ -36,9 +36,9 @@ if([string]::IsNullOrWhiteSpace($HeroWorkloadId) -or
 	throw 'HeroWorkloadId and CrowdWorkloadId are required runtime-adapter selectors.'
 }
 
-function Get-Phase7Prerequisite([string]$Name, [string]$Path)
+function Get-AnimatedGeometryPrerequisite([string]$Name, [string]$Path)
 {
-	# Phase 7 combines independent correctness evidence with live timing. Do not
+	# Animated-geometry validation combines independent correctness evidence with live timing. Do not
 	# silently promote a hero/crowd capture into proof of full-reference parity
 	# or the million-decision bounds corpus when their artifact was not supplied.
 	if([string]::IsNullOrWhiteSpace($Path))
@@ -47,7 +47,7 @@ function Get-Phase7Prerequisite([string]$Name, [string]$Path)
 			name = $Name
 			status = 'unavailable'
 			path = ''
-			reason = "A $Name evidence JSON path is required for a complete Phase 7 result."
+			reason = "A $Name evidence JSON path is required for a complete animated-geometry result."
 		}
 	}
 	if(-not (Test-Path -LiteralPath $Path -PathType Leaf))
@@ -90,13 +90,13 @@ function Get-Phase7Prerequisite([string]$Name, [string]$Path)
 	}
 }
 
-$phase7Prerequisites = @(
-	Get-Phase7Prerequisite 'full-reference' $FullReferenceEvidence
-	Get-Phase7Prerequisite 'million-decision' $MillionDecisionEvidence
+$animatedGeometryPrerequisites = @(
+	Get-AnimatedGeometryPrerequisite 'full-reference' $FullReferenceEvidence
+	Get-AnimatedGeometryPrerequisite 'million-decision' $MillionDecisionEvidence
 )
 if($DryRun)
 {
-	Write-Output "validated animated hero/crowd runtime plan duration=$DurationSeconds seconds with $(@($phase7Prerequisites | Where-Object { $_.status -eq 'accepted' }).Count)/2 Phase 7 correctness prerequisites (dry run; no animation measurement)"
+	Write-Output "validated animated hero/crowd runtime plan duration=$DurationSeconds seconds with $(@($animatedGeometryPrerequisites | Where-Object { $_.status -eq 'accepted' }).Count)/2 animated-geometry correctness prerequisites (dry run; no animation measurement)"
 	exit 0
 }
 if(-not (Test-Path -LiteralPath $Runner -PathType Leaf))
@@ -191,7 +191,7 @@ foreach($workload in @(
 		result = $resultPath
 	}
 }
-$missingPrerequisites = @($phase7Prerequisites | Where-Object {
+$missingPrerequisites = @($animatedGeometryPrerequisites | Where-Object {
 	$_.status -ne 'accepted'
 })
 $status = if(@($rows | Where-Object {
@@ -202,9 +202,9 @@ $status = if(@($rows | Where-Object {
 	status = $status
 	runtimeAdapter = $RuntimeAdapter
 	durationSeconds = $DurationSeconds
-	phase7Prerequisites = $phase7Prerequisites
+	animatedGeometryPrerequisites = $animatedGeometryPrerequisites
 	workloads = $rows
-	note = 'Only accepted full-reference and million-decision evidence plus repeated bounded Vulkan runtime captures with execution IDs satisfy the complete Phase 7 workflow.'
+	note = 'Only accepted full-reference and million-decision evidence plus repeated bounded Vulkan runtime captures with execution IDs satisfy the complete animated-geometry workflow.'
 } | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $Output -Encoding utf8
 if($status -ne 'measured-result-published')
 {

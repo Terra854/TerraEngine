@@ -3,6 +3,7 @@
 #include "ExportPackageValidator.h"
 
 #include "File Formats/TerraEngineMeshFile.h"
+#include "Resource/VirtualGeometryCodec.h"
 #include "Physics/Assets/CookedColliderAsset.h"
 #include "Physics/Assets/PhysicsMaterial.h"
 #include "TEPAK/PackReader.h"
@@ -16,6 +17,7 @@
 #include <iomanip>
 #include <optional>
 #include <sstream>
+#include <span>
 #include <stdexcept>
 #include <string_view>
 #include <unordered_set>
@@ -182,95 +184,61 @@ bool ValidateRendererRecoveryManifestBlock(const nlohmann::json& rendererRecover
 bool ValidateVirtualGeometryTemfPayload(const tepak::ByteBuffer& bytes, std::string_view path, std::string& outError)
 {
 	const std::string normalizedPath = NormalizePackagePath(path);
-	if (bytes.size() < sizeof(MeshHeader)) {
-		outError = "Virtual geometry mesh payload is too small: " + normalizedPath;
+	const auto validated = TerraEngine::Resource::ValidateTemfProductionFile(
+		std::span<const std::uint8_t>(bytes.data(), bytes.size()), {});
+	if (!validated.IsComplete()) {
+		outError = "Virtual geometry mesh payload requires a canonical TEMFPRD1 recook: "
+			+ normalizedPath + ". " + validated.diagnostic;
 		return false;
 	}
-
-	MeshHeader header{};
-	std::memcpy(&header, bytes.data(), sizeof(MeshHeader));
-	std::uint32_t magic = 0u;
-	std::memcpy(&magic, header.magic, sizeof(magic));
-	if (magic != kMeshMagicValue || header.version != kMeshCurrentVersion) {
-		outError = "Virtual geometry mesh payload is not a current TEMF file: " + normalizedPath;
+	if ((validated.directory.header.representationFlags
+			& kTemfRepresentationVirtualGeometry) == 0u) {
+		outError = "Virtual geometry mesh payload does not declare the canonical virtual representation: "
+			+ normalizedPath;
 		return false;
 	}
-
-	if ((header.meshletFlags & kMeshletHeaderFlagHasVirtualGeometry) == 0u
-		|| header.virtualGeometryHeaderOffset == 0u
-		|| header.virtualGeometryHeaderSize != sizeof(VirtualGeometryHeader)
-		|| header.virtualGeometryPayloadGeneration != kVirtualGeometryPayloadGeneration) {
-		outError = "Virtual geometry mesh payload is stale or missing its current TEMF virtual geometry header: " + normalizedPath;
+	const auto rootBlock = std::find_if(
+		validated.directory.blocks.begin(),
+		validated.directory.blocks.end(),
+		[](const TemfBlockDescriptor& block) {
+			return block.streamKind
+					== static_cast<std::uint16_t>(TemfStreamKind::Metadata)
+				&& block.attributeMask == kTemfMetadataVirtualHeader;
+		});
+	if (rootBlock == validated.directory.blocks.end()) {
+		outError = "Virtual geometry mesh payload is missing its canonical hierarchy root: "
+			+ normalizedPath;
 		return false;
 	}
-
-	const std::uint64_t virtualHeaderEnd = static_cast<std::uint64_t>(header.virtualGeometryHeaderOffset) + sizeof(VirtualGeometryHeader);
-	if (virtualHeaderEnd > bytes.size()) {
-		outError = "Virtual geometry mesh payload header range is outside the packed file: " + normalizedPath;
+	const std::span<const std::uint8_t> encoded(bytes.data()
+			+ static_cast<std::size_t>(rootBlock->encodedPayloadOffset),
+		static_cast<std::size_t>(rootBlock->encodedBytes));
+	const auto decoded = TerraEngine::Resource::DecodeTemfProductionBlock(
+		{ *rootBlock, encoded, validated.directory.quantizationDomains, 0u },
+		{});
+	VirtualGeometryHeader root{};
+	if (!decoded.IsComplete() || decoded.bytes.size() != sizeof(root)) {
+		outError = "Virtual geometry mesh payload has an invalid canonical hierarchy root: "
+			+ normalizedPath;
 		return false;
 	}
-
-	VirtualGeometryHeader virtualHeader{};
-	std::memcpy(&virtualHeader, bytes.data() + header.virtualGeometryHeaderOffset, sizeof(VirtualGeometryHeader));
-	if (virtualHeader.payloadGeneration != kVirtualGeometryPayloadGeneration
-		|| virtualHeader.headerSize != sizeof(VirtualGeometryHeader)
-		|| virtualHeader.detailLevelCount == 0u
-		|| virtualHeader.sourceTriangleCount == 0u
-		|| virtualHeader.sourceVertexCount == 0u) {
-		outError = "Virtual geometry mesh payload root metadata is invalid and must be rebuilt: " + normalizedPath;
-		return false;
-	}
-
-	constexpr std::uint32_t requiredFlags = kVirtualGeometryValidationFlagAdaptiveTargetsPresent
+	std::memcpy(&root, decoded.bytes.data(), sizeof(root));
+	constexpr std::uint32_t requiredFlags =
+		kVirtualGeometryValidationFlagAdaptiveTargetsPresent
 		| kVirtualGeometryValidationFlagFallbackCoverageValidated
 		| kVirtualGeometryValidationFlagClusterHierarchyValidated
 		| kVirtualGeometryValidationFlagPageLinksValidated
 		| kVirtualGeometryValidationFlagConeSafetyMetadataValidated;
-	if ((virtualHeader.flags & kVirtualGeometryValidationFlagAdaptiveTargetsPresent) == 0u
-		|| virtualHeader.requestedTargetCount == 0u
-		|| virtualHeader.requestedTargetTableOffset == 0u) {
-		outError = "Virtual geometry mesh payload is missing adaptive cook metadata: " + normalizedPath;
+	if (root.payloadGeneration != kVirtualGeometryPayloadGeneration
+		|| (root.flags & requiredFlags) != requiredFlags
+		|| root.requestedTargetCount == 0u
+		|| root.pageCount == 0u
+		|| root.clusterPageLinkCount == 0u
+		|| root.coneSafetyCount == 0u) {
+		outError = "Virtual geometry mesh payload does not prove all required production metadata: "
+			+ normalizedPath;
 		return false;
 	}
-	if ((virtualHeader.flags & kVirtualGeometryValidationFlagFallbackCoverageValidated) == 0u) {
-		outError = "Virtual geometry mesh payload is missing fallback coverage validation: " + normalizedPath;
-		return false;
-	}
-	if ((virtualHeader.flags & kVirtualGeometryValidationFlagClusterHierarchyValidated) == 0u
-		|| virtualHeader.clusterCount == 0u
-		|| virtualHeader.clusterTableOffset == 0u) {
-		outError = "Virtual geometry mesh payload is missing cluster hierarchy metadata: " + normalizedPath;
-		return false;
-	}
-	if ((virtualHeader.flags & kVirtualGeometryValidationFlagPageLinksValidated) == 0u
-		|| virtualHeader.pageCount == 0u
-		|| virtualHeader.pageTableOffset == 0u
-		|| virtualHeader.clusterPageLinkCount == 0u
-		|| virtualHeader.clusterPageLinkTableOffset == 0u) {
-		outError = "Virtual geometry mesh payload is missing page metadata or cluster-page links: " + normalizedPath;
-		return false;
-	}
-	if ((virtualHeader.flags & kVirtualGeometryValidationFlagConeSafetyMetadataValidated) == 0u
-		|| virtualHeader.coneSafetyCount != virtualHeader.clusterCount
-		|| virtualHeader.coneSafetyTableOffset == 0u) {
-		outError = "Virtual geometry mesh payload is missing cone safety metadata: " + normalizedPath;
-		return false;
-	}
-	if ((virtualHeader.flags & requiredFlags) != requiredFlags) {
-		outError = "Virtual geometry mesh payload is missing required adaptive validation flags: " + normalizedPath;
-		return false;
-	}
-
-	if (!ValidateTableRange(bytes, virtualHeader.detailLevelTableOffset, virtualHeader.detailLevelCount, sizeof(VirtualGeometryDetailLevelRecord), "detail", normalizedPath, outError)
-		|| !ValidateTableRange(bytes, virtualHeader.cullableGroupTableOffset, virtualHeader.cullableGroupCount, sizeof(VirtualGeometryCullableGroupRecord), "cullable group", normalizedPath, outError)
-		|| !ValidateTableRange(bytes, virtualHeader.requestedTargetTableOffset, virtualHeader.requestedTargetCount, sizeof(VirtualGeometryRequestedTargetRecord), "adaptive target", normalizedPath, outError)
-		|| !ValidateTableRange(bytes, virtualHeader.clusterTableOffset, virtualHeader.clusterCount, sizeof(VirtualGeometryClusterRecord), "cluster", normalizedPath, outError)
-		|| !ValidateTableRange(bytes, virtualHeader.pageTableOffset, virtualHeader.pageCount, sizeof(VirtualGeometryPageRecord), "page", normalizedPath, outError)
-		|| !ValidateTableRange(bytes, virtualHeader.clusterPageLinkTableOffset, virtualHeader.clusterPageLinkCount, sizeof(VirtualGeometryClusterPageLinkRecord), "cluster-page link", normalizedPath, outError)
-		|| !ValidateTableRange(bytes, virtualHeader.coneSafetyTableOffset, virtualHeader.coneSafetyCount, sizeof(VirtualGeometryConeSafetyRecord), "cone safety", normalizedPath, outError)) {
-		return false;
-	}
-
 	return true;
 }
 

@@ -3,7 +3,7 @@
 This document defines how TerraEngine animation performance evidence is prepared,
 captured, interpreted, and compared. It does not report a performance pass.
 All candidate wall-clock timing, throughput, latency, diagnostics-overhead, and
-whole-engine regression acceptance is deferred to final Phase 18 tasks animation-validation-runs-every-accumulated-feature-workflow-benchmark-t-runs-every-unrelated and
+whole-engine regression acceptance is deferred to final implementation stage tasks animation-validation-runs-every-accumulated-feature-workflow-benchmark-t-runs-every-unrelated and
 animation-validation-invoke-final-only-t-t-comparator-every-prepared-control-including. The continuous 24-hour acceptance soak is deferred to animation-validation-continuous-hour-mixed-animation-soak-renderer-physics-reload-cancellation-streaming.
 
 Intermediate work may compile the harnesses, verify hashes and schemas, generate
@@ -20,9 +20,9 @@ it must not be accepted by weakening a nearby constant.
 | Pre-animation source commit | `6d12e3a99d7c0d41899fc96fa18b02b61e5a0aa9` |
 | Locked animation-validation-is-completed-immutable-pre-feature-reference-capture-remains-sole-pre baseline | `out/validation/animation/baseline/locked-baseline.json` — SHA-256 `cf4375934729e1afa745d9446faacfc1a7ba53a6d7db79b3d1e0e8164a5ced8f` |
 | animation-validation-is-completed-immutable-pre-feature-reference-capture-remains-sole-pre evidence selection | 178 files, 371,567,204 bytes — aggregate SHA-256 `4020949bd881f94f0395853e947e4512fb587c7bdd1ce5592317e75c01b5fcb5` |
-| Runtime limits contract | `Docs/Animation/README.md` — SHA-256 `1bb8bb3d0affa53d146b717171a7b23d72437af88449c273e8cb1a2fe4869279` |
-| animation-validation-is-completed-immutable-pre-feature-reference-capture-remains-sole-pre workload configuration | `Tools/Animation/PerformanceWorkloads.json` — SHA-256 `dd297ef96f629b290be03bce64dec19612726cd5931e886fb722d80970d49dba` |
-| Animation stress definitions | `Tests/Fixtures/Animation/stress/workloads.json` — SHA-256 `c5652867707f46b2db388a3fc27af14c71db6b13a431dc64a52d6584f555a891` |
+| Runtime limits contract | `Docs/Animation/README.md` — SHA-256 `a2dd5eee95aa1590a927094006d120d2d67f39d2166605f27902dde85dc3566a` |
+| Animation performance workloads | `Tools/Animation/PerformanceWorkloads.json` — SHA-256 `d99199c796368fa7706af363985ce3e0b75a71fa5fa2c29238bce65343e943a6` |
+| Animation stress definitions | `Tests/Fixtures/Animation/stress/workloads.json` — SHA-256 `40e3a8b7eb447ad3e3029a81cbc7383b15f92045c4f04ec69f13a35e3c44296a` |
 | Whole-engine coverage matrix | `Tools/Animation/PerformanceCoverageMatrix.json` — SHA-256 `1e1f4a158b99a636faef1ec0679bf21aa1b30446352ece59483791bde024dbd1` |
 | Soak iteration schema | `Tests/Fixtures/Animation/stress/soak-result.schema.json` — SHA-256 `fa1b6548872e9ca70a8e1d5aeef9e810d82cc8bcd45e386c2a29744df8991659` |
 

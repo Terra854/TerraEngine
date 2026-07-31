@@ -39,11 +39,15 @@ namespace TerraEngine::Resource
 			merged.expectedStoredByteCount = std::max(merged.expectedStoredByteCount, value.expectedStoredByteCount);
 			merged.expectedDecodedByteCount = std::max(merged.expectedDecodedByteCount, value.expectedDecodedByteCount);
 			merged.expectedIntegrityValue = std::max(merged.expectedIntegrityValue, value.expectedIntegrityValue);
-			if (!merged.staticPageRead.has_value() && value.staticPageRead.has_value())
+			// A complete ordered block list is indivisible. Mixing blocks from two
+			// feedback copies could combine descriptors from different cooked pages,
+			// so deterministic coalescing keeps the first complete value-only list.
+			if (merged.exactBlockReads.empty() && !value.exactBlockReads.empty())
 			{
-				merged.staticPageRead = value.staticPageRead;
+				merged.exactBlockReads = value.exactBlockReads;
+				merged.quantizationDomains = value.quantizationDomains;
+				merged.availableDecoderCapabilities = value.availableDecoderCapabilities;
 			}
-			merged.rawPayloadIsDecoded = merged.rawPayloadIsDecoded || value.rawPayloadIsDecoded;
 			merged.dependencyPageIds.insert(
 				merged.dependencyPageIds.end(), value.dependencyPageIds.begin(), value.dependencyPageIds.end());
 			normalizeDependencies(merged);
@@ -90,9 +94,9 @@ namespace TerraEngine::Resource
 				fallback.visible = true;
 				// A root request's byte range cannot be reused for another physical
 				// page. Its own catalog entry must supply any exact-range source.
-				fallback.staticPageRead.reset();
-				fallback.rawPayloadIsDecoded = false;
-				fallback.staticPageReadDiagnostic =
+				fallback.exactBlockReads.clear();
+				fallback.quantizationDomains.clear();
+				fallback.canonicalPageReadDiagnostic =
 					"Dependency expansion requires an independently resolved compact range for the fallback page.";
 				if (mergeFeedback(std::move(fallback)))
 				{
@@ -104,9 +108,9 @@ namespace TerraEngine::Resource
 				VirtualGeometryStreamingFeedback dependency = value;
 				dependency.pageId = dependencyPageId;
 				dependency.dependencyPageIds.clear();
-				dependency.staticPageRead.reset();
-				dependency.rawPayloadIsDecoded = false;
-				dependency.staticPageReadDiagnostic =
+				dependency.exactBlockReads.clear();
+				dependency.quantizationDomains.clear();
+				dependency.canonicalPageReadDiagnostic =
 					"Dependency expansion requires an independently resolved compact range for this dependency page.";
 				if (mergeFeedback(std::move(dependency)))
 				{

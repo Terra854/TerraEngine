@@ -1,6 +1,6 @@
 // AnimationControllerAsset.h - Bounded authored controller graph document.
 //
-// This is durable authoring data only. T065 later compiles it into immutable
+// This is durable authoring data only. ImplementationCheck later compiles it into immutable
 // evaluation opcodes, so these records deliberately contain stable IDs and no
 // runtime pointers, cursors, or editor-owned allocations.
 
@@ -122,7 +122,7 @@ namespace TerraEngine::Animation {
 		std::uint64_t stableId = 0U;
 		std::string name;
 		std::uint64_t leaderStateId = 0U;
-		// Marker names remain author-friendly, while event and state IDs let T070
+		// Marker names remain author-friendly, while event and state IDs let ImplementationCheck
 		// resolve phase without changing the frozen AnimationClip v1 format.
 		std::vector<AnimationControllerSyncMarker> markers;
 		auto operator<=>(const AnimationControllerSyncGroup&) const = default;

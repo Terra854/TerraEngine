@@ -1,10 +1,10 @@
 {
 	"schemaVersion": 1,
-	"feature": "043-optimize-engine-performance",
+	"feature": "physics-performance-baseline",
 	"capturedAt": "2026-07-15T04:07:18.0746791+08:00",
 	"sourceEvidence": {
 		"installedSummary": "out/validation/installed-editor-physics-stress/evidence/summary.json",
-		"specification": "specs/043-optimize-engine-performance/spec.md"
+		"specification": "Docs/Physics.md"
 	},
 	"build": {
 		"configuration": "RelWithDebInfo",

@@ -176,4 +176,4 @@ Focused playback cases are registered under `Animation.Sampling`,
 `Animation.Blend`, `Animation.Event`, `Animation.Snapshot`,
 `Animation.RootMotion`, `Animation.Playback`, `Animation.CpuDeterminism`, and
 `Animation.RenderFallback`. Intermediate gates run correctness and deterministic
-stress only; all measured performance execution remains in Spec 043 Phase 18.
+stress only; all measured performance execution remains in animation production validation implementation stage.

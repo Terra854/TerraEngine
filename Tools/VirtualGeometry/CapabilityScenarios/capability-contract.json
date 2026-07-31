@@ -1,7 +1,6 @@
 {
 	"schemaVersion": 2,
-	"phase": 0,
-	"id": "phase-0",
+	"id": "capability-contract",
 	"title": "Capability truth and immutable baseline",
 	"requiredTools": [],
 	"operations": [],

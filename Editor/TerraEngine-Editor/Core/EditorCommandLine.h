@@ -11,7 +11,7 @@
 struct EditorCommandLineOptions
 {
 	std::optional<std::filesystem::path> startupProjectPath;
-	// Present only for the installed US7 acceptance command. Normal editor
+	// Present only for the installed CapabilityValidation acceptance command. Normal editor
 	// launches never generate or overwrite invariant evidence.
 	std::optional<std::filesystem::path> physicsInvariantOutputPath;
 };

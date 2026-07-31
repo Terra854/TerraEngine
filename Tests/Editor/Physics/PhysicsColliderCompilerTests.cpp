@@ -1,4 +1,4 @@
-// T051 regression coverage for the provider-neutral, headless collider cook.
+// ImplementationCheck regression coverage for the provider-neutral, headless collider cook.
 // These tests exercise the real staged-file publication boundary without
 // launching the editor or requiring a provider-specific physics world.
 #include "../TestHarness.h"

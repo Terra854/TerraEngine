@@ -324,11 +324,14 @@ namespace {
 				snapshot.frameId,
 				VirtualGeometryDebugVisualizationMode::Residency);
 			snapshot.virtualGeometryViewSelections.push_back(state);
+			TerraEngine::Renderer::GeometryRouteDecision routeDecision;
+			routeDecision.selected = TerraEngine::Renderer::GeometryRoute::VirtualGeometryHardware;
+			snapshot.geometryRouteDecisions.push_back(routeDecision);
 
 			const std::vector<TerraEngine::Renderer::Vulkan::VirtualGeometryPagePayloadUploadRecord> records =
 				TerraEngine::Renderer::Vulkan::BuildVirtualGeometryPagePayloadUploadPlan(snapshot, RenderViewType::Game, state.outputId);
 
-			context.ExpectEqual(static_cast<std::size_t>(1u), records.size(), "One page-local packet should produce one Vulkan payload upload record.");
+			context.ExpectEqual(static_cast<std::size_t>(1u), records.size(), "A selected virtual-geometry route should publish its complete fallback-page binding.");
 			context.Expect(records.front().accepted, "Resident fallback page payloads should be accepted by upload planning.");
 			context.Expect(records.front().payloadSource == VirtualGeometryPagePayloadSource::ResidentFallbackPayload, "Upload planning should preserve fallback page payload source labels.");
 			context.Expect(records.front().emittedSource == VirtualGeometryEmittedPageSource::FallbackPage, "Upload planning should preserve emitted fallback source labels.");
@@ -354,11 +357,14 @@ namespace {
 				snapshot.frameId,
 				VirtualGeometryDebugVisualizationMode::Residency);
 			snapshot.virtualGeometryViewSelections.push_back(state);
+			TerraEngine::Renderer::GeometryRouteDecision routeDecision;
+			routeDecision.selected = TerraEngine::Renderer::GeometryRoute::VirtualGeometryHardware;
+			snapshot.geometryRouteDecisions.push_back(routeDecision);
 
 			const std::vector<TerraEngine::Renderer::Vulkan::VirtualGeometryPagePayloadUploadRecord> records =
 				TerraEngine::Renderer::Vulkan::BuildVirtualGeometryPagePayloadUploadPlan(snapshot, RenderViewType::Game, state.outputId);
 
-			context.ExpectEqual(static_cast<std::size_t>(1u), records.size(), "Incomplete resident page metadata should still produce one diagnostic upload record.");
+			context.ExpectEqual(static_cast<std::size_t>(1u), records.size(), "The upload plan should retain one rejected diagnostic row for an incomplete physical binding.");
 			context.Expect(!records.front().accepted, "Resident page uploads must be rejected until a physical page descriptor binding exists.");
 			context.Expect(records.front().reason.find("physical descriptor binding") != std::string::npos, "Rejected resident page uploads should explain the missing physical binding.");
 		});

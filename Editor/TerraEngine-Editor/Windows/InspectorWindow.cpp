@@ -14,6 +14,7 @@
 #include "Engine/Core/Object/Component.h"
 #include "Engine/Components/PrefabLinkComponent.h"
 #include "Engine/Resource/ResourceManager.h"
+#include "Engine/Resource/VirtualGeometryCodec.h"
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Scene/SceneManager.h"
 #include "Engine/Scene/SceneMutationQueue.h"
@@ -61,6 +62,7 @@
 #include <sstream>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 using ReflectionProperty = TerraEngine::Reflection::Property;
 using ReflectionType = TerraEngine::Reflection::Type;
@@ -68,6 +70,40 @@ using ReflectionVariant = TerraEngine::Reflection::Variant;
 
 namespace
 {
+struct TemfInspectorSummary
+{
+	TemfProductionHeader header{};
+	std::uint32_t blockCount = 0u;
+	std::string error;
+};
+
+// Inspector summaries are produced only after the complete immutable file has
+// passed the same bounded validator used by the runtime loader.
+std::optional<TemfInspectorSummary> ReadTemfInspectorSummary(const std::filesystem::path& path)
+{
+	std::ifstream input(path, std::ios::binary);
+	if (!input)
+	{
+		return std::nullopt;
+	}
+	input.seekg(0, std::ios::end);
+	const std::streamoff size = input.tellg();
+	input.seekg(0, std::ios::beg);
+	if (size <= 0)
+	{
+		return std::nullopt;
+	}
+	std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
+	input.read(reinterpret_cast<char*>(bytes.data()), size);
+	const auto validated = TerraEngine::Resource::ValidateTemfProductionFile(bytes, {});
+	if (!input || !validated.IsComplete())
+	{
+		return std::nullopt;
+	}
+	return TemfInspectorSummary{ validated.directory.header,
+		static_cast<std::uint32_t>(validated.directory.blocks.size()), {} };
+}
+
 TerraEngine::UUID GetObjectUuid(entt::entity entity)
 {
 	if (std::optional<Object> object = ObjectManager::instance().getObject(entity))
@@ -5238,21 +5274,16 @@ void InspectorWindow::DrawModelPackageChildInspector(const std::filesystem::path
 		});
 
 		const std::filesystem::path compiledPath = AssetDatabase::Instance().GetBuildRoot() / mesh.compiledPath;
-		MeshHeader header{};
-		std::ifstream input(compiledPath, std::ios::binary);
-		if (input.is_open()) {
-			input.read(reinterpret_cast<char*>(&header), sizeof(header));
-		}
-
-		if (std::memcmp(header.magic, "TEMF", 4) == 0) {
+		const std::optional<TemfInspectorSummary> summary = ReadTemfInspectorSummary(compiledPath);
+		if (summary) {
 			ImGui::Spacing();
-			ImGui::Text("Compiled Info (.temf - meshlet only)");
+			ImGui::Text("Compiled Info (.temf - canonical production blocks)");
 			drawCommonTable("GeneratedMeshCompiledSummary", [&]() {
-				drawRowU32("Version", static_cast<std::uint32_t>(header.version));
-				drawRowU32("Meshlets", header.meshletCount);
-				drawRowU32("Meshlet Vertices", header.meshletVertexCount);
-				drawRowU32("Meshlet Sections", header.meshletSectionCount);
-				drawRowU32("Meshlet Bounds", header.meshletBoundsCount);
+				drawRowU32("Version", static_cast<std::uint32_t>(summary->header.formatVersion));
+				drawRowU32("Production Blocks", summary->blockCount);
+				drawRowU32("Virtual Pages", summary->header.pageCount);
+				drawRowU32("Quantization Domains", summary->header.quantizationDomainCount);
+				drawRowU32("Dependencies", summary->header.dependencyCount);
 			});
 		}
 		else {
@@ -6016,24 +6047,10 @@ void InspectorWindow::DrawMeshInspector(const std::filesystem::path& path) {
 		return;
 	}
 
-	MeshHeader header{};
-	std::ifstream in(fullCompiledPath, std::ios::binary);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (in.is_open()) {
-		in.read((char*)&header, sizeof(MeshHeader));
-	}
-
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (memcmp(header.magic, "TEMF", 4) != 0) {
-		ImGui::TextColored(ImVec4(1, 0, 0, 1), "Invalid TEMF header in compiled mesh!");
+	const std::optional<TemfInspectorSummary> production = ReadTemfInspectorSummary(fullCompiledPath);
+	if (!production) {
+		ImGui::TextColored(ImVec4(1, 0, 0, 1), "Compiled mesh requires a canonical TEMFPRD1 recook.");
 		return;
-	}
-
-	// Direct replacement format requires an exact version match and full rebuild.
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (header.version != kMeshCurrentVersion) {
-		ImGui::TextColored(ImVec4(1, 0.7f, 0, 1), "Unsupported TEMF version %u.", (uint32_t)header.version);
-		ImGui::TextWrapped("This build accepts only direct-replacement TEMF version %u. Recompile all mesh assets.", (uint32_t)kMeshCurrentVersion);
 	}
 
 	auto drawInfoRow = [](const char* label, std::string_view value) {
@@ -6048,30 +6065,20 @@ void InspectorWindow::DrawMeshInspector(const std::filesystem::path& path) {
 		drawInfoRow(label, std::to_string(value).c_str());
 	};
 
-	ImGui::Text("Compiled Info (.temf - meshlet only)");
+	ImGui::Text("Compiled Info (.temf - canonical production blocks)");
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::BeginTable("MeshInfoTable", 2, ImGuiTableFlags_SizingStretchProp)) {
 		ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 180.0f);
 		ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
 
-		drawInfoRowU32("Version", (uint32_t)header.version);
-		drawInfoRowU32("Meshlet Vertices", header.meshletVertexCount);
-		drawInfoRowU32("Meshlet Vertex Remap Entries", header.meshletVertexRemapCount);
-		
-		const char* remapEncodingLabel = "invalid";
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (static_cast<MeshletRemapEncoding>(header.meshletVertexRemapEncoding) == MeshletRemapEncoding::Uint16) remapEncodingLabel = "u16";
-		else if (static_cast<MeshletRemapEncoding>(header.meshletVertexRemapEncoding) == MeshletRemapEncoding::Uint32) remapEncodingLabel = "u32";
-		drawInfoRow("Remap Encoding", remapEncodingLabel);
-
-		drawInfoRowU32("Meshlet Primitive Indices", header.meshletPrimitiveIndexCount);
-		drawInfoRowU32("Meshlets", header.meshletCount);
-		drawInfoRowU32("Meshlet Sections", header.meshletSectionCount);
-		drawInfoRowU32("Meshlet Bounds", header.meshletBoundsCount);
-		
+		drawInfoRowU32("Version", (uint32_t)production->header.formatVersion);
+		drawInfoRowU32("Production Blocks", production->blockCount);
+		drawInfoRowU32("Virtual Pages", production->header.pageCount);
+		drawInfoRowU32("Quantization Domains", production->header.quantizationDomainCount);
+		drawInfoRowU32("Dependencies", production->header.dependencyCount);
 		char flagsBuf[16];
-		snprintf(flagsBuf, sizeof(flagsBuf), "0x%08X", header.meshletFlags);
-		drawInfoRow("Meshlet Flags", flagsBuf);
+		snprintf(flagsBuf, sizeof(flagsBuf), "0x%08X", production->header.representationFlags);
+		drawInfoRow("Representation Flags", flagsBuf);
 
 		ImGui::EndTable();
 	}
@@ -6197,13 +6204,13 @@ void InspectorWindow::DrawMeshInspector(const std::filesystem::path& path) {
 			ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 180.0f);
 			ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
 
-			drawInfoRowU32("Header Size", header.headerSize);
-			drawInfoRowU32("Vertex Payload Offset", header.meshletVertexDataOffset);
-			drawInfoRowU32("Vertex Remap Payload Offset", header.meshletVertexRemapDataOffset);
-			drawInfoRowU32("Primitive Index Payload Offset", header.meshletPrimitiveIndexDataOffset);
-			drawInfoRowU32("Meshlet Table Offset", header.meshletTableOffset);
-			drawInfoRowU32("Meshlet Section Offset", header.meshletSectionOffset);
-			drawInfoRowU32("Meshlet Bounds Offset", header.meshletBoundsOffset);
+			drawInfoRowU32("Header Bytes", production->header.headerBytes);
+			drawInfoRowU32("Directory Bytes", static_cast<uint32_t>(production->header.directoryBytes));
+			drawInfoRowU32("Payload Offset", static_cast<uint32_t>(production->header.payloadOffset));
+			drawInfoRowU32("Payload Bytes", static_cast<uint32_t>(production->header.payloadBytes));
+			drawInfoRowU32("Page Table Offset", static_cast<uint32_t>(production->header.pageTableOffset));
+			drawInfoRowU32("Block Table Offset", static_cast<uint32_t>(production->header.blockTableOffset));
+			drawInfoRowU32("Quantization Table Offset", static_cast<uint32_t>(production->header.quantizationTableOffset));
 
 			ImGui::EndTable();
 		}
@@ -6215,15 +6222,10 @@ void InspectorWindow::DrawMeshInspector(const std::filesystem::path& path) {
 			ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 180.0f);
 			ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
 
-			char buf[64];
-			snprintf(buf, sizeof(buf), "%.3f, %.3f, %.3f", header.quantization.positionOffset[0], header.quantization.positionOffset[1], header.quantization.positionOffset[2]);
-			drawInfoRow("Center", buf);
-			snprintf(buf, sizeof(buf), "%.3f, %.3f, %.3f", header.quantization.positionScale[0], header.quantization.positionScale[1], header.quantization.positionScale[2]);
-			drawInfoRow("Extent", buf);
-			snprintf(buf, sizeof(buf), "%.3f, %.3f", header.quantization.uvOffset[0], header.quantization.uvOffset[1]);
-			drawInfoRow("UV Min", buf);
-			snprintf(buf, sizeof(buf), "%.3f, %.3f", header.quantization.uvScale[0], header.quantization.uvScale[1]);
-			drawInfoRow("UV Scale", buf);
+			drawInfoRowU32("Quantization Domains", production->header.quantizationDomainCount);
+			drawInfoRowU32("Selected Quantization Profile", production->header.selectedQuantizationProfileId);
+			drawInfoRowU32("Logical Page Size", production->header.logicalPageSizeBytes);
+			drawInfoRow("Format Contract", "TEMFPRD1");
 
 			ImGui::EndTable();
 		}

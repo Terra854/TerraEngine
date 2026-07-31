@@ -1,7 +1,7 @@
 # Advanced runtime actor overlays
 
 These four loose prefabs are deterministic, mesh-free runtime control fixtures for
-the Spec 043 retargeting, motion-matching, and ragdoll installed-editor gates.
+the animation production validation retargeting, motion-matching, and ragdoll installed-editor gates.
 They use the production prefab document shape and the exact authored
 `AnimatorComponent` schema-v1 fields emitted by the model package importer and
 scene serializer. Runtime instance handles, effective modes, asset generations,

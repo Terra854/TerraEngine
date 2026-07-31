@@ -3,9 +3,11 @@
 #include "File Formats/TerraEngineMeshFile.h"
 #include "Renderer/Graph/RenderDiagnostics.h"
 #include "Renderer/RenderSystem.h"
+#include "Renderer/VirtualGeometry/Geometry/VirtualGeometryPackedVertex.h"
 #include "Resource/ResourceManager.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -162,6 +164,53 @@ namespace
 
 	void RegisterVirtualGeometryQualityTests(TestRegistry& registry)
 	{
+		registry.Add("VirtualGeometry.Quality.QuantizationProfilesDeclareConservativeError", [](TestContext& context) {
+			// Quantization remains editor-owned until the cooked production record is
+			// integrated. Keep this engine-side contract check source-level so the
+			// runtime does not take an editor compiler dependency.
+			const std::filesystem::path path =
+				std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Editor/AssetCompilers/VirtualGeometryQuantization.cpp";
+			std::ifstream file(path);
+			const std::string source{ std::istreambuf_iterator<char>(file), {} };
+			context.Expect(source.find("kCinematicProfile") != std::string::npos, "Cook-time quantization must declare the Cinematic profile.");
+			context.Expect(source.find("kBalancedProfile") != std::string::npos, "Cook-time quantization must declare the Balanced profile.");
+			context.Expect(source.find("kMemoryProfile") != std::string::npos, "Cook-time quantization must declare the Memory profile.");
+			context.Expect(source.find("half-step position-error limit") != std::string::npos,
+				"Cook-time diagnostics must identify when a selected profile cannot meet its half-step error contract.");
+		});
+
+		registry.Add("VirtualGeometry.Quality.PackedPositionUsesProfiledSixteenBitContainer", [](TestContext& context) {
+			const std::array<float, 3u> position{ -0.75f, 0.125f, 0.9f };
+			const VirtualGeometryPackedVertex cinematic = PackVirtualGeometryVertex(
+				position, { 0.0f, 0.0f, 1.0f }, { 1.0f, 0.0f, 0.0f }, -1.0f,
+				{ 0.25f, 0.75f }, 16u, 12u, 10u, 16u);
+			const VirtualGeometryPackedVertex memory = PackVirtualGeometryVertex(
+				position, { 0.0f, 0.0f, 1.0f }, { 1.0f, 0.0f, 0.0f }, -1.0f,
+				{ 0.25f, 0.75f }, 12u, 8u, 8u, 12u);
+			const std::array<float, 3u> decodedCinematic =
+				DecodeVirtualGeometryPackedPosition(cinematic);
+			const std::array<float, 3u> decodedMemory =
+				DecodeVirtualGeometryPackedPosition(memory);
+			float cinematicError = 0.0f;
+			float memoryError = 0.0f;
+			for (std::size_t axis = 0u; axis < position.size(); ++axis)
+			{
+				cinematicError = std::max(cinematicError,
+					std::abs(position[axis] - decodedCinematic[axis]));
+				memoryError = std::max(memoryError,
+					std::abs(position[axis] - decodedMemory[axis]));
+			}
+
+			context.Expect(sizeof(cinematic) == kMeshletPackedVertexStrideBytes,
+				"The higher-precision production vertex must preserve the four-word Vulkan stride.");
+			context.Expect(cinematicError <= (1.0f / 65535.0f) + 1.0e-6f,
+				"The Cinematic position lattice should reconstruct within one 16-bit normalized step.");
+			context.Expect(memoryError + 1.0e-7f >= cinematicError,
+				"A lower-memory source lattice must not appear more precise than the Cinematic lattice.");
+			context.Expect(cinematic.words != memory.words,
+				"Changing the named bit budget must change the stored vertex identity.");
+		});
+
 		registry.Add("VirtualGeometry.Quality.DefaultsRetainLegacyHiZMetadata", [](TestContext& context) {
 			// Hi-Z is now resource-gated by the renderer. These fields remain so
 			// older project settings can round-trip without reintroducing a

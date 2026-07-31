@@ -72,12 +72,12 @@ namespace TerraEngine::Tests
 						!= std::string::npos,
 					"Animated benchmark acceptance must bind requested crowds to published owner, work-packet, and deformation evidence.");
 			});
-		registry.Add("AnimatedVirtualGeometry.Performance.Phase7RequiresIndependentEvidence",
+		registry.Add("AnimatedVirtualGeometry.Performance.RequiresIndependentEvidence",
 			[](TestContext &context)
 			{
 				// Full-reference and million-decision correctness are independent
 				// gates. The wrapper must retain both rather than promoting timing
-				// evidence alone into a complete Phase 7 result.
+				// evidence alone into a complete ImplementationStage result.
 				const auto path = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
 					/ "Tools/VirtualGeometry/RunAnimatedVirtualGeometryBenchmark.ps1";
 				std::ifstream input(path, std::ios::binary);
@@ -86,8 +86,8 @@ namespace TerraEngine::Tests
 					std::istreambuf_iterator<char>()};
 				context.Expect(source.find("FullReferenceEvidence") != std::string::npos
 					&& source.find("MillionDecisionEvidence") != std::string::npos
-					&& source.find("phase7Prerequisites") != std::string::npos,
-					"Phase 7 wrapper must require and publish its full-reference and million-decision prerequisites.");
+					&& source.find("animatedGeometryPrerequisites") != std::string::npos,
+					"Animated evidence output must retain independent full-reference and million-decision prerequisites.");
 			});
 	}
 } // namespace TerraEngine::Tests

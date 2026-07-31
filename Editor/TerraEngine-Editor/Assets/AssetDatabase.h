@@ -38,9 +38,7 @@ struct VirtualGeometryAssetMetadata {
 	bool readable = false;
 	bool hasVirtualGeometry = false;
 	bool needsRebuild = false;
-	// Aggregate profiles are separately versioned from TEMF/VGXD. These fields
-	// let the Inspector request a targeted mesh recook instead of treating an
-	// older otherwise-renderable asset as globally broken.
+	// Canonical production validation records the recook state for Inspector.
 	bool aggregateProfileCurrent = false;
 	bool aggregateProfileRepairRequired = false;
 	std::string aggregateProfileDiagnostic;

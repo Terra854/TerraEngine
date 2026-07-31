@@ -41,4 +41,20 @@ namespace TerraEngine::Editor
 	// the parent. An empty list is incomplete rather than silently error-free.
 	[[nodiscard]] VirtualGeometryCoverageProof BuildVirtualGeometryCoverageProof(
 		float objectError, const std::vector<float> &descendantErrors, float projectionScale, float distance);
+
+	struct VirtualGeometryAccumulatedDetailError
+	{
+		float localError = 0.0f;
+		float quantizationHalfStepError = 0.0f;
+		float accumulatedError = 0.0f;
+		bool monotonic = false;
+
+		[[nodiscard]] bool Valid() const noexcept;
+	};
+
+	// A parent may never advertise less error than any retained child or the
+	// local quantization lattice. Taking the maximum creates a monotonic error
+	// chain that remains conservative when detail is accumulated bottom-up.
+	[[nodiscard]] VirtualGeometryAccumulatedDetailError BuildVirtualGeometryAccumulatedDetailError(
+		float localError, float quantizationHalfStepError, const std::vector<float> &childAccumulatedErrors);
 } // namespace TerraEngine::Editor

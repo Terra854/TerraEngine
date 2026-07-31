@@ -1,8 +1,7 @@
 {
 	"schemaVersion": 2,
-	"phase": 9,
-	"id": "phase-9",
-	"title": "Production migration, package, install, benchmark, and quickstart",
+	"id": "production-readiness",
+	"title": "Production rebuild, package, install, benchmark, and quickstart",
 	"requiredTools": ["asset.virtualGeometry.inspect", "asset.virtualGeometry.rebuild", "script.compile", "jobs.cancel", "diagnostics.get_summary", "game_view.capture"],
 	"operations": [
 		{"id": "inspect-before", "tool": "asset.virtualGeometry.inspect", "evidence": "editor/inspect-before.json"},
@@ -13,15 +12,15 @@
 		{"id": "inspect-after", "tool": "asset.virtualGeometry.inspect", "evidence": "editor/inspect-after.json"}
 	],
 	"captures": [
-		{"id": "post-migration", "tool": "game_view.capture", "evidence": "images/post-migration.png"}
+		{"id": "post-rebuild", "tool": "game_view.capture", "evidence": "images/post-rebuild.png"}
 	],
 	"requiredArtifacts": [
 		{"path": "editor/inspect-before.json", "kind": "editor-envelope"},
 		{"path": "editor/rebuild.json", "kind": "editor-envelope"},
 		{"path": "editor/diagnostics.json", "kind": "editor-envelope"},
 		{"path": "editor/inspect-after.json", "kind": "editor-envelope"},
-		{"path": "images/post-migration.png", "kind": "png"}
+		{"path": "images/post-rebuild.png", "kind": "png"}
 	],
-	"releaseGates": ["production-editor-tests", "benchmark-baseline", "benchmark-candidate", "benchmark-comparison", "migration", "install", "package", "installed-package-inventory", "quickstart"],
+	"releaseGates": ["production-editor-tests", "benchmark-baseline", "benchmark-candidate", "benchmark-comparison", "install", "package", "installed-package-inventory", "quickstart"],
 	"unavailablePolicy": "fail-closed"
 }

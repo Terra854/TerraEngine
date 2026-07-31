@@ -3672,20 +3672,20 @@ namespace TerraEngine::Editor::Automation
 					// animation binding did or did not produce virtual-page work.
 					// They never expose page bytes or mutable backend handles.
 					{"meshLoaded", runtimeMesh != nullptr},
-					{"animatedPageDirectoryAvailable",
+					{"deformableDemandedPagesAvailable",
 						runtimeMesh != nullptr
-							&& runtimeMesh->hasAnimatedVirtualPageDirectory},
-					{"animatedPageEntryCount",
+							&& runtimeMesh->hasDeformableDemandedPages},
+					{"deformableDemandedPageEntryCount",
 						runtimeMesh != nullptr
-							? runtimeMesh->animatedVirtualPageEntries.size()
+							? runtimeMesh->deformableDemandedPageEntries.size()
 							: 0U},
-					{"animatedPageSectionSetCount",
+					{"deformableDemandedPageSectionSetCount",
 						runtimeMesh != nullptr
-							? runtimeMesh->animatedVirtualPageSections.size()
+							? runtimeMesh->deformableDemandedPageSections.size()
 							: 0U},
-					{"animatedPageDirectoryDiagnostic",
+					{"deformableDemandedPageDiagnostic",
 						runtimeMesh != nullptr
-							? runtimeMesh->animatedVirtualPageDirectoryDiagnostic
+							? "Canonical TEMF demanded pages are validated."
 							: "Mesh is not loaded."}
 				});
 			}
@@ -8333,17 +8333,18 @@ namespace TerraEngine::Editor::Automation
 			streamingPlan.requests)
 		{
 			// Exact-range ownership is the decisive live-streaming handoff. Expose
-			// value-only identifiers and range facts so automation can distinguish
-			// missing mesh metadata from worker IO/decode failures.
+			// the ordered block count too, so automation can distinguish a valid
+			// multi-block page from a missing mesh-metadata handoff.
 			streamingRequests.push_back({
 				{"assetId", TerraEngine::ToHexString(streamingRequest.assetId)},
 				{"pageId", streamingRequest.pageId},
 				{"fallbackPageId", streamingRequest.fallbackPageId},
 				{"clusterId", streamingRequest.clusterId},
-				{"hasExactStaticPageRead", streamingRequest.staticPageRead.has_value()},
+				{"hasExactBlockReads", !streamingRequest.exactBlockReads.empty()},
+				{"exactBlockCount", streamingRequest.exactBlockReads.size()},
 				{"expectedStoredBytes", streamingRequest.expectedStoredByteCount},
 				{"expectedDecodedBytes", streamingRequest.expectedDecodedByteCount},
-				{"staticPageReadDiagnostic", streamingRequest.staticPageReadDiagnostic}
+				{"canonicalPageReadDiagnostic", streamingRequest.canonicalPageReadDiagnostic}
 			});
 		}
 		const nlohmann::json streaming = {
@@ -8407,6 +8408,20 @@ namespace TerraEngine::Editor::Automation
 			{"gpuFallbackAffectedPackets", stats.virtualGeometryGpuFallbackAffectedPackets},
 			{"gpuFallbackAffectedBatches", stats.virtualGeometryGpuFallbackAffectedBatches},
 			{"gpuFallbackReason", stats.virtualGeometryGpuFallbackReason},
+			// Route decisions are immutable frame diagnostics. Publishing them here
+			// lets installed automation prove that a low-poly capture used the
+			// conventional direct path and suppressed every VG-only workload.
+			{"geometryRoute", stats.geometryRoute},
+			{"geometryRouteSource", stats.geometryRouteSource},
+			{"geometryRoutePolicyIdentity", stats.geometryRoutePolicyIdentity},
+			{"geometryRouteCalibrationIdentity", stats.geometryRouteCalibrationIdentity},
+			{"geometryRouteHysteresisFrames", stats.geometryRouteHysteresisFrames},
+			{"geometryRouteDirectBatchCount", stats.geometryRouteDirectBatchCount},
+			{"geometryRouteSharedInstanceCount", stats.geometryRouteSharedInstanceCount},
+			{"geometryRouteSuppressedPageRequests", stats.geometryRouteSuppressedPageRequests},
+			{"geometryRouteSuppressedDecodeBlocks", stats.geometryRouteSuppressedDecodeBlocks},
+			{"geometryRouteSuppressedResidencyRecords", stats.geometryRouteSuppressedResidencyRecords},
+			{"geometryRouteFallbackReason", stats.geometryRouteFallbackReason},
 			{"performanceGateCount", stats.virtualGeometryPerformanceGateCount},
 			{"performanceGateFailures", stats.virtualGeometryPerformanceGateFailures},
 			{"performanceGateUnsupported", stats.virtualGeometryPerformanceGateUnsupported},

@@ -23,9 +23,9 @@ $script:RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "../..
 $script:OutRoot = [System.IO.Path]::GetFullPath((Join-Path $script:RepoRoot "out"))
 $script:BaselineRoot = [System.IO.Path]::GetFullPath((Join-Path $script:RepoRoot "out/validation/animation/baseline"))
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-$script:ExpectedManifestSha256 = "c5652867707f46b2db388a3fc27af14c71db6b13a431dc64a52d6584f555a891"
-$script:ExpectedRuntimeContractSha256 = "1bb8bb3d0affa53d146b717171a7b23d72437af88449c273e8cb1a2fe4869279"
-$script:ExpectedPerformanceWorkloadsSha256 = "dd297ef96f629b290be03bce64dec19612726cd5931e886fb722d80970d49dba"
+$script:ExpectedManifestSha256 = "40e3a8b7eb447ad3e3029a81cbc7383b15f92045c4f04ec69f13a35e3c44296a"
+$script:ExpectedRuntimeContractSha256 = "a2dd5eee95aa1590a927094006d120d2d67f39d2166605f27902dde85dc3566a"
+$script:ExpectedPerformanceWorkloadsSha256 = "d99199c796368fa7706af363985ce3e0b75a71fa5fa2c29238bce65343e943a6"
 
 function Resolve-RepoPath {
 	param([Parameter(Mandatory = $true)][string]$Path)

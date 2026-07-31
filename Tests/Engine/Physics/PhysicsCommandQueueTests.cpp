@@ -2,7 +2,7 @@
 //
 // These tests describe the queue contract before the production queue exists.
 // They intentionally include the future engine-owned header so a clean build
-// fails until T021 supplies the typed command envelope and queue.
+// fails until ImplementationCheck supplies the typed command envelope and queue.
 
 #include "../TestHarness.h"
 

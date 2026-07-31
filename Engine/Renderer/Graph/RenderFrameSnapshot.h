@@ -8,6 +8,7 @@
 
 #include "Renderer/Deformation/GpuDeformationPlan.h"
 #include "Renderer/RenderTypes.h"
+#include "Renderer/VirtualGeometry/Selection/GeometryRoutePolicy.h"
 #include "Utilities/UUID.h"
 #include "Core/Export.h"
 
@@ -181,6 +182,10 @@ namespace TerraEngine::Renderer {
 		bool usingFallback = false;
 		AnimationRenderGenerationRecord animation;
 		RenderInvalidationGenerationRecord invalidation;
+		// Route input and the resulting decision are copied with the renderable so
+		// worker stages never re-query a live mesh, material, or device object.
+		GeometryRouteInputSummary geometryRouteInput;
+		GeometryRouteDecision geometryRouteDecision;
 	};
 
 	struct VirtualGeometryViewDrawRecord
@@ -321,6 +326,11 @@ namespace TerraEngine::Renderer {
 		std::vector<RenderFrameResourceRecord> textures;
 		std::vector<VirtualGeometryViewSelectionState> virtualGeometryViewSelections;
 		std::vector<VirtualGeometryViewVisibilitySnapshot> virtualGeometryVisibilitySnapshots;
+		// A frame owns one deterministic decision per renderable and batches direct
+		// instances by shared packed geometry. These records are intentionally
+		// independent of a camera so Scene, shadow, capture, and picking agree.
+		std::vector<GeometryRouteDecision> geometryRouteDecisions;
+		std::vector<DirectMeshletBatch> directMeshletBatches;
 		// Every view contributes page demands here. Worker preparation sorts and
 		// deduplicates them into one renderer-owned deformation plan.
 		std::vector<DeformationPageDemand> animatedGeometryPageDemands;

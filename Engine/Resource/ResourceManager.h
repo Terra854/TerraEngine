@@ -400,8 +400,8 @@ public:
 	// Diagnostics and lifecycle tests use this bounded count to prove that
 	// publisher retirement reclaims real cache ownership, not only metadata.
 	[[nodiscard]] std::size_t GetRetiredAnimationPayloadCountForDiagnostics() const;
-	// This explicit deformable entry point requires the appended TDEF payload.
-	// LoadMesh remains backward compatible with static TEMF v1 assets.
+	// This explicit entry point requires a complete canonical deformable
+	// descriptor set. LoadMesh accepts canonical static TEMF v1 assets.
 	TerraEngine::UUID LoadDeformableMesh(
 		const std::filesystem::path& path,
 		std::uint32_t expectedSkeletonJointCount = 0U,

@@ -32,7 +32,7 @@ namespace TerraEngine::Tests {
 			context.Expect(ComponentAccessRegistry().contains("RigidBodyComponent"), "Rigid body must self-register.");
 			context.Expect(ComponentAccessRegistry().contains("ColliderSetComponent"), "Collider set must self-register.");
 #else
-			context.Expect(false, "Physics component headers are not available yet (T033/T034 contract pending).");
+			context.Expect(false, "Physics component headers are not available yet (ImplementationCheck/ImplementationCheck contract pending).");
 #endif
 		});
 
@@ -55,7 +55,7 @@ namespace TerraEngine::Tests {
 			context.Expect(colliders.colliders[0].recordId != colliders.colliders[1].recordId,
 				"Each repeated collider receives an independent stable record identity.");
 #else
-			context.Expect(false, "Physics component headers are not available yet (T033/T034 contract pending).");
+			context.Expect(false, "Physics component headers are not available yet (ImplementationCheck/ImplementationCheck contract pending).");
 #endif
 		});
 	}

@@ -1,10 +1,10 @@
 {
 	"schemaVersion": 1,
-	"feature": "029-virtual-geometry-hardening",
+	"system": "virtual-geometry-hardening",
 	"description": "Clean-checkout virtual geometry hardening and scaling fixture manifest. Entries use deterministic generated data or small committed fixtures; large meshes stay optional manual stress coverage.",
-	"scalingFeature": "030-vg-gpu-driven-batching",
-	"gpuCompactionFeature": "031-vg-gpu-compaction",
-	"truePageResidencyFeature": "034-vg-true-page-residency",
+	"scalingContract": "gpu-driven-batching",
+	"gpuCompactionContract": "gpu-packet-compaction",
+	"pageResidencyContract": "true-page-residency",
 	"packageFormats": [
 		"gltf",
 		"glb",

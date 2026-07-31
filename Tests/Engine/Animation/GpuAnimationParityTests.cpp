@@ -1,6 +1,6 @@
 // GpuAnimationParityTests.cpp - CPU reference versus GPU shader-contract parity.
 //
-// These tests intentionally do not launch Vulkan. T084-T088 own the dedicated
+// These tests intentionally do not launch Vulkan. ImplementationCheck-ImplementationCheck own the dedicated
 // HLSL stage files and later live-backend coverage will feed their readback
 // records through this same comparison contract. Until then, the small CPU
 // emulation below verifies the cooked-data, fixed ABI, tolerance, and safe-output
@@ -162,7 +162,7 @@ namespace TerraEngine::Tests {
 		{
 			// This is the intentional temporary seam: it consumes exactly the immutable
 			// clip-view contract that the Sample shader will consume, but it performs no
-			// Vulkan work. T084-T088 replace this call's producer with shader readback;
+			// Vulkan work. ImplementationCheck-ImplementationCheck replace this call's producer with shader readback;
 			// the assertions below remain unchanged and never embed HLSL in C++.
 			return EvaluateCpuReference(view, tick, loop, output);
 		}
@@ -458,7 +458,7 @@ namespace TerraEngine::Tests {
 				"Engine/Shaders/Animation/AnimationPalette.comp.hlsl"};
 			for(const std::string_view shaderPath : shaderPaths) {
 				context.Expect(std::filesystem::exists(SourceRoot() / std::string(shaderPath)),
-					"GPU parity requires the dedicated T084-T088 shader source asset; shader code must not be embedded here.");
+					"GPU parity requires the dedicated ImplementationCheck-ImplementationCheck shader source asset; shader code must not be embedded here.");
 			}
 
 			GpuAnimationPoseRecord bindPose{};

@@ -1,4 +1,4 @@
-// T051 editor persistence tests for validated .tephysmat assets.
+// ImplementationCheck editor persistence tests for validated .tephysmat assets.
 #include "../TestHarness.h"
 
 #include "PhysicsMaterialAssetWriter.h"

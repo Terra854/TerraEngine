@@ -2,7 +2,7 @@
 	"format": "TerraEngineProfilerCapture",
 	"payloadVersion": 1,
 	"metadata": {
-		"terraEngineVersion": "feature-043-fixture",
+		"terraEngineVersion": "profiling-fixture",
 		"projectName": "Profiler V1 Compatibility",
 		"settings": {}
 	},

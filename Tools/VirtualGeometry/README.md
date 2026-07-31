@@ -1,6 +1,6 @@
 # Virtual Geometry benchmark setup
 
-This directory owns the versioned manifests used by feature 045. The manifests
+This directory owns the versioned manifests used by the production virtual-geometry workflow. The manifests
 are inputs only; they do not claim that a benchmark executable or GPU capture
 has already run.
 
@@ -15,7 +15,7 @@ has already run.
   accelerated routes.
 - `dependency-baseline.json` records the vendored dependency commit hashes.
 
-The feature 045 benchmark target is built and installed by the normal CMake
+The production virtual-geometry benchmark target is built and installed by the normal CMake
 workflow. Capture scripts still fail closed when the executable, manifests, or
 authoritative runtime adapter is unavailable. Every accepted capture preserves
 command inputs, raw samples, execution IDs, revision/settings hashes, and image
@@ -33,9 +33,9 @@ Get-Content Tools/VirtualGeometry/hardware-matrix.json | ConvertFrom-Json
 Get-Content Tools/VirtualGeometry/quality-profiles.json | ConvertFrom-Json
 ```
 
-The baseline build/test/install commands are documented in
-`specs/045-virtual-geometry-alternative/quickstart.md` and are recorded as
-instructions (not setup evidence) in `specs/045-virtual-geometry-alternative/evidence/setup-baseline.md`.
+The baseline build, test, and install commands are documented in
+`Docs/Testing.md`; this directory contains only installed-product inputs and
+evidence contracts.
 
 Capture and comparison tools accept only measured samples carrying a matching
 `executionId`; five or more samples are required for aggregates. Unavailable,
@@ -48,7 +48,7 @@ Installed-editor visual summaries can be converted without inventing timings:
 ```powershell
 powershell -File Tools/VirtualGeometry/CaptureVirtualGeometryPerformance.ps1 `
   -VisualSummary out/editor/visual-summary-01.json,out/editor/visual-summary-02.json `
-  -Output out/evidence/045/visual-capture.json
+  -Output out/evidence/virtual-geometry/visual-capture.json
 ```
 
 The normal installed-editor summary supplies
@@ -58,13 +58,13 @@ The normal installed-editor summary supplies
 `rows[]`, but those rows must also set `postCaptureMeasured=true`. Duplicate
 evidence does not count, and at least five measured rows are required.
 
-## Phase 0-9 release gate
+## Production capability gate
 
-`RunVirtualGeometryPhaseGate.ps1` is the Vulkan-only installed-tree entry
-point. It validates exactly one manifest for each phase 0 through 9, runs the
+`RunVirtualGeometryCapabilityGate.ps1` is the Vulkan-only installed-tree entry
+point. It validates exactly one manifest for each production capability, runs the
 focused quickstart slices, codec/page experiment, route-image comparisons,
 full-reference and million-decision prerequisites, vendor matrix, benchmark
-comparison, migration, install/package inventory, and installed-editor MCP
+comparison, install/package inventory, and installed-editor MCP
 scenarios. Every command record includes the executable, argument, stdout, and
 stderr SHA-256 values plus a unique execution identity. JSON inputs without an
 accepted status and execution identity remain incomplete.
@@ -74,7 +74,7 @@ fallback editor capture:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File `
-	Tools/VirtualGeometry/RunVirtualGeometryPhaseGate.ps1 `
+	Tools/VirtualGeometry/RunVirtualGeometryCapabilityGate.ps1 `
 	-CodecInputMesh <compiled-corpus-mesh.temf> `
 	-HardwareImage <hardware.png> `
 	-ComputeImage <compute.png> `
@@ -83,12 +83,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File `
 	-FullReferenceEvidence <accepted-full-reference.json> `
 	-MillionDecisionEvidence <accepted-million-decision.json> `
 	-BenchmarkBaseline <measured-baseline.json> `
-	-BenchmarkCandidate <measured-candidate.json> `
-	-MigrationInput <legacy-cache-manifest.json>
+	-BenchmarkCandidate <measured-candidate.json>
 ```
 
-Outputs are rooted at `out/evidence/045/phase-gate/phase-0` through
-`phase-9`, with the aggregate `phase-gate.json` and `release-gates.json` beside
-them. Missing AMD, NVIDIA, or Intel runner hardware is recorded as
-`unavailable`; it is never converted to a parity pass. `-DryRun` validates the
+Outputs are rooted at `out/evidence/virtual-geometry/production-gates/`, with
+the aggregate `production-gate.json` and `release-gates.json` beside them.
+Missing runner hardware is recorded as `unavailable`; it is never converted to
+a parity pass. `-DryRun` validates the
 Vulkan-only orchestration without launching tests, tools, or the editor.

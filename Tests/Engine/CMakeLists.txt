@@ -11,9 +11,13 @@ add_executable(TerraEngine-EngineTests
 	# the runtime decoder remains linked from the TerraEngine library.
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/VirtualGeometryCodecs.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/VirtualGeometryMeshoptCodec.cpp
+	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/VirtualGeometryProductionBlocks.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/VirtualGeometryAssemblyBuilder.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/VirtualGeometryFoliageCurveBuilder.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/VirtualGeometryVoxelBuilder.cpp
+	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/VirtualGeometrySplineCurveBuilder.cpp
+	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/VirtualGeometryDisplacementBuilder.cpp
+	${CMAKE_SOURCE_DIR}/Tools/VirtualGeometry/VirtualGeometryComparativeEvidence.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/AnimationClipCompiler.cpp
 	# Motion database cook tests link the production deterministic compiler
 	# directly, matching the existing clip compiler test boundary above.
@@ -132,6 +136,7 @@ add_executable(TerraEngine-EngineTests
 	Resource/VirtualGeometryStreamingSoakTests.cpp
 	Resource/VirtualGeometryPublicationContractTests.cpp
 	Resource/VirtualGeometryCodecTests.cpp
+	Resource/VirtualGeometryProductionFormatTests.cpp
 	Resource/VirtualGeometryResourceTests.cpp
 	Resource/VirtualGeometryResidencyTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/MockRenderBackendTests.cpp
@@ -182,6 +187,8 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryCullingTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryDiagnosticsTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryEvidenceSchemaTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryComparativeEvidenceTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryClaimClassificationTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryHardeningTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryHiZTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryGpuTimingTests.cpp
@@ -195,12 +202,18 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryShaderLayoutTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryShadowTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometrySchedulerContractTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryRoutePolicyTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryDirectRouteTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryClassPolicyTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/ProceduralGeometryPublicationTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryProductionClassTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryStressTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryVisibilityLayoutTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryVisibilityResolveTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryVisibilitySemanticsTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanVirtualGeometryCompactionTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanVirtualGeometryIndirectTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanVirtualGeometryProductionDecodeTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryMultiPassTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryMaterialIntegrationTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryBackendContractTests.cpp
@@ -426,13 +439,13 @@ set_tests_properties(Engine.VirtualGeometryFoundation PROPERTIES
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry,RenderTypes,Renderer.Diagnostics,Resource.Residency"
 )
 
-# Feature 045 has a stable contract slice independent of the older broad
-# foundation entry. It covers truth/evidence, scheduler/publication boundaries,
+# Keep a stable production contract slice independent of the broader renderer
+# registry. It covers truth/evidence, scheduler/publication boundaries,
 # portable visibility, backend contracts, and animated-page integration without
 # pretending that a live GPU or soak ran inside CTest.
-add_test(NAME Engine.VirtualGeometryFeature045Contracts COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
-set_tests_properties(Engine.VirtualGeometryFeature045Contracts PROPERTIES
-	LABELS "Engine;VirtualGeometry;Feature045;Contract"
+add_test(NAME Engine.VirtualGeometryProductionContracts COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.VirtualGeometryProductionContracts PROPERTIES
+	LABELS "Engine;VirtualGeometry;Production;Contract"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry.Capability;VirtualGeometry.GpuTiming;Renderer.VulkanVirtualGeometryTiming;VirtualGeometry.Evidence;VirtualGeometry.Scheduler;VirtualGeometry.Publication;VirtualGeometry.Visibility;VirtualGeometry.Backend;AnimatedVirtualGeometry"
 )
 

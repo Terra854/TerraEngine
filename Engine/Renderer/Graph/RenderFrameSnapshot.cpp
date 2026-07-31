@@ -801,6 +801,14 @@ namespace TerraEngine::Renderer {
 		SortByUuid(snapshot.materials, &RenderFrameResourceRecord::resourceId);
 		SortByUuid(snapshot.meshes, &RenderFrameResourceRecord::resourceId);
 		SortByUuid(snapshot.textures, &RenderFrameResourceRecord::resourceId);
+		std::sort(snapshot.geometryRouteDecisions.begin(), snapshot.geometryRouteDecisions.end(),
+			[](const GeometryRouteDecision& left, const GeometryRouteDecision& right) {
+				return left.decisionIdentity < right.decisionIdentity;
+			});
+		std::sort(snapshot.directMeshletBatches.begin(), snapshot.directMeshletBatches.end(),
+			[](const DirectMeshletBatch& left, const DirectMeshletBatch& right) {
+				return left.geometryIdentity < right.geometryIdentity;
+			});
 		std::sort(snapshot.animatedGeometryPageDemands.begin(),
 			snapshot.animatedGeometryPageDemands.end(),
 			[](const DeformationPageDemand& left, const DeformationPageDemand& right)
@@ -1005,10 +1013,29 @@ namespace TerraEngine::Renderer {
 			HashCombine(hash, HashUuid(renderable.meshId));
 			HashCombine(hash, HashUuid(renderable.materialId));
 			HashVirtualGeometryRange(hash, renderable.virtualGeometry);
+			HashCombine(hash, renderable.geometryRouteDecision.decisionIdentity);
+			HashCombine(hash, static_cast<std::uint64_t>(renderable.geometryRouteDecision.selected));
+			HashCombine(hash, renderable.geometryRouteDecision.routeGeneration);
 			HashCombine(hash, renderable.taskShaderCullingEnabled ? 1u : 0u);
 			HashCombine(hash, renderable.usingFallback ? 1u : 0u);
 			HashCombine(hash, BuildAnimationRenderGenerationHash(renderable.animation));
 			HashCombine(hash, BuildRenderInvalidationGenerationHash(renderable.invalidation));
+		}
+		for(const GeometryRouteDecision& decision : snapshot.geometryRouteDecisions)
+		{
+			HashCombine(hash, decision.decisionIdentity);
+			HashCombine(hash, static_cast<std::uint64_t>(decision.selected));
+			HashCombine(hash, decision.policyIdentity);
+			HashCombine(hash, decision.calibrationIdentity);
+			HashCombine(hash, decision.routeGeneration);
+		}
+		for(const DirectMeshletBatch& batch : snapshot.directMeshletBatches)
+		{
+			HashCombine(hash, batch.geometryIdentity);
+			HashCombine(hash, batch.geometryGeneration);
+			HashCombine(hash, batch.materialIdentity);
+			HashCombine(hash, batch.meshletCount);
+			for(const std::uint64_t instance : batch.instanceIdentities) HashCombine(hash, instance);
 		}
 		for(const DeformationPageDemand& demand : snapshot.animatedGeometryPageDemands)
 		{
@@ -1351,7 +1378,7 @@ namespace TerraEngine::Renderer {
 				if(!ownersWithMatchingPagePackets.contains(stableInstanceId))
 				{
 					// An unmatched visible draw is a complete-owner fail-open
-					// submission. Selecting all of that owner's validated AVPD
+					// submission. Selecting all of that owner's validated demanded
 					// pages is conservative and keeps owner identity intact; it
 					// never aliases work between independently animated clones.
 					ownerFallbackViewMasks[stableInstanceId] |= viewMask;

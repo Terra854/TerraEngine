@@ -43,7 +43,7 @@
 		]
 	},
 	"performanceValidation": {
-		"us3WorkerMatrix": {
+		"worker-scalingWorkerMatrix": {
 			"scenarios": ["paused", "unchanged", "small", "large"],
 			"workerCounts": [1, 2, 4, "max"],
 			"thresholdOverrides": {

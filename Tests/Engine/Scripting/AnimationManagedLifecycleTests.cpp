@@ -147,7 +147,7 @@ namespace TerraEngine::Tests {
 				&& events.find("EventId") != std::string::npos
 				&& events.find("Tag") != std::string::npos
 				&& events.find("PayloadCategories") != std::string::npos,
-				"Managed filters must cover every animator/controller/state/layer/event/tag/payload selector from FR-085.");
+				"Managed filters must cover every animator/controller/state/layer/event/tag/payload selector from FunctionalContract.");
 			context.Expect(events.find("ResetManagedSubscriptions") != std::string::npos
 				&& events.find("InvalidateForReload") != std::string::npos
 				&& events.find("layerIndex: AnyLayer") != std::string::npos

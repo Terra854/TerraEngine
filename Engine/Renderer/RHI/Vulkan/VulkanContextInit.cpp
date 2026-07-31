@@ -349,6 +349,116 @@ void VulkanContext::Impl::DestroyVulkanVirtualGeometryExecutorPipeline()
 	virtualGeometryExecutorDescriptorSetLayout = VK_NULL_HANDLE;
 }
 
+// The production decoder has a deliberately small, private ABI: a request,
+// canonical ExpandedProduction bytes, an output buffer, and a host-visible
+// completion record. Compressed profiles never reach this pipeline.
+bool VulkanContext::Impl::EnsureVulkanVirtualGeometryProductionDecodePipeline()
+{
+	if(virtualGeometryProductionDecodePipelines.layout != VK_NULL_HANDLE
+		&& virtualGeometryProductionDecodePipelines.expandedProductionDecode != VK_NULL_HANDLE
+		&& virtualGeometryProductionDecodeDescriptorSetLayout != VK_NULL_HANDLE) {
+		virtualGeometryProductionDecodeUnavailableReason.clear();
+		return true;
+	}
+	if(device == VK_NULL_HANDLE || descriptorPool == VK_NULL_HANDLE) {
+		virtualGeometryProductionDecodeUnavailableReason = "Vulkan device or descriptor pool is unavailable.";
+		return false;
+	}
+
+	DestroyVulkanVirtualGeometryProductionDecodePipeline();
+	std::array<VkDescriptorSetLayoutBinding, 4> bindings{};
+	for(std::uint32_t binding = 0u; binding < bindings.size(); ++binding) {
+		bindings[binding].binding = binding;
+		bindings[binding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		bindings[binding].descriptorCount = 1u;
+		bindings[binding].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	}
+	VkDescriptorSetLayoutCreateInfo setLayoutInfo{};
+	setLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+	setLayoutInfo.bindingCount = static_cast<std::uint32_t>(bindings.size());
+	setLayoutInfo.pBindings = bindings.data();
+	if(vkCreateDescriptorSetLayout(device, &setLayoutInfo, nullptr,
+		&virtualGeometryProductionDecodeDescriptorSetLayout) != VK_SUCCESS) {
+		virtualGeometryProductionDecodeUnavailableReason = "Could not create the ExpandedProduction decode descriptor layout.";
+		DestroyVulkanVirtualGeometryProductionDecodePipeline();
+		return false;
+	}
+	const VkPushConstantRange pushRange{ VK_SHADER_STAGE_COMPUTE_BIT, 0u, 16u };
+	VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+	pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+	pipelineLayoutInfo.setLayoutCount = 1u;
+	pipelineLayoutInfo.pSetLayouts = &virtualGeometryProductionDecodeDescriptorSetLayout;
+	pipelineLayoutInfo.pushConstantRangeCount = 1u;
+	pipelineLayoutInfo.pPushConstantRanges = &pushRange;
+	if(vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr,
+		&virtualGeometryProductionDecodePipelines.layout) != VK_SUCCESS) {
+		virtualGeometryProductionDecodeUnavailableReason = "Could not create the ExpandedProduction decode pipeline layout.";
+		DestroyVulkanVirtualGeometryProductionDecodePipeline();
+		return false;
+	}
+	std::vector<std::uint8_t> shaderBytes;
+	try {
+		shaderBytes = ResourceManager::Instance().ReadFileBytes(
+			ResourceManager::Instance().ResolveEngineAssetPath(
+				"Shaders/VirtualGeometry/VirtualGeometryProductionDecode.comp.spv"));
+	}
+	catch(const std::exception&) {
+		virtualGeometryProductionDecodeUnavailableReason = "ExpandedProduction decode SPIR-V is unavailable.";
+		DestroyVulkanVirtualGeometryProductionDecodePipeline();
+		return false;
+	}
+	if(shaderBytes.empty() || shaderBytes.size() % sizeof(std::uint32_t) != 0u) {
+		virtualGeometryProductionDecodeUnavailableReason = "ExpandedProduction decode SPIR-V has an invalid byte length.";
+		DestroyVulkanVirtualGeometryProductionDecodePipeline();
+		return false;
+	}
+	VkShaderModuleCreateInfo moduleInfo{ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+	moduleInfo.codeSize = shaderBytes.size();
+	moduleInfo.pCode = reinterpret_cast<const std::uint32_t*>(shaderBytes.data());
+	VkShaderModule module = VK_NULL_HANDLE;
+	if(vkCreateShaderModule(device, &moduleInfo, nullptr, &module) != VK_SUCCESS) {
+		virtualGeometryProductionDecodeUnavailableReason = "Could not create the ExpandedProduction decode shader module.";
+		DestroyVulkanVirtualGeometryProductionDecodePipeline();
+		return false;
+	}
+	VkPipelineShaderStageCreateInfo shaderStage{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
+	shaderStage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+	shaderStage.module = module;
+	shaderStage.pName = "main";
+	VkComputePipelineCreateInfo pipelineInfo{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+	pipelineInfo.stage = shaderStage;
+	pipelineInfo.layout = virtualGeometryProductionDecodePipelines.layout;
+	const bool created = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1u,
+		&pipelineInfo, nullptr, &virtualGeometryProductionDecodePipelines.expandedProductionDecode) == VK_SUCCESS;
+	vkDestroyShaderModule(device, module, nullptr);
+	if(!created) {
+		virtualGeometryProductionDecodeUnavailableReason = "Could not create the ExpandedProduction decode compute pipeline.";
+		DestroyVulkanVirtualGeometryProductionDecodePipeline();
+		return false;
+	}
+	virtualGeometryProductionDecodeUnavailableReason.clear();
+	return true;
+}
+
+void VulkanContext::Impl::DestroyVulkanVirtualGeometryProductionDecodePipeline()
+{
+	if(device != VK_NULL_HANDLE) {
+		if(virtualGeometryProductionDecodePipelines.expandedProductionDecode != VK_NULL_HANDLE)
+			vkDestroyPipeline(device, virtualGeometryProductionDecodePipelines.expandedProductionDecode, nullptr);
+		if(virtualGeometryProductionDecodePipelines.layout != VK_NULL_HANDLE)
+			vkDestroyPipelineLayout(device, virtualGeometryProductionDecodePipelines.layout, nullptr);
+		if(virtualGeometryProductionDecodeDescriptorSetLayout != VK_NULL_HANDLE)
+			vkDestroyDescriptorSetLayout(device, virtualGeometryProductionDecodeDescriptorSetLayout, nullptr);
+	}
+	virtualGeometryProductionDecodePipelines = {};
+	virtualGeometryProductionDecodeDescriptorSetLayout = VK_NULL_HANDLE;
+	// A recreated layout cannot use an old descriptor set. The pool owns old
+	// sets until backend teardown, while the next preparation allocates a set
+	// compatible with the new layout.
+	for(auto& resources : virtualGeometryProductionDecodeResourcesByFrame)
+		resources.descriptorSet = VK_NULL_HANDLE;
+}
+
 // Visibility is a separate compute chain from packet traversal. Its four
 // storage-buffer bindings match the small, pass-local ABI used by the raster,
 // resolve, and shading-bin shader assets.
@@ -761,6 +871,16 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 	{
 		candidates.clear();
 	}
+	for(auto& resources : virtualGeometryProductionDecodeResourcesByFrame)
+	{
+		DestroyBufferImmediate(resources.requestBuffer);
+		DestroyBufferImmediate(resources.encodedBuffer);
+		DestroyBufferImmediate(resources.decodedBuffer);
+		DestroyBufferImmediate(resources.resultReadbackBuffer);
+		resources = {};
+	}
+	completedVirtualGeometryProductionDecodeEvidence = false;
+	publishedVirtualGeometryProductionDecodeGeneration = 0u;
 	activeVirtualGeometryPacketBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 	activeVirtualGeometryBatchBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 	activeVirtualGeometryCompactedPacketBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
@@ -812,6 +932,7 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 
 	DestroyVulkanAnimationComputePipelines();
 	DestroyVulkanVirtualGeometryExecutorPipeline();
+	DestroyVulkanVirtualGeometryProductionDecodePipeline();
 	DestroyVulkanVirtualGeometryVisibilityPipelines();
 	for (VulkanAnimationFrameResources& resources : animationFrameResources) {
 		for (VulkanBuffer& buffer : resources.buffers) {

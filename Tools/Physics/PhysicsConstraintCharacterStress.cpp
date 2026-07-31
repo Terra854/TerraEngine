@@ -1,4 +1,4 @@
-// PhysicsConstraintCharacterStress.cpp - installed headless US4 physics probe.
+// PhysicsConstraintCharacterStress.cpp - installed headless readiness physics probe.
 //
 // The fixture uses only TerraEngine's provider-neutral request and extraction
 // records. The concrete Jolt backend is selected by the executable, but no Jolt

@@ -1,10 +1,13 @@
 {
 	"schemaVersion": 1,
-	"feature": "045-virtual-geometry-alternative",
+	"product": "virtual-geometry-production",
 	"status": "setup-manifest",
 	"measurementPolicy": {
 		"rawSamplesRequired": true,
-		"minimumPairedRuns": 5,
+		"minimumPairedRuns": 6,
+		"minimumValidSamplesPerSide": 6,
+		"visualFirst": true,
+		"protectedMetrics": ["frameTime", "processorPreparation", "deviceSubmission", "storageBytes", "residentBytes", "requestCount", "decodeTime", "uploadTime"],
 		"unavailableIsNotZero": true,
 		"randomizePairedOrder": true
 	},
@@ -12,10 +15,12 @@
 		{
 			"id": "baseline-processor-expanded",
 			"route": "processor-expanded",
-			"purpose": "Immutable pre-feature comparison route",
+			"purpose": "Immutable baseline comparison route",
 			"fixtureIds": ["dense-cluster-selection", "streaming-pressure", "multi-material-package"],
 			"qualityProfile": "reference-default",
-			"status": "planned-capture"
+			"status": "planned-capture",
+			"requiredSamplesPerSide": 6,
+			"sampleProvenance": ["contentHash", "cameraPathHash", "qualityProfileHash", "hardwareIdentity", "graphicsPath", "runtimeRevision", "commandHash"]
 		},
 		{
 			"id": "static-representative-corpus",
@@ -23,7 +28,9 @@
 			"purpose": "Static geometry quality and frame-work comparison",
 			"fixtureIds": ["tiny-mesh-skip", "dense-cluster-selection", "curved-error-profile", "hard-surface-material-bands", "multi-material-package"],
 			"qualityProfile": "reference-default",
-			"status": "planned-capture"
+			"status": "planned-capture",
+			"requiredSamplesPerSide": 6,
+			"sampleProvenance": ["contentHash", "cameraPathHash", "qualityProfileHash", "hardwareIdentity", "graphicsPath", "runtimeRevision", "commandHash"]
 		},
 		{
 			"id": "page-residency-pressure",
@@ -39,6 +46,92 @@
 			"purpose": "View ownership and conservative occlusion preservation",
 			"fixtureIds": ["thin-hiz-occluder", "multi-view-independence", "shadow-view-virtual-geometry", "cone-safety-metadata"],
 			"qualityProfile": "reference-default",
+			"status": "planned-capture"
+		},
+		{
+			"id": "low-poly-unique-direct",
+			"route": "forced-direct-meshlet",
+			"purpose": "Unique low-poly calibration without virtual-geometry hierarchy, paging, decode, or residency work",
+			"triangleBands": [[12, 64], [65, 512], [513, 4096]],
+			"instancePopulations": [1, 16, 256],
+			"qualityProfile": "Balanced",
+			"requiredSamplesPerSide": 6,
+			"status": "planned-capture"
+		},
+		{
+			"id": "low-poly-repeated-direct",
+			"route": "forced-direct-meshlet",
+			"purpose": "Repeated low-poly populations sharing immutable owner-packed geometry",
+			"triangleBands": [[12, 64], [65, 512], [513, 4096]],
+			"instancePopulations": [64, 1024, 10000],
+			"qualityProfile": "Balanced",
+			"requiredSamplesPerSide": 6,
+			"status": "planned-capture"
+		},
+		{
+			"id": "low-poly-forced-virtual-geometry",
+			"route": "forced-virtual-geometry",
+			"purpose": "Correct forced-route comparison for every eligible low-poly calibration point",
+			"triangleBands": [[12, 64], [65, 512], [513, 4096]],
+			"instancePopulations": [1, 64, 1024],
+			"qualityProfile": "Balanced",
+			"requiredSamplesPerSide": 6,
+			"status": "planned-capture"
+		},
+		{
+			"id": "low-poly-automatic-routing",
+			"route": "automatic",
+			"purpose": "Measured correctness-first route selection, tie-break, confidence, and hysteresis calibration",
+			"triangleBands": [[12, 64], [65, 512], [513, 4096]],
+			"instancePopulations": [1, 16, 64, 256, 1024, 10000],
+			"qualityProfile": "Balanced",
+			"requiredSamplesPerSide": 6,
+			"routeSwitchLimitPerMinute": 1,
+			"status": "planned-capture"
+		},
+		{
+			"id": "dense-photogrammetry",
+			"route": "automatic",
+			"purpose": "Dense static geometry codec, residency, and total-frame evidence",
+			"fixtureIds": ["dense-cluster-selection", "curved-error-profile"],
+			"qualityProfile": "Cinematic",
+			"requiredSamplesPerSide": 6,
+			"status": "planned-capture"
+		},
+		{
+			"id": "hard-surface-city",
+			"route": "automatic",
+			"purpose": "Large hard-surface material and multi-view routing evidence",
+			"fixtureIds": ["hard-surface-material-bands", "multi-material-package"],
+			"qualityProfile": "Balanced",
+			"requiredSamplesPerSide": 6,
+			"status": "planned-capture"
+		},
+		{
+			"id": "foliage-forest",
+			"route": "automatic",
+			"purpose": "Repeated foliage coverage, silhouette, overdraw, and distant-transition evidence",
+			"geometryClasses": ["foliage", "assembly", "distant-representation"],
+			"qualityProfile": "Balanced",
+			"requiredSamplesPerSide": 6,
+			"status": "planned-capture"
+		},
+		{
+			"id": "production-geometry-classes",
+			"route": "automatic-with-safe-fallback",
+			"purpose": "Spline, curve, displacement, tessellation, terrain, assembly, and distant transition validation",
+			"geometryClasses": ["spline", "curve", "displacement", "tessellation", "terrain", "assembly", "distant-representation"],
+			"qualityProfile": "Balanced",
+			"requiredSamplesPerSide": 6,
+			"status": "planned-capture"
+		},
+		{
+			"id": "adversarial-integrity-and-bounds",
+			"route": "automatic-with-safe-fallback",
+			"purpose": "Malformed blocks, extreme coordinates, shared boundaries, displacement gradients, and stale-generation rollback",
+			"fixtureIds": ["page-integrity-malformed", "cone-safety-metadata", "thin-hiz-occluder"],
+			"qualityProfile": "Cinematic",
+			"requiredSamplesPerSide": 6,
 			"status": "planned-capture"
 		},
 		{

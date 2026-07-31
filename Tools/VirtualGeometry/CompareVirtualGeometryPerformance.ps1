@@ -3,7 +3,7 @@ param(
 	[Parameter(Mandatory=$true)][string]$BaselineDirectory,
 	[Parameter(Mandatory=$true)][string]$CandidateDirectory,
 	[Parameter(Mandatory=$true)][string]$Output,
-	[int]$MinimumRuns = 5,
+	[int]$MinimumRuns = 6,
 	[double]$MaxMedianRegressionRatio = 1.10
 )
 Set-StrictMode -Version Latest
@@ -35,11 +35,12 @@ function Get-Measured([object[]]$Captures) {
 	return $out.ToArray()
 }
 function Median([double[]]$Values){ $sorted=@($Values|Sort-Object); return $sorted[[Math]::Floor(($sorted.Count-1)/2)] }
+function Quantile([double[]]$Values, [double]$Probability){ $sorted=@($Values|Sort-Object); return $sorted[[Math]::Min($sorted.Count-1,[Math]::Ceiling($sorted.Count*$Probability)-1)] }
 $baseline = Read-Captures $BaselineDirectory; $candidate = Read-Captures $CandidateDirectory
 $baseValues = @(Get-Measured $baseline); $candidateValues = @(Get-Measured $candidate)
 if($baseValues.Count -lt $MinimumRuns -or $candidateValues.Count -lt $MinimumRuns){ throw "At least $MinimumRuns measured comparable runs are required; pending/unavailable samples do not count." }
 $baseMedian = Median $baseValues; $candidateMedian = Median $candidateValues
 $ratio = $candidateMedian / $baseMedian
-$result = [ordered]@{ schemaVersion=1; status= if($ratio -le $MaxMedianRegressionRatio){'accepted'}else{'regression'}; baselineMeasuredSamples=$baseValues.Count; candidateMeasuredSamples=$candidateValues.Count; baselineMedianNanoseconds=$baseMedian; candidateMedianNanoseconds=$candidateMedian; medianRatio=$ratio; maxMedianRegressionRatio=$MaxMedianRegressionRatio; note='Comparison uses only measured samples; capability or timing unavailable is never treated as zero.' }
+$result = [ordered]@{ schemaVersion=1; status= if($ratio -le $MaxMedianRegressionRatio){'accepted'}else{'regression'}; baselineMeasuredSamples=$baseValues.Count; candidateMeasuredSamples=$candidateValues.Count; baselineStatistics=[ordered]@{medianNanoseconds=$baseMedian;p95Nanoseconds=(Quantile $baseValues 0.95);p99Nanoseconds=(Quantile $baseValues 0.99)}; candidateStatistics=[ordered]@{medianNanoseconds=$candidateMedian;p95Nanoseconds=(Quantile $candidateValues 0.95);p99Nanoseconds=(Quantile $candidateValues 0.99)}; medianRatio=$ratio; maxMedianRegressionRatio=$MaxMedianRegressionRatio; unavailableIsNotZero=$true; note='Comparison uses only measured samples; capability or timing unavailable is never treated as zero.' }
 $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $Output -Encoding utf8
 if($result.status -eq 'regression'){ exit 2 }; Write-Output "comparison accepted: median ratio $ratio"

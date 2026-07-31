@@ -2,7 +2,7 @@
 param(
 	[string]$Matrix = 'Tools/VirtualGeometry/hardware-matrix.json',
 	[string]$Runner = 'out/build/RelWithDebInfo/Build/Tools/TerraEngineVirtualGeometryBenchmark.exe',
-	[string]$Output = 'out/evidence/045/backend-parity.json',
+	[string]$Output = 'out/evidence/virtual-geometry-production/backend-parity.json',
 	[string]$Workloads = 'Tools/VirtualGeometry/workloads.json',
 	[string]$Quality = 'Tools/VirtualGeometry/quality-profiles.json',
 	[string]$RuntimeAdapter = '',
@@ -20,7 +20,7 @@ $utf8NoBom = [Text.UTF8Encoding]::new($false)
 function Get-ObservedVendorFamily([string]$Adapter)
 {
 	# Adapter names are runtime evidence rather than setup-time assumptions.
-	# Normalize only the three families required by Feature 045, retaining an
+	# Normalize only the required adapter families, retaining an
 	# empty value for every unrecognized adapter so it can never become a pass.
 	if($Adapter -match '(?i)\b(NVIDIA|GeForce|Quadro)\b')
 	{
@@ -54,7 +54,7 @@ if(@($profiles | Where-Object {
 	[string]$_.backend -notin @('Vulkan', 'not-captured')
 }).Count -ne 0)
 {
-	throw 'Feature 045 backend parity is Vulkan-only.'
+	throw 'Production virtual-geometry backend parity is Vulkan-only.'
 }
 if($DryRun)
 {
@@ -227,7 +227,7 @@ $crossVendorStatus = if($requiredFamilies.Count -gt 0 -and
 	'incomplete'
 }
 # A matrix without required families may accept its current Vulkan host. This
-# feature explicitly lists AMD, NVIDIA, and Intel, so its overall release status
+# matrix explicitly lists AMD, NVIDIA, and Intel, so its overall release status
 # remains incomplete until those external lanes publish measurements.
 $status = if($requiredFamilies.Count -gt 0) {
 	$crossVendorStatus

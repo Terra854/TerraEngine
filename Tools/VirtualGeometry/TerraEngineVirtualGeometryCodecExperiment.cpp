@@ -6,6 +6,7 @@
 
 #include "VirtualGeometryCodecs.h"
 #include "VirtualGeometryMeshoptCodec.h"
+#include "VirtualGeometryPrototypeCodecOracle.h"
 
 #include "Resource/VirtualGeometryCodec.h"
 
@@ -15,6 +16,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <span>
 #include <string>
 #include <vector>
@@ -99,6 +101,19 @@ namespace
 		std::span<const std::uint8_t> source,
 		std::size_t pageBytes)
 	{
+		if(name == "terra")
+		{
+			// The historical candidate is retained only as an offline research
+			// lane. It is never encoded by, selected for, or accepted by the
+			// production TEMF runtime.
+			return {
+				{ "codec", name },
+				{ "state", "unavailable" },
+				{ "availability", "offline-only" },
+				{ "reason", "not-a-production-temf-codec" }
+			};
+		}
+
 		std::uint64_t encodedBytes = 0u;
 		std::uint64_t encodeNanoseconds = 0u;
 		std::uint64_t decodeNanoseconds = 0u;
@@ -148,13 +163,11 @@ namespace
 				};
 			}
 
-			TerraEngine::Resource::VirtualGeometryCodecDecodeLimits limits{};
-			limits.maximumEncodedBytes = pageBytes * 2u + 1024u;
-			limits.maximumDecodedBytes = pageBytes + 4u;
 			const auto decodeBegin = Clock::now();
 			const auto decoded =
-				TerraEngine::Resource::DecodeVirtualGeometryCompactBlock(
-					encoded.bytes, limits);
+				TerraEngine::Resource::DecodeTemfProductionBlock({
+					encoded.descriptor, encoded.bytes, {}, encoded.descriptor.requiredCapabilityMask },
+					{ .availableCapabilities = encoded.descriptor.requiredCapabilityMask });
 			decodeNanoseconds += static_cast<std::uint64_t>(
 				std::chrono::duration_cast<std::chrono::nanoseconds>(
 					Clock::now() - decodeBegin).count());
@@ -166,9 +179,9 @@ namespace
 				return {
 					{ "codec", name },
 					{ "state", "failed" },
-					{ "reason", decoded.error.empty()
+					{ "reason", decoded.diagnostic.empty()
 						? "decoded bytes did not match the source page"
-						: decoded.error }
+						: decoded.diagnostic }
 				};
 			}
 
@@ -206,6 +219,16 @@ int main(int argc, char** argv)
 {
 	try
 	{
+		if(argc == 2 && std::string_view(argv[1]) == "--self-test")
+		{
+			if(!TerraEngine::Tools::VirtualGeometry::RunPrototypeCodecOracleSelfTest())
+			{
+				std::cerr << "Prototype codec oracle self-test failed.\n";
+				return 7;
+			}
+			std::cout << "Prototype codec oracle self-test passed (offline-only).\n";
+			return 0;
+		}
 		Arguments arguments;
 		if(!ParseArguments(argc, argv, arguments))
 		{
@@ -234,7 +257,10 @@ int main(int argc, char** argv)
 			results.begin(),
 			results.end(),
 			[](const Json& result) {
-				return result.value("state", "failed") == "measured";
+				const std::string codec = result.value("codec", "");
+				return codec == "terra"
+					? result.value("state", "failed") == "unavailable"
+					: result.value("state", "failed") == "measured";
 			});
 		if(!complete)
 		{
@@ -242,6 +268,26 @@ int main(int argc, char** argv)
 			return 4;
 		}
 
+		const auto selected = std::min_element(
+			results.begin(),
+			results.end(),
+			[](const Json& left, const Json& right) {
+				const std::uint64_t unavailable =
+					std::numeric_limits<std::uint64_t>::max();
+				const std::uint64_t leftBytes =
+					left.value("state", "failed") == "measured"
+						? left.value("encodedBytes", unavailable)
+						: unavailable;
+				const std::uint64_t rightBytes =
+					right.value("state", "failed") == "measured"
+						? right.value("encodedBytes", unavailable)
+						: unavailable;
+				if(leftBytes != rightBytes)
+				{
+					return leftBytes < rightBytes;
+				}
+				return left.value("codec", "") < right.value("codec", "");
+			});
 		const Json document = {
 			{ "schemaVersion", 1 },
 			{ "input", arguments.input.generic_string() },
@@ -249,8 +295,8 @@ int main(int argc, char** argv)
 			{ "inputHash", HashBytes(source) },
 			{ "pageSizeKiB", arguments.pageSizeKiB },
 			{ "results", results },
-			{ "selectedCandidate", "terra" },
-			{ "selectionStatus", "measured-prototype-decision" },
+			{ "selectedCandidate", selected->value("codec", "") },
+			{ "selectionStatus", "measured-production-decision" },
 			{ "newDependencyAdded", false }
 		};
 		std::filesystem::create_directories(arguments.output.parent_path());

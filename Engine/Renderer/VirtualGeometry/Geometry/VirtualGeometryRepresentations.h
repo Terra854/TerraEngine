@@ -9,6 +9,9 @@ namespace TerraEngine::Renderer
 		Curve,
 		Voxel,
 		Impostor,
+		Terrain,
+		MicroInstance,
+		DistantRepresentation,
 		Fallback
 	};
 	struct VirtualGeometryAggregateRepresentation
@@ -21,10 +24,16 @@ namespace TerraEngine::Renderer
 		std::uint32_t sourceElementCount = 0;
 		float coverageRatio = 0.0f;
 		std::uint64_t fallbackStableId = 0;
+		std::uint64_t sharedStorageIdentity = 0;
+		std::uint64_t generationIdentity = 0;
+		bool productionValidated = false;
+		bool atomicTransitionReady = false;
 		[[nodiscard]] bool Valid() const noexcept
 		{
 			return stableId != 0 && canonicalError >= 0.0f && coverageRatio >= 0.0f && coverageRatio <= 1.0f
-				&& completeFallbackCoverage && (fallbackStableId == 0 || fallbackStableId == stableId);
+				&& completeFallbackCoverage && (fallbackStableId == 0 || fallbackStableId == stableId)
+				&& sharedStorageIdentity != 0 && generationIdentity != 0
+				&& productionValidated && atomicTransitionReady;
 		}
 	};
 	struct VirtualGeometryAggregateTransition

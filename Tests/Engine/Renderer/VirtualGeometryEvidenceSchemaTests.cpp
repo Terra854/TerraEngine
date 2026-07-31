@@ -42,6 +42,11 @@ namespace TerraEngine::Tests
 				capture.environment.adapter = "adapter";
 				capture.workload.name = "scene";
 				capture.integrityHash = "integrity";
+				capture.statistics.medianNanoseconds = 100u;
+				capture.statistics.p95Nanoseconds = 125u;
+				capture.statistics.p99Nanoseconds = 150u;
+				capture.statistics.sampleCount = 6u;
+				capture.statistics.rejectedCount = 1u;
 				capture.diagnostics = { { "z-last", "value" }, { "a-first", "line\nbreak" } };
 
 				const std::string first = TerraEngine::Renderer::SerializeVirtualGeometryBenchmarkCapture(capture);
@@ -50,6 +55,11 @@ namespace TerraEngine::Tests
 				context.Expect(first.find("capture-\\\"quoted\\\"") != std::string::npos, "Evidence strings must escape quotation marks.");
 				context.Expect(first.find("line\\nbreak") != std::string::npos, "Evidence strings must escape control characters.");
 				context.Expect(first.find("\"a-first\"") < first.find("\"z-last\""), "Diagnostic map keys must serialize in sorted order.");
+				context.Expect(first.find("medianNanoseconds") != std::string::npos
+					&& first.find("p95Nanoseconds") != std::string::npos
+					&& first.find("p99Nanoseconds") != std::string::npos
+					&& first.find("rejectedCount") != std::string::npos,
+					"Evidence serialization must retain robust statistics and rejected-sample counts.");
 			});
 
 		registry.Add("VirtualGeometry.EvidenceSchema.SerializerOutputPassesInstalledValidator",
@@ -90,6 +100,35 @@ namespace TerraEngine::Tests
 				context.Expect(!rejected.valid, "A partial benchmark capture must not satisfy a release evidence gate.");
 				context.Expect(
 					!rejected.issues.empty() && rejected.issues.front().path.starts_with("$."), "Schema failures must name machine-readable JSON paths.");
+			});
+
+		registry.Add("VirtualGeometry.EvidenceSchema.MeasuredRowsRequireCompletedQueryProvenance",
+			[](TestContext& context)
+			{
+				TerraEngine::Renderer::VirtualGeometryBenchmarkCapture capture{};
+				capture.identity.captureId = "capture-provenance";
+				capture.identity.workloadVersion = "workload-v1";
+				capture.environment.backend = "vulkan";
+				capture.workload.name = "provenance";
+				capture.integrityHash = "sha256:test";
+				TerraEngine::Renderer::VirtualGeometryMeasurementRecord sample{};
+				sample.availability = TerraEngine::Renderer::VirtualGeometryMeasurementAvailability::Measured;
+				sample.durationNanoseconds = 100u;
+				sample.queryIdentity = "query-1";
+				sample.executionEvidenceId = "completed-submit-1";
+				sample.identity = { 1u, 0u, 1u };
+				capture.rawSamples.push_back(sample);
+				const auto accepted = TerraEngine::Tools::VirtualGeometry::ValidateSchemaDocument(
+					TerraEngine::Renderer::SerializeVirtualGeometryBenchmarkCapture(capture),
+					TerraEngine::Tools::VirtualGeometry::SchemaDocumentKind::BenchmarkCapture);
+				context.Expect(accepted.valid,
+					"A measured benchmark row must retain completed frame, query, and execution provenance.");
+				capture.rawSamples.front().executionEvidenceId.clear();
+				const auto rejected = TerraEngine::Tools::VirtualGeometry::ValidateSchemaDocument(
+					TerraEngine::Renderer::SerializeVirtualGeometryBenchmarkCapture(capture),
+					TerraEngine::Tools::VirtualGeometry::SchemaDocumentKind::BenchmarkCapture);
+				context.Expect(!rejected.valid,
+					"A measured duration without completed execution proof must fail closed.");
 			});
 	}
 } // namespace TerraEngine::Tests

@@ -79,5 +79,5 @@ $env:TERRAENGINE_TEST_FILTER = 'Editor.Animation'
 ./out/build/RelWithDebInfo/TerraEngine-EditorTests.exe
 ```
 
-Installed-editor click-through validation is performed separately by the Phase 13
+Installed-editor click-through validation is performed separately by the implementation stage
 gate. Performance measurement is not implied by these functional checks.

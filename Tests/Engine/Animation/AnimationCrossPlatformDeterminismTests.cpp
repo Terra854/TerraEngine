@@ -19,7 +19,7 @@ namespace TerraEngine::Tests {
 		using namespace TerraEngine::Animation;
 
 		// These names deliberately include the installed platform/toolchain contract.
-		// The test rehearses each lane in the current process; T270 remains responsible
+		// The test rehearses each lane in the current process; ImplementationCheck remains responsible
 		// for launching the real binaries and comparing 100,000-tick evidence.
 		enum class FrozenLaneKind : std::uint8_t {
 			WindowsMsvcInstalledRuntime = 0U,
@@ -44,7 +44,7 @@ namespace TerraEngine::Tests {
 			{FrozenLaneKind::Ubuntu2404Gcc14InstalledHeadless, kUbuntuWorkers}
 		}};
 
-		// Ordinary CTest runs keep a short contract rehearsal. T270 selects the
+		// Ordinary CTest runs keep a short contract rehearsal. ImplementationCheck selects the
 		// frozen 100,000-tick acceptance profile explicitly so every real compiler
 		// lane performs the complete correctness workload without making unrelated
 		// local test iterations pay that cost.
@@ -127,7 +127,7 @@ namespace TerraEngine::Tests {
 		bool RunsInCurrentAcceptanceProcess(FrozenLaneKind lane) noexcept
 		{
 			// The short developer profile rehearses every partition in one process.
-			// The T270 acceptance profile must instead report only lanes executed by
+			// The ImplementationCheck acceptance profile must instead report only lanes executed by
 			// the real compiled platform so its evidence cannot imply that MSVC ran on
 			// Linux, or that GCC ran on Windows.
 #if defined(_WIN32)

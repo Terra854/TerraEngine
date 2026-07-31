@@ -1,7 +1,6 @@
 {
 	"schemaVersion": 2,
-	"phase": 7,
-	"id": "phase-7",
+	"id": "animated-geometry",
 	"title": "Animated virtual geometry advantage",
 	"requiredTools": ["asset.virtualGeometry.inspect", "renderer.virtualGeometry.stats", "diagnostics.get_summary", "camera.capture_custom", "game_view.capture"],
 	"operations": [

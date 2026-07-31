@@ -10,16 +10,16 @@
 #   powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Physics/RunInstalledEditorPhysicsStress.ps1 `
 #     -InstallRoot out/build/RelWithDebInfo/Build -AllowLiveStress
 #
-# US4 readiness matrix (one disposable project, five clean editor launches):
+# readiness readiness matrix (one disposable project, five clean editor launches):
 #   powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Physics/RunInstalledEditorPhysicsStress.ps1 `
-#     -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/validation/043-us4 `
-#     -RunUs4ReadinessMatrix -AllowLiveStress
-# Individual -Us4ReadinessMode cold|warm|stale|corrupt|forced-build runs retain
+#     -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/validation/readiness `
+#     -RunReadinessMatrix -AllowLiveStress
+# Individual -ReadinessMode cold|warm|stale|corrupt|forced-build runs retain
 # their own evidence summary below WorkRoot/evidence/. Warm and later modes
 # require the disposable project left by the preceding cold scenario.
-# US5 profiler checks are opt-in so the historical physics timing run remains
+# profiler-capture profiler checks are opt-in so the historical physics timing run remains
 # comparable. They request a capture detail/version, then retain a bounded
-# summary and recovery/metric-gate evidence under evidence/us5-*.json.
+# summary and recovery/metric-gate evidence under evidence/profiler-capture-*.json.
 
 [CmdletBinding()]
 param(
@@ -45,7 +45,7 @@ param(
 	[ValidateRange(1, 10000)]
 	[int] $ActiveDynamicCount = 1000,
 
-	# US1 uses the same installed-editor harness for canonical, deliberately
+	# canonical-runtime uses the same installed-editor harness for canonical, deliberately
 	# dense, and small-scene marker evidence. Defaults retain the accepted
 	# 10,000-body canonical physics identity.
 	[ValidateSet("canonical", "dense", "small")]
@@ -57,10 +57,10 @@ param(
 	[ValidateSet("0", "1", "2", "4", "max")]
 	[string] $WorkerCount = "max",
 
-	# US3 labels the workload used by the worker-scaling matrix.  The label is
+	# worker-scaling labels the workload used by the worker-scaling matrix.  The label is
 	# persisted with each run so a comparison cannot accidentally mix scenarios.
 	[ValidateSet("paused", "unchanged", "small", "large")]
-	[string] $Us3Scenario = "large",
+	[string] $WorkerScalingScenario = "large",
 
 	# Keep scheduler thresholds explicit and reproducible; the matrix can rerun
 	# with an override without editing the generated project settings.
@@ -72,16 +72,16 @@ param(
 
 	# Runs the complete paused/unchanged/small/large x 1/2/4/max matrix and
 	# writes one recommendation report below WorkRoot.
-	[switch] $RunUs3WorkerMatrix,
+	[switch] $RunWorkerScalingMatrix,
 
-	# US4 readiness cases reuse one disposable project across clean editor
+	# readiness readiness cases reuse one disposable project across clean editor
 	# launches.  The modes retain source authority: only generated cache/output
 	# artifacts are removed or damaged, except stale deliberately changes the
 	# disposable source copy to invalidate its derived scene.
 	[ValidateSet("none", "cold", "warm", "stale", "corrupt", "forced-build")]
-	[string] $Us4ReadinessMode = "none",
+	[string] $ReadinessMode = "none",
 
-	# US5 capture controls are additive to the existing profiler operations. The
+	# profiler-capture capture controls are additive to the existing profiler operations. The
 	# editor may ignore these fields when an older installed bridge is used; the
 	# retained evidence records that compatibility outcome explicitly.
 	[ValidateSet("detailed", "sampled", "aggregate")]
@@ -95,25 +95,25 @@ param(
 	[ValidateRange(5, 5)]
 	[int] $CaptureDurationSeconds = 5,
 
-	[switch] $RunUs5ProfilerChecks,
+	[switch] $RunProfilerCaptureChecks,
 
 	# Runs the documented cold/warm/stale/corrupt/forced-build sequence and
 	# writes a per-scenario report plus a matrix report below WorkRoot.
-	[switch] $RunUs4ReadinessMatrix,
+	[switch] $RunReadinessMatrix,
 
 	# The authoring walkthrough adds public editor authoring operations before Play Mode. Keep this
-	# optional so T105/T111 performance measurements remain directly comparable.
+	# optional so performance baseline performance measurements remain directly comparable.
 	[switch] $RunAuthoringWalkthrough,
 
-	# US6 exercises the installed managed-reload and public physics automation
+	# managed-reload-automation exercises the installed managed-reload and public physics automation
 	# contracts. Its extra query and command calls remain outside the timed stress
-	# interval so the T105/T111 performance measurements stay comparable.
-	[switch] $RunUs6Loopback,
+	# interval so the performance baseline performance measurements stay comparable.
+	[switch] $RunManagedReloadAutomationLoopback,
 
-	# Spec 043 US2 adds an installed-editor matrix around the timed physics run.
+	# physics validation collider-cook adds an installed-editor matrix around the timed physics run.
 	# Reparent/conflict probes execute while stopped, and stale/unchanged/active
 	# probes use only published runtime snapshots so they never mutate live storage.
-	[switch] $RunUs2IncrementalMatrix,
+	[switch] $RunColliderCookIncrementalMatrix,
 
 	# Memory regression runs opt into the maximum debug primitive budget while
 	# preserving the normal two-tick retention setting. Default acceptance runs
@@ -279,9 +279,9 @@ function Get-PropertyValue {
 	return $property.Value
 }
 
-function Complete-Us5ProfilerEvidence {
+function Complete-ProfilerCaptureEvidence {
 	param([Parameter(Mandatory = $true)] $Summary, [Parameter(Mandatory = $true)] $Artifact, [Parameter(Mandatory = $true)][string] $ArtifactRoot)
-	if (-not $RunUs5ProfilerChecks) { return }
+	if (-not $RunProfilerCaptureChecks) { return }
 	$summaryData = Get-PropertyValue -Object $Summary -Name "summary"
 	if ($null -eq $summaryData) { $summaryData = $Summary }
 	$reportedVersion = Get-PropertyValue -Object $Summary -Name "payloadVersion"
@@ -294,16 +294,16 @@ function Complete-Us5ProfilerEvidence {
 		$artifactFiles = @(Get-ChildItem -LiteralPath $ArtifactRoot -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq [string]$Artifact.name -or $_.BaseName -eq [string]$Artifact.artifactId })
 		if ($artifactFiles.Count -gt 0) { $reportedBytes = [UInt64]($artifactFiles | Measure-Object -Property Length -Sum).Sum }
 	}
-	$us5Profiler.artifactBytes = if ($null -eq $reportedBytes) { $null } else { [UInt64]$reportedBytes }
-	$us5Profiler.sizeGatePassed = $null -ne $reportedBytes -and [UInt64]$reportedBytes -le [UInt64]$us5Profiler.sizeGateBytes
+	$profilerCapture.artifactBytes = if ($null -eq $reportedBytes) { $null } else { [UInt64]$reportedBytes }
+	$profilerCapture.sizeGatePassed = $null -ne $reportedBytes -and [UInt64]$reportedBytes -le [UInt64]$profilerCapture.sizeGateBytes
 	$summaryEngineDuration = Get-PropertyValue -Object $summaryData -Name "totalDurationMs"
-	$us5Profiler.summaryEngineDurationMs = $summaryEngineDuration
+	$profilerCapture.summaryEngineDurationMs = $summaryEngineDuration
 	$observedDuration = if ($null -ne $profilerCaptureStartedAtMs -and $null -ne $profilerCaptureStoppedAtMs) {
 		[double]$profilerCaptureStoppedAtMs - [double]$profilerCaptureStartedAtMs
 	} else { $null }
-	$us5Profiler.durationObservedMs = $observedDuration
-	$us5Profiler.durationGatePassed = $null -ne $observedDuration -and [double]$observedDuration -ge ($CaptureDurationSeconds * 1000.0)
-	$us5Profiler.versionAccepted = $null -eq $reportedVersion -or [string]$reportedVersion -eq $CaptureVersion -or [string]$reportedVersion -eq $CaptureVersion.TrimStart("v")
+	$profilerCapture.durationObservedMs = $observedDuration
+	$profilerCapture.durationGatePassed = $null -ne $observedDuration -and [double]$observedDuration -ge ($CaptureDurationSeconds * 1000.0)
+	$profilerCapture.versionAccepted = $null -eq $reportedVersion -or [string]$reportedVersion -eq $CaptureVersion -or [string]$reportedVersion -eq $CaptureVersion.TrimStart("v")
 	$streamObject = Get-PropertyValue -Object $summaryData -Name "streams"
 	if ($null -eq $streamObject) { $streamObject = Get-PropertyValue -Object $summaryData -Name "timingStreams" }
 	$streamNames = @()
@@ -328,22 +328,22 @@ function Complete-Us5ProfilerEvidence {
 		workVolume = $null -ne $workVolumes -and [UInt64](Get-PropertyValue -Object $workVolumes -Name "measuredTickCount") -gt 0
 	}
 	$allEvidenceIds = @($streamNames + $stageIds + $boundaryIds + $presentationIds + $responsivenessIds)
-	$us5Profiler.metricAvailability = [ordered]@{ streams = $metricAvailability; gatePassed = (@($metricAvailability.GetEnumerator() | Where-Object { -not $_.Value }).Count -eq 0); streamIds = $allEvidenceIds }
+	$profilerCapture.metricAvailability = [ordered]@{ streams = $metricAvailability; gatePassed = (@($metricAvailability.GetEnumerator() | Where-Object { -not $_.Value }).Count -eq 0); streamIds = $allEvidenceIds }
 	if ($metricAvailability.physics) { [void]$unavailableMetrics.Remove("nativePhysicsStagePercentiles") }
 	if ($metricAvailability.scheduler) { [void]$unavailableMetrics.Remove("workerUtilizationHistory") }
 	if ($metricAvailability.protectedBoundary) { [void]$unavailableMetrics.Remove("protectedBoundaryStallHistory") }
 	if ($metricAvailability.responsiveness) { [void]$unavailableMetrics.Remove("frameResponsiveness") }
-	$us5Profiler.recoveryProbe = [ordered]@{ attempted = $false; supported = $false; status = "not-requested"; reason = "The public load operation is exercised by the orchestrator's truncated-tail fixture probe." }
+	$profilerCapture.recoveryProbe = [ordered]@{ attempted = $false; supported = $false; status = "not-requested"; reason = "The public load operation is exercised by the orchestrator's truncated-tail fixture probe." }
 	$baseline = Get-PropertyValue -Object $summaryData -Name "baseline"
-	$us5Profiler.comparableBaseline = [ordered]@{
+	$profilerCapture.comparableBaseline = [ordered]@{
 		captureLevel = $CaptureLevel; requestedVersion = $CaptureVersion
 		frameCount = Get-PropertyValue -Object $summaryData -Name "frameCount"
 		completeFrameCount = Get-PropertyValue -Object $summaryData -Name "completeFrameCount"
 		incompleteFrameCount = Get-PropertyValue -Object $summaryData -Name "incompleteFrameCount"
-		baselineReference = "Tests/Fixtures/Performance/043-baseline-summary.json"
+		baselineReference = "Tests/Fixtures/Performance/physics-baseline-summary.json"
 		baselineFrameP95Milliseconds = if ($null -ne $baseline) { Get-PropertyValue -Object $baseline -Name "frameP95Milliseconds" } else { $null }
 	}
-	$us5Profiler.compatibility = if ($null -eq $reportedVersion) { "legacy-reader-no-version-field" } elseif ($us5Profiler.versionAccepted) { "accepted" } else { "mismatch" }
+	$profilerCapture.compatibility = if ($null -eq $reportedVersion) { "legacy-reader-no-version-field" } elseif ($profilerCapture.versionAccepted) { "accepted" } else { "mismatch" }
 }
 
 function Get-ToolEnvelope {
@@ -380,7 +380,7 @@ function Get-PhysicsSnapshot {
 	return $Envelope.data
 }
 
-function Invoke-Us3WorkerMatrix {
+function Invoke-WorkerScalingMatrix {
 	# Each child owns one editor process and one disposable project.  Keeping
 	# scenarios isolated makes timings and hashes comparable and repeatable.
 	$matrixRoot = Get-AbsolutePath -Path $WorkRoot -BasePath $repoRoot
@@ -393,7 +393,7 @@ function Invoke-Us3WorkerMatrix {
 			$arguments = @(
 				"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $PSCommandPath,
 				"-InstallRoot", $InstallRoot, "-WorkRoot", $childRoot,
-				"-WorkerCount", $workers, "-Us3Scenario", $scenario,
+				"-WorkerCount", $workers, "-WorkerScalingScenario", $scenario,
 				"-ParallelPreparationThreshold", $ParallelPreparationThreshold,
 				"-ParallelExtractionThreshold", $ParallelExtractionThreshold,
 				"-ObjectCount", $(if ($scenario -eq "small") { 256 } else { $ObjectCount }),
@@ -429,7 +429,7 @@ function Invoke-Us3WorkerMatrix {
 	# work and cannot accidentally choose the global worker default.
 	$recommendation = $successful | Where-Object { $_.scenario -eq "large" } | Sort-Object { [double]$_.summary.monotonicDurationMs } | Select-Object -First 1
 	$report = [ordered]@{
-		version = 1; feature = "043-US3"; thresholdOverride = [ordered]@{ parallelPreparation = $ParallelPreparationThreshold; parallelExtraction = $ParallelExtractionThreshold }
+		version = 1; feature = "worker-scaling"; thresholdOverride = [ordered]@{ parallelPreparation = $ParallelPreparationThreshold; parallelExtraction = $ParallelExtractionThreshold }
 		scenarios = @("paused", "unchanged", "small", "large"); workerCounts = @("1", "2", "4", "max")
 		deterministic = ($successful.Count -eq 16 -and @($determinismByScenario.Values | Where-Object { -not $_.identical }).Count -eq 0)
 		determinismByScenario = $determinismByScenario; scalingComparable = ($successful.Count -eq 16)
@@ -437,14 +437,14 @@ function Invoke-Us3WorkerMatrix {
 		recommended = if ($null -eq $recommendation) { $null } else { [ordered]@{ scenario = $recommendation.scenario; requestedWorkerCount = $recommendation.requestedWorkerCount; resolvedWorkerCount = $recommendation.summary.actualWorkerCount; durationMs = $recommendation.summary.monotonicDurationMs; reason = "fastest successful correctness-gated large-workload result" } }
 		runs = @($records)
 	}
-	$reportPath = Join-Path $matrixRoot "us3-matrix-summary.json"
+	$reportPath = Join-Path $matrixRoot "worker-scaling-matrix-summary.json"
 	Write-JsonFile -Path $reportPath -Value $report -Depth 64
-	Write-Output ("US3 matrix report: {0}" -f $reportPath)
-	if (-not $report.deterministic -or -not $report.scalingComparable) { throw "US3 matrix did not produce 16 successful deterministic runs." }
+	Write-Output ("worker-scaling matrix report: {0}" -f $reportPath)
+	if (-not $report.deterministic -or -not $report.scalingComparable) { throw "worker-scaling matrix did not produce 16 successful deterministic runs." }
 	exit 0
 }
 
-function Invoke-Us4ReadinessMatrix {
+function Invoke-ReadinessMatrix {
 	# One reusable project is intentional here: cold creates regenerated outputs,
 	# warm proves they are reusable, and later cases perturb only the documented
 	# disposable cache or source-copy boundary. Each child exits normally before
@@ -458,7 +458,7 @@ function Invoke-Us4ReadinessMatrix {
 		$arguments = @(
 			"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $PSCommandPath,
 			"-InstallRoot", $InstallRoot, "-WorkRoot", $matrixRoot,
-			"-Us4ReadinessMode", $mode,
+			"-ReadinessMode", $mode,
 			"-ObjectCount", $ObjectCount, "-ActiveDynamicCount", $ActiveDynamicCount,
 			"-ExplicitStepCount", $ExplicitStepCount,
 			"-WorkerCount", $WorkerCount,
@@ -467,13 +467,13 @@ function Invoke-Us4ReadinessMatrix {
 			"-AllowLiveStress"
 		)
 		& powershell.exe @arguments
-		$summaryFile = Join-Path $matrixRoot ("evidence/us4-{0}-summary.json" -f $mode)
+		$summaryFile = Join-Path $matrixRoot ("evidence/readiness-{0}-summary.json" -f $mode)
 		if (Test-Path -LiteralPath $summaryFile) {
 			$summary = Get-Content -LiteralPath $summaryFile -Raw | ConvertFrom-Json
 			# Readiness evidence is accepted only when the editor completed its own
 			# shutdown lifecycle. This prevents a force-stopped child from looking like
 			# a successful cache/readiness scenario merely because earlier checks passed.
-			$scenarioComplete = [bool]$summary.success -and [bool]$summary.us4Readiness.normalShutdown
+			$scenarioComplete = [bool]$summary.success -and [bool]$summary.readiness.normalShutdown
 			$records.Add([ordered]@{ mode = $mode; success = $scenarioComplete; summaryPath = $summaryFile; summary = $summary })
 		} else {
 			$records.Add([ordered]@{ mode = $mode; success = $false; summaryPath = $summaryFile; error = "scenario summary was not produced" })
@@ -481,16 +481,16 @@ function Invoke-Us4ReadinessMatrix {
 	}
 	$successful = @($records | Where-Object { $_.success })
 	$report = [ordered]@{
-		version = 1; feature = "043-US4"; modes = @("cold", "warm", "stale", "corrupt", "forced-build")
+		version = 1; feature = "readiness"; modes = @("cold", "warm", "stale", "corrupt", "forced-build")
 		# A successful scenario writes its own source/cache/readiness evidence. The
 		# matrix deliberately does not reinterpret provider-specific reason strings.
 		complete = ($successful.Count -eq 5)
 		runs = @($records)
 	}
-	$reportPath = Join-Path $matrixRoot "us4-readiness-matrix-summary.json"
+	$reportPath = Join-Path $matrixRoot "readiness-readiness-matrix-summary.json"
 	Write-JsonFile -Path $reportPath -Value $report -Depth 64
-	Write-Output ("US4 readiness matrix report: {0}" -f $reportPath)
-	if (-not $report.complete) { throw "US4 readiness matrix did not produce five successful scenario summaries." }
+	Write-Output ("readiness readiness matrix report: {0}" -f $reportPath)
+	if (-not $report.complete) { throw "readiness readiness matrix did not produce five successful scenario summaries." }
 	exit 0
 }
 
@@ -500,14 +500,14 @@ $resolvedInstallRoot = Get-AbsolutePath -Path $InstallRoot -BasePath $repoRoot
 $resolvedWorkRoot = Get-AbsolutePath -Path $WorkRoot -BasePath $repoRoot
 Assert-PathBelow -Parent $outRoot -Child $resolvedWorkRoot
 
-if ($RunUs3WorkerMatrix -and $RunUs4ReadinessMatrix) {
-	throw "Run the US3 worker matrix and US4 readiness matrix separately so their project-reuse rules remain unambiguous."
+if ($RunWorkerScalingMatrix -and $RunReadinessMatrix) {
+	throw "Run the worker-scaling worker matrix and readiness readiness matrix separately so their project-reuse rules remain unambiguous."
 }
-if ($RunUs3WorkerMatrix) {
-	Invoke-Us3WorkerMatrix
+if ($RunWorkerScalingMatrix) {
+	Invoke-WorkerScalingMatrix
 }
-if ($RunUs4ReadinessMatrix) {
-	Invoke-Us4ReadinessMatrix
+if ($RunReadinessMatrix) {
+	Invoke-ReadinessMatrix
 }
 
 $editorDirectory = Join-Path $resolvedInstallRoot "Editor"
@@ -519,7 +519,7 @@ if (-not (Test-LoopbackPortAvailable -Port $McpPort)) {
 	throw "MCP port $McpPort is already occupied. Choose a free explicit -McpPort; the editor intentionally does not randomize this endpoint."
 }
 
-if ((Test-Path -LiteralPath $resolvedWorkRoot) -and $Us4ReadinessMode -eq "none") {
+if ((Test-Path -LiteralPath $resolvedWorkRoot) -and $ReadinessMode -eq "none") {
 	# The path-below-out check above makes this recursive cleanup safe. The stress
 	# project is disposable, including its generated 10,000-object scene.
 	Remove-Item -LiteralPath $resolvedWorkRoot -Recurse -Force
@@ -541,7 +541,7 @@ $derivedScenesRoot = Join-Path $projectRoot "Library/DerivedScenes"
 $managedOutputRoot = Join-Path $projectRoot "Build/Assembly-CSharp"
 $managedReadinessManifestPath = Join-Path $managedOutputRoot "ManagedReadiness.manifest.json"
 $projectAlreadyExists = Test-Path -LiteralPath $scenePath -PathType Leaf
-$us4ScenarioSummaryPath = if ($Us4ReadinessMode -eq "none") { $null } else { Join-Path $evidenceRoot ("us4-{0}-summary.json" -f $Us4ReadinessMode) }
+$readinessScenarioSummaryPath = if ($ReadinessMode -eq "none") { $null } else { Join-Path $evidenceRoot ("readiness-{0}-summary.json" -f $ReadinessMode) }
 $startTime = Get-Date
 $monotonicFrequency = [double][System.Diagnostics.Stopwatch]::Frequency
 $monotonicStartTicks = [System.Diagnostics.Stopwatch]::GetTimestamp()
@@ -558,35 +558,35 @@ $profilerCaptureSummary = $null
 $profilerCaptureSucceeded = $false
 $profilerCaptureStartedAtMs = $null
 $profilerCaptureStoppedAtMs = $null
-$us5ProfilerGateError = $null
-$us5Profiler = [ordered]@{
-	requested = [bool]$RunUs5ProfilerChecks; captureLevel = $CaptureLevel
+$profilerCaptureGateError = $null
+$profilerCapture = [ordered]@{
+	requested = [bool]$RunProfilerCaptureChecks; captureLevel = $CaptureLevel
 	requestedVersion = $CaptureVersion; durationSeconds = $CaptureDurationSeconds
 	sizeGateBytes = 10MB; sizeGatePassed = $null; artifactBytes = $null
 	versionAccepted = $null; recoveryProbe = $null; metricAvailability = $null
 	comparableBaseline = $null; compatibility = "unknown"
 }
 $authoringWalkthrough = [ordered]@{ requested = [bool]$RunAuthoringWalkthrough; completed = $false }
-$us4Readiness = [ordered]@{
-	requested = ($Us4ReadinessMode -ne "none"); mode = $Us4ReadinessMode
+$readiness = [ordered]@{
+	requested = ($ReadinessMode -ne "none"); mode = $ReadinessMode
 	projectReused = $projectAlreadyExists; preparation = $null; startup = $null
 	forcedCompile = $null; final = $null; sourceAuthority = $null
 }
 # Paused and unchanged probes deliberately issue no Next request after the editor
 # reaches its protected paused boundary; active scenarios retain the requested loop.
-$measuredExplicitStepCount = if ($Us3Scenario -eq "paused" -or $Us3Scenario -eq "unchanged") { 0 } else { $ExplicitStepCount }
-$us2Matrix = [ordered]@{
-	requested = [bool]$RunUs2IncrementalMatrix; completed = $false
+$measuredExplicitStepCount = if ($WorkerScalingScenario -eq "paused" -or $WorkerScalingScenario -eq "unchanged") { 0 } else { $ExplicitStepCount }
+$colliderCookMatrix = [ordered]@{
+	requested = [bool]$RunColliderCookIncrementalMatrix; completed = $false
 	reparent = $null; conflict = $null; stale = $null; unchanged = $null; active = $null
 }
-$us3ScenarioEvidence = [ordered]@{ scenario = $Us3Scenario; paused = ($Us3Scenario -eq "paused"); unchanged = $false; fromTick = $null; toTick = $null; nextRequests = $measuredExplicitStepCount; synchronization = $null }
+$workerScalingScenarioEvidence = [ordered]@{ scenario = $WorkerScalingScenario; paused = ($WorkerScalingScenario -eq "paused"); unchanged = $false; fromTick = $null; toTick = $null; nextRequests = $measuredExplicitStepCount; synchronization = $null }
 $sceneViewEvidence = [ordered]@{ scenario = $SceneViewScenario; configured = $null; effective = $null; state = $null }
-$us6Loopback = [ordered]@{
-	requested = [bool]$RunUs6Loopback; completed = $false
+$managedReloadAutomationLoopback = [ordered]@{
+	requested = [bool]$RunManagedReloadAutomationLoopback; completed = $false
 	managedReload = $null; runtimeDiscovery = $null; customGravity = $null; events = $null
 }
-$us6EvidenceCompleteness = [ordered]@{
-	requested = [bool]$RunUs6Loopback; complete = $false; checks = $null
+$managedReloadAutomationEvidenceCompleteness = [ordered]@{
+	requested = [bool]$RunManagedReloadAutomationLoopback; complete = $false; checks = $null
 }
 $unavailableMetrics = [System.Collections.Generic.List[string]]::new()
 $unavailableMetrics.Add("nativePhysicsStagePercentiles")
@@ -594,7 +594,7 @@ $unavailableMetrics.Add("workerUtilizationHistory")
 $unavailableMetrics.Add("protectedBoundaryStallHistory")
 $unavailableMetrics.Add("frameResponsiveness")
 $unavailableMetrics.Add("profilerCaptureUnlessGeneratedByEditor")
-$us5RequiredMetrics = @("physics", "sceneView", "scheduler", "protectedBoundary", "responsiveness", "presentation", "workVolume")
+$profilerCaptureRequiredMetrics = @("physics", "sceneView", "scheduler", "protectedBoundary", "responsiveness", "presentation", "workVolume")
 $lastDiagnosticsCaptureMs = -5000.0
 $hardwareEvidence = Get-HardwareEvidence
 $resolvedWorkerCount = if ($WorkerCount -eq "max" -or $WorkerCount -eq "0") { [int][Math]::Max(1, [Environment]::ProcessorCount) } else { [int]$WorkerCount }
@@ -610,13 +610,13 @@ $runSucceeded = $false
 $rpcId = 0
 
 try {
-	if ($RunUs6Loopback -and -not $RunUs2IncrementalMatrix) {
-		throw "US6 evidence completeness requires -RunUs2IncrementalMatrix so rollback and protected-boundary visibility are proven in the same run."
+	if ($RunManagedReloadAutomationLoopback -and -not $RunColliderCookIncrementalMatrix) {
+		throw "managed-reload-automation evidence completeness requires -RunColliderCookIncrementalMatrix so rollback and protected-boundary visibility are proven in the same run."
 	}
 	Start-Stage -Name "projectAndSceneGeneration"
 	New-Item -ItemType Directory -Force -Path (Split-Path -Parent $scenePath), (Split-Path -Parent $projectSettingsPath), (Split-Path -Parent $lastScenePath), (Split-Path -Parent $editorLayoutIniPath), $evidenceRoot | Out-Null
-	if ($Us4ReadinessMode -ne "none" -and -not $projectAlreadyExists -and $Us4ReadinessMode -ne "cold") {
-		throw "US4 '$Us4ReadinessMode' requires the disposable source project created by the preceding cold scenario."
+	if ($ReadinessMode -ne "none" -and -not $projectAlreadyExists -and $ReadinessMode -ne "cold") {
+		throw "readiness '$ReadinessMode' requires the disposable source project created by the preceding cold scenario."
 	}
 
 	# These are the exact editor-wide preference keys consumed by ProjectManager.
@@ -725,12 +725,12 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 		throw "ActiveDynamicCount plus the scenario's kinematic coverage must leave at least one static body."
 	}
 	$staticCount = $ObjectCount - $dynamicCount - $kinematicCount
-	# Keep one high dynamic body free of built-in gravity during the optional US6
+	# Keep one high dynamic body free of built-in gravity during the optional managed-reload-automation
 	# run. A mass-independent acceleration command is then the only source of its
 	# first downward velocity, making idempotent custom-gravity behavior observable.
-	$us6TargetIndex = [int][Math]::Min($dynamicCount - 1, 1950)
-	$us6TargetId = Get-StableGuid -Value ([UInt64]($us6TargetIndex + 1))
-	$us6TargetPosition = $null
+	$managedReloadAutomationTargetIndex = [int][Math]::Min($dynamicCount - 1, 1950)
+	$managedReloadAutomationTargetId = Get-StableGuid -Value ([UInt64]($managedReloadAutomationTargetIndex + 1))
+	$managedReloadAutomationTargetPosition = $null
 	$objects = [System.Collections.Generic.List[object]]::new()
 	$emptyGuid = "00000000000000000000000000000000"
 	for ($index = 0; $index -lt $ObjectCount; ++$index) {
@@ -758,7 +758,7 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 		$body = [ordered]@{
 			active = $true; schemaVersion = 1; motionType = if ($isDynamic) { "Dynamic" } elseif ($isKinematic) { "Kinematic" } else { "Static" }
 			massMode = "ExplicitMass"; mass = 1.0; linearDamping = 0.02; angularDamping = 0.05
-			useGravity = $isDynamic -and -not ($RunUs6Loopback -and $index -eq $us6TargetIndex); allowSleeping = $true; startAwake = -not $isStaticBody; continuousCollisionMode = "Discrete"
+			useGravity = $isDynamic -and -not ($RunManagedReloadAutomationLoopback -and $index -eq $managedReloadAutomationTargetIndex); allowSleeping = $true; startAwake = -not $isStaticBody; continuousCollisionMode = "Discrete"
 			initialLinearVelocity = @(0.0, 0.0, 0.0); initialAngularVelocity = @(0.0, 0.0, 0.0)
 			maxLinearVelocity = 500.0; maxAngularVelocity = 100.0; allowedDegreesOfFreedom = 63
 			interpolationMode = "Interpolate"; collisionLayerId = 0; useCollisionMaskOverride = $false
@@ -782,7 +782,7 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 			}
 			children = @()
 		})
-		if ($index -eq $us6TargetIndex) { $us6TargetPosition = @($position) }
+		if ($index -eq $managedReloadAutomationTargetIndex) { $managedReloadAutomationTargetPosition = @($position) }
 	}
 	$scene = [ordered]@{
 		name = "Installed Physics Stress"
@@ -795,12 +795,12 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 	# The readiness matrix never deletes authored input. Cold clears only
 	# disposable derived/readiness output, stale changes the disposable source
 	# copy by whitespace only, and corrupt damages exactly one derived artifact.
-	if ($Us4ReadinessMode -ne "none") {
-		Start-Stage -Name "us4ScenarioPreparation"
+	if ($ReadinessMode -ne "none") {
+		Start-Stage -Name "readinessScenarioPreparation"
 		$sourceHashBeforePreparation = (Get-FileHash -LiteralPath $scenePath -Algorithm SHA256).Hash
 		$preparedArtifacts = @(Get-ArtifactInventory -Root $projectRoot)
 		$mutation = "none"
-		switch ($Us4ReadinessMode) {
+		switch ($ReadinessMode) {
 			"cold" {
 				# The manifest is cache metadata, not project authority. Removing it
 				# requests a real cold managed-readiness validation without deleting a
@@ -819,17 +819,17 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 			}
 			"corrupt" {
 				$derivedArtifact = @(Get-ChildItem -LiteralPath $derivedScenesRoot -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1)
-				if ($derivedArtifact.Count -ne 1) { throw "US4 corrupt requires an existing disposable derived-scene artifact from an earlier scenario." }
+				if ($derivedArtifact.Count -ne 1) { throw "readiness corrupt requires an existing disposable derived-scene artifact from an earlier scenario." }
 				[System.IO.File]::WriteAllBytes($derivedArtifact[0].FullName, [byte[]]@(0x55, 0x53, 0x34))
 				$mutation = "damaged disposable derived artifact '$($derivedArtifact[0].FullName)'"
 			}
 		}
 		$sourceHashAfterPreparation = (Get-FileHash -LiteralPath $scenePath -Algorithm SHA256).Hash
-		$us4Readiness.preparation = [ordered]@{
+		$readiness.preparation = [ordered]@{
 			mutation = $mutation; sourceSha256Before = $sourceHashBeforePreparation; sourceSha256After = $sourceHashAfterPreparation
 			artifactInventoryBefore = $preparedArtifacts; artifactInventoryAfter = @(Get-ArtifactInventory -Root $projectRoot)
 		}
-		Complete-Stage -Name "us4ScenarioPreparation"
+		Complete-Stage -Name "readinessScenarioPreparation"
 	}
 	$authoredSceneHashBefore = (Get-FileHash -LiteralPath $scenePath -Algorithm SHA256).Hash
 	Complete-Stage -Name "projectAndSceneGeneration"
@@ -844,7 +844,7 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 	$startInfo.EnvironmentVariables["TERRAENGINE_SUPPRESS_PROJECT_RECENTS"] = "1"
 	# The canonical run leaves worker discovery entirely to the native pool. Remove
 	# an inherited override as well, so a parent shell cannot accidentally cap the
-	# installed editor. Explicit 1/2/4 values remain available only for FR-046's
+	# installed editor. Explicit 1/2/4 values remain available only for worker-scaling thresholds's
 	# controlled worker-scaling comparison matrix.
 	if ($WorkerCount -eq "max" -or $WorkerCount -eq "0") {
 		$startInfo.EnvironmentVariables.Remove("TERRAENGINE_THREADPOOL_WORKERS")
@@ -902,20 +902,20 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 	$tools = Invoke-McpRpc -Method "tools/list"
 	$toolNames = @($tools.result.tools | ForEach-Object { $_.name })
 	$requiredTools = @("play.enter", "play.pause", "play.step", "play.exit", "physics.state", "physics.diagnostics.get", "diagnostics.get_summary", "profiler.capture.start", "profiler.capture.stop", "profiler.capture.list", "profiler.capture.summary", "jobs.get", "scene_view.state", "scene_view.settings.get", "scene_view.settings.set")
-	if ($Us4ReadinessMode -ne "none") {
+	if ($ReadinessMode -ne "none") {
 		# These additive read surfaces are the contract evidence for source-versus-
 		# derived startup decisions and managed-output reuse. Forced build also uses
 		# the existing durable script.compile job contract.
 		$requiredTools += @("project.state", "script.status")
-		if ($Us4ReadinessMode -eq "forced-build") { $requiredTools += "script.compile" }
+		if ($ReadinessMode -eq "forced-build") { $requiredTools += "script.compile" }
 	}
-	if ($RunUs2IncrementalMatrix) {
+	if ($RunColliderCookIncrementalMatrix) {
 		$requiredTools += @("project.state", "scene.list_objects", "scene.save", "transaction.execute", "history.state", "history.undo", "physics.body.inspect")
 	}
 	if ($RunAuthoringWalkthrough) {
 		$requiredTools += @("object.create", "object.set_metadata", "scene.list_objects", "scene.save", "transaction.execute", "history.state", "history.undo", "history.redo", "prefab.create", "prefab.instantiate", "prefab.overrides.inspect", "prefab.overrides.apply", "prefab.overrides.revert")
 	}
-	if ($RunUs6Loopback) {
+	if ($RunManagedReloadAutomationLoopback) {
 		$requiredTools += @("scene.save", "script.compile", "physics.body.inspect", "physics.body.apply_force", "physics.raycast", "physics.query_job.get", "physics.contacts.list")
 	}
 	foreach ($requiredTool in $requiredTools) {
@@ -1021,7 +1021,7 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 		}
 	}
 
-	function Capture-Us4ReadinessEvidence {
+	function Capture-ReadinessEvidence {
 		param([Parameter(Mandatory = $true)][string] $Phase)
 		# Keep raw additive contract data in the summary. This avoids guessing
 		# provider-specific cache reasons while preserving derived-scene fallback,
@@ -1029,9 +1029,9 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 		$projectState = Invoke-Tool -Name "project.state"
 		$scriptStatus = Invoke-Tool -Name "script.status"
 		if ($null -eq $projectState.data.derivedScene -or $null -eq $projectState.data.readiness) {
-			throw "US4 project.state did not provide derived-scene and readiness evidence."
+			throw "readiness project.state did not provide derived-scene and readiness evidence."
 		}
-		if ($null -eq $scriptStatus.data) { throw "US4 script.status did not provide readiness evidence." }
+		if ($null -eq $scriptStatus.data) { throw "readiness script.status did not provide readiness evidence." }
 		return [ordered]@{
 			phase = $Phase; timestamp = (Get-Date).ToString("o"); monotonicMs = Get-MonotonicMilliseconds
 			projectState = $projectState.data; scriptStatus = $scriptStatus.data
@@ -1098,19 +1098,19 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 	if ($initialPlayState.data.currentState -ne "stopped") {
 		throw "The clean editor was not stopped after its initial managed build."
 	}
-	if ($Us4ReadinessMode -ne "none") {
-		Start-Stage -Name "us4ReadinessEvidence"
-		$us4Readiness.startup = Capture-Us4ReadinessEvidence -Phase "startup-ready"
-		$derivedStartup = $us4Readiness.startup.projectState.derivedScene
-		$scriptReadinessStartup = $us4Readiness.startup.scriptStatus.readiness
-		$derivedExpectation = switch ($Us4ReadinessMode) {
+	if ($ReadinessMode -ne "none") {
+		Start-Stage -Name "readinessEvidence"
+		$readiness.startup = Capture-ReadinessEvidence -Phase "startup-ready"
+		$derivedStartup = $readiness.startup.projectState.derivedScene
+		$scriptReadinessStartup = $readiness.startup.scriptStatus.readiness
+		$derivedExpectation = switch ($ReadinessMode) {
 			"warm" { [bool]$derivedStartup.cacheHit }
 			"cold" { -not [bool]$derivedStartup.cacheHit -and [bool]$derivedStartup.usedAuthoritativeSource -and [bool]$derivedStartup.regenerationPublished }
 			"stale" { -not [bool]$derivedStartup.cacheHit -and [bool]$derivedStartup.usedAuthoritativeSource -and [bool]$derivedStartup.regenerationPublished }
 			"corrupt" { -not [bool]$derivedStartup.cacheHit -and [bool]$derivedStartup.usedAuthoritativeSource -and [bool]$derivedStartup.regenerationPublished }
 			default { $true }
 		}
-		$us4Readiness.startupValidation = [ordered]@{
+		$readiness.startupValidation = [ordered]@{
 			derivedExpectationMet = $derivedExpectation
 			cacheHit = [bool]$derivedStartup.cacheHit
 			usedAuthoritativeSource = [bool]$derivedStartup.usedAuthoritativeSource
@@ -1118,28 +1118,28 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 			derivedReason = [string]$derivedStartup.reason
 			managedReadiness = $scriptReadinessStartup
 		}
-		if (-not $derivedExpectation) { throw "US4 '$Us4ReadinessMode' did not publish the required derived-scene cache/fallback/regeneration outcome." }
-		if ($Us4ReadinessMode -eq "forced-build") {
-			if (-not [bool]$scriptReadinessStartup.cache.hit) { throw "US4 forced-build requires a warm managed-readiness hit before its explicit rebuild." }
+		if (-not $derivedExpectation) { throw "readiness '$ReadinessMode' did not publish the required derived-scene cache/fallback/regeneration outcome." }
+		if ($ReadinessMode -eq "forced-build") {
+			if (-not [bool]$scriptReadinessStartup.cache.hit) { throw "readiness forced-build requires a warm managed-readiness hit before its explicit rebuild." }
 			# A warm output is intentionally present from the previous scenario. This
 			# public request must still rebuild and complete as a durable job.
 			$compile = Invoke-Tool -Name "script.compile" -Arguments ([ordered]@{
-				profile = "RelWithDebInfo"; correlationId = "us4-forced-managed-build"
+				profile = "RelWithDebInfo"; correlationId = "readiness-forced-managed-build"
 			})
-			if (-not [bool]$compile.data.forcedBuild) { throw "US4 forced build was not acknowledged as cache-bypassing." }
+			if (-not [bool]$compile.data.forcedBuild) { throw "readiness forced build was not acknowledged as cache-bypassing." }
 			$compileJobId = [string]$compile.data.jobId
-			if ([string]::IsNullOrWhiteSpace($compileJobId)) { throw "US4 forced build did not return a durable job ID." }
-			$compileJob = Wait-AutomationJob -JobId $compileJobId -Operation "US4 forced managed build"
-			$us4Readiness.forcedCompile = [ordered]@{
+			if ([string]::IsNullOrWhiteSpace($compileJobId)) { throw "readiness forced build did not return a durable job ID." }
+			$compileJob = Wait-AutomationJob -JobId $compileJobId -Operation "readiness forced managed build"
+			$readiness.forcedCompile = [ordered]@{
 				accepted = $compile.data; jobId = $compileJobId; durableResult = $compileJob
-				postBuild = Capture-Us4ReadinessEvidence -Phase "forced-build-complete"
+				postBuild = Capture-ReadinessEvidence -Phase "forced-build-complete"
 			}
 		}
-		Complete-Stage -Name "us4ReadinessEvidence"
+		Complete-Stage -Name "readinessEvidence"
 	}
 
-	if ($RunUs2IncrementalMatrix) {
-		Start-Stage -Name "us2StoppedMutationMatrix"
+	if ($RunColliderCookIncrementalMatrix) {
+		Start-Stage -Name "collider-cookStoppedMutationMatrix"
 		# Use two real physics objects from the generated stress scene. The exact
 		# reparent is immediately undone before Play Mode so the performance fixture
 		# remains byte-for-byte equivalent after its normalizing save.
@@ -1153,60 +1153,60 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 		$reparent = Invoke-Tool -Name "transaction.execute" -Arguments ([ordered]@{
 			operations = @([ordered]@{ kind = "object.set_parent"; target = $childId; parent = $parentId })
 			expectedSceneGeneration = $sceneGeneration
-			label = "T079 installed physics reparent"
-			correlationId = "t079-us2-reparent"
-			idempotencyKey = "t079-us2-reparent"
+			label = "collider-cook matrix installed physics reparent"
+			correlationId = "collider-cook-collider-cook-reparent"
+			idempotencyKey = "collider-cook-collider-cook-reparent"
 		})
-		if ([int]$reparent.data.appliedOperationCount -ne 1) { throw "T079 reparent did not commit exactly one typed operation." }
+		if ([int]$reparent.data.appliedOperationCount -ne 1) { throw "collider-cook matrix reparent did not commit exactly one typed operation." }
 		$historyAfterReparent = Invoke-Tool -Name "history.state"
 		$reparentUndo = Invoke-Tool -Name "history.undo" -Arguments ([ordered]@{ expectedSequence = [UInt64]$historyAfterReparent.data.sequence })
 		$restoredRoots = Invoke-Tool -Name "scene.list_objects" -Arguments ([ordered]@{ search = $childName })
 		$restoredChild = @($restoredRoots.data.objects | Where-Object { [string]$_.uuid -eq $childId -and $null -eq $_.parent })
-		if ($restoredChild.Count -ne 1) { throw "T079 reparent undo did not restore the physics child as an exact root." }
+		if ($restoredChild.Count -ne 1) { throw "collider-cook matrix reparent undo did not restore the physics child as an exact root." }
 
 		# A deliberately stale scene generation must reject before any write. Search
 		# both names afterward so the evidence proves the prior name survived and the
 		# conflicting value never became partially visible.
-		$conflictName = "T079 MUST NOT COMMIT"
+		$conflictName = "collider-cook matrix MUST NOT COMMIT"
 		$conflict = Invoke-ToolExpectFailure -Name "transaction.execute" -Arguments ([ordered]@{
 			operations = @([ordered]@{ kind = "object.set_metadata"; target = $childId; name = $conflictName })
 			expectedSceneGeneration = [UInt64]::MaxValue
-			label = "T079 installed stale conflict"
-			correlationId = "t079-us2-conflict"
-			idempotencyKey = "t079-us2-conflict"
+			label = "collider-cook matrix installed stale conflict"
+			correlationId = "collider-cook-collider-cook-conflict"
+			idempotencyKey = "collider-cook-collider-cook-conflict"
 		})
-		if ([string]$conflict.error.category -ne "stale_target") { throw "T079 stale transaction returned '$($conflict.error.category)' instead of stale_target." }
+		if ([string]$conflict.error.category -ne "stale_target") { throw "collider-cook matrix stale transaction returned '$($conflict.error.category)' instead of stale_target." }
 		$conflictLeak = Invoke-Tool -Name "scene.list_objects" -Arguments ([ordered]@{ search = $conflictName })
 		$unchangedRoot = Invoke-Tool -Name "scene.list_objects" -Arguments ([ordered]@{ search = $childName })
 		if (@($conflictLeak.data.objects).Count -ne 0 -or @($unchangedRoot.data.objects | Where-Object { [string]$_.uuid -eq $childId }).Count -ne 1) {
-			throw "T079 stale conflict changed live scene state before rejection."
+			throw "collider-cook matrix stale conflict changed live scene state before rejection."
 		}
 
 		[void](Invoke-Tool -Name "scene.save")
 		$authoredSceneHashBefore = (Get-FileHash -LiteralPath $scenePath -Algorithm SHA256).Hash
-		$us2Matrix.reparent = [ordered]@{
+		$colliderCookMatrix.reparent = [ordered]@{
 			child = $childId; parent = $parentId; transactionId = [string]$reparent.data.transactionId
 			visibilityBoundary = [string]$reparent.data.visibilityBoundary; undoHistoryId = [string]$reparentUndo.data.historyId
 			initialHistoryDepth = [int]$historyBeforeReparent.data.undoDepth; restoredAsRoot = $true
 		}
-		$us2Matrix.conflict = [ordered]@{
+		$colliderCookMatrix.conflict = [ordered]@{
 			expectedSceneGeneration = [UInt64]::MaxValue; actualSceneGeneration = $sceneGeneration
 			category = [string]$conflict.error.category; message = Get-RejectionMessage -Envelope $conflict; partialVisibility = $false
 		}
-		Complete-Stage -Name "us2StoppedMutationMatrix"
+		Complete-Stage -Name "collider-cookStoppedMutationMatrix"
 	}
 
-	if ($RunUs6Loopback) {
-		Start-Stage -Name "us6ManagedReload"
+	if ($RunManagedReloadAutomationLoopback) {
+		Start-Stage -Name "managed-reload-automationManagedReload"
 		# Use the public durable compilation job rather than relying solely on the
 		# editor's implicit clean-project build. This proves the installed managed
 		# assembly can cross a second reload boundary in RelWithDebInfo.
-		$compile = Invoke-Tool -Name "script.compile" -Arguments ([ordered]@{ profile = "RelWithDebInfo"; correlationId = "us6-managed-reload" })
+		$compile = Invoke-Tool -Name "script.compile" -Arguments ([ordered]@{ profile = "RelWithDebInfo"; correlationId = "managed-reload-automation-managed-reload" })
 		$compileJobId = [string]$compile.data.jobId
-		if ([string]::IsNullOrWhiteSpace($compileJobId)) { throw "US6 script.compile did not return a durable job ID." }
-		$compileJob = Wait-AutomationJob -JobId $compileJobId -Operation "US6 managed reload"
-		if ([string]$compileJob.correlationId -ne "us6-managed-reload") { throw "US6 managed reload lost its correlation ID." }
-		$us6Loopback.managedReload = [ordered]@{
+		if ([string]::IsNullOrWhiteSpace($compileJobId)) { throw "managed-reload-automation script.compile did not return a durable job ID." }
+		$compileJob = Wait-AutomationJob -JobId $compileJobId -Operation "managed-reload-automation managed reload"
+		if ([string]$compileJob.correlationId -ne "managed-reload-automation-managed-reload") { throw "managed-reload-automation managed reload lost its correlation ID." }
+		$managedReloadAutomationLoopback.managedReload = [ordered]@{
 			jobId = $compileJobId; state = [string]$compileJob.state; correlationId = [string]$compileJob.correlationId
 			result = $compileJob.result
 		}
@@ -1217,7 +1217,7 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 			[void](Invoke-Tool -Name "scene.save")
 			$authoredSceneHashBefore = (Get-FileHash -LiteralPath $scenePath -Algorithm SHA256).Hash
 		}
-		Complete-Stage -Name "us6ManagedReload"
+		Complete-Stage -Name "managed-reload-automationManagedReload"
 	}
 
 	if ($RunAuthoringWalkthrough) {
@@ -1319,7 +1319,7 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 	if (-not $physicsReady) { throw "Physics did not publish advancing ticks with at least $ObjectCount bodies before the timeout." }
 	Capture-EditorProcessMemory -Phase "physics-live" -Tick $previousTick
 	Complete-Stage -Name "physicsLive"
-	if ($RunUs2IncrementalMatrix) {
+	if ($RunColliderCookIncrementalMatrix) {
 		# World generation is validated before body lookup, so this probe does not
 		# depend on a provider-private handle or a guessed component generation.
 		$currentWorldGeneration = [UInt64]$state.worldGeneration
@@ -1327,66 +1327,66 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 		$stale = Invoke-ToolExpectFailure -Name "physics.body.inspect" -Arguments ([ordered]@{
 			target = [ordered]@{ objectId = $childId; componentGeneration = [UInt64]1; worldGeneration = $staleWorldGeneration }
 		})
-		if ([string]$stale.error.category -ne "conflict") { throw "T079 stale physics target returned '$($stale.error.category)' instead of conflict." }
-		$us2Matrix.stale = [ordered]@{
+		if ([string]$stale.error.category -ne "conflict") { throw "collider-cook matrix stale physics target returned '$($stale.error.category)' instead of conflict." }
+		$colliderCookMatrix.stale = [ordered]@{
 			objectId = $childId; currentWorldGeneration = $currentWorldGeneration; staleWorldGeneration = $staleWorldGeneration
 			category = [string]$stale.error.category; message = Get-RejectionMessage -Envelope $stale; partialVisibility = $false
 		}
 	}
 
-	if ($RunUs6Loopback) {
-		Start-Stage -Name "us6RuntimeDiscovery"
-		$us6WorldGeneration = [UInt64]$state.worldGeneration
+	if ($RunManagedReloadAutomationLoopback) {
+		Start-Stage -Name "managed-reload-automationRuntimeDiscovery"
+		$managedReloadAutomationWorldGeneration = [UInt64]$state.worldGeneration
 		# Discover the target through a real bounded query job. The high, gravity-
 		# disabled fixture body is the first hit along this vertical ray, and the hit
 		# supplies the exact component generation needed by every later command.
 		$raycast = Invoke-Tool -Name "physics.raycast" -Arguments ([ordered]@{
-			worldGeneration = $us6WorldGeneration
-			origin = @([double]$us6TargetPosition[0], 100.0, [double]$us6TargetPosition[2])
+			worldGeneration = $managedReloadAutomationWorldGeneration
+			origin = @([double]$managedReloadAutomationTargetPosition[0], 100.0, [double]$managedReloadAutomationTargetPosition[2])
 			direction = @(0.0, -1.0, 0.0); distance = 200.0; maximumHits = 64
 			batchSize = 1; layerMask = [UInt32]::MaxValue; includeTriggers = $false
-			correlationId = "us6-target-raycast"
+			correlationId = "managed-reload-automation-target-raycast"
 		})
 		$raycastJobId = [string]$raycast.data.jobId
-		if ([string]::IsNullOrWhiteSpace($raycastJobId)) { throw "US6 physics.raycast did not return a durable query job ID." }
-		$raycastJob = Wait-AutomationJob -JobId $raycastJobId -Operation "US6 target raycast" -PollTool "physics.query_job.get"
-		$targetHits = @($raycastJob.result.hits | Where-Object { [string]$_.objectId -eq $us6TargetId })
-		if ($targetHits.Count -ne 1) { throw "US6 target raycast did not return the dedicated custom-gravity body exactly once." }
+		if ([string]::IsNullOrWhiteSpace($raycastJobId)) { throw "managed-reload-automation physics.raycast did not return a durable query job ID." }
+		$raycastJob = Wait-AutomationJob -JobId $raycastJobId -Operation "managed-reload-automation target raycast" -PollTool "physics.query_job.get"
+		$targetHits = @($raycastJob.result.hits | Where-Object { [string]$_.objectId -eq $managedReloadAutomationTargetId })
+		if ($targetHits.Count -ne 1) { throw "managed-reload-automation target raycast did not return the dedicated custom-gravity body exactly once." }
 		$targetHit = $targetHits[0]
-		$us6Target = [ordered]@{
-			objectId = $us6TargetId
+		$managedReloadAutomationTarget = [ordered]@{
+			objectId = $managedReloadAutomationTargetId
 			componentGeneration = [UInt64]$targetHit.componentGeneration
-			worldGeneration = $us6WorldGeneration
+			worldGeneration = $managedReloadAutomationWorldGeneration
 		}
-		$bodyBefore = Get-PhysicsSnapshot -Envelope (Invoke-Tool -Name "physics.body.inspect" -Arguments ([ordered]@{ target = $us6Target }))
+		$bodyBefore = Get-PhysicsSnapshot -Envelope (Invoke-Tool -Name "physics.body.inspect" -Arguments ([ordered]@{ target = $managedReloadAutomationTarget }))
 		$diagnosticsBefore = Get-PhysicsSnapshot -Envelope (Invoke-Tool -Name "physics.diagnostics.get" -Arguments ([ordered]@{ includeFailures = $true }))
-		if (@($diagnosticsBefore.data.scheduler).Count -lt 1) { throw "US6 physics diagnostics did not expose scheduler declarations." }
-		$us6Loopback.runtimeDiscovery = [ordered]@{
-			worldGeneration = $us6WorldGeneration; target = $us6Target; raycastJobId = $raycastJobId
+		if (@($diagnosticsBefore.data.scheduler).Count -lt 1) { throw "managed-reload-automation physics diagnostics did not expose scheduler declarations." }
+		$managedReloadAutomationLoopback.runtimeDiscovery = [ordered]@{
+			worldGeneration = $managedReloadAutomationWorldGeneration; target = $managedReloadAutomationTarget; raycastJobId = $raycastJobId
 			raycastState = [string]$raycastJob.state; raycastHitCount = @($raycastJob.result.hits).Count
 			bodyBefore = $bodyBefore; schedulerDeclarationCount = @($diagnosticsBefore.data.scheduler).Count
 		}
-		Complete-Stage -Name "us6RuntimeDiscovery"
+		Complete-Stage -Name "managed-reload-automationRuntimeDiscovery"
 	}
 
 	Start-Stage -Name "pause"
 	$pause = Invoke-Tool -Name "play.pause" -Arguments ([ordered]@{ expectedState = "playing"; correlationId = "installed-physics-stress-pause" })
 	$pausedState = Wait-StablePausedPhysicsState
 	$pausedTick = [UInt64]$pausedState.tick
-	if ($Us3Scenario -eq "unchanged") {
+	if ($WorkerScalingScenario -eq "unchanged") {
 		# Two immutable reads while paused prove the unchanged workload does not
 		# advance state or enqueue a step request.
 		$unchangedProbe = Get-PhysicsSnapshot -Envelope (Invoke-Tool -Name "physics.state")
-		$us3ScenarioEvidence.fromTick = $pausedTick
-		$us3ScenarioEvidence.toTick = [UInt64]$unchangedProbe.tick
-		$us3ScenarioEvidence.unchanged = ($us3ScenarioEvidence.fromTick -eq $us3ScenarioEvidence.toTick)
-		if (-not $us3ScenarioEvidence.unchanged) { throw "US3 unchanged scenario advanced while paused." }
+		$workerScalingScenarioEvidence.fromTick = $pausedTick
+		$workerScalingScenarioEvidence.toTick = [UInt64]$unchangedProbe.tick
+		$workerScalingScenarioEvidence.unchanged = ($workerScalingScenarioEvidence.fromTick -eq $workerScalingScenarioEvidence.toTick)
+		if (-not $workerScalingScenarioEvidence.unchanged) { throw "worker-scaling unchanged scenario advanced while paused." }
 	}
-	if ($Us3Scenario -eq "paused") {
-		$us3ScenarioEvidence.fromTick = $pausedTick
-		$us3ScenarioEvidence.toTick = $pausedTick
+	if ($WorkerScalingScenario -eq "paused") {
+		$workerScalingScenarioEvidence.fromTick = $pausedTick
+		$workerScalingScenarioEvidence.toTick = $pausedTick
 	}
-	if ($measuredExplicitStepCount -gt 0 -or $RunUs2IncrementalMatrix -or $RunUs6Loopback) {
+	if ($measuredExplicitStepCount -gt 0 -or $RunColliderCookIncrementalMatrix -or $RunManagedReloadAutomationLoopback) {
 		# A playing-frame step can already be complete while its immutable snapshot is
 		# still one publication behind. One untimed Next drains that late publication;
 		# measured requests begin only after the new paused snapshot is stable.
@@ -1407,21 +1407,21 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 		}
 		$pausedState = Wait-StablePausedPhysicsState
 		$pausedTick = [UInt64]$pausedState.tick
-		$us3ScenarioEvidence.synchronization = [ordered]@{
+		$workerScalingScenarioEvidence.synchronization = [ordered]@{
 			requestedNextCount = 1; fromTick = $synchronizationFromTick; toTick = $pausedTick
 			observedTickAdvance = $pausedTick - $synchronizationFromTick; purpose = "drain pre-pause publication lag before measured exact steps"
 		}
 	}
 	Capture-DiagnosticsSummary -Phase "paused" -Force
 	Complete-Stage -Name "pause"
-	if ($RunUs2IncrementalMatrix) {
-		Start-Stage -Name "us2UnchangedWarmup"
+	if ($RunColliderCookIncrementalMatrix) {
+		Start-Stage -Name "collider-cookUnchangedWarmup"
 		# One untimed paused step establishes the steady unchanged-authoring path.
 		# The separately timed/profiler-captured loop below still contains exactly
 		# ExplicitStepCount active steps.
 		$unchangedFromTick = $pausedTick
-		$unchangedStep = Invoke-Tool -Name "play.step" -Arguments ([ordered]@{ expectedState = "paused"; correlationId = "t079-us2-unchanged" })
-		if ([int]$unchangedStep.data.stepsCompleted -ne 1 -or $unchangedStep.data.currentState -ne "paused") { throw "T079 unchanged warmup did not complete exactly one paused frame." }
+		$unchangedStep = Invoke-Tool -Name "play.step" -Arguments ([ordered]@{ expectedState = "paused"; correlationId = "collider-cook-collider-cook-unchanged" })
+		if ([int]$unchangedStep.data.stepsCompleted -ne 1 -or $unchangedStep.data.currentState -ne "paused") { throw "collider-cook matrix unchanged warmup did not complete exactly one paused frame." }
 		$unchangedExpectedTick = $unchangedFromTick + 1
 		$unchangedTick = $unchangedFromTick
 		$unchangedDeadline = (Get-Date).AddSeconds([Math]::Min(30, $StartupTimeoutSeconds))
@@ -1429,16 +1429,16 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 			Start-Sleep -Milliseconds 1
 			$unchangedState = Get-PhysicsSnapshot -Envelope (Invoke-Tool -Name "physics.state")
 			$unchangedTick = [UInt64]$unchangedState.tick
-			if ($unchangedTick -gt $unchangedExpectedTick) { throw "T079 unchanged warmup advanced more than one physics tick." }
+			if ($unchangedTick -gt $unchangedExpectedTick) { throw "collider-cook matrix unchanged warmup advanced more than one physics tick." }
 		}
-		if ($unchangedTick -ne $unchangedExpectedTick) { throw "T079 unchanged warmup did not publish tick $unchangedExpectedTick." }
+		if ($unchangedTick -ne $unchangedExpectedTick) { throw "collider-cook matrix unchanged warmup did not publish tick $unchangedExpectedTick." }
 		$unchangedDiagnostics = Get-PhysicsSnapshot -Envelope (Invoke-Tool -Name "physics.diagnostics.get" -Arguments ([ordered]@{ includeFailures = $true }))
 		if ((-not [bool]$unchangedDiagnostics.data.authoring.snapshotReused) -or
 			([UInt64]$unchangedDiagnostics.data.authoring.changedObjects -ne 0) -or
 			([UInt64]$unchangedDiagnostics.data.preparation.estimatedWorkItems -ne 0)) {
-			throw "T079 unchanged frame rebuilt authoring or preparation work instead of reusing the retained snapshot."
+			throw "collider-cook matrix unchanged frame rebuilt authoring or preparation work instead of reusing the retained snapshot."
 		}
-		$us2Matrix.unchanged = [ordered]@{
+		$colliderCookMatrix.unchanged = [ordered]@{
 			fromTick = $unchangedFromTick; toTick = $unchangedTick
 			snapshotReused = [bool]$unchangedDiagnostics.data.authoring.snapshotReused
 			changedObjects = [UInt64]$unchangedDiagnostics.data.authoring.changedObjects
@@ -1447,32 +1447,32 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 			publicationEntries = [UInt64]$unchangedDiagnostics.data.publication.entries
 		}
 		$pausedTick = $unchangedTick
-		Complete-Stage -Name "us2UnchangedWarmup"
+		Complete-Stage -Name "collider-cookUnchangedWarmup"
 	}
-	if ($RunUs6Loopback) {
-		Start-Stage -Name "us6CustomGravity"
+	if ($RunManagedReloadAutomationLoopback) {
+		Start-Stage -Name "managed-reload-automationCustomGravity"
 		$customGravityArguments = [ordered]@{
-			target = $us6Target; worldGeneration = $us6WorldGeneration
+			target = $managedReloadAutomationTarget; worldGeneration = $managedReloadAutomationWorldGeneration
 			vector = @(0.0, -9.81, 0.0); applicationMode = "Acceleration"; applyOnNextStep = $true
-			idempotencyKey = "us6-custom-gravity-once"; correlationId = "us6-custom-gravity"
+			idempotencyKey = "managed-reload-automation-custom-gravity-once"; correlationId = "managed-reload-automation-custom-gravity"
 		}
 		$customGravity = Invoke-Tool -Name "physics.body.apply_force" -Arguments $customGravityArguments
 		$customGravityReplay = Invoke-Tool -Name "physics.body.apply_force" -Arguments $customGravityArguments
 		if (-not [bool]$customGravity.data.accepted -or [string]$customGravity.data.idempotencyDisposition -ne "new") {
-			throw "US6 custom-gravity command was not accepted as a new typed command."
+			throw "managed-reload-automation custom-gravity command was not accepted as a new typed command."
 		}
 		if (-not [bool]$customGravityReplay.data.accepted -or [string]$customGravityReplay.data.idempotencyDisposition -ne "replay") {
-			throw "US6 duplicate custom-gravity command did not replay the retained receipt."
+			throw "managed-reload-automation duplicate custom-gravity command did not replay the retained receipt."
 		}
 		if ([UInt64]$customGravity.data.commandId -ne [UInt64]$customGravityReplay.data.commandId) {
-			throw "US6 idempotent custom-gravity replay returned a different command ID."
+			throw "managed-reload-automation idempotent custom-gravity replay returned a different command ID."
 		}
 
 		# Consume the queued acceleration at exactly one protected paused boundary.
 		$customGravityFromTick = $pausedTick
-		$customGravityStep = Invoke-Tool -Name "play.step" -Arguments ([ordered]@{ expectedState = "paused"; correlationId = "us6-custom-gravity-step" })
+		$customGravityStep = Invoke-Tool -Name "play.step" -Arguments ([ordered]@{ expectedState = "paused"; correlationId = "managed-reload-automation-custom-gravity-step" })
 		if ([int]$customGravityStep.data.stepsCompleted -ne 1 -or $customGravityStep.data.currentState -ne "paused") {
-			throw "US6 custom-gravity Next request did not complete exactly one paused frame."
+			throw "managed-reload-automation custom-gravity Next request did not complete exactly one paused frame."
 		}
 		$customGravityExpectedTick = $customGravityFromTick + 1
 		$customGravityAfterTick = $customGravityFromTick
@@ -1481,10 +1481,10 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 			Start-Sleep -Milliseconds 1
 			$customGravityState = Get-PhysicsSnapshot -Envelope (Invoke-Tool -Name "physics.state")
 			$customGravityAfterTick = [UInt64]$customGravityState.tick
-			if ($customGravityAfterTick -gt $customGravityExpectedTick) { throw "US6 custom-gravity step advanced more than one physics tick." }
+			if ($customGravityAfterTick -gt $customGravityExpectedTick) { throw "managed-reload-automation custom-gravity step advanced more than one physics tick." }
 		}
-		if ($customGravityAfterTick -ne $customGravityExpectedTick) { throw "US6 custom-gravity step did not publish its expected physics tick." }
-		$bodyAfter = Get-PhysicsSnapshot -Envelope (Invoke-Tool -Name "physics.body.inspect" -Arguments ([ordered]@{ target = $us6Target }))
+		if ($customGravityAfterTick -ne $customGravityExpectedTick) { throw "managed-reload-automation custom-gravity step did not publish its expected physics tick." }
+		$bodyAfter = Get-PhysicsSnapshot -Envelope (Invoke-Tool -Name "physics.body.inspect" -Arguments ([ordered]@{ target = $managedReloadAutomationTarget }))
 		$beforeVerticalVelocity = [double]$bodyBefore.data.linearVelocity[1]
 		$afterVerticalVelocity = [double]$bodyAfter.data.linearVelocity[1]
 		$verticalDelta = $afterVerticalVelocity - $beforeVerticalVelocity
@@ -1492,16 +1492,16 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 		# This deliberately broad deterministic envelope admits damping/float error
 		# while rejecting no application and an accidental duplicate application.
 		if ($verticalDelta -ge -0.05 -or $verticalDelta -le -0.25) {
-			throw "US6 custom gravity changed vertical velocity by $verticalDelta m/s; expected exactly one acceleration application."
+			throw "managed-reload-automation custom gravity changed vertical velocity by $verticalDelta m/s; expected exactly one acceleration application."
 		}
 		$pausedTick = $customGravityAfterTick
-		$us6Loopback.customGravity = [ordered]@{
+		$managedReloadAutomationLoopback.customGravity = [ordered]@{
 			applicationMode = "Acceleration"; commandId = [UInt64]$customGravity.data.commandId
 			firstDisposition = [string]$customGravity.data.idempotencyDisposition; replayDisposition = [string]$customGravityReplay.data.idempotencyDisposition
 			fromTick = $customGravityFromTick; toTick = $customGravityAfterTick
 			verticalVelocityBefore = $beforeVerticalVelocity; verticalVelocityAfter = $afterVerticalVelocity; verticalVelocityDelta = $verticalDelta
 		}
-		Complete-Stage -Name "us6CustomGravity"
+		Complete-Stage -Name "managed-reload-automationCustomGravity"
 	}
 	$stepPublicationSamples = [System.Collections.Generic.List[object]]::new()
 	$profilerBeforeIds = @()
@@ -1509,7 +1509,7 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 		$profilerBefore = Invoke-Tool -Name "profiler.capture.list"
 		$profilerBeforeIds = @($profilerBefore.data.artifacts | ForEach-Object { [string]$_.artifactId })
 		$profilerStartArguments = [ordered]@{ correlationId = "installed-physics-stress-baseline" }
-		if ($RunUs5ProfilerChecks) {
+		if ($RunProfilerCaptureChecks) {
 			# New installed builds accept additive v2 controls while legacy clients
 			# may continue omitting them. V1 artifacts remain load-only compatibility
 			# inputs and are never requested from the v2 recording operation.
@@ -1560,14 +1560,14 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 		Capture-EditorProcessMemory -Phase "paused-step" -Tick $pausedTick
 	}
 	Complete-Stage -Name "explicitStepping"
-	if ($RunUs2IncrementalMatrix) {
+	if ($RunColliderCookIncrementalMatrix) {
 		$activeDiagnostics = Get-PhysicsSnapshot -Envelope (Invoke-Tool -Name "physics.diagnostics.get" -Arguments ([ordered]@{ includeFailures = $true }))
 		if (([UInt64]$activeDiagnostics.data.extraction.totalBodies -lt [UInt64]$ObjectCount) -or
 			([UInt64]$activeDiagnostics.data.extraction.activeBodies -lt 1) -or
 			([UInt64]$activeDiagnostics.data.extraction.extractedBodies -lt 1)) {
-			throw "T079 active matrix did not retain the complete body view and selected active extraction work."
+			throw "collider-cook matrix active matrix did not retain the complete body view and selected active extraction work."
 		}
-		$us2Matrix.active = [ordered]@{
+		$colliderCookMatrix.active = [ordered]@{
 		stepCount = $measuredExplicitStepCount; fromTick = $explicitSteppingStartTick; toTick = $pausedTick
 			totalBodies = [UInt64]$activeDiagnostics.data.extraction.totalBodies
 			activeBodies = [UInt64]$activeDiagnostics.data.extraction.activeBodies
@@ -1580,14 +1580,14 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 			publicationChunks = [UInt64]$activeDiagnostics.data.publication.chunks
 			targetBoundary = [string]$activeDiagnostics.data.publication.targetBoundary
 		}
-		$us2Matrix.completed = $null -ne $us2Matrix.reparent -and $null -ne $us2Matrix.conflict -and $null -ne $us2Matrix.stale -and $null -ne $us2Matrix.unchanged -and $null -ne $us2Matrix.active
-		if (-not $us2Matrix.completed) { throw "T079 US2 matrix did not retain evidence for every required scenario." }
+		$colliderCookMatrix.completed = $null -ne $colliderCookMatrix.reparent -and $null -ne $colliderCookMatrix.conflict -and $null -ne $colliderCookMatrix.stale -and $null -ne $colliderCookMatrix.unchanged -and $null -ne $colliderCookMatrix.active
+		if (-not $colliderCookMatrix.completed) { throw "collider-cook matrix collider-cook matrix did not retain evidence for every required scenario." }
 	}
 	# Detailed scheduler diagnostics can take several frames to serialize for a
 	# 10,000-body scene. Capture them once after the timed interval so observation
 	# never becomes a periodic stall in the performance workload itself.
 	Capture-DiagnosticsSummary -Phase "stepping-complete" -Force
-	if ($RunUs6Loopback) {
+	if ($RunManagedReloadAutomationLoopback) {
 		# Read the immutable event history after the timed interval. Managed event
 		# ordering/reload isolation is covered by the focused ABI integration tests;
 		# this installed call proves the same published packet is live through MCP.
@@ -1597,35 +1597,35 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 		# after the measured interval instead of weakening the event assertion.
 		$eventProbe = [ordered]@{ performed = $false; reason = "retained stress-window contact" }
 		$contacts = Get-PhysicsSnapshot -Envelope (Invoke-Tool -Name "physics.contacts.list" -Arguments ([ordered]@{
-			worldGeneration = $us6WorldGeneration; maximumContacts = 64
+			worldGeneration = $managedReloadAutomationWorldGeneration; maximumContacts = 64
 			fromTick = [UInt64][Math]::Max(0, [double]$pausedTick - 31.0); toTick = $pausedTick
 		}))
 		$contactCount = @($contacts.data.contacts).Count
 		if ($contactCount -lt 1) {
-			Start-Stage -Name "us6ContactEventProbe"
+			Start-Stage -Name "managed-reload-automationContactEventProbe"
 			# Reuse the exact body generations discovered by the installed raycast.
 			# Place that body just above the wide static floor, then give it enough
 			# downward velocity to cross the small gap without tunnelling through its
 			# own height. This creates a real contact manifold; spawning the body deeply
 			# inside a solid would not guarantee a provider contact-added callback.
-			$eventProbePosition = @([double]$us6TargetPosition[0], 0.1, [double]$us6TargetPosition[2])
+			$eventProbePosition = @([double]$managedReloadAutomationTargetPosition[0], 0.1, [double]$managedReloadAutomationTargetPosition[2])
 			$teleport = Invoke-Tool -Name "physics.body.teleport" -Arguments ([ordered]@{
-				target = $us6Target; worldGeneration = $us6WorldGeneration; position = $eventProbePosition
-				applyOnNextStep = $true; idempotencyKey = "us6-contact-probe-teleport"; correlationId = "us6-contact-probe-teleport"
+				target = $managedReloadAutomationTarget; worldGeneration = $managedReloadAutomationWorldGeneration; position = $eventProbePosition
+				applyOnNextStep = $true; idempotencyKey = "managed-reload-automation-contact-probe-teleport"; correlationId = "managed-reload-automation-contact-probe-teleport"
 			})
-			if (-not [bool]$teleport.data.accepted) { throw "US6 contact-event probe teleport was not accepted." }
+			if (-not [bool]$teleport.data.accepted) { throw "managed-reload-automation contact-event probe teleport was not accepted." }
 			$velocity = Invoke-Tool -Name "physics.body.set_velocity" -Arguments ([ordered]@{
-				target = $us6Target; worldGeneration = $us6WorldGeneration; vector = @(0.0, -20.0, 0.0)
-				applyOnNextStep = $true; idempotencyKey = "us6-contact-probe-velocity"; correlationId = "us6-contact-probe-velocity"
+				target = $managedReloadAutomationTarget; worldGeneration = $managedReloadAutomationWorldGeneration; vector = @(0.0, -20.0, 0.0)
+				applyOnNextStep = $true; idempotencyKey = "managed-reload-automation-contact-probe-velocity"; correlationId = "managed-reload-automation-contact-probe-velocity"
 			})
-			if (-not [bool]$velocity.data.accepted) { throw "US6 contact-event probe velocity was not accepted." }
+			if (-not [bool]$velocity.data.accepted) { throw "managed-reload-automation contact-event probe velocity was not accepted." }
 
 			$eventProbeFromTick = $pausedTick
 			$eventProbeTicks = [System.Collections.Generic.List[object]]::new()
 			for ($probeStep = 1; $probeStep -le 3 -and $contactCount -lt 1; ++$probeStep) {
-				$eventProbeStep = Invoke-Tool -Name "play.step" -Arguments ([ordered]@{ expectedState = "paused"; correlationId = "us6-contact-probe-step-$probeStep" })
+				$eventProbeStep = Invoke-Tool -Name "play.step" -Arguments ([ordered]@{ expectedState = "paused"; correlationId = "managed-reload-automation-contact-probe-step-$probeStep" })
 				if ([int]$eventProbeStep.data.stepsCompleted -ne 1 -or $eventProbeStep.data.currentState -ne "paused") {
-					throw "US6 contact-event probe step $probeStep did not complete exactly one paused frame."
+					throw "managed-reload-automation contact-event probe step $probeStep did not complete exactly one paused frame."
 				}
 				$eventProbeExpectedTick = $pausedTick + 1
 				$eventProbeTick = $pausedTick
@@ -1634,13 +1634,13 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 					Start-Sleep -Milliseconds 1
 					$eventProbeState = Get-PhysicsSnapshot -Envelope (Invoke-Tool -Name "physics.state")
 					$eventProbeTick = [UInt64]$eventProbeState.tick
-					if ($eventProbeTick -gt $eventProbeExpectedTick) { throw "US6 contact-event probe advanced more than one physics tick." }
+					if ($eventProbeTick -gt $eventProbeExpectedTick) { throw "managed-reload-automation contact-event probe advanced more than one physics tick." }
 				}
-				if ($eventProbeTick -ne $eventProbeExpectedTick) { throw "US6 contact-event probe did not publish tick $eventProbeExpectedTick." }
+				if ($eventProbeTick -ne $eventProbeExpectedTick) { throw "managed-reload-automation contact-event probe did not publish tick $eventProbeExpectedTick." }
 				$eventProbeTicks.Add([ordered]@{ step = $probeStep; fromTick = $pausedTick; toTick = $eventProbeTick })
 				$pausedTick = $eventProbeTick
 				$contacts = Get-PhysicsSnapshot -Envelope (Invoke-Tool -Name "physics.contacts.list" -Arguments ([ordered]@{
-					worldGeneration = $us6WorldGeneration; target = $us6Target; maximumContacts = 64
+					worldGeneration = $managedReloadAutomationWorldGeneration; target = $managedReloadAutomationTarget; maximumContacts = 64
 					fromTick = $eventProbeTick; toTick = $eventProbeTick
 				}))
 				$contactCount = @($contacts.data.contacts).Count
@@ -1651,17 +1651,17 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 				velocityCommandId = [UInt64]$velocity.data.commandId; position = $eventProbePosition; velocity = @(0.0, -20.0, 0.0)
 				steps = @($eventProbeTicks); contactCount = $contactCount
 			}
-			Complete-Stage -Name "us6ContactEventProbe"
+			Complete-Stage -Name "managed-reload-automationContactEventProbe"
 		}
-		if ($contactCount -lt 1) { throw "US6 installed event snapshot contained no contacts after the 10,000-body stepping interval." }
-		$us6Loopback.events = [ordered]@{
-			worldGeneration = $us6WorldGeneration; tick = [UInt64]$contacts.tick
+		if ($contactCount -lt 1) { throw "managed-reload-automation installed event snapshot contained no contacts after the 10,000-body stepping interval." }
+		$managedReloadAutomationLoopback.events = [ordered]@{
+			worldGeneration = $managedReloadAutomationWorldGeneration; tick = [UInt64]$contacts.tick
 			contactCount = $contactCount; truncated = [bool]$contacts.truncated; overflow = [bool]$contacts.overflow; probe = $eventProbe
 		}
-		$us6Loopback.completed = $true
+		$managedReloadAutomationLoopback.completed = $true
 	}
 	if (-not $SkipProfilerCapture) {
-		if ($RunUs5ProfilerChecks -and $null -ne $profilerCaptureStartedAtMs) {
+		if ($RunProfilerCaptureChecks -and $null -ne $profilerCaptureStartedAtMs) {
 			# The artifact gate measures a real five-second recording interval. If the
 			# deterministic explicit-step workload completes sooner, keep Play Mode
 			# paused and let ordinary editor frames fill the remaining wall-clock time.
@@ -1692,16 +1692,16 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 		$profilerCaptureSummary = Invoke-Tool -Name "profiler.capture.summary" -Arguments ([ordered]@{ artifactId = [string]$profilerCaptureArtifact.artifactId })
 		$profilerCaptureSucceeded = $true
 		[void]$unavailableMetrics.Remove("profilerCaptureUnlessGeneratedByEditor")
-		Complete-Us5ProfilerEvidence -Summary $profilerCaptureSummary.data -Artifact $profilerCaptureArtifact -ArtifactRoot $projectRoot
-		if ($RunUs5ProfilerChecks -and $null -ne $us5Profiler.artifactBytes -and -not $us5Profiler.sizeGatePassed) {
-			$us5ProfilerGateError = "US5 profiler artifact exceeded the 10 MiB five-second size gate ($($us5Profiler.artifactBytes) bytes)."
+		Complete-ProfilerCaptureEvidence -Summary $profilerCaptureSummary.data -Artifact $profilerCaptureArtifact -ArtifactRoot $projectRoot
+		if ($RunProfilerCaptureChecks -and $null -ne $profilerCapture.artifactBytes -and -not $profilerCapture.sizeGatePassed) {
+			$profilerCaptureGateError = "profiler-capture profiler artifact exceeded the 10 MiB five-second size gate ($($profilerCapture.artifactBytes) bytes)."
 		}
-		if ($RunUs5ProfilerChecks) {
+		if ($RunProfilerCaptureChecks) {
 			# Loading the just-committed artifact is a non-destructive recovery probe.
 			# Older bridges may not expose a durable load job; retain that outcome as
 			# compatibility evidence rather than turning a v1 run into a false failure.
 			try {
-				$load = Invoke-Tool -Name "profiler.capture.load" -Arguments ([ordered]@{ artifactId = [string]$profilerCaptureArtifact.artifactId; correlationId = "installed-us5-recovery-probe" })
+				$load = Invoke-Tool -Name "profiler.capture.load" -Arguments ([ordered]@{ artifactId = [string]$profilerCaptureArtifact.artifactId; correlationId = "installed-profiler-capture-recovery-probe" })
 				$loadJobId = [string]$load.data.jobId
 				$loadState = "queued"
 				if (-not [string]::IsNullOrWhiteSpace($loadJobId)) {
@@ -1714,15 +1714,15 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 						Start-Sleep -Milliseconds 100
 					}
 				}
-				$us5Profiler.recoveryProbe = [ordered]@{ attempted = $true; supported = $true; status = $loadState; artifactId = [string]$profilerCaptureArtifact.artifactId }
+				$profilerCapture.recoveryProbe = [ordered]@{ attempted = $true; supported = $true; status = $loadState; artifactId = [string]$profilerCaptureArtifact.artifactId }
 			}
 			catch {
-				$us5Profiler.recoveryProbe = [ordered]@{ attempted = $true; supported = $false; status = "unavailable"; reason = $_.Exception.Message }
+				$profilerCapture.recoveryProbe = [ordered]@{ attempted = $true; supported = $false; status = "unavailable"; reason = $_.Exception.Message }
 			}
-			if (-not $us5Profiler.durationGatePassed) { $us5ProfilerGateError = "US5 profiler capture did not span the required five-second wall-clock interval." }
-			elseif (-not $us5Profiler.versionAccepted) { $us5ProfilerGateError = "US5 profiler capture payload version did not match the requested v2 writer." }
-			elseif (-not $us5Profiler.metricAvailability.gatePassed) { $us5ProfilerGateError = "US5 profiler summary omitted one or more required typed evidence streams." }
-			elseif (-not $us5Profiler.recoveryProbe.supported -or $us5Profiler.recoveryProbe.status -ne "succeeded") { $us5ProfilerGateError = "US5 profiler committed-artifact load/recovery probe did not succeed." }
+			if (-not $profilerCapture.durationGatePassed) { $profilerCaptureGateError = "profiler-capture profiler capture did not span the required five-second wall-clock interval." }
+			elseif (-not $profilerCapture.versionAccepted) { $profilerCaptureGateError = "profiler-capture profiler capture payload version did not match the requested v2 writer." }
+			elseif (-not $profilerCapture.metricAvailability.gatePassed) { $profilerCaptureGateError = "profiler-capture profiler summary omitted one or more required typed evidence streams." }
+			elseif (-not $profilerCapture.recoveryProbe.supported -or $profilerCapture.recoveryProbe.status -ne "succeeded") { $profilerCaptureGateError = "profiler-capture profiler committed-artifact load/recovery probe did not succeed." }
 		}
 	}
 	# Capture the post-workload Scene View state, not only the startup snapshot.
@@ -1766,29 +1766,29 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 	}
 	$process.Refresh()
 	if ($process.HasExited) { throw "Editor exited unexpectedly before the harness could verify final process health." }
-	if ($Us4ReadinessMode -ne "none") {
-		$us4Readiness.final = Capture-Us4ReadinessEvidence -Phase "post-play-restoration"
-		$sourceChangedOnlyWhenRequested = if ($Us4ReadinessMode -eq "stale") {
-			$us4Readiness.preparation.sourceSha256Before -ne $us4Readiness.preparation.sourceSha256After
+	if ($ReadinessMode -ne "none") {
+		$readiness.final = Capture-ReadinessEvidence -Phase "post-play-restoration"
+		$sourceChangedOnlyWhenRequested = if ($ReadinessMode -eq "stale") {
+			$readiness.preparation.sourceSha256Before -ne $readiness.preparation.sourceSha256After
 		} else {
-			$us4Readiness.preparation.sourceSha256Before -eq $us4Readiness.preparation.sourceSha256After
+			$readiness.preparation.sourceSha256Before -eq $readiness.preparation.sourceSha256After
 		}
-		$sourcePreservedDuringEditorRun = $us4Readiness.final.authoredSceneSha256 -eq $authoredSceneHashBefore
-		$us4Readiness.sourceAuthority = [ordered]@{
+		$sourcePreservedDuringEditorRun = $readiness.final.authoredSceneSha256 -eq $authoredSceneHashBefore
+		$readiness.sourceAuthority = [ordered]@{
 			sourceChangedOnlyForStale = $sourceChangedOnlyWhenRequested
 			sourcePreservedDuringEditorRun = $sourcePreservedDuringEditorRun
-			sourceSha256AtStartup = $authoredSceneHashBefore; sourceSha256AfterRun = $us4Readiness.final.authoredSceneSha256
+			sourceSha256AtStartup = $authoredSceneHashBefore; sourceSha256AfterRun = $readiness.final.authoredSceneSha256
 		}
 		if (-not $sourceChangedOnlyWhenRequested -or -not $sourcePreservedDuringEditorRun) {
-			throw "US4 source-authority evidence failed; inspect the per-scenario readiness summary."
+			throw "readiness source-authority evidence failed; inspect the per-scenario readiness summary."
 		}
 	}
 	Complete-Stage -Name "playExitAndRestore"
-	if (-not [string]::IsNullOrWhiteSpace($us5ProfilerGateError)) {
+	if (-not [string]::IsNullOrWhiteSpace($profilerCaptureGateError)) {
 		# Defer profiler acceptance failure until Play Mode has restored authored
 		# state. The finally block can then verify a normal editor shutdown even
 		# when a strict evidence gate identifies an incomplete capture.
-		throw $us5ProfilerGateError
+		throw $profilerCaptureGateError
 	}
 
 	$runSucceeded = $true
@@ -1798,7 +1798,7 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 	# by the fresh-process PhysicsDeterminismStress worker matrix.
 	$determinismEvidence = [ordered]@{
 		version = 1; basis = "authored-scene-exact-step-publication"
-		scenario = $Us3Scenario; authoredSceneSha256 = $authoredSceneHashBefore
+		scenario = $WorkerScalingScenario; authoredSceneSha256 = $authoredSceneHashBefore
 		objectCount = $ObjectCount; activeDynamicCount = $dynamicCount
 		explicitStepCount = $measuredExplicitStepCount
 		explicitStepDeltas = @($stepPublicationSamples | ForEach-Object { [UInt64]$_.toTick - [UInt64]$_.fromTick })
@@ -1816,16 +1816,16 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 		authoredSceneSha256Before = $authoredSceneHashBefore; authoredSceneSha256After = $authoredSceneHashAfter
 		observations = @($observations); diagnosticsSnapshots = @($diagnosticSnapshots); automationLatencySamples = @($latencySamples)
 		authoringWalkthrough = $authoringWalkthrough
-		us2Matrix = $us2Matrix
-		us3Scenario = $us3ScenarioEvidence
+		colliderCookMatrix = $colliderCookMatrix
+		workerScalingScenario = $workerScalingScenarioEvidence
 		sceneView = $sceneViewEvidence
-		us6Loopback = $us6Loopback
-		us6EvidenceCompleteness = $us6EvidenceCompleteness
-		us4Readiness = $us4Readiness
+		managedReloadAutomationLoopback = $managedReloadAutomationLoopback
+		managedReloadAutomationEvidenceCompleteness = $managedReloadAutomationEvidenceCompleteness
+		readiness = $readiness
 		stages = $stageRecords; automationLatency = Get-LatencySummary -Samples @($latencySamples)
 		explicitStepPublication = @($stepPublicationSamples); hardware = $hardwareEvidence
 		profilerCapture = [ordered]@{ start = $profilerCaptureStart; stop = $profilerCaptureStop; job = $profilerCaptureJob; artifact = $profilerCaptureArtifact; summary = $profilerCaptureSummary; succeeded = $profilerCaptureSucceeded }
-		us5Profiler = $us5Profiler
+		profilerEvidence = $profilerCapture
 		processMemorySamples = @($processMemorySamples)
 		unavailableMetrics = @($unavailableMetrics)
 		artifactInventory = Get-ArtifactInventory -Root $projectRoot; forcedTermination = $false
@@ -1840,14 +1840,14 @@ catch {
 		stages = $stageRecords; automationLatency = Get-LatencySummary -Samples @($latencySamples); automationLatencySamples = @($latencySamples); hardware = $hardwareEvidence
 		diagnosticsSnapshots = @($diagnosticSnapshots); artifactInventory = @()
 		authoringWalkthrough = $authoringWalkthrough
-		us2Matrix = $us2Matrix
-		us3Scenario = $us3ScenarioEvidence
+		colliderCookMatrix = $colliderCookMatrix
+		workerScalingScenario = $workerScalingScenarioEvidence
 		sceneView = $sceneViewEvidence
-		us6Loopback = $us6Loopback
-		us6EvidenceCompleteness = $us6EvidenceCompleteness
-		us4Readiness = $us4Readiness
+		managedReloadAutomationLoopback = $managedReloadAutomationLoopback
+		managedReloadAutomationEvidenceCompleteness = $managedReloadAutomationEvidenceCompleteness
+		readiness = $readiness
 		profilerCapture = [ordered]@{ start = $profilerCaptureStart; stop = $profilerCaptureStop; job = $profilerCaptureJob; artifact = $profilerCaptureArtifact; summary = $profilerCaptureSummary; succeeded = $profilerCaptureSucceeded }
-		us5Profiler = $us5Profiler
+		profilerEvidence = $profilerCapture
 		processMemorySamples = @($processMemorySamples)
 		unavailableMetrics = @($unavailableMetrics); forcedTermination = $false
 	})
@@ -1879,29 +1879,29 @@ finally {
 		$summary.automationLatency = Get-LatencySummary -Samples @($latencySamples)
 		$summary.automationLatencySamples = @($latencySamples)
 		$summary.diagnosticsSnapshots = @($diagnosticSnapshots)
-		$summary.us2Matrix = $us2Matrix
-		$summary.us3Scenario = $us3ScenarioEvidence
+		$summary.colliderCookMatrix = $colliderCookMatrix
+		$summary.workerScalingScenario = $workerScalingScenarioEvidence
 		$artifactInventory = @(Get-ArtifactInventory -Root $projectRoot)
 		$summary.artifactInventory = $artifactInventory
 		$summary.profilerCapture = [ordered]@{ start = $profilerCaptureStart; stop = $profilerCaptureStop; job = $profilerCaptureJob; artifact = $profilerCaptureArtifact; summary = $profilerCaptureSummary; succeeded = $profilerCaptureSucceeded }
-		$summary.us5Profiler = $us5Profiler
+		$summary.profilerCapture = $profilerCapture
 		$summary.processMemorySamples = @($processMemorySamples)
 		$summary.unavailableMetrics = @($unavailableMetrics)
-		if ($Us4ReadinessMode -ne "none") {
+		if ($ReadinessMode -ne "none") {
 			# Shutdown is recorded after CloseMainWindow/WaitForExit, so it distinguishes
 			# a clean lifecycle from the emergency force-stop fallback.
-			$us4Readiness.normalShutdown = (-not $forcedTermination -and $null -ne $process -and $process.HasExited)
-			$us4Readiness.finalArtifactInventory = $artifactInventory
-			$summary.us4Readiness = $us4Readiness
+			$readiness.normalShutdown = (-not $forcedTermination -and $null -ne $process -and $process.HasExited)
+			$readiness.finalArtifactInventory = $artifactInventory
+			$summary.readiness = $readiness
 		}
 		$completenessFailure = $false
-		if ($RunUs6Loopback -and [bool]$summary.success) {
+		if ($RunManagedReloadAutomationLoopback -and [bool]$summary.success) {
 			$stepDeltas = @($stepPublicationSamples | ForEach-Object { [UInt64]$_.toTick - [UInt64]$_.fromTick })
 			$evidenceStepDeltas = @($determinismEvidence.explicitStepDeltas)
 			$exactSteps = $measuredExplicitStepCount -gt 0 -and $stepDeltas.Count -eq $measuredExplicitStepCount -and @($stepDeltas | Where-Object { $_ -ne 1 }).Count -eq 0 -and ($stepDeltas -join ",") -eq ($evidenceStepDeltas -join ",")
 			$stateEvidence = -not [string]::IsNullOrWhiteSpace([string]$determinismHash) -and $null -ne $determinismEvidence -and -not [string]::IsNullOrWhiteSpace([string]$determinismEvidence.authoredSceneSha256)
-			$rollbackEvidence = [bool]$us2Matrix.completed -and $null -ne $us2Matrix.conflict -and -not [bool]$us2Matrix.conflict.partialVisibility -and $null -ne $us2Matrix.stale -and -not [bool]$us2Matrix.stale.partialVisibility
-			$visibilityEvidence = $null -ne $us2Matrix.reparent -and -not [string]::IsNullOrWhiteSpace([string]$us2Matrix.reparent.visibilityBoundary) -and $null -ne $us2Matrix.active -and -not [string]::IsNullOrWhiteSpace([string]$us2Matrix.active.targetBoundary)
+			$rollbackEvidence = [bool]$colliderCookMatrix.completed -and $null -ne $colliderCookMatrix.conflict -and -not [bool]$colliderCookMatrix.conflict.partialVisibility -and $null -ne $colliderCookMatrix.stale -and -not [bool]$colliderCookMatrix.stale.partialVisibility
+			$visibilityEvidence = $null -ne $colliderCookMatrix.reparent -and -not [string]::IsNullOrWhiteSpace([string]$colliderCookMatrix.reparent.visibilityBoundary) -and $null -ne $colliderCookMatrix.active -and -not [string]::IsNullOrWhiteSpace([string]$colliderCookMatrix.active.targetBoundary)
 			$normalShutdown = -not $forcedTermination -and $null -ne $process -and $process.HasExited
 			$unavailableEvidence = $unavailableMetrics.Count -gt 0 -and @($unavailableMetrics | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -eq 0
 			$artifactEvidence = $artifactInventory.Count -gt 0
@@ -1911,31 +1911,31 @@ finally {
 				rollbackEvidence = $rollbackEvidence; visibilityEvidence = $visibilityEvidence
 				normalEditorShutdown = $normalShutdown; unavailableMetricEvidence = $unavailableEvidence
 				unavailableMetrics = @($unavailableMetrics); artifactInventoryNonempty = $artifactEvidence; artifactCount = $artifactInventory.Count
-				us6LoopbackComplete = [bool]$us6Loopback.completed
+				managedReloadAutomationLoopbackComplete = [bool]$managedReloadAutomationLoopback.completed
 			}
-			$us6EvidenceCompleteness = [ordered]@{
+			$managedReloadAutomationEvidenceCompleteness = [ordered]@{
 				requested = $true
-				complete = $exactSteps -and $stateEvidence -and $rollbackEvidence -and $visibilityEvidence -and $normalShutdown -and $unavailableEvidence -and $artifactEvidence -and [bool]$us6Loopback.completed
+				complete = $exactSteps -and $stateEvidence -and $rollbackEvidence -and $visibilityEvidence -and $normalShutdown -and $unavailableEvidence -and $artifactEvidence -and [bool]$managedReloadAutomationLoopback.completed
 				checks = $checks
 			}
-			$summary.us6EvidenceCompleteness = $us6EvidenceCompleteness
-			if (-not $us6EvidenceCompleteness.complete) {
+			$summary.managedReloadAutomationEvidenceCompleteness = $managedReloadAutomationEvidenceCompleteness
+			if (-not $managedReloadAutomationEvidenceCompleteness.complete) {
 				$completenessFailure = $true
 				$summary.success = $false
 				$summary | Add-Member -NotePropertyName failedAt -NotePropertyValue (Get-Date).ToString("o") -Force
-				$summary | Add-Member -NotePropertyName error -NotePropertyValue "US6 evidence completeness gate failed; inspect us6EvidenceCompleteness.checks." -Force
+				$summary | Add-Member -NotePropertyName error -NotePropertyValue "managed-reload-automation evidence completeness gate failed; inspect managedReloadAutomationEvidenceCompleteness.checks." -Force
 			}
 		}
-		elseif ($RunUs6Loopback) {
-			$us6EvidenceCompleteness = [ordered]@{ requested = $true; complete = $false; checks = $null; notEvaluatedReason = "run failed before final evidence validation" }
-			$summary.us6EvidenceCompleteness = $us6EvidenceCompleteness
+		elseif ($RunManagedReloadAutomationLoopback) {
+			$managedReloadAutomationEvidenceCompleteness = [ordered]@{ requested = $true; complete = $false; checks = $null; notEvaluatedReason = "run failed before final evidence validation" }
+			$summary.managedReloadAutomationEvidenceCompleteness = $managedReloadAutomationEvidenceCompleteness
 		}
 		Write-JsonFile -Path $summaryPath -Value $summary
-		if ($Us4ReadinessMode -ne "none") {
+		if ($ReadinessMode -ne "none") {
 			# Preserve each scenario even though the reusable project's normal summary
 			# path is intentionally overwritten by the next matrix child.
-			Write-JsonFile -Path $us4ScenarioSummaryPath -Value $summary -Depth 64
+			Write-JsonFile -Path $readinessScenarioSummaryPath -Value $summary -Depth 64
 		}
-		if ($completenessFailure) { throw "US6 evidence completeness gate failed; inspect '$summaryPath'." }
+		if ($completenessFailure) { throw "managed-reload-automation evidence completeness gate failed; inspect '$summaryPath'." }
 	}
 }

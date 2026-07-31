@@ -6,8 +6,10 @@
 #include "ModelPackageImporter.h"
 #include "Resource/ResourceManager.h"
 #include "Utilities/UUID.h"
+#include "VirtualGeometryProductionBlocks.h"
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <chrono>
 #include <filesystem>
@@ -22,6 +24,8 @@
 
 namespace TerraEngine::EditorTests
 {
+	using namespace TerraEngine::Editor;
+
 	namespace
 	{
 		std::filesystem::path MakeVirtualGeometryInspectorProjectRoot()
@@ -33,114 +37,48 @@ namespace TerraEngine::EditorTests
 			return root;
 		}
 
-		void WriteMeshHeader(const std::filesystem::path& path, bool cookedVirtualGeometry)
+		void WriteMeshHeader(const std::filesystem::path& path, bool virtualGeometry)
 		{
 			std::filesystem::create_directories(path.parent_path());
-
-			MeshHeader header{};
-			std::memcpy(header.magic, "TEMF", 4);
-			header.version = kMeshCurrentVersion;
-			header.headerSize = sizeof(MeshHeader);
-			header.meshletCount = 12u;
-			if (cookedVirtualGeometry)
-			{
-				header.meshletFlags = kMeshletHeaderFlagHasVirtualGeometry;
-				header.virtualGeometryHeaderOffset = sizeof(MeshHeader);
-				header.virtualGeometryHeaderSize = sizeof(VirtualGeometryHeader);
-				header.virtualGeometryPayloadGeneration = kVirtualGeometryPayloadGeneration;
-			}
-			else
-			{
-				header.meshletFlags = kMeshletHeaderFlagHasVirtualGeometry;
-				header.virtualGeometryHeaderOffset = 0u;
-				header.virtualGeometryHeaderSize = 0u;
-				header.virtualGeometryPayloadGeneration = 0u;
-			}
-
-			std::ofstream output(path, std::ios::binary);
-			output.write(reinterpret_cast<const char*>(&header), sizeof(header));
-			if (cookedVirtualGeometry)
-			{
-				VirtualGeometryHeader virtualHeader{};
-				virtualHeader.payloadGeneration = kVirtualGeometryPayloadGeneration;
-				virtualHeader.headerSize = sizeof(VirtualGeometryHeader);
-				virtualHeader.detailLevelCount = 3u;
-				virtualHeader.cullableGroupCount = 12u;
-				virtualHeader.clusterCount = 12u;
-				virtualHeader.coneSafetyCount = 12u;
-				virtualHeader.coneSafetyTableOffset = sizeof(MeshHeader) + sizeof(VirtualGeometryHeader);
-				virtualHeader.flags = kVirtualGeometryValidationFlagConeSafetyMetadataValidated;
-				virtualHeader.sourceTriangleCount = 2048u;
-				output.write(reinterpret_cast<const char*>(&virtualHeader), sizeof(virtualHeader));
-			for (std::uint32_t clusterIndex = 0u; clusterIndex < virtualHeader.coneSafetyCount; ++clusterIndex)
-				{
-					VirtualGeometryConeSafetyRecord coneSafety{};
-					coneSafety.clusterId = clusterIndex;
-					coneSafety.groupOffset = clusterIndex;
-					coneSafety.groupCount = 1u;
-					coneSafety.materialSidedness = 0u;
-					coneSafety.windingState = 0u;
-					coneSafety.alphaRisk = 0u;
-					coneSafety.thinShellRisk = 0u;
-					coneSafety.flags = kVirtualGeometryConeSafetyFlagConeValid | kVirtualGeometryConeSafetyFlagEligible;
-				output.write(reinterpret_cast<const char*>(&coneSafety), sizeof(coneSafety));
-			}
-			// Inspector metadata treats this compact sidecar as the current
-			// aggregate contract. Runtime performs stricter cluster validation.
-			const VirtualGeometryAggregateProfileRecord profile{
-				static_cast<std::uint32_t>(VirtualGeometryAggregateProfileKind::Fallback),
-				kVirtualGeometryAggregateProfileFlagCompleteFallbackCoverage,
-				1u, 0.0f, 1u, 1.0f, 1u, 0u, 0u };
-			const VirtualGeometryAggregateProfileHeader aggregateHeader{
-				kVirtualGeometryAggregateProfileMagicValue,
-				kVirtualGeometryAggregateProfileVersion,
-				static_cast<std::uint16_t>(sizeof(VirtualGeometryAggregateProfileHeader)),
-				static_cast<std::uint32_t>(sizeof(VirtualGeometryAggregateProfileHeader)
-					+ sizeof(VirtualGeometryAggregateProfileRecord)),
-				1u,
-				CalculateVirtualGeometryCompactHash(std::span<const std::uint8_t>(
-					reinterpret_cast<const std::uint8_t*>(&profile), sizeof(profile))) };
-			output.write(reinterpret_cast<const char*>(&aggregateHeader), sizeof(aggregateHeader));
-			output.write(reinterpret_cast<const char*>(&profile), sizeof(profile));
+			// Inspector fixtures use the same canonical builder as real cooks so
+			// metadata tests cannot accidentally keep a retired reader alive.
+			const std::array<std::uint8_t, 16> payload{
+				0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u,
+				8u, 9u, 10u, 11u, 12u, 13u, 14u, 15u };
+			TemfQuantizationDomain domain{};
+			domain.domainId = 0u;
+			domain.domainVersion = 1u;
+			domain.componentCount = 4u;
+			domain.domainHash = 1u;
+			TemfProductionStreamInput stream{};
+			stream.streamKind = TemfStreamKind::Position;
+			stream.codecProfile = TemfCodecProfile::ExpandedProduction;
+			stream.attributeMask = 1u;
+			stream.quantizationDomainId = 0u;
+			stream.elementCount = 1u;
+			stream.elementStride = static_cast<std::uint32_t>(payload.size());
+			stream.decodedBytes = payload;
+			TemfProductionBuildRequest request{};
+			request.representationFlags = virtualGeometry
+				? kTemfRepresentationVirtualGeometry
+				: kTemfRepresentationDirectMeshlets;
+			request.logicalPageSizeBytes = virtualGeometry ? kTemfPageSize32KiB : 0u;
+			request.assetIdentity = 1u;
+			request.sourceContentHash = 2u;
+			request.buildRecipeHash = 3u;
+			request.toolIdentity = 4u;
+			request.generationIdentity = 5u;
+			request.quantizationDomains = std::span<const TemfQuantizationDomain>(&domain, 1u);
+			request.streams = std::span<const TemfProductionStreamInput>(&stream, 1u);
+			const TemfProductionBuildResult result = BuildTemfProductionBlocks(request);
+			std::ofstream output(path, std::ios::binary | std::ios::trunc);
+			output.write(reinterpret_cast<const char*>(result.bytes.data()),
+				static_cast<std::streamsize>(result.bytes.size()));
 		}
-	}
 
 		void WriteSmallMeshSkippedHeader(const std::filesystem::path& path)
 		{
-			MeshHeader header{};
-			std::memcpy(header.magic, "TEMF", 4);
-			header.version = kMeshCurrentVersion;
-			header.headerSize = sizeof(MeshHeader);
-			header.meshletCount = 1u;
-			header.meshletFlags = kMeshletHeaderFlagHasVirtualGeometry;
-			header.virtualGeometryHeaderOffset = sizeof(MeshHeader);
-			header.virtualGeometryHeaderSize = sizeof(VirtualGeometryHeader);
-			header.virtualGeometryPayloadGeneration = kVirtualGeometryPayloadGeneration;
-
-			const std::string message = "Mesh is too small for useful page streaming.";
-			VirtualGeometryHeader virtualHeader{};
-			virtualHeader.payloadGeneration = kVirtualGeometryPayloadGeneration;
-			virtualHeader.headerSize = sizeof(VirtualGeometryHeader);
-			virtualHeader.detailLevelCount = 1u;
-			virtualHeader.cullableGroupCount = 1u;
-			virtualHeader.clusterCount = 1u;
-			virtualHeader.sourceTriangleCount = 1u;
-			virtualHeader.skippedDetailCount = 1u;
-			virtualHeader.skippedDetailTableOffset = sizeof(MeshHeader) + sizeof(VirtualGeometryHeader);
-			virtualHeader.diagnosticStringOffset = virtualHeader.skippedDetailTableOffset + sizeof(VirtualGeometrySkippedDetailRecord);
-			virtualHeader.diagnosticStringSize = static_cast<std::uint32_t>(message.size());
-
-			VirtualGeometrySkippedDetailRecord skipped{};
-			skipped.targetIndex = 1u;
-			skipped.status = static_cast<std::uint32_t>(VirtualGeometryDetailTargetRecordStatus::Skipped);
-			skipped.reason = static_cast<std::uint32_t>(VirtualGeometrySkippedDetailRecordReason::MeshTooSmall);
-			skipped.messageStringSize = static_cast<std::uint32_t>(message.size());
-
-			std::ofstream output(path, std::ios::binary);
-			output.write(reinterpret_cast<const char*>(&header), sizeof(header));
-			output.write(reinterpret_cast<const char*>(&virtualHeader), sizeof(virtualHeader));
-			output.write(reinterpret_cast<const char*>(&skipped), sizeof(skipped));
-			output.write(message.data(), static_cast<std::streamsize>(message.size()));
+			WriteMeshHeader(path, false);
 		}
 
 		std::string ReadBinaryFile(const std::filesystem::path& path)
@@ -162,6 +100,37 @@ namespace TerraEngine::EditorTests
 			output << "vt 1 0\n";
 			output << "vt 0 1\n";
 			output << "f 1/1 2/2 3/3\n";
+		}
+
+		void WriteDenseObj(const std::filesystem::path& path)
+		{
+			// A dense grid intentionally exceeds the direct-meshlet threshold so
+			// this test exercises real requested-target diagnostics and page work.
+			constexpr int kGrid = 48;
+			std::filesystem::create_directories(path.parent_path());
+			std::ofstream output(path, std::ios::trunc);
+			for(int y = 0; y <= kGrid; ++y)
+			{
+				for(int x = 0; x <= kGrid; ++x)
+				{
+					output << "v " << x << ' ' << y << " 0\n";
+					output << "vt " << (static_cast<double>(x) / kGrid) << ' '
+						<< (static_cast<double>(y) / kGrid) << "\n";
+				}
+			}
+			const auto index = [](int x, int y) { return y * (kGrid + 1) + x + 1; };
+			for(int y = 0; y < kGrid; ++y)
+			{
+				for(int x = 0; x < kGrid; ++x)
+				{
+					const int a = index(x, y);
+					const int b = index(x + 1, y);
+					const int c = index(x, y + 1);
+					const int d = index(x + 1, y + 1);
+					output << "f " << a << '/' << a << ' ' << b << '/' << b << ' ' << c << '/' << c << "\n";
+					output << "f " << b << '/' << b << ' ' << d << '/' << d << ' ' << c << '/' << c << "\n";
+				}
+			}
 		}
 
 		void WriteMaterialAsset(const std::filesystem::path& path, std::string_view name)
@@ -427,41 +396,21 @@ namespace TerraEngine::EditorTests
 			context.Expect(readable, "Inspector metadata accessor should read a valid compiled TEMF header.");
 			context.Expect(virtualGeometry.hasVirtualGeometry, "Cooked virtual geometry should be reported as present.");
 			context.Expect(!virtualGeometry.needsRebuild, "Current payload generation should not request a rebuild.");
-			context.Expect(virtualGeometry.aggregateProfileCurrent, "Current cooked metadata should discover the VGAP aggregate sidecar.");
-			context.Expect(!virtualGeometry.aggregateProfileRepairRequired, "A valid VGAP sidecar should not queue targeted repair guidance.");
-			context.ExpectEqual(3u, virtualGeometry.detailLevelCount, "Inspector metadata should expose the cooked detail count.");
-			context.ExpectEqual(2048u, virtualGeometry.sourceTriangleCount, "Inspector metadata should expose source triangle count.");
+			context.Expect(virtualGeometry.aggregateProfileCurrent,
+				"Current cooked metadata should confirm the canonical production directory.");
+			context.Expect(!virtualGeometry.aggregateProfileRepairRequired,
+				"A valid canonical directory should not queue repair guidance.");
 			context.Expect(virtualGeometry.warnings.empty(), "Current cooked metadata should not surface warning rows.");
-			context.Expect(!virtualGeometry.pageStreamingReady, "Cooked metadata without page tables should not be reported as page-streaming ready.");
-			context.Expect(!virtualGeometry.pageIntegrityErrors.empty(), "Inspector metadata should expose page integrity issues without turning them into rebuild warnings.");
+			context.Expect(virtualGeometry.pageStreamingReady,
+				"Canonical virtual geometry with descriptor-owned pages should report streaming readiness.");
+			context.Expect(virtualGeometry.pageIntegrityErrors.empty(),
+				"A valid canonical directory should not expose page integrity failures.");
 
 			AssetDatabase::Instance().Shutdown();
 			std::filesystem::remove_all(root);
 		});
 
-		registry.Add("VirtualGeometry.Editor.Inspector.MissingAggregateProfileRequestsTargetedRecook", [](TestContext& context) {
-			const std::filesystem::path root = MakeVirtualGeometryInspectorProjectRoot();
-			AssetDatabase::Instance().Initialize(root);
-			const std::filesystem::path compiledPath = AssetDatabase::Instance().GetBuildRoot() / "legacy-profile.temf";
-			WriteMeshHeader(compiledPath, true);
-			const std::uintmax_t profileBytes = sizeof(VirtualGeometryAggregateProfileHeader)
-				+ sizeof(VirtualGeometryAggregateProfileRecord);
-			std::filesystem::resize_file(compiledPath, std::filesystem::file_size(compiledPath) - profileBytes);
-
-			AssetMetadata metadata{};
-			metadata.importerName = "MeshImporter";
-			metadata.compiledPath = "legacy-profile.temf";
-			VirtualGeometryAssetMetadata virtualGeometry{};
-			context.Expect(AssetDatabase::Instance().TryGetVirtualGeometryMetadata(metadata, virtualGeometry), "Legacy profile metadata should remain readable.");
-			context.Expect(!virtualGeometry.needsRebuild, "Missing VGAP should request a targeted repair, not reject valid TEMF geometry.");
-			context.Expect(!virtualGeometry.aggregateProfileCurrent && virtualGeometry.aggregateProfileRepairRequired, "Missing VGAP should be identified as a targeted recook requirement.");
-			context.Expect(virtualGeometry.rebuildGuidance.find("VGAP") != std::string::npos, "Targeted recook guidance should name the aggregate-profile artifact.");
-
-			AssetDatabase::Instance().Shutdown();
-			std::filesystem::remove_all(root);
-		});
-
-		registry.Add("VirtualGeometry.Editor.Inspector.ReportsSmallMeshSkippedStreamingReason", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Editor.Inspector.ReportsDirectResidentRoute", [](TestContext& context) {
 			const std::filesystem::path root = MakeVirtualGeometryInspectorProjectRoot();
 			AssetDatabase::Instance().Initialize(root);
 
@@ -476,13 +425,16 @@ namespace TerraEngine::EditorTests
 			VirtualGeometryPageSummaryMetadata pageSummary{};
 			const bool pageSummaryReadable = AssetDatabase::Instance().TryGetVirtualGeometryPageSummary(metadata, pageSummary);
 
-			context.Expect(readable, "Tiny cooked mesh metadata should remain readable.");
-			context.Expect(virtualGeometry.smallMeshStreamingSkipped, "Tiny meshes should explicitly report that page streaming was skipped.");
-			context.Expect(!virtualGeometry.pageStreamingReady, "Tiny skipped meshes should not claim page streaming readiness.");
-			context.Expect(virtualGeometry.skippedStreamingReason.find("too small") != std::string::npos, "Tiny skipped meshes should carry the cook explanation.");
-			context.Expect(pageSummaryReadable, "Mesh page summaries should be readable for tiny meshes.");
-			context.Expect(pageSummary.smallMeshStreamingSkipped, "Page summaries should carry the tiny-mesh skipped flag.");
-			context.Expect(pageSummary.integrityErrors.empty(), "Intentional tiny-mesh skips should not look like corrupt page metadata.");
+			context.Expect(readable, "Direct-resident cooked mesh metadata should remain readable.");
+			context.Expect(!virtualGeometry.hasVirtualGeometry,
+				"Direct-resident meshes must not advertise a virtual-geometry representation.");
+			context.Expect(!virtualGeometry.pageStreamingReady,
+				"Direct-resident meshes must not claim page streaming readiness.");
+			context.Expect(!virtualGeometry.warnings.empty(),
+				"The inspector should explain that the mesh uses direct-resident geometry.");
+			context.Expect(pageSummaryReadable, "Mesh page summaries should be readable for direct-resident meshes.");
+			context.Expect(pageSummary.integrityErrors.empty(),
+				"An intentional direct route should not look like corrupt page metadata.");
 
 			AssetDatabase::Instance().Shutdown();
 			std::filesystem::remove_all(root);
@@ -493,15 +445,18 @@ namespace TerraEngine::EditorTests
 			AssetDatabase::Instance().Initialize(root);
 
 			const std::filesystem::path compiledPath = AssetDatabase::Instance().GetBuildRoot() / "stale.temf";
-			WriteMeshHeader(compiledPath, false);
+			std::ofstream rejected(compiledPath, std::ios::binary | std::ios::trunc);
+			rejected.write("TEMF", 4);
+			rejected.close();
 
 			AssetMetadata metadata{};
 			metadata.compiledPath = "stale.temf";
 			VirtualGeometryAssetMetadata virtualGeometry{};
 			const bool readable = AssetDatabase::Instance().TryGetVirtualGeometryMetadata(metadata, virtualGeometry);
 
-			context.Expect(readable, "Stale virtual geometry headers should remain readable for inspector guidance.");
-			context.Expect(virtualGeometry.hasVirtualGeometry, "Stale virtual geometry flags should still be visible to the inspector.");
+			context.Expect(readable, "Noncanonical mesh bytes should remain inspectable for recook guidance.");
+			context.Expect(!virtualGeometry.hasVirtualGeometry,
+				"Rejected bytes must not publish unvalidated virtual-geometry capabilities.");
 			context.Expect(virtualGeometry.needsRebuild, "Incomplete virtual geometry metadata should request a rebuild.");
 			context.Expect(!virtualGeometry.warnings.empty(), "Stale metadata should surface a visible warning.");
 			context.Expect(virtualGeometry.rebuildGuidance.find("Rebuild") != std::string::npos, "Stale metadata should include explicit rebuild guidance for the inspector.");
@@ -539,7 +494,7 @@ namespace TerraEngine::EditorTests
 			AssetDatabase::Instance().Initialize(root);
 
 			const std::filesystem::path sourcePath = AssetDatabase::Instance().GetAssetRoot() / "override.obj";
-			WriteTinyObj(sourcePath);
+			WriteDenseObj(sourcePath);
 			AssetDatabase::Instance().ImportAsset(sourcePath, true);
 
 			const auto& assets = AssetDatabase::Instance().GetAssets();
@@ -599,7 +554,7 @@ namespace TerraEngine::EditorTests
 			AssetDatabase::Instance().Initialize(root);
 
 			const std::filesystem::path sourcePath = AssetDatabase::Instance().GetAssetRoot() / "diagnostics.obj";
-			WriteTinyObj(sourcePath);
+			WriteDenseObj(sourcePath);
 			AssetDatabase::Instance().ImportAsset(sourcePath, true);
 			const auto& assets = AssetDatabase::Instance().GetAssets();
 			const auto assetIt = assets.find(std::filesystem::absolute(sourcePath));

@@ -9,7 +9,7 @@ It creates a disposable project below `out/`, writes 10,000 physics objects
 the installed editor with isolated MCP preferences, and drives Play Mode
 through the loopback JSON-RPC endpoint.
 
-Run it only after the spec 042 RelWithDebInfo build, CTest, and install gates succeed. Other configurations are not accepted for this feature:
+Run it only after the physics foundation RelWithDebInfo build, CTest, and install gates succeed. Other configurations are not accepted for this feature:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Physics/RunInstalledEditorPhysicsStress.ps1 `
@@ -27,19 +27,19 @@ items each. Explicit 1/2/4 values are matrix overrides only; the native pool
 does not cap explicit environment/API requests, and the harness/build scripts
 do not pass a `--parallel` argument.
 
-For the US3 acceptance matrix, run one isolated command:
+For the worker-scaling acceptance matrix, run one isolated command:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Physics/RunInstalledEditorPhysicsStress.ps1 `
 	-InstallRoot out/build/RelWithDebInfo/Build `
-	-WorkRoot out/validation/043-us3 `
-	-RunUs3WorkerMatrix -AllowLiveStress
+	-WorkRoot out/validation/worker-scaling `
+	-RunWorkerScalingMatrix -AllowLiveStress
 ```
 
 This executes paused, unchanged, small, and large scenarios at 1/2/4/max
 workers, compares deterministic observation hashes and scaling coverage, and
 reports the fastest successful correctness-gated configuration in
-`us3-matrix-summary.json`. Override `-ParallelPreparationThreshold` or
+`worker-scaling-matrix-summary.json`. Override `-ParallelPreparationThreshold` or
 `-ParallelExtractionThreshold` to capture a reproducible threshold comparison.
 `-ActiveDynamicCount` may raise the dynamic-body count for an explicitly named
 overload run; the acceptance default matches `stress-fixtures.json` exactly.
@@ -48,16 +48,16 @@ mode uses the advertised public MCP contract to create and edit an object,
 verify exact undo/redo, create and instantiate a prefab, apply and revert real
 overrides, then unwind and save the temporary edits so normal editor shutdown
 remains part of the evidence. It is optional because those authoring calls must
-not contaminate the T105/T111 performance baseline.
+not contaminate the performance baseline.
 
-For the US6 installed managed/automation proof, add both `-RunUs6Loopback` and
-`-RunUs2IncrementalMatrix`. US6 evidence completeness requires the US2 matrix in
+For the managed-reload-automation installed managed/automation proof, add both `-RunManagedReloadAutomationLoopback` and
+`-RunColliderCookIncrementalMatrix`. managed-reload-automation evidence completeness requires the collider-cook matrix in
 the same installed-editor run so rejected-batch rollback and protected-boundary
 visibility cannot be inferred from a separate artifact. The final gate also
 requires exact one-tick measured step deltas, a deterministic state-evidence
 hash, normal non-forced shutdown, explicit unavailable-metric records, and a
 nonempty project artifact inventory; a missing item changes `summary.json` to
-`success: false` and is detailed under `us6EvidenceCompleteness`. The harness
+`success: false` and is detailed under `managed-reload-automationEvidenceCompleteness`. The harness
 performs a second durable RelWithDebInfo managed reload, discovers a
 generation-safe body through a bounded raycast job, inspects scheduler/body
 snapshots, replays one idempotent mass-independent acceleration receipt, and
@@ -76,14 +76,14 @@ excludes the intentionally growing live capture document so the counters isolate
 physics/editor ownership. These switches are opt-in so Windows process queries
 and debug rendering do not alter the canonical performance baseline.
 
-For the US4 project-readiness acceptance, run the isolated matrix after the
+For the readiness acceptance, run the isolated matrix after the
 install target succeeds:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Physics/RunInstalledEditorPhysicsStress.ps1 `
 	-InstallRoot out/build/RelWithDebInfo/Build `
-	-WorkRoot out/validation/043-us4 `
-	-RunUs4ReadinessMatrix -AllowLiveStress
+	-WorkRoot out/validation/readiness `
+	-RunReadinessMatrix -AllowLiveStress
 ```
 
 The matrix executes cold, warm, stale, corrupt, and forced-build scenarios in
@@ -119,7 +119,7 @@ histories, or frame responsiveness) are listed explicitly under
 `unavailableMetrics`; the run fails if the required profiler capture cannot be
 persisted and summarized.
 
-## US5 profiler capture matrix
+## Profiler capture matrix
 
 Run the opt-in profiler evidence mode for each detail level and reader version:
 
@@ -127,8 +127,8 @@ Run the opt-in profiler evidence mode for each detail level and reader version:
 foreach ($level in @("detailed", "sampled", "aggregate")) {
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Physics/RunInstalledEditorPhysicsStress.ps1 `
         -InstallRoot out/build/RelWithDebInfo/Build `
-        -WorkRoot ("out/validation/043-us5/{0}-v2" -f $level) `
-        -CaptureLevel $level -CaptureVersion v2 -RunUs5ProfilerChecks -AllowLiveStress
+        -WorkRoot ("out/validation/profiler-capture/{0}-v2" -f $level) `
+        -CaptureLevel $level -CaptureVersion v2 -RunProfilerCaptureChecks -AllowLiveStress
 }
 ```
 

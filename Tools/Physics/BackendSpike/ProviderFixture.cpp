@@ -633,7 +633,7 @@ namespace
 		result.shapeCast = castCollector.HadHit();
 
 		// Creating a public distance constraint through BodyInterface avoids locking
-		// internals and provides the narrow constraint capability gate requested by T003.
+		// internals and provides the narrow constraint capability gate requested by constraint-capability.
 		const BodyID constraintA = AddSphere(world, RVec3(-2.0_r, 4.0_r, 0.0_r), EMotionType::Dynamic, kMovingLayer, 0.2f);
 		const BodyID constraintB = AddSphere(world, RVec3(-2.0_r, 5.0_r, 0.0_r), EMotionType::Dynamic, kMovingLayer, 0.2f);
 		DistanceConstraintSettings distance;
@@ -793,7 +793,7 @@ namespace
 		std::vector<double> samples;
 		samples.reserve(10000);
 		QueryResult result;
-		// SC-004 requires the complete 10,000-request batch to retain identical
+		// large-batch-determinism requires the complete 10,000-request batch to retain identical
 		// provider-neutral ordering over 100 repetitions, not merely one dense ray.
 		// Time the first batch for query percentiles and hash all 100 batches.
 		result.batchRepeatOrderingEqual = true;

@@ -28,8 +28,8 @@ rasterization. TerraEngine should then differentiate through:
   and deformation;
 - explicit source-labelled diagnostics and conservative failure behavior;
 - reproducible cross-vendor results rather than undocumented performance claims;
-- backend portability across Vulkan, DirectX 12, mesh-shader, compute, and
-  conventional fallback routes.
+- backend portability across Vulkan, mesh-shader, compute, and conventional
+  fallback routes.
 
 The work must be delivered as a sequence of independently useful milestones.
 No milestone may advertise a GPU capability merely because its records, buffers,
@@ -114,7 +114,7 @@ TerraEngine should pursue four forms of superiority:
    - stable dynamic bounds and conservative visibility.
 
 2. **Portability superiority**
-   - equivalent visibility semantics on Vulkan and DirectX 12;
+   - equivalent visibility semantics across supported backend routes;
    - mesh-shader, compute-raster, and indexed fallback routes;
    - compressed data that does not require one vendor's future hardware;
    - optional acceleration when standardized dense-geometry hardware exists.
@@ -308,7 +308,7 @@ Required properties:
 
 - opaque and masked material support;
 - programmable vertex and pixel material features;
-- Vulkan and DirectX 12;
+- Vulkan and future backend routes;
 - mesh-shader, compute-raster, and indexed fallbacks;
 - landscapes, foliage, aggregate geometry, curves, and splines;
 - virtual-shadow and lighting integration;
@@ -586,7 +586,7 @@ The final page size may be a small family rather than one universal value.
 Each phase must leave the engine usable and must not depend on later phases for
 basic correctness.
 
-### Phase 0: Capability truth and measurement
+### implementation stage: Capability truth and measurement
 
 Deliver:
 
@@ -604,7 +604,7 @@ Exit gates:
 - repeated captures name identical revision, adapter, driver, and settings;
 - no change in rendered output.
 
-### Phase 1: Cluster-DAG and codec prototypes
+### implementation stage: Cluster-DAG and codec prototypes
 
 Deliver:
 
@@ -622,7 +622,7 @@ Exit gates:
 - no material or protected-boundary violations;
 - a recorded codec decision based on measurements.
 
-### Phase 2: GPU traversal, compaction, and submission
+### implementation stage: GPU traversal, compaction, and submission
 
 Deliver:
 
@@ -640,7 +640,7 @@ Exit gates:
 - overflow tests fail open without holes;
 - CPU render-preparation cost scales with views and bins.
 
-### Phase 3: Visibility buffer on hardware rasterization
+### implementation stage: Visibility buffer on hardware rasterization
 
 Deliver:
 
@@ -657,7 +657,7 @@ Exit gates:
 - opaque and masked material correctness;
 - visibility identity remains stable across streaming.
 
-### Phase 4: GPU-feedback streaming
+### implementation stage: GPU-feedback streaming
 
 Deliver:
 
@@ -674,7 +674,7 @@ Exit gates:
 - requests converge for a stationary view;
 - publication and removal remain atomic under injected failures.
 
-### Phase 5: Hybrid hardware/compute rasterization
+### implementation stage: Hybrid hardware/compute rasterization
 
 Deliver:
 
@@ -690,7 +690,7 @@ Exit gates:
 - hybrid mode outperforms hardware-only mode on the micropolygon corpus;
 - large-triangle and overdraw worst cases select safe routes.
 
-### Phase 6: Complete material and multi-pass integration
+### implementation stage: Complete material and multi-pass integration
 
 Deliver:
 
@@ -707,7 +707,7 @@ Exit gates:
 - camera cuts and newly exposed geometry recover within the same frame policy;
 - no pass reuses incompatible camera visibility.
 
-### Phase 7: Animated-geometry advantage
+### implementation stage: Animated-geometry advantage
 
 Deliver:
 
@@ -725,7 +725,7 @@ Exit gates:
 - unchanged pages perform no deformation work;
 - animated benchmark results meet the differentiation targets in Section 10.
 
-### Phase 8: Aggregate geometry and ecosystem integration
+### implementation stage: Aggregate geometry and ecosystem integration
 
 Deliver:
 
@@ -741,12 +741,12 @@ Exit gates:
 - no mandatory vendor-specific runtime dependency;
 - every raster consumer uses the same selected geometry generation.
 
-### Phase 9: Production readiness
+### implementation stage: Production readiness
 
 Deliver:
 
 - incremental cooker and derived-data cache;
-- cross-vendor Vulkan CI; D3D12/DXIL cross-backend CI is deferred beyond feature 045;
+- cross-vendor Vulkan CI; non-Vulkan cross-backend CI is deferred beyond virtual geometry production;
 - benchmark dashboard;
 - import, inspect, repair, and package workflows;
 - compatibility and migration policy;
@@ -815,7 +815,7 @@ These are research targets, not current claims. They must be revised after Phase
 | Visibility correctness | Zero unexplained CPU/GPU mismatches | Zero false rejection in at least one million adversarial decisions per hardware family |
 | Streaming | No missing-geometry holes | Stationary-view convergence with no recurring requests and bounded churn under traversal |
 | Frame pacing | No unbounded stalls | p99 no more than 20% above median during the defined traversal |
-| Portability | Vulkan mesh-shader and indexed fallback parity | Vulkan/DX12 plus compute-raster parity on AMD, NVIDIA, and Intel |
+| Portability | Vulkan mesh-shader and indexed fallback parity | Vulkan plus compute-raster parity across required vendor lanes |
 
 Disk-density comparisons must state whether they include attributes, hierarchy,
 fallbacks, compression containers, and duplicate LOD data. Position-only numbers
@@ -880,10 +880,10 @@ specification set:
 8. Hybrid compute rasterization.
 9. Material and shading bins.
 10. Two-pass occlusion and multi-view integration.
-11. Animated virtual geometry v2.
+11. Animated virtual geometry.
 12. Virtual geometry shadows and capture integration.
 13. Aggregate geometry representations.
-14. Vulkan portability and fallback contracts (D3D12/DXIL portability is deferred).
+14. Vulkan portability and fallback contracts (other backend portability is deferred).
 15. Production cooker, tooling, and benchmark release gates.
 
 Each specification should declare:
@@ -954,21 +954,21 @@ The plan is informed by the following primary or first-party sources:
 - Epic Games, [A Deep Dive into Nanite Virtualized Geometry](https://advances.realtimerendering.com/s2021/index.html), SIGGRAPH Advances in Real-Time Rendering 2021. The presentation covers the complete path from imported mesh through build, streaming, decompression, culling, rasterization, and shading.
 - Epic Games, [Nanite Virtualized Geometry in Unreal Engine](https://dev.epicgames.com/documentation/en-us/unreal-engine/nanite-virtualized-geometry-in-unreal-engine), current feature and platform documentation.
 - The authorized `Terra854/UnrealEngine` fork at commit [`7deeb413d3dc1fc034f48d1aacc0861301829d32`](https://github.com/Terra854/UnrealEngine/tree/7deeb413d3dc1fc034f48d1aacc0861301829d32), inspected for implementation-level comparison only.
-- Samuli Laine and Tero Karras, [High-Performance Software Rasterization on GPUs](https://research.nvidia.com/publication/2011-08_high-performance-software-rasterization-gpus), HPG 2011.
+- Samuli Laine and Tero Karras, *High-Performance Software Rasterization on GPUs*, HPG 2011.
 - Christopher A. Burns and Warren A. Hunt, [The Visibility Buffer: A Cache-Friendly Approach to Deferred Shading](https://jcgt.org/published/0002/02/04/), JCGT 2013.
-- Microsoft, [DirectX Mesh Shader Specification](https://microsoft.github.io/DirectX-Specs/d3d/MeshShader.html), including amplification, culling, and indirect dispatch.
-- AMD, [Meshlet Compression](https://gpuopen.com/learn/mesh_shaders/mesh_shaders-meshlet_compression/), including generalized triangle strips, global-grid quantization, and mesh-shader decode considerations.
+- A published mesh-shader specification, including amplification, culling, and indirect dispatch.
+- A published meshlet-compression reference, including generalized triangle strips, global-grid quantization, and mesh-shader decode considerations.
 - Bastian Kuth et al., [Towards Practical Meshlet Compression](https://gpuopen.com/download/publications/Towards_Practical_Meshlet_Compression_paper.pdf), VMV 2024.
 - Joshua Barczak, Carsten Benthin, and David McAllister, [DGF: A Dense, Hardware-Friendly Geometry Format](https://gpuopen.com/download/publications/DGF.pdf), HPG 2024, used here as a compression and random-access geometry reference.
-- AMD, [Dense Geometry Compression Format SDK](https://gpuopen.com/dgf/), including Vulkan, DirectX 12, CPU/GPU decode, DGFS, and animation-aware updates.
-- AMD, [Animating Geometry with DGF](https://gpuopen.com/learn/animating-geometry-with-amd-dgf/), updateable compressed blocks for animated geometry.
+- Dense Geometry Compression Format SDK documentation, including Vulkan, CPU/GPU decode, DGFS, and animation-aware updates.
+- Animating Geometry with DGF documentation, covering updateable compressed blocks for animated geometry.
 - `meshoptimizer`, [mesh optimization, meshlet, and attribute-aware simplification reference](https://github.com/zeux/meshoptimizer), permissively licensed research and prototype baseline.
 - Khronos, [`vkCmdWriteTimestamp2`](https://registry.khronos.org/VulkanSC/specs/1.0-extensions/man/html/vkCmdWriteTimestamp2.html), timestamp-query semantics for GPU measurement.
-- AMD, [Radeon GPU Profiler](https://gpuopen.com/rgp/), event timing, wave occupancy, pipeline state, and instruction analysis.
+- A GPU profiler reference, covering event timing, wave occupancy, pipeline state, and instruction analysis.
 
 ## 15. Immediate Next Action
 
-Start with **Phase 0: capability truth and measurement**. It is the smallest
+Start with **implementation stage: capability truth and measurement**. It is the smallest
 change that improves every later decision and prevents the project from
 mistaking planned records for executed GPU work.
 

@@ -9,11 +9,11 @@
 	"authority": {
 		"runtimeContract": {
 			"path": "Docs/Animation/README.md",
-			"sha256": "1bb8bb3d0affa53d146b717171a7b23d72437af88449c273e8cb1a2fe4869279"
+			"sha256": "a2dd5eee95aa1590a927094006d120d2d67f39d2166605f27902dde85dc3566a"
 		},
 		"performanceWorkloads": {
 			"path": "Tools/Animation/PerformanceWorkloads.json",
-			"sha256": "dd297ef96f629b290be03bce64dec19612726cd5931e886fb722d80970d49dba"
+			"sha256": "d99199c796368fa7706af363985ce3e0b75a71fa5fa2c29238bce65343e943a6"
 		},
 		"baseline": {
 			"sourceCommit": "6d12e3a99d7c0d41899fc96fa18b02b61e5a0aa9",
@@ -36,7 +36,7 @@
 	},
 	"resultContract": {
 		"schemaVersion": 1,
-		"requiredRunKinds": ["readiness", "final-phase-18"],
+		"requiredRunKinds": ["readiness", "final-implementation stage"],
 		"finalOnlyStatistics": ["median", "p95", "p99", "worst"],
 		"minimumPairedMeasuredRuns": 5,
 		"missingMetricPolicy": "reject",

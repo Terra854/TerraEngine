@@ -335,6 +335,20 @@ namespace TerraEngine::Renderer::Vulkan {
 		std::uint32_t viewId)
 	{
 		std::vector<VirtualGeometryPagePayloadUploadRecord> records;
+		const bool hasVirtualGeometryRoute = std::any_of(
+			snapshot.geometryRouteDecisions.begin(), snapshot.geometryRouteDecisions.end(),
+			[](const GeometryRouteDecision& decision)
+			{
+				return decision.selected == GeometryRoute::VirtualGeometryHardware
+					|| decision.selected == GeometryRoute::VirtualGeometryCompute;
+			});
+		if(!hasVirtualGeometryRoute)
+		{
+			// Direct batches still use ordinary mesh/material upload planning above.
+			// They must not acquire a VG page payload, descriptor row, or residency
+			// record merely because a previous frame used a virtual representation.
+			return records;
+		}
 		for (const VirtualGeometryViewSelectionState& state : snapshot.virtualGeometryViewSelections)
 		{
 			if (state.viewType != viewType)

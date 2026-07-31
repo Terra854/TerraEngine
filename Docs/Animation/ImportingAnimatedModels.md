@@ -87,7 +87,8 @@ Mirrored or negative-scale hierarchies are retained only when the resulting tran
 - Zero total weight is explicit identity deformation, not an implicit bind to joint zero.
 - A palette partition contains at most 256 source joints. Deterministic topology-aware partitioning is attempted before rejection.
 - A bound deformable mesh must carry the exact nonzero skeleton compatibility fingerprint.
-- TDEF v1 stores dense morph position deltas. Normal/tangent morph deltas are not yet represented and must not be silently claimed as complete.
+- Canonical TEMF v1 stores dense position, normal, and tangent morph deltas in
+  descriptor-owned deformable streams.
 
 The hard source-package limits are 1,024 skins/skeletons and 4,096 clips; the normal operational defaults are 64 and 256. See [Animation Assets](AnimationAssets.md) and the [frozen limits contract](../../Docs/Animation/README.md) for all limits.
 
@@ -129,6 +130,6 @@ cmake --build --preset RelWithDebInfo --target install
 
 Then import the deterministic fixtures through the installed editor, inspect generated children and prefab bindings, inject a malformed/cancelled reimport, and verify that the last-known-good bytes and GUIDs remain unchanged. The Phase A live gate also records real Asset Browser/Inspector clicks, MCP import/query results, Scene/Game captures, project reload, and explicit performance deferral.
 
-No source model is downloaded during configure, build, test, install, editor startup, or normal import validation. Licensed real-model acquisition happens explicitly in final Phase 18.
+No source model is downloaded during configure, build, test, install, editor startup, or normal import validation. Licensed real-model acquisition happens explicitly in final implementation stage.
 
 All measured import/authoring timing, animation benchmarks, diagnostics-overhead measurements, engine-wide baseline comparisons, and performance acceptance remain reserved for animation-validation-runs-every-accumulated-feature-workflow-benchmark-t-runs-every-unrelated, animation-validation-invoke-final-only-t-t-comparator-every-prepared-control-including, and animation-validation-repair-capable-final-checks-t-t-are-clean-final-blocking. Correctness and source-free import validation must pass now; performance testing is deferred, not waived.

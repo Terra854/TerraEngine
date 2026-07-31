@@ -1,10 +1,10 @@
 # TerraEngine Testing
 
-## Feature 045 production gates
+## Production virtual-geometry gates
 
 From a clean checkout, compile and run the focused contract registrations before
 installing. The install target compiles the Vulkan SPIR-V set and runs a final
-audit of required tools, scenarios, fixtures, shaders, and Feature 045 docs.
+audit of required tools, scenarios, fixtures, shaders, and production virtual-geometry docs.
 
 ```powershell
 git submodule update --init --recursive
@@ -14,7 +14,7 @@ cmake --build --preset RelWithDebInfo --target `
 	TerraEngineVirtualGeometryAssetTool TerraEngineVirtualGeometryBenchmark `
 	TerraEngineVirtualGeometryCodecExperiment
 ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
-	-R "^(Engine|Editor)\.VirtualGeometryFeature045Contracts$" `
+	-R "^(Engine|Editor)\.VirtualGeometryProductionContracts$" `
 	--output-on-failure
 cmake --build --preset RelWithDebInfo --target install
 ```
@@ -29,18 +29,18 @@ $vgAdapter = Join-Path $vgTools 'VirtualGeometryRuntimeAdapter.cmd'
 $vgWorkloads = Join-Path $vgTools 'workloads.json'
 $vgMatrix = Join-Path $vgTools 'hardware-matrix.json'
 $vgQuality = Join-Path $vgTools 'quality-profiles.json'
-$vgEvidence = [IO.Path]::GetFullPath('out/evidence/045/install-dry-run')
+$vgEvidence = [IO.Path]::GetFullPath('out/evidence/virtual-geometry/install-dry-run')
 
 & (Join-Path $vgTools 'RunCodecExperiment.ps1') `
-	-InputMesh (Join-Path $installRoot 'Tests/Fixtures/Animation/US1Import/Assets/Models/US1Hero.gltf') `
+	-InputMesh (Join-Path $installRoot 'Tests/Fixtures/Animation/ImportValidation/Assets/Models/ImportHero.gltf') `
 	-ExperimentExecutable (Join-Path $installRoot 'Tools/TerraEngineVirtualGeometryCodecExperiment.exe') `
 	-OutputDirectory (Join-Path $vgEvidence 'codec') -DryRun
 & (Join-Path $vgTools 'CaptureVirtualGeometryPerformance.ps1') `
 	-BenchmarkExecutable $vgRunner -Workloads $vgWorkloads -Matrix $vgMatrix `
 	-Quality $vgQuality -Output (Join-Path $vgEvidence 'capture.json') -DryRun
-& (Join-Path $vgTools 'RunVirtualGeometryPhaseGate.ps1') `
-	-ScenarioDirectory (Join-Path $vgTools 'PhaseScenarios') `
-	-OutputDirectory (Join-Path $vgEvidence 'phase-gate') -DryRun
+& (Join-Path $vgTools 'RunVirtualGeometryCapabilityGate.ps1') `
+	-ScenarioDirectory (Join-Path $vgTools 'CapabilityScenarios') `
+	-OutputDirectory (Join-Path $vgEvidence 'production-gate') -DryRun
 & (Join-Path $vgTools 'RunBackendParityMatrix.ps1') `
 	-Runner $vgRunner -Workloads $vgWorkloads -Matrix $vgMatrix `
 	-Quality $vgQuality -Output (Join-Path $vgEvidence 'backend-parity.json') -DryRun
@@ -61,7 +61,7 @@ $vgEvidence = [IO.Path]::GetFullPath('out/evidence/045/install-dry-run')
 Non-dry runs fail for missing executables, manifests, images, or raw captures.
 Performance comparison requires at least five comparable measured runs; image
 comparison records both hashes. Unattached AMD/NVIDIA/Intel Vulkan hardware
-remains `unavailable`, never a pass. Feature 045's installed matrix is
+remains `unavailable`, never a pass. The production virtual-geometry installed matrix is
 Vulkan-only; D3D12 and DXIL are out of scope. Soak acceptance requires bounded
 duration, raw counters, high-water/bounded-growth data, command/environment,
 and artifact hashes; missing data is not zero. Installed automation commands
@@ -70,8 +70,8 @@ and artifact hashes; missing data is not zero. Installed automation commands
 explicit mutation command is requested, and canceled/failed repairs retain
 last-known-good output. Packaging/compatibility claims require installed
 artifacts, source/license provenance, and explicit fallback diagnostics.
-For the single-scenario phase 0-9 commands, use the installed-tree helper in
-`Build/Docs/Specs/045-virtual-geometry-alternative/quickstart.md`.
+For individual capability scenarios, use the installed-tree `CapabilityScenarios/`
+manifests and the production gate command above.
 
 This document is the reproducible CTest workflow for the current unit test
 layout. Engine tests live under `Tests/Engine`; editor tests live under
@@ -149,7 +149,7 @@ ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
 cmake --build --preset RelWithDebInfo --target install
 ```
 
-## Virtual Geometry feature 045 evidence
+## Virtual Geometry production evidence
 
 Validate the setup manifests without launching a renderer:
 
@@ -178,17 +178,17 @@ $adapter = Join-Path $vgTools 'VirtualGeometryRuntimeAdapter.cmd'
 	--quality (Join-Path $vgTools 'quality-profiles.json') `
 	--workload 'baseline-processor-expanded' --runtime-adapter $adapter `
 	--duration-seconds 30 `
-	--output ([IO.Path]::GetFullPath('out/evidence/045/baseline/run-01.json'))
+	--output ([IO.Path]::GetFullPath('out/evidence/virtual-geometry/baseline/run-01.json'))
 & (Join-Path $vgTools 'CompareVirtualGeometryPerformance.ps1') `
-	-BaselineDirectory ([IO.Path]::GetFullPath('out/evidence/045/baseline')) `
-	-CandidateDirectory ([IO.Path]::GetFullPath('out/evidence/045/candidate')) `
-	-Output ([IO.Path]::GetFullPath('out/evidence/045/comparison.json'))
+	-BaselineDirectory ([IO.Path]::GetFullPath('out/evidence/virtual-geometry/baseline')) `
+	-CandidateDirectory ([IO.Path]::GetFullPath('out/evidence/virtual-geometry/candidate')) `
+	-Output ([IO.Path]::GetFullPath('out/evidence/virtual-geometry/comparison.json'))
 ```
 
 The comparison script exits non-zero for insufficient measured evidence or a
 median regression above the configured ratio. A successful script run is not a
 substitute for the required build, focused CTest, install, image-parity, and
-hardware-matrix gates; link those results from the phase evidence directory.
+hardware-matrix gates; link those results from the capability evidence directory.
 
 To prove that no ambient global package cache is involved, use a unique empty
 cache beneath `out/` and run the four restores directly. Do not clear or alter
@@ -313,16 +313,16 @@ scripting, automation, export, and complete CTest surfaces described below.
 
 Candidate animation benchmarks, workflow timing/throughput/latency gates,
 diagnostics-overhead measurements, candidate captures, and paired engine
-comparisons run only in final Phase 18. T001 remains the immutable reference
+comparisons run only in final implementation stage. implementation check remains the immutable reference
 capture. An intermediate gate uses explicit reviewed authority and omits both
 performance manifest parameters:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
 	-File Tools/Animation/RunAnimationPhaseGate.ps1 `
-	-Phase foundation -GateTask T024 `
+	-Phase foundation -GateTask implementation check `
 	-DeferPerformanceExecutionToFinalIntegration `
-	-PerformanceDeferralAuthority "Spec 043 final-only performance schedule amendment (2026-07-17)" `
+	-PerformanceDeferralAuthority "animation production validation final-only performance schedule amendment (2026-07-17)" `
 	-FixtureRoot <fixture-project> `
 	-ScenarioManifest <scenario.json> `
 	-AcceptanceUpdateManifest <acceptance-update.json> `
@@ -342,23 +342,23 @@ checks. `Animation.Dormant.*` remains active because those cases prove non-timed
 structural invariants. Every intermediate `-Execute` run requires this deferral
 switch. The resulting correctness gate can pass, but its performance
 pass/comparability/repeatability fields remain `null` because they were
-deliberately not measured, and T283, T284, and T288 still block final integration.
+deliberately not measured, and implementation check, implementation check, and implementation check still block final integration.
 
 The reviewed schedule metadata is hash-locked without changing performance
 workloads or thresholds: runtime contract
-`1bb8bb3d0affa53d146b717171a7b23d72437af88449c273e8cb1a2fe4869279`,
+`a2dd5eee95aa1590a927094006d120d2d67f39d2166605f27902dde85dc3566a`,
 renderer workload manifest
-`397b7cb6ac01714a628c44bab6cb002c034c8d8e5422bf184dc10cddf201b12f`,
+`3230959fab8c628d9396bd31a7923672c3a1ebf5b51ff4998066a8f10c2b3e4c`,
 and performance workloads
-`dd297ef96f629b290be03bce64dec19612726cd5931e886fb722d80970d49dba`.
+`d99199c796368fa7706af363985ce3e0b75a71fa5fa2c29238bce65343e943a6`.
 
 The final live gate rejects that switch and requires both final inputs:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
 	-File Tools/Animation/RunAnimationPhaseGate.ps1 `
-	-Phase final-live -GateTask T288 `
-	-FinalAnimationPerformanceEvidenceManifest out/validation/animation/final/animation-performance/t283-manifest.json `
+	-Phase final-live -GateTask implementation check `
+	-FinalAnimationPerformanceEvidenceManifest out/validation/animation/final/animation-performance/implementation check-manifest.json `
 	-PerformanceCandidateManifest out/validation/animation/final/engine-performance/candidate-manifest.json `
 	-FixtureRoot <fixture-project> `
 	-ScenarioManifest <scenario.json> `
@@ -366,10 +366,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 	-Execute
 ```
 
-The T283 manifest must explicitly be passing, non-deferred, scoped to final
-animation performance, and cover SC-001, SC-006, SC-009, SC-013 through SC-015,
-and SC-027 through SC-031. The engine-wide candidate is evaluated by the locked
-T284 comparator. Missing or incomparable proof fails closed. See
+The implementation check manifest must explicitly be passing, non-deferred, scoped to final
+animation performance, and cover success contract, success contract, success contract, success contract through success contract,
+and success contract through success contract. The engine-wide candidate is evaluated by the locked
+implementation check comparator. Missing or incomparable proof fails closed. See
 `Docs/Animation/README.md` for the current schema limitation and evidence shape.
 
 The scene graph runtime checks validate deterministic traversal, hierarchy
@@ -437,7 +437,7 @@ rejections, fallbacks, and small-scene guard state. This section deliberately
 does not include lighting controls; lighting remains in renderer-specific
 diagnostic surfaces.
 
-Active object handle coverage for `specs/022-active-object-handles` extends the
+Active object handle coverage extends the
 same pass with compact reference footprint helpers, stale-reference rejection,
 runtime membership reuse flags, active authored-state serialization, and
 automation fallback counters. Use this tighter filter when changing
@@ -541,7 +541,7 @@ ctest --test-dir out\build\CodexDebug --output-on-failure -C Debug
 cmd /c "call ""C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"" >nul && cmake --build out\build\CodexDebug --target install --config Debug"
 ```
 
-Scene View overlay coverage for `specs/037-scene-view-overlays` lives in the
+Scene View overlay coverage lives in the
 editor harness. It validates the toolbar tool state, snap fallback, marker
 projection and deterministic overlap selection, orientation widget labels,
 renderer-unavailable diagnostics, preference JSON fallback, icon accessibility
@@ -597,7 +597,7 @@ application.
 Visible-command reuse coverage validates static-view cache-hit telemetry,
 deduplicated streaming touch publication, scheduler resource declarations,
 automation stats, profiler rows, and repeated-resource performance gates. Use
-this focused pass while iterating on `specs/032-visible-command-reuse`:
+this focused pass while iterating on visible-command reuse:
 
 ```powershell
 $env:TERRAENGINE_TEST_FILTER="Renderer.VisibleCommandReuse;Renderer.VisibleStreamingTouches;Engine.SystemScheduler.DefaultResourcesAcceptVirtualGeometryRenderDeclaration"
@@ -631,7 +631,7 @@ pipeline disk caches because those files are backend cache implementation
 details, not loaded resource residency.
 
 Profiler stats and render-diagnostic relocation coverage for
-`specs/035-gpu-profiler-stats` lives in the existing engine/editor harnesses.
+GPU profiler statistics coverage lives in the existing engine/editor harnesses.
 Use this pass when changing the Game View stats overlay, Profiler timing stream
 presentation, Profiler toolbar, Resource Residency virtual geometry diagnostic
 tables, or automation diagnostics contracts:
@@ -670,7 +670,7 @@ Remove-Item Env:TERRAENGINE_TEST_FILTER
 
 Virtual geometry coverage will build on the renderer, resource residency,
 streaming, asset pipeline, automation, and export suites. Use this focused pass
-while implementing `specs/026-virtual-geometry` tasks:
+while implementing virtual geometry changes:
 
 ```powershell
 $env:TERRAENGINE_TEST_FILTER="VirtualGeometry;MeshCompiler;HiZ;ResourceStreaming;ResourceResidency;Renderer;AssetPipeline;Editor.Automation;Export"
@@ -685,7 +685,7 @@ The CTest labels also expose stable virtual-geometry slices:
 ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryRenderer|Engine.VirtualGeometryResource|Editor.VirtualGeometryAssetPipeline|Editor.VirtualGeometryAutomation|Editor.VirtualGeometryExport" --output-on-failure -C Debug
 ```
 
-Feature `specs/027-adaptive-virtual-geometry` adds focused adaptive slices for
+The adaptive virtual geometry milestone adds focused adaptive slices for
 configurable cook ratios, Inspector-only per-mesh overrides, real page
 streaming, stronger Hi-Z validation, mixed-detail cluster selection, and runtime
 visualization. Use this pass while implementing or reviewing that feature:
@@ -694,7 +694,7 @@ visualization. Use this pass while implementing or reviewing that feature:
 ctest --test-dir out/build/Debug -R "Engine.AdaptiveVirtualGeometry|Editor.AdaptiveVirtualGeometry" --output-on-failure -C Debug
 ```
 
-Feature `specs/029-virtual-geometry-hardening` adds the staged hardening pass
+The virtual geometry hardening milestone adds the staged hardening pass
 for Hi-Z correctness, explainable Hi-Z diagnostics, real page streaming,
 counter source truth, transition stability, multi-view independence, visualizer
 cleanup, and broad asset coverage:
@@ -703,7 +703,7 @@ cleanup, and broad asset coverage:
 ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryHardening|Editor.VirtualGeometryHardening" --output-on-failure -C Debug
 ```
 
-Feature `specs/030-vg-gpu-driven-batching` adds the staged virtual geometry
+The GPU-driven batching milestone adds the staged virtual geometry
 scaling pass for cluster packet batching, runtime compaction, real page
 residency, performance gates, shadow-view selection, cone-safety metadata, and
 Hi-Z baseline preservation:
@@ -712,7 +712,7 @@ Hi-Z baseline preservation:
 ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryBatching|Engine.VirtualGeometryCompaction|Engine.VirtualGeometryPerformanceGate|Engine.VirtualGeometryShadow|Engine.VirtualGeometryCulling|Engine.VirtualGeometryRenderer|Engine.VirtualGeometryResource|Editor.VirtualGeometryAssetPipeline|Editor.VirtualGeometryAutomation|Editor.VirtualGeometryExport|Editor.VirtualGeometryDiagnostics" --output-on-failure -C Debug
 ```
 
-When implementing `030`, run each phase or user-story slice before advancing to
+When implementing GPU-driven batching, run each capability slice before advancing to
 the next one. The Hi-Z slice is a preservation pass: it must prove the current
 moving-wall, camera-cut, resize, thin-geometry, and multi-view behavior still
 matches the accepted baseline rather than adding new Hi-Z runtime tiers.
@@ -729,7 +729,7 @@ cone-culling slice is conservative by default: it validates the required
 selected cluster is one-sided, opaque, consistent-winding, low thin-shell risk,
 and cone-valid.
 
-Feature `specs/031-vg-gpu-compaction` advances the already-selected virtual
+The GPU packet compaction milestone advances the already-selected virtual
 geometry cluster cut into GPU-visible packet buffers, GPU packet compaction,
 generated submission records, and source-labeled per-view counter readbacks.
 The current CPU-selected cluster cut remains the correctness oracle, and the
@@ -739,7 +739,7 @@ current Hi-Z behavior remains locked as the accepted baseline:
 ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryBatching|Engine.VirtualGeometryCompaction|Engine.VirtualGeometryPerformanceGate|Engine.VirtualGeometryRenderer|Engine.RendererRecovery" --output-on-failure -C Debug
 ```
 
-When implementing `031`, run each phase or user-story slice before advancing to
+When implementing GPU packet compaction, run each capability slice before advancing to
 the next one. The GPU packet buffer slice must validate packet and batch layout
 before shader consumption is enabled. The compaction slice must validate
 candidate, compacted, rejected, fail-open, generated submission, and overflow
@@ -748,7 +748,7 @@ moving-wall, camera-cut, resize, thin-geometry, and multi-view behavior still
 matches the accepted baseline without adding quality tiers or retuning
 occlusion.
 
-The feature `031` performance gates fail when dense selected packet work does
+The GPU packet compaction performance gates fail when dense selected packet work does
 not collapse to submitted batches at or below `10%`, when CPU visible-command
 preparation regresses beyond the configured budget, when compaction counters
 miss fixture truth by more than `1%` or one packet, when generated submissions
@@ -757,7 +757,7 @@ across 300 frames, or when the Hi-Z false-occlusion count is non-zero.
 Unsupported prerequisites are reported as `Unsupported`, not as passing
 zero-valued metrics.
 
-Feature `specs/033-vg-page-streaming` turns virtual geometry residency into a
+The page-sourced geometry streaming milestone turns virtual geometry residency into a
 true page-sourced render contract. Use the page-streaming slices while
 implementing that feature:
 
@@ -772,27 +772,27 @@ the resource-labeled slice after the engine test target builds:
 ctest --test-dir out/build/Debug -C Debug -L Resource --output-on-failure
 ```
 
-For US6 page-source diagnostics, build both native test targets and run the
+For capability validation page-source diagnostics, build both native test targets and run the
 registry filters that match the editor-facing contract names:
 
 ```powershell
-cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Diagnostics.US6&& out\build\Debug\TerraEngine-EngineTests.exe"
-cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Diagnostics.US6&& out\build\Debug\TerraEngine-EditorTests.exe"
-cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Automation.US6&& out\build\Debug\TerraEngine-EditorTests.exe"
+cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Diagnostics.capability validation&& out\build\Debug\TerraEngine-EngineTests.exe"
+cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Diagnostics.capability validation&& out\build\Debug\TerraEngine-EditorTests.exe"
+cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Automation.capability validation&& out\build\Debug\TerraEngine-EditorTests.exe"
 ```
 
 The literal task checkpoint
 `ctest --test-dir out/build/Debug -C Debug -R VirtualGeometry.Editor --output-on-failure`
 currently matches no top-level CTest target. Treat the registry filters above
-as the authoritative US6 validation until CTest target names are expanded.
+as the authoritative capability validation validation until CTest target names are expanded.
 
-For US7 asset cook/runtime integrity, run the inspector, runtime loader, and
+For capability validation asset cook/runtime integrity, run the inspector, runtime loader, and
 automation slices before the asset-pipeline CTest checkpoint:
 
 ```powershell
-cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Inspector.US7&& out\build\Debug\TerraEngine-EditorTests.exe"
-cmd /c "set TERRAENGINE_TEST_FILTER=Resource.Manager.Mesh.US7&& out\build\Debug\TerraEngine-EngineTests.exe"
-cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Automation.US7&& out\build\Debug\TerraEngine-EditorTests.exe"
+cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Inspector.capability validation&& out\build\Debug\TerraEngine-EditorTests.exe"
+cmd /c "set TERRAENGINE_TEST_FILTER=Resource.Manager.Mesh.capability validation&& out\build\Debug\TerraEngine-EngineTests.exe"
+cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Automation.capability validation&& out\build\Debug\TerraEngine-EditorTests.exe"
 ctest --test-dir out/build/Debug -C Debug -R AssetPipeline --output-on-failure
 ```
 
@@ -800,16 +800,16 @@ These checks protect the TEMF v1 page-integrity contract, tiny/simple mesh skip
 reasons, mesh-only Inspector controls, and automation fields for page readiness
 or integrity failure diagnostics.
 
-For US8 page-streaming performance and memory gates, run the page-gate filters
+For capability validation page-streaming performance and memory gates, run the page-gate filters
 before the broad VirtualGeometry label checkpoint:
 
 ```powershell
-cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.PerformanceGate.US8&& out\build\Debug\TerraEngine-EngineTests.exe"
-cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Render.MultiView.US8&& out\build\Debug\TerraEngine-EngineTests.exe"
+cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.PerformanceGate.capability validation&& out\build\Debug\TerraEngine-EngineTests.exe"
+cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Render.MultiView.capability validation&& out\build\Debug\TerraEngine-EngineTests.exe"
 ctest --test-dir out/build/Debug -C Debug -L VirtualGeometry --output-on-failure
 ```
 
-The US8 gates fail when resident page payload bytes exceed the configured page
+The capability validation gates fail when resident page payload bytes exceed the configured page
 budget, resident page payloads approach full owning-mesh residency, page-source
 coverage is missing, embedded full-mesh fallback is used as the normal path, or
 Scene View/Game View page-source counters lose their view/counter-source
@@ -817,7 +817,7 @@ identity.
 
 The clean-checkout fixture names are `page-sourced-resident-payload`,
 `page-fallback-only-coverage`, `page-budget-churn`, and
-`page-integrity-malformed`; `dense-page-budget-streaming-gate` adds the US8
+`page-integrity-malformed`; `dense-page-budget-streaming-gate` adds the capability validation
 resident-byte, full-owning-mesh, missing-coverage, and embedded-fallback gate
 coverage. These fixtures prove that normal rendering emits resident page
 payloads, fallback pages stay pinned and visible, resident bytes respect the
@@ -831,7 +831,7 @@ editor asset pipeline, automation, export, and debug visualizer behavior:
 ctest --test-dir out/build/Debug -R "Engine.VirtualGeometry|Editor.VirtualGeometry|Engine.Renderer|Engine.Resource|Editor.AssetPipeline.VirtualGeometry|Editor.Automation|Editor.Export" --output-on-failure -C Debug
 ```
 
-US9 broad asset coverage is represented by
+capability validation broad asset coverage is represented by
 `Tests/Fixtures/VirtualGeometry/hardening-fixtures.json`. The clean-checkout
 tests validate tiny, dense, thin, curved, hard-surface, multi-material package,
 streaming-pressure, multi-view, and export categories through procedural data,
@@ -858,7 +858,7 @@ and residency churn invariants lives in
 `Docs/Renderer/VirtualGeometry.md`, `Docs/TerraEngineMeshFile.md`,
 `Docs/Testing.md`, and that fixture README into the Debug install tree for QA.
 
-For feature `034` true page residency, run exact Resource Residency checks
+For true page residency, run exact Resource Residency checks
 before renderer payload checks:
 
 ```powershell
@@ -869,8 +869,8 @@ ctest --test-dir out/build/Debug -C Debug -R "VirtualGeometry\\.(Render|PageStre
 These tests must prove that `Stream CPU Bytes` and `Render GPU Bytes` are exact
 current live bytes for the row's asset, package parent rows do not borrow child
 bytes, unavailable accounting stays non-numeric, and page-source diagnostics do
-not silently treat owning mesh buffers as true page-owned rendering. Feature
-`034` now publishes shader-decodable page-local vertex, primitive, remap,
+not silently treat owning mesh buffers as true page-owned rendering. The current
+implementation publishes shader-decodable page-local vertex, primitive, remap,
 meshlet, bounds, decode-info, and material streams for resident high-detail and
 fallback packets. The shader-layout regression slice also proves that these
 branches select page-local records before any owner-stream read. Owning-mesh
@@ -890,12 +890,12 @@ ctest --test-dir out/build/Debug -R "Engine.VirtualGeometry|Editor.VirtualGeomet
 cmd.exe /s /c '"C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64 && cmake --build --preset Debug --target install'
 ```
 
-During feature `029`, run the hardening slice after each phase or user story,
+During virtual geometry hardening, run the hardening slice after each capability slice,
 then run the broader virtual-geometry regression set before the install target.
 The hardening fixture manifest lives at
 `Tests/Fixtures/VirtualGeometry/hardening-fixtures.json`.
 
-During feature `030`, rebuild the compiler tools before CTest whenever
+During GPU-driven batching work, rebuild the compiler tools before CTest whenever
 `MeshCompiler.cpp`, package importers, TEMF virtual geometry structs, or sidecar
 metadata changes. Several editor tests launch `TerraEngineMeshCompiler.exe` or
 `TerraEngineModelPackageCompiler.exe`, so stale tool binaries can make newly
@@ -1073,7 +1073,7 @@ The local command sequence is the supported validation gate. Keep the
 it retains the disposable project and any partial or complete export evidence
 after failure.
 
-For the Spec 043 canonical comparison, use 10,000 bodies (1,000 dynamic,
+For the animation production validation canonical comparison, use 10,000 bodies (1,000 dynamic,
 1,000 kinematic, 8,000 static) and 100 exact paused steps. Scene View defaults
 are a 2,000-object large-scene threshold, 2,048 visible-marker budget, 512-item
 presentation batches, 18-pixel density radius, density threshold 4, clustered
@@ -1083,7 +1083,7 @@ use hardware concurrency with no environment cap; only the 1/2/4 matrix sets
 `TERRAENGINE_THREADPOOL_WORKERS` deliberately, and build commands do not pass
 `--parallel`.
 
-## Spec 042 physics hardening workflow
+## physics foundation validation physics hardening workflow
 
 The complete physics gate uses RelWithDebInfo on Windows x64. From a Visual
 Studio developer PowerShell, run the following in order:
@@ -1114,14 +1114,14 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Physics/RunInstall
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/ExportRuntimeBaseline/RunBaseline.ps1 -InstallRoot out/build/RelWithDebInfo/Build -WorkRoot out/ci/physics-export-baseline
 ```
 
-The live harness accepts `-RunUs6Loopback` for managed/automation checks and
+The live harness accepts `-RunManagedReloadAutomationLoopback` for managed/automation checks and
 `-RunAuthoringWalkthrough` for authoring checks. The export baseline must retain
 the six evidence files and must not copy `.tecollider` source recipes into the
 published package. Troubleshoot stale binaries by reinstalling; troubleshoot a
 failed export by reading `validation-report.json`, `content-inventory.json`,
 and `package-validation.txt` before changing the fixture.
 
-Spec 042's Windows/MSVC sanitizer support is limited to the provider-only
+physics foundation validation's Windows/MSVC sanitizer support is limited to the provider-only
 `ReleaseASAN` BackendSpike. There is no supported full-engine TSan lane on this
 toolchain, and provider-spike results do not cover engine/editor/Vulkan/managed
 runtime lifecycle behavior. Record commands, toolchain, exclusions, and results
@@ -1130,7 +1130,7 @@ is archived.
 
 ## MCP Editor Completeness
 
-Feature `041` expands the loopback-only editor bridge with typed capability
+The loopback-only editor bridge exposes typed capability
 providers, atomic automation transactions, durable session jobs, structured
 logs, project and scene lifecycle, Play Mode, asset and prefab workflows,
 scripting, build profiles, Scene View commands, and profiler captures. The
@@ -1156,7 +1156,7 @@ Installed-editor validation uses
 `out/build/Debug/Build/Editor/TerraEngine-Editor.exe`. Start at the project hub
 with isolated preferences, enable the bridge and writes from
 `Edit > Preferences... > MCP Bridge`, and run the end-to-end scenario in
-`specs/041-mcp-editor-completeness/quickstart.md`. Validation must cover one
+the editor automation validation workflow. Validation must cover one
 successful atomic batch and one rejected batch, undo/redo, disconnect and job
 reconnect, Play Mode single-step, image capture, correlated logs, script
 compilation, export evidence, profiler capture, approval binding, project
@@ -1199,7 +1199,7 @@ install will fail at managed publish.
 
 ### Renderer Stability Hardening
 
-Feature 040 adds deterministic filters for `VulkanPresentationLifecycle`,
+scene runtime validation adds deterministic filters for `VulkanPresentationLifecycle`,
 `VulkanUiSubmissionFailure`, `EditorFrameCompletionTracker`,
 `Editor.StartupRenderer`, `Editor.PostFrameBoundary`,
 `Editor.CheckedImGuiVulkanBridge`, and `Editor.ViewportTextureRetirement`.
@@ -1239,7 +1239,7 @@ The live editor script output may remain `Assembly-CSharp.dll` on Linux because
 it is a managed `dotnet build` assembly. That is distinct from exported
 NativeAOT payloads such as `Assembly-CSharp.so`.
 
-## Spec 043 project readiness and Play Mode restoration
+## animation production validation project readiness and Play Mode restoration
 
 Run the project-readiness slice after an integrated RelWithDebInfo build. Keep
 the native worker override unset so the tests and later installed run use the
@@ -1265,13 +1265,13 @@ Play Mode bulk restoration, and export exclusion. A cache failure is successful
 recovery only when authored source loads completely, no partial live state is
 visible, and best-effort regeneration is atomically published.
 
-After install, run the harness's US4 matrix under a disposable work root:
+After install, run the harness's capability validation matrix under a disposable work root:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Physics/RunInstalledEditorPhysicsStress.ps1 `
 	-InstallRoot out/build/RelWithDebInfo/Build `
-	-WorkRoot out/validation/043-us4 `
-	-RunUs4ReadinessMatrix -AllowLiveStress
+	-WorkRoot out/validation/readiness `
+	-RunReadinessMatrix -AllowLiveStress
 ```
 
 Retain every scenario summary, MCP log, stage timing, source hash, cache
@@ -1320,18 +1320,18 @@ Remove-Item Env:TERRAENGINE_TEST_FILTER
 cmd /c "C:\PROGRA~1\MIB055~1\18\COMMUN~1\Common7\Tools\VsDevCmd.bat -arch=x64 -host_arch=x64 && cmake --build --preset RelWithDebInfo --target install"
 ```
 
-## Spec 043 profiler v2 evidence
+## animation production validation profiler v2 evidence
 
 The installed harness keeps profiler capture selection additive. New recordings
 use payload v2; v1 compatibility is verified by immutable fixture load tests and
-never by rewriting a v1 artifact. Use `-RunUs5ProfilerChecks` with
+never by rewriting a v1 artifact. Use `-RunProfilerCaptureProfilerChecks` with
 `-CaptureLevel detailed|sampled|aggregate` and `-CaptureVersion v2`:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Physics/RunInstalledEditorPhysicsStress.ps1 `
     -InstallRoot out/build/RelWithDebInfo/Build `
-    -WorkRoot out/validation/043-us5/detailed-v2 `
-    -CaptureLevel detailed -CaptureVersion v2 -RunUs5ProfilerChecks -AllowLiveStress
+    -WorkRoot out/validation/profiler-capture/detailed-v2 `
+    -CaptureLevel detailed -CaptureVersion v2 -RunProfilerCaptureChecks -AllowLiveStress
 ```
 
 Evidence records the selected level/version, frame counts, comparable baseline,
@@ -1341,7 +1341,7 @@ applies a 10 MiB size gate. Missing measurements remain explicit unavailable
 values rather than being invented as zero.
 Compare like-for-like level, version, workload, workers, and duration.
 
-## Spec 044 animated virtual geometry
+## animated virtual geometry validation animated virtual geometry
 
 Animated virtual geometry has three validation layers. Run the focused CPU,
 format, shader-contract, scheduler, streaming, publication, and recovery checks
@@ -1351,7 +1351,7 @@ before the complete suites:
 $env:TERRAENGINE_TEST_FILTER="AnimatedVirtualGeometry;VirtualGeometry.ShaderLayout;Renderer.AnimationView;ShaderGeometryContract"
 .\out\build\RelWithDebInfo\TerraEngine-EngineTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
-$env:TERRAENGINE_TEST_FILTER="SkinnedMeshCook;AnimatedVirtualPageFormat;VirtualGeometry"
+$env:TERRAENGINE_TEST_FILTER="SkinnedMeshCook;DeformableDemandedPageFormat;VirtualGeometry"
 .\out\build\RelWithDebInfo\TerraEngine-EditorTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
 ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo --output-on-failure

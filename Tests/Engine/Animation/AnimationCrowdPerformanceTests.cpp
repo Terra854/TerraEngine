@@ -2,7 +2,7 @@
 //
 // This suite verifies source-controlled identities, counters, memory evidence,
 // and tail-result validation only. It never measures a frame or decides final
-// performance acceptance before Phase 18 task T283.
+// performance acceptance before ImplementationStage task ImplementationCheck.
 
 #include "TestHarness.h"
 
@@ -28,11 +28,11 @@ namespace TerraEngine::Tests {
 
 	namespace {
 		inline constexpr std::string_view kFrozenStressManifestSha256 =
-			"c5652867707f46b2db388a3fc27af14c71db6b13a431dc64a52d6584f555a891";
+			"40e3a8b7eb447ad3e3029a81cbc7383b15f92045c4f04ec69f13a35e3c44296a";
 		inline constexpr std::string_view kFrozenRuntimeContractSha256 =
-			"1bb8bb3d0affa53d146b717171a7b23d72437af88449c273e8cb1a2fe4869279";
+			"a2dd5eee95aa1590a927094006d120d2d67f39d2166605f27902dde85dc3566a";
 		inline constexpr std::string_view kFrozenPerformanceWorkloadsSha256 =
-			"dd297ef96f629b290be03bce64dec19612726cd5931e886fb722d80970d49dba";
+			"d99199c796368fa7706af363985ce3e0b75a71fa5fa2c29238bce65343e943a6";
 
 		std::filesystem::path SourcePath(std::string_view relativePath)
 		{
@@ -245,7 +245,7 @@ namespace TerraEngine::Tests {
 				"The complete generated-workload manifest must retain its reviewed byte hash.");
 			context.Expect(manifest.at("performanceAcceptancePhase") == 18
 				&& manifest.at("performanceExecutionDeferred").get<bool>(),
-				"Scale performance execution must remain deferred to final Phase 18.");
+				"Scale performance execution must remain deferred to final ImplementationStage.");
 			const nlohmann::json& runtime = manifest.at("authority").at("runtimeContract");
 			const nlohmann::json& performance = manifest.at("authority").at("performanceWorkloads");
 			context.Expect(runtime.at("sha256").get<std::string>() == kFrozenRuntimeContractSha256
@@ -253,7 +253,7 @@ namespace TerraEngine::Tests {
 				"The runtime profile path and bytes must match the frozen authority.");
 			context.Expect(performance.at("sha256").get<std::string>() == kFrozenPerformanceWorkloadsSha256
 				&& Sha256(ReadText(SourcePath(performance.at("path").get<std::string>()))) == kFrozenPerformanceWorkloadsSha256,
-				"The immutable T001 performance workload bytes must remain unchanged.");
+				"The immutable ImplementationCheck performance workload bytes must remain unchanged.");
 		});
 
 		registry.Add("Animation.CrowdPerformance.CrowdDefinitionIsExact", [](TestContext& context) {
@@ -301,7 +301,7 @@ namespace TerraEngine::Tests {
 			result.counters = ScaleCountersV1{1000U, 100U, 2U, 250U, 500U, 250U, 1U, 1U, 0U, 0U, 128U, 256U};
 			result.pairedRuns.assign(5U, FrameTailV1{3600U, 10.0, 12.0, 14.0, 16.0, 50.0});
 			context.Expect(!ValidateScaleBenchmark(result, false),
-				"A complete synthetic result must not pass before final Phase 18.");
+				"A complete synthetic result must not pass before final ImplementationStage.");
 			context.Expect(ValidateScaleBenchmark(result, true),
 				"Exact-boundary mixed-mode, bounded-memory, and tail evidence should satisfy the final schema.");
 			result.pairedRuns[0U].p99Milliseconds = std::numeric_limits<double>::quiet_NaN();

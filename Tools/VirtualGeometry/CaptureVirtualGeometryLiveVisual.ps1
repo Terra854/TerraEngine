@@ -1,13 +1,15 @@
 [CmdletBinding()]
 param(
 	[string]$InstalledEditor = 'out/build/RelWithDebInfo/Build/Editor/TerraEngine-Editor.exe',
-	[string]$Project = 'Tests/Fixtures/Animation/US1Import',
+	[string]$Project = 'Tests/Fixtures/Animation/ImportValidation',
 	[string]$Asset = '',
-	[string]$Preferences = 'out/validation/virtual-geometry-phase0-live/editor-preferences.json',
-	[string]$OutputDirectory = 'out/validation/virtual-geometry-phase0-live',
-	[string]$Prefab = 'Assets/Models/US1Hero_Generated/US1Hero.teprefab',
-	[string]$PrefabName = 'Feature 045 Phase 0 Hero',
+	[string]$Preferences = 'out/validation/virtual-geometry/live/editor-preferences.json',
+	[string]$OutputDirectory = 'out/validation/virtual-geometry/live',
+	[string]$Prefab = 'Assets/Models/ImportHero_Generated/ImportHero.teprefab',
+	[string]$PrefabName = 'Virtual Geometry Validation Hero',
 	[string]$PrefabChildObject = '',
+	[string]$MeshAssetId = '',
+	[string]$MaterialAssetId = '',
 	[double]$PrefabScale = 1.0,
 	[int]$PrefabInstanceCount = 1,
 	[int]$PrefabRequestedAnimationMode = -1,
@@ -17,11 +19,14 @@ param(
 	[switch]$CleanupValidationScene,
 	[string]$ValidationScenePath = 'Assets/Scenes/VirtualGeometryLive.tescene',
 	[double[]]$ValidationCameraPosition = @(0.0, 0.5, 1.0),
+	[double[]]$ValidationCameraTarget = @(0.0, 0.5, 0.0),
 	[int]$StreamingSettleMilliseconds = 250,
 	[int]$McpPort = 43155,
 	[int]$StartupTimeoutSeconds = 90,
 	[int]$CaptureTimeoutMilliseconds = 60000,
 	[string]$ValidationRoute = '',
+	[ValidateSet('', 'automatic', 'direct', 'virtual-hardware', 'virtual-compute')]
+	[string]$RepresentationRoute = '',
 	[ValidateSet('Game', 'Scene')]
 	[string]$DiagnosticsViewType = 'Game',
 	[switch]$EnterPlayMode,
@@ -75,11 +80,35 @@ if($PrefabInstanceCount -lt 1)
 {
 	throw 'PrefabInstanceCount must be at least one.'
 }
+foreach($cameraVector in @($ValidationCameraPosition, $ValidationCameraTarget))
+{
+	if($cameraVector.Count -ne 3)
+	{
+		throw 'Validation camera position and target must each contain three coordinates.'
+	}
+}
+$meshAssetIdentity = $MeshAssetId.Trim().ToLowerInvariant()
+$materialAssetIdentity = $MaterialAssetId.Trim().ToLowerInvariant()
+$useRawMesh = -not [string]::IsNullOrWhiteSpace($meshAssetIdentity)
+if($useRawMesh -and $meshAssetIdentity -notmatch '^[0-9a-f]{32}$')
+{
+	throw 'MeshAssetId must be a 32-character hexadecimal UUID.'
+}
+if(-not [string]::IsNullOrWhiteSpace($materialAssetIdentity) -and
+	$materialAssetIdentity -notmatch '^[0-9a-f]{32}$')
+{
+	throw 'MaterialAssetId must be empty or a 32-character hexadecimal UUID.'
+}
+if($useRawMesh -and -not $CreateValidationScene)
+{
+	throw 'Raw mesh validation requires CreateValidationScene so the authored project remains untouched.'
+}
 $validationRouteName = $ValidationRoute.Trim().ToLowerInvariant()
 if($validationRouteName -notin @('', 'hardware', 'compute', 'indexed', 'hybrid'))
 {
 	throw "ValidationRoute must be hardware, compute, indexed, hybrid, or empty; received '$ValidationRoute'."
 }
+$representationRouteName = $RepresentationRoute.Trim().ToLowerInvariant()
 [IO.Directory]::CreateDirectory($outputRoot) | Out-Null
 # Live capture must be reproducible even when the developer's base preference
 # file has MCP disabled. Preserve that file and write a run-local copy whose
@@ -249,6 +278,170 @@ function Invoke-McpPngCapture(
 	return $envelope
 }
 
+function Save-EditorWindowCapture(
+	[Diagnostics.Process]$Process,
+	[string]$OutputPath)
+{
+	# MCP camera captures prove renderer output, while this operating-system
+	# capture proves the installed editor itself was visible and responsive.
+	# Capture only the exact process window instead of the full developer desktop.
+	Add-Type -AssemblyName System.Drawing
+	if(-not ('TerraEngineLiveWindowCaptureNative' -as [type]))
+	{
+		Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class TerraEngineLiveWindowCaptureNative
+{
+	[StructLayout(LayoutKind.Sequential)]
+	public struct Rect
+	{
+		public int Left;
+		public int Top;
+		public int Right;
+		public int Bottom;
+	}
+
+	[DllImport("user32.dll")]
+	public static extern bool GetWindowRect(IntPtr window, out Rect rectangle);
+
+	[DllImport("user32.dll")]
+	public static extern bool ShowWindow(IntPtr window, int command);
+
+	[DllImport("user32.dll")]
+	public static extern bool SetForegroundWindow(IntPtr window);
+
+	[DllImport("user32.dll")]
+	public static extern bool PrintWindow(
+		IntPtr window,
+		IntPtr deviceContext,
+		uint flags);
+}
+'@
+	}
+	$Process.Refresh()
+	$window = $Process.MainWindowHandle
+	if($window -eq [IntPtr]::Zero)
+	{
+		throw 'Installed editor did not publish a capturable main window.'
+	}
+	[void][TerraEngineLiveWindowCaptureNative]::ShowWindow($window, 9)
+	[void][TerraEngineLiveWindowCaptureNative]::SetForegroundWindow($window)
+	Start-Sleep -Milliseconds 250
+	$rectangle = [TerraEngineLiveWindowCaptureNative+Rect]::new()
+	if(-not [TerraEngineLiveWindowCaptureNative]::GetWindowRect(
+		$window, [ref]$rectangle))
+	{
+		throw 'Unable to read the installed editor window bounds.'
+	}
+	$width = $rectangle.Right - $rectangle.Left
+	$height = $rectangle.Bottom - $rectangle.Top
+	if($width -lt 64 -or $height -lt 64)
+	{
+		throw "Installed editor window bounds are invalid: ${width}x${height}."
+	}
+	$bitmap = [Drawing.Bitmap]::new($width, $height)
+	$graphics = [Drawing.Graphics]::FromImage($bitmap)
+	try
+	{
+		# PW_RENDERFULLCONTENT asks Desktop Window Manager for the composed
+		# window, including Vulkan/ImGui client pixels. Fall back to an exact
+		# on-screen rectangle only on platforms that reject that request.
+		$deviceContext = $graphics.GetHdc()
+		try
+		{
+			$printed = [TerraEngineLiveWindowCaptureNative]::PrintWindow(
+				$window,
+				$deviceContext,
+				2)
+		}
+		finally
+		{
+			$graphics.ReleaseHdc($deviceContext)
+		}
+		if(-not $printed)
+		{
+			$graphics.CopyFromScreen(
+				$rectangle.Left,
+				$rectangle.Top,
+				0,
+				0,
+				[Drawing.Size]::new($width, $height))
+		}
+		$bitmap.Save($OutputPath, [Drawing.Imaging.ImageFormat]::Png)
+	}
+	finally
+	{
+		$graphics.Dispose()
+		$bitmap.Dispose()
+	}
+	return [ordered]@{
+		status = 'measured'
+		kind = 'editor-window-screenshot'
+		path = $OutputPath
+		width = $width
+		height = $height
+		sha256 = (Get-FileHash -LiteralPath $OutputPath -Algorithm SHA256).
+			Hash.ToLowerInvariant()
+	}
+}
+
+function Save-PickingReviewImage(
+	[string]$SourcePath,
+	[string]$OutputPath,
+	[int[]]$Pixel,
+	[string]$Status)
+{
+	# The review image never substitutes for the authoritative Vulkan result.
+	# It marks the exact queried pixel on a copy of the real renderer capture so
+	# a human can correlate the separately recorded measured/unavailable state.
+	Add-Type -AssemblyName System.Drawing
+	$source = [Drawing.Image]::FromFile($SourcePath)
+	$bitmap = [Drawing.Bitmap]::new($source)
+	$graphics = [Drawing.Graphics]::FromImage($bitmap)
+	$pen = [Drawing.Pen]::new([Drawing.Color]::FromArgb(255, 255, 32, 32), 3.0)
+	$brush = [Drawing.SolidBrush]::new(
+		[Drawing.Color]::FromArgb(220, 16, 16, 16))
+	$textBrush = [Drawing.SolidBrush]::new([Drawing.Color]::White)
+	$font = [Drawing.Font]::new('Segoe UI', 12.0, [Drawing.FontStyle]::Bold)
+	try
+	{
+		$x = [Math]::Max(0, [Math]::Min($bitmap.Width - 1, $Pixel[0]))
+		$y = [Math]::Max(0, [Math]::Min($bitmap.Height - 1, $Pixel[1]))
+		$graphics.DrawEllipse($pen, $x - 10, $y - 10, 20, 20)
+		$graphics.DrawLine($pen, $x - 16, $y, $x + 16, $y)
+		$graphics.DrawLine($pen, $x, $y - 16, $x, $y + 16)
+		$label = "Authoritative pick: $Status at ($($Pixel[0]), $($Pixel[1]))"
+		$size = $graphics.MeasureString($label, $font)
+		$graphics.FillRectangle($brush, 4, 4, $size.Width + 12, $size.Height + 8)
+		$graphics.DrawString($label, $font, $textBrush, 10, 8)
+		$bitmap.Save($OutputPath, [Drawing.Imaging.ImageFormat]::Png)
+	}
+	finally
+	{
+		$font.Dispose()
+		$textBrush.Dispose()
+		$brush.Dispose()
+		$pen.Dispose()
+		$graphics.Dispose()
+		$bitmap.Dispose()
+		$source.Dispose()
+	}
+}
+
+function New-UnavailableEvidence([string]$Kind, [string]$Reason)
+{
+	# Optional evidence must never be represented as a successful measurement.
+	# Consumers can distinguish a missing capability from an empty payload.
+	return [ordered]@{
+		status = 'unavailable'
+		kind = $Kind
+		reason = $Reason
+		availability = 'unavailable'
+	}
+}
+
 $editor = $null
 $stdoutTask = $null
 $stderrTask = $null
@@ -261,6 +454,9 @@ $validationRouteSet = $null
 $validationRouteReset = $null
 $validationRouteBootstrap = $null
 $validationRouteOverrideActive = $false
+$representationRouteSet = $null
+$representationRouteReset = $null
+$representationRouteOverrideActive = $false
 try
 {
 	$start = [Diagnostics.ProcessStartInfo]::new()
@@ -353,6 +549,7 @@ try
 
 	$validationScene = $null
 	$validationCamera = $null
+	$validationLight = $null
 	if(-not [string]::IsNullOrWhiteSpace($ScenePath))
 	{
 		# Opening the supplied authored scene gives installed validation the same
@@ -389,7 +586,7 @@ try
 					ForEach-Object { [string]$_.name }
 			)
 			$sceneToolsReady =
-				$tools -contains 'prefab.instantiate' -and
+				($useRawMesh -or $tools -contains 'prefab.instantiate') -and
 				$tools -contains 'object.create' -and
 				$tools -contains 'component.add' -and
 				$tools -contains 'component.set_property' -and
@@ -406,21 +603,59 @@ try
 			throw 'Disposable scene tools did not become available after scene publication.'
 		}
 		$validationCamera = Invoke-McpTool 'object.create' ([ordered]@{
-			name = 'Feature 045 Validation Camera'
+			name = 'Virtual Geometry Validation Camera'
 		})
 		Invoke-McpTool 'component.add' ([ordered]@{
-			object = 'Feature 045 Validation Camera'
+			object = 'Virtual Geometry Validation Camera'
 			component = 'Transform'
 		}) | Out-Null
 		Invoke-McpTool 'component.add' ([ordered]@{
-			object = 'Feature 045 Validation Camera'
+			object = 'Virtual Geometry Validation Camera'
 			component = 'CameraComponent'
 		}) | Out-Null
 		Invoke-McpTool 'component.set_property' ([ordered]@{
-			object = 'Feature 045 Validation Camera'
+			object = 'Virtual Geometry Validation Camera'
 			component = 'Transform'
 			property = 'Position'
 			value = @($ValidationCameraPosition)
+		}) | Out-Null
+		# The disposable scene has no authored illumination. Add a real point
+		# light through the transactional editor API so visual grading evaluates
+		# shaded geometry and shadow submission instead of a black silhouette.
+		$validationLight = Invoke-McpTool 'object.create' ([ordered]@{
+			name = 'Virtual Geometry Validation Light'
+		})
+		Invoke-McpTool 'component.add' ([ordered]@{
+			object = 'Virtual Geometry Validation Light'
+			component = 'Transform'
+		}) | Out-Null
+		Invoke-McpTool 'component.add' ([ordered]@{
+			object = 'Virtual Geometry Validation Light'
+			component = 'LightComponent'
+		}) | Out-Null
+		Invoke-McpTool 'component.set_property' ([ordered]@{
+			object = 'Virtual Geometry Validation Light'
+			component = 'Transform'
+			property = 'Position'
+			value = @(2.0, 3.0, 3.0)
+		}) | Out-Null
+		Invoke-McpTool 'component.set_property' ([ordered]@{
+			object = 'Virtual Geometry Validation Light'
+			component = 'LightComponent'
+			property = 'intensity'
+			value = 2500.0
+		}) | Out-Null
+		Invoke-McpTool 'component.set_property' ([ordered]@{
+			object = 'Virtual Geometry Validation Light'
+			component = 'LightComponent'
+			property = 'range'
+			value = 20.0
+		}) | Out-Null
+		Invoke-McpTool 'component.set_property' ([ordered]@{
+			object = 'Virtual Geometry Validation Light'
+			component = 'LightComponent'
+			property = 'castsShadows'
+			value = $true
 		}) | Out-Null
 	}
 
@@ -438,10 +673,48 @@ try
 		}
 		$instanceNames += $instanceName
 	}
-	$usedBulkPrefabPublication =
+	$usedBulkPrefabPublication = -not $useRawMesh -and
 		($PrefabInstanceCount -gt 1 -or $PrefabRequestedAnimationMode -ge 0) -and
 		$tools -contains 'prefab.instantiate_many'
-	if($usedBulkPrefabPublication)
+	if($useRawMesh)
+	{
+		for($instanceIndex = 0; $instanceIndex -lt $PrefabInstanceCount; ++$instanceIndex)
+		{
+			$instanceName = $instanceNames[$instanceIndex]
+			# Build raw-mesh validation objects exclusively through protected,
+			# reflected editor mutations. The source project and asset metadata
+			# remain immutable while the installed renderer receives the exact
+			# cooked mesh and material identities selected by the caller.
+			$instance = Invoke-McpTool 'object.create' ([ordered]@{
+				name = $instanceName
+			})
+			Invoke-McpTool 'component.add' ([ordered]@{
+				object = $instanceName
+				component = 'Transform'
+			}) | Out-Null
+			Invoke-McpTool 'component.add' ([ordered]@{
+				object = $instanceName
+				component = 'MeshRenderComponent'
+			}) | Out-Null
+			Invoke-McpTool 'component.set_property' ([ordered]@{
+				object = $instanceName
+				component = 'MeshRenderComponent'
+				property = 'meshId'
+				value = $meshAssetIdentity
+			}) | Out-Null
+			if(-not [string]::IsNullOrWhiteSpace($materialAssetIdentity))
+			{
+				Invoke-McpTool 'component.set_property' ([ordered]@{
+					object = $instanceName
+					component = 'MeshRenderComponent'
+					property = 'materialId'
+					value = $materialAssetIdentity
+				}) | Out-Null
+			}
+			$instances += $instance
+		}
+	}
+	elseif($usedBulkPrefabPublication)
 	{
 		# Large gates and forced-authority probes publish in one protected
 		# object-storage generation. Even a single forced CPU instance must not
@@ -478,7 +751,9 @@ try
 		# crowd profile therefore exercises real per-instance deformation work
 		# while remaining transient because this harness never saves the scene.
 		$instanceName = $instanceNames[$instanceIndex]
-		if($PrefabRequestedAnimationMode -ge 0 -and -not $usedBulkPrefabPublication)
+		if($PrefabRequestedAnimationMode -ge 0 -and
+			-not $useRawMesh -and
+			-not $usedBulkPrefabPublication)
 		{
 			# A probe may force CPU animation while retaining the same real prefab
 			# and renderer path. This isolates evaluator failures from canonical
@@ -509,18 +784,29 @@ try
 			}) | Out-Null
 		}
 	}
-	if(-not [string]::IsNullOrWhiteSpace($PrefabChildObject) -and
-		$PrefabScale -ne 1.0)
+	if($PrefabScale -ne 1.0)
 	{
 		if($PrefabInstanceCount -ne 1)
 		{
-			throw 'PrefabChildObject scaling requires exactly one validation instance.'
+			throw 'Validation-object scaling requires exactly one validation instance.'
 		}
-		# Scaling only the disposable validation instance raises its projected
-		# error enough to demand non-root detail pages without altering the
-		# source asset, cook metadata, or production quality defaults.
+		$scaleTargetObject = if($useRawMesh)
+		{
+			$instanceNames[0]
+		}
+		else
+		{
+			$PrefabChildObject
+		}
+		if([string]::IsNullOrWhiteSpace($scaleTargetObject))
+		{
+			throw 'Prefab scaling requires PrefabChildObject when no raw mesh is supplied.'
+		}
+		# Raw meshes have no prefab child. Target their generated validation name;
+		# prefab captures continue to scale their explicit child object. Both paths
+		# mutate only the disposable scene and increase projected page demand.
 		Invoke-McpTool 'component.set_property' ([ordered]@{
-			object = $PrefabChildObject
+			object = $scaleTargetObject
 			component = 'Transform'
 			property = 'Scale'
 			value = @($PrefabScale, $PrefabScale, $PrefabScale)
@@ -537,9 +823,9 @@ try
 		$validationRouteBootstrap = Invoke-McpPngCapture `
 			'camera.capture_custom' `
 			([ordered]@{
-				name = 'Feature 045 Validation Route Bootstrap'
+				name = 'Virtual Geometry Validation Route Bootstrap'
 				position = @($ValidationCameraPosition)
-				target = @(0.0, 0.5, 0.0)
+				target = @($ValidationCameraTarget)
 				up = @(0.0, 1.0, 0.0)
 				projection = 'perspective'
 				verticalFovDegrees = 60.0
@@ -558,6 +844,18 @@ try
 			'renderer.virtualGeometry.validationRoute.set' `
 			([ordered]@{ route = $validationRouteName })
 		$validationRouteOverrideActive = $true
+	}
+	if(-not [string]::IsNullOrWhiteSpace($representationRouteName))
+	{
+		$representationRouteSet = Invoke-McpTool 'route.lock' ([ordered]@{
+			route = $representationRouteName
+			enabled = $true
+		})
+		if(-not $representationRouteSet.ok)
+		{
+			throw "Representation route lock was unavailable: $($representationRouteSet.message)"
+		}
+		$representationRouteOverrideActive = $true
 	}
 	$scene = Invoke-McpTool 'scene.list_objects' ([ordered]@{
 		includeComponents = $true
@@ -578,7 +876,7 @@ try
 		}
 		$playEnter = Invoke-McpTool 'play.enter' ([ordered]@{
 			expectedState = 'stopped'
-			correlationId = 'feature-045-live-enter'
+			correlationId = 'virtual-geometry-live-enter'
 		})
 		$playEntered = $true
 		# Let the protected play transition publish its runtime scene and advance
@@ -602,9 +900,9 @@ try
 		'renderer.virtualGeometry.capabilityEvidence' `
 		([ordered]@{ view = 'Game' })
 	$cameraArguments = [ordered]@{
-		name = 'Feature 045 Phase 0 Static Baseline'
+		name = 'Virtual Geometry Static Baseline'
 		position = @($ValidationCameraPosition)
-		target = @(0.0, 0.5, 0.0)
+		target = @($ValidationCameraTarget)
 		up = @(0.0, 1.0, 0.0)
 		projection = 'perspective'
 		verticalFovDegrees = 60.0
@@ -666,6 +964,19 @@ try
 		'camera.capture_custom' `
 		$cameraArguments `
 		$secondPath
+	$cameraReviewPath = Join-Path $outputRoot 'camera-capture.png'
+	[IO.File]::Copy($firstPath, $cameraReviewPath, $true)
+	$shadowReviewPath = Join-Path $outputRoot 'shadow-review.png'
+	$shadowReviewArguments = [ordered]@{}
+	foreach($entry in $cameraArguments.GetEnumerator())
+	{
+		$shadowReviewArguments[$entry.Key] = $entry.Value
+	}
+	$shadowReviewArguments.name = 'Virtual Geometry Shadow Review'
+	$shadowReview = Invoke-McpPngCapture `
+		'camera.capture_custom' `
+		$shadowReviewArguments `
+		$shadowReviewPath
 	# Query again after two next-frame captures. This gives the backend enough
 	# completed frame slots to publish fence-delayed execution receipts without
 	# treating the earlier capability snapshot as proof of execution.
@@ -686,11 +997,271 @@ try
 				viewType = $DiagnosticsViewType
 			})
 	}
+	# Collect optional evidence only when the installed editor advertises the
+	# operation. A rejected request is recorded as unavailable, never inferred
+	# from the camera image or from CPU-side projection.
+	$firstHash = (Get-FileHash -LiteralPath $firstPath -Algorithm SHA256).Hash.ToLowerInvariant()
+	$secondHash = (Get-FileHash -LiteralPath $secondPath -Algorithm SHA256).Hash.ToLowerInvariant()
+	$pickingEvidence = New-UnavailableEvidence 'authoritative-picking' 'renderer.virtualGeometry.authoritativePick is not advertised.'
+	$shadowEvidence = New-UnavailableEvidence 'shadow-diagnostics' 'Shadow-view diagnostics are not advertised by this editor.'
+	$editorWindowEvidence = New-UnavailableEvidence 'editor-window-screenshot' 'No editor-window screenshot operation is advertised.'
+	$profilerEvidence = New-UnavailableEvidence 'profiler-open-responsiveness' 'Profiler capture operations are not advertised.'
+	if($tools -contains 'renderer.virtualGeometry.authoritativePick')
+	{
+		try
+		{
+			# Try the centre and a bounded grid because the editor view can have a
+			# different aspect ratio from the dedicated capture target. Poll each
+			# request for several frames so fence-delayed identity publication is
+			# not mistaken for an unsupported pick.
+			$pickPixels = @(
+				@(240, 135),
+				@(180, 135), @(300, 135),
+				@(240, 90), @(240, 180),
+				@(120, 90), @(360, 90),
+				@(120, 180), @(360, 180)
+			)
+			$pickRequest = $null
+			$pick = $null
+			$pickState = $null
+			$selectedPickPixel = @(240, 135)
+			foreach($candidatePixel in $pickPixels)
+			{
+				$pickRequest = Invoke-McpTool 'renderer.virtualGeometry.authoritativePick' ([ordered]@{
+					viewType = $DiagnosticsViewType
+					pixel = @($candidatePixel)
+					request = $true
+				})
+				for($poll = 0; $poll -lt 5; ++$poll)
+				{
+					Start-Sleep -Milliseconds 100
+					$pick = Invoke-McpTool 'renderer.virtualGeometry.authoritativePick' ([ordered]@{
+						viewType = $DiagnosticsViewType
+						pixel = @($candidatePixel)
+						request = $false
+					})
+					$pickState = Get-PropertyValue (
+						Get-PropertyValue $pick 'data') 'authoritative'
+					if([string](Get-PropertyValue $pickState 'status') -eq 'Ready')
+					{
+						break
+					}
+				}
+				$selectedPickPixel = @($candidatePixel)
+				if([string](Get-PropertyValue $pickState 'status') -eq 'Ready')
+				{
+					break
+				}
+			}
+			if([string](Get-PropertyValue $pickState 'status') -ne 'Ready')
+			{
+				$pickingEvidence = New-UnavailableEvidence 'authoritative-picking' "Pick state was not Ready ($([string](Get-PropertyValue $pickState 'status')))."
+				$pickingEvidence.state = $pickState
+			}
+			else
+			{
+				$pickingEvidence = [ordered]@{
+				status = 'measured'
+				kind = 'authoritative-picking'
+				viewType = $DiagnosticsViewType
+				pixel = @($selectedPickPixel)
+				request = $pickRequest
+				state = $pick
+				associatedImage = [ordered]@{ path = $firstPath; sha256 = $firstHash }
+				}
+			}
+			$pickingReviewPath = Join-Path $outputRoot 'picking-review.png'
+			Save-PickingReviewImage `
+				-SourcePath $firstPath `
+				-OutputPath $pickingReviewPath `
+				-Pixel $selectedPickPixel `
+				-Status ([string](Get-PropertyValue $pickState 'status'))
+			$pickingEvidence.reviewImage = [ordered]@{
+				path = $pickingReviewPath
+				sha256 = (Get-FileHash -LiteralPath $pickingReviewPath -Algorithm SHA256).
+					Hash.ToLowerInvariant()
+			}
+		}
+		catch
+		{
+			$pickingEvidence = New-UnavailableEvidence 'authoritative-picking' $_.Exception.Message
+		}
+	}
+	if($tools -contains 'renderer.virtualGeometry.stats')
+	{
+		try
+		{
+			$shadowStats = Invoke-McpTool 'renderer.virtualGeometry.stats' ([ordered]@{ viewType = 'Shadow' })
+			$shadowDiagnosticsPath = Join-Path $outputRoot 'shadow-diagnostics.json'
+			[IO.File]::WriteAllText($shadowDiagnosticsPath, ($shadowStats | ConvertTo-Json -Depth 64), $utf8NoBom)
+			$shadowEvidence = [ordered]@{
+				status = 'measured'
+				kind = 'shadow-diagnostics'
+				viewType = 'Shadow'
+				diagnostics = $shadowStats
+				path = $shadowDiagnosticsPath
+				image = [ordered]@{
+					status = 'measured'
+					kind = 'visible-shadow-camera'
+					path = $shadowReviewPath
+					sha256 = (Get-FileHash -LiteralPath $shadowReviewPath -Algorithm SHA256).
+						Hash.ToLowerInvariant()
+					envelope = $shadowReview
+				}
+			}
+		}
+		catch
+		{
+			# Shadow-buffer diagnostics are optional, but the separately captured
+			# lit camera remains valid human-review evidence. Never promote it to
+			# a shadow-buffer measurement when the view type is unavailable.
+			$shadowEvidence = New-UnavailableEvidence 'shadow-diagnostics' $_.Exception.Message
+			$shadowEvidence.image = [ordered]@{
+				status = 'measured'
+				kind = 'visible-shadow-camera'
+				path = $shadowReviewPath
+				sha256 = (Get-FileHash -LiteralPath $shadowReviewPath -Algorithm SHA256).
+					Hash.ToLowerInvariant()
+				envelope = $shadowReview
+			}
+		}
+	}
+	if($tools -contains 'profiler.capture.start' -and
+		$tools -contains 'profiler.capture.stop')
+	{
+		$profilerWatch = [Diagnostics.Stopwatch]::StartNew()
+		$profilerStarted = $false
+		try
+		{
+			$profilerBefore = Invoke-McpTool 'profiler.capture.list'
+			$profilerBeforeIds = @(
+				$profilerBefore.data.artifacts |
+					ForEach-Object { [string]$_.artifactId }
+			)
+			# Sixteen per-frame samples are large enough to prove the buffered
+			# capture path without keeping the profiler armed for a long workload.
+			$profilerStart = Invoke-McpTool 'profiler.capture.start' ([ordered]@{
+				captureLevel = 'sampled'
+				maxFrames = 16
+				sampleIntervalFrames = 1
+			})
+			$profilerStarted = $true
+			Start-Sleep -Milliseconds ([Math]::Max(1000, $StreamingSettleMilliseconds))
+			$profilerStop = Invoke-McpTool 'profiler.capture.stop'
+			$profilerStopJobId = [string]$profilerStop.data.jobId
+			if([string]::IsNullOrWhiteSpace($profilerStopJobId))
+			{
+				throw 'Profiler capture stop did not return a durable job identity.'
+			}
+			$profilerJob = $null
+			$profilerDeadline = [DateTime]::UtcNow.AddSeconds(60)
+			do
+			{
+				$profilerJob = Invoke-McpTool 'jobs.get' ([ordered]@{
+					jobId = $profilerStopJobId
+				})
+				$profilerJobState = [string]$profilerJob.data.job.state
+				if($profilerJobState -notin @('succeeded', 'failed', 'canceled'))
+				{
+					Start-Sleep -Milliseconds 100
+				}
+			}
+			while($profilerJobState -notin @('succeeded', 'failed', 'canceled') -and
+				[DateTime]::UtcNow -lt $profilerDeadline)
+			if($profilerJobState -ne 'succeeded')
+			{
+				throw "Profiler persistence ended in state '$profilerJobState'."
+			}
+			$profilerAfter = Invoke-McpTool 'profiler.capture.list'
+			$newProfilerArtifacts = @(
+				$profilerAfter.data.artifacts |
+					Where-Object {
+						$profilerBeforeIds -notcontains [string]$_.artifactId
+					}
+			)
+			if($newProfilerArtifacts.Count -ne 1)
+			{
+				throw "Profiler persistence published $($newProfilerArtifacts.Count) new artifacts instead of one."
+			}
+			$profilerArtifact = $newProfilerArtifacts[0]
+			$profilerSummary = Invoke-McpTool 'profiler.capture.summary' ([ordered]@{
+				artifactId = [string]$profilerArtifact.artifactId
+			})
+			$profilerFrameCount = [UInt64]$profilerSummary.data.summary.frameCount
+			if($profilerFrameCount -eq 0)
+			{
+				throw 'Profiler capture persisted without any completed frame samples.'
+			}
+			$profilerLoad = Invoke-McpTool 'profiler.capture.load' ([ordered]@{
+				artifactId = [string]$profilerArtifact.artifactId
+			})
+			$profilerLoadJob = $null
+			$profilerLoadJobId = [string]$profilerLoad.data.jobId
+			if(-not [string]::IsNullOrWhiteSpace($profilerLoadJobId))
+			{
+				$loadDeadline = [DateTime]::UtcNow.AddSeconds(60)
+				do
+				{
+					$profilerLoadJob = Invoke-McpTool 'jobs.get' ([ordered]@{
+						jobId = $profilerLoadJobId
+					})
+					$loadState = [string]$profilerLoadJob.data.job.state
+					if($loadState -notin @('succeeded', 'failed', 'canceled'))
+					{
+						Start-Sleep -Milliseconds 100
+					}
+				}
+				while($loadState -notin @('succeeded', 'failed', 'canceled') -and
+					[DateTime]::UtcNow -lt $loadDeadline)
+				if($loadState -ne 'succeeded')
+				{
+					throw "Profiler recovery load ended in state '$loadState'."
+				}
+			}
+			Start-Sleep -Milliseconds 250
+			$profilerWatch.Stop()
+			$profilerEvidence = [ordered]@{
+				status = 'measured'
+				kind = 'profiler-open-responsiveness'
+				elapsedMilliseconds = $profilerWatch.Elapsed.TotalMilliseconds
+				start = $profilerStart
+				stop = $profilerStop
+				persistenceJob = $profilerJob
+				artifact = $profilerArtifact
+				summary = $profilerSummary
+				frameCount = $profilerFrameCount
+				load = $profilerLoad
+				loadJob = $profilerLoadJob
+			}
+		}
+		catch
+		{
+			if($profilerStarted)
+			{
+				# Best-effort cleanup; failed persistence remains unavailable.
+				try { Invoke-McpTool 'profiler.capture.stop' | Out-Null } catch { }
+			}
+			$profilerEvidence = New-UnavailableEvidence 'profiler-open-responsiveness' $_.Exception.Message
+		}
+	}
+	$editorWindowPath = Join-Path $outputRoot 'editor-window.png'
+	try
+	{
+		$editorWindowEvidence = Save-EditorWindowCapture `
+			-Process $editor `
+			-OutputPath $editorWindowPath
+	}
+	catch
+	{
+		$editorWindowEvidence = New-UnavailableEvidence `
+			'editor-window-screenshot' `
+			$_.Exception.Message
+	}
 	if($playEntered)
 	{
 		$playExit = Invoke-McpTool 'play.exit' ([ordered]@{
 			expectedState = 'playing'
-			correlationId = 'feature-045-live-exit'
+			correlationId = 'virtual-geometry-live-exit'
 		})
 		$playEntered = $false
 		if(-not [bool]$playExit.data.restoration.completed -or
@@ -704,6 +1275,11 @@ try
 		$validationRouteReset = Invoke-McpTool `
 			'renderer.virtualGeometry.validationRoute.reset'
 		$validationRouteOverrideActive = $false
+	}
+	if($representationRouteOverrideActive)
+	{
+		$representationRouteReset = Invoke-McpTool 'route.lock' ([ordered]@{ route = 'automatic'; enabled = $false })
+		$representationRouteOverrideActive = $false
 	}
 	$completedStages = @(
 		$postCaptureCapabilities.data.capabilities |
@@ -719,16 +1295,21 @@ try
 		$deviceAuthoredStages |
 			Where-Object { $completedStages -notcontains $_ }
 	).Count -eq 0
+	$measuredGeometryRoute = [string](Get-PropertyValue (
+		Get-PropertyValue $postCaptureStats 'data') 'geometryRoute')
 	$firstHash = (Get-FileHash -LiteralPath $firstPath -Algorithm SHA256).Hash.ToLowerInvariant()
 	$secondHash = (Get-FileHash -LiteralPath $secondPath -Algorithm SHA256).Hash.ToLowerInvariant()
 	$summary = [ordered]@{
 		schemaVersion = 1
-		feature = '045-virtual-geometry-alternative'
-		route = if($deviceAuthoredRoute) {
+		product = 'virtual-geometry-production'
+		route = if($measuredGeometryRoute -eq 'direct_meshlet') {
+			'direct-indexed'
+		} elseif($deviceAuthoredRoute) {
 			'vulkan-device-authored-indirect'
 		} else {
 			'processor-expanded-fallback'
 		}
+		geometryRoute = $measuredGeometryRoute
 		capturedAt = [DateTime]::UtcNow.ToString('o')
 		editor = $editorPath
 		project = $projectPath
@@ -736,6 +1317,12 @@ try
 		sceneObjectCount = @($scene.data.objects).Count
 		validationScene = $validationScene
 		validationCamera = $validationCamera
+		validationCameraConfiguration = [ordered]@{
+			position = @($ValidationCameraPosition)
+			target = @($ValidationCameraTarget)
+			verticalFovDegrees = 60.0
+		}
+		validationLight = $validationLight
 		playSceneSave = $playSceneSave
 		playEnter = $playEnter
 		playExit = $playExit
@@ -749,9 +1336,27 @@ try
 			set = $validationRouteSet
 			reset = $validationRouteReset
 		}
+		representationRoute = [ordered]@{
+			requested = if([string]::IsNullOrWhiteSpace($representationRouteName)) { $null } else { $representationRouteName }
+			set = $representationRouteSet
+			reset = $representationRouteReset
+		}
 		diagnosticsViewType = $DiagnosticsViewType
 		instantiatedPrefab = $instances[0]
 		instantiatedPrefabs = $instances
+		instantiatedGeometry = [ordered]@{
+			source = if($useRawMesh) { 'raw-mesh' } else { 'prefab' }
+			meshAssetId = if($useRawMesh) { $meshAssetIdentity } else { $null }
+			materialAssetId = if($useRawMesh) { $materialAssetIdentity } else { $null }
+			objects = $instances
+			objectNames = $instanceNames
+			scale = $PrefabScale
+			scaleTargetObject = if($PrefabScale -ne 1.0) {
+				if($useRawMesh) { $instanceNames[0] } else { $PrefabChildObject }
+			} else {
+				$null
+			}
+		}
 		animationDiagnostics = $animationDiagnostics
 		capabilityEvidence = $capabilities
 		postCaptureCapabilityEvidence = $postCaptureCapabilities
@@ -761,6 +1366,21 @@ try
 		postFirstCaptureAsset = $postFirstCaptureAsset
 		postCaptureStats = $postCaptureStats
 		postCaptureAsset = $postCaptureAsset
+		pickingEvidence = $pickingEvidence
+		shadowEvidence = $shadowEvidence
+		editorWindowEvidence = $editorWindowEvidence
+		profilerEvidence = $profilerEvidence
+		cameraReview = [ordered]@{
+			path = $cameraReviewPath
+			sha256 = (Get-FileHash -LiteralPath $cameraReviewPath -Algorithm SHA256).
+				Hash.ToLowerInvariant()
+		}
+		shadowReview = [ordered]@{
+			path = $shadowReviewPath
+			sha256 = (Get-FileHash -LiteralPath $shadowReviewPath -Algorithm SHA256).
+				Hash.ToLowerInvariant()
+			envelope = $shadowReview
+		}
 		warmupCapture = [ordered]@{
 			path = $warmupPath
 			sha256 = (Get-FileHash -LiteralPath $warmupPath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -826,7 +1446,7 @@ finally
 			{
 				Invoke-McpTool 'play.exit' ([ordered]@{
 					expectedState = 'playing'
-					correlationId = 'feature-045-live-finally-exit'
+					correlationId = 'virtual-geometry-live-finally-exit'
 				}) | Out-Null
 				$playEntered = $false
 			}

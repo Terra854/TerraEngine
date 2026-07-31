@@ -6,14 +6,17 @@
 #include "ModelPackageImportTypes.h"
 
 #include "File Formats/TerraEngineMeshFile.h"
+#include "Resource/VirtualGeometryCodec.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
+#include <span>
 #include <sstream>
 #include <tuple>
+#include <type_traits>
 #include <vector>
 
 namespace TerraEngine::AssetPipeline
@@ -754,56 +757,164 @@ namespace TerraEngine::AssetPipeline
 
 	void PopulateGeneratedMeshVirtualGeometryMetadata(const std::filesystem::path& compiledMeshPath, GeneratedModelMeshAsset& mesh, std::vector<ModelImportDiagnostic>& diagnostics)
 	{
+		// Reinspection replaces every advisory field atomically. A direct route must
+		// never retain virtual hierarchy rows from a prior cook or caller-owned cache.
 		mesh.virtualGeometryRequested = true;
 		mesh.virtualGeometryCooked = false;
 		mesh.virtualGeometryStatus = "Failed";
+		mesh.virtualGeometryDetailLevels = 0u;
+		mesh.virtualGeometryMeshlets = 0u;
+		mesh.virtualGeometrySourceTriangles = 0u;
+		mesh.virtualGeometryTargets.clear();
 		mesh.virtualGeometryWarnings.clear();
+		mesh.virtualGeometryClusterSummary = {};
+		mesh.virtualGeometryConeSafetySummary = {};
 
 		std::ifstream input(compiledMeshPath, std::ios::binary);
 		if (!input)
 		{
-			mesh.virtualGeometryStatus = "Failed";
-			mesh.virtualGeometryWarnings.push_back("Compiled mesh was not available for virtual geometry metadata inspection.");
-			diagnostics.push_back({ ModelDiagnosticSeverity::Warning, "VirtualGeometryMetadataUnavailable", mesh.displayName, "Package mesh was imported, but virtual geometry metadata could not be inspected.", "The generated mesh remains available for rebuild." });
+			mesh.virtualGeometryWarnings.push_back("Compiled mesh was not available for canonical geometry metadata inspection.");
+			diagnostics.push_back({ ModelDiagnosticSeverity::Warning, "VirtualGeometryMetadataUnavailable", mesh.displayName, "Package mesh was imported, but canonical geometry metadata could not be inspected.", "The generated mesh remains available for rebuild." });
 			return;
 		}
 
-		MeshHeader header{};
-		input.read(reinterpret_cast<char*>(&header), sizeof(header));
-		if (!input || std::memcmp(header.magic, "TEMF", 4) != 0)
+		input.seekg(0, std::ios::end);
+		const std::streamoff byteCount = input.tellg();
+		input.seekg(0, std::ios::beg);
+		if (byteCount <= 0)
 		{
-			mesh.virtualGeometryStatus = "Failed";
-			mesh.virtualGeometryWarnings.push_back("Compiled mesh header is not a valid TEMF file.");
-			diagnostics.push_back({ ModelDiagnosticSeverity::Warning, "VirtualGeometryInvalidCompiledMesh", mesh.displayName, "Package mesh compiled output is not a readable TEMF file.", "Reimport the package to regenerate mesh outputs." });
+			mesh.virtualGeometryStatus = "NeedsRebuild";
+			mesh.virtualGeometryWarnings.push_back("Compiled mesh is empty and requires a canonical TEMFPRD1 recook.");
+			return;
+		}
+		std::vector<std::uint8_t> bytes(static_cast<std::size_t>(byteCount));
+		input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+		if (!input)
+		{
+			mesh.virtualGeometryStatus = "NeedsRebuild";
+			mesh.virtualGeometryWarnings.push_back("Compiled mesh could not be read completely and requires a canonical recook.");
 			return;
 		}
 
-		mesh.virtualGeometryMeshlets = header.meshletCount;
-		if ((header.meshletFlags & kMeshletHeaderFlagHasVirtualGeometry) == 0u)
+		TerraEngine::Resource::TemfProductionValidationLimits limits{};
+		limits.availableCapabilities =
+			kVirtualGeometryCodecCapabilityExpanded
+			| kVirtualGeometryCodecCapabilityMeshoptimizer;
+		const TerraEngine::Resource::TemfProductionValidationResult validated =
+			TerraEngine::Resource::ValidateTemfProductionFile(bytes, limits);
+		if (!validated.IsComplete())
+		{
+			mesh.virtualGeometryStatus = "NeedsRebuild";
+			mesh.virtualGeometryWarnings.push_back("Compiled mesh requires a canonical TEMFPRD1 recook: " + validated.diagnostic);
+			diagnostics.push_back({ ModelDiagnosticSeverity::Warning, "VirtualGeometryNeedsRebuild", mesh.displayName, "Generated package mesh is not a canonical TEMFPRD1 payload.", "Reimport the package to rebuild generated mesh outputs." });
+			return;
+		}
+
+		// Decode only the typed metadata streams needed by package inventory. This
+		// follows the same bounded codec contract as ResourceManager without
+		// publishing a temporary resource or mutating the live cache.
+		const auto DecodeStream = [&](TemfStreamKind kind, std::uint64_t attributeMask, std::vector<std::uint8_t>& destination)
+		{
+			destination.clear();
+			for (const TemfBlockDescriptor& descriptor : validated.directory.blocks)
+			{
+				if (descriptor.streamKind != static_cast<std::uint16_t>(kind)
+					|| descriptor.attributeMask != attributeMask)
+				{
+					continue;
+				}
+				const std::span<const std::uint8_t> encoded(bytes.data() + descriptor.encodedPayloadOffset, static_cast<std::size_t>(descriptor.encodedBytes));
+				const auto decoded = TerraEngine::Resource::DecodeTemfProductionBlock(
+					{ descriptor, encoded, validated.directory.quantizationDomains, limits.availableCapabilities },
+					limits);
+				if (!decoded.IsComplete())
+				{
+					destination.clear();
+					return false;
+				}
+				destination.insert(destination.end(), decoded.bytes.begin(), decoded.bytes.end());
+			}
+			return !destination.empty();
+		};
+		const auto DecodeRecords = [&](std::uint64_t attributeMask, auto& destination)
+		{
+			using Record = typename std::remove_reference_t<decltype(destination)>::value_type;
+			std::vector<std::uint8_t> decoded;
+			if (!DecodeStream(TemfStreamKind::Metadata, attributeMask, decoded)
+				|| decoded.size() % sizeof(Record) != 0u)
+			{
+				destination.clear();
+				return false;
+			}
+			destination.resize(decoded.size() / sizeof(Record));
+			std::memcpy(destination.data(), decoded.data(), decoded.size());
+			return true;
+		};
+
+		std::vector<std::uint8_t> runtimeBytes;
+		if (!DecodeStream(TemfStreamKind::Metadata, kTemfMetadataRuntimeLayout, runtimeBytes)
+			|| runtimeBytes.size() != sizeof(TemfRuntimeDecodeMetadata))
+		{
+			mesh.virtualGeometryStatus = "NeedsRebuild";
+			mesh.virtualGeometryWarnings.push_back("Canonical runtime geometry metadata is missing or malformed.");
+			return;
+		}
+		TemfRuntimeDecodeMetadata runtime{};
+		std::memcpy(&runtime, runtimeBytes.data(), sizeof(runtime));
+		mesh.virtualGeometryMeshlets = runtime.meshletCount;
+		mesh.virtualGeometrySourceTriangles = runtime.meshletPrimitiveIndexCount / 3u;
+
+		if ((validated.directory.header.representationFlags & kTemfRepresentationVirtualGeometry) == 0u)
 		{
 			mesh.virtualGeometryStatus = "Skipped";
-			mesh.virtualGeometryWarnings.push_back("Compiled mesh does not contain a virtual geometry payload.");
+			mesh.virtualGeometryWarnings.push_back("Compiled mesh uses the canonical direct-resident meshlet route; no virtual pages were built.");
 			return;
 		}
 
-		if (header.virtualGeometryHeaderOffset == 0u
-			|| header.virtualGeometryHeaderSize != sizeof(VirtualGeometryHeader)
-			|| header.virtualGeometryPayloadGeneration != kVirtualGeometryPayloadGeneration)
-		{
-			mesh.virtualGeometryStatus = "NeedsRebuild";
-			mesh.virtualGeometryWarnings.push_back("Virtual geometry payload metadata is stale or incomplete.");
-			diagnostics.push_back({ ModelDiagnosticSeverity::Warning, "VirtualGeometryNeedsRebuild", mesh.displayName, "Generated package mesh has stale virtual geometry metadata.", "Reimport the package to rebuild generated mesh outputs." });
-			return;
-		}
-
+		std::vector<std::uint8_t> virtualHeaderBytes;
 		VirtualGeometryHeader virtualHeader{};
-		input.seekg(static_cast<std::streamoff>(header.virtualGeometryHeaderOffset), std::ios::beg);
-		input.read(reinterpret_cast<char*>(&virtualHeader), sizeof(virtualHeader));
-		if (!input || virtualHeader.payloadGeneration != kVirtualGeometryPayloadGeneration)
+		std::vector<VirtualGeometryDetailLevelRecord> detailLevels;
+		std::vector<VirtualGeometryMaterialSectionRecord> materialSections;
+		std::vector<VirtualGeometryCullableGroupRecord> cullableGroups;
+		std::vector<VirtualGeometryPageRecord> pages;
+		std::vector<VirtualGeometryRequestedTargetRecord> requestedTargets;
+		std::vector<VirtualGeometrySkippedDetailRecord> skippedDetails;
+		std::vector<VirtualGeometryClusterRecord> clusters;
+		std::vector<VirtualGeometryClusterPageLinkRecord> clusterPageLinks;
+		std::vector<VirtualGeometryConeSafetyRecord> coneSafety;
+		std::vector<std::uint8_t> stringBytes;
+		const bool hierarchyComplete =
+			DecodeStream(TemfStreamKind::Metadata, kTemfMetadataVirtualHeader, virtualHeaderBytes)
+			&& virtualHeaderBytes.size() == sizeof(VirtualGeometryHeader)
+			&& DecodeRecords(kTemfMetadataVirtualDetailLevels, detailLevels)
+			&& DecodeRecords(kTemfMetadataVirtualMaterialSections, materialSections)
+			&& DecodeRecords(kTemfMetadataVirtualCullableGroups, cullableGroups)
+			&& DecodeRecords(kTemfMetadataVirtualPages, pages)
+			&& DecodeRecords(kTemfMetadataVirtualClusters, clusters)
+			&& DecodeRecords(kTemfMetadataVirtualClusterPageLinks, clusterPageLinks)
+			&& DecodeRecords(kTemfMetadataVirtualConeSafety, coneSafety);
+		if (!hierarchyComplete)
 		{
 			mesh.virtualGeometryStatus = "NeedsRebuild";
-			mesh.virtualGeometryWarnings.push_back("Virtual geometry root header could not be read.");
-			diagnostics.push_back({ ModelDiagnosticSeverity::Warning, "VirtualGeometryRootHeaderUnreadable", mesh.displayName, "Generated package mesh virtual geometry root header could not be read.", "Reimport the package to rebuild generated mesh outputs." });
+			mesh.virtualGeometryWarnings.push_back("Canonical virtual-geometry hierarchy metadata is incomplete.");
+			return;
+		}
+		std::memcpy(&virtualHeader, virtualHeaderBytes.data(), sizeof(virtualHeader));
+		DecodeRecords(kTemfMetadataVirtualRequestedTargets, requestedTargets);
+		DecodeRecords(kTemfMetadataVirtualSkippedDetails, skippedDetails);
+		DecodeStream(TemfStreamKind::Metadata, kTemfMetadataVirtualDiagnosticStrings, stringBytes);
+		const std::string stringTable(reinterpret_cast<const char*>(stringBytes.data()), stringBytes.size());
+
+		if (detailLevels.size() != virtualHeader.detailLevelCount
+			|| materialSections.size() != virtualHeader.materialSectionCount
+			|| cullableGroups.size() != virtualHeader.cullableGroupCount
+			|| pages.size() != virtualHeader.pageCount
+			|| clusters.size() != virtualHeader.clusterCount
+			|| clusterPageLinks.size() != virtualHeader.clusterPageLinkCount
+			|| coneSafety.size() != virtualHeader.coneSafetyCount)
+		{
+			mesh.virtualGeometryStatus = "NeedsRebuild";
+			mesh.virtualGeometryWarnings.push_back("Canonical virtual-geometry record counts disagree with their root metadata.");
 			return;
 		}
 
@@ -816,186 +927,108 @@ namespace TerraEngine::AssetPipeline
 		mesh.virtualGeometryClusterSummary.materialSectionCount = virtualHeader.materialSectionCount;
 		mesh.virtualGeometryClusterSummary.fallbackCoverageValid =
 			(virtualHeader.flags & kVirtualGeometryValidationFlagFallbackCoverageValidated) != 0u;
+		mesh.virtualGeometryClusterSummary.clusterMaterialSectionCount =
+			CountClusterMaterialSections(clusters);
 		mesh.virtualGeometryClusterSummary.materialCoverageValid =
 			mesh.virtualGeometryClusterSummary.fallbackCoverageValid
-			&& virtualHeader.materialSectionCount > 0u;
-		std::vector<VirtualGeometryClusterRecord> clusters;
-		if (ReadVirtualGeometryTable(input, virtualHeader.clusterTableOffset, virtualHeader.clusterCount, clusters))
-		{
-			// Count the material ids referenced by clusters instead of trusting a
-			// header count alone. This keeps package diagnostics useful when a
-			// future cooker emits multiple material sections under TEMF v1.
-			mesh.virtualGeometryClusterSummary.clusterMaterialSectionCount = CountClusterMaterialSections(clusters);
-			mesh.virtualGeometryClusterSummary.materialCoverageValid =
-				mesh.virtualGeometryClusterSummary.materialCoverageValid
-				&& (mesh.virtualGeometryClusterSummary.clusterMaterialSectionCount <= virtualHeader.materialSectionCount);
-		}
-		else
-		{
-			mesh.virtualGeometryClusterSummary.materialCoverageValid = false;
-			mesh.virtualGeometryWarnings.push_back("Virtual geometry cluster material diagnostics could not be read.");
-		}
+			&& mesh.virtualGeometryClusterSummary.clusterMaterialSectionCount <= virtualHeader.materialSectionCount;
 
-		mesh.virtualGeometryConeSafetySummary = {};
-		mesh.virtualGeometryConeSafetySummary.recordCount = virtualHeader.coneSafetyCount;
+		mesh.virtualGeometryConeSafetySummary.recordCount =
+			static_cast<std::uint32_t>(coneSafety.size());
 		mesh.virtualGeometryConeSafetySummary.metadataValid =
 			(virtualHeader.flags & kVirtualGeometryValidationFlagConeSafetyMetadataValidated) != 0u
-			&& virtualHeader.coneSafetyCount == virtualHeader.clusterCount
-			&& virtualHeader.coneSafetyTableOffset != 0u;
-		std::string stringTable;
-		if (virtualHeader.diagnosticStringOffset != 0u && virtualHeader.diagnosticStringSize != 0u)
+			&& coneSafety.size() == clusters.size();
+		for (const VirtualGeometryConeSafetyRecord& cone : coneSafety)
 		{
-			stringTable.resize(virtualHeader.diagnosticStringSize);
-			input.seekg(static_cast<std::streamoff>(virtualHeader.diagnosticStringOffset), std::ios::beg);
-			input.read(stringTable.data(), static_cast<std::streamsize>(stringTable.size()));
-		}
-		std::vector<VirtualGeometryConeSafetyRecord> coneSafety;
-		if (mesh.virtualGeometryConeSafetySummary.metadataValid
-			&& ReadVirtualGeometryTable(input, virtualHeader.coneSafetyTableOffset, virtualHeader.coneSafetyCount, coneSafety))
-		{
-			for (const VirtualGeometryConeSafetyRecord& cone : coneSafety)
+			if ((cone.flags & kVirtualGeometryConeSafetyFlagEligible) != 0u)
 			{
-				if ((cone.flags & kVirtualGeometryConeSafetyFlagEligible) != 0u)
-				{
-					++mesh.virtualGeometryConeSafetySummary.eligibleClusterCount;
-					continue;
-				}
-				++mesh.virtualGeometryConeSafetySummary.disabledClusterCount;
-				if (cone.disabledReasonStringSize == 0u
-					|| cone.disabledReasonStringOffset + cone.disabledReasonStringSize > stringTable.size())
-				{
-					continue;
-				}
-				const std::string reason = stringTable.substr(cone.disabledReasonStringOffset, cone.disabledReasonStringSize);
-				if (std::find(mesh.virtualGeometryConeSafetySummary.disabledReasons.begin(), mesh.virtualGeometryConeSafetySummary.disabledReasons.end(), reason)
-					== mesh.virtualGeometryConeSafetySummary.disabledReasons.end())
-				{
-					mesh.virtualGeometryConeSafetySummary.disabledReasons.push_back(reason);
-				}
+				++mesh.virtualGeometryConeSafetySummary.eligibleClusterCount;
+				continue;
+			}
+			++mesh.virtualGeometryConeSafetySummary.disabledClusterCount;
+			const std::size_t reasonEnd =
+				static_cast<std::size_t>(cone.disabledReasonStringOffset)
+				+ cone.disabledReasonStringSize;
+			if (cone.disabledReasonStringSize == 0u || reasonEnd > stringTable.size())
+			{
+				continue;
+			}
+			const std::string reason = stringTable.substr(
+				cone.disabledReasonStringOffset,
+				cone.disabledReasonStringSize);
+			if (std::find(
+					mesh.virtualGeometryConeSafetySummary.disabledReasons.begin(),
+					mesh.virtualGeometryConeSafetySummary.disabledReasons.end(),
+					reason)
+				== mesh.virtualGeometryConeSafetySummary.disabledReasons.end())
+			{
+				mesh.virtualGeometryConeSafetySummary.disabledReasons.push_back(reason);
 			}
 		}
-		else
-		{
-			mesh.virtualGeometryConeSafetySummary.metadataValid = false;
-			mesh.virtualGeometryWarnings.push_back("Virtual geometry cone safety metadata could not be read.");
-		}
 
-		std::vector<VirtualGeometryRequestedTargetRecord> requestedTargets;
-		std::vector<VirtualGeometryDetailLevelRecord> detailLevels;
-		std::vector<VirtualGeometrySkippedDetailRecord> skippedDetails;
-		if(ReadVirtualGeometryTable(
-				input,
-				virtualHeader.requestedTargetTableOffset,
-				virtualHeader.requestedTargetCount,
-				requestedTargets)
-			&& ReadVirtualGeometryTable(
-				input,
-				virtualHeader.detailLevelTableOffset,
-				virtualHeader.detailLevelCount,
-				detailLevels)
-			&& ReadVirtualGeometryTable(
-				input,
-				virtualHeader.skippedDetailTableOffset,
-				virtualHeader.skippedDetailCount,
-				skippedDetails))
+		mesh.virtualGeometryTargets.reserve(requestedTargets.size());
+		for (const VirtualGeometryRequestedTargetRecord& requested : requestedTargets)
 		{
-			std::vector<GeneratedModelMeshVirtualGeometryTarget> finalTargets;
-			finalTargets.reserve(requestedTargets.size());
-			for(const VirtualGeometryRequestedTargetRecord& requested
-				: requestedTargets)
+			GeneratedModelMeshVirtualGeometryTarget target{};
+			target.targetIndex = requested.targetIndex;
+			target.requestedRatio = requested.requestedRatio;
+			target.status = VirtualGeometryTargetStatusText(requested.status);
+			target.desiredTriangleCount = requested.desiredTriangleCount;
+			target.desiredMeshletCount = requested.desiredMeshletCount;
+			target.actualRatio = requested.requestedRatio;
+			target.triangleCount = requested.desiredTriangleCount;
+			target.meshletCount = requested.desiredMeshletCount;
+
+			const auto generated = std::find_if(
+				detailLevels.begin(),
+				detailLevels.end(),
+				[&requested](const VirtualGeometryDetailLevelRecord& detail)
+				{
+					return detail.requestedTargetIndex == requested.targetIndex;
+				});
+			if (generated != detailLevels.end())
 			{
-				GeneratedModelMeshVirtualGeometryTarget target{};
-				target.targetIndex = requested.targetIndex;
-				target.requestedRatio = requested.requestedRatio;
-				target.status = VirtualGeometryTargetStatusText(requested.status);
-				target.desiredTriangleCount = requested.desiredTriangleCount;
-				target.desiredMeshletCount = requested.desiredMeshletCount;
-				target.actualRatio = requested.requestedRatio;
-				target.triangleCount = requested.desiredTriangleCount;
-				target.meshletCount = requested.desiredMeshletCount;
-
-				const auto generated = std::find_if(
-					detailLevels.begin(),
-					detailLevels.end(),
-					[&requested](
-						const VirtualGeometryDetailLevelRecord& detail) {
-						return detail.requestedTargetIndex
-							== requested.targetIndex;
-					});
-				if(generated != detailLevels.end())
-				{
-					target.status = "Generated";
-					target.actualRatio = generated->targetRatio;
-					target.actualTriangleCount = generated->primitiveCount;
-					target.actualMeshletCount = generated->meshletCount;
-					target.triangleCount = generated->primitiveCount;
-					target.meshletCount = generated->meshletCount;
-					target.nearestGeneratedLevelIndex =
-						generated->lodIndex;
-					target.geometricError = generated->geometricError;
-				}
-
-				const auto skipped = std::find_if(
-					skippedDetails.begin(),
-					skippedDetails.end(),
-					[&requested](
-						const VirtualGeometrySkippedDetailRecord& record) {
-						return record.targetIndex == requested.targetIndex;
-					});
-				if(skipped != skippedDetails.end())
-				{
-					target.status =
-						VirtualGeometryTargetStatusText(skipped->status);
-					target.reason =
-						VirtualGeometrySkippedReasonText(skipped->reason);
-					target.nearestGeneratedLevelIndex =
-						skipped->nearestGeneratedLodIndex;
-					target.actualRatio =
-						skipped->actualCandidateRatio > 0.0f
-							? skipped->actualCandidateRatio
-							: skipped->actualNearestRatio;
-					target.actualTriangleCount =
-						skipped->candidateTriangleCount;
-					target.actualMeshletCount =
-						skipped->candidateMeshletCount;
-					if(target.actualTriangleCount > 0u)
-					{
-						target.triangleCount =
-							target.actualTriangleCount;
-					}
-					if(target.actualMeshletCount > 0u)
-					{
-						target.meshletCount =
-							target.actualMeshletCount;
-					}
-					const std::size_t messageEnd =
-						static_cast<std::size_t>(
-							skipped->messageStringOffset)
-						+ skipped->messageStringSize;
-					if(messageEnd <= stringTable.size())
-					{
-						target.message = stringTable.substr(
-							skipped->messageStringOffset,
-							skipped->messageStringSize);
-					}
-				}
-				finalTargets.push_back(std::move(target));
+				target.status = "Generated";
+				target.actualRatio = generated->targetRatio;
+				target.actualTriangleCount = generated->primitiveCount;
+				target.actualMeshletCount = generated->meshletCount;
+				target.triangleCount = generated->primitiveCount;
+				target.meshletCount = generated->meshletCount;
+				target.nearestGeneratedLevelIndex = generated->lodIndex;
+				target.geometricError = generated->geometricError;
 			}
-			// Static inventory cooking runs before the final skinned recook. Always
-			// replace its advisory rows with the tables embedded in the published
-			// TEMF so Inspector and automation report exactly what can render.
-			mesh.virtualGeometryTargets = std::move(finalTargets);
-		}
-		else
-		{
-			mesh.virtualGeometryWarnings.push_back(
-				"Final virtual geometry target diagnostics could not be read.");
-		}
-		if (virtualHeader.detailLevelCount == 0u || virtualHeader.cullableGroupCount == 0u)
-		{
-			mesh.virtualGeometryCooked = false;
-			mesh.virtualGeometryStatus = "NeedsRebuild";
-			mesh.virtualGeometryWarnings.push_back("Virtual geometry payload has no renderable details or cullable groups.");
+
+			const auto skipped = std::find_if(
+				skippedDetails.begin(),
+				skippedDetails.end(),
+				[&requested](const VirtualGeometrySkippedDetailRecord& record)
+				{
+					return record.targetIndex == requested.targetIndex;
+				});
+			if (skipped != skippedDetails.end())
+			{
+				target.status = VirtualGeometryTargetStatusText(skipped->status);
+				target.reason = VirtualGeometrySkippedReasonText(skipped->reason);
+				target.nearestGeneratedLevelIndex = skipped->nearestGeneratedLodIndex;
+				target.actualRatio = skipped->actualCandidateRatio > 0.0f
+					? skipped->actualCandidateRatio
+					: skipped->actualNearestRatio;
+				target.actualTriangleCount = skipped->candidateTriangleCount;
+				target.actualMeshletCount = skipped->candidateMeshletCount;
+				if (target.actualTriangleCount > 0u) target.triangleCount = target.actualTriangleCount;
+				if (target.actualMeshletCount > 0u) target.meshletCount = target.actualMeshletCount;
+				const std::size_t messageEnd =
+					static_cast<std::size_t>(skipped->messageStringOffset)
+					+ skipped->messageStringSize;
+				if (messageEnd <= stringTable.size())
+				{
+					target.message = stringTable.substr(
+						skipped->messageStringOffset,
+						skipped->messageStringSize);
+				}
+			}
+			mesh.virtualGeometryTargets.push_back(std::move(target));
 		}
 	}
+
 }

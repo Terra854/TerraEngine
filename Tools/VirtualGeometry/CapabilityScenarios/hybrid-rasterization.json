@@ -1,7 +1,6 @@
 {
 	"schemaVersion": 2,
-	"phase": 5,
-	"id": "phase-5",
+	"id": "hybrid-rasterization",
 	"title": "Hybrid compute rasterization",
 	"requiredTools": ["renderer.virtualGeometry.capabilityEvidence", "renderer.virtualGeometry.stats", "game_view.capture"],
 	"operations": [

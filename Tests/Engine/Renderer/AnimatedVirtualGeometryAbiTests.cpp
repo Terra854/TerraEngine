@@ -52,16 +52,20 @@ namespace TerraEngine::Tests {
 
 	void RegisterAnimatedVirtualGeometryAbiTests(TestRegistry& registry)
 	{
-		registry.Add("AnimatedVirtualGeometry.Abi.PhysicalPageLayoutsAreFrozen", [](TestContext& context)
+		registry.Add("AnimatedVirtualGeometry.Abi.CanonicalDemandedPageLayoutsAreStable", [](TestContext& context)
 		{
-			context.ExpectEqual<std::size_t>(52u, sizeof(AnimatedVirtualPageDirectoryHeader),
-				"AVPD headers must remain byte exact.");
-			context.ExpectEqual<std::size_t>(100u, sizeof(AnimatedVirtualPageDirectoryEntry),
-				"AVPD entries must remain byte exact.");
-			context.ExpectEqual<std::size_t>(64u, sizeof(AnimatedVirtualPageBlobHeader),
-				"AVPB headers must remain byte exact.");
-			context.ExpectEqual<std::size_t>(32u, sizeof(AnimatedVirtualPageSectionRecord),
-				"AVPB section records must remain byte exact.");
+			context.ExpectEqual<std::size_t>(40u,
+				sizeof(TemfDeformableDemandedPageDirectory),
+				"Canonical demanded-page directories must remain byte exact.");
+			context.ExpectEqual<std::size_t>(80u,
+				sizeof(TemfDeformableDemandedPageEntry),
+				"Canonical demanded-page entries must remain byte exact.");
+			context.ExpectEqual<std::size_t>(56u,
+				sizeof(TemfDeformableDemandedPagePayload),
+				"Canonical demanded-page payload identities must remain byte exact.");
+			context.ExpectEqual<std::size_t>(24u,
+				sizeof(TemfDeformablePageSection),
+				"Canonical demanded-page section records must remain byte exact.");
 			context.ExpectEqual<std::size_t>(64u,
 				sizeof(TerraEngine::Renderer::GpuDeformedVertexRecord),
 				"Graphics-facing animated vertices must remain 64 bytes.");

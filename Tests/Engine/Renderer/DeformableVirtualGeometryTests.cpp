@@ -1,8 +1,8 @@
 // DeformableVirtualGeometryTests.cpp - deformable virtual-geometry contracts.
 //
-// T093 will publish deformable cluster packets. These tests validate the
+// ImplementationCheck will publish deformable cluster packets. These tests validate the
 // existing cooked-data and fail-open seams while spelling out the extra packet
-// fields that T093 must connect to the renderer.
+// fields that ImplementationCheck must connect to the renderer.
 
 #include "TestHarness.h"
 
@@ -17,7 +17,7 @@ namespace TerraEngine::Tests
 {
 	namespace
 	{
-		// This is intentionally a test-only contract until T093 provides an
+		// This is intentionally a test-only contract until ImplementationCheck provides an
 		// equivalent renderer-owned packet. A cluster may not discard these
 		// fields while simplification, page fallback, or culling are in use.
 		struct DeformableVirtualGeometryPacketContract
@@ -116,49 +116,55 @@ namespace TerraEngine::Tests
 				{ 2u, 5u, 8u, 11u }, { 30000u, 20000u, 10000u, 5535u }, 3u, 7u, true, false, true
 			};
 
-			context.ExpectEqual(4u, kDeformableMeshMaximumInfluences, "Cooked deformable VG vertices must retain the four normalized skin influences required by TDEF.");
+			context.ExpectEqual(4u, kTemfMaximumSkinInfluences,
+				"Canonical deformable vertices must retain four normalized skin influences.");
 			context.Expect(contract.jointWeights[0] != 0u && contract.jointWeights[3] != 0u && contract.morphTargetCount == 3u,
-				"T093 packets must preserve every cooked influence and morph target needed to reconstruct deformation.");
-			context.Expect((kDeformableMeshPayloadFlagConservativeMorphEnvelope
-				& kDeformableMeshPayloadFlagDenseMorphPositionDeltas) == 0u,
+				"ImplementationCheck packets must preserve every cooked influence and morph target needed to reconstruct deformation.");
+			context.Expect((kTemfDeformableFlagConservativeMorphEnvelope
+				& kTemfDeformableFlagDenseMorphDeltas) == 0u,
 				"Morph envelopes and dense morph deltas must remain independently identifiable in the cooked payload.");
 		});
 
-		registry.Add("VirtualGeometry.Deformable.VersionedClusterAndMorphSidecarContract", [](TestContext& context) {
-			DeformableVirtualGeometrySidecarHeader sidecar{};
-			sidecar.magic = kDeformableVirtualGeometrySidecarMagicValue;
-			sidecar.version = kDeformableVirtualGeometrySidecarVersion;
-			sidecar.headerSize = sizeof(DeformableVirtualGeometrySidecarHeader);
-			sidecar.morphVertexStrideBytes = sizeof(DeformableVirtualGeometryMorphVertex);
-			DeformableVirtualGeometryClusterRecord cluster{};
-			cluster.flags = kDeformableVirtualGeometryClusterFlagActive
-				| kDeformableVirtualGeometryClusterFlagFallbackCoverageComplete;
-			cluster.deformationBoundsMin[0] = -1.0F;
-			cluster.deformationBoundsMax[0] = 1.0F;
-			DeformableVirtualGeometryMorphVertex morphVertex{};
+		registry.Add("VirtualGeometry.Deformable.CanonicalPageMorphContract", [](TestContext& context) {
+			TemfDeformableDemandedPagePayload payload{};
+			payload.pageId = 7u;
+			payload.sectionCount = 1u;
+			payload.sectionTableOffset =
+				sizeof(TemfDeformableDemandedPagePayload);
+			payload.decodedByteSize =
+				sizeof(TemfDeformableDemandedPagePayload)
+				+ sizeof(TemfDeformablePageSection)
+				+ sizeof(TemfDeformablePageMorphVertex);
+			TemfDeformablePageSection section{};
+			section.kind = TemfDeformablePageSectionKind::MorphDeltas;
+			section.relativeByteOffset = payload.sectionTableOffset
+				+ sizeof(TemfDeformablePageSection);
+			section.byteSize = sizeof(TemfDeformablePageMorphVertex);
+			section.elementCount = 1u;
+			section.elementStride = sizeof(TemfDeformablePageMorphVertex);
+			TemfDeformablePageMorphVertex morphVertex{};
 
-			context.Expect(sidecar.magic == kDeformableVirtualGeometrySidecarMagicValue
-				&& sidecar.morphVertexStrideBytes == 48U
-				&& sizeof(DeformableVirtualGeometryMorphVertex) == 48U,
-				"TDFV must remain a separately versioned 48-byte target-major GPU morph extension over frozen TDEF v1.");
-			context.Expect((cluster.flags & kDeformableVirtualGeometryClusterFlagFallbackCoverageComplete) != 0U
-				&& (cluster.flags & (kDeformableVirtualGeometryClusterFlagConeCullingSafe
-					| kDeformableVirtualGeometryClusterFlagHiZCullingSafe)) == 0U,
-				"Cooked deformable clusters must retain fallback coverage while unproven cone and Hi-Z culling stay disabled.");
-			context.Expect(morphVertex.normalDelta[0] == 0.0F && morphVertex.tangentDelta[0] == 0.0F,
-				"Absent normal and tangent morph channels must use zero-filled GPU records instead of changing the fixed stride.");
+			context.Expect(payload.pageId == 7u
+				&& section.relativeByteOffset
+					+ section.byteSize == payload.decodedByteSize
+				&& sizeof(TemfDeformablePageMorphVertex) == 48u,
+				"Canonical demanded pages must own relative, fixed-stride morph data.");
+			context.Expect(morphVertex.normalDelta[0] == 0.0f
+				&& morphVertex.tangentDelta[0] == 0.0f,
+				"Absent normal and tangent deltas must remain zero-filled.");
 		});
 
 		registry.Add("VirtualGeometry.Deformable.DynamicBoundsContractRemainsConservative", [](TestContext& context) {
-			DeformableMeshPayloadHeader header{};
-			header.virtualGeometryDeformationFlags = kDeformableMeshVirtualGeometryFlagWholeMeshEnvelope
-				| kDeformableMeshVirtualGeometryFlagDisableUnprovenConeCulling;
-			header.deformationBoundsMin[0] = -2.0f;
-			header.deformationBoundsMax[0] = 3.0f;
+			TemfDeformableMetadata metadata{};
+			metadata.flags = kTemfDeformableFlagConservativeMorphEnvelope;
+			metadata.deformationBoundsMin[0] = -2.0f;
+			metadata.deformationBoundsMax[0] = 3.0f;
 
-			context.Expect((header.virtualGeometryDeformationFlags & kDeformableMeshVirtualGeometryFlagWholeMeshEnvelope) != 0u,
-				"Before T093 proves cluster-specific dynamic bounds, deformable VG must use the whole-mesh conservative envelope.");
-			context.Expect(header.deformationBoundsMin[0] <= 0.0f && header.deformationBoundsMax[0] >= 0.0f,
+			context.Expect((metadata.flags
+				& kTemfDeformableFlagConservativeMorphEnvelope) != 0u,
+				"Deformable geometry must declare its conservative morph envelope.");
+			context.Expect(metadata.deformationBoundsMin[0] <= 0.0f
+				&& metadata.deformationBoundsMax[0] >= 0.0f,
 				"The conservative deformation envelope must contain the bind-pose origin as a culling-safe baseline.");
 		});
 
@@ -175,7 +181,7 @@ namespace TerraEngine::Tests
 				true,
 				false);
 
-			context.Expect(contract.failOpenCulling, "T093 must label deformable clusters with unproven bounds as fail-open before GPU culling.");
+			context.Expect(contract.failOpenCulling, "ImplementationCheck must label deformable clusters with unproven bounds as fail-open before GPU culling.");
 			context.Expect(selection.range.failOpen, "The existing selection seam must preserve visibility when bounds are invalid.");
 		});
 
@@ -207,7 +213,7 @@ namespace TerraEngine::Tests
 
 			context.ExpectEqual(7u, asset.clusters.front().materialSectionId, "Fallback clusters must retain their cooked material-section identity.");
 			context.Expect(contract.materialSectionId == asset.clusters.front().materialSectionId && contract.fallbackCoverageComplete,
-				"T093 packet emission must preserve material coverage when a deformable cluster falls back to a coarser page.");
+				"ImplementationCheck packet emission must preserve material coverage when a deformable cluster falls back to a coarser page.");
 		});
 	}
 }

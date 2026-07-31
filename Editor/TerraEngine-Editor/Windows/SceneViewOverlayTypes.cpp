@@ -576,6 +576,19 @@ namespace TerraEngine::Editor::SceneViewOverlay
 				{"cameraExemptions", snapshot.cameraExemptionCount},
 				{"lightExemptions", snapshot.lightExemptionCount}
 			}},
+			{"geometryRoute", {
+				{"route", snapshot.geometryRoute},
+				{"source", snapshot.geometryRouteSource},
+				{"policyIdentity", snapshot.geometryRoutePolicyIdentity},
+				{"calibrationIdentity", snapshot.geometryRouteCalibrationIdentity},
+				{"hysteresisFrames", snapshot.geometryRouteHysteresisFrames},
+				{"directBatchCount", snapshot.geometryRouteDirectBatchCount},
+				{"sharedInstanceCount", snapshot.geometryRouteSharedInstanceCount},
+				{"suppressedPageRequests", snapshot.geometryRouteSuppressedPageRequests},
+				{"suppressedDecodeBlocks", snapshot.geometryRouteSuppressedDecodeBlocks},
+				{"suppressedResidencyRecords", snapshot.geometryRouteSuppressedResidencyRecords},
+				{"fallbackReason", snapshot.geometryRouteFallbackReason}
+			}},
 			{"stageTimings", std::move(stageTimings)},
 			{"orientationWidgetVisible", snapshot.orientationWidget.visible},
 			{"orientationHoveredAxis", snapshot.orientationWidget.hoveredAxis},

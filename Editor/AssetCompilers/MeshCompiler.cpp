@@ -3,8 +3,8 @@
 // Implements the mesh compilation logic, including source file importing via Assimp, normal smoothing, and tangent generation. It utilizes meshoptimizer for meshlet generation and packs the final data into a high-performance binary format suitable for GPU-driven rendering.
 
 #include "MeshCompiler.h"
-#include "VirtualGeometryCodecs.h"
-#include "VirtualGeometryMeshoptCodec.h"
+#include "VirtualGeometryProductionBlocks.h"
+#include "VirtualGeometryQuantization.h"
 
 #include <algorithm>
 #include <array>
@@ -45,11 +45,17 @@
 #include <assimp/scene.h>
 
 #include "Engine/File Formats/TerraEngineMeshFile.h"
+#include "Engine/Renderer/VirtualGeometry/Geometry/VirtualGeometryPackedVertex.h"
+#include "Engine/Resource/VirtualGeometryCodec.h"
 #include "External/meshoptimizer/src/meshoptimizer.h"
 #include "External/mikktspace/mikktspace.h"
 
 namespace
 {
+	// Publication is defined later with the skinned cooker helpers. Declare it
+	// here so static and skinned output share the same atomic replace boundary.
+	bool ReplaceStagedTemf(const std::filesystem::path& stagedPath, const std::filesystem::path& outputPath);
+
 	constexpr float kPi = 3.14159265358979323846f;
 	// meshoptimizer stops simplifying once this error budget is reached. The
 	// adaptive cook then applies the user-facing maximumGeometricError gate so
@@ -256,90 +262,6 @@ namespace
 				: 0u;
 		}
 		return locks;
-	}
-
-	void BuildVirtualGeometryShadowCodecProfiles(
-		std::span<const std::uint8_t> source,
-		VirtualGeometryCompileReport& report)
-	{
-		for(const std::uint32_t pageSizeKiB : { 32u, 64u, 128u })
-		{
-			const std::size_t pageBytes =
-				static_cast<std::size_t>(pageSizeKiB) * 1024u;
-			const std::size_t sourceBytesPerPage =
-				pageBytes - sizeof(VirtualGeometryCompactBlockHeader);
-			for(const TerraEngine::Editor::VirtualGeometryPrototypeCodec codec : {
-				TerraEngine::Editor::VirtualGeometryPrototypeCodec::Expanded,
-				TerraEngine::Editor::VirtualGeometryPrototypeCodec::Terra })
-			{
-				VirtualGeometryShadowCodecCompileReport profile{};
-				profile.codecProfile =
-					codec == TerraEngine::Editor::VirtualGeometryPrototypeCodec::Expanded
-						? "expanded"
-						: "terra";
-				profile.pageSizeKiB = pageSizeKiB;
-				profile.sourceBytes = source.size();
-				profile.complete = true;
-				for(std::size_t offset = 0u;
-					offset < source.size();
-					offset += sourceBytesPerPage)
-				{
-					const auto page = source.subspan(
-						offset,
-						std::min(sourceBytesPerPage, source.size() - offset));
-					const TerraEngine::Editor::VirtualGeometryEncodedBlock encoded =
-						TerraEngine::Editor::EncodeVirtualGeometryPrototypeBlock(codec, {
-							page,
-							static_cast<std::uint32_t>(page.size()),
-							1u,
-							0u
-						});
-					if(!encoded.IsComplete() || encoded.bytes.size() > pageBytes)
-					{
-						profile.complete = false;
-						break;
-					}
-					profile.encodedBytes += encoded.bytes.size();
-					profile.deterministicHash ^=
-						CalculateVirtualGeometryCompactHash(encoded.bytes);
-				}
-				report.shadowCodecProfiles.push_back(std::move(profile));
-			}
-
-			VirtualGeometryShadowCodecCompileReport meshopt{};
-			meshopt.codecProfile = "meshoptimizer";
-			meshopt.pageSizeKiB = pageSizeKiB;
-			meshopt.sourceBytes = source.size();
-			meshopt.complete = true;
-			for(std::size_t offset = 0u;
-				offset < source.size();
-				offset += sourceBytesPerPage)
-			{
-				const auto page = source.subspan(
-					offset,
-					std::min(sourceBytesPerPage, source.size() - offset));
-				std::vector<std::uint8_t> padded(
-					(page.size() + 3u) & ~std::size_t(3u), 0u);
-				std::copy(page.begin(), page.end(), padded.begin());
-				const TerraEngine::Editor::VirtualGeometryEncodedBlock encoded =
-					TerraEngine::Editor::EncodeVirtualGeometryMeshoptBlock({
-						padded,
-						TerraEngine::Editor::VirtualGeometryMeshoptStreamKind::
-							QuantizedAttributes,
-						static_cast<std::uint32_t>(padded.size() / 4u),
-						4u
-					});
-				if(!encoded.IsComplete() || encoded.bytes.size() > pageBytes)
-				{
-					meshopt.complete = false;
-					break;
-				}
-				meshopt.encodedBytes += encoded.bytes.size();
-				meshopt.deterministicHash ^=
-					CalculateVirtualGeometryCompactHash(encoded.bytes);
-			}
-			report.shadowCodecProfiles.push_back(std::move(meshopt));
-		}
 	}
 
 	// struct FaceInfo groups related state and operations so callers have one documented contract.
@@ -1135,220 +1057,7 @@ namespace
 		}
 	}
 
-	// Appends a VGXD footer whose offsets are relative to its own first byte.
-	// Keeping the complete index, descriptors, and encoded blocks together lets
-	// streaming validate one bounded range without relying on TEMF-global
-	// offsets or process-local compiler state.
-	void AppendVirtualGeometryCompactFooter(
-		std::ofstream& out,
-		const std::vector<std::uint8_t>& vertexData,
-		const std::vector<std::uint8_t>& vertexRemapData,
-		const std::vector<std::uint8_t>& primitiveIndices,
-		const VirtualGeometryBuildOutput* virtualGeometry)
-	{
-		if(virtualGeometry == nullptr)
-		{
-			return;
-		}
-
-		std::vector<std::uint8_t> source;
-		source.reserve(vertexData.size() + vertexRemapData.size() + primitiveIndices.size());
-		source.insert(source.end(), vertexData.begin(), vertexData.end());
-		source.insert(source.end(), vertexRemapData.begin(), vertexRemapData.end());
-		source.insert(source.end(), primitiveIndices.begin(), primitiveIndices.end());
-		if(source.empty())
-		{
-			return;
-		}
-
-		const std::size_t requestedPageCount = std::max<std::size_t>(1u, virtualGeometry->pages.size());
-		const std::size_t pageCount = std::min(requestedPageCount, source.size());
-		std::vector<TerraEngine::Editor::VirtualGeometryEncodedBlock> encodedBlocks;
-		std::vector<VirtualGeometryCompactPageDescriptor> pages;
-		encodedBlocks.reserve(pageCount);
-		pages.reserve(pageCount);
-		for(std::size_t pageIndex = 0u; pageIndex < pageCount; ++pageIndex)
-		{
-			const std::size_t begin = source.size() * pageIndex / pageCount;
-			const std::size_t end = source.size() * (pageIndex + 1u) / pageCount;
-			const std::span<const std::uint8_t> pageSource(source.data() + begin, end - begin);
-			const auto encoded = TerraEngine::Editor::EncodeVirtualGeometryPrototypeBlock(
-				TerraEngine::Editor::VirtualGeometryPrototypeCodec::Terra,
-				{ pageSource, 1u, static_cast<std::uint32_t>(pageSource.size()), 0u });
-			if(!encoded.IsComplete())
-			{
-				return;
-			}
-			const std::uint32_t pageId = pageIndex < virtualGeometry->pages.size()
-				? virtualGeometry->pages[pageIndex].pageId
-				: static_cast<std::uint32_t>(pageIndex);
-			const std::uint32_t fallbackPageId = pageIndex < virtualGeometry->pages.size()
-				? virtualGeometry->pages[pageIndex].fallbackPageId
-				: pageId;
-			// blockTableOffset is assigned after the common descriptor table location
-			// is known. Each compact page owns one bounded Terra block in v1.
-			pages.push_back({ pageId, fallbackPageId, 64u, 1u, 0u,
-				static_cast<std::uint32_t>(pageSource.size()),
-				kVirtualGeometryExtensionFlagPinnedFallback,
-				kVirtualGeometryCodecCapabilityTerra });
-			encodedBlocks.push_back(encoded);
-		}
-
-		const auto Align16 = [](std::size_t value) { return (value + 15u) & ~std::size_t(15u); };
-		const std::size_t entryCount = pages.size() + 1u;
-		const std::size_t entryTableOffset = sizeof(VirtualGeometryExtensionDirectoryHeader);
-		const std::size_t pageTableOffset = Align16(entryTableOffset + entryCount * sizeof(VirtualGeometryExtensionDirectoryEntry));
-		const std::size_t blockTableOffset = Align16(pageTableOffset + pages.size() * sizeof(VirtualGeometryCompactPageDescriptor));
-		std::size_t blockBytesOffset = Align16(blockTableOffset + encodedBlocks.size() * sizeof(VirtualGeometryCompactBlockDescriptor));
-		std::vector<VirtualGeometryCompactBlockDescriptor> blocks;
-		blocks.reserve(encodedBlocks.size());
-		for(std::size_t blockIndex = 0u; blockIndex < encodedBlocks.size(); ++blockIndex)
-		{
-			const auto& encoded = encodedBlocks[blockIndex];
-			blocks.push_back({ static_cast<std::uint32_t>(VirtualGeometryCompactBlockKind::Positions),
-				static_cast<std::uint32_t>(VirtualGeometryCompactCodec::Terra), 0u, 1u,
-				pages[blockIndex].decodedByteSize, 0u, blockBytesOffset,
-				static_cast<std::uint32_t>(encoded.bytes.size()), pages[blockIndex].decodedByteSize,
-				CalculateVirtualGeometryCompactHash(encoded.bytes), kVirtualGeometryCodecCapabilityTerra });
-			pages[blockIndex].blockTableOffset = blockTableOffset + blockIndex * sizeof(VirtualGeometryCompactBlockDescriptor);
-			blockBytesOffset = Align16(blockBytesOffset + encoded.bytes.size());
-		}
-
-		std::vector<VirtualGeometryExtensionDirectoryEntry> entries;
-		entries.reserve(entryCount);
-		for(std::size_t pageIndex = 0u; pageIndex < pages.size(); ++pageIndex)
-		{
-			const auto& page = pages[pageIndex];
-			entries.push_back({ static_cast<std::uint32_t>(VirtualGeometryExtensionType::CompactPage),
-				kVirtualGeometryExtensionFlagPageLocal | kVirtualGeometryExtensionFlagPinnedFallback,
-				page.pageId, page.profile,
-				pageTableOffset + pageIndex * sizeof(VirtualGeometryCompactPageDescriptor),
-				static_cast<std::uint32_t>(sizeof(VirtualGeometryCompactPageDescriptor)),
-				page.decodedByteSize,
-				CalculateVirtualGeometryCompactHash(std::span<const std::uint8_t>(
-					reinterpret_cast<const std::uint8_t*>(&page), sizeof(page))),
-				page.requiredCapabilities });
-		}
-		entries.push_back({ static_cast<std::uint32_t>(VirtualGeometryExtensionType::TerraBlock), 0u,
-			0u, 64u, blockTableOffset,
-			static_cast<std::uint32_t>(blocks.size() * sizeof(VirtualGeometryCompactBlockDescriptor)),
-			static_cast<std::uint32_t>(blocks.size() * sizeof(VirtualGeometryCompactBlockDescriptor)),
-			CalculateVirtualGeometryCompactHash(std::span<const std::uint8_t>(
-				reinterpret_cast<const std::uint8_t*>(blocks.data()), blocks.size() * sizeof(VirtualGeometryCompactBlockDescriptor))),
-			kVirtualGeometryCodecCapabilityTerra });
-
-		const std::size_t footerBytes = blockBytesOffset;
-		if(footerBytes > std::numeric_limits<std::uint32_t>::max())
-		{
-			return;
-		}
-		const VirtualGeometryExtensionDirectoryHeader directory{
-			kVirtualGeometryExtensionDirectoryMagicValue, kVirtualGeometryExtensionDirectoryVersion,
-			static_cast<std::uint16_t>(sizeof(VirtualGeometryExtensionDirectoryHeader)),
-			static_cast<std::uint32_t>(footerBytes), static_cast<std::uint32_t>(entries.size()),
-			static_cast<std::uint32_t>(entryTableOffset),
-			CalculateVirtualGeometryCompactHash(std::span<const std::uint8_t>(
-				reinterpret_cast<const std::uint8_t*>(entries.data()), entries.size() * sizeof(VirtualGeometryExtensionDirectoryEntry))),
-			kVirtualGeometryCodecCapabilityTerra };
-
-		std::vector<std::uint8_t> footer(footerBytes, 0u);
-		std::memcpy(footer.data(), &directory, sizeof(directory));
-		std::memcpy(footer.data() + entryTableOffset, entries.data(), entries.size() * sizeof(VirtualGeometryExtensionDirectoryEntry));
-		std::memcpy(footer.data() + pageTableOffset, pages.data(), pages.size() * sizeof(VirtualGeometryCompactPageDescriptor));
-		std::memcpy(footer.data() + blockTableOffset, blocks.data(), blocks.size() * sizeof(VirtualGeometryCompactBlockDescriptor));
-		for(std::size_t blockIndex = 0u; blockIndex < blocks.size(); ++blockIndex)
-		{
-			std::memcpy(footer.data() + blocks[blockIndex].byteOffset,
-				encodedBlocks[blockIndex].bytes.data(), encodedBlocks[blockIndex].bytes.size());
-		}
-		out.write(reinterpret_cast<const char*>(footer.data()), static_cast<std::streamsize>(footer.size()));
-	}
-
-	// Append the aggregate profile separately from VGXD so existing compact
-	// readers keep their frozen directory contract. The profile names a normal
-	// validated root fallback cluster; it never carries geometry bytes itself.
-	void AppendVirtualGeometryAggregateProfile(
-		std::ofstream& out,
-		const VirtualGeometryBuildOutput* virtualGeometry)
-	{
-		if (virtualGeometry == nullptr || virtualGeometry->clusters.empty())
-		{
-			return;
-		}
-		const auto rootIt = std::find_if(
-			virtualGeometry->clusters.begin(),
-			virtualGeometry->clusters.end(),
-			[](const VirtualGeometryClusterRecord& cluster) {
-				return cluster.parentClusterId == kVirtualGeometryInvalidIndex;
-			});
-		if (rootIt == virtualGeometry->clusters.end()
-			|| std::count_if(
-				virtualGeometry->clusters.begin(), virtualGeometry->clusters.end(),
-				[](const VirtualGeometryClusterRecord& cluster) {
-					return cluster.parentClusterId == kVirtualGeometryInvalidIndex;
-				}) != 1)
-		{
-			// A global aggregate fallback cannot prove coverage for multiple roots.
-			// Leave this mesh on ordinary per-cluster fallbacks until a future
-			// cooker emits explicitly regional aggregate profiles.
-			return;
-		}
-
-		const auto fallbackCluster = [&]() {
-			std::uint32_t selected = rootIt->clusterId;
-			for (std::size_t guard = 0u; guard < virtualGeometry->clusters.size(); ++guard)
-			{
-				const VirtualGeometryClusterRecord& cluster =
-					virtualGeometry->clusters[selected];
-				if (cluster.fallbackClusterId == selected
-					|| cluster.fallbackClusterId >= virtualGeometry->clusters.size())
-				{
-					break;
-				}
-				selected = cluster.fallbackClusterId;
-			}
-			return selected;
-		}();
-
-		float canonicalError = 0.0f;
-		for (const VirtualGeometryClusterRecord& cluster : virtualGeometry->clusters)
-		{
-			canonicalError = std::max(canonicalError, cluster.geometricError);
-		}
-		const std::span<const std::uint8_t> clusterBytes(
-			reinterpret_cast<const std::uint8_t*>(virtualGeometry->clusters.data()),
-			virtualGeometry->clusters.size() * sizeof(VirtualGeometryClusterRecord));
-		std::uint64_t stableId = CalculateVirtualGeometryCompactHash(clusterBytes);
-		if (stableId == 0u)
-		{
-			stableId = 1u;
-		}
-
-		const VirtualGeometryAggregateProfileRecord profile{
-			static_cast<std::uint32_t>(VirtualGeometryAggregateProfileKind::Fallback),
-			kVirtualGeometryAggregateProfileFlagCompleteFallbackCoverage,
-			stableId,
-			canonicalError,
-			static_cast<std::uint32_t>(virtualGeometry->clusters.size()),
-			1.0f,
-			stableId,
-			fallbackCluster,
-			0u };
-		const VirtualGeometryAggregateProfileHeader header{
-			kVirtualGeometryAggregateProfileMagicValue,
-			kVirtualGeometryAggregateProfileVersion,
-			static_cast<std::uint16_t>(sizeof(VirtualGeometryAggregateProfileHeader)),
-			static_cast<std::uint32_t>(sizeof(VirtualGeometryAggregateProfileHeader)
-				+ sizeof(VirtualGeometryAggregateProfileRecord)),
-			1u,
-			CalculateVirtualGeometryCompactHash(std::span<const std::uint8_t>(
-				reinterpret_cast<const std::uint8_t*>(&profile), sizeof(profile))) };
-		out.write(reinterpret_cast<const char*>(&header), sizeof(header));
-		out.write(reinterpret_cast<const char*>(&profile), sizeof(profile));
-	}
-
-	// ValidateFixedGpuLayout is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	bool ValidateFixedGpuLayout(const MeshHeader& header)
+	bool ValidateFixedGpuLayout(const MeshletRuntimeLayout& header)
 	{
 		// The direct-replacement format intentionally keeps one fixed layout so
 		// runtime never has to branch or repack bytes for mesh shader uploads.
@@ -1371,16 +1080,16 @@ namespace
 		const VertexAttribute expectedLayout[4] = {
 			{
 				static_cast<std::uint32_t>(AttributeSemantic::Position),
-				static_cast<std::uint32_t>(AttributeFormat::R10G10B10A2Snorm),
+				static_cast<std::uint32_t>(AttributeFormat::R16G16B16Unorm),
 				0u},
 			{
 				static_cast<std::uint32_t>(AttributeSemantic::Normal),
-				static_cast<std::uint32_t>(AttributeFormat::Oct32),
-				4u},
+				static_cast<std::uint32_t>(AttributeFormat::Oct12x2),
+				6u},
 			{
 				static_cast<std::uint32_t>(AttributeSemantic::Tangent),
-				static_cast<std::uint32_t>(AttributeFormat::Oct32),
-				8u},
+				static_cast<std::uint32_t>(AttributeFormat::Oct10x2TangentSign),
+				9u},
 			{
 				static_cast<std::uint32_t>(AttributeSemantic::TexCoord0),
 				static_cast<std::uint32_t>(AttributeFormat::R16G16Unorm),
@@ -1440,7 +1149,7 @@ namespace
 	};
 
 	bool TryBuildPayloadLayout(
-		const MeshHeader& header,
+		const MeshletRuntimeLayout& header,
 		std::size_t vertexBytes,
 		std::size_t vertexRemapBytes,
 		std::size_t skinningBytes,
@@ -1505,7 +1214,7 @@ namespace
 
 	void WriteTemf(
 		const std::filesystem::path& outputPath,
-		const MeshHeader& header,
+		const MeshletRuntimeLayout& header,
 		const std::vector<std::uint8_t>& vertexData,
 		const std::vector<std::uint8_t>& vertexRemapData,
 		const std::vector<std::uint8_t>& skinningData,
@@ -1624,8 +1333,6 @@ namespace
 				out.write(virtualGeometry->stringTable.data(), static_cast<std::streamsize>(virtualGeometry->stringTable.size()));
 			}
 		}
-		AppendVirtualGeometryCompactFooter(out, vertexData, vertexRemapData, primitiveIndices, virtualGeometry);
-		AppendVirtualGeometryAggregateProfile(out, virtualGeometry);
 	}
 
 	bool BuildMeshletPayload(
@@ -2252,7 +1959,7 @@ namespace
 				// Rejecting one candidate does not poison the entire asset. The
 				// previous detail remains the fallback so the renderer never sees
 				// a lower-detail mesh with unbounded visual error.
-				report.virtualGeometry.warnings.push_back("virtual geometry simplification skipped a candidate LOD: geometric error exceeded the US2 tolerance");
+				report.virtualGeometry.warnings.push_back("virtual geometry simplification skipped a candidate LOD: geometric error exceeded the validated tolerance");
 				AppendRequestedTargetReport(report, targetIndex, targetRatio, desiredTriangleCount, desiredMeshletCount, VirtualGeometryDetailTargetRecordStatus::Rejected);
 				AppendSkippedTargetReport(
 					report,
@@ -2697,6 +2404,7 @@ namespace
 		const std::vector<VertexRaw>& vertices,
 		bool includeBounds,
 		float previousDetailGeometricError,
+		float maximumGeometricError,
 		bool& outDetailEmitted,
 		std::uint32_t& outCandidatePrimitiveCount,
 		std::uint32_t& outCandidateMeshletCount,
@@ -2755,7 +2463,9 @@ namespace
 			payload.targetRatio = sourceCoverageIndices.empty()
 				? 1.0f
 				: static_cast<float>(clusterIndices.size()) / static_cast<float>(sourceCoverageIndices.size());
-			const float ratioSpacingFloor = ComputeVirtualGeometrySelectionErrorFloor(lod.targetRatio);
+			const float ratioSpacingFloor = std::min(
+				ComputeVirtualGeometrySelectionErrorFloor(lod.targetRatio),
+				maximumGeometricError);
 			// Different simplification requests can produce the same topology
 			// and error estimate. Give every coarser emitted detail a meaningfully
 			// larger screen-error threshold so several LODs cannot switch over a
@@ -2764,7 +2474,11 @@ namespace
 			// simplifier error remains authoritative when it is larger.
 			const float previousDetailSpacingFloor = lodIndex == 0u
 				? 0.0f
-				: std::min(previousDetailGeometricError * 1.5f, 0.05f);
+				: std::min({
+					previousDetailGeometricError * 1.5f,
+					0.05f,
+					maximumGeometricError
+				});
 			payload.geometricError = std::max({
 				simplificationError,
 				ratioSpacingFloor,
@@ -3292,6 +3006,7 @@ namespace
 				vertices,
 				includeBounds,
 				previousDetailGeometricError,
+				report.virtualGeometry.adaptiveSettings.maximumGeometricError,
 				detailEmitted,
 				candidatePrimitiveCount,
 				candidateMeshletCount,
@@ -3755,7 +3470,7 @@ static bool CompileMeshInternal(
 		}
 	}
 
-	// Phase 2: Foundational Cleanup (Welding & Smoothing)
+	// Foundational cleanup stage: welding and smoothing.
 	
 	ReportMeshProgress(progressCallback, 0.18f, "Mesh Cleanup", "Smoothing normals and generating tangents.");
 	// 1. Smooth normals (Connectivity-aware) on unindexed vertices
@@ -3785,7 +3500,7 @@ static bool CompileMeshInternal(
 		// Deformable cooks need the final cleanup order because generated normals
 		// or tangents may split one safely canonicalized source vertex into several
 		// static vertices. The caller duplicates the same skin/morph record onto
-		// every resulting vertex before appending the TDEF/TDFV payload.
+		// every resulting vertex before emitting canonical deformable streams.
 		outFinalWeldIdentities->clear();
 		outFinalWeldIdentities->reserve(vertices.size());
 		for (const VertexRaw& vertex : vertices)
@@ -3873,13 +3588,13 @@ static bool CompileMeshInternal(
 	ReleaseVectorMemory(indices);
 	ReleaseVectorMemory(virtualGeometryLods);
 
-	MeshHeader header{};
+	MeshletRuntimeLayout header{};
 	header.magic[0] = 'T';
 	header.magic[1] = 'E';
 	header.magic[2] = 'M';
 	header.magic[3] = 'F';
 	header.version = kMeshCurrentVersion;
-	header.headerSize = static_cast<std::uint32_t>(sizeof(MeshHeader));
+	header.headerSize = static_cast<std::uint32_t>(sizeof(MeshletRuntimeLayout));
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!TryConvertCount(vertices.size(), "meshlet global vertex count", header.meshletVertexCount)
@@ -3898,16 +3613,16 @@ static bool CompileMeshInternal(
 	header.layout.attributeCount = 4;
 	header.layout.attributes[0] = {
 		static_cast<std::uint32_t>(AttributeSemantic::Position),
-		static_cast<std::uint32_t>(AttributeFormat::R10G10B10A2Snorm),
+		static_cast<std::uint32_t>(AttributeFormat::R16G16B16Unorm),
 		0};
 	header.layout.attributes[1] = {
 		static_cast<std::uint32_t>(AttributeSemantic::Normal),
-		static_cast<std::uint32_t>(AttributeFormat::Oct32),
-		4};
+		static_cast<std::uint32_t>(AttributeFormat::Oct12x2),
+		6};
 	header.layout.attributes[2] = {
 		static_cast<std::uint32_t>(AttributeSemantic::Tangent),
-		static_cast<std::uint32_t>(AttributeFormat::Oct32),
-		8};
+		static_cast<std::uint32_t>(AttributeFormat::Oct10x2TangentSign),
+		9};
 	header.layout.attributes[3] = {
 		static_cast<std::uint32_t>(AttributeSemantic::TexCoord0),
 		static_cast<std::uint32_t>(AttributeFormat::R16G16Unorm),
@@ -3944,7 +3659,10 @@ static bool CompileMeshInternal(
 	header.quantization.uvScale[1] = hasUv ? std::max(1e-6f, maxUv[1] - minUv[1]) : 1.0f;
 
 	std::vector<std::uint8_t> vertexData(vertices.size() * static_cast<std::size_t>(header.layout.strideBytes));
-	std::uint8_t* vertexWriteCursor = vertexData.data();
+	const TerraEngine::Editor::VirtualGeometryQuantizationProfile&
+		quantizationProfile =
+			TerraEngine::Editor::GetVirtualGeometryQuantizationProfile(
+				TerraEngine::Editor::VirtualGeometryQuantizationProfileName::Balanced);
 
 	ReportMeshProgress(progressCallback, 0.74f, "Mesh Pack", "Packing GPU vertex streams.");
 	// Keep packing deterministic so binary assets remain stable across repeated runs.
@@ -3971,22 +3689,32 @@ static bool CompileMeshInternal(
 			(vertex.uv[0] - header.quantization.uvOffset[0]) / header.quantization.uvScale[0],
 			(vertex.uv[1] - header.quantization.uvOffset[1]) / header.quantization.uvScale[1]};
 
-		const std::uint32_t packedPosition = PackR10G10B10A2Snorm(qPosition, vertex.tangentW);
-		const std::uint32_t packedNormal   = PackOct32Normal(qNormal);
-
 		std::array<float, 3> tangentVec = {vertex.tangent[0], vertex.tangent[1], vertex.tangent[2]};
-		const std::uint32_t packedTangent = PackOct32Normal(tangentVec);
-		
-		const std::uint32_t packedUv = PackR16G16Unorm(qUv);
-
-		std::memcpy(vertexWriteCursor, &packedPosition, sizeof(packedPosition));
-		vertexWriteCursor += sizeof(packedPosition);
-		std::memcpy(vertexWriteCursor, &packedNormal, sizeof(packedNormal));
-		vertexWriteCursor += sizeof(packedNormal);
-		std::memcpy(vertexWriteCursor, &packedTangent, sizeof(packedTangent));
-		vertexWriteCursor += sizeof(packedTangent);
-		std::memcpy(vertexWriteCursor, &packedUv, sizeof(packedUv));
-		vertexWriteCursor += sizeof(packedUv);
+		const TerraEngine::VirtualGeometryPackedVertex packedVertex =
+			TerraEngine::PackVirtualGeometryVertex(
+				qPosition,
+				qNormal,
+				tangentVec,
+				vertex.tangentW,
+				qUv,
+				TerraEngine::Editor::GetVirtualGeometryQuantizationBits(
+					quantizationProfile,
+					TerraEngine::Editor::VirtualGeometryQuantizationAttribute::Position),
+				TerraEngine::Editor::GetVirtualGeometryQuantizationBits(
+					quantizationProfile,
+					TerraEngine::Editor::VirtualGeometryQuantizationAttribute::Normal),
+				TerraEngine::Editor::GetVirtualGeometryQuantizationBits(
+					quantizationProfile,
+					TerraEngine::Editor::VirtualGeometryQuantizationAttribute::Tangent),
+				TerraEngine::Editor::GetVirtualGeometryQuantizationBits(
+					quantizationProfile,
+					TerraEngine::Editor::VirtualGeometryQuantizationAttribute::TextureCoordinate));
+		const std::size_t vertexIndex =
+			static_cast<std::size_t>(&vertex - vertices.data());
+		std::memcpy(
+			vertexData.data() + vertexIndex * sizeof(packedVertex),
+			&packedVertex,
+			sizeof(packedVertex));
 	}
 
 	// The packed stream now owns the vertex data required for serialization.
@@ -4023,37 +3751,6 @@ static bool CompileMeshInternal(
 		report.failureReason = "remap-encoding-failed";
 		return FinalizeReport(false);
 	}
-
-	// Shadow-cook every approved prototype/profile from the same immutable
-	// packed streams. This offline work is isolated from live publication and
-	// can be moved to independent job-system tasks without changing results.
-	std::vector<std::uint8_t> shadowCodecSource;
-	shadowCodecSource.reserve(
-		vertexData.size()
-		+ remapData.size()
-		+ meshletPayload.primitiveIndices.size());
-	shadowCodecSource.insert(
-		shadowCodecSource.end(), vertexData.begin(), vertexData.end());
-	shadowCodecSource.insert(
-		shadowCodecSource.end(), remapData.begin(), remapData.end());
-	shadowCodecSource.insert(
-		shadowCodecSource.end(),
-		meshletPayload.primitiveIndices.begin(),
-		meshletPayload.primitiveIndices.end());
-	BuildVirtualGeometryShadowCodecProfiles(
-		shadowCodecSource, report.virtualGeometry);
-	const bool shadowProfilesComplete = std::all_of(
-		report.virtualGeometry.shadowCodecProfiles.begin(),
-		report.virtualGeometry.shadowCodecProfiles.end(),
-		[](const VirtualGeometryShadowCodecCompileReport& profile) {
-			return profile.complete;
-		});
-	if(!shadowProfilesComplete)
-	{
-		report.virtualGeometry.warnings.push_back(
-			"one or more compact shadow profiles exceeded its physical page budget");
-	}
-	ReleaseVectorMemory(shadowCodecSource);
 
 	ReleaseVectorMemory(meshletPayload.vertexRemapIndices);
 
@@ -4098,23 +3795,241 @@ static bool CompileMeshInternal(
 	header.virtualGeometryHeaderOffset = payloadLayout.virtualGeometryHeaderOffset;
 	header.virtualGeometryHeaderSize = static_cast<std::uint32_t>(sizeof(VirtualGeometryHeader));
 	header.virtualGeometryPayloadGeneration = kVirtualGeometryPayloadGeneration;
-	PopulateVirtualGeometryHeader(virtualGeometryPayload, header.virtualGeometryHeaderOffset);
+		PopulateVirtualGeometryHeader(virtualGeometryPayload, header.virtualGeometryHeaderOffset);
+		// Route from source complexity, not the sum of every generated LOD. Using
+		// the packed primitive total made the same low-poly mesh switch routes when
+		// its adaptive profile happened to request more intermediate levels.
+		constexpr std::uint32_t kDirectMeshletMaximumSourceTriangles = 4096u;
+		const bool denseProduction =
+			report.virtualGeometry.sourceTriangleCount > kDirectMeshletMaximumSourceTriangles;
+		if (!denseProduction)
+		{
+			// Small meshes remain direct-resident: no virtual hierarchy metadata or
+			// page table is emitted for a route that cannot amortize its overhead.
+			header.meshletFlags &= ~kMeshletHeaderFlagHasVirtualGeometry;
+			header.virtualGeometryHeaderOffset = 0u;
+			header.virtualGeometryHeaderSize = 0u;
+			header.virtualGeometryPayloadGeneration = 0u;
+		}
 
 	try
 	{
-		ReportMeshProgress(progressCallback, 0.94f, "Mesh Write", "Writing Terra mesh file.");
+		ReportMeshProgress(progressCallback, 0.94f, "Mesh Write", "Writing canonical TEMF production blocks.");
 		std::filesystem::create_directories(output.parent_path());
-		WriteTemf(
-			output,
-			header,
-			vertexData,
-			remapData,
-			{}, // skinningData
-			meshletPayload.primitiveIndices,
-			meshletPayload.meshletRecords,
-			meshletPayload.meshletSections,
-			meshletPayload.meshletBounds,
-			&virtualGeometryPayload);
+		// The three independently decodable attribute streams retain their own
+		// source-space domains. This makes recipe invalidation and quality
+		// diagnostics precise without changing the fixed 128-bit Vulkan layout.
+		std::array<TerraEngine::Editor::VirtualGeometryProductionQuantizationStreamRange, 3u>
+			quantizationRanges{};
+		quantizationRanges[0u].attribute =
+			TerraEngine::Editor::VirtualGeometryQuantizationAttribute::Position;
+		quantizationRanges[0u].scope = TemfQuantizationDomainScope::Asset;
+		quantizationRanges[0u].streamKind = TemfStreamKind::Position;
+		quantizationRanges[0u].stableIdentity = 1u;
+		quantizationRanges[0u].componentCount = 3u;
+		for (std::size_t component = 0u; component < 3u; ++component)
+		{
+			quantizationRanges[0u].origin[component] = minPos[component];
+			quantizationRanges[0u].extent[component] =
+				static_cast<double>(maxPos[component]) - minPos[component];
+		}
+		quantizationRanges[1u].attribute =
+			TerraEngine::Editor::VirtualGeometryQuantizationAttribute::Normal;
+		quantizationRanges[1u].scope = TemfQuantizationDomainScope::Asset;
+		quantizationRanges[1u].streamKind = TemfStreamKind::NormalTangent;
+		quantizationRanges[1u].stableIdentity = 2u;
+		quantizationRanges[1u].componentCount = 4u;
+		quantizationRanges[1u].extent = { 1.0, 1.0, 1.0, 1.0 };
+		quantizationRanges[2u].attribute =
+			TerraEngine::Editor::VirtualGeometryQuantizationAttribute::TextureCoordinate;
+		quantizationRanges[2u].scope = TemfQuantizationDomainScope::Asset;
+		quantizationRanges[2u].streamKind = TemfStreamKind::TextureColor;
+		quantizationRanges[2u].stableIdentity = 3u;
+		quantizationRanges[2u].componentCount = 2u;
+		quantizationRanges[2u].origin = {
+			static_cast<double>(header.quantization.uvOffset[0]),
+			static_cast<double>(header.quantization.uvOffset[1]), 0.0, 0.0 };
+		quantizationRanges[2u].extent = {
+			static_cast<double>(header.quantization.uvScale[0]),
+			static_cast<double>(header.quantization.uvScale[1]), 0.0, 0.0 };
+		const auto productionQuantization =
+			TerraEngine::Editor::BuildVirtualGeometryProductionQuantizationDomains(
+				{ TerraEngine::Editor::VirtualGeometryQuantizationProfileName::Balanced,
+					quantizationRanges });
+		if (!productionQuantization.IsComplete())
+		{
+			throw std::runtime_error(
+				"canonical quantization domains failed: "
+				+ productionQuantization.diagnostic);
+		}
+		std::vector<TemfQuantizationDomain> domains =
+			productionQuantization.domains;
+		const auto addIdentityDomain = [&domains](TemfStreamKind kind)
+		{
+			TemfQuantizationDomain domain{};
+			domain.domainId = static_cast<std::uint32_t>(domains.size());
+			domain.domainVersion = 1u;
+			domain.domainScope =
+				static_cast<std::uint16_t>(TemfQuantizationDomainScope::Asset);
+			domain.streamKind = static_cast<std::uint16_t>(kind);
+			domain.componentCount = 1u;
+			domain.componentBitWidths[0u] = 8u;
+			domain.extent[0u] = 1.0;
+			domain.quantizationStep[0u] = 1.0 / 255.0;
+			domain.domainHash =
+				0x9e3779b97f4a7c15ull
+				^ static_cast<std::uint64_t>(domain.domainId + 1u)
+				^ static_cast<std::uint64_t>(kind);
+			domains.push_back(domain);
+			return domain.domainId;
+		};
+		const std::uint32_t remapDomainId =
+			addIdentityDomain(TemfStreamKind::VertexRemapStableIdentity);
+		const std::uint32_t topologyDomainId =
+			addIdentityDomain(TemfStreamKind::Topology);
+		const std::uint32_t metadataDomainId =
+			addIdentityDomain(TemfStreamKind::Metadata);
+
+		std::vector<std::uint8_t> positionData(
+			static_cast<std::size_t>(header.meshletVertexCount) * 6u);
+		std::vector<std::uint8_t> normalTangentData(
+			static_cast<std::size_t>(header.meshletVertexCount) * 6u);
+		std::vector<std::uint8_t> textureData(
+			static_cast<std::size_t>(header.meshletVertexCount) * 4u);
+		for (std::size_t vertexIndex = 0u;
+			vertexIndex < header.meshletVertexCount; ++vertexIndex)
+		{
+			const std::uint8_t* packed =
+				vertexData.data() + vertexIndex * kMeshletPackedVertexStrideBytes;
+			std::memcpy(positionData.data() + vertexIndex * 6u, packed, 6u);
+			std::memcpy(
+				normalTangentData.data() + vertexIndex * 6u,
+				packed + 6u,
+				6u);
+			std::memcpy(textureData.data() + vertexIndex * 4u, packed + 12u, 4u);
+		}
+		// Every render-visible record is a distinct production block.  This keeps
+		// async decode typed and prevents a retired monolithic payload from
+		// becoming an accidental second on-disk contract.
+		std::vector<TerraEngine::Editor::TemfProductionStreamInput> streams;
+		const auto addBytes = [&streams](TemfStreamKind kind, std::uint64_t subKind,
+			std::uint32_t domainId, std::uint32_t count,
+			std::uint32_t stride, const auto& bytes,
+			TemfCodecProfile profile = TemfCodecProfile::ExpandedProduction) {
+			if (count == 0u)
+			{
+				return;
+			}
+			const auto byteView = std::span(bytes);
+			streams.push_back({ kind, profile, subKind, domainId, count, stride,
+				{ reinterpret_cast<const std::uint8_t*>(byteView.data()), byteView.size_bytes() } });
+		};
+		const auto addRecords = [&addBytes, metadataDomainId](
+			std::uint64_t subKind, const auto& records,
+			TemfCodecProfile profile = TemfCodecProfile::ExpandedProduction) {
+			using Record = typename std::remove_cvref_t<decltype(records)>::value_type;
+			addBytes(TemfStreamKind::Metadata, subKind, metadataDomainId,
+				static_cast<std::uint32_t>(records.size()),
+				static_cast<std::uint32_t>(sizeof(Record)), std::as_bytes(std::span(records)), profile);
+		};
+		addBytes(TemfStreamKind::Position, 0u, 0u, header.meshletVertexCount,
+			6u, positionData);
+		addBytes(TemfStreamKind::NormalTangent, 0u, 1u,
+			header.meshletVertexCount, 6u, normalTangentData);
+		addBytes(TemfStreamKind::TextureColor, 0u, 2u,
+			header.meshletVertexCount, 4u, textureData);
+		addBytes(TemfStreamKind::VertexRemapStableIdentity, 0u, remapDomainId,
+			header.meshletVertexRemapCount,
+			GetRemapElementSizeBytes(remapEncoding), remapData);
+		addBytes(TemfStreamKind::Topology, 0u, topologyDomainId,
+			header.meshletPrimitiveIndexCount, 1u,
+			meshletPayload.primitiveIndices);
+		TemfRuntimeDecodeMetadata runtimeMetadata{};
+		runtimeMetadata.formatVersion = header.version;
+		runtimeMetadata.meshletVertexCount = header.meshletVertexCount;
+		runtimeMetadata.meshletVertexRemapCount = header.meshletVertexRemapCount;
+		runtimeMetadata.meshletPrimitiveIndexCount = header.meshletPrimitiveIndexCount;
+		runtimeMetadata.meshletCount = header.meshletCount;
+		runtimeMetadata.meshletSectionCount = header.meshletSectionCount;
+		runtimeMetadata.meshletBoundsCount = header.meshletBoundsCount;
+		runtimeMetadata.meshletVertexRemapEncoding = header.meshletVertexRemapEncoding;
+		runtimeMetadata.meshletFlags = header.meshletFlags;
+		runtimeMetadata.layout = header.layout;
+		runtimeMetadata.quantization = header.quantization;
+		addBytes(TemfStreamKind::Metadata, kTemfMetadataRuntimeLayout,
+			metadataDomainId, 1u,
+			static_cast<std::uint32_t>(sizeof(runtimeMetadata)), std::as_bytes(std::span(&runtimeMetadata, 1u)));
+		const TemfCodecProfile compactMetadataProfile = denseProduction
+			&& meshletPayload.meshletRecords.size() * sizeof(MeshletRecord) <= kTemfPageSize64KiB
+			? TemfCodecProfile::MeshoptimizerProductionStatic : TemfCodecProfile::ExpandedProduction;
+		addRecords(kTemfMetadataMeshletRecords, meshletPayload.meshletRecords, compactMetadataProfile);
+		addRecords(kTemfMetadataMeshletSections, meshletPayload.meshletSections);
+		addRecords(kTemfMetadataMeshletBounds, meshletPayload.meshletBounds);
+		if (denseProduction)
+		{
+		addBytes(TemfStreamKind::Metadata, kTemfMetadataVirtualHeader,
+			metadataDomainId, 1u,
+			static_cast<std::uint32_t>(sizeof(virtualGeometryPayload.header)),
+			std::as_bytes(std::span(&virtualGeometryPayload.header, 1u)));
+		addRecords(kTemfMetadataVirtualDetailLevels, virtualGeometryPayload.detailLevels);
+		addRecords(kTemfMetadataVirtualMaterialSections, virtualGeometryPayload.materialSections);
+		addRecords(kTemfMetadataVirtualSectionRanges, virtualGeometryPayload.sectionRanges);
+		addRecords(kTemfMetadataVirtualCullableGroups, virtualGeometryPayload.cullableGroups);
+		addRecords(kTemfMetadataVirtualPages, virtualGeometryPayload.pages);
+		addRecords(kTemfMetadataVirtualRequestedTargets, virtualGeometryPayload.requestedTargets);
+		addRecords(kTemfMetadataVirtualSkippedDetails, virtualGeometryPayload.skippedDetails);
+		addRecords(kTemfMetadataVirtualClusters, virtualGeometryPayload.clusters);
+		addRecords(kTemfMetadataVirtualClusterPageLinks, virtualGeometryPayload.clusterPageLinks);
+		addRecords(kTemfMetadataVirtualConeSafety, virtualGeometryPayload.coneSafety);
+		addRecords(kTemfMetadataVirtualValidationFlags, virtualGeometryPayload.validationFlags);
+		addRecords(kTemfMetadataVirtualDiagnostics, virtualGeometryPayload.diagnostics);
+		addBytes(TemfStreamKind::Metadata, kTemfMetadataVirtualDiagnosticStrings,
+			metadataDomainId,
+			static_cast<std::uint32_t>(virtualGeometryPayload.stringTable.size()), 1u,
+			std::as_bytes(std::span(virtualGeometryPayload.stringTable)));
+		}
+		TerraEngine::Editor::TemfProductionBuildRequest request{};
+		request.representationFlags = denseProduction
+			? (kTemfRepresentationDirectMeshlets | kTemfRepresentationVirtualGeometry)
+			: kTemfRepresentationDirectMeshlets;
+		request.logicalPageSizeBytes = denseProduction ? kTemfPageSize64KiB : 0u;
+		request.sourceContentHash = report.sourceBytes;
+		request.buildRecipeHash =
+			(static_cast<std::uint64_t>(header.meshletCount) << 32u
+				| header.meshletPrimitiveIndexCount)
+			^ productionQuantization.settingsHash
+			^ productionQuantization.domainSetHash;
+		request.generationIdentity =
+			productionQuantization.domainSetHash;
+		request.selectedQuantizationProfileId =
+			static_cast<std::uint32_t>(TemfQuantizationProfile::Balanced);
+		request.quantizationDomains = domains;
+		request.streams = streams;
+		const TerraEngine::Editor::TemfProductionBuildResult production =
+			TerraEngine::Editor::BuildTemfProductionBlocks(request);
+		if (!production.IsComplete())
+		{
+			throw std::runtime_error("canonical TEMF assembly failed: " + production.error);
+		}
+		const std::filesystem::path stagedOutput = output.string() + ".temfprd1.stage";
+		{
+			std::ofstream staged(stagedOutput, std::ios::binary | std::ios::trunc);
+			staged.write(reinterpret_cast<const char*>(production.bytes.data()),
+				static_cast<std::streamsize>(production.bytes.size()));
+			if (!staged)
+			{
+				throw std::runtime_error("could not write staged canonical TEMF file");
+			}
+		}
+		const auto reopened = TerraEngine::Resource::ValidateTemfProductionFile(production.bytes, {});
+		if (!reopened.IsComplete() || !ReplaceStagedTemf(stagedOutput, output))
+		{
+			std::error_code ignored;
+			std::filesystem::remove(stagedOutput, ignored);
+			throw std::runtime_error(!reopened.IsComplete()
+				? "staged canonical TEMF validation failed: " + reopened.diagnostic
+				: "staged canonical TEMF file could not atomically replace its output");
+		}
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (std::filesystem::exists(output))
@@ -4338,7 +4253,7 @@ namespace
 		return true;
 	}
 
-	bool HasTemfMagic(const MeshHeader& header)
+	bool HasTemfMagic(const MeshletRuntimeLayout& header)
 	{
 		return header.magic[0] == 'T'
 			&& header.magic[1] == 'E'
@@ -4358,1173 +4273,45 @@ namespace
 		return static_cast<bool>(stream);
 	}
 
-	bool TryBuildDeformableVirtualGeometrySidecar(
-		std::fstream& stream,
-		std::uint32_t stagedSize,
-		const MeshHeader& meshHeader,
-		const SkinnedMeshCookInput& input,
-		const std::vector<const SkinnedMeshMorphTarget*>& orderedMorphs,
-		const std::vector<std::uint32_t>& vertexPaletteIndices,
-		const std::vector<std::uint8_t>& skinningBytes,
-		std::uint32_t sidecarOffset,
-		DeformableVirtualGeometrySidecarHeader& outHeader,
-		std::vector<DeformableVirtualGeometryClusterRecord>& outClusters,
-		std::vector<std::uint32_t>& outPaletteIndices,
-		std::vector<DeformableVirtualGeometryMorphRecord>& outMorphs,
-		std::vector<DeformableVirtualGeometryMorphVertex>& outMorphVertices)
+	// This temporary cook-only aggregate is never serialized.  Its fields are
+	// converted directly into typed TEMFPRD1 metadata and descriptor-owned blobs.
+	struct CanonicalDemandedPageCookedBlob
 	{
-		const auto RangeWithinStagedFile = [stagedSize](std::uint32_t offset, std::uint64_t byteCount) {
-			return offset <= stagedSize && byteCount <= static_cast<std::uint64_t>(stagedSize - offset);
-		};
-		const auto BuildEnvelope = [&](const std::vector<std::uint32_t>& vertices,
-			float (&outMinimum)[3], float (&outMaximum)[3], float& outDeformationError) {
-			std::array<float, 3> largestDisplacement{};
-			for (std::size_t axis = 0u; axis < 3u; ++axis)
-			{
-				outMinimum[axis] = std::numeric_limits<float>::max();
-				outMaximum[axis] = std::numeric_limits<float>::lowest();
-			}
-			for (std::uint32_t vertexIndex : vertices)
-			{
-				for (std::size_t axis = 0u; axis < 3u; ++axis)
-				{
-					float minimum = input.vertices[vertexIndex].baseVertex.position[axis];
-					float maximum = minimum;
-					for (const SkinnedMeshMorphTarget* morph : orderedMorphs)
-					{
-						const float delta = morph->positionDeltas[vertexIndex][axis];
-						minimum += std::min(delta, 0.0f);
-						maximum += std::max(delta, 0.0f);
-					}
-					outMinimum[axis] = std::min(outMinimum[axis], minimum);
-					outMaximum[axis] = std::max(outMaximum[axis], maximum);
-					largestDisplacement[axis] = std::max(
-						largestDisplacement[axis],
-						std::max(std::abs(minimum - input.vertices[vertexIndex].baseVertex.position[axis]),
-							std::abs(maximum - input.vertices[vertexIndex].baseVertex.position[axis])));
-				}
-			}
-			outDeformationError = std::sqrt(
-				largestDisplacement[0] * largestDisplacement[0]
-				+ largestDisplacement[1] * largestDisplacement[1]
-				+ largestDisplacement[2] * largestDisplacement[2]);
-			return std::isfinite(outDeformationError);
-		};
-
-		if (vertexPaletteIndices.size() != input.vertices.size()
-			|| skinningBytes.size() != input.vertices.size() * kDeformableMeshSkinningStrideBytes)
+		struct Entry
 		{
-			return false;
-		}
-		const bool hasBoundSkinning = std::any_of(
-			skinningBytes.begin(), skinningBytes.end(), [](std::uint8_t value) { return value != 0u; });
-		std::vector<VirtualGeometryClusterRecord> sourceClusters;
-		std::vector<VirtualGeometryCullableGroupRecord> sourceGroups;
-		bool hasVirtualGeometryClusters = false;
-		if ((meshHeader.meshletFlags & kMeshletHeaderFlagHasVirtualGeometry) != 0u)
-		{
-			VirtualGeometryHeader virtualHeader{};
-			if (meshHeader.virtualGeometryHeaderOffset == 0u
-				|| meshHeader.virtualGeometryHeaderSize != sizeof(VirtualGeometryHeader)
-				|| !RangeWithinStagedFile(meshHeader.virtualGeometryHeaderOffset, sizeof(VirtualGeometryHeader))
-				|| !TryReadStagedRecord(stream, meshHeader.virtualGeometryHeaderOffset, virtualHeader)
-				|| virtualHeader.payloadGeneration != kVirtualGeometryPayloadGeneration
-				|| virtualHeader.headerSize != sizeof(VirtualGeometryHeader))
-			{
-				return false;
-			}
-			std::uint64_t clusterBytes = static_cast<std::uint64_t>(virtualHeader.clusterCount)
-				* sizeof(VirtualGeometryClusterRecord);
-			std::uint64_t groupBytes = static_cast<std::uint64_t>(virtualHeader.cullableGroupCount)
-				* sizeof(VirtualGeometryCullableGroupRecord);
-			if ((virtualHeader.clusterCount != 0u && !RangeWithinStagedFile(virtualHeader.clusterTableOffset, clusterBytes))
-				|| (virtualHeader.cullableGroupCount != 0u && !RangeWithinStagedFile(virtualHeader.cullableGroupTableOffset, groupBytes)))
-			{
-				return false;
-			}
-			sourceClusters.resize(virtualHeader.clusterCount);
-			sourceGroups.resize(virtualHeader.cullableGroupCount);
-			if (!sourceClusters.empty())
-			{
-				stream.clear();
-				stream.seekg(static_cast<std::streamoff>(virtualHeader.clusterTableOffset), std::ios::beg);
-				stream.read(reinterpret_cast<char*>(sourceClusters.data()), static_cast<std::streamsize>(clusterBytes));
-				if (!stream)
-				{
-					return false;
-				}
-			}
-			if (!sourceGroups.empty())
-			{
-				stream.clear();
-				stream.seekg(static_cast<std::streamoff>(virtualHeader.cullableGroupTableOffset), std::ios::beg);
-				stream.read(reinterpret_cast<char*>(sourceGroups.data()), static_cast<std::streamsize>(groupBytes));
-				if (!stream)
-				{
-					return false;
-				}
-			}
-			hasVirtualGeometryClusters = !sourceClusters.empty();
-		}
-
-		const MeshletRemapEncoding remapEncoding = static_cast<MeshletRemapEncoding>(meshHeader.meshletVertexRemapEncoding);
-		const std::uint32_t remapStride = GetRemapElementSizeBytes(remapEncoding);
-		const std::uint64_t remapBytes = static_cast<std::uint64_t>(meshHeader.meshletVertexRemapCount) * remapStride;
-		if ((remapEncoding != MeshletRemapEncoding::Uint16 && remapEncoding != MeshletRemapEncoding::Uint32)
-			|| !RangeWithinStagedFile(meshHeader.meshletVertexRemapDataOffset, remapBytes))
-		{
-			return false;
-		}
-		std::vector<std::uint8_t> remapBytesBuffer(static_cast<std::size_t>(remapBytes));
-		stream.clear();
-		stream.seekg(static_cast<std::streamoff>(meshHeader.meshletVertexRemapDataOffset), std::ios::beg);
-		stream.read(reinterpret_cast<char*>(remapBytesBuffer.data()), static_cast<std::streamsize>(remapBytesBuffer.size()));
-		if (!stream)
-		{
-			return false;
-		}
-		const auto ReadRemappedVertex = [&](std::uint32_t remapIndex, std::uint32_t& outVertex) {
-			if (remapIndex >= meshHeader.meshletVertexRemapCount)
-			{
-				return false;
-			}
-			const std::size_t offset = static_cast<std::size_t>(remapIndex) * remapStride;
-			if (remapEncoding == MeshletRemapEncoding::Uint16)
-			{
-				std::uint16_t compact = 0u;
-				std::memcpy(&compact, remapBytesBuffer.data() + offset, sizeof(compact));
-				outVertex = compact;
-			}
-			else
-			{
-				std::memcpy(&outVertex, remapBytesBuffer.data() + offset, sizeof(outVertex));
-			}
-			return outVertex < vertexPaletteIndices.size();
-		};
-
-		const auto AppendCluster = [&](const VirtualGeometryClusterRecord* sourceCluster, bool fallbackOnly) {
-			std::vector<std::uint32_t> clusterVertices;
-			if (sourceCluster == nullptr)
-			{
-				clusterVertices.resize(static_cast<std::uint32_t>(input.vertices.size()));
-				std::iota(clusterVertices.begin(), clusterVertices.end(), 0u);
-			}
-			else
-			{
-				if (sourceCluster->groupOffset > sourceGroups.size()
-					|| sourceCluster->groupCount > sourceGroups.size() - sourceCluster->groupOffset)
-				{
-					return false;
-				}
-				for (std::uint32_t groupIndex = sourceCluster->groupOffset;
-					groupIndex < sourceCluster->groupOffset + sourceCluster->groupCount; ++groupIndex)
-				{
-					const VirtualGeometryCullableGroupRecord& group = sourceGroups[groupIndex];
-					if (group.vertexOffset > meshHeader.meshletVertexRemapCount
-						|| group.vertexCount > meshHeader.meshletVertexRemapCount - group.vertexOffset)
-					{
-						return false;
-					}
-					for (std::uint32_t remapIndex = group.vertexOffset;
-						remapIndex < group.vertexOffset + group.vertexCount; ++remapIndex)
-					{
-						std::uint32_t vertex = 0u;
-						if (!ReadRemappedVertex(remapIndex, vertex))
-						{
-							return false;
-						}
-						clusterVertices.push_back(vertex);
-					}
-				}
-				std::sort(clusterVertices.begin(), clusterVertices.end());
-				clusterVertices.erase(std::unique(clusterVertices.begin(), clusterVertices.end()), clusterVertices.end());
-				if (clusterVertices.empty())
-				{
-					return false;
-				}
-			}
-			std::vector<std::uint32_t> palettes;
-			palettes.reserve(clusterVertices.size());
-			for (std::uint32_t vertex : clusterVertices)
-			{
-				palettes.push_back(vertexPaletteIndices[vertex]);
-			}
-			std::sort(palettes.begin(), palettes.end());
-			palettes.erase(std::unique(palettes.begin(), palettes.end()), palettes.end());
-			if (palettes.empty())
-			{
-				return false;
-			}
-			DeformableVirtualGeometryClusterRecord record{};
-			record.clusterId = sourceCluster == nullptr ? 0u : sourceCluster->clusterId;
-			record.fallbackClusterId = sourceCluster == nullptr ? 0u : sourceCluster->fallbackClusterId;
-			record.parentClusterId = sourceCluster == nullptr ? kVirtualGeometryInvalidIndex : sourceCluster->parentClusterId;
-			record.firstChildClusterId = sourceCluster == nullptr ? kVirtualGeometryInvalidIndex : sourceCluster->firstChildClusterId;
-			record.childCount = sourceCluster == nullptr ? 0u : sourceCluster->childCount;
-			record.geometricError = sourceCluster == nullptr ? 0.0f : sourceCluster->geometricError;
-			if (!std::isfinite(record.geometricError) || record.geometricError < 0.0f
-				|| !BuildEnvelope(clusterVertices, record.deformationBoundsMin, record.deformationBoundsMax, record.deformationError))
-			{
-				return false;
-			}
-			record.flags = kDeformableVirtualGeometryClusterFlagActive
-				| kDeformableVirtualGeometryClusterFlagFallbackCoverageComplete;
-			record.morphTargetCount = static_cast<std::uint32_t>(orderedMorphs.size());
-			if (fallbackOnly)
-			{
-				record.flags |= kDeformableVirtualGeometryClusterFlagFallbackActive;
-			}
-			if (!hasBoundSkinning)
-			{
-				record.flags |= kDeformableVirtualGeometryClusterFlagConservativeEnvelopeValid
-					| kDeformableVirtualGeometryClusterFlagFrustumCullingSafe;
-				if (record.childCount != 0u)
-				{
-					record.flags |= kDeformableVirtualGeometryClusterFlagRefinementSafe;
-				}
-			}
-			record.paletteIndexCount = static_cast<std::uint32_t>(palettes.size());
-			outPaletteIndices.insert(outPaletteIndices.end(), palettes.begin(), palettes.end());
-			outClusters.push_back(record);
-			return true;
-		};
-
-		if (hasVirtualGeometryClusters)
-		{
-			for (const VirtualGeometryClusterRecord& cluster : sourceClusters)
-			{
-				if (cluster.clusterId != outClusters.size() || !AppendCluster(&cluster, cluster.fallbackClusterId == cluster.clusterId))
-				{
-					return false;
-				}
-			}
-		}
-		else if (!AppendCluster(nullptr, true))
-		{
-			return false;
-		}
-
-		std::uint64_t paletteCursor = static_cast<std::uint64_t>(sidecarOffset)
-			+ sizeof(DeformableVirtualGeometrySidecarHeader)
-			+ static_cast<std::uint64_t>(outClusters.size()) * sizeof(DeformableVirtualGeometryClusterRecord);
-		for (DeformableVirtualGeometryClusterRecord& cluster : outClusters)
-		{
-			cluster.paletteIndexOffset = static_cast<std::uint32_t>(paletteCursor);
-			paletteCursor += static_cast<std::uint64_t>(cluster.paletteIndexCount) * sizeof(std::uint32_t);
-		}
-		const std::uint64_t morphTableOffset = paletteCursor;
-		paletteCursor += static_cast<std::uint64_t>(orderedMorphs.size()) * sizeof(DeformableVirtualGeometryMorphRecord);
-		const std::uint64_t morphVertexDataOffset = paletteCursor;
-		for (const SkinnedMeshMorphTarget* morph : orderedMorphs)
-		{
-			DeformableVirtualGeometryMorphRecord morphRecord{};
-			morphRecord.stableTargetId = morph->stableTargetId;
-			morphRecord.vertexDataOffset = static_cast<std::uint32_t>(paletteCursor);
-			morphRecord.vertexCount = static_cast<std::uint32_t>(input.vertices.size());
-			morphRecord.vertexStrideBytes = sizeof(DeformableVirtualGeometryMorphVertex);
-			morphRecord.flags = kDeformableVirtualGeometryMorphFlagPosition;
-			if (!morph->normalDeltas.empty())
-			{
-				morphRecord.flags |= kDeformableVirtualGeometryMorphFlagNormal;
-			}
-			if (!morph->tangentDeltas.empty())
-			{
-				morphRecord.flags |= kDeformableVirtualGeometryMorphFlagTangent;
-			}
-			outMorphs.push_back(morphRecord);
-			for (std::size_t vertexIndex = 0u; vertexIndex < input.vertices.size(); ++vertexIndex)
-			{
-				DeformableVirtualGeometryMorphVertex gpuRecord{};
-				std::copy_n(morph->positionDeltas[vertexIndex].begin(), 3u, gpuRecord.positionDelta);
-				if (!morph->normalDeltas.empty())
-				{
-					std::copy_n(morph->normalDeltas[vertexIndex].begin(), 3u, gpuRecord.normalDelta);
-				}
-				if (!morph->tangentDeltas.empty())
-				{
-					std::copy_n(morph->tangentDeltas[vertexIndex].begin(), 3u, gpuRecord.tangentDelta);
-				}
-				outMorphVertices.push_back(gpuRecord);
-			}
-			paletteCursor += static_cast<std::uint64_t>(input.vertices.size()) * sizeof(DeformableVirtualGeometryMorphVertex);
-		}
-		if (paletteCursor > std::numeric_limits<std::uint32_t>::max()
-			|| outMorphVertices.size() != orderedMorphs.size() * input.vertices.size())
-		{
-			return false;
-		}
-		outHeader.magic = kDeformableVirtualGeometrySidecarMagicValue;
-		outHeader.version = kDeformableVirtualGeometrySidecarVersion;
-		outHeader.headerSize = static_cast<std::uint16_t>(sizeof(DeformableVirtualGeometrySidecarHeader));
-		outHeader.payloadSize = static_cast<std::uint32_t>(paletteCursor - sidecarOffset);
-		outHeader.flags = kDeformableVirtualGeometrySidecarFlagDerivedFromClusters;
-		outHeader.clusterCount = static_cast<std::uint32_t>(outClusters.size());
-		outHeader.clusterTableOffset = sidecarOffset + static_cast<std::uint32_t>(sizeof(DeformableVirtualGeometrySidecarHeader));
-		outHeader.paletteIndexCount = static_cast<std::uint32_t>(outPaletteIndices.size());
-		outHeader.paletteIndexTableOffset = outPaletteIndices.empty() ? 0u : outClusters.front().paletteIndexOffset;
-		outHeader.morphTargetCount = static_cast<std::uint32_t>(outMorphs.size());
-		outHeader.morphTableOffset = outMorphs.empty() ? 0u : static_cast<std::uint32_t>(morphTableOffset);
-		outHeader.morphVertexDataOffset = outMorphs.empty() ? 0u : static_cast<std::uint32_t>(morphVertexDataOffset);
-		outHeader.morphVertexStrideBytes = sizeof(DeformableVirtualGeometryMorphVertex);
-		return outHeader.clusterCount != 0u && outHeader.paletteIndexCount != 0u;
-	}
-
-	struct AnimatedVirtualPageCookedBlob
-	{
-		AnimatedVirtualPageDirectoryEntry entry{};
+			std::uint32_t pageId = 0u;
+			std::uint32_t parentPageId = kVirtualGeometryInvalidIndex;
+			std::uint32_t fallbackPageId = kVirtualGeometryInvalidIndex;
+			std::uint32_t flags = 0u;
+			std::uint64_t blobHash = 0u;
+			std::uint64_t contentGeneration = 0u;
+			std::uint64_t skeletonCompatibilityFingerprint = 0u;
+			std::uint32_t clusterOffset = 0u;
+			std::uint32_t clusterCount = 0u;
+			std::uint32_t materialSectionId = 0u;
+			float conservativeBoundsMin[3]{};
+			float conservativeBoundsMax[3]{};
+			float geometricError = 0.0f;
+			float deformationError = 0.0f;
+		} entry;
 		std::vector<std::uint8_t> bytes;
 	};
 
-	struct AnimatedVirtualPageCookedSection
-	{
-		AnimatedVirtualPageSectionType type =
-			AnimatedVirtualPageSectionType::PackedVertices;
-		std::uint32_t flags = 1u;
-		std::uint32_t elementCount = 0u;
-		std::uint32_t elementStride = 0u;
-		std::vector<std::uint8_t> bytes;
-	};
-
-	std::uint64_t HashAnimatedVirtualCookBytes(
+	// Stable source-vertex hashing is local cook state.  It identifies only
+	// byte-identical inputs while canonical topology is reconstructed.
+	std::uint64_t HashCanonicalCookBytes(
 		const std::uint8_t* bytes,
 		std::size_t byteCount,
 		std::uint64_t seed = 1469598103934665603ull)
 	{
-		std::uint64_t hash = seed;
 		for (std::size_t index = 0u; index < byteCount; ++index)
 		{
-			hash ^= bytes[index];
-			hash *= 1099511628211ull;
+			seed = (seed ^ bytes[index]) * 1099511628211ull;
 		}
-		return hash == 0u ? 1u : hash;
+		return seed;
 	}
 
-	template <typename Record>
-	std::vector<std::uint8_t> CopyAnimatedVirtualPageRecords(
-		const std::vector<Record>& records)
-	{
-		std::vector<std::uint8_t> bytes(
-			records.size() * sizeof(Record));
-		if (!bytes.empty())
-		{
-			std::memcpy(bytes.data(), records.data(), bytes.size());
-		}
-		return bytes;
-	}
-
-	template <typename Record>
-	bool TryReadAnimatedVirtualPageTable(
-		std::fstream& stream,
-		std::uint32_t offset,
-		std::uint32_t count,
-		std::vector<Record>& output)
-	{
-		output.resize(count);
-		if (output.empty())
-		{
-			return true;
-		}
-		stream.clear();
-		stream.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
-		stream.read(
-			reinterpret_cast<char*>(output.data()),
-			static_cast<std::streamsize>(output.size() * sizeof(Record)));
-		return static_cast<bool>(stream);
-	}
-
-	bool TryBuildAnimatedVirtualPageBlobs(
-		std::fstream& stream,
-		const MeshHeader& meshHeader,
-		const SkinnedMeshCookInput& input,
-		const SkinnedMeshCookSettings& settings,
-		const std::vector<SkinnedMeshPalettePartition>& palettes,
-		const std::vector<std::uint32_t>& vertexPaletteIndices,
-		const std::vector<std::uint8_t>& skinningBytes,
-		const std::vector<const SkinnedMeshMorphTarget*>& orderedMorphs,
-		const std::vector<DeformableVirtualGeometryClusterRecord>&
-			deformableClusters,
-		std::uint64_t meshPayloadGeneration,
-		std::vector<AnimatedVirtualPageCookedBlob>& output,
-		std::vector<std::uint32_t>& rootPageIds)
-	{
-		if (meshPayloadGeneration == 0u
-			|| meshHeader.virtualGeometryHeaderOffset == 0u
-			|| meshHeader.layout.strideBytes != kMeshletPackedVertexStrideBytes
-			|| vertexPaletteIndices.size() != input.vertices.size()
-			|| skinningBytes.size()
-				!= input.vertices.size() * sizeof(AnimatedVirtualPageSkinRecord))
-		{
-			return false;
-		}
-
-		VirtualGeometryHeader virtualHeader{};
-		if (!TryReadStagedRecord(
-				stream, meshHeader.virtualGeometryHeaderOffset, virtualHeader)
-			|| virtualHeader.payloadGeneration
-				!= kVirtualGeometryPayloadGeneration)
-		{
-			return false;
-		}
-		std::vector<VirtualGeometryPageRecord> pages;
-		std::vector<VirtualGeometryClusterRecord> clusters;
-		std::vector<VirtualGeometryCullableGroupRecord> groups;
-		std::vector<MeshletRecord> meshlets;
-		std::vector<MeshletBounds> bounds;
-		if (!TryReadAnimatedVirtualPageTable(
-				stream, virtualHeader.pageTableOffset,
-				virtualHeader.pageCount, pages)
-			|| !TryReadAnimatedVirtualPageTable(
-				stream, virtualHeader.clusterTableOffset,
-				virtualHeader.clusterCount, clusters)
-			|| !TryReadAnimatedVirtualPageTable(
-				stream, virtualHeader.cullableGroupTableOffset,
-				virtualHeader.cullableGroupCount, groups)
-			|| !TryReadAnimatedVirtualPageTable(
-				stream, meshHeader.meshletTableOffset,
-				meshHeader.meshletCount, meshlets)
-			|| !TryReadAnimatedVirtualPageTable(
-				stream, meshHeader.meshletBoundsOffset,
-				meshHeader.meshletBoundsCount, bounds)
-			|| pages.empty()
-			|| clusters.size() != deformableClusters.size())
-		{
-			return false;
-		}
-
-		const std::uint32_t remapStride = GetRemapElementSizeBytes(
-			static_cast<MeshletRemapEncoding>(
-				meshHeader.meshletVertexRemapEncoding));
-		if (remapStride == 0u)
-		{
-			return false;
-		}
-		std::vector<std::uint8_t> remapBytes(
-			static_cast<std::size_t>(meshHeader.meshletVertexRemapCount)
-				* remapStride);
-		std::vector<std::uint8_t> primitiveBytes(
-			meshHeader.meshletPrimitiveIndexCount);
-		std::vector<std::uint8_t> packedVertices(
-			static_cast<std::size_t>(meshHeader.meshletVertexCount)
-				* meshHeader.layout.strideBytes);
-		const auto ReadBytes = [&stream](
-			std::uint32_t offset, std::vector<std::uint8_t>& bytes)
-		{
-			if (bytes.empty())
-			{
-				return true;
-			}
-			stream.clear();
-			stream.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
-			stream.read(
-				reinterpret_cast<char*>(bytes.data()),
-				static_cast<std::streamsize>(bytes.size()));
-			return static_cast<bool>(stream);
-		};
-		if (!ReadBytes(meshHeader.meshletVertexRemapDataOffset, remapBytes)
-			|| !ReadBytes(
-				meshHeader.meshletPrimitiveIndexDataOffset, primitiveBytes)
-			|| !ReadBytes(meshHeader.meshletVertexDataOffset, packedVertices))
-		{
-			return false;
-		}
-		const auto DecodeRemap = [&](std::uint32_t index,
-			std::uint32_t& sourceVertex)
-		{
-			if (index >= meshHeader.meshletVertexRemapCount)
-			{
-				return false;
-			}
-			const std::size_t byteOffset =
-				static_cast<std::size_t>(index) * remapStride;
-			if (remapStride == sizeof(std::uint16_t))
-			{
-				std::uint16_t compact = 0u;
-				std::memcpy(
-					&compact, remapBytes.data() + byteOffset,
-					sizeof(compact));
-				sourceVertex = compact;
-			}
-			else
-			{
-				std::memcpy(
-					&sourceVertex, remapBytes.data() + byteOffset,
-					sizeof(sourceVertex));
-			}
-			return sourceVertex < meshHeader.meshletVertexCount;
-		};
-
-		output.clear();
-		rootPageIds.clear();
-		output.reserve(pages.size());
-		for (const VirtualGeometryPageRecord& page : pages)
-		{
-			if (page.pageId >= pages.size()
-				|| page.groupOffset > groups.size()
-				|| page.groupCount == 0u
-				|| page.groupCount > groups.size() - page.groupOffset)
-			{
-				return false;
-			}
-			const auto clusterIt = std::find_if(
-				clusters.begin(), clusters.end(),
-				[&page](const VirtualGeometryClusterRecord& cluster)
-				{
-					return cluster.pageId == page.pageId;
-				});
-			if (clusterIt == clusters.end()
-				|| clusterIt->clusterId >= deformableClusters.size())
-			{
-				return false;
-			}
-
-			std::vector<std::uint32_t> sourceVertices;
-			std::unordered_map<std::uint32_t, std::uint32_t> localVertexBySource;
-			std::vector<std::uint32_t> localRemap;
-			std::vector<MeshletRecord> localMeshlets;
-			std::vector<MeshletBounds> localBounds;
-			std::vector<std::uint8_t> localPrimitives;
-			for (std::uint32_t groupIndex = page.groupOffset;
-				groupIndex < page.groupOffset + page.groupCount; ++groupIndex)
-			{
-				const VirtualGeometryCullableGroupRecord& group =
-					groups[groupIndex];
-				if (group.groupIndex >= meshlets.size())
-				{
-					return false;
-				}
-				MeshletRecord localMeshlet = meshlets[group.groupIndex];
-				if (localMeshlet.vertexOffset
-						> meshHeader.meshletVertexRemapCount
-					|| localMeshlet.vertexCount
-						> meshHeader.meshletVertexRemapCount
-							- localMeshlet.vertexOffset
-					|| localMeshlet.primitiveIndexOffset
-						> primitiveBytes.size()
-					|| localMeshlet.primitiveIndexCount
-						> primitiveBytes.size()
-							- localMeshlet.primitiveIndexOffset)
-				{
-					return false;
-				}
-				localMeshlet.vertexOffset =
-					static_cast<std::uint32_t>(localRemap.size());
-				for (std::uint32_t vertex = 0u;
-					vertex < meshlets[group.groupIndex].vertexCount; ++vertex)
-				{
-					std::uint32_t sourceVertex = 0u;
-					if (!DecodeRemap(
-						meshlets[group.groupIndex].vertexOffset + vertex,
-						sourceVertex))
-					{
-						return false;
-					}
-					auto [iterator, inserted] = localVertexBySource.emplace(
-						sourceVertex,
-						static_cast<std::uint32_t>(sourceVertices.size()));
-					if (inserted)
-					{
-						sourceVertices.push_back(sourceVertex);
-					}
-					localRemap.push_back(iterator->second);
-				}
-				localMeshlet.primitiveIndexOffset =
-					static_cast<std::uint32_t>(localPrimitives.size());
-				const std::size_t primitiveBegin =
-					meshlets[group.groupIndex].primitiveIndexOffset;
-				localPrimitives.insert(
-					localPrimitives.end(),
-					primitiveBytes.begin()
-						+ static_cast<std::ptrdiff_t>(primitiveBegin),
-					primitiveBytes.begin()
-						+ static_cast<std::ptrdiff_t>(
-							primitiveBegin
-							+ meshlets[group.groupIndex]
-								.primitiveIndexCount));
-				localMeshlets.push_back(localMeshlet);
-				if (group.groupIndex < bounds.size())
-				{
-					localBounds.push_back(bounds[group.groupIndex]);
-				}
-			}
-			if (sourceVertices.empty() || localMeshlets.empty()
-				|| localPrimitives.empty())
-			{
-				return false;
-			}
-
-			std::vector<std::uint8_t> localPackedVertices;
-			std::vector<AnimatedVirtualPageSourceVertexRecord> sourceIds;
-			localPackedVertices.reserve(
-				sourceVertices.size() * meshHeader.layout.strideBytes);
-			sourceIds.reserve(sourceVertices.size());
-			for (std::uint32_t sourceVertex : sourceVertices)
-			{
-				const std::size_t begin =
-					static_cast<std::size_t>(sourceVertex)
-						* meshHeader.layout.strideBytes;
-				localPackedVertices.insert(
-					localPackedVertices.end(),
-					packedVertices.begin()
-						+ static_cast<std::ptrdiff_t>(begin),
-					packedVertices.begin()
-						+ static_cast<std::ptrdiff_t>(
-							begin + meshHeader.layout.strideBytes));
-				sourceIds.push_back({ sourceVertex });
-			}
-
-			// Rewrite partition-local influences into one page-local joint palette.
-			// This makes the blob independent of the owner TDEF palette tables.
-			std::vector<std::uint32_t> pageJointPalette;
-			std::unordered_map<std::uint32_t, std::uint8_t>
-				localJointByPaletteEntry;
-			std::vector<AnimatedVirtualPageSkinRecord> localSkin;
-			std::uint32_t pagePalettePartition =
-				kVirtualGeometryInvalidIndex;
-			localSkin.reserve(sourceVertices.size());
-			for (std::uint32_t sourceVertex : sourceVertices)
-			{
-				const std::uint32_t partition =
-					vertexPaletteIndices[sourceVertex];
-				if (partition >= palettes.size())
-				{
-					return false;
-				}
-				if (pagePalettePartition
-					== kVirtualGeometryInvalidIndex)
-				{
-					pagePalettePartition = partition;
-				}
-				else if (pagePalettePartition != partition)
-				{
-					// Version one animation palette dispatches one cooked
-					// partition per work packet. A physical page must therefore
-					// be split by the cooker before it crosses that boundary.
-					return false;
-				}
-				AnimatedVirtualPageSkinRecord record{};
-				const std::uint8_t* sourceSkin =
-					skinningBytes.data()
-					+ static_cast<std::size_t>(sourceVertex)
-						* sizeof(AnimatedVirtualPageSkinRecord);
-				for (std::uint32_t influence = 0u; influence < 4u;
-					++influence)
-				{
-					record.normalizedWeights[influence] =
-						sourceSkin[4u + influence];
-					if (record.normalizedWeights[influence] == 0u)
-					{
-						continue;
-					}
-					const std::uint32_t partitionJoint =
-						sourceSkin[influence];
-					if (partitionJoint
-						>= palettes[partition].sourceJointIds.size())
-					{
-						return false;
-					}
-					auto found =
-						localJointByPaletteEntry.find(partitionJoint);
-					if (found
-						== localJointByPaletteEntry.end())
-					{
-						if (pageJointPalette.size()
-							>= kAnimatedVirtualPageMaximumLocalJoints)
-						{
-							return false;
-						}
-						const std::uint8_t localJoint =
-							static_cast<std::uint8_t>(
-								pageJointPalette.size());
-						// Store the evaluator palette entry, not the skeleton
-						// joint id. Compute can then gather the correct 3x4
-						// matrix without owner TDEF tables or CPU readback.
-						pageJointPalette.push_back(partitionJoint);
-						found =
-							localJointByPaletteEntry.emplace(
-								partitionJoint, localJoint).first;
-					}
-					record.localJointIndices[influence] = found->second;
-				}
-				localSkin.push_back(record);
-			}
-
-			std::vector<AnimatedVirtualPageMorphRecord> localMorphs;
-			std::vector<DeformableVirtualGeometryMorphVertex> localMorphDeltas;
-			for (const SkinnedMeshMorphTarget* morph : orderedMorphs)
-			{
-				const std::size_t deltaStart = localMorphDeltas.size();
-				bool affected = false;
-				for (std::uint32_t sourceVertex : sourceVertices)
-				{
-					DeformableVirtualGeometryMorphVertex delta{};
-					std::copy_n(
-						morph->positionDeltas[sourceVertex].begin(),
-						3u, delta.positionDelta);
-					if (!morph->normalDeltas.empty())
-					{
-						std::copy_n(
-							morph->normalDeltas[sourceVertex].begin(),
-							3u, delta.normalDelta);
-					}
-					if (!morph->tangentDeltas.empty())
-					{
-						std::copy_n(
-							morph->tangentDeltas[sourceVertex].begin(),
-							3u, delta.tangentDelta);
-					}
-					const std::uint8_t* deltaBytes =
-						reinterpret_cast<const std::uint8_t*>(&delta);
-					affected = affected || std::any_of(
-						deltaBytes,
-						deltaBytes + sizeof(delta),
-						[](std::uint8_t value) { return value != 0u; });
-					localMorphDeltas.push_back(delta);
-				}
-				if (!affected)
-				{
-					localMorphDeltas.resize(deltaStart);
-					continue;
-				}
-				std::uint32_t flags =
-					kDeformableVirtualGeometryMorphFlagPosition;
-				if (!morph->normalDeltas.empty())
-				{
-					flags |=
-						kDeformableVirtualGeometryMorphFlagNormal;
-				}
-				if (!morph->tangentDeltas.empty())
-				{
-					flags |=
-						kDeformableVirtualGeometryMorphFlagTangent;
-				}
-				localMorphs.push_back({
-					morph->stableTargetId,
-					static_cast<std::uint32_t>(
-						deltaStart
-						* sizeof(
-							DeformableVirtualGeometryMorphVertex)),
-					static_cast<std::uint32_t>(sourceVertices.size()),
-					static_cast<std::uint32_t>(
-						sizeof(
-							DeformableVirtualGeometryMorphVertex)),
-					flags });
-			}
-
-			std::vector<AnimatedVirtualPageCookedSection> sections;
-			const auto AddSection = [&sections](
-				AnimatedVirtualPageSectionType type,
-				std::uint32_t count,
-				std::uint32_t stride,
-				std::vector<std::uint8_t> bytes)
-			{
-				if (count == 0u || stride == 0u || bytes.empty())
-				{
-					return;
-				}
-				sections.push_back({
-					type, 1u, count, stride, std::move(bytes) });
-			};
-			AddSection(
-				AnimatedVirtualPageSectionType::PackedVertices,
-				static_cast<std::uint32_t>(sourceVertices.size()),
-				meshHeader.layout.strideBytes,
-				std::move(localPackedVertices));
-			// Capture the count before moving the byte vector. C++ does not
-			// guarantee function-argument evaluation order, so reading size()
-			// in the same call as a by-value move can otherwise observe zero.
-			const std::uint32_t localPrimitiveByteCount =
-				static_cast<std::uint32_t>(localPrimitives.size());
-			AddSection(
-				AnimatedVirtualPageSectionType::PrimitiveBytes,
-				localPrimitiveByteCount,
-				sizeof(std::uint8_t), std::move(localPrimitives));
-			AddSection(
-				AnimatedVirtualPageSectionType::VertexRemap,
-				static_cast<std::uint32_t>(localRemap.size()),
-				sizeof(std::uint32_t),
-				CopyAnimatedVirtualPageRecords(localRemap));
-			AddSection(
-				AnimatedVirtualPageSectionType::Meshlets,
-				static_cast<std::uint32_t>(localMeshlets.size()),
-				sizeof(MeshletRecord),
-				CopyAnimatedVirtualPageRecords(localMeshlets));
-			AddSection(
-				AnimatedVirtualPageSectionType::MeshletBounds,
-				static_cast<std::uint32_t>(localBounds.size()),
-				sizeof(MeshletBounds),
-				CopyAnimatedVirtualPageRecords(localBounds));
-			std::vector<QuantizationInfo> decodeConstants{
-				meshHeader.quantization };
-			AddSection(
-				AnimatedVirtualPageSectionType::DecodeConstants,
-				1u, sizeof(QuantizationInfo),
-				CopyAnimatedVirtualPageRecords(decodeConstants));
-			std::vector<std::uint32_t> materialIds{
-				clusterIt->materialSectionId };
-			AddSection(
-				AnimatedVirtualPageSectionType::Materials,
-				1u, sizeof(std::uint32_t),
-				CopyAnimatedVirtualPageRecords(materialIds));
-			AddSection(
-				AnimatedVirtualPageSectionType::SkinRecords,
-				static_cast<std::uint32_t>(localSkin.size()),
-				sizeof(AnimatedVirtualPageSkinRecord),
-				CopyAnimatedVirtualPageRecords(localSkin));
-			AddSection(
-				AnimatedVirtualPageSectionType::JointPalette,
-				static_cast<std::uint32_t>(pageJointPalette.size()),
-				sizeof(std::uint32_t),
-				CopyAnimatedVirtualPageRecords(pageJointPalette));
-			AddSection(
-				AnimatedVirtualPageSectionType::MorphTargets,
-				static_cast<std::uint32_t>(localMorphs.size()),
-				sizeof(AnimatedVirtualPageMorphRecord),
-				CopyAnimatedVirtualPageRecords(localMorphs));
-			AddSection(
-				AnimatedVirtualPageSectionType::MorphDeltas,
-				static_cast<std::uint32_t>(localMorphDeltas.size()),
-				sizeof(DeformableVirtualGeometryMorphVertex),
-				CopyAnimatedVirtualPageRecords(localMorphDeltas));
-			AddSection(
-				AnimatedVirtualPageSectionType::SourceVertexIds,
-				static_cast<std::uint32_t>(sourceIds.size()),
-				sizeof(AnimatedVirtualPageSourceVertexRecord),
-				CopyAnimatedVirtualPageRecords(sourceIds));
-			std::vector<VirtualGeometryClusterRecord> localClusters{
-				*clusterIt };
-			AddSection(
-				AnimatedVirtualPageSectionType::Clusters,
-				1u, sizeof(VirtualGeometryClusterRecord),
-				CopyAnimatedVirtualPageRecords(localClusters));
-			std::vector<std::array<float, 2>> errorSamples{ {
-				clusterIt->geometricError,
-				deformableClusters[clusterIt->clusterId]
-					.deformationError } };
-			AddSection(
-				AnimatedVirtualPageSectionType::ErrorSamples,
-				1u, sizeof(std::array<float, 2>),
-				CopyAnimatedVirtualPageRecords(errorSamples));
-			std::vector<AnimatedVirtualGeometryCompactStreamDescriptor> compactStreams;
-			const auto addCompactStream = [&](AnimatedVirtualGeometryCompactStreamKind kind, std::uint32_t capability, std::uint32_t decodedBytes)
-			{
-				AnimatedVirtualGeometryCompactStreamDescriptor descriptor{};
-				descriptor.kind = kind;
-				descriptor.requiredCapabilityMask = capability;
-				descriptor.stableTopologyId = clusterIt->clusterId + 1u;
-				descriptor.stableIdentityHash = HashAnimatedVirtualCookBytes(reinterpret_cast<const std::uint8_t*>(sourceIds.data()), sourceIds.size() * sizeof(AnimatedVirtualPageSourceVertexRecord));
-				descriptor.storedByteSize = decodedBytes;
-				descriptor.decodedByteSize = decodedBytes;
-				if(IsValidAnimatedVirtualGeometryCompactStreamDescriptor(descriptor)) compactStreams.push_back(descriptor);
-			};
-			if(!localMorphs.empty())
-			{
-				addCompactStream(AnimatedVirtualGeometryCompactStreamKind::Position, 1u, static_cast<std::uint32_t>(localMorphDeltas.size() * sizeof(DeformableVirtualGeometryMorphVertex)));
-				if((localMorphs.front().flags & kDeformableVirtualGeometryMorphFlagNormal) != 0u)
-					addCompactStream(AnimatedVirtualGeometryCompactStreamKind::Normal, 1u, static_cast<std::uint32_t>(localMorphDeltas.size() * sizeof(DeformableVirtualGeometryMorphVertex)));
-				if((localMorphs.front().flags & kDeformableVirtualGeometryMorphFlagTangent) != 0u)
-					addCompactStream(AnimatedVirtualGeometryCompactStreamKind::Tangent, 1u, static_cast<std::uint32_t>(localMorphDeltas.size() * sizeof(DeformableVirtualGeometryMorphVertex)));
-			}
-			if(!compactStreams.empty())
-				AddSection(AnimatedVirtualPageSectionType::CompactAnimationStreams, static_cast<std::uint32_t>(compactStreams.size()), sizeof(AnimatedVirtualGeometryCompactStreamDescriptor), CopyAnimatedVirtualPageRecords(compactStreams));
-			if (sections.size()
-				> kAnimatedVirtualPageMaximumSections)
-			{
-				return false;
-			}
-
-			AnimatedVirtualPageCookedBlob cooked;
-			AnimatedVirtualPageBlobHeader blobHeader{};
-			blobHeader.magic =
-				kAnimatedVirtualPageBlobMagicValue;
-			blobHeader.version =
-				kAnimatedVirtualPageFormatVersion;
-			blobHeader.headerSize =
-				sizeof(AnimatedVirtualPageBlobHeader);
-			blobHeader.flags =
-				kAnimatedVirtualPageFlagAnimated
-				| kAnimatedVirtualPageFlagHasSkinning
-				| (localMorphs.empty()
-					? 0u
-					: kAnimatedVirtualPageFlagHasMorphs)
-				| kAnimatedVirtualPageFlagHasErrorSamples;
-			if (page.fallbackPageId == page.pageId)
-			{
-				blobHeader.flags |=
-					kAnimatedVirtualPageFlagPinnedFallback;
-				rootPageIds.push_back(page.pageId);
-			}
-			blobHeader.pageId = page.pageId;
-			blobHeader.sectionCount =
-				static_cast<std::uint32_t>(sections.size());
-			blobHeader.sectionTableOffset =
-				sizeof(AnimatedVirtualPageBlobHeader);
-			blobHeader.meshPayloadGeneration =
-				meshPayloadGeneration;
-			std::uint64_t contentGeneration =
-				HashAnimatedVirtualCookBytes(
-					reinterpret_cast<const std::uint8_t*>(
-						&page.pageId),
-					sizeof(page.pageId),
-					meshPayloadGeneration);
-			for (const AnimatedVirtualPageCookedSection& section :
-				sections)
-			{
-				contentGeneration = HashAnimatedVirtualCookBytes(
-					section.bytes.data(), section.bytes.size(),
-					contentGeneration);
-			}
-			blobHeader.contentGeneration = contentGeneration;
-			blobHeader.skeletonCompatibilityFingerprint =
-				settings.skeletonCompatibilityFingerprint;
-			blobHeader.contentHash = contentGeneration;
-
-			std::uint32_t blobCursor = AlignUp(
-				static_cast<std::uint32_t>(
-					sizeof(AnimatedVirtualPageBlobHeader)
-					+ sections.size()
-						* sizeof(AnimatedVirtualPageSectionRecord)),
-				16u);
-			std::vector<AnimatedVirtualPageSectionRecord>
-				sectionRecords;
-			sectionRecords.reserve(sections.size());
-			for (const AnimatedVirtualPageCookedSection& section :
-				sections)
-			{
-				blobCursor = AlignUp(blobCursor, 16u);
-				sectionRecords.push_back({
-					static_cast<std::uint32_t>(section.type),
-					section.flags,
-					blobCursor,
-					section.bytes.size(),
-					section.elementCount,
-					section.elementStride });
-				if (section.bytes.size()
-					> std::numeric_limits<std::uint32_t>::max()
-						- blobCursor)
-				{
-					return false;
-				}
-				blobCursor +=
-					static_cast<std::uint32_t>(section.bytes.size());
-			}
-			blobHeader.byteSize = blobCursor;
-			cooked.bytes.resize(blobCursor, 0u);
-			std::memcpy(
-				cooked.bytes.data(), &blobHeader,
-				sizeof(blobHeader));
-			std::memcpy(
-				cooked.bytes.data()
-					+ blobHeader.sectionTableOffset,
-				sectionRecords.data(),
-				sectionRecords.size()
-					* sizeof(AnimatedVirtualPageSectionRecord));
-			for (std::size_t index = 0u;
-				index < sections.size(); ++index)
-			{
-				std::memcpy(
-					cooked.bytes.data()
-						+ sectionRecords[index].byteOffset,
-					sections[index].bytes.data(),
-					sections[index].bytes.size());
-			}
-
-			const DeformableVirtualGeometryClusterRecord&
-				deformable =
-					deformableClusters[clusterIt->clusterId];
-			cooked.entry.pageId = page.pageId;
-			cooked.entry.parentPageId =
-				clusterIt->parentClusterId
-					== kVirtualGeometryInvalidIndex
-				? kVirtualGeometryInvalidIndex
-				: clusters[clusterIt->parentClusterId].pageId;
-			cooked.entry.fallbackPageId =
-				page.fallbackPageId;
-			cooked.entry.flags = blobHeader.flags;
-			cooked.entry.blobSize = cooked.bytes.size();
-			cooked.entry.blobHash =
-				HashAnimatedVirtualCookBytes(
-					cooked.bytes.data(), cooked.bytes.size());
-			cooked.entry.contentGeneration =
-				contentGeneration;
-			cooked.entry.clusterOffset =
-				clusterIt->clusterId;
-			cooked.entry.clusterCount = 1u;
-			cooked.entry.materialSectionId =
-				clusterIt->materialSectionId;
-			cooked.entry.skeletonCompatibilityFingerprint =
-				settings.skeletonCompatibilityFingerprint;
-			std::copy_n(
-				deformable.deformationBoundsMin, 3u,
-				cooked.entry.conservativeBoundsMin);
-			std::copy_n(
-				deformable.deformationBoundsMax, 3u,
-				cooked.entry.conservativeBoundsMax);
-			cooked.entry.geometricError =
-				clusterIt->geometricError;
-			cooked.entry.deformationError =
-				deformable.deformationError;
-			output.push_back(std::move(cooked));
-		}
-		return !output.empty() && !rootPageIds.empty();
-	}
-
-	bool TryWriteAnimatedVirtualPageDirectory(
-		std::fstream& stream,
-		std::uint64_t extensionEnd,
-		std::uint64_t meshPayloadGeneration,
-		std::vector<AnimatedVirtualPageCookedBlob>& pages,
-		const std::vector<std::uint32_t>& rootPageIds,
-		std::uint64_t& outputEnd)
-	{
-		std::uint32_t directoryOffset = 0u;
-		if (!TryAlignSkinnedOffset(
-			extensionEnd, 16u, directoryOffset)
-			|| pages.empty() || rootPageIds.empty())
-		{
-			return false;
-		}
-		const std::uint64_t pageTableOffset =
-			static_cast<std::uint64_t>(directoryOffset)
-			+ sizeof(AnimatedVirtualPageDirectoryHeader);
-		const std::uint64_t rootTableOffset =
-			pageTableOffset
-			+ pages.size()
-				* sizeof(AnimatedVirtualPageDirectoryEntry);
-		std::uint32_t blobCursor = 0u;
-		if (!TryAlignSkinnedOffset(
-			rootTableOffset
-				+ rootPageIds.size()
-					* sizeof(std::uint32_t),
-			16u, blobCursor))
-		{
-			return false;
-		}
-		for (AnimatedVirtualPageCookedBlob& page : pages)
-		{
-			page.entry.blobOffset = blobCursor;
-			if (page.bytes.size()
-				> std::numeric_limits<std::uint32_t>::max()
-					- blobCursor)
-			{
-				return false;
-			}
-			blobCursor = AlignUp(
-				blobCursor
-					+ static_cast<std::uint32_t>(
-						page.bytes.size()),
-				16u);
-		}
-
-		AnimatedVirtualPageDirectoryHeader directory{};
-		directory.magic =
-			kAnimatedVirtualPageDirectoryMagicValue;
-		directory.version =
-			kAnimatedVirtualPageFormatVersion;
-		directory.headerSize =
-			sizeof(AnimatedVirtualPageDirectoryHeader);
-		directory.payloadSize =
-			static_cast<std::uint32_t>(
-				rootTableOffset
-				+ rootPageIds.size()
-					* sizeof(std::uint32_t)
-				- directoryOffset);
-		directory.pageCount =
-			static_cast<std::uint32_t>(pages.size());
-		directory.pageTableOffset =
-			static_cast<std::uint32_t>(pageTableOffset);
-		directory.rootPageCount =
-			static_cast<std::uint32_t>(rootPageIds.size());
-		directory.rootPageTableOffset =
-			static_cast<std::uint32_t>(rootTableOffset);
-		directory.flags =
-			kAnimatedVirtualPageFlagAnimated
-			| kAnimatedVirtualPageFlagHasSkinning;
-		directory.meshPayloadGeneration =
-			meshPayloadGeneration;
-		std::vector<AnimatedVirtualPageDirectoryEntry> entries;
-		entries.reserve(pages.size());
-		for (const AnimatedVirtualPageCookedBlob& page : pages)
-		{
-			entries.push_back(page.entry);
-		}
-		directory.directoryHash =
-			HashAnimatedVirtualCookBytes(
-				reinterpret_cast<const std::uint8_t*>(
-					entries.data()),
-				entries.size()
-					* sizeof(
-						AnimatedVirtualPageDirectoryEntry));
-		directory.directoryHash =
-			HashAnimatedVirtualCookBytes(
-				reinterpret_cast<const std::uint8_t*>(
-					rootPageIds.data()),
-				rootPageIds.size() * sizeof(std::uint32_t),
-				directory.directoryHash);
-
-		stream.clear();
-		stream.seekp(0, std::ios::end);
-		const std::streamoff current = stream.tellp();
-		if (current < 0
-			|| static_cast<std::uint64_t>(current)
-				> directoryOffset)
-		{
-			return false;
-		}
-		std::vector<char> padding(
-			static_cast<std::size_t>(
-				directoryOffset
-				- static_cast<std::uint64_t>(current)),
-			0);
-		stream.write(
-			padding.data(),
-			static_cast<std::streamsize>(padding.size()));
-		stream.write(
-			reinterpret_cast<const char*>(&directory),
-			sizeof(directory));
-		stream.write(
-			reinterpret_cast<const char*>(entries.data()),
-			static_cast<std::streamsize>(
-				entries.size()
-				* sizeof(
-					AnimatedVirtualPageDirectoryEntry)));
-		stream.write(
-			reinterpret_cast<const char*>(rootPageIds.data()),
-			static_cast<std::streamsize>(
-				rootPageIds.size()
-					* sizeof(std::uint32_t)));
-		for (const AnimatedVirtualPageCookedBlob& page : pages)
-		{
-			const std::streamoff beforePage = stream.tellp();
-			if (beforePage < 0
-				|| static_cast<std::uint64_t>(beforePage)
-					> page.entry.blobOffset)
-			{
-				return false;
-			}
-			padding.assign(
-				static_cast<std::size_t>(
-					page.entry.blobOffset
-						- static_cast<std::uint64_t>(
-							beforePage)),
-				0);
-			stream.write(
-				padding.data(),
-				static_cast<std::streamsize>(padding.size()));
-			stream.write(
-				reinterpret_cast<const char*>(
-					page.bytes.data()),
-				static_cast<std::streamsize>(
-					page.bytes.size()));
-		}
-		stream.flush();
-		outputEnd = static_cast<std::uint64_t>(
-			stream.tellp());
-		return static_cast<bool>(stream)
-			&& outputEnd
-				<= std::numeric_limits<std::uint32_t>::max();
-	}
-
-	bool TryAppendDeformablePayload(
+	bool RewriteCanonicalDeformablePayload(
 		const std::filesystem::path& stagedPath,
 		const SkinnedMeshCookInput& input,
 		const SkinnedMeshCookSettings& settings,
@@ -5535,74 +4322,284 @@ namespace
 		SkinnedMeshCookFailure& outFailure)
 	{
 		outFailure = SkinnedMeshCookFailure::StagedPayloadWriteFailed;
-		std::fstream stream(stagedPath, std::ios::binary | std::ios::in | std::ios::out);
-		if (!stream)
+		std::ifstream file(stagedPath, std::ios::binary);
+		const std::vector<std::uint8_t> source((std::istreambuf_iterator<char>(file)), {});
+		const auto directory = TerraEngine::Resource::ValidateTemfProductionFile(source, {});
+		if (!file || !directory.IsComplete()) return false;
+		std::vector<std::vector<std::uint8_t>> decoded;
+		std::vector<TerraEngine::Editor::TemfProductionStreamInput> streams;
+		for (const TemfBlockDescriptor& descriptor : directory.directory.blocks)
+		{
+			auto block = TerraEngine::Resource::DecodeTemfProductionBlock({ descriptor,
+				std::span(source).subspan(descriptor.encodedPayloadOffset, descriptor.encodedBytes), directory.directory.quantizationDomains, kVirtualGeometryCodecCapabilityMeshoptimizer },
+				{ .availableCapabilities = kVirtualGeometryCodecCapabilityMeshoptimizer });
+			if (!block.IsComplete()) return false;
+			decoded.push_back(std::move(block.bytes));
+			streams.push_back({ static_cast<TemfStreamKind>(descriptor.streamKind), TemfCodecProfile::ExpandedProduction,
+				descriptor.attributeMask, descriptor.quantizationDomainId, descriptor.decodedElementCount, descriptor.decodedStride, decoded.back() });
+		}
+		std::vector<TemfQuantizationDomain> rebuildDomains(
+			directory.directory.quantizationDomains.begin(),
+			directory.directory.quantizationDomains.end());
+		const auto findDomainId = [&rebuildDomains](TemfStreamKind streamKind)
+		{
+			const auto found = std::find_if(
+				rebuildDomains.begin(),
+				rebuildDomains.end(),
+				[streamKind](const TemfQuantizationDomain& domain)
+				{
+					return domain.streamKind
+						== static_cast<std::uint16_t>(streamKind);
+				});
+			return found == rebuildDomains.end()
+				? std::numeric_limits<std::uint32_t>::max()
+				: found->domainId;
+		};
+		const std::uint32_t metadataDomainId =
+			findDomainId(TemfStreamKind::Metadata);
+		if (metadataDomainId == std::numeric_limits<std::uint32_t>::max())
 		{
 			return false;
 		}
-
-		MeshHeader header{};
-		stream.read(reinterpret_cast<char*>(&header), sizeof(header));
-		if (!stream || !HasTemfMagic(header) || header.version != kMeshCurrentVersion
-			|| header.headerSize != sizeof(MeshHeader))
+		const auto appendRuntimeDomain =
+			[&rebuildDomains](TemfStreamKind streamKind)
 		{
-			outFailure = SkinnedMeshCookFailure::FormatCompatibilityMismatch;
-			return false;
-		}
-
-		std::error_code sizeError;
-		const std::uintmax_t stagedSize = std::filesystem::file_size(stagedPath, sizeError);
-		if (sizeError || stagedSize < sizeof(MeshHeader)
-			|| stagedSize > static_cast<std::uintmax_t>(std::numeric_limits<std::uint32_t>::max()))
+			TemfQuantizationDomain domain{};
+			domain.domainId =
+				static_cast<std::uint32_t>(rebuildDomains.size());
+			domain.domainVersion = 1u;
+			domain.domainScope = static_cast<std::uint16_t>(
+				TemfQuantizationDomainScope::DeformableEnvelope);
+			domain.streamKind = static_cast<std::uint16_t>(streamKind);
+			domain.componentCount = 1u;
+			domain.componentBitWidths[0u] = 8u;
+			domain.extent[0u] = 1.0;
+			domain.quantizationStep[0u] = 1.0 / 255.0;
+			domain.domainHash =
+				0xd6e8feb86659fd93ull
+				^ static_cast<std::uint64_t>(domain.domainId + 1u)
+				^ static_cast<std::uint64_t>(streamKind);
+			rebuildDomains.push_back(domain);
+			return domain.domainId;
+		};
+		const std::uint32_t skinningDomainId =
+			appendRuntimeDomain(TemfStreamKind::Skinning);
+		const std::uint32_t proceduralDomainId =
+			appendRuntimeDomain(TemfStreamKind::ProceduralUpdate);
+		// Reconstruct the immutable runtime inputs from canonical stream sub-kinds
+		// before adding deformable data.  The page builder receives these copied
+		// values, never a legacy file offset or a live staged-file stream.
+		const auto CopyDecodedStream = [&directory, &decoded](
+			TemfStreamKind kind, std::uint64_t subKind)
 		{
-			outFailure = SkinnedMeshCookFailure::PayloadRangeOverflow;
-			return false;
-		}
-
-		std::size_t expectedSkinningBytes = 0u;
-		if (!TryMultiplySkinnedSize(input.vertices.size(), kDeformableMeshSkinningStrideBytes, expectedSkinningBytes)
-			|| expectedSkinningBytes > std::numeric_limits<std::uint32_t>::max()
-			|| skinningBytes.size() != expectedSkinningBytes
-			|| vertexPaletteIndices.size() != input.vertices.size()
-			|| header.meshletVertexCount != input.vertices.size()
-			|| header.meshletSkinningDataOffset != 0u
-			|| header.meshletSkinningDataCount != 0u
-			|| header.virtualGeometryReserved != 0u)
-		{
-			outFailure = SkinnedMeshCookFailure::StaticVertexLayoutIncompatible;
-			return false;
-		}
-
-		std::uint32_t skinningOffset = 0u;
-		std::uint32_t metadataOffset = 0u;
-		if (!TryAlignSkinnedOffset(stagedSize, kMeshletVertexDataAlignmentBytes, skinningOffset)
-			|| !TryAlignSkinnedOffset(
-				static_cast<std::uint64_t>(skinningOffset) + skinningBytes.size(),
-				kMeshletVertexDataAlignmentBytes,
-				metadataOffset))
-		{
-			outFailure = SkinnedMeshCookFailure::PayloadRangeOverflow;
-			return false;
-		}
-
-		std::uint32_t vertexCount = 0u;
-		std::uint32_t paletteCount = 0u;
-		std::uint32_t morphCount = 0u;
-		if (!TryConvertSkinnedCount(input.vertices.size(), vertexCount)
-			|| !TryConvertSkinnedCount(palettes.size(), paletteCount)
-			|| !TryConvertSkinnedCount(input.morphTargets.size(), morphCount))
-		{
-			outFailure = SkinnedMeshCookFailure::PayloadRangeOverflow;
-			return false;
-		}
-		for (std::uint32_t paletteIndex : vertexPaletteIndices)
-		{
-			if (paletteIndex >= paletteCount)
+			std::vector<std::uint8_t> bytes;
+			for (std::size_t index = 0u;
+				index < directory.directory.blocks.size(); ++index)
 			{
-				outFailure = SkinnedMeshCookFailure::PalettePartitionLimitExceeded;
+				const TemfBlockDescriptor& descriptor =
+					directory.directory.blocks[index];
+				if (descriptor.streamKind == static_cast<std::uint16_t>(kind)
+					&& descriptor.attributeMask == subKind)
+				{
+					bytes.insert(bytes.end(), decoded[index].begin(), decoded[index].end());
+				}
+			}
+			return bytes;
+		};
+		const auto CopyCanonicalRecords = [&CopyDecodedStream](
+			std::uint64_t subKind, auto& destination)
+		{
+			using Record = typename std::remove_reference_t<decltype(destination)>::value_type;
+			const std::vector<std::uint8_t> bytes =
+				CopyDecodedStream(TemfStreamKind::Metadata, subKind);
+			if (bytes.empty() || bytes.size() % sizeof(Record) != 0u)
+			{
 				return false;
 			}
+			destination.resize(bytes.size() / sizeof(Record));
+			std::memcpy(destination.data(), bytes.data(), bytes.size());
+			return true;
+		};
+		const std::vector<std::uint8_t> runtimeBytes =
+			CopyDecodedStream(TemfStreamKind::Metadata, kTemfMetadataRuntimeLayout);
+		TemfRuntimeDecodeMetadata runtimeMetadata{};
+		VirtualGeometryHeader virtualHeader{};
+		std::vector<VirtualGeometryPageRecord> virtualPages;
+		std::vector<VirtualGeometryClusterRecord> virtualClusters;
+		std::vector<VirtualGeometryCullableGroupRecord> virtualGroups;
+		std::vector<MeshletRecord> meshlets;
+		std::vector<MeshletBounds> meshletBounds;
+		if (runtimeBytes.size() != sizeof(runtimeMetadata))
+		{
+			return false;
 		}
+		std::memcpy(&runtimeMetadata, runtimeBytes.data(), sizeof(runtimeMetadata));
+		const bool hasVirtualGeometry =
+			(directory.directory.header.representationFlags
+				& kTemfRepresentationVirtualGeometry) != 0u;
+		const std::vector<std::uint8_t> virtualHeaderBytes =
+			CopyDecodedStream(TemfStreamKind::Metadata, kTemfMetadataVirtualHeader);
+		if (!CopyCanonicalRecords(kTemfMetadataMeshletRecords, meshlets)
+			|| !CopyCanonicalRecords(kTemfMetadataMeshletBounds, meshletBounds))
+		{
+			return false;
+		}
+		if (hasVirtualGeometry)
+		{
+			if (virtualHeaderBytes.size() != sizeof(virtualHeader)
+				|| !CopyCanonicalRecords(
+					kTemfMetadataVirtualPages, virtualPages)
+				|| !CopyCanonicalRecords(
+					kTemfMetadataVirtualClusters, virtualClusters)
+				|| !CopyCanonicalRecords(
+					kTemfMetadataVirtualCullableGroups, virtualGroups))
+			{
+				return false;
+			}
+			std::memcpy(
+				&virtualHeader, virtualHeaderBytes.data(), sizeof(virtualHeader));
+		}
+		MeshletRuntimeLayout runtimeLayout{};
+		runtimeLayout.magic[0] = 'T'; runtimeLayout.magic[1] = 'E';
+		runtimeLayout.magic[2] = 'M'; runtimeLayout.magic[3] = 'F';
+		runtimeLayout.version = runtimeMetadata.formatVersion;
+		runtimeLayout.headerSize = sizeof(MeshletRuntimeLayout);
+		runtimeLayout.meshletVertexCount = runtimeMetadata.meshletVertexCount;
+		runtimeLayout.meshletVertexRemapCount = runtimeMetadata.meshletVertexRemapCount;
+		runtimeLayout.meshletPrimitiveIndexCount = runtimeMetadata.meshletPrimitiveIndexCount;
+		runtimeLayout.meshletCount = runtimeMetadata.meshletCount;
+		runtimeLayout.meshletSectionCount = runtimeMetadata.meshletSectionCount;
+		runtimeLayout.meshletBoundsCount = runtimeMetadata.meshletBoundsCount;
+		runtimeLayout.meshletVertexRemapEncoding = runtimeMetadata.meshletVertexRemapEncoding;
+		runtimeLayout.meshletFlags = runtimeMetadata.meshletFlags;
+		runtimeLayout.layout = runtimeMetadata.layout;
+		runtimeLayout.quantization = runtimeMetadata.quantization;
+		if (runtimeLayout.layout.strideBytes
+			!= kMeshletPackedVertexStrideBytes)
+		{
+			std::cerr << "Canonical deformable TEMF runtime layout uses packed "
+				<< "vertex stride " << runtimeLayout.layout.strideBytes
+				<< "; expected " << kMeshletPackedVertexStrideBytes << ".\n";
+			return false;
+		}
+		const std::vector<std::uint8_t> remapBytes =
+			CopyDecodedStream(TemfStreamKind::VertexRemapStableIdentity, 0u);
+		const std::vector<std::uint8_t> primitiveBytes =
+			CopyDecodedStream(TemfStreamKind::Topology, 0u);
+		const std::vector<std::uint8_t> positionBytes =
+			CopyDecodedStream(TemfStreamKind::Position, 0u);
+		const std::vector<std::uint8_t> normalTangentBytes =
+			CopyDecodedStream(TemfStreamKind::NormalTangent, 0u);
+		const std::vector<std::uint8_t> textureBytes =
+			CopyDecodedStream(TemfStreamKind::TextureColor, 0u);
+		if (positionBytes.size()
+				!= static_cast<std::size_t>(runtimeLayout.meshletVertexCount) * 6u
+			|| normalTangentBytes.size()
+				!= static_cast<std::size_t>(runtimeLayout.meshletVertexCount) * 6u
+			|| textureBytes.size()
+				!= static_cast<std::size_t>(runtimeLayout.meshletVertexCount) * 4u)
+		{
+			return false;
+		}
+		std::vector<std::uint8_t> packedVertices(
+			static_cast<std::size_t>(runtimeLayout.meshletVertexCount)
+				* kMeshletPackedVertexStrideBytes);
+		for (std::size_t vertexIndex = 0u;
+			vertexIndex < runtimeLayout.meshletVertexCount; ++vertexIndex)
+		{
+			std::uint8_t* destination =
+				packedVertices.data()
+				+ vertexIndex * kMeshletPackedVertexStrideBytes;
+			std::memcpy(
+				destination, positionBytes.data() + vertexIndex * 6u, 6u);
+			std::memcpy(
+				destination + 6u,
+				normalTangentBytes.data() + vertexIndex * 6u,
+				6u);
+			std::memcpy(
+				destination + 12u,
+				textureBytes.data() + vertexIndex * 4u,
+				4u);
+		}
+		TemfDeformableMetadata root{};
+		root.skinningVertexCount = static_cast<std::uint32_t>(skinningBytes.size() / kTemfSkinningStrideBytes);
+		root.palettePartitionCount = static_cast<std::uint32_t>(palettes.size());
+		root.morphTargetCount = static_cast<std::uint32_t>(input.morphTargets.size());
+		root.sourceSkeletonJointCount = settings.sourceSkeletonJointCount;
+		// These flags describe the decoded streams, not an appended container.
+		// They let the runtime prove the fixed skinning and identity conventions
+		// before it hands any data to animation or render workers.
+		root.flags = kTemfDeformableFlagConservativeMorphEnvelope
+			| kTemfDeformableFlagZeroWeightMeansIdentity
+			| kTemfDeformableFlagVertexPaletteIndices
+			| kTemfDeformableFlagDenseMorphDeltas;
+		root.skeletonCompatibilityFingerprint = settings.skeletonCompatibilityFingerprint;
+		for (std::size_t component = 0u; component < 3u; ++component)
+		{
+			root.deformationBoundsMin[component] = std::numeric_limits<float>::max();
+			root.deformationBoundsMax[component] = std::numeric_limits<float>::lowest();
+		}
+		for (std::size_t vertexIndex = 0u; vertexIndex < input.vertices.size(); ++vertexIndex)
+		{
+			for (std::size_t component = 0u; component < 3u; ++component)
+			{
+				float minimum = input.vertices[vertexIndex].baseVertex.position[component];
+				float maximum = minimum;
+				for (const SkinnedMeshMorphTarget& morph : input.morphTargets)
+				{
+					const float delta = morph.positionDeltas[vertexIndex][component];
+					minimum += std::min(delta, 0.0f);
+					maximum += std::max(delta, 0.0f);
+				}
+				root.deformationBoundsMin[component] = std::min(root.deformationBoundsMin[component], minimum);
+				root.deformationBoundsMax[component] = std::max(root.deformationBoundsMax[component], maximum);
+			}
+		}
+		streams.push_back({ TemfStreamKind::Skinning,
+			TemfCodecProfile::ExpandedProduction, 0u, skinningDomainId,
+			root.skinningVertexCount, kTemfSkinningStrideBytes,
+			skinningBytes });
+		const auto appendBytes =
+			[&decoded, &streams, metadataDomainId](
+				std::uint64_t subKind,
+				const void* data,
+				std::size_t byteCount,
+				std::uint32_t count,
+				std::uint32_t stride) {
+			if (byteCount == 0u) return;
+			const auto* first = static_cast<const std::uint8_t*>(data);
+			decoded.emplace_back(first, first + byteCount);
+			streams.push_back({ TemfStreamKind::Metadata,
+				TemfCodecProfile::ExpandedProduction, subKind,
+				metadataDomainId, count, stride, decoded.back() });
+		};
+		std::vector<TemfDeformablePaletteRecord> paletteRecords;
+		std::vector<std::uint32_t> paletteJoints;
+		for (const SkinnedMeshPalettePartition& palette : palettes)
+		{
+			paletteRecords.push_back({
+				static_cast<std::uint32_t>(paletteJoints.size()),
+				static_cast<std::uint32_t>(palette.sourceJointIds.size()) });
+			paletteJoints.insert(paletteJoints.end(), palette.sourceJointIds.begin(), palette.sourceJointIds.end());
+		}
+		appendBytes(kTemfMetadataDeformablePalettes, paletteRecords.data(), paletteRecords.size() * sizeof(TemfDeformablePaletteRecord), static_cast<std::uint32_t>(paletteRecords.size()), sizeof(TemfDeformablePaletteRecord));
+		appendBytes(kTemfMetadataDeformablePaletteJoints, paletteJoints.data(), paletteJoints.size() * sizeof(std::uint32_t), static_cast<std::uint32_t>(paletteJoints.size()), sizeof(std::uint32_t));
+		appendBytes(kTemfMetadataDeformableVertexPalettes, vertexPaletteIndices.data(), vertexPaletteIndices.size() * sizeof(std::uint32_t), static_cast<std::uint32_t>(vertexPaletteIndices.size()), sizeof(std::uint32_t));
+		std::vector<TemfDeformableMorphRecord> morphRecords;
+		std::vector<std::array<float, 3>> positions, normals, tangents;
+		for (const SkinnedMeshMorphTarget& morph : input.morphTargets)
+		{
+			morphRecords.push_back({ morph.stableTargetId,
+				static_cast<std::uint32_t>(positions.size()),
+				static_cast<std::uint32_t>(morph.positionDeltas.size()), 0u });
+			positions.insert(positions.end(), morph.positionDeltas.begin(), morph.positionDeltas.end());
+			normals.insert(normals.end(), morph.normalDeltas.begin(), morph.normalDeltas.end());
+			tangents.insert(tangents.end(), morph.tangentDeltas.begin(), morph.tangentDeltas.end());
+		}
+		appendBytes(kTemfMetadataDeformableMorphs, morphRecords.data(), morphRecords.size() * sizeof(TemfDeformableMorphRecord), static_cast<std::uint32_t>(morphRecords.size()), sizeof(TemfDeformableMorphRecord));
+		appendBytes(kTemfMetadataDeformableMorphPositions, positions.data(), positions.size() * sizeof(std::array<float, 3>), static_cast<std::uint32_t>(positions.size()), sizeof(std::array<float, 3>));
+		appendBytes(kTemfMetadataDeformableMorphNormals, normals.data(), normals.size() * sizeof(std::array<float, 3>), static_cast<std::uint32_t>(normals.size()), sizeof(std::array<float, 3>));
+		appendBytes(kTemfMetadataDeformableMorphTangents, tangents.data(), tangents.size() * sizeof(std::array<float, 3>), static_cast<std::uint32_t>(tangents.size()), sizeof(std::array<float, 3>));
 
 		std::vector<const SkinnedMeshMorphTarget*> orderedMorphs;
 		orderedMorphs.reserve(input.morphTargets.size());
@@ -5610,384 +4607,398 @@ namespace
 		{
 			orderedMorphs.push_back(&morph);
 		}
-		std::sort(orderedMorphs.begin(), orderedMorphs.end(), [](const SkinnedMeshMorphTarget* left, const SkinnedMeshMorphTarget* right) {
-			return left->stableTargetId < right->stableTargetId;
-		});
+		std::sort(orderedMorphs.begin(), orderedMorphs.end(),
+			[](const SkinnedMeshMorphTarget* left,
+				const SkinnedMeshMorphTarget* right) {
+				return left->stableTargetId < right->stableTargetId;
+			});
 		for (std::size_t index = 1u; index < orderedMorphs.size(); ++index)
 		{
-			if (orderedMorphs[index - 1u]->stableTargetId == orderedMorphs[index]->stableTargetId)
+			if (orderedMorphs[index - 1u]->stableTargetId
+				== orderedMorphs[index]->stableTargetId)
 			{
-				outFailure = SkinnedMeshCookFailure::DuplicateMorphTarget;
 				return false;
 			}
 		}
-
-		std::vector<DeformableMeshPaletteRecord> paletteRecords(palettes.size());
-		std::vector<DeformableMeshMorphRecord> morphRecords(orderedMorphs.size());
-		std::uint64_t tableCursor = static_cast<std::uint64_t>(metadataOffset) + sizeof(DeformableMeshPayloadHeader)
-			+ static_cast<std::uint64_t>(paletteRecords.size()) * sizeof(DeformableMeshPaletteRecord)
-			+ static_cast<std::uint64_t>(morphRecords.size()) * sizeof(DeformableMeshMorphRecord);
-		if (tableCursor > std::numeric_limits<std::uint32_t>::max())
-		{
-			outFailure = SkinnedMeshCookFailure::PayloadRangeOverflow;
-			return false;
-		}
-
-		for (std::size_t index = 0u; index < palettes.size(); ++index)
-		{
-			std::uint32_t jointCount = 0u;
-			if (palettes[index].sourceJointIds.size() > kDeformableMeshMaximumPaletteJoints
-				|| !TryConvertSkinnedCount(palettes[index].sourceJointIds.size(), jointCount)
-				|| tableCursor + static_cast<std::uint64_t>(jointCount) * sizeof(std::uint32_t) > std::numeric_limits<std::uint32_t>::max())
+		std::vector<CanonicalDemandedPageCookedBlob> demandedPageBlobs;
+		std::vector<std::uint32_t> demandedPageRoots;
+		const std::uint64_t meshPayloadGeneration =
+			directory.directory.header.generationIdentity == 0u
+				? 1u : directory.directory.header.generationIdentity;
+		// Each page owns one small canonical identity payload.  The descriptor
+		// carries its exact byte range and integrity, so no appended side table or
+		// offset-bearing page header is needed to discover or validate it.
+		const std::uint32_t remapStride = GetRemapElementSizeBytes(
+			static_cast<MeshletRemapEncoding>(runtimeLayout.meshletVertexRemapEncoding));
+		if (remapStride == 0u) return false;
+		const auto decodeRemap = [&remapBytes, remapStride, &runtimeLayout](std::uint32_t index, std::uint32_t& value) {
+			const std::size_t offset = static_cast<std::size_t>(index) * remapStride;
+			if (offset > remapBytes.size() || remapBytes.size() - offset < remapStride) return false;
+			if (remapStride == sizeof(std::uint16_t))
 			{
-				outFailure = SkinnedMeshCookFailure::PayloadRangeOverflow;
-				return false;
+				std::uint16_t compact{};
+				std::memcpy(&compact, remapBytes.data() + offset, sizeof(compact));
+				value = compact;
 			}
-			paletteRecords[index] = { static_cast<std::uint32_t>(tableCursor), jointCount };
-			tableCursor += static_cast<std::uint64_t>(jointCount) * sizeof(std::uint32_t);
-		}
-
-		const std::uint32_t vertexPaletteIndexOffset = static_cast<std::uint32_t>(tableCursor);
-		const std::uint64_t vertexPaletteBytes = static_cast<std::uint64_t>(vertexPaletteIndices.size()) * sizeof(std::uint32_t);
-		if (tableCursor + vertexPaletteBytes > std::numeric_limits<std::uint32_t>::max())
+			else std::memcpy(&value, remapBytes.data() + offset, sizeof(value));
+			return value < runtimeLayout.meshletVertexCount;
+		};
+		struct PageSectionBytes
 		{
-			outFailure = SkinnedMeshCookFailure::PayloadRangeOverflow;
+			TemfDeformablePageSectionKind kind;
+			std::uint32_t count;
+			std::uint32_t stride;
+			std::vector<std::uint8_t> bytes;
+		};
+		const auto copyRecords = [](const auto& records) {
+			using Record = typename std::remove_reference_t<decltype(records)>::value_type;
+			std::vector<std::uint8_t> bytes(records.size() * sizeof(Record));
+			if (!bytes.empty()) std::memcpy(bytes.data(), records.data(), bytes.size());
+			return bytes;
+		};
+		const auto failDemandedPage = [](std::uint32_t pageId,
+			std::string_view reason)
+		{
+			// Keep deformable cook failures actionable.  A malformed page must be
+			// rejected atomically, but naming the failed invariant avoids hiding
+			// the source of a bad cook behind a generic staged-write error.
+			std::cerr << "Canonical deformable page " << pageId
+				<< " rejected: " << reason << ".\n";
 			return false;
-		}
-		tableCursor += vertexPaletteBytes;
-
-		for (std::size_t index = 0u; index < orderedMorphs.size(); ++index)
+		};
+		for (const VirtualGeometryPageRecord& page : virtualPages)
 		{
-			const SkinnedMeshMorphTarget& morph = *orderedMorphs[index];
-			std::uint32_t deltaCount = 0u;
-			if (!TryConvertSkinnedCount(morph.positionDeltas.size(), deltaCount)
-				|| tableCursor + static_cast<std::uint64_t>(deltaCount) * sizeof(std::array<float, 3>) > std::numeric_limits<std::uint32_t>::max())
+			if (page.groupCount == 0u || page.groupOffset > virtualGroups.size()
+				|| page.groupCount > virtualGroups.size() - page.groupOffset)
 			{
-				outFailure = SkinnedMeshCookFailure::PayloadRangeOverflow;
-				return false;
+				return failDemandedPage(page.pageId, "group range is invalid");
 			}
-			morphRecords[index] = {
-				morph.stableTargetId,
-				static_cast<std::uint32_t>(tableCursor),
-				deltaCount,
-				static_cast<std::uint32_t>(sizeof(std::array<float, 3>)),
-				kDeformableMeshPayloadFlagDenseMorphPositionDeltas
-			};
-			tableCursor += static_cast<std::uint64_t>(deltaCount) * sizeof(std::array<float, 3>);
-		}
-		if (tableCursor - metadataOffset > std::numeric_limits<std::uint32_t>::max())
-		{
-			outFailure = SkinnedMeshCookFailure::PayloadRangeOverflow;
-			return false;
-		}
-		// Keep TDEF v1's payloadSize frozen at tableCursor. TDFV starts immediately
-		// afterward, allowing historical readers to validate and consume the base
-		// skin/morph data unchanged while current loaders opt into cluster facts.
-		const std::uint32_t sidecarOffset = static_cast<std::uint32_t>(tableCursor);
-		DeformableVirtualGeometrySidecarHeader virtualGeometrySidecar{};
-		std::vector<DeformableVirtualGeometryClusterRecord> virtualGeometryClusters;
-		std::vector<std::uint32_t> virtualGeometryPaletteIndices;
-		std::vector<DeformableVirtualGeometryMorphRecord> virtualGeometryMorphs;
-		std::vector<DeformableVirtualGeometryMorphVertex> virtualGeometryMorphVertices;
-		if (!TryBuildDeformableVirtualGeometrySidecar(
-			stream,
-			static_cast<std::uint32_t>(stagedSize),
-			header,
-			input,
-			orderedMorphs,
-			vertexPaletteIndices,
-			skinningBytes,
-			sidecarOffset,
-			virtualGeometrySidecar,
-			virtualGeometryClusters,
-			virtualGeometryPaletteIndices,
-			virtualGeometryMorphs,
-			virtualGeometryMorphVertices))
-		{
-			outFailure = SkinnedMeshCookFailure::StagedPayloadWriteFailed;
-			return false;
-		}
-		const std::uint64_t stagedPayloadEnd = static_cast<std::uint64_t>(sidecarOffset)
-			+ virtualGeometrySidecar.payloadSize;
-		if (stagedPayloadEnd > std::numeric_limits<std::uint32_t>::max())
-		{
-			outFailure = SkinnedMeshCookFailure::PayloadRangeOverflow;
-			return false;
-		}
-
-		DeformableMeshPayloadHeader metadata{};
-		metadata.magic = kDeformableMeshPayloadMagicValue;
-		metadata.version = kDeformableMeshPayloadVersion;
-		metadata.headerSize = static_cast<std::uint16_t>(sizeof(DeformableMeshPayloadHeader));
-		metadata.payloadSize = static_cast<std::uint32_t>(tableCursor - metadataOffset);
-		metadata.compatibleMeshVersion = kMeshCurrentVersion;
-		metadata.skinningVertexCount = vertexCount;
-		metadata.palettePartitionCount = paletteCount;
-		metadata.morphTargetCount = morphCount;
-		metadata.paletteTableOffset = metadataOffset + static_cast<std::uint32_t>(sizeof(DeformableMeshPayloadHeader));
-		metadata.morphTableOffset = metadata.paletteTableOffset
-			+ static_cast<std::uint32_t>(paletteRecords.size() * sizeof(DeformableMeshPaletteRecord));
-		metadata.vertexPaletteIndexOffset = vertexPaletteIndexOffset;
-		metadata.vertexPaletteIndexCount = vertexCount;
-		metadata.skinningDataOffset = skinningOffset;
-		metadata.skinningDataSize = static_cast<std::uint32_t>(skinningBytes.size());
-		metadata.skinningStrideBytes = kDeformableMeshSkinningStrideBytes;
-		metadata.maximumInfluences = kDeformableMeshMaximumInfluences;
-		metadata.maximumPaletteJoints = kDeformableMeshMaximumPaletteJoints;
-		metadata.sourceSkeletonJointCount = settings.sourceSkeletonJointCount;
-		metadata.skeletonCompatibilityFingerprint = settings.skeletonCompatibilityFingerprint;
-		metadata.flags = kDeformableMeshPayloadFlagConservativeMorphEnvelope
-			| kDeformableMeshPayloadFlagZeroWeightMeansIdentity
-			| kDeformableMeshPayloadFlagVertexPaletteIndices
-			| kDeformableMeshPayloadFlagDenseMorphPositionDeltas;
-		metadata.virtualGeometryDeformationFlags = kDeformableMeshVirtualGeometryFlagWholeMeshEnvelope
-			| kDeformableMeshVirtualGeometryFlagDisableUnprovenConeCulling
-			| kDeformableMeshVirtualGeometryFlagRequireCompleteFallback;
-		for (std::size_t component = 0u; component < 3u; ++component)
-		{
-			metadata.deformationBoundsMin[component] = std::numeric_limits<float>::max();
-			metadata.deformationBoundsMax[component] = std::numeric_limits<float>::lowest();
-		}
-		for (std::size_t vertexIndex = 0u; vertexIndex < input.vertices.size(); ++vertexIndex)
-		{
-			const SkinnedMeshCookVertex& vertex = input.vertices[vertexIndex];
-			for (std::size_t component = 0u; component < 3u; ++component)
+			const auto cluster = std::find_if(virtualClusters.begin(), virtualClusters.end(),
+				[page](const VirtualGeometryClusterRecord& candidate) { return candidate.pageId == page.pageId; });
+			if (cluster == virtualClusters.end())
 			{
-				// Multiple morph targets can be active together. Summing all negative
-				// and positive deltas produces a conservative [0,1]-weight envelope;
-				// sampling each target independently would underestimate combinations.
-				float minimum = vertex.baseVertex.position[component];
-				float maximum = vertex.baseVertex.position[component];
-				for (const SkinnedMeshMorphTarget* morph : orderedMorphs)
+				return failDemandedPage(page.pageId, "cluster record is missing");
+			}
+			std::vector<std::uint32_t> sourceVertices;
+			std::unordered_map<std::uint32_t, std::uint32_t> localBySource;
+			std::vector<std::uint32_t> localRemap;
+			std::vector<MeshletRecord> localMeshlets;
+			std::vector<MeshletBounds> localBounds;
+			std::vector<std::uint8_t> localTopology;
+			for (std::uint32_t groupIndex = page.groupOffset; groupIndex < page.groupOffset + page.groupCount; ++groupIndex)
+			{
+				const std::uint32_t meshletIndex = virtualGroups[groupIndex].groupIndex;
+				if (meshletIndex >= meshlets.size() || meshletIndex >= meshletBounds.size())
 				{
-					const float delta = morph->positionDeltas[vertexIndex][component];
-					minimum += std::min(delta, 0.0f);
-					maximum += std::max(delta, 0.0f);
+					return failDemandedPage(page.pageId,
+						"group references an unavailable meshlet");
 				}
-				metadata.deformationBoundsMin[component] = std::min(metadata.deformationBoundsMin[component], minimum);
-				metadata.deformationBoundsMax[component] = std::max(metadata.deformationBoundsMax[component], maximum);
+				const MeshletRecord sourceMeshlet = meshlets[meshletIndex];
+				if (sourceMeshlet.vertexOffset > runtimeLayout.meshletVertexRemapCount
+					|| sourceMeshlet.vertexCount > runtimeLayout.meshletVertexRemapCount - sourceMeshlet.vertexOffset
+					|| sourceMeshlet.primitiveIndexOffset > primitiveBytes.size()
+					|| sourceMeshlet.primitiveIndexCount > primitiveBytes.size() - sourceMeshlet.primitiveIndexOffset)
+				{
+					return failDemandedPage(page.pageId,
+						"meshlet stream range is invalid");
+				}
+				MeshletRecord localMeshlet = sourceMeshlet;
+				localMeshlet.vertexOffset = static_cast<std::uint32_t>(localRemap.size());
+				for (std::uint32_t vertex = 0u; vertex < sourceMeshlet.vertexCount; ++vertex)
+				{
+					std::uint32_t sourceVertex{};
+					if (!decodeRemap(sourceMeshlet.vertexOffset + vertex,
+						sourceVertex))
+					{
+						return failDemandedPage(page.pageId,
+							"vertex remap entry is invalid");
+					}
+					auto [found, inserted] = localBySource.emplace(sourceVertex, static_cast<std::uint32_t>(sourceVertices.size()));
+					if (inserted) sourceVertices.push_back(sourceVertex);
+					localRemap.push_back(found->second);
+				}
+				localMeshlet.primitiveIndexOffset = static_cast<std::uint32_t>(localTopology.size());
+				localTopology.insert(localTopology.end(), primitiveBytes.begin() + sourceMeshlet.primitiveIndexOffset,
+					primitiveBytes.begin() + sourceMeshlet.primitiveIndexOffset + sourceMeshlet.primitiveIndexCount);
+				localMeshlets.push_back(localMeshlet);
+				localBounds.push_back(meshletBounds[meshletIndex]);
 			}
-		}
-
-		// Match ResourceManager's accepted deformation generation byte-for-byte:
-		// skin stream first, followed by the complete frozen TDEF v1 payload.
-		std::uint64_t meshPayloadGeneration = 14695981039346656037ull;
-		const auto HashGenerationBytes = [&meshPayloadGeneration](
-			const void* bytes, std::size_t byteCount)
-		{
-			const std::uint8_t* values =
-				static_cast<const std::uint8_t*>(bytes);
-			for (std::size_t index = 0u; index < byteCount; ++index)
+			if (sourceVertices.empty() || localTopology.empty())
 			{
-				meshPayloadGeneration ^= values[index];
-				meshPayloadGeneration *= 1099511628211ull;
+				return failDemandedPage(page.pageId,
+					"page contains no renderable geometry");
 			}
-		};
-		HashGenerationBytes(skinningBytes.data(), skinningBytes.size());
-		HashGenerationBytes(&metadata, sizeof(metadata));
-		HashGenerationBytes(
-			paletteRecords.data(),
-			paletteRecords.size() * sizeof(DeformableMeshPaletteRecord));
-		HashGenerationBytes(
-			morphRecords.data(),
-			morphRecords.size() * sizeof(DeformableMeshMorphRecord));
-		for (const SkinnedMeshPalettePartition& palette : palettes)
-		{
-			HashGenerationBytes(
-				palette.sourceJointIds.data(),
-				palette.sourceJointIds.size() * sizeof(std::uint32_t));
+			std::vector<std::uint8_t> localPackedVertices;
+			std::vector<TemfDeformablePageSourceIdentity> sourceIdentities;
+			std::vector<TemfDeformablePageSkinRecord> localSkin;
+			std::uint32_t paletteIndex = kVirtualGeometryInvalidIndex;
+			for (const std::uint32_t sourceVertex : sourceVertices)
+			{
+				const std::size_t vertexOffset = static_cast<std::size_t>(sourceVertex) * runtimeLayout.layout.strideBytes;
+				if (vertexOffset > packedVertices.size() || packedVertices.size() - vertexOffset < runtimeLayout.layout.strideBytes
+					|| sourceVertex >= vertexPaletteIndices.size()
+					|| static_cast<std::size_t>(sourceVertex) * kTemfSkinningStrideBytes + kTemfSkinningStrideBytes > skinningBytes.size())
+				{
+					return failDemandedPage(page.pageId,
+						"source vertex range exceeds a deformable stream");
+				}
+				localPackedVertices.insert(localPackedVertices.end(), packedVertices.begin() + vertexOffset,
+					packedVertices.begin() + vertexOffset + runtimeLayout.layout.strideBytes);
+				sourceIdentities.push_back({ sourceVertex });
+				if (paletteIndex == kVirtualGeometryInvalidIndex) paletteIndex = vertexPaletteIndices[sourceVertex];
+				if (paletteIndex != vertexPaletteIndices[sourceVertex]
+					|| paletteIndex >= palettes.size())
+				{
+					return failDemandedPage(page.pageId,
+						"page spans incompatible joint palettes");
+				}
+				TemfDeformablePageSkinRecord skin{};
+				std::memcpy(&skin, skinningBytes.data() + static_cast<std::size_t>(sourceVertex) * kTemfSkinningStrideBytes, sizeof(skin));
+				localSkin.push_back(skin);
+			}
+			std::vector<TemfDeformablePageMorphRecord> localMorphs;
+			std::vector<TemfDeformablePageMorphVertex> localMorphDeltas;
+			for (const SkinnedMeshMorphTarget* morph : orderedMorphs)
+			{
+				const std::uint32_t firstDelta = static_cast<std::uint32_t>(localMorphDeltas.size());
+				std::uint32_t flags = 1u;
+				if (!morph->normalDeltas.empty()) flags |= 2u;
+				if (!morph->tangentDeltas.empty()) flags |= 4u;
+				for (const std::uint32_t sourceVertex : sourceVertices)
+				{
+					TemfDeformablePageMorphVertex delta{};
+					std::copy_n(morph->positionDeltas[sourceVertex].begin(), 3u, delta.positionDelta);
+					if (!morph->normalDeltas.empty()) std::copy_n(morph->normalDeltas[sourceVertex].begin(), 3u, delta.normalDelta);
+					if (!morph->tangentDeltas.empty()) std::copy_n(morph->tangentDeltas[sourceVertex].begin(), 3u, delta.tangentDelta);
+					localMorphDeltas.push_back(delta);
+				}
+				localMorphs.push_back({ morph->stableTargetId, firstDelta, static_cast<std::uint32_t>(sourceVertices.size()), flags });
+			}
+			std::vector<PageSectionBytes> sections;
+			const auto addSection = [&sections, &page](
+				TemfDeformablePageSectionKind kind, std::uint32_t count,
+				std::uint32_t stride, std::vector<std::uint8_t> bytes) {
+				// An asset with no morph targets has no morph payload section. Every
+				// section that is present remains nonempty and range-checkable.
+				if (count == 0u && bytes.empty()) return true;
+				if (stride == 0u
+					|| bytes.size() != static_cast<std::size_t>(count) * stride)
+				{
+					std::cerr << "Canonical deformable page " << page.pageId
+						<< " section " << static_cast<std::uint32_t>(kind)
+						<< " has " << bytes.size() << " bytes; expected "
+						<< static_cast<std::size_t>(count) * stride << ".\n";
+					return false;
+				}
+				sections.push_back({ kind, count, stride, std::move(bytes) }); return true;
+			};
+			const std::vector<std::uint32_t>& jointPalette = palettes[paletteIndex].sourceJointIds;
+			const std::vector<QuantizationInfo> decodeConstants{ runtimeLayout.quantization };
+			const std::vector<VirtualGeometryClusterRecord> localClusters{ *cluster };
+			const std::vector<std::array<float, 2>> errors{{ cluster->geometricError, 0.0f }};
+			// Evaluate the topology count before transferring ownership of the
+			// vector.  Function argument evaluation order must not decide whether
+			// the canonical section advertises its real element count or zero.
+			const std::uint32_t localTopologyCount =
+				static_cast<std::uint32_t>(localTopology.size());
+			if (!addSection(TemfDeformablePageSectionKind::PackedVertices, static_cast<std::uint32_t>(sourceVertices.size()), runtimeLayout.layout.strideBytes, std::move(localPackedVertices))
+				|| !addSection(TemfDeformablePageSectionKind::Topology, localTopologyCount, 1u, std::move(localTopology))
+				|| !addSection(TemfDeformablePageSectionKind::VertexRemap, static_cast<std::uint32_t>(localRemap.size()), sizeof(std::uint32_t), copyRecords(localRemap))
+				|| !addSection(TemfDeformablePageSectionKind::Meshlets, static_cast<std::uint32_t>(localMeshlets.size()), sizeof(MeshletRecord), copyRecords(localMeshlets))
+				|| !addSection(TemfDeformablePageSectionKind::MeshletBounds, static_cast<std::uint32_t>(localBounds.size()), sizeof(MeshletBounds), copyRecords(localBounds))
+				|| !addSection(TemfDeformablePageSectionKind::DecodeConstants, 1u, sizeof(QuantizationInfo), copyRecords(decodeConstants))
+				|| !addSection(TemfDeformablePageSectionKind::SkinRecords, static_cast<std::uint32_t>(localSkin.size()), sizeof(TemfDeformablePageSkinRecord), copyRecords(localSkin))
+				|| !addSection(TemfDeformablePageSectionKind::JointPalette, static_cast<std::uint32_t>(jointPalette.size()), sizeof(std::uint32_t), copyRecords(jointPalette))
+				|| !addSection(TemfDeformablePageSectionKind::MorphTargets, static_cast<std::uint32_t>(localMorphs.size()), sizeof(TemfDeformablePageMorphRecord), copyRecords(localMorphs))
+				|| !addSection(TemfDeformablePageSectionKind::MorphDeltas, static_cast<std::uint32_t>(localMorphDeltas.size()), sizeof(TemfDeformablePageMorphVertex), copyRecords(localMorphDeltas))
+				|| !addSection(TemfDeformablePageSectionKind::SourceVertexIdentities, static_cast<std::uint32_t>(sourceIdentities.size()), sizeof(TemfDeformablePageSourceIdentity), copyRecords(sourceIdentities))
+				|| !addSection(TemfDeformablePageSectionKind::Clusters, 1u, sizeof(VirtualGeometryClusterRecord), copyRecords(localClusters))
+				|| !addSection(TemfDeformablePageSectionKind::ErrorSamples, 1u, sizeof(std::array<float, 2>), copyRecords(errors)))
+			{
+				return failDemandedPage(page.pageId,
+					"section count, stride, or byte range is inconsistent");
+			}
+			const std::size_t headerBytes = sizeof(TemfDeformableDemandedPagePayload) + sections.size() * sizeof(TemfDeformablePageSection);
+			std::size_t totalBytes = headerBytes;
+			for (const PageSectionBytes& section : sections) totalBytes += section.bytes.size();
+			if (totalBytes > std::numeric_limits<std::uint32_t>::max())
+			{
+				return failDemandedPage(page.pageId,
+					"decoded payload exceeds the canonical size limit");
+			}
+			TemfDeformableDemandedPagePayload payload{};
+			payload.pageId = page.pageId; payload.clusterId = cluster->clusterId; payload.materialSectionId = cluster->materialSectionId;
+			payload.flags = kTemfDeformablePageFlagSkinned
+				| (localMorphs.empty() ? 0u : kTemfDeformablePageFlagMorphed);
+			payload.sectionCount = static_cast<std::uint32_t>(sections.size());
+			payload.sectionTableOffset = sizeof(TemfDeformableDemandedPagePayload); payload.decodedByteSize = static_cast<std::uint32_t>(totalBytes);
+			payload.meshPayloadGeneration = meshPayloadGeneration; payload.contentGeneration = meshPayloadGeneration;
+			payload.skeletonCompatibilityFingerprint = settings.skeletonCompatibilityFingerprint;
+			CanonicalDemandedPageCookedBlob cooked{};
+			cooked.entry.pageId = page.pageId; cooked.entry.parentPageId = kVirtualGeometryInvalidIndex; cooked.entry.fallbackPageId = page.fallbackPageId;
+			cooked.entry.flags = payload.flags; cooked.entry.clusterOffset = cluster->clusterId; cooked.entry.clusterCount = 1u;
+			cooked.entry.materialSectionId = cluster->materialSectionId; cooked.entry.contentGeneration = payload.contentGeneration;
+			cooked.entry.skeletonCompatibilityFingerprint = payload.skeletonCompatibilityFingerprint; cooked.entry.geometricError = cluster->geometricError;
+			for (std::size_t axis = 0u; axis < 3u; ++axis) { cooked.entry.conservativeBoundsMin[axis] = cluster->boundsCenter[axis] - cluster->boundsRadius; cooked.entry.conservativeBoundsMax[axis] = cluster->boundsCenter[axis] + cluster->boundsRadius; }
+			cooked.bytes.resize(totalBytes); std::memcpy(cooked.bytes.data(), &payload, sizeof(payload));
+			std::size_t cursor = headerBytes;
+			for (std::size_t index = 0u; index < sections.size(); ++index) { const PageSectionBytes& source = sections[index]; TemfDeformablePageSection record{ source.kind, 1u, static_cast<std::uint32_t>(cursor), static_cast<std::uint32_t>(source.bytes.size()), source.count, source.stride }; std::memcpy(cooked.bytes.data() + sizeof(payload) + index * sizeof(record), &record, sizeof(record)); std::memcpy(cooked.bytes.data() + cursor, source.bytes.data(), source.bytes.size()); cursor += source.bytes.size(); }
+			cooked.entry.blobHash = CalculateVirtualGeometryCompactHash(cooked.bytes);
+			demandedPageRoots.push_back(page.pageId); demandedPageBlobs.push_back(std::move(cooked));
 		}
-		HashGenerationBytes(
-			vertexPaletteIndices.data(),
-			vertexPaletteIndices.size() * sizeof(std::uint32_t));
-		for (const SkinnedMeshMorphTarget* morph : orderedMorphs)
-		{
-			HashGenerationBytes(
-				morph->positionDeltas.data(),
-				morph->positionDeltas.size()
-					* sizeof(std::array<float, 3>));
-		}
-		if (meshPayloadGeneration == 0u)
-		{
-			meshPayloadGeneration = 1u;
-		}
-		std::vector<AnimatedVirtualPageCookedBlob>
-			animatedPageBlobs;
-		std::vector<std::uint32_t> animatedRootPageIds;
-		const bool hasAnimatedPhysicalPages =
-			TryBuildAnimatedVirtualPageBlobs(
-			stream,
-			header,
-			input,
-			settings,
-			palettes,
-			vertexPaletteIndices,
-			skinningBytes,
-			orderedMorphs,
-			virtualGeometryClusters,
-			meshPayloadGeneration,
-			animatedPageBlobs,
-			animatedRootPageIds);
-
-		// Append all extension data before rewriting the small root header. A crash
-		// can only damage this private staged file; the published TEMF is untouched.
-		stream.clear();
-		stream.seekp(0, std::ios::end);
-		const std::streamoff currentEnd = stream.tellp();
-		if (currentEnd < 0 || static_cast<std::uint64_t>(currentEnd) > skinningOffset)
+		if (demandedPageBlobs.size() > std::numeric_limits<std::uint32_t>::max()
+			|| demandedPageRoots.size() > std::numeric_limits<std::uint32_t>::max())
 		{
 			return false;
 		}
-		std::vector<char> padding(static_cast<std::size_t>(skinningOffset - static_cast<std::uint64_t>(currentEnd)), 0);
-		stream.write(padding.data(), static_cast<std::streamsize>(padding.size()));
-		stream.write(reinterpret_cast<const char*>(skinningBytes.data()), static_cast<std::streamsize>(skinningBytes.size()));
-		const std::uint64_t afterSkinning = static_cast<std::uint64_t>(skinningOffset) + skinningBytes.size();
-		padding.assign(static_cast<std::size_t>(metadataOffset - afterSkinning), 0);
-		stream.write(padding.data(), static_cast<std::streamsize>(padding.size()));
-		stream.write(reinterpret_cast<const char*>(&metadata), sizeof(metadata));
-		stream.write(reinterpret_cast<const char*>(paletteRecords.data()), static_cast<std::streamsize>(paletteRecords.size() * sizeof(DeformableMeshPaletteRecord)));
-		stream.write(reinterpret_cast<const char*>(morphRecords.data()), static_cast<std::streamsize>(morphRecords.size() * sizeof(DeformableMeshMorphRecord)));
-		for (const SkinnedMeshPalettePartition& palette : palettes)
+		std::vector<TemfDeformableDemandedPageEntry> demandedPageEntries;
+		std::vector<TemfDeformableDemandedPageDependency> demandedPageDependencies;
+		std::vector<TemfDeformableDemandedPageRoot> demandedPageRootRecords;
+		std::vector<TemfDeformableDemandedPageBlob> demandedPageBlobRecords;
+		demandedPageEntries.reserve(demandedPageBlobs.size());
+		demandedPageBlobRecords.reserve(demandedPageBlobs.size());
+		for (std::size_t index = 0u; index < demandedPageBlobs.size(); ++index)
 		{
-			stream.write(reinterpret_cast<const char*>(palette.sourceJointIds.data()), static_cast<std::streamsize>(palette.sourceJointIds.size() * sizeof(std::uint32_t)));
-		}
-		stream.write(reinterpret_cast<const char*>(vertexPaletteIndices.data()), static_cast<std::streamsize>(vertexPaletteIndices.size() * sizeof(std::uint32_t)));
-		for (const SkinnedMeshMorphTarget* morph : orderedMorphs)
-		{
-			stream.write(reinterpret_cast<const char*>(morph->positionDeltas.data()), static_cast<std::streamsize>(morph->positionDeltas.size() * sizeof(std::array<float, 3>)));
-		}
-		stream.write(reinterpret_cast<const char*>(&virtualGeometrySidecar), sizeof(virtualGeometrySidecar));
-		stream.write(
-			reinterpret_cast<const char*>(virtualGeometryClusters.data()),
-			static_cast<std::streamsize>(virtualGeometryClusters.size() * sizeof(DeformableVirtualGeometryClusterRecord)));
-		stream.write(
-			reinterpret_cast<const char*>(virtualGeometryPaletteIndices.data()),
-			static_cast<std::streamsize>(virtualGeometryPaletteIndices.size() * sizeof(std::uint32_t)));
-		stream.write(
-			reinterpret_cast<const char*>(virtualGeometryMorphs.data()),
-			static_cast<std::streamsize>(virtualGeometryMorphs.size() * sizeof(DeformableVirtualGeometryMorphRecord)));
-		stream.write(
-			reinterpret_cast<const char*>(virtualGeometryMorphVertices.data()),
-			static_cast<std::streamsize>(virtualGeometryMorphVertices.size() * sizeof(DeformableVirtualGeometryMorphVertex)));
-		const std::streamoff writtenEnd = stream.tellp();
-		stream.flush();
-		if (!stream || writtenEnd < 0 || static_cast<std::uint64_t>(writtenEnd) != stagedPayloadEnd)
-		{
-			return false;
-		}
-		if (hasAnimatedPhysicalPages)
-		{
-			std::uint64_t animatedPayloadEnd = 0u;
-			if (!TryWriteAnimatedVirtualPageDirectory(
-				stream,
-				stagedPayloadEnd,
-				meshPayloadGeneration,
-				animatedPageBlobs,
-				animatedRootPageIds,
-				animatedPayloadEnd)
-				|| animatedPayloadEnd <= stagedPayloadEnd)
+			const CanonicalDemandedPageCookedBlob& cooked = demandedPageBlobs[index];
+			const std::uint64_t blobId = static_cast<std::uint64_t>(index) + 1u;
+			const bool hasParent = cooked.entry.parentPageId
+				!= kVirtualGeometryInvalidIndex;
+			const std::uint32_t dependencyOffset =
+				static_cast<std::uint32_t>(demandedPageDependencies.size());
+			if (hasParent)
 			{
-				outFailure =
-					SkinnedMeshCookFailure::StagedPayloadWriteFailed;
+				demandedPageDependencies.push_back({ cooked.entry.pageId,
+					cooked.entry.parentPageId, 0u, 0u });
+			}
+			demandedPageEntries.push_back({ cooked.entry.pageId,
+				cooked.entry.parentPageId, cooked.entry.fallbackPageId,
+				cooked.entry.clusterOffset, cooked.entry.materialSectionId,
+				cooked.entry.flags, dependencyOffset, hasParent ? 1u : 0u,
+				blobId, cooked.entry.contentGeneration,
+				{ cooked.entry.conservativeBoundsMin[0],
+					cooked.entry.conservativeBoundsMin[1],
+					cooked.entry.conservativeBoundsMin[2] },
+				{ cooked.entry.conservativeBoundsMax[0],
+					cooked.entry.conservativeBoundsMax[1],
+					cooked.entry.conservativeBoundsMax[2] },
+				cooked.entry.geometricError, cooked.entry.deformationError });
+			demandedPageBlobRecords.push_back({ blobId,
+				cooked.entry.contentGeneration, cooked.entry.blobHash,
+				cooked.entry.pageId, static_cast<std::uint32_t>(cooked.bytes.size()),
+				cooked.entry.flags, 0u });
+		}
+		for (const std::uint32_t pageId : demandedPageRoots)
+		{
+			demandedPageRootRecords.push_back({ pageId, 0u });
+		}
+		TemfDeformableDemandedPageDirectory demandedPageDirectory{};
+		demandedPageDirectory.version = 1u;
+		demandedPageDirectory.entryCount = static_cast<std::uint32_t>(demandedPageEntries.size());
+		demandedPageDirectory.rootCount = static_cast<std::uint32_t>(demandedPageRootRecords.size());
+		demandedPageDirectory.dependencyCount = static_cast<std::uint32_t>(demandedPageDependencies.size());
+		demandedPageDirectory.blobCount = static_cast<std::uint32_t>(demandedPageBlobRecords.size());
+		demandedPageDirectory.flags = kTemfDeformablePageFlagSkinned;
+		demandedPageDirectory.meshPayloadGeneration =
+			directory.directory.header.generationIdentity == 0u
+				? 1u : directory.directory.header.generationIdentity;
+		demandedPageDirectory.skeletonCompatibilityFingerprint =
+			settings.skeletonCompatibilityFingerprint;
+		root.demandedPageCount = demandedPageDirectory.entryCount;
+		appendBytes(kTemfMetadataDeformableRoot, &root, sizeof(root), 1u,
+			sizeof(root));
+		if (hasVirtualGeometry)
+		{
+			appendBytes(kTemfMetadataDeformableDemandedPageDirectory,
+				&demandedPageDirectory, sizeof(demandedPageDirectory), 1u,
+				sizeof(demandedPageDirectory));
+			appendBytes(kTemfMetadataDeformableDemandedPageEntries,
+				demandedPageEntries.data(),
+				demandedPageEntries.size()
+					* sizeof(TemfDeformableDemandedPageEntry),
+				static_cast<std::uint32_t>(demandedPageEntries.size()),
+				sizeof(TemfDeformableDemandedPageEntry));
+			appendBytes(kTemfMetadataDeformableDemandedPageRoots,
+				demandedPageRootRecords.data(),
+				demandedPageRootRecords.size()
+					* sizeof(TemfDeformableDemandedPageRoot),
+				static_cast<std::uint32_t>(
+					demandedPageRootRecords.size()),
+				sizeof(TemfDeformableDemandedPageRoot));
+			appendBytes(kTemfMetadataDeformableDemandedPageDependencies,
+				demandedPageDependencies.data(),
+				demandedPageDependencies.size()
+					* sizeof(TemfDeformableDemandedPageDependency),
+				static_cast<std::uint32_t>(
+					demandedPageDependencies.size()),
+				sizeof(TemfDeformableDemandedPageDependency));
+			appendBytes(kTemfMetadataDeformableDemandedPageBlobs,
+				demandedPageBlobRecords.data(),
+				demandedPageBlobRecords.size()
+					* sizeof(TemfDeformableDemandedPageBlob),
+				static_cast<std::uint32_t>(
+					demandedPageBlobRecords.size()),
+				sizeof(TemfDeformableDemandedPageBlob));
+		}
+		std::uint32_t rebuiltPageSize =
+			directory.directory.header.logicalPageSizeBytes;
+		for (const CanonicalDemandedPageCookedBlob& cooked : demandedPageBlobs)
+		{
+			if (cooked.bytes.empty()
+				|| cooked.bytes.size() > kTemfPageSize128KiB)
+			{
 				return false;
 			}
-		}
-
-		// Read the staged header back from disk before publishing its root pointer.
-		// This catches short writes, stale layouts, and—critically—a skeleton
-		// fingerprint that differs from the generation supplied by the importer.
-		DeformableMeshPayloadHeader stagedMetadata{};
-		stream.clear();
-		stream.seekg(static_cast<std::streamoff>(metadataOffset), std::ios::beg);
-		stream.read(reinterpret_cast<char*>(&stagedMetadata), sizeof(stagedMetadata));
-		if (!stream
-			|| stagedMetadata.magic != kDeformableMeshPayloadMagicValue
-			|| stagedMetadata.version != kDeformableMeshPayloadVersion
-			|| stagedMetadata.headerSize != sizeof(DeformableMeshPayloadHeader)
-			|| stagedMetadata.compatibleMeshVersion != kMeshCurrentVersion
-			|| stagedMetadata.skeletonCompatibilityFingerprint != settings.skeletonCompatibilityFingerprint
-			|| stagedMetadata.maximumInfluences != kDeformableMeshMaximumInfluences
-			|| stagedMetadata.maximumPaletteJoints != kDeformableMeshMaximumPaletteJoints
-			|| stagedMetadata.skinningStrideBytes != kDeformableMeshSkinningStrideBytes)
-		{
-			outFailure = SkinnedMeshCookFailure::FormatCompatibilityMismatch;
-			return false;
-		}
-
-		const auto RangeWithin = [](std::uint32_t offset, std::uint64_t byteCount, std::uint64_t rangeBegin, std::uint64_t rangeEnd) {
-			const std::uint64_t begin = offset;
-			return begin >= rangeBegin && begin <= rangeEnd && byteCount <= (rangeEnd - begin);
-		};
-		const std::uint64_t payloadEnd = static_cast<std::uint64_t>(metadataOffset) + stagedMetadata.payloadSize;
-		const std::uint64_t paletteTableBytes = static_cast<std::uint64_t>(stagedMetadata.palettePartitionCount)
-			* sizeof(DeformableMeshPaletteRecord);
-		const std::uint64_t morphTableBytes = static_cast<std::uint64_t>(stagedMetadata.morphTargetCount)
-			* sizeof(DeformableMeshMorphRecord);
-		const std::uint64_t vertexPaletteTableBytes = static_cast<std::uint64_t>(stagedMetadata.vertexPaletteIndexCount)
-			* sizeof(std::uint32_t);
-		if (payloadEnd != tableCursor
-			|| stagedMetadata.skinningVertexCount != vertexCount
-			|| stagedMetadata.sourceSkeletonJointCount != settings.sourceSkeletonJointCount
-			|| stagedMetadata.skinningDataOffset != skinningOffset
-			|| stagedMetadata.skinningDataSize != skinningBytes.size()
-			|| !RangeWithin(stagedMetadata.skinningDataOffset, stagedMetadata.skinningDataSize, skinningOffset, metadataOffset)
-			|| !RangeWithin(stagedMetadata.paletteTableOffset, paletteTableBytes, metadataOffset, payloadEnd)
-			|| !RangeWithin(stagedMetadata.morphTableOffset, morphTableBytes, metadataOffset, payloadEnd)
-			|| !RangeWithin(stagedMetadata.vertexPaletteIndexOffset, vertexPaletteTableBytes, metadataOffset, payloadEnd))
-		{
-			outFailure = SkinnedMeshCookFailure::PayloadRangeOverflow;
-			return false;
-		}
-		for (const DeformableMeshPaletteRecord& record : paletteRecords)
-		{
-			if (record.jointCount == 0u || record.jointCount > kDeformableMeshMaximumPaletteJoints
-				|| !RangeWithin(
-					record.jointTableOffset,
-					static_cast<std::uint64_t>(record.jointCount) * sizeof(std::uint32_t),
-					metadataOffset,
-					payloadEnd))
+			if (cooked.bytes.size() > rebuiltPageSize)
 			{
-				outFailure = SkinnedMeshCookFailure::PayloadRangeOverflow;
-				return false;
+				// Deformation adds skin/source records to an otherwise valid
+				// geometry page. Promote the canonical page profile when that
+				// complete packet no longer fits the static cook's smaller choice.
+				rebuiltPageSize = kTemfPageSize128KiB;
 			}
+			decoded.push_back(cooked.bytes);
+			streams.push_back({ TemfStreamKind::ProceduralUpdate,
+				TemfCodecProfile::ExpandedProduction,
+				kTemfMetadataDeformableDemandedPageBlobs,
+				proceduralDomainId,
+				1u, static_cast<std::uint32_t>(decoded.back().size()),
+				decoded.back() });
 		}
-		for (const DeformableMeshMorphRecord& record : morphRecords)
+		TerraEngine::Editor::TemfProductionBuildRequest request{};
+		request.representationFlags = directory.directory.header.representationFlags | kTemfRepresentationDeformableStreams;
+		request.logicalPageSizeBytes = rebuiltPageSize;
+		request.assetIdentity = directory.directory.header.assetIdentity;
+		request.sourceContentHash =
+			directory.directory.header.sourceContentHash;
+		request.buildRecipeHash =
+			directory.directory.header.buildRecipeHash
+			^ settings.skeletonCompatibilityFingerprint;
+		request.toolIdentity = directory.directory.header.toolIdentity;
+		request.generationIdentity =
+			directory.directory.header.generationIdentity;
+		request.selectedQuantizationProfileId =
+			directory.directory.header.selectedQuantizationProfileId;
+		request.quantizationDomains = rebuildDomains;
+		request.streams = streams;
+		auto rebuilt = TerraEngine::Editor::BuildTemfProductionBlocks(request);
+		if (!rebuilt.IsComplete())
 		{
-			if (record.positionDeltaStrideBytes != sizeof(std::array<float, 3>)
-				|| record.positionDeltaCount != vertexCount
-				|| !RangeWithin(
-					record.positionDeltaOffset,
-					static_cast<std::uint64_t>(record.positionDeltaCount) * record.positionDeltaStrideBytes,
-					metadataOffset,
-					payloadEnd))
-			{
-				outFailure = SkinnedMeshCookFailure::PayloadRangeOverflow;
-				return false;
-			}
-		}
-
-		header.meshletSkinningDataOffset = skinningOffset;
-		header.meshletSkinningDataCount = vertexCount;
-		header.virtualGeometryReserved = metadataOffset;
-		stream.seekp(0, std::ios::beg);
-		stream.write(reinterpret_cast<const char*>(&header), sizeof(header));
-		stream.flush();
-		if (!stream)
-		{
+			std::cerr << "Canonical deformable TEMF assembly failed: "
+				<< rebuilt.error << "\n";
 			return false;
 		}
-
-		outSummary.hasSkinning = true;
-		outSummary.morphTargetCount = morphCount;
-		outSummary.palettePartitionCount = paletteCount;
-		outSummary.deformationEnvelopeValid = true;
-		outSummary.zeroWeightIdentityEncoded = true;
-		outSummary.virtualGeometryFailsOpen = true;
-		outSummary.virtualGeometryClusterCount = virtualGeometrySidecar.clusterCount;
-		outSummary.skeletonCompatibilityValidated = true;
-		outSummary.skeletonCompatibilityFingerprint = metadata.skeletonCompatibilityFingerprint;
-		outFailure = SkinnedMeshCookFailure::None;
-		return true;
+		const auto rebuiltValidation =
+			TerraEngine::Resource::ValidateTemfProductionFile(
+				rebuilt.bytes, {});
+		if (!rebuiltValidation.IsComplete())
+		{
+			std::cerr << "Canonical deformable TEMF validation failed: "
+				<< rebuiltValidation.diagnostic << "\n";
+			return false;
+		}
+		std::ofstream output(stagedPath, std::ios::binary | std::ios::trunc);
+		output.write(reinterpret_cast<const char*>(rebuilt.bytes.data()), static_cast<std::streamsize>(rebuilt.bytes.size()));
+		outSummary.hasSkinning = true; outSummary.palettePartitionCount = root.palettePartitionCount; outSummary.morphTargetCount = root.morphTargetCount;
+		return static_cast<bool>(output);
 	}
 
 	bool ReplaceStagedTemf(const std::filesystem::path& stagedPath, const std::filesystem::path& outputPath)
@@ -6154,7 +5165,7 @@ bool CompileSkinnedMeshFromRaw(
 		std::sort(uniqueInfluences.begin(), uniqueInfluences.end(), [](const SkinnedMeshInfluence& left, const SkinnedMeshInfluence& right) {
 			return left.weight != right.weight ? left.weight > right.weight : left.jointIndex < right.jointIndex;
 		});
-		const std::size_t retainedCount = std::min<std::size_t>(kDeformableMeshMaximumInfluences, uniqueInfluences.size());
+		const std::size_t retainedCount = std::min<std::size_t>(kTemfMaximumSkinInfluences, uniqueInfluences.size());
 		float retainedWeight = 0.0f;
 		for (std::size_t index = 0u; index < retainedCount; ++index)
 		{
@@ -6329,12 +5340,12 @@ bool CompileSkinnedMeshFromRaw(
 			component.sourceJointIds.end());
 		if (component.sourceJointIds.empty())
 		{
-			// TDEF keeps palette records structurally nonempty. Joint zero is a
+			// Canonical palette records stay structurally nonempty. Joint zero is a
 			// deterministic placeholder for an unbound component; all four weights
 			// remain zero and the identity flag forbids runtime palette sampling.
 			component.sourceJointIds.push_back(0u);
 		}
-		if (component.sourceJointIds.size() > kDeformableMeshMaximumPaletteJoints)
+		if (component.sourceJointIds.size() > kTemfMaximumPaletteJoints)
 		{
 			SetDiagnostic(
 				"SkinnedMeshConnectedPaletteTooLarge",
@@ -6367,7 +5378,7 @@ bool CompileSkinnedMeshFromRaw(
 				existing.begin(), existing.end(),
 				component.sourceJointIds.begin(), component.sourceJointIds.end(),
 				std::back_inserter(combined));
-			if (combined.size() <= kDeformableMeshMaximumPaletteJoints)
+			if (combined.size() <= kTemfMaximumPaletteJoints)
 			{
 				selectedPalette = paletteIndex;
 				selectedJointUnion = std::move(combined);
@@ -6407,7 +5418,7 @@ bool CompileSkinnedMeshFromRaw(
 	}
 
 	std::size_t sourceSkinningByteCount = 0u;
-	if (!TryMultiplySkinnedSize(input.vertices.size(), kDeformableMeshSkinningStrideBytes, sourceSkinningByteCount)
+	if (!TryMultiplySkinnedSize(input.vertices.size(), kTemfSkinningStrideBytes, sourceSkinningByteCount)
 		|| sourceSkinningByteCount > std::numeric_limits<std::uint32_t>::max())
 	{
 		SetDiagnostic(
@@ -6420,7 +5431,7 @@ bool CompileSkinnedMeshFromRaw(
 	for (std::size_t vertexIndex = 0u; vertexIndex < report.cookedVertices.size(); ++vertexIndex)
 	{
 		SkinnedMeshCookedVertex& cooked = report.cookedVertices[vertexIndex];
-		std::uint8_t* encoded = sourceSkinningBytes.data() + vertexIndex * kDeformableMeshSkinningStrideBytes;
+		std::uint8_t* encoded = sourceSkinningBytes.data() + vertexIndex * kTemfSkinningStrideBytes;
 		if (!referencedVertices[vertexIndex])
 		{
 			continue;
@@ -6439,7 +5450,7 @@ bool CompileSkinnedMeshFromRaw(
 		}
 		const std::vector<std::uint32_t>& palette = report.palettePartitions[paletteIndex].sourceJointIds;
 		std::uint32_t quantizedSum = 0u;
-		std::array<float, kDeformableMeshMaximumInfluences> fractionalRemainders{};
+		std::array<float, kTemfMaximumSkinInfluences> fractionalRemainders{};
 		for (std::size_t influenceIndex = 0u; influenceIndex < cooked.influences.size(); ++influenceIndex)
 		{
 			const auto joint = std::lower_bound(palette.begin(), palette.end(), cooked.influences[influenceIndex].jointIndex);
@@ -6465,7 +5476,7 @@ bool CompileSkinnedMeshFromRaw(
 				"Normalize the source skin weights before reimporting.");
 			return Finish(false, SkinnedMeshCookFailure::InvalidInfluenceWeight);
 		}
-		std::array<std::size_t, kDeformableMeshMaximumInfluences> remainderOrder{ 0u, 1u, 2u, 3u };
+		std::array<std::size_t, kTemfMaximumSkinInfluences> remainderOrder{ 0u, 1u, 2u, 3u };
 		std::sort(remainderOrder.begin(), remainderOrder.begin() + static_cast<std::ptrdiff_t>(cooked.influences.size()),
 			[&](std::size_t left, std::size_t right) {
 				if (fractionalRemainders[left] != fractionalRemainders[right])
@@ -6513,42 +5524,42 @@ bool CompileSkinnedMeshFromRaw(
 	std::unordered_map<std::uint64_t, std::vector<std::uint32_t>> stagedVerticesBySignature;
 	const auto HashSourceVertex = [&](std::uint32_t sourceIndex) {
 		const RawMeshVertex& base = input.vertices[sourceIndex].baseVertex;
-		std::uint64_t hash = HashAnimatedVirtualCookBytes(
+		std::uint64_t hash = HashCanonicalCookBytes(
 			reinterpret_cast<const std::uint8_t*>(base.position.data()),
 			sizeof(base.position));
-		hash = HashAnimatedVirtualCookBytes(
+		hash = HashCanonicalCookBytes(
 			reinterpret_cast<const std::uint8_t*>(base.normal.data()),
 			sizeof(base.normal),
 			hash);
-		hash = HashAnimatedVirtualCookBytes(
+		hash = HashCanonicalCookBytes(
 			reinterpret_cast<const std::uint8_t*>(base.uv.data()),
 			sizeof(base.uv),
 			hash);
-		hash = HashAnimatedVirtualCookBytes(
+		hash = HashCanonicalCookBytes(
 			reinterpret_cast<const std::uint8_t*>(&vertexPalette[sourceIndex]),
 			sizeof(vertexPalette[sourceIndex]),
 			hash);
-		hash = HashAnimatedVirtualCookBytes(
+		hash = HashCanonicalCookBytes(
 			sourceSkinningBytes.data()
-				+ static_cast<std::size_t>(sourceIndex) * kDeformableMeshSkinningStrideBytes,
-			kDeformableMeshSkinningStrideBytes,
+				+ static_cast<std::size_t>(sourceIndex) * kTemfSkinningStrideBytes,
+			kTemfSkinningStrideBytes,
 			hash);
 		for (const SkinnedMeshMorphTarget& morph : input.morphTargets)
 		{
-			hash = HashAnimatedVirtualCookBytes(
+			hash = HashCanonicalCookBytes(
 				reinterpret_cast<const std::uint8_t*>(morph.positionDeltas[sourceIndex].data()),
 				sizeof(morph.positionDeltas[sourceIndex]),
 				hash);
 			if (!morph.normalDeltas.empty())
 			{
-				hash = HashAnimatedVirtualCookBytes(
+				hash = HashCanonicalCookBytes(
 					reinterpret_cast<const std::uint8_t*>(morph.normalDeltas[sourceIndex].data()),
 					sizeof(morph.normalDeltas[sourceIndex]),
 					hash);
 			}
 			if (!morph.tangentDeltas.empty())
 			{
-				hash = HashAnimatedVirtualCookBytes(
+				hash = HashCanonicalCookBytes(
 					reinterpret_cast<const std::uint8_t*>(morph.tangentDeltas[sourceIndex].data()),
 					sizeof(morph.tangentDeltas[sourceIndex]),
 					hash);
@@ -6564,9 +5575,9 @@ bool CompileSkinnedMeshFromRaw(
 			|| std::memcmp(leftBase.uv.data(), rightBase.uv.data(), sizeof(leftBase.uv)) != 0
 			|| vertexPalette[left] != vertexPalette[right]
 			|| std::memcmp(
-				sourceSkinningBytes.data() + static_cast<std::size_t>(left) * kDeformableMeshSkinningStrideBytes,
-				sourceSkinningBytes.data() + static_cast<std::size_t>(right) * kDeformableMeshSkinningStrideBytes,
-				kDeformableMeshSkinningStrideBytes) != 0)
+				sourceSkinningBytes.data() + static_cast<std::size_t>(left) * kTemfSkinningStrideBytes,
+				sourceSkinningBytes.data() + static_cast<std::size_t>(right) * kTemfSkinningStrideBytes,
+				kTemfSkinningStrideBytes) != 0)
 		{
 			return false;
 		}
@@ -6645,7 +5656,7 @@ bool CompileSkinnedMeshFromRaw(
 		stagedInput.morphTargets.push_back(std::move(stagedMorph));
 	}
 	std::size_t stagedSkinningByteCount = 0u;
-	if (!TryMultiplySkinnedSize(stagedToSource.size(), kDeformableMeshSkinningStrideBytes, stagedSkinningByteCount))
+	if (!TryMultiplySkinnedSize(stagedToSource.size(), kTemfSkinningStrideBytes, stagedSkinningByteCount))
 	{
 		SetDiagnostic(
 			"SkinnedMeshSkinningStreamOverflow",
@@ -6660,9 +5671,9 @@ bool CompileSkinnedMeshFromRaw(
 	{
 		const std::uint32_t sourceIndex = stagedToSource[stagedIndex];
 		std::memcpy(
-			stagedSkinningBytes.data() + stagedIndex * kDeformableMeshSkinningStrideBytes,
-			sourceSkinningBytes.data() + static_cast<std::size_t>(sourceIndex) * kDeformableMeshSkinningStrideBytes,
-			kDeformableMeshSkinningStrideBytes);
+			stagedSkinningBytes.data() + stagedIndex * kTemfSkinningStrideBytes,
+			sourceSkinningBytes.data() + static_cast<std::size_t>(sourceIndex) * kTemfSkinningStrideBytes,
+			kTemfSkinningStrideBytes);
 		stagedVertexPalettes.push_back(vertexPalette[sourceIndex]);
 	}
 
@@ -6732,7 +5743,7 @@ bool CompileSkinnedMeshFromRaw(
 	std::vector<std::uint8_t> payloadSkinningBytes;
 	payloadSkinningBytes.reserve(
 		finalVertexToStagedVertex.size()
-			* kDeformableMeshSkinningStrideBytes);
+			* kTemfSkinningStrideBytes);
 	std::vector<std::uint32_t> payloadVertexPalettes;
 	payloadVertexPalettes.reserve(finalVertexToStagedVertex.size());
 	for (const SkinnedMeshMorphTarget& stagedMorph : stagedInput.morphTargets)
@@ -6762,11 +5773,11 @@ bool CompileSkinnedMeshFromRaw(
 		payloadVertexPalettes.push_back(stagedVertexPalettes[stagedVertex]);
 		const std::uint8_t* skinningRecord = stagedSkinningBytes.data()
 			+ static_cast<std::size_t>(stagedVertex)
-				* kDeformableMeshSkinningStrideBytes;
+				* kTemfSkinningStrideBytes;
 		payloadSkinningBytes.insert(
 			payloadSkinningBytes.end(),
 			skinningRecord,
-			skinningRecord + kDeformableMeshSkinningStrideBytes);
+			skinningRecord + kTemfSkinningStrideBytes);
 		for (std::size_t morphIndex = 0u;
 			morphIndex < stagedInput.morphTargets.size();
 			++morphIndex)
@@ -6789,8 +5800,30 @@ bool CompileSkinnedMeshFromRaw(
 			}
 		}
 	}
+	// Report the same canonical vertex set that the published TEMF owns. The
+	// earlier per-source rows were needed while palettes and quantized weights
+	// were built, but retaining deindexed duplicates here would make diagnostics
+	// disagree with the deformation streams that runtime consumers receive.
+	std::vector<SkinnedMeshCookedVertex> canonicalCookedVertices;
+	canonicalCookedVertices.reserve(finalVertexToStagedVertex.size());
+	for (const std::uint32_t stagedVertex : finalVertexToStagedVertex)
+	{
+		if (stagedVertex >= stagedToSource.size()
+			|| stagedToSource[stagedVertex] >= report.cookedVertices.size())
+		{
+			std::filesystem::remove(stagePath, ignored);
+			SetDiagnostic(
+				"SkinnedMeshStaticVertexLayoutIncompatible",
+				"Static cleanup emitted a canonical vertex without a matching cooked deformation record.",
+				"Reimport the source mesh after rebuilding the mesh compiler and runtime from the same revision.");
+			return Finish(false, SkinnedMeshCookFailure::StaticVertexLayoutIncompatible);
+		}
+		canonicalCookedVertices.push_back(
+			report.cookedVertices[stagedToSource[stagedVertex]]);
+	}
+	report.cookedVertices = std::move(canonicalCookedVertices);
 	SkinnedMeshCookFailure appendFailure = SkinnedMeshCookFailure::StagedPayloadWriteFailed;
-	if (!TryAppendDeformablePayload(
+	if (!RewriteCanonicalDeformablePayload(
 		stagePath,
 		payloadInput,
 		settings,

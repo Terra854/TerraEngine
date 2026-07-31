@@ -10,7 +10,7 @@ namespace TerraEngine::EditorTests
 {
 	namespace
 	{
-		std::string ReadFeatureFile(const char* relativePath)
+		std::string ReadProductionFile(const char* relativePath)
 		{
 			std::ifstream input(
 				std::filesystem::path(TERRAENGINE_SOURCE_DIR) / relativePath,
@@ -30,22 +30,22 @@ namespace TerraEngine::EditorTests
 		}
 	}
 
-	void RegisterVirtualGeometryFeatureScaffoldingTests(TestRegistry& registry)
+	void RegisterVirtualGeometryProductionScaffoldingTests(TestRegistry& registry)
 	{
-		// This neutral registration point is intentionally tiny. Story-specific
-		// editor tests extend the feature without relying on static initialization
+		// This neutral registration point is intentionally tiny. Capability-specific
+		// editor tests extend the production contract without relying on static initialization
 		// or silently disappearing from the editor test executable.
-		registry.Add("VirtualGeometry.Editor.Feature045.ScaffoldingRegistered", [](TestContext& context)
+		registry.Add("VirtualGeometry.Editor.Production.ScaffoldingRegistered", [](TestContext& context)
 		{
 			context.Expect(true,
-				"The feature 045 editor-test registration point must execute.");
+				"The production virtual-geometry editor-test registration point must execute.");
 		});
 
-		registry.Add("VirtualGeometry.Editor.Feature045.LiveHarnessSuppressesAutomaticSceneOpen", [](TestContext& context)
+		registry.Add("VirtualGeometry.Editor.Production.LiveHarnessSuppressesAutomaticSceneOpen", [](TestContext& context)
 		{
-			const std::string editorSource = ReadFeatureFile(
+			const std::string editorSource = ReadProductionFile(
 				"Editor/TerraEngine-Editor/Subsystems/MainEditorSubsystem.cpp");
-			const std::string harnessSource = ReadFeatureFile(
+			const std::string harnessSource = ReadProductionFile(
 				"Tools/VirtualGeometry/CaptureVirtualGeometryLiveVisual.ps1");
 			constexpr std::string_view flag =
 				"TERRAENGINE_SUPPRESS_AUTOMATIC_SCENE_OPEN";
@@ -60,11 +60,11 @@ namespace TerraEngine::EditorTests
 				"The installed live harness must opt into disposable-scene startup.");
 		});
 
-		registry.Add("VirtualGeometry.Editor.Feature045.LiveHarnessLocksValidationRoutes", [](TestContext& context)
+		registry.Add("VirtualGeometry.Editor.Production.LiveHarnessLocksValidationRoutes", [](TestContext& context)
 		{
-			const std::string harnessSource = ReadFeatureFile(
+			const std::string harnessSource = ReadProductionFile(
 				"Tools/VirtualGeometry/CaptureVirtualGeometryLiveVisual.ps1");
-			const std::string comparisonSource = ReadFeatureFile(
+			const std::string comparisonSource = ReadProductionFile(
 				"Tools/VirtualGeometry/CompareVisibilityImages.ps1");
 			ExpectContains(context, harnessSource,
 				"renderer.virtualGeometry.validationRoute.set",
@@ -80,10 +80,10 @@ namespace TerraEngine::EditorTests
 				"Cross-route comparisons must preserve candidate route provenance.");
 		});
 
-		registry.Add("VirtualGeometry.Editor.Feature045.InstallProducersListRequiredArtifacts", [](TestContext& context)
+		registry.Add("VirtualGeometry.Editor.Production.InstallProducersListRequiredArtifacts", [](TestContext& context)
 		{
-			const std::string rootCmake = ReadFeatureFile("CMakeLists.txt");
-			const std::string toolsCmake = ReadFeatureFile(
+			const std::string rootCmake = ReadProductionFile("CMakeLists.txt");
+			const std::string toolsCmake = ReadProductionFile(
 				"Tools/VirtualGeometry/CMakeLists.txt");
 
 			// These assertions protect the direct install producers without
@@ -99,17 +99,17 @@ namespace TerraEngine::EditorTests
 				"The accelerated-route shader must be produced in the install tree.");
 			ExpectContains(context, toolsCmake,
 				"${CMAKE_BINARY_DIR}/Build/Tools",
-				"Every Feature 045 executable must use the canonical runnable install tree.");
+				"Every production virtual-geometry executable must use the canonical runnable install tree.");
 			ExpectContains(context, toolsCmake,
 				"TerraEngineVirtualGeometryBenchmark",
 				"The benchmark executable must have an installed producer.");
 		});
 
-		registry.Add("VirtualGeometry.Editor.Feature045.PhaseGateCoversZeroThroughNine", [](TestContext& context)
+		registry.Add("VirtualGeometry.Editor.Production.CapabilityScenariosCoverRequiredContracts", [](TestContext& context)
 		{
 			const std::filesystem::path scenarioRoot =
 				std::filesystem::path(TERRAENGINE_SOURCE_DIR) /
-				"Tools/VirtualGeometry/PhaseScenarios";
+				"Tools/VirtualGeometry/CapabilityScenarios";
 			std::size_t scenarioCount = 0;
 			std::string combined;
 			for (const std::filesystem::directory_entry& entry :
@@ -129,31 +129,32 @@ namespace TerraEngine::EditorTests
 			context.ExpectEqual(
 				static_cast<std::size_t>(10),
 				scenarioCount,
-				"The installed phase gate must define exactly one scenario for every phase 0-9.");
-			for (int phase = 0; phase <= 9; ++phase)
+				"The installed gate must define the complete production capability set.");
+			for (const std::string_view scenarioId : {
+				"capability-contract", "codec-storage", "device-submission",
+				"visibility-parity", "streaming-publication", "hybrid-rasterization",
+				"multi-view-rendering", "animated-geometry", "vendor-portability",
+				"production-readiness"})
 			{
-				ExpectContains(
-					context,
-					combined,
-					"\"phase\": " + std::to_string(phase),
-					"Every phase number from zero through nine must be present.");
+				ExpectContains(context, combined, "\"id\": \"" + std::string(scenarioId) + "\"",
+					"Every required production capability scenario must be present.");
 			}
 			context.Expect(
 				combined.find("D3D12") == std::string::npos &&
 					combined.find("DX12") == std::string::npos &&
 					combined.find("DXIL") == std::string::npos,
-				"Feature 045 phase scenarios must stay Vulkan-only.");
+				"Production capability scenarios must stay Vulkan-only.");
 		});
 
-		registry.Add("VirtualGeometry.Editor.Feature045.ReleaseGateHashesRealEvidence", [](TestContext& context)
+		registry.Add("VirtualGeometry.Editor.Production.ReleaseGateHashesRealEvidence", [](TestContext& context)
 		{
-			const std::string phaseGate = ReadFeatureFile(
-				"Tools/VirtualGeometry/RunVirtualGeometryPhaseGate.ps1");
-			const std::string releaseGate = ReadFeatureFile(
+			const std::string scenarioGate = ReadProductionFile(
+				"Tools/VirtualGeometry/RunVirtualGeometryCapabilityGate.ps1");
+			const std::string releaseGate = ReadProductionFile(
 				"Tools/VirtualGeometry/InvokeVirtualGeometryReleaseGates.ps1");
-			const std::string matrixGate = ReadFeatureFile(
+			const std::string matrixGate = ReadProductionFile(
 				"Tools/VirtualGeometry/RunBackendParityMatrix.ps1");
-			ExpectContains(context, phaseGate,
+			ExpectContains(context, scenarioGate,
 				"InvokeVirtualGeometryReleaseGates.ps1",
 				"The installed editor runner must invoke the release-gate orchestrator.");
 			ExpectContains(context, releaseGate,
@@ -182,16 +183,16 @@ namespace TerraEngine::EditorTests
 				"The benchmark comparison must supply the candidate capture directory.");
 			ExpectContains(context, releaseGate,
 				"VirtualGeometry.Editor.Automation.ValidationRoutes",
-				"The phase 3 editor gate must select the current route-validation tests.");
+				"The visibility-parity editor gate must select the current route-validation tests.");
 			ExpectContains(context, releaseGate,
 				"VirtualGeometry.Editor.Diagnostics.Foundation.ShadowSelectionsRemainSeparate",
-				"The phase 6 editor gate must select the current auxiliary-view tests.");
+				"The multi-view editor gate must select the current auxiliary-view tests.");
 			ExpectContains(context, releaseGate,
 				"VirtualGeometry.Editor.Export.Benchmark",
-				"The phase 9 editor gate must select the current benchmark-export tests.");
-			ExpectContains(context, phaseGate,
+				"The production-readiness editor gate must select the current benchmark-export tests.");
+			ExpectContains(context, scenarioGate,
 				"$declaredOutputs",
-				"Every operation and capture output declared by a phase manifest must be audited.");
+				"Every operation and capture output declared by a capability manifest must be audited.");
 			ExpectContains(context, matrixGate,
 				"'--runtime-adapter' $RuntimeAdapter",
 				"The backend matrix must forward its runtime adapter to the native benchmark.");

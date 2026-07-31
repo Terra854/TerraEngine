@@ -1,4 +1,4 @@
-# Feature 045 installed Vulkan runtime adapter.
+# Production virtual-geometry installed Vulkan runtime adapter.
 #
 # The native benchmark launches this script through
 # VirtualGeometryRuntimeAdapter.cmd. Each invocation starts the installed
@@ -15,6 +15,8 @@
 #   TERRA_VG_RUNTIME_PREFAB
 #   TERRA_VG_RUNTIME_PREFAB_CHILD
 #   TERRA_VG_RUNTIME_PREFAB_SCALE
+#   TERRA_VG_RUNTIME_MESH_ID
+#   TERRA_VG_RUNTIME_MATERIAL_ID
 #   TERRA_VG_RUNTIME_MCP_PORT_BASE
 #   TERRA_VG_RUNTIME_STREAMING_SETTLE_MS
 
@@ -212,7 +214,7 @@ $backend = (Require-AdapterArgument $options 'backend').ToLowerInvariant()
 $sampleIndex = [UInt64](Require-AdapterArgument $options 'sample-index')
 if($backend -ne 'vulkan')
 {
-	throw "Feature 045 runtime adapter supports Vulkan only, not '$backend'."
+	throw "The production virtual-geometry runtime adapter supports Vulkan only, not '$backend'."
 }
 
 $scriptRoot = [IO.Path]::GetFullPath($PSScriptRoot)
@@ -306,7 +308,7 @@ $artifactRoot = "$outputPath.artifacts"
 [IO.Directory]::CreateDirectory($artifactRoot) | Out-Null
 
 $editorDefault = Join-Path $installedRoot 'Editor/TerraEngine-Editor.exe'
-$projectDefault = Join-Path $installedRoot 'Tests/Fixtures/Animation/US1Import'
+$projectDefault = Join-Path $installedRoot 'Tests/Fixtures/Animation/ImportValidation'
 if($isAnimatedWorkload)
 {
 	# Source-tree runs discover the user-provided project beside the repository.
@@ -320,8 +322,8 @@ $editorPath = Resolve-InputPath (
 	Get-EnvironmentOverride 'TERRA_VG_RUNTIME_EDITOR' $editorDefault) $workingRoot
 $projectPath = Resolve-InputPath (
 	Get-EnvironmentOverride 'TERRA_VG_RUNTIME_PROJECT' $projectDefault) $workingRoot
-$assetDefault = 'Assets/Models/US1Hero.gltf'
-$prefabDefault = 'Assets/Models/US1Hero_Generated/US1Hero.teprefab'
+$assetDefault = 'Assets/Models/ImportHero.gltf'
+$prefabDefault = 'Assets/Models/ImportHero_Generated/ImportHero.teprefab'
 $prefabChildDefault = ''
 $prefabScaleDefault = '1'
 if($isAnimatedWorkload)
@@ -335,6 +337,18 @@ $asset = Get-EnvironmentOverride 'TERRA_VG_RUNTIME_ASSET' $assetDefault
 $prefab = Get-EnvironmentOverride 'TERRA_VG_RUNTIME_PREFAB' $prefabDefault
 $prefabChild = Get-EnvironmentOverride 'TERRA_VG_RUNTIME_PREFAB_CHILD' $prefabChildDefault
 $prefabScale = [double](Get-EnvironmentOverride 'TERRA_VG_RUNTIME_PREFAB_SCALE' $prefabScaleDefault)
+$meshAssetId = (Get-EnvironmentOverride 'TERRA_VG_RUNTIME_MESH_ID' '').Trim().ToLowerInvariant()
+$materialAssetId = (Get-EnvironmentOverride 'TERRA_VG_RUNTIME_MATERIAL_ID' '').Trim().ToLowerInvariant()
+$useRawMesh = -not [string]::IsNullOrWhiteSpace($meshAssetId)
+if($useRawMesh -and $meshAssetId -notmatch '^[0-9a-f]{32}$')
+{
+	throw 'TERRA_VG_RUNTIME_MESH_ID must be a 32-character hexadecimal UUID.'
+}
+if(-not [string]::IsNullOrWhiteSpace($materialAssetId) -and
+	$materialAssetId -notmatch '^[0-9a-f]{32}$')
+{
+	throw 'TERRA_VG_RUNTIME_MATERIAL_ID must be empty or a 32-character hexadecimal UUID.'
+}
 $portBase = [int](Get-EnvironmentOverride 'TERRA_VG_RUNTIME_MCP_PORT_BASE' '43175')
 $streamingSettleMilliseconds = [int](Get-EnvironmentOverride `
 	'TERRA_VG_RUNTIME_STREAMING_SETTLE_MS' '250')
@@ -389,6 +403,19 @@ if($isAnimatedWorkload)
 	}
 }
 
+$prefabName = "Virtual Geometry runtime sample $sampleIndex"
+$rawPressureObjectName = ''
+$rawPressureGeometryRequired = $useRawMesh -and
+	$workload -eq 'page-residency-pressure'
+if($rawPressureGeometryRequired)
+{
+	# A pressure sample needs a large projected raw mesh. The generated name is
+	# also the exact object selector that the live harness scales and reports.
+	$prefabScale = 10.0
+	$rawPressureObjectName = "Virtual Geometry page residency pressure $sampleIndex"
+	$prefabName = $rawPressureObjectName
+}
+
 $liveArguments = @{
 	InstalledEditor = $editorPath
 	Project = $projectPath
@@ -396,14 +423,59 @@ $liveArguments = @{
 	Preferences = (Join-Path $scriptRoot 'runtime-adapter-preferences.json')
 	OutputDirectory = $artifactRoot
 	Prefab = $prefab
-	PrefabName = "Feature 045 runtime sample $sampleIndex"
+	PrefabName = $prefabName
 	PrefabChildObject = $prefabChild
 	PrefabScale = $prefabScale
 	PrefabInstanceCount = [int]$runtimePrefabInstanceCount
 	PrefabSpacing = $runtimePrefabSpacing
+	MeshAssetId = $meshAssetId
+	MaterialAssetId = $materialAssetId
 	StreamingSettleMilliseconds = $streamingSettleMilliseconds
 	McpPort = $mcpPort
 	StartupTimeoutSeconds = 90
+}
+if($useRawMesh)
+{
+	# Raw mesh samples always use a disposable scene. This keeps the benchmark
+	# isolated from authored hierarchies while still exercising the installed
+	# asset database, renderer, streaming workers, and Vulkan backend.
+	$liveArguments['CreateValidationScene'] = $true
+	$liveArguments['CleanupValidationScene'] = $true
+	$liveArguments['ValidationScenePath'] =
+		"Assets/Scenes/.terra-validation/virtual-geometry-$workload-$sampleIndex-$PID.tescene"
+	if($rawPressureGeometryRequired)
+	{
+		# Keep the camera close to the ten-times raw mesh so projected error
+		# creates sustained non-root page demand. The close crop is intentional:
+		# this workload validates streaming pressure, while the normal live
+		# visual capture owns full-object framing.
+		$liveArguments['ValidationCameraPosition'] = @(0.0, 0.3, 3.0)
+		$liveArguments['ValidationCameraTarget'] = @(0.0, 0.3, 0.0)
+	}
+	else
+	{
+		$liveArguments['ValidationCameraPosition'] = @(0.0, 0.3, 3.0)
+	}
+}
+
+# Workload identity owns the transient representation override used by this
+# sample. This keeps automatic/direct/virtual measurements reproducible without
+# changing the project or persisting an editor preference.
+$representationRoute = switch($workload)
+{
+	'low-poly-unique-direct' { 'direct' }
+	'low-poly-repeated-direct' { 'direct' }
+	'low-poly-forced-virtual-geometry' { 'virtual-hardware' }
+	'low-poly-automatic-routing' { 'automatic' }
+	default { 'virtual-hardware' }
+}
+$liveArguments['RepresentationRoute'] = $representationRoute
+if($representationRoute -in @('virtual-hardware', 'virtual-compute'))
+{
+	# The installed Vulkan lane must exercise a real raster backend route;
+	# processor-expanded or ungraded execution cannot become timing evidence.
+	$liveArguments['ValidationRoute'] =
+		if($representationRoute -eq 'virtual-compute') { 'compute' } else { 'hardware' }
 }
 if($isAnimatedWorkload)
 {
@@ -414,7 +486,7 @@ if($isAnimatedWorkload)
 	$liveArguments['CreateValidationScene'] = $true
 	$liveArguments['CleanupValidationScene'] = $true
 	$liveArguments['ValidationScenePath'] =
-		"Assets/Scenes/.terra-validation/Feature045-$workload-$sampleIndex-$PID.tescene"
+		"Assets/Scenes/.terra-validation/virtual-geometry-$workload-$sampleIndex-$PID.tescene"
 	$liveArguments['ValidationCameraPosition'] = @(
 		[double]$runtimeCameraPosition[0],
 		[double]$runtimeCameraPosition[1],
@@ -440,6 +512,47 @@ $summary = Get-Content -Raw -LiteralPath $summaryPath | ConvertFrom-Json
 $vulkanIdentity = Read-ActiveVulkanIdentity (
 	Join-Path $artifactRoot 'installed-editor.stdout.log')
 
+# The live harness owns the exact editor transactions. Keep those records in
+# the adapter artifact so consumers can audit which route, pages, and profiler
+# operation produced the native benchmark sample without reopening the editor.
+$routeEvidence = [ordered]@{
+	rendererRoute = [string](Get-OptionalProperty $summary 'route')
+	validation = Get-OptionalProperty $summary 'validationRoute'
+	representation = Get-OptionalProperty $summary 'representationRoute'
+}
+$pageEvidence = [ordered]@{
+	diagnosticsViewType = [string](Get-OptionalProperty $summary 'diagnosticsViewType')
+	postWarmupStats = Get-OptionalProperty $summary 'postWarmupCaptureStats'
+	postFirstCaptureStats = Get-OptionalProperty $summary 'postFirstCaptureStats'
+	postCaptureStats = Get-OptionalProperty $summary 'postCaptureStats'
+	postCaptureAsset = Get-OptionalProperty $summary 'postCaptureAsset'
+}
+$profilerEvidence = Get-OptionalProperty $summary 'profilerEvidence'
+$instantiatedGeometry = Get-OptionalProperty $summary 'instantiatedGeometry'
+$rawGeometryEvidenceValid = $true
+if($useRawMesh)
+{
+	$publishedObjectNames = @(
+		Get-OptionalProperty $instantiatedGeometry 'objectNames')
+	$publishedMeshId = [string](Get-OptionalProperty $instantiatedGeometry 'meshAssetId')
+	$publishedMaterialId = [string](Get-OptionalProperty $instantiatedGeometry 'materialAssetId')
+	$rawGeometryEvidenceValid =
+		[string](Get-OptionalProperty $instantiatedGeometry 'source') -eq 'raw-mesh' -and
+		$publishedMeshId -eq $meshAssetId -and
+		($publishedMaterialId -eq $materialAssetId) -and
+		$publishedObjectNames -contains $prefabName
+	if($rawPressureGeometryRequired)
+	{
+		# This confirms the scale operation addressed the dynamically generated
+		# pressure object rather than an authored prefab child with a coincidental name.
+		$rawGeometryEvidenceValid = $rawGeometryEvidenceValid -and
+			$publishedObjectNames -contains $rawPressureObjectName -and
+			[double](Get-OptionalProperty $instantiatedGeometry 'scale') -eq 10.0 -and
+			[string](Get-OptionalProperty $instantiatedGeometry 'scaleTargetObject') -eq
+				$rawPressureObjectName
+	}
+}
+
 $capabilityEnvelope = Get-OptionalProperty $summary 'postCaptureCapabilityEvidence'
 $capabilityData = Get-OptionalProperty $capabilityEnvelope 'data'
 $measurements = @(
@@ -457,13 +570,36 @@ $validatedStages = @(
 			[bool](Get-OptionalProperty $_ 'validated')
 		} |
 		ForEach-Object { [string](Get-OptionalProperty $_ 'stage') })
-$requiredStages = @('traversal', 'compaction', 'indirect-generation')
+$directRouteWorkload = $workload -in @(
+	'low-poly-unique-direct',
+	'low-poly-repeated-direct',
+	'low-poly-automatic-routing')
+$directRouteMeasured =
+	[string](Get-OptionalProperty $summary 'route') -eq 'direct-indexed'
+$requiredStages = if($directRouteWorkload)
+{
+	# Direct-resident geometry intentionally owns no VG traversal, decode, or
+	# residency work. Its fence-delayed main-pass timestamp is the only required
+	# GPU stage for low-poly calibration.
+	@('hardware-raster')
+}
+else
+{
+	@('traversal', 'compaction', 'indirect-generation')
+}
 $missingStages = @($requiredStages | Where-Object {
 	$validatedStages -notcontains $_
 })
 
 $statsEnvelope = Get-OptionalProperty $summary 'postCaptureStats'
 $statsData = Get-OptionalProperty $statsEnvelope 'data'
+$routeEvidence.geometryRoute = [string](Get-OptionalProperty $statsData 'geometryRoute')
+$routeEvidence.source = [string](Get-OptionalProperty $statsData 'geometryRouteSource')
+$routeEvidence.directBatchCount = [UInt64](Get-OptionalProperty $statsData 'geometryRouteDirectBatchCount')
+$routeEvidence.sharedInstanceCount = [UInt64](Get-OptionalProperty $statsData 'geometryRouteSharedInstanceCount')
+$routeEvidence.suppressedPageRequests = [UInt64](Get-OptionalProperty $statsData 'geometryRouteSuppressedPageRequests')
+$routeEvidence.suppressedDecodeBlocks = [UInt64](Get-OptionalProperty $statsData 'geometryRouteSuppressedDecodeBlocks')
+$routeEvidence.suppressedResidencyRecords = [UInt64](Get-OptionalProperty $statsData 'geometryRouteSuppressedResidencyRecords')
 $streaming = Get-OptionalProperty $statsData 'streaming'
 if($null -eq $streaming)
 {
@@ -510,6 +646,11 @@ if($workload -eq 'page-residency-pressure')
 		$streamingCounters.pendingDecodePages -eq 0 -and
 		$streamingCounters.pendingUploadPages -eq 0
 }
+# Preserve the final typed counters beside the capture snapshots. A consumer
+# can therefore inspect page demand and completion without deriving it from
+# the renderer route or from the PNG artifacts.
+$pageEvidence.counters = $streamingCounters
+$pageEvidence.activityValid = $streamingActivityValid
 $animationActivityValid = $true
 $observedUniqueDeformationDispatches = [UInt64]0
 $observedAnimationOwnerMappings = [UInt64]0
@@ -584,15 +725,29 @@ else
 {
 	[bool](Get-OptionalProperty $summary 'unchangedByteIdentity')
 }
-$boundedCounters = $frameIdentityValid -and
+$routeExecutionValid = if($directRouteWorkload)
+{
+	$directRouteMeasured -and
+	$streamingCounters.submittedRequests -eq 0 -and
+	$streamingCounters.completedReads -eq 0 -and
+	$streamingCounters.acceptedPublicationPages -eq 0 -and
+	$streamingCounters.physicalResidencyRows -eq 0 -and
+	$streamingCounters.visibleResidentPages -eq 0
+}
+else
+{
 	[string](Get-OptionalProperty $summary 'route') -eq
-		'vulkan-device-authored-indirect' -and
+		'vulkan-device-authored-indirect'
+}
+$boundedCounters = $frameIdentityValid -and
+	$routeExecutionValid -and
 	$measurements.Count -gt 0 -and
 	$missingStages.Count -eq 0 -and
 	$validationErrors.Count -eq 0 -and
 	$captureFilesValid -and
 	$streamingActivityValid -and
 	$animationActivityValid -and
+	$rawGeometryEvidenceValid -and
 	[bool](Get-OptionalProperty $statsEnvelope 'ok')
 
 $captureTime = [DateTime]::UtcNow.ToString('o')
@@ -630,7 +785,14 @@ else
 	$null
 }
 
-$prefabFile = Join-Path $projectPath $prefab
+$identityAssetFile = if($useRawMesh)
+{
+	Join-Path $projectPath $asset
+}
+else
+{
+	Join-Path $projectPath $prefab
+}
 $shaderDirectory = Join-Path $installedRoot 'Editor/Shaders/VirtualGeometry'
 $capture = [ordered]@{
 	identity = [ordered]@{
@@ -649,17 +811,17 @@ $capture = [ordered]@{
 			"installed-tree|" + (Get-FileSha256OrUnavailable $editorPath))
 		executableHash = Get-FileSha256OrUnavailable $editorPath
 		shaderHash = Get-DirectoryInventoryHash $shaderDirectory
-		assetHash = Get-FileSha256OrUnavailable $prefabFile
+		assetHash = Get-FileSha256OrUnavailable $identityAssetFile
 		buildRecipeHash = Get-Sha256Text (
-			"$workload|$asset|$prefab|$prefabScale")
+			"$workload|$asset|$prefab|$prefabScale|$meshAssetId|$materialAssetId")
 	}
 	environment = [ordered]@{
 		backend = 'vulkan'
 		adapter = $vulkanIdentity.adapter
 		driver = $vulkanIdentity.driver
-		route = [string](Get-OptionalProperty $summary 'route')
+		route = $routeEvidence.rendererRoute
 		resolution = '480x270'
-		quality = 'feature-045-installed-validation'
+		quality = 'production-installed-validation'
 	}
 	workload = [ordered]@{
 		name = $workload
@@ -680,6 +842,17 @@ $capture = [ordered]@{
 		rejectedCount = if($boundedCounters) { 0 } else { 1 }
 		boundedCounters = $boundedCounters
 		rejectionReasons = @(
+			if(-not $routeExecutionValid)
+			{
+				if($directRouteWorkload)
+				{
+					'Low-poly capture did not prove the direct-indexed route with all VG-only streaming work suppressed.'
+				}
+				else
+				{
+					'Capture did not prove the device-authored Vulkan virtual-geometry route.'
+				}
+			}
 			if($missingStages.Count -gt 0)
 			{
 				"Missing validated stages: $($missingStages -join ', ')"
@@ -695,6 +868,10 @@ $capture = [ordered]@{
 			if(-not $streamingActivityValid)
 			{
 				'Streaming pressure produced no complete request/read/publication activity.'
+			}
+			if(-not $rawGeometryEvidenceValid)
+			{
+				'Raw-mesh object, scale, mesh identity, or material identity evidence was incomplete.'
 			}
 			if(-not $animationActivityValid)
 			{
@@ -714,9 +891,14 @@ $capture = [ordered]@{
 		)
 	}
 	geometry = [ordered]@{
-		route = [string](Get-OptionalProperty $summary 'route')
+		route = $routeEvidence.rendererRoute
 		validatedStages = $validatedStages
+		rawMesh = $instantiatedGeometry
+		rawGeometryEvidenceValid = $rawGeometryEvidenceValid
 	}
+	routeEvidence = $routeEvidence
+	pageEvidence = $pageEvidence
+	profilerEvidence = $profilerEvidence
 	residencyAndStreaming = [ordered]@{
 		boundedCounters = $boundedCounters
 		counters = $streamingCounters
@@ -724,6 +906,9 @@ $capture = [ordered]@{
 			Get-OptionalProperty $streaming 'lastRejectionReason')
 	}
 	visibilityAndShading = [ordered]@{
+		visualGatePassed = $captureFilesValid -and
+			$frameIdentityValid -and
+			$validationErrors.Count -eq 0
 		unchangedByteIdentity = [bool](
 			Get-OptionalProperty $summary 'unchangedByteIdentity')
 		expectedFrameIdentity = if($isAnimatedWorkload) {

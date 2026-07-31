@@ -1185,13 +1185,13 @@ namespace TerraEngine::Resource
 		return plan;
 	}
 
-	AnimatedVirtualPageResidencyPublication
-	PublishAnimatedVirtualPageResidencySnapshot(
-		const AnimatedVirtualPageResidencySnapshot& prior,
-		AnimatedVirtualPageResidencySnapshot candidate,
+	DeformableVirtualPageResidencyPublication
+	PublishDeformableVirtualPageResidencySnapshot(
+		const DeformableVirtualPageResidencySnapshot& prior,
+		DeformableVirtualPageResidencySnapshot candidate,
 		std::uint64_t completedFence)
 	{
-		AnimatedVirtualPageResidencyPublication result;
+		DeformableVirtualPageResidencyPublication result;
 		result.visible = prior;
 		if(candidate.publicationGeneration == 0u
 			|| candidate.catalogGeneration == 0u
@@ -1205,8 +1205,8 @@ namespace TerraEngine::Resource
 			return result;
 		}
 		std::sort(candidate.pages.begin(), candidate.pages.end(),
-			[](const AnimatedVirtualPageResidencyRow& left,
-				const AnimatedVirtualPageResidencyRow& right)
+			[](const DeformableVirtualPageResidencyRow& left,
+				const DeformableVirtualPageResidencyRow& right)
 			{
 				if(left.assetId != right.assetId)
 				{
@@ -1219,7 +1219,7 @@ namespace TerraEngine::Resource
 		for(std::size_t index = 0u;
 			index < candidate.pages.size(); ++index)
 		{
-			const AnimatedVirtualPageResidencyRow& page =
+			const DeformableVirtualPageResidencyRow& page =
 				candidate.pages[index];
 			if(page.assetId == TerraEngine::EMPTY_UUID
 				|| page.pageId == 0xffffffffu
