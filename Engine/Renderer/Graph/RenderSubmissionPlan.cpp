@@ -22,7 +22,8 @@ namespace TerraEngine::Renderer {
 		const std::vector<RenderPassNode>& passes,
 		const RenderWorkPacketPlan& packetPlan,
 		std::uint64_t currentFrameId,
-		std::shared_ptr<const TerraEngine::Animation::GpuAnimationPlan> animationPlan)
+		std::shared_ptr<const TerraEngine::Animation::GpuAnimationPlan> animationPlan,
+		std::shared_ptr<const VirtualGeometryGpuPlan> virtualGeometryPlan)
 	{
 		RenderSubmissionPlan plan;
 		plan.frameId = snapshot.frameId;
@@ -33,6 +34,7 @@ namespace TerraEngine::Renderer {
 		const DeformationBackendWorkPlan deformation =
 			BuildDeformationBackendWorkPlan(snapshot);
 		plan.deformationWork = deformation.immutablePlan;
+		plan.virtualGeometryWork = std::move(virtualGeometryPlan);
 		plan.fallbacksUsed = packetPlan.serializedReasons;
 
 		for (const RenderPassNode& pass : passes)
@@ -101,6 +103,24 @@ namespace TerraEngine::Renderer {
 			AddSubmissionDiagnostic(plan, "invalid-animated-geometry-deformation",
 				"Animated geometry deformation work is incomplete or belongs to another frame.",
 				"Discard the candidate deformation publication and keep compatible fallback coverage.");
+		}
+		if(plan.virtualGeometryWork != nullptr)
+		{
+			const VirtualGeometryGpuPlan &virtualGeometry = *plan.virtualGeometryWork;
+			if(!virtualGeometry.IsComplete())
+			{
+				AddSubmissionDiagnostic(plan, "invalid-virtual-geometry-work",
+					virtualGeometry.rejectionReason.empty()
+						? "Virtual-geometry work is incomplete or violates its bounded stage contract."
+						: virtualGeometry.rejectionReason,
+					"Discard the immutable device-work envelope and retain the diagnosed conservative fallback.");
+			}
+			else if(virtualGeometry.frameId != 0u && virtualGeometry.frameId != plan.frameId)
+			{
+				AddSubmissionDiagnostic(plan, "stale-virtual-geometry-work",
+					"Virtual-geometry work was prepared for a different frame.",
+					"Discard stale device work and rebuild it from the current immutable snapshot.");
+			}
 		}
 		if (!plan.frameOverlapAllowed && plan.frameOverlapBlockedReasons.empty())
 		{

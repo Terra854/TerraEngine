@@ -1,0 +1,13 @@
+{
+	"autoBuildScripts": true,
+	"editorMcpEnabled": true,
+	"editorMcpListenPort": 43175,
+	"editorMcpRecentSession": "virtual-geometry-runtime-adapter",
+	"editorMcpWriteModeDefault": "writes_enabled",
+	"externalScriptEditorCommand": "",
+	"recentProjects": [],
+	"renderDebugDiagnostics": true,
+	"rendererDiagnosticsPreferencesInitialized": true,
+	"theme": "Dark",
+	"vulkanValidationLayers": true
+}

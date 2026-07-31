@@ -216,6 +216,12 @@ namespace TerraEngine::Renderer {
 		std::uint64_t budgetPressureBytes = 0u;
 		std::uint64_t estimatedGeometryBytes = 0u;
 		std::uint32_t clusterPacketCount = 0u;
+		// These counters describe the renderer-neutral packet routes that were
+		// copied into this immutable view snapshot. Validation tooling can use
+		// them to prove that Hybrid exercised the three real raster paths.
+		std::uint32_t hardwareRasterPacketCount = 0u;
+		std::uint32_t computeRasterPacketCount = 0u;
+		std::uint32_t indexedRasterPacketCount = 0u;
 		std::uint32_t candidateClusterCount = 0u;
 		std::uint32_t compactedClusterCount = 0u;
 		std::uint32_t rejectedClusterCount = 0u;
@@ -253,6 +259,12 @@ namespace TerraEngine::Renderer {
 		std::uint32_t animatedPageDemandCount = 0u;
 		std::uint32_t animatedUniqueDispatchCount = 0u;
 		std::uint32_t animatedReuseCount = 0u;
+		// These values describe the immutable deformation plan, not a speculative
+		// live GPU readback. They let editor and automation distinguish a shared
+		// compatible request from work rejected before command recording.
+		std::vector<std::uint32_t> animatedAnimationLods;
+		std::uint32_t animatedSkippedWorkCount = 0u;
+		std::string animatedBoundsSource;
 		std::uint32_t animatedFallbackCount = 0u;
 		std::uint64_t deformationCurrentBytes = 0u;
 		std::uint64_t deformationHistoryBytes = 0u;
@@ -366,6 +378,7 @@ namespace TerraEngine::Renderer {
 		std::vector<RenderQueueReadiness> queueReadiness;
 		std::vector<RenderPerformanceGateResult> performanceGates;
 		std::vector<VirtualGeometryViewDiagnosticsSnapshot> virtualGeometryViews;
+		VirtualGeometryCapabilityDiagnosticsSnapshot virtualGeometryCapabilityDiagnostics;
 		std::vector<VirtualGeometryBudgetContributor> virtualGeometryBudgetContributors;
 		std::vector<VirtualGeometrySchedulerDiagnostics> virtualGeometrySchedulers;
 		std::vector<RenderCaptureSchedulerDiagnostics> captureSchedulers;
@@ -417,6 +430,9 @@ namespace TerraEngine::Renderer {
 	TERRAENGINE_API void AddVirtualGeometryFailOpenDiagnostic(RenderDiagnosticsSummary& summary, const TerraEngine::UUID& meshId, const VirtualGeometryDrawRange& range);
 	TERRAENGINE_API VirtualGeometrySchedulerDiagnostics BuildVirtualGeometrySchedulerDiagnostics(std::string owningSystem, std::string schedulerPhase, std::vector<std::string> readResources, std::vector<std::string> writeResources, std::string workerSafePreparation, std::string protectedBoundary, std::string visibilityBoundary);
 	TERRAENGINE_API void ApplyVirtualGeometryDiagnostics(RenderDiagnosticsSummary& summary, std::vector<VirtualGeometryViewDiagnosticsSnapshot> viewSnapshots, std::vector<VirtualGeometrySchedulerDiagnostics> schedulerSnapshots);
+	TERRAENGINE_API VirtualGeometryGpuTimingSnapshot BuildVirtualGeometryGpuTimingSnapshot(const VirtualGeometryMeasurementRecord& measurement, const VirtualGeometryFrameViewIdentity& publicationIdentity);
+	TERRAENGINE_API void ApplyVirtualGeometryGpuTimingDiagnostics(RenderDiagnosticsSummary& summary, std::vector<VirtualGeometryMeasurementRecord> measurements, const VirtualGeometryFrameViewIdentity& publicationIdentity);
+	TERRAENGINE_API void ApplyVirtualGeometryCapabilityDiagnostics(RenderDiagnosticsSummary& summary, VirtualGeometryCapabilityDiagnosticsSnapshot diagnostics);
 	TERRAENGINE_API RenderCaptureSchedulerDiagnostics BuildRenderCaptureSchedulerDiagnostics(std::string owningSystem, std::string schedulerPhase, std::string sourceKind, bool backendReadback, bool deterministicFallback);
 	TERRAENGINE_API std::optional<TerraEngine::Profiling::PresentationWaitKind> ClassifyUnavoidablePresentationWait(BackendSubmitStage stage);
 	TERRAENGINE_API std::vector<TerraEngine::Profiling::PresentationWaitRecord> BuildPresentationWaitRecords(const BackendFrameBreakdown& breakdown);

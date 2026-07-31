@@ -477,7 +477,10 @@ namespace
 		}
 		if (HasRenderableVirtualGeometryPages(*summary))
 		{
-			std::string label = std::to_string(summary->residentPages) + " resident";
+			// These totals originate from the protected render publication, not the
+			// cooked page catalog. Calling them published avoids implying that every
+			// page listed in a TEMF is physically usable by this frame.
+			std::string label = std::to_string(summary->residentPages) + " published";
 			if (summary->pinnedFallbackPages > 0u)
 			{
 				label += ", ";

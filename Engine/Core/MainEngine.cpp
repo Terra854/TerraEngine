@@ -22,6 +22,7 @@
 #include "Profiling/Profiler.h"
 #include "Profiling/ProfilerScope.h"
 #include "Resource/ResourceManager.h"
+#include "Resource/VirtualGeometryStreamingSystem.h"
 #include "Runtime/BootSummary.h"
 #include "Runtime/ContentMount/ContentMount.h"
 #include "Runtime/ExportStartupCoordinator.h"
@@ -275,6 +276,17 @@ void Engine::Initialize()
 		// installed parity run independent of a graphics driver and window server.
 		UISystem& uiSystem = UISystem::Instance();
 		RegisterEngineSystem(systems, systemScheduler, uiSystem, uiSystem.SchedulerDeclaration());
+
+		// Streaming publication is a separate protected boundary. Register it before
+		// RenderSystem so accepted page state is complete before the renderer captures
+		// this frame's immutable snapshot; it never adds a scene-mutation flush.
+		TerraEngine::Resource::VirtualGeometryStreamingSystem& virtualGeometryStreamingSystem =
+			TerraEngine::Resource::VirtualGeometryStreamingSystem::Instance();
+		RegisterEngineSystem(
+			systems,
+			systemScheduler,
+			virtualGeometryStreamingSystem,
+			virtualGeometryStreamingSystem.SchedulerDeclaration());
 
 		RenderSystem& renderSystem = RenderSystem::Instance();
 		renderSystem.SetEditorModeEnabled(editorMode);

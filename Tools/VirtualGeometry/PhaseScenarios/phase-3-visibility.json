@@ -1,0 +1,23 @@
+{
+	"schemaVersion": 2,
+	"phase": 3,
+	"id": "phase-3",
+	"title": "Hardware visibility and route parity",
+	"requiredTools": ["renderer.virtualGeometry.capabilityEvidence", "renderer.virtualGeometry.stats", "camera.capture_custom", "game_view.capture"],
+	"operations": [
+		{"id": "capability", "tool": "renderer.virtualGeometry.capabilityEvidence", "evidence": "editor/capability.json"},
+		{"id": "stats", "tool": "renderer.virtualGeometry.stats", "evidence": "editor/stats.json"}
+	],
+	"captures": [
+		{"id": "scene", "tool": "camera.capture_custom", "evidence": "images/scene.png"},
+		{"id": "game", "tool": "game_view.capture", "evidence": "images/game.png"}
+	],
+	"requiredArtifacts": [
+		{"path": "editor/capability.json", "kind": "editor-envelope"},
+		{"path": "editor/stats.json", "kind": "editor-envelope"},
+		{"path": "images/scene.png", "kind": "png"},
+		{"path": "images/game.png", "kind": "png"}
+	],
+	"releaseGates": ["visibility-tests", "visibility-editor-tests", "route-parity-hardware-compute", "route-parity-hardware-indexed"],
+	"unavailablePolicy": "fail-closed"
+}

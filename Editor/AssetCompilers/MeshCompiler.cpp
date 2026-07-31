@@ -3,6 +3,8 @@
 // Implements the mesh compilation logic, including source file importing via Assimp, normal smoothing, and tangent generation. It utilizes meshoptimizer for meshlet generation and packs the final data into a high-performance binary format suitable for GPU-driven rendering.
 
 #include "MeshCompiler.h"
+#include "VirtualGeometryCodecs.h"
+#include "VirtualGeometryMeshoptCodec.h"
 
 #include <algorithm>
 #include <array>
@@ -20,6 +22,7 @@
 #include <iterator>
 #include <limits>
 #include <numeric>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -150,6 +153,194 @@ namespace
 	};
 	static_assert(offsetof(VertexRaw, tangent) == offsetof(VertexRaw, normal) + sizeof(float) * 3u);
 	static_assert(offsetof(VertexRaw, uv) == offsetof(VertexRaw, normal) + sizeof(float) * 6u);
+
+	std::vector<unsigned char> BuildVirtualGeometrySimplificationLocks(
+		const std::vector<VertexRaw>& vertices)
+	{
+		struct PositionBits
+		{
+			std::array<std::uint32_t, 3u> values{};
+
+			bool operator==(const PositionBits&) const = default;
+		};
+		struct PositionBitsHasher
+		{
+			std::size_t operator()(const PositionBits& key) const noexcept
+			{
+				std::size_t seed = 0u;
+				for(const std::uint32_t value : key.values)
+				{
+					seed ^= static_cast<std::size_t>(value)
+						+ 0x9e3779b9u
+						+ (seed << 6u)
+						+ (seed >> 2u);
+				}
+				return seed;
+			}
+		};
+		const auto GetPositionBits = [](const VertexRaw& vertex)
+		{
+			PositionBits key{};
+			static_assert(sizeof(key.values) == sizeof(vertex.position));
+			std::memcpy(
+				key.values.data(),
+				vertex.position.data(),
+				sizeof(vertex.position));
+			return key;
+		};
+
+		// A negative tangent sign is ordinary for an entire UV island. It only
+		// identifies a mirrored seam when another vertex at the exact welded
+		// position carries the opposite sign. Record both signs first so a
+		// uniformly mirrored grid remains simplifiable.
+		std::unordered_map<PositionBits, std::uint8_t, PositionBitsHasher>
+			tangentSignsByPosition;
+		tangentSignsByPosition.reserve(vertices.size());
+		struct WeldIdentitySet
+		{
+			std::uint32_t firstIdentity = 0u;
+			bool hasIdentity = false;
+			bool hasConflict = false;
+		};
+		std::unordered_map<PositionBits, WeldIdentitySet, PositionBitsHasher>
+			weldIdentitiesByPosition;
+		weldIdentitiesByPosition.reserve(vertices.size());
+		for(const VertexRaw& vertex : vertices)
+		{
+			const PositionBits position = GetPositionBits(vertex);
+			const std::uint8_t sign =
+				vertex.tangentW < 0.0f ? 0x1u : 0x2u;
+			tangentSignsByPosition[position] |= sign;
+
+			// A non-zero deformation identity is normal for every animated
+			// vertex, so locking every such vertex would disable all animated
+			// simplification. Only coincident vertices with different identities
+			// form a real skinning or morph seam that must remain fixed.
+			WeldIdentitySet& identities = weldIdentitiesByPosition[position];
+			if(vertex.weldIdentity != 0u)
+			{
+				if(!identities.hasIdentity)
+				{
+					identities.firstIdentity = vertex.weldIdentity;
+					identities.hasIdentity = true;
+				}
+				else if(identities.firstIdentity != vertex.weldIdentity)
+				{
+					identities.hasConflict = true;
+				}
+			}
+		}
+
+		std::vector<unsigned char> locks(vertices.size(), 0u);
+		for(std::size_t index = 0u; index < vertices.size(); ++index)
+		{
+			const VertexRaw& vertex = vertices[index];
+			// Deformation weld identities encode joint palettes, morph envelopes,
+			// and authored vertex masks. Mirrored tangent frames encode a handed
+			// boundary. Locking either case is deliberately conservative: material
+			// sections are simplified independently, while UV/normal/tangent
+			// differences remain protected by the weighted attribute stream.
+			const auto signIt =
+				tangentSignsByPosition.find(GetPositionBits(vertex));
+			const bool mirroredTangentSeam =
+				signIt != tangentSignsByPosition.end()
+				&& signIt->second == 0x3u;
+			const auto identityIt =
+				weldIdentitiesByPosition.find(GetPositionBits(vertex));
+			const bool deformationSeam =
+				identityIt != weldIdentitiesByPosition.end()
+				&& identityIt->second.hasConflict;
+			locks[index] = deformationSeam
+				|| mirroredTangentSeam
+				? 1u
+				: 0u;
+		}
+		return locks;
+	}
+
+	void BuildVirtualGeometryShadowCodecProfiles(
+		std::span<const std::uint8_t> source,
+		VirtualGeometryCompileReport& report)
+	{
+		for(const std::uint32_t pageSizeKiB : { 32u, 64u, 128u })
+		{
+			const std::size_t pageBytes =
+				static_cast<std::size_t>(pageSizeKiB) * 1024u;
+			const std::size_t sourceBytesPerPage =
+				pageBytes - sizeof(VirtualGeometryCompactBlockHeader);
+			for(const TerraEngine::Editor::VirtualGeometryPrototypeCodec codec : {
+				TerraEngine::Editor::VirtualGeometryPrototypeCodec::Expanded,
+				TerraEngine::Editor::VirtualGeometryPrototypeCodec::Terra })
+			{
+				VirtualGeometryShadowCodecCompileReport profile{};
+				profile.codecProfile =
+					codec == TerraEngine::Editor::VirtualGeometryPrototypeCodec::Expanded
+						? "expanded"
+						: "terra";
+				profile.pageSizeKiB = pageSizeKiB;
+				profile.sourceBytes = source.size();
+				profile.complete = true;
+				for(std::size_t offset = 0u;
+					offset < source.size();
+					offset += sourceBytesPerPage)
+				{
+					const auto page = source.subspan(
+						offset,
+						std::min(sourceBytesPerPage, source.size() - offset));
+					const TerraEngine::Editor::VirtualGeometryEncodedBlock encoded =
+						TerraEngine::Editor::EncodeVirtualGeometryPrototypeBlock(codec, {
+							page,
+							static_cast<std::uint32_t>(page.size()),
+							1u,
+							0u
+						});
+					if(!encoded.IsComplete() || encoded.bytes.size() > pageBytes)
+					{
+						profile.complete = false;
+						break;
+					}
+					profile.encodedBytes += encoded.bytes.size();
+					profile.deterministicHash ^=
+						CalculateVirtualGeometryCompactHash(encoded.bytes);
+				}
+				report.shadowCodecProfiles.push_back(std::move(profile));
+			}
+
+			VirtualGeometryShadowCodecCompileReport meshopt{};
+			meshopt.codecProfile = "meshoptimizer";
+			meshopt.pageSizeKiB = pageSizeKiB;
+			meshopt.sourceBytes = source.size();
+			meshopt.complete = true;
+			for(std::size_t offset = 0u;
+				offset < source.size();
+				offset += sourceBytesPerPage)
+			{
+				const auto page = source.subspan(
+					offset,
+					std::min(sourceBytesPerPage, source.size() - offset));
+				std::vector<std::uint8_t> padded(
+					(page.size() + 3u) & ~std::size_t(3u), 0u);
+				std::copy(page.begin(), page.end(), padded.begin());
+				const TerraEngine::Editor::VirtualGeometryEncodedBlock encoded =
+					TerraEngine::Editor::EncodeVirtualGeometryMeshoptBlock({
+						padded,
+						TerraEngine::Editor::VirtualGeometryMeshoptStreamKind::
+							QuantizedAttributes,
+						static_cast<std::uint32_t>(padded.size() / 4u),
+						4u
+					});
+				if(!encoded.IsComplete() || encoded.bytes.size() > pageBytes)
+				{
+					meshopt.complete = false;
+					break;
+				}
+				meshopt.encodedBytes += encoded.bytes.size();
+				meshopt.deterministicHash ^=
+					CalculateVirtualGeometryCompactHash(encoded.bytes);
+			}
+			report.shadowCodecProfiles.push_back(std::move(meshopt));
+		}
+	}
 
 	// struct FaceInfo groups related state and operations so callers have one documented contract.
 	struct FaceInfo
@@ -944,6 +1135,218 @@ namespace
 		}
 	}
 
+	// Appends a VGXD footer whose offsets are relative to its own first byte.
+	// Keeping the complete index, descriptors, and encoded blocks together lets
+	// streaming validate one bounded range without relying on TEMF-global
+	// offsets or process-local compiler state.
+	void AppendVirtualGeometryCompactFooter(
+		std::ofstream& out,
+		const std::vector<std::uint8_t>& vertexData,
+		const std::vector<std::uint8_t>& vertexRemapData,
+		const std::vector<std::uint8_t>& primitiveIndices,
+		const VirtualGeometryBuildOutput* virtualGeometry)
+	{
+		if(virtualGeometry == nullptr)
+		{
+			return;
+		}
+
+		std::vector<std::uint8_t> source;
+		source.reserve(vertexData.size() + vertexRemapData.size() + primitiveIndices.size());
+		source.insert(source.end(), vertexData.begin(), vertexData.end());
+		source.insert(source.end(), vertexRemapData.begin(), vertexRemapData.end());
+		source.insert(source.end(), primitiveIndices.begin(), primitiveIndices.end());
+		if(source.empty())
+		{
+			return;
+		}
+
+		const std::size_t requestedPageCount = std::max<std::size_t>(1u, virtualGeometry->pages.size());
+		const std::size_t pageCount = std::min(requestedPageCount, source.size());
+		std::vector<TerraEngine::Editor::VirtualGeometryEncodedBlock> encodedBlocks;
+		std::vector<VirtualGeometryCompactPageDescriptor> pages;
+		encodedBlocks.reserve(pageCount);
+		pages.reserve(pageCount);
+		for(std::size_t pageIndex = 0u; pageIndex < pageCount; ++pageIndex)
+		{
+			const std::size_t begin = source.size() * pageIndex / pageCount;
+			const std::size_t end = source.size() * (pageIndex + 1u) / pageCount;
+			const std::span<const std::uint8_t> pageSource(source.data() + begin, end - begin);
+			const auto encoded = TerraEngine::Editor::EncodeVirtualGeometryPrototypeBlock(
+				TerraEngine::Editor::VirtualGeometryPrototypeCodec::Terra,
+				{ pageSource, 1u, static_cast<std::uint32_t>(pageSource.size()), 0u });
+			if(!encoded.IsComplete())
+			{
+				return;
+			}
+			const std::uint32_t pageId = pageIndex < virtualGeometry->pages.size()
+				? virtualGeometry->pages[pageIndex].pageId
+				: static_cast<std::uint32_t>(pageIndex);
+			const std::uint32_t fallbackPageId = pageIndex < virtualGeometry->pages.size()
+				? virtualGeometry->pages[pageIndex].fallbackPageId
+				: pageId;
+			// blockTableOffset is assigned after the common descriptor table location
+			// is known. Each compact page owns one bounded Terra block in v1.
+			pages.push_back({ pageId, fallbackPageId, 64u, 1u, 0u,
+				static_cast<std::uint32_t>(pageSource.size()),
+				kVirtualGeometryExtensionFlagPinnedFallback,
+				kVirtualGeometryCodecCapabilityTerra });
+			encodedBlocks.push_back(encoded);
+		}
+
+		const auto Align16 = [](std::size_t value) { return (value + 15u) & ~std::size_t(15u); };
+		const std::size_t entryCount = pages.size() + 1u;
+		const std::size_t entryTableOffset = sizeof(VirtualGeometryExtensionDirectoryHeader);
+		const std::size_t pageTableOffset = Align16(entryTableOffset + entryCount * sizeof(VirtualGeometryExtensionDirectoryEntry));
+		const std::size_t blockTableOffset = Align16(pageTableOffset + pages.size() * sizeof(VirtualGeometryCompactPageDescriptor));
+		std::size_t blockBytesOffset = Align16(blockTableOffset + encodedBlocks.size() * sizeof(VirtualGeometryCompactBlockDescriptor));
+		std::vector<VirtualGeometryCompactBlockDescriptor> blocks;
+		blocks.reserve(encodedBlocks.size());
+		for(std::size_t blockIndex = 0u; blockIndex < encodedBlocks.size(); ++blockIndex)
+		{
+			const auto& encoded = encodedBlocks[blockIndex];
+			blocks.push_back({ static_cast<std::uint32_t>(VirtualGeometryCompactBlockKind::Positions),
+				static_cast<std::uint32_t>(VirtualGeometryCompactCodec::Terra), 0u, 1u,
+				pages[blockIndex].decodedByteSize, 0u, blockBytesOffset,
+				static_cast<std::uint32_t>(encoded.bytes.size()), pages[blockIndex].decodedByteSize,
+				CalculateVirtualGeometryCompactHash(encoded.bytes), kVirtualGeometryCodecCapabilityTerra });
+			pages[blockIndex].blockTableOffset = blockTableOffset + blockIndex * sizeof(VirtualGeometryCompactBlockDescriptor);
+			blockBytesOffset = Align16(blockBytesOffset + encoded.bytes.size());
+		}
+
+		std::vector<VirtualGeometryExtensionDirectoryEntry> entries;
+		entries.reserve(entryCount);
+		for(std::size_t pageIndex = 0u; pageIndex < pages.size(); ++pageIndex)
+		{
+			const auto& page = pages[pageIndex];
+			entries.push_back({ static_cast<std::uint32_t>(VirtualGeometryExtensionType::CompactPage),
+				kVirtualGeometryExtensionFlagPageLocal | kVirtualGeometryExtensionFlagPinnedFallback,
+				page.pageId, page.profile,
+				pageTableOffset + pageIndex * sizeof(VirtualGeometryCompactPageDescriptor),
+				static_cast<std::uint32_t>(sizeof(VirtualGeometryCompactPageDescriptor)),
+				page.decodedByteSize,
+				CalculateVirtualGeometryCompactHash(std::span<const std::uint8_t>(
+					reinterpret_cast<const std::uint8_t*>(&page), sizeof(page))),
+				page.requiredCapabilities });
+		}
+		entries.push_back({ static_cast<std::uint32_t>(VirtualGeometryExtensionType::TerraBlock), 0u,
+			0u, 64u, blockTableOffset,
+			static_cast<std::uint32_t>(blocks.size() * sizeof(VirtualGeometryCompactBlockDescriptor)),
+			static_cast<std::uint32_t>(blocks.size() * sizeof(VirtualGeometryCompactBlockDescriptor)),
+			CalculateVirtualGeometryCompactHash(std::span<const std::uint8_t>(
+				reinterpret_cast<const std::uint8_t*>(blocks.data()), blocks.size() * sizeof(VirtualGeometryCompactBlockDescriptor))),
+			kVirtualGeometryCodecCapabilityTerra });
+
+		const std::size_t footerBytes = blockBytesOffset;
+		if(footerBytes > std::numeric_limits<std::uint32_t>::max())
+		{
+			return;
+		}
+		const VirtualGeometryExtensionDirectoryHeader directory{
+			kVirtualGeometryExtensionDirectoryMagicValue, kVirtualGeometryExtensionDirectoryVersion,
+			static_cast<std::uint16_t>(sizeof(VirtualGeometryExtensionDirectoryHeader)),
+			static_cast<std::uint32_t>(footerBytes), static_cast<std::uint32_t>(entries.size()),
+			static_cast<std::uint32_t>(entryTableOffset),
+			CalculateVirtualGeometryCompactHash(std::span<const std::uint8_t>(
+				reinterpret_cast<const std::uint8_t*>(entries.data()), entries.size() * sizeof(VirtualGeometryExtensionDirectoryEntry))),
+			kVirtualGeometryCodecCapabilityTerra };
+
+		std::vector<std::uint8_t> footer(footerBytes, 0u);
+		std::memcpy(footer.data(), &directory, sizeof(directory));
+		std::memcpy(footer.data() + entryTableOffset, entries.data(), entries.size() * sizeof(VirtualGeometryExtensionDirectoryEntry));
+		std::memcpy(footer.data() + pageTableOffset, pages.data(), pages.size() * sizeof(VirtualGeometryCompactPageDescriptor));
+		std::memcpy(footer.data() + blockTableOffset, blocks.data(), blocks.size() * sizeof(VirtualGeometryCompactBlockDescriptor));
+		for(std::size_t blockIndex = 0u; blockIndex < blocks.size(); ++blockIndex)
+		{
+			std::memcpy(footer.data() + blocks[blockIndex].byteOffset,
+				encodedBlocks[blockIndex].bytes.data(), encodedBlocks[blockIndex].bytes.size());
+		}
+		out.write(reinterpret_cast<const char*>(footer.data()), static_cast<std::streamsize>(footer.size()));
+	}
+
+	// Append the aggregate profile separately from VGXD so existing compact
+	// readers keep their frozen directory contract. The profile names a normal
+	// validated root fallback cluster; it never carries geometry bytes itself.
+	void AppendVirtualGeometryAggregateProfile(
+		std::ofstream& out,
+		const VirtualGeometryBuildOutput* virtualGeometry)
+	{
+		if (virtualGeometry == nullptr || virtualGeometry->clusters.empty())
+		{
+			return;
+		}
+		const auto rootIt = std::find_if(
+			virtualGeometry->clusters.begin(),
+			virtualGeometry->clusters.end(),
+			[](const VirtualGeometryClusterRecord& cluster) {
+				return cluster.parentClusterId == kVirtualGeometryInvalidIndex;
+			});
+		if (rootIt == virtualGeometry->clusters.end()
+			|| std::count_if(
+				virtualGeometry->clusters.begin(), virtualGeometry->clusters.end(),
+				[](const VirtualGeometryClusterRecord& cluster) {
+					return cluster.parentClusterId == kVirtualGeometryInvalidIndex;
+				}) != 1)
+		{
+			// A global aggregate fallback cannot prove coverage for multiple roots.
+			// Leave this mesh on ordinary per-cluster fallbacks until a future
+			// cooker emits explicitly regional aggregate profiles.
+			return;
+		}
+
+		const auto fallbackCluster = [&]() {
+			std::uint32_t selected = rootIt->clusterId;
+			for (std::size_t guard = 0u; guard < virtualGeometry->clusters.size(); ++guard)
+			{
+				const VirtualGeometryClusterRecord& cluster =
+					virtualGeometry->clusters[selected];
+				if (cluster.fallbackClusterId == selected
+					|| cluster.fallbackClusterId >= virtualGeometry->clusters.size())
+				{
+					break;
+				}
+				selected = cluster.fallbackClusterId;
+			}
+			return selected;
+		}();
+
+		float canonicalError = 0.0f;
+		for (const VirtualGeometryClusterRecord& cluster : virtualGeometry->clusters)
+		{
+			canonicalError = std::max(canonicalError, cluster.geometricError);
+		}
+		const std::span<const std::uint8_t> clusterBytes(
+			reinterpret_cast<const std::uint8_t*>(virtualGeometry->clusters.data()),
+			virtualGeometry->clusters.size() * sizeof(VirtualGeometryClusterRecord));
+		std::uint64_t stableId = CalculateVirtualGeometryCompactHash(clusterBytes);
+		if (stableId == 0u)
+		{
+			stableId = 1u;
+		}
+
+		const VirtualGeometryAggregateProfileRecord profile{
+			static_cast<std::uint32_t>(VirtualGeometryAggregateProfileKind::Fallback),
+			kVirtualGeometryAggregateProfileFlagCompleteFallbackCoverage,
+			stableId,
+			canonicalError,
+			static_cast<std::uint32_t>(virtualGeometry->clusters.size()),
+			1.0f,
+			stableId,
+			fallbackCluster,
+			0u };
+		const VirtualGeometryAggregateProfileHeader header{
+			kVirtualGeometryAggregateProfileMagicValue,
+			kVirtualGeometryAggregateProfileVersion,
+			static_cast<std::uint16_t>(sizeof(VirtualGeometryAggregateProfileHeader)),
+			static_cast<std::uint32_t>(sizeof(VirtualGeometryAggregateProfileHeader)
+				+ sizeof(VirtualGeometryAggregateProfileRecord)),
+			1u,
+			CalculateVirtualGeometryCompactHash(std::span<const std::uint8_t>(
+				reinterpret_cast<const std::uint8_t*>(&profile), sizeof(profile))) };
+		out.write(reinterpret_cast<const char*>(&header), sizeof(header));
+		out.write(reinterpret_cast<const char*>(&profile), sizeof(profile));
+	}
+
 	// ValidateFixedGpuLayout is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool ValidateFixedGpuLayout(const MeshHeader& header)
 	{
@@ -1221,6 +1624,8 @@ namespace
 				out.write(virtualGeometry->stringTable.data(), static_cast<std::streamsize>(virtualGeometry->stringTable.size()));
 			}
 		}
+		AppendVirtualGeometryCompactFooter(out, vertexData, vertexRemapData, primitiveIndices, virtualGeometry);
+		AppendVirtualGeometryAggregateProfile(out, virtualGeometry);
 	}
 
 	bool BuildMeshletPayload(
@@ -1759,6 +2164,8 @@ namespace
 		std::vector<std::uint32_t> currentIndices = sourceIndices;
 		const float* positions = vertices.front().position.data();
 		const float* attributes = vertices.front().normal.data();
+		const std::vector<unsigned char> simplificationLocks =
+			BuildVirtualGeometrySimplificationLocks(vertices);
 		float maxError = 0.0f;
 		std::uint32_t previousTriangleCount = sourceTriangleCount;
 		std::uint32_t previousMeshletCount = sourceMeshletCount;
@@ -1817,7 +2224,7 @@ namespace
 				sizeof(VertexRaw),
 				kVirtualGeometrySimplifyAttributeWeights.data(),
 				kVirtualGeometrySimplifyAttributeCount,
-				nullptr,
+				simplificationLocks.data(),
 				targetIndexCount,
 				kSimplificationTargetError,
 				kVirtualGeometrySimplifyOptions,
@@ -2194,6 +2601,8 @@ namespace
 		float resultError = 0.0f;
 		const float* positions = vertices.front().position.data();
 		const float* attributes = vertices.front().normal.data();
+		const std::vector<unsigned char> simplificationLocks =
+			BuildVirtualGeometrySimplificationLocks(vertices);
 		std::size_t simplifiedIndexCount = meshopt_simplifyWithAttributes(
 			simplified.data(),
 			sourceIndices.data(),
@@ -2205,7 +2614,7 @@ namespace
 			sizeof(VertexRaw),
 			kVirtualGeometrySimplifyAttributeWeights.data(),
 			kVirtualGeometrySimplifyAttributeCount,
-			nullptr,
+			simplificationLocks.data(),
 			targetIndexCount,
 			kSimplificationTargetError,
 			kVirtualGeometrySimplifyOptions,
@@ -3615,6 +4024,37 @@ static bool CompileMeshInternal(
 		return FinalizeReport(false);
 	}
 
+	// Shadow-cook every approved prototype/profile from the same immutable
+	// packed streams. This offline work is isolated from live publication and
+	// can be moved to independent job-system tasks without changing results.
+	std::vector<std::uint8_t> shadowCodecSource;
+	shadowCodecSource.reserve(
+		vertexData.size()
+		+ remapData.size()
+		+ meshletPayload.primitiveIndices.size());
+	shadowCodecSource.insert(
+		shadowCodecSource.end(), vertexData.begin(), vertexData.end());
+	shadowCodecSource.insert(
+		shadowCodecSource.end(), remapData.begin(), remapData.end());
+	shadowCodecSource.insert(
+		shadowCodecSource.end(),
+		meshletPayload.primitiveIndices.begin(),
+		meshletPayload.primitiveIndices.end());
+	BuildVirtualGeometryShadowCodecProfiles(
+		shadowCodecSource, report.virtualGeometry);
+	const bool shadowProfilesComplete = std::all_of(
+		report.virtualGeometry.shadowCodecProfiles.begin(),
+		report.virtualGeometry.shadowCodecProfiles.end(),
+		[](const VirtualGeometryShadowCodecCompileReport& profile) {
+			return profile.complete;
+		});
+	if(!shadowProfilesComplete)
+	{
+		report.virtualGeometry.warnings.push_back(
+			"one or more compact shadow profiles exceeded its physical page budget");
+	}
+	ReleaseVectorMemory(shadowCodecSource);
+
 	ReleaseVectorMemory(meshletPayload.vertexRemapIndices);
 
 	report.usedU16RemapEncoding = (remapEncoding == MeshletRemapEncoding::Uint16);
@@ -4764,6 +5204,28 @@ namespace
 				AnimatedVirtualPageSectionType::ErrorSamples,
 				1u, sizeof(std::array<float, 2>),
 				CopyAnimatedVirtualPageRecords(errorSamples));
+			std::vector<AnimatedVirtualGeometryCompactStreamDescriptor> compactStreams;
+			const auto addCompactStream = [&](AnimatedVirtualGeometryCompactStreamKind kind, std::uint32_t capability, std::uint32_t decodedBytes)
+			{
+				AnimatedVirtualGeometryCompactStreamDescriptor descriptor{};
+				descriptor.kind = kind;
+				descriptor.requiredCapabilityMask = capability;
+				descriptor.stableTopologyId = clusterIt->clusterId + 1u;
+				descriptor.stableIdentityHash = HashAnimatedVirtualCookBytes(reinterpret_cast<const std::uint8_t*>(sourceIds.data()), sourceIds.size() * sizeof(AnimatedVirtualPageSourceVertexRecord));
+				descriptor.storedByteSize = decodedBytes;
+				descriptor.decodedByteSize = decodedBytes;
+				if(IsValidAnimatedVirtualGeometryCompactStreamDescriptor(descriptor)) compactStreams.push_back(descriptor);
+			};
+			if(!localMorphs.empty())
+			{
+				addCompactStream(AnimatedVirtualGeometryCompactStreamKind::Position, 1u, static_cast<std::uint32_t>(localMorphDeltas.size() * sizeof(DeformableVirtualGeometryMorphVertex)));
+				if((localMorphs.front().flags & kDeformableVirtualGeometryMorphFlagNormal) != 0u)
+					addCompactStream(AnimatedVirtualGeometryCompactStreamKind::Normal, 1u, static_cast<std::uint32_t>(localMorphDeltas.size() * sizeof(DeformableVirtualGeometryMorphVertex)));
+				if((localMorphs.front().flags & kDeformableVirtualGeometryMorphFlagTangent) != 0u)
+					addCompactStream(AnimatedVirtualGeometryCompactStreamKind::Tangent, 1u, static_cast<std::uint32_t>(localMorphDeltas.size() * sizeof(DeformableVirtualGeometryMorphVertex)));
+			}
+			if(!compactStreams.empty())
+				AddSection(AnimatedVirtualPageSectionType::CompactAnimationStreams, static_cast<std::uint32_t>(compactStreams.size()), sizeof(AnimatedVirtualGeometryCompactStreamDescriptor), CopyAnimatedVirtualPageRecords(compactStreams));
 			if (sections.size()
 				> kAnimatedVirtualPageMaximumSections)
 			{

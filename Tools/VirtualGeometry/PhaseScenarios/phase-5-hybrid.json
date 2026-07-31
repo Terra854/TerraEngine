@@ -1,0 +1,21 @@
+{
+	"schemaVersion": 2,
+	"phase": 5,
+	"id": "phase-5",
+	"title": "Hybrid compute rasterization",
+	"requiredTools": ["renderer.virtualGeometry.capabilityEvidence", "renderer.virtualGeometry.stats", "game_view.capture"],
+	"operations": [
+		{"id": "capability", "tool": "renderer.virtualGeometry.capabilityEvidence", "evidence": "editor/capability.json"},
+		{"id": "stats", "tool": "renderer.virtualGeometry.stats", "evidence": "editor/stats.json"}
+	],
+	"captures": [
+		{"id": "hybrid-visible", "tool": "game_view.capture", "evidence": "images/hybrid-visible.png"}
+	],
+	"requiredArtifacts": [
+		{"path": "editor/capability.json", "kind": "editor-envelope"},
+		{"path": "editor/stats.json", "kind": "editor-envelope"},
+		{"path": "images/hybrid-visible.png", "kind": "png"}
+	],
+	"releaseGates": ["hybrid-raster-tests", "route-parity-hardware-hybrid"],
+	"unavailablePolicy": "fail-closed"
+}

@@ -1,0 +1,13 @@
+{
+	"schemaVersion": 2,
+	"phase": 1,
+	"id": "phase-1",
+	"title": "Cluster DAG, compact format, and codec page-size decision",
+	"requiredTools": [],
+	"operations": [],
+	"captures": [],
+	"requiredArtifacts": [],
+	"releaseGates": ["codec-editor-tests", "codec-runtime-tests", "codec-page-size-experiment"],
+	"requiredPageSizesKiB": [32, 64, 128],
+	"unavailablePolicy": "fail-closed"
+}

@@ -1030,7 +1030,8 @@ bool SaveCaptureDocument(const ProfilerCaptureDocument& document, const std::fil
 					{"durationMs", sample.durationMs},
 					{"depth", sample.depth},
 					{"occurrenceCount", sample.occurrenceCount},
-					{"complete", sample.complete}
+					{"complete", sample.complete},
+					{"retainInAggregate", sample.retainInAggregate}
 				});
 			}
 			json["frames"].push_back(std::move(frameJson));
@@ -1226,6 +1227,7 @@ bool LoadCaptureDocument(const std::filesystem::path& path, ProfilerCaptureDocum
 				sample.depth = sampleJson.value("depth", 0u);
 				sample.occurrenceCount = sampleJson.value("occurrenceCount", 1u);
 				sample.complete = sampleJson.value("complete", true);
+				sample.retainInAggregate = sampleJson.value("retainInAggregate", false);
 				frame.samples.push_back(std::move(sample));
 			}
 			document.frames.push_back(std::move(frame));
@@ -1720,15 +1722,18 @@ nlohmann::json PackFrameV2(const ProfilerFrameRecord& frame, const ProfilerCaptu
 		// only the bounded per-instance rows follow the optional detail policy.
 		result["y"] = PackAnimationTelemetryV2(*frame.animationTelemetry, includeOptional);
 	}
+	// Timing lanes are compact, bounded frame evidence. Persist them at every
+	// detail level so an aggregate or unsampled frame remains useful after the
+	// capture is saved and loaded.
+	result["t"] = nlohmann::json::array();
+	for (const ProfilerTimingStreamSample& stream : frame.timingStreams)
+	{
+		result["t"].push_back(nlohmann::json::array({table.Intern(stream.id), table.Intern(stream.label),
+			static_cast<std::uint8_t>(stream.scope), static_cast<std::uint8_t>(stream.source),
+			static_cast<std::uint8_t>(stream.status), ToNanoseconds(stream.milliseconds), table.Intern(stream.statusReason)}));
+	}
 	if (includeOptional)
 	{
-		result["t"] = nlohmann::json::array();
-		for (const ProfilerTimingStreamSample& stream : frame.timingStreams)
-		{
-			result["t"].push_back(nlohmann::json::array({table.Intern(stream.id), table.Intern(stream.label),
-				static_cast<std::uint8_t>(stream.scope), static_cast<std::uint8_t>(stream.source),
-				static_cast<std::uint8_t>(stream.status), ToNanoseconds(stream.milliseconds), table.Intern(stream.statusReason)}));
-		}
 		result["m"] = nlohmann::json::array();
 		for (const ProfilerModuleSummary& module : frame.moduleSummaries)
 		{
@@ -1745,13 +1750,25 @@ nlohmann::json PackFrameV2(const ProfilerFrameRecord& frame, const ProfilerCaptu
 			}
 			result["m"].push_back(nlohmann::json::array({static_cast<std::uint8_t>(module.moduleId), module.available, ToNanoseconds(module.totalMs), metrics}));
 		}
+	}
+	const bool hasAggregateRoot = std::any_of(frame.samples.begin(), frame.samples.end(), [](const ProfilerSample& sample) {
+		return sample.retainInAggregate;
+	});
+	if (includeOptional || hasAggregateRoot)
+	{
+		// Optional scopes follow the detail policy, while the single fixed
+		// aggregate root is allowed through on otherwise compact frames.
 		result["a"] = nlohmann::json::array();
 		for (const ProfilerSample& sample : frame.samples)
 		{
+			if (!includeOptional && !sample.retainInAggregate)
+			{
+				continue;
+			}
 			result["a"].push_back(nlohmann::json::array({sample.sampleId, sample.parentSampleId,
 				static_cast<std::uint8_t>(sample.moduleId), table.Intern(sample.name), table.Intern(sample.threadLabel),
 				table.Intern(sample.taskLabel), ToNanoseconds(sample.startMs), ToNanoseconds(sample.durationMs),
-				sample.depth, sample.occurrenceCount, sample.complete}));
+				sample.depth, sample.occurrenceCount, sample.complete, sample.retainInAggregate}));
 		}
 	}
 	if (frame.physics.has_value())
@@ -1876,9 +1893,13 @@ bool UnpackFrameV2(const nlohmann::json& json, const std::vector<std::string>& s
 		}
 		if (const auto it = json.find("a"); it != json.end()) for (const auto& value : *it)
 		{
-			if (!value.is_array() || value.size() != 11u) { error = "Profiler v2 has malformed sample data."; return false; }
+			if (!value.is_array() || (value.size() != 11u && value.size() != 12u)) { error = "Profiler v2 has malformed sample data."; return false; }
 			const std::string* name = StringAt(strings, value[3], error); const std::string* thread = StringAt(strings, value[4], error); const std::string* task = StringAt(strings, value[5], error); if (!name || !thread || !task) return false;
-			out.samples.push_back({value[0].get<std::uint64_t>(), value[1].get<std::uint64_t>(), static_cast<ProfilerModuleId>(value[2].get<std::uint8_t>()), *name, *thread, *task, ToMilliseconds(value[6].get<std::uint64_t>()), ToMilliseconds(value[7].get<std::uint64_t>()), value[8].get<std::uint32_t>(), value[9].get<std::uint32_t>(), value[10].get<bool>()});
+			ProfilerSample sample{value[0].get<std::uint64_t>(), value[1].get<std::uint64_t>(), static_cast<ProfilerModuleId>(value[2].get<std::uint8_t>()), *name, *thread, *task, ToMilliseconds(value[6].get<std::uint64_t>()), ToMilliseconds(value[7].get<std::uint64_t>()), value[8].get<std::uint32_t>(), value[9].get<std::uint32_t>(), value[10].get<bool>()};
+			// Eleven-field records predate the aggregate frame root and therefore
+			// remain optional when an older capture is loaded and saved again.
+			sample.retainInAggregate = value.size() == 12u && value[11].get<bool>();
+			out.samples.push_back(std::move(sample));
 		}
 		if (const auto it = json.find("p"); it != json.end())
 		{

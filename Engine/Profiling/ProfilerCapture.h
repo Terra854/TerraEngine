@@ -169,6 +169,10 @@ struct ProfilerSample
 	std::uint32_t depth = 0u;
 	std::uint32_t occurrenceCount = 1u;
 	bool complete = true;
+	// Aggregate captures omit optional scopes to avoid mutex contention across
+	// worker threads. This flag preserves only the fixed frame-root record that
+	// lets timeline consumers explain a measured frame without enabling them.
+	bool retainInAggregate = false;
 };
 
 // Physics fields are copied at the profiler frame boundary. Saved captures and

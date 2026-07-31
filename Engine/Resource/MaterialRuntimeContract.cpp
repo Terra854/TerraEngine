@@ -5,6 +5,17 @@
 #include <algorithm>
 
 namespace {
+	void HashMaterialCapabilityField(std::uint64_t& seed, const std::uint64_t value) noexcept
+	{
+		seed ^= value + 0x9e3779b97f4a7c15ull + (seed << 6u) + (seed >> 2u);
+	}
+
+	bool HasMaterialMagic(const MaterialHeader& header) noexcept
+	{
+		return header.magic[0] == 'T' && header.magic[1] == 'M'
+			&& header.magic[2] == 'A' && header.magic[3] == 'T';
+	}
+
 	const TextureBinding* FindTexture(std::span<const TextureBinding> textures, TextureSemantic semantic)
 	{
 		const auto it = std::find_if(textures.begin(), textures.end(), [semantic](const TextureBinding& binding) {
@@ -91,6 +102,7 @@ namespace {
 MaterialRuntimeContract ResolveMaterialRuntimeContract(const MaterialHeader& header, std::span<const TextureBinding> textures)
 {
 	MaterialRuntimeContract contract;
+	contract.compatibilitySignature = 1469598103934665603ull;
 	contract.slots.push_back(ResolveSlot(header, textures, MaterialRuntimeSlot::Albedo, TextureSemantic::Base, TextureSemantic::Base, false));
 	contract.slots.push_back(ResolveSlot(header, textures, MaterialRuntimeSlot::Normal, TextureSemantic::Normal, TextureSemantic::Normal, false));
 	contract.slots.push_back(ResolveSlot(header, textures, MaterialRuntimeSlot::Roughness, TextureSemantic::MetallicRoughness, TextureSemantic::MetallicRoughness, true));
@@ -127,4 +139,75 @@ const char* ToString(MaterialRuntimeSlot slot)
 	case MaterialRuntimeSlot::Emissive: return "emissive";
 	default: return "unknown";
 	}
+}
+
+MaterialVisibilityCompatibility EvaluateMaterialVisibilityCompatibility(const MaterialHeader& header)
+{
+	MaterialVisibilityCompatibility compatibility{};
+	if(header.alphaMode == static_cast<std::uint32_t>(AlphaMode::Blend))
+	{
+		compatibility.reason = "Blended material requires ordered forward/indexed fallback.";
+		return compatibility;
+	}
+	compatibility.supportsVisibilityBuffer = true;
+	compatibility.requiresForwardFallback = false;
+	compatibility.reason = header.alphaMode == static_cast<std::uint32_t>(AlphaMode::Mask)
+		? "Alpha-tested material keeps its stable identity after the opacity test."
+		: "Opaque material is compatible with stable visibility identity.";
+	return compatibility;
+}
+
+MaterialCapabilitySignature BuildMaterialCapabilitySignature(const MaterialHeader& header)
+{
+	MaterialCapabilitySignature result{};
+	const MaterialVisibilityCompatibility visibility =
+		EvaluateMaterialVisibilityCompatibility(header);
+	result.requiredFeatureMask = visibility.supportsVisibilityBuffer
+		? ToVirtualGeometryMaterialFeatureMask(
+			VirtualGeometryMaterialFeature::VisibilityBuffer)
+		: 0u;
+	if(header.alphaMode == static_cast<std::uint32_t>(AlphaMode::Mask))
+	{
+		result.requiredFeatureMask |= ToVirtualGeometryMaterialFeatureMask(
+			VirtualGeometryMaterialFeature::AlphaTest);
+	}
+	// A header-only material has one non-programmable bin. Optional TMVG data
+	// below can request more bins, but never widens this conservative default.
+	result.maximumShadingBins = 1u;
+	result.shadingBin = 0u;
+	result.compatibilitySignature = 1469598103934665603ull;
+	HashMaterialCapabilityField(result.compatibilitySignature, header.version);
+	HashMaterialCapabilityField(result.compatibilitySignature, header.shadingModel);
+	HashMaterialCapabilityField(result.compatibilitySignature, header.alphaMode);
+	HashMaterialCapabilityField(result.compatibilitySignature,
+		result.requiredFeatureMask);
+	result.valid = HasMaterialMagic(header)
+		&& header.headerSize == sizeof(MaterialHeader)
+		&& visibility.supportsVisibilityBuffer;
+	return result;
+}
+
+MaterialCapabilitySignature BuildMaterialCapabilitySignature(const Material& material)
+{
+	MaterialCapabilitySignature result = BuildMaterialCapabilitySignature(material.header);
+	if(material.virtualGeometryExtension)
+	{
+		const auto& extension = *material.virtualGeometryExtension;
+		result.requiredFeatureMask = extension.requiredFeatureMask;
+		result.programmableFeatureMask = extension.programmableFeatureMask;
+		result.shadingBin = extension.shadingBin;
+		result.maximumShadingBins = extension.maximumShadingBins;
+		result.compatibilitySignature = extension.compatibilitySignature;
+		result.valid = result.valid
+			&& IsValidVirtualGeometryMaterialExtension(extension)
+			&& result.maximumShadingBins > 0u
+			&& result.shadingBin < result.maximumShadingBins
+			&& result.compatibilitySignature != 0u;
+	}
+	return result;
+}
+
+bool ValidateMaterialVisibilityAbi(const MaterialHeader& header, std::uint32_t visibilityAbiVersion)
+{
+	return visibilityAbiVersion != 0u;
 }

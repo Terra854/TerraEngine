@@ -317,25 +317,60 @@ namespace TerraEngine::Renderer {
 		const bool workerAllowed = capabilities.supportsParallelRecording && capabilities.maxRecordingWorkers > 1u;
 		for (const RenderFrameViewRequest& view : snapshot.viewRequests)
 		{
+			const std::string viewPrefix = "view-" + std::to_string(view.outputId);
+			const std::uint64_t collectedGeometryResource = view.outputId + 1u;
+			const std::uint64_t virtualGeometryMainResource = view.outputId + 200u;
+			const std::uint64_t depthResource = view.outputId + 100u;
+			const std::uint64_t virtualGeometryPostResource = view.outputId + 201u;
+
 			RenderPassNode collectPass;
-			collectPass.passId = "view-" + std::to_string(view.outputId) + ".collect";
+			collectPass.passId = viewPrefix + ".collect";
 			collectPass.viewType = view.viewType;
 			collectPass.workPolicy = workerAllowed ? RenderWorkPolicy::WorkerEligible : RenderWorkPolicy::SerialRequired;
 			collectPass.fallbackReason = workerAllowed ? "" : "Backend capability profile disables parallel recording.";
 			collectPass.profilingLabel = "RenderGraph: Collect View";
-			collectPass.outputs.push_back({ view.outputId + 1u, RenderAccessMode::Write, RenderStage::Cull, collectPass.passId });
+			collectPass.outputs.push_back({ collectedGeometryResource, RenderAccessMode::Write, RenderStage::Cull, collectPass.passId });
 			passes.push_back(std::move(collectPass));
 
+			RenderPassNode virtualGeometryMainPass;
+			virtualGeometryMainPass.passId = viewPrefix + ".virtual-geometry-main-occlusion";
+			virtualGeometryMainPass.viewType = view.viewType;
+			virtualGeometryMainPass.dependencies.push_back(passes.back().passId);
+			virtualGeometryMainPass.workPolicy = workerAllowed ? RenderWorkPolicy::WorkerEligible : RenderWorkPolicy::SerialRequired;
+			virtualGeometryMainPass.fallbackReason = workerAllowed ? "" : "Backend capability profile disables parallel recording.";
+			virtualGeometryMainPass.profilingLabel = "RenderGraph: Virtual Geometry Main Occlusion";
+			// Main occlusion is deliberately before draw. It uses only current-frame
+			// conservative data, so a rejected or invalidated history cannot hide a
+			// packet before the visible fallback draw has been prepared.
+			virtualGeometryMainPass.inputs.push_back({ collectedGeometryResource, RenderAccessMode::Read, RenderStage::Cull, virtualGeometryMainPass.passId });
+			virtualGeometryMainPass.outputs.push_back({ virtualGeometryMainResource, RenderAccessMode::Write, RenderStage::Cull, virtualGeometryMainPass.passId });
+			passes.push_back(std::move(virtualGeometryMainPass));
+
 			RenderPassNode drawPass;
-			drawPass.passId = "view-" + std::to_string(view.outputId) + ".draw";
+			drawPass.passId = viewPrefix + ".draw";
 			drawPass.viewType = view.viewType;
 			drawPass.dependencies.push_back(passes.back().passId);
 			drawPass.workPolicy = workerAllowed ? RenderWorkPolicy::WorkerEligible : RenderWorkPolicy::SerialRequired;
 			drawPass.fallbackReason = workerAllowed ? "" : "Backend capability profile disables parallel recording.";
 			drawPass.profilingLabel = "RenderGraph: Draw View";
-			drawPass.inputs.push_back({ view.outputId + 1u, RenderAccessMode::Read, RenderStage::Geometry, drawPass.passId });
-			drawPass.outputs.push_back({ view.outputId + 100u, RenderAccessMode::Write, RenderStage::Geometry, drawPass.passId });
+			drawPass.inputs.push_back({ collectedGeometryResource, RenderAccessMode::Read, RenderStage::Geometry, drawPass.passId });
+			drawPass.inputs.push_back({ virtualGeometryMainResource, RenderAccessMode::Read, RenderStage::Geometry, drawPass.passId });
+			drawPass.outputs.push_back({ depthResource, RenderAccessMode::Write, RenderStage::Geometry, drawPass.passId });
 			passes.push_back(std::move(drawPass));
+
+			RenderPassNode virtualGeometryPostPass;
+			virtualGeometryPostPass.passId = viewPrefix + ".virtual-geometry-post-occlusion";
+			virtualGeometryPostPass.viewType = view.viewType;
+			virtualGeometryPostPass.dependencies.push_back(passes.back().passId);
+			virtualGeometryPostPass.workPolicy = workerAllowed ? RenderWorkPolicy::WorkerEligible : RenderWorkPolicy::SerialRequired;
+			virtualGeometryPostPass.fallbackReason = workerAllowed ? "" : "Backend capability profile disables parallel recording.";
+			virtualGeometryPostPass.profilingLabel = "RenderGraph: Virtual Geometry Post Occlusion";
+			// Post occlusion consumes the depth written by this frame's draw pass.
+			// VulkanHiZ may still reject its history, but the graph order preserves a
+			// declared boundary for publishing the fresh pyramid and invalidation.
+			virtualGeometryPostPass.inputs.push_back({ depthResource, RenderAccessMode::Read, RenderStage::Cull, virtualGeometryPostPass.passId });
+			virtualGeometryPostPass.outputs.push_back({ virtualGeometryPostResource, RenderAccessMode::Write, RenderStage::Cull, virtualGeometryPostPass.passId });
+			passes.push_back(std::move(virtualGeometryPostPass));
 		}
 		return passes;
 	}

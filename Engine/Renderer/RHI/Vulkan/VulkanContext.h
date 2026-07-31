@@ -34,6 +34,14 @@ public:
 	bool ConsumeRenderSubmissionPlan(const TerraEngine::Renderer::RenderSubmissionPlan& plan) override;
 	TerraEngine::Renderer::RenderCaptureResult ReadbackCapture(const TerraEngine::Renderer::RenderCaptureRequest& request) override;
 	std::vector<TerraEngine::Renderer::RenderCaptureResult> PollCaptureReadbacks() override;
+	bool QueueConventionalVisibilityIdentityReadback(
+		const TerraEngine::Renderer::ConventionalVisibilityIdentityReadbackRequest& request) override;
+	std::vector<TerraEngine::Renderer::ConventionalVisibilityIdentityReadbackResult>
+		PollConventionalVisibilityIdentityReadbacks() override;
+	std::vector<TerraEngine::Renderer::VirtualGeometryBackendExecutionReceipt>
+		PollVirtualGeometryExecutionReceipts() override;
+	std::vector<TerraEngine::Renderer::VirtualGeometryBackendMeasurement>
+		PollVirtualGeometryMeasurements() override;
 	TerraEngine::Renderer::BackendFrameBreakdown GetLatestBackendFrameBreakdown() const override;
 	TerraEngine::Renderer::AnimationGpuBackendExecutionSnapshot
 		GetLatestAnimationGpuBackendExecution() const override;

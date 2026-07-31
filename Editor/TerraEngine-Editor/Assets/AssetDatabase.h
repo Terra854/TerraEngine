@@ -38,6 +38,12 @@ struct VirtualGeometryAssetMetadata {
 	bool readable = false;
 	bool hasVirtualGeometry = false;
 	bool needsRebuild = false;
+	// Aggregate profiles are separately versioned from TEMF/VGXD. These fields
+	// let the Inspector request a targeted mesh recook instead of treating an
+	// older otherwise-renderable asset as globally broken.
+	bool aggregateProfileCurrent = false;
+	bool aggregateProfileRepairRequired = false;
+	std::string aggregateProfileDiagnostic;
 	std::uint32_t payloadGeneration = 0u;
 	std::uint32_t detailLevelCount = 0u;
 	std::uint32_t meshletCount = 0u;
@@ -50,11 +56,21 @@ struct VirtualGeometryAssetMetadata {
 	std::uint32_t coneSafetyRecordCount = 0u;
 	std::uint32_t coneEligibleClusterCount = 0u;
 	std::uint32_t coneDisabledClusterCount = 0u;
+	std::uint64_t encodedGeometryBytes = 0u;
+	std::uint64_t decodedGeometryBytes = 0u;
+	float bytesPerSourceTriangle = 0.0f;
+	float maximumObjectError = 0.0f;
 	bool pageStreamingReady = false;
 	bool smallMeshStreamingSkipped = false;
 	bool coneSafetyMetadataValid = false;
 	std::string skippedStreamingReason;
 	std::string rebuildGuidance;
+	std::string codec = "expanded";
+	std::string codecProfile = "expanded-v1";
+	std::string formatHash;
+	std::string cacheKey;
+	std::string cacheState = "unavailable";
+	std::string cacheReason = "No verified stage-cache provenance was published.";
 	std::vector<std::string> warnings;
 	std::vector<std::string> pageIntegrityErrors;
 	std::vector<std::string> coneDisabledReasons;

@@ -106,6 +106,16 @@ struct VirtualGeometryPageCompileReport
 	bool pinnedFallback = false;
 };
 
+struct VirtualGeometryShadowCodecCompileReport
+{
+	std::string codecProfile;
+	std::uint32_t pageSizeKiB = 0u;
+	std::uint64_t sourceBytes = 0u;
+	std::uint64_t encodedBytes = 0u;
+	std::uint64_t deterministicHash = 0u;
+	bool complete = false;
+};
+
 struct VirtualGeometryCompileReport
 {
 	// Status names whether this compile produced virtual geometry metadata or
@@ -125,6 +135,7 @@ struct VirtualGeometryCompileReport
 	std::vector<VirtualGeometrySkippedLevelCompileReport> skippedLevels;
 	std::vector<VirtualGeometryClusterCompileReport> clusters;
 	std::vector<VirtualGeometryPageCompileReport> pages;
+	std::vector<VirtualGeometryShadowCodecCompileReport> shadowCodecProfiles;
 	std::vector<std::string> warnings;
 	std::vector<std::string> errors;
 };

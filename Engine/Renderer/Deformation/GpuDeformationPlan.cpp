@@ -47,7 +47,9 @@ namespace TerraEngine::Renderer {
 			&& pageId != kInvalidDeformationRecordIndex
 			&& pageContentGeneration != 0u
 			&& residencyGeneration != 0u
-			&& layoutVersion == kAnimatedGeometryAbiVersion;
+			&& layoutVersion == kAnimatedGeometryAbiVersion
+			&& codecProfile != 0u
+			&& codecVersion != 0u;
 	}
 
 	bool DeformedPageKey::IsComplete() const noexcept
@@ -55,7 +57,8 @@ namespace TerraEngine::Renderer {
 		return page.IsComplete()
 			&& deformation.IsComplete()
 			&& deformation.meshPayloadGeneration == page.meshPayloadGeneration
-			&& inputLayoutVersion == kAnimatedGeometryAbiVersion;
+			&& inputLayoutVersion == kAnimatedGeometryAbiVersion
+			&& animationLodVersion == kAnimatedGeometryAbiVersion;
 	}
 
 	bool GpuDeformationPlan::IsComplete() const noexcept

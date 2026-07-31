@@ -9,6 +9,59 @@
 #include <algorithm>
 #include <stdexcept>
 
+VulkanHiZOcclusionSchedule BuildVulkanHiZOcclusionSchedule(
+	const VulkanHiZHistoryMetadata& history,
+	const VulkanHiZValidationInput& input) noexcept
+{
+	VulkanHiZOcclusionSchedule schedule{};
+	// A post pass may consume only a current, ready pyramid. The main pass stays
+	// scheduled after every invalidation so conservative visible coverage is
+	// rebuilt instead of accidentally sampling stale depth.
+	schedule.runPostPass = input.pyramidReady;
+	schedule.reusesHistory = history.valid
+		&& history.viewId == input.viewId
+		&& history.viewClass == input.viewClass
+		&& history.targetId == input.targetId
+		&& history.width == input.width
+		&& history.height == input.height
+		&& history.projectionSignature == input.projectionSignature
+		&& history.depthSceneSignature == input.depthSceneSignature
+		&& !input.cameraCut;
+	if (schedule.reusesHistory)
+	{
+		schedule.invalidation = VulkanHiZInvalidReason::None;
+	}
+	else if (!input.pyramidReady)
+	{
+		schedule.invalidation = VulkanHiZInvalidReason::MissingPyramid;
+	}
+	else if (input.cameraCut)
+	{
+		schedule.invalidation = VulkanHiZInvalidReason::CameraCut;
+	}
+	else if (!history.valid)
+	{
+		schedule.invalidation = VulkanHiZInvalidReason::FirstFrame;
+	}
+	else if (history.width != input.width || history.height != input.height)
+	{
+		schedule.invalidation = VulkanHiZInvalidReason::Resize;
+	}
+	else if (history.projectionSignature != input.projectionSignature)
+	{
+		schedule.invalidation = VulkanHiZInvalidReason::ProjectionChanged;
+	}
+	else if (history.depthSceneSignature != input.depthSceneSignature)
+	{
+		schedule.invalidation = VulkanHiZInvalidReason::DepthSceneChanged;
+	}
+	else
+	{
+		schedule.invalidation = VulkanHiZInvalidReason::ViewMismatch;
+	}
+	return schedule;
+}
+
 void VulkanHiZ::Create(VkDevice device, VmaAllocator allocator, uint32_t screenWidth, uint32_t screenHeight, VkFormat /*ignored*/) {
 	// Swapchain creation can briefly report a zero-sized drawable during
 	// minimized or export-startup transitions. Vulkan images must still use

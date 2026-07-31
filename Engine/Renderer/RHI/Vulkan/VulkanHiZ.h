@@ -108,6 +108,22 @@ struct VulkanHiZValidationResult
 	bool failOpen = true;
 };
 
+enum class VulkanHiZOcclusionPass : std::uint32_t
+{
+	Main = 0u,
+	Post = 1u
+};
+
+struct VulkanHiZOcclusionSchedule
+{
+	// Main pass always starts from the current frame's conservative depth state.
+	// Post pass is allowed only after that state has a ready Vulkan pyramid.
+	bool runMainPass = true;
+	bool runPostPass = false;
+	bool reusesHistory = false;
+	VulkanHiZInvalidReason invalidation = VulkanHiZInvalidReason::FirstFrame;
+};
+
 struct VulkanHiZProjectedBoundsInput
 {
 	// The task shader must make the same conservative decisions as this helper:
@@ -214,6 +230,12 @@ inline VulkanHiZValidationResult ValidateVulkanHiZHistory(const VulkanHiZHistory
 	result.failOpen = false;
 	return result;
 }
+
+// Keep schedule derivation outside command recording so worker-safe graph
+// preparation can declare both passes without touching Vulkan ownership.
+VulkanHiZOcclusionSchedule BuildVulkanHiZOcclusionSchedule(
+	const VulkanHiZHistoryMetadata& history,
+	const VulkanHiZValidationInput& input) noexcept;
 
 inline VulkanHiZProjectedBoundsResult ValidateVulkanHiZProjectedBounds(const VulkanHiZProjectedBoundsInput& input)
 {

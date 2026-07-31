@@ -51,6 +51,10 @@ namespace TerraEngine::Renderer {
 		std::uint64_t pageContentGeneration = 0u;
 		std::uint64_t residencyGeneration = 0u;
 		std::uint32_t layoutVersion = 0u;
+		// Codec identity is part of the immutable source-page key. A recook that
+		// changes either field must never reuse an older deformation output.
+		std::uint32_t codecProfile = 0u;
+		std::uint32_t codecVersion = 0u;
 
 		[[nodiscard]] bool IsComplete() const noexcept;
 		auto operator<=>(const StaticPageKey&) const = default;
@@ -61,6 +65,10 @@ namespace TerraEngine::Renderer {
 		StaticPageKey page;
 		DeformationGeneration deformation;
 		std::uint32_t inputLayoutVersion = 0u;
+		// Animation LOD is independent of geometry LOD. Compatible views merge
+		// only when both this level and its policy version match.
+		std::uint32_t animationLod = 0u;
+		std::uint32_t animationLodVersion = 0u;
 
 		[[nodiscard]] bool IsComplete() const noexcept;
 		auto operator<=>(const DeformedPageKey&) const = default;

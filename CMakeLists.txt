@@ -71,6 +71,9 @@ list(REMOVE_DUPLICATES TERRAENGINE_ANIMATION_ENGINE_HEADERS)
 file(GLOB_RECURSE TERRAENGINE_ANIMATION_SHADER_SOURCES CONFIGURE_DEPENDS
 	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/Animation/*"
 )
+file(GLOB_RECURSE TERRAENGINE_VIRTUAL_GEOMETRY_SHADER_SOURCES CONFIGURE_DEPENDS
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/VirtualGeometry/*"
+)
 file(GLOB_RECURSE TERRAENGINE_ANIMATION_EDITOR_SOURCES CONFIGURE_DEPENDS
 	"${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Animation/*.cpp"
 	"${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Animation/*.h"
@@ -111,6 +114,15 @@ list(APPEND TERRAENGINE_ANIMATION_ASSET_COMPILER_SOURCES
 list(REMOVE_DUPLICATES TERRAENGINE_ANIMATION_EDITOR_SOURCES)
 list(REMOVE_DUPLICATES TERRAENGINE_ANIMATION_ASSET_COMPILER_SOURCES)
 
+# Feature 045 asset-cooking modules are shared by the standalone mesh compiler,
+# model-package compiler, editor, and editor tests. A configure-dependent glob
+# keeps those four targets on the same deterministic codec/DAG implementation
+# as later phases add narrowly named VirtualGeometry modules.
+file(GLOB TERRAENGINE_VIRTUAL_GEOMETRY_ASSET_COMPILER_SOURCES CONFIGURE_DEPENDS
+	"${CMAKE_CURRENT_SOURCE_DIR}/Editor/AssetCompilers/VirtualGeometry*.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Editor/AssetCompilers/VirtualGeometry*.h"
+)
+
 file(GLOB_RECURSE TERRAENGINE_ANIMATION_MANAGED_CORE_SOURCES CONFIGURE_DEPENDS
 	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Managed/Source/Animation/*.cs"
 )
@@ -121,6 +133,21 @@ file(GLOB_RECURSE TERRAENGINE_ANIMATION_TOOL_SOURCES CONFIGURE_DEPENDS
 	"${CMAKE_CURRENT_SOURCE_DIR}/Tools/Animation/*"
 )
 
+# Feature 045 owns a dedicated backend-neutral renderer module plus typed
+# streaming/publication files. CONFIGURE_DEPENDS keeps later milestone files in
+# the reviewed feature directories visible to the engine target automatically.
+file(GLOB_RECURSE TERRAENGINE_VIRTUAL_GEOMETRY_ENGINE_SOURCES CONFIGURE_DEPENDS
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Renderer/VirtualGeometry/*.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Resource/VirtualGeometry*.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Renderer/RHI/Vulkan/VulkanVirtualGeometry*.cpp"
+)
+file(GLOB_RECURSE TERRAENGINE_VIRTUAL_GEOMETRY_ENGINE_HEADERS CONFIGURE_DEPENDS
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Renderer/VirtualGeometry/*.h"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Renderer/VirtualGeometry/*.hpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Resource/VirtualGeometry*.h"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Resource/VirtualGeometry*.hpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Renderer/RHI/Vulkan/VulkanVirtualGeometry*.h"
+)
 set(ENGINE_SOURCES
 	Engine/Core/MainEngine.cpp
 	Engine/Core/FatalErrorReport.cpp
@@ -210,6 +237,7 @@ set(ENGINE_SOURCES
 	Engine/Renderer/RHI/Vulkan/VulkanCommandRecording.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanDescriptorPlanning.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanFrameDiagnostics.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanVirtualGeometryExecutor.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanPipelineStateKeys.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanReadbackConversion.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanRecordingContext.cpp
@@ -238,6 +266,7 @@ set(ENGINE_SOURCES
 	Engine/Runtime/ContentMount/io/PathNormalizer.cpp
 	Engine/Runtime/ContentMount/util/WorkerPool.cpp
 	${TERRAENGINE_ANIMATION_ENGINE_SOURCES}
+	${TERRAENGINE_VIRTUAL_GEOMETRY_ENGINE_SOURCES}
 )
 
 set(ENGINE_HEADERS
@@ -363,6 +392,7 @@ set(ENGINE_HEADERS
 	Engine/Runtime/ExportStartupCoordinator.h
 	Engine/Debug.h
 	${TERRAENGINE_ANIMATION_ENGINE_HEADERS}
+	${TERRAENGINE_VIRTUAL_GEOMETRY_ENGINE_HEADERS}
 )
 
 set(BASISU_SOURCES
@@ -621,6 +651,10 @@ set(SIMDJSON_SINGLEHEADER ON CACHE BOOL "Use vendored simdjson single header out
 add_subdirectory(External/simdjson)
 set_target_properties(simdjson PROPERTIES CXX_SCAN_FOR_MODULES OFF)
 
+# Benchmark/test schema validation is kept in its feature tool directory and
+# relies only on TerraEngine's already vendored JSON implementation.
+add_subdirectory(Tools/VirtualGeometry)
+
 set(FASTGLTF_ENABLE_TESTS OFF CACHE BOOL "Disable fastgltf tests" FORCE)
 set(FASTGLTF_ENABLE_EXAMPLES OFF CACHE BOOL "Disable fastgltf examples" FORCE)
 set(FASTGLTF_ENABLE_DOCS OFF CACHE BOOL "Disable fastgltf docs" FORCE)
@@ -724,6 +758,12 @@ add_custom_target(TerraEngine.Animation.Tools)
 if(TERRAENGINE_ANIMATION_TOOL_SOURCES)
 	target_sources(TerraEngine.Animation.Tools PRIVATE ${TERRAENGINE_ANIMATION_TOOL_SOURCES})
 	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Tools/Animation PREFIX "Animation Tools" FILES ${TERRAENGINE_ANIMATION_TOOL_SOURCES})
+endif()
+
+add_custom_target(TerraEngine.VirtualGeometry.Shaders)
+if(TERRAENGINE_VIRTUAL_GEOMETRY_SHADER_SOURCES)
+	target_sources(TerraEngine.VirtualGeometry.Shaders PRIVATE ${TERRAENGINE_VIRTUAL_GEOMETRY_SHADER_SOURCES})
+	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/VirtualGeometry PREFIX "Virtual Geometry Shaders" FILES ${TERRAENGINE_VIRTUAL_GEOMETRY_SHADER_SOURCES})
 endif()
 
 # --- Managed Source ----------------------------------------------------------
@@ -953,6 +993,7 @@ source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Launcher PREFIX "TerraEngine-Launc
 add_executable(TerraEngineMeshCompiler
 	Editor/TerraEngineMeshCompiler.cpp
 	Editor/AssetCompilers/MeshCompiler.cpp
+	${TERRAENGINE_VIRTUAL_GEOMETRY_ASSET_COMPILER_SOURCES}
 )
 
 # Target boundary: this declaration defines one buildable unit and its install/runtime behavior.
@@ -974,6 +1015,7 @@ add_executable(TerraEngineModelPackageCompiler
 	Editor/AssetCompilers/TextureCompiler.cpp
 	Editor/TerraEngine-Editor/Assets/AssetImportResult.cpp
 	${TERRAENGINE_ANIMATION_ASSET_COMPILER_SOURCES}
+	${TERRAENGINE_VIRTUAL_GEOMETRY_ASSET_COMPILER_SOURCES}
 )
 
 # Target boundary: this declaration defines one buildable unit and its install/runtime behavior.
@@ -1338,6 +1380,7 @@ add_executable(TerraEngine-Editor
 	Editor/AssetCompilers/PhysicsMaterialAssetWriter.cpp
 	${IMGUI_FILE_DIALOG_DIR}/ImGuiFileDialog.cpp
 	${TERRAENGINE_ANIMATION_EDITOR_SOURCES}
+	${TERRAENGINE_VIRTUAL_GEOMETRY_ASSET_COMPILER_SOURCES}
 )
 set_target_properties(TerraEngine-Editor PROPERTIES
 	BUILD_RPATH "${TERRAENGINE_LOCAL_RPATH}"
@@ -1512,6 +1555,7 @@ install(FILES
 	DESTINATION "${ENGINE_INSTALL_DESTINATION}/Editor/Shaders/Includes/Geometry"
 )
 install(FILES
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/VirtualGeometry/VirtualGeometryAbi.hlsli"
 	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/VirtualGeometry/AnimatedVirtualGeometryAbi.hlsli"
 	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/VirtualGeometry/AnimatedDeformedGeometry.hlsli"
 	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/VirtualGeometry/DeformableVirtualGeometry.hlsli"
@@ -1576,6 +1620,7 @@ file(REMOVE
 	\"\${out_dir}/Default.task.spv\"
 	\"\${out_dir}/Default.mesh.spv\"
 	\"\${out_dir}/Default.frag.spv\"
+	\"\${out_dir}/Default.ConventionalVisibilityIdentity.frag.spv\"
 	\"\${lighting_out_dir}/ClusterGrid.comp.tspf\"
 	\"\${lighting_out_dir}/ClusterDepthMask.comp.tspf\"
 	\"\${lighting_out_dir}/LightCull.comp.tspf\"
@@ -1587,6 +1632,15 @@ file(REMOVE
 	\"\${postprocess_out_dir}/GTAO.comp.spv\"
 	\"\${postprocess_out_dir}/GTAOBlur.comp.spv\"
 	\"\${virtualgeometry_out_dir}/VirtualGeometryPacketCompaction.comp.spv\"
+	\"\${virtualgeometry_out_dir}/VirtualGeometryAnimatedClusterBounds.comp.spv\"
+	\"\${virtualgeometry_out_dir}/VirtualGeometryAnimatedMorphBeforeSkin.comp.spv\"
+	\"\${virtualgeometry_out_dir}/VirtualGeometryComputeRaster.comp.spv\"
+	\"\${virtualgeometry_out_dir}/VirtualGeometryGeneratedIndirect.comp.spv\"
+	\"\${virtualgeometry_out_dir}/VirtualGeometryIndirectArguments.comp.spv\"
+	\"\${virtualgeometry_out_dir}/VirtualGeometryShadingBins.comp.spv\"
+	\"\${virtualgeometry_out_dir}/VirtualGeometryTraversal.comp.spv\"
+	\"\${virtualgeometry_out_dir}/VirtualGeometryVisibilityReconstruct.comp.spv\"
+	\"\${virtualgeometry_out_dir}/VirtualGeometryVisibilityResolve.comp.spv\"
 	\"\${animation_out_dir}/AnimationSample.comp.spv\"
 	\"\${animation_out_dir}/AnimationBlend.comp.spv\"
 	\"\${animation_out_dir}/AnimationHierarchy.comp.spv\"
@@ -1636,6 +1690,20 @@ execute_process(
 # Configure-time guard: select platform or option behavior before generating build files.
 if(NOT compile_ps EQUAL 0)
 	message(FATAL_ERROR \"Failed to compile Default.frag.hlsl with TerraEngineShaderCompiler during install\")
+endif()
+
+# This SPIR-V-only variant is selected solely by the Vulkan two-target
+# conventional visibility pass. The installed target0-only artifact remains
+# the shadow/default shader and no DXIL artifact is produced.
+execute_process(
+	COMMAND \"\${DXC_PATH}\" -spirv -fspv-target-env=vulkan1.3 -T ps_6_0 -E main
+		-D TERRAENGINE_VULKAN_CONVENTIONAL_VISIBILITY_IDENTITY=1
+		-Fo \"\${out_dir}/Default.ConventionalVisibilityIdentity.frag.spv\"
+		\"\${SHADER_SRC_DIR}/Default.frag.hlsl\"
+	RESULT_VARIABLE compile_conventional_visibility_identity
+)
+if(NOT compile_conventional_visibility_identity EQUAL 0)
+	message(FATAL_ERROR \"Failed to compile the Vulkan conventional visibility identity fragment variant during install\")
 endif()
 
 execute_process(
@@ -1736,6 +1804,27 @@ execute_process(
 if(NOT compile_vg_packet_compaction EQUAL 0)
     message(FATAL_ERROR \"Failed to compile VirtualGeometryPacketCompaction.comp.hlsl during install\")
 endif()
+
+# Every feature-045 compute stage is compiled during install. Keeping this list
+# explicit makes a missing source, include, entry point, or DXC regression fail
+# the required install gate instead of shipping a partial runtime shader set.
+foreach(virtualgeometry_canonical_shader IN ITEMS
+	VirtualGeometryAnimatedClusterBounds
+	VirtualGeometryAnimatedMorphBeforeSkin
+	VirtualGeometryComputeRaster
+	VirtualGeometryGeneratedIndirect
+	VirtualGeometryIndirectArguments
+	VirtualGeometryShadingBins
+	VirtualGeometryTraversal
+	VirtualGeometryVisibilityReconstruct
+	VirtualGeometryVisibilityResolve)
+	execute_process(
+		COMMAND \"\${DXC_PATH}\" -T cs_6_0 -E main -Fo \"\${virtualgeometry_out_dir}/\${virtualgeometry_canonical_shader}.comp.spv\" -spirv -I \"\${virtualgeometry_src_dir}\" \"\${virtualgeometry_src_dir}/\${virtualgeometry_canonical_shader}.comp.hlsl\"
+		RESULT_VARIABLE compile_virtualgeometry_canonical)
+	if(NOT compile_virtualgeometry_canonical EQUAL 0)
+		message(FATAL_ERROR \"Failed to compile \${virtualgeometry_canonical_shader}.comp.hlsl during install\")
+	endif()
+endforeach()
 
 # Compile every GPU animation stage into the installed editor tree. Keeping the
 # list explicit makes a missing stage fail the install instead of silently
@@ -2011,6 +2100,7 @@ endif()
 	# editor/runtime tree so clean-checkout QA does not depend on source paths.
 	install(FILES
 		"${CMAKE_CURRENT_SOURCE_DIR}/Docs/Renderer/VirtualGeometry.md"
+		"${CMAKE_CURRENT_SOURCE_DIR}/Docs/Renderer/VirtualGeometryAlternativePlan.md"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Docs/TerraEngineMeshFile.md"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Docs/Testing.md"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Docs/EditorMcpBridge.md"
@@ -2036,6 +2126,23 @@ endif()
 		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Tools/Animation"
 		FILES_MATCHING PATTERN "*.ps1" PATTERN "*.json"
 	)
+	# Feature 045 manifests and scripts define the installed validation surface.
+	# The executable arrives in a later milestone, but its inputs are installable
+	# from the first foundation gate.
+	# Remove only the generated scenario destination before copying. Otherwise a
+	# renamed phase manifest survives an incremental install and the aggregate
+	# phase gate correctly rejects the duplicate phase.
+	install(CODE
+		"file(REMOVE_RECURSE \"${ENGINE_INSTALL_DESTINATION}/Tools/VirtualGeometry/PhaseScenarios\")"
+	)
+	install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Tools/VirtualGeometry/"
+		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Tools/VirtualGeometry"
+		FILES_MATCHING
+			PATTERN "*.json"
+			PATTERN "*.ps1"
+			PATTERN "*.cmd"
+			PATTERN "*.md"
+	)
 	# Keep the small deterministic animation and export-parity inputs beside the
 	# installed validation tooling. The Tests path makes their QA-only role clear;
 	# exported games continue to consume cooked TEPAK data, never these sources.
@@ -2047,7 +2154,31 @@ endif()
 	)
 	install(FILES
 		"${CMAKE_CURRENT_SOURCE_DIR}/Tests/Fixtures/VirtualGeometry/README.md"
+		"${CMAKE_CURRENT_SOURCE_DIR}/Tests/Fixtures/VirtualGeometry/hardening-fixtures.json"
+		"${CMAKE_CURRENT_SOURCE_DIR}/Tests/Fixtures/VirtualGeometry/feature-045-fixtures.json"
 		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Tests/Fixtures/VirtualGeometry"
+	)
+	# Feature 045 reuses the deterministic animated-page fixture from feature
+	# 044. Install the complete small fixture so the phase-7 validation command
+	# never reaches back into the source checkout for shaders or manifests.
+	install(DIRECTORY
+		"${CMAKE_CURRENT_SOURCE_DIR}/Tests/Fixtures/AnimatedVirtualGeometry/"
+		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Tests/Fixtures/AnimatedVirtualGeometry"
+	)
+	install(FILES
+		"${CMAKE_CURRENT_SOURCE_DIR}/specs/045-virtual-geometry-alternative/spec.md"
+		"${CMAKE_CURRENT_SOURCE_DIR}/specs/045-virtual-geometry-alternative/plan.md"
+		"${CMAKE_CURRENT_SOURCE_DIR}/specs/045-virtual-geometry-alternative/research.md"
+		"${CMAKE_CURRENT_SOURCE_DIR}/specs/045-virtual-geometry-alternative/data-model.md"
+		"${CMAKE_CURRENT_SOURCE_DIR}/specs/045-virtual-geometry-alternative/quickstart.md"
+		"${CMAKE_CURRENT_SOURCE_DIR}/specs/045-virtual-geometry-alternative/acceptance-matrix.md"
+		"${CMAKE_CURRENT_SOURCE_DIR}/specs/045-virtual-geometry-alternative/compliance-review.md"
+		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Docs/Specs/045-virtual-geometry-alternative"
+	)
+	install(DIRECTORY
+		"${CMAKE_CURRENT_SOURCE_DIR}/specs/045-virtual-geometry-alternative/contracts/"
+		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Docs/Specs/045-virtual-geometry-alternative/contracts"
+		FILES_MATCHING PATTERN "*.md"
 	)
 
 	# Install cimgui (TerraEngine-ImGui)

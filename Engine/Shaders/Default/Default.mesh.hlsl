@@ -116,7 +116,19 @@ struct PushConstants
 
 static const uint kMaxMeshletVertices = 64;
 static const uint kMaxMeshletTriangles = 124;
+// Fragment-stage SV_PrimitiveID is local to this meshlet. Keeping this stride
+// explicit makes the stable visibility primitive identity reproducible for
+// mesh, indexed, and page-local routes that share the surface contract.
+static const uint kStableVisibilityPrimitiveStride = kMaxMeshletTriangles;
 static const uint kMaxStatsSlots = 16u;
+
+struct StableVisibilityPrimitive
+{
+	// Primitive attributes travel directly from the mesh stage to the fragment
+	// stage. This avoids SV_PrimitiveID, whose SPIR-V lowering can require the
+	// optional Vulkan geometryShader feature even when no geometry stage exists.
+	nointerpolation uint stablePrimitiveId : TEXCOORD6;
+};
 // Task stages may run without rejecting any work, but their payload still owns
 // the exact child meshlet index for each emitted mesh-stage group.
 static const uint kVirtualGeometryFlagTaskPayloadValid = 0x40u;
@@ -450,11 +462,29 @@ uint LoadVirtualGeometryBufferWord(uint bufferIndex, uint wordOffset, uint fallb
 		return fallbackValue;
 	}
 
+	uint elementCount = 0u;
+	uint stride = 0u;
+	globalBuffers[NonUniformResourceIndex(bufferIndex)].GetDimensions(
+		elementCount,
+		stride);
+	// The mesh stage consumes task-authored packet ids. Guard the physical table
+	// as well as the logical descriptor so a stale cross-view packet fails open
+	// instead of issuing an undefined bindless read on the graphics queue.
+	if (wordOffset >= elementCount)
+	{
+		return fallbackValue;
+	}
 	return globalBuffers[NonUniformResourceIndex(bufferIndex)][wordOffset];
 }
 
 uint LoadVirtualGeometryPagePayloadDescriptorWordAt(uint packetDescriptorIndex, uint descriptorWord, uint fallbackValue)
 {
+	if (descriptorWord >= kVirtualGeometryPayloadDescriptorStrideWords
+		|| packetDescriptorIndex > (0xffffffffu - descriptorWord)
+			/ kVirtualGeometryPayloadDescriptorStrideWords)
+	{
+		return fallbackValue;
+	}
 	const uint wordOffset = packetDescriptorIndex * kVirtualGeometryPayloadDescriptorStrideWords + descriptorWord;
 	return LoadVirtualGeometryBufferWord(
 		SceneUniforms.virtualGeometryPagePayloadBufferIndex,
@@ -851,7 +881,8 @@ uint LoadPrimitiveIndex(uint primitiveElementIndex)
 void EmitMeshlet(
 	uint meshletIndex,
 	out vertices PSIn outputVertices[kMaxMeshletVertices],
-	out indices uint3 outputTriangles[kMaxMeshletTriangles])
+	out indices uint3 outputTriangles[kMaxMeshletTriangles],
+	out primitives StableVisibilityPrimitive outputPrimitiveData[kMaxMeshletTriangles])
 {
 	const MeshDecodeInfo decode = meshDecodeInfo[0];
 	DefaultGpuAnimationGraphicsRecord animationRecord;
@@ -968,6 +999,10 @@ void EmitMeshlet(
 
 	for (uint primitiveIndex = 0; primitiveIndex < primitiveCount; ++primitiveIndex)
 	{
+		// Stable identity is authored before validating indices so a malformed
+		// primitive still has deterministic debug and diagnostic ownership.
+		outputPrimitiveData[primitiveIndex].stablePrimitiveId =
+			meshletIndex * kStableVisibilityPrimitiveStride + primitiveIndex;
 		const uint primitiveOffset = record.primitiveIndexOffset + primitiveIndex * 3u;
 		const uint index0 = LoadPrimitiveIndex(primitiveOffset + 0u);
 		const uint index1 = LoadPrimitiveIndex(primitiveOffset + 1u);
@@ -980,6 +1015,8 @@ void EmitMeshlet(
 			continue;
 		}
 
+		// Preserve source primitive order. The primitive attribute above carries
+		// the same stable identity without relying on fragment SV_PrimitiveID.
 		outputTriangles[primitiveIndex] = uint3(index0, index1, index2);
 	}
 }
@@ -989,7 +1026,8 @@ void EmitPageLocalMeshlet(
 	uint pageId,
 	uint meshletIndex,
 	out vertices PSIn outputVertices[kMaxMeshletVertices],
-	out indices uint3 outputTriangles[kMaxMeshletTriangles])
+	out indices uint3 outputTriangles[kMaxMeshletTriangles],
+	out primitives StableVisibilityPrimitive outputPrimitiveData[kMaxMeshletTriangles])
 {
 	const MeshDecodeInfo decode = LoadPageLocalDecodeInfo(descriptor);
 	TeAnimatedGraphicsBridge deformationBridge;
@@ -1091,6 +1129,11 @@ void EmitPageLocalMeshlet(
 
 	for (uint primitiveIndex = 0; primitiveIndex < primitiveCount; ++primitiveIndex)
 	{
+		// Mix the physical page into page-local identity so independently
+		// resident pages cannot alias the same meshlet/primitive pair.
+		outputPrimitiveData[primitiveIndex].stablePrimitiveId =
+			(pageId * 16777619u)
+			^ (meshletIndex * kStableVisibilityPrimitiveStride + primitiveIndex);
 		const uint primitiveOffset = record.primitiveIndexOffset + primitiveIndex * 3u;
 		const uint index0 = LoadPageLocalPrimitiveIndex(descriptor, primitiveOffset + 0u);
 		const uint index1 = LoadPageLocalPrimitiveIndex(descriptor, primitiveOffset + 1u);
@@ -1102,6 +1145,8 @@ void EmitPageLocalMeshlet(
 			continue;
 		}
 
+		// Page-local meshlets use the same stable local primitive ordering as
+		// ordinary meshlets, so visibility records do not depend on payload source.
 		outputTriangles[primitiveIndex] = uint3(index0, index1, index2);
 	}
 }
@@ -1112,7 +1157,8 @@ void main(
 	in payload TaskPayload taskPayload,
 	uint3 groupId : SV_GroupID,
 	out vertices PSIn outputVertices[kMaxMeshletVertices],
-	out indices uint3 outputTriangles[kMaxMeshletTriangles])
+	out indices uint3 outputTriangles[kMaxMeshletTriangles],
+	out primitives StableVisibilityPrimitive outputPrimitiveData[kMaxMeshletTriangles])
 {
 	const uint visibleIndex = groupId.x;
 	const uint packetDescriptorIndex = taskPayload.packetDescriptorIndices[visibleIndex];
@@ -1181,7 +1227,8 @@ void main(
 			pageId,
 			pageLocalMeshletIndex,
 			outputVertices,
-			outputTriangles);
+			outputTriangles,
+			outputPrimitiveData);
 		return;
 	}
 
@@ -1193,5 +1240,5 @@ void main(
 		return;
 	}
 
-	EmitMeshlet(meshletIndex, outputVertices, outputTriangles);
+	EmitMeshlet(meshletIndex, outputVertices, outputTriangles, outputPrimitiveData);
 }

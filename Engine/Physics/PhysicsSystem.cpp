@@ -252,7 +252,16 @@ namespace TerraEngine::Physics {
 
 		bool StartWorldLocked(const PhysicsSettings& requestedSettings) {
 			if(world.Handle().IsValid()) return true;
-			if(!backendInitialized || !world.Create(requestedSettings)) return false;
+			if(!backendInitialized) {
+				TERRAENGINE_LOG(LogLevel::Error,
+					"Physics world creation failed because the backend is not initialized.");
+				return false;
+			}
+			if(!world.Create(requestedSettings)) {
+				TERRAENGINE_LOG(LogLevel::Error,
+					"Physics world creation failed because the engine-facing world rejected its settings or lifecycle state.");
+				return false;
+			}
 			// A recreated world owns a new generation. Drop immutable editor data from
 			// the former generation before any consumer can select it by accident.
 			PublishedPhysicsDebugPackets().Clear();
@@ -273,6 +282,12 @@ namespace TerraEngine::Physics {
 				lastAggregateDiagnosticsTick = 0U;
 				return true;
 			}
+			// Preserve the provider's actionable failure at the protected creation
+			// boundary. Play Mode reports only a boolean to automation, so without
+			// this log a backend allocation or configuration error is indistinguishable
+			// from an uninitialized engine system.
+			TERRAENGINE_LOG(LogLevel::Error,
+				"Physics world creation failed: " << result.message);
 			world.MarkFailed();
 			world.BeginStopping();
 			world.BeginDraining();

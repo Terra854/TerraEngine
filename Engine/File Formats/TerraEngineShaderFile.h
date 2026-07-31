@@ -8,6 +8,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -183,6 +184,47 @@ struct ShaderHeader
 
 static_assert(sizeof(ShaderHeader) <= 128, "TSPF header should remain compact");
 
+// Optional TSPV provenance follows the v1 payload. The separately tagged
+// envelope lets a v1 reader preserve its fixed header while newer readers can
+// distinguish a real extension from arbitrary trailing bytes in legacy files.
+inline constexpr std::uint32_t kShaderProvenanceExtensionMagicValue = 0x56505354u; // 'TSPV' little endian
+inline constexpr std::uint32_t kShaderProvenanceExtensionVersion = 1u;
+struct ShaderProvenanceExtensionHeader
+{
+	std::uint32_t magic = kShaderProvenanceExtensionMagicValue;
+	std::uint32_t payloadSize = 0u;
+};
+static_assert(sizeof(ShaderProvenanceExtensionHeader) == 8u, "TSPV extension envelope must remain byte-stable.");
+
+struct ShaderProvenanceBackendVariantExtension
+{
+	std::uint32_t version = kShaderProvenanceExtensionVersion;
+	std::uint32_t featureMask = 0u;
+	std::uint64_t normalizedSourceHash = 0u;
+	std::uint64_t normalizedIncludeHash = 0u;
+	std::uint64_t interfaceAbiHash = 0u;
+	std::uint32_t compilerVersion = 0u;
+	std::uint32_t toolchainVersion = 0u;
+	std::uint32_t spirvAvailable = 0u;
+	std::uint32_t dxilAvailable = 0u;
+	std::uint64_t spirvHash = 0u;
+	std::uint64_t dxilHash = 0u;
+};
+static_assert(sizeof(ShaderProvenanceBackendVariantExtension) == 64u, "TSPV extension layout must remain byte-stable.");
+
+
+// Validate explicit availability values before runtime code uses their hashes.
+// A missing backend must carry no hash so an absent DXIL artifact is never
+// accidentally presented as a usable backend variant.
+inline constexpr bool IsValidShaderProvenanceExtension(const ShaderProvenanceBackendVariantExtension& extension)
+{
+	return extension.version == kShaderProvenanceExtensionVersion
+		&& extension.spirvAvailable <= 1u
+		&& extension.dxilAvailable <= 1u
+		&& (extension.spirvAvailable != 0u || extension.spirvHash == 0u)
+		&& (extension.dxilAvailable != 0u || extension.dxilHash == 0u);
+}
+
 // Fully loaded representation: contiguous storage plus typed views into arrays
 // and the string table. Serialization will populate these fields.
 struct Shader
@@ -198,4 +240,5 @@ struct Shader
 	std::span<const StageIOAttribute> outputs;
 	std::span<const std::uint8_t> bytecode;
 	std::string_view stringTable;
+	std::optional<ShaderProvenanceBackendVariantExtension> provenance;
 };

@@ -5,6 +5,7 @@
 #include "AssetDatabase.h"
 #include "../Subsystems/ScriptCompilationSubsystem.h"
 #include "Engine/Core/Logger/Logger.h"
+#include <array>
 #include <fstream>
 #include <sstream>
 #include <iomanip>
@@ -16,6 +17,7 @@
 #include <cstdlib>
 #include <regex>
 #include <set>
+#include <span>
 #include <stdexcept>
 #include <string_view>
 #include <thread>
@@ -106,6 +108,205 @@ namespace {
 		std::ostringstream stream;
 		stream << std::hex << std::setw(16) << std::setfill('0') << hash;
 		return stream.str();
+	}
+
+	void AppendVirtualGeometryCacheHash(
+		std::uint64_t& hash,
+		std::string_view value)
+	{
+		for(const unsigned char byte : value)
+		{
+			hash = (hash ^ byte) * 1099511628211ull;
+		}
+		// Delimit fields so different input partitions cannot alias.
+		hash = (hash ^ 0xffu) * 1099511628211ull;
+	}
+
+	std::string BuildVirtualGeometryStageCacheKey(
+		const std::filesystem::path& sourcePath,
+		const VirtualGeometryAdaptiveCompileSettings& settings,
+		const std::filesystem::path& compilerPath)
+	{
+		std::ifstream source(sourcePath, std::ios::binary);
+		if(!source)
+		{
+			return {};
+		}
+
+		std::uint64_t hash = 1469598103934665603ull;
+		std::array<char, 64u * 1024u> buffer{};
+		while(source)
+		{
+			source.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+			const std::streamsize read = source.gcount();
+			for(std::streamsize index = 0; index < read; ++index)
+			{
+				hash = (hash ^ static_cast<unsigned char>(buffer[index]))
+					* 1099511628211ull;
+			}
+		}
+		if(!source.eof())
+		{
+			return {};
+		}
+
+		std::ostringstream recipe;
+		recipe << "virtual-geometry-stage-cache-v1;"
+			<< settings.settingsSource << ';'
+			<< settings.minimumSourceTriangles << ';'
+			<< settings.minimumGeneratedTriangles << ';'
+			<< settings.minimumMeshletsPerGeneratedLevel << ';'
+			<< settings.minimumUsefulTriangleReduction << ';'
+			<< settings.minimumUsefulMeshletReduction << ';'
+			<< settings.maximumGeometricError << ';';
+		for(const float ratio : settings.targetRatios)
+		{
+			recipe << ratio << ',';
+		}
+		std::error_code metadataError;
+		recipe << compilerPath.filename().generic_string() << ';'
+			<< std::filesystem::file_size(compilerPath, metadataError) << ';';
+		metadataError.clear();
+		const auto compilerWriteTime =
+			std::filesystem::last_write_time(compilerPath, metadataError);
+		if(!metadataError)
+		{
+			recipe << compilerWriteTime.time_since_epoch().count();
+		}
+		AppendVirtualGeometryCacheHash(hash, recipe.str());
+
+		std::ostringstream key;
+		key << std::hex << std::setw(16) << std::setfill('0') << hash;
+		return key.str();
+	}
+
+	bool ValidateVirtualGeometryCachedMesh(
+		const std::filesystem::path& candidate)
+	{
+		std::ifstream input(candidate, std::ios::binary);
+		MeshHeader header{};
+		input.read(reinterpret_cast<char*>(&header), sizeof(header));
+		std::error_code sizeError;
+		const std::uintmax_t fileSize =
+			std::filesystem::file_size(candidate, sizeError);
+		return input
+			&& std::memcmp(header.magic, "TEMF", 4u) == 0
+			&& header.version == kMeshCurrentVersion
+			&& !sizeError
+			&& fileSize >= sizeof(MeshHeader);
+	}
+
+	std::string HashVirtualGeometryFormatRecord(
+		const VirtualGeometryHeader& header)
+	{
+		std::uint64_t hash = 1469598103934665603ull;
+		const auto* bytes = reinterpret_cast<const std::uint8_t*>(&header);
+		for(std::size_t index = 0u; index < sizeof(header); ++index)
+		{
+			hash = (hash ^ bytes[index]) * 1099511628211ull;
+		}
+		std::ostringstream text;
+		text << std::hex << std::setw(16) << std::setfill('0') << hash;
+		return text.str();
+	}
+
+	bool PublishVirtualGeometryStageCache(
+		const std::filesystem::path& candidate,
+		const std::filesystem::path& cachePath,
+		std::string_view privateIdentity)
+	{
+		if(ValidateVirtualGeometryCachedMesh(cachePath))
+		{
+			return true;
+		}
+		std::error_code error;
+		std::filesystem::create_directories(cachePath.parent_path(), error);
+		if(error)
+		{
+			return false;
+		}
+
+		const std::filesystem::path staging =
+			cachePath.string() + "." + std::string(privateIdentity) + ".tmp";
+		std::filesystem::remove(staging, error);
+		error.clear();
+		std::filesystem::copy_file(
+			candidate,
+			staging,
+			std::filesystem::copy_options::overwrite_existing,
+			error);
+		if(error || !ValidateVirtualGeometryCachedMesh(staging))
+		{
+			std::filesystem::remove(staging, error);
+			return false;
+		}
+
+		std::filesystem::rename(staging, cachePath, error);
+		if(error)
+		{
+			// A concurrent worker may have won publication with the same content
+			// key. Its complete verified entry is an acceptable resume point.
+			std::filesystem::remove(staging, error);
+			return ValidateVirtualGeometryCachedMesh(cachePath);
+		}
+		return true;
+	}
+
+	void PublishVirtualGeometryCacheProvenance(
+		const std::filesystem::path& compiledPath,
+		std::string_view cacheKey,
+		std::string_view state,
+		std::string_view reason,
+		std::string_view privateIdentity)
+	{
+		const std::filesystem::path finalPath =
+			compiledPath.string() + ".vgcache.json";
+		const std::filesystem::path stagingPath =
+			finalPath.string() + "." + std::string(privateIdentity) + ".tmp";
+		const std::filesystem::path previousPath =
+			finalPath.string() + ".previous";
+		{
+			std::ofstream output(stagingPath, std::ios::binary | std::ios::trunc);
+			output << json{
+				{ "schemaVersion", 1 },
+				{ "stage", "complete-mesh" },
+				{ "inputKey", cacheKey },
+				{ "state", state },
+				{ "reason", reason },
+				{ "valid", true }
+			}.dump(2) << '\n';
+			if(!output)
+			{
+				std::error_code ignored;
+				std::filesystem::remove(stagingPath, ignored);
+				return;
+			}
+		}
+
+		std::error_code error;
+		std::filesystem::remove(previousPath, error);
+		error.clear();
+		if(std::filesystem::exists(finalPath))
+		{
+			std::filesystem::rename(finalPath, previousPath, error);
+			if(error)
+			{
+				std::filesystem::remove(stagingPath, error);
+				return;
+			}
+		}
+		std::filesystem::rename(stagingPath, finalPath, error);
+		if(error)
+		{
+			std::filesystem::remove(stagingPath, error);
+			error.clear();
+			if(std::filesystem::exists(previousPath))
+			{
+				std::filesystem::rename(previousPath, finalPath, error);
+			}
+			return;
+		}
+		std::filesystem::remove(previousPath, error);
 	}
 
 	bool HasParentTraversal(const std::filesystem::path& path) {
@@ -976,6 +1177,88 @@ namespace {
 		input.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
 		input.read(reinterpret_cast<char*>(outRecords.data()), static_cast<std::streamsize>(outRecords.size() * sizeof(RecordType)));
 		return static_cast<bool>(input);
+	}
+
+	struct VirtualGeometryAggregateProfileReadState
+	{
+		bool current = false;
+		bool sidecarPresent = false;
+		std::string diagnostic;
+	};
+
+	// Inspector repair deliberately verifies the compact profile itself instead
+	// of trusting a file-exists check. It does not publish anything; the normal
+	// async mesh importer owns the later staged recook and main-thread commit.
+	VirtualGeometryAggregateProfileReadState ReadVirtualGeometryAggregateProfileState(
+		std::ifstream& input,
+		const MeshHeader& meshHeader)
+	{
+		VirtualGeometryAggregateProfileReadState state;
+		input.clear();
+		input.seekg(0, std::ios::end);
+		const std::streamoff fileSize = input.tellg();
+		if (fileSize < 0)
+		{
+			state.diagnostic = "Compiled mesh size could not be read.";
+			return state;
+		}
+		for (std::uint64_t offset = meshHeader.headerSize;
+			offset + sizeof(VirtualGeometryAggregateProfileHeader)
+				<= static_cast<std::uint64_t>(fileSize); offset += 4u)
+		{
+			VirtualGeometryAggregateProfileHeader header{};
+			input.clear();
+			input.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+			input.read(reinterpret_cast<char*>(&header), sizeof(header));
+			if (!input || header.magic != kVirtualGeometryAggregateProfileMagicValue)
+			{
+				continue;
+			}
+			state.sidecarPresent = true;
+			const std::uint64_t recordBytes =
+				static_cast<std::uint64_t>(header.profileCount)
+				* sizeof(VirtualGeometryAggregateProfileRecord);
+			if (header.version != kVirtualGeometryAggregateProfileVersion
+				|| header.headerSize != sizeof(header)
+				|| header.profileCount == 0u
+				|| header.byteSize != sizeof(header) + recordBytes
+				|| header.byteSize > static_cast<std::uint64_t>(fileSize) - offset)
+			{
+				state.diagnostic = "VGAP aggregate profile header is stale or malformed.";
+				continue;
+			}
+			std::vector<VirtualGeometryAggregateProfileRecord> profiles(header.profileCount);
+			input.clear();
+			input.seekg(static_cast<std::streamoff>(offset + sizeof(header)), std::ios::beg);
+			input.read(reinterpret_cast<char*>(profiles.data()), static_cast<std::streamsize>(recordBytes));
+			const bool valid = static_cast<bool>(input)
+				&& header.contentHash == CalculateVirtualGeometryCompactHash(
+					std::span<const std::uint8_t>(
+						reinterpret_cast<const std::uint8_t*>(profiles.data()),
+						static_cast<std::size_t>(recordBytes)))
+				&& std::all_of(profiles.begin(), profiles.end(), [](const auto& profile) {
+					return profile.kind <= static_cast<std::uint32_t>(VirtualGeometryAggregateProfileKind::Fallback)
+						&& (profile.flags & kVirtualGeometryAggregateProfileFlagCompleteFallbackCoverage) != 0u
+						&& profile.stableId != 0u
+						&& profile.fallbackStableId == profile.stableId
+						&& std::isfinite(profile.canonicalError) && profile.canonicalError >= 0.0f
+						&& std::isfinite(profile.coverageRatio) && profile.coverageRatio >= 0.0f
+						&& profile.coverageRatio <= 1.0f
+						&& profile.sourceElementCount != 0u
+						&& profile.reserved == 0u;
+				});
+			if (valid)
+			{
+				state.current = true;
+				return state;
+			}
+			state.diagnostic = "VGAP aggregate profile contents failed validation.";
+		}
+		if (!state.sidecarPresent)
+		{
+			state.diagnostic = "No VGAP aggregate profile sidecar was found.";
+		}
+		return state;
 	}
 }
 
@@ -3265,6 +3548,43 @@ bool AssetDatabase::CompileMeshWithProcess(const AssetMetadata& metadata, const 
 		TERRAENGINE_LOG(LogLevel::Warning, "Invalid virtual geometry override for " << fullSourcePath << ": " << JoinValidationErrors(resolvedSettings.validationErrors));
 	}
 	const VirtualGeometryAdaptiveCompileSettings compileSettings = ToCompileVirtualGeometrySettings(resolvedSettings);
+	const std::string privateIdentity = UuidToString(metadata.guid);
+	const std::filesystem::path cacheCompilerPath =
+		GetEditorExecutableDirectory() / kMeshCompilerName;
+	const std::string stageCacheKey = BuildVirtualGeometryStageCacheKey(
+		fullSourcePath, compileSettings, cacheCompilerPath);
+	const std::filesystem::path stageCachePath =
+		buildRoot / ".virtual-geometry-cache" / stageCacheKey / "mesh.temf";
+
+	// Cache reuse still stages privately and enters the same protected
+	// publication boundary as a fresh compiler result. Cancellation therefore
+	// cannot make a cache hit visible after the caller has rejected the job.
+	if(!stageCacheKey.empty()
+		&& ValidateVirtualGeometryCachedMesh(stageCachePath)
+		&& (!progressState || !progressState->cancelRequested.load()))
+	{
+		std::error_code cacheError;
+		std::filesystem::copy_file(
+			stageCachePath,
+			stagedCompiledPath,
+			std::filesystem::copy_options::overwrite_existing,
+			cacheError);
+		if(!cacheError
+			&& ValidateVirtualGeometryCachedMesh(stagedCompiledPath)
+			&& PublishCompiledAssetFromWorker(
+				stagedCompiledPath, fullCompiledPath, progressState))
+		{
+			PublishVirtualGeometryCacheProvenance(
+				fullCompiledPath,
+				stageCacheKey,
+				"hit",
+				"verified content-addressed complete-mesh stage",
+				privateIdentity);
+			std::filesystem::remove(stagedMeshReportPath, cacheError);
+			return true;
+		}
+		std::filesystem::remove(stagedCompiledPath, cacheError);
+	}
 
 #ifdef _WIN32
 	const std::filesystem::path compilerPath = GetEditorExecutableDirectory() / kMeshCompilerName;
@@ -3298,11 +3618,24 @@ bool AssetDatabase::CompileMeshWithProcess(const AssetMetadata& metadata, const 
 		std::filesystem::remove(stagedMeshReportPath, cleanupError);
 		return false;
 	}
+	const bool cachePublished =
+		!stageCacheKey.empty()
+		&& (!progressState || !progressState->cancelRequested.load())
+		&& PublishVirtualGeometryStageCache(
+			stagedCompiledPath, stageCachePath, privateIdentity);
 	if (!PublishCompiledAssetFromWorker(stagedCompiledPath, fullCompiledPath, progressState)) {
 		std::filesystem::remove(stagedCompiledPath, cleanupError);
 		std::filesystem::remove(stagedMeshReportPath, cleanupError);
 		return false;
 	}
+	PublishVirtualGeometryCacheProvenance(
+		fullCompiledPath,
+		stageCacheKey,
+		cachePublished ? "miss-published" : "miss-cache-unavailable",
+		cachePublished
+			? "fresh compiler output validated and published to stage cache"
+			: "fresh compiler output published live; cache publication failed",
+		privateIdentity);
 	std::filesystem::remove(stagedMeshReportPath, cleanupError);
 	return true;
 #else
@@ -3316,11 +3649,24 @@ bool AssetDatabase::CompileMeshWithProcess(const AssetMetadata& metadata, const 
 		std::filesystem::remove(stagedMeshReportPath, cleanupError);
 		return false;
 	}
+	const bool cachePublished =
+		!stageCacheKey.empty()
+		&& (!progressState || !progressState->cancelRequested.load())
+		&& PublishVirtualGeometryStageCache(
+			stagedCompiledPath, stageCachePath, privateIdentity);
 	if (!PublishCompiledAssetFromWorker(stagedCompiledPath, fullCompiledPath, progressState)) {
 		std::filesystem::remove(stagedCompiledPath, cleanupError);
 		std::filesystem::remove(stagedMeshReportPath, cleanupError);
 		return false;
 	}
+	PublishVirtualGeometryCacheProvenance(
+		fullCompiledPath,
+		stageCacheKey,
+		cachePublished ? "miss-published" : "miss-cache-unavailable",
+		cachePublished
+			? "fresh compiler output validated and published to stage cache"
+			: "fresh compiler output published live; cache publication failed",
+		privateIdentity);
 	std::filesystem::remove(stagedMeshReportPath, cleanupError);
 	return true;
 #endif
@@ -4351,6 +4697,23 @@ bool AssetDatabase::TryGetVirtualGeometryMetadata(const AssetMetadata& metadata,
 		outMetadata.rebuildGuidance = "Rebuild this mesh because the virtual geometry root header is unreadable or incompatible.";
 		return true;
 	}
+	const VirtualGeometryAggregateProfileReadState aggregateProfile =
+		ReadVirtualGeometryAggregateProfileState(input, header);
+	outMetadata.aggregateProfileCurrent = aggregateProfile.current;
+	outMetadata.aggregateProfileRepairRequired = !aggregateProfile.current;
+	outMetadata.aggregateProfileDiagnostic = aggregateProfile.diagnostic;
+	if (outMetadata.aggregateProfileRepairRequired)
+	{
+		// The expanded/cluster payload remains usable through its validated
+		// per-cluster fallback chain. Requesting repair here targets only this
+		// source mesh and lets the existing staged importer publish atomically.
+		outMetadata.warnings.push_back(
+			"Aggregate fallback profile needs targeted recook: "
+			+ aggregateProfile.diagnostic);
+		outMetadata.rebuildGuidance =
+			"Rebuild this mesh to publish the current VGAP aggregate fallback profile; "
+			"the existing per-cluster fallback remains active until then.";
+	}
 
 	outMetadata.detailLevelCount = virtualHeader.detailLevelCount;
 	outMetadata.sourceTriangleCount = virtualHeader.sourceTriangleCount;
@@ -4359,6 +4722,76 @@ bool AssetDatabase::TryGetVirtualGeometryMetadata(const AssetMetadata& metadata,
 	outMetadata.clusterCount = virtualHeader.clusterCount;
 	outMetadata.materialSectionCount = virtualHeader.materialSectionCount;
 	outMetadata.pageCount = virtualHeader.pageCount;
+	outMetadata.formatHash = HashVirtualGeometryFormatRecord(virtualHeader);
+	std::error_code compiledSizeError;
+	outMetadata.encodedGeometryBytes = std::filesystem::file_size(
+		compiledPath, compiledSizeError);
+	if(compiledSizeError)
+	{
+		outMetadata.encodedGeometryBytes = 0u;
+	}
+	// The legacy expanded profile is already GPU-ready, so stored and decoded
+	// sizes are identical. Compact sidecars report their own sizes separately.
+	outMetadata.decodedGeometryBytes = outMetadata.encodedGeometryBytes;
+	outMetadata.bytesPerSourceTriangle =
+		virtualHeader.sourceTriangleCount == 0u
+			? 0.0f
+			: static_cast<float>(outMetadata.encodedGeometryBytes)
+				/ static_cast<float>(virtualHeader.sourceTriangleCount);
+
+	const std::filesystem::path cacheProvenancePath =
+		compiledPath.string() + ".vgcache.json";
+	std::ifstream cacheProvenanceInput(cacheProvenancePath, std::ios::binary);
+	if(cacheProvenanceInput)
+	{
+		try
+		{
+			const json cacheProvenance = json::parse(cacheProvenanceInput);
+			if(cacheProvenance.value("schemaVersion", 0u) == 1u
+				&& cacheProvenance.value("valid", false))
+			{
+				outMetadata.cacheKey =
+					cacheProvenance.value("inputKey", std::string());
+				outMetadata.cacheState =
+					cacheProvenance.value("state", std::string("unavailable"));
+				outMetadata.cacheReason =
+					cacheProvenance.value("reason", std::string());
+			}
+		}
+		catch(const std::exception&)
+		{
+			outMetadata.cacheState = "invalid";
+			outMetadata.cacheReason =
+				"Stage-cache provenance sidecar is malformed.";
+		}
+	}
+	if(virtualHeader.clusterCount != 0u
+		&& virtualHeader.clusterTableOffset != 0u)
+	{
+		std::vector<VirtualGeometryClusterRecord> clusters;
+		if(ReadVirtualGeometryRecordTable(
+			input,
+			virtualHeader.clusterTableOffset,
+			virtualHeader.clusterCount,
+			clusters))
+		{
+			for(const VirtualGeometryClusterRecord& cluster : clusters)
+			{
+				if(std::isfinite(cluster.geometricError))
+				{
+					outMetadata.maximumObjectError = std::max(
+						outMetadata.maximumObjectError,
+						cluster.geometricError);
+				}
+			}
+		}
+		else
+		{
+			input.clear();
+			outMetadata.pageIntegrityErrors.push_back(
+				"Cluster error metadata could not be read.");
+		}
+	}
 	constexpr std::uint32_t kRequiredPageStreamingValidationFlags =
 		kVirtualGeometryValidationFlagFallbackCoverageValidated
 		| kVirtualGeometryValidationFlagClusterHierarchyValidated
@@ -4624,7 +5057,10 @@ bool AssetDatabase::RebuildVirtualGeometryAsset(const TerraEngine::UUID& assetGu
 			}
 			return false;
 		}
-		ImportAsset(assetRoot / metadata.sourcePath, true);
+		// Route repair through the normal worker/staging pipeline. This limits the
+		// recook to the selected mesh and preserves the last complete compiled
+		// artifact until the new VGAP-bearing output is ready to publish.
+		ImportAssetWithProgress(assetRoot / metadata.sourcePath, true);
 		return true;
 	}
 

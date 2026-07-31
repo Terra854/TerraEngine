@@ -5,6 +5,10 @@
 // missing-resource rejection may remove work, but invalid or fallback packets
 // are preserved so the mesh-shader path never loses coverage while the GPU
 // driven path is being validated.
+//
+// This 192-byte record is the exact counterpart of
+// VulkanVirtualGeometryPacketUploadRecord. The processor-facing packet type is
+// deliberately not uploaded because it owns diagnostic text and native padding.
 
 struct GpuVirtualGeometryPacketRecord
 {
@@ -32,8 +36,11 @@ struct GpuVirtualGeometryPacketRecord
 	uint2 pagePayloadByteSize;
 	uint payloadBufferIndex;
 	uint payloadDescriptorIndex;
+	uint generatedCommandIndex;
+	uint generatedCommandTaskGroupCount;
 	uint debugIdentity;
 	uint flags;
+	uint2 tailPadding;
 };
 
 struct GpuPacketCompactionConstants
@@ -52,10 +59,10 @@ struct GpuPacketCompactionCounters
 	uint failOpenPackets;
 };
 
-[[vk::binding(0, 0)]] StructuredBuffer<GpuVirtualGeometryPacketRecord> candidatePackets;
-[[vk::binding(1, 0)]] RWStructuredBuffer<GpuVirtualGeometryPacketRecord> compactedPackets;
-[[vk::binding(2, 0)]] RWStructuredBuffer<uint4> generatedSubmissions;
-[[vk::binding(3, 0)]] RWStructuredBuffer<GpuPacketCompactionCounters> compactionCounters;
+[[vk::binding(3, 0)]] StructuredBuffer<GpuVirtualGeometryPacketRecord> candidatePackets;
+[[vk::binding(4, 0)]] RWStructuredBuffer<GpuVirtualGeometryPacketRecord> compactedPackets;
+[[vk::binding(5, 0)]] RWStructuredBuffer<uint4> generatedSubmissions;
+[[vk::binding(6, 0)]] RWStructuredBuffer<GpuPacketCompactionCounters> compactionCounters;
 
 [[vk::push_constant]] ConstantBuffer<GpuPacketCompactionConstants> Compaction;
 
@@ -107,5 +114,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 	}
 
 	compactedPackets[compactedIndex] = packet;
-	generatedSubmissions[compactedIndex] = uint4(packet.packetId, packet.meshletOffset, packet.meshletCount, packet.selectedLod);
+	// Indirect generation is the sole writer of generatedSubmissions. Leaving
+	// this range untouched prevents packet metadata from ever being interpreted
+	// as VkDrawMeshTasksIndirectCommandEXT dimensions.
 }

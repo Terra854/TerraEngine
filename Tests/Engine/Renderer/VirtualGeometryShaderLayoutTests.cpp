@@ -67,6 +67,30 @@ namespace TerraEngine::Tests
 			return buffer.str();
 		}
 
+		std::string ReadVirtualGeometryGeneratedIndirectShader()
+		{
+			const std::filesystem::path shaderPath =
+				std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Engine/Shaders/VirtualGeometry/VirtualGeometryGeneratedIndirect.comp.hlsl";
+			std::ifstream input(shaderPath, std::ios::binary);
+			std::ostringstream buffer;
+			buffer << input.rdbuf();
+			return buffer.str();
+		}
+
+		std::string ReadVirtualGeometryAbi()
+		{
+			// The feature ABI is intentionally policy-free and shared by every
+			// backend stage. Reading the dedicated shader file catches accidental
+			// binding renumbering or loss of generation guards before runtime.
+			const std::filesystem::path shaderPath =
+				std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Engine/Shaders/VirtualGeometry/VirtualGeometryAbi.hlsli";
+			std::ifstream input(shaderPath, std::ios::binary);
+			std::ostringstream buffer;
+			buffer << input.rdbuf();
+			return buffer.str();
+		}
+
 		std::string ReadVulkanContextSource()
 		{
 			// The Vulkan draw path owns the final push-constant submission.
@@ -167,6 +191,24 @@ namespace TerraEngine::Tests
 
 	void RegisterVirtualGeometryShaderLayoutTests(TestRegistry& registry)
 	{
+		registry.Add("VirtualGeometry.ShaderLayout.FeatureAbiOwnsBindingsAndGenerationGuards", [](TestContext& context) {
+			const std::string abi = ReadVirtualGeometryAbi();
+			context.Expect(!abi.empty(), "The virtual-geometry ABI shader include must be readable from the source tree.");
+			context.Expect(ShaderContains(abi, "#define TE_VIRTUAL_GEOMETRY_ABI_VERSION 1u"),
+				"The feature ABI must publish an explicit version for host/backend compatibility checks.");
+			context.Expect(ShaderContains(abi, "#define TE_VIRTUAL_GEOMETRY_BINDING_COUNT 14u"),
+				"The feature ABI must keep one explicit descriptor-binding count.");
+			context.Expect(ShaderContains(abi, "uint2 rendererGeneration;")
+					&& ShaderContains(abi, "uint2 geometryGeneration;")
+					&& ShaderContains(abi, "uint2 residencyGeneration;")
+					&& ShaderContains(abi, "uint2 descriptorGeneration;"),
+				"Every generated packet must be guarded by renderer, geometry, residency, and descriptor generations.");
+			context.Expect(ShaderContains(abi, "bool TeVirtualGeometryGenerationMatches("),
+				"Backends must share one generation-match predicate instead of inventing route-specific acceptance.");
+			context.Expect(ShaderContains(abi, "bool TeVirtualGeometryWithinCapacity(uint index, uint capacity)"),
+				"Backends must share the bounded-capacity predicate used by fail-open overflow handling.");
+		});
+
 		registry.Add("VirtualGeometry.ShaderLayout.PushConstantsCarrySelectedLodRange", [](TestContext& context) {
 			context.Expect(offsetof(PushConstants, virtualMeshletOffset) > offsetof(PushConstants, indirectDrawOffset), "Virtual geometry range should follow indirect draw metadata.");
 			context.ExpectEqual(offsetof(PushConstants, virtualMeshletOffset) + sizeof(std::uint32_t), offsetof(PushConstants, virtualMeshletCount), "Virtual meshlet offset/count should be tightly packed.");
@@ -225,7 +267,20 @@ namespace TerraEngine::Tests
 			context.Expect(ShaderContains(shader, "Compaction.failOpenOnInvalid"), "Compaction shader should preserve fail-open coverage for invalid or missing-resource packets.");
 			context.Expect(ShaderContains(shader, "ProjectedBoundsOutsideView"), "Compaction shader should own frustum-style projected-bounds rejection.");
 			context.Expect(ShaderContains(shader, "compactedIndex >= Compaction.outputCapacity"), "Compaction shader should guard output overflow instead of writing past compacted capacity.");
+			context.Expect(!ShaderContains(shader, "generatedSubmissions[compactedIndex] ="), "Compaction must not leave packet metadata in the indirect-command buffer.");
 			context.Expect(ShaderContains(shader, "[numthreads(64, 1, 1)]"), "Compaction shader should use an explicit, bounded thread-group size.");
+		});
+
+		registry.Add("VirtualGeometry.ShaderLayout.GeneratedIndirectUsesStableBoundedTaskCommands", [](TestContext& context) {
+			const std::string shader = ReadVirtualGeometryGeneratedIndirectShader();
+
+			context.Expect(!shader.empty(), "Generated indirect shader should remain available as a separate engine shader.");
+			context.Expect(ShaderContains(shader, "packet.generatedCommandIndex >= Indirect.argumentCapacity"), "Generated commands must validate the stable graphics descriptor index.");
+			context.Expect(ShaderContains(shader, "InterlockedMax(")
+				&& ShaderContains(shader, "packet.generatedCommandTaskGroupCount"),
+				"Every surviving packet must conservatively publish its complete compatible-batch command.");
+			context.Expect(ShaderContains(shader, "if it rejects the entire batch, the cleared command remains zero"), "Generated commands should document the all-rejected zero-work contract.");
+			context.Expect(ShaderContains(shader, "1u << packet.emittedSource"), "The route mask must treat emitted-source values as enum identities rather than raw bit masks.");
 		});
 
 		registry.Add("VirtualGeometry.ShaderLayout.PageLocalPacketsPreserveMaterialAndPayloadIdentity", [](TestContext& context) {
@@ -282,6 +337,8 @@ namespace TerraEngine::Tests
 			context.Expect(ShaderContains(taskShader, "SceneUniforms.virtualGeometryPacketDescriptorIndex"), "Task shader should address page-local descriptors by packet descriptor id, not selected cluster row.");
 			context.Expect(ShaderContains(taskShader, "TryResolvePageLocalMeshlet"), "Task shader should resolve each meshlet in a batched page-local packet run.");
 			context.Expect(ShaderContains(taskShader, "gTaskPayload.packetDescriptorIndices[visibleCount]"), "Task payloads should preserve the descriptor selected for every compacted meshlet.");
+			context.Expect(ShaderContains(taskShader, "wordOffset >= elementCount"), "Task shader should fail open before a stale packet can read beyond the physical page table.");
+			context.Expect(ShaderContains(taskShader, "0xffffffffu - descriptorWord"), "Task shader should reject overflowing packet-descriptor address arithmetic.");
 			context.Expect(ShaderContains(taskShader, "kVirtualGeometryPayloadDescriptorMaterialWordOffset"), "Task shader descriptor layout should keep page-local material stream slots.");
 			context.Expect(ShaderContains(meshShader, "TryUsePageLocalGeometry"), "Mesh shader should choose page-local geometry for resident page and fallback packets.");
 			context.Expect(ShaderContains(meshShader, "LoadPageLocalPackedVertexWord"), "Mesh shader should emit resident pages from page-local packed vertices.");
@@ -290,6 +347,8 @@ namespace TerraEngine::Tests
 			context.Expect(ShaderContains(meshShader, "SceneUniforms.virtualGeometryPacketDescriptorIndex"), "Mesh shader should address page-local descriptors by packet descriptor id, not selected cluster row.");
 			context.Expect(ShaderContains(meshShader, "taskPayload.packetDescriptorIndices[visibleIndex]"), "Mesh shader should consume the per-meshlet descriptor chosen by the task shader.");
 			context.Expect(ShaderContains(meshShader, "TryLoadPageLocalPayloadDescriptorAt"), "Mesh shader should load independently addressed descriptors inside a page-local packet run.");
+			context.Expect(ShaderContains(meshShader, "wordOffset >= elementCount"), "Mesh shader should fail open before a stale packet can read beyond the physical page table.");
+			context.Expect(ShaderContains(meshShader, "0xffffffffu - descriptorWord"), "Mesh shader should reject overflowing packet-descriptor address arithmetic.");
 			context.Expect(ShaderContains(meshShader, "const uint pageLocalMeshletIndex = taskPayload.meshletIndices[visibleIndex];"), "Mesh shader should preserve the packet-local meshlet index resolved by the task stage.");
 			context.Expect(ShaderContains(meshShader, "if (pageLocalMeshletIndex >= pageDescriptor.meshletCount)"), "Mesh shader should validate the resolved packet-local index instead of the task-group output slot.");
 			context.Expect(ShaderContains(meshShader, "kVirtualGeometryPayloadDescriptorMaterialWordOffset"), "Mesh shader descriptor layout should keep page-local material stream slots.");
@@ -355,7 +414,11 @@ namespace TerraEngine::Tests
 			const std::size_t pageIndexValidation = meshShader.find("if (pageLocalMeshletIndex >= pageDescriptor.meshletCount)", pageIndex);
 			const std::size_t pageEmit = meshShader.find("EmitPageLocalMeshlet(", pageIndexValidation);
 			const std::size_t branchReturn = pageEmit == std::string::npos ? std::string::npos : meshShader.find("return;", pageEmit);
-			const std::size_t ownerEmit = meshShader.find("EmitMeshlet(meshletIndex, outputVertices, outputTriangles);", pageEmit);
+			// Primitive-identity output is an additional argument, but ownership
+			// ordering still depends only on the owner-mesh call occurring later.
+			const std::size_t ownerEmit = meshShader.find(
+				"EmitMeshlet(meshletIndex, outputVertices, outputTriangles",
+				pageEmit);
 			context.Expect(
 				pageIndex != std::string::npos
 					&& pageIndexValidation != std::string::npos
@@ -399,6 +462,26 @@ namespace TerraEngine::Tests
 					&& ownerFallback < wholeOwnerCount
 					&& wholeOwnerCount < packetExpansion,
 				"Legacy animated assets without AVPB inputs must publish one complete owner-mesh fallback before page packets can be expanded.");
+			context.Expect(
+				ShaderContains(vulkanSource,
+					"&& !command.animationBinding.RequiresOwnerMeshDeformationFallback()"),
+				"Legacy owner-mesh deformation must stay on the mesh-only Vulkan route because it has no current task-stage bounds; canonical animated pages remain task-pipeline eligible.");
+			context.Expect(
+				ShaderContains(vulkanSource,
+					"resources.graphicsGroups.begin()")
+					&& ShaderContains(vulkanSource,
+						"candidate.stableInstanceId")
+					&& ShaderContains(vulkanSource,
+						"candidate.meshId == command.meshId"),
+				"Canonical graphics publications must resolve the exact owner/mesh group so multiple independently animated owners can share one frame safely.");
+			context.Expect(
+				ShaderContains(vulkanSource,
+					"return group->headerWordOffset;"),
+				"Validated multi-owner demanded-page deformation must publish each owner's bridge header instead of rejecting the entire compute plan.");
+			context.Expect(
+				ShaderContains(vulkanSource,
+					"&& !multiOwnerCanonicalFallback"),
+				"Multi-owner canonical fallback draws must use the mesh-only collection so task payloads cannot consume an unproven page bridge.");
 			context.Expect(
 				!ShaderContains(vulkanSource, "const bool wholeOwnerDeformationFallback =")
 					&& ShaderContains(vulkanSource,
@@ -600,11 +683,17 @@ namespace TerraEngine::Tests
 				ShaderContains(vulkanResources, "std::optional<PipelineKey> VulkanContext::Impl::BuildPipelineKey"),
 				"Pipeline creation and lookup should share one complete key builder.");
 			context.Expect(
-				ShaderContains(vulkanContext, "impl->BuildPipelineKey(collectionId, material->header.flags)"),
-				"Prepared-resource fallback checks should use the generation-aware pipeline key.");
+				ShaderContains(vulkanContext,
+					"impl->BuildPipelineKey(collectionId, material->header.flags,")
+					&& ShaderContains(vulkanContext,
+						"preparationUsesConventionalVisibilityIdentity);"),
+				"Prepared-resource fallback checks should use the generation-aware pipeline key and the matching identity-target variant.");
 			context.Expect(
-				ShaderContains(vulkanContext, "impl->BuildPipelineKey(shaderCollectionId, materialFlags)"),
-				"Draw-time pipeline resolution should use the generation-aware pipeline key.");
+				ShaderContains(vulkanContext,
+					"impl->BuildPipelineKey(shaderCollectionId, materialFlags,")
+					&& ShaderContains(vulkanContext,
+						"pipelineUsesConventionalVisibilityIdentity);"),
+				"Draw-time pipeline resolution should use the generation-aware pipeline key and the matching identity-target variant.");
 			context.Expect(
 				!ShaderContains(vulkanContext, "PipelineKey pipeKey = {"),
 				"Vulkan pipeline lookups must not silently zero generation and geometry-contract fields.");
@@ -714,6 +803,46 @@ namespace TerraEngine::Tests
 			context.Expect(ShaderContains(vulkanResourcesSource, "if (HasStorageBinding(6) && mesh.meshSkinningBuffer.buffer == VK_NULL_HANDLE)"), "Descriptor creation should fail closed if the required skinning owner could not be created.");
 			context.Expect(ShaderContains(vulkanResourcesSource, "if (HasStorageBinding(6))"), "Reflected skinning binding 6 should always be written, including for static meshes.");
 			context.Expect(!ShaderContains(vulkanResourcesSource, "if (hasSkinning && HasStorageBinding(6))"), "Descriptor publication must not silently skip a statically used skinning binding.");
+		});
+
+		registry.Add("VirtualGeometry.ShaderLayout.ByteAddressPayloadsOwnCompleteFinalWords", [](TestContext& context) {
+			const std::string vulkanResourcesSource = ReadVulkanContextResourcesSource();
+
+			// A u16 remap or u8 primitive may end midway through the 32-bit word
+			// fetched by ByteAddressBuffer.Load. GPU-assisted validation requires
+			// the descriptor range to include that complete final word.
+			context.Expect(ShaderContains(vulkanResourcesSource,
+				"const auto AlignByteAddressRange = [](VkDeviceSize byteCount)"),
+				"Vulkan mesh uploads should centralize four-byte ByteAddressBuffer padding.");
+			context.Expect(ShaderContains(vulkanResourcesSource,
+				"CreateBuffer(vertexRemapUploadSize"),
+				"16-bit vertex-remap storage should allocate its padded descriptor range.");
+			context.Expect(ShaderContains(vulkanResourcesSource,
+				"CreateBuffer(primitiveIndexUploadSize"),
+				"8-bit primitive storage should allocate its padded descriptor range.");
+			context.Expect(ShaderContains(vulkanResourcesSource,
+				"CopyBuffer(stagingVertexRemap.buffer, vMesh.meshletVertexRemapBuffer.buffer, vertexRemapUploadSize)"),
+				"The remap upload should initialize the complete padded range.");
+			context.Expect(ShaderContains(vulkanResourcesSource,
+				"CopyBuffer(stagingIndex.buffer, vMesh.indexBuffer.buffer, primitiveIndexUploadSize)"),
+				"The primitive upload should initialize the complete padded range.");
+		});
+
+		registry.Add("VirtualGeometry.ShaderLayout.CanonicalGraphicsBridgeIndexesEveryOwnerGroup", [](TestContext& context) {
+			const std::string vulkanSource = ReadVulkanContextSource();
+
+			// One frame-owned bridge contains a header for every owner/mesh pair.
+			// Draws must select their matched group instead of silently falling
+			// back to bind pose whenever more than one animator is visible.
+			context.Expect(
+				ShaderContains(vulkanSource, "push.textureIndex = canonicalGroup.value();"),
+				"Canonical deformation draws should publish the matched owner-group index.");
+			context.Expect(
+				ShaderContains(vulkanSource, "canonicalGraphicsAvailable"),
+				"Canonical page deformation should select a task-stage pipeline that initializes packet payload identity.");
+			context.Expect(
+				!ShaderContains(vulkanSource, "deformationResources.graphicsGroups.size() == 1u"),
+				"Canonical deformation should remain available to multi-owner frames.");
 		});
 
 		registry.Add("VirtualGeometry.ShaderLayout.HiZPyramidTracksEditorRenderTargetSize", [](TestContext& context) {

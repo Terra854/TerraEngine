@@ -9,7 +9,9 @@
 #include "Animation/Gpu/GpuAnimationPlan.h"
 #include "Renderer/Graph/RenderGraph.h"
 #include "Renderer/Graph/RenderWorkPacket.h"
+#include "Renderer/VirtualGeometry/Selection/VirtualGeometryGpuPlan.h"
 #include "VulkanCommonIncludes.h"
+#include "VulkanVirtualGeometryExecutor.h"
 
 #include <array>
 #include <cstdint>
@@ -45,6 +47,28 @@ namespace TerraEngine::Renderer::Vulkan {
 	TERRAENGINE_API VulkanRendererThreadingPlan BuildVulkanRendererThreadingPlan(
 		const RenderFrameSnapshot& snapshot,
 		const BackendCapabilityProfile& capabilities);
+
+	// This value plan bridges immutable renderer preparation to Vulkan's existing
+	// executor. It owns no VkBuffer or descriptor lifetime: VulkanContext remains
+	// the protected owner of those objects and invokes the recorder below once.
+	struct VulkanVirtualGeometryCommandPlan
+	{
+		VulkanVirtualGeometryExecutorPlan executorPlan;
+		std::vector<VulkanVirtualGeometryExecutorStage> stages;
+		bool protectedRecordingRequired = true;
+		bool valid = false;
+		std::string rejectionReason;
+	};
+
+	TERRAENGINE_API VulkanVirtualGeometryCommandPlan BuildVulkanVirtualGeometryCommandPlan(
+		const VirtualGeometryGpuPlan& immutablePlan,
+		const VulkanVirtualGeometryExecutorResources& resources,
+		const VulkanVirtualGeometryExecutorPipelines& pipelines);
+	TERRAENGINE_API VulkanVirtualGeometryExecutorRecordingResult RecordVulkanVirtualGeometryCommands(
+		VkCommandBuffer commandBuffer,
+		const VulkanVirtualGeometryCommandPlan& commandPlan,
+		const VulkanVirtualGeometryExecutorResources& resources,
+		const VulkanVirtualGeometryExecutorPipelines& pipelines);
 
 	// A single animation generation is recorded once before all view draw work.
 	// This value plan deliberately owns neither command buffers nor queue submits;

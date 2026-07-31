@@ -45,6 +45,8 @@
 #include <backends/imgui_impl_vulkan.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
+#include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <stdexcept>
@@ -76,6 +78,12 @@
 
 namespace
 {
+	bool IsEnvironmentFlagEnabled(const char* name)
+	{
+		const char* value = std::getenv(name);
+		return value != nullptr && std::string_view(value) == "1";
+	}
+
 	// The graph transaction is shared by Asset Browser drag/drop and MCP-backed
 	// prefab instantiation. Preparation completes before the first live object is
 	// published, and every newly assigned UUID is retained for rollback.
@@ -93,7 +101,110 @@ namespace
 		const TerraEngine::UUID& prefabGuid,
 		nlohmann::json prefabJson,
 		std::string_view requestedName,
-		std::optional<entt::entity> parent);
+		std::optional<entt::entity> parent,
+		std::size_t rootsPerInstance = 0U);
+
+	constexpr std::uint32_t kMaximumBulkPrefabInstances = 4096u;
+
+	std::uint32_t ResolveBulkGridColumns(const PrefabAuthoringService::BulkInstantiationRequest& request)
+	{
+		if (request.columns != 0u)
+		{
+			return request.columns;
+		}
+		return static_cast<std::uint32_t>(std::ceil(std::sqrt(static_cast<double>(request.count))));
+	}
+
+	glm::vec3 ResolveBulkGridPosition(
+		const PrefabAuthoringService::BulkInstantiationRequest& request,
+		std::uint32_t instanceIndex)
+	{
+		const std::uint32_t columns = ResolveBulkGridColumns(request);
+		const std::uint32_t row = instanceIndex / columns;
+		const std::uint32_t column = instanceIndex % columns;
+		const float halfWidth = static_cast<float>(columns - 1u) * 0.5f;
+		return request.origin + glm::vec3(
+			(static_cast<float>(column) - halfWidth) * request.spacing,
+			0.0f,
+			(static_cast<float>(row) - halfWidth) * request.spacing);
+	}
+
+	std::string ResolveBulkInstanceName(
+		std::string_view namePrefix,
+		std::string_view sourceName,
+		std::uint32_t instanceIndex,
+		std::uint32_t instanceCount)
+	{
+		const std::string baseName = namePrefix.empty() ? std::string(sourceName) : std::string(namePrefix);
+		if (instanceCount == 1u)
+		{
+			return baseName;
+		}
+		return baseName + " " + std::to_string(instanceIndex + 1u);
+	}
+
+	bool ApplyBulkRootPosition(nlohmann::json& rootObject, const glm::vec3& position)
+	{
+		if (!rootObject.is_object())
+		{
+			return false;
+		}
+		nlohmann::json& components = rootObject["components"];
+		if (components.is_null())
+		{
+			components = nlohmann::json::object();
+		}
+		if (!components.is_object())
+		{
+			return false;
+		}
+		nlohmann::json& transform = components["Transform"];
+		if (transform.is_null())
+		{
+			transform = nlohmann::json::object();
+		}
+		if (!transform.is_object())
+		{
+			return false;
+		}
+		transform["Position"] = {position.x, position.y, position.z};
+		return true;
+	}
+
+	std::size_t ApplyBulkAnimationMode(
+		nlohmann::json& object,
+		TerraEngine::Animation::AnimationExecutionPolicy requestedMode)
+	{
+		if (!object.is_object())
+		{
+			return 0u;
+		}
+
+		std::size_t modifiedComponents = 0u;
+		if (auto components = object.find("components");
+			components != object.end() && components->is_object())
+		{
+			if (auto animator = components->find("AnimatorComponent");
+				animator != components->end() && animator->is_object())
+			{
+				// Mutate only the cloned serialized graph. ObjectManager cannot
+				// observe it until the complete batch commits at the protected
+				// prefab publication boundary below.
+				(*animator)["requestedMode"] =
+					static_cast<std::uint8_t>(requestedMode);
+				++modifiedComponents;
+			}
+		}
+		if (auto children = object.find("children");
+			children != object.end() && children->is_array())
+		{
+			for (nlohmann::json& child : *children)
+			{
+				modifiedComponents += ApplyBulkAnimationMode(child, requestedMode);
+			}
+		}
+		return modifiedComponents;
+	}
 }
 
 std::string PrefabAuthoringService::ResolvePrefabId(std::string_view identity) const {
@@ -289,6 +400,266 @@ PrefabAuthoringService::Result PrefabAuthoringService::Instantiate(
 		{"instanceId", instanceId},
 		{"path", prefab.relativePath},
 		{"prefabGeneration", prefab.generation}
+	}};
+}
+
+PrefabAuthoringService::Result PrefabAuthoringService::InstantiateMany(
+	std::string_view prefabIdentity,
+	const BulkInstantiationRequest& request)
+{
+	if (request.count == 0u || request.count > kMaximumBulkPrefabInstances
+		|| !std::isfinite(request.spacing) || request.spacing < 0.0f
+		|| !std::isfinite(request.origin.x) || !std::isfinite(request.origin.y)
+		|| !std::isfinite(request.origin.z)
+		|| request.columns > request.count)
+	{
+		return {
+			false,
+			"validation",
+			"Bulk prefab count, spacing, columns, or origin is outside the supported range.",
+			{{"rolledBack", true}, {"maximumCount", kMaximumBulkPrefabInstances}}
+		};
+	}
+
+	const std::string prefabId = ResolvePrefabId(prefabIdentity);
+	if (prefabId.empty())
+	{
+		return {false, "missing_target", "Prefab was not found.", {{"rolledBack", true}}};
+	}
+	if (!activeContextPrefabId.empty() && activeContextPrefabId == prefabId)
+	{
+		return {false, "conflict", "A prefab cannot contain itself.", {{"rolledBack", true}}};
+	}
+
+	const PrefabState& prefab = prefabsById.at(prefabId);
+	if (request.parent.has_value()
+		&& !ObjectManager::instance().getObject(*request.parent).has_value())
+	{
+		return {
+			false,
+			"validation",
+			"Prefab batch parent no longer exists in the hierarchy.",
+			{{"rolledBack", true}}
+		};
+	}
+	const std::uint32_t columns = ResolveBulkGridColumns(request);
+	nlohmann::json instanceRows = nlohmann::json::array();
+	nlohmann::json instanceIds = nlohmann::json::array();
+
+	if (prefab.hasSerializedGraph)
+	{
+		if (!prefab.serializedDocument.contains("objects")
+			|| !prefab.serializedDocument["objects"].is_array()
+			|| prefab.serializedDocument["objects"].empty())
+		{
+			return {false, "validation", "Registered prefab has no root objects.", {{"rolledBack", true}}};
+		}
+
+		const std::size_t rootsPerInstance = prefab.serializedDocument["objects"].size();
+		nlohmann::json combinedDocument = prefab.serializedDocument;
+		combinedDocument["objects"] = nlohmann::json::array();
+		std::size_t animationModeOverrideCount = 0u;
+		for (std::uint32_t instanceIndex = 0u; instanceIndex < request.count; ++instanceIndex)
+		{
+			const std::string name = ResolveBulkInstanceName(
+				request.namePrefix, prefab.sourceName, instanceIndex, request.count);
+			const glm::vec3 position = ResolveBulkGridPosition(request, instanceIndex);
+			for (std::size_t rootIndex = 0u; rootIndex < rootsPerInstance; ++rootIndex)
+			{
+				nlohmann::json rootObject = prefab.serializedDocument["objects"][rootIndex];
+				if (rootIndex == 0u)
+				{
+					rootObject["name"] = name;
+					if (!ApplyBulkRootPosition(rootObject, position))
+					{
+						return {
+							false,
+							"validation",
+							"Prefab root components cannot accept deterministic grid placement.",
+							{{"rolledBack", true}}
+						};
+					}
+				}
+				if (request.requestedAnimationMode.has_value())
+				{
+					animationModeOverrideCount += ApplyBulkAnimationMode(
+						rootObject, *request.requestedAnimationMode);
+				}
+				combinedDocument["objects"].push_back(std::move(rootObject));
+			}
+		}
+
+		const ProtectedPrefabInstantiationResult graph = InstantiateRegisteredPrefabGraph(
+			prefab.absolutePath,
+			prefab.assetGuid,
+			std::move(combinedDocument),
+			{},
+			request.parent,
+			rootsPerInstance);
+		if (!graph.ok || graph.roots.size() != rootsPerInstance * request.count)
+		{
+			return {
+				false,
+				graph.errorCategory.empty() ? "internal" : graph.errorCategory,
+				graph.message.empty() ? "Could not publish the complete prefab batch." : graph.message,
+				{{"rolledBack", true}}
+			};
+		}
+
+		// Service identity state is published only after ObjectManager accepted
+		// the complete graph. Every response row names the canonical root plus
+		// any secondary roots created for that prefab instance.
+		for (std::uint32_t instanceIndex = 0u; instanceIndex < request.count; ++instanceIndex)
+		{
+			const std::size_t firstRoot = static_cast<std::size_t>(instanceIndex) * rootsPerInstance;
+			const Object canonicalRoot = ObjectManager::instance().makeObjectHandle(graph.roots[firstRoot]);
+			const std::string instanceId = TerraEngine::ToHexString(
+				ObjectManager::instance().getUUID(canonicalRoot));
+			const std::string name = ResolveBulkInstanceName(
+				request.namePrefix, prefab.sourceName, instanceIndex, request.count);
+			const glm::vec3 position = ResolveBulkGridPosition(request, instanceIndex);
+			nlohmann::json rootIds = nlohmann::json::array();
+			for (std::size_t rootOffset = 0u; rootOffset < rootsPerInstance; ++rootOffset)
+			{
+				const Object root = ObjectManager::instance().makeObjectHandle(graph.roots[firstRoot + rootOffset]);
+				rootIds.push_back(TerraEngine::ToHexString(ObjectManager::instance().getUUID(root)));
+			}
+			instances[instanceId] = {prefabId, prefab.sourceName};
+			instanceIds.push_back(instanceId);
+			instanceRows.push_back({
+				{"index", instanceIndex},
+				{"name", name},
+				{"instanceId", instanceId},
+				{"rootIds", std::move(rootIds)},
+				{"position", {position.x, position.y, position.z}}
+			});
+		}
+
+		return {true, {}, "Instantiated prefab batch.", {
+			{"prefabId", prefabId},
+			{"path", prefab.relativePath},
+			{"prefabGeneration", prefab.generation},
+			{"instanceCount", request.count},
+			{"rootCount", graph.roots.size()},
+			{"objectCount", graph.objectCount},
+			{"instanceIds", std::move(instanceIds)},
+			{"instances", std::move(instanceRows)},
+			{"grid", {{"columns", columns}, {"spacing", request.spacing},
+				{"origin", {request.origin.x, request.origin.y, request.origin.z}}}},
+			{"requestedAnimationMode", request.requestedAnimationMode.has_value()
+				? nlohmann::json(static_cast<std::uint8_t>(*request.requestedAnimationMode))
+				: nlohmann::json(nullptr)},
+			{"animationModeOverrideCount", animationModeOverrideCount},
+			{"visibilityBoundary", "prefab_bulk_publication"},
+			{"rolledBack", false}
+		}};
+	}
+
+	ObjectManager& objects = ObjectManager::instance();
+	if (objects.IsBulkPublicationActive())
+	{
+		return {
+			false,
+			"conflict",
+			"Another protected scene publication is already active.",
+			{{"rolledBack", true}}
+		};
+	}
+
+	const bool sceneWasDirty = SceneManager::Instance().IsActiveSceneDirty();
+	std::vector<entt::entity> roots;
+	std::vector<std::unique_ptr<ICommand>> undoCommands;
+	roots.reserve(request.count);
+	undoCommands.reserve(request.count);
+	bool publicationActive = false;
+	auto rollback = [&]() {
+		for (entt::entity rootEntity : roots)
+		{
+			if (const std::optional<Object> root = objects.getObject(rootEntity))
+			{
+				objects.removeObject(*root);
+			}
+		}
+		if (publicationActive)
+		{
+			objects.FinishBulkPublication(false);
+			publicationActive = false;
+		}
+		if (!sceneWasDirty)
+		{
+			SceneManager::Instance().ClearActiveSceneDirty();
+		}
+	};
+
+	objects.BeginBulkPublication({request.count, request.count});
+	publicationActive = true;
+	try
+	{
+		for (std::uint32_t instanceIndex = 0u; instanceIndex < request.count; ++instanceIndex)
+		{
+			const std::string name = ResolveBulkInstanceName(
+				request.namePrefix, prefab.sourceName, instanceIndex, request.count);
+			Object instance = objects.createObject(name);
+			Transform* transform = objects.GetComponent<Transform>(instance);
+			if (transform == nullptr)
+			{
+				throw std::runtime_error("Prefab instance Transform was not created.");
+			}
+			transform->position = ResolveBulkGridPosition(request, instanceIndex);
+			objects.MarkObjectTransformDirty(instance);
+			if (request.parent.has_value())
+			{
+				objects.setParent(instance, objects.makeObjectHandle(*request.parent));
+			}
+			roots.push_back(instance.EntityId());
+			undoCommands.push_back(std::make_unique<CreateObjectCommand>(instance.EntityId()));
+		}
+	}
+	catch (const std::exception& error)
+	{
+		rollback();
+		return {
+			false,
+			"validation",
+			std::string("Prefab batch was rejected: ") + error.what(),
+			{{"rolledBack", true}}
+		};
+	}
+
+	objects.FinishBulkPublication(true);
+	publicationActive = false;
+	UndoRedoSystem::Instance().PushTransactionGroup("Instantiate Prefab Batch", std::move(undoCommands));
+	SceneManager::Instance().ForceMarkActiveSceneDirty();
+	for (std::uint32_t instanceIndex = 0u; instanceIndex < request.count; ++instanceIndex)
+	{
+		const Object instance = objects.makeObjectHandle(roots[instanceIndex]);
+		const std::string instanceId = TerraEngine::ToHexString(objects.getUUID(instance));
+		const std::string name = ResolveBulkInstanceName(
+			request.namePrefix, prefab.sourceName, instanceIndex, request.count);
+		const glm::vec3 position = ResolveBulkGridPosition(request, instanceIndex);
+		instances[instanceId] = {prefabId, prefab.sourceName};
+		instanceIds.push_back(instanceId);
+		instanceRows.push_back({
+			{"index", instanceIndex},
+			{"name", name},
+			{"instanceId", instanceId},
+			{"rootIds", nlohmann::json::array({instanceId})},
+			{"position", {position.x, position.y, position.z}}
+		});
+	}
+	return {true, {}, "Instantiated prefab batch.", {
+		{"prefabId", prefabId},
+		{"path", prefab.relativePath},
+		{"prefabGeneration", prefab.generation},
+		{"instanceCount", request.count},
+		{"rootCount", request.count},
+		{"objectCount", request.count},
+		{"instanceIds", std::move(instanceIds)},
+		{"instances", std::move(instanceRows)},
+		{"grid", {{"columns", columns}, {"spacing", request.spacing},
+			{"origin", {request.origin.x, request.origin.y, request.origin.z}}}},
+		{"visibilityBoundary", "prefab_bulk_publication"},
+		{"rolledBack", false}
 	}};
 }
 
@@ -874,7 +1245,8 @@ namespace
 		const TerraEngine::UUID& prefabGuid,
 		nlohmann::json prefabJson,
 		std::string_view requestedName,
-		std::optional<entt::entity> parent)
+		std::optional<entt::entity> parent,
+		std::size_t rootsPerInstance)
 	{
 		ProtectedPrefabInstantiationResult result;
 		const TerraEngine::Scene::PreparedSceneDecode prepared = Serializer::PrepareSceneDecode(prefabJson);
@@ -906,30 +1278,51 @@ namespace
 		}
 
 		std::vector<std::optional<TerraEngine::UUID>> sourceRootObjectIds;
-		std::unordered_map<TerraEngine::UUID, TerraEngine::UUID> uuidRemap;
 		std::vector<TerraEngine::UUID> generatedObjectIds;
 		std::string preparationFailure;
 		sourceRootObjectIds.reserve(prefabJson["objects"].size());
-		for (std::size_t rootIndex = 0U; rootIndex < prefabJson["objects"].size(); ++rootIndex)
+		if (rootsPerInstance == 0U)
 		{
-			nlohmann::json& objectJson = prefabJson["objects"][rootIndex];
-			sourceRootObjectIds.push_back(ReadSerializedObjectUuid(objectJson));
-			if (rootIndex == 0U && !requestedName.empty())
-			{
-				// A multi-root prefab has one canonical response root. Rename only that
-				// root so secondary authored roots keep deterministic source names.
-				objectJson["name"] = std::string(requestedName);
-			}
-			if (!CollectPrefabInstanceUuidRemap(objectJson, uuidRemap, generatedObjectIds, preparationFailure))
-			{
-				result.errorCategory = "validation";
-				result.message = preparationFailure;
-				return result;
-			}
+			rootsPerInstance = prefabJson["objects"].size();
 		}
-		for (nlohmann::json& objectJson : prefabJson["objects"])
+		if (rootsPerInstance == 0U || prefabJson["objects"].size() % rootsPerInstance != 0U)
 		{
-			RewritePrefabInstanceUuidReferences(objectJson, uuidRemap);
+			result.errorCategory = "validation";
+			result.message = "Prefab batch root grouping is invalid.";
+			return result;
+		}
+		for (std::size_t instanceRoot = 0U;
+			instanceRoot < prefabJson["objects"].size();
+			instanceRoot += rootsPerInstance)
+		{
+			// Repeated instances legitimately repeat authored source UUIDs. Each
+			// instance receives its own remap so references stay inside that graph
+			// while duplicate UUIDs within one source graph remain a hard error.
+			std::unordered_map<TerraEngine::UUID, TerraEngine::UUID> uuidRemap;
+			for (std::size_t rootOffset = 0U; rootOffset < rootsPerInstance; ++rootOffset)
+			{
+				const std::size_t rootIndex = instanceRoot + rootOffset;
+				nlohmann::json& objectJson = prefabJson["objects"][rootIndex];
+				sourceRootObjectIds.push_back(ReadSerializedObjectUuid(objectJson));
+				if (rootIndex == 0U && !requestedName.empty())
+				{
+					// A multi-root prefab has one canonical response root. Rename only
+					// that root so secondary authored roots retain source names.
+					objectJson["name"] = std::string(requestedName);
+				}
+				if (!CollectPrefabInstanceUuidRemap(
+					objectJson, uuidRemap, generatedObjectIds, preparationFailure))
+				{
+					result.errorCategory = "validation";
+					result.message = preparationFailure;
+					return result;
+				}
+			}
+			for (std::size_t rootOffset = 0U; rootOffset < rootsPerInstance; ++rootOffset)
+			{
+				RewritePrefabInstanceUuidReferences(
+					prefabJson["objects"][instanceRoot + rootOffset], uuidRemap);
+			}
 		}
 
 		const bool sceneWasDirty = SceneManager::Instance().IsActiveSceneDirty();
@@ -1104,47 +1497,56 @@ void MainEditorSubsystem::OnProjectOpened() {
 		preferences->ApplyStoredPreferencesToRenderSystem();
 	}
 	
-	// Check for last opened scene
-	std::filesystem::path lastScenePath = projectRoot / "Library" / "LastScene.txt";
-	bool loaded = false;
-	
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (std::filesystem::exists(lastScenePath)) {
-		std::ifstream in(lastScenePath);
-		std::string relPath;
+	// Installed automation can create a disposable scene after the editor MCP
+	// listener becomes ready. Skipping automatic scene restore for that process
+	// prevents a user's heavy authored scene from rendering first, while normal
+	// interactive launches keep the existing LastScene/fallback behavior.
+	const bool suppressAutomaticSceneOpen =
+		IsEnvironmentFlagEnabled("TERRAENGINE_SUPPRESS_AUTOMATIC_SCENE_OPEN");
+	if (!suppressAutomaticSceneOpen)
+	{
+		// Check for last opened scene
+		std::filesystem::path lastScenePath = projectRoot / "Library" / "LastScene.txt";
+		bool loaded = false;
+
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (std::getline(in, relPath) && !relPath.empty()) {
-			// Verify it still exists
-			if (std::filesystem::exists(assetRoot / relPath)) {
-				OpenScene(relPath);
-				if (sceneLoaded) loaded = true;
-			}
-		}
-	}
-	
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!loaded) {
-		bool foundAny = false;
-		if (std::filesystem::exists(assetRoot)) {
-			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-			for (const auto& entry : std::filesystem::recursive_directory_iterator(assetRoot)) {
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (entry.is_regular_file() && entry.path().extension() == ".tescene") {
-					std::error_code ec;
-					auto rel = std::filesystem::relative(entry.path(), assetRoot, ec);
-					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-					if (!ec) {
-						OpenScene(rel);
-						foundAny = true;
-						break;
-					}
+		if (std::filesystem::exists(lastScenePath)) {
+			std::ifstream in(lastScenePath);
+			std::string relPath;
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+			if (std::getline(in, relPath) && !relPath.empty()) {
+				// Verify it still exists
+				if (std::filesystem::exists(assetRoot / relPath)) {
+					OpenScene(relPath);
+					if (sceneLoaded) loaded = true;
 				}
 			}
 		}
-		
+
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!foundAny) {
-			// Maybe create a new one? For now just do nothing or log.
+		if (!loaded) {
+			bool foundAny = false;
+			if (std::filesystem::exists(assetRoot)) {
+				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+				for (const auto& entry : std::filesystem::recursive_directory_iterator(assetRoot)) {
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+					if (entry.is_regular_file() && entry.path().extension() == ".tescene") {
+						std::error_code ec;
+						auto rel = std::filesystem::relative(entry.path(), assetRoot, ec);
+						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+						if (!ec) {
+							OpenScene(rel);
+							foundAny = true;
+							break;
+						}
+					}
+				}
+			}
+
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+			if (!foundAny) {
+				// Maybe create a new one? For now just do nothing or log.
+			}
 		}
 	}
 
@@ -2018,12 +2420,18 @@ void MainEditorSubsystem::Shutdown() {
 bool MainEditorSubsystem::StartPlayMode()
 {
 	if(ScriptingSystem::Instance().IsRunning())
+	{
+		TERRAENGINE_LOG(LogLevel::Error,
+			"Play Mode entry rejected because scripting is already running.");
 		return false;
+	}
 	if (ctx != nullptr && ctx->projectManager != nullptr && ctx->projectManager->HasActiveProject()
 		&& !ctx->projectManager->GetReadinessState().simulationEssentialReady)
 	{
 		// Play Mode must never start against a project whose scene publication was
 		// cancelled, rejected, or is still waiting for its protected boundary.
+		TERRAENGINE_LOG(LogLevel::Error,
+			"Play Mode entry rejected because simulation-essential project content is not ready.");
 		return false;
 	}
 	// Commit pending authoring transactions before capturing the exact pre-play
@@ -2034,6 +2442,8 @@ bool MainEditorSubsystem::StartPlayMode()
 	{
 		// Starting runtime systems without a valid authored restore packet would
 		// leave Play Mode unable to return the editor to a complete scene.
+		TERRAENGINE_LOG(LogLevel::Error,
+			"Play Mode entry rejected because the authored scene restore snapshot could not be captured.");
 		return false;
 	}
 	if(!TerraEngine::Physics::PhysicsSystem::Instance().StartWorld())

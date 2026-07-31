@@ -9,18 +9,24 @@
 #include "../Framework/EditorWindow.h"
 #include "Engine/Profiling/ProfilerCapture.h"
 
+#include <memory>
+
 class MainEditorSubsystem;
+struct ProfilerWindowCache;
 
 // class ProfilerWindow groups related state and operations so callers have one documented contract.
 class ProfilerWindow : public EditorWindow
 {
 public:
 	explicit ProfilerWindow(MainEditorSubsystem* owner);
+	~ProfilerWindow() override;
 
 protected:
 	void OnGui() override;
 
 private:
+	void RefreshLiveSnapshot();
+	void RefreshSampleAnalysis(const TerraEngine::Profiling::ProfilerFrameRecord& frame);
 	void DrawToolbar();
 	void DrawCaptureList();
 	void DrawFrameList();
@@ -35,4 +41,7 @@ private:
 
 	MainEditorSubsystem* owner = nullptr;
 	TerraEngine::Profiling::ProfilerModuleId selectedModule = TerraEngine::Profiling::ProfilerModuleId::CpuEngine;
+	// The profiler window owns presentation snapshots instead of deep-copying
+	// mutable engine capture state while every ImGui frame is being drawn.
+	std::unique_ptr<ProfilerWindowCache> cache;
 };

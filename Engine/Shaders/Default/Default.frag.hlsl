@@ -701,7 +701,7 @@ float3 BuildVirtualGeometryHashColor(uint value)
 		(float)((value >> 16u) & 255u) / 255.0f);
 }
 
-float3 BuildVirtualGeometryDebugColor(uint debugMode, PSIn input, FrameCullingData frame)
+float3 BuildVirtualGeometryDebugColor(uint debugMode, PSIn input, FrameCullingData frame, uint stablePrimitiveId)
 {
 	const uint virtualActive = SceneUniforms.virtualGeometryFlags & 1u;
 	const uint failOpen = (SceneUniforms.virtualGeometryFlags >> 1u) & 1u;
@@ -777,14 +777,52 @@ float3 BuildVirtualGeometryDebugColor(uint debugMode, PSIn input, FrameCullingDa
 	}
 	if (debugMode == kVirtualGeometryDebugModeCluster)
 	{
-		// Cluster mode: selected cluster identity drives a stable hash color.
-		const uint clusterSeed = clusterHashSeed + selectedClusterCount * 101u + input.meshletIndex;
+		// Cluster mode: selected cluster identity and the authored primitive order
+		// drive a stable hash color without requiring a second live color target.
+		const uint clusterSeed = clusterHashSeed + selectedClusterCount * 101u + stablePrimitiveId;
 		return BuildVirtualGeometryHashColor(clusterSeed + 73u);
 	}
 	return float3(0.0f, 0.0f, 0.0f);
 }
 
-float4 main(PSIn input) : SV_Target0
+// Conventional Scene/Game/capture pipelines compile this explicit Vulkan-only
+// variant when their render pass owns the matching integer identity target.
+// Shadow pipelines deliberately omit the define and retain their one-target
+// ABI, so a shadow pass can never bind an unpaired visibility attachment.
+#if defined(TERRAENGINE_VULKAN_CONVENTIONAL_VISIBILITY_IDENTITY)
+struct ConventionalVisibilityOutput
+{
+	float4 color : SV_Target0;
+	// These lanes identify the exact fragment producer; they are typed integer
+	// attachment data, never a debug-color encoding that presentation may alter.
+	uint4 identity : SV_Target1;
+};
+
+ConventionalVisibilityOutput MakeConventionalVisibilityOutput(float4 color, uint stablePrimitiveId)
+{
+	ConventionalVisibilityOutput output;
+	output.color = color;
+	output.identity = uint4(
+		stablePrimitiveId,
+		SceneUniforms.meshDataIndex,
+		SceneUniforms.virtualGeometryPacketDescriptorIndex,
+		SceneUniforms.statsSlotIndex);
+	return output;
+}
+
+#define TERRAENGINE_CONVENTIONAL_OUTPUT ConventionalVisibilityOutput
+#define TERRAENGINE_CONVENTIONAL_SEMANTIC
+#define TERRAENGINE_CONVENTIONAL_RETURN(colorValue, primitiveId) return MakeConventionalVisibilityOutput(colorValue, primitiveId)
+#else
+#define TERRAENGINE_CONVENTIONAL_OUTPUT float4
+#define TERRAENGINE_CONVENTIONAL_SEMANTIC : SV_Target0
+#define TERRAENGINE_CONVENTIONAL_RETURN(colorValue, primitiveId) return colorValue
+#endif
+
+TERRAENGINE_CONVENTIONAL_OUTPUT main(
+	PSIn input,
+	nointerpolation uint stablePrimitiveId : TEXCOORD6)
+	TERRAENGINE_CONVENTIONAL_SEMANTIC
 {
 	const MaterialData mat = allMaterials[SceneUniforms.materialIndex];
 	const float2 uv = input.uv * mat.UVTransform.xy + mat.UVTransform.zw;
@@ -804,7 +842,7 @@ float4 main(PSIn input) : SV_Target0
 		// Shadow-map rendering only needs alpha testing and a depth write. Return
 		// before material lighting so the shadow pass does not sample the same
 		// shadow maps it is currently updating.
-		return float4(0.0f, 0.0f, 0.0f, 1.0f);
+		TERRAENGINE_CONVENTIONAL_RETURN(float4(0.0f, 0.0f, 0.0f, 1.0f), stablePrimitiveId);
 	}
 
 	const uint statsIndex = min(SceneUniforms.statsSlotIndex, kMaxStatsSlots - 1u);
@@ -816,7 +854,7 @@ float4 main(PSIn input) : SV_Target0
 		// has failed open or is disabled. That makes the overlay useful for
 		// diagnosing why a mesh is still taking the conservative fallback path,
 		// instead of silently looking identical to normal material rendering.
-		return float4(ApplyEditorTint(BuildVirtualGeometryDebugColor(virtualGeometryDebugMode, input, frame)), finalColor.a);
+		TERRAENGINE_CONVENTIONAL_RETURN(float4(ApplyEditorTint(BuildVirtualGeometryDebugColor(virtualGeometryDebugMode, input, frame, stablePrimitiveId)), finalColor.a), stablePrimitiveId);
 	}
 
 	float3 sampledNormal = globalTextures[NonUniformResourceIndex(min(mat.NormalTextureIndex, kMaxBindlessTextureCount - 1u))].Sample(globalSamplers[NonUniformResourceIndex(min(mat.NormalTextureIndex, kMaxBindlessTextureCount - 1u))], uv).rgb;
@@ -841,7 +879,7 @@ float4 main(PSIn input) : SV_Target0
 
 	if (mat.ShadingModel == kShadingModel_Unlit)
 	{
-		return float4(ApplyEditorTint(finalColor.rgb + emissive), finalColor.a);
+		TERRAENGINE_CONVENTIONAL_RETURN(float4(ApplyEditorTint(finalColor.rgb + emissive), finalColor.a), stablePrimitiveId);
 	}
 
 	const uint lightCount = frame.clusterGridAndLightCount.w;
@@ -922,7 +960,7 @@ float4 main(PSIn input) : SV_Target0
 	if (SceneUniforms.taskCullingEnabled > 1u)
 	{
 		const float normalizedCount = (float)evaluatedLightCount / max((float)lightCount, 1.0f);
-		return float4(BuildHeatmapColor(normalizedCount), 1.0);
+		TERRAENGINE_CONVENTIONAL_RETURN(float4(BuildHeatmapColor(normalizedCount), 1.0), stablePrimitiveId);
 	}
 
 	float3 finalLighting = lighting;
@@ -946,5 +984,5 @@ float4 main(PSIn input) : SV_Target0
 	{
 		outputColor = finalColor.rgb;
 	}
-	return float4(ApplyEditorTint(max(outputColor, float3(0.0f, 0.0f, 0.0f))), finalColor.a);
+	TERRAENGINE_CONVENTIONAL_RETURN(float4(ApplyEditorTint(max(outputColor, float3(0.0f, 0.0f, 0.0f))), finalColor.a), stablePrimitiveId);
 }

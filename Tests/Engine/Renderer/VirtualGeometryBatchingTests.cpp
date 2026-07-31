@@ -5,6 +5,7 @@
 #include "Renderer/RenderSystem.h"
 #include "Renderer/RHI/Vulkan/VulkanRendererWorkCache.h"
 #include "Renderer/RHI/Vulkan/VulkanUploadPlanning.h"
+#include "Renderer/VirtualGeometry/Visibility/VirtualGeometryVisibility.h"
 
 #include <iterator>
 #include <limits>
@@ -138,6 +139,43 @@ namespace {
 			context.ExpectEqual(252u, cpuBatches.front().submittedMeshlets, "Page-local batching should preserve the exact camera meshlet count.");
 			context.ExpectEqual(static_cast<std::size_t>(1u), gpuBatches.size(), "GPU batch metadata should mirror the collapsed page-local draw run.");
 			context.ExpectEqual(36u, gpuBatches.front().packetCount, "The GPU batch should expose the whole descriptor run to the task shader.");
+		});
+
+		registry.Add("VirtualGeometry.Batching.Regression.IndependentOwnersNeverShareOneDraw", [](TestContext& context) {
+			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID materialId = TerraEngine::GenerateUUID();
+			std::vector<VirtualGeometryClusterPacket> packets;
+			for (std::uint32_t index = 0u; index < 2u; ++index)
+			{
+				VirtualGeometryClusterPacket packet;
+				packet.packetId = index;
+				packet.viewId = 4u;
+				packet.viewType = RenderViewType::Game;
+				packet.objectId = TerraEngine::GenerateUUID();
+				packet.meshId = meshId;
+				packet.materialId = materialId;
+				packet.meshletOffset = index * 8u;
+				packet.meshletCount = 8u;
+				packet.payloadSource = VirtualGeometryPagePayloadSource::ResidentPagePayload;
+				packet.emittedSource = VirtualGeometryEmittedPageSource::HighDetailPage;
+				packets.push_back(packet);
+			}
+
+			const std::vector<ClusterWorkBatch> cpuBatches =
+				RenderSystem::BuildVirtualGeometryClusterBatches(packets);
+			const std::vector<GpuVirtualGeometryPacketRecord> gpuPackets =
+				RenderSystem::BuildGpuVirtualGeometryPacketRecords(
+					packets,
+					9102u,
+					VirtualGeometryDebugVisualizationMode::None);
+			const std::vector<GpuVirtualGeometryBatchDescriptor> gpuBatches =
+				RenderSystem::BuildGpuVirtualGeometryBatchDescriptors(
+					gpuPackets,
+					9102u,
+					VirtualGeometryDebugVisualizationMode::None);
+
+			context.ExpectEqual(static_cast<std::size_t>(2u), cpuBatches.size(), "Different object transforms require different CPU draw commands.");
+			context.ExpectEqual(static_cast<std::size_t>(2u), gpuBatches.size(), "Device-authored commands must preserve independent owner identity.");
 		});
 
 		registry.Add("VirtualGeometry.Batching.Regression.AntiqueCameraLeafCutCollapsesToOneDraw", [](TestContext& context) {
@@ -390,6 +428,37 @@ namespace {
 			}
 		});
 
+		registry.Add("VirtualGeometry.Batching.MixedRasterRoutesKeepProtectedBoundaries", [](TestContext& context) {
+			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID materialId = TerraEngine::GenerateUUID();
+			std::vector<VirtualGeometryClusterPacket> packets;
+			for(std::uint32_t index = 0u; index < 3u; ++index)
+			{
+				VirtualGeometryClusterPacket packet;
+				packet.packetId = index;
+				packet.meshId = meshId;
+				packet.materialId = materialId;
+				packet.selectedLod = 0u;
+				packet.clusterId = index;
+				packet.meshletOffset = index * 4u;
+				packet.meshletCount = 4u;
+				packet.rasterRoute = index;
+				packet.materialBin = 7u;
+				packets.push_back(packet);
+			}
+
+			const std::vector<ClusterWorkBatch> batches =
+				RenderSystem::BuildVirtualGeometryClusterBatches(packets);
+
+			context.ExpectEqual<std::size_t>(3u, batches.size(),
+				"Hardware, compute, and indexed packets must keep separate protected-boundary batches.");
+			for(const ClusterWorkBatch& batch : batches)
+			{
+				context.ExpectEqual(1u, batch.packetCount,
+					"A mixed-route batch must never inherit a neighboring packet's execution policy.");
+			}
+		});
+
 		registry.Add("VirtualGeometry.Batching.Foundation.CopiesPacketTablesIntoVisibilitySnapshots", [](TestContext& context) {
 			TerraEngine::Renderer::RenderFrameSnapshot snapshot;
 			snapshot.frameId = 3001u;
@@ -406,6 +475,30 @@ namespace {
 			context.ExpectEqual(1u, diagnostics.clusterPacketCount, "Diagnostics should expose copied cluster packet count.");
 			context.ExpectEqual(1u, diagnostics.submittedBatchCount, "Diagnostics should expose copied batch count.");
 			context.ExpectEqual(8u, diagnostics.submittedMeshlets, "Diagnostics should report submitted meshlets from the batch.");
+		});
+
+		registry.Add("VirtualGeometry.Batching.DiagnosticsPublishExecutedRasterRoutes", [](TestContext& context) {
+			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility;
+			visibility.valid = true;
+			for(const TerraEngine::Renderer::VirtualGeometryRasterRoute route : {
+				TerraEngine::Renderer::VirtualGeometryRasterRoute::Hardware,
+				TerraEngine::Renderer::VirtualGeometryRasterRoute::Compute,
+				TerraEngine::Renderer::VirtualGeometryRasterRoute::Indexed})
+			{
+				VirtualGeometryClusterPacket packet;
+				packet.rasterRoute = static_cast<std::uint32_t>(route);
+				visibility.clusterPackets.push_back(packet);
+			}
+
+			const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics =
+				TerraEngine::Renderer::BuildVirtualGeometryDiagnosticsFromVisibilitySnapshot(visibility);
+
+			context.ExpectEqual(1u, diagnostics.hardwareRasterPacketCount,
+				"Diagnostics should publish packets that executed the hardware route.");
+			context.ExpectEqual(1u, diagnostics.computeRasterPacketCount,
+				"Diagnostics should publish packets that executed the compute route.");
+			context.ExpectEqual(1u, diagnostics.indexedRasterPacketCount,
+				"Diagnostics should publish packets that executed the indexed route.");
 		});
 
 		registry.Add("VirtualGeometry.Batching.CopiesGpuPacketTablesIntoVisibilitySnapshots", [](TestContext& context) {

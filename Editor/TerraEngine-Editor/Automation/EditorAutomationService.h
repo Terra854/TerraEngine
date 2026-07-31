@@ -147,6 +147,10 @@ namespace TerraEngine::Editor::Automation
 		nlohmann::json HandleCameraObjectCapture(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleCustomCameraCapture(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleRendererVirtualGeometryStats(const nlohmann::json& arguments, const std::string& requestId);
+		nlohmann::json HandleRendererVirtualGeometryCapabilityEvidence(const nlohmann::json& arguments, const std::string& requestId);
+		nlohmann::json HandleRendererVirtualGeometryValidationRouteSet(const nlohmann::json& arguments, const std::string& requestId);
+		nlohmann::json HandleRendererVirtualGeometryValidationRouteReset(const nlohmann::json& arguments, const std::string& requestId);
+		nlohmann::json HandleRendererVirtualGeometryAuthoritativePick(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleDiagnosticsGetSummary(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json ExecuteProviderHandler(std::uint64_t operation, std::string_view operationName, const nlohmann::json& arguments, WriteMode writeMode, const std::string& requestId);
 		void RefreshPhysicsCookJob(std::string_view jobId);

@@ -100,6 +100,37 @@ namespace TerraEngine::Editor::Automation
 		{
 			return {{"oneOf", Json::array({AssetReferenceSchema(), Json{{"type", "null"}}})}};
 		}
+
+		AutomationCapabilityRegistration MakePrefabInstantiationRegistration(
+			const AutomationHandlerResolver& resolver,
+			std::string name,
+			std::string description,
+			Json inputSchema)
+		{
+			auto registration = MakeRegistration(
+				resolver,
+				std::move(name),
+				std::move(description),
+				std::move(inputSchema),
+				MutationMode::SceneMutation,
+				AutomationApprovalPolicy::None);
+			registration.descriptor.category = "prefab";
+			registration.descriptor.availability.requiresScene = true;
+			registration.descriptor.execution.visibilityBoundary = "prefab_bulk_publication";
+			registration.descriptor.execution.commitReads = {
+				"ProjectState",
+				"AssetDatabase",
+				"ObjectStorage",
+				"SceneGraph"
+			};
+			registration.descriptor.execution.commitWrites = {
+				"ObjectStorage",
+				"SceneGraph",
+				"EditorHistory",
+				"EditorAutomationSession"
+			};
+			return registration;
+		}
 	}
 
 	AssetPrefabAutomationProvider::AssetPrefabAutomationProvider(AutomationHandlerResolver resolver)
@@ -115,7 +146,7 @@ namespace TerraEngine::Editor::Automation
 	std::vector<AutomationCapabilityRegistration> AssetPrefabAutomationProvider::GetCapabilities()
 	{
 		std::vector<AutomationCapabilityRegistration> capabilities;
-		capabilities.reserve(20);
+		capabilities.reserve(21);
 		capabilities.push_back(MakeRegistration(
 			resolveHandler,
 			"asset.list",
@@ -210,8 +241,49 @@ namespace TerraEngine::Editor::Automation
 		{
 			capabilities.push_back(MakeRegistration(resolveHandler, name, "Safely organize a project-contained asset.", ObjectSchema({}, {}), mode, approval));
 		}
+		capabilities.push_back(MakePrefabInstantiationRegistration(
+			resolveHandler,
+			"prefab.instantiate",
+			"Instantiate one prefab through the protected atomic prefab publication boundary.",
+			ObjectSchema({
+				{"prefab", AssetReferenceSchema()},
+				{"name", {{"type", "string"}}}
+			}, {"prefab"})));
+		auto instantiateMany = MakePrefabInstantiationRegistration(
+			resolveHandler,
+			"prefab.instantiate_many",
+			"Instantiate a deterministic prefab grid as one protected atomic publication.",
+			ObjectSchema({
+				{"prefab", AssetReferenceSchema()},
+				{"count", {{"type", "integer"}, {"minimum", 1}, {"maximum", 4096}}},
+				{"namePrefix", {{"type", "string"}}},
+				{"spacing", {{"type", "number"}, {"minimum", 0.0}}},
+				{"columns", {{"type", "integer"}, {"minimum", 1}, {"maximum", 4096}}},
+				{"requestedAnimationMode", {
+					{"type", "integer"},
+					{"minimum", 0},
+					{"maximum", 3},
+					{"description", "Atomic AnimatorComponent execution policy override."}
+				}},
+				{"origin", {
+					{"type", "array"},
+					{"minItems", 3},
+					{"maxItems", 3},
+					{"items", {{"type", "number"}}}
+				}}
+			}, {"prefab", "count"}));
+		instantiateMany.descriptor.limits = {
+			{"maximumCount", 4096u},
+			{"publication", "single_generation"}
+		};
+		instantiateMany.descriptor.diagnosticsContract = {
+			{"rollbackField", "rolledBack"},
+			{"visibilityBoundary", "prefab_bulk_publication"},
+			{"identityFields", {"instanceIds", "instances[].instanceId", "instances[].rootIds"}}
+		};
+		capabilities.push_back(std::move(instantiateMany));
 		for (const auto& [name, mode] : std::vector<std::pair<std::string, MutationMode>>{
-			{"prefab.create", MutationMode::AssetMutation}, {"prefab.instantiate", MutationMode::SceneMutation},
+			{"prefab.create", MutationMode::AssetMutation},
 			{"prefab.overrides.inspect", MutationMode::ReadOnly}, {"prefab.overrides.apply", MutationMode::AssetMutation},
 			{"prefab.overrides.revert", MutationMode::SceneMutation}, {"prefab.edit.open", MutationMode::ProjectMutation},
 			{"prefab.edit.close", MutationMode::ProjectMutation}})

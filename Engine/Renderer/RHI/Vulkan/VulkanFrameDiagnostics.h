@@ -7,10 +7,12 @@
 #pragma once
 
 #include "Renderer/Graph/RenderFrameBreakdown.h"
+#include "Renderer/RHI/RHIDefinitions.h"
 #include "Renderer/RendererRecovery.h"
 #include "Profiling/PerformanceTelemetry.h"
 #include "Core/Export.h"
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -52,6 +54,31 @@ namespace TerraEngine::Renderer::Vulkan {
 		std::uint64_t renderSessionGeneration = 0u;
 		std::uint32_t duplicateFailureCount = 0u;
 	};
+
+	// Each virtual-geometry stage has an explicit Vulkan timing owner.  A marker
+	// only becomes pending after a live command records both timestamp writes;
+	// CPU-prepared mirrors intentionally remain unavailable.
+	struct VulkanVirtualGeometryStageMarker
+	{
+		VirtualGeometryBackendStage stage = VirtualGeometryBackendStage::Traversal;
+		VirtualGeometryBackendRoute route = VirtualGeometryBackendRoute::None;
+		BackendMeasurementAvailability availability = BackendMeasurementAvailability::Unavailable;
+		bool ownsLiveCommand = false;
+		bool timestampWritesRecorded = false;
+		std::string label;
+		std::string reason;
+	};
+
+	inline constexpr std::size_t kVulkanVirtualGeometryStageCount = 13u;
+
+	TERRAENGINE_API std::string GetVulkanVirtualGeometryStageLabel(VirtualGeometryBackendStage stage);
+	TERRAENGINE_API VulkanVirtualGeometryStageMarker MakeVulkanVirtualGeometryStageMarker(
+		VirtualGeometryBackendStage stage,
+		VirtualGeometryBackendRoute route,
+		bool ownsLiveCommand,
+		bool timestampWritesRecorded);
+	TERRAENGINE_API std::array<VulkanVirtualGeometryStageMarker, kVulkanVirtualGeometryStageCount>
+		CreateVulkanVirtualGeometryStageMarkers();
 
 	TERRAENGINE_API BackendFrameBreakdown CreateVulkanFrameBreakdown(std::uint64_t frameId);
 	TERRAENGINE_API void RecordVulkanFrameCost(

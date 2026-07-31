@@ -489,6 +489,32 @@ namespace
 		json << "]";
 	}
 
+	void AppendShadowCodecProfilesJson(
+		std::ostringstream& json,
+		const std::vector<VirtualGeometryShadowCodecCompileReport>& profiles)
+	{
+		json << "[";
+		for(std::size_t index = 0u; index < profiles.size(); ++index)
+		{
+			if(index != 0u)
+			{
+				json << ",";
+			}
+			const auto& profile = profiles[index];
+			json << "{";
+			json << "\"codec\":\""
+				<< EscapeJson(profile.codecProfile) << "\",";
+			json << "\"pageSizeKiB\":" << profile.pageSizeKiB << ",";
+			json << "\"sourceBytes\":" << profile.sourceBytes << ",";
+			json << "\"encodedBytes\":" << profile.encodedBytes << ",";
+			json << "\"deterministicHash\":"
+				<< profile.deterministicHash << ",";
+			json << "\"complete\":" << ToBoolText(profile.complete);
+			json << "}";
+		}
+		json << "]";
+	}
+
 	// BuildReportJson is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::string BuildReportJson(const MeshCompileReport& report)
 	{
@@ -525,6 +551,9 @@ namespace
 		AppendGeneratedLevelsJson(json, report.virtualGeometry.generatedLevels);
 		json << ",\"skippedLevels\":";
 		AppendSkippedLevelsJson(json, report.virtualGeometry.skippedLevels);
+		json << ",\"shadowCodecProfiles\":";
+		AppendShadowCodecProfilesJson(
+			json, report.virtualGeometry.shadowCodecProfiles);
 		json << ",";
 		json << "\"warnings\":";
 		AppendStringArrayJson(json, report.virtualGeometry.warnings);

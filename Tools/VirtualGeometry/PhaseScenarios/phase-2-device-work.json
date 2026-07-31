@@ -1,0 +1,20 @@
+{
+	"schemaVersion": 2,
+	"phase": 2,
+	"id": "phase-2",
+	"title": "Vulkan traversal, compaction, and generated submission",
+	"requiredTools": ["renderer.virtualGeometry.capabilityEvidence", "renderer.virtualGeometry.stats", "diagnostics.get_summary"],
+	"operations": [
+		{"id": "capability", "tool": "renderer.virtualGeometry.capabilityEvidence", "evidence": "editor/capability.json"},
+		{"id": "stats", "tool": "renderer.virtualGeometry.stats", "evidence": "editor/stats.json"},
+		{"id": "diagnostics", "tool": "diagnostics.get_summary", "evidence": "editor/diagnostics.json"}
+	],
+	"captures": [],
+	"requiredArtifacts": [
+		{"path": "editor/capability.json", "kind": "editor-envelope"},
+		{"path": "editor/stats.json", "kind": "editor-envelope"},
+		{"path": "editor/diagnostics.json", "kind": "editor-envelope"}
+	],
+	"releaseGates": ["traversal-million-decision-tests"],
+	"unavailablePolicy": "fail-closed"
+}

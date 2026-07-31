@@ -38,6 +38,73 @@ namespace {
 	constexpr std::uint16_t kSpirvOpEmitMeshTasksEXT = 5294u;
 	constexpr std::uint32_t kSpirvExecutionModelTaskEXT = 5364u;
 	constexpr std::uint32_t kSpirvStorageClassTaskPayloadWorkgroupEXT = 5402u;
+	constexpr std::uint64_t kFnv1aOffsetBasis = 14695981039346656037ull;
+	constexpr std::uint64_t kFnv1aPrime = 1099511628211ull;
+
+	// HashBytes provides deterministic provenance identifiers without making the
+	// runtime depend on a particular source-control or compiler installation.
+	std::uint64_t HashBytes(const std::uint8_t* bytes, std::size_t byteCount)
+	{
+		std::uint64_t hash = kFnv1aOffsetBasis;
+		for(std::size_t index = 0u; index < byteCount; ++index)
+		{
+			hash ^= bytes[index];
+			hash *= kFnv1aPrime;
+		}
+		return hash;
+	}
+
+	// Normalize source line endings before hashing so the same checked-in shader
+	// has stable provenance on Windows and Unix build hosts.
+	std::uint64_t HashNormalizedSource(const std::filesystem::path& sourcePath)
+	{
+		std::ifstream source(sourcePath, std::ios::binary);
+		if(!source)
+		{
+			return 0u;
+		}
+		std::string bytes((std::istreambuf_iterator<char>(source)), std::istreambuf_iterator<char>());
+		std::string normalized;
+		normalized.reserve(bytes.size());
+		for(std::size_t index = 0u; index < bytes.size(); ++index)
+		{
+			if(bytes[index] == '\r' && index + 1u < bytes.size() && bytes[index + 1u] == '\n')
+			{
+				continue;
+			}
+			normalized.push_back(bytes[index]);
+		}
+		return HashBytes(reinterpret_cast<const std::uint8_t*>(normalized.data()), normalized.size());
+	}
+
+	// Reflection is the ABI consumed by pipeline creation. Hash the serialized
+	// records rather than HLSL text so semantically relevant layout changes are
+	// visible even when source file paths or comments differ.
+	std::uint64_t HashReflectionAbi(
+		const std::vector<DescriptorSetLayoutDesc>& descriptorSets,
+		const std::vector<DescriptorBinding>& descriptorBindings,
+		const std::vector<PushConstantRange>& pushConstants,
+		const std::vector<StageIOAttribute>& inputs,
+		const std::vector<StageIOAttribute>& outputs)
+	{
+		std::uint64_t hash = kFnv1aOffsetBasis;
+		const auto Append = [&hash](const auto& values)
+		{
+			const auto* bytes = reinterpret_cast<const std::uint8_t*>(values.data());
+			const std::size_t byteCount = values.size() * sizeof(typename std::remove_reference_t<decltype(values)>::value_type);
+			for(std::size_t index = 0u; index < byteCount; ++index)
+			{
+				hash ^= bytes[index];
+				hash *= kFnv1aPrime;
+			}
+		};
+		Append(descriptorSets);
+		Append(descriptorBindings);
+		Append(pushConstants);
+		Append(inputs);
+		Append(outputs);
+		return hash;
+	}
 
 	// PatchTaskEmitPayload is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool PatchTaskEmitPayload(std::vector<std::uint8_t>& bytecode) {
@@ -851,6 +918,22 @@ bool CompileShader(const std::filesystem::path& input, const std::filesystem::pa
 		reflected.pushConstants.size()) * sizeof(PushConstantRange);
 	const std::uint64_t bytecodeBytes = static_cast<std::uint64_t>(bytecode.size());
 	const std::uint64_t stringsBytes = static_cast<std::uint64_t>(strings.data.size());
+	// Backend availability remains explicit in provenance. The compiler emits
+	// canonical SPIR-V and does not infer another backend artifact.
+	ShaderProvenanceBackendVariantExtension provenance{};
+	provenance.normalizedSourceHash = HashNormalizedSource(input);
+	provenance.normalizedIncludeHash = 0u;
+	provenance.interfaceAbiHash = HashReflectionAbi(
+		descriptorSets, descriptorBindings, reflected.pushConstants,
+		stageInputs, stageOutputs);
+	provenance.compilerVersion = 1u;
+	provenance.toolchainVersion = 0u;
+	provenance.spirvAvailable = 1u;
+	provenance.dxilAvailable = 0u;
+	provenance.spirvHash = HashBytes(bytecode.data(), bytecode.size());
+	provenance.dxilHash = 0u;
+	ShaderProvenanceExtensionHeader provenanceHeader{};
+	provenanceHeader.payloadSize = sizeof(provenance);
 
 	std::uint64_t payloadCursor = headerSize + sizeof(ShaderReflection);
 	const auto ReservePayloadBlock = [&payloadCursor](std::uint64_t byteCount, std::uint32_t& outOffset) -> bool {
@@ -877,6 +960,9 @@ bool CompileShader(const std::filesystem::path& input, const std::filesystem::pa
 	std::uint32_t pushConstantsOffset = 0;
 	std::uint32_t compiledBinaryOffset = 0;
 	std::uint32_t stringOffset = 0;
+	// The trailing extension is discovered through its magic and size instead
+	// of a fixed header offset, so legacy headers remain binary-compatible.
+	std::uint32_t ignoredExtensionOffset = 0;
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!ReservePayloadBlock(descriptorSetsBytes, descriptorSetsOffset)
 		|| !ReservePayloadBlock(descriptorBindingsBytes, descriptorBindingsOffset)
@@ -884,7 +970,8 @@ bool CompileShader(const std::filesystem::path& input, const std::filesystem::pa
 		|| !ReservePayloadBlock(stageOutputsBytes, stageOutputsOffset)
 		|| !ReservePayloadBlock(pushConstantBytes, pushConstantsOffset)
 		|| !ReservePayloadBlock(sizeof(CompiledStageBinary) + bytecodeBytes, compiledBinaryOffset)
-		|| !ReservePayloadBlock(stringsBytes, stringOffset)) {
+		|| !ReservePayloadBlock(stringsBytes, stringOffset)
+		|| !ReservePayloadBlock(sizeof(provenanceHeader) + sizeof(provenance), ignoredExtensionOffset)) {
 		std::cerr << "Shader payload layout overflowed 32-bit file offsets for " << input << "\n";
 		CleanupTempSpv();
 		return false;
@@ -974,6 +1061,10 @@ bool CompileShader(const std::filesystem::path& input, const std::filesystem::pa
 	if (!strings.data.empty()) {
 		out.write(strings.data.data(), static_cast<std::streamsize>(strings.data.size()));
 	}
+	// Write provenance last so older loaders can consume the complete v1 payload
+	// unchanged, while newer loaders validate the tagged backend record.
+	out.write(reinterpret_cast<const char*>(&provenanceHeader), sizeof(provenanceHeader));
+	out.write(reinterpret_cast<const char*>(&provenance), sizeof(provenance));
 
 	CleanupTempSpv();
 	return static_cast<bool>(out);

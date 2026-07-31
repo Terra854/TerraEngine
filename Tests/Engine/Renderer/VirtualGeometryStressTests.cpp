@@ -389,9 +389,13 @@ namespace TerraEngine::Tests
 					demand.key.page = {
 						meshId, 4u, 0u, 5u, 6u,
 						kAnimatedGeometryAbiVersion };
+					demand.key.page.codecProfile = 1u;
+					demand.key.page.codecVersion = 1u;
 					demand.key.deformation = {
 						instance, 1u, 7u, 8u, 9u, 4u, 10u, 11u };
 					demand.key.inputLayoutVersion =
+						kAnimatedGeometryAbiVersion;
+					demand.key.animationLodVersion =
 						kAnimatedGeometryAbiVersion;
 					demand.sourceRecordIndex =
 						static_cast<std::uint32_t>(instance - 1u);

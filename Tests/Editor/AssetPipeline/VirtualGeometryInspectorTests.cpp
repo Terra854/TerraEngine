@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <span>
 #include <string>
 #include <thread>
 #include <vector>
@@ -71,7 +72,7 @@ namespace TerraEngine::EditorTests
 				virtualHeader.flags = kVirtualGeometryValidationFlagConeSafetyMetadataValidated;
 				virtualHeader.sourceTriangleCount = 2048u;
 				output.write(reinterpret_cast<const char*>(&virtualHeader), sizeof(virtualHeader));
-				for (std::uint32_t clusterIndex = 0u; clusterIndex < virtualHeader.coneSafetyCount; ++clusterIndex)
+			for (std::uint32_t clusterIndex = 0u; clusterIndex < virtualHeader.coneSafetyCount; ++clusterIndex)
 				{
 					VirtualGeometryConeSafetyRecord coneSafety{};
 					coneSafety.clusterId = clusterIndex;
@@ -82,10 +83,27 @@ namespace TerraEngine::EditorTests
 					coneSafety.alphaRisk = 0u;
 					coneSafety.thinShellRisk = 0u;
 					coneSafety.flags = kVirtualGeometryConeSafetyFlagConeValid | kVirtualGeometryConeSafetyFlagEligible;
-					output.write(reinterpret_cast<const char*>(&coneSafety), sizeof(coneSafety));
-				}
+				output.write(reinterpret_cast<const char*>(&coneSafety), sizeof(coneSafety));
 			}
+			// Inspector metadata treats this compact sidecar as the current
+			// aggregate contract. Runtime performs stricter cluster validation.
+			const VirtualGeometryAggregateProfileRecord profile{
+				static_cast<std::uint32_t>(VirtualGeometryAggregateProfileKind::Fallback),
+				kVirtualGeometryAggregateProfileFlagCompleteFallbackCoverage,
+				1u, 0.0f, 1u, 1.0f, 1u, 0u, 0u };
+			const VirtualGeometryAggregateProfileHeader aggregateHeader{
+				kVirtualGeometryAggregateProfileMagicValue,
+				kVirtualGeometryAggregateProfileVersion,
+				static_cast<std::uint16_t>(sizeof(VirtualGeometryAggregateProfileHeader)),
+				static_cast<std::uint32_t>(sizeof(VirtualGeometryAggregateProfileHeader)
+					+ sizeof(VirtualGeometryAggregateProfileRecord)),
+				1u,
+				CalculateVirtualGeometryCompactHash(std::span<const std::uint8_t>(
+					reinterpret_cast<const std::uint8_t*>(&profile), sizeof(profile))) };
+			output.write(reinterpret_cast<const char*>(&aggregateHeader), sizeof(aggregateHeader));
+			output.write(reinterpret_cast<const char*>(&profile), sizeof(profile));
 		}
+	}
 
 		void WriteSmallMeshSkippedHeader(const std::filesystem::path& path)
 		{
@@ -409,11 +427,35 @@ namespace TerraEngine::EditorTests
 			context.Expect(readable, "Inspector metadata accessor should read a valid compiled TEMF header.");
 			context.Expect(virtualGeometry.hasVirtualGeometry, "Cooked virtual geometry should be reported as present.");
 			context.Expect(!virtualGeometry.needsRebuild, "Current payload generation should not request a rebuild.");
+			context.Expect(virtualGeometry.aggregateProfileCurrent, "Current cooked metadata should discover the VGAP aggregate sidecar.");
+			context.Expect(!virtualGeometry.aggregateProfileRepairRequired, "A valid VGAP sidecar should not queue targeted repair guidance.");
 			context.ExpectEqual(3u, virtualGeometry.detailLevelCount, "Inspector metadata should expose the cooked detail count.");
 			context.ExpectEqual(2048u, virtualGeometry.sourceTriangleCount, "Inspector metadata should expose source triangle count.");
 			context.Expect(virtualGeometry.warnings.empty(), "Current cooked metadata should not surface warning rows.");
 			context.Expect(!virtualGeometry.pageStreamingReady, "Cooked metadata without page tables should not be reported as page-streaming ready.");
 			context.Expect(!virtualGeometry.pageIntegrityErrors.empty(), "Inspector metadata should expose page integrity issues without turning them into rebuild warnings.");
+
+			AssetDatabase::Instance().Shutdown();
+			std::filesystem::remove_all(root);
+		});
+
+		registry.Add("VirtualGeometry.Editor.Inspector.MissingAggregateProfileRequestsTargetedRecook", [](TestContext& context) {
+			const std::filesystem::path root = MakeVirtualGeometryInspectorProjectRoot();
+			AssetDatabase::Instance().Initialize(root);
+			const std::filesystem::path compiledPath = AssetDatabase::Instance().GetBuildRoot() / "legacy-profile.temf";
+			WriteMeshHeader(compiledPath, true);
+			const std::uintmax_t profileBytes = sizeof(VirtualGeometryAggregateProfileHeader)
+				+ sizeof(VirtualGeometryAggregateProfileRecord);
+			std::filesystem::resize_file(compiledPath, std::filesystem::file_size(compiledPath) - profileBytes);
+
+			AssetMetadata metadata{};
+			metadata.importerName = "MeshImporter";
+			metadata.compiledPath = "legacy-profile.temf";
+			VirtualGeometryAssetMetadata virtualGeometry{};
+			context.Expect(AssetDatabase::Instance().TryGetVirtualGeometryMetadata(metadata, virtualGeometry), "Legacy profile metadata should remain readable.");
+			context.Expect(!virtualGeometry.needsRebuild, "Missing VGAP should request a targeted repair, not reject valid TEMF geometry.");
+			context.Expect(!virtualGeometry.aggregateProfileCurrent && virtualGeometry.aggregateProfileRepairRequired, "Missing VGAP should be identified as a targeted recook requirement.");
+			context.Expect(virtualGeometry.rebuildGuidance.find("VGAP") != std::string::npos, "Targeted recook guidance should name the aggregate-profile artifact.");
 
 			AssetDatabase::Instance().Shutdown();
 			std::filesystem::remove_all(root);

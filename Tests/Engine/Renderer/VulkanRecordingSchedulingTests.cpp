@@ -95,6 +95,121 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(static_cast<std::size_t>(1u), keys.size(), "Pipeline keys should be generated from snapshot renderables.");
 		});
 
+		registry.Add("Renderer.VulkanRecording.BoundsVirtualGeometryMaterialPipelineKeys", [](TestContext& context) {
+			const TerraEngine::UUID materialId = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
+			MaterialCapabilitySignature compatible{};
+			compatible.requiredFeatureMask = ToVirtualGeometryMaterialFeatureMask(
+				VirtualGeometryMaterialFeature::VisibilityBuffer);
+			compatible.programmableFeatureMask = ToVirtualGeometryMaterialFeatureMask(
+				VirtualGeometryMaterialFeature::ProgrammableShading);
+			compatible.shadingBin = 3u;
+			compatible.maximumShadingBins = 4u;
+			compatible.compatibilitySignature = 0x45u;
+			compatible.valid = true;
+			const auto programmable = TerraEngine::Renderer::Vulkan::BuildPipelineStateKey(
+				materialId, meshId, compatible);
+			compatible.shadingBin = compatible.maximumShadingBins;
+			const auto fallback = TerraEngine::Renderer::Vulkan::BuildPipelineStateKey(
+				materialId, meshId, compatible);
+			context.Expect(!programmable.usesIndexedFallback
+				&& programmable.shadingBin == 3u
+				&& fallback.usesIndexedFallback && fallback.shadingBin == 0u,
+				"Only a valid bounded TMVG signature may select a programmable Vulkan pipeline key.");
+		});
+
+		registry.Add("Renderer.VulkanRecording.ConventionalIdentityVariantUsesDistinctPipelineKey", [](TestContext& context) {
+			MaterialCapabilitySignature capability{};
+			capability.maximumShadingBins = 1u;
+			capability.compatibilitySignature = 0x92u;
+			capability.valid = true;
+			const TerraEngine::UUID materialId = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
+			const auto target0Only = TerraEngine::Renderer::Vulkan::BuildPipelineStateKey(
+				materialId, meshId, capability, false);
+			const auto identityTarget = TerraEngine::Renderer::Vulkan::BuildPipelineStateKey(
+				materialId, meshId, capability, true);
+			context.Expect(
+				!target0Only.usesConventionalVisibilityIdentity
+					&& identityTarget.usesConventionalVisibilityIdentity
+					&& target0Only.sortKey != identityTarget.sortKey,
+				"The typed conventional visibility shader variant must never reuse a target0-only Vulkan pipeline key.");
+		});
+
+		registry.Add("Renderer.VulkanRecording.ConventionalIdentityReadbackIsTypedAndFailClosed", [](TestContext& context) {
+			TerraEngine::Renderer::ConventionalVisibilityIdentityReadbackResult empty{};
+			empty.completed = true;
+			empty.identity = glm::uvec4(0u);
+			context.Expect(!empty.authoritative && empty.identity == glm::uvec4(0u),
+				"A zero uint4 identity must never be presented as an authoritative GPU pick.");
+
+			const std::filesystem::path vulkanSource = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContext.cpp";
+			std::ifstream stream(vulkanSource, std::ios::binary);
+			const std::string source{ std::istreambuf_iterator<char>(stream), {} };
+			context.Expect(source.find("inFlightConventionalVisibilityIdentityReadbacks") != std::string::npos
+				&& source.find("vkGetFenceStatus") != std::string::npos
+				&& source.find("Identity pixel was zero") != std::string::npos,
+				"The Vulkan identity path must publish only fence-completed, nonzero typed pixels.");
+			const std::filesystem::path renderSystemSource = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Engine" / "Renderer" / "RenderSystem.cpp";
+			std::ifstream renderSystemStream(renderSystemSource, std::ios::binary);
+			const std::string renderSystem{ std::istreambuf_iterator<char>(renderSystemStream), {} };
+			context.Expect(renderSystem.find("candidate.payloadDescriptorIndex == result.identity.z") != std::string::npos
+				&& renderSystem.find("latestSceneAuthoritativeIdentityPick") != std::string::npos,
+				"RenderSystem must map a completed identity only to its immutable packet descriptor record.");
+		});
+
+		registry.Add("Renderer.VulkanRecording.ConventionalIdentityBlendRequiresIndependentBlend", [](TestContext& context) {
+			const std::filesystem::path vulkanContextSource = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContext.cpp";
+			std::ifstream vulkanContextStream(vulkanContextSource, std::ios::binary);
+			const std::string vulkanContext{ std::istreambuf_iterator<char>(vulkanContextStream), {} };
+			const std::filesystem::path initializationSource = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContextInit.cpp";
+			std::ifstream initializationStream(initializationSource, std::ios::binary);
+			const std::string initialization{ std::istreambuf_iterator<char>(initializationStream), {} };
+
+			// Target0-only pipelines deliberately differ from the integer identity
+			// attachment, so the required core feature must be both checked and enabled.
+			context.Expect(vulkanContext.find("identityBlendAttachment.colorWriteMask = 0u;")
+					!= std::string::npos
+				&& vulkanContext.find("identityBlendAttachment.blendEnable = VK_FALSE;")
+					!= std::string::npos
+				&& initialization.find("features2.features.independentBlend != VK_TRUE")
+					!= std::string::npos
+				&& initialization.find("deviceFeatures.independentBlend = VK_TRUE;")
+					!= std::string::npos
+				&& initialization.find("independentBlend is required for the conventional two-target visibility pass.")
+					!= std::string::npos,
+				"Conventional two-target pipelines must reject devices without and enable core independentBlend.");
+		});
+
+		registry.Add("Renderer.VulkanRecording.PrimaryCommandBuffersSubmitOncePerFrameSlot", [](TestContext& context) {
+			const std::filesystem::path vulkanContextSource = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContext.cpp";
+			std::ifstream vulkanContextStream(vulkanContextSource, std::ios::binary);
+			const std::string vulkanContext{ std::istreambuf_iterator<char>(vulkanContextStream), {} };
+			const std::filesystem::path resourceSource = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContextResources.cpp";
+			std::ifstream resourceStream(resourceSource, std::ios::binary);
+			const std::string resources{ std::istreambuf_iterator<char>(resourceStream), {} };
+			// The marker is set after queue submission and cleared only when the
+			// owning frame slot becomes reusable. Descriptor-mutation prefix
+			// submissions must use the same ownership marker because asset
+			// finalization can re-enter that path before the outer call unwinds.
+			context.Expect(vulkanContext.find("pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] != 0u")
+					!= std::string::npos
+				&& resources.find("pendingPrimaryCommandBuffersSubmitted[currentFrame] = 1u;")
+					!= std::string::npos
+				&& resources.find("descriptor mutation editor render semaphore drain")
+					!= std::string::npos
+				&& resources.find("editorRenderSubmitted = false;")
+					!= std::string::npos
+				&& vulkanContext.find("BeginFrame") != std::string::npos,
+				"EndFrame and descriptor mutation must reject a second primary submission and consume an editor render signal before reusing its binary semaphore.");
+		});
+
 		registry.Add("Renderer.VulkanRecording.ThreadPlanCoversAllThreadingStages", [](TestContext& context) {
 			TerraEngine::Renderer::RenderFrameSnapshot snapshot;
 			snapshot.frameId = 9u;

@@ -1,0 +1,25 @@
+{
+	"schemaVersion": 2,
+	"phase": 4,
+	"id": "phase-4",
+	"title": "Feedback streaming and atomic publication",
+	"requiredTools": ["asset.virtualGeometry.inspect", "renderer.virtualGeometry.stats", "diagnostics.get_summary", "game_view.capture"],
+	"operations": [
+		{"id": "inspect-before", "tool": "asset.virtualGeometry.inspect", "evidence": "editor/inspect-before.json"},
+		{"id": "stats", "tool": "renderer.virtualGeometry.stats", "evidence": "editor/stats.json"},
+		{"id": "diagnostics", "tool": "diagnostics.get_summary", "evidence": "editor/diagnostics.json"},
+		{"id": "inspect-after", "tool": "asset.virtualGeometry.inspect", "evidence": "editor/inspect-after.json"}
+	],
+	"captures": [
+		{"id": "fallback", "tool": "game_view.capture", "evidence": "images/fallback.png"}
+	],
+	"requiredArtifacts": [
+		{"path": "editor/inspect-before.json", "kind": "editor-envelope"},
+		{"path": "editor/stats.json", "kind": "editor-envelope"},
+		{"path": "editor/diagnostics.json", "kind": "editor-envelope"},
+		{"path": "editor/inspect-after.json", "kind": "editor-envelope"},
+		{"path": "images/fallback.png", "kind": "png"}
+	],
+	"releaseGates": ["streaming-tests"],
+	"unavailablePolicy": "fail-closed"
+}

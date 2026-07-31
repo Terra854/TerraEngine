@@ -17,6 +17,7 @@
 #include "File Formats/TerraEngineAnimationFile.h"
 #include "File Formats/TerraEngineMeshFile.h"
 #include "Resource/ResourceStreaming.h"
+#include "Resource/VirtualGeometryCodec.h"
 
 namespace
 {
@@ -1514,17 +1515,31 @@ namespace
 		mesh.virtualGeometryResidentFallbackPageBytes = 0u;
 		mesh.virtualGeometryProtectedFallbackBytes = 0u;
 		mesh.virtualGeometryOwnerFallbackReason.clear();
+		mesh.virtualGeometryPhysicalPageStates.clear();
+		mesh.virtualGeometryPhysicalPagePublicationGenerations.clear();
+		mesh.virtualGeometryPhysicalPagePublicationGeneration = 0u;
 		if (!mesh.hasVirtualGeometry || mesh.virtualGeometryPages.empty())
 		{
 			return;
 		}
 
 		mesh.virtualGeometryFullOwnerPayloadBytes = ResolveFullOwnerMeshPayloadBytes(mesh);
+		mesh.virtualGeometryPhysicalPageStates.resize(
+			mesh.virtualGeometryPages.size(),
+			static_cast<std::uint32_t>(GeometryPageState::NotResident));
+		mesh.virtualGeometryPhysicalPagePublicationGenerations.resize(
+			mesh.virtualGeometryPages.size(), 1u);
+		mesh.virtualGeometryPhysicalPagePublicationGeneration = 1u;
 		for (const VirtualGeometryPageRecord& page : mesh.virtualGeometryPages)
 		{
 			const bool fallbackPage = page.pageId == page.fallbackPageId;
 			if (fallbackPage)
 			{
+				// The fallback range is the only physical page payload guaranteed by
+				// this loader. Pin it before render snapshots can observe the mesh so
+				// resident-ancestor selection always has coverage while IO starts.
+				mesh.virtualGeometryPhysicalPageStates[page.pageId] =
+					static_cast<std::uint32_t>(GeometryPageState::Pinned);
 				mesh.virtualGeometryResidentFallbackPageBytes = AddVirtualGeometryByteCount(
 					mesh.virtualGeometryResidentFallbackPageBytes,
 					page.byteSize);
@@ -1532,12 +1547,8 @@ namespace
 					mesh.virtualGeometryProtectedFallbackBytes,
 					page.byteSize);
 			}
-			else
-			{
-				mesh.virtualGeometryResidentHighDetailPageBytes = AddVirtualGeometryByteCount(
-					mesh.virtualGeometryResidentHighDetailPageBytes,
-					page.byteSize);
-			}
+			// Non-fallback page bytes are catalogued but not published resident.
+			// A later typed streaming transaction owns the state transition.
 		}
 
 		mesh.virtualGeometryPageStreamingReady =
@@ -1701,6 +1712,118 @@ namespace
 			return static_cast<char>(std::tolower(value));
 		});
 		return extension == ".temf";
+	}
+
+	// Publish aggregate profile data only after the ordinary cluster/page tables
+	// have passed atomic validation. Invalid optional sidecars fall back to the
+	// existing validated cluster chain and request a targeted editor recook.
+	void ResolveVirtualGeometryAggregateProfile(
+		const std::vector<std::uint8_t>& fileBytes,
+		const MeshHeader& header,
+		Mesh& mesh)
+	{
+		mesh.hasVirtualGeometryAggregateProfile = false;
+		mesh.virtualGeometryAggregateProfileProvenance = VirtualGeometryAggregateProfileProvenance::None;
+		mesh.virtualGeometryAggregateProfiles.clear();
+		mesh.virtualGeometryAggregateProfileOffset = 0u;
+		mesh.virtualGeometryAggregateProfileDiagnostic.clear();
+		if (!mesh.hasVirtualGeometry || mesh.virtualGeometryClusters.empty())
+		{
+			return;
+		}
+
+		for (std::uint64_t offset = header.headerSize;
+			offset + sizeof(VirtualGeometryAggregateProfileHeader) <= fileBytes.size(); offset += 4u)
+		{
+			VirtualGeometryAggregateProfileHeader profileHeader{};
+			std::memcpy(&profileHeader, fileBytes.data() + offset, sizeof(profileHeader));
+			if (profileHeader.magic != kVirtualGeometryAggregateProfileMagicValue)
+			{
+				continue;
+			}
+			const std::uint64_t recordBytes = static_cast<std::uint64_t>(profileHeader.profileCount)
+				* sizeof(VirtualGeometryAggregateProfileRecord);
+			if (profileHeader.version != kVirtualGeometryAggregateProfileVersion
+				|| profileHeader.headerSize != sizeof(profileHeader)
+				|| profileHeader.profileCount == 0u
+				|| profileHeader.byteSize != sizeof(profileHeader) + recordBytes
+				|| profileHeader.byteSize > fileBytes.size() - offset)
+			{
+				mesh.virtualGeometryAggregateProfileDiagnostic = "VGAP header is incompatible or out of range.";
+				// Geometry payload bytes may coincidentally contain the four-byte
+				// magic. Keep scanning for the appended sidecar instead of letting
+				// that false positive hide a later valid aggregate publication.
+				continue;
+			}
+			const std::span<const std::uint8_t> rawProfiles(
+				fileBytes.data() + offset + sizeof(profileHeader), static_cast<std::size_t>(recordBytes));
+			std::vector<VirtualGeometryAggregateProfileRecord> profiles(profileHeader.profileCount);
+			std::memcpy(profiles.data(), rawProfiles.data(), rawProfiles.size());
+			const bool valid = profileHeader.contentHash == CalculateVirtualGeometryCompactHash(rawProfiles)
+				&& std::all_of(profiles.begin(), profiles.end(), [&](const auto& profile) {
+					return profile.kind <= static_cast<std::uint32_t>(VirtualGeometryAggregateProfileKind::Fallback)
+						&& (profile.flags & kVirtualGeometryAggregateProfileFlagCompleteFallbackCoverage) != 0u
+						&& profile.stableId != 0u && profile.fallbackStableId == profile.stableId
+						&& std::isfinite(profile.canonicalError) && profile.canonicalError >= 0.0f
+						&& std::isfinite(profile.coverageRatio) && profile.coverageRatio >= 0.0f
+						&& profile.coverageRatio <= 1.0f && profile.sourceElementCount != 0u
+						&& profile.fallbackClusterId < mesh.virtualGeometryClusters.size()
+						&& profile.reserved == 0u;
+				});
+			if (valid)
+			{
+				mesh.hasVirtualGeometryAggregateProfile = true;
+				mesh.virtualGeometryAggregateProfileProvenance = VirtualGeometryAggregateProfileProvenance::CookedSidecar;
+				mesh.virtualGeometryAggregateProfiles = std::move(profiles);
+				mesh.virtualGeometryAggregateProfileOffset = offset;
+				return;
+			}
+			mesh.virtualGeometryAggregateProfileDiagnostic = "VGAP aggregate profile validation failed.";
+			// A false-positive magic match must not prevent the validated sidecar
+			// appended by the current cooker from being discovered later.
+			continue;
+		}
+
+		const auto rootIt = std::find_if(mesh.virtualGeometryClusters.begin(), mesh.virtualGeometryClusters.end(),
+			[](const VirtualGeometryClusterRecord& cluster) { return cluster.parentClusterId == kVirtualGeometryInvalidIndex; });
+		if (rootIt == mesh.virtualGeometryClusters.end()
+			|| std::count_if(mesh.virtualGeometryClusters.begin(), mesh.virtualGeometryClusters.end(),
+				[](const VirtualGeometryClusterRecord& cluster) { return cluster.parentClusterId == kVirtualGeometryInvalidIndex; }) != 1)
+		{
+			mesh.virtualGeometryAggregateProfileDiagnostic = "No valid VGAP sidecar exists; multiple roots require a regional aggregate-profile recook.";
+			return;
+		}
+		std::uint32_t fallbackClusterId = rootIt->clusterId;
+		for (std::size_t guard = 0u; guard < mesh.virtualGeometryClusters.size(); ++guard)
+		{
+			const VirtualGeometryClusterRecord& cluster = mesh.virtualGeometryClusters[fallbackClusterId];
+			if (cluster.fallbackClusterId == fallbackClusterId)
+			{
+				break;
+			}
+			fallbackClusterId = cluster.fallbackClusterId;
+		}
+		float canonicalError = 0.0f;
+		for (const VirtualGeometryClusterRecord& cluster : mesh.virtualGeometryClusters)
+		{
+			canonicalError = std::max(canonicalError, cluster.geometricError);
+		}
+		const std::span<const std::uint8_t> clusterBytes(
+			reinterpret_cast<const std::uint8_t*>(mesh.virtualGeometryClusters.data()),
+			mesh.virtualGeometryClusters.size() * sizeof(VirtualGeometryClusterRecord));
+		std::uint64_t stableId = CalculateVirtualGeometryCompactHash(clusterBytes);
+		mesh.virtualGeometryAggregateProfiles.push_back({
+			static_cast<std::uint32_t>(VirtualGeometryAggregateProfileKind::Fallback),
+			kVirtualGeometryAggregateProfileFlagCompleteFallbackCoverage,
+			stableId == 0u ? 1u : stableId, canonicalError,
+			static_cast<std::uint32_t>(mesh.virtualGeometryClusters.size()), 1.0f,
+			stableId == 0u ? 1u : stableId, fallbackClusterId, 0u });
+		mesh.hasVirtualGeometryAggregateProfile = true;
+		mesh.virtualGeometryAggregateProfileProvenance = VirtualGeometryAggregateProfileProvenance::LegacyDerived;
+		if (mesh.virtualGeometryAggregateProfileDiagnostic.empty())
+		{
+			mesh.virtualGeometryAggregateProfileDiagnostic = "No VGAP sidecar was found; a validated legacy fallback profile was derived.";
+		}
 	}
 
 	// Parse a TEMF mesh file from disk and populate spans into the payload.
@@ -1994,6 +2117,7 @@ namespace
 		const std::size_t payloadOffset = header.headerSize;
 		auto mesh = std::make_unique<Mesh>();
 		mesh->header = header;
+		mesh->sourcePath = resolvedPath.string();
 		if(!CopyValidatedDeformableRuntimeMetadata(fileBytes, header, *mesh)) {
 			TERRAENGINE_LOG(LogLevel::Error,
 				"Validated TDEF metadata could not be copied into runtime mesh state: " << resolvedPath);
@@ -2065,6 +2189,169 @@ namespace
 				mesh->animatedVirtualPageDirectoryDiagnostic =
 					"No valid AVPD directory matched the deformable payload generation.";
 			}
+		}
+		// VGXD is an optional static compact footer. Clear every candidate-facing
+		// vector before scanning so a reload can never retain metadata from a
+		// rejected footer; malformed compact data still leaves expanded TEMF usable.
+		mesh->hasVirtualGeometryCompactDirectory = false;
+		mesh->virtualGeometryCompactDirectory = {};
+		mesh->virtualGeometryCompactEntries.clear();
+		mesh->virtualGeometryCompactPages.clear();
+		mesh->virtualGeometryCompactBlocks.clear();
+		mesh->virtualGeometryCompactDirectoryOffset = 0u;
+		mesh->virtualGeometryCompactDiagnostic.clear();
+		std::string compactCandidateDiagnostic;
+		for(std::uint64_t offset = header.headerSize; offset + sizeof(VirtualGeometryExtensionDirectoryHeader) <= fileBytes.size(); offset += 4u)
+		{
+			VirtualGeometryExtensionDirectoryHeader directory{};
+			std::memcpy(&directory, fileBytes.data() + offset, sizeof(directory));
+			if(directory.magic != kVirtualGeometryExtensionDirectoryMagicValue) continue;
+			if(directory.version != kVirtualGeometryExtensionDirectoryVersion
+				|| directory.headerSize != sizeof(directory) || directory.entryCount == 0u)
+			{
+				compactCandidateDiagnostic =
+					"VGXD header identity, version, or entry count is invalid.";
+				continue;
+			}
+			const std::uint64_t entriesBytes = static_cast<std::uint64_t>(directory.entryCount) * sizeof(VirtualGeometryExtensionDirectoryEntry);
+			if(directory.byteSize < sizeof(directory) || directory.entryTableOffset < sizeof(directory)
+				|| directory.byteSize > fileBytes.size() - offset
+				|| entriesBytes > directory.byteSize - directory.entryTableOffset)
+			{
+				compactCandidateDiagnostic =
+					"VGXD header or entry table exceeds the cooked file range.";
+				continue;
+			}
+			const std::span<const std::uint8_t> footer(fileBytes.data() + offset, directory.byteSize);
+			std::string directoryError;
+			if(!TerraEngine::Resource::ValidateVirtualGeometryExtensionDirectory(footer, {}, &directoryError))
+			{
+				compactCandidateDiagnostic = std::move(directoryError);
+				continue;
+			}
+			std::vector<VirtualGeometryExtensionDirectoryEntry> entries(directory.entryCount);
+			std::memcpy(entries.data(), footer.data() + directory.entryTableOffset, static_cast<std::size_t>(entriesBytes));
+			bool valid = true;
+			for(const auto& entry : entries)
+				if(entry.byteOffset < directory.headerSize || entry.byteSize == 0u
+					|| entry.byteOffset > directory.byteSize
+					|| entry.byteSize > directory.byteSize - entry.byteOffset)
+				{
+					compactCandidateDiagnostic =
+						"VGXD contains an entry outside its validated footer range.";
+					valid = false;
+					break;
+				}
+			if(valid)
+			{
+				std::vector<VirtualGeometryCompactPageDescriptor> pages;
+				std::vector<VirtualGeometryCompactBlockDescriptor> blocks;
+				std::vector<std::pair<std::uint64_t, std::uint64_t>> blockTableRanges;
+				for(const auto& entry : entries)
+				{
+					if(entry.type == static_cast<std::uint32_t>(VirtualGeometryExtensionType::CompactPage)
+						&& entry.byteSize >= sizeof(VirtualGeometryCompactPageDescriptor))
+					{
+						VirtualGeometryCompactPageDescriptor page{}; std::memcpy(&page, footer.data() + entry.byteOffset, sizeof(page));
+						if(entry.byteSize != sizeof(page)
+							|| entry.contentHash != CalculateVirtualGeometryCompactHash(std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(&page), sizeof(page)))
+							|| page.profile != 64u || page.blockCount == 0u || page.requiredCapabilities == 0u
+							|| page.decodedByteSize != entry.decodedByteSize)
+						{
+							compactCandidateDiagnostic =
+								"VGXD compact page metadata or integrity is invalid.";
+							valid = false;
+							break;
+						}
+						pages.push_back(page);
+					}
+					else if(entry.type == static_cast<std::uint32_t>(VirtualGeometryExtensionType::TerraBlock)
+						&& entry.byteSize % sizeof(VirtualGeometryCompactBlockDescriptor) == 0u)
+					{
+						if(entry.contentHash != CalculateVirtualGeometryCompactHash(footer.subspan(entry.byteOffset, entry.byteSize)))
+						{
+							compactCandidateDiagnostic =
+								"VGXD Terra block descriptor table failed integrity validation.";
+							valid = false;
+							break;
+						}
+						blockTableRanges.emplace_back(entry.byteOffset, entry.byteSize);
+						const auto count = entry.byteSize / sizeof(VirtualGeometryCompactBlockDescriptor);
+						for(std::uint32_t i = 0u; i < count; ++i)
+						{
+							VirtualGeometryCompactBlockDescriptor block{}; std::memcpy(&block, footer.data() + entry.byteOffset + i * sizeof(block), sizeof(block));
+							if(block.byteSize == 0u || block.requiredCapabilities == 0u || block.byteOffset > directory.byteSize
+								|| block.byteSize > directory.byteSize - block.byteOffset
+								|| block.contentHash != CalculateVirtualGeometryCompactHash(footer.subspan(block.byteOffset, block.byteSize)))
+							{
+								compactCandidateDiagnostic =
+									"VGXD Terra block range or stored integrity is invalid.";
+								valid = false;
+								break;
+							}
+							const auto decoded = TerraEngine::Resource::DecodeVirtualGeometryCompactBlock(footer.subspan(block.byteOffset, block.byteSize), {});
+							if(!decoded.IsComplete() || decoded.header.codec != block.codec || decoded.header.decodedByteSize != block.decodedByteSize
+								|| decoded.bytes.size() != block.decodedByteSize)
+							{
+								compactCandidateDiagnostic = decoded.error.empty()
+									? "VGXD decoded Terra block metadata does not match its descriptor."
+									: decoded.error;
+								valid = false;
+								break;
+							}
+							blocks.push_back(block);
+						}
+					}
+					else
+					{
+						compactCandidateDiagnostic =
+							"VGXD contains an unsupported required entry or malformed Terra block table.";
+						valid = false;
+						break;
+					}
+					if(!valid) break;
+				}
+				for(const VirtualGeometryCompactPageDescriptor& page : pages)
+				{
+					const std::uint64_t pageBlockBytes = static_cast<std::uint64_t>(page.blockCount) * sizeof(VirtualGeometryCompactBlockDescriptor);
+					const bool pageTableIsKnown = std::any_of(blockTableRanges.begin(), blockTableRanges.end(), [&page, pageBlockBytes](const auto& range) {
+						return page.blockTableOffset >= range.first && pageBlockBytes <= range.second - (page.blockTableOffset - range.first);
+					});
+					if(!pageTableIsKnown)
+					{
+						compactCandidateDiagnostic =
+							"VGXD compact page points outside every validated block descriptor table.";
+						valid = false;
+						break;
+					}
+				}
+				if(valid && (pages.empty() || blocks.empty()))
+				{
+					compactCandidateDiagnostic =
+						"VGXD has no usable compact pages or Terra blocks.";
+					valid = false;
+				}
+				if(valid)
+				{
+					mesh->virtualGeometryCompactPages = std::move(pages);
+					mesh->virtualGeometryCompactBlocks = std::move(blocks);
+				}
+			}
+			if(!valid) continue;
+			mesh->hasVirtualGeometryCompactDirectory = true;
+			mesh->virtualGeometryCompactDirectory = directory;
+			mesh->virtualGeometryCompactEntries = std::move(entries);
+			mesh->virtualGeometryCompactDirectoryOffset = offset;
+			break;
+		}
+		if(!mesh->hasVirtualGeometryCompactDirectory)
+		{
+			// Preserve one bounded actionable reason on the mesh. Renderer and
+			// automation copy this value without reopening the cooked file.
+			mesh->virtualGeometryCompactDiagnostic =
+				compactCandidateDiagnostic.empty()
+					? "No VGXD compact directory was found in the cooked mesh."
+					: compactCandidateDiagnostic;
 		}
 
 		mesh->storage.assign(fileBytes.begin() + static_cast<std::ptrdiff_t>(payloadOffset), fileBytes.end());
@@ -2326,6 +2613,10 @@ namespace
 		{
 			TERRAENGINE_LOG(LogLevel::Warning, warning);
 		}
+		// This publication is derived from fully validated immutable tables and
+		// therefore stays safe for render-worker snapshots. Legacy profiles are
+		// explicitly marked so editor repair can recook only this mesh later.
+		ResolveVirtualGeometryAggregateProfile(fileBytes, header, *mesh);
 
 		return mesh;
 	}
@@ -2429,6 +2720,7 @@ void ResourceManager::CacheLoadedMeshBounds(const TerraEngine::UUID& id, const M
 			glm::vec3(mesh->localBoundsMax[0], mesh->localBoundsMax[1], mesh->localBoundsMax[2]),
 			TerraEngine::Scene::SpatialBoundsSource::Mesh);
 	}
+
 	if (mesh->hasDeformablePayload)
 	{
 		// The static mesh box is insufficient for CPU broadphase queries: a skin

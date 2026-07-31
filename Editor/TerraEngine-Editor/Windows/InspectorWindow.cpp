@@ -34,6 +34,7 @@
 #include "AssetDatabase.h"
 #include "AssetImportResult.h"
 #include "Editor/AssetCompilers/MeshCompiler.h"
+#include "Editor/AssetCompilers/MaterialAssetWriter.h"
 #include "Editor/AssetCompilers/TextureCompiler.h"
 #include "ModelPackageImporter.h"
 #include "Engine/File Formats/TerraEngineMaterialFile.h"
@@ -5969,12 +5970,15 @@ void InspectorWindow::DrawMaterialInspector(const std::filesystem::path& path) {
 		changed = false;
 	}
 	if (changed) {
-		std::ofstream outFile(path, std::ios::binary);
-		if (outFile.is_open()) {
-			outFile.write(reinterpret_cast<const char*>(m_MaterialDataBuffer.data()), static_cast<std::streamsize>(m_MaterialDataBuffer.size()));
-			outFile.close();
-
-			// Notify ResourceManager to reload this material from disk
+		// Inspector saves use the validated candidate/backup publication path.
+		// A malformed edit or failed replacement therefore leaves the previous
+		// material generation live instead of partially truncating the asset.
+		if (TerraEngine::AssetPipeline::PublishMaterialAssetBytes(
+			path,
+			std::span<const std::uint8_t>(
+				m_MaterialDataBuffer.data(),
+				m_MaterialDataBuffer.size()))) {
+			// Reload only after the complete candidate becomes visible.
 			auto& assets = AssetDatabase::Instance().GetAssets();
 			auto it = assets.find(std::filesystem::absolute(path));
 			if (it != assets.end()) {
@@ -6032,12 +6036,12 @@ void InspectorWindow::DrawMeshInspector(const std::filesystem::path& path) {
 		ImGui::TextWrapped("This build accepts only direct-replacement TEMF version %u. Recompile all mesh assets.", (uint32_t)kMeshCurrentVersion);
 	}
 
-	auto drawInfoRow = [](const char* label, const char* value) {
+	auto drawInfoRow = [](const char* label, std::string_view value) {
 		ImGui::TableNextRow();
 		ImGui::TableSetColumnIndex(0);
 		ImGui::TextUnformatted(label);
 		ImGui::TableSetColumnIndex(1);
-		ImGui::TextUnformatted(value);
+		ImGui::TextUnformatted(value.data(), value.data() + value.size());
 	};
 
 	auto drawInfoRowU32 = [&](const char* label, uint32_t value) {
@@ -6098,6 +6102,22 @@ void InspectorWindow::DrawMeshInspector(const std::filesystem::path& path) {
 				drawInfoRowU32("Detail Levels", virtualGeometryMetadata.detailLevelCount);
 				drawInfoRowU32("Source Triangles", virtualGeometryMetadata.sourceTriangleCount);
 				drawInfoRowU32("Resident Meshlets", virtualGeometryMetadata.meshletCount);
+				drawInfoRow("Codec / Profile",
+					virtualGeometryMetadata.codec + " / "
+						+ virtualGeometryMetadata.codecProfile);
+				drawInfoRow("Format Hash",
+					virtualGeometryMetadata.formatHash.empty()
+						? "Unavailable"
+						: virtualGeometryMetadata.formatHash);
+				drawInfoRowU32("Encoded KiB",
+					static_cast<std::uint32_t>(
+						virtualGeometryMetadata.encodedGeometryBytes / 1024u));
+				drawInfoRowU32("Decoded KiB",
+					static_cast<std::uint32_t>(
+						virtualGeometryMetadata.decodedGeometryBytes / 1024u));
+				drawInfoRow("Stage Cache",
+					virtualGeometryMetadata.cacheState + ": "
+						+ virtualGeometryMetadata.cacheReason);
 				drawInfoRowU32("Material Sections", virtualGeometryMetadata.materialSectionCount);
 				drawInfoRow("Cone Safety", virtualGeometryMetadata.coneSafetyMetadataValid ? "Valid" : "Missing");
 				drawInfoRowU32("Cone Records", virtualGeometryMetadata.coneSafetyRecordCount);

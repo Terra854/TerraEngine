@@ -303,6 +303,27 @@ namespace TerraEngine::Renderer {
 		return result;
 	}
 
+	void DeformedPageRetirementQueue::Enqueue(const DeformedPagePublication& publication)
+	{
+		if(publication.IsComplete() && publication.completionFence != 0u)
+			pending.push_back(publication);
+	}
+
+	std::vector<DeformedPagePublication> DeformedPageRetirementQueue::RetireCompleted(std::uint64_t completedFence)
+	{
+		std::vector<DeformedPagePublication> retired;
+		for(auto it = pending.begin(); it != pending.end();)
+		{
+			if(it->completionFence <= completedFence)
+			{
+				retired.push_back(*it);
+				it = pending.erase(it);
+			}
+			else ++it;
+		}
+		return retired;
+	}
+
 	AnimatedGeometryDiagnosticSnapshot CoalesceAnimatedGeometryDiagnostics(
 		std::span<const AnimatedGeometryDiagnostic> diagnostics,
 		std::size_t capacity)

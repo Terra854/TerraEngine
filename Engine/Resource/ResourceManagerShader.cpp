@@ -10,6 +10,8 @@
 #include <array>
 #include <cctype>
 #include <cstring>
+#include <optional>
+#include <vector>
 
 #include "Core/Logger/Logger.h"
 #include "File Formats/TerraEngineShaderFile.h"
@@ -65,6 +67,10 @@ namespace
 			shader, shader.reflection.source.pathOffset));
 		std::transform(source.begin(), source.end(), source.begin(),
 			[](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+		// TSPF provenance preserves the compiler host's native path separators.
+		// Normalize Windows backslashes before classifying engine-owned geometry
+		// stages so an installed shader cannot be mistaken for authored content.
+		std::replace(source.begin(), source.end(), '\\', '/');
 		if(source.find("engine/shaders/") != std::string::npos
 			|| source.find("editor/shaders/") != std::string::npos)
 		{
@@ -174,6 +180,60 @@ namespace
 		}
 
 		return payload + relativeOffset;
+	}
+
+	// Load the optional, trailing TSPV record without changing the fixed v1
+	// header. Unknown trailing data is retained for forward compatibility, but a
+	// record that identifies itself as TSPV must be internally valid.
+	bool LoadShaderProvenance(
+		const std::filesystem::path& path,
+		const std::vector<std::uint8_t>& fileBytes,
+		std::size_t knownPayloadEnd,
+		std::optional<ShaderProvenanceBackendVariantExtension>& provenance)
+	{
+		if(knownPayloadEnd >= fileBytes.size())
+		{
+			return knownPayloadEnd == fileBytes.size();
+		}
+
+		const std::size_t remainingBytes = fileBytes.size() - knownPayloadEnd;
+		if(remainingBytes < sizeof(ShaderProvenanceExtensionHeader))
+		{
+			TERRAENGINE_LOG(LogLevel::Warning,
+				"Ignoring unrecognized trailing TSPF bytes in " << path);
+			return true;
+		}
+
+		ShaderProvenanceExtensionHeader extensionHeader{};
+		std::memcpy(&extensionHeader, fileBytes.data() + knownPayloadEnd,
+			sizeof(extensionHeader));
+		if(extensionHeader.magic != kShaderProvenanceExtensionMagicValue)
+		{
+			TERRAENGINE_LOG(LogLevel::Warning,
+				"Ignoring unknown trailing TSPF extension in " << path);
+			return true;
+		}
+		if(extensionHeader.payloadSize != sizeof(ShaderProvenanceBackendVariantExtension)
+			|| remainingBytes < sizeof(extensionHeader) + extensionHeader.payloadSize)
+		{
+			TERRAENGINE_LOG(LogLevel::Error,
+				"TSPV extension size is invalid in " << path);
+			return false;
+		}
+
+		ShaderProvenanceBackendVariantExtension parsed{};
+		std::memcpy(&parsed,
+			fileBytes.data() + knownPayloadEnd + sizeof(extensionHeader),
+			sizeof(parsed));
+		if(!IsValidShaderProvenanceExtension(parsed))
+		{
+			TERRAENGINE_LOG(LogLevel::Error,
+				"TSPV extension is invalid in " << path);
+			return false;
+		}
+
+		provenance = parsed;
+		return true;
 	}
 
 	// Parse a TSPF shader stage container into a runtime-friendly structure.
@@ -343,6 +403,33 @@ namespace
 		}
 
 		shader->bytecode = std::span<const std::uint8_t>(bytecodePtr, shader->binary.bytecodeSize);
+		// Every fixed v1 range has already been bounds-checked above. The maximum
+		// end identifies where an optional appended extension may safely begin.
+		std::size_t knownPayloadEnd = header.headerSize;
+		const auto IncludeRange = [&knownPayloadEnd](std::uint32_t offset, std::size_t size)
+		{
+			knownPayloadEnd = std::max(knownPayloadEnd,
+				static_cast<std::size_t>(offset) + size);
+		};
+		IncludeRange(header.reflectionOffset, sizeof(ShaderReflection));
+		IncludeRange(header.compiledBinaryOffset, sizeof(CompiledStageBinary));
+		IncludeRange(shader->binary.bytecodeOffset, shader->binary.bytecodeSize);
+		IncludeRange(header.descriptorSetsOffset,
+			static_cast<std::size_t>(header.descriptorSetCount) * sizeof(DescriptorSetLayoutDesc));
+		IncludeRange(header.descriptorBindingsOffset,
+			static_cast<std::size_t>(header.descriptorBindingCount) * sizeof(DescriptorBinding));
+		IncludeRange(header.pushConstantsOffset,
+			static_cast<std::size_t>(header.pushConstantCount) * sizeof(PushConstantRange));
+		IncludeRange(header.stageInputsOffset,
+			static_cast<std::size_t>(header.stageInputCount) * sizeof(StageIOAttribute));
+		IncludeRange(header.stageOutputsOffset,
+			static_cast<std::size_t>(header.stageOutputCount) * sizeof(StageIOAttribute));
+		IncludeRange(header.stringTableOffset, header.stringTableSize);
+		if(!LoadShaderProvenance(resolvedPath, fileBytes, knownPayloadEnd,
+			shader->provenance))
+		{
+			return nullptr;
+		}
 		if(!ValidateRuntimeGeometryContract(*shader, resolvedPath))
 		{
 			return nullptr;

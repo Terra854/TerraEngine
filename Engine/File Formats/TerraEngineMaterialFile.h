@@ -9,6 +9,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -190,6 +191,58 @@ struct MaterialHeader
 
 static_assert(sizeof(MaterialHeader) <= 256, "TMAT header should remain compact");
 
+// Optional TMVG extension: TMAT v1 readers stop at MaterialHeader, while
+// virtual-geometry-aware readers validate a separately tagged record after the
+// normal arrays. This keeps legacy assets readable without treating trailing
+// bytes as virtual-geometry policy.
+inline constexpr std::uint32_t kVirtualGeometryMaterialExtensionMagicValue = 0x47564d54u; // 'TMVG' little endian
+inline constexpr std::uint32_t kVirtualGeometryMaterialExtensionVersion = 1u;
+// These bits describe material requirements, not backend capabilities. A
+// backend compares them with its own declared feature mask before it selects a
+// programmable virtual-geometry pipeline.
+enum class VirtualGeometryMaterialFeature : std::uint32_t
+{
+	VisibilityBuffer = 1u << 0u,
+	AlphaTest = 1u << 1u,
+	ProgrammableShading = 1u << 2u
+};
+
+inline constexpr std::uint32_t ToVirtualGeometryMaterialFeatureMask(
+	const VirtualGeometryMaterialFeature feature) noexcept
+{
+	return static_cast<std::uint32_t>(feature);
+}
+struct VirtualGeometryMaterialExtensionHeader
+{
+	std::uint32_t magic = kVirtualGeometryMaterialExtensionMagicValue;
+	std::uint32_t payloadSize = 0u;
+};
+static_assert(sizeof(VirtualGeometryMaterialExtensionHeader) == 8u, "TMVG extension envelope must retain a stable wire layout.");
+
+enum class VirtualGeometryMaterialFallbackPolicy : std::uint32_t { Indexed = 0u, Compute = 1u, DisableVirtualGeometry = 2u };
+struct VirtualGeometryMaterialExtension
+{
+	std::uint32_t version = kVirtualGeometryMaterialExtensionVersion;
+	std::uint32_t requiredFeatureMask = 0u;
+	std::uint32_t programmableFeatureMask = 0u;
+	std::uint32_t shadingBin = 0u;
+	std::uint32_t permutationKey = 0u;
+	std::uint32_t maximumShadingBins = 0u;
+	VirtualGeometryMaterialFallbackPolicy fallbackPolicy = VirtualGeometryMaterialFallbackPolicy::Indexed;
+	std::uint32_t diagnosticReasonCode = 0u;
+	std::uint64_t compatibilitySignature = 0u;
+};
+static_assert(sizeof(VirtualGeometryMaterialExtension) == 40u, "Optional TMVG extension must retain a stable wire layout.");
+
+// Validate the closed fallback enum so a corrupt optional extension never
+// silently selects an invented render route.
+inline constexpr bool IsValidVirtualGeometryMaterialExtension(const VirtualGeometryMaterialExtension& extension)
+{
+	return extension.version == kVirtualGeometryMaterialExtensionVersion
+		&& static_cast<std::uint32_t>(extension.fallbackPolicy)
+			<= static_cast<std::uint32_t>(VirtualGeometryMaterialFallbackPolicy::DisableVirtualGeometry);
+}
+
 // In-memory representation of a fully loaded material file.
 // struct Material groups related state and operations so callers have one documented contract.
 struct Material
@@ -202,4 +255,5 @@ struct Material
 	std::span<const FloatParameter> floats;    // Views into storage
 	std::vector<ResolvedMaterialSlot> resolvedSlots;
 	std::vector<std::string> fallbackWarnings;
+	std::optional<VirtualGeometryMaterialExtension> virtualGeometryExtension;
 };

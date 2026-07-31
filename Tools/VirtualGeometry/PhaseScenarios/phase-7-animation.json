@@ -1,0 +1,25 @@
+{
+	"schemaVersion": 2,
+	"phase": 7,
+	"id": "phase-7",
+	"title": "Animated virtual geometry advantage",
+	"requiredTools": ["asset.virtualGeometry.inspect", "renderer.virtualGeometry.stats", "diagnostics.get_summary", "camera.capture_custom", "game_view.capture"],
+	"operations": [
+		{"id": "inspect", "tool": "asset.virtualGeometry.inspect", "evidence": "editor/inspect.json"},
+		{"id": "stats", "tool": "renderer.virtualGeometry.stats", "evidence": "editor/stats.json"},
+		{"id": "diagnostics", "tool": "diagnostics.get_summary", "evidence": "editor/diagnostics.json"}
+	],
+	"captures": [
+		{"id": "hero", "tool": "camera.capture_custom", "evidence": "images/hero.png"},
+		{"id": "crowd", "tool": "game_view.capture", "evidence": "images/crowd.png"}
+	],
+	"requiredArtifacts": [
+		{"path": "editor/inspect.json", "kind": "editor-envelope"},
+		{"path": "editor/stats.json", "kind": "editor-envelope"},
+		{"path": "editor/diagnostics.json", "kind": "editor-envelope"},
+		{"path": "images/hero.png", "kind": "png"},
+		{"path": "images/crowd.png", "kind": "png"}
+	],
+	"releaseGates": ["animation-runtime-tests", "animation-editor-tests", "full-reference", "million-decision"],
+	"unavailablePolicy": "fail-closed"
+}

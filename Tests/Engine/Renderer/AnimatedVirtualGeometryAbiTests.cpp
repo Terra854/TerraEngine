@@ -32,10 +32,13 @@ namespace TerraEngine::Tests {
 			demand.key.page.pageContentGeneration = 20u + pageId;
 			demand.key.page.residencyGeneration = 30u;
 			demand.key.page.layoutVersion = kAnimatedGeometryAbiVersion;
+			demand.key.page.codecProfile = 1u;
+			demand.key.page.codecVersion = 1u;
 			demand.key.deformation = {
 				100u, 101u, 102u, 103u, 104u, 10u, 105u, 106u
 			};
 			demand.key.inputLayoutVersion = kAnimatedGeometryAbiVersion;
+			demand.key.animationLodVersion = kAnimatedGeometryAbiVersion;
 			demand.sourceRecordIndex = 4u;
 			demand.vertexCount = 64u;
 			demand.meshletCount = 2u;

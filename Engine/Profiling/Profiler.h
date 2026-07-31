@@ -77,6 +77,9 @@ public:
 	std::string GetLastError() const;
 	std::string GetStatusText() const;
 	bool IsCapturing() const;
+	// UI readers poll this atomic revision before requesting deep capture copies.
+	// Recording threads never wait for a profiler window that is only redrawing.
+	std::uint64_t GetSnapshotRevision() const noexcept;
 
 private:
 	Profiler() = default;
@@ -110,5 +113,6 @@ private:
 	std::atomic_bool frameRecordingActive = false;
 	std::atomic_bool markerRecordingActive = false;
 	std::atomic_bool taskRecordingActive = false;
+	std::atomic_uint64_t snapshotRevision = 1u;
 };
 }

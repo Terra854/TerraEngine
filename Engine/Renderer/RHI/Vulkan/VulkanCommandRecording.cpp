@@ -190,6 +190,78 @@ namespace TerraEngine::Renderer::Vulkan {
 		return plan;
 	}
 
+	VulkanVirtualGeometryCommandPlan BuildVulkanVirtualGeometryCommandPlan(
+		const VirtualGeometryGpuPlan& immutablePlan,
+		const VulkanVirtualGeometryExecutorResources& resources,
+		const VulkanVirtualGeometryExecutorPipelines& pipelines)
+	{
+		VulkanVirtualGeometryCommandPlan commandPlan;
+		if(!immutablePlan.IsComplete())
+		{
+			commandPlan.rejectionReason = immutablePlan.rejectionReason.empty()
+				? "Virtual-geometry command recording requires a complete immutable GPU plan."
+				: immutablePlan.rejectionReason;
+			return commandPlan;
+		}
+
+		commandPlan.executorPlan = BuildVulkanVirtualGeometryExecutorPlan(
+			immutablePlan.traversal.instanceCount,
+			immutablePlan.capacity,
+			immutablePlan.generatedWork.usesIndirectCount,
+			resources,
+			pipelines,
+			immutablePlan.frameId,
+			immutablePlan.generation,
+			immutablePlan.generation,
+			immutablePlan.generation);
+		if(!commandPlan.executorPlan.unavailableReason.empty())
+		{
+			commandPlan.rejectionReason = commandPlan.executorPlan.unavailableReason;
+			return commandPlan;
+		}
+
+		// The ordering is not optional: each stage publishes storage writes for
+		// the next one, and the final stage creates the indirect draw boundary.
+		commandPlan.stages = {
+			VulkanVirtualGeometryExecutorStage::Traversal,
+			VulkanVirtualGeometryExecutorStage::Compaction,
+			VulkanVirtualGeometryExecutorStage::Indirect };
+		commandPlan.valid = true;
+		return commandPlan;
+	}
+
+	VulkanVirtualGeometryExecutorRecordingResult RecordVulkanVirtualGeometryCommands(
+		VkCommandBuffer commandBuffer,
+		const VulkanVirtualGeometryCommandPlan& commandPlan,
+		const VulkanVirtualGeometryExecutorResources& resources,
+		const VulkanVirtualGeometryExecutorPipelines& pipelines)
+	{
+		VulkanVirtualGeometryExecutorRecordingResult result{};
+		result.zeroWork = commandPlan.executorPlan.zeroWork;
+		if(!commandPlan.valid)
+		{
+			result.failureReason = commandPlan.rejectionReason.empty()
+				? "Virtual-geometry Vulkan command plan is invalid."
+				: commandPlan.rejectionReason;
+			return result;
+		}
+
+		for(const VulkanVirtualGeometryExecutorStage stage : commandPlan.stages)
+		{
+			const VulkanVirtualGeometryExecutorRecordingResult stageResult =
+				RecordVulkanVirtualGeometryExecutorStage(
+					commandBuffer, stage, commandPlan.executorPlan, resources, pipelines);
+			if(!stageResult.recorded)
+			{
+				return stageResult;
+			}
+			result.dispatchCount += stageResult.dispatchCount;
+			result.barrierCount += stageResult.barrierCount;
+		}
+		result.recorded = true;
+		return result;
+	}
+
 	VulkanAnimationCommandPlan BuildVulkanAnimationCommandPlan(
 		const Animation::GpuAnimationPlan& plan,
 		std::uint32_t rendererGeneration)

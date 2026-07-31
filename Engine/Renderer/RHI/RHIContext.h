@@ -11,6 +11,7 @@
 #include "Renderer/Graph/RenderSubmissionPlan.h"
 #include "Renderer/Graph/RenderDiagnostics.h"
 #include "Renderer/RendererRecovery.h"
+#include "Renderer/VirtualGeometry/Diagnostics/VirtualGeometryReplay.h"
 #include "Core/Export.h"
 
 #include <string>
@@ -84,6 +85,18 @@ public:
 	{
 		return {};
 	}
+	// Conventional visibility identity readback is intentionally a distinct
+	// typed queue: color capture metadata must never be mistaken for GPU picking.
+	virtual bool QueueConventionalVisibilityIdentityReadback(
+		const TerraEngine::Renderer::ConventionalVisibilityIdentityReadbackRequest&)
+	{
+		return false;
+	}
+	virtual std::vector<TerraEngine::Renderer::ConventionalVisibilityIdentityReadbackResult>
+		PollConventionalVisibilityIdentityReadbacks()
+	{
+		return {};
+	}
 	// IsTaskShaderSupported is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	virtual bool IsTaskShaderSupported() const { return false; }
 	// Virtual geometry can still render through TerraEngine's mesh-only shader
@@ -103,6 +116,27 @@ public:
 	// commands and successfully submitted their owning graphics command buffer.
 	virtual TerraEngine::Renderer::AnimationGpuBackendExecutionSnapshot
 		GetLatestAnimationGpuBackendExecution() const
+	{
+		return {};
+	}
+	// Completed receipts and measurements are non-blocking protected-boundary
+	// publications. Empty vectors mean that the backend has no completed data;
+	// callers must not translate that absence into executed support or zero time.
+	virtual std::vector<TerraEngine::Renderer::VirtualGeometryBackendExecutionReceipt>
+		PollVirtualGeometryExecutionReceipts()
+	{
+		return {};
+	}
+	virtual std::vector<TerraEngine::Renderer::VirtualGeometryBackendMeasurement>
+		PollVirtualGeometryMeasurements()
+	{
+		return {};
+	}
+	// Counter data is a separate delayed publication from timings and execution
+	// receipts. The default preserves the conservative contract: callers retain
+	// pending replay artifacts until a backend proves a completed counter copy.
+	virtual std::vector<TerraEngine::Renderer::VirtualGeometryAuthoritativeCounterReadback>
+		PollVirtualGeometryReplayCounters()
 	{
 		return {};
 	}

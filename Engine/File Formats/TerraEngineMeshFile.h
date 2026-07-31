@@ -80,6 +80,31 @@ constexpr std::uint32_t kAnimatedVirtualPageFlagHasSkinning = 1u << 2u;
 constexpr std::uint32_t kAnimatedVirtualPageFlagHasMorphs = 1u << 3u;
 constexpr std::uint32_t kAnimatedVirtualPageFlagHasErrorSamples = 1u << 4u;
 constexpr std::uint32_t kAnimatedVirtualPageFlagAll = 0x1fu;
+// VGXD is an optional compact virtual-geometry extension appended after TEMF
+// v1 payloads. Legacy readers stop at their known sections, while newer tools
+// can discover independently versioned blocks through this directory.
+constexpr std::uint32_t kVirtualGeometryExtensionDirectoryMagicValue = 0x44584756u; // 'VGXD' little endian
+constexpr std::uint16_t kVirtualGeometryExtensionDirectoryVersion = 1u;
+// VGAP is an independently versioned aggregate-profile sidecar. Keeping it
+// outside the frozen VGXD v1 footer lets older compact cooks remain readable
+// while one targeted recook can publish the canonical aggregate fallback.
+constexpr std::uint32_t kVirtualGeometryAggregateProfileMagicValue = 0x50414756u; // 'VGAP' little endian
+constexpr std::uint16_t kVirtualGeometryAggregateProfileVersion = 1u;
+constexpr std::uint32_t kVirtualGeometryAggregateProfileFlagCompleteFallbackCoverage = 1u << 0u;
+constexpr std::uint32_t kVirtualGeometryCompactBlockMagicValue = 0x42434756u; // 'VGCB' little endian
+constexpr std::uint16_t kVirtualGeometryCompactBlockVersion = 1u;
+constexpr std::uint32_t kVirtualGeometryExtensionFlagRequired = 1u << 0u;
+constexpr std::uint32_t kVirtualGeometryExtensionFlagPageLocal = 1u << 1u;
+constexpr std::uint32_t kVirtualGeometryExtensionFlagPinnedFallback = 1u << 2u;
+constexpr std::uint32_t kVirtualGeometryCompactBlockFlagMeshoptIndexStream = 1u << 0u;
+constexpr std::uint32_t kVirtualGeometryCompactBlockFlagMeshoptVertexStream = 1u << 1u;
+constexpr std::uint64_t kVirtualGeometryCodecCapabilityExpanded = 1ull << 0u;
+constexpr std::uint64_t kVirtualGeometryCodecCapabilityTerra = 1ull << 1u;
+constexpr std::uint64_t kVirtualGeometryCodecCapabilityMeshoptimizer = 1ull << 2u;
+constexpr std::uint64_t kVirtualGeometryCodecCapabilityAll =
+	kVirtualGeometryCodecCapabilityExpanded
+	| kVirtualGeometryCodecCapabilityTerra
+	| kVirtualGeometryCodecCapabilityMeshoptimizer;
 
 // Detail target status mirrors the renderer diagnostics. Records store integer
 // values so the unstable TEMF v1 payload can be read by simple tools without
@@ -578,6 +603,97 @@ struct DeformableVirtualGeometryMorphVertex
 	float tangentDelta[4];
 };
 
+// Page sizes are explicit experiment profiles rather than an implicit cooker
+// constant. Their ids are serialized, allowing a later profile decision to
+// remain reproducible when all three candidates are still supported.
+enum class VirtualGeometryPageSizeProfile : std::uint32_t
+{
+	KiB32 = 0u,
+	KiB64 = 1u,
+	KiB128 = 2u
+};
+
+constexpr std::uint32_t GetVirtualGeometryPageProfileBytes(
+	VirtualGeometryPageSizeProfile profile)
+{
+	switch(profile)
+	{
+	case VirtualGeometryPageSizeProfile::KiB32: return 32u * 1024u;
+	case VirtualGeometryPageSizeProfile::KiB64: return 64u * 1024u;
+	case VirtualGeometryPageSizeProfile::KiB128: return 128u * 1024u;
+	}
+	return 0u;
+}
+
+constexpr bool IsVirtualGeometryPagePayloadWithinProfile(
+	VirtualGeometryPageSizeProfile profile,
+	std::uint32_t decodedByteSize)
+{
+	const std::uint32_t profileBytes = GetVirtualGeometryPageProfileBytes(profile);
+	return profileBytes != 0u && decodedByteSize <= profileBytes;
+}
+
+// This stable byte hash is shared by offline prototype encoders and the
+// reference decoder. It is an integrity identifier, not a security primitive.
+inline std::uint64_t CalculateVirtualGeometryCompactHash(std::span<const std::uint8_t> bytes)
+{
+	std::uint64_t hash = 1469598103934665603ull;
+	for(const std::uint8_t byte : bytes)
+	{
+		hash = (hash ^ byte) * 1099511628211ull;
+	}
+	return hash;
+}
+
+enum class VirtualGeometryCompactCodec : std::uint32_t
+{
+	Expanded = 0u,
+	Terra = 1u,
+	Meshoptimizer = 2u
+};
+
+enum class VirtualGeometryExtensionType : std::uint32_t
+{
+	CompactPage = 0u,
+	ExpandedBlock = 1u,
+	TerraBlock = 2u,
+	MeshoptimizerBlock = 3u
+};
+
+// The file-format enum deliberately mirrors the renderer-facing aggregate
+// kinds without making Resource or cooker code depend on renderer headers.
+enum class VirtualGeometryAggregateProfileKind : std::uint32_t
+{
+	Assembly = 0u,
+	Foliage = 1u,
+	Curve = 2u,
+	Voxel = 3u,
+	Impostor = 4u,
+	Fallback = 5u
+};
+
+enum class VirtualGeometryAggregateProfileProvenance : std::uint8_t
+{
+	None = 0u,
+	LegacyDerived = 1u,
+	CookedSidecar = 2u
+};
+
+// Block kinds keep independently decoded topology and attribute streams
+// discoverable without coupling the compact prototype to one vertex layout.
+enum class VirtualGeometryCompactBlockKind : std::uint32_t
+{
+	Topology = 0u,
+	Positions = 1u,
+	NormalsTangents = 2u,
+	TextureCoordinatesColors = 3u,
+	MaterialIdentities = 4u,
+	SkinWeights = 5u,
+	MorphTargets = 6u,
+	Deformation = 7u,
+	DecodeConstants = 8u
+};
+
 // The directory remains resident while individual AVPB blobs stream. Exact
 // offsets and hashes let ResourceStreaming validate a page without retaining
 // the complete owner vertex, skin, or morph streams.
@@ -634,7 +750,8 @@ enum class AnimatedVirtualPageSectionType : std::uint32_t
 	MorphDeltas = 10u,
 	SourceVertexIds = 11u,
 	Clusters = 12u,
-	ErrorSamples = 13u
+	ErrorSamples = 13u,
+	CompactAnimationStreams = 14u
 };
 
 struct AnimatedVirtualPageBlobHeader
@@ -683,6 +800,112 @@ struct AnimatedVirtualPageSourceVertexRecord
 {
 	std::uint64_t stableSourceVertexId;
 };
+
+// The compact directory is a small immutable index. It is deliberately outside
+// the TEMF v1 root header so adding block codecs never changes legacy offsets.
+struct VirtualGeometryExtensionDirectoryHeader
+{
+	std::uint32_t magic;
+	std::uint16_t version;
+	std::uint16_t headerSize;
+	std::uint32_t byteSize;
+	std::uint32_t entryCount;
+	std::uint32_t entryTableOffset;
+	std::uint64_t directoryHash;
+	std::uint64_t requiredCapabilities;
+};
+
+// Entries identify one independently validatable block or page. All byte
+// offsets are relative to the directory's first byte, avoiding file-global
+// pointer ambiguity when a TEMF gains multiple future extensions.
+struct VirtualGeometryExtensionDirectoryEntry
+{
+	std::uint32_t type;
+	std::uint32_t flags;
+	std::uint32_t pageId;
+	std::uint32_t profile;
+	std::uint64_t byteOffset;
+	std::uint32_t byteSize;
+	std::uint32_t decodedByteSize;
+	std::uint64_t contentHash;
+	std::uint64_t requiredCapabilities;
+};
+
+// VGAP contains value-only selection data. The fallback cluster remains a
+// normal validated cluster id, so rendering never treats a profile as geometry
+// or dereferences a profile-owned resource during worker preparation.
+struct VirtualGeometryAggregateProfileHeader
+{
+	std::uint32_t magic;
+	std::uint16_t version;
+	std::uint16_t headerSize;
+	std::uint32_t byteSize;
+	std::uint32_t profileCount;
+	std::uint64_t contentHash;
+};
+
+struct VirtualGeometryAggregateProfileRecord
+{
+	std::uint32_t kind;
+	std::uint32_t flags;
+	std::uint64_t stableId;
+	float canonicalError;
+	std::uint32_t sourceElementCount;
+	float coverageRatio;
+	std::uint64_t fallbackStableId;
+	std::uint32_t fallbackClusterId;
+	std::uint32_t reserved;
+};
+
+// The page descriptor owns only bounded page-local facts. The directory entry
+// provides physical placement, while this record supplies decode and fallback
+// ownership without reopening the complete TEMF payload.
+struct VirtualGeometryCompactPageDescriptor
+{
+	std::uint32_t pageId;
+	std::uint32_t fallbackPageId;
+	std::uint32_t profile;
+	std::uint32_t blockCount;
+	std::uint64_t blockTableOffset;
+	std::uint32_t decodedByteSize;
+	std::uint32_t flags;
+	std::uint64_t requiredCapabilities;
+};
+
+// Block descriptors are the page-local indirection table. A decoder validates
+// this record before touching the corresponding self-describing block bytes.
+struct VirtualGeometryCompactBlockDescriptor
+{
+	std::uint32_t kind;
+	std::uint32_t codec;
+	std::uint32_t flags;
+	std::uint32_t elementCount;
+	std::uint32_t elementStride;
+	std::uint32_t reserved;
+	std::uint64_t byteOffset;
+	std::uint32_t byteSize;
+	std::uint32_t decodedByteSize;
+	std::uint64_t contentHash;
+	std::uint64_t requiredCapabilities;
+};
+
+// Every codec emits this common block header before its bytes. The decoder can
+// bound allocations and validate required features without knowing editor-side
+// recipe objects or trusting the directory alone.
+struct VirtualGeometryCompactBlockHeader
+{
+	std::uint32_t magic;
+	std::uint16_t version;
+	std::uint16_t headerSize;
+	std::uint32_t codec;
+	std::uint32_t flags;
+	std::uint32_t decodedByteSize;
+	std::uint32_t encodedByteSize;
+	std::uint32_t elementCount;
+	std::uint32_t elementStride;
+	std::uint64_t requiredCapabilities;
+	std::uint64_t decodedHash;
+};
 #pragma pack(pop)
 
 static_assert(sizeof(MeshHeader) <= 640, "TEMF header should remain compact");
@@ -703,11 +926,22 @@ static_assert(sizeof(AnimatedVirtualPageSkinRecord) == 8u, "AVPB skin records ma
 static_assert(sizeof(AnimatedVirtualPageMorphRecord) == 20u, "AVPB morph records use a fixed v1 layout");
 static_assert(sizeof(AnimatedVirtualPageSourceVertexRecord) == 8u, "AVPB source identities are full-width");
 
+static_assert(sizeof(VirtualGeometryExtensionDirectoryHeader) == 36u, "VGXD v1 header must stay byte exact");
+static_assert(sizeof(VirtualGeometryExtensionDirectoryEntry) == 48u, "VGXD v1 entries must stay byte exact");
+static_assert(sizeof(VirtualGeometryAggregateProfileHeader) == 24u, "VGAP v1 header must stay byte exact");
+static_assert(sizeof(VirtualGeometryAggregateProfileRecord) == 44u, "VGAP v1 records must stay byte exact");
+static_assert(sizeof(VirtualGeometryCompactPageDescriptor) == 40u, "VGXD v1 page descriptors must stay byte exact");
+static_assert(sizeof(VirtualGeometryCompactBlockDescriptor) == 56u, "VGXD v1 block descriptors must stay byte exact");
+static_assert(sizeof(VirtualGeometryCompactBlockHeader) == 48u, "VGCB v1 block headers must stay byte exact");
+
 // In-memory representation of an entire .temf payload.
 // Raw byte storage keeps payload ownership in one place while spans/vectors expose typed views.
 struct Mesh
 {
 	MeshHeader header{};
+	// The loader records the immutable cooked-file location so streaming can
+	// issue exact compact-page reads without reopening ResourceManager state.
+	std::string sourcePath;
 	std::vector<std::uint8_t> storage;
 	std::span<const std::uint8_t> meshletVertexData;
 	// Runtime always works with uint32 remap entries even if on-disk storage used uint16.
@@ -748,6 +982,25 @@ struct Mesh
 		animatedVirtualPageSections;
 	std::uint64_t animatedVirtualPageDirectoryOffset = 0u;
 	std::string animatedVirtualPageDirectoryDiagnostic;
+	// Optional VGXD metadata is retained separately from legacy expanded pages;
+	// a failed compact validation leaves these fields empty so callers keep the
+	// already validated triangle/page fallback.
+	bool hasVirtualGeometryCompactDirectory = false;
+	VirtualGeometryExtensionDirectoryHeader virtualGeometryCompactDirectory{};
+	std::vector<VirtualGeometryExtensionDirectoryEntry> virtualGeometryCompactEntries;
+	std::vector<VirtualGeometryCompactPageDescriptor> virtualGeometryCompactPages;
+	std::vector<VirtualGeometryCompactBlockDescriptor> virtualGeometryCompactBlocks;
+	std::uint64_t virtualGeometryCompactDirectoryOffset = 0u;
+	std::string virtualGeometryCompactDiagnostic;
+	// A current VGAP sidecar is preferred. Legacy TEMF cooks receive one
+	// derived complete fallback profile after their cluster/page tables validate,
+	// allowing runtime to remain safe while the editor schedules a targeted recook.
+	bool hasVirtualGeometryAggregateProfile = false;
+	VirtualGeometryAggregateProfileProvenance virtualGeometryAggregateProfileProvenance =
+		VirtualGeometryAggregateProfileProvenance::None;
+	std::vector<VirtualGeometryAggregateProfileRecord> virtualGeometryAggregateProfiles;
+	std::uint64_t virtualGeometryAggregateProfileOffset = 0u;
+	std::string virtualGeometryAggregateProfileDiagnostic;
 	std::vector<MeshletRecord> meshletRecords;
 	std::vector<MeshletSection> meshletSections;
 	std::vector<MeshletBounds> meshletBounds;
@@ -776,6 +1029,14 @@ struct Mesh
 	std::uint64_t virtualGeometryResidentFallbackPageBytes = 0u;
 	std::uint64_t virtualGeometryProtectedFallbackBytes = 0u;
 	std::string virtualGeometryOwnerFallbackReason;
+	// Runtime-only physical residency publication. Values use GeometryPageState's
+	// stable numeric layout, but live here as plain data so this file format
+	// header does not depend on renderer implementation headers. The loader
+	// publishes only bytes physically available to the renderer; page-table
+	// membership alone never implies that a high-detail page is resident.
+	std::vector<std::uint32_t> virtualGeometryPhysicalPageStates;
+	std::vector<std::uint64_t> virtualGeometryPhysicalPagePublicationGenerations;
+	std::uint64_t virtualGeometryPhysicalPagePublicationGeneration = 0u;
 	// Object-level culling needs one conservative mesh bound before the GPU
 	// sees individual meshlets. It is derived during load so render systems can
 	// cheaply transform it into world space without walking every meshlet.
@@ -783,3 +1044,33 @@ struct Mesh
 	float localBoundsMin[3] = { 0.0f, 0.0f, 0.0f };
 	float localBoundsMax[3] = { 0.0f, 0.0f, 0.0f };
 };
+
+// Version-two optional compact animation blocks are deliberately separate from
+// frozen TDEF/TDFV/AVPD/AVPB layouts. Readers can retain legacy sidecars when
+// this directory is absent and reject only unknown required capabilities.
+inline constexpr std::uint32_t kAnimatedVirtualGeometryCompactStreamVersion = 1u;
+enum class AnimatedVirtualGeometryCompactStreamKind : std::uint32_t { Position = 0u, Normal = 1u, Tangent = 2u };
+struct AnimatedVirtualGeometryCompactStreamDescriptor
+{
+	std::uint32_t version = kAnimatedVirtualGeometryCompactStreamVersion;
+	AnimatedVirtualGeometryCompactStreamKind kind = AnimatedVirtualGeometryCompactStreamKind::Position;
+	std::uint32_t requiredCapabilityMask = 0u;
+	std::uint32_t stableTopologyId = 0u;
+	std::uint64_t stableIdentityHash = 0u;
+	std::uint64_t byteOffset = 0u;
+	std::uint32_t storedByteSize = 0u;
+	std::uint32_t decodedByteSize = 0u;
+};
+static_assert(sizeof(AnimatedVirtualGeometryCompactStreamDescriptor) == 40u, "Compact animated stream layout is versioned and byte-stable.");
+
+inline bool IsValidAnimatedVirtualGeometryCompactStreamDescriptor(
+	const AnimatedVirtualGeometryCompactStreamDescriptor& descriptor) noexcept
+{
+	return descriptor.version == kAnimatedVirtualGeometryCompactStreamVersion
+		&& static_cast<std::uint32_t>(descriptor.kind) <= static_cast<std::uint32_t>(AnimatedVirtualGeometryCompactStreamKind::Tangent)
+		&& descriptor.requiredCapabilityMask != 0u
+		&& descriptor.stableTopologyId != 0u
+		&& descriptor.stableIdentityHash != 0u
+		&& descriptor.storedByteSize != 0u
+		&& descriptor.decodedByteSize >= descriptor.storedByteSize;
+}

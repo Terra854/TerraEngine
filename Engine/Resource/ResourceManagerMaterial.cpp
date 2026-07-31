@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <optional>
+#include <vector>
 
 #include "Core/Logger/Logger.h"
 #include "File Formats/TerraEngineMaterialFile.h"
@@ -16,6 +18,60 @@
 
 namespace
 {
+	// TMVG is appended after the legacy arrays. Its magic and payload size keep
+	// a regular v1 TMAT fully readable while making malformed VG policy fail
+	// closed instead of selecting an arbitrary fallback route.
+	bool LoadVirtualGeometryMaterialExtension(
+		const std::filesystem::path& path,
+		const std::vector<std::uint8_t>& fileBytes,
+		std::size_t knownPayloadEnd,
+		std::optional<VirtualGeometryMaterialExtension>& extension)
+	{
+		if(knownPayloadEnd >= fileBytes.size())
+		{
+			return knownPayloadEnd == fileBytes.size();
+		}
+
+		const std::size_t remainingBytes = fileBytes.size() - knownPayloadEnd;
+		if(remainingBytes < sizeof(VirtualGeometryMaterialExtensionHeader))
+		{
+			TERRAENGINE_LOG(LogLevel::Warning,
+				"Ignoring unrecognized trailing TMAT bytes in " << path);
+			return true;
+		}
+
+		VirtualGeometryMaterialExtensionHeader extensionHeader{};
+		std::memcpy(&extensionHeader, fileBytes.data() + knownPayloadEnd,
+			sizeof(extensionHeader));
+		if(extensionHeader.magic != kVirtualGeometryMaterialExtensionMagicValue)
+		{
+			TERRAENGINE_LOG(LogLevel::Warning,
+				"Ignoring unknown trailing TMAT extension in " << path);
+			return true;
+		}
+		if(extensionHeader.payloadSize != sizeof(VirtualGeometryMaterialExtension)
+			|| remainingBytes < sizeof(extensionHeader) + extensionHeader.payloadSize)
+		{
+			TERRAENGINE_LOG(LogLevel::Error,
+				"TMVG extension size is invalid in " << path);
+			return false;
+		}
+
+		VirtualGeometryMaterialExtension parsed{};
+		std::memcpy(&parsed,
+			fileBytes.data() + knownPayloadEnd + sizeof(extensionHeader),
+			sizeof(parsed));
+		if(!IsValidVirtualGeometryMaterialExtension(parsed))
+		{
+			TERRAENGINE_LOG(LogLevel::Error,
+				"TMVG extension is invalid in " << path);
+			return false;
+		}
+
+		extension = parsed;
+		return true;
+	}
+
 	// Read and validate a TMAT file. This function only performs disk I/O and
 	// buffer parsing; cache management lives in ResourceManager so the same
 	// loader can be reused by synchronous and asynchronous callers.
@@ -121,6 +177,28 @@ namespace
 			}
 
 			material->floats = std::span<const FloatParameter>(reinterpret_cast<const FloatParameter*>(payload + floatOffset), header.floatParameterCount);
+		}
+
+		// The legacy header and array bounds above define the first safe byte for
+		// an optional extension. A v1 material without extra bytes therefore has
+		// no virtual-geometry policy rather than an implied one.
+		std::size_t knownPayloadEnd = header.headerSize;
+		if(header.textureCount > 0)
+		{
+			knownPayloadEnd = std::max(knownPayloadEnd,
+				static_cast<std::size_t>(header.textureArrayOffset)
+					+ static_cast<std::size_t>(header.textureCount) * sizeof(TextureBinding));
+		}
+		if(header.floatParameterCount > 0)
+		{
+			knownPayloadEnd = std::max(knownPayloadEnd,
+				static_cast<std::size_t>(header.floatParameterOffset)
+					+ static_cast<std::size_t>(header.floatParameterCount) * sizeof(FloatParameter));
+		}
+		if(!LoadVirtualGeometryMaterialExtension(resolvedPath, fileBytes,
+			knownPayloadEnd, material->virtualGeometryExtension))
+		{
+			return nullptr;
 		}
 
 		MaterialRuntimeContract contract = ResolveMaterialRuntimeContract(material->header, material->textures);

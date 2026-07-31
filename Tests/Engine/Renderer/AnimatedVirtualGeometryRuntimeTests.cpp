@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <unordered_set>
 
 namespace TerraEngine::Tests {
 
@@ -48,10 +49,13 @@ namespace TerraEngine::Tests {
 				MakeRuntimeUuid(1u), 5u, pageId, 10u + pageId, 12u,
 				kAnimatedGeometryAbiVersion
 			};
+			demand.key.page.codecProfile = 1u;
+			demand.key.page.codecVersion = 1u;
 			demand.key.deformation = {
 				20u, 21u, 22u, 23u, 24u, 5u, 25u, 26u
 			};
 			demand.key.inputLayoutVersion = kAnimatedGeometryAbiVersion;
+			demand.key.animationLodVersion = kAnimatedGeometryAbiVersion;
 			demand.sourceRecordIndex = 3u;
 			demand.vertexCount = 64u;
 			demand.meshletCount = 2u;
@@ -532,6 +536,76 @@ namespace TerraEngine::Tests {
 				"A shadow-only page should carry only the shadow view bit.");
 		});
 
+		registry.Add("AnimatedVirtualGeometry.Runtime.VisibleOwnerFallbackPreservesIndependentCrowdDemands", [](TestContext& context)
+		{
+			using namespace TerraEngine::Renderer;
+			constexpr std::size_t ownerCount = 1000u;
+			RenderFrameSnapshot snapshot;
+			snapshot.frameId = 77u;
+			snapshot.renderables.reserve(ownerCount);
+			snapshot.animatedGeometryPageDemands.reserve(ownerCount);
+
+			VirtualGeometryViewSelectionState captureView;
+			captureView.draws.reserve(ownerCount);
+			for(std::size_t ownerIndex = 0u;
+				ownerIndex < ownerCount;
+				++ownerIndex)
+			{
+				TerraEngine::UUID objectId{};
+				const std::uint16_t objectOrdinal =
+					static_cast<std::uint16_t>(ownerIndex + 1u);
+				objectId[objectId.size() - 2u] =
+					static_cast<std::uint8_t>(objectOrdinal >> 8u);
+				objectId.back() =
+					static_cast<std::uint8_t>(objectOrdinal);
+				RenderFrameRenderableRecord renderable;
+				renderable.objectId = objectId;
+				renderable.animation.stableInstanceId =
+					1000u + ownerIndex;
+				snapshot.renderables.push_back(renderable);
+
+				DeformationPageDemand demand =
+					MakeRuntimeDemand(2u, 0u);
+				demand.key.deformation.stableInstanceId =
+					renderable.animation.stableInstanceId;
+				snapshot.animatedGeometryPageDemands.push_back(demand);
+
+				VirtualGeometryViewDrawRecord draw;
+				draw.objectId = objectId;
+				draw.range.virtualGeometryActive = true;
+				draw.range.meshletCount = 64u;
+				draw.range.selectedClusterCount = 0u;
+				draw.range.payloadSource =
+					VirtualGeometryPagePayloadSource::Unknown;
+				captureView.draws.push_back(draw);
+			}
+			snapshot.virtualGeometryViewSelections.push_back(
+				std::move(captureView));
+
+			const std::vector<DeformationPageDemand> selected =
+				SelectAnimatedGeometryPageDemands(snapshot);
+			context.ExpectEqual<std::size_t>(
+				ownerCount,
+				selected.size(),
+				"A visible complete-owner fallback must retain one validated page demand per independently animated owner.");
+
+			const GpuDeformationPlan plan = BuildGpuDeformationPlan(
+				snapshot.frameId,
+				25u,
+				selected);
+			std::unordered_set<std::uint64_t> stableOwners;
+			for(const DeformationWorkRecord& work : plan.work)
+			{
+				stableOwners.insert(
+					work.key.deformation.stableInstanceId);
+			}
+			context.Expect(
+				plan.IsComplete()
+					&& plan.work.size() == ownerCount
+					&& stableOwners.size() == ownerCount,
+				"The crowd fallback must publish distinct deformation work keys instead of merging or dropping independently animated owners.");
+		});
+
 		registry.Add("AnimatedVirtualGeometry.Runtime.MillionDecisionExtremePoseVisibilityHasNoFalseRejections", [](TestContext& context)
 		{
 			using namespace TerraEngine::Renderer;
@@ -601,6 +675,33 @@ namespace TerraEngine::Tests {
 				0u,
 				falseRejections,
 				"One million extreme-pose/morph half-space comparisons must never reject visible deformed geometry.");
+		});
+		registry.Add("AnimatedVirtualGeometry.Runtime.FenceRetirementPreservesLkg", [](TestContext& context)
+		{
+			using namespace TerraEngine::Renderer;
+			DeformedPagePublication publication{};
+			publication.publicationGeneration = 2u;
+			publication.staticAllocationId = 1u;
+			publication.currentAllocationId = 2u;
+			publication.previousAllocationId = 3u;
+			publication.boundsAllocationId = 4u;
+			publication.completionFence = 9u;
+			publication.geometryValid = publication.boundsValid = publication.refinementValid = true;
+			publication.key.page.meshPayloadGeneration = 1u;
+			publication.key.page.meshId = UUID{ 1u, 2u };
+			publication.key.page.pageContentGeneration = 1u;
+			publication.key.page.residencyGeneration = 1u;
+			publication.key.page.pageId = 1u;
+			publication.key.page.codecProfile = 1u;
+			publication.key.page.codecVersion = 1u;
+			publication.key.page.layoutVersion = kAnimatedGeometryAbiVersion;
+			publication.key.deformation = { 1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u };
+			publication.key.inputLayoutVersion = kAnimatedGeometryAbiVersion;
+			publication.key.animationLodVersion = kAnimatedGeometryAbiVersion;
+			DeformedPageRetirementQueue queue;
+			queue.Enqueue(publication);
+			context.Expect(queue.PendingCount() == 1u && queue.RetireCompleted(8u).empty(), "Retirement waits for the completion fence.");
+			context.Expect(queue.RetireCompleted(9u).size() == 1u && queue.PendingCount() == 0u, "Completed fences retire the prior allocation atomically.");
 		});
 	}
 

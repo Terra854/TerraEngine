@@ -1,10 +1,12 @@
 #include "RenderFrameSnapshot.h"
 #include "RenderDiagnostics.h"
 
+#include <algorithm>
 #include <cmath>
 #include <functional>
 #include <map>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace TerraEngine::Renderer {
@@ -1241,6 +1243,26 @@ namespace TerraEngine::Renderer {
 
 		using SelectedPageKey = std::pair<std::uint64_t, std::uint32_t>;
 		std::map<SelectedPageKey, std::uint64_t> selectedViewMasks;
+		std::unordered_map<std::uint64_t, std::unordered_set<std::uint32_t>>
+			demandPagesByOwner;
+		demandPagesByOwner.reserve(
+			snapshot.animatedGeometryPageDemands.size());
+		for(const DeformationPageDemand& demand :
+			snapshot.animatedGeometryPageDemands)
+		{
+			demandPagesByOwner[demand.key.deformation.stableInstanceId].insert(
+				demand.key.page.pageId);
+		}
+
+		// A page-local GPU packet is the preferred visibility proof. Some
+		// protected fallback routes deliberately submit the complete embedded
+		// owner mesh instead, so they have no packet page that can be joined to
+		// the independently validated animated-page directory. Preserve a
+		// separate owner-wide view mask for that conservative route rather than
+		// dropping every deformation demand for a visibly submitted animator.
+		std::unordered_map<std::uint64_t, std::uint64_t>
+			ownerFallbackViewMasks;
+		ownerFallbackViewMasks.reserve(stableInstances.size());
 		for(std::size_t viewIndex = 0u;
 			viewIndex < snapshot.virtualGeometryViewSelections.size();
 			++viewIndex)
@@ -1252,6 +1274,35 @@ namespace TerraEngine::Renderer {
 				std::uint64_t{1u} << std::min<std::size_t>(viewIndex, 63u);
 			const VirtualGeometryViewSelectionState& view =
 				snapshot.virtualGeometryViewSelections[viewIndex];
+			std::unordered_set<std::uint64_t> visibleOwners;
+			visibleOwners.reserve(view.draws.size());
+			std::unordered_set<std::uint64_t> ownersWithMatchingPagePackets;
+			ownersWithMatchingPagePackets.reserve(view.gpuPacketRecords.size());
+			for(const VirtualGeometryViewDrawRecord& draw : view.draws)
+			{
+				const auto stableInstance =
+					stableInstances.find(draw.objectId);
+				if(stableInstance == stableInstances.end()
+					|| draw.range.meshletCount == 0u
+					|| (!draw.range.virtualGeometryActive
+						&& !draw.range.failOpen))
+				{
+					continue;
+				}
+				visibleOwners.insert(stableInstance->second);
+				const bool completeOwnerPayload =
+					draw.range.payloadSource
+						== VirtualGeometryPagePayloadSource::EmbeddedMeshPayload
+					|| draw.range.payloadSource
+						== VirtualGeometryPagePayloadSource::
+							ConservativeEmbeddedFallback
+					|| draw.range.selectedClusterCount == 0u;
+				if(completeOwnerPayload)
+				{
+					ownerFallbackViewMasks[stableInstance->second] |=
+						viewMask;
+				}
+			}
 			for(const GpuVirtualGeometryPacketRecord& packet :
 				view.gpuPacketRecords)
 			{
@@ -1262,7 +1313,25 @@ namespace TerraEngine::Renderer {
 						== VirtualGeometryPagePayloadSource::ResidentFallbackPayload;
 				const auto stableInstance =
 					stableInstances.find(packet.objectId);
-				if(!residentPage || stableInstance == stableInstances.end())
+				if(stableInstance == stableInstances.end())
+				{
+					continue;
+				}
+				if(packet.payloadSource
+						== VirtualGeometryPagePayloadSource::EmbeddedMeshPayload
+					|| packet.payloadSource
+						== VirtualGeometryPagePayloadSource::
+							ConservativeEmbeddedFallback)
+				{
+					ownerFallbackViewMasks[stableInstance->second] |=
+						viewMask;
+					continue;
+				}
+				const auto demandedPages =
+					demandPagesByOwner.find(stableInstance->second);
+				if(!residentPage
+					|| demandedPages == demandPagesByOwner.end()
+					|| !demandedPages->second.contains(packet.pageId))
 				{
 					continue;
 				}
@@ -1274,6 +1343,19 @@ namespace TerraEngine::Renderer {
 					stableInstance->second,
 					packet.pageId
 				}] |= viewMask;
+				ownersWithMatchingPagePackets.insert(
+					stableInstance->second);
+			}
+			for(const std::uint64_t stableInstanceId : visibleOwners)
+			{
+				if(!ownersWithMatchingPagePackets.contains(stableInstanceId))
+				{
+					// An unmatched visible draw is a complete-owner fail-open
+					// submission. Selecting all of that owner's validated AVPD
+					// pages is conservative and keeps owner identity intact; it
+					// never aliases work between independently animated clones.
+					ownerFallbackViewMasks[stableInstanceId] |= viewMask;
+				}
 			}
 		}
 
@@ -1288,12 +1370,21 @@ namespace TerraEngine::Renderer {
 				demand.key.deformation.stableInstanceId,
 				demand.key.page.pageId
 			});
-			if(selected == selectedViewMasks.end())
+			const auto ownerFallback = ownerFallbackViewMasks.find(
+				demand.key.deformation.stableInstanceId);
+			const std::uint64_t requestedViewMask =
+				(selected != selectedViewMasks.end()
+					? selected->second
+					: 0u)
+				| (ownerFallback != ownerFallbackViewMasks.end()
+					? ownerFallback->second
+					: 0u);
+			if(requestedViewMask == 0u)
 			{
 				continue;
 			}
 			DeformationPageDemand selectedDemand = demand;
-			selectedDemand.requestedViewMask = selected->second;
+			selectedDemand.requestedViewMask = requestedViewMask;
 			selectedDemands.push_back(std::move(selectedDemand));
 		}
 		return selectedDemands;
@@ -1660,6 +1751,7 @@ namespace TerraEngine::Renderer {
 					snapshot.animatedGeometryPageDemands.size());
 			if(snapshot.animatedGeometryPageDemands.empty())
 			{
+				viewDiagnostics.animatedBoundsSource = "NoAnimatedPageWork";
 				return;
 			}
 			const std::uint64_t rendererGeneration =
@@ -1689,10 +1781,36 @@ namespace TerraEngine::Renderer {
 					viewDiagnostics.deformationCurrentBytes
 						+ viewDiagnostics.deformationHistoryBytes
 						+ viewDiagnostics.deformationBoundsBytes;
+				bool everyWorkRecordCanReuseHistory = true;
+				for(const DeformationWorkRecord& work : deformation.work)
+				{
+					if(std::find(viewDiagnostics.animatedAnimationLods.begin(),
+						viewDiagnostics.animatedAnimationLods.end(),
+						work.key.animationLod)
+						== viewDiagnostics.animatedAnimationLods.end())
+					{
+						viewDiagnostics.animatedAnimationLods.push_back(
+							work.key.animationLod);
+					}
+					everyWorkRecordCanReuseHistory =
+						everyWorkRecordCanReuseHistory && work.historyValid;
+				}
+				std::sort(viewDiagnostics.animatedAnimationLods.begin(),
+					viewDiagnostics.animatedAnimationLods.end());
+				// Compatible demands are merged into one dispatch and reported by
+				// animatedReuseCount. Do not double-count that sharing as skipped work.
+				viewDiagnostics.animatedSkippedWorkCount = 0u;
+				viewDiagnostics.animatedBoundsSource = everyWorkRecordCanReuseHistory
+					? "PlannedCurrentAndHistoryDynamicBounds"
+					: "PlannedCurrentGenerationDynamicBounds";
 				return;
 			}
 			viewDiagnostics.animatedFallbackCount =
 				viewDiagnostics.animatedPageDemandCount;
+			viewDiagnostics.animatedSkippedWorkCount =
+				viewDiagnostics.animatedPageDemandCount;
+			viewDiagnostics.animatedBoundsSource =
+				"ConservativeOwnerEnvelopeFallback";
 			viewDiagnostics.animatedFallbackReason =
 				deformation.rejectionReason;
 		};

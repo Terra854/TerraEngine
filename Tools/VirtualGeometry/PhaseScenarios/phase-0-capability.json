@@ -1,0 +1,12 @@
+{
+	"schemaVersion": 2,
+	"phase": 0,
+	"id": "phase-0",
+	"title": "Capability truth and immutable baseline",
+	"requiredTools": [],
+	"operations": [],
+	"captures": [],
+	"requiredArtifacts": [],
+	"releaseGates": ["capability-tests", "baseline-capture"],
+	"unavailablePolicy": "fail-closed"
+}

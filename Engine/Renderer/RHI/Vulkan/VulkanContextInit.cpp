@@ -251,6 +251,197 @@ void VulkanContext::Impl::DestroyVulkanAnimationComputePipelines()
 	animationComputePipelines = {};
 }
 
+	// All three compute stages share one explicit descriptor ABI. Generated
+	// arguments are still not consumed by graphics, but their compute command is
+	// independently measured and can fail open without affecting CPU draws.
+bool VulkanContext::Impl::EnsureVulkanVirtualGeometryExecutorPipeline()
+{
+	if(virtualGeometryExecutorPipelines.layout != VK_NULL_HANDLE
+		&& virtualGeometryExecutorPipelines.compaction != VK_NULL_HANDLE
+		&& virtualGeometryExecutorPipelines.traversal != VK_NULL_HANDLE
+		&& virtualGeometryExecutorPipelines.indirectGeneration != VK_NULL_HANDLE
+		&& virtualGeometryExecutorDescriptorSetLayout != VK_NULL_HANDLE) {
+		virtualGeometryExecutorUnavailableReason.clear();
+		return true;
+	}
+	if(device == VK_NULL_HANDLE || descriptorPool == VK_NULL_HANDLE) {
+		virtualGeometryExecutorUnavailableReason = "Vulkan device or descriptor pool is unavailable.";
+		return false;
+	}
+
+	DestroyVulkanVirtualGeometryExecutorPipeline();
+	std::array<VkDescriptorSetLayoutBinding, 7> bindings{};
+	for(std::uint32_t binding = 0u; binding < bindings.size(); ++binding) {
+		bindings[binding].binding = binding;
+		bindings[binding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		bindings[binding].descriptorCount = 1u;
+		bindings[binding].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	}
+	VkDescriptorSetLayoutCreateInfo setLayoutInfo{};
+	setLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+	setLayoutInfo.bindingCount = static_cast<std::uint32_t>(bindings.size());
+	setLayoutInfo.pBindings = bindings.data();
+	if(vkCreateDescriptorSetLayout(device, &setLayoutInfo, nullptr, &virtualGeometryExecutorDescriptorSetLayout) != VK_SUCCESS) {
+		virtualGeometryExecutorUnavailableReason = "Could not create the virtual-geometry compaction descriptor layout.";
+		DestroyVulkanVirtualGeometryExecutorPipeline();
+		return false;
+	}
+
+	const VkPushConstantRange pushRange{
+		VK_SHADER_STAGE_COMPUTE_BIT,
+		0u,
+		static_cast<std::uint32_t>(sizeof(TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryCompactionPushConstants)) };
+	VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+	pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+	pipelineLayoutInfo.setLayoutCount = 1u;
+	pipelineLayoutInfo.pSetLayouts = &virtualGeometryExecutorDescriptorSetLayout;
+	pipelineLayoutInfo.pushConstantRangeCount = 1u;
+	pipelineLayoutInfo.pPushConstantRanges = &pushRange;
+	if(vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &virtualGeometryExecutorPipelines.layout) != VK_SUCCESS) {
+		virtualGeometryExecutorUnavailableReason = "Could not create the virtual-geometry compaction pipeline layout.";
+		DestroyVulkanVirtualGeometryExecutorPipeline();
+		return false;
+	}
+
+	const auto createPipeline = [this](const char* shaderPath, VkPipeline& pipeline) {
+		std::vector<std::uint8_t> shaderBytes;
+		try { shaderBytes = ResourceManager::Instance().ReadFileBytes(ResourceManager::Instance().ResolveEngineAssetPath(shaderPath)); }
+		catch(const std::exception&) { return false; }
+		if(shaderBytes.empty() || shaderBytes.size() % sizeof(std::uint32_t) != 0u) return false;
+		VkShaderModuleCreateInfo moduleInfo{ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+		moduleInfo.codeSize = shaderBytes.size(); moduleInfo.pCode = reinterpret_cast<const std::uint32_t*>(shaderBytes.data());
+		VkShaderModule module = VK_NULL_HANDLE;
+		if(vkCreateShaderModule(device, &moduleInfo, nullptr, &module) != VK_SUCCESS) return false;
+		VkPipelineShaderStageCreateInfo shaderStage{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
+		shaderStage.stage = VK_SHADER_STAGE_COMPUTE_BIT; shaderStage.module = module; shaderStage.pName = "main";
+		VkComputePipelineCreateInfo pipelineInfo{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+		pipelineInfo.stage = shaderStage; pipelineInfo.layout = virtualGeometryExecutorPipelines.layout;
+		const bool created = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1u, &pipelineInfo, nullptr, &pipeline) == VK_SUCCESS;
+		vkDestroyShaderModule(device, module, nullptr); return created;
+	};
+	if(!createPipeline("Shaders/VirtualGeometry/VirtualGeometryTraversal.comp.spv", virtualGeometryExecutorPipelines.traversal)
+		|| !createPipeline("Shaders/VirtualGeometry/VirtualGeometryPacketCompaction.comp.spv", virtualGeometryExecutorPipelines.compaction)
+		|| !createPipeline("Shaders/VirtualGeometry/VirtualGeometryIndirectArguments.comp.spv", virtualGeometryExecutorPipelines.indirectGeneration)) {
+		virtualGeometryExecutorUnavailableReason = "One or more virtual-geometry traversal, compaction, or indirect SPIR-V pipelines are unavailable.";
+		DestroyVulkanVirtualGeometryExecutorPipeline();
+		return false;
+	}
+	virtualGeometryExecutorUnavailableReason.clear();
+	return true;
+}
+
+void VulkanContext::Impl::DestroyVulkanVirtualGeometryExecutorPipeline()
+{
+	if(device != VK_NULL_HANDLE) {
+		if(virtualGeometryExecutorPipelines.traversal != VK_NULL_HANDLE) vkDestroyPipeline(device, virtualGeometryExecutorPipelines.traversal, nullptr);
+		if(virtualGeometryExecutorPipelines.compaction != VK_NULL_HANDLE) {
+			vkDestroyPipeline(device, virtualGeometryExecutorPipelines.compaction, nullptr);
+		}
+		if(virtualGeometryExecutorPipelines.indirectGeneration != VK_NULL_HANDLE) vkDestroyPipeline(device, virtualGeometryExecutorPipelines.indirectGeneration, nullptr);
+		if(virtualGeometryExecutorPipelines.layout != VK_NULL_HANDLE) {
+			vkDestroyPipelineLayout(device, virtualGeometryExecutorPipelines.layout, nullptr);
+		}
+		if(virtualGeometryExecutorDescriptorSetLayout != VK_NULL_HANDLE) {
+			vkDestroyDescriptorSetLayout(device, virtualGeometryExecutorDescriptorSetLayout, nullptr);
+		}
+	}
+	virtualGeometryExecutorPipelines = {};
+	virtualGeometryExecutorDescriptorSetLayout = VK_NULL_HANDLE;
+}
+
+// Visibility is a separate compute chain from packet traversal. Its four
+// storage-buffer bindings match the small, pass-local ABI used by the raster,
+// resolve, and shading-bin shader assets.
+bool VulkanContext::Impl::EnsureVulkanVirtualGeometryVisibilityPipelines()
+{
+	if(virtualGeometryVisibilityPipelines.layout != VK_NULL_HANDLE
+		&& virtualGeometryVisibilityPipelines.computeRaster != VK_NULL_HANDLE
+		&& virtualGeometryVisibilityPipelines.visibilityResolve != VK_NULL_HANDLE
+		&& virtualGeometryVisibilityPipelines.shadingBins != VK_NULL_HANDLE
+		&& virtualGeometryVisibilityDescriptorSetLayout != VK_NULL_HANDLE) {
+		virtualGeometryVisibilityUnavailableReason.clear();
+		return true;
+	}
+	if(device == VK_NULL_HANDLE || descriptorPool == VK_NULL_HANDLE) {
+		virtualGeometryVisibilityUnavailableReason = "Vulkan device or descriptor pool is unavailable.";
+		return false;
+	}
+
+	DestroyVulkanVirtualGeometryVisibilityPipelines();
+	std::array<VkDescriptorSetLayoutBinding, 4> bindings{};
+	for(std::uint32_t binding = 0u; binding < bindings.size(); ++binding) {
+		bindings[binding].binding = binding;
+		bindings[binding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		bindings[binding].descriptorCount = 1u;
+		bindings[binding].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	}
+	VkDescriptorSetLayoutCreateInfo setLayoutInfo{};
+	setLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+	setLayoutInfo.bindingCount = static_cast<std::uint32_t>(bindings.size());
+	setLayoutInfo.pBindings = bindings.data();
+	if(vkCreateDescriptorSetLayout(device, &setLayoutInfo, nullptr, &virtualGeometryVisibilityDescriptorSetLayout) != VK_SUCCESS) {
+		virtualGeometryVisibilityUnavailableReason = "Could not create the virtual-geometry visibility descriptor layout.";
+		return false;
+	}
+	// Compute raster additionally receives explicit target width/height. Resolve
+	// and shading bins use the first 16 bytes of the same compatible range.
+	const VkPushConstantRange pushRange{ VK_SHADER_STAGE_COMPUTE_BIT, 0u, 24u };
+	VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+	pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+	pipelineLayoutInfo.setLayoutCount = 1u;
+	pipelineLayoutInfo.pSetLayouts = &virtualGeometryVisibilityDescriptorSetLayout;
+	pipelineLayoutInfo.pushConstantRangeCount = 1u;
+	pipelineLayoutInfo.pPushConstantRanges = &pushRange;
+	if(vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &virtualGeometryVisibilityPipelines.layout) != VK_SUCCESS) {
+		virtualGeometryVisibilityUnavailableReason = "Could not create the virtual-geometry visibility pipeline layout.";
+		DestroyVulkanVirtualGeometryVisibilityPipelines();
+		return false;
+	}
+	const auto createPipeline = [this](const char* shaderPath, VkPipeline& pipeline) {
+		std::vector<std::uint8_t> shaderBytes;
+		try { shaderBytes = ResourceManager::Instance().ReadFileBytes(ResourceManager::Instance().ResolveEngineAssetPath(shaderPath)); }
+		catch(const std::exception&) { return false; }
+		if(shaderBytes.empty() || shaderBytes.size() % sizeof(std::uint32_t) != 0u) return false;
+		VkShaderModuleCreateInfo moduleInfo{ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+		moduleInfo.codeSize = shaderBytes.size();
+		moduleInfo.pCode = reinterpret_cast<const std::uint32_t*>(shaderBytes.data());
+		VkShaderModule module = VK_NULL_HANDLE;
+		if(vkCreateShaderModule(device, &moduleInfo, nullptr, &module) != VK_SUCCESS) return false;
+		VkPipelineShaderStageCreateInfo shaderStage{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
+		shaderStage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+		shaderStage.module = module;
+		shaderStage.pName = "main";
+		VkComputePipelineCreateInfo pipelineInfo{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+		pipelineInfo.stage = shaderStage;
+		pipelineInfo.layout = virtualGeometryVisibilityPipelines.layout;
+		const bool created = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1u, &pipelineInfo, nullptr, &pipeline) == VK_SUCCESS;
+		vkDestroyShaderModule(device, module, nullptr);
+		return created;
+	};
+	if(!createPipeline("Shaders/VirtualGeometry/VirtualGeometryComputeRaster.comp.spv", virtualGeometryVisibilityPipelines.computeRaster)
+		|| !createPipeline("Shaders/VirtualGeometry/VirtualGeometryVisibilityResolve.comp.spv", virtualGeometryVisibilityPipelines.visibilityResolve)
+		|| !createPipeline("Shaders/VirtualGeometry/VirtualGeometryShadingBins.comp.spv", virtualGeometryVisibilityPipelines.shadingBins)) {
+		virtualGeometryVisibilityUnavailableReason = "One or more virtual-geometry visibility SPIR-V pipelines are unavailable.";
+		DestroyVulkanVirtualGeometryVisibilityPipelines();
+		return false;
+	}
+	virtualGeometryVisibilityUnavailableReason.clear();
+	return true;
+}
+
+void VulkanContext::Impl::DestroyVulkanVirtualGeometryVisibilityPipelines()
+{
+	if(device != VK_NULL_HANDLE) {
+		if(virtualGeometryVisibilityPipelines.computeRaster != VK_NULL_HANDLE) vkDestroyPipeline(device, virtualGeometryVisibilityPipelines.computeRaster, nullptr);
+		if(virtualGeometryVisibilityPipelines.visibilityResolve != VK_NULL_HANDLE) vkDestroyPipeline(device, virtualGeometryVisibilityPipelines.visibilityResolve, nullptr);
+		if(virtualGeometryVisibilityPipelines.shadingBins != VK_NULL_HANDLE) vkDestroyPipeline(device, virtualGeometryVisibilityPipelines.shadingBins, nullptr);
+		if(virtualGeometryVisibilityPipelines.layout != VK_NULL_HANDLE) vkDestroyPipelineLayout(device, virtualGeometryVisibilityPipelines.layout, nullptr);
+		if(virtualGeometryVisibilityDescriptorSetLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device, virtualGeometryVisibilityDescriptorSetLayout, nullptr);
+	}
+	virtualGeometryVisibilityPipelines = {};
+	virtualGeometryVisibilityDescriptorSetLayout = VK_NULL_HANDLE;
+}
+
 bool VulkanContext::Impl::EnsureVulkanDeformationComputePipelines()
 {
 	using Stage = TerraEngine::Renderer::Vulkan::
@@ -267,9 +458,16 @@ bool VulkanContext::Impl::EnsureVulkanDeformationComputePipelines()
 	{
 		return true;
 	}
+	// Deformation shaders occupy descriptor set 2, so Vulkan requires valid
+	// layouts for sets 0 and 1 even when CPU animation owns the palette and no
+	// GPU animation dispatch exists. Create the structural animation layout here
+	// instead of relying on an earlier GPU-animation frame to have done so.
+	const bool animationLayoutReady =
+		animationDescriptorSetLayout != VK_NULL_HANDLE
+		|| EnsureVulkanAnimationDescriptorSets();
 	if(device == VK_NULL_HANDLE
 		|| globalDescriptorSetLayout == VK_NULL_HANDLE
-		|| animationDescriptorSetLayout == VK_NULL_HANDLE
+		|| !animationLayoutReady
 		|| deformationDescriptorSetLayout == VK_NULL_HANDLE)
 	{
 		return false;
@@ -459,6 +657,12 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 			? "Vulkan image readback was canceled because the device was lost."
 			: "Vulkan image readback was canceled during renderer shutdown.",
 		true);
+	for (VulkanConventionalVisibilityIdentityReadbackRequest& request :
+		inFlightConventionalVisibilityIdentityReadbacks) {
+		DestroyConventionalVisibilityIdentityReadbackRequestResources(request);
+	}
+	inFlightConventionalVisibilityIdentityReadbacks.clear();
+	completedConventionalVisibilityIdentityReadbacks.clear();
 
 	DestroyAmbientOcclusionResources();
 	DestroyEnvironmentLightingResources();
@@ -544,6 +748,19 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 		DestroyVirtualGeometryGpuPacketResources(resources);
 	}
 	retiredVirtualGeometryGpuPacketResources.clear();
+	for (PersistentVirtualGeometryPageResource& page : persistentVirtualGeometryPages)
+	{
+		DestroyBufferImmediate(page.buffer);
+		if (page.bindlessIndex != INVALID_BINDLESS_BUFFER_INDEX)
+		{
+			freeBufferIndices.push_back(page.bindlessIndex);
+		}
+	}
+	persistentVirtualGeometryPages.clear();
+	for (auto& candidates : pendingVirtualGeometryPublicationsByFrame)
+	{
+		candidates.clear();
+	}
 	activeVirtualGeometryPacketBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 	activeVirtualGeometryBatchBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 	activeVirtualGeometryCompactedPacketBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
@@ -594,6 +811,8 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 	deformationDescriptorSetLayout = VK_NULL_HANDLE;
 
 	DestroyVulkanAnimationComputePipelines();
+	DestroyVulkanVirtualGeometryExecutorPipeline();
+	DestroyVulkanVirtualGeometryVisibilityPipelines();
 	for (VulkanAnimationFrameResources& resources : animationFrameResources) {
 		for (VulkanBuffer& buffer : resources.buffers) {
 			DestroyBufferImmediate(buffer);
@@ -1288,6 +1507,9 @@ bool VulkanContext::Impl::CreateLogicalDevice() {
 
 	VkPhysicalDeviceFeatures deviceFeatures{};
 	deviceFeatures.samplerAnisotropy = VK_TRUE;
+	// Conventional visibility has a blended target0 beside a typed identity
+	// target, so the selected device must expose and enable independent blending.
+	deviceFeatures.independentBlend = VK_TRUE;
 
 	// Enable Descriptor Indexing features
 	vulkan12Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
@@ -1607,6 +1829,88 @@ bool VulkanContext::Impl::CreateDepthResources() {
 	return true;
 }
 
+// VulkanContext::Impl::UsesConventionalVisibilityAttachments determines whether
+// a pass owns the paired color/identity attachment contract. Shadow and editor
+// presentation passes deliberately remain target0-only.
+bool VulkanContext::Impl::UsesConventionalVisibilityAttachments(VkRenderPass pass) const
+{
+	return pass != VK_NULL_HANDLE
+		&& (pass == offscreenRenderPass || (!editorMode && pass == renderPass));
+}
+
+// VulkanContext::Impl::CreateConventionalVisibilityIdentityAttachment creates
+// the integer attachment that matches Default.ConventionalVisibilityIdentity.
+bool VulkanContext::Impl::CreateConventionalVisibilityIdentityAttachment(
+	VkExtent2D extent, ConventionalVisibilityIdentityAttachment& attachment)
+{
+	if (extent.width == 0u || extent.height == 0u) {
+		TERRAENGINE_LOG(LogLevel::Error,
+			"Cannot create a conventional visibility identity attachment with a zero extent.");
+		return false;
+	}
+	VkFormatProperties formatProperties{};
+	vkGetPhysicalDeviceFormatProperties(physicalDevice,
+		VK_FORMAT_R32G32B32A32_UINT, &formatProperties);
+	const VkFormatFeatureFlags requiredFeatures =
+		VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
+	if ((formatProperties.optimalTilingFeatures & requiredFeatures) != requiredFeatures) {
+		// There is no alternate identity representation in the conventional ABI:
+		// fail creation rather than silently pairing the identity shader with an
+		// incompatible attachment format.
+		TERRAENGINE_LOG(LogLevel::Error,
+			"VK_FORMAT_R32G32B32A32_UINT does not support the required identity attachment features.");
+		return false;
+	}
+
+	VkImageCreateInfo imageInfo{};
+	imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	imageInfo.imageType = VK_IMAGE_TYPE_2D;
+	imageInfo.extent = { extent.width, extent.height, 1u };
+	imageInfo.mipLevels = 1u;
+	imageInfo.arrayLayers = 1u;
+	imageInfo.format = VK_FORMAT_R32G32B32A32_UINT;
+	imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+	imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	imageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+	imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+	imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+	VmaAllocationCreateInfo allocationInfo{};
+	allocationInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+	if (vmaCreateImage(allocator, &imageInfo, &allocationInfo,
+		&attachment.image, &attachment.allocation, nullptr) != VK_SUCCESS) {
+		TERRAENGINE_LOG(LogLevel::Error,
+			"Failed to create a conventional visibility identity image.");
+		attachment = {};
+		return false;
+	}
+	vmaSetAllocationName(allocator, attachment.allocation,
+		"Conventional Visibility Identity Attachment");
+	attachment.view = CreateImageView(attachment.image,
+		VK_FORMAT_R32G32B32A32_UINT, VK_IMAGE_ASPECT_COLOR_BIT);
+	if (attachment.view == VK_NULL_HANDLE) {
+		TERRAENGINE_LOG(LogLevel::Error,
+			"Failed to create a conventional visibility identity image view.");
+		DestroyConventionalVisibilityIdentityAttachment(attachment);
+		return false;
+	}
+	return true;
+}
+
+// VulkanContext::Impl::DestroyConventionalVisibilityIdentityAttachment releases
+// the view before its VMA-owned image, preserving Vulkan object lifetime rules.
+void VulkanContext::Impl::DestroyConventionalVisibilityIdentityAttachment(
+	ConventionalVisibilityIdentityAttachment& attachment)
+{
+	if (device != VK_NULL_HANDLE && attachment.view != VK_NULL_HANDLE) {
+		vkDestroyImageView(device, attachment.view, nullptr);
+	}
+	if (attachment.image != VK_NULL_HANDLE && attachment.allocation != VK_NULL_HANDLE) {
+		vmaDestroyImage(allocator, attachment.image, attachment.allocation);
+	}
+	attachment = {};
+}
+
 // VulkanContext::Impl::CreateRenderPass is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool VulkanContext::Impl::CreateRenderPass() {
 	if (editorMode) {
@@ -1676,6 +1980,24 @@ bool VulkanContext::Impl::CreateRenderPass() {
 		colorAttachmentRef.attachment = 0;
 		colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
+		VkAttachmentDescription2 identityAttachment{};
+		identityAttachment.sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2;
+		identityAttachment.format = VK_FORMAT_R32G32B32A32_UINT;
+		identityAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+		identityAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+		identityAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+		identityAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		identityAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		identityAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		identityAttachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+		VkAttachmentReference2 identityAttachmentRef{};
+		identityAttachmentRef.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2;
+		identityAttachmentRef.attachment = 1;
+		identityAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		const std::array<VkAttachmentReference2, 2> colorAttachmentRefs = {
+			colorAttachmentRef, identityAttachmentRef };
+
 		VkAttachmentDescription2 depthAttachment{};
 		depthAttachment.sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2;
 		depthAttachment.format = depthFormat;
@@ -1692,7 +2014,7 @@ bool VulkanContext::Impl::CreateRenderPass() {
 
 		VkAttachmentReference2 depthAttachmentRef{};
 		depthAttachmentRef.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2;
-		depthAttachmentRef.attachment = 1;
+		depthAttachmentRef.attachment = 2;
 		depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
 		VkAttachmentDescription2 vrsAttachment{};
@@ -1706,7 +2028,7 @@ bool VulkanContext::Impl::CreateRenderPass() {
 
 		VkAttachmentReference2 vrsAttachmentRef{};
 		vrsAttachmentRef.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2;
-		vrsAttachmentRef.attachment = 2;
+		vrsAttachmentRef.attachment = 3;
 		vrsAttachmentRef.layout = VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR;
 
 		VkFragmentShadingRateAttachmentInfoKHR vrsInfo{};
@@ -1717,8 +2039,8 @@ bool VulkanContext::Impl::CreateRenderPass() {
 		VkSubpassDescription2 subpass{};
 		subpass.sType = VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_2;
 		subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-		subpass.colorAttachmentCount = 1;
-		subpass.pColorAttachments = &colorAttachmentRef;
+		subpass.colorAttachmentCount = static_cast<std::uint32_t>(colorAttachmentRefs.size());
+		subpass.pColorAttachments = colorAttachmentRefs.data();
 		subpass.pDepthStencilAttachment = &depthAttachmentRef;
 		subpass.pNext = &vrsInfo;
 
@@ -1731,7 +2053,8 @@ bool VulkanContext::Impl::CreateRenderPass() {
 		dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
 		dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
-		std::array<VkAttachmentDescription2, 3> attachments = {colorAttachment, depthAttachment, vrsAttachment};
+		std::array<VkAttachmentDescription2, 4> attachments = {
+			colorAttachment, identityAttachment, depthAttachment, vrsAttachment};
 		VkRenderPassCreateInfo2 renderPassInfo{};
 		renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO_2;
 		renderPassInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
@@ -1762,6 +2085,22 @@ bool VulkanContext::Impl::CreateRenderPass() {
 		colorAttachmentRef.attachment = 0;
 		colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
+		VkAttachmentDescription identityAttachment{};
+		identityAttachment.format = VK_FORMAT_R32G32B32A32_UINT;
+		identityAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+		identityAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+		identityAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+		identityAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		identityAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		identityAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		identityAttachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+		VkAttachmentReference identityAttachmentRef{};
+		identityAttachmentRef.attachment = 1;
+		identityAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		const std::array<VkAttachmentReference, 2> colorAttachmentRefs = {
+			colorAttachmentRef, identityAttachmentRef };
+
 		VkAttachmentDescription depthAttachment{};
 		depthAttachment.format = depthFormat;
 		depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -1775,13 +2114,13 @@ bool VulkanContext::Impl::CreateRenderPass() {
 		depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
 		VkAttachmentReference depthAttachmentRef{};
-		depthAttachmentRef.attachment = 1;
+		depthAttachmentRef.attachment = 2;
 		depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
 		VkSubpassDescription subpass{};
 		subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-		subpass.colorAttachmentCount = 1;
-		subpass.pColorAttachments = &colorAttachmentRef;
+		subpass.colorAttachmentCount = static_cast<std::uint32_t>(colorAttachmentRefs.size());
+		subpass.pColorAttachments = colorAttachmentRefs.data();
 		subpass.pDepthStencilAttachment = &depthAttachmentRef;
 
 		VkSubpassDependency dependency{};
@@ -1792,7 +2131,8 @@ bool VulkanContext::Impl::CreateRenderPass() {
 		dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
 		dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
-		std::array<VkAttachmentDescription, 2> attachments = {colorAttachment, depthAttachment};
+		std::array<VkAttachmentDescription, 3> attachments = {
+			colorAttachment, identityAttachment, depthAttachment};
 		VkRenderPassCreateInfo renderPassInfo{};
 		renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
 		renderPassInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
@@ -1814,8 +2154,13 @@ bool VulkanContext::Impl::CreateRenderPass() {
 // VulkanContext::Impl::CreateFramebuffers is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool VulkanContext::Impl::CreateFramebuffers() {
 	// Editor presentation is color-only. Runtime framebuffers retain depth and
-	// optional VRS because those attachments are consumed by the game render pass.
+	// optional VRS plus one image-owned integer identity target. Keeping identity
+	// images per swapchain image avoids cross-frame writes to a shared attachment.
 	framebuffers.resize(swapchainImageViews.size());
+	presentationVisibilityIdentities.clear();
+	if (!editorMode) {
+		presentationVisibilityIdentities.resize(swapchainImageViews.size());
+	}
 
 	for (size_t i = 0; i < swapchainImageViews.size(); i++) {
 		std::vector<VkImageView> attachments = {
@@ -1823,6 +2168,15 @@ bool VulkanContext::Impl::CreateFramebuffers() {
 		};
 		if (!editorMode) {
 			attachments.push_back(depthImageView);
+			if (!CreateConventionalVisibilityIdentityAttachment(
+				swapchainExtent, presentationVisibilityIdentities[i])) {
+				TERRAENGINE_LOG(LogLevel::Error,
+					"Failed to create the runtime conventional visibility identity attachment.");
+				return false;
+			}
+			// The render-pass attachment order is color, identity, depth, then VRS.
+			attachments.insert(attachments.begin() + 1,
+				presentationVisibilityIdentities[i].view);
 		}
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -2000,6 +2354,7 @@ VulkanContext::Impl::PresentationResourceBundle VulkanContext::Impl::TakePresent
 	bundle.depthImage = std::exchange(depthImage, VK_NULL_HANDLE);
 	bundle.depthAllocation = std::exchange(depthImageAllocation, VK_NULL_HANDLE);
 	bundle.depthView = std::exchange(depthImageView, VK_NULL_HANDLE);
+	bundle.visibilityIdentities = std::move(presentationVisibilityIdentities);
 	bundle.acquireByFrame = std::move(imageAvailableSemaphores);
 	bundle.editorOffscreenReadyByFrame = std::move(renderFinishedSemaphores);
 	bundle.presentReadyByImage = std::move(uiSemaphores);
@@ -2029,6 +2384,7 @@ void VulkanContext::Impl::RestorePresentationResourceBundle(PresentationResource
 	depthImage = std::exchange(bundle.depthImage, VK_NULL_HANDLE);
 	depthImageAllocation = std::exchange(bundle.depthAllocation, VK_NULL_HANDLE);
 	depthImageView = std::exchange(bundle.depthView, VK_NULL_HANDLE);
+	presentationVisibilityIdentities = std::move(bundle.visibilityIdentities);
 	imageAvailableSemaphores = std::move(bundle.acquireByFrame);
 	renderFinishedSemaphores = std::move(bundle.editorOffscreenReadyByFrame);
 	uiSemaphores = std::move(bundle.presentReadyByImage);
@@ -2054,6 +2410,9 @@ void VulkanContext::Impl::DestroyPresentationResourceBundle(PresentationResource
 	}
 	if (bundle.depthImage != VK_NULL_HANDLE && bundle.depthAllocation != VK_NULL_HANDLE) {
 		vmaDestroyImage(allocator, bundle.depthImage, bundle.depthAllocation);
+	}
+	for (ConventionalVisibilityIdentityAttachment& identity : bundle.visibilityIdentities) {
+		DestroyConventionalVisibilityIdentityAttachment(identity);
 	}
 	bundle = {};
 }
@@ -2482,6 +2841,18 @@ bool VulkanContext::Impl::IsDeviceSuitable(VkPhysicalDevice device) {
 
 	vkGetPhysicalDeviceFeatures2(device, &features2);
 
+	// The conventional visibility pass intentionally gives target0-only content
+	// a masked, non-blended identity slot. Vulkan requires independentBlend when
+	// color attachment blend states differ, so reject unsupported devices early.
+	if (features2.features.independentBlend != VK_TRUE) {
+		VkPhysicalDeviceProperties deviceProperties{};
+		vkGetPhysicalDeviceProperties(device, &deviceProperties);
+		TERRAENGINE_LOG(LogLevel::Warning, "Rejecting Vulkan device '"
+			<< deviceProperties.deviceName
+			<< "': independentBlend is required for the conventional two-target visibility pass.");
+		return false;
+	}
+
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!features12.descriptorIndexing || !features12.runtimeDescriptorArray || 
 		!features12.shaderSampledImageArrayNonUniformIndexing || 
@@ -2662,6 +3033,10 @@ void VulkanContext::Impl::CleanupSwapChain() {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (swapchain) vkDestroySwapchainKHR(device, swapchain, nullptr);
 	}
+	for (ConventionalVisibilityIdentityAttachment& identity : presentationVisibilityIdentities) {
+		DestroyConventionalVisibilityIdentityAttachment(identity);
+	}
+	presentationVisibilityIdentities.clear();
 	framebuffers.clear();
 	swapchainImageViews.clear();
 	swapchainImages.clear();

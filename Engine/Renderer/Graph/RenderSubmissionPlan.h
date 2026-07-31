@@ -5,6 +5,7 @@
 #include "RenderGraph.h"
 #include "RenderWorkPacket.h"
 #include "Renderer/Deformation/GpuDeformationPlan.h"
+#include "Renderer/VirtualGeometry/Selection/VirtualGeometryGpuPlan.h"
 #include "Core/Export.h"
 
 #include <cstdint>
@@ -23,6 +24,10 @@ namespace TerraEngine::Renderer {
 		// Renderer deformation is separate from animation evaluation because its
 		// work set is the union of resident page demands from every render view.
 		std::shared_ptr<const GpuDeformationPlan> deformationWork;
+		// Worker preparation can attach one immutable device-authored geometry
+		// envelope. The backend consumes this plan at its protected command
+		// recording boundary; RenderSystem never hands it mutable scene storage.
+		std::shared_ptr<const VirtualGeometryGpuPlan> virtualGeometryWork;
 		std::vector<RenderResourceState> resourceTransitions;
 		std::vector<RenderQueueReadiness> queueReadiness;
 		std::vector<std::string> fallbacksUsed;
@@ -39,7 +44,8 @@ namespace TerraEngine::Renderer {
 		const std::vector<RenderPassNode>& passes,
 		const RenderWorkPacketPlan& packetPlan,
 		std::uint64_t currentFrameId,
-		std::shared_ptr<const TerraEngine::Animation::GpuAnimationPlan> animationPlan = {});
+		std::shared_ptr<const TerraEngine::Animation::GpuAnimationPlan> animationPlan = {},
+		std::shared_ptr<const VirtualGeometryGpuPlan> virtualGeometryPlan = {});
 
 	TERRAENGINE_API bool ValidateRenderSubmissionPlan(RenderSubmissionPlan& plan, std::uint64_t currentFrameId);
 

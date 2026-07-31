@@ -1,0 +1,40 @@
+{
+	"schemaVersion": 1,
+	"feature": "045-virtual-geometry-alternative",
+	"status": "setup-inventory",
+	"provenance": {
+		"manifestSource": "Tests/Fixtures/VirtualGeometry/hardening-fixtures.json",
+		"fixtureReadme": "Tests/Fixtures/VirtualGeometry/README.md",
+		"binaryPolicy": "No large binary assets are committed by setup; recipes remain reproducible and optional stress assets are manual.",
+		"licensePolicy": "Every future committed asset must record source, license, generator command, and post-processing."
+	},
+	"fixtures": [
+		{"id":"exact-residency-package-children","category":"exact-residency","source":"hardening-fixtures.json","status":"recipe-documented"},
+		{"id":"exact-residency-unavailable-accounting","category":"exact-residency","source":"hardening-fixtures.json","status":"recipe-documented"},
+		{"id":"true-page-residency-owning-mesh-fallback","category":"page-streaming","source":"hardening-fixtures.json","status":"recipe-documented"},
+		{"id":"tiny-mesh-skip","category":"tiny","source":"hardening-fixtures.json","status":"recipe-documented"},
+		{"id":"dense-cluster-selection","category":"dense","source":"hardening-fixtures.json","status":"recipe-documented"},
+		{"id":"thin-hiz-occluder","category":"thin","source":"hardening-fixtures.json","status":"recipe-documented"},
+		{"id":"curved-error-profile","category":"curved","source":"hardening-fixtures.json","status":"recipe-documented"},
+		{"id":"hard-surface-material-bands","category":"materials","source":"hardening-fixtures.json","status":"recipe-documented"},
+		{"id":"multi-material-package","category":"materials","source":"hardening-fixtures.json","status":"recipe-documented"},
+		{"id":"streaming-pressure","category":"page-streaming","source":"hardening-fixtures.json","status":"recipe-documented"},
+		{"id":"page-sourced-resident-payload","category":"page-streaming","source":"hardening-fixtures.json","status":"recipe-documented"},
+		{"id":"page-fallback-only-coverage","category":"page-streaming","source":"hardening-fixtures.json","status":"recipe-documented"},
+		{"id":"page-budget-churn","category":"page-streaming","source":"hardening-fixtures.json","status":"recipe-documented"},
+		{"id":"dense-page-budget-streaming-gate","category":"page-streaming","source":"hardening-fixtures.json","status":"recipe-documented"},
+		{"id":"page-integrity-malformed","category":"page-streaming","source":"hardening-fixtures.json","status":"recipe-documented"},
+		{"id":"multi-view-independence","category":"multi-view","source":"hardening-fixtures.json","status":"recipe-documented"},
+		{"id":"visible-command-reuse-repeated-resources","category":"multi-view","source":"hardening-fixtures.json","status":"recipe-documented"},
+		{"id":"export-runtime-metadata","category":"export","source":"hardening-fixtures.json","status":"recipe-documented"},
+		{"id":"dense-cluster-batching","category":"gpu-driven","source":"hardening-fixtures.json","status":"recipe-documented"},
+		{"id":"runtime-packet-compaction","category":"gpu-driven","source":"hardening-fixtures.json","status":"recipe-documented"},
+		{"id":"gpu-packet-buffer-batching","category":"gpu-driven","source":"hardening-fixtures.json","status":"recipe-documented"},
+		{"id":"gpu-packet-compaction-generated-submit","category":"gpu-driven","source":"hardening-fixtures.json","status":"recipe-documented"},
+		{"id":"shadow-view-virtual-geometry","category":"culling","source":"hardening-fixtures.json","status":"recipe-documented"},
+		{"id":"cone-safety-metadata","category":"culling","source":"hardening-fixtures.json","status":"recipe-documented"}
+	],
+	"optionalManualStress": [
+		{"id":"large-scan-asset","source":"hardening-fixtures.json","status":"optional-manual"}
+	]
+}

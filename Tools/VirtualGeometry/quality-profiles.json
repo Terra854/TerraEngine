@@ -1,0 +1,25 @@
+{
+	"schemaVersion": 1,
+	"feature": "045-virtual-geometry-alternative",
+	"qualityProfiles": [
+		{
+			"id": "reference-default",
+			"description": "Matched reference/accelerated quality settings for baseline comparisons",
+			"resolution": "1920x1080",
+			"msaa": 1,
+			"shadowQuality": "high",
+			"textureQuality": "high",
+			"virtualGeometry": "default",
+			"imageTolerance": {"maxAbsDifference": 2, "maxDifferentPixelsRatio": 0.001}
+		},
+		{
+			"id": "streaming-budget",
+			"description": "Deterministic small-budget profile for page residency pressure",
+			"resolution": "1920x1080",
+			"geometryBudgetBytes": 67108864,
+			"pageSizesKiB": [32, 64, 128],
+			"virtualGeometry": "default",
+			"imageTolerance": {"maxAbsDifference": 2, "maxDifferentPixelsRatio": 0.001}
+		}
+	]
+}

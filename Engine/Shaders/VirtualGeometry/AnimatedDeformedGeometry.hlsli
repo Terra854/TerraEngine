@@ -34,14 +34,13 @@ struct TeAnimatedGraphicsPage
 
 bool TeTryLoadAnimatedGraphicsBridge(
 	uint bridgeBufferIndex,
-	uint groupIndex,
+	uint headerWordOffset,
 	out TeAnimatedGraphicsBridge bridge)
 {
 	bridge = (TeAnimatedGraphicsBridge)0;
 	if(bridgeBufferIndex == TE_ANIMATED_GEOMETRY_INVALID_INDEX
-		|| groupIndex > (0xffffffffu
+		|| headerWordOffset > 0xffffffffu
 			- TE_ANIMATED_GRAPHICS_BRIDGE_HEADER_WORDS)
-			/ TE_ANIMATED_GRAPHICS_BRIDGE_HEADER_WORDS)
 	{
 		return false;
 	}
@@ -49,8 +48,7 @@ bool TeTryLoadAnimatedGraphicsBridge(
 	uint stride;
 	globalBuffers[NonUniformResourceIndex(bridgeBufferIndex)]
 		.GetDimensions(elementCount, stride);
-	const uint header = groupIndex
-		* TE_ANIMATED_GRAPHICS_BRIDGE_HEADER_WORDS;
+	const uint header = headerWordOffset;
 	if(header > elementCount
 		|| TE_ANIMATED_GRAPHICS_BRIDGE_HEADER_WORDS
 			> elementCount - header

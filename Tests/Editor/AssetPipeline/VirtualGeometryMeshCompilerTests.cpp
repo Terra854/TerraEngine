@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <string>
 #include <string_view>
@@ -125,6 +126,28 @@ namespace
 		const TerraEngine::UUID meshId = manager.LoadMesh(output);
 		return manager.GetMesh(meshId);
 	}
+
+	void RemoveAggregateProfileSidecar(const std::filesystem::path& output)
+	{
+		const std::uintmax_t sidecarBytes =
+			sizeof(VirtualGeometryAggregateProfileHeader)
+			+ sizeof(VirtualGeometryAggregateProfileRecord);
+		const std::uintmax_t fileBytes = std::filesystem::file_size(output);
+		if (fileBytes >= sidecarBytes)
+		{
+			std::filesystem::resize_file(output, fileBytes - sidecarBytes);
+		}
+	}
+
+	void CorruptAggregateProfileSidecar(const std::filesystem::path& output)
+	{
+		// The record hash covers this byte. Altering it preserves TEMF geometry
+		// while proving the optional sidecar reader fails safely to legacy data.
+		std::fstream file(output, std::ios::binary | std::ios::in | std::ios::out);
+		file.seekp(-1, std::ios::end);
+		const char corrupted = '\x7f';
+		file.write(&corrupted, 1);
+	}
 }
 
 	void RegisterVirtualGeometryMeshCompilerTests(TestRegistry& registry)
@@ -224,6 +247,43 @@ namespace
 				}
 			}
 			context.Expect(sawParentChildLink, "High-detail fixtures should publish at least one source-coverage parent/child link.");
+		});
+
+		registry.Add("Editor.AssetPipeline.VirtualGeometry.MeshCompiler.AggregateProfileSidecarSupportsCurrentAndLegacyReaders", [](TestContext& context) {
+			// A one-cluster fixture proves the v1 global profile contract without
+			// claiming that one aggregate covers an unrelated multi-root region.
+			const RawMeshFixture fixture = MakeSmallMesh();
+			const std::filesystem::path output = MakeTempOutputPath("AggregateProfileDualReader");
+			MeshCompileReport report{};
+			context.Expect(CompileMeshFromRaw("VirtualGeometry/AggregateProfileDualReader.obj", output, fixture.vertices, fixture.indices, true, &report), "Aggregate profile fixture should compile.");
+
+			Mesh* current = LoadCompiledMeshForInspection(output);
+			context.Expect(current != nullptr, "Current aggregate profile fixture should load.");
+			if (current != nullptr)
+			{
+				context.Expect(current->hasVirtualGeometryAggregateProfile, "Current cooks should publish an aggregate profile.");
+				context.Expect(current->virtualGeometryAggregateProfileProvenance == VirtualGeometryAggregateProfileProvenance::CookedSidecar, "Current reader should prefer the validated VGAP sidecar.");
+				context.Expect(!current->virtualGeometryAggregateProfiles.empty(), "Current VGAP sidecar should publish at least one typed fallback profile.");
+			}
+
+			RemoveAggregateProfileSidecar(output);
+			Mesh* legacy = LoadCompiledMeshForInspection(output);
+			context.Expect(legacy != nullptr, "Legacy TEMF without VGAP should remain readable.");
+			if (legacy != nullptr)
+			{
+				context.Expect(legacy->hasVirtualGeometryAggregateProfile, "Single-root legacy TEMF should derive a safe aggregate fallback.");
+				context.Expect(legacy->virtualGeometryAggregateProfileProvenance == VirtualGeometryAggregateProfileProvenance::LegacyDerived, "Legacy reader should label derived fallback provenance.");
+			}
+
+			context.Expect(CompileMeshFromRaw("VirtualGeometry/AggregateProfileDualReader.obj", output, fixture.vertices, fixture.indices, true, &report), "Malformed sidecar fixture should recook before corruption.");
+			CorruptAggregateProfileSidecar(output);
+			Mesh* malformed = LoadCompiledMeshForInspection(output);
+			context.Expect(malformed != nullptr, "Malformed VGAP must preserve the validated TEMF fallback path.");
+			if (malformed != nullptr)
+			{
+				context.Expect(malformed->virtualGeometryAggregateProfileProvenance == VirtualGeometryAggregateProfileProvenance::LegacyDerived, "Malformed VGAP should never publish partially trusted current profile data.");
+				context.Expect(malformed->virtualGeometryAggregateProfileDiagnostic.find("validation") != std::string::npos, "Malformed VGAP should retain an actionable repair diagnostic.");
+			}
 		});
 
 		registry.Add("Editor.AssetPipeline.VirtualGeometry.MeshCompiler.PerMeshMinimumSourceOverrideCanSkipSmallMeshes", [](TestContext& context) {

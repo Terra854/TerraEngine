@@ -7,6 +7,94 @@
 
 namespace TerraEngine::Renderer::Vulkan {
 
+	std::string GetVulkanVirtualGeometryStageLabel(VirtualGeometryBackendStage stage)
+	{
+		switch(stage)
+		{
+		case VirtualGeometryBackendStage::Traversal: return "Virtual geometry traversal";
+		case VirtualGeometryBackendStage::Compaction: return "Virtual geometry compaction";
+		case VirtualGeometryBackendStage::IndirectGeneration: return "Virtual geometry indirect generation";
+		case VirtualGeometryBackendStage::PageDecode: return "Virtual geometry page decode";
+		case VirtualGeometryBackendStage::HardwareRaster: return "Virtual geometry hardware raster";
+		case VirtualGeometryBackendStage::ComputeRaster: return "Virtual geometry compute raster";
+		case VirtualGeometryBackendStage::VisibilityResolve: return "Virtual geometry visibility resolve";
+		case VirtualGeometryBackendStage::Shading: return "Virtual geometry shading";
+		case VirtualGeometryBackendStage::StreamingUpdate: return "Virtual geometry streaming update";
+		case VirtualGeometryBackendStage::Deformation: return "Virtual geometry deformation";
+		case VirtualGeometryBackendStage::Shadow: return "Virtual geometry shadow";
+		case VirtualGeometryBackendStage::Capture: return "Virtual geometry capture";
+		case VirtualGeometryBackendStage::RayTracing: return "Virtual geometry ray tracing";
+		}
+
+		return "Virtual geometry unknown stage";
+	}
+
+	VulkanVirtualGeometryStageMarker MakeVulkanVirtualGeometryStageMarker(
+		VirtualGeometryBackendStage stage,
+		VirtualGeometryBackendRoute route,
+		bool ownsLiveCommand,
+		bool timestampWritesRecorded)
+	{
+		VulkanVirtualGeometryStageMarker marker;
+		marker.stage = stage;
+		marker.route = route;
+		marker.ownsLiveCommand = ownsLiveCommand;
+		marker.timestampWritesRecorded = timestampWritesRecorded;
+		marker.label = GetVulkanVirtualGeometryStageLabel(stage);
+
+		if(!ownsLiveCommand)
+		{
+			marker.availability = BackendMeasurementAvailability::Unavailable;
+			marker.reason = "No live Vulkan command owns this virtual-geometry stage; CPU-prepared data is not execution evidence.";
+			return marker;
+		}
+
+		if(!timestampWritesRecorded)
+		{
+			marker.availability = BackendMeasurementAvailability::Invalid;
+			marker.reason = "The live Vulkan command did not record both virtual-geometry timestamp boundaries.";
+			return marker;
+		}
+
+		marker.availability = BackendMeasurementAvailability::Pending;
+		marker.reason = "The live Vulkan command is submitted, and its timestamp query is pending delayed readback.";
+		return marker;
+	}
+
+	std::array<VulkanVirtualGeometryStageMarker, kVulkanVirtualGeometryStageCount>
+		CreateVulkanVirtualGeometryStageMarkers()
+	{
+		constexpr std::array<VirtualGeometryBackendStage, kVulkanVirtualGeometryStageCount> stages = {
+			VirtualGeometryBackendStage::Traversal,
+			VirtualGeometryBackendStage::Compaction,
+			VirtualGeometryBackendStage::IndirectGeneration,
+			VirtualGeometryBackendStage::PageDecode,
+			VirtualGeometryBackendStage::HardwareRaster,
+			VirtualGeometryBackendStage::ComputeRaster,
+			VirtualGeometryBackendStage::VisibilityResolve,
+			VirtualGeometryBackendStage::Shading,
+			VirtualGeometryBackendStage::StreamingUpdate,
+			VirtualGeometryBackendStage::Deformation,
+			VirtualGeometryBackendStage::Shadow,
+			VirtualGeometryBackendStage::Capture,
+			VirtualGeometryBackendStage::RayTracing
+		};
+
+		std::array<VulkanVirtualGeometryStageMarker, kVulkanVirtualGeometryStageCount> markers{};
+		for(std::size_t index = 0u; index < stages.size(); ++index)
+		{
+			// Stage routes are deliberately None until a command-recording path
+			// proves ownership.  This makes future Vulkan executors opt in rather
+			// than inheriting a false route claim from CPU preparation.
+			markers[index] = MakeVulkanVirtualGeometryStageMarker(
+				stages[index],
+				VirtualGeometryBackendRoute::None,
+				false,
+				false);
+		}
+		return markers;
+	}
+
 	BackendFrameBreakdown CreateVulkanFrameBreakdown(std::uint64_t frameId)
 	{
 		BackendFrameBreakdown breakdown;

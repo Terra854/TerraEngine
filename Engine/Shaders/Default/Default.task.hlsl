@@ -285,11 +285,30 @@ uint LoadVirtualGeometryBufferWord(uint bufferIndex, uint wordOffset, uint fallb
 		return fallbackValue;
 	}
 
+	uint elementCount = 0u;
+	uint stride = 0u;
+	globalBuffers[NonUniformResourceIndex(bufferIndex)].GetDimensions(
+		elementCount,
+		stride);
+	// Packet ids come from an immutable CPU/GPU handoff, but a stale or rejected
+	// publication can still reach a fail-open draw. Never let that mismatch turn
+	// into an out-of-range bindless read; the caller's fallback preserves owner
+	// geometry coverage until a matching descriptor generation is available.
+	if (wordOffset >= elementCount)
+	{
+		return fallbackValue;
+	}
 	return globalBuffers[NonUniformResourceIndex(bufferIndex)][wordOffset];
 }
 
 uint LoadVirtualGeometryPagePayloadDescriptorWordAt(uint packetDescriptorIndex, uint descriptorWord, uint fallbackValue)
 {
+	if (descriptorWord >= kVirtualGeometryPayloadDescriptorStrideWords
+		|| packetDescriptorIndex > (0xffffffffu - descriptorWord)
+			/ kVirtualGeometryPayloadDescriptorStrideWords)
+	{
+		return fallbackValue;
+	}
 	const uint wordOffset = packetDescriptorIndex * kVirtualGeometryPayloadDescriptorStrideWords + descriptorWord;
 	return LoadVirtualGeometryBufferWord(
 		SceneUniforms.virtualGeometryPagePayloadBufferIndex,

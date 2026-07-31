@@ -23,6 +23,7 @@
 #include "../Project/EditorPreferencesMetadata.h"
 #include "../Project/ProjectSettingsMetadata.h"
 #include "Engine/Renderer/RenderTypes.h"
+#include "Engine/Animation/AnimationTypes.h"
 #include "Engine/Scene/BulkScenePublication.h"
 #include "Engine/Scene/TransactionalMutation.h"
 #include "Engine/Utilities/UUID.h"
@@ -44,6 +45,23 @@ public:
 		nlohmann::json data = nlohmann::json::object();
 	};
 
+	// BulkInstantiationRequest is the typed worker-prepared payload consumed by
+	// the protected prefab publication boundary. Keeping grid math out of JSON
+	// handlers makes native editor callers and MCP automation share one contract.
+	struct BulkInstantiationRequest {
+		std::uint32_t count = 1u;
+		float spacing = 0.0f;
+		std::uint32_t columns = 0u;
+		glm::vec3 origin = glm::vec3(0.0f);
+		std::string namePrefix;
+		std::optional<entt::entity> parent;
+		// An authored animation policy must be present before the protected
+		// publication becomes visible. Applying it here prevents an automatic
+		// GPU frame from racing a later per-object automation mutation.
+		std::optional<TerraEngine::Animation::AnimationExecutionPolicy>
+			requestedAnimationMode;
+	};
+
 	Result Create(entt::entity sourceEntity, const std::filesystem::path& projectRelativePath, const std::filesystem::path& absolutePath);
 	// RegisterExistingAsset lets editor-owned asset discovery attach a prefab
 	// that predates this service session. The AssetDatabase GUID remains the
@@ -60,6 +78,12 @@ public:
 		std::string_view prefabIdentity,
 		std::string_view requestedName,
 		std::optional<entt::entity> parent = std::nullopt);
+	// InstantiateMany publishes every requested graph in one protected bulk
+	// transaction. Rejection leaves object storage, service identity state,
+	// scene dirtiness, and editor history unchanged.
+	Result InstantiateMany(
+		std::string_view prefabIdentity,
+		const BulkInstantiationRequest& request);
 	Result InspectOverrides(std::string_view instanceIdentity) const;
 	Result ApplyOverrides(std::string_view instanceIdentity, std::optional<std::uint64_t> expectedGeneration);
 	Result RevertOverrides(std::string_view instanceIdentity);

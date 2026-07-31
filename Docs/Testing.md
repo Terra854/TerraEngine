@@ -1,5 +1,78 @@
 # TerraEngine Testing
 
+## Feature 045 production gates
+
+From a clean checkout, compile and run the focused contract registrations before
+installing. The install target compiles the Vulkan SPIR-V set and runs a final
+audit of required tools, scenarios, fixtures, shaders, and Feature 045 docs.
+
+```powershell
+git submodule update --init --recursive
+cmake --fresh --preset RelWithDebInfo
+cmake --build --preset RelWithDebInfo --target `
+	TerraEngine TerraEngine-Editor TerraEngine-EngineTests TerraEngine-EditorTests `
+	TerraEngineVirtualGeometryAssetTool TerraEngineVirtualGeometryBenchmark `
+	TerraEngineVirtualGeometryCodecExperiment
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
+	-R "^(Engine|Editor)\.VirtualGeometryFeature045Contracts$" `
+	--output-on-failure
+cmake --build --preset RelWithDebInfo --target install
+```
+
+Resolve every dry-run input from the installed tree:
+
+```powershell
+$installRoot = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
+$vgTools = Join-Path $installRoot 'Tools/VirtualGeometry'
+$vgRunner = Join-Path $installRoot 'Tools/TerraEngineVirtualGeometryBenchmark.exe'
+$vgAdapter = Join-Path $vgTools 'VirtualGeometryRuntimeAdapter.cmd'
+$vgWorkloads = Join-Path $vgTools 'workloads.json'
+$vgMatrix = Join-Path $vgTools 'hardware-matrix.json'
+$vgQuality = Join-Path $vgTools 'quality-profiles.json'
+$vgEvidence = [IO.Path]::GetFullPath('out/evidence/045/install-dry-run')
+
+& (Join-Path $vgTools 'RunCodecExperiment.ps1') `
+	-InputMesh (Join-Path $installRoot 'Tests/Fixtures/Animation/US1Import/Assets/Models/US1Hero.gltf') `
+	-ExperimentExecutable (Join-Path $installRoot 'Tools/TerraEngineVirtualGeometryCodecExperiment.exe') `
+	-OutputDirectory (Join-Path $vgEvidence 'codec') -DryRun
+& (Join-Path $vgTools 'CaptureVirtualGeometryPerformance.ps1') `
+	-BenchmarkExecutable $vgRunner -Workloads $vgWorkloads -Matrix $vgMatrix `
+	-Quality $vgQuality -Output (Join-Path $vgEvidence 'capture.json') -DryRun
+& (Join-Path $vgTools 'RunVirtualGeometryPhaseGate.ps1') `
+	-ScenarioDirectory (Join-Path $vgTools 'PhaseScenarios') `
+	-OutputDirectory (Join-Path $vgEvidence 'phase-gate') -DryRun
+& (Join-Path $vgTools 'RunBackendParityMatrix.ps1') `
+	-Runner $vgRunner -Workloads $vgWorkloads -Matrix $vgMatrix `
+	-Quality $vgQuality -Output (Join-Path $vgEvidence 'backend-parity.json') -DryRun
+& (Join-Path $vgTools 'RunAnimatedVirtualGeometryBenchmark.ps1') `
+	-Runner $vgRunner -RuntimeAdapter $vgAdapter -Workloads $vgWorkloads `
+	-Matrix $vgMatrix -Quality $vgQuality `
+	-Output (Join-Path $vgEvidence 'animated.json') -DryRun
+& (Join-Path $vgTools 'RunVirtualGeometryStreamingSoak.ps1') `
+	-Runner $vgRunner -RuntimeAdapter $vgAdapter -Workloads $vgWorkloads `
+	-Matrix $vgMatrix -Quality $vgQuality `
+	-Output (Join-Path $vgEvidence 'streaming-soak.json') -DryRun
+& (Join-Path $vgTools 'RunVirtualGeometryProductionSoak.ps1') `
+	-Runner $vgRunner -RuntimeAdapter $vgAdapter -Workloads $vgWorkloads `
+	-Matrix $vgMatrix -Quality $vgQuality `
+	-Output (Join-Path $vgEvidence 'production-soak.json') -DryRun
+```
+
+Non-dry runs fail for missing executables, manifests, images, or raw captures.
+Performance comparison requires at least five comparable measured runs; image
+comparison records both hashes. Unattached AMD/NVIDIA/Intel Vulkan hardware
+remains `unavailable`, never a pass. Feature 045's installed matrix is
+Vulkan-only; D3D12 and DXIL are out of scope. Soak acceptance requires bounded
+duration, raw counters, high-water/bounded-growth data, command/environment,
+and artifact hashes; missing data is not zero. Installed automation commands
+(`asset.virtualGeometry.inspect`, `.settings.get`, `.rebuild`, and
+`renderer.virtualGeometry.stats`) are read-only/reporting contracts unless an
+explicit mutation command is requested, and canceled/failed repairs retain
+last-known-good output. Packaging/compatibility claims require installed
+artifacts, source/license provenance, and explicit fallback diagnostics.
+For the single-scenario phase 0-9 commands, use the installed-tree helper in
+`Build/Docs/Specs/045-virtual-geometry-alternative/quickstart.md`.
+
 This document is the reproducible CTest workflow for the current unit test
 layout. Engine tests live under `Tests/Engine`; editor tests live under
 `Tests/Editor`. Launcher tests are intentionally out of scope for the current
@@ -75,6 +148,47 @@ ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
 	--output-on-failure
 cmake --build --preset RelWithDebInfo --target install
 ```
+
+## Virtual Geometry feature 045 evidence
+
+Validate the setup manifests without launching a renderer:
+
+```powershell
+$installRoot = (Resolve-Path 'out/build/RelWithDebInfo/Build').Path
+$vgTools = Join-Path $installRoot 'Tools/VirtualGeometry'
+$vgRunner = Join-Path $installRoot 'Tools/TerraEngineVirtualGeometryBenchmark.exe'
+& (Join-Path $vgTools 'CaptureVirtualGeometryPerformance.ps1') `
+	-BenchmarkExecutable $vgRunner `
+	-Workloads (Join-Path $vgTools 'workloads.json') `
+	-Matrix (Join-Path $vgTools 'hardware-matrix.json') `
+	-Quality (Join-Path $vgTools 'quality-profiles.json') -DryRun
+```
+
+After the installed benchmark target and a live adapter/readback path are
+available, capture the processor-expanded baseline and a candidate into
+separate directories. The runner preserves unavailable/pending states and does
+not synthesize timing values. Repeat the command at least five times per
+directory with distinct output names, then compare the directories:
+
+```powershell
+$adapter = Join-Path $vgTools 'VirtualGeometryRuntimeAdapter.cmd'
+& $vgRunner `
+	--workloads (Join-Path $vgTools 'workloads.json') `
+	--matrix (Join-Path $vgTools 'hardware-matrix.json') `
+	--quality (Join-Path $vgTools 'quality-profiles.json') `
+	--workload 'baseline-processor-expanded' --runtime-adapter $adapter `
+	--duration-seconds 30 `
+	--output ([IO.Path]::GetFullPath('out/evidence/045/baseline/run-01.json'))
+& (Join-Path $vgTools 'CompareVirtualGeometryPerformance.ps1') `
+	-BaselineDirectory ([IO.Path]::GetFullPath('out/evidence/045/baseline')) `
+	-CandidateDirectory ([IO.Path]::GetFullPath('out/evidence/045/candidate')) `
+	-Output ([IO.Path]::GetFullPath('out/evidence/045/comparison.json'))
+```
+
+The comparison script exits non-zero for insufficient measured evidence or a
+median regression above the configured ratio. A successful script run is not a
+substitute for the required build, focused CTest, install, image-parity, and
+hardware-matrix gates; link those results from the phase evidence directory.
 
 To prove that no ambient global package cache is involved, use a unique empty
 cache beneath `out/` and run the four restores directly. Do not clear or alter
@@ -622,7 +736,7 @@ The current CPU-selected cluster cut remains the correctness oracle, and the
 current Hi-Z behavior remains locked as the accepted baseline:
 
 ```powershell
-ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryBatching|Engine.VirtualGeometryCompaction|Engine.VirtualGeometryPerformanceGate|Engine.VirtualGeometryHiZ|Engine.VirtualGeometryMultiView|Engine.VirtualGeometryRenderer|Engine.Renderer|Engine.SystemScheduler" --output-on-failure -C Debug
+ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryBatching|Engine.VirtualGeometryCompaction|Engine.VirtualGeometryPerformanceGate|Engine.VirtualGeometryRenderer|Engine.RendererRecovery" --output-on-failure -C Debug
 ```
 
 When implementing `031`, run each phase or user-story slice before advancing to
@@ -648,7 +762,7 @@ true page-sourced render contract. Use the page-streaming slices while
 implementing that feature:
 
 ```powershell
-ctest --test-dir out/build/Debug -R "VirtualGeometryPageStreaming|VirtualGeometryPageResidency|Engine.VirtualGeometryResource|Engine.VirtualGeometryHiZ|Engine.VirtualGeometryMultiView|Engine.VirtualGeometryPerformanceGate" --output-on-failure -C Debug
+ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryPageStreaming|Engine.VirtualGeometryPageResidency|Engine.VirtualGeometryResource|Engine.VirtualGeometryRenderer|Engine.VirtualGeometryPerformanceGate" --output-on-failure -C Debug
 ```
 
 For the page request, budget pressure, eviction, and re-request lifecycle, run

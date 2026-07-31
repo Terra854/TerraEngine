@@ -722,7 +722,7 @@ namespace TerraEngine::Resource
 				static_cast<std::uint64_t>(section.elementCount)
 					* section.elementStride;
 			if(section.type > static_cast<std::uint32_t>(
-					AnimatedVirtualPageSectionType::ErrorSamples)
+					AnimatedVirtualPageSectionType::CompactAnimationStreams)
 				|| section.byteSize == 0u
 				|| section.elementCount == 0u
 				|| section.elementStride == 0u
@@ -737,6 +737,26 @@ namespace TerraEngine::Resource
 				return output;
 			}
 			priorEnd = section.byteOffset + section.byteSize;
+		}
+		for(const AnimatedVirtualPageSectionRecord& section : output.sections)
+		{
+			if(section.type != static_cast<std::uint32_t>(AnimatedVirtualPageSectionType::CompactAnimationStreams)) continue;
+			if(section.elementStride != sizeof(AnimatedVirtualGeometryCompactStreamDescriptor))
+			{
+				output.sections.clear();
+				output.rejectionReason = "Compact animation stream descriptor stride is invalid.";
+				return output;
+			}
+			output.compactStreams.resize(section.elementCount);
+			std::memcpy(output.compactStreams.data(), bytes.data() + section.byteOffset, static_cast<std::size_t>(section.byteSize));
+			for(const auto& descriptor : output.compactStreams)
+				if(!IsValidAnimatedVirtualGeometryCompactStreamDescriptor(descriptor))
+				{
+					output.sections.clear();
+					output.compactStreams.clear();
+					output.rejectionReason = "Compact animation stream descriptor failed version/capability validation.";
+					return output;
+				}
 		}
 		const auto HasSection = [&output](AnimatedVirtualPageSectionType type)
 		{
@@ -824,6 +844,82 @@ namespace TerraEngine::Resource
 			return output;
 		}
 		output.status = AnimatedVirtualPageReadStatus::Completed;
+		return output;
+	}
+
+	VirtualGeometryStaticPageReadCompletion ReadVirtualGeometryStaticPageRange(
+		const VirtualGeometryStaticPageReadRequest& request,
+		std::uint64_t currentRequestGeneration)
+	{
+		VirtualGeometryStaticPageReadCompletion output;
+		output.pageId = request.pageId;
+		output.requestGeneration = request.requestGeneration;
+		if(request.path.empty() || request.pageId == kVirtualGeometryInvalidIndex
+			|| request.byteSize == 0u || request.expectedHash == 0u
+			|| request.requestGeneration == 0u)
+		{
+			output.diagnostic = "Static page read request is incomplete.";
+			return output;
+		}
+		if(request.cancellation != nullptr && request.cancellation->load())
+		{
+			output.status = VirtualGeometryStaticPageReadStatus::Cancelled;
+			output.diagnostic = "Static page read was cancelled before IO.";
+			return output;
+		}
+		if(request.requestGeneration != currentRequestGeneration)
+		{
+			output.status = VirtualGeometryStaticPageReadStatus::StaleGeneration;
+			output.diagnostic = "Static page read belongs to a stale request generation.";
+			return output;
+		}
+		if(request.byteSize > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
+		{
+			output.diagnostic = "Static page range cannot fit in process memory.";
+			return output;
+		}
+		std::ifstream stream(request.path, std::ios::binary);
+		if(!stream)
+		{
+			output.status = VirtualGeometryStaticPageReadStatus::IoFailure;
+			output.diagnostic = "Static page source file could not be opened.";
+			return output;
+		}
+		stream.seekg(0, std::ios::end);
+		const std::streamoff end = stream.tellg();
+		if(end < 0 || request.byteOffset > static_cast<std::uint64_t>(end)
+			|| request.byteSize > static_cast<std::uint64_t>(end) - request.byteOffset)
+		{
+			output.status = VirtualGeometryStaticPageReadStatus::IoFailure;
+			output.diagnostic = "Static page exact range exceeds the source file.";
+			return output;
+		}
+		output.bytes.resize(static_cast<std::size_t>(request.byteSize));
+		stream.clear();
+		stream.seekg(static_cast<std::streamoff>(request.byteOffset));
+		stream.read(reinterpret_cast<char*>(output.bytes.data()), static_cast<std::streamsize>(output.bytes.size()));
+		if(!stream)
+		{
+			output.bytes.clear();
+			output.status = VirtualGeometryStaticPageReadStatus::IoFailure;
+			output.diagnostic = "Static page exact-range read was incomplete.";
+			return output;
+		}
+		if(request.cancellation != nullptr && request.cancellation->load())
+		{
+			output.bytes.clear();
+			output.status = VirtualGeometryStaticPageReadStatus::Cancelled;
+			output.diagnostic = "Static page read was cancelled after IO.";
+			return output;
+		}
+		if(HashAnimatedVirtualPageBytes(output.bytes) != request.expectedHash)
+		{
+			output.bytes.clear();
+			output.status = VirtualGeometryStaticPageReadStatus::IntegrityFailure;
+			output.diagnostic = "Static page exact range failed its content hash validation.";
+			return output;
+		}
+		output.status = VirtualGeometryStaticPageReadStatus::Completed;
 		return output;
 	}
 

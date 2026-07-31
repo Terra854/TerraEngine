@@ -409,6 +409,24 @@ namespace TerraEngine::Resource
 		std::uint64_t retirementBudgetBytes = 0u;
 	};
 
+	// These caps keep page pools bounded even when feedback repeatedly requests
+	// new detail.  Decisions are plans; the protected streaming boundary applies
+	// their corresponding transition events later in the frame.
+	struct VirtualGeometryPageLifecycleLimits
+	{
+		std::uint32_t maximumResidentPages = 0u;
+		std::uint32_t maximumRetries = 3u;
+		std::uint64_t retirementFrameLag = 2u;
+	};
+
+	struct VirtualGeometryPageLifecyclePlan
+	{
+		std::vector<VirtualGeometryPageEvictionCandidate> evictions;
+		std::vector<std::uint32_t> retryablePageIds;
+		std::vector<std::uint32_t> retiredPageIds;
+		bool valid = false;
+	};
+
 	struct VirtualGeometryPageBudgetPressureContributor
 	{
 		TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
@@ -649,6 +667,11 @@ namespace TerraEngine::Resource
 	TERRAENGINE_API std::uint32_t ProtectVirtualGeometryFallbackPages(std::vector<VirtualGeometryResidentPage>& pages, std::uint64_t frameId, std::string_view reason = {});
 	TERRAENGINE_API std::vector<VirtualGeometryPageEvictionCandidate> BuildVirtualGeometryPageEvictionCandidates(const std::vector<VirtualGeometryResidentPage>& pages, const VirtualGeometryPageBudget& budget);
 	TERRAENGINE_API VirtualGeometryPageBudgetPressureSummary BuildVirtualGeometryPageBudgetPressureSummary(const std::vector<VirtualGeometryResidentPage>& pages, const VirtualGeometryPageBudget& budget);
+	TERRAENGINE_API VirtualGeometryPageLifecyclePlan BuildVirtualGeometryPageLifecyclePlan(
+		const std::vector<VirtualGeometryResidentPage>& pages,
+		const VirtualGeometryPageBudget& budget,
+		const VirtualGeometryPageLifecycleLimits& limits,
+		std::uint64_t frameId);
 	TERRAENGINE_API AnimatedVirtualPageResidencyPublication
 		PublishAnimatedVirtualPageResidencySnapshot(
 			const AnimatedVirtualPageResidencySnapshot& prior,

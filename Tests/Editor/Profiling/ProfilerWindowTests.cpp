@@ -61,6 +61,18 @@ namespace TerraEngine::EditorTests
 		{
 			return ReadRepositorySource("Editor/TerraEngine-Editor/Profiling/EditorProfilerService.cpp");
 		}
+
+		std::size_t CountOccurrences(const std::string& source, const std::string& token)
+		{
+			std::size_t count = 0u;
+			std::size_t cursor = 0u;
+			while ((cursor = source.find(token, cursor)) != std::string::npos)
+			{
+				++count;
+				cursor += token.size();
+			}
+			return count;
+		}
 	}
 
 	void RegisterProfilerWindowTests(TestRegistry& registry)
@@ -105,7 +117,7 @@ namespace TerraEngine::EditorTests
 			context.Expect(source.find("unavailable") != std::string::npos, "Unavailable typed streams should be labelled instead of shown as zero.");
 		});
 
-		registry.Add("ProfilerWindow.Recording.KeepsNormalRedrawAndCaptureLowOverhead", [](TestContext& context) {
+		registry.Add("ProfilerWindow.Recording.UsesBoundedSampledCaptureForScopeEvidence", [](TestContext& context) {
 			const std::string source = ReadProfilerWindowSource();
 			const std::string serviceSource = ReadEditorProfilerServiceSource();
 			const std::size_t timingDisclosure = source.find("TreeNode(\"Timing Distribution\")");
@@ -113,15 +125,48 @@ namespace TerraEngine::EditorTests
 			const std::size_t evidenceDisclosure = source.find("TreeNode(\"Whole Capture Analysis\")");
 			const std::size_t documentCopy = source.find("GetDocumentSnapshot()", evidenceDisclosure);
 
-			context.Expect(serviceSource.find("detailLevel = TerraEngine::Profiling::ProfilerCaptureDetailLevel::Aggregate") != std::string::npos,
-				"The ordinary Record action should use low-overhead aggregate capture.");
-			context.Expect(serviceSource.find("recordMarkers = false") != std::string::npos
-				&& serviceSource.find("taskExecutionEnabled = false") != std::string::npos,
-				"The ordinary Record action should leave mutex-heavy optional instrumentation disabled.");
+			context.Expect(serviceSource.find("detailLevel = TerraEngine::Profiling::ProfilerCaptureDetailLevel::Sampled") != std::string::npos
+				&& serviceSource.find("sampleIntervalFrames = 4u") != std::string::npos,
+				"The ordinary Record action should retain scope evidence on a bounded four-frame cadence.");
+			context.Expect(serviceSource.find("recordMarkers = true") != std::string::npos
+				&& serviceSource.find("taskExecutionEnabled = true") != std::string::npos
+				&& serviceSource.find("recordTaskContext = true") != std::string::npos,
+				"The sampled toolbar capture should retain marker and task context needed to build useful scope trees.");
+			context.Expect(serviceSource.find("keeping the") != std::string::npos
+				&& serviceSource.find("artifact size bounded") != std::string::npos,
+				"The service should document the sampled-versus-detailed capture tradeoff for future maintainers.");
 			context.Expect(timingDisclosure != std::string::npos && frameCopy != std::string::npos && timingDisclosure < frameCopy,
 				"Rolling timing distributions should copy the complete capture only after the user expands them.");
 			context.Expect(evidenceDisclosure != std::string::npos && documentCopy != std::string::npos && evidenceDisclosure < documentCopy,
 				"Whole-capture evidence should be copied and summarized only after the user expands it.");
+		});
+
+		registry.Add("ProfilerWindow.OpenFramePath.UsesCachedCompactSnapshots", [](TestContext& context) {
+			const std::string source = ReadProfilerWindowSource();
+
+			context.Expect(source.find("kProfilerWindowRefreshInterval") != std::string::npos
+				&& source.find("GetSnapshotRevision()") != std::string::npos
+				&& source.find("now >= cache->nextProfilerRefresh") != std::string::npos,
+				"The open profiler should poll a cheap revision and rate-limit deep presentation snapshots.");
+			context.ExpectEqual(static_cast<std::size_t>(1u), CountOccurrences(source, "GetFrameListSnapshot()"),
+				"The profiler window should copy its frame list only in the snapshot refresh path.");
+			context.ExpectEqual(static_cast<std::size_t>(1u), CountOccurrences(source, "GetSelectedFrameSnapshot()"),
+				"The profiler window should copy its selected frame only in the snapshot refresh path.");
+			context.ExpectEqual(static_cast<std::size_t>(1u), CountOccurrences(source, "BuildSampleTree(frame, selectedModule)"),
+				"Top offenders and the sample hierarchy should share one cached sample-tree analysis.");
+			context.Expect(source.find("GetLatestRenderGraphDiagnostics()") == std::string::npos
+				&& source.find("GetLatestBackendStageTimings()") != std::string::npos
+				&& source.find("GetLatestRendererRecoverySnapshot()") != std::string::npos,
+				"The profiler should read compact renderer fields instead of copying the complete diagnostics graph.");
+			context.Expect(source.find("captureEvidenceValid") != std::string::npos
+				&& source.find("Refresh Whole Capture Analysis") != std::string::npos
+				&& source.find("timingDistributionValid") != std::string::npos
+				&& source.find("Refresh Timing Distribution") != std::string::npos
+				&& source.find("timingDistributionFrameIndex") == std::string::npos,
+				"Expanded whole-capture disclosures should reuse cached analysis until the user requests a refresh.");
+			context.Expect(source.find("TreeNode(\"Sample Hierarchy\")") != std::string::npos
+				&& source.find("GetBool(openStateId, false)") != std::string::npos,
+				"Large scope hierarchies should be opt-in and start collapsed.");
 		});
 	}
 }

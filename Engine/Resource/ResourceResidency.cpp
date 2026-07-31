@@ -1147,6 +1147,44 @@ namespace TerraEngine::Resource
 		return summary;
 	}
 
+	VirtualGeometryPageLifecyclePlan BuildVirtualGeometryPageLifecyclePlan(
+		const std::vector<VirtualGeometryResidentPage>& pages,
+		const VirtualGeometryPageBudget& budget,
+		const VirtualGeometryPageLifecycleLimits& limits,
+		std::uint64_t frameId)
+	{
+		VirtualGeometryPageLifecyclePlan plan;
+		plan.evictions = BuildVirtualGeometryPageEvictionCandidates(pages, budget);
+		std::uint32_t residentCount = 0u;
+		for(const VirtualGeometryResidentPage& page : pages)
+		{
+			if(IsVirtualGeometryPageResidentForRendering(page)) { ++residentCount; }
+			if(page.state == VirtualGeometryPageResidencyState::Failed
+				&& page.requestCount <= limits.maximumRetries)
+			{
+				plan.retryablePageIds.push_back(page.pageId);
+			}
+			if(page.state == VirtualGeometryPageResidencyState::PendingRetirement
+				&& page.retirementFrame != 0u
+				&& frameId >= page.retirementFrame + limits.retirementFrameLag)
+			{
+				plan.retiredPageIds.push_back(page.pageId);
+			}
+		}
+		if(limits.maximumResidentPages != 0u && residentCount > limits.maximumResidentPages)
+		{
+			const std::uint32_t required = residentCount - limits.maximumResidentPages;
+			if(plan.evictions.size() > required)
+			{
+				plan.evictions.resize(required);
+			}
+		}
+		std::sort(plan.retryablePageIds.begin(), plan.retryablePageIds.end());
+		std::sort(plan.retiredPageIds.begin(), plan.retiredPageIds.end());
+		plan.valid = true;
+		return plan;
+	}
+
 	AnimatedVirtualPageResidencyPublication
 	PublishAnimatedVirtualPageResidencySnapshot(
 		const AnimatedVirtualPageResidencySnapshot& prior,

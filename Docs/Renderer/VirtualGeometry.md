@@ -1,5 +1,39 @@
 # TerraEngine Virtual Geometry
 
+## Feature 045 production workflow
+
+Clean-checkout validation always configures, builds, tests, and installs:
+
+```powershell
+git submodule update --init --recursive
+cmake --fresh --preset RelWithDebInfo
+cmake --build --preset RelWithDebInfo --target TerraEngine TerraEngine-Editor TerraEngine-EngineTests TerraEngine-EditorTests install
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R "Engine.VirtualGeometry|Editor.VirtualGeometry" --output-on-failure
+```
+
+Use installed editor automation (`asset.virtualGeometry.inspect`,
+`asset.virtualGeometry.settings.get`, `renderer.virtualGeometry.stats`) for
+read-only codec/profile/hash/cache/page/error presentation. Rebuild, cancel,
+migration, and targeted repair must preserve last-known-good output; canceled or
+failed work is never a successful repair. Missing identities remain
+`unavailable`, not estimated.
+
+Tooling is under `Tools/VirtualGeometry/`: run `RunCodecExperiment.ps1` for the
+32/64/128 KiB matrix, capture with `CaptureVirtualGeometryPerformance.ps1`,
+compare at least five comparable measured runs with
+`CompareVirtualGeometryPerformance.ps1`, and use
+`CompareVirtualGeometryImages.ps1` for conservative image/hash checks. Missing
+tools, images, hashes, or raw samples fail closed.
+
+`RunBackendParityMatrix.ps1`, `RunAnimatedVirtualGeometryBenchmark.ps1`,
+`RunVirtualGeometryStreamingSoak.ps1`, and
+`RunVirtualGeometryProductionSoak.ps1` cover backend, animation, residency, and
+bounded-growth validation. Unattached AMD/NVIDIA/Intel Vulkan lanes are
+explicitly unavailable and excluded from pass counts; D3D12/DXIL lanes are
+deferred beyond feature 045. The installed phase gate
+(`RunVirtualGeometryPhaseGate.ps1`) consumes `PhaseScenarios/*.json`; `not-run`
+is incomplete, never passing.
+
 This guide tracks the staged implementation of TerraEngine virtual geometry.
 The feature targets static opaque meshes on the mesh shader path and deliberately
 keeps the active TEMF version at `1` while allowing the payload contract to
@@ -46,6 +80,24 @@ and user-story slice must pass its focused tests before the next slice begins.
 Final acceptance still requires the full compile, focused CTest, regression,
 and install flow so the installed editor/runtime tree contains matching docs,
 shaders, binaries, and generated metadata.
+
+## Feature 045 measurement semantics
+
+Feature 045 benchmark captures are versioned evidence, not estimates. A
+capability may be planned or supported without executing; only a completed
+live command with generation-safe readback can be marked executed, and only a
+capture with validation artifacts can be marked validated. Timing states are
+`pending`, `unavailable`, `invalid`, or `measured`; pending and unavailable
+values must remain non-numeric rather than becoming zero.
+
+The processor-expanded route is captured first as the immutable correctness and
+performance oracle. Use the manifests in `Tools/VirtualGeometry/` and the
+capture/comparison scripts to preserve workload, revision, adapter, driver,
+route, quality, raw samples, image artifacts, and hashes. Competitive claims
+require at least five comparable measured runs in randomized paired order.
+Until a runtime adapter and authoritative readback are supplied, the benchmark
+writer emits an explicit unavailable skeleton and makes no GPU performance
+claim.
 
 ## Virtual Geometry Hardening Roadmap
 

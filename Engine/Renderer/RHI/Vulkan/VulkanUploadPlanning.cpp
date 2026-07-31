@@ -189,6 +189,53 @@ namespace TerraEngine::Renderer::Vulkan {
 		return plan;
 	}
 
+	VirtualGeometryUploadIntentPlan BuildVirtualGeometryUploadIntentPlan(
+		std::vector<VirtualGeometryPageUploadIntent> intents,
+		std::vector<std::uint64_t> retirementAllocations)
+	{
+		VirtualGeometryUploadIntentPlan plan;
+		std::sort(intents.begin(), intents.end(), [](const auto& left, const auto& right)
+		{
+			if(left.pinnedFallback != right.pinnedFallback) return left.pinnedFallback;
+			if(left.meshId != right.meshId)
+			{
+				return std::lexicographical_compare(left.meshId.begin(), left.meshId.end(), right.meshId.begin(), right.meshId.end());
+			}
+			return left.pageId < right.pageId;
+		});
+		for(const VirtualGeometryPageUploadIntent& intent : intents)
+		{
+			if(intent.meshId == TerraEngine::EMPTY_UUID || intent.pageId == 0xffffffffu
+				|| intent.contentGeneration == 0u || intent.byteSize == 0u || intent.sourceHash == 0u)
+			{
+				plan.rejectionReason = "Virtual geometry upload intent is incomplete.";
+				return plan;
+			}
+			if(!plan.uploadIntents.empty()
+				&& plan.uploadIntents.back().meshId == intent.meshId
+				&& plan.uploadIntents.back().pageId == intent.pageId)
+			{
+				plan.rejectionReason = "Virtual geometry upload intents repeat a page identity.";
+				return plan;
+			}
+			plan.uploadIntents.push_back(intent);
+			if(intent.existingAllocationId != 0u)
+			{
+				plan.descriptorRefreshAllocations.push_back(intent.existingAllocationId);
+			}
+		}
+		std::sort(retirementAllocations.begin(), retirementAllocations.end());
+		retirementAllocations.erase(std::unique(retirementAllocations.begin(), retirementAllocations.end()), retirementAllocations.end());
+		if(std::find(retirementAllocations.begin(), retirementAllocations.end(), 0u) != retirementAllocations.end())
+		{
+			plan.rejectionReason = "Virtual geometry retirement intent has no allocation.";
+			return plan;
+		}
+		plan.retirementAllocations = std::move(retirementAllocations);
+		plan.valid = true;
+		return plan;
+	}
+
 	UploadPreparationPlan BuildUploadPreparationPlan(const RenderFrameSnapshot& snapshot, std::size_t payloadBudget)
 	{
 		UploadPreparationPlan plan;

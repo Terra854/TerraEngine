@@ -181,14 +181,16 @@ void EditorProfilerService::Update(float)
 void EditorProfilerService::StartRecording()
 {
 	ProfilerCaptureSettings settings{};
-	// The ordinary toolbar action must observe the engine without serializing
-	// every worker scope through the profiler mutex. Aggregate mode retains the
-	// critical frame, physics, scheduler, presentation, and worker streams;
-	// typed callers can still request sampled or detailed scope capture.
-	settings.detailLevel = TerraEngine::Profiling::ProfilerCaptureDetailLevel::Aggregate;
-	settings.recordMarkers = false;
-	settings.taskExecutionEnabled = false;
-	settings.recordTaskContext = false;
+	// The ordinary toolbar action must preserve useful scope trees in the saved
+	// capture without serializing every worker scope on every frame. Sampling
+	// every fourth frame gives users actionable hot samples while keeping the
+	// profiler mutex and artifact size bounded; callers that need every scope
+	// can still explicitly request a detailed capture.
+	settings.detailLevel = TerraEngine::Profiling::ProfilerCaptureDetailLevel::Sampled;
+	settings.sampleIntervalFrames = 4u;
+	settings.recordMarkers = true;
+	settings.taskExecutionEnabled = true;
+	settings.recordTaskContext = true;
 	settings.maxFrames = 10000u;
 	settings.maxDurationSeconds = 0.0;
 	StartRecording(settings);

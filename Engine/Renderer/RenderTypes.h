@@ -22,6 +22,8 @@
 #include "Scene/SpatialDiagnostics.h"
 #include "Animation/Gpu/GpuAnimationPlan.h"
 #include "Animation/Runtime/AnimatorInstanceStore.h"
+#include "Renderer/VirtualGeometry/Capability/VirtualGeometryCapability.h"
+#include "Renderer/VirtualGeometry/Geometry/VirtualGeometryRepresentations.h"
 #include "Utilities/UUID.h"
 
 namespace TerraEngine::Animation {
@@ -638,6 +640,13 @@ inline constexpr std::uint32_t kVirtualGeometryFlagConeCullingSafe = 1u << 5u;
 inline constexpr std::uint32_t kVirtualGeometryFlagTaskPayloadValid = 1u << 6u;
 inline constexpr std::uint32_t kVirtualGeometryDebugModeShift = 8u;
 inline constexpr std::uint32_t kVirtualGeometryDebugModeMask = 0xFFu;
+// Packet flags reserve two high bits for the route selected by the immutable
+// material/capability classifier and eight more for the bounded shading bin.
+// The low bits remain compatible with the existing fail-open shader contract.
+inline constexpr std::uint32_t kVirtualGeometryRasterRouteShift = 16u;
+inline constexpr std::uint32_t kVirtualGeometryRasterRouteMask = 0x3u;
+inline constexpr std::uint32_t kVirtualGeometryMaterialBinShift = 20u;
+inline constexpr std::uint32_t kVirtualGeometryMaterialBinMask = 0xFFu;
 
 // VirtualGeometryInactiveReason keeps fail-open renderer states explainable in
 // diagnostics instead of showing misleading zero counters.
@@ -1098,6 +1107,10 @@ struct VirtualGeometryClusterPacket
 	std::uint32_t payloadDescriptorIndex = 0xffffffffu;
 	std::string fallbackReason;
 	std::uint32_t debugIdentity = 0u;
+	// These are preparation policy values. The GPU mirror packs them into its
+	// existing flags word without widening the frozen packet ABI.
+	std::uint32_t rasterRoute = 0u;
+	std::uint32_t materialBin = 0u;
 	bool fallbackPacket = false;
 };
 
@@ -1190,6 +1203,66 @@ struct GpuVirtualGeometryPacketRecord
 	std::uint32_t debugIdentity = 0u;
 	std::uint32_t flags = 0u;
 };
+
+// VirtualGeometryVisibilityPick is the route-neutral identity returned to editor
+// tools after they query the latest compacted visibility records. It deliberately
+// contains object/cluster/meshlet identity rather than a backend buffer address,
+// so Scene View never retains a Vulkan resource past its owning frame.
+struct VirtualGeometryVisibilityPick
+{
+	TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+	TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+	TerraEngine::UUID materialId = TerraEngine::EMPTY_UUID;
+	std::uint64_t frameId = 0u;
+	std::uint32_t packetId = 0u;
+	std::uint32_t clusterId = 0u;
+	std::uint32_t meshletId = 0u;
+	std::uint32_t selectedLod = 0u;
+	std::uint32_t debugIdentity = 0u;
+	bool fallback = false;
+
+	[[nodiscard]] bool IsValid() const noexcept
+	{
+		return objectId != TerraEngine::EMPTY_UUID
+			&& meshId != TerraEngine::EMPTY_UUID
+			&& frameId != 0u;
+	}
+};
+
+namespace TerraEngine::Renderer {
+
+	// AuthoritativeVisibilityPickStatus keeps automation from presenting a queued
+	// GPU copy or an unavailable renderer as if it were a completed object pick.
+	enum class AuthoritativeVisibilityPickStatus : std::uint8_t
+	{
+		Unavailable,
+		Pending,
+		Ready
+	};
+
+	inline const char* ToString(AuthoritativeVisibilityPickStatus status)
+	{
+		switch (status)
+		{
+		case AuthoritativeVisibilityPickStatus::Unavailable: return "Unavailable";
+		case AuthoritativeVisibilityPickStatus::Pending: return "Pending";
+		case AuthoritativeVisibilityPickStatus::Ready: return "Ready";
+		default: return "Unavailable";
+		}
+	}
+
+	// AuthoritativeVisibilityPickState is a copied automation-facing status. It
+	// owns no Vulkan handles and exposes a pick only after the owning frame fence
+	// has completed and RenderSystem has mapped its typed identity to a packet.
+	struct AuthoritativeVisibilityPickState
+	{
+		AuthoritativeVisibilityPickStatus status = AuthoritativeVisibilityPickStatus::Unavailable;
+		glm::uvec2 pixel = glm::uvec2(0u);
+		std::optional<::VirtualGeometryVisibilityPick> pick;
+		std::string reason;
+	};
+
+}
 
 // GpuVirtualGeometryBatchDescriptor mirrors a compatible packet run that can be
 // consumed by GPU-driven submission. It deliberately repeats the compatibility
@@ -2073,6 +2146,21 @@ struct VirtualGeometryAssetRuntime
 	std::vector<VirtualGeometryDetailRuntime> detailLevels;
 	std::vector<VirtualGeometryCullableGroupRuntime> cullableGroups;
 	std::vector<VirtualGeometryClusterRuntime> clusters;
+	// Aggregate profiles are immutable cooker facts. The fallback is still a
+	// normal cluster id, so visibility and residency remain typed cluster/page
+	// operations instead of treating an aggregate profile as draw geometry.
+	struct AggregateProfileRuntime
+	{
+		::TerraEngine::Renderer::VirtualGeometryAggregateRepresentation representation{};
+		std::uint32_t fallbackClusterId = 0xffffffffu;
+		bool legacyDerived = false;
+
+		[[nodiscard]] bool Valid() const noexcept
+		{
+			return representation.Valid() && fallbackClusterId != 0xffffffffu;
+		}
+	};
+	std::vector<AggregateProfileRuntime> aggregateProfiles;
 	std::vector<ConeSafetyMetadata> coneSafety;
 	std::vector<GeometryPageRuntime> pages;
 	std::vector<std::string> warnings;
@@ -2663,6 +2751,24 @@ struct UIRenderBatch
 	}
 };
 
+// VirtualGeometryDecodedPageUploadRecord is the immutable value handoff from
+// worker-safe exact-range decoding to the protected RHI upload boundary. The
+// owned bytes and every identity required for publication travel together, so
+// a backend never needs to read live ResourceManager or streaming containers.
+struct VirtualGeometryDecodedPageUploadRecord
+{
+	TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+	std::uint32_t pageId = 0xffffffffu;
+	std::uint32_t fallbackPageId = 0xffffffffu;
+	std::uint32_t clusterId = 0xffffffffu;
+	std::vector<std::uint32_t> dependencyPageIds;
+	std::uint64_t publicationGeneration = 0u;
+	std::uint64_t storedByteCount = 0u;
+	std::uint64_t decodedByteCount = 0u;
+	std::uint64_t integrityValue = 0u;
+	std::vector<std::uint8_t> decodedBytes;
+};
+
 // struct FrameRenderData groups related state and operations so callers have one documented contract.
 struct FrameRenderData
 {
@@ -2689,6 +2795,9 @@ struct FrameRenderData
 		std::vector<VirtualGeometryCounterReadbackRecord> virtualGeometryCounterReadbacks;
 		std::vector<VirtualGeometryGpuFallbackRecord> virtualGeometryGpuFallbackRecords;
 		std::vector<VirtualGeometryPageRetirementRecord> virtualGeometryPageRetirements;
+		// A decoded page remains non-resident until the backend uploads this
+		// record and the owning frame-slot fence completes.
+		std::vector<VirtualGeometryDecodedPageUploadRecord> virtualGeometryDecodedPageUploads;
 		// Scene View can request a whole-view authoring tint for non-mesh passes
 	// such as sky and grid while individual DrawCommand tint preserves the
 	// focused prefab branch at normal color.
@@ -2957,3 +3066,45 @@ struct RenderStatsSnapshot
 	bool vrsActive = false;
 	bool valid = false;
 };
+
+namespace TerraEngine::Renderer
+{
+	// A timing snapshot is copied from a delayed backend query only after it is
+	// checked against the exact publication frame, view, and renderer generation.
+	// Its optional duration keeps pending and failed queries from looking like zero.
+	struct VirtualGeometryGpuTimingSnapshot
+	{
+		VirtualGeometryCapabilityStage stage = VirtualGeometryCapabilityStage::Traversal;
+		VirtualGeometryFrameViewIdentity identity{};
+		VirtualGeometryMeasurementAvailability availability = VirtualGeometryMeasurementAvailability::Unavailable;
+		std::optional<std::uint64_t> durationNanoseconds;
+		std::string queryIdentity;
+		std::string executionEvidenceId;
+		std::string reason;
+		std::uint32_t latencyFrames = 0u;
+
+		[[nodiscard]] bool HasAuthoritativeDuration() const noexcept
+		{
+			return availability == VirtualGeometryMeasurementAvailability::Measured
+				&& durationNanoseconds.has_value() && !queryIdentity.empty()
+				&& !executionEvidenceId.empty();
+		}
+
+		[[nodiscard]] bool IsGenerationSafeFor(const VirtualGeometryFrameViewIdentity& publication) const noexcept
+		{
+			return identity == publication;
+		}
+	};
+
+	// Automation reads this immutable copy from RenderDiagnostics instead of
+	// polling live RHI query pools. Raw measurements preserve availability and
+	// reasons, while timingSnapshots contain only generation-safe numeric values.
+	struct VirtualGeometryCapabilityDiagnosticsSnapshot
+	{
+		std::string schemaVersion = "1";
+		VirtualGeometryFrameViewIdentity publicationIdentity{};
+		std::vector<VirtualGeometryCapabilityEvidence> capabilities;
+		std::vector<VirtualGeometryMeasurementRecord> measurements;
+		std::vector<VirtualGeometryGpuTimingSnapshot> timingSnapshots;
+	};
+}

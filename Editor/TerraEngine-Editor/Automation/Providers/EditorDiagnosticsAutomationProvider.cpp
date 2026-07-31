@@ -80,12 +80,19 @@ namespace TerraEngine::Editor::Automation
 	std::vector<AutomationCapabilityRegistration> EditorDiagnosticsAutomationProvider::GetCapabilities()
 	{
 		std::vector<AutomationCapabilityRegistration> capabilities;
-		capabilities.reserve(12);
+		capabilities.reserve(15);
 		capabilities.push_back(MakeRegistration(resolveHandler, "activity.list", "activity", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, false, false));
 		capabilities.push_back(MakeRegistration(resolveHandler, "game_view.capture", "capture", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, false, true));
 		capabilities.push_back(MakeRegistration(resolveHandler, "camera.capture_object", "capture", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, true, true));
 		capabilities.push_back(MakeRegistration(resolveHandler, "camera.capture_custom", "capture", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, false, true));
 		capabilities.push_back(MakeRegistration(resolveHandler, "renderer.virtualGeometry.stats", "renderer", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, false, true));
+		capabilities.push_back(MakeRegistration(resolveHandler, "renderer.virtualGeometry.capabilityEvidence", "renderer", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, false, true));
+		// Validation-route overrides are transient session selections, like selecting
+		// an authored object. Project-write permission is sufficient and avoids
+		// invalidating this provider with the stricter global-write approval rule.
+		capabilities.push_back(MakeRegistration(resolveHandler, "renderer.virtualGeometry.validationRoute.set", "renderer", MutationMode::EditorSelection, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, false, false, true));
+		capabilities.push_back(MakeRegistration(resolveHandler, "renderer.virtualGeometry.validationRoute.reset", "renderer", MutationMode::EditorSelection, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, false, false, true));
+		capabilities.push_back(MakeRegistration(resolveHandler, "renderer.virtualGeometry.authoritativePick", "renderer", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, false, true));
 		capabilities.push_back(MakeRegistration(resolveHandler, "renderer.recovery.safe_save_project", "renderer", MutationMode::ProjectMutation, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, true, false, false));
 		capabilities.push_back(MakeRegistration(resolveHandler, "diagnostics.get_summary", "diagnostics", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, false, false));
 		capabilities.push_back(MakeRegistration(resolveHandler, "jobs.list", "jobs", MutationMode::ReadOnly, AutomationPermission::Read, AutomationApprovalPolicy::None, false, false, false));

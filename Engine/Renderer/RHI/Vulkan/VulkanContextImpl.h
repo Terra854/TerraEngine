@@ -13,10 +13,13 @@
 #include "VulkanUploadPlanning.h"
 #include "VulkanDescriptorPlanning.h"
 #include "VulkanCommandRecording.h"
+#include "VulkanVirtualGeometryExecutor.h"
+#include "VulkanFrameDiagnostics.h"
 
 #include "Core/Logger/Logger.h"
 #include "Window/WindowSystem.h"
 #include "Resource/ResourceManager.h"
+#include "Resource/VirtualGeometryPagePublication.h"
 #include "Resource/ShaderCollection.h"
 #include "File Formats/TerraEngineMeshFile.h"
 #include "File Formats/TerraEngineMaterialFile.h"
@@ -196,6 +199,9 @@ struct PipelineKey {
 	std::uint64_t shaderModuleGeneration = 0u;
 	std::uint32_t geometryAbiVersion = 0u;
 	std::uint32_t geometryPolicy = 0u;
+	// Only the default conventional surface pipeline can exchange its ordinary
+	// fragment stage for the Vulkan-only identity-output variant.
+	bool usesConventionalVisibilityIdentity = false;
 
 	bool operator==(const PipelineKey& other) const {
 		return shaderCollectionId == other.shaderCollectionId
@@ -203,7 +209,8 @@ struct PipelineKey {
 			&& collectionGeneration == other.collectionGeneration
 			&& shaderModuleGeneration == other.shaderModuleGeneration
 			&& geometryAbiVersion == other.geometryAbiVersion
-			&& geometryPolicy == other.geometryPolicy;
+			&& geometryPolicy == other.geometryPolicy
+			&& usesConventionalVisibilityIdentity == other.usesConventionalVisibilityIdentity;
 	}
 };
 
@@ -217,6 +224,7 @@ struct PipelineKeyHash {
 		hash ^= std::hash<std::uint64_t>{}(k.shaderModuleGeneration) << 3u;
 		hash ^= std::hash<std::uint32_t>{}(k.geometryAbiVersion) << 4u;
 		hash ^= std::hash<std::uint32_t>{}(k.geometryPolicy) << 5u;
+		hash ^= std::hash<bool>{}(k.usesConventionalVisibilityIdentity) << 6u;
 		return hash;
 	}
 };
@@ -275,6 +283,17 @@ struct VulkanContext::Impl {
 	VmaAllocation depthImageAllocation = VK_NULL_HANDLE;
 	VkImageView depthImageView = VK_NULL_HANDLE;
 
+	// A conventional identity attachment stores integer producer data beside the
+	// primary color output. It is not sampled or read back in this slice; owning
+	// it separately keeps the future readback path independent from presentation.
+	struct ConventionalVisibilityIdentityAttachment
+	{
+		VkImage image = VK_NULL_HANDLE;
+		VmaAllocation allocation = VK_NULL_HANDLE;
+		VkImageView view = VK_NULL_HANDLE;
+	};
+	std::vector<ConventionalVisibilityIdentityAttachment> presentationVisibilityIdentities;
+
 	std::vector<VkCommandPool> commandPools;
 	std::vector<VkCommandBuffer> commandBuffers;
 	// Editor UI recording uses pools that are independent from scene rendering.
@@ -319,6 +338,7 @@ struct VulkanContext::Impl {
 		VkImage depthImage = VK_NULL_HANDLE;
 		VmaAllocation depthAllocation = VK_NULL_HANDLE;
 		VkImageView depthView = VK_NULL_HANDLE;
+		std::vector<ConventionalVisibilityIdentityAttachment> visibilityIdentities;
 		std::vector<VkSemaphore> acquireByFrame;
 		std::vector<VkSemaphore> editorOffscreenReadyByFrame;
 		std::vector<VkSemaphore> presentReadyByImage;
@@ -584,11 +604,29 @@ struct VulkanContext::Impl {
 					std::uint32_t viewId = 0u;
 					RenderViewType viewType = RenderViewType::Game;
 					VulkanBuffer packetBuffer{};
+					VulkanBuffer traversalInstanceBuffer{};
+					VulkanBuffer traversalRequestBuffer{};
+					VulkanBuffer traversalCounterBuffer{};
 					VulkanBuffer batchBuffer{};
 					VulkanBuffer compactedPacketBuffer{};
 					VulkanBuffer generatedSubmissionBuffer{};
 					VulkanBuffer counterReadbackBuffer{};
+					VulkanBuffer zeroWorkIndirectBuffer{};
+					// Visibility compute uses frame-owned scratch records. These buffers
+					// are intentionally separate from generated draw arguments so a
+					// visibility failure cannot publish indirect execution authority.
+					VulkanBuffer visibilityTriangleBuffer{};
+					VulkanBuffer visibilityDepthBuffer{};
+					VulkanBuffer visibilityRecordBuffer{};
+					VulkanBuffer resolvedVisibilityBuffer{};
+					VulkanBuffer shadingBinBuffer{};
 					VulkanBuffer pagePayloadBuffer{};
+					// This private set matches the compaction shader's four storage
+					// bindings. It is not the global bindless set used by graphics.
+					VkDescriptorSet executorDescriptorSet = VK_NULL_HANDLE;
+					VkDescriptorSet visibilityComputeRasterDescriptorSet = VK_NULL_HANDLE;
+					VkDescriptorSet visibilityResolveDescriptorSet = VK_NULL_HANDLE;
+					VkDescriptorSet visibilityShadingBinsDescriptorSet = VK_NULL_HANDLE;
 					BindlessBufferPublication packetPublication{};
 					BindlessBufferPublication batchPublication{};
 					BindlessBufferPublication compactedPacketPublication{};
@@ -602,10 +640,18 @@ struct VulkanContext::Impl {
 					std::uint32_t counterReadbackBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 					std::uint32_t pagePayloadBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 					std::size_t packetCapacity = 0u;
+					std::size_t traversalInstanceCapacity = 0u;
+					std::size_t traversalRequestCapacity = 0u;
 					std::size_t batchCapacity = 0u;
 					std::size_t compactedPacketCapacity = 0u;
 					std::size_t generatedSubmissionCapacity = 0u;
+					bool generatedSubmissionSupportsIndirect = false;
 					std::size_t counterReadbackCapacity = 0u;
+					std::size_t visibilityTriangleCapacity = 0u;
+					std::size_t visibilityDepthCapacity = 0u;
+					std::size_t visibilityRecordCapacity = 0u;
+					std::size_t resolvedVisibilityCapacity = 0u;
+					std::size_t shadingBinCapacity = 0u;
 					std::size_t pagePayloadCapacity = 0u;
 					// Resource Residency needs asset-owned byte counts even
 					// though page-local virtual geometry streams are packed into
@@ -624,12 +670,42 @@ struct VulkanContext::Impl {
 					std::deque<VirtualGeometryGpuPacketFrameResources> retiredVirtualGeometryGpuPacketResources{};
 					std::array<std::vector<TerraEngine::Renderer::Vulkan::VirtualGeometryPageRetirementPlan>, MAX_FRAMES_IN_FLIGHT> pendingVirtualGeometryPageRetirementsByFrame{};
 					std::uint64_t nextVirtualGeometryGpuPacketResourceSerial = 1u;
+				// Decoded static pages use persistent buffers rather than the
+				// per-view packet mirrors above. A candidate is queued on the
+				// submitting frame slot and becomes publishable only after
+				// BeginFrame observes that slot's fence.
+				struct PersistentVirtualGeometryPageResource
+				{
+					TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+					std::uint32_t pageId = 0xffffffffu;
+					std::uint64_t publicationGeneration = 0u;
+					std::uint64_t allocationId = 0u;
+					std::uint32_t bindlessIndex = INVALID_BINDLESS_BUFFER_INDEX;
+					VulkanBuffer buffer{};
+				};
+				std::vector<PersistentVirtualGeometryPageResource> persistentVirtualGeometryPages;
+				std::array<std::vector<TerraEngine::Resource::VirtualGeometryPagePublicationCandidate>,
+					MAX_FRAMES_IN_FLIGHT> pendingVirtualGeometryPublicationsByFrame{};
+				std::uint64_t nextVirtualGeometryPersistentPageAllocationId = 1u;
 				std::uint32_t activeVirtualGeometryPacketBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 				std::uint32_t activeVirtualGeometryBatchBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 				std::uint32_t activeVirtualGeometryCompactedPacketBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 				std::uint32_t activeVirtualGeometryGeneratedSubmissionBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 				std::uint32_t activeVirtualGeometryCounterReadbackBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 				std::uint32_t activeVirtualGeometryPagePayloadBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
+				// This plan records whether the GPU-driven executor has every live
+				// prerequisite. CPU-authored mirrors remain authoritative until it does.
+				TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryExecutorPlan latestVirtualGeometryExecutorPlan{};
+				TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryFailureReceipt latestVirtualGeometryExecutorFailure{};
+				TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryExecutorResources latestVirtualGeometryExecutorResources{};
+				TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryExecutorPipelines virtualGeometryExecutorPipelines{};
+				VkDescriptorSetLayout virtualGeometryExecutorDescriptorSetLayout = VK_NULL_HANDLE;
+				std::string virtualGeometryExecutorUnavailableReason;
+				TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryVisibilityPlan latestVirtualGeometryVisibilityPlan{};
+				TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryVisibilityResources latestVirtualGeometryVisibilityResources{};
+				TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryVisibilityPipelines virtualGeometryVisibilityPipelines{};
+				VkDescriptorSetLayout virtualGeometryVisibilityDescriptorSetLayout = VK_NULL_HANDLE;
+				std::string virtualGeometryVisibilityUnavailableReason;
 				static constexpr uint32_t kHiZViewCount = 2u;
 				static constexpr uint32_t kHiZGameViewIndex = 0u;
 				static constexpr uint32_t kHiZSceneViewIndex = 1u;
@@ -863,14 +939,50 @@ struct VulkanContext::Impl {
 		std::uint32_t latencyFrames = 0u;
 		std::string reason;
 	};
+	// Virtual-geometry timestamp state is separate from the broad per-view GPU
+	// timer. A stage stays unavailable until an executor owns an isolated live
+	// Vulkan command; prepared CPU packet mirrors never enter this state as work.
+	struct VirtualGeometryGpuTimestampStageSample
+	{
+		TerraEngine::Renderer::VirtualGeometryBackendStage stage =
+			TerraEngine::Renderer::VirtualGeometryBackendStage::Traversal;
+		TerraEngine::Renderer::VirtualGeometryBackendRoute route =
+			TerraEngine::Renderer::VirtualGeometryBackendRoute::None;
+		TerraEngine::Renderer::BackendMeasurementAvailability availability =
+			TerraEngine::Renderer::BackendMeasurementAvailability::Unavailable;
+		std::uint64_t frameNumber = 0u;
+		std::uint32_t viewId = 0u;
+		std::uint64_t rendererGeneration = 0u;
+		std::uint64_t geometryGeneration = 0u;
+		std::uint64_t residencyGeneration = 0u;
+		std::uint64_t commandGeneration = 0u;
+		std::uint32_t firstQuery = 0u;
+		bool timestampWritesRecorded = false;
+		bool published = false;
+		std::string reason;
+	};
 	static constexpr uint32_t kGpuTimestampQueriesPerView = 2u;
 	static constexpr uint32_t kGpuTimestampQueriesPerFrame = kStatsViewCount * kGpuTimestampQueriesPerView;
+	static constexpr uint32_t kVirtualGeometryTimestampQueriesPerStage = 2u;
+	static constexpr uint32_t kVirtualGeometryTimestampQueriesPerFrame =
+		kStatsViewCount
+		* static_cast<uint32_t>(TerraEngine::Renderer::Vulkan::kVulkanVirtualGeometryStageCount)
+		* kVirtualGeometryTimestampQueriesPerStage;
+	static constexpr uint32_t kTotalGpuTimestampQueriesPerFrame =
+		kGpuTimestampQueriesPerFrame + kVirtualGeometryTimestampQueriesPerFrame;
 	VkQueryPool gpuTimestampQueryPool = VK_NULL_HANDLE;
 	float gpuTimestampPeriodNanoseconds = 0.0f;
 	bool gpuTimestampQueriesSupported = false;
+	std::uint64_t gpuTimestampQueryPoolGeneration = 0u;
 	std::array<std::array<bool, kStatsViewCount>, MAX_FRAMES_IN_FLIGHT> pendingGpuTimestampWritesByFrame{};
 	std::array<std::array<std::uint64_t, kStatsViewCount>, MAX_FRAMES_IN_FLIGHT> pendingGpuTimestampFrameIdsByFrame{};
 	std::array<std::array<GpuTimestampViewSample, kStatsViewCount>, MAX_FRAMES_IN_FLIGHT> completedGpuTimestampSamplesByFrame{};
+	std::array<std::array<std::array<VirtualGeometryGpuTimestampStageSample, TerraEngine::Renderer::Vulkan::kVulkanVirtualGeometryStageCount>, kStatsViewCount>, MAX_FRAMES_IN_FLIGHT> virtualGeometryGpuTimestampSamplesByFrame{};
+	std::vector<TerraEngine::Renderer::VirtualGeometryBackendExecutionReceipt> completedVirtualGeometryExecutionReceipts;
+	std::vector<TerraEngine::Renderer::VirtualGeometryBackendMeasurement> completedVirtualGeometryMeasurements;
+	// Capability flags are promoted only after a fence-delayed timestamp receipt,
+	// never merely because a pipeline or descriptor set was created.
+	std::array<bool, TerraEngine::Renderer::Vulkan::kVulkanVirtualGeometryStageCount> completedVirtualGeometryStageEvidence{};
 	std::array<std::vector<FrameLightCandidate>, kStatsSlotCount> pendingLightAnalysisCandidatesBySlot{};
 	std::array<GpuLightAnalysisViewSnapshot, kStatsViewCount> latestGpuLightAnalysisByView{};
 	std::array<ViewLightingTemporalState, kStatsViewCount> lightingTemporalStateByView{};
@@ -931,6 +1043,10 @@ struct VulkanContext::Impl {
 	
 		void PublishVirtualGeometryGpuPacketResources(const FrameRenderData& frameData, RenderViewType viewType, std::uint32_t viewId, std::uint64_t frameId);
 		void DestroyVirtualGeometryGpuPacketResources(VirtualGeometryGpuPacketFrameResources& resources);
+		bool EnsureVulkanVirtualGeometryExecutorPipeline();
+		void DestroyVulkanVirtualGeometryExecutorPipeline();
+		bool EnsureVulkanVirtualGeometryVisibilityPipelines();
+		void DestroyVulkanVirtualGeometryVisibilityPipelines();
 		void ResetMeshletCounters(uint32_t statsSlotIndex);
 	
 	// GetSnapshotLightDataOffset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1013,22 +1129,29 @@ struct VulkanContext::Impl {
 
 	// struct OffscreenResources groups related state and operations so callers have one documented contract.
 	struct OffscreenResources {
-	VkImage image = VK_NULL_HANDLE;
-	VmaAllocation allocation = VK_NULL_HANDLE;
-	VkImageView view = VK_NULL_HANDLE;
-	VkSampler sampler = VK_NULL_HANDLE;
-	VkImage depthImage = VK_NULL_HANDLE;
-	VmaAllocation depthAllocation = VK_NULL_HANDLE;
-	VkImageView depthView = VK_NULL_HANDLE;
-	VkFramebuffer framebuffer = VK_NULL_HANDLE;
-	// Each offscreen target owns its real framebuffer extent. MCP capture
-	// targets can differ from the editor swapchain, so readback must consult
-	// this field instead of assuming every target is swapchain-sized.
-	VkExtent2D extent{0u, 0u};
-	// Vulkan may recycle the same numeric VkImageView/VkSampler handles after a
-	// resize. The editor uses this monotonic identity to refresh its ImGui
-	// descriptor even when comparing the raw handles would report no change.
-	std::uint64_t generation = 0u;
+		VkImage image = VK_NULL_HANDLE;
+		VmaAllocation allocation = VK_NULL_HANDLE;
+		VkImageView view = VK_NULL_HANDLE;
+		VkSampler sampler = VK_NULL_HANDLE;
+		VkImage depthImage = VK_NULL_HANDLE;
+		VmaAllocation depthAllocation = VK_NULL_HANDLE;
+		VkImageView depthView = VK_NULL_HANDLE;
+		// Every Scene, Game, and dedicated capture target owns the typed identity
+		// image required by the conventional default fragment variant.
+		ConventionalVisibilityIdentityAttachment visibilityIdentity;
+		VkFramebuffer framebuffer = VK_NULL_HANDLE;
+		// Each offscreen target owns its real framebuffer extent. MCP capture
+		// targets can differ from the editor swapchain, so readback must consult
+		// this field instead of assuming every target is swapchain-sized.
+		VkExtent2D extent{0u, 0u};
+		// Vulkan may recycle the same numeric VkImageView/VkSampler handles after a
+		// resize. The editor uses this monotonic identity to refresh its ImGui
+		// descriptor even when comparing the raw handles would report no change.
+		std::uint64_t generation = 0u;
+		// Published only after this target records its conventional pass. Async
+		// identity copies reject a frame/session mismatch before mapping pixels.
+		std::uint64_t identityFrameId = 0u;
+		std::uint64_t identityRendererGeneration = 0u;
 	};
 	OffscreenResources sceneView;
 	OffscreenResources gameView;
@@ -1179,7 +1302,9 @@ struct VulkanContext::Impl {
 		{
 			std::uint64_t stableInstanceId = 0u;
 			TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
-			std::uint32_t groupIndex = 0u;
+			// The bridge stores each owner/mesh slice contiguously. Draw push
+			// constants carry this word offset so shaders never scan other owners.
+			std::uint32_t headerWordOffset = 0u;
 		};
 		std::vector<GraphicsGroup> graphicsGroups;
 		std::vector<TerraEngine::Renderer::DeformedPageKey> workKeys;
@@ -1256,12 +1381,29 @@ struct VulkanContext::Impl {
 	};
 	std::deque<VulkanReadbackRequest> inFlightReadbacks;
 	std::deque<TerraEngine::Renderer::RenderCaptureResult> completedReadbacks;
+	// Identity copies are kept separate from image capture so their uint4 ABI and
+	// generation checks can fail closed without manufacturing color metadata.
+	struct VulkanConventionalVisibilityIdentityReadbackRequest
+	{
+		TerraEngine::Renderer::ConventionalVisibilityIdentityReadbackResult completion;
+		VkImage sourceImage = VK_NULL_HANDLE;
+		VkBuffer stagingBuffer = VK_NULL_HANDLE;
+		VmaAllocation stagingAllocation = VK_NULL_HANDLE;
+		VkFence fence = VK_NULL_HANDLE;
+		VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+		VkCommandPool commandPool = VK_NULL_HANDLE;
+	};
+	std::deque<VulkanConventionalVisibilityIdentityReadbackRequest> inFlightConventionalVisibilityIdentityReadbacks;
+	std::deque<TerraEngine::Renderer::ConventionalVisibilityIdentityReadbackResult> completedConventionalVisibilityIdentityReadbacks;
 
 	bool InitVulkan(WindowSystem& windowSystem);
 	void Cleanup(bool skipDeviceIdle = false);
 	void ProcessReadbackRequests();
 	void DestroyReadbackRequestResources(VulkanReadbackRequest& request);
 	void CancelReadbackRequests(std::string_view errorCategory, std::string_view message, bool publishResults);
+	void ProcessConventionalVisibilityIdentityReadbacks();
+	void DestroyConventionalVisibilityIdentityReadbackRequestResources(
+		VulkanConventionalVisibilityIdentityReadbackRequest& request);
 	[[nodiscard]] bool HasInFlightReadbackForImage(VkImage image) const;
 
 	void InitEditorMode();
@@ -1366,6 +1508,27 @@ struct VulkanContext::Impl {
 	void ResolveCompletedGpuTimestamps(uint32_t frameIndex);
 	void MarkGpuTimestampBegin(VkCommandBuffer cmd, uint32_t frameIndex, VulkanContext::ViewType view, std::uint64_t frameId);
 	void MarkGpuTimestampEnd(VkCommandBuffer cmd, uint32_t frameIndex, VulkanContext::ViewType view);
+	void BeginVirtualGeometryTimestampFrame(
+		uint32_t frameIndex,
+		VulkanContext::ViewType view,
+		std::uint64_t frameNumber,
+		std::uint32_t viewId,
+		std::uint64_t rendererGeneration);
+	void MarkVirtualGeometryTimestampBegin(
+		VkCommandBuffer cmd,
+		uint32_t frameIndex,
+		VulkanContext::ViewType view,
+		TerraEngine::Renderer::VirtualGeometryBackendStage stage,
+		TerraEngine::Renderer::VirtualGeometryBackendRoute route,
+		std::uint64_t geometryGeneration,
+		std::uint64_t residencyGeneration,
+		std::uint64_t commandGeneration);
+	void MarkVirtualGeometryTimestampEnd(
+		VkCommandBuffer cmd,
+		uint32_t frameIndex,
+		VulkanContext::ViewType view,
+		TerraEngine::Renderer::VirtualGeometryBackendStage stage);
+	void ResolveCompletedVirtualGeometryTimestamps(uint32_t frameIndex);
 
 	bool CreateDescriptorPool();
 
@@ -1373,6 +1536,7 @@ struct VulkanContext::Impl {
 	VulkanBuffer CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage, const char* name = nullptr);
 	void DestroyBufferImmediate(VulkanBuffer& buffer);
 	void RetireBuffer(VulkanBuffer& buffer);
+	void PublishVirtualGeometryDecodedPageResources(const FrameRenderData& frameData);
 	bool PublishVulkanAnimationResources(const TerraEngine::Animation::GpuAnimationPlan& plan, std::uint32_t rendererGeneration);
 	bool PublishVulkanCpuAnimationResources(
 		const TerraEngine::Renderer::CpuAnimationDeformationPlan& plan);
@@ -1408,8 +1572,15 @@ struct VulkanContext::Impl {
 	void EnsureMesh(TerraEngine::UUID meshId);
 	std::optional<PipelineKey> BuildPipelineKey(
 		TerraEngine::UUID shaderCollectionId,
-		uint32_t materialFlags) const;
-	void EnsurePipeline(TerraEngine::UUID shaderCollectionId, VkRenderPass renderPass, uint32_t materialFlags);
+		uint32_t materialFlags,
+		bool usesConventionalVisibilityIdentity = false) const;
+	void EnsurePipeline(TerraEngine::UUID shaderCollectionId, VkRenderPass renderPass,
+		uint32_t materialFlags, bool usesConventionalVisibilityIdentity = false);
+	bool UsesConventionalVisibilityAttachments(VkRenderPass pass) const;
+	bool CreateConventionalVisibilityIdentityAttachment(
+		VkExtent2D extent, ConventionalVisibilityIdentityAttachment& attachment);
+	void DestroyConventionalVisibilityIdentityAttachment(
+		ConventionalVisibilityIdentityAttachment& attachment);
 	VkDescriptorSet EnsureMeshDescriptorSet(TerraEngine::UUID meshId, const VulkanPipeline& pipeline);
 
 	VkDescriptorType MapDescriptorType(DescriptorType type);

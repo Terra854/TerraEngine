@@ -132,6 +132,16 @@ namespace TerraEngine::Renderer {
 		const DeformedPagePublication& prior,
 		const DeformedPagePublication& candidate);
 
+	class TERRAENGINE_API DeformedPageRetirementQueue
+	{
+	public:
+		void Enqueue(const DeformedPagePublication& publication);
+		std::vector<DeformedPagePublication> RetireCompleted(std::uint64_t completedFence);
+		[[nodiscard]] std::size_t PendingCount() const noexcept { return pending.size(); }
+	private:
+		std::vector<DeformedPagePublication> pending;
+	};
+
 	enum class AnimatedGeometryFallback : std::uint8_t
 	{
 		None,

@@ -9,6 +9,12 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <glm/glm.hpp>
+
+// RenderViewType is defined by RenderTypes.h. The RHI identity-readback
+// contract needs only its fixed underlying representation here, which avoids a
+// circular RenderTypes -> animation -> RHIContext include during compilation.
+enum class RenderViewType : std::uint8_t;
 
 enum class RHIBackend
 {
@@ -28,6 +34,32 @@ struct RHIConfig
 
 namespace TerraEngine::Renderer {
 
+	// ConventionalVisibilityIdentityReadbackRequest names one Scene/Game target
+	// pixel without exposing a backend image handle to editor or scripting code.
+	struct ConventionalVisibilityIdentityReadbackRequest
+	{
+		RenderViewType viewType = static_cast<RenderViewType>(1u);
+		glm::uvec2 pixel = glm::uvec2(0u);
+		std::uint64_t frameId = 0u;
+		std::uint64_t rendererGeneration = 0u;
+		std::uint64_t targetGeneration = 0u;
+	};
+
+	// This result is separate from color capture. The uint4 value is
+	// authoritative only after the backend's fence-owned copy completes.
+	struct ConventionalVisibilityIdentityReadbackResult
+	{
+		RenderViewType viewType = static_cast<RenderViewType>(1u);
+		glm::uvec2 pixel = glm::uvec2(0u);
+		std::uint64_t frameId = 0u;
+		std::uint64_t rendererGeneration = 0u;
+		std::uint64_t targetGeneration = 0u;
+		glm::uvec4 identity = glm::uvec4(0u);
+		bool completed = false;
+		bool authoritative = false;
+		std::string rejectionReason;
+	};
+
 	enum class RenderBackendQueueMode
 	{
 		Parallel,
@@ -42,6 +74,115 @@ namespace TerraEngine::Renderer {
 		RenderBackendQueueMode mode = RenderBackendQueueMode::Serial;
 		bool handoffRequired = false;
 		std::string fallbackReason;
+	};
+
+	enum class VirtualGeometryBackendStage : std::uint8_t
+	{
+		Traversal,
+		Compaction,
+		IndirectGeneration,
+		PageDecode,
+		HardwareRaster,
+		ComputeRaster,
+		VisibilityResolve,
+		Shading,
+		StreamingUpdate,
+		Deformation,
+		Shadow,
+		Capture,
+		RayTracing
+	};
+
+	enum class VirtualGeometryBackendRoute : std::uint8_t
+	{
+		None,
+		ProcessorOracle,
+		MeshShader,
+		Compute,
+		Indexed
+	};
+
+	enum class BackendMeasurementAvailability : std::uint8_t
+	{
+		Pending,
+		Unavailable,
+		Invalid,
+		Measured
+	};
+
+	// Generated-work capabilities describe launch mechanics only. Execution
+	// evidence is published separately after the backend has submitted and
+	// observed the matching generation.
+	struct VirtualGeometryGeneratedWorkCapability
+	{
+		bool supportsDeviceAuthoredWork = false;
+		bool supportsIndirectCount = false;
+		bool supportsBoundedNonCount = false;
+		bool supportsZeroCommandSubmission = false;
+		std::uint32_t maximumCommandCount = 0u;
+		std::uint32_t commandAlignment = 0u;
+		std::uint32_t commandStride = 0u;
+	};
+
+	struct VirtualGeometryBackendExecutionReceipt
+	{
+		VirtualGeometryBackendStage stage =
+			VirtualGeometryBackendStage::Traversal;
+		VirtualGeometryBackendRoute route =
+			VirtualGeometryBackendRoute::None;
+		std::uint64_t frameNumber = 0u;
+		std::uint32_t viewId = 0u;
+		std::uint64_t rendererGeneration = 0u;
+		std::uint64_t geometryGeneration = 0u;
+		std::uint64_t residencyGeneration = 0u;
+		std::uint64_t commandGeneration = 0u;
+		std::uint64_t completionFence = 0u;
+		bool commandRecorded = false;
+		bool commandSubmitted = false;
+		bool completionObserved = false;
+		bool generationMatched = false;
+		std::string evidenceId;
+		std::string failureReason;
+
+		[[nodiscard]] bool IsExecuted() const noexcept
+		{
+			return frameNumber != 0u
+				&& rendererGeneration != 0u
+				&& geometryGeneration != 0u
+				&& commandGeneration != 0u
+				&& completionFence != 0u
+				&& commandRecorded
+				&& commandSubmitted
+				&& completionObserved
+				&& generationMatched
+				&& !evidenceId.empty();
+		}
+	};
+
+	struct VirtualGeometryBackendMeasurement
+	{
+		VirtualGeometryBackendStage stage =
+			VirtualGeometryBackendStage::Traversal;
+		std::uint64_t frameNumber = 0u;
+		std::uint32_t viewId = 0u;
+		std::uint64_t rendererGeneration = 0u;
+		std::uint64_t queryPoolGeneration = 0u;
+		std::uint32_t firstQuery = 0u;
+		std::uint32_t queryCount = 0u;
+		std::uint64_t rawTicks = 0u;
+		double durationMilliseconds = 0.0;
+		BackendMeasurementAvailability availability =
+			BackendMeasurementAvailability::Unavailable;
+		std::string reason;
+
+		[[nodiscard]] bool HasAuthoritativeValue() const noexcept
+		{
+			return availability == BackendMeasurementAvailability::Measured
+				&& frameNumber != 0u
+				&& rendererGeneration != 0u
+				&& queryPoolGeneration != 0u
+				&& queryCount != 0u;
+		}
 	};
 
 	// BackendCapabilityProfile is the renderer-facing promise a graphics API
@@ -78,6 +219,10 @@ namespace TerraEngine::Renderer {
 		bool supportsVirtualGeometryGpuCompaction = false;
 		bool supportsVirtualGeometryGeneratedSubmissions = false;
 		bool supportsVirtualGeometryCounterReadback = false;
+		bool supportsVirtualGeometryComputeRaster = false;
+		bool supportsVirtualGeometryVisibilityResolve = false;
+		bool supportsVirtualGeometryShadingBins = false;
+		VirtualGeometryGeneratedWorkCapability virtualGeometryGeneratedWork{};
 		std::uint32_t maxRecordingWorkers = 1u;
 		std::uint32_t workerSchedulingThreshold = 128u;
 		std::uint32_t maxPreparedFrames = 1u;

@@ -321,6 +321,7 @@ void Profiler::StartRecording(const ProfilerCaptureMetadata& metadata, const Pro
 	statusText = "Recording";
 	state = ProfilerSessionState::Recording;
 	UpdateFastRecordingFlagsLocked();
+	snapshotRevision.fetch_add(1u, std::memory_order_release);
 }
 
 // Profiler::PauseRecording is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -333,6 +334,7 @@ void Profiler::PauseRecording()
 		state = ProfilerSessionState::Paused;
 		statusText = "Paused";
 		UpdateFastRecordingFlagsLocked();
+		snapshotRevision.fetch_add(1u, std::memory_order_release);
 	}
 }
 
@@ -346,6 +348,7 @@ void Profiler::ResumeRecording()
 		state = ProfilerSessionState::Recording;
 		statusText = "Recording";
 		UpdateFastRecordingFlagsLocked();
+		snapshotRevision.fetch_add(1u, std::memory_order_release);
 	}
 }
 
@@ -368,6 +371,7 @@ ProfilerCaptureDocument Profiler::FinishRecording()
 	state = ProfilerSessionState::Finalizing;
 	statusText = "Finalizing capture";
 	UpdateFastRecordingFlagsLocked();
+	snapshotRevision.fetch_add(1u, std::memory_order_release);
 	ProfilerCaptureDocument snapshot = document;
 	MaterializeAnimationDiagnosticsMetrics(snapshot);
 	return snapshot;
@@ -388,6 +392,7 @@ void Profiler::Clear()
 	statusText = "Idle";
 	lastError.clear();
 	UpdateFastRecordingFlagsLocked();
+	snapshotRevision.fetch_add(1u, std::memory_order_release);
 }
 
 // Profiler::LoadDocument is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -403,6 +408,7 @@ void Profiler::LoadDocument(const ProfilerCaptureDocument& loadedDocument)
 	statusText = "Loaded capture";
 	lastError.clear();
 	UpdateFastRecordingFlagsLocked();
+	snapshotRevision.fetch_add(1u, std::memory_order_release);
 }
 
 // Profiler::BeginFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -599,11 +605,28 @@ void Profiler::EndFrame()
 		UnavailableTelemetryDuration("Input timestamp was not supplied by the active platform backend."),
 		AvailableTelemetryDuration(MillisecondsToNanoseconds(currentFrame->durationMs)),
 		renderDiagnostics.frameId};
+	if (settings.detailLevel == ProfilerCaptureDetailLevel::Aggregate)
+	{
+		// Explicit Aggregate captures intentionally disable optional markers.
+		// Keep one fixed root sample so a valid frame timing never produces an
+		// empty timeline, while system and worker scope contention remains absent.
+		ProfilerSample frameRoot;
+		frameRoot.sampleId = nextSampleId++;
+		frameRoot.moduleId = ProfilerModuleId::CpuEngine;
+		frameRoot.name = "Engine Frame";
+		frameRoot.threadLabel = "main";
+		frameRoot.durationMs = currentFrame->durationMs;
+		frameRoot.retainInAggregate = true;
+		currentFrame->samples.push_back(std::move(frameRoot));
+	}
 	AggregateSamplesForFrame(*currentFrame);
 	document.frames.push_back(*currentFrame);
 	TrimFrameBuffer(document.frames, settings);
 	currentFrame.reset();
 	UpdateFastRecordingFlagsLocked();
+	// Publish after the complete frame is immutable so UI readers never need to
+	// contend with marker producers for an in-progress sample vector.
+	snapshotRevision.fetch_add(1u, std::memory_order_release);
 }
 
 void Profiler::RecordDormantAnimationFacts(std::uint64_t schedulerMembershipChecks)
@@ -1044,7 +1067,11 @@ void Profiler::RecordTaskFinished(bool sampleActive)
 void Profiler::SelectFrame(std::uint64_t frameIndex)
 {
 	std::lock_guard<std::mutex> lock(mutex);
-	selectedFrameIndex = frameIndex;
+	if (selectedFrameIndex != frameIndex)
+	{
+		selectedFrameIndex = frameIndex;
+		snapshotRevision.fetch_add(1u, std::memory_order_release);
+	}
 }
 
 // Profiler::GetState is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1190,6 +1217,11 @@ bool Profiler::IsCapturing() const
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	return state == ProfilerSessionState::Recording || state == ProfilerSessionState::Paused;
+}
+
+std::uint64_t Profiler::GetSnapshotRevision() const noexcept
+{
+	return snapshotRevision.load(std::memory_order_acquire);
 }
 
 // Profiler::NowMs is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

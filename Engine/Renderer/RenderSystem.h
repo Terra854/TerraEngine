@@ -28,7 +28,11 @@
 #include "Components/LightComponent.h"
 #include "Renderer/Graph/RenderDiagnostics.h"
 #include "Renderer/Graph/RenderFrameSnapshot.h"
+#include "Renderer/RenderTypes.h"
 #include "Renderer/RendererRecoveryPolicy.h"
+#include "Renderer/VirtualGeometry/Diagnostics/VirtualGeometryReplay.h"
+#include "Renderer/VirtualGeometry/Selection/VirtualGeometryViewPolicy.h"
+#include "Renderer/VirtualGeometry/Visibility/VirtualGeometryVisibility.h"
 #include "Physics/PhysicsDiagnostics.h"
 #include "Scene/RuntimeLayout.h"
 #include "Scene/SceneGraphRuntime.h"
@@ -104,6 +108,11 @@ public:
 	bool RequestsEngineShutdown() const override;
 	std::string SystemName() override;
 	TerraEngine::Scheduling::SystemDeclaration SchedulerDeclaration() override;
+	// Split the renderer's frame contract into scheduler-visible boundaries. The
+	// current renderer still executes its established frame body at the protected
+	// snapshot boundary while later virtual-geometry work replaces those internal
+	// sections with the typed plans named by these descriptors.
+	std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> DeclareFrameWorkloads(float deltaTime) override;
 
 	void ReloadMaterial(const TerraEngine::UUID& materialId);
 	void ReloadMesh(const TerraEngine::UUID& meshId);
@@ -133,10 +142,48 @@ public:
 	// Automation can explain page-deformation eligibility without copying page
 	// identities or backend-owned work records.
 	std::size_t GetLatestAnimatedGeometryPageDemandCount() const;
+	// Scene/editor tools receive copied semantic visibility records from the last
+	// completed protected frame. They never map or retain backend-owned buffers.
+	std::vector<GpuVirtualGeometryPacketRecord>
+		GetLatestVirtualGeometryVisibilityRecords(RenderViewType viewType) const;
+	// Resolve a normalized viewport point against already-compacted records. The
+	// smallest covering cluster wins; stable debug identity breaks equal-area
+	// ties so hardware, compute, and indexed routes choose the same object.
+	static std::optional<VirtualGeometryVisibilityPick>
+		PickVirtualGeometryVisibilityRecord(
+			std::span<const GpuVirtualGeometryPacketRecord> records,
+			const glm::vec2& normalizedViewportPosition);
+	// Queue one non-blocking GPU identity copy. Returning false means callers
+	// must use the explicit CPU-projection fallback and must not claim GPU proof.
+	bool RequestConventionalVisibilityIdentityPick(
+		RenderViewType viewType, const glm::uvec2& pixel);
+	std::optional<VirtualGeometryVisibilityPick>
+		GetLatestAuthoritativeConventionalVisibilityIdentityPick(
+			RenderViewType viewType, const glm::uvec2& pixel) const;
+	// Return the exact asynchronous state for an identity request. Callers may
+	// poll this copied value but must never infer readiness from CPU projection.
+	TerraEngine::Renderer::AuthoritativeVisibilityPickState
+		GetConventionalVisibilityIdentityPickState(
+			RenderViewType viewType, const glm::uvec2& pixel) const;
+	// These validation controls are transient editor state. Hardware, Compute,
+	// and Indexed are real packet routes; hybrid deliberately keeps no fourth
+	// route and instead requests a mixed packet/material validation scene.
+	bool SetVirtualGeometryValidationRouteOverride(
+		TerraEngine::Renderer::VirtualGeometryRasterRoute route,
+		std::string* outReason = nullptr);
+	void SetVirtualGeometryHybridValidationSceneRequested(bool requested);
+	void ClearVirtualGeometryValidationRouteOverride();
+	std::optional<TerraEngine::Renderer::VirtualGeometryRasterRoute>
+		GetVirtualGeometryValidationRouteOverride() const;
+	bool IsVirtualGeometryHybridValidationSceneRequested() const;
 	void SetRendererRecoveryPolicy(const TerraEngine::Renderer::RendererRecoveryPolicy& policy);
 	TerraEngine::Renderer::RendererRecoveryPolicy GetRendererRecoveryPolicy() const;
 	std::vector<TerraEngine::Renderer::OcclusionDebugSample> GetLatestVirtualGeometryOcclusionDebugSamples(RenderViewType viewType, std::size_t maxCount = TerraEngine::Renderer::kVirtualGeometryOcclusionDebugSampleCapacity) const;
 	TerraEngine::Renderer::RenderDiagnosticsSummary GetLatestRenderGraphDiagnostics() const;
+	// Profiler presentation needs only submit-stage timings. Returning that
+	// projection avoids copying cost samples, stall messages, and per-view work
+	// records under the renderer statistics mutex.
+	std::vector<TerraEngine::Renderer::BackendStageTiming> GetLatestBackendStageTimings() const;
 	TerraEngine::Renderer::RenderCaptureAvailability GetCaptureAvailability() const;
 	TerraEngine::Renderer::RenderCaptureLimits GetCaptureLimits() const;
 	TerraEngine::Renderer::RenderCaptureQueueState GetCaptureQueueState() const;
@@ -289,6 +336,7 @@ private:
 	// Moves non-blocking backend fence completions into the bounded public
 	// result queue. This runs only at the protected render boundary.
 	void DrainCaptureReadbacks();
+	void DrainConventionalVisibilityIdentityReadbacks();
 	bool ResolveRenderDebugDiagnosticsEnabled() const;
 	void ApplyRenderDiagnosticsRequest();
 	void ReportFatalRendererRecoveryFailure(TerraEngine::Renderer::RendererRecoverySnapshot snapshot);
@@ -361,12 +409,38 @@ private:
 	TerraEngine::Renderer::RendererRecoveryPolicy rendererRecoveryPolicy = TerraEngine::Renderer::MakeEditorRendererRecoveryPolicy();
 	TerraEngine::Renderer::RenderDiagnosticsSummary latestRenderGraphDiagnostics{};
 	TerraEngine::Renderer::RenderFrameSnapshot latestRenderFrameSnapshot{};
+	std::vector<GpuVirtualGeometryPacketRecord> latestGameVirtualGeometryVisibilityRecords;
+	std::vector<GpuVirtualGeometryPacketRecord> latestSceneVirtualGeometryVisibilityRecords;
+	std::optional<VirtualGeometryVisibilityPick> latestSceneAuthoritativeIdentityPick;
+	std::optional<VirtualGeometryVisibilityPick> latestGameAuthoritativeIdentityPick;
+	glm::uvec2 latestSceneAuthoritativeIdentityPixel = glm::uvec2(0u);
+	glm::uvec2 latestGameAuthoritativeIdentityPixel = glm::uvec2(0u);
+	// At most one identity copy per view is tracked as pending. A later request
+	// replaces the earlier one so automation cannot accidentally read stale GPU
+	// proof after changing its requested pixel.
+	std::optional<glm::uvec2> pendingSceneAuthoritativeIdentityPixel;
+	std::optional<glm::uvec2> pendingGameAuthoritativeIdentityPixel;
+	std::string latestSceneAuthoritativeIdentityFailureReason;
+	std::string latestGameAuthoritativeIdentityFailureReason;
+	mutable std::mutex virtualGeometryValidationMutex;
+	std::optional<TerraEngine::Renderer::VirtualGeometryRasterRoute>
+		virtualGeometryValidationRouteOverride;
+	bool virtualGeometryHybridValidationSceneRequested = false;
 	TerraEngine::Renderer::RenderCaptureLimits captureLimits{};
 	TerraEngine::Renderer::RenderCaptureQueueState captureQueueState{};
 	// LOD transition history is private renderer state keyed by view/object/mesh.
 	// Workers only receive immutable snapshots of the resulting state, so Scene
 	// View, Game View, and future render targets cannot share mutable decisions.
 	std::unordered_map<std::uint64_t, TerraEngine::Renderer::VirtualGeometryClusterSelectionResult> virtualGeometryTransitionCache;
+	// Each rendered target owns its visibility history policy. Compatible views
+	// may reuse immutable geometry/residency, but never share a mutable Hi-Z
+	// history unless the policy explicitly assigns the same owner.
+	std::unordered_map<std::uint64_t, TerraEngine::Renderer::VirtualGeometryViewPolicyState> virtualGeometryViewPolicies;
+	// Pending replay counters remain unavailable until RHI publishes a completed
+	// counter-copy receipt. Keeping them on RenderSystem makes the protected frame
+	// boundary, rather than a worker, the only publication owner.
+	TerraEngine::Renderer::VirtualGeometryReplayReadbackQueue virtualGeometryReplayReadbacks;
+	std::vector<TerraEngine::Renderer::VirtualGeometryReplayArtifact> latestVirtualGeometryReplayArtifacts;
 	struct CompatibleAnimationPoseCacheRecord
 	{
 		TerraEngine::Renderer::AnimationRenderBinding binding{};

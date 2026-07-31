@@ -5,16 +5,19 @@
 #include "EditorContext.h"
 #include "Engine/Components/PrefabLinkComponent.h"
 #include "Engine/Components/Transform.h"
+#include "Engine/Components/AnimatorComponent.h"
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Scene/SceneManager.h"
 #include "ProjectManager.h"
 #include "UndoRedoSystem.h"
 
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
 
 namespace TerraEngine::EditorTests
@@ -36,6 +39,10 @@ namespace TerraEngine::EditorTests
 				std::filesystem::create_directories(workspace);
 				ObjectManager::instance().clear();
 				SceneManager::Instance().UnloadAll();
+				// The prefab fixture serializes the real authored animation
+				// component so the atomic policy override is verified after the
+				// protected ObjectManager publication.
+				AnimatorComponent::registerType();
 				context.projectManager = std::make_shared<ProjectManager>();
 				service.SetEditorContext(&context);
 				// Project selection stays editor-owned; automation starts with the
@@ -83,7 +90,12 @@ namespace TerraEngine::EditorTests
 					{"objects", nlohmann::json::array({{
 						{"name", std::string(name)},
 						{"uuid", TerraEngine::ToHexString(rootId)},
-						{"components", {{"Transform", {
+						{"components", {
+							{"AnimatorComponent", {
+								{"active", true},
+								{"requestedMode", 0}
+							}},
+							{"Transform", {
 							{"Position", {3.0f, 4.0f, 5.0f}},
 							{"Rotation", {1.0f, 0.0f, 0.0f, 0.0f}},
 							{"Scale", {1.0f, 2.0f, 1.0f}}
@@ -194,6 +206,130 @@ namespace TerraEngine::EditorTests
 				context.ExpectEqual(static_cast<std::size_t>(1U), ObjectManager::instance().getChildren(*restoredRoot).size(),
 					"Redo should restore the complete child graph rather than only the root.");
 			}
+		});
+
+		registry.Add("Editor.MCP.Prefab.InstantiateManyPublishesOneDeterministicGeneration", [](TestContext& context) {
+			PrefabAutomationFixture fixture("InstantiateManyGrid");
+			context.Expect(fixture.ready, "Bulk-prefab fixture should create and open a project scene.");
+			fixture.EnableAssetDatabase();
+			const std::string registeredGuid = fixture.WriteExistingPrefab(
+				"Assets/Models/Crowd_Generated/Crowd.teprefab", "Crowd Character");
+			context.Expect(!registeredGuid.empty(), "The crowd prefab should be registered before bulk publication.");
+
+			ObjectManager& objects = ObjectManager::instance();
+			const std::uint64_t hierarchyBefore = objects.GetHierarchyRevision();
+			const nlohmann::json result = fixture.service.HandleTool(
+				"prefab.instantiate_many",
+				{{"prefab", registeredGuid}, {"count", 4u}, {"namePrefix", "Gate Character"},
+					{"spacing", 2.0f}, {"requestedAnimationMode", 3}},
+				WriteMode::WritesEnabled,
+				"prefab-instantiate-many-grid");
+			context.Expect(result.value("ok", false), "A registered prefab grid should publish atomically.");
+			const nlohmann::json data = result.value("data", nlohmann::json::object());
+			const nlohmann::json rows = data.value("instances", nlohmann::json::array());
+			context.ExpectEqual(static_cast<std::size_t>(4u), rows.size(),
+				"Bulk instantiation should return one typed identity row per requested instance.");
+			context.ExpectEqual(static_cast<std::uint64_t>(hierarchyBefore + 1u), objects.GetHierarchyRevision(),
+				"Every object in the grid should become visible through one bulk-publication generation.");
+			context.ExpectEqual(std::string("prefab_bulk_publication"),
+				data.value("visibilityBoundary", std::string()),
+				"The result should name the protected visibility boundary.");
+			context.ExpectEqual(static_cast<std::size_t>(4u),
+				data.value("animationModeOverrideCount", static_cast<std::size_t>(0u)),
+				"Every cloned AnimatorComponent should receive the policy before publication.");
+
+			const std::array<glm::vec3, 4> expectedPositions = {
+				glm::vec3(-1.0f, 0.0f, -1.0f),
+				glm::vec3(1.0f, 0.0f, -1.0f),
+				glm::vec3(-1.0f, 0.0f, 1.0f),
+				glm::vec3(1.0f, 0.0f, 1.0f)
+			};
+			std::unordered_set<std::string> returnedIds;
+			for (std::size_t index = 0u; index < rows.size(); ++index)
+			{
+				const std::string instanceId = rows[index].value("instanceId", std::string());
+				context.Expect(!instanceId.empty() && returnedIds.insert(instanceId).second,
+					"Every bulk-created canonical root should have a distinct stable identity.");
+				const std::optional<TerraEngine::UUID> parsed = TerraEngine::ParseUUID(instanceId);
+				const std::optional<Object> root = parsed ? objects.getObject(*parsed) : std::nullopt;
+				context.Expect(root.has_value(), "Returned bulk identities should resolve immediately after the boundary.");
+				if (!root) continue;
+				const Transform* transform = objects.GetComponent<Transform>(*root);
+				context.Expect(transform != nullptr && transform->position == expectedPositions[index],
+					"Bulk grid placement should be deterministic and centered.");
+				const AnimatorComponent* animator = objects.GetComponent<AnimatorComponent>(*root);
+				context.Expect(
+					animator != nullptr
+						&& animator->requestedMode
+							== TerraEngine::Animation::AnimationExecutionPolicy::
+								ForceCpuDeterministicFallback,
+					"The requested animation policy should be visible in the same bulk generation.");
+				context.ExpectEqual("Gate Character " + std::to_string(index + 1u),
+					objects.getObjectName(*root),
+					"Bulk root names should be deterministic and one-based.");
+			}
+
+			UndoRedoSystem::Instance().Undo();
+			for (const std::string& instanceId : returnedIds)
+			{
+				const std::optional<TerraEngine::UUID> parsed = TerraEngine::ParseUUID(instanceId);
+				context.Expect(parsed && !objects.getObject(*parsed).has_value(),
+					"One history action should remove the complete bulk prefab publication.");
+			}
+		});
+
+		registry.Add("Editor.MCP.Prefab.InstantiateManyRejectsAtomicallyAndDeclaresBoundary", [](TestContext& context) {
+			PrefabAutomationFixture fixture("InstantiateManyRollback");
+			context.Expect(fixture.ready, "Bulk rollback fixture should create and open a project scene.");
+			fixture.EnableAssetDatabase();
+			const std::string registeredGuid = fixture.WriteExistingPrefab(
+				"Assets/Models/Rollback_Generated/Rollback.teprefab", "Rollback Character");
+			context.Expect(!registeredGuid.empty(), "The rollback prefab should be registered.");
+
+			const auto capability = fixture.service.GetRegistry().Find(
+				"prefab.instantiate_many",
+				1u,
+				fixture.service.BuildAutomationStateSnapshot());
+			context.Expect(capability.has_value(), "Bulk prefab automation should be discoverable in an active scene.");
+			if (capability)
+			{
+				context.Expect(capability->descriptor.execution.workerPreparation,
+					"Immutable bulk request parsing should be declared worker-preparable.");
+				context.Expect(capability->descriptor.execution.protectedCommit,
+					"Live prefab publication should remain a protected commit.");
+				context.ExpectEqual(std::string("prefab_bulk_publication"),
+					capability->descriptor.execution.visibilityBoundary,
+					"The capability should declare its exact visibility boundary.");
+				context.Expect(std::find(
+					capability->descriptor.execution.commitWrites.begin(),
+					capability->descriptor.execution.commitWrites.end(),
+					"ObjectStorage") != capability->descriptor.execution.commitWrites.end(),
+					"The protected commit should declare live object-storage writes.");
+			}
+
+			ObjectManager& objects = ObjectManager::instance();
+			const std::size_t rootsBefore = objects.getRootObjects().size();
+			const std::uint64_t hierarchyBefore = objects.GetHierarchyRevision();
+			objects.BeginBulkPublication({0u, 0u});
+			const nlohmann::json rejected = fixture.service.HandleTool(
+				"prefab.instantiate_many",
+				{{"prefab", registeredGuid}, {"count", 8u}, {"namePrefix", "Rejected"},
+					{"spacing", 1.0f}},
+				WriteMode::WritesEnabled,
+				"prefab-instantiate-many-conflict");
+			objects.FinishBulkPublication(false);
+
+			context.Expect(!rejected.value("ok", true),
+				"A concurrent protected publication should reject the entire prefab batch.");
+			context.ExpectEqual(std::string("conflict"),
+				rejected.value("error", nlohmann::json::object()).value("category", std::string()),
+				"Concurrent publication rejection should be classified as a conflict.");
+			context.Expect(rejected.value("data", nlohmann::json::object()).value("rolledBack", false),
+				"Rejected bulk operations should explicitly report atomic rollback.");
+			context.ExpectEqual(rootsBefore, objects.getRootObjects().size(),
+				"Rejected bulk publication must not leak any roots.");
+			context.ExpectEqual(hierarchyBefore, objects.GetHierarchyRevision(),
+				"A rejected publication must not advance the visible hierarchy generation.");
 		});
 
 		registry.Add("Editor.MCP.Prefab.CreateAndInstantiatePreserveStableIdentity", [](TestContext& context) {

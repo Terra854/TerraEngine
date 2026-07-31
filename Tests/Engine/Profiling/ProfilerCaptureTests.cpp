@@ -130,6 +130,28 @@ namespace TerraEngine::Tests {
 	}
 
 	void RegisterProfilerCaptureTests(TestRegistry& registry) {
+		registry.Add("Engine.ProfilerCapture.SnapshotRevisionChangesOnlyForPublishedPresentationState", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+
+			Profiler& profiler = Profiler::Instance();
+			profiler.Clear();
+			const std::uint64_t clearedRevision = profiler.GetSnapshotRevision();
+			profiler.LoadDocument(MakeCaptureDocument());
+			const std::uint64_t loadedRevision = profiler.GetSnapshotRevision();
+			context.Expect(loadedRevision > clearedRevision,
+				"Loading immutable capture data should publish a newer presentation revision.");
+
+			(void)profiler.GetFrameListSnapshot();
+			(void)profiler.GetSelectedFrameSnapshot();
+			context.ExpectEqual(loadedRevision, profiler.GetSnapshotRevision(),
+				"Read-only UI snapshots must not invalidate the presentation revision.");
+
+			profiler.SelectFrame(999u);
+			context.Expect(profiler.GetSnapshotRevision() > loadedRevision,
+				"Changing the selected frame should publish a newer presentation revision.");
+			profiler.Clear();
+		});
+
 		registry.Add("Engine.ProfilerCapture.HelpersReportModulesAndTrimFrameBuffers", [](TestContext& context) {
 			using namespace TerraEngine::Profiling;
 
@@ -537,8 +559,35 @@ namespace TerraEngine::Tests {
 			const std::vector<ProfilerFrameRecord> aggregateFrames = profiler.GetFramesSnapshot();
 			context.ExpectEqual(std::size_t(1U), aggregateFrames.size(),
 				"Aggregate captures must still retain their critical frame evidence.");
-			context.Expect(aggregateFrames.front().samples.empty(),
-				"Aggregate captures should not retain optional scope samples.");
+			context.ExpectEqual(std::size_t(1U), aggregateFrames.front().samples.size(),
+				"Aggregate captures should retain one fixed frame-root sample for timeline consumers.");
+			context.Expect(HasSampleNamed(aggregateFrames.front(), "Engine Frame")
+				&& aggregateFrames.front().samples.front().retainInAggregate,
+				"The aggregate frame root must be explicitly marked so compact persistence can retain it.");
+			TempProfilerWorkspace aggregateWorkspace;
+			const std::filesystem::path aggregatePath = aggregateWorkspace.Path("aggregate-root.teprof");
+			ProfilerCaptureDocument aggregateDocument = profiler.FinishRecording();
+			std::string aggregateError;
+			context.Expect(SaveCaptureDocument(aggregateDocument, aggregatePath, aggregateError),
+				"Aggregate frame roots should save through the compact capture format: " + aggregateError);
+			ProfilerCaptureDocument loadedAggregateDocument;
+			context.Expect(LoadCaptureDocument(aggregatePath, loadedAggregateDocument, aggregateError),
+				"Aggregate frame roots should load through the compact capture format: " + aggregateError);
+			context.Expect(!loadedAggregateDocument.frames.empty()
+				&& HasSampleNamed(loadedAggregateDocument.frames.front(), "Engine Frame")
+				&& loadedAggregateDocument.frames.front().samples.front().retainInAggregate,
+				"Saved aggregate captures must preserve the fixed frame-root sample and its retention contract.");
+			context.Expect(!loadedAggregateDocument.frames.empty()
+				&& !loadedAggregateDocument.frames.front().timingStreams.empty(),
+				"Saved aggregate captures must preserve compact timing lanes alongside the frame root.");
+			const std::vector<ProfilerTimingStreamAggregate> aggregateTimingStreams =
+				BuildTimingStreamAggregates(loadedAggregateDocument.frames);
+			const auto engineTiming = std::find_if(
+				aggregateTimingStreams.begin(),
+				aggregateTimingStreams.end(),
+				[](const ProfilerTimingStreamAggregate& stream) { return stream.id == "engine_cpu"; });
+			context.Expect(engineTiming != aggregateTimingStreams.end() && engineTiming->sampleCount == 1U,
+				"Aggregate timing summaries must count the persisted engine frame timing.");
 			profiler.Clear();
 
 			ProfilerCaptureSettings sampledSettings;

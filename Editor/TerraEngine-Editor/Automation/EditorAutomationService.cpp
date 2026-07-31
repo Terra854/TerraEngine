@@ -59,6 +59,7 @@
 #include "Engine/Renderer/RendererRecovery.h"
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Resource/ResourceManager.h"
+#include "Engine/Resource/VirtualGeometryStreamingSystem.h"
 #include "Engine/Physics/PhysicsSystem.h"
 #include "Engine/Physics/Assets/ColliderRecipe.h"
 #include "Engine/Physics/Assets/CookedColliderAsset.h"
@@ -896,6 +897,28 @@ namespace TerraEngine::Editor::Automation
 				{"detailLevelCount", metadata.detailLevelCount},
 				{"sourceTriangleCount", metadata.sourceTriangleCount},
 				{"meshletCounts", {{"resident", metadata.meshletCount}}},
+				{"format", {
+					{"codec", metadata.codec},
+					{"profile", metadata.codecProfile},
+					{"hash", metadata.formatHash},
+					{"encodedBytes", metadata.encodedGeometryBytes},
+					{"decodedBytes", metadata.decodedGeometryBytes},
+					{"bytesPerSourceTriangle", metadata.bytesPerSourceTriangle}
+				}},
+				{"quality", {
+					{"maximumObjectError", metadata.maximumObjectError},
+					{"screenErrorState", "runtime-view-dependent"}
+				}},
+				{"cache", {
+					{"key", metadata.cacheKey},
+					{"state", metadata.cacheState},
+					{"reason", metadata.cacheReason}
+				}},
+				{"pageMetrics", {
+					{"pageCount", metadata.pageCount},
+					{"fragmentationState", "unavailable-expanded-profile"},
+					{"dependencyFanOutState", "unavailable-expanded-profile"}
+				}},
 				{"boundsStatus", metadata.meshletCount > 0u ? "available" : "unknown"},
 				{"pageStreamingReady", metadata.pageStreamingReady},
 				{"smallMeshStreamingSkipped", metadata.smallMeshStreamingSkipped},
@@ -1192,10 +1215,13 @@ namespace TerraEngine::Editor::Automation
 				}},
 				{"pageResidencySummary", {
 					{"pageCount", pageCount},
-					{"residentPageCount", pageCount},
+					// Import metadata is a cooked catalog, not live physical residency.
+					// Runtime page publications are reported by render diagnostics instead.
+					{"residentPageCount", 0u},
 					{"pinnedFallbackPageCount", 0u},
 					{"estimatedBytes", 0u},
-					{"pageStreamingReady", pageCount > 0u && usableMeshCount > 0u},
+					{"pageStreamingReady", false},
+					{"physicalResidencyAuthoritative", false},
 					{"smallMeshStreamingSkipped", false},
 					{"skippedStreamingReason", std::string()},
 					{"integrityErrors", nlohmann::json::array()}
@@ -1211,7 +1237,8 @@ namespace TerraEngine::Editor::Automation
 					{"sourceTriangleCount", sourceTriangleCount},
 					{"meshletCounts", {{"resident", meshletCount}}},
 					{"boundsStatus", meshletCount > 0u ? "available" : "unknown"},
-					{"pageStreamingReady", pageCount > 0u && usableMeshCount > 0u},
+					{"pageStreamingReady", false},
+					{"physicalResidencyAuthoritative", false},
 					{"smallMeshStreamingSkipped", false},
 					{"skippedStreamingReason", std::string()},
 					{"pageIntegrityErrors", nlohmann::json::array()},
@@ -1282,6 +1309,69 @@ namespace TerraEngine::Editor::Automation
 			return std::nullopt;
 		}
 
+		std::optional<TerraEngine::Renderer::VirtualGeometryRasterRoute>
+		ParseVirtualGeometryValidationRoute(const nlohmann::json& value)
+		{
+			if (!value.is_string()) return std::nullopt;
+			const std::string route = LowerAscii(value.get<std::string>());
+			if (route == "hardware") return TerraEngine::Renderer::VirtualGeometryRasterRoute::Hardware;
+			if (route == "compute") return TerraEngine::Renderer::VirtualGeometryRasterRoute::Compute;
+			if (route == "indexed") return TerraEngine::Renderer::VirtualGeometryRasterRoute::Indexed;
+			return std::nullopt;
+		}
+
+		const char* ToAutomationString(TerraEngine::Renderer::VirtualGeometryRasterRoute route)
+		{
+			switch (route)
+			{
+			case TerraEngine::Renderer::VirtualGeometryRasterRoute::Hardware: return "Hardware";
+			case TerraEngine::Renderer::VirtualGeometryRasterRoute::Compute: return "Compute";
+			case TerraEngine::Renderer::VirtualGeometryRasterRoute::Indexed: return "Indexed";
+			case TerraEngine::Renderer::VirtualGeometryRasterRoute::Fallback: return "Fallback";
+			default: return "Unknown";
+			}
+		}
+
+		std::optional<glm::uvec2> ParseAutomationPixel(const nlohmann::json& value)
+		{
+			if (!value.is_array() || value.size() != 2u) return std::nullopt;
+			try
+			{
+				return glm::uvec2(value[0].get<std::uint32_t>(), value[1].get<std::uint32_t>());
+			}
+			catch (const nlohmann::json::exception&)
+			{
+				return std::nullopt;
+			}
+		}
+
+		nlohmann::json SerializeAuthoritativeVisibilityPick(
+			const TerraEngine::Renderer::AuthoritativeVisibilityPickState& state)
+		{
+			nlohmann::json data = {
+				{"status", ToString(state.status)},
+				{"pixel", nlohmann::json::array({state.pixel.x, state.pixel.y})},
+				{"reason", state.reason},
+				{"pick", nullptr}
+			};
+			if (state.pick)
+			{
+				data["pick"] = {
+					{"objectId", TerraEngine::ToHexString(state.pick->objectId)},
+					{"meshId", TerraEngine::ToHexString(state.pick->meshId)},
+					{"materialId", TerraEngine::ToHexString(state.pick->materialId)},
+					{"frameId", state.pick->frameId},
+					{"packetId", state.pick->packetId},
+					{"clusterId", state.pick->clusterId},
+					{"meshletId", state.pick->meshletId},
+					{"selectedLod", state.pick->selectedLod},
+					{"debugIdentity", state.pick->debugIdentity},
+					{"fallback", state.pick->fallback}
+				};
+			}
+			return data;
+		}
+
 		const char* ToAutomationString(VirtualGeometryPerformanceGateStatus status)
 		{
 			switch (status)
@@ -1304,6 +1394,68 @@ namespace TerraEngine::Editor::Automation
 			case VirtualGeometryPerformanceGateSource::Unsupported: return "unsupported";
 			case VirtualGeometryPerformanceGateSource::Manual: return "manual";
 			default: return "unknown";
+			}
+		}
+
+		const char* ToAutomationString(
+			TerraEngine::Renderer::VirtualGeometryCapabilityStage stage)
+		{
+			using Stage = TerraEngine::Renderer::VirtualGeometryCapabilityStage;
+			switch(stage)
+			{
+			case Stage::Traversal: return "traversal";
+			case Stage::Compaction: return "compaction";
+			case Stage::Indirect: return "indirect-generation";
+			case Stage::Decode: return "decode";
+			case Stage::HardwareRaster: return "hardware-raster";
+			case Stage::ComputeRaster: return "compute-raster";
+			case Stage::Resolve: return "visibility-resolve";
+			case Stage::Shading: return "shading";
+			case Stage::Streaming: return "streaming-update";
+			case Stage::Deformation: return "deformation";
+			case Stage::Shadow: return "shadow";
+			case Stage::Capture: return "capture";
+			case Stage::RayTracing: return "ray-tracing";
+			default: return "unknown";
+			}
+		}
+
+		const char* ToAutomationString(
+			TerraEngine::Renderer::VirtualGeometryCapabilityBackend backend)
+		{
+			using Backend = TerraEngine::Renderer::VirtualGeometryCapabilityBackend;
+			switch(backend)
+			{
+			case Backend::Vulkan: return "vulkan";
+			default: return "unknown";
+			}
+		}
+
+		const char* ToAutomationString(
+			TerraEngine::Renderer::VirtualGeometryCapabilityRoute route)
+		{
+			using Route = TerraEngine::Renderer::VirtualGeometryCapabilityRoute;
+			switch(route)
+			{
+			case Route::MeshShader: return "mesh-shader";
+			case Route::ComputeRaster: return "compute-raster";
+			case Route::IndexedFallback: return "indexed-fallback";
+			default: return "unknown";
+			}
+		}
+
+		const char* ToAutomationString(
+			TerraEngine::Renderer::VirtualGeometryMeasurementAvailability availability)
+		{
+			using Availability =
+				TerraEngine::Renderer::VirtualGeometryMeasurementAvailability;
+			switch(availability)
+			{
+			case Availability::Pending: return "pending";
+			case Availability::Unavailable: return "unavailable";
+			case Availability::Invalid: return "invalid";
+			case Availability::Measured: return "measured";
+			default: return "invalid";
 			}
 		}
 
@@ -1361,6 +1513,11 @@ namespace TerraEngine::Editor::Automation
 				{"hiZActive", view.hiZActive},
 				{"hiZHistoryValid", view.hiZHistoryValid},
 				{"counterSource", ToString(view.counterSource)},
+				{"rasterPacketCounts", {
+					{"hardware", view.hardwareRasterPacketCount},
+					{"compute", view.computeRasterPacketCount},
+					{"indexed", view.indexedRasterPacketCount}
+				}},
 				{"gpuPacketRecords", view.gpuPacketRecordCount},
 				{"gpuBatchDescriptors", view.gpuBatchDescriptorCount},
 				{"gpuPacketFrameSets", view.gpuPacketFrameSetCount},
@@ -1417,6 +1574,9 @@ namespace TerraEngine::Editor::Automation
 					{"pageDemands", view.animatedPageDemandCount},
 					{"uniqueDispatches", view.animatedUniqueDispatchCount},
 					{"reuseCount", view.animatedReuseCount},
+					{"animationLods", view.animatedAnimationLods},
+					{"skippedWorkCount", view.animatedSkippedWorkCount},
+					{"boundsSource", view.animatedBoundsSource},
 					{"fallbackCount", view.animatedFallbackCount},
 					{"currentBytes", view.deformationCurrentBytes},
 					{"historyBytes", view.deformationHistoryBytes},
@@ -2318,6 +2478,8 @@ namespace TerraEngine::Editor::Automation
 		add("asset.duplicate", "asset", MutationMode::AssetMutation, true, false, false, "source, destination");
 		add("prefab.create", "prefab", MutationMode::AssetMutation, true, true, false, "object, path");
 		add("prefab.instantiate", "prefab", MutationMode::SceneMutation, true, true, false, "prefab, name?");
+		add("prefab.instantiate_many", "prefab", MutationMode::SceneMutation, true, true, false,
+			"prefab, count, namePrefix?, spacing?, columns?, origin?, requestedAnimationMode?");
 		add("prefab.overrides.inspect", "prefab", MutationMode::ReadOnly, true, true, false, "instance");
 		add("prefab.overrides.apply", "prefab", MutationMode::AssetMutation, true, true, false, "instance, expectedPrefabGeneration");
 		add("prefab.overrides.revert", "prefab", MutationMode::SceneMutation, true, true, false, "instance");
@@ -2366,6 +2528,16 @@ namespace TerraEngine::Editor::Automation
 		add("asset.virtualGeometry.settings.reset", "asset", MutationMode::AssetMutation, true, false, false, "asset: asset path|uuid, rebuildAfterReset?: bool");
 		add("asset.virtualGeometry.rebuild", "asset", MutationMode::AssetMutation, true, false, false, "target: asset path|uuid|all, force?: bool, includePackageOutputs?: bool, diagnosticsLevel?: summary|detailed|debug");
 		add("asset.virtualGeometry.inspect", "asset", MutationMode::ReadOnly, true, false, false, "asset: asset path|uuid, includeRuntimeState?: bool, viewType?: Game|Scene|Shadow|ExportRuntime");
+		// Production tooling aliases deliberately reuse the validated asset
+		// handlers. They expose explicit dotted contracts without inventing a
+		// successful result when the installed compiler/runtime is unavailable.
+		add("asset.virtualGeometry.codec.inspect", "asset", MutationMode::ReadOnly, true, false, false, "asset: asset path|uuid");
+		add("asset.virtualGeometry.cache.inspect", "asset", MutationMode::ReadOnly, true, false, false, "asset: asset path|uuid");
+		add("asset.virtualGeometry.migration.inspect", "asset", MutationMode::ReadOnly, true, false, false, "asset: asset path|uuid");
+		add("asset.virtualGeometry.repair.plan", "asset", MutationMode::ReadOnly, true, false, false, "asset: asset path|uuid");
+		add("asset.virtualGeometry.repair.execute", "asset", MutationMode::AssetMutation, true, false, false, "target: asset path|uuid|all, force?: bool");
+		add("asset.virtualGeometry.benchmark.status", "asset", MutationMode::ReadOnly, true, false, false, "asset?: asset path|uuid");
+		add("asset.virtualGeometry.benchmark.capture", "asset", MutationMode::ExportMutation, true, false, false, "target: asset path|uuid, output?: path");
 		add("asset.prepare_delete", "asset", MutationMode::Destructive, true, false, true, "path: project-relative asset path");
 		add("export.validate", "export", MutationMode::ReadOnly, true, false, false, "profile: string");
 		add("export.start", "export", MutationMode::ExportMutation, true, false, true, "profile: string, confirmOutput?: string");
@@ -2374,6 +2546,10 @@ namespace TerraEngine::Editor::Automation
 		add("camera.capture_object", "capture", MutationMode::ReadOnly, false, true, false, "object|camera|target: uuid|entity|name, includeDisabled?: bool, width?: integer, height?: integer, format?: image/png");
 		add("camera.capture_custom", "capture", MutationMode::ReadOnly, false, false, false, "position: [x,y,z], target?: [x,y,z], forward?: [x,y,z], up?: [x,y,z], projection?: perspective|orthographic, width?: integer, height?: integer");
 		add("renderer.virtualGeometry.stats", "renderer", MutationMode::ReadOnly, false, false, false, "viewType?: Game|Scene");
+		add("renderer.virtualGeometry.capabilityEvidence", "renderer", MutationMode::ReadOnly, false, false, false, "viewType?: Game|Scene");
+		add("renderer.virtualGeometry.validationRoute.set", "renderer", MutationMode::EditorSelection, false, false, false, "route: Hardware|Compute|Indexed|Hybrid");
+		add("renderer.virtualGeometry.validationRoute.reset", "renderer", MutationMode::EditorSelection, false, false, false, "no arguments");
+		add("renderer.virtualGeometry.authoritativePick", "renderer", MutationMode::ReadOnly, false, false, false, "viewType?: Game|Scene, pixel: [x,y], request?: bool");
 		add("renderer.recovery.safe_save_project", "renderer", MutationMode::ProjectMutation, true, false, false, "reason?: string");
 		add("diagnostics.get_summary", "diagnostics", MutationMode::ReadOnly, false, false, false, "includeDetails?: bool, surface?: string");
 	}
@@ -4540,6 +4716,16 @@ namespace TerraEngine::Editor::Automation
 		if (operation == AutomationOperation("asset.virtualGeometry.settings.reset")) return HandleVirtualGeometrySettingsReset(arguments, requestId);
 		if (operation == AutomationOperation("asset.virtualGeometry.rebuild")) return HandleVirtualGeometryRebuild(arguments, requestId);
 		if (operation == AutomationOperation("asset.virtualGeometry.inspect")) return HandleVirtualGeometryInspect(arguments, requestId);
+		if (operation == AutomationOperation("asset.virtualGeometry.codec.inspect")
+			|| operation == AutomationOperation("asset.virtualGeometry.cache.inspect")
+			|| operation == AutomationOperation("asset.virtualGeometry.migration.inspect")
+			|| operation == AutomationOperation("asset.virtualGeometry.repair.plan"))
+			return HandleVirtualGeometryInspect(arguments, requestId);
+		if (operation == AutomationOperation("asset.virtualGeometry.repair.execute")) return HandleVirtualGeometryRebuild(arguments, requestId);
+		if (operation == AutomationOperation("asset.virtualGeometry.benchmark.status"))
+			return BuildError(requestId, ErrorCategory::Unavailable, "Benchmark evidence requires an installed runner and authoritative measured capture.");
+		if (operation == AutomationOperation("asset.virtualGeometry.benchmark.capture"))
+			return BuildError(requestId, ErrorCategory::Unavailable, "Benchmark capture requires an installed runner and live adapter/readback.");
 		if (operation == AutomationOperation("asset.prepare_delete")) return HandleAssetPrepareDelete(arguments, requestId);
 		if (operation == AutomationOperation("export.validate")) return HandleExportValidate(arguments, requestId);
 		if (operation == AutomationOperation("export.start")) return HandleExportStart(arguments, requestId);
@@ -4548,6 +4734,10 @@ namespace TerraEngine::Editor::Automation
 		if (operation == AutomationOperation("camera.capture_object")) return HandleCameraObjectCapture(arguments, requestId);
 		if (operation == AutomationOperation("camera.capture_custom")) return HandleCustomCameraCapture(arguments, requestId);
 		if (operation == AutomationOperation("renderer.virtualGeometry.stats")) return HandleRendererVirtualGeometryStats(arguments, requestId);
+		if (operation == AutomationOperation("renderer.virtualGeometry.capabilityEvidence")) return HandleRendererVirtualGeometryCapabilityEvidence(arguments, requestId);
+		if (operation == AutomationOperation("renderer.virtualGeometry.validationRoute.set")) return HandleRendererVirtualGeometryValidationRouteSet(arguments, requestId);
+		if (operation == AutomationOperation("renderer.virtualGeometry.validationRoute.reset")) return HandleRendererVirtualGeometryValidationRouteReset(arguments, requestId);
+		if (operation == AutomationOperation("renderer.virtualGeometry.authoritativePick")) return HandleRendererVirtualGeometryAuthoritativePick(arguments, requestId);
 		if (operation == AutomationOperation("renderer.recovery.safe_save_project"))
 		{
 			std::string error;
@@ -5093,13 +5283,95 @@ namespace TerraEngine::Editor::Automation
 			return BuildSuccess(requestId, result.message, result.data);
 		}
 		if (IsOperationOneOf(operation, {
-			AutomationOperation("prefab.instantiate"), AutomationOperation("prefab.overrides.inspect"),
+			AutomationOperation("prefab.instantiate"), AutomationOperation("prefab.instantiate_many"),
+			AutomationOperation("prefab.overrides.inspect"),
 			AutomationOperation("prefab.overrides.apply"), AutomationOperation("prefab.overrides.revert"),
 			AutomationOperation("prefab.edit.open"), AutomationOperation("prefab.edit.close")}))
 		{
 			PrefabAuthoringService::Result result;
-			if (operation == AutomationOperation("prefab.instantiate"))
+			if (operation == AutomationOperation("prefab.instantiate")
+				|| operation == AutomationOperation("prefab.instantiate_many"))
 			{
+				const bool instantiateMany =
+					operation == AutomationOperation("prefab.instantiate_many");
+				PrefabAuthoringService::BulkInstantiationRequest bulkRequest;
+				if (instantiateMany)
+				{
+					if (!arguments.contains("count") || !arguments["count"].is_number_integer())
+					{
+						return BuildError(requestId, ErrorCategory::Validation,
+							"prefab.instantiate_many count must be an integer.");
+					}
+					const std::int64_t requestedCount = arguments["count"].get<std::int64_t>();
+					if (requestedCount < 1 || requestedCount > 4096)
+					{
+						return BuildError(requestId, ErrorCategory::Validation,
+							"prefab.instantiate_many count must be between 1 and 4096.");
+					}
+					bulkRequest.count = static_cast<std::uint32_t>(requestedCount);
+					bulkRequest.namePrefix = arguments.value("namePrefix", std::string{});
+					bulkRequest.spacing = arguments.value("spacing", 0.0f);
+					if (arguments.contains("requestedAnimationMode"))
+					{
+						if (!arguments["requestedAnimationMode"].is_number_integer())
+						{
+							return BuildError(requestId, ErrorCategory::Validation,
+								"prefab.instantiate_many requestedAnimationMode must be an integer.");
+						}
+						const std::int64_t requestedMode =
+							arguments["requestedAnimationMode"].get<std::int64_t>();
+						if (requestedMode < 0 || requestedMode > 3)
+						{
+							return BuildError(requestId, ErrorCategory::Validation,
+								"prefab.instantiate_many requestedAnimationMode must be between 0 and 3.");
+						}
+						bulkRequest.requestedAnimationMode =
+							static_cast<TerraEngine::Animation::AnimationExecutionPolicy>(
+								requestedMode);
+					}
+					if (arguments.contains("columns"))
+					{
+						if (!arguments["columns"].is_number_integer())
+						{
+							return BuildError(requestId, ErrorCategory::Validation,
+								"prefab.instantiate_many columns must be an integer.");
+						}
+						const std::int64_t requestedColumns = arguments["columns"].get<std::int64_t>();
+						if (requestedColumns < 1 || requestedColumns > requestedCount)
+						{
+							return BuildError(requestId, ErrorCategory::Validation,
+								"prefab.instantiate_many columns must be between 1 and count.");
+						}
+						bulkRequest.columns = static_cast<std::uint32_t>(requestedColumns);
+					}
+					if (arguments.contains("origin"))
+					{
+						const nlohmann::json& origin = arguments["origin"];
+						if (!origin.is_array() || origin.size() != 3u
+							|| !std::all_of(origin.begin(), origin.end(), [](const nlohmann::json& coordinate) {
+								return coordinate.is_number();
+							}))
+						{
+							return BuildError(requestId, ErrorCategory::Validation,
+								"prefab.instantiate_many origin must contain exactly three numbers.");
+						}
+						bulkRequest.origin = glm::vec3(
+							origin[0].get<float>(),
+							origin[1].get<float>(),
+							origin[2].get<float>());
+					}
+				}
+				const auto instantiateResolvedPrefab =
+					[&](std::string_view resolvedPrefabId) -> PrefabAuthoringService::Result {
+						if (instantiateMany)
+						{
+							return prefabAuthoringService.InstantiateMany(
+								resolvedPrefabId, bulkRequest);
+						}
+						return prefabAuthoringService.Instantiate(
+							resolvedPrefabId, arguments.value("name", std::string{}));
+					};
+
 				const std::string prefabIdentity = arguments.value("prefab", std::string{});
 				const AssetMetadata* registeredPrefab = nullptr;
 				if (editorContext != nullptr && editorContext->assetDatabase != nullptr)
@@ -5148,15 +5420,15 @@ namespace TerraEngine::Editor::Automation
 					// which is also used by native hierarchy drag/drop. The response keeps
 					// the indexed GUID/generation while instanceId names the real root.
 					result = registered.ok
-						? prefabAuthoringService.Instantiate(
-							registered.data.value("prefabId", std::string{}), arguments.value("name", std::string{}))
+						? instantiateResolvedPrefab(
+							registered.data.value("prefabId", std::string{}))
 						: registered;
 				}
 				else
 				{
 					// Session-created prefabs are immediately usable before the file watcher
 					// publishes them into AssetDatabase, so preserve that short local path.
-					result = prefabAuthoringService.Instantiate(prefabIdentity, arguments.value("name", std::string{}));
+					result = instantiateResolvedPrefab(prefabIdentity);
 				}
 			}
 			else if (operation == AutomationOperation("prefab.overrides.inspect"))
@@ -7889,6 +8161,9 @@ namespace TerraEngine::Editor::Automation
 			{"pageDemands", 0u},
 			{"uniqueDispatches", 0u},
 			{"reuseCount", 0u},
+			{"animationLods", nlohmann::json::array()},
+			{"skippedWorkCount", 0u},
+			{"boundsSource", "NoAnimatedPageWork"},
 			{"fallbackCount", 0u},
 			{"currentBytes", 0u},
 			{"historyBytes", 0u},
@@ -7902,6 +8177,9 @@ namespace TerraEngine::Editor::Automation
 		};
 		std::uint32_t selectedClusters = 0u;
 		std::uint32_t fallbackSelections = 0u;
+		std::uint32_t hardwareRasterPackets = 0u;
+		std::uint32_t computeRasterPackets = 0u;
+		std::uint32_t indexedRasterPackets = 0u;
 		nlohmann::json selectedLodHistogram = nlohmann::json::array();
 		const TerraEngine::Renderer::RenderDiagnosticsSummary diagnostics = renderSystem->GetLatestRenderGraphDiagnostics();
 		for (const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& view : diagnostics.virtualGeometryViews)
@@ -7936,6 +8214,9 @@ namespace TerraEngine::Editor::Automation
 				{"pageDemands", view.animatedPageDemandCount},
 				{"uniqueDispatches", view.animatedUniqueDispatchCount},
 				{"reuseCount", view.animatedReuseCount},
+				{"animationLods", view.animatedAnimationLods},
+				{"skippedWorkCount", view.animatedSkippedWorkCount},
+				{"boundsSource", view.animatedBoundsSource},
 				{"fallbackCount", view.animatedFallbackCount},
 				{"currentBytes", view.deformationCurrentBytes},
 				{"historyBytes", view.deformationHistoryBytes},
@@ -7949,6 +8230,9 @@ namespace TerraEngine::Editor::Automation
 			};
 			selectedClusters = view.clusterSelection.selectedClusters;
 			fallbackSelections = view.clusterSelection.fallbackClusters;
+			hardwareRasterPackets = view.hardwareRasterPacketCount;
+			computeRasterPackets = view.computeRasterPacketCount;
+			indexedRasterPackets = view.indexedRasterPacketCount;
 			// Publish the renderer's final per-LOD cluster counts so live MCP
 			// validation can prove that distance selection reached a coarse LOD.
 			for (const std::uint32_t selectedCount : view.selectedLodHistogram)
@@ -7961,6 +8245,115 @@ namespace TerraEngine::Editor::Automation
 		{
 			performanceGates.push_back(SerializeVirtualGeometryPerformanceGate(gate));
 		}
+		// Streaming runs before RenderSystem and publishes through a protected
+		// boundary, so copy its immutable diagnostics instead of inferring worker
+		// IO or Vulkan upload completion from renderer selection counters.
+		const TerraEngine::Resource::VirtualGeometryStreamingSystem& streamingSystem =
+			TerraEngine::Resource::VirtualGeometryStreamingSystem::Instance();
+		const TerraEngine::Resource::VirtualGeometryStreamingDiagnostics streamingSnapshot =
+			streamingSystem.DiagnosticsSnapshot();
+		const TerraEngine::Resource::VirtualGeometryStreamingPlan streamingPlan =
+			streamingSystem.LastPreparedPlan();
+		const TerraEngine::Resource::VirtualGeometryPhysicalPageResidencySnapshot
+			streamingResidency = streamingSystem.ResidencySnapshot();
+		const std::optional<TerraEngine::Renderer::VirtualGeometryRasterRoute>
+			validationRouteOverride = renderSystem->GetVirtualGeometryValidationRouteOverride();
+		const nlohmann::json validationRoute = {
+			{"requestedRoute", validationRouteOverride
+				? nlohmann::json(ToAutomationString(*validationRouteOverride))
+				: nlohmann::json(nullptr)},
+			{"overrideActive", validationRouteOverride.has_value()},
+			{"hybridSceneRequested", renderSystem->IsVirtualGeometryHybridValidationSceneRequested()},
+			{"hybridMeaning", "Hybrid is a mixed packet/material scene using Hardware, Compute, and Indexed packets; it is not a backend route."},
+			{"executedPacketCounts", {
+				{"hardware", hardwareRasterPackets},
+				{"compute", computeRasterPackets},
+				{"indexed", indexedRasterPackets}
+			}},
+			{"hybridCoverageComplete",
+				hardwareRasterPackets > 0u
+					&& computeRasterPackets > 0u
+					&& indexedRasterPackets > 0u}
+		};
+		std::uint32_t pendingDecodePages = 0u;
+		std::uint32_t pendingUploadPages = 0u;
+		std::uint32_t failedDecodePages = 0u;
+		for (const TerraEngine::Resource::VirtualGeometryStreamingDecodedPage& decoded :
+			streamingPlan.decodedPages)
+		{
+			switch (decoded.status)
+			{
+			case TerraEngine::Resource::VirtualGeometryStreamingDecodeStatus::PendingDecode:
+				++pendingDecodePages;
+				break;
+			case TerraEngine::Resource::VirtualGeometryStreamingDecodeStatus::PendingUpload:
+				++pendingUploadPages;
+				break;
+			case TerraEngine::Resource::VirtualGeometryStreamingDecodeStatus::Failed:
+				++failedDecodePages;
+				break;
+			case TerraEngine::Resource::VirtualGeometryStreamingDecodeStatus::NotRequested:
+			case TerraEngine::Resource::VirtualGeometryStreamingDecodeStatus::Cancelled:
+				break;
+			}
+		}
+		nlohmann::json streamingEvents = nlohmann::json::array();
+		for (const TerraEngine::Resource::VirtualGeometryStreamingDiagnosticEvent& event :
+			streamingSnapshot.recentEvents)
+		{
+			streamingEvents.push_back({
+				{"frameId", event.frameId},
+				{"pageId", event.pageId},
+				{"stage", event.stage},
+				{"detail", event.detail},
+				{"failure", event.failure}
+			});
+		}
+		nlohmann::json streamingRequests = nlohmann::json::array();
+		for (const TerraEngine::Resource::VirtualGeometryStreamingFeedback& streamingRequest :
+			streamingPlan.requests)
+		{
+			// Exact-range ownership is the decisive live-streaming handoff. Expose
+			// value-only identifiers and range facts so automation can distinguish
+			// missing mesh metadata from worker IO/decode failures.
+			streamingRequests.push_back({
+				{"assetId", TerraEngine::ToHexString(streamingRequest.assetId)},
+				{"pageId", streamingRequest.pageId},
+				{"fallbackPageId", streamingRequest.fallbackPageId},
+				{"clusterId", streamingRequest.clusterId},
+				{"hasExactStaticPageRead", streamingRequest.staticPageRead.has_value()},
+				{"expectedStoredBytes", streamingRequest.expectedStoredByteCount},
+				{"expectedDecodedBytes", streamingRequest.expectedDecodedByteCount},
+				{"staticPageReadDiagnostic", streamingRequest.staticPageReadDiagnostic}
+			});
+		}
+		const nlohmann::json streaming = {
+			{"submittedRequests", streamingSnapshot.submittedRequests},
+			{"expandedDependencyRequests", streamingSnapshot.expandedDependencyRequests},
+			{"preparedDecodeIntents", streamingSnapshot.preparedDecodeIntents},
+			{"preparedUploadIntents", streamingSnapshot.preparedUploadIntents},
+			{"completedReads", streamingSnapshot.completedReads},
+			{"cancelledReads", streamingSnapshot.cancelledReads},
+			{"submittedPublicationCandidates", streamingSnapshot.submittedPublicationCandidates},
+			{"acceptedPublicationBatches", streamingSnapshot.acceptedPublicationBatches},
+			{"acceptedPublicationPages", streamingSnapshot.acceptedPublicationPages},
+			{"rejectedPublications", streamingSnapshot.rejectedPublications},
+			{"visibleResidentPages", streamingSnapshot.visibleResidentPages},
+			{"lastPreparedFrame", streamingSnapshot.lastPreparedFrame},
+			{"lastPublicationFrame", streamingSnapshot.lastPublicationFrame},
+			{"lastRejectionReason", streamingSnapshot.lastRejectionReason},
+			{"currentRequestCount", streamingPlan.requests.size()},
+			{"currentDecodeIntentCount", streamingPlan.decodeIntents.size()},
+			{"currentUploadIntentCount", streamingPlan.uploadIntents.size()},
+			{"currentDecodedPageCount", streamingPlan.decodedPages.size()},
+			{"pendingDecodePages", pendingDecodePages},
+			{"pendingUploadPages", pendingUploadPages},
+			{"failedDecodePages", failedDecodePages},
+			{"physicalResidencyRows", streamingResidency.pages.size()},
+			{"physicalResidencyGeneration", streamingResidency.publicationGeneration},
+			{"currentRequests", std::move(streamingRequests)},
+			{"recentEvents", std::move(streamingEvents)}
+		};
 		nlohmann::json data = {
 			{"viewType", ToString(stats.viewType)},
 			{"valid", stats.valid},
@@ -8030,9 +8423,11 @@ namespace TerraEngine::Editor::Automation
 			{"embeddedFallbackBytes", stats.virtualGeometryEmbeddedFallbackBytes},
 			{"pageResidency", std::move(pageResidency)},
 			{"selectedClusters", selectedClusters},
+			{"validationRoute", validationRoute},
 			{"selectedLodHistogram", std::move(selectedLodHistogram)},
 			{"fallbackSelections", fallbackSelections},
 			{"animatedVirtualGeometry", std::move(animatedVirtualGeometry)},
+			{"streaming", streaming},
 			{"counterSource", ToString(stats.meshletCounterSource)},
 			{"counterFrameId", stats.meshletCounterFrameId},
 			{"counterLatencyFrames", stats.meshletCounterLatencyFrames},
@@ -8057,6 +8452,310 @@ namespace TerraEngine::Editor::Automation
 			{"vrsActive", stats.vrsActive}
 		};
 		return BuildSuccess(requestId, "Read virtual geometry culling stats.", std::move(data));
+	}
+
+	nlohmann::json EditorAutomationService::HandleRendererVirtualGeometryValidationRouteSet(
+		const nlohmann::json& arguments,
+		const std::string& requestId)
+	{
+		if (!arguments.contains("route") || !arguments["route"].is_string())
+		{
+			return BuildError(requestId, ErrorCategory::Validation,
+				"route must be Hardware, Compute, Indexed, or Hybrid.");
+		}
+		const std::string requestedRoute = LowerAscii(arguments["route"].get<std::string>());
+		const std::optional<TerraEngine::Renderer::VirtualGeometryRasterRoute> route =
+			ParseVirtualGeometryValidationRoute(arguments["route"]);
+		if (requestedRoute != "hybrid" && !route)
+		{
+			// Validate the complete route selector before consulting live state so
+			// malformed requests never degrade into misleading renderer errors.
+			return BuildError(requestId, ErrorCategory::Validation,
+				"route must be Hardware, Compute, Indexed, or Hybrid.");
+		}
+		if (editorContext == nullptr || editorContext->engine == nullptr)
+		{
+			return BuildError(requestId, ErrorCategory::MissingTarget, "Renderer is not available.");
+		}
+		RenderSystem* renderSystem = editorContext->engine->GetSystem<RenderSystem>();
+		if (renderSystem == nullptr)
+		{
+			return BuildError(requestId, ErrorCategory::MissingTarget, "RenderSystem is not registered.");
+		}
+
+		if (requestedRoute == "hybrid")
+		{
+			// Hybrid is evidence from a deliberately mixed packet/material scene,
+			// not a fourth Vulkan backend or a synthetic forced packet route.
+			renderSystem->SetVirtualGeometryHybridValidationSceneRequested(true);
+			return BuildSuccess(requestId,
+				"Requested mixed packet/material hybrid validation; no synthetic backend route was enabled.",
+				{{"requestedRoute", "Hybrid"},
+					{"overrideActive", false},
+					{"hybridSceneRequested", true},
+					{"diagnostic", "Use a scene containing hardware-compatible and compute-forced materials; inspect emitted packet routes."}});
+		}
+
+		std::string unavailableReason;
+		if (!renderSystem->SetVirtualGeometryValidationRouteOverride(*route, &unavailableReason))
+		{
+			return BuildError(requestId, ErrorCategory::Unavailable,
+				unavailableReason.empty()
+					? "The requested Vulkan validation route is unavailable."
+					: unavailableReason);
+		}
+		return BuildSuccess(requestId, "Set transient Vulkan virtual-geometry validation route.", {
+			{"requestedRoute", ToAutomationString(*route)},
+			{"overrideActive", true},
+			{"hybridSceneRequested", false},
+			{"diagnostic", "The route is copied into prepared packets; incompatible materials use an explicit indexed fallback."}
+		});
+	}
+
+	nlohmann::json EditorAutomationService::HandleRendererVirtualGeometryValidationRouteReset(
+		const nlohmann::json&,
+		const std::string& requestId)
+	{
+		if (editorContext == nullptr || editorContext->engine == nullptr)
+		{
+			return BuildError(requestId, ErrorCategory::MissingTarget, "Renderer is not available.");
+		}
+		RenderSystem* renderSystem = editorContext->engine->GetSystem<RenderSystem>();
+		if (renderSystem == nullptr)
+		{
+			return BuildError(requestId, ErrorCategory::MissingTarget, "RenderSystem is not registered.");
+		}
+		// Reset is idempotent so installed validation runs always restore the
+		// ordinary material-driven route policy, even after a failed route test.
+		renderSystem->ClearVirtualGeometryValidationRouteOverride();
+		return BuildSuccess(requestId, "Cleared transient Vulkan virtual-geometry validation routing.", {
+			{"overrideActive", false},
+			{"hybridSceneRequested", false}
+		});
+	}
+
+	nlohmann::json EditorAutomationService::HandleRendererVirtualGeometryAuthoritativePick(
+		const nlohmann::json& arguments,
+		const std::string& requestId)
+	{
+		RenderViewType viewType = RenderViewType::Scene;
+		if (arguments.contains("viewType"))
+		{
+			const std::optional<RenderViewType> parsed = ParseAutomationRenderViewType(arguments["viewType"]);
+			if (!parsed || (*parsed != RenderViewType::Game && *parsed != RenderViewType::Scene))
+			{
+				return BuildError(requestId, ErrorCategory::Validation, "viewType must be Game or Scene.");
+			}
+			viewType = *parsed;
+		}
+		if (!arguments.contains("pixel"))
+		{
+			return BuildError(requestId, ErrorCategory::Validation, "pixel must be a [x,y] uint32 array.");
+		}
+		const std::optional<glm::uvec2> pixel = ParseAutomationPixel(arguments["pixel"]);
+		if (!pixel)
+		{
+			return BuildError(requestId, ErrorCategory::Validation, "pixel must be a [x,y] uint32 array.");
+		}
+		if (editorContext == nullptr || editorContext->engine == nullptr)
+		{
+			return BuildError(requestId, ErrorCategory::MissingTarget, "Renderer is not available.");
+		}
+		RenderSystem* renderSystem = editorContext->engine->GetSystem<RenderSystem>();
+		if (renderSystem == nullptr)
+		{
+			return BuildError(requestId, ErrorCategory::MissingTarget, "RenderSystem is not registered.");
+		}
+
+		const bool request = arguments.value("request", false);
+		if (request)
+		{
+			// Queueing is non-blocking. A false return is represented below as an
+			// unavailable state, never as a fabricated CPU-projection pick.
+			(void)renderSystem->RequestConventionalVisibilityIdentityPick(viewType, *pixel);
+		}
+		const TerraEngine::Renderer::AuthoritativeVisibilityPickState state =
+			renderSystem->GetConventionalVisibilityIdentityPickState(viewType, *pixel);
+		return BuildSuccess(requestId, "Read asynchronous Vulkan authoritative identity-pick state.", {
+			{"viewType", ToString(viewType)},
+			{"requested", request},
+			{"authoritative", SerializeAuthoritativeVisibilityPick(state)}
+		});
+	}
+
+	nlohmann::json EditorAutomationService::HandleRendererVirtualGeometryCapabilityEvidence(
+		const nlohmann::json& arguments,
+		const std::string& requestId)
+	{
+		// Evidence is scoped to one rendered surface. Rejecting unsupported
+		// selectors before reading live state prevents clients from silently
+		// combining camera, shadow, or export generations.
+		RenderViewType viewType = RenderViewType::Game;
+		if(arguments.contains("viewType"))
+		{
+			const std::optional<RenderViewType> parsedViewType =
+				ParseAutomationRenderViewType(arguments["viewType"]);
+			if(!parsedViewType
+				|| (*parsedViewType != RenderViewType::Game
+					&& *parsedViewType != RenderViewType::Scene))
+			{
+				return BuildError(
+					requestId,
+					ErrorCategory::Validation,
+					"viewType must be Game or Scene.");
+			}
+			viewType = *parsedViewType;
+		}
+
+		if(editorContext == nullptr || editorContext->engine == nullptr)
+		{
+			return BuildError(
+				requestId,
+				ErrorCategory::MissingTarget,
+				"Renderer is not available.");
+		}
+
+		RenderSystem* renderSystem = editorContext->engine->GetSystem<RenderSystem>();
+		if(renderSystem == nullptr)
+		{
+			return BuildError(
+				requestId,
+				ErrorCategory::MissingTarget,
+				"RenderSystem is not registered.");
+		}
+
+		const TerraEngine::Renderer::RenderDiagnosticsSummary diagnostics =
+			renderSystem->GetLatestRenderGraphDiagnostics();
+		const TerraEngine::Renderer::VirtualGeometryCapabilityDiagnosticsSnapshot&
+			evidence = diagnostics.virtualGeometryCapabilityDiagnostics;
+
+		nlohmann::json capabilityRows = nlohmann::json::array();
+		nlohmann::json measurementRows = nlohmann::json::array();
+		nlohmann::json timingRows = nlohmann::json::array();
+		nlohmann::json fallbackRows = nlohmann::json::array();
+		nlohmann::json evidenceIds = nlohmann::json::array();
+		std::string backend = "unknown";
+		std::string device;
+
+		for(const TerraEngine::Renderer::VirtualGeometryCapabilityEvidence& capability
+			: evidence.capabilities)
+		{
+			backend = ToAutomationString(capability.key.backend);
+			if(!capability.key.deviceIdentity.empty())
+			{
+				device = capability.key.deviceIdentity;
+			}
+			const bool executed = capability.CanReportExecuted();
+			const bool validated = capability.CanReportValidated();
+			capabilityRows.push_back({
+				{"stage", ToAutomationString(capability.key.stage)},
+				{"backend", ToAutomationString(capability.key.backend)},
+				{"route", ToAutomationString(capability.key.route)},
+				{"deviceIdentity", capability.key.deviceIdentity},
+				{"requiredFeatures", capability.key.requiredFeatures},
+				{"planned", capability.planned},
+				{"supported", capability.supported},
+				{"executed", executed},
+				{"validated", validated},
+				{"supportReason", capability.supportReason},
+				{"queriedLimits", capability.queriedLimits},
+				{"evidenceId", executed
+					? capability.execution.evidenceId
+					: std::string()},
+				{"validationArtifactIds", validated
+					? capability.validationArtifactIds
+					: std::vector<std::string>{}},
+				{"source", capability.source},
+				{"timestamp", capability.timestamp}
+			});
+			if(executed)
+			{
+				evidenceIds.push_back(capability.execution.evidenceId);
+			}
+			if(capability.fallbackRoute
+				!= TerraEngine::Renderer::VirtualGeometryCapabilityRoute::Unknown
+				|| !capability.fallbackReason.empty())
+			{
+				fallbackRows.push_back({
+					{"stage", ToAutomationString(capability.key.stage)},
+					{"route", ToAutomationString(capability.fallbackRoute)},
+					{"reason", capability.fallbackReason}
+				});
+			}
+		}
+
+		for(const TerraEngine::Renderer::VirtualGeometryMeasurementRecord& measurement
+			: evidence.measurements)
+		{
+			const bool authoritative = measurement.HasAuthoritativeDuration();
+			measurementRows.push_back({
+				{"stage", ToAutomationString(measurement.stage)},
+				{"frameId", measurement.identity.frameId},
+				{"viewId", measurement.identity.viewId},
+				{"rendererGeneration", measurement.identity.rendererGeneration},
+				{"availability", ToAutomationString(measurement.availability)},
+				{"rawTicks", measurement.rawTicks.has_value()
+					? nlohmann::json(*measurement.rawTicks)
+					: nlohmann::json(nullptr)},
+				{"durationNanoseconds", authoritative
+					? nlohmann::json(*measurement.durationNanoseconds)
+					: nlohmann::json(nullptr)},
+				{"queryIdentity", measurement.queryIdentity},
+				{"executionEvidenceId", authoritative
+					? measurement.executionEvidenceId
+					: std::string()},
+				{"reason", measurement.rejectionReason},
+				{"warmupOrdinal", measurement.warmupOrdinal},
+				{"sampleOrdinal", measurement.sampleOrdinal}
+			});
+		}
+
+		for(const TerraEngine::Renderer::VirtualGeometryGpuTimingSnapshot& timing
+			: evidence.timingSnapshots)
+		{
+			const bool authoritative = timing.HasAuthoritativeDuration();
+			timingRows.push_back({
+				{"stage", ToAutomationString(timing.stage)},
+				{"frameId", timing.identity.frameId},
+				{"viewId", timing.identity.viewId},
+				{"rendererGeneration", timing.identity.rendererGeneration},
+				{"availability", ToAutomationString(timing.availability)},
+				{"durationNanoseconds", authoritative
+					? nlohmann::json(*timing.durationNanoseconds)
+					: nlohmann::json(nullptr)},
+				{"queryIdentity", timing.queryIdentity},
+				{"executionEvidenceId", authoritative
+					? timing.executionEvidenceId
+					: std::string()},
+				{"reason", timing.reason},
+				{"latencyFrames", timing.latencyFrames}
+			});
+		}
+
+		return BuildSuccess(
+			requestId,
+			"Read virtual geometry capability, timing, and evidence.",
+			{
+				{"schemaVersion", evidence.schemaVersion},
+				{"requestedViewType", ToString(viewType)},
+				{"frameId", evidence.publicationIdentity.frameId},
+				{"viewId", evidence.publicationIdentity.viewId},
+				{"rendererGeneration",
+					evidence.publicationIdentity.rendererGeneration},
+				{"backend", backend},
+				{"device", device},
+				{"driver", ""},
+				{"capabilities", std::move(capabilityRows)},
+				{"measurements", std::move(measurementRows)},
+				{"timingSnapshots", std::move(timingRows)},
+				{"fallbacks", std::move(fallbackRows)},
+				{"overflows", nlohmann::json::array()},
+				{"diagnostics", {
+					{"coalesced", 0u},
+					{"dropped", 0u}
+				}},
+				{"evidenceIds", std::move(evidenceIds)}
+			});
 	}
 
 	nlohmann::json EditorAutomationService::HandleDiagnosticsGetSummary(const nlohmann::json& arguments, const std::string& requestId)

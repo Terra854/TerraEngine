@@ -1,0 +1,61 @@
+{
+	"schemaVersion": 1,
+	"feature": "045-virtual-geometry-alternative",
+	"status": "setup-manifest",
+	"measurementPolicy": {
+		"rawSamplesRequired": true,
+		"minimumPairedRuns": 5,
+		"unavailableIsNotZero": true,
+		"randomizePairedOrder": true
+	},
+	"workloads": [
+		{
+			"id": "baseline-processor-expanded",
+			"route": "processor-expanded",
+			"purpose": "Immutable pre-feature comparison route",
+			"fixtureIds": ["dense-cluster-selection", "streaming-pressure", "multi-material-package"],
+			"qualityProfile": "reference-default",
+			"status": "planned-capture"
+		},
+		{
+			"id": "static-representative-corpus",
+			"route": "reference-or-accelerated",
+			"purpose": "Static geometry quality and frame-work comparison",
+			"fixtureIds": ["tiny-mesh-skip", "dense-cluster-selection", "curved-error-profile", "hard-surface-material-bands", "multi-material-package"],
+			"qualityProfile": "reference-default",
+			"status": "planned-capture"
+		},
+		{
+			"id": "page-residency-pressure",
+			"route": "reference-or-accelerated",
+			"purpose": "Demand, residency, fallback, and budget behavior",
+			"fixtureIds": ["page-sourced-resident-payload", "page-fallback-only-coverage", "page-budget-churn", "page-integrity-malformed"],
+			"qualityProfile": "streaming-budget",
+			"status": "planned-capture"
+		},
+		{
+			"id": "multi-view-and-hiz",
+			"route": "reference-or-accelerated",
+			"purpose": "View ownership and conservative occlusion preservation",
+			"fixtureIds": ["thin-hiz-occluder", "multi-view-independence", "shadow-view-virtual-geometry", "cone-safety-metadata"],
+			"qualityProfile": "reference-default",
+			"status": "planned-capture"
+		},
+		{
+			"id": "animated-hero",
+			"route": "vulkan-installed-animated",
+			"purpose": "BaseCharacter deformation evidence from New Animated Project",
+			"fixtureIds": ["new-animated-project", "base-character-hero", "full-reference-required", "million-decision-required"],
+			"qualityProfile": "reference-default",
+			"status": "planned-capture"
+		},
+		{
+			"id": "animated-crowd",
+			"route": "vulkan-installed-animated",
+			"purpose": "Crowd deformation evidence; requires the declared 1000-animator fixture threshold",
+			"fixtureIds": ["new-animated-project", "base-character-crowd", "full-reference-required", "million-decision-required"],
+			"qualityProfile": "reference-default",
+			"status": "planned-capture"
+		}
+	]
+}

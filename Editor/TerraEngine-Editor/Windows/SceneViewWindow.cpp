@@ -2700,6 +2700,53 @@ void SceneViewWindow::HandlePicking(const glm::mat4& view, const glm::mat4& proj
 	float x = ((mousePos.x - viewportPos.x) / viewportSize.x) * 2.0f - 1.0f;
 	float y = 1.0f - ((mousePos.y - viewportPos.y) / viewportSize.y) * 2.0f;
 
+	// Prefer the same compacted semantic visibility records that feed virtual
+	// geometry debug identity. This keeps editor selection route-neutral: mesh,
+	// compute, and indexed fallback packets all resolve to the same object id.
+	const glm::vec2 normalizedViewportPosition(
+		(mousePos.x - viewportPos.x) / viewportSize.x,
+		(mousePos.y - viewportPos.y) / viewportSize.y);
+	const float localPixelX = std::clamp(mousePos.x - viewportPos.x, 0.0f, viewportSize.x - 1.0f);
+	const float localPixelY = std::clamp(mousePos.y - viewportPos.y, 0.0f, viewportSize.y - 1.0f);
+	// ImGui mouse coordinates start at the top while Vulkan image copies start
+	// at the bottom, so invert Y before requesting the exact attachment texel.
+	const glm::uvec2 identityPixel(
+		static_cast<std::uint32_t>(localPixelX),
+		static_cast<std::uint32_t>(viewportSize.y - 1.0f - localPixelY));
+	// A completed identity copy is the only GPU-authoritative selection source.
+	// Queue the next non-blocking copy before falling back so a later click can
+	// consume a fence-proven result without treating CPU projection as GPU work.
+	if (const std::optional<VirtualGeometryVisibilityPick> authoritativePick =
+		RenderSystem::Instance().GetLatestAuthoritativeConventionalVisibilityIdentityPick(
+			RenderViewType::Scene, identityPixel);
+		authoritativePick && authoritativePick->IsValid())
+	{
+		if (const std::optional<Object> pickedObject =
+			ObjectManager::instance().getObject(authoritativePick->objectId))
+		{
+			m_Owner->SetSelectedEntity(pickedObject->EntityId());
+			return;
+		}
+	}
+	RenderSystem::Instance().RequestConventionalVisibilityIdentityPick(
+		RenderViewType::Scene, identityPixel);
+	const std::vector<GpuVirtualGeometryPacketRecord> visibilityRecords =
+		RenderSystem::Instance().GetLatestVirtualGeometryVisibilityRecords(
+			RenderViewType::Scene);
+	const std::optional<VirtualGeometryVisibilityPick> visibilityPick =
+		RenderSystem::PickVirtualGeometryVisibilityRecord(
+			visibilityRecords,
+			normalizedViewportPosition);
+	if(visibilityPick && visibilityPick->IsValid())
+	{
+		if(const std::optional<Object> pickedObject =
+			ObjectManager::instance().getObject(visibilityPick->objectId))
+		{
+			m_Owner->SetSelectedEntity(pickedObject->EntityId());
+			return;
+		}
+	}
+
 	glm::mat4 invVP = glm::inverse(proj * view);
 	glm::vec4 rayStart = invVP * glm::vec4(x, y, 0.01f, 1.0f);
 	glm::vec4 rayEnd = invVP * glm::vec4(x, y, 1.0f, 1.0f);

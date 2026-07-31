@@ -90,6 +90,28 @@ namespace TerraEngine::Renderer::Vulkan {
 		std::string rejectionReason;
 	};
 
+	// A value-only intent crosses from resource streaming to Vulkan's protected
+	// submission boundary.  It describes work, never performs an upload itself.
+	struct VirtualGeometryPageUploadIntent
+	{
+		TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+		std::uint32_t pageId = 0xffffffffu;
+		std::uint64_t contentGeneration = 0u;
+		std::uint64_t byteSize = 0u;
+		std::uint64_t sourceHash = 0u;
+		std::uint64_t existingAllocationId = 0u;
+		bool pinnedFallback = false;
+	};
+
+	struct VirtualGeometryUploadIntentPlan
+	{
+		std::vector<VirtualGeometryPageUploadIntent> uploadIntents;
+		std::vector<std::uint64_t> descriptorRefreshAllocations;
+		std::vector<std::uint64_t> retirementAllocations;
+		bool valid = false;
+		std::string rejectionReason;
+	};
+
 	TERRAENGINE_API UploadPreparationPlan BuildUploadPreparationPlan(const RenderFrameSnapshot& snapshot, std::size_t payloadBudget = 64u);
 	TERRAENGINE_API VirtualGeometryPageUploadPublication PlanVirtualGeometryPageUploadPublication(const GeometryPageRuntime& page);
 	TERRAENGINE_API VirtualGeometryPageRetirementPlan PlanVirtualGeometryPageRetirement(const GeometryPageRuntime& page, std::uint64_t frameId, std::uint64_t safeFrameLag = 2u);
@@ -109,5 +131,8 @@ namespace TerraEngine::Renderer::Vulkan {
 			std::uint64_t poolCapacityBytes,
 			std::uint64_t uploadBudgetBytes,
 			std::uint64_t allocationGeneration);
+	TERRAENGINE_API VirtualGeometryUploadIntentPlan BuildVirtualGeometryUploadIntentPlan(
+		std::vector<VirtualGeometryPageUploadIntent> intents,
+		std::vector<std::uint64_t> retirementAllocations);
 
 }

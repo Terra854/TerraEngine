@@ -303,6 +303,7 @@ namespace TerraEngine::Resource
 	{
 		AnimatedVirtualPageBlobHeader header{};
 		std::vector<AnimatedVirtualPageSectionRecord> sections;
+		std::vector<AnimatedVirtualGeometryCompactStreamDescriptor> compactStreams;
 		std::vector<std::uint8_t> bytes;
 		bool valid = false;
 		std::string rejectionReason;
@@ -335,6 +336,39 @@ namespace TerraEngine::Resource
 		std::uint32_t pageId = kVirtualGeometryInvalidIndex;
 		std::uint64_t requestGeneration = 0u;
 		AnimatedVirtualPageBlob blob;
+		std::string diagnostic;
+	};
+
+	// Static pages use the same exact-range discipline as animated pages, but
+	// deliberately return raw owned bytes.  Their format-specific decoder runs
+	// after this worker-safe read has proven the range, generation, and hash.
+	enum class VirtualGeometryStaticPageReadStatus : std::uint8_t
+	{
+		Completed,
+		Cancelled,
+		InvalidRequest,
+		IoFailure,
+		IntegrityFailure,
+		StaleGeneration
+	};
+
+	struct VirtualGeometryStaticPageReadRequest
+	{
+		std::filesystem::path path;
+		std::uint32_t pageId = kVirtualGeometryInvalidIndex;
+		std::uint64_t byteOffset = 0u;
+		std::uint64_t byteSize = 0u;
+		std::uint64_t expectedHash = 0u;
+		std::uint64_t requestGeneration = 0u;
+		std::shared_ptr<const std::atomic_bool> cancellation;
+	};
+
+	struct VirtualGeometryStaticPageReadCompletion
+	{
+		VirtualGeometryStaticPageReadStatus status = VirtualGeometryStaticPageReadStatus::InvalidRequest;
+		std::uint32_t pageId = kVirtualGeometryInvalidIndex;
+		std::uint64_t requestGeneration = 0u;
+		std::vector<std::uint8_t> bytes;
 		std::string diagnostic;
 	};
 
@@ -492,6 +526,9 @@ namespace TerraEngine::Resource
 		std::uint64_t expectedMeshPayloadGeneration);
 	TERRAENGINE_API AnimatedVirtualPageReadCompletion ReadAnimatedVirtualPageRange(
 		const AnimatedVirtualPageReadRequest& request,
+		std::uint64_t currentRequestGeneration);
+	TERRAENGINE_API VirtualGeometryStaticPageReadCompletion ReadVirtualGeometryStaticPageRange(
+		const VirtualGeometryStaticPageReadRequest& request,
 		std::uint64_t currentRequestGeneration);
 	TERRAENGINE_API std::vector<StreamingNeed> MergeStreamingNeeds(std::vector<StreamingNeed> needs, double nowSeconds = 0.0);
 	// This declaration describes the worker-safe planning phase. The actual

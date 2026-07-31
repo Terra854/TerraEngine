@@ -353,6 +353,64 @@ namespace TerraEngine::EditorTests {
 	}
 
 	void RegisterHeadlessExportPipelineTests(TestRegistry& registry) {
+		registry.Add("Editor.MaterialAssetWriter.StagedWritePreservesRollback", [](TestContext& context) {
+			using namespace TerraEngine::AssetPipeline;
+
+			TempHeadlessPipelineDirectory tempDirectory;
+			const std::filesystem::path outputPath =
+				tempDirectory.Root() / "Materials" / "StagedMaterial.tmat";
+			MaterialAssetWriteDesc initial{};
+			initial.header = CreateDefaultMaterialHeader(TerraEngine::EMPTY_UUID);
+			initial.header.baseColorFactor[0] = 0.2f;
+			context.Expect(WriteMaterialAsset(outputPath, initial),
+				"The initial material candidate must publish before rollback is tested.");
+			const auto ReadBytes = [](const std::filesystem::path& path) {
+				std::ifstream input(path, std::ios::binary | std::ios::ate);
+				std::streamsize size = 0;
+				if(input)
+				{
+					size = static_cast<std::streamsize>(input.tellg());
+				}
+				std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
+				input.seekg(0);
+				if(!bytes.empty()) input.read(reinterpret_cast<char*>(bytes.data()), size);
+				return bytes;
+			};
+			const std::vector<std::uint8_t> initialBytes = ReadBytes(outputPath);
+
+			MaterialAssetWriteDesc rejected = initial;
+			VirtualGeometryMaterialExtension invalidExtension{};
+			invalidExtension.fallbackPolicy =
+				static_cast<VirtualGeometryMaterialFallbackPolicy>(99u);
+			rejected.virtualGeometryExtension = invalidExtension;
+			context.Expect(!WriteMaterialAsset(outputPath, rejected),
+				"An invalid virtual-geometry extension must be rejected before publication.");
+			context.Expect(ReadBytes(outputPath) == initialBytes,
+				"A rejected candidate must leave the previous material bytes untouched.");
+
+			MaterialAssetWriteDesc replacement = initial;
+			replacement.header.baseColorFactor[0] = 0.8f;
+			context.Expect(WriteMaterialAsset(outputPath, replacement),
+				"A valid replacement should publish through the staged writer.");
+			context.Expect(ReadBytes(outputPath.string() + ".previous") == initialBytes,
+				"The staged writer must preserve the last complete material as .previous.");
+			context.Expect(ReadBytes(outputPath) != initialBytes,
+				"Atomic replacement must publish the validated replacement bytes.");
+
+			const std::vector<std::uint8_t> generatedBytes =
+				ReadBytes(outputPath);
+			context.Expect(PublishMaterialAssetBytes(outputPath, generatedBytes),
+				"Inspector-style material bytes must use the same validated publication path.");
+			std::vector<std::uint8_t> malformedBytes = generatedBytes;
+			malformedBytes.resize(sizeof(MaterialHeader) - 1u);
+			const std::vector<std::uint8_t> lastKnownGood =
+				ReadBytes(outputPath);
+			context.Expect(!PublishMaterialAssetBytes(outputPath, malformedBytes),
+				"Truncated Inspector bytes must be rejected before publication.");
+			context.Expect(ReadBytes(outputPath) == lastKnownGood,
+				"A rejected Inspector save must preserve the last-known-good material.");
+		});
+
 		registry.Add("Editor.HeadlessExportPipeline.RuntimeDiscoveryIgnoresCurrentWorkingDirectory", [](TestContext& context) {
 			TempHeadlessPipelineDirectory tempDirectory;
 			const ExportPlatform platform = GetHostExportPlatform();

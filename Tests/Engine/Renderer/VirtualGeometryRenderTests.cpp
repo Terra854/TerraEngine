@@ -191,10 +191,22 @@ namespace TerraEngine::Tests
 
 	void RegisterVirtualGeometryRenderTests(TestRegistry& registry)
 	{
+		registry.Add("VirtualGeometry.Render.PhysicalPagePublicationDoesNotAssumeCatalogResidency", [](TestContext& context) {
+			const std::string rendererSource = ReadRendererSourceFile("Engine/Renderer/RenderSystem.cpp");
+			const std::string loaderSource = ReadRendererSourceFile("Engine/Resource/ResourceManagerMesh.cpp");
+			context.Expect(SourceContains(rendererSource, "virtualGeometryPhysicalPageStates"),
+				"Render snapshots must consume the resource-side physical page publication.");
+			context.Expect(SourceContains(rendererSource, "GeometryPageState::NotResident"),
+				"A missing publication must fail closed and allow ancestor fallback selection.");
+			context.Expect(SourceContains(loaderSource, "GeometryPageState::Pinned"),
+				"The loader must publish protected fallback coverage before high-detail streaming.");
+		});
+
 		registry.Add("VirtualGeometry.Render.GpuPacketDescriptorsPreserveMaterialAndFallbackRuns", [](TestContext& context) {
 			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
 			const TerraEngine::UUID materialA = TerraEngine::GenerateUUID();
 			const TerraEngine::UUID materialB = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID ownerId = TerraEngine::GenerateUUID();
 			std::vector<VirtualGeometryClusterPacket> cpuPackets;
 			for (std::uint32_t index = 0u; index < 6u; ++index)
 			{
@@ -202,7 +214,10 @@ namespace TerraEngine::Tests
 				packet.packetId = index;
 				packet.viewId = 1u;
 				packet.viewType = RenderViewType::Game;
-				packet.objectId = TerraEngine::GenerateUUID();
+				// This test isolates material/fallback run splitting. Independent
+				// owners are covered separately because production batching must
+				// never merge their transforms into one draw.
+				packet.objectId = ownerId;
 				packet.meshId = meshId;
 				packet.materialId = index < 2u ? materialA : materialB;
 				packet.selectedLod = 1u;

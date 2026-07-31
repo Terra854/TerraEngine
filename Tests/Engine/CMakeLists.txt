@@ -7,6 +7,13 @@ file(GLOB_RECURSE TERRAENGINE_ENGINE_ANIMATION_TEST_SOURCES CONFIGURE_DEPENDS
 add_executable(TerraEngine-EngineTests
 	EngineTests.cpp
 	${TERRAENGINE_ENGINE_ANIMATION_TEST_SOURCES}
+	# Codec round-trip tests use the production cooker encoders directly while
+	# the runtime decoder remains linked from the TerraEngine library.
+	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/VirtualGeometryCodecs.cpp
+	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/VirtualGeometryMeshoptCodec.cpp
+	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/VirtualGeometryAssemblyBuilder.cpp
+	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/VirtualGeometryFoliageCurveBuilder.cpp
+	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/VirtualGeometryVoxelBuilder.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/AnimationClipCompiler.cpp
 	# Motion database cook tests link the production deterministic compiler
 	# directly, matching the existing clip compiler test boundary above.
@@ -117,6 +124,14 @@ add_executable(TerraEngine-EngineTests
 		Resource/ResourceStreamingResidencyIntegrationTests.cpp
 	Resource/VirtualGeometryPageResidencyTests.cpp
 	Resource/VirtualGeometryPageStreamingHardeningTests.cpp
+	Resource/VirtualGeometryFeedbackStreamingTests.cpp
+	Resource/VirtualGeometryPhysicalPageTests.cpp
+	Resource/VirtualGeometryStreamingEndToEndTests.cpp
+	Resource/VirtualGeometryPagePublicationTests.cpp
+	Resource/VirtualGeometryResidencyLifecycleTests.cpp
+	Resource/VirtualGeometryStreamingSoakTests.cpp
+	Resource/VirtualGeometryPublicationContractTests.cpp
+	Resource/VirtualGeometryCodecTests.cpp
 	Resource/VirtualGeometryResourceTests.cpp
 	Resource/VirtualGeometryResidencyTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/MockRenderBackendTests.cpp
@@ -157,11 +172,21 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderSnapshotContractTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderSubmissionOwnershipTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryBatchingTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryAggregateContractTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryAggregateTransitionTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryBenchmarkTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryCapabilityContractTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryCapabilityTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryCapabilityTruthTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryCompactionTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryCullingTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryDiagnosticsTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryEvidenceSchemaTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryHardeningTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryHiZTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryGpuTimingTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryGpuDrivenPerformanceTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryInstanceTraversalTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryMultiViewTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryPageStreamingTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryPerformanceGateTests.cpp
@@ -169,7 +194,32 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryRenderTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryShaderLayoutTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryShadowTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometrySchedulerContractTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryStressTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryVisibilityLayoutTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryVisibilityResolveTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryVisibilitySemanticsTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanVirtualGeometryCompactionTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanVirtualGeometryIndirectTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryMultiPassTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryMaterialIntegrationTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryBackendContractTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryShaderProvenanceTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryTraversalOracleTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryTraversalOverflowTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryTwoPassOcclusionTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryViewOwnershipTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryProductionSoakTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryHardwareVisibilityTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryComputeRasterTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryHybridRasterTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryShadingBinTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryBackendParityTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/AnimatedVirtualGeometryMorphParityTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/AnimatedVirtualGeometryReuseTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/AnimatedVirtualGeometryBoundsTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/AnimatedVirtualGeometryLodTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/AnimatedVirtualGeometryPerformanceTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderWorkerTaskGroupTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderSubmissionPlanTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/LiveGpuSubmissionBoundaryTests.cpp
@@ -183,6 +233,7 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderWorkerSafetyTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderWorkSchedulingTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanFrameDiagnosticsTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanVirtualGeometryTimingTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanImageReadbackTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanPresentationLifecycleTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanUiSubmissionFailureTests.cpp
@@ -239,6 +290,9 @@ add_executable(TerraEngine-EngineTests
 target_include_directories(TerraEngine-EngineTests
 	PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}
+		# Some cooker-side codec headers intentionally include the public engine
+		# format contract through its repository-qualified path.
+		${CMAKE_SOURCE_DIR}
 		${CMAKE_SOURCE_DIR}/Engine/Core/Object
 		${CMAKE_SOURCE_DIR}/Engine/Runtime/ContentMount
 		${CMAKE_SOURCE_DIR}/Editor/Export
@@ -250,6 +304,7 @@ target_include_directories(TerraEngine-EngineTests
 target_link_libraries(TerraEngine-EngineTests
 	PRIVATE
 		TerraEngine-Engine
+		TerraEngineVirtualGeometrySchemas
 		# PhysicsJobAdapterTests exercises the provider-private bridge directly.
 		# Keep Jolt private to this test target so gameplay consumers still see no
 		# provider headers or link requirements.
@@ -369,6 +424,16 @@ add_test(NAME Engine.VirtualGeometryFoundation COMMAND $<TARGET_FILE:TerraEngine
 set_tests_properties(Engine.VirtualGeometryFoundation PROPERTIES
 	LABELS "Engine;VirtualGeometry"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry,RenderTypes,Renderer.Diagnostics,Resource.Residency"
+)
+
+# Feature 045 has a stable contract slice independent of the older broad
+# foundation entry. It covers truth/evidence, scheduler/publication boundaries,
+# portable visibility, backend contracts, and animated-page integration without
+# pretending that a live GPU or soak ran inside CTest.
+add_test(NAME Engine.VirtualGeometryFeature045Contracts COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.VirtualGeometryFeature045Contracts PROPERTIES
+	LABELS "Engine;VirtualGeometry;Feature045;Contract"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry.Capability;VirtualGeometry.GpuTiming;Renderer.VulkanVirtualGeometryTiming;VirtualGeometry.Evidence;VirtualGeometry.Scheduler;VirtualGeometry.Publication;VirtualGeometry.Visibility;VirtualGeometry.Backend;AnimatedVirtualGeometry"
 )
 
 add_test(NAME Engine.VirtualGeometryHardening COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)

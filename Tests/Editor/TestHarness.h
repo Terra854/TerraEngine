@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdlib>
 #include <exception>
 #include <functional>
@@ -47,6 +48,7 @@ namespace TerraEngine::EditorTests {
 		int RunAll(std::ostream& output) const {
 			TestContext context;
 			int failedCount = 0;
+			std::size_t selectedCount = 0;
 			const char* filterValue = std::getenv("TERRAENGINE_TEST_FILTER");
 			const std::string filter = filterValue != nullptr ? filterValue : "";
 			const char* excludeFilterValue = std::getenv("TERRAENGINE_TEST_EXCLUDE_FILTER");
@@ -78,6 +80,7 @@ namespace TerraEngine::EditorTests {
 				if(!included || excluded) {
 					continue;
 				}
+				++selectedCount;
 				try {
 					test.body(context);
 					output << "[PASS] " << test.name << '\n';
@@ -93,7 +96,10 @@ namespace TerraEngine::EditorTests {
 				}
 			}
 
-			output << tests_.size() << " tests, " << failedCount << " failures\n";
+			// Keep focused evidence honest: registry size describes discovery,
+			// while selectedCount describes work that actually ran.
+			output << selectedCount << " selected tests (" << tests_.size()
+				<< " registered), " << failedCount << " failures\n";
 			return failedCount == 0 ? 0 : 1;
 		}
 

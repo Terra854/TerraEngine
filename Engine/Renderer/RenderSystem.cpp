@@ -10,6 +10,9 @@
 #include "RHI/Vulkan/VulkanRendererWorkCache.h"
 #include "Renderer/Graph/RenderGraph.h"
 #include "Renderer/Graph/RenderSubmissionPlan.h"
+#include "Renderer/VirtualGeometry/Selection/VirtualGeometryGpuPlan.h"
+#include "Renderer/VirtualGeometry/Selection/VirtualGeometrySelection.h"
+#include "Renderer/VirtualGeometry/Visibility/VirtualGeometryRasterBins.h"
 #include "Core/FatalErrorReport.h"
 #include "Core/Logger/Logger.h"
 #include "Core/Scheduling/EcsQueryTaskGraph.h"
@@ -27,6 +30,7 @@
 #include "Core/Object/ObjectManager.h"
 #include "Components/Transform.h"
 #include "Resource/ResourceManager.h"
+#include "Resource/VirtualGeometryStreamingSystem.h"
 #include "Utilities/PlatformUtils.h"
 #include "ThreadPool/ThreadPool.h"
 #include "Profiling/Profiler.h"
@@ -41,8 +45,10 @@
 #define GLM_FORCE_RADIANS
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <future>
 #include <initializer_list>
@@ -389,6 +395,10 @@ namespace
 	VirtualGeometryAssetRuntime BuildVirtualGeometryRuntimeFromMesh(const TerraEngine::UUID& meshId, const Mesh& mesh)
 	{
 		VirtualGeometryAssetRuntime runtime{};
+		const TerraEngine::Resource::VirtualGeometryPhysicalPageResidencySnapshot residency =
+			TerraEngine::Resource::VirtualGeometryStreamingSystem::Instance().ResidencySnapshot();
+		const std::vector<TerraEngine::Resource::VirtualGeometryPagePublication> publications =
+			TerraEngine::Resource::VirtualGeometryStreamingSystem::Instance().PublishedPages();
 		runtime.assetId = meshId;
 		runtime.cookStatus = mesh.hasVirtualGeometry ? VirtualGeometryCookStatus::Cooked : VirtualGeometryCookStatus::NeedsRebuild;
 		runtime.sourceTriangleCount = mesh.virtualGeometryHeader.sourceTriangleCount;
@@ -493,6 +503,35 @@ namespace
 			record.boundsRadius = cluster.boundsRadius;
 			runtime.clusters.push_back(record);
 		}
+		// Loader-owned VGAP records have already passed integrity and fallback
+		// validation. Copy only the typed value facts into the immutable runtime
+		// snapshot so render workers never reopen ResourceManager mesh storage.
+		runtime.aggregateProfiles.reserve(mesh.virtualGeometryAggregateProfiles.size());
+		for (const VirtualGeometryAggregateProfileRecord& profile : mesh.virtualGeometryAggregateProfiles)
+		{
+			if (profile.kind > static_cast<std::uint32_t>(VirtualGeometryAggregateProfileKind::Fallback))
+			{
+				continue;
+			}
+			VirtualGeometryAssetRuntime::AggregateProfileRuntime aggregate{};
+			aggregate.representation.kind =
+				static_cast<::TerraEngine::Renderer::VirtualGeometryAggregateKind>(profile.kind);
+			aggregate.representation.stableId = profile.stableId;
+			aggregate.representation.canonicalError = profile.canonicalError;
+			aggregate.representation.completeFallbackCoverage =
+				(profile.flags & kVirtualGeometryAggregateProfileFlagCompleteFallbackCoverage) != 0u;
+			aggregate.representation.sourceElementCount = profile.sourceElementCount;
+			aggregate.representation.coverageRatio = profile.coverageRatio;
+			aggregate.representation.fallbackStableId = profile.fallbackStableId;
+			aggregate.fallbackClusterId = profile.fallbackClusterId;
+			aggregate.legacyDerived = mesh.virtualGeometryAggregateProfileProvenance
+			== VirtualGeometryAggregateProfileProvenance::LegacyDerived;
+			if (aggregate.Valid()
+				&& aggregate.fallbackClusterId < runtime.clusters.size())
+			{
+				runtime.aggregateProfiles.push_back(std::move(aggregate));
+			}
+		}
 		runtime.coneSafety.reserve(mesh.virtualGeometryConeSafety.size());
 		for (const VirtualGeometryConeSafetyRecord& cone : mesh.virtualGeometryConeSafety)
 		{
@@ -536,13 +575,64 @@ namespace
 				record.payloadByteSize = page.byteSize;
 				record.payloadBufferIndex = 0xffffffffu;
 				record.payloadDescriptorIndex = 0xffffffffu;
-				record.pinnedFallback = record.fallbackPage;
-				record.protectedFallback = record.fallbackPage || record.pinnedFallback;
-				// TEMF v1 keeps the cooked virtual-geometry pages inside the loaded
-			// mesh payload. Until page streaming starts replacing these embedded
-			// ranges with demand-loaded storage, every published page is resident
-			// and can participate in LOD selection immediately.
-			record.state = GeometryPageState::Resident;
+				record.publicationGeneration = mesh.virtualGeometryPhysicalPagePublicationGeneration;
+				if (page.pageId < mesh.virtualGeometryPhysicalPageStates.size()
+					&& page.pageId < mesh.virtualGeometryPhysicalPagePublicationGenerations.size())
+				{
+					record.state = static_cast<GeometryPageState>(
+						mesh.virtualGeometryPhysicalPageStates[page.pageId]);
+					record.publicationGeneration =
+						mesh.virtualGeometryPhysicalPagePublicationGenerations[page.pageId];
+				}
+				const auto streamed = std::find_if(residency.pages.begin(), residency.pages.end(),
+					[meshId, pageId = page.pageId](const auto& row) { return row.assetId == meshId && row.pageId == pageId; });
+				if(streamed != residency.pages.end()) {
+					switch(streamed->state) {
+					case TerraEngine::Resource::VirtualGeometryPagePublicationState::Resident: record.state = GeometryPageState::Resident; break;
+					case TerraEngine::Resource::VirtualGeometryPagePublicationState::PendingIO: record.state = GeometryPageState::PendingIO; break;
+					case TerraEngine::Resource::VirtualGeometryPagePublicationState::PendingDecode: record.state = GeometryPageState::PendingIO; break;
+					case TerraEngine::Resource::VirtualGeometryPagePublicationState::PendingUpload: record.state = GeometryPageState::PendingUpload; break;
+					case TerraEngine::Resource::VirtualGeometryPagePublicationState::Failed: record.state = GeometryPageState::Failed; break;
+					default: break;
+					}
+					record.publicationGeneration = streamed->residencyGeneration;
+				}
+				const auto publication = std::find_if(
+					publications.begin(),
+					publications.end(),
+					[meshId, pageId = page.pageId](const auto& value)
+					{
+						return value.key.asset.assetId == meshId
+							&& value.key.pageId == pageId
+							&& value.IsVisible();
+					});
+				if (publication != publications.end())
+				{
+					record.state = GeometryPageState::Resident;
+					record.payloadByteOffset = 0u;
+					record.payloadByteSize = publication->payload.decodedByteCount;
+					record.byteSize = publication->payload.decodedByteCount;
+					record.payloadBufferIndex = publication->descriptor.bufferIndex;
+					record.payloadDescriptorIndex = publication->descriptor.descriptorIndex;
+					record.allocationId = publication->descriptor.allocationId;
+					record.meshPayloadGeneration =
+						publication->key.generations.geometryFormatGeneration;
+					record.pageContentGeneration =
+						publication->key.pageContentGeneration;
+					record.residencyGeneration =
+						publication->key.generations.residencyGeneration;
+					record.publicationGeneration =
+						publication->publicationGeneration;
+				}
+				// Missing publication data is intentionally fail-closed: the cluster
+				// resolver will request this page and walk its resident ancestors.
+				record.pinnedFallback = record.fallbackPage
+					&& record.state == GeometryPageState::Pinned;
+				record.protectedFallback = record.pinnedFallback;
+				record.eligibleForNewWork = record.state == GeometryPageState::NotResident
+					|| record.state == GeometryPageState::Requested
+					|| record.state == GeometryPageState::PendingIO
+					|| record.state == GeometryPageState::PendingUpload;
 			runtime.pages.push_back(record);
 		}
 		return runtime;
@@ -1217,7 +1307,8 @@ namespace
 		const glm::uvec2& targetSize,
 		RenderViewType viewType,
 		std::uint32_t outputId,
-		std::uint64_t transitionStateSignature)
+		std::uint64_t transitionStateSignature,
+		std::uint64_t virtualGeometryResidencyGeneration)
 	{
 		std::uint64_t seed = kRenderHashOffset;
 		HashCombine(seed, sceneRevision);
@@ -1228,6 +1319,10 @@ namespace
 		HashCombine(seed, static_cast<std::uint64_t>(viewType));
 		HashCombine(seed, outputId);
 		HashCombine(seed, transitionStateSignature);
+		// Cached page needs and selected fallback clusters are valid only for the
+		// physical residency snapshot that produced them. Publication changes the
+		// generation at a protected boundary and forces one deterministic rebuild.
+		HashCombine(seed, virtualGeometryResidencyGeneration);
 		return seed;
 	}
 
@@ -1883,12 +1978,18 @@ std::vector<ClusterWorkBatch> RenderSystem::BuildVirtualGeometryClusterBatches(
 		const bool compatibleOwner =
 			previous.viewId == next.viewId
 			&& previous.viewType == next.viewType
+			&& previous.objectId == next.objectId
 			&& previous.meshId == next.meshId
 			&& previous.materialId == next.materialId
 			&& previous.selectedLod == next.selectedLod
 			&& previous.payloadSource == next.payloadSource
 			&& previous.emittedSource == next.emittedSource
 			&& previous.fallbackPacket == next.fallbackPacket
+			// Raster route and shading-bin policy are protected-boundary
+			// execution state. A CPU-expanded batch must not span a route
+			// transition that the GPU descriptor path intentionally splits.
+			&& previous.rasterRoute == next.rasterRoute
+			&& previous.materialBin == next.materialBin
 			&& previous.packetId + 1u == next.packetId;
 		// Embedded draws still share one payload binding for their entire run.
 		// Page-local draws carry one descriptor id per emitted meshlet, so adjacent
@@ -1991,10 +2092,242 @@ std::vector<GpuVirtualGeometryPacketRecord> RenderSystem::BuildGpuVirtualGeometr
 		// Bit 0 marks fail-open coverage; higher bits mirror the active debug
 		// mode so generated submissions can reject stale visualizer ownership.
 		record.flags = (packet.fallbackPacket ? 1u : 0u)
-			| (static_cast<std::uint32_t>(NormalizeVirtualGeometryDebugVisualizationMode(debugMode)) << 8u);
+			| (static_cast<std::uint32_t>(NormalizeVirtualGeometryDebugVisualizationMode(debugMode)) << 8u)
+			| ((packet.rasterRoute & kVirtualGeometryRasterRouteMask)
+				<< kVirtualGeometryRasterRouteShift)
+			| ((packet.materialBin & kVirtualGeometryMaterialBinMask)
+				<< kVirtualGeometryMaterialBinShift);
 		records.push_back(record);
 	}
 	return records;
+}
+
+std::optional<VirtualGeometryVisibilityPick>
+RenderSystem::PickVirtualGeometryVisibilityRecord(
+	std::span<const GpuVirtualGeometryPacketRecord> records,
+	const glm::vec2& normalizedViewportPosition)
+{
+	if(!std::isfinite(normalizedViewportPosition.x)
+		|| !std::isfinite(normalizedViewportPosition.y)
+		|| normalizedViewportPosition.x < 0.0f
+		|| normalizedViewportPosition.x > 1.0f
+		|| normalizedViewportPosition.y < 0.0f
+		|| normalizedViewportPosition.y > 1.0f)
+	{
+		return std::nullopt;
+	}
+
+	const GpuVirtualGeometryPacketRecord* bestRecord = nullptr;
+	float bestArea = std::numeric_limits<float>::max();
+	for(const GpuVirtualGeometryPacketRecord& record : records)
+	{
+		if(record.objectId == TerraEngine::EMPTY_UUID
+			|| record.meshId == TerraEngine::EMPTY_UUID
+			|| record.frameId == 0u
+			|| record.meshletCount == 0u
+			|| record.projectedBounds == glm::vec4(0.0f))
+		{
+			continue;
+		}
+
+		const float minimumX = std::clamp(
+			std::min(record.projectedBounds.x, record.projectedBounds.z),
+			0.0f,
+			1.0f);
+		const float maximumX = std::clamp(
+			std::max(record.projectedBounds.x, record.projectedBounds.z),
+			0.0f,
+			1.0f);
+		const float minimumY = std::clamp(
+			std::min(record.projectedBounds.y, record.projectedBounds.w),
+			0.0f,
+			1.0f);
+		const float maximumY = std::clamp(
+			std::max(record.projectedBounds.y, record.projectedBounds.w),
+			0.0f,
+			1.0f);
+		if(normalizedViewportPosition.x < minimumX
+			|| normalizedViewportPosition.x > maximumX
+			|| normalizedViewportPosition.y < minimumY
+			|| normalizedViewportPosition.y > maximumY)
+		{
+			continue;
+		}
+
+		const float area = (maximumX - minimumX) * (maximumY - minimumY);
+		const bool winsStableTie = bestRecord != nullptr
+			&& area == bestArea
+			&& record.debugIdentity < bestRecord->debugIdentity;
+		if(bestRecord != nullptr && area > bestArea && !winsStableTie)
+		{
+			continue;
+		}
+		if(bestRecord != nullptr && area == bestArea && !winsStableTie)
+		{
+			continue;
+		}
+		bestRecord = &record;
+		bestArea = area;
+	}
+
+	if(bestRecord == nullptr)
+	{
+		return std::nullopt;
+	}
+
+	VirtualGeometryVisibilityPick pick;
+	pick.objectId = bestRecord->objectId;
+	pick.meshId = bestRecord->meshId;
+	pick.materialId = bestRecord->materialId;
+	pick.frameId = bestRecord->frameId;
+	pick.packetId = bestRecord->packetId;
+	pick.clusterId = bestRecord->clusterId;
+	pick.meshletId = bestRecord->meshletOffset;
+	pick.selectedLod = bestRecord->selectedLod;
+	pick.debugIdentity = bestRecord->debugIdentity;
+	pick.fallback = (bestRecord->flags & 0x1u) != 0u;
+	return pick;
+}
+
+bool RenderSystem::RequestConventionalVisibilityIdentityPick(
+	RenderViewType viewType, const glm::uvec2& pixel)
+{
+	if (!rhi) return false;
+	TerraEngine::Renderer::ConventionalVisibilityIdentityReadbackRequest request{};
+	request.viewType = viewType;
+	request.pixel = pixel;
+	{
+		std::lock_guard<std::mutex> lock(statsMutex);
+		const std::vector<GpuVirtualGeometryPacketRecord>& records =
+			viewType == RenderViewType::Scene
+			? latestSceneVirtualGeometryVisibilityRecords
+			: latestGameVirtualGeometryVisibilityRecords;
+		if (records.empty() || records.front().frameId == 0u) return false;
+		request.frameId = records.front().frameId;
+		request.rendererGeneration = latestRendererRecoverySnapshot.renderSessionGeneration;
+	}
+	if (!rhi->QueueConventionalVisibilityIdentityReadback(request)) return false;
+	{
+		std::lock_guard<std::mutex> lock(statsMutex);
+		// A fresh GPU request invalidates any older value for this view. The
+		// replacement is visible only when DrainConventional... observes its fence.
+		if (viewType == RenderViewType::Scene) {
+			pendingSceneAuthoritativeIdentityPixel = pixel;
+			latestSceneAuthoritativeIdentityPick.reset();
+			latestSceneAuthoritativeIdentityFailureReason.clear();
+		} else {
+			pendingGameAuthoritativeIdentityPixel = pixel;
+			latestGameAuthoritativeIdentityPick.reset();
+			latestGameAuthoritativeIdentityFailureReason.clear();
+		}
+	}
+	return true;
+}
+
+std::optional<VirtualGeometryVisibilityPick>
+RenderSystem::GetLatestAuthoritativeConventionalVisibilityIdentityPick(
+	RenderViewType viewType, const glm::uvec2& pixel) const
+{
+	std::lock_guard<std::mutex> lock(statsMutex);
+	const std::optional<VirtualGeometryVisibilityPick>& pick =
+		viewType == RenderViewType::Scene
+		? latestSceneAuthoritativeIdentityPick : latestGameAuthoritativeIdentityPick;
+	const glm::uvec2 storedPixel = viewType == RenderViewType::Scene
+		? latestSceneAuthoritativeIdentityPixel : latestGameAuthoritativeIdentityPixel;
+	if (storedPixel != pixel || !pick || !pick->IsValid()) return std::nullopt;
+	return pick;
+}
+
+TerraEngine::Renderer::AuthoritativeVisibilityPickState
+RenderSystem::GetConventionalVisibilityIdentityPickState(
+	RenderViewType viewType, const glm::uvec2& pixel) const
+{
+	std::lock_guard<std::mutex> lock(statsMutex);
+	TerraEngine::Renderer::AuthoritativeVisibilityPickState state{};
+	state.pixel = pixel;
+	const std::optional<VirtualGeometryVisibilityPick>& completed =
+		viewType == RenderViewType::Scene
+		? latestSceneAuthoritativeIdentityPick : latestGameAuthoritativeIdentityPick;
+	const glm::uvec2 completedPixel = viewType == RenderViewType::Scene
+		? latestSceneAuthoritativeIdentityPixel : latestGameAuthoritativeIdentityPixel;
+	const std::optional<glm::uvec2>& pending = viewType == RenderViewType::Scene
+		? pendingSceneAuthoritativeIdentityPixel : pendingGameAuthoritativeIdentityPixel;
+	const std::string& failureReason = viewType == RenderViewType::Scene
+		? latestSceneAuthoritativeIdentityFailureReason : latestGameAuthoritativeIdentityFailureReason;
+	if (completedPixel == pixel && completed && completed->IsValid()) {
+		state.status = TerraEngine::Renderer::AuthoritativeVisibilityPickStatus::Ready;
+		state.pick = completed;
+		return state;
+	}
+	if (pending && *pending == pixel) {
+		state.status = TerraEngine::Renderer::AuthoritativeVisibilityPickStatus::Pending;
+		state.reason = "The typed Vulkan identity copy is waiting for its frame fence.";
+		return state;
+	}
+	state.status = TerraEngine::Renderer::AuthoritativeVisibilityPickStatus::Unavailable;
+	state.reason = failureReason.empty()
+		? "No authoritative Vulkan identity result is available for this pixel."
+		: failureReason;
+	return state;
+}
+
+bool RenderSystem::SetVirtualGeometryValidationRouteOverride(
+	TerraEngine::Renderer::VirtualGeometryRasterRoute route,
+	std::string* outReason)
+{
+	if (route == TerraEngine::Renderer::VirtualGeometryRasterRoute::Fallback) {
+		if (outReason) *outReason = "Fallback is not a validation route; request Indexed explicitly.";
+		return false;
+	}
+	if (!rhi) {
+		if (outReason) *outReason = "The Vulkan renderer is unavailable.";
+		return false;
+	}
+	const TerraEngine::Renderer::BackendCapabilityProfile capabilities =
+		rhi->GetBackendCapabilityProfile();
+	const bool supported = route == TerraEngine::Renderer::VirtualGeometryRasterRoute::Indexed
+		|| (route == TerraEngine::Renderer::VirtualGeometryRasterRoute::Hardware
+			&& capabilities.supportsVirtualGeometryGeneratedSubmissions)
+		|| (route == TerraEngine::Renderer::VirtualGeometryRasterRoute::Compute
+			&& capabilities.supportsVirtualGeometryComputeRaster);
+	if (!supported) {
+		if (outReason) *outReason = "The active Vulkan adapter does not support the requested validation route.";
+		return false;
+	}
+	std::lock_guard<std::mutex> lock(virtualGeometryValidationMutex);
+	virtualGeometryValidationRouteOverride = route;
+	virtualGeometryHybridValidationSceneRequested = false;
+	if (outReason) outReason->clear();
+	return true;
+}
+
+void RenderSystem::SetVirtualGeometryHybridValidationSceneRequested(bool requested)
+{
+	std::lock_guard<std::mutex> lock(virtualGeometryValidationMutex);
+	// Hybrid remains an intentional mixture of real packet routes. It never
+	// becomes a synthetic backend enum or a force-route value in Vulkan work.
+	virtualGeometryValidationRouteOverride.reset();
+	virtualGeometryHybridValidationSceneRequested = requested;
+}
+
+void RenderSystem::ClearVirtualGeometryValidationRouteOverride()
+{
+	std::lock_guard<std::mutex> lock(virtualGeometryValidationMutex);
+	virtualGeometryValidationRouteOverride.reset();
+	virtualGeometryHybridValidationSceneRequested = false;
+}
+
+std::optional<TerraEngine::Renderer::VirtualGeometryRasterRoute>
+RenderSystem::GetVirtualGeometryValidationRouteOverride() const
+{
+	std::lock_guard<std::mutex> lock(virtualGeometryValidationMutex);
+	return virtualGeometryValidationRouteOverride;
+}
+
+bool RenderSystem::IsVirtualGeometryHybridValidationSceneRequested() const
+{
+	std::lock_guard<std::mutex> lock(virtualGeometryValidationMutex);
+	return virtualGeometryHybridValidationSceneRequested;
 }
 
 std::vector<GpuVirtualGeometryBatchDescriptor> RenderSystem::BuildGpuVirtualGeometryBatchDescriptors(
@@ -2018,6 +2351,7 @@ std::vector<GpuVirtualGeometryBatchDescriptor> RenderSystem::BuildGpuVirtualGeom
 			&& isPageLocalSource(next.payloadSource);
 		const bool compatibleOwner = previous.viewId == next.viewId
 			&& previous.viewType == next.viewType
+			&& previous.objectId == next.objectId
 			&& previous.meshId == next.meshId
 			&& previous.materialId == next.materialId
 			&& previous.selectedLod == next.selectedLod
@@ -3013,6 +3347,332 @@ RenderSystem::BuildCpuAnimationDeformation(
 	}
 }
 
+namespace
+{
+	using BackendStage = TerraEngine::Renderer::VirtualGeometryBackendStage;
+	using CapabilityStage =
+		TerraEngine::Renderer::VirtualGeometryCapabilityStage;
+
+	CapabilityStage ToCapabilityStage(BackendStage stage)
+	{
+		switch(stage)
+		{
+		case BackendStage::Traversal: return CapabilityStage::Traversal;
+		case BackendStage::Compaction: return CapabilityStage::Compaction;
+		case BackendStage::IndirectGeneration: return CapabilityStage::Indirect;
+		case BackendStage::PageDecode: return CapabilityStage::Decode;
+		case BackendStage::HardwareRaster: return CapabilityStage::HardwareRaster;
+		case BackendStage::ComputeRaster: return CapabilityStage::ComputeRaster;
+		case BackendStage::VisibilityResolve: return CapabilityStage::Resolve;
+		case BackendStage::Shading: return CapabilityStage::Shading;
+		case BackendStage::StreamingUpdate: return CapabilityStage::Streaming;
+		case BackendStage::Deformation: return CapabilityStage::Deformation;
+		case BackendStage::Shadow: return CapabilityStage::Shadow;
+		case BackendStage::RayTracing: return CapabilityStage::RayTracing;
+		default: return CapabilityStage::Capture;
+		}
+	}
+
+	TerraEngine::Renderer::VirtualGeometryCapabilityRoute ToCapabilityRoute(
+		TerraEngine::Renderer::VirtualGeometryBackendRoute route)
+	{
+		using BackendRoute =
+			TerraEngine::Renderer::VirtualGeometryBackendRoute;
+		using CapabilityRoute =
+			TerraEngine::Renderer::VirtualGeometryCapabilityRoute;
+		switch(route)
+		{
+		case BackendRoute::MeshShader: return CapabilityRoute::MeshShader;
+		case BackendRoute::Compute: return CapabilityRoute::ComputeRaster;
+		case BackendRoute::ProcessorOracle:
+		case BackendRoute::Indexed: return CapabilityRoute::IndexedFallback;
+		default: return CapabilityRoute::Unknown;
+		}
+	}
+
+	TerraEngine::Renderer::VirtualGeometryMeasurementAvailability
+		ToMeasurementAvailability(
+			TerraEngine::Renderer::BackendMeasurementAvailability availability)
+	{
+		using BackendAvailability =
+			TerraEngine::Renderer::BackendMeasurementAvailability;
+		using Availability =
+			TerraEngine::Renderer::VirtualGeometryMeasurementAvailability;
+		switch(availability)
+		{
+		case BackendAvailability::Pending: return Availability::Pending;
+		case BackendAvailability::Unavailable: return Availability::Unavailable;
+		case BackendAvailability::Invalid: return Availability::Invalid;
+		case BackendAvailability::Measured: return Availability::Measured;
+		default: return Availability::Invalid;
+		}
+	}
+
+	bool BackendSupportsStage(
+		CapabilityStage stage,
+		const TerraEngine::Renderer::BackendCapabilityProfile& profile,
+		bool meshShaderRoute)
+	{
+		switch(stage)
+		{
+		case CapabilityStage::Compaction:
+			return profile.supportsVirtualGeometryGpuCompaction;
+		case CapabilityStage::Indirect:
+			return profile.supportsVirtualGeometryGeneratedSubmissions;
+		case CapabilityStage::ComputeRaster:
+			return profile.supportsVirtualGeometryComputeRaster;
+		case CapabilityStage::Resolve:
+			return profile.supportsVirtualGeometryVisibilityResolve;
+		case CapabilityStage::Shading:
+			return profile.supportsVirtualGeometryShadingBins;
+		case CapabilityStage::Streaming:
+		case CapabilityStage::RayTracing:
+			return false;
+		case CapabilityStage::Capture:
+			return profile.supportsImageReadback;
+		default:
+			return meshShaderRoute;
+		}
+	}
+
+	TerraEngine::Renderer::VirtualGeometryCapabilityDiagnosticsSnapshot
+		CollectVirtualGeometryCapabilityDiagnostics(
+			RHIContext& context,
+			const TerraEngine::Renderer::BackendCapabilityProfile& profile,
+			const TerraEngine::Renderer::VirtualGeometryFrameViewIdentity&
+				currentPublication)
+	{
+		using namespace TerraEngine::Renderer;
+		std::vector<VirtualGeometryBackendExecutionReceipt> receipts =
+			context.PollVirtualGeometryExecutionReceipts();
+		std::vector<VirtualGeometryBackendMeasurement> backendMeasurements =
+			context.PollVirtualGeometryMeasurements();
+
+		VirtualGeometryCapabilityDiagnosticsSnapshot diagnostics{};
+		diagnostics.publicationIdentity = currentPublication;
+
+		// Delayed queries keep the identity of the frame that owned the commands.
+		// Publish the newest completed identity, then reject older/mismatched rows
+		// through the shared generation-safe diagnostics applicator.
+		std::optional<VirtualGeometryFrameViewIdentity> newestCompletedIdentity;
+		const auto considerCompletedIdentity =
+			[&newestCompletedIdentity](
+				VirtualGeometryFrameViewIdentity candidate)
+			{
+				if(!newestCompletedIdentity.has_value()
+					|| candidate.frameId > newestCompletedIdentity->frameId
+					|| (candidate.frameId == newestCompletedIdentity->frameId
+						&& candidate.viewId
+							> newestCompletedIdentity->viewId))
+				{
+					newestCompletedIdentity = candidate;
+				}
+			};
+		for(const VirtualGeometryBackendExecutionReceipt& receipt : receipts)
+		{
+			if(receipt.IsExecuted())
+			{
+				considerCompletedIdentity({
+					receipt.frameNumber,
+					receipt.viewId,
+					receipt.rendererGeneration
+				});
+			}
+		}
+		for(const VirtualGeometryBackendMeasurement& measurement
+			: backendMeasurements)
+		{
+			if(measurement.frameNumber != 0u
+				&& measurement.rendererGeneration != 0u)
+			{
+				considerCompletedIdentity({
+					measurement.frameNumber,
+					measurement.viewId,
+					measurement.rendererGeneration
+				});
+			}
+		}
+		if(newestCompletedIdentity.has_value())
+		{
+			diagnostics.publicationIdentity = *newestCompletedIdentity;
+		}
+
+		const bool meshShaderRoute =
+			context.SupportsVirtualGeometryMeshShaderRoute();
+		constexpr std::array<BackendStage, 13u> backendStages = {
+			BackendStage::Traversal,
+			BackendStage::Compaction,
+			BackendStage::IndirectGeneration,
+			BackendStage::PageDecode,
+			BackendStage::HardwareRaster,
+			BackendStage::ComputeRaster,
+			BackendStage::VisibilityResolve,
+			BackendStage::Shading,
+			BackendStage::StreamingUpdate,
+			BackendStage::Deformation,
+			BackendStage::Shadow,
+			BackendStage::Capture,
+			BackendStage::RayTracing
+		};
+		diagnostics.capabilities.reserve(backendStages.size());
+		for(const BackendStage backendStage : backendStages)
+		{
+			const CapabilityStage stage = ToCapabilityStage(backendStage);
+			VirtualGeometryCapabilityKey key{};
+			key.stage = stage;
+			key.backend = profile.backendId == "vulkan"
+				? VirtualGeometryCapabilityBackend::Vulkan
+				: VirtualGeometryCapabilityBackend::Unknown;
+			key.route = stage == CapabilityStage::Compaction
+					|| stage == CapabilityStage::ComputeRaster
+				? VirtualGeometryCapabilityRoute::ComputeRaster
+				: VirtualGeometryCapabilityRoute::MeshShader;
+			key.deviceIdentity = profile.backendId;
+			VirtualGeometryCapabilityEvidence capability =
+				MakePlannedVirtualGeometryCapability(std::move(key));
+			const bool supported =
+				BackendSupportsStage(stage, profile, meshShaderRoute);
+			EvaluateVirtualGeometryCapabilitySupport(
+				capability,
+				supported,
+				supported
+					? "The active backend exposes the required live route."
+					: "The active backend has not exposed a complete live route.",
+				"profile-derived limits");
+			capability.source = "backend-profile";
+			if(!supported)
+			{
+				capability.fallbackRoute =
+					VirtualGeometryCapabilityRoute::IndexedFallback;
+				capability.fallbackReason =
+					"The processor-expanded/indexed route remains authoritative.";
+			}
+
+			const auto completed = std::find_if(
+				receipts.begin(),
+				receipts.end(),
+				[&](const VirtualGeometryBackendExecutionReceipt& receipt)
+				{
+					return receipt.stage == backendStage
+						&& receipt.IsExecuted()
+						&& VirtualGeometryFrameViewIdentity{
+							receipt.frameNumber,
+							receipt.viewId,
+							receipt.rendererGeneration
+						} == diagnostics.publicationIdentity;
+				});
+			if(completed != receipts.end())
+			{
+				VirtualGeometryCapabilityExecution execution{};
+				execution.identity = diagnostics.publicationIdentity;
+				execution.evidenceId = completed->evidenceId;
+				execution.completedLiveCommand = true;
+				execution.preparedOnly = false;
+				(void)AttachVirtualGeometryExecutionEvidence(
+					capability,
+					std::move(execution));
+				capability.source = "backend-completion-receipt";
+			}
+			diagnostics.capabilities.push_back(std::move(capability));
+		}
+
+		diagnostics.measurements.reserve(backendMeasurements.size());
+		for(const VirtualGeometryBackendMeasurement& backendMeasurement
+			: backendMeasurements)
+		{
+			VirtualGeometryMeasurementRecord measurement{};
+			measurement.stage =
+				ToCapabilityStage(backendMeasurement.stage);
+			measurement.identity = {
+				backendMeasurement.frameNumber,
+				backendMeasurement.viewId,
+				backendMeasurement.rendererGeneration
+			};
+			measurement.availability =
+				ToMeasurementAvailability(backendMeasurement.availability);
+			measurement.rejectionReason = backendMeasurement.reason;
+			if(backendMeasurement.queryPoolGeneration != 0u
+				&& backendMeasurement.queryCount != 0u)
+			{
+				measurement.queryIdentity =
+					"pool-"
+					+ std::to_string(
+						backendMeasurement.queryPoolGeneration)
+					+ "/"
+					+ std::to_string(backendMeasurement.firstQuery)
+					+ "+"
+					+ std::to_string(backendMeasurement.queryCount);
+			}
+
+			const auto completed = std::find_if(
+				receipts.begin(),
+				receipts.end(),
+				[&](const VirtualGeometryBackendExecutionReceipt& receipt)
+				{
+					return receipt.stage == backendMeasurement.stage
+						&& receipt.frameNumber
+							== backendMeasurement.frameNumber
+						&& receipt.viewId == backendMeasurement.viewId
+						&& receipt.rendererGeneration
+							== backendMeasurement.rendererGeneration
+						&& receipt.IsExecuted();
+				});
+			if(completed != receipts.end())
+			{
+				measurement.executionEvidenceId = completed->evidenceId;
+			}
+			if(backendMeasurement.availability
+				== BackendMeasurementAvailability::Measured)
+			{
+				if(completed == receipts.end()
+					|| !backendMeasurement.HasAuthoritativeValue())
+				{
+					measurement.availability =
+						VirtualGeometryMeasurementAvailability::Invalid;
+					measurement.rejectionReason =
+						"measured backend timing lacks matching completed execution evidence";
+				}
+				else
+				{
+					measurement.rawTicks =
+						backendMeasurement.rawTicks;
+					measurement.durationNanoseconds =
+						static_cast<std::uint64_t>(std::llround(
+							backendMeasurement.durationMilliseconds
+								* 1'000'000.0));
+				}
+			}
+			diagnostics.measurements.push_back(std::move(measurement));
+		}
+
+		for(VirtualGeometryCapabilityEvidence& capability
+			: diagnostics.capabilities)
+		{
+			if(!capability.CanReportExecuted())
+			{
+				continue;
+			}
+			const auto measured = std::find_if(
+				diagnostics.measurements.begin(),
+				diagnostics.measurements.end(),
+				[&](const VirtualGeometryMeasurementRecord& measurement)
+				{
+					return measurement.stage == capability.key.stage
+						&& measurement.identity
+							== capability.execution.identity
+						&& measurement.HasAuthoritativeDuration();
+				});
+			if(measured != diagnostics.measurements.end())
+			{
+				(void)AttachVirtualGeometryValidationEvidence(
+					capability,
+					{ measured->queryIdentity });
+			}
+		}
+		return diagnostics;
+	}
+}
+
 // RenderSystem::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void RenderSystem::Initialize()
 {
@@ -3034,7 +3694,7 @@ void RenderSystem::Initialize()
 	// VRS is a render-pass attachment decision in Vulkan. Apply the startup
 	// render profile before backend initialization so exported builds that
 	// declare VRS disabled never create or load a shading-rate attachment.
-	vulkanContext->SetVariableRateShadingEnabled(SanitizeRenderSettings(currentSettings).variableRateShading > 0u);
+		vulkanContext->SetVariableRateShadingEnabled(SanitizeRenderSettings(currentSettings).variableRateShading > 0u);
 	rhi = std::move(vulkanContext);
 	rendererRecoveryPolicy = ResourceManager::Instance().GetRendererRecoveryPolicy();
 	rhi->Initialize(WindowSystem::Instance());
@@ -3043,8 +3703,8 @@ void RenderSystem::Initialize()
 		try {
 			auto& renderSystem = RenderSystem::Instance();
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (renderSystem.GetContext()) {
-				static_cast<VulkanContext*>(renderSystem.GetContext())->Resize(width, height);
+			if (auto* vulkanContext = dynamic_cast<VulkanContext*>(renderSystem.GetContext())) {
+				vulkanContext->Resize(width, height);
 			}
 		} catch (const std::exception& e) {
 			TERRAENGINE_LOG(LogLevel::Error, "Exception in resize callback: " << e.what());
@@ -3801,6 +4461,13 @@ void RenderSystem::Update(float deltaTime)
 	const TerraEngine::Renderer::BackendCapabilityProfile backendCapabilities = rhi
 		? rhi->GetBackendCapabilityProfile()
 		: TerraEngine::Renderer::BackendCapabilityProfile{};
+	// Read the editor validation preference once before worker-safe packet
+	// preparation. Packet values, rather than this mutable preference, cross the
+	// protected Vulkan recording boundary later in the frame.
+	const std::optional<TerraEngine::Renderer::VirtualGeometryRasterRoute>
+		validationRouteOverride = GetVirtualGeometryValidationRouteOverride();
+	const bool hybridValidationSceneRequested =
+		IsVirtualGeometryHybridValidationSceneRequested();
 	bool hasPendingDedicatedCaptureRender = false;
 	glm::uvec2 pendingDedicatedCaptureTargetSize = captureLimits.defaultWidth > 0u && captureLimits.defaultHeight > 0u
 		? glm::uvec2(captureLimits.defaultWidth, captureLimits.defaultHeight)
@@ -3869,12 +4536,27 @@ void RenderSystem::Update(float deltaTime)
 		{
 			noViewDiagnostics.delayedWork.push_back("Render frame skipped because no Scene, Game, or runtime output target was requested.");
 		}
+		if(rhi)
+		{
+			TerraEngine::Renderer::ApplyVirtualGeometryCapabilityDiagnostics(
+				noViewDiagnostics,
+				CollectVirtualGeometryCapabilityDiagnostics(
+					*rhi,
+					backendCapabilities,
+					{
+						activeRenderFrameId,
+						0u,
+						snapshotRendererGeneration
+					}));
+		}
 		TerraEngine::Renderer::PublishRenderDiagnostics(noViewDiagnostics);
 		{
 			std::lock_guard<std::mutex> lock(statsMutex);
 			latestRenderFrameSnapshot = renderFrameSnapshot;
 			latestRendererRecoverySnapshot = finalRecoverySnapshot;
 			latestRenderGraphDiagnostics = noViewDiagnostics;
+			latestGameVirtualGeometryVisibilityRecords.clear();
+			latestSceneVirtualGeometryVisibilityRecords.clear();
 		}
 		// Even when no view submits GPU work, streaming visibility needs still
 		// have to age out. Without this cleanup pass, assets that were visible
@@ -4043,6 +4725,10 @@ void RenderSystem::Update(float deltaTime)
 				page.contentGeneration;
 			demand.key.page.layoutVersion =
 				TerraEngine::Renderer::kAnimatedGeometryAbiVersion;
+			// The current runtime page is the expanded v1 profile. Compact
+			// profiles publish different values and cannot alias cached output.
+			demand.key.page.codecProfile = 1u;
+			demand.key.page.codecVersion = 1u;
 			demand.key.deformation.stableInstanceId =
 				renderable.animation.stableInstanceId;
 			demand.key.deformation.objectGeneration =
@@ -4062,6 +4748,9 @@ void RenderSystem::Update(float deltaTime)
 			demand.key.deformation.sceneGeneration =
 				std::max<std::uint64_t>(1u, protectedSceneGeneration);
 			demand.key.inputLayoutVersion =
+				TerraEngine::Renderer::kAnimatedGeometryAbiVersion;
+			demand.key.animationLod = 0u;
+			demand.key.animationLodVersion =
 				TerraEngine::Renderer::kAnimatedGeometryAbiVersion;
 			demand.sourceRecordIndex =
 				renderable.animation.gpuWorkPacketCount != 0u
@@ -4360,8 +5049,62 @@ void RenderSystem::Update(float deltaTime)
 		state.debugVisualizationMode = NormalizeVirtualGeometryDebugVisualizationMode(debugVisualizationMode);
 		state.shadowPass = shadowPass;
 		state.exportRuntime = exportRuntime;
-		state.hiZOcclusionAllowed = true;
+		state.viewGeneration = activeRenderFrameId;
+		const auto makeViewKind = [shadowPass, outputKind]() {
+			if(shadowPass) return TerraEngine::Renderer::VirtualGeometryViewKind::Shadow;
+			if(outputKind == RenderOutputKind::SceneView) return TerraEngine::Renderer::VirtualGeometryViewKind::Editor;
+			if(outputKind == RenderOutputKind::OffscreenTexture) return TerraEngine::Renderer::VirtualGeometryViewKind::Capture;
+			return TerraEngine::Renderer::VirtualGeometryViewKind::Camera;
+		};
+		const std::uint64_t policyKey = (static_cast<std::uint64_t>(
+			static_cast<std::uint32_t>(viewType)) << 32u) | outputId;
+		TerraEngine::Renderer::VirtualGeometryViewPolicyState policyState{};
+		policyState.kind = makeViewKind();
+		policyState.viewId = policyKey;
+		policyState.targetGeneration = (static_cast<std::uint64_t>(targetSize.x) << 32u)
+			| targetSize.y;
+		policyState.projectionGeneration = policyState.targetGeneration;
+		policyState.geometryGeneration = snapshotRendererGeneration;
+		policyState.residencyGeneration =
+			TerraEngine::Resource::VirtualGeometryStreamingSystem::Instance()
+				.ResidencySnapshot().publicationGeneration;
+		if(const auto previous = virtualGeometryViewPolicies.find(policyKey);
+			previous != virtualGeometryViewPolicies.end())
+		{
+			policyState.resized = previous->second.targetGeneration != policyState.targetGeneration;
+		}
+		TerraEngine::Renderer::VirtualGeometryViewPolicyState historyOwner = policyState;
+		if(policyState.kind == TerraEngine::Renderer::VirtualGeometryViewKind::Shadow
+			|| policyState.kind == TerraEngine::Renderer::VirtualGeometryViewKind::Capture)
+		{
+			const auto compatibleOwner = std::find_if(
+				virtualGeometryViewPolicies.begin(), virtualGeometryViewPolicies.end(),
+				[&policyState](const auto &entry) {
+					return (entry.second.kind == TerraEngine::Renderer::VirtualGeometryViewKind::Camera
+						|| entry.second.kind == TerraEngine::Renderer::VirtualGeometryViewKind::Editor)
+						&& entry.second.geometryGeneration == policyState.geometryGeneration
+						&& entry.second.residencyGeneration == policyState.residencyGeneration;
+				});
+			if(compatibleOwner != virtualGeometryViewPolicies.end())
+			{
+				historyOwner = compatibleOwner->second;
+			}
+		}
+		policyState.historyOwnerViewId = policyState.kind == TerraEngine::Renderer::VirtualGeometryViewKind::Camera
+			|| policyState.kind == TerraEngine::Renderer::VirtualGeometryViewKind::Editor
+			? policyState.viewId : historyOwner.viewId;
+		const TerraEngine::Renderer::VirtualGeometryViewPolicyDecision viewPolicy =
+			TerraEngine::Renderer::EvaluateVirtualGeometryViewPolicy(policyState, historyOwner);
+		virtualGeometryViewPolicies[policyKey] = policyState;
+		// Geometry/residency reuse is allowed only as immutable inputs. Capture and
+		// shadow views deliberately retain a main-pass/fail-open visibility policy
+		// until they own a compatible history themselves.
+		state.hiZOcclusionAllowed = viewPolicy.historyValid;
 		state.hiZInactiveReason.clear();
+		if(!viewPolicy.historyValid && !shadowPass)
+		{
+			state.hiZInactiveReason = "View-owned virtual-geometry history is not reusable; visibility remains conservative.";
+		}
 		state.selectedClusters = selectedClusters;
 		state.pageNeeds = pageNeeds;
 		state.clusterPackets = clusterPackets;
@@ -4777,6 +5520,141 @@ void RenderSystem::Update(float deltaTime)
 				viewType,
 				outputId,
 				clusterPacketBase);
+			// Resolve route policy while this immutable command still owns the
+			// exact material identity. Numeric route/bin values are copied into
+			// packet flags, so protected Vulkan recording never reopens mutable
+			// material state.
+			const Material* packetMaterial =
+				ResourceManager::Instance().GetMaterial(command.materialId);
+			const VirtualGeometryMaterialExtension* materialPolicy =
+				packetMaterial != nullptr
+					&& packetMaterial->virtualGeometryExtension.has_value()
+				? &packetMaterial->virtualGeometryExtension.value()
+				: nullptr;
+			const std::uint32_t materialBin =
+				materialPolicy != nullptr ? materialPolicy->shadingBin : 0u;
+			const std::uint32_t materialBinCapacity =
+				materialPolicy != nullptr
+					&& materialPolicy->maximumShadingBins != 0u
+				? std::min(materialPolicy->maximumShadingBins, 256u)
+				: 64u;
+			const bool materialForcesCompute =
+				materialPolicy != nullptr
+				&& materialPolicy->fallbackPolicy
+					== VirtualGeometryMaterialFallbackPolicy::Compute;
+			const bool materialDisablesVirtualGeometry =
+				materialPolicy != nullptr
+				&& materialPolicy->fallbackPolicy
+					== VirtualGeometryMaterialFallbackPolicy::DisableVirtualGeometry;
+			const bool alphaMasked = packetMaterial != nullptr
+				&& packetMaterial->header.alphaMode
+					== static_cast<std::uint32_t>(AlphaMode::Mask);
+			std::vector<TerraEngine::Renderer::VirtualGeometryRasterCandidate>
+				rasterCandidates;
+			rasterCandidates.reserve(localPackets.size());
+			for(std::size_t packetIndex = 0u;
+				packetIndex < localPackets.size();
+				++packetIndex)
+			{
+				const VirtualGeometryClusterPacket& localPacket =
+					localPackets[packetIndex];
+				TerraEngine::Renderer::VirtualGeometryRasterCandidate candidate;
+				candidate.stableId = localPacket.debugIdentity;
+				candidate.materialBin = materialBin;
+				candidate.hardwareSupported =
+					backendCapabilities.supportsVirtualGeometryGeneratedSubmissions
+					&& !materialForcesCompute
+					&& !materialDisablesVirtualGeometry;
+				candidate.computeSupported =
+					backendCapabilities.supportsVirtualGeometryComputeRaster
+					&& !materialDisablesVirtualGeometry;
+				candidate.alphaMasked = alphaMasked;
+				candidate.requiresStableIdentity = true;
+				candidate.sourceOrdinal =
+					static_cast<std::uint32_t>(packetIndex);
+				rasterCandidates.push_back(candidate);
+			}
+			const TerraEngine::Renderer::VirtualGeometryRasterBinPlan rasterPlan =
+				hybridValidationSceneRequested
+				? TerraEngine::Renderer::BuildVirtualGeometryHybridRasterBinPlan(
+					rasterCandidates,
+					materialBinCapacity)
+				: TerraEngine::Renderer::BuildVirtualGeometryRasterBinPlan(
+					rasterCandidates,
+					materialBinCapacity);
+			for(std::size_t packetIndex = 0u;
+				packetIndex < localPackets.size();
+				++packetIndex)
+			{
+				VirtualGeometryClusterPacket& localPacket =
+					localPackets[packetIndex];
+				const TerraEngine::Renderer::VirtualGeometryRasterCandidate&
+					candidate = rasterCandidates[packetIndex];
+				// Raster plans are stable-ID ordered, but retain each packet's
+				// source ordinal. Resolve through that ordinal so duplicate debug
+				// hashes cannot reorder ownership, page needs, or cluster records.
+				const auto plannedOrdinal = std::find(
+					rasterPlan.routeSourceOrdinals.begin(),
+					rasterPlan.routeSourceOrdinals.end(),
+					static_cast<std::uint32_t>(packetIndex));
+				const std::size_t plannedIndex =
+					static_cast<std::size_t>(std::distance(
+						rasterPlan.routeSourceOrdinals.begin(),
+						plannedOrdinal));
+				TerraEngine::Renderer::VirtualGeometryRasterRoute rasterRoute =
+					plannedOrdinal == rasterPlan.routeSourceOrdinals.end()
+						|| plannedIndex >= rasterPlan.routes.size()
+					? TerraEngine::Renderer::VirtualGeometryRasterRoute::Indexed
+					: rasterPlan.routes[plannedIndex];
+				if(hybridValidationSceneRequested
+					&& std::find(
+						rasterPlan.fallbackStableIds.begin(),
+						rasterPlan.fallbackStableIds.end(),
+						candidate.stableId)
+						!= rasterPlan.fallbackStableIds.end())
+				{
+					if(!localPacket.fallbackReason.empty())
+					{
+						localPacket.fallbackReason += "; ";
+					}
+					localPacket.fallbackReason +=
+						"hybrid validation kept an unsupported candidate visible through indexed fail-open";
+				}
+				if (validationRouteOverride.has_value())
+				{
+					const TerraEngine::Renderer::VirtualGeometryRasterRoute requestedRoute =
+						*validationRouteOverride;
+					const bool packetSupportsRequestedRoute =
+						(requestedRoute == TerraEngine::Renderer::VirtualGeometryRasterRoute::Hardware
+							&& candidate.hardwareSupported)
+						|| (requestedRoute == TerraEngine::Renderer::VirtualGeometryRasterRoute::Compute
+							&& candidate.computeSupported)
+						|| requestedRoute == TerraEngine::Renderer::VirtualGeometryRasterRoute::Indexed;
+					if (packetSupportsRequestedRoute) {
+						rasterRoute = requestedRoute;
+					} else {
+						rasterRoute = TerraEngine::Renderer::VirtualGeometryRasterRoute::Indexed;
+						if (!localPacket.fallbackReason.empty()) localPacket.fallbackReason += "; ";
+						localPacket.fallbackReason +=
+							"requested validation route is unsupported by this packet/material; used visible indexed fallback";
+					}
+				}
+				if(rasterRoute
+					== TerraEngine::Renderer::VirtualGeometryRasterRoute::Fallback)
+				{
+					rasterRoute =
+						TerraEngine::Renderer::VirtualGeometryRasterRoute::Indexed;
+					if(!localPacket.fallbackReason.empty())
+					{
+						localPacket.fallbackReason += "; ";
+					}
+					localPacket.fallbackReason +=
+						"material shading-bin capacity overflow used visible indexed fallback";
+				}
+				localPacket.rasterRoute =
+					static_cast<std::uint32_t>(rasterRoute);
+				localPacket.materialBin = std::min(materialBin, 255u);
+			}
 			if (localPackets.size() == selection.selectedClusters.size())
 			{
 				std::vector<VirtualGeometryClusterPacket> compactedPackets;
@@ -5174,6 +6052,9 @@ void RenderSystem::Update(float deltaTime)
 		return telemetry;
 	};
 
+	const std::uint64_t virtualGeometryResidencyGeneration =
+		TerraEngine::Resource::VirtualGeometryStreamingSystem::Instance()
+			.ResidencySnapshot().publicationGeneration;
 	auto buildVisibleDrawCommands = [&](const glm::mat4& viewProjection, const glm::uvec2& targetSize, RenderOutputKind outputKind, RenderViewType viewType, std::uint32_t outputId, const glm::vec3& cameraPosition) {
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Visible Draw Commands Cache Lookup", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		VirtualGeometryQualityProfile viewVirtualGeometryQuality = renderFrameSnapshot.renderSettings.virtualGeometry;
@@ -5189,7 +6070,8 @@ void RenderSystem::Update(float deltaTime)
 			targetSize,
 			viewType,
 			outputId,
-			BuildVirtualGeometryTransitionStateSignature(virtualGeometryTransitionCache, outputKind, viewType, outputId));
+			BuildVirtualGeometryTransitionStateSignature(virtualGeometryTransitionCache, outputKind, viewType, outputId),
+			virtualGeometryResidencyGeneration);
 		if (const auto existing = visibleCommandCache.recordsBySignature.find(signature); existing != visibleCommandCache.recordsBySignature.end())
 		{
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Reuse Visible Draw Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
@@ -5757,6 +6639,37 @@ void RenderSystem::Update(float deltaTime)
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Fetch UI Batch", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		frameData.uiBatch = UISystem::Instance().GetCombinedFrameBatch();
 	}
+	{
+		// StreamingPrepare completed before this render workload. Copy only
+		// integrity-checked decoded values into the immutable frame payload;
+		// Vulkan still must upload them and observe its frame fence before the
+		// protected streaming system may publish Resident state.
+		const TerraEngine::Resource::VirtualGeometryStreamingPlan streamingPlan =
+			TerraEngine::Resource::VirtualGeometryStreamingSystem::Instance().LastPreparedPlan();
+		for (const TerraEngine::Resource::VirtualGeometryStreamingDecodedPage& decoded : streamingPlan.decodedPages)
+		{
+			if (decoded.status != TerraEngine::Resource::VirtualGeometryStreamingDecodeStatus::PendingUpload
+				|| decoded.decodedBytes.empty())
+			{
+				continue;
+			}
+
+			VirtualGeometryDecodedPageUploadRecord upload{};
+			upload.assetId = decoded.request.assetId;
+			upload.pageId = decoded.request.pageId;
+			upload.fallbackPageId = decoded.request.fallbackPageId;
+			upload.clusterId = decoded.request.clusterId;
+			upload.dependencyPageIds = decoded.request.dependencyPageIds;
+			upload.publicationGeneration = std::max<std::uint64_t>(activeRenderFrameId, 1u);
+			upload.storedByteCount = decoded.request.expectedStoredByteCount != 0u
+				? decoded.request.expectedStoredByteCount
+				: decoded.decodedBytes.size();
+			upload.decodedByteCount = decoded.decodedBytes.size();
+			upload.integrityValue = decoded.request.expectedIntegrityValue;
+			upload.decodedBytes = decoded.decodedBytes;
+			frameData.virtualGeometryDecodedPageUploads.push_back(std::move(upload));
+		}
+	}
 
 	rhi->SetGlobalTaskShaderCullingEnabled(taskShaderCullingEnabled);
 
@@ -6059,6 +6972,24 @@ void RenderSystem::Update(float deltaTime)
 		});
 	}
 
+	// Retain only ordinary Scene/Game records for editor interaction. Dedicated
+	// capture outputs have independent cameras and must never replace the records
+	// used to resolve a click in the visible Scene View.
+	std::vector<GpuVirtualGeometryPacketRecord> completedSceneVisibilityRecords;
+	std::vector<GpuVirtualGeometryPacketRecord> completedGameVisibilityRecords;
+	for(const PreparedRenderSubmission& prepared : preparedRenderSubmissions)
+	{
+		if(prepared.output.kind == RenderOutputKind::SceneView)
+		{
+			completedSceneVisibilityRecords = prepared.frame.virtualGeometryGpuPackets;
+		}
+		else if(prepared.output.kind == RenderOutputKind::GameView
+			|| prepared.output.kind == RenderOutputKind::MainRuntimeView)
+		{
+			completedGameVisibilityRecords = prepared.frame.virtualGeometryGpuPackets;
+		}
+	}
+
 	// Every camera, shadow set, and dedicated capture has now published its
 	// immutable page selection. Seal deformation from that union so animation
 	// runs once per visible physical page/instance generation rather than once
@@ -6070,6 +7001,76 @@ void RenderSystem::Update(float deltaTime)
 		TerraEngine::Renderer::BuildDeformationBackendWorkPlan(
 			renderFrameSnapshot);
 	renderSubmissionPlan.deformationWork = selectedDeformation.immutablePlan;
+	// Seal one immutable virtual-geometry envelope only after every view has
+	// produced its own visibility packet list. The oracle normalizes this union
+	// into bounded IDs; it does not replace the per-view CPU cut that remains the
+	// coverage authority until Vulkan reports completed device-stage evidence.
+	const TerraEngine::Renderer::VirtualGeometryBackendSelection backendSelection =
+		TerraEngine::Renderer::SelectVirtualGeometryBackend(backendCapabilities);
+	if(backendSelection.deviceAuthoredWorkAvailable)
+	{
+		std::vector<TerraEngine::Renderer::VirtualGeometryOracleNode> oracleNodes;
+		for(const PreparedRenderSubmission &prepared : preparedRenderSubmissions)
+		{
+			for(const GpuVirtualGeometryPacketRecord &packet : prepared.frame.virtualGeometryGpuPackets)
+			{
+				TerraEngine::Renderer::VirtualGeometryOracleNode node{};
+				// Packet identity is local to a view, so the sealed all-view envelope
+				// uses an ordinal value. Its deterministic order follows the immutable
+				// prepared-submission sequence, while packet metadata remains view-owned.
+				node.id = static_cast<std::uint64_t>(oracleNodes.size()) + 1u;
+				node.resident = packet.meshletCount != 0u
+					&& (packet.flags & kVirtualGeometryFlagFailOpen) == 0u;
+				node.error = 1.0f;
+				oracleNodes.push_back(node);
+			}
+		}
+		if(!oracleNodes.empty())
+		{
+			const std::uint32_t boundedCapacity = std::min<std::uint32_t>(
+				backendSelection.commandCapacity,
+				static_cast<std::uint32_t>(std::min<std::size_t>(
+					oracleNodes.size(), std::numeric_limits<std::uint32_t>::max())));
+			const TerraEngine::Renderer::VirtualGeometrySelectionResult oracleSelection =
+				TerraEngine::Renderer::SelectVirtualGeometryOracle(
+					oracleNodes, 0.0f, boundedCapacity);
+			TerraEngine::Renderer::VirtualGeometryGpuPlanOptions planOptions{};
+			planOptions.packetCapacity = boundedCapacity;
+			planOptions.frameId = activeRenderFrameId;
+			planOptions.generation = snapshotRendererGeneration;
+			planOptions.generatedWorkKind = backendSelection.generatedWorkKind;
+			planOptions.usesIndirectCount =
+				backendCapabilities.virtualGeometryGeneratedWork.supportsIndirectCount;
+			auto immutableVirtualGeometryPlan = std::make_shared<const TerraEngine::Renderer::VirtualGeometryGpuPlan>(
+				TerraEngine::Renderer::BuildVirtualGeometryGpuPlan(
+					oracleSelection, planOptions));
+			if(immutableVirtualGeometryPlan->IsComplete())
+			{
+				renderSubmissionPlan.virtualGeometryWork = immutableVirtualGeometryPlan;
+				// Existing Vulkan implementations may return no counter rows. In that
+				// case the replay remains pending rather than inventing an authoritative
+				// value from prepared CPU packet counts.
+				const std::vector<TerraEngine::Renderer::VirtualGeometryAuthoritativeCounterReadback>
+					completedCounters = rhi->PollVirtualGeometryReplayCounters();
+				latestVirtualGeometryReplayArtifacts =
+					virtualGeometryReplayReadbacks.PublishAuthoritative(completedCounters);
+				virtualGeometryReplayReadbacks.EnqueuePending(*immutableVirtualGeometryPlan);
+			}
+			else
+			{
+				renderSubmissionPlan.fallbacksUsed.push_back(
+					"Virtual-geometry immutable device-work envelope was invalid; CPU oracle coverage remains authoritative.");
+			}
+		}
+	}
+	else if(!backendSelection.fallbackReason.empty())
+	{
+		renderSubmissionPlan.fallbacksUsed.push_back(backendSelection.fallbackReason);
+		if(TerraEngine::Renderer::RenderDiagnosticsRequested())
+		{
+			renderGraphDiagnostics.backendFallbacks.push_back(backendSelection.fallbackReason);
+		}
+	}
 	if(!TerraEngine::Renderer::ValidateRenderSubmissionPlan(
 		renderSubmissionPlan,
 		activeRenderFrameId))
@@ -6126,6 +7127,16 @@ void RenderSystem::Update(float deltaTime)
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: RHI End Frame", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		rhi->EndFrame();
 	}
+	TerraEngine::Renderer::ApplyVirtualGeometryCapabilityDiagnostics(
+		renderGraphDiagnostics,
+		CollectVirtualGeometryCapabilityDiagnostics(
+			*rhi,
+			backendCapabilities,
+			{
+				activeRenderFrameId,
+				renderFrameSnapshot.viewRequests.front().outputId,
+				snapshotRendererGeneration
+			}));
 
 	{
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Publish Render Stats", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
@@ -6198,6 +7209,12 @@ void RenderSystem::Update(float deltaTime)
 					selection.animatedUniqueDispatchCount;
 				target.animatedReuseCount =
 					selection.animatedReuseCount;
+				target.animatedAnimationLods =
+					selection.animatedAnimationLods;
+				target.animatedSkippedWorkCount =
+					selection.animatedSkippedWorkCount;
+				target.animatedBoundsSource =
+					selection.animatedBoundsSource;
 				target.animatedFallbackCount =
 					selection.animatedFallbackCount;
 				target.deformationCurrentBytes =
@@ -6457,11 +7474,114 @@ void RenderSystem::Update(float deltaTime)
 			: TerraEngine::Renderer::AnimationGpuBackendExecutionSnapshot{};
 		latestRenderGraphDiagnostics = renderGraphDiagnostics;
 		latestRenderFrameSnapshot = renderFrameSnapshot;
+		latestSceneVirtualGeometryVisibilityRecords =
+			std::move(completedSceneVisibilityRecords);
+		latestGameVirtualGeometryVisibilityRecords =
+			std::move(completedGameVisibilityRecords);
 		latestSkyRuntimeState = skyRuntimeState;
 		TerraEngine::Profiling::Profiler::Instance().RecordRenderStats(latestGameStats, latestSceneStats);
 	}
 
 	skyStateDirty = false;
+
+	// Submit copied observations after this frame's immutable snapshot is built.
+	// StreamingPrepare runs before the next render update, so these values are
+	// naturally prior-frame feedback and cannot make a page resident mid-frame.
+	std::vector<TerraEngine::Resource::VirtualGeometryStreamingFeedback> streamingFeedback;
+	for(const auto& view : renderFrameSnapshot.virtualGeometryViewSelections) {
+		for(const auto& request : view.pageRequests) {
+			TerraEngine::Resource::VirtualGeometryStreamingFeedback feedback{};
+			feedback.assetId = request.meshId; feedback.pageId = request.pageId;
+			feedback.fallbackPageId = request.fallbackPageId; feedback.clusterId = request.clusterId;
+			feedback.priority = request.priority; feedback.observedFrame = activeRenderFrameId;
+			feedback.staticPageReadDiagnostic =
+				"No exact compact page range was resolved from the current mesh snapshot.";
+			// Resolve a compact page into an exact immutable VGCB byte range while
+			// RenderSystem still owns the main-thread ResourceManager snapshot. The
+			// worker receives only values and therefore never reads a live mesh.
+			if(const Mesh* mesh = ResourceManager::Instance().GetMesh(request.meshId);
+				mesh != nullptr)
+			{
+				if(!mesh->hasVirtualGeometryCompactDirectory)
+				{
+					feedback.staticPageReadDiagnostic =
+						mesh->virtualGeometryCompactDiagnostic.empty()
+							? "The loaded mesh has no validated VGXD compact directory. Cooked source: " + mesh->sourcePath
+							: mesh->virtualGeometryCompactDiagnostic + " Cooked source: " + mesh->sourcePath;
+				}
+				else if(mesh->sourcePath.empty())
+				{
+					feedback.staticPageReadDiagnostic =
+						"The validated compact directory has no immutable cooked source path.";
+				}
+				else
+				{
+					const auto page = std::find_if(mesh->virtualGeometryCompactPages.begin(),
+						mesh->virtualGeometryCompactPages.end(), [&request](const auto& value)
+						{
+							return value.pageId == request.pageId;
+						});
+					const auto blockTable = std::find_if(mesh->virtualGeometryCompactEntries.begin(),
+						mesh->virtualGeometryCompactEntries.end(), [](const auto& value)
+						{
+							return value.type == static_cast<std::uint32_t>(VirtualGeometryExtensionType::TerraBlock);
+						});
+					if(page == mesh->virtualGeometryCompactPages.end())
+					{
+						feedback.staticPageReadDiagnostic =
+							"The requested page ID is absent from the validated VGXD page table.";
+					}
+					else if(blockTable == mesh->virtualGeometryCompactEntries.end())
+					{
+						feedback.staticPageReadDiagnostic =
+							"The validated VGXD directory has no Terra block descriptor table.";
+					}
+					else if(page->blockCount != 1u
+						|| page->blockTableOffset < blockTable->byteOffset)
+					{
+						feedback.staticPageReadDiagnostic =
+							"The requested compact page does not identify one valid Terra block descriptor.";
+					}
+					else
+					{
+						const std::uint64_t relativeBlockOffset =
+							page->blockTableOffset - blockTable->byteOffset;
+						const std::uint64_t blockIndex = relativeBlockOffset
+							/ sizeof(VirtualGeometryCompactBlockDescriptor);
+						if(relativeBlockOffset % sizeof(VirtualGeometryCompactBlockDescriptor) != 0u
+							|| blockIndex >= mesh->virtualGeometryCompactBlocks.size())
+						{
+							feedback.staticPageReadDiagnostic =
+								"The requested compact page points outside the validated block descriptor table.";
+						}
+						else
+						{
+							const VirtualGeometryCompactBlockDescriptor& block =
+								mesh->virtualGeometryCompactBlocks[static_cast<std::size_t>(blockIndex)];
+							feedback.expectedStoredByteCount = block.byteSize;
+							feedback.expectedDecodedByteCount = block.decodedByteSize;
+							feedback.expectedIntegrityValue = block.contentHash;
+							feedback.staticPageRead = TerraEngine::Resource::VirtualGeometryStaticPageReadRequest{
+								mesh->sourcePath, request.pageId,
+								mesh->virtualGeometryCompactDirectoryOffset + block.byteOffset,
+								block.byteSize, block.contentHash, 0u, nullptr };
+							feedback.staticPageReadDiagnostic =
+								"Resolved an exact validated VGXD/VGCB range from the cooked mesh.";
+						}
+					}
+				}
+			}
+			else
+			{
+				feedback.staticPageReadDiagnostic =
+					"The requested mesh ID is not present in ResourceManager.";
+			}
+			if(request.fallbackPageId != request.pageId && request.fallbackPageId != 0xffffffffu)
+				feedback.dependencyPageIds.push_back(request.fallbackPageId);
+			streamingFeedback.push_back(std::move(feedback));
+		}
+	}
+	TerraEngine::Resource::VirtualGeometryStreamingSystem::Instance().SubmitPriorFrameFeedback(std::move(streamingFeedback));
 
 	ResourceManager::Instance().RunResidencyCleanup(activeRenderFrameId);
 	ProcessQueuedCaptureRequests();
@@ -6477,6 +7597,9 @@ void RenderSystem::Shutdown()
 	// cannot reuse transforms or sky entities from the previous scene session.
 	worldTransformCache.Clear();
 	compatibleAnimationPoseCache.clear();
+	virtualGeometryViewPolicies.clear();
+	virtualGeometryReplayReadbacks.Clear();
+	latestVirtualGeometryReplayArtifacts.clear();
 	hasCachedSkyObjectResolution = false;
 	cachedSkyObject.reset();
 	cachedSkyHierarchyRevision = 0U;
@@ -6586,6 +7709,117 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 	declaration.profilingLabel = declaration.name;
 	declaration.usesDefaultMetadata = false;
 	return declaration;
+}
+
+std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::DeclareFrameWorkloads(float deltaTime)
+{
+	using namespace TerraEngine::Scheduling;
+	std::array<FrameWorkloadDeclaration, 4> workloads;
+
+	// The established renderer remains one protected operation for this
+	// foundational increment. Naming its capture edge now prevents future worker
+	// planning from touching live ObjectManager, window, or RHI state directly.
+	FrameWorkloadDeclaration& snapshot = workloads[0];
+	snapshot.workloadName = "RenderSnapshot";
+	snapshot.ownerSystem = "RenderSystem";
+	snapshot.phase = "Render";
+	snapshot.stableDescriptorId = "RenderSystem/Render/RenderSnapshot";
+	snapshot.activationPredicateKey = "render-system-frame";
+	snapshot.reads = {
+		"Window", "SceneGraph", "ObjectManager", "Resources",
+		kResourceVirtualGeometryPagePublications,
+		kResourceVirtualGeometryPageResidencySnapshots,
+		kResourceVirtualGeometryCounterReadbacks,
+		kResourceAnimatedGeometryPublications
+	};
+	snapshot.writes = { kResourceRenderFrameSnapshot };
+	snapshot.explicitDependencies = { "VirtualGeometryStreamingSystem/Render/PagePublish" };
+	snapshot.workerEligible = false;
+	snapshot.mainThreadRequired = true;
+	snapshot.mutationPolicy = FrameWorkloadMutationPolicy::DeferredOnly;
+	snapshot.phaseKind = WorkerSystemPhaseKind::Snapshot;
+	snapshot.boundaryClassification = HardBoundaryClassification::Protected;
+	snapshot.hardBoundary = true;
+	snapshot.protectedCommit = "Captures exact live scene, resource, page-publication, readback, view, and renderer generations into one immutable RenderFrameSnapshot.";
+	snapshot.protectedReason = snapshot.protectedCommit;
+	snapshot.profilingLabel = "RenderSystem.RenderSnapshot";
+
+	FrameWorkloadDeclaration& prepare = workloads[1];
+	prepare.workloadName = "VirtualGeometryPrepare";
+	prepare.ownerSystem = "RenderSystem";
+	prepare.phase = "Render";
+	prepare.stableDescriptorId = "RenderSystem/Render/VirtualGeometryPrepare";
+	prepare.activationPredicateKey = snapshot.activationPredicateKey;
+	prepare.reads = {
+		kResourceRenderFrameSnapshot, kResourceVirtualGeometryQualityProfile,
+		kResourceVirtualGeometryPageResidencySnapshots,
+		kResourceVirtualGeometryPagePublications,
+		kResourceAnimatedGeometryOutputs
+	};
+	prepare.writes = {
+		kResourceVirtualGeometryClusterPackets, kResourceVirtualGeometryBatchPlans,
+		kResourceVirtualGeometryPageNeedPackets, kResourceAnimatedGeometryDeformationPlans
+	};
+	prepare.explicitDependencies = { snapshot.stableDescriptorId };
+	prepare.workerEligible = true;
+	prepare.mainThreadRequired = false;
+	prepare.phaseKind = WorkerSystemPhaseKind::WorkerPrepare;
+	prepare.boundaryClassification = HardBoundaryClassification::WorkerSafe;
+	prepare.safeSubwork = "Consumes only the immutable RenderFrameSnapshot and prior immutable publications to produce typed virtual geometry selection, packet, page-need, and deformation plans.";
+	prepare.profilingLabel = "RenderSystem.VirtualGeometryPrepare";
+
+	FrameWorkloadDeclaration& commit = workloads[2];
+	commit.workloadName = "BackendCommit";
+	commit.ownerSystem = "RenderSystem";
+	commit.phase = "Render";
+	commit.stableDescriptorId = "RenderSystem/Render/BackendCommit";
+	commit.activationPredicateKey = snapshot.activationPredicateKey;
+	commit.reads = {
+		kResourceVirtualGeometryClusterPackets, kResourceVirtualGeometryBatchPlans,
+		kResourceVirtualGeometryPageNeedPackets, kResourceAnimatedGeometryDeformationPlans
+	};
+	commit.writes = {
+		kResourceVirtualGeometryGpuPacketFrameSets, kResourceVirtualGeometryGeneratedSubmissions,
+		kResourceVirtualGeometryCounterReadbacks, kResourceVirtualGeometryVisibilitySnapshots
+	};
+	commit.explicitDependencies = { prepare.stableDescriptorId };
+	commit.workerEligible = false;
+	commit.mainThreadRequired = true;
+	commit.phaseKind = WorkerSystemPhaseKind::ProtectedCommit;
+	commit.boundaryClassification = HardBoundaryClassification::Protected;
+	commit.hardBoundary = true;
+	commit.protectedCommit = "Owns backend resource mutation, command recording, queue submission, pending counters, and visibility targets.";
+	commit.protectedReason = commit.protectedCommit;
+	commit.profilingLabel = "RenderSystem.BackendCommit";
+
+	FrameWorkloadDeclaration& publication = workloads[3];
+	publication.workloadName = "RenderPublication";
+	publication.ownerSystem = "RenderSystem";
+	publication.phase = "Render";
+	publication.stableDescriptorId = "RenderSystem/Render/RenderPublication";
+	publication.activationPredicateKey = snapshot.activationPredicateKey;
+	publication.reads = { kResourceVirtualGeometryGeneratedSubmissions, kResourceVirtualGeometryVisibilitySnapshots };
+	publication.writes = { "RendererDiagnostics", kResourceVirtualGeometryDiagnostics };
+	publication.explicitDependencies = { commit.stableDescriptorId };
+	publication.workerEligible = false;
+	publication.mainThreadRequired = true;
+	publication.phaseKind = WorkerSystemPhaseKind::ProtectedCommit;
+	publication.boundaryClassification = HardBoundaryClassification::Protected;
+	publication.hardBoundary = true;
+	publication.sameFrameVisibilityRequired = true;
+	publication.protectedCommit = "Publishes complete render diagnostics and visibility results only after protected backend work completes.";
+	publication.protectedReason = publication.protectedCommit;
+	publication.profilingLabel = "RenderSystem.RenderPublication";
+
+	// Update remains the proven rendering path while T016 establishes executable
+	// scheduler descriptors. The other callbacks intentionally perform only their
+	// boundary handoff bookkeeping until later tasks replace the legacy body with
+	// typed prepared-plan and backend-publication implementations.
+	snapshot.work = [this, deltaTime](JobGraphContext&) { Update(deltaTime); };
+	prepare.work = [](JobGraphContext&) {};
+	commit.work = [](JobGraphContext&) {};
+	publication.work = [](JobGraphContext&) {};
+	return { workloads.begin(), workloads.end() };
 }
 
 TerraEngine::Scheduling::HardBoundary RenderSystem::GetLiveGpuSubmissionBoundary() const
@@ -6856,6 +8090,25 @@ TerraEngine::Renderer::VirtualGeometryClusterSelectionResult RenderSystem::Selec
 		return result;
 	}
 
+	// Prefer the least-error complete aggregate profile that can answer every
+	// missing-page fallback through one existing cluster. This is a typed
+	// coverage proof, not permission to pick an unrelated resident cluster.
+	const VirtualGeometryAssetRuntime::AggregateProfileRuntime* aggregateFallback = nullptr;
+	for (const VirtualGeometryAssetRuntime::AggregateProfileRuntime& profile : asset.aggregateProfiles)
+	{
+		if (!profile.Valid()
+			|| FindVirtualGeometryClusterById(asset, profile.fallbackClusterId) == nullptr)
+		{
+			continue;
+		}
+		if (aggregateFallback == nullptr
+			|| profile.representation.canonicalError
+				< aggregateFallback->representation.canonicalError)
+		{
+			aggregateFallback = &profile;
+		}
+	}
+
 	const VirtualGeometryQualityProfile sanitized = SanitizeVirtualGeometryQualityProfile(quality);
 	const float finiteProjectedRadiusPixels = std::isfinite(projectedRadiusPixels)
 		? std::max(projectedRadiusPixels, 0.0f)
@@ -6888,6 +8141,11 @@ TerraEngine::Renderer::VirtualGeometryClusterSelectionResult RenderSystem::Selec
 		if (const VirtualGeometryClusterRuntime* fallbackCluster = FindVirtualGeometryClusterById(asset, desiredCluster.fallbackClusterId); fallbackCluster != nullptr)
 		{
 			need.fallbackPageId = fallbackCluster->pageId;
+		}
+		else if (aggregateFallback != nullptr)
+		{
+			need.fallbackPageId = FindVirtualGeometryClusterById(
+				asset, aggregateFallback->fallbackClusterId)->pageId;
 		}
 		need.clusterId = desiredCluster.clusterId;
 		need.desiredLodIndex = desiredCluster.lodIndex;
@@ -6932,6 +8190,22 @@ TerraEngine::Renderer::VirtualGeometryClusterSelectionResult RenderSystem::Selec
 				break;
 			}
 			fallbackId = fallbackCluster->fallbackClusterId;
+		}
+
+		// The authored chain remains the first choice. Only after it cannot
+		// produce a resident cluster may the independently validated aggregate
+		// profile answer the request, and only when its canonical error bounds
+		// the desired cluster's error.
+		if (aggregateFallback != nullptr
+			&& aggregateFallback->representation.canonicalError >= desiredCluster.geometricError)
+		{
+			const VirtualGeometryClusterRuntime* aggregateCluster =
+				FindVirtualGeometryClusterById(asset, aggregateFallback->fallbackClusterId);
+			if (aggregateCluster != nullptr
+				&& VirtualGeometryClusterPageIsResident(asset, *aggregateCluster))
+			{
+				return ResolvedCluster{ aggregateCluster, true };
+			}
 		}
 
 		// Never substitute an arbitrary resident cluster from another coverage
@@ -7277,6 +8551,8 @@ void RenderSystem::Clear()
 		latestAnimationGpuBackendExecution = {};
 		latestRenderGraphDiagnostics = {};
 		latestRenderFrameSnapshot = {};
+		latestGameVirtualGeometryVisibilityRecords.clear();
+		latestSceneVirtualGeometryVisibilityRecords.clear();
 		latestGameStats.viewType = RenderViewType::Game;
 		latestSceneStats.viewType = RenderViewType::Scene;
 		latestGameBudgetDiagnostics.viewType = RenderViewType::Game;
@@ -7295,6 +8571,9 @@ void RenderSystem::Clear()
 	latestGameViewTargetSize = glm::uvec2(0u);
 	latestGameViewFrameId = 0u;
 	virtualGeometryTransitionCache.clear();
+	virtualGeometryViewPolicies.clear();
+	virtualGeometryReplayReadbacks.Clear();
+	latestVirtualGeometryReplayArtifacts.clear();
 	compatibleAnimationPoseCache.clear();
 	worldTransformCache.Clear();
 	latestTransformCacheDiagnostics = {};
@@ -7404,6 +8683,17 @@ std::size_t RenderSystem::GetLatestAnimatedGeometryPageDemandCount() const
 	return latestRenderFrameSnapshot.animatedGeometryPageDemands.size();
 }
 
+std::vector<GpuVirtualGeometryPacketRecord>
+RenderSystem::GetLatestVirtualGeometryVisibilityRecords(RenderViewType viewType) const
+{
+	std::lock_guard<std::mutex> lock(statsMutex);
+	if(viewType == RenderViewType::Scene)
+	{
+		return latestSceneVirtualGeometryVisibilityRecords;
+	}
+	return latestGameVirtualGeometryVisibilityRecords;
+}
+
 std::vector<TerraEngine::Renderer::OcclusionDebugSample> RenderSystem::GetLatestVirtualGeometryOcclusionDebugSamples(RenderViewType viewType, std::size_t maxCount) const
 {
 	std::lock_guard<std::mutex> lock(statsMutex);
@@ -7431,6 +8721,12 @@ TerraEngine::Renderer::RenderDiagnosticsSummary RenderSystem::GetLatestRenderGra
 {
 	std::lock_guard<std::mutex> lock(statsMutex);
 	return latestRenderGraphDiagnostics;
+}
+
+std::vector<TerraEngine::Renderer::BackendStageTiming> RenderSystem::GetLatestBackendStageTimings() const
+{
+	std::lock_guard<std::mutex> lock(statsMutex);
+	return latestRenderGraphDiagnostics.backendFrameBreakdown.stageTimings;
 }
 
 TerraEngine::Renderer::RenderCaptureLimits RenderSystem::GetCaptureLimits() const
@@ -7698,6 +8994,67 @@ void RenderSystem::DrainCaptureReadbacks()
 	for (TerraEngine::Renderer::RenderCaptureResult& result : rhi->PollCaptureReadbacks())
 	{
 		CompleteCapture(std::move(result));
+	}
+	DrainConventionalVisibilityIdentityReadbacks();
+}
+
+void RenderSystem::DrainConventionalVisibilityIdentityReadbacks()
+{
+	if (!rhi) return;
+	for (const TerraEngine::Renderer::ConventionalVisibilityIdentityReadbackResult& result :
+		rhi->PollConventionalVisibilityIdentityReadbacks()) {
+		std::lock_guard<std::mutex> lock(statsMutex);
+		std::optional<glm::uvec2>& pendingPixel = result.viewType == RenderViewType::Scene
+			? pendingSceneAuthoritativeIdentityPixel : pendingGameAuthoritativeIdentityPixel;
+		std::string& failureReason = result.viewType == RenderViewType::Scene
+			? latestSceneAuthoritativeIdentityFailureReason : latestGameAuthoritativeIdentityFailureReason;
+		if (pendingPixel && *pendingPixel == result.pixel) {
+			pendingPixel.reset();
+		}
+		if (!result.completed || !result.authoritative
+			|| result.frameId == 0u || result.identity == glm::uvec4(0u)) {
+			failureReason = "The Vulkan identity copy completed without an authoritative nonzero uint4 result.";
+			continue;
+		}
+		if (result.rendererGeneration != 0u
+			&& result.rendererGeneration != latestRendererRecoverySnapshot.renderSessionGeneration) {
+			failureReason = "The Vulkan identity copy belonged to a stale renderer generation.";
+			continue;
+		}
+		const std::vector<GpuVirtualGeometryPacketRecord>& records =
+			result.viewType == RenderViewType::Scene
+			? latestSceneVirtualGeometryVisibilityRecords
+			: latestGameVirtualGeometryVisibilityRecords;
+		const auto record = std::find_if(records.begin(), records.end(), [&result](const GpuVirtualGeometryPacketRecord& candidate) {
+			return candidate.frameId == result.frameId
+				&& candidate.payloadDescriptorIndex == result.identity.z
+				&& candidate.objectId != TerraEngine::EMPTY_UUID
+				&& candidate.meshId != TerraEngine::EMPTY_UUID;
+		});
+		if (record == records.end()) {
+			failureReason = "The completed Vulkan identity did not match a published virtual-geometry packet.";
+			continue;
+		}
+		VirtualGeometryVisibilityPick pick{};
+		pick.objectId = record->objectId;
+		pick.meshId = record->meshId;
+		pick.materialId = record->materialId;
+		pick.frameId = record->frameId;
+		pick.packetId = record->packetId;
+		pick.clusterId = record->clusterId;
+		pick.meshletId = result.identity.x;
+		pick.selectedLod = record->selectedLod;
+		pick.debugIdentity = record->debugIdentity;
+		pick.fallback = (record->flags & 0x1u) != 0u;
+		if (result.viewType == RenderViewType::Scene) {
+			latestSceneAuthoritativeIdentityPick = pick;
+			latestSceneAuthoritativeIdentityPixel = result.pixel;
+			latestSceneAuthoritativeIdentityFailureReason.clear();
+		} else {
+			latestGameAuthoritativeIdentityPick = pick;
+			latestGameAuthoritativeIdentityPixel = result.pixel;
+			latestGameAuthoritativeIdentityFailureReason.clear();
+		}
 	}
 }
 

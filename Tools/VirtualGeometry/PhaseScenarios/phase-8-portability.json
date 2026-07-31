@@ -1,0 +1,24 @@
+{
+	"schemaVersion": 2,
+	"phase": 8,
+	"id": "phase-8",
+	"title": "Aggregate representations and Vulkan vendor portability",
+	"requiredTools": ["renderer.virtualGeometry.capabilityEvidence", "renderer.virtualGeometry.stats", "diagnostics.get_summary", "game_view.capture"],
+	"operations": [
+		{"id": "capability", "tool": "renderer.virtualGeometry.capabilityEvidence", "evidence": "editor/capability.json"},
+		{"id": "stats", "tool": "renderer.virtualGeometry.stats", "evidence": "editor/stats.json"},
+		{"id": "diagnostics", "tool": "diagnostics.get_summary", "evidence": "editor/diagnostics.json"}
+	],
+	"captures": [
+		{"id": "aggregate", "tool": "game_view.capture", "evidence": "images/aggregate.png"}
+	],
+	"requiredArtifacts": [
+		{"path": "editor/capability.json", "kind": "editor-envelope"},
+		{"path": "editor/stats.json", "kind": "editor-envelope"},
+		{"path": "editor/diagnostics.json", "kind": "editor-envelope"},
+		{"path": "images/aggregate.png", "kind": "png"}
+	],
+	"releaseGates": ["aggregate-portability-tests", "vulkan-vendor-matrix"],
+	"vendorLanes": ["amd-vulkan", "nvidia-vulkan", "intel-vulkan"],
+	"unavailablePolicy": "fail-closed"
+}

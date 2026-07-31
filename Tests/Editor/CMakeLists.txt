@@ -52,6 +52,7 @@ add_executable(TerraEngine-EditorTests
 	Core/EditorStartupRendererConfigurationTests.cpp
 	Core/EditorPostFrameBoundaryTests.cpp
 	Core/MainEditorToolbarTests.cpp
+	Feature045/VirtualGeometryFeatureScaffoldingTests.cpp
 	Automation/EditorAutomationServiceTests.cpp
 	Automation/EditorAutomationRegistryTests.cpp
 	Automation/EditorAutomationJobTests.cpp
@@ -89,6 +90,7 @@ add_executable(TerraEngine-EditorTests
 	Automation/ProfilerDiagnosticsAutomationTests.cpp
 	Automation/RendererRecoveryAutomationTests.cpp
 	Automation/VirtualGeometryAutomationTests.cpp
+	Automation/VirtualGeometryCapabilityAutomationTests.cpp
 	Automation/VirtualGeometryScalingAutomationTests.cpp
 	AssetPipeline/ModelPackageImportResultTests.cpp
 	AssetPipeline/FbxPackageImporterTests.cpp
@@ -108,10 +110,20 @@ add_executable(TerraEngine-EditorTests
 	AssetPipeline/GltfImportFailureTests.cpp
 	AssetPipeline/GltfReimportTests.cpp
 	AssetPipeline/VirtualGeometryInspectorTests.cpp
+	AssetPipeline/VirtualGeometryAttributeSimplificationTests.cpp
+	AssetPipeline/VirtualGeometryClusterDagTests.cpp
+	AssetPipeline/VirtualGeometryCompactFormatTests.cpp
+	AssetPipeline/VirtualGeometryDeterministicBuildTests.cpp
 	AssetPipeline/VirtualGeometryScalingAssetPipelineTests.cpp
 	AssetPipeline/VirtualGeometryMeshCompilerTests.cpp
+	AssetPipeline/VirtualGeometryPageProfileTests.cpp
+	AssetPipeline/VirtualGeometryStableIdentityTests.cpp
 	AssetPipeline/AnimatedVirtualPageFormatTests.cpp
+	AssetPipeline/AnimatedVirtualGeometryCompactFormatTests.cpp
 	AssetPipeline/VirtualGeometryPackageImportTests.cpp
+	AssetPipeline/VirtualGeometryMigrationTests.cpp
+	Automation/VirtualGeometryProductionAutomationTests.cpp
+	Export/VirtualGeometryBenchmarkExportTests.cpp
 	Renderer/GameViewStatsOverlayTests.cpp
 	Renderer/CheckedImGuiVulkanBridgeTests.cpp
 	Renderer/ViewportTextureRetirementTests.cpp
@@ -208,6 +220,7 @@ add_executable(TerraEngine-EditorTests
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/SceneViewOverlayMarkers.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/SceneViewOverlayTypes.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/MeshCompiler.cpp
+	${TERRAENGINE_VIRTUAL_GEOMETRY_ASSET_COMPILER_SOURCES}
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/AnimationClipCompiler.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/MotionDatabaseCompiler.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/MotionDatabaseAuthoringHost.cpp
@@ -355,6 +368,15 @@ add_test(NAME Editor.VirtualGeometryFoundation COMMAND $<TARGET_FILE:TerraEngine
 set_tests_properties(Editor.VirtualGeometryFoundation PROPERTIES
 	LABELS "Editor;VirtualGeometry"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry,Editor.AssetPipeline.ModelPackage,Editor.Automation"
+)
+
+# Keep the installed/package contract selectable without running the complete
+# editor registry. The filter also covers migration, benchmark-claim, and
+# automation contract cases introduced for the production-readiness phase.
+add_test(NAME Editor.VirtualGeometryFeature045Contracts COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.VirtualGeometryFeature045Contracts PROPERTIES
+	LABELS "Editor;VirtualGeometry;Feature045;Contract"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Feature045;VirtualGeometry.Editor.AssetPipeline.Migration;VirtualGeometry.Editor.Export.Benchmark;VirtualGeometry.Editor.Automation"
 )
 
 add_test(NAME Editor.VirtualGeometryHardening COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)

@@ -83,6 +83,7 @@ namespace TerraEngine::Scheduling {
 	// are plain strings because the scheduler validates declarations before any
 	// renderer-specific type system is available during startup.
 	inline constexpr const char kResourceVirtualGeometryQualityProfile[] = "VirtualGeometryQualityProfile";
+	inline constexpr const char kResourceRenderFrameSnapshot[] = "RenderFrameSnapshot";
 	inline constexpr const char kResourceVirtualGeometryResidencySnapshots[] = "VirtualGeometryResidencySnapshots";
 	inline constexpr const char kResourceVirtualGeometryPageResidencySnapshots[] = "VirtualGeometryPageResidencySnapshots";
 	inline constexpr const char kResourceVirtualGeometryHiZValidationState[] = "VirtualGeometryHiZValidationState";

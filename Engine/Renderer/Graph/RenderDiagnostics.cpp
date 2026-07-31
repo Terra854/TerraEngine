@@ -1,5 +1,6 @@
 #include "RenderDiagnostics.h"
 #include "RenderFrameSnapshot.h"
+#include "Renderer/VirtualGeometry/Visibility/VirtualGeometryVisibility.h"
 
 #include <algorithm>
 #include <cmath>
@@ -842,6 +843,24 @@ namespace TerraEngine::Renderer {
 		snapshot.requestedPages = visibility.counters.requestedPages;
 		snapshot.missingPages = visibility.counters.missingPages;
 		snapshot.clusterPacketCount = static_cast<std::uint32_t>(visibility.clusterPackets.size());
+		for(const VirtualGeometryClusterPacket& packet : visibility.clusterPackets)
+		{
+			switch(static_cast<VirtualGeometryRasterRoute>(packet.rasterRoute))
+			{
+			case VirtualGeometryRasterRoute::Hardware:
+				++snapshot.hardwareRasterPacketCount;
+				break;
+			case VirtualGeometryRasterRoute::Compute:
+				++snapshot.computeRasterPacketCount;
+				break;
+			case VirtualGeometryRasterRoute::Indexed:
+			case VirtualGeometryRasterRoute::Fallback:
+				// Fallback is counted with Indexed because Vulkan recording
+				// normalizes unsupported work to the visible indexed path.
+				++snapshot.indexedRasterPacketCount;
+				break;
+			}
+		}
 		snapshot.clusterSelection.selectedClusters = static_cast<std::uint32_t>(visibility.selectedClusters.size());
 		snapshot.clusterSelection.fallbackClusters = visibility.counters.fallbackSubstitutions;
 		for (const ClusterWorkBatch& batch : visibility.clusterBatches)
@@ -1513,6 +1532,98 @@ namespace TerraEngine::Renderer {
 				}
 			}
 		}
+	}
+
+	VirtualGeometryGpuTimingSnapshot BuildVirtualGeometryGpuTimingSnapshot(
+		const VirtualGeometryMeasurementRecord& measurement,
+		const VirtualGeometryFrameViewIdentity& publicationIdentity)
+	{
+		VirtualGeometryGpuTimingSnapshot snapshot{};
+		snapshot.stage = measurement.stage;
+		snapshot.identity = measurement.identity;
+		snapshot.queryIdentity = measurement.queryIdentity;
+		snapshot.executionEvidenceId = measurement.executionEvidenceId;
+		snapshot.reason = measurement.rejectionReason;
+		if(publicationIdentity.frameId >= measurement.identity.frameId) {
+			snapshot.latencyFrames = static_cast<std::uint32_t>(
+				publicationIdentity.frameId - measurement.identity.frameId);
+		}
+
+		// A query result belongs to exactly one immutable renderer generation. Do
+		// not re-label an older result as current merely because its slot completed.
+		if(measurement.identity != publicationIdentity) {
+			snapshot.availability = VirtualGeometryMeasurementAvailability::Invalid;
+			snapshot.reason = "timing identity does not match the published frame, view, and renderer generation";
+			return snapshot;
+		}
+
+		snapshot.availability = measurement.availability;
+		if(measurement.availability != VirtualGeometryMeasurementAvailability::Measured) {
+			return snapshot;
+		}
+		if(!measurement.HasAuthoritativeDuration()) {
+			snapshot.availability = VirtualGeometryMeasurementAvailability::Invalid;
+			snapshot.reason = "measured timing lacks a completed query or execution evidence ID";
+			return snapshot;
+		}
+
+		// Zero remains a valid measured duration here because the query and command
+		// evidence have already proven that the backend completed the named pass.
+		snapshot.durationNanoseconds = measurement.durationNanoseconds;
+		return snapshot;
+	}
+
+	void ApplyVirtualGeometryGpuTimingDiagnostics(
+		RenderDiagnosticsSummary& summary,
+		std::vector<VirtualGeometryMeasurementRecord> measurements,
+		const VirtualGeometryFrameViewIdentity& publicationIdentity)
+	{
+		VirtualGeometryCapabilityDiagnosticsSnapshot diagnostics =
+			summary.virtualGeometryCapabilityDiagnostics;
+		diagnostics.publicationIdentity = publicationIdentity;
+		diagnostics.measurements = std::move(measurements);
+		diagnostics.timingSnapshots.clear();
+		diagnostics.timingSnapshots.reserve(diagnostics.measurements.size());
+		for(VirtualGeometryMeasurementRecord& measurement : diagnostics.measurements) {
+			VirtualGeometryGpuTimingSnapshot snapshot =
+				BuildVirtualGeometryGpuTimingSnapshot(measurement, publicationIdentity);
+			// Preserve the rejected record for automation, but strip any stale number
+			// before publication so a raw delayed value cannot pass a timing gate.
+			if(snapshot.availability != VirtualGeometryMeasurementAvailability::Measured) {
+				measurement.availability = snapshot.availability;
+				measurement.durationNanoseconds.reset();
+				measurement.rawTicks.reset();
+				measurement.rejectionReason = snapshot.reason;
+			}
+			diagnostics.timingSnapshots.push_back(std::move(snapshot));
+		}
+		summary.virtualGeometryCapabilityDiagnostics = std::move(diagnostics);
+	}
+
+	void ApplyVirtualGeometryCapabilityDiagnostics(
+		RenderDiagnosticsSummary& summary,
+		VirtualGeometryCapabilityDiagnosticsSnapshot diagnostics)
+	{
+		if(diagnostics.schemaVersion.empty()) {
+			diagnostics.schemaVersion = "1";
+		}
+		for(VirtualGeometryCapabilityEvidence& capability : diagnostics.capabilities) {
+			if(capability.executed
+				&& capability.execution.identity != diagnostics.publicationIdentity) {
+				// This is a rejected publication, not a fallback execution. Preserve the
+				// support fact but atomically withdraw stale execution/validation claims.
+				capability.executed = false;
+				capability.validated = false;
+				capability.validationArtifactIds.clear();
+				capability.fallbackReason = "execution evidence belongs to a stale published generation";
+			}
+		}
+
+		summary.virtualGeometryCapabilityDiagnostics = std::move(diagnostics);
+		ApplyVirtualGeometryGpuTimingDiagnostics(
+			summary,
+			summary.virtualGeometryCapabilityDiagnostics.measurements,
+			summary.virtualGeometryCapabilityDiagnostics.publicationIdentity);
 	}
 
 	RenderCaptureSchedulerDiagnostics BuildRenderCaptureSchedulerDiagnostics(

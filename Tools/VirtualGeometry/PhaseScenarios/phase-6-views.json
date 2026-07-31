@@ -1,0 +1,25 @@
+{
+	"schemaVersion": 2,
+	"phase": 6,
+	"id": "phase-6",
+	"title": "Materials, occlusion, and every Vulkan view",
+	"requiredTools": ["renderer.virtualGeometry.capabilityEvidence", "renderer.virtualGeometry.stats", "diagnostics.get_summary", "camera.capture_custom", "game_view.capture"],
+	"operations": [
+		{"id": "capability", "tool": "renderer.virtualGeometry.capabilityEvidence", "evidence": "editor/capability.json"},
+		{"id": "stats", "tool": "renderer.virtualGeometry.stats", "evidence": "editor/stats.json"},
+		{"id": "diagnostics", "tool": "diagnostics.get_summary", "evidence": "editor/diagnostics.json"}
+	],
+	"captures": [
+		{"id": "scene", "tool": "camera.capture_custom", "evidence": "images/scene.png"},
+		{"id": "game", "tool": "game_view.capture", "evidence": "images/game.png"}
+	],
+	"requiredArtifacts": [
+		{"path": "editor/capability.json", "kind": "editor-envelope"},
+		{"path": "editor/stats.json", "kind": "editor-envelope"},
+		{"path": "editor/diagnostics.json", "kind": "editor-envelope"},
+		{"path": "images/scene.png", "kind": "png"},
+		{"path": "images/game.png", "kind": "png"}
+	],
+	"releaseGates": ["views-materials-tests", "views-editor-tests"],
+	"unavailablePolicy": "fail-closed"
+}

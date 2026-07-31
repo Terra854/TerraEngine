@@ -29,6 +29,21 @@ bool Finite3(float3 value)
 	return all(!isnan(value)) && all(!isinf(value));
 }
 
+void PublishFailOpenBounds(uint workRecordIndex)
+{
+	// Clear the proof identity before refinement can read this row. Consumers
+	// require every proof bit, so this forces parent/fallback coverage instead
+	// of allowing stale bounds to cull newly deformed geometry.
+	TeAnimatedDynamicBounds unavailable;
+	unavailable.minimum = float4(0.0F, 0.0F, 0.0F, 0.0F);
+	unavailable.maximum = unavailable.minimum;
+	unavailable.sphere = unavailable.minimum;
+	unavailable.identity = uint4(0u, workRecordIndex,
+		TE_ANIMATED_GEOMETRY_ABI_VERSION, 0u);
+	meshletBounds[workRecordIndex] = unavailable;
+	clusterBounds[workRecordIndex] = unavailable;
+}
+
 [numthreads(64, 1, 1)]
 void main(uint lane : SV_GroupThreadID)
 {
@@ -77,6 +92,7 @@ void main(uint lane : SV_GroupThreadID)
 	}
 	if(sharedValid[0] == 0u || work.vertexCount == 0u)
 	{
+		PublishFailOpenBounds(boundsPush.workRecordIndex);
 		InterlockedOr(diagnostics[0],
 			TE_ANIMATED_GEOMETRY_DIAGNOSTIC_NONFINITE_OUTPUT);
 		return;

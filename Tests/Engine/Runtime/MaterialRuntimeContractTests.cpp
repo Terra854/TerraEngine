@@ -65,5 +65,27 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(static_cast<std::uint8_t>(42u), albedo->textureUuid[0], "Albedo should keep authored texture UUID.");
 			context.ExpectEqual(static_cast<std::size_t>(3), contract.warnings.size(), "Only unsatisfied slots should report warnings.");
 		});
+
+		registry.Add("Engine.MaterialContract.VisibilityRejectsBlendedIdentity", [](TestContext& context) {
+			MaterialHeader header = MakeMaterialHeader();
+			header.alphaMode = static_cast<std::uint32_t>(AlphaMode::Blend);
+			const MaterialVisibilityCompatibility compatibility = EvaluateMaterialVisibilityCompatibility(header);
+			context.Expect(!compatibility.supportsVisibilityBuffer && compatibility.requiresForwardFallback,
+				"Blended materials must keep ordered forward fallback instead of a lossy visibility record.");
+		});
+		registry.Add("Engine.MaterialContract.VirtualGeometryCapabilitySignature", [](TestContext& context) {
+			Material material{};
+			material.header = MakeMaterialHeader();
+			material.virtualGeometryExtension = VirtualGeometryMaterialExtension{};
+			material.virtualGeometryExtension->requiredFeatureMask = 1u;
+			material.virtualGeometryExtension->maximumShadingBins = 8u;
+			material.virtualGeometryExtension->compatibilitySignature = 0x1234u;
+			const auto signature = BuildMaterialCapabilitySignature(material);
+			context.Expect(signature.valid && signature.maximumShadingBins == 8u, "Valid TMVG capability signatures must expose bounded shading-bin limits.");
+			MaterialCapabilitySignature blended = BuildMaterialCapabilitySignature(MakeMaterialHeader());
+			context.Expect(blended.valid && blended.maximumShadingBins == 1u && blended.shadingBin == 0u,
+				"Header-only opaque materials must keep a bounded default pipeline bin.");
+			context.Expect(ValidateMaterialVisibilityAbi(MakeMaterialHeader(), 1u), "Visibility ABI validation accepts a known nonzero ABI version.");
+		});
 	}
 }
