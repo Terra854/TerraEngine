@@ -165,6 +165,11 @@ FrameDurationStats BuildFrameDurationStats(const std::vector<ProfilerFrameListIt
 		if (!frame.complete)
 		{
 			++stats.partialFrameCount;
+			// A partial frame ends when capture lifecycle work interrupts the frame,
+			// so its elapsed duration is not comparable to a naturally completed
+			// frame. Keep it visible as recovery evidence without allowing it to
+			// inflate the live mean or tail percentiles.
+			continue;
 		}
 		if (std::isfinite(frame.durationMs) && frame.durationMs >= 0.0)
 		{
@@ -825,7 +830,11 @@ void ProfilerWindow::DrawFrameList()
 	const FrameDurationStats& stats = cache->frameDurationStats;
 	if (!frames.empty())
 	{
-		ImGui::TextDisabled("%zu frames  mean %.2f ms  p95 %.2f ms", stats.frameCount, stats.meanMs, stats.p95Ms);
+		ImGui::TextDisabled("%zu complete  %zu partial  mean %.2f ms  p95 %.2f ms",
+			stats.frameCount,
+			stats.partialFrameCount,
+			stats.meanMs,
+			stats.p95Ms);
 	}
 	std::vector<ProfilerFrameListItem>& sortedFrames = cache->sortedFrames;
 	std::optional<std::uint64_t> requestedFrameSelection;
@@ -1339,7 +1348,7 @@ void ProfilerWindow::DrawFrameOverview(const ProfilerFrameRecord& frame)
 		DrawMetricCell("Max", stats.maxMs, FrameDurationColor(stats.maxMs));
 		DrawMetricCell("Std Dev", stats.stdDevMs, FrameDurationColor(stats.stdDevMs));
 		ImGui::TableNextColumn();
-		ImGui::TextDisabled("Frames");
+		ImGui::TextDisabled("Complete");
 		ImGui::Text("%zu", stats.frameCount);
 		ImGui::TableNextColumn();
 		ImGui::TextDisabled("Partial");

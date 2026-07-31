@@ -185,5 +185,23 @@ namespace TerraEngine::EditorTests
 				&& source.find("GetBool(openStateId, false)") != std::string::npos,
 				"Sorting and drawing large scope hierarchies should be opt-in and start collapsed.");
 		});
+
+		registry.Add("ProfilerWindow.FrameStatistics.ExcludePartialFrames", [](TestContext& context) {
+			const std::string source = ReadProfilerWindowSource();
+			const std::size_t statisticsStart = source.find("FrameDurationStats BuildFrameDurationStats");
+			const std::size_t partialFrameGuard = source.find("if (!frame.complete)", statisticsStart);
+			const std::size_t skipPartialFrame = source.find("continue;", partialFrameGuard);
+			const std::size_t durationSample = source.find("values.push_back(frame.durationMs)", partialFrameGuard);
+
+			context.Expect(statisticsStart != std::string::npos
+				&& partialFrameGuard != std::string::npos
+				&& skipPartialFrame != std::string::npos
+				&& durationSample != std::string::npos
+				&& partialFrameGuard < skipPartialFrame
+				&& skipPartialFrame < durationSample,
+				"Partial frames should remain counted as recovery evidence but must not enter live frame-time statistics.");
+			context.Expect(source.find("%zu complete  %zu partial") != std::string::npos,
+				"The live Profiler should distinguish completed timing samples from partial recovery records.");
+		});
 	}
 }
