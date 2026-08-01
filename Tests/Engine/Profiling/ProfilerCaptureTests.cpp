@@ -5,6 +5,7 @@
 #include "Renderer/RenderTypes.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <chrono>
 #include <cstdint>
@@ -506,10 +507,13 @@ namespace TerraEngine::Tests {
 				"Scene View marker preparation",
 				128U,
 				false}};
+			const std::array<ProfilerEditorStageTiming, 1u> editorStages{{
+				{"Editor.MainDraw", 63'000U, 1U}}};
 
 			profiler.StartRecording(metadata, settings);
 			profiler.BeginFrame();
 			profiler.RecordSceneViewStages(stages);
+			profiler.RecordEditorStages(editorStages);
 			profiler.EndFrame();
 
 			const std::vector<ProfilerFrameRecord> frames = profiler.GetFramesSnapshot();
@@ -519,6 +523,10 @@ namespace TerraEngine::Tests {
 				context.Expect(std::any_of(frames.front().performanceStages.begin(), frames.front().performanceStages.end(), [](const PerformanceStageRecord& stage) {
 					return stage.domain == PerformanceStageDomain::SceneView && stage.stageName == "SceneView.Projection";
 				}), "Validated Scene View stages must survive the protected editor boundary as value records.");
+				context.Expect(std::any_of(frames.front().performanceStages.begin(), frames.front().performanceStages.end(), [](const PerformanceStageRecord& stage) {
+					return stage.domain == PerformanceStageDomain::Editor && stage.stageName == "Editor.MainDraw"
+						&& stage.duration.nanoseconds == 63'000U;
+				}), "Batched editor stage timings must survive without becoming ordinary CPU samples.");
 				context.Expect(!frames.front().presentationWaits.empty(), "Presentation-wait evidence must remain present even when its clock is explicitly unavailable.");
 				context.Expect(std::all_of(frames.front().presentationWaits.begin(), frames.front().presentationWaits.end(), [](const PresentationWaitRecord& wait) {
 					return ValidatePresentationWaitRecord(wait).valid;

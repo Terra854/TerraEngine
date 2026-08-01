@@ -477,6 +477,10 @@ if($representationRoute -in @('virtual-hardware', 'virtual-compute'))
 	$liveArguments['ValidationRoute'] =
 		if($representationRoute -eq 'virtual-compute') { 'compute' } else { 'hardware' }
 }
+# Profiler frame records are published at runtime frame boundaries. Enter Play
+# Mode for every benchmark sample so static geometry captures produce real
+# profiler frames instead of rendering only through the idle editor viewport.
+$liveArguments['EnterPlayMode'] = $true
 if($isAnimatedWorkload)
 {
 	# scene.open is deliberately approval-gated in the editor. Automated
@@ -494,7 +498,6 @@ if($isAnimatedWorkload)
 	# Animation authority and per-instance deformation advance only in the
 	# runtime scene. Require visibly different frames so a static editor pose
 	# cannot be promoted into measured animated hero or crowd evidence.
-	$liveArguments['EnterPlayMode'] = $true
 	$liveArguments['ExpectAnimatedChange'] = $true
 	# Headless editor captures render through the active Scene viewport before
 	# the dedicated custom camera target. Query that live selection instead of

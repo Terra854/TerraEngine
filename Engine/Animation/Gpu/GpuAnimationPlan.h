@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <span>
 #include <type_traits>
 #include <vector>
@@ -718,6 +719,11 @@ namespace TerraEngine::Animation {
 		// These owned resident bytes match descriptor bindings three through seven.
 		// A plan is published only after their producer has validated every packet.
 		GpuAnimationResidentPayloads residentPayloads{};
+		// When every request references the same immutable cooked payload, retain
+		// that producer ownership instead of cloning clip/program/skeleton tables on
+		// every animated frame. Atlas-built multi-payload plans continue to use the
+		// owned value above.
+		std::shared_ptr<const GpuAnimationResidentPayloads> sharedResidentPayloads;
 		std::vector<GpuAnimationGenerationRecord> generationRecords;
 		std::vector<GpuAnimationWorkPacket> workPackets;
 		// Entries are appended beside their sorted work packet, preserving an exact
@@ -728,6 +734,11 @@ namespace TerraEngine::Animation {
 		std::vector<GpuAnimationBatch> batches;
 		std::vector<GpuAnimationStageSpan> stageSpans;
 		GpuAnimationPlanDiagnostics diagnostics{};
+
+		[[nodiscard]] const GpuAnimationResidentPayloads& ResidentPayloads() const noexcept
+		{
+			return sharedResidentPayloads ? *sharedResidentPayloads : residentPayloads;
+		}
 
 		void Clear() noexcept;
 	};

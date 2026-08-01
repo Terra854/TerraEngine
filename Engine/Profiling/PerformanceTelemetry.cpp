@@ -43,7 +43,9 @@ bool IsKnownAvailability(TelemetryAvailability availability)
 // separation between physics and Scene View timing streams.
 bool IsKnownStageDomain(PerformanceStageDomain domain)
 {
-	return domain == PerformanceStageDomain::Physics || domain == PerformanceStageDomain::SceneView;
+	return domain == PerformanceStageDomain::Physics
+		|| domain == PerformanceStageDomain::SceneView
+		|| domain == PerformanceStageDomain::Editor;
 }
 
 // IsKnownPresentationWaitKind prevents unknown waits from being attributed to a

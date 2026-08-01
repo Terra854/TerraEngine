@@ -75,10 +75,23 @@ namespace TerraEngine::Tests {
 			context.Expect(contextSource.find("result.outcome = impl->deviceLost ? EditorPresentOutcome::DeviceLost") != std::string::npos, "PresentEditor should return a typed terminal result after device loss.");
 			const std::size_t boundedEditorAcquire = contextSource.find("impl->device, impl->swapchain, 1'000'000ULL");
 			const std::size_t retryableEditorAcquire = contextSource.find("acquireResult == VK_TIMEOUT || acquireResult == VK_NOT_READY", boundedEditorAcquire);
+			const std::size_t deferredCompletionCall = contextSource.find("deferSkippedEditorRenderCompletion()", retryableEditorAcquire);
 			const std::size_t skippedEditorAcquire = contextSource.find("result.outcome = EditorPresentOutcome::Skipped;", retryableEditorAcquire);
 			context.Expect(boundedEditorAcquire != std::string::npos && retryableEditorAcquire != std::string::npos
-				&& skippedEditorAcquire != std::string::npos,
-				"Editor presentation must bound swapchain acquisition and retry later instead of blocking protected editor work behind the compositor.");
+				&& deferredCompletionCall != std::string::npos && skippedEditorAcquire != std::string::npos
+				&& deferredCompletionCall < skippedEditorAcquire,
+				"Editor presentation must bound swapchain acquisition and enqueue offscreen completion before retrying a busy compositor.");
+			const std::size_t deferredCompletionStart = contextSource.find("auto deferSkippedEditorRenderCompletion");
+			const std::size_t deferredCompletionEnd = contextSource.find("if (impl->framebufferResized)", deferredCompletionStart);
+			const std::string deferredCompletion = deferredCompletionStart != std::string::npos
+				&& deferredCompletionEnd != std::string::npos
+				? contextSource.substr(deferredCompletionStart, deferredCompletionEnd - deferredCompletionStart)
+				: std::string{};
+			context.Expect(deferredCompletion.find("vkResetFences") != std::string::npos
+				&& deferredCompletion.find("impl->inFlightFences[frameSlot]") != std::string::npos
+				&& deferredCompletion.find("impl->currentFrame = (frameSlot + 1) % impl->MAX_FRAMES_IN_FLIGHT") != std::string::npos
+				&& deferredCompletion.find("WaitGraphicsQueueIdle") == std::string::npos,
+				"A skipped editor render must transfer completion to its frame fence and rotate slots without synchronously idling the graphics queue.");
 			context.Expect(contextSource.find("impl->MarkDeviceLost(submitResult, \"editor render queue submit\")") != std::string::npos, "Editor render submit failures should latch device loss before recovery.");
 			context.Expect(contextSource.find("impl->MarkDeviceLost(idleResult, \"editor render recovery queue idle\")") != std::string::npos, "Editor render recovery should not loop when the queue cannot prove idle.");
 			context.Expect(initSource.find("void VulkanContext::Impl::RecreateSwapChain()") != std::string::npos && initSource.find("if (deviceLost)") != std::string::npos, "Swapchain recreation should not run after the device-lost latch is set.");

@@ -67,6 +67,41 @@ namespace TerraEngine::Tests {
 			context.Expect(plan.formatted.find("access-conflict") == std::string::npos, "Ordered handoffs should not report an access conflict.");
 		});
 
+		registry.Add("Engine.FrameWorkload.TransitiveReverseOrderDoesNotCreateConflictCycle", [](TestContext& context) {
+			std::atomic<int> stage = 0;
+			std::atomic<bool> ordered = true;
+			auto consumer = MakeWorkload("AConsumer", { "SharedState" }, {});
+			consumer.stableDescriptorId = "scheduler/a-consumer";
+			consumer.explicitDependencies = { "scheduler/b-relay" };
+			consumer.work = [&stage, &ordered](TerraEngine::Scheduling::JobGraphContext&) {
+				ordered.store(ordered.load() && stage.load() == 2);
+				stage.store(3);
+			};
+			auto relay = MakeWorkload("BRelay", { "RelayInput" }, { "RelayOutput" });
+			relay.stableDescriptorId = "scheduler/b-relay";
+			relay.explicitDependencies = { "scheduler/c-producer" };
+			relay.work = [&stage, &ordered](TerraEngine::Scheduling::JobGraphContext&) {
+				ordered.store(ordered.load() && stage.load() == 1);
+				stage.store(2);
+			};
+			auto producer = MakeWorkload("CProducer", {}, { "SharedState", "RelayInput" });
+			producer.stableDescriptorId = "scheduler/c-producer";
+			producer.work = [&stage, &ordered](TerraEngine::Scheduling::JobGraphContext&) {
+				ordered.store(ordered.load() && stage.load() == 0);
+				stage.store(1);
+			};
+
+			const auto plan = TerraEngine::Scheduling::ExecuteFrameWorkloads(
+				{ consumer, relay, producer }, "transitive-reverse-order");
+
+			context.Expect(plan.valid && plan.completed,
+				"A transitive producer-to-consumer path must remain valid when descriptor sorting places the consumer first.");
+			context.Expect(ordered.load() && stage.load() == 3,
+				"The existing transitive dependency path must govern execution without a reverse resource edge.");
+			context.Expect(plan.formatted.find("explicit-dependency-cycle") == std::string::npos,
+				"Resource lowering must not introduce a cycle opposite an explicit transitive dependency path.");
+		});
+
 		registry.Add("Engine.FrameWorkload.WorkerPreparedDeferredMutationHandoffIsCovered", [](TestContext& context) {
 			auto workerPrepare = MakeWorkload("WorkerTransactionPrepare", { "SceneGraph" }, { "SceneMutationQueue" });
 			workerPrepare.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::WorkerPrepare;

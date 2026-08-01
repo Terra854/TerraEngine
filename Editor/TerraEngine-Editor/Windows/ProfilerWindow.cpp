@@ -1111,7 +1111,7 @@ void ProfilerWindow::DrawCaptureEvidenceSummary()
 		ImGui::TextDisabled("Capture is complete.");
 	}
 
-	if (ImGui::TreeNode("Physics and Scene View Stages"))
+	if (ImGui::TreeNode("Physics, Scene View, and Editor Stages"))
 	{
 		DrawEvidenceMetrics("ProfilerStageEvidence", summary.stageTimings);
 		ImGui::TreePop();

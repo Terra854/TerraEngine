@@ -10,7 +10,6 @@
 #include <limits>
 #include <map>
 #include <mutex>
-#include <set>
 #include <sstream>
 #include <tuple>
 #include <unordered_map>
@@ -64,39 +63,40 @@ namespace TerraEngine::Scheduling {
 			return values;
 		}
 
-		std::set<std::string> ReadSet(const FrameWorkloadDeclaration& declaration)
+		bool SortedListsIntersect(
+			const std::vector<std::string>& left,
+			const std::vector<std::string>& right,
+			std::string& matchedValue)
 		{
-			return std::set<std::string>(declaration.reads.begin(), declaration.reads.end());
-		}
-
-		std::set<std::string> WriteSet(const FrameWorkloadDeclaration& declaration)
-		{
-			return std::set<std::string>(declaration.writes.begin(), declaration.writes.end());
-		}
-
-		bool HasWriteConflict(const FrameWorkloadDeclaration& left, const FrameWorkloadDeclaration& right, std::string& resourceName)
-		{
-			const std::set<std::string> leftReads = ReadSet(left);
-			const std::set<std::string> leftWrites = WriteSet(left);
-			const std::set<std::string> rightReads = ReadSet(right);
-			const std::set<std::string> rightWrites = WriteSet(right);
-			for (const std::string& write : leftWrites)
+			// Validation normalizes resource names before conflict checks. A linear
+			// merge therefore finds intersections without allocating four tree sets
+			// for every workload pair.
+			std::size_t leftIndex = 0u;
+			std::size_t rightIndex = 0u;
+			while (leftIndex < left.size() && rightIndex < right.size())
 			{
-				if (rightWrites.contains(write) || rightReads.contains(write))
+				if (left[leftIndex] < right[rightIndex])
 				{
-					resourceName = write;
-					return true;
+					++leftIndex;
 				}
-			}
-			for (const std::string& write : rightWrites)
-			{
-				if (leftReads.contains(write))
+				else if (right[rightIndex] < left[leftIndex])
 				{
-					resourceName = write;
+					++rightIndex;
+				}
+				else
+				{
+					matchedValue = left[leftIndex];
 					return true;
 				}
 			}
 			return false;
+		}
+
+		bool HasWriteConflict(const FrameWorkloadDeclaration& left, const FrameWorkloadDeclaration& right, std::string& resourceName)
+		{
+			return SortedListsIntersect(left.writes, right.writes, resourceName)
+				|| SortedListsIntersect(left.writes, right.reads, resourceName)
+				|| SortedListsIntersect(right.writes, left.reads, resourceName);
 		}
 
 		FrameWorkloadExecutionPolicy SelectPolicy(const FrameWorkloadDeclaration& declaration, std::vector<ArchitectureDiagnostic>& diagnostics)
@@ -154,7 +154,7 @@ namespace TerraEngine::Scheduling {
 			plan.migrationSummary.inlineCount = inlineCount;
 		}
 
-		void RefreshMigrationSummary(FrameExecutionPlan& plan)
+		void RefreshMigrationSummary(FrameExecutionPlan& plan, bool formatSummary = true)
 		{
 			ArchitectureMigrationSummary summary;
 			for (const FrameWorkloadResult& result : plan.results)
@@ -256,7 +256,10 @@ namespace TerraEngine::Scheduling {
 			summary.protectedCommitTimeNs = plan.migrationSummary.protectedCommitTimeNs;
 			summary.coordinatorWaitTimeNs = plan.migrationSummary.coordinatorWaitTimeNs;
 			summary.workerUtilization = plan.migrationSummary.workerUtilization;
-			summary.formatted = FormatArchitectureMigrationSummary(summary);
+			if (formatSummary)
+			{
+				summary.formatted = FormatArchitectureMigrationSummary(summary);
+			}
 			plan.migrationSummary = std::move(summary);
 		}
 
@@ -871,7 +874,10 @@ namespace TerraEngine::Scheduling {
 		return partitions;
 	}
 
-	FrameExecutionPlan ValidateFrameWorkloads(std::vector<FrameWorkloadDeclaration> workloads, std::string frameId)
+	FrameExecutionPlan ValidateFrameWorkloadsInternal(
+		std::vector<FrameWorkloadDeclaration> workloads,
+		std::string frameId,
+		bool formatPlan)
 	{
 		FrameExecutionPlan plan;
 		plan.frameId = std::move(frameId);
@@ -1021,20 +1027,43 @@ namespace TerraEngine::Scheduling {
 				}
 			}
 		}
-		auto hasDependencyPath = [&dependencyOutgoing](std::size_t from, std::size_t to) {
-			std::vector<bool> visited(dependencyOutgoing.size(), false);
-			std::vector<std::size_t> pending{from};
+		// Compute reachability once per source. The previous pair-wise DFS allocated
+		// scratch vectors for every worker pair, which made validation quadratic in
+		// allocations before any actual frame work could begin.
+		std::vector<std::vector<bool>> dependencyReachability(
+			plan.results.size(), std::vector<bool>(plan.results.size(), false));
+		std::vector<std::size_t> pending;
+		pending.reserve(plan.results.size());
+		for (std::size_t source = 0; source < plan.results.size(); ++source)
+		{
+			pending.clear();
+			pending.insert(pending.end(), dependencyOutgoing[source].begin(), dependencyOutgoing[source].end());
 			while (!pending.empty())
 			{
 				const std::size_t current = pending.back();
 				pending.pop_back();
-				if (current == to) return true;
-				if (current >= visited.size() || visited[current]) continue;
-				visited[current] = true;
+				if (dependencyReachability[source][current])
+				{
+					continue;
+				}
+				dependencyReachability[source][current] = true;
 				pending.insert(pending.end(), dependencyOutgoing[current].begin(), dependencyOutgoing[current].end());
 			}
-			return false;
-		};
+		}
+
+		// Preserve the already-resolved descriptor indices for graph lowering. This
+		// removes a second descriptor map and conflict scan from execution.
+		for (std::size_t dependentIndex = 0; dependentIndex < plan.results.size(); ++dependentIndex)
+		{
+			for (const std::string& dependencyIdentity : plan.results[dependentIndex].declaration.explicitDependencies)
+			{
+				const auto dependency = descriptorIndex.find(dependencyIdentity);
+				if (dependency != descriptorIndex.end())
+				{
+					plan.dependencyEdges.push_back({ dependency->second, dependentIndex });
+				}
+			}
+		}
 
 		for (std::size_t leftIndex = 0; leftIndex < plan.results.size(); ++leftIndex)
 		{
@@ -1042,12 +1071,12 @@ namespace TerraEngine::Scheduling {
 			{
 				const FrameWorkloadResult& left = plan.results[leftIndex];
 				const FrameWorkloadResult& right = plan.results[rightIndex];
-				if (left.executionPolicy != FrameWorkloadExecutionPolicy::WorkerSafe || right.executionPolicy != FrameWorkloadExecutionPolicy::WorkerSafe)
-				{
-					continue;
-				}
-				const bool explicitlyOrdered = hasDependencyPath(leftIndex, rightIndex)
-					|| hasDependencyPath(rightIndex, leftIndex);
+				// An explicit dependency path already supplies the required ordering.
+				// Skipping both direct and transitive paths prevents a redundant
+				// alphabetical conflict edge from reversing that dataflow and forming a
+				// cycle when the declared path runs from right to left.
+				const bool explicitlyOrdered = dependencyReachability[leftIndex][rightIndex]
+					|| dependencyReachability[rightIndex][leftIndex];
 				if (explicitlyOrdered)
 				{
 					continue;
@@ -1055,23 +1084,37 @@ namespace TerraEngine::Scheduling {
 				std::string resourceName;
 				if (HasWriteConflict(left.declaration, right.declaration, resourceName))
 				{
-					AddArchitectureDiagnostic(plan.diagnostics, ArchitectureDiagnosticSeverity::Error, ArchitectureDiagnosticCode::AccessConflict, left.declaration.workloadName + " <-> " + right.declaration.workloadName, resourceName, "Worker-safe workloads have unordered write conflict.", "Add graph ordering or keep one workload protected.");
-					plan.results[leftIndex].executionPolicy = FrameWorkloadExecutionPolicy::Rejected;
-					plan.results[rightIndex].executionPolicy = FrameWorkloadExecutionPolicy::Rejected;
+					plan.dependencyEdges.push_back({ leftIndex, rightIndex });
+					const bool workerConflict = left.executionPolicy == FrameWorkloadExecutionPolicy::WorkerSafe
+						&& right.executionPolicy == FrameWorkloadExecutionPolicy::WorkerSafe;
+					if (workerConflict)
+					{
+						AddArchitectureDiagnostic(plan.diagnostics, ArchitectureDiagnosticSeverity::Error, ArchitectureDiagnosticCode::AccessConflict, left.declaration.workloadName + " <-> " + right.declaration.workloadName, resourceName, "Worker-safe workloads have unordered write conflict.", "Add graph ordering or keep one workload protected.");
+						plan.results[leftIndex].executionPolicy = FrameWorkloadExecutionPolicy::Rejected;
+						plan.results[rightIndex].executionPolicy = FrameWorkloadExecutionPolicy::Rejected;
+					}
 				}
 			}
 		}
 
 		SortDiagnostics(plan.diagnostics);
 		plan.valid = std::none_of(plan.diagnostics.begin(), plan.diagnostics.end(), IsError);
-		RefreshMigrationSummary(plan);
-		plan.formatted = FormatFrameExecutionPlan(plan);
+		RefreshMigrationSummary(plan, formatPlan);
+		if (formatPlan)
+		{
+			plan.formatted = FormatFrameExecutionPlan(plan);
+		}
 		return plan;
+	}
+
+	FrameExecutionPlan ValidateFrameWorkloads(std::vector<FrameWorkloadDeclaration> workloads, std::string frameId)
+	{
+		return ValidateFrameWorkloadsInternal(std::move(workloads), std::move(frameId), true);
 	}
 
 	FrameExecutionPlan ExecuteFrameWorkloads(std::vector<FrameWorkloadDeclaration> workloads, std::string frameId)
 	{
-		FrameExecutionPlan plan = ValidateFrameWorkloads(std::move(workloads), std::move(frameId));
+		FrameExecutionPlan plan = ValidateFrameWorkloadsInternal(std::move(workloads), std::move(frameId), false);
 		plan.executionMode = FrameWorkloadExecutionMode::Parallel;
 		if (!plan.valid)
 		{
@@ -1091,10 +1134,8 @@ namespace TerraEngine::Scheduling {
 		JobGraph graph(plan.frameId, "Architecture Hardened Frame");
 		std::vector<std::vector<DependencyHandle>> handlesByResult(plan.results.size());
 		std::vector<ScheduledPartition> scheduledPartitions;
-		std::unordered_map<std::string, std::size_t> resultIndexByDescriptor;
 		for (std::size_t resultIndex = 0; resultIndex < plan.results.size(); ++resultIndex)
 		{
-			resultIndexByDescriptor.emplace(plan.results[resultIndex].declaration.stableDescriptorId, resultIndex);
 			FrameWorkloadResult& result = plan.results[resultIndex];
 			if (result.executionPolicy == FrameWorkloadExecutionPolicy::Omitted || result.executionPolicy == FrameWorkloadExecutionPolicy::Rejected)
 			{
@@ -1163,39 +1204,18 @@ namespace TerraEngine::Scheduling {
 				}
 			}
 		};
-		for (std::size_t resultIndex = 0; resultIndex < plan.results.size(); ++resultIndex)
+		for (const FrameWorkloadDependencyEdge& edge : plan.dependencyEdges)
 		{
-			const FrameWorkloadResult& result = plan.results[resultIndex];
-			for (const std::string& dependencyId : result.declaration.explicitDependencies)
+			if (edge.prerequisiteIndex < handlesByResult.size()
+				&& edge.dependentIndex < handlesByResult.size())
 			{
-				const auto dependency = resultIndexByDescriptor.find(dependencyId);
-				if (dependency != resultIndexByDescriptor.end())
-				{
-					addAllDependencies(handlesByResult[dependency->second], handlesByResult[resultIndex]);
-				}
-			}
-		}
-		for (std::size_t leftIndex = 0; leftIndex < plan.results.size(); ++leftIndex)
-		{
-			for (std::size_t rightIndex = leftIndex + 1; rightIndex < plan.results.size(); ++rightIndex)
-			{
-				const bool explicitlyOrdered = std::find(plan.results[rightIndex].declaration.explicitDependencies.begin(), plan.results[rightIndex].declaration.explicitDependencies.end(), plan.results[leftIndex].declaration.stableDescriptorId) != plan.results[rightIndex].declaration.explicitDependencies.end()
-					|| std::find(plan.results[leftIndex].declaration.explicitDependencies.begin(), plan.results[leftIndex].declaration.explicitDependencies.end(), plan.results[rightIndex].declaration.stableDescriptorId) != plan.results[leftIndex].declaration.explicitDependencies.end();
-				if (explicitlyOrdered)
-				{
-					// An explicit descriptor edge carries the intended direction even when
-					// alphabetical declaration order differs from dataflow order.
-					continue;
-				}
-				std::string resourceName;
-				if (HasWriteConflict(plan.results[leftIndex].declaration, plan.results[rightIndex].declaration, resourceName))
-				{
-					addAllDependencies(handlesByResult[leftIndex], handlesByResult[rightIndex]);
-				}
+				addAllDependencies(handlesByResult[edge.prerequisiteIndex], handlesByResult[edge.dependentIndex]);
 			}
 		}
 
-		const JobGraphSummary& summary = graph.Execute();
+		JobGraphExecuteOptions executeOptions;
+		executeOptions.formatSummary = false;
+		const JobGraphSummary& summary = graph.Execute(executeOptions);
 		plan.valid = summary.valid;
 		for (FrameWorkloadResult& result : plan.results)
 		{
@@ -1218,7 +1238,7 @@ namespace TerraEngine::Scheduling {
 
 	FrameExecutionPlan ExecuteFrameWorkloadsCompatibility(std::vector<FrameWorkloadDeclaration> workloads, std::string frameId)
 	{
-		FrameExecutionPlan plan = ValidateFrameWorkloads(std::move(workloads), std::move(frameId));
+		FrameExecutionPlan plan = ValidateFrameWorkloadsInternal(std::move(workloads), std::move(frameId), false);
 		plan.executionMode = FrameWorkloadExecutionMode::Compatibility;
 		plan.parallelExecutionUsed = false;
 		if (!plan.valid)

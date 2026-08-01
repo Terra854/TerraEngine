@@ -414,6 +414,10 @@ private:
 	// backend/publication stages consume a snapshot of these records, never a
 	// live mesh or resource-manager object.
 	std::vector<TerraEngine::Renderer::GeometryRouteFramePlan> latestGeometryRouteFramePlans;
+	// Route plans depend only on the ordered selected-route sequence. Reusing an
+	// exact signature avoids rebuilding identical tiny plans while the protected
+	// snapshot still owns all live scene/resource capture.
+	std::uint64_t latestGeometryRouteFramePlanSignature = 0u;
 	std::vector<GpuVirtualGeometryPacketRecord> latestGameVirtualGeometryVisibilityRecords;
 	std::vector<GpuVirtualGeometryPacketRecord> latestSceneVirtualGeometryVisibilityRecords;
 	std::optional<VirtualGeometryVisibilityPick> latestSceneAuthoritativeIdentityPick;

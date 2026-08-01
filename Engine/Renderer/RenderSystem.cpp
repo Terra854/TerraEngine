@@ -486,7 +486,45 @@ namespace
 		TerraEngine::Renderer::VisibleStreamingTouchSet streamingTouchSet;
 		TerraEngine::Renderer::VisibleCommandReuseTelemetry reuseTelemetry;
 		TerraEngine::Scene::SpatialDiagnosticsSnapshot diagnostics;
+		// A cache hit borrows one stable unordered_map value until this result is
+		// consumed immediately by the current view. Rehash preserves references,
+		// and trimming cannot run again before the caller copies these spans into
+		// its protected FrameRenderData.
+		const VisibleCommandCacheRecord* cachedRecord = nullptr;
 		bool cacheHit = false;
+
+		[[nodiscard]] const std::vector<DrawCommand>& Commands() const noexcept
+		{
+			return cachedRecord ? cachedRecord->commands : commands;
+		}
+		[[nodiscard]] const std::vector<GpuVirtualGeometryPacketRecord>& GpuPacketRecords() const noexcept
+		{
+			return cachedRecord ? cachedRecord->gpuPacketRecords : gpuPacketRecords;
+		}
+		[[nodiscard]] const std::vector<GpuVirtualGeometryBatchDescriptor>& GpuBatchDescriptors() const noexcept
+		{
+			return cachedRecord ? cachedRecord->gpuBatchDescriptors : gpuBatchDescriptors;
+		}
+		[[nodiscard]] const std::vector<GpuVirtualGeometryPacketFrameSet>& GpuPacketFrameSets() const noexcept
+		{
+			return cachedRecord ? cachedRecord->gpuPacketFrameSets : gpuPacketFrameSets;
+		}
+		[[nodiscard]] const std::vector<GpuPacketCompactionDispatch>& GpuCompactionDispatches() const noexcept
+		{
+			return cachedRecord ? cachedRecord->gpuCompactionDispatches : gpuCompactionDispatches;
+		}
+		[[nodiscard]] const std::vector<GeneratedVirtualGeometrySubmissionRecord>& GeneratedSubmissions() const noexcept
+		{
+			return cachedRecord ? cachedRecord->generatedSubmissions : generatedSubmissions;
+		}
+		[[nodiscard]] const std::vector<VirtualGeometryCounterReadbackRecord>& GpuCounterReadbacks() const noexcept
+		{
+			return cachedRecord ? cachedRecord->gpuCounterReadbacks : gpuCounterReadbacks;
+		}
+		[[nodiscard]] const std::vector<VirtualGeometryGpuFallbackRecord>& GpuFallbackRecords() const noexcept
+		{
+			return cachedRecord ? cachedRecord->gpuFallbackRecords : gpuFallbackRecords;
+		}
 	};
 
 	struct VirtualGeometryViewSelectionPacket
@@ -6414,22 +6452,11 @@ void RenderSystem::Update(float deltaTime)
 			}
 			VisibleCommandBuildResult cachedResult;
 			{
-				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Copy Cached Visible Draw Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-				cachedResult.commands = existing->second.commands;
-				cachedResult.selectedClusters = existing->second.selectedClusters;
-				cachedResult.pageNeeds = existing->second.pageNeeds;
-				cachedResult.clusterPackets = existing->second.clusterPackets;
-				cachedResult.clusterBatches = existing->second.clusterBatches;
-				cachedResult.gpuPacketRecords = existing->second.gpuPacketRecords;
-				cachedResult.gpuBatchDescriptors = existing->second.gpuBatchDescriptors;
-				cachedResult.gpuPacketFrameSets = existing->second.gpuPacketFrameSets;
-				cachedResult.gpuCompactionDispatches = existing->second.gpuCompactionDispatches;
-				cachedResult.generatedSubmissions = existing->second.generatedSubmissions;
-				cachedResult.gpuCounterReadbacks = existing->second.gpuCounterReadbacks;
-				cachedResult.gpuFallbackRecords = existing->second.gpuFallbackRecords;
-				cachedResult.compactionResults = existing->second.compactionResults;
-				cachedResult.fallbackCoverage = existing->second.fallbackCoverage;
-				cachedResult.lodTransitionStates = existing->second.lodTransitionStates;
+				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Reference Cached Visible Draw Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+				// Keep the large immutable vectors in the cache until FrameRenderData
+				// performs its one required ownership copy. The old path copied all VG
+				// payloads into this temporary and then copied them a second time.
+				cachedResult.cachedRecord = &existing->second;
 				cachedResult.streamingTouchSet = existing->second.streamingTouchSet;
 				cachedResult.reuseTelemetry = buildVisibleCommandReuseTelemetry(viewType, outputId, true, true, existing->second.streamingTouchSet);
 				if (existing->second.reuseTelemetry.conservativeRefresh)
@@ -7026,24 +7053,24 @@ void RenderSystem::Update(float deltaTime)
 		+ cameras.size()
 		+ captureLimits.maxConcurrentCaptures);
 	auto copyVirtualGeometryFramePayload = [](FrameRenderData& target, const VisibleCommandBuildResult& source) {
-		target.virtualGeometryGpuPackets = source.gpuPacketRecords;
-		target.virtualGeometryGpuBatches = source.gpuBatchDescriptors;
-		target.virtualGeometryGpuFrameSets = source.gpuPacketFrameSets;
+		target.virtualGeometryGpuPackets = source.GpuPacketRecords();
+		target.virtualGeometryGpuBatches = source.GpuBatchDescriptors();
+		target.virtualGeometryGpuFrameSets = source.GpuPacketFrameSets();
 		// The compute visibility mirror is intentionally opt-in. Ordinary dense VG
 		// already renders through mesh tasks, so rebuilding CPU triangles and full
 		// pixel buffers without a diagnostics consumer only duplicates frame work.
 		target.virtualGeometryVisibilityDiagnosticsRequested =
 			TerraEngine::Renderer::RenderDiagnosticsRequested()
-			|| std::any_of(source.gpuPacketFrameSets.begin(),
-				source.gpuPacketFrameSets.end(),
+			|| std::any_of(source.GpuPacketFrameSets().begin(),
+				source.GpuPacketFrameSets().end(),
 				[](const GpuVirtualGeometryPacketFrameSet& frameSet) {
 					return frameSet.debugMode
 						!= VirtualGeometryDebugVisualizationMode::None;
 				});
-		target.virtualGeometryGpuCompactionDispatches = source.gpuCompactionDispatches;
-		target.virtualGeometryGeneratedSubmissions = source.generatedSubmissions;
-		target.virtualGeometryCounterReadbacks = source.gpuCounterReadbacks;
-		target.virtualGeometryGpuFallbackRecords = source.gpuFallbackRecords;
+		target.virtualGeometryGpuCompactionDispatches = source.GpuCompactionDispatches();
+		target.virtualGeometryGeneratedSubmissions = source.GeneratedSubmissions();
+		target.virtualGeometryCounterReadbacks = source.GpuCounterReadbacks();
+		target.virtualGeometryGpuFallbackRecords = source.GpuFallbackRecords();
 	};
 	auto applySceneViewContextTint = [&]() {
 		if (!sceneViewContextTintEnabled || sceneViewContextFocusedObjectIds.empty())
@@ -7080,7 +7107,7 @@ void RenderSystem::Update(float deltaTime)
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Scene View Visible Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 			visibleCommands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix, sceneViewTargetSize, RenderOutputKind::SceneView, RenderViewType::Scene, 1u, frameData.cameraWorldPosition);
 		}
-		frameData.commands = visibleCommands.commands;
+		frameData.commands = visibleCommands.Commands();
 		copyVirtualGeometryFramePayload(frameData, visibleCommands);
 		sceneSpatialDiagnostics = visibleCommands.diagnostics;
 		sceneVisibleCommandTelemetry = visibleCommands.reuseTelemetry;
@@ -7123,7 +7150,7 @@ void RenderSystem::Update(float deltaTime)
 				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Game View Visible Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 				visibleCommands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix, gameViewTargetSize, RenderOutputKind::GameView, RenderViewType::Game, 2u, frameData.cameraWorldPosition);
 			}
-			frameData.commands = visibleCommands.commands;
+			frameData.commands = visibleCommands.Commands();
 			copyVirtualGeometryFramePayload(frameData, visibleCommands);
 			gameSpatialDiagnostics = visibleCommands.diagnostics;
 			gameVisibleCommandTelemetry = visibleCommands.reuseTelemetry;
@@ -7223,7 +7250,7 @@ void RenderSystem::Update(float deltaTime)
 			hasLatestGameViewCamera = true;
 			frameData.editorContextTint = glm::vec4(0.0f);
 			const VisibleCommandBuildResult visibleCommands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix, gameViewTargetSize, RenderOutputKind::MainRuntimeView, RenderViewType::Game, 2u, frameData.cameraWorldPosition);
-			frameData.commands = visibleCommands.commands;
+			frameData.commands = visibleCommands.Commands();
 			copyVirtualGeometryFramePayload(frameData, visibleCommands);
 			gameSpatialDiagnostics = visibleCommands.diagnostics;
 			frameData.shadowDrawLists = buildShadowDrawLists(frameData.cameraWorldPosition);
@@ -7284,7 +7311,7 @@ void RenderSystem::Update(float deltaTime)
 			RenderViewType::Game,
 			9000u,
 		captureFrameData.cameraWorldPosition);
-		captureFrameData.commands = visibleCommands.commands;
+		captureFrameData.commands = visibleCommands.Commands();
 		copyVirtualGeometryFramePayload(captureFrameData, visibleCommands);
 		captureFrameData.shadowDrawLists = buildShadowDrawLists(captureFrameData.cameraWorldPosition);
 
@@ -8136,6 +8163,13 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 {
 	using namespace TerraEngine::Scheduling;
 	std::array<FrameWorkloadDeclaration, 5> workloads;
+	std::size_t priorRouteDecisionCount = 0u;
+	{
+		// The last immutable snapshot is sufficient for dispatch granularity. A
+		// first frame reports zero and therefore safely takes the inline path.
+		std::lock_guard<std::mutex> lock(statsMutex);
+		priorRouteDecisionCount = latestRenderFrameSnapshot.geometryRouteDecisions.size();
+	}
 
 	// The established renderer remains one protected operation for this
 	// foundational increment. Naming its capture edge now prevents future worker
@@ -8176,6 +8210,8 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	routePrepare.explicitDependencies = { snapshot.stableDescriptorId };
 	routePrepare.workerEligible = true;
 	routePrepare.mainThreadRequired = false;
+	routePrepare.estimatedWorkItemCount = priorRouteDecisionCount;
+	routePrepare.inlineWorkItemThreshold = 16u;
 	routePrepare.phaseKind = WorkerSystemPhaseKind::WorkerPrepare;
 	routePrepare.boundaryClassification = HardBoundaryClassification::WorkerSafe;
 	routePrepare.safeSubwork = "Scores immutable representation candidates, applies calibrated hysteresis, and groups direct instances by shared packed geometry without touching live resources.";
@@ -8200,6 +8236,8 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	prepare.explicitDependencies = { routePrepare.stableDescriptorId };
 	prepare.workerEligible = true;
 	prepare.mainThreadRequired = false;
+	prepare.estimatedWorkItemCount = priorRouteDecisionCount;
+	prepare.inlineWorkItemThreshold = 16u;
 	prepare.phaseKind = WorkerSystemPhaseKind::WorkerPrepare;
 	prepare.boundaryClassification = HardBoundaryClassification::WorkerSafe;
 	prepare.safeSubwork = "Consumes only the immutable RenderFrameSnapshot and prior immutable publications to produce typed virtual geometry selection, packet, page-need, and deformation plans.";
@@ -8253,14 +8291,29 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	// ownership visible until their declared boundaries execute.
 	snapshot.work = [this, deltaTime](JobGraphContext&) { Update(deltaTime); };
 	routePrepare.work = [this](JobGraphContext&) {
-		TerraEngine::Renderer::RenderFrameSnapshot snapshotCopy;
+		std::vector<TerraEngine::Renderer::GeometryRouteDecision> routeDecisions;
 		{
 			std::lock_guard<std::mutex> lock(statsMutex);
-			snapshotCopy = latestRenderFrameSnapshot;
+			routeDecisions = latestRenderFrameSnapshot.geometryRouteDecisions;
+		}
+		std::uint64_t signature = 1469598103934665603ULL;
+		for(const TerraEngine::Renderer::GeometryRouteDecision& decision : routeDecisions)
+		{
+			signature ^= static_cast<std::uint64_t>(decision.selected) + 1u;
+			signature *= 1099511628211ULL;
+		}
+		signature ^= static_cast<std::uint64_t>(routeDecisions.size());
+		{
+			std::lock_guard<std::mutex> lock(statsMutex);
+			if(latestGeometryRouteFramePlanSignature == signature
+				&& latestGeometryRouteFramePlans.size() == routeDecisions.size())
+			{
+				return;
+			}
 		}
 		std::vector<TerraEngine::Renderer::GeometryRouteFramePlan> prepared;
-		prepared.reserve(snapshotCopy.geometryRouteDecisions.size());
-		for(const TerraEngine::Renderer::GeometryRouteDecision& decision : snapshotCopy.geometryRouteDecisions)
+		prepared.reserve(routeDecisions.size());
+		for(const TerraEngine::Renderer::GeometryRouteDecision& decision : routeDecisions)
 		{
 			TerraEngine::Renderer::GeometryRouteFramePlan plan{};
 			plan.selectedRoute = decision.selected;
@@ -8270,17 +8323,14 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 		}
 		std::lock_guard<std::mutex> lock(statsMutex);
 		latestGeometryRouteFramePlans = std::move(prepared);
+		latestGeometryRouteFramePlanSignature = signature;
 	};
 	prepare.work = [this](JobGraphContext&) {
 		// Copy the worker-owned route output before filtering. Direct entries have
 		// zero VG counters, so this pass cannot manufacture hierarchy traversal,
 		// feedback, page, compaction, or executor work for them.
-		std::vector<TerraEngine::Renderer::GeometryRouteFramePlan> preparedRoutes;
-		{
-			std::lock_guard<std::mutex> lock(statsMutex);
-			preparedRoutes = latestGeometryRouteFramePlans;
-		}
-		const bool hasVirtualGeometryWork = std::any_of(preparedRoutes.begin(), preparedRoutes.end(),
+		std::lock_guard<std::mutex> lock(statsMutex);
+		const bool hasVirtualGeometryWork = std::any_of(latestGeometryRouteFramePlans.begin(), latestGeometryRouteFramePlans.end(),
 			[](const TerraEngine::Renderer::GeometryRouteFramePlan& plan) {
 				return plan.selectedRoute != TerraEngine::Renderer::GeometryRoute::DirectMeshlet
 					&& plan.generatedVirtualGeometryPacketCount != 0u;

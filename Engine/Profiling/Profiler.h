@@ -25,6 +25,16 @@ namespace TerraEngine::Profiling
 {
 struct ProfilerHotPathState;
 
+// EditorSystem batches these fixed records and publishes them once at the end
+// of its protected update. Literal names avoid temporary string allocation in
+// the editor hot path; the profiler copies them only while a capture is active.
+struct ProfilerEditorStageTiming
+{
+	const char* stageName = nullptr;
+	std::uint64_t durationNanoseconds = 0u;
+	std::uint64_t workItemCount = 1u;
+};
+
 // class Profiler groups related state and operations so callers have one documented contract.
 class Profiler
 {
@@ -66,6 +76,9 @@ public:
 	// Copy value-only editor stage telemetry into the current capture frame.
 	// The profiler never retains the Scene View window or its mutable caches.
 	void RecordSceneViewStages(std::span<const PerformanceStageRecord> stages);
+	// Editor-only timings use a dedicated typed domain and never become ordinary
+	// CPU samples. Publishing one bounded batch avoids one profiler lock per stage.
+	void RecordEditorStages(std::span<const ProfilerEditorStageTiming> stages);
 	void RecordTaskQueued();
 	bool RecordTaskStarted(const char* taskLabel);
 	void RecordTaskFinished(bool sampleActive);

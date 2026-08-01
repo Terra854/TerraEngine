@@ -58,11 +58,13 @@ namespace TerraEngine::Tests
 					std::istreambuf_iterator<char>(input),
 					std::istreambuf_iterator<char>()};
 				context.Expect(
-					source.find("$liveArguments['EnterPlayMode'] = $true")
+					source.find("Profiler frame records are published at runtime frame boundaries")
+						!= std::string::npos
+					&& source.find("$liveArguments['EnterPlayMode'] = $true")
 						!= std::string::npos
 					&& source.find("$liveArguments['ExpectAnimatedChange'] = $true")
 						!= std::string::npos,
-					"Animated benchmark samples must run Play Mode and prove frame-to-frame motion.");
+					"Every benchmark sample must run Play Mode for profiler frames, while animated samples also prove frame-to-frame motion.");
 				context.Expect(
 					source.find("observedAnimationOwnerMappings")
 						!= std::string::npos

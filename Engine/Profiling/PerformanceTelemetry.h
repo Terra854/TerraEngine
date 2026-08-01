@@ -31,7 +31,11 @@ struct TelemetryDuration
 enum class PerformanceStageDomain
 {
 	Physics,
-	SceneView
+	SceneView,
+	// Editor stages are captured as value timings outside Engine CPU. This keeps
+	// the profiler useful for diagnosing editor-window cost without allowing
+	// nested ImGui markers to contaminate the game-facing CPU timeline.
+	Editor
 };
 
 struct PerformanceStageRecord

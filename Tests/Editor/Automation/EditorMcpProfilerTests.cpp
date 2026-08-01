@@ -50,6 +50,38 @@ namespace TerraEngine::EditorTests
 			context.ExpectEqual(10.0, summary.frameWorstMs, "The bounded performance maximum should exclude incomplete frames.");
 		});
 
+		registry.Add("Editor.MCP.Profiler.WorkerSummaryUsesCaptureLocalDeltas", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+			auto available = [](std::uint64_t nanoseconds) {
+				return TelemetryDuration{TelemetryAvailability::Available, nanoseconds, {}};
+			};
+			auto worker = [&](std::uint64_t queueDepth, std::uint64_t dispatches, std::uint64_t usefulItems, std::uint64_t run, std::uint64_t wait, std::uint64_t idle) {
+				return WorkerTelemetryRecord{7u, queueDepth, dispatches, usefulItems, available(run), available(wait), available(idle)};
+			};
+
+			ProfilerCaptureDocument document;
+			ProfilerFrameRecord first{.frameIndex = 1u, .durationMs = 1.0, .complete = true};
+			first.workerTelemetry.push_back(worker(1u, 100u, 1'000u, 10'000u, 2'000u, 5'000u));
+			ProfilerFrameRecord second{.frameIndex = 2u, .durationMs = 1.0, .complete = true};
+			second.workerTelemetry.push_back(worker(4u, 103u, 1'030u, 10'300u, 2'100u, 5'400u));
+			ProfilerFrameRecord third{.frameIndex = 3u, .durationMs = 1.0, .complete = true};
+			third.workerTelemetry.push_back(worker(2u, 108u, 1'080u, 10'800u, 2'250u, 6'000u));
+			document.frames = {first, second, third};
+
+			const EditorProfilerCaptureSummary summary = EditorProfilerService::SummarizeDocument("worker-deltas", document);
+			context.ExpectEqual(std::size_t(1u), summary.workerHistories.size(), "One captured worker should produce one bounded worker summary.");
+			if (!summary.workerHistories.empty())
+			{
+				const EditorProfilerWorkerSummary& result = summary.workerHistories.front();
+				context.ExpectEqual(std::uint64_t(8u), result.totalDispatchCount, "Capture totals must subtract the pre-capture cumulative dispatch baseline.");
+				context.ExpectEqual(std::uint64_t(80u), result.totalUsefulWorkItems, "Useful work totals must contain only work observed during the capture.");
+				context.ExpectEqual(std::uint64_t(4u), result.maximumQueueDepth, "Queue depth remains an instantaneous maximum rather than a delta.");
+				context.ExpectEqual(std::uint64_t(2u), result.runDuration.sampleCount, "Three cumulative observations should produce two duration intervals.");
+				context.Expect(result.runDuration.maximum > 0.00049 && result.runDuration.maximum < 0.00051,
+					"Worker run percentiles should use the largest per-interval delta, not the process-lifetime total.");
+			}
+		});
+
 		registry.Add("Editor.MCP.Profiler.DiscoveryCoversCaptureLifecycle", [](TestContext& context) {
 			EditorAutomationService service;
 			const std::array<std::string_view, 5> operations{

@@ -168,6 +168,14 @@ namespace TerraEngine::Tests {
 			}
 
 			auto after = WaitForDispatchCount(context, pool, 5);
+			std::uint64_t visitedDispatchCount = 0u;
+			std::size_t visitedWorkerCount = 0u;
+			bool visitedHistoryWasEmpty = true;
+			pool.VisitTelemetryCounters([&](const ThreadPoolWorkerTelemetry& worker) {
+				++visitedWorkerCount;
+				visitedDispatchCount += worker.dispatchCount;
+				visitedHistoryWasEmpty = visitedHistoryWasEmpty && worker.history.empty();
+			});
 			context.ExpectEqual(0ULL, static_cast<unsigned long long>(before->workers.front().dispatchCount),
 				"A previously returned snapshot must not change when workers publish later counters.");
 			context.ExpectEqual(2U, after->samplingIntervalDispatches,
@@ -176,6 +184,12 @@ namespace TerraEngine::Tests {
 				"A two-dispatch sampling interval should retain completed dispatches two and four.");
 			context.ExpectEqual(5ULL, static_cast<unsigned long long>(after->workers.front().dispatchCount),
 				"Sampling should reduce only detailed history, never cumulative dispatch evidence.");
+			context.ExpectEqual(std::size_t(1U), visitedWorkerCount,
+				"The counters-only visitor should expose each worker exactly once.");
+			context.ExpectEqual(5ULL, static_cast<unsigned long long>(visitedDispatchCount),
+				"The counters-only profiler path must preserve complete cumulative dispatch evidence.");
+			context.Expect(visitedHistoryWasEmpty,
+				"The counters-only visitor must not materialize bounded dispatch history.");
 		});
 	}
 }

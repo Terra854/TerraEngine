@@ -204,6 +204,12 @@ namespace TerraEngine::Scheduling {
 		bool afterPhysicsFlushActive = false;
 		std::string afterPhysicsConsumer;
 		std::string afterPhysicsReason;
+		// The immutable dependency topology is reused only after exact descriptor,
+		// generation, activation, and order checks. These counters keep that hot-path
+		// decision visible in scheduler diagnostics.
+		bool frameTopologyCacheHit = false;
+		std::uint64_t frameTopologyCacheHitCount = 0u;
+		std::uint64_t frameTopologyCacheMissCount = 0u;
 		std::string formatted;
 	};
 
@@ -276,6 +282,25 @@ namespace TerraEngine::Scheduling {
 			std::uint64_t stableDescriptorGeneration = 0;
 		};
 
+		struct FrameTopologyCacheEntry {
+			std::string stableDescriptorId;
+			std::string phase;
+			std::string ownerSystem;
+			std::uint64_t stableDescriptorGeneration = 0u;
+			std::size_t executionOrder = 0u;
+			bool active = false;
+			bool ready = false;
+			bool sameFrameVisibilityRequired = false;
+		};
+
+		struct FrameTopologyCache {
+			bool valid = false;
+			std::vector<FrameTopologyCacheEntry> entries;
+			std::vector<std::vector<std::string>> loweredDependencies;
+			std::uint64_t hitCount = 0u;
+			std::uint64_t missCount = 0u;
+		};
+
 		std::vector<FrameWorkloadDeclaration> BuildSystemOwnedWorkloadDeclarations(RegisteredSystem& registeredSystem, float deltaTime, std::size_t executionOrder);
 		SameFramePhysicsPublicationState ResolveSameFramePhysicsPublicationState() const;
 
@@ -289,6 +314,7 @@ namespace TerraEngine::Scheduling {
 		std::string latestEcsGraphSummary;
 		ScheduleSummary latestSummary;
 		FrameExecutionPlan latestFrameExecutionPlan;
+		FrameTopologyCache frameTopologyCache;
 		bool frameWorkloadCompatibilityFallbackEnabled = true;
 		bool dirty = true;
 	};

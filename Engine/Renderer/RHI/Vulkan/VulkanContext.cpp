@@ -3257,14 +3257,30 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		}
 	}
 
+	struct DrawResourcePreparationKey
+	{
+		TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+		TerraEngine::UUID materialId = TerraEngine::EMPTY_UUID;
+		TerraEngine::UUID collectionId = TerraEngine::EMPTY_UUID;
+		VkRenderPass renderPass = VK_NULL_HANDLE;
+		std::uint32_t materialFlags = 0u;
+		bool conventionalVisibilityIdentity = false;
+
+		bool operator==(const DrawResourcePreparationKey&) const = default;
+	};
+	std::size_t drawResourceUpperBound = frameData.commands.size();
+	for(const ShadowDrawList& shadowDrawList : frameData.shadowDrawLists)
+	{
+		drawResourceUpperBound += shadowDrawList.commands.size();
+	}
+	std::vector<DrawResourcePreparationKey> preparedDrawResourceKeys;
+	preparedDrawResourceKeys.reserve(drawResourceUpperBound);
 	const auto PrepareDrawResources = [&](const DrawCommand& command,
 		VkRenderPass preparationPass) {
 		Material* material = ResourceManager::Instance().GetMaterial(command.materialId);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!material) return;
 
-		impl->EnsureMesh(command.meshId);
-		
 		TerraEngine::UUID collectionId = material->header.shaderCollectionId;
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (collectionId == TerraEngine::EMPTY_UUID) {
@@ -3286,6 +3302,23 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 
 		const bool preparationUsesConventionalVisibilityIdentity =
 			impl->UsesConventionalVisibilityAttachments(preparationPass);
+		const DrawResourcePreparationKey preparationKey{
+			command.meshId,
+			command.materialId,
+			collectionId,
+			preparationPass,
+			material->header.flags,
+			preparationUsesConventionalVisibilityIdentity};
+		if(std::find(preparedDrawResourceKeys.begin(), preparedDrawResourceKeys.end(), preparationKey)
+			!= preparedDrawResourceKeys.end())
+		{
+			return;
+		}
+		// Mesh/material/pipeline preparation is invariant for duplicate commands in
+		// one protected view submission. Record the exact key only after collection
+		// selection so animated fallback and shadow render-pass differences remain
+		// independent.
+		impl->EnsureMesh(command.meshId);
 		impl->EnsurePipeline(collectionId, preparationPass, material->header.flags,
 			preparationUsesConventionalVisibilityIdentity);
 		impl->EnsureMaterialDescriptorSets(collectionId, command.materialId);
@@ -3307,6 +3340,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 				}
 			}
 		}
+		preparedDrawResourceKeys.push_back(preparationKey);
 	};
 
 	{
@@ -5650,6 +5684,9 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	impl->RecordDiagnosticCheckpoint(cmd, view == ViewType::Scene ? "scene.shadows.end" : "game.shadows.end");
 	
 	std::vector<VkCommandBuffer> secondaryBuffers;
+	// Mesh chunks plus optional sky/grid/UI command buffers form a small, known
+	// upper bound. Reserving once avoids vector growth inside primary recording.
+	secondaryBuffers.reserve(prepared.size() + 3u);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!prepared.empty()) {
 		const size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
@@ -8576,6 +8613,60 @@ TerraEngine::Renderer::Vulkan::EditorPresentResult VulkanContext::PresentEditor(
 		return drainResult;
 	};
 
+	// Swapchain acquisition is intentionally bounded so a busy compositor cannot
+	// freeze the editor. When that retryable timeout follows an offscreen render,
+	// consume its binary semaphore with this slot's fence and move on to the next
+	// slot. The next reuse waits only for this exact submission instead of forcing
+	// the entire graphics queue idle in BeginFrame.
+	auto deferSkippedEditorRenderCompletion = [&]() -> VkResult {
+		if (!impl->editorRenderSubmitted) return VK_SUCCESS;
+
+		TERRAENGINE_PROFILE_SCOPE(
+			"Editor Present: Defer Skipped Render Completion",
+			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		const std::uint32_t frameSlot = impl->currentFrame;
+		const VkResult resetResult = vkResetFences(
+			impl->device, 1, &impl->inFlightFences[frameSlot]);
+		if (resetResult != VK_SUCCESS) return resetResult;
+
+		VkSemaphore renderSemaphore = impl->renderFinishedSemaphores[frameSlot];
+		VkPipelineStageFlags renderStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+		VkSubmitInfo completionSubmit{};
+		completionSubmit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		completionSubmit.waitSemaphoreCount = 1;
+		completionSubmit.pWaitSemaphores = &renderSemaphore;
+		completionSubmit.pWaitDstStageMask = &renderStage;
+		const VkResult submitResult = impl->SubmitGraphicsQueue(
+			1, &completionSubmit, impl->inFlightFences[frameSlot]);
+		if (submitResult != VK_SUCCESS) {
+			// A failed submit consumes no semaphore and leaves the reset fence
+			// unsignaled. Keep the rare recovery path conservative: consume the
+			// signal synchronously, then replace the unusable fence before retrying.
+			if (submitResult == VK_ERROR_DEVICE_LOST) return submitResult;
+			const VkResult drainResult = consumeOutstandingSemaphores(false);
+			VkFenceCreateInfo fenceInfo{};
+			fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+			fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+			VkFence replacement = VK_NULL_HANDLE;
+			const VkResult repairResult = vkCreateFence(
+				impl->device, &fenceInfo, nullptr, &replacement);
+			if (repairResult == VK_SUCCESS) {
+				vkDestroyFence(impl->device, impl->inFlightFences[frameSlot], nullptr);
+				impl->inFlightFences[frameSlot] = replacement;
+			}
+			if (drainResult != VK_SUCCESS) return drainResult;
+			if (repairResult != VK_SUCCESS) return repairResult;
+			return submitResult;
+		}
+
+		// The queued wait now owns the render-finished signal and the slot fence
+		// proves when its command buffers are reusable. No UI submission serial is
+		// published because skipped ImGui draw data did not reach the GPU.
+		impl->editorRenderSubmitted = false;
+		impl->currentFrame = (frameSlot + 1) % impl->MAX_FRAMES_IN_FLIGHT;
+		return VK_SUCCESS;
+	};
+
 	// BeginFrame waited this slot's previous UI fence before recording began.
 	// Do not reset or free the pool here: EndFrame may have just submitted
 	// Scene/Game command buffers from it, and the UI submission below extends
@@ -8583,6 +8674,11 @@ TerraEngine::Renderer::Vulkan::EditorPresentResult VulkanContext::PresentEditor(
 
 	if (impl->framebufferResized) {
 		if (!impl->ClaimFramebufferResizeRebuild()) {
+			const VkResult completionResult = deferSkippedEditorRenderCompletion();
+			if (completionResult != VK_SUCCESS) {
+				return fail(EditorUiFrameStage::DrainSemaphore, completionResult,
+					"deferred editor resize render completion");
+			}
 			result.outcome = EditorPresentOutcome::Skipped;
 			return result;
 		}
@@ -8610,9 +8706,14 @@ TerraEngine::Renderer::Vulkan::EditorPresentResult VulkanContext::PresentEditor(
 	}
 	impl->ResolveUnextendedAcquireProof(unextendedAcquireProof, acquireResult, imageIndex);
 	if (acquireResult == VK_TIMEOUT || acquireResult == VK_NOT_READY) {
-		// No image or acquire semaphore was published. Leave currentFrame unchanged
-		// so its protected BeginFrame cleanup can consume any offscreen render signal
-		// before another acquisition attempt reuses the slot.
+		// No image or acquire semaphore was published. Retire any offscreen render
+		// asynchronously through its frame-slot fence, then retry presentation from
+		// another slot without a queue-wide idle wait.
+		const VkResult completionResult = deferSkippedEditorRenderCompletion();
+		if (completionResult != VK_SUCCESS) {
+			return fail(EditorUiFrameStage::DrainSemaphore, completionResult,
+				"deferred editor acquire render completion");
+		}
 		result.outcome = EditorPresentOutcome::Skipped;
 		result.stage = EditorUiFrameStage::AcquireImage;
 		result.nativeResult = static_cast<std::int32_t>(acquireResult);

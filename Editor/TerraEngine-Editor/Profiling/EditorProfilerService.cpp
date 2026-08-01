@@ -129,6 +129,38 @@ std::vector<EditorProfilerMetricSummary> FinalizeMetrics(const std::map<std::str
 	}
 	return result;
 }
+
+TerraEngine::Profiling::TelemetryDuration CumulativeDurationDelta(
+	const TerraEngine::Profiling::TelemetryDuration& current,
+	const TerraEngine::Profiling::TelemetryDuration& previous)
+{
+	if (current.availability != TerraEngine::Profiling::TelemetryAvailability::Available)
+	{
+		return current;
+	}
+	if (previous.availability != TerraEngine::Profiling::TelemetryAvailability::Available)
+	{
+		return {
+			TerraEngine::Profiling::TelemetryAvailability::Unavailable,
+			0u,
+			"The previous cumulative worker sample was unavailable."
+		};
+	}
+	// A decreasing counter means ThreadPool telemetry was reset during capture.
+	// In that case the current value is precisely the work completed since reset.
+	return {
+		TerraEngine::Profiling::TelemetryAvailability::Available,
+		current.nanoseconds >= previous.nanoseconds
+			? current.nanoseconds - previous.nanoseconds
+			: current.nanoseconds,
+		{}
+	};
+}
+
+std::uint64_t CumulativeCounterDelta(std::uint64_t current, std::uint64_t previous)
+{
+	return current >= previous ? current - previous : current;
+}
 }
 
 // EditorProfilerService::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -162,6 +194,7 @@ void EditorProfilerService::OnProjectOpened()
 		}
 		cancellationToken = std::make_shared<std::atomic_bool>(false);
 		captureStore.SetProjectRoot(ctx->projectManager->GetProjectRoot());
+		lastSavedCaptureArtifact.reset();
 		statusText = "Profiler ready";
 		lastError.clear();
 	}
@@ -180,6 +213,7 @@ void EditorProfilerService::OnProjectClosed()
 	}
 	captureStore.ClearProjectRoot();
 	captures.clear();
+	lastSavedCaptureArtifact.reset();
 	busy = false;
 	statusText = "No project open";
 	lastError.clear();
@@ -221,6 +255,7 @@ void EditorProfilerService::StartRecording(const ProfilerCaptureSettings& settin
 
 	Profiler::Instance().StartRecording(MakeMetadata(), settings);
 	std::lock_guard<std::mutex> lock(mutex);
+	lastSavedCaptureArtifact.reset();
 	statusText = MakeRecordingStatus(settings);
 	lastError.clear();
 }
@@ -269,6 +304,7 @@ void EditorProfilerService::FinishCapture()
 		storeSnapshot = captureStore;
 		cancelToken = cancellationToken;
 		busy = true;
+		lastSavedCaptureArtifact.reset();
 		statusText = "Saving profiler capture";
 		lastError.clear();
 	}
@@ -344,6 +380,25 @@ void EditorProfilerService::FinishCapture()
 		{
 			return;
 		}
+		std::optional<EditorProfilerCaptureArtifact> savedCaptureArtifact;
+		const std::filesystem::path normalizedSavedPath = savedPath.lexically_normal();
+		const auto savedCapture = std::find_if(
+			refreshedCaptures.begin(),
+			refreshedCaptures.end(),
+			[&normalizedSavedPath](const TerraEngine::Profiling::ProfilerCaptureArtifact& artifact) {
+				return artifact.absolutePath.lexically_normal() == normalizedSavedPath;
+			});
+		if (savedCapture != refreshedCaptures.end())
+		{
+			savedCaptureArtifact = EditorProfilerCaptureArtifact{
+				MakeArtifactId(savedCapture->fileName),
+				*savedCapture
+			};
+		}
+		else if (error.empty())
+		{
+			error = "Saved profiler capture was missing from the refreshed project index.";
+		}
 		Profiler::Instance().LoadDocument(loadedDocument);
 
 		std::shared_ptr<EditorProfilerService> self = weakSelf.lock();
@@ -356,6 +411,7 @@ void EditorProfilerService::FinishCapture()
 		if (generation == self->projectGeneration && (!cancelToken || !cancelToken->load(std::memory_order_acquire)))
 		{
 			self->captures = std::move(refreshedCaptures);
+			self->lastSavedCaptureArtifact = std::move(savedCaptureArtifact);
 			self->busy = false;
 			self->lastError = error;
 			self->statusText = "Saved and opened capture";
@@ -538,6 +594,12 @@ std::vector<EditorProfilerCaptureArtifact> EditorProfilerService::GetAutomationC
 	return result;
 }
 
+std::optional<EditorProfilerCaptureArtifact> EditorProfilerService::GetLastSavedCaptureArtifact() const
+{
+	std::lock_guard<std::mutex> lock(mutex);
+	return lastSavedCaptureArtifact;
+}
+
 bool EditorProfilerService::ReadCaptureDocumentById(
 	std::string_view artifactId,
 	ProfilerCaptureDocument& outDocument,
@@ -637,6 +699,7 @@ EditorProfilerCaptureSummary EditorProfilerService::SummarizeDocument(
 		MetricAccumulator run;
 		MetricAccumulator wait;
 		MetricAccumulator idle;
+		std::optional<TerraEngine::Profiling::WorkerTelemetryRecord> previous;
 	};
 	std::map<std::uint32_t, WorkerAccumulator> workerAccumulators;
 
@@ -659,7 +722,11 @@ EditorProfilerCaptureSummary EditorProfilerService::SummarizeDocument(
 
 		for (const TerraEngine::Profiling::PerformanceStageRecord& stage : frame.performanceStages)
 		{
-			const char* domain = stage.domain == TerraEngine::Profiling::PerformanceStageDomain::Physics ? "physics" : "scene_view";
+			const char* domain = stage.domain == TerraEngine::Profiling::PerformanceStageDomain::Physics
+				? "physics"
+				: stage.domain == TerraEngine::Profiling::PerformanceStageDomain::SceneView
+				? "scene_view"
+				: "editor";
 			const std::string id = std::string(domain) + "." + stage.stageName;
 			AddDuration(stageAccumulators, id, std::string(domain) + " / " + stage.stageName, stage.duration);
 		}
@@ -689,17 +756,25 @@ EditorProfilerCaptureSummary EditorProfilerService::SummarizeDocument(
 			accumulator.summary.workerId = worker.workerId;
 			++accumulator.summary.sampleCount;
 			accumulator.summary.maximumQueueDepth = std::max(accumulator.summary.maximumQueueDepth, worker.queueDepth);
-			accumulator.summary.totalDispatchCount += worker.dispatchCount;
-			accumulator.summary.totalUsefulWorkItems += worker.usefulWorkItemCount;
 			if (accumulator.run.summary.label.empty())
 			{
 				accumulator.run.summary = {"worker.run", "Worker run", "ms"};
 				accumulator.wait.summary = {"worker.wait", "Worker wait", "ms"};
 				accumulator.idle.summary = {"worker.idle", "Worker idle", "ms"};
 			}
-			accumulator.run.Add(worker.runDuration);
-			accumulator.wait.Add(worker.waitDuration);
-			accumulator.idle.Add(worker.idleDuration);
+			if (accumulator.previous.has_value())
+			{
+				// ThreadPool publishes process-lifetime cumulative counters. Convert
+				// adjacent observations into capture-local intervals before summing or
+				// calculating percentiles; the first observation is only a baseline.
+				const TerraEngine::Profiling::WorkerTelemetryRecord& previous = *accumulator.previous;
+				accumulator.summary.totalDispatchCount += CumulativeCounterDelta(worker.dispatchCount, previous.dispatchCount);
+				accumulator.summary.totalUsefulWorkItems += CumulativeCounterDelta(worker.usefulWorkItemCount, previous.usefulWorkItemCount);
+				accumulator.run.Add(CumulativeDurationDelta(worker.runDuration, previous.runDuration));
+				accumulator.wait.Add(CumulativeDurationDelta(worker.waitDuration, previous.waitDuration));
+				accumulator.idle.Add(CumulativeDurationDelta(worker.idleDuration, previous.idleDuration));
+			}
+			accumulator.previous = worker;
 		}
 		if (frame.physicsWorkVolume.has_value())
 		{

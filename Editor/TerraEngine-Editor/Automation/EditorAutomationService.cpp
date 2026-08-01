@@ -4911,11 +4911,11 @@ namespace TerraEngine::Editor::Automation
 				}
 				else
 				{
-					const std::vector<EditorProfilerCaptureArtifact> artifacts = profiler.GetAutomationCaptureList();
-					const auto created = std::find_if(artifacts.begin(), artifacts.end(), [this](const EditorProfilerCaptureArtifact& artifact) {
-						return !profilerArtifactIdsBeforeStop.contains(artifact.artifactId);
-					});
-					if (created != artifacts.end())
+					// Persistence publishes the exact saved path through the profiler
+					// service. Do not infer it from a before/after list delta: project-open
+					// discovery can finish during recording and make an older capture look new.
+					const std::optional<EditorProfilerCaptureArtifact> created = profiler.GetLastSavedCaptureArtifact();
+					if (created.has_value())
 					{
 						(void)jobService.AddArtifact(jobId, {created->artifactId, "profiler_capture", {}, "application/json", {
 							{"name", created->artifact.fileName},
@@ -4924,13 +4924,11 @@ namespace TerraEngine::Editor::Automation
 						}});
 						(void)jobService.CompleteSucceeded(jobId, {{"artifactId", created->artifactId}});
 						activeProfilerCaptureJobId.clear();
-						profilerArtifactIdsBeforeStop.clear();
 					}
 					else if (!profiler.GetLastError().empty())
 					{
 						(void)jobService.CompleteFailed(jobId, {{"error", profiler.GetLastError()}});
 						activeProfilerCaptureJobId.clear();
-						profilerArtifactIdsBeforeStop.clear();
 					}
 				}
 			}
@@ -5914,9 +5912,6 @@ namespace TerraEngine::Editor::Automation
 				if (!activeProfilerCaptureJobId.empty())
 					return BuildError(requestId, ErrorCategory::Unavailable,
 						"Profiler capture persistence is already active.");
-				profilerArtifactIdsBeforeStop.clear();
-				for (const EditorProfilerCaptureArtifact& artifact : editorContext->editorProfiler->GetAutomationCaptureList())
-					profilerArtifactIdsBeforeStop.insert(artifact.artifactId);
 				const AutomationJobSnapshot job = jobService.Create({"profiler", std::string(operationName), requestId, arguments.value("correlationId", requestId), {}, false});
 				if (job.jobId.empty()) return BuildError(requestId, ErrorCategory::QueueFull, "Profiler job queue is full.");
 				activeProfilerCaptureJobId = job.jobId;

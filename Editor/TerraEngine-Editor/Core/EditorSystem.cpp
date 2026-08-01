@@ -31,10 +31,14 @@
 #include <backends/imgui_impl_vulkan.h>
 #include <ImGuiFileDialog.h>
 #include <GLFW/glfw3.h>
+#include <array>
+#include <chrono>
 #include <utility>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <stdexcept>
+#include <type_traits>
 #include <unordered_map>
 
 // Static storage for callback chaining
@@ -46,6 +50,59 @@ static GLFWscrollfun g_PrevScrollCallback = nullptr;
 static GLFWkeyfun g_PrevKeyCallback = nullptr;
 static GLFWcharfun g_PrevCharCallback = nullptr;
 static GLFWdropfun g_PrevDropCallback = nullptr;
+
+namespace {
+	// Editor profiling deliberately avoids ordinary nested profiler scopes. This
+	// stack-owned collector measures fixed regions with the steady clock, then
+	// publishes one bounded value batch before ProfilerEditorWorkScope closes.
+	// When recording is inactive, publication returns before taking a lock.
+	class EditorCpuStageBatch final {
+	public:
+		template<typename Callback>
+		auto Measure(const char* stageName, Callback&& callback)
+		{
+			const auto start = Clock::now();
+			if constexpr(std::is_void_v<std::invoke_result_t<Callback>>)
+			{
+				std::invoke(std::forward<Callback>(callback));
+				Record(stageName, start);
+			}
+			else
+			{
+				auto result = std::invoke(std::forward<Callback>(callback));
+				Record(stageName, start);
+				return result;
+			}
+		}
+
+		~EditorCpuStageBatch()
+		{
+			TerraEngine::Profiling::Profiler::Instance().RecordEditorStages(
+				std::span<const TerraEngine::Profiling::ProfilerEditorStageTiming>(
+					stages.data(), stageCount));
+		}
+
+	private:
+		using Clock = std::chrono::steady_clock;
+
+		void Record(const char* stageName, Clock::time_point start)
+		{
+			if(stageCount >= stages.size())
+			{
+				return;
+			}
+			const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+				Clock::now() - start).count();
+			stages[stageCount++] = {
+				stageName,
+				static_cast<std::uint64_t>(std::max<std::int64_t>(0, elapsed)),
+				1u};
+		}
+
+		std::array<TerraEngine::Profiling::ProfilerEditorStageTiming, 16u> stages{};
+		std::size_t stageCount = 0u;
+	};
+}
 
 // Resolve the managed editor directory from the executable first because the
 // editor can be launched by Visual Studio, MCP, or scripts with different
@@ -650,6 +707,7 @@ void EditorSystem::Update(float deltaTime) {
 	// the CPU Engine sample tree. This outer boundary measures the complete editor
 	// interval separately and suppresses every nested editor-only profiler marker.
 	TerraEngine::Profiling::ProfilerEditorWorkScope editorProfilerBoundary;
+	EditorCpuStageBatch editorStages;
 
 	// Keep this idempotent fallback so future delayed-startup paths still open
 	// the requested project before the editor chooses between hub and workspace UI.
@@ -702,18 +760,24 @@ void EditorSystem::Update(float deltaTime) {
 		}
 		// The ImGui Vulkan backend may submit font/texture uploads from NewFrame.
 		// Serialize that hidden queue access with renderer and asset-upload work.
-		const auto newFrameResult = TerraEngine::Editor::CheckedImGuiVulkanBridge::Execute(
-			TerraEngine::Renderer::Vulkan::EditorUiFrameStage::RecordDrawData,
-			[&]() { vulkan->RunWithQueueAccess([]() { ImGui_ImplVulkan_NewFrame(); }); });
+		const auto newFrameResult = editorStages.Measure("Editor.ImGuiBackendNewFrame", [&]() {
+			return TerraEngine::Editor::CheckedImGuiVulkanBridge::Execute(
+				TerraEngine::Renderer::Vulkan::EditorUiFrameStage::RecordDrawData,
+				[&]() { vulkan->RunWithQueueAccess([]() { ImGui_ImplVulkan_NewFrame(); }); });
+		});
 		if (!newFrameResult.success) {
 			TERRAENGINE_LOG(LogLevel::Error, "Dear ImGui Vulkan NewFrame failed: " << newFrameResult.nativeResult);
 			return;
 		}
 	} else {
-		ImGui_ImplVulkan_NewFrame();
+		editorStages.Measure("Editor.ImGuiBackendNewFrame", []() {
+			ImGui_ImplVulkan_NewFrame();
+		});
 	}
-	ImGui_ImplGlfw_NewFrame();
-	ImGui::NewFrame();
+	editorStages.Measure("Editor.ImGuiFrameStart", []() {
+		ImGui_ImplGlfw_NewFrame();
+		ImGui::NewFrame();
+	});
 	
 	// MCP must keep processing while the project hub is visible so clients can
 	// read status and finish retained jobs after a native project close. The
@@ -721,22 +785,30 @@ void EditorSystem::Update(float deltaTime) {
 	// only from this protected editor update boundary.
 	if (context.editorMcpBridge) {
 		TERRAENGINE_PROFILE_SCOPE("EditorSystem: MCP Bridge", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		context.editorMcpBridge->Update(deltaTime);
+		editorStages.Measure("Editor.McpBridge", [&]() {
+			context.editorMcpBridge->Update(deltaTime);
+		});
 	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (context.projectManager->HasActiveProject()) {
 		{
 			TERRAENGINE_PROFILE_SCOPE("EditorSystem: Asset Database", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-			AssetDatabase::Instance().Update();
+			editorStages.Measure("Editor.AssetDatabase", []() {
+				AssetDatabase::Instance().Update();
+			});
 		}
 		{
 			TERRAENGINE_PROFILE_SCOPE("EditorSystem: Main Editor Update", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-			mainEditor->Update(deltaTime);
+			editorStages.Measure("Editor.MainUpdate", [&]() {
+				mainEditor->Update(deltaTime);
+			});
 		}
 		{
 			TERRAENGINE_PROFILE_SCOPE("EditorSystem: Main Editor Draw", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-			mainEditor->DrawUI();
+			editorStages.Measure("Editor.MainDraw", [&]() {
+				mainEditor->DrawUI();
+			});
 		}
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (mainEditor && mainEditor->IsInspectorValueDragging()) {
@@ -745,29 +817,36 @@ void EditorSystem::Update(float deltaTime) {
 			WrapCursorForInspectorDrag(window);
 		}
 	} else {
-		ScriptingSystem::Instance().UpdateInspectorWatch(std::nullopt, context.scripting.selectionVersion);
-		projectHub->Update(deltaTime);
-		projectHub->DrawUI();
-		if (mainEditor) {
-			mainEditor->DrawProjectHubWindows();
-		}
+		editorStages.Measure("Editor.ProjectHub", [&]() {
+			ScriptingSystem::Instance().UpdateInspectorWatch(std::nullopt, context.scripting.selectionVersion);
+			projectHub->Update(deltaTime);
+			projectHub->DrawUI();
+			if (mainEditor) {
+				mainEditor->DrawProjectHubWindows();
+			}
+		});
 	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (managedUpdate) {
 		TERRAENGINE_PROFILE_SCOPE("EditorSystem: Managed Update", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		managedUpdate(deltaTime);
+		editorStages.Measure("Editor.ManagedUpdate", [&]() {
+			managedUpdate(deltaTime);
+		});
 	}
 
 	{
 		TERRAENGINE_PROFILE_SCOPE("EditorSystem: ImGui Build Draw Data", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		ImGui::Render();
+		editorStages.Measure("Editor.ImGuiRender", []() {
+			ImGui::Render();
+		});
 	}
 	
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vulkan) {
 		TERRAENGINE_PROFILE_SCOPE("EditorSystem: Present Editor UI", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		const auto presentResult = vulkan->PresentEditor([&](){
+		const auto presentResult = editorStages.Measure("Editor.PresentUi", [&]() {
+			return vulkan->PresentEditor([&](){
 			const auto bridgeResult = TerraEngine::Editor::CheckedImGuiVulkanBridge::Execute(
 				TerraEngine::Renderer::Vulkan::EditorUiFrameStage::RecordDrawData,
 				[&]() {
@@ -804,6 +883,7 @@ void EditorSystem::Update(float deltaTime) {
 				throw std::runtime_error("Dear ImGui Vulkan draw recording failed with result "
 					+ std::to_string(bridgeResult.nativeResult));
 			}
+			});
 		});
 		if (presentResult.outcome == TerraEngine::Renderer::Vulkan::EditorPresentOutcome::RecoverableFailure) {
 			TERRAENGINE_LOG(LogLevel::Error, "Editor UI presentation stopped safely at "

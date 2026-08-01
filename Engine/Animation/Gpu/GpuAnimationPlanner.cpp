@@ -956,6 +956,7 @@ namespace TerraEngine::Animation {
 			}
 			std::vector<GpuAnimationWorkRequest> stagedRequests;
 			GpuAnimationResidentPayloads payloadCopy{};
+			std::shared_ptr<const GpuAnimationResidentPayloads> sharedPayload;
 			if(!atlasEntries.empty()) {
 				const std::shared_ptr<const GpuAnimationResidentPayloads> firstPayload =
 					atlasEntries.front().residentPayloads;
@@ -970,7 +971,10 @@ namespace TerraEngine::Animation {
 					for(GpuAnimationFrameAtlasEntry& entry : atlasEntries) {
 						stagedRequests.push_back(std::move(entry.request));
 					}
-					payloadCopy = *firstPayload;
+					// Cooked payload bytes are immutable and already shared by every
+					// lowering input. Preserve that ownership rather than duplicating
+					// the same clip/program/skeleton vectors once per rendered frame.
+					sharedPayload = firstPayload;
 				} else {
 					GpuAnimationFrameAtlas atlas;
 					const GpuAnimationLoweringStatus atlasStatus =
@@ -993,6 +997,7 @@ namespace TerraEngine::Animation {
 				return result.status;
 			}
 			output.residentPayloads = std::move(payloadCopy);
+			output.sharedResidentPayloads = std::move(sharedPayload);
 			result.workRequests = std::move(stagedRequests);
 			result.status = GpuAnimationLoweringStatus::Ok;
 			return result.status;

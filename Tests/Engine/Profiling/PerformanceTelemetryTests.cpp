@@ -26,8 +26,10 @@ void RegisterPerformanceTelemetryTests(TestRegistry& registry)
 	registry.Add("Profiling.PerformanceTelemetryValidatesPhysicsAndSceneViewStages", [](TestContext& context) {
 		PerformanceStageRecord physics{PerformanceStageDomain::Physics, "Physics.Extract", AvailableDuration(45000u), "physics extraction", 1000u, false};
 		PerformanceStageRecord sceneView{PerformanceStageDomain::SceneView, "SceneView.Density", AvailableDuration(12000u), "marker density", 800u, true};
+		PerformanceStageRecord editor{PerformanceStageDomain::Editor, "Editor.MainDraw", AvailableDuration(18000u), "EditorSystem", 1u, false};
 		context.Expect(ValidatePerformanceStageRecord(physics).valid, "Typed physics stages with measured durations should validate.");
 		context.Expect(ValidatePerformanceStageRecord(sceneView).valid, "Typed Scene View stages with measured durations should validate.");
+		context.Expect(ValidatePerformanceStageRecord(editor).valid, "Typed editor stages should remain separate valid evidence outside Engine CPU.");
 		physics.stageName.clear();
 		context.Expect(!ValidatePerformanceStageRecord(physics).valid, "Stages without names should be rejected from profiler evidence.");
 	});

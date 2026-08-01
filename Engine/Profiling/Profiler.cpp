@@ -782,6 +782,34 @@ void Profiler::BeginFrame(bool playModeActive)
 // Profiler::EndFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Profiler::EndFrame()
 {
+	// External producers publish immutable snapshots independently of the
+	// profiler document. Capture those values before taking the profiler mutex so
+	// a window snapshot or FinishRecording call never waits on subsystem copies.
+	if(!frameRecordingActive.load(std::memory_order_acquire))
+	{
+		return;
+	}
+	const auto physicsSnapshot = TerraEngine::Physics::AcquirePhysicsDiagnosticsSnapshot();
+	std::vector<WorkloadExecutionRecord> workloadExecutionSnapshot =
+		TerraEngine::Scheduling::LatestFrameWorkloadExecutionRecordsForProfiling();
+	thread_local std::vector<WorkerTelemetryRecord> workerCounterScratch;
+	workerCounterScratch.clear();
+	workerCounterScratch.reserve(ThreadPool::instance().getThreadCount());
+	ThreadPool::instance().VisitTelemetryCounters(
+		[](const ThreadPoolWorkerTelemetry& worker)
+		{
+			workerCounterScratch.push_back({
+				static_cast<std::uint32_t>(worker.workerIndex),
+				worker.latestQueueDepthAtStart,
+				worker.dispatchCount,
+				worker.usefulItemCount,
+				AvailableTelemetryDuration(worker.runNanoseconds),
+				AvailableTelemetryDuration(worker.waitNanoseconds),
+				AvailableTelemetryDuration(worker.idleNanoseconds)});
+		});
+	const TerraEngine::Renderer::RenderDiagnosticsSummary renderDiagnostics =
+		TerraEngine::Renderer::LatestRenderDiagnostics();
+
 	std::lock_guard<std::mutex> lock(mutex);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (state != ProfilerSessionState::Recording || !currentFrame.has_value())
@@ -831,8 +859,9 @@ void Profiler::EndFrame()
 	// Capture compact immutable physics diagnostics at the ordinary profiler
 	// frame boundary. This producer is independent of whether the optional
 	// Physics Diagnostics editor window has ever been opened.
-	if (const auto physics = TerraEngine::Physics::AcquirePhysicsDiagnosticsSnapshot())
+	if (physicsSnapshot)
 	{
+		const auto& physics = physicsSnapshot;
 		ProfilerPhysicsFrameCounters counters;
 		counters.tick = physics->tick;
 		counters.bodyCount = physics->counters.bodyCount;
@@ -882,7 +911,7 @@ void Profiler::EndFrame()
 	// Scheduler records are published only after a completed frame-workload pass.
 	// The copy keeps profiler storage independent of workload callbacks and live
 	// system state while preserving queue/worker/boundary diagnostics.
-	currentFrame->workloadExecutions = TerraEngine::Scheduling::LatestFrameWorkloadExecutionRecordsForProfiling();
+	currentFrame->workloadExecutions = std::move(workloadExecutionSnapshot);
 	for (const WorkloadExecutionRecord& execution : currentFrame->workloadExecutions)
 	{
 		ProtectedBoundaryRecord boundary;
@@ -897,17 +926,7 @@ void Profiler::EndFrame()
 			currentFrame->protectedBoundaries.push_back(std::move(boundary));
 		}
 	}
-	if (const auto workerSnapshot = ThreadPool::instance().GetTelemetrySnapshot())
-	{
-		for (const ThreadPoolWorkerTelemetry& worker : workerSnapshot->workers)
-		{
-			currentFrame->workerTelemetry.push_back({
-				static_cast<std::uint32_t>(worker.workerIndex), worker.latestQueueDepthAtStart,
-				worker.dispatchCount, worker.usefulItemCount, AvailableTelemetryDuration(worker.runNanoseconds),
-				AvailableTelemetryDuration(worker.waitNanoseconds), AvailableTelemetryDuration(worker.idleNanoseconds)});
-		}
-	}
-	const TerraEngine::Renderer::RenderDiagnosticsSummary renderDiagnostics = TerraEngine::Renderer::LatestRenderDiagnostics();
+	currentFrame->workerTelemetry.assign(workerCounterScratch.begin(), workerCounterScratch.end());
 	currentFrame->presentationWaits = renderDiagnostics.presentationWaits;
 	if (currentFrame->presentationWaits.empty())
 	{
@@ -1206,6 +1225,47 @@ void Profiler::EndEditorWork(bool active)
 	const std::int64_t durationNanoseconds =
 		std::max<std::int64_t>(0, SteadyNowNanoseconds() - buffer.editorWorkStartNanoseconds);
 	hotPath->excludedEditorNanoseconds.fetch_add(durationNanoseconds, std::memory_order_relaxed);
+}
+
+void Profiler::RecordEditorStages(std::span<const ProfilerEditorStageTiming> stages)
+{
+	if(!frameRecordingActive.load(std::memory_order_acquire) || stages.empty())
+	{
+		return;
+	}
+
+	std::lock_guard<std::mutex> lock(mutex);
+	if(state != ProfilerSessionState::Recording || !currentFrame.has_value())
+	{
+		return;
+	}
+
+	// EditorSystem currently publishes eight named regions. Keep a defensive
+	// bound so an accidental producer loop cannot inflate every retained frame.
+	constexpr std::size_t kMaximumEditorStageRecordsPerFrame = 16u;
+	std::size_t published = 0u;
+	for(const ProfilerEditorStageTiming& timing : stages)
+	{
+		if(published >= kMaximumEditorStageRecordsPerFrame)
+		{
+			break;
+		}
+		if(timing.stageName == nullptr || timing.stageName[0] == '\0')
+		{
+			continue;
+		}
+		PerformanceStageRecord stage;
+		stage.domain = PerformanceStageDomain::Editor;
+		stage.stageName = timing.stageName;
+		stage.duration = AvailableTelemetryDuration(timing.durationNanoseconds);
+		stage.workloadName = "EditorSystem";
+		stage.workItemCount = timing.workItemCount;
+		if(ValidatePerformanceStageRecord(stage).valid)
+		{
+			currentFrame->performanceStages.push_back(std::move(stage));
+			++published;
+		}
+	}
 }
 
 // Profiler::BeginSample is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1871,14 +1931,21 @@ void Profiler::AggregateSamplesForFrame(ProfilerFrameRecord& frame) const
 		AddOrReplaceMetric(*tasks, "Finished tasks", static_cast<double>(finishedTaskCount), "count");
 	}
 
-	std::sort(frame.samples.begin(), frame.samples.end(), [](const ProfilerSample& left, const ProfilerSample& right) {
+	const auto sampleOrder = [](const ProfilerSample& left, const ProfilerSample& right) {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (left.startMs == right.startMs)
 		{
 			return left.depth < right.depth;
 		}
 		return left.startMs < right.startMs;
-	});
+	};
+	// A single producer, and many already time-ordered multi-producer frames, need
+	// no sort. The linear check avoids an O(n log n) reorder while retaining the
+	// exact stable display contract when buffers were merged out of time order.
+	if(!std::is_sorted(frame.samples.begin(), frame.samples.end(), sampleOrder))
+	{
+		std::sort(frame.samples.begin(), frame.samples.end(), sampleOrder);
+	}
 }
 
 // Profiler::UpdateFastRecordingFlagsLocked is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

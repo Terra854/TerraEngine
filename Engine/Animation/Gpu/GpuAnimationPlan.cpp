@@ -438,6 +438,7 @@ namespace TerraEngine::Animation {
 	{
 		generation = 0U;
 		residentPayloads = {};
+		sharedResidentPayloads.reset();
 		generationRecords.clear();
 		workPackets.clear();
 		renderIdentities.clear();

@@ -338,7 +338,10 @@ namespace TerraEngine::Scheduling {
 			return true;
 		}
 
-		JobGraphSummary BuildSummary(const std::vector<JobGraphDependencyEdge>& edges, std::vector<JobGraphDiagnostic> diagnostics) const
+		JobGraphSummary BuildSummary(
+			const std::vector<JobGraphDependencyEdge>& edges,
+			std::vector<JobGraphDiagnostic> diagnostics,
+			bool formatSummary) const
 		{
 			JobGraphSummary summary;
 			summary.graphId = graphId;
@@ -410,7 +413,10 @@ namespace TerraEngine::Scheduling {
 			summary.completed = summary.valid && std::all_of(nodes.begin(), nodes.end(), [](const Node& node) {
 				return IsTerminal(node.state);
 			});
-			summary.formatted = FormatJobGraphSummary(summary);
+			if (formatSummary)
+			{
+				summary.formatted = FormatJobGraphSummary(summary);
+			}
 			return summary;
 		}
 	};
@@ -719,7 +725,7 @@ namespace TerraEngine::Scheduling {
 		return impl->cancellationRequested.load(std::memory_order_acquire);
 	}
 
-	const JobGraphSummary& JobGraph::Validate()
+	const JobGraphSummary& JobGraph::Validate(bool formatSummary)
 	{
 		std::vector<JobGraphDiagnostic> diagnostics;
 		if (impl->graphId.empty())
@@ -796,13 +802,13 @@ namespace TerraEngine::Scheduling {
 		{
 			node.state = JobGraphNodeState::Pending;
 		}
-		impl->latestSummary = impl->BuildSummary(edges, std::move(diagnostics));
+		impl->latestSummary = impl->BuildSummary(edges, std::move(diagnostics), formatSummary);
 		return impl->latestSummary;
 	}
 
 	const JobGraphSummary& JobGraph::Execute(const JobGraphExecuteOptions& options)
 	{
-		const JobGraphSummary& validation = Validate();
+		const JobGraphSummary& validation = Validate(options.formatSummary);
 		if (!validation.valid)
 		{
 			return impl->latestSummary;
@@ -839,12 +845,26 @@ namespace TerraEngine::Scheduling {
 		std::atomic<std::uint64_t> workerTimeNs{ 0 };
 		std::uint64_t protectedTimeNs = 0;
 		std::uint64_t coordinatorWaitTimeNs = 0;
+		// Node handles are assigned in insertion order, so an index min-heap keeps
+		// the same deterministic handle ordering without scanning and sorting every
+		// node at the beginning of each dependency wave.
+		std::priority_queue<std::size_t, std::vector<std::size_t>, std::greater<std::size_t>> readyQueue;
+		for (std::size_t index = 0; index < remainingDependencies.size(); ++index)
+		{
+			if (remainingDependencies[index] == 0)
+			{
+				readyQueue.push(index);
+			}
+		}
 
 		auto completeNode = [&](std::size_t index, JobGraphNodeState state) {
 			impl->nodes[index].state = state;
 			for (std::size_t dependent : outgoing[index])
 			{
-				--remainingDependencies[dependent];
+				if (--remainingDependencies[dependent] == 0)
+				{
+					readyQueue.push(dependent);
+				}
 			}
 		};
 
@@ -866,20 +886,25 @@ namespace TerraEngine::Scheduling {
 			return impl->cancellation.target.IsValid() && impl->cancellation.target.id == node.handle.id;
 		};
 
+		struct RunningWorker {
+			std::size_t index = 0;
+			std::shared_ptr<Task<void>> task;
+			std::future<void> future;
+		};
+		std::vector<std::size_t> ready;
+		ready.reserve(impl->nodes.size());
+		std::vector<RunningWorker> runningWorkers;
+		runningWorkers.reserve(impl->nodes.size());
+
 		std::size_t terminalCount = 0;
 		while (terminalCount < impl->nodes.size())
 		{
-			std::vector<std::size_t> ready;
-			for (std::size_t index = 0; index < impl->nodes.size(); ++index)
+			ready.clear();
+			while (!readyQueue.empty())
 			{
-				if (impl->nodes[index].state == JobGraphNodeState::Pending && remainingDependencies[index] == 0)
-				{
-					ready.push_back(index);
-				}
+				ready.push_back(readyQueue.top());
+				readyQueue.pop();
 			}
-			std::stable_sort(ready.begin(), ready.end(), [&](std::size_t left, std::size_t right) {
-				return impl->nodes[left].handle.id < impl->nodes[right].handle.id;
-			});
 
 			if (ready.empty())
 			{
@@ -895,12 +920,7 @@ namespace TerraEngine::Scheduling {
 				break;
 			}
 
-			struct RunningWorker {
-				std::size_t index = 0;
-				std::shared_ptr<Task<void>> task;
-				std::future<void> future;
-			};
-			std::vector<RunningWorker> runningWorkers;
+			runningWorkers.clear();
 
 			for (std::size_t index : ready)
 			{
@@ -1020,7 +1040,7 @@ namespace TerraEngine::Scheduling {
 			}
 		}
 
-		impl->latestSummary = impl->BuildSummary(edges, std::move(diagnostics));
+		impl->latestSummary = impl->BuildSummary(edges, std::move(diagnostics), options.formatSummary);
 		impl->latestSummary.workerTimeNs = workerTimeNs.load(std::memory_order_relaxed);
 		impl->latestSummary.protectedTimeNs = protectedTimeNs;
 		impl->latestSummary.coordinatorWaitTimeNs = coordinatorWaitTimeNs;
@@ -1028,7 +1048,6 @@ namespace TerraEngine::Scheduling {
 		impl->latestSummary.workerUtilization = totalMeasuredTimeNs == 0
 			? 0.0
 			: static_cast<double>(impl->latestSummary.workerTimeNs) / static_cast<double>(totalMeasuredTimeNs);
-		impl->latestSummary.formatted = FormatJobGraphSummary(impl->latestSummary);
 		return impl->latestSummary;
 	}
 

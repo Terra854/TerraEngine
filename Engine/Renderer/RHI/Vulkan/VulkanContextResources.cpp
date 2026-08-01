@@ -2412,7 +2412,7 @@ bool VulkanContext::Impl::PublishVulkanAnimationResources(
 	// Validate every copied index before creating or updating any Vulkan object.
 	// The renderer treats this immutable plan as one transaction: malformed
 	// producer bytes must not expose a partially updated descriptor set.
-	const auto& payloads = plan.residentPayloads;
+	const auto& payloads = plan.ResidentPayloads();
 	if(plan.generation == 0U || plan.generationRecords.empty()
 		|| !payloads.HasRequiredSampleAndHierarchyInputs()) return false;
 	for(const TerraEngine::Animation::GpuAnimationWorkPacket& packet : plan.workPackets) {

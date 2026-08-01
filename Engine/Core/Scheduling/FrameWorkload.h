@@ -166,6 +166,14 @@ namespace TerraEngine::Scheduling {
 		std::size_t partitionCount = 0;
 	};
 
+	// Validation lowers descriptor and resource ordering into compact result
+	// indices once. Execution consumes these indices directly instead of rebuilding
+	// string maps and repeating the all-pairs resource-conflict search.
+	struct FrameWorkloadDependencyEdge {
+		std::size_t prerequisiteIndex = 0;
+		std::size_t dependentIndex = 0;
+	};
+
 	struct ArchitectureMigrationSummary {
 		std::size_t workerSafeCount = 0;
 		std::size_t protectedCount = 0;
@@ -268,6 +276,7 @@ namespace TerraEngine::Scheduling {
 		std::string frameId = "frame";
 		std::vector<FrameWorkloadDeclaration> workloads;
 		std::vector<FrameWorkloadResult> results;
+		std::vector<FrameWorkloadDependencyEdge> dependencyEdges;
 		std::vector<ArchitectureDiagnostic> diagnostics;
 		// Execution records are bounded value snapshots; they never retain the
 		// std::function callbacks held by workload declarations.

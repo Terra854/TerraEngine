@@ -130,6 +130,9 @@ public:
 	std::string GetLastError() const;
 	std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> GetCaptureList() const;
 	std::vector<EditorProfilerCaptureArtifact> GetAutomationCaptureList() const;
+	// The stop job consumes this exact result instead of inferring the new capture
+	// from a list delta that may race asynchronous project-open discovery.
+	std::optional<EditorProfilerCaptureArtifact> GetLastSavedCaptureArtifact() const;
 	// ReadCaptureDocumentById is a blocking worker API used by durable jobs. UI
 	// callers should use RequestLoadCaptureById, which retains asynchronous load.
 	bool ReadCaptureDocumentById(
@@ -160,6 +163,7 @@ private:
 	std::shared_ptr<std::atomic_bool> cancellationToken = std::make_shared<std::atomic_bool>(false);
 	mutable std::mutex mutex;
 	std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> captures;
+	std::optional<EditorProfilerCaptureArtifact> lastSavedCaptureArtifact;
 	bool busy = false;
 	std::string statusText = "Idle";
 	std::string lastError;

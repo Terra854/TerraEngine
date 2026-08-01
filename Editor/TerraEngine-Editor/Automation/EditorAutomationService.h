@@ -27,7 +27,6 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 struct EditorContext;
@@ -195,10 +194,9 @@ namespace TerraEngine::Editor::Automation
 		// its durable job ID lets polling mirror native progress and diagnostics.
 		std::string activeScriptCompilationJobId;
 		// Profiler capture persistence completes asynchronously after stop. The
-		// baseline IDs let jobs.get identify the new project-contained artifact
-		// without exposing or accepting an arbitrary filesystem path.
+		// service publishes the exact saved artifact once the durable write and
+		// refreshed project index both complete.
 		std::string activeProfilerCaptureJobId;
-		std::unordered_set<std::string> profilerArtifactIdsBeforeStop;
 		std::string activeProfilerLoadJobId;
 		std::string activeProfilerLoadArtifactId;
 		struct ActivePhysicsCookJob

@@ -315,6 +315,21 @@ namespace TerraEngine::Tests {
 
 	void RegisterGpuAnimationShaderLayoutTests(TestRegistry& registry)
 	{
+		registry.Add("Animation.GpuPlan.SharedResidentPayloadAvoidsPerFrameClone", [](TestContext& context) {
+			GpuAnimationPlan plan;
+			plan.residentPayloads.programWords = {1u};
+			auto sharedPayload = std::make_shared<GpuAnimationResidentPayloads>();
+			sharedPayload->programWords = {7u, 9u};
+			plan.sharedResidentPayloads = sharedPayload;
+			context.Expect(&plan.ResidentPayloads() == sharedPayload.get()
+				&& plan.ResidentPayloads().programWords.size() == 2u,
+				"A shared cooked payload should remain the exact immutable plan source instead of being cloned.");
+			plan.Clear();
+			context.Expect(!plan.sharedResidentPayloads
+				&& plan.ResidentPayloads().programWords.empty(),
+				"Clearing a plan must retire shared payload ownership and its owned fallback together.");
+		});
+
 		registry.Add("Animation.GpuShaderLayout.SharedHlslAbiMatchesFrozenConstants", [](TestContext& context) {
 			const std::string hlsl = ReadAnimationGpuAbi();
 			context.Expect(!hlsl.empty(), "The shared HLSL ABI file must be present in Engine/Shaders/Animation.");

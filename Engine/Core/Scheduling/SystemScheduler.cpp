@@ -425,6 +425,9 @@ namespace TerraEngine::Scheduling {
 		stream << "After Physics visibility: active=" << (summary.afterPhysicsFlushActive ? "true" : "false")
 			<< " consumer='" << summary.afterPhysicsConsumer
 			<< "' reason='" << summary.afterPhysicsReason << "'\n";
+		stream << "Frame topology cache: " << (summary.frameTopologyCacheHit ? "hit" : "miss")
+			<< " hits=" << summary.frameTopologyCacheHitCount
+			<< " misses=" << summary.frameTopologyCacheMissCount << '\n';
 		stream << "Main-thread systems:";
 		for (const std::string& system : summary.mainThreadSystems)
 		{
@@ -496,6 +499,7 @@ namespace TerraEngine::Scheduling {
 		latestComponentQueryGroups.clear();
 		latestEcsGraphSummary.clear();
 		latestSummary = {};
+		frameTopologyCache = {};
 		SetSameFramePhysicsPublicationState({false, {}, "Scheduler was cleared; no same-frame physics consumer is active."});
 		dirty = true;
 	}
@@ -503,18 +507,21 @@ namespace TerraEngine::Scheduling {
 	void SystemScheduler::SetPhaseDefinitions(std::vector<SchedulerPhaseDefinition> newPhases)
 	{
 		phases = std::move(newPhases);
+		frameTopologyCache.valid = false;
 		dirty = true;
 	}
 
 	void SystemScheduler::SetResourceDefinitions(std::vector<SchedulerResourceDefinition> newResources)
 	{
 		resources = std::move(newResources);
+		frameTopologyCache.valid = false;
 		dirty = true;
 	}
 
 	void SystemScheduler::SetMutationFlushPoints(std::vector<MutationFlushPoint> newFlushPoints)
 	{
 		flushPoints = std::move(newFlushPoints);
+		frameTopologyCache.valid = false;
 		dirty = true;
 	}
 
@@ -530,6 +537,7 @@ namespace TerraEngine::Scheduling {
 			NormalizeDeclaration(system, std::move(declaration)),
 			systems.size()
 		});
+		frameTopologyCache.valid = false;
 		dirty = true;
 	}
 
@@ -681,6 +689,7 @@ namespace TerraEngine::Scheduling {
 			registeredSystem.stableWorkloadDescriptors = current;
 			for (FrameWorkloadDeclaration& cached : registeredSystem.stableWorkloadDescriptors)
 			{
+				cached.stableDescriptorGeneration = registeredSystem.stableDescriptorGeneration;
 				cached.stableDescriptorGeneration = registeredSystem.stableDescriptorGeneration;
 				// Stable scheduling state must not retain closures or immutable frame
 				// inputs beyond the frame that supplied them.
@@ -1064,6 +1073,9 @@ namespace TerraEngine::Scheduling {
 		if (dirty)
 		{
 			BuildSchedule();
+			// Phase/resource/flush changes can alter dependency meaning even when a
+			// descriptor retains the same public identity.
+			frameTopologyCache.valid = false;
 		}
 
 		std::vector<FrameWorkloadDeclaration> workloads;
@@ -1181,6 +1193,49 @@ namespace TerraEngine::Scheduling {
 				appendFlushWorkload(point, nextExecutionOrder++);
 			}
 		}
+
+		const auto topologyMatches = [this, &workloads]() {
+			if(!frameTopologyCache.valid
+				|| frameTopologyCache.entries.size() != workloads.size()
+				|| frameTopologyCache.loweredDependencies.size() != workloads.size())
+			{
+				return false;
+			}
+			for(std::size_t index = 0u; index < workloads.size(); ++index)
+			{
+				const FrameWorkloadDeclaration& workload = workloads[index];
+				const FrameTopologyCacheEntry& cached = frameTopologyCache.entries[index];
+				if(cached.stableDescriptorId != workload.stableDescriptorId
+					|| cached.phase != workload.phase
+					|| cached.ownerSystem != workload.ownerSystem
+					|| cached.stableDescriptorGeneration != workload.stableDescriptorGeneration
+					|| cached.executionOrder != workload.executionOrder
+					|| cached.active != workload.active
+					|| cached.ready != workload.ready
+					|| cached.sameFrameVisibilityRequired != workload.sameFrameVisibilityRequired)
+				{
+					return false;
+				}
+			}
+			return true;
+		};
+		if(topologyMatches())
+		{
+			for(std::size_t index = 0u; index < workloads.size(); ++index)
+			{
+				workloads[index].explicitDependencies =
+					frameTopologyCache.loweredDependencies[index];
+			}
+			++frameTopologyCache.hitCount;
+			latestSummary.frameTopologyCacheHit = true;
+			latestSummary.frameTopologyCacheHitCount = frameTopologyCache.hitCount;
+			latestSummary.frameTopologyCacheMissCount = frameTopologyCache.missCount;
+			return workloads;
+		}
+		++frameTopologyCache.missCount;
+		latestSummary.frameTopologyCacheHit = false;
+		latestSummary.frameTopologyCacheHitCount = frameTopologyCache.hitCount;
+		latestSummary.frameTopologyCacheMissCount = frameTopologyCache.missCount;
 
 		// Lower phase and system ordering into explicit descriptor edges. The
 		// numeric executionOrder remains a deterministic display/tie-break value;
@@ -1307,6 +1362,37 @@ namespace TerraEngine::Scheduling {
 				|| flushPositionFor(index) != MutationFlushPosition::FrameEnd) continue;
 			for (const std::size_t prerequisite : previousPhaseTerminals) addDependency(index, prerequisite);
 			previousPhaseTerminals = {index};
+		}
+
+		// Replace the cache only after the complete dependency graph has been
+		// lowered. A failed allocation leaves the prior exact cache untouched and
+		// affects performance only; frame correctness continues from workloads.
+		try
+		{
+			FrameTopologyCache refreshed;
+			refreshed.valid = true;
+			refreshed.hitCount = frameTopologyCache.hitCount;
+			refreshed.missCount = frameTopologyCache.missCount;
+			refreshed.entries.reserve(workloads.size());
+			refreshed.loweredDependencies.reserve(workloads.size());
+			for(const FrameWorkloadDeclaration& workload : workloads)
+			{
+				refreshed.entries.push_back({
+					workload.stableDescriptorId,
+					workload.phase,
+					workload.ownerSystem,
+					workload.stableDescriptorGeneration,
+					workload.executionOrder,
+					workload.active,
+					workload.ready,
+					workload.sameFrameVisibilityRequired});
+				refreshed.loweredDependencies.push_back(workload.explicitDependencies);
+			}
+			frameTopologyCache = std::move(refreshed);
+		}
+		catch(const std::bad_alloc&)
+		{
+			frameTopologyCache.valid = false;
 		}
 
 		return workloads;

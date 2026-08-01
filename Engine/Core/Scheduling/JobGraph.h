@@ -198,6 +198,10 @@ namespace TerraEngine::Scheduling {
 
 	struct JobGraphExecuteOptions {
 		JobGraphMutationBarrierCallback mutationBarrierCallback;
+		// Frame scheduling consumes structured telemetry and does not display the
+		// verbose graph string. Keeping formatting opt-in for that hot path avoids
+		// building the same diagnostic text twice per frame.
+		bool formatSummary = true;
 	};
 
 	struct JobGraphSchedulerLoweringInput {
@@ -237,7 +241,7 @@ namespace TerraEngine::Scheduling {
 		void RequestCancellation(std::string reason, JobGraphCancellationScope scope = JobGraphCancellationScope::Graph, DependencyHandle target = {});
 		bool IsCancellationRequested() const;
 
-		const JobGraphSummary& Validate();
+		const JobGraphSummary& Validate(bool formatSummary = true);
 		const JobGraphSummary& Execute(const JobGraphExecuteOptions& options = {});
 		const JobGraphSummary& LatestSummary() const;
 

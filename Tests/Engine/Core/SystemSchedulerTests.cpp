@@ -629,6 +629,9 @@ namespace TerraEngine::Tests {
 					"Per-frame input binding must not rebuild unchanged descriptor metadata.");
 				context.Expect(first.front().estimatedWorkItemCount == second.front().estimatedWorkItemCount,
 					"Dynamic estimates may be rebound without changing the stable descriptor generation.");
+				context.Expect(scheduler.LatestSummary().frameTopologyCacheHit
+					&& scheduler.LatestSummary().frameTopologyCacheHitCount >= 1u,
+					"An exact repeated descriptor/activation sequence should reuse its lowered topology.");
 			}
 
 			system.alternateResource = true;
@@ -637,6 +640,9 @@ namespace TerraEngine::Tests {
 			{
 				context.Expect(changed.front().stableDescriptorGeneration > second.front().stableDescriptorGeneration,
 					"Changing stable resource metadata must publish a new descriptor generation.");
+				context.Expect(!scheduler.LatestSummary().frameTopologyCacheHit
+					&& scheduler.LatestSummary().frameTopologyCacheMissCount >= 2u,
+					"A changed stable generation must rebuild rather than reuse the prior dependency topology.");
 			}
 		});
 

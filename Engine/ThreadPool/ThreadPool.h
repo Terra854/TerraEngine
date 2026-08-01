@@ -219,6 +219,19 @@ public:
 	void ConfigureTelemetrySampling(std::uint32_t dispatchInterval, std::size_t historyCapacityPerWorker);
 	void ResetTelemetry();
 	[[nodiscard]] std::shared_ptr<const ThreadPoolTelemetrySnapshot> GetTelemetrySnapshot() const;
+	// The profiler needs only cumulative worker counters at a frame boundary.
+	// Visiting the existing records under the telemetry lock avoids allocating an
+	// immutable snapshot and copying every bounded dispatch-history deque each
+	// frame. The visitor must copy values only and must never retain references.
+	template<typename Visitor>
+	void VisitTelemetryCounters(Visitor&& visitor) const
+	{
+		std::lock_guard<std::mutex> lock(telemetryMutex);
+		for(const auto& source : workerTelemetry)
+		{
+			std::invoke(visitor, source.counters);
+		}
+	}
 
 private:
 	ThreadPool() : stop(false) {}
