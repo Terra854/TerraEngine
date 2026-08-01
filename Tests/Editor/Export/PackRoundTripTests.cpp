@@ -1,11 +1,14 @@
 #include "TestHarness.h"
 
+#include "File Formats/TerraEngineMeshFile.h"
 #include "TEPAK/PackReader.h"
 #include "TEPAK/PackValidator.h"
 #include "TEPAK/PackWriter.h"
+#include "archive/ArchiveWorkflow.h"
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -46,6 +49,14 @@ namespace TerraEngine::EditorTests {
 				std::filesystem::create_directories(fullPath.parent_path());
 				std::ofstream stream(fullPath, std::ios::binary);
 				stream << contents;
+			}
+
+			void WriteBytes(const std::filesystem::path& relativePath, const std::vector<std::uint8_t>& contents) const {
+				const std::filesystem::path fullPath = AssetRoot() / relativePath;
+				std::filesystem::create_directories(fullPath.parent_path());
+				std::ofstream stream(fullPath, std::ios::binary);
+				stream.write(reinterpret_cast<const char*>(contents.data()),
+					static_cast<std::streamsize>(contents.size()));
 			}
 
 		private:
@@ -91,6 +102,51 @@ namespace TerraEngine::EditorTests {
 
 		tepak::ByteBuffer ToBytes(const std::string& text) {
 			return tepak::ByteBuffer(text.begin(), text.end());
+		}
+
+		std::vector<std::uint8_t> MakePagedTemfExtentFixture() {
+			constexpr std::uint64_t kFirstPageBytes = 40u;
+			constexpr std::uint64_t kSecondPageBytes = 56u;
+			const std::uint64_t pageTableOffset = sizeof(TemfProductionHeader);
+			const std::uint64_t blockTableOffset = pageTableOffset + 2u * sizeof(TemfPageDescriptor);
+			const std::uint64_t payloadOffset = blockTableOffset + 2u * sizeof(TemfBlockDescriptor);
+			std::vector<std::uint8_t> bytes(static_cast<std::size_t>(
+				payloadOffset + kFirstPageBytes + kSecondPageBytes), 0u);
+
+			TemfProductionHeader header{};
+			header.logicalPageSizeBytes = kTemfPageSize64KiB;
+			header.pageCount = 2u;
+			header.blockCount = 2u;
+			header.pageTableOffset = pageTableOffset;
+			header.blockTableOffset = blockTableOffset;
+			header.payloadOffset = payloadOffset;
+			header.payloadBytes = kFirstPageBytes + kSecondPageBytes;
+			header.directoryBytes = payloadOffset - sizeof(TemfProductionHeader);
+			std::memcpy(bytes.data(), &header, sizeof(header));
+
+			TemfPageDescriptor pages[2]{};
+			pages[0].logicalPageId = 3u;
+			pages[0].firstBlockIndex = 0u;
+			pages[0].blockCount = 1u;
+			pages[0].attributedStoredBytes = kFirstPageBytes;
+			pages[1].logicalPageId = 4u;
+			pages[1].firstBlockIndex = 1u;
+			pages[1].blockCount = 1u;
+			pages[1].attributedStoredBytes = kSecondPageBytes;
+			std::memcpy(bytes.data() + pageTableOffset, pages, sizeof(pages));
+
+			TemfBlockDescriptor blocks[2]{};
+			blocks[0].logicalPageId = pages[0].logicalPageId;
+			blocks[0].encodedPayloadOffset = payloadOffset;
+			blocks[0].encodedBytes = kFirstPageBytes;
+			blocks[1].logicalPageId = pages[1].logicalPageId;
+			blocks[1].encodedPayloadOffset = payloadOffset + kFirstPageBytes;
+			blocks[1].encodedBytes = kSecondPageBytes;
+			std::memcpy(bytes.data() + blockTableOffset, blocks, sizeof(blocks));
+			for(std::size_t index = static_cast<std::size_t>(payloadOffset); index < bytes.size(); ++index) {
+				bytes[index] = static_cast<std::uint8_t>((index * 17u) & 0xffu);
+			}
+			return bytes;
 		}
 
 		bool HasChild(const tepak::DirectoryListingResult& listing, const std::string& normalizedPath, tepak::PackNodeKind kind) {
@@ -182,6 +238,39 @@ namespace TerraEngine::EditorTests {
 			context.Expect(rangeBytes == ToBytes(compressedText.substr(4090U, 128U)), "ReadRange should reconstruct compressed bytes across an extent boundary.");
 			context.Expect(validation.validationStatus, "A compressed pack should pass deep validation.");
 			context.ExpectEqual(0ULL, validation.errorCount, "A compressed pack should not report validation errors.");
+		});
+
+		registry.Add("Editor.PackRoundTrip.PagedTemfUsesMetadataAndLogicalPageExtents", [](TestContext& context) {
+			TempPackWorkspace workspace;
+			const std::vector<std::uint8_t> temfBytes = MakePagedTemfExtentFixture();
+			workspace.WriteBytes("Meshes/Paged.temf", temfBytes);
+			tepak::PackagingRequest request = MakeRequest(workspace, true);
+			request.extentSizingBytes = 1024u * 1024u;
+
+			const tepak::PackWriteResult writeResult = tepak::PackWriter::Create(request);
+			const tepak::PackReader reader = tepak::PackReader::Open(workspace.PackPath());
+			const std::uint64_t payloadOffset = sizeof(TemfProductionHeader)
+				+ 2u * sizeof(TemfPageDescriptor) + 2u * sizeof(TemfBlockDescriptor);
+			context.ExpectEqual(3u, static_cast<unsigned int>(writeResult.extents.size()),
+				"A paged TEMF must use one metadata extent and one extent per logical page.");
+			context.ExpectEqual(payloadOffset, writeResult.extents[0].uncompressedSize,
+				"The first TEMF extent must stop exactly at the encoded payload.");
+			context.ExpectEqual(40ull, writeResult.extents[1].uncompressedSize,
+				"The first page must retain its authored compact byte boundary.");
+			context.ExpectEqual(56ull, writeResult.extents[2].uncompressedSize,
+				"The second page must retain its authored compact byte boundary.");
+			context.Expect(reader.ReadAll("meshes/paged.temf") == temfBytes,
+				"Page-aware extent planning must preserve the exact TEMF byte stream.");
+			context.Expect(reader.ReadRange("meshes/paged.temf", payloadOffset + 40u, 56u)
+				== tepak::ByteBuffer(temfBytes.begin() + static_cast<std::ptrdiff_t>(payloadOffset + 40u), temfBytes.end()),
+				"A logical page range must reconstruct from exactly one matching TEPAK extent.");
+		});
+
+		registry.Add("Editor.PackRoundTrip.DictionaryDecisionChargesStoredDictionaryBytes", [](TestContext& context) {
+			context.Expect(!tepak::archive::IsDictionaryStorageBeneficial(1000u, 900u, 128u),
+				"A dictionary must be rejected when its stored bytes exceed the sampled extent savings.");
+			context.Expect(tepak::archive::IsDictionaryStorageBeneficial(1000u, 700u, 128u),
+				"A dictionary may be accepted after repaying its storage and safety margin.");
 		});
 
 		registry.Add("Editor.PackRoundTrip.ExtractsSingleFileAndDirectorySubtree", [](TestContext& context) {

@@ -1131,13 +1131,9 @@ try
 	{
 		$profilerWatch = [Diagnostics.Stopwatch]::StartNew()
 		$profilerStarted = $false
+		$profilerStopRequested = $false
 		try
 		{
-			$profilerBefore = Invoke-McpTool 'profiler.capture.list'
-			$profilerBeforeIds = @(
-				$profilerBefore.data.artifacts |
-					ForEach-Object { [string]$_.artifactId }
-			)
 			# Sixteen per-frame samples are large enough to prove the buffered
 			# capture path without keeping the profiler armed for a long workload.
 			$profilerStart = Invoke-McpTool 'profiler.capture.start' ([ordered]@{
@@ -1148,6 +1144,10 @@ try
 			$profilerStarted = $true
 			Start-Sleep -Milliseconds ([Math]::Max(1000, $StreamingSettleMilliseconds))
 			$profilerStop = Invoke-McpTool 'profiler.capture.stop'
+			# Once stop is accepted, persistence owns this recording. Never issue a
+			# second stop from error cleanup because that could save the finalized
+			# document again under a second timestamp.
+			$profilerStopRequested = $true
 			$profilerStopJobId = [string]$profilerStop.data.jobId
 			if([string]::IsNullOrWhiteSpace($profilerStopJobId))
 			{
@@ -1172,20 +1172,54 @@ try
 			{
 				throw "Profiler persistence ended in state '$profilerJobState'."
 			}
-			$profilerAfter = Invoke-McpTool 'profiler.capture.list'
-			$newProfilerArtifacts = @(
-				$profilerAfter.data.artifacts |
-					Where-Object {
-						$profilerBeforeIds -notcontains [string]$_.artifactId
-					}
-			)
-			if($newProfilerArtifacts.Count -ne 1)
+			# The durable stop job identifies the exact artifact it persisted. A
+			# before/after list delta is unsafe because project-open discovery is
+			# asynchronous and may publish older captures between the two reads.
+			$profilerJobRecord = $profilerJob.data.job
+			$profilerJobResult = Get-PropertyValue $profilerJobRecord 'result'
+			$profilerArtifactId = [string](Get-PropertyValue $profilerJobResult 'artifactId')
+			if([string]::IsNullOrWhiteSpace($profilerArtifactId))
 			{
-				throw "Profiler persistence published $($newProfilerArtifacts.Count) new artifacts instead of one."
+				$profilerJobArtifacts = @(Get-PropertyValue $profilerJobRecord 'artifacts')
+				$profilerArtifactId = [string](
+					$profilerJobArtifacts |
+						Where-Object { [string]$_.kind -eq 'profiler_capture' } |
+						Select-Object -First 1 -ExpandProperty artifactId)
 			}
-			$profilerArtifact = $newProfilerArtifacts[0]
+			if([string]::IsNullOrWhiteSpace($profilerArtifactId))
+			{
+				throw 'Profiler persistence succeeded without publishing its artifact identity.'
+			}
+
+			$profilerArtifact = $null
+			$profilerArtifactDeadline = [DateTime]::UtcNow.AddSeconds(10)
+			do
+			{
+				$profilerAfter = Invoke-McpTool 'profiler.capture.list'
+				$matchingProfilerArtifacts = @(
+					$profilerAfter.data.artifacts |
+						Where-Object { [string]$_.artifactId -eq $profilerArtifactId })
+				if($matchingProfilerArtifacts.Count -gt 1)
+				{
+					throw "Profiler artifact identity '$profilerArtifactId' was published more than once."
+				}
+				if($matchingProfilerArtifacts.Count -eq 1)
+				{
+					$profilerArtifact = $matchingProfilerArtifacts[0]
+				}
+				elseif([DateTime]::UtcNow -lt $profilerArtifactDeadline)
+				{
+					Start-Sleep -Milliseconds 100
+				}
+			}
+			while($null -eq $profilerArtifact -and
+				[DateTime]::UtcNow -lt $profilerArtifactDeadline)
+			if($null -eq $profilerArtifact)
+			{
+				throw "Profiler artifact '$profilerArtifactId' did not become queryable after persistence."
+			}
 			$profilerSummary = Invoke-McpTool 'profiler.capture.summary' ([ordered]@{
-				artifactId = [string]$profilerArtifact.artifactId
+				artifactId = $profilerArtifactId
 			})
 			$profilerFrameCount = [UInt64]$profilerSummary.data.summary.frameCount
 			if($profilerFrameCount -eq 0)
@@ -1193,7 +1227,7 @@ try
 				throw 'Profiler capture persisted without any completed frame samples.'
 			}
 			$profilerLoad = Invoke-McpTool 'profiler.capture.load' ([ordered]@{
-				artifactId = [string]$profilerArtifact.artifactId
+				artifactId = $profilerArtifactId
 			})
 			$profilerLoadJob = $null
 			$profilerLoadJobId = [string]$profilerLoad.data.jobId
@@ -1236,9 +1270,9 @@ try
 		}
 		catch
 		{
-			if($profilerStarted)
+			if($profilerStarted -and -not $profilerStopRequested)
 			{
-				# Best-effort cleanup; failed persistence remains unavailable.
+				# Stop only a recording that never reached the persistence request.
 				try { Invoke-McpTool 'profiler.capture.stop' | Out-Null } catch { }
 			}
 			$profilerEvidence = New-UnavailableEvidence 'profiler-open-responsiveness' $_.Exception.Message

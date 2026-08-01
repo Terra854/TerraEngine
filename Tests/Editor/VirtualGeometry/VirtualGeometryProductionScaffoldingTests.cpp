@@ -80,6 +80,31 @@ namespace TerraEngine::EditorTests
 				"Cross-route comparisons must preserve candidate route provenance.");
 		});
 
+		registry.Add("VirtualGeometry.Editor.Production.LiveHarnessUsesDurableProfilerArtifactIdentity", [](TestContext& context)
+		{
+			const std::string harnessSource = ReadProductionFile(
+				"Tools/VirtualGeometry/CaptureVirtualGeometryLiveVisual.ps1");
+			const std::string physicsHarnessSource = ReadProductionFile(
+				"Tools/Physics/RunInstalledEditorPhysicsStress.ps1");
+			const std::string automationSource = ReadProductionFile(
+				"Editor/TerraEngine-Editor/Automation/EditorAutomationService.cpp");
+			ExpectContains(context, harnessSource,
+				"$profilerArtifactId = [string](Get-PropertyValue $profilerJobResult 'artifactId')",
+				"The live harness must select the artifact identity returned by the durable stop job.");
+			ExpectContains(context, harnessSource,
+				"$profilerStarted -and -not $profilerStopRequested",
+				"Error cleanup must not stop and persist an already-finalized capture again.");
+			context.Expect(
+				harnessSource.find("$profilerBeforeIds -notcontains") == std::string::npos,
+				"The live harness must not infer artifact identity from an asynchronous list delta.");
+			ExpectContains(context, physicsHarnessSource,
+				"$_.artifactId -eq $profilerCaptureArtifactId",
+				"The installed physics harness must resolve the exact durable profiler artifact.");
+			ExpectContains(context, automationSource,
+				"Profiler capture is not recording or paused.",
+				"Profiler automation must reject a second stop after finalization begins.");
+		});
+
 		registry.Add("VirtualGeometry.Editor.Production.InstallProducersListRequiredArtifacts", [](TestContext& context)
 		{
 			const std::string rootCmake = ReadProductionFile("CMakeLists.txt");

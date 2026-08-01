@@ -11,6 +11,7 @@
 #include <cctype>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <string>
 
 #include "Core/Logger/Logger.h"
@@ -18,6 +19,7 @@
 #include "File Formats/TerraEngineMeshFile.h"
 #include "Resource/ResourceStreaming.h"
 #include "Resource/VirtualGeometryCodec.h"
+#include "Runtime/ContentMount/ContentMount.h"
 
 namespace
 {
@@ -811,29 +813,47 @@ namespace
 
 		auto productionMesh = std::make_unique<Mesh>();
 		productionMesh->sourcePath = resolvedPath.string();
+		productionMesh->sourceLogicalPath = ContentMount::NormalizeLogicalPath(
+			resolvedPath.lexically_relative(manager.GetAssetRoot()).generic_string());
 		productionMesh->storage = fileBytes;
 		struct DecodedProductionBlock
 		{
 			TemfBlockDescriptor descriptor{};
-			std::vector<std::uint8_t> bytes;
+			// Blocks decode only when a runtime stream actually consumes them. The
+			// validated encoded range remains in Mesh::storage until that point, so
+			// optional or future streams do not add load-time decode work.
+			std::optional<std::vector<std::uint8_t>> bytes;
 		};
 		std::vector<DecodedProductionBlock> decodedBlocks;
 		std::size_t decodedStorageBytes = 0u;
 		for (const TemfBlockDescriptor& descriptor : validated.directory.blocks)
 		{
-			const auto encoded = std::span<const std::uint8_t>(productionMesh->storage).subspan(
-				static_cast<std::size_t>(descriptor.encodedPayloadOffset), static_cast<std::size_t>(descriptor.encodedBytes));
-			auto decoded = TerraEngine::Resource::DecodeTemfProductionBlock(
-				{ descriptor, encoded, validated.directory.quantizationDomains, productionLimits.availableCapabilities }, productionLimits);
-			if (!decoded.IsComplete())
+			if (descriptor.decodedBytes > std::numeric_limits<std::size_t>::max() - decodedStorageBytes)
 			{
-				TERRAENGINE_LOG(LogLevel::Error, "TEMFPRD1 block decode failed for " << resolvedPath << ": " << decoded.diagnostic);
+				TERRAENGINE_LOG(LogLevel::Error, "TEMFPRD1 recook required for " << resolvedPath << ": decoded block storage exceeds process limits.");
 				return nullptr;
 			}
-			decodedStorageBytes += decoded.bytes.size();
-			decodedBlocks.push_back({ descriptor, std::move(decoded.bytes) });
+			decodedStorageBytes += static_cast<std::size_t>(descriptor.decodedBytes);
+			decodedBlocks.push_back({ descriptor, std::nullopt });
 		}
 		productionMesh->decodedProductionStorage.reserve(decodedStorageBytes);
+		const auto decodeBlock = [&](DecodedProductionBlock& block) {
+			if (block.bytes.has_value()) return true;
+			const auto encoded = std::span<const std::uint8_t>(productionMesh->storage).subspan(
+				static_cast<std::size_t>(block.descriptor.encodedPayloadOffset),
+				static_cast<std::size_t>(block.descriptor.encodedBytes));
+			auto decoded = TerraEngine::Resource::DecodeTemfProductionBlock(
+				{ block.descriptor, encoded, validated.directory.quantizationDomains,
+					productionLimits.availableCapabilities }, productionLimits);
+			if (!decoded.IsComplete())
+			{
+				TERRAENGINE_LOG(LogLevel::Error, "TEMFPRD1 block decode failed for "
+					<< resolvedPath << ": " << decoded.diagnostic);
+				return false;
+			}
+			block.bytes = std::move(decoded.bytes);
+			return true;
+		};
 		std::vector<std::pair<std::uint64_t, std::span<const std::uint8_t>>> decodedStreamCache;
 		const auto copyStream = [&](TemfStreamKind kind, std::uint64_t metadataSubKind = 0u) {
 			const std::uint64_t cacheKey = (static_cast<std::uint64_t>(kind) << 56u) | metadataSubKind;
@@ -845,13 +865,17 @@ namespace
 				}
 			}
 			const std::size_t begin = productionMesh->decodedProductionStorage.size();
-			for (const DecodedProductionBlock& block : decodedBlocks)
+			for (DecodedProductionBlock& block : decodedBlocks)
 			{
 				if (block.descriptor.streamKind == static_cast<std::uint16_t>(kind)
 					&& block.descriptor.attributeMask == metadataSubKind)
 				{
+					if (!decodeBlock(block))
+					{
+						return std::span<const std::uint8_t>{};
+					}
 					productionMesh->decodedProductionStorage.insert(productionMesh->decodedProductionStorage.end(),
-						block.bytes.begin(), block.bytes.end());
+						block.bytes->begin(), block.bytes->end());
 				}
 			}
 			const std::span<const std::uint8_t> copied = std::span<const std::uint8_t>(productionMesh->decodedProductionStorage).subspan(
@@ -1261,8 +1285,8 @@ namespace
 					return nullptr;
 				}
 			}
-			std::vector<const DecodedProductionBlock*> pageBlocks;
-			for (const DecodedProductionBlock& block : decodedBlocks)
+			std::vector<DecodedProductionBlock*> pageBlocks;
+			for (DecodedProductionBlock& block : decodedBlocks)
 			{
 				if (block.descriptor.streamKind == static_cast<std::uint16_t>(TemfStreamKind::ProceduralUpdate)
 					&& block.descriptor.attributeMask == kTemfMetadataDeformableDemandedPageBlobs)
@@ -1280,30 +1304,35 @@ namespace
 			for (std::size_t index = 0u; index < pageBlocks.size(); ++index)
 			{
 				const TemfDeformableDemandedPageBlob& record = productionMesh->deformableDemandedPageBlobs[index];
-				const DecodedProductionBlock& block = *pageBlocks[index];
+				DecodedProductionBlock& block = *pageBlocks[index];
+				if (!decodeBlock(block))
+				{
+					return nullptr;
+				}
+				const std::vector<std::uint8_t>& blockBytes = *block.bytes;
 				if (record.blobId != index + 1u || record.pageId != productionMesh->deformableDemandedPageEntries[index].pageId
 					|| record.contentGeneration != productionMesh->deformableDemandedPageEntries[index].contentGeneration
 					|| record.decodedIntegrity != block.descriptor.decodedIntegrity
-					|| record.decodedBytes != block.bytes.size()
-					|| block.bytes.size() < sizeof(TemfDeformableDemandedPagePayload))
+					|| record.decodedBytes != blockBytes.size()
+					|| blockBytes.size() < sizeof(TemfDeformableDemandedPagePayload))
 				{
 					TERRAENGINE_LOG(LogLevel::Error, "TEMFPRD1 recook required for " << resolvedPath << ": demanded-page blob integrity is invalid.");
 					return nullptr;
 				}
 				TemfDeformableDemandedPagePayload payload{};
-				std::memcpy(&payload, block.bytes.data(), sizeof(payload));
+				std::memcpy(&payload, blockBytes.data(), sizeof(payload));
 				const std::size_t sectionTableBytes = static_cast<std::size_t>(payload.sectionCount)
 					* sizeof(TemfDeformablePageSection);
 				if (payload.sectionCount == 0u
 					|| payload.sectionTableOffset != sizeof(TemfDeformableDemandedPagePayload)
-					|| payload.decodedByteSize != block.bytes.size()
-					|| sectionTableBytes > block.bytes.size() - payload.sectionTableOffset)
+					|| payload.decodedByteSize != blockBytes.size()
+					|| sectionTableBytes > blockBytes.size() - payload.sectionTableOffset)
 				{
 					TERRAENGINE_LOG(LogLevel::Error, "TEMFPRD1 recook required for " << resolvedPath << ": demanded-page section table is invalid.");
 					return nullptr;
 				}
 				std::vector<TemfDeformablePageSection> sections(payload.sectionCount);
-				std::memcpy(sections.data(), block.bytes.data() + payload.sectionTableOffset, sectionTableBytes);
+				std::memcpy(sections.data(), blockBytes.data() + payload.sectionTableOffset, sectionTableBytes);
 				std::uint32_t requiredSections = 0u;
 				const std::size_t dataBegin = payload.sectionTableOffset + sectionTableBytes;
 				std::vector<std::pair<std::uint32_t, std::uint32_t>> sectionRanges;
@@ -1315,8 +1344,8 @@ namespace
 						|| section.elementCount == 0u || section.elementStride == 0u
 						|| section.byteSize != static_cast<std::uint64_t>(section.elementCount) * section.elementStride
 						|| section.relativeByteOffset < dataBegin
-						|| section.relativeByteOffset > block.bytes.size()
-						|| section.byteSize > block.bytes.size() - section.relativeByteOffset)
+						|| section.relativeByteOffset > blockBytes.size()
+						|| section.byteSize > blockBytes.size() - section.relativeByteOffset)
 					{
 						TERRAENGINE_LOG(LogLevel::Error, "TEMFPRD1 recook required for " << resolvedPath << ": demanded-page section range is invalid.");
 						return nullptr;
@@ -1336,7 +1365,7 @@ namespace
 					}
 					expectedSectionOffset = range.second;
 				}
-				if (expectedSectionOffset != block.bytes.size())
+				if (expectedSectionOffset != blockBytes.size())
 				{
 					TERRAENGINE_LOG(LogLevel::Error, "TEMFPRD1 recook required for " << resolvedPath << ": demanded-page section coverage is incomplete.");
 					return nullptr;
@@ -1360,7 +1389,7 @@ namespace
 					return nullptr;
 				}
 				productionMesh->deformableDemandedPageSections.push_back(std::move(sections));
-				productionMesh->deformableDemandedPagePayloads.push_back(block.bytes);
+				productionMesh->deformableDemandedPagePayloads.push_back(blockBytes);
 			}
 			if (demandedPagesRequired)
 			{

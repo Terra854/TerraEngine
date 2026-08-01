@@ -57,6 +57,13 @@ struct ExtractRequest final {
 
 // Discovers files and the logical directory tree that will feed the pack plan.
 model::PackagingInventory BuildPackagingInventory(const PackagingRequest& request);
+// A shared dictionary must repay both its compressed extents and the bytes used
+// to store the dictionary itself. This helper is public to focused tests so the
+// archive-wide size decision cannot regress to an extent-only comparison.
+bool IsDictionaryStorageBeneficial(
+	std::uint64_t bytesWithoutDictionary,
+	std::uint64_t bytesWithDictionary,
+	std::uint64_t dictionaryBytes);
 // Converts discovered files into immutable metadata tables and extent plans.
 model::PackPlan BuildPackPlan(const PackagingRequest& request, const model::PackagingInventory& inventory, const codec::CodecProvider& codecProvider);
 

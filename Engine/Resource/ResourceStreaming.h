@@ -311,6 +311,11 @@ namespace TerraEngine::Resource
 		std::uint64_t expectedHash = 0u;
 		std::uint64_t requestGeneration = 0u;
 		std::shared_ptr<const std::atomic_bool> cancellation;
+		// Packaged runtimes identify the same cooked file by its normalized TEPAK
+		// path. Keeping both paths lets editor jobs retain fast loose-file reads
+		// while export jobs use the mounted archive as their sole byte authority.
+		std::string mountedLogicalPath;
+		bool mountedContentRequired = false;
 	};
 
 	struct VirtualGeometryStaticPageReadCompletion

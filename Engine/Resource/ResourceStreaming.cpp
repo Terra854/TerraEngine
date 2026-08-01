@@ -5,6 +5,7 @@
 // candidate lists on worker tasks and feed compact needs back to the manager.
 
 #include "Resource/ResourceStreaming.h"
+#include "Runtime/ContentMount/ContentMount.h"
 
 #include <algorithm>
 #include <charconv>
@@ -315,7 +316,8 @@ namespace TerraEngine::Resource
 		VirtualGeometryStaticPageReadCompletion output;
 		output.pageId = request.pageId;
 		output.requestGeneration = request.requestGeneration;
-		if(request.path.empty() || request.pageId == kVirtualGeometryInvalidIndex
+		if((request.path.empty() && request.mountedLogicalPath.empty())
+			|| request.pageId == kVirtualGeometryInvalidIndex
 			|| request.byteSize == 0u || request.expectedHash == 0u
 			|| request.requestGeneration == 0u)
 		{
@@ -339,32 +341,63 @@ namespace TerraEngine::Resource
 			output.diagnostic = "Static page range cannot fit in process memory.";
 			return output;
 		}
-		std::ifstream stream(request.path, std::ios::binary);
-		if(!stream)
+		// A mounted archive is authoritative when it contains this logical file.
+		// Editor sessions may still fall back to the loose artifact when their
+		// diagnostic mount does not contain the iterated asset; export runtimes
+		// explicitly disable that fallback through mountedContentRequired.
+		bool readFromMount = false;
+		if(!request.mountedLogicalPath.empty() && ContentMount::Instance().IsMounted())
+		{
+			const MountedContentReadResult mounted = ContentMount::Instance().ReadRangeChecked(
+				request.mountedLogicalPath, request.byteOffset, request.byteSize, request.byteSize);
+			if(mounted.Succeeded())
+			{
+				output.bytes = mounted.bytes;
+				readFromMount = true;
+			}
+			else if(request.mountedContentRequired || mounted.status != ContentReadStatus::NotFound)
+			{
+				output.status = VirtualGeometryStaticPageReadStatus::IoFailure;
+				output.diagnostic = "Mounted TEMF page range is missing, rejected, or corrupt.";
+				return output;
+			}
+		}
+		else if(request.mountedContentRequired)
 		{
 			output.status = VirtualGeometryStaticPageReadStatus::IoFailure;
-			output.diagnostic = "Static page source file could not be opened.";
+			output.diagnostic = "Packaged TEMF page read requires an active content mount and logical path.";
 			return output;
 		}
-		stream.seekg(0, std::ios::end);
-		const std::streamoff end = stream.tellg();
-		if(end < 0 || request.byteOffset > static_cast<std::uint64_t>(end)
-			|| request.byteSize > static_cast<std::uint64_t>(end) - request.byteOffset)
+
+		if(!readFromMount)
 		{
-			output.status = VirtualGeometryStaticPageReadStatus::IoFailure;
-			output.diagnostic = "Static page exact range exceeds the source file.";
-			return output;
-		}
-		output.bytes.resize(static_cast<std::size_t>(request.byteSize));
-		stream.clear();
-		stream.seekg(static_cast<std::streamoff>(request.byteOffset));
-		stream.read(reinterpret_cast<char*>(output.bytes.data()), static_cast<std::streamsize>(output.bytes.size()));
-		if(!stream)
-		{
-			output.bytes.clear();
-			output.status = VirtualGeometryStaticPageReadStatus::IoFailure;
-			output.diagnostic = "Static page exact-range read was incomplete.";
-			return output;
+			std::ifstream stream(request.path, std::ios::binary);
+			if(!stream)
+			{
+				output.status = VirtualGeometryStaticPageReadStatus::IoFailure;
+				output.diagnostic = "Static page source file could not be opened.";
+				return output;
+			}
+			stream.seekg(0, std::ios::end);
+			const std::streamoff end = stream.tellg();
+			if(end < 0 || request.byteOffset > static_cast<std::uint64_t>(end)
+				|| request.byteSize > static_cast<std::uint64_t>(end) - request.byteOffset)
+			{
+				output.status = VirtualGeometryStaticPageReadStatus::IoFailure;
+				output.diagnostic = "Static page exact range exceeds the source file.";
+				return output;
+			}
+			output.bytes.resize(static_cast<std::size_t>(request.byteSize));
+			stream.clear();
+			stream.seekg(static_cast<std::streamoff>(request.byteOffset));
+			stream.read(reinterpret_cast<char*>(output.bytes.data()), static_cast<std::streamsize>(output.bytes.size()));
+			if(!stream)
+			{
+				output.bytes.clear();
+				output.status = VirtualGeometryStaticPageReadStatus::IoFailure;
+				output.diagnostic = "Static page exact-range read was incomplete.";
+				return output;
+			}
 		}
 		if(request.cancellation != nullptr && request.cancellation->load())
 		{

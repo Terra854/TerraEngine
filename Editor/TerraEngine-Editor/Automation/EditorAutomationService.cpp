@@ -5902,6 +5902,18 @@ namespace TerraEngine::Editor::Automation
 			}
 			if (operation == AutomationOperation("profiler.capture.stop"))
 			{
+				const TerraEngine::Profiling::ProfilerSessionState profilerState =
+					editorContext->editorProfiler->GetState();
+				// A stop request owns one transition from live recording to durable
+				// persistence. Reject repeated or concurrent stops before they can
+				// snapshot and save the already-finalized document a second time.
+				if (profilerState != TerraEngine::Profiling::ProfilerSessionState::Recording
+					&& profilerState != TerraEngine::Profiling::ProfilerSessionState::Paused)
+					return BuildError(requestId, ErrorCategory::Unavailable,
+						"Profiler capture is not recording or paused.");
+				if (!activeProfilerCaptureJobId.empty())
+					return BuildError(requestId, ErrorCategory::Unavailable,
+						"Profiler capture persistence is already active.");
 				profilerArtifactIdsBeforeStop.clear();
 				for (const EditorProfilerCaptureArtifact& artifact : editorContext->editorProfiler->GetAutomationCaptureList())
 					profilerArtifactIdsBeforeStop.insert(artifact.artifactId);

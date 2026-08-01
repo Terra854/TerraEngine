@@ -1504,10 +1504,7 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 		Complete-Stage -Name "managed-reload-automationCustomGravity"
 	}
 	$stepPublicationSamples = [System.Collections.Generic.List[object]]::new()
-	$profilerBeforeIds = @()
 	if (-not $SkipProfilerCapture) {
-		$profilerBefore = Invoke-Tool -Name "profiler.capture.list"
-		$profilerBeforeIds = @($profilerBefore.data.artifacts | ForEach-Object { [string]$_.artifactId })
 		$profilerStartArguments = [ordered]@{ correlationId = "installed-physics-stress-baseline" }
 		if ($RunProfilerCaptureChecks) {
 			# New installed builds accept additive v2 controls while legacy clients
@@ -1685,9 +1682,21 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 			Start-Sleep -Milliseconds 100
 		}
 		if ([string]$profilerCaptureJob.state -ne "succeeded") { throw "Profiler capture persistence job ended in state '$($profilerCaptureJob.state)'." }
+		$profilerCaptureJobResult = Get-PropertyValue -Object $profilerCaptureJob -Name "result"
+		$profilerCaptureArtifactId = [string](Get-PropertyValue -Object $profilerCaptureJobResult -Name "artifactId")
+		if ([string]::IsNullOrWhiteSpace($profilerCaptureArtifactId)) {
+			$profilerCaptureJobArtifacts = @(Get-PropertyValue -Object $profilerCaptureJob -Name "artifacts")
+			$profilerCaptureArtifactId = [string](
+				$profilerCaptureJobArtifacts |
+					Where-Object { [string](Get-PropertyValue -Object $_ -Name "kind") -eq "profiler_capture" } |
+					Select-Object -First 1 -ExpandProperty artifactId)
+		}
+		if ([string]::IsNullOrWhiteSpace($profilerCaptureArtifactId)) {
+			throw "Profiler capture persistence succeeded without publishing its artifact identity."
+		}
 		$profilerAfter = Invoke-Tool -Name "profiler.capture.list"
-		$profilerCaptureArtifact = @($profilerAfter.data.artifacts | Where-Object { $profilerBeforeIds -notcontains [string]$_.artifactId } | Select-Object -First 1)
-		if ($profilerCaptureArtifact.Count -ne 1) { throw "Profiler capture stop succeeded but did not publish exactly one new artifact." }
+		$profilerCaptureArtifact = @($profilerAfter.data.artifacts | Where-Object { [string]$_.artifactId -eq $profilerCaptureArtifactId })
+		if ($profilerCaptureArtifact.Count -ne 1) { throw "Profiler capture stop succeeded but its exact artifact identity was not listed once." }
 		$profilerCaptureArtifact = $profilerCaptureArtifact[0]
 		$profilerCaptureSummary = Invoke-Tool -Name "profiler.capture.summary" -Arguments ([ordered]@{ artifactId = [string]$profilerCaptureArtifact.artifactId })
 		$profilerCaptureSucceeded = $true

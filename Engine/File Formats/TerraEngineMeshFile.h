@@ -941,6 +941,9 @@ struct Mesh
 	// The loader records the immutable cooked-file location so streaming can
 	// issue exact compact-page reads without reopening ResourceManager state.
 	std::string sourcePath;
+	// Export archives address the same file relative to the mounted content
+	// root. This copied lookup key avoids deriving an archive path on workers.
+	std::string sourceLogicalPath;
 	std::vector<std::uint8_t> storage;
 	// Decoded canonical blocks own the byte spans consumed by the renderer.
 	std::vector<std::uint8_t> decodedProductionStorage;

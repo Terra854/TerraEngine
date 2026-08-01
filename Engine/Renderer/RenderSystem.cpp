@@ -7954,11 +7954,16 @@ void RenderSystem::Update(float deltaTime)
 								storedTotal += block.encodedBytes;
 								decodedTotal += block.decodedBytes;
 								expectedNextPayloadOffset = block.encodedPayloadOffset + block.encodedBytes;
-								feedback.exactBlockReads.push_back({
-									{ mesh->sourcePath, request.pageId, block.encodedPayloadOffset,
-										block.encodedBytes, block.encodedIntegrity, 0u, nullptr },
-									block
-								});
+								TerraEngine::Resource::VirtualGeometryStaticPageReadRequest pageRead{};
+								pageRead.path = mesh->sourcePath;
+								pageRead.pageId = request.pageId;
+								pageRead.byteOffset = block.encodedPayloadOffset;
+								pageRead.byteSize = block.encodedBytes;
+								pageRead.expectedHash = block.encodedIntegrity;
+								pageRead.mountedLogicalPath = mesh->sourceLogicalPath;
+								pageRead.mountedContentRequired =
+									ResourceManager::Instance().IsExportRuntime();
+								feedback.exactBlockReads.push_back({ std::move(pageRead), block });
 							}
 							if(!pageRangesValid || storedTotal != page.attributedStoredBytes
 								|| decodedTotal != page.decodedBytes)
