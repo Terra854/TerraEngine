@@ -108,4 +108,7 @@ Focused coverage lives in:
 - `Tests/Editor/Animation/AnimationExportTests.cpp`; and
 - `Tests/Engine/Animation/AnimationRuntimeParityTests.cpp`.
 
-The installed Animation Export Validation workflow uses `Tools/Animation/RunAnimationValidationGate.ps1` and stores evidence under `out/validation/animation/animation-export-validation/`. It must exercise eviction/reactivation, reload success and failure, project reload, TEPAK export/remount, installed rendered and headless startup, managed ABI loading, and camera evidence. Correctness/readiness evidence may be collected without timing; performance acceptance is deferred to the final valid-performance environment.
+Use the focused CTest coverage above together with the installed export runtime
+baseline in `Tools/ExportRuntimeBaseline/RunBaseline.ps1`. The combined checks
+exercise eviction/reactivation, reload success and failure, TEPAK export and
+remount, installed rendered and headless startup, and managed ABI loading.

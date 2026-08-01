@@ -314,7 +314,7 @@ namespace TerraEngine::Animation {
 			case AnimationCommandKind::SetParameter:
 			case AnimationCommandKind::FireTrigger:
 				// Controller parameters are captured now but become meaningful when the
-				// immutable controller evaluator lands in the next user-story phase.
+				// immutable controller evaluator is completed in future controller work.
 				return AnimationStatus::Ok;
 			default: return AnimationStatus::InvalidArgument;
 			}

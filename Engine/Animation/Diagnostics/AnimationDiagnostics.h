@@ -16,11 +16,11 @@
 #include <vector>
 
 namespace TerraEngine::Animation {
-	inline constexpr std::string_view kAnimationFeatureIdentity = "043-complete-animation-system";
+	inline constexpr std::string_view kAnimationFeatureIdentity = "animation";
 	inline constexpr std::string_view kAnimationBaselineSourceCommit = "6d12e3a99d7c0d41899fc96fa18b02b61e5a0aa9";
 	inline constexpr std::string_view kAnimationBaselineManifestSha256 = "cf4375934729e1afa745d9446faacfc1a7ba53a6d7db79b3d1e0e8164a5ced8f";
 	inline constexpr std::string_view kAnimationBaselineEvidenceSha256 = "4020949bd881f94f0395853e947e4512fb587c7bdd1ce5592317e75c01b5fcb5";
-	inline constexpr std::string_view kAnimationPerformanceWorkloadsSha256 = "d99199c796368fa7706af363985ce3e0b75a71fa5fa2c29238bce65343e943a6";
+	inline constexpr std::string_view kAnimationPerformanceWorkloadsSha256 = "847c2e6f98e48be816da8907961924420c32bf25dff7c72afc88fafbd765f390";
 
 	// Capture identity travels with every snapshot so a saved profiler result can
 	// prove which immutable reference and threshold manifest it was compared to.

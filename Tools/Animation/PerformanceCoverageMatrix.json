@@ -1,12 +1,12 @@
 {
 	"schemaVersion": 1,
-	"feature": "complete-animation-system",
-	"task": "animation-validation-us-extend-final-only-tools-animation-compareanimationperformance-ps-matrix-cover",
-	"comparisonTask": "animation-validation-invoke-final-only-t-t-comparator-every-prepared-control-including",
+	"feature": "animation",
+	"task": "animation-performance-coverage",
+	"comparisonTask": "animation-performance-comparison",
 	"finalPhaseOnly": true,
 	"performanceWorkloads": {
 		"path": "Tools/Animation/PerformanceWorkloads.json",
-		"sha256": "d99199c796368fa7706af363985ce3e0b75a71fa5fa2c29238bce65343e943a6"
+		"sha256": "847c2e6f98e48be816da8907961924420c32bf25dff7c72afc88fafbd765f390"
 	},
 	"lockedBaseline": {
 		"path": "out/validation/animation/baseline/locked-baseline.json",

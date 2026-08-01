@@ -1,12 +1,12 @@
 {
 	"schemaVersion": 1,
-	"feature": "complete-animation-system",
-	"task": "animation-validation-later-performance-related-tasks-may-construct-comparators-fixtures-instrumentation-schemas",
+	"feature": "animation",
+	"task": "animation-performance-evidence",
 	"description": "Source-controlled performance identities, controls, thresholds, and frozen animation reference profiles. Candidate evidence may reference these values but may not replace or override them.",
 	"authority": {
 		"runtimeContract": {
 			"path": "Docs/Animation/README.md",
-			"sha256": "a2dd5eee95aa1590a927094006d120d2d67f39d2166605f27902dde85dc3566a"
+			"sha256": "e9e231c9c9b9e6f22868cec47146436e9a8aac90802e9d1d26b6cfeee88f98c2"
 		},
 		"lockedBaseline": {
 			"path": "out/validation/animation/baseline/locked-baseline.json",
@@ -48,12 +48,12 @@
 	},
 	"candidateTemplate": {
 		"reference": {
-			"feature": "complete-animation-system",
+			"feature": "animation",
 			"baselineState": "locked",
 			"baselineSourceCommit": "6d12e3a99d7c0d41899fc96fa18b02b61e5a0aa9",
 			"baselineSha256": "cf4375934729e1afa745d9446faacfc1a7ba53a6d7db79b3d1e0e8164a5ced8f",
 			"baselineEvidenceAggregateSha256": "4020949bd881f94f0395853e947e4512fb587c7bdd1ce5592317e75c01b5fcb5",
-			"runtimeContractSha256": "a2dd5eee95aa1590a927094006d120d2d67f39d2166605f27902dde85dc3566a",
+			"runtimeContractSha256": "e9e231c9c9b9e6f22868cec47146436e9a8aac90802e9d1d26b6cfeee88f98c2",
 			"rendererWorkloadManifestSha256": "3230959fab8c628d9396bd31a7923672c3a1ebf5b51ff4998066a8f10c2b3e4c"
 		},
 		"comparisonIdentity": {

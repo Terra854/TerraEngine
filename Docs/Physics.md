@@ -181,20 +181,9 @@ physics SDK for the RelWithDebInfo gate.
 
 ### Sanitizer support on Windows
 
-The Windows/MSVC project does not provide a full-engine ThreadSanitizer lane.
-The supported sanitizer evidence is the repository's provider-only Jolt spike:
-
-```powershell
-pwsh -NoProfile -File Tools/Physics/BackendSpike/RunBackendSpike.ps1 `
-  -Candidate Jolt56 `
-  -Jolt56Source out/physics-spike/sources/JoltPhysics-5.6.0 `
-  -WorkRoot out/physics-backend-spike `
-  -RunId jolt56-windows-asan `
-  -Configuration ReleaseASAN `
-  -FixtureRepeats 3
-```
-
-That lane instruments the provider fixture only; TerraEngine engine/editor,
-Vulkan presentation, managed NativeAOT, and full lifecycle CTest binaries are
-excluded. The orchestrator must record the exact toolchain, outcome, and any
-unsupported lanes in `Docs/Physics/evidence/sanitizer-validation.md`.
+The Windows/MSVC project does not currently provide a supported full-engine
+ThreadSanitizer or AddressSanitizer lane. Do not infer engine coverage from a
+third-party provider build. If sanitizer validation is introduced, it must be a
+maintained CMake/CTest configuration that exercises TerraEngine's engine,
+editor, renderer, managed, and lifecycle boundaries and documents its exact
+exclusions.

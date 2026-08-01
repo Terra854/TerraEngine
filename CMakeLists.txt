@@ -2132,6 +2132,11 @@ endif()
 	# shipped as inspectable command-line tools. They still require
 	# the inputs named by each command, but no validation script should disappear
 	# merely because the editor is being exercised from its installed tree.
+	# Replace the directory before copying so renamed or retired validation files
+	# cannot survive an incremental install and leak obsolete planning identities.
+	install(CODE
+		"file(REMOVE_RECURSE \"${ENGINE_INSTALL_DESTINATION}/Tools/Animation\")"
+	)
 	install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Tools/Animation/"
 		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Tools/Animation"
 		FILES_MATCHING PATTERN "*.ps1" PATTERN "*.json"

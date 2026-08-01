@@ -30,7 +30,7 @@ namespace TerraEngine::Tests {
 	namespace {
 		inline constexpr double kMaximumCollapsedDiagnosticsMedianOverheadPercent = 2.0;
 		inline constexpr std::string_view kStressManifestSha256 =
-			"40e3a8b7eb447ad3e3029a81cbc7383b15f92045c4f04ec69f13a35e3c44296a";
+			"a1e5cc3dafa996014b753a0fe9bc39b9299efc0d367ec9c8d134e5768fb7becf";
 
 		std::filesystem::path SourcePath(std::string_view relativePath)
 		{
@@ -164,7 +164,7 @@ namespace TerraEngine::Tests {
 			context.Expect(performance.at("sourceControlledThresholds").at("animationAcceptance")
 				.at("collapsedDiagnosticsMaximumMedianOverheadPercent") == 2,
 				"The source-controlled collapsed-diagnostics threshold must remain exactly two percent.");
-			context.Expect(stress.at("performanceAcceptancePhase") == 18
+			context.Expect(stress.at("performanceAcceptanceMode") == "release"
 				&& stress.at("performanceExecutionDeferred").get<bool>(),
 				"Diagnostics measurements must remain explicitly deferred to final ImplementationStage.");
 			context.Expect(crowd != stress.at("workloads").end()

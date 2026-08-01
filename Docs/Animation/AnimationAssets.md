@@ -118,4 +118,7 @@ cmake --build --preset RelWithDebInfo --target install
 
 All dependencies come from the repository; configuring, building, testing, and installing do not download animation models or require a global package manager. The install step is mandatory because editor/runtime validation uses installed binaries and assets.
 
-These commands are correctness checks. animation production validation intentionally runs all candidate benchmarks, workflow timing, diagnostics-overhead measurements, performance comparisons, and acceptance decisions only in final tasks animation-validation-runs-every-accumulated-feature-workflow-benchmark-t-runs-every-unrelated, animation-validation-invoke-final-only-t-t-comparator-every-prepared-control-including, and animation-validation-repair-capable-final-checks-t-t-are-clean-final-blocking. That schedule defers measurement; it does not waive any performance threshold.
+These commands are correctness checks. Candidate benchmarks, workflow timing,
+diagnostics-overhead measurements, and performance comparisons require a
+separate measured release run. Deferring measurement does not waive any
+performance threshold.

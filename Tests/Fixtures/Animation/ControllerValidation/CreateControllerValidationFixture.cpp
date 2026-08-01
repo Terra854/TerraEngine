@@ -1,4 +1,4 @@
-// Controller ValidationCreateControllerFixture.cpp - Produce the checked Controller Validation controller assets.
+// CreateControllerValidationFixture.cpp - Reproduce the checked controller and mask assets.
 //
 // This small fixture producer intentionally calls the same serializers and graph
 // compiler as the editor.  It keeps the binary test inputs reproducible without
@@ -94,7 +94,7 @@ namespace {
 
 int main(int argumentCount, char** arguments) {
 	if(argumentCount != 2) {
-		std::cerr << "Usage: Controller ValidationCreateControllerFixture <fixture-root>\n";
+		std::cerr << "Usage: CreateControllerValidationFixture <fixture-root>\n";
 		return 2;
 	}
 	const std::filesystem::path fixtureRoot = arguments[1];

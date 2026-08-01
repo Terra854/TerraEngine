@@ -41,8 +41,8 @@ $script:RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "../..
 $script:OutRoot = [System.IO.Path]::GetFullPath((Join-Path $script:RepoRoot "out"))
 $script:BaselineRoot = [System.IO.Path]::GetFullPath((Join-Path $script:RepoRoot "out/validation/animation/baseline"))
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-$script:ExpectedManifestSha256 = "40e3a8b7eb447ad3e3029a81cbc7383b15f92045c4f04ec69f13a35e3c44296a"
-$script:ExpectedResultSchemaSha256 = "fa1b6548872e9ca70a8e1d5aeef9e810d82cc8bcd45e386c2a29744df8991659"
+$script:ExpectedManifestSha256 = "a1e5cc3dafa996014b753a0fe9bc39b9299efc0d367ec9c8d134e5768fb7becf"
+$script:ExpectedResultSchemaSha256 = "daa3318a1b2b105ee05a740135ff0724fb1cec46a2467c414f7859a866b87514"
 $script:PrivateGrowthLimitBytes = [UInt64]268435456
 $script:GpuGrowthLimitBytes = [UInt64]134217728
 $script:HandleGrowthLimit = [UInt64]64
@@ -285,11 +285,11 @@ function Invoke-RunnerSlice {
 
 $resolvedManifest = Resolve-RepoPath $ManifestPath
 $resolvedSchema = Resolve-RepoPath $ResultSchemaPath
-if ((Get-Sha256 $resolvedManifest) -cne $script:ExpectedManifestSha256) { throw "The AnimationValidationUsHashLockedFrozenCharacterCrowdComplexHeroModeChurn stress manifest identity changed." }
+if ((Get-Sha256 $resolvedManifest) -cne $script:ExpectedManifestSha256) { throw "The animation stress manifest identity changed." }
 if ((Get-Sha256 $resolvedSchema) -cne $script:ExpectedResultSchemaSha256) { throw "The soak result schema identity changed." }
 $manifest = Read-Json $resolvedManifest
 $schema = Read-Json $resolvedSchema
-if ($manifest.performanceAcceptancePhase -ne 18 -or -not $manifest.performanceExecutionDeferred -or
+if ($manifest.performanceAcceptanceMode -ne "release" -or -not $manifest.performanceExecutionDeferred -or
 	$schema.properties.schemaVersion.const -ne 1 -or $schema.properties.resources.properties.retainedHistoryRecords.maximum -ne 36000) {
 	throw "The source-controlled soak contract is malformed or weakened."
 }

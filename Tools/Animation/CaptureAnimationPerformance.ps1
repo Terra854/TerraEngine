@@ -3,7 +3,7 @@
 # This collector measures the current installed tree only. It never reads a prior
 # candidate as input and it refuses to synthesize a measurement that a workload
 # did not publish. The result is therefore suitable as the candidate input to
-# CompareAnimationPerformance.ps1 and RunAnimationValidationGate.ps1.
+# CompareAnimationPerformance.ps1 and release validation workflows.
 
 [CmdletBinding()]
 param(
@@ -66,7 +66,7 @@ function Get-TextSha256 {
 
 function Get-BaselineEvidenceState {
 	param([Parameter(Mandatory = $true)][string]$BaselineRoot)
-	# Match the AnimationValidationIsCompletedImmutablePreFeatureReferenceCaptureRemainsSolePre lock selection exactly: generated project trees and the lock
+	# Match the immutable reference baseline selection exactly: generated project trees and the lock
 	# file itself are excluded, while every other evidence byte is re-hashed.
 	$rootPrefix = [System.IO.Path]::GetFullPath($BaselineRoot).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
 	$lines = [System.Collections.Generic.List[string]]::new()
@@ -492,7 +492,7 @@ try {
 	$evidenceLock = Read-Json $evidenceLockPath
 	$baselineEvidence = Get-BaselineEvidenceState -BaselineRoot $baselineRoot
 	$expectedAggregate = [string]$config.authority.lockedBaseline.evidenceAggregateSha256
-	if ([string]$evidenceLock.aggregateSha256 -cne $expectedAggregate -or [string]$baselineEvidence.aggregateSha256 -cne $expectedAggregate -or [int]$baselineEvidence.fileCount -ne [int]$evidenceLock.fileCount -or [UInt64]$baselineEvidence.totalBytes -ne [UInt64]$evidenceLock.totalBytes) { throw 'The protected AnimationValidationIsCompletedImmutablePreFeatureReferenceCaptureRemainsSolePre evidence selection changed; candidate collection is incomparable.' }
+	if ([string]$evidenceLock.aggregateSha256 -cne $expectedAggregate -or [string]$baselineEvidence.aggregateSha256 -cne $expectedAggregate -or [int]$baselineEvidence.fileCount -ne [int]$evidenceLock.fileCount -or [UInt64]$baselineEvidence.totalBytes -ne [UInt64]$evidenceLock.totalBytes) { throw 'The protected reference-baseline evidence selection changed; candidate collection is incomparable.' }
 	$hostEvidence = Get-CurrentHostEvidence -ExpectedKnownAmbientProcesses @($config.candidateTemplate.comparisonSettings.knownAmbientProcessesPresent)
 	# Compare required facts individually because the raw host snapshot contains
 	# additional diagnostic fields while candidate identity has the locked shape.
@@ -510,7 +510,7 @@ try {
 	$runSpecs = @(for ($index = 0; $index -le 5; ++$index) {
 		[ordered]@{ index = $index; kind = if ($index -eq 0) { 'warmup' } else { 'measured' }; run = if ($index -eq 0) { 0 } else { $index }; label = if ($index -eq 0) { 'w' } else { "m$index" } }
 	})
-	# AnimationValidationIsCompletedImmutablePreFeatureReferenceCaptureRemainsSolePre measured each control as a contiguous warmup-plus-five batch. Preserve
+	# The reference baseline measured each control as a contiguous warmup-plus-five batch. Preserve
 	# that order so thermal state and cache reuse are paired with the locked run.
 	foreach ($spec in $runSpecs) {
 		$focusedRoot = Join-Path $output ("f/{0}" -f $spec.label); $focusedLog = Join-Path $focusedRoot 'ctest.log'
@@ -550,7 +550,7 @@ try {
 	$manifestWorkloads = @(); foreach ($control in $controls) { $paths = @($normalized[$control.id]); if ($paths.Count -ne 6) { throw "Collector did not produce exactly one warmup plus five measured '$($control.id)' records." }; $manifestWorkloads += [ordered]@{ id = $control.id; settingsHash = $control.settingsHash; settings = $control.settings; warmupResultPath = Get-RelativeRepoPath $paths[0]; measuredResultPaths = @($paths[1..5] | ForEach-Object { Get-RelativeRepoPath $_ }) } }
 	$reference = [ordered]@{}; foreach ($property in $config.candidateTemplate.reference.PSObject.Properties) { $reference[$property.Name] = $property.Value }; $reference.performanceWorkloadsSha256 = Get-Sha256 $workloadsPath
 	$candidatePath = Join-Path $output 'candidate-manifest.json'
-	Write-Json $candidatePath ([ordered]@{ schemaVersion = 1; feature = 'complete-animation-system'; reference = $reference; comparisonIdentity = $config.candidateTemplate.comparisonIdentity; comparisonSettings = $config.candidateTemplate.comparisonSettings; observations = $config.candidateTemplate.requiredObservations; candidateBuild = [ordered]@{ sourceCommit = $source.sourceCommit; sourceTreeDirty = $source.sourceTreeDirty; sourceDiffSha256 = $source.sourceDiffSha256; buildConfiguration = 'RelWithDebInfo'; installedTreeRoot = Get-RelativeRepoPath $install; artifacts = @([ordered]@{ path = Get-RelativeRepoPath $editor; sha256 = Get-Sha256 $editor }, [ordered]@{ path = Get-RelativeRepoPath $engine; sha256 = Get-Sha256 $engine }) }; rawInputPaths = @((Get-RelativeRepoPath $rawHostPath), (Get-RelativeRepoPath $sourcePath)); workloads = $manifestWorkloads })
+	Write-Json $candidatePath ([ordered]@{ schemaVersion = 1; feature = 'animation'; reference = $reference; comparisonIdentity = $config.candidateTemplate.comparisonIdentity; comparisonSettings = $config.candidateTemplate.comparisonSettings; observations = $config.candidateTemplate.requiredObservations; candidateBuild = [ordered]@{ sourceCommit = $source.sourceCommit; sourceTreeDirty = $source.sourceTreeDirty; sourceDiffSha256 = $source.sourceDiffSha256; buildConfiguration = 'RelWithDebInfo'; installedTreeRoot = Get-RelativeRepoPath $install; artifacts = @([ordered]@{ path = Get-RelativeRepoPath $editor; sha256 = Get-Sha256 $editor }, [ordered]@{ path = Get-RelativeRepoPath $engine; sha256 = Get-Sha256 $engine }) }; rawInputPaths = @((Get-RelativeRepoPath $rawHostPath), (Get-RelativeRepoPath $sourcePath)); workloads = $manifestWorkloads })
 	$comparisonPath = Join-Path $output 'comparison.json'; & $powershell -NoProfile -ExecutionPolicy Bypass -File $comparatorPath -CandidateManifest (Get-RelativeRepoPath $candidatePath) -OutputPath (Get-RelativeRepoPath $comparisonPath); exit $LASTEXITCODE
 }
 catch {

@@ -8,4 +8,3 @@
 /Tools/Animation/PerformanceWorkloads.json -text
 /Tests/Fixtures/Animation/stress/workloads.json -text
 /Tests/Fixtures/RendererPerformanceBaseline/workloads.json -text
-/specs/043-complete-animation-system/contracts/runtime-limits-and-validation.md -text

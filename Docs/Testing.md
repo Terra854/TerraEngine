@@ -309,68 +309,13 @@ The focused registrations are iteration aids. Feature and release gates still
 run the broader scheduler, transactional mutation, renderer, physics,
 scripting, automation, export, and complete CTest surfaces described below.
 
-### Animation phase-gate performance schedule
+### Animation validation tools
 
-Candidate animation benchmarks, workflow timing/throughput/latency gates,
-diagnostics-overhead measurements, candidate captures, and paired engine
-comparisons run only in final implementation stage. implementation check remains the immutable reference
-capture. An intermediate gate uses explicit reviewed authority and omits both
-performance manifest parameters:
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
-	-File Tools/Animation/RunAnimationPhaseGate.ps1 `
-	-Phase foundation -GateTask implementation check `
-	-DeferPerformanceExecutionToFinalIntegration `
-	-PerformanceDeferralAuthority "animation production validation final-only performance schedule amendment (2026-07-17)" `
-	-FixtureRoot <fixture-project> `
-	-ScenarioManifest <scenario.json> `
-	-AcceptanceUpdateManifest <acceptance-update.json> `
-	-Execute
-```
-
-In this mode, CTest entries matching `Performance` or exact
-`Editor.ExportBaseline` are excluded. Because several broad engine/editor CTest
-registries mix correctness cases with measured workloads, the gate also applies
-exact in-process exclusions for the animation benchmark namespaces, measured
-profiler clock/file-size cases, production virtual-geometry batching/stress
-gates, the physics fresh-process load/allocation matrix, editor physics
-performance cases, and the large-scene cold/warm timing gate. Generic tokens
-such as `Performance`, `PerformanceGate`, `Timing`, or `Overhead` are not used at
-the harness level because they would hide structural schema and diagnostics
-checks. `Animation.Dormant.*` remains active because those cases prove non-timed
-structural invariants. Every intermediate `-Execute` run requires this deferral
-switch. The resulting correctness gate can pass, but its performance
-pass/comparability/repeatability fields remain `null` because they were
-deliberately not measured, and implementation check, implementation check, and implementation check still block final integration.
-
-The reviewed schedule metadata is hash-locked without changing performance
-workloads or thresholds: runtime contract
-`a2dd5eee95aa1590a927094006d120d2d67f39d2166605f27902dde85dc3566a`,
-renderer workload manifest
-`3230959fab8c628d9396bd31a7923672c3a1ebf5b51ff4998066a8f10c2b3e4c`,
-and performance workloads
-`d99199c796368fa7706af363985ce3e0b75a71fa5fa2c29238bce65343e943a6`.
-
-The final live gate rejects that switch and requires both final inputs:
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
-	-File Tools/Animation/RunAnimationPhaseGate.ps1 `
-	-Phase final-live -GateTask implementation check `
-	-FinalAnimationPerformanceEvidenceManifest out/validation/animation/final/animation-performance/implementation check-manifest.json `
-	-PerformanceCandidateManifest out/validation/animation/final/engine-performance/candidate-manifest.json `
-	-FixtureRoot <fixture-project> `
-	-ScenarioManifest <scenario.json> `
-	-AcceptanceUpdateManifest <acceptance-update.json> `
-	-Execute
-```
-
-The implementation check manifest must explicitly be passing, non-deferred, scoped to final
-animation performance, and cover success contract, success contract, success contract, success contract through success contract,
-and success contract through success contract. The engine-wide candidate is evaluated by the locked
-implementation check comparator. Missing or incomparable proof fails closed. See
-`Docs/Animation/README.md` for the current schema limitation and evidence shape.
+Use the focused CTest registrations for correctness and the reusable commands in
+`Tools/Animation/` for fixture generation, installed-model checks, performance
+capture, comparison, and soak testing. The commands and their reproducible
+inputs are documented in `Docs/Animation/README.md` and
+`Docs/Animation/Performance.md`.
 
 The scene graph runtime checks validate deterministic traversal, hierarchy
 diagnostics, prefab composition, queued mutation safety, and editor/runtime
@@ -1121,12 +1066,11 @@ published package. Troubleshoot stale binaries by reinstalling; troubleshoot a
 failed export by reading `validation-report.json`, `content-inventory.json`,
 and `package-validation.txt` before changing the fixture.
 
-physics foundation validation's Windows/MSVC sanitizer support is limited to the provider-only
-`ReleaseASAN` BackendSpike. There is no supported full-engine TSan lane on this
-toolchain, and provider-spike results do not cover engine/editor/Vulkan/managed
-runtime lifecycle behavior. Record commands, toolchain, exclusions, and results
-in the sanitizer evidence file; do not claim a lane was run unless its output
-is archived.
+There is no supported full-engine Windows/MSVC sanitizer lane. Do not treat a
+third-party provider build as coverage for engine, editor, Vulkan, managed, or
+runtime lifecycle behavior. Any future sanitizer lane must be registered and
+documented as a maintained CMake/CTest configuration before its results are
+used as release evidence.
 
 ## MCP Editor Completeness
 

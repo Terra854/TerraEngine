@@ -23,9 +23,9 @@ $script:RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "../..
 $script:OutRoot = [System.IO.Path]::GetFullPath((Join-Path $script:RepoRoot "out"))
 $script:BaselineRoot = [System.IO.Path]::GetFullPath((Join-Path $script:RepoRoot "out/validation/animation/baseline"))
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-$script:ExpectedManifestSha256 = "40e3a8b7eb447ad3e3029a81cbc7383b15f92045c4f04ec69f13a35e3c44296a"
-$script:ExpectedRuntimeContractSha256 = "a2dd5eee95aa1590a927094006d120d2d67f39d2166605f27902dde85dc3566a"
-$script:ExpectedPerformanceWorkloadsSha256 = "d99199c796368fa7706af363985ce3e0b75a71fa5fa2c29238bce65343e943a6"
+$script:ExpectedManifestSha256 = "a1e5cc3dafa996014b753a0fe9bc39b9299efc0d367ec9c8d134e5768fb7becf"
+$script:ExpectedRuntimeContractSha256 = "e9e231c9c9b9e6f22868cec47146436e9a8aac90802e9d1d26b6cfeee88f98c2"
+$script:ExpectedPerformanceWorkloadsSha256 = "847c2e6f98e48be816da8907961924420c32bf25dff7c72afc88fafbd765f390"
 
 function Resolve-RepoPath {
 	param([Parameter(Mandatory = $true)][string]$Path)
@@ -116,10 +116,10 @@ function Assert-FrozenManifest {
 		[Parameter(Mandatory = $true)][string]$ResolvedManifestPath
 	)
 	if ((Get-Sha256 $ResolvedManifestPath) -cne $script:ExpectedManifestSha256) {
-		throw "The stress workload manifest bytes differ from the reviewed AnimationValidationUsHashLockedFrozenCharacterCrowdComplexHeroModeChurn identity."
+		throw "The stress workload manifest bytes differ from the reviewed animation stress identity."
 	}
-	if ($Manifest.schemaVersion -ne 1 -or $Manifest.feature -ne "complete-animation-system" -or
-		$Manifest.task -ne "AnimationValidationUsHashLockedFrozenCharacterCrowdComplexHeroModeChurn" -or $Manifest.performanceAcceptancePhase -ne 18 -or
+	if ($Manifest.schemaVersion -ne 1 -or $Manifest.feature -ne "animation" -or
+		$Manifest.task -ne "animation-stress-workloads" -or $Manifest.performanceAcceptanceMode -ne "release" -or
 		-not $Manifest.performanceExecutionDeferred) {
 		throw "The stress manifest identity or final-phase execution guard is invalid."
 	}

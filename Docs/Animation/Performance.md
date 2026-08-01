@@ -2,9 +2,9 @@
 
 This document defines how TerraEngine animation performance evidence is prepared,
 captured, interpreted, and compared. It does not report a performance pass.
-All candidate wall-clock timing, throughput, latency, diagnostics-overhead, and
-whole-engine regression acceptance is deferred to final implementation stage tasks animation-validation-runs-every-accumulated-feature-workflow-benchmark-t-runs-every-unrelated and
-animation-validation-invoke-final-only-t-t-comparator-every-prepared-control-including. The continuous 24-hour acceptance soak is deferred to animation-validation-continuous-hour-mixed-animation-soak-renderer-physics-reload-cancellation-streaming.
+Candidate wall-clock timing, throughput, latency, diagnostics overhead, and
+whole-engine regression acceptance require an explicit measured release run.
+The continuous 24-hour soak remains a separate long-running release check.
 
 Intermediate work may compile the harnesses, verify hashes and schemas, generate
 deterministic project descriptors, and exercise non-timed correctness or
@@ -18,15 +18,15 @@ it must not be accepted by weakening a nearby constant.
 | Authority | Identity |
 |---|---|
 | Pre-animation source commit | `6d12e3a99d7c0d41899fc96fa18b02b61e5a0aa9` |
-| Locked animation-validation-is-completed-immutable-pre-feature-reference-capture-remains-sole-pre baseline | `out/validation/animation/baseline/locked-baseline.json` — SHA-256 `cf4375934729e1afa745d9446faacfc1a7ba53a6d7db79b3d1e0e8164a5ced8f` |
-| animation-validation-is-completed-immutable-pre-feature-reference-capture-remains-sole-pre evidence selection | 178 files, 371,567,204 bytes — aggregate SHA-256 `4020949bd881f94f0395853e947e4512fb587c7bdd1ce5592317e75c01b5fcb5` |
-| Runtime limits contract | `Docs/Animation/README.md` — SHA-256 `a2dd5eee95aa1590a927094006d120d2d67f39d2166605f27902dde85dc3566a` |
-| Animation performance workloads | `Tools/Animation/PerformanceWorkloads.json` — SHA-256 `d99199c796368fa7706af363985ce3e0b75a71fa5fa2c29238bce65343e943a6` |
-| Animation stress definitions | `Tests/Fixtures/Animation/stress/workloads.json` — SHA-256 `40e3a8b7eb447ad3e3029a81cbc7383b15f92045c4f04ec69f13a35e3c44296a` |
-| Whole-engine coverage matrix | `Tools/Animation/PerformanceCoverageMatrix.json` — SHA-256 `1e1f4a158b99a636faef1ec0679bf21aa1b30446352ece59483791bde024dbd1` |
+| Locked reference baseline | `out/validation/animation/baseline/locked-baseline.json` — SHA-256 `cf4375934729e1afa745d9446faacfc1a7ba53a6d7db79b3d1e0e8164a5ced8f` |
+| Reference-baseline evidence selection | 178 files, 371,567,204 bytes — aggregate SHA-256 `4020949bd881f94f0395853e947e4512fb587c7bdd1ce5592317e75c01b5fcb5` |
+| Runtime limits contract | `Docs/Animation/README.md` — SHA-256 `e9e231c9c9b9e6f22868cec47146436e9a8aac90802e9d1d26b6cfeee88f98c2` |
+| Animation performance workloads | `Tools/Animation/PerformanceWorkloads.json` — SHA-256 `847c2e6f98e48be816da8907961924420c32bf25dff7c72afc88fafbd765f390` |
+| Animation stress definitions | `Tests/Fixtures/Animation/stress/workloads.json` — SHA-256 `a1e5cc3dafa996014b753a0fe9bc39b9299efc0d367ec9c8d134e5768fb7becf` |
+| Whole-engine coverage matrix | `Tools/Animation/PerformanceCoverageMatrix.json` — SHA-256 `b32480055b7ed0adc64072848a2610b475334996648609a69b269385f62cb9c8` |
 | Soak iteration schema | `Tests/Fixtures/Animation/stress/soak-result.schema.json` — SHA-256 `fa1b6548872e9ca70a8e1d5aeef9e810d82cc8bcd45e386c2a29744df8991659` |
 
-Candidate tools may write only below `out/` and may never overwrite the animation-validation-is-completed-immutable-pre-feature-reference-capture-remains-sole-pre
+Candidate tools may write only below `out/` and may never overwrite the reference
 baseline tree. A candidate build is not allowed to become its own reference.
 
 ## Frozen reference host and platform
@@ -45,12 +45,12 @@ Final animation measurements use exactly this profile:
   and the same quality settings and editor layout for both sides of a pair.
 - Windows Performance power plan, stable performance/fan profile, completed
   warm-up, and a recorded materially comparable ambient-process set.
-- 31 TerraEngine workers unless a pre-existing animation-validation-is-completed-immutable-pre-feature-reference-capture-remains-sole-pre control has its own locked
+- 31 TerraEngine workers unless a pre-existing reference control has its own locked
   worker count.
 
 The exact firmware-visible device, Vulkan API/driver, toolchain, executable,
 project, fixture, display, hybrid-routing, power, thermal, and ambient-process
-facts recorded by animation-validation-is-completed-immutable-pre-feature-reference-capture-remains-sole-pre must match. Missing or unknown identity is not a warning;
+facts recorded by the reference baseline must match. Missing or unknown identity is not a warning;
 it rejects the comparison.
 
 ## Frozen content profiles
@@ -72,7 +72,7 @@ replace these repository-owned, deterministic workload definitions.
 
 ## Exact acceptance thresholds
 
-All thresholds come from the runtime contract or immutable animation-validation-is-completed-immutable-pre-feature-reference-capture-remains-sole-pre configuration:
+All thresholds come from the runtime contract or immutable reference-baseline configuration:
 
 - animation-outcome-creator-import-representative-animated-gltf-fbx-package-obtain-correctly-referenced-playable-prefab: each of three clean import-workflow trials finishes in under 300
   seconds, measured from the installed-editor import command until the prefab is
@@ -153,13 +153,14 @@ mutex or detail allocation.
 
 ## Whole-engine regression matrix
 
-animation-validation-invoke-final-only-t-t-comparator-every-prepared-control-including opts into `CompareAnimationPerformance.ps1 -FinalPhaseMatrix`. Without that
+`CompareAnimationPerformance.ps1 -FinalPhaseMatrix` opts into whole-engine
+coverage. Without that
 switch, the tool verifies matrix readiness and explicitly reports performance
 execution as deferred. The final matrix covers renderer, camera, UI, physics,
 scripting, resource streaming/residency, virtual geometry, scheduler, profiler,
 MCP/editor automation, startup, and export.
 
-Each domain maps to one immutable animation-validation-is-completed-immutable-pre-feature-reference-capture-remains-sole-pre control and lists the metrics/facts that
+Each domain maps to one immutable reference-baseline control and lists the metrics/facts that
 must survive the mapping. All mapped candidate workloads still require the same
 warm-up, five measured results, raw result paths, installed artifact identity,
 and source-controlled settings hash used by the original comparator. The matrix
@@ -197,8 +198,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Animation/Generate
   -OutputRoot out/generated/animation-stress
 ```
 
-animation-validation-runs-every-accumulated-feature-workflow-benchmark-t-runs-every-unrelated supplies fresh installed-run candidate evidence to the existing capture
-pipeline. animation-validation-invoke-final-only-t-t-comparator-every-prepared-control-including performs the final comparison explicitly:
+Supply fresh installed-run candidate evidence through the capture pipeline, then
+perform the whole-engine comparison explicitly:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Animation/CompareAnimationPerformance.ps1 `

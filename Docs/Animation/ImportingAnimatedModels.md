@@ -128,8 +128,15 @@ ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo `
 cmake --build --preset RelWithDebInfo --target install
 ```
 
-Then import the deterministic fixtures through the installed editor, inspect generated children and prefab bindings, inject a malformed/cancelled reimport, and verify that the last-known-good bytes and GUIDs remain unchanged. The Phase A live gate also records real Asset Browser/Inspector clicks, MCP import/query results, Scene/Game captures, project reload, and explicit performance deferral.
+Then import the deterministic fixtures through the installed editor, inspect
+generated children and prefab bindings, inject a malformed or cancelled
+reimport, and verify that the last-known-good bytes and GUIDs remain unchanged.
 
-No source model is downloaded during configure, build, test, install, editor startup, or normal import validation. Licensed real-model acquisition happens explicitly in final implementation stage.
+No source model is downloaded during configure, build, test, install, editor
+startup, or normal import validation. Any licensed real-model acquisition is an
+explicit user action outside the build.
 
-All measured import/authoring timing, animation benchmarks, diagnostics-overhead measurements, engine-wide baseline comparisons, and performance acceptance remain reserved for animation-validation-runs-every-accumulated-feature-workflow-benchmark-t-runs-every-unrelated, animation-validation-invoke-final-only-t-t-comparator-every-prepared-control-including, and animation-validation-repair-capable-final-checks-t-t-are-clean-final-blocking. Correctness and source-free import validation must pass now; performance testing is deferred, not waived.
+Measured import and authoring timing, animation benchmarks, diagnostics overhead,
+and engine-wide baseline comparisons require an explicit performance run.
+Correctness and source-free import validation remain mandatory regardless of
+whether performance measurement is scheduled.

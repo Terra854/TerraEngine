@@ -32,9 +32,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/ExportRuntimeBasel
 	-WorkRoot out/ci/export-runtime-baseline
 ```
 
-`Invoke-ExportRuntimeBaseline.ps1` is a descriptive forwarding alias. The
-historical `Tests/Tools/ExportRuntimeBaseline/ExportSample.ps1` also forwards
-to the same command.
+The historical `Tests/Tools/ExportRuntimeBaseline/ExportSample.ps1` forwards
+to this canonical command for older test invocations.
 
 ## Inputs and generated output
 

@@ -1,9 +1,9 @@
 # Installed Editor Physics Stress Harness
 
 `RunInstalledEditorPhysicsStress.ps1` is the shared installed-editor performance,
-correctness, project-readiness, and managed/automation validation harness. Story
-names are used below instead of stale task numbers so its evidence remains
-unambiguous when the active Spec Kit task graph changes.
+correctness, project-readiness, and managed/automation validation harness. Its
+evidence uses stable workflow names so reports remain meaningful across engine
+revisions.
 It creates a disposable project below `out/`, writes 10,000 physics objects
 (1,000 active dynamic, 1,000 kinematic, and 8,000 static by default), starts
 the installed editor with isolated MCP preferences, and drives Play Mode

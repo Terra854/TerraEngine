@@ -28,11 +28,11 @@ namespace TerraEngine::Tests {
 
 	namespace {
 		inline constexpr std::string_view kFrozenStressManifestSha256 =
-			"40e3a8b7eb447ad3e3029a81cbc7383b15f92045c4f04ec69f13a35e3c44296a";
+			"a1e5cc3dafa996014b753a0fe9bc39b9299efc0d367ec9c8d134e5768fb7becf";
 		inline constexpr std::string_view kFrozenRuntimeContractSha256 =
-			"a2dd5eee95aa1590a927094006d120d2d67f39d2166605f27902dde85dc3566a";
+			"e9e231c9c9b9e6f22868cec47146436e9a8aac90802e9d1d26b6cfeee88f98c2";
 		inline constexpr std::string_view kFrozenPerformanceWorkloadsSha256 =
-			"d99199c796368fa7706af363985ce3e0b75a71fa5fa2c29238bce65343e943a6";
+			"847c2e6f98e48be816da8907961924420c32bf25dff7c72afc88fafbd765f390";
 
 		std::filesystem::path SourcePath(std::string_view relativePath)
 		{
@@ -243,7 +243,7 @@ namespace TerraEngine::Tests {
 			const nlohmann::json manifest = nlohmann::json::parse(manifestText);
 			context.ExpectEqual(std::string(kFrozenStressManifestSha256), Sha256(manifestText),
 				"The complete generated-workload manifest must retain its reviewed byte hash.");
-			context.Expect(manifest.at("performanceAcceptancePhase") == 18
+			context.Expect(manifest.at("performanceAcceptanceMode") == "release"
 				&& manifest.at("performanceExecutionDeferred").get<bool>(),
 				"Scale performance execution must remain deferred to final ImplementationStage.");
 			const nlohmann::json& runtime = manifest.at("authority").at("runtimeContract");
