@@ -1,5 +1,6 @@
 #include "VirtualGeometryRasterBins.h"
 #include <algorithm>
+#include <cmath>
 namespace TerraEngine::Renderer
 {
 	namespace
@@ -49,6 +50,26 @@ namespace TerraEngine::Renderer
 				? candidate.hardwareSupported
 				: candidate.computeSupported;
 		}
+
+		bool PrefersComputeRaster(
+			const VirtualGeometryRasterCandidate& candidate)
+		{
+			if(!candidate.computeSupported
+				|| candidate.triangleCount == 0u
+				|| !std::isfinite(candidate.projectedPixelArea)
+				|| candidate.projectedPixelArea <= 0.0f
+				|| candidate.projectedPixelArea
+					> kVirtualGeometryComputeMaximumPacketPixelArea)
+			{
+				return false;
+			}
+			const float averageTrianglePixelArea =
+				candidate.projectedPixelArea
+				/ static_cast<float>(candidate.triangleCount);
+			return candidate.preferCompute
+				|| averageTrianglePixelArea
+					<= kVirtualGeometryComputeAverageTrianglePixelArea;
+		}
 	}
 
 	VirtualGeometryRasterBinPlan BuildVirtualGeometryRasterBinPlan(
@@ -70,6 +91,10 @@ namespace TerraEngine::Renderer
 				++plan.overflowCount;
 				plan.failOpen = true;
 				plan.fallbackStableIds.push_back(candidate.stableId);
+			}
+			else if(PrefersComputeRaster(candidate))
+			{
+				route = VirtualGeometryRasterRoute::Compute;
 			}
 			else if(candidate.hardwareSupported)
 			{

@@ -1644,6 +1644,8 @@ file(REMOVE
 	\"\${virtualgeometry_out_dir}/VirtualGeometryAnimatedClusterBounds.comp.spv\"
 	\"\${virtualgeometry_out_dir}/VirtualGeometryAnimatedMorphBeforeSkin.comp.spv\"
 	\"\${virtualgeometry_out_dir}/VirtualGeometryComputeRaster.comp.spv\"
+	\"\${virtualgeometry_out_dir}/VirtualGeometryComposite.vert.spv\"
+	\"\${virtualgeometry_out_dir}/VirtualGeometryComposite.frag.spv\"
 	\"\${virtualgeometry_out_dir}/VirtualGeometryGeneratedIndirect.comp.spv\"
 	\"\${virtualgeometry_out_dir}/VirtualGeometryIndirectArguments.comp.spv\"
 	\"\${virtualgeometry_out_dir}/VirtualGeometryShadingBins.comp.spv\"
@@ -1835,6 +1837,21 @@ foreach(virtualgeometry_canonical_shader IN ITEMS
 		message(FATAL_ERROR \"Failed to compile \${virtualgeometry_canonical_shader}.comp.hlsl during install\")
 	endif()
 endforeach()
+
+# The adaptive microtriangle route shades a fullscreen visibility winner with
+# the same default surface function as the hardware fragment path.
+execute_process(
+	COMMAND \"\${DXC_PATH}\" -T vs_6_0 -E main -Fo \"\${virtualgeometry_out_dir}/VirtualGeometryComposite.vert.spv\" -spirv -I \"\${virtualgeometry_src_dir}\" \"\${virtualgeometry_src_dir}/VirtualGeometryComposite.vert.hlsl\"
+	RESULT_VARIABLE compile_virtualgeometry_composite_vertex)
+if(NOT compile_virtualgeometry_composite_vertex EQUAL 0)
+	message(FATAL_ERROR \"Failed to compile VirtualGeometryComposite.vert.hlsl during install\")
+endif()
+execute_process(
+	COMMAND \"\${DXC_PATH}\" -T ps_6_0 -E main -Fo \"\${virtualgeometry_out_dir}/VirtualGeometryComposite.frag.spv\" -spirv -I \"\${virtualgeometry_src_dir}\" \"\${virtualgeometry_src_dir}/VirtualGeometryComposite.frag.hlsl\"
+	RESULT_VARIABLE compile_virtualgeometry_composite_fragment)
+if(NOT compile_virtualgeometry_composite_fragment EQUAL 0)
+	message(FATAL_ERROR \"Failed to compile VirtualGeometryComposite.frag.hlsl during install\")
+endif()
 
 # Compile every GPU animation stage into the installed editor tree. Keeping the
 # list explicit makes a missing stage fail the install instead of silently

@@ -3,6 +3,7 @@
 // The compact four-word ABI intentionally remains usable by hardware, compute,
 // and indexed fallback producers without a route-specific descriptor layout.
 #include "VirtualGeometryAbi.hlsli"
+#include "VirtualGeometryRasterTriangle.hlsli"
 struct VisibilityConstants
 {
 	uint recordCount;
@@ -12,20 +13,10 @@ struct VisibilityConstants
 	uint primitiveCount;
 	uint reserved;
 };
-struct RasterTriangle
-{
-	float4 clip0;
-	float4 clip1;
-	float4 clip2;
-	uint stablePrimitiveId;
-	uint packedOwnerMaterial;
-	uint sourceGeneration;
-	uint flags;
-};
-[[vk::binding(0, 0)]] StructuredBuffer<uint4> inputRecords;
-[[vk::binding(1, 0)]] RWStructuredBuffer<uint4> outputRecords;
-[[vk::binding(2, 0)]] RWStructuredBuffer<uint> diagnostics;
-[[vk::binding(3, 0)]] StructuredBuffer<RasterTriangle> triangles;
+[[vk::binding(0, 1)]] StructuredBuffer<uint4> inputRecords;
+[[vk::binding(1, 1)]] RWStructuredBuffer<uint4> outputRecords;
+[[vk::binding(2, 1)]] RWStructuredBuffer<uint> diagnostics;
+[[vk::binding(3, 1)]] StructuredBuffer<RasterTriangle> triangles;
 [[vk::push_constant]] ConstantBuffer<VisibilityConstants> Resolve;
 
 float2 UnpackUnorm2x16(uint packed)
@@ -121,5 +112,5 @@ bool ReconstructAttributes(
 		inputRecord.x,
 		PackUnorm2x16(barycentrics.xy),
 		inputRecord.z,
-		sourceTriangle.packedOwnerMaterial);
+		sourceTriangle.identity.y);
 }

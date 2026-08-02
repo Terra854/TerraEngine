@@ -472,8 +472,9 @@ bool VulkanContext::Impl::EnsureVulkanVirtualGeometryVisibilityPipelines()
 		virtualGeometryVisibilityUnavailableReason.clear();
 		return true;
 	}
-	if(device == VK_NULL_HANDLE || descriptorPool == VK_NULL_HANDLE) {
-		virtualGeometryVisibilityUnavailableReason = "Vulkan device or descriptor pool is unavailable.";
+	if(device == VK_NULL_HANDLE || descriptorPool == VK_NULL_HANDLE
+		|| globalDescriptorSetLayout == VK_NULL_HANDLE) {
+		virtualGeometryVisibilityUnavailableReason = "Vulkan device, descriptor pool, or global descriptor layout is unavailable.";
 		return false;
 	}
 
@@ -483,7 +484,8 @@ bool VulkanContext::Impl::EnsureVulkanVirtualGeometryVisibilityPipelines()
 		bindings[binding].binding = binding;
 		bindings[binding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 		bindings[binding].descriptorCount = 1u;
-		bindings[binding].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+		bindings[binding].stageFlags =
+			VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 	}
 	VkDescriptorSetLayoutCreateInfo setLayoutInfo{};
 	setLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -495,11 +497,18 @@ bool VulkanContext::Impl::EnsureVulkanVirtualGeometryVisibilityPipelines()
 	}
 	// Compute raster additionally receives explicit target width/height. Resolve
 	// and shading bins use the first 16 bytes of the same compatible range.
-	const VkPushConstantRange pushRange{ VK_SHADER_STAGE_COMPUTE_BIT, 0u, 24u };
+	const VkPushConstantRange pushRange{
+		VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+		0u,
+		24u };
+	const std::array<VkDescriptorSetLayout, 2u> setLayouts{
+		globalDescriptorSetLayout,
+		virtualGeometryVisibilityDescriptorSetLayout };
 	VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
 	pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-	pipelineLayoutInfo.setLayoutCount = 1u;
-	pipelineLayoutInfo.pSetLayouts = &virtualGeometryVisibilityDescriptorSetLayout;
+	pipelineLayoutInfo.setLayoutCount =
+		static_cast<std::uint32_t>(setLayouts.size());
+	pipelineLayoutInfo.pSetLayouts = setLayouts.data();
 	pipelineLayoutInfo.pushConstantRangeCount = 1u;
 	pipelineLayoutInfo.pPushConstantRanges = &pushRange;
 	if(vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &virtualGeometryVisibilityPipelines.layout) != VK_SUCCESS) {
@@ -539,9 +548,153 @@ bool VulkanContext::Impl::EnsureVulkanVirtualGeometryVisibilityPipelines()
 	return true;
 }
 
+VkPipeline VulkanContext::Impl::EnsureVulkanVirtualGeometryCompositePipeline(
+	VkRenderPass renderPass)
+{
+	if(renderPass == VK_NULL_HANDLE
+		|| !EnsureVulkanVirtualGeometryVisibilityPipelines())
+	{
+		return VK_NULL_HANDLE;
+	}
+	if(const auto existing = virtualGeometryCompositePipelines.find(renderPass);
+		existing != virtualGeometryCompositePipelines.end())
+	{
+		return existing->second;
+	}
+	const auto loadModule = [this](const char* shaderPath) -> VkShaderModule
+	{
+		std::vector<std::uint8_t> shaderBytes;
+		try
+		{
+			shaderBytes = ResourceManager::Instance().ReadFileBytes(
+				ResourceManager::Instance().ResolveEngineAssetPath(shaderPath));
+		}
+		catch(const std::exception&)
+		{
+			return VK_NULL_HANDLE;
+		}
+		if(shaderBytes.empty()
+			|| shaderBytes.size() % sizeof(std::uint32_t) != 0u)
+		{
+			return VK_NULL_HANDLE;
+		}
+		VkShaderModuleCreateInfo moduleInfo{};
+		moduleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+		moduleInfo.codeSize = shaderBytes.size();
+		moduleInfo.pCode = reinterpret_cast<const std::uint32_t*>(
+			shaderBytes.data());
+		VkShaderModule module = VK_NULL_HANDLE;
+		return vkCreateShaderModule(device, &moduleInfo, nullptr, &module)
+			== VK_SUCCESS ? module : VK_NULL_HANDLE;
+	};
+	VkShaderModule vertexModule = loadModule(
+		"Shaders/VirtualGeometry/VirtualGeometryComposite.vert.spv");
+	VkShaderModule fragmentModule = loadModule(
+		"Shaders/VirtualGeometry/VirtualGeometryComposite.frag.spv");
+	if(vertexModule == VK_NULL_HANDLE || fragmentModule == VK_NULL_HANDLE)
+	{
+		if(vertexModule != VK_NULL_HANDLE)
+			vkDestroyShaderModule(device, vertexModule, nullptr);
+		if(fragmentModule != VK_NULL_HANDLE)
+			vkDestroyShaderModule(device, fragmentModule, nullptr);
+		return VK_NULL_HANDLE;
+	}
+	const std::array<VkPipelineShaderStageCreateInfo, 2u> shaderStages{{
+		{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0u,
+			VK_SHADER_STAGE_VERTEX_BIT, vertexModule, "main", nullptr },
+		{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0u,
+			VK_SHADER_STAGE_FRAGMENT_BIT, fragmentModule, "main", nullptr } }};
+	VkPipelineVertexInputStateCreateInfo vertexInput{};
+	vertexInput.sType =
+		VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+	VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+	inputAssembly.sType =
+		VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+	inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+	VkPipelineViewportStateCreateInfo viewportState{};
+	viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+	viewportState.viewportCount = 1u;
+	viewportState.scissorCount = 1u;
+	VkPipelineRasterizationStateCreateInfo rasterization{};
+	rasterization.sType =
+		VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+	rasterization.polygonMode = VK_POLYGON_MODE_FILL;
+	rasterization.cullMode = VK_CULL_MODE_NONE;
+	rasterization.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+	rasterization.lineWidth = 1.0f;
+	VkPipelineMultisampleStateCreateInfo multisample{};
+	multisample.sType =
+		VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+	multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+	VkPipelineDepthStencilStateCreateInfo depthStencil{};
+	depthStencil.sType =
+		VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+	depthStencil.depthTestEnable = VK_TRUE;
+	depthStencil.depthWriteEnable = VK_TRUE;
+	depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+	const std::uint32_t colorAttachmentCount =
+		UsesConventionalVisibilityAttachments(renderPass) ? 2u : 1u;
+	std::array<VkPipelineColorBlendAttachmentState, 2u> blendAttachments{};
+	for(std::uint32_t attachment = 0u;
+		attachment < colorAttachmentCount;
+		++attachment)
+	{
+		blendAttachments[attachment].blendEnable = VK_FALSE;
+		blendAttachments[attachment].colorWriteMask =
+			VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
+			| VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+	}
+	VkPipelineColorBlendStateCreateInfo blendState{};
+	blendState.sType =
+		VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+	blendState.attachmentCount = colorAttachmentCount;
+	blendState.pAttachments = blendAttachments.data();
+	const std::array<VkDynamicState, 2u> dynamicStates{
+		VK_DYNAMIC_STATE_VIEWPORT,
+		VK_DYNAMIC_STATE_SCISSOR };
+	VkPipelineDynamicStateCreateInfo dynamicState{};
+	dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+	dynamicState.dynamicStateCount =
+		static_cast<std::uint32_t>(dynamicStates.size());
+	dynamicState.pDynamicStates = dynamicStates.data();
+	VkGraphicsPipelineCreateInfo pipelineInfo{};
+	pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+	pipelineInfo.stageCount =
+		static_cast<std::uint32_t>(shaderStages.size());
+	pipelineInfo.pStages = shaderStages.data();
+	pipelineInfo.pVertexInputState = &vertexInput;
+	pipelineInfo.pInputAssemblyState = &inputAssembly;
+	pipelineInfo.pViewportState = &viewportState;
+	pipelineInfo.pRasterizationState = &rasterization;
+	pipelineInfo.pMultisampleState = &multisample;
+	pipelineInfo.pDepthStencilState = &depthStencil;
+	pipelineInfo.pColorBlendState = &blendState;
+	pipelineInfo.pDynamicState = &dynamicState;
+	pipelineInfo.layout = virtualGeometryVisibilityPipelines.layout;
+	pipelineInfo.renderPass = renderPass;
+	pipelineInfo.subpass = 0u;
+	VkPipeline pipeline = VK_NULL_HANDLE;
+	const VkResult result = vkCreateGraphicsPipelines(
+		device, VK_NULL_HANDLE, 1u, &pipelineInfo, nullptr, &pipeline);
+	vkDestroyShaderModule(device, fragmentModule, nullptr);
+	vkDestroyShaderModule(device, vertexModule, nullptr);
+	if(result != VK_SUCCESS)
+	{
+		return VK_NULL_HANDLE;
+	}
+	virtualGeometryCompositePipelines.emplace(renderPass, pipeline);
+	return pipeline;
+}
+
 void VulkanContext::Impl::DestroyVulkanVirtualGeometryVisibilityPipelines()
 {
 	if(device != VK_NULL_HANDLE) {
+		for(auto& [renderPass, pipeline] : virtualGeometryCompositePipelines)
+		{
+			(void)renderPass;
+			if(pipeline != VK_NULL_HANDLE)
+				vkDestroyPipeline(device, pipeline, nullptr);
+		}
 		if(virtualGeometryVisibilityPipelines.computeRaster != VK_NULL_HANDLE) vkDestroyPipeline(device, virtualGeometryVisibilityPipelines.computeRaster, nullptr);
 		if(virtualGeometryVisibilityPipelines.visibilityResolve != VK_NULL_HANDLE) vkDestroyPipeline(device, virtualGeometryVisibilityPipelines.visibilityResolve, nullptr);
 		if(virtualGeometryVisibilityPipelines.shadingBins != VK_NULL_HANDLE) vkDestroyPipeline(device, virtualGeometryVisibilityPipelines.shadingBins, nullptr);
@@ -550,6 +703,7 @@ void VulkanContext::Impl::DestroyVulkanVirtualGeometryVisibilityPipelines()
 	}
 	virtualGeometryVisibilityPipelines = {};
 	virtualGeometryVisibilityDescriptorSetLayout = VK_NULL_HANDLE;
+	virtualGeometryCompositePipelines.clear();
 }
 
 bool VulkanContext::Impl::EnsureVulkanDeformationComputePipelines()

@@ -17,13 +17,13 @@ namespace TerraEngine::Tests
 				context.Expect(shader.find("numthreads") != std::string::npos, "Compute raster requires bounded dispatch");
 				context.Expect(shader.find("Interlocked") != std::string::npos, "Compute raster requires atomic depth/tie updates");
 				context.Expect(shader.find("pixelCount") != std::string::npos, "Large-triangle coverage must be capacity bounded");
-				context.Expect(shader.find("ClipAgainstNearPlane") != std::string::npos,
-					"Compute raster must clip near-plane crossings before coverage evaluation.");
+				context.Expect(shader.find("ClipAgainstFrustumPlane") != std::string::npos,
+					"Compute raster must clip homogeneous frustum crossings before coverage evaluation.");
 				context.Expect(shader.find("IsTopLeftEdge") != std::string::npos,
 					"Compute raster must use the top-left rule to avoid shared-edge cracks.");
 				context.Expect(shader.find("for(uint y") != std::string::npos && shader.find("for(uint x") != std::string::npos,
 					"Each triangle must visit its bounded screen rectangle so large triangles remain complete.");
-				context.Expect(shader.find("stablePrimitiveId") != std::string::npos,
+				context.Expect(shader.find("source.identity.x") != std::string::npos,
 					"Equal-depth writes must resolve with a stable primitive identity.");
 			});
 	}

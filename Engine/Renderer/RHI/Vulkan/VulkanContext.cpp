@@ -3624,7 +3624,15 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			}
 		}
 	}
-	impl->PublishVirtualGeometryGpuPacketResources(frameData, renderViewType, diagnosticViewId, impl->backendFrameSerial);
+	impl->PublishVirtualGeometryGpuPacketResources(
+		frameData,
+		renderViewType,
+		diagnosticViewId,
+		impl->backendFrameSerial,
+		statsSlotIndex,
+		renderSnapshot.lightDataOffset,
+		renderSnapshot.clusterDataOffset,
+		renderSnapshot.lightIndexOffset);
 	const bool hasDirectGeometryCommands = std::any_of(
 		frameData.commands.begin(),
 		frameData.commands.end(),
@@ -3648,6 +3656,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			impl->renderSessionGeneration);
 
 	}
+	bool productionVisibilityRecorded = false;
 	if(hasVirtualGeometryTimestampWork)
 	{
 		// Every live compute stage owns its own timestamp interval. The indirect
@@ -3682,10 +3691,12 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			impl->latestVirtualGeometryExecutorPlan.generatedSubmissionExecutionAvailable =
 				recordedEveryExecutorStage && !executorPlan.zeroWork;
 		}
-		// Visibility remains a diagnostic/render-preparation branch. Its readiness
-		// and fence-delayed receipts never alter the generated-indirect draw gate.
+		// Visibility becomes production authority only after every compute stage
+		// records successfully. The graphics path checks this separate flag before
+		// omitting any hardware packet, preserving fail-open coverage.
 		const auto& visibilityPlan = impl->latestVirtualGeometryVisibilityPlan;
 		if(visibilityPlan.ready) {
+			bool recordedEveryVisibilityStage = true;
 			const std::array<std::pair<TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryVisibilityStage,
 				TerraEngine::Renderer::VirtualGeometryBackendStage>, 3> visibilityStages{{
 				{ TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryVisibilityStage::ComputeRaster, TerraEngine::Renderer::VirtualGeometryBackendStage::ComputeRaster },
@@ -3700,6 +3711,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 					cmd, visibilityStage, visibilityPlan, impl->latestVirtualGeometryVisibilityResources,
 					impl->virtualGeometryVisibilityPipelines);
 				if(!visibilityRecordingResult.recorded) {
+					recordedEveryVisibilityStage = false;
 					impl->latestVirtualGeometryVisibilityPlan.unavailableReason = visibilityRecordingResult.failureReason;
 					break;
 				}
@@ -3713,6 +3725,28 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 					vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 						0u, 1u, &visibilityBarrier, 0u, nullptr, 0u, nullptr);
 				}
+			}
+			productionVisibilityRecorded = recordedEveryVisibilityStage
+				&& !visibilityPlan.zeroWork;
+			if(productionVisibilityRecorded)
+			{
+				// Fullscreen material shading reads resolved records and expanded
+				// attributes in the following graphics render pass.
+				VkMemoryBarrier compositeBarrier{};
+				compositeBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+				compositeBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+				compositeBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+				vkCmdPipelineBarrier(
+					cmd,
+					VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+					VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+					0u,
+					1u,
+					&compositeBarrier,
+					0u,
+					nullptr,
+					0u,
+					nullptr);
 			}
 		}
 	}
@@ -4546,6 +4580,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		// command source after the GPU executor produced a bounded uint4 record.
 		bool useGeneratedVirtualGeometryIndirect = false;
 		std::uint32_t generatedVirtualGeometryIndirectIndex = 0u;
+		TerraEngine::Renderer::VirtualGeometryRasterRoute rasterRoute =
+			TerraEngine::Renderer::VirtualGeometryRasterRoute::Hardware;
 	};
 	std::vector<PreparedDraw> prepared;
 	prepared.reserve(frameData.commands.size());
@@ -4987,6 +5023,11 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		draw.materialFlags = materialFlags;
 		const auto& executorPlan = impl->latestVirtualGeometryExecutorPlan;
 		draw.generatedVirtualGeometryIndirectIndex = command.virtualGeometryPacketDescriptorIndex;
+		draw.rasterRoute = static_cast<
+			TerraEngine::Renderer::VirtualGeometryRasterRoute>(
+				(command.virtualGeometryFlags
+					>> kVirtualGeometryRasterRouteShift)
+				& kVirtualGeometryRasterRouteMask);
 		draw.useGeneratedVirtualGeometryIndirect = executorPlan.resourcesReady
 			&& executorPlan.descriptorReady && executorPlan.pipelinesReady
 			&& executorPlan.generatedSubmissionExecutionAvailable
@@ -5682,7 +5723,105 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	pendingBudgetDiagnostics.shadowPassRecorded = recordedAnyShadowPass;
 	impl->RecordPendingBudgetDiagnostics(statsSlotIndex, pendingBudgetDiagnostics);
 	impl->RecordDiagnosticCheckpoint(cmd, view == ViewType::Scene ? "scene.shadows.end" : "game.shadows.end");
-	
+
+	// Record the composite before worker draw recording decides ownership. If
+	// any graphics prerequisite fails, compute packets remain in the ordinary
+	// hardware stream for this frame and no geometry can disappear.
+	VkCommandBuffer virtualGeometryCompositeSecondary = VK_NULL_HANDLE;
+	bool computeCompositeReady = false;
+	const bool hasComputeOwnedDraw = std::any_of(
+		prepared.begin(),
+		prepared.end(),
+		[](const PreparedDraw& draw)
+		{
+			return draw.rasterRoute
+				== TerraEngine::Renderer::VirtualGeometryRasterRoute::Compute;
+		});
+	if(productionVisibilityRecorded && hasComputeOwnedDraw
+		&& impl->latestVirtualGeometryVisibilityResources
+			.visibilityResolveDescriptorSet != VK_NULL_HANDLE
+		&& currentFrame < impl->globalDescriptorSets.size()
+		&& impl->globalDescriptorSets[currentFrame] != VK_NULL_HANDLE)
+	{
+		const VkPipeline compositePipeline =
+			impl->EnsureVulkanVirtualGeometryCompositePipeline(
+				renderPassInfo.renderPass);
+		if(compositePipeline != VK_NULL_HANDLE)
+		{
+			const std::size_t workerIndex = prepared.size() + 3u;
+			impl->EnsureWorkerPools(
+				impl->currentFrame, workerIndex + 1u);
+			VkCommandBuffer composite = impl->AcquireWorkerCommandBuffer(
+				impl->currentFrame, workerIndex);
+			if(composite != VK_NULL_HANDLE)
+			{
+				vkResetCommandBuffer(composite, 0u);
+				VkCommandBufferInheritanceInfo inheritance{};
+				inheritance.sType =
+					VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO;
+				inheritance.renderPass = renderPassInfo.renderPass;
+				inheritance.subpass = 0u;
+				inheritance.framebuffer = renderPassInfo.framebuffer;
+				VkCommandBufferBeginInfo begin{};
+				begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+				begin.flags =
+					VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT;
+				begin.pInheritanceInfo = &inheritance;
+				if(vkBeginCommandBuffer(composite, &begin) == VK_SUCCESS)
+				{
+					VkViewport viewport{};
+					viewport.width = static_cast<float>(
+						renderPassInfo.renderArea.extent.width);
+					viewport.height = static_cast<float>(
+						renderPassInfo.renderArea.extent.height);
+					viewport.maxDepth = 1.0f;
+					vkCmdSetViewport(composite, 0u, 1u, &viewport);
+					VkRect2D scissor{};
+					scissor.extent = renderPassInfo.renderArea.extent;
+					vkCmdSetScissor(composite, 0u, 1u, &scissor);
+					vkCmdBindPipeline(
+						composite,
+						VK_PIPELINE_BIND_POINT_GRAPHICS,
+						compositePipeline);
+					const std::array<VkDescriptorSet, 2u> descriptorSets{
+						impl->globalDescriptorSets[currentFrame],
+						impl->latestVirtualGeometryVisibilityResources
+							.visibilityResolveDescriptorSet };
+					vkCmdBindDescriptorSets(
+						composite,
+						VK_PIPELINE_BIND_POINT_GRAPHICS,
+						impl->virtualGeometryVisibilityPipelines.layout,
+						0u,
+						static_cast<std::uint32_t>(descriptorSets.size()),
+						descriptorSets.data(),
+						0u,
+						nullptr);
+					const std::array<std::uint32_t, 4u> constants{
+						impl->latestVirtualGeometryVisibilityPlan.targetWidth,
+						impl->latestVirtualGeometryVisibilityPlan.targetHeight,
+						static_cast<std::uint32_t>(
+							impl->latestVirtualGeometryVisibilityPlan
+								.geometryGeneration),
+						0u };
+					vkCmdPushConstants(
+						composite,
+						impl->virtualGeometryVisibilityPipelines.layout,
+						VK_SHADER_STAGE_COMPUTE_BIT |
+							VK_SHADER_STAGE_FRAGMENT_BIT,
+						0u,
+						static_cast<std::uint32_t>(sizeof(constants)),
+						constants.data());
+					vkCmdDraw(composite, 3u, 1u, 0u, 0u);
+					if(vkEndCommandBuffer(composite) == VK_SUCCESS)
+					{
+						virtualGeometryCompositeSecondary = composite;
+						computeCompositeReady = true;
+					}
+				}
+			}
+		}
+	}
+
 	std::vector<VkCommandBuffer> secondaryBuffers;
 	// Mesh chunks plus optional sky/grid/UI command buffers form a small, known
 	// upper bound. Reserving once avoids vector growth inside primary recording.
@@ -5696,7 +5835,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		impl->EnsureWorkerPools(impl->currentFrame, workerCount);
 		std::vector<std::future<VkCommandBuffer>> futures;
 		futures.reserve(workerCount);
-		auto recordSecondaryRange = [this, &prepared, &HasMeshletPayload](VkCommandBuffer secondary, VkRenderPass renderPass, VkFramebuffer framebuffer, VkExtent2D renderExtent, size_t start, size_t end) -> VkCommandBuffer {
+		auto recordSecondaryRange = [this, &prepared, &HasMeshletPayload, computeCompositeReady](VkCommandBuffer secondary, VkRenderPass renderPass, VkFramebuffer framebuffer, VkExtent2D renderExtent, size_t start, size_t end) -> VkCommandBuffer {
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (secondary == VK_NULL_HANDLE) return VK_NULL_HANDLE;
 			vkResetCommandBuffer(secondary, 0);
@@ -5735,6 +5874,12 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (size_t i = start; i < end; ++i) {
 				const PreparedDraw& draw = prepared[i];
+				if(computeCompositeReady
+					&& draw.rasterRoute
+						== TerraEngine::Renderer::VirtualGeometryRasterRoute::Compute)
+				{
+					continue;
+				}
 				if (draw.pipeline == nullptr
 					|| draw.pipeline->pipeline == VK_NULL_HANDLE
 					|| draw.pipeline->layout == VK_NULL_HANDLE
@@ -5889,6 +6034,12 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			vkEndCommandBuffer(uiCmd);
 			secondaryBuffers.push_back(uiCmd);
 		}
+	}
+	if(virtualGeometryCompositeSecondary != VK_NULL_HANDLE)
+	{
+		// Composite after opaque hardware packets so its explicit SV_Depth can
+		// resolve against conventional geometry in the shared depth attachment.
+		secondaryBuffers.push_back(virtualGeometryCompositeSecondary);
 	}
 
 	VkSubpassContents contents = secondaryBuffers.empty() ? VK_SUBPASS_CONTENTS_INLINE : VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS;

@@ -121,7 +121,9 @@ struct PushConstants
 	float4 editorTint;
 };
 
+#if !defined(TERRAENGINE_DEFAULT_SURFACE_LIBRARY)
 [[vk::push_constant]] ConstantBuffer<PushConstants> SceneUniforms;
+#endif
 
 // The mesh stage and every compatible authored surface shader consume one
 // installed geometry contract for static and animated page output.
@@ -603,9 +605,9 @@ float3 EvaluateAreaLightLTC(GPULight light, float3 worldPosition, float3 normal,
 	return (diffuse * ltcDiffuseScale + specular * ltcSpecularScale) * radiance * warpedNdotL * distanceAttenuation * areaScale * 0.1;
 }
 
-float3 EvaluateSingleLight(uint lightIndex, PSIn input, FrameCullingData frame, float3 normal, float3 viewDir, float3 albedo, float metallic, float roughness)
+float3 EvaluateSingleLight(uint lightIndex, PSIn input, FrameCullingData frame, float3 normal, float3 viewDir, float3 albedo, float metallic, float roughness, uint lightDataOffset)
 {
-	const GPULight light = globalLights[SceneUniforms.lightDataOffset + lightIndex];
+	const GPULight light = globalLights[lightDataOffset + lightIndex];
 	const uint lightType = (uint)(light.positionAndType.w + 0.5);
 	const float shadowFactor = ComputeShadowFactor(light, frame, input.worldPosition);
 	if (lightType == kLightTypeDirectional)
@@ -683,9 +685,9 @@ float3 BuildHeatmapColor(float normalizedLightCount)
 	return lerp(float3(0.0, 0.2, 1.0), float3(1.0, 0.2, 0.0), t);
 }
 
-float3 ApplyEditorTint(float3 color)
+float3 ApplyEditorTint(float3 color, float4 editorTint)
 {
-	return lerp(color, SceneUniforms.editorTint.rgb, saturate(SceneUniforms.editorTint.a));
+	return lerp(color, editorTint.rgb, saturate(editorTint.a));
 }
 
 float3 BuildVirtualGeometryHashColor(uint value)
@@ -701,15 +703,15 @@ float3 BuildVirtualGeometryHashColor(uint value)
 		(float)((value >> 16u) & 255u) / 255.0f);
 }
 
-float3 BuildVirtualGeometryDebugColor(uint debugMode, PSIn input, FrameCullingData frame, uint stablePrimitiveId)
+float3 BuildVirtualGeometryDebugColor(uint debugMode, PSIn input, FrameCullingData frame, uint stablePrimitiveId, PushConstants uniforms)
 {
-	const uint virtualActive = SceneUniforms.virtualGeometryFlags & 1u;
-	const uint failOpen = (SceneUniforms.virtualGeometryFlags >> 1u) & 1u;
+	const uint virtualActive = uniforms.virtualGeometryFlags & 1u;
+	const uint failOpen = (uniforms.virtualGeometryFlags >> 1u) & 1u;
 	const uint selectedLod = input.virtualGeometryDebugData & 0xFFu;
 	const uint selectedClusterCount = (input.virtualGeometryDebugData >> 8u) & 0xFFu;
 	const uint packedMissingPageCount = (input.virtualGeometryDebugData >> 16u) & 0xFFu;
 	const uint clusterHashSeed = (input.virtualGeometryDebugData >> 24u) & 0xFFu;
-	const uint missingPageCount = max(SceneUniforms.selectedVirtualPageNeedCount, packedMissingPageCount);
+	const uint missingPageCount = max(uniforms.selectedVirtualPageNeedCount, packedMissingPageCount);
 	const bool hiZTrusted = frame.renderSettings2.w > 0.5f;
 	if (debugMode == kVirtualGeometryDebugModeLOD)
 	{
@@ -785,6 +787,7 @@ float3 BuildVirtualGeometryDebugColor(uint debugMode, PSIn input, FrameCullingDa
 	return float3(0.0f, 0.0f, 0.0f);
 }
 
+#if !defined(TERRAENGINE_DEFAULT_SURFACE_LIBRARY)
 // Conventional Scene/Game/capture pipelines compile this explicit Vulkan-only
 // variant when their render pass owns the matching integer identity target.
 // Shadow pipelines deliberately omit the define and retain their one-target
@@ -818,13 +821,17 @@ ConventionalVisibilityOutput MakeConventionalVisibilityOutput(float4 color, uint
 #define TERRAENGINE_CONVENTIONAL_SEMANTIC : SV_Target0
 #define TERRAENGINE_CONVENTIONAL_RETURN(colorValue, primitiveId) return colorValue
 #endif
+#endif
 
-TERRAENGINE_CONVENTIONAL_OUTPUT main(
+// Both fixed-function fragments and the visibility-buffer composite call the
+// same material function. Passing immutable draw state explicitly lets a
+// fullscreen composite shade different materials without per-triangle draws.
+float4 ShadeDefaultSurface(
 	PSIn input,
-	nointerpolation uint stablePrimitiveId : TEXCOORD6)
-	TERRAENGINE_CONVENTIONAL_SEMANTIC
+	uint stablePrimitiveId,
+	PushConstants uniforms)
 {
-	const MaterialData mat = allMaterials[SceneUniforms.materialIndex];
+	const MaterialData mat = allMaterials[uniforms.materialIndex];
 	const float2 uv = input.uv * mat.UVTransform.xy + mat.UVTransform.zw;
 
 	float4 baseColorSample = globalTextures[NonUniformResourceIndex(min(mat.BaseColorTextureIndex, kMaxBindlessTextureCount - 1u))].Sample(globalSamplers[NonUniformResourceIndex(min(mat.BaseColorTextureIndex, kMaxBindlessTextureCount - 1u))], uv);
@@ -837,24 +844,24 @@ TERRAENGINE_CONVENTIONAL_OUTPUT main(
 	{
 		clip(finalColor.a - mat.AlphaCutoff);
 	}
-	if (SceneUniforms.vrsActive == 2u)
+	if (uniforms.vrsActive == 2u)
 	{
 		// Shadow-map rendering only needs alpha testing and a depth write. Return
 		// before material lighting so the shadow pass does not sample the same
 		// shadow maps it is currently updating.
-		TERRAENGINE_CONVENTIONAL_RETURN(float4(0.0f, 0.0f, 0.0f, 1.0f), stablePrimitiveId);
+		return float4(0.0f, 0.0f, 0.0f, 1.0f);
 	}
 
-	const uint statsIndex = min(SceneUniforms.statsSlotIndex, kMaxStatsSlots - 1u);
+	const uint statsIndex = min(uniforms.statsSlotIndex, kMaxStatsSlots - 1u);
 	const FrameCullingData frame = frameCullingData[statsIndex];
-	const uint virtualGeometryDebugMode = (SceneUniforms.virtualGeometryFlags >> 8u) & 0xFFu;
+	const uint virtualGeometryDebugMode = (uniforms.virtualGeometryFlags >> 8u) & 0xFFu;
 	if (virtualGeometryDebugMode != 0u)
 	{
 		// Debug visualization is allowed to render even when virtual geometry
 		// has failed open or is disabled. That makes the overlay useful for
 		// diagnosing why a mesh is still taking the conservative fallback path,
 		// instead of silently looking identical to normal material rendering.
-		TERRAENGINE_CONVENTIONAL_RETURN(float4(ApplyEditorTint(BuildVirtualGeometryDebugColor(virtualGeometryDebugMode, input, frame, stablePrimitiveId)), finalColor.a), stablePrimitiveId);
+		return float4(ApplyEditorTint(BuildVirtualGeometryDebugColor(virtualGeometryDebugMode, input, frame, stablePrimitiveId, uniforms), uniforms.editorTint), finalColor.a);
 	}
 
 	float3 sampledNormal = globalTextures[NonUniformResourceIndex(min(mat.NormalTextureIndex, kMaxBindlessTextureCount - 1u))].Sample(globalSamplers[NonUniformResourceIndex(min(mat.NormalTextureIndex, kMaxBindlessTextureCount - 1u))], uv).rgb;
@@ -879,7 +886,7 @@ TERRAENGINE_CONVENTIONAL_OUTPUT main(
 
 	if (mat.ShadingModel == kShadingModel_Unlit)
 	{
-		TERRAENGINE_CONVENTIONAL_RETURN(float4(ApplyEditorTint(finalColor.rgb + emissive), finalColor.a), stablePrimitiveId);
+		return float4(ApplyEditorTint(finalColor.rgb + emissive, uniforms.editorTint), finalColor.a);
 	}
 
 	const uint lightCount = frame.clusterGridAndLightCount.w;
@@ -901,7 +908,7 @@ TERRAENGINE_CONVENTIONAL_OUTPUT main(
 	// isolated pixels.
 	if (clusteredLightingAvailable)
 	{
-		cluster = clusterGrid[SceneUniforms.clusterDataOffset + clusterIndex];
+		cluster = clusterGrid[uniforms.clusterDataOffset + clusterIndex];
 		const uint3 clusterGridDim = max(frame.clusterGridAndLightCount.xyz, uint3(1u, 1u, 1u));
 		const uint clusterCount = clusterGridDim.x * clusterGridDim.y * clusterGridDim.z;
 		const uint clusterLightRangeLimit = clusterCount * lightCount;
@@ -922,12 +929,12 @@ TERRAENGINE_CONVENTIONAL_OUTPUT main(
 		[loop]
 		for (uint lane = 0u; lane < cluster.count; ++lane)
 		{
-			const uint lightIndex = lightIndices[SceneUniforms.lightIndexOffset + cluster.offset + lane];
+			const uint lightIndex = lightIndices[uniforms.lightIndexOffset + cluster.offset + lane];
 			if (lightIndex == 0xFFFFFFFFu || lightIndex >= lightCount)
 			{
 				continue;
 			}
-			lighting += EvaluateSingleLight(lightIndex, input, frame, normal, viewDir, finalColor.rgb, metallic, roughness);
+			lighting += EvaluateSingleLight(lightIndex, input, frame, normal, viewDir, finalColor.rgb, metallic, roughness, uniforms.lightDataOffset);
 			evaluatedLightCount += 1u;
 		}
 	}
@@ -951,16 +958,16 @@ TERRAENGINE_CONVENTIONAL_OUTPUT main(
 		[loop]
 		for (uint lightIndex = 0u; lightIndex < lightCount; ++lightIndex)
 		{
-			lighting += EvaluateSingleLight(lightIndex, input, frame, normal, viewDir, finalColor.rgb, metallic, roughness);
+			lighting += EvaluateSingleLight(lightIndex, input, frame, normal, viewDir, finalColor.rgb, metallic, roughness, uniforms.lightDataOffset);
 			evaluatedLightCount += 1u;
 		}
 	}
 
 	// Debug heatmap mode: set task-culling push constant to 2 from CPU tools.
-	if (SceneUniforms.taskCullingEnabled > 1u)
+	if (uniforms.taskCullingEnabled > 1u)
 	{
 		const float normalizedCount = (float)evaluatedLightCount / max((float)lightCount, 1.0f);
-		TERRAENGINE_CONVENTIONAL_RETURN(float4(BuildHeatmapColor(normalizedCount), 1.0), stablePrimitiveId);
+		return float4(BuildHeatmapColor(normalizedCount), 1.0);
 	}
 
 	float3 finalLighting = lighting;
@@ -984,5 +991,17 @@ TERRAENGINE_CONVENTIONAL_OUTPUT main(
 	{
 		outputColor = finalColor.rgb;
 	}
-	TERRAENGINE_CONVENTIONAL_RETURN(float4(ApplyEditorTint(max(outputColor, float3(0.0f, 0.0f, 0.0f))), finalColor.a), stablePrimitiveId);
+	return float4(ApplyEditorTint(max(outputColor, float3(0.0f, 0.0f, 0.0f)), uniforms.editorTint), finalColor.a);
 }
+
+#if !defined(TERRAENGINE_DEFAULT_SURFACE_LIBRARY)
+TERRAENGINE_CONVENTIONAL_OUTPUT main(
+	PSIn input,
+	nointerpolation uint stablePrimitiveId : TEXCOORD6)
+	TERRAENGINE_CONVENTIONAL_SEMANTIC
+{
+	const float4 shaded = ShadeDefaultSurface(
+		input, stablePrimitiveId, SceneUniforms);
+	TERRAENGINE_CONVENTIONAL_RETURN(shaded, stablePrimitiveId);
+}
+#endif

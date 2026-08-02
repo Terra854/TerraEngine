@@ -11,6 +11,12 @@ namespace TerraEngine::Renderer::Vulkan
 {
 	namespace
 	{
+		// The visibility-only layout exposes one overlapping push-constant range to
+		// compute raster and fragment compositing. Updates through that layout must
+		// therefore name both consumers; preparation layouts remain compute-only.
+		constexpr VkShaderStageFlags kVirtualGeometryPushConstantStages =
+			VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+
 		void RecordVirtualGeometryBarrier(VkCommandBuffer commandBuffer, VulkanVirtualGeometryBarrierKind kind)
 		{
 			VkMemoryBarrier barrier{};
@@ -519,15 +525,48 @@ namespace TerraEngine::Renderer::Vulkan
 			result.failureReason = "Vulkan visibility pass descriptor set or pipeline is unavailable.";
 			return result;
 		}
-		vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines.layout, 0u, 1u, &descriptorSet, 0u, nullptr);
+		// Set 0 is the shared bindless heap used by the production composite;
+		// compute visibility stages use their pass-local storage buffers at set 1.
+		vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines.layout, 1u, 1u, &descriptorSet, 0u, nullptr);
 		if(!plan.zeroWork) {
-			vkCmdPushConstants(commandBuffer, pipelines.layout,
-				VK_SHADER_STAGE_COMPUTE_BIT, 0u, pushConstantBytes,
-				constants.data());
 			vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
-			vkCmdDispatch(commandBuffer,
-				(dispatchItemCount + 63u) / 64u, 1u, 1u);
-			result.dispatchCount = 1u;
+			const std::uint32_t phaseCount = stage
+				== VulkanVirtualGeometryVisibilityStage::ComputeRaster
+				? 3u : 1u;
+			for(std::uint32_t phase = 0u; phase < phaseCount; ++phase)
+			{
+				if(stage
+					== VulkanVirtualGeometryVisibilityStage::ComputeRaster)
+				{
+					constants[3] = phase;
+				}
+				vkCmdPushConstants(commandBuffer, pipelines.layout,
+					kVirtualGeometryPushConstantStages, 0u, pushConstantBytes,
+					constants.data());
+				vkCmdDispatch(commandBuffer,
+					(dispatchItemCount + 63u) / 64u, 1u, 1u);
+				++result.dispatchCount;
+				if(phase + 1u < phaseCount)
+				{
+					VkMemoryBarrier phaseBarrier{};
+					phaseBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+					phaseBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+					phaseBarrier.dstAccessMask =
+						VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+					vkCmdPipelineBarrier(
+						commandBuffer,
+						VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+						VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+						0u,
+						1u,
+						&phaseBarrier,
+						0u,
+						nullptr,
+						0u,
+						nullptr);
+					++result.barrierCount;
+				}
+			}
 		}
 		result.recorded = true;
 		return result;

@@ -2,9 +2,9 @@
 #include "VirtualGeometryAbi.hlsli"
 
 struct BinConstants { uint visibleCount; uint binCapacity; uint binCount; uint reserved; };
-[[vk::binding(0, 0)]] StructuredBuffer<uint4> visible;
-[[vk::binding(1, 0)]] RWStructuredBuffer<uint> bins;
-[[vk::binding(2, 0)]] RWStructuredBuffer<uint> diagnostics;
+[[vk::binding(0, 1)]] StructuredBuffer<uint4> visible;
+[[vk::binding(1, 1)]] RWStructuredBuffer<uint> bins;
+[[vk::binding(2, 1)]] RWStructuredBuffer<uint> diagnostics;
 [[vk::push_constant]] ConstantBuffer<BinConstants> Bin;
 
 [numthreads(64, 1, 1)]

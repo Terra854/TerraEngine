@@ -253,13 +253,26 @@ namespace
 		glm::vec4 clip0 = glm::vec4(0.0f);
 		glm::vec4 clip1 = glm::vec4(0.0f);
 		glm::vec4 clip2 = glm::vec4(0.0f);
-		std::uint32_t stablePrimitiveId = 0xffffffffu;
-		std::uint32_t packedOwnerMaterial = 0u;
-		std::uint32_t sourceGeneration = 0u;
-		std::uint32_t flags = 0u;
+		glm::vec4 world0 = glm::vec4(0.0f);
+		glm::vec4 world1 = glm::vec4(0.0f);
+		glm::vec4 world2 = glm::vec4(0.0f);
+		glm::vec4 normal0 = glm::vec4(0.0f);
+		glm::vec4 normal1 = glm::vec4(0.0f);
+		glm::vec4 normal2 = glm::vec4(0.0f);
+		glm::vec4 tangent0 = glm::vec4(0.0f);
+		glm::vec4 tangent1 = glm::vec4(0.0f);
+		glm::vec4 tangent2 = glm::vec4(0.0f);
+		glm::vec4 uv0 = glm::vec4(0.0f);
+		glm::vec4 uv1 = glm::vec4(0.0f);
+		glm::vec4 uv2 = glm::vec4(0.0f);
+		glm::vec4 editorTint = glm::vec4(0.0f);
+		glm::uvec4 identity = glm::uvec4(0u);
+		glm::uvec4 shadingOffsets = glm::uvec4(0u);
+		glm::uvec4 shadingState = glm::uvec4(0u);
+		glm::uvec4 debugState = glm::uvec4(0u);
 	};
 	static_assert(
-		sizeof(VirtualGeometryRasterTriangleUpload) == 64u,
+		sizeof(VirtualGeometryRasterTriangleUpload) == 320u,
 		"Compute-raster triangle uploads must match the shader ABI.");
 
 	std::uint64_t BuildVirtualGeometryPagePayloadResourceSignature(
@@ -3137,7 +3150,11 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 	const FrameRenderData& frameData,
 	RenderViewType viewType,
 	std::uint32_t viewId,
-	std::uint64_t frameId)
+	std::uint64_t frameId,
+	std::uint32_t statsSlotIndex,
+	std::uint32_t lightDataOffset,
+	std::uint32_t clusterDataOffset,
+	std::uint32_t lightIndexOffset)
 {
 	activeVirtualGeometryPacketBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 	activeVirtualGeometryBatchBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
@@ -3546,12 +3563,23 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 				TerraEngine::Renderer::VirtualGeometryBackendStage::Compaction);
 	}
 
-	if(!frameData.virtualGeometryVisibilityDiagnosticsRequested)
+	const bool productionComputeRasterRequested = std::any_of(
+		frameData.virtualGeometryGpuPackets.begin(),
+		frameData.virtualGeometryGpuPackets.end(),
+		[](const GpuVirtualGeometryPacketRecord& packet)
+		{
+			const std::uint32_t route =
+				(packet.flags >> kVirtualGeometryRasterRouteShift)
+				& kVirtualGeometryRasterRouteMask;
+			return route == static_cast<std::uint32_t>(
+				TerraEngine::Renderer::VirtualGeometryRasterRoute::Compute);
+		});
+	if(!frameData.virtualGeometryVisibilityDiagnosticsRequested
+		&& !productionComputeRasterRequested)
 	{
-		// Dense VG already has a complete mesh-task graphics route. Compute raster,
-		// resolve, and shading bins are a diagnostic mirror, and preparing them
-		// requires CPU triangle expansion plus two target-sized buffer clears. Keep
-		// that cost at zero until a visualizer or detailed diagnostics requests it.
+		// Fixed-function raster remains the zero-overhead default. Allocate and
+		// expand visibility data only for an explicit diagnostic or a packet whose
+		// projected microtriangles were assigned to production compute raster.
 		virtualGeometryVisibilityUnavailableReason =
 			"Virtual-geometry visibility diagnostics were not requested for this view.";
 		return;
@@ -3574,6 +3602,15 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 		{
 			break;
 		}
+		const std::uint32_t packetRoute =
+			(packet.flags >> kVirtualGeometryRasterRouteShift)
+			& kVirtualGeometryRasterRouteMask;
+		if(productionComputeRasterRequested
+			&& packetRoute != static_cast<std::uint32_t>(
+				TerraEngine::Renderer::VirtualGeometryRasterRoute::Compute))
+		{
+			continue;
+		}
 		const Mesh* mesh = ResourceManager::Instance().GetMesh(packet.meshId);
 		const auto commandIt = std::find_if(
 			frameData.commands.begin(),
@@ -3595,9 +3632,14 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 		{
 			continue;
 		}
-		const glm::mat4 clipTransform =
-			frameData.projectionMatrix * frameData.viewMatrix
-			* commandIt->modelMatrix;
+		const glm::mat4 worldTransform = commandIt->modelMatrix;
+		const glm::mat3 normalTransform = glm::transpose(
+			glm::inverse(glm::mat3(worldTransform)));
+		const glm::mat3 directionTransform = glm::mat3(worldTransform);
+		const std::uint32_t materialIndex = materialIndexMap.contains(
+			packet.materialId)
+			? materialIndexMap.at(packet.materialId)
+			: 0u;
 		const std::uint32_t endMeshlet = std::min<std::uint32_t>(
 			packet.meshletOffset + packet.meshletCount,
 			static_cast<std::uint32_t>(mesh->meshletRecords.size()));
@@ -3623,6 +3665,10 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 				primitiveOffset += 3u)
 			{
 				glm::vec4 clipPositions[3]{};
+				glm::vec4 worldPositions[3]{};
+				glm::vec4 normals[3]{};
+				glm::vec4 tangents[3]{};
+				glm::vec4 textureCoordinates[3]{};
 				bool validTriangle = true;
 				for(std::uint32_t corner = 0u; corner < 3u; ++corner)
 				{
@@ -3674,8 +3720,36 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 						mesh->runtimeLayout.quantization.positionOffset[2]
 							+ normalizedPosition.z
 								* mesh->runtimeLayout.quantization.positionScale[2]);
+					const std::array<float, 3u> decodedNormal =
+						TerraEngine::DecodeVirtualGeometryPackedNormal(
+							packedVertex);
+					const std::array<float, 4u> decodedTangent =
+						TerraEngine::DecodeVirtualGeometryPackedTangent(
+							packedVertex);
+					const std::array<float, 2u> decodedUv =
+						TerraEngine::DecodeVirtualGeometryPackedTextureCoordinate(
+							packedVertex);
+					worldPositions[corner] = worldTransform
+						* glm::vec4(localPosition, 1.0f);
 					clipPositions[corner] =
-						clipTransform * glm::vec4(localPosition, 1.0f);
+						frameData.projectionMatrix * frameData.viewMatrix
+						* worldPositions[corner];
+					normals[corner] = glm::vec4(glm::normalize(
+						normalTransform * glm::vec3(
+							decodedNormal[0], decodedNormal[1], decodedNormal[2])), 0.0f);
+					tangents[corner] = glm::vec4(glm::normalize(
+						directionTransform * glm::vec3(
+							decodedTangent[0], decodedTangent[1], decodedTangent[2])),
+						decodedTangent[3]);
+					textureCoordinates[corner] = glm::vec4(
+						mesh->runtimeLayout.quantization.uvOffset[0]
+							+ decodedUv[0]
+								* mesh->runtimeLayout.quantization.uvScale[0],
+						mesh->runtimeLayout.quantization.uvOffset[1]
+							+ decodedUv[1]
+								* mesh->runtimeLayout.quantization.uvScale[1],
+						0.0f,
+						0.0f);
 				}
 				if(!validTriangle)
 				{
@@ -3685,7 +3759,20 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 				triangle.clip0 = clipPositions[0];
 				triangle.clip1 = clipPositions[1];
 				triangle.clip2 = clipPositions[2];
-				triangle.stablePrimitiveId =
+				triangle.world0 = worldPositions[0];
+				triangle.world1 = worldPositions[1];
+				triangle.world2 = worldPositions[2];
+				triangle.normal0 = normals[0];
+				triangle.normal1 = normals[1];
+				triangle.normal2 = normals[2];
+				triangle.tangent0 = tangents[0];
+				triangle.tangent1 = tangents[1];
+				triangle.tangent2 = tangents[2];
+				triangle.uv0 = textureCoordinates[0];
+				triangle.uv1 = textureCoordinates[1];
+				triangle.uv2 = textureCoordinates[2];
+				triangle.editorTint = commandIt->editorTint;
+				const std::uint32_t stablePrimitiveId =
 					static_cast<std::uint32_t>(
 						visibilityTriangles.size());
 				const std::uint32_t materialBin =
@@ -3694,11 +3781,33 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 				const std::uint32_t rasterRoute =
 					(packet.flags >> kVirtualGeometryRasterRouteShift)
 					& kVirtualGeometryRasterRouteMask;
-				triangle.packedOwnerMaterial =
-					materialBin | (rasterRoute << 8u);
-				triangle.sourceGeneration =
-					static_cast<std::uint32_t>(executorGeneration);
-				triangle.flags = packet.flags;
+				triangle.identity = glm::uvec4(
+					stablePrimitiveId,
+					materialBin | (rasterRoute << 8u),
+					static_cast<std::uint32_t>(executorGeneration),
+					packet.flags);
+				triangle.shadingOffsets = glm::uvec4(
+					materialIndex,
+					statsSlotIndex,
+					lightDataOffset,
+					clusterDataOffset);
+				triangle.shadingState = glm::uvec4(
+					lightIndexOffset,
+					packet.flags,
+					meshletIndex,
+					packet.packetId);
+				const std::uint32_t selectedClusterCount =
+					std::min(commandIt->selectedVirtualClusterCount, 255u);
+				const std::uint32_t selectedPageNeedCount =
+					std::min(commandIt->selectedVirtualPageNeedCount, 255u);
+				triangle.debugState = glm::uvec4(
+					(commandIt->selectedVirtualLod & 0xffu)
+						| (selectedClusterCount << 8u)
+						| (selectedPageNeedCount << 16u)
+						| ((packet.debugIdentity & 0xffu) << 24u),
+					commandIt->meshDataIndex,
+					packet.packetId,
+					selectedPageNeedCount);
 				visibilityTriangles.push_back(triangle);
 			}
 		}

@@ -15,6 +15,7 @@
 #include "VulkanCommandRecording.h"
 #include "VulkanVirtualGeometryExecutor.h"
 #include "VulkanFrameDiagnostics.h"
+#include "Renderer/VirtualGeometry/Visibility/VirtualGeometryVisibility.h"
 
 #include "Core/Logger/Logger.h"
 #include "Window/WindowSystem.h"
@@ -726,6 +727,11 @@ struct VulkanContext::Impl {
 				TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryVisibilityResources latestVirtualGeometryVisibilityResources{};
 				TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryVisibilityPipelines virtualGeometryVisibilityPipelines{};
 				VkDescriptorSetLayout virtualGeometryVisibilityDescriptorSetLayout = VK_NULL_HANDLE;
+				// Composite pipelines are render-pass compatible objects; Scene/Game,
+				// capture, and swapchain passes may therefore own distinct handles
+				// while sharing one visibility pipeline layout.
+				std::unordered_map<VkRenderPass, VkPipeline>
+					virtualGeometryCompositePipelines;
 				std::string virtualGeometryVisibilityUnavailableReason;
 				static constexpr uint32_t kHiZViewCount = 2u;
 				static constexpr uint32_t kHiZGameViewIndex = 0u;
@@ -1062,7 +1068,15 @@ struct VulkanContext::Impl {
 			bool GenerateAmbientOcclusion(VkCommandBuffer cmd, const FrameCullingDataGPU& frameData, uint32_t snapshotSlotIndex, VkImageView sampledDepthView);
 		void GenerateVRSImage(VkCommandBuffer cmd, VkImageView colorView);
 	
-		void PublishVirtualGeometryGpuPacketResources(const FrameRenderData& frameData, RenderViewType viewType, std::uint32_t viewId, std::uint64_t frameId);
+		void PublishVirtualGeometryGpuPacketResources(
+			const FrameRenderData& frameData,
+			RenderViewType viewType,
+			std::uint32_t viewId,
+			std::uint64_t frameId,
+			std::uint32_t statsSlotIndex,
+			std::uint32_t lightDataOffset,
+			std::uint32_t clusterDataOffset,
+			std::uint32_t lightIndexOffset);
 		void DestroyVirtualGeometryGpuPacketResources(VirtualGeometryGpuPacketFrameResources& resources);
 		bool EnsureVulkanVirtualGeometryExecutorPipeline();
 		void DestroyVulkanVirtualGeometryExecutorPipeline();
@@ -1070,8 +1084,10 @@ struct VulkanContext::Impl {
 		void DestroyVulkanVirtualGeometryProductionDecodePipeline();
 		void PrepareVulkanVirtualGeometryProductionDecode(const FrameRenderData& frameData);
 		void CompleteVulkanVirtualGeometryProductionDecode(std::uint32_t frameIndex);
-		bool EnsureVulkanVirtualGeometryVisibilityPipelines();
-		void DestroyVulkanVirtualGeometryVisibilityPipelines();
+	bool EnsureVulkanVirtualGeometryVisibilityPipelines();
+	VkPipeline EnsureVulkanVirtualGeometryCompositePipeline(
+		VkRenderPass renderPass);
+	void DestroyVulkanVirtualGeometryVisibilityPipelines();
 		void ResetMeshletCounters(uint32_t statsSlotIndex);
 	
 	// GetSnapshotLightDataOffset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

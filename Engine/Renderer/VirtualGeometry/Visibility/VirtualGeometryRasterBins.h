@@ -12,10 +12,23 @@ namespace TerraEngine::Renderer
 		bool computeSupported = true;
 		bool alphaMasked = false;
 		bool requiresStableIdentity = true;
+		// Projected work estimates let the route planner keep ordinary triangles
+		// on fixed-function raster while moving only quad-inefficient microgeometry
+		// to the one-lane-per-triangle compute path.
+		float projectedPixelArea = 0.0f;
+		std::uint32_t triangleCount = 0u;
+		bool preferCompute = false;
 		// Callers may use this value to map stable-ID ordered results back to
 		// packet ownership without changing packet order.
 		std::uint32_t sourceOrdinal = 0;
 	};
+
+	// Compute raster wins only when the average triangle covers less than a
+	// pixel and the packet rectangle is bounded. The rectangle guard prevents
+	// one long, thin triangle from turning the conservative pixel loop into a
+	// worse choice than fixed-function rasterization.
+	inline constexpr float kVirtualGeometryComputeAverageTrianglePixelArea = 1.0f;
+	inline constexpr float kVirtualGeometryComputeMaximumPacketPixelArea = 65536.0f;
 	struct VirtualGeometryRasterBinPlan
 	{
 		// Routes are ordered by stable ID so identical packet sets produce the

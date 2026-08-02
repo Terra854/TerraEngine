@@ -5683,7 +5683,7 @@ void RenderSystem::Update(float deltaTime)
 			renderFrameSnapshot.virtualGeometryViewSelections.push_back(std::move(state));
 		};
 
-	auto applyVirtualGeometrySelection = [&](std::vector<DrawCommand>& commands, RenderOutputKind outputKind, RenderViewType viewType, std::uint32_t outputId, const glm::vec3& cameraPosition, const glm::uvec2& targetSize, const VirtualGeometryQualityProfile& viewVirtualGeometryQuality) {
+	auto applyVirtualGeometrySelection = [&](std::vector<DrawCommand>& commands, const glm::mat4& viewProjection, RenderOutputKind outputKind, RenderViewType viewType, std::uint32_t outputId, const glm::vec3& cameraPosition, const glm::uvec2& targetSize, const VirtualGeometryQualityProfile& viewVirtualGeometryQuality) {
 		VirtualGeometryViewSelectionPacket packet;
 		std::vector<DrawCommand> expandedCommands;
 		expandedCommands.reserve(commands.size());
@@ -5853,6 +5853,51 @@ void RenderSystem::Update(float deltaTime)
 				viewType,
 				outputId,
 				clusterPacketBase);
+			// Project the packet AABB once during view preparation. The same bounds
+			// drive editor picking, CPU compaction, and the microtriangle route split,
+			// keeping all three consumers on one immutable estimate.
+			const glm::mat4 packetClipTransform =
+				viewProjection * command.modelMatrix;
+			for(VirtualGeometryClusterPacket& localPacket : localPackets)
+			{
+				glm::vec2 minimumUv(
+					std::numeric_limits<float>::max());
+				glm::vec2 maximumUv(
+					std::numeric_limits<float>::lowest());
+				bool projectionValid = true;
+				for(std::uint32_t corner = 0u; corner < 8u; ++corner)
+				{
+					const glm::vec3 localCorner(
+						(corner & 1u) != 0u
+							? localPacket.boundsMax.x
+							: localPacket.boundsMin.x,
+						(corner & 2u) != 0u
+							? localPacket.boundsMax.y
+							: localPacket.boundsMin.y,
+						(corner & 4u) != 0u
+							? localPacket.boundsMax.z
+							: localPacket.boundsMin.z);
+					const glm::vec4 clip = packetClipTransform
+						* glm::vec4(localCorner, 1.0f);
+					if(!std::isfinite(clip.w) || clip.w <= 1.0e-5f)
+					{
+						projectionValid = false;
+						break;
+					}
+					const glm::vec2 ndc = glm::vec2(clip) / clip.w;
+					// Camera projections already include Terra's Vulkan Y flip, and
+					// the renderer uses a positive-height viewport. Match the actual
+					// framebuffer transform used by hardware and compute raster.
+					const glm::vec2 uv = ndc * 0.5f + glm::vec2(0.5f);
+					minimumUv = glm::min(minimumUv, uv);
+					maximumUv = glm::max(maximumUv, uv);
+				}
+				if(projectionValid)
+				{
+					localPacket.projectedBounds = glm::vec4(
+						minimumUv, maximumUv);
+				}
+			}
 			// Resolve route policy while this immutable command still owns the
 			// exact material identity. Numeric route/bin values are copied into
 			// packet flags, so protected Vulkan recording never reopens mutable
@@ -5882,6 +5927,23 @@ void RenderSystem::Update(float deltaTime)
 			const bool alphaMasked = packetMaterial != nullptr
 				&& packetMaterial->header.alphaMode
 					== static_cast<std::uint32_t>(AlphaMode::Mask);
+			const bool defaultSurfaceShader = packetMaterial != nullptr
+				&& (packetMaterial->header.shaderCollectionId
+						== TerraEngine::EMPTY_UUID
+					|| packetMaterial->header.shaderCollectionId
+						== ResourceManager::Instance()
+							.GetDefaultShaderCollectionID()
+					|| packetMaterial->header.shaderCollectionId
+						== ResourceManager::Instance()
+							.GetDefaultTaskShaderCollectionID());
+			const bool opaqueComputeSurface = packetMaterial != nullptr
+				&& packetMaterial->header.alphaMode
+					!= static_cast<std::uint32_t>(AlphaMode::Blend);
+			const bool singleSidedComputeSurface = packetMaterial != nullptr
+				&& (packetMaterial->header.flags & ::DoubleSided) == 0u;
+			const bool staticComputeSurface =
+				!command.animationBinding
+					.RequiresConservativeCoarseVisibility();
 			std::vector<TerraEngine::Renderer::VirtualGeometryRasterCandidate>
 				rasterCandidates;
 			rasterCandidates.reserve(localPackets.size());
@@ -5900,9 +5962,41 @@ void RenderSystem::Update(float deltaTime)
 					&& !materialDisablesVirtualGeometry;
 				candidate.computeSupported =
 					computeVirtualGeometryRouteAvailable
-					&& !materialDisablesVirtualGeometry;
+					&& !materialDisablesVirtualGeometry
+					&& defaultSurfaceShader
+					&& opaqueComputeSurface
+					&& singleSidedComputeSurface
+					&& staticComputeSurface
+					&& localPacket.projectedBounds != glm::vec4(0.0f);
 				candidate.alphaMasked = alphaMasked;
 				candidate.requiresStableIdentity = true;
+				const glm::vec2 clampedMinimum = glm::clamp(
+					glm::vec2(localPacket.projectedBounds),
+					glm::vec2(0.0f),
+					glm::vec2(1.0f));
+				const glm::vec2 clampedMaximum = glm::clamp(
+					glm::vec2(
+						localPacket.projectedBounds.z,
+						localPacket.projectedBounds.w),
+					glm::vec2(0.0f),
+					glm::vec2(1.0f));
+				const glm::vec2 projectedExtent = glm::max(
+					clampedMaximum - clampedMinimum,
+					glm::vec2(0.0f));
+				candidate.projectedPixelArea =
+					projectedExtent.x * static_cast<float>(targetSize.x)
+					* projectedExtent.y * static_cast<float>(targetSize.y);
+				for(std::uint32_t meshletIndex = localPacket.meshletOffset;
+					meshletIndex < localPacket.meshletOffset
+						+ localPacket.meshletCount
+						&& meshletIndex < mesh->meshletRecords.size();
+					++meshletIndex)
+				{
+					candidate.triangleCount +=
+						mesh->meshletRecords[meshletIndex]
+							.primitiveIndexCount / 3u;
+				}
+				candidate.preferCompute = materialForcesCompute;
 				candidate.sourceOrdinal =
 					static_cast<std::uint32_t>(packetIndex);
 				rasterCandidates.push_back(candidate);
@@ -6110,7 +6204,13 @@ void RenderSystem::Update(float deltaTime)
 							break;
 						}
 					}
-					batchCommand.virtualGeometryFlags = virtualGeometryFlags;
+					// The route belongs to this homogeneous packet batch. Carry it in
+					// the established flags word so Vulkan can omit compute-owned main
+					// draws only after the visibility composite is proven recordable.
+					batchCommand.virtualGeometryFlags = virtualGeometryFlags
+						| ((firstPacket.rasterRoute
+							& kVirtualGeometryRasterRouteMask)
+							<< kVirtualGeometryRasterRouteShift);
 					expandedCommands.push_back(batchCommand);
 				}
 				continue;
@@ -6478,7 +6578,7 @@ void RenderSystem::Update(float deltaTime)
 		const TerraEngine::Scene::SpatialQueryResult query = spatialIndex.QueryFrustum(frustum, filter);
 		VisibleCommandBuildResult result;
 		result.commands = buildDrawCommandsFromCandidateIndices(collectCandidateIndices(query));
-		VirtualGeometryViewSelectionPacket selectionPacket = applyVirtualGeometrySelection(result.commands, outputKind, viewType, outputId, cameraPosition, targetSize, viewVirtualGeometryQuality);
+		VirtualGeometryViewSelectionPacket selectionPacket = applyVirtualGeometrySelection(result.commands, viewProjection, outputKind, viewType, outputId, cameraPosition, targetSize, viewVirtualGeometryQuality);
 		result.selectedClusters = std::move(selectionPacket.selectedClusters);
 		result.pageNeeds = std::move(selectionPacket.pageNeeds);
 		result.clusterPackets = std::move(selectionPacket.clusterPackets);

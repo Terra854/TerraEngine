@@ -103,6 +103,28 @@ namespace TerraEngine
 			}
 			return { x * 0.5f + 0.5f, y * 0.5f + 0.5f };
 		}
+
+		[[nodiscard]] inline std::array<float, 3u> DecodeOctahedral(
+			const std::array<float, 2u>& encodedUnit) noexcept
+		{
+			float x = encodedUnit[0] * 2.0f - 1.0f;
+			float y = encodedUnit[1] * 2.0f - 1.0f;
+			float z = 1.0f - std::abs(x) - std::abs(y);
+			if(z < 0.0f)
+			{
+				const float previousX = x;
+				x = (1.0f - std::abs(y))
+					* (previousX >= 0.0f ? 1.0f : -1.0f);
+				y = (1.0f - std::abs(previousX))
+					* (y >= 0.0f ? 1.0f : -1.0f);
+			}
+			const float length = std::sqrt(x * x + y * y + z * z);
+			if(!std::isfinite(length) || length <= 1.0e-20f)
+			{
+				return { 0.0f, 0.0f, 1.0f };
+			}
+			return { x / length, y / length, z / length };
+		}
 	} // namespace VirtualGeometryPackedVertexDetail
 
 	// Inputs are already normalized to their asset domains. Position is
@@ -157,5 +179,34 @@ namespace TerraEngine
 			static_cast<float>(ExtractBits(vertex.words, 16u, 16u)) * inverseMaximum * 2.0f - 1.0f,
 			static_cast<float>(ExtractBits(vertex.words, 32u, 16u)) * inverseMaximum * 2.0f - 1.0f
 		};
+	}
+
+	[[nodiscard]] inline std::array<float, 3u> DecodeVirtualGeometryPackedNormal(
+		const VirtualGeometryPackedVertex& vertex) noexcept
+	{
+		using namespace VirtualGeometryPackedVertexDetail;
+		return DecodeOctahedral({
+			static_cast<float>(ExtractBits(vertex.words, 48u, 12u)) / 4095.0f,
+			static_cast<float>(ExtractBits(vertex.words, 60u, 12u)) / 4095.0f });
+	}
+
+	[[nodiscard]] inline std::array<float, 4u> DecodeVirtualGeometryPackedTangent(
+		const VirtualGeometryPackedVertex& vertex) noexcept
+	{
+		using namespace VirtualGeometryPackedVertexDetail;
+		const std::array<float, 3u> direction = DecodeOctahedral({
+			static_cast<float>(ExtractBits(vertex.words, 72u, 10u)) / 1023.0f,
+			static_cast<float>(ExtractBits(vertex.words, 82u, 10u)) / 1023.0f });
+		return { direction[0], direction[1], direction[2],
+			ExtractBits(vertex.words, 92u, 1u) != 0u ? -1.0f : 1.0f };
+	}
+
+	[[nodiscard]] inline std::array<float, 2u> DecodeVirtualGeometryPackedTextureCoordinate(
+		const VirtualGeometryPackedVertex& vertex) noexcept
+	{
+		using namespace VirtualGeometryPackedVertexDetail;
+		return {
+			static_cast<float>(ExtractBits(vertex.words, 96u, 16u)) / 65535.0f,
+			static_cast<float>(ExtractBits(vertex.words, 112u, 16u)) / 65535.0f };
 	}
 } // namespace TerraEngine

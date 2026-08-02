@@ -125,7 +125,7 @@ namespace TerraEngine::Tests
 					"Vulkan must reject immutable packet input from another Scene, Game, reflection, or capture view before frame-owned resources are published.");
 			});
 
-		r.Add("Vulkan.VirtualGeometry.VisibilityDiagnosticsAreOptIn",
+		r.Add("Vulkan.VirtualGeometry.VisibilityPreparationIsDemandDriven",
 			[](TestContext &context)
 			{
 				FrameRenderData frameData{};
@@ -139,14 +139,18 @@ namespace TerraEngine::Tests
 				const std::string source{
 					std::istreambuf_iterator<char>(sourceStream),
 					std::istreambuf_iterator<char>() };
+				const std::size_t productionGate = source.find(
+					"productionComputeRasterRequested");
 				const std::size_t gate = source.find(
-					"if(!frameData.virtualGeometryVisibilityDiagnosticsRequested)");
+					"if(!frameData.virtualGeometryVisibilityDiagnosticsRequested",
+					productionGate);
 				const std::size_t triangleExpansion = source.find(
 					"std::vector<VirtualGeometryRasterTriangleUpload> visibilityTriangles");
-				context.Expect(gate != std::string::npos
+				context.Expect(productionGate != std::string::npos
+						&& gate != std::string::npos
 						&& triangleExpansion != std::string::npos
 						&& gate < triangleExpansion,
-					"The opt-in gate must run before CPU triangle expansion and pixel-buffer preparation.");
+					"Diagnostic or production compute demand must be proven before CPU triangle expansion and pixel-buffer preparation.");
 			});
 	}
 } // namespace TerraEngine::Tests

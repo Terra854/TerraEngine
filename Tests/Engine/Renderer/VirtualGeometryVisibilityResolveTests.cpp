@@ -34,7 +34,7 @@ namespace TerraEngine::Tests
 				context.Expect(shader.find("ReconstructAttributes") != std::string::npos
 					&& shader.find("UnpackSnorm2x16") != std::string::npos,
 					"Resolve must reconstruct canonical attributes and validate screen-space derivatives.");
-				context.Expect(shader.find("sourceTriangle.packedOwnerMaterial") != std::string::npos,
+				context.Expect(shader.find("sourceTriangle.identity.y") != std::string::npos,
 					"Resolve must preserve discrete owner/material identity without interpolation.");
 			});
 	}

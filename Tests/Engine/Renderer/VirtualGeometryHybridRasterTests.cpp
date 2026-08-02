@@ -92,6 +92,47 @@ namespace TerraEngine::Tests
 					"Fail-open hybrid routing must remain visible through Indexed, never a synthetic fallback route.");
 			});
 
+		registry.Add("VirtualGeometry.Visibility.MicrotrianglesPreferComputeRaster",
+			[](TestContext& context)
+			{
+				using namespace TerraEngine::Renderer;
+				VirtualGeometryRasterCandidate microtrianglePacket{};
+				microtrianglePacket.stableId = 1u;
+				microtrianglePacket.projectedPixelArea = 48.0f;
+				microtrianglePacket.triangleCount = 96u;
+				const VirtualGeometryRasterBinPlan plan =
+					BuildVirtualGeometryRasterBinPlan(
+						{ microtrianglePacket }, 64u);
+				context.Expect(
+					plan.computeCount == 1u
+						&& plan.hardwareCount == 0u
+						&& plan.routes.front()
+							== VirtualGeometryRasterRoute::Compute,
+					"Subpixel triangles should avoid fixed-function 2x2 quad allocation.");
+			});
+
+		registry.Add("VirtualGeometry.Visibility.LargeOrUnboundedPacketsStayHardware",
+			[](TestContext& context)
+			{
+				using namespace TerraEngine::Renderer;
+				VirtualGeometryRasterCandidate ordinaryPacket{};
+				ordinaryPacket.stableId = 1u;
+				ordinaryPacket.projectedPixelArea = 4096.0f;
+				ordinaryPacket.triangleCount = 32u;
+				VirtualGeometryRasterCandidate unboundedPacket = ordinaryPacket;
+				unboundedPacket.stableId = 2u;
+				unboundedPacket.projectedPixelArea =
+					kVirtualGeometryComputeMaximumPacketPixelArea + 1.0f;
+				unboundedPacket.preferCompute = true;
+				const VirtualGeometryRasterBinPlan plan =
+					BuildVirtualGeometryRasterBinPlan(
+						{ ordinaryPacket, unboundedPacket }, 64u);
+				context.Expect(
+					plan.hardwareCount == 2u
+						&& plan.computeCount == 0u,
+					"Large packet rectangles must remain on bounded hardware raster work even when compute is preferred.");
+			});
+
 		registry.Add("VirtualGeometry.Visibility.MixedRouteCrackAndImageParityContract",
 			[](TestContext &context)
 			{
@@ -101,10 +142,13 @@ namespace TerraEngine::Tests
 				// Equal-depth hardware/compute overlap is resolved by the smallest stable
 				// primitive identity. Check the executable atomic contract instead of a
 				// cosmetic variable name so this test follows the shader's actual behavior.
-				context.Expect(shader.find("depthKey == previousDepth") != std::string::npos
-					&& shader.find("InterlockedMin(visibility[pixel].x, source.stablePrimitiveId") != std::string::npos,
+				context.Expect(shader.find("Raster.phase == 1u") != std::string::npos
+					&& shader.find("InterlockedMin(") != std::string::npos
+					&& shader.find("source.identity.x") != std::string::npos,
 					"Mixed routes require deterministic stable-identity tie arbitration");
-				context.Expect(shader.find("failOpen") != std::string::npos, "Uncertain mixed-route coverage must fail open");
+				context.Expect(shader.find("Raster.phase == 0u") != std::string::npos
+					&& shader.find("visibility[pixel].x != source.identity.x") != std::string::npos,
+					"Companion visibility fields must publish only after depth and stable ownership are final.");
 			});
 	}
 } // namespace TerraEngine::Tests
