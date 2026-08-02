@@ -88,19 +88,25 @@ namespace TerraEngine::Tests
 				Renderer::Vulkan::VulkanVirtualGeometryVisibilityResources resources{};
 				Renderer::Vulkan::VulkanVirtualGeometryVisibilityPipelines pipelines{};
 				const auto missing = Renderer::Vulkan::BuildVulkanVirtualGeometryVisibilityPlan(
-					8u, 16u, 64u, 64u, 8u,
+					8u, 16u, 2u, 64u, 64u, 8u,
 					resources, pipelines, 3u, 4u);
 				c.Expect(!missing.ready && !missing.unavailableReason.empty(), "Visibility cannot claim execution without complete frame resources and pipelines.");
 				resources.resourcesOwnedByFrame = true;
-				resources.inputTriangleBuffer = reinterpret_cast<VkBuffer>(1u); resources.depthBuffer = reinterpret_cast<VkBuffer>(2u);
+				resources.inputTriangleBuffer = reinterpret_cast<VkBuffer>(1u);
+				resources.setupPacketBuffer = reinterpret_cast<VkBuffer>(14u);
+				resources.setupMeshletBuffer = reinterpret_cast<VkBuffer>(15u);
+				resources.pagePayloadBuffer = reinterpret_cast<VkBuffer>(16u);
+				resources.depthBuffer = reinterpret_cast<VkBuffer>(2u);
 				resources.visibilityRecordBuffer = reinterpret_cast<VkBuffer>(3u); resources.resolvedVisibilityBuffer = reinterpret_cast<VkBuffer>(4u);
 				resources.shadingBinBuffer = reinterpret_cast<VkBuffer>(5u); resources.diagnosticBuffer = reinterpret_cast<VkBuffer>(6u);
+				resources.bindlessDescriptorSet = reinterpret_cast<VkDescriptorSet>(17u);
+				resources.triangleSetupDescriptorSet = reinterpret_cast<VkDescriptorSet>(18u);
 				resources.computeRasterDescriptorSet = reinterpret_cast<VkDescriptorSet>(7u);
 				resources.visibilityResolveDescriptorSet = reinterpret_cast<VkDescriptorSet>(8u);
 				resources.shadingBinsDescriptorSet = reinterpret_cast<VkDescriptorSet>(9u);
-				pipelines.layout = reinterpret_cast<VkPipelineLayout>(10u); pipelines.computeRaster = reinterpret_cast<VkPipeline>(11u); pipelines.visibilityResolve = reinterpret_cast<VkPipeline>(12u); pipelines.shadingBins = reinterpret_cast<VkPipeline>(13u);
+				pipelines.layout = reinterpret_cast<VkPipelineLayout>(10u); pipelines.triangleSetup = reinterpret_cast<VkPipeline>(19u); pipelines.computeRaster = reinterpret_cast<VkPipeline>(11u); pipelines.visibilityResolve = reinterpret_cast<VkPipeline>(12u); pipelines.shadingBins = reinterpret_cast<VkPipeline>(13u);
 				const auto ready = Renderer::Vulkan::BuildVulkanVirtualGeometryVisibilityPlan(
-					21u, 16u, 64u, 32u, 8u,
+					21u, 16u, 4u, 64u, 32u, 8u,
 					resources, pipelines, 3u, 4u);
 				c.Expect(
 					ready.ready && ready.boundedPrimitiveCount == 16u
@@ -144,13 +150,16 @@ namespace TerraEngine::Tests
 				const std::size_t gate = source.find(
 					"if(!frameData.virtualGeometryVisibilityDiagnosticsRequested",
 					productionGate);
-				const std::size_t triangleExpansion = source.find(
-					"std::vector<VirtualGeometryRasterTriangleUpload> visibilityTriangles");
+				const std::size_t gpuSetup = source.find(
+					"std::vector<VirtualGeometryRasterPacketSetupUpload> visibilityPackets");
+				const std::size_t cpuTriangleExpansion = source.find(
+					"VirtualGeometryRasterTriangleUpload");
 				context.Expect(productionGate != std::string::npos
 						&& gate != std::string::npos
-						&& triangleExpansion != std::string::npos
-						&& gate < triangleExpansion,
-					"Diagnostic or production compute demand must be proven before CPU triangle expansion and pixel-buffer preparation.");
+						&& gpuSetup != std::string::npos
+						&& cpuTriangleExpansion == std::string::npos
+						&& gate < gpuSetup,
+					"Diagnostic or production compute demand must be proven before compact GPU-native setup and must never restore per-triangle CPU expansion.");
 			});
 	}
 } // namespace TerraEngine::Tests

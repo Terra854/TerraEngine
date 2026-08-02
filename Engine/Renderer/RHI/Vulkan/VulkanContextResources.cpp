@@ -152,18 +152,30 @@ namespace
 		return true;
 	}
 
-	// ClearMappedBuffer establishes deterministic safe contents for optional
-	// animation inputs and compute outputs before shaders can inspect them.
-	// This is an upload only; it never asks the GPU to return a pose to the CPU.
-	bool ClearMappedBuffer(VmaAllocator allocator, const VulkanBuffer& buffer)
+	// ClearMappedBufferRange establishes deterministic safe contents only for the
+	// bytes a shader may read before overwriting. Large deformation outputs are
+	// intentionally excluded: their dispatch writes every active element, and
+	// clearing their full retained capacity on the CPU dominated animated frames.
+	bool ClearMappedBufferRange(
+		VmaAllocator allocator,
+		const VulkanBuffer& buffer,
+		VkDeviceSize size,
+		VkDeviceSize offset = 0u)
 	{
-		if(allocator == VK_NULL_HANDLE || buffer.allocation == VK_NULL_HANDLE || buffer.size == 0U) return false;
+		if(allocator == VK_NULL_HANDLE || buffer.allocation == VK_NULL_HANDLE
+			|| size == 0u || offset > buffer.size || size > buffer.size - offset) return false;
 		void* mapped = nullptr;
 		if(vmaMapMemory(allocator, buffer.allocation, &mapped) != VK_SUCCESS) return false;
-		std::memset(mapped, 0, static_cast<std::size_t>(buffer.size));
-		vmaFlushAllocation(allocator, buffer.allocation, 0U, buffer.size);
+		std::memset(static_cast<std::uint8_t*>(mapped) + offset, 0,
+			static_cast<std::size_t>(size));
+		vmaFlushAllocation(allocator, buffer.allocation, offset, size);
 		vmaUnmapMemory(allocator, buffer.allocation);
 		return true;
+	}
+
+	bool ClearMappedBuffer(VmaAllocator allocator, const VulkanBuffer& buffer)
+	{
+		return ClearMappedBufferRange(allocator, buffer, buffer.size);
 	}
 
 	// Builds the conventional-mesh morph stream in deterministic target-major
@@ -244,36 +256,35 @@ namespace
 		std::unordered_map<TerraEngine::UUID, std::uint64_t> bytesByMesh;
 	};
 
-	// This byte-exact upload record mirrors RasterTriangle in
-	// VirtualGeometryComputeRaster.comp.hlsl. CPU preparation resolves selected
-	// meshlet primitives to clip space once; the protected compute pass receives
-	// only immutable frame-owned triangle values.
-	struct alignas(16) VirtualGeometryRasterTriangleUpload
+	// One record per selected packet replaces the former 320-byte upload for
+	// every triangle. The GPU setup stage combines this immutable state with the
+	// page-local TEMF payload and optional deformation bridge.
+	struct alignas(16) VirtualGeometryRasterPacketSetupUpload
 	{
-		glm::vec4 clip0 = glm::vec4(0.0f);
-		glm::vec4 clip1 = glm::vec4(0.0f);
-		glm::vec4 clip2 = glm::vec4(0.0f);
-		glm::vec4 world0 = glm::vec4(0.0f);
-		glm::vec4 world1 = glm::vec4(0.0f);
-		glm::vec4 world2 = glm::vec4(0.0f);
-		glm::vec4 normal0 = glm::vec4(0.0f);
-		glm::vec4 normal1 = glm::vec4(0.0f);
-		glm::vec4 normal2 = glm::vec4(0.0f);
-		glm::vec4 tangent0 = glm::vec4(0.0f);
-		glm::vec4 tangent1 = glm::vec4(0.0f);
-		glm::vec4 tangent2 = glm::vec4(0.0f);
-		glm::vec4 uv0 = glm::vec4(0.0f);
-		glm::vec4 uv1 = glm::vec4(0.0f);
-		glm::vec4 uv2 = glm::vec4(0.0f);
+		glm::mat4 viewProjection = glm::mat4(1.0f);
+		glm::mat4 model = glm::mat4(1.0f);
+		glm::mat4 normalTransform = glm::mat4(1.0f);
 		glm::vec4 editorTint = glm::vec4(0.0f);
+		glm::uvec4 payloadState = glm::uvec4(0u);
 		glm::uvec4 identity = glm::uvec4(0u);
 		glm::uvec4 shadingOffsets = glm::uvec4(0u);
 		glm::uvec4 shadingState = glm::uvec4(0u);
 		glm::uvec4 debugState = glm::uvec4(0u);
+		glm::uvec4 deformationState = glm::uvec4(0u);
 	};
 	static_assert(
-		sizeof(VirtualGeometryRasterTriangleUpload) == 320u,
-		"Compute-raster triangle uploads must match the shader ABI.");
+		sizeof(VirtualGeometryRasterPacketSetupUpload) == 304u,
+		"Compute-raster packet setup uploads must match the shader ABI.");
+
+	struct VirtualGeometryRasterMeshletSetupUpload
+	{
+		std::uint32_t packetIndex = 0u;
+		std::uint32_t localMeshletIndex = 0u;
+		std::uint32_t primitiveBase = 0u;
+		std::uint32_t triangleCount = 0u;
+	};
+	static_assert(sizeof(VirtualGeometryRasterMeshletSetupUpload) == 16u,
+		"Compute-raster meshlet work must remain one uint4.");
 
 	std::uint64_t BuildVirtualGeometryPagePayloadResourceSignature(
 		const std::vector<GpuVirtualGeometryPacketRecord>& packets)
@@ -1286,9 +1297,24 @@ bool VulkanContext::Impl::PublishVulkanCpuAnimationResources(
 		return false;
 	}
 
-	std::vector<TerraEngine::Animation::GpuAnimationPaletteRecord> palettes;
-	std::vector<float> morphWeights;
-	std::vector<VulkanGpuAnimationGraphicsRecord> bridgeRecords;
+	if(cpuAnimationFrameResources.size() < MAX_FRAMES_IN_FLIGHT) {
+		cpuAnimationFrameResources.resize(MAX_FRAMES_IN_FLIGHT);
+	}
+	VulkanCpuAnimationFrameResources& resources =
+		cpuAnimationFrameResources[currentFrame];
+	if(resources.live
+		&& resources.rendererGeneration != plan.rendererGeneration) {
+		RetireVulkanCpuAnimationFrameResources(resources);
+	}
+	// These vectors are private to the fence-owned frame slot. Clearing preserves
+	// capacity, which avoids allocator traffic while still rebuilding every
+	// pose-dependent byte from the current immutable CPU animation plan.
+	auto& palettes = resources.paletteUploadScratch;
+	auto& morphWeights = resources.morphWeightUploadScratch;
+	auto& bridgeRecords = resources.bridgeUploadScratch;
+	palettes.clear();
+	morphWeights.clear();
+	bridgeRecords.clear();
 	try {
 		palettes.reserve(paletteCount);
 		morphWeights.reserve(morphWeightCount);
@@ -1342,15 +1368,6 @@ bool VulkanContext::Impl::PublishVulkanCpuAnimationResources(
 		return false;
 	}
 
-	if(cpuAnimationFrameResources.size() < MAX_FRAMES_IN_FLIGHT) {
-		cpuAnimationFrameResources.resize(MAX_FRAMES_IN_FLIGHT);
-	}
-	VulkanCpuAnimationFrameResources& resources =
-		cpuAnimationFrameResources[currentFrame];
-	if(resources.live
-		&& resources.rendererGeneration != plan.rendererGeneration) {
-		RetireVulkanCpuAnimationFrameResources(resources);
-	}
 	const auto ensureBuffer = [this](VulkanBuffer& buffer,
 		VkDeviceSize& capacity, VkDeviceSize requiredBytes,
 		const char* name) {
@@ -1598,6 +1615,58 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 	{
 		return false;
 	}
+	if(deformationFrameResources.size() < MAX_FRAMES_IN_FLIGHT)
+	{
+		deformationFrameResources.resize(MAX_FRAMES_IN_FLIGHT);
+	}
+	VulkanDeformationFrameResources& resources =
+		deformationFrameResources[currentFrame];
+	if(resources.live
+		&& resources.rendererGeneration != plan.rendererGeneration)
+	{
+		RetireVulkanDeformationFrameResources(resources);
+	}
+
+	std::vector<TerraEngine::Renderer::StaticPageKey> requestedStaticPages;
+	{
+		TERRAENGINE_PROFILE_SCOPE(
+			"Vulkan: Deformation Resolve Static Page Cache",
+			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		try
+		{
+			requestedStaticPages.reserve(plan.work.size());
+			for(const TerraEngine::Renderer::DeformationWorkRecord& work : plan.work)
+			{
+				if(requestedStaticPages.empty()
+					|| requestedStaticPages.back() != work.key.page)
+				{
+					requestedStaticPages.push_back(work.key.page);
+				}
+			}
+		}
+		catch(const std::bad_alloc&)
+		{
+			return false;
+		}
+	}
+	const bool reuseStaticPageUpload =
+		resources.staticPageUploadValid
+		&& resources.staticPageByteCount != 0u
+		&& resources.buffers[static_cast<std::size_t>(
+			DescriptorBinding::StaticPageBytes)].buffer != VK_NULL_HANDLE
+		&& resources.capacities[static_cast<std::size_t>(
+			DescriptorBinding::StaticPageBytes)] >= resources.staticPageByteCount
+		&& resources.staticPageUploads.size()
+			== requestedStaticPages.size()
+		&& std::equal(
+			requestedStaticPages.begin(),
+			requestedStaticPages.end(),
+			resources.staticPageUploads.begin(),
+			[](const TerraEngine::Renderer::StaticPageKey& key,
+				const VulkanDeformationFrameResources::StaticPageUploadRecord& cached)
+			{
+				return key == cached.key;
+			});
 
 	enum class PaletteAuthority
 	{
@@ -1616,6 +1685,8 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 		GpuDeformationShaderWorkRecord> shaderWork;
 	std::vector<std::uint8_t> staticPageBytes;
 	std::vector<TerraEngine::Renderer::DeformedPageKey> workKeys;
+	std::vector<VulkanDeformationFrameResources::StaticPageUploadRecord>
+		rebuiltStaticPages;
 	struct RefinementRecord
 	{
 		std::uint32_t parentWorkIndex = 0u;
@@ -1638,6 +1709,10 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 		shaderWork.reserve(plan.work.size());
 		workKeys.reserve(plan.work.size());
 		refinement.reserve(plan.totalClusterBoundsCount);
+		if(!reuseStaticPageUpload)
+		{
+			rebuiltStaticPages.reserve(requestedStaticPages.size());
+		}
 	}
 	catch(const std::bad_alloc&)
 	{
@@ -1659,105 +1734,163 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 			});
 		return found == sections.end() ? nullptr : &*found;
 	};
-	for(std::uint32_t workIndex = 0u;
-		workIndex < plan.work.size();
-		++workIndex)
+	struct CpuPaletteOffsets
 	{
-		const TerraEngine::Renderer::DeformationWorkRecord& source =
-			plan.work[workIndex];
-		const Mesh* mesh =
-			ResourceManager::Instance().GetMesh(source.key.page.meshId);
-		if(mesh == nullptr
-			|| !mesh->hasDeformableDemandedPages)
+		std::uint64_t paletteBytes = 0u;
+		std::uint64_t morphBytes = 0u;
+	};
+	std::unordered_map<std::uint64_t, CpuPaletteOffsets> cpuPaletteOffsets;
+	try
+	{
+		if(pendingCpuAnimationPlan != nullptr)
 		{
-			return false;
-		}
-		const auto entryIt = std::find_if(
-			mesh->deformableDemandedPageEntries.begin(),
-			mesh->deformableDemandedPageEntries.end(),
-			[&source](
-				const TemfDeformableDemandedPageEntry& entry)
+			cpuPaletteOffsets.reserve(pendingCpuAnimationPlan->records.size());
+			CpuPaletteOffsets next{};
+			for(const auto& record : pendingCpuAnimationPlan->records)
 			{
-				return entry.pageId == source.key.page.pageId
-					&& entry.contentGeneration
-						== source.key.page.pageContentGeneration;
-			});
-		if(entryIt == mesh->deformableDemandedPageEntries.end())
-		{
-			return false;
+				cpuPaletteOffsets.try_emplace(record.stableInstanceId, next);
+				next.paletteBytes += record.data->paletteMatrices.size()
+					* sizeof(TerraEngine::Animation::GpuAnimationPaletteRecord);
+				next.morphBytes += record.data->morphWeights.size()
+					* sizeof(float);
+			}
 		}
-		const std::size_t pageIndex = static_cast<std::size_t>(
-			std::distance(mesh->deformableDemandedPageEntries.begin(), entryIt));
-		if(pageIndex >= mesh->deformableDemandedPagePayloads.size()
-			|| pageIndex >= mesh->deformableDemandedPageSections.size()
-			|| staticPageBytes.size()
-				> std::numeric_limits<std::uint32_t>::max())
+	}
+	catch(const std::bad_alloc&)
+	{
+		return false;
+	}
+	{
+		TERRAENGINE_PROFILE_SCOPE(
+			"Vulkan: Deformation Build Dynamic Uploads",
+			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		try
 		{
-			return false;
-		}
-		const std::span<const std::uint8_t> blobBytes =
-			mesh->deformableDemandedPagePayloads[pageIndex];
-		const auto& sections =
-			mesh->deformableDemandedPageSections[pageIndex];
-		const TemfDeformablePageSection* vertices =
-			FindSection(
-				sections,
-				TemfDeformablePageSectionKind::PackedVertices);
-		const TemfDeformablePageSection* skin =
-			FindSection(
-				sections,
-				TemfDeformablePageSectionKind::SkinRecords);
-		const TemfDeformablePageSection* joints =
-			FindSection(
-				sections,
-				TemfDeformablePageSectionKind::JointPalette);
-		const TemfDeformablePageSection* morphTargets =
-			FindSection(
-				sections,
-				TemfDeformablePageSectionKind::MorphTargets);
-		const TemfDeformablePageSection* morphDeltas =
-			FindSection(
-				sections,
-				TemfDeformablePageSectionKind::MorphDeltas);
-		const TemfDeformablePageSection* decode =
-			FindSection(
-				sections,
-				TemfDeformablePageSectionKind::DecodeConstants);
-		if(vertices == nullptr
-			|| skin == nullptr
-			|| joints == nullptr
-			|| decode == nullptr
-			|| decode->byteSize != sizeof(QuantizationInfo)
-			|| vertices->elementCount != source.vertexCount
-			|| skin->elementCount != source.vertexCount)
-		{
-			return false;
-		}
-		const std::size_t alignedBase =
-			(staticPageBytes.size() + 15u) & ~std::size_t{15u};
-		if(alignedBase
-				> std::numeric_limits<std::uint32_t>::max()
-			|| blobBytes.size()
-				> std::numeric_limits<std::uint32_t>::max()
-					- alignedBase)
-		{
-			return false;
-		}
-		staticPageBytes.resize(alignedBase, 0u);
-		const std::uint32_t blobBase =
-			static_cast<std::uint32_t>(alignedBase);
-		staticPageBytes.insert(
-			staticPageBytes.end(),
-			blobBytes.begin(),
-			blobBytes.end());
+			std::size_t staticPageIndex = 0u;
+			for(std::uint32_t workIndex = 0u;
+			workIndex < plan.work.size();
+			++workIndex)
+			{
+			const TerraEngine::Renderer::DeformationWorkRecord& source =
+				plan.work[workIndex];
+			const bool beginsStaticPage = workIndex == 0u
+				|| plan.work[workIndex - 1u].key.page != source.key.page;
+			if(beginsStaticPage && workIndex != 0u)
+			{
+				++staticPageIndex;
+			}
+			if(staticPageIndex >= requestedStaticPages.size())
+			{
+				return false;
+			}
 
-		std::uint64_t paletteOffsetBytes = 0u;
-		std::uint64_t morphOffsetBytes = 0u;
-		if(pendingAnimationImmutablePlan != nullptr
+			if(!reuseStaticPageUpload && beginsStaticPage)
+			{
+				const Mesh* mesh = ResourceManager::Instance().GetMesh(
+					source.key.page.meshId);
+				if(mesh == nullptr || !mesh->hasDeformableDemandedPages)
+				{
+					return false;
+				}
+				const auto entryIt = std::find_if(
+					mesh->deformableDemandedPageEntries.begin(),
+					mesh->deformableDemandedPageEntries.end(),
+					[&source](const TemfDeformableDemandedPageEntry& entry)
+					{
+						return entry.pageId == source.key.page.pageId
+							&& entry.contentGeneration
+								== source.key.page.pageContentGeneration;
+					});
+				if(entryIt == mesh->deformableDemandedPageEntries.end())
+				{
+					return false;
+				}
+				const std::size_t pageIndex = static_cast<std::size_t>(
+					std::distance(mesh->deformableDemandedPageEntries.begin(), entryIt));
+				if(pageIndex >= mesh->deformableDemandedPagePayloads.size()
+					|| pageIndex >= mesh->deformableDemandedPageSections.size())
+				{
+					return false;
+				}
+				const std::span<const std::uint8_t> blobBytes =
+					mesh->deformableDemandedPagePayloads[pageIndex];
+				const auto& sections = mesh->deformableDemandedPageSections[pageIndex];
+				const TemfDeformablePageSection* vertices = FindSection(
+					sections, TemfDeformablePageSectionKind::PackedVertices);
+				const TemfDeformablePageSection* skin = FindSection(
+					sections, TemfDeformablePageSectionKind::SkinRecords);
+				const TemfDeformablePageSection* joints = FindSection(
+					sections, TemfDeformablePageSectionKind::JointPalette);
+				const TemfDeformablePageSection* morphTargets = FindSection(
+					sections, TemfDeformablePageSectionKind::MorphTargets);
+				const TemfDeformablePageSection* morphDeltas = FindSection(
+					sections, TemfDeformablePageSectionKind::MorphDeltas);
+				const TemfDeformablePageSection* decode = FindSection(
+					sections, TemfDeformablePageSectionKind::DecodeConstants);
+				if(vertices == nullptr || skin == nullptr || joints == nullptr
+					|| decode == nullptr || decode->byteSize != sizeof(QuantizationInfo)
+					|| vertices->elementCount != source.vertexCount
+					|| skin->elementCount != source.vertexCount
+					|| decode->relativeByteOffset > blobBytes.size()
+					|| sizeof(QuantizationInfo)
+						> blobBytes.size() - decode->relativeByteOffset)
+				{
+					return false;
+				}
+				const std::size_t alignedBase =
+					(staticPageBytes.size() + 15u) & ~std::size_t{15u};
+				if(alignedBase > std::numeric_limits<std::uint32_t>::max()
+					|| blobBytes.size()
+						> std::numeric_limits<std::uint32_t>::max() - alignedBase)
+				{
+					return false;
+				}
+				staticPageBytes.resize(alignedBase, 0u);
+				VulkanDeformationFrameResources::StaticPageUploadRecord cached{};
+				cached.key = source.key.page;
+				cached.blobBase = static_cast<std::uint32_t>(alignedBase);
+				cached.packedVertexByteOffset = cached.blobBase
+					+ vertices->relativeByteOffset;
+				cached.skinRecordByteOffset = cached.blobBase
+					+ skin->relativeByteOffset;
+				cached.morphDeltaByteOffset = morphDeltas == nullptr ? 0u
+					: cached.blobBase + morphDeltas->relativeByteOffset;
+				cached.jointPaletteByteOffset = cached.blobBase
+					+ joints->relativeByteOffset;
+				cached.vertexCount = vertices->elementCount;
+				cached.jointCount = joints->elementCount;
+				cached.morphTargetCount = morphTargets == nullptr ? 0u
+					: morphTargets->elementCount;
+				cached.geometricError = entryIt->geometricError;
+				cached.deformationError = entryIt->deformationError;
+				QuantizationInfo quantization{};
+				std::memcpy(&quantization,
+					blobBytes.data() + decode->relativeByteOffset,
+					sizeof(quantization));
+				std::copy_n(quantization.positionOffset, 3u,
+					cached.positionOffset.begin());
+				std::copy_n(quantization.positionScale, 3u,
+					cached.positionScale.begin());
+				staticPageBytes.insert(staticPageBytes.end(),
+					blobBytes.begin(), blobBytes.end());
+				rebuiltStaticPages.push_back(std::move(cached));
+			}
+			const auto& staticPage = reuseStaticPageUpload
+				? resources.staticPageUploads[staticPageIndex]
+				: rebuiltStaticPages[staticPageIndex];
+			if(staticPage.key != source.key.page
+				|| staticPage.vertexCount != source.vertexCount)
+			{
+				return false;
+			}
+
+			std::uint64_t paletteOffsetBytes = 0u;
+			std::uint64_t morphOffsetBytes = 0u;
+			if(pendingAnimationImmutablePlan != nullptr
 			&& source.sourceRecordIndex
 				< pendingAnimationImmutablePlan->workPackets.size()
 			&& currentFrame < animationFrameResources.size())
-		{
+			{
 			if(authority == PaletteAuthority::Cpu)
 			{
 				return false;
@@ -1788,67 +1921,42 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 				animationResources.buffers[morphBinding].buffer;
 			morphBytes =
 				animationResources.buffers[morphBinding].size;
-		}
-		else if(pendingCpuAnimationPlan != nullptr
+			}
+			else if(pendingCpuAnimationPlan != nullptr
 			&& currentFrame < cpuAnimationFrameResources.size())
-		{
+			{
 			if(authority == PaletteAuthority::Gpu)
 			{
 				return false;
 			}
 			authority = PaletteAuthority::Cpu;
-			std::size_t recordIndex = 0u;
-			for(;
-				recordIndex
-					< pendingCpuAnimationPlan->records.size();
-				++recordIndex)
-			{
-				const auto& record =
-					pendingCpuAnimationPlan->records[recordIndex];
-				if(record.stableInstanceId
-					== source.key.deformation.stableInstanceId)
-				{
-					break;
-				}
-				paletteOffsetBytes +=
-					record.data->paletteMatrices.size()
-					* sizeof(
-						TerraEngine::Animation::
-							GpuAnimationPaletteRecord);
-				morphOffsetBytes +=
-					record.data->morphWeights.size()
-					* sizeof(float);
-			}
-			if(recordIndex
-				== pendingCpuAnimationPlan->records.size())
+			const auto offsets = cpuPaletteOffsets.find(
+				source.key.deformation.stableInstanceId);
+			if(offsets == cpuPaletteOffsets.end())
 			{
 				return false;
 			}
+			paletteOffsetBytes = offsets->second.paletteBytes;
+			morphOffsetBytes = offsets->second.morphBytes;
 			const auto& cpuResources =
 				cpuAnimationFrameResources[currentFrame];
 			paletteBuffer = cpuResources.paletteBuffer.buffer;
 			paletteBytes = cpuResources.paletteBuffer.size;
 			morphBuffer = cpuResources.morphWeightBuffer.buffer;
 			morphBytes = cpuResources.morphWeightBuffer.size;
-		}
-		else
-		{
-			return false;
-		}
-		if(paletteBuffer == VK_NULL_HANDLE
+			}
+			else
+			{
+				return false;
+			}
+			if(paletteBuffer == VK_NULL_HANDLE
 			|| paletteOffsetBytes % 16u != 0u
 			|| morphOffsetBytes % sizeof(float) != 0u)
-		{
-			return false;
-		}
+			{
+				return false;
+			}
 
-		QuantizationInfo quantization{};
-		std::memcpy(
-			&quantization,
-			blobBytes.data()
-				+ static_cast<std::size_t>(decode->relativeByteOffset),
-			sizeof(quantization));
-		TerraEngine::Renderer::GpuDeformationGenerationRecord
+			TerraEngine::Renderer::GpuDeformationGenerationRecord
 			generation{};
 		generation.stableInstanceId =
 			source.key.deformation.stableInstanceId;
@@ -1864,26 +1972,17 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 			source.key.deformation.sceneGeneration;
 		generation.meshPayloadGeneration =
 			source.key.deformation.meshPayloadGeneration;
-		generations.push_back(generation);
+			generations.push_back(generation);
 
-		TerraEngine::Renderer::GpuDeformationShaderWorkRecord
+			TerraEngine::Renderer::GpuDeformationShaderWorkRecord
 			work{};
 		work.generationRecordIndex = workIndex;
-		work.inputVertexByteOffset =
-			blobBase
-			+ vertices->relativeByteOffset;
-		work.skinRecordByteOffset =
-			blobBase
-			+ skin->relativeByteOffset;
-		work.morphDeltaByteOffset = morphDeltas == nullptr
-				? 0u
-				: blobBase
-					+ morphDeltas->relativeByteOffset;
+		work.inputVertexByteOffset = staticPage.packedVertexByteOffset;
+		work.skinRecordByteOffset = staticPage.skinRecordByteOffset;
+		work.morphDeltaByteOffset = staticPage.morphDeltaByteOffset;
 		work.vertexCount = source.vertexCount;
-		work.jointCount = joints->elementCount;
-		work.morphTargetCount = morphTargets == nullptr
-			? 0u
-			: morphTargets->elementCount;
+		work.jointCount = staticPage.jointCount;
+		work.morphTargetCount = staticPage.morphTargetCount;
 		work.paletteRowOffset =
 			static_cast<std::uint32_t>(
 				paletteOffsetBytes / 16u);
@@ -1892,35 +1991,35 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 				morphOffsetBytes / sizeof(float));
 		work.currentOutputOffset = source.vertexOffset;
 		work.previousOutputOffset = source.vertexOffset;
-		work.jointPaletteByteOffset =
-			blobBase
-			+ joints->relativeByteOffset;
-		std::copy_n(
-			quantization.positionOffset,
-			3u,
-			work.positionOffset.begin());
-		std::copy_n(
-			quantization.positionScale,
-			3u,
-			work.positionScale.begin());
-		shaderWork.push_back(work);
-		workKeys.push_back(source.key);
-		for(std::uint32_t cluster = 0u;
+		work.jointPaletteByteOffset = staticPage.jointPaletteByteOffset;
+		work.positionOffset = staticPage.positionOffset;
+		work.positionScale = staticPage.positionScale;
+			shaderWork.push_back(work);
+			workKeys.push_back(source.key);
+			for(std::uint32_t cluster = 0u;
 			cluster < source.clusterCount;
 			++cluster)
-		{
+			{
 			RefinementRecord record{};
 			record.parentWorkIndex = workIndex;
 			record.selectedWorkIndex = workIndex;
 			record.requestFeedbackIndex =
 				source.clusterBoundsOffset + cluster;
-			record.geometricError = entryIt->geometricError;
-			record.deformationError =
-				entryIt->deformationError;
-			refinement.push_back(record);
+			record.geometricError = staticPage.geometricError;
+			record.deformationError = staticPage.deformationError;
+				refinement.push_back(record);
+			}
+			}
+		}
+		catch(const std::bad_alloc&)
+		{
+			return false;
 		}
 	}
-	if(staticPageBytes.empty()
+	const VkDeviceSize staticPageByteCount = reuseStaticPageUpload
+		? resources.staticPageByteCount
+		: static_cast<VkDeviceSize>(staticPageBytes.size());
+	if(staticPageByteCount == 0u
 		|| generations.size() != plan.work.size()
 		|| shaderWork.size() != plan.work.size()
 		|| refinement.size()
@@ -1930,20 +2029,6 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 		return false;
 	}
 
-	if(deformationFrameResources.size()
-		< MAX_FRAMES_IN_FLIGHT)
-	{
-		deformationFrameResources.resize(
-			MAX_FRAMES_IN_FLIGHT);
-	}
-	VulkanDeformationFrameResources& resources =
-		deformationFrameResources[currentFrame];
-	if(resources.live
-		&& resources.rendererGeneration
-			!= plan.rendererGeneration)
-	{
-		RetireVulkanDeformationFrameResources(resources);
-	}
 	const std::uint32_t previousFrame =
 		(currentFrame + MAX_FRAMES_IN_FLIGHT - 1u)
 		% MAX_FRAMES_IN_FLIGHT;
@@ -1991,48 +2076,58 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 	{
 		return static_cast<std::size_t>(binding);
 	};
-	for(std::size_t binding = 0u;
-		binding
-			< TerraEngine::Renderer::Vulkan::
-				kVulkanDeformationDescriptorBindingCount;
-		++binding)
 	{
-		if(binding == BindingIndex(DescriptorBinding::Palettes)
-			|| binding
-				== BindingIndex(
-					DescriptorBinding::MorphWeights)
-			|| binding
-				== BindingIndex(
-					DescriptorBinding::PreviousVertices))
+		TERRAENGINE_PROFILE_SCOPE(
+			"Vulkan: Deformation Ensure Buffers",
+			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		for(std::size_t binding = 0u;
+			binding < TerraEngine::Renderer::Vulkan::
+				kVulkanDeformationDescriptorBindingCount;
+			++binding)
 		{
-			continue;
+			if(binding == BindingIndex(DescriptorBinding::Palettes)
+				|| binding == BindingIndex(DescriptorBinding::MorphWeights)
+				|| binding == BindingIndex(DescriptorBinding::PreviousVertices))
+			{
+				continue;
+			}
+			VkDeviceSize requiredBytes =
+				descriptorPlan.bindings[binding].minimumByteCount;
+			if(binding == BindingIndex(DescriptorBinding::StaticPageBytes))
+			{
+				requiredBytes = staticPageByteCount;
+			}
+			else if(binding == BindingIndex(DescriptorBinding::Refinement))
+			{
+				requiredBytes = refinement.size() * sizeof(RefinementRecord);
+			}
+			if(!EnsureBuffer(binding, requiredBytes,
+				"Animated Virtual Geometry Frame Buffer"))
+			{
+				RetireVulkanDeformationFrameResources(resources);
+				return false;
+			}
 		}
-		VkDeviceSize requiredBytes =
-			descriptorPlan.bindings[binding].minimumByteCount;
-		if(binding
-			== BindingIndex(
-				DescriptorBinding::StaticPageBytes))
-		{
-			requiredBytes = staticPageBytes.size();
-		}
-		else if(binding
-			== BindingIndex(
-				DescriptorBinding::Refinement))
-		{
-			requiredBytes =
-				refinement.size() * sizeof(RefinementRecord);
-		}
-		if(!EnsureBuffer(
-			binding,
-			requiredBytes,
-			"Animated Virtual Geometry Frame Buffer"))
-		{
-			RetireVulkanDeformationFrameResources(resources);
-			return false;
-		}
-		if(!ClearMappedBuffer(
+	}
+	// Every active input/refinement element is overwritten below, and the
+	// deformation dispatch writes every active vertex. Only diagnostic and
+	// forward-compatible bounds tails need a deterministic sentinel. Bounding
+	// these clears avoids touching retained capacity that this frame cannot read.
+	const VkDeviceSize clusterClearBytes = std::max<VkDeviceSize>(16u,
+		static_cast<VkDeviceSize>(plan.totalClusterBoundsCount)
+			* sizeof(TerraEngine::Renderer::GpuDynamicBoundsRecord));
+	{
+		TERRAENGINE_PROFILE_SCOPE(
+			"Vulkan: Deformation Clear Safety Tails",
+			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		if(!ClearMappedBufferRange(
 			allocator,
-			resources.buffers[binding]))
+			resources.buffers[BindingIndex(DescriptorBinding::ClusterBounds)],
+			clusterClearBytes)
+		|| !ClearMappedBufferRange(
+			allocator,
+			resources.buffers[BindingIndex(DescriptorBinding::Diagnostics)],
+			16u))
 		{
 			RetireVulkanDeformationFrameResources(resources);
 			return false;
@@ -2051,7 +2146,11 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 				bytes,
 				byteCount);
 	};
-	if(!Upload(
+	{
+		TERRAENGINE_PROFILE_SCOPE(
+			"Vulkan: Deformation Upload Active Ranges",
+			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		if(!Upload(
 			DescriptorBinding::Generations,
 			generations.data(),
 			generations.size() * sizeof(generations.front()))
@@ -2059,17 +2158,27 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 			DescriptorBinding::Work,
 			shaderWork.data(),
 			shaderWork.size() * sizeof(shaderWork.front()))
-		|| !Upload(
-			DescriptorBinding::StaticPageBytes,
-			staticPageBytes.data(),
-			staticPageBytes.size())
+		|| (!reuseStaticPageUpload
+			&& !Upload(
+				DescriptorBinding::StaticPageBytes,
+				staticPageBytes.data(),
+				staticPageByteCount))
 		|| !Upload(
 			DescriptorBinding::Refinement,
 			refinement.data(),
 			refinement.size() * sizeof(refinement.front())))
+		{
+			RetireVulkanDeformationFrameResources(resources);
+			return false;
+		}
+	}
+	if(!reuseStaticPageUpload)
 	{
-		RetireVulkanDeformationFrameResources(resources);
-		return false;
+		// Commit cache identity only after the upload succeeds. A failed upload
+		// therefore cannot make a later frame trust partial mapped-buffer contents.
+		resources.staticPageUploads = std::move(rebuiltStaticPages);
+		resources.staticPageByteCount = staticPageByteCount;
+		resources.staticPageUploadValid = true;
 	}
 
 	std::array<
@@ -2483,7 +2592,20 @@ bool VulkanContext::Impl::PublishVulkanAnimationResources(
 	const VkDeviceSize bridgeBytes = static_cast<VkDeviceSize>(
 		plan.workPackets.size() * sizeof(VulkanGpuAnimationGraphicsRecord));
 	if(bridgeBytes == 0U || bridgeBytes > maximumStorageBufferRange) return false;
-	std::vector<VulkanAnimationPoseHistoryIdentity> currentPoseHistoryIdentities;
+	if(animationFrameResources.size() < MAX_FRAMES_IN_FLIGHT) {
+		animationFrameResources.resize(MAX_FRAMES_IN_FLIGHT);
+	}
+	if(!EnsureVulkanAnimationDescriptorSets()) return false;
+	VulkanAnimationFrameResources& resources = animationFrameResources[currentFrame];
+	if(resources.live && resources.rendererGeneration != rendererGeneration) {
+		// A completed frame slot may reuse and overwrite its buffers for a newer
+		// plan generation. Only renderer-session replacement invalidates the native
+		// allocations and bindless identities themselves.
+		RetireVulkanAnimationFrameResources(resources);
+	}
+	std::vector<VulkanAnimationPoseHistoryIdentity>& currentPoseHistoryIdentities =
+		resources.poseHistoryScratch;
+	currentPoseHistoryIdentities.clear();
 	bool requestsHoldLast = false;
 	try {
 		currentPoseHistoryIdentities.reserve(plan.workPackets.size());
@@ -2501,17 +2623,6 @@ bool VulkanContext::Impl::PublishVulkanAnimationResources(
 		}
 	} catch(const std::bad_alloc&) {
 		return false;
-	}
-	if(animationFrameResources.size() < MAX_FRAMES_IN_FLIGHT) {
-		animationFrameResources.resize(MAX_FRAMES_IN_FLIGHT);
-	}
-	if(!EnsureVulkanAnimationDescriptorSets()) return false;
-	VulkanAnimationFrameResources& resources = animationFrameResources[currentFrame];
-	if(resources.live && resources.rendererGeneration != rendererGeneration) {
-		// A completed frame slot may reuse and overwrite its buffers for a newer
-		// plan generation. Only renderer-session replacement invalidates the native
-		// allocations and bindless identities themselves.
-		RetireVulkanAnimationFrameResources(resources);
 	}
 	bool holdLastHistoryCompatible = requestsHoldLast && resources.live
 		&& resources.poseHistoryIdentities == currentPoseHistoryIdentities;
@@ -2567,9 +2678,17 @@ bool VulkanContext::Impl::PublishVulkanAnimationResources(
 	try {
 		for(std::size_t index = 0U; index < descriptorPlan.bindings.size(); ++index) {
 			ensureBuffer(index, descriptorByteCounts[index], "GPU Animation Frame Buffer");
-			const bool preserveLocalPoseHistory = holdLastHistoryCompatible
-				&& index == localPoseBindingIndex;
-			if(!preserveLocalPoseHistory && !ClearMappedBuffer(allocator, resources.buffers[index])) {
+			const std::size_t diagnosticsBindingIndex = static_cast<std::size_t>(
+				TerraEngine::Animation::GpuAnimationDescriptorBinding::Diagnostics);
+			const bool clearLocalPose = index == localPoseBindingIndex
+				&& !holdLastHistoryCompatible;
+			const bool clearDiagnostics = index == diagnosticsBindingIndex;
+			// Input ranges are overwritten below and active output ranges are fully
+			// produced by their dispatch stages. Only local-pose fallback state and
+			// atomic diagnostics require a zero sentinel before compute begins.
+			if((clearLocalPose || clearDiagnostics)
+				&& !ClearMappedBufferRange(allocator, resources.buffers[index],
+					descriptorByteCounts[index], 0U)) {
 				RetireVulkanAnimationFrameResources(resources);
 				return false;
 			}
@@ -2663,7 +2782,9 @@ bool VulkanContext::Impl::PublishVulkanAnimationResources(
 				"GPU Animation Graphics Bridge Buffer");
 			resources.graphicsBridgeCapacityBytes = bridgeBytes;
 		}
-		std::vector<VulkanGpuAnimationGraphicsRecord> bridgeRecords;
+		std::vector<VulkanGpuAnimationGraphicsRecord>& bridgeRecords =
+			resources.graphicsBridgeScratch;
+		bridgeRecords.clear();
 		bridgeRecords.reserve(plan.workPackets.size());
 		for(std::size_t packetIndex = 0U; packetIndex < plan.workPackets.size(); ++packetIndex) {
 			const TerraEngine::Animation::GpuAnimationWorkPacket& packet = plan.workPackets[packetIndex];
@@ -2699,7 +2820,7 @@ bool VulkanContext::Impl::PublishVulkanAnimationResources(
 		return false;
 	}
 	resources.live = true;
-	resources.poseHistoryIdentities = std::move(currentPoseHistoryIdentities);
+	resources.poseHistoryIdentities.swap(currentPoseHistoryIdentities);
 	resources.completionPending = false;
 	return true;
 }
@@ -2772,7 +2893,8 @@ void VulkanContext::Impl::DestroyVirtualGeometryGpuPacketResources(VirtualGeomet
 		&& resources.executorDescriptorSet != VK_NULL_HANDLE) {
 		vkFreeDescriptorSets(device, descriptorPool, 1u, &resources.executorDescriptorSet);
 	}
-	const std::array<VkDescriptorSet, 3> visibilityDescriptorSets{
+	const std::array<VkDescriptorSet, 4> visibilityDescriptorSets{
+		resources.visibilityTriangleSetupDescriptorSet,
 		resources.visibilityComputeRasterDescriptorSet,
 		resources.visibilityResolveDescriptorSet,
 		resources.visibilityShadingBinsDescriptorSet };
@@ -2791,6 +2913,8 @@ void VulkanContext::Impl::DestroyVirtualGeometryGpuPacketResources(VirtualGeomet
 	DestroyBufferImmediate(resources.counterReadbackBuffer);
 	DestroyBufferImmediate(resources.zeroWorkIndirectBuffer);
 	DestroyBufferImmediate(resources.visibilityTriangleBuffer);
+	DestroyBufferImmediate(resources.visibilitySetupPacketBuffer);
+	DestroyBufferImmediate(resources.visibilitySetupMeshletBuffer);
 	DestroyBufferImmediate(resources.visibilityDepthBuffer);
 	DestroyBufferImmediate(resources.visibilityRecordBuffer);
 	DestroyBufferImmediate(resources.resolvedVisibilityBuffer);
@@ -3585,20 +3709,20 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 		return;
 	}
 
-	// Decode the selected owner meshlets into the exact RasterTriangle ABI.
-	// Compute never reinterprets a large C++ packet structure as triangle input,
-	// and every primitive carries the same material/route identity selected by
-	// RenderSystem.
+	// Upload only packet state and compact meshlet work. The GPU setup stage reads
+	// packed page-local vertices/topology and writes the exact RasterTriangle ABI,
+	// eliminating per-frame CPU vertex decode and per-triangle expansion.
 	constexpr std::size_t kMaximumVisibilityPrimitiveCount = 1u << 20u;
 	constexpr std::uint64_t kMaximumVisibilityPixelCount = 1u << 24u;
-	std::vector<VirtualGeometryRasterTriangleUpload> visibilityTriangles;
-	visibilityTriangles.reserve(std::min<std::size_t>(
-		frameData.virtualGeometryGpuPackets.size() * 64u,
-		kMaximumVisibilityPrimitiveCount));
+	constexpr std::uint32_t kRasterDoubleSidedFlag = 1u << 31u;
+	std::vector<VirtualGeometryRasterPacketSetupUpload> visibilityPackets;
+	std::vector<VirtualGeometryRasterMeshletSetupUpload> visibilityMeshlets;
+	visibilityPackets.reserve(frameData.virtualGeometryGpuPackets.size());
+	std::size_t visibilityTriangleCount = 0u;
 	for(const GpuVirtualGeometryPacketRecord& packet :
 		frameData.virtualGeometryGpuPackets)
 	{
-		if(visibilityTriangles.size() >= kMaximumVisibilityPrimitiveCount)
+		if(visibilityTriangleCount >= kMaximumVisibilityPrimitiveCount)
 		{
 			break;
 		}
@@ -3633,20 +3757,102 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 			continue;
 		}
 		const glm::mat4 worldTransform = commandIt->modelMatrix;
-		const glm::mat3 normalTransform = glm::transpose(
-			glm::inverse(glm::mat3(worldTransform)));
-		const glm::mat3 directionTransform = glm::mat3(worldTransform);
 		const std::uint32_t materialIndex = materialIndexMap.contains(
 			packet.materialId)
 			? materialIndexMap.at(packet.materialId)
 			: 0u;
+		const Material* packetMaterial =
+			ResourceManager::Instance().GetMaterial(packet.materialId);
+		const bool doubleSided = packetMaterial != nullptr
+			&& (packetMaterial->header.flags & DoubleSided) != 0u;
+		VirtualGeometryRasterPacketSetupUpload setup;
+		setup.viewProjection = frameData.projectionMatrix * frameData.viewMatrix;
+		setup.model = worldTransform;
+		setup.normalTransform = glm::mat4(glm::transpose(
+			glm::inverse(glm::mat3(worldTransform))));
+		setup.editorTint = commandIt->editorTint;
+		setup.payloadState = glm::uvec4(
+			packet.packetId,
+			packet.pageId,
+			packetMaterial != nullptr ? packetMaterial->header.flags : 0u,
+			INVALID_BINDLESS_BUFFER_INDEX);
+		const std::uint32_t materialBin =
+			(packet.flags >> kVirtualGeometryMaterialBinShift)
+			& kVirtualGeometryMaterialBinMask;
+		const std::uint32_t rasterRoute =
+			(packet.flags >> kVirtualGeometryRasterRouteShift)
+			& kVirtualGeometryRasterRouteMask;
+		setup.identity = glm::uvec4(
+			0u,
+			materialBin | (rasterRoute << 8u),
+			static_cast<std::uint32_t>(executorGeneration),
+			packet.flags | (doubleSided ? kRasterDoubleSidedFlag : 0u));
+		setup.shadingOffsets = glm::uvec4(
+			materialIndex,
+			statsSlotIndex,
+			lightDataOffset,
+			clusterDataOffset);
+		setup.shadingState = glm::uvec4(
+			lightIndexOffset,
+			packet.flags,
+			packet.meshletOffset,
+			packet.packetId);
+		const std::uint32_t selectedClusterCount =
+			std::min(commandIt->selectedVirtualClusterCount, 255u);
+		const std::uint32_t selectedPageNeedCount =
+			std::min(commandIt->selectedVirtualPageNeedCount, 255u);
+		setup.debugState = glm::uvec4(
+			(commandIt->selectedVirtualLod & 0xffu)
+				| (selectedClusterCount << 8u)
+				| (selectedPageNeedCount << 16u)
+				| ((packet.debugIdentity & 0xffu) << 24u),
+			commandIt->meshDataIndex,
+			packet.packetId,
+			selectedPageNeedCount);
+		setup.deformationState = glm::uvec4(
+			INVALID_BINDLESS_BUFFER_INDEX,
+			packet.meshletOffset,
+			0u,
+			0u);
+		if(deformationComputeRecordedForCurrentFrame
+			&& pendingDeformationImmutablePlan != nullptr
+			&& activeDeformationGraphicsBufferIndex
+				!= INVALID_BINDLESS_BUFFER_INDEX
+			&& currentFrame < deformationFrameResources.size())
+		{
+			const TerraEngine::Renderer::AnimationRenderBinding& binding =
+				commandIt->animationBinding;
+			const std::uint64_t stableInstanceId = binding.gpu.IsComplete()
+				? binding.gpu.stableInstanceId
+				: (static_cast<std::uint64_t>(binding.animatorSlotIndex) << 32u)
+					| binding.animatorGeneration;
+			const auto& deformationResources = deformationFrameResources[currentFrame];
+			const auto deformationGroup = std::find_if(
+				deformationResources.graphicsGroups.begin(),
+				deformationResources.graphicsGroups.end(),
+				[&](const VulkanDeformationFrameResources::GraphicsGroup& group)
+				{
+					return group.stableInstanceId == stableInstanceId
+						&& group.meshId == commandIt->meshId;
+				});
+			if(deformationResources.live
+				&& deformationResources.frameId
+					== pendingDeformationImmutablePlan->frameId
+				&& deformationGroup != deformationResources.graphicsGroups.end())
+			{
+				setup.payloadState.w = activeDeformationGraphicsBufferIndex;
+				setup.deformationState.x = deformationGroup->headerWordOffset;
+			}
+		}
+		const std::uint32_t setupPacketIndex =
+			static_cast<std::uint32_t>(visibilityPackets.size());
+		const std::size_t packetTriangleBase = visibilityTriangleCount;
 		const std::uint32_t endMeshlet = std::min<std::uint32_t>(
 			packet.meshletOffset + packet.meshletCount,
 			static_cast<std::uint32_t>(mesh->meshletRecords.size()));
 		for(std::uint32_t meshletIndex = packet.meshletOffset;
 			meshletIndex < endMeshlet
-				&& visibilityTriangles.size()
-					< kMaximumVisibilityPrimitiveCount;
+				&& visibilityTriangleCount < kMaximumVisibilityPrimitiveCount;
 			++meshletIndex)
 		{
 			const MeshletRecord& meshlet = mesh->meshletRecords[meshletIndex];
@@ -3658,167 +3864,55 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 			{
 				continue;
 			}
-			for(std::uint32_t primitiveOffset = 0u;
-				primitiveOffset < meshlet.primitiveIndexCount
-					&& visibilityTriangles.size()
-						< kMaximumVisibilityPrimitiveCount;
-				primitiveOffset += 3u)
+			const std::uint32_t triangleCount =
+				meshlet.primitiveIndexCount / 3u;
+			// Empty meshlets carry no setup work. Skipping them also prevents a
+			// zero-length work record from referencing a packet record that is not
+			// published below.
+			if(triangleCount == 0u)
 			{
-				glm::vec4 clipPositions[3]{};
-				glm::vec4 worldPositions[3]{};
-				glm::vec4 normals[3]{};
-				glm::vec4 tangents[3]{};
-				glm::vec4 textureCoordinates[3]{};
-				bool validTriangle = true;
-				for(std::uint32_t corner = 0u; corner < 3u; ++corner)
-				{
-					const std::uint8_t localVertex =
-						mesh->meshletPrimitiveIndexData[
-							static_cast<std::size_t>(
-								meshlet.primitiveIndexOffset)
-							+ primitiveOffset + corner];
-					std::uint32_t globalVertex = 0u;
-					if(localVertex >= meshlet.vertexCount
-						|| !TryReadVirtualGeometryRemapIndex(
-							*mesh,
-							meshlet.vertexOffset + localVertex,
-							globalVertex))
-					{
-						validTriangle = false;
-						break;
-					}
-					const std::size_t vertexByteOffset =
-						static_cast<std::size_t>(globalVertex)
-						* kMeshletPackedVertexStrideBytes;
-					if(vertexByteOffset
-						+ sizeof(TerraEngine::VirtualGeometryPackedVertex)
-						> mesh->meshletVertexData.size())
-					{
-						validTriangle = false;
-						break;
-					}
-					TerraEngine::VirtualGeometryPackedVertex packedVertex{};
-					std::memcpy(
-						&packedVertex,
-						mesh->meshletVertexData.data()
-							+ vertexByteOffset,
-						sizeof(packedVertex));
-					const std::array<float, 3u> decodedPosition =
-						TerraEngine::DecodeVirtualGeometryPackedPosition(
-							packedVertex);
-					const glm::vec3 normalizedPosition(
-						decodedPosition[0],
-						decodedPosition[1],
-						decodedPosition[2]);
-					const glm::vec3 localPosition(
-						mesh->runtimeLayout.quantization.positionOffset[0]
-							+ normalizedPosition.x
-								* mesh->runtimeLayout.quantization.positionScale[0],
-						mesh->runtimeLayout.quantization.positionOffset[1]
-							+ normalizedPosition.y
-								* mesh->runtimeLayout.quantization.positionScale[1],
-						mesh->runtimeLayout.quantization.positionOffset[2]
-							+ normalizedPosition.z
-								* mesh->runtimeLayout.quantization.positionScale[2]);
-					const std::array<float, 3u> decodedNormal =
-						TerraEngine::DecodeVirtualGeometryPackedNormal(
-							packedVertex);
-					const std::array<float, 4u> decodedTangent =
-						TerraEngine::DecodeVirtualGeometryPackedTangent(
-							packedVertex);
-					const std::array<float, 2u> decodedUv =
-						TerraEngine::DecodeVirtualGeometryPackedTextureCoordinate(
-							packedVertex);
-					worldPositions[corner] = worldTransform
-						* glm::vec4(localPosition, 1.0f);
-					clipPositions[corner] =
-						frameData.projectionMatrix * frameData.viewMatrix
-						* worldPositions[corner];
-					normals[corner] = glm::vec4(glm::normalize(
-						normalTransform * glm::vec3(
-							decodedNormal[0], decodedNormal[1], decodedNormal[2])), 0.0f);
-					tangents[corner] = glm::vec4(glm::normalize(
-						directionTransform * glm::vec3(
-							decodedTangent[0], decodedTangent[1], decodedTangent[2])),
-						decodedTangent[3]);
-					textureCoordinates[corner] = glm::vec4(
-						mesh->runtimeLayout.quantization.uvOffset[0]
-							+ decodedUv[0]
-								* mesh->runtimeLayout.quantization.uvScale[0],
-						mesh->runtimeLayout.quantization.uvOffset[1]
-							+ decodedUv[1]
-								* mesh->runtimeLayout.quantization.uvScale[1],
-						0.0f,
-						0.0f);
-				}
-				if(!validTriangle)
-				{
-					continue;
-				}
-				VirtualGeometryRasterTriangleUpload triangle;
-				triangle.clip0 = clipPositions[0];
-				triangle.clip1 = clipPositions[1];
-				triangle.clip2 = clipPositions[2];
-				triangle.world0 = worldPositions[0];
-				triangle.world1 = worldPositions[1];
-				triangle.world2 = worldPositions[2];
-				triangle.normal0 = normals[0];
-				triangle.normal1 = normals[1];
-				triangle.normal2 = normals[2];
-				triangle.tangent0 = tangents[0];
-				triangle.tangent1 = tangents[1];
-				triangle.tangent2 = tangents[2];
-				triangle.uv0 = textureCoordinates[0];
-				triangle.uv1 = textureCoordinates[1];
-				triangle.uv2 = textureCoordinates[2];
-				triangle.editorTint = commandIt->editorTint;
-				const std::uint32_t stablePrimitiveId =
-					static_cast<std::uint32_t>(
-						visibilityTriangles.size());
-				const std::uint32_t materialBin =
-					(packet.flags >> kVirtualGeometryMaterialBinShift)
-					& kVirtualGeometryMaterialBinMask;
-				const std::uint32_t rasterRoute =
-					(packet.flags >> kVirtualGeometryRasterRouteShift)
-					& kVirtualGeometryRasterRouteMask;
-				triangle.identity = glm::uvec4(
-					stablePrimitiveId,
-					materialBin | (rasterRoute << 8u),
-					static_cast<std::uint32_t>(executorGeneration),
-					packet.flags);
-				triangle.shadingOffsets = glm::uvec4(
-					materialIndex,
-					statsSlotIndex,
-					lightDataOffset,
-					clusterDataOffset);
-				triangle.shadingState = glm::uvec4(
-					lightIndexOffset,
-					packet.flags,
-					meshletIndex,
-					packet.packetId);
-				const std::uint32_t selectedClusterCount =
-					std::min(commandIt->selectedVirtualClusterCount, 255u);
-				const std::uint32_t selectedPageNeedCount =
-					std::min(commandIt->selectedVirtualPageNeedCount, 255u);
-				triangle.debugState = glm::uvec4(
-					(commandIt->selectedVirtualLod & 0xffu)
-						| (selectedClusterCount << 8u)
-						| (selectedPageNeedCount << 16u)
-						| ((packet.debugIdentity & 0xffu) << 24u),
-					commandIt->meshDataIndex,
-					packet.packetId,
-					selectedPageNeedCount);
-				visibilityTriangles.push_back(triangle);
+				continue;
 			}
+			const std::size_t boundedTriangleCount = std::min<std::size_t>(
+				triangleCount,
+				kMaximumVisibilityPrimitiveCount - visibilityTriangleCount);
+			visibilityMeshlets.push_back({
+				setupPacketIndex,
+				meshletIndex - packet.meshletOffset,
+				static_cast<std::uint32_t>(visibilityTriangleCount),
+				static_cast<std::uint32_t>(boundedTriangleCount) });
+			visibilityTriangleCount += boundedTriangleCount;
+		}
+		if(visibilityTriangleCount != packetTriangleBase)
+		{
+			visibilityPackets.push_back(setup);
 		}
 	}
-	ensureAndWriteBuffer(
-		resources.visibilityTriangleBuffer,
-		resources.visibilityTriangleCapacity,
-		visibilityTriangles.size(),
-		sizeof(VirtualGeometryRasterTriangleUpload),
-		visibilityTriangles.data(),
-		"Virtual Geometry Compute Raster Triangle Buffer");
+	ensureAndWriteBuffer(resources.visibilitySetupPacketBuffer,
+		resources.visibilitySetupPacketCapacity, visibilityPackets.size(),
+		sizeof(VirtualGeometryRasterPacketSetupUpload), visibilityPackets.data(),
+		"Virtual Geometry Compute Raster Packet Setup Buffer");
+	ensureAndWriteBuffer(resources.visibilitySetupMeshletBuffer,
+		resources.visibilitySetupMeshletCapacity, visibilityMeshlets.size(),
+		sizeof(VirtualGeometryRasterMeshletSetupUpload), visibilityMeshlets.data(),
+		"Virtual Geometry Compute Raster Meshlet Setup Buffer");
+	if(visibilityTriangleCount != 0u)
+	{
+		const VkDeviceSize requiredTriangleBytes = static_cast<VkDeviceSize>(
+			visibilityTriangleCount * 320u);
+		if(resources.visibilityTriangleBuffer.buffer == VK_NULL_HANDLE
+			|| resources.visibilityTriangleCapacity < visibilityTriangleCount
+			|| resources.visibilityTriangleBuffer.size < requiredTriangleBytes)
+		{
+			RetireBuffer(resources.visibilityTriangleBuffer);
+			resources.visibilityTriangleBuffer = CreateBuffer(
+				requiredTriangleBytes,
+				VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+				VMA_MEMORY_USAGE_GPU_ONLY,
+				"Virtual Geometry GPU-Native Raster Triangle Buffer");
+			resources.visibilityTriangleCapacity = visibilityTriangleCount;
+		}
+	}
 
 	// Visibility records are pixel-addressed, not primitive-addressed. Preserve
 	// the view's real aspect ratio and fail closed instead of allocating an
@@ -3872,13 +3966,22 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 	TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryVisibilityResources visibilityResources;
 	visibilityResources.inputTriangleBuffer =
 		resources.visibilityTriangleBuffer.buffer;
+	visibilityResources.setupPacketBuffer = resources.visibilitySetupPacketBuffer.buffer;
+	visibilityResources.setupMeshletBuffer = resources.visibilitySetupMeshletBuffer.buffer;
+	visibilityResources.pagePayloadBuffer = resources.pagePayloadBuffer.buffer;
 	visibilityResources.depthBuffer = resources.visibilityDepthBuffer.buffer;
 	visibilityResources.visibilityRecordBuffer = resources.visibilityRecordBuffer.buffer;
 	visibilityResources.resolvedVisibilityBuffer = resources.resolvedVisibilityBuffer.buffer;
 	visibilityResources.shadingBinBuffer = resources.shadingBinBuffer.buffer;
 	visibilityResources.diagnosticBuffer = resources.counterReadbackBuffer.buffer;
+	visibilityResources.bindlessDescriptorSet = currentFrame < globalDescriptorSets.size()
+		? globalDescriptorSets[currentFrame] : VK_NULL_HANDLE;
 	visibilityResources.resourcesOwnedByFrame = resources.live;
 	if(visibilityResources.inputTriangleBuffer == VK_NULL_HANDLE
+		|| visibilityResources.setupPacketBuffer == VK_NULL_HANDLE
+		|| visibilityResources.setupMeshletBuffer == VK_NULL_HANDLE
+		|| visibilityResources.pagePayloadBuffer == VK_NULL_HANDLE
+		|| visibilityResources.bindlessDescriptorSet == VK_NULL_HANDLE
 		|| visibilityResources.depthBuffer == VK_NULL_HANDLE
 		|| visibilityResources.visibilityRecordBuffer == VK_NULL_HANDLE
 		|| visibilityResources.resolvedVisibilityBuffer == VK_NULL_HANDLE
@@ -3887,14 +3990,16 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 		virtualGeometryVisibilityUnavailableReason = "Virtual-geometry visibility frame storage buffers are unavailable for this view.";
 	}
 	else if(EnsureVulkanVirtualGeometryVisibilityPipelines()) {
-		if(resources.visibilityComputeRasterDescriptorSet == VK_NULL_HANDLE
+		if(resources.visibilityTriangleSetupDescriptorSet == VK_NULL_HANDLE
+			|| resources.visibilityComputeRasterDescriptorSet == VK_NULL_HANDLE
 			|| resources.visibilityResolveDescriptorSet == VK_NULL_HANDLE
 			|| resources.visibilityShadingBinsDescriptorSet == VK_NULL_HANDLE) {
-			const std::array<VkDescriptorSetLayout, 3> layouts{
+			const std::array<VkDescriptorSetLayout, 4> layouts{
+				virtualGeometryVisibilityDescriptorSetLayout,
 				virtualGeometryVisibilityDescriptorSetLayout,
 				virtualGeometryVisibilityDescriptorSetLayout,
 				virtualGeometryVisibilityDescriptorSetLayout };
-			std::array<VkDescriptorSet, 3> descriptorSets{};
+			std::array<VkDescriptorSet, 4> descriptorSets{};
 			VkDescriptorSetAllocateInfo allocationInfo{};
 			allocationInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
 			allocationInfo.descriptorPool = descriptorPool;
@@ -3904,23 +4009,30 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 				virtualGeometryVisibilityUnavailableReason = "Could not allocate virtual-geometry visibility descriptor sets.";
 			}
 			else {
-				resources.visibilityComputeRasterDescriptorSet = descriptorSets[0];
-				resources.visibilityResolveDescriptorSet = descriptorSets[1];
-				resources.visibilityShadingBinsDescriptorSet = descriptorSets[2];
+				resources.visibilityTriangleSetupDescriptorSet = descriptorSets[0];
+				resources.visibilityComputeRasterDescriptorSet = descriptorSets[1];
+				resources.visibilityResolveDescriptorSet = descriptorSets[2];
+				resources.visibilityShadingBinsDescriptorSet = descriptorSets[3];
 			}
 		}
-		if(resources.visibilityComputeRasterDescriptorSet != VK_NULL_HANDLE
+		if(resources.visibilityTriangleSetupDescriptorSet != VK_NULL_HANDLE
+			&& resources.visibilityComputeRasterDescriptorSet != VK_NULL_HANDLE
 			&& resources.visibilityResolveDescriptorSet != VK_NULL_HANDLE
 			&& resources.visibilityShadingBinsDescriptorSet != VK_NULL_HANDLE) {
-			const std::array<std::array<VkDescriptorBufferInfo, 4>, 3> bufferInfos{{
-				{{ { resources.visibilityTriangleBuffer.buffer, 0u, resources.visibilityTriangleBuffer.size }, { resources.visibilityDepthBuffer.buffer, 0u, resources.visibilityDepthBuffer.size }, { resources.visibilityRecordBuffer.buffer, 0u, resources.visibilityRecordBuffer.size }, { resources.counterReadbackBuffer.buffer, 0u, resources.counterReadbackBuffer.size } }},
-				{{ { resources.visibilityRecordBuffer.buffer, 0u, resources.visibilityRecordBuffer.size }, { resources.resolvedVisibilityBuffer.buffer, 0u, resources.resolvedVisibilityBuffer.size }, { resources.counterReadbackBuffer.buffer, 0u, resources.counterReadbackBuffer.size }, { resources.visibilityTriangleBuffer.buffer, 0u, resources.visibilityTriangleBuffer.size } }},
-				{{ { resources.resolvedVisibilityBuffer.buffer, 0u, resources.resolvedVisibilityBuffer.size }, { resources.shadingBinBuffer.buffer, 0u, resources.shadingBinBuffer.size }, { resources.counterReadbackBuffer.buffer, 0u, resources.counterReadbackBuffer.size }, { resources.counterReadbackBuffer.buffer, 0u, resources.counterReadbackBuffer.size } }} }};
-			const std::array<VkDescriptorSet, 3> descriptorSets{
+			const VkDescriptorBufferInfo diagnosticInfo{
+				resources.counterReadbackBuffer.buffer, 0u,
+				resources.counterReadbackBuffer.size };
+			const std::array<std::array<VkDescriptorBufferInfo, 6>, 4> bufferInfos{{
+				{{ { resources.visibilitySetupPacketBuffer.buffer, 0u, resources.visibilitySetupPacketBuffer.size }, { resources.visibilitySetupMeshletBuffer.buffer, 0u, resources.visibilitySetupMeshletBuffer.size }, { resources.pagePayloadBuffer.buffer, 0u, resources.pagePayloadBuffer.size }, { resources.visibilityTriangleBuffer.buffer, 0u, resources.visibilityTriangleBuffer.size }, diagnosticInfo, diagnosticInfo }},
+				{{ { resources.visibilityTriangleBuffer.buffer, 0u, resources.visibilityTriangleBuffer.size }, { resources.visibilityDepthBuffer.buffer, 0u, resources.visibilityDepthBuffer.size }, { resources.visibilityRecordBuffer.buffer, 0u, resources.visibilityRecordBuffer.size }, diagnosticInfo, diagnosticInfo, diagnosticInfo }},
+				{{ { resources.visibilityRecordBuffer.buffer, 0u, resources.visibilityRecordBuffer.size }, { resources.resolvedVisibilityBuffer.buffer, 0u, resources.resolvedVisibilityBuffer.size }, diagnosticInfo, { resources.visibilityTriangleBuffer.buffer, 0u, resources.visibilityTriangleBuffer.size }, diagnosticInfo, diagnosticInfo }},
+				{{ { resources.resolvedVisibilityBuffer.buffer, 0u, resources.resolvedVisibilityBuffer.size }, { resources.shadingBinBuffer.buffer, 0u, resources.shadingBinBuffer.size }, diagnosticInfo, diagnosticInfo, diagnosticInfo, diagnosticInfo }} }};
+			const std::array<VkDescriptorSet, 4> descriptorSets{
+				resources.visibilityTriangleSetupDescriptorSet,
 				resources.visibilityComputeRasterDescriptorSet,
 				resources.visibilityResolveDescriptorSet,
 				resources.visibilityShadingBinsDescriptorSet };
-			std::array<VkWriteDescriptorSet, 12> writes{};
+			std::array<VkWriteDescriptorSet, 24> writes{};
 			for(std::uint32_t passIndex = 0u; passIndex < descriptorSets.size(); ++passIndex) {
 				for(std::uint32_t binding = 0u; binding < bufferInfos[passIndex].size(); ++binding) {
 					VkWriteDescriptorSet& write = writes[passIndex * bufferInfos[passIndex].size() + binding];
@@ -3933,6 +4045,7 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 				}
 			}
 			vkUpdateDescriptorSets(device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0u, nullptr);
+			visibilityResources.triangleSetupDescriptorSet = resources.visibilityTriangleSetupDescriptorSet;
 			visibilityResources.computeRasterDescriptorSet = resources.visibilityComputeRasterDescriptorSet;
 			visibilityResources.visibilityResolveDescriptorSet = resources.visibilityResolveDescriptorSet;
 			visibilityResources.shadingBinsDescriptorSet = resources.visibilityShadingBinsDescriptorSet;
@@ -3948,9 +4061,12 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 			: glm::uvec2(0u);
 	latestVirtualGeometryVisibilityPlan = TerraEngine::Renderer::Vulkan::BuildVulkanVirtualGeometryVisibilityPlan(
 		static_cast<std::uint32_t>(std::min<std::size_t>(
-			visibilityTriangles.size(),
+			visibilityTriangleCount,
 			std::numeric_limits<std::uint32_t>::max())),
 		boundedVisibilityCapacity,
+		static_cast<std::uint32_t>(std::min<std::size_t>(
+			visibilityMeshlets.size(),
+			std::numeric_limits<std::uint32_t>::max())),
 		boundedVisibilityTargetSize.x,
 		boundedVisibilityTargetSize.y,
 		static_cast<std::uint32_t>(kVisibilityMaterialBinCount),
@@ -3964,7 +4080,7 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 		latestVirtualGeometryVisibilityPlan.unavailableReason = virtualGeometryVisibilityUnavailableReason;
 	}
 
-	// CPU-expanded commands remain the diagnosed fail-open fallback. When all
+	// Ordinary hardware commands remain the diagnosed fail-open fallback. When all
 	// executor stages record successfully, the main mesh-task pass consumes the
 	// GPU-authored 16-byte indirect records from this frame-owned buffer.
 }

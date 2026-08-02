@@ -107,14 +107,19 @@ void RasterizeTriangle(RasterVertex vertex0, RasterVertex vertex1, RasterVertex 
 	float2 screen1 = (vertex1.clip.xy / vertex1.clip.w * 0.5f + 0.5f) * float2(width, height);
 	float2 screen2 = (vertex2.clip.xy / vertex2.clip.w * 0.5f + 0.5f) * float2(width, height);
 	float signedArea = EdgeFunction(screen0, screen1, screen2);
-	// Production compute packets are restricted to single-sided default
-	// materials. EdgeFunction has the opposite sign from the conventional cross
-	// product, so Vulkan's CCW front faces arrive negative. Reject the other
-	// winding, then normalize coverage math to a positive area.
-	if(signedArea >= -1e-8f) return;
-	const RasterVertex swapVertex = vertex1; vertex1 = vertex2; vertex2 = swapVertex;
-	const float2 swapScreen = screen1; screen1 = screen2; screen2 = swapScreen;
-	signedArea = -signedArea;
+	// EdgeFunction has the opposite sign from the conventional cross product, so
+	// Vulkan's CCW front faces arrive negative. Double-sided default materials
+	// accept either winding; single-sided packets retain hardware culling parity.
+	const bool doubleSided = (source.identity.w
+		& TE_VIRTUAL_GEOMETRY_RASTER_FLAG_DOUBLE_SIDED) != 0u;
+	if(!doubleSided && signedArea >= -1e-8f) return;
+	if(abs(signedArea) <= 1e-8f) return;
+	if(signedArea < 0.0f)
+	{
+		const RasterVertex swapVertex = vertex1; vertex1 = vertex2; vertex2 = swapVertex;
+		const float2 swapScreen = screen1; screen1 = screen2; screen2 = swapScreen;
+		signedArea = -signedArea;
+	}
 	const float2 rawMinimum = min(screen0, min(screen1, screen2));
 	const float2 rawMaximum = max(screen0, max(screen1, screen2));
 	if(rawMaximum.x < 0.0f || rawMaximum.y < 0.0f

@@ -1,4 +1,4 @@
-// Shared CPU-uploaded triangle ABI for compute raster, resolve, and composite.
+// Shared GPU-authored triangle ABI for compute raster, resolve, and composite.
 // Keeping one declaration prevents a shader stage from silently reading a
 // different stride after the production visibility payload evolves.
 #ifndef TERRAENGINE_VIRTUAL_GEOMETRY_RASTER_TRIANGLE_HLSLI

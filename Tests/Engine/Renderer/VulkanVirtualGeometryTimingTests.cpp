@@ -12,7 +12,8 @@ namespace TerraEngine::Tests
 			{
 				const auto markers = TerraEngine::Renderer::Vulkan::CreateVulkanVirtualGeometryStageMarkers();
 
-				context.ExpectEqual(static_cast<std::size_t>(13u),
+				context.ExpectEqual(
+					TerraEngine::Renderer::Vulkan::kVulkanVirtualGeometryStageCount,
 					markers.size(),
 					"Vulkan timing must explicitly own every virtual-geometry stage, including unsupported routes.");
 				for (const TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryStageMarker &marker : markers)

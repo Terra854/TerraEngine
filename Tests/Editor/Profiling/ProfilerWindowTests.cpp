@@ -1,5 +1,9 @@
 #include "TestHarness.h"
+#include "Editor/TerraEngine-Editor/Profiling/ProfilerDiagnosticAnalysis.h"
+#include "Editor/TerraEngine-Editor/Profiling/ProfilerSampleHierarchy.h"
 
+#include <algorithm>
+#include <chrono>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -77,6 +81,115 @@ namespace TerraEngine::EditorTests
 
 	void RegisterProfilerWindowTests(TestRegistry& registry)
 	{
+		registry.Add("ProfilerWindow.SampleHierarchy.ValidatesParentsAndRebuildsPresentationDepth", [](TestContext& context) {
+			using TerraEngine::EditorProfiling::BuildProfilerSampleHierarchy;
+			using TerraEngine::EditorProfiling::ProfilerSampleDisplayName;
+			using TerraEngine::Profiling::ProfilerFrameRecord;
+			using TerraEngine::Profiling::ProfilerModuleId;
+			using TerraEngine::Profiling::ProfilerSample;
+
+			auto sample = [](std::uint64_t id, std::uint64_t parentId, const char* name,
+				const char* task, const char* thread, double startMs, double durationMs, std::uint32_t capturedDepth) {
+				ProfilerSample value;
+				value.sampleId = id;
+				value.parentSampleId = parentId;
+				value.moduleId = ProfilerModuleId::CpuEngine;
+				value.name = name;
+				value.taskLabel = task;
+				value.threadLabel = thread;
+				value.startMs = startMs;
+				value.durationMs = durationMs;
+				value.depth = capturedDepth;
+				return value;
+			};
+
+			ProfilerFrameRecord frame;
+			// Deliberately shuffle input order and captured depths. Parent IDs and
+			// validated intervals, not serialization order, must define the UI tree.
+			frame.samples.push_back(sample(2u, 1u, "Child", "", "Main", 1.0, 4.0, 9u));
+			frame.samples.push_back(sample(1u, 0u, "Root", "", "Main", 0.0, 10.0, 7u));
+			frame.samples.push_back(sample(3u, 1u, "JobGraph::ProtectedJob", "RenderSystem.RenderSnapshot", "Main", 3.0, 4.0, 12u));
+			frame.samples.push_back(sample(4u, 1u, "Wrong Thread", "", "Worker", 2.0, 1.0, 20u));
+
+			const auto hierarchy = BuildProfilerSampleHierarchy(frame, ProfilerModuleId::CpuEngine);
+			auto findNode = [&hierarchy](std::uint64_t sampleId) -> const TerraEngine::EditorProfiling::ProfilerSampleHierarchyNode& {
+				const auto found = std::find_if(hierarchy.nodes.begin(), hierarchy.nodes.end(), [&hierarchy, sampleId](const auto& node) {
+					return hierarchy.samples[node.sampleIndex].sampleId == sampleId;
+				});
+				return *found;
+			};
+
+			context.ExpectEqual(std::uint32_t(0u), findNode(1u).presentationDepth,
+				"A validated parent should be presented as a root regardless of captured depth.");
+			context.ExpectEqual(std::uint32_t(1u), findNode(2u).presentationDepth,
+				"A valid child should be indented exactly one rebuilt level below its parent.");
+			context.ExpectEqual(std::uint32_t(0u), findNode(4u).presentationDepth,
+				"A cross-thread parent link should be rejected and presented as a root.");
+			context.ExpectEqual(std::string("RenderSystem.RenderSnapshot"),
+				ProfilerSampleDisplayName(hierarchy.samples[findNode(3u).sampleIndex]),
+				"Generic scheduler wrappers should display their workload label.");
+			context.ExpectEqual(4.0, findNode(1u).selfDurationMs,
+				"Overlapping child intervals should be merged before calculating parent self time.");
+		});
+
+		registry.Add("ProfilerWindow.Diagnostics.BuildsTruthfulContextAndCoverage", [](TestContext& context) {
+			using namespace TerraEngine::EditorProfiling;
+			using namespace TerraEngine::Profiling;
+			ProfilerFrameRecord frame;
+			frame.durationMs = 10.0;
+			frame.samples = {
+				{1u, 0u, ProfilerModuleId::CpuEngine, "Engine::Update", "991", "", 0.0, 10.0, 0u, 1u, true},
+				{2u, 1u, ProfilerModuleId::CpuEngine, "JobGraph::ProtectedJob", "991", "RenderSystem", 1.0, 4.0, 1u, 1u, true},
+				{3u, 2u, ProfilerModuleId::CpuEngine, "Render Child", "991", "", 2.0, 1.0, 2u, 1u, true}
+			};
+			WorkloadExecutionRecord execution;
+			execution.ownerSystem = "RenderSystem";
+			execution.workloadName = "RenderSystem";
+			execution.phase = "Presentation";
+			execution.selectedPath = WorkloadExecutionPath::Protected;
+			frame.workloadExecutions.push_back(execution);
+
+			const ProfilerDiagnosticAnalysis analysis = BuildProfilerDiagnosticAnalysis(frame, ProfilerModuleId::CpuEngine);
+			context.ExpectEqual(std::size_t(3u), analysis.rows.size(), "Every validated module scope should produce one diagnostic row.");
+			context.ExpectEqual(std::string("Main Thread"), analysis.rows[0].threadLabel,
+				"The Engine::Update lane should use a readable main-thread name while retaining its raw ID.");
+			context.ExpectEqual(std::string("Presentation"), analysis.rows[1].phase,
+				"A scheduler workload scope should inherit the typed execution phase.");
+			context.ExpectEqual(std::string("Protected"), analysis.rows[1].executionPath,
+				"A scheduler workload scope should expose its actual execution path.");
+			context.ExpectEqual(10.0, analysis.capturedWallMs,
+				"Nested scopes should merge into elapsed wall coverage instead of inflating it.");
+			context.ExpectEqual(10.0, analysis.cpuWorkMs,
+				"Nested scopes on one thread should contribute CPU work only once.");
+			context.Expect(ProfilerDiagnosticRowMatches(analysis.rows[1], "present", 0.0),
+				"Diagnostic search should match phase metadata case-insensitively.");
+			context.Expect(!ProfilerDiagnosticRowMatches(analysis.rows[2], "", 2.0),
+				"Minimum-duration filtering should remove low-cost noise.");
+		});
+
+		registry.Add("ProfilerWindow.Diagnostics.LargeFrameAnalysisStaysInteractive", [](TestContext& context) {
+			using namespace TerraEngine::EditorProfiling;
+			using namespace TerraEngine::Profiling;
+			ProfilerFrameRecord frame;
+			frame.durationMs = 20.0;
+			frame.samples.reserve(10001u);
+			frame.samples.push_back({1u, 0u, ProfilerModuleId::CpuEngine, "Engine::Update", "main-id", "", 0.0, 20.0, 0u, 1u, true});
+			for (std::uint64_t index = 0u; index < 10000u; ++index)
+			{
+				const double startMs = static_cast<double>(index) * 0.0019;
+				frame.samples.push_back({index + 2u, 1u, ProfilerModuleId::CpuEngine,
+					"Small Scope", "main-id", "", startMs, 0.001, 1u, 1u, true});
+			}
+
+			const auto started = std::chrono::steady_clock::now();
+			const ProfilerDiagnosticAnalysis analysis = BuildProfilerDiagnosticAnalysis(frame, ProfilerModuleId::CpuEngine);
+			const auto elapsed = std::chrono::steady_clock::now() - started;
+			context.ExpectEqual(std::size_t(10001u), analysis.rows.size(),
+				"Large detailed captures should retain every diagnostic row in one cached analysis.");
+			context.Expect(elapsed < std::chrono::seconds(2),
+				"A ten-thousand-scope frame should analyze within an interactive, non-frame-loop budget.");
+		});
+
 		registry.Add("ProfilerWindow.Toolbar.GroupsActionsAndExplainsDisabledStates", [](TestContext& context) {
 			const std::string source = ReadProfilerWindowSource();
 
@@ -106,8 +219,16 @@ namespace TerraEngine::EditorTests
 
 		registry.Add("ProfilerWindow.V2Evidence.PresentsRecoveryAndTypedStreams", [](TestContext& context) {
 			const std::string source = ReadProfilerWindowSource();
+			const std::size_t frameDetails = source.find("void ProfilerWindow::DrawFrameDetails()");
+			const std::size_t selectionGuard = source.find("if (!selectedFrame.has_value())", frameDetails);
+			const std::size_t captureEvidenceDraw = source.find("DrawCaptureEvidenceSummary();", selectionGuard);
 
 			context.Expect(source.find("DrawCaptureEvidenceSummary") != std::string::npos, "Profiler Window should render capture-level v2 evidence separately from a selected frame.");
+			context.Expect(frameDetails != std::string::npos
+				&& selectionGuard != std::string::npos
+				&& captureEvidenceDraw != std::string::npos
+				&& selectionGuard < captureEvidenceDraw,
+				"Capture evidence should remain hidden until a profiler session supplies a selected frame.");
 			context.Expect(source.find("detailLevel") != std::string::npos, "Profiler Window should identify the detailed, sampled, or aggregate capture level.");
 			context.Expect(source.find("Recovery warning") != std::string::npos, "Recovered incomplete capture tails should remain visible to the user.");
 			context.Expect(source.find("Physics, Scene View, and Editor Stages") != std::string::npos, "Profiler Window should distinguish native physics, Scene View, and Editor stages.");
@@ -120,9 +241,9 @@ namespace TerraEngine::EditorTests
 		registry.Add("ProfilerWindow.Recording.KeepsUnlimitedDetailedCaptureAndDefersFramePresentation", [](TestContext& context) {
 			const std::string source = ReadProfilerWindowSource();
 			const std::string serviceSource = ReadEditorProfilerServiceSource();
-			const std::size_t timingDisclosure = source.find("TreeNode(\"Timing Distribution\")");
+			const std::size_t timingDisclosure = source.find("TreeNodeEx(\"Timing Distribution\", ImGuiTreeNodeFlags_DefaultOpen)");
 			const std::size_t frameCopy = source.find("GetFramesSnapshot()", timingDisclosure);
-			const std::size_t evidenceDisclosure = source.find("TreeNode(\"Whole Capture Analysis\")");
+			const std::size_t evidenceDisclosure = source.find("TreeNodeEx(\"Whole Capture Analysis\", ImGuiTreeNodeFlags_DefaultOpen)");
 			const std::size_t documentCopy = source.find("GetDocumentSnapshot()", evidenceDisclosure);
 
 			context.Expect(serviceSource.find("detailLevel = TerraEngine::Profiling::ProfilerCaptureDetailLevel::Detailed") != std::string::npos
@@ -174,8 +295,8 @@ namespace TerraEngine::EditorTests
 				&& pinGuard < selectedFrameCopy
 				&& source.find("Frame analysis will become available after the recording is finished.") != std::string::npos,
 				"Detailed frame inspection should remain unavailable until the recording is finalized.");
-			context.ExpectEqual(static_cast<std::size_t>(1u), CountOccurrences(source, "BuildSampleTree(frame, selectedModule)"),
-				"Top offenders and the sample hierarchy should share one cached sample-tree analysis.");
+			context.ExpectEqual(static_cast<std::size_t>(1u), CountOccurrences(source, "BuildProfilerDiagnosticAnalysis(frame, selectedModule)"),
+				"Diagnosis, offenders, hierarchy, and timeline should share one cached frame analysis.");
 			context.Expect(source.find("GetLatestRenderGraphDiagnostics()") == std::string::npos
 				&& source.find("GetLatestBackendStageTimings()") != std::string::npos
 				&& source.find("GetLatestRendererRecoverySnapshot()") != std::string::npos,
@@ -186,10 +307,38 @@ namespace TerraEngine::EditorTests
 				&& source.find("Refresh Timing Distribution") != std::string::npos
 				&& source.find("timingDistributionFrameIndex") == std::string::npos,
 				"Expanded whole-capture disclosures should reuse cached analysis until the user requests a refresh.");
-			context.Expect(source.find("TreeNode(\"Sample Hierarchy\")") != std::string::npos
-				&& source.find("TreeNode(\"Top Offenders\")") != std::string::npos
-				&& source.find("GetBool(openStateId, false)") != std::string::npos,
-				"Sorting and drawing large scope hierarchies should be opt-in and start collapsed.");
+			context.Expect(source.find("TreeNodeEx(\"Sample Hierarchy\", ImGuiTreeNodeFlags_DefaultOpen)") != std::string::npos
+				&& source.find("TreeNodeEx(\"Top Offenders\", ImGuiTreeNodeFlags_DefaultOpen)") != std::string::npos
+				&& source.find("GetBool(openStateId, true)") != std::string::npos,
+				"Primary diagnostic disclosures and every nested sample parent should open immediately.");
+			context.Expect(source.find("ImGui::TreeNode(") == std::string::npos
+				&& source.find("TreeNodeEx(\"Physics Counters\", ImGuiTreeNodeFlags_DefaultOpen)") != std::string::npos
+				&& source.find("TreeNodeEx(\"Scripting Dispatch Counters\", ImGuiTreeNodeFlags_DefaultOpen)") != std::string::npos
+				&& source.find("TreeNodeEx(\"Backend Submit Path\", ImGuiTreeNodeFlags_DefaultOpen)") != std::string::npos,
+				"Every profiler disclosure should default open when a capture session is presented.");
+		});
+
+		registry.Add("ProfilerWindow.Diagnostics.ExposesActionableViews", [](TestContext& context) {
+			const std::string source = ReadProfilerWindowSource();
+			const std::string schedulerSource = ReadRepositorySource("Engine/Core/Scheduling/SystemScheduler.cpp");
+			const std::string vulkanSource = ReadRepositorySource("Engine/Renderer/RHI/Vulkan/VulkanContext.cpp");
+
+			context.Expect(source.find("Primary self-time offender") != std::string::npos,
+				"The diagnosis summary should name the first scope a developer should investigate.");
+			context.Expect(source.find("Search scope, phase, path, or thread") != std::string::npos,
+				"Large captures should be searchable by both scope and scheduler context.");
+			context.Expect(source.find("[Uninstrumented inside %s]") != std::string::npos,
+				"Parent self time should appear explicitly instead of disappearing into an inclusive row.");
+			context.Expect(source.find("TreeNodeEx(\"Thread Timeline\", ImGuiTreeNodeFlags_DefaultOpen)") != std::string::npos
+				&& source.find("IsMouseHoveringRect") != std::string::npos,
+				"The default-open per-thread timeline should expose exact scope context on hover.");
+			context.Expect(schedulerSource.find("SystemScheduler: Build System Declaration") != std::string::npos
+				&& schedulerSource.find("SystemScheduler: Match Topology Cache") != std::string::npos,
+				"Frame-workload construction should identify expensive system declarations and cache matching separately.");
+			context.Expect(vulkanSource.find("Vulkan: Submission Plan State Lock Wait") != std::string::npos
+				&& vulkanSource.find("Vulkan: Publish GPU Animation Plan") != std::string::npos
+				&& vulkanSource.find("Vulkan: Publish Deformation Plan") != std::string::npos,
+				"Render submission should separate synchronization from animation and deformation publication.");
 		});
 
 		registry.Add("ProfilerWindow.FrameStatistics.ExcludePartialFrames", [](TestContext& context) {

@@ -31,7 +31,9 @@ namespace TerraEngine::Tests
 				request.requestGeneration = 9u;
 				const auto read = Resource::ReadVirtualGeometryStaticPageRange(request, 9u);
 				context.Expect(
-					read.status == Resource::VirtualGeometryStaticPageReadStatus::Completed, "Exact page ranges must validate before decode work begins.");
+					read.status == Resource::VirtualGeometryStaticPageReadStatus::Completed
+						&& read.source == Resource::VirtualGeometryStaticPageReadSource::LooseFile,
+					"Exact loose page ranges must validate and retain their physical source before decode work begins.");
 				context.ExpectEqual(bytes.size(), read.bytes.size(), "Completed reads return owned page bytes.");
 				auto cancelled = std::make_shared<std::atomic_bool>(true);
 				request.cancellation = std::move(cancelled);
@@ -53,7 +55,11 @@ namespace TerraEngine::Tests
 				std::filesystem::remove_all(root, ignored);
 				std::filesystem::create_directories(contentRoot / "Meshes");
 				std::filesystem::create_directories(packPath.parent_path());
-				const std::vector<std::uint8_t> fileBytes{ 1u, 3u, 5u, 7u, 9u, 11u, 13u, 15u };
+				std::vector<std::uint8_t> fileBytes(12288u);
+				for(std::size_t index = 0u; index < fileBytes.size(); ++index)
+				{
+					fileBytes[index] = static_cast<std::uint8_t>((index / 97u) & 0xffu);
+				}
 				{
 					std::ofstream stream(contentRoot / "Meshes" / "Page.temf", std::ios::binary);
 					stream.write(reinterpret_cast<const char*>(fileBytes.data()),
@@ -65,20 +71,22 @@ namespace TerraEngine::Tests
 				packRequest.outputPackPath = packPath;
 				packRequest.extentSizingBytes = 4096u;
 				packRequest.workerCount = 1u;
-				packRequest.enableCompression = false;
+				packRequest.enableCompression = true;
 				packRequest.enableDictionaryTraining = false;
 				packRequest.overwriteExisting = true;
 				(void)tepak::PackWriter::Create(packRequest);
 				context.Expect(ContentMount::Instance().Mount(packPath),
 					"The page-read fixture archive must mount before worker IO.");
 
-				const std::vector<std::uint8_t> expected(fileBytes.begin() + 2, fileBytes.begin() + 6);
+				const std::vector<std::uint8_t> expected(
+					fileBytes.begin() + 3000,
+					fileBytes.begin() + 9000);
 				Resource::VirtualGeometryStaticPageReadRequest request{};
 				// Packaged reads only need the logical path; no developer filesystem
 				// location should be required for a mounted TEPAK asset.
 				request.path.clear();
 				request.pageId = 7u;
-				request.byteOffset = 2u;
+				request.byteOffset = 3000u;
 				request.byteSize = expected.size();
 				request.expectedHash = Resource::HashVirtualGeometryPageBytes(expected);
 				request.requestGeneration = 4u;
@@ -87,8 +95,10 @@ namespace TerraEngine::Tests
 				const auto mountedRead = Resource::ReadVirtualGeometryStaticPageRange(request, 4u);
 				context.Expect(mountedRead.status == Resource::VirtualGeometryStaticPageReadStatus::Completed,
 					"Packaged page IO must use ContentMount when no loose TEMF exists.");
+				context.Expect(mountedRead.source == Resource::VirtualGeometryStaticPageReadSource::MountedTepak,
+					"Streaming diagnostics must distinguish TEPAK extent IO from loose editor reads.");
 				context.Expect(mountedRead.bytes == expected,
-					"Mounted page IO must preserve the exact logical TEMF byte range.");
+					"Mounted page IO must preserve an exact logical TEMF range spanning compressed TEPAK extents.");
 
 				request.mountedLogicalPath = "Meshes/Missing.temf";
 				request.path = contentRoot / "Meshes" / "Page.temf";

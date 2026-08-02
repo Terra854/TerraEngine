@@ -91,5 +91,40 @@ namespace TerraEngine::Tests
 				context.Expect(
 					!IsValidVirtualGeometryMaterialExtension(extension), "Corrupt material policy must not select an invented virtual-geometry route.");
 			});
+
+		registry.Add("VirtualGeometry.Material.DoubleSidedComputeAndHardwareMultipassRemainComplete",
+			[](TestContext& context)
+			{
+				const std::filesystem::path sourceRoot = TERRAENGINE_SOURCE_DIR;
+				const auto ReadSource = [](const std::filesystem::path& path)
+				{
+					std::ifstream stream(path, std::ios::binary);
+					return std::string{
+						std::istreambuf_iterator<char>(stream),
+						std::istreambuf_iterator<char>() };
+				};
+				const std::string rasterShader = ReadSource(sourceRoot
+					/ "Engine/Shaders/VirtualGeometry/VirtualGeometryComputeRaster.comp.hlsl");
+				const std::string setupShader = ReadSource(sourceRoot
+					/ "Engine/Shaders/VirtualGeometry/VirtualGeometryTriangleSetup.comp.hlsl");
+				const std::string renderer = ReadSource(sourceRoot
+					/ "Engine/Renderer/RenderSystem.cpp");
+				context.Expect(
+					rasterShader.find("TE_VIRTUAL_GEOMETRY_RASTER_FLAG_DOUBLE_SIDED")
+						!= std::string::npos
+						&& setupShader.find("packet.identity.w") != std::string::npos
+						&& renderer.find("singleSidedComputeSurface") == std::string::npos,
+					"Default double-sided materials must carry explicit winding policy through GPU setup instead of falling off the compute route.");
+
+				const std::string vulkan = ReadSource(sourceRoot
+					/ "Engine/Renderer/RHI/Vulkan/VulkanContext.cpp");
+				const std::size_t shadowPreparation = vulkan.find("preparedShadowLists");
+				const std::size_t computeOwnership = vulkan.find("hasComputeOwnedDraw");
+				context.Expect(
+					shadowPreparation != std::string::npos
+						&& computeOwnership != std::string::npos
+						&& shadowPreparation < computeOwnership,
+					"Shadow passes must retain the complete hardware draw before main-view compute ownership omits duplicate color coverage.");
+			});
 	}
 } // namespace TerraEngine::Tests

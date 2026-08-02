@@ -69,7 +69,7 @@ namespace TerraEngine::Renderer::Vulkan {
 		std::string reason;
 	};
 
-	inline constexpr std::size_t kVulkanVirtualGeometryStageCount = 13u;
+	inline constexpr std::size_t kVulkanVirtualGeometryStageCount = 14u;
 
 	TERRAENGINE_API std::string GetVulkanVirtualGeometryStageLabel(VirtualGeometryBackendStage stage);
 	TERRAENGINE_API VulkanVirtualGeometryStageMarker MakeVulkanVirtualGeometryStageMarker(

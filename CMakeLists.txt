@@ -1644,6 +1644,7 @@ file(REMOVE
 	\"\${virtualgeometry_out_dir}/VirtualGeometryAnimatedClusterBounds.comp.spv\"
 	\"\${virtualgeometry_out_dir}/VirtualGeometryAnimatedMorphBeforeSkin.comp.spv\"
 	\"\${virtualgeometry_out_dir}/VirtualGeometryComputeRaster.comp.spv\"
+	\"\${virtualgeometry_out_dir}/VirtualGeometryTriangleSetup.comp.spv\"
 	\"\${virtualgeometry_out_dir}/VirtualGeometryComposite.vert.spv\"
 	\"\${virtualgeometry_out_dir}/VirtualGeometryComposite.frag.spv\"
 	\"\${virtualgeometry_out_dir}/VirtualGeometryGeneratedIndirect.comp.spv\"
@@ -1823,6 +1824,7 @@ foreach(virtualgeometry_canonical_shader IN ITEMS
 	VirtualGeometryAnimatedClusterBounds
 	VirtualGeometryAnimatedMorphBeforeSkin
 	VirtualGeometryComputeRaster
+	VirtualGeometryTriangleSetup
 	VirtualGeometryGeneratedIndirect
 	VirtualGeometryIndirectArguments
 	VirtualGeometryProductionDecode

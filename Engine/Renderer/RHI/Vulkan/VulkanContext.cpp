@@ -3698,7 +3698,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		if(visibilityPlan.ready) {
 			bool recordedEveryVisibilityStage = true;
 			const std::array<std::pair<TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryVisibilityStage,
-				TerraEngine::Renderer::VirtualGeometryBackendStage>, 3> visibilityStages{{
+				TerraEngine::Renderer::VirtualGeometryBackendStage>, 4> visibilityStages{{
+				{ TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryVisibilityStage::TriangleSetup, TerraEngine::Renderer::VirtualGeometryBackendStage::TriangleSetup },
 				{ TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryVisibilityStage::ComputeRaster, TerraEngine::Renderer::VirtualGeometryBackendStage::ComputeRaster },
 				{ TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryVisibilityStage::VisibilityResolve, TerraEngine::Renderer::VirtualGeometryBackendStage::VisibilityResolve },
 				{ TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryVisibilityStage::ShadingBins, TerraEngine::Renderer::VirtualGeometryBackendStage::Shading } }};
@@ -4716,7 +4717,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 				RequiresOwnerMeshDeformationFallback()
 			&& !ResolveCanonicalGraphicsGroup(command).has_value();
 	};
-	const auto ApplyAnimationGraphicsBridge = [&](const DrawCommand& command, PushConstants& push) {
+	const auto ApplyAnimationGraphicsBridge = [&](const DrawCommand& command,
+		PushConstants& push, bool preferOwnerPalette) {
 		// Static and rejected animation draws publish invalid bridge fields. A
 		// validated CPU pose selects its own frame upload; GPU/Hybrid work then
 		// follows the separately generation-checked compute bridge below.
@@ -4724,8 +4726,9 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		push.textureIndex = VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
 		const TerraEngine::Renderer::AnimationRenderBinding& binding =
 			command.animationBinding;
-		const std::optional<std::uint32_t> canonicalGroup =
-			ResolveCanonicalGraphicsGroup(command);
+		const std::optional<std::uint32_t> canonicalGroup = preferOwnerPalette
+			? std::nullopt
+			: ResolveCanonicalGraphicsGroup(command);
 		if(canonicalGroup.has_value())
 		{
 			// Every canonical owner/mesh pair owns one contiguous bridge slice.
@@ -4931,6 +4934,23 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			&& command.taskShaderCullingEnabled
 			&& mesh.hasMeshletBounds
 			&& !conservativeDeformableVisibility;
+		const auto& executorPlan = impl->latestVirtualGeometryExecutorPlan;
+		const bool deviceAuthoredCommand =
+			executorPlan.resourcesReady
+			&& executorPlan.descriptorReady
+			&& executorPlan.pipelinesReady
+			&& executorPlan.generatedSubmissionExecutionAvailable
+			&& generatedVirtualGeometrySubmissionsUsable
+			&& !executorPlan.zeroWork
+			&& command.virtualGeometryPacketDescriptorIndex
+				< executorPlan.boundedPacketCount
+			&& impl->latestVirtualGeometryExecutorResources
+				.generatedSubmissionBuffer != VK_NULL_HANDLE;
+		const bool ownerPaletteDeformation =
+			(command.virtualGeometryFlags
+				& kVirtualGeometryFlagOwnerPaletteDeformation) != 0u
+			|| (command.animationBinding.RequiresConservativeCoarseVisibility()
+				&& !deviceAuthoredCommand);
 
 		PushConstants push{};
 		push.viewProj = frameData.projectionMatrix * frameData.viewMatrix;
@@ -4940,7 +4960,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		if (impl->materialIndexMap.contains(command.materialId)) {
 			push.materialIndex = impl->materialIndexMap[command.materialId];
 		}
-		ApplyAnimationGraphicsBridge(command, push);
+		ApplyAnimationGraphicsBridge(command, push,
+			ownerPaletteDeformation);
 		push.vrsActive = 0u; 
 		push.taskCullingEnabled = activeTaskCulling ? 1u : 0u;
 		push.statsSlotIndex = statsSlotIndex;
@@ -4959,6 +4980,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			|| command.virtualGeometryPayloadSource == VirtualGeometryPagePayloadSource::ResidentFallbackPayload;
 		const bool pageLocalGeometry =
 			requestedPageLocalGeometry
+			&& !ownerPaletteDeformation
 			&& impl->activeVirtualGeometryPagePayloadBufferIndex != VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
 		// A validated compute bridge is compatible with a self-contained demanded-page
 		// packet: the mesh shader resolves the packet's page id through that
@@ -4981,6 +5003,14 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		push.virtualMeshletCount = selectedMeshletCount;
 		push.selectedVirtualLod = command.selectedVirtualLod;
 		push.virtualGeometryFlags = command.virtualGeometryFlags;
+		if(ownerPaletteDeformation)
+		{
+			// Bind the route choice and deformation source to the same immutable
+			// executor decision. Backend-wide capability support alone cannot prove
+			// that this packet will execute through generated device work.
+			push.virtualGeometryFlags |=
+				kVirtualGeometryFlagOwnerPaletteDeformation;
+		}
 		if (pipeline->hasTaskStage)
 		{
 			// Task payload addressing remains authoritative when culling is off.
@@ -5021,20 +5051,13 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		draw.descriptorSets.push_back(meshDescriptorSet);
 		draw.push = push;
 		draw.materialFlags = materialFlags;
-		const auto& executorPlan = impl->latestVirtualGeometryExecutorPlan;
 		draw.generatedVirtualGeometryIndirectIndex = command.virtualGeometryPacketDescriptorIndex;
 		draw.rasterRoute = static_cast<
 			TerraEngine::Renderer::VirtualGeometryRasterRoute>(
 				(command.virtualGeometryFlags
 					>> kVirtualGeometryRasterRouteShift)
 				& kVirtualGeometryRasterRouteMask);
-		draw.useGeneratedVirtualGeometryIndirect = executorPlan.resourcesReady
-			&& executorPlan.descriptorReady && executorPlan.pipelinesReady
-			&& executorPlan.generatedSubmissionExecutionAvailable
-			&& generatedVirtualGeometrySubmissionsUsable
-			&& !executorPlan.zeroWork
-			&& command.virtualGeometryPacketDescriptorIndex < executorPlan.boundedPacketCount
-			&& impl->latestVirtualGeometryExecutorResources.generatedSubmissionBuffer != VK_NULL_HANDLE;
+		draw.useGeneratedVirtualGeometryIndirect = deviceAuthoredCommand;
 		
 		// RenderSystem has already collapsed compatible contiguous virtual
 		// geometry cluster packets into this selected meshlet range. Vulkan
@@ -5205,7 +5228,9 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			if (impl->materialIndexMap.contains(command.materialId)) {
 				shadowDraw.push.materialIndex = impl->materialIndexMap[command.materialId];
 			}
-			ApplyAnimationGraphicsBridge(command, shadowDraw.push);
+			ApplyAnimationGraphicsBridge(command, shadowDraw.push,
+				(command.virtualGeometryFlags
+					& kVirtualGeometryFlagOwnerPaletteDeformation) != 0u);
 			shadowDraw.push.vrsActive = 2u;
 			shadowDraw.push.taskCullingEnabled = 0u;
 			shadowDraw.push.statsSlotIndex = statsSlotIndex;
@@ -7666,7 +7691,14 @@ TerraEngine::Renderer::BackendCapabilityProfile VulkanContext::GetBackendCapabil
 
 bool VulkanContext::ConsumeRenderSubmissionPlan(const TerraEngine::Renderer::RenderSubmissionPlan& plan)
 {
-	std::lock_guard<std::recursive_mutex> stateLock(impl->deviceStateMutex);
+	TERRAENGINE_PROFILE_SCOPE("Vulkan: Consume Render Submission Plan", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+	std::unique_lock<std::recursive_mutex> stateLock(impl->deviceStateMutex, std::defer_lock);
+	{
+		// Expose lock contention separately from resource publication. A long wait
+		// here points at synchronization ownership, not animation or deformation.
+		TERRAENGINE_PROFILE_SCOPE("Vulkan: Submission Plan State Lock Wait", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		stateLock.lock();
+	}
 	// The renderer graph has already validated packet identity. Recheck the
 	// immutable animation hand-off at Vulkan's protected boundary because this
 	// code owns descriptor writes and must never follow live animator state.
@@ -7702,6 +7734,7 @@ bool VulkanContext::ConsumeRenderSubmissionPlan(const TerraEngine::Renderer::Ren
 		VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
 	const auto PublishDeformation = [&]()
 	{
+		TERRAENGINE_PROFILE_SCOPE("Vulkan: Publish Deformation Plan", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		if(plan.deformationWork == nullptr
 			|| plan.deformationWork->work.empty())
 		{
@@ -7739,6 +7772,7 @@ bool VulkanContext::ConsumeRenderSubmissionPlan(const TerraEngine::Renderer::Ren
 	}
 
 	if(hasCpuAnimationWork) {
+		TERRAENGINE_PROFILE_SCOPE("Vulkan: Publish CPU Animation Plan", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		const std::shared_ptr<const TerraEngine::Renderer::CpuAnimationDeformationPlan>&
 			cpuPlan = plan.animationWork.cpuDeformationPlan;
 		if(cpuPlan == nullptr || !cpuPlan->IsComplete()
@@ -7764,41 +7798,47 @@ bool VulkanContext::ConsumeRenderSubmissionPlan(const TerraEngine::Renderer::Ren
 		return PublishDeformation();
 	}
 
-	const std::shared_ptr<const TerraEngine::Animation::GpuAnimationPlan>& immutablePlan =
-		plan.animationWork.immutablePlan;
-	if (!immutablePlan || immutablePlan->generation == 0U || immutablePlan->workPackets.empty()) return false;
-	const std::uint32_t rendererGeneration = plan.animationWork.ranges.front().rendererGeneration;
-	if (rendererGeneration == 0U) return false;
-	for (const TerraEngine::Renderer::AnimationBackendWorkRange& range : plan.animationWork.ranges)
+	const std::shared_ptr<const TerraEngine::Animation::GpuAnimationPlan>& immutablePlan = plan.animationWork.immutablePlan;
+	std::uint32_t rendererGeneration = 0u;
 	{
-		const std::size_t firstPacket = range.firstGpuWorkPacket;
-		const std::size_t packetCount = range.gpuWorkPacketCount;
-		if (range.animationPlanGeneration != immutablePlan->generation
-			|| range.rendererGeneration != rendererGeneration
-			|| range.paletteGeneration == 0U
-			|| packetCount == 0U
-			|| firstPacket > immutablePlan->workPackets.size()
-			|| packetCount > immutablePlan->workPackets.size() - firstPacket)
+		TERRAENGINE_PROFILE_SCOPE("Vulkan: Validate GPU Animation Plan", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		if (!immutablePlan || immutablePlan->generation == 0U || immutablePlan->workPackets.empty()) return false;
+		rendererGeneration = plan.animationWork.ranges.front().rendererGeneration;
+		if (rendererGeneration == 0U) return false;
+		for (const TerraEngine::Renderer::AnimationBackendWorkRange& range : plan.animationWork.ranges)
 		{
-			return false;
+			const std::size_t firstPacket = range.firstGpuWorkPacket;
+			const std::size_t packetCount = range.gpuWorkPacketCount;
+			if (range.animationPlanGeneration != immutablePlan->generation
+				|| range.rendererGeneration != rendererGeneration
+				|| range.paletteGeneration == 0U
+				|| packetCount == 0U
+				|| firstPacket > immutablePlan->workPackets.size()
+				|| packetCount > immutablePlan->workPackets.size() - firstPacket)
+			{
+				return false;
+			}
 		}
 	}
 
-	const TerraEngine::Renderer::Vulkan::VulkanAnimationCommandPlan commandPlan =
-		TerraEngine::Renderer::Vulkan::BuildVulkanAnimationCommandPlan(*immutablePlan, rendererGeneration);
-	if (!commandPlan.valid || !commandPlan.hasWork) return false;
-	if (!impl->PublishVulkanAnimationResources(*immutablePlan, rendererGeneration)
-		|| !impl->EnsureVulkanAnimationComputePipelines())
+	TerraEngine::Renderer::Vulkan::VulkanAnimationCommandPlan commandPlan;
 	{
-		// PublishVulkanAnimationResources clears the active bridge before it
-		// begins. Preserve that invariant on every setup failure and report the
-		// rejected handoff truthfully so renderer diagnostics cannot claim that
-		// animation work was accepted when no descriptors or pipeline exist.
-		impl->activeAnimationGraphicsBufferIndex = VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
-		impl->activeCpuAnimationGraphicsBufferIndex =
-			VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
-		impl->pendingCpuAnimationPlan.reset();
-		return false;
+		TERRAENGINE_PROFILE_SCOPE("Vulkan: Publish GPU Animation Plan", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		commandPlan = TerraEngine::Renderer::Vulkan::BuildVulkanAnimationCommandPlan(*immutablePlan, rendererGeneration);
+		if (!commandPlan.valid || !commandPlan.hasWork) return false;
+		if (!impl->PublishVulkanAnimationResources(*immutablePlan, rendererGeneration)
+			|| !impl->EnsureVulkanAnimationComputePipelines())
+		{
+			// PublishVulkanAnimationResources clears the active bridge before it
+			// begins. Preserve that invariant on every setup failure and report the
+			// rejected handoff truthfully so renderer diagnostics cannot claim that
+			// animation work was accepted when no descriptors or pipeline exist.
+			impl->activeAnimationGraphicsBufferIndex = VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
+			impl->activeCpuAnimationGraphicsBufferIndex =
+				VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
+			impl->pendingCpuAnimationPlan.reset();
+			return false;
+		}
 	}
 
 	impl->pendingAnimationCommandPlan = commandPlan;

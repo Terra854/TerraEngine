@@ -133,6 +133,35 @@ namespace TerraEngine::Tests
 					"Large packet rectangles must remain on bounded hardware raster work even when compute is preferred.");
 			});
 
+		registry.Add("VirtualGeometry.Visibility.CalibrationAddsHysteresisAndContentionGuard",
+			[](TestContext& context)
+			{
+				using namespace TerraEngine::Renderer;
+				VirtualGeometryRasterCandidate boundary{};
+				boundary.stableId = 7u;
+				boundary.projectedPixelArea = 100.0f;
+				boundary.triangleCount = 100u;
+				const auto fresh = BuildVirtualGeometryRasterBinPlan({ boundary }, 64u);
+				boundary.priorRoute = VirtualGeometryRasterRoute::Compute;
+				boundary.priorRouteValid = true;
+				const auto retained = BuildVirtualGeometryRasterBinPlan({ boundary }, 64u);
+				context.Expect(
+					fresh.hardwareCount == 1u && retained.computeCount == 1u
+						&& fresh.routeSwitchCount == 0u
+						&& retained.routeSwitchCount == 0u,
+					"Asymmetric measured thresholds must retain a prior compute route without pulling a fresh boundary packet off hardware.");
+
+				VirtualGeometryRasterCandidate contended{};
+				contended.stableId = 8u;
+				contended.projectedPixelArea = 10.0f;
+				contended.triangleCount = 200u;
+				const auto guarded = BuildVirtualGeometryRasterBinPlan({ contended }, 64u);
+				context.Expect(
+					guarded.hardwareCount == 1u
+						&& guarded.peakEstimatedAtomicContention > 12.0f,
+					"Dense overlap must remain on fixed-function raster when the portable atomic-contention estimate exceeds calibration.");
+			});
+
 		registry.Add("VirtualGeometry.Visibility.MixedRouteCrackAndImageParityContract",
 			[](TestContext &context)
 			{

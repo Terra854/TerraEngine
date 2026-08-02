@@ -219,6 +219,35 @@ namespace TerraEngine::EditorTests
 				"The glTF socket and nested-transform import contract");
 		});
 
+		registry.Add("Editor.Animation.GltfImport.DisambiguatesRepeatedInferredJointRoles", [](TestContext& context) {
+			nlohmann::json document = LoadBaseDocument();
+			// Two morph-only mesh nodes with the same display name are both included
+			// in the synthetic scene skeleton. Their stable paths remain distinct,
+			// and import must turn those paths into unique serializable joint roles.
+			document["meshes"][0]["weights"] = { 0.0 };
+			document["meshes"][0]["primitives"][0]["targets"] = nlohmann::json::array({ { { "POSITION", 0 } } });
+			document["nodes"][0]["name"] = "RepeatedNode";
+			document["nodes"].push_back({ { "name", "RepeatedNode" }, { "mesh", 0 } });
+			document["scenes"][0]["nodes"] = { 0, 1 };
+			const GltfImportResult result = ImportContractFixture("repeated-inferred-joint-role", document);
+			context.Expect(result.status != TerraEngine::AssetPipeline::GltfImportStatus::Failed
+				&& !HasDiagnostic(result, "SkeletonSerializeFailed"),
+				"Repeated inferred node roles must receive deterministic stable-id suffixes instead of rejecting the package.");
+		});
+
+		registry.Add("Editor.Animation.GltfImport.CoalescesIdenticalSkinRecords", [](TestContext& context) {
+			nlohmann::json document = LoadBaseDocument();
+			AddAnimatedSkinContractData(document, "LINEAR");
+			// Some exporters repeat one unnamed skin for multiple mesh nodes. The
+			// structural joint signature is identical, so both source indices should
+			// resolve through one skeleton and one set of animation subassets.
+			document["skins"].push_back(document["skins"][0]);
+			const GltfImportResult result = ImportContractFixture("identical-skin-records", document);
+			context.Expect(result.status != TerraEngine::AssetPipeline::GltfImportStatus::Failed
+				&& !HasDiagnostic(result, "AnimationImportManifestInvalid"),
+				"Identical source skins must share one canonical skeleton identity instead of publishing duplicate manifest children.");
+		});
+
 		registry.Add("Editor.Animation.GltfImport.NormalizesCoordinateConventionsOnce", [](TestContext& context) {
 			nlohmann::json document = LoadBaseDocument();
 			AddAnimatedSkinContractData(document, "LINEAR");

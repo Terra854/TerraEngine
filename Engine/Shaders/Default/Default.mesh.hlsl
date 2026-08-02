@@ -133,6 +133,7 @@ struct StableVisibilityPrimitive
 // Task stages may run without rejecting any work, but their payload still owns
 // the exact child meshlet index for each emitted mesh-stage group.
 static const uint kVirtualGeometryFlagTaskPayloadValid = 0x40u;
+static const uint kVirtualGeometryFlagOwnerPaletteDeformation = 0x80u;
 static const uint kMeshletCullFlagFrustum = 1u;
 static const uint kMeshletCullFlagCone = 2u;
 static const uint kMeshletCullFlagUnavailable = 4u;
@@ -1165,6 +1166,8 @@ void main(
 		// Canonical compute output is keyed by the same physical page id as this
 		// packet. Legacy owner deformation has no such publication and therefore
 		// keeps using the complete owner payload.
+		&& (SceneUniforms.virtualGeometryFlags
+			& kVirtualGeometryFlagOwnerPaletteDeformation) == 0u
 		&& (canonicalDeformationAvailable || !gpuDeformationAvailable)
 		&& TryLoadPageLocalPayloadDescriptorAt(packetDescriptorIndex, pageDescriptor);
 	// Choose the payload source before reading decode metadata. Resident page

@@ -77,13 +77,11 @@ float3 TransformPosition(float3 position, uint localJoint, TeAnimatedDeformation
 	{
 		return position;
 	}
-	// The canonical demanded page stores a compact local palette whose entries
-	// are indices into
-	// the animation evaluator's cooked palette. Geometry compute performs this
-	// indirection once; material and canonical graphics stages never bind skin
-	// or palette resources.
-	const uint paletteEntry =
-		staticPageBytes.Load(work.jointPaletteByteOffset + localJoint * 4u);
+	// Skin records are encoded against the mesh palette partition, so localJoint
+	// already indexes the compact evaluator palette. The adjacent joint-palette
+	// section stores source-skeleton identities for validation and recooking; using
+	// those global identities as compact row indices reads the wrong matrices.
+	const uint paletteEntry = localJoint;
 	const uint row = work.paletteRowOffset + paletteEntry * 3u;
 	return float3(
 		dot(paletteRows[row + 0u], float4(position, 1.0F)),
@@ -97,8 +95,8 @@ float3 TransformDirection(float3 direction, uint localJoint, TeAnimatedDeformati
 	{
 		return direction;
 	}
-	const uint paletteEntry =
-		staticPageBytes.Load(work.jointPaletteByteOffset + localJoint * 4u);
+	// Match TransformPosition: local skin indices address compact palette rows.
+	const uint paletteEntry = localJoint;
 	const uint row = work.paletteRowOffset + paletteEntry * 3u;
 	return float3(
 		dot(paletteRows[row + 0u].xyz, direction),

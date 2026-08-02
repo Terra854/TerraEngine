@@ -465,6 +465,7 @@ void VulkanContext::Impl::DestroyVulkanVirtualGeometryProductionDecodePipeline()
 bool VulkanContext::Impl::EnsureVulkanVirtualGeometryVisibilityPipelines()
 {
 	if(virtualGeometryVisibilityPipelines.layout != VK_NULL_HANDLE
+		&& virtualGeometryVisibilityPipelines.triangleSetup != VK_NULL_HANDLE
 		&& virtualGeometryVisibilityPipelines.computeRaster != VK_NULL_HANDLE
 		&& virtualGeometryVisibilityPipelines.visibilityResolve != VK_NULL_HANDLE
 		&& virtualGeometryVisibilityPipelines.shadingBins != VK_NULL_HANDLE
@@ -479,7 +480,7 @@ bool VulkanContext::Impl::EnsureVulkanVirtualGeometryVisibilityPipelines()
 	}
 
 	DestroyVulkanVirtualGeometryVisibilityPipelines();
-	std::array<VkDescriptorSetLayoutBinding, 4> bindings{};
+	std::array<VkDescriptorSetLayoutBinding, 6> bindings{};
 	for(std::uint32_t binding = 0u; binding < bindings.size(); ++binding) {
 		bindings[binding].binding = binding;
 		bindings[binding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -537,7 +538,8 @@ bool VulkanContext::Impl::EnsureVulkanVirtualGeometryVisibilityPipelines()
 		vkDestroyShaderModule(device, module, nullptr);
 		return created;
 	};
-	if(!createPipeline("Shaders/VirtualGeometry/VirtualGeometryComputeRaster.comp.spv", virtualGeometryVisibilityPipelines.computeRaster)
+	if(!createPipeline("Shaders/VirtualGeometry/VirtualGeometryTriangleSetup.comp.spv", virtualGeometryVisibilityPipelines.triangleSetup)
+		|| !createPipeline("Shaders/VirtualGeometry/VirtualGeometryComputeRaster.comp.spv", virtualGeometryVisibilityPipelines.computeRaster)
 		|| !createPipeline("Shaders/VirtualGeometry/VirtualGeometryVisibilityResolve.comp.spv", virtualGeometryVisibilityPipelines.visibilityResolve)
 		|| !createPipeline("Shaders/VirtualGeometry/VirtualGeometryShadingBins.comp.spv", virtualGeometryVisibilityPipelines.shadingBins)) {
 		virtualGeometryVisibilityUnavailableReason = "One or more virtual-geometry visibility SPIR-V pipelines are unavailable.";
@@ -695,6 +697,7 @@ void VulkanContext::Impl::DestroyVulkanVirtualGeometryVisibilityPipelines()
 			if(pipeline != VK_NULL_HANDLE)
 				vkDestroyPipeline(device, pipeline, nullptr);
 		}
+		if(virtualGeometryVisibilityPipelines.triangleSetup != VK_NULL_HANDLE) vkDestroyPipeline(device, virtualGeometryVisibilityPipelines.triangleSetup, nullptr);
 		if(virtualGeometryVisibilityPipelines.computeRaster != VK_NULL_HANDLE) vkDestroyPipeline(device, virtualGeometryVisibilityPipelines.computeRaster, nullptr);
 		if(virtualGeometryVisibilityPipelines.visibilityResolve != VK_NULL_HANDLE) vkDestroyPipeline(device, virtualGeometryVisibilityPipelines.visibilityResolve, nullptr);
 		if(virtualGeometryVisibilityPipelines.shadingBins != VK_NULL_HANDLE) vkDestroyPipeline(device, virtualGeometryVisibilityPipelines.shadingBins, nullptr);
@@ -704,6 +707,16 @@ void VulkanContext::Impl::DestroyVulkanVirtualGeometryVisibilityPipelines()
 	virtualGeometryVisibilityPipelines = {};
 	virtualGeometryVisibilityDescriptorSetLayout = VK_NULL_HANDLE;
 	virtualGeometryCompositePipelines.clear();
+	for(auto& frameResources : virtualGeometryGpuPacketResourcesByFrame)
+	{
+		for(auto& resources : frameResources)
+		{
+			resources.visibilityTriangleSetupDescriptorSet = VK_NULL_HANDLE;
+			resources.visibilityComputeRasterDescriptorSet = VK_NULL_HANDLE;
+			resources.visibilityResolveDescriptorSet = VK_NULL_HANDLE;
+			resources.visibilityShadingBinsDescriptorSet = VK_NULL_HANDLE;
+		}
+	}
 }
 
 bool VulkanContext::Impl::EnsureVulkanDeformationComputePipelines()

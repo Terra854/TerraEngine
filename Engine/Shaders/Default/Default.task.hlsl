@@ -187,6 +187,7 @@ struct PushConstants
 static const uint kMaxStatsSlots = 16u;
 static const uint kHiZViewCount = 2u;
 static const uint kVirtualGeometryFlagConeCullingSafe = 0x20u;
+static const uint kVirtualGeometryFlagOwnerPaletteDeformation = 0x80u;
 static const uint kVirtualGeometryDebugModeShift = 8u;
 static const uint kVirtualGeometryDebugModeMask = 0xFFu;
 static const uint kInvalidVirtualGeometryBufferIndex = 0xFFFFFFFFu;
@@ -1205,7 +1206,9 @@ void main(uint3 groupId : SV_GroupID)
 	// deformation still suppresses page-local selection because it has no
 	// matching page publication.
 	const bool pageLocalGeometry =
-		(canonicalDeformationAvailable || !gpuDeformationAvailable)
+		(SceneUniforms.virtualGeometryFlags
+			& kVirtualGeometryFlagOwnerPaletteDeformation) == 0u
+		&& (canonicalDeformationAvailable || !gpuDeformationAvailable)
 		&& TryUsePageLocalGeometry(pageDescriptor);
 	// Do not touch the owner decode buffer for resident page packets. Page-local
 	// descriptors carry a complete decode record and must remain independently

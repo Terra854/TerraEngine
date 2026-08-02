@@ -15,6 +15,7 @@
 #include <numeric>
 #include <sstream>
 #include <thread>
+#include <unordered_map>
 
 namespace TerraEngine::Profiling
 {
@@ -42,6 +43,53 @@ std::string CurrentThreadLabel()
 	std::ostringstream stream;
 	stream << std::this_thread::get_id();
 	return stream.str();
+}
+
+// CalculateSampleCoverageMs merges nested and overlapping samples before
+// reporting a total. Grouping by thread produces CPU work (parallel lanes add),
+// while one shared group produces elapsed wall coverage for the frame.
+double CalculateSampleCoverageMs(
+	const std::vector<ProfilerSample>& samples,
+	ProfilerModuleId moduleId,
+	bool groupByThread)
+{
+	std::unordered_map<std::string, std::vector<std::pair<double, double>>> intervalsByLane;
+	for (const ProfilerSample& sample : samples)
+	{
+		if (sample.moduleId != moduleId || !std::isfinite(sample.startMs)
+			|| !std::isfinite(sample.durationMs) || sample.durationMs <= 0.0)
+		{
+			continue;
+		}
+		intervalsByLane[groupByThread ? sample.threadLabel : std::string{}].emplace_back(
+			sample.startMs, sample.startMs + sample.durationMs);
+	}
+
+	double coveredMs = 0.0;
+	for (auto& [lane, intervals] : intervalsByLane)
+	{
+		(void)lane;
+		std::sort(intervals.begin(), intervals.end());
+		if (intervals.empty())
+		{
+			continue;
+		}
+		double mergedBeginMs = intervals.front().first;
+		double mergedEndMs = intervals.front().second;
+		for (std::size_t index = 1u; index < intervals.size(); ++index)
+		{
+			if (intervals[index].first <= mergedEndMs)
+			{
+				mergedEndMs = std::max(mergedEndMs, intervals[index].second);
+				continue;
+			}
+			coveredMs += mergedEndMs - mergedBeginMs;
+			mergedBeginMs = intervals[index].first;
+			mergedEndMs = intervals[index].second;
+		}
+		coveredMs += mergedEndMs - mergedBeginMs;
+	}
+	return coveredMs;
 }
 
 template <std::size_t Capacity>
@@ -1897,24 +1945,23 @@ void Profiler::AggregateSamplesForFrame(ProfilerFrameRecord& frame) const
 {
 	for (ProfilerModuleSummary& module : frame.moduleSummaries)
 	{
-		module.totalMs = 0.0;
-	}
-
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (const ProfilerSample& sample : frame.samples)
-	{
-		if (ProfilerModuleSummary* module = FindModule(frame.moduleSummaries, sample.moduleId))
-		{
-			module->available = true;
-			module->totalMs += sample.durationMs;
-		}
+		// totalMs is CPU work rather than a sum of inclusive nodes. Nested samples
+		// overlap by design, so summing every duration made a fully instrumented
+		// hierarchy look progressively more expensive as detail was added.
+		module.totalMs = CalculateSampleCoverageMs(frame.samples, module.moduleId, true);
+		module.available = module.totalMs > 0.0;
 	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ProfilerModuleSummary* engineCpu = FindModule(frame.moduleSummaries, ProfilerModuleId::CpuEngine))
 	{
 		engineCpu->available = settings.cpuEngineEnabled;
+		const double capturedWallMs = CalculateSampleCoverageMs(frame.samples, ProfilerModuleId::CpuEngine, false);
 		AddOrReplaceMetric(*engineCpu, "Frame duration", frame.durationMs, "ms");
+		AddOrReplaceMetric(*engineCpu, "Captured wall time", capturedWallMs, "ms");
+		AddOrReplaceMetric(*engineCpu, "Captured CPU work", engineCpu->totalMs, "ms");
+		AddOrReplaceMetric(*engineCpu, "Scope coverage", frame.durationMs > 0.0 ? capturedWallMs * 100.0 / frame.durationMs : 0.0, "%");
+		AddOrReplaceMetric(*engineCpu, "Uncovered frame time", std::max(0.0, frame.durationMs - capturedWallMs), "ms");
 		AddOrReplaceMetric(*engineCpu, "Engine sample count", static_cast<double>(std::count_if(frame.samples.begin(), frame.samples.end(), [](const ProfilerSample& sample) {
 			return sample.moduleId == ProfilerModuleId::CpuEngine;
 		})), "count");
@@ -1926,6 +1973,9 @@ void Profiler::AggregateSamplesForFrame(ProfilerFrameRecord& frame) const
 	if (ProfilerModuleSummary* tasks = FindModule(frame.moduleSummaries, ProfilerModuleId::TaskExecution))
 	{
 		tasks->available = settings.taskExecutionEnabled;
+		const double capturedWallMs = CalculateSampleCoverageMs(frame.samples, ProfilerModuleId::TaskExecution, false);
+		AddOrReplaceMetric(*tasks, "Captured wall time", capturedWallMs, "ms");
+		AddOrReplaceMetric(*tasks, "Parallel CPU work", tasks->totalMs, "ms");
 		AddOrReplaceMetric(*tasks, "Queued tasks", static_cast<double>(queuedTaskCount), "count");
 		AddOrReplaceMetric(*tasks, "Started tasks", static_cast<double>(startedTaskCount), "count");
 		AddOrReplaceMetric(*tasks, "Finished tasks", static_cast<double>(finishedTaskCount), "count");

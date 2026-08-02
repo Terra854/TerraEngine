@@ -577,6 +577,10 @@ namespace TerraEngine::Scheduling {
 	{
 		SystemsBase& system = *registeredSystem.system;
 		const SystemDeclaration& declaration = registeredSystem.declaration;
+		// The system name is retained as task context so an expensive declaration
+		// identifies its owner instead of collapsing into one opaque scheduler cost.
+		TERRAENGINE_PROFILE_TASK_SCOPE("SystemScheduler: Build System Declaration",
+			TerraEngine::Profiling::ProfilerModuleId::CpuEngine, declaration.name.c_str());
 		std::vector<FrameWorkloadDeclaration> current = system.DeclareFrameWorkloads(deltaTime);
 		if (current.empty())
 		{
@@ -1072,6 +1076,7 @@ namespace TerraEngine::Scheduling {
 	{
 		if (dirty)
 		{
+			TERRAENGINE_PROFILE_SCOPE("SystemScheduler: Rebuild Dirty Schedule", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 			BuildSchedule();
 			// Phase/resource/flush changes can alter dependency meaning even when a
 			// descriptor retains the same public identity.
@@ -1087,8 +1092,12 @@ namespace TerraEngine::Scheduling {
 		// Resolve conditional visibility before asking PhysicsSystem to bind its
 		// per-frame activation. This prevents the physics packet and flush
 		// descriptor from observing the previous frame's consumer state.
-		const SameFramePhysicsPublicationState physicsPublicationState = ResolveSameFramePhysicsPublicationState();
-		SetSameFramePhysicsPublicationState(physicsPublicationState);
+		SameFramePhysicsPublicationState physicsPublicationState;
+		{
+			TERRAENGINE_PROFILE_SCOPE("SystemScheduler: Resolve Same-Frame Publication", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			physicsPublicationState = ResolveSameFramePhysicsPublicationState();
+			SetSameFramePhysicsPublicationState(physicsPublicationState);
+		}
 		latestSummary.afterPhysicsFlushActive = physicsPublicationState.active;
 		latestSummary.afterPhysicsConsumer = physicsPublicationState.consumerSystem;
 		latestSummary.afterPhysicsReason = physicsPublicationState.reason;
@@ -1147,6 +1156,8 @@ namespace TerraEngine::Scheduling {
 		// a dormant frame. Excluding them from the initial estimate keeps adding a
 		// zero-work subsystem from increasing the scheduler's per-frame allocation;
 		// an active system can still grow the vector when it publishes real work.
+		{
+		TERRAENGINE_PROFILE_SCOPE("SystemScheduler: Collect Workload Declarations", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		const std::size_t alwaysDeclaredSystemCount = static_cast<std::size_t>(std::count_if(
 			orderedIndices.begin(), orderedIndices.end(), [this](std::size_t index) {
 				return !systems[index].declaration.omitWhenNoFrameWorkloads;
@@ -1193,6 +1204,7 @@ namespace TerraEngine::Scheduling {
 				appendFlushWorkload(point, nextExecutionOrder++);
 			}
 		}
+		}
 
 		const auto topologyMatches = [this, &workloads]() {
 			if(!frameTopologyCache.valid
@@ -1219,7 +1231,12 @@ namespace TerraEngine::Scheduling {
 			}
 			return true;
 		};
-		if(topologyMatches())
+		bool topologyCacheHit = false;
+		{
+			TERRAENGINE_PROFILE_SCOPE("SystemScheduler: Match Topology Cache", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			topologyCacheHit = topologyMatches();
+		}
+		if(topologyCacheHit)
 		{
 			for(std::size_t index = 0u; index < workloads.size(); ++index)
 			{
@@ -1400,8 +1417,15 @@ namespace TerraEngine::Scheduling {
 
 	FrameExecutionPlan SystemScheduler::ExecuteFrameWorkloads(float deltaTime, const MutationFlushCallback& flushCallback)
 	{
-		TERRAENGINE_PROFILE_SCOPE("SystemScheduler: Coordinator Wait Region", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		std::vector<FrameWorkloadDeclaration> workloads = BuildFrameWorkloadDeclarations(deltaTime);
+		// This scope is the scheduler call itself. Previous labels described the
+		// entire call as a coordinator wait and protected-inline region, which made
+		// every system appear as a child of waits that had not actually occurred.
+		TERRAENGINE_PROFILE_SCOPE("SystemScheduler::ExecuteFrameWorkloads", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		std::vector<FrameWorkloadDeclaration> workloads;
+		{
+			TERRAENGINE_PROFILE_SCOPE("SystemScheduler: Build Frame Workloads", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			workloads = BuildFrameWorkloadDeclarations(deltaTime);
+		}
 		if (!frameWorkloadCompatibilityFallbackEnabled)
 		{
 			TERRAENGINE_PROFILE_SCOPE("SystemScheduler: Inline Region Validation", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
@@ -1437,8 +1461,13 @@ namespace TerraEngine::Scheduling {
 				}
 			};
 		}
-		TERRAENGINE_PROFILE_SCOPE("SystemScheduler: Worker Protected Inline Execution Region", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		return TerraEngine::Scheduling::ExecuteFrameWorkloads(std::move(workloads), "system-scheduler-frame");
+		{
+			// The validated workload executor contains worker-eligible and protected
+			// jobs. Give their shared parent a neutral label so the hierarchy does not
+			// claim all of that time belongs to either execution policy.
+			TERRAENGINE_PROFILE_SCOPE("SystemScheduler: Execute Validated Workloads", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			return TerraEngine::Scheduling::ExecuteFrameWorkloads(std::move(workloads), "system-scheduler-frame");
+		}
 	}
 
 	WorkerCoverageReport SystemScheduler::BuildWorkerCoverageReport(float deltaTime)

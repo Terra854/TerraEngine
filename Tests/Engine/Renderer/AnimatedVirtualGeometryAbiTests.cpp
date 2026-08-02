@@ -7,6 +7,10 @@
 
 #include <array>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <string>
 
 namespace TerraEngine::Tests {
 
@@ -111,6 +115,38 @@ namespace TerraEngine::Tests {
 			context.Expect(plan.IsComplete(), "Distinct full-width generations remain valid.");
 			context.ExpectEqual<std::size_t>(2u, plan.work.size(),
 				"High-bit generation differences must never alias one cache entry.");
+		});
+
+		registry.Add("AnimatedVirtualGeometry.Abi.ComputeRasterConsumesDemandedPageOutput", [](TestContext& context)
+		{
+			const std::filesystem::path shaderPath =
+				std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+					/ "Engine/Shaders/VirtualGeometry/VirtualGeometryTriangleSetup.comp.hlsl";
+			std::ifstream stream(shaderPath, std::ios::binary);
+			const std::string shader{
+				std::istreambuf_iterator<char>(stream),
+				std::istreambuf_iterator<char>() };
+			context.Expect(
+				shader.find("AnimatedDeformedGeometry.hlsli") != std::string::npos
+					&& shader.find("TeTryResolveAnimatedGraphicsPage") != std::string::npos
+					&& shader.find("TeTryLoadAnimatedVertex") != std::string::npos,
+				"Compute raster setup must consume the same deduplicated demanded-page deformation bridge as mesh shading, not rebuild animation per view.");
+		});
+
+		registry.Add("AnimatedVirtualGeometry.Abi.PageSkinningKeepsPaletteLocalJointIndices", [](TestContext& context)
+		{
+			const std::filesystem::path shaderPath =
+				std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+					/ "Engine/Shaders/VirtualGeometry/AnimatedPageDeform.comp.hlsl";
+			std::ifstream stream(shaderPath, std::ios::binary);
+			const std::string shader{
+				std::istreambuf_iterator<char>(stream),
+				std::istreambuf_iterator<char>() };
+			context.Expect(
+				shader.find("const uint paletteEntry = localJoint;") != std::string::npos
+					&& shader.find("staticPageBytes.Load(work.jointPaletteByteOffset + localJoint * 4u)")
+						== std::string::npos,
+				"Demanded-page skin records already contain palette-local indices; the shader must not reinterpret source-skeleton joint identities as compact palette rows.");
 		});
 	}
 

@@ -617,6 +617,8 @@ struct VulkanContext::Impl {
 					// are intentionally separate from generated draw arguments so a
 					// visibility failure cannot publish indirect execution authority.
 					VulkanBuffer visibilityTriangleBuffer{};
+					VulkanBuffer visibilitySetupPacketBuffer{};
+					VulkanBuffer visibilitySetupMeshletBuffer{};
 					VulkanBuffer visibilityDepthBuffer{};
 					VulkanBuffer visibilityRecordBuffer{};
 					VulkanBuffer resolvedVisibilityBuffer{};
@@ -626,6 +628,7 @@ struct VulkanContext::Impl {
 					// bindings. It is not the global bindless set used by graphics.
 					VkDescriptorSet executorDescriptorSet = VK_NULL_HANDLE;
 					VkDescriptorSet visibilityComputeRasterDescriptorSet = VK_NULL_HANDLE;
+					VkDescriptorSet visibilityTriangleSetupDescriptorSet = VK_NULL_HANDLE;
 					VkDescriptorSet visibilityResolveDescriptorSet = VK_NULL_HANDLE;
 					VkDescriptorSet visibilityShadingBinsDescriptorSet = VK_NULL_HANDLE;
 					BindlessBufferPublication packetPublication{};
@@ -649,6 +652,8 @@ struct VulkanContext::Impl {
 					bool generatedSubmissionSupportsIndirect = false;
 					std::size_t counterReadbackCapacity = 0u;
 					std::size_t visibilityTriangleCapacity = 0u;
+					std::size_t visibilitySetupPacketCapacity = 0u;
+					std::size_t visibilitySetupMeshletCapacity = 0u;
 					std::size_t visibilityDepthCapacity = 0u;
 					std::size_t visibilityRecordCapacity = 0u;
 					std::size_t resolvedVisibilityCapacity = 0u;
@@ -1271,6 +1276,11 @@ struct VulkanContext::Impl {
 		// same animator/layout sequence. A changed packet order or cooked generation
 		// forces the local-pose buffer back to its stateless bind-pose sentinel.
 		std::vector<VulkanAnimationPoseHistoryIdentity> poseHistoryIdentities;
+		// Frame-slot scratch survives its fence cycle. These vectors are rebuilt
+		// every active frame, so retaining capacity avoids two allocator round trips
+		// without sharing writable upload memory between in-flight frames.
+		std::vector<VulkanAnimationPoseHistoryIdentity> poseHistoryScratch;
+		std::vector<VulkanGpuAnimationGraphicsRecord> graphicsBridgeScratch;
 		bool live = false;
 		bool completionPending = false;
 	};
@@ -1290,6 +1300,13 @@ struct VulkanContext::Impl {
 		std::uint32_t graphicsBridgeBindlessIndex = INVALID_BINDLESS_BUFFER_INDEX;
 		std::uint64_t frameId = 0U;
 		std::uint64_t rendererGeneration = 0U;
+		// Frame slots return only after their Vulkan fence completes. Reusing these
+		// CPU vectors removes three allocations per active frame without sharing
+		// mutable upload memory with another in-flight slot.
+		std::vector<TerraEngine::Animation::GpuAnimationPaletteRecord>
+			paletteUploadScratch;
+		std::vector<float> morphWeightUploadScratch;
+		std::vector<VulkanGpuAnimationGraphicsRecord> bridgeUploadScratch;
 		bool live = false;
 	};
 	VkDescriptorSetLayout animationDescriptorSetLayout = VK_NULL_HANDLE;
@@ -1348,8 +1365,30 @@ struct VulkanContext::Impl {
 			// constants carry this word offset so shaders never scan other owners.
 			std::uint32_t headerWordOffset = 0u;
 		};
+		// StaticPageUploadRecord contains only cooked demanded-page facts. Pose and
+		// frame generations deliberately stay out of this cache so a new animation
+		// publication still rebuilds the small dynamic work records every frame.
+		struct StaticPageUploadRecord
+		{
+			TerraEngine::Renderer::StaticPageKey key{};
+			std::uint32_t blobBase = 0u;
+			std::uint32_t packedVertexByteOffset = 0u;
+			std::uint32_t skinRecordByteOffset = 0u;
+			std::uint32_t morphDeltaByteOffset = 0u;
+			std::uint32_t jointPaletteByteOffset = 0u;
+			std::uint32_t vertexCount = 0u;
+			std::uint32_t jointCount = 0u;
+			std::uint32_t morphTargetCount = 0u;
+			float geometricError = 0.0f;
+			float deformationError = 0.0f;
+			std::array<float, 4u> positionOffset{};
+			std::array<float, 4u> positionScale{};
+		};
 		std::vector<GraphicsGroup> graphicsGroups;
 		std::vector<TerraEngine::Renderer::DeformedPageKey> workKeys;
+		std::vector<StaticPageUploadRecord> staticPageUploads;
+		VkDeviceSize staticPageByteCount = 0u;
+		bool staticPageUploadValid = false;
 		VulkanBuffer graphicsBridgeBuffer{};
 		VkDeviceSize graphicsBridgeCapacityBytes = 0u;
 		std::uint32_t currentVerticesBindlessIndex =

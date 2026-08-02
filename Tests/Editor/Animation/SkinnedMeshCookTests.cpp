@@ -436,6 +436,56 @@ namespace TerraEngine::EditorTests {
 				"Low-poly deformable meshes must retain canonical metadata while avoiding unnecessary demanded pages.");
 		});
 
+		registry.Add("Editor.Animation.SkinnedMeshCook.ZeroFillsMissingMorphAttributeChannels", [](TestContext& context) {
+			SkinnedMeshCookInput input = MakeTriangleInput();
+			SkinnedMeshMorphTarget morph;
+			morph.stableTargetId = 84U;
+			morph.positionDeltas = {
+				std::array<float, 3U>{0.0F, 0.0F, 0.1F},
+				std::array<float, 3U>{0.0F, 0.0F, 0.2F},
+				std::array<float, 3U>{0.0F, 0.0F, 0.3F}};
+			// glTF permits morph targets without NORMAL or TANGENT attributes. The
+			// canonical TEMF writer must still emit dense zero lanes for the runtime.
+			input.morphTargets.push_back(std::move(morph));
+			const std::filesystem::path outputPath =
+				TestRoot() / "missing-morph-attributes.temf";
+			SkinnedMeshCookReport report;
+			context.Expect(CompileSkinnedMeshFromRaw(
+				"missing-morph-attributes",
+				outputPath,
+				input,
+				&report,
+				MakeBoundCookSettings()),
+				"A position-only morph target must publish a canonical deformable TEMF: "
+					+ report.diagnosticMessage);
+
+			ResourceManager& resources = ResourceManager::Instance();
+			resources.ClearCaches();
+			const TerraEngine::UUID meshId = resources.LoadDeformableMesh(
+				outputPath,
+				4096U,
+				kTestSkeletonCompatibilityFingerprint);
+			const Mesh* mesh = resources.GetMesh(meshId);
+			context.Expect(mesh != nullptr
+				&& mesh->deformableMorphPositions.size() == input.vertices.size()
+				&& mesh->deformableMorphNormals.size() == input.vertices.size()
+				&& mesh->deformableMorphTangents.size() == input.vertices.size(),
+				"The runtime must accept equally sized dense morph attribute lanes.");
+			if (mesh != nullptr)
+			{
+				const std::array<float, 3U> zero{};
+				context.Expect(std::all_of(
+					mesh->deformableMorphNormals.begin(),
+					mesh->deformableMorphNormals.end(),
+					[&zero](const std::array<float, 3U>& delta) { return delta == zero; })
+					&& std::all_of(
+						mesh->deformableMorphTangents.begin(),
+						mesh->deformableMorphTangents.end(),
+						[&zero](const std::array<float, 3U>& delta) { return delta == zero; }),
+					"Omitted morph normal and tangent attributes must decode as zero deltas.");
+			}
+		});
+
 		registry.Add("Editor.Animation.SkinnedMeshCook.PreservesAdaptiveLodsAndPerMeshPercentageThresholds", [](TestContext& context) {
 			const SkinnedMeshCookInput input = MakeSkinnedGridInput(48U);
 			const std::filesystem::path defaultPath =

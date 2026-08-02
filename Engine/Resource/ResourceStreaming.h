@@ -302,6 +302,13 @@ namespace TerraEngine::Resource
 		StaleGeneration
 	};
 
+	enum class VirtualGeometryStaticPageReadSource : std::uint8_t
+	{
+		None,
+		LooseFile,
+		MountedTepak
+	};
+
 	struct VirtualGeometryStaticPageReadRequest
 	{
 		std::filesystem::path path;
@@ -323,6 +330,8 @@ namespace TerraEngine::Resource
 		VirtualGeometryStaticPageReadStatus status = VirtualGeometryStaticPageReadStatus::InvalidRequest;
 		std::uint32_t pageId = kVirtualGeometryInvalidIndex;
 		std::uint64_t requestGeneration = 0u;
+		VirtualGeometryStaticPageReadSource source =
+			VirtualGeometryStaticPageReadSource::None;
 		std::vector<std::uint8_t> bytes;
 		std::string diagnostic;
 	};

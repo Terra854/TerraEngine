@@ -8,12 +8,15 @@
 
 #include "../Core/EditorContext.h"
 #include "../Profiling/EditorProfilerService.h"
+#include "../Profiling/ProfilerDiagnosticAnalysis.h"
+#include "../Profiling/ProfilerSampleHierarchy.h"
 #include "../Subsystems/MainEditorSubsystem.h"
 #include "Engine/Profiling/Profiler.h"
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Scripting/ScriptingSystem.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -36,6 +39,12 @@ using TerraEngine::Profiling::ProfilerSample;
 using TerraEngine::Profiling::ProfilerSessionState;
 using TerraEngine::Profiling::ProfilerTimingStreamAggregate;
 using TerraEngine::Profiling::ProfilerTimingStreamStatus;
+using TerraEngine::EditorProfiling::ProfilerDiagnosticAnalysis;
+using TerraEngine::EditorProfiling::ProfilerDiagnosticRow;
+using TerraEngine::EditorProfiling::ProfilerSampleHierarchy;
+using TerraEngine::EditorProfiling::ProfilerSampleHierarchyNode;
+using TerraEngine::EditorProfiling::BuildProfilerDiagnosticAnalysis;
+using TerraEngine::EditorProfiling::ProfilerDiagnosticRowMatches;
 
 namespace
 {
@@ -43,33 +52,6 @@ namespace
 // ten-Hz UI still feels live while keeping deep capture and renderer snapshots
 // off the producer-critical path.
 constexpr auto kProfilerWindowRefreshInterval = std::chrono::milliseconds(100);
-// struct SampleTreeNode groups related state and operations so callers have one documented contract.
-struct SampleTreeNode
-{
-	std::size_t sampleIndex = 0u;
-	std::vector<std::size_t> childIndices;
-	double selfDurationMs = 0.0;
-};
-
-// struct SampleTree groups related state and operations so callers have one documented contract.
-struct SampleTree
-{
-	std::vector<ProfilerSample> samples;
-	std::vector<SampleTreeNode> nodes;
-	std::vector<std::size_t> rootIndices;
-};
-
-// struct HotSampleRow groups the columns needed for the sorted "what cost the frame" table.
-struct HotSampleRow
-{
-	std::string name;
-	std::string threadLabel;
-	std::string taskLabel;
-	double inclusiveMs = 0.0;
-	double selfMs = 0.0;
-	std::uint32_t depth = 0u;
-};
-
 // struct FrameDurationStats keeps capture-level timing answers close to the UI
 // code that presents them, without changing the profiler capture file format.
 struct FrameDurationStats
@@ -308,99 +290,6 @@ void DrawEvidenceMetrics(const char* tableId, const std::vector<EditorProfilerMe
 	ImGui::EndTable();
 }
 
-// BuildSampleTree is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-SampleTree BuildSampleTree(const ProfilerFrameRecord& frame, ProfilerModuleId selectedModule)
-{
-	SampleTree tree;
-	// Keep the table useful for timing inspection while rebuilding the parent
-	// links that make nested profiler scopes readable at a glance.
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (const ProfilerSample& sample : frame.samples)
-	{
-		if (sample.moduleId == selectedModule)
-		{
-			tree.samples.push_back(sample);
-		}
-	}
-
-	std::sort(tree.samples.begin(), tree.samples.end(), [](const ProfilerSample& left, const ProfilerSample& right) {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (left.startMs == right.startMs)
-		{
-			return left.depth < right.depth;
-		}
-		return left.startMs < right.startMs;
-	});
-
-	tree.nodes.resize(tree.samples.size());
-	std::unordered_map<std::uint64_t, std::size_t> sampleIndexById;
-	sampleIndexById.reserve(tree.samples.size());
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (std::size_t index = 0u; index < tree.samples.size(); ++index)
-	{
-		tree.nodes[index].sampleIndex = index;
-		sampleIndexById.emplace(tree.samples[index].sampleId, index);
-	}
-
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (std::size_t index = 0u; index < tree.samples.size(); ++index)
-	{
-		const ProfilerSample& sample = tree.samples[index];
-		const auto parentIt = sampleIndexById.find(sample.parentSampleId);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (sample.parentSampleId != 0u && parentIt != sampleIndexById.end())
-		{
-			tree.nodes[parentIt->second].childIndices.push_back(index);
-		}
-		else
-		{
-			tree.rootIndices.push_back(index);
-		}
-	}
-
-	for (SampleTreeNode& node : tree.nodes)
-	{
-		double childDurationMs = 0.0;
-		for (const std::size_t childIndex : node.childIndices)
-		{
-			childDurationMs += tree.samples[tree.nodes[childIndex].sampleIndex].durationMs;
-		}
-		const double inclusiveMs = tree.samples[node.sampleIndex].durationMs;
-		node.selfDurationMs = std::max(0.0, inclusiveMs - childDurationMs);
-	}
-	return tree;
-}
-
-std::vector<HotSampleRow> BuildHotSampleRows(const SampleTree& tree)
-{
-	std::vector<HotSampleRow> rows;
-	rows.reserve(tree.samples.size());
-	for (const SampleTreeNode& node : tree.nodes)
-	{
-		const ProfilerSample& sample = tree.samples[node.sampleIndex];
-		if (sample.durationMs <= 0.0)
-		{
-			continue;
-		}
-		rows.push_back({
-			sample.name,
-			sample.threadLabel,
-			sample.taskLabel,
-			sample.durationMs,
-			node.selfDurationMs,
-			sample.depth
-		});
-	}
-	std::sort(rows.begin(), rows.end(), [](const HotSampleRow& left, const HotSampleRow& right) {
-		if (left.selfMs == right.selfMs)
-		{
-			return left.inclusiveMs > right.inclusiveMs;
-		}
-		return left.selfMs > right.selfMs;
-	});
-	return rows;
-}
-
 // DrawDisclosureControl is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool DrawDisclosureControl(bool hasChildren, bool isOpen)
 {
@@ -446,17 +335,54 @@ bool DrawDisclosureControl(bool hasChildren, bool isOpen)
 	return clicked;
 }
 
-// DrawSampleTreeRow is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void DrawSampleTreeRow(const SampleTree& tree, std::size_t nodeIndex, std::uint64_t frameIndex, double frameDurationMs)
+bool DiagnosticNodeOrDescendantMatches(
+	const ProfilerDiagnosticAnalysis& analysis,
+	std::size_t nodeIndex,
+	const std::string& query,
+	double minimumDurationMs)
 {
-	const SampleTreeNode& node = tree.nodes[nodeIndex];
+	if (ProfilerDiagnosticRowMatches(analysis.rows[nodeIndex], query, minimumDurationMs))
+	{
+		return true;
+	}
+	for (const std::size_t childIndex : analysis.hierarchy.nodes[nodeIndex].childIndices)
+	{
+		if (DiagnosticNodeOrDescendantMatches(analysis, childIndex, query, minimumDurationMs))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+// DrawSampleTreeRow renders validated hierarchy links plus an explicit row for
+// parent self time. The latter is the part of a scope with no child marker and
+// is usually the first place a developer should add finer instrumentation.
+void DrawSampleTreeRow(
+	const ProfilerDiagnosticAnalysis& analysis,
+	std::size_t nodeIndex,
+	std::uint64_t frameIndex,
+	double frameDurationMs,
+	const std::string& query,
+	double minimumDurationMs,
+	bool showUninstrumentedRows)
+{
+	const ProfilerSampleHierarchy& tree = analysis.hierarchy;
+	const ProfilerSampleHierarchyNode& node = tree.nodes[nodeIndex];
 	const ProfilerSample& sample = tree.samples[node.sampleIndex];
-	const bool hasChildren = !node.childIndices.empty();
+	const ProfilerDiagnosticRow& row = analysis.rows[nodeIndex];
+	if (!DiagnosticNodeOrDescendantMatches(analysis, nodeIndex, query, minimumDurationMs))
+	{
+		return;
+	}
+	const bool hasChildren = std::any_of(node.childIndices.begin(), node.childIndices.end(), [&](std::size_t childIndex) {
+		return DiagnosticNodeOrDescendantMatches(analysis, childIndex, query, minimumDurationMs);
+	});
 	constexpr float kTreeIndentPixels = 12.0f;
 
 	ImGui::TableNextRow();
 	ImGui::TableSetColumnIndex(0);
-	ImGui::SetCursorPosX(ImGui::GetCursorPosX() + static_cast<float>(sample.depth) * kTreeIndentPixels);
+	ImGui::SetCursorPosX(ImGui::GetCursorPosX() + static_cast<float>(node.presentationDepth) * kTreeIndentPixels);
 	bool isOpen = true;
 	const std::string rowId = std::to_string(frameIndex) + ":" + std::to_string(sample.sampleId);
 	ImGui::PushID(rowId.c_str());
@@ -465,7 +391,10 @@ void DrawSampleTreeRow(const SampleTree& tree, std::size_t nodeIndex, std::uint6
 	{
 		ImGuiStorage* storage = ImGui::GetStateStorage();
 		const ImGuiID openStateId = ImGui::GetID("SampleOpen");
-		isOpen = storage->GetBool(openStateId, false);
+		// A newly opened profiler frame should expose the complete diagnostic
+		// hierarchy immediately. The stored value still preserves any manual
+		// collapse the developer makes after that first presentation.
+		isOpen = storage->GetBool(openStateId, true);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (DrawDisclosureControl(true, isOpen))
 		{
@@ -479,7 +408,7 @@ void DrawSampleTreeRow(const SampleTree& tree, std::size_t nodeIndex, std::uint6
 		// each depth level without using ImGui tree nodes inside a table row.
 		DrawDisclosureControl(false, true);
 	}
-	ImGui::TextUnformatted(sample.name.c_str());
+	ImGui::TextUnformatted(row.name.c_str());
 
 	ImGui::TableSetColumnIndex(1);
 	ImGui::Text("%.3f", sample.durationMs);
@@ -490,16 +419,37 @@ void DrawSampleTreeRow(const SampleTree& tree, std::size_t nodeIndex, std::uint6
 	ImGui::TableSetColumnIndex(4);
 	DrawTimeBar(sample.durationMs, frameDurationMs);
 	ImGui::TableSetColumnIndex(5);
-	ImGui::TextUnformatted(sample.threadLabel.c_str());
+	ImGui::TextUnformatted(row.threadLabel.c_str());
+	if (ImGui::IsItemHovered() && row.rawThreadLabel != row.threadLabel)
+	{
+		ImGui::SetTooltip("Captured thread: %s", row.rawThreadLabel.c_str());
+	}
 	ImGui::TableSetColumnIndex(6);
-	ImGui::TextUnformatted(sample.taskLabel.c_str());
+	ImGui::TextUnformatted(row.phase.empty() ? "-" : row.phase.c_str());
+	ImGui::TableSetColumnIndex(7);
+	ImGui::TextUnformatted(row.executionPath.empty() ? "-" : row.executionPath.c_str());
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (hasChildren && isOpen)
 	{
+		if (showUninstrumentedRows && node.selfDurationMs >= minimumDurationMs)
+		{
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			ImGui::SetCursorPosX(ImGui::GetCursorPosX() + static_cast<float>(node.presentationDepth + 1u) * kTreeIndentPixels + 8.0f);
+			ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.25f, 1.0f), "[Uninstrumented inside %s]", row.name.c_str());
+			ImGui::TableSetColumnIndex(1); ImGui::Text("%.3f", node.selfDurationMs);
+			ImGui::TableSetColumnIndex(2); ImGui::Text("%.3f", node.selfDurationMs);
+			ImGui::TableSetColumnIndex(3); ImGui::Text("%.1f%%", SafePercent(node.selfDurationMs, frameDurationMs));
+			ImGui::TableSetColumnIndex(4); DrawTimeBar(node.selfDurationMs, frameDurationMs);
+			ImGui::TableSetColumnIndex(5); ImGui::TextUnformatted(row.threadLabel.c_str());
+			ImGui::TableSetColumnIndex(6); ImGui::TextUnformatted(row.phase.empty() ? "-" : row.phase.c_str());
+			ImGui::TableSetColumnIndex(7); ImGui::TextUnformatted("No child scope");
+		}
 		for (const std::size_t childIndex : node.childIndices)
 		{
-			DrawSampleTreeRow(tree, childIndex, frameIndex, frameDurationMs);
+			DrawSampleTreeRow(analysis, childIndex, frameIndex, frameDurationMs, query,
+				minimumDurationMs, showUninstrumentedRows);
 		}
 	}
 	ImGui::PopID();
@@ -526,8 +476,12 @@ struct ProfilerWindowCache
 	bool sampleAnalysisValid = false;
 	std::uint64_t sampleAnalysisFrameIndex = 0u;
 	ProfilerModuleId sampleAnalysisModule = ProfilerModuleId::CpuEngine;
-	SampleTree sampleTree;
-	std::vector<HotSampleRow> hotSampleRows;
+	ProfilerDiagnosticAnalysis diagnosticAnalysis;
+	// Filters are presentation state and never trigger a new capture analysis.
+	// This keeps typing in Search cheap even for a frame with thousands of scopes.
+	std::array<char, 128u> sampleSearch{};
+	float minimumSampleDurationMs = 0.05f;
+	bool showUninstrumentedRows = true;
 	bool captureEvidenceOpenLastFrame = false;
 	bool captureEvidenceValid = false;
 	EditorProfilerCaptureSummary captureEvidenceSummary;
@@ -663,10 +617,9 @@ void ProfilerWindow::RefreshSampleAnalysis(const ProfilerFrameRecord& frame)
 		return;
 	}
 
-	// Build parent links and hot rows once for the cached selected frame. Both UI
-	// sections share this analysis instead of copying and sorting samples twice.
-	cache->sampleTree = BuildSampleTree(frame, selectedModule);
-	cache->hotSampleRows = BuildHotSampleRows(cache->sampleTree);
+	// Build hierarchy, scheduler context, hot rows, and timeline lanes once for
+	// the cached selected frame. Every diagnostic view shares this immutable work.
+	cache->diagnosticAnalysis = BuildProfilerDiagnosticAnalysis(frame, selectedModule);
 	cache->sampleAnalysisFrameIndex = frame.frameIndex;
 	cache->sampleAnalysisModule = selectedModule;
 	cache->sampleAnalysisValid = true;
@@ -939,7 +892,6 @@ void ProfilerWindow::DrawFrameList()
 void ProfilerWindow::DrawFrameDetails()
 {
 	DrawRendererRecoverySummary();
-	DrawCaptureEvidenceSummary();
 
 	const std::optional<ProfilerFrameRecord>& selectedFrame = cache->selectedFrame;
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -965,19 +917,23 @@ void ProfilerWindow::DrawFrameDetails()
 			return;
 		}
 	}
+	// Capture-wide evidence is meaningful only after a capture session has
+	// supplied a selected frame. Keeping it behind this guard prevents the empty
+	// profiler state from presenting a fabricated zero-frame analysis.
+	DrawCaptureEvidenceSummary();
 
 	DrawFrameOverview(*selectedFrame);
 	DrawPhysicsSummary(*selectedFrame);
 
 	const ScriptingSystem::ScriptingFrameResult& scriptingResult = ScriptingSystem::Instance().GetLatestScriptingFrameResult();
-	if (scriptingResult.frameId != 0 && ImGui::TreeNode("Scripting Dispatch Counters"))
+	if (scriptingResult.frameId != 0 && ImGui::TreeNodeEx("Scripting Dispatch Counters", ImGuiTreeNodeFlags_DefaultOpen))
 	{
 		ImGui::Text("Updated: %zu  Worker: %zu  Protected: %zu", scriptingResult.updatedScripts, scriptingResult.workerScripts, scriptingResult.protectedScripts);
 		ImGui::Text("Cache hits: %zu  Misses: %zu  Bridge avoided: %zu", scriptingResult.cacheHits, scriptingResult.cacheMisses, scriptingResult.bridgeCallsAvoided);
 		ImGui::Text("Typed writes: %zu  JSON fallbacks: %zu  Coalesced: %zu", scriptingResult.typedMutations, scriptingResult.jsonMutationFallbacks, scriptingResult.coalescedMutations);
 		ImGui::TreePop();
 	}
-	if (ImGui::TreeNode("Visible Command Reuse"))
+	if (ImGui::TreeNodeEx("Visible Command Reuse", ImGuiTreeNodeFlags_DefaultOpen))
 	{
 		if (ImGui::BeginTable("ProfilerVisibleCommandReuseRows", 7, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
 		{
@@ -1012,7 +968,7 @@ void ProfilerWindow::DrawFrameDetails()
 		}
 		ImGui::TreePop();
 	}
-	if (!cache->backendStageTimings.empty() && ImGui::TreeNode("Backend Submit Path"))
+	if (!cache->backendStageTimings.empty() && ImGui::TreeNodeEx("Backend Submit Path", ImGuiTreeNodeFlags_DefaultOpen))
 	{
 		if (ImGui::BeginTable("ProfilerBackendSubmitStages", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
 		{
@@ -1047,7 +1003,9 @@ void ProfilerWindow::DrawFrameDetails()
 			{
 				selectedModule = moduleId;
 				DrawModuleSummary(*selectedFrame);
+				DrawDiagnosticSummary(*selectedFrame);
 				DrawHotSamples(*selectedFrame);
+				DrawTimeline(*selectedFrame);
 				DrawSamples(*selectedFrame);
 				ImGui::EndTabItem();
 			}
@@ -1060,9 +1018,9 @@ void ProfilerWindow::DrawCaptureEvidenceSummary()
 {
 	ImGui::SeparatorText("Capture Evidence");
 	// Whole-capture synthesis deep-copies and scans every retained typed stream.
-	// Keep it out of the normal redraw path until the user explicitly asks for
-	// the analysis; selected-frame details above remain cheap and live.
-	const bool captureEvidenceOpen = ImGui::TreeNode("Whole Capture Analysis");
+	// Open it once with the profiler session, then retain the cached result across
+	// redraws so the default-expanded presentation does not repeat the scan.
+	const bool captureEvidenceOpen = ImGui::TreeNodeEx("Whole Capture Analysis", ImGuiTreeNodeFlags_DefaultOpen);
 	if (!captureEvidenceOpen)
 	{
 		cache->captureEvidenceOpenLastFrame = false;
@@ -1111,23 +1069,23 @@ void ProfilerWindow::DrawCaptureEvidenceSummary()
 		ImGui::TextDisabled("Capture is complete.");
 	}
 
-	if (ImGui::TreeNode("Physics, Scene View, and Editor Stages"))
+	if (ImGui::TreeNodeEx("Physics, Scene View, and Editor Stages", ImGuiTreeNodeFlags_DefaultOpen))
 	{
 		DrawEvidenceMetrics("ProfilerStageEvidence", summary.stageTimings);
 		ImGui::TreePop();
 	}
-	if (ImGui::TreeNode("Protected Boundary Breakdown"))
+	if (ImGui::TreeNodeEx("Protected Boundary Breakdown", ImGuiTreeNodeFlags_DefaultOpen))
 	{
 		DrawEvidenceMetrics("ProfilerBoundaryEvidence", summary.protectedBoundaryTimings);
 		ImGui::TreePop();
 	}
-	if (ImGui::TreeNode("Presentation and Responsiveness"))
+	if (ImGui::TreeNodeEx("Presentation and Responsiveness", ImGuiTreeNodeFlags_DefaultOpen))
 	{
 		DrawEvidenceMetrics("ProfilerPresentationWaitEvidence", summary.presentationWaitTimings);
 		DrawEvidenceMetrics("ProfilerResponsivenessEvidence", summary.responsivenessTimings);
 		ImGui::TreePop();
 	}
-	if (ImGui::TreeNode("Worker Timeline Summary"))
+	if (ImGui::TreeNodeEx("Worker Timeline Summary", ImGuiTreeNodeFlags_DefaultOpen))
 	{
 		if (summary.workerHistories.empty())
 		{
@@ -1156,7 +1114,7 @@ void ProfilerWindow::DrawCaptureEvidenceSummary()
 		}
 		ImGui::TreePop();
 	}
-	if (ImGui::TreeNode("Physics Work Volumes"))
+	if (ImGui::TreeNodeEx("Physics Work Volumes", ImGuiTreeNodeFlags_DefaultOpen))
 	{
 		const EditorProfilerWorkVolumeSummary& volume = summary.workVolumes;
 		ImGui::Text("Ticks %llu  Total %llu  Active %llu  Examined %llu",
@@ -1180,7 +1138,7 @@ void ProfilerWindow::DrawPhysicsSummary(const TerraEngine::Profiling::ProfilerFr
 		return;
 	}
 	const TerraEngine::Profiling::ProfilerPhysicsFrameCounters& physics = *frame.physics;
-	if (!ImGui::TreeNode("Physics Counters"))
+	if (!ImGui::TreeNodeEx("Physics Counters", ImGuiTreeNodeFlags_DefaultOpen))
 	{
 		return;
 	}
@@ -1272,7 +1230,7 @@ void ProfilerWindow::DrawFrameOverview(const ProfilerFrameRecord& frame)
 	// Distribution analysis copies and sorts the rolling frame capture. Keep that
 	// work behind an explicit disclosure so the normal profiler redraw stays
 	// proportional to the lightweight frame list instead of the capture length.
-	const bool timingDistributionOpen = ImGui::TreeNode("Timing Distribution");
+	const bool timingDistributionOpen = ImGui::TreeNodeEx("Timing Distribution", ImGuiTreeNodeFlags_DefaultOpen);
 	if (timingDistributionOpen)
 	{
 		const bool timingDistributionOpenedThisFrame = !cache->timingDistributionOpenLastFrame;
@@ -1412,22 +1370,88 @@ void ProfilerWindow::DrawModuleSummary(const ProfilerFrameRecord& frame)
 	}
 }
 
+void ProfilerWindow::DrawDiagnosticSummary(const ProfilerFrameRecord& frame)
+{
+	RefreshSampleAnalysis(frame);
+	const ProfilerDiagnosticAnalysis& analysis = cache->diagnosticAnalysis;
+	ImGui::SeparatorText("Diagnosis");
+	if (analysis.rows.empty())
+	{
+		ImGui::TextDisabled("No detailed scopes were captured for this module.");
+		return;
+	}
+
+	const double coveragePercent = SafePercent(analysis.capturedWallMs, frame.durationMs);
+	if (ImGui::BeginTable("ProfilerDiagnosisSummary", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+	{
+		ImGui::TableSetupColumn("Frame wall");
+		ImGui::TableSetupColumn("Captured wall");
+		ImGui::TableSetupColumn("CPU work");
+		ImGui::TableSetupColumn("Coverage");
+		ImGui::TableHeadersRow();
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0); ImGui::Text("%.3f ms", frame.durationMs);
+		ImGui::TableSetColumnIndex(1); ImGui::Text("%.3f ms", analysis.capturedWallMs);
+		ImGui::TableSetColumnIndex(2); ImGui::Text("%.3f ms", analysis.cpuWorkMs);
+		ImGui::TableSetColumnIndex(3); ImGui::Text("%.1f%%", coveragePercent);
+		ImGui::EndTable();
+	}
+
+	if (!analysis.hotRowIndices.empty())
+	{
+		const ProfilerDiagnosticRow& offender = analysis.rows[analysis.hotRowIndices.front()];
+		ImGui::Text("Primary self-time offender: %s (%.3f ms self, %.3f ms inclusive)",
+			offender.name.c_str(), offender.selfMs, offender.inclusiveMs);
+		ImGui::TextDisabled("Thread: %s  Phase: %s  Path: %s",
+			offender.threadLabel.c_str(), offender.phase.empty() ? "-" : offender.phase.c_str(),
+			offender.executionPath.empty() ? "-" : offender.executionPath.c_str());
+	}
+	if (analysis.uncoveredFrameMs > std::max(0.10, frame.durationMs * 0.01))
+	{
+		ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.25f, 1.0f),
+			"%.3f ms of this frame has no scope coverage.", analysis.uncoveredFrameMs);
+	}
+
+	ImGui::SetNextItemWidth(260.0f);
+	ImGui::InputTextWithHint("##ProfilerSampleSearch", "Search scope, phase, path, or thread",
+		cache->sampleSearch.data(), cache->sampleSearch.size());
+	ImGui::SameLine();
+	ImGui::SetNextItemWidth(110.0f);
+	ImGui::DragFloat("Min ms", &cache->minimumSampleDurationMs, 0.01f, 0.0f,
+		static_cast<float>(std::max(1.0, frame.durationMs)), "%.2f");
+	ImGui::SameLine();
+	ImGui::Checkbox("Show uninstrumented", &cache->showUninstrumentedRows);
+}
+
 // ProfilerWindow::DrawHotSamples is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ProfilerWindow::DrawHotSamples(const ProfilerFrameRecord& frame)
 {
 	// Sorting every captured scope is analysis work, not ordinary live display.
 	// Keep it behind an explicit disclosure and reuse the result for the full
 	// hierarchy if the user opens both sections for the same pinned frame.
-	if (!ImGui::TreeNode("Top Offenders"))
+	// The three primary diagnostic views should be immediately useful when a
+	// developer opens a frame. ImGui still remembers any manual collapse made
+	// after this first appearance.
+	if (!ImGui::TreeNodeEx("Top Offenders", ImGuiTreeNodeFlags_DefaultOpen))
 	{
 		ImGui::TextDisabled("Expand to sort the cached frame's hottest scopes.");
 		return;
 	}
 	RefreshSampleAnalysis(frame);
-	const std::vector<HotSampleRow>& rows = cache->hotSampleRows;
-	if (rows.empty())
+	const ProfilerDiagnosticAnalysis& analysis = cache->diagnosticAnalysis;
+	const std::string query(cache->sampleSearch.data());
+	std::vector<std::size_t> visibleRows;
+	visibleRows.reserve(analysis.hotRowIndices.size());
+	for (const std::size_t rowIndex : analysis.hotRowIndices)
 	{
-		ImGui::TextDisabled("No hot samples for this module.");
+		if (ProfilerDiagnosticRowMatches(analysis.rows[rowIndex], query, cache->minimumSampleDurationMs))
+		{
+			visibleRows.push_back(rowIndex);
+		}
+	}
+	if (visibleRows.empty())
+	{
+		ImGui::TextDisabled("No samples match the current diagnostic filter.");
 		ImGui::TreePop();
 		return;
 	}
@@ -1435,8 +1459,8 @@ void ProfilerWindow::DrawHotSamples(const ProfilerFrameRecord& frame)
 	// same execution interval more than once. Self time is the non-overlapping cost.
 	ImGui::TextDisabled("Inclusive timings are nested and must not be added together; Self excludes child scopes.");
 
-	const std::size_t rowLimit = std::min<std::size_t>(rows.size(), 12u);
-	if (ImGui::BeginTable("ProfilerHotSamples", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	const std::size_t rowLimit = std::min<std::size_t>(visibleRows.size(), 20u);
+	if (ImGui::BeginTable("ProfilerHotSamples", 8, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
 	{
 		ImGui::TableSetupColumn("Scope", ImGuiTableColumnFlags_WidthStretch, 2.5f);
 		ImGui::TableSetupColumn("Self");
@@ -1444,10 +1468,12 @@ void ProfilerWindow::DrawHotSamples(const ProfilerFrameRecord& frame)
 		ImGui::TableSetupColumn("% Frame");
 		ImGui::TableSetupColumn("Load", ImGuiTableColumnFlags_WidthStretch, 1.0f);
 		ImGui::TableSetupColumn("Thread");
+		ImGui::TableSetupColumn("Phase");
+		ImGui::TableSetupColumn("Path");
 		ImGui::TableHeadersRow();
 		for (std::size_t rowIndex = 0u; rowIndex < rowLimit; ++rowIndex)
 		{
-			const HotSampleRow& row = rows[rowIndex];
+			const ProfilerDiagnosticRow& row = analysis.rows[visibleRows[rowIndex]];
 			ImGui::TableNextRow();
 			ImGui::TableSetColumnIndex(0);
 			ImGui::TextUnformatted(row.name.c_str());
@@ -1461,9 +1487,78 @@ void ProfilerWindow::DrawHotSamples(const ProfilerFrameRecord& frame)
 			DrawTimeBar(row.selfMs, std::max(frame.durationMs, 1.0));
 			ImGui::TableSetColumnIndex(5);
 			ImGui::TextUnformatted(row.threadLabel.c_str());
+			if (ImGui::IsItemHovered() && row.rawThreadLabel != row.threadLabel)
+			{
+				ImGui::SetTooltip("Captured thread: %s", row.rawThreadLabel.c_str());
+			}
+			ImGui::TableSetColumnIndex(6);
+			ImGui::TextUnformatted(row.phase.empty() ? "-" : row.phase.c_str());
+			ImGui::TableSetColumnIndex(7);
+			ImGui::TextUnformatted(row.executionPath.empty() ? "-" : row.executionPath.c_str());
 		}
 		ImGui::EndTable();
 	}
+	ImGui::TreePop();
+}
+
+void ProfilerWindow::DrawTimeline(const ProfilerFrameRecord& frame)
+{
+	if (!ImGui::TreeNodeEx("Thread Timeline", ImGuiTreeNodeFlags_DefaultOpen))
+	{
+		ImGui::TextDisabled("Expand to correlate overlapping work and scheduler paths chronologically.");
+		return;
+	}
+	RefreshSampleAnalysis(frame);
+	const ProfilerDiagnosticAnalysis& analysis = cache->diagnosticAnalysis;
+	const std::string query(cache->sampleSearch.data());
+	constexpr float kLabelWidth = 96.0f;
+	constexpr float kBarHeight = 12.0f;
+	constexpr std::uint32_t kVisibleDepthLimit = 8u;
+	ImGui::TextDisabled("Horizontal position is frame time; nested scopes stack downward. Hover a bar for exact context.");
+	ImGui::BeginChild("ProfilerThreadTimelineScroll", ImVec2(0.0f, 280.0f), true, ImGuiWindowFlags_HorizontalScrollbar);
+	for (std::size_t laneIndex = 0u; laneIndex < analysis.timelineLanes.size(); ++laneIndex)
+	{
+		const auto& lane = analysis.timelineLanes[laneIndex];
+		const float laneHeight = 20.0f + kBarHeight * static_cast<float>(std::min(lane.maximumDepth, kVisibleDepthLimit) + 1u);
+		const ImVec2 origin = ImGui::GetCursorScreenPos();
+		const float width = std::max(320.0f, ImGui::GetContentRegionAvail().x);
+		ImGui::PushID(static_cast<int>(laneIndex));
+		ImGui::InvisibleButton("TimelineLane", ImVec2(width, laneHeight));
+		ImGui::PopID();
+		ImDrawList* drawList = ImGui::GetWindowDrawList();
+		drawList->AddText(origin, ImGui::GetColorU32(ImGuiCol_Text), lane.label.c_str());
+		const float plotBeginX = origin.x + kLabelWidth;
+		const float plotWidth = std::max(1.0f, width - kLabelWidth);
+		drawList->AddRectFilled(ImVec2(plotBeginX, origin.y), ImVec2(origin.x + width, origin.y + laneHeight),
+			ImGui::GetColorU32(ImGuiCol_FrameBg));
+		for (const std::size_t nodeIndex : lane.nodeIndices)
+		{
+			const ProfilerDiagnosticRow& row = analysis.rows[nodeIndex];
+			if (!ProfilerDiagnosticRowMatches(row, query, cache->minimumSampleDurationMs))
+			{
+				continue;
+			}
+			const ProfilerSampleHierarchyNode& node = analysis.hierarchy.nodes[nodeIndex];
+			const ProfilerSample& sample = analysis.hierarchy.samples[node.sampleIndex];
+			const float startFraction = static_cast<float>(std::clamp(sample.startMs / std::max(frame.durationMs, 0.001), 0.0, 1.0));
+			const float endFraction = static_cast<float>(std::clamp((sample.startMs + sample.durationMs) / std::max(frame.durationMs, 0.001), 0.0, 1.0));
+			const float x0 = plotBeginX + startFraction * plotWidth;
+			const float x1 = std::max(x0 + 1.0f, plotBeginX + endFraction * plotWidth);
+			const float y0 = origin.y + 3.0f + kBarHeight * static_cast<float>(std::min(node.presentationDepth, kVisibleDepthLimit));
+			const ImVec2 barMin(x0, y0);
+			const ImVec2 barMax(x1, y0 + kBarHeight - 2.0f);
+			const ImU32 color = ImGui::GetColorU32(ImVec4(0.20f + 0.06f * static_cast<float>(node.presentationDepth % 5u), 0.55f, 0.90f, 1.0f));
+			drawList->AddRectFilled(barMin, barMax, color, 2.0f);
+			if (ImGui::IsMouseHoveringRect(barMin, barMax))
+			{
+				ImGui::SetTooltip("%s\nInclusive %.3f ms | Self %.3f ms\n%s | %s | %s\nRaw thread: %s",
+					row.name.c_str(), row.inclusiveMs, row.selfMs, row.threadLabel.c_str(),
+					row.phase.empty() ? "No phase" : row.phase.c_str(),
+					row.executionPath.empty() ? "No scheduler path" : row.executionPath.c_str(), row.rawThreadLabel.c_str());
+			}
+		}
+	}
+	ImGui::EndChild();
 	ImGui::TreePop();
 }
 
@@ -1471,16 +1566,16 @@ void ProfilerWindow::DrawHotSamples(const ProfilerFrameRecord& frame)
 void ProfilerWindow::DrawSamples(const ProfilerFrameRecord& frame)
 {
 	ImGui::SeparatorText("Samples");
-	// Large captures can contain thousands of nested markers. Keep the complete
-	// hierarchy opt-in, and start each parent collapsed, so merely opening the
-	// profiler never emits every sample row into ImGui.
-	if (!ImGui::TreeNode("Sample Hierarchy"))
+	// Open both the disclosure and every nested sample parent by default so the
+	// complete captured hierarchy is visible without repetitive expansion.
+	if (!ImGui::TreeNodeEx("Sample Hierarchy", ImGuiTreeNodeFlags_DefaultOpen))
 	{
 		ImGui::TextDisabled("Expand to inspect the cached scope tree.");
 		return;
 	}
 	RefreshSampleAnalysis(frame);
-	const SampleTree& tree = cache->sampleTree;
+	const ProfilerDiagnosticAnalysis& analysis = cache->diagnosticAnalysis;
+	const ProfilerSampleHierarchy& tree = analysis.hierarchy;
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (tree.samples.empty())
 	{
@@ -1492,7 +1587,7 @@ void ProfilerWindow::DrawSamples(const ProfilerFrameRecord& frame)
 	const ImVec2 originalCellPadding = ImGui::GetStyle().CellPadding;
 	ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(1.0f, originalCellPadding.y));
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (ImGui::BeginTable("ProfilerSamples", 7, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	if (ImGui::BeginTable("ProfilerSamples", 8, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
 	{
 		ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch, 2.5f);
 		ImGui::TableSetupColumn("Incl.");
@@ -1500,12 +1595,15 @@ void ProfilerWindow::DrawSamples(const ProfilerFrameRecord& frame)
 		ImGui::TableSetupColumn("% Frame");
 		ImGui::TableSetupColumn("Load", ImGuiTableColumnFlags_WidthStretch, 1.0f);
 		ImGui::TableSetupColumn("Thread");
-		ImGui::TableSetupColumn("Task");
+		ImGui::TableSetupColumn("Phase");
+		ImGui::TableSetupColumn("Path");
 		ImGui::TableHeadersRow();
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const std::size_t rootIndex : tree.rootIndices)
 		{
-			DrawSampleTreeRow(tree, rootIndex, frame.frameIndex, frame.durationMs);
+			DrawSampleTreeRow(analysis, rootIndex, frame.frameIndex, frame.durationMs,
+				std::string(cache->sampleSearch.data()), cache->minimumSampleDurationMs,
+				cache->showUninstrumentedRows);
 		}
 		ImGui::EndTable();
 	}

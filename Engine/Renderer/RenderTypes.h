@@ -318,6 +318,15 @@ namespace TerraEngine::Renderer {
 			return !pageLocalDeformationAvailable
 				&& RequiresConservativeCoarseVisibility();
 		}
+
+		[[nodiscard]] bool IsComputeRasterDeformationSafe() const noexcept
+		{
+			// Conservative CPU broadphase visibility keeps an animated owner in the
+			// candidate set; it does not invalidate exact page-local GPU geometry.
+			// Compute rasterization is unsafe only when active deformation lacks that
+			// complete page publication and must fall back to the owner mesh.
+			return !RequiresOwnerMeshDeformationFallback();
+		}
 	};
 
 	// The resolver receives only protected-boundary values. currentPose is one
@@ -638,6 +647,10 @@ inline constexpr std::uint32_t kVirtualGeometryFlagConeCullingSafe = 1u << 5u;
 // operating as a pass-through stage. Keeping that contract separate from the
 // culling toggle prevents larger ranges from restarting every 32 meshlets.
 inline constexpr std::uint32_t kVirtualGeometryFlagTaskPayloadValid = 1u << 6u;
+// A processor-expanded animated draw keeps VG's selected owner-meshlet range,
+// but skins that range through the proven graphics palette bridge. Canonical
+// page output becomes authoritative only after device-authored work is live.
+inline constexpr std::uint32_t kVirtualGeometryFlagOwnerPaletteDeformation = 1u << 7u;
 inline constexpr std::uint32_t kVirtualGeometryDebugModeShift = 8u;
 inline constexpr std::uint32_t kVirtualGeometryDebugModeMask = 0xFFu;
 // Packet flags reserve two high bits for the route selected by the immutable

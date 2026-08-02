@@ -52,39 +52,56 @@ namespace TerraEngine::Renderer
 		}
 
 		bool PrefersComputeRaster(
-			const VirtualGeometryRasterCandidate& candidate)
+			const VirtualGeometryRasterCandidate& candidate,
+			const VirtualGeometryRasterCalibration& calibration,
+			float& averageTrianglePixelArea,
+			float& estimatedAtomicContention)
 		{
+			averageTrianglePixelArea = 0.0f;
+			estimatedAtomicContention = 0.0f;
 			if(!candidate.computeSupported
 				|| candidate.triangleCount == 0u
 				|| !std::isfinite(candidate.projectedPixelArea)
 				|| candidate.projectedPixelArea <= 0.0f
 				|| candidate.projectedPixelArea
-					> kVirtualGeometryComputeMaximumPacketPixelArea)
+					> calibration.maximumPacketPixelArea)
 			{
 				return false;
 			}
-			const float averageTrianglePixelArea =
+			averageTrianglePixelArea =
 				candidate.projectedPixelArea
-				/ static_cast<float>(candidate.triangleCount);
+					/ static_cast<float>(candidate.triangleCount);
+			estimatedAtomicContention = static_cast<float>(candidate.triangleCount)
+				/ std::max(candidate.projectedPixelArea, 1.0f);
+			const float threshold = candidate.priorRouteValid
+				&& candidate.priorRoute == VirtualGeometryRasterRoute::Compute
+				? calibration.computeExitAverageTrianglePixelArea
+				: calibration.computeEnterAverageTrianglePixelArea;
 			return candidate.preferCompute
-				|| averageTrianglePixelArea
-					<= kVirtualGeometryComputeAverageTrianglePixelArea;
+				|| (averageTrianglePixelArea <= threshold
+					&& estimatedAtomicContention
+						<= calibration.maximumEstimatedAtomicContention);
 		}
 	}
 
 	VirtualGeometryRasterBinPlan BuildVirtualGeometryRasterBinPlan(
 		const std::vector<VirtualGeometryRasterCandidate>& candidates,
-		std::uint32_t materialBinCapacity)
+		std::uint32_t materialBinCapacity,
+		VirtualGeometryRasterCalibration calibration)
 	{
 		VirtualGeometryRasterBinPlan plan{};
 		const std::vector<VirtualGeometryRasterCandidate> ordered =
 			OrderCandidates(candidates);
+		float trianglePixelAreaSum = 0.0f;
+		std::uint32_t measuredCandidateCount = 0u;
 		for(const VirtualGeometryRasterCandidate& candidate : ordered)
 		{
 			plan.routeStableIds.push_back(candidate.stableId);
 			plan.routeSourceOrdinals.push_back(candidate.sourceOrdinal);
 			VirtualGeometryRasterRoute route =
 				VirtualGeometryRasterRoute::Indexed;
+			float averageTrianglePixelArea = 0.0f;
+			float estimatedAtomicContention = 0.0f;
 			if(candidate.materialBin >= materialBinCapacity)
 			{
 				route = VirtualGeometryRasterRoute::Fallback;
@@ -92,7 +109,8 @@ namespace TerraEngine::Renderer
 				plan.failOpen = true;
 				plan.fallbackStableIds.push_back(candidate.stableId);
 			}
-			else if(PrefersComputeRaster(candidate))
+			else if(PrefersComputeRaster(candidate, calibration,
+				averageTrianglePixelArea, estimatedAtomicContention))
 			{
 				route = VirtualGeometryRasterRoute::Compute;
 			}
@@ -110,8 +128,23 @@ namespace TerraEngine::Renderer
 				plan.fallbackStableIds.push_back(candidate.stableId);
 			}
 			plan.routes.push_back(route);
+			if(averageTrianglePixelArea > 0.0f)
+			{
+				trianglePixelAreaSum += averageTrianglePixelArea;
+				++measuredCandidateCount;
+			}
+			plan.peakEstimatedAtomicContention = std::max(
+				plan.peakEstimatedAtomicContention,
+				estimatedAtomicContention);
+			if(candidate.priorRouteValid && candidate.priorRoute != route)
+			{
+				++plan.routeSwitchCount;
+			}
 			CountRoute(plan, route);
 		}
+		plan.averageTrianglePixelArea = measuredCandidateCount != 0u
+			? trianglePixelAreaSum / static_cast<float>(measuredCandidateCount)
+			: 0.0f;
 		return plan;
 	}
 

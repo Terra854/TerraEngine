@@ -291,7 +291,20 @@ namespace TerraEngine::Editor
 			{
 				if(blocks[index].descriptor.dependencyCount != 0u)
 				{
-					page.firstDependencyIndex = blocks[index].descriptor.firstDependencyIndex;
+					// A page owns one contiguous slice of the dependency table. Preserve
+					// the first contributing block's offset while accumulating later
+					// topology blocks; overwriting the offset would pair the last start
+					// with the whole-page count and extend past the table.
+					if(page.dependencyCount == 0u)
+					{
+						page.firstDependencyIndex = blocks[index].descriptor.firstDependencyIndex;
+					}
+					else if(blocks[index].descriptor.firstDependencyIndex
+						!= page.firstDependencyIndex + page.dependencyCount)
+					{
+						result.error = "Production page dependencies must occupy one contiguous canonical range.";
+						return result;
+					}
 					page.dependencyCount += blocks[index].descriptor.dependencyCount;
 				}
 			}

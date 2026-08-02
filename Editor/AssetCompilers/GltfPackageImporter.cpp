@@ -1496,6 +1496,10 @@ namespace TerraEngine::AssetPipeline
 			std::size_t generatedSkeletonIndex = 0U;
 			std::unordered_set<std::size_t> sourceNodes;
 			std::unordered_map<std::size_t, std::uint32_t> sourceNodeToCookedJoint;
+			// Multiple glTF skin records may describe the same unnamed joint and
+			// inverse-bind contract. They share one cooked skeleton while this alias
+			// set keeps every source mesh binding resolvable.
+			std::unordered_set<std::size_t> sourceSkinIndices;
 			std::optional<std::size_t> sourceRootNode;
 			std::string semanticKey;
 		};
@@ -1646,6 +1650,7 @@ namespace TerraEngine::AssetPipeline
 
 			const bool needsSyntheticRoot = roots.size() > 1U;
 			std::unordered_map<std::size_t, std::uint32_t> cookedIndices;
+			std::unordered_set<std::string> cookedJointRoles;
 			if (needsSyntheticRoot)
 			{
 				Animation::SkeletonJoint synthetic;
@@ -1668,6 +1673,14 @@ namespace TerraEngine::AssetPipeline
 				// source array order. A normalized display-name fallback still gives FBX-
 				// and glTF-authored rigs a stable retarget role without using node indices.
 				joint.semanticRole = nodes[nodeIndex].jointRole;
+				// glTF files commonly reuse a display name for a deforming joint and
+				// its attached mesh node. Skeleton assets require unique semantic roles,
+				// so disambiguate only repeated roles with the stable path-derived id.
+				if (!cookedJointRoles.insert(joint.semanticRole).second)
+				{
+					joint.semanticRole += "_" + HexHash(joint.stableId);
+					cookedJointRoles.insert(joint.semanticRole);
+				}
 				if (parents[nodeIndex].has_value() && cookedIndices.contains(*parents[nodeIndex]))
 				{
 					joint.parentIndex = static_cast<std::int32_t>(cookedIndices[*parents[nodeIndex]]);
@@ -1741,6 +1754,7 @@ namespace TerraEngine::AssetPipeline
 			context.generatedSkeletonIndex = animation.skeletons.size();
 			context.sourceNodes = std::move(included);
 			context.sourceNodeToCookedJoint = std::move(cookedIndices);
+			if (skinIndex.has_value()) context.sourceSkinIndices.insert(*skinIndex);
 			context.sourceRootNode = !needsSyntheticRoot && roots.size() == 1U
 				? std::optional<std::size_t>(roots.front())
 				: std::nullopt;
@@ -2276,6 +2290,17 @@ namespace TerraEngine::AssetPipeline
 					: std::string(skin.name);
 				const std::string semanticKey = "skeleton/skin/" + NormalizeSemanticToken(displayName, "skin")
 					+ "/" + HexHash(StableSemanticHash(signature));
+				const auto matchingContext = std::find_if(contexts.begin(), contexts.end(),
+					[&](const GltfSkeletonContext& context) {
+						return context.semanticKey == semanticKey;
+					});
+				if (matchingContext != contexts.end())
+				{
+					// Identical unnamed skins must not publish duplicate GUIDs or clips.
+					// Retain the later source index as an alias of the canonical context.
+					matchingContext->sourceSkinIndices.insert(skinIndex);
+					continue;
+				}
 				const std::array<std::size_t, 0U> noAdditionalSeeds{};
 				if (auto context = BuildSkeletonContext(asset, nodes, parents, metadata.coordinateConversion,
 					converter, options, skinIndex, noAdditionalSeeds, displayName, semanticKey, animation, diagnostics))
@@ -2760,7 +2785,7 @@ namespace TerraEngine::AssetPipeline
 					}
 					skin = &asset.skins[*skinIndex];
 					const auto context = std::find_if(skeletonContexts.begin(), skeletonContexts.end(), [&](const GltfSkeletonContext& candidate) {
-						return animation.skeletons[candidate.generatedSkeletonIndex].sourceSkinIndex == *skinIndex;
+						return candidate.sourceSkinIndices.contains(*skinIndex);
 					});
 					if (context == skeletonContexts.end())
 					{

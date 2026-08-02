@@ -253,11 +253,16 @@ namespace TerraEngine::Renderer::Vulkan
 		// The visibility shaders use storage buffers for their conservative depth
 		// and identity records, so each pass receives its own compatible binding set.
 		VkBuffer inputTriangleBuffer = VK_NULL_HANDLE;
+		VkBuffer setupPacketBuffer = VK_NULL_HANDLE;
+		VkBuffer setupMeshletBuffer = VK_NULL_HANDLE;
+		VkBuffer pagePayloadBuffer = VK_NULL_HANDLE;
 		VkBuffer depthBuffer = VK_NULL_HANDLE;
 		VkBuffer visibilityRecordBuffer = VK_NULL_HANDLE;
 		VkBuffer resolvedVisibilityBuffer = VK_NULL_HANDLE;
 		VkBuffer shadingBinBuffer = VK_NULL_HANDLE;
 		VkBuffer diagnosticBuffer = VK_NULL_HANDLE;
+		VkDescriptorSet bindlessDescriptorSet = VK_NULL_HANDLE;
+		VkDescriptorSet triangleSetupDescriptorSet = VK_NULL_HANDLE;
 		VkDescriptorSet computeRasterDescriptorSet = VK_NULL_HANDLE;
 		VkDescriptorSet visibilityResolveDescriptorSet = VK_NULL_HANDLE;
 		VkDescriptorSet shadingBinsDescriptorSet = VK_NULL_HANDLE;
@@ -267,6 +272,7 @@ namespace TerraEngine::Renderer::Vulkan
 	struct VulkanVirtualGeometryVisibilityPipelines
 	{
 		VkPipelineLayout layout = VK_NULL_HANDLE;
+		VkPipeline triangleSetup = VK_NULL_HANDLE;
 		VkPipeline computeRaster = VK_NULL_HANDLE;
 		VkPipeline visibilityResolve = VK_NULL_HANDLE;
 		VkPipeline shadingBins = VK_NULL_HANDLE;
@@ -277,6 +283,7 @@ namespace TerraEngine::Renderer::Vulkan
 		std::uint64_t frameId = 0u;
 		std::uint64_t geometryGeneration = 0u;
 		std::uint32_t boundedPrimitiveCount = 0u;
+		std::uint32_t meshletWorkCount = 0u;
 		std::uint32_t targetWidth = 0u;
 		std::uint32_t targetHeight = 0u;
 		std::uint32_t pixelCount = 0u;
@@ -289,6 +296,7 @@ namespace TerraEngine::Renderer::Vulkan
 
 	enum class VulkanVirtualGeometryVisibilityStage : std::uint8_t
 	{
+		TriangleSetup,
 		ComputeRaster,
 		VisibilityResolve,
 		ShadingBins
@@ -296,6 +304,7 @@ namespace TerraEngine::Renderer::Vulkan
 
 	TERRAENGINE_API VulkanVirtualGeometryVisibilityPlan BuildVulkanVirtualGeometryVisibilityPlan(
 		std::uint32_t requestedPrimitiveCount, std::uint32_t maximumPrimitiveCount,
+		std::uint32_t meshletWorkCount,
 		std::uint32_t targetWidth, std::uint32_t targetHeight,
 		std::uint32_t materialBinCount,
 		const VulkanVirtualGeometryVisibilityResources& resources,

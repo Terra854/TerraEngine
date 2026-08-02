@@ -15,6 +15,7 @@ namespace TerraEngine::Renderer::Vulkan {
 		case VirtualGeometryBackendStage::Compaction: return "Virtual geometry compaction";
 		case VirtualGeometryBackendStage::IndirectGeneration: return "Virtual geometry indirect generation";
 		case VirtualGeometryBackendStage::PageDecode: return "Virtual geometry page decode";
+		case VirtualGeometryBackendStage::TriangleSetup: return "Virtual geometry triangle setup";
 		case VirtualGeometryBackendStage::HardwareRaster: return "Virtual geometry hardware raster";
 		case VirtualGeometryBackendStage::ComputeRaster: return "Virtual geometry compute raster";
 		case VirtualGeometryBackendStage::VisibilityResolve: return "Virtual geometry visibility resolve";
@@ -69,6 +70,7 @@ namespace TerraEngine::Renderer::Vulkan {
 			VirtualGeometryBackendStage::Compaction,
 			VirtualGeometryBackendStage::IndirectGeneration,
 			VirtualGeometryBackendStage::PageDecode,
+			VirtualGeometryBackendStage::TriangleSetup,
 			VirtualGeometryBackendStage::HardwareRaster,
 			VirtualGeometryBackendStage::ComputeRaster,
 			VirtualGeometryBackendStage::VisibilityResolve,

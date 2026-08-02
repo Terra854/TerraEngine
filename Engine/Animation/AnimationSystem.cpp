@@ -782,6 +782,55 @@ namespace TerraEngine::Animation {
 			bool safePose = true;
 			bool planned = false;
 			bool evaluated = false;
+
+			void ResetForCaptureReuse() noexcept
+			{
+				// Candidate storage alternates with the published frame-work vector. Clear
+				// produced values without replacing input vectors so their allocations can
+				// be reused when the same animator is captured again two frames later.
+				clipView = {};
+				advance = {};
+				pose.reset();
+				publication.reset();
+				evaluationStatus = AnimationStatus::NotReady;
+				retargetActive = false;
+				sampledSourceSkeleton = false;
+				retargetMetrics = {};
+				retargetDeterministicHash = 0U;
+				retargetEvaluationStatus = AnimationStatus::NotReady;
+				pendingMotionQueries.clear();
+				evaluatedMotionQueries.clear();
+				pendingMotionQueriesV2.clear();
+				evaluatedMotionQueriesV2.clear();
+				restoredFromHistory = false;
+				activeProceduralGoals.clear();
+				proceduralResults.clear();
+				proceduralStateObserved = false;
+				ragdollPhysicsPose.reset();
+				ragdollMotorDrives.clear();
+				ragdollRecoveryBlendComplete = false;
+				priorPublication.reset();
+				priorFallbackPublication.reset();
+				sourceObjectGeneration = 0U;
+				sourceObjectWorldTransform = {};
+				sourceObjectWorldTransformCaptured = false;
+				executionDecision = {};
+				resolvedConsumers = {};
+				cacheKey = {};
+				cacheRequirements = {};
+				fallbackGenerations = {};
+				liveFallbackGenerations = {};
+				fallbackDecision = {};
+				fallbackCandidate.reset();
+				selectedPublication.reset();
+				gpuLowering.reset();
+				gpuStageMask = 0U;
+				cacheEligible = false;
+				cacheReused = false;
+				safePose = true;
+				planned = false;
+				evaluated = false;
+			}
 		};
 
 		std::unique_ptr<AnimatorInstanceStore> instances = std::make_unique<AnimatorInstanceStore>();
@@ -821,6 +870,10 @@ namespace TerraEngine::Animation {
 		// scene/physics state, preserving the worker-safe scripting declaration.
 		std::vector<AnimationRootMotionApplicationRequest> pendingRootMotionApplications;
 		std::vector<FrameWorkItem> frameWork;
+		// Capture builds transactionally into this second owned vector. Swapping on
+		// success preserves the previous allocation for the next frame, avoiding a
+		// fresh FrameWorkItem allocation while a failed capture stays invisible.
+		std::vector<FrameWorkItem> candidateFrameWork;
 		AnimationWorkScheduler workScheduler{MakeAnimationWorkSchedulerConfiguration()};
 		AnimationWorkCancellationSource workCancellationSource;
 		AnimationWorkPlan workPlan;
@@ -2046,14 +2099,19 @@ namespace TerraEngine::Animation {
 					capturedProceduralCommandStatuses[index] = jointExists
 						? AnimationStatus::Ok : AnimationStatus::InvalidArgument;
 				}
-				std::vector<FrameWorkItem> candidate;
-				candidate.reserve(capturedFrameInputs.size());
-				for(const AnimationFrameInput& input : capturedFrameInputs) {
+				// Keep two alternating item arrays alive. Copy assignment can then reuse
+				// binding, parameter, controller, and event-vector capacity instead of
+				// allocating a fresh nested object graph for every animator every frame.
+				candidateFrameWork.resize(capturedFrameInputs.size());
+				for(std::size_t inputIndex = 0U;
+					inputIndex < capturedFrameInputs.size(); ++inputIndex) {
+					const AnimationFrameInput& input = capturedFrameInputs[inputIndex];
 					const RuntimeRecord* record = FindRuntimeRecordLocked(input.handle);
 					if(record == nullptr || record->poseGeneration == std::numeric_limits<AnimationGeneration>::max()) {
 						return false;
 					}
-					FrameWorkItem item;
+					FrameWorkItem& item = candidateFrameWork[inputIndex];
+					item.ResetForCaptureReuse();
 					item.input = input;
 					item.binding = record->binding;
 					item.playback = record->playback;
@@ -2187,9 +2245,8 @@ namespace TerraEngine::Animation {
 							item.binding.clipGeneration,
 							item.binding.streamedSegmentPayloads);
 					}
-					candidate.push_back(std::move(item));
 				}
-				frameWork = std::move(candidate);
+				frameWork.swap(candidateFrameWork);
 				frameTick = captureTick;
 				return true;
 			} catch(const std::bad_alloc&) {

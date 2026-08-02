@@ -353,6 +353,7 @@ namespace TerraEngine::Resource
 			if(mounted.Succeeded())
 			{
 				output.bytes = mounted.bytes;
+				output.source = VirtualGeometryStaticPageReadSource::MountedTepak;
 				readFromMount = true;
 			}
 			else if(request.mountedContentRequired || mounted.status != ContentReadStatus::NotFound)
@@ -398,6 +399,7 @@ namespace TerraEngine::Resource
 				output.diagnostic = "Static page exact-range read was incomplete.";
 				return output;
 			}
+			output.source = VirtualGeometryStaticPageReadSource::LooseFile;
 		}
 		if(request.cancellation != nullptr && request.cancellation->load())
 		{

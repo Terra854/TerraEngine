@@ -485,13 +485,29 @@ namespace TerraEngine::Tests
 			context.Expect(
 				!ShaderContains(vulkanSource, "const bool wholeOwnerDeformationFallback =")
 					&& ShaderContains(vulkanSource,
-						"requestedPageLocalGeometry\n\t\t\t&& impl->activeVirtualGeometryPagePayloadBufferIndex"),
-				"Vulkan should preserve a validated animated page packet instead of collapsing canonical compute output to the owner mesh.");
+						"requestedPageLocalGeometry\n\t\t\t&& !ownerPaletteDeformation\n\t\t\t&& impl->activeVirtualGeometryPagePayloadBufferIndex"),
+				"Vulkan should preserve validated device-authored pages while routing only processor-expanded animation through the owner palette bridge.");
 			context.Expect(
 				ShaderContains(meshShader, "TeTryLoadAnimatedGraphicsBridge(")
 					&& ShaderContains(meshShader,
+						"kVirtualGeometryFlagOwnerPaletteDeformation")
+					&& ShaderContains(meshShader,
 						"&& (canonicalDeformationAvailable || !gpuDeformationAvailable)"),
 				"The mesh shader should consume canonical compute output for a matching page while keeping legacy owner deformation on its compatibility path.");
+			context.Expect(
+				ShaderContains(renderSystemSource,
+					"backendCapabilities.supportsVirtualGeometryGeneratedSubmissions")
+					&& ShaderContains(renderSystemSource,
+						"kVirtualGeometryFlagOwnerPaletteDeformation")
+					&& ShaderContains(vulkanSource,
+						"&& !ownerPaletteDeformation")
+					&& ShaderContains(vulkanSource,
+						"draw.useGeneratedVirtualGeometryIndirect = deviceAuthoredCommand")
+					&& ShaderContains(vulkanSource,
+						"ApplyAnimationGraphicsBridge(command, push,\n\t\t\townerPaletteDeformation)")
+					&& ShaderContains(taskShader,
+						"kVirtualGeometryFlagOwnerPaletteDeformation"),
+				"Processor-expanded animated VG must bind its selected LOD and owner palette bridge to the same per-command device-authored execution decision.");
 			context.Expect(
 				ShaderContains(taskShader,
 					"&& (!gpuDeformationAvailable || canonicalDeformationAvailable)")
@@ -504,6 +520,10 @@ namespace TerraEngine::Tests
 				static_cast<std::uint32_t>(1u << 6u),
 				::kVirtualGeometryFlagTaskPayloadValid,
 				"The task-payload-valid bit must remain below the virtual-geometry debug-mode byte.");
+			context.ExpectEqual(
+				static_cast<std::uint32_t>(1u << 7u),
+				::kVirtualGeometryFlagOwnerPaletteDeformation,
+				"The owner-palette compatibility bit must remain below the virtual-geometry debug-mode byte.");
 			const std::size_t visiblePayloadAssignment = vulkanSource.find(
 				"push.virtualGeometryFlags |= kVirtualGeometryFlagTaskPayloadValid");
 			const std::size_t shadowPayloadAssignment = vulkanSource.find(

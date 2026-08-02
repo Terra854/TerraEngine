@@ -51,5 +51,54 @@ namespace TerraEngine::EditorTests
 					&& directValidated.directory.header.pageTableOffset == 0u,
 					"Direct-resident production output must publish no logical page table.");
 			});
+
+		registry.Add("VirtualGeometry.Editor.AssetPipeline.MultipleTopologyBlocksPublishOneDependencyRange",
+			[](TestContext& context)
+			{
+				// Two topology blocks on one page reproduce the production import shape
+				// used by dense deformable meshes. Both depend on the stable remap block,
+				// so the page directory must retain the first dependency offset.
+				const std::array<std::uint32_t, 3u> remap = { 0u, 1u, 2u };
+				const std::array<std::uint32_t, 3u> indices = { 0u, 1u, 2u };
+				std::array<TemfQuantizationDomain, 2u> domains{};
+				domains[0].domainId = 0u;
+				domains[0].domainVersion = 1u;
+				domains[0].domainScope = static_cast<std::uint16_t>(TemfQuantizationDomainScope::Asset);
+				domains[0].streamKind = static_cast<std::uint16_t>(TemfStreamKind::VertexRemapStableIdentity);
+				domains[0].componentCount = 1u;
+				domains[0].domainHash = 101u;
+				domains[1].domainId = 1u;
+				domains[1].domainVersion = 1u;
+				domains[1].domainScope = static_cast<std::uint16_t>(TemfQuantizationDomainScope::Asset);
+				domains[1].streamKind = static_cast<std::uint16_t>(TemfStreamKind::Topology);
+				domains[1].componentCount = 1u;
+				domains[1].domainHash = 103u;
+				const auto remapBytes = std::as_bytes(std::span(remap));
+				const auto indexBytes = std::as_bytes(std::span(indices));
+				const std::array<TemfProductionStreamInput, 3u> streams = {
+					TemfProductionStreamInput{ TemfStreamKind::VertexRemapStableIdentity,
+						TemfCodecProfile::ExpandedProduction, 0u, 0u,
+						static_cast<std::uint32_t>(remap.size()), sizeof(std::uint32_t),
+						{ reinterpret_cast<const std::uint8_t*>(remapBytes.data()), remapBytes.size() } },
+					TemfProductionStreamInput{ TemfStreamKind::Topology,
+						TemfCodecProfile::MeshoptimizerProductionStatic, 1u, 0u,
+						static_cast<std::uint32_t>(indices.size()), sizeof(std::uint32_t),
+						{ reinterpret_cast<const std::uint8_t*>(indexBytes.data()), indexBytes.size() } },
+					TemfProductionStreamInput{ TemfStreamKind::Topology,
+						TemfCodecProfile::MeshoptimizerProductionStatic, 1u, 0u,
+						static_cast<std::uint32_t>(indices.size()), sizeof(std::uint32_t),
+						{ reinterpret_cast<const std::uint8_t*>(indexBytes.data()), indexBytes.size() } }
+				};
+				const TemfProductionBuildRequest request{
+					kTemfRepresentationVirtualGeometry, kTemfPageSize32KiB,
+					107u, 109u, 113u, 127u, 131u, 0u, domains, streams };
+				const TemfProductionBuildResult result = BuildTemfProductionBlocks(request);
+				const auto validated = TerraEngine::Resource::ValidateTemfProductionFile(result.bytes, {});
+				context.Expect(result.IsComplete() && validated.IsComplete()
+					&& validated.directory.pages.size() == 1u
+					&& validated.directory.pages.front().firstDependencyIndex == 0u
+					&& validated.directory.pages.front().dependencyCount == 2u,
+					"A page with multiple topology blocks must publish one in-range dependency slice beginning at its first block.");
+			});
 	}
 } // namespace TerraEngine::EditorTests

@@ -4677,8 +4677,27 @@ namespace
 				static_cast<std::uint32_t>(positions.size()),
 				static_cast<std::uint32_t>(morph.positionDeltas.size()), 0u });
 			positions.insert(positions.end(), morph.positionDeltas.begin(), morph.positionDeltas.end());
-			normals.insert(normals.end(), morph.normalDeltas.begin(), morph.normalDeltas.end());
-			tangents.insert(tangents.end(), morph.tangentDeltas.begin(), morph.tangentDeltas.end());
+			// TEMF's dense morph contract gives every target equally sized position,
+			// normal, and tangent lanes. Import formats may omit the optional normal
+			// or tangent channels, so materialize those missing lanes as zero deltas.
+			// This preserves the source result while keeping descriptor counts aligned
+			// for direct-resident and virtual-geometry runtime validation.
+			if (morph.normalDeltas.empty())
+			{
+				normals.insert(normals.end(), morph.positionDeltas.size(), {});
+			}
+			else
+			{
+				normals.insert(normals.end(), morph.normalDeltas.begin(), morph.normalDeltas.end());
+			}
+			if (morph.tangentDeltas.empty())
+			{
+				tangents.insert(tangents.end(), morph.positionDeltas.size(), {});
+			}
+			else
+			{
+				tangents.insert(tangents.end(), morph.tangentDeltas.begin(), morph.tangentDeltas.end());
+			}
 		}
 		appendBytes(kTemfMetadataDeformableMorphs, morphRecords.data(), morphRecords.size() * sizeof(TemfDeformableMorphRecord), static_cast<std::uint32_t>(morphRecords.size()), sizeof(TemfDeformableMorphRecord));
 		appendBytes(kTemfMetadataDeformableMorphPositions, positions.data(), positions.size() * sizeof(std::array<float, 3>), static_cast<std::uint32_t>(positions.size()), sizeof(std::array<float, 3>));

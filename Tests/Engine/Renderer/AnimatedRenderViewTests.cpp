@@ -277,10 +277,14 @@ namespace TerraEngine::Tests
 				legacy.RequiresOwnerMeshDeformationFallback()
 					&& pageLocal.pageLocalDeformationAvailable
 					&& !pageLocal.RequiresOwnerMeshDeformationFallback()
+					&& !legacy.IsComputeRasterDeformationSafe()
+					&& pageLocal.IsComputeRasterDeformationSafe()
 					&& !bindPose.RequiresOwnerMeshDeformationFallback()
+					&& bindPose.IsComputeRasterDeformationSafe()
 					&& !safePose.RequiresOwnerMeshDeformationFallback()
+					&& safePose.IsComputeRasterDeformationSafe()
 					&& !staticBinding.RequiresOwnerMeshDeformationFallback(),
-				"Pose binding must preserve demanded-page capability while a rejected page state retains fail-open owner coverage.");
+				"Pose binding must preserve demanded-page compute eligibility while a rejected page state retains fail-open owner coverage.");
 		});
 
 		registry.Add("Renderer.AnimationView.ActiveDeformationFailsOpenAtCpuBroadphase", [](TestContext& context) {

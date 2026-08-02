@@ -551,6 +551,10 @@ namespace TerraEngine::Tests {
 			profiler.RecordTaskQueued();
 			const bool outerSampleActive = profiler.BeginSample("Outer", ProfilerModuleId::CpuEngine);
 			context.Expect(outerSampleActive, "Profiler scopes should report that a sample was opened while recording.");
+			const bool innerSampleActive = profiler.BeginSample("Inner", ProfilerModuleId::CpuEngine);
+			context.Expect(innerSampleActive, "Nested CPU scopes should be retained for self-time analysis.");
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+			profiler.EndSample();
 			const bool taskSampleActive = profiler.RecordTaskStarted("UnitTask");
 			context.Expect(taskSampleActive, "Task profiler scopes should report an active sample while recording.");
 			profiler.RecordTaskFinished(taskSampleActive);
@@ -561,7 +565,22 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(1u, static_cast<unsigned int>(frames.size()), "Ending a recorded frame should publish one frame snapshot.");
 			context.Expect(frames.front().complete, "Completed frames should be marked complete.");
 			context.Expect(HasSampleNamed(frames.front(), "Outer"), "Explicit profiler samples should be stored in the completed frame.");
+			context.Expect(HasSampleNamed(frames.front(), "Inner"), "Nested profiler samples should be stored in the completed frame.");
 			context.Expect(HasSampleNamed(frames.front(), "ThreadPool Task"), "Task profiler samples should be stored in the completed frame.");
+			const ProfilerModuleSummary* cpuModule = FindModule(frames.front().moduleSummaries, ProfilerModuleId::CpuEngine);
+			double inclusiveCpuSumMs = 0.0;
+			for (const ProfilerSample& sample : frames.front().samples)
+			{
+				if (sample.moduleId == ProfilerModuleId::CpuEngine)
+				{
+					inclusiveCpuSumMs += sample.durationMs;
+				}
+			}
+			context.Expect(cpuModule != nullptr && cpuModule->totalMs < inclusiveCpuSumMs,
+				"Module CPU work should merge nested intervals instead of adding inclusive scope durations.");
+			const ProfilerMetric* coverageMetric = cpuModule != nullptr ? FindMetric(*cpuModule, "Scope coverage") : nullptr;
+			context.Expect(coverageMetric != nullptr && coverageMetric->value >= 0.0 && coverageMetric->value <= 100.0,
+				"CPU summaries should expose bounded wall-time scope coverage.");
 
 			const ProfilerModuleSummary* taskModule = FindModule(frames.front().moduleSummaries, ProfilerModuleId::TaskExecution);
 			const ProfilerMetric* queuedMetric = taskModule != nullptr ? FindMetric(*taskModule, "Queued tasks") : nullptr;

@@ -399,6 +399,7 @@ namespace TerraEngine::Renderer::Vulkan
 
 	VulkanVirtualGeometryVisibilityPlan BuildVulkanVirtualGeometryVisibilityPlan(
 		std::uint32_t requestedPrimitiveCount, std::uint32_t maximumPrimitiveCount,
+		std::uint32_t meshletWorkCount,
 		std::uint32_t targetWidth, std::uint32_t targetHeight,
 		std::uint32_t materialBinCount,
 		const VulkanVirtualGeometryVisibilityResources& resources,
@@ -407,6 +408,7 @@ namespace TerraEngine::Renderer::Vulkan
 	{
 		VulkanVirtualGeometryVisibilityPlan plan;
 		plan.frameId = frameId; plan.geometryGeneration = geometryGeneration;
+		plan.meshletWorkCount = meshletWorkCount;
 		plan.targetWidth = targetWidth;
 		plan.targetHeight = targetHeight;
 		plan.materialBinCount = materialBinCount;
@@ -426,13 +428,23 @@ namespace TerraEngine::Renderer::Vulkan
 		}
 		plan.boundedPrimitiveCount = std::min(requestedPrimitiveCount, maximumPrimitiveCount);
 		plan.zeroWork = plan.boundedPrimitiveCount == 0u
+			|| plan.meshletWorkCount == 0u
 			|| plan.pixelCount == 0u;
-		const bool resourcesReady = resources.resourcesOwnedByFrame && resources.inputTriangleBuffer != VK_NULL_HANDLE
+		const bool resourcesReady = resources.resourcesOwnedByFrame
+			&& resources.inputTriangleBuffer != VK_NULL_HANDLE
+			&& resources.setupPacketBuffer != VK_NULL_HANDLE
+			&& resources.setupMeshletBuffer != VK_NULL_HANDLE
+			&& resources.pagePayloadBuffer != VK_NULL_HANDLE
 			&& resources.depthBuffer != VK_NULL_HANDLE && resources.visibilityRecordBuffer != VK_NULL_HANDLE
 			&& resources.resolvedVisibilityBuffer != VK_NULL_HANDLE && resources.shadingBinBuffer != VK_NULL_HANDLE
-			&& resources.diagnosticBuffer != VK_NULL_HANDLE && resources.computeRasterDescriptorSet != VK_NULL_HANDLE
+			&& resources.diagnosticBuffer != VK_NULL_HANDLE
+			&& resources.bindlessDescriptorSet != VK_NULL_HANDLE
+			&& resources.triangleSetupDescriptorSet != VK_NULL_HANDLE
+			&& resources.computeRasterDescriptorSet != VK_NULL_HANDLE
 			&& resources.visibilityResolveDescriptorSet != VK_NULL_HANDLE && resources.shadingBinsDescriptorSet != VK_NULL_HANDLE;
-		const bool pipelinesReady = pipelines.layout != VK_NULL_HANDLE && pipelines.computeRaster != VK_NULL_HANDLE
+		const bool pipelinesReady = pipelines.layout != VK_NULL_HANDLE
+			&& pipelines.triangleSetup != VK_NULL_HANDLE
+			&& pipelines.computeRaster != VK_NULL_HANDLE
 			&& pipelines.visibilityResolve != VK_NULL_HANDLE && pipelines.shadingBins != VK_NULL_HANDLE;
 		plan.ready = resourcesReady && pipelinesReady;
 		plan.evidenceId = "vulkan-vg-visibility." + std::to_string(frameId) + "." + std::to_string(geometryGeneration);
@@ -455,7 +467,8 @@ namespace TerraEngine::Renderer::Vulkan
 		const auto RecordStage = [&](VulkanVirtualGeometryVisibilityStage stage) {
 			return RecordVulkanVirtualGeometryVisibilityStage(commandBuffer, stage, plan, resources, pipelines);
 		};
-		const std::array<VulkanVirtualGeometryVisibilityStage, 3> stages{
+		const std::array<VulkanVirtualGeometryVisibilityStage, 4> stages{
+			VulkanVirtualGeometryVisibilityStage::TriangleSetup,
 			VulkanVirtualGeometryVisibilityStage::ComputeRaster,
 			VulkanVirtualGeometryVisibilityStage::VisibilityResolve,
 			VulkanVirtualGeometryVisibilityStage::ShadingBins };
@@ -495,6 +508,13 @@ namespace TerraEngine::Renderer::Vulkan
 		std::uint32_t pushConstantBytes = 16u;
 		std::uint32_t dispatchItemCount = plan.pixelCount;
 		switch(stage) {
+		case VulkanVirtualGeometryVisibilityStage::TriangleSetup:
+			descriptorSet = resources.triangleSetupDescriptorSet;
+			pipeline = pipelines.triangleSetup;
+			constants = { plan.meshletWorkCount, plan.boundedPrimitiveCount,
+				static_cast<std::uint32_t>(plan.geometryGeneration), 0u, 0u, 0u };
+			dispatchItemCount = plan.meshletWorkCount;
+			break;
 		case VulkanVirtualGeometryVisibilityStage::ComputeRaster:
 			descriptorSet = resources.computeRasterDescriptorSet;
 			pipeline = pipelines.computeRaster;
@@ -527,6 +547,8 @@ namespace TerraEngine::Renderer::Vulkan
 		}
 		// Set 0 is the shared bindless heap used by the production composite;
 		// compute visibility stages use their pass-local storage buffers at set 1.
+		vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+			pipelines.layout, 0u, 1u, &resources.bindlessDescriptorSet, 0u, nullptr);
 		vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines.layout, 1u, 1u, &descriptorSet, 0u, nullptr);
 		if(!plan.zeroWork) {
 			vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
@@ -544,7 +566,10 @@ namespace TerraEngine::Renderer::Vulkan
 					kVirtualGeometryPushConstantStages, 0u, pushConstantBytes,
 					constants.data());
 				vkCmdDispatch(commandBuffer,
-					(dispatchItemCount + 63u) / 64u, 1u, 1u);
+					stage == VulkanVirtualGeometryVisibilityStage::TriangleSetup
+						? dispatchItemCount
+						: (dispatchItemCount + 63u) / 64u,
+					1u, 1u);
 				++result.dispatchCount;
 				if(phase + 1u < phaseCount)
 				{

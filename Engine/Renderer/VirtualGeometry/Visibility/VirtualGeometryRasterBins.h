@@ -18,6 +18,11 @@ namespace TerraEngine::Renderer
 		float projectedPixelArea = 0.0f;
 		std::uint32_t triangleCount = 0u;
 		bool preferCompute = false;
+		// A prior stable decision enables asymmetric enter/exit thresholds. Tests,
+		// captures, and future backend calibration can omit it without changing the
+		// deterministic stateless default.
+		VirtualGeometryRasterRoute priorRoute = VirtualGeometryRasterRoute::Indexed;
+		bool priorRouteValid = false;
 		// Callers may use this value to map stable-ID ordered results back to
 		// packet ownership without changing packet order.
 		std::uint32_t sourceOrdinal = 0;
@@ -27,8 +32,21 @@ namespace TerraEngine::Renderer
 	// pixel and the packet rectangle is bounded. The rectangle guard prevents
 	// one long, thin triangle from turning the conservative pixel loop into a
 	// worse choice than fixed-function rasterization.
-	inline constexpr float kVirtualGeometryComputeAverageTrianglePixelArea = 1.0f;
-	inline constexpr float kVirtualGeometryComputeMaximumPacketPixelArea = 65536.0f;
+	struct VirtualGeometryRasterCalibration
+	{
+		float computeEnterAverageTrianglePixelArea = 0.85f;
+		float computeExitAverageTrianglePixelArea = 1.15f;
+		float maximumPacketPixelArea = 65536.0f;
+		// Estimated triangles touching the same pixel are a portable contention
+		// proxy. The limit avoids forcing a vendor-specific atomic model into the
+		// API-neutral route planner.
+		float maximumEstimatedAtomicContention = 12.0f;
+	};
+	inline constexpr VirtualGeometryRasterCalibration kDefaultVirtualGeometryRasterCalibration{};
+	inline constexpr float kVirtualGeometryComputeAverageTrianglePixelArea =
+		kDefaultVirtualGeometryRasterCalibration.computeEnterAverageTrianglePixelArea;
+	inline constexpr float kVirtualGeometryComputeMaximumPacketPixelArea =
+		kDefaultVirtualGeometryRasterCalibration.maximumPacketPixelArea;
 	struct VirtualGeometryRasterBinPlan
 	{
 		// Routes are ordered by stable ID so identical packet sets produce the
@@ -40,12 +58,16 @@ namespace TerraEngine::Renderer
 		std::uint32_t hardwareCount = 0;
 		std::uint32_t computeCount = 0;
 		std::uint32_t indexedCount = 0;
+		std::uint32_t routeSwitchCount = 0;
+		float averageTrianglePixelArea = 0.0f;
+		float peakEstimatedAtomicContention = 0.0f;
 		bool failOpen = false;
 		bool hybridCoverageComplete = false;
 		std::vector<std::uint64_t> fallbackStableIds;
 	};
 	[[nodiscard]] VirtualGeometryRasterBinPlan BuildVirtualGeometryRasterBinPlan(
-		const std::vector<VirtualGeometryRasterCandidate> &, std::uint32_t materialBinCapacity);
+		const std::vector<VirtualGeometryRasterCandidate> &, std::uint32_t materialBinCapacity,
+		VirtualGeometryRasterCalibration calibration = kDefaultVirtualGeometryRasterCalibration);
 	// Hybrid validation is a deterministic mixture of the three real routes.
 	// It never creates a synthetic fourth route, and it uses Indexed whenever a
 	// requested accelerated route is not supported by a candidate.

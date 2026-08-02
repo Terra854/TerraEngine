@@ -82,6 +82,7 @@ namespace TerraEngine::Renderer {
 		Compaction,
 		IndirectGeneration,
 		PageDecode,
+		TriangleSetup,
 		HardwareRaster,
 		ComputeRaster,
 		VisibilityResolve,

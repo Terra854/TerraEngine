@@ -3499,6 +3499,7 @@ namespace
 		case BackendStage::IndirectGeneration: return CapabilityStage::Indirect;
 		case BackendStage::PageDecode: return CapabilityStage::Decode;
 		case BackendStage::HardwareRaster: return CapabilityStage::HardwareRaster;
+		case BackendStage::TriangleSetup:
 		case BackendStage::ComputeRaster: return CapabilityStage::ComputeRaster;
 		case BackendStage::VisibilityResolve: return CapabilityStage::Resolve;
 		case BackendStage::Shading: return CapabilityStage::Shading;
@@ -4611,6 +4612,9 @@ void RenderSystem::Update(float deltaTime)
 		rhi != nullptr && rhi->SupportsVirtualGeometryMeshShaderRoute();
 	const bool computeVirtualGeometryRouteAvailable =
 		backendCapabilities.supportsVirtualGeometryGpuPacketBuffers;
+	const bool deviceAuthoredVirtualGeometryAvailable =
+		backendCapabilities.supportsVirtualGeometryGpuCompaction
+		&& backendCapabilities.supportsVirtualGeometryGeneratedSubmissions;
 	// Snapshot the mutually exclusive validation controls once before worker-safe
 	// preparation. Packet values, rather than mutable editor state, cross the
 	// protected Vulkan recording boundary later in this frame.
@@ -5774,6 +5778,12 @@ void RenderSystem::Update(float deltaTime)
 				| (range.hiZNearPlaneGuardPassed ? kVirtualGeometryFlagHiZNearPlaneGuard : 0u)
 				| (range.hiZThinGeometryGuardPassed ? kVirtualGeometryFlagHiZThinGeometryGuard : 0u)
 				| (coneCullingSafe ? kVirtualGeometryFlagConeCullingSafe : 0u)
+				// Processor-expanded VG still keeps the selected LOD range, but its
+				// animated vertices must use the proven owner palette bridge until
+				// device-authored page work has completed on this backend.
+				| (command.animationBinding.RequiresConservativeCoarseVisibility()
+					&& !deviceAuthoredVirtualGeometryAvailable
+					? kVirtualGeometryFlagOwnerPaletteDeformation : 0u)
 				| (debugMode << kVirtualGeometryDebugModeShift);
 			if (!coneCullingSafe && TerraEngine::Renderer::RenderDiagnosticsRequested() && !coneDisabledReason.empty())
 			{
@@ -5939,11 +5949,9 @@ void RenderSystem::Update(float deltaTime)
 			const bool opaqueComputeSurface = packetMaterial != nullptr
 				&& packetMaterial->header.alphaMode
 					!= static_cast<std::uint32_t>(AlphaMode::Blend);
-			const bool singleSidedComputeSurface = packetMaterial != nullptr
-				&& (packetMaterial->header.flags & ::DoubleSided) == 0u;
-			const bool staticComputeSurface =
-				!command.animationBinding
-					.RequiresConservativeCoarseVisibility();
+			const bool deformationSafeComputeSurface =
+				command.animationBinding
+					.IsComputeRasterDeformationSafe();
 			std::vector<TerraEngine::Renderer::VirtualGeometryRasterCandidate>
 				rasterCandidates;
 			rasterCandidates.reserve(localPackets.size());
@@ -5965,8 +5973,7 @@ void RenderSystem::Update(float deltaTime)
 					&& !materialDisablesVirtualGeometry
 					&& defaultSurfaceShader
 					&& opaqueComputeSurface
-					&& singleSidedComputeSurface
-					&& staticComputeSurface
+					&& deformationSafeComputeSurface
 					&& localPacket.projectedBounds != glm::vec4(0.0f);
 				candidate.alphaMasked = alphaMasked;
 				candidate.requiresStableIdentity = true;
