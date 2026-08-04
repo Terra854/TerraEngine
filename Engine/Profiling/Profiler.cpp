@@ -1728,6 +1728,11 @@ bool Profiler::IsCapturing() const
 	return state == ProfilerSessionState::Recording || state == ProfilerSessionState::Paused;
 }
 
+bool Profiler::IsFrameRecordingActive() const noexcept
+{
+	return frameRecordingActive.load(std::memory_order_acquire);
+}
+
 std::uint64_t Profiler::GetSnapshotRevision() const noexcept
 {
 	return snapshotRevision.load(std::memory_order_acquire);

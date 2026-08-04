@@ -123,6 +123,26 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(static_cast<std::size_t>(1u), keys.size(), "Pipeline keys should be generated from snapshot renderables.");
 		});
 
+		registry.Add("Renderer.VulkanRecording.CollapsesInstancedPipelineStateKeys", [](TestContext& context) {
+			TerraEngine::Renderer::RenderFrameSnapshot snapshot;
+			const TerraEngine::UUID sharedMesh = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID sharedMaterial = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID secondMaterial = TerraEngine::GenerateUUID();
+			// Two instances share one complete pipeline identity. A third material
+			// requires one additional key, independent of how many objects use it.
+			snapshot.renderables.push_back({
+				TerraEngine::GenerateUUID(), sharedMesh, sharedMaterial });
+			snapshot.renderables.push_back({
+				TerraEngine::GenerateUUID(), sharedMesh, sharedMaterial });
+			snapshot.renderables.push_back({
+				TerraEngine::GenerateUUID(), sharedMesh, secondMaterial });
+
+			const auto keys =
+				TerraEngine::Renderer::Vulkan::BuildPipelineStateKeys(snapshot);
+			context.ExpectEqual(static_cast<std::size_t>(2u), keys.size(),
+				"Instanced draws must share one immutable pipeline-state key.");
+		});
+
 		registry.Add("Renderer.VulkanRecording.BoundsVirtualGeometryMaterialPipelineKeys", [](TestContext& context) {
 			const TerraEngine::UUID materialId = TerraEngine::GenerateUUID();
 			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
@@ -290,11 +310,17 @@ namespace TerraEngine::Tests {
 			TerraEngine::Renderer::Vulkan::VulkanRendererPreparationCache cache;
 			const auto first = cache.BuildFramePreparation(snapshot, passes, profile);
 			const auto second = cache.BuildFramePreparation(snapshot, passes, profile);
+			const auto compact = cache.BuildFramePreparation(
+				snapshot, passes, profile, false);
 
 			context.ExpectEqual(static_cast<std::size_t>(0u), first.cacheHitCount, "The first frame should populate preparation caches.");
 			context.Expect(second.cacheHitCount >= 3u, "Stable frames should reuse descriptor, pipeline, and upload preparation caches.");
 			context.ExpectEqual(static_cast<std::size_t>(1u), second.renderPacketCache.cacheHits, "Persistent draw packet signatures should hit for unchanged renderables.");
 			context.ExpectEqual(static_cast<std::size_t>(0u), second.renderPacketCache.cacheMisses, "Unchanged renderables should not rebuild persistent draw packets.");
+			context.ExpectEqual(static_cast<std::size_t>(1u), compact.renderPacketCache.packetCount,
+				"Compact preparation should retain the packet population count.");
+			context.ExpectEqual(static_cast<std::size_t>(0u), compact.renderPacketCache.cacheHits,
+				"Compact preparation must skip diagnostic-only persistent packet scans.");
 		});
 
 		registry.Add("Renderer.VulkanRecording.InvalidatesUploadPlansAndRetiresResourcesDeterministically", [](TestContext& context) {

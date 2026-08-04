@@ -263,7 +263,12 @@ namespace TerraEngine::Scheduling {
 		const ScheduleSummary& BuildSchedule();
 		const ScheduleSummary& ExecuteFrame(float deltaTime, const MutationFlushCallback& flushCallback);
 		std::vector<FrameWorkloadDeclaration> BuildFrameWorkloadDeclarations(float deltaTime);
-		FrameExecutionPlan ExecuteFrameWorkloads(float deltaTime, const MutationFlushCallback& flushCallback = {});
+		// Direct diagnostic callers retain detailed output by default. ExecuteFrame
+		// selects the compact path because it runs every Play Mode frame.
+		FrameExecutionPlan ExecuteFrameWorkloads(
+			float deltaTime,
+			const MutationFlushCallback& flushCallback = {},
+			bool compactRuntimeDiagnostics = false);
 		WorkerCoverageReport BuildWorkerCoverageReport(float deltaTime);
 		const ScheduleSummary& LatestSummary() const;
 		const FrameExecutionPlan& LatestFrameExecutionPlan() const;

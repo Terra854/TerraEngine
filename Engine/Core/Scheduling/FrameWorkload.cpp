@@ -367,7 +367,11 @@ namespace TerraEngine::Scheduling {
 			plan.executionRecords.push_back(std::move(record));
 		}
 
-		void ApplyJobGraphSummary(FrameExecutionPlan& plan, const JobGraphSummary& summary, const std::vector<ScheduledPartition>& scheduledPartitions)
+		void ApplyJobGraphSummary(
+			FrameExecutionPlan& plan,
+			const JobGraphSummary& summary,
+			const std::vector<ScheduledPartition>& scheduledPartitions,
+			bool collectExecutionRecords)
 		{
 			std::unordered_map<std::string, JobGraphNodeState> statesByName;
 			std::unordered_map<std::string, const JobGraphResultEntry*> entriesByName;
@@ -390,7 +394,12 @@ namespace TerraEngine::Scheduling {
 				hasScheduledPartition[scheduled.resultIndex] = true;
 				allScheduledPartitionsCompleted[scheduled.resultIndex] = allScheduledPartitionsCompleted[scheduled.resultIndex] && completed;
 				const auto entry = entriesByName.find(scheduled.jobName);
-				AppendExecutionRecord(plan, result, scheduled.partition, entry == entriesByName.end() ? nullptr : entry->second, completed);
+				if (collectExecutionRecords)
+				{
+					AppendExecutionRecord(plan, result, scheduled.partition,
+						entry == entriesByName.end() ? nullptr : entry->second,
+						completed);
+				}
 			}
 			for (std::size_t resultIndex = 0; resultIndex < plan.results.size(); ++resultIndex)
 			{
@@ -405,7 +414,11 @@ namespace TerraEngine::Scheduling {
 			{
 				if (result.executionPolicy == FrameWorkloadExecutionPolicy::Omitted || result.executionPolicy == FrameWorkloadExecutionPolicy::Rejected)
 				{
-					AppendExecutionRecord(plan, result, {}, nullptr, result.executionPolicy == FrameWorkloadExecutionPolicy::Omitted);
+					if (collectExecutionRecords)
+					{
+						AppendExecutionRecord(plan, result, {}, nullptr,
+							result.executionPolicy == FrameWorkloadExecutionPolicy::Omitted);
+					}
 				}
 			}
 			plan.completed = summary.completed && std::all_of(plan.results.begin(), plan.results.end(), [](const FrameWorkloadResult& result) {
@@ -1112,9 +1125,18 @@ namespace TerraEngine::Scheduling {
 		return ValidateFrameWorkloadsInternal(std::move(workloads), std::move(frameId), true);
 	}
 
-	FrameExecutionPlan ExecuteFrameWorkloads(std::vector<FrameWorkloadDeclaration> workloads, std::string frameId)
+	FrameExecutionPlan ExecuteFrameWorkloads(
+		std::vector<FrameWorkloadDeclaration> workloads,
+		std::string frameId,
+		FrameWorkloadExecutionOptions options)
 	{
-		FrameExecutionPlan plan = ValidateFrameWorkloadsInternal(std::move(workloads), std::move(frameId), false);
+		FrameExecutionPlan plan;
+		{
+			TERRAENGINE_PROFILE_SCOPE("FrameWorkload: Validate and Lower",
+				TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			plan = ValidateFrameWorkloadsInternal(
+				std::move(workloads), std::move(frameId), false);
+		}
 		plan.executionMode = FrameWorkloadExecutionMode::Parallel;
 		if (!plan.valid)
 		{
@@ -1127,10 +1149,13 @@ namespace TerraEngine::Scheduling {
 		if (hasWorkerWork && ThreadPool::instance().getThreadCount() == 0)
 		{
 			AddArchitectureDiagnostic(plan.diagnostics, ArchitectureDiagnosticSeverity::Warning, ArchitectureDiagnosticCode::CompatibilityFallback, plan.frameId, "ThreadPool", "Parallel frame execution requested worker work before the ThreadPool was initialized.", "Initialize ThreadPool before executing worker-safe frame work, or call ExecuteFrameWorkloadsCompatibility for an explicit serial baseline.");
-			plan = ExecuteFrameWorkloadsCompatibility(std::move(plan.workloads), std::move(plan.frameId));
+			plan = ExecuteFrameWorkloadsCompatibility(
+				std::move(plan.workloads), std::move(plan.frameId), options);
 			return plan;
 		}
 
+		TERRAENGINE_PROFILE_SCOPE("FrameWorkload: Build and Execute Job Graph",
+			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		JobGraph graph(plan.frameId, "Architecture Hardened Frame");
 		std::vector<std::vector<DependencyHandle>> handlesByResult(plan.results.size());
 		std::vector<ScheduledPartition> scheduledPartitions;
@@ -1224,19 +1249,31 @@ namespace TerraEngine::Scheduling {
 				plan.parallelExecutionUsed = true;
 			}
 		}
-		ApplyJobGraphSummary(plan, summary, scheduledPartitions);
+		ApplyJobGraphSummary(plan, summary, scheduledPartitions,
+			options.collectExecutionRecords);
 		if (!summary.valid || !plan.completed)
 		{
 			AddArchitectureDiagnostic(plan.diagnostics, ArchitectureDiagnosticSeverity::Error, ArchitectureDiagnosticCode::ExecutionFailed, plan.frameId, "", "Frame workload graph did not complete successfully.", "Inspect JobGraph diagnostics.");
 		}
-		SortDiagnostics(plan.diagnostics);
-		RefreshMigrationSummary(plan);
-		plan.formatted = FormatFrameExecutionPlan(plan);
-		PublishExecutionRecordsForProfiling(plan);
+		{
+			TERRAENGINE_PROFILE_SCOPE("FrameWorkload: Publish Execution Diagnostics",
+				TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			SortDiagnostics(plan.diagnostics);
+			RefreshMigrationSummary(plan, options.formatDiagnostics);
+			plan.formatted = options.formatDiagnostics
+				? FormatFrameExecutionPlan(plan) : std::string{};
+			if (options.collectExecutionRecords)
+			{
+				PublishExecutionRecordsForProfiling(plan);
+			}
+		}
 		return plan;
 	}
 
-	FrameExecutionPlan ExecuteFrameWorkloadsCompatibility(std::vector<FrameWorkloadDeclaration> workloads, std::string frameId)
+	FrameExecutionPlan ExecuteFrameWorkloadsCompatibility(
+		std::vector<FrameWorkloadDeclaration> workloads,
+		std::string frameId,
+		FrameWorkloadExecutionOptions options)
 	{
 		FrameExecutionPlan plan = ValidateFrameWorkloadsInternal(std::move(workloads), std::move(frameId), false);
 		plan.executionMode = FrameWorkloadExecutionMode::Compatibility;
@@ -1291,13 +1328,19 @@ namespace TerraEngine::Scheduling {
 			if (result.executionPolicy == FrameWorkloadExecutionPolicy::Omitted)
 			{
 				result.completed = true;
-				AppendExecutionRecord(plan, result, {}, nullptr, true);
+				if (options.collectExecutionRecords)
+				{
+					AppendExecutionRecord(plan, result, {}, nullptr, true);
+				}
 				continue;
 			}
 			if (result.executionPolicy == FrameWorkloadExecutionPolicy::Rejected)
 			{
 				result.completed = false;
-				AppendExecutionRecord(plan, result, {}, nullptr, false);
+				if (options.collectExecutionRecords)
+				{
+					AppendExecutionRecord(plan, result, {}, nullptr, false);
+				}
 				continue;
 			}
 			std::vector<FrameWorkloadPartition> partitions;
@@ -1328,7 +1371,10 @@ namespace TerraEngine::Scheduling {
 					JobGraphResultEntry entry;
 					entry.dispatchCount = 1u;
 					entry.usefulWorkItemCount = partition.itemEnd - partition.itemBegin;
-					AppendExecutionRecord(plan, result, partition, &entry, true);
+					if (options.collectExecutionRecords)
+					{
+						AppendExecutionRecord(plan, result, partition, &entry, true);
+					}
 				}
 				result.completed = true;
 			}
@@ -1346,9 +1392,13 @@ namespace TerraEngine::Scheduling {
 			AddArchitectureDiagnostic(plan.diagnostics, ArchitectureDiagnosticSeverity::Error, ArchitectureDiagnosticCode::ExecutionFailed, plan.frameId, "", "Frame workload compatibility pass did not complete successfully.", "Inspect workload diagnostics.");
 		}
 		SortDiagnostics(plan.diagnostics);
-		RefreshMigrationSummary(plan);
-		plan.formatted = FormatFrameExecutionPlan(plan);
-		PublishExecutionRecordsForProfiling(plan);
+		RefreshMigrationSummary(plan, options.formatDiagnostics);
+		plan.formatted = options.formatDiagnostics
+			? FormatFrameExecutionPlan(plan) : std::string{};
+		if (options.collectExecutionRecords)
+		{
+			PublishExecutionRecordsForProfiling(plan);
+		}
 		return plan;
 	}
 

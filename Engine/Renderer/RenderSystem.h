@@ -418,6 +418,11 @@ private:
 	// exact signature avoids rebuilding identical tiny plans while the protected
 	// snapshot still owns all live scene/resource capture.
 	std::uint64_t latestGeometryRouteFramePlanSignature = 0u;
+	// Render publication folds the route sequence while it already scans the
+	// decisions for stats. The following scheduler workload can compare these two
+	// scalar values before copying any per-instance route records.
+	std::uint64_t latestGeometryRouteSelectionSignature = 0u;
+	std::size_t latestGeometryRouteSelectionCount = 0u;
 	std::vector<GpuVirtualGeometryPacketRecord> latestGameVirtualGeometryVisibilityRecords;
 	std::vector<GpuVirtualGeometryPacketRecord> latestSceneVirtualGeometryVisibilityRecords;
 	std::optional<VirtualGeometryVisibilityPick> latestSceneAuthoritativeIdentityPick;

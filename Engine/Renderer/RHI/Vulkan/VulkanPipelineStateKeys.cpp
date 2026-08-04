@@ -1,10 +1,31 @@
 #include "VulkanPipelineStateKeys.h"
 
 #include <algorithm>
+#include <unordered_set>
 
 namespace TerraEngine::Renderer::Vulkan {
 	namespace
 	{
+		struct PipelineStateIdentity
+		{
+			TerraEngine::UUID materialId = TerraEngine::EMPTY_UUID;
+			TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+
+			bool operator==(const PipelineStateIdentity&) const = default;
+		};
+
+		struct PipelineStateIdentityHash
+		{
+			std::size_t operator()(const PipelineStateIdentity& identity) const noexcept
+			{
+				std::size_t seed = std::hash<TerraEngine::UUID>{}(identity.materialId);
+				seed ^= std::hash<TerraEngine::UUID>{}(identity.meshId)
+					+ static_cast<std::size_t>(0x9e3779b9U)
+					+ (seed << 6U) + (seed >> 2U);
+				return seed;
+			}
+		};
+
 		void HashCombine(std::uint64_t& seed, const std::uint64_t value) noexcept
 		{
 			seed ^= value + 0x9e3779b97f4a7c15ull + (seed << 6u) + (seed >> 2u);
@@ -58,9 +79,19 @@ namespace TerraEngine::Renderer::Vulkan {
 	std::vector<PipelineStateKey> BuildPipelineStateKeys(const RenderFrameSnapshot& snapshot)
 	{
 		std::vector<PipelineStateKey> keys;
-		keys.reserve(snapshot.renderables.size());
+		std::unordered_set<PipelineStateIdentity, PipelineStateIdentityHash>
+			uniqueIdentities;
+		uniqueIdentities.reserve(snapshot.renderables.size());
+		keys.reserve(std::min(snapshot.renderables.size(), snapshot.materials.size()));
 		for (const RenderFrameRenderableRecord& renderable : snapshot.renderables)
 		{
+			// Pipeline state is shared by every instance with the same immutable
+			// mesh/material identity. Instance transforms, LOD ranges, and object ids
+			// are draw payloads and must not create duplicate pipeline keys.
+			if(!uniqueIdentities.emplace(PipelineStateIdentity{
+				renderable.materialId, renderable.meshId }).second) {
+				continue;
+			}
 			keys.push_back(BuildPipelineStateKey(renderable.materialId,
 				renderable.meshId,
 				MakeSnapshotFallbackCapability(renderable.materialId)));

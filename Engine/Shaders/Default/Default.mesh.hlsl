@@ -458,6 +458,27 @@ struct PageLocalPayloadDescriptor
 	uint localRemapEncoding;
 };
 
+// One hardware wave cooperatively emits a meshlet. The previous single-lane
+// layout serialized every vertex and primitive, which made animated skinning
+// scale with the slowest lane instead of the GPU's available SIMD width.
+static const uint kMeshShaderThreadCount = 32u;
+
+// Lane zero validates immutable draw metadata once, then publishes it to the
+// other lanes in the meshlet group. This preserves the defensive validation
+// path without multiplying bindless header reads by the wave width.
+groupshared DefaultGpuAnimationGraphicsRecord gMeshShaderAnimationRecord;
+groupshared TeAnimatedGraphicsBridge gMeshShaderCanonicalDeformation;
+groupshared TeAnimatedGraphicsPage gMeshShaderCanonicalPage;
+groupshared PageLocalPayloadDescriptor gMeshShaderPageDescriptor;
+groupshared uint gMeshShaderGpuDeformationAvailable;
+groupshared uint gMeshShaderCanonicalDeformationAvailable;
+groupshared uint gMeshShaderCanonicalPageAvailable;
+groupshared uint gMeshShaderPageLocalGeometry;
+groupshared uint gMeshShaderPacketDescriptorIndex;
+groupshared uint gMeshShaderPageId;
+groupshared float gMeshShaderBoundsRadius;
+groupshared uint gMeshShaderCullFlags;
+
 uint LoadVirtualGeometryBufferWord(uint bufferIndex, uint wordOffset, uint fallbackValue)
 {
 	if (bufferIndex == kInvalidVirtualGeometryBufferIndex)
@@ -883,13 +904,14 @@ uint LoadPrimitiveIndex(uint primitiveElementIndex)
 
 void EmitMeshlet(
 	uint meshletIndex,
+	uint groupThreadIndex,
+	DefaultGpuAnimationGraphicsRecord animationRecord,
+	bool gpuDeformationAvailable,
 	out vertices PSIn outputVertices[kMaxMeshletVertices],
 	out indices uint3 outputTriangles[kMaxMeshletTriangles],
 	out primitives StableVisibilityPrimitive outputPrimitiveData[kMaxMeshletTriangles])
 {
 	const MeshDecodeInfo decode = meshDecodeInfo[0];
-	DefaultGpuAnimationGraphicsRecord animationRecord;
-	const bool gpuDeformationAvailable = TryLoadGpuAnimationGraphicsRecord(animationRecord);
 	const uint meshletCount = decode.counts.w & 0x7FFFFFFFu;
 	const uint isU16 = (decode.counts.w >> 31u) & 1u;
 
@@ -900,16 +922,28 @@ void EmitMeshlet(
 	}
 
 	const MeshletRecord record = meshletRecords[meshletIndex];
-	float meshletBoundsRadius = 0.0f;
-	uint meshletCullFlags = 0u;
-	BuildMeshletDebugData(meshletIndex, meshletCount, meshletBoundsRadius, meshletCullFlags);
+	if (groupThreadIndex == 0u)
+	{
+		BuildMeshletDebugData(
+			meshletIndex,
+			meshletCount,
+			gMeshShaderBoundsRadius,
+			gMeshShaderCullFlags);
+	}
+	GroupMemoryBarrierWithGroupSync();
+	const float meshletBoundsRadius = gMeshShaderBoundsRadius;
+	const uint meshletCullFlags = gMeshShaderCullFlags;
 
 	// Defensive clamps keep malformed payloads from writing outside shader-declared arrays.
 	const uint vertexCount = min(record.vertexCount, kMaxMeshletVertices);
 	const uint primitiveCount = min(record.primitiveIndexCount / 3u, kMaxMeshletTriangles);
 	SetMeshOutputCounts(vertexCount, primitiveCount);
 
-	for (uint vertexIndex = 0; vertexIndex < vertexCount; ++vertexIndex)
+	// Each lane owns a disjoint output index sequence. Meshlets can contain up to
+	// 64 vertices, so a 32-lane wave finishes the common case in one or two steps.
+	for (uint vertexIndex = groupThreadIndex;
+		vertexIndex < vertexCount;
+		vertexIndex += kMeshShaderThreadCount)
 	{
 		const uint remapIndex = record.vertexOffset + vertexIndex;
 		uint globalVertexIndex = 0u;
@@ -991,7 +1025,9 @@ void EmitMeshlet(
 		outputVertices[vertexIndex] = outVertex;
 	}
 
-	for (uint primitiveIndex = 0; primitiveIndex < primitiveCount; ++primitiveIndex)
+	for (uint primitiveIndex = groupThreadIndex;
+		primitiveIndex < primitiveCount;
+		primitiveIndex += kMeshShaderThreadCount)
 	{
 		// Stable identity is authored before validating indices so a malformed
 		// primitive still has deterministic debug and diagnostic ownership.
@@ -1019,23 +1055,15 @@ void EmitPageLocalMeshlet(
 	PageLocalPayloadDescriptor descriptor,
 	uint pageId,
 	uint meshletIndex,
+	uint groupThreadIndex,
+	TeAnimatedGraphicsBridge deformationBridge,
+	TeAnimatedGraphicsPage deformationPage,
+	bool hasCanonicalDeformation,
 	out vertices PSIn outputVertices[kMaxMeshletVertices],
 	out indices uint3 outputTriangles[kMaxMeshletTriangles],
 	out primitives StableVisibilityPrimitive outputPrimitiveData[kMaxMeshletTriangles])
 {
 	const MeshDecodeInfo decode = LoadPageLocalDecodeInfo(descriptor);
-	TeAnimatedGraphicsBridge deformationBridge;
-	TeAnimatedGraphicsPage deformationPage;
-	const bool hasCanonicalDeformation =
-		TeTryLoadAnimatedGraphicsBridge(
-			SceneUniforms.meshDataIndex,
-			SceneUniforms.textureIndex,
-			deformationBridge)
-		&& TeTryResolveAnimatedGraphicsPage(
-			SceneUniforms.meshDataIndex,
-			deformationBridge,
-			pageId,
-			deformationPage);
 	const uint meshletCount = descriptor.meshletCount;
 	if (meshletIndex >= meshletCount)
 	{
@@ -1044,9 +1072,18 @@ void EmitPageLocalMeshlet(
 	}
 
 	const MeshletRecord record = LoadPageLocalMeshletRecord(descriptor, meshletIndex);
-	float meshletBoundsRadius = 0.0f;
-	uint meshletCullFlags = 0u;
-	BuildPageLocalMeshletDebugData(descriptor, meshletIndex, meshletCount, meshletBoundsRadius, meshletCullFlags);
+	if (groupThreadIndex == 0u)
+	{
+		BuildPageLocalMeshletDebugData(
+			descriptor,
+			meshletIndex,
+			meshletCount,
+			gMeshShaderBoundsRadius,
+			gMeshShaderCullFlags);
+	}
+	GroupMemoryBarrierWithGroupSync();
+	const float meshletBoundsRadius = gMeshShaderBoundsRadius;
+	const uint meshletCullFlags = gMeshShaderCullFlags;
 
 	// Page-local records are already rebased by the Vulkan upload planner. These
 	// clamps are still kept here because malformed or stale page payloads should
@@ -1055,7 +1092,9 @@ void EmitPageLocalMeshlet(
 	const uint primitiveCount = min(record.primitiveIndexCount / 3u, kMaxMeshletTriangles);
 	SetMeshOutputCounts(vertexCount, primitiveCount);
 
-	for (uint vertexIndex = 0; vertexIndex < vertexCount; ++vertexIndex)
+	for (uint vertexIndex = groupThreadIndex;
+		vertexIndex < vertexCount;
+		vertexIndex += kMeshShaderThreadCount)
 	{
 		const uint remapIndex = record.vertexOffset + vertexIndex;
 		uint localVertexIndex = 0u;
@@ -1118,7 +1157,9 @@ void EmitPageLocalMeshlet(
 		outputVertices[vertexIndex] = outVertex;
 	}
 
-	for (uint primitiveIndex = 0; primitiveIndex < primitiveCount; ++primitiveIndex)
+	for (uint primitiveIndex = groupThreadIndex;
+		primitiveIndex < primitiveCount;
+		primitiveIndex += kMeshShaderThreadCount)
 	{
 		// Mix the physical page into page-local identity so independently
 		// resident pages cannot alias the same meshlet/primitive pair.
@@ -1143,33 +1184,80 @@ void EmitPageLocalMeshlet(
 }
 
 [outputtopology("triangle")]
-[numthreads(1, 1, 1)]
+[numthreads(32, 1, 1)]
 void main(
 	in payload TaskPayload taskPayload,
 	uint3 groupId : SV_GroupID,
+	uint groupThreadIndex : SV_GroupIndex,
 	out vertices PSIn outputVertices[kMaxMeshletVertices],
 	out indices uint3 outputTriangles[kMaxMeshletTriangles],
 	out primitives StableVisibilityPrimitive outputPrimitiveData[kMaxMeshletTriangles])
 {
 	const uint visibleIndex = groupId.x;
-	const uint packetDescriptorIndex = taskPayload.packetDescriptorIndices[visibleIndex];
-	DefaultGpuAnimationGraphicsRecord animationRecord;
-	const bool gpuDeformationAvailable = TryLoadGpuAnimationGraphicsRecord(animationRecord);
-	TeAnimatedGraphicsBridge canonicalDeformation;
-	const bool canonicalDeformationAvailable =
-		TeTryLoadAnimatedGraphicsBridge(
-			SceneUniforms.meshDataIndex,
-			SceneUniforms.textureIndex,
-			canonicalDeformation);
-	PageLocalPayloadDescriptor pageDescriptor;
-	const bool pageLocalGeometry = IsVirtualGeometryPageLocalSource(SceneUniforms.virtualGeometryPayloadSource)
-		// Canonical compute output is keyed by the same physical page id as this
-		// packet. Legacy owner deformation has no such publication and therefore
-		// keeps using the complete owner payload.
-		&& (SceneUniforms.virtualGeometryFlags
-			& kVirtualGeometryFlagOwnerPaletteDeformation) == 0u
-		&& (canonicalDeformationAvailable || !gpuDeformationAvailable)
-		&& TryLoadPageLocalPayloadDescriptorAt(packetDescriptorIndex, pageDescriptor);
+	if (groupThreadIndex == 0u)
+	{
+		// Only lane zero performs generation and bounds-table validation. Every
+		// other lane consumes the exact same immutable result after the barrier.
+		gMeshShaderPacketDescriptorIndex =
+			taskPayload.packetDescriptorIndices[visibleIndex];
+		gMeshShaderAnimationRecord = (DefaultGpuAnimationGraphicsRecord)0;
+		gMeshShaderCanonicalDeformation = (TeAnimatedGraphicsBridge)0;
+		gMeshShaderCanonicalPage = (TeAnimatedGraphicsPage)0;
+		gMeshShaderPageDescriptor = (PageLocalPayloadDescriptor)0;
+		gMeshShaderPageId = 0xffffffffu;
+		gMeshShaderGpuDeformationAvailable =
+			TryLoadGpuAnimationGraphicsRecord(gMeshShaderAnimationRecord)
+				? 1u : 0u;
+		gMeshShaderCanonicalDeformationAvailable =
+			TeTryLoadAnimatedGraphicsBridge(
+				SceneUniforms.meshDataIndex,
+				SceneUniforms.textureIndex,
+				gMeshShaderCanonicalDeformation)
+				? 1u : 0u;
+		gMeshShaderPageLocalGeometry =
+			IsVirtualGeometryPageLocalSource(
+				SceneUniforms.virtualGeometryPayloadSource)
+			// Canonical compute output is keyed by the same physical page id as
+			// this packet. Legacy owner deformation has no such publication and
+			// therefore keeps using the complete owner payload.
+			&& (SceneUniforms.virtualGeometryFlags
+				& kVirtualGeometryFlagOwnerPaletteDeformation) == 0u
+			&& (gMeshShaderCanonicalDeformationAvailable != 0u
+				|| gMeshShaderGpuDeformationAvailable == 0u)
+			&& TryLoadPageLocalPayloadDescriptorAt(
+				gMeshShaderPacketDescriptorIndex,
+				gMeshShaderPageDescriptor)
+				? 1u : 0u;
+		gMeshShaderCanonicalPageAvailable = 0u;
+		if (gMeshShaderPageLocalGeometry != 0u)
+		{
+			gMeshShaderPageId =
+				LoadVirtualGeometryPagePayloadDescriptorWordAt(
+					gMeshShaderPacketDescriptorIndex,
+					0u,
+					0xffffffffu);
+			if (gMeshShaderCanonicalDeformationAvailable != 0u)
+			{
+				gMeshShaderCanonicalPageAvailable =
+					TeTryResolveAnimatedGraphicsPage(
+						SceneUniforms.meshDataIndex,
+						gMeshShaderCanonicalDeformation,
+						gMeshShaderPageId,
+						gMeshShaderCanonicalPage)
+						? 1u : 0u;
+			}
+		}
+	}
+	GroupMemoryBarrierWithGroupSync();
+
+	const uint packetDescriptorIndex = gMeshShaderPacketDescriptorIndex;
+	const DefaultGpuAnimationGraphicsRecord animationRecord =
+		gMeshShaderAnimationRecord;
+	const bool gpuDeformationAvailable =
+		gMeshShaderGpuDeformationAvailable != 0u;
+	const PageLocalPayloadDescriptor pageDescriptor =
+		gMeshShaderPageDescriptor;
+	const bool pageLocalGeometry = gMeshShaderPageLocalGeometry != 0u;
 	// Choose the payload source before reading decode metadata. Resident page
 	// packets are self-contained and must not require a valid full-owner decode
 	// buffer merely because the shader also supports legacy owner-mesh draws.
@@ -1210,15 +1298,14 @@ void main(
 			SetMeshOutputCounts(0, 0);
 			return;
 		}
-		const uint pageId =
-			LoadVirtualGeometryPagePayloadDescriptorWordAt(
-				packetDescriptorIndex,
-				0u,
-				0xffffffffu);
 		EmitPageLocalMeshlet(
 			pageDescriptor,
-			pageId,
+			gMeshShaderPageId,
 			pageLocalMeshletIndex,
+			groupThreadIndex,
+			gMeshShaderCanonicalDeformation,
+			gMeshShaderCanonicalPage,
+			gMeshShaderCanonicalPageAvailable != 0u,
 			outputVertices,
 			outputTriangles,
 			outputPrimitiveData);
@@ -1233,5 +1320,12 @@ void main(
 		return;
 	}
 
-	EmitMeshlet(meshletIndex, outputVertices, outputTriangles, outputPrimitiveData);
+	EmitMeshlet(
+		meshletIndex,
+		groupThreadIndex,
+		animationRecord,
+		gpuDeformationAvailable,
+		outputVertices,
+		outputTriangles,
+		outputPrimitiveData);
 }

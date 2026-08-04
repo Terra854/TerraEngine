@@ -81,4 +81,14 @@ TERRAENGINE_API AnimationStatus StepStateMachine(const EvaluationProgram &progra
 // program.  It avoids repeating graph-map allocation on every worker tick.
 TERRAENGINE_API AnimationStatus StepStateMachineTrusted(const EvaluationProgram &program, const StateMachineSnapshot &prior,
 	const StateMachineStepInput &input, StateMachineSnapshot &output);
+
+// Advances a worker-owned candidate directly after Publish has validated the
+// immutable program. The caller must keep a last-good snapshot and restore it
+// when this function fails, because allocation failure can leave the candidate
+// partially advanced. This explicit contract lets steady-state crowd animation
+// reuse retained history capacity instead of copying every history vector twice.
+TERRAENGINE_API AnimationStatus StepStateMachineTrustedInPlace(
+	const EvaluationProgram &program,
+	StateMachineSnapshot &candidate,
+	const StateMachineStepInput &input);
 } // namespace TerraEngine::Animation

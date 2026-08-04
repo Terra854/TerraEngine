@@ -61,6 +61,13 @@ namespace TerraEngine::Tests
 					"Indexed and page-local Vulkan routes must both emit the stable primitive identity contract.");
 				context.Expect(meshShader.find("pageId * 16777619u") != std::string::npos,
 					"Page-local identities must include physical page ownership so separate resident pages cannot alias.");
+				context.Expect(meshShader.find("[numthreads(32, 1, 1)]") != std::string::npos
+					&& meshShader.find("vertexIndex += kMeshShaderThreadCount") != std::string::npos
+					&& meshShader.find("primitiveIndex += kMeshShaderThreadCount") != std::string::npos,
+					"Meshlet emission must distribute vertex and primitive work across one hardware wave.");
+				context.Expect(meshShader.find("GroupMemoryBarrierWithGroupSync()") != std::string::npos
+					&& meshShader.find("gMeshShaderAnimationRecord") != std::string::npos,
+					"Cooperative mesh emission must validate immutable animation metadata once and publish it to the full group.");
 				context.Expect(fragmentShader.find("main(\n\tPSIn input,\n\tnointerpolation uint stablePrimitiveId") != std::string::npos,
 					"The fragment stage must consume the stable identity interpolator, rather than relying on debug color alone.");
 				context.Expect(renderPassSource.find("VK_FORMAT_R32G32B32A32_UINT") != std::string::npos

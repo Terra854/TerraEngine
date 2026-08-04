@@ -83,6 +83,11 @@ namespace TerraEngine::Animation {
 		// immutable EvaluationProgram object inside one worker-owned batch. Direct
 		// callers keep the checked default so untrusted programs are never accepted.
 		bool programValidated = false;
+		// A non-zero mask is the result of DeriveStageMask for this exact program and
+		// visual feature shape. AnimationSystem fills it only after checked lowering;
+		// later members of the same worker batch and presentation can then avoid
+		// rescanning identical immutable instructions. Direct callers leave it zero.
+		std::uint32_t prevalidatedStageMask = 0U;
 		// The producer owns this shared immutable copy for the whole frame.  It is
 		// deliberately not a span because lowering may outlive asset-cache changes.
 		std::shared_ptr<const GpuAnimationResidentPayloads> residentPayloads;

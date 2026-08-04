@@ -94,6 +94,10 @@ public:
 	std::string GetLastError() const;
 	std::string GetStatusText() const;
 	bool IsCapturing() const;
+	// Scheduler hot paths use this atomic observation after BeginFrame. Unlike
+	// IsCapturing(), it takes no document mutex and is true only while the current
+	// Play Mode frame is actively accepting capture evidence.
+	bool IsFrameRecordingActive() const noexcept;
 	// UI readers poll this atomic revision before requesting deep capture copies.
 	// Recording threads never wait for a profiler window that is only redrawing.
 	std::uint64_t GetSnapshotRevision() const noexcept;

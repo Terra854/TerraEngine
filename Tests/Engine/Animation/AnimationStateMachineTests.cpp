@@ -65,6 +65,27 @@ void RegisterAnimationStateMachineTests(TestRegistry &registry) {
 				result.transitionHistory.back().transitionStableId == 20U && result.retainedTriggerEdges.empty(),
 			"Higher priority then state-specific and stable transition identity select one fixed-tick trigger edge deterministically.");
 	});
+	registry.Add("Animation.StateMachine.TrustedInPlaceStepMatchesTransactionalResultAndReusesHistory", [](TestContext &context) {
+		EvaluationProgram program = MakeProgram();
+		StateMachineSnapshot prior{};
+		prior.activeStateId = 10U;
+		prior.transitionHistory.reserve(8U);
+		StateMachineSnapshot expected;
+		const StateMachineTriggerEdge edge{1U, 1U, true};
+		const AnimationStatus expectedStatus = StepStateMachineTrusted(
+			program, prior, {4, {&edge, 1U}}, expected);
+		StateMachineSnapshot candidate = prior;
+		candidate.transitionHistory.reserve(8U);
+		const std::size_t retainedCapacity = candidate.transitionHistory.capacity();
+		const AnimationStatus inPlaceStatus = StepStateMachineTrustedInPlace(
+			program, candidate, {4, {&edge, 1U}});
+		context.Expect(
+			expectedStatus == AnimationStatus::Ok
+				&& inPlaceStatus == AnimationStatus::Ok
+				&& candidate == expected
+				&& candidate.transitionHistory.capacity() == retainedCapacity,
+			"The worker-owned in-place path must produce the exact transactional state while retaining preallocated history storage.");
+	});
 	registry.Add("Animation.StateMachine.PublishesImmutableSnapshotsAtomically", [](TestContext &context) {
 		AnimationGraphInstance instance;
 		EvaluationProgram program = MakeProgram();

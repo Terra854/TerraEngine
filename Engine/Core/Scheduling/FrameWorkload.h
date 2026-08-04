@@ -290,6 +290,14 @@ namespace TerraEngine::Scheduling {
 		std::string formatted;
 	};
 
+	// Public callers keep the historical detailed result by default. The live
+	// scheduler can explicitly disable diagnostic strings and execution evidence
+	// on ordinary frames, then enable either channel when its UI or profiler needs it.
+	struct FrameWorkloadExecutionOptions {
+		bool collectExecutionRecords = true;
+		bool formatDiagnostics = true;
+	};
+
 	TERRAENGINE_API std::string ToString(FrameWorkloadExecutionPolicy policy);
 	TERRAENGINE_API std::string ToString(FrameWorkloadMutationPolicy policy);
 	TERRAENGINE_API std::string ToString(FrameWorkloadExecutionMode mode);
@@ -313,8 +321,14 @@ namespace TerraEngine::Scheduling {
 	TERRAENGINE_API std::vector<ConversionFinding> InitialWorkerConversionFindings();
 	TERRAENGINE_API WorkerCoverageReport BuildWorkerCoverageReport(const FrameExecutionPlan& plan);
 	TERRAENGINE_API FrameExecutionPlan ValidateFrameWorkloads(std::vector<FrameWorkloadDeclaration> workloads, std::string frameId = "frame");
-	TERRAENGINE_API FrameExecutionPlan ExecuteFrameWorkloads(std::vector<FrameWorkloadDeclaration> workloads, std::string frameId = "frame");
-	TERRAENGINE_API FrameExecutionPlan ExecuteFrameWorkloadsCompatibility(std::vector<FrameWorkloadDeclaration> workloads, std::string frameId = "frame");
+	TERRAENGINE_API FrameExecutionPlan ExecuteFrameWorkloads(
+		std::vector<FrameWorkloadDeclaration> workloads,
+		std::string frameId = "frame",
+		FrameWorkloadExecutionOptions options = {});
+	TERRAENGINE_API FrameExecutionPlan ExecuteFrameWorkloadsCompatibility(
+		std::vector<FrameWorkloadDeclaration> workloads,
+		std::string frameId = "frame",
+		FrameWorkloadExecutionOptions options = {});
 	// Returns a bounded value copy from the most recently completed scheduler
 	// execution. The profiler consumes it after the protected frame boundary;
 	// callbacks and mutable workload inputs are never retained here.

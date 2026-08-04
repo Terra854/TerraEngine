@@ -117,7 +117,6 @@ namespace TerraEngine::Animation {
 		}
 		const bool validatedAssetPairUnchanged = asset_ == &asset
 			&& referenceSkeleton_ == referenceSkeleton;
-		if(!validatedAssetPairUnchanged) Close();
 		if((streamedPayloads && residentSegments.size() != asset.segments.size())
 			|| (!streamedPayloads && !residentSegments.empty()
 				&& residentSegments.size() != asset.segments.size())) {
@@ -161,23 +160,57 @@ namespace TerraEngine::Animation {
 			return codecStatus;
 		}
 
-		std::vector<std::uint8_t> stagedResidency;
 		try {
-			if(residentSegments.empty()) {
-				stagedResidency.assign(asset.segments.size(), 1U);
-			} else {
-				stagedResidency.assign(residentSegments.begin(), residentSegments.end());
-			}
+			// Reserve before changing any visible view field. Existing animator views
+			// normally already have this exact segment capacity, so a crowd-wide stream
+			// promotion performs no allocator traffic. A failed growth preserves the
+			// complete previous publication.
+			residentSegments_.reserve(asset.segments.size());
 		} catch(const std::bad_alloc&) {
 			return AnimationStatus::InternalError;
 		}
 
+		// uint8_t assignment cannot throw after the exact capacity was reserved.
+		// Commit the bitmap first, then publish its matching immutable identities.
+		if(residentSegments.empty()) {
+			residentSegments_.assign(asset.segments.size(), 1U);
+		} else {
+			residentSegments_.assign(residentSegments.begin(), residentSegments.end());
+		}
 		asset_ = &asset;
 		referenceSkeleton_ = referenceSkeleton;
 		codec_ = stagedCodec;
-		residentSegments_ = std::move(stagedResidency);
 		streamedGeneration_ = streamedGeneration;
 		streamedPayloads_ = std::move(streamedPayloads);
+		return AnimationStatus::Ok;
+	}
+
+	AnimationStatus AnimationClipView::CopyStreamingStateFrom(
+		const AnimationClipView& validated) noexcept
+	{
+		if(!IsOpen() || !validated.IsOpen()
+			|| asset_ != validated.asset_
+			|| referenceSkeleton_ != validated.referenceSkeleton_) {
+			return AnimationStatus::InvalidArgument;
+		}
+		if(streamedGeneration_ == validated.streamedGeneration_
+			&& streamedPayloads_ == validated.streamedPayloads_
+			&& residentSegments_ == validated.residentSegments_) {
+			return AnimationStatus::Ok;
+		}
+		try {
+			// reserve provides the strong exception guarantee. Once it succeeds, all
+			// following value and shared-ownership copies are non-throwing.
+			residentSegments_.reserve(validated.residentSegments_.size());
+		} catch(const std::bad_alloc&) {
+			return AnimationStatus::InternalError;
+		}
+		residentSegments_.assign(
+			validated.residentSegments_.begin(),
+			validated.residentSegments_.end());
+		codec_ = validated.codec_;
+		streamedGeneration_ = validated.streamedGeneration_;
+		streamedPayloads_ = validated.streamedPayloads_;
 		return AnimationStatus::Ok;
 	}
 

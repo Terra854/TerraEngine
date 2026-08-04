@@ -151,7 +151,8 @@ namespace TerraEngine::Renderer::Vulkan {
 		VulkanRendererPreparationSummary BuildFramePreparation(
 			const RenderFrameSnapshot& snapshot,
 			const std::vector<RenderPassNode>& passes,
-			const BackendCapabilityProfile& capabilities);
+			const BackendCapabilityProfile& capabilities,
+			bool collectPersistentPacketDiagnostics = true);
 
 	private:
 		void TrimCachesIfNeeded();

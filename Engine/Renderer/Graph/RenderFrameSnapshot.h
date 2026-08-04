@@ -327,6 +327,9 @@ namespace TerraEngine::Renderer {
 		std::vector<RenderFrameViewRequest> viewRequests;
 		std::vector<RenderFrameRenderableRecord> renderables;
 		std::vector<RenderFrameLightRecord> lights;
+		// Resource tables contain one record per UUID. Per-instance mesh/material
+		// identities remain on renderables; duplicating resource rows makes descriptor,
+		// upload, sorting, and hashing work scale with instance count unnecessarily.
 		std::vector<RenderFrameResourceRecord> materials;
 		std::vector<RenderFrameResourceRecord> meshes;
 		std::vector<RenderFrameResourceRecord> textures;

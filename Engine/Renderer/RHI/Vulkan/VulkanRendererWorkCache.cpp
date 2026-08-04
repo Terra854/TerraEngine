@@ -216,11 +216,11 @@ namespace {
 		std::uint64_t signature = 1099511628211ull;
 		for (const RenderFrameRenderableRecord& record : records)
 		{
-			HashCombine(signature, HashUuid(record.objectId));
+			// Pipeline keys depend only on immutable mesh/material state. Object ids,
+			// transforms, and virtual-geometry draw ranges are payload data; hashing
+			// them invalidated and slowed the cache without changing a pipeline key.
 			HashCombine(signature, HashUuid(record.meshId));
 			HashCombine(signature, HashUuid(record.materialId));
-			HashCombine(signature, record.taskShaderCullingEnabled ? 1u : 0u);
-			HashCombine(signature, HashVirtualGeometryRange(record.virtualGeometry));
 		}
 		return signature;
 	}
@@ -389,7 +389,8 @@ namespace {
 	VulkanRendererPreparationSummary VulkanRendererPreparationCache::BuildFramePreparation(
 		const RenderFrameSnapshot& snapshot,
 		const std::vector<RenderPassNode>& passes,
-		const BackendCapabilityProfile& capabilities)
+		const BackendCapabilityProfile& capabilities,
+		bool collectPersistentPacketDiagnostics)
 	{
 		VulkanRendererPreparationSummary summary;
 		summary.frameId = snapshot.frameId;
@@ -415,7 +416,17 @@ namespace {
 			summary.transitionPlans.push_back(BuildResourceTransitionPlan(snapshot.frameId, pass));
 		}
 
-		summary.renderPacketCache = RefreshPersistentRenderPackets(snapshot);
+		if(collectPersistentPacketDiagnostics)
+		{
+			summary.renderPacketCache = RefreshPersistentRenderPackets(snapshot);
+		}
+		else
+		{
+			// Packet-cache scans exist only to report hit/miss diagnostics. Preserve
+			// the useful population count while keeping the compact production path
+			// free of an otherwise redundant O(instance-count) hash/map pass.
+			summary.renderPacketCache.packetCount = snapshot.renderables.size();
+		}
 		summary.visibilityPlan = BuildVisibilityPreparationPlan(snapshot, capabilities);
 		summary.indirectDrawPlan = BuildIndirectDrawPreparationPlan(snapshot, capabilities);
 		summary.shadowPlan = BuildShadowRecordingPreparationPlan(snapshot, capabilities);

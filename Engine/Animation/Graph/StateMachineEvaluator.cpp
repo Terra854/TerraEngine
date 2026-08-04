@@ -316,20 +316,22 @@ void AppendSyncHistory(const EvaluationProgram &program, StateMachineSnapshot &s
 	TrimOldest(staged.syncHistory);
 }
 
-AnimationStatus StepInternal(const EvaluationProgram &program, const StateMachineSnapshot &prior, const StateMachineStepInput &input,
-	StateMachineSnapshot &output, bool preflightProgram) {
+AnimationStatus StepInPlaceInternal(
+	const EvaluationProgram &program,
+	StateMachineSnapshot &staged,
+	const StateMachineStepInput &input,
+	bool preflightProgram) {
 	try {
 		if ((preflightProgram && ValidateStateMachineProgram(program) != AnimationStatus::Ok) ||
-			!ValidatePriorSnapshot(program, prior, preflightProgram) || input.tick < prior.lastTick ||
+			!ValidatePriorSnapshot(program, staged, preflightProgram) || input.tick < staged.lastTick ||
 			!ValidateInputEdges(input.triggerEdges) || !ValidateResetRequests(input.resetTriggerSequenceIds)) {
 			return AnimationStatus::InvalidArgument;
 		}
-		const AnimationStatus edgeStatus = PreflightIncomingEdges(prior, input.triggerEdges);
+		const AnimationStatus edgeStatus = PreflightIncomingEdges(staged, input.triggerEdges);
 		if (edgeStatus != AnimationStatus::Ok) {
 			return edgeStatus;
 		}
 
-		StateMachineSnapshot staged = prior;
 		LatchTriggerEdges(staged, input.triggerEdges);
 		for (const std::uint64_t resetId : input.resetTriggerSequenceIds) {
 			staged.retainedTriggerEdges.erase(std::remove_if(staged.retainedTriggerEdges.begin(), staged.retainedTriggerEdges.end(),
@@ -370,7 +372,6 @@ AnimationStatus StepInternal(const EvaluationProgram &program, const StateMachin
 				ApplyTriggerConsumption(staged, transition);
 				AppendSyncHistory(program, staged);
 				staged.lastTick = input.tick;
-				output = std::move(staged);
 				return AnimationStatus::Ok;
 			}
 			std::uint64_t destinationLeaf = 0U;
@@ -415,9 +416,30 @@ AnimationStatus StepInternal(const EvaluationProgram &program, const StateMachin
 		}
 		AppendSyncHistory(program, staged);
 		staged.lastTick = input.tick;
-		output = std::move(staged);
 		return AnimationStatus::Ok;
 	} catch (const std::bad_alloc &) {
+		return AnimationStatus::InternalError;
+	}
+}
+
+AnimationStatus StepInternal(
+	const EvaluationProgram &program,
+	const StateMachineSnapshot &prior,
+	const StateMachineStepInput &input,
+	StateMachineSnapshot &output,
+	bool preflightProgram) {
+	try {
+		// Public graph stepping remains transactional: build in private storage and
+		// publish only a complete result. AnimationSystem's worker-owned candidate
+		// uses the explicit in-place entry point below to reuse retained capacity.
+		StateMachineSnapshot staged = prior;
+		const AnimationStatus status = StepInPlaceInternal(
+			program, staged, input, preflightProgram);
+		if(status == AnimationStatus::Ok) {
+			output = std::move(staged);
+		}
+		return status;
+	} catch(const std::bad_alloc&) {
 		return AnimationStatus::InternalError;
 	}
 }
@@ -507,5 +529,12 @@ AnimationStatus StepStateMachine(const EvaluationProgram &program, const StateMa
 AnimationStatus StepStateMachineTrusted(const EvaluationProgram &program, const StateMachineSnapshot &prior,
 	const StateMachineStepInput &input, StateMachineSnapshot &output) {
 	return StepInternal(program, prior, input, output, false);
+}
+
+AnimationStatus StepStateMachineTrustedInPlace(
+	const EvaluationProgram &program,
+	StateMachineSnapshot &candidate,
+	const StateMachineStepInput &input) {
+	return StepInPlaceInternal(program, candidate, input, false);
 }
 } // namespace TerraEngine::Animation

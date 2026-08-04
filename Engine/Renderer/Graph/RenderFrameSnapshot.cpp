@@ -29,11 +29,17 @@ namespace TerraEngine::Renderer {
 		template<typename Record>
 		void SortByUuid(std::vector<Record>& records, TerraEngine::UUID Record::* member)
 		{
-			std::sort(records.begin(), records.end(), [member](const Record& left, const Record& right) {
+			const auto orderedBefore = [member](const Record& left, const Record& right) {
 				// Two-digit hexadecimal text preserves byte-array order. Compare UUID
 				// bytes directly so sorting does not allocate two strings per comparison.
 				return left.*member < right.*member;
-			});
+			};
+			// RenderSystem canonicalizes retained membership when structure changes.
+			// Preserve that steady-state order with one linear check instead of an
+			// unconditional O(N log N) sort on every frame.
+			if(!std::is_sorted(records.begin(), records.end(), orderedBefore)) {
+				std::sort(records.begin(), records.end(), orderedBefore);
+			}
 		}
 
 		void HashVirtualGeometryRange(std::uint64_t& hash, const VirtualGeometryDrawRange& range)

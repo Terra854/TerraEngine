@@ -78,6 +78,12 @@ namespace TerraEngine::Animation {
 			std::span<const std::uint8_t> residentSegments = {},
 			AnimationGeneration streamedGeneration = 0U,
 			std::shared_ptr<const AnimationClipSegmentPayloadSet> streamedPayloads = {}) noexcept;
+		// Copy a fully validated streaming publication for the same immutable clip
+		// and skeleton pair. Crowd promotion uses this path so every animator keeps
+		// independent view ownership without repeating codec validation or allocating
+		// another residency vector at the protected frame boundary.
+		AnimationStatus CopyStreamingStateFrom(
+			const AnimationClipView& validated) noexcept;
 		void Close() noexcept;
 
 		AnimationStatus ResolveTime(

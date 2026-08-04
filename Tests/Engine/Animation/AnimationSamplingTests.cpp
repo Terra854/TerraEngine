@@ -352,6 +352,20 @@ namespace TerraEngine::Tests {
 					== skeleton.joints.front().localBindTransform.translation,
 				"A missing streamed segment must expose only the safe reference fallback.");
 
+			AnimationClipChannelSample promotedSample;
+			AnimationClipView unopenedView;
+			context.Expect(missingView.CopyStreamingStateFrom(streamedView)
+					== AnimationStatus::Ok
+				&& missingView.Matches(
+					clip, &skeleton, firstOnly, clip.runtimeGeneration, payloads)
+				&& missingView.Sample({
+					kAnimatedJoint, AnimationClipTrackKind::Translation, 3, false},
+					promotedSample) == AnimationStatus::Ok
+				&& Near(promotedSample.value.vectorValue.x, 3.0F)
+				&& unopenedView.CopyStreamingStateFrom(streamedView)
+					== AnimationStatus::InvalidArgument,
+				"A validated streaming view should promote an identical open clip in place while rejecting an unbound destination.");
+
 			AnimationClipSegmentPayloadSet corruptPayloads = *payloads;
 			auto corruptBytes =
 				std::make_shared<std::vector<std::uint8_t>>(*residentBytes);

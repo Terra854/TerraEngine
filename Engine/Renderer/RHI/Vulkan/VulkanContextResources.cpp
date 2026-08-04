@@ -2616,6 +2616,7 @@ bool VulkanContext::Impl::PublishVulkanAnimationResources(
 
 	TerraEngine::Renderer::Vulkan::VulkanAnimationDescriptorSetPlan descriptorPlan;
 	const auto& payloads = plan.ResidentPayloads();
+	bool requestsHoldLast = false;
 	{
 		TERRAENGINE_PROFILE_SCOPE("Vulkan: Validate Animation Resource Plan",
 			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
@@ -2652,6 +2653,13 @@ bool VulkanContext::Impl::PublishVulkanAnimationResources(
 				// the current recovery generation in the graphics bridge.
 				return false;
 			}
+			// Fold this dynamic fallback fact into the mandatory packet validation.
+			// Frames without hold-last work can then skip building a 4,000-entry pose
+			// history identity vector that no shader will read.
+			requestsHoldLast = requestsHoldLast
+				|| TerraEngine::Animation::HasGpuAnimationFlag(
+					packet.flags,
+					TerraEngine::Animation::GpuAnimationWorkFlag::UseHoldLastFallback);
 		}
 		for(const TerraEngine::Animation::GpuAnimationDispatchRecord& dispatch : plan.dispatchRecords) {
 			if(dispatch.workPacketIndex >= plan.workPackets.size()
@@ -2697,23 +2705,22 @@ bool VulkanContext::Impl::PublishVulkanAnimationResources(
 	std::vector<VulkanAnimationPoseHistoryIdentity>& currentPoseHistoryIdentities =
 		resources.poseHistoryScratch;
 	currentPoseHistoryIdentities.clear();
-	bool requestsHoldLast = false;
 	{
 		TERRAENGINE_PROFILE_SCOPE("Vulkan: Build Animation Pose History",
 			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		try {
-			currentPoseHistoryIdentities.reserve(plan.workPackets.size());
-			for(const TerraEngine::Animation::GpuAnimationWorkPacket& packet : plan.workPackets) {
-				const TerraEngine::Animation::GpuAnimationGenerationRecord& generation =
-					plan.generationRecords[packet.generationRecordIndex];
-				currentPoseHistoryIdentities.push_back({
-					packet.stableInstanceId,
-					packet.localPoseOffsetBytes,
-					packet.jointCount,
-					generation.skeletonGeneration,
-					generation.programGeneration});
-				requestsHoldLast = requestsHoldLast || TerraEngine::Animation::HasGpuAnimationFlag(
-					packet.flags, TerraEngine::Animation::GpuAnimationWorkFlag::UseHoldLastFallback);
+			if(requestsHoldLast) {
+				currentPoseHistoryIdentities.reserve(plan.workPackets.size());
+				for(const TerraEngine::Animation::GpuAnimationWorkPacket& packet : plan.workPackets) {
+					const TerraEngine::Animation::GpuAnimationGenerationRecord& generation =
+						plan.generationRecords[packet.generationRecordIndex];
+					currentPoseHistoryIdentities.push_back({
+						packet.stableInstanceId,
+						packet.localPoseOffsetBytes,
+						packet.jointCount,
+						generation.skeletonGeneration,
+						generation.programGeneration});
+				}
 			}
 		} catch(const std::bad_alloc&) {
 			return false;

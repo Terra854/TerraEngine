@@ -416,8 +416,11 @@ namespace TerraEngine::Tests
 			const std::size_t branchReturn = pageEmit == std::string::npos ? std::string::npos : meshShader.find("return;", pageEmit);
 			// Primitive-identity output is an additional argument, but ownership
 			// ordering still depends only on the owner-mesh call occurring later.
+			// Cooperative mesh emission passes lane and cached animation state before
+			// the output arrays. The ownership contract still depends on the page
+			// branch returning before any owner-mesh emission call can execute.
 			const std::size_t ownerEmit = meshShader.find(
-				"EmitMeshlet(meshletIndex, outputVertices, outputTriangles",
+				"EmitMeshlet(\n\t\tmeshletIndex,",
 				pageEmit);
 			context.Expect(
 				pageIndex != std::string::npos
@@ -494,7 +497,9 @@ namespace TerraEngine::Tests
 					&& ShaderContains(meshShader,
 						"kVirtualGeometryFlagOwnerPaletteDeformation")
 					&& ShaderContains(meshShader,
-						"&& (canonicalDeformationAvailable || !gpuDeformationAvailable)"),
+						"&& (gMeshShaderCanonicalDeformationAvailable != 0u")
+					&& ShaderContains(meshShader,
+						"|| gMeshShaderGpuDeformationAvailable == 0u)"),
 				"The mesh shader should consume canonical compute output for a matching page while keeping legacy owner deformation on its compatibility path.");
 			context.Expect(
 				ShaderContains(renderSystemSource,

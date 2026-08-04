@@ -42,6 +42,24 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(static_cast<std::size_t>(2), plan.migrationSummary.workerSafeCount, "Both workloads should be counted as worker-safe.");
 		});
 
+		registry.Add("Engine.FrameWorkload.CompactExecutionOmitsOptionalEvidence", [](TestContext& context) {
+			auto workload = MakeWorkload("Compact", { "Snapshot" }, { "Prepared" });
+			workload.work = [](TerraEngine::Scheduling::JobGraphContext&) {};
+			TerraEngine::Scheduling::FrameWorkloadExecutionOptions options;
+			options.collectExecutionRecords = false;
+			options.formatDiagnostics = false;
+
+			const auto plan = TerraEngine::Scheduling::ExecuteFrameWorkloads(
+				{ workload }, "compact-execution", options);
+
+			context.Expect(plan.valid && plan.completed,
+				"Compact execution must preserve workload correctness and completion.");
+			context.Expect(plan.executionRecords.empty(),
+				"Compact execution must omit optional per-partition profiler evidence.");
+			context.Expect(plan.formatted.empty() && plan.migrationSummary.formatted.empty(),
+				"Compact execution must avoid rebuilding optional diagnostic strings.");
+		});
+
 		registry.Add("Engine.FrameWorkload.WriteConflictRejectedBeforeExecution", [](TestContext& context) {
 			auto first = MakeWorkload("A", {}, { "ObjectManager" });
 			auto second = MakeWorkload("B", { "ObjectManager" }, {});

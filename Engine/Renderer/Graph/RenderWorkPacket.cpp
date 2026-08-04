@@ -1,6 +1,7 @@
 #include "RenderWorkPacket.h"
 
 #include <algorithm>
+#include <unordered_map>
 #include <utility>
 
 namespace TerraEngine::Renderer {
@@ -60,6 +61,13 @@ namespace TerraEngine::Renderer {
 	{
 		AnimationBackendWorkPlan plan;
 		plan.frameId = snapshot.frameId;
+		// A crowd normally contributes one GPU range per animator. Reserve both
+		// containers once and index stable ids directly; the former linear duplicate
+		// search became quadratic when thousands of independently animated meshes
+		// were present in one frame.
+		plan.ranges.reserve(snapshot.renderables.size());
+		std::unordered_map<std::uint64_t, std::size_t> rangeIndexByStableId;
+		rangeIndexByStableId.reserve(snapshot.renderables.size());
 		const auto reject = [&plan](std::string reason)
 		{
 			plan.valid = false;
@@ -87,21 +95,20 @@ namespace TerraEngine::Renderer {
 				continue;
 			}
 
-			const auto duplicate = std::find_if(plan.ranges.begin(), plan.ranges.end(),
-				[stableInstanceId = animation.stableInstanceId](const AnimationBackendWorkRange& range)
-				{
-					return range.stableInstanceId == stableInstanceId;
-				});
-			if (duplicate != plan.ranges.end())
+			const auto [rangeIndex, inserted] = rangeIndexByStableId.emplace(
+				animation.stableInstanceId, plan.ranges.size());
+			if (!inserted)
 			{
+				const AnimationBackendWorkRange& duplicate =
+					plan.ranges[rangeIndex->second];
 				// Multiple meshes may reference one animator. They consume one palette
 				// generation and must not submit its compute work once per mesh/view.
-				if (duplicate->animationPlanGeneration != animation.animationPlanGeneration
-					|| duplicate->paletteGeneration != animation.paletteGeneration
-					|| duplicate->rendererGeneration != animation.rendererGeneration
-					|| duplicate->firstGpuWorkPacket != animation.firstGpuWorkPacket
-					|| duplicate->gpuWorkPacketCount != animation.gpuWorkPacketCount
-					|| duplicate->gpuStageMask != animation.gpuStageMask)
+				if (duplicate.animationPlanGeneration != animation.animationPlanGeneration
+					|| duplicate.paletteGeneration != animation.paletteGeneration
+					|| duplicate.rendererGeneration != animation.rendererGeneration
+					|| duplicate.firstGpuWorkPacket != animation.firstGpuWorkPacket
+					|| duplicate.gpuWorkPacketCount != animation.gpuWorkPacketCount
+					|| duplicate.gpuStageMask != animation.gpuStageMask)
 				{
 					reject("One animator was referenced with conflicting GPU work generations.");
 					return plan;

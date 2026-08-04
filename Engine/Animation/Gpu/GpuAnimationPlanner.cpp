@@ -520,7 +520,13 @@ namespace TerraEngine::Animation {
 		GpuAnimationWorkRequest staged{};
 		staged.batchKey.programContentId = input.program.programContentId;
 		staged.batchKey.skeletonTopologyId = input.visual.skeletonTopologyId;
-		staged.batchKey.stageMask = DeriveStageMask(program, input.visual);
+		// AnimationSystem may carry forward the exact result from its mandatory
+		// preflight. Only a validated immutable program may authorize this shortcut;
+		// ordinary callers retain the fully checked derivation path.
+		staged.batchKey.stageMask = input.programValidated
+			&& input.prevalidatedStageMask != 0U
+			? input.prevalidatedStageMask
+			: DeriveStageMask(program, input.visual);
 		staged.batchKey.outputFlags = static_cast<std::uint32_t>(GpuAnimationOutputFlag::Pose)
 			| static_cast<std::uint32_t>(GpuAnimationOutputFlag::Bounds)
 			| static_cast<std::uint32_t>(GpuAnimationOutputFlag::Palette);

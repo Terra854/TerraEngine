@@ -7,7 +7,9 @@
 #include "SystemScheduler.h"
 
 #include "Core/SystemBase.h"
+#include "EcsQueryTaskGraph.h"
 #include "JobGraph.h"
+#include "Profiling/Profiler.h"
 #include "Profiling/ProfilerScope.h"
 #include "Scene/SceneMutationQueue.h"
 
@@ -1059,17 +1061,46 @@ namespace TerraEngine::Scheduling {
 			return latestSummary;
 		}
 
-		FrameExecutionPlan plan = ExecuteFrameWorkloads(deltaTime, flushCallback);
-		latestFrameExecutionPlan = plan;
-		latestSummary.workerCoverageReport = ::TerraEngine::Scheduling::BuildWorkerCoverageReport(plan);
+		FrameExecutionPlan plan = ExecuteFrameWorkloads(
+			deltaTime, flushCallback, true);
+		// The scheduler is the sole owner of the completed plan. Move its callbacks,
+		// result vectors, and optional execution evidence into the retained snapshot
+		// instead of deep-copying the complete frame graph every frame.
+		latestFrameExecutionPlan = std::move(plan);
+		const bool schedulerDiagnosticsRequested =
+			TerraEngine::Scheduling::EcsGraphFrameDiagnosticsEnabled();
+		if (schedulerDiagnosticsRequested)
+		{
+			latestSummary.workerCoverageReport =
+				::TerraEngine::Scheduling::BuildWorkerCoverageReport(
+					latestFrameExecutionPlan);
+		}
+		else
+		{
+			// Compact frames retain the numeric health envelope used by automation,
+			// but defer category/string construction until the diagnostics window opens.
+			WorkerCoverageReport compactCoverage{};
+			compactCoverage.frameId = latestFrameExecutionPlan.frameId;
+			compactCoverage.barrierCount =
+				latestFrameExecutionPlan.migrationSummary.barrierCount;
+			compactCoverage.protectedTimeNs =
+				latestFrameExecutionPlan.migrationSummary.protectedBaselineTimeNs
+				+ latestFrameExecutionPlan.migrationSummary.protectedCommitTimeNs;
+			compactCoverage.workerTimeNs =
+				latestFrameExecutionPlan.migrationSummary.workerPreparationTimeNs;
+			latestSummary.workerCoverageReport = std::move(compactCoverage);
+		}
 		latestSummary.transactionDiagnostics = TerraEngine::Scene::SceneMutationQueue::Instance().GetTransactionDiagnostics();
-		if (!plan.valid || !plan.completed)
+		if (!latestFrameExecutionPlan.valid || !latestFrameExecutionPlan.completed)
 		{
 			AddDiagnostic(latestSummary.diagnostics, DiagnosticSeverity::Error, DiagnosticCategory::Scheduler, "SystemScheduler", "", "", "Parallel frame workload execution did not complete.", "Inspect the frame execution plan and architecture diagnostics for failed worker/protected jobs.");
 			SortDiagnostics(latestSummary.diagnostics);
 			latestSummary.valid = std::none_of(latestSummary.diagnostics.begin(), latestSummary.diagnostics.end(), IsError);
 		}
-		latestSummary.formatted = FormatScheduleSummary(latestSummary);
+		if(schedulerDiagnosticsRequested || !latestSummary.valid)
+		{
+			latestSummary.formatted = FormatScheduleSummary(latestSummary);
+		}
 		return latestSummary;
 	}
 
@@ -1416,7 +1447,10 @@ namespace TerraEngine::Scheduling {
 		return workloads;
 	}
 
-	FrameExecutionPlan SystemScheduler::ExecuteFrameWorkloads(float deltaTime, const MutationFlushCallback& flushCallback)
+	FrameExecutionPlan SystemScheduler::ExecuteFrameWorkloads(
+		float deltaTime,
+		const MutationFlushCallback& flushCallback,
+		bool compactRuntimeDiagnostics)
 	{
 		// This scope is the scheduler call itself. Previous labels described the
 		// entire call as a coordinator wait and protected-inline region, which made
@@ -1467,7 +1501,14 @@ namespace TerraEngine::Scheduling {
 			// jobs. Give their shared parent a neutral label so the hierarchy does not
 			// claim all of that time belongs to either execution policy.
 			TERRAENGINE_PROFILE_SCOPE("SystemScheduler: Execute Validated Workloads", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-			return TerraEngine::Scheduling::ExecuteFrameWorkloads(std::move(workloads), "system-scheduler-frame");
+			FrameWorkloadExecutionOptions options;
+			options.formatDiagnostics = !compactRuntimeDiagnostics
+				|| EcsGraphFrameDiagnosticsEnabled();
+			options.collectExecutionRecords = options.formatDiagnostics
+				|| TerraEngine::Profiling::Profiler::Instance()
+					.IsFrameRecordingActive();
+			return TerraEngine::Scheduling::ExecuteFrameWorkloads(
+				std::move(workloads), "system-scheduler-frame", options);
 		}
 	}
 
