@@ -122,6 +122,26 @@ namespace TerraEngine::Renderer::Vulkan {
 		return output;
 	}
 
+	bool CanReuseVulkanAnimationResidentPayloadUpload(
+		const std::shared_ptr<const Animation::GpuAnimationResidentPayloads>& previousOwner,
+		const std::shared_ptr<const Animation::GpuAnimationResidentPayloads>& currentOwner,
+		bool residentBuffersRetained) noexcept
+	{
+		// Pointer identity is an immutable-content identity here: animation asset
+		// publication and atlas caches create a new shared object whenever any cooked
+		// byte changes. Retaining the prior owner also prevents allocator address reuse.
+		return residentBuffersRetained
+			&& currentOwner
+			&& previousOwner == currentOwner;
+	}
+
+	bool ShouldRefreshVulkanAnimationBindlessBuffer(
+		bool hasPublishedIndex,
+		bool bufferReallocated) noexcept
+	{
+		return !hasPublishedIndex || bufferReallocated;
+	}
+
 	VulkanDeformationDescriptorSetPlan BuildVulkanDeformationDescriptorSetPlan(
 		const GpuDeformationPlan& plan,
 		std::uint64_t workingSetLimitBytes)

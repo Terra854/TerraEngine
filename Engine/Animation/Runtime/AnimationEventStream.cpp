@@ -85,10 +85,9 @@ namespace TerraEngine::Animation {
 		}
 
 		try {
-			std::vector<OrderedEvent> forward;
-			std::vector<OrderedEvent> reverse;
-			forward.reserve(events.size());
-			reverse.reserve(events.size());
+			auto authored = std::make_shared<ImmutableAuthoredEvents>();
+			authored->forward.reserve(events.size());
+			authored->reverse.reserve(events.size());
 			for(std::size_t index = 0U; index < events.size(); ++index) {
 				const AnimationClipEvent& event = events[index];
 				if(event.stableEventId == 0U || event.tick < 0 || event.tick > durationTicks
@@ -96,8 +95,8 @@ namespace TerraEngine::Animation {
 					return AnimationStatus::InvalidArgument;
 				}
 				const OrderedEvent ordered{event, static_cast<std::uint64_t>(index)};
-				if(event.fireForward) forward.push_back(ordered);
-				if(event.fireReverse) reverse.push_back(ordered);
+				if(event.fireForward) authored->forward.push_back(ordered);
+				if(event.fireReverse) authored->reverse.push_back(ordered);
 			}
 			auto eventLess = [](const OrderedEvent& left, const OrderedEvent& right) noexcept {
 				if(left.authored.tick != right.authored.tick) return left.authored.tick < right.authored.tick;
@@ -106,16 +105,15 @@ namespace TerraEngine::Animation {
 				}
 				return left.authoredOrder < right.authoredOrder;
 			};
-			std::sort(forward.begin(), forward.end(), eventLess);
-			std::sort(reverse.begin(), reverse.end(), eventLess);
+			std::sort(authored->forward.begin(), authored->forward.end(), eventLess);
+			std::sort(authored->reverse.begin(), authored->reverse.end(), eventLess);
 
 			// Publication is atomic: only a fully validated, sorted configuration
 			// replaces the previous stream and its delivery watermark.
 			clip_ = clip;
 			durationTicks_ = durationTicks;
 			config_ = config;
-			forwardEvents_ = std::move(forward);
-			reverseEvents_ = std::move(reverse);
+			authoredEvents_ = std::move(authored);
 			ResetDeliveryHistory();
 			diagnostics_ = {};
 			configured_ = true;
@@ -168,7 +166,12 @@ namespace TerraEngine::Animation {
 		}
 
 		const bool forward = request.currentAbsoluteTick > request.previousAbsoluteTick;
-		const std::vector<OrderedEvent>& authoredEvents = forward ? forwardEvents_ : reverseEvents_;
+		if(!authoredEvents_) {
+			output.status = AnimationStatus::NotReady;
+			return output.status;
+		}
+		const std::vector<OrderedEvent>& authoredEvents = forward
+			? authoredEvents_->forward : authoredEvents_->reverse;
 		if(authoredEvents.empty()) return AnimationStatus::Ok;
 		try {
 			output.events.reserve(config_.maxEventsPerUpdate);

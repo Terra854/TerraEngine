@@ -11,6 +11,16 @@
 
 namespace TerraEngine::Animation {
 	namespace {
+		struct GpuAnimationPlanThreadScratch {
+			// Plan construction runs once per worker task and never recursively. Keeping
+			// these index arrays on the worker thread removes two allocator round trips
+			// per frame while preserving transactional output ownership.
+			std::vector<std::size_t> compatibilityOrder;
+			std::vector<std::size_t> stableIdentityOrder;
+		};
+
+		thread_local GpuAnimationPlanThreadScratch g_planThreadScratch;
+
 		struct ScratchLayout {
 			std::uint64_t totalSizeBytes = 0U;
 			std::uint64_t localPoseOffsetBytes = 0U;
@@ -645,7 +655,9 @@ namespace TerraEngine::Animation {
 				return reject(status, GpuAnimationDiagnosticFlag::ScratchOverflow);
 			}
 
-			std::vector<std::size_t> sortedRequestIndices(requests.size());
+			std::vector<std::size_t>& sortedRequestIndices =
+				g_planThreadScratch.compatibilityOrder;
+			sortedRequestIndices.resize(requests.size());
 			std::iota(sortedRequestIndices.begin(), sortedRequestIndices.end(), 0U);
 			for(std::size_t requestIndex = 0U; requestIndex < requests.size(); ++requestIndex) {
 				const GpuAnimationWorkRequest& request = requests[requestIndex];
@@ -665,20 +677,23 @@ namespace TerraEngine::Animation {
 						static_cast<std::uint32_t>(requestIndex), &request);
 				}
 			}
-			std::sort(
-				sortedRequestIndices.begin(),
-				sortedRequestIndices.end(),
+			const auto compatibilityLess =
 				[requests](std::size_t left, std::size_t right) noexcept {
 					return RequestLess(requests[left], requests[right]);
-				});
+				};
+			if(!std::is_sorted(
+					sortedRequestIndices.begin(), sortedRequestIndices.end(), compatibilityLess)) {
+				std::sort(
+					sortedRequestIndices.begin(), sortedRequestIndices.end(), compatibilityLess);
+			}
 
 			// Batch sorting groups compatibility first, so two equal stable pairs can
 			// be far apart. Sort a separate identity view to reject duplicates without
 			// accidentally depending on adjacency in the dispatch ordering.
-			std::vector<std::size_t> stableOrderIndices = sortedRequestIndices;
-			std::sort(
-				stableOrderIndices.begin(),
-				stableOrderIndices.end(),
+			std::vector<std::size_t>& stableOrderIndices =
+				g_planThreadScratch.stableIdentityOrder;
+			stableOrderIndices.assign(sortedRequestIndices.begin(), sortedRequestIndices.end());
+			const auto stableIdentityLess =
 				[requests](std::size_t left, std::size_t right) noexcept {
 					return std::tie(
 						requests[left].stableInstanceId,
@@ -686,7 +701,12 @@ namespace TerraEngine::Animation {
 						< std::tie(
 							requests[right].stableInstanceId,
 							requests[right].stableSubmissionOrdinal);
-				});
+				};
+			if(!std::is_sorted(
+					stableOrderIndices.begin(), stableOrderIndices.end(), stableIdentityLess)) {
+				std::sort(
+					stableOrderIndices.begin(), stableOrderIndices.end(), stableIdentityLess);
+			}
 			for(std::size_t stableIndex = 1U; stableIndex < stableOrderIndices.size(); ++stableIndex) {
 				const std::size_t previousIndex = stableOrderIndices[stableIndex - 1U];
 				const std::size_t currentIndex = stableOrderIndices[stableIndex];

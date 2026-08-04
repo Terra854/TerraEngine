@@ -112,7 +112,12 @@ namespace TerraEngine::Animation {
 		std::span<const std::uint8_t> residentSegments,
 		AnimationGeneration streamedGeneration,
 		std::shared_ptr<const AnimationClipSegmentPayloadSet> streamedPayloads) noexcept {
-		Close();
+		if(Matches(asset, referenceSkeleton, residentSegments, streamedGeneration, streamedPayloads)) {
+			return AnimationStatus::Ok;
+		}
+		const bool validatedAssetPairUnchanged = asset_ == &asset
+			&& referenceSkeleton_ == referenceSkeleton;
+		if(!validatedAssetPairUnchanged) Close();
 		if((streamedPayloads && residentSegments.size() != asset.segments.size())
 			|| (!streamedPayloads && !residentSegments.empty()
 				&& residentSegments.size() != asset.segments.size())) {
@@ -133,7 +138,7 @@ namespace TerraEngine::Animation {
 				}
 			}
 		}
-		if(referenceSkeleton != nullptr) {
+		if(referenceSkeleton != nullptr && !validatedAssetPairUnchanged) {
 			try {
 				if(const AnimationStatus status = ValidateReferenceSkeleton(asset, *referenceSkeleton);
 					status != AnimationStatus::Ok) {
@@ -143,6 +148,10 @@ namespace TerraEngine::Animation {
 				return AnimationStatus::InternalError;
 			}
 		}
+		// Segment streaming never changes the immutable clip or reference skeleton.
+		// Retain their completed validation and rebuild only the codec/residency view;
+		// crowd instances can then promote together without allocating one joint set
+		// per animator on the protected thread.
 
 		AnimationCodecView stagedCodec;
 		const AnimationStatus codecStatus = streamedPayloads
@@ -167,6 +176,7 @@ namespace TerraEngine::Animation {
 		referenceSkeleton_ = referenceSkeleton;
 		codec_ = stagedCodec;
 		residentSegments_ = std::move(stagedResidency);
+		streamedGeneration_ = streamedGeneration;
 		streamedPayloads_ = std::move(streamedPayloads);
 		return AnimationStatus::Ok;
 	}
@@ -176,7 +186,29 @@ namespace TerraEngine::Animation {
 		referenceSkeleton_ = nullptr;
 		codec_ = {};
 		residentSegments_.clear();
+		streamedGeneration_ = 0U;
 		streamedPayloads_.reset();
+	}
+
+	bool AnimationClipView::Matches(
+		const AnimationClipAsset& asset,
+		const SkeletonAsset* referenceSkeleton,
+		std::span<const std::uint8_t> residentSegments,
+		AnimationGeneration streamedGeneration,
+		const std::shared_ptr<const AnimationClipSegmentPayloadSet>& streamedPayloads) const noexcept {
+		if(asset_ != &asset || referenceSkeleton_ != referenceSkeleton
+			|| streamedGeneration_ != streamedGeneration
+			|| streamedPayloads_ != streamedPayloads) {
+			return false;
+		}
+		if(residentSegments.empty()) {
+			return !streamedPayloads && residentSegments_.size() == asset.segments.size()
+				&& std::all_of(residentSegments_.begin(), residentSegments_.end(),
+					[](std::uint8_t value) { return value == 1U; });
+		}
+		return residentSegments_.size() == residentSegments.size()
+			&& std::equal(
+				residentSegments_.begin(), residentSegments_.end(), residentSegments.begin());
 	}
 
 	AnimationStatus AnimationClipView::ResolveTime(

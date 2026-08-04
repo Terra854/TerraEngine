@@ -7,6 +7,7 @@
 #include <cstring>
 #include <limits>
 #include <new>
+#include <unordered_map>
 
 namespace TerraEngine::Animation {
 	namespace {
@@ -497,7 +498,9 @@ namespace TerraEngine::Animation {
 			return GpuAnimationLoweringStatus::InvalidArgument;
 		}
 		const EvaluationProgram& program = *input.program.program;
-		if(!IsProgramUsable(program)) return GpuAnimationLoweringStatus::InvalidArgument;
+		if(!input.programValidated && !IsProgramUsable(program)) {
+			return GpuAnimationLoweringStatus::InvalidArgument;
+		}
 		// The compiled stable hash is the immutable program-byte identity used by
 		// batching. Accepting a caller-selected value could group a recompiled
 		// program with stale descriptor contents under the same compatibility key.
@@ -558,6 +561,10 @@ namespace TerraEngine::Animation {
 			staged.flags |= static_cast<std::uint32_t>(GpuAnimationWorkFlag::AllowVisualProcedural);
 		}
 		if(input.visual.allowVisualRagdoll) staged.flags |= static_cast<std::uint32_t>(GpuAnimationWorkFlag::AllowRagdollVisual);
+		if(input.visual.suspendVisualEvaluation) {
+			staged.flags |= static_cast<std::uint32_t>(
+				GpuAnimationWorkFlag::SuspendVisualEvaluation);
+		}
 		output = staged;
 		return GpuAnimationLoweringStatus::Ok;
 	}
@@ -589,12 +596,109 @@ namespace TerraEngine::Animation {
 				std::uint32_t morphBase = 0U;
 			};
 			std::vector<AtlasPayloadMapping> payloadMappings;
+			payloadMappings.reserve(entries.size());
+			struct AtlasPayloadIdentity {
+				const GpuAnimationResidentPayloads* payload = nullptr;
+				std::uint32_t programResourceIndex = 0U;
+				std::uint32_t skeletonResourceIndex = 0U;
+				std::uint32_t morphResourceIndex = 0U;
+				std::uint32_t jointCount = 0U;
+				std::uint32_t morphCount = 0U;
+				std::uint32_t paletteEntryCount = 0U;
+
+				bool operator==(const AtlasPayloadIdentity&) const noexcept = default;
+			};
+			struct AtlasPayloadIdentityHash {
+				std::size_t operator()(const AtlasPayloadIdentity& value) const noexcept {
+					std::size_t hash = std::hash<const void*>{}(value.payload);
+					const std::array<std::uint32_t, 6U> lanes{
+						value.programResourceIndex, value.skeletonResourceIndex,
+						value.morphResourceIndex, value.jointCount,
+						value.morphCount, value.paletteEntryCount};
+					for(const std::uint32_t lane : lanes) {
+						hash ^= std::hash<std::uint32_t>{}(lane) + 0x9e3779b9U
+							+ (hash << 6U) + (hash >> 2U);
+					}
+					return hash;
+				}
+			};
+			std::unordered_map<AtlasPayloadIdentity, std::size_t,
+				AtlasPayloadIdentityHash> payloadIdentityMappings;
+			payloadIdentityMappings.reserve(entries.size());
+			// Pointer identity handles the common crowd case. A content bucket retains
+			// exact deduplication for independently loaded immutable copies without a
+			// full scan through every distinct asset already appended to the atlas.
+			std::unordered_multimap<std::size_t, std::size_t> payloadContentMappings;
+			payloadContentMappings.reserve(entries.size());
+			struct CachedPayloadContentHash {
+				std::weak_ptr<const GpuAnimationResidentPayloads> owner;
+				std::size_t hash = 0U;
+			};
+			// Cooked payload objects are immutable and normally survive for the whole
+			// scene. Cache their byte hash on the presentation thread; weak ownership
+			// prevents this diagnostic/dedup aid from extending asset lifetime.
+			thread_local std::unordered_map<const GpuAnimationResidentPayloads*,
+				CachedPayloadContentHash> payloadHashCache;
+			const auto buildContentHash = [&](const AtlasPayloadIdentity& identity,
+				const std::shared_ptr<const GpuAnimationResidentPayloads>& payloadOwner) {
+				const GpuAnimationResidentPayloads& payload = *payloadOwner;
+				std::size_t payloadHash = 0U;
+				const auto cached = payloadHashCache.find(payloadOwner.get());
+				if(cached != payloadHashCache.end()) {
+					const std::shared_ptr<const GpuAnimationResidentPayloads> retained =
+						cached->second.owner.lock();
+					if(retained == payloadOwner) payloadHash = cached->second.hash;
+				}
+				if(payloadHash == 0U) {
+					if(payloadHashCache.size() >= 4096U) {
+						std::erase_if(payloadHashCache, [](const auto& entry) {
+							return entry.second.owner.expired();
+						});
+						if(payloadHashCache.size() >= 4096U) payloadHashCache.clear();
+					}
+					payloadHash = 1469598103934665603ULL;
+					const auto mixPayloadBytes = [&payloadHash](
+						const void* data, std::size_t byteCount) {
+						const auto* bytes = static_cast<const std::uint8_t*>(data);
+						for(std::size_t index = 0U; index < byteCount; ++index) {
+							payloadHash ^= bytes[index];
+							payloadHash *= 1099511628211ULL;
+						}
+					};
+					mixPayloadBytes(payload.programWords.data(),
+						payload.programWords.size() * sizeof(std::uint32_t));
+					mixPayloadBytes(payload.packedClipBytes.data(),
+						payload.packedClipBytes.size());
+					mixPayloadBytes(payload.skeletonTables.data(),
+						payload.skeletonTables.size());
+					mixPayloadBytes(payload.morphInputs.data(), payload.morphInputs.size());
+					// FNV can theoretically produce zero; reserve it as the cache-miss
+					// sentinel without weakening exact byte comparison after bucket lookup.
+					if(payloadHash == 0U) payloadHash = 1U;
+					payloadHashCache[payloadOwner.get()] = {payloadOwner, payloadHash};
+				}
+				std::size_t hash = payloadHash;
+				const auto mixBytes = [&hash](const void* data, std::size_t byteCount) {
+					const auto* bytes = static_cast<const std::uint8_t*>(data);
+					for(std::size_t index = 0U; index < byteCount; ++index) {
+						hash ^= bytes[index];
+						hash *= 1099511628211ULL;
+					}
+				};
+				const std::array<std::uint32_t, 6U> shape{
+					identity.programResourceIndex, identity.skeletonResourceIndex,
+					identity.morphResourceIndex, identity.jointCount,
+					identity.morphCount, identity.paletteEntryCount};
+				mixBytes(shape.data(), sizeof(shape));
+				return hash;
+			};
 
 			for(const GpuAnimationFrameAtlasEntry& entry : entries) {
 				if(!entry.residentPayloads
 					|| !entry.request.renderIdentity.IsComplete()
-					|| !ValidateGpuAnimationResidentPayloads(
-						entry.request, *entry.residentPayloads)
+					|| (!entry.residentPayloadsValidated
+						&& !ValidateGpuAnimationResidentPayloads(
+							entry.request, *entry.residentPayloads))
 					|| !IsRelocatableSingleClipRequest(
 						entry.request, *entry.residentPayloads)) {
 					return GpuAnimationLoweringStatus::InvalidArgument;
@@ -655,34 +759,52 @@ namespace TerraEngine::Animation {
 				std::uint32_t programBase = 0U;
 				std::uint32_t skeletonBase = 0U;
 				std::uint32_t morphBase = 0U;
-				const auto existingMapping = std::find_if(
-					payloadMappings.begin(),
-					payloadMappings.end(),
-					[&](const AtlasPayloadMapping& candidate) {
-						// Hash-only deduplication could alias corrupt or colliding
-						// content. Exact byte equality and selected resource shape
-						// are required before two animators share atlas ranges.
-						return candidate.sourceProgramResourceIndex
+				const AtlasPayloadIdentity payloadIdentity{
+					entry.residentPayloads.get(), entry.request.programResourceIndex,
+					entry.request.skeletonResourceIndex,
+					entry.request.morphResourceIndex, entry.request.jointCount,
+					entry.request.morphCount, entry.request.paletteEntryCount};
+				auto identityMapping = payloadIdentityMappings.find(payloadIdentity);
+				const std::size_t payloadContentHash = identityMapping
+					== payloadIdentityMappings.end()
+					? buildContentHash(payloadIdentity, entry.residentPayloads) : 0U;
+				auto existingMapping = payloadMappings.end();
+				if(identityMapping != payloadIdentityMappings.end()) {
+					existingMapping = payloadMappings.begin()
+						+ static_cast<std::ptrdiff_t>(identityMapping->second);
+				} else {
+					const auto candidates = payloadContentMappings.equal_range(payloadContentHash);
+					for(auto candidate = candidates.first;
+						candidate != candidates.second; ++candidate) {
+						AtlasPayloadMapping& mapping = payloadMappings[candidate->second];
+						// Content hashes only select a small bucket. Exact bytes and the
+						// selected resource shape remain the proof used for aliasing.
+						if(mapping.sourceProgramResourceIndex
 								== entry.request.programResourceIndex
-							&& candidate.sourceSkeletonResourceIndex
+							&& mapping.sourceSkeletonResourceIndex
 								== entry.request.skeletonResourceIndex
-							&& candidate.sourceMorphResourceIndex
+							&& mapping.sourceMorphResourceIndex
 								== entry.request.morphResourceIndex
-							&& candidate.jointCount == entry.request.jointCount
-							&& candidate.morphCount
-								== entry.request.morphCount
-							&& candidate.paletteEntryCount
-								== entry.request.paletteEntryCount
-							&& candidate.payload->programWords
-								== source.programWords
-							&& candidate.payload->packedClipBytes
-								== source.packedClipBytes
-							&& candidate.payload->skeletonTables
-								== source.skeletonTables
-							&& candidate.payload->morphInputs
-								== source.morphInputs;
-					});
+							&& mapping.jointCount == entry.request.jointCount
+							&& mapping.morphCount == entry.request.morphCount
+							&& mapping.paletteEntryCount == entry.request.paletteEntryCount
+							&& mapping.payload->programWords == source.programWords
+							&& mapping.payload->packedClipBytes == source.packedClipBytes
+							&& mapping.payload->skeletonTables == source.skeletonTables
+							&& mapping.payload->morphInputs == source.morphInputs) {
+							existingMapping = payloadMappings.begin()
+								+ static_cast<std::ptrdiff_t>(candidate->second);
+							break;
+						}
+					}
+				}
 				if(existingMapping != payloadMappings.end()) {
+					// A distinct immutable owner may contain identical bytes. Remember the
+					// proven mapping so every later crowd member is an O(1) pointer lookup.
+					payloadIdentityMappings.try_emplace(
+						payloadIdentity,
+						static_cast<std::size_t>(
+							std::distance(payloadMappings.begin(), existingMapping)));
 					clipBase = existingMapping->clipBase;
 					programBase = existingMapping->programBase;
 					skeletonBase = existingMapping->skeletonBase;
@@ -868,6 +990,10 @@ namespace TerraEngine::Animation {
 					programBase,
 					skeletonBase,
 					morphBase});
+				payloadIdentityMappings.emplace(
+					payloadIdentity, payloadMappings.size() - 1U);
+				payloadContentMappings.emplace(
+					payloadContentHash, payloadMappings.size() - 1U);
 				}
 
 				GpuAnimationWorkRequest relocated = entry.request;
@@ -929,7 +1055,8 @@ namespace TerraEngine::Animation {
 		GpuAnimationArena& paletteArena,
 		GpuAnimationPlan& output,
 		GpuAnimationLoweredPlanResult& result,
-		const GpuAnimationPlanLimits& limits) noexcept
+		const GpuAnimationPlanLimits& limits,
+		GpuAnimationFrameAtlasCache* atlasCache) noexcept
 	{
 		result = {};
 		try {
@@ -944,15 +1071,17 @@ namespace TerraEngine::Animation {
 					return status;
 				}
 				if(!input.residentPayloads
-					|| !ValidateGpuAnimationResidentPayloads(
-						request, *input.residentPayloads)) {
+					|| (!input.residentPayloadsValidated
+						&& !ValidateGpuAnimationResidentPayloads(
+							request, *input.residentPayloads))) {
 					// Incomplete GPU residency is an expected capability failure. The CPU
 					// evaluator remains authoritative and no malformed GPU packet is emitted.
 					continue;
 				}
 				atlasEntries.push_back({
 					std::move(request),
-					input.residentPayloads});
+					input.residentPayloads,
+					input.residentPayloadsValidated});
 			}
 			std::vector<GpuAnimationWorkRequest> stagedRequests;
 			GpuAnimationResidentPayloads payloadCopy{};
@@ -976,15 +1105,83 @@ namespace TerraEngine::Animation {
 					// the same clip/program/skeleton vectors once per rendered frame.
 					sharedPayload = firstPayload;
 				} else {
-					GpuAnimationFrameAtlas atlas;
-					const GpuAnimationLoweringStatus atlasStatus =
-						BuildGpuAnimationFrameAtlas(atlasEntries, atlas);
-					if(atlasStatus != GpuAnimationLoweringStatus::Ok) {
-						result.status = atlasStatus;
-						return atlasStatus;
+					bool cacheMatches = atlasCache != nullptr
+						&& atlasCache->residentPayloads
+						&& atlasCache->entries.size() == atlasEntries.size();
+					if(cacheMatches) {
+						for(std::size_t index = 0U; index < atlasEntries.size(); ++index) {
+							const GpuAnimationFrameAtlasEntry& current = atlasEntries[index];
+							const GpuAnimationFrameAtlasCacheEntry& cached =
+								atlasCache->entries[index];
+							// Payload objects are immutable. Exact shared ownership plus the selected
+							// descriptor shape proves every cached relocation remains valid, while
+							// sample ticks and generation records stay frame-local below.
+							cacheMatches = cached.sourcePayload.lock() == current.residentPayloads
+								&& IsRelocatableSingleClipRequest(
+									current.request, *current.residentPayloads)
+								&& cached.sourceProgramResourceIndex
+									== current.request.programResourceIndex
+								&& cached.sourceSkeletonResourceIndex
+									== current.request.skeletonResourceIndex
+								&& cached.sourceMorphResourceIndex
+									== current.request.morphResourceIndex
+								&& cached.jointCount == current.request.jointCount
+								&& cached.morphCount == current.request.morphCount
+								&& cached.paletteEntryCount == current.request.paletteEntryCount;
+							if(!cacheMatches) break;
+						}
 					}
-					stagedRequests = std::move(atlas.requests);
-					payloadCopy = std::move(atlas.residentPayloads);
+					if(cacheMatches) {
+						stagedRequests.reserve(atlasEntries.size());
+						for(std::size_t index = 0U; index < atlasEntries.size(); ++index) {
+							GpuAnimationWorkRequest relocated = std::move(atlasEntries[index].request);
+							const GpuAnimationFrameAtlasCacheEntry& cached =
+								atlasCache->entries[index];
+							relocated.clipResourceIndex = cached.relocatedClipResourceIndex;
+							relocated.programResourceIndex = cached.relocatedProgramResourceIndex;
+							relocated.skeletonResourceIndex = cached.relocatedSkeletonResourceIndex;
+							relocated.morphResourceIndex = cached.relocatedMorphResourceIndex;
+							stagedRequests.push_back(std::move(relocated));
+						}
+						sharedPayload = atlasCache->residentPayloads;
+					} else {
+						GpuAnimationFrameAtlas atlas;
+						const GpuAnimationLoweringStatus atlasStatus =
+							BuildGpuAnimationFrameAtlas(atlasEntries, atlas);
+						if(atlasStatus != GpuAnimationLoweringStatus::Ok) {
+							result.status = atlasStatus;
+							return atlasStatus;
+						}
+						stagedRequests = std::move(atlas.requests);
+						if(atlasCache != nullptr) {
+							auto immutablePayload =
+								std::make_shared<const GpuAnimationResidentPayloads>(
+									std::move(atlas.residentPayloads));
+							std::vector<GpuAnimationFrameAtlasCacheEntry> refreshedEntries;
+							refreshedEntries.reserve(atlasEntries.size());
+							for(std::size_t index = 0U; index < atlasEntries.size(); ++index) {
+								const GpuAnimationFrameAtlasEntry& sourceEntry = atlasEntries[index];
+								const GpuAnimationWorkRequest& relocated = stagedRequests[index];
+								refreshedEntries.push_back({
+									sourceEntry.residentPayloads,
+									sourceEntry.request.programResourceIndex,
+									sourceEntry.request.skeletonResourceIndex,
+									sourceEntry.request.morphResourceIndex,
+									sourceEntry.request.jointCount,
+									sourceEntry.request.morphCount,
+									sourceEntry.request.paletteEntryCount,
+									relocated.clipResourceIndex,
+									relocated.programResourceIndex,
+									relocated.skeletonResourceIndex,
+									relocated.morphResourceIndex});
+							}
+							atlasCache->entries = std::move(refreshedEntries);
+							atlasCache->residentPayloads = immutablePayload;
+							sharedPayload = std::move(immutablePayload);
+						} else {
+							payloadCopy = std::move(atlas.residentPayloads);
+						}
+					}
 				}
 			}
 			GpuAnimationPlanBuildDiagnostics diagnostics{};

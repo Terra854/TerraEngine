@@ -123,27 +123,62 @@ namespace TerraEngine::Animation {
 		std::span<const std::int32_t> jointParents,
 		AnimationFixedTick fixedTick) const
 	{
+		return CaptureReadView().Resolve(animator, jointParents, fixedTick);
+	}
+
+	AnimationConsumerRegistry::ReadView
+	AnimationConsumerRegistry::CaptureReadView() const noexcept
+	{
+		ReadView view;
+		view.snapshot_ = std::atomic_load_explicit(
+			&published_, std::memory_order_acquire);
+		return view;
+	}
+
+	bool AnimationConsumerRegistry::ReadView::HasDeclarations() const noexcept
+	{
+		return snapshot_ != nullptr && !snapshot_->values.empty();
+	}
+
+	AnimationResolvedConsumerRequirements
+	AnimationConsumerRegistry::ReadView::Resolve(
+		AnimatorInstanceHandle animator,
+		std::span<const std::int32_t> jointParents,
+		AnimationFixedTick fixedTick) const
+	{
 		AnimationResolvedConsumerRequirements resolved;
 		if(!animator.IsValid() || fixedTick < 0) {
 			resolved.status = AnimationStatus::InvalidArgument;
 			return resolved;
 		}
-		const std::shared_ptr<const PublishedDeclarations> snapshot =
-			std::atomic_load_explicit(&published_, std::memory_order_acquire);
-		if(!snapshot) return resolved;
-		if(snapshot->declarationTick > fixedTick) {
+		if(!snapshot_) return resolved;
+		if(snapshot_->declarationTick > fixedTick) {
 			resolved.status = AnimationStatus::InvalidArgument;
 			return resolved;
 		}
-		resolved.declarationGeneration = snapshot->generation;
-		resolved.declarationTick = snapshot->declarationTick;
+		resolved.declarationGeneration = snapshot_->generation;
+		resolved.declarationTick = snapshot_->declarationTick;
 		resolved.maximumSnapshotAgeTicks = std::numeric_limits<AnimationFixedTick>::max();
 		try {
 			std::vector<std::uint32_t> requestedJoints;
 			AnimationConsumerRequirements requirements;
 			requirements.jointParents = jointParents;
-			for(const AnimationConsumerDeclaration& declaration : snapshot->values) {
-				if(declaration.animator != animator) continue;
+			// Publications are sorted by generation-safe animator handle. Skip directly
+			// to this animator's contiguous declaration range instead of walking every
+			// unrelated gameplay/tooling consumer for every visual crowd member.
+			const auto first = std::lower_bound(
+				snapshot_->values.begin(), snapshot_->values.end(), animator,
+				[](const AnimationConsumerDeclaration& declaration,
+					AnimatorInstanceHandle target) {
+					return declaration.animator.slotIndex != target.slotIndex
+						? declaration.animator.slotIndex < target.slotIndex
+						: declaration.animator.generation < target.generation;
+				});
+			for(auto iterator = first;
+				iterator != snapshot_->values.end()
+					&& iterator->animator == animator;
+				++iterator) {
+				const AnimationConsumerDeclaration& declaration = *iterator;
 				const std::size_t before = requestedJoints.size();
 				requestedJoints.insert(requestedJoints.end(), declaration.joints.begin(), declaration.joints.end());
 				resolved.curves.insert(resolved.curves.end(), declaration.curves.begin(), declaration.curves.end());

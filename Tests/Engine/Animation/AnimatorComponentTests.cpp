@@ -93,7 +93,7 @@ namespace TerraEngine::Tests {
 						{"ragdollProfileOverrideAssetId", TerraEngine::ToHexString(MakeUuid(5U))},
 						{"motionDatabaseOverrideAssetId", TerraEngine::ToHexString(MakeUuid(6U))},
 						{"requestedMode", static_cast<std::uint32_t>(Animation::AnimationExecutionPolicy::ForceHybridAuthoritative)},
-						{"rootMotionPolicy", static_cast<std::uint32_t>(Animation::AnimatorRootMotionPolicy::ExtractOnly)},
+						{"rootMotionPolicy", static_cast<std::uint32_t>(Animation::AnimatorRootMotionPolicy::Ignore)},
 						{"updatePolicy", static_cast<std::uint32_t>(Animation::AnimatorUpdatePolicy::FixedStep)},
 						{"timePolicy", static_cast<std::uint32_t>(Animation::AnimatorTimePolicy::Fixed)},
 						{"initialParameters", R"({"Grounded":true,"Speed":2.5})"},
@@ -310,7 +310,7 @@ namespace TerraEngine::Tests {
 			context.Expect(animator != nullptr, "Malformed policy input should still produce a safe authored component.");
 			context.Expect(animator != nullptr
 				&& animator->requestedMode == Animation::AnimationExecutionPolicy::Auto
-				&& animator->rootMotionPolicy == Animation::AnimatorRootMotionPolicy::ExtractOnly
+				&& animator->rootMotionPolicy == Animation::AnimatorRootMotionPolicy::Ignore
 				&& animator->updatePolicy == Animation::AnimatorUpdatePolicy::EveryFrame
 				&& animator->timePolicy == Animation::AnimatorTimePolicy::Scaled
 				&& animator->eventPolicy == Animation::AnimatorEventPolicy::Dispatch

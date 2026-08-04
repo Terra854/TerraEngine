@@ -4,6 +4,7 @@
 
 #include "Animation/AnimationSystem.h"
 #include "Animation/Assets/AnimationClipAsset.h"
+#include "Animation/Runtime/AnimationClipView.h"
 #include "Animation/Assets/AnimationControllerAsset.h"
 #include "Animation/Codec/AnimationCodec.h"
 #include "Animation/Graph/AnimationProgramPublisher.h"
@@ -17,6 +18,7 @@
 #include "Components/Transform.h"
 #include "Core/Object/ObjectManager.h"
 #include "File Formats/TerraEngineMeshFile.h"
+#include "Profiling/ProfilerScope.h"
 #include "Renderer/RenderSystem.h"
 #include "Resource/ResourceManager.h"
 #include "ThreadPool/ThreadPool.h"
@@ -37,6 +39,8 @@
 #include <set>
 #include <span>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -52,7 +56,10 @@ namespace TerraEngine::Animation {
 		inline constexpr std::size_t kMaximumDiscoveredStreamingDependencies = 256U;
 		inline constexpr std::size_t kMaximumControllerDependencyDepth = 64U;
 		inline constexpr std::size_t kMaximumAnimatorLoadRequestsPerFrame = 8U;
-		inline constexpr std::size_t kMaximumAnimationRangeRequestsPerBinding = 3U;
+		// One direct clip may contain dozens of small independently checked segments.
+		// Queue a bounded complete wave so residency can be published once, instead of
+		// forcing every animator through a protected rebind after each three segments.
+		inline constexpr std::size_t kMaximumAnimationRangeRequestsPerBinding = 64U;
 		inline constexpr std::size_t kMaximumGpuBindingPayloadBytes = 64U * 1024U * 1024U;
 		inline constexpr std::size_t kGpuProgramHeaderBytes = 64U;
 		inline constexpr std::size_t kGpuProgramJointRecordBytes = 16U;
@@ -219,20 +226,28 @@ namespace TerraEngine::Animation {
 		void PublishAndRequestStreamingDependencies(
 			const UUID& ownerObjectId,
 			std::span<const RuntimeStreamingDependency> dependencies,
+			bool publishOwnerNeeds,
 			std::uint64_t frameId,
 			ResourceManager& resources,
 			std::map<RuntimeStreamingDependency, std::shared_future<UUID>>& pendingLoads,
+			std::set<RuntimeStreamingDependency>& processedDependencies,
 			std::size_t& issuedRequestCount)
 		{
 			for(const RuntimeStreamingDependency& dependency : dependencies) {
-				resources.MarkStreamingNeed(
-					dependency.assetId,
-					dependency.assetType,
-					TerraEngine::Resource::StreamingNeedType::RuntimeExplicit,
-					frameId,
-					"active animator dependency",
-					100,
-					ownerObjectId);
+				if(publishOwnerNeeds) {
+					// Ownership is persistent until the component explicitly replaces or
+					// releases this dependency set. A clip-segment promotion must not rewrite
+					// the same ResourceManager record for every prefab instance.
+					resources.MarkStreamingNeed(
+						dependency.assetId,
+						dependency.assetType,
+						TerraEngine::Resource::StreamingNeedType::RuntimeExplicit,
+						frameId,
+						"active animator dependency",
+						100,
+						ownerObjectId);
+				}
+				if(!processedDependencies.insert(dependency).second) continue;
 				if(resources.IsAnimationAssetPublished(
 					dependency.assetId, dependency.assetType)) {
 					pendingLoads.erase(dependency);
@@ -313,7 +328,7 @@ namespace TerraEngine::Animation {
 			TerraEngine::Renderer::RendererRecoveryStateKind rendererState =
 				TerraEngine::Renderer::RendererRecoveryStateKind::Active;
 			AnimationExecutionPolicy requestedMode = AnimationExecutionPolicy::Auto;
-			AnimatorRootMotionPolicy rootMotionPolicy = AnimatorRootMotionPolicy::ExtractOnly;
+			AnimatorRootMotionPolicy rootMotionPolicy = AnimatorRootMotionPolicy::Ignore;
 			AnimatorUpdatePolicy updatePolicy = AnimatorUpdatePolicy::EveryFrame;
 			AnimatorTimePolicy timePolicy = AnimatorTimePolicy::Scaled;
 			std::string initialParametersJson;
@@ -324,9 +339,8 @@ namespace TerraEngine::Animation {
 			auto operator<=>(const AuthoredBindingSignature&) const = default;
 		};
 
-		[[nodiscard]] AuthoredBindingSignature MakeSignature(
-			const AnimatorComponent& component,
-			const ResourceManager& resources)
+		[[nodiscard]] AuthoredBindingSignature MakeAuthoredSignature(
+			const AnimatorComponent& component)
 		{
 			AuthoredBindingSignature result;
 			result.controllerAssetId = component.controllerAssetId;
@@ -341,35 +355,6 @@ namespace TerraEngine::Animation {
 			result.retargetProfileAssetId = component.retargetProfileOverrideAssetId;
 			result.motionDatabaseAssetId = component.motionDatabaseOverrideAssetId;
 			result.ragdollProfileAssetId = component.ragdollProfileOverrideAssetId;
-			result.controllerRuntimeGeneration = resources.GetAnimationAssetRuntimeGeneration(
-				component.controllerAssetId, AssetType::AnimationController);
-			result.defaultClipRuntimeGeneration = resources.GetAnimationAssetRuntimeGeneration(
-				component.defaultClipAssetId, AssetType::AnimationClip);
-			result.skeletonRuntimeGeneration = resources.GetAnimationAssetRuntimeGeneration(
-				component.skeletonOverrideAssetId, AssetType::Skeleton);
-			result.retargetProfileRuntimeGeneration =
-				resources.GetAnimationAssetRuntimeGeneration(
-					component.retargetProfileOverrideAssetId, AssetType::RetargetProfile);
-			result.motionDatabaseRuntimeGeneration = resources.GetAnimationAssetRuntimeGeneration(
-				component.motionDatabaseOverrideAssetId, AssetType::MotionDatabase);
-			result.ragdollProfileRuntimeGeneration = resources.GetAnimationAssetRuntimeGeneration(
-				component.ragdollProfileOverrideAssetId, AssetType::RagdollProfile);
-			// The profile's source skeleton is an indirect dependency. Include its
-			// durable and runtime identity so a same-GUID source-rig reload cannot leave
-			// a compiled mapping bound to retired reference-pose bytes.
-			RetargetProfileAsset retargetProfile;
-			AnimationGeneration ignoredProfileGeneration = 0U;
-			if(component.retargetProfileOverrideAssetId != EMPTY_UUID
-				&& resources.CopyRetargetProfilePublication(
-					component.retargetProfileOverrideAssetId,
-					retargetProfile,
-					ignoredProfileGeneration)) {
-				result.retargetSourceSkeletonAssetId =
-					retargetProfile.sourceSkeletonAssetId.value;
-				result.retargetSourceSkeletonRuntimeGeneration =
-					resources.GetAnimationAssetRuntimeGeneration(
-						result.retargetSourceSkeletonAssetId, AssetType::Skeleton);
-			}
 			result.requestedMode = component.requestedMode;
 			result.rootMotionPolicy = component.rootMotionPolicy;
 			result.updatePolicy = component.updatePolicy;
@@ -379,6 +364,126 @@ namespace TerraEngine::Animation {
 			result.cullingPolicy = component.cullingPolicy;
 			result.diagnosticOverrides = component.diagnosticOverrides;
 			return result;
+		}
+
+		[[nodiscard]] bool CapturePublishedAssetGenerations(
+			AuthoredBindingSignature& result,
+			const ResourceManager& resources)
+		{
+			// Resource generation reads can take the asset-cache lock. The caller caches
+			// this completed record by authored value so a thousand identical prefab
+			// instances observe each publication once instead of repeating every lookup.
+			const auto capture = [&resources](
+				const UUID& id,
+				AssetType type,
+				AnimationGeneration& destination) {
+				const auto generation =
+					resources.TryGetAnimationAssetRuntimeGeneration(id, type);
+				if(!generation.has_value()) return false;
+				destination = *generation;
+				return true;
+			};
+			if(!capture(result.controllerAssetId, AssetType::AnimationController,
+					result.controllerRuntimeGeneration)
+				|| !capture(result.defaultClipAssetId, AssetType::AnimationClip,
+					result.defaultClipRuntimeGeneration)
+				|| !capture(result.skeletonAssetId, AssetType::Skeleton,
+					result.skeletonRuntimeGeneration)
+				|| !capture(result.retargetProfileAssetId, AssetType::RetargetProfile,
+					result.retargetProfileRuntimeGeneration)
+				|| !capture(result.motionDatabaseAssetId, AssetType::MotionDatabase,
+					result.motionDatabaseRuntimeGeneration)
+				|| !capture(result.ragdollProfileAssetId, AssetType::RagdollProfile,
+					result.ragdollProfileRuntimeGeneration)) {
+				return false;
+			}
+			// The profile's source skeleton is an indirect dependency. Include its
+			// durable and runtime identity so a same-GUID source-rig reload cannot leave
+			// a compiled mapping bound to retired reference-pose bytes.
+			RetargetProfileAsset retargetProfile;
+			AnimationGeneration ignoredProfileGeneration = 0U;
+			if(result.retargetProfileAssetId != EMPTY_UUID
+				&& resources.CopyRetargetProfilePublication(
+					result.retargetProfileAssetId,
+					retargetProfile,
+					ignoredProfileGeneration)) {
+				result.retargetSourceSkeletonAssetId =
+					retargetProfile.sourceSkeletonAssetId.value;
+				if(!capture(result.retargetSourceSkeletonAssetId, AssetType::Skeleton,
+					result.retargetSourceSkeletonRuntimeGeneration)) {
+					return false;
+				}
+			}
+			return true;
+		}
+
+		[[nodiscard]] bool MatchesAuthoredBindingInputs(
+			const AuthoredBindingSignature& published,
+			const AuthoredBindingSignature& captured) noexcept
+		{
+			// Resolved mesh fingerprints and controller-selected skeleton fields are
+			// filled later in the protected pass. Compare only values originating from
+			// the component and their directly observed ResourceManager generations.
+			// The caller separately proves exact indirect and render dependencies when a
+			// global revision changed, so unrelated project imports can use this match.
+			return published.controllerAssetId == captured.controllerAssetId
+				&& published.defaultClipAssetId == captured.defaultClipAssetId
+				&& published.loopDefaultClip == captured.loopDefaultClip
+				&& published.playAutomatically == captured.playAutomatically
+				&& published.defaultClipStartFrame == captured.defaultClipStartFrame
+				&& published.skeletonAssetId == captured.skeletonAssetId
+				&& published.retargetProfileAssetId == captured.retargetProfileAssetId
+				&& published.retargetSourceSkeletonAssetId
+					== captured.retargetSourceSkeletonAssetId
+				&& published.motionDatabaseAssetId == captured.motionDatabaseAssetId
+				&& published.ragdollProfileAssetId == captured.ragdollProfileAssetId
+				&& published.controllerRuntimeGeneration
+					== captured.controllerRuntimeGeneration
+				&& published.defaultClipRuntimeGeneration
+					== captured.defaultClipRuntimeGeneration
+				&& (captured.skeletonAssetId == EMPTY_UUID
+					|| published.skeletonRuntimeGeneration
+						== captured.skeletonRuntimeGeneration)
+				&& published.retargetProfileRuntimeGeneration
+					== captured.retargetProfileRuntimeGeneration
+				&& published.retargetSourceSkeletonRuntimeGeneration
+					== captured.retargetSourceSkeletonRuntimeGeneration
+				&& published.motionDatabaseRuntimeGeneration
+					== captured.motionDatabaseRuntimeGeneration
+				&& published.ragdollProfileRuntimeGeneration
+					== captured.ragdollProfileRuntimeGeneration
+				&& published.requestedMode == captured.requestedMode
+				&& published.rootMotionPolicy == captured.rootMotionPolicy
+				&& published.updatePolicy == captured.updatePolicy
+				&& published.timePolicy == captured.timePolicy
+				&& published.initialParametersJson == captured.initialParametersJson
+				&& published.eventPolicy == captured.eventPolicy
+				&& published.cullingPolicy == captured.cullingPolicy
+				&& published.diagnosticOverrides == captured.diagnosticOverrides;
+		}
+
+		[[nodiscard]] bool MatchesPublishedDirectRenderInput(
+			const AuthoredBindingSignature& published,
+			const std::map<UUID, MeshAnimationBindingSnapshot>& meshSnapshots,
+			const TerraEngine::Renderer::RendererRecoverySnapshot& renderer) noexcept
+		{
+			// A valid direct-clip GPU binding records the exact immutable deformable
+			// mesh identity. Querying that one mesh lets unrelated project imports and
+			// hot reloads bypass the expensive per-animator preparation path without
+			// hiding a recook of the mesh actually consumed by this animator.
+			if(published.renderMeshAssetId == EMPTY_UUID
+				|| published.renderMeshHeaderVersion == 0U
+				|| published.deformablePayloadGeneration == 0U
+				|| published.rendererSessionGeneration
+					!= renderer.renderSessionGeneration
+				|| published.rendererState != renderer.state) {
+				return false;
+			}
+			const auto mesh = meshSnapshots.find(published.renderMeshAssetId);
+			return mesh != meshSnapshots.end() && mesh->second.present
+				&& mesh->second.runtimeLayoutVersion == published.renderMeshHeaderVersion
+				&& mesh->second.deformablePayloadGeneration
+					== published.deformablePayloadGeneration;
 		}
 
 		struct GpuBindingRenderIdentity {
@@ -393,6 +498,28 @@ namespace TerraEngine::Animation {
 			std::array<float, 3U> deformationBoundsMinimum{};
 			std::array<float, 3U> deformationBoundsMaximum{};
 			bool valid = false;
+		};
+
+		// One protected reconciliation pass may inspect thousands of prefab children
+		// that reference the same immutable mesh and skeleton publication. Cache that
+		// exact compatibility proof so ResourceManager locking and palette validation
+		// happen once per asset generation, while each object keeps its own hierarchy
+		// fingerprint and runtime animation identity.
+		struct GpuBindingMeshObservationKey {
+			UUID meshId = EMPTY_UUID;
+			UUID skeletonId = EMPTY_UUID;
+			AnimationGeneration skeletonGeneration = 0U;
+
+			auto operator<=>(const GpuBindingMeshObservationKey&) const = default;
+		};
+
+		struct GpuBindingMeshObservation {
+			GpuBindingRenderIdentity identity{};
+			std::uint32_t meshHeaderVersion = 0U;
+			std::uint64_t deformablePayloadGeneration = 0U;
+			AnimationCompatibilityFingerprint skeletonCompatibilityFingerprint = 0U;
+			bool meshPresent = false;
+			bool compatible = false;
 		};
 
 		void MixRenderIdentityValue(std::uint64_t& hash, std::uint64_t value) noexcept
@@ -412,70 +539,62 @@ namespace TerraEngine::Animation {
 		}
 
 		[[nodiscard]] bool IsValidatedSinglePaletteDeformableMesh(
-			const Mesh& mesh,
+			const MeshAnimationBindingSnapshot& mesh,
 			const SkeletonAsset& skeleton) noexcept
 		{
-			const TemfDeformableMetadata& metadata = mesh.deformableMetadata;
 			constexpr std::uint32_t requiredFlags =
 				kTemfDeformableFlagConservativeMorphEnvelope
 				| kTemfDeformableFlagZeroWeightMeansIdentity
 				| kTemfDeformableFlagVertexPaletteIndices
 				| kTemfDeformableFlagDenseMorphDeltas;
-			if(!mesh.hasDeformablePayload
+			if(!mesh.present || !mesh.hasDeformablePayload
 				|| mesh.deformablePayloadGeneration == 0U
-				|| metadata.skinningVertexCount == 0U
-				|| metadata.skinningVertexCount != mesh.runtimeLayout.meshletSkinningDataCount
-				|| metadata.palettePartitionCount != 1U
-				|| mesh.deformablePalettes.size() != 1U
-				|| metadata.morphTargetCount != mesh.deformableMorphs.size()
-				|| metadata.morphTargetCount
+				|| mesh.skinningVertexCount == 0U
+				|| mesh.skinningVertexCount != mesh.meshletSkinningDataCount
+				|| mesh.palettePartitionCount != 1U
+				|| mesh.paletteRecordCount != 1U
+				|| mesh.morphTargetCount != mesh.morphRecordCount
+				|| mesh.morphTargetCount
 					> kGpuAnimationMaximumMorphTargetsV1
-				|| mesh.deformableVertexPaletteIndices.size()
-					!= metadata.skinningVertexCount
-				|| mesh.meshletSkinningData.size()
+				|| mesh.vertexPaletteIndexCount != mesh.skinningVertexCount
+				|| mesh.meshletSkinningDataBytes
 					!= static_cast<std::size_t>(
-						metadata.skinningVertexCount)
+						mesh.skinningVertexCount)
 						* kTemfSkinningStrideBytes
-				|| metadata.sourceSkeletonJointCount != skeleton.joints.size()
-				|| metadata.skeletonCompatibilityFingerprint == 0U
-				|| metadata.skeletonCompatibilityFingerprint
+				|| mesh.sourceSkeletonJointCount != skeleton.joints.size()
+				|| mesh.skeletonCompatibilityFingerprint == 0U
+				|| mesh.skeletonCompatibilityFingerprint
 					!= skeleton.compatibilityFingerprint
-				|| metadata.flags != requiredFlags) {
+				|| mesh.flags != requiredFlags) {
 				return false;
 			}
 			for(std::size_t lane = 0U; lane < 3U; ++lane) {
-				if(!std::isfinite(metadata.deformationBoundsMin[lane])
-					|| !std::isfinite(metadata.deformationBoundsMax[lane])
-					|| metadata.deformationBoundsMin[lane]
-						> metadata.deformationBoundsMax[lane]) {
+				if(!std::isfinite(mesh.deformationBoundsMinimum[lane])
+					|| !std::isfinite(mesh.deformationBoundsMaximum[lane])
+					|| mesh.deformationBoundsMinimum[lane]
+						> mesh.deformationBoundsMaximum[lane]) {
 					return false;
 				}
 			}
 
-			const TemfDeformablePaletteRecord& palette =
-				mesh.deformablePalettes.front();
-			if(palette.jointCount == 0U
-				|| palette.jointCount > kGpuAnimationPaletteEntriesPerPartition
-				|| palette.jointCount != mesh.deformablePaletteJoints.size()) {
+			if(mesh.singlePaletteJointCount == 0U
+				|| mesh.singlePaletteJointCount > kGpuAnimationPaletteEntriesPerPartition
+				|| mesh.singlePaletteJointCount != mesh.paletteJoints.size()) {
 				return false;
 			}
-			for(std::size_t index = 0U;
-				index < mesh.deformablePaletteJoints.size(); ++index) {
-				const std::uint32_t joint = mesh.deformablePaletteJoints[index];
+			for(std::size_t index = 0U; index < mesh.paletteJoints.size(); ++index) {
+				const std::uint32_t joint = mesh.paletteJoints[index];
 				if(joint >= skeleton.joints.size()
 					|| (index != 0U
-						&& joint <= mesh.deformablePaletteJoints[index - 1U])) {
+						&& joint <= mesh.paletteJoints[index - 1U])) {
 					return false;
 				}
 			}
-			for(std::size_t index = 0U;
-				index < mesh.deformableMorphs.size(); ++index) {
-				const std::uint32_t stableTargetId =
-					mesh.deformableMorphs[index].stableTargetId;
+			for(std::size_t index = 0U; index < mesh.morphStableIds.size(); ++index) {
+				const std::uint64_t stableTargetId = mesh.morphStableIds[index];
 				if(stableTargetId == 0U) return false;
 				for(std::size_t prior = 0U; prior < index; ++prior) {
-					if(mesh.deformableMorphs[prior].stableTargetId
-						== stableTargetId) {
+					if(mesh.morphStableIds[prior] == stableTargetId) {
 						return false;
 					}
 				}
@@ -483,9 +602,8 @@ namespace TerraEngine::Animation {
 			return true;
 		}
 
-		[[nodiscard]] bool IsOwnedByAnimator(
+		[[nodiscard]] std::optional<UUID> FindRuntimeAnimatorOwner(
 			const Object& renderObject,
-			const UUID& animatorObjectId,
 			ObjectManager& objects) noexcept
 		{
 			std::optional<Object> current = renderObject;
@@ -496,20 +614,26 @@ namespace TerraEngine::Animation {
 						objects.GetComponent<AnimatorComponent>(*current);
 					// The nearest authored animator blocks every ancestor even when
 					// disabled, matching RenderSystem's protected ownership rule.
-					return nearest != nullptr && IsRuntimeComponentActive(*nearest)
-						&& objects.getUUID(*current) == animatorObjectId;
+					if(nearest == nullptr || !IsRuntimeComponentActive(*nearest)) {
+						return std::nullopt;
+					}
+					const UUID ownerObjectId = objects.getUUID(*current);
+					return ownerObjectId == EMPTY_UUID
+						? std::nullopt : std::optional<UUID>{ownerObjectId};
 				}
 				current = objects.getParent(*current);
 			}
-			return false;
+			return std::nullopt;
 		}
 
 		[[nodiscard]] GpuBindingRenderIdentity ResolveGpuBindingRenderIdentity(
-			const UUID& animatorObjectId,
+			std::span<const Object> ownedRenderObjects,
 			const SkeletonAsset* skeleton,
 			ObjectManager& objects,
-			ResourceManager& resources,
-			AuthoredBindingSignature& signature)
+			AuthoredBindingSignature& signature,
+			const std::map<UUID, MeshAnimationBindingSnapshot>& meshSnapshots,
+			std::map<GpuBindingMeshObservationKey,
+				GpuBindingMeshObservation>& meshObservations)
 		{
 			GpuBindingRenderIdentity result;
 			const TerraEngine::Renderer::RendererRecoverySnapshot renderer =
@@ -529,60 +653,71 @@ namespace TerraEngine::Animation {
 			MixRenderIdentityValue(candidateFingerprint,
 				renderer.renderSessionGeneration);
 			std::size_t compatibleCandidateCount = 0U;
-			for(const Object& renderObject
-				: objects.SnapshotObjectsWithComponents<
-					Transform, MeshRenderComponent>()) {
-				if(!IsOwnedByAnimator(renderObject, animatorObjectId, objects)) continue;
+			for(const Object& renderObject : ownedRenderObjects) {
 				const MeshRenderComponent* component =
 					objects.GetComponent<MeshRenderComponent>(renderObject);
 				if(component == nullptr) continue;
 				MixRenderIdentityUuid(candidateFingerprint, objects.getUUID(renderObject));
 				MixRenderIdentityUuid(candidateFingerprint, component->meshId);
-				Mesh* mesh = component->meshId == EMPTY_UUID
-					? nullptr : resources.GetMesh(component->meshId);
-				if(mesh == nullptr) {
+				const GpuBindingMeshObservationKey observationKey{
+					component->meshId,
+					signature.resolvedSkeletonAssetId,
+					signature.skeletonRuntimeGeneration};
+				auto observation = meshObservations.find(observationKey);
+				if(observation == meshObservations.end()) {
+					GpuBindingMeshObservation captured;
+					const auto mesh = meshSnapshots.find(component->meshId);
+					if(mesh != meshSnapshots.end() && mesh->second.present) {
+						captured.meshPresent = true;
+						captured.meshHeaderVersion = mesh->second.runtimeLayoutVersion;
+						captured.deformablePayloadGeneration =
+							mesh->second.deformablePayloadGeneration;
+						captured.skeletonCompatibilityFingerprint =
+							mesh->second.skeletonCompatibilityFingerprint;
+						captured.compatible = skeleton != nullptr
+							&& IsValidatedSinglePaletteDeformableMesh(mesh->second, *skeleton);
+						if(captured.compatible) {
+							captured.identity.meshId = component->meshId;
+							captured.identity.meshHeaderVersion = mesh->second.runtimeLayoutVersion;
+							captured.identity.deformablePayloadGeneration =
+								mesh->second.deformablePayloadGeneration;
+							captured.identity.skeletonCompatibilityFingerprint =
+								mesh->second.skeletonCompatibilityFingerprint;
+							captured.identity.paletteJoints = mesh->second.paletteJoints;
+							captured.identity.morphStableIds = mesh->second.morphStableIds;
+							std::sort(captured.identity.morphStableIds.begin(),
+								captured.identity.morphStableIds.end());
+							captured.identity.deformationBoundsMinimum =
+								mesh->second.deformationBoundsMinimum;
+							captured.identity.deformationBoundsMaximum =
+								mesh->second.deformationBoundsMaximum;
+						}
+					}
+					observation = meshObservations.emplace(
+						observationKey, std::move(captured)).first;
+				}
+				if(!observation->second.meshPresent) {
 					MixRenderIdentityValue(candidateFingerprint, 0U);
 					continue;
 				}
-				MixRenderIdentityValue(candidateFingerprint, mesh->runtimeLayout.version);
 				MixRenderIdentityValue(candidateFingerprint,
-					mesh->deformablePayloadGeneration);
+					observation->second.meshHeaderVersion);
 				MixRenderIdentityValue(candidateFingerprint,
-					mesh->deformableMetadata.skeletonCompatibilityFingerprint);
-				if(skeleton == nullptr
-					|| !IsValidatedSinglePaletteDeformableMesh(*mesh, *skeleton)) {
+					observation->second.deformablePayloadGeneration);
+				MixRenderIdentityValue(candidateFingerprint,
+					observation->second.skeletonCompatibilityFingerprint);
+				if(!observation->second.compatible) {
 					continue;
 				}
 				++compatibleCandidateCount;
 				if(compatibleCandidateCount == 1U) {
-					result.meshId = component->meshId;
-					result.meshHeaderVersion = mesh->runtimeLayout.version;
-					result.deformablePayloadGeneration =
-						mesh->deformablePayloadGeneration;
-					result.skeletonCompatibilityFingerprint =
-						mesh->deformableMetadata.skeletonCompatibilityFingerprint;
-					result.paletteJoints = mesh->deformablePaletteJoints;
-					result.morphStableIds.clear();
-					result.morphStableIds.reserve(
-						mesh->deformableMorphs.size());
-					for(const TemfDeformableMorphRecord& morph
-						: mesh->deformableMorphs) {
-						result.morphStableIds.push_back(
-							morph.stableTargetId);
-					}
-					std::sort(
-						result.morphStableIds.begin(),
-						result.morphStableIds.end());
-					std::copy_n(
-						mesh->deformableMetadata.deformationBoundsMin,
-						result.deformationBoundsMinimum.size(),
-						result.deformationBoundsMinimum.begin());
-					std::copy_n(
-						mesh->deformableMetadata.deformationBoundsMax,
-						result.deformationBoundsMaximum.size(),
-						result.deformationBoundsMaximum.begin());
+					result = observation->second.identity;
 				}
 			}
+			// Asset observations intentionally omit frame/session identity so they can
+			// be copied across every matching prefab child in this protected pass.
+			result.rendererSessionGeneration = renderer.renderSessionGeneration;
+			result.sceneGeneration = objects.GetSceneGeneration();
 			MixRenderIdentityValue(candidateFingerprint, compatibleCandidateCount);
 			if(candidateFingerprint == 0U) candidateFingerprint = 1U;
 			signature.renderCandidateFingerprint = candidateFingerprint;
@@ -819,8 +954,12 @@ namespace TerraEngine::Animation {
 		struct ClipStreamingRuntime {
 			// These hard bounds cover all active animators together. QueueRead uses
 			// the shared ThreadPool and never captures ObjectManager or live bindings.
-			AnimationStreamingCoordinator coordinator{8U, 64U, 64U * 1024U * 1024U, 4096U};
+			AnimationStreamingCoordinator coordinator{64U, 64U, 64U * 1024U * 1024U, 4096U};
 			std::map<ClipStreamPayloadKey, AnimationStreamReadJob> pendingReads;
+			// Successful reads may finish across several frames. Keep their publication
+			// intent latched until the current bounded wave has completely settled, then
+			// expose one immutable residency change to component reconciliation.
+			bool deferredPublicationPending = false;
 			std::map<ClipStreamPayloadKey, std::uint32_t> gameplayCriticalRetainers;
 			std::map<ClipStreamGenerationKey, AnimationCookedRangeTable> clipRangeTables;
 			struct MotionStreamPlan {
@@ -860,14 +999,20 @@ namespace TerraEngine::Animation {
 				&& left.blockIndex == right.blockIndex && left.byteSize == right.byteSize
 				&& left.generation == right.generation
 				&& left.prefetch == right.prefetch && left.priority == right.priority
-				&& left.logicalPath.lexically_normal() == right.logicalPath.lexically_normal()
+				// Cooked prefab instances normally reference the exact same path bytes.
+				// Avoid allocating two normalized filesystem paths for every segment of
+				// every identical animator; normalize only compatibility spellings that
+				// actually differ (for example, "Assets/./walk" versus "Assets/walk").
+				&& (left.logicalPath == right.logicalPath
+					|| left.logicalPath.lexically_normal()
+						== right.logicalPath.lexically_normal())
 				&& left.byteOffset == right.byteOffset
 				&& left.expectedContentFingerprint == right.expectedContentFingerprint;
 		}
 
 		bool PollClipStreamReads(ClipStreamingRuntime& runtime)
 		{
-			bool published = false;
+			bool publishedThisPoll = false;
 			for(auto iterator = runtime.pendingReads.begin();
 				iterator != runtime.pendingReads.end();) {
 				if(iterator->second.completion.wait_for(std::chrono::seconds(0))
@@ -876,8 +1021,8 @@ namespace TerraEngine::Animation {
 					continue;
 				}
 				try {
-					published = runtime.coordinator.PublishReadResult(
-						iterator->second.completion.get()) || published;
+					publishedThisPoll = runtime.coordinator.PublishReadResult(
+						iterator->second.completion.get()) || publishedThisPoll;
 				} catch(...) {
 					// A worker exception cannot cross the protected boundary. Mark this
 					// exact generation failed and keep the immutable fallback visible.
@@ -886,8 +1031,13 @@ namespace TerraEngine::Animation {
 				}
 				iterator = runtime.pendingReads.erase(iterator);
 			}
+			runtime.deferredPublicationPending =
+				runtime.deferredPublicationPending || publishedThisPoll;
 			runtime.snapshot = runtime.coordinator.LoadResidencySnapshot();
-			return published;
+			if(!runtime.pendingReads.empty()) return false;
+			const bool publishSettledWave = runtime.deferredPublicationPending;
+			runtime.deferredPublicationPending = false;
+			return publishSettledWave;
 		}
 
 		void AppendRetainedRequest(
@@ -1179,65 +1329,171 @@ namespace TerraEngine::Animation {
 			return useCompleteDataFallback();
 		}
 
+		struct ClipStreamRetainAdjustment {
+			AnimationStreamRequest request;
+			std::int64_t retainDelta = 0;
+			bool gameplayCriticalDirty = false;
+		};
+
 		void ReconcileClipStreamRetains(
 			ClipStreamingRuntime& runtime,
-			std::vector<AnimationStreamRequest>& current,
-			const std::vector<AnimationStreamRequest>& desired)
+			std::shared_ptr<const std::vector<AnimationStreamRequest>>& current,
+			const std::vector<AnimationStreamRequest>& desired,
+			std::shared_ptr<const std::vector<AnimationStreamRequest>> sharedDesired,
+			std::map<ClipStreamPayloadKey, ClipStreamRetainAdjustment>&
+				retainAdjustments)
 		{
-			for(const AnimationStreamRequest& request : current) {
+			// Identical direct-clip prefab instances retain the same immutable vector.
+			// Pointer identity proves every request and gameplay-critical flag match.
+			if(current && sharedDesired && current == sharedDesired) return;
+			const std::span<const AnimationStreamRequest> currentRequests = current
+				? std::span<const AnimationStreamRequest>{*current}
+				: std::span<const AnimationStreamRequest>{};
+			auto removeRetain = [&](const AnimationStreamRequest& request) {
+				const ClipStreamPayloadKey key = MakeClipStreamPayloadKey(request);
+				auto& adjustment = retainAdjustments[key];
+				adjustment.request = request;
+				--adjustment.retainDelta;
+				if(!request.gameplayCritical) return;
+				if(auto critical = runtime.gameplayCriticalRetainers.find(key);
+					critical != runtime.gameplayCriticalRetainers.end()) {
+					if(critical->second > 1U) --critical->second;
+					else runtime.gameplayCriticalRetainers.erase(critical);
+				}
+				adjustment.gameplayCriticalDirty = true;
+			};
+			auto addRetain = [&](const AnimationStreamRequest& request) {
+				const ClipStreamPayloadKey key = MakeClipStreamPayloadKey(request);
+				auto& adjustment = retainAdjustments[key];
+				adjustment.request = request;
+				++adjustment.retainDelta;
+				if(request.gameplayCritical) {
+					std::uint32_t& count = runtime.gameplayCriticalRetainers[key];
+					if(count < std::numeric_limits<std::uint32_t>::max()) ++count;
+				}
+				adjustment.gameplayCriticalDirty = true;
+			};
+			auto changeCriticality = [&](const AnimationStreamRequest& prior,
+				const AnimationStreamRequest& replacement) {
+				if(prior.gameplayCritical == replacement.gameplayCritical) return;
+				const ClipStreamPayloadKey key = MakeClipStreamPayloadKey(replacement);
+				if(replacement.gameplayCritical) {
+					std::uint32_t& count = runtime.gameplayCriticalRetainers[key];
+					if(count < std::numeric_limits<std::uint32_t>::max()) ++count;
+				} else if(auto critical = runtime.gameplayCriticalRetainers.find(key);
+					critical != runtime.gameplayCriticalRetainers.end()) {
+					if(critical->second > 1U) --critical->second;
+					else runtime.gameplayCriticalRetainers.erase(critical);
+				}
+				retainAdjustments[key].request = replacement;
+				retainAdjustments[key].gameplayCriticalDirty = true;
+			};
+			// Streaming refreshes preserve the cook's deterministic segment order.
+			// Thousands of identical animators therefore normally arrive with the
+			// exact same retained request vector. Prove that common case linearly and
+			// keep the existing storage; the generic reconciliation below is quadratic
+			// and also copies every path string even when ownership did not change.
+			if(currentRequests.size() == desired.size()) {
+				bool identical = true;
+				for(std::size_t index = 0U; index < currentRequests.size(); ++index) {
+					if(!SameClipStreamRequest(currentRequests[index], desired[index])
+						|| currentRequests[index].gameplayCritical
+							!= desired[index].gameplayCritical) {
+						identical = false;
+						break;
+					}
+				}
+				if(identical) return;
+			}
+			const auto payloadLess = [](const AnimationStreamRequest& left,
+				const AnimationStreamRequest& right) {
+				return MakeClipStreamPayloadKey(left) < MakeClipStreamPayloadKey(right);
+			};
+			const bool currentSorted = std::is_sorted(
+				currentRequests.begin(), currentRequests.end(), payloadLess);
+			const bool desiredSorted = std::is_sorted(
+				desired.begin(), desired.end(), payloadLess);
+			if(currentSorted && desiredSorted) {
+				// Direct clips append their independently streamed segments in block order.
+				// Merge those two ordered lists once instead of comparing every old block
+				// with every new block for every prefab instance. A 4,000-member crowd with
+				// 64 blocks consequently performs about 256,000 comparisons rather than
+				// about 16 million path-normalizing comparisons at a residency transition.
+				std::size_t currentIndex = 0U;
+				std::size_t desiredIndex = 0U;
+				while(currentIndex < currentRequests.size() || desiredIndex < desired.size()) {
+					if(currentIndex == currentRequests.size()) {
+						addRetain(desired[desiredIndex++]);
+						continue;
+					}
+					if(desiredIndex == desired.size()) {
+						removeRetain(currentRequests[currentIndex++]);
+						continue;
+					}
+					const AnimationStreamRequest& prior = currentRequests[currentIndex];
+					const AnimationStreamRequest& replacement = desired[desiredIndex];
+					const ClipStreamPayloadKey priorKey = MakeClipStreamPayloadKey(prior);
+					const ClipStreamPayloadKey replacementKey =
+						MakeClipStreamPayloadKey(replacement);
+					if(priorKey < replacementKey) {
+						removeRetain(prior);
+						++currentIndex;
+						continue;
+					}
+					if(replacementKey < priorKey) {
+						addRetain(replacement);
+						++desiredIndex;
+						continue;
+					}
+					if(SameClipStreamRequest(prior, replacement)) {
+						changeCriticality(prior, replacement);
+					} else {
+						// A matching physical key with different immutable range metadata is
+						// treated as an explicit replacement, preserving fail-closed behavior.
+						removeRetain(prior);
+						addRetain(replacement);
+					}
+					++currentIndex;
+					++desiredIndex;
+				}
+				current = sharedDesired ? std::move(sharedDesired)
+					: std::make_shared<const std::vector<AnimationStreamRequest>>(desired);
+				return;
+			}
+			// Controller programs may author clips in graph traversal order rather than
+			// payload order. Preserve the generic reconciliation path for those uncommon
+			// lists; direct-clip crowds never pay its nested-search cost.
+			for(const AnimationStreamRequest& request : currentRequests) {
 				const auto replacement = std::find_if(desired.begin(), desired.end(),
 					[&](const AnimationStreamRequest& candidate) {
 						return SameClipStreamRequest(request, candidate);
 					});
 				if(replacement == desired.end()) {
-					(void)runtime.coordinator.Release(request);
-					if(request.gameplayCritical) {
-						const ClipStreamPayloadKey key = MakeClipStreamPayloadKey(request);
-						if(auto critical = runtime.gameplayCriticalRetainers.find(key);
-							critical != runtime.gameplayCriticalRetainers.end()) {
-							if(critical->second > 1U) --critical->second;
-							else runtime.gameplayCriticalRetainers.erase(critical);
-						}
-						(void)runtime.coordinator.SetGameplayCritical(request,
-							runtime.gameplayCriticalRetainers.contains(key));
-					}
+					removeRetain(request);
 				}
 			}
 			for(const AnimationStreamRequest& request : desired) {
-				const auto prior = std::find_if(current.begin(), current.end(),
+				const auto prior = std::find_if(currentRequests.begin(), currentRequests.end(),
 					[&](const AnimationStreamRequest& candidate) {
 						return SameClipStreamRequest(request, candidate);
 					});
 				const ClipStreamPayloadKey key = MakeClipStreamPayloadKey(request);
-				if(prior == current.end()) {
-					(void)runtime.coordinator.Retain(request);
-					if(request.gameplayCritical) {
-						std::uint32_t& count = runtime.gameplayCriticalRetainers[key];
-						if(count < std::numeric_limits<std::uint32_t>::max()) ++count;
-					}
-					(void)runtime.coordinator.SetGameplayCritical(request,
-						runtime.gameplayCriticalRetainers.contains(key));
+				if(prior == currentRequests.end()) {
+					addRetain(request);
 				} else if(prior->gameplayCritical != request.gameplayCritical) {
-					if(request.gameplayCritical) {
-						std::uint32_t& count = runtime.gameplayCriticalRetainers[key];
-						if(count < std::numeric_limits<std::uint32_t>::max()) ++count;
-					} else if(auto critical = runtime.gameplayCriticalRetainers.find(key);
-						critical != runtime.gameplayCriticalRetainers.end()) {
-						if(critical->second > 1U) --critical->second;
-						else runtime.gameplayCriticalRetainers.erase(critical);
-					}
-					(void)runtime.coordinator.SetGameplayCritical(request,
-						runtime.gameplayCriticalRetainers.contains(key));
+					changeCriticality(*prior, request);
 				}
 			}
-			current = desired;
+			current = sharedDesired ? std::move(sharedDesired)
+				: std::make_shared<const std::vector<AnimationStreamRequest>>(desired);
 		}
 
 		void ReleaseClipStreamRetains(
 			ClipStreamingRuntime& runtime,
-			std::vector<AnimationStreamRequest>& requests)
+			std::shared_ptr<const std::vector<AnimationStreamRequest>>& requests)
 		{
-			for(const AnimationStreamRequest& request : requests) {
+			if(!requests) return;
+			for(const AnimationStreamRequest& request : *requests) {
 				(void)runtime.coordinator.Release(request);
 				if(!request.gameplayCritical) continue;
 				const ClipStreamPayloadKey key = MakeClipStreamPayloadKey(request);
@@ -1249,7 +1505,7 @@ namespace TerraEngine::Animation {
 				(void)runtime.coordinator.SetGameplayCritical(request,
 					runtime.gameplayCriticalRetainers.contains(key));
 			}
-			requests.clear();
+			requests.reset();
 		}
 
 		[[nodiscard]] bool TryAlignGpuPayload(
@@ -2203,7 +2459,10 @@ namespace TerraEngine::Animation {
 			if(resolvedSkeletonAssetId != EMPTY_UUID) {
 				SkeletonAsset skeleton;
 				AnimationGeneration generation = 0U;
-				if(resources.CopySkeletonPublication(resolvedSkeletonAssetId, skeleton, generation)) {
+				TERRAENGINE_PROFILE_SCOPE("Animation: Copy Binding Skeleton Publication",
+					TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+				if(resources.CopySkeletonPublication(
+					resolvedSkeletonAssetId, skeleton, generation)) {
 					binding.skeleton = std::make_shared<SkeletonAsset>(std::move(skeleton));
 					binding.skeletonGeneration = generation;
 					signature.skeletonRuntimeGeneration = generation;
@@ -2212,13 +2471,25 @@ namespace TerraEngine::Animation {
 			if(component.defaultClipAssetId != EMPTY_UUID) {
 				AnimationClipAsset clip;
 				AnimationGeneration generation = 0U;
-				if(resources.CopyAnimationClipPublication(component.defaultClipAssetId, clip, generation)) {
+				bool copied = false;
+				{
+					TERRAENGINE_PROFILE_SCOPE("Animation: Copy Binding Clip Publication",
+						TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+					copied = resources.CopyAnimationClipPublication(
+						component.defaultClipAssetId, clip, generation);
+				}
+				if(copied) {
 					binding.clip = std::make_shared<AnimationClipAsset>(std::move(clip));
 					binding.clipGeneration = generation;
 					signature.defaultClipRuntimeGeneration = generation;
-					ResolvedClipStreamingPayloads streamed = ResolveClipSegmentResidency(
-						*binding.clip, generation, gameplayCritical,
-						resources, streaming, streamingState);
+					ResolvedClipStreamingPayloads streamed;
+					{
+						TERRAENGINE_PROFILE_SCOPE("Animation: Resolve Binding Clip Residency",
+							TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+						streamed = ResolveClipSegmentResidency(
+							*binding.clip, generation, gameplayCritical,
+							resources, streaming, streamingState);
+					}
 					binding.residentSegments = std::move(streamed.residentSegments);
 					binding.streamedSegmentPayloads = std::move(streamed.payloads);
 				}
@@ -2369,19 +2640,35 @@ namespace TerraEngine::Animation {
 			AuthoredBindingSignature signature{};
 			ControllerProgramState controllerProgram;
 			std::vector<RuntimeStreamingDependency> streamingDependencies;
-			std::vector<AnimationStreamRequest> retainedClipStreams;
+			std::shared_ptr<const std::vector<AnimationStreamRequest>>
+				retainedClipStreams;
 			AnimationStatus lastBindingStatus = AnimationStatus::NotReady;
 			bool clipStreamingPending = false;
 			bool motionDatabaseStreamed = false;
 			bool motionDatabaseFallback = false;
 		};
 
-		std::map<UUID, Entry> entries;
+		// Object UUID lookup is the dominant protected cost for large prefab
+		// crowds. Authored snapshot order still controls creation and binding, so
+		// this hash index changes no deterministic playback or publication order.
+		std::unordered_map<UUID, Entry> entries;
 		std::map<RuntimeStreamingDependency, std::shared_future<UUID>> pendingStreamingLoads;
 		ClipStreamingRuntime clipStreaming;
 		ResourceManager* resources = nullptr;
 		std::uint64_t synchronizationFrame = 0U;
 		bool playbackRestartRequested = false;
+		// Stable frames reuse the last protected binding result. Authored edits,
+		// compatible resource publications, renderer recovery, and outstanding
+		// stream work each invalidate this observation and force a complete pass.
+		std::uint64_t observedMembershipRevision = 0U;
+		std::uint64_t observedAnimatorMutationRevision = 0U;
+		std::uint64_t observedResourceRevision = 0U;
+		std::uint64_t observedRendererSessionGeneration = 0U;
+		TerraEngine::Renderer::RendererRecoveryStateKind observedRendererState =
+			TerraEngine::Renderer::RendererRecoveryStateKind::Active;
+		AnimatorComponentSynchronizationSummary lastSummary{};
+		bool hasStableObservation = false;
+		bool requiresPolling = true;
 	};
 
 	AnimatorComponentBindingCoordinator::AnimatorComponentBindingCoordinator()
@@ -2396,6 +2683,8 @@ namespace TerraEngine::Animation {
 		ObjectManager& objects,
 		ResourceManager& resources) noexcept
 	{
+		TERRAENGINE_PROFILE_SCOPE("Animation: Synchronize Authored Components",
+			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		AnimatorComponentSynchronizationSummary summary;
 		try {
 			impl_->resources = &resources;
@@ -2405,15 +2694,193 @@ namespace TerraEngine::Animation {
 			const std::uint64_t streamingFrame = impl_->synchronizationFrame;
 			const bool playbackRestartRequested =
 				impl_->playbackRestartRequested;
+			const std::uint64_t membershipRevision =
+				objects.GetRuntimeActiveMembershipRevision();
+			const std::uint64_t animatorMutationRevision =
+				objects.GetComponentValueMutationRevision(
+					AnimatorComponent::kComponentName);
+			const std::uint64_t resourceRevision =
+				resources.GetAnimationBindingResourceRevision();
+			const TerraEngine::Renderer::RendererRecoverySnapshot renderer =
+				RenderSystem::Instance().GetLatestRendererRecoverySnapshot();
+			const bool sharedRuntimeInputsStable = impl_->hasStableObservation
+				&& impl_->observedResourceRevision == resourceRevision
+				&& impl_->observedRendererSessionGeneration
+					== renderer.renderSessionGeneration
+				&& impl_->observedRendererState == renderer.state;
+			bool allRuntimeHandlesAlive = true;
+			for(const auto& [ownerObjectId, entry] : impl_->entries) {
+				(void)ownerObjectId;
+				if(!animation.IsAnimatorInstanceAlive(entry.handle)) {
+					allRuntimeHandlesAlive = false;
+					break;
+				}
+			}
+			if(impl_->hasStableObservation && !impl_->requiresPolling
+				&& !playbackRestartRequested && allRuntimeHandlesAlive
+				&& impl_->observedMembershipRevision == membershipRevision
+				&& impl_->observedAnimatorMutationRevision
+					== animatorMutationRevision
+				&& impl_->observedResourceRevision == resourceRevision
+				&& impl_->observedRendererSessionGeneration
+					== renderer.renderSessionGeneration
+				&& impl_->observedRendererState == renderer.state) {
+				// Event-like counters describe work performed by this synchronization,
+				// while stream and binding totals remain the last complete observation.
+				summary = impl_->lastSummary;
+				summary.createdCount = 0U;
+				summary.reboundCount = 0U;
+				summary.invalidatedCount = 0U;
+				summary.failedCount = 0U;
+				return summary;
+			}
 			std::size_t issuedStreamingRequests = 0U;
+			std::set<RuntimeStreamingDependency> processedStreamingDependencies;
 			const bool clipPublicationChanged = PollClipStreamReads(impl_->clipStreaming);
 			PruneCompletedStreamingLoads(impl_->pendingStreamingLoads);
-			const std::vector<Object> authoredObjects =
-				objects.SnapshotObjectsWithComponents<AnimatorComponent>();
+			std::vector<Object> authoredObjects;
+			{
+				TERRAENGINE_PROFILE_SCOPE("Animation: Snapshot Authored Animators",
+					TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+				authoredObjects =
+					objects.SnapshotObjectsWithComponents<AnimatorComponent>();
+			}
 			summary.authoredActiveCount = authoredObjects.size();
-			std::set<UUID> seen;
+			std::map<AuthoredBindingSignature, AuthoredBindingSignature>
+				authoredSignatureTemplates;
+			// Freeze all unique authored generation tuples before mutating any runtime
+			// entry. If a resource writer is active, retain the previous complete world
+			// and retry next frame instead of blocking the editor's protected boundary.
+			for(const Object& object : authoredObjects) {
+				const AnimatorComponent* component =
+					objects.GetComponent<AnimatorComponent>(object);
+				if(component == nullptr) continue;
+				const AuthoredBindingSignature authoredSignature =
+					MakeAuthoredSignature(*component);
+				if(authoredSignatureTemplates.contains(authoredSignature)) continue;
+				AuthoredBindingSignature completedSignature = authoredSignature;
+				if(!CapturePublishedAssetGenerations(completedSignature, resources)) {
+					impl_->requiresPolling = true;
+					summary = impl_->hasStableObservation
+						? impl_->lastSummary : summary;
+					summary.createdCount = 0U;
+					summary.reboundCount = 0U;
+					summary.invalidatedCount = 0U;
+					summary.failedCount = 0U;
+					return summary;
+				}
+				authoredSignatureTemplates.emplace(
+					authoredSignature, std::move(completedSignature));
+			}
+			std::unordered_set<UUID> seen;
+			seen.reserve(authoredObjects.size());
 			std::set<ClipStreamPayloadKey> desiredClipPayloads;
+			// Identical prefab instances share authored animation assets and cooked GPU
+			// inputs. These protected-pass caches retain one immutable preparation per
+			// exact generation while every runtime animator still receives independent
+			// playback, parameters, events, and publication generations.
+			using SkeletonPublicationKey =
+				std::pair<UUID, AnimationGeneration>;
+			std::map<SkeletonPublicationKey, SkeletonAsset>
+				renderSkeletonPublications;
+			std::map<AuthoredBindingSignature,
+				std::vector<RuntimeStreamingDependency>>
+				streamingDependencyTemplates;
+			struct DirectClipBindingTemplate {
+				AnimatorPlaybackBinding binding;
+				ClipStreamingBindingState streamingState;
+				// Identical prefab instances share these immutable request descriptors.
+				// Per-instance retain accounting remains in the coordinator delta batch.
+				std::shared_ptr<const std::vector<AnimationStreamRequest>>
+					retainedRequests;
+				AuthoredBindingSignature resolvedSignature;
+				AnimationClipView validatedClipView;
+				AnimationStatus validatedClipViewStatus = AnimationStatus::NotReady;
+			};
+			std::map<AuthoredBindingSignature, DirectClipBindingTemplate>
+				directClipBindingTemplates;
+			struct PendingDirectClipStreamingRefresh {
+				Impl::Entry* entry = nullptr;
+				DirectClipBindingTemplate* prepared = nullptr;
+				bool playOnBind = false;
+			};
+			std::vector<PendingDirectClipStreamingRefresh> pendingDirectClipRefreshes;
+			std::map<ClipStreamPayloadKey, ClipStreamRetainAdjustment>
+				clipStreamRetainAdjustments;
+			// Reserve before touching live coordinator entries. A crowd-wide stream
+			// promotion can then be staged without an allocation failure midway through
+			// its protected bookkeeping.
+			pendingDirectClipRefreshes.reserve(authoredObjects.size());
+			// Prefab crowds commonly contain thousands of byte-identical authored
+			// components. Cache the ResourceManager observations and exact render-mesh
+			// validation per unique signature for this protected pass; every instance
+			// still compares its own component and runtime handle below.
+			std::map<AuthoredBindingSignature, bool> directRenderInputMatches;
+			std::map<GpuBindingMeshObservationKey, GpuBindingMeshObservation>
+				gpuBindingMeshObservations;
+			std::map<UUID, MeshAnimationBindingSnapshot> meshBindingSnapshots;
+			// Resolve render ownership once for the protected scene snapshot. The old
+			// per-animator query rescanned every renderable and walked its hierarchy,
+			// turning a crowd of A animators and R meshes into O(A*R) startup work.
+			// Grouping by the nearest active animator makes the same exact validation
+			// linear in the scene size while retaining the disabled-child barrier rule.
+			std::unordered_map<UUID, std::vector<Object>> renderObjectsByAnimator;
+			renderObjectsByAnimator.reserve(authoredObjects.size());
+			{
+				TERRAENGINE_PROFILE_SCOPE("Animation: Index Render Ownership",
+					TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+				for(const Object& renderObject
+					: objects.SnapshotObjectsWithComponents<
+						Transform, MeshRenderComponent>()) {
+					const std::optional<UUID> owner =
+						FindRuntimeAnimatorOwner(renderObject, objects);
+					if(owner.has_value()) {
+						renderObjectsByAnimator[*owner].push_back(renderObject);
+					}
+				}
+			}
+			{
+				TERRAENGINE_PROFILE_SCOPE("Animation: Snapshot Deformable Mesh Inputs",
+					TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+				// Freeze every unique render mesh before touching coordinator entries.
+				// A concurrent import therefore defers this complete reconciliation
+				// instead of blocking the protected frame or publishing a half-updated
+				// crowd whose earlier instances observed a different mesh generation.
+				for(const auto& [ownerObjectId, renderObjects]
+					: renderObjectsByAnimator) {
+					(void)ownerObjectId;
+					for(const Object& renderObject : renderObjects) {
+						const MeshRenderComponent* component =
+							objects.GetComponent<MeshRenderComponent>(renderObject);
+						if(component == nullptr || component->meshId == EMPTY_UUID
+							|| meshBindingSnapshots.contains(component->meshId)) {
+							continue;
+						}
+						auto snapshot = resources.TryCopyMeshAnimationBindingSnapshot(
+							component->meshId);
+						if(!snapshot.has_value()) {
+							impl_->requiresPolling = true;
+							summary = impl_->hasStableObservation
+								? impl_->lastSummary : summary;
+							summary.createdCount = 0U;
+							summary.reboundCount = 0U;
+							summary.invalidatedCount = 0U;
+							summary.failedCount = 0U;
+							return summary;
+						}
+						meshBindingSnapshots.emplace(
+							component->meshId, std::move(*snapshot));
+					}
+				}
+			}
 
+			std::optional<TerraEngine::Profiling::ProfilerScope> bindingProfile;
+			bindingProfile.emplace("Animation: Reconcile Animator Bindings",
+				TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			// Reserve before retaining Entry pointers for the deferred direct-clip
+			// batch. This also removes hash-table growth from the measured loop.
+			impl_->entries.reserve(std::max(
+				impl_->entries.size(), authoredObjects.size()));
 			for(const Object& object : authoredObjects) {
 				const UUID ownerObjectId = objects.getUUID(object);
 				const AnimatorComponent* component = objects.GetComponent<AnimatorComponent>(object);
@@ -2426,7 +2893,14 @@ namespace TerraEngine::Animation {
 					continue;
 				}
 				seen.insert(ownerObjectId);
-				AuthoredBindingSignature signature = MakeSignature(*component, resources);
+				const AuthoredBindingSignature authoredSignature =
+					MakeAuthoredSignature(*component);
+				auto capturedSignature = authoredSignatureTemplates.find(authoredSignature);
+				if(capturedSignature == authoredSignatureTemplates.end()) {
+					++summary.failedCount;
+					continue;
+				}
+				AuthoredBindingSignature signature = capturedSignature->second;
 				auto existing = impl_->entries.find(ownerObjectId);
 				std::optional<ControllerProgramState> retainedControllerProgram;
 				const bool identityChanged = existing != impl_->entries.end()
@@ -2461,6 +2935,50 @@ namespace TerraEngine::Animation {
 					}
 					impl_->entries.erase(existing);
 					existing = impl_->entries.end();
+				}
+
+				bool directRenderInputStable = false;
+				if(!sharedRuntimeInputsStable && existing != impl_->entries.end()
+					&& component->controllerAssetId == EMPTY_UUID) {
+					auto cachedMatch = directRenderInputMatches.find(
+						existing->second.signature);
+					if(cachedMatch == directRenderInputMatches.end()) {
+						cachedMatch = directRenderInputMatches.emplace(
+							existing->second.signature,
+							MatchesPublishedDirectRenderInput(
+								existing->second.signature,
+								meshBindingSnapshots, renderer)).first;
+					}
+					directRenderInputStable = cachedMatch->second;
+				}
+				const bool relevantRuntimeInputsStable =
+					sharedRuntimeInputsStable || directRenderInputStable;
+				if(existing != impl_->entries.end()
+					&& relevantRuntimeInputsStable
+					&& !playbackRestartRequested
+					&& MatchesAuthoredBindingInputs(
+						existing->second.signature, signature)
+					&& existing->second.lastBindingStatus != AnimationStatus::MissingAsset
+					&& existing->second.lastBindingStatus != AnimationStatus::NotReady
+					&& !existing->second.controllerProgram.pending
+					&& !existing->second.clipStreamingPending
+					&& (!clipPublicationChanged
+						|| !existing->second.retainedClipStreams
+						|| existing->second.retainedClipStreams->empty())) {
+					// Membership growth elsewhere in the scene must not make already-bound
+					// animators repeat skeleton, mesh, streaming, and codec preparation.
+					summary.streamedMotionDatabaseCount +=
+						existing->second.motionDatabaseStreamed ? 1U : 0U;
+					summary.fallbackMotionDatabaseCount +=
+						existing->second.motionDatabaseFallback ? 1U : 0U;
+				if(existing->second.retainedClipStreams) {
+					for(const AnimationStreamRequest& request
+						: *existing->second.retainedClipStreams) {
+					desiredClipPayloads.insert(
+						MakeClipStreamPayloadKey(request));
+					}
+				}
+					continue;
 				}
 
 				bool createdNow = false;
@@ -2521,37 +3039,72 @@ namespace TerraEngine::Animation {
 								? resolvedController->skeletonAssetId.value
 								: EMPTY_UUID);
 				signature.resolvedSkeletonAssetId = resolvedSkeletonAssetId;
-				SkeletonAsset renderSkeleton;
-				AnimationGeneration renderSkeletonGeneration = 0U;
 				const SkeletonAsset* renderSkeletonView = nullptr;
-				if(resolvedSkeletonAssetId != EMPTY_UUID
-					&& resources.CopySkeletonPublication(
+				if(resolvedSkeletonAssetId != EMPTY_UUID) {
+					SkeletonPublicationKey skeletonKey{
 						resolvedSkeletonAssetId,
-						renderSkeleton,
-						renderSkeletonGeneration)) {
-					signature.skeletonRuntimeGeneration =
-						renderSkeletonGeneration;
-					signature.resolvedSkeletonCompatibilityFingerprint =
-						renderSkeleton.compatibilityFingerprint;
-					if(renderSkeleton.joints.size()
-						<= std::numeric_limits<std::uint32_t>::max()) {
-						signature.resolvedSkeletonJointCount =
-							static_cast<std::uint32_t>(
-								renderSkeleton.joints.size());
-						renderSkeletonView = &renderSkeleton;
+						signature.skeletonRuntimeGeneration};
+					auto skeletonPublication =
+						renderSkeletonPublications.find(skeletonKey);
+					if(skeletonPublication == renderSkeletonPublications.end()) {
+						SkeletonAsset renderSkeleton;
+						AnimationGeneration renderSkeletonGeneration = 0U;
+						if(resources.CopySkeletonPublication(
+							resolvedSkeletonAssetId,
+							renderSkeleton,
+							renderSkeletonGeneration)) {
+							skeletonKey.second = renderSkeletonGeneration;
+							skeletonPublication = renderSkeletonPublications.emplace(
+								skeletonKey, std::move(renderSkeleton)).first;
+						}
+					}
+					if(skeletonPublication != renderSkeletonPublications.end()) {
+						const SkeletonAsset& renderSkeleton =
+							skeletonPublication->second;
+						signature.skeletonRuntimeGeneration =
+							skeletonPublication->first.second;
+						signature.resolvedSkeletonCompatibilityFingerprint =
+							renderSkeleton.compatibilityFingerprint;
+						if(renderSkeleton.joints.size()
+							<= std::numeric_limits<std::uint32_t>::max()) {
+							signature.resolvedSkeletonJointCount =
+								static_cast<std::uint32_t>(
+									renderSkeleton.joints.size());
+							renderSkeletonView = &renderSkeleton;
+						}
 					}
 				}
+				const auto ownedRenderObjects = renderObjectsByAnimator.find(ownerObjectId);
+				const std::span<const Object> ownedRenderObjectView =
+					ownedRenderObjects == renderObjectsByAnimator.end()
+						? std::span<const Object>{}
+						: std::span<const Object>{ownedRenderObjects->second};
 				const GpuBindingRenderIdentity renderIdentity =
 					ResolveGpuBindingRenderIdentity(
-						ownerObjectId,
+						ownedRenderObjectView,
 						renderSkeletonView,
 						objects,
-						resources,
-						signature);
+						signature,
+						meshBindingSnapshots,
+						gpuBindingMeshObservations);
+				AuthoredBindingSignature sharedPreparationKey = signature;
+				// The candidate fingerprint deliberately includes the render-object UUID
+				// to detect hierarchy replacement. Cooked asset preparation depends on
+				// the exact mesh/generation fields beside it, not on instance identity.
+				sharedPreparationKey.renderCandidateFingerprint = 0U;
+				auto dependencyTemplate =
+					streamingDependencyTemplates.find(sharedPreparationKey);
+				if(dependencyTemplate == streamingDependencyTemplates.end()) {
+					dependencyTemplate = streamingDependencyTemplates.emplace(
+						sharedPreparationKey,
+						CollectAuthoredStreamingDependencies(
+							*component, resources, resolvedController)).first;
+				}
 				std::vector<RuntimeStreamingDependency> streamingDependencies =
-					CollectAuthoredStreamingDependencies(
-						*component, resources, resolvedController);
-				if(existing->second.streamingDependencies != streamingDependencies) {
+					dependencyTemplate->second;
+				const bool streamingDependenciesChanged =
+					existing->second.streamingDependencies != streamingDependencies;
+				if(streamingDependenciesChanged) {
 					// Replace all needs owned by this component as one protected scene
 					// synchronization step. Shared assets keep other owners' records.
 					(void)resources.ReleaseStreamingNeedsForObject(
@@ -2562,59 +3115,238 @@ namespace TerraEngine::Animation {
 				PublishAndRequestStreamingDependencies(
 					ownerObjectId,
 					existing->second.streamingDependencies,
+					streamingDependenciesChanged,
 					streamingFrame,
 					resources,
 					impl_->pendingStreamingLoads,
+					processedStreamingDependencies,
 					issuedStreamingRequests);
-				const bool authoredValuesChanged = existing->second.signature != signature;
+				const bool authoredValuesChanged = !MatchesAuthoredBindingInputs(
+					existing->second.signature, signature);
+				// Controller-selected clips and skeletons are not stored directly on the
+				// component, but their exact publications still belong to the binding.
+				// Compare those resolved generations after controller preparation so an
+				// eviction or hot reload immediately publishes a safe pose and retries.
+				const bool resolvedDependenciesChanged =
+					existing->second.signature.resolvedSkeletonAssetId
+						!= signature.resolvedSkeletonAssetId
+					|| existing->second.signature.skeletonRuntimeGeneration
+						!= signature.skeletonRuntimeGeneration
+					|| existing->second.signature.controllerDependencyRuntimeFingerprint
+						!= signature.controllerDependencyRuntimeFingerprint
+					|| existing->second.signature.resolvedSkeletonCompatibilityFingerprint
+						!= signature.resolvedSkeletonCompatibilityFingerprint
+					|| existing->second.signature.resolvedSkeletonJointCount
+						!= signature.resolvedSkeletonJointCount
+					|| existing->second.signature.renderCandidateFingerprint
+						!= signature.renderCandidateFingerprint
+					|| existing->second.signature.renderMeshAssetId
+						!= signature.renderMeshAssetId
+					|| existing->second.signature.renderMeshHeaderVersion
+						!= signature.renderMeshHeaderVersion
+					|| existing->second.signature.deformablePayloadGeneration
+						!= signature.deformablePayloadGeneration
+					|| existing->second.signature.rendererSessionGeneration
+						!= signature.rendererSessionGeneration
+					|| existing->second.signature.rendererState != signature.rendererState;
 				const bool dependencyRetry = existing->second.lastBindingStatus == AnimationStatus::MissingAsset
 					|| existing->second.lastBindingStatus == AnimationStatus::NotReady;
-				if(createdNow || authoredValuesChanged || dependencyRetry
+				if(createdNow || authoredValuesChanged || resolvedDependenciesChanged
+					|| dependencyRetry
 					|| playbackRestartRequested
 					|| controllerProgramChanged || existing->second.controllerProgram.pending
 					|| existing->second.clipStreamingPending
-					|| (clipPublicationChanged && !existing->second.retainedClipStreams.empty())) {
+					|| (clipPublicationChanged
+						&& existing->second.retainedClipStreams
+						&& !existing->second.retainedClipStreams->empty())) {
+					const bool streamingOnlyRefresh = !createdNow
+						&& !authoredValuesChanged && !resolvedDependenciesChanged
+						&& !playbackRestartRequested
+						&& !controllerProgramChanged
+						&& !existing->second.controllerProgram.pending
+						&& component->controllerAssetId == EMPTY_UUID
+						&& component->retargetProfileOverrideAssetId == EMPTY_UUID
+						&& (!dependencyRetry
+							|| existing->second.clipStreamingPending)
+						&& (existing->second.clipStreamingPending
+							|| (clipPublicationChanged
+								&& existing->second.retainedClipStreams
+								&& !existing->second.retainedClipStreams->empty()));
 					ClipStreamingBindingState clipStreamingState;
-					AnimatorPlaybackBinding binding = BuildPlaybackBinding(
-						*component, resources, signature, existing->second.controllerProgram,
-						renderIdentity, impl_->clipStreaming, clipStreamingState);
+					AnimatorPlaybackBinding binding;
+					AnimationClipView* validatedClipView = nullptr;
+					DirectClipBindingTemplate* preparedBinding = nullptr;
+					const auto cachedBinding = component->controllerAssetId == EMPTY_UUID
+						? directClipBindingTemplates.find(sharedPreparationKey)
+						: directClipBindingTemplates.end();
+					if(cachedBinding != directClipBindingTemplates.end()) {
+						preparedBinding = &cachedBinding->second;
+						if(!streamingOnlyRefresh) {
+							binding = preparedBinding->binding;
+							clipStreamingState = preparedBinding->streamingState;
+						}
+						const std::uint64_t renderCandidateFingerprint =
+							signature.renderCandidateFingerprint;
+						signature = preparedBinding->resolvedSignature;
+						signature.renderCandidateFingerprint =
+							renderCandidateFingerprint;
+						if(preparedBinding->validatedClipViewStatus
+							== AnimationStatus::Ok) {
+							validatedClipView = &preparedBinding->validatedClipView;
+						}
+					} else {
+						binding = BuildPlaybackBinding(
+							*component, resources, signature,
+							existing->second.controllerProgram,
+							renderIdentity, impl_->clipStreaming,
+							clipStreamingState);
+						if(component->controllerAssetId == EMPTY_UUID) {
+							DirectClipBindingTemplate prepared;
+							prepared.binding = binding;
+							prepared.streamingState = clipStreamingState;
+							prepared.retainedRequests = std::make_shared<const
+								std::vector<AnimationStreamRequest>>(
+								prepared.streamingState.retainedRequests);
+							prepared.resolvedSignature = signature;
+							if(binding.clip && binding.skeleton) {
+								prepared.validatedClipViewStatus =
+									prepared.validatedClipView.Open(
+										*binding.clip,
+										binding.skeleton.get(),
+										std::span<const std::uint8_t>(
+											binding.residentSegments),
+										binding.clipGeneration,
+										binding.streamedSegmentPayloads);
+							}
+							const auto inserted = directClipBindingTemplates.emplace(
+								sharedPreparationKey, std::move(prepared)).first;
+							preparedBinding = &inserted->second;
+							if(inserted->second.validatedClipViewStatus
+								== AnimationStatus::Ok) {
+								validatedClipView = &inserted->second.validatedClipView;
+							}
+						}
+					}
 					// Runtime worlds autoplay authored components, while the editor
 					// deliberately leaves the same binding stopped outside Play Mode.
 					// Rebinds inherit that domain policy so hot reload cannot restart an
 					// animation after the user has stopped the scene.
-					binding.playOnBind =
+					const bool playOnBind =
 						animation.IsAuthoredComponentPlaybackEnabled()
-						&& component->playAutomatically;
-					const AnimationStatus status = animation.BindAnimatorPlayback(
-						existing->second.handle,
-						std::move(binding));
-					existing->second.signature = signature;
-					existing->second.lastBindingStatus = status;
-					existing->second.clipStreamingPending = clipStreamingState.pending;
-					existing->second.motionDatabaseStreamed =
-						clipStreamingState.motionDatabaseStreamed;
-					existing->second.motionDatabaseFallback =
-						clipStreamingState.motionDatabaseFallback;
-					ReconcileClipStreamRetains(impl_->clipStreaming,
-						existing->second.retainedClipStreams,
-						clipStreamingState.retainedRequests);
-					if(status == AnimationStatus::Ok || status == AnimationStatus::MissingAsset
-						|| status == AnimationStatus::IncompatibleAsset) {
-						++summary.reboundCount;
+							&& component->playAutomatically;
+					if(streamingOnlyRefresh && preparedBinding != nullptr) {
+						// Defer all identical direct-clip promotions until the protected pass
+						// has collected them. AnimationSystem then locks runtime ownership and
+						// evaluation-cache state once for the complete prefab crowd.
+						existing->second.signature = signature;
+						existing->second.clipStreamingPending =
+							preparedBinding->streamingState.pending;
+						existing->second.motionDatabaseStreamed =
+							preparedBinding->streamingState.motionDatabaseStreamed;
+						existing->second.motionDatabaseFallback =
+							preparedBinding->streamingState.motionDatabaseFallback;
+						ReconcileClipStreamRetains(impl_->clipStreaming,
+							existing->second.retainedClipStreams,
+							preparedBinding->streamingState.retainedRequests,
+							preparedBinding->retainedRequests,
+							clipStreamRetainAdjustments);
+						pendingDirectClipRefreshes.push_back({
+							&existing->second, preparedBinding, playOnBind});
 					} else {
-						++summary.failedCount;
+						binding.playOnBind = playOnBind;
+						const AnimationStatus status = animation.BindAnimatorPlayback(
+							existing->second.handle,
+							std::move(binding));
+						existing->second.signature = signature;
+						existing->second.lastBindingStatus = status;
+						existing->second.clipStreamingPending = clipStreamingState.pending;
+						existing->second.motionDatabaseStreamed =
+							clipStreamingState.motionDatabaseStreamed;
+						existing->second.motionDatabaseFallback =
+							clipStreamingState.motionDatabaseFallback;
+						ReconcileClipStreamRetains(impl_->clipStreaming,
+							existing->second.retainedClipStreams,
+							clipStreamingState.retainedRequests,
+							{},
+							clipStreamRetainAdjustments);
+						if(status == AnimationStatus::Ok
+							|| status == AnimationStatus::MissingAsset
+							|| status == AnimationStatus::IncompatibleAsset) {
+							++summary.reboundCount;
+						} else {
+							++summary.failedCount;
+						}
 					}
 				}
 				summary.streamedMotionDatabaseCount +=
 					existing->second.motionDatabaseStreamed ? 1U : 0U;
 				summary.fallbackMotionDatabaseCount +=
 					existing->second.motionDatabaseFallback ? 1U : 0U;
-				for(const AnimationStreamRequest& request
-					: existing->second.retainedClipStreams) {
-					desiredClipPayloads.insert(MakeClipStreamPayloadKey(request));
+				if(existing->second.retainedClipStreams) {
+					for(const AnimationStreamRequest& request
+						: *existing->second.retainedClipStreams) {
+						desiredClipPayloads.insert(
+							MakeClipStreamPayloadKey(request));
+					}
 				}
 			}
-
+			if(!clipStreamRetainAdjustments.empty()) {
+				TERRAENGINE_PROFILE_SCOPE(
+					"Animation: Apply Clip Streaming Retain Adjustments",
+					TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+				std::vector<AnimationStreamRetainAdjustment> adjustments;
+				adjustments.reserve(clipStreamRetainAdjustments.size());
+				for(const auto& [key, adjustment] : clipStreamRetainAdjustments) {
+					adjustments.push_back({
+						adjustment.request,
+						adjustment.retainDelta,
+						adjustment.gameplayCriticalDirty,
+						impl_->clipStreaming.gameplayCriticalRetainers.contains(key)});
+				}
+				(void)impl_->clipStreaming.coordinator.ApplyRetainAdjustments(adjustments);
+			}
+			bindingProfile.reset();
+			if(!pendingDirectClipRefreshes.empty()) {
+				TERRAENGINE_PROFILE_SCOPE(
+					"Animation: Apply Direct Clip Streaming Refresh Batch",
+					TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+				std::vector<AnimatorDirectClipStreamingRefresh> refreshes;
+				std::vector<AnimationStatus> statuses(
+					pendingDirectClipRefreshes.size(), AnimationStatus::InvalidArgument);
+				refreshes.reserve(pendingDirectClipRefreshes.size());
+				for(PendingDirectClipStreamingRefresh& pending
+					: pendingDirectClipRefreshes) {
+					refreshes.push_back({
+						pending.entry->handle,
+						&pending.prepared->binding,
+						pending.prepared->validatedClipViewStatus == AnimationStatus::Ok
+							? &pending.prepared->validatedClipView
+							: nullptr});
+				}
+				animation.RefreshAnimatorDirectClipStreamingBatch(refreshes, statuses);
+				for(std::size_t index = 0U;
+					index < pendingDirectClipRefreshes.size(); ++index) {
+					PendingDirectClipStreamingRefresh& pending =
+						pendingDirectClipRefreshes[index];
+					AnimationStatus status = statuses[index];
+					if(status != AnimationStatus::Ok) {
+						// A mismatched record falls back independently; it cannot reject or
+						// roll back successful shared promotions for the rest of the batch.
+						AnimatorPlaybackBinding fallback = pending.prepared->binding;
+						fallback.playOnBind = pending.playOnBind;
+						status = animation.BindAnimatorPlayback(
+							pending.entry->handle, std::move(fallback));
+					}
+					pending.entry->lastBindingStatus = status;
+					if(status == AnimationStatus::Ok
+						|| status == AnimationStatus::MissingAsset
+						|| status == AnimationStatus::IncompatibleAsset) {
+						++summary.reboundCount;
+					} else {
+						++summary.failedCount;
+					}
+				}
+			}
 			for(auto iterator = impl_->entries.begin(); iterator != impl_->entries.end();) {
 				if(seen.contains(iterator->first)) {
 					++iterator;
@@ -2662,6 +3394,45 @@ namespace TerraEngine::Animation {
 			// next frame retries instead of silently keeping the old clock domain.
 			impl_->playbackRestartRequested = false;
 			summary.runtimeActiveCount = impl_->entries.size();
+			impl_->requiresPolling = !impl_->pendingStreamingLoads.empty()
+				|| !impl_->clipStreaming.pendingReads.empty();
+			for(const auto& [ownerObjectId, entry] : impl_->entries) {
+				(void)ownerObjectId;
+				// Poll only work that can complete without publishing a ResourceManager
+				// revision. Missing or terminally-not-ready assets stay on their explicit
+				// safe pose until an import, reload, or stream publication advances that
+				// revision. Treating those stable statuses as pending made one bad asset
+				// force an O(animators) protected rebind on every frame.
+				// pendingReads is the authoritative list of clip-stream work that can
+				// still complete asynchronously. A binding may retain its visual
+				// clipStreamingPending safe-pose state after a read reaches Failed or
+				// Cancelled; polling that status forever recreates the full-scene scan.
+				// A later successful stream publication advances the resource revision
+				// and re-enters reconciliation without per-frame polling.
+				impl_->requiresPolling = impl_->requiresPolling
+					|| entry.controllerProgram.pending;
+			}
+			const TerraEngine::Renderer::RendererRecoverySnapshot completedRenderer =
+				RenderSystem::Instance().GetLatestRendererRecoverySnapshot();
+			impl_->observedMembershipRevision =
+				objects.GetRuntimeActiveMembershipRevision();
+			impl_->observedAnimatorMutationRevision =
+				objects.GetComponentValueMutationRevision(
+					AnimatorComponent::kComponentName);
+			impl_->observedResourceRevision =
+				resources.GetAnimationBindingResourceRevision();
+			impl_->observedRendererSessionGeneration =
+				completedRenderer.renderSessionGeneration;
+			impl_->observedRendererState = completedRenderer.state;
+			// If a worker published while this pass was walking earlier entries,
+			// rescan once next frame so every binding sees the same completed input.
+			impl_->requiresPolling = impl_->requiresPolling
+				|| impl_->observedResourceRevision != resourceRevision
+				|| completedRenderer.renderSessionGeneration
+					!= renderer.renderSessionGeneration
+				|| completedRenderer.state != renderer.state;
+			impl_->lastSummary = summary;
+			impl_->hasStableObservation = true;
 			return summary;
 		} catch(const std::bad_alloc&) {
 			++summary.failedCount;
@@ -2698,6 +3469,7 @@ namespace TerraEngine::Animation {
 		impl_->entries.clear();
 		impl_->pendingStreamingLoads.clear();
 		impl_->clipStreaming.pendingReads.clear();
+		impl_->clipStreaming.deferredPublicationPending = false;
 		(void)impl_->clipStreaming.coordinator.ApplyResidentBudget(0U);
 		impl_->clipStreaming.gameplayCriticalRetainers.clear();
 		impl_->clipStreaming.clipRangeTables.clear();
@@ -2706,5 +3478,8 @@ namespace TerraEngine::Animation {
 			impl_->clipStreaming.coordinator.LoadResidencySnapshot();
 		impl_->resources = nullptr;
 		impl_->playbackRestartRequested = false;
+		impl_->lastSummary = {};
+		impl_->hasStableObservation = false;
+		impl_->requiresPolling = true;
 	}
 }

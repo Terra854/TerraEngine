@@ -15,6 +15,7 @@
 #include <mutex>
 #include <span>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 class ObjectManager;
@@ -116,13 +117,27 @@ namespace TerraEngine::Animation {
 		bool CopySocketSnapshots(
 			AnimatorInstanceHandle animator,
 			std::vector<AnimationAttachmentTransformSnapshot>& output) const;
+		[[nodiscard]] bool HasPublicationRequests() const;
+		[[nodiscard]] bool IsPublicationRequested(
+			AnimatorInstanceHandle animator) const;
 		[[nodiscard]] std::size_t PublishedSocketCount(AnimatorInstanceHandle animator) const;
+		void RetireSnapshot(AnimatorInstanceHandle animator);
 		void Retire(AnimatorInstanceHandle animator);
 		void Clear();
 
 	private:
+		struct AnimatorHandleHash {
+			[[nodiscard]] std::size_t operator()(
+				AnimatorInstanceHandle value) const noexcept;
+		};
+
 		mutable std::mutex mutex_;
 		std::vector<AnimationBoneSocketSnapshot> snapshots_;
+		// A failed coherent read is a subscription for the next protected frame.
+		// Keeping requests separate from snapshots preserves the immutable read ABI
+		// while ordinary animators avoid copying every bone when nobody consumes it.
+		mutable std::unordered_set<AnimatorInstanceHandle, AnimatorHandleHash>
+			publicationRequests_;
 	};
 
 	// Captures a standalone, immutable snapshot from a sealed CPU pose. A reload

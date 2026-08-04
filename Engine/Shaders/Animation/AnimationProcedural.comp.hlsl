@@ -326,6 +326,7 @@ void main(uint3 id : SV_DispatchThreadID)
 	if (!TeResolveWork(id.x, TE_ANIMATION_GPU_STAGE_PROCEDURAL, dispatch, packet, joint)) return;
 	if (!TeValidatePacket(dispatch, packet, joint, TE_ANIMATION_GPU_STAGE_PROCEDURAL)
 		|| joint >= packet.jointCount) return;
+	if ((packet.flags & TE_ANIMATION_GPU_WORK_SUSPEND_VISUAL_EVALUATION) != 0u) return;
 	// A deterministic or CPU-authoritative packet already contains the protected
 	// pose selected by the CPU evaluator. Do not layer a visual-only result over it.
 	if ((packet.flags & TE_ANIMATION_PROCEDURAL_RELEVANT_FLAGS) != 0u

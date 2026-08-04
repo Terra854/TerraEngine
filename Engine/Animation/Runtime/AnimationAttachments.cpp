@@ -75,6 +75,13 @@ namespace TerraEngine::Animation {
 		return publisher;
 	}
 
+	std::size_t AnimationAttachmentSnapshotPublisher::AnimatorHandleHash::operator()(
+		AnimatorInstanceHandle value) const noexcept
+	{
+		return (static_cast<std::size_t>(value.slotIndex) << 32U)
+			^ static_cast<std::size_t>(value.generation);
+	}
+
 	bool AnimationAttachmentSnapshotPublisher::Publish(AnimationBoneSocketSnapshot snapshot)
 	{
 		if(!snapshot.animator.IsValid() || snapshot.poseGeneration == 0U
@@ -103,6 +110,7 @@ namespace TerraEngine::Animation {
 		try {
 			AnimationSocketReadSnapshot staged;
 			std::scoped_lock lock(mutex_);
+			publicationRequests_.insert(animator);
 			const auto snapshot = std::find_if(snapshots_.begin(), snapshots_.end(), [animator](const auto& value) {
 				return value.animator == animator;
 			});
@@ -132,19 +140,44 @@ namespace TerraEngine::Animation {
 		return true;
 	}
 
+	bool AnimationAttachmentSnapshotPublisher::HasPublicationRequests() const
+	{
+		std::scoped_lock lock(mutex_);
+		return !publicationRequests_.empty();
+	}
+
+	bool AnimationAttachmentSnapshotPublisher::IsPublicationRequested(
+		AnimatorInstanceHandle animator) const
+	{
+		std::scoped_lock lock(mutex_);
+		return publicationRequests_.contains(animator);
+	}
+
 	std::size_t AnimationAttachmentSnapshotPublisher::PublishedSocketCount(
 		AnimatorInstanceHandle animator) const
 	{
 		std::scoped_lock lock(mutex_);
+		publicationRequests_.insert(animator);
 		const auto snapshot = std::find_if(snapshots_.begin(), snapshots_.end(), [animator](const auto& value) {
 			return value.animator == animator;
 		});
 		return snapshot == snapshots_.end() ? 0U : snapshot->sockets.size();
 	}
 
+	void AnimationAttachmentSnapshotPublisher::RetireSnapshot(
+		AnimatorInstanceHandle animator)
+	{
+		std::scoped_lock lock(mutex_);
+		const auto snapshot = std::remove_if(snapshots_.begin(), snapshots_.end(), [animator](const auto& value) {
+			return value.animator == animator;
+		});
+		snapshots_.erase(snapshot, snapshots_.end());
+	}
+
 	void AnimationAttachmentSnapshotPublisher::Retire(AnimatorInstanceHandle animator)
 	{
 		std::scoped_lock lock(mutex_);
+		publicationRequests_.erase(animator);
 		const auto snapshot = std::remove_if(snapshots_.begin(), snapshots_.end(), [animator](const auto& value) {
 			return value.animator == animator;
 		});
@@ -155,6 +188,7 @@ namespace TerraEngine::Animation {
 	{
 		std::scoped_lock lock(mutex_);
 		snapshots_.clear();
+		publicationRequests_.clear();
 	}
 
 	AnimationStatus CaptureAnimationBoneSocketSnapshot(

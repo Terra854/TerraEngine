@@ -310,13 +310,13 @@ TerraEngine::Scene::SceneChangePacket ObjectManager::PublishSceneChangePacket()
 
 	const auto sortByObjectId = [](std::vector<TerraEngine::Scene::SceneObjectRevisionSnapshot>& snapshots) {
 		std::sort(snapshots.begin(), snapshots.end(), [](const auto& left, const auto& right) {
-			return TerraEngine::ToHexString(left.objectId) < TerraEngine::ToHexString(right.objectId);
+			return left.objectId < right.objectId;
 		});
 	};
 	const auto sortHierarchy = [](std::vector<TerraEngine::Scene::SceneObjectRevisionSnapshot>& snapshots) {
 		std::sort(snapshots.begin(), snapshots.end(), [](const auto& left, const auto& right) {
 			return left.hierarchyDepth == right.hierarchyDepth
-				? TerraEngine::ToHexString(left.objectId) < TerraEngine::ToHexString(right.objectId)
+				? left.objectId < right.objectId
 				: left.hierarchyDepth < right.hierarchyDepth;
 		});
 	};
@@ -420,7 +420,9 @@ void ObjectManager::rebuildRuntimeActiveMembershipCache()
 		runtimeActiveMembershipCache.push_back(membership);
 	}
 	std::sort(runtimeActiveMembershipCache.begin(), runtimeActiveMembershipCache.end(), [](const TerraEngine::Scene::RuntimeActiveMembership& left, const TerraEngine::Scene::RuntimeActiveMembership& right) {
-		return TerraEngine::ToHexString(left.objectId) < TerraEngine::ToHexString(right.objectId);
+		// UUID byte order exactly matches its fixed-width hexadecimal order and
+		// avoids temporary string allocation while publishing large scene caches.
+		return left.objectId < right.objectId;
 	});
 	cachedRuntimeActiveMembershipRevision = runtimeActiveMembershipRevision;
 }
@@ -725,7 +727,7 @@ std::vector<Object> ObjectManager::getChildren(const Object& parent)
 	// and runtime summaries. Sort by UUID instead of transient EnTT ids so
 	// reloads and undo sessions keep the same parent-before-child ordering.
 	std::sort(children.begin(), children.end(), [this](const Object& lhs, const Object& rhs) {
-		return TerraEngine::ToHexString(getUUID(lhs)) < TerraEngine::ToHexString(getUUID(rhs));
+		return getUUID(lhs) < getUUID(rhs);
 	});
 	return children;
 }
@@ -748,7 +750,7 @@ std::vector<Object> ObjectManager::getRootObjects()
 	// Root order is part of the authored scene surface, so make it independent
 	// from unordered_map bucket order and stable across editor/runtime/export.
 	std::sort(roots.begin(), roots.end(), [this](const Object& lhs, const Object& rhs) {
-		return TerraEngine::ToHexString(getUUID(lhs)) < TerraEngine::ToHexString(getUUID(rhs));
+		return getUUID(lhs) < getUUID(rhs);
 	});
 	return roots;
 }
@@ -1001,12 +1003,65 @@ void ObjectManager::notifyObjectStructureChanged(const Object& obj)
 		++it->second.componentGeneration;
 		++it->second.bindingGeneration;
 	}
+	++componentMutationRevision;
+	if (componentMutationRevision == 0)
+	{
+		componentMutationRevision = 1;
+	}
 	invalidateRuntimeActiveMembership();
 	notifySpatialObjectDirty(obj.EntityId());
 	const TerraEngine::Scene::SceneObjectRevisionSnapshot snapshot = captureSceneObjectRevision(obj);
 	recordSceneChange(TerraEngine::Scene::SceneChangeKind::Component, snapshot);
 	recordSceneChange(TerraEngine::Scene::SceneChangeKind::Bounds, snapshot);
 	if (onModified && !bulkPublicationActive) onModified();
+}
+
+void ObjectManager::notifyObjectComponentValueChanged(
+	const Object& obj,
+	std::string_view componentName)
+{
+	if (ReportWorkerObjectMutation("ObjectManager.notifyObjectComponentValueChanged", "Worker code attempted to alter a live component value directly."))
+	{
+		return;
+	}
+	if (!registry.valid(obj.EntityId()))
+	{
+		return;
+	}
+
+	// Value edits preserve component and managed-wrapper identity. The global
+	// token invalidates cached binding observations without forcing unrelated
+	// spatial, hierarchy, or active-membership snapshots to rebuild.
+	++componentMutationRevision;
+	if (componentMutationRevision == 0)
+	{
+		componentMutationRevision = 1;
+	}
+	if(!componentName.empty()) {
+		// Reflected edits execute at a protected boundary. Retaining one monotonic
+		// token per component type prevents an unrelated frequently-written
+		// component from invalidating every specialized runtime binder.
+		auto [revisionIterator, inserted] =
+			componentValueMutationRevisions.try_emplace(
+				std::string{componentName}, 1U);
+		(void)inserted;
+		std::uint64_t& revision = revisionIterator->second;
+		++revision;
+		if(revision == 0U) revision = 1U;
+	}
+	recordSceneChange(
+		TerraEngine::Scene::SceneChangeKind::Component,
+		captureSceneObjectRevision(obj));
+	if (onModified && !bulkPublicationActive) onModified();
+}
+
+std::uint64_t ObjectManager::GetComponentValueMutationRevision(
+	std::string_view componentName) const
+{
+	const auto found = componentValueMutationRevisions.find(
+		std::string{componentName});
+	return found != componentValueMutationRevisions.end()
+		? found->second : 1U;
 }
 
 void ObjectManager::notifyManagedBindingsReloaded()
@@ -1239,7 +1294,7 @@ std::optional<Object> ObjectManager::resolveObjectHandle(const Object& reference
 void ObjectManager::SortObjectsByStableId(std::vector<Object>& objects)
 {
 	std::sort(objects.begin(), objects.end(), [this](const Object& lhs, const Object& rhs) {
-		return TerraEngine::ToHexString(getUUID(lhs)) < TerraEngine::ToHexString(getUUID(rhs));
+		return getUUID(lhs) < getUUID(rhs);
 	});
 }
 
@@ -1378,6 +1433,12 @@ void ObjectManager::clear()
 	if (sceneGeneration == 0)
 	{
 		sceneGeneration = 1;
+	}
+	++componentMutationRevision;
+	if (componentMutationRevision == 0)
+	{
+	componentMutationRevision = 1;
+	componentValueMutationRevisions.clear();
 	}
 	pendingSceneChanges.clear();
 	registry.clear();

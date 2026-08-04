@@ -7,6 +7,7 @@ void main(uint3 id : SV_DispatchThreadID)
 	TeAnimationGpuDispatchRecord dispatch; TeAnimationGpuWorkPacket packet; uint joint;
 	if (!TeResolveWork(id.x, TE_ANIMATION_GPU_STAGE_SAMPLE, dispatch, packet, joint)) return;
 	if (!TeValidatePacket(dispatch, packet, joint, TE_ANIMATION_GPU_STAGE_SAMPLE) || joint >= packet.jointCount) return;
+	if ((packet.flags & TE_ANIMATION_GPU_WORK_SUSPEND_VISUAL_EVALUATION) != 0u) return;
 	TeAnimationPose pose = TeIdentityPose();
 	// Program records are 16 bytes per joint: clip offsets for T/R/S plus a reserved lane.
 	uint programBytes; gAnimationProgram.GetDimensions(programBytes);

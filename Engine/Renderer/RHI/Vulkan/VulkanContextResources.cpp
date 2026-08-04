@@ -20,6 +20,7 @@
 #include <iomanip>
 #include <iterator>
 #include <limits>
+#include <memory>
 #include <new>
 #include <numeric>
 #include <sstream>
@@ -1259,18 +1260,75 @@ bool VulkanContext::Impl::PublishVulkanCpuAnimationResources(
 		return false;
 	}
 
+	// Synchronized visual clones publish distinct instance records, but their
+	// local-space palette and morph bytes are often identical. Build one immutable
+	// upload slice per 128-bit content identity, then point every clone bridge at
+	// that slice. Model transforms remain draw-owned, so sharing these bytes cannot
+	// collapse object placement or instance generations.
+	struct SharedCpuAnimationContentKey
+	{
+		std::uint64_t low = 0U;
+		std::uint64_t high = 0U;
+
+		bool operator==(const SharedCpuAnimationContentKey&) const = default;
+	};
+	struct SharedCpuAnimationContentKeyHash
+	{
+		std::size_t operator()(const SharedCpuAnimationContentKey& key) const noexcept
+		{
+			const std::uint64_t rotatedHigh = (key.high << 1U) | (key.high >> 63U);
+			return static_cast<std::size_t>(key.low ^ rotatedHigh);
+		}
+	};
+	struct SharedCpuAnimationUploadSlice
+	{
+		const TerraEngine::Renderer::CpuAnimationDeformationData* data = nullptr;
+		std::uint64_t paletteOffsetBytes = 0U;
+		std::uint64_t morphOffsetBytes = 0U;
+	};
+
 	std::size_t paletteCount = 0U;
 	std::size_t morphWeightCount = 0U;
+	std::vector<SharedCpuAnimationUploadSlice> sharedSlices;
+	std::vector<std::size_t> recordSliceIndices;
+	std::unordered_map<SharedCpuAnimationContentKey, std::size_t,
+		SharedCpuAnimationContentKeyHash> sharedSliceByContent;
+	try {
+		sharedSlices.reserve(plan.records.size());
+		recordSliceIndices.reserve(plan.records.size());
+		sharedSliceByContent.reserve(plan.records.size());
+	} catch(const std::bad_alloc&) {
+		return false;
+	}
 	for(const TerraEngine::Renderer::CpuAnimationDeformationRecord& record
 		: plan.records) {
 		if(!record.IsComplete()
-			|| record.rendererGeneration != plan.rendererGeneration
-			|| record.data->paletteMatrices.size()
+			|| record.rendererGeneration != plan.rendererGeneration) {
+			return false;
+		}
+
+		const SharedCpuAnimationContentKey key{
+			record.data->contentIdLow,
+			record.data->contentIdHigh};
+		const auto existing = sharedSliceByContent.find(key);
+		if(existing != sharedSliceByContent.end()) {
+			recordSliceIndices.push_back(existing->second);
+			continue;
+		}
+		if(record.data->paletteMatrices.size()
 				> std::numeric_limits<std::size_t>::max() - paletteCount
 			|| record.data->morphWeights.size()
 				> std::numeric_limits<std::size_t>::max() - morphWeightCount) {
 			return false;
 		}
+		const std::size_t sliceIndex = sharedSlices.size();
+		sharedSlices.push_back({
+			record.data.get(),
+			static_cast<std::uint64_t>(paletteCount)
+				* sizeof(TerraEngine::Animation::GpuAnimationPaletteRecord),
+			static_cast<std::uint64_t>(morphWeightCount) * sizeof(float)});
+		sharedSliceByContent.emplace(key, sliceIndex);
+		recordSliceIndices.push_back(sliceIndex);
 		paletteCount += record.data->paletteMatrices.size();
 		morphWeightCount += record.data->morphWeights.size();
 	}
@@ -1319,20 +1377,27 @@ bool VulkanContext::Impl::PublishVulkanCpuAnimationResources(
 		palettes.reserve(paletteCount);
 		morphWeights.reserve(morphWeightCount);
 		bridgeRecords.reserve(plan.records.size());
-		std::uint64_t paletteOffsetBytes = 0U;
-		std::uint64_t morphOffsetBytes = 0U;
+		for(const SharedCpuAnimationUploadSlice& slice : sharedSlices) {
+			if(slice.data == nullptr) return false;
+			palettes.insert(palettes.end(),
+				slice.data->paletteMatrices.begin(),
+				slice.data->paletteMatrices.end());
+			morphWeights.insert(morphWeights.end(),
+				slice.data->morphWeights.begin(),
+				slice.data->morphWeights.end());
+		}
 		const std::uint32_t planGeneration = static_cast<std::uint32_t>(
 			(plan.frameId % std::numeric_limits<std::uint32_t>::max()) + 1U);
 		for(std::size_t recordIndex = 0U;
 			recordIndex < plan.records.size(); ++recordIndex) {
 			const TerraEngine::Renderer::CpuAnimationDeformationRecord& source =
 				plan.records[recordIndex];
-			palettes.insert(palettes.end(),
-				source.data->paletteMatrices.begin(),
-				source.data->paletteMatrices.end());
-			morphWeights.insert(morphWeights.end(),
-				source.data->morphWeights.begin(),
-				source.data->morphWeights.end());
+			if(recordIndex >= recordSliceIndices.size()
+				|| recordSliceIndices[recordIndex] >= sharedSlices.size()) {
+				return false;
+			}
+			const SharedCpuAnimationUploadSlice& shared =
+				sharedSlices[recordSliceIndices[recordIndex]];
 
 			VulkanGpuAnimationGraphicsRecord bridge{};
 			bridge.planGeneration = planGeneration;
@@ -1343,8 +1408,8 @@ bool VulkanContext::Impl::PublishVulkanCpuAnimationResources(
 			bridge.workPacketIndex =
 				static_cast<std::uint32_t>(recordIndex);
 			bridge.generationRecordIndex = 0U;
-			bridge.paletteOffsetBytes = paletteOffsetBytes;
-			bridge.morphOutputOffsetBytes = morphOffsetBytes;
+			bridge.paletteOffsetBytes = shared.paletteOffsetBytes;
+			bridge.morphOutputOffsetBytes = shared.morphOffsetBytes;
 			bridge.jointCount = source.data->jointCount;
 			bridge.morphCount = static_cast<std::uint32_t>(
 				source.data->morphWeights.size());
@@ -1359,10 +1424,6 @@ bool VulkanContext::Impl::PublishVulkanCpuAnimationResources(
 			}
 			bridge.validMarker = 1U;
 			bridgeRecords.push_back(bridge);
-			paletteOffsetBytes += source.data->paletteMatrices.size()
-				* sizeof(TerraEngine::Animation::GpuAnimationPaletteRecord);
-			morphOffsetBytes += source.data->morphWeights.size()
-				* sizeof(float);
 		}
 	} catch(const std::bad_alloc&) {
 		return false;
@@ -1428,16 +1489,20 @@ bool VulkanContext::Impl::PublishVulkanCpuAnimationResources(
 		== INVALID_BINDLESS_BUFFER_INDEX) {
 		resources.graphicsBridgeBindlessIndex = AllocateBufferIndex();
 	}
+	// The publication rejected this path above if the current frame slot had
+	// recorded or submitted commands. BeginFrame has already waited its fence,
+	// so these three descriptor writes target a proven-idle set and must not turn
+	// every CPU animator upload into a device-wide synchronization point.
 	UpdateGlobalBufferForFrame(currentFrame,
 		resources.paletteBindlessIndex, resources.paletteBuffer.buffer,
-		0U, paletteBytes);
+		0U, paletteBytes, true);
 	UpdateGlobalBufferForFrame(currentFrame,
 		resources.morphWeightBindlessIndex,
 		resources.morphWeightBuffer.buffer, 0U,
-		std::max<VkDeviceSize>(morphWeightBytes, 16U));
+		std::max<VkDeviceSize>(morphWeightBytes, 16U), true);
 	UpdateGlobalBufferForFrame(currentFrame,
 		resources.graphicsBridgeBindlessIndex,
-		resources.graphicsBridgeBuffer.buffer, 0U, bridgeBytes);
+		resources.graphicsBridgeBuffer.buffer, 0U, bridgeBytes, true);
 	resources.frameId = plan.frameId;
 	resources.rendererGeneration = plan.rendererGeneration;
 	resources.live = true;
@@ -1931,7 +1996,7 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 			}
 			authority = PaletteAuthority::Cpu;
 			const auto offsets = cpuPaletteOffsets.find(
-				source.key.deformation.stableInstanceId);
+				source.sourceStableInstanceId);
 			if(offsets == cpuPaletteOffsets.end())
 			{
 				return false;
@@ -2284,24 +2349,31 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 		resources.refinementBindlessIndex =
 			AllocateBufferIndex();
 	}
+	// This function rejects recorded or submitted current-slot command buffers
+	// before touching any resource. The frame fence is therefore the complete
+	// safety proof for these bindless publications; another global idle wait
+	// would serialize deformation against unrelated frames in flight.
 	UpdateGlobalBufferForFrame(
 		currentFrame,
 		resources.currentVerticesBindlessIndex,
 		resources.buffers[currentBinding].buffer,
 		0u,
-		resources.buffers[currentBinding].size);
+		resources.buffers[currentBinding].size,
+		true);
 	UpdateGlobalBufferForFrame(
 		currentFrame,
 		resources.boundsBindlessIndex,
 		resources.buffers[boundsBinding].buffer,
 		0u,
-		resources.buffers[boundsBinding].size);
+		resources.buffers[boundsBinding].size,
+		true);
 	UpdateGlobalBufferForFrame(
 		currentFrame,
 		resources.refinementBindlessIndex,
 		resources.buffers[refinementBinding].buffer,
 		0u,
-		resources.buffers[refinementBinding].size);
+		resources.buffers[refinementBinding].size,
+		true);
 	const std::uint32_t previousVerticesBindlessIndex =
 		historyCompatible
 			? previousResources->currentVerticesBindlessIndex
@@ -2313,20 +2385,30 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 		return false;
 	}
 
-	std::vector<std::uint32_t> orderedWork(plan.work.size());
-	std::iota(orderedWork.begin(), orderedWork.end(), 0u);
+	struct GraphicsGroupMember
+	{
+		std::uint64_t stableInstanceId = 0u;
+		std::uint32_t workIndex = 0u;
+	};
+	std::vector<GraphicsGroupMember> orderedWork;
+	for(std::uint32_t workIndex = 0u; workIndex < plan.work.size(); ++workIndex)
+	{
+		const auto& work = plan.work[workIndex];
+		for(const std::uint64_t consumer : work.consumerStableInstanceIds)
+		{
+			orderedWork.push_back({consumer, workIndex});
+		}
+	}
 	std::sort(
 		orderedWork.begin(),
 		orderedWork.end(),
-		[&plan](std::uint32_t left, std::uint32_t right)
+		[&plan](const GraphicsGroupMember& left, const GraphicsGroupMember& right)
 		{
-			const auto& leftWork = plan.work[left];
-			const auto& rightWork = plan.work[right];
-			if(leftWork.key.deformation.stableInstanceId
-				!= rightWork.key.deformation.stableInstanceId)
+			const auto& leftWork = plan.work[left.workIndex];
+			const auto& rightWork = plan.work[right.workIndex];
+			if(left.stableInstanceId != right.stableInstanceId)
 			{
-				return leftWork.key.deformation.stableInstanceId
-					< rightWork.key.deformation.stableInstanceId;
+				return left.stableInstanceId < right.stableInstanceId;
 			}
 			if(leftWork.key.page.meshId
 				!= rightWork.key.page.meshId)
@@ -2349,14 +2431,15 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 		orderedIndex < orderedWork.size();
 		++orderedIndex)
 	{
-		const auto& work = plan.work[orderedWork[orderedIndex]];
+		const GraphicsGroupMember& member = orderedWork[orderedIndex];
+		const auto& work = plan.work[member.workIndex];
 		if(groups.empty()
 			|| groups.back().stableInstanceId
-				!= work.key.deformation.stableInstanceId
+				!= member.stableInstanceId
 			|| groups.back().meshId != work.key.page.meshId)
 		{
 			groups.push_back({
-				work.key.deformation.stableInstanceId,
+				member.stableInstanceId,
 				work.key.page.meshId,
 				orderedIndex,
 				0u });
@@ -2398,7 +2481,7 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 				+ group.count * kBridgeRecordWords,
 			0u);
 		const auto& firstWork =
-			plan.work[orderedWork[group.begin]];
+			plan.work[orderedWork[group.begin].workIndex];
 		bridgeWords[headerOffset + 0u] =
 			TerraEngine::Renderer::kAnimatedGeometryAbiVersion;
 		bridgeWords[headerOffset + 1u] =
@@ -2443,7 +2526,7 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 			++localRecord)
 		{
 			const std::uint32_t workIndex =
-				orderedWork[group.begin + localRecord];
+				orderedWork[group.begin + localRecord].workIndex;
 			const auto& work = plan.work[workIndex];
 			const std::size_t outputOffset =
 				static_cast<std::size_t>(recordWordOffset)
@@ -2494,7 +2577,8 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 		resources.graphicsBridgeBindlessIndex,
 		resources.graphicsBridgeBuffer.buffer,
 		0u,
-		bridgeBytes);
+		bridgeBytes,
+		true);
 	resources.descriptorPlan = descriptorPlan;
 	resources.workKeys = std::move(workKeys);
 	resources.frameId = plan.frameId;
@@ -2509,6 +2593,8 @@ bool VulkanContext::Impl::PublishVulkanAnimationResources(
 	const TerraEngine::Animation::GpuAnimationPlan& plan,
 	std::uint32_t rendererGeneration)
 {
+	TERRAENGINE_PROFILE_SCOPE("Vulkan: Publish Animation Resources",
+		TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 	activeAnimationGraphicsBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 	if(plan.dispatchCommands.empty()) {
 		// The dormant/static invariant is strict: zero animation work creates no
@@ -2528,62 +2614,67 @@ bool VulkanContext::Impl::PublishVulkanAnimationResources(
 		return false;
 	}
 
-	const TerraEngine::Renderer::Vulkan::VulkanAnimationDescriptorSetPlan descriptorPlan =
-		TerraEngine::Renderer::Vulkan::BuildVulkanAnimationDescriptorSetPlan(plan);
-	if(!descriptorPlan.valid || !descriptorPlan.hasWork) return false;
-	// Validate every copied index before creating or updating any Vulkan object.
-	// The renderer treats this immutable plan as one transaction: malformed
-	// producer bytes must not expose a partially updated descriptor set.
+	TerraEngine::Renderer::Vulkan::VulkanAnimationDescriptorSetPlan descriptorPlan;
 	const auto& payloads = plan.ResidentPayloads();
-	if(plan.generation == 0U || plan.generationRecords.empty()
-		|| !payloads.HasRequiredSampleAndHierarchyInputs()) return false;
-	for(const TerraEngine::Animation::GpuAnimationWorkPacket& packet : plan.workPackets) {
-		if(packet.generationRecordIndex >= plan.generationRecords.size()
-			|| packet.clipResourceIndex == TerraEngine::Animation::kGpuAnimationInvalidResourceIndex
-			|| packet.programResourceIndex == TerraEngine::Animation::kGpuAnimationInvalidResourceIndex
-			|| packet.skeletonResourceIndex == TerraEngine::Animation::kGpuAnimationInvalidResourceIndex
-			|| packet.stageMask == 0U
-			|| (packet.stageMask & ~TerraEngine::Animation::kGpuAnimationAllStageMask) != 0U
-			|| (packet.maskResourceIndex != TerraEngine::Animation::kGpuAnimationInvalidResourceIndex
-				&& payloads.maskTables.empty())
-			|| (packet.morphCount != 0U && (packet.morphResourceIndex
-				== TerraEngine::Animation::kGpuAnimationInvalidResourceIndex || payloads.morphInputs.empty()))) {
-			return false;
+	{
+		TERRAENGINE_PROFILE_SCOPE("Vulkan: Validate Animation Resource Plan",
+			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		descriptorPlan = TerraEngine::Renderer::Vulkan::
+			BuildVulkanAnimationDescriptorSetPlan(plan);
+		if(!descriptorPlan.valid || !descriptorPlan.hasWork) return false;
+		// Validate every copied index before creating or updating any Vulkan object.
+		// The renderer treats this immutable plan as one transaction: malformed
+		// producer bytes must not expose a partially updated descriptor set.
+		if(plan.generation == 0U || plan.generationRecords.empty()
+			|| !payloads.HasRequiredSampleAndHierarchyInputs()) return false;
+		for(const TerraEngine::Animation::GpuAnimationWorkPacket& packet : plan.workPackets) {
+			if(packet.generationRecordIndex >= plan.generationRecords.size()
+				|| packet.clipResourceIndex == TerraEngine::Animation::kGpuAnimationInvalidResourceIndex
+				|| packet.programResourceIndex == TerraEngine::Animation::kGpuAnimationInvalidResourceIndex
+				|| packet.skeletonResourceIndex == TerraEngine::Animation::kGpuAnimationInvalidResourceIndex
+				|| packet.stageMask == 0U
+				|| (packet.stageMask & ~TerraEngine::Animation::kGpuAnimationAllStageMask) != 0U
+				|| (packet.maskResourceIndex != TerraEngine::Animation::kGpuAnimationInvalidResourceIndex
+					&& payloads.maskTables.empty())
+				|| (packet.morphCount != 0U && (packet.morphResourceIndex
+					== TerraEngine::Animation::kGpuAnimationInvalidResourceIndex || payloads.morphInputs.empty()))) {
+				return false;
+			}
+			const TerraEngine::Animation::GpuAnimationGenerationRecord& generation =
+				plan.generationRecords[packet.generationRecordIndex];
+			const std::uint64_t stableInstanceId =
+				(static_cast<std::uint64_t>(generation.instanceSlot) << 32U)
+				| static_cast<std::uint64_t>(generation.instanceGeneration);
+			if(!TerraEngine::Animation::IsGpuAnimationGenerationRecordValid(generation)
+				|| generation.rendererGeneration != rendererGeneration
+				|| packet.stableInstanceId != stableInstanceId) {
+				// Never relabel an immutable packet from an older renderer session with
+				// the current recovery generation in the graphics bridge.
+				return false;
+			}
 		}
-		const TerraEngine::Animation::GpuAnimationGenerationRecord& generation =
-			plan.generationRecords[packet.generationRecordIndex];
-		const std::uint64_t stableInstanceId =
-			(static_cast<std::uint64_t>(generation.instanceSlot) << 32U)
-			| static_cast<std::uint64_t>(generation.instanceGeneration);
-		if(!TerraEngine::Animation::IsGpuAnimationGenerationRecordValid(generation)
-			|| generation.rendererGeneration != rendererGeneration
-			|| packet.stableInstanceId != stableInstanceId) {
-			// Never relabel an immutable packet from an older renderer session with
-			// the current recovery generation in the graphics bridge.
-			return false;
+		for(const TerraEngine::Animation::GpuAnimationDispatchRecord& dispatch : plan.dispatchRecords) {
+			if(dispatch.workPacketIndex >= plan.workPackets.size()
+				|| dispatch.generationRecordIndex >= plan.generationRecords.size()
+				|| !TerraEngine::Animation::IsGpuAnimationStageValueValid(dispatch.stage)
+				|| dispatch.elementCount == 0U) return false;
+			const TerraEngine::Animation::GpuAnimationWorkPacket& packet =
+				plan.workPackets[dispatch.workPacketIndex];
+			if(dispatch.stableInstanceId != packet.stableInstanceId
+				|| dispatch.generationRecordIndex != packet.generationRecordIndex) return false;
 		}
-	}
-	for(const TerraEngine::Animation::GpuAnimationDispatchRecord& dispatch : plan.dispatchRecords) {
-		if(dispatch.workPacketIndex >= plan.workPackets.size()
-			|| dispatch.generationRecordIndex >= plan.generationRecords.size()
-			|| !TerraEngine::Animation::IsGpuAnimationStageValueValid(dispatch.stage)
-			|| dispatch.elementCount == 0U) return false;
-		const TerraEngine::Animation::GpuAnimationWorkPacket& packet =
-			plan.workPackets[dispatch.workPacketIndex];
-		if(dispatch.stableInstanceId != packet.stableInstanceId
-			|| dispatch.generationRecordIndex != packet.generationRecordIndex) return false;
-	}
-	for(const TerraEngine::Animation::GpuAnimationDispatchCommand& command : plan.dispatchCommands) {
-		const std::size_t first = command.pushConstants.firstDispatchRecord;
-		const std::size_t count = command.pushConstants.dispatchRecordCount;
-		if(command.pushConstants.planGeneration != plan.generation
-			|| !TerraEngine::Animation::IsGpuAnimationStageValueValid(command.pushConstants.stage)
-			|| count == 0U
-			|| count > TerraEngine::Animation::kGpuAnimationMaximumDispatchRecordsPerCommand
-			|| first > plan.dispatchRecords.size()
-			|| count > plan.dispatchRecords.size() - first
-			|| command.groupCountX == 0U || command.groupCountY == 0U || command.groupCountZ == 0U) {
-			return false;
+		for(const TerraEngine::Animation::GpuAnimationDispatchCommand& command : plan.dispatchCommands) {
+			const std::size_t first = command.pushConstants.firstDispatchRecord;
+			const std::size_t count = command.pushConstants.dispatchRecordCount;
+			if(command.pushConstants.planGeneration != plan.generation
+				|| !TerraEngine::Animation::IsGpuAnimationStageValueValid(command.pushConstants.stage)
+				|| count == 0U
+				|| count > TerraEngine::Animation::kGpuAnimationMaximumDispatchRecordsPerCommand
+				|| first > plan.dispatchRecords.size()
+				|| count > plan.dispatchRecords.size() - first
+				|| command.groupCountX == 0U || command.groupCountY == 0U || command.groupCountZ == 0U) {
+				return false;
+			}
 		}
 	}
 	if(maximumStorageBufferRange == 0U
@@ -2607,28 +2698,37 @@ bool VulkanContext::Impl::PublishVulkanAnimationResources(
 		resources.poseHistoryScratch;
 	currentPoseHistoryIdentities.clear();
 	bool requestsHoldLast = false;
-	try {
-		currentPoseHistoryIdentities.reserve(plan.workPackets.size());
-		for(const TerraEngine::Animation::GpuAnimationWorkPacket& packet : plan.workPackets) {
-			const TerraEngine::Animation::GpuAnimationGenerationRecord& generation =
-				plan.generationRecords[packet.generationRecordIndex];
-			currentPoseHistoryIdentities.push_back({
-				packet.stableInstanceId,
-				packet.localPoseOffsetBytes,
-				packet.jointCount,
-				generation.skeletonGeneration,
-				generation.programGeneration});
-			requestsHoldLast = requestsHoldLast || TerraEngine::Animation::HasGpuAnimationFlag(
-				packet.flags, TerraEngine::Animation::GpuAnimationWorkFlag::UseHoldLastFallback);
+	{
+		TERRAENGINE_PROFILE_SCOPE("Vulkan: Build Animation Pose History",
+			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		try {
+			currentPoseHistoryIdentities.reserve(plan.workPackets.size());
+			for(const TerraEngine::Animation::GpuAnimationWorkPacket& packet : plan.workPackets) {
+				const TerraEngine::Animation::GpuAnimationGenerationRecord& generation =
+					plan.generationRecords[packet.generationRecordIndex];
+				currentPoseHistoryIdentities.push_back({
+					packet.stableInstanceId,
+					packet.localPoseOffsetBytes,
+					packet.jointCount,
+					generation.skeletonGeneration,
+					generation.programGeneration});
+				requestsHoldLast = requestsHoldLast || TerraEngine::Animation::HasGpuAnimationFlag(
+					packet.flags, TerraEngine::Animation::GpuAnimationWorkFlag::UseHoldLastFallback);
+			}
+		} catch(const std::bad_alloc&) {
+			return false;
 		}
-	} catch(const std::bad_alloc&) {
-		return false;
 	}
 	bool holdLastHistoryCompatible = requestsHoldLast && resources.live
 		&& resources.poseHistoryIdentities == currentPoseHistoryIdentities;
 
 	bool descriptorBindingsChanged = false;
-	auto ensureBuffer = [this, &resources, &descriptorBindingsChanged](
+	bool residentBuffersRetained = true;
+	std::array<bool, TerraEngine::Animation::kGpuAnimationDescriptorBindingCount>
+		bufferReallocated{};
+	auto ensureBuffer = [this, &resources, &descriptorPlan,
+		&descriptorBindingsChanged, &residentBuffersRetained,
+		&bufferReallocated](
 		std::size_t bindingIndex,
 		VkDeviceSize requiredBytes,
 		const char* name) {
@@ -2643,6 +2743,12 @@ bool VulkanContext::Impl::PublishVulkanAnimationResources(
 				VMA_MEMORY_USAGE_CPU_TO_GPU, name);
 			resources.capacities[bindingIndex] = safeBytes;
 			descriptorBindingsChanged = true;
+			bufferReallocated[bindingIndex] = true;
+			if(descriptorPlan.bindings[bindingIndex].source
+				== TerraEngine::Renderer::Vulkan::
+					VulkanAnimationDescriptorSource::ResidentInput) {
+				residentBuffersRetained = false;
+			}
 		}
 	};
 
@@ -2675,52 +2781,74 @@ bool VulkanContext::Impl::PublishVulkanAnimationResources(
 	holdLastHistoryCompatible = holdLastHistoryCompatible
 		&& resources.buffers[localPoseBindingIndex].buffer != VK_NULL_HANDLE
 		&& resources.capacities[localPoseBindingIndex] >= descriptorByteCounts[localPoseBindingIndex];
-	try {
-		for(std::size_t index = 0U; index < descriptorPlan.bindings.size(); ++index) {
-			ensureBuffer(index, descriptorByteCounts[index], "GPU Animation Frame Buffer");
-			const std::size_t diagnosticsBindingIndex = static_cast<std::size_t>(
-				TerraEngine::Animation::GpuAnimationDescriptorBinding::Diagnostics);
-			const bool clearLocalPose = index == localPoseBindingIndex
-				&& !holdLastHistoryCompatible;
-			const bool clearDiagnostics = index == diagnosticsBindingIndex;
-			// Input ranges are overwritten below and active output ranges are fully
-			// produced by their dispatch stages. Only local-pose fallback state and
-			// atomic diagnostics require a zero sentinel before compute begins.
-			if((clearLocalPose || clearDiagnostics)
-				&& !ClearMappedBufferRange(allocator, resources.buffers[index],
-					descriptorByteCounts[index], 0U)) {
-				RetireVulkanAnimationFrameResources(resources);
-				return false;
+	{
+		TERRAENGINE_PROFILE_SCOPE("Vulkan: Prepare Animation Buffers",
+			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		try {
+			for(std::size_t index = 0U; index < descriptorPlan.bindings.size(); ++index) {
+				ensureBuffer(index, descriptorByteCounts[index], "GPU Animation Frame Buffer");
+				const std::size_t diagnosticsBindingIndex = static_cast<std::size_t>(
+					TerraEngine::Animation::GpuAnimationDescriptorBinding::Diagnostics);
+				// Ordinary sample work overwrites every active local-pose record and can
+				// never read the previous frame slot. Only hold-last fallback may consume
+				// retained bytes, so an incompatible history requires clearing only when
+				// at least one packet actually requests that fallback behavior.
+				const bool clearLocalPose = index == localPoseBindingIndex
+					&& requestsHoldLast && !holdLastHistoryCompatible;
+				const bool clearDiagnostics = index == diagnosticsBindingIndex;
+				// Input ranges are overwritten below and active output ranges are fully
+				// produced by their dispatch stages. Only local-pose fallback state and
+				// atomic diagnostics require a zero sentinel before compute begins.
+				if((clearLocalPose || clearDiagnostics)
+					&& !ClearMappedBufferRange(allocator, resources.buffers[index],
+						descriptorByteCounts[index], 0U)) {
+					RetireVulkanAnimationFrameResources(resources);
+					return false;
+				}
 			}
+		} catch(const std::exception&) {
+			RetireVulkanAnimationFrameResources(resources);
+			return false;
 		}
-	} catch(const std::exception&) {
-		RetireVulkanAnimationFrameResources(resources);
-		return false;
 	}
+	const bool reuseResidentPayloadUpload =
+		TerraEngine::Renderer::Vulkan::
+			CanReuseVulkanAnimationResidentPayloadUpload(
+				resources.residentPayloadOwner,
+				plan.sharedResidentPayloads,
+				residentBuffersRetained);
 
 	using Binding = TerraEngine::Animation::GpuAnimationDescriptorBinding;
 	const auto upload = [this, &resources](Binding binding, const void* bytes, VkDeviceSize size) {
 		if(size == 0U) return true;
 		return WriteMappedBuffer(allocator, resources.buffers[static_cast<std::size_t>(binding)], bytes, size);
 	};
-	if(!upload(Binding::GenerationRecords, plan.generationRecords.data(),
-		static_cast<VkDeviceSize>(plan.generationRecords.size() * sizeof(TerraEngine::Animation::GpuAnimationGenerationRecord)))
-		|| !upload(Binding::WorkPackets, plan.workPackets.data(),
-			static_cast<VkDeviceSize>(plan.workPackets.size() * sizeof(TerraEngine::Animation::GpuAnimationWorkPacket)))
-		|| !upload(Binding::DispatchRecords, plan.dispatchRecords.data(),
-			static_cast<VkDeviceSize>(plan.dispatchRecords.size() * sizeof(TerraEngine::Animation::GpuAnimationDispatchRecord)))
-		|| !upload(Binding::ProgramWords, payloads.programWords.data(),
-			static_cast<VkDeviceSize>(payloads.programWords.size() * sizeof(std::uint32_t)))
-		|| !upload(Binding::PackedClipBytes, payloads.packedClipBytes.data(),
-			static_cast<VkDeviceSize>(payloads.packedClipBytes.size()))
-		|| !upload(Binding::SkeletonTables, payloads.skeletonTables.data(),
-			static_cast<VkDeviceSize>(payloads.skeletonTables.size()))
-		|| !upload(Binding::MaskTables, payloads.maskTables.data(),
-			static_cast<VkDeviceSize>(payloads.maskTables.size()))
-		|| !upload(Binding::MorphInputs, payloads.morphInputs.data(),
-			static_cast<VkDeviceSize>(payloads.morphInputs.size()))) {
-		RetireVulkanAnimationFrameResources(resources);
-		return false;
+	{
+		TERRAENGINE_PROFILE_SCOPE("Vulkan: Upload Animation Inputs",
+			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		if(!upload(Binding::GenerationRecords, plan.generationRecords.data(),
+			static_cast<VkDeviceSize>(plan.generationRecords.size() * sizeof(TerraEngine::Animation::GpuAnimationGenerationRecord)))
+			|| !upload(Binding::WorkPackets, plan.workPackets.data(),
+				static_cast<VkDeviceSize>(plan.workPackets.size() * sizeof(TerraEngine::Animation::GpuAnimationWorkPacket)))
+			|| !upload(Binding::DispatchRecords, plan.dispatchRecords.data(),
+				static_cast<VkDeviceSize>(plan.dispatchRecords.size() * sizeof(TerraEngine::Animation::GpuAnimationDispatchRecord)))) {
+			RetireVulkanAnimationFrameResources(resources);
+			return false;
+		}
+		if(!reuseResidentPayloadUpload
+			&& (!upload(Binding::ProgramWords, payloads.programWords.data(),
+					static_cast<VkDeviceSize>(payloads.programWords.size() * sizeof(std::uint32_t)))
+				|| !upload(Binding::PackedClipBytes, payloads.packedClipBytes.data(),
+					static_cast<VkDeviceSize>(payloads.packedClipBytes.size()))
+				|| !upload(Binding::SkeletonTables, payloads.skeletonTables.data(),
+					static_cast<VkDeviceSize>(payloads.skeletonTables.size()))
+				|| !upload(Binding::MaskTables, payloads.maskTables.data(),
+					static_cast<VkDeviceSize>(payloads.maskTables.size()))
+				|| !upload(Binding::MorphInputs, payloads.morphInputs.data(),
+					static_cast<VkDeviceSize>(payloads.morphInputs.size())))) {
+			RetireVulkanAnimationFrameResources(resources);
+			return false;
+		}
 	}
 
 	resources.descriptorPlan = descriptorPlan;
@@ -2751,20 +2879,31 @@ bool VulkanContext::Impl::PublishVulkanAnimationResources(
 			0U,
 			nullptr);
 	}
-	const auto publishInternalAnimationBuffer = [this, &resources, &descriptorByteCounts](
+	const auto publishInternalAnimationBuffer = [this, &resources,
+		&bufferReallocated](
 		std::uint32_t& bindlessIndex,
 		TerraEngine::Animation::GpuAnimationDescriptorBinding binding) {
 		const std::size_t bindingIndex = static_cast<std::size_t>(binding);
 		const VulkanBuffer& buffer = resources.buffers[bindingIndex];
 		if(buffer.buffer == VK_NULL_HANDLE || buffer.size == 0U) return INVALID_BINDLESS_BUFFER_INDEX;
-		if(bindlessIndex == INVALID_BINDLESS_BUFFER_INDEX) bindlessIndex = AllocateBufferIndex();
+		const bool hasPublishedIndex =
+			bindlessIndex != INVALID_BINDLESS_BUFFER_INDEX;
+		if(!hasPublishedIndex) bindlessIndex = AllocateBufferIndex();
 		// Global set 0, binding 9 is updated only before this frame records. These
 		// indices stay internal; the graphics bridge below is the sole exposed one.
-		UpdateGlobalBufferForFrame(currentFrame, bindlessIndex, buffer.buffer, 0U,
-			descriptorByteCounts[bindingIndex]);
+		// Bind the complete allocation so changing active packet counts does not turn
+		// an otherwise stable frame slot into host descriptor mutation every frame.
+		if(TerraEngine::Renderer::Vulkan::
+			ShouldRefreshVulkanAnimationBindlessBuffer(
+				hasPublishedIndex, bufferReallocated[bindingIndex])) {
+			UpdateGlobalBufferForFrame(currentFrame, bindlessIndex, buffer.buffer,
+				0U, resources.capacities[bindingIndex], true);
+		}
 		return bindlessIndex;
 	};
 	try {
+		TERRAENGINE_PROFILE_SCOPE("Vulkan: Publish Animation Graphics Bridge",
+			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		(void)publishInternalAnimationBuffer(
 			resources.generationRecordsBindlessIndex, Binding::GenerationRecords);
 		(void)publishInternalAnimationBuffer(
@@ -2774,6 +2913,7 @@ bool VulkanContext::Impl::PublishVulkanAnimationResources(
 		(void)publishInternalAnimationBuffer(
 			resources.morphOutputsBindlessIndex, Binding::MorphOutputs);
 
+		bool graphicsBridgeReallocated = false;
 		if(resources.graphicsBridgeBuffer.buffer == VK_NULL_HANDLE
 			|| resources.graphicsBridgeCapacityBytes < bridgeBytes) {
 			RetireBuffer(resources.graphicsBridgeBuffer);
@@ -2781,6 +2921,7 @@ bool VulkanContext::Impl::PublishVulkanAnimationResources(
 				VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU,
 				"GPU Animation Graphics Bridge Buffer");
 			resources.graphicsBridgeCapacityBytes = bridgeBytes;
+			graphicsBridgeReallocated = true;
 		}
 		std::vector<VulkanGpuAnimationGraphicsRecord>& bridgeRecords =
 			resources.graphicsBridgeScratch;
@@ -2810,16 +2951,28 @@ bool VulkanContext::Impl::PublishVulkanAnimationResources(
 			RetireVulkanAnimationFrameResources(resources);
 			return false;
 		}
-		if(resources.graphicsBridgeBindlessIndex == INVALID_BINDLESS_BUFFER_INDEX)
+		const bool hasPublishedBridgeIndex =
+			resources.graphicsBridgeBindlessIndex != INVALID_BINDLESS_BUFFER_INDEX;
+		if(!hasPublishedBridgeIndex)
 			resources.graphicsBridgeBindlessIndex = AllocateBufferIndex();
-		UpdateGlobalBufferForFrame(currentFrame, resources.graphicsBridgeBindlessIndex,
-			resources.graphicsBridgeBuffer.buffer, 0U, bridgeBytes);
+		if(TerraEngine::Renderer::Vulkan::
+			ShouldRefreshVulkanAnimationBindlessBuffer(
+				hasPublishedBridgeIndex, graphicsBridgeReallocated)) {
+			UpdateGlobalBufferForFrame(currentFrame,
+				resources.graphicsBridgeBindlessIndex,
+				resources.graphicsBridgeBuffer.buffer, 0U,
+				resources.graphicsBridgeCapacityBytes, true);
+		}
 		activeAnimationGraphicsBufferIndex = resources.graphicsBridgeBindlessIndex;
 	} catch(const std::exception&) {
 		RetireVulkanAnimationFrameResources(resources);
 		return false;
 	}
 	resources.live = true;
+	// Owned fallback payloads have no cross-frame identity and deliberately upload
+	// every time. Shared immutable payloads remain retained until this slot grows,
+	// retires, or observes a different publication.
+	resources.residentPayloadOwner = plan.sharedResidentPayloads;
 	resources.poseHistoryIdentities.swap(currentPoseHistoryIdentities);
 	resources.completionPending = false;
 	return true;
@@ -3392,9 +3545,10 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 		return;
 	}
 
-	auto ensureAndWriteBuffer = [&](VulkanBuffer& buffer, std::size_t& capacity, std::size_t elementCount, std::size_t elementSize, const void* source, const char* name,
+	auto ensureBuffer = [&](VulkanBuffer& buffer, std::size_t& capacity,
+		std::size_t elementCount, std::size_t elementSize, const char* name,
 		VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) {
-		if (elementCount == 0u || source == nullptr)
+		if (elementCount == 0u)
 		{
 			return;
 		}
@@ -3406,6 +3560,18 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 			buffer = CreateBuffer(requiredBytes, usage, VMA_MEMORY_USAGE_CPU_TO_GPU, name);
 			capacity = elementCount;
 		}
+	};
+	auto ensureAndWriteBuffer = [&](VulkanBuffer& buffer, std::size_t& capacity,
+		std::size_t elementCount, std::size_t elementSize, const void* source,
+		const char* name,
+		VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) {
+		if (elementCount == 0u || source == nullptr)
+		{
+			return;
+		}
+		ensureBuffer(buffer, capacity, elementCount, elementSize, name, usage);
+		const VkDeviceSize requiredBytes =
+			static_cast<VkDeviceSize>(elementCount * elementSize);
 		WriteMappedBuffer(allocator, buffer, source, requiredBytes);
 	};
 
@@ -3644,16 +3810,28 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 				VkDescriptorBufferInfo{ resources.compactedPacketBuffer.buffer, 0u, resources.compactedPacketBuffer.size },
 				VkDescriptorBufferInfo{ resources.generatedSubmissionBuffer.buffer, 0u, resources.generatedSubmissionBuffer.size },
 				VkDescriptorBufferInfo{ resources.counterReadbackBuffer.buffer, 0u, resources.counterReadbackBuffer.size } };
-			std::array<VkWriteDescriptorSet, 7> writes{};
-			for(std::uint32_t binding = 0u; binding < writes.size(); ++binding) {
-				writes[binding].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-				writes[binding].dstSet = resources.executorDescriptorSet;
-				writes[binding].dstBinding = binding;
-				writes[binding].descriptorCount = 1u;
-				writes[binding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-				writes[binding].pBufferInfo = &bufferInfos[binding];
+			std::array<VirtualGeometryGpuPacketFrameResources::BindlessBufferPublication, 7u>
+				currentPublications{};
+			for(std::size_t binding = 0u; binding < bufferInfos.size(); ++binding) {
+				currentPublications[binding] = {
+					bufferInfos[binding].buffer,
+					bufferInfos[binding].range };
 			}
-			vkUpdateDescriptorSets(device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0u, nullptr);
+			if(currentPublications != resources.executorDescriptorPublications) {
+				std::array<VkWriteDescriptorSet, 7> writes{};
+				for(std::uint32_t binding = 0u; binding < writes.size(); ++binding) {
+					writes[binding].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+					writes[binding].dstSet = resources.executorDescriptorSet;
+					writes[binding].dstBinding = binding;
+					writes[binding].descriptorCount = 1u;
+					writes[binding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+					writes[binding].pBufferInfo = &bufferInfos[binding];
+				}
+				vkUpdateDescriptorSets(device,
+					static_cast<std::uint32_t>(writes.size()),
+					writes.data(), 0u, nullptr);
+				resources.executorDescriptorPublications = currentPublications;
+			}
 			executorResources.descriptorSet = resources.executorDescriptorSet;
 		}
 	}
@@ -3718,6 +3896,54 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 	std::vector<VirtualGeometryRasterPacketSetupUpload> visibilityPackets;
 	std::vector<VirtualGeometryRasterMeshletSetupUpload> visibilityMeshlets;
 	visibilityPackets.reserve(frameData.virtualGeometryGpuPackets.size());
+	std::unordered_multimap<TerraEngine::UUID, const DrawCommand*>
+		commandsByObject;
+	commandsByObject.reserve(frameData.commands.size());
+	for(const DrawCommand& command : frameData.commands)
+	{
+		commandsByObject.emplace(command.objectId, std::addressof(command));
+	}
+	struct DeformationGroupKey
+	{
+		std::uint64_t stableInstanceId = 0U;
+		TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+
+		bool operator==(const DeformationGroupKey&) const = default;
+	};
+	struct DeformationGroupKeyHash
+	{
+		std::size_t operator()(const DeformationGroupKey& value) const noexcept
+		{
+			std::size_t hash = std::hash<std::uint64_t>{}(value.stableInstanceId);
+			hash ^= std::hash<TerraEngine::UUID>{}(value.meshId)
+				+ 0x9e3779b9U + (hash << 6U) + (hash >> 2U);
+			return hash;
+		}
+	};
+	using GraphicsGroup = VulkanDeformationFrameResources::GraphicsGroup;
+	std::unordered_map<DeformationGroupKey, const GraphicsGroup*,
+		DeformationGroupKeyHash> deformationGroupsByInstance;
+	const VulkanDeformationFrameResources* currentDeformationResources = nullptr;
+	if(deformationComputeRecordedForCurrentFrame
+		&& pendingDeformationImmutablePlan != nullptr
+		&& activeDeformationGraphicsBufferIndex != INVALID_BINDLESS_BUFFER_INDEX
+		&& currentFrame < deformationFrameResources.size())
+	{
+		const VulkanDeformationFrameResources& resources =
+			deformationFrameResources[currentFrame];
+		if(resources.live
+			&& resources.frameId == pendingDeformationImmutablePlan->frameId)
+		{
+			currentDeformationResources = std::addressof(resources);
+			deformationGroupsByInstance.reserve(resources.graphicsGroups.size());
+			for(const GraphicsGroup& group : resources.graphicsGroups)
+			{
+				deformationGroupsByInstance.emplace(
+					DeformationGroupKey{group.stableInstanceId, group.meshId},
+					std::addressof(group));
+			}
+		}
+	}
 	std::size_t visibilityTriangleCount = 0u;
 	for(const GpuVirtualGeometryPacketRecord& packet :
 		frameData.virtualGeometryGpuPackets)
@@ -3736,23 +3962,28 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 			continue;
 		}
 		const Mesh* mesh = ResourceManager::Instance().GetMesh(packet.meshId);
-		const auto commandIt = std::find_if(
-			frameData.commands.begin(),
-			frameData.commands.end(),
-			[&packet](const DrawCommand& command) {
+		const DrawCommand* commandIt = nullptr;
+		const auto [commandBegin, commandRangeEnd] =
+			commandsByObject.equal_range(packet.objectId);
+		for(auto candidate = commandBegin;
+			candidate != commandRangeEnd && commandIt == nullptr; ++candidate)
+		{
+			const DrawCommand& command = *candidate->second;
 				const std::uint64_t commandEnd =
 					static_cast<std::uint64_t>(command.virtualMeshletOffset)
 					+ command.virtualMeshletCount;
 				const std::uint64_t packetEnd =
 					static_cast<std::uint64_t>(packet.meshletOffset)
 					+ packet.meshletCount;
-				return command.objectId == packet.objectId
-					&& command.meshId == packet.meshId
+				if(command.meshId == packet.meshId
 					&& command.materialId == packet.materialId
 					&& command.virtualMeshletOffset <= packet.meshletOffset
-					&& commandEnd >= packetEnd;
-			});
-		if(mesh == nullptr || commandIt == frameData.commands.end())
+					&& commandEnd >= packetEnd)
+				{
+					commandIt = candidate->second;
+				}
+		}
+		if(mesh == nullptr || commandIt == nullptr)
 		{
 			continue;
 		}
@@ -3814,11 +4045,7 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 			packet.meshletOffset,
 			0u,
 			0u);
-		if(deformationComputeRecordedForCurrentFrame
-			&& pendingDeformationImmutablePlan != nullptr
-			&& activeDeformationGraphicsBufferIndex
-				!= INVALID_BINDLESS_BUFFER_INDEX
-			&& currentFrame < deformationFrameResources.size())
+		if(currentDeformationResources != nullptr)
 		{
 			const TerraEngine::Renderer::AnimationRenderBinding& binding =
 				commandIt->animationBinding;
@@ -3826,22 +4053,12 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 				? binding.gpu.stableInstanceId
 				: (static_cast<std::uint64_t>(binding.animatorSlotIndex) << 32u)
 					| binding.animatorGeneration;
-			const auto& deformationResources = deformationFrameResources[currentFrame];
-			const auto deformationGroup = std::find_if(
-				deformationResources.graphicsGroups.begin(),
-				deformationResources.graphicsGroups.end(),
-				[&](const VulkanDeformationFrameResources::GraphicsGroup& group)
-				{
-					return group.stableInstanceId == stableInstanceId
-						&& group.meshId == commandIt->meshId;
-				});
-			if(deformationResources.live
-				&& deformationResources.frameId
-					== pendingDeformationImmutablePlan->frameId
-				&& deformationGroup != deformationResources.graphicsGroups.end())
+			const auto deformationGroup = deformationGroupsByInstance.find(
+				DeformationGroupKey{stableInstanceId, commandIt->meshId});
+			if(deformationGroup != deformationGroupsByInstance.end())
 			{
 				setup.payloadState.w = activeDeformationGraphicsBufferIndex;
-				setup.deformationState.x = deformationGroup->headerWordOffset;
+				setup.deformationState.x = deformationGroup->second->headerWordOffset;
 			}
 		}
 		const std::uint32_t setupPacketIndex =
@@ -3940,28 +4157,29 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 		virtualGeometryVisibilityUnavailableReason =
 			"Virtual-geometry visibility target is empty or exceeds the bounded pixel capacity.";
 	}
-	std::vector<std::uint32_t> visibilityDepthWords(
-		visibilityPixelCount,
-		std::numeric_limits<std::uint32_t>::max());
-	std::vector<std::uint32_t> visibilityRecordWords(
-		visibilityPixelCount * 4u,
-		0u);
-	for(std::size_t pixel = 0u; pixel < visibilityPixelCount; ++pixel)
-	{
-		visibilityRecordWords[pixel * 4u] =
-			std::numeric_limits<std::uint32_t>::max();
-	}
 	constexpr std::size_t kVisibilityMaterialBinCount = 64u;
-	std::array<std::uint32_t, kVisibilityMaterialBinCount>
-		shadingBinWords{};
-	ensureAndWriteBuffer(resources.visibilityDepthBuffer, resources.visibilityDepthCapacity,
-		visibilityDepthWords.size(), sizeof(std::uint32_t), visibilityDepthWords.data(), "Virtual Geometry Visibility Depth Buffer");
-	ensureAndWriteBuffer(resources.visibilityRecordBuffer, resources.visibilityRecordCapacity,
-		visibilityRecordWords.size(), sizeof(std::uint32_t), visibilityRecordWords.data(), "Virtual Geometry Visibility Record Buffer");
-	ensureAndWriteBuffer(resources.resolvedVisibilityBuffer, resources.resolvedVisibilityCapacity,
-		visibilityRecordWords.size(), sizeof(std::uint32_t), visibilityRecordWords.data(), "Virtual Geometry Resolved Visibility Buffer");
-	ensureAndWriteBuffer(resources.shadingBinBuffer, resources.shadingBinCapacity,
-		shadingBinWords.size(), sizeof(std::uint32_t), shadingBinWords.data(), "Virtual Geometry Shading Bin Buffer");
+	constexpr VkBufferUsageFlags kVisibilityScratchUsage =
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+		| VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+	// These are GPU-written scratch buffers. Allocation remains a protected CPU
+	// operation, but initialization is recorded as four transfer fills immediately
+	// before compute raster instead of copying viewport-sized host arrays.
+	ensureBuffer(resources.visibilityDepthBuffer,
+		resources.visibilityDepthCapacity, visibilityPixelCount,
+		sizeof(std::uint32_t), "Virtual Geometry Visibility Depth Buffer",
+		kVisibilityScratchUsage);
+	ensureBuffer(resources.visibilityRecordBuffer,
+		resources.visibilityRecordCapacity, visibilityPixelCount * 4u,
+		sizeof(std::uint32_t), "Virtual Geometry Visibility Record Buffer",
+		kVisibilityScratchUsage);
+	ensureBuffer(resources.resolvedVisibilityBuffer,
+		resources.resolvedVisibilityCapacity, visibilityPixelCount * 4u,
+		sizeof(std::uint32_t), "Virtual Geometry Resolved Visibility Buffer",
+		kVisibilityScratchUsage);
+	ensureBuffer(resources.shadingBinBuffer,
+		resources.shadingBinCapacity, kVisibilityMaterialBinCount,
+		sizeof(std::uint32_t), "Virtual Geometry Shading Bin Buffer",
+		kVisibilityScratchUsage);
 
 	TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryVisibilityResources visibilityResources;
 	visibilityResources.inputTriangleBuffer =
@@ -4032,19 +4250,36 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 				resources.visibilityComputeRasterDescriptorSet,
 				resources.visibilityResolveDescriptorSet,
 				resources.visibilityShadingBinsDescriptorSet };
-			std::array<VkWriteDescriptorSet, 24> writes{};
-			for(std::uint32_t passIndex = 0u; passIndex < descriptorSets.size(); ++passIndex) {
-				for(std::uint32_t binding = 0u; binding < bufferInfos[passIndex].size(); ++binding) {
-					VkWriteDescriptorSet& write = writes[passIndex * bufferInfos[passIndex].size() + binding];
-					write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-					write.dstSet = descriptorSets[passIndex];
-					write.dstBinding = binding;
-					write.descriptorCount = 1u;
-					write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-					write.pBufferInfo = &bufferInfos[passIndex][binding];
+			std::array<VirtualGeometryGpuPacketFrameResources::BindlessBufferPublication, 24u>
+				currentPublications{};
+			for(std::size_t passIndex = 0u; passIndex < descriptorSets.size(); ++passIndex) {
+				for(std::size_t binding = 0u;
+					binding < bufferInfos[passIndex].size(); ++binding) {
+					const std::size_t publicationIndex =
+						passIndex * bufferInfos[passIndex].size() + binding;
+					currentPublications[publicationIndex] = {
+						bufferInfos[passIndex][binding].buffer,
+						bufferInfos[passIndex][binding].range };
 				}
 			}
-			vkUpdateDescriptorSets(device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0u, nullptr);
+			if(currentPublications != resources.visibilityDescriptorPublications) {
+				std::array<VkWriteDescriptorSet, 24> writes{};
+				for(std::uint32_t passIndex = 0u; passIndex < descriptorSets.size(); ++passIndex) {
+					for(std::uint32_t binding = 0u; binding < bufferInfos[passIndex].size(); ++binding) {
+						VkWriteDescriptorSet& write = writes[passIndex * bufferInfos[passIndex].size() + binding];
+						write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+						write.dstSet = descriptorSets[passIndex];
+						write.dstBinding = binding;
+						write.descriptorCount = 1u;
+						write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+						write.pBufferInfo = &bufferInfos[passIndex][binding];
+					}
+				}
+				vkUpdateDescriptorSets(device,
+					static_cast<std::uint32_t>(writes.size()), writes.data(),
+					0u, nullptr);
+				resources.visibilityDescriptorPublications = currentPublications;
+			}
 			visibilityResources.triangleSetupDescriptorSet = resources.visibilityTriangleSetupDescriptorSet;
 			visibilityResources.computeRasterDescriptorSet = resources.visibilityComputeRasterDescriptorSet;
 			visibilityResources.visibilityResolveDescriptorSet = resources.visibilityResolveDescriptorSet;
@@ -9120,7 +9355,13 @@ void VulkanContext::Impl::UpdateGlobalBuffer(uint32_t index, VkBuffer buffer, Vk
 	}
 }
 
-void VulkanContext::Impl::UpdateGlobalBufferForFrame(uint32_t frameIndex, uint32_t index, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize range)
+void VulkanContext::Impl::UpdateGlobalBufferForFrame(
+	uint32_t frameIndex,
+	uint32_t index,
+	VkBuffer buffer,
+	VkDeviceSize offset,
+	VkDeviceSize range,
+	bool frameSlotKnownIdle)
 {
 	std::lock_guard<std::recursive_mutex> descriptorLock(descriptorHostAccessMutex);
 	if (frameIndex >= globalDescriptorSets.size()
@@ -9132,7 +9373,7 @@ void VulkanContext::Impl::UpdateGlobalBufferForFrame(uint32_t frameIndex, uint32
 		return;
 	}
 
-	if (frameIndex == currentFrame)
+	if (frameIndex == currentFrame && !frameSlotKnownIdle)
 	{
 		// Updating a bindless buffer slot mutates the shared global descriptor
 		// set. Reuse the central descriptor-idle path so already-submitted editor

@@ -4922,8 +4922,21 @@ namespace
 					"section count, stride, or byte range is inconsistent");
 			}
 			const std::size_t headerBytes = sizeof(TemfDeformableDemandedPagePayload) + sections.size() * sizeof(TemfDeformablePageSection);
+			const auto alignPageSection = [](std::size_t value) {
+				return (value + kTemfDeformablePageSectionAlignment - 1u)
+					& ~(static_cast<std::size_t>(
+						kTemfDeformablePageSectionAlignment) - 1u);
+			};
+			// Topology is byte-packed and commonly ends at a non-word boundary.
+			// Align every following section independently so GPU word/float4 loads
+			// never reinterpret the last topology bytes as remap or skin data.
 			std::size_t totalBytes = headerBytes;
-			for (const PageSectionBytes& section : sections) totalBytes += section.bytes.size();
+			for (const PageSectionBytes& section : sections)
+			{
+				totalBytes = alignPageSection(totalBytes);
+				totalBytes += section.bytes.size();
+			}
+			totalBytes = alignPageSection(totalBytes);
 			if (totalBytes > std::numeric_limits<std::uint32_t>::max())
 			{
 				return failDemandedPage(page.pageId,
@@ -4938,16 +4951,41 @@ namespace
 			payload.meshPayloadGeneration = meshPayloadGeneration; payload.contentGeneration = meshPayloadGeneration;
 			payload.skeletonCompatibilityFingerprint = settings.skeletonCompatibilityFingerprint;
 			CanonicalDemandedPageCookedBlob cooked{};
-			cooked.entry.pageId = page.pageId; cooked.entry.parentPageId = kVirtualGeometryInvalidIndex; cooked.entry.fallbackPageId = page.fallbackPageId;
+			cooked.entry.pageId = page.pageId;
+			// The hierarchy fallback is also the demanded-page dependency. Root
+			// pages name themselves as fallback and therefore have no parent.
+			cooked.entry.parentPageId = page.fallbackPageId == page.pageId
+				? kVirtualGeometryInvalidIndex : page.fallbackPageId;
+			cooked.entry.fallbackPageId = page.fallbackPageId;
 			cooked.entry.flags = payload.flags; cooked.entry.clusterOffset = cluster->clusterId; cooked.entry.clusterCount = 1u;
 			cooked.entry.materialSectionId = cluster->materialSectionId; cooked.entry.contentGeneration = payload.contentGeneration;
 			cooked.entry.skeletonCompatibilityFingerprint = payload.skeletonCompatibilityFingerprint; cooked.entry.geometricError = cluster->geometricError;
 			for (std::size_t axis = 0u; axis < 3u; ++axis) { cooked.entry.conservativeBoundsMin[axis] = cluster->boundsCenter[axis] - cluster->boundsRadius; cooked.entry.conservativeBoundsMax[axis] = cluster->boundsCenter[axis] + cluster->boundsRadius; }
 			cooked.bytes.resize(totalBytes); std::memcpy(cooked.bytes.data(), &payload, sizeof(payload));
 			std::size_t cursor = headerBytes;
-			for (std::size_t index = 0u; index < sections.size(); ++index) { const PageSectionBytes& source = sections[index]; TemfDeformablePageSection record{ source.kind, 1u, static_cast<std::uint32_t>(cursor), static_cast<std::uint32_t>(source.bytes.size()), source.count, source.stride }; std::memcpy(cooked.bytes.data() + sizeof(payload) + index * sizeof(record), &record, sizeof(record)); std::memcpy(cooked.bytes.data() + cursor, source.bytes.data(), source.bytes.size()); cursor += source.bytes.size(); }
+			for (std::size_t index = 0u; index < sections.size(); ++index)
+			{
+				cursor = alignPageSection(cursor);
+				const PageSectionBytes& source = sections[index];
+				TemfDeformablePageSection record{
+					source.kind,
+					1u,
+					static_cast<std::uint32_t>(cursor),
+					static_cast<std::uint32_t>(source.bytes.size()),
+					source.count,
+					source.stride };
+				std::memcpy(cooked.bytes.data() + sizeof(payload)
+					+ index * sizeof(record), &record, sizeof(record));
+				std::memcpy(cooked.bytes.data() + cursor,
+					source.bytes.data(), source.bytes.size());
+				cursor += source.bytes.size();
+			}
 			cooked.entry.blobHash = CalculateVirtualGeometryCompactHash(cooked.bytes);
-			demandedPageRoots.push_back(page.pageId); demandedPageBlobs.push_back(std::move(cooked));
+			if(cooked.entry.parentPageId == kVirtualGeometryInvalidIndex)
+			{
+				demandedPageRoots.push_back(page.pageId);
+			}
+			demandedPageBlobs.push_back(std::move(cooked));
 		}
 		if (demandedPageBlobs.size() > std::numeric_limits<std::uint32_t>::max()
 			|| demandedPageRoots.size() > std::numeric_limits<std::uint32_t>::max())
@@ -5064,7 +5102,7 @@ namespace
 				kTemfMetadataDeformableDemandedPageBlobs,
 				proceduralDomainId,
 				1u, static_cast<std::uint32_t>(decoded.back().size()),
-				decoded.back() });
+				decoded.back(), cooked.entry.pageId });
 		}
 		TerraEngine::Editor::TemfProductionBuildRequest request{};
 		request.representationFlags = directory.directory.header.representationFlags | kTemfRepresentationDeformableStreams;

@@ -61,6 +61,9 @@ namespace TerraEngine::Animation {
 		bool reverse = false;
 		bool useBindPoseFallback = false;
 		bool useHoldLastFallback = false;
+		// A prior-frame visibility decision may freeze presentation without removing
+		// this packet. Stable packet offsets let shaders retain the last complete pose.
+		bool suspendVisualEvaluation = false;
 		bool hasRootMotion = false;
 		// Optional visual stages are enabled only after their immutable table has
 		// been packed for this exact frame. Merely compiling a graph node is not
@@ -76,9 +79,17 @@ namespace TerraEngine::Animation {
 		GpuAnimationProgramInput program;
 		GpuAnimationVisualInput visual;
 		AnimationExecutionModeDecision execution;
+		// A producer may reuse a successful validation only for the exact same
+		// immutable EvaluationProgram object inside one worker-owned batch. Direct
+		// callers keep the checked default so untrusted programs are never accepted.
+		bool programValidated = false;
 		// The producer owns this shared immutable copy for the whole frame.  It is
 		// deliberately not a span because lowering may outlive asset-cache changes.
 		std::shared_ptr<const GpuAnimationResidentPayloads> residentPayloads;
+		// AnimationSystem sets this only after validating the exact lowered request
+		// against the shared immutable payload. Presentation may reuse that proof;
+		// direct callers and tests retain the checked default-false path.
+		bool residentPayloadsValidated = false;
 	};
 
 	struct GpuAnimationLoweringResult {
@@ -104,6 +115,7 @@ namespace TerraEngine::Animation {
 	struct GpuAnimationFrameAtlasEntry {
 		GpuAnimationWorkRequest request{};
 		std::shared_ptr<const GpuAnimationResidentPayloads> residentPayloads;
+		bool residentPayloadsValidated = false;
 	};
 
 	struct GpuAnimationFrameAtlas {
@@ -114,6 +126,36 @@ namespace TerraEngine::Animation {
 		{
 			residentPayloads = {};
 			requests.clear();
+		}
+	};
+
+	// Presentation rebuilds dynamic work requests every frame, but the immutable
+	// clip/program/skeleton atlas changes only when its source payload owners or
+	// selected resource shapes change. This cache retains one checked relocation
+	// layout without owning the source assets; callers provide their own external
+	// synchronization when preparation can overlap.
+	struct GpuAnimationFrameAtlasCacheEntry {
+		std::weak_ptr<const GpuAnimationResidentPayloads> sourcePayload;
+		std::uint32_t sourceProgramResourceIndex = 0U;
+		std::uint32_t sourceSkeletonResourceIndex = 0U;
+		std::uint32_t sourceMorphResourceIndex = 0U;
+		std::uint32_t jointCount = 0U;
+		std::uint32_t morphCount = 0U;
+		std::uint32_t paletteEntryCount = 0U;
+		std::uint32_t relocatedClipResourceIndex = 0U;
+		std::uint32_t relocatedProgramResourceIndex = 0U;
+		std::uint32_t relocatedSkeletonResourceIndex = 0U;
+		std::uint32_t relocatedMorphResourceIndex = 0U;
+	};
+
+	struct GpuAnimationFrameAtlasCache {
+		std::vector<GpuAnimationFrameAtlasCacheEntry> entries;
+		std::shared_ptr<const GpuAnimationResidentPayloads> residentPayloads;
+
+		void Clear() noexcept
+		{
+			entries.clear();
+			residentPayloads.reset();
 		}
 	};
 
@@ -146,5 +188,6 @@ namespace TerraEngine::Animation {
 		GpuAnimationArena& paletteArena,
 		GpuAnimationPlan& output,
 		GpuAnimationLoweredPlanResult& result,
-		const GpuAnimationPlanLimits& limits = {}) noexcept;
+		const GpuAnimationPlanLimits& limits = {},
+		GpuAnimationFrameAtlasCache* atlasCache = nullptr) noexcept;
 }

@@ -63,6 +63,17 @@ namespace TerraEngine::Animation
 		std::uint64_t expectedContentFingerprint = 0u;
 	};
 
+	// A protected crowd reconciliation aggregates per-instance ownership into one
+	// counted update per immutable payload. Criticality is optional because ordinary
+	// retain changes must not republish an otherwise unchanged residency snapshot.
+	struct AnimationStreamRetainAdjustment
+	{
+		AnimationStreamRequest request;
+		std::int64_t retainDelta = 0;
+		bool updateGameplayCritical = false;
+		bool gameplayCritical = false;
+	};
+
 	struct AnimationStreamDecision
 	{
 		AnimationStreamRequest request;
@@ -180,6 +191,16 @@ namespace TerraEngine::Animation
 		bool Cancel(const AnimationStreamRequest& request);
 		bool Retain(const AnimationStreamRequest& request);
 		bool Release(const AnimationStreamRequest& request);
+		// Apply a counted ownership delta under one coordinator lock. Crowd binding
+		// reconciliation aggregates identical per-instance changes before calling
+		// this method, avoiding one mutex acquisition and decision scan per animator.
+		bool AdjustRetainCount(
+			const AnimationStreamRequest& request,
+			std::int64_t adjustment);
+		// Validate the complete unique-payload batch before mutating any decision, then
+		// publish at most one rebuilt residency snapshot for all criticality changes.
+		bool ApplyRetainAdjustments(
+			std::span<const AnimationStreamRetainAdjustment> adjustments);
 		// Active bindings may promote or demote a shared payload as gameplay
 		// consumers appear and disappear. Physical range identity is unchanged.
 		bool SetGameplayCritical(

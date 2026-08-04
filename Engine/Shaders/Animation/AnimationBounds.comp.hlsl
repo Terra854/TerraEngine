@@ -7,6 +7,7 @@ void main(uint3 id : SV_DispatchThreadID)
 	TeAnimationGpuDispatchRecord dispatch; TeAnimationGpuWorkPacket packet; uint element;
 	if (!TeResolveWork(id.x, TE_ANIMATION_GPU_STAGE_BOUNDS, dispatch, packet, element)) return;
 	if (!TeValidatePacket(dispatch, packet, element, TE_ANIMATION_GPU_STAGE_BOUNDS) || element != 0u) return;
+	if ((packet.flags & TE_ANIMATION_GPU_WORK_SUSPEND_VISUAL_EVALUATION) != 0u) return;
 	uint inputBytes; gAnimationMorphInputs.GetDimensions(inputBytes); uint outputBytes; gAnimationBounds.GetDimensions(outputBytes);
 	const uint outputOffset = packet.boundsOutputIndex * 32u;
 	const uint tableOffset = packet.morphResourceIndex * 16u;

@@ -94,7 +94,25 @@ namespace TerraEngine::Animation {
 	// resolution atomically loads the immutable set and never retains producer
 	// vectors or locks the registry while walking skeleton ancestors.
 	class TERRAENGINE_API AnimationConsumerRegistry {
+		struct PublishedDeclarations;
+
 	public:
+		// One captured view pins an immutable declaration publication for every
+		// worker partition in a frame. Resolve performs no atomic shared_ptr traffic,
+		// so a handful of gameplay consumers cannot serialize a large visual crowd.
+		class ReadView {
+		public:
+			[[nodiscard]] AnimationResolvedConsumerRequirements Resolve(
+				AnimatorInstanceHandle animator,
+				std::span<const std::int32_t> jointParents,
+				AnimationFixedTick fixedTick) const;
+			[[nodiscard]] bool HasDeclarations() const noexcept;
+
+		private:
+			friend class AnimationConsumerRegistry;
+			std::shared_ptr<const PublishedDeclarations> snapshot_;
+		};
+
 		static AnimationConsumerRegistry& Instance();
 
 		AnimationStatus PublishDeclarations(
@@ -105,12 +123,12 @@ namespace TerraEngine::Animation {
 			AnimatorInstanceHandle animator,
 			std::span<const std::int32_t> jointParents,
 			AnimationFixedTick fixedTick) const;
+		[[nodiscard]] ReadView CaptureReadView() const noexcept;
 		void Clear() noexcept;
 		[[nodiscard]] AnimationGeneration PublishedGeneration() const noexcept;
 		[[nodiscard]] std::size_t DeclarationCount() const noexcept;
 
 	private:
-		struct PublishedDeclarations;
 		mutable std::mutex publishMutex_;
 		std::shared_ptr<const PublishedDeclarations> published_;
 	};

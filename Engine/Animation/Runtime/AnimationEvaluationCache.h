@@ -147,6 +147,11 @@ namespace TerraEngine::Animation {
 			AnimationEvaluationCacheGenerationDomain domain,
 			std::uint64_t generation);
 		[[nodiscard]] std::size_t InvalidateAnimator(AnimatorInstanceHandle animator);
+		// Shared residency publications can invalidate thousands of prefab instances
+		// at once. Holding the cache mutex once keeps that protected publication
+		// linear without changing the generation-safe per-animator erase semantics.
+		[[nodiscard]] std::size_t InvalidateAnimators(
+			std::span<const AnimatorInstanceHandle> animators);
 		void InvalidateAll();
 		[[nodiscard]] std::size_t Size() const noexcept;
 

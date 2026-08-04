@@ -2698,6 +2698,9 @@ void ResourceManager::ClearCaches()
 	}
 	ClearResidencyState();
 	ClearStreamingState();
+	// Mesh and animation cache ownership changed as one protected teardown
+	// publication, so wake binding synchronization exactly once.
+	m_AnimationBindingResourceRevision.fetch_add(1U, std::memory_order_release);
 }
 
 // ResourceManager::DeleteResource is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -2756,6 +2759,11 @@ void ResourceManager::DeleteResource(const TerraEngine::UUID& id, AssetType type
 		registry.idToPath.erase(id);
 		break;
 	}
+	}
+	if(type == AssetType::Mesh) {
+		// Deletion is a tombstone publication for animator bindings: retained
+		// runtime handles must observe that their immutable dependency vanished.
+		m_AnimationBindingResourceRevision.fetch_add(1U, std::memory_order_release);
 	}
 
 	if (type == AssetType::Mesh)
@@ -4560,6 +4568,55 @@ Mesh* ResourceManager::GetMesh(const TerraEngine::UUID& id)
 	return GetResourceById<Mesh>(id, meshCache, [this](const std::filesystem::path& p) { return LoadMesh(p); });
 }
 
+std::optional<MeshAnimationBindingSnapshot>
+ResourceManager::TryCopyMeshAnimationBindingSnapshot(
+	const TerraEngine::UUID& id) const
+{
+	MeshAnimationBindingSnapshot snapshot;
+	if(id == TerraEngine::EMPTY_UUID) return snapshot;
+	std::shared_lock lock(meshCache.mutex, std::try_to_lock);
+	if(!lock.owns_lock()) return std::nullopt;
+	const auto found = meshCache.resources.find(id);
+	if(found == meshCache.resources.end() || !found->second) return snapshot;
+
+	// Copy only the immutable compatibility facts consumed by animation. Large
+	// vertex, index, morph-delta, and virtual-geometry streams remain cache-owned
+	// and are never duplicated at the protected frame boundary.
+	const Mesh& mesh = *found->second;
+	const TemfDeformableMetadata& metadata = mesh.deformableMetadata;
+	snapshot.present = true;
+	snapshot.hasDeformablePayload = mesh.hasDeformablePayload;
+	snapshot.runtimeLayoutVersion = mesh.runtimeLayout.version;
+	snapshot.deformablePayloadGeneration = mesh.deformablePayloadGeneration;
+	snapshot.skinningVertexCount = metadata.skinningVertexCount;
+	snapshot.meshletSkinningDataCount = mesh.runtimeLayout.meshletSkinningDataCount;
+	snapshot.meshletSkinningDataBytes = mesh.meshletSkinningData.size();
+	snapshot.palettePartitionCount = metadata.palettePartitionCount;
+	snapshot.paletteRecordCount = mesh.deformablePalettes.size();
+	snapshot.singlePaletteJointCount = mesh.deformablePalettes.size() == 1U
+		? mesh.deformablePalettes.front().jointCount : 0U;
+	snapshot.morphTargetCount = metadata.morphTargetCount;
+	snapshot.morphRecordCount = mesh.deformableMorphs.size();
+	snapshot.vertexPaletteIndexCount =
+		mesh.deformableVertexPaletteIndices.size();
+	snapshot.sourceSkeletonJointCount = metadata.sourceSkeletonJointCount;
+	snapshot.skeletonCompatibilityFingerprint =
+		metadata.skeletonCompatibilityFingerprint;
+	snapshot.flags = metadata.flags;
+	std::copy_n(metadata.deformationBoundsMin,
+		snapshot.deformationBoundsMinimum.size(),
+		snapshot.deformationBoundsMinimum.begin());
+	std::copy_n(metadata.deformationBoundsMax,
+		snapshot.deformationBoundsMaximum.size(),
+		snapshot.deformationBoundsMaximum.begin());
+	snapshot.paletteJoints = mesh.deformablePaletteJoints;
+	snapshot.morphStableIds.reserve(mesh.deformableMorphs.size());
+	for(const TemfDeformableMorphRecord& morph : mesh.deformableMorphs) {
+		snapshot.morphStableIds.push_back(morph.stableTargetId);
+	}
+	return snapshot;
+}
+
 TerraEngine::Animation::SkeletonAsset* ResourceManager::GetSkeleton(const TerraEngine::UUID& id)
 {
 	return GetResourceById<TerraEngine::Animation::SkeletonAsset>(
@@ -4590,6 +4647,31 @@ TerraEngine::Animation::AnimationGeneration ResourceManager::GetAnimationAssetRu
 	case AssetType::RetargetProfile: return readGeneration(retargetProfileCache);
 	case AssetType::MotionDatabase: return readGeneration(motionDatabaseCache);
 	case AssetType::RagdollProfile: return readGeneration(ragdollProfileCache);
+	default: return 0U;
+	}
+}
+
+std::optional<TerraEngine::Animation::AnimationGeneration>
+ResourceManager::TryGetAnimationAssetRuntimeGeneration(
+	const TerraEngine::UUID& id,
+	AssetType type) const noexcept
+{
+	if(id == TerraEngine::EMPTY_UUID) return 0U;
+	const auto tryReadGeneration = [&](const auto& cache)
+		-> std::optional<TerraEngine::Animation::AnimationGeneration> {
+		std::shared_lock lock(cache.mutex, std::try_to_lock);
+		if(!lock.owns_lock()) return std::nullopt;
+		const auto found = cache.runtimeGenerations.find(id);
+		return found != cache.runtimeGenerations.end() ? found->second : 0U;
+	};
+	switch(type) {
+	case AssetType::Skeleton: return tryReadGeneration(skeletonCache);
+	case AssetType::AnimationClip: return tryReadGeneration(animationClipCache);
+	case AssetType::AnimationController: return tryReadGeneration(animationControllerCache);
+	case AssetType::AnimationMask: return tryReadGeneration(animationMaskCache);
+	case AssetType::RetargetProfile: return tryReadGeneration(retargetProfileCache);
+	case AssetType::MotionDatabase: return tryReadGeneration(motionDatabaseCache);
+	case AssetType::RagdollProfile: return tryReadGeneration(ragdollProfileCache);
 	default: return 0U;
 	}
 }

@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cctype>
 #include <cstring>
+#include <iterator>
 #include <limits>
 #include <optional>
 #include <string>
@@ -696,7 +697,8 @@ namespace
 
 	void ResolveVirtualGeometryUploadPolicy(
 		Mesh& mesh,
-		std::size_t canonicalProductionPageCount)
+		std::span<const TemfPageDescriptor> canonicalPages,
+		std::span<const TemfBlockDescriptor> canonicalBlocks)
 	{
 		mesh.virtualGeometryPageStreamingReady = false;
 		mesh.virtualGeometryFullOwnerPayloadBytes = 0u;
@@ -740,14 +742,50 @@ namespace
 			// A later typed streaming transaction owns the state transition.
 		}
 
-		// The production directory currently packs whole decoded streams into
-		// physical codec pages, while the hierarchy table assigns one logical page
-		// to each independently selectable spatial cluster. Those page IDs are not
-		// interchangeable when their counts differ. Failing open to the already
-		// decoded owning-mesh payload keeps every cooked LOD selectable and prevents
-		// requests for unrelated codec pages; it also makes diagnostics admit that
-		// no page-local byte ownership exists for this asset generation.
-		if (canonicalProductionPageCount != mesh.virtualGeometryPages.size())
+		// Count equality is not an identity proof: asset-wide streams may occupy
+		// additional physical pages. Every selectable hierarchy page must instead
+		// map to exactly one canonical page containing its independently decodable
+		// deformation payload. This is the same page ID later requested by render
+		// selection, resource streaming, and Vulkan deformation publication.
+		bool completePageIdentityMapping = true;
+		for (const VirtualGeometryPageRecord& virtualPage : mesh.virtualGeometryPages)
+		{
+			const auto first = std::find_if(canonicalPages.begin(), canonicalPages.end(),
+				[&virtualPage](const TemfPageDescriptor& page)
+				{ return page.logicalPageId == virtualPage.pageId; });
+			if (first == canonicalPages.end()
+				|| std::find_if(std::next(first), canonicalPages.end(),
+					[&virtualPage](const TemfPageDescriptor& page)
+					{ return page.logicalPageId == virtualPage.pageId; }) != canonicalPages.end()
+				|| first->firstBlockIndex > canonicalBlocks.size()
+				|| first->blockCount > canonicalBlocks.size() - first->firstBlockIndex)
+			{
+				completePageIdentityMapping = false;
+				break;
+			}
+			bool ownsDeformablePayload = false;
+			for (std::uint32_t blockOffset = 0u; blockOffset < first->blockCount;
+				++blockOffset)
+			{
+				const TemfBlockDescriptor& block =
+					canonicalBlocks[first->firstBlockIndex + blockOffset];
+				if (block.logicalPageId == virtualPage.pageId
+					&& block.streamKind == static_cast<std::uint16_t>(
+						TemfStreamKind::ProceduralUpdate)
+					&& block.attributeMask
+						== kTemfMetadataDeformableDemandedPageBlobs)
+				{
+					ownsDeformablePayload = true;
+					break;
+				}
+			}
+			if (!ownsDeformablePayload)
+			{
+				completePageIdentityMapping = false;
+				break;
+			}
+		}
+		if (!completePageIdentityMapping)
 		{
 			for (const VirtualGeometryPageRecord& page : mesh.virtualGeometryPages)
 			{
@@ -758,7 +796,7 @@ namespace
 				}
 			}
 			mesh.virtualGeometryOwnerFallbackReason =
-				"canonical production pages do not map one-to-one to virtual hierarchy pages; using the validated owning-mesh payload";
+				"canonical production pages do not provide complete hierarchy page identities; using the validated owning-mesh payload";
 			return;
 		}
 
@@ -1045,7 +1083,8 @@ namespace
 			}
 			ResolveVirtualGeometryUploadPolicy(
 				*productionMesh,
-				validated.directory.pages.size());
+				validated.directory.pages,
+				validated.directory.blocks);
 		}
 		else
 		{
@@ -1344,6 +1383,8 @@ namespace
 						|| section.elementCount == 0u || section.elementStride == 0u
 						|| section.byteSize != static_cast<std::uint64_t>(section.elementCount) * section.elementStride
 						|| section.relativeByteOffset < dataBegin
+						|| section.relativeByteOffset
+							% kTemfDeformablePageSectionAlignment != 0u
 						|| section.relativeByteOffset > blockBytes.size()
 						|| section.byteSize > blockBytes.size() - section.relativeByteOffset)
 					{
@@ -1355,19 +1396,42 @@ namespace
 						section.relativeByteOffset + section.byteSize);
 				}
 				std::sort(sectionRanges.begin(), sectionRanges.end());
-				std::uint32_t expectedSectionOffset = static_cast<std::uint32_t>(dataBegin);
+				const auto alignPageSection = [](std::size_t value) {
+					return (value + kTemfDeformablePageSectionAlignment - 1u)
+						& ~(static_cast<std::size_t>(
+							kTemfDeformablePageSectionAlignment) - 1u);
+				};
+				std::size_t consumedOffset = dataBegin;
 				for (const auto& range : sectionRanges)
 				{
-					if (range.first != expectedSectionOffset || range.second < range.first)
+					const std::size_t expectedSectionOffset =
+						alignPageSection(consumedOffset);
+					const bool paddingIsZero =
+						expectedSectionOffset <= blockBytes.size()
+						&& std::all_of(
+							blockBytes.begin() + static_cast<std::ptrdiff_t>(consumedOffset),
+							blockBytes.begin() + static_cast<std::ptrdiff_t>(expectedSectionOffset),
+							[](std::uint8_t byte) { return byte == 0u; });
+					if (range.first != expectedSectionOffset
+						|| range.second < range.first || !paddingIsZero)
 					{
-						TERRAENGINE_LOG(LogLevel::Error, "TEMFPRD1 recook required for " << resolvedPath << ": demanded-page sections overlap or leave unclaimed bytes.");
+						TERRAENGINE_LOG(LogLevel::Error, "TEMFPRD1 recook required for " << resolvedPath << ": demanded-page section alignment or padding is invalid.");
 						return nullptr;
 					}
-					expectedSectionOffset = range.second;
+					consumedOffset = range.second;
 				}
-				if (expectedSectionOffset != blockBytes.size())
+				const std::size_t expectedBlobSize =
+					alignPageSection(consumedOffset);
+				const bool trailingPaddingIsZero =
+					expectedBlobSize <= blockBytes.size()
+					&& std::all_of(
+						blockBytes.begin() + static_cast<std::ptrdiff_t>(consumedOffset),
+						blockBytes.end(),
+						[](std::uint8_t byte) { return byte == 0u; });
+				if (expectedBlobSize != blockBytes.size()
+					|| !trailingPaddingIsZero)
 				{
-					TERRAENGINE_LOG(LogLevel::Error, "TEMFPRD1 recook required for " << resolvedPath << ": demanded-page section coverage is incomplete.");
+					TERRAENGINE_LOG(LogLevel::Error, "TEMFPRD1 recook required for " << resolvedPath << ": demanded-page trailing alignment is invalid.");
 					return nullptr;
 				}
 				const std::uint32_t kRequiredPageSections = root.morphTargetCount == 0u

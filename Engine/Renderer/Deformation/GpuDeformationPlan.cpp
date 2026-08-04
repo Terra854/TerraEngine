@@ -7,6 +7,84 @@
 namespace TerraEngine::Renderer {
 
 	namespace {
+		bool HasReusableContent(const DeformationPageDemand& demand) noexcept
+		{
+			return demand.key.deformation.contentIdLow != 0u
+				&& demand.key.deformation.contentIdHigh != 0u;
+		}
+
+		bool SameReusableKey(
+			const DeformationPageDemand& left,
+			const DeformationPageDemand& right) noexcept
+		{
+			if(left.key.page != right.key.page
+				|| left.key.inputLayoutVersion != right.key.inputLayoutVersion
+				|| left.key.animationLod != right.key.animationLod
+				|| left.key.animationLodVersion != right.key.animationLodVersion)
+			{
+				return false;
+			}
+			if(!HasReusableContent(left) || !HasReusableContent(right))
+			{
+				return left.key == right.key;
+			}
+			return left.key.deformation.contentIdLow
+					== right.key.deformation.contentIdLow
+				&& left.key.deformation.contentIdHigh
+					== right.key.deformation.contentIdHigh
+				&& left.key.deformation.rendererGeneration
+					== right.key.deformation.rendererGeneration
+				&& left.key.deformation.sceneGeneration
+					== right.key.deformation.sceneGeneration;
+		}
+
+		bool ReusableKeyLess(
+			const DeformationPageDemand& left,
+			const DeformationPageDemand& right) noexcept
+		{
+			if(left.key.page != right.key.page) return left.key.page < right.key.page;
+			if(left.key.inputLayoutVersion != right.key.inputLayoutVersion)
+				return left.key.inputLayoutVersion < right.key.inputLayoutVersion;
+			if(left.key.animationLod != right.key.animationLod)
+				return left.key.animationLod < right.key.animationLod;
+			if(left.key.animationLodVersion != right.key.animationLodVersion)
+				return left.key.animationLodVersion < right.key.animationLodVersion;
+			const bool leftReusable = HasReusableContent(left);
+			const bool rightReusable = HasReusableContent(right);
+			if(leftReusable != rightReusable) return leftReusable < rightReusable;
+			if(!leftReusable) return left.key < right.key;
+			if(left.key.deformation.contentIdLow
+				!= right.key.deformation.contentIdLow)
+			{
+				return left.key.deformation.contentIdLow
+					< right.key.deformation.contentIdLow;
+			}
+			if(left.key.deformation.contentIdHigh
+				!= right.key.deformation.contentIdHigh)
+			{
+				return left.key.deformation.contentIdHigh
+					< right.key.deformation.contentIdHigh;
+			}
+			if(left.key.deformation.rendererGeneration
+				!= right.key.deformation.rendererGeneration)
+			{
+				return left.key.deformation.rendererGeneration
+					< right.key.deformation.rendererGeneration;
+			}
+			if(left.key.deformation.sceneGeneration
+				!= right.key.deformation.sceneGeneration)
+			{
+				return left.key.deformation.sceneGeneration
+					< right.key.deformation.sceneGeneration;
+			}
+			// Equal reusable keys use owner identity only as a deterministic tie-break;
+			// SameReusableKey still merges them into one dispatch below.
+			const std::uint64_t leftOwner = left.ownerStableInstanceId != 0u
+				? left.ownerStableInstanceId : left.key.deformation.stableInstanceId;
+			const std::uint64_t rightOwner = right.ownerStableInstanceId != 0u
+				? right.ownerStableInstanceId : right.key.deformation.stableInstanceId;
+			return leftOwner < rightOwner;
+		}
 
 		bool TryAddCount(std::uint32_t current, std::uint32_t additional, std::uint32_t& result)
 		{
@@ -20,7 +98,8 @@ namespace TerraEngine::Renderer {
 
 		bool SameWorkShape(const DeformationPageDemand& left, const DeformationPageDemand& right)
 		{
-			return left.sourceRecordIndex == right.sourceRecordIndex
+			return (left.sourceRecordIndex == right.sourceRecordIndex
+					|| (HasReusableContent(left) && HasReusableContent(right)))
 				&& left.vertexCount == right.vertexCount
 				&& left.meshletCount == right.meshletCount
 				&& left.clusterCount == right.clusterCount;
@@ -37,7 +116,8 @@ namespace TerraEngine::Renderer {
 			&& morphGeneration != 0u
 			&& meshPayloadGeneration != 0u
 			&& rendererGeneration != 0u
-			&& sceneGeneration != 0u;
+			&& sceneGeneration != 0u
+			&& ((contentIdLow == 0u) == (contentIdHigh == 0u));
 	}
 
 	bool StaticPageKey::IsComplete() const noexcept
@@ -73,6 +153,8 @@ namespace TerraEngine::Renderer {
 				return record.key.IsComplete()
 					&& record.key.deformation.rendererGeneration == rendererGeneration
 					&& record.sourceRecordIndex != kInvalidDeformationRecordIndex
+					&& record.sourceStableInstanceId != 0u
+					&& !record.consumerStableInstanceIds.empty()
 					&& record.vertexCount != 0u
 					&& record.meshletCount != 0u
 					&& record.clusterCount != 0u
@@ -107,11 +189,7 @@ namespace TerraEngine::Renderer {
 		}
 
 		std::vector<DeformationPageDemand> ordered(demands.begin(), demands.end());
-		std::sort(ordered.begin(), ordered.end(),
-			[](const DeformationPageDemand& left, const DeformationPageDemand& right)
-			{
-				return left.key < right.key;
-			});
+		std::sort(ordered.begin(), ordered.end(), ReusableKeyLess);
 
 		for(std::size_t index = 0u; index < ordered.size();)
 		{
@@ -119,6 +197,10 @@ namespace TerraEngine::Renderer {
 			if(!first.key.IsComplete()
 				|| first.key.deformation.rendererGeneration != rendererGeneration
 				|| first.sourceRecordIndex == kInvalidDeformationRecordIndex
+				|| (first.ownerStableInstanceId == 0u
+					&& first.key.deformation.stableInstanceId == 0u)
+				|| (first.sourceStableInstanceId == 0u
+					&& first.key.deformation.stableInstanceId == 0u)
 				|| first.vertexCount == 0u
 				|| first.meshletCount == 0u
 				|| first.clusterCount == 0u
@@ -130,7 +212,8 @@ namespace TerraEngine::Renderer {
 
 			DeformationPageDemand merged = first;
 			std::size_t next = index + 1u;
-			for(; next < ordered.size() && ordered[next].key == first.key; ++next)
+			for(; next < ordered.size()
+				&& SameReusableKey(ordered[next], first); ++next)
 			{
 				if(!SameWorkShape(first, ordered[next]))
 				{
@@ -145,6 +228,24 @@ namespace TerraEngine::Renderer {
 
 			DeformationWorkRecord record;
 			record.key = merged.key;
+			record.sourceStableInstanceId = merged.sourceStableInstanceId != 0u
+				? merged.sourceStableInstanceId
+				: merged.key.deformation.stableInstanceId;
+			for(std::size_t consumerIndex = index;
+				consumerIndex < next; ++consumerIndex)
+			{
+				const std::uint64_t owner =
+					ordered[consumerIndex].ownerStableInstanceId != 0u
+						? ordered[consumerIndex].ownerStableInstanceId
+						: ordered[consumerIndex].key.deformation.stableInstanceId;
+				record.consumerStableInstanceIds.push_back(owner);
+			}
+			std::sort(record.consumerStableInstanceIds.begin(),
+				record.consumerStableInstanceIds.end());
+			record.consumerStableInstanceIds.erase(std::unique(
+				record.consumerStableInstanceIds.begin(),
+				record.consumerStableInstanceIds.end()),
+				record.consumerStableInstanceIds.end());
 			record.sourceRecordIndex = merged.sourceRecordIndex;
 			record.vertexOffset = plan.totalVertexCount;
 			record.vertexCount = merged.vertexCount;

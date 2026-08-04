@@ -25,6 +25,11 @@ namespace TerraEngine::Editor
 		std::uint32_t elementCount = 0u;
 		std::uint32_t elementStride = 0u;
 		std::span<const std::uint8_t> decodedBytes;
+		// Most streams are packed automatically. Page-local hierarchy payloads
+		// instead name the exact persistent page consumed by selection, streaming,
+		// and deformation. The direct-resident sentinel means "automatic" here;
+		// direct-only files continue to use that value for every descriptor.
+		std::uint32_t logicalPageIdOverride = kTemfDirectResidentPageId;
 	};
 
 	struct TemfProductionBuildRequest

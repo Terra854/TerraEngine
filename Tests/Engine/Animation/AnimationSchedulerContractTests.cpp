@@ -309,32 +309,42 @@ namespace TerraEngine::Tests {
 			const std::vector<FrameWorkloadDeclaration> animationWorkloads = animationSystem.DeclareFrameWorkloads(1.0F / 60.0F);
 			const std::vector<FrameWorkloadDeclaration> presentationWorkloads = presentationSystem.DeclareFrameWorkloads(1.0F / 60.0F);
 
-			context.ExpectEqual(static_cast<std::size_t>(4U), animationWorkloads.size(),
-				"AnimationSystem must expose capture, planning, authoritative evaluation, and publication.");
+			context.ExpectEqual(static_cast<std::size_t>(5U), animationWorkloads.size(),
+				"AnimationSystem must expose capture, planning, single-plan finalization, authoritative evaluation, and publication.");
 			context.ExpectEqual(static_cast<std::size_t>(2U), presentationWorkloads.size(),
 				"AnimationPresentationSystem must expose worker preparation and protected publication.");
 			const FrameWorkloadDeclaration* capture = FindWorkload(animationWorkloads, "CaptureAnimationInputs");
 			const FrameWorkloadDeclaration* plan = FindWorkload(animationWorkloads, "PlanAnimationEvaluation");
+			const FrameWorkloadDeclaration* finalize = FindWorkload(animationWorkloads, "FinalizeAnimationWorkPlan");
 			const FrameWorkloadDeclaration* evaluate = FindWorkload(animationWorkloads, "EvaluateAuthoritativeAnimation");
 			const FrameWorkloadDeclaration* publish = FindWorkload(animationWorkloads, "PublishAnimationAuthority");
 			const FrameWorkloadDeclaration* preparePresentation = FindWorkload(presentationWorkloads, "PrepareAnimationPresentation");
 			const FrameWorkloadDeclaration* publishPresentation = FindWorkload(presentationWorkloads, "PublishAnimationPresentation");
-			context.Expect(capture != nullptr && plan != nullptr && evaluate != nullptr && publish != nullptr
+			context.Expect(capture != nullptr && plan != nullptr && finalize != nullptr
+				&& evaluate != nullptr && publish != nullptr
 				&& preparePresentation != nullptr && publishPresentation != nullptr,
 				"Every frozen animation workload name must be declared.");
-			if(capture == nullptr || plan == nullptr || evaluate == nullptr || publish == nullptr
+			if(capture == nullptr || plan == nullptr || finalize == nullptr
+				|| evaluate == nullptr || publish == nullptr
 				|| preparePresentation == nullptr || publishPresentation == nullptr) {
 				return;
 			}
 			for(const FrameWorkloadDeclaration& workload : animationWorkloads) {
-				context.ExpectEqual(static_cast<std::size_t>(256U), workload.estimatedWorkItemCount,
-					"Every animation stage must freeze the same post-synchronization membership count before partitioning.");
+				const std::size_t expectedItems = workload.workloadName == "FinalizeAnimationWorkPlan"
+					? 1U : 256U;
+				context.ExpectEqual(expectedItems, workload.estimatedWorkItemCount,
+					"Per-animator stages must freeze membership while finalization remains one atomic plan build.");
 			}
 
 			ExpectProtectedWorkload(context, *capture);
 			context.Expect(capture->phaseKind == TerraEngine::Scheduling::WorkerSystemPhaseKind::Snapshot,
 				"Live component/command capture must be identified as a protected snapshot.");
 			ExpectWorkerWorkload(context, *plan);
+			context.Expect(plan->partitionWorkItemCount == 128U
+				&& evaluate->partitionWorkItemCount == 128U,
+				"Full-rate crowd planning and evaluation should use one practical worker-pool wave instead of dispatching 64-item microtasks.");
+			ExpectWorkerWorkload(context, *finalize,
+				TerraEngine::Scheduling::FrameWorkloadPartitionPolicy::Single);
 			ExpectWorkerWorkload(context, *evaluate);
 			ExpectProtectedWorkload(context, *publish);
 			context.Expect(publish->phaseKind == TerraEngine::Scheduling::WorkerSystemPhaseKind::ProtectedCommit
@@ -356,6 +366,9 @@ namespace TerraEngine::Tests {
 				&& Contains(plan->writes, TerraEngine::Scheduling::kResourceAnimationWorkPackets)
 				&& Contains(plan->writes, TerraEngine::Scheduling::kResourceAnimationVisualPackets),
 				"Planning must consume immutable inputs and emit typed work/visual packets.");
+			context.Expect(Contains(finalize->reads, TerraEngine::Scheduling::kResourceAnimationWorkPackets)
+				&& Contains(finalize->writes, TerraEngine::Scheduling::kResourceAnimationWorkPackets),
+				"Finalization must convert the complete planned packet set into one immutable scheduler plan.");
 			context.Expect(Contains(evaluate->reads, TerraEngine::Scheduling::kResourceAnimationWorkPackets)
 				&& Contains(evaluate->writes, TerraEngine::Scheduling::kResourceAnimationAuthoritativeOutputs),
 				"Authoritative evaluation must write only prepared output owned by its frame workload.");
@@ -372,8 +385,12 @@ namespace TerraEngine::Tests {
 
 			context.Expect(!plan->explicitDependencies.empty() && capture->stableDescriptorId == plan->explicitDependencies.front(),
 				"Planning must wait for the protected immutable input capture.");
-			context.Expect(!evaluate->explicitDependencies.empty() && plan->stableDescriptorId == evaluate->explicitDependencies.front(),
-				"Authoritative evaluation must wait for planning.");
+			context.Expect(!finalize->explicitDependencies.empty()
+				&& plan->stableDescriptorId == finalize->explicitDependencies.front(),
+				"Single-plan finalization must wait for every planning range.");
+			context.Expect(!evaluate->explicitDependencies.empty()
+				&& finalize->stableDescriptorId == evaluate->explicitDependencies.front(),
+				"Authoritative evaluation must wait for the immutable plan.");
 			context.Expect(!publish->explicitDependencies.empty() && evaluate->stableDescriptorId == publish->explicitDependencies.front(),
 				"Authority publication must wait for all worker evaluation.");
 			context.Expect(!publishPresentation->explicitDependencies.empty()

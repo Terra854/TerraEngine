@@ -244,6 +244,32 @@ namespace TerraEngine::Tests {
 				"Explicit renderer recovery invalidation must remove only matching generations.");
 			context.Expect(cache.InvalidateAnimator(second.animator) == 1U && cache.Size() == 0U,
 				"Animator destruction must remove every remaining cached view atomically.");
+
+			AnimationEvaluationCacheConfiguration rangeConfiguration;
+			rangeConfiguration.maximumEntries = 8U;
+			AnimationEvaluationCache rangeCache(rangeConfiguration);
+			AnimationEvaluationCacheKey targetFirst = MakeCacheKey(20U);
+			AnimationEvaluationCacheKey targetSecond = targetFirst;
+			++targetSecond.evaluationTick;
+			AnimationEvaluationCacheKey neighborBefore = MakeCacheKey(19U);
+			AnimationEvaluationCacheKey neighborAfter = MakeCacheKey(21U);
+			(void)rangeCache.Store(neighborBefore, MakeCacheValue(50U));
+			(void)rangeCache.Store(targetFirst, MakeCacheValue(51U));
+			// Multiple view/tick variants from the same completed source frame share
+			// one animator watermark and must be removed as one contiguous range.
+			(void)rangeCache.Store(targetSecond, MakeCacheValue(51U));
+			(void)rangeCache.Store(neighborAfter, MakeCacheValue(53U));
+			context.Expect(rangeCache.InvalidateAnimator(targetFirst.animator) == 2U
+				&& rangeCache.Size() == 2U
+				&& rangeCache.Lookup(targetFirst, {}).disposition
+					== AnimationEvaluationCacheDisposition::Miss
+				&& rangeCache.Lookup(targetSecond, {}).disposition
+					== AnimationEvaluationCacheDisposition::Miss
+				&& rangeCache.Lookup(neighborBefore, {}).disposition
+					== AnimationEvaluationCacheDisposition::Reused
+				&& rangeCache.Lookup(neighborAfter, {}).disposition
+					== AnimationEvaluationCacheDisposition::Reused,
+				"Contiguous animator invalidation must remove every target view without disturbing adjacent animator ranges.");
 		});
 
 		registry.Add("Animation.Caching.ConcurrentAccessRemainsBounded", [](TestContext& context) {

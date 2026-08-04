@@ -114,6 +114,31 @@ namespace TerraEngine::Tests
 					"Visibility independently bounds primitive work and the real pixel target before compute raster, resolve, and shading bins.");
 			});
 
+		r.Add("Vulkan.VirtualGeometry.VisibilityScratchUsesBoundedGpuClearRanges",
+			[](TestContext &c)
+			{
+				Renderer::Vulkan::VulkanVirtualGeometryVisibilityPlan plan{};
+				plan.ready = true;
+				plan.pixelCount = 64u * 32u;
+				plan.materialBinCount = 64u;
+				const auto clearPlan = Renderer::Vulkan::
+					BuildVulkanVirtualGeometryVisibilityClearPlan(plan);
+				c.Expect(clearPlan.valid
+						&& clearPlan.depthBytes == 64u * 32u * sizeof(std::uint32_t)
+						&& clearPlan.visibilityRecordBytes
+							== 64u * 32u * 4u * sizeof(std::uint32_t)
+						&& clearPlan.resolvedVisibilityBytes
+							== clearPlan.visibilityRecordBytes
+						&& clearPlan.shadingBinBytes
+							== 64u * sizeof(std::uint32_t),
+					"Visibility scratch initialization must remain a bounded GPU transfer plan instead of a viewport-sized CPU upload.");
+
+				plan.zeroWork = true;
+				c.Expect(!Renderer::Vulkan::
+						BuildVulkanVirtualGeometryVisibilityClearPlan(plan).valid,
+					"A zero-work visibility generation must not record scratch clears.");
+			});
+
 		r.Add("Vulkan.VirtualGeometry.PacketPublicationRejectsCrossViewGenerations",
 			[](TestContext &context)
 			{

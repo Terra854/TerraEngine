@@ -159,18 +159,20 @@ void HierarchyWindow::RefreshRootEntityCache(ObjectManager& objectManager, bool 
 	}
 
 	m_CachedRootEntities.clear();
+	m_CachedRootLeafFlags.clear();
+	m_CachedRootTreeNodeIds.clear();
 	std::vector<Object> roots = objectManager.getRootObjects();
 	m_CachedRootEntities.reserve(roots.size());
-	m_CachedRootsAreLeaves = true;
+	m_CachedRootLeafFlags.reserve(roots.size());
+	m_CachedRootTreeNodeIds.reserve(roots.size());
 	for (const Object& root : roots)
 	{
 		m_CachedRootEntities.push_back(root.EntityId());
-		// This one-time revision check makes flat scenes eligible for clipping.
-		// Nested scenes retain the established recursive TreeNode behavior.
-		if (!objectManager.getChildren(root).empty())
-		{
-			m_CachedRootsAreLeaves = false;
-		}
+		// Cache the structural fact once per hierarchy revision. Names, selection,
+		// and prefab presentation remain live row data, while child discovery is
+		// avoided for roots the snapshot already proved are leaves.
+		m_CachedRootLeafFlags.push_back(objectManager.getChildren(root).empty() ? 1u : 0u);
+		m_CachedRootTreeNodeIds.push_back(TerraEngine::ToHexString(objectManager.getUUID(root)));
 	}
 
 	m_CachedHierarchyRevision = hierarchyRevision;
@@ -179,26 +181,63 @@ void HierarchyWindow::RefreshRootEntityCache(ObjectManager& objectManager, bool 
 
 void HierarchyWindow::DrawCachedRootNodes()
 {
-	// A ten-thousand-body stress scene is normally a flat root list. ImGui's
-	// clipper limits row construction to the visible portion while DrawEntityNode
-	// continues to own every selection, drag/drop, prefab, and context action.
-	if (m_CachedRootsAreLeaves && m_SearchFilter.empty())
+	// Search must inspect every authored name, and expanded branch roots have
+	// variable height. The ordinary unfiltered view can still clip each contiguous
+	// run of collapsed roots independently. ImGui stores tree openness by the same
+	// stable UUID string used in DrawEntityNode, so only genuinely expanded roots
+	// leave the clipped path and recurse through their children.
+	if (!m_SearchFilter.empty()
+		|| m_CachedRootLeafFlags.size() != m_CachedRootEntities.size()
+		|| m_CachedRootTreeNodeIds.size() != m_CachedRootEntities.size())
 	{
-		ImGuiListClipper clipper;
-		clipper.Begin(static_cast<int>(m_CachedRootEntities.size()));
-		while (clipper.Step())
+		for (const entt::entity root : m_CachedRootEntities)
 		{
-			for (int index = clipper.DisplayStart; index < clipper.DisplayEnd; ++index)
-			{
-				DrawEntityNode(m_CachedRootEntities[static_cast<std::size_t>(index)]);
-			}
+			DrawEntityNode(root);
 		}
 		return;
 	}
 
-	for (const entt::entity root : m_CachedRootEntities)
+	const auto rootIsExpanded = [&](std::size_t index) {
+		if (m_CachedRootLeafFlags[index] != 0u)
+		{
+			return false;
+		}
+		const ImGuiID treeNodeId = ImGui::GetID(m_CachedRootTreeNodeIds[index].c_str());
+		return ImGui::GetStateStorage()->GetInt(treeNodeId, 0) != 0;
+	};
+
+	std::size_t rootIndex = 0u;
+	while (rootIndex < m_CachedRootEntities.size())
 	{
-		DrawEntityNode(root);
+		if (rootIsExpanded(rootIndex))
+		{
+			DrawEntityNode(m_CachedRootEntities[rootIndex]);
+			++rootIndex;
+			continue;
+		}
+
+		const std::size_t runStart = rootIndex;
+		while (rootIndex < m_CachedRootEntities.size()
+			&& !rootIsExpanded(rootIndex))
+		{
+			++rootIndex;
+		}
+		const std::size_t runLength = rootIndex - runStart;
+		ImGuiListClipper clipper;
+		clipper.Begin(static_cast<int>(runLength));
+		while (clipper.Step())
+		{
+			for (int visibleIndex = clipper.DisplayStart;
+				visibleIndex < clipper.DisplayEnd;
+				++visibleIndex)
+			{
+				const std::size_t cachedIndex = runStart + static_cast<std::size_t>(visibleIndex);
+				DrawEntityNode(
+					m_CachedRootEntities[cachedIndex],
+					nullptr,
+					m_CachedRootLeafFlags[cachedIndex] != 0u);
+			}
+		}
 	}
 }
 
@@ -436,7 +475,10 @@ void HierarchyWindow::CreatePrefabFromSelection(entt::entity obj)
 }
 
 // HierarchyWindow::DrawEntityNode is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void HierarchyWindow::DrawEntityNode(entt::entity obj, const std::unordered_set<TerraEngine::UUID>* prefabSourceObjectIds) {
+void HierarchyWindow::DrawEntityNode(
+	entt::entity obj,
+	const std::unordered_set<TerraEngine::UUID>* prefabSourceObjectIds,
+	bool knownLeaf) {
 	auto& objManager = ObjectManager::instance();
 	std::optional<Object> object = objManager.getObject(obj);
 	if (!object)
@@ -472,9 +514,16 @@ void HierarchyWindow::DrawEntityNode(entt::entity obj, const std::unordered_set<
 		flags |= ImGuiTreeNodeFlags_Selected;
 	}
 	
-	auto children = objManager.getChildren(*object);
+	// Cached root leaves skip a registry traversal. Recursive children and branch
+	// roots still query live hierarchy data so expansion and reparenting behavior
+	// remains identical after the revision invalidates the root cache.
+	std::vector<Object> children;
+	if (!knownLeaf)
+	{
+		children = objManager.getChildren(*object);
+	}
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (children.empty()) {
+	if (knownLeaf || children.empty()) {
 		flags |= ImGuiTreeNodeFlags_Leaf;
 	}
 	

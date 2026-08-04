@@ -294,6 +294,22 @@ namespace TerraEngine::Renderer::Vulkan
 		std::string unavailableReason;
 	};
 
+	// Scratch outputs are cleared by transfer commands on the GPU. The byte plan
+	// keeps size arithmetic testable and prevents a frame from allocating and
+	// copying viewport-sized CPU zero arrays merely to initialize compute output.
+	struct VulkanVirtualGeometryVisibilityClearPlan
+	{
+		VkDeviceSize depthBytes = 0u;
+		VkDeviceSize visibilityRecordBytes = 0u;
+		VkDeviceSize resolvedVisibilityBytes = 0u;
+		VkDeviceSize shadingBinBytes = 0u;
+		bool valid = false;
+	};
+
+	TERRAENGINE_API VulkanVirtualGeometryVisibilityClearPlan
+		BuildVulkanVirtualGeometryVisibilityClearPlan(
+			const VulkanVirtualGeometryVisibilityPlan& plan);
+
 	enum class VulkanVirtualGeometryVisibilityStage : std::uint8_t
 	{
 		TriangleSetup,

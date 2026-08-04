@@ -94,6 +94,14 @@ namespace TerraEngine::Animation {
 			AnimationClipChannelSample& output) const noexcept;
 
 		[[nodiscard]] bool IsOpen() const noexcept { return asset_ != nullptr; }
+		// Capture calls Open every frame to validate residency. This exact-match test
+		// lets an alternating frame slot retain its already checked copied bitmap.
+		[[nodiscard]] bool Matches(
+			const AnimationClipAsset& asset,
+			const SkeletonAsset* referenceSkeleton,
+			std::span<const std::uint8_t> residentSegments,
+			AnimationGeneration streamedGeneration,
+			const std::shared_ptr<const AnimationClipSegmentPayloadSet>& streamedPayloads) const noexcept;
 		[[nodiscard]] bool IsSegmentResident(std::uint32_t segmentIndex) const noexcept;
 		[[nodiscard]] const AnimationClipAsset* Asset() const noexcept { return asset_; }
 		[[nodiscard]] const SkeletonAsset* ReferenceSkeleton() const noexcept { return referenceSkeleton_; }
@@ -110,6 +118,7 @@ namespace TerraEngine::Animation {
 		const SkeletonAsset* referenceSkeleton_ = nullptr;
 		AnimationCodecView codec_{};
 		std::vector<std::uint8_t> residentSegments_;
+		AnimationGeneration streamedGeneration_ = 0U;
 		std::shared_ptr<const AnimationClipSegmentPayloadSet> streamedPayloads_;
 	};
 }

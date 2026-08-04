@@ -444,6 +444,45 @@ namespace TerraEngine::Animation {
 		return AnimationStatus::Ok;
 	}
 
+	AnimationStatus ProceduralCommandStore::CaptureActiveGoals(
+		std::vector<ActiveProceduralGoalRange>& ranges,
+		std::vector<NativeAnimationProceduralGoalCommand>& goals) const {
+		std::scoped_lock lock(mutex_);
+		ranges.clear();
+		goals.clear();
+		try {
+			std::size_t goalCount = 0U;
+			for(const AnimatorState& state : states_) {
+				if(goalCount > UINT32_MAX
+					|| state.activeGoals.size()
+						> static_cast<std::size_t>(UINT32_MAX) - goalCount) {
+					return AnimationStatus::RangeOverflow;
+				}
+				goalCount += state.activeGoals.size();
+			}
+			ranges.reserve(std::max(ranges.capacity(), states_.size()));
+			goals.reserve(std::max(goals.capacity(), goalCount));
+			for(const AnimatorState& state : states_) {
+				if(state.activeGoals.empty()) continue;
+				ranges.push_back({
+					state.animator,
+					static_cast<std::uint32_t>(goals.size()),
+					static_cast<std::uint32_t>(state.activeGoals.size())});
+				goals.insert(
+					goals.end(), state.activeGoals.begin(), state.activeGoals.end());
+			}
+			return AnimationStatus::Ok;
+		} catch(const std::bad_alloc&) {
+			ranges.clear();
+			goals.clear();
+			return AnimationStatus::HardLimitExceeded;
+		} catch(...) {
+			ranges.clear();
+			goals.clear();
+			return AnimationStatus::InternalError;
+		}
+	}
+
 	AnimationStatus ProceduralCommandStore::PublishResults(
 		NativeAnimationAnimatorHandle animator,
 		std::span<const NativeAnimationProceduralResultSnapshot> results,
@@ -519,17 +558,25 @@ namespace TerraEngine::Animation {
 	}
 
 	ProceduralCommandStore::AnimatorState* ProceduralCommandStore::FindStateLocked(NativeAnimationAnimatorHandle animator) {
-		const auto state = std::find_if(states_.begin(), states_.end(), [&animator](const AnimatorState& value) {
-			return SameAnimator(value.animator, animator);
-		});
-		return state == states_.end() ? nullptr : &*state;
+		const auto state = std::lower_bound(
+			states_.begin(), states_.end(), animator,
+			[](const AnimatorState& value, const NativeAnimationAnimatorHandle& key) {
+				return std::tie(value.animator.slotIndex, value.animator.generation)
+					< std::tie(key.slotIndex, key.generation);
+			});
+		return state == states_.end() || !SameAnimator(state->animator, animator)
+			? nullptr : &*state;
 	}
 
 	const ProceduralCommandStore::AnimatorState* ProceduralCommandStore::FindStateLocked(NativeAnimationAnimatorHandle animator) const {
-		const auto state = std::find_if(states_.begin(), states_.end(), [&animator](const AnimatorState& value) {
-			return SameAnimator(value.animator, animator);
-		});
-		return state == states_.end() ? nullptr : &*state;
+		const auto state = std::lower_bound(
+			states_.begin(), states_.end(), animator,
+			[](const AnimatorState& value, const NativeAnimationAnimatorHandle& key) {
+				return std::tie(value.animator.slotIndex, value.animator.generation)
+					< std::tie(key.slotIndex, key.generation);
+			});
+		return state == states_.end() || !SameAnimator(state->animator, animator)
+			? nullptr : &*state;
 	}
 
 	ProceduralCommandStore::AnimatorState* ProceduralCommandStore::FindOrCreateStateLocked(NativeAnimationAnimatorHandle animator) {
@@ -538,8 +585,13 @@ namespace TerraEngine::Animation {
 		// count by command capacity prevents a stream of short-lived handles from
 		// turning copied receipts/results into an unbounded allocation source.
 		if(states_.size() >= commandCapacity_) return nullptr;
-		states_.push_back({animator});
-		return &states_.back();
+		const auto insertion = std::lower_bound(
+			states_.begin(), states_.end(), animator,
+			[](const AnimatorState& value, const NativeAnimationAnimatorHandle& key) {
+				return std::tie(value.animator.slotIndex, value.animator.generation)
+					< std::tie(key.slotIndex, key.generation);
+			});
+		return &*states_.insert(insertion, AnimatorState{animator});
 	}
 
 	void ProceduralCommandStore::ReclaimTerminalReceiptLocked() {

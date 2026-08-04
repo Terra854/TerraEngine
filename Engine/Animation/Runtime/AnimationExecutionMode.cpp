@@ -420,6 +420,23 @@ namespace TerraEngine::Animation {
 			|| completePose;
 	}
 
+	bool RequiresCpuRootMotionAuthority(
+		AnimatorRootMotionPolicy policy,
+		bool currentClipHasRootMotion,
+		bool interruptedTransitionHasRootMotion,
+		bool destinationTransitionHasRootMotion,
+		bool explicitlyConsumed) noexcept
+	{
+		// An explicit reader remains authoritative even when the current authored
+		// clip is in-place. Otherwise Ignore suppresses automatic extraction and the
+		// remaining policies require CPU work only when a real delta can exist.
+		return explicitlyConsumed
+			|| (policy != AnimatorRootMotionPolicy::Ignore
+				&& (currentClipHasRootMotion
+					|| interruptedTransitionHasRootMotion
+					|| destinationTransitionHasRootMotion));
+	}
+
 	std::string_view ToString(AnimationEffectiveExecutionMode mode) noexcept
 	{
 		switch(mode) {

@@ -63,6 +63,8 @@ namespace TerraEngine::Tests {
 			auto deformation = std::make_shared<CpuAnimationDeformationData>();
 			deformation->paletteMatrices.resize(1U);
 			deformation->jointCount = 1U;
+			deformation->contentIdLow = 1U;
+			deformation->contentIdHigh = 2U;
 			auto cpuPlan = std::make_shared<CpuAnimationDeformationPlan>();
 			cpuPlan->frameId = 31U;
 			cpuPlan->rendererGeneration = 4U;
@@ -93,6 +95,8 @@ namespace TerraEngine::Tests {
 			auto deformation = std::make_shared<CpuAnimationDeformationData>();
 			deformation->paletteMatrices.resize(1U);
 			deformation->jointCount = 1U;
+			deformation->contentIdLow = 1U;
+			deformation->contentIdHigh = 2U;
 			auto cpuPlan = std::make_shared<CpuAnimationDeformationPlan>();
 			cpuPlan->frameId = 40U;
 			cpuPlan->rendererGeneration = 3U;

@@ -38,6 +38,8 @@ namespace TerraEngine::Renderer {
 		std::uint64_t meshPayloadGeneration = 0u;
 		std::uint64_t rendererGeneration = 0u;
 		std::uint64_t sceneGeneration = 0u;
+		std::uint64_t contentIdLow = 0u;
+		std::uint64_t contentIdHigh = 0u;
 
 		[[nodiscard]] bool IsComplete() const noexcept;
 		auto operator<=>(const DeformationGeneration&) const = default;
@@ -77,6 +79,10 @@ namespace TerraEngine::Renderer {
 	struct DeformationPageDemand
 	{
 		DeformedPageKey key;
+		// The owner remains instance-local even when key content is reusable. View
+		// selection and the graphics bridge use this id to alias the shared output.
+		std::uint64_t ownerStableInstanceId = 0u;
+		std::uint64_t sourceStableInstanceId = 0u;
 		std::uint32_t sourceRecordIndex = kInvalidDeformationRecordIndex;
 		std::uint32_t vertexCount = 0u;
 		std::uint32_t meshletCount = 0u;
@@ -88,6 +94,8 @@ namespace TerraEngine::Renderer {
 	struct DeformationWorkRecord
 	{
 		DeformedPageKey key;
+		std::uint64_t sourceStableInstanceId = 0u;
+		std::vector<std::uint64_t> consumerStableInstanceIds;
 		std::uint32_t sourceRecordIndex = kInvalidDeformationRecordIndex;
 		std::uint32_t vertexOffset = 0u;
 		std::uint32_t vertexCount = 0u;

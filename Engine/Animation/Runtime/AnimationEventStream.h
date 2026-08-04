@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <memory>
 #include <span>
 #include <unordered_set>
 #include <vector>
@@ -86,6 +87,14 @@ namespace TerraEngine::Animation {
 			std::uint64_t authoredOrder = 0U;
 		};
 
+		// Authored event ordering never changes after Configure. Sharing these two
+		// sorted arrays makes a worker snapshot copy proportional to its delivery
+		// watermark instead of the number and payload size of authored clip events.
+		struct ImmutableAuthoredEvents {
+			std::vector<OrderedEvent> forward;
+			std::vector<OrderedEvent> reverse;
+		};
+
 		struct EventIdentityHash {
 			std::size_t operator()(const AnimationEventIdentity& identity) const noexcept;
 		};
@@ -96,8 +105,7 @@ namespace TerraEngine::Animation {
 		AnimationAssetHandle clip_{};
 		AnimationFixedTick durationTicks_ = 0;
 		AnimationEventStreamConfig config_{};
-		std::vector<OrderedEvent> forwardEvents_;
-		std::vector<OrderedEvent> reverseEvents_;
+		std::shared_ptr<const ImmutableAuthoredEvents> authoredEvents_;
 		std::deque<AnimationEventIdentity> retainedEvents_;
 		std::unordered_set<AnimationEventIdentity, EventIdentityHash> retainedEventSet_;
 		AnimationEventStreamDiagnostics diagnostics_{};

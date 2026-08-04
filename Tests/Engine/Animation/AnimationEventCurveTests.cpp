@@ -91,6 +91,29 @@ namespace TerraEngine::Tests {
 				"Repeating the same interval must not expose one-shot events twice.");
 		});
 
+		registry.Add("Animation.Event.CopiedStreamsShareAuthoredDataButKeepIndependentWatermarks", [](TestContext& context) {
+			AnimationEventStream original;
+			const std::vector<AnimationClipEvent> authored{
+				MakeEvent(1U, 10), MakeEvent(2U, 20), MakeEvent(3U, 30)};
+			context.Expect(original.Configure(MakeClipHandle(), 100, authored)
+				== AnimationStatus::Ok,
+				"The source event stream should configure before it enters a worker snapshot.");
+			AnimationEventStream copied = original;
+			const AnimatorInstanceHandle animator{12U, 3U};
+			AnimationEventTraversalResult originalResult;
+			AnimationEventTraversalResult copiedResult;
+			context.Expect(original.Traverse(MakeTraversal(animator, 0, 40), originalResult)
+					== AnimationStatus::Ok
+				&& copied.Traverse(MakeTraversal(animator, 0, 40), copiedResult)
+					== AnimationStatus::Ok
+				&& originalResult.events.size() == authored.size()
+				&& copiedResult.events.size() == authored.size(),
+				"Worker copies must retain immutable authored ordering while advancing independent delivery history.");
+			context.Expect(original.Traverse(MakeTraversal(animator, 0, 40), originalResult)
+					== AnimationStatus::Ok && originalResult.events.empty(),
+				"Advancing a copied stream must not reset or alias the source delivery watermark.");
+		});
+
 		registry.Add("Animation.Event.LoopCatchUpAndReverseUseDeterministicOccurrenceOrder", [](TestContext& context) {
 			AnimationEventStream stream;
 			const std::vector<AnimationClipEvent> authored{MakeEvent(1U, 25), MakeEvent(2U, 75)};

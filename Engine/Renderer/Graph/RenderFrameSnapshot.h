@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -65,6 +66,11 @@ namespace TerraEngine::Renderer {
 		std::uint64_t programGeneration = 0U;
 		std::uint64_t animationPlanGeneration = 0U;
 		std::uint64_t rendererGeneration = 0U;
+		// CPU-authoritative clones with byte-identical palettes and morph weights
+		// may share one local-space deformation result. Both halves must be present;
+		// GPU packets and unverified paths leave them zero and remain instance-local.
+		std::uint64_t deformationContentIdLow = 0U;
+		std::uint64_t deformationContentIdHigh = 0U;
 		std::uint32_t firstGpuWorkPacket = 0U;
 		std::uint32_t gpuWorkPacketCount = 0U;
 		std::uint32_t gpuStageMask = 0U;
@@ -344,6 +350,33 @@ namespace TerraEngine::Renderer {
 		bool containsLiveMutableState = false;
 	};
 
+	// RenderSystem publishes the prior frame's complete animated-object visibility
+	// union after every camera and shadow list has been prepared. AnimationSystem
+	// consumes this immutable value on the following frame so visual-only animators
+	// can sleep without introducing a Render -> Animation dependency cycle.
+	struct AnimatedObjectVisibilitySnapshot
+	{
+		std::uint64_t frameId = 0U;
+		std::uint64_t sceneGeneration = 0U;
+		std::vector<TerraEngine::UUID> visibleObjectIds;
+		bool hasActiveView = false;
+		bool valid = false;
+
+		[[nodiscard]] bool Contains(const TerraEngine::UUID& objectId) const noexcept
+		{
+			return std::binary_search(
+				visibleObjectIds.begin(), visibleObjectIds.end(), objectId);
+		}
+	};
+
+	// Publication swaps one complete shared snapshot atomically. Readers never
+	// retain renderer-owned containers or observe a partially assembled union.
+	TERRAENGINE_API void PublishAnimatedObjectVisibilitySnapshot(
+		AnimatedObjectVisibilitySnapshot snapshot);
+	[[nodiscard]] TERRAENGINE_API std::shared_ptr<const AnimatedObjectVisibilitySnapshot>
+		LoadAnimatedObjectVisibilitySnapshot() noexcept;
+	TERRAENGINE_API void ClearAnimatedObjectVisibilitySnapshot() noexcept;
+
 	// Builder functions keep construction deterministic. Tests and future
 	// backends can create snapshots without needing access to RenderSystem.
 	// Deterministic sorting and hashing make worker completion order irrelevant
@@ -352,6 +385,11 @@ namespace TerraEngine::Renderer {
 	TERRAENGINE_API bool SnapshotUsesOnlyResolvedResources(const RenderFrameSnapshot& snapshot);
 	TERRAENGINE_API bool SnapshotContainsLiveMutableState(const RenderFrameSnapshot& snapshot);
 	TERRAENGINE_API bool ValidateAnimationRenderGenerationRecord(const AnimationRenderGenerationRecord& record);
+	// Page-local compute descriptors currently bind one GPU animation palette
+	// arena. CPU-authoritative publications must stay on the owner deformation
+	// path instead of being assigned an unrelated GPU work-packet index.
+	TERRAENGINE_API bool CanScheduleGpuAnimatedPageDeformation(
+		const AnimationRenderGenerationRecord& record);
 	TERRAENGINE_API std::uint64_t BuildAnimationRenderGenerationHash(const AnimationRenderGenerationRecord& record);
 	TERRAENGINE_API std::uint64_t BuildRenderInvalidationGenerationHash(const RenderInvalidationGenerationRecord& record);
 	TERRAENGINE_API std::uint64_t BuildSnapshotDeterministicHash(const RenderFrameSnapshot& snapshot);

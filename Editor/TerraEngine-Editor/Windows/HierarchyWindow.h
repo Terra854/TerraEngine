@@ -25,7 +25,10 @@ protected:
 	virtual void OnGui() override;
 
 private:
-	void DrawEntityNode(entt::entity obj, const std::unordered_set<TerraEngine::UUID>* prefabSourceObjectIds = nullptr);
+	void DrawEntityNode(
+		entt::entity obj,
+		const std::unordered_set<TerraEngine::UUID>* prefabSourceObjectIds = nullptr,
+		bool knownLeaf = false);
 	void RefreshRootEntityCache(class ObjectManager& objectManager, bool prefabEditingMode);
 	void DrawCachedRootNodes();
 	void CreatePrefabFromSelection(entt::entity obj);
@@ -38,9 +41,17 @@ private:
 	// a full SceneGraph every ImGui frame while rows still read live names and
 	// selection state below.
 	std::vector<entt::entity> m_CachedRootEntities;
+	// One byte per cached root records whether the hierarchy snapshot proved that
+	// row is a leaf. DrawCachedRootNodes uses contiguous leaf runs with ImGui's
+	// clipper, so a handful of expandable roots no longer forces every flat root
+	// through ImGui each frame.
+	std::vector<std::uint8_t> m_CachedRootLeafFlags;
+	// ImGui keys tree openness by the stable authored UUID string. Retaining those
+	// keys beside the structural cache lets DrawCachedRootNodes clip collapsed
+	// prefab roots without resolving every UUID on every editor frame.
+	std::vector<std::string> m_CachedRootTreeNodeIds;
 	std::uint64_t m_CachedHierarchyRevision = std::numeric_limits<std::uint64_t>::max();
 	bool m_CachedPrefabEditingMode = false;
-	bool m_CachedRootsAreLeaves = false;
 	entt::entity m_ContextEntityId = entt::null;
 	bool m_OpenEntityMenu = false;
 };

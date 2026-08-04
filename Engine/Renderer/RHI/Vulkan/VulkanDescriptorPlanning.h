@@ -10,6 +10,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -70,6 +71,21 @@ namespace TerraEngine::Renderer::Vulkan {
 	// perform no allocation, upload, descriptor mutation, or queue submission.
 	TERRAENGINE_API VulkanAnimationDescriptorSetPlan BuildVulkanAnimationDescriptorSetPlan(
 		const Animation::GpuAnimationPlan& plan);
+
+	// Resident payload objects are immutable and may be shared by every plan that
+	// references the same cooked animation data. Reuse is valid only when the
+	// exact retained owner matches and none of the destination buffers changed.
+	// Keeping this decision handle-free makes its fail-closed behavior unit-testable.
+	[[nodiscard]] TERRAENGINE_API bool CanReuseVulkanAnimationResidentPayloadUpload(
+		const std::shared_ptr<const Animation::GpuAnimationResidentPayloads>& previousOwner,
+		const std::shared_ptr<const Animation::GpuAnimationResidentPayloads>& currentOwner,
+		bool residentBuffersRetained) noexcept;
+
+	// A frame-local bindless slot already describes its retained allocation. Only
+	// first publication or allocation replacement requires host descriptor work.
+	[[nodiscard]] TERRAENGINE_API bool ShouldRefreshVulkanAnimationBindlessBuffer(
+		bool hasPublishedIndex,
+		bool bufferReallocated) noexcept;
 
 	enum class VulkanDeformationDescriptorBinding : std::uint8_t
 	{

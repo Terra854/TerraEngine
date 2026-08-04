@@ -617,32 +617,96 @@ namespace TerraEngine::Animation
 
 	bool AnimationStreamingCoordinator::Retain(const AnimationStreamRequest& request)
 	{
-		std::scoped_lock lock(m_mutex);
-		const auto found = std::find_if(m_decisions.begin(), m_decisions.end(), [&](const auto& value) {
-			return MakeGenerationKey(value.request) == MakeGenerationKey(request);
-		});
-		if (found == m_decisions.end() || IsTerminal(found->state)
-			|| !MatchesImmutableRequest(found->request, request)
-			|| found->retainCount == std::numeric_limits<std::uint32_t>::max())
-		{
-			return false;
-		}
-		++found->retainCount;
-		return true;
+		return AdjustRetainCount(request, 1);
 	}
 
 	bool AnimationStreamingCoordinator::Release(const AnimationStreamRequest& request)
 	{
+		return AdjustRetainCount(request, -1);
+	}
+
+	bool AnimationStreamingCoordinator::AdjustRetainCount(
+		const AnimationStreamRequest& request,
+		std::int64_t adjustment)
+	{
+		if(adjustment == 0) return true;
 		std::scoped_lock lock(m_mutex);
 		const auto found = std::find_if(m_decisions.begin(), m_decisions.end(), [&](const auto& value) {
 			return MakeGenerationKey(value.request) == MakeGenerationKey(request);
 		});
 		if (found == m_decisions.end() || !MatchesImmutableRequest(found->request, request)
-			|| found->retainCount == 0u)
+			|| (adjustment > 0 && IsTerminal(found->state)))
 		{
 			return false;
 		}
-		--found->retainCount;
+		const std::int64_t current = found->retainCount;
+		if(adjustment < -current
+			|| adjustment > static_cast<std::int64_t>(
+				std::numeric_limits<std::uint32_t>::max()) - current) {
+			return false;
+		}
+		found->retainCount = static_cast<std::uint32_t>(current + adjustment);
+		return true;
+	}
+
+	bool AnimationStreamingCoordinator::ApplyRetainAdjustments(
+		std::span<const AnimationStreamRetainAdjustment> adjustments)
+	{
+		if(adjustments.empty()) return true;
+		std::scoped_lock lock(m_mutex);
+		struct ValidatedAdjustment
+		{
+			AnimationStreamDecision* decision = nullptr;
+			const AnimationStreamRetainAdjustment* adjustment = nullptr;
+			std::string generationKey;
+		};
+		std::vector<ValidatedAdjustment> validated;
+		std::unordered_set<std::string> uniqueKeys;
+		try {
+			validated.reserve(adjustments.size());
+			uniqueKeys.reserve(adjustments.size());
+			for(const AnimationStreamRetainAdjustment& adjustment : adjustments) {
+				std::string generationKey = MakeGenerationKey(adjustment.request);
+				if(!uniqueKeys.insert(generationKey).second) return false;
+				const auto found = std::find_if(m_decisions.begin(), m_decisions.end(),
+					[&](const AnimationStreamDecision& value) {
+						return MakeGenerationKey(value.request) == generationKey;
+					});
+				if(found == m_decisions.end()
+					|| !MatchesImmutableRequest(found->request, adjustment.request)
+					|| (adjustment.retainDelta > 0 && IsTerminal(found->state))) {
+					return false;
+				}
+				const std::int64_t current = found->retainCount;
+				if(adjustment.retainDelta < -current
+					|| adjustment.retainDelta > static_cast<std::int64_t>(
+						std::numeric_limits<std::uint32_t>::max()) - current) {
+					return false;
+				}
+				validated.push_back({&*found, &adjustment, std::move(generationKey)});
+			}
+		} catch(const std::bad_alloc&) {
+			return false;
+		}
+
+		bool rebuildSnapshot = false;
+		for(const ValidatedAdjustment& item : validated) {
+			AnimationStreamDecision& decision = *item.decision;
+			const AnimationStreamRetainAdjustment& adjustment = *item.adjustment;
+			decision.retainCount = static_cast<std::uint32_t>(
+				static_cast<std::int64_t>(decision.retainCount)
+					+ adjustment.retainDelta);
+			if(!adjustment.updateGameplayCritical
+				|| decision.request.gameplayCritical == adjustment.gameplayCritical) {
+				continue;
+			}
+			decision.request.gameplayCritical = adjustment.gameplayCritical;
+			decision.publicationSequence = ++m_publicationSequence;
+			rebuildSnapshot = rebuildSnapshot
+				|| (decision.state == AnimationStreamState::Resident
+					&& m_residentPayloads.contains(item.generationKey));
+		}
+		if(rebuildSnapshot) RebuildResidencySnapshotLocked();
 		return true;
 	}
 

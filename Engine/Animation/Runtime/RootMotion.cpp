@@ -356,13 +356,19 @@ namespace TerraEngine::Animation {
 	// These definitions intentionally live after the private pending-record
 	// definitions. Keeping destruction out of the public header lets any system
 	// include RootMotion.h without instantiating std::vector on incomplete types.
-	AnimationRootMotionResultPublisher::AnimationRootMotionResultPublisher() = default;
+	AnimationRootMotionResultPublisher::AnimationRootMotionResultPublisher()
+	{
+		// Both histories are fixed-size rings once warm. Reserving their records and
+		// lookup buckets up front keeps the per-frame publication path allocation-free
+		// for the common steady-state animated crowd.
+		applications_.reserve(kRetainedRootMotionApplications);
+		results_.reserve(kRetainedRootMotionResults);
+		applicationIndex_.reserve(kRetainedRootMotionApplications + 1U);
+		resultIndex_.reserve(kRetainedRootMotionResults + 1U);
+	}
 	AnimationRootMotionResultPublisher::~AnimationRootMotionResultPublisher() = default;
 
 	namespace {
-		constexpr std::size_t kRetainedRootMotionResults = 4096U;
-		constexpr std::size_t kRetainedRootMotionApplications = 4096U;
-
 		bool ValidMode(AnimationRootMotionApplicationMode mode) noexcept
 		{
 			return mode >= AnimationRootMotionApplicationMode::Ignore
@@ -500,6 +506,103 @@ namespace TerraEngine::Animation {
 		return publisher;
 	}
 
+	std::size_t AnimationRootMotionResultPublisher::ApplicationIdentityHash::operator()(
+		const ApplicationIdentity& identity) const noexcept
+	{
+		// This is the same inexpensive avalanche combine used by many hash tables.
+		// Equality still compares every identity field, so a hash collision can never
+		// merge receipts belonging to different animators or producers.
+		std::size_t hash = std::hash<std::uint64_t>{}(
+			(static_cast<std::uint64_t>(identity.animatorSlot) << 32U)
+				| identity.animatorGeneration);
+		auto combine = [&hash](std::uint64_t value) {
+			hash ^= std::hash<std::uint64_t>{}(value)
+				+ static_cast<std::size_t>(0x9E3779B97F4A7C15ULL)
+				+ (hash << 6U) + (hash >> 2U);
+		};
+		combine(identity.producerId);
+		combine(identity.idempotencyKey);
+		return hash;
+	}
+
+	std::size_t AnimationRootMotionResultPublisher::ResultIdentityHash::operator()(
+		const ResultIdentity& identity) const noexcept
+	{
+		std::size_t hash = ApplicationIdentityHash{}(identity.application);
+		hash ^= std::hash<std::uint64_t>{}(identity.correlationId)
+			+ static_cast<std::size_t>(0x9E3779B97F4A7C15ULL)
+			+ (hash << 6U) + (hash >> 2U);
+		hash ^= std::hash<bool>{}(identity.idempotencyConflict)
+			+ static_cast<std::size_t>(0x9E3779B97F4A7C15ULL)
+			+ (hash << 6U) + (hash >> 2U);
+		return hash;
+	}
+
+	AnimationRootMotionResultPublisher::ApplicationIdentity
+	AnimationRootMotionResultPublisher::MakeApplicationIdentity(
+		const AnimationRootMotionApplicationRequest& request) noexcept
+	{
+		return {
+			request.delta.animator.slotIndex,
+			request.delta.animator.generation,
+			request.producerId,
+			request.idempotencyKey};
+	}
+
+	AnimationRootMotionResultPublisher::ApplicationIdentity
+	AnimationRootMotionResultPublisher::MakeApplicationIdentity(
+		const AnimationRootMotionApplicationResult& result) noexcept
+	{
+		return {
+			result.animator.slotIndex,
+			result.animator.generation,
+			result.producerId,
+			result.idempotencyKey};
+	}
+
+	AnimationRootMotionResultPublisher::ResultIdentity
+	AnimationRootMotionResultPublisher::MakeResultIdentity(
+		const AnimationRootMotionApplicationResult& result) noexcept
+	{
+		return {
+			MakeApplicationIdentity(result),
+			result.correlationId,
+			result.idempotencyConflict};
+	}
+
+	AnimationRootMotionResultPublisher::ApplicationRecord*
+	AnimationRootMotionResultPublisher::FindApplicationLocked(
+		const AnimationRootMotionApplicationRequest& request) noexcept
+	{
+		const auto found = applicationIndex_.find(MakeApplicationIdentity(request));
+		if(found == applicationIndex_.end() || found->second >= applications_.size()) return nullptr;
+		return &applications_[found->second];
+	}
+
+	AnimationRootMotionResultPublisher::ApplicationRecord*
+	AnimationRootMotionResultPublisher::FindApplicationLocked(
+		const AnimationRootMotionApplicationResult& result) noexcept
+	{
+		const auto found = applicationIndex_.find(MakeApplicationIdentity(result));
+		if(found == applicationIndex_.end() || found->second >= applications_.size()) return nullptr;
+		return &applications_[found->second];
+	}
+
+	void AnimationRootMotionResultPublisher::RebuildLookupIndexesLocked()
+	{
+		applicationIndex_.clear();
+		for(std::size_t index = 0U; index < applications_.size(); ++index) {
+			applicationIndex_.emplace(
+				MakeApplicationIdentity(applications_[index].request), index);
+		}
+		resultIndex_.clear();
+		for(std::size_t index = 0U; index < results_.size(); ++index) {
+			resultIndex_.emplace(MakeResultIdentity(results_[index]), index);
+		}
+		applicationEvictionCursor_ = 0U;
+		resultEvictionCursor_ = 0U;
+	}
+
 	AnimationRootMotionApplicationReceipt AnimationRootMotionResultPublisher::ReserveApplication(
 		const AnimationRootMotionApplicationRequest& request,
 		bool& shouldRoute)
@@ -531,9 +634,6 @@ namespace TerraEngine::Animation {
 		std::scoped_lock lock(mutex_);
 		auto retainTerminal = [this, &receipt](AnimationRootMotionApplicationResult value) {
 			try {
-				// Allocate before RetainResultLocked can evict bounded history. This keeps
-				// an allocation failure from removing an unrelated terminal record.
-				results_.reserve(results_.size() + 1U);
 				RetainResultLocked(std::move(value));
 				return true;
 			} catch(...) {
@@ -541,12 +641,8 @@ namespace TerraEngine::Animation {
 				return false;
 			}
 		};
-		const auto exact = std::find_if(applications_.begin(), applications_.end(), [&request](const ApplicationRecord& value) {
-			return value.request.delta.animator == request.delta.animator
-				&& value.request.producerId == request.producerId
-				&& value.request.idempotencyKey == request.idempotencyKey;
-		});
-		if(exact != applications_.end()) {
+		ApplicationRecord* exact = FindApplicationLocked(request);
+		if(exact != nullptr) {
 			if(SameApplication(exact->request, request)) {
 				exact->receipt.duplicate = true;
 				receipt = exact->receipt;
@@ -601,15 +697,22 @@ namespace TerraEngine::Animation {
 		}
 		const bool requiresApplicationEviction =
 			applications_.size() >= kRetainedRootMotionApplications;
-		const auto evictableApplication = !requiresApplicationEviction
-			? applications_.end()
-			: std::find_if(applications_.begin(), applications_.end(), [](const ApplicationRecord& value) {
-				// Queued records own a pending protected-boundary acknowledgement and
-				// can never be evicted. Any other status is a copied terminal receipt.
-				return value.receipt.status != AnimationStatus::Queued;
-			});
+		std::size_t evictableApplicationIndex = applications_.size();
+		if(requiresApplicationEviction) {
+			// The cursor names the logically oldest retained record. A cyclic scan
+			// preserves FIFO eviction while skipping queued work that still owns an
+			// acknowledgement from a later scene or physics boundary.
+			for(std::size_t offset = 0U; offset < applications_.size(); ++offset) {
+				const std::size_t candidate =
+					(applicationEvictionCursor_ + offset) % applications_.size();
+				if(applications_[candidate].receipt.status != AnimationStatus::Queued) {
+					evictableApplicationIndex = candidate;
+					break;
+				}
+			}
+		}
 		if(requiresApplicationEviction
-			&& evictableApplication == applications_.end()) {
+			&& evictableApplicationIndex == applications_.size()) {
 			receipt.status = AnimationStatus::HardLimitExceeded;
 			deferred.status = receipt.status;
 			deferred.disposition = AnimationRootMotionDisposition::Rejected;
@@ -620,12 +723,6 @@ namespace TerraEngine::Animation {
 			// Reserve all potentially growing storage before changing either retained
 			// collection. If allocation fails, no application identity or result is
 			// partially installed and an exact retry may route normally.
-			if(applications_.size() < kRetainedRootMotionApplications) {
-				applications_.reserve(applications_.size() + 1U);
-			}
-			if(results_.size() < kRetainedRootMotionResults) {
-				results_.reserve(results_.size() + 1U);
-			}
 			const bool addAppliedMutationSlot = IsMutatingMode(request.mode)
 				&& appliedMutation == appliedMutations_.end();
 			if(addAppliedMutationSlot) {
@@ -635,21 +732,46 @@ namespace TerraEngine::Animation {
 				}
 				appliedMutations_.reserve(appliedMutations_.size() + 1U);
 			}
-			// Only a full vector captures an iterator for eviction. When capacity is
-			// available, reserve() may invalidate the old end iterator, so the explicit
-			// pre-reserve decision prevents comparing or erasing through that stale value.
-			if(requiresApplicationEviction) {
-				applications_.erase(evictableApplication);
-			}
 			receipt.status = AnimationStatus::Queued;
-			applications_.push_back({request, receipt});
 			deferred.status = AnimationStatus::Queued;
 			deferred.disposition = AnimationRootMotionDisposition::Deferred;
-			try {
-				RetainResultLocked(std::move(deferred));
-			} catch(...) {
-				applications_.pop_back();
-				throw;
+			const ApplicationIdentity newIdentity = MakeApplicationIdentity(request);
+			if(!requiresApplicationEviction) {
+				// Append until the fixed history fills. If either lookup or optional
+				// diagnostic retention fails, remove the new identity atomically.
+				applications_.push_back({request, receipt});
+				const std::size_t newIndex = applications_.size() - 1U;
+				try {
+					const auto inserted = applicationIndex_.emplace(newIdentity, newIndex);
+					if(!inserted.second) throw std::bad_alloc{};
+					RetainResultLocked(std::move(deferred));
+				} catch(...) {
+					applicationIndex_.erase(newIdentity);
+					applications_.pop_back();
+					throw;
+				}
+			} else {
+				// A full history is a fixed ring. Insert the new lookup before replacing
+				// the old slot, keeping both identities available until result retention
+				// succeeds so exception rollback never needs another allocation.
+				ApplicationRecord replacement{request, receipt};
+				ApplicationRecord& slot = applications_[evictableApplicationIndex];
+				const ApplicationIdentity oldIdentity = MakeApplicationIdentity(slot.request);
+				const auto inserted = applicationIndex_.emplace(
+					newIdentity, evictableApplicationIndex);
+				if(!inserted.second) throw std::bad_alloc{};
+				using std::swap;
+				swap(slot, replacement);
+				try {
+					RetainResultLocked(std::move(deferred));
+				} catch(...) {
+					swap(slot, replacement);
+					applicationIndex_.erase(newIdentity);
+					throw;
+				}
+				applicationIndex_.erase(oldIdentity);
+				applicationEvictionCursor_ =
+					(evictableApplicationIndex + 1U) % applications_.size();
 			}
 			if(addAppliedMutationSlot) {
 				// The placeholder does not reject a later retry unless a protected target
@@ -668,12 +790,9 @@ namespace TerraEngine::Animation {
 		const AnimationRootMotionApplicationRequest& request) const noexcept
 	{
 		std::scoped_lock lock(mutex_);
-		const auto found = std::find_if(applications_.begin(), applications_.end(), [&request](const ApplicationRecord& value) {
-			return value.request.delta.animator == request.delta.animator
-				&& value.request.producerId == request.producerId
-				&& value.request.idempotencyKey == request.idempotencyKey;
-		});
-		return found != applications_.end() && found->receipt.duplicate;
+		const auto found = applicationIndex_.find(MakeApplicationIdentity(request));
+		return found != applicationIndex_.end() && found->second < applications_.size()
+			&& applications_[found->second].receipt.duplicate;
 	}
 
 	void AnimationRootMotionResultPublisher::UpdateApplicationReceipt(
@@ -681,12 +800,8 @@ namespace TerraEngine::Animation {
 		const AnimationRootMotionApplicationReceipt& receipt)
 	{
 		std::scoped_lock lock(mutex_);
-		const auto found = std::find_if(applications_.begin(), applications_.end(), [&request](const ApplicationRecord& value) {
-			return value.request.delta.animator == request.delta.animator
-				&& value.request.producerId == request.producerId
-				&& value.request.idempotencyKey == request.idempotencyKey;
-		});
-		if(found == applications_.end()) return;
+		ApplicationRecord* found = FindApplicationLocked(request);
+		if(found == nullptr) return;
 		// Scalar receipt progress is always retained. Optional diagnostic strings
 		// are copied separately so an allocation failure cannot unwind a protected
 		// route after the target request has already been accepted.
@@ -741,19 +856,34 @@ namespace TerraEngine::Animation {
 	void AnimationRootMotionResultPublisher::RetainResultLocked(
 		AnimationRootMotionApplicationResult result)
 	{
-		const auto duplicate = std::find_if(results_.begin(), results_.end(), [&result](const auto& value) {
-			return value.animator == result.animator
-				&& value.producerId == result.producerId
-				&& value.idempotencyKey == result.idempotencyKey
-				&& value.correlationId == result.correlationId
-				&& value.idempotencyConflict == result.idempotencyConflict;
-		});
-		if(duplicate != results_.end()) {
-			*duplicate = std::move(result);
+		const ResultIdentity identity = MakeResultIdentity(result);
+		const auto duplicate = resultIndex_.find(identity);
+		if(duplicate != resultIndex_.end() && duplicate->second < results_.size()) {
+			results_[duplicate->second] = std::move(result);
 			return;
 		}
-		if(results_.size() >= kRetainedRootMotionResults) results_.erase(results_.begin());
-		results_.push_back(std::move(result));
+		if(results_.size() < kRetainedRootMotionResults) {
+			results_.push_back(std::move(result));
+			const std::size_t newIndex = results_.size() - 1U;
+			try {
+				const auto inserted = resultIndex_.emplace(identity, newIndex);
+				if(!inserted.second) throw std::bad_alloc{};
+			} catch(...) {
+				results_.pop_back();
+				throw;
+			}
+			return;
+		}
+
+		// Once warm, result history is another fixed ring. Replacing the oldest
+		// slot avoids shifting 4,095 large diagnostic records for every animator.
+		const std::size_t replacementIndex = resultEvictionCursor_ % results_.size();
+		const ResultIdentity oldIdentity = MakeResultIdentity(results_[replacementIndex]);
+		const auto inserted = resultIndex_.emplace(identity, replacementIndex);
+		if(!inserted.second) throw std::bad_alloc{};
+		results_[replacementIndex] = std::move(result);
+		resultIndex_.erase(oldIdentity);
+		resultEvictionCursor_ = (replacementIndex + 1U) % results_.size();
 	}
 
 	void AnimationRootMotionResultPublisher::RememberAppliedMutationLocked(
@@ -774,12 +904,8 @@ namespace TerraEngine::Animation {
 		AnimationRootMotionApplicationResult result)
 	{
 		std::scoped_lock lock(mutex_);
-		const auto application = std::find_if(applications_.begin(), applications_.end(), [&result](const ApplicationRecord& value) {
-			return value.request.delta.animator == result.animator
-				&& value.request.producerId == result.producerId
-				&& value.request.idempotencyKey == result.idempotencyKey;
-		});
-		if(application != applications_.end()) {
+		ApplicationRecord* application = FindApplicationLocked(result);
+		if(application != nullptr) {
 			application->receipt.status = result.status;
 			result.duplicate = result.duplicate || application->receipt.duplicate;
 			if(result.disposition == AnimationRootMotionDisposition::Applied
@@ -857,12 +983,8 @@ namespace TerraEngine::Animation {
 			result.disposition = AnimationRootMotionDisposition::Rejected;
 		}
 		pendingScene_.erase(pending);
-		const auto application = std::find_if(applications_.begin(), applications_.end(), [&result](const ApplicationRecord& value) {
-			return value.request.delta.animator == result.animator
-				&& value.request.producerId == result.producerId
-				&& value.request.idempotencyKey == result.idempotencyKey;
-		});
-		if(application != applications_.end()) {
+		ApplicationRecord* application = FindApplicationLocked(result);
+		if(application != nullptr) {
 			application->receipt.status = result.status;
 			result.duplicate = result.duplicate || application->receipt.duplicate;
 			if(result.disposition == AnimationRootMotionDisposition::Applied
@@ -873,9 +995,6 @@ namespace TerraEngine::Animation {
 		try {
 			// The authoritative receipt and once-only ledger are already terminal. A
 			// diagnostic-history allocation failure may drop only this optional copy.
-			if(results_.size() < kRetainedRootMotionResults) {
-				results_.reserve(results_.size() + 1U);
-			}
 			RetainResultLocked(std::move(result));
 		} catch(...) {
 			// Never unwind or restore Queued after the scene transaction committed.
@@ -948,12 +1067,8 @@ namespace TerraEngine::Animation {
 				result.disposition = AnimationRootMotionDisposition::Rejected;
 			}
 			pendingPhysics_.erase(pending);
-			const auto application = std::find_if(applications_.begin(), applications_.end(), [&result](const ApplicationRecord& value) {
-				return value.request.delta.animator == result.animator
-					&& value.request.producerId == result.producerId
-					&& value.request.idempotencyKey == result.idempotencyKey;
-			});
-			if(application != applications_.end()) {
+			ApplicationRecord* application = FindApplicationLocked(result);
+			if(application != nullptr) {
 				application->receipt.status = result.status;
 				result.duplicate = result.duplicate || application->receipt.duplicate;
 				if(result.disposition == AnimationRootMotionDisposition::Applied
@@ -962,9 +1077,6 @@ namespace TerraEngine::Animation {
 				}
 			}
 			try {
-				if(results_.size() < kRetainedRootMotionResults) {
-					results_.reserve(results_.size() + 1U);
-				}
 				RetainResultLocked(std::move(result));
 			} catch(...) {
 				// Receipt and once-only state were terminalized before optional history.
@@ -990,6 +1102,9 @@ namespace TerraEngine::Animation {
 		std::erase_if(results_, [animator](const AnimationRootMotionApplicationResult& value) {
 			return value.animator == animator;
 		});
+		// Retirement is infrequent and may compact vector slots. Rebuilding both
+		// indexes once here keeps every hot publication lookup exact afterward.
+		RebuildLookupIndexesLocked();
 	}
 
 	void AnimationRootMotionResultPublisher::CopyForAnimator(
@@ -1018,8 +1133,12 @@ namespace TerraEngine::Animation {
 		pendingScene_.clear();
 		pendingPhysics_.clear();
 		applications_.clear();
+		applicationIndex_.clear();
+		applicationEvictionCursor_ = 0U;
 		appliedMutations_.clear();
 		results_.clear();
+		resultIndex_.clear();
+		resultEvictionCursor_ = 0U;
 	}
 
 	static AnimationRootMotionApplicationReceipt RouteRootMotionApplicationImpl(

@@ -786,6 +786,59 @@ namespace {
 		return info->status;
 	}
 
+	bool CopyOrMaterializeCurrentSocketSnapshot(
+		TerraEngine::Animation::AnimatorInstanceHandle animator,
+		const std::shared_ptr<const TerraEngine::Animation::PublishedAnimatorPose>& published,
+		TerraEngine::Animation::AnimationSocketReadSnapshot& output)
+	{
+		using namespace TerraEngine::Animation;
+		AnimationAttachmentSnapshotPublisher& publisher =
+			AnimationAttachmentSnapshotPublisher::Instance();
+		AnimationSocketReadSnapshot candidate;
+		const bool copied = publisher.CopySocketSnapshot(animator, candidate);
+		const auto isCurrent = [&](const AnimationSocketReadSnapshot& snapshot) {
+			return published && published->snapshot && published->snapshot->pose
+				&& snapshot.animator == animator
+				&& snapshot.poseGeneration == published->snapshot->publicationGeneration
+				&& snapshot.publicationGeneration == published->snapshot->publicationGeneration
+				&& snapshot.sourceTick == published->snapshot->tick
+				&& snapshot.skeleton == published->skeleton;
+		};
+		if(copied && isCurrent(candidate)) {
+			output = std::move(candidate);
+			return true;
+		}
+
+		// The first explicit managed read doubles as a subscription. Materialize
+		// its initial result from the already sealed authority publication so the
+		// API does not impose an artificial one-frame delay; later protected frames
+		// refresh only this requested animator rather than the entire crowd.
+		publisher.RetireSnapshot(animator);
+		if(!published || !published->snapshot || !published->snapshot->pose
+			|| !published->skeletonAsset || !published->sourceObjectWorldTransformCaptured) {
+			return false;
+		}
+		AnimationBoneSocketSnapshotRequest request;
+		request.animator = animator;
+		request.sourceObjectId = published->ownerObjectId;
+		request.sourceObjectGeneration = published->objectGeneration;
+		request.sourceComponentGeneration = published->componentGeneration;
+		request.sourceTick = published->snapshot->tick;
+		request.publicationGeneration = published->snapshot->publicationGeneration;
+		request.sourceObjectWorldTransform = published->sourceObjectWorldTransform;
+		request.pose = published->snapshot->pose;
+		request.skeleton = published->skeletonAsset;
+		AnimationBoneSocketSnapshot snapshot;
+		if(CaptureAnimationBoneSocketSnapshot(request, snapshot) != AnimationStatus::Ok
+			|| !publisher.Publish(std::move(snapshot))) {
+			return false;
+		}
+		candidate = {};
+		if(!publisher.CopySocketSnapshot(animator, candidate) || !isCurrent(candidate)) return false;
+		output = std::move(candidate);
+		return true;
+	}
+
 	void CopyBoundedAnimationText(char* destination, std::size_t capacity, std::string_view source) noexcept
 	{
 		if(destination == nullptr || capacity == 0U) return;
@@ -1261,15 +1314,8 @@ extern "C" {
 			const std::shared_ptr<const PublishedAnimatorPose> published =
 				AnimationSystem::Instance().LoadPublishedAnimatorPose(handle);
 			AnimationSocketReadSnapshot socketSnapshot;
-			const bool copied = AnimationAttachmentSnapshotPublisher::Instance()
-				.CopySocketSnapshot(handle, socketSnapshot);
-			const bool currentSnapshot = published && published->snapshot
-				&& published->snapshot->pose && copied
-				&& socketSnapshot.animator == handle
-				&& socketSnapshot.poseGeneration == published->snapshot->publicationGeneration
-				&& socketSnapshot.publicationGeneration == published->snapshot->publicationGeneration
-				&& socketSnapshot.sourceTick == published->snapshot->tick
-				&& socketSnapshot.skeleton == published->skeleton;
+			const bool currentSnapshot = CopyOrMaterializeCurrentSocketSnapshot(
+				handle, published, socketSnapshot);
 			if(!currentSnapshot) {
 				result->status = NativeAnimationStatus::NotReady;
 				result->reasonMask = static_cast<std::uint32_t>(
@@ -1596,8 +1642,10 @@ extern "C" {
 			FillAnimationBufferInfo(*info, NativeAnimationStatus::StaleHandle, 0U, 0U, 0, 0U);
 			return info->status;
 		}
+		const std::shared_ptr<const PublishedAnimatorPose> published =
+			AnimationSystem::Instance().LoadPublishedAnimatorPose(handle);
 		AnimationSocketReadSnapshot socketSnapshot;
-		if(!AnimationAttachmentSnapshotPublisher::Instance().CopySocketSnapshot(handle, socketSnapshot)) {
+		if(!CopyOrMaterializeCurrentSocketSnapshot(handle, published, socketSnapshot)) {
 			FillAnimationBufferInfo(*info, NativeAnimationStatus::NotReady, 0U, 0U, 0, 0U);
 			return info->status;
 		}

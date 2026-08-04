@@ -3,6 +3,7 @@
 #include "VirtualGeometryProductionBlocks.h"
 #include "Resource/VirtualGeometryCodec.h"
 
+#include <algorithm>
 #include <array>
 #include <vector>
 
@@ -99,6 +100,76 @@ namespace TerraEngine::EditorTests
 					&& validated.directory.pages.front().firstDependencyIndex == 0u
 					&& validated.directory.pages.front().dependencyCount == 2u,
 					"A page with multiple topology blocks must publish one in-range dependency slice beginning at its first block.");
+			});
+
+		registry.Add("VirtualGeometry.Editor.AssetPipeline.ExplicitHierarchyPagesRemainIsolated",
+			[](TestContext& context)
+			{
+				// Two page-local payloads reserve the same IDs used by hierarchy
+				// selection. An asset-wide metadata stream must be packed above them,
+				// never into page zero merely because it was authored first.
+				const std::array<std::uint8_t, 4u> metadata = { 1u, 2u, 3u, 4u };
+				const std::array<std::uint8_t, 3u> pageZero = { 5u, 6u, 7u };
+				const std::array<std::uint8_t, 2u> pageOne = { 8u, 9u };
+				std::array<TemfQuantizationDomain, 2u> domains{};
+				for(std::size_t index = 0u; index < domains.size(); ++index)
+				{
+					domains[index].domainId = static_cast<std::uint32_t>(index);
+					domains[index].domainVersion = 1u;
+					domains[index].domainScope = static_cast<std::uint16_t>(
+						TemfQuantizationDomainScope::Asset);
+					domains[index].streamKind = static_cast<std::uint16_t>(index == 0u
+						? TemfStreamKind::Metadata : TemfStreamKind::ProceduralUpdate);
+					domains[index].componentCount = 1u;
+					domains[index].domainHash = 211u + index;
+				}
+				const std::array<TemfProductionStreamInput, 3u> streams = {
+					TemfProductionStreamInput{ TemfStreamKind::Metadata,
+						TemfCodecProfile::ExpandedProduction, 17u, 0u,
+						static_cast<std::uint32_t>(metadata.size()), 1u, metadata },
+					TemfProductionStreamInput{ TemfStreamKind::ProceduralUpdate,
+						TemfCodecProfile::ExpandedProduction,
+						kTemfMetadataDeformableDemandedPageBlobs, 1u, 1u,
+						static_cast<std::uint32_t>(pageZero.size()), pageZero, 0u },
+					TemfProductionStreamInput{ TemfStreamKind::ProceduralUpdate,
+						TemfCodecProfile::ExpandedProduction,
+						kTemfMetadataDeformableDemandedPageBlobs, 1u, 1u,
+						static_cast<std::uint32_t>(pageOne.size()), pageOne, 1u }
+				};
+				const TemfProductionBuildRequest request{
+					kTemfRepresentationVirtualGeometry, kTemfPageSize32KiB,
+					223u, 227u, 229u, 233u, 239u, 0u, domains, streams };
+				const TemfProductionBuildResult result =
+					BuildTemfProductionBlocks(request);
+				const auto validated = TerraEngine::Resource::ValidateTemfProductionFile(
+					result.bytes, {});
+				context.Expect(result.IsComplete() && validated.IsComplete()
+					&& validated.directory.pages.size() == 3u,
+					"Explicit hierarchy pages and automatic owner data must produce three valid isolated pages.");
+				if(!validated.IsComplete())
+				{
+					return;
+				}
+				const auto FindPage = [&validated](std::uint32_t pageId)
+				{
+					return std::find_if(validated.directory.pages.begin(),
+						validated.directory.pages.end(), [pageId](const TemfPageDescriptor& page)
+						{ return page.logicalPageId == pageId; });
+				};
+				const auto zero = FindPage(0u);
+				const auto one = FindPage(1u);
+				const auto automatic = FindPage(2u);
+				context.Expect(zero != validated.directory.pages.end()
+					&& one != validated.directory.pages.end()
+					&& automatic != validated.directory.pages.end()
+					&& zero->blockCount == 1u && one->blockCount == 1u
+					&& validated.directory.blocks[zero->firstBlockIndex].streamKind
+						== static_cast<std::uint16_t>(TemfStreamKind::ProceduralUpdate)
+					&& validated.directory.blocks[one->firstBlockIndex].streamKind
+						== static_cast<std::uint16_t>(TemfStreamKind::ProceduralUpdate)
+					&& validated.directory.blocks[automatic->firstBlockIndex].streamKind
+						== static_cast<std::uint16_t>(TemfStreamKind::Metadata),
+					"Hierarchy page IDs must resolve only their page-local payload while automatic streams begin above the reserved range.");
 			});
 	}
 } // namespace TerraEngine::EditorTests

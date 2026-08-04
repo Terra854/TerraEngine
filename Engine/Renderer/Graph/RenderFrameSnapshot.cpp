@@ -2,6 +2,7 @@
 #include "RenderDiagnostics.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <functional>
 #include <map>
@@ -12,6 +13,9 @@
 namespace TerraEngine::Renderer {
 
 	namespace {
+		std::shared_ptr<const AnimatedObjectVisibilitySnapshot>
+			gAnimatedObjectVisibilitySnapshot;
+
 		void HashCombine(std::uint64_t& seed, std::uint64_t value)
 		{
 			seed ^= value + 0x9e3779b97f4a7c15ull + (seed << 6u) + (seed >> 2u);
@@ -26,7 +30,9 @@ namespace TerraEngine::Renderer {
 		void SortByUuid(std::vector<Record>& records, TerraEngine::UUID Record::* member)
 		{
 			std::sort(records.begin(), records.end(), [member](const Record& left, const Record& right) {
-				return TerraEngine::ToHexString(left.*member) < TerraEngine::ToHexString(right.*member);
+				// Two-digit hexadecimal text preserves byte-array order. Compare UUID
+				// bytes directly so sorting does not allocate two strings per comparison.
+				return left.*member < right.*member;
 			});
 		}
 
@@ -595,10 +601,10 @@ namespace TerraEngine::Renderer {
 				{
 					return left.pageId < right.pageId;
 				}
-				return TerraEngine::ToHexString(left.meshId) < TerraEngine::ToHexString(right.meshId);
+				return left.meshId < right.meshId;
 			});
 			std::sort(state.residentPageSets.begin(), state.residentPageSets.end(), [](const VirtualGeometryResidentPageSetRecord& left, const VirtualGeometryResidentPageSetRecord& right) {
-				return TerraEngine::ToHexString(left.meshId) < TerraEngine::ToHexString(right.meshId);
+				return left.meshId < right.meshId;
 			});
 			for (VirtualGeometryResidentPageSetRecord& set : state.residentPageSets)
 			{
@@ -610,7 +616,7 @@ namespace TerraEngine::Renderer {
 				{
 					return left.pageId < right.pageId;
 				}
-				return TerraEngine::ToHexString(left.meshId) < TerraEngine::ToHexString(right.meshId);
+				return left.meshId < right.meshId;
 			});
 			std::sort(state.emittedPageSources.begin(), state.emittedPageSources.end(), [](const VirtualGeometryEmittedPageSourceRecord& left, const VirtualGeometryEmittedPageSourceRecord& right) {
 				if (left.viewId != right.viewId)
@@ -621,7 +627,7 @@ namespace TerraEngine::Renderer {
 				{
 					return left.clusterId < right.clusterId;
 				}
-				return TerraEngine::ToHexString(left.meshId) < TerraEngine::ToHexString(right.meshId);
+				return left.meshId < right.meshId;
 			});
 			std::sort(state.pageRetirements.begin(), state.pageRetirements.end(), [](const VirtualGeometryPageRetirementRecord& left, const VirtualGeometryPageRetirementRecord& right) {
 				if (left.frameId != right.frameId)
@@ -632,21 +638,21 @@ namespace TerraEngine::Renderer {
 				{
 					return left.pageId < right.pageId;
 				}
-				return TerraEngine::ToHexString(left.meshId) < TerraEngine::ToHexString(right.meshId);
+				return left.meshId < right.meshId;
 			});
 			std::sort(state.pageResidency.begin(), state.pageResidency.end(), [](const PageResidencyRecord& left, const PageResidencyRecord& right) {
 				if (left.pageId != right.pageId)
 				{
 					return left.pageId < right.pageId;
 				}
-				return TerraEngine::ToHexString(left.meshId) < TerraEngine::ToHexString(right.meshId);
+				return left.meshId < right.meshId;
 			});
 			std::sort(state.fallbackCoverage.begin(), state.fallbackCoverage.end(), [](const FallbackCoverageChain& left, const FallbackCoverageChain& right) {
 				if (left.desiredClusterId != right.desiredClusterId)
 				{
 					return left.desiredClusterId < right.desiredClusterId;
 				}
-				return TerraEngine::ToHexString(left.meshId) < TerraEngine::ToHexString(right.meshId);
+				return left.meshId < right.meshId;
 			});
 			std::sort(state.hiZRegressionSnapshots.begin(), state.hiZRegressionSnapshots.end(), [](const HiZRegressionSnapshot& left, const HiZRegressionSnapshot& right) {
 				if (left.viewId != right.viewId)
@@ -660,14 +666,14 @@ namespace TerraEngine::Renderer {
 				{
 					return left.clusterId < right.clusterId;
 				}
-				return TerraEngine::ToHexString(left.meshId) < TerraEngine::ToHexString(right.meshId);
+				return left.meshId < right.meshId;
 			});
 			std::sort(state.shadowVisibilitySelections.begin(), state.shadowVisibilitySelections.end(), [](const ShadowVisibilitySelection& left, const ShadowVisibilitySelection& right) {
 				if (left.shadowViewId != right.shadowViewId)
 				{
 					return left.shadowViewId < right.shadowViewId;
 				}
-				return TerraEngine::ToHexString(left.lightId) < TerraEngine::ToHexString(right.lightId);
+				return left.lightId < right.lightId;
 			});
 			std::sort(state.performanceGates.begin(), state.performanceGates.end(), [](const PerformanceGateResult& left, const PerformanceGateResult& right) {
 				if (left.gateId != right.gateId)
@@ -829,14 +835,14 @@ namespace TerraEngine::Renderer {
 		for (VirtualGeometryViewSelectionState& state : snapshot.virtualGeometryViewSelections)
 		{
 			std::sort(state.draws.begin(), state.draws.end(), [](const VirtualGeometryViewDrawRecord& left, const VirtualGeometryViewDrawRecord& right) {
-				return TerraEngine::ToHexString(left.objectId) < TerraEngine::ToHexString(right.objectId);
+				return left.objectId < right.objectId;
 			});
 			std::sort(state.selectedClusters.begin(), state.selectedClusters.end(), [](const VirtualGeometrySelectedClusterRecord& left, const VirtualGeometrySelectedClusterRecord& right) {
 				if (left.clusterId != right.clusterId)
 				{
 					return left.clusterId < right.clusterId;
 				}
-				return TerraEngine::ToHexString(left.objectId) < TerraEngine::ToHexString(right.objectId);
+				return left.objectId < right.objectId;
 			});
 			SortVirtualGeometryScalingRecords(state);
 			std::sort(state.pageNeeds.begin(), state.pageNeeds.end(), [](const VirtualGeometryPageNeedRecord& left, const VirtualGeometryPageNeedRecord& right) {
@@ -844,14 +850,14 @@ namespace TerraEngine::Renderer {
 				{
 					return left.pageId < right.pageId;
 				}
-				return TerraEngine::ToHexString(left.objectId) < TerraEngine::ToHexString(right.objectId);
+				return left.objectId < right.objectId;
 			});
 			std::sort(state.lodTransitionStates.begin(), state.lodTransitionStates.end(), [](const VirtualGeometryLODTransitionState& left, const VirtualGeometryLODTransitionState& right) {
 				if (left.outputId != right.outputId)
 				{
 					return left.outputId < right.outputId;
 				}
-				return TerraEngine::ToHexString(left.objectId) < TerraEngine::ToHexString(right.objectId);
+				return left.objectId < right.objectId;
 			});
 		}
 		std::sort(snapshot.virtualGeometryVisibilitySnapshots.begin(), snapshot.virtualGeometryVisibilitySnapshots.end(), [](const VirtualGeometryViewVisibilitySnapshot& left, const VirtualGeometryViewVisibilitySnapshot& right) {
@@ -864,14 +870,14 @@ namespace TerraEngine::Renderer {
 		for (VirtualGeometryViewVisibilitySnapshot& state : snapshot.virtualGeometryVisibilitySnapshots)
 		{
 			std::sort(state.drawRanges.begin(), state.drawRanges.end(), [](const VirtualGeometryViewDrawRecord& left, const VirtualGeometryViewDrawRecord& right) {
-				return TerraEngine::ToHexString(left.objectId) < TerraEngine::ToHexString(right.objectId);
+				return left.objectId < right.objectId;
 			});
 			std::sort(state.selectedClusters.begin(), state.selectedClusters.end(), [](const VirtualGeometrySelectedClusterRecord& left, const VirtualGeometrySelectedClusterRecord& right) {
 				if (left.clusterId != right.clusterId)
 				{
 					return left.clusterId < right.clusterId;
 				}
-				return TerraEngine::ToHexString(left.objectId) < TerraEngine::ToHexString(right.objectId);
+				return left.objectId < right.objectId;
 			});
 			SortVirtualGeometryScalingRecords(state);
 			std::sort(state.pageNeeds.begin(), state.pageNeeds.end(), [](const VirtualGeometryPageNeedRecord& left, const VirtualGeometryPageNeedRecord& right) {
@@ -879,14 +885,14 @@ namespace TerraEngine::Renderer {
 				{
 					return left.pageId < right.pageId;
 				}
-				return TerraEngine::ToHexString(left.objectId) < TerraEngine::ToHexString(right.objectId);
+				return left.objectId < right.objectId;
 			});
 			std::sort(state.lodTransitionStates.begin(), state.lodTransitionStates.end(), [](const VirtualGeometryLODTransitionState& left, const VirtualGeometryLODTransitionState& right) {
 				if (left.outputId != right.outputId)
 				{
 					return left.outputId < right.outputId;
 				}
-				return TerraEngine::ToHexString(left.objectId) < TerraEngine::ToHexString(right.objectId);
+				return left.objectId < right.objectId;
 			});
 		}
 	}
@@ -926,6 +932,8 @@ namespace TerraEngine::Renderer {
 				&& record.poseGeneration == 0U
 				&& record.morphGeneration == 0U
 				&& record.paletteGeneration == 0U
+				&& record.deformationContentIdLow == 0U
+				&& record.deformationContentIdHigh == 0U
 				&& record.gpuWorkPacketCount == 0U
 				&& !record.complete
 				&& !record.safeFallback;
@@ -934,6 +942,11 @@ namespace TerraEngine::Renderer {
 		if (record.stableInstanceId == 0U
 			|| record.deformablePayloadGeneration == 0U
 			|| record.rendererGeneration == 0U)
+		{
+			return false;
+		}
+		if((record.deformationContentIdLow == 0U)
+			!= (record.deformationContentIdHigh == 0U))
 		{
 			return false;
 		}
@@ -959,6 +972,51 @@ namespace TerraEngine::Renderer {
 			&& record.gpuStageMask != 0U;
 	}
 
+	void PublishAnimatedObjectVisibilitySnapshot(
+		AnimatedObjectVisibilitySnapshot snapshot)
+	{
+		// UUID ordering makes membership checks logarithmic and removes duplicate
+		// objects that were visible in multiple cameras, cascades, or captures.
+		std::sort(snapshot.visibleObjectIds.begin(), snapshot.visibleObjectIds.end());
+		snapshot.visibleObjectIds.erase(
+			std::unique(snapshot.visibleObjectIds.begin(), snapshot.visibleObjectIds.end()),
+			snapshot.visibleObjectIds.end());
+		auto immutable = std::make_shared<const AnimatedObjectVisibilitySnapshot>(
+			std::move(snapshot));
+		std::atomic_store_explicit(
+			&gAnimatedObjectVisibilitySnapshot, std::move(immutable),
+			std::memory_order_release);
+	}
+
+	std::shared_ptr<const AnimatedObjectVisibilitySnapshot>
+	LoadAnimatedObjectVisibilitySnapshot() noexcept
+	{
+		return std::atomic_load_explicit(
+			&gAnimatedObjectVisibilitySnapshot, std::memory_order_acquire);
+	}
+
+	void ClearAnimatedObjectVisibilitySnapshot() noexcept
+	{
+		std::atomic_store_explicit(
+			&gAnimatedObjectVisibilitySnapshot,
+			std::shared_ptr<const AnimatedObjectVisibilitySnapshot>{},
+			std::memory_order_release);
+	}
+
+	bool CanScheduleGpuAnimatedPageDeformation(
+		const AnimationRenderGenerationRecord& record)
+	{
+		// CPU palettes live in a different frame resource from GPU palette output.
+		// Treating packet zero as a CPU sentinel is unsafe whenever another
+		// animator owns real GPU packet zero, because the page would skin with the
+		// other character's matrices. Owner deformation is already the complete,
+		// correct fallback for these CPU-authoritative renderables.
+		return ValidateAnimationRenderGenerationRecord(record)
+			&& record.complete
+			&& !record.safeFallback
+			&& record.gpuWorkPacketCount != 0U;
+	}
+
 	std::uint64_t BuildAnimationRenderGenerationHash(const AnimationRenderGenerationRecord& record)
 	{
 		std::uint64_t hash = 1469598103934665603ULL;
@@ -970,6 +1028,8 @@ namespace TerraEngine::Renderer {
 		HashCombine(hash, record.programGeneration);
 		HashCombine(hash, record.animationPlanGeneration);
 		HashCombine(hash, record.rendererGeneration);
+		HashCombine(hash, record.deformationContentIdLow);
+		HashCombine(hash, record.deformationContentIdHigh);
 		HashCombine(hash, record.firstGpuWorkPacket);
 		HashCombine(hash, record.gpuWorkPacketCount);
 		HashCombine(hash, record.gpuStageMask);
@@ -1049,6 +1109,9 @@ namespace TerraEngine::Renderer {
 			HashCombine(hash, demand.key.deformation.animationPublicationGeneration);
 			HashCombine(hash, demand.key.deformation.rendererGeneration);
 			HashCombine(hash, demand.key.deformation.sceneGeneration);
+			HashCombine(hash, demand.key.deformation.contentIdLow);
+			HashCombine(hash, demand.key.deformation.contentIdHigh);
+			HashCombine(hash, demand.ownerStableInstanceId);
 			HashCombine(hash, demand.requestedViewMask);
 			HashCombine(hash, demand.vertexCount);
 			HashCombine(hash, demand.meshletCount);
@@ -1278,7 +1341,10 @@ namespace TerraEngine::Renderer {
 		for(const DeformationPageDemand& demand :
 			snapshot.animatedGeometryPageDemands)
 		{
-			demandPagesByOwner[demand.key.deformation.stableInstanceId].insert(
+			const std::uint64_t owner = demand.ownerStableInstanceId != 0u
+				? demand.ownerStableInstanceId
+				: demand.key.deformation.stableInstanceId;
+			demandPagesByOwner[owner].insert(
 				demand.key.page.pageId);
 		}
 
@@ -1318,18 +1384,33 @@ namespace TerraEngine::Renderer {
 					continue;
 				}
 				visibleOwners.insert(stableInstance->second);
-				const bool completeOwnerPayload =
-					draw.range.payloadSource
-						== VirtualGeometryPagePayloadSource::EmbeddedMeshPayload
-					|| draw.range.payloadSource
-						== VirtualGeometryPagePayloadSource::
-							ConservativeEmbeddedFallback
-					|| draw.range.selectedClusterCount == 0u;
-				if(completeOwnerPayload)
+			}
+			// Embedded and conservative payloads still carry the exact cluster cut
+			// selected for this view. Join those clusters to demanded page ids before
+			// considering the expensive whole-owner fallback; otherwise a low LOD
+			// draw needlessly deforms every page contained by the source asset.
+			for(const VirtualGeometrySelectedClusterRecord& cluster :
+				view.selectedClusters)
+			{
+				const auto stableInstance =
+					stableInstances.find(cluster.objectId);
+				if(stableInstance == stableInstances.end())
 				{
-					ownerFallbackViewMasks[stableInstance->second] |=
-						viewMask;
+					continue;
 				}
+				const auto demandedPages =
+					demandPagesByOwner.find(stableInstance->second);
+				if(demandedPages == demandPagesByOwner.end()
+					|| !demandedPages->second.contains(cluster.pageId))
+				{
+					continue;
+				}
+				selectedViewMasks[{
+					stableInstance->second,
+					cluster.pageId
+				}] |= viewMask;
+				ownersWithMatchingPagePackets.insert(
+					stableInstance->second);
 			}
 			for(const GpuVirtualGeometryPacketRecord& packet :
 				view.gpuPacketRecords)
@@ -1345,19 +1426,14 @@ namespace TerraEngine::Renderer {
 				{
 					continue;
 				}
-				if(packet.payloadSource
+				const auto demandedPages =
+					demandPagesByOwner.find(stableInstance->second);
+				const bool exactEmbeddedPage = packet.payloadSource
 						== VirtualGeometryPagePayloadSource::EmbeddedMeshPayload
 					|| packet.payloadSource
 						== VirtualGeometryPagePayloadSource::
-							ConservativeEmbeddedFallback)
-				{
-					ownerFallbackViewMasks[stableInstance->second] |=
-						viewMask;
-					continue;
-				}
-				const auto demandedPages =
-					demandPagesByOwner.find(stableInstance->second);
-				if(!residentPage
+							ConservativeEmbeddedFallback;
+				if((!residentPage && !exactEmbeddedPage)
 					|| demandedPages == demandPagesByOwner.end()
 					|| !demandedPages->second.contains(packet.pageId))
 				{
@@ -1394,12 +1470,15 @@ namespace TerraEngine::Renderer {
 		for(const DeformationPageDemand& demand :
 			snapshot.animatedGeometryPageDemands)
 		{
+			const std::uint64_t owner = demand.ownerStableInstanceId != 0u
+				? demand.ownerStableInstanceId
+				: demand.key.deformation.stableInstanceId;
 			const auto selected = selectedViewMasks.find({
-				demand.key.deformation.stableInstanceId,
+				owner,
 				demand.key.page.pageId
 			});
 			const auto ownerFallback = ownerFallbackViewMasks.find(
-				demand.key.deformation.stableInstanceId);
+				owner);
 			const std::uint64_t requestedViewMask =
 				(selected != selectedViewMasks.end()
 					? selected->second

@@ -221,6 +221,37 @@ namespace TerraEngine::Tests
 		});
 
 		registry.Add("Animation.Streaming.PrefetchWindowsAreAtomicAndStrictlyBounded", [](TestContext& context) {
+			Animation::AnimationStreamingCoordinator countedRetains;
+			const Animation::AnimationStreamRequest counted = StreamRequest(
+				AnimationId(59U), Animation::AnimationStreamPayloadKind::ClipSegment,
+				0U, 8U, 1U);
+			context.Expect(countedRetains.Request(counted).accepted
+				&& countedRetains.AdjustRetainCount(counted, 4000)
+				&& countedRetains.Query(counted)->retainCount == 4000U
+				&& countedRetains.AdjustRetainCount(counted, -3999)
+				&& countedRetains.Query(counted)->retainCount == 1U
+				&& !countedRetains.AdjustRetainCount(counted, -2),
+				"Counted crowd retains must update one immutable request atomically and reject underflow without partial state changes.");
+			const Animation::AnimationStreamRequest secondCounted = StreamRequest(
+				AnimationId(59U), Animation::AnimationStreamPayloadKind::ClipSegment,
+				1U, 8U, 1U);
+			context.Expect(countedRetains.Request(secondCounted).accepted,
+				"A second immutable segment should be available for transactional retain testing.");
+			const std::array invalidRetainBatch = {
+				Animation::AnimationStreamRetainAdjustment{counted, 3999, true, true},
+				Animation::AnimationStreamRetainAdjustment{secondCounted, -1, false, false}};
+			context.Expect(!countedRetains.ApplyRetainAdjustments(invalidRetainBatch)
+				&& countedRetains.Query(counted)->retainCount == 1U,
+				"A rejected retain batch must leave every earlier validated payload unchanged.");
+			const std::array validRetainBatch = {
+				Animation::AnimationStreamRetainAdjustment{counted, 3999, true, true},
+				Animation::AnimationStreamRetainAdjustment{secondCounted, 2, false, false}};
+			context.Expect(countedRetains.ApplyRetainAdjustments(validRetainBatch)
+				&& countedRetains.Query(counted)->retainCount == 4000U
+				&& countedRetains.Query(counted)->request.gameplayCritical
+				&& countedRetains.Query(secondCounted)->retainCount == 2U,
+				"One transactional retain batch should publish counted ownership and criticality for all unique payloads.");
+
 			Animation::AnimationStreamingCoordinator atomicBytes(4u, 4u, 15u, 16u);
 			const std::array byteOverflow = {
 				StreamRequest(AnimationId(60u), Animation::AnimationStreamPayloadKind::ClipSegment, 0u, 8u, 1u, false, true),

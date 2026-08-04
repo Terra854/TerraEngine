@@ -272,6 +272,9 @@ namespace TerraEngine::EditorTests {
 				TemfDeformableDemandedPagePayload blobHeader{};
 				std::memcpy(&blobHeader, decoded.bytes.data(), sizeof(blobHeader));
 				std::uint32_t sectionMask = 0u;
+				bool sectionsAreGpuAligned =
+					decoded.bytes.size()
+						% kTemfDeformablePageSectionAlignment == 0u;
 				if (blobHeader.sectionTableOffset == sizeof(blobHeader)
 					&& blobHeader.decodedByteSize == decoded.bytes.size()
 					&& static_cast<std::size_t>(blobHeader.sectionCount)
@@ -284,16 +287,27 @@ namespace TerraEngine::EditorTests {
 						std::memcpy(&section, decoded.bytes.data() + blobHeader.sectionTableOffset
 							+ static_cast<std::size_t>(sectionIndex) * sizeof(section), sizeof(section));
 						sectionMask |= 1u << static_cast<std::uint32_t>(section.kind);
+						sectionsAreGpuAligned = sectionsAreGpuAligned
+							&& section.relativeByteOffset
+								% kTemfDeformablePageSectionAlignment == 0u;
 					}
 				}
 				const std::uint32_t expectedSectionMask =
 					((1u << 13u) - 1u)
 					& ~((1u << 8u) | (1u << 9u));
+				const auto physicalPage = std::find_if(
+					validated.directory.pages.begin(), validated.directory.pages.end(),
+					[&blobHeader](const TemfPageDescriptor& page)
+					{ return page.logicalPageId == blobHeader.pageId; });
 				context.Expect(blobHeader.pageId == blobRecords[decodedBlobCount].pageId
+					&& descriptor.logicalPageId == blobHeader.pageId
+					&& physicalPage != validated.directory.pages.end()
+					&& physicalPage->blockCount == 1u
 					&& sectionMask == expectedSectionMask
+					&& sectionsAreGpuAligned
 					&& descriptor.decodedIntegrity
 						== blobRecords[decodedBlobCount].decodedIntegrity,
-					"Independent blob decode must retain identity, integrity, and every runtime deformation section.");
+					"Independent blob decode must retain identity, integrity, GPU-aligned ranges, and every runtime deformation section.");
 				++decodedBlobCount;
 			}
 			context.ExpectEqual(static_cast<std::size_t>(directory.blobCount), decodedBlobCount,
@@ -302,13 +316,16 @@ namespace TerraEngine::EditorTests {
 				outputPath, 4096U, kTestSkeletonCompatibilityFingerprint);
 			const Mesh* loaded = ResourceManager::Instance().GetMesh(loadedId);
 			context.Expect(loaded != nullptr
+				&& loaded->virtualGeometryPageStreamingReady
+				&& loaded->virtualGeometryOwnerFallbackReason.empty()
+				&& loaded->hasDeformableDemandedPages
 				&& loaded->deformableDemandedPageSections.size()
 					== loaded->deformableDemandedPagePayloads.size()
 				&& std::all_of(loaded->deformableDemandedPageSections.begin(),
 					loaded->deformableDemandedPageSections.end(), [](const auto& sections) {
 						return sections.size() == 11u;
 					}),
-				"The canonical loader must retain every validated page-local deformation section for Vulkan consumption.");
+				"The canonical loader must retain every validated page-local deformation section and enable hierarchy-page streaming for Vulkan consumption.");
 			// Corrupt an encoded descriptor-owned blob rather than a retired appended
 			// offset.  Integrity validation must fail before a Mesh can be published.
 			const auto blobBlock = std::find_if(validated.directory.blocks.begin(),

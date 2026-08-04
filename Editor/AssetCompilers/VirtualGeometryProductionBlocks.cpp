@@ -120,13 +120,62 @@ namespace TerraEngine::Editor
 
 		std::vector<PackedBlock> blocks;
 		std::vector<TemfPageDescriptor> pages;
-		std::uint32_t nextPageId = 0u;
+		// Page-local streams reserve their hierarchy identities before automatic
+		// packing begins. Asset-wide metadata and owner streams are placed above
+		// that range, so a runtime request for hierarchy page N cannot accidentally
+		// read an unrelated slice of an owner stream that happened to receive N.
+		std::uint32_t highestExplicitPageId = 0u;
+		bool hasExplicitPage = false;
+		for(const TemfProductionStreamInput& stream : request.streams)
+		{
+			if(stream.logicalPageIdOverride == kTemfDirectResidentPageId)
+			{
+				continue;
+			}
+			if(directResident)
+			{
+				result.error = "Direct-resident streams cannot override logical page identities.";
+				return result;
+			}
+			hasExplicitPage = true;
+			highestExplicitPageId = std::max(
+				highestExplicitPageId, stream.logicalPageIdOverride);
+		}
+		if(hasExplicitPage && highestExplicitPageId == kTemfDirectResidentPageId - 1u)
+		{
+			result.error = "Explicit production page identities leave no range for automatic streams.";
+			return result;
+		}
+		std::uint32_t nextAutomaticPageId = hasExplicitPage
+			? highestExplicitPageId + 1u : 0u;
 		std::uint64_t nextBlockId = 1u;
+		std::uint32_t activePageId = kTemfDirectResidentPageId;
 		std::uint32_t activePageBytes = 0u;
 		std::uint64_t activePageDecodedBytes = 0u;
 		std::uint32_t activePageFirstBlock = 0u;
 		std::uint32_t activePageBlockCount = 0u;
 		std::uint32_t activePageDependencyCount = 0u;
+		const auto flushActivePage = [&]()
+		{
+			if(directResident || activePageBlockCount == 0u)
+			{
+				return;
+			}
+			pages.push_back({ activePageId, 0u, activePageFirstBlock,
+				static_cast<std::uint32_t>(blocks.size()) - activePageFirstBlock,
+				0u, 0u, activePageBytes, activePageDecodedBytes, 0u,
+				{ 0u, 0u } });
+			activePageId = kTemfDirectResidentPageId;
+			activePageFirstBlock = static_cast<std::uint32_t>(blocks.size());
+			activePageBytes = 0u;
+			activePageDecodedBytes = 0u;
+			activePageBlockCount = 0u;
+			activePageDependencyCount = 0u;
+		};
+		const auto beginAutomaticPage = [&]()
+		{
+			activePageId = nextAutomaticPageId++;
+		};
 		for(const TemfProductionStreamInput& stream : request.streams)
 		{
 			if(stream.quantizationDomainId >= request.quantizationDomains.size())
@@ -139,6 +188,19 @@ namespace TerraEngine::Editor
 			{
 				return result;
 			}
+			const bool explicitPage = !directResident
+				&& stream.logicalPageIdOverride != kTemfDirectResidentPageId;
+			if(explicitPage)
+			{
+				flushActivePage();
+				if(std::any_of(pages.begin(), pages.end(), [&stream](const TemfPageDescriptor& page)
+					{ return page.logicalPageId == stream.logicalPageIdOverride; }))
+				{
+					result.error = "Production streams duplicate an explicit logical page identity.";
+					return result;
+				}
+				activePageId = stream.logicalPageIdOverride;
+			}
 			if(!directResident && encoded.size() > request.logicalPageSizeBytes
 				&& stream.codecProfile != TemfCodecProfile::ExpandedProduction)
 			{
@@ -147,6 +209,10 @@ namespace TerraEngine::Editor
 			}
 			for(std::size_t begin = 0u; begin < encoded.size();)
 			{
+				if(!directResident && activePageId == kTemfDirectResidentPageId)
+				{
+					beginAutomaticPage();
+				}
 				const bool topology = stream.streamKind == TemfStreamKind::Topology;
 				// The physical page budget reserves its directory records, one
 				// dependency slot per topology block, alignment padding, and the
@@ -162,14 +228,12 @@ namespace TerraEngine::Editor
 					&& activePageBytes != 0u
 					&& encoded.size() - begin > remainingBudget)
 				{
-					pages.push_back({ nextPageId++, 0u, activePageFirstBlock,
-						static_cast<std::uint32_t>(blocks.size()) - activePageFirstBlock, 0u, 0u,
-						activePageBytes, activePageDecodedBytes, 0u, { 0u, 0u } });
-					activePageFirstBlock = static_cast<std::uint32_t>(blocks.size());
-					activePageBytes = 0u;
-					activePageDecodedBytes = 0u;
-					activePageBlockCount = 0u;
-					activePageDependencyCount = 0u;
+					if(explicitPage)
+					{
+						result.error = "An explicit production page payload exceeds its isolated page budget.";
+						return result;
+					}
+					flushActivePage();
 					continue;
 				}
 				std::size_t size = directResident ? encoded.size() - begin
@@ -184,14 +248,12 @@ namespace TerraEngine::Editor
 							result.error = "Expanded production elements cannot fit within the selected page size.";
 							return result;
 						}
-						pages.push_back({ nextPageId++, 0u, activePageFirstBlock,
-							static_cast<std::uint32_t>(blocks.size()) - activePageFirstBlock, 0u, 0u,
-							activePageBytes, activePageDecodedBytes, 0u, { 0u, 0u } });
-						activePageFirstBlock = static_cast<std::uint32_t>(blocks.size());
-						activePageBytes = 0u;
-						activePageDecodedBytes = 0u;
-						activePageBlockCount = 0u;
-						activePageDependencyCount = 0u;
+						if(explicitPage)
+						{
+							result.error = "An explicit expanded stream cannot be split across physical pages.";
+							return result;
+						}
+						flushActivePage();
 						continue;
 					}
 				}
@@ -210,7 +272,8 @@ namespace TerraEngine::Editor
 				packed.encoded.assign(encoded.begin() + static_cast<std::ptrdiff_t>(begin),
 					encoded.begin() + static_cast<std::ptrdiff_t>(begin + size));
 				packed.descriptor.blockId = nextBlockId++;
-				packed.descriptor.logicalPageId = directResident ? kTemfDirectResidentPageId : nextPageId;
+				packed.descriptor.logicalPageId = directResident
+					? kTemfDirectResidentPageId : activePageId;
 				const std::size_t pageOrdinal = directResident ? blocks.size()
 					: blocks.size() - activePageFirstBlock;
 				if(pageOrdinal > std::numeric_limits<std::uint16_t>::max())
@@ -243,13 +306,14 @@ namespace TerraEngine::Editor
 				blocks.push_back(std::move(packed));
 				begin += size;
 			}
+			if(explicitPage)
+			{
+				// One hierarchy payload owns one physical page. Closing it here keeps
+				// later metadata from sharing its residency and integrity lifetime.
+				flushActivePage();
+			}
 		}
-		if(!directResident && !blocks.empty())
-		{
-			pages.push_back({ nextPageId, 0u, activePageFirstBlock,
-				static_cast<std::uint32_t>(blocks.size()) - activePageFirstBlock, 0u, 0u,
-				activePageBytes, activePageDecodedBytes, 0u, { 0u, 0u } });
-		}
+		flushActivePage();
 		// Topology is meaningful only after every stable-remap block is ready.
 		// Attribute and topology streams are deliberately page-independent, so
 		// this dependency crosses page boundaries instead of requiring both

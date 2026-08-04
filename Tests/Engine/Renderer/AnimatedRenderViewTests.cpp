@@ -173,6 +173,35 @@ namespace TerraEngine::Tests
 
 	void RegisterAnimatedRenderViewTests(TestRegistry& registry)
 	{
+		registry.Add("Renderer.AnimationView.VisibilityPublicationIsImmutableAndDeduplicated", [](TestContext& context) {
+			using namespace TerraEngine::Renderer;
+			const UUID first = MakeAnimatedViewTestUuid(31u);
+			const UUID second = MakeAnimatedViewTestUuid(32u);
+			AnimatedObjectVisibilitySnapshot snapshot;
+			snapshot.frameId = 91u;
+			snapshot.sceneGeneration = 17u;
+			snapshot.visibleObjectIds = {second, first, second};
+			snapshot.hasActiveView = true;
+			snapshot.valid = true;
+			PublishAnimatedObjectVisibilitySnapshot(std::move(snapshot));
+
+			const auto published = LoadAnimatedObjectVisibilitySnapshot();
+			context.Expect(published && published->valid,
+				"Animated visibility must publish one complete immutable snapshot.");
+			if(published)
+			{
+				context.ExpectEqual(std::size_t{2u}, published->visibleObjectIds.size(),
+					"Objects visible in multiple views must be deduplicated once.");
+				context.Expect(published->Contains(first) && published->Contains(second),
+					"Sorted visibility membership must retain every unique object.");
+				context.Expect(!published->Contains(MakeAnimatedViewTestUuid(33u)),
+					"Objects outside every camera and shadow list must remain absent.");
+			}
+			ClearAnimatedObjectVisibilitySnapshot();
+			context.Expect(!LoadAnimatedObjectVisibilitySnapshot(),
+				"Renderer shutdown must retire the prior scene's visibility snapshot.");
+		});
+
 		registry.Add("Renderer.AnimationView.ImmutableAllViewGenerationContract", [](TestContext& context) {
 			const TerraEngine::Renderer::RenderFrameSnapshot snapshot = BuildAllViewSnapshot();
 			const TerraEngine::Renderer::AnimationRenderGenerationRecord& generation =
@@ -287,7 +316,7 @@ namespace TerraEngine::Tests
 				"Pose binding must preserve demanded-page compute eligibility while a rejected page state retains fail-open owner coverage.");
 		});
 
-		registry.Add("Renderer.AnimationView.ActiveDeformationFailsOpenAtCpuBroadphase", [](TestContext& context) {
+		registry.Add("Renderer.AnimationView.ActiveDeformationUsesProvenCpuBroadphaseEnvelope", [](TestContext& context) {
 			using namespace TerraEngine::Renderer;
 			auto request = BuildGpuVisualBindingRequest();
 			request.gpuVisualIdentity = BuildGpuVisualIdentity();
@@ -304,11 +333,18 @@ namespace TerraEngine::Tests
 
 			context.Expect(
 				active.RequiresConservativeCoarseVisibility(),
-				"An active compute-deformed mesh must survive static CPU broadphase culling so current page bounds can decide visibility.");
+				"Active deformation must still report that its bounds require a conservative proof.");
+			context.Expect(
+				active.RequiresUnboundedCoarseVisibility(false)
+					&& !active.RequiresUnboundedCoarseVisibility(true),
+				"An active deformable mesh must fail open without bounds, but a validated whole-animation envelope may safely use CPU broadphase culling.");
 			context.Expect(
 				!bindPose.RequiresConservativeCoarseVisibility()
 					&& !safePose.RequiresConservativeCoarseVisibility()
-					&& !staticBinding.RequiresConservativeCoarseVisibility(),
+					&& !staticBinding.RequiresConservativeCoarseVisibility()
+					&& !bindPose.RequiresUnboundedCoarseVisibility(false)
+					&& !safePose.RequiresUnboundedCoarseVisibility(false)
+					&& !staticBinding.RequiresUnboundedCoarseVisibility(false),
 				"Bind pose, safe pose, and static meshes may continue using their CPU spatial bounds.");
 		});
 

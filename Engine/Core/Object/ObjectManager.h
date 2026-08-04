@@ -107,6 +107,12 @@ public:
 	// Notify systems and managed wrapper caches that component membership or
 	// other object-local structure changed without changing transform values.
 	void notifyObjectStructureChanged(const Object& obj);
+	// Publish an authored component-value edit without pretending component
+	// membership changed. The component name also advances a type-specific token,
+	// allowing a binder to ignore unrelated per-frame component writes.
+	void notifyObjectComponentValueChanged(
+		const Object& obj,
+		std::string_view componentName);
 	// Managed assembly reloads invalidate wrapper lifetimes without changing
 	// native component membership. This protected helper advances only binding
 	// generations so stale C# physics/component facades fail validation.
@@ -122,6 +128,13 @@ public:
 	std::uint64_t getObjectMetadataGeneration(const Object& obj) const;
 	std::uint64_t getObjectComponentGeneration(const Object& obj) const;
 	std::uint64_t getObjectBindingGeneration(const Object& obj) const;
+	// One protected monotonic token covers component membership and authored
+	// value writes. Consumers may reuse cached results while it is unchanged.
+	std::uint64_t GetComponentMutationRevision() const { return componentMutationRevision; }
+	// Return the value-mutation token for one reflected component type. Missing
+	// entries have never been edited and use the stable initial revision.
+	[[nodiscard]] std::uint64_t GetComponentValueMutationRevision(
+		std::string_view componentName) const;
 
 	// Get the list of all globally available tags defined in the project.
 	// getAvailableTags is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -383,6 +396,9 @@ private:
 	std::uint64_t sceneGeneration = 1;
 	std::uint64_t sceneChangePublicationRevision = 0;
 	std::uint64_t runtimeActiveMembershipRevision = 0;
+	std::uint64_t componentMutationRevision = 1;
+	std::unordered_map<std::string, std::uint64_t>
+		componentValueMutationRevisions;
 	std::uint64_t cachedRuntimeActiveMembershipRevision = static_cast<std::uint64_t>(-1);
 	std::vector<TerraEngine::Scene::RuntimeActiveMembership> runtimeActiveMembershipCache;
 	std::unordered_map<entt::entity, ObjectMetadata> metadataMap;

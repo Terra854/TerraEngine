@@ -80,23 +80,28 @@ namespace TerraEngine::Renderer
 
 		GeometryRouteDecision SelectInternal(
 			const GeometryRoutePolicyInput &input,
-			const GeometryRoutePolicyState *previousState)
+			const GeometryRoutePolicyState *previousState,
+			bool includeCandidateDiagnostics)
 		{
 			GeometryRouteDecision decision{};
 			decision.policyIdentity = input.policyIdentity;
 			decision.calibrationIdentity = input.calibrationIdentity;
 			decision.confidenceMargin = std::max(0.0F, input.confidenceMargin);
 
-			for (const GeometryRoute route : kStableTieBreakOrder)
+			if (includeCandidateDiagnostics)
 			{
-				const GeometryRoutePolicyCandidateInput &candidate = *FindCandidate(input, route);
-				decision.candidates.push_back(GeometryRouteCandidate{
-					route,
-					candidate.IsEligible(),
-					std::isfinite(candidate.estimatedCost)
-						? std::optional<double>{candidate.estimatedCost}
-						: std::nullopt,
-					DescribeRejections(candidate)});
+				decision.candidates.reserve(kStableTieBreakOrder.size());
+				for (const GeometryRoute route : kStableTieBreakOrder)
+				{
+					const GeometryRoutePolicyCandidateInput &candidate = *FindCandidate(input, route);
+					decision.candidates.push_back(GeometryRouteCandidate{
+						route,
+						candidate.IsEligible(),
+						std::isfinite(candidate.estimatedCost)
+							? std::optional<double>{candidate.estimatedCost}
+							: std::nullopt,
+						DescribeRejections(candidate)});
+				}
 			}
 
 			const GeometryRoute automaticallySelected = FindBestEligible(input);
@@ -241,14 +246,27 @@ namespace TerraEngine::Renderer
 
 	GeometryRouteDecision SelectGeometryRoute(const GeometryRoutePolicyInput &input)
 	{
-		return SelectInternal(input, nullptr);
+		return SelectInternal(input, nullptr, true);
 	}
 
 	GeometryRouteDecision SelectGeometryRoute(
 		const GeometryRoutePolicyInput &input,
 		const GeometryRoutePolicyState &previousState)
 	{
-		return SelectInternal(input, &previousState);
+		return SelectInternal(input, &previousState, true);
+	}
+
+	GeometryRouteDecision SelectGeometryRouteCompact(
+		const GeometryRoutePolicyInput &input)
+	{
+		return SelectInternal(input, nullptr, false);
+	}
+
+	GeometryRouteDecision SelectGeometryRouteCompact(
+		const GeometryRoutePolicyInput &input,
+		const GeometryRoutePolicyState &previousState)
+	{
+		return SelectInternal(input, &previousState, false);
 	}
 
 	void BuildGeometryRouteFramePlan(GeometryRouteFramePlan &plan)

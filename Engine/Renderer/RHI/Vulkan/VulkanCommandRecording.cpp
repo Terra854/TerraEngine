@@ -1,5 +1,6 @@
 #include "VulkanCommandRecording.h"
 #include "VulkanDescriptorPlanning.h"
+#include "Profiling/ProfilerScope.h"
 
 #include <limits>
 
@@ -266,6 +267,8 @@ namespace TerraEngine::Renderer::Vulkan {
 		const Animation::GpuAnimationPlan& plan,
 		std::uint32_t rendererGeneration)
 	{
+		TERRAENGINE_PROFILE_SCOPE("Vulkan: Build Animation Command Plan",
+			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		VulkanAnimationCommandPlan output;
 		output.planGeneration = plan.generation;
 		output.rendererGeneration = rendererGeneration;

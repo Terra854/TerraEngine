@@ -157,7 +157,7 @@ namespace {
 			if(!ReadAnimatorEnum(json, "requestedMode",
 				static_cast<std::uint32_t>(AnimationExecutionPolicy::ForceCpuDeterministicFallback), AnimationExecutionPolicy::Auto, staged.requestedMode)
 				|| !ReadAnimatorEnum(json, "rootMotionPolicy",
-					static_cast<std::uint32_t>(AnimatorRootMotionPolicy::ApplyToCharacter), AnimatorRootMotionPolicy::ExtractOnly, staged.rootMotionPolicy)
+					static_cast<std::uint32_t>(AnimatorRootMotionPolicy::ApplyToCharacter), AnimatorRootMotionPolicy::Ignore, staged.rootMotionPolicy)
 				|| !ReadAnimatorEnum(json, "updatePolicy",
 					static_cast<std::uint32_t>(AnimatorUpdatePolicy::Manual), AnimatorUpdatePolicy::EveryFrame, staged.updatePolicy)
 				|| !ReadAnimatorEnum(json, "timePolicy",

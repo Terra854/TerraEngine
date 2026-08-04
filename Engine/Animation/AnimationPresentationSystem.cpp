@@ -11,6 +11,7 @@
 #include <mutex>
 #include <new>
 #include <thread>
+#include <unordered_set>
 #include <utility>
 
 namespace TerraEngine::Animation {
@@ -27,6 +28,11 @@ namespace TerraEngine::Animation {
 		std::shared_ptr<const GpuAnimationPresentationFrame> submittedFrame;
 		std::uint64_t submittedSourceGeneration = 0U;
 		std::shared_ptr<const PublishedGpuAnimationPresentationPlan> publishedPlan;
+		// The immutable combined atlas normally survives many dynamic sample ticks.
+		// Preparation owns this cache under a narrow mutex so future overlapping
+		// frame production cannot race a relocation-layout replacement.
+		mutable std::mutex atlasCacheMutex;
+		GpuAnimationFrameAtlasCache atlasCache;
 		std::unique_ptr<AnimationGenerationLatch> lifecycleLatch =
 			std::make_unique<AnimationGenerationLatch>();
 		AnimationCancellationSource gpuCancellationSource;
@@ -81,24 +87,36 @@ namespace TerraEngine::Animation {
 		return derived == 0U ? 1U : derived;
 	}
 
-	[[nodiscard]] bool PlanContainsExactOwnerMapping(
-		const GpuAnimationPlan& plan,
+	struct LoweredOwnerKey {
+		std::uint64_t stableInstanceId = 0U;
+		std::uint32_t instanceSlot = 0U;
+		std::uint32_t instanceGeneration = 0U;
+		std::uint32_t componentGeneration = 0U;
+
+		bool operator==(const LoweredOwnerKey&) const noexcept = default;
+	};
+
+	struct LoweredOwnerKeyHash {
+		std::size_t operator()(const LoweredOwnerKey& value) const noexcept
+		{
+			// Generation lanes are already well distributed counters. Combining them
+			// with the stable 64-bit identity gives average O(1) owner validation.
+			std::size_t hash = std::hash<std::uint64_t>{}(value.stableInstanceId);
+			hash ^= std::hash<std::uint32_t>{}(value.instanceSlot) + 0x9e3779b9U
+				+ (hash << 6U) + (hash >> 2U);
+			hash ^= std::hash<std::uint32_t>{}(value.instanceGeneration) + 0x9e3779b9U
+				+ (hash << 6U) + (hash >> 2U);
+			hash ^= std::hash<std::uint32_t>{}(value.componentGeneration) + 0x9e3779b9U
+				+ (hash << 6U) + (hash >> 2U);
+			return hash;
+		}
+	};
+
+	[[nodiscard]] LoweredOwnerKey MakeLoweredOwnerKey(
 		const GpuAnimationOwnerObjectMapping& mapping) noexcept
 	{
-		if(!mapping.IsComplete()) return false;
-		for(const GpuAnimationWorkPacket& packet : plan.workPackets) {
-			if(packet.stableInstanceId != mapping.stableInstanceId
-				|| packet.generationRecordIndex >= plan.generationRecords.size()) continue;
-			const GpuAnimationGenerationRecord& generation =
-				plan.generationRecords[packet.generationRecordIndex];
-			if(IsGpuAnimationGenerationRecordValid(generation)
-				&& generation.instanceSlot == mapping.instanceSlot
-				&& generation.instanceGeneration == mapping.instanceGeneration
-				&& generation.componentGeneration == mapping.componentGeneration) {
-				return true;
-			}
-		}
-		return false;
+		return {mapping.stableInstanceId, mapping.instanceSlot,
+			mapping.instanceGeneration, mapping.componentGeneration};
 	}
 
 	AnimationPresentationSystem& AnimationPresentationSystem::Instance()
@@ -335,9 +353,13 @@ namespace TerraEngine::Animation {
 				GpuAnimationArenaKind::Scratch, prepared->source->scratchArenaCapacityBytes);
 			GpuAnimationArena paletteArena(
 				GpuAnimationArenaKind::Palette, prepared->source->paletteArenaCapacityBytes);
-			(void)BuildLoweredGpuAnimationPlan(
-				prepared->source->inputs, prepared->planGeneration, scratchArena, paletteArena,
-				prepared->plan, prepared->result, prepared->source->planLimits);
+			{
+				std::scoped_lock cacheLock(impl_->atlasCacheMutex);
+				(void)BuildLoweredGpuAnimationPlan(
+					prepared->source->inputs, prepared->planGeneration, scratchArena, paletteArena,
+					prepared->plan, prepared->result, prepared->source->planLimits,
+					&impl_->atlasCache);
+			}
 			if(gpuCancellation.IsCancellationRequested(*impl_->lifecycleLatch)) {
 				prepared->plan = {};
 				prepared->cancelled.store(true, std::memory_order_release);
@@ -394,12 +416,24 @@ namespace TerraEngine::Animation {
 			if(buildSucceeded) {
 				publication->plan = std::move(prepared->plan);
 				try {
+					std::unordered_set<LoweredOwnerKey, LoweredOwnerKeyHash> loweredOwners;
+					loweredOwners.reserve(publication->plan.workPackets.size());
+					for(const GpuAnimationWorkPacket& packet : publication->plan.workPackets) {
+						if(packet.generationRecordIndex
+							>= publication->plan.generationRecords.size()) continue;
+						const GpuAnimationGenerationRecord& generation =
+							publication->plan.generationRecords[packet.generationRecordIndex];
+						if(!IsGpuAnimationGenerationRecordValid(generation)) continue;
+						loweredOwners.insert({packet.stableInstanceId, generation.instanceSlot,
+							generation.instanceGeneration, generation.componentGeneration});
+					}
 					publication->ownerObjectMappings.reserve(prepared->source->ownerObjectMappings.size());
 					for(const GpuAnimationOwnerObjectMapping& mapping : prepared->source->ownerObjectMappings) {
 						// Publish only a complete, generation-equal mapping that names an
 						// actual lowered packet. A rejected/missing packet must not leave
 						// render collection an object identity it could accidentally reuse.
-						if(PlanContainsExactOwnerMapping(publication->plan, mapping)) {
+						if(mapping.IsComplete()
+							&& loweredOwners.contains(MakeLoweredOwnerKey(mapping))) {
 							publication->ownerObjectMappings.push_back(mapping);
 						}
 					}

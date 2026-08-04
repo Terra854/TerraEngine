@@ -296,6 +296,13 @@ enum class TemfDeformablePageSectionKind : std::uint32_t
 	ErrorSamples = 12u
 };
 
+// Every canonical demanded-page section begins on a GPU-friendly boundary.
+// ByteAddressBuffer consumers issue 32-bit and 128-bit loads directly from
+// these offsets, so packed topology bytes must never leave later sections
+// unaligned. This is a cook-format requirement; older misaligned blobs must be
+// recooked instead of being interpreted through an ambiguous compatibility path.
+inline constexpr std::uint32_t kTemfDeformablePageSectionAlignment = 16u;
+
 struct TemfDeformablePageSection
 {
 	TemfDeformablePageSectionKind kind;

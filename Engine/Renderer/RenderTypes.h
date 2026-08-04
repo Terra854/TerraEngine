@@ -155,6 +155,11 @@ namespace TerraEngine::Renderer {
 		std::vector<TerraEngine::Animation::GpuAnimationPaletteRecord> paletteMatrices;
 		std::vector<float> morphWeights;
 		std::uint32_t jointCount = 0U;
+		// Two independently seeded content hashes let synchronized instances share
+		// one local-space deformation dispatch without trusting a single 64-bit
+		// identity. Model transforms remain draw-owned and are applied afterwards.
+		std::uint64_t contentIdLow = 0U;
+		std::uint64_t contentIdHigh = 0U;
 
 		[[nodiscard]] bool IsComplete() const noexcept
 		{
@@ -164,7 +169,8 @@ namespace TerraEngine::Renderer {
 				&& paletteMatrices.size()
 					<= TerraEngine::Animation::kGpuAnimationPaletteEntriesPerPartition
 				&& morphWeights.size()
-					<= TerraEngine::Animation::kGpuAnimationMaximumMorphTargetsV1;
+					<= TerraEngine::Animation::kGpuAnimationMaximumMorphTargetsV1
+				&& contentIdLow != 0U && contentIdHigh != 0U;
 		}
 	};
 
@@ -270,6 +276,8 @@ namespace TerraEngine::Renderer {
 		std::uint32_t componentGeneration = 0U;
 		std::uint32_t skeletonGeneration = 0U;
 		std::uint64_t skeletonCompatibilityFingerprint = 0U;
+		std::uint64_t deformationContentIdLow = 0U;
+		std::uint64_t deformationContentIdHigh = 0U;
 		AnimationRenderPoseSource source = AnimationRenderPoseSource::BindPose;
 		AnimationRenderBindingStatus status = AnimationRenderBindingStatus::MissingPose;
 		std::uint64_t posePublicationGeneration = 0U;
@@ -308,6 +316,17 @@ namespace TerraEngine::Renderer {
 				&& status == AnimationRenderBindingStatus::Ready
 				&& !safePose
 				&& source != AnimationRenderPoseSource::BindPose;
+		}
+
+		[[nodiscard]] bool RequiresUnboundedCoarseVisibility(
+			bool hasConservativeDeformationEnvelope) const noexcept
+		{
+			// A validated TEMF whole-animation envelope is already safe for CPU
+			// broadphase rejection. Fail open only when active deformation has no
+			// such proof; this preserves correctness for legacy or incomplete assets
+			// without force-submitting every properly cooked animated instance.
+			return RequiresConservativeCoarseVisibility()
+				&& !hasConservativeDeformationEnvelope;
 		}
 
 		[[nodiscard]] bool RequiresOwnerMeshDeformationFallback() const noexcept

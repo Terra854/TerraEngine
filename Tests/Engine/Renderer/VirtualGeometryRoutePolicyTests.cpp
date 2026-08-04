@@ -84,6 +84,36 @@ namespace TerraEngine::Tests
 					"Hysteresis state must advance deterministically with each accepted frame.");
 			});
 
+		registry.Add("VirtualGeometry.RoutePolicy.CompactRuntimeDecisionMatchesDetailedPolicy",
+			[](TestContext &context)
+			{
+				Renderer::GeometryRoutePolicyInput input{};
+				input.direct.valid = true;
+				input.direct.estimatedCost = 3.0F;
+				input.virtualGeometryHardware.valid = true;
+				input.virtualGeometryHardware.estimatedCost = 1.0F;
+				input.virtualGeometryCompute.valid = true;
+				input.virtualGeometryCompute.estimatedCost = 2.0F;
+				Renderer::GeometryRoutePolicyState previous{};
+				previous.current = Renderer::GeometryRoute::DirectMeshlet;
+				previous.challenger = Renderer::GeometryRoute::VirtualGeometryHardware;
+				previous.stableFrames = 7U;
+				previous.challengerFrames = 1U;
+
+				const auto detailed = Renderer::SelectGeometryRoute(input, previous);
+				const auto compact = Renderer::SelectGeometryRouteCompact(input, previous);
+				context.Expect(compact.selected == detailed.selected
+					&& compact.nextState.current == detailed.nextState.current
+					&& compact.nextState.challenger == detailed.nextState.challenger
+					&& compact.nextState.stableFrames == detailed.nextState.stableFrames
+					&& compact.nextState.challengerFrames == detailed.nextState.challengerFrames,
+					"The allocation-free runtime decision must preserve route selection and hysteresis exactly.");
+				context.Expect(compact.candidates.empty(),
+					"Compact runtime selection must omit candidate diagnostics that no render stage consumes.");
+				context.Expect(detailed.candidates.size() == 3U,
+					"The full inspection API must retain all candidate diagnostics.");
+			});
+
 		registry.Add("VirtualGeometry.RoutePolicy.RouteLockSelectsExactEligibleRoute",
 			[](TestContext &context)
 			{

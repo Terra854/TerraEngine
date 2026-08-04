@@ -217,10 +217,11 @@ namespace TerraEngine::Animation {
 		HybridCpuAuthority = 0x040U,
 		DeterministicReference = 0x080U,
 		AllowVisualProcedural = 0x100U,
-		AllowRagdollVisual = 0x200U
+		AllowRagdollVisual = 0x200U,
+		SuspendVisualEvaluation = 0x400U
 	};
 
-	inline constexpr std::uint32_t kGpuAnimationAllWorkFlags = 0x3ffU;
+	inline constexpr std::uint32_t kGpuAnimationAllWorkFlags = 0x7ffU;
 
 	// Output flags participate in the deterministic compatibility key. Work with
 	// different output obligations cannot accidentally share a renderer batch.

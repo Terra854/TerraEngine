@@ -89,6 +89,50 @@ namespace TerraEngine::Tests {
 				"Deduplication must preserve every consuming view.");
 		});
 
+		registry.Add("AnimatedVirtualGeometry.Abi.SharesVerifiedCloneContentAcrossOwners", [](TestContext& context)
+		{
+			auto first = MakeDemand(7u, 1u);
+			first.ownerStableInstanceId = 100u;
+			first.sourceStableInstanceId = 100u;
+			first.key.deformation.contentIdLow = 0x12345678u;
+			first.key.deformation.contentIdHigh = 0xabcdef01u;
+			auto clone = first;
+			clone.ownerStableInstanceId = 200u;
+			clone.sourceStableInstanceId = 200u;
+			clone.key.deformation.stableInstanceId = 200u;
+			clone.key.deformation.objectGeneration = 201u;
+			clone.key.deformation.animationPublicationGeneration = 202u;
+			clone.sourceRecordIndex = 9u;
+			clone.requestedViewMask = 4u;
+
+			const std::array demands = {first, clone};
+			const auto plan = TerraEngine::Renderer::BuildGpuDeformationPlan(
+				9u, 105u, demands);
+
+			context.Expect(plan.IsComplete(),
+				"Two independently verified content ids should produce a complete shared plan.");
+			context.ExpectEqual<std::size_t>(1u, plan.work.size(),
+				"Byte-identical local-space clone content should dispatch once per page.");
+			if(plan.work.empty()) return;
+			context.ExpectEqual<std::size_t>(2u,
+				plan.work.front().consumerStableInstanceIds.size(),
+				"The shared work record must retain both graphics-owner aliases.");
+			context.ExpectEqual<std::uint64_t>(5u,
+				plan.work.front().requestedViewMask,
+				"Shared clone work must retain the union of consuming views.");
+			context.ExpectEqual<std::uint64_t>(100u,
+				plan.work.front().sourceStableInstanceId,
+				"The deterministic first owner should supply the shared palette bytes.");
+
+			clone.key.deformation.contentIdHigh ^= 1u;
+			const std::array distinct = {first, clone};
+			const auto distinctPlan = TerraEngine::Renderer::BuildGpuDeformationPlan(
+				9u, 105u, distinct);
+			context.Expect(distinctPlan.IsComplete()
+					&& distinctPlan.work.size() == 2u,
+				"A mismatch in either content-id half must keep owners isolated.");
+		});
+
 		registry.Add("AnimatedVirtualGeometry.Abi.RejectsConflictsAtomically", [](TestContext& context)
 		{
 			auto first = MakeDemand(7u, 1u);

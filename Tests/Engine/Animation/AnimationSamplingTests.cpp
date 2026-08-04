@@ -224,6 +224,21 @@ namespace TerraEngine::Tests {
 				"An exact step boundary should choose the key authored at that boundary.");
 		});
 
+		registry.Add("Animation.Sampling.ClipViewRecognizesAnUnchangedResidentGeneration", [](TestContext& context) {
+			const SkeletonAsset skeleton = MakeSkeleton();
+			const AnimationClipAsset clip = CompileSamplingClip(context);
+			AnimationClipView view;
+			context.Expect(view.Open(clip, &skeleton) == AnimationStatus::Ok,
+				"The initial checked clip view should open successfully.");
+			context.Expect(view.Matches(clip, &skeleton, {}, 0U, {}),
+				"A fully resident unchanged clip should match its retained checked view.");
+			context.Expect(view.Open(clip, &skeleton) == AnimationStatus::Ok && view.IsOpen(),
+				"Opening the exact same immutable generation should remain a safe no-op.");
+			const std::array<std::uint8_t, 2U> changedResidency{1U, 0U};
+			context.Expect(!view.Matches(clip, &skeleton, changedResidency, 0U, {}),
+				"A changed residency bitmap must invalidate the capture fast path.");
+		});
+
 		registry.Add("Animation.Sampling.ReferenceDefaultAndUnavailableFallback", [](TestContext& context) {
 			const SkeletonAsset skeleton = MakeSkeleton();
 			const AnimationClipAsset clip = CompileSamplingClip(context);

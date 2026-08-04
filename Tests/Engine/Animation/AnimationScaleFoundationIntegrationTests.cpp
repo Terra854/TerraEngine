@@ -503,6 +503,53 @@ namespace TerraEngine::Tests {
 				"A truthful unchanged cache hit must retain the exact pose and its bounded lifetime lease.");
 		});
 
+		registry.Add("Animation.ScaleFoundation.SynchronizedVisualClonesReuseCpuEvaluation",
+			[](TestContext& context) {
+				AnimationSystem& system = AnimationSystem::Instance();
+				system.Initialize();
+				const AnimatorInstanceHandle firstAnimator =
+					system.CreateAnimatorInstance(MakeIntegrationDescriptor(92U));
+				const AnimatorInstanceHandle secondAnimator =
+					system.CreateAnimatorInstance(MakeIntegrationDescriptor(93U));
+				IntegrationAnimatorGuard firstCleanup(system, firstAnimator);
+				IntegrationAnimatorGuard secondCleanup(system, secondAnimator);
+				AnimatorPlaybackBinding binding = MakeIntegrationBinding(context);
+				binding.evaluationGenerations.unchangedInputReuseEligible = false;
+				context.Expect(firstAnimator.IsValid() && secondAnimator.IsValid()
+					&& system.BindAnimatorPlayback(firstAnimator, binding)
+						== AnimationStatus::Ok
+					&& system.BindAnimatorPlayback(secondAnimator, std::move(binding))
+						== AnimationStatus::Ok
+					&& ExecuteIntegrationFrame(
+						system, "animation-scale-synchronized-clones"),
+					"Two synchronized visual-only CPU animators must complete through one scheduler range.");
+
+				const std::shared_ptr<const PublishedAnimatorPose> first =
+					system.LoadPublishedAnimatorPose(firstAnimator);
+				const std::shared_ptr<const PublishedAnimatorPose> second =
+					system.LoadPublishedAnimatorPose(secondAnimator);
+				const AnimationProductionIntegrationSnapshot diagnostics =
+					system.ReadProductionIntegrationSnapshot();
+				context.Expect(first && second && first != second
+					&& first->animator == firstAnimator
+					&& second->animator == secondAnimator
+					&& first->snapshot && second->snapshot
+					&& first->snapshot->pose && second->snapshot->pose
+					&& first->snapshot->pose->Generation().animator == firstAnimator
+					&& second->snapshot->pose->Generation().animator == secondAnimator
+					&& first->visualPoseContentIdLow != 0U
+					&& first->visualPoseContentIdHigh != 0U
+					&& first->visualPoseContentIdLow
+						== second->visualPoseContentIdLow
+					&& first->visualPoseContentIdHigh
+						== second->visualPoseContentIdHigh
+					&& std::ranges::equal(
+						first->snapshot->pose->LocalTransforms(),
+						second->snapshot->pose->LocalTransforms())
+					&& diagnostics.reusedItemCount == 1U,
+					"A shared visual evaluation must preserve distinct instance generations while publishing identical pose channels.");
+			});
+
 		registry.Add("Animation.ScaleFoundation.ScriptCrossfadePublishesContinuousPose",
 			[](TestContext& context) {
 				AnimationSystem& system = AnimationSystem::Instance();

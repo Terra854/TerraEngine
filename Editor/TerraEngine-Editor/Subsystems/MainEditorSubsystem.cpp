@@ -45,13 +45,17 @@
 #include <backends/imgui_impl_vulkan.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <stdexcept>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <nlohmann/json.hpp>
 
 // Include Window Headers
@@ -78,6 +82,71 @@
 
 namespace
 {
+	// MainDraw contains viewport registration plus every native editor window.
+	// Publish fixed, bounded sub-stages only while a profiler capture is active so
+	// developers can identify one scaling window without enabling editor scopes in
+	// the game-facing CPU tree. Literal names also avoid hot-path allocations.
+	class EditorMainDrawStageBatch final
+	{
+	public:
+		EditorMainDrawStageBatch()
+			: active(TerraEngine::Profiling::Profiler::Instance().IsCapturing())
+		{
+		}
+
+		template<typename Callback>
+		void Measure(const char* stageName, Callback&& callback)
+		{
+			if (!active)
+			{
+				std::invoke(std::forward<Callback>(callback));
+				return;
+			}
+			const auto start = Clock::now();
+			std::invoke(std::forward<Callback>(callback));
+			if (stageCount >= stages.size())
+			{
+				return;
+			}
+			const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+				Clock::now() - start).count();
+			stages[stageCount++] = {
+				stageName,
+				static_cast<std::uint64_t>(std::max<std::int64_t>(0, elapsed)),
+				1u};
+		}
+
+		~EditorMainDrawStageBatch()
+		{
+			if (!active || stageCount == 0u)
+			{
+				return;
+			}
+			TerraEngine::Profiling::Profiler::Instance().RecordEditorStages(
+				std::span<const TerraEngine::Profiling::ProfilerEditorStageTiming>(
+					stages.data(), stageCount));
+		}
+
+	private:
+		using Clock = std::chrono::steady_clock;
+		std::array<TerraEngine::Profiling::ProfilerEditorStageTiming, 32u> stages{};
+		std::size_t stageCount = 0u;
+		bool active = false;
+	};
+
+	const char* EditorWindowDrawStageName(const std::string_view title)
+	{
+		if (title == "Scene Hierarchy") return "Editor.Window.SceneHierarchy";
+		if (title == "Inspector") return "Editor.Window.Inspector";
+		if (title == "Project Browser") return "Editor.Window.ProjectBrowser";
+		if (title == "Game View") return "Editor.Window.GameView";
+		if (title == "Scene View") return "Editor.Window.SceneView";
+		if (title == "Profiler") return "Editor.Window.Profiler";
+		if (title == "Animation Diagnostics") return "Editor.Window.AnimationDiagnostics";
+		if (title == "Resource Residency") return "Editor.Window.ResourceResidency";
+		return "Editor.Window.Other";
+	}
+
 	bool IsEnvironmentFlagEnabled(const char* name)
 	{
 		const char* value = std::getenv(name);
@@ -3132,6 +3201,7 @@ void MainEditorSubsystem::DrawProjectHubWindows()
 
 // MainEditorSubsystem::DrawUI is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::DrawUI() {
+	EditorMainDrawStageBatch mainDrawStages;
 	EnsurePrefabObjectsLoadedForEditor();
 
 	// Check for resize/recreation of offscreen resources
@@ -3145,7 +3215,9 @@ void MainEditorSubsystem::DrawUI() {
 			VulkanContext* vulkan = dynamic_cast<VulkanContext*>(renderSystem->GetContext());
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (vulkan) {
-				RefreshViewportTextures(*vulkan);
+				mainDrawStages.Measure("Editor.MainDraw.ViewportTextures", [&]() {
+					RefreshViewportTextures(*vulkan);
+				});
 			}
 		}
 	}
@@ -3246,7 +3318,9 @@ void MainEditorSubsystem::DrawUI() {
 			m_PrefabObjectsLoadedForEditor = false;
 			{
 				TERRAENGINE_PROFILE_TASK_SCOPE("EditorWindow::Draw", TerraEngine::Profiling::ProfilerModuleId::CpuEngine, win->GetTitle().c_str());
-				win->Draw();
+				mainDrawStages.Measure(EditorWindowDrawStageName(win->GetTitle()), [&]() {
+					win->Draw();
+				});
 			}
 			EnsurePrefabObjectsLoadedForEditor();
 		}
@@ -3257,7 +3331,9 @@ void MainEditorSubsystem::DrawUI() {
 				EnsurePrefabObjectsLoadedForEditor();
 			}
 			TERRAENGINE_PROFILE_TASK_SCOPE("EditorWindow::Draw", TerraEngine::Profiling::ProfilerModuleId::CpuEngine, win->GetTitle().c_str());
-			win->Draw();
+			mainDrawStages.Measure(EditorWindowDrawStageName(win->GetTitle()), [&]() {
+				win->Draw();
+			});
 		}
 	}
 	// Windows enqueue editor transactions during ImGui. Capture their immutable

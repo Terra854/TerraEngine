@@ -29,6 +29,7 @@
 #include <vector>
 
 namespace TerraEngine::Animation {
+	class AnimationClipView;
 	struct MotionDatabaseAsset;
 	struct RagdollProfileAsset;
 	struct RetargetCompiledProfile;
@@ -140,7 +141,9 @@ namespace TerraEngine::Animation {
 		// Authored initial values cross the binding boundary as copied JSON and are
 		// parsed once into typed runtime snapshots before worker evaluation begins.
 		std::string initialParametersJson = "{}";
-		AnimatorRootMotionPolicy rootMotionPolicy = AnimatorRootMotionPolicy::ExtractOnly;
+		// Visual-only animation should not acquire CPU authority unless the author
+		// explicitly enables root-motion extraction or application.
+		AnimatorRootMotionPolicy rootMotionPolicy = AnimatorRootMotionPolicy::Ignore;
 		AnimatorUpdatePolicy updatePolicy = AnimatorUpdatePolicy::EveryFrame;
 		AnimatorEventPolicy eventPolicy = AnimatorEventPolicy::Dispatch;
 		AnimatorCullingPolicy cullingPolicy = AnimatorCullingPolicy::Automatic;
@@ -156,6 +159,15 @@ namespace TerraEngine::Animation {
 		// This snapshot pins the exact segment bytes represented by residentSegments.
 		// Null preserves legacy/full-resident callers that decode clip->streamData.
 		std::shared_ptr<const AnimationClipSegmentPayloadSet> streamedSegmentPayloads;
+	};
+
+	// The coordinator owns every pointer for the duration of one protected batch.
+	// Grouping identical direct-clip promotions avoids reacquiring runtime/cache
+	// locks once per prefab instance while preserving an individual result status.
+	struct AnimatorDirectClipStreamingRefresh {
+		AnimatorInstanceHandle handle;
+		const AnimatorPlaybackBinding* streamedBinding = nullptr;
+		AnimationClipView* sharedValidatedClipView = nullptr;
 	};
 
 	// This copied diagnostic snapshot exposes the selected task granularity and
@@ -187,6 +199,11 @@ namespace TerraEngine::Animation {
 		AnimationTransform sourceObjectWorldTransform{};
 		bool sourceObjectWorldTransformCaptured = false;
 		std::uint64_t authorityPublicationGeneration = 0U;
+		// Visual-only synchronized clones retain their own publication and animator
+		// generations, while this content identity lets renderer preparation reuse
+		// the exact same model-space pose without rebuilding every mesh palette.
+		std::uint64_t visualPoseContentIdLow = 0U;
+		std::uint64_t visualPoseContentIdHigh = 0U;
 		AnimationAssetHandle controller;
 		AnimationAssetHandle clip;
 		AnimationAssetHandle skeleton;
@@ -199,7 +216,7 @@ namespace TerraEngine::Animation {
 		AnimationExecutionPolicy requestedExecutionPolicy = AnimationExecutionPolicy::Auto;
 		AnimationEffectiveExecutionMode effectiveExecutionMode =
 			AnimationEffectiveExecutionMode::CpuDeterministicFallback;
-		AnimatorRootMotionPolicy rootMotionPolicy = AnimatorRootMotionPolicy::ExtractOnly;
+		AnimatorRootMotionPolicy rootMotionPolicy = AnimatorRootMotionPolicy::Ignore;
 		AnimatorUpdatePolicy updatePolicy = AnimatorUpdatePolicy::EveryFrame;
 		AnimatorEventPolicy eventPolicy = AnimatorEventPolicy::Dispatch;
 		AnimatorCullingPolicy cullingPolicy = AnimatorCullingPolicy::Automatic;
@@ -263,6 +280,16 @@ namespace TerraEngine::Animation {
 		[[nodiscard]] AnimationStatus BindAnimatorPlayback(
 			AnimatorInstanceHandle handle,
 			AnimatorPlaybackBinding binding);
+		// Promote newly resident segment bytes for an unchanged direct-clip binding.
+		// This preserves playback, graph, parameter, and publication continuity while
+		// replacing only the immutable stream/GPU resource views.
+		[[nodiscard]] AnimationStatus RefreshAnimatorDirectClipStreaming(
+			AnimatorInstanceHandle handle,
+			const AnimatorPlaybackBinding& streamedBinding,
+			AnimationClipView* sharedValidatedClipView = nullptr);
+		void RefreshAnimatorDirectClipStreamingBatch(
+			std::span<const AnimatorDirectClipStreamingRefresh> refreshes,
+			std::span<AnimationStatus> statuses);
 		// Dynamic view/residency/material/renderer/physics owners refresh their
 		// immutable generations through this protected narrow API. A changed bundle
 		// cancels the captured frame and invalidates only this animator's cache.
@@ -366,6 +393,11 @@ namespace TerraEngine::Animation {
 	private:
 		AnimationSystem();
 		~AnimationSystem() override;
+		[[nodiscard]] AnimationStatus RefreshAnimatorDirectClipStreamingLocked(
+			AnimatorInstanceHandle handle,
+			const AnimatorPlaybackBinding& streamedBinding,
+			AnimationClipView* sharedValidatedClipView,
+			bool& outChanged);
 
 		struct Impl;
 		std::unique_ptr<Impl> impl_;

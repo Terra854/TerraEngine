@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <array>
 #include <filesystem>
 #include <cstdint>
@@ -151,6 +152,36 @@ struct AnimationRangeReadResult
 	{
 		return status == AnimationRangeReadStatus::Ok;
 	}
+};
+
+// Animation binding reconciliation needs only a compact proof of a mesh's
+// immutable deformable layout. Copying these values under the cache lock keeps
+// raw Mesh pointers out of protected frame-boundary work, while a missing
+// optional from the query below explicitly means a publisher currently owns
+// the cache lock and the caller should retry on the next frame.
+struct MeshAnimationBindingSnapshot
+{
+	bool present = false;
+	bool hasDeformablePayload = false;
+	std::uint32_t runtimeLayoutVersion = 0U;
+	std::uint64_t deformablePayloadGeneration = 0U;
+	std::uint32_t skinningVertexCount = 0U;
+	std::uint32_t meshletSkinningDataCount = 0U;
+	std::size_t meshletSkinningDataBytes = 0U;
+	std::uint32_t palettePartitionCount = 0U;
+	std::size_t paletteRecordCount = 0U;
+	std::uint32_t singlePaletteJointCount = 0U;
+	std::uint32_t morphTargetCount = 0U;
+	std::size_t morphRecordCount = 0U;
+	std::size_t vertexPaletteIndexCount = 0U;
+	std::uint32_t sourceSkeletonJointCount = 0U;
+	TerraEngine::Animation::AnimationCompatibilityFingerprint
+		skeletonCompatibilityFingerprint = 0U;
+	std::uint32_t flags = 0U;
+	std::array<float, 3U> deformationBoundsMinimum{};
+	std::array<float, 3U> deformationBoundsMaximum{};
+	std::vector<std::uint32_t> paletteJoints;
+	std::vector<std::uint64_t> morphStableIds;
 };
 
 // A block range is an absolute byte interval inside one checked cooked asset.
@@ -580,6 +611,11 @@ public:
 	// or a subsequent reload replaces the resource.
 	Material* GetMaterial(const TerraEngine::UUID& id);
 	Mesh* GetMesh(const TerraEngine::UUID& id);
+	// Observe an already-published mesh without starting a synchronous load or
+	// waiting behind an importer. A contained snapshot with present=false means
+	// the mesh is not currently cached; nullopt means the cache is writer-owned.
+	[[nodiscard]] std::optional<MeshAnimationBindingSnapshot>
+		TryCopyMeshAnimationBindingSnapshot(const TerraEngine::UUID& id) const;
 	TerraEngine::Animation::SkeletonAsset* GetSkeleton(const TerraEngine::UUID& id);
 	TerraEngine::Animation::AnimationClipAsset* GetAnimationClip(const TerraEngine::UUID& id);
 	// Return the session-local generation currently assigned to a cooked
@@ -588,6 +624,20 @@ public:
 	[[nodiscard]] TerraEngine::Animation::AnimationGeneration GetAnimationAssetRuntimeGeneration(
 		const TerraEngine::UUID& id,
 		AssetType type) const noexcept;
+	// Frame-boundary systems must not wait behind a long asset publication. A
+	// missing optional means the cache is writer-owned; callers retain their last
+	// complete immutable binding and retry at the next protected boundary.
+	[[nodiscard]] std::optional<TerraEngine::Animation::AnimationGeneration>
+		TryGetAnimationAssetRuntimeGeneration(
+			const TerraEngine::UUID& id,
+			AssetType type) const noexcept;
+	// Animation bindings include both authored animation assets and deformable
+	// mesh payloads. This monotonic revision lets the protected binding bridge
+	// skip an expensive scene-wide rescan until one of those inputs is republished.
+	[[nodiscard]] std::uint64_t GetAnimationBindingResourceRevision() const noexcept
+	{
+		return m_AnimationBindingResourceRevision.load(std::memory_order_acquire);
+	}
 	// A retained runtime generation may describe a deletion or eviction
 	// tombstone. This lightweight query distinguishes that state from an actual
 	// immutable payload without copying a potentially large clip or database.
@@ -910,6 +960,10 @@ private:
 	// the coordinated cache locks are held and removed by publisher retirement.
 	std::vector<RetiredAnimationPayload> m_RetiredAnimationPayloads;
 	mutable std::mutex m_RetiredAnimationPayloadMutex;
+	// Only mesh and animation publications affect immutable animator bindings.
+	// Keeping this narrower than the general resource cache prevents texture and
+	// material streaming from waking the expensive binding synchronization path.
+	std::atomic_uint64_t m_AnimationBindingResourceRevision{1U};
 
 	ResourceCache<Material> materialCache;
 	ResourceCache<Mesh> meshCache;
@@ -1090,8 +1144,11 @@ std::optional<TerraEngine::Animation::AnimationGeneration> ResourceManager::Adva
 		return std::nullopt;
 	}
 	++iterator->second;
+	// Every animation generation change is a binding-visible publication,
+	// including tombstones created by deletion.
+	m_AnimationBindingResourceRevision.fetch_add(1U, std::memory_order_release);
 	return iterator->second;
-}
+	}
 
 template <typename Resource>
 // ResourceManager::FinalizeLoad is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1176,6 +1233,13 @@ TerraEngine::UUID ResourceManager::FinalizeLoad(
 		cache.pathToId[key] = publicationId;
 		cache.idToPath[publicationId] = key;
 		cache.resources[publicationId] = std::move(resource);
+		if (cache.assetType == AssetType::Mesh)
+		{
+			// Publication happens while the typed cache lock is exclusive. The
+			// release operation makes the completed payload visible before a
+			// protected binding boundary observes the new revision.
+			m_AnimationBindingResourceRevision.fetch_add(1U, std::memory_order_release);
+		}
 	}
 	else
 	{

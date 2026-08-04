@@ -598,6 +598,9 @@ struct VulkanContext::Impl {
 					{
 						VkBuffer buffer = VK_NULL_HANDLE;
 						VkDeviceSize range = 0u;
+
+						bool operator==(
+							const BindlessBufferPublication&) const = default;
 					};
 
 					std::uint64_t resourceSerial = 0u;
@@ -637,6 +640,13 @@ struct VulkanContext::Impl {
 					BindlessBufferPublication generatedSubmissionPublication{};
 					BindlessBufferPublication counterReadbackPublication{};
 					BindlessBufferPublication pagePayloadPublication{};
+					// Private descriptor sets are immutable while their exact buffer
+					// handles and ranges remain unchanged. These mirrors prevent an
+					// identical vkUpdateDescriptorSets call on every rendered frame.
+					std::array<BindlessBufferPublication, 7u>
+						executorDescriptorPublications{};
+					std::array<BindlessBufferPublication, 24u>
+						visibilityDescriptorPublications{};
 					std::uint32_t packetBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 					std::uint32_t batchBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 					std::uint32_t compactedPacketBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
@@ -1126,7 +1136,13 @@ struct VulkanContext::Impl {
 
 	uint32_t AllocateBufferIndex();
 	void UpdateGlobalBuffer(uint32_t index, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize range);
-	void UpdateGlobalBufferForFrame(uint32_t frameIndex, uint32_t index, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize range);
+	void UpdateGlobalBufferForFrame(
+		uint32_t frameIndex,
+		uint32_t index,
+		VkBuffer buffer,
+		VkDeviceSize offset,
+		VkDeviceSize range,
+		bool frameSlotKnownIdle = false);
 	void UpdateGlobalHiZ(uint32_t frameIndex);
 	void WaitForDescriptorMutationIdle();
 
@@ -1281,6 +1297,11 @@ struct VulkanContext::Impl {
 		// without sharing writable upload memory between in-flight frames.
 		std::vector<VulkanAnimationPoseHistoryIdentity> poseHistoryScratch;
 		std::vector<VulkanGpuAnimationGraphicsRecord> graphicsBridgeScratch;
+		// Retaining the immutable cooked payload proves both content identity and
+		// lifetime for frame-slot upload reuse. A buffer growth or renderer recovery
+		// clears this owner before any later plan can skip its resident upload.
+		std::shared_ptr<const TerraEngine::Animation::GpuAnimationResidentPayloads>
+			residentPayloadOwner;
 		bool live = false;
 		bool completionPending = false;
 	};

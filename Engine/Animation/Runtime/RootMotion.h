@@ -9,6 +9,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 class ObjectManager;
@@ -237,6 +238,44 @@ namespace TerraEngine::Animation {
 		struct PendingPhysics;
 		struct ApplicationRecord;
 		struct AppliedMutationRecord;
+		// Root-motion receipts use this exact producer identity for retry and
+		// idempotency checks. Keeping a typed key avoids rescanning thousands of
+		// retained records for every animated object at the protected boundary.
+		struct ApplicationIdentity {
+			std::uint32_t animatorSlot = 0U;
+			std::uint32_t animatorGeneration = 0U;
+			std::uint32_t producerId = 0U;
+			std::uint64_t idempotencyKey = 0U;
+
+			bool operator==(const ApplicationIdentity&) const noexcept = default;
+		};
+		struct ApplicationIdentityHash {
+			std::size_t operator()(const ApplicationIdentity& identity) const noexcept;
+		};
+		struct ResultIdentity {
+			ApplicationIdentity application;
+			std::uint64_t correlationId = 0U;
+			bool idempotencyConflict = false;
+
+			bool operator==(const ResultIdentity&) const noexcept = default;
+		};
+		struct ResultIdentityHash {
+			std::size_t operator()(const ResultIdentity& identity) const noexcept;
+		};
+
+		static constexpr std::size_t kRetainedRootMotionResults = 4096U;
+		static constexpr std::size_t kRetainedRootMotionApplications = 4096U;
+		[[nodiscard]] static ApplicationIdentity MakeApplicationIdentity(
+			const AnimationRootMotionApplicationRequest& request) noexcept;
+		[[nodiscard]] static ApplicationIdentity MakeApplicationIdentity(
+			const AnimationRootMotionApplicationResult& result) noexcept;
+		[[nodiscard]] static ResultIdentity MakeResultIdentity(
+			const AnimationRootMotionApplicationResult& result) noexcept;
+		[[nodiscard]] ApplicationRecord* FindApplicationLocked(
+			const AnimationRootMotionApplicationRequest& request) noexcept;
+		[[nodiscard]] ApplicationRecord* FindApplicationLocked(
+			const AnimationRootMotionApplicationResult& result) noexcept;
+		void RebuildLookupIndexesLocked();
 		void RetainResultLocked(AnimationRootMotionApplicationResult result);
 		void RememberAppliedMutationLocked(const ApplicationRecord& application) noexcept;
 
@@ -244,8 +283,13 @@ namespace TerraEngine::Animation {
 		std::vector<PendingScene> pendingScene_;
 		std::vector<PendingPhysics> pendingPhysics_;
 		std::vector<ApplicationRecord> applications_;
+		std::unordered_map<ApplicationIdentity, std::size_t, ApplicationIdentityHash>
+			applicationIndex_;
+		std::size_t applicationEvictionCursor_ = 0U;
 		std::vector<AppliedMutationRecord> appliedMutations_;
 		std::vector<AnimationRootMotionApplicationResult> results_;
+		std::unordered_map<ResultIdentity, std::size_t, ResultIdentityHash> resultIndex_;
+		std::size_t resultEvictionCursor_ = 0U;
 	};
 
 	// The caller invokes routing from a declared protected preparation boundary.

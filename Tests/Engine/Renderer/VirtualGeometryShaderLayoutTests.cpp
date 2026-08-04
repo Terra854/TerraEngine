@@ -440,7 +440,9 @@ namespace TerraEngine::Tests
 			context.Expect(ShaderContains(vulkanSource, "VirtualGeometryPagePayloadSource::ResidentFallbackPayload"), "Resident fallback page packets should participate in the page-local launch path.");
 			context.Expect(ShaderContains(vulkanSource, "push.virtualMeshletOffset = ownerMeshletOffset"), "Page-local draws should keep the owner meshlet offset available for descriptor fail-open rendering.");
 			context.Expect(ShaderContains(vulkanSource, "? command.virtualMeshletCount"), "Page-local draws should launch the packet-local meshlet count instead of clamping by the owner mesh offset.");
-			context.Expect(ShaderContains(vulkanSource, "std::min(command.virtualMeshletOffset, mesh.meshletCount)"), "Owner-mesh fallback draws should still clamp their global meshlet offset to the resident owner payload.");
+			context.Expect(ShaderContains(vulkanSource, "std::min(command.virtualMeshletOffset,")
+				&& ShaderContains(vulkanSource, "staticPreparation->meshletCount"),
+				"Owner-mesh fallback draws should clamp against the copied resident meshlet count without retaining an unsafe mesh-cache pointer.");
 		});
 
 		registry.Add("VirtualGeometry.ShaderLayout.AnimatedPagesUseCanonicalComputeOutput", [](TestContext& context) {
@@ -468,15 +470,15 @@ namespace TerraEngine::Tests
 				"Legacy owner-mesh deformation must stay on the mesh-only Vulkan route because it has no current task-stage bounds; canonical animated pages remain task-pipeline eligible.");
 			context.Expect(
 				ShaderContains(vulkanSource,
-					"resources.graphicsGroups.begin()")
+					"canonicalGraphicsGroupOffsets.find(")
 					&& ShaderContains(vulkanSource,
-						"candidate.stableInstanceId")
+						"CanonicalGraphicsGroupKey{stableInstanceId, command.meshId}")
 					&& ShaderContains(vulkanSource,
-						"candidate.meshId == command.meshId"),
+						"canonicalGraphicsGroupOffsets.emplace("),
 				"Canonical graphics publications must resolve the exact owner/mesh group so multiple independently animated owners can share one frame safely.");
 			context.Expect(
 				ShaderContains(vulkanSource,
-					"return group->headerWordOffset;"),
+					"? std::optional<std::uint32_t>(group->second)"),
 				"Validated multi-owner demanded-page deformation must publish each owner's bridge header instead of rejecting the entire compute plan.");
 			context.Expect(
 				ShaderContains(vulkanSource,
@@ -504,7 +506,7 @@ namespace TerraEngine::Tests
 					&& ShaderContains(vulkanSource,
 						"draw.useGeneratedVirtualGeometryIndirect = deviceAuthoredCommand")
 					&& ShaderContains(vulkanSource,
-						"ApplyAnimationGraphicsBridge(command, push,\n\t\t\townerPaletteDeformation)")
+						"ApplyAnimationGraphicsBridge(command, push,\n\t\t\townerPaletteDeformation, canonicalGraphicsGroup)")
 					&& ShaderContains(taskShader,
 						"kVirtualGeometryFlagOwnerPaletteDeformation"),
 				"Processor-expanded animated VG must bind its selected LOD and owner palette bridge to the same per-command device-authored execution decision.");
@@ -780,11 +782,12 @@ namespace TerraEngine::Tests
 			const std::string vulkanSource = ReadVulkanContextSource();
 
 			context.Expect(ShaderContains(vulkanSource, "bool PushDefaultMeshConstants"), "Vulkan draw submission should centralize default mesh push-constant emission.");
-			context.Expect(ShaderContains(vulkanSource, "for (const VkPushConstantRange& range : pipeline.pushConstants)"), "Default mesh submission should iterate reflected push-constant ranges.");
+			context.Expect(ShaderContains(vulkanSource, "const VkPushConstantRange& range = pushConstantRanges[rangeIndex]"), "Default mesh submission should iterate the copied reflected push-constant ranges.");
 			context.Expect(ShaderContains(vulkanSource, "range.stageFlags"), "Default mesh submission should preserve each reflected stage mask.");
 			context.Expect(ShaderContains(vulkanSource, "pushBytes + range.offset"), "Default mesh submission should push the byte slice requested by each reflected range.");
-			context.Expect(ShaderContains(vulkanSource, "PushDefaultMeshConstants(secondary, *draw.pipeline, draw.push);"), "Main visible draws should push reflected ranges so task-stage Hi-Z constants are never skipped.");
-			context.Expect(ShaderContains(vulkanSource, "PushDefaultMeshConstants(cmd, *draw.pipeline, shadowPush);"), "Shadow draws should share the reflected push path without inventing a second contract.");
+			context.Expect(ShaderContains(vulkanSource, "draw.pushConstantRanges.data()")
+				&& ShaderContains(vulkanSource, "draw.pushConstantRangeCount"),
+				"Visible and shadow draws should consume retained reflected ranges so cache refreshes cannot invalidate recording inputs.");
 			context.Expect(!ShaderContains(vulkanSource, "vkCmdPushConstants(secondary, draw.pipeline->layout, draw.pipeline->defaultPushConstantStages, 0, sizeof(PushConstants)"), "Visible draws must not return to a single all-stage full-struct push; stale fragment ranges can make that skip task-stage Hi-Z constants.");
 			context.Expect(!ShaderContains(vulkanSource, "vkCmdPushConstants(cmd, draw.pipeline->layout, draw.pipeline->defaultPushConstantStages, 0, sizeof(PushConstants)"), "Shadow draws must not return to the stale defaultPushConstantStages full-struct path.");
 		});

@@ -173,24 +173,43 @@ namespace TerraEngine::Animation {
 
 		// Sort first by evaluator compatibility so each eventual range has exactly
 		// one program/layout contract. The stable ordinal and handle break all ties.
-		std::sort(plan.items.begin(), plan.items.end(), [](const auto& left, const auto& right) {
+		const auto compatibilityLess = [](const auto& left, const auto& right) {
 			return std::tie(left.item.compatibility, left.item.stablePublicationOrder,
 				left.item.animator, left.item.sourceGeneration, left.item.scratchBytes)
 				< std::tie(right.item.compatibility, right.item.stablePublicationOrder,
 					right.item.animator, right.item.sourceGeneration, right.item.scratchBytes);
-		});
+		};
+		// Captured crowds are commonly homogeneous and already ordered by stable
+		// instance slot. Prove that linear fast path before paying for an O(n log n)
+		// sort; heterogeneous callers retain the exact deterministic ordering below.
+		if(!std::is_sorted(plan.items.begin(), plan.items.end(), compatibilityLess)) {
+			std::sort(plan.items.begin(), plan.items.end(), compatibilityLess);
+		}
 
 		// An identical publication identity would make deterministic merge intent
 		// ambiguous. Detect it independently of compatibility grouping.
-		std::vector<std::pair<std::uint64_t, AnimatorInstanceHandle>> identities;
-		identities.reserve(plan.items.size());
-		for(const AnimationScheduledWorkItem& scheduled : plan.items) {
-			identities.emplace_back(scheduled.item.stablePublicationOrder, scheduled.item.animator);
+		bool publicationIdentitiesStrictlyOrdered = true;
+		for(std::size_t index = 1U; index < sourceItems.size(); ++index) {
+			const AnimationWorkItem& previous = sourceItems[index - 1U];
+			const AnimationWorkItem& current = sourceItems[index];
+			if(!(std::tie(previous.stablePublicationOrder, previous.animator)
+				< std::tie(current.stablePublicationOrder, current.animator))) {
+				publicationIdentitiesStrictlyOrdered = false;
+				break;
+			}
 		}
-		std::sort(identities.begin(), identities.end());
-		if(std::adjacent_find(identities.begin(), identities.end()) != identities.end()) {
-			return MakeRejectedPlan(AnimationStatus::Rejected,
-				configuration_.scratchAlignment, plan.cancellation);
+		if(!publicationIdentitiesStrictlyOrdered) {
+			std::vector<std::pair<std::uint64_t, AnimatorInstanceHandle>> identities;
+			identities.reserve(plan.items.size());
+			for(const AnimationScheduledWorkItem& scheduled : plan.items) {
+				identities.emplace_back(
+					scheduled.item.stablePublicationOrder, scheduled.item.animator);
+			}
+			std::sort(identities.begin(), identities.end());
+			if(std::adjacent_find(identities.begin(), identities.end()) != identities.end()) {
+				return MakeRejectedPlan(AnimationStatus::Rejected,
+					configuration_.scratchAlignment, plan.cancellation);
+			}
 		}
 
 		std::size_t scratchCursor = 0U;
@@ -267,13 +286,18 @@ namespace TerraEngine::Animation {
 
 		plan.publicationOrder.resize(plan.items.size());
 		std::iota(plan.publicationOrder.begin(), plan.publicationOrder.end(), 0U);
-		std::sort(plan.publicationOrder.begin(), plan.publicationOrder.end(), [&plan](
+		const auto publicationLess = [&plan](
 			std::size_t leftIndex, std::size_t rightIndex) {
 			const AnimationWorkItem& left = plan.items[leftIndex].item;
 			const AnimationWorkItem& right = plan.items[rightIndex].item;
 			return std::tie(left.stablePublicationOrder, left.animator)
 				< std::tie(right.stablePublicationOrder, right.animator);
-		});
+		};
+		if(!std::is_sorted(
+			plan.publicationOrder.begin(), plan.publicationOrder.end(), publicationLess)) {
+			std::sort(
+				plan.publicationOrder.begin(), plan.publicationOrder.end(), publicationLess);
+		}
 
 		if(sourceItems.size() <= configuration_.inlineItemThreshold || availableWorkerCount <= 1U) {
 			plan.executionPolicy = AnimationWorkExecutionPolicy::Inline;
@@ -348,10 +372,24 @@ namespace TerraEngine::Animation {
 			return AnimationStatus::Rejected;
 		}
 
-		std::vector<bool> seen(plan.items.size(), false);
-		for(const std::size_t itemIndex : plan.publicationOrder) {
-			if(itemIndex >= plan.items.size() || seen[itemIndex]) return AnimationStatus::Rejected;
-			seen[itemIndex] = true;
+		bool identityPublicationOrder = true;
+		for(std::size_t index = 0U; index < plan.publicationOrder.size(); ++index) {
+			if(plan.publicationOrder[index] != index) {
+				identityPublicationOrder = false;
+				break;
+			}
+		}
+		if(!identityPublicationOrder) {
+			// Non-identity plans need the general duplicate proof. The homogeneous
+			// crowd fast path above is already a complete bounded permutation and
+			// avoids allocating this second O(animator-count) validation array.
+			std::vector<bool> seen(plan.items.size(), false);
+			for(const std::size_t itemIndex : plan.publicationOrder) {
+				if(itemIndex >= plan.items.size() || seen[itemIndex]) {
+					return AnimationStatus::Rejected;
+				}
+				seen[itemIndex] = true;
+			}
 		}
 		for(std::size_t index = 1U; index < plan.publicationOrder.size(); ++index) {
 			const AnimationWorkItem& previous = plan.items[plan.publicationOrder[index - 1U]].item;

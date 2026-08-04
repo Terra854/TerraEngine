@@ -667,7 +667,9 @@ namespace TerraEngine::AssetPipeline
 				{ "ragdollProfileOverrideAssetId", TerraEngine::ToHexString(TerraEngine::EMPTY_UUID) },
 				{ "motionDatabaseOverrideAssetId", TerraEngine::ToHexString(TerraEngine::EMPTY_UUID) },
 				{ "requestedMode", static_cast<std::uint32_t>(TerraEngine::Animation::AnimationExecutionPolicy::Auto) },
-				{ "rootMotionPolicy", static_cast<std::uint32_t>(TerraEngine::Animation::AnimatorRootMotionPolicy::ExtractOnly) },
+				// Imported characters default to visual-only animation. Root-motion
+				// extraction is authoritative CPU work and must be explicitly requested.
+				{ "rootMotionPolicy", static_cast<std::uint32_t>(TerraEngine::Animation::AnimatorRootMotionPolicy::Ignore) },
 				{ "updatePolicy", static_cast<std::uint32_t>(TerraEngine::Animation::AnimatorUpdatePolicy::EveryFrame) },
 				{ "timePolicy", static_cast<std::uint32_t>(TerraEngine::Animation::AnimatorTimePolicy::Scaled) },
 				{ "initialParameters", "{}" },

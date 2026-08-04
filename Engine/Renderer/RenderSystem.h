@@ -461,6 +461,26 @@ private:
 	// One prior complete pose per render object supports an explicit hold-last
 	// request without retaining unbounded publication generations.
 	std::unordered_map<TerraEngine::UUID, CompatibleAnimationPoseCacheRecord> compatibleAnimationPoseCache;
+	struct RenderableMembershipCacheRecord
+	{
+		// These values are authored membership/identity facts. Per-frame poses,
+		// resource pointers, transforms, and visibility remain freshly resolved.
+		Object object;
+		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		MeshRenderComponent mesh{};
+		std::optional<Object> nearestAnimatorObject;
+		TerraEngine::UUID animatorObjectId = TerraEngine::EMPTY_UUID;
+		TerraEngine::UUID skeletonOverrideAssetId = TerraEngine::EMPTY_UUID;
+		std::uint64_t animatorObjectLifetime = 0U;
+		std::uint32_t animatorComponentGeneration = 0U;
+	};
+	// Static render membership is reused until a scene, component, or hierarchy
+	// publication changes. This removes repeated hierarchy walks for large prefab
+	// crowds without caching dynamic animation publications or resource residency.
+	std::vector<RenderableMembershipCacheRecord> renderableMembershipCache;
+	std::uint64_t renderableMembershipSceneGeneration = 0U;
+	std::uint64_t renderableMembershipComponentRevision = 0U;
+	std::uint64_t renderableMembershipHierarchyRevision = 0U;
 	// Visualizer modes are view-local runtime preferences. Project settings keep
 	// only the default, while each editor view can request a different mode for
 	// the next prepared frame without mutating global quality state.

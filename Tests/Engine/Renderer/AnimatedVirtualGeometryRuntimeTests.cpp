@@ -89,6 +89,35 @@ namespace TerraEngine::Tests {
 
 	void RegisterAnimatedVirtualGeometryRuntimeTests(TestRegistry& registry)
 	{
+		registry.Add("AnimatedVirtualGeometry.Runtime.CpuAuthorityNeverAliasesGpuPacketZero", [](TestContext& context)
+		{
+			using namespace TerraEngine::Renderer;
+			AnimationRenderGenerationRecord cpuRecord;
+			cpuRecord.stableInstanceId = 41u;
+			cpuRecord.poseGeneration = 2u;
+			cpuRecord.morphGeneration = 2u;
+			cpuRecord.paletteGeneration = 2u;
+			cpuRecord.deformablePayloadGeneration = 3u;
+			cpuRecord.programGeneration = 4u;
+			cpuRecord.rendererGeneration = 5u;
+			cpuRecord.source = AnimationRenderEvaluationSource::CpuPose;
+			cpuRecord.complete = true;
+
+			AnimationRenderGenerationRecord gpuRecord = cpuRecord;
+			gpuRecord.animationPlanGeneration = 6u;
+			gpuRecord.gpuWorkPacketCount = 1u;
+			gpuRecord.gpuStageMask = 1u;
+			gpuRecord.source =
+				AnimationRenderEvaluationSource::HybridAuthoritative;
+
+			context.Expect(ValidateAnimationRenderGenerationRecord(cpuRecord)
+				&& !CanScheduleGpuAnimatedPageDeformation(cpuRecord),
+				"A valid CPU pose must retain owner deformation instead of aliasing GPU packet zero.");
+			context.Expect(ValidateAnimationRenderGenerationRecord(gpuRecord)
+				&& CanScheduleGpuAnimatedPageDeformation(gpuRecord),
+				"A valid GPU-backed pose should remain eligible for page-local deformation.");
+		});
+
 		registry.Add("AnimatedVirtualGeometry.Runtime.MorphsBeforeSkinningAndPreservesHistory", [](TestContext& context)
 		{
 			using namespace TerraEngine::Renderer;
@@ -561,6 +590,49 @@ namespace TerraEngine::Tests {
 					&& plan.work.size() == ownerCount
 					&& stableOwners.size() == ownerCount,
 				"The crowd fallback must publish distinct deformation work keys instead of merging or dropping independently animated owners.");
+		});
+
+		registry.Add("AnimatedVirtualGeometry.Runtime.EmbeddedPayloadUsesExactSelectedClusterPages", [](TestContext& context)
+		{
+			using namespace TerraEngine::Renderer;
+			RenderFrameSnapshot snapshot;
+			const TerraEngine::UUID objectId = MakeRuntimeUuid(23u);
+
+			RenderFrameRenderableRecord renderable;
+			renderable.objectId = objectId;
+			renderable.animation.stableInstanceId = 60u;
+			snapshot.renderables.push_back(renderable);
+			for(std::uint32_t pageId = 1u; pageId <= 4u; ++pageId)
+			{
+				DeformationPageDemand demand = MakeRuntimeDemand(pageId, 0u);
+				demand.key.deformation.stableInstanceId = 60u;
+				snapshot.animatedGeometryPageDemands.push_back(demand);
+			}
+
+			VirtualGeometryViewSelectionState view;
+			VirtualGeometryViewDrawRecord draw;
+			draw.objectId = objectId;
+			draw.range.virtualGeometryActive = true;
+			draw.range.meshletCount = 64u;
+			draw.range.selectedClusterCount = 2u;
+			draw.range.payloadSource =
+				VirtualGeometryPagePayloadSource::EmbeddedMeshPayload;
+			view.draws.push_back(draw);
+			for(const std::uint32_t pageId : {2u, 4u})
+			{
+				VirtualGeometrySelectedClusterRecord cluster;
+				cluster.objectId = objectId;
+				cluster.pageId = pageId;
+				view.selectedClusters.push_back(cluster);
+			}
+			snapshot.virtualGeometryViewSelections.push_back(std::move(view));
+
+			const std::vector<DeformationPageDemand> selected =
+				SelectAnimatedGeometryPageDemands(snapshot);
+			context.Expect(selected.size() == 2u
+				&& selected[0].key.page.pageId == 2u
+				&& selected[1].key.page.pageId == 4u,
+				"An embedded payload must deform only the exact pages named by its visible cluster cut instead of expanding to every owner page.");
 		});
 
 		registry.Add("AnimatedVirtualGeometry.Runtime.MillionDecisionExtremePoseVisibilityHasNoFalseRejections", [](TestContext& context)

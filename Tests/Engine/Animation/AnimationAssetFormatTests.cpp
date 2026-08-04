@@ -260,6 +260,14 @@ namespace TerraEngine::Tests {
 	}
 
 	void RegisterAnimationAssetFormatTests(TestRegistry& registry) {
+		registry.Add("Animation.AssetFormat.MissingMeshBindingSnapshotNeverStartsALoad", [](TestContext& context) {
+			ResourceManager& resources = ResourceManager::Instance();
+			const auto snapshot = resources.TryCopyMeshAnimationBindingSnapshot(
+				MakeAssetGuid(0xE1U).value);
+			context.Expect(snapshot.has_value() && !snapshot->present,
+				"A nonblocking mesh observation must distinguish a missing cached mesh from a busy cache without loading it synchronously.");
+		});
+
 		registry.Add("Animation.AssetFormat.SkeletonAndClipRoundTripAllCoreTables", [](TestContext& context) {
 			const SkeletonAsset skeleton = MakeSkeletonAsset();
 			std::vector<std::uint8_t> skeletonBytes;

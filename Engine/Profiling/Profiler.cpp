@@ -1288,13 +1288,14 @@ void Profiler::RecordEditorStages(std::span<const ProfilerEditorStageTiming> sta
 		return;
 	}
 
-	// EditorSystem currently publishes eight named regions. Keep a defensive
-	// bound so an accidental producer loop cannot inflate every retained frame.
-	constexpr std::size_t kMaximumEditorStageRecordsPerFrame = 16u;
+	// EditorSystem and MainEditorSubsystem publish fixed named regions in two
+	// bounded batches. Thirty-two records keep every native window diagnosable
+	// without allowing an accidental producer loop to inflate retained frames.
+	constexpr std::size_t kMaximumEditorStageRecordsPerBatch = 32u;
 	std::size_t published = 0u;
 	for(const ProfilerEditorStageTiming& timing : stages)
 	{
-		if(published >= kMaximumEditorStageRecordsPerFrame)
+		if(published >= kMaximumEditorStageRecordsPerBatch)
 		{
 			break;
 		}

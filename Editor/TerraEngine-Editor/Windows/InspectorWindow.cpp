@@ -4189,7 +4189,7 @@ void InspectorWindow::DrawAnimatorInspector(
 	TerraEngine::Animation::AnimatorTimePolicy timePolicy =
 		TerraEngine::Animation::AnimatorTimePolicy::Scaled;
 	TerraEngine::Animation::AnimatorRootMotionPolicy rootMotionPolicy =
-		TerraEngine::Animation::AnimatorRootMotionPolicy::ExtractOnly;
+		TerraEngine::Animation::AnimatorRootMotionPolicy::Ignore;
 	std::string initialParameters;
 	{
 		// Copy authored values while holding the component read lock, then release

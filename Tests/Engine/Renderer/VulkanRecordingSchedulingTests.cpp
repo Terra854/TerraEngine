@@ -16,6 +16,34 @@ namespace TerraEngine::Tests {
 
 	void RegisterVulkanRecordingSchedulingTests(TestRegistry& registry)
 	{
+		registry.Add("Renderer.VulkanRecording.ReusesOnlyExactResidentAnimationPayload", [](TestContext& context) {
+			auto first = std::make_shared<TerraEngine::Animation::GpuAnimationResidentPayloads>();
+			first->programWords = {1u, 2u};
+			auto equalBytesDifferentOwner =
+				std::make_shared<TerraEngine::Animation::GpuAnimationResidentPayloads>(*first);
+			context.Expect(
+				TerraEngine::Renderer::Vulkan::
+					CanReuseVulkanAnimationResidentPayloadUpload(first, first, true),
+				"A retained frame-slot buffer may reuse the exact immutable cooked payload owner.");
+			context.Expect(
+				!TerraEngine::Renderer::Vulkan::
+					CanReuseVulkanAnimationResidentPayloadUpload(
+						first, equalBytesDifferentOwner, true)
+				&& !TerraEngine::Renderer::Vulkan::
+					CanReuseVulkanAnimationResidentPayloadUpload(first, first, false)
+				&& !TerraEngine::Renderer::Vulkan::
+					CanReuseVulkanAnimationResidentPayloadUpload({}, first, true),
+				"A new publication, resized buffer, or empty prior identity must force a complete resident upload.");
+			context.Expect(
+				!TerraEngine::Renderer::Vulkan::
+					ShouldRefreshVulkanAnimationBindlessBuffer(true, false)
+				&& TerraEngine::Renderer::Vulkan::
+					ShouldRefreshVulkanAnimationBindlessBuffer(false, false)
+				&& TerraEngine::Renderer::Vulkan::
+					ShouldRefreshVulkanAnimationBindlessBuffer(true, true),
+				"Stable frame-slot descriptors stay untouched, while first publication and buffer replacement refresh them.");
+		});
+
 		registry.Add("Renderer.VulkanRecording.AnimationBackendReceiptRequiresRecordedSubmittedWork", [](TestContext& context) {
 			TerraEngine::Renderer::AnimationGpuBackendExecutionSnapshot snapshot;
 			context.Expect(!snapshot.HasSubmittedWork() && !snapshot.HasCompletedWork(),

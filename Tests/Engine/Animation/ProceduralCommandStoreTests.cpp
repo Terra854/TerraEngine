@@ -110,6 +110,35 @@ namespace TerraEngine::Tests {
 				"Only protected publication should make the complete copied goal batch observable.");
 		});
 
+		registry.Add("Animation.ProceduralCommands.CaptureAllActiveGoalsAsOneOrderedSnapshot", [](TestContext& context) {
+			AnimatorInstanceStore instances;
+			const NativeAnimationAnimatorHandle first = NativeHandle(instances.Create(Descriptor(10U)));
+			const NativeAnimationAnimatorHandle second = NativeHandle(instances.Create(Descriptor(11U)));
+			ProceduralCommandStore store;
+			// Submit in reverse animator order to prove retained storage and bulk output
+			// use generation-safe handle order rather than producer arrival order.
+			const auto secondGoal = Goal(second, 2U, 1U, 2U, 2U, 20U);
+			const auto firstGoal = Goal(first, 1U, 1U, 1U, 1U, 10U);
+			(void)store.Submit(secondGoal, instances);
+			(void)store.Submit(firstGoal, instances);
+			std::vector<NativeAnimationProceduralGoalCommand> drained;
+			store.DrainThrough(12, drained, instances);
+			for(const auto& command : drained) {
+				store.PublishCompletion(command, AnimationStatus::Ok, 12, 5U);
+			}
+			std::vector<ActiveProceduralGoalRange> ranges;
+			std::vector<NativeAnimationProceduralGoalCommand> goals;
+			context.Expect(store.CaptureActiveGoals(ranges, goals) == AnimationStatus::Ok
+					&& ranges.size() == 2U && goals.size() == 2U,
+				"One protected capture should return every retained active goal.");
+			context.Expect(ranges.size() == 2U
+					&& ranges[0U].animator.slotIndex == first.slotIndex
+					&& ranges[1U].animator.slotIndex == second.slotIndex
+					&& goals[ranges[0U].firstGoal].animator.slotIndex == first.slotIndex
+					&& goals[ranges[1U].firstGoal].animator.slotIndex == second.slotIndex,
+				"Flat ranges must merge linearly with AnimatorInstanceStore slot order.");
+		});
+
 		registry.Add("Animation.ProceduralCommands.ReconcileIdempotencyAndCancellationWithoutAliasing", [](TestContext& context) {
 			AnimatorInstanceStore instances;
 			const NativeAnimationAnimatorHandle animator = NativeHandle(instances.Create(Descriptor(2U)));

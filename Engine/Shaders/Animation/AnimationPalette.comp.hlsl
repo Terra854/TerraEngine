@@ -7,6 +7,7 @@ void main(uint3 id : SV_DispatchThreadID)
 	TeAnimationGpuDispatchRecord dispatch; TeAnimationGpuWorkPacket packet; uint entry;
 	if (!TeResolveWork(id.x, TE_ANIMATION_GPU_STAGE_PALETTE, dispatch, packet, entry)) return;
 	if (!TeValidatePacket(dispatch, packet, entry, TE_ANIMATION_GPU_STAGE_PALETTE) || entry >= packet.paletteEntryCount) return;
+	if ((packet.flags & TE_ANIMATION_GPU_WORK_SUSPEND_VISUAL_EVALUATION) != 0u) return;
 	uint paletteBytes; gAnimationPalette.GetDimensions(paletteBytes);
 	uint skeletonBytes; gAnimationSkeleton.GetDimensions(skeletonBytes);
 	uint outputOffset = 0u;

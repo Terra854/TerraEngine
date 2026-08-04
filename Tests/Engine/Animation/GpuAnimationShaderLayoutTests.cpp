@@ -482,7 +482,7 @@ namespace TerraEngine::Tests {
 			context.Expect(!IsGpuAnimationStageValueValid(kGpuAnimationStageCount),
 				"The first value beyond Palette must remain invalid in version one.");
 
-			const std::array<std::uint32_t, 10U> workFlags{
+			const std::array<std::uint32_t, 11U> workFlags{
 				Value(GpuAnimationWorkFlag::Looping),
 				Value(GpuAnimationWorkFlag::Reverse),
 				Value(GpuAnimationWorkFlag::UseReferenceFallback),
@@ -492,12 +492,13 @@ namespace TerraEngine::Tests {
 				Value(GpuAnimationWorkFlag::HybridCpuAuthority),
 				Value(GpuAnimationWorkFlag::DeterministicReference),
 				Value(GpuAnimationWorkFlag::AllowVisualProcedural),
-				Value(GpuAnimationWorkFlag::AllowRagdollVisual)};
+				Value(GpuAnimationWorkFlag::AllowRagdollVisual),
+				Value(GpuAnimationWorkFlag::SuspendVisualEvaluation)};
 			for(std::uint32_t index = 0U; index < workFlags.size(); ++index) {
 				context.ExpectEqual(1U << index, workFlags[index],
 					"Each work-policy bit must retain its exact version-one value.");
 			}
-			context.ExpectEqual(0x3ffU, kGpuAnimationAllWorkFlags,
+			context.ExpectEqual(0x7ffU, kGpuAnimationAllWorkFlags,
 				"The work flag validation mask must include exactly the frozen bits.");
 			context.ExpectEqual(0x01U, Value(GpuAnimationOutputFlag::Pose), "Pose output bit.");
 			context.ExpectEqual(0x02U, Value(GpuAnimationOutputFlag::MorphWeights), "Morph output bit.");

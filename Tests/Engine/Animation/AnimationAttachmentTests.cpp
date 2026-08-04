@@ -113,6 +113,21 @@ namespace TerraEngine::Tests {
 				"Socket readers must receive one copied model-space publication with matching tick, pose generation, and parent bone identity.");
 		});
 
+		registry.Add("Animation.Attachments.MissingReadArmsDemandDrivenPublication", [](TestContext& context) {
+			AnimationAttachmentSnapshotPublisher& publisher =
+				AnimationAttachmentSnapshotPublisher::Instance();
+			publisher.Clear();
+			const AnimatorInstanceHandle animator{15U, 4U};
+			AnimationSocketReadSnapshot missing;
+			const bool copied = publisher.CopySocketSnapshot(animator, missing);
+			context.Expect(!copied && publisher.HasPublicationRequests()
+				&& publisher.IsPublicationRequested(animator),
+				"A first missing coherent read must arm only that animator for the next protected publication.");
+			publisher.Retire(animator);
+			context.Expect(!publisher.HasPublicationRequests(),
+				"Retiring the exact animator generation must also retire its publication request.");
+		});
+
 		registry.Add("Animation.Attachments.SocketReadersRejectRetiredHandleAfterRebind", [](TestContext& context) {
 			AnimationAttachmentSnapshotPublisher::Instance().Clear();
 			const AnimationBoneSocketSnapshot oldSnapshot = MakeSnapshot(2.0F);

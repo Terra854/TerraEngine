@@ -160,9 +160,12 @@ namespace TerraEngine::Animation {
 
 		void EraseAnimatorEntriesLocked(AnimatorInstanceHandle animator)
 		{
-			for(auto iterator = entries.begin(); iterator != entries.end();) {
-				if(iterator->first.animator == animator) iterator = entries.erase(iterator);
-				else ++iterator;
+			AnimationEvaluationCacheKey firstKey;
+			firstKey.animator = animator;
+			auto iterator = entries.lower_bound(firstKey);
+			while(iterator != entries.end()
+				&& iterator->first.animator == animator) {
+				iterator = entries.erase(iterator);
 			}
 			auto state = animatorStates.find(animator);
 			if(state != animatorStates.end()) state->second.entryCount = 0U;
@@ -406,16 +409,50 @@ namespace TerraEngine::Animation {
 	{
 		if(impl_ == nullptr || !animator.IsValid()) return 0U;
 		std::scoped_lock lock(impl_->mutex);
+		const auto animatorState = impl_->animatorStates.find(animator);
+		if(animatorState == impl_->animatorStates.end()) return 0U;
+
+		// AnimationEvaluationCacheKey orders the generation-safe animator first, so
+		// every payload for one animator forms one contiguous map range. Starting at
+		// lower_bound avoids rescanning the complete crowd cache once per refreshed
+		// animator, which otherwise turns a shared residency promotion into O(N^2).
+		AnimationEvaluationCacheKey firstKey;
+		firstKey.animator = animator;
+		auto iterator = impl_->entries.lower_bound(firstKey);
 		std::size_t removed = 0U;
-		for(auto iterator = impl_->entries.begin(); iterator != impl_->entries.end();) {
-			if(iterator->first.animator == animator) {
+		while(iterator != impl_->entries.end()
+			&& iterator->first.animator == animator) {
+			iterator = impl_->entries.erase(iterator);
+			++removed;
+		}
+		impl_->animatorStates.erase(animatorState);
+		return removed;
+	}
+
+	std::size_t AnimationEvaluationCache::InvalidateAnimators(
+		std::span<const AnimatorInstanceHandle> animators)
+	{
+		if(impl_ == nullptr || animators.empty()) return 0U;
+		std::scoped_lock lock(impl_->mutex);
+		std::size_t removed = 0U;
+		for(const AnimatorInstanceHandle animator : animators) {
+			if(!animator.IsValid()) continue;
+			const auto animatorState = impl_->animatorStates.find(animator);
+			if(animatorState == impl_->animatorStates.end()) continue;
+
+			// Keys for one generation-safe animator are contiguous. Repeating this
+			// bounded lower_bound under one lock avoids both a full cache scan and the
+			// lock convoy previously created by a crowd-wide stream promotion.
+			AnimationEvaluationCacheKey firstKey;
+			firstKey.animator = animator;
+			auto iterator = impl_->entries.lower_bound(firstKey);
+			while(iterator != impl_->entries.end()
+				&& iterator->first.animator == animator) {
 				iterator = impl_->entries.erase(iterator);
 				++removed;
-			} else {
-				++iterator;
 			}
+			impl_->animatorStates.erase(animatorState);
 		}
-		impl_->animatorStates.erase(animator);
 		return removed;
 	}
 

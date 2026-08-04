@@ -50,6 +50,17 @@ namespace TerraEngine::Renderer
 		const GeometryRoutePolicyInput &input,
 		const GeometryRoutePolicyState &previousState);
 
+	// Runtime frame assembly needs the selected route and next hysteresis state,
+	// but not three allocation-heavy diagnostic candidate descriptions for every
+	// repeated instance. This compact form preserves the exact policy decision
+	// while leaving candidates empty; inspection tools keep using the full API.
+	[[nodiscard]] TERRAENGINE_API GeometryRouteDecision SelectGeometryRouteCompact(
+		const GeometryRoutePolicyInput &input);
+
+	[[nodiscard]] TERRAENGINE_API GeometryRouteDecision SelectGeometryRouteCompact(
+		const GeometryRoutePolicyInput &input,
+		const GeometryRoutePolicyState &previousState);
+
 	// This compact execution record is used by scheduler and regression tests
 	// to prove that a direct-only frame cannot accidentally manufacture VG work.
 	struct TERRAENGINE_API GeometryRouteFramePlan

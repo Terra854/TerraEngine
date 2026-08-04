@@ -112,6 +112,30 @@ namespace TerraEngine::Renderer::Vulkan
 		return plan;
 	}
 
+	VulkanVirtualGeometryVisibilityClearPlan
+		BuildVulkanVirtualGeometryVisibilityClearPlan(
+			const VulkanVirtualGeometryVisibilityPlan& plan)
+	{
+		VulkanVirtualGeometryVisibilityClearPlan clearPlan;
+		if(!plan.ready || plan.zeroWork || plan.pixelCount == 0u
+			|| plan.materialBinCount == 0u)
+		{
+			return clearPlan;
+		}
+		clearPlan.depthBytes = static_cast<VkDeviceSize>(plan.pixelCount)
+			* sizeof(std::uint32_t);
+		clearPlan.visibilityRecordBytes =
+			static_cast<VkDeviceSize>(plan.pixelCount) * 4u
+			* sizeof(std::uint32_t);
+		clearPlan.resolvedVisibilityBytes =
+			clearPlan.visibilityRecordBytes;
+		clearPlan.shadingBinBytes =
+			static_cast<VkDeviceSize>(plan.materialBinCount)
+			* sizeof(std::uint32_t);
+		clearPlan.valid = true;
+		return clearPlan;
+	}
+
 	VulkanVirtualGeometryExecutorRecordingResult RecordVulkanVirtualGeometryExecutorStage(
 		VkCommandBuffer commandBuffer, VulkanVirtualGeometryExecutorStage stage,
 		const VulkanVirtualGeometryExecutorPlan &plan,
@@ -544,6 +568,43 @@ namespace TerraEngine::Renderer::Vulkan
 		if(descriptorSet == VK_NULL_HANDLE || pipeline == VK_NULL_HANDLE) {
 			result.failureReason = "Vulkan visibility pass descriptor set or pipeline is unavailable.";
 			return result;
+		}
+		if(stage == VulkanVirtualGeometryVisibilityStage::ComputeRaster
+			&& !plan.zeroWork)
+		{
+			const VulkanVirtualGeometryVisibilityClearPlan clearPlan =
+				BuildVulkanVirtualGeometryVisibilityClearPlan(plan);
+			if(!clearPlan.valid)
+			{
+				result.failureReason =
+					"Vulkan visibility scratch clear plan is invalid.";
+				return result;
+			}
+			// Compute visibility consumes viewport-sized scratch ranges. Clear them
+			// in device command order so the CPU never constructs or copies tens of
+			// megabytes of sentinel arrays for each frame.
+			vkCmdFillBuffer(commandBuffer, resources.depthBuffer, 0u,
+				clearPlan.depthBytes,
+				std::numeric_limits<std::uint32_t>::max());
+			vkCmdFillBuffer(commandBuffer, resources.visibilityRecordBuffer, 0u,
+				clearPlan.visibilityRecordBytes,
+				std::numeric_limits<std::uint32_t>::max());
+			vkCmdFillBuffer(commandBuffer, resources.resolvedVisibilityBuffer, 0u,
+				clearPlan.resolvedVisibilityBytes,
+				std::numeric_limits<std::uint32_t>::max());
+			vkCmdFillBuffer(commandBuffer, resources.shadingBinBuffer, 0u,
+				clearPlan.shadingBinBytes, 0u);
+
+			VkMemoryBarrier clearBarrier{};
+			clearBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+			clearBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+			clearBarrier.dstAccessMask =
+				VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+			vkCmdPipelineBarrier(commandBuffer,
+				VK_PIPELINE_STAGE_TRANSFER_BIT,
+				VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+				0u, 1u, &clearBarrier, 0u, nullptr, 0u, nullptr);
+			++result.barrierCount;
 		}
 		// Set 0 is the shared bindless heap used by the production composite;
 		// compute visibility stages use their pass-local storage buffers at set 1.

@@ -239,8 +239,8 @@ namespace
 			context.Expect(mesh->hasVirtualGeometry, "Loaded mesh should advertise virtual geometry metadata.");
 			context.Expect((mesh->runtimeLayout.meshletFlags & kMeshletHeaderFlagHasVirtualGeometry) != 0u, "TEMF header should carry the virtual geometry flag.");
 			context.Expect(!mesh->virtualGeometryPageStreamingReady,
-				"Whole-stream codec pages must not masquerade as spatial hierarchy pages when their mappings differ.");
-			context.Expect(mesh->virtualGeometryOwnerFallbackReason.find("do not map one-to-one") != std::string::npos,
+				"A static owner-stream cook must not masquerade as page-local deformable hierarchy data.");
+			context.Expect(mesh->virtualGeometryOwnerFallbackReason.find("do not provide complete hierarchy page identities") != std::string::npos,
 				"A page-identity mismatch should explain why the validated owning-mesh payload is active.");
 			context.Expect(std::all_of(
 				mesh->virtualGeometryPhysicalPageStates.begin(),

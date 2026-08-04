@@ -574,6 +574,11 @@ namespace TerraEngine::Tests {
 				const UUID objectId = objects.getUUID(object);
 				context.Expect(ExecuteBindingFrame(animation),
 					"The first frame must queue its physical segment read without blocking evaluation.");
+				const AnimatorInstanceHandle streamingHandle =
+					animation.ResolveAnimatorForObject(objectId);
+				AnimationFixedTick lastPlaybackTick =
+					animation.LoadAnimatorPlaybackState(streamingHandle).absoluteTick;
+				bool playbackRegressed = false;
 				const std::shared_ptr<const PublishedAnimatorPose> fallback =
 					animation.LoadPublishedAnimatorPoseForObject(objectId);
 				const auto fallbackModel = fallback && fallback->snapshot && fallback->snapshot->pose
@@ -589,6 +594,11 @@ namespace TerraEngine::Tests {
 				for(; publicationFrames < 128U; ++publicationFrames) {
 					std::this_thread::sleep_for(std::chrono::milliseconds(1));
 					if(!ExecuteBindingFrame(animation)) break;
+					const AnimatorPlaybackStateSnapshot playback =
+						animation.LoadAnimatorPlaybackState(streamingHandle);
+					playbackRegressed = playbackRegressed
+						|| playback.absoluteTick < lastPlaybackTick;
+					lastPlaybackTick = playback.absoluteTick;
 					resident = animation.LoadPublishedAnimatorPoseForObject(objectId);
 					const auto model = resident && resident->snapshot && resident->snapshot->pose
 						? resident->snapshot->pose->ModelTransforms()
@@ -597,8 +607,9 @@ namespace TerraEngine::Tests {
 						&& model.size() == 1U && model[0U].translation.x == 5.0F) break;
 				}
 				context.Expect(publicationFrames < 128U && resident
-					&& resident->status == AnimationStatus::Ok,
-					"A complete matching range must become visible on a later protected frame and drive the production evaluator.");
+					&& resident->status == AnimationStatus::Ok && !playbackRegressed
+					&& animation.ResolveAnimatorForObject(objectId) == streamingHandle,
+					"A complete matching range must promote in place without resetting playback or replacing the generation-safe runtime handle.");
 
 				objects.RemoveComponent<AnimatorComponent>(object);
 				(void)animation.DeclareFrameWorkloads(1.0F / 60.0F);
@@ -876,6 +887,12 @@ namespace TerraEngine::Tests {
 					&& summary.streamedMotionDatabaseCount == 0U
 					&& summary.fallbackMotionDatabaseCount == 1U,
 					"A same-size corrupt physical block must fail raw-byte validation and leave the complete DATA database authoritative.");
+				const AnimatorComponentSynchronizationSummary terminal =
+					coordinator.Synchronize(animation, objects, resources);
+				context.Expect(terminal.createdCount == 0U
+					&& terminal.reboundCount == 0U
+					&& terminal.failedCount == 0U,
+					"A terminally failed stream must not keep polling and reconciling an unchanged authored animator every frame.");
 
 				coordinator.InvalidateAll(animation);
 				animation.Shutdown();
@@ -1303,6 +1320,8 @@ namespace TerraEngine::Tests {
 				handle = restoredHandle;
 
 				component->defaultClipStartFrame = 24U;
+				objects.notifyObjectComponentValueChanged(
+					object, AnimatorComponent::kComponentName);
 				context.Expect(ExecuteBindingFrame(animation),
 					"Editing the start frame must rebuild a controller-backed binding at the protected boundary.");
 				const AnimatorInstanceHandle retimedHandle =
@@ -1495,6 +1514,44 @@ namespace TerraEngine::Tests {
 				std::filesystem::remove(clipPath, cleanupError);
 				cleanupError.clear();
 				std::filesystem::remove(skeletonPath, cleanupError);
+				animation.Initialize();
+			});
+
+		registry.Add("Animation.ComponentBinding.TerminalMissingAssetDoesNotPollEveryFrame",
+			[](TestContext& context) {
+				ObjectManager& objects = ObjectManager::instance();
+				ResourceManager& resources = ResourceManager::Instance();
+				AnimationSystem& animation = AnimationSystem::Instance();
+				objects.clear();
+				animation.Initialize();
+
+				const Object object = objects.createObject("Missing Asset Animator");
+				AnimatorComponent* component =
+					objects.AddComponent<AnimatorComponent>(object);
+				if(component != nullptr) {
+					// This UUID deliberately has no registered path or live publication.
+					// It therefore reaches a terminal safe pose with no worker left to poll.
+					component->defaultClipAssetId = MakeBindingAssetGuid(241U).value;
+					objects.notifyObjectStructureChanged(object);
+				}
+
+				AnimatorComponentBindingCoordinator coordinator;
+				const AnimatorComponentSynchronizationSummary first =
+					coordinator.Synchronize(animation, objects, resources);
+				const AnimatorComponentSynchronizationSummary stable =
+					coordinator.Synchronize(animation, objects, resources);
+				context.Expect(component != nullptr
+					&& first.createdCount == 1U
+					&& first.reboundCount == 1U
+					&& stable.runtimeActiveCount == 1U
+					&& stable.createdCount == 0U
+					&& stable.reboundCount == 0U
+					&& stable.failedCount == 0U,
+					"A terminal missing dependency must retain its safe pose without forcing every unchanged frame to reconcile the complete animator set.");
+
+				coordinator.InvalidateAll(animation);
+				animation.Shutdown();
+				objects.clear();
 				animation.Initialize();
 			});
 	}

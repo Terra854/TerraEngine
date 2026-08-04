@@ -222,6 +222,17 @@ namespace TerraEngine::Animation {
 	[[nodiscard]] TERRAENGINE_API std::string_view ToString(AnimationEffectiveExecutionMode mode) noexcept;
 	[[nodiscard]] TERRAENGINE_API std::string_view ToString(AnimationExecutionModeReason reason) noexcept;
 
+	// Root-motion policy describes what to do with a delta, but only an authored
+	// track, interrupted transition, destination transition, or explicit consumer
+	// can produce authoritative work. Keeping this decision pure lets import/runtime
+	// callers share the same rule without consulting live scene or renderer state.
+	[[nodiscard]] TERRAENGINE_API bool RequiresCpuRootMotionAuthority(
+		AnimatorRootMotionPolicy policy,
+		bool currentClipHasRootMotion,
+		bool interruptedTransitionHasRootMotion,
+		bool destinationTransitionHasRootMotion,
+		bool explicitlyConsumed) noexcept;
+
 	// All returned state depends only on the request and previousState. In
 	// particular, this function does not consult clocks, globals, or provider state.
 	[[nodiscard]] TERRAENGINE_API AnimationExecutionModeDecision ResolveAnimationExecutionMode(

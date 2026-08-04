@@ -47,8 +47,10 @@ struct AnimatorComponent final : public Component<AnimatorComponent>
 	TerraEngine::UUID motionDatabaseOverrideAssetId = TerraEngine::EMPTY_UUID;
 	TerraEngine::Animation::AnimationExecutionPolicy requestedMode =
 		TerraEngine::Animation::AnimationExecutionPolicy::Auto;
+	// Root motion is opt-in because extracting it requires authoritative CPU work.
+	// Ordinary visual-only crowds therefore remain eligible for GPU evaluation.
 	TerraEngine::Animation::AnimatorRootMotionPolicy rootMotionPolicy =
-		TerraEngine::Animation::AnimatorRootMotionPolicy::ExtractOnly;
+		TerraEngine::Animation::AnimatorRootMotionPolicy::Ignore;
 	TerraEngine::Animation::AnimatorUpdatePolicy updatePolicy =
 		TerraEngine::Animation::AnimatorUpdatePolicy::EveryFrame;
 	TerraEngine::Animation::AnimatorTimePolicy timePolicy =
@@ -88,7 +90,7 @@ struct AnimatorComponent final : public Component<AnimatorComponent>
 	{
 		rootMotionPolicy = value <= static_cast<std::uint32_t>(TerraEngine::Animation::AnimatorRootMotionPolicy::ApplyToCharacter)
 			? static_cast<TerraEngine::Animation::AnimatorRootMotionPolicy>(value)
-			: TerraEngine::Animation::AnimatorRootMotionPolicy::ExtractOnly;
+			: TerraEngine::Animation::AnimatorRootMotionPolicy::Ignore;
 	}
 
 	[[nodiscard]] std::uint32_t GetUpdatePolicyValue() const noexcept

@@ -359,8 +359,11 @@ namespace TerraEngine::Tests {
 			declaration.rootMotion = true;
 			context.Expect(consumers.PublishDeclarations({&declaration, 1U}, 1U, 5) == AnimationStatus::Ok,
 				"A complete declaration batch must publish atomically before frame capture.");
+			const AnimationConsumerRegistry::ReadView capturedView =
+				consumers.CaptureReadView();
 			const std::vector<std::int32_t> parents{-1, 0, 1, 1};
-			const AnimationResolvedConsumerRequirements resolved = consumers.Resolve(animator, parents, 6);
+			const AnimationResolvedConsumerRequirements resolved =
+				capturedView.Resolve(animator, parents, 6);
 			context.Expect(resolved.status == AnimationStatus::Ok
 				&& resolved.closure.joints == std::vector<std::uint32_t>({0U, 1U, 3U}),
 				"Hybrid authority must include every requested joint ancestor.");
@@ -372,6 +375,19 @@ namespace TerraEngine::Tests {
 				&& resolved.attribution.front().consumerId == 42U
 				&& resolved.attribution.front().closedJointCount == 3U,
 				"Diagnostics must identify which consumer expanded the authoritative closure.");
+			context.Expect(capturedView.HasDeclarations()
+				&& capturedView.Resolve({2U, 7U}, parents, 6).attribution.empty(),
+				"A captured frame view should reject unrelated sorted animator ranges without rescanning or inheriting another handle's declarations.");
+			AnimationConsumerDeclaration replacement = declaration;
+			replacement.animator = {4U, 7U};
+			replacement.declarationGeneration = 2U;
+			replacement.declarationTick = 7;
+			context.Expect(consumers.PublishDeclarations(
+				{&replacement, 1U}, 2U, 7) == AnimationStatus::Ok,
+				"A later complete declaration generation should replace the live registry.");
+			context.Expect(capturedView.Resolve(animator, parents, 8).attribution.size() == 1U
+				&& consumers.Resolve(animator, parents, 8).attribution.empty(),
+				"An in-flight frame view must pin its immutable generation while a later frame observes the replacement publication.");
 			consumers.Clear();
 		});
 

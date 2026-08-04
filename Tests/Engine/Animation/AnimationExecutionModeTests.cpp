@@ -81,6 +81,25 @@ namespace TerraEngine::Tests {
 				"Selection-reason labels are diagnostic contracts rather than localized display text.");
 		});
 
+		registry.Add("Animation.ExecutionMode.RootMotionPolicyRequiresAnAuthoredOrExplicitSource",
+			[](TestContext& context) {
+				context.Expect(!RequiresCpuRootMotionAuthority(
+					AnimatorRootMotionPolicy::ExtractOnly, false, false, false, false),
+					"An in-place clip must stay eligible for GPU Visual even when its authored policy would extract a real delta.");
+				context.Expect(RequiresCpuRootMotionAuthority(
+					AnimatorRootMotionPolicy::ApplyToObject, true, false, false, false)
+					&& RequiresCpuRootMotionAuthority(
+						AnimatorRootMotionPolicy::ExtractOnly, false, true, false, false)
+					&& RequiresCpuRootMotionAuthority(
+						AnimatorRootMotionPolicy::ExtractOnly, false, false, true, false),
+					"Current, interrupted, and destination transition root tracks must retain CPU authority.");
+				context.Expect(RequiresCpuRootMotionAuthority(
+					AnimatorRootMotionPolicy::Ignore, false, false, false, true)
+					&& !RequiresCpuRootMotionAuthority(
+						AnimatorRootMotionPolicy::Ignore, true, true, true, false),
+					"Explicit consumers override Ignore, while Ignore alone suppresses automatic extraction from authored tracks.");
+			});
+
 		registry.Add("Animation.ExecutionMode.ConsumerClosureSortsDeduplicatesAndIncludesAncestors", [](TestContext& context) {
 			// Joint 0 is the root. Joint 3 depends on 2 -> 1 -> 0, while joint 5
 			// depends on 4 -> 0. Repeated and unordered requests must still produce

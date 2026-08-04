@@ -16,6 +16,15 @@
 #include <vector>
 
 namespace TerraEngine::Animation {
+	// One range points into a frame-owned flat goal array. Capture keeps ranges in
+	// animator-handle order, allowing AnimationSystem to merge them with its already
+	// ordered live-instance snapshot without a mutex acquisition per animator.
+	struct ActiveProceduralGoalRange {
+		NativeAnimationAnimatorHandle animator{};
+		std::uint32_t firstGoal = 0U;
+		std::uint32_t goalCount = 0U;
+	};
+
 	// A store instance belongs to the animation runtime rather than a global
 	// singleton. This makes scene/runtime shutdown explicit and prevents old
 	// managed commands from leaking into a newly created animation system.
@@ -67,6 +76,12 @@ namespace TerraEngine::Animation {
 			NativeAnimationAnimatorHandle animator,
 			std::span<NativeAnimationProceduralGoalCommand> destination,
 			std::uint32_t& requiredCount) const;
+		// Captures all active procedural state under one lock. The caller supplies
+		// reusable flat storage so ordinary frames with no procedural animators do
+		// not perform one protected lookup for every member of a large crowd.
+		[[nodiscard]] AnimationStatus CaptureActiveGoals(
+			std::vector<ActiveProceduralGoalRange>& ranges,
+			std::vector<NativeAnimationProceduralGoalCommand>& goals) const;
 
 		// Replaces one animator's retained result batch atomically after validating
 		// every copied snapshot. Failed validation preserves the prior publication.
