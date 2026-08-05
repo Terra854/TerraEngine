@@ -466,6 +466,10 @@ namespace
 		// renderable-world revisions, so a hit can attach this frame's animation
 		// binding during materialization without a separate hash lookup/copy pass.
 		std::vector<std::uint32_t> renderableIndices;
+		// Cached direct-route commands never contribute a VG view draw. Retaining
+		// only the exact contributing command indices prevents a 4,000-member direct
+		// crowd from being rescanned merely to republish an empty VG selection.
+		std::vector<std::uint32_t> virtualGeometryCommandIndices;
 		std::vector<TerraEngine::Renderer::VirtualGeometrySelectedClusterRecord> selectedClusters;
 		std::vector<TerraEngine::Renderer::VirtualGeometryPageNeedRecord> pageNeeds;
 		std::vector<VirtualGeometryClusterPacket> clusterPackets;
@@ -4066,14 +4070,14 @@ void RenderSystem::Update(float deltaTime)
 		}
 
 		std::optional<TerraEngine::Animation::GpuAnimationOwnerObjectMapping> ownerMapping;
-		const auto ownerBegin = std::lower_bound(gpuPresentation->ownerObjectMappings.begin(),
-			gpuPresentation->ownerObjectMappings.end(), request.animatorObjectId,
-			[](const TerraEngine::Animation::GpuAnimationOwnerObjectMapping& mapping,
-				const TerraEngine::UUID& ownerObjectId) {
-				return mapping.ownerObjectId < ownerObjectId;
-			});
-		for(auto ownerIt = ownerBegin;
-			ownerIt != gpuPresentation->ownerObjectMappings.end()
+		const TerraEngine::Animation::GpuAnimationOwnerObjectMapping* ownerBegin =
+			gpuPresentation->FindFirstOwnerObjectMapping(request.animatorObjectId);
+		const TerraEngine::Animation::GpuAnimationOwnerObjectMapping* ownerEnd =
+			gpuPresentation->ownerObjectMappings.data()
+				+ gpuPresentation->ownerObjectMappings.size();
+		for(const TerraEngine::Animation::GpuAnimationOwnerObjectMapping* ownerIt =
+				ownerBegin;
+			ownerIt != nullptr && ownerIt != ownerEnd
 				&& ownerIt->ownerObjectId == request.animatorObjectId; ++ownerIt) {
 			const TerraEngine::Animation::GpuAnimationOwnerObjectMapping& mapping = *ownerIt;
 			if(!mapping.IsComplete() || mapping.ownerObjectId != request.animatorObjectId
@@ -4232,6 +4236,13 @@ void RenderSystem::Update(float deltaTime)
 							cached.objectId = meshComp.spatialObjectId != TerraEngine::EMPTY_UUID
 								? meshComp.spatialObjectId : objManager.getUUID(object);
 							cached.mesh = meshComp;
+							cached.objectIdentity = static_cast<std::uint64_t>(
+								std::hash<TerraEngine::UUID>{}(cached.objectId));
+							cached.meshIdentity = static_cast<std::uint64_t>(
+								std::hash<TerraEngine::UUID>{}(meshComp.meshId));
+							cached.materialIdentity = std::max<std::uint64_t>(1U,
+								static_cast<std::uint64_t>(
+									std::hash<TerraEngine::UUID>{}(meshComp.materialId)));
 							std::optional<Object> hierarchyObject = object;
 							for(std::size_t depth = 0U;
 								hierarchyObject.has_value() && depth < 1024U; ++depth) {
@@ -4275,6 +4286,25 @@ void RenderSystem::Update(float deltaTime)
 					renderableMembershipComponentRevision = membershipComponentRevision;
 					renderableMembershipHierarchyRevision = membershipHierarchyRevision;
 				}
+				const auto resourceAvailable = [&frameResourceAvailability, &resourceManager](
+					const TerraEngine::UUID& resourceId)
+				{
+					const auto cachedResource = frameResourceAvailability.find(resourceId);
+					if(cachedResource != frameResourceAvailability.end()) {
+						return cachedResource->second;
+					}
+					const bool available = resourceManager.HasResource(resourceId);
+					frameResourceAvailability.emplace(resourceId, available);
+					return available;
+				};
+				TerraEngine::UUID lastAvailabilityMeshId = TerraEngine::EMPTY_UUID;
+				TerraEngine::UUID lastAvailabilityMaterialId = TerraEngine::EMPTY_UUID;
+				bool lastMeshAvailable = false;
+				bool lastMaterialAvailable = false;
+				const Mesh* lastRuntimeMesh = nullptr;
+				bool lastRuntimeMeshDeformable = false;
+				TerraEngine::Animation::AnimationCompatibilityFingerprint
+					lastRuntimeMeshSkeletonFingerprint = 0U;
 				for(const RenderableMembershipCacheRecord& cached
 					: renderableMembershipCache) {
 						const Object& object = cached.object;
@@ -4290,16 +4320,27 @@ void RenderSystem::Update(float deltaTime)
 							continue;
 						}
 
-						const auto resourceAvailable = [&frameResourceAvailability, &resourceManager](
-							const TerraEngine::UUID& resourceId)
-						{
-							const auto cached = frameResourceAvailability.find(resourceId);
-							if(cached != frameResourceAvailability.end()) return cached->second;
-							const bool available = resourceManager.HasResource(resourceId);
-							frameResourceAvailability.emplace(resourceId, available);
-							return available;
-						};
-						if (!resourceAvailable(meshId) || !resourceAvailable(materialId))
+						if(lastAvailabilityMeshId != meshId) {
+							lastAvailabilityMeshId = meshId;
+							lastMeshAvailable = resourceAvailable(meshId);
+							const auto cachedMesh = frameMeshResources.find(meshId);
+							if(cachedMesh != frameMeshResources.end()) {
+								lastRuntimeMesh = cachedMesh->second;
+							} else {
+								lastRuntimeMesh = resourceManager.GetMesh(meshId);
+								frameMeshResources.emplace(meshId, lastRuntimeMesh);
+							}
+							lastRuntimeMeshDeformable = lastRuntimeMesh != nullptr
+								&& IsValidatedAnimationDeformableMesh(*lastRuntimeMesh);
+							lastRuntimeMeshSkeletonFingerprint = lastRuntimeMesh != nullptr
+								? ResolveDeformableSkeletonFingerprint(*lastRuntimeMesh, nullptr)
+								: 0U;
+						}
+						if(lastAvailabilityMaterialId != materialId) {
+							lastAvailabilityMaterialId = materialId;
+							lastMaterialAvailable = resourceAvailable(materialId);
+						}
+						if (!lastMeshAvailable || !lastMaterialAvailable)
 						{
 							++runtimeLayoutRejectedRecordCount;
 							runtimeLayoutRejectionReasons.push_back("resource-not-loaded");
@@ -4314,16 +4355,8 @@ void RenderSystem::Update(float deltaTime)
 						const TerraEngine::UUID objectId = cached.objectId;
 
 						TerraEngine::Renderer::AnimationRenderBinding animationBinding;
-						const Mesh* runtimeMesh = nullptr;
-						if(const auto cachedMesh = frameMeshResources.find(meshId);
-							cachedMesh != frameMeshResources.end()) {
-							runtimeMesh = cachedMesh->second;
-						} else {
-							runtimeMesh = resourceManager.GetMesh(meshId);
-							frameMeshResources.emplace(meshId, runtimeMesh);
-						}
-						if(runtimeMesh != nullptr
-							&& IsValidatedAnimationDeformableMesh(*runtimeMesh)) {
+						const Mesh* runtimeMesh = lastRuntimeMesh;
+						if(runtimeMesh != nullptr && lastRuntimeMeshDeformable) {
 							animationBinding.meshId = meshId;
 							animationBinding.deformablePayloadGeneration =
 								runtimeMesh->deformablePayloadGeneration;
@@ -4355,6 +4388,54 @@ void RenderSystem::Update(float deltaTime)
 										animationAuthorityGeneration = TerraEngine::Animation::AnimationSystem::Instance()
 											.AuthorityPublicationGeneration();
 									}
+									// GPU-visual crowds do not publish CPU poses. Prove their complete
+									// packet identity before consulting either CPU-pose hash table; the
+									// protected cache-retirement pass below still removes a stale held
+									// pose if an animator changed from CPU authority to GPU visual.
+									TerraEngine::Renderer::AnimationRenderBindingRequest gpuVisualRequest;
+									gpuVisualRequest.meshId = meshId;
+									gpuVisualRequest.animatorObjectId = animatorObjectId;
+									gpuVisualRequest.animatorObjectGeneration = animatorObjectLifetime;
+									gpuVisualRequest.animationAuthorityGeneration = *animationAuthorityGeneration;
+									gpuVisualRequest.deformablePayloadGeneration =
+										runtimeMesh->deformablePayloadGeneration;
+									gpuVisualRequest.componentGeneration = componentGeneration;
+									gpuVisualRequest.skeletonCompatibilityFingerprint =
+										lastRuntimeMeshSkeletonFingerprint;
+									gpuVisualRequest.pageLocalDeformationAvailable =
+										runtimeMesh->hasDeformableDemandedPages
+										&& runtimeMesh->virtualGeometryPageStreamingReady;
+									gpuVisualRequest.expectedGpuRenderIdentity.meshId = meshId;
+									gpuVisualRequest.expectedGpuRenderIdentity.meshHeaderVersion =
+										runtimeMesh->runtimeLayout.version;
+									gpuVisualRequest.expectedGpuRenderIdentity.deformablePayloadGeneration =
+										runtimeMesh->deformablePayloadGeneration;
+									gpuVisualRequest.expectedGpuRenderIdentity.rendererGeneration =
+										protectedRendererGeneration;
+									gpuVisualRequest.expectedGpuRenderIdentity.sceneGeneration =
+										protectedSceneGeneration;
+									gpuVisualRequest.expectedGpuRenderIdentity.skeletonCompatibilityFingerprint =
+										gpuVisualRequest.skeletonCompatibilityFingerprint;
+									gpuVisualRequest.invalidation.asset =
+										runtimeMesh->deformablePayloadGeneration
+										^ gpuVisualRequest.skeletonCompatibilityFingerprint;
+									gpuVisualRequest.invalidation.page =
+										runtimeMesh->deformablePayloadGeneration;
+									gpuVisualRequest.invalidation.view = nextRenderFrameId;
+									gpuVisualRequest.invalidation.material =
+										cached.materialIdentity;
+									gpuVisualRequest.invalidation.renderer = protectedRendererGeneration;
+									gpuVisualRequest.invalidation.residency =
+										runtimeMesh->deformablePayloadGeneration;
+									gpuVisualRequest.gpuVisualIdentity =
+										findUniqueGpuAnimationIdentity(gpuVisualRequest);
+									const bool hasDirectGpuVisualBinding =
+										gpuVisualRequest.gpuVisualIdentity.has_value()
+										&& !gpuVisualRequest.gpuVisualIdentity->hybridCpuAuthority;
+									if(hasDirectGpuVisualBinding) {
+										animationBinding = ResolveAnimationRenderBinding(
+											gpuVisualRequest);
+									} else {
 
 									std::shared_ptr<const TerraEngine::Animation::PublishedAnimatorPose> currentPose;
 									if(const auto published = animatorPosePublications.find(animatorObjectId);
@@ -4406,8 +4487,7 @@ void RenderSystem::Update(float deltaTime)
 										^ effectiveSkeletonFingerprint;
 									request.invalidation.page = runtimeMesh->deformablePayloadGeneration;
 									request.invalidation.view = nextRenderFrameId;
-									request.invalidation.material = std::max<std::uint64_t>(1U,
-										static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(materialId)));
+									request.invalidation.material = cached.materialIdentity;
 									request.invalidation.renderer = protectedRendererGeneration;
 									request.invalidation.residency = runtimeMesh->deformablePayloadGeneration;
 									request.currentPose = currentPose;
@@ -4469,15 +4549,22 @@ void RenderSystem::Update(float deltaTime)
 										&& held != compatibleAnimationPoseCache.end()) {
 										held->second.lastTouchedFrameId = nextRenderFrameId;
 										aliveCompatibleAnimationObjects.insert(objectId);
-									} else {
-										compatibleAnimationPoseCache.erase(objectId);
+									} else if(held != compatibleAnimationPoseCache.end()) {
+										// The lookup above already proved whether a held CPU pose exists.
+										// Erase by iterator so a non-CPU binding does not hash the same
+										// object identity twice on every frame.
+										compatibleAnimationPoseCache.erase(held);
+									}
 									}
 								}
 							}
 						}
 
-						renderables.push_back({ object.EntityId(), objectId,
-							objManager.isObjectStatic(object), reflectedMesh, std::move(animationBinding) });
+						renderables.push_back({
+							object.EntityId(), objectId, cached.objectIdentity,
+							cached.meshIdentity, cached.materialIdentity,
+							objManager.isObjectStatic(object), reflectedMesh, runtimeMesh,
+							std::move(animationBinding) });
 					}
 			}));
 
@@ -4699,7 +4786,10 @@ void RenderSystem::Update(float deltaTime)
 			|| binding.pose == nullptr || protectedRendererGeneration == 0U) {
 			continue;
 		}
-		const Mesh* mesh = ResourceManager::Instance().GetMesh(binding.meshId);
+		// Collection already resolved this exact resource under the same protected
+		// boundary. Reuse it instead of reopening ResourceManager for each of the
+		// few CPU-authoritative members of an otherwise GPU-visual crowd.
+		const Mesh* mesh = entry.runtimeMesh;
 		if(mesh == nullptr
 			|| mesh->deformablePayloadGeneration
 				!= binding.deformablePayloadGeneration
@@ -4877,12 +4967,14 @@ void RenderSystem::Update(float deltaTime)
 		TerraEngine::Renderer::PublishRenderDiagnostics(noViewDiagnostics);
 		// A valid empty publication lets visual-only animation sleep while every
 		// output is closed. Scene generation still guards against stale project data.
-		TerraEngine::Renderer::PublishAnimatedObjectVisibilitySnapshot({
-			activeRenderFrameId,
-			protectedSceneGeneration,
-			{},
-			false,
-			true});
+		TerraEngine::Renderer::AnimatedObjectVisibilitySnapshot emptyVisibility;
+		emptyVisibility.frameId = activeRenderFrameId;
+		emptyVisibility.sceneGeneration = protectedSceneGeneration;
+		emptyVisibility.hasActiveView = false;
+		emptyVisibility.valid = true;
+		emptyVisibility.canonicalUnique = true;
+		TerraEngine::Renderer::PublishAnimatedObjectVisibilitySnapshot(
+			std::move(emptyVisibility));
 		{
 			std::lock_guard<std::mutex> lock(statsMutex);
 			latestRenderFrameSnapshot = renderFrameSnapshot;
@@ -4911,8 +5003,16 @@ void RenderSystem::Update(float deltaTime)
 	// Route scoring depends on immutable mesh/capability/calibration facts, not on
 	// an instance transform. Evaluate hysteresis once per unique mesh per frame,
 	// then stamp the copied decision with each object's diagnostic identity.
-	std::unordered_map<TerraEngine::UUID,
-		TerraEngine::Renderer::GeometryRouteDecision> geometryRouteDecisionByMesh;
+	struct CachedGeometryRouteDecision
+	{
+		// Route scoring and mesh hashing depend only on the immutable mesh facts.
+		// Keeping both values together lets every repeated instance copy the result
+		// without rebuilding costs or rehashing the shared mesh UUID.
+		TerraEngine::Renderer::GeometryRouteDecision decision{};
+		std::uint64_t meshIdentity = 0U;
+	};
+	std::unordered_map<TerraEngine::UUID, CachedGeometryRouteDecision>
+		geometryRouteDecisionByMesh;
 	geometryRouteDecisionByMesh.reserve(expectedUniqueMeshCount);
 	renderFrameSnapshot.renderables.reserve(renderables.size());
 	// Meshes and materials are resource tables, not draw tables. Track their exact
@@ -4962,18 +5062,40 @@ void RenderSystem::Update(float deltaTime)
 		destination.nextState = source.nextState;
 		return destination;
 	};
+	const CanonicalGeometryRouteFacts emptyRouteFacts{};
+	TerraEngine::UUID preparedMeshId = TerraEngine::EMPTY_UUID;
+	const Mesh* preparedMesh = nullptr;
+	const CanonicalGeometryRouteFacts* preparedRouteFacts = &emptyRouteFacts;
+	std::array<std::optional<TerraEngine::Renderer::VirtualGeometryDrawRange>, 2U>*
+		preparedVirtualRanges = nullptr;
+	CachedGeometryRouteDecision* preparedRouteDecision = nullptr;
+	TerraEngine::UUID lastSnapshotMeshId = TerraEngine::EMPTY_UUID;
+	TerraEngine::UUID lastSnapshotMaterialId = TerraEngine::EMPTY_UUID;
 	for (const RenderableEntry& entry : renderables)
 	{
 		const auto transformIt = worldTransforms->find(entry.entity);
 		const Transform* transform = transformIt != worldTransforms->end() ? &transformIt->second : nullptr;
+		if(preparedMeshId != entry.mesh.meshId) {
+			// Most crowds contain long runs of one mesh. Retain only the immediately
+			// preceding lookup results so identical adjacent instances avoid four
+			// unordered-map probes while mixed scenes preserve the general cache path.
+			preparedMeshId = entry.mesh.meshId;
+			preparedMesh = entry.runtimeMesh;
+			preparedVirtualRanges = &virtualDrawRangeByMesh[entry.mesh.meshId];
+			preparedRouteFacts = preparedMesh != nullptr
+				? &getGeometryRouteFacts(entry.mesh.meshId, *preparedMesh)
+				: &emptyRouteFacts;
+			const auto existingRoute = geometryRouteDecisionByMesh.find(
+				entry.mesh.meshId);
+			preparedRouteDecision = existingRoute != geometryRouteDecisionByMesh.end()
+				? &existingRoute->second : nullptr;
+		}
 		TerraEngine::Renderer::VirtualGeometryDrawRange virtualRange{};
-		const auto cachedMesh = frameMeshResources.find(entry.mesh.meshId);
-		const Mesh* mesh = cachedMesh != frameMeshResources.end()
-			? cachedMesh->second : nullptr;
+		const Mesh* mesh = preparedMesh;
 		if (mesh != nullptr && mesh->hasVirtualGeometry)
 		{
 			const std::size_t cullingIndex = entry.mesh.taskShaderCullingEnabled ? 1U : 0U;
-			auto& cachedRanges = virtualDrawRangeByMesh[entry.mesh.meshId];
+			auto& cachedRanges = *preparedVirtualRanges;
 			if(cachedRanges[cullingIndex].has_value()) {
 				virtualRange = *cachedRanges[cullingIndex];
 			} else {
@@ -5002,67 +5124,64 @@ void RenderSystem::Update(float deltaTime)
 		// Copy representation facts into the frame before view-specific work. A
 		// direct route clears its VG span, preventing hierarchy/page/executor work
 		// while leaving conventional mesh-task submission and resource uploads intact.
-		TerraEngine::Renderer::GeometryRoutePolicyInput routeInput{};
-		const CanonicalGeometryRouteFacts emptyRouteFacts{};
-		const CanonicalGeometryRouteFacts& routeFacts = mesh != nullptr
-			? getGeometryRouteFacts(entry.mesh.meshId, *mesh)
-			: emptyRouteFacts;
-		// Route costs are calibrated from canonical topology, physical directory,
-		// and decoded-byte facts. Optional meshlet bounds deliberately contribute
-		// nothing: they are a culling acceleration structure, not geometry truth.
-		const float sourceTriangleWork = static_cast<float>(routeFacts.sourceTriangleCount);
-		const float meshletWork = static_cast<float>(routeFacts.packedMeshletCount);
-		const float decodedKiB = static_cast<float>(routeFacts.decodedBytes) / 1024.0F;
-		const float directCost = sourceTriangleWork + meshletWork * 8.0F
-			+ decodedKiB * 0.125F;
-		const float virtualDirectoryWork =
-			static_cast<float>(routeFacts.physicalPageCount) * 24.0F
-			+ static_cast<float>(routeFacts.physicalBlockCount) * 3.0F;
-		routeInput.direct.valid = routeFacts.directUsable;
-		routeInput.direct.estimatedCost = routeFacts.directUsable
-			? std::max(1.0F, directCost) : 0.0F;
-		routeInput.virtualGeometryHardware.valid = routeFacts.virtualGeometryUsable;
-		routeInput.virtualGeometryHardware.capabilitiesAvailable =
-			hardwareVirtualGeometryRouteAvailable;
-		routeInput.virtualGeometryHardware.estimatedCost = routeFacts.virtualGeometryUsable
-			? std::max(1.0F, sourceTriangleWork * 0.45F + meshletWork * 2.0F
-				+ decodedKiB * 0.050F + virtualDirectoryWork)
-			: 0.0F;
-		routeInput.virtualGeometryCompute.valid = routeFacts.virtualGeometryUsable;
-		routeInput.virtualGeometryCompute.capabilitiesAvailable =
-			computeVirtualGeometryRouteAvailable;
-		routeInput.virtualGeometryCompute.estimatedCost = routeFacts.virtualGeometryUsable
-			? std::max(1.0F, sourceTriangleWork * 0.58F + meshletWork * 3.0F
-				+ decodedKiB * 0.075F + virtualDirectoryWork)
-			: 0.0F;
-		routeInput.calibrationIdentity = routeFacts.calibrationIdentity == 0u
-			? 1u : routeFacts.calibrationIdentity;
-		if(validationRouteOverride.has_value()) {
-			switch(*validationRouteOverride) {
-			case TerraEngine::Renderer::VirtualGeometryRasterRoute::Indexed:
-				routeInput.authorOverride =
-					TerraEngine::Renderer::GeometryRoute::DirectMeshlet;
-				break;
-			case TerraEngine::Renderer::VirtualGeometryRasterRoute::Hardware:
-				routeInput.authorOverride =
-					TerraEngine::Renderer::GeometryRoute::VirtualGeometryHardware;
-				break;
-			case TerraEngine::Renderer::VirtualGeometryRasterRoute::Compute:
-				routeInput.authorOverride =
-					TerraEngine::Renderer::GeometryRoute::VirtualGeometryCompute;
-				break;
-			case TerraEngine::Renderer::VirtualGeometryRasterRoute::Fallback:
-				// The setter rejects this retired validation choice. Keep the
-				// snapshot automatic if external code somehow supplies it.
-				break;
+		const CanonicalGeometryRouteFacts& routeFacts = *preparedRouteFacts;
+		const std::uint64_t routeObjectIdentity = entry.objectIdentity;
+		if(preparedRouteDecision == nullptr) {
+			TerraEngine::Renderer::GeometryRoutePolicyInput routeInput{};
+			// Route costs are calibrated from canonical topology, physical directory,
+			// and decoded-byte facts. Optional meshlet bounds deliberately contribute
+			// nothing: they are a culling acceleration structure, not geometry truth.
+			// Repeated instances share these immutable facts, so calculate them once
+			// for the mesh instead of once for every object in a crowd.
+			const float sourceTriangleWork =
+				static_cast<float>(routeFacts.sourceTriangleCount);
+			const float meshletWork = static_cast<float>(routeFacts.packedMeshletCount);
+			const float decodedKiB = static_cast<float>(routeFacts.decodedBytes) / 1024.0F;
+			const float directCost = sourceTriangleWork + meshletWork * 8.0F
+				+ decodedKiB * 0.125F;
+			const float virtualDirectoryWork =
+				static_cast<float>(routeFacts.physicalPageCount) * 24.0F
+				+ static_cast<float>(routeFacts.physicalBlockCount) * 3.0F;
+			routeInput.direct.valid = routeFacts.directUsable;
+			routeInput.direct.estimatedCost = routeFacts.directUsable
+				? std::max(1.0F, directCost) : 0.0F;
+			routeInput.virtualGeometryHardware.valid = routeFacts.virtualGeometryUsable;
+			routeInput.virtualGeometryHardware.capabilitiesAvailable =
+				hardwareVirtualGeometryRouteAvailable;
+			routeInput.virtualGeometryHardware.estimatedCost = routeFacts.virtualGeometryUsable
+				? std::max(1.0F, sourceTriangleWork * 0.45F + meshletWork * 2.0F
+					+ decodedKiB * 0.050F + virtualDirectoryWork)
+				: 0.0F;
+			routeInput.virtualGeometryCompute.valid = routeFacts.virtualGeometryUsable;
+			routeInput.virtualGeometryCompute.capabilitiesAvailable =
+				computeVirtualGeometryRouteAvailable;
+			routeInput.virtualGeometryCompute.estimatedCost = routeFacts.virtualGeometryUsable
+				? std::max(1.0F, sourceTriangleWork * 0.58F + meshletWork * 3.0F
+					+ decodedKiB * 0.075F + virtualDirectoryWork)
+				: 0.0F;
+			routeInput.calibrationIdentity = routeFacts.calibrationIdentity == 0u
+				? 1u : routeFacts.calibrationIdentity;
+			if(validationRouteOverride.has_value()) {
+				switch(*validationRouteOverride) {
+				case TerraEngine::Renderer::VirtualGeometryRasterRoute::Indexed:
+					routeInput.authorOverride =
+						TerraEngine::Renderer::GeometryRoute::DirectMeshlet;
+					break;
+				case TerraEngine::Renderer::VirtualGeometryRasterRoute::Hardware:
+					routeInput.authorOverride =
+						TerraEngine::Renderer::GeometryRoute::VirtualGeometryHardware;
+					break;
+				case TerraEngine::Renderer::VirtualGeometryRasterRoute::Compute:
+					routeInput.authorOverride =
+						TerraEngine::Renderer::GeometryRoute::VirtualGeometryCompute;
+					break;
+				case TerraEngine::Renderer::VirtualGeometryRasterRoute::Fallback:
+					// The setter rejects this retired validation choice. Keep the
+					// snapshot automatic if external code somehow supplies it.
+					break;
+				}
 			}
-		}
-		const std::uint64_t routeObjectIdentity =
-			static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(entry.objectId));
-		const std::uint64_t routeMeshIdentity =
-			static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(entry.mesh.meshId));
-		auto cachedRoute = geometryRouteDecisionByMesh.find(entry.mesh.meshId);
-		if(cachedRoute == geometryRouteDecisionByMesh.end()) {
+			const std::uint64_t routeMeshIdentity = entry.meshIdentity;
 			// Calibration identity distinguishes recooked topology while the mesh
 			// identity keeps unrelated resources from sharing hysteresis history.
 			const std::uint64_t routeStateKey = routeMeshIdentity
@@ -5074,11 +5193,16 @@ void RenderSystem::Update(float deltaTime)
 					routeInput, priorRouteState->second)
 				: TerraEngine::Renderer::SelectGeometryRouteCompact(routeInput);
 			geometryRoutePolicyStates[routeStateKey] = preparedRoute.nextState;
-			cachedRoute = geometryRouteDecisionByMesh.emplace(
-				entry.mesh.meshId, std::move(preparedRoute)).first;
+			const auto cachedRoute = geometryRouteDecisionByMesh.emplace(
+				entry.mesh.meshId,
+				CachedGeometryRouteDecision{
+					std::move(preparedRoute), routeMeshIdentity}).first;
+			preparedRouteDecision = &cachedRoute->second;
 		}
 		const TerraEngine::Renderer::GeometryRouteDecision& preparedRoute =
-			cachedRoute->second;
+			preparedRouteDecision->decision;
+		const std::uint64_t routeMeshIdentity =
+			preparedRouteDecision->meshIdentity;
 		TerraEngine::Renderer::GeometryRouteSelectionRecord routeSelection{};
 		routeSelection.objectIdentity = routeObjectIdentity;
 		routeSelection.meshIdentity = routeMeshIdentity;
@@ -5101,7 +5225,7 @@ void RenderSystem::Update(float deltaTime)
 		snapshotRenderable.geometryRouteInput.availableRepresentationMask =
 			routeFacts.representationFlags;
 		snapshotRenderable.geometryRouteInput.calibrationClassIdentity =
-			routeInput.calibrationIdentity;
+			preparedRoute.calibrationIdentity;
 		snapshotRenderable.geometryRouteInput.calibrationVersion =
 			mesh != nullptr ? mesh->runtimeLayout.version : 0u;
 		snapshotRenderable.geometryRouteInput.directBatchEligible =
@@ -5179,13 +5303,19 @@ void RenderSystem::Update(float deltaTime)
 			snapshotRenderable.invalidation = binding.invalidation;
 			snapshotRenderable.invalidation.view = activeRenderFrameId;
 		}
-		if(snapshotMeshIds.emplace(entry.mesh.meshId).second) {
-			renderFrameSnapshot.meshes.push_back({
-				entry.mesh.meshId, "mesh", true, false });
+		if(lastSnapshotMeshId != entry.mesh.meshId) {
+			lastSnapshotMeshId = entry.mesh.meshId;
+			if(snapshotMeshIds.emplace(entry.mesh.meshId).second) {
+				renderFrameSnapshot.meshes.push_back({
+					entry.mesh.meshId, "mesh", true, false });
+			}
 		}
-		if(snapshotMaterialIds.emplace(entry.mesh.materialId).second) {
-			renderFrameSnapshot.materials.push_back({
-				entry.mesh.materialId, "material", true, false });
+		if(lastSnapshotMaterialId != entry.mesh.materialId) {
+			lastSnapshotMaterialId = entry.mesh.materialId;
+			if(snapshotMaterialIds.emplace(entry.mesh.materialId).second) {
+				renderFrameSnapshot.materials.push_back({
+					entry.mesh.materialId, "material", true, false });
+			}
 		}
 	}
 	}
@@ -5875,7 +6005,8 @@ void RenderSystem::Update(float deltaTime)
 		const glm::uvec2& targetSize,
 		std::uint32_t outputId,
 		bool shadowPass,
-		bool exportRuntime) {
+		bool exportRuntime,
+		const std::vector<std::uint32_t>* virtualGeometryCommandIndices = nullptr) {
 		TerraEngine::Renderer::VirtualGeometryViewSelectionState state;
 		state.outputKind = outputKind;
 		state.viewType = viewType;
@@ -5947,8 +6078,7 @@ void RenderSystem::Update(float deltaTime)
 		state.compactionResults = compactionResults;
 		state.fallbackCoverage = fallbackCoverage;
 		state.lodTransitionStates = lodTransitionStates;
-		for (const DrawCommand& command : commands)
-		{
+		const auto appendVirtualGeometryDraw = [&](const DrawCommand& command) {
 			TerraEngine::Renderer::VirtualGeometryDrawRange range{};
 			range.selectedLodIndex = command.selectedVirtualLod;
 			range.meshletOffset = command.virtualMeshletOffset;
@@ -5985,7 +6115,7 @@ void RenderSystem::Update(float deltaTime)
 			}
 			if (!range.virtualGeometryActive && range.meshletCount == 0u && !range.failOpen)
 			{
-				continue;
+				return;
 			}
 			state.draws.push_back({
 				command.objectId,
@@ -5993,6 +6123,17 @@ void RenderSystem::Update(float deltaTime)
 				std::move(range),
 				command.taskShaderCullingEnabled
 			});
+		};
+		if(virtualGeometryCommandIndices != nullptr) {
+			for(const std::uint32_t commandIndex : *virtualGeometryCommandIndices) {
+				if(commandIndex < commands.size()) {
+					appendVirtualGeometryDraw(commands[commandIndex]);
+				}
+			}
+		} else {
+			for(const DrawCommand& command : commands) {
+				appendVirtualGeometryDraw(command);
+			}
 		}
 		state.hasHiZValidationState = true;
 		state.hiZValidationState = {};
@@ -7079,7 +7220,7 @@ void RenderSystem::Update(float deltaTime)
 			const RenderViewType diagnosticsViewType = outputKind == RenderOutputKind::MainRuntimeView ? RenderViewType::ExportRuntime : viewType;
 			{
 				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Reuse Visible VG Selection Stats", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-				recordVirtualGeometryViewSelection(existing->second.commands, existing->second.selectedClusters, existing->second.pageNeeds, existing->second.clusterPackets, existing->second.clusterBatches, existing->second.compactionResults, existing->second.fallbackCoverage, existing->second.lodTransitionStates, viewVirtualGeometryQuality.debugVisualizationMode, outputKind, diagnosticsViewType, targetSize, outputId, false, outputKind == RenderOutputKind::MainRuntimeView);
+				recordVirtualGeometryViewSelection(existing->second.commands, existing->second.selectedClusters, existing->second.pageNeeds, existing->second.clusterPackets, existing->second.clusterBatches, existing->second.compactionResults, existing->second.fallbackCoverage, existing->second.lodTransitionStates, viewVirtualGeometryQuality.debugVisualizationMode, outputKind, diagnosticsViewType, targetSize, outputId, false, outputKind == RenderOutputKind::MainRuntimeView, &existing->second.virtualGeometryCommandIndices);
 			}
 			{
 				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Reuse Visible Streaming Touch Set", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
@@ -7159,14 +7300,25 @@ void RenderSystem::Update(float deltaTime)
 		record.lastTouchedFrameId = activeRenderFrameId;
 		record.commands = result.commands;
 		record.renderableIndices.reserve(record.commands.size());
-		for(DrawCommand& command : record.commands)
+		for(std::size_t commandIndex = 0U;
+			commandIndex < record.commands.size(); ++commandIndex)
 		{
+			DrawCommand& command = record.commands[commandIndex];
 			const auto current = renderableCommandIndices.find(command.objectId);
 			const bool indexRepresentable = current != renderableCommandIndices.end()
 				&& current->second <= std::numeric_limits<std::uint32_t>::max();
 			record.renderableIndices.push_back(indexRepresentable
 				? static_cast<std::uint32_t>(current->second)
 				: std::numeric_limits<std::uint32_t>::max());
+			const bool contributesVirtualGeometry =
+				(command.virtualGeometryFlags & (kVirtualGeometryFlagActive
+					| kVirtualGeometryFlagFailOpen)) != 0U
+				|| command.virtualMeshletCount != 0U;
+			if(contributesVirtualGeometry
+				&& commandIndex <= std::numeric_limits<std::uint32_t>::max()) {
+				record.virtualGeometryCommandIndices.push_back(
+					static_cast<std::uint32_t>(commandIndex));
+			}
 			// The per-object compatible-pose cache is the sole retained owner of an
 			// older publication. Geometry selection never needs the pose pointer.
 			command.animationBinding = {};

@@ -22,6 +22,10 @@ public:
 	std::filesystem::path GetProfilerDirectory() const;
 
 	bool SaveNewCapture(TerraEngine::Profiling::ProfilerCaptureDocument document, std::filesystem::path& outPath, std::string& outError) const;
+	// The editor's asynchronous finish path already owns its document. Retaining
+	// that value after serialization avoids reading a multi-megabyte capture back
+	// from disk merely to select the session that was just recorded.
+	bool SaveNewCaptureRetained(TerraEngine::Profiling::ProfilerCaptureDocument& document, std::filesystem::path& outPath, std::string& outError) const;
 	bool LoadCapture(const std::filesystem::path& capturePath, TerraEngine::Profiling::ProfilerCaptureDocument& outDocument, std::string& outError) const;
 	std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> ListCaptures(std::string& outError, const std::function<bool()>& shouldCancel = {}) const;
 	bool IsPathInsideProject(const std::filesystem::path& path) const;

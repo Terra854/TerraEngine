@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <iterator>
 #include <numeric>
 #include <sstream>
 #include <thread>
@@ -740,6 +741,14 @@ void Profiler::Clear()
 // Profiler::LoadDocument is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Profiler::LoadDocument(const ProfilerCaptureDocument& loadedDocument)
 {
+	ProfilerCaptureDocument retainedDocument = loadedDocument;
+	LoadDocument(std::move(retainedDocument));
+}
+
+// Profiler::LoadDocument adopts a completed capture from an asynchronous store
+// without retaining a second copy of its potentially unbounded frame history.
+void Profiler::LoadDocument(ProfilerCaptureDocument&& loadedDocument)
+{
 	std::lock_guard<std::mutex> lock(mutex);
 	frameRecordingActive.store(false, std::memory_order_release);
 	markerRecordingActive.store(false, std::memory_order_release);
@@ -748,8 +757,12 @@ void Profiler::LoadDocument(const ProfilerCaptureDocument& loadedDocument)
 	hotPath->sessionGeneration.fetch_add(1u, std::memory_order_acq_rel);
 	hotPath->excludedEditorNanoseconds.store(0, std::memory_order_release);
 	DiscardPublishedThreadData(*hotPath);
-	document = loadedDocument;
-	retainedFrames.assign(document.frames.begin(), document.frames.end());
+	document = std::move(loadedDocument);
+	retainedFrames.clear();
+	retainedFrames.insert(
+		retainedFrames.end(),
+		std::make_move_iterator(document.frames.begin()),
+		std::make_move_iterator(document.frames.end()));
 	// Capture readers are tolerant of older or recovered artifacts, but every
 	// presentation API promises chronological frame-index order. Normalize once
 	// on load so the Profiler window can use its no-sort fast path safely.

@@ -2692,14 +2692,16 @@ namespace TerraEngine::Animation {
 					binding.morphStableIds.end(),
 					renderIdentity.morphStableIds.begin(),
 					renderIdentity.morphStableIds.end());
+				std::vector<std::uint64_t>& mutableMorphStableIds =
+					binding.morphStableIds.Mutable();
 				std::sort(
-					binding.morphStableIds.begin(),
-					binding.morphStableIds.end());
+					mutableMorphStableIds.begin(),
+					mutableMorphStableIds.end());
 				binding.morphStableIds.erase(
 					std::unique(
-						binding.morphStableIds.begin(),
-						binding.morphStableIds.end()),
-					binding.morphStableIds.end());
+						mutableMorphStableIds.begin(),
+						mutableMorphStableIds.end()),
+					mutableMorphStableIds.end());
 			}
 			ConfigureGpuResidentBinding(binding, renderIdentity);
 			return binding;
@@ -3001,12 +3003,19 @@ namespace TerraEngine::Animation {
 				bool playOnBind = false;
 			};
 			std::vector<PendingDirectClipStreamingRefresh> pendingDirectClipRefreshes;
+			struct PendingDirectClipFullBind {
+				Impl::Entry* entry = nullptr;
+				DirectClipBindingTemplate* prepared = nullptr;
+				bool playOnBind = false;
+			};
+			std::vector<PendingDirectClipFullBind> pendingDirectClipFullBinds;
 			std::map<ClipStreamPayloadKey, ClipStreamRetainAdjustment>
 				clipStreamRetainAdjustments;
 			// Reserve before touching live coordinator entries. A crowd-wide stream
 			// promotion can then be staged without an allocation failure midway through
 			// its protected bookkeeping.
 			pendingDirectClipRefreshes.reserve(authoredObjects.size());
+			pendingDirectClipFullBinds.reserve(authoredObjects.size());
 			// Prefab crowds commonly contain thousands of byte-identical authored
 			// components. Cache the ResourceManager observations and exact render-mesh
 			// validation per unique signature for this protected pass; every instance
@@ -3589,18 +3598,7 @@ namespace TerraEngine::Animation {
 							preparedBinding,
 							playOnBind});
 					} else {
-						binding.playOnBind = playOnBind;
-						AnimationStatus status = AnimationStatus::NotReady;
-						{
-							TERRAENGINE_PROFILE_SCOPE(
-								"Animation: Bind Full Animator Playback",
-								TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-							status = animation.BindAnimatorPlayback(
-								existing->second.handle,
-								std::move(binding));
-						}
 						existing->second.signature = signature;
-						existing->second.lastBindingStatus = status;
 						existing->second.clipStreamingPending = clipStreamingState.pending;
 						existing->second.motionDatabaseStreamed =
 							clipStreamingState.motionDatabaseStreamed;
@@ -3611,12 +3609,34 @@ namespace TerraEngine::Animation {
 							clipStreamingState.retainedRequests,
 							{},
 							clipStreamRetainAdjustments);
-						if(status == AnimationStatus::Ok
-							|| status == AnimationStatus::MissingAsset
-							|| status == AnimationStatus::IncompatibleAsset) {
-							++summary.reboundCount;
+						if(preparedBinding != nullptr
+							&& component->controllerAssetId == EMPTY_UUID) {
+							// Identical direct-clip prefab bindings share one immutable
+							// preparation. Defer them so AnimationSystem acquires runtime
+							// ownership and invalidates global lifecycle state only once.
+							pendingDirectClipFullBinds.push_back({
+								&existing->second,
+								preparedBinding,
+								playOnBind});
 						} else {
-							++summary.failedCount;
+							binding.playOnBind = playOnBind;
+							AnimationStatus status = AnimationStatus::NotReady;
+							{
+								TERRAENGINE_PROFILE_SCOPE(
+									"Animation: Bind Full Animator Playback",
+									TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+								status = animation.BindAnimatorPlayback(
+									existing->second.handle,
+									std::move(binding));
+							}
+							existing->second.lastBindingStatus = status;
+							if(status == AnimationStatus::Ok
+								|| status == AnimationStatus::MissingAsset
+								|| status == AnimationStatus::IncompatibleAsset) {
+								++summary.reboundCount;
+							} else {
+								++summary.failedCount;
+							}
 						}
 					}
 				}
@@ -3625,6 +3645,39 @@ namespace TerraEngine::Animation {
 				summary.fallbackMotionDatabaseCount +=
 					existing->second.motionDatabaseFallback ? 1U : 0U;
 				includeDesiredClipRequests(existing->second.retainedClipStreams);
+			}
+			if(!pendingDirectClipFullBinds.empty()) {
+				TERRAENGINE_PROFILE_SCOPE(
+					"Animation: Bind Full Animator Playback Batch",
+					TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+				std::vector<AnimatorPlaybackBindRequest> requests;
+				std::vector<AnimationStatus> statuses(
+					pendingDirectClipFullBinds.size(), AnimationStatus::InvalidArgument);
+				requests.reserve(pendingDirectClipFullBinds.size());
+				for(const PendingDirectClipFullBind& pending
+					: pendingDirectClipFullBinds) {
+					requests.push_back({
+						pending.entry->handle,
+						&pending.prepared->binding,
+						pending.prepared->validatedClipViewStatus
+							== AnimationStatus::Ok
+							? &pending.prepared->validatedClipView : nullptr,
+						pending.playOnBind});
+				}
+				animation.BindAnimatorPlaybackBatch(requests, statuses);
+				for(std::size_t index = 0U;
+					index < pendingDirectClipFullBinds.size(); ++index) {
+					Impl::Entry& entry = *pendingDirectClipFullBinds[index].entry;
+					const AnimationStatus status = statuses[index];
+					entry.lastBindingStatus = status;
+					if(status == AnimationStatus::Ok
+						|| status == AnimationStatus::MissingAsset
+						|| status == AnimationStatus::IncompatibleAsset) {
+						++summary.reboundCount;
+					} else {
+						++summary.failedCount;
+					}
+				}
 			}
 			if(!clipStreamRetainAdjustments.empty()) {
 				TERRAENGINE_PROFILE_SCOPE(

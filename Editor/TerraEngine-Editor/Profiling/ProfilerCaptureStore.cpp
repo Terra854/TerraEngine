@@ -87,6 +87,13 @@ std::filesystem::path ProfilerCaptureStore::GetProfilerDirectory() const
 // ProfilerCaptureStore::SaveNewCapture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool ProfilerCaptureStore::SaveNewCapture(TerraEngine::Profiling::ProfilerCaptureDocument document, std::filesystem::path& outPath, std::string& outError) const
 {
+	return SaveNewCaptureRetained(document, outPath, outError);
+}
+
+// ProfilerCaptureStore::SaveNewCaptureRetained serializes one caller-owned
+// document while preserving its normalized metadata for immediate selection.
+bool ProfilerCaptureStore::SaveNewCaptureRetained(TerraEngine::Profiling::ProfilerCaptureDocument& document, std::filesystem::path& outPath, std::string& outError) const
+{
 	if (root.empty())
 	{
 		outError = "No project is open.";

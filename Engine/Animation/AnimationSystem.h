@@ -16,6 +16,7 @@
 #include "Animation/Runtime/AnimationWorkScheduler.h"
 #include "Animation/Runtime/AnimatorPlayback.h"
 #include "Animation/Runtime/RootMotion.h"
+#include "Animation/Runtime/SharedCopyVector.h"
 #include "Animation/Procedural/ProceduralCommandStore.h"
 #include "Animation/Gpu/GpuAnimationPlanner.h"
 #include "Core/SystemBase.h"
@@ -96,14 +97,14 @@ namespace TerraEngine::Animation {
 		std::shared_ptr<const RagdollProfileAsset> ragdollProfile;
 		std::shared_ptr<const SkeletonAsset> retargetSourceSkeleton;
 		std::vector<AnimatorControllerClipBinding> controllerClips;
-		std::vector<std::uint8_t> residentSegments;
-		std::vector<std::uint64_t> jointStableIds;
+		SharedCopyVector<std::uint8_t> residentSegments;
+		SharedCopyVector<std::uint64_t> jointStableIds;
 		// Source-rig order is retained separately from the target publication layout.
 		// A retarget worker samples this exact immutable order, then publishes only
 		// target-rig joints through jointStableIds.
-		std::vector<std::uint64_t> retargetSourceJointStableIds;
-		std::vector<std::uint64_t> morphStableIds;
-		std::vector<std::uint64_t> curveStableIds;
+		SharedCopyVector<std::uint64_t> retargetSourceJointStableIds;
+		SharedCopyVector<std::uint64_t> morphStableIds;
+		SharedCopyVector<std::uint64_t> curveStableIds;
 		// GPU presentation uses only immutable, binding-owned values.  The vectors
 		// below replace borrowed consumer spans and remain valid through worker
 		// planning and protected publication.
@@ -114,8 +115,8 @@ namespace TerraEngine::Animation {
 		bool controllerProgramRequired = false;
 		AnimationStatus controllerProgramStatus = AnimationStatus::Ok;
 		AnimationExecutionPolicy requestedExecutionPolicy = AnimationExecutionPolicy::Auto;
-		std::vector<std::uint32_t> authoritativeJointIndices;
-		std::vector<std::int32_t> jointParents;
+		SharedCopyVector<std::uint32_t> authoritativeJointIndices;
+		SharedCopyVector<std::int32_t> jointParents;
 		AnimationGpuExecutionInputs gpuExecution{};
 		std::uint32_t gpuProgramResourceIndex = kGpuAnimationInvalidResourceIndex;
 		GpuAnimationVisualInput gpuVisual{};
@@ -177,6 +178,19 @@ namespace TerraEngine::Animation {
 		// The protected batch may repair a lagging runtime record when the same
 		// direct-clip asset has already advanced to a newer immutable generation.
 		bool allowClipPublicationReplacement = false;
+		bool playOnBind = false;
+	};
+
+	// The component coordinator owns each binding pointer for the duration of one
+	// protected batch. Direct-clip prefab crowds share an immutable prepared
+	// template while retaining independent runtime clocks and publication state.
+	struct AnimatorPlaybackBindRequest {
+		AnimatorInstanceHandle handle;
+		const AnimatorPlaybackBinding* binding = nullptr;
+		// The coordinator validates one direct-clip publication per shared authored
+		// signature. Each runtime record adopts that checked view state instead of
+		// reopening identical codec and skeleton tables thousands of times.
+		const AnimationClipView* sharedValidatedClipView = nullptr;
 		bool playOnBind = false;
 	};
 
@@ -293,6 +307,12 @@ namespace TerraEngine::Animation {
 		[[nodiscard]] AnimationStatus BindAnimatorPlayback(
 			AnimatorInstanceHandle handle,
 			AnimatorPlaybackBinding binding);
+		// Bind a crowd under one runtime-ownership lock and one global lifecycle
+		// invalidation. Each record is still validated and updated independently;
+		// statuses preserve the request order and failures cannot alias another owner.
+		void BindAnimatorPlaybackBatch(
+			std::span<const AnimatorPlaybackBindRequest> requests,
+			std::span<AnimationStatus> statuses);
 		// Promote newly resident segment bytes for an unchanged direct-clip binding.
 		// This preserves playback, graph, parameter, and publication continuity while
 		// replacing only the immutable stream/GPU resource views.
@@ -406,6 +426,14 @@ namespace TerraEngine::Animation {
 	private:
 		AnimationSystem();
 		~AnimationSystem() override;
+		[[nodiscard]] AnimationStatus BindAnimatorPlaybackLocked(
+			AnimatorInstanceHandle handle,
+			AnimatorPlaybackBinding binding,
+			const AnimationClipView* sharedValidatedClipView,
+			bool immutableBindingValidated,
+			bool deferEvaluationCacheInvalidation,
+			bool publishGlobalInvalidation,
+			bool& outMutated);
 		[[nodiscard]] AnimationStatus RefreshAnimatorDirectClipStreamingLocked(
 			AnimatorInstanceHandle handle,
 			const AnimatorPlaybackBinding& streamedBinding,

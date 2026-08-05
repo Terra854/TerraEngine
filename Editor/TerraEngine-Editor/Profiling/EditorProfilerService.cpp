@@ -327,7 +327,7 @@ void EditorProfilerService::FinishCapture()
 		std::filesystem::path savedPath;
 		std::string error;
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!storeSnapshot.SaveNewCapture(std::move(document), savedPath, error))
+		if (!storeSnapshot.SaveNewCaptureRetained(document, savedPath, error))
 		{
 			std::shared_ptr<EditorProfilerService> self = weakSelf.lock();
 			if (!self)
@@ -349,57 +349,29 @@ void EditorProfilerService::FinishCapture()
 			return;
 		}
 
-		ProfilerCaptureDocument loadedDocument;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!storeSnapshot.LoadCapture(savedPath, loadedDocument, error))
-		{
-			std::shared_ptr<EditorProfilerService> self = weakSelf.lock();
-			if (!self)
-			{
-				return;
-			}
-			std::lock_guard<std::mutex> lock(self->mutex);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (generation == self->projectGeneration && (!cancelToken || !cancelToken->load(std::memory_order_acquire)))
-			{
-				self->busy = false;
-				self->lastError = error;
-				self->statusText = "Saved capture but failed to open it";
-			}
-			return;
-		}
-		if (cancelToken && cancelToken->load(std::memory_order_acquire))
-		{
-			return;
-		}
-
-		std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> refreshedCaptures = storeSnapshot.ListCaptures(error, [cancelToken]() {
-			return cancelToken && cancelToken->load(std::memory_order_acquire);
-		});
-		if (cancelToken && cancelToken->load(std::memory_order_acquire))
-		{
-			return;
-		}
 		std::optional<EditorProfilerCaptureArtifact> savedCaptureArtifact;
-		const std::filesystem::path normalizedSavedPath = savedPath.lexically_normal();
-		const auto savedCapture = std::find_if(
-			refreshedCaptures.begin(),
-			refreshedCaptures.end(),
-			[&normalizedSavedPath](const TerraEngine::Profiling::ProfilerCaptureArtifact& artifact) {
-				return artifact.absolutePath.lexically_normal() == normalizedSavedPath;
-			});
-		if (savedCapture != refreshedCaptures.end())
-		{
+		TerraEngine::Profiling::ProfilerCaptureArtifact savedCapture;
+		if (TerraEngine::Profiling::TryReadCaptureArtifactMetadata(
+			savedPath, savedCapture) && savedCapture.supported) {
+			if(savedCapture.status == "Ready (metadata)") {
+				savedCapture.status = "Ready";
+			}
+			if(savedCapture.status.empty()) {
+				savedCapture.status = savedCapture.recoveredIncompleteTail
+					? "recovered_incomplete_tail"
+					: (savedCapture.complete ? "complete" : "incomplete");
+			}
 			savedCaptureArtifact = EditorProfilerCaptureArtifact{
-				MakeArtifactId(savedCapture->fileName),
-				*savedCapture
+				MakeArtifactId(savedCapture.fileName),
+				std::move(savedCapture)
 			};
 		}
-		else if (error.empty())
-		{
-			error = "Saved profiler capture was missing from the refreshed project index.";
+		else {
+			error = "Saved profiler capture metadata could not be reopened.";
 		}
-		Profiler::Instance().LoadDocument(loadedDocument);
+		// The store retained the exact document it serialized. Transfer it directly
+		// into the profiler instead of parsing the file again and copying every frame.
+		Profiler::Instance().LoadDocument(std::move(document));
 
 		std::shared_ptr<EditorProfilerService> self = weakSelf.lock();
 		if (!self)
@@ -410,7 +382,26 @@ void EditorProfilerService::FinishCapture()
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (generation == self->projectGeneration && (!cancelToken || !cancelToken->load(std::memory_order_acquire)))
 		{
-			self->captures = std::move(refreshedCaptures);
+			if(savedCaptureArtifact.has_value()) {
+				const std::filesystem::path normalizedSavedPath =
+					savedCaptureArtifact->artifact.absolutePath.lexically_normal();
+				auto existing = std::find_if(
+					self->captures.begin(), self->captures.end(),
+					[&normalizedSavedPath](
+						const TerraEngine::Profiling::ProfilerCaptureArtifact& artifact) {
+						return artifact.absolutePath.lexically_normal()
+							== normalizedSavedPath;
+					});
+				if(existing != self->captures.end()) {
+					*existing = savedCaptureArtifact->artifact;
+				} else {
+					self->captures.push_back(savedCaptureArtifact->artifact);
+				}
+				std::sort(self->captures.begin(), self->captures.end(),
+					[](const auto& left, const auto& right) {
+						return left.fileName > right.fileName;
+					});
+			}
 			self->lastSavedCaptureArtifact = std::move(savedCaptureArtifact);
 			self->busy = false;
 			self->lastError = error;

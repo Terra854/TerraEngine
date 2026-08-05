@@ -305,6 +305,51 @@ namespace TerraEngine::Tests {
 				"The former generation-high/slot-plus-one encoding must fail closed before RenderSystem can bind a GPU-only packet.");
 		});
 
+		registry.Add("Animation.Presentation.OwnerLookupFindsFirstExactMapping", [](TestContext& context) {
+			TerraEngine::Animation::PublishedGpuAnimationPresentationPlan plan;
+			for(std::uint32_t index = 0U; index < 32U; ++index) {
+				TerraEngine::Animation::GpuAnimationOwnerObjectMapping mapping;
+				mapping.ownerObjectId[0] = static_cast<std::uint8_t>(index + 1U);
+				mapping.stableInstanceId = static_cast<std::uint64_t>(index + 1U);
+				mapping.workPacketIndex = index;
+				plan.ownerObjectMappings.push_back(mapping);
+			}
+			// A duplicate owner remains adjacent after canonical publication sorting.
+			// The lookup must name the first record so RenderSystem can detect ambiguity.
+			TerraEngine::Animation::GpuAnimationOwnerObjectMapping duplicate =
+				plan.ownerObjectMappings[11U];
+			duplicate.workPacketIndex = 99U;
+			plan.ownerObjectMappings.insert(
+				plan.ownerObjectMappings.begin() + 12U, duplicate);
+			plan.BuildOwnerObjectLookup();
+
+			const TerraEngine::Animation::GpuAnimationOwnerObjectMapping* found =
+				plan.FindFirstOwnerObjectMapping(plan.ownerObjectMappings[11U].ownerObjectId);
+			context.Expect(found == &plan.ownerObjectMappings[11U]
+				&& found->workPacketIndex == 11U,
+				"The immutable owner index must resolve the first exact sorted mapping.");
+			TerraEngine::UUID missing{};
+			missing[0] = 201U;
+			context.Expect(plan.FindFirstOwnerObjectMapping(missing) == nullptr,
+				"An absent owner must fail closed without falling through to another bucket.");
+		});
+
+		registry.Add("Animation.Binding.SharedArraysDetachOnlyOnMutation", [](TestContext& context) {
+			TerraEngine::Animation::SharedCopyVector<std::uint64_t> original{
+				11U, 22U, 33U};
+			TerraEngine::Animation::SharedCopyVector<std::uint64_t> copied = original;
+			context.Expect(original.data() == copied.data(),
+				"A frame binding copy must retain the same immutable array storage.");
+
+			copied.Mutable()[1U] = 99U;
+			context.Expect(original.data() != copied.data(),
+				"The first mutation must detach without changing an older frame snapshot.");
+			context.ExpectEqual(static_cast<std::uint64_t>(22U), original[1U],
+				"The original immutable binding array must preserve its captured value.");
+			context.ExpectEqual(static_cast<std::uint64_t>(99U), copied[1U],
+				"The detached writer must publish its replacement value independently.");
+		});
+
 		registry.Add("Animation.Scheduler.WorkloadsSeparateWorkerPreparationFromPublication", [](TestContext& context) {
 			TerraEngine::Animation::AnimationSystem& animationSystem = TerraEngine::Animation::AnimationSystem::Instance();
 			TerraEngine::Animation::AnimationPresentationSystem& presentationSystem = TerraEngine::Animation::AnimationPresentationSystem::Instance();

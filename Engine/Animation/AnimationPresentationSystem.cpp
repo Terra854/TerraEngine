@@ -9,6 +9,7 @@
 #include <array>
 #include <atomic>
 #include <cassert>
+#include <functional>
 #include <mutex>
 #include <new>
 #include <thread>
@@ -17,6 +18,111 @@
 #include <utility>
 
 namespace TerraEngine::Animation {
+	void PublishedGpuAnimationPresentationPlan::BuildOwnerObjectLookup() noexcept
+	{
+		ownerObjectLookupIndices.clear();
+		ownerObjectLookupMask = 0U;
+		if(ownerObjectMappings.empty()) {
+			return;
+		}
+
+		// A maximum load factor of one half keeps the bounded linear probe short for
+		// large crowds. Overflow or allocation failure deliberately leaves the sorted
+		// vector as the exact, allocation-free lookup fallback.
+		std::size_t tableSize = 1U;
+		const std::size_t requiredSize = ownerObjectMappings.size() <=
+			(std::numeric_limits<std::size_t>::max() / 2U)
+			? ownerObjectMappings.size() * 2U
+			: std::numeric_limits<std::size_t>::max();
+		while(tableSize < requiredSize
+			&& tableSize <= (std::numeric_limits<std::uint32_t>::max() / 2U)) {
+			tableSize <<= 1U;
+		}
+		if(tableSize < requiredSize
+			|| tableSize > static_cast<std::size_t>(
+				std::numeric_limits<std::uint32_t>::max())) {
+			return;
+		}
+
+		const std::uint32_t emptyIndex = std::numeric_limits<std::uint32_t>::max();
+		try {
+			ownerObjectLookupIndices.assign(tableSize, emptyIndex);
+		} catch(const std::bad_alloc&) {
+			ownerObjectLookupIndices.clear();
+			return;
+		}
+		const std::uint32_t mask = static_cast<std::uint32_t>(tableSize - 1U);
+		for(std::size_t mappingIndex = 0U;
+			mappingIndex < ownerObjectMappings.size(); ++mappingIndex) {
+			if(mappingIndex > std::numeric_limits<std::uint32_t>::max()) {
+				ownerObjectLookupIndices.clear();
+				return;
+			}
+			const GpuAnimationOwnerObjectMapping& mapping =
+				ownerObjectMappings[mappingIndex];
+			std::uint32_t bucket = static_cast<std::uint32_t>(
+				std::hash<UUID>{}(mapping.ownerObjectId)) & mask;
+			bool inserted = false;
+			for(std::size_t probe = 0U; probe < tableSize; ++probe) {
+				std::uint32_t& storedIndex = ownerObjectLookupIndices[bucket];
+				if(storedIndex == emptyIndex) {
+					storedIndex = static_cast<std::uint32_t>(mappingIndex);
+					inserted = true;
+					break;
+				}
+				if(ownerObjectMappings[storedIndex].ownerObjectId
+					== mapping.ownerObjectId) {
+					// Sorted publication order guarantees the first occurrence is the
+					// beginning of the exact adjacent owner range.
+					inserted = true;
+					break;
+				}
+				bucket = (bucket + 1U) & mask;
+			}
+			if(!inserted) {
+				ownerObjectLookupIndices.clear();
+				return;
+			}
+		}
+		ownerObjectLookupMask = mask;
+	}
+
+	const GpuAnimationOwnerObjectMapping*
+		PublishedGpuAnimationPresentationPlan::FindFirstOwnerObjectMapping(
+			const UUID& ownerObjectId) const noexcept
+	{
+		if(ownerObjectId == EMPTY_UUID || ownerObjectMappings.empty()) {
+			return nullptr;
+		}
+		if(!ownerObjectLookupIndices.empty()
+			&& ownerObjectLookupIndices.size()
+				== static_cast<std::size_t>(ownerObjectLookupMask) + 1U) {
+			const std::uint32_t emptyIndex = std::numeric_limits<std::uint32_t>::max();
+			std::uint32_t bucket = static_cast<std::uint32_t>(
+				std::hash<UUID>{}(ownerObjectId)) & ownerObjectLookupMask;
+			for(std::size_t probe = 0U; probe < ownerObjectLookupIndices.size(); ++probe) {
+				const std::uint32_t storedIndex = ownerObjectLookupIndices[bucket];
+				if(storedIndex == emptyIndex) {
+					return nullptr;
+				}
+				if(storedIndex < ownerObjectMappings.size()
+					&& ownerObjectMappings[storedIndex].ownerObjectId == ownerObjectId) {
+					return &ownerObjectMappings[storedIndex];
+				}
+				bucket = (bucket + 1U) & ownerObjectLookupMask;
+			}
+			return nullptr;
+		}
+
+		const auto mapping = std::lower_bound(
+			ownerObjectMappings.begin(), ownerObjectMappings.end(), ownerObjectId,
+			[](const GpuAnimationOwnerObjectMapping& candidate, const UUID& value) {
+				return candidate.ownerObjectId < value;
+			});
+		return mapping != ownerObjectMappings.end()
+			&& mapping->ownerObjectId == ownerObjectId ? &*mapping : nullptr;
+	}
+
 	namespace {
 		constexpr std::size_t kInlinePresentationThreshold = 16U;
 	}
@@ -471,11 +577,14 @@ namespace TerraEngine::Animation {
 								< std::tie(right.ownerObjectId, right.componentGeneration,
 									right.stableInstanceId, right.workPacketIndex);
 						});
+					publication->BuildOwnerObjectLookup();
 				} catch(const std::bad_alloc&) {
 					// An incomplete owner map cannot safely support GPU-only rendering.
 					// Retire this candidate as a CPU fallback instead of publishing a
 					// plan whose packets cannot be tied to their originating objects.
 					publication->ownerObjectMappings.clear();
+					publication->ownerObjectLookupIndices.clear();
+					publication->ownerObjectLookupMask = 0U;
 					publication->plan = {};
 					publication->safeFallback = true;
 				}

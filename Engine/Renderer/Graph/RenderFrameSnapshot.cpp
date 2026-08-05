@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <map>
 #include <optional>
 #include <unordered_map>
@@ -985,6 +986,78 @@ namespace TerraEngine::Renderer {
 			&& record.gpuStageMask != 0U;
 	}
 
+	void AnimatedObjectVisibilitySnapshot::BuildVisibleObjectLookup() noexcept
+	{
+		visibleObjectLookupIndices.clear();
+		visibleObjectLookupMask = 0U;
+		if(visibleObjectIds.empty()
+			|| visibleObjectIds.size() >= std::numeric_limits<std::uint32_t>::max()) {
+			return;
+		}
+		try {
+			std::size_t capacity = 1U;
+			const std::size_t required = visibleObjectIds.size() * 2U;
+			while(capacity < required) {
+				if(capacity > (std::numeric_limits<std::uint32_t>::max() >> 1U)) {
+					return;
+				}
+				capacity <<= 1U;
+			}
+			const std::uint32_t invalidIndex =
+				std::numeric_limits<std::uint32_t>::max();
+			std::vector<std::uint32_t> lookup(capacity, invalidIndex);
+			const std::uint32_t mask = static_cast<std::uint32_t>(capacity - 1U);
+			for(std::uint32_t index = 0U;
+				index < static_cast<std::uint32_t>(visibleObjectIds.size()); ++index) {
+				std::uint32_t slot = static_cast<std::uint32_t>(
+					HashUuid(visibleObjectIds[index])) & mask;
+				for(std::size_t probe = 0U; probe < capacity; ++probe) {
+					const std::uint32_t existing = lookup[slot];
+					if(existing == invalidIndex) {
+						lookup[slot] = index;
+						break;
+					}
+					if(existing < visibleObjectIds.size()
+						&& visibleObjectIds[existing] == visibleObjectIds[index]) {
+						break;
+					}
+					slot = (slot + 1U) & mask;
+				}
+			}
+			visibleObjectLookupIndices = std::move(lookup);
+			visibleObjectLookupMask = mask;
+		} catch(const std::bad_alloc&) {
+			// The canonical sorted vector remains a complete exact fallback. Memory
+			// pressure therefore affects only lookup speed, never culling correctness.
+			visibleObjectLookupIndices.clear();
+			visibleObjectLookupMask = 0U;
+		}
+	}
+
+	bool AnimatedObjectVisibilitySnapshot::Contains(
+		const TerraEngine::UUID& objectId) const noexcept
+	{
+		const std::uint32_t invalidIndex = std::numeric_limits<std::uint32_t>::max();
+		if(!visibleObjectLookupIndices.empty()
+			&& visibleObjectLookupIndices.size()
+				== static_cast<std::size_t>(visibleObjectLookupMask) + 1U) {
+			std::uint32_t slot = static_cast<std::uint32_t>(HashUuid(objectId))
+				& visibleObjectLookupMask;
+			for(std::size_t probe = 0U; probe < visibleObjectLookupIndices.size(); ++probe) {
+				const std::uint32_t index = visibleObjectLookupIndices[slot];
+				if(index == invalidIndex) return false;
+				if(index < visibleObjectIds.size()
+					&& visibleObjectIds[index] == objectId) {
+					return true;
+				}
+				slot = (slot + 1U) & visibleObjectLookupMask;
+			}
+			return false;
+		}
+		return std::binary_search(
+			visibleObjectIds.begin(), visibleObjectIds.end(), objectId);
+	}
+
 	void PublishAnimatedObjectVisibilitySnapshot(
 		AnimatedObjectVisibilitySnapshot snapshot)
 	{
@@ -999,6 +1072,7 @@ namespace TerraEngine::Renderer {
 				snapshot.visibleObjectIds.end());
 			snapshot.canonicalUnique = true;
 		}
+		snapshot.BuildVisibleObjectLookup();
 		auto immutable = std::make_shared<const AnimatedObjectVisibilitySnapshot>(
 			std::move(snapshot));
 		std::atomic_store_explicit(

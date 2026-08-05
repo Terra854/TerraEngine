@@ -383,6 +383,12 @@ namespace TerraEngine::Renderer {
 		std::uint64_t frameId = 0U;
 		std::uint64_t sceneGeneration = 0U;
 		std::vector<TerraEngine::UUID> visibleObjectIds;
+		// A compact open-addressed table stores indices into visibleObjectIds. The
+		// renderer builds it once when publishing; thousands of animation workers
+		// then perform exact expected-O(1) membership tests instead of repeating a
+		// binary search through the same immutable vector for every animator.
+		std::vector<std::uint32_t> visibleObjectLookupIndices;
+		std::uint32_t visibleObjectLookupMask = 0U;
 		bool hasActiveView = false;
 		bool valid = false;
 		// RenderSystem can publish directly from its canonical renderable-index mask.
@@ -390,11 +396,11 @@ namespace TerraEngine::Renderer {
 		// normalization in PublishAnimatedObjectVisibilitySnapshot.
 		bool canonicalUnique = false;
 
-		[[nodiscard]] bool Contains(const TerraEngine::UUID& objectId) const noexcept
-		{
-			return std::binary_search(
-				visibleObjectIds.begin(), visibleObjectIds.end(), objectId);
-		}
+		// BuildVisibleObjectLookup is called only by the protected publisher after
+		// canonicalization. Allocation failure leaves the sorted-vector fallback
+		// intact, so visibility remains fail-open and deterministic.
+		void BuildVisibleObjectLookup() noexcept;
+		[[nodiscard]] bool Contains(const TerraEngine::UUID& objectId) const noexcept;
 	};
 
 	// Publication swaps one complete shared snapshot atomically. Readers never

@@ -73,6 +73,19 @@ namespace TerraEngine::Animation {
 		// This contains only mappings whose stable packet survived lowering. Keeping
 		// it in the envelope makes packet/object matching one atomic publication.
 		std::vector<GpuAnimationOwnerObjectMapping> ownerObjectMappings;
+		// Presentation builds this compact open-addressed table once before atomic
+		// publication. Render collection can then resolve thousands of authored
+		// owners in expected O(1) time without rebuilding a frame-local hash table.
+		// Each slot stores an index into the sorted ownerObjectMappings vector.
+		std::vector<std::uint32_t> ownerObjectLookupIndices;
+		std::uint32_t ownerObjectLookupMask = 0U;
+
+		// BuildOwnerObjectLookup preserves the sorted-vector fallback if allocation
+		// fails. FindFirstOwnerObjectMapping returns the first mapping for an owner,
+		// allowing the renderer to retain its adjacent-duplicate ambiguity check.
+		void BuildOwnerObjectLookup() noexcept;
+		[[nodiscard]] const GpuAnimationOwnerObjectMapping*
+			FindFirstOwnerObjectMapping(const UUID& ownerObjectId) const noexcept;
 	};
 
 	// Presentation is intentionally a separate system from controller authority.

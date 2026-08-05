@@ -2234,7 +2234,7 @@ namespace TerraEngine::Animation {
 					for(std::size_t inputIndex = 0U; inputIndex < capturedFrameInputs.size();
 						++inputIndex) {
 						const AnimationFrameInput &input = capturedFrameInputs[inputIndex];
-						const RuntimeRecord *record = FindRuntimeRecordLocked(input.handle);
+						RuntimeRecord *record = FindRuntimeRecordLocked(input.handle);
 						if(record == nullptr ||
 						   record->poseGeneration ==
 							   std::numeric_limits<AnimationGeneration>::max()) {
@@ -2324,6 +2324,12 @@ namespace TerraEngine::Animation {
 						if(item.controllerStateCaptured) {
 							item.capturedGraphState = record->graphState;
 							item.candidateGraphState = record->graphState;
+							// Both private copies are now complete, so exchange the candidate
+							// and live buffers without changing either value. Workers mutate the
+							// original allocation while the runtime keeps an identical rollback
+							// copy; successful publication can later swap the candidate back in
+							// without deep-copying three history vectors for every animator.
+							std::swap(item.candidateGraphState, record->graphState);
 							item.transition = record->transition;
 						} else if(priorControllerStateCaptured || !sameAnimator) {
 							// Clear a reused slot once when it leaves controller evaluation.
@@ -6332,7 +6338,10 @@ namespace TerraEngine::Animation {
 					record->eventStream = item.eventStream;
 				}
 				if(item.controllerStateCaptured) {
-					record->graphState = item.candidateGraphState;
+					// Capture retained a complete live rollback copy before workers ran.
+					// Swap the validated candidate into authority in constant time; the
+					// prior allocation returns to the retained item for the next capture.
+					std::swap(record->graphState, item.candidateGraphState);
 					record->transition = item.transition;
 				}
 				record->binding.stateId = item.binding.stateId;
@@ -8516,6 +8525,21 @@ namespace TerraEngine::Animation {
 	{
 		impl_->AssertCoordinatorThread();
 		std::scoped_lock lock(impl_->runtimeOwnershipMutex);
+		bool mutated = false;
+		return BindAnimatorPlaybackLocked(
+			handle, std::move(binding), nullptr, false, false, true, mutated);
+	}
+
+	AnimationStatus AnimationSystem::BindAnimatorPlaybackLocked(
+		AnimatorInstanceHandle handle,
+		AnimatorPlaybackBinding binding,
+		const AnimationClipView* sharedValidatedClipView,
+		bool immutableBindingValidated,
+		bool deferEvaluationCacheInvalidation,
+		bool publishGlobalInvalidation,
+		bool& outMutated)
+	{
+		outMutated = false;
 		Impl::RuntimeRecord* record = impl_->FindRuntimeRecordLocked(handle);
 		if(!impl_->runtimeActive.load(std::memory_order_acquire)
 			|| record == nullptr || !impl_->instances->IsAlive(handle)) {
@@ -8525,7 +8549,8 @@ namespace TerraEngine::Animation {
 			|| binding.programGeneration == 0U || binding.stateId == 0U) {
 			return AnimationStatus::InvalidArgument;
 		}
-		if(binding.controllerProgramRequired && binding.evaluationProgram) {
+		if(!immutableBindingValidated
+			&& binding.controllerProgramRequired && binding.evaluationProgram) {
 			const AnimationStatus stateProgramStatus = ValidateStateMachineProgram(
 				*binding.evaluationProgram);
 			if(stateProgramStatus != AnimationStatus::Ok) return stateProgramStatus;
@@ -8537,7 +8562,7 @@ namespace TerraEngine::Animation {
 				});
 			if(!initialStateExists) return AnimationStatus::InvalidArgument;
 		}
-		if((binding.retargetProfile
+		if(!immutableBindingValidated && ((binding.retargetProfile
 				&& (binding.retargetProfileGeneration == 0U
 					|| binding.retargetProfile->runtimeGeneration
 						!= binding.retargetProfileGeneration))
@@ -8548,7 +8573,7 @@ namespace TerraEngine::Animation {
 			|| (binding.ragdollProfile
 				&& (binding.ragdollProfileGeneration == 0U
 					|| binding.ragdollProfile->runtimeGeneration
-						!= binding.ragdollProfileGeneration))) {
+						!= binding.ragdollProfileGeneration)))) {
 			return AnimationStatus::InvalidArgument;
 		}
 		if(record->contentGeneration == std::numeric_limits<AnimationGeneration>::max()
@@ -8680,10 +8705,14 @@ namespace TerraEngine::Animation {
 			return std::adjacent_find(sorted.begin(), sorted.end()) == sorted.end();
 		};
 		try {
-			if(!validStableIds(binding.jointStableIds)
+			// A component crowd shares the exact prepared binding pointer. Once one
+			// live record has validated these immutable arrays, repeating four copied
+			// sorts for every identical prefab instance only adds protected-frame work.
+			if(!immutableBindingValidated
+				&& (!validStableIds(binding.jointStableIds)
 				|| !validStableIds(binding.retargetSourceJointStableIds)
 				|| !validStableIds(binding.morphStableIds)
-				|| !validStableIds(binding.curveStableIds)) {
+				|| !validStableIds(binding.curveStableIds))) {
 				return AnimationStatus::InvalidArgument;
 			}
 		} catch(const std::bad_alloc&) {
@@ -8732,12 +8761,21 @@ namespace TerraEngine::Animation {
 		if(dependencyStatus == AnimationStatus::Ok) {
 			const SkeletonAsset* samplingSkeleton = clipTargetsRetargetSource
 				? binding.retargetSourceSkeleton.get() : binding.skeleton.get();
-			dependencyStatus = clipView.Open(
-				*binding.clip,
-				samplingSkeleton,
-				std::span<const std::uint8_t>(binding.residentSegments),
-				binding.clipGeneration,
-				binding.streamedSegmentPayloads);
+			const bool sharedViewMatches = sharedValidatedClipView != nullptr
+				&& sharedValidatedClipView->Matches(
+					*binding.clip,
+					samplingSkeleton,
+					std::span<const std::uint8_t>(binding.residentSegments),
+					binding.clipGeneration,
+					binding.streamedSegmentPayloads);
+			dependencyStatus = sharedViewMatches
+				? clipView.AdoptValidatedPublicationFrom(*sharedValidatedClipView)
+				: clipView.Open(
+					*binding.clip,
+					samplingSkeleton,
+					std::span<const std::uint8_t>(binding.residentSegments),
+					binding.clipGeneration,
+					binding.streamedSegmentPayloads);
 			if(dependencyStatus == AnimationStatus::Ok) {
 				const AnimationAssetHandle clipHandle{binding.clip->assetId, binding.clipGeneration};
 				dependencyStatus = eventStream.Configure(
@@ -8770,10 +8808,17 @@ namespace TerraEngine::Animation {
 			binding.fallbackCompatibilityFingerprint =
 				binding.skeleton->compatibilityFingerprint;
 		}
-		(void)impl_->InvalidateLifecycleLocked(AnimationLifecycleBoundary::Asset);
-		(void)AnimationPresentationSystem::Instance().NotifyLifecycleInvalidation(
-			AnimationLifecycleBoundary::Asset);
-		(void)impl_->evaluationCache.InvalidateAnimator(handle);
+		if(publishGlobalInvalidation) {
+			// A direct-clip crowd batch reaches this point under one protected lock.
+			// The first record invalidates shared authority/presentation ownership;
+			// later records still retire their individual caches below.
+			(void)impl_->InvalidateLifecycleLocked(AnimationLifecycleBoundary::Asset);
+			(void)AnimationPresentationSystem::Instance().NotifyLifecycleInvalidation(
+				AnimationLifecycleBoundary::Asset);
+		}
+		if(!deferEvaluationCacheInvalidation) {
+			(void)impl_->evaluationCache.InvalidateAnimator(handle);
+		}
 		record->binding = std::move(binding);
 		if(record->descriptor.controller.IsValid()
 			&& record->binding.evaluationProgram) {
@@ -8851,8 +8896,67 @@ namespace TerraEngine::Animation {
 		});
 		AnimationRootMotionResultPublisher::Instance().Retire(handle);
 		impl_->rollbackHistory.Clear(handle);
-		impl_->frameDeclarationEpoch.fetch_add(1U, std::memory_order_acq_rel);
+		if(publishGlobalInvalidation) {
+			impl_->frameDeclarationEpoch.fetch_add(1U, std::memory_order_acq_rel);
+		}
+		outMutated = true;
 		return dependencyStatus;
+	}
+
+	void AnimationSystem::BindAnimatorPlaybackBatch(
+		std::span<const AnimatorPlaybackBindRequest> requests,
+		std::span<AnimationStatus> statuses)
+	{
+		impl_->AssertCoordinatorThread();
+		if(statuses.size() != requests.size()) {
+			std::fill(statuses.begin(), statuses.end(), AnimationStatus::InvalidArgument);
+			return;
+		}
+		std::scoped_lock lock(impl_->runtimeOwnershipMutex);
+		bool globalInvalidationPublished = false;
+		std::vector<const AnimatorPlaybackBinding*> validatedBindings;
+		std::vector<AnimatorInstanceHandle> mutatedHandles;
+		try {
+			validatedBindings.reserve(requests.size());
+			mutatedHandles.reserve(requests.size());
+		} catch(const std::bad_alloc&) {
+			std::fill(statuses.begin(), statuses.end(), AnimationStatus::InternalError);
+			return;
+		}
+		for(std::size_t index = 0U; index < requests.size(); ++index) {
+			const AnimatorPlaybackBindRequest& request = requests[index];
+			if(request.binding == nullptr) {
+				statuses[index] = AnimationStatus::InvalidArgument;
+				continue;
+			}
+			AnimatorPlaybackBinding binding = *request.binding;
+			binding.playOnBind = request.playOnBind;
+			const bool immutableBindingValidated = std::find(
+				validatedBindings.begin(), validatedBindings.end(), request.binding)
+				!= validatedBindings.end();
+			bool mutated = false;
+			statuses[index] = BindAnimatorPlaybackLocked(
+				request.handle,
+				std::move(binding),
+				request.sharedValidatedClipView,
+				immutableBindingValidated,
+				true,
+				!globalInvalidationPublished,
+				mutated);
+			globalInvalidationPublished = globalInvalidationPublished || mutated;
+			if(mutated) {
+				mutatedHandles.push_back(request.handle);
+				if(!immutableBindingValidated) {
+					validatedBindings.push_back(request.binding);
+				}
+			}
+		}
+		if(!mutatedHandles.empty()) {
+			// Evaluation cache keys are animator-contiguous. One bulk operation keeps
+			// its mutex for the complete crowd instead of reacquiring it thousands of
+			// times during one protected resource publication.
+			(void)impl_->evaluationCache.InvalidateAnimators(mutatedHandles);
+		}
 	}
 
 	AnimationStatus AnimationSystem::RefreshAnimatorDirectClipStreaming(

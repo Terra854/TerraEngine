@@ -39,6 +39,10 @@
 #include "Scene/SpatialDiagnostics.h"
 #include "Scene/SpatialIndex.h"
 
+// RenderableEntry retains a protected-boundary pointer without exposing the
+// complete mesh payload through this already broad system header.
+struct Mesh;
+
 namespace TerraEngine::Renderer
 {
 	// RenderTransformCacheDiagnostics makes cache reuse observable without exposing
@@ -379,8 +383,15 @@ private:
 	{
 		entt::entity entity;
 		TerraEngine::UUID objectId;
+		std::uint64_t objectIdentity = 0U;
+		std::uint64_t meshIdentity = 0U;
+		std::uint64_t materialIdentity = 0U;
 		bool isStatic = false;
 		MeshRenderComponent mesh;
+		// The pointer is consumed only inside this protected frame capture. It never
+		// enters a worker packet, and resource publication cannot change until the
+		// boundary ends, so later snapshot assembly can avoid another mesh lookup.
+		const Mesh* runtimeMesh = nullptr;
 		// Protected collection resolves this pointer bundle before any worker-safe
 		// signature, visibility, or draw preparation sees the renderable.
 		TerraEngine::Renderer::AnimationRenderBinding animationBinding{};
@@ -472,6 +483,12 @@ private:
 		// resource pointers, transforms, and visibility remain freshly resolved.
 		Object object;
 		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		// Stable hashes are derived only when authored membership changes. Per-frame
+		// snapshot assembly copies these scalar identities instead of hashing the
+		// same crowd UUIDs again.
+		std::uint64_t objectIdentity = 0U;
+		std::uint64_t meshIdentity = 0U;
+		std::uint64_t materialIdentity = 0U;
 		MeshRenderComponent mesh{};
 		std::optional<Object> nearestAnimatorObject;
 		TerraEngine::UUID animatorObjectId = TerraEngine::EMPTY_UUID;

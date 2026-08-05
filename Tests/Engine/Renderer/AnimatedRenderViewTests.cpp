@@ -192,8 +192,10 @@ namespace TerraEngine::Tests
 			{
 				context.ExpectEqual(std::size_t{2u}, published->visibleObjectIds.size(),
 					"Objects visible in multiple views must be deduplicated once.");
+				context.Expect(!published->visibleObjectLookupIndices.empty(),
+					"Published visibility must build the reusable exact-membership lookup.");
 				context.Expect(published->Contains(first) && published->Contains(second),
-					"Sorted visibility membership must retain every unique object.");
+					"Indexed visibility membership must retain every unique object.");
 				context.Expect(!published->Contains(MakeAnimatedViewTestUuid(33u)),
 					"Objects outside every camera and shadow list must remain absent.");
 			}
@@ -222,6 +224,8 @@ namespace TerraEngine::Tests
 			{
 				context.ExpectEqual(std::size_t{2u}, published->visibleObjectIds.size(),
 					"Canonical publication must preserve one record per marked renderable.");
+				context.Expect(published->Contains(first) && published->Contains(second),
+					"Canonical renderer publication must populate the same exact lookup.");
 				context.Expect(published->visibleObjectIds[0] == first
 					&& published->visibleObjectIds[1] == second,
 					"Canonical publication must preserve the renderable table's UUID order.");

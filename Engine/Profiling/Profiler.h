@@ -47,6 +47,9 @@ public:
 	ProfilerCaptureDocument FinishRecording();
 	void Clear();
 	void LoadDocument(const ProfilerCaptureDocument& document);
+	// Persistence workers transfer their retained capture into the profiler so a
+	// completed recording does not duplicate every frame and sample hierarchy.
+	void LoadDocument(ProfilerCaptureDocument&& document);
 
 	// A recording can remain armed while Play Mode is stopped. Passing false
 	// keeps the session active but prevents editor-preview frames from entering it.
