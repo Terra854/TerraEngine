@@ -177,6 +177,26 @@ namespace TerraEngine::Renderer {
 		std::uint32_t invalidSelectionReasons = 0u;
 	};
 
+	struct GeometryRouteSelectionRecord
+	{
+		// A renderable needs only the resolved route and the generations that prove
+		// it belongs to this object/mesh. The complete decision contains candidate
+		// vectors and diagnostic strings; retaining those for every instance made a
+		// 4,000-instance crowd copy the same mesh-level explanation thousands of
+		// times even when no diagnostics consumer was active.
+		std::uint64_t decisionIdentity = 0u;
+		std::uint64_t objectIdentity = 0u;
+		std::uint64_t meshIdentity = 0u;
+		std::uint64_t assetGeneration = 0u;
+		GeometryRoute selected = GeometryRoute::DirectMeshlet;
+		std::uint64_t policyIdentity = 0u;
+		std::uint64_t calibrationIdentity = 0u;
+		GeometryRouteSelectionSource source = GeometryRouteSelectionSource::Automatic;
+		std::uint32_t stableFrameCount = 0u;
+		GeometryRouteFallbackReason fallbackReason = GeometryRouteFallbackReason::None;
+		std::uint64_t routeGeneration = 0u;
+	};
+
 	struct RenderFrameRenderableRecord
 	{
 		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
@@ -191,7 +211,7 @@ namespace TerraEngine::Renderer {
 		// Route input and the resulting decision are copied with the renderable so
 		// worker stages never re-query a live mesh, material, or device object.
 		GeometryRouteInputSummary geometryRouteInput;
-		GeometryRouteDecision geometryRouteDecision;
+		GeometryRouteSelectionRecord geometryRouteDecision;
 	};
 
 	struct VirtualGeometryViewDrawRecord
@@ -335,9 +355,10 @@ namespace TerraEngine::Renderer {
 		std::vector<RenderFrameResourceRecord> textures;
 		std::vector<VirtualGeometryViewSelectionState> virtualGeometryViewSelections;
 		std::vector<VirtualGeometryViewVisibilitySnapshot> virtualGeometryVisibilitySnapshots;
-		// A frame owns one deterministic decision per renderable and batches direct
-		// instances by shared packed geometry. These records are intentionally
-		// independent of a camera so Scene, shadow, capture, and picking agree.
+		// Each renderable owns the compact route selection used by normal rendering.
+		// Full decisions below retain candidate lists and explanation strings only
+		// while detailed diagnostics are requested, so ordinary crowd frames do not
+		// duplicate heavyweight diagnostic storage for every instance.
 		std::vector<GeometryRouteDecision> geometryRouteDecisions;
 		std::vector<DirectMeshletBatch> directMeshletBatches;
 		// Every view contributes page demands here. Worker preparation sorts and
@@ -364,6 +385,10 @@ namespace TerraEngine::Renderer {
 		std::vector<TerraEngine::UUID> visibleObjectIds;
 		bool hasActiveView = false;
 		bool valid = false;
+		// RenderSystem can publish directly from its canonical renderable-index mask.
+		// Standalone producers leave this false and receive defensive sort/unique
+		// normalization in PublishAnimatedObjectVisibilitySnapshot.
+		bool canonicalUnique = false;
 
 		[[nodiscard]] bool Contains(const TerraEngine::UUID& objectId) const noexcept
 		{

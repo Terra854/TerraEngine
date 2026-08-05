@@ -9,6 +9,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 
 namespace TerraEngine::Animation {
@@ -22,6 +23,11 @@ namespace TerraEngine::Animation {
 		std::uint32_t instanceSlot = kInvalidAnimatorInstanceSlot;
 		std::uint32_t instanceGeneration = 0U;
 		std::uint32_t componentGeneration = 0U;
+		// The producer leaves this lane invalid because packet order is decided by
+		// deterministic presentation lowering. The published mapping fills it with
+		// the exact packet index so RenderSystem does not rebuild a 4,000-entry
+		// stable-instance hash table every frame.
+		std::uint32_t workPacketIndex = std::numeric_limits<std::uint32_t>::max();
 
 		[[nodiscard]] bool IsComplete() const noexcept
 		{
@@ -30,6 +36,12 @@ namespace TerraEngine::Animation {
 				&& instanceGeneration != 0U && componentGeneration != 0U
 				&& stableInstanceId == ((static_cast<std::uint64_t>(instanceSlot) << 32U)
 					| static_cast<std::uint64_t>(instanceGeneration));
+		}
+
+		[[nodiscard]] bool HasPublishedPacketIndex() const noexcept
+		{
+			return IsComplete()
+				&& workPacketIndex != std::numeric_limits<std::uint32_t>::max();
 		}
 	};
 

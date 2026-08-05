@@ -1326,6 +1326,71 @@ namespace TerraEngine::Tests {
 				"Each split command must preserve the exact contiguous record range consumed by HLSL.");
 		});
 
+		registry.Add("Animation.GpuPlan.StableTopologyRefreshUpdatesOnlyDynamicFrameLanes", [](TestContext& context) {
+			std::vector<GpuAnimationWorkRequest> initial{
+				MakeRequest(100U, 1U, 0U),
+				MakeRequest(200U, 1U, 1U)};
+			initial[0U].sampleTick = 10U;
+			initial[1U].sampleTick = 20U;
+			GpuAnimationArena initialScratch;
+			GpuAnimationArena initialPalette;
+			ConfigureArenas(initialScratch, initialPalette);
+			GpuAnimationPlan initialPlan;
+			context.ExpectEqual(Value(GpuAnimationPlanStatus::Ok), Value(BuildGpuAnimationPlan(
+				initial, 31U, initialScratch, initialPalette, initialPlan)),
+				"The initial stable topology fixture should build normally.");
+
+			std::vector<GpuAnimationWorkRequest> next = initial;
+			next[0U].sampleTick = 11U;
+			next[1U].sampleTick = 21U;
+			++next[0U].generations.workGeneration;
+			++next[1U].generations.workGeneration;
+			GpuAnimationArena refreshedScratch;
+			GpuAnimationArena refreshedPalette;
+			ConfigureArenas(refreshedScratch, refreshedPalette);
+			GpuAnimationPlan refreshedPlan;
+			context.Expect(TryRefreshGpuAnimationPlan(
+				next, 32U, refreshedScratch, refreshedPalette, initialPlan, refreshedPlan),
+				"An unchanged packet/resource topology should accept a dynamic-only refresh.");
+			const bool dispatchTopologyMatches = refreshedPlan.dispatchRecords.size()
+				== initialPlan.dispatchRecords.size()
+				&& std::equal(
+					refreshedPlan.dispatchRecords.begin(),
+					refreshedPlan.dispatchRecords.end(),
+					initialPlan.dispatchRecords.begin(),
+					[](const GpuAnimationDispatchRecord& left,
+						const GpuAnimationDispatchRecord& right) {
+						return left.stableInstanceId == right.stableInstanceId
+							&& left.elementOffset == right.elementOffset
+							&& left.workPacketIndex == right.workPacketIndex
+							&& left.stage == right.stage
+							&& left.elementCount == right.elementCount
+							&& left.batchIndex == right.batchIndex;
+					});
+			context.Expect(refreshedPlan.generation == 32U
+				&& refreshedPlan.workPackets[0U].sampleTick == 11U
+				&& refreshedPlan.workPackets[1U].sampleTick == 21U
+				&& refreshedPlan.generationRecords[0U].workGeneration
+					== next[0U].generations.workGeneration
+				&& dispatchTopologyMatches,
+				"Topology refresh must preserve packet/dispatch structure while replacing frame-varying ticks and generations.");
+			context.Expect(std::all_of(
+				refreshedPlan.dispatchCommands.begin(),
+				refreshedPlan.dispatchCommands.end(),
+				[](const GpuAnimationDispatchCommand& command) {
+					return command.pushConstants.planGeneration == 32U;
+				}),
+				"Every reused dispatch command must carry the new plan generation.");
+
+			GpuAnimationPlan rejectedOutput = refreshedPlan;
+			const std::uint32_t retainedGeneration = rejectedOutput.generation;
+			++next[0U].jointCount;
+			context.Expect(!TryRefreshGpuAnimationPlan(
+				next, 33U, refreshedScratch, refreshedPalette, refreshedPlan, rejectedOutput)
+				&& rejectedOutput.generation == retainedGeneration,
+				"A changed resource shape must reject topology reuse without partially overwriting the last-good output.");
+		});
+
 		registry.Add("Animation.GpuPlan.PaletteStridePartitionsAndPlanAlignmentAreBounded", [](TestContext& context) {
 			context.ExpectEqual(48U, kGpuAnimationPaletteStride,
 				"Palette matrices must retain the three-row 48-byte shader stride.");

@@ -29,7 +29,6 @@ namespace fs = std::filesystem;
 namespace
 {
 	constexpr std::string_view kDefaultProjectVersion = "1.0.0";
-	constexpr std::string_view kEditorPreferencesFileName = ".terra_editor_prefs.json";
 	constexpr std::array<std::string_view, 2> kDefaultEditorLayoutFiles = {
 		"EditorLayout.terra",
 		"EditorLayout.ini"
@@ -236,59 +235,6 @@ namespace
 		return true;
 	}
 
-	fs::path ResolveEditorPreferencesPath()
-	{
-		// Tests and developer tools can pin the preferences file explicitly, while
-		// normal editor runs use a user-level path so settings do not follow the
-		// active project or the process launch directory.
-		if (const char* overridePath = std::getenv("TERRAENGINE_EDITOR_PREFS_PATH"))
-		{
-			if (overridePath[0] != '\0')
-			{
-				return fs::path(overridePath);
-			}
-		}
-
-#ifdef _WIN32
-		if (const char* appData = std::getenv("APPDATA"))
-		{
-			if (appData[0] != '\0')
-			{
-				return fs::path(appData) / "TerraEngine" / "Editor" / kEditorPreferencesFileName;
-			}
-		}
-		if (const char* localAppData = std::getenv("LOCALAPPDATA"))
-		{
-			if (localAppData[0] != '\0')
-			{
-				return fs::path(localAppData) / "TerraEngine" / "Editor" / kEditorPreferencesFileName;
-			}
-		}
-#else
-		if (const char* xdgConfigHome = std::getenv("XDG_CONFIG_HOME"))
-		{
-			if (xdgConfigHome[0] != '\0')
-			{
-				return fs::path(xdgConfigHome) / "TerraEngine" / "Editor" / kEditorPreferencesFileName;
-			}
-		}
-		if (const char* home = std::getenv("HOME"))
-		{
-			if (home[0] != '\0')
-			{
-				return fs::path(home) / ".config" / "TerraEngine" / "Editor" / kEditorPreferencesFileName;
-			}
-		}
-#endif
-
-		return fs::current_path() / kEditorPreferencesFileName;
-	}
-
-	fs::path ResolveLegacyEditorPreferencesPath()
-	{
-		return fs::current_path() / kEditorPreferencesFileName;
-	}
-
 	std::string NormalizePathForRecentComparison(const fs::path& path)
 	{
 		std::error_code errorCode;
@@ -467,7 +413,8 @@ namespace
 	}
 }
 
-ProjectManager::ProjectManager() {
+ProjectManager::ProjectManager()
+	: editorPreferencesStorage(TerraEngine::Editor::ResolveEditorPreferencesStorageLocation()) {
 	LoadEditorPreferences();
 }
 
@@ -1089,7 +1036,13 @@ void ProjectManager::SaveProjectSettings() {
 
 // ProjectManager::SaveEditorPreferences is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool ProjectManager::SaveEditorPreferences(std::string* outError) {
-	const fs::path preferencesPath = ResolveEditorPreferencesPath();
+	const fs::path& preferencesPath = editorPreferencesStorage.path;
+	if (preferencesPath.empty()) {
+		if (outError != nullptr) {
+			*outError = "The platform user configuration directory is unavailable; editor preferences were not written.";
+		}
+		return false;
+	}
 	std::error_code errorCode;
 	if (!preferencesPath.parent_path().empty()) {
 		fs::create_directories(preferencesPath.parent_path(), errorCode);
@@ -1198,26 +1151,15 @@ bool ProjectManager::SaveProjectDataForRendererRecovery(std::string* outError) {
 
 // ProjectManager::LoadEditorPreferences is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ProjectManager::LoadEditorPreferences() {
-	const fs::path preferencesPath = ResolveEditorPreferencesPath();
-	const fs::path legacyPreferencesPath = ResolveLegacyEditorPreferencesPath();
-	fs::path pathToLoad;
-	if (fs::exists(preferencesPath)) {
-		pathToLoad = preferencesPath;
-	} else if (fs::exists(legacyPreferencesPath)) {
-		pathToLoad = legacyPreferencesPath;
-	}
-
-	if (!pathToLoad.empty()) {
+	const fs::path& preferencesPath = editorPreferencesStorage.path;
+	if (!preferencesPath.empty() && fs::exists(preferencesPath)) {
 		try {
-			std::ifstream file(pathToLoad);
+			std::ifstream file(preferencesPath);
 			nlohmann::json j;
 			file >> j;
 			editorPrefs = j.get<EditorPreferences>();
 			const bool prunedTransientRecents = PruneTransientRecentProjects(editorPrefs.recentProjects);
-			if (pathToLoad != preferencesPath) {
-				SaveEditorPreferences();
-			}
-			else if (prunedTransientRecents)
+			if (prunedTransientRecents)
 			{
 				SaveEditorPreferences();
 			}

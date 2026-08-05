@@ -63,6 +63,40 @@ namespace TerraEngine::Animation
 		std::uint64_t expectedContentFingerprint = 0u;
 	};
 
+	// The four numeric fields below identify one immutable payload generation.
+	// Physical range metadata is validated after the indexed lookup, so hash
+	// collisions or an incorrectly reused generation still fail closed.
+	struct AnimationStreamLookupKey
+	{
+		TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+		AnimationStreamPayloadKind kind = AnimationStreamPayloadKind::ClipSegment;
+		std::uint32_t blockIndex = 0u;
+		std::uint64_t generation = 0u;
+
+		[[nodiscard]] bool operator==(const AnimationStreamLookupKey&) const noexcept = default;
+	};
+
+	struct AnimationStreamLookupKeyHash
+	{
+		[[nodiscard]] std::size_t operator()(const AnimationStreamLookupKey& key) const noexcept
+		{
+			std::size_t hash = std::hash<TerraEngine::UUID>{}(key.assetId);
+			const auto combine = [&hash](std::size_t value) {
+				hash ^= value + 0x9e3779b97f4a7c15ULL + (hash << 6u) + (hash >> 2u);
+			};
+			combine(std::hash<std::uint8_t>{}(static_cast<std::uint8_t>(key.kind)));
+			combine(std::hash<std::uint32_t>{}(key.blockIndex));
+			combine(std::hash<std::uint64_t>{}(key.generation));
+			return hash;
+		}
+	};
+
+	[[nodiscard]] inline AnimationStreamLookupKey MakeAnimationStreamLookupKey(
+		const AnimationStreamRequest& request) noexcept
+	{
+		return {request.assetId, request.kind, request.blockIndex, request.generation};
+	}
+
 	// A protected crowd reconciliation aggregates per-instance ownership into one
 	// counted update per immutable payload. Criticality is optional because ordinary
 	// retain changes must not republish an otherwise unchanged residency snapshot.
@@ -135,6 +169,11 @@ namespace TerraEngine::Animation
 	{
 		std::uint64_t publicationSequence = 0u;
 		std::vector<AnimationResidentPayload> payloads;
+		// Readers execute during protected animator-binding reconciliation. This
+		// immutable index turns each lookup from a full resident-payload scan into
+		// one numeric hash probe followed by exact immutable-range validation.
+		std::unordered_map<AnimationStreamLookupKey, std::size_t,
+			AnimationStreamLookupKeyHash> payloadIndex;
 
 		[[nodiscard]] const AnimationResidentPayload* Find(
 			const AnimationStreamRequest& request) const noexcept;
@@ -216,6 +255,11 @@ namespace TerraEngine::Animation
 	private:
 		[[nodiscard]] static std::string MakePayloadKey(const AnimationStreamRequest& request);
 		[[nodiscard]] static std::string MakeGenerationKey(const AnimationStreamRequest& request);
+		[[nodiscard]] AnimationStreamDecision* FindDecisionLocked(
+			const AnimationStreamRequest& request) noexcept;
+		[[nodiscard]] const AnimationStreamDecision* FindDecisionLocked(
+			const AnimationStreamRequest& request) const noexcept;
+		void RebuildDecisionIndexLocked();
 		[[nodiscard]] AnimationStreamDecision RequestLocked(const AnimationStreamRequest& request);
 		void SignalSupersededReadsLocked(const AnimationStreamRequest& request);
 		void PruneTerminalDecisionsLocked();
@@ -234,6 +278,11 @@ namespace TerraEngine::Animation
 		std::uint64_t m_fallbackUses = 0u;
 		mutable std::mutex m_mutex;
 		std::vector<AnimationStreamDecision> m_decisions;
+		// The decision vector remains the deterministic diagnostics/publication
+		// order. This companion index supplies O(1) generation lookup without
+		// changing that stable external ordering contract.
+		std::unordered_map<AnimationStreamLookupKey, std::size_t,
+			AnimationStreamLookupKeyHash> m_decisionIndex;
 		std::unordered_map<std::string, std::uint64_t> m_latestRequestedGenerations;
 		std::unordered_map<std::string, std::uint64_t> m_activeGenerations;
 		std::unordered_map<std::string, std::shared_ptr<std::atomic_bool>> m_cancellationTokens;

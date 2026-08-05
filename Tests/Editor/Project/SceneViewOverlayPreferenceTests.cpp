@@ -20,7 +20,7 @@ namespace TerraEngine::EditorTests
 				: root_(std::filesystem::temp_directory_path() / "TerraEngineSceneViewPreferenceTests")
 				, preferencesPath_(root_ / ".terra_editor_prefs.json")
 			{
-				if (const char* existing = std::getenv("TERRAENGINE_EDITOR_PREFS_PATH"))
+				if (const char* existing = std::getenv(TerraEngine::Editor::kEditorPreferencesSessionPathEnvironment))
 				{
 					previousOverride_ = existing;
 				}
@@ -53,18 +53,18 @@ namespace TerraEngine::EditorTests
 			static void SetPath(const std::string& path)
 			{
 #ifdef _WIN32
-				_putenv_s("TERRAENGINE_EDITOR_PREFS_PATH", path.c_str());
+				_putenv_s(TerraEngine::Editor::kEditorPreferencesSessionPathEnvironment, path.c_str());
 #else
-				setenv("TERRAENGINE_EDITOR_PREFS_PATH", path.c_str(), 1);
+				setenv(TerraEngine::Editor::kEditorPreferencesSessionPathEnvironment, path.c_str(), 1);
 #endif
 			}
 
 			static void ClearPath()
 			{
 #ifdef _WIN32
-				_putenv_s("TERRAENGINE_EDITOR_PREFS_PATH", "");
+				_putenv_s(TerraEngine::Editor::kEditorPreferencesSessionPathEnvironment, "");
 #else
-				unsetenv("TERRAENGINE_EDITOR_PREFS_PATH");
+				unsetenv(TerraEngine::Editor::kEditorPreferencesSessionPathEnvironment);
 #endif
 			}
 

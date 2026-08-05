@@ -38,17 +38,27 @@ namespace TerraEngine::Tests {
 	void RegisterAnimationMutationContractTests(TestRegistry& registry) {
 		registry.Add("Animation.Mutation.GenerationSafeStoreSnapshotsAndDormancy", [](TestContext& context) {
 			AnimatorInstanceStore store;
+			const std::uint64_t initialMembershipRevision = store.MembershipRevision();
 			std::vector<AnimationFrameInput> frames;
 			store.CaptureFrameInputs(4, frames);
 			context.Expect(frames.empty() && store.ActiveCount() == 0U,
 				"A dormant store must have zero membership and no frame work to publish.");
+			context.ExpectEqual(initialMembershipRevision, store.MembershipRevision(),
+				"Read-only dormant snapshots must not advance the membership proof.");
 
 			const AnimatorInstanceHandle first = store.Create(MakeDescriptor(1U));
+			const std::uint64_t createdMembershipRevision = store.MembershipRevision();
+			context.Expect(createdMembershipRevision > initialMembershipRevision,
+				"Creating a live slot must advance the lock-free membership proof.");
 			context.Expect(store.IsAlive(first), "A created instance should be alive for typed commands.");
 			store.CaptureFrameInputs(5, frames);
 			context.Expect(frames.size() == 1U && frames.front().handle == first && frames.front().tick == 5,
 				"Workers must receive a copied immutable frame input, not live store state.");
+			context.ExpectEqual(createdMembershipRevision, store.MembershipRevision(),
+				"Liveness checks and frame capture must preserve an unchanged membership revision.");
 			context.Expect(store.Invalidate(first) && !store.IsAlive(first), "Lifecycle invalidation must retire the exact generation.");
+			context.Expect(store.MembershipRevision() > createdMembershipRevision,
+				"Invalidating a live slot must invalidate every retained membership proof.");
 			const AnimatorInstanceHandle replacement = store.Create(MakeDescriptor(2U));
 			context.Expect(first.slotIndex == replacement.slotIndex && first.generation != replacement.generation,
 				"Reused slots must advance generation so stale commands cannot target replacements.");

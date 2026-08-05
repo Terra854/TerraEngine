@@ -214,6 +214,30 @@ namespace TerraEngine::Animation {
 		return AnimationStatus::Ok;
 	}
 
+	AnimationStatus AnimationClipView::AdoptValidatedPublicationFrom(
+		const AnimationClipView& validated) noexcept
+	{
+		if(!validated.IsOpen()) {
+			return AnimationStatus::InvalidArgument;
+		}
+		try {
+			// Prove storage before changing the pointer pair. All assignments after this
+			// reserve are non-allocating, so a failed promotion leaves the old view intact.
+			residentSegments_.reserve(validated.residentSegments_.size());
+		} catch(const std::bad_alloc&) {
+			return AnimationStatus::InternalError;
+		}
+		residentSegments_.assign(
+			validated.residentSegments_.begin(),
+			validated.residentSegments_.end());
+		asset_ = validated.asset_;
+		referenceSkeleton_ = validated.referenceSkeleton_;
+		codec_ = validated.codec_;
+		streamedGeneration_ = validated.streamedGeneration_;
+		streamedPayloads_ = validated.streamedPayloads_;
+		return AnimationStatus::Ok;
+	}
+
 	void AnimationClipView::Close() noexcept {
 		asset_ = nullptr;
 		referenceSkeleton_ = nullptr;

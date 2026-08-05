@@ -77,11 +77,10 @@ namespace TerraEngine::Animation
 	const AnimationResidentPayload* AnimationStreamingResidencySnapshot::Find(
 		const AnimationStreamRequest& request) const noexcept
 	{
-		const auto found = std::find_if(payloads.begin(), payloads.end(),
-			[&](const AnimationResidentPayload& payload) {
-				return MatchesImmutableRequest(payload.request, request);
-			});
-		return found == payloads.end() ? nullptr : &*found;
+		const auto indexed = payloadIndex.find(MakeAnimationStreamLookupKey(request));
+		if(indexed == payloadIndex.end() || indexed->second >= payloads.size()) return nullptr;
+		const AnimationResidentPayload& payload = payloads[indexed->second];
+		return MatchesImmutableRequest(payload.request, request) ? &payload : nullptr;
 	}
 
 	AnimationStreamingCoordinator::AnimationStreamingCoordinator(
@@ -107,6 +106,32 @@ namespace TerraEngine::Animation
 	std::string AnimationStreamingCoordinator::MakeGenerationKey(const AnimationStreamRequest& request)
 	{
 		return MakePayloadKey(request) + ":" + std::to_string(request.generation);
+	}
+
+	AnimationStreamDecision* AnimationStreamingCoordinator::FindDecisionLocked(
+		const AnimationStreamRequest& request) noexcept
+	{
+		const auto indexed = m_decisionIndex.find(MakeAnimationStreamLookupKey(request));
+		if(indexed == m_decisionIndex.end() || indexed->second >= m_decisions.size()) return nullptr;
+		return &m_decisions[indexed->second];
+	}
+
+	const AnimationStreamDecision* AnimationStreamingCoordinator::FindDecisionLocked(
+		const AnimationStreamRequest& request) const noexcept
+	{
+		const auto indexed = m_decisionIndex.find(MakeAnimationStreamLookupKey(request));
+		if(indexed == m_decisionIndex.end() || indexed->second >= m_decisions.size()) return nullptr;
+		return &m_decisions[indexed->second];
+	}
+
+	void AnimationStreamingCoordinator::RebuildDecisionIndexLocked()
+	{
+		m_decisionIndex.clear();
+		m_decisionIndex.reserve(m_decisions.size());
+		for(std::size_t index = 0u; index < m_decisions.size(); ++index) {
+			m_decisionIndex.insert_or_assign(
+				MakeAnimationStreamLookupKey(m_decisions[index].request), index);
+		}
 	}
 
 	void AnimationStreamingCoordinator::PruneTerminalDecisionsLocked()
@@ -143,6 +168,9 @@ namespace TerraEngine::Animation
 				m_activeGenerations.erase(payloadKey);
 			}
 		}
+		// Sorting and front erasure both change vector indices even when the
+		// remaining decision contents are untouched.
+		RebuildDecisionIndexLocked();
 	}
 
 	void AnimationStreamingCoordinator::RebuildResidencySnapshotLocked()
@@ -160,6 +188,11 @@ namespace TerraEngine::Animation
 			[](const AnimationResidentPayload& left, const AnimationResidentPayload& right) {
 				return MakeGenerationKey(left.request) < MakeGenerationKey(right.request);
 			});
+		snapshot->payloadIndex.reserve(snapshot->payloads.size());
+		for(std::size_t index = 0u; index < snapshot->payloads.size(); ++index) {
+			snapshot->payloadIndex.insert_or_assign(
+				MakeAnimationStreamLookupKey(snapshot->payloads[index].request), index);
+		}
 		m_residencySnapshot = std::move(snapshot);
 	}
 
@@ -205,11 +238,9 @@ namespace TerraEngine::Animation
 			return result;
 		}
 
-		auto existing = std::find_if(m_decisions.begin(), m_decisions.end(), [&](const auto& value) {
-			return MakeGenerationKey(value.request) == generationKey;
-		});
+		AnimationStreamDecision* existing = FindDecisionLocked(request);
 		AnimationStreamDecision* evictedRetry = nullptr;
-		if (existing != m_decisions.end())
+		if (existing != nullptr)
 		{
 			const bool identical = MatchesImmutableRequest(existing->request, request);
 			if (!identical)
@@ -222,7 +253,7 @@ namespace TerraEngine::Animation
 				// Missing is the recoverable terminal state produced only by budget
 				// eviction. Requeueing the exact immutable generation lets an active
 				// consumer reactivate it without inventing an asset reload generation.
-				evictedRetry = &*existing;
+				evictedRetry = existing;
 			} else {
 				result = *existing;
 				result.accepted = !IsTerminal(existing->state);
@@ -321,6 +352,8 @@ namespace TerraEngine::Animation
 		result.reason = "Queued on the asynchronous IO path; fallback remains authoritative until protected publication.";
 		m_latestRequestedGenerations[payloadKey] = request.generation;
 		m_decisions.push_back(result);
+		m_decisionIndex.insert_or_assign(
+			MakeAnimationStreamLookupKey(request), m_decisions.size() - 1u);
 		++m_fallbackUses;
 		return result;
 	}
@@ -346,10 +379,8 @@ namespace TerraEngine::Animation
 		if (job.decision.accepted)
 		{
 			std::scoped_lock lock(m_mutex);
-			const auto found = std::find_if(m_decisions.begin(), m_decisions.end(), [&](const auto& value) {
-				return MakeGenerationKey(value.request) == MakeGenerationKey(request);
-			});
-			if (found != m_decisions.end() && found->state == AnimationStreamState::Requested)
+			const AnimationStreamDecision* found = FindDecisionLocked(request);
+			if (found != nullptr && found->state == AnimationStreamState::Requested)
 			{
 				auto [token, inserted] = m_cancellationTokens.try_emplace(
 					MakeGenerationKey(request), cancellation);
@@ -508,6 +539,7 @@ namespace TerraEngine::Animation
 		}
 
 		m_decisions = previousDecisions;
+		RebuildDecisionIndexLocked();
 		m_latestRequestedGenerations = previousLatest;
 		m_activeGenerations = previousActive;
 		m_publicationSequence = previousSequence;
@@ -532,11 +564,9 @@ namespace TerraEngine::Animation
 	{
 		const std::string payloadKey = MakePayloadKey(request);
 		const std::string generationKey = MakeGenerationKey(request);
-		const auto found = std::find_if(m_decisions.begin(), m_decisions.end(), [&](const auto& value) {
-			return MakeGenerationKey(value.request) == generationKey;
-		});
+		AnimationStreamDecision* found = FindDecisionLocked(request);
 		const auto latest = m_latestRequestedGenerations.find(payloadKey);
-		if (found == m_decisions.end() || found->state != AnimationStreamState::Requested
+		if (found == nullptr || found->state != AnimationStreamState::Requested
 			|| !MatchesImmutableRequest(found->request, request)
 			|| latest == m_latestRequestedGenerations.end() || latest->second != request.generation)
 		{
@@ -559,14 +589,10 @@ namespace TerraEngine::Animation
 		if (const auto active = m_activeGenerations.find(payloadKey); active != m_activeGenerations.end())
 		{
 			const std::uint64_t previousGeneration = active->second;
-			for (AnimationStreamDecision& decision : m_decisions)
-			{
-				if (MakePayloadKey(decision.request) == payloadKey
-					&& decision.request.generation == previousGeneration)
-				{
-					decision.activeGeneration = false;
-					break;
-				}
+			AnimationStreamRequest previousRequest = request;
+			previousRequest.generation = previousGeneration;
+			if(AnimationStreamDecision* previous = FindDecisionLocked(previousRequest)) {
+				previous->activeGeneration = false;
 			}
 		}
 		m_activeGenerations[payloadKey] = request.generation;
@@ -592,10 +618,8 @@ namespace TerraEngine::Animation
 	bool AnimationStreamingCoordinator::Cancel(const AnimationStreamRequest& request)
 	{
 		std::scoped_lock lock(m_mutex);
-		const auto found = std::find_if(m_decisions.begin(), m_decisions.end(), [&](const auto& value) {
-			return MakeGenerationKey(value.request) == MakeGenerationKey(request);
-		});
-		if (found == m_decisions.end() || found->state != AnimationStreamState::Requested
+		AnimationStreamDecision* found = FindDecisionLocked(request);
+		if (found == nullptr || found->state != AnimationStreamState::Requested
 			|| !MatchesImmutableRequest(found->request, request))
 		{
 			return false;
@@ -631,10 +655,8 @@ namespace TerraEngine::Animation
 	{
 		if(adjustment == 0) return true;
 		std::scoped_lock lock(m_mutex);
-		const auto found = std::find_if(m_decisions.begin(), m_decisions.end(), [&](const auto& value) {
-			return MakeGenerationKey(value.request) == MakeGenerationKey(request);
-		});
-		if (found == m_decisions.end() || !MatchesImmutableRequest(found->request, request)
+		AnimationStreamDecision* found = FindDecisionLocked(request);
+		if (found == nullptr || !MatchesImmutableRequest(found->request, request)
 			|| (adjustment > 0 && IsTerminal(found->state)))
 		{
 			return false;
@@ -668,11 +690,8 @@ namespace TerraEngine::Animation
 			for(const AnimationStreamRetainAdjustment& adjustment : adjustments) {
 				std::string generationKey = MakeGenerationKey(adjustment.request);
 				if(!uniqueKeys.insert(generationKey).second) return false;
-				const auto found = std::find_if(m_decisions.begin(), m_decisions.end(),
-					[&](const AnimationStreamDecision& value) {
-						return MakeGenerationKey(value.request) == generationKey;
-					});
-				if(found == m_decisions.end()
+				AnimationStreamDecision* found = FindDecisionLocked(adjustment.request);
+				if(found == nullptr
 					|| !MatchesImmutableRequest(found->request, adjustment.request)
 					|| (adjustment.retainDelta > 0 && IsTerminal(found->state))) {
 					return false;
@@ -683,7 +702,7 @@ namespace TerraEngine::Animation
 						std::numeric_limits<std::uint32_t>::max()) - current) {
 					return false;
 				}
-				validated.push_back({&*found, &adjustment, std::move(generationKey)});
+				validated.push_back({found, &adjustment, std::move(generationKey)});
 			}
 		} catch(const std::bad_alloc&) {
 			return false;
@@ -715,10 +734,8 @@ namespace TerraEngine::Animation
 		bool gameplayCritical)
 	{
 		std::scoped_lock lock(m_mutex);
-		const auto found = std::find_if(m_decisions.begin(), m_decisions.end(), [&](const auto& value) {
-			return MakeGenerationKey(value.request) == MakeGenerationKey(request);
-		});
-		if(found == m_decisions.end() || !MatchesImmutableRequest(found->request, request)) {
+		AnimationStreamDecision* found = FindDecisionLocked(request);
+		if(found == nullptr || !MatchesImmutableRequest(found->request, request)) {
 			return false;
 		}
 		if(found->request.gameplayCritical == gameplayCritical) return true;
@@ -786,10 +803,8 @@ namespace TerraEngine::Animation
 		const AnimationStreamRequest& request) const
 	{
 		std::scoped_lock lock(m_mutex);
-		const auto found = std::find_if(m_decisions.begin(), m_decisions.end(), [&](const auto& value) {
-			return MakeGenerationKey(value.request) == MakeGenerationKey(request);
-		});
-		return found == m_decisions.end()
+		const AnimationStreamDecision* found = FindDecisionLocked(request);
+		return found == nullptr || !MatchesImmutableRequest(found->request, request)
 			? std::optional<AnimationStreamDecision>{}
 			: std::optional<AnimationStreamDecision>{*found};
 	}

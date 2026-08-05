@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace
@@ -160,11 +161,22 @@ void HierarchyWindow::RefreshRootEntityCache(ObjectManager& objectManager, bool 
 
 	m_CachedRootEntities.clear();
 	m_CachedRootLeafFlags.clear();
+	std::unordered_map<std::string, std::uint8_t> priorExpandedFlags;
+	priorExpandedFlags.reserve(m_CachedRootTreeNodeIds.size());
+	for(std::size_t index = 0U;
+		index < m_CachedRootTreeNodeIds.size()
+			&& index < m_CachedRootExpandedFlags.size();
+		++index) {
+		priorExpandedFlags.emplace(
+			m_CachedRootTreeNodeIds[index], m_CachedRootExpandedFlags[index]);
+	}
 	m_CachedRootTreeNodeIds.clear();
+	m_CachedRootExpandedFlags.clear();
 	std::vector<Object> roots = objectManager.getRootObjects();
 	m_CachedRootEntities.reserve(roots.size());
 	m_CachedRootLeafFlags.reserve(roots.size());
 	m_CachedRootTreeNodeIds.reserve(roots.size());
+	m_CachedRootExpandedFlags.reserve(roots.size());
 	for (const Object& root : roots)
 	{
 		m_CachedRootEntities.push_back(root.EntityId());
@@ -172,7 +184,11 @@ void HierarchyWindow::RefreshRootEntityCache(ObjectManager& objectManager, bool 
 		// and prefab presentation remain live row data, while child discovery is
 		// avoided for roots the snapshot already proved are leaves.
 		m_CachedRootLeafFlags.push_back(objectManager.getChildren(root).empty() ? 1u : 0u);
-		m_CachedRootTreeNodeIds.push_back(TerraEngine::ToHexString(objectManager.getUUID(root)));
+		std::string treeNodeId = TerraEngine::ToHexString(objectManager.getUUID(root));
+		const auto priorExpansion = priorExpandedFlags.find(treeNodeId);
+		m_CachedRootExpandedFlags.push_back(
+			priorExpansion == priorExpandedFlags.end() ? 0U : priorExpansion->second);
+		m_CachedRootTreeNodeIds.push_back(std::move(treeNodeId));
 	}
 
 	m_CachedHierarchyRevision = hierarchyRevision;
@@ -188,7 +204,8 @@ void HierarchyWindow::DrawCachedRootNodes()
 	// leave the clipped path and recurse through their children.
 	if (!m_SearchFilter.empty()
 		|| m_CachedRootLeafFlags.size() != m_CachedRootEntities.size()
-		|| m_CachedRootTreeNodeIds.size() != m_CachedRootEntities.size())
+		|| m_CachedRootTreeNodeIds.size() != m_CachedRootEntities.size()
+		|| m_CachedRootExpandedFlags.size() != m_CachedRootEntities.size())
 	{
 		for (const entt::entity root : m_CachedRootEntities)
 		{
@@ -198,12 +215,8 @@ void HierarchyWindow::DrawCachedRootNodes()
 	}
 
 	const auto rootIsExpanded = [&](std::size_t index) {
-		if (m_CachedRootLeafFlags[index] != 0u)
-		{
-			return false;
-		}
-		const ImGuiID treeNodeId = ImGui::GetID(m_CachedRootTreeNodeIds[index].c_str());
-		return ImGui::GetStateStorage()->GetInt(treeNodeId, 0) != 0;
+		return m_CachedRootLeafFlags[index] == 0u
+			&& m_CachedRootExpandedFlags[index] != 0u;
 	};
 
 	std::size_t rootIndex = 0u;
@@ -211,7 +224,11 @@ void HierarchyWindow::DrawCachedRootNodes()
 	{
 		if (rootIsExpanded(rootIndex))
 		{
-			DrawEntityNode(m_CachedRootEntities[rootIndex]);
+			DrawEntityNode(
+				m_CachedRootEntities[rootIndex],
+				nullptr,
+				false,
+				&m_CachedRootExpandedFlags[rootIndex]);
 			++rootIndex;
 			continue;
 		}
@@ -235,7 +252,8 @@ void HierarchyWindow::DrawCachedRootNodes()
 				DrawEntityNode(
 					m_CachedRootEntities[cachedIndex],
 					nullptr,
-					m_CachedRootLeafFlags[cachedIndex] != 0u);
+					m_CachedRootLeafFlags[cachedIndex] != 0u,
+					&m_CachedRootExpandedFlags[cachedIndex]);
 			}
 		}
 	}
@@ -478,7 +496,8 @@ void HierarchyWindow::CreatePrefabFromSelection(entt::entity obj)
 void HierarchyWindow::DrawEntityNode(
 	entt::entity obj,
 	const std::unordered_set<TerraEngine::UUID>* prefabSourceObjectIds,
-	bool knownLeaf) {
+	bool knownLeaf,
+	std::uint8_t* cachedExpandedFlag) {
 	auto& objManager = ObjectManager::instance();
 	std::optional<Object> object = objManager.getObject(obj);
 	if (!object)
@@ -552,6 +571,12 @@ void HierarchyWindow::DrawEntityNode(
 	// branches remain stable while the prefab is being edited in context.
 	const std::string treeNodeId = TerraEngine::ToHexString(ObjectManager::instance().getUUID(*object));
 	bool opened = ImGui::TreeNodeEx(treeNodeId.c_str(), flags, "%s", name.c_str());
+	if(cachedExpandedFlag != nullptr) {
+		// ImGui has already applied arrow/double-click toggles for this visible
+		// row. Store the result once so off-screen siblings require no state lookup.
+		*cachedExpandedFlag = opened && (flags & ImGuiTreeNodeFlags_Leaf) == 0
+			? 1U : 0U;
+	}
 	if (isPrefabAuthoredObject) {
 		ImGui::PopStyleColor();
 	}

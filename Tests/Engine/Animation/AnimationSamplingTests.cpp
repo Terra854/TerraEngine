@@ -366,6 +366,36 @@ namespace TerraEngine::Tests {
 					== AnimationStatus::InvalidArgument,
 				"A validated streaming view should promote an identical open clip in place while rejecting an unbound destination.");
 
+			AnimationClipAsset replacementClip = clip;
+			++replacementClip.runtimeGeneration;
+			AnimationClipSegmentPayloadSet replacementPayloadSet = *payloads;
+			replacementPayloadSet.generation = replacementClip.runtimeGeneration;
+			replacementPayloadSet.publicationSequence = 13U;
+			auto replacementPayloads =
+				std::make_shared<const AnimationClipSegmentPayloadSet>(
+					std::move(replacementPayloadSet));
+			AnimationClipView replacementView;
+			context.Expect(replacementView.Open(
+				replacementClip,
+				&skeleton,
+				firstOnly,
+				replacementClip.runtimeGeneration,
+				replacementPayloads) == AnimationStatus::Ok,
+				"A hot-reloaded clip publication must be validated before adoption.");
+			context.Expect(missingView.CopyStreamingStateFrom(replacementView)
+					== AnimationStatus::InvalidArgument
+				&& missingView.AdoptValidatedPublicationFrom(replacementView)
+					== AnimationStatus::Ok
+				&& missingView.Matches(
+					replacementClip,
+					&skeleton,
+					firstOnly,
+					replacementClip.runtimeGeneration,
+					replacementPayloads)
+				&& unopenedView.AdoptValidatedPublicationFrom(replacementView)
+					== AnimationStatus::Ok,
+				"A checked publication replacement must support both an old generation and a previously unavailable destination without weakening same-generation identity checks.");
+
 			AnimationClipSegmentPayloadSet corruptPayloads = *payloads;
 			auto corruptBytes =
 				std::make_shared<std::vector<std::uint8_t>>(*residentBytes);

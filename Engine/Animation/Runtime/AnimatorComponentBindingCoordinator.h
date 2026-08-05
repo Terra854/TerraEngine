@@ -20,6 +20,9 @@ namespace TerraEngine::Animation {
 	struct AnimatorComponentSynchronizationSummary {
 		std::size_t authoredActiveCount = 0U;
 		std::size_t runtimeActiveCount = 0U;
+		// This is the number of authored records actually inspected by the binding
+		// reconciler. Zero distinguishes a cheap pending poll from a full pass.
+		std::size_t reconciledBindingCount = 0U;
 		std::size_t createdCount = 0U;
 		std::size_t reboundCount = 0U;
 		std::size_t invalidatedCount = 0U;

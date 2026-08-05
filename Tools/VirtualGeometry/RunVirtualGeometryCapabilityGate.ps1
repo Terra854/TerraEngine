@@ -533,7 +533,7 @@ try
 	$start.UseShellExecute = $false
 	$start.RedirectStandardOutput = $true
 	$start.RedirectStandardError = $true
-	$start.EnvironmentVariables['TERRAENGINE_EDITOR_PREFS_PATH'] =
+	$start.EnvironmentVariables['TERRAENGINE_EDITOR_PREFS_SESSION_PATH'] =
 		$preferencesPath
 	$start.EnvironmentVariables['TERRAENGINE_SUPPRESS_PROJECT_RECENTS'] = '1'
 	$editor = [Diagnostics.Process]::Start($start)

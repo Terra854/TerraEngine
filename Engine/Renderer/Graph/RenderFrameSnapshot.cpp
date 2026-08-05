@@ -6,6 +6,7 @@
 #include <cmath>
 #include <functional>
 #include <map>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -42,6 +43,13 @@ namespace TerraEngine::Renderer {
 			}
 		}
 
+		template<typename Record, typename Compare>
+		void SortIfNeeded(std::vector<Record>& records, Compare compare)
+		{
+			if(!std::is_sorted(records.begin(), records.end(), compare)) {
+				std::sort(records.begin(), records.end(), compare);
+			}
+		}
 		void HashVirtualGeometryRange(std::uint64_t& hash, const VirtualGeometryDrawRange& range)
 		{
 			HashCombine(hash, range.selectedLodIndex);
@@ -801,7 +809,7 @@ namespace TerraEngine::Renderer {
 	{
 		// Stable sort points make repeated frames produce identical work packet
 		// ids and pass ordering even when scene registry iteration order changes.
-		std::sort(snapshot.viewRequests.begin(), snapshot.viewRequests.end(), [](const RenderFrameViewRequest& left, const RenderFrameViewRequest& right) {
+		SortIfNeeded(snapshot.viewRequests, [](const RenderFrameViewRequest& left, const RenderFrameViewRequest& right) {
 			if (left.outputId != right.outputId)
 			{
 				return left.outputId < right.outputId;
@@ -813,16 +821,15 @@ namespace TerraEngine::Renderer {
 		SortByUuid(snapshot.materials, &RenderFrameResourceRecord::resourceId);
 		SortByUuid(snapshot.meshes, &RenderFrameResourceRecord::resourceId);
 		SortByUuid(snapshot.textures, &RenderFrameResourceRecord::resourceId);
-		std::sort(snapshot.geometryRouteDecisions.begin(), snapshot.geometryRouteDecisions.end(),
+		SortIfNeeded(snapshot.geometryRouteDecisions,
 			[](const GeometryRouteDecision& left, const GeometryRouteDecision& right) {
 				return left.decisionIdentity < right.decisionIdentity;
 			});
-		std::sort(snapshot.directMeshletBatches.begin(), snapshot.directMeshletBatches.end(),
+		SortIfNeeded(snapshot.directMeshletBatches,
 			[](const DirectMeshletBatch& left, const DirectMeshletBatch& right) {
 				return left.geometryIdentity < right.geometryIdentity;
 			});
-		std::sort(snapshot.animatedGeometryPageDemands.begin(),
-			snapshot.animatedGeometryPageDemands.end(),
+		SortIfNeeded(snapshot.animatedGeometryPageDemands,
 			[](const DeformationPageDemand& left, const DeformationPageDemand& right)
 			{
 				if(left.key != right.key)
@@ -831,7 +838,7 @@ namespace TerraEngine::Renderer {
 				}
 				return left.requestedViewMask < right.requestedViewMask;
 			});
-		std::sort(snapshot.virtualGeometryViewSelections.begin(), snapshot.virtualGeometryViewSelections.end(), [](const VirtualGeometryViewSelectionState& left, const VirtualGeometryViewSelectionState& right) {
+		SortIfNeeded(snapshot.virtualGeometryViewSelections, [](const VirtualGeometryViewSelectionState& left, const VirtualGeometryViewSelectionState& right) {
 			if (left.outputId != right.outputId)
 			{
 				return left.outputId < right.outputId;
@@ -840,10 +847,10 @@ namespace TerraEngine::Renderer {
 		});
 		for (VirtualGeometryViewSelectionState& state : snapshot.virtualGeometryViewSelections)
 		{
-			std::sort(state.draws.begin(), state.draws.end(), [](const VirtualGeometryViewDrawRecord& left, const VirtualGeometryViewDrawRecord& right) {
+			SortIfNeeded(state.draws, [](const VirtualGeometryViewDrawRecord& left, const VirtualGeometryViewDrawRecord& right) {
 				return left.objectId < right.objectId;
 			});
-			std::sort(state.selectedClusters.begin(), state.selectedClusters.end(), [](const VirtualGeometrySelectedClusterRecord& left, const VirtualGeometrySelectedClusterRecord& right) {
+			SortIfNeeded(state.selectedClusters, [](const VirtualGeometrySelectedClusterRecord& left, const VirtualGeometrySelectedClusterRecord& right) {
 				if (left.clusterId != right.clusterId)
 				{
 					return left.clusterId < right.clusterId;
@@ -851,14 +858,14 @@ namespace TerraEngine::Renderer {
 				return left.objectId < right.objectId;
 			});
 			SortVirtualGeometryScalingRecords(state);
-			std::sort(state.pageNeeds.begin(), state.pageNeeds.end(), [](const VirtualGeometryPageNeedRecord& left, const VirtualGeometryPageNeedRecord& right) {
+			SortIfNeeded(state.pageNeeds, [](const VirtualGeometryPageNeedRecord& left, const VirtualGeometryPageNeedRecord& right) {
 				if (left.pageId != right.pageId)
 				{
 					return left.pageId < right.pageId;
 				}
 				return left.objectId < right.objectId;
 			});
-			std::sort(state.lodTransitionStates.begin(), state.lodTransitionStates.end(), [](const VirtualGeometryLODTransitionState& left, const VirtualGeometryLODTransitionState& right) {
+			SortIfNeeded(state.lodTransitionStates, [](const VirtualGeometryLODTransitionState& left, const VirtualGeometryLODTransitionState& right) {
 				if (left.outputId != right.outputId)
 				{
 					return left.outputId < right.outputId;
@@ -866,7 +873,7 @@ namespace TerraEngine::Renderer {
 				return left.objectId < right.objectId;
 			});
 		}
-		std::sort(snapshot.virtualGeometryVisibilitySnapshots.begin(), snapshot.virtualGeometryVisibilitySnapshots.end(), [](const VirtualGeometryViewVisibilitySnapshot& left, const VirtualGeometryViewVisibilitySnapshot& right) {
+		SortIfNeeded(snapshot.virtualGeometryVisibilitySnapshots, [](const VirtualGeometryViewVisibilitySnapshot& left, const VirtualGeometryViewVisibilitySnapshot& right) {
 			if (left.outputId != right.outputId)
 			{
 				return left.outputId < right.outputId;
@@ -875,10 +882,10 @@ namespace TerraEngine::Renderer {
 		});
 		for (VirtualGeometryViewVisibilitySnapshot& state : snapshot.virtualGeometryVisibilitySnapshots)
 		{
-			std::sort(state.drawRanges.begin(), state.drawRanges.end(), [](const VirtualGeometryViewDrawRecord& left, const VirtualGeometryViewDrawRecord& right) {
+			SortIfNeeded(state.drawRanges, [](const VirtualGeometryViewDrawRecord& left, const VirtualGeometryViewDrawRecord& right) {
 				return left.objectId < right.objectId;
 			});
-			std::sort(state.selectedClusters.begin(), state.selectedClusters.end(), [](const VirtualGeometrySelectedClusterRecord& left, const VirtualGeometrySelectedClusterRecord& right) {
+			SortIfNeeded(state.selectedClusters, [](const VirtualGeometrySelectedClusterRecord& left, const VirtualGeometrySelectedClusterRecord& right) {
 				if (left.clusterId != right.clusterId)
 				{
 					return left.clusterId < right.clusterId;
@@ -886,14 +893,14 @@ namespace TerraEngine::Renderer {
 				return left.objectId < right.objectId;
 			});
 			SortVirtualGeometryScalingRecords(state);
-			std::sort(state.pageNeeds.begin(), state.pageNeeds.end(), [](const VirtualGeometryPageNeedRecord& left, const VirtualGeometryPageNeedRecord& right) {
+			SortIfNeeded(state.pageNeeds, [](const VirtualGeometryPageNeedRecord& left, const VirtualGeometryPageNeedRecord& right) {
 				if (left.pageId != right.pageId)
 				{
 					return left.pageId < right.pageId;
 				}
 				return left.objectId < right.objectId;
 			});
-			std::sort(state.lodTransitionStates.begin(), state.lodTransitionStates.end(), [](const VirtualGeometryLODTransitionState& left, const VirtualGeometryLODTransitionState& right) {
+			SortIfNeeded(state.lodTransitionStates, [](const VirtualGeometryLODTransitionState& left, const VirtualGeometryLODTransitionState& right) {
 				if (left.outputId != right.outputId)
 				{
 					return left.outputId < right.outputId;
@@ -981,12 +988,17 @@ namespace TerraEngine::Renderer {
 	void PublishAnimatedObjectVisibilitySnapshot(
 		AnimatedObjectVisibilitySnapshot snapshot)
 	{
-		// UUID ordering makes membership checks logarithmic and removes duplicate
-		// objects that were visible in multiple cameras, cascades, or captures.
-		std::sort(snapshot.visibleObjectIds.begin(), snapshot.visibleObjectIds.end());
-		snapshot.visibleObjectIds.erase(
-			std::unique(snapshot.visibleObjectIds.begin(), snapshot.visibleObjectIds.end()),
-			snapshot.visibleObjectIds.end());
+		if(!snapshot.canonicalUnique)
+		{
+			// External/test producers may append the same object from several views.
+			// Normalize those snapshots here; the live renderer avoids this O(N log N)
+			// work by publishing from its canonical renderable-index visibility mask.
+			std::sort(snapshot.visibleObjectIds.begin(), snapshot.visibleObjectIds.end());
+			snapshot.visibleObjectIds.erase(
+				std::unique(snapshot.visibleObjectIds.begin(), snapshot.visibleObjectIds.end()),
+				snapshot.visibleObjectIds.end());
+			snapshot.canonicalUnique = true;
+		}
 		auto immutable = std::make_shared<const AnimatedObjectVisibilitySnapshot>(
 			std::move(snapshot));
 		std::atomic_store_explicit(
@@ -1849,11 +1861,23 @@ namespace TerraEngine::Renderer {
 	std::vector<VirtualGeometryViewDiagnosticsSnapshot> BuildVirtualGeometryViewDiagnosticsFromSnapshot(
 		const RenderFrameSnapshot& snapshot,
 		const VirtualGeometryQualityProfile& qualityProfile,
-		VirtualGeometryInactiveReason inactiveReason)
+		VirtualGeometryInactiveReason inactiveReason,
+		const GpuDeformationPlan* completedDeformationPlan)
 	{
 		const VirtualGeometryQualityProfile quality = SanitizeVirtualGeometryQualityProfile(qualityProfile);
+		std::optional<GpuDeformationPlan> fallbackDeformationPlan;
+		if(completedDeformationPlan == nullptr && !snapshot.animatedGeometryPageDemands.empty()) {
+			// Standalone diagnostics callers may not own the backend work plan. Build
+			// it at most once here; the live renderer passes its completed immutable
+			// plan so Game, Scene, and Shadow diagnostics never repeat this work.
+			fallbackDeformationPlan = BuildGpuDeformationPlan(
+				snapshot.frameId,
+				snapshot.animatedGeometryPageDemands.front().key.deformation.rendererGeneration,
+				snapshot.animatedGeometryPageDemands);
+			completedDeformationPlan = &*fallbackDeformationPlan;
+		}
 		const auto ApplyAnimatedGeometryDiagnostics =
-			[&snapshot](VirtualGeometryViewDiagnosticsSnapshot& viewDiagnostics)
+			[&snapshot, completedDeformationPlan](VirtualGeometryViewDiagnosticsSnapshot& viewDiagnostics)
 		{
 			// Visibility snapshots are the preferred live path, while prepared
 			// selection states are the fallback path. Both must be enriched from
@@ -1867,13 +1891,17 @@ namespace TerraEngine::Renderer {
 				viewDiagnostics.animatedBoundsSource = "NoAnimatedPageWork";
 				return;
 			}
-			const std::uint64_t rendererGeneration =
-				snapshot.animatedGeometryPageDemands.front()
-					.key.deformation.rendererGeneration;
-			const GpuDeformationPlan deformation = BuildGpuDeformationPlan(
-				snapshot.frameId,
-				rendererGeneration,
-				snapshot.animatedGeometryPageDemands);
+			if(completedDeformationPlan == nullptr) {
+				viewDiagnostics.animatedFallbackCount =
+					viewDiagnostics.animatedPageDemandCount;
+				viewDiagnostics.animatedSkippedWorkCount =
+					viewDiagnostics.animatedPageDemandCount;
+				viewDiagnostics.animatedBoundsSource = "MissingCompletedDeformationPlan";
+				viewDiagnostics.animatedFallbackReason =
+					"Animated demands were present without a completed deformation plan.";
+				return;
+			}
+			const GpuDeformationPlan& deformation = *completedDeformationPlan;
 			if(deformation.IsComplete())
 			{
 				viewDiagnostics.animatedUniqueDispatchCount =
@@ -1947,10 +1975,22 @@ namespace TerraEngine::Renderer {
 			return diagnostics;
 		}
 
-		std::vector<VirtualGeometryViewSelectionState> states = BuildVirtualGeometryViewSelectionStates(snapshot);
+		// Live RenderSystem snapshots already own the prepared view states. Calling
+		// BuildVirtualGeometryViewSelectionStates here used to return those states by
+		// value, which deep-copied every draw, cluster, page, batch, and fallback
+		// vector solely so the stats publisher could read them. Keep a local fallback
+		// only for standalone callers that supplied renderables without view states.
+		std::vector<VirtualGeometryViewSelectionState> fallbackStates;
+		const std::vector<VirtualGeometryViewSelectionState>* states =
+			&snapshot.virtualGeometryViewSelections;
+		if(states->empty())
+		{
+			fallbackStates = BuildVirtualGeometryViewSelectionStates(snapshot);
+			states = &fallbackStates;
+		}
 		std::vector<VirtualGeometryViewDiagnosticsSnapshot> diagnostics;
-		diagnostics.reserve(states.size());
-		for (const VirtualGeometryViewSelectionState& state : states)
+		diagnostics.reserve(states->size());
+		for (const VirtualGeometryViewSelectionState& state : *states)
 		{
 			VirtualGeometryViewDiagnosticsSnapshot viewDiagnostics;
 			viewDiagnostics.viewType = state.viewType;

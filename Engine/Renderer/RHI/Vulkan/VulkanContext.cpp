@@ -53,6 +53,10 @@ namespace
 	constexpr float kDepthHistoryMatrixEpsilon = 0.0005f;
 	constexpr std::uint64_t kTemporalStateHistoryFrames = 240u;
 	constexpr std::size_t kVulkanParallelRecordingThreshold = 64u;
+	// A worker needs enough repeated draw commands to amortize task scheduling,
+	// command-pool ownership, and command-buffer begin/end calls. This also bounds
+	// retained worker pools in very large crowds.
+	constexpr std::size_t kVulkanDrawsPerRecordingWorker = 256u;
 	constexpr std::size_t kMaxVulkanCaptureReadbacks = 4u;
 	constexpr std::size_t kMaxPreparedPushConstantRanges = 8u;
 
@@ -173,6 +177,9 @@ namespace
 	{
 		std::uint64_t signature = 1469598103934665603ull;
 		HashVulkanHiZDepthSignatureValue(signature, static_cast<std::uint64_t>(frameData.commands.size()));
+		std::unordered_map<TerraEngine::UUID, std::uint64_t> materialSignatures;
+		materialSignatures.reserve(std::min<std::size_t>(
+			frameData.commands.size(), 64U));
 
 		for (const DrawCommand& command : frameData.commands)
 		{
@@ -180,9 +187,12 @@ namespace
 			// depth-producing draw identity that created it for diagnostics, but
 			// do not use this signature as a hard gate: interactive movement
 			// must keep Hi-Z active and let the shader fail open per meshlet.
-			HashVulkanHiZDepthSignatureUuid(signature, command.objectId);
-			HashVulkanHiZDepthSignatureUuid(signature, command.meshId);
-			HashVulkanHiZDepthSignatureUuid(signature, command.materialId);
+			HashVulkanHiZDepthSignatureValue(signature,
+				static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(command.objectId)));
+			HashVulkanHiZDepthSignatureValue(signature,
+				static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(command.meshId)));
+			HashVulkanHiZDepthSignatureValue(signature,
+				static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(command.materialId)));
 			HashVulkanHiZDepthSignatureMat4(signature, command.modelMatrix);
 			HashVulkanHiZDepthSignatureValue(signature, command.materialIndex);
 			HashVulkanHiZDepthSignatureValue(signature, command.meshDataIndex);
@@ -209,31 +219,48 @@ namespace
 			HashVulkanHiZDepthSignatureValue(signature, command.selectedVirtualPageNeedCount);
 			HashVulkanHiZDepthSignatureValue(signature, command.taskShaderCullingEnabled ? 1u : 0u);
 
-			const Material* material = ResourceManager::Instance().GetMaterial(command.materialId);
-			if (material == nullptr)
-			{
-				HashVulkanHiZDepthSignatureValue(signature, 0u);
+			const auto cachedMaterial = materialSignatures.find(command.materialId);
+			if(cachedMaterial != materialSignatures.end()) {
+				HashVulkanHiZDepthSignatureValue(signature, cachedMaterial->second);
 				continue;
 			}
-
-			HashVulkanHiZDepthSignatureValue(signature, 1u);
-			HashVulkanHiZDepthSignatureValue(signature, material->header.flags);
-			HashVulkanHiZDepthSignatureValue(signature, material->header.shadingModel);
-			HashVulkanHiZDepthSignatureValue(signature, material->header.alphaMode);
-			HashVulkanHiZDepthSignatureUuid(signature, material->header.shaderCollectionId);
-			HashVulkanHiZDepthSignatureFloat(signature, material->header.alphaCutoff);
-			HashVulkanHiZDepthSignatureValue(signature, static_cast<std::uint64_t>(material->shadowBehavior));
-			HashVulkanHiZDepthSignatureValue(signature, material->header.textureCount);
-			for (const TextureBinding& binding : material->textures)
-			{
-				HashVulkanHiZDepthSignatureValue(signature, static_cast<std::uint64_t>(binding.semantic));
-				HashVulkanHiZDepthSignatureUuid(signature, binding.textureUuid);
-				HashVulkanHiZDepthSignatureValue(signature, static_cast<std::uint64_t>(binding.uvSetIndex));
-				HashVulkanHiZDepthSignatureFloat(signature, binding.uvScale[0]);
-				HashVulkanHiZDepthSignatureFloat(signature, binding.uvScale[1]);
-				HashVulkanHiZDepthSignatureFloat(signature, binding.uvOffset[0]);
-				HashVulkanHiZDepthSignatureFloat(signature, binding.uvOffset[1]);
+			// Material depth behavior is shared by every prefab instance. Hash one
+			// exact publication per UUID, then fold that compact value into each draw
+			// instead of locking ResourceManager and revisiting texture bindings 4,000
+			// times on an otherwise stable crowd frame.
+			std::uint64_t materialSignature = 1469598103934665603ull;
+			const Material* material =
+				ResourceManager::Instance().GetMaterial(command.materialId);
+			if(material == nullptr) {
+				HashVulkanHiZDepthSignatureValue(materialSignature, 0U);
+			} else {
+				HashVulkanHiZDepthSignatureValue(materialSignature, 1U);
+				HashVulkanHiZDepthSignatureValue(materialSignature, material->header.flags);
+				HashVulkanHiZDepthSignatureValue(materialSignature, material->header.shadingModel);
+				HashVulkanHiZDepthSignatureValue(materialSignature, material->header.alphaMode);
+				HashVulkanHiZDepthSignatureUuid(materialSignature,
+					material->header.shaderCollectionId);
+				HashVulkanHiZDepthSignatureFloat(materialSignature,
+					material->header.alphaCutoff);
+				HashVulkanHiZDepthSignatureValue(materialSignature,
+					static_cast<std::uint64_t>(material->shadowBehavior));
+				HashVulkanHiZDepthSignatureValue(materialSignature,
+					material->header.textureCount);
+				for(const TextureBinding& binding : material->textures) {
+					HashVulkanHiZDepthSignatureValue(materialSignature,
+						static_cast<std::uint64_t>(binding.semantic));
+					HashVulkanHiZDepthSignatureUuid(materialSignature,
+						binding.textureUuid);
+					HashVulkanHiZDepthSignatureValue(materialSignature,
+						static_cast<std::uint64_t>(binding.uvSetIndex));
+					HashVulkanHiZDepthSignatureFloat(materialSignature, binding.uvScale[0]);
+					HashVulkanHiZDepthSignatureFloat(materialSignature, binding.uvScale[1]);
+					HashVulkanHiZDepthSignatureFloat(materialSignature, binding.uvOffset[0]);
+					HashVulkanHiZDepthSignatureFloat(materialSignature, binding.uvOffset[1]);
+				}
 			}
+			materialSignatures.emplace(command.materialId, materialSignature);
+			HashVulkanHiZDepthSignatureValue(signature, materialSignature);
 		}
 
 		return signature;
@@ -1763,38 +1790,83 @@ void VulkanContext::BeginFrame() {
 			}
 		}
 
-	// Reset command pool so the main command buffer and any newly allocated
-	// per-camera buffers start from a clean state each frame.
+	// Reset the primary pool only after this frame slot's fence proves every main
+	// and extra primary command buffer is idle. Some drivers retain pool-level
+	// bookkeeping beyond an individual reset, so this protected reset remains the
+	// correctness boundary for multi-view and dedicated-capture command buffers.
 	{
-		TERRAENGINE_PROFILE_SCOPE("Vulkan: BeginFrame Reset Command Pools", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		TERRAENGINE_PROFILE_SCOPE("Vulkan: BeginFrame Reset Command Pools",
+			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		const auto resetStart = BackendClock::now();
 		const VkResult poolResetResult = vkResetCommandPool(
 			impl->device, impl->commandPools[impl->currentFrame], 0);
-		if (impl->MarkDeviceLost(poolResetResult, "begin frame command pool reset")) {
+		if (impl->MarkDeviceLost(poolResetResult, "begin frame command pool reset"))
+		{
 			return;
 		}
-		if (poolResetResult != VK_SUCCESS) {
-			TERRAENGINE_LOG(LogLevel::Error, "BeginFrame could not reset the completed frame command pool: " << poolResetResult);
+		if (poolResetResult != VK_SUCCESS)
+		{
+			TERRAENGINE_LOG(LogLevel::Error,
+				"BeginFrame could not reset the completed frame command pool: "
+					<< poolResetResult);
 			impl->skipFrame = true;
 			return;
 		}
 		TerraEngine::Renderer::Vulkan::RecordVulkanFrameStage(
 			impl->pendingBackendFrameBreakdown,
-			{ TerraEngine::Renderer::BackendFrameCostCategory::RhiBeginFrame, TerraEngine::Renderer::BackendSubmitStage::CommandBufferReset, RenderViewType::Game, 0u, "Reset primary command pool", true, false },
+			{ TerraEngine::Renderer::BackendFrameCostCategory::RhiBeginFrame,
+				TerraEngine::Renderer::BackendSubmitStage::CommandBufferReset,
+				RenderViewType::Game, 0u, "Reset primary command pool", true, false },
 			ElapsedMilliseconds(resetStart));
-		// Reset worker pools for this frame once so secondary buffers can be rerecorded safely.
-		if (impl->currentFrame < impl->workerCommandPools.size()) {
+		// Reset only pools that supplied command buffers during the completed use of
+		// this frame slot. An individual command-buffer reset is sufficient for Vulkan
+		// validity, but some drivers retain native recording resources until the pool
+		// is reset. Skipping inactive retained pools preserves the original CPU saving
+		// without allowing those native resources to accumulate every frame.
+		if (impl->currentFrame < impl->workerCommandPools.size()
+			&& impl->currentFrame < impl->workerBufferUsage.size())
+		{
 			auto& framePools = impl->workerCommandPools[impl->currentFrame];
-			for (VkCommandPool pool : framePools) {
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (pool != VK_NULL_HANDLE) {
-					const auto workerResetStart = BackendClock::now();
-					vkResetCommandPool(impl->device, pool, 0);
-					TerraEngine::Renderer::Vulkan::RecordVulkanFrameStage(
-						impl->pendingBackendFrameBreakdown,
-						{ TerraEngine::Renderer::BackendFrameCostCategory::RhiBeginFrame, TerraEngine::Renderer::BackendSubmitStage::CommandBufferReset, RenderViewType::Game, 0u, "Reset worker command pool", true, false },
-						ElapsedMilliseconds(workerResetStart));
+			const auto& frameUsage = impl->workerBufferUsage[impl->currentFrame];
+			const auto workerResetStart = BackendClock::now();
+			const std::size_t activePoolLimit = std::min(
+				framePools.size(), frameUsage.size());
+			std::size_t resetWorkerPoolCount = 0u;
+			for (std::size_t poolIndex = 0u;
+				poolIndex < activePoolLimit;
+				++poolIndex)
+			{
+				if (frameUsage[poolIndex] == 0u
+					|| framePools[poolIndex] == VK_NULL_HANDLE)
+				{
+					continue;
 				}
+				const VkResult workerResetResult = vkResetCommandPool(
+					impl->device, framePools[poolIndex], 0);
+				if (impl->MarkDeviceLost(
+					workerResetResult, "begin frame active worker command pool reset"))
+				{
+					return;
+				}
+				if (workerResetResult != VK_SUCCESS)
+				{
+					TERRAENGINE_LOG(LogLevel::Error,
+						"BeginFrame could not reset an active worker command pool: "
+							<< workerResetResult);
+					impl->skipFrame = true;
+					return;
+				}
+				++resetWorkerPoolCount;
+			}
+			if (resetWorkerPoolCount != 0u)
+			{
+				TerraEngine::Renderer::Vulkan::RecordVulkanFrameStage(
+					impl->pendingBackendFrameBreakdown,
+					{ TerraEngine::Renderer::BackendFrameCostCategory::RhiBeginFrame,
+						TerraEngine::Renderer::BackendSubmitStage::CommandBufferReset,
+						RenderViewType::Game, 0u,
+						"Reset active worker command pools", true, false },
+					ElapsedMilliseconds(workerResetStart));
 			}
 		}
 	}
@@ -3317,10 +3389,26 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	}
 	std::unordered_set<DrawResourcePreparationKey, DrawResourcePreparationKeyHash>
 		preparedDrawResourceKeys;
-	preparedDrawResourceKeys.reserve(drawResourceUpperBound);
+	// Instance count is usually much larger than unique mesh/material/pass
+	// combinations. Keep the bucket array proportional to expected diversity.
+	preparedDrawResourceKeys.reserve(std::min<std::size_t>(
+		drawResourceUpperBound, 128u));
+	TerraEngine::UUID lastPreparationMaterialId = TerraEngine::EMPTY_UUID;
+	Material* lastPreparationMaterial = nullptr;
+	std::optional<DrawResourcePreparationKey> lastPreparedResourceKey;
 	const auto PrepareDrawResources = [&](const DrawCommand& command,
 		VkRenderPass preparationPass) {
-		Material* material = ResourceManager::Instance().GetMaterial(command.materialId);
+		Material* material = nullptr;
+		if(command.materialId == lastPreparationMaterialId)
+		{
+			material = lastPreparationMaterial;
+		}
+		else
+		{
+			material = ResourceManager::Instance().GetMaterial(command.materialId);
+			lastPreparationMaterialId = command.materialId;
+			lastPreparationMaterial = material;
+		}
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!material) return;
 
@@ -3352,10 +3440,17 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			preparationPass,
 			material->header.flags,
 			preparationUsesConventionalVisibilityIdentity};
-		if(!preparedDrawResourceKeys.emplace(preparationKey).second)
+		if(lastPreparedResourceKey.has_value()
+			&& *lastPreparedResourceKey == preparationKey)
 		{
 			return;
 		}
+		if(!preparedDrawResourceKeys.emplace(preparationKey).second)
+		{
+			lastPreparedResourceKey = preparationKey;
+			return;
+		}
+		lastPreparedResourceKey = preparationKey;
 		// Mesh/material/pipeline preparation is invariant for duplicate commands in
 		// one protected view submission. Record the exact key only after collection
 		// selection so animated fallback and shadow render-pass differences remain
@@ -3423,7 +3518,20 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		if (useMainCommandBuffer) {
 			cmd = impl->commandBuffers[impl->currentFrame];
 			const auto resetCommandStart = BackendClock::now();
-			vkResetCommandBuffer(cmd, 0);
+			const VkResult resetCommandResult = vkResetCommandBuffer(cmd, 0);
+			if (impl->MarkDeviceLost(
+				resetCommandResult, "render frame primary command buffer reset"))
+			{
+				return;
+			}
+			if (resetCommandResult != VK_SUCCESS)
+			{
+				TERRAENGINE_LOG(LogLevel::Error,
+					"RenderFrame could not reset the completed primary command buffer: "
+						<< resetCommandResult);
+				impl->skipFrame = true;
+				return;
+			}
 			TerraEngine::Renderer::Vulkan::RecordVulkanFrameStage(
 				impl->pendingBackendFrameBreakdown,
 				{ TerraEngine::Renderer::BackendFrameCostCategory::RhiBeginFrame, TerraEngine::Renderer::BackendSubmitStage::CommandBufferReset, renderViewType, diagnosticViewId, "Reset primary command buffer", false, true },
@@ -4545,7 +4653,11 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	for (const ShadowDrawList& shadowDrawList : frameData.shadowDrawLists) {
 		shadowCommandSourceCount += shadowDrawList.commands.size();
 	}
-	std::vector<VkDrawMeshTasksIndirectCommandEXT> indirectCommands;
+	// RenderFrame is serialized by the backend state mutex. Thread-local scratch
+	// retains the large crowd capacities without sharing mutable command bytes
+	// between coordinator threads or VulkanContext instances.
+	thread_local std::vector<VkDrawMeshTasksIndirectCommandEXT> indirectCommands;
+	indirectCommands.clear();
 	// Reserve both the main-view commands and the light-specific shadow lists so
 	// per-light culling does not thrash the indirect-command buffer on CPU.
 	indirectCommands.reserve(frameData.commands.size() + shadowCommandSourceCount);
@@ -4656,16 +4768,69 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		TerraEngine::Renderer::VirtualGeometryRasterRoute rasterRoute =
 			TerraEngine::Renderer::VirtualGeometryRasterRoute::Hardware;
 	};
-	std::vector<PreparedDraw> prepared;
+	thread_local std::vector<PreparedDraw> prepared;
+	prepared.clear();
 	prepared.reserve(frameData.commands.size());
-	std::vector<PreparedDraw> preparedShadow;
-	preparedShadow.reserve(frameData.commands.size());
+	std::uint32_t cameraVisibleShadowCasterCount = 0U;
 	struct PreparedShadowList {
 		TerraEngine::UUID lightId = TerraEngine::EMPTY_UUID;
 		std::vector<PreparedDraw> draws;
 	};
-	std::vector<PreparedShadowList> preparedShadowLists;
-	preparedShadowLists.reserve(frameData.shadowDrawLists.size());
+	thread_local std::vector<PreparedShadowList> preparedShadowLists;
+	if(preparedShadowLists.size() > frameData.shadowDrawLists.size()) {
+		preparedShadowLists.resize(frameData.shadowDrawLists.size());
+	}
+	while(preparedShadowLists.size() < frameData.shadowDrawLists.size()) {
+		preparedShadowLists.emplace_back();
+	}
+	for(PreparedShadowList& preparedList : preparedShadowLists) {
+		preparedList.lightId = TerraEngine::EMPTY_UUID;
+		preparedList.draws.clear();
+	}
+	struct PrimitiveEstimateKey
+	{
+		TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+		std::uint32_t meshletOffset = 0U;
+		std::uint32_t meshletCount = 0U;
+		std::uint32_t fallbackPrimitiveCount = 0U;
+
+		bool operator==(const PrimitiveEstimateKey&) const noexcept = default;
+	};
+	struct PrimitiveEstimateKeyHash
+	{
+		std::size_t operator()(const PrimitiveEstimateKey& value) const noexcept
+		{
+			std::size_t hash = std::hash<TerraEngine::UUID>{}(value.meshId);
+			const auto combine = [&hash](std::uint32_t lane) noexcept {
+				hash ^= static_cast<std::size_t>(lane) + 0x9e3779b9U
+					+ (hash << 6U) + (hash >> 2U);
+			};
+			combine(value.meshletOffset);
+			combine(value.meshletCount);
+			combine(value.fallbackPrimitiveCount);
+			return hash;
+		}
+	};
+	thread_local std::unordered_map<PrimitiveEstimateKey, std::uint32_t,
+		PrimitiveEstimateKeyHash> primitiveEstimateCache;
+	primitiveEstimateCache.clear();
+	primitiveEstimateCache.reserve(std::min<std::size_t>(
+		frameData.commands.size(), 128U));
+	const auto estimateSelectedPrimitives = [&](const DrawCommand& command,
+		std::uint32_t fallbackPrimitiveCount,
+		std::uint32_t meshletOffset,
+		std::uint32_t meshletCount) {
+		const PrimitiveEstimateKey key{
+			command.meshId, meshletOffset, meshletCount, fallbackPrimitiveCount};
+		if(const auto cached = primitiveEstimateCache.find(key);
+			cached != primitiveEstimateCache.end()) {
+			return cached->second;
+		}
+		const std::uint32_t primitiveCount = EstimateSelectedPrimitiveCount(
+			command.meshId, fallbackPrimitiveCount, meshletOffset, meshletCount);
+		primitiveEstimateCache.emplace(key, primitiveCount);
+		return primitiveCount;
+	};
 
 	RenderStatsSnapshot pendingStats{};
 	pendingStats.viewType = (view == ViewType::Scene) ? RenderViewType::Scene : RenderViewType::Game;
@@ -4708,19 +4873,32 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 
 		return &pipelineIt->second;
 	};
-	std::unordered_map<TerraEngine::UUID, Material*> materialLookupCache;
-	materialLookupCache.reserve(frameData.commands.size());
+	thread_local std::unordered_map<TerraEngine::UUID, Material*>
+		materialLookupCache;
+	materialLookupCache.clear();
+	materialLookupCache.reserve(std::min<std::size_t>(
+		frameData.commands.size(), 128u));
+	TerraEngine::UUID lastMaterialId = TerraEngine::EMPTY_UUID;
+	Material* lastMaterial = nullptr;
 	const auto ResolveMaterial = [&](const TerraEngine::UUID& materialId) -> Material* {
 		// Material reloads invalidate backend state between frames. Within one
 		// RenderFrame call the reflected command list is immutable, so repeated
 		// camera and shadow draws can share the same ResourceManager lookup.
+		if(materialId == lastMaterialId)
+		{
+			return lastMaterial;
+		}
 		auto existing = materialLookupCache.find(materialId);
 		if (existing != materialLookupCache.end()) {
-			return existing->second;
+			lastMaterialId = materialId;
+			lastMaterial = existing->second;
+			return lastMaterial;
 		}
 		Material* material = ResourceManager::Instance().GetMaterial(materialId);
 		materialLookupCache.emplace(materialId, material);
-		return material;
+		lastMaterialId = materialId;
+		lastMaterial = material;
+		return lastMaterial;
 	};
 	const auto HasMeshletPayload = [](const VulkanMesh& mesh) {
 		// Mesh shaders need the packed vertex data, remap table, decode info,
@@ -4733,50 +4911,6 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			&& mesh.meshletBuffer.buffer != VK_NULL_HANDLE
 			&& mesh.meshletCount != 0u;
 	};
-	struct CanonicalGraphicsGroupKey
-	{
-		std::uint64_t stableInstanceId = 0u;
-		TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
-
-		bool operator==(const CanonicalGraphicsGroupKey&) const noexcept = default;
-	};
-	struct CanonicalGraphicsGroupKeyHash
-	{
-		std::size_t operator()(const CanonicalGraphicsGroupKey& key) const noexcept
-		{
-			// Combine both exact identity fields. Equality still resolves a rare hash
-			// collision, so one animated owner can never consume another's palette.
-			std::size_t hash = std::hash<std::uint64_t>{}(key.stableInstanceId);
-			hash ^= std::hash<TerraEngine::UUID>{}(key.meshId)
-				+ static_cast<std::size_t>(0x9e3779b9u) + (hash << 6u) + (hash >> 2u);
-			return hash;
-		}
-	};
-	std::unordered_map<CanonicalGraphicsGroupKey, std::uint32_t,
-		CanonicalGraphicsGroupKeyHash> canonicalGraphicsGroupOffsets;
-	if(impl->deformationComputeRecordedForCurrentFrame
-		&& impl->pendingDeformationImmutablePlan != nullptr
-		&& impl->activeDeformationGraphicsBufferIndex
-			!= VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX
-		&& impl->currentFrame < impl->deformationFrameResources.size())
-	{
-		const auto& resources = impl->deformationFrameResources[impl->currentFrame];
-		if(resources.live
-			&& resources.frameId == impl->pendingDeformationImmutablePlan->frameId
-			&& resources.graphicsBridgeBindlessIndex
-				== impl->activeDeformationGraphicsBufferIndex)
-		{
-			// The immutable bridge contains one exact owner/mesh record. Index it
-			// once so thousands of draws do not repeatedly scan the whole crowd.
-			canonicalGraphicsGroupOffsets.reserve(resources.graphicsGroups.size());
-			for(const auto& group : resources.graphicsGroups)
-			{
-				canonicalGraphicsGroupOffsets.emplace(
-					CanonicalGraphicsGroupKey{group.stableInstanceId, group.meshId},
-					group.headerWordOffset);
-			}
-		}
-	}
 	const auto ResolveCanonicalGraphicsGroup =
 		[&](const DrawCommand& command)
 			-> std::optional<std::uint32_t>
@@ -4800,9 +4934,20 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 					binding.animatorSlotIndex)
 						<< 32u)
 					| binding.animatorGeneration;
-		const auto group = canonicalGraphicsGroupOffsets.find(
-			CanonicalGraphicsGroupKey{stableInstanceId, command.meshId});
-		return group != canonicalGraphicsGroupOffsets.end()
+		const auto& resources =
+			impl->deformationFrameResources[impl->currentFrame];
+		if(!resources.live
+			|| resources.frameId
+				!= impl->pendingDeformationImmutablePlan->frameId
+			|| resources.graphicsBridgeBindlessIndex
+				!= impl->activeDeformationGraphicsBufferIndex)
+		{
+			return std::nullopt;
+		}
+		const auto group = resources.graphicsGroupOffsets.find(
+			VulkanContext::Impl::VulkanDeformationFrameResources::
+				GraphicsGroupKey{stableInstanceId, command.meshId});
+		return group != resources.graphicsGroupOffsets.end()
 			? std::optional<std::uint32_t>(group->second)
 			: std::nullopt;
 	};
@@ -4991,13 +5136,16 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			kMaxPreparedPushConstantRanges> pushConstantRanges{};
 		std::uint32_t pushConstantRangeCount = 0u;
 	};
-	std::unordered_map<StaticDrawPreparationKey, StaticDrawPreparation,
+	thread_local std::unordered_map<StaticDrawPreparationKey, StaticDrawPreparation,
 		StaticDrawPreparationKeyHash> staticDrawPreparationCache;
+	staticDrawPreparationCache.clear();
 	// Repeated instances share immutable mesh, material, pipeline, and descriptor
 	// resources. Resolve that static envelope once per exact pass/route key; the
 	// following loop still builds unique model and animation push data per owner.
 	staticDrawPreparationCache.reserve(std::min<std::size_t>(
 		frameData.commands.size() + frameData.shadowDrawLists.size(), 128U));
+	std::optional<StaticDrawPreparationKey> lastStaticPreparationKey;
+	std::optional<StaticDrawPreparation> lastStaticPreparation;
 	const auto ResolveStaticDrawPreparation = [&](const DrawCommand& command,
 		TerraEngine::UUID requestedCollectionId,
 		VkRenderPass renderPass,
@@ -5009,20 +5157,30 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			requestedCollectionId,
 			renderPass,
 			materialFlags};
+		if(lastStaticPreparationKey.has_value()
+			&& *lastStaticPreparationKey == key)
+		{
+			return lastStaticPreparation.has_value()
+				? &*lastStaticPreparation : nullptr;
+		}
 		if(const auto cached = staticDrawPreparationCache.find(key);
 			cached != staticDrawPreparationCache.end())
 		{
-			return cached->second.pipeline != VK_NULL_HANDLE
-				&& cached->second.pipelineLayout != VK_NULL_HANDLE
-				&& cached->second.meshDescriptorSet != VK_NULL_HANDLE
-				&& cached->second.meshletCount != 0u
-				? &cached->second : nullptr;
+			lastStaticPreparationKey = key;
+			lastStaticPreparation = cached->second;
+			return lastStaticPreparation->pipeline != VK_NULL_HANDLE
+				&& lastStaticPreparation->pipelineLayout != VK_NULL_HANDLE
+				&& lastStaticPreparation->meshDescriptorSet != VK_NULL_HANDLE
+				&& lastStaticPreparation->meshletCount != 0u
+				? &*lastStaticPreparation : nullptr;
 		}
 
 		impl->EnsureMesh(command.meshId);
 		auto meshIt = impl->meshCache.find(command.meshId);
 		if(meshIt == impl->meshCache.end() || !HasMeshletPayload(meshIt->second)) {
 			staticDrawPreparationCache.emplace(key, StaticDrawPreparation{});
+			lastStaticPreparationKey = key;
+			lastStaticPreparation.reset();
 			return nullptr;
 		}
 
@@ -5035,6 +5193,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		}
 		if(pipeline == nullptr) {
 			staticDrawPreparationCache.emplace(key, StaticDrawPreparation{});
+			lastStaticPreparationKey = key;
+			lastStaticPreparation.reset();
 			return nullptr;
 		}
 
@@ -5043,6 +5203,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			impl->EnsureMeshDescriptorSet(command.meshId, *pipeline);
 		if(meshDescriptorSet == VK_NULL_HANDLE) {
 			staticDrawPreparationCache.emplace(key, StaticDrawPreparation{});
+			lastStaticPreparationKey = key;
+			lastStaticPreparation.reset();
 			return nullptr;
 		}
 		if(pipeline->pushConstants.size() > kMaxPreparedPushConstantRanges)
@@ -5050,6 +5212,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			TERRAENGINE_LOG(LogLevel::Error,
 				"Skipping draw because the reflected pipeline exposes more push-constant ranges than the prepared draw can retain.");
 			staticDrawPreparationCache.emplace(key, StaticDrawPreparation{});
+			lastStaticPreparationKey = key;
+			lastStaticPreparation.reset();
 			return nullptr;
 		}
 		StaticDrawPreparation preparation{};
@@ -5071,7 +5235,9 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			key,
 			std::move(preparation));
 		(void)wasInserted;
-		return &inserted->second;
+		lastStaticPreparationKey = key;
+		lastStaticPreparation = inserted->second;
+		return &*lastStaticPreparation;
 	};
 
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
@@ -5156,12 +5322,15 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 				&& !deviceAuthoredCommand);
 
 		PushConstants push{};
-		push.viewProj = frameData.projectionMatrix * frameData.viewMatrix;
+		// Every draw in this immutable view uses the same camera transform.
+		// Reusing the matrix avoids 4,000 identical 4x4 multiplies for a crowd.
+		push.viewProj = currentViewProjection;
 		push.model = command.modelMatrix;
 		push.materialIndex = 0;
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (impl->materialIndexMap.contains(command.materialId)) {
-			push.materialIndex = impl->materialIndexMap[command.materialId];
+		if(const auto materialIndex = impl->materialIndexMap.find(command.materialId);
+			materialIndex != impl->materialIndexMap.end()) {
+			push.materialIndex = materialIndex->second;
 		}
 		ApplyAnimationGraphicsBridge(command, push,
 			ownerPaletteDeformation, canonicalGraphicsGroup);
@@ -5288,63 +5457,20 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 
 		prepared.push_back(std::move(draw));
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (shadowResourcesReady && ShouldMaterialCastShadow(material->shadowBehavior)) {
-			TerraEngine::UUID shadowCollectionId = collectionId;
-			const StaticDrawPreparation* shadowPreparation =
-				ResolveStaticDrawPreparation(
-					command, shadowCollectionId, impl->shadowRenderPass, materialFlags);
-
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (shadowPreparation != nullptr) {
-				const VkDescriptorSet shadowMeshDescriptorSet =
-					shadowPreparation->meshDescriptorSet;
-				{
-					PreparedDraw shadowDraw{};
-					shadowDraw.pipeline = shadowPreparation->pipeline;
-					shadowDraw.pipelineLayout =
-						shadowPreparation->pipelineLayout;
-					shadowDraw.meshletCount =
-						shadowPreparation->meshletCount;
-					shadowDraw.pushConstantRangeCount =
-						shadowPreparation->pushConstantRangeCount;
-					std::copy_n(
-						shadowPreparation->pushConstantRanges.begin(),
-						shadowPreparation->pushConstantRangeCount,
-						shadowDraw.pushConstantRanges.begin());
-					shadowDraw.meshId = command.meshId;
-					shadowDraw.materialId = command.materialId;
-					shadowDraw.descriptorSets = {impl->globalDescriptorSets[currentFrame], shadowMeshDescriptorSet};
-					shadowDraw.push = push;
-					shadowDraw.materialFlags = materialFlags;
-					// Shadow-map passes use a minimal fragment-shader branch:
-					// alpha-tested materials can still clip, but lighting and
-					// recursive shadow sampling are skipped while depth writes.
-					shadowDraw.push.vrsActive = 2u;
-					shadowDraw.push.taskCullingEnabled = 0u;
-					// Shadow visibility is evaluated from the light point of
-					// view. Keep the original diagnostic flags intact so shadow
-					// recording cannot become another path that latches camera
-					// Hi-Z off after an editor view or blocker changes.
-					shadowDraw.push.virtualGeometryPacketBufferIndex = VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
-					shadowDraw.push.virtualGeometryBatchBufferIndex = VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
-					shadowDraw.push.editorTint = glm::vec4(0.0f);
-					
-					VkDrawMeshTasksIndirectCommandEXT shadowIndirectCmd{};
-					shadowIndirectCmd.groupCountX = taskGroupCount;
-					shadowIndirectCmd.groupCountY = 1;
-					shadowIndirectCmd.groupCountZ = 1;
-					shadowDraw.indirectBufferIndex = static_cast<uint32_t>(indirectCommands.size());
-					indirectCommands.push_back(shadowIndirectCmd);
-
-					preparedShadow.push_back(std::move(shadowDraw));
-				}
-			}
+		// Per-light shadow lists below own the only shadow draw preparations that
+		// can be submitted. The former camera-list copy built another complete draw
+		// and indirect command per visible instance solely to count it, doubling
+		// preparation for a crowd before discarding those commands.
+		if(shadowResourcesReady
+			&& ShouldMaterialCastShadow(material->shadowBehavior)
+			&& cameraVisibleShadowCasterCount
+				< std::numeric_limits<std::uint32_t>::max()) {
+			++cameraVisibleShadowCasterCount;
 		}
 
 		pendingStats.drawCalls += 1u;
-		pendingStats.triangleCount += EstimateSelectedPrimitiveCount(
-			command.meshId,
+		pendingStats.triangleCount += estimateSelectedPrimitives(
+			command,
 			staticPreparation->indexCount / 3u,
 			ownerMeshletOffset,
 			selectedMeshletCount);
@@ -5361,8 +5487,12 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	}
 
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (const ShadowDrawList& shadowDrawList : frameData.shadowDrawLists) {
-		PreparedShadowList preparedList{};
+	for(std::size_t shadowListIndex = 0U;
+		shadowListIndex < frameData.shadowDrawLists.size(); ++shadowListIndex) {
+		const ShadowDrawList& shadowDrawList =
+			frameData.shadowDrawLists[shadowListIndex];
+		PreparedShadowList& preparedList =
+			preparedShadowLists[shadowListIndex];
 		preparedList.lightId = shadowDrawList.lightId;
 		preparedList.draws.reserve(shadowDrawList.commands.size());
 
@@ -5421,12 +5551,13 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			shadowDraw.meshId = command.meshId;
 			shadowDraw.materialId = command.materialId;
 			shadowDraw.descriptorSets = {impl->globalDescriptorSets[currentFrame], shadowMeshDescriptorSet};
-			shadowDraw.push.viewProj = frameData.projectionMatrix * frameData.viewMatrix;
+			shadowDraw.push.viewProj = currentViewProjection;
 			shadowDraw.push.model = command.modelMatrix;
 			shadowDraw.push.materialIndex = 0u;
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (impl->materialIndexMap.contains(command.materialId)) {
-				shadowDraw.push.materialIndex = impl->materialIndexMap[command.materialId];
+			if(const auto materialIndex = impl->materialIndexMap.find(command.materialId);
+				materialIndex != impl->materialIndexMap.end()) {
+				shadowDraw.push.materialIndex = materialIndex->second;
 			}
 			ApplyAnimationGraphicsBridge(command, shadowDraw.push,
 				(command.virtualGeometryFlags
@@ -5490,10 +5621,10 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			preparedList.draws.push_back(std::move(shadowDraw));
 		}
 
-		preparedShadowLists.push_back(std::move(preparedList));
 	}
 
-	pendingBudgetDiagnostics.cameraVisibleShadowCasterCount = static_cast<std::uint32_t>(preparedShadow.size());
+	pendingBudgetDiagnostics.cameraVisibleShadowCasterCount =
+		cameraVisibleShadowCasterCount;
 	pendingBudgetDiagnostics.lightVisibleShadowCasterCount = 0u;
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const PreparedShadowList& preparedList : preparedShadowLists) {
@@ -5784,6 +5915,10 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		"Vulkan: Primary Record Shadow Commands");
 	auto RecordShadowDraws = [&](const std::vector<PreparedDraw>& shadowDraws, const glm::mat4& lightViewProjection) {
 		std::uint32_t recordedDrawCount = 0u;
+		VkPipeline boundPipeline = VK_NULL_HANDLE;
+		VkPipelineLayout boundDescriptorLayout = VK_NULL_HANDLE;
+		std::array<VkDescriptorSet, 2u> boundDescriptorSets{};
+		bool descriptorsBound = false;
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const PreparedDraw& draw : shadowDraws) {
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -5793,8 +5928,25 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 				continue;
 			}
 
-			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline);
-			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipelineLayout, 0, static_cast<uint32_t>(draw.descriptorSets.size()), draw.descriptorSets.data(), 0, nullptr);
+			// Crowds commonly repeat one pipeline and descriptor pair thousands of
+			// times. Vulkan keeps this state until another bind changes it, so emit a
+			// bind only when the prepared draw actually changes the required state.
+			if(boundPipeline != draw.pipeline)
+			{
+				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline);
+				boundPipeline = draw.pipeline;
+			}
+			if(!descriptorsBound || boundDescriptorLayout != draw.pipelineLayout
+				|| boundDescriptorSets != draw.descriptorSets)
+			{
+				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+					draw.pipelineLayout, 0,
+					static_cast<uint32_t>(draw.descriptorSets.size()),
+					draw.descriptorSets.data(), 0, nullptr);
+				boundDescriptorLayout = draw.pipelineLayout;
+				boundDescriptorSets = draw.descriptorSets;
+				descriptorsBound = true;
+			}
 
 			PushConstants shadowPush = draw.push;
 			shadowPush.viewProj = lightViewProjection;
@@ -5892,9 +6044,10 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		shadowScissor.offset = { static_cast<std::int32_t>(record.regionX), static_cast<std::int32_t>(record.regionY) };
 		shadowScissor.extent = { std::min(record.regionWidth, width), std::min(record.regionHeight, height) };
 		vkCmdSetScissor(cmd, 0u, 1u, &shadowScissor);
-		const std::vector<PreparedDraw>& shadowDraws = (record.preparedDraws != nullptr)
+		static const std::vector<PreparedDraw> kEmptyPreparedShadowDraws{};
+		const std::vector<PreparedDraw>& shadowDraws = record.preparedDraws != nullptr
 			? *record.preparedDraws
-			: preparedShadow;
+			: kEmptyPreparedShadowDraws;
 		pendingBudgetDiagnostics.shadowDrawSubmissionCount += RecordShadowDraws(shadowDraws, lightViewProjection);
 		vkCmdEndRenderPass(cmd);
 		return true;
@@ -6065,13 +6218,24 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!prepared.empty()) {
 		const size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
-		const size_t workerCount = prepared.size() < kVulkanParallelRecordingThreshold ? 1u : std::min(prepared.size(), hw);
+		const size_t usefulWorkerCount = std::max<size_t>(
+			1u,
+			(prepared.size() + kVulkanDrawsPerRecordingWorker - 1u)
+				/ kVulkanDrawsPerRecordingWorker);
+		const size_t workerCount = prepared.size()
+			< kVulkanParallelRecordingThreshold
+			? 1u
+			: std::min(usefulWorkerCount, hw);
 		const size_t chunkSize = (prepared.size() + workerCount - 1) / workerCount;
 
 		impl->EnsureWorkerPools(impl->currentFrame, workerCount);
 		std::vector<std::future<VkCommandBuffer>> futures;
 		futures.reserve(workerCount);
-		auto recordSecondaryRange = [this, &prepared, computeCompositeReady](VkCommandBuffer secondary, VkRenderPass renderPass, VkFramebuffer framebuffer, VkExtent2D renderExtent, size_t start, size_t end) -> VkCommandBuffer {
+		// The scratch vector belongs to the render thread's thread-local storage.
+		// Worker jobs must capture that exact storage explicitly; resolving the
+		// thread-local name on a worker would select the worker's empty instance.
+		const std::vector<PreparedDraw>* preparedForRecording = &prepared;
+		auto recordSecondaryRange = [this, computeCompositeReady, preparedForRecording](VkCommandBuffer secondary, VkRenderPass renderPass, VkFramebuffer framebuffer, VkExtent2D renderExtent, size_t start, size_t end) -> VkCommandBuffer {
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (secondary == VK_NULL_HANDLE) return VK_NULL_HANDLE;
 			vkResetCommandBuffer(secondary, 0);
@@ -6106,10 +6270,14 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			scissor.offset = { 0, 0 };
 			scissor.extent = renderExtent;
 			vkCmdSetScissor(secondary, 0u, 1u, &scissor);
+			VkPipeline boundPipeline = VK_NULL_HANDLE;
+			VkPipelineLayout boundDescriptorLayout = VK_NULL_HANDLE;
+			std::array<VkDescriptorSet, 2u> boundDescriptorSets{};
+			bool descriptorsBound = false;
 
 			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (size_t i = start; i < end; ++i) {
-				const PreparedDraw& draw = prepared[i];
+				const PreparedDraw& draw = (*preparedForRecording)[i];
 				if(computeCompositeReady
 					&& draw.rasterRoute
 						== TerraEngine::Renderer::VirtualGeometryRasterRoute::Compute)
@@ -6122,8 +6290,23 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 					continue;
 				}
 
-				vkCmdBindPipeline(secondary, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline);
-				vkCmdBindDescriptorSets(secondary, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipelineLayout, 0, static_cast<uint32_t>(draw.descriptorSets.size()), draw.descriptorSets.data(), 0, nullptr);
+				if(boundPipeline != draw.pipeline)
+				{
+					vkCmdBindPipeline(secondary, VK_PIPELINE_BIND_POINT_GRAPHICS,
+						draw.pipeline);
+					boundPipeline = draw.pipeline;
+				}
+				if(!descriptorsBound || boundDescriptorLayout != draw.pipelineLayout
+					|| boundDescriptorSets != draw.descriptorSets)
+				{
+					vkCmdBindDescriptorSets(secondary,
+						VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipelineLayout, 0,
+						static_cast<uint32_t>(draw.descriptorSets.size()),
+						draw.descriptorSets.data(), 0, nullptr);
+					boundDescriptorLayout = draw.pipelineLayout;
+					boundDescriptorSets = draw.descriptorSets;
+					descriptorsBound = true;
+				}
 				PushDefaultMeshConstants(
 					secondary,
 					draw.pipelineLayout,

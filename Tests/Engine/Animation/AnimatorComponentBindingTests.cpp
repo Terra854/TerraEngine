@@ -390,6 +390,29 @@ namespace TerraEngine::Tests {
 					&& reloadedPlayback.absoluteTick > 0,
 					"Hot reload must retain the animator lifetime while atomically replacing its asset-generation bundle and restarting active playback.");
 
+				const AnimationGeneration clipBeforeClipOnlyReload =
+					resources.GetAnimationAssetRuntimeGeneration(
+						clipId, AssetType::AnimationClip);
+				context.Expect(resources.ReloadAnimationClip(clipId)
+					&& ExecuteBindingFrame(animation),
+					"A direct-clip-only publication must refresh through the protected batch boundary.");
+				const AnimationGeneration clipAfterClipOnlyReload =
+					resources.GetAnimationAssetRuntimeGeneration(
+						clipId, AssetType::AnimationClip);
+				const std::shared_ptr<const PublishedAnimatorPose> clipOnlyReloaded =
+					animation.LoadPublishedAnimatorPoseForObject(objectId);
+				const AnimatorPlaybackStateSnapshot clipOnlyReloadedPlayback =
+					animation.LoadAnimatorPlaybackState(activeHandle);
+				context.Expect(clipAfterClipOnlyReload > clipBeforeClipOnlyReload
+					&& animation.ResolveAnimatorForObject(objectId) == activeHandle
+					&& clipOnlyReloaded
+					&& clipOnlyReloaded->skeleton.generation == skeletonAfterReload
+					&& clipOnlyReloaded->clip.generation == clipAfterClipOnlyReload
+					&& clipOnlyReloadedPlayback.runState
+						== AnimatorPlaybackRunState::Playing
+					&& clipOnlyReloadedPlayback.absoluteTick > 0,
+					"The batched direct-clip publication path must keep the runtime handle, retain the exact skeleton, and restart the new clip generation.");
+
 				resources.DeleteResource(clipId, AssetType::AnimationClip);
 				resources.DeleteResource(skeletonId, AssetType::Skeleton);
 				const AnimationGeneration clipTombstone =
@@ -950,6 +973,8 @@ namespace TerraEngine::Tests {
 				AnimatorComponentBindingCoordinator coordinator;
 				const AnimatorComponentSynchronizationSummary queued =
 					coordinator.Synchronize(animation, objects, resources);
+				const AnimatorComponentSynchronizationSummary waiting =
+					coordinator.Synchronize(animation, objects, resources);
 				objects.RemoveComponent<AnimatorComponent>(object);
 				const AnimatorComponentSynchronizationSummary removed =
 					coordinator.Synchronize(animation, objects, resources);
@@ -959,6 +984,10 @@ namespace TerraEngine::Tests {
 					coordinator.Synchronize(animation, objects, resources);
 
 				context.Expect(blockerRunning && componentCreated
+					&& queued.reconciledBindingCount == 1U
+					&& waiting.reconciledBindingCount == 0U
+					&& waiting.createdCount == 0U
+					&& waiting.reboundCount == 0U
 					&& queued.requestedStreamPayloadCount
 						== database.residentBlocks.size()
 					&& queued.retainedStreamPayloadCount
@@ -969,7 +998,7 @@ namespace TerraEngine::Tests {
 					&& removed.retainedStreamPayloadCount == 0U
 					&& afterLateWorkers.residentStreamPayloadCount == 0U
 					&& afterLateWorkers.streamedMotionDatabaseCount == 0U,
-					"Component removal must release every retain, cancel queued block IO, and reject late workers without publishing a database candidate.");
+					"An unchanged pending range read must skip binding reconciliation; a later component removal must still release every retain, cancel queued block IO, and reject late workers.");
 
 				coordinator.InvalidateAll(animation);
 				animation.Shutdown();

@@ -425,7 +425,11 @@ namespace TerraEngine::Renderer {
 	TERRAENGINE_API void ApplyVirtualGeometryAdaptiveDiagnostics(VirtualGeometryViewDiagnosticsSnapshot& snapshot, VirtualGeometryAdaptiveSettingsDiagnostics settings, VirtualGeometryCookOutputDiagnostics cookOutput, VirtualGeometryClusterSelectionDiagnostics clusterSelection, VirtualGeometryPageResidencyDiagnostics pageResidency, VirtualGeometryHiZValidationDiagnostics hiZValidation);
 	TERRAENGINE_API VirtualGeometryViewDiagnosticsSnapshot BuildVirtualGeometryLodQualityDiagnostics(RenderViewType viewType, std::uint64_t frameId, const std::vector<VirtualGeometryAssetRuntime>& assets, const VirtualGeometryQualityProfile& qualityProfile);
 	TERRAENGINE_API VirtualGeometryViewDiagnosticsSnapshot BuildVirtualGeometryDiagnosticsFromVisibilitySnapshot(const VirtualGeometryViewVisibilitySnapshot& visibility);
-	TERRAENGINE_API std::vector<VirtualGeometryViewDiagnosticsSnapshot> BuildVirtualGeometryViewDiagnosticsFromSnapshot(const RenderFrameSnapshot& snapshot, const VirtualGeometryQualityProfile& qualityProfile, VirtualGeometryInactiveReason inactiveReason);
+	TERRAENGINE_API std::vector<VirtualGeometryViewDiagnosticsSnapshot> BuildVirtualGeometryViewDiagnosticsFromSnapshot(
+		const RenderFrameSnapshot& snapshot,
+		const VirtualGeometryQualityProfile& qualityProfile,
+		VirtualGeometryInactiveReason inactiveReason,
+		const GpuDeformationPlan* completedDeformationPlan = nullptr);
 	TERRAENGINE_API VirtualGeometryViewDiagnosticsSnapshot BuildVirtualGeometryHiZDiagnostics(const VirtualGeometryHiZDiagnosticsInput& input);
 	TERRAENGINE_API void AddVirtualGeometryFailOpenDiagnostic(RenderDiagnosticsSummary& summary, const TerraEngine::UUID& meshId, const VirtualGeometryDrawRange& range);
 	TERRAENGINE_API VirtualGeometrySchedulerDiagnostics BuildVirtualGeometrySchedulerDiagnostics(std::string owningSystem, std::string schedulerPhase, std::vector<std::string> readResources, std::vector<std::string> writeResources, std::string workerSafePreparation, std::string protectedBoundary, std::string visibilityBoundary);

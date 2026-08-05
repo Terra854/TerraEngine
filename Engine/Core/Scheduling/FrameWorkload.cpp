@@ -1156,9 +1156,19 @@ namespace TerraEngine::Scheduling {
 
 		TERRAENGINE_PROFILE_SCOPE("FrameWorkload: Build and Execute Job Graph",
 			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		JobGraph graph(plan.frameId, "Architecture Hardened Frame");
-		std::vector<std::vector<DependencyHandle>> handlesByResult(plan.results.size());
-		std::vector<ScheduledPartition> scheduledPartitions;
+		// Frame topology is rebuilt because callbacks and activation can change, but
+		// the coordinator thread can retain all graph/vector capacity across frames.
+		// Reset advances handle generations and clears logical contents, so no stale
+		// callback or dependency remains observable through this allocation reuse.
+		thread_local JobGraph graph("frame-workload", "Architecture Hardened Frame");
+		graph.Reset(plan.frameId, "Architecture Hardened Frame");
+		thread_local std::vector<std::vector<DependencyHandle>> handlesByResult;
+		for(std::vector<DependencyHandle>& handles : handlesByResult) {
+			handles.clear();
+		}
+		handlesByResult.resize(plan.results.size());
+		thread_local std::vector<ScheduledPartition> scheduledPartitions;
+		scheduledPartitions.clear();
 		for (std::size_t resultIndex = 0; resultIndex < plan.results.size(); ++resultIndex)
 		{
 			FrameWorkloadResult& result = plan.results[resultIndex];
@@ -1220,7 +1230,7 @@ namespace TerraEngine::Scheduling {
 			}
 		}
 
-		auto addAllDependencies = [&graph](const std::vector<DependencyHandle>& before, const std::vector<DependencyHandle>& after) {
+		auto addAllDependencies = [](const std::vector<DependencyHandle>& before, const std::vector<DependencyHandle>& after) {
 			for (const DependencyHandle& beforeHandle : before)
 			{
 				for (const DependencyHandle& afterHandle : after)

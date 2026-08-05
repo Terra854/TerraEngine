@@ -1062,7 +1062,8 @@ namespace TerraEngine::Animation {
 		GpuAnimationPlan& output,
 		GpuAnimationLoweredPlanResult& result,
 		const GpuAnimationPlanLimits& limits,
-		GpuAnimationFrameAtlasCache* atlasCache) noexcept
+		GpuAnimationFrameAtlasCache* atlasCache,
+		const GpuAnimationPlan* previousPlan) noexcept
 	{
 		result = {};
 		try {
@@ -1191,10 +1192,24 @@ namespace TerraEngine::Animation {
 				}
 			}
 			GpuAnimationPlanBuildDiagnostics diagnostics{};
-			const GpuAnimationPlanStatus planStatus = BuildGpuAnimationPlan(
-				stagedRequests, planGeneration, scratchArena, paletteArena, output, limits, &diagnostics);
+			const bool topologyReused = previousPlan != nullptr
+				&& sharedPayload
+				&& previousPlan->sharedResidentPayloads == sharedPayload
+				&& TryRefreshGpuAnimationPlan(
+					stagedRequests,
+					planGeneration,
+					scratchArena,
+					paletteArena,
+					*previousPlan,
+					output,
+					limits);
+			const GpuAnimationPlanStatus planStatus = topologyReused
+				? GpuAnimationPlanStatus::Ok
+				: BuildGpuAnimationPlan(
+					stagedRequests, planGeneration, scratchArena, paletteArena, output, limits, &diagnostics);
 			result.planStatus = planStatus;
 			result.diagnostics = diagnostics;
+			result.topologyReused = topologyReused;
 			if(planStatus != GpuAnimationPlanStatus::Ok) {
 				result.status = GpuAnimationLoweringStatus::PlanBuildFailed;
 				return result.status;

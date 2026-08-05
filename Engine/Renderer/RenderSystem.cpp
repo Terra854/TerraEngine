@@ -461,6 +461,11 @@ namespace
 		std::uint64_t signature = 0u;
 		std::uint64_t lastTouchedFrameId = 0u;
 		std::vector<DrawCommand> commands;
+		// Each cached geometry command remembers its stable index in the current
+		// revision-sorted renderable table. Cache keys already include scene and
+		// renderable-world revisions, so a hit can attach this frame's animation
+		// binding during materialization without a separate hash lookup/copy pass.
+		std::vector<std::uint32_t> renderableIndices;
 		std::vector<TerraEngine::Renderer::VirtualGeometrySelectedClusterRecord> selectedClusters;
 		std::vector<TerraEngine::Renderer::VirtualGeometryPageNeedRecord> pageNeeds;
 		std::vector<VirtualGeometryClusterPacket> clusterPackets;
@@ -526,27 +531,57 @@ namespace
 		// and trimming cannot run again before the caller copies these spans into
 		// its protected FrameRenderData.
 		const VisibleCommandCacheRecord* cachedRecord = nullptr;
-		// A geometry-cache hit still needs this frame's immutable animation
-		// publications. Store only that narrow overlay; the caller materializes one
-		// owned command vector instead of copying the full cache entry twice.
-		std::vector<TerraEngine::Renderer::AnimationRenderBinding>
-			refreshedAnimationBindings;
 		bool cacheHit = false;
 
-		void MaterializeCommands(std::vector<DrawCommand>& destination) const
+		template<typename RenderableContainer>
+		void MaterializeCommands(
+			std::vector<DrawCommand>& destination,
+			const RenderableContainer& currentRenderables,
+			std::vector<std::uint8_t>* visibleAnimatedFlags,
+			const std::unordered_map<TerraEngine::UUID, std::size_t>*
+				currentRenderableIndices) const
 		{
 			if(cachedRecord == nullptr)
 			{
 				destination = commands;
+				if(visibleAnimatedFlags == nullptr || currentRenderableIndices == nullptr)
+				{
+					return;
+				}
+				for(const DrawCommand& command : destination)
+				{
+					if(command.animationBinding.status
+						!= TerraEngine::Renderer::AnimationRenderBindingStatus::Ready)
+					{
+						continue;
+					}
+					const auto current = currentRenderableIndices->find(command.objectId);
+					if(current != currentRenderableIndices->end()
+						&& current->second < visibleAnimatedFlags->size())
+					{
+						(*visibleAnimatedFlags)[current->second] = 1u;
+					}
+				}
 				return;
 			}
 			destination = cachedRecord->commands;
 			const std::size_t bindingCount = std::min(
-				destination.size(), refreshedAnimationBindings.size());
+				destination.size(), cachedRecord->renderableIndices.size());
 			for(std::size_t index = 0U; index < bindingCount; ++index)
 			{
-				destination[index].animationBinding =
-					refreshedAnimationBindings[index];
+				const std::uint32_t renderableIndex =
+					cachedRecord->renderableIndices[index];
+				if(renderableIndex < currentRenderables.size()) {
+					destination[index].animationBinding =
+						currentRenderables[renderableIndex].animationBinding;
+					if(visibleAnimatedFlags != nullptr
+						&& renderableIndex < visibleAnimatedFlags->size()
+						&& destination[index].animationBinding.status
+							== TerraEngine::Renderer::AnimationRenderBindingStatus::Ready)
+					{
+						(*visibleAnimatedFlags)[renderableIndex] = 1u;
+					}
+				}
 			}
 		}
 		[[nodiscard]] const std::vector<GpuVirtualGeometryPacketRecord>& GpuPacketRecords() const noexcept
@@ -4014,33 +4049,7 @@ void RenderSystem::Update(float deltaTime)
 	// packet for every mesh. That is quadratic for crowds. These frame-local
 	// immutable indexes retain all duplicate records so the fail-open ambiguity
 	// checks below remain identical while ordinary lookups become constant-time.
-	std::unordered_multimap<TerraEngine::UUID, std::uint32_t> gpuOwnerMappingIndices;
-	std::unordered_multimap<std::uint64_t, std::uint32_t> gpuWorkPacketIndices;
-	if(gpuPresentation != nullptr) {
-		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Build GPU Animation Identity Index",
-			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		gpuOwnerMappingIndices.reserve(gpuPresentation->ownerObjectMappings.size());
-		for(std::uint32_t mappingIndex = 0U;
-			mappingIndex < gpuPresentation->ownerObjectMappings.size(); ++mappingIndex) {
-			const TerraEngine::Animation::GpuAnimationOwnerObjectMapping& mapping =
-				gpuPresentation->ownerObjectMappings[mappingIndex];
-			if(mapping.IsComplete()) {
-				gpuOwnerMappingIndices.emplace(mapping.ownerObjectId, mappingIndex);
-			}
-		}
-	}
-	if(immutableGpuAnimationPlan != nullptr) {
-		gpuWorkPacketIndices.reserve(immutableGpuAnimationPlan->workPackets.size());
-		for(std::uint32_t packetIndex = 0U;
-			packetIndex < immutableGpuAnimationPlan->workPackets.size(); ++packetIndex) {
-			gpuWorkPacketIndices.emplace(
-				immutableGpuAnimationPlan->workPackets[packetIndex].stableInstanceId,
-				packetIndex);
-		}
-	}
-
-	const auto findUniqueGpuVisualIdentity = [&immutableGpuAnimationPlan, &gpuPresentation,
-		&gpuOwnerMappingIndices, &gpuWorkPacketIndices,
+	const auto findUniqueGpuAnimationIdentity = [&immutableGpuAnimationPlan, &gpuPresentation,
 		protectedRendererGeneration, protectedSceneGeneration](
 		const TerraEngine::Renderer::AnimationRenderBindingRequest& request)
 		-> std::optional<TerraEngine::Renderer::AnimationGpuRenderBinding>
@@ -4057,12 +4066,19 @@ void RenderSystem::Update(float deltaTime)
 		}
 
 		std::optional<TerraEngine::Animation::GpuAnimationOwnerObjectMapping> ownerMapping;
-		const auto ownerRange = gpuOwnerMappingIndices.equal_range(request.animatorObjectId);
-		for(auto ownerIt = ownerRange.first; ownerIt != ownerRange.second; ++ownerIt) {
-			const TerraEngine::Animation::GpuAnimationOwnerObjectMapping& mapping =
-				gpuPresentation->ownerObjectMappings[ownerIt->second];
+		const auto ownerBegin = std::lower_bound(gpuPresentation->ownerObjectMappings.begin(),
+			gpuPresentation->ownerObjectMappings.end(), request.animatorObjectId,
+			[](const TerraEngine::Animation::GpuAnimationOwnerObjectMapping& mapping,
+				const TerraEngine::UUID& ownerObjectId) {
+				return mapping.ownerObjectId < ownerObjectId;
+			});
+		for(auto ownerIt = ownerBegin;
+			ownerIt != gpuPresentation->ownerObjectMappings.end()
+				&& ownerIt->ownerObjectId == request.animatorObjectId; ++ownerIt) {
+			const TerraEngine::Animation::GpuAnimationOwnerObjectMapping& mapping = *ownerIt;
 			if(!mapping.IsComplete() || mapping.ownerObjectId != request.animatorObjectId
-				|| mapping.componentGeneration != request.componentGeneration) {
+				|| mapping.componentGeneration != request.componentGeneration
+				|| !mapping.HasPublishedPacketIndex()) {
 				continue;
 			}
 			if(ownerMapping.has_value()) {
@@ -4077,9 +4093,8 @@ void RenderSystem::Update(float deltaTime)
 		std::optional<TerraEngine::Renderer::AnimationGpuRenderBinding> match;
 		const std::uint32_t rendererGeneration =
 			static_cast<std::uint32_t>(protectedRendererGeneration);
-		const auto packetRange = gpuWorkPacketIndices.equal_range(ownerMapping->stableInstanceId);
-		for(auto packetIt = packetRange.first; packetIt != packetRange.second; ++packetIt) {
-			const std::uint32_t packetIndex = packetIt->second;
+		const std::uint32_t packetIndex = ownerMapping->workPacketIndex;
+		if(packetIndex < immutableGpuAnimationPlan->workPackets.size()) {
 			const TerraEngine::Animation::GpuAnimationWorkPacket& packet =
 				immutableGpuAnimationPlan->workPackets[packetIndex];
 			const TerraEngine::Animation::GpuAnimationRenderIdentity& renderIdentity =
@@ -4087,10 +4102,8 @@ void RenderSystem::Update(float deltaTime)
 			if(packet.generationRecordIndex >= immutableGpuAnimationPlan->generationRecords.size()
 				|| packet.stageMask == 0U
 				|| !renderIdentity.IsComplete()
-				|| renderIdentity != request.expectedGpuRenderIdentity
-				|| TerraEngine::Animation::HasGpuAnimationFlag(packet.flags,
-					TerraEngine::Animation::GpuAnimationWorkFlag::HybridCpuAuthority)) {
-				continue;
+				|| renderIdentity != request.expectedGpuRenderIdentity) {
+				return std::nullopt;
 			}
 			const TerraEngine::Animation::GpuAnimationGenerationRecord& generation =
 				immutableGpuAnimationPlan->generationRecords[packet.generationRecordIndex];
@@ -4106,7 +4119,7 @@ void RenderSystem::Update(float deltaTime)
 				|| generation.rendererGeneration != rendererGeneration
 				|| packet.stableInstanceId != ((static_cast<std::uint64_t>(generation.instanceSlot) << 32U)
 					| static_cast<std::uint64_t>(generation.instanceGeneration))) {
-				continue;
+				return std::nullopt;
 			}
 
 			TerraEngine::Renderer::AnimationGpuRenderBinding candidate{};
@@ -4129,6 +4142,9 @@ void RenderSystem::Update(float deltaTime)
 			candidate.programGeneration = generation.programGeneration;
 			candidate.stageMask = packet.stageMask;
 			candidate.renderIdentity = renderIdentity;
+			candidate.hybridCpuAuthority = TerraEngine::Animation::HasGpuAnimationFlag(
+				packet.flags,
+				TerraEngine::Animation::GpuAnimationWorkFlag::HybridCpuAuthority);
 			candidate.valid = true;
 			if(match.has_value()) {
 				// The plan ABI names one packet per animator. Without a mesh ID in the
@@ -4187,7 +4203,7 @@ void RenderSystem::Update(float deltaTime)
 			[&cameras, &renderables, &aliveCompatibleAnimationObjects,
 				&animatorPosePublications, &animationAuthorityGeneration,
 				&runtimeLayoutRejectedRecordCount, &runtimeLayoutRejectionReasons,
-				&findUniqueGpuVisualIdentity, &frameResourceAvailability,
+				&findUniqueGpuAnimationIdentity, &frameResourceAvailability,
 				&frameMeshResources, &resourceManager, &registry,
 				protectedRendererGeneration,
 				protectedSceneGeneration, this](const TerraEngine::Scheduling::EcsQueryChunk&, TerraEngine::Scheduling::JobGraphContext&)
@@ -4427,13 +4443,22 @@ void RenderSystem::Update(float deltaTime)
 											held = compatibleAnimationPoseCache.end();
 										}
 									}
-									if(currentPose == nullptr) {
-										// This only scans the already-retained immutable plan. It never
-										// opens an animator instance or invents a CPU pose for Visual GPU.
-										request.gpuVisualIdentity = findUniqueGpuVisualIdentity(request);
-									}
+									// The published owner mapping names one exact packet for both
+									// Visual GPU and Hybrid. Resolve it while all mesh identity is
+									// already hot instead of rescanning every binding in a later pass.
+									request.gpuVisualIdentity =
+										findUniqueGpuAnimationIdentity(request);
 
 									animationBinding = ResolveAnimationRenderBinding(request);
+									if(currentPose != nullptr
+										&& animationBinding.status == TerraEngine::Renderer::AnimationRenderBindingStatus::Ready
+										&& animationBinding.source == TerraEngine::Renderer::AnimationRenderPoseSource::CpuPose
+										&& request.gpuVisualIdentity.has_value()
+										&& request.gpuVisualIdentity->hybridCpuAuthority) {
+										// Hybrid keeps CPU authority while the exact GPU packet supplies
+										// deformation. The helper above already validated every generation.
+										animationBinding.gpu = *request.gpuVisualIdentity;
+									}
 									if(animationBinding.status == TerraEngine::Renderer::AnimationRenderBindingStatus::Ready
 										&& animationBinding.source == TerraEngine::Renderer::AnimationRenderPoseSource::CpuPose) {
 										compatibleAnimationPoseCache[objectId] = {
@@ -4625,135 +4650,6 @@ void RenderSystem::Update(float deltaTime)
 		(void)wasInserted;
 		return inserted->second;
 	};
-	{
-		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Resolve Animation Render Bindings",
-			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-	if(immutableGpuAnimationPlan != nullptr && gpuPresentation != nullptr
-		&& protectedRendererGeneration != 0U
-		&& protectedRendererGeneration <= std::numeric_limits<std::uint32_t>::max()
-		&& protectedSceneGeneration != 0U
-		&& protectedSceneGeneration <= std::numeric_limits<std::uint32_t>::max()
-		&& immutableGpuAnimationPlan->renderIdentities.size()
-			== immutableGpuAnimationPlan->workPackets.size()) {
-		const std::uint32_t rendererGeneration = static_cast<std::uint32_t>(protectedRendererGeneration);
-		for(RenderableEntry& entry : renderables) {
-			TerraEngine::Renderer::AnimationRenderBinding& binding = entry.animationBinding;
-			if(binding.meshId == TerraEngine::EMPTY_UUID
-				|| binding.status != TerraEngine::Renderer::AnimationRenderBindingStatus::Ready
-				|| binding.safePose) {
-				continue;
-			}
-
-			std::optional<std::uint32_t> packetIndex;
-			if(binding.gpu.IsComplete()) {
-				// A GPU-only resolver already named one exact plan packet. Verify its
-				// complete envelope before retaining it; do not look up a replacement.
-				if(binding.gpu.presentationGeneration == gpuPresentation->presentationGeneration
-					&& binding.gpu.sourceGeneration == gpuPresentation->sourceGeneration
-					&& binding.gpu.planGeneration == immutableGpuAnimationPlan->generation
-					&& binding.gpu.rendererGeneration == rendererGeneration
-					&& binding.gpu.workPacketIndex < immutableGpuAnimationPlan->workPackets.size()) {
-					packetIndex = binding.gpu.workPacketIndex;
-				} else {
-					binding.gpu = {};
-					continue;
-				}
-			} else {
-				// Reuse the immutable identity index built for collection. Constructing a
-				// second 4,000-entry table here added pure hash/allocation work every frame.
-				const std::uint64_t stableInstanceId = BuildStableAnimationInstanceId(binding, entry.objectId);
-				const auto packetRange = gpuWorkPacketIndices.equal_range(stableInstanceId);
-				if(packetRange.first != packetRange.second
-					&& std::next(packetRange.first) == packetRange.second) {
-					// CPU bindings cannot name a mesh ordinal. Ambiguous instances retain
-					// the verified CPU path; unique instances resolve in constant time.
-					packetIndex = packetRange.first->second;
-				}
-			}
-			if(!packetIndex.has_value()) continue;
-
-			const TerraEngine::Animation::GpuAnimationWorkPacket& packet =
-				immutableGpuAnimationPlan->workPackets[*packetIndex];
-			const TerraEngine::Animation::GpuAnimationRenderIdentity& renderIdentity =
-				immutableGpuAnimationPlan->renderIdentities[*packetIndex];
-			const Mesh* currentMesh =
-				ResourceManager::Instance().GetMesh(binding.meshId);
-			TerraEngine::Animation::GpuAnimationRenderIdentity expectedRenderIdentity{};
-			if(currentMesh != nullptr) {
-				expectedRenderIdentity.meshId = binding.meshId;
-				expectedRenderIdentity.meshHeaderVersion =
-					// Preserve the same runtime-layout identity used when the binding
-					// was prepared, so a recooked decoded mesh invalidates stale work.
-					currentMesh->runtimeLayout.version;
-				expectedRenderIdentity.deformablePayloadGeneration =
-					binding.deformablePayloadGeneration;
-				expectedRenderIdentity.rendererGeneration =
-					protectedRendererGeneration;
-				expectedRenderIdentity.sceneGeneration =
-					protectedSceneGeneration;
-				expectedRenderIdentity.skeletonCompatibilityFingerprint =
-					binding.skeletonCompatibilityFingerprint;
-			}
-			if(packet.generationRecordIndex >= immutableGpuAnimationPlan->generationRecords.size()
-				|| !renderIdentity.IsComplete()
-				|| currentMesh == nullptr
-				|| renderIdentity != expectedRenderIdentity
-				|| currentMesh->deformablePayloadGeneration
-					!= binding.deformablePayloadGeneration
-				|| currentMesh->deformableMetadata.skeletonCompatibilityFingerprint
-					!= binding.skeletonCompatibilityFingerprint
-				|| (binding.gpu.IsComplete()
-					&& binding.gpu.renderIdentity != renderIdentity)) {
-				binding.gpu = {};
-				continue;
-			}
-			const TerraEngine::Animation::GpuAnimationGenerationRecord& generation =
-				immutableGpuAnimationPlan->generationRecords[packet.generationRecordIndex];
-			if(!TerraEngine::Animation::IsGpuAnimationGenerationRecordValid(generation)
-				|| packet.stageMask == 0U
-				|| generation.rendererGeneration != rendererGeneration
-				|| generation.sceneGeneration
-					!= static_cast<std::uint32_t>(protectedSceneGeneration)
-				|| generation.meshGeneration
-					!= renderIdentity.meshHeaderVersion
-				|| generation.instanceSlot != binding.animatorSlotIndex
-				|| generation.instanceGeneration != binding.animatorGeneration
-				|| generation.componentGeneration != binding.componentGeneration
-				|| (binding.gpu.IsComplete()
-					&& packet.stableInstanceId != binding.gpu.stableInstanceId)) {
-				binding.gpu = {};
-				continue;
-			}
-
-			if(!binding.gpu.IsComplete()) {
-				binding.gpu.stableInstanceId = packet.stableInstanceId;
-				binding.gpu.presentationGeneration = gpuPresentation->presentationGeneration;
-				binding.gpu.sourceGeneration = gpuPresentation->sourceGeneration;
-				binding.gpu.paletteGeneration = gpuPresentation->presentationGeneration;
-				binding.gpu.planGeneration = immutableGpuAnimationPlan->generation;
-				binding.gpu.rendererGeneration = rendererGeneration;
-				binding.gpu.workPacketIndex = *packetIndex;
-				binding.gpu.stableSubmissionOrdinal = packet.stableSubmissionOrdinal;
-				binding.gpu.instanceSlot = generation.instanceSlot;
-				binding.gpu.instanceGeneration = generation.instanceGeneration;
-				binding.gpu.componentGeneration = generation.componentGeneration;
-				binding.gpu.skeletonGeneration = generation.skeletonGeneration;
-				binding.gpu.meshGeneration = generation.meshGeneration;
-				binding.gpu.resourceGeneration = generation.resourceGeneration;
-				binding.gpu.sceneGeneration = generation.sceneGeneration;
-				binding.gpu.workGeneration = generation.workGeneration;
-				binding.gpu.programGeneration = generation.programGeneration;
-				binding.gpu.stageMask = packet.stageMask;
-				binding.gpu.renderIdentity = renderIdentity;
-				binding.gpu.hybridCpuAuthority = TerraEngine::Animation::HasGpuAnimationFlag(
-					packet.flags, TerraEngine::Animation::GpuAnimationWorkFlag::HybridCpuAuthority);
-				binding.gpu.valid = true;
-			}
-			binding.invalidation.pose = generation.workGeneration;
-			binding.invalidation.morph = generation.workGeneration;
-		}
-	}
-	}
 	std::shared_ptr<TerraEngine::Renderer::CpuAnimationDeformationPlan>
 		cpuDeformationPlan;
 	{
@@ -5019,9 +4915,6 @@ void RenderSystem::Update(float deltaTime)
 		TerraEngine::Renderer::GeometryRouteDecision> geometryRouteDecisionByMesh;
 	geometryRouteDecisionByMesh.reserve(expectedUniqueMeshCount);
 	renderFrameSnapshot.renderables.reserve(renderables.size());
-	// Route diagnostics remain one-per-instance, so reserve the final size before
-	// copying records that contain strings and policy state.
-	renderFrameSnapshot.geometryRouteDecisions.reserve(renderables.size());
 	// Meshes and materials are resource tables, not draw tables. Track their exact
 	// identities once per frame so instancing does not create, sort, hash, and copy
 	// thousands of duplicate backend resource records.
@@ -5031,6 +4924,44 @@ void RenderSystem::Update(float deltaTime)
 	snapshotMaterialIds.reserve(expectedUniqueMeshCount);
 	renderFrameSnapshot.meshes.reserve(expectedUniqueMeshCount);
 	renderFrameSnapshot.materials.reserve(expectedUniqueMeshCount);
+	const bool retainDetailedRouteCandidates =
+		TerraEngine::Renderer::RenderDiagnosticsRequested();
+	if(retainDetailedRouteCandidates)
+	{
+		// Full route decisions contain candidate vectors and diagnostic strings.
+		// Keep them only while an explicit diagnostics consumer is active; ordinary
+		// rendering stores the compact per-instance selection record below.
+		renderFrameSnapshot.geometryRouteDecisions.reserve(renderables.size());
+	}
+	const auto copyRouteDecisionForFrame = [retainDetailedRouteCandidates](
+		const TerraEngine::Renderer::GeometryRouteDecision& source) {
+		TerraEngine::Renderer::GeometryRouteDecision destination;
+		destination.decisionIdentity = source.decisionIdentity;
+		destination.frameId = source.frameId;
+		destination.viewFamilyId = source.viewFamilyId;
+		destination.objectIdentity = source.objectIdentity;
+		destination.meshIdentity = source.meshIdentity;
+		destination.assetGeneration = source.assetGeneration;
+		destination.selected = source.selected;
+		if(retainDetailedRouteCandidates) {
+			// Candidate rejection strings are valuable only to an active detailed
+			// consumer. Avoid two nested-vector copies per instance in ordinary play.
+			destination.candidates = source.candidates;
+		}
+		destination.policyIdentity = source.policyIdentity;
+		destination.calibrationIdentity = source.calibrationIdentity;
+		destination.source = source.source;
+		destination.estimatedCost = source.estimatedCost;
+		destination.measuredCost = source.measuredCost;
+		destination.confidenceMargin = source.confidenceMargin;
+		destination.stableFrameCount = source.stableFrameCount;
+		destination.fallbackReason = source.fallbackReason;
+		destination.fallbackDiagnostic = source.fallbackDiagnostic;
+		destination.routeGeneration = source.routeGeneration;
+		destination.deterministicHash = source.deterministicHash;
+		destination.nextState = source.nextState;
+		return destination;
+	};
 	for (const RenderableEntry& entry : renderables)
 	{
 		const auto transformIt = worldTransforms->find(entry.entity);
@@ -5130,30 +5061,37 @@ void RenderSystem::Update(float deltaTime)
 			static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(entry.objectId));
 		const std::uint64_t routeMeshIdentity =
 			static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(entry.mesh.meshId));
-		TerraEngine::Renderer::GeometryRouteDecision routeDecision;
-		if(const auto cachedRoute = geometryRouteDecisionByMesh.find(entry.mesh.meshId);
-			cachedRoute != geometryRouteDecisionByMesh.end()) {
-			routeDecision = cachedRoute->second;
-		} else {
+		auto cachedRoute = geometryRouteDecisionByMesh.find(entry.mesh.meshId);
+		if(cachedRoute == geometryRouteDecisionByMesh.end()) {
 			// Calibration identity distinguishes recooked topology while the mesh
 			// identity keeps unrelated resources from sharing hysteresis history.
 			const std::uint64_t routeStateKey = routeMeshIdentity
 				^ (routeInput.calibrationIdentity << 1U);
 			const auto priorRouteState = geometryRoutePolicyStates.find(routeStateKey);
-			routeDecision = priorRouteState != geometryRoutePolicyStates.end()
+			TerraEngine::Renderer::GeometryRouteDecision preparedRoute =
+				priorRouteState != geometryRoutePolicyStates.end()
 				? TerraEngine::Renderer::SelectGeometryRouteCompact(
 					routeInput, priorRouteState->second)
 				: TerraEngine::Renderer::SelectGeometryRouteCompact(routeInput);
-			geometryRoutePolicyStates[routeStateKey] = routeDecision.nextState;
-			geometryRouteDecisionByMesh.emplace(entry.mesh.meshId, routeDecision);
+			geometryRoutePolicyStates[routeStateKey] = preparedRoute.nextState;
+			cachedRoute = geometryRouteDecisionByMesh.emplace(
+				entry.mesh.meshId, std::move(preparedRoute)).first;
 		}
-		routeDecision.frameId = activeRenderFrameId;
-		routeDecision.objectIdentity = routeObjectIdentity;
-		routeDecision.meshIdentity = routeMeshIdentity;
-		routeDecision.assetGeneration = snapshotRendererGeneration;
-		routeDecision.decisionIdentity = routeDecision.objectIdentity ^ (routeDecision.meshIdentity << 1u) ^ activeRenderFrameId;
-		routeDecision.routeGeneration = snapshotRendererGeneration;
-		routeDecision.deterministicHash = routeDecision.decisionIdentity;
+		const TerraEngine::Renderer::GeometryRouteDecision& preparedRoute =
+			cachedRoute->second;
+		TerraEngine::Renderer::GeometryRouteSelectionRecord routeSelection{};
+		routeSelection.objectIdentity = routeObjectIdentity;
+		routeSelection.meshIdentity = routeMeshIdentity;
+		routeSelection.assetGeneration = snapshotRendererGeneration;
+		routeSelection.decisionIdentity = routeObjectIdentity
+			^ (routeMeshIdentity << 1u) ^ activeRenderFrameId;
+		routeSelection.selected = preparedRoute.selected;
+		routeSelection.policyIdentity = preparedRoute.policyIdentity;
+		routeSelection.calibrationIdentity = preparedRoute.calibrationIdentity;
+		routeSelection.source = preparedRoute.source;
+		routeSelection.stableFrameCount = preparedRoute.stableFrameCount;
+		routeSelection.fallbackReason = preparedRoute.fallbackReason;
+		routeSelection.routeGeneration = snapshotRendererGeneration;
 		snapshotRenderable.geometryRouteInput.sourceTriangleCount =
 			routeFacts.sourceTriangleCount;
 		snapshotRenderable.geometryRouteInput.packedMeshletCount =
@@ -5167,12 +5105,26 @@ void RenderSystem::Update(float deltaTime)
 		snapshotRenderable.geometryRouteInput.calibrationVersion =
 			mesh != nullptr ? mesh->runtimeLayout.version : 0u;
 		snapshotRenderable.geometryRouteInput.directBatchEligible =
-			routeDecision.selected == TerraEngine::Renderer::GeometryRoute::DirectMeshlet;
+			routeSelection.selected == TerraEngine::Renderer::GeometryRoute::DirectMeshlet;
 		snapshotRenderable.geometryRouteInput.repeatedInstanceStorageCompatible = true;
-		snapshotRenderable.geometryRouteInput.deterministicSummaryHash = routeDecision.decisionIdentity;
-		snapshotRenderable.geometryRouteDecision = routeDecision;
-		renderFrameSnapshot.geometryRouteDecisions.push_back(routeDecision);
-		if (routeDecision.selected == TerraEngine::Renderer::GeometryRoute::DirectMeshlet)
+		snapshotRenderable.geometryRouteInput.deterministicSummaryHash =
+			routeSelection.decisionIdentity;
+		snapshotRenderable.geometryRouteDecision = routeSelection;
+		if(retainDetailedRouteCandidates)
+		{
+			TerraEngine::Renderer::GeometryRouteDecision routeDecision =
+				copyRouteDecisionForFrame(preparedRoute);
+			routeDecision.frameId = activeRenderFrameId;
+			routeDecision.objectIdentity = routeSelection.objectIdentity;
+			routeDecision.meshIdentity = routeSelection.meshIdentity;
+			routeDecision.assetGeneration = routeSelection.assetGeneration;
+			routeDecision.decisionIdentity = routeSelection.decisionIdentity;
+			routeDecision.routeGeneration = routeSelection.routeGeneration;
+			routeDecision.deterministicHash = routeSelection.decisionIdentity;
+			renderFrameSnapshot.geometryRouteDecisions.push_back(
+				std::move(routeDecision));
+		}
+		if (routeSelection.selected == TerraEngine::Renderer::GeometryRoute::DirectMeshlet)
 		{
 			snapshotRenderable.virtualGeometry = {};
 		}
@@ -7145,27 +7097,10 @@ void RenderSystem::Update(float deltaTime)
 			VisibleCommandBuildResult cachedResult;
 			{
 				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Reference Cached Visible Draw Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-				// Retain the large immutable VG vectors in the cache, but refresh the
-				// current frame's animation binding on each small draw record. This keeps
-				// visibility reusable while preventing a cached command from retaining or
-				// rendering an older pose publication.
+				// Binding refresh is fused into the mandatory command materialization below.
+				// The cache's revision-validated indices avoid both this former full loop
+				// and a second 4,000-entry overlay allocation on every hit.
 				cachedResult.cachedRecord = &existing->second;
-				cachedResult.refreshedAnimationBindings.reserve(
-					existing->second.commands.size());
-				for(const DrawCommand& command : existing->second.commands)
-				{
-					const auto current = renderableCommandIndices.find(command.objectId);
-					if(current != renderableCommandIndices.end())
-					{
-						cachedResult.refreshedAnimationBindings.push_back(
-							renderables[current->second].animationBinding);
-					}
-					else
-					{
-						cachedResult.refreshedAnimationBindings.push_back(
-							command.animationBinding);
-					}
-				}
 				cachedResult.streamingTouchSet = existing->second.streamingTouchSet;
 				cachedResult.reuseTelemetry = buildVisibleCommandReuseTelemetry(viewType, outputId, true, true, existing->second.streamingTouchSet);
 				if (existing->second.reuseTelemetry.conservativeRefresh)
@@ -7223,8 +7158,15 @@ void RenderSystem::Update(float deltaTime)
 		record.signature = signature;
 		record.lastTouchedFrameId = activeRenderFrameId;
 		record.commands = result.commands;
+		record.renderableIndices.reserve(record.commands.size());
 		for(DrawCommand& command : record.commands)
 		{
+			const auto current = renderableCommandIndices.find(command.objectId);
+			const bool indexRepresentable = current != renderableCommandIndices.end()
+				&& current->second <= std::numeric_limits<std::uint32_t>::max();
+			record.renderableIndices.push_back(indexRepresentable
+				? static_cast<std::uint32_t>(current->second)
+				: std::numeric_limits<std::uint32_t>::max());
 			// The per-object compatible-pose cache is the sole retained owner of an
 			// older publication. Geometry selection never needs the pose pointer.
 			command.animationBinding = {};
@@ -7767,6 +7709,11 @@ void RenderSystem::Update(float deltaTime)
 		+ gameViewCameras.size()
 		+ cameras.size()
 		+ captureLimits.maxConcurrentCaptures);
+	// Each materialized view marks an index in the canonical renderable table.
+	// The final publication walks this mask once, producing sorted unique UUIDs
+	// without rescanning every camera command and sorting duplicates afterward.
+	std::vector<std::uint8_t> visibleAnimatedRenderableFlags(
+		renderables.size(), 0u);
 	auto copyVirtualGeometryFramePayload = [](FrameRenderData& target, const VisibleCommandBuildResult& source) {
 		target.virtualGeometryGpuPackets = source.GpuPacketRecords();
 		target.virtualGeometryGpuBatches = source.GpuBatchDescriptors();
@@ -7822,7 +7769,8 @@ void RenderSystem::Update(float deltaTime)
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Scene View Visible Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 			visibleCommands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix, sceneViewTargetSize, RenderOutputKind::SceneView, RenderViewType::Scene, 1u, frameData.cameraWorldPosition);
 		}
-		visibleCommands.MaterializeCommands(frameData.commands);
+		visibleCommands.MaterializeCommands(frameData.commands, renderables,
+			&visibleAnimatedRenderableFlags, &renderableCommandIndices);
 		copyVirtualGeometryFramePayload(frameData, visibleCommands);
 		sceneSpatialDiagnostics = visibleCommands.diagnostics;
 		sceneVisibleCommandTelemetry = visibleCommands.reuseTelemetry;
@@ -7865,7 +7813,8 @@ void RenderSystem::Update(float deltaTime)
 				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Game View Visible Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 				visibleCommands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix, gameViewTargetSize, RenderOutputKind::GameView, RenderViewType::Game, 2u, frameData.cameraWorldPosition);
 			}
-			visibleCommands.MaterializeCommands(frameData.commands);
+			visibleCommands.MaterializeCommands(frameData.commands, renderables,
+				&visibleAnimatedRenderableFlags, &renderableCommandIndices);
 			copyVirtualGeometryFramePayload(frameData, visibleCommands);
 			gameSpatialDiagnostics = visibleCommands.diagnostics;
 			gameVisibleCommandTelemetry = visibleCommands.reuseTelemetry;
@@ -7965,7 +7914,8 @@ void RenderSystem::Update(float deltaTime)
 			hasLatestGameViewCamera = true;
 			frameData.editorContextTint = glm::vec4(0.0f);
 			const VisibleCommandBuildResult visibleCommands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix, gameViewTargetSize, RenderOutputKind::MainRuntimeView, RenderViewType::Game, 2u, frameData.cameraWorldPosition);
-			visibleCommands.MaterializeCommands(frameData.commands);
+			visibleCommands.MaterializeCommands(frameData.commands, renderables,
+				&visibleAnimatedRenderableFlags, &renderableCommandIndices);
 			copyVirtualGeometryFramePayload(frameData, visibleCommands);
 			gameSpatialDiagnostics = visibleCommands.diagnostics;
 			frameData.shadowDrawLists = buildShadowDrawLists(frameData.cameraWorldPosition);
@@ -8026,7 +7976,8 @@ void RenderSystem::Update(float deltaTime)
 			RenderViewType::Game,
 			9000u,
 		captureFrameData.cameraWorldPosition);
-		visibleCommands.MaterializeCommands(captureFrameData.commands);
+		visibleCommands.MaterializeCommands(captureFrameData.commands, renderables,
+			&visibleAnimatedRenderableFlags, &renderableCommandIndices);
 		copyVirtualGeometryFramePayload(captureFrameData, visibleCommands);
 		captureFrameData.shadowDrawLists = buildShadowDrawLists(captureFrameData.cameraWorldPosition);
 
@@ -8046,28 +7997,38 @@ void RenderSystem::Update(float deltaTime)
 		visibility.sceneGeneration = protectedSceneGeneration;
 		visibility.hasActiveView = !preparedRenderSubmissions.empty();
 		visibility.valid = true;
-		// Camera and shadow command lists are both presentation consumers. Including
-		// shadow-only casters prevents their frozen pose from producing stale shadows.
+		// Camera commands marked the canonical mask while their current animation
+		// bindings were attached. Scan only shadow lists here so shadow-only casters
+		// cannot freeze while avoiding a second scan of every camera command.
 		for(const PreparedRenderSubmission& prepared : preparedRenderSubmissions)
 		{
-			auto collect = [&visibility](const std::vector<DrawCommand>& commands)
-			{
-				for(const DrawCommand& command : commands)
-				{
-					if(command.objectId != TerraEngine::EMPTY_UUID
-						&& command.animationBinding.status
-							== TerraEngine::Renderer::AnimationRenderBindingStatus::Ready)
-					{
-						visibility.visibleObjectIds.push_back(command.objectId);
-					}
-				}
-			};
-			collect(prepared.frame.commands);
 			for(const ShadowDrawList& shadow : prepared.frame.shadowDrawLists)
 			{
-				collect(shadow.commands);
+				for(const DrawCommand& command : shadow.commands)
+				{
+					if(command.animationBinding.status
+						!= TerraEngine::Renderer::AnimationRenderBindingStatus::Ready)
+					{
+						continue;
+					}
+					const auto current = renderableCommandIndices.find(command.objectId);
+					if(current != renderableCommandIndices.end()
+						&& current->second < visibleAnimatedRenderableFlags.size())
+					{
+						visibleAnimatedRenderableFlags[current->second] = 1u;
+					}
+				}
 			}
 		}
+		visibility.visibleObjectIds.reserve(renderables.size());
+		for(std::size_t index = 0u; index < renderables.size(); ++index)
+		{
+			if(visibleAnimatedRenderableFlags[index] != 0u)
+			{
+				visibility.visibleObjectIds.push_back(renderables[index].objectId);
+			}
+		}
+		visibility.canonicalUnique = true;
 		TerraEngine::Renderer::PublishAnimatedObjectVisibilitySnapshot(
 			std::move(visibility));
 	}
@@ -8134,11 +8095,13 @@ void RenderSystem::Update(float deltaTime)
 	const TerraEngine::Renderer::VirtualGeometryBackendSelection backendSelection =
 		TerraEngine::Renderer::SelectVirtualGeometryBackend(backendCapabilities);
 	const bool hasVirtualGeometryRoute = std::any_of(
-		renderFrameSnapshot.geometryRouteDecisions.begin(),
-		renderFrameSnapshot.geometryRouteDecisions.end(),
-		[](const TerraEngine::Renderer::GeometryRouteDecision& decision) {
-			return decision.selected == TerraEngine::Renderer::GeometryRoute::VirtualGeometryHardware
-				|| decision.selected == TerraEngine::Renderer::GeometryRoute::VirtualGeometryCompute;
+		renderFrameSnapshot.renderables.begin(),
+		renderFrameSnapshot.renderables.end(),
+		[](const TerraEngine::Renderer::RenderFrameRenderableRecord& renderable) {
+			return renderable.geometryRouteDecision.selected
+					== TerraEngine::Renderer::GeometryRoute::VirtualGeometryHardware
+				|| renderable.geometryRouteDecision.selected
+					== TerraEngine::Renderer::GeometryRoute::VirtualGeometryCompute;
 		});
 	if(backendSelection.deviceAuthoredWorkAvailable && hasVirtualGeometryRoute)
 	{
@@ -8287,7 +8250,11 @@ void RenderSystem::Update(float deltaTime)
 		// inventory diagnostics scan every cooked VG asset and allocate warning
 		// strings, so keep that work behind the explicit diagnostics request.
 		virtualGeometryViewSnapshots =
-			TerraEngine::Renderer::BuildVirtualGeometryViewDiagnosticsFromSnapshot(renderFrameSnapshot, virtualGeometryQuality, GetVirtualGeometryInactiveReason());
+			TerraEngine::Renderer::BuildVirtualGeometryViewDiagnosticsFromSnapshot(
+				renderFrameSnapshot,
+				virtualGeometryQuality,
+				GetVirtualGeometryInactiveReason(),
+				selectedDeformation.immutablePlan.get());
 		if (detailedRenderDiagnosticsRequested)
 		{
 			std::vector<TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot> detailedVirtualGeometryViewSnapshots;
@@ -8573,8 +8540,10 @@ void RenderSystem::Update(float deltaTime)
 			geometryRouteStats.sharedInstances +=
 				static_cast<std::uint32_t>(batch.instanceIdentities.size());
 		}
-		for(const TerraEngine::Renderer::GeometryRouteDecision& decision :
-			renderFrameSnapshot.geometryRouteDecisions) {
+		for(const TerraEngine::Renderer::RenderFrameRenderableRecord& renderable :
+			renderFrameSnapshot.renderables) {
+			const TerraEngine::Renderer::GeometryRouteSelectionRecord& decision =
+				renderable.geometryRouteDecision;
 			geometryRouteStats.directCount += decision.selected
 				== TerraEngine::Renderer::GeometryRoute::DirectMeshlet ? 1U : 0U;
 			geometryRouteStats.virtualCount += (decision.selected
@@ -8585,9 +8554,6 @@ void RenderSystem::Update(float deltaTime)
 			geometryRouteStats.calibrationIdentity = decision.calibrationIdentity;
 			geometryRouteStats.hysteresisFrames = std::max(
 				geometryRouteStats.hysteresisFrames, decision.stableFrameCount);
-			if(!decision.fallbackDiagnostic.empty()) {
-				geometryRouteStats.fallbackReason = decision.fallbackDiagnostic;
-			}
 			geometryRouteStats.source = decision.source
 				== TerraEngine::Renderer::GeometryRouteSelectionSource::AuthorOverride
 				? "author_override" : decision.source
@@ -8599,11 +8565,22 @@ void RenderSystem::Update(float deltaTime)
 				static_cast<std::uint64_t>(decision.selected) + 1U;
 			geometryRouteSelectionSignature *= 1099511628211ULL;
 		}
+		// Full explanations exist only while diagnostics are requested. They are
+		// not needed to count routes, but preserve the most useful fallback string
+		// for the overlay when a diagnostic consumer explicitly asked for it.
+		for(const TerraEngine::Renderer::GeometryRouteDecision& decision :
+			renderFrameSnapshot.geometryRouteDecisions)
+		{
+			if(!decision.fallbackDiagnostic.empty())
+			{
+				geometryRouteStats.fallbackReason = decision.fallbackDiagnostic;
+			}
+		}
 		geometryRouteSelectionSignature ^=
-			static_cast<std::uint64_t>(renderFrameSnapshot.geometryRouteDecisions.size());
+			static_cast<std::uint64_t>(renderFrameSnapshot.renderables.size());
 		latestGeometryRouteSelectionSignature = geometryRouteSelectionSignature;
 		latestGeometryRouteSelectionCount =
-			renderFrameSnapshot.geometryRouteDecisions.size();
+			renderFrameSnapshot.renderables.size();
 		const auto applyGeometryRouteStats = [&renderFrameSnapshot,
 			&geometryRouteStats](RenderStatsSnapshot& stats) {
 			stats.geometryRoutePolicyIdentity = geometryRouteStats.policyIdentity;
@@ -8620,7 +8597,7 @@ void RenderSystem::Update(float deltaTime)
 			stats.geometryRouteSuppressedResidencyRecords = geometryRouteStats.directCount;
 			// An empty route envelope means this frame contained no routable geometry;
 			// do not label that absence as a successful direct-meshlet decision.
-			stats.geometryRoute = renderFrameSnapshot.geometryRouteDecisions.empty() ? ""
+			stats.geometryRoute = renderFrameSnapshot.renderables.empty() ? ""
 				: geometryRouteStats.virtualCount == 0U ? "direct_meshlet"
 				: geometryRouteStats.directCount == 0U ? "virtual_geometry" : "mixed";
 		};
@@ -9009,7 +8986,7 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 		// The last immutable snapshot is sufficient for dispatch granularity. A
 		// first frame reports zero and therefore safely takes the inline path.
 		std::lock_guard<std::mutex> lock(statsMutex);
-		priorRouteDecisionCount = latestRenderFrameSnapshot.geometryRouteDecisions.size();
+		priorRouteDecisionCount = latestRenderFrameSnapshot.renderables.size();
 	}
 
 	// The established renderer remains one protected operation for this
@@ -9135,7 +9112,7 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	// ownership visible until their declared boundaries execute.
 	snapshot.work = [this, deltaTime](JobGraphContext&) { Update(deltaTime); };
 	routePrepare.work = [this](JobGraphContext&) {
-		std::vector<TerraEngine::Renderer::GeometryRouteDecision> routeDecisions;
+		std::vector<TerraEngine::Renderer::GeometryRouteSelectionRecord> routeSelections;
 		std::uint64_t signature = 0U;
 		std::size_t routeDecisionCount = 0U;
 		{
@@ -9146,14 +9123,19 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 				&& latestGeometryRouteFramePlans.size() == routeDecisionCount) {
 				return;
 			}
-			routeDecisions = latestRenderFrameSnapshot.geometryRouteDecisions;
+			routeSelections.reserve(latestRenderFrameSnapshot.renderables.size());
+			for(const TerraEngine::Renderer::RenderFrameRenderableRecord& renderable :
+				latestRenderFrameSnapshot.renderables)
+			{
+				routeSelections.push_back(renderable.geometryRouteDecision);
+			}
 		}
 		std::vector<TerraEngine::Renderer::GeometryRouteFramePlan> prepared;
-		prepared.reserve(routeDecisions.size());
-		for(const TerraEngine::Renderer::GeometryRouteDecision& decision : routeDecisions)
+		prepared.reserve(routeSelections.size());
+		for(const TerraEngine::Renderer::GeometryRouteSelectionRecord& selection : routeSelections)
 		{
 			TerraEngine::Renderer::GeometryRouteFramePlan plan{};
-			plan.selectedRoute = decision.selected;
+			plan.selectedRoute = selection.selected;
 			plan.instances = 1u;
 			TerraEngine::Renderer::BuildGeometryRouteFramePlan(plan);
 			prepared.push_back(plan);
@@ -9185,7 +9167,7 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 		// Publishing occurs after protected submission. Holding the publication
 		// mutex ensures editor/MCP readers observe one complete diagnostic frame.
 		std::lock_guard<std::mutex> lock(statsMutex);
-		(void)latestRenderFrameSnapshot.geometryRouteDecisions.size();
+		(void)latestRenderFrameSnapshot.renderables.size();
 	};
 	return { workloads.begin(), workloads.end() };
 }

@@ -31,7 +31,7 @@ namespace TerraEngine::EditorTests
 				// The editor uses a user-level preference file. This fixture redirects
 				// that file so the test proves persistence without touching a real
 				// developer profile.
-				if (const char* existingOverride = std::getenv("TERRAENGINE_EDITOR_PREFS_PATH"))
+				if (const char* existingOverride = std::getenv(TerraEngine::Editor::kEditorPreferencesSessionPathEnvironment))
 				{
 					previousOverride = existingOverride;
 					hadPreviousOverride = true;
@@ -65,18 +65,18 @@ namespace TerraEngine::EditorTests
 			static void SetPreferenceOverride(const std::string& path)
 			{
 #ifdef _WIN32
-				_putenv_s("TERRAENGINE_EDITOR_PREFS_PATH", path.c_str());
+				_putenv_s(TerraEngine::Editor::kEditorPreferencesSessionPathEnvironment, path.c_str());
 #else
-				setenv("TERRAENGINE_EDITOR_PREFS_PATH", path.c_str(), 1);
+				setenv(TerraEngine::Editor::kEditorPreferencesSessionPathEnvironment, path.c_str(), 1);
 #endif
 			}
 
 			static void ClearPreferenceOverride()
 			{
 #ifdef _WIN32
-				_putenv_s("TERRAENGINE_EDITOR_PREFS_PATH", "");
+				_putenv_s(TerraEngine::Editor::kEditorPreferencesSessionPathEnvironment, "");
 #else
-				unsetenv("TERRAENGINE_EDITOR_PREFS_PATH");
+				unsetenv(TerraEngine::Editor::kEditorPreferencesSessionPathEnvironment);
 #endif
 			}
 

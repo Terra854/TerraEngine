@@ -28,7 +28,8 @@ private:
 	void DrawEntityNode(
 		entt::entity obj,
 		const std::unordered_set<TerraEngine::UUID>* prefabSourceObjectIds = nullptr,
-		bool knownLeaf = false);
+		bool knownLeaf = false,
+		std::uint8_t* cachedExpandedFlag = nullptr);
 	void RefreshRootEntityCache(class ObjectManager& objectManager, bool prefabEditingMode);
 	void DrawCachedRootNodes();
 	void CreatePrefabFromSelection(entt::entity obj);
@@ -50,6 +51,10 @@ private:
 	// keys beside the structural cache lets DrawCachedRootNodes clip collapsed
 	// prefab roots without resolving every UUID on every editor frame.
 	std::vector<std::string> m_CachedRootTreeNodeIds;
+	// Tree openness changes only when the corresponding visible row is clicked.
+	// Retaining one byte beside each cached root avoids hashing and probing ImGui's
+	// state storage for every off-screen crowd root on every editor frame.
+	std::vector<std::uint8_t> m_CachedRootExpandedFlags;
 	std::uint64_t m_CachedHierarchyRevision = std::numeric_limits<std::uint64_t>::max();
 	bool m_CachedPrefabEditingMode = false;
 	entt::entity m_ContextEntityId = entt::null;

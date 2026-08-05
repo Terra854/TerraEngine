@@ -2,31 +2,14 @@
 
 #include "EditorStartupRendererConfiguration.h"
 #include "../Project/EditorPreferences.h"
+#include "../Project/EditorPreferencesStorage.h"
 
 #include <algorithm>
-#include <cstdlib>
 #include <fstream>
 #include <nlohmann/json.hpp>
 
 namespace
 {
-	std::filesystem::path ResolvePreferencesPath()
-	{
-		if (const char* overridePath = std::getenv("TERRAENGINE_EDITOR_PREFS_PATH"); overridePath && overridePath[0]) {
-			return overridePath;
-		}
-#ifdef _WIN32
-		if (const char* appData = std::getenv("APPDATA"); appData && appData[0]) {
-			return std::filesystem::path(appData) / "TerraEngine" / "Editor" / ".terra_editor_prefs.json";
-		}
-#else
-		if (const char* config = std::getenv("XDG_CONFIG_HOME"); config && config[0]) {
-			return std::filesystem::path(config) / "TerraEngine" / "Editor" / ".terra_editor_prefs.json";
-		}
-#endif
-		return {};
-	}
-
 	std::filesystem::path NormalizeProjectPath(const std::filesystem::path& path)
 	{
 		std::error_code error;
@@ -89,7 +72,10 @@ namespace
 
 	void ApplyUserPreferences(TerraEngine::Editor::EditorStartupRendererConfiguration& configuration)
 	{
-		const std::filesystem::path path = ResolvePreferencesPath();
+		// Use the same resolver as ProjectManager. This read occurs before Vulkan
+		// starts, but it must still observe the exact store used by later UI writes.
+		const std::filesystem::path path =
+			TerraEngine::Editor::ResolveEditorPreferencesStorageLocation().path;
 		if (path.empty() || !std::filesystem::exists(path)) return;
 		try {
 			std::ifstream stream(path);

@@ -1386,6 +1386,28 @@ struct VulkanContext::Impl {
 			// constants carry this word offset so shaders never scan other owners.
 			std::uint32_t headerWordOffset = 0u;
 		};
+		struct GraphicsGroupKey
+		{
+			std::uint64_t stableInstanceId = 0u;
+			TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+
+			bool operator==(const GraphicsGroupKey&) const noexcept = default;
+		};
+		struct GraphicsGroupKeyHash
+		{
+			std::size_t operator()(const GraphicsGroupKey& key) const noexcept
+			{
+				// Deformation upload already visits every owner/mesh group. Retaining
+				// this exact index lets each rendered view perform only a lookup,
+				// rather than rebuilding another large map before drawing.
+				std::size_t hash = std::hash<std::uint64_t>{}(
+					key.stableInstanceId);
+				hash ^= std::hash<TerraEngine::UUID>{}(key.meshId)
+					+ static_cast<std::size_t>(0x9e3779b9u)
+					+ (hash << 6u) + (hash >> 2u);
+				return hash;
+			}
+		};
 		// StaticPageUploadRecord contains only cooked demanded-page facts. Pose and
 		// frame generations deliberately stay out of this cache so a new animation
 		// publication still rebuilds the small dynamic work records every frame.
@@ -1406,6 +1428,8 @@ struct VulkanContext::Impl {
 			std::array<float, 4u> positionScale{};
 		};
 		std::vector<GraphicsGroup> graphicsGroups;
+		std::unordered_map<GraphicsGroupKey, std::uint32_t,
+			GraphicsGroupKeyHash> graphicsGroupOffsets;
 		std::vector<TerraEngine::Renderer::DeformedPageKey> workKeys;
 		std::vector<StaticPageUploadRecord> staticPageUploads;
 		VkDeviceSize staticPageByteCount = 0u;

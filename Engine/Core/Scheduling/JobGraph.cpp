@@ -16,7 +16,6 @@
 #include <future>
 #include <map>
 #include <queue>
-#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <tuple>
@@ -253,8 +252,13 @@ namespace TerraEngine::Scheduling {
 				}
 			}
 
-			std::set<std::tuple<std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t>> seen;
+			// Handles in one graph share a generation and IDs are 32-bit. Pack the two
+			// endpoint IDs into one key so duplicate removal reuses a flat hash table
+			// instead of allocating one red-black-tree node per frame dependency.
+			std::unordered_set<std::uint64_t> seen;
+			seen.reserve(edges.size());
 			std::vector<JobGraphDependencyEdge> uniqueEdges;
+			uniqueEdges.reserve(edges.size());
 			for (const JobGraphDependencyEdge& edge : edges)
 			{
 				if (!ValidateHandle(edge.before, JobGraphNodeKind::Invalid, diagnostics, "edge")
@@ -262,7 +266,9 @@ namespace TerraEngine::Scheduling {
 				{
 					continue;
 				}
-				const auto key = std::make_tuple(edge.before.id, edge.before.generation, edge.after.id, edge.after.generation);
+				const std::uint64_t key =
+					(static_cast<std::uint64_t>(edge.before.id) << 32U)
+					| static_cast<std::uint64_t>(edge.after.id);
 				if (edge.before.id == edge.after.id)
 				{
 					AddDiagnostic(diagnostics, JobGraphDiagnosticSeverity::Error, JobGraphDiagnosticCategory::Dependency, edge.after.label, "A graph node cannot depend on itself.", "Remove the self-dependency edge.");
@@ -659,9 +665,10 @@ namespace TerraEngine::Scheduling {
 			node.dependencies.pop_back();
 			impl->explicitEdges.push_back({ node.handle, declaration.group });
 		}
-		impl->nodeById[node.handle.id] = impl->nodes.size();
-		impl->nodes.push_back(node);
-		return node.handle;
+		const DependencyHandle handle = node.handle;
+		impl->nodeById[handle.id] = impl->nodes.size();
+		impl->nodes.push_back(std::move(node));
+		return handle;
 	}
 
 	std::vector<DependencyHandle> JobGraph::AddPartitionedJobs(std::vector<JobGraphJobDeclaration> declarations)
@@ -684,9 +691,10 @@ namespace TerraEngine::Scheduling {
 		node.executionPolicy = declaration.executionPolicy;
 		node.groupJobs = std::move(declaration.jobs);
 		node.profilingLabel = NormalizeLabel(declaration.profilingLabel, node.name);
-		impl->nodeById[node.handle.id] = impl->nodes.size();
-		impl->nodes.push_back(node);
-		return node.handle;
+		const DependencyHandle handle = node.handle;
+		impl->nodeById[handle.id] = impl->nodes.size();
+		impl->nodes.push_back(std::move(node));
+		return handle;
 	}
 
 	DependencyHandle JobGraph::AddBarrier(JobGraphBarrierDeclaration declaration)
@@ -701,9 +709,10 @@ namespace TerraEngine::Scheduling {
 		node.barrierAfter = std::move(declaration.after);
 		node.diagnosePendingMutations = declaration.diagnosePendingMutations;
 		node.profilingLabel = NormalizeLabel(declaration.profilingLabel, node.name);
-		impl->nodeById[node.handle.id] = impl->nodes.size();
-		impl->nodes.push_back(node);
-		return node.handle;
+		const DependencyHandle handle = node.handle;
+		impl->nodeById[handle.id] = impl->nodes.size();
+		impl->nodes.push_back(std::move(node));
+		return handle;
 	}
 
 	void JobGraph::AddDependency(DependencyHandle before, DependencyHandle after)

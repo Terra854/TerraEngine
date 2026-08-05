@@ -111,6 +111,7 @@ namespace TerraEngine::Animation {
 		GpuAnimationPlanStatus planStatus = GpuAnimationPlanStatus::InvalidArgument;
 		std::vector<GpuAnimationWorkRequest> workRequests;
 		GpuAnimationPlanBuildDiagnostics diagnostics{};
+		bool topologyReused = false;
 	};
 
 	// Each entry couples one already-lowered request to the immutable descriptor
@@ -194,5 +195,6 @@ namespace TerraEngine::Animation {
 		GpuAnimationPlan& output,
 		GpuAnimationLoweredPlanResult& result,
 		const GpuAnimationPlanLimits& limits = {},
-		GpuAnimationFrameAtlasCache* atlasCache = nullptr) noexcept;
+		GpuAnimationFrameAtlasCache* atlasCache = nullptr,
+		const GpuAnimationPlan* previousPlan = nullptr) noexcept;
 }

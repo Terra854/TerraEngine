@@ -2455,6 +2455,8 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 			+ orderedWork.size() * kBridgeRecordWords);
 	resources.graphicsGroups.clear();
 	resources.graphicsGroups.reserve(groups.size());
+	resources.graphicsGroupOffsets.clear();
+	resources.graphicsGroupOffsets.reserve(groups.size());
 	for(std::uint32_t groupIndex = 0u;
 		groupIndex < groups.size();
 		++groupIndex)
@@ -2521,6 +2523,10 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 			group.stableInstanceId,
 			group.meshId,
 			static_cast<std::uint32_t>(headerOffset) });
+		resources.graphicsGroupOffsets.emplace(
+			VulkanDeformationFrameResources::GraphicsGroupKey{
+				group.stableInstanceId, group.meshId},
+			static_cast<std::uint32_t>(headerOffset));
 		for(std::size_t localRecord = 0u;
 			localRecord < group.count;
 			++localRecord)
@@ -3910,26 +3916,6 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 	{
 		commandsByObject.emplace(command.objectId, std::addressof(command));
 	}
-	struct DeformationGroupKey
-	{
-		std::uint64_t stableInstanceId = 0U;
-		TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
-
-		bool operator==(const DeformationGroupKey&) const = default;
-	};
-	struct DeformationGroupKeyHash
-	{
-		std::size_t operator()(const DeformationGroupKey& value) const noexcept
-		{
-			std::size_t hash = std::hash<std::uint64_t>{}(value.stableInstanceId);
-			hash ^= std::hash<TerraEngine::UUID>{}(value.meshId)
-				+ 0x9e3779b9U + (hash << 6U) + (hash >> 2U);
-			return hash;
-		}
-	};
-	using GraphicsGroup = VulkanDeformationFrameResources::GraphicsGroup;
-	std::unordered_map<DeformationGroupKey, const GraphicsGroup*,
-		DeformationGroupKeyHash> deformationGroupsByInstance;
 	const VulkanDeformationFrameResources* currentDeformationResources = nullptr;
 	if(deformationComputeRecordedForCurrentFrame
 		&& pendingDeformationImmutablePlan != nullptr
@@ -3942,13 +3928,6 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 			&& resources.frameId == pendingDeformationImmutablePlan->frameId)
 		{
 			currentDeformationResources = std::addressof(resources);
-			deformationGroupsByInstance.reserve(resources.graphicsGroups.size());
-			for(const GraphicsGroup& group : resources.graphicsGroups)
-			{
-				deformationGroupsByInstance.emplace(
-					DeformationGroupKey{group.stableInstanceId, group.meshId},
-					std::addressof(group));
-			}
 		}
 	}
 	std::size_t visibilityTriangleCount = 0u;
@@ -4060,12 +4039,15 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 				? binding.gpu.stableInstanceId
 				: (static_cast<std::uint64_t>(binding.animatorSlotIndex) << 32u)
 					| binding.animatorGeneration;
-			const auto deformationGroup = deformationGroupsByInstance.find(
-				DeformationGroupKey{stableInstanceId, commandIt->meshId});
-			if(deformationGroup != deformationGroupsByInstance.end())
+			const auto deformationGroup =
+				currentDeformationResources->graphicsGroupOffsets.find(
+					VulkanDeformationFrameResources::GraphicsGroupKey{
+						stableInstanceId, commandIt->meshId});
+			if(deformationGroup
+				!= currentDeformationResources->graphicsGroupOffsets.end())
 			{
 				setup.payloadState.w = activeDeformationGraphicsBufferIndex;
-				setup.deformationState.x = deformationGroup->second->headerWordOffset;
+				setup.deformationState.x = deformationGroup->second;
 			}
 		}
 		const std::uint32_t setupPacketIndex =

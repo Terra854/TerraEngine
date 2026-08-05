@@ -620,7 +620,7 @@ try {
 	}
 
 	# These are the exact editor-wide preference keys consumed by ProjectManager.
-	# Supplying them via TERRAENGINE_EDITOR_PREFS_PATH prevents this live run from
+	# Supplying them via TERRAENGINE_EDITOR_PREFS_SESSION_PATH prevents this live run from
 	# changing the user's normal MCP enablement, port, or recent-project history.
 	# Seed the complete Scene View document before process startup. Runtime writes
 	# correctly require an interactive high-impact approval, while this disposable
@@ -840,7 +840,7 @@ DockSpace ID=0x81567634 Window=0x5B0EFE5B Pos=0,43 Size=1280,677 CentralNode=1
 	$startInfo.Arguments = '--project "{0}"' -f $projectRoot.Replace('"', '\"')
 	$startInfo.WorkingDirectory = $editorDirectory
 	$startInfo.UseShellExecute = $false
-	$startInfo.EnvironmentVariables["TERRAENGINE_EDITOR_PREFS_PATH"] = $preferencesPath
+	$startInfo.EnvironmentVariables["TERRAENGINE_EDITOR_PREFS_SESSION_PATH"] = $preferencesPath
 	$startInfo.EnvironmentVariables["TERRAENGINE_SUPPRESS_PROJECT_RECENTS"] = "1"
 	# The canonical run leaves worker discovery entirely to the native pool. Remove
 	# an inherited override as well, so a parent shell cannot accidentally cap the

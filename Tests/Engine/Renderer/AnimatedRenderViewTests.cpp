@@ -202,6 +202,40 @@ namespace TerraEngine::Tests
 				"Renderer shutdown must retire the prior scene's visibility snapshot.");
 		});
 
+		registry.Add("Renderer.AnimationView.CanonicalVisibilityPublicationSkipsRenormalization", [](TestContext& context) {
+			using namespace TerraEngine::Renderer;
+			const UUID first = MakeAnimatedViewTestUuid(41u);
+			const UUID second = MakeAnimatedViewTestUuid(42u);
+			AnimatedObjectVisibilitySnapshot snapshot;
+			snapshot.frameId = 92u;
+			snapshot.sceneGeneration = 18u;
+			snapshot.visibleObjectIds = {first, second};
+			snapshot.hasActiveView = true;
+			snapshot.valid = true;
+			snapshot.canonicalUnique = true;
+			PublishAnimatedObjectVisibilitySnapshot(std::move(snapshot));
+
+			const auto published = LoadAnimatedObjectVisibilitySnapshot();
+			context.Expect(published && published->canonicalUnique,
+				"Renderer-owned visibility masks must retain their canonical-order proof.");
+			if(published)
+			{
+				context.ExpectEqual(std::size_t{2u}, published->visibleObjectIds.size(),
+					"Canonical publication must preserve one record per marked renderable.");
+				context.Expect(published->visibleObjectIds[0] == first
+					&& published->visibleObjectIds[1] == second,
+					"Canonical publication must preserve the renderable table's UUID order.");
+			}
+			ClearAnimatedObjectVisibilitySnapshot();
+		});
+
+		registry.Add("Renderer.AnimationView.RouteSelectionRecordRemainsCompact", [](TestContext& context) {
+			context.Expect(
+				sizeof(TerraEngine::Renderer::GeometryRouteSelectionRecord)
+					< sizeof(TerraEngine::Renderer::GeometryRouteDecision),
+				"Per-instance snapshots must not retain mesh-level route candidate vectors and strings.");
+		});
+
 		registry.Add("Renderer.AnimationView.ImmutableAllViewGenerationContract", [](TestContext& context) {
 			const TerraEngine::Renderer::RenderFrameSnapshot snapshot = BuildAllViewSnapshot();
 			const TerraEngine::Renderer::AnimationRenderGenerationRecord& generation =

@@ -1346,6 +1346,7 @@ add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Subsystems/PrefabAuthoringSubsystem.cpp
 	Editor/TerraEngine-Editor/Subsystems/ScriptCompilationSubsystem.cpp
 	Editor/TerraEngine-Editor/Subsystems/UndoRedoSystem.cpp
+	Editor/TerraEngine-Editor/Project/EditorPreferencesStorage.cpp
 	Editor/TerraEngine-Editor/Project/ProjectManager.cpp
 	Editor/TerraEngine-Editor/Project/ManagedReadinessManifest.cpp
 	Editor/TerraEngine-Editor/Project/ScriptWorkspaceService.cpp

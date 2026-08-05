@@ -335,12 +335,25 @@ namespace TerraEngine::Renderer::Vulkan {
 		std::uint32_t viewId)
 	{
 		std::vector<VirtualGeometryPagePayloadUploadRecord> records;
+		const auto usesVirtualGeometry = [](GeometryRoute route)
+		{
+			return route == GeometryRoute::VirtualGeometryHardware
+				|| route == GeometryRoute::VirtualGeometryCompute;
+		};
+		// Ordinary frames retain only the compact route attached to each renderable.
+		// Detailed route decisions remain an optional diagnostics envelope, while
+		// standalone tests and tools may still provide that envelope without a
+		// renderable table, so accept either source.
 		const bool hasVirtualGeometryRoute = std::any_of(
-			snapshot.geometryRouteDecisions.begin(), snapshot.geometryRouteDecisions.end(),
-			[](const GeometryRouteDecision& decision)
+			snapshot.renderables.begin(), snapshot.renderables.end(),
+			[&usesVirtualGeometry](const RenderFrameRenderableRecord& renderable)
 			{
-				return decision.selected == GeometryRoute::VirtualGeometryHardware
-					|| decision.selected == GeometryRoute::VirtualGeometryCompute;
+				return usesVirtualGeometry(renderable.geometryRouteDecision.selected);
+			}) || std::any_of(
+			snapshot.geometryRouteDecisions.begin(), snapshot.geometryRouteDecisions.end(),
+			[&usesVirtualGeometry](const GeometryRouteDecision& decision)
+			{
+				return usesVirtualGeometry(decision.selected);
 			});
 		if(!hasVirtualGeometryRoute)
 		{

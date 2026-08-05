@@ -84,6 +84,12 @@ namespace TerraEngine::Animation {
 		// another residency vector at the protected frame boundary.
 		AnimationStatus CopyStreamingStateFrom(
 			const AnimationClipView& validated) noexcept;
+		// Adopt a separately validated immutable clip publication, including a new
+		// asset pointer or an initially unavailable destination. Hot reload validates
+		// the shared source view once, then each animator copies only its checked view
+		// state instead of repeating codec and skeleton validation.
+		AnimationStatus AdoptValidatedPublicationFrom(
+			const AnimationClipView& validated) noexcept;
 		void Close() noexcept;
 
 		AnimationStatus ResolveTime(

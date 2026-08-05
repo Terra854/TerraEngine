@@ -189,6 +189,7 @@ add_executable(TerraEngine-EditorTests
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Animation/AnimationRecorder.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Animation/AnimationSceneHandles.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Assets/AnimationAssetActions.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Project/EditorPreferencesStorage.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Project/ProjectManager.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Project/ManagedReadinessManifest.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Project/ScriptWorkspaceService.cpp

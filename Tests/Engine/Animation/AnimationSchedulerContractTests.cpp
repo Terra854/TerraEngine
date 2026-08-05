@@ -293,6 +293,11 @@ namespace TerraEngine::Tests {
 				| static_cast<std::uint64_t>(mapping.instanceGeneration);
 			context.Expect(mapping.IsComplete(),
 				"Presentation must preserve the established slot-high/generation-low stable identity for GPU-only object matching.");
+			context.Expect(!mapping.HasPublishedPacketIndex(),
+				"A producer mapping must remain unusable for direct render lookup until lowering publishes its exact packet index.");
+			mapping.workPacketIndex = 19U;
+			context.Expect(mapping.HasPublishedPacketIndex(),
+				"A lowered owner mapping must expose its exact packet index without a renderer-side identity table.");
 
 			mapping.stableInstanceId = (static_cast<std::uint64_t>(mapping.instanceGeneration) << 32U)
 				| static_cast<std::uint64_t>(mapping.instanceSlot + 1U);

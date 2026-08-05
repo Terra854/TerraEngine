@@ -643,6 +643,7 @@ namespace TerraEngine::Animation {
 		try {
 			GpuAnimationPlan temporaryPlan;
 			temporaryPlan.generation = planGeneration;
+			temporaryPlan.buildLimits = limits;
 			GpuAnimationArena temporaryScratchArena = scratchArena;
 			GpuAnimationArena temporaryPaletteArena = paletteArena;
 			const GpuAnimationPlanStatus scratchGenerationStatus = temporaryScratchArena.BeginGeneration(planGeneration);
@@ -1022,6 +1023,141 @@ namespace TerraEngine::Animation {
 			return reject(GpuAnimationPlanStatus::AllocationFailure, GpuAnimationDiagnosticFlag::OutputOverflow);
 		} catch(...) {
 			return reject(GpuAnimationPlanStatus::AllocationFailure, GpuAnimationDiagnosticFlag::OutputOverflow);
+		}
+	}
+
+	bool TryRefreshGpuAnimationPlan(
+		std::span<const GpuAnimationWorkRequest> requests,
+		std::uint32_t planGeneration,
+		GpuAnimationArena& scratchArena,
+		GpuAnimationArena& paletteArena,
+		const GpuAnimationPlan& previous,
+		GpuAnimationPlan& output,
+		const GpuAnimationPlanLimits& limits) noexcept
+	{
+		if(planGeneration == 0U
+			|| previous.generation == 0U
+			|| previous.buildLimits != limits
+			|| scratchArena.Kind() != GpuAnimationArenaKind::Scratch
+			|| paletteArena.Kind() != GpuAnimationArenaKind::Palette
+			|| !IsPlanLimitConfigurationValid(limits)
+			|| requests.size() != previous.workPackets.size()
+			|| requests.size() != previous.generationRecords.size()
+			|| requests.size() != previous.renderIdentities.size()
+			|| requests.size() > limits.maximumPackets) {
+			return false;
+		}
+
+		try {
+			GpuAnimationArena refreshedScratch = scratchArena;
+			GpuAnimationArena refreshedPalette = paletteArena;
+			if(refreshedScratch.BeginGeneration(planGeneration) != GpuAnimationPlanStatus::Ok
+				|| refreshedPalette.BeginGeneration(planGeneration) != GpuAnimationPlanStatus::Ok) {
+				return false;
+			}
+
+			std::size_t batchIndex = 0U;
+			std::uint32_t batchEnd = previous.batches.empty()
+				? 0U
+				: previous.batches.front().firstWorkPacket
+					+ previous.batches.front().workPacketCount;
+			for(std::size_t packetIndex = 0U; packetIndex < requests.size(); ++packetIndex) {
+				while(batchIndex < previous.batches.size() && packetIndex >= batchEnd) {
+					++batchIndex;
+					if(batchIndex < previous.batches.size()) {
+						batchEnd = previous.batches[batchIndex].firstWorkPacket
+							+ previous.batches[batchIndex].workPacketCount;
+					}
+				}
+				if(batchIndex >= previous.batches.size()) return false;
+
+				const GpuAnimationWorkRequest& request = requests[packetIndex];
+				const GpuAnimationWorkPacket& packet = previous.workPackets[packetIndex];
+				const GpuAnimationBatch& batch = previous.batches[batchIndex];
+				if(!IsGpuAnimationGenerationRecordValid(request.generations)
+					|| !IsRequestValid(request, limits)
+					|| request.palettePartitionCount > limits.maximumPalettePartitions
+					|| request.batchKey != batch.key
+					|| MakeGpuAnimationBatchGenerationKey(request.generations) != batch.generationKey
+					|| request.stableInstanceId != packet.stableInstanceId
+					|| request.stableSubmissionOrdinal != packet.stableSubmissionOrdinal
+					|| request.inputPoseOffsetBytes != packet.inputPoseOffsetBytes
+					|| request.clipResourceIndex != packet.clipResourceIndex
+					|| request.programResourceIndex != packet.programResourceIndex
+					|| request.skeletonResourceIndex != packet.skeletonResourceIndex
+					|| request.maskResourceIndex != packet.maskResourceIndex
+					|| request.morphResourceIndex != packet.morphResourceIndex
+					|| request.jointCount != packet.jointCount
+					|| request.morphCount != packet.morphCount
+					|| request.paletteEntryCount != packet.paletteEntryCount
+					|| request.palettePartitionCount != packet.palettePartitionCount
+					|| request.flags != packet.flags
+					|| request.diagnosticIndex != packet.diagnosticIndex) {
+					return false;
+				}
+
+				ScratchLayout layout{};
+				if(!BuildScratchLayout(request, layout)
+					|| layout.totalSizeBytes != packet.scratchSizeBytes) {
+					return false;
+				}
+				const std::uint32_t scratchAlignment = std::max({
+					kGpuAnimationArenaAlignment,
+					limits.scratchAlignmentBytes,
+					request.scratchAlignmentBytes});
+				GpuAnimationArenaAllocation scratchAllocation{};
+				if(refreshedScratch.Allocate(
+						layout.totalSizeBytes, scratchAlignment, scratchAllocation)
+						!= GpuAnimationPlanStatus::Ok
+					|| scratchAllocation.offsetBytes != packet.scratchOffsetBytes
+					|| packet.localPoseOffsetBytes != packet.scratchOffsetBytes
+						+ layout.localPoseOffsetBytes
+					|| packet.modelPoseOffsetBytes != packet.scratchOffsetBytes
+						+ layout.modelPoseOffsetBytes
+					|| packet.morphOutputOffsetBytes != packet.scratchOffsetBytes
+						+ layout.morphOutputOffsetBytes) {
+					return false;
+				}
+
+				if(request.paletteEntryCount != 0U) {
+					std::uint64_t paletteSizeBytes = 0U;
+					GpuAnimationArenaAllocation paletteAllocation{};
+					if(!CheckedGpuMultiply(
+							request.paletteEntryCount,
+							kGpuAnimationPaletteStride,
+							paletteSizeBytes)
+						|| refreshedPalette.Allocate(
+							paletteSizeBytes,
+							kGpuAnimationArenaAlignment,
+							paletteAllocation) != GpuAnimationPlanStatus::Ok
+						|| paletteAllocation.offsetBytes != packet.paletteOffsetBytes) {
+						return false;
+					}
+				} else if(packet.paletteOffsetBytes != 0U) {
+					return false;
+				}
+			}
+
+			GpuAnimationPlan refreshed = previous;
+			refreshed.generation = planGeneration;
+			for(std::size_t packetIndex = 0U; packetIndex < requests.size(); ++packetIndex) {
+				const GpuAnimationWorkRequest& request = requests[packetIndex];
+				refreshed.generationRecords[packetIndex] = request.generations;
+				refreshed.workPackets[packetIndex].sampleTick = request.sampleTick;
+				refreshed.renderIdentities[packetIndex] = request.renderIdentity;
+			}
+			for(GpuAnimationDispatchCommand& command : refreshed.dispatchCommands) {
+				command.pushConstants.planGeneration = planGeneration;
+			}
+
+			output = std::move(refreshed);
+			scratchArena = refreshedScratch;
+			paletteArena = refreshedPalette;
+			return true;
+		} catch(const std::bad_alloc&) {
+			return false;
+		} catch(...) {
+			return false;
 		}
 	}
 }

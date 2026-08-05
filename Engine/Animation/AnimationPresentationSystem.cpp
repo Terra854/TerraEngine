@@ -5,13 +5,15 @@
 #include "AnimationSystem.h"
 #include "Core/Scheduling/JobGraph.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cassert>
 #include <mutex>
 #include <new>
 #include <thread>
-#include <unordered_set>
+#include <tuple>
+#include <unordered_map>
 #include <utility>
 
 namespace TerraEngine::Animation {
@@ -353,12 +355,17 @@ namespace TerraEngine::Animation {
 				GpuAnimationArenaKind::Scratch, prepared->source->scratchArenaCapacityBytes);
 			GpuAnimationArena paletteArena(
 				GpuAnimationArenaKind::Palette, prepared->source->paletteArenaCapacityBytes);
+			// The atomic publication remains immutable for this worker's lifetime.
+			// It supplies a topology template only; a mismatched generation, layout,
+			// payload owner, arena shape, or limit falls back to the complete builder.
+			const std::shared_ptr<const PublishedGpuAnimationPresentationPlan> previous =
+				std::atomic_load_explicit(&impl_->publishedPlan, std::memory_order_acquire);
 			{
 				std::scoped_lock cacheLock(impl_->atlasCacheMutex);
 				(void)BuildLoweredGpuAnimationPlan(
 					prepared->source->inputs, prepared->planGeneration, scratchArena, paletteArena,
 					prepared->plan, prepared->result, prepared->source->planLimits,
-					&impl_->atlasCache);
+					&impl_->atlasCache, previous ? &previous->plan : nullptr);
 			}
 			if(gpuCancellation.IsCancellationRequested(*impl_->lifecycleLatch)) {
 				prepared->plan = {};
@@ -416,27 +423,54 @@ namespace TerraEngine::Animation {
 			if(buildSucceeded) {
 				publication->plan = std::move(prepared->plan);
 				try {
-					std::unordered_set<LoweredOwnerKey, LoweredOwnerKeyHash> loweredOwners;
+					std::unordered_map<LoweredOwnerKey, std::uint32_t,
+						LoweredOwnerKeyHash> loweredOwners;
 					loweredOwners.reserve(publication->plan.workPackets.size());
-					for(const GpuAnimationWorkPacket& packet : publication->plan.workPackets) {
+					for(std::uint32_t packetIndex = 0U;
+						packetIndex < publication->plan.workPackets.size(); ++packetIndex) {
+						const GpuAnimationWorkPacket& packet =
+							publication->plan.workPackets[packetIndex];
 						if(packet.generationRecordIndex
 							>= publication->plan.generationRecords.size()) continue;
 						const GpuAnimationGenerationRecord& generation =
 							publication->plan.generationRecords[packet.generationRecordIndex];
 						if(!IsGpuAnimationGenerationRecordValid(generation)) continue;
-						loweredOwners.insert({packet.stableInstanceId, generation.instanceSlot,
-							generation.instanceGeneration, generation.componentGeneration});
+						const LoweredOwnerKey key{packet.stableInstanceId,
+							generation.instanceSlot, generation.instanceGeneration,
+							generation.componentGeneration};
+						const auto [existing, inserted] =
+							loweredOwners.emplace(key, packetIndex);
+						if(!inserted) {
+							// Duplicate exact owner identities are ambiguous. Mark the key invalid
+							// so Render never guesses which palette belongs to an authored object.
+							existing->second = std::numeric_limits<std::uint32_t>::max();
+						}
 					}
 					publication->ownerObjectMappings.reserve(prepared->source->ownerObjectMappings.size());
 					for(const GpuAnimationOwnerObjectMapping& mapping : prepared->source->ownerObjectMappings) {
 						// Publish only a complete, generation-equal mapping that names an
 						// actual lowered packet. A rejected/missing packet must not leave
 						// render collection an object identity it could accidentally reuse.
-						if(mapping.IsComplete()
-							&& loweredOwners.contains(MakeLoweredOwnerKey(mapping))) {
-							publication->ownerObjectMappings.push_back(mapping);
+						const auto lowered = loweredOwners.find(MakeLoweredOwnerKey(mapping));
+						if(mapping.IsComplete() && lowered != loweredOwners.end()
+							&& lowered->second != std::numeric_limits<std::uint32_t>::max()) {
+							GpuAnimationOwnerObjectMapping published = mapping;
+							published.workPacketIndex = lowered->second;
+							publication->ownerObjectMappings.push_back(std::move(published));
 						}
 					}
+					// Binary search over a retained immutable vector is cheaper than rebuilding
+					// two hash tables in RenderSystem. Secondary identities keep duplicates
+					// adjacent so the renderer can preserve its fail-closed ambiguity check.
+					std::sort(publication->ownerObjectMappings.begin(),
+						publication->ownerObjectMappings.end(),
+						[](const GpuAnimationOwnerObjectMapping& left,
+							const GpuAnimationOwnerObjectMapping& right) {
+							return std::tie(left.ownerObjectId, left.componentGeneration,
+								left.stableInstanceId, left.workPacketIndex)
+								< std::tie(right.ownerObjectId, right.componentGeneration,
+									right.stableInstanceId, right.workPacketIndex);
+						});
 				} catch(const std::bad_alloc&) {
 					// An incomplete owner map cannot safely support GPU-only rendering.
 					// Retire this candidate as a CPU fallback instead of publishing a

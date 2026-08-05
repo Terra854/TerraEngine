@@ -594,6 +594,8 @@ namespace TerraEngine::Animation {
 		std::uint32_t maximumPalettePartitions = kGpuAnimationMaximumPalettePartitionsV1;
 		std::uint32_t reserved0 = 0U;
 		std::uint32_t reserved1 = 0U;
+
+		auto operator<=>(const GpuAnimationPlanLimits&) const = default;
 	};
 
 	// Plan diagnostics are copied as one bounded 32-byte value. Build rejection
@@ -717,6 +719,10 @@ namespace TerraEngine::Animation {
 
 	struct GpuAnimationPlan {
 		std::uint32_t generation = 0U;
+		// A cached topology is reusable only under the exact same safety bounds.
+		// Retaining them in the CPU plan prevents a relaxed earlier build from
+		// bypassing a later caller's tighter packet or dispatch limits.
+		GpuAnimationPlanLimits buildLimits{};
 		// These owned resident bytes match descriptor bindings three through seven.
 		// A plan is published only after their producer has validated every packet.
 		GpuAnimationResidentPayloads residentPayloads{};
@@ -763,6 +769,20 @@ namespace TerraEngine::Animation {
 		GpuAnimationPlan& output,
 		const GpuAnimationPlanLimits& limits = {},
 		GpuAnimationPlanBuildDiagnostics* buildDiagnostics = nullptr) noexcept;
+
+	// Stable crowds change sample ticks and per-frame generations while retaining
+	// packet order, resource layout, scratch shapes, and dispatch topology. This
+	// transactional fast path replays checked arena allocation and updates only the
+	// dynamic lanes. It returns false without touching outputs when any topology
+	// input changed, allowing callers to fall back to the complete builder.
+	[[nodiscard]] TERRAENGINE_API bool TryRefreshGpuAnimationPlan(
+		std::span<const GpuAnimationWorkRequest> requests,
+		std::uint32_t planGeneration,
+		GpuAnimationArena& scratchArena,
+		GpuAnimationArena& paletteArena,
+		const GpuAnimationPlan& previous,
+		GpuAnimationPlan& output,
+		const GpuAnimationPlanLimits& limits = {}) noexcept;
 
 	// Shared helpers keep CPU tests, shaders, and renderer validation on one rule.
 	[[nodiscard]] TERRAENGINE_API std::uint32_t GpuAnimationStageElementCount(

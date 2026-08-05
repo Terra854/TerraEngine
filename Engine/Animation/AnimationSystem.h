@@ -168,6 +168,16 @@ namespace TerraEngine::Animation {
 		AnimatorInstanceHandle handle;
 		const AnimatorPlaybackBinding* streamedBinding = nullptr;
 		AnimationClipView* sharedValidatedClipView = nullptr;
+		// The authored UUID lets a previously unavailable runtime record accept only
+		// the exact direct clip that the coordinator validated for this component.
+		UUID expectedClipAssetId = EMPTY_UUID;
+		// A ResourceManager hot publication of the same authored direct clip may
+		// replace its immutable generation without rebuilding unrelated mesh,
+		// skeleton, parameter, and policy arrays for every prefab instance.
+		// The protected batch may repair a lagging runtime record when the same
+		// direct-clip asset has already advanced to a newer immutable generation.
+		bool allowClipPublicationReplacement = false;
+		bool playOnBind = false;
 	};
 
 	// This copied diagnostic snapshot exposes the selected task granularity and
@@ -274,6 +284,9 @@ namespace TerraEngine::Animation {
 		[[nodiscard]] AnimationStatus NotifyLifecycleInvalidation(
 			AnimationLifecycleBoundary boundary);
 		[[nodiscard]] bool IsAnimatorInstanceAlive(AnimatorInstanceHandle handle) const;
+		// Binding synchronization uses this revision to validate its retained handle
+		// set without reopening the private instance store for every crowd member.
+		[[nodiscard]] std::uint64_t AnimatorInstanceMembershipRevision() const noexcept;
 		// Binding copies immutable ownership and validates the dependency generation
 		// before any worker sees it. Missing or incompatible clip data is retained as
 		// an explicit safe-pose status rather than partially mixing generations.
@@ -397,7 +410,12 @@ namespace TerraEngine::Animation {
 			AnimatorInstanceHandle handle,
 			const AnimatorPlaybackBinding& streamedBinding,
 			AnimationClipView* sharedValidatedClipView,
-			bool& outChanged);
+			UUID expectedClipAssetId,
+			bool allowClipPublicationReplacement,
+			bool playOnBind,
+			std::uint64_t replacementClipFingerprint,
+			bool& outChanged,
+			bool& outReplacedClipPublication);
 
 		struct Impl;
 		std::unique_ptr<Impl> impl_;

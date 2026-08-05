@@ -28,7 +28,7 @@ namespace TerraEngine::EditorTests
 				: root_(std::filesystem::temp_directory_path() / "TerraEngineProjectSettings" / name)
 				, preferencesPath_(root_ / ".terra_editor_prefs.json")
 			{
-				if (const char* existing = std::getenv("TERRAENGINE_EDITOR_PREFS_PATH"))
+				if (const char* existing = std::getenv(TerraEngine::Editor::kEditorPreferencesSessionPathEnvironment))
 				{
 					previousOverride_ = existing;
 				}
@@ -63,18 +63,18 @@ namespace TerraEngine::EditorTests
 			static void SetPreferencePath(const std::string& path)
 			{
 #ifdef _WIN32
-				_putenv_s("TERRAENGINE_EDITOR_PREFS_PATH", path.c_str());
+				_putenv_s(TerraEngine::Editor::kEditorPreferencesSessionPathEnvironment, path.c_str());
 #else
-				setenv("TERRAENGINE_EDITOR_PREFS_PATH", path.c_str(), 1);
+				setenv(TerraEngine::Editor::kEditorPreferencesSessionPathEnvironment, path.c_str(), 1);
 #endif
 			}
 
 			static void ClearPreferencePath()
 			{
 #ifdef _WIN32
-				_putenv_s("TERRAENGINE_EDITOR_PREFS_PATH", "");
+				_putenv_s(TerraEngine::Editor::kEditorPreferencesSessionPathEnvironment, "");
 #else
-				unsetenv("TERRAENGINE_EDITOR_PREFS_PATH");
+				unsetenv(TerraEngine::Editor::kEditorPreferencesSessionPathEnvironment);
 #endif
 			}
 
@@ -175,6 +175,22 @@ namespace TerraEngine::EditorTests
 			}
 
 			std::filesystem::remove_all(root, ignored);
+		});
+
+		registry.Add("Editor.Preferences.ManagerKeepsConstructionStore", [](TestContext& context) {
+			ScopedEditorPreferenceFile firstStore("ManagerKeepsConstructionStoreA");
+			::ProjectManager manager;
+			const std::filesystem::path firstPath = firstStore.PreferencesPath();
+
+			{
+				// A later environment change must not redirect an already-running
+				// editor. This prevents test runners from leaking a changing MCP port
+				// into the user's global preference document.
+				ScopedEditorPreferenceFile secondStore("ManagerKeepsConstructionStoreB");
+				manager.SetAutoBuildScripts(false);
+				context.Expect(std::filesystem::exists(firstPath), "The manager should save to the store selected at construction.");
+				context.Expect(!std::filesystem::exists(secondStore.PreferencesPath()), "A later session path must not receive writes from an existing manager.");
+			}
 		});
 
 		registry.Add("Editor.ProjectSettings.TempRecentEntriesArePrunedOnLoad", [](TestContext& context) {

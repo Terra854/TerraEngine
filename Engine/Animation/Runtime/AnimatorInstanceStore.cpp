@@ -21,6 +21,7 @@ namespace TerraEngine::Animation {
 			slot.descriptor = descriptor;
 			slot.alive = true;
 			activeCount_.fetch_add(1U, std::memory_order_release);
+			membershipRevision_.fetch_add(1U, std::memory_order_acq_rel);
 			return {slotIndex, slot.generation};
 		}
 		if(slots_.size() >= kInvalidAnimatorInstanceSlot) return {};
@@ -28,6 +29,7 @@ namespace TerraEngine::Animation {
 			slotIndex = static_cast<std::uint32_t>(slots_.size());
 			slots_.push_back(Slot{descriptor, 1U, true, false});
 			activeCount_.fetch_add(1U, std::memory_order_release);
+			membershipRevision_.fetch_add(1U, std::memory_order_acq_rel);
 		}
 		return {slotIndex, slots_[slotIndex].generation};
 	}
@@ -64,12 +66,17 @@ namespace TerraEngine::Animation {
 		return activeCount_.load(std::memory_order_acquire);
 	}
 
+	std::uint64_t AnimatorInstanceStore::MembershipRevision() const noexcept {
+		return membershipRevision_.load(std::memory_order_acquire);
+	}
+
 	AnimatorInstanceHandle AnimatorInstanceStore::SetGenerationForTesting(AnimatorInstanceHandle handle, AnimationGeneration generation) {
 		std::scoped_lock lock(mutex_);
 		if(!handle.IsValid() || handle.slotIndex >= slots_.size()) return {};
 		Slot& slot = slots_[handle.slotIndex];
 		if(!slot.alive || slot.generation != handle.generation || generation <= slot.generation) return {};
 		slot.generation = generation;
+		membershipRevision_.fetch_add(1U, std::memory_order_acq_rel);
 		return {handle.slotIndex, generation};
 	}
 
@@ -77,6 +84,7 @@ namespace TerraEngine::Animation {
 		Slot& slot = slots_[slotIndex];
 		slot.alive = false;
 		activeCount_.fetch_sub(1U, std::memory_order_release);
+		membershipRevision_.fetch_add(1U, std::memory_order_acq_rel);
 		if(slot.generation == UINT32_MAX) {
 			// There is no distinct non-zero generation left for this slot. It must
 			// never re-enter the free list or the next create would wrap and alias.

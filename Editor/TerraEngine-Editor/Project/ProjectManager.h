@@ -6,6 +6,7 @@
 
 #include "ProjectSettings.h"
 #include "EditorPreferences.h"
+#include "EditorPreferencesStorage.h"
 #include "Scene/Serializer.h"
 #include <atomic>
 #include <cstdint>
@@ -112,6 +113,9 @@ private:
 	void AddToRecentProjects(const std::filesystem::path& path, const std::string& name);
 
 	std::filesystem::path projectRoot;
+	// Bind one store when the manager is constructed. Environment changes made
+	// later in the process cannot redirect a live editor's preference writes.
+	TerraEngine::Editor::EditorPreferencesStorageLocation editorPreferencesStorage;
 	std::optional<ProjectSettings> currentSettings;
 	EditorPreferences editorPrefs;
 	RendererRecoveryProjectActionState rendererRecoveryActionState;

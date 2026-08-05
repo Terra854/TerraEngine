@@ -47,6 +47,11 @@ namespace TerraEngine::Animation {
 		// atomic avoids taking the store mutex on every dormant frame; descriptor
 		// capture still takes the mutex before reading any live slot data.
 		std::size_t ActiveCount() const noexcept;
+		// This process-lifetime revision advances for every successful membership or
+		// generation mutation. Coordinator caches can prove that all previously
+		// checked handles are still alive with one atomic load instead of taking the
+		// store mutex once per animator.
+		std::uint64_t MembershipRevision() const noexcept;
 		// This narrow monotonic hook exists solely for the regression test that
 		// proves an exhausted 32-bit generation can never wrap and alias an ancient
 		// handle. It cannot move a live slot backward to revive a stale identity.
@@ -72,5 +77,6 @@ namespace TerraEngine::Animation {
 		std::vector<Slot> slots_;
 		std::vector<std::uint32_t> freeSlots_;
 		std::atomic_size_t activeCount_ = 0U;
+		std::atomic_uint64_t membershipRevision_ = 1U;
 	};
 }

@@ -320,6 +320,11 @@ namespace TerraEngine::Tests
 			context.Expect(payload != nullptr && payload->bytes
 				&& *payload->bytes == std::vector<std::uint8_t>({3U, 4U, 5U}),
 				"Protected publication must expose an immutable snapshot containing the exact checked bytes.");
+			Animation::AnimationStreamRequest conflictingRange = request;
+			conflictingRange.byteOffset += 1U;
+			context.Expect(!coordinator.Query(conflictingRange).has_value()
+				&& published->Find(conflictingRange) == nullptr,
+				"Indexed generation lookup must still reject mismatched immutable physical ranges rather than aliasing by hash key alone.");
 
 			Animation::AnimationStreamRequest cancelled = request;
 			cancelled.generation = 2U;

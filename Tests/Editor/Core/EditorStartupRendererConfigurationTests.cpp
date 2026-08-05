@@ -1,13 +1,82 @@
 #include "TestHarness.h"
 #include "Editor/TerraEngine-Editor/Core/EditorStartupRendererConfiguration.h"
+#include "Editor/TerraEngine-Editor/Project/EditorPreferencesStorage.h"
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 
 namespace TerraEngine::EditorTests
 {
+	namespace
+	{
+		class ScopedEditorPreferenceSessionPath
+		{
+		public:
+			explicit ScopedEditorPreferenceSessionPath(const std::filesystem::path& path)
+			{
+				// Preserve the parent process exactly because the editor test executable
+				// contains many preference owners that run sequentially.
+				if (const char* existing = std::getenv(TerraEngine::Editor::kEditorPreferencesSessionPathEnvironment))
+				{
+					previousPath_ = existing;
+				}
+				Set(path.string());
+			}
+
+			~ScopedEditorPreferenceSessionPath()
+			{
+				if (previousPath_.has_value())
+				{
+					Set(*previousPath_);
+				}
+				else
+				{
+					Clear();
+				}
+			}
+
+		private:
+			static void Set(const std::string& path)
+			{
+#ifdef _WIN32
+				_putenv_s(TerraEngine::Editor::kEditorPreferencesSessionPathEnvironment, path.c_str());
+#else
+				setenv(TerraEngine::Editor::kEditorPreferencesSessionPathEnvironment, path.c_str(), 1);
+#endif
+			}
+
+			static void Clear()
+			{
+#ifdef _WIN32
+				_putenv_s(TerraEngine::Editor::kEditorPreferencesSessionPathEnvironment, "");
+#else
+				unsetenv(TerraEngine::Editor::kEditorPreferencesSessionPathEnvironment);
+#endif
+			}
+
+			std::optional<std::string> previousPath_;
+		};
+	}
+
 	void RegisterEditorStartupRendererConfigurationTests(TestRegistry& registry)
 	{
+		registry.Add("Editor.Preferences.GlobalPathIsIndependentFromSessionOverride", [](TestContext& context) {
+			const std::filesystem::path globalPath = TerraEngine::Editor::ResolveGlobalEditorPreferencesPath();
+			const std::filesystem::path sessionPath = std::filesystem::temp_directory_path()
+				/ "TerraEnginePreferences" / "startup-session.json";
+			ScopedEditorPreferenceSessionPath session(sessionPath);
+			const auto location = TerraEngine::Editor::ResolveEditorPreferencesStorageLocation();
+
+			context.Expect(location.isolatedSession, "An explicit automation path must be classified as an isolated session store.");
+			context.ExpectEqual(sessionPath.string(), location.path.string(), "The active session should use only its explicit preference document.");
+			context.ExpectEqual(
+				globalPath.string(),
+				TerraEngine::Editor::ResolveGlobalEditorPreferencesPath().string(),
+				"A session override must not redirect the canonical global preference source.");
+		});
+
 		registry.Add("Editor.StartupRenderer.DirectProjectIsReadOnlyAndSanitized", [](TestContext& context) {
 			const auto root = std::filesystem::temp_directory_path() / "TerraEngineStartupRendererConfiguration";
 			std::filesystem::remove_all(root);

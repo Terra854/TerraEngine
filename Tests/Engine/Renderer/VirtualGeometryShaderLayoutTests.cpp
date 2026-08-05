@@ -453,6 +453,9 @@ namespace TerraEngine::Tests
 			const std::string meshShader = ReadDefaultMeshShader();
 			const std::string taskShader = ReadDefaultTaskShader();
 			const std::string vulkanSource = ReadVulkanContextSource();
+			const std::string vulkanImplSource = ReadVulkanContextImplSource();
+			const std::string vulkanResourcesSource =
+				ReadVulkanContextResourcesSource();
 
 			const std::size_t ownerFallback = renderSystemSource.find(
 				"command.animationBinding.RequiresOwnerMeshDeformationFallback()");
@@ -473,11 +476,11 @@ namespace TerraEngine::Tests
 				"Legacy owner-mesh deformation must stay on the mesh-only Vulkan route because it has no current task-stage bounds; canonical animated pages remain task-pipeline eligible.");
 			context.Expect(
 				ShaderContains(vulkanSource,
-					"canonicalGraphicsGroupOffsets.find(")
-					&& ShaderContains(vulkanSource,
-						"CanonicalGraphicsGroupKey{stableInstanceId, command.meshId}")
-					&& ShaderContains(vulkanSource,
-						"canonicalGraphicsGroupOffsets.emplace("),
+					"resources.graphicsGroupOffsets.find(")
+					&& ShaderContains(vulkanImplSource,
+						"GraphicsGroupKeyHash")
+					&& ShaderContains(vulkanResourcesSource,
+						"resources.graphicsGroupOffsets.emplace("),
 				"Canonical graphics publications must resolve the exact owner/mesh group so multiple independently animated owners can share one frame safely.");
 			context.Expect(
 				ShaderContains(vulkanSource,
@@ -758,7 +761,26 @@ namespace TerraEngine::Tests
 			const std::string vulkanSource = ReadVulkanContextSource();
 
 			context.Expect(ShaderContains(vulkanSource, "editorCompletionTracker.RecordFenceCompletion"), "BeginFrame should publish frame-slot completion from the completed UI fence.");
-			context.Expect(ShaderContains(vulkanSource, "const VkResult poolResetResult = vkResetCommandPool"), "BeginFrame command-pool reset failures must stop recording for that slot.");
+			context.Expect(ShaderContains(vulkanSource,
+				"const VkResult poolResetResult = vkResetCommandPool"),
+				"BeginFrame must retain the completed primary-pool reset required by multi-view and dedicated-capture command buffers.");
+			context.Expect(ShaderContains(vulkanSource,
+				"correctness boundary for multi-view and dedicated-capture command buffers"),
+				"The primary-pool lifetime rule should document why the reset follows the frame fence.");
+			context.Expect(ShaderContains(vulkanSource,
+				"const VkResult resetCommandResult = vkResetCommandBuffer(cmd, 0)"),
+				"The individually reset primary command buffer must reject reset failures before recording begins.");
+			context.Expect(!ShaderContains(vulkanSource,
+				"for (VkCommandPool pool : framePools)"),
+				"BeginFrame should not reset every retained worker pool unconditionally.");
+			context.Expect(ShaderContains(vulkanSource,
+				"frameUsage[poolIndex] == 0u")
+				&& ShaderContains(vulkanSource,
+					"Reset active worker command pools"),
+				"BeginFrame should reclaim driver recording resources only for worker pools used by the completed frame slot.");
+			context.Expect(ShaderContains(vulkanSource,
+				"kVulkanDrawsPerRecordingWorker"),
+				"Large draw lists should bound secondary-recording workers by useful command chunks instead of hardware-thread count alone.");
 			context.Expect(ShaderContains(vulkanSource, "Do not reset or free the pool here: EndFrame may have just submitted"), "PresentEditor must preserve command buffers submitted earlier in the same frame.");
 			context.Expect(ShaderContains(vulkanSource, "Skipping editor render recovery because the graphics queue did not prove idle"), "Editor render recovery should not recreate swapchain resources while submitted work may still reference them.");
 			context.Expect(ShaderContains(vulkanSource, "fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT"), "Failed UI submits should restore a signaled frame fence after the pre-submit reset.");
