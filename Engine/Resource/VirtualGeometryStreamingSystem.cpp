@@ -9,6 +9,7 @@
 #include <array>
 #include <iterator>
 #include <limits>
+#include <tuple>
 #include <utility>
 
 namespace TerraEngine::Resource
@@ -30,6 +31,69 @@ namespace TerraEngine::Resource
 		bool FitsProcessVector(std::uint64_t byteCount) noexcept
 		{
 			return byteCount <= static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max());
+		}
+
+		// Several worker-side producers can finish the same page during one frame.
+		// Keep only the newest complete value for that page before PagePublish sees
+		// the private batch. This preserves the protected boundary's atomic contract
+		// while preventing a harmless duplicate completion from rejecting unrelated
+		// pages in the same batch. Allocation reuse across *different* pages is still
+		// deliberately left for the publication validator to reject.
+		std::vector<VirtualGeometryPagePublicationCandidate> CoalescePageCandidates(
+			std::vector<VirtualGeometryPagePublicationCandidate> candidates)
+		{
+			std::sort(candidates.begin(), candidates.end(), [](const auto& left, const auto& right)
+			{
+				return std::tie(left.key.asset.assetId, left.key.pageId,
+					left.publicationGeneration, left.candidateId, left.descriptor.allocationId)
+					< std::tie(right.key.asset.assetId, right.key.pageId,
+						right.publicationGeneration, right.candidateId, right.descriptor.allocationId);
+			});
+
+			std::vector<VirtualGeometryPagePublicationCandidate> coalesced;
+			coalesced.reserve(candidates.size());
+			for (VirtualGeometryPagePublicationCandidate& candidate : candidates)
+			{
+				if (coalesced.empty()
+					|| coalesced.back().key.asset.assetId != candidate.key.asset.assetId
+					|| coalesced.back().key.pageId != candidate.key.pageId)
+				{
+					coalesced.push_back(std::move(candidate));
+					continue;
+				}
+
+				// Sorting makes this the newest deterministic value for the identical
+				// publication identity. Replacing privately is safe because neither
+				// candidate has been exposed to residency or renderer consumers yet.
+				coalesced.back() = std::move(candidate);
+			}
+			return coalesced;
+		}
+
+		std::vector<VirtualGeometryPagePublicationCandidate> DiscardSupersededPageCandidates(
+			std::vector<VirtualGeometryPagePublicationCandidate> candidates,
+			const std::vector<VirtualGeometryPagePublication>& visiblePages)
+		{
+			// Frame-slot fences can complete out of order. If a newer page generation
+			// is already visible, the older completion can no longer become visible and
+			// would deterministically fail the protected validator as "not newer".
+		// Drop only that proved-obsolete value before PagePublish; malformed,
+		// conflicting, or allocation-colliding candidates still reach the validator
+		// and retain its atomic rejection behaviour.
+		candidates.erase(std::remove_if(candidates.begin(), candidates.end(),
+			[&visiblePages](const VirtualGeometryPagePublicationCandidate& candidate)
+			{
+				const auto visible = std::find_if(visiblePages.begin(), visiblePages.end(),
+					[&candidate](const VirtualGeometryPagePublication& page)
+					{
+						return page.IsVisible()
+							&& page.key.asset.assetId == candidate.key.asset.assetId
+							&& page.key.pageId == candidate.key.pageId;
+					});
+				return visible != visiblePages.end()
+					&& candidate.publicationGeneration <= visible->publicationGeneration;
+			}), candidates.end());
+			return candidates;
 		}
 	} // namespace
 
@@ -225,12 +289,20 @@ namespace TerraEngine::Resource
 		{
 			std::vector<VirtualGeometryStreamingFeedback> feedback;
 			std::vector<VirtualGeometryPagePublicationCandidate> candidates;
+			std::vector<VirtualGeometryPagePublication> visiblePages;
 			{
 				std::scoped_lock lock(candidateMutex);
 				feedback = priorFrameFeedback;
 				candidates = std::move(pendingPublicationCandidates);
 				pendingPublicationCandidates.clear();
+				// Copy the last protected snapshot while its owner lock is held. Worker
+				// preparation uses this immutable value only to discard slot-fence
+				// completions that the next PagePublish could never accept.
+				visiblePages = publicationStore.Snapshot();
 			}
+			candidates = CoalescePageCandidates(std::move(candidates));
+			candidates = DiscardSupersededPageCandidates(
+				std::move(candidates), visiblePages);
 
 			// This is the worker-safe boundary: all work uses copied values and cannot
 			// expose a page, allocate a descriptor, or write a live resource.

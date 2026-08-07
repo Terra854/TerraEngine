@@ -84,6 +84,7 @@ namespace TerraEngine::Tests {
 	void RegisterBulkScenePublicationTests(TestRegistry& registry);
 	void RegisterProfilerCaptureTests(TestRegistry& registry);
 	void RegisterProfilerCaptureV2Tests(TestRegistry& registry);
+	void RegisterProfilerOptimizationEvidenceTests(TestRegistry& registry);
 	void RegisterProfilerCaptureLevelTests(TestRegistry& registry);
 	void RegisterProfilerCapturePerformanceTests(TestRegistry& registry);
 	void RegisterProfilerPerformanceSummaryTests(TestRegistry& registry);
@@ -114,6 +115,7 @@ namespace TerraEngine::Tests {
 	void RegisterVirtualGeometryResourceTests(TestRegistry& registry);
 	void RegisterVirtualGeometryResidencyTests(TestRegistry& registry);
 	void RegisterRenderTypesTests(TestRegistry& registry);
+	void RegisterRenderInstanceAbiTests(TestRegistry& registry);
 	void RegisterAnimatedRenderViewTests(TestRegistry& registry);
 	void RegisterAnimatedVirtualGeometryAbiTests(TestRegistry& registry);
 	void RegisterAnimatedVirtualGeometryRuntimeTests(TestRegistry& registry);
@@ -203,6 +205,13 @@ namespace TerraEngine::Tests {
 	void RegisterVirtualGeometryTraversalOverflowTests(TestRegistry& registry);
 	void RegisterVirtualGeometryTwoPassOcclusionTests(TestRegistry& registry);
 	void RegisterVirtualGeometryViewOwnershipTests(TestRegistry& registry);
+	void RegisterRenderRouteParityTests(TestRegistry& registry);
+	void RegisterVirtualGeometryViewEvidenceTests(TestRegistry& registry);
+	void RegisterRendererViewLifecycleTests(TestRegistry& registry);
+	void RegisterPersistentRenderTopologyTests(TestRegistry& registry);
+	void RegisterSharedRenderSubmissionTests(TestRegistry& registry);
+	void RegisterVulkanGroupedSubmissionTests(TestRegistry& registry);
+	void RegisterRendererScalePerformanceTests(TestRegistry& registry);
 	void RegisterVirtualGeometryProductionSoakTests(TestRegistry& registry);
 	void RegisterVirtualGeometryHardwareVisibilityTests(TestRegistry& registry);
 	void RegisterVirtualGeometryComputeRasterTests(TestRegistry& registry);
@@ -364,6 +373,7 @@ int main() {
 	TerraEngine::Tests::RegisterBulkScenePublicationTests(registry);
 	TerraEngine::Tests::RegisterProfilerCaptureTests(registry);
 	TerraEngine::Tests::RegisterProfilerCaptureV2Tests(registry);
+	TerraEngine::Tests::RegisterProfilerOptimizationEvidenceTests(registry);
 	TerraEngine::Tests::RegisterProfilerCaptureLevelTests(registry);
 	TerraEngine::Tests::RegisterProfilerCapturePerformanceTests(registry);
 	TerraEngine::Tests::RegisterProfilerPerformanceSummaryTests(registry);
@@ -394,6 +404,7 @@ int main() {
 	TerraEngine::Tests::RegisterVirtualGeometryResourceTests(registry);
 	TerraEngine::Tests::RegisterVirtualGeometryResidencyTests(registry);
 	TerraEngine::Tests::RegisterRenderTypesTests(registry);
+	TerraEngine::Tests::RegisterRenderInstanceAbiTests(registry);
 	TerraEngine::Tests::RegisterAnimatedRenderViewTests(registry);
 	TerraEngine::Tests::RegisterAnimatedVirtualGeometryAbiTests(registry);
 	TerraEngine::Tests::RegisterAnimatedVirtualGeometryRuntimeTests(registry);
@@ -456,6 +467,13 @@ int main() {
 	TerraEngine::Tests::RegisterVirtualGeometryTraversalOverflowTests(registry);
 	TerraEngine::Tests::RegisterVirtualGeometryTwoPassOcclusionTests(registry);
 	TerraEngine::Tests::RegisterVirtualGeometryViewOwnershipTests(registry);
+	TerraEngine::Tests::RegisterRenderRouteParityTests(registry);
+	TerraEngine::Tests::RegisterVirtualGeometryViewEvidenceTests(registry);
+	TerraEngine::Tests::RegisterRendererViewLifecycleTests(registry);
+	TerraEngine::Tests::RegisterPersistentRenderTopologyTests(registry);
+	TerraEngine::Tests::RegisterSharedRenderSubmissionTests(registry);
+	TerraEngine::Tests::RegisterVulkanGroupedSubmissionTests(registry);
+	TerraEngine::Tests::RegisterRendererScalePerformanceTests(registry);
 	TerraEngine::Tests::RegisterVirtualGeometryProductionSoakTests(registry);
 	TerraEngine::Tests::RegisterVirtualGeometryHardwareVisibilityTests(registry);
 	TerraEngine::Tests::RegisterVirtualGeometryComputeRasterTests(registry);

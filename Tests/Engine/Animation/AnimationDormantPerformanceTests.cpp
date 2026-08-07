@@ -97,7 +97,7 @@ namespace TerraEngine::Tests {
 				"Static projects must create no animation jobs, allocations, residency, GPU, physics, managed, or detailed diagnostic work.");
 			context.Expect(std::is_trivially_copyable_v<AnimationDiagnosticsSnapshot>,
 				"Foundation snapshots must remain fixed value records with no hidden allocation ownership.");
-			context.Expect(sizeof(AnimationDiagnosticsSnapshot) <= 512U,
+			context.Expect(sizeof(AnimationDiagnosticsSnapshot) <= 1024U,
 				"The always-available summary snapshot must remain a bounded fixed-size record.");
 		});
 

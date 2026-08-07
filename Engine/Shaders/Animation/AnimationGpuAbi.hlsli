@@ -7,6 +7,11 @@
 #ifndef TERRAENGINE_ANIMATION_GPU_ABI_HLSLI
 #define TERRAENGINE_ANIMATION_GPU_ABI_HLSLI
 
+// Grouped rendering consumes animation selectors from the shared renderer
+// instance record. Including the ABI here keeps CPU/HLSL field ownership
+// explicit without duplicating a second incompatible animation record.
+#include "../Default/RenderInstanceAbi.hlsli"
+
 #define TE_ANIMATION_GPU_DESCRIPTOR_SET 1u
 #define TE_ANIMATION_GPU_DESCRIPTOR_BINDING_COUNT 15u
 #define TE_ANIMATION_GPU_DESCRIPTOR_GENERATION_RECORDS 0u

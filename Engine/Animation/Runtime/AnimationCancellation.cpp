@@ -288,6 +288,10 @@ namespace TerraEngine::Animation {
 				AnimationLifecycleBoundary::Component,
 				AnimationLifecycleBoundary::Scene,
 				AnimationLifecycleBoundary::Asset,
+				// Script hot reload can replace program/binding identities consumed by
+				// GPU work just as it can replace CPU evaluation state. Retaining a
+				// batch across that boundary would allow stale compact work to publish.
+				AnimationLifecycleBoundary::ScriptDomain,
 				AnimationLifecycleBoundary::PlayMode,
 				AnimationLifecycleBoundary::Renderer,
 				AnimationLifecycleBoundary::Device,

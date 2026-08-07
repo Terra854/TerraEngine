@@ -61,13 +61,20 @@ namespace TerraEngine::Renderer {
 	{
 		AnimationBackendWorkPlan plan;
 		plan.frameId = snapshot.frameId;
-		// A crowd normally contributes one GPU range per animator. Reserve both
-		// containers once and index stable ids directly; the former linear duplicate
-		// search became quadratic when thousands of independently animated meshes
-		// were present in one frame.
+		// A crowd normally contributes one GPU range per animator. Stable identities
+		// encode a dense slot, so use that lane directly and retain a hash fallback
+		// for sparse or externally authored identities.
 		plan.ranges.reserve(snapshot.renderables.size());
-		std::unordered_map<std::uint64_t, std::size_t> rangeIndexByStableId;
-		rangeIndexByStableId.reserve(snapshot.renderables.size());
+		struct DenseRangeIndex
+		{
+			std::uint64_t stableInstanceId = 0u;
+			std::size_t rangeIndex = 0u;
+		};
+		std::vector<DenseRangeIndex> rangeIndexByAnimatorSlot(
+			snapshot.renderables.size() + 1u);
+		std::unordered_map<std::uint64_t, std::size_t> sparseRangeIndices;
+		sparseRangeIndices.reserve(std::min<std::size_t>(
+			snapshot.renderables.size(), 64u));
 		const auto reject = [&plan](std::string reason)
 		{
 			plan.valid = false;
@@ -95,12 +102,44 @@ namespace TerraEngine::Renderer {
 				continue;
 			}
 
-			const auto [rangeIndex, inserted] = rangeIndexByStableId.emplace(
-				animation.stableInstanceId, plan.ranges.size());
+			const std::uint64_t animatorSlot = animation.stableInstanceId >> 32u;
+			std::size_t existingRangeIndex = 0u;
+			bool inserted = false;
+			if(animatorSlot < rangeIndexByAnimatorSlot.size())
+			{
+				DenseRangeIndex& dense = rangeIndexByAnimatorSlot[
+					static_cast<std::size_t>(animatorSlot)];
+				if(dense.stableInstanceId == 0u)
+				{
+					dense.stableInstanceId = animation.stableInstanceId;
+					dense.rangeIndex = plan.ranges.size();
+					existingRangeIndex = dense.rangeIndex;
+					inserted = true;
+				}
+				else if(dense.stableInstanceId == animation.stableInstanceId)
+				{
+					existingRangeIndex = dense.rangeIndex;
+				}
+				else
+				{
+					const auto [sparse, sparseInserted] =
+						sparseRangeIndices.emplace(animation.stableInstanceId,
+							plan.ranges.size());
+					existingRangeIndex = sparse->second;
+					inserted = sparseInserted;
+				}
+			}
+			else
+			{
+				const auto [sparse, sparseInserted] = sparseRangeIndices.emplace(
+					animation.stableInstanceId, plan.ranges.size());
+				existingRangeIndex = sparse->second;
+				inserted = sparseInserted;
+			}
 			if (!inserted)
 			{
 				const AnimationBackendWorkRange& duplicate =
-					plan.ranges[rangeIndex->second];
+					plan.ranges[existingRangeIndex];
 				// Multiple meshes may reference one animator. They consume one palette
 				// generation and must not submit its compute work once per mesh/view.
 				if (duplicate.animationPlanGeneration != animation.animationPlanGeneration
@@ -125,11 +164,15 @@ namespace TerraEngine::Renderer {
 				animation.gpuStageMask});
 			++plan.gpuAnimatorCount;
 		}
-		std::sort(plan.ranges.begin(), plan.ranges.end(),
-			[](const AnimationBackendWorkRange& left, const AnimationBackendWorkRange& right)
-			{
-				return left.stableInstanceId < right.stableInstanceId;
-			});
+		const auto rangeBefore = [](const AnimationBackendWorkRange& left,
+			const AnimationBackendWorkRange& right)
+		{
+			return left.stableInstanceId < right.stableInstanceId;
+		};
+		if(!std::is_sorted(plan.ranges.begin(), plan.ranges.end(), rangeBefore))
+		{
+			std::sort(plan.ranges.begin(), plan.ranges.end(), rangeBefore);
+		}
 		if(plan.ranges.empty()) return plan;
 		if(!immutablePlan || immutablePlan->generation == 0U) {
 			reject("GPU animation ranges require their complete immutable presentation plan.");
@@ -161,26 +204,32 @@ namespace TerraEngine::Renderer {
 	}
 
 	DeformationBackendWorkPlan BuildDeformationBackendWorkPlan(
-		const RenderFrameSnapshot& snapshot)
+		const RenderFrameSnapshot& snapshot,
+		std::shared_ptr<const GpuDeformationPlan> immutablePlan)
 	{
 		DeformationBackendWorkPlan result;
 		result.frameId = snapshot.frameId;
-		if(snapshot.animatedGeometryPageDemands.empty())
+		if(!immutablePlan && snapshot.animatedGeometryPageDemands.empty())
 		{
 			return result;
 		}
-
-		const std::uint64_t rendererGeneration =
-			snapshot.animatedGeometryPageDemands.front().key.deformation.rendererGeneration;
-		auto plan = std::make_shared<GpuDeformationPlan>(BuildGpuDeformationPlan(
-			snapshot.frameId,
-			rendererGeneration,
-			snapshot.animatedGeometryPageDemands));
-		result.valid = plan->IsComplete();
-		result.rejectionReason = plan->rejectionReason;
-		result.uniquePageCount = plan->work.size();
-		result.reusedDemandCount = plan->reusedDemandCount;
-		result.immutablePlan = std::move(plan);
+		if(!immutablePlan)
+		{
+			const std::uint64_t rendererGeneration =
+				snapshot.animatedGeometryPageDemands.front().key.deformation.rendererGeneration;
+			immutablePlan = std::make_shared<GpuDeformationPlan>(BuildGpuDeformationPlan(
+				snapshot.frameId,
+				rendererGeneration,
+				snapshot.animatedGeometryPageDemands));
+		}
+		result.valid = immutablePlan->frameId == snapshot.frameId
+			&& immutablePlan->IsComplete();
+		result.rejectionReason = result.valid
+			? immutablePlan->rejectionReason
+			: "The immutable deformation plan is incomplete or belongs to another frame.";
+		result.uniquePageCount = immutablePlan->work.size();
+		result.reusedDemandCount = immutablePlan->reusedDemandCount;
+		result.immutablePlan = std::move(immutablePlan);
 		return result;
 	}
 

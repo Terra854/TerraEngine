@@ -127,15 +127,17 @@ namespace TerraEngine::Tests {
 
 		AnimationClipAsset MakeStreamedBindingClip(
 			TestContext& context,
-			const SkeletonAsset& skeleton)
+			const SkeletonAsset& skeleton,
+			AnimationFixedTick durationTicks = 60,
+			AnimationFixedTick segmentDurationTicks = 60)
 		{
 			AnimationClipCompileInput input;
 			input.assetId = MakeBindingAssetGuid(181U);
 			input.skeletonAssetId = skeleton.assetId;
 			input.compatibilityFingerprint = skeleton.compatibilityFingerprint;
-			input.durationTicks = 60;
+			input.durationTicks = durationTicks;
 			input.sampleRate = 60U;
-			input.segmentDurationTicks = 60;
+			input.segmentDurationTicks = segmentDurationTicks;
 
 			AnimationSourceTrack translation;
 			translation.stableTargetId = skeleton.joints.front().stableId;
@@ -151,9 +153,11 @@ namespace TerraEngine::Tests {
 
 			AnimationClipAsset clip;
 			AnimationClipCompileReport report;
+			const std::size_t expectedSegmentCount = static_cast<std::size_t>(
+				(durationTicks + segmentDurationTicks - 1U) / segmentDurationTicks);
 			context.Expect(CompileAnimationClip(input, {}, clip, report) == AnimationStatus::Ok
-				&& clip.segments.size() == 1U && !clip.streamData.empty(),
-				"The range-streaming fixture must compile one non-empty production segment.");
+				&& clip.segments.size() == expectedSegmentCount && !clip.streamData.empty(),
+				"The range-streaming fixture must compile every requested non-empty production segment.");
 			return clip;
 		}
 
@@ -644,6 +648,158 @@ namespace TerraEngine::Tests {
 				std::filesystem::remove(clipPath, cleanupError);
 				cleanupError.clear();
 				std::filesystem::remove(skeletonPath, cleanupError);
+				animation.Initialize();
+				if(initializedPool) ThreadPool::instance().shutdown();
+			});
+
+		registry.Add("Animation.ComponentBinding.MixedStreamWavePromotesOnlyDirtyDirectCohort",
+			[](TestContext& context) {
+				const bool initializedPool = ThreadPool::instance().getThreadCount() == 0U;
+				if(initializedPool) ThreadPool::instance().initialize(2U);
+				ObjectManager& objects = ObjectManager::instance();
+				ResourceManager& resources = ResourceManager::Instance();
+				AnimationSystem& animation = AnimationSystem::Instance();
+				objects.clear();
+				animation.Initialize();
+
+				const SkeletonAsset skeleton = MakeBindingSkeleton();
+				// Sixty-five blocks deliberately cross the coordinator's 64-read wave
+				// bound. The final block is unknown to the first reverse index and proves
+				// generation-level ownership routes later discoveries without a full scan.
+				const AnimationClipAsset clip = MakeStreamedBindingClip(
+					context, skeleton, 65U, 1U);
+				std::vector<std::uint8_t> skeletonBytes;
+				std::vector<std::uint8_t> clipBytes;
+				context.Expect(SerializeSkeletonAsset(skeleton, skeletonBytes) == AnimationStatus::Ok
+						&& SerializeAnimationClipAsset(clip, clipBytes) == AnimationStatus::Ok,
+					"The shared-cohort fixture must serialize one production streamed clip.");
+				const std::filesystem::path skeletonPath =
+					WriteBindingAsset("shared-cohort-binding.teskel", skeletonBytes);
+				const std::filesystem::path clipPath =
+					WriteBindingAsset("shared-cohort-binding.teanim", clipBytes);
+				const UUID skeletonId = resources.LoadSkeleton(
+					skeletonPath, skeleton.compatibilityFingerprint);
+				const UUID clipId = resources.LoadAnimationClip(
+					clipPath, skeleton.compatibilityFingerprint);
+
+				constexpr std::size_t directAnimatorCount = 64U;
+				constexpr std::size_t totalAnimatorCount = directAnimatorCount + 1U;
+				std::vector<UUID> objectIds;
+				objectIds.reserve(totalAnimatorCount);
+				std::vector<AnimatorInstanceHandle> initialHandles;
+				initialHandles.reserve(totalAnimatorCount);
+				for(std::size_t animatorIndex = 0U; animatorIndex < totalAnimatorCount;
+					++animatorIndex) {
+					const Object object = objects.createObject("Shared Cohort Animator");
+					AnimatorComponent* component = objects.AddComponent<AnimatorComponent>(object);
+					if(component != nullptr) {
+						component->skeletonOverrideAssetId = skeletonId;
+						component->defaultClipAssetId = clipId;
+						// Non-authoritative direct clips are the scalable visual-crowd class.
+						// They may share one validated residency publication safely.
+						component->rootMotionPolicy = AnimatorRootMotionPolicy::Ignore;
+						// Dispatch is the normal authoring default. An immutable clip with no
+						// events has no authoritative event state, so the direct crowd must not
+						// leak into the generic compatibility-owner index. Retain deliberately
+						// keeps one advanced owner on that path for mixed-wave coverage.
+						component->eventPolicy = animatorIndex < directAnimatorCount
+							? AnimatorEventPolicy::Dispatch
+							: AnimatorEventPolicy::Retain;
+						objects.notifyObjectStructureChanged(object);
+					}
+					objectIds.push_back(objects.getUUID(object));
+				}
+
+				AnimatorComponentBindingCoordinator coordinator;
+				AnimatorComponentSynchronizationSummary summary =
+					coordinator.Synchronize(animation, objects, resources);
+				for(const UUID& objectId : objectIds) {
+					initialHandles.push_back(animation.ResolveAnimatorForObject(objectId));
+				}
+				const bool boundWholeCohort = summary.createdCount == totalAnimatorCount
+					&& initialHandles.size() == totalAnimatorCount;
+
+				std::size_t publicationAttempts = 0U;
+				for(; publicationAttempts < 128U
+					&& summary.refreshedStreamingCohortCount == 0U; ++publicationAttempts) {
+					std::this_thread::sleep_for(std::chrono::milliseconds(1));
+					summary = coordinator.Synchronize(animation, objects, resources);
+				}
+				bool handlesPreserved = objectIds.size() == initialHandles.size();
+				for(std::size_t index = 0U;
+					handlesPreserved && index < objectIds.size(); ++index) {
+					handlesPreserved = animation.ResolveAnimatorForObject(objectIds[index])
+						== initialHandles[index];
+				}
+				context.Expect(boundWholeCohort,
+					"The initial authored pass must bind every member of the direct-clip cohort.");
+				context.Expect(publicationAttempts < 128U,
+					"The direct-clip range worker must settle within the bounded test window.");
+				context.ExpectEqual(std::size_t{1U}, summary.refreshedStreamingCohortCount,
+					"One settled direct-clip payload must refresh exactly one shared cohort.");
+				context.ExpectEqual(directAnimatorCount, summary.refreshedStreamingAnimatorCount,
+					"The shared cohort publication must reach every member.");
+				context.ExpectEqual(std::size_t{1U}, summary.reconciledBindingCount,
+					"A mixed publication must reconcile only the reverse-indexed generic owner after refreshing the direct cohort.");
+				context.ExpectEqual(std::size_t{1U}, summary.reboundCount,
+					"Only the generic retained-event owner may use compatibility refresh.");
+				context.Expect(handlesPreserved,
+					"A residency-only cohort publication must preserve every runtime handle.");
+
+				std::size_t maximumReconciledInLaterWave = 0U;
+				std::size_t settledAttempts = 0U;
+				for(; settledAttempts < 256U
+					&& (summary.requestedStreamPayloadCount != 0U
+						|| summary.residentStreamPayloadCount < clip.segments.size());
+					++settledAttempts) {
+					std::this_thread::sleep_for(std::chrono::milliseconds(1));
+					summary = coordinator.Synchronize(animation, objects, resources);
+					maximumReconciledInLaterWave = std::max(
+						maximumReconciledInLaterWave,
+						summary.reconciledBindingCount);
+				}
+				context.Expect(settledAttempts < 256U
+					&& summary.residentStreamPayloadCount == clip.segments.size(),
+					"Both bounded read waves must settle and publish all sixty-five clip blocks.");
+				context.Expect(maximumReconciledInLaterWave <= 1U,
+					"A block discovered after the first wave must reconcile only the generation-indexed generic owner, never the full cohort.");
+
+				SkeletonAsset unrelatedSkeleton = skeleton;
+				unrelatedSkeleton.assetId = MakeBindingAssetGuid(205U);
+				std::vector<std::uint8_t> unrelatedSkeletonBytes;
+				context.Expect(SerializeSkeletonAsset(
+					unrelatedSkeleton, unrelatedSkeletonBytes) == AnimationStatus::Ok,
+					"The unrelated resource-revision fixture must serialize a valid skeleton.");
+				const std::filesystem::path unrelatedSkeletonPath =
+					WriteBindingAsset("unrelated-cohort-binding.teskel",
+						unrelatedSkeletonBytes);
+				const UUID unrelatedSkeletonId = resources.LoadSkeleton(
+					unrelatedSkeletonPath, unrelatedSkeleton.compatibilityFingerprint);
+				summary = coordinator.Synchronize(animation, objects, resources);
+				context.Expect(unrelatedSkeletonId == unrelatedSkeleton.assetId.value
+					&& summary.reconciledBindingCount <= 1U
+					&& summary.createdCount == 0U && summary.invalidatedCount == 0U,
+					"An unrelated global animation-resource revision must inspect only generic compatibility owners, not the direct crowd.");
+				context.Expect(resources.ReloadAnimationClip(clipId),
+					"The streamed clip must support an exact same-GUID hot reload.");
+				summary = coordinator.Synchronize(animation, objects, resources);
+				context.Expect(summary.refreshedStreamingCohortCount == 1U
+					&& summary.refreshedStreamingAnimatorCount == directAnimatorCount
+					&& summary.reconciledBindingCount <= 1U,
+					"A new generation discovered after hot reload must refresh its durable direct cohort and only the generic compatibility owner.");
+
+				coordinator.InvalidateAll(animation);
+				animation.Shutdown();
+				objects.clear();
+				resources.DeleteResource(clipId, AssetType::AnimationClip);
+				resources.DeleteResource(skeletonId, AssetType::Skeleton);
+				resources.DeleteResource(unrelatedSkeletonId, AssetType::Skeleton);
+				std::error_code cleanupError;
+				std::filesystem::remove(clipPath, cleanupError);
+				cleanupError.clear();
+				std::filesystem::remove(skeletonPath, cleanupError);
+				cleanupError.clear();
+				std::filesystem::remove(unrelatedSkeletonPath, cleanupError);
 				animation.Initialize();
 				if(initializedPool) ThreadPool::instance().shutdown();
 			});

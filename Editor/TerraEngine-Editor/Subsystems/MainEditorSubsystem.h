@@ -60,6 +60,13 @@ public:
 		// GPU frame from racing a later per-object automation mutation.
 		std::optional<TerraEngine::Animation::AnimationExecutionPolicy>
 			requestedAnimationMode;
+		// Optional direct clips are assigned round-robin before publication. This
+		// supports ordinary crowd authoring and reproducible mixed-playback tests
+		// without exposing partially configured AnimatorComponents to the runtime.
+		std::vector<TerraEngine::UUID> defaultClipAssetIds;
+		// A non-zero step offsets each instance on the fixed animation timeline.
+		// Animation binding performs the final duration-aware clamp or loop.
+		std::uint32_t defaultClipStartFrameStep = 0u;
 	};
 
 	Result Create(entt::entity sourceEntity, const std::filesystem::path& projectRelativePath, const std::filesystem::path& absolutePath);

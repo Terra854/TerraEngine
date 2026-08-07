@@ -19,8 +19,18 @@ namespace TerraEngine::EditorTests {
 			: std::runtime_error(message) {}
 	};
 
+	class TestSkip final : public std::runtime_error {
+	public:
+		explicit TestSkip(const std::string& message)
+			: std::runtime_error(message) {}
+	};
+
 	class TestContext {
 	public:
+		[[noreturn]] void Skip(std::string_view message) const {
+			throw TestSkip(std::string(message));
+		}
+
 		void Expect(bool condition, std::string_view message) const {
 			if(!condition) {
 				throw TestFailure(std::string(message));
@@ -48,6 +58,7 @@ namespace TerraEngine::EditorTests {
 		int RunAll(std::ostream& output) const {
 			TestContext context;
 			int failedCount = 0;
+			int skippedCount = 0;
 			std::size_t selectedCount = 0;
 			const char* filterValue = std::getenv("TERRAENGINE_TEST_FILTER");
 			const std::string filter = filterValue != nullptr ? filterValue : "";
@@ -84,6 +95,9 @@ namespace TerraEngine::EditorTests {
 				try {
 					test.body(context);
 					output << "[PASS] " << test.name << '\n';
+				} catch(const TestSkip& skip) {
+					++skippedCount;
+					output << "[SKIP] " << test.name << ": " << skip.what() << '\n';
 				} catch(const TestFailure& failure) {
 					++failedCount;
 					output << "[FAIL] " << test.name << ": " << failure.what() << '\n';
@@ -99,7 +113,7 @@ namespace TerraEngine::EditorTests {
 			// Keep focused evidence honest: registry size describes discovery,
 			// while selectedCount describes work that actually ran.
 			output << selectedCount << " selected tests (" << tests_.size()
-				<< " registered), " << failedCount << " failures\n";
+				<< " registered), " << failedCount << " failures, " << skippedCount << " skipped\n";
 			return failedCount == 0 ? 0 : 1;
 		}
 

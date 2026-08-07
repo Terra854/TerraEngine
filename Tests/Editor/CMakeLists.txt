@@ -39,6 +39,7 @@ add_executable(TerraEngine-EditorTests
 	Export/VirtualGeometryScalingExportTests.cpp
 	Profiling/ProfilerCaptureStoreTests.cpp
 	Profiling/ProfilerWindowTests.cpp
+	Profiling/ProfilerIdleOverheadTests.cpp
 	Project/LinuxScriptCompilationTests.cpp
 	Project/LinuxScriptEditorLaunchTests.cpp
 	Project/LinuxScriptWorkspaceTests.cpp
@@ -53,6 +54,8 @@ add_executable(TerraEngine-EditorTests
 	Core/EditorPostFrameBoundaryTests.cpp
 	Core/MainEditorToolbarTests.cpp
 	VirtualGeometry/VirtualGeometryProductionScaffoldingTests.cpp
+	VirtualGeometry/VirtualGeometryDiagnosticsTests.cpp
+	VirtualGeometry/DenseAnimatedVirtualGeometryFixtureTests.cpp
 	Automation/EditorAutomationServiceTests.cpp
 	Automation/EditorAutomationRegistryTests.cpp
 	Automation/EditorAutomationJobTests.cpp
@@ -85,6 +88,7 @@ add_executable(TerraEngine-EditorTests
 	Automation/EditorMcpPhysicsContractTests.cpp
 	Automation/EditorMcpPhysicsSafetyTests.cpp
 	Automation/EditorMcpTransportTests.cpp
+	Automation/CurrentProjectCompatibilityTests.cpp
 	Automation/EditorMcpAssetImportTests.cpp
 	Automation/EditorMcpAssetImportSafetyTests.cpp
 	Automation/ProfilerDiagnosticsAutomationTests.cpp
@@ -172,6 +176,7 @@ add_executable(TerraEngine-EditorTests
 	Scene/SchedulerPlayModeGraphTests.cpp
 	Scene/SceneRuntimeParityTests.cpp
 	Scene/StreamingEditorWorkflowTests.cpp
+	Hierarchy/HierarchyVirtualizationTests.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Subsystems/PrefabAuthoringSubsystem.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Subsystems/ScriptCompilationSubsystem.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Subsystems/UndoRedoSystem.cpp
@@ -418,6 +423,30 @@ add_test(NAME Editor.VirtualGeometryDiagnostics COMMAND $<TARGET_FILE:TerraEngin
 set_tests_properties(Editor.VirtualGeometryDiagnostics PROPERTIES
 	LABELS "Editor;VirtualGeometry;Diagnostics"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Diagnostics"
+)
+
+add_test(NAME Editor.ProfilerIdleOverhead COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.ProfilerIdleOverhead PROPERTIES
+	LABELS "Editor;Profiler;Performance"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Editor.ProfilerIdleOverhead"
+)
+
+add_test(NAME Editor.DenseAnimatedVirtualGeometryFixture COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.DenseAnimatedVirtualGeometryFixture PROPERTIES
+	LABELS "Editor;VirtualGeometry;Animation;Fixture"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.DenseAnimatedFixture"
+)
+
+add_test(NAME Editor.CurrentProjectCompatibility COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.CurrentProjectCompatibility PROPERTIES
+	LABELS "Editor;Automation;Compatibility"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Editor.Automation.CurrentProjectCompatibility"
+)
+
+add_test(NAME Editor.HierarchyVirtualization COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.HierarchyVirtualization PROPERTIES
+	LABELS "Editor;Hierarchy;Performance"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Editor.Hierarchy.Virtualization"
 )
 
 add_test(NAME Editor.RendererRecovery COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)

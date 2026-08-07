@@ -342,6 +342,40 @@ namespace TerraEngine::Tests
 			std::filesystem::remove(path, error);
 		});
 
+		registry.Add("Animation.Streaming.CompletedWavePublishesOneAtomicResidencySnapshot", [](TestContext& context) {
+			Animation::AnimationStreamingCoordinator coordinator;
+			Animation::AnimationStreamRequest first = StreamRequest(
+				AnimationId(79U), Animation::AnimationStreamPayloadKind::ClipSegment,
+				0U, 3U, 1U);
+			Animation::AnimationStreamRequest second = StreamRequest(
+				AnimationId(80U), Animation::AnimationStreamPayloadKind::ClipSegment,
+				1U, 2U, 1U);
+			context.Expect(coordinator.Request(first).accepted
+				&& coordinator.Request(second).accepted,
+				"Both independent clip blocks must enter the requested state before publication.");
+
+			Animation::AnimationStreamReadResult firstResult;
+			firstResult.request = first;
+			firstResult.status = Animation::AnimationStreamReadStatus::Ok;
+			firstResult.bytes = {1U, 2U, 3U};
+			Animation::AnimationStreamReadResult secondResult;
+			secondResult.request = second;
+			secondResult.status = Animation::AnimationStreamReadStatus::Ok;
+			secondResult.bytes = {4U, 5U};
+			const std::array<const Animation::AnimationStreamReadResult*, 2U> completed{
+				&firstResult, &secondResult};
+			const std::shared_ptr<const Animation::AnimationStreamingResidencySnapshot> before =
+				coordinator.LoadResidencySnapshot();
+			context.Expect(coordinator.PublishReadResults(completed) == completed.size(),
+				"A completed worker wave must publish every valid requested block.");
+
+			const std::shared_ptr<const Animation::AnimationStreamingResidencySnapshot> after =
+				coordinator.LoadResidencySnapshot();
+			context.Expect(after != before && after->payloads.size() == 2U
+				&& after->Find(first) != nullptr && after->Find(second) != nullptr,
+				"The protected batch must expose the complete wave through one replacement snapshot.");
+		});
+
 		registry.Add("Animation.Streaming.EvictedGenerationRequeuesExactImmutableRange", [](TestContext& context) {
 			const std::filesystem::path path = std::filesystem::temp_directory_path()
 				/ ("terra-stream-reactivate-" + std::to_string(

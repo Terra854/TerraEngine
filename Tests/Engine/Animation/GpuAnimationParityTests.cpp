@@ -474,5 +474,55 @@ namespace TerraEngine::Tests {
 				&& HasGpuAnimationDiagnostic(flags, GpuAnimationDiagnosticFlag::BindPoseFallback),
 				"A non-finite shader-contract pose must set diagnostics and publish only the safe bind pose.");
 		});
+
+		registry.Add("Animation.GpuPlan.ExactVisualStatesShareOneEvaluationAcrossOwners", [](TestContext& context) {
+			std::vector<GpuAnimationWorkRequest> requests(4000U, MakeParityPlanRequest());
+			for(std::uint32_t index = 0U; index < requests.size(); ++index) {
+				// Owner identity is intentionally distinct while every visual input stays exact.
+				requests[index].stableInstanceId = 1000U + index;
+				requests[index].stableSubmissionOrdinal = index;
+				requests[index].generations.instanceSlot = index;
+				requests[index].generations.instanceGeneration = index + 1U;
+				requests[index].generations.componentGeneration = index + 1U;
+				requests[index].generations.workGeneration = index + 1U;
+				requests[index].diagnosticIndex = 0x80000000U;
+			}
+			GpuAnimationArena scratch{GpuAnimationArenaKind::Scratch, 16U * 1024U * 1024U};
+			GpuAnimationArena palette{GpuAnimationArenaKind::Palette, 16U * 1024U * 1024U};
+			GpuAnimationPlan plan;
+			context.Expect(BuildGpuAnimationPlan(requests, 31U, scratch, palette, plan)
+				== GpuAnimationPlanStatus::Ok
+				&& plan.workPackets.size() == requests.size()
+				&& plan.evaluationSourcePacketIndices.size() == requests.size(),
+				"Every owner must retain an identity packet while sharing has a complete source mapping.");
+			const std::size_t sourceCount = static_cast<std::size_t>(std::count_if(
+				plan.evaluationSourcePacketIndices.begin(), plan.evaluationSourcePacketIndices.end(),
+				[index = std::uint32_t{0U}](std::uint32_t source) mutable { return source == index++; }));
+			context.Expect(sourceCount == 1U && plan.dispatchRecords.size() == 6U
+				&& plan.workPackets.front().paletteOffsetBytes
+					== plan.workPackets.back().paletteOffsetBytes,
+				"Four thousand exact visual owners must evaluate one shared palette source, not duplicate dispatches.");
+			requests.back().sampleTick++;
+			GpuAnimationPlan divergent;
+			GpuAnimationArena divergentScratch{GpuAnimationArenaKind::Scratch, 16U * 1024U * 1024U};
+			GpuAnimationArena divergentPalette{GpuAnimationArenaKind::Palette, 16U * 1024U * 1024U};
+			context.Expect(BuildGpuAnimationPlan(requests, 32U, divergentScratch, divergentPalette, divergent)
+				== GpuAnimationPlanStatus::Ok
+				&& divergent.evaluationSourcePacketIndices.back()
+					!= divergent.evaluationSourcePacketIndices.front()
+				&& divergent.workPackets.back().paletteOffsetBytes
+					!= divergent.workPackets.front().paletteOffsetBytes,
+				"A differing sample tick must split visual evaluation and palette output deterministically.");
+			requests.back().sampleTick = requests.front().sampleTick;
+			requests.back().evaluationParameterFingerprint = 0xC0FFEEU;
+			GpuAnimationPlan parameterDivergent;
+			GpuAnimationArena parameterScratch{GpuAnimationArenaKind::Scratch, 16U * 1024U * 1024U};
+			GpuAnimationArena parameterPalette{GpuAnimationArenaKind::Palette, 16U * 1024U * 1024U};
+			context.Expect(BuildGpuAnimationPlan(requests, 33U, parameterScratch, parameterPalette,
+				parameterDivergent) == GpuAnimationPlanStatus::Ok
+				&& parameterDivergent.evaluationSourcePacketIndices.back()
+					!= parameterDivergent.evaluationSourcePacketIndices.front(),
+				"A parameter fingerprint change must split shared evaluation even when generations collide.");
+		});
 	}
 }

@@ -115,7 +115,7 @@ namespace TerraEngine::Tests {
 				"Byte-identical local-space clone content should dispatch once per page.");
 			if(plan.work.empty()) return;
 			context.ExpectEqual<std::size_t>(2u,
-				plan.work.front().consumerStableInstanceIds.size(),
+				plan.work.front().ConsumerCount(),
 				"The shared work record must retain both graphics-owner aliases.");
 			context.ExpectEqual<std::uint64_t>(5u,
 				plan.work.front().requestedViewMask,

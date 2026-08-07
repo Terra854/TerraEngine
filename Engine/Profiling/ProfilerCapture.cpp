@@ -732,6 +732,104 @@ bool ValidateProfilerAnimationFrameTelemetry(const ProfilerAnimationFrameTelemet
 	return true;
 }
 
+bool ValidateProfilerAnimationOptimizationEvidence(
+	const ProfilerAnimationOptimizationEvidence& evidence) noexcept
+{
+	const bool fallbackReasonsEmpty = std::all_of(
+		evidence.fallbackReasonCounts.begin(), evidence.fallbackReasonCounts.end(),
+		[](std::uint64_t value) { return value == 0U; });
+	const bool timingsEmpty = std::all_of(
+		evidence.timingNanoseconds.begin(), evidence.timingNanoseconds.end(),
+		[](std::uint64_t value) { return value == 0U; });
+	if (!evidence.valid)
+	{
+		// Invalid means unavailable, never an older frame's counters with a false
+		// label. This rule lets the editor distinguish unavailable from measured zero.
+		return evidence.frameIndex == 0U && evidence.candidateGeneration == 0U
+			&& evidence.acceptedGeneration == 0U && evidence.rejectedGeneration == 0U
+			&& evidence.topologyGeneration == 0U && evidence.presentationGeneration == 0U
+			&& evidence.rendererGeneration == 0U && evidence.sceneGeneration == 0U
+			&& evidence.activeAnimators == 0U && evidence.suspendedAnimators == 0U
+			&& evidence.compactEligibleAnimators == 0U && evidence.compactProcessedAnimators == 0U
+			&& evidence.completeCapturedAnimators == 0U && evidence.completeProcessedAnimators == 0U
+			&& evidence.compactToCompleteTransitions == 0U && evidence.completeToCompactTransitions == 0U
+			&& evidence.retainedTopologyHits == 0U && evidence.retainedTopologyMisses == 0U
+			&& evidence.compactPlanGroups == 0U && evidence.compactDispatches == 0U
+			&& evidence.rejectedCandidateCount == 0U && fallbackReasonsEmpty && timingsEmpty;
+	}
+
+	// Compact and complete processing are disjoint. Every processed record must
+	// originate in its corresponding accepted range, and dispatched groups cannot
+	// exceed the number of compact animators they describe.
+	const bool compactGenerationsComplete = evidence.compactProcessedAnimators == 0U
+		|| (evidence.topologyGeneration != 0U && evidence.presentationGeneration != 0U
+			&& evidence.rendererGeneration != 0U);
+	return evidence.frameIndex != 0U && evidence.candidateGeneration != 0U
+		&& evidence.acceptedGeneration != 0U && compactGenerationsComplete
+		&& evidence.sceneGeneration != 0U && evidence.activeAnimators != 0U
+		&& evidence.suspendedAnimators <= evidence.activeAnimators
+		&& evidence.compactEligibleAnimators <= evidence.activeAnimators
+		&& evidence.compactProcessedAnimators <= evidence.compactEligibleAnimators
+		&& evidence.completeProcessedAnimators <= evidence.completeCapturedAnimators
+		&& evidence.completeCapturedAnimators <= evidence.activeAnimators
+		&& evidence.compactProcessedAnimators
+			<= evidence.activeAnimators - evidence.completeProcessedAnimators
+		&& evidence.compactPlanGroups <= evidence.compactProcessedAnimators
+		&& evidence.compactDispatches <= evidence.compactProcessedAnimators;
+}
+
+bool ValidateProfilerRenderOptimizationEvidence(const ProfilerRenderOptimizationEvidence& evidence) noexcept
+{
+	for (const ProfilerRenderOptimizationViewSummary& view : evidence.views)
+	{
+		if (!view.valid)
+		{
+			// An unavailable view carries no stale optimization result. Its view type
+			// may still identify which slot was unavailable to the editor.
+			if (view.frameGeneration != 0U || view.topologyGeneration != 0U
+				|| view.viewGeneration != 0U || view.rendererGeneration != 0U
+				|| view.topologyBuildNanoseconds != 0U
+				|| view.dynamicMaterializationNanoseconds != 0U
+				|| view.instanceStreamUploadNanoseconds != 0U
+				|| view.groupedCommandRecordingNanoseconds != 0U
+				|| view.visibleInstanceCount != 0U || view.groupedInstanceCount != 0U
+				|| view.fallbackInstanceCount != 0U || view.groupedSubmissionCount != 0U
+				|| view.fallbackSubmissionCount != 0U || view.avoidedSubmissionCount != 0U
+				|| view.instanceStreamBytes != 0U || view.instanceStreamCapacityBytes != 0U
+				|| view.topologyReuseHits != 0U || view.topologyInvalidations != 0U
+				|| view.viewEvidenceReuseHits != 0U || view.viewEvidenceInvalidations != 0U
+				|| view.rejectedIncompleteKeyCount != 0U || view.rejectedUnsupportedVariantCount != 0U
+				|| view.rejectedOutOfRangeCount != 0U || view.rejectedStaleGenerationCount != 0U
+				|| view.fallbackAllocationFailureCount != 0U || view.fallbackRecoveryCount != 0U)
+			{
+				return false;
+			}
+			continue;
+		}
+
+		// Conservation and capacity checks make the typed evidence useful for
+		// diagnosis without trusting independently incremented presentation rows.
+		if (view.frameGeneration == 0U || view.topologyGeneration == 0U
+			|| view.viewGeneration == 0U || view.rendererGeneration == 0U
+			|| view.groupedInstanceCount > view.visibleInstanceCount
+			|| view.fallbackInstanceCount != view.visibleInstanceCount - view.groupedInstanceCount
+			|| view.groupedSubmissionCount > view.groupedInstanceCount
+			|| view.fallbackSubmissionCount > view.fallbackInstanceCount
+			|| view.avoidedSubmissionCount > view.visibleInstanceCount
+			|| view.instanceStreamBytes > view.instanceStreamCapacityBytes)
+		{
+			return false;
+		}
+	}
+
+	if (evidence.views[0].valid && evidence.views[1].valid
+		&& evidence.views[0].viewType == evidence.views[1].viewType)
+	{
+		return false;
+	}
+	return true;
+}
+
 // MakeTimestampForFileName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string MakeTimestampForFileName()
 {
@@ -928,14 +1026,23 @@ bool SaveCaptureDocument(const ProfilerCaptureDocument& document, const std::fil
 	{
 		for (const ProfilerFrameRecord& frame : document.frames)
 		{
-			if (!frame.animationTelemetry)
+			if (frame.animationOptimization.has_value()
+				&& !ValidateProfilerAnimationOptimizationEvidence(*frame.animationOptimization))
 			{
-				continue;
+				outError = "Profiler capture contains invalid animation optimization evidence.";
+				return false;
 			}
-			if (!ValidateProfilerAnimationFrameTelemetry(*frame.animationTelemetry)
+			if (frame.renderOptimization.has_value()
+				&& !ValidateProfilerRenderOptimizationEvidence(*frame.renderOptimization))
+			{
+				outError = "Profiler capture contains invalid renderer optimization evidence.";
+				return false;
+			}
+			if (frame.animationTelemetry
+				&& (!ValidateProfilerAnimationFrameTelemetry(*frame.animationTelemetry)
 				|| !frame.animationDiagnostics.has_value() || frame.animationDiagnostics->dormant
 				|| frame.animationDiagnostics->schedulerMembershipChecks
-					!= frame.animationTelemetry->summary.schedulerMembershipChecks)
+					!= frame.animationTelemetry->summary.schedulerMembershipChecks))
 			{
 				outError = "Profiler capture contains invalid or conflicting animation telemetry.";
 				return false;
@@ -1705,6 +1812,187 @@ bool UnpackAnimationTelemetryV2(
 	return true;
 }
 
+nlohmann::json PackAnimationOptimizationV2(
+	const ProfilerAnimationOptimizationEvidence& evidence)
+{
+	nlohmann::json result = nlohmann::json::array({
+		evidence.frameIndex, evidence.candidateGeneration, evidence.acceptedGeneration,
+		evidence.rejectedGeneration, evidence.topologyGeneration, evidence.presentationGeneration,
+		evidence.rendererGeneration, evidence.sceneGeneration, evidence.activeAnimators,
+		evidence.suspendedAnimators, evidence.compactEligibleAnimators,
+		evidence.compactProcessedAnimators, evidence.completeCapturedAnimators,
+		evidence.completeProcessedAnimators, evidence.compactToCompleteTransitions,
+		evidence.completeToCompactTransitions, evidence.retainedTopologyHits,
+		evidence.retainedTopologyMisses, evidence.compactPlanGroups,
+		evidence.compactDispatches, evidence.rejectedCandidateCount});
+	for (std::uint64_t count : evidence.fallbackReasonCounts)
+	{
+		result.push_back(count);
+	}
+	for (std::uint64_t timing : evidence.timingNanoseconds)
+	{
+		result.push_back(timing);
+	}
+	result.push_back(evidence.valid);
+	return result;
+}
+
+bool UnpackAnimationOptimizationV2(
+	const nlohmann::json& json,
+	ProfilerAnimationOptimizationEvidence& out,
+	std::string& error)
+{
+	constexpr std::size_t kScalarCount = 21U;
+	constexpr std::size_t kValueCount = kScalarCount
+		+ ProfilerAnimationOptimizationEvidence::kFallbackReasonCount
+		+ ProfilerAnimationOptimizationEvidence::kTimingCount + 1U;
+	if (!json.is_array() || json.size() != kValueCount || !json.back().is_boolean())
+	{
+		error = "Profiler v2 has malformed animation optimization evidence.";
+		return false;
+	}
+	for (std::size_t index = 0U; index + 1U < json.size(); ++index)
+	{
+		if (!json.at(index).is_number_unsigned())
+		{
+			error = "Profiler v2 animation optimization evidence has a non-unsigned value.";
+			return false;
+		}
+	}
+
+	std::size_t index = 0U;
+	auto next = [&json, &index]() { return json.at(index++).get<std::uint64_t>(); };
+	out.frameIndex = next();
+	out.candidateGeneration = next();
+	out.acceptedGeneration = next();
+	out.rejectedGeneration = next();
+	out.topologyGeneration = next();
+	out.presentationGeneration = next();
+	out.rendererGeneration = next();
+	out.sceneGeneration = next();
+	out.activeAnimators = next();
+	out.suspendedAnimators = next();
+	out.compactEligibleAnimators = next();
+	out.compactProcessedAnimators = next();
+	out.completeCapturedAnimators = next();
+	out.completeProcessedAnimators = next();
+	out.compactToCompleteTransitions = next();
+	out.completeToCompactTransitions = next();
+	out.retainedTopologyHits = next();
+	out.retainedTopologyMisses = next();
+	out.compactPlanGroups = next();
+	out.compactDispatches = next();
+	out.rejectedCandidateCount = next();
+	for (std::uint64_t& count : out.fallbackReasonCounts)
+	{
+		count = next();
+	}
+	for (std::uint64_t& timing : out.timingNanoseconds)
+	{
+		timing = next();
+	}
+	out.valid = json.at(index).get<bool>();
+	if (!ValidateProfilerAnimationOptimizationEvidence(out))
+	{
+		error = "Profiler v2 contains inconsistent animation optimization evidence.";
+		return false;
+	}
+	return true;
+}
+
+nlohmann::json PackRenderOptimizationV2(const ProfilerRenderOptimizationEvidence& evidence)
+{
+	nlohmann::json result = nlohmann::json::array();
+	for (const ProfilerRenderOptimizationViewSummary& view : evidence.views)
+	{
+		result.push_back(nlohmann::json::array({
+			view.viewType, view.frameGeneration, view.topologyGeneration, view.viewGeneration,
+			view.rendererGeneration, view.topologyBuildNanoseconds,
+			view.dynamicMaterializationNanoseconds, view.instanceStreamUploadNanoseconds,
+			view.groupedCommandRecordingNanoseconds, view.visibleInstanceCount, view.groupedInstanceCount,
+			view.fallbackInstanceCount, view.groupedSubmissionCount, view.fallbackSubmissionCount,
+			view.avoidedSubmissionCount, view.instanceStreamBytes, view.instanceStreamCapacityBytes,
+			view.topologyReuseHits, view.topologyInvalidations, view.viewEvidenceReuseHits,
+			view.viewEvidenceInvalidations, view.rejectedIncompleteKeyCount,
+			view.rejectedUnsupportedVariantCount, view.rejectedOutOfRangeCount,
+			view.rejectedStaleGenerationCount, view.fallbackAllocationFailureCount,
+			view.fallbackRecoveryCount, view.valid}));
+	}
+	return result;
+}
+
+bool UnpackRenderOptimizationV2(
+	const nlohmann::json& json,
+	ProfilerRenderOptimizationEvidence& out,
+	std::string& error)
+{
+	if (!json.is_array() || json.size() != out.views.size())
+	{
+		error = "Profiler v2 has malformed renderer optimization evidence.";
+		return false;
+	}
+	for (std::size_t viewIndex = 0U; viewIndex < out.views.size(); ++viewIndex)
+	{
+		const nlohmann::json& values = json.at(viewIndex);
+		const bool hasTimings = values.is_array() && values.size() == 28U;
+		if (!values.is_array() || (values.size() != 24U && !hasTimings)
+			|| !values.back().is_boolean())
+		{
+			error = "Profiler v2 has malformed renderer optimization view evidence.";
+			return false;
+		}
+		for (std::size_t index = 0U; index + 1U < values.size(); ++index)
+		{
+			if (!values.at(index).is_number_unsigned())
+			{
+				error = "Profiler v2 renderer optimization evidence has a non-unsigned value.";
+				return false;
+			}
+		}
+
+		ProfilerRenderOptimizationViewSummary& view = out.views[viewIndex];
+		std::size_t index = 0U;
+		view.viewType = values.at(index++).get<std::uint32_t>();
+		view.frameGeneration = values.at(index++).get<std::uint64_t>();
+		view.topologyGeneration = values.at(index++).get<std::uint64_t>();
+		view.viewGeneration = values.at(index++).get<std::uint64_t>();
+		view.rendererGeneration = values.at(index++).get<std::uint64_t>();
+		if (hasTimings)
+		{
+			view.topologyBuildNanoseconds = values.at(index++).get<std::uint64_t>();
+			view.dynamicMaterializationNanoseconds = values.at(index++).get<std::uint64_t>();
+			view.instanceStreamUploadNanoseconds = values.at(index++).get<std::uint64_t>();
+			view.groupedCommandRecordingNanoseconds = values.at(index++).get<std::uint64_t>();
+		}
+		auto nextCounter = [&values, &index]() { return values.at(index++).get<std::uint32_t>(); };
+		view.visibleInstanceCount = nextCounter();
+		view.groupedInstanceCount = nextCounter();
+		view.fallbackInstanceCount = nextCounter();
+		view.groupedSubmissionCount = nextCounter();
+		view.fallbackSubmissionCount = nextCounter();
+		view.avoidedSubmissionCount = nextCounter();
+		view.instanceStreamBytes = nextCounter();
+		view.instanceStreamCapacityBytes = nextCounter();
+		view.topologyReuseHits = nextCounter();
+		view.topologyInvalidations = nextCounter();
+		view.viewEvidenceReuseHits = nextCounter();
+		view.viewEvidenceInvalidations = nextCounter();
+		view.rejectedIncompleteKeyCount = nextCounter();
+		view.rejectedUnsupportedVariantCount = nextCounter();
+		view.rejectedOutOfRangeCount = nextCounter();
+		view.rejectedStaleGenerationCount = nextCounter();
+		view.fallbackAllocationFailureCount = nextCounter();
+		view.fallbackRecoveryCount = nextCounter();
+		view.valid = values.at(index).get<bool>();
+	}
+	if (!ValidateProfilerRenderOptimizationEvidence(out))
+	{
+		error = "Profiler v2 contains inconsistent renderer optimization evidence.";
+		return false;
+	}
+	return true;
+}
+
 nlohmann::json PackFrameV2(const ProfilerFrameRecord& frame, const ProfilerCaptureSettings& settings, V2StringTable& table)
 {
 	nlohmann::json result = {
@@ -1724,6 +2012,18 @@ nlohmann::json PackFrameV2(const ProfilerFrameRecord& frame, const ProfilerCaptu
 		// Aggregate counters and stage availability are critical every-frame proof;
 		// only the bounded per-instance rows follow the optional detail policy.
 		result["y"] = PackAnimationTelemetryV2(*frame.animationTelemetry, includeOptional);
+	}
+	if (frame.animationOptimization.has_value())
+	{
+		// Compact/complete conservation is aggregate evidence and therefore remains
+		// available even when a sampled capture omits per-instance detail rows.
+		result["n"] = PackAnimationOptimizationV2(*frame.animationOptimization);
+	}
+	if (frame.renderOptimization.has_value())
+	{
+		// Aggregate renderer evidence is small and required on every detail level;
+		// optional per-group rows remain outside this fixed capture contract.
+		result["o"] = PackRenderOptimizationV2(*frame.renderOptimization);
 	}
 	// Timing lanes are compact, bounded frame evidence. Persist them at every
 	// detail level so an aggregate or unsampled frame remains useful after the
@@ -1879,6 +2179,24 @@ bool UnpackFrameV2(const nlohmann::json& json, const std::vector<std::string>& s
 			out.animationTelemetry =
 				std::make_shared<const ProfilerAnimationFrameTelemetry>(std::move(telemetry));
 		}
+		if (const auto it = json.find("n"); it != json.end())
+		{
+			ProfilerAnimationOptimizationEvidence evidence;
+			if (!UnpackAnimationOptimizationV2(*it, evidence, error))
+			{
+				return false;
+			}
+			out.animationOptimization = std::move(evidence);
+		}
+		if (const auto it = json.find("o"); it != json.end())
+		{
+			ProfilerRenderOptimizationEvidence evidence;
+			if (!UnpackRenderOptimizationV2(*it, evidence, error))
+			{
+				return false;
+			}
+			out.renderOptimization = std::move(evidence);
+		}
 		if (const auto it = json.find("t"); it != json.end()) for (const auto& value : *it)
 		{
 			if (!value.is_array() || value.size() != 7u) { error = "Profiler v2 has malformed timing data."; return false; }
@@ -1993,63 +2311,71 @@ bool SaveProfilerCaptureV2Impl(const ProfilerCaptureDocument& inputDocument, con
 		std::size_t first = 0u;
 		while (first < document.frames.size())
 		{
-			nlohmann::json frames = nlohmann::json::array();
-			// A compact JSON array contributes two brackets plus one comma between
-			// elements. Measuring each packed frame once preserves the prior exact
-			// soft-bound decision without repeatedly copying and dumping the whole
-			// growing array, which made large captures quadratic to persist.
-			std::size_t serializedFramesBytes = 2u;
+			// Serialize each packed frame exactly once and append it directly to the
+			// chunk payload. Detailed captures can contain thousands of samples per
+			// frame; retaining a JSON tree and dumping it again for the checksum and
+			// outer envelope caused capture persistence to monopolize a worker for
+			// minutes in large editor scenes.
+			std::string framePayload{"["};
+			framePayload.reserve(std::min<std::size_t>(maximumChunkBytes, 8u * 1024u * 1024u));
+			nlohmann::json previousPhysicsCounters;
+			std::size_t frameCount = 0u;
 			std::size_t end = first;
-			while (end < document.frames.size() && frames.size() < framesPerChunk)
+			while (end < document.frames.size() && frameCount < framesPerChunk)
 			{
 				nlohmann::json packedFrame = PackFrameV2(document.frames[end], document.metadata.settings, strings);
-				const std::size_t packedFrameBytes = packedFrame.dump().size();
-				const std::size_t candidateBytes = serializedFramesBytes
-					+ (frames.empty() ? 0u : 1u)
-					+ packedFrameBytes;
+				const auto physics = packedFrame.find("p");
+				nlohmann::json nextPhysicsCounters;
+				if (physics != packedFrame.end())
+				{
+					nextPhysicsCounters = *physics;
+					if (previousPhysicsCounters.is_null())
+					{
+						// Every chunk begins with a complete baseline so tail recovery
+						// and independent chunk decoding remain deterministic.
+						packedFrame["cb"] = *physics;
+					}
+					else
+					{
+						nlohmann::json deltas = nlohmann::json::array();
+						for (std::size_t counter = 0u; counter < physics->size(); ++counter)
+						{
+							if ((*physics)[counter] != previousPhysicsCounters[counter])
+								deltas.push_back(nlohmann::json::array({counter, (*physics)[counter]}));
+						}
+						packedFrame["cd"] = std::move(deltas);
+					}
+					packedFrame.erase("p");
+				}
+
+				const std::string serializedFrame = packedFrame.dump();
+				const std::size_t candidateBytes = framePayload.size()
+					+ (frameCount == 0u ? 0u : 1u)
+					+ serializedFrame.size()
+					+ 1u;
 				// A single critical frame may exceed the soft byte target. It stays
 				// intact rather than silently losing correctness evidence; all normal
 				// chunks are otherwise split before crossing the configured bound.
-				if (!frames.empty() && candidateBytes > maximumChunkBytes)
+				if (frameCount != 0u && candidateBytes > maximumChunkBytes)
 				{
 					break;
 				}
-				frames.push_back(std::move(packedFrame));
-				serializedFramesBytes = candidateBytes;
+				if (frameCount != 0u)
+					framePayload.push_back(',');
+				framePayload.append(serializedFrame);
+				if (!nextPhysicsCounters.is_null())
+					previousPhysicsCounters = std::move(nextPhysicsCounters);
+				++frameCount;
 				++end;
 			}
-			nlohmann::json previousPhysicsCounters;
-			for (nlohmann::json& frame : frames)
-			{
-				const auto physics = frame.find("p");
-				if (physics == frame.end())
-				{
-					continue;
-				}
-				if (previousPhysicsCounters.is_null())
-				{
-					// A chunk begins with a complete counter baseline so it can be
-					// decoded independently after tail recovery.
-					frame["cb"] = *physics;
-				}
-				else
-				{
-					nlohmann::json deltas = nlohmann::json::array();
-					for (std::size_t counter = 0u; counter < physics->size(); ++counter)
-					{
-						if ((*physics)[counter] != previousPhysicsCounters[counter])
-						{
-							deltas.push_back(nlohmann::json::array({counter, (*physics)[counter]}));
-						}
-					}
-					frame["cd"] = std::move(deltas);
-				}
-				previousPhysicsCounters = *physics;
-				frame.erase("p");
-			}
-			const std::string framePayload = frames.dump();
-			nlohmann::json chunk = {{"type", "chunk"}, {"sequence", sequence++}, {"committedFrameCount", frames.size()}, {"checksum", Fnv1a32(framePayload)}, {"frames", std::move(frames)}};
-			output << chunk.dump() << '\n';
+			framePayload.push_back(']');
+			// The frame payload is already valid compact JSON. Emit the small outer
+			// envelope around it instead of parsing or serializing that payload a
+			// second time; the checksum continues to cover the exact stored bytes.
+			output << "{\"type\":\"chunk\",\"sequence\":" << sequence++
+				<< ",\"committedFrameCount\":" << frameCount
+				<< ",\"checksum\":" << Fnv1a32(framePayload)
+				<< ",\"frames\":" << framePayload << "}\n";
 			committedFrames += static_cast<std::uint64_t>(end - first);
 			first = end;
 		}

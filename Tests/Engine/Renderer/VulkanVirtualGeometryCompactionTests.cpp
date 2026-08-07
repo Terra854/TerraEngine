@@ -176,15 +176,21 @@ namespace TerraEngine::Tests
 					"if(!frameData.virtualGeometryVisibilityDiagnosticsRequested",
 					productionGate);
 				const std::size_t gpuSetup = source.find(
-					"std::vector<VirtualGeometryRasterPacketSetupUpload> visibilityPackets");
+					"thread_local std::vector<VirtualGeometryRasterPacketSetupUpload>");
+				const std::size_t reuseProof = source.find(
+					"resources.visibilityInputReuseSignature == visibilityInputSignature");
+				const std::size_t retainedCounts = source.find(
+					"resources.visibilityInputTriangleCount = visibilityTriangleCount");
 				const std::size_t cpuTriangleExpansion = source.find(
 					"VirtualGeometryRasterTriangleUpload");
 				context.Expect(productionGate != std::string::npos
 						&& gate != std::string::npos
 						&& gpuSetup != std::string::npos
+						&& reuseProof != std::string::npos
+						&& retainedCounts != std::string::npos
 						&& cpuTriangleExpansion == std::string::npos
 						&& gate < gpuSetup,
-					"Diagnostic or production compute demand must be proven before compact GPU-native setup and must never restore per-triangle CPU expansion.");
+					"Compute demand must be proven before compact GPU-native setup, stable setup evidence must retain reusable counts, and the path must never restore per-triangle CPU expansion.");
 			});
 	}
 } // namespace TerraEngine::Tests

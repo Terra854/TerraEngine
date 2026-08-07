@@ -7,8 +7,10 @@
 #pragma once
 
 #include "Animation/AnimationTypes.h"
+#include "Animation/Runtime/AnimationFallback.h"
 #include "Animation/Runtime/AnimationExecutionMode.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -16,6 +18,8 @@
 #include <vector>
 
 namespace TerraEngine::Animation {
+	inline constexpr std::size_t kAnimationFallbackReasonCount =
+		static_cast<std::size_t>(AnimationFallbackReason::InternalFailure) + 1U;
 	inline constexpr std::string_view kAnimationFeatureIdentity = "animation";
 	inline constexpr std::string_view kAnimationBaselineSourceCommit = "6d12e3a99d7c0d41899fc96fa18b02b61e5a0aa9";
 	inline constexpr std::string_view kAnimationBaselineManifestSha256 = "cf4375934729e1afa745d9446faacfc1a7ba53a6d7db79b3d1e0e8164a5ced8f";
@@ -82,6 +86,21 @@ namespace TerraEngine::Animation {
 		std::uint64_t residencyMisses = 0U;
 		std::uint64_t fallbackCount = 0U;
 		std::uint64_t modeSwitchCount = 0U;
+		// These fixed counters are published with the authority generation. They
+		// avoid per-animator strings and make compact/complete accounting useful in
+		// a recording without adding work while the profiler is idle.
+		std::uint64_t compactEligibleAnimators = 0U;
+		std::uint64_t compactProcessedAnimators = 0U;
+		std::uint64_t completeCapturedAnimators = 0U;
+		std::uint64_t completeProcessedAnimators = 0U;
+		std::uint64_t compactToCompleteTransitions = 0U;
+		std::uint64_t completeToCompactTransitions = 0U;
+		std::uint64_t retainedTopologyHits = 0U;
+		std::uint64_t retainedTopologyMisses = 0U;
+		std::uint64_t compactPlanGroups = 0U;
+		std::uint64_t compactDispatches = 0U;
+		std::uint64_t rejectedCandidateCount = 0U;
+		std::array<std::uint64_t, kAnimationFallbackReasonCount> fallbackReasonCounts{};
 	};
 
 	struct AnimationDiagnosticsTimings {
@@ -93,11 +112,26 @@ namespace TerraEngine::Animation {
 		double gpuPlanningMs = 0.0;
 		double gpuExecutionMs = 0.0;
 		double deformationMs = 0.0;
+		double compactCaptureMs = 0.0;
+		double compactEvaluationMs = 0.0;
+		double compactPublicationMs = 0.0;
+		double completeCaptureMs = 0.0;
+		double completeEvaluationMs = 0.0;
+		double completePublicationMs = 0.0;
+		double topologyBuildMs = 0.0;
+		double topologyRefreshMs = 0.0;
 	};
 
 	struct AnimationDiagnosticsSnapshot {
 		std::uint32_t schemaVersion = 1U;
 		std::uint64_t frameIndex = 0U;
+		std::uint64_t candidateGeneration = 0U;
+		std::uint64_t acceptedGeneration = 0U;
+		std::uint64_t rejectedGeneration = 0U;
+		std::uint64_t topologyGeneration = 0U;
+		std::uint64_t presentationGeneration = 0U;
+		std::uint64_t rendererGeneration = 0U;
+		std::uint64_t sceneGeneration = 0U;
 		AnimationFixedTick fixedTick = 0;
 		AnimationDiagnosticsDetailLevel detailLevel = AnimationDiagnosticsDetailLevel::Disabled;
 		bool dormant = true;

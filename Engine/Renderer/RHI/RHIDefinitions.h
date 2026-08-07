@@ -36,6 +36,7 @@ namespace TerraEngine::Renderer {
 
 	// ConventionalVisibilityIdentityReadbackRequest names one Scene/Game target
 	// pixel without exposing a backend image handle to editor or scripting code.
+	// Dedicated captures are opt-in so they never replace visible editor targets.
 	struct ConventionalVisibilityIdentityReadbackRequest
 	{
 		RenderViewType viewType = static_cast<RenderViewType>(1u);
@@ -43,6 +44,7 @@ namespace TerraEngine::Renderer {
 		std::uint64_t frameId = 0u;
 		std::uint64_t rendererGeneration = 0u;
 		std::uint64_t targetGeneration = 0u;
+		bool dedicatedCaptureTarget = false;
 	};
 
 	// This result is separate from color capture. The uint4 value is
@@ -54,6 +56,7 @@ namespace TerraEngine::Renderer {
 		std::uint64_t frameId = 0u;
 		std::uint64_t rendererGeneration = 0u;
 		std::uint64_t targetGeneration = 0u;
+		bool dedicatedCaptureTarget = false;
 		glm::uvec4 identity = glm::uvec4(0u);
 		bool completed = false;
 		bool authoritative = false;

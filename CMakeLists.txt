@@ -1563,6 +1563,18 @@ install(FILES
 	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/Geometry/TerraGeometryContract.hlsli"
 	DESTINATION "${ENGINE_INSTALL_DESTINATION}/Editor/Shaders/Includes/Geometry"
 )
+# Grouped rendering and animation share these source-level ABI declarations
+# with shader contract tests and installed tooling. Install them beside the
+# other public shader includes so a clean install never depends on the source
+# checkout when validating record offsets or selector semantics.
+install(FILES
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/Default/RenderInstanceAbi.hlsli"
+	DESTINATION "${ENGINE_INSTALL_DESTINATION}/Editor/Shaders/Includes/Default"
+)
+install(FILES
+	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/Animation/AnimationGpuAbi.hlsli"
+	DESTINATION "${ENGINE_INSTALL_DESTINATION}/Editor/Shaders/Includes/Animation"
+)
 install(FILES
 	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/VirtualGeometry/VirtualGeometryAbi.hlsli"
 	"${CMAKE_CURRENT_SOURCE_DIR}/Engine/Shaders/VirtualGeometry/AnimatedVirtualGeometryAbi.hlsli"

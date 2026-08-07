@@ -181,9 +181,9 @@ namespace TerraEngine::Renderer {
 	{
 		// A renderable needs only the resolved route and the generations that prove
 		// it belongs to this object/mesh. The complete decision contains candidate
-		// vectors and diagnostic strings; retaining those for every instance made a
-		// 4,000-instance crowd copy the same mesh-level explanation thousands of
-		// times even when no diagnostics consumer was active.
+		// vectors and diagnostic strings; retaining those for every member of a large
+		// repeated crowd copied the same mesh-level explanation many times even when
+		// no diagnostics consumer was active.
 		std::uint64_t decisionIdentity = 0u;
 		std::uint64_t objectIdentity = 0u;
 		std::uint64_t meshIdentity = 0u;
@@ -212,6 +212,21 @@ namespace TerraEngine::Renderer {
 		// worker stages never re-query a live mesh, material, or device object.
 		GeometryRouteInputSummary geometryRouteInput;
 		GeometryRouteSelectionRecord geometryRouteDecision;
+		// One-based, deterministic key used by conventional uint4 visibility
+		// readback. It refers only to the immutable table below.
+		std::uint32_t conventionalVisibilityIdentityIndex = 0u;
+	};
+
+	// A compact lookup table lets a conventional raster identity resolve direct
+	// and virtual-geometry objects through the same immutable frame snapshot.
+	// Packet metadata remains an optional refinement, never the source of object
+	// ownership for a direct draw.
+	struct ConventionalVisibilityIdentityRecord
+	{
+		std::uint32_t index = 0u;
+		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+		TerraEngine::UUID materialId = TerraEngine::EMPTY_UUID;
 	};
 
 	struct VirtualGeometryViewDrawRecord
@@ -220,6 +235,24 @@ namespace TerraEngine::Renderer {
 		TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
 		VirtualGeometryDrawRange range;
 		bool taskShaderCullingEnabled = true;
+		// This zero-based index addresses the same immutable renderable table as the
+		// draw command's one-based visibility identity. CPU consumers can therefore
+		// join view results to animation records without hashing the object UUID.
+		std::uint32_t renderableIndex = 0xffffffffu;
+	};
+
+	struct VirtualGeometryRetainedSelectionEvidence
+	{
+		std::vector<VirtualGeometrySelectedClusterRecord> selectedClusters;
+		std::vector<VirtualGeometryPageNeedRecord> pageNeeds;
+		std::vector<VirtualGeometryClusterPacket> clusterPackets;
+		std::vector<ClusterWorkBatch> clusterBatches;
+		std::vector<CompactedVisibilitySet> compactionResults;
+		std::vector<FallbackCoverageChain> fallbackCoverage;
+		std::vector<VirtualGeometryLODTransitionState> lodTransitionStates;
+		std::vector<VirtualGeometryPageRequestRecord> pageRequests;
+		std::vector<VirtualGeometryPagePayloadRecord> residentPagePayloads;
+		std::vector<VirtualGeometryEmittedPageSourceRecord> emittedPageSources;
 	};
 
 	struct VirtualGeometryViewSelectionState
@@ -249,6 +282,16 @@ namespace TerraEngine::Renderer {
 		bool hasHiZValidationState = false;
 		VirtualGeometryHiZValidationState hiZValidationState;
 		std::vector<VirtualGeometryViewDrawRecord> draws;
+		// A stable visible-command cache may retain immutable draw evidence across
+		// frames. The accessor keeps ordinary standalone snapshots value-owned while
+		// allowing live cache hits to avoid copying thousands of unchanged ranges.
+		std::shared_ptr<const std::vector<VirtualGeometryViewDrawRecord>> retainedDraws;
+
+		[[nodiscard]] const std::vector<VirtualGeometryViewDrawRecord>& DrawRecords()
+			const noexcept
+		{
+			return retainedDraws ? *retainedDraws : draws;
+		}
 		std::vector<VirtualGeometrySelectedClusterRecord> selectedClusters;
 		std::vector<VirtualGeometryClusterPacket> clusterPackets;
 		std::vector<ClusterWorkBatch> clusterBatches;
@@ -259,6 +302,36 @@ namespace TerraEngine::Renderer {
 		std::vector<GeneratedVirtualGeometrySubmissionRecord> generatedSubmissions;
 		std::vector<VirtualGeometryCounterReadbackRecord> gpuCounterReadbacks;
 		std::vector<VirtualGeometryGpuFallbackRecord> gpuFallbackRecords;
+		std::shared_ptr<const VirtualGeometryRetainedGpuEvidence> retainedGpuEvidence;
+
+		[[nodiscard]] const auto& GpuPacketRecords() const noexcept
+		{
+			return retainedGpuEvidence ? retainedGpuEvidence->packetRecords : gpuPacketRecords;
+		}
+		[[nodiscard]] const auto& GpuBatchDescriptors() const noexcept
+		{
+			return retainedGpuEvidence ? retainedGpuEvidence->batchDescriptors : gpuBatchDescriptors;
+		}
+		[[nodiscard]] const auto& GpuPacketFrameSets() const noexcept
+		{
+			return retainedGpuEvidence ? retainedGpuEvidence->packetFrameSets : gpuPacketFrameSets;
+		}
+		[[nodiscard]] const auto& GpuCompactionDispatches() const noexcept
+		{
+			return retainedGpuEvidence ? retainedGpuEvidence->compactionDispatches : gpuCompactionDispatches;
+		}
+		[[nodiscard]] const auto& GeneratedSubmissions() const noexcept
+		{
+			return retainedGpuEvidence ? retainedGpuEvidence->generatedSubmissions : generatedSubmissions;
+		}
+		[[nodiscard]] const auto& GpuCounterReadbacks() const noexcept
+		{
+			return retainedGpuEvidence ? retainedGpuEvidence->counterReadbacks : gpuCounterReadbacks;
+		}
+		[[nodiscard]] const auto& GpuFallbackRecords() const noexcept
+		{
+			return retainedGpuEvidence ? retainedGpuEvidence->fallbackRecords : gpuFallbackRecords;
+		}
 		std::vector<CompactedVisibilitySet> compactionResults;
 		std::vector<VirtualGeometryPageNeedRecord> pageNeeds;
 		std::vector<VirtualGeometryPageRequestRecord> pageRequests;
@@ -273,6 +346,72 @@ namespace TerraEngine::Renderer {
 		std::vector<ShadowVisibilitySelection> shadowVisibilitySelections;
 		std::vector<PerformanceGateResult> performanceGates;
 		std::vector<VirtualGeometryLODTransitionState> lodTransitionStates;
+		// These records are immutable for a cache signature. A live cache hit shares
+		// their retained owner; authored and standalone snapshots continue using the
+		// value-owned vectors above and below.
+		std::shared_ptr<const VirtualGeometryRetainedSelectionEvidence>
+			retainedSelectionEvidence;
+
+		[[nodiscard]] const std::vector<VirtualGeometrySelectedClusterRecord>&
+			SelectedClusters() const noexcept
+		{
+			return retainedSelectionEvidence
+				? retainedSelectionEvidence->selectedClusters : selectedClusters;
+		}
+		[[nodiscard]] const std::vector<VirtualGeometryPageNeedRecord>& PageNeeds()
+			const noexcept
+		{
+			return retainedSelectionEvidence
+				? retainedSelectionEvidence->pageNeeds : pageNeeds;
+		}
+		[[nodiscard]] const std::vector<VirtualGeometryClusterPacket>& ClusterPackets()
+			const noexcept
+		{
+			return retainedSelectionEvidence
+				? retainedSelectionEvidence->clusterPackets : clusterPackets;
+		}
+		[[nodiscard]] const std::vector<ClusterWorkBatch>& ClusterBatches()
+			const noexcept
+		{
+			return retainedSelectionEvidence
+				? retainedSelectionEvidence->clusterBatches : clusterBatches;
+		}
+		[[nodiscard]] const std::vector<CompactedVisibilitySet>& CompactionResults()
+			const noexcept
+		{
+			return retainedSelectionEvidence
+				? retainedSelectionEvidence->compactionResults : compactionResults;
+		}
+		[[nodiscard]] const std::vector<FallbackCoverageChain>& FallbackCoverage()
+			const noexcept
+		{
+			return retainedSelectionEvidence
+				? retainedSelectionEvidence->fallbackCoverage : fallbackCoverage;
+		}
+		[[nodiscard]] const std::vector<VirtualGeometryLODTransitionState>&
+			LodTransitionStates() const noexcept
+		{
+			return retainedSelectionEvidence
+				? retainedSelectionEvidence->lodTransitionStates : lodTransitionStates;
+		}
+		[[nodiscard]] const std::vector<VirtualGeometryPageRequestRecord>& PageRequests()
+			const noexcept
+		{
+			return retainedSelectionEvidence
+				? retainedSelectionEvidence->pageRequests : pageRequests;
+		}
+		[[nodiscard]] const std::vector<VirtualGeometryPagePayloadRecord>&
+			ResidentPagePayloads() const noexcept
+		{
+			return retainedSelectionEvidence
+				? retainedSelectionEvidence->residentPagePayloads : residentPagePayloads;
+		}
+		[[nodiscard]] const std::vector<VirtualGeometryEmittedPageSourceRecord>&
+			EmittedPageSources() const noexcept
+		{
+			return retainedSelectionEvidence
+				? retainedSelectionEvidence->emittedPageSources : emittedPageSources;
+		}
 	};
 
 	struct VirtualGeometryViewVisibilitySnapshot
@@ -300,6 +439,7 @@ namespace TerraEngine::Renderer {
 		std::vector<GeneratedVirtualGeometrySubmissionRecord> generatedSubmissions;
 		std::vector<VirtualGeometryCounterReadbackRecord> gpuCounterReadbacks;
 		std::vector<VirtualGeometryGpuFallbackRecord> gpuFallbackRecords;
+		std::shared_ptr<const VirtualGeometryRetainedGpuEvidence> retainedGpuEvidence;
 		std::vector<CompactedVisibilitySet> compactionResults;
 		std::vector<VirtualGeometryPageNeedRecord> pageNeeds;
 		std::vector<VirtualGeometryPageRequestRecord> pageRequests;
@@ -317,6 +457,76 @@ namespace TerraEngine::Renderer {
 		std::vector<OcclusionDebugSample> occlusionDebugSamples;
 		VirtualGeometryCounterSource source = VirtualGeometryCounterSource::Prepared;
 		bool valid = false;
+
+		[[nodiscard]] const auto& GpuPacketRecords() const noexcept
+		{
+			return retainedGpuEvidence ? retainedGpuEvidence->packetRecords : gpuPacketRecords;
+		}
+		[[nodiscard]] const auto& GpuBatchDescriptors() const noexcept
+		{
+			return retainedGpuEvidence ? retainedGpuEvidence->batchDescriptors : gpuBatchDescriptors;
+		}
+		[[nodiscard]] const auto& GpuPacketFrameSets() const noexcept
+		{
+			return retainedGpuEvidence ? retainedGpuEvidence->packetFrameSets : gpuPacketFrameSets;
+		}
+		[[nodiscard]] const auto& GpuCompactionDispatches() const noexcept
+		{
+			return retainedGpuEvidence ? retainedGpuEvidence->compactionDispatches : gpuCompactionDispatches;
+		}
+		[[nodiscard]] const auto& GeneratedSubmissions() const noexcept
+		{
+			return retainedGpuEvidence ? retainedGpuEvidence->generatedSubmissions : generatedSubmissions;
+		}
+		[[nodiscard]] const auto& GpuCounterReadbacks() const noexcept
+		{
+			return retainedGpuEvidence ? retainedGpuEvidence->counterReadbacks : gpuCounterReadbacks;
+		}
+		[[nodiscard]] const auto& GpuFallbackRecords() const noexcept
+		{
+			return retainedGpuEvidence ? retainedGpuEvidence->fallbackRecords : gpuFallbackRecords;
+		}
+
+		[[nodiscard]] const auto& SelectedClusters() const noexcept
+		{
+			return selectedClusters;
+		}
+		[[nodiscard]] const auto& PageNeeds() const noexcept
+		{
+			return pageNeeds;
+		}
+		[[nodiscard]] const auto& ClusterPackets() const noexcept
+		{
+			return clusterPackets;
+		}
+		[[nodiscard]] const auto& ClusterBatches() const noexcept
+		{
+			return clusterBatches;
+		}
+		[[nodiscard]] const auto& CompactionResults() const noexcept
+		{
+			return compactionResults;
+		}
+		[[nodiscard]] const auto& FallbackCoverage() const noexcept
+		{
+			return fallbackCoverage;
+		}
+		[[nodiscard]] const auto& LodTransitionStates() const noexcept
+		{
+			return lodTransitionStates;
+		}
+		[[nodiscard]] const auto& PageRequests() const noexcept
+		{
+			return pageRequests;
+		}
+		[[nodiscard]] const auto& ResidentPagePayloads() const noexcept
+		{
+			return residentPagePayloads;
+		}
+		[[nodiscard]] const auto& EmittedPageSources() const noexcept
+		{
+			return emittedPageSources;
+		}
 	};
 
 	struct RenderFrameLightRecord
@@ -346,6 +556,8 @@ namespace TerraEngine::Renderer {
 		std::uint64_t frameId = 0u;
 		std::vector<RenderFrameViewRequest> viewRequests;
 		std::vector<RenderFrameRenderableRecord> renderables;
+		std::vector<ConventionalVisibilityIdentityRecord>
+			conventionalVisibilityIdentityTable;
 		std::vector<RenderFrameLightRecord> lights;
 		// Resource tables contain one record per UUID. Per-instance mesh/material
 		// identities remain on renderables; duplicating resource rows makes descriptor,
@@ -361,9 +573,11 @@ namespace TerraEngine::Renderer {
 		// duplicate heavyweight diagnostic storage for every instance.
 		std::vector<GeometryRouteDecision> geometryRouteDecisions;
 		std::vector<DirectMeshletBatch> directMeshletBatches;
-		// Every view contributes page demands here. Worker preparation sorts and
-		// deduplicates them into one renderer-owned deformation plan.
+		// Standalone producers may provide explicit demands here. The live renderer
+		// streams demands directly into its immutable plan and publishes only the
+		// count below, avoiding a second crowd-sized allocation and traversal.
 		std::vector<DeformationPageDemand> animatedGeometryPageDemands;
+		std::size_t animatedGeometryPageDemandCount = 0u;
 		RenderSettings renderSettings;
 		std::uint64_t resourceRevision = 0u;
 		std::uint64_t sceneRevision = 0u;
@@ -418,6 +632,20 @@ namespace TerraEngine::Renderer {
 	TERRAENGINE_API void SortSnapshotDeterministically(RenderFrameSnapshot& snapshot);
 	TERRAENGINE_API bool SnapshotUsesOnlyResolvedResources(const RenderFrameSnapshot& snapshot);
 	TERRAENGINE_API bool SnapshotContainsLiveMutableState(const RenderFrameSnapshot& snapshot);
+	// These builders split immutable mesh/material/pipeline membership from the
+	// values that intentionally change per frame. They are pure snapshot work and
+	// therefore remain safe to execute on scheduler worker tasks.
+	TERRAENGINE_API SharedRenderGroupKey BuildSharedRenderGroupKey(
+		const RenderFrameRenderableRecord& renderable,
+		const RenderFrameViewRequest& view) noexcept;
+	TERRAENGINE_API PersistentRenderTopology BuildPersistentRenderTopology(
+		const RenderFrameSnapshot& snapshot,
+		std::uint64_t topologyGeneration);
+	TERRAENGINE_API DynamicRenderFrameState BuildDynamicRenderFrameState(
+		const RenderFrameSnapshot& snapshot,
+		const PersistentRenderTopology& topology,
+		const RenderFrameViewRequest& view,
+		std::uint64_t frameGeneration);
 	TERRAENGINE_API bool ValidateAnimationRenderGenerationRecord(const AnimationRenderGenerationRecord& record);
 	// Page-local compute descriptors currently bind one GPU animation palette
 	// arena. CPU-authoritative publications must stay on the owner deformation

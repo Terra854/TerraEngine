@@ -11,6 +11,7 @@
 
 #include <future>
 #include <algorithm>
+#include <cmath>
 #include <map>
 #include <iomanip>
 #include <numeric>
@@ -198,6 +199,7 @@ void EditorProfilerService::OnProjectOpened()
 		statusText = "Profiler ready";
 		lastError.clear();
 	}
+	MarkPresentationChanged();
 	RefreshCaptureList();
 }
 
@@ -217,6 +219,7 @@ void EditorProfilerService::OnProjectClosed()
 	busy = false;
 	statusText = "No project open";
 	lastError.clear();
+	MarkPresentationChanged();
 }
 
 // EditorProfilerService::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -250,6 +253,7 @@ void EditorProfilerService::StartRecording(const ProfilerCaptureSettings& settin
 		std::lock_guard<std::mutex> lock(mutex);
 		lastError = "Open a project before profiling.";
 		statusText = lastError;
+		MarkPresentationChanged();
 		return;
 	}
 
@@ -258,6 +262,7 @@ void EditorProfilerService::StartRecording(const ProfilerCaptureSettings& settin
 	lastSavedCaptureArtifact.reset();
 	statusText = MakeRecordingStatus(settings);
 	lastError.clear();
+	MarkPresentationChanged();
 }
 
 // EditorProfilerService::PauseRecording is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -266,6 +271,7 @@ void EditorProfilerService::PauseRecording()
 	Profiler::Instance().PauseRecording();
 	std::lock_guard<std::mutex> lock(mutex);
 	statusText = "Paused";
+	MarkPresentationChanged();
 }
 
 // EditorProfilerService::ResumeRecording is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -275,14 +281,81 @@ void EditorProfilerService::ResumeRecording()
 	const ProfilerCaptureSettings settings = Profiler::Instance().GetSettings();
 	std::lock_guard<std::mutex> lock(mutex);
 	statusText = MakeRecordingStatus(settings);
+	MarkPresentationChanged();
+}
+
+void EditorProfilerService::PublishEditorFrameTiming(
+	std::uint64_t frameIndex,
+	double frameTimeMs) noexcept
+{
+	// Publish the value before its identity. Acquire-loading the identity makes
+	// the paired duration visible without taking the capture-store mutex.
+	editorFrameTimeMs.store(frameTimeMs, std::memory_order_relaxed);
+	editorFrameIndex.store(frameIndex, std::memory_order_release);
+}
+
+void EditorProfilerService::PublishProfilerWindowDrawTiming(
+	std::uint64_t frameIndex,
+	double drawDurationMs) noexcept
+{
+	// Publish the duration before its frame identity. A later acquire load of the
+	// identity therefore observes a completed ProfilerWindow::OnGui measurement.
+	profilerWindowDrawMs.store(drawDurationMs, std::memory_order_relaxed);
+	profilerWindowDrawFrameIndex.store(frameIndex, std::memory_order_release);
+}
+
+void EditorProfilerService::ClearProfilerWindowDrawTiming() noexcept
+{
+	// Hiding the window invalidates its previous sample. Without this reset, a
+	// closed A/B measurement could accidentally report an earlier open frame.
+	profilerWindowDrawMs.store(0.0, std::memory_order_relaxed);
+	profilerWindowDrawFrameIndex.store(0u, std::memory_order_release);
+}
+
+void EditorProfilerService::PublishImGuiRenderTiming(
+	std::uint64_t frameIndex,
+	double durationMs) noexcept
+{
+	imguiRenderMs.store(durationMs, std::memory_order_relaxed);
+	imguiRenderFrameIndex.store(frameIndex, std::memory_order_release);
+}
+
+void EditorProfilerService::PublishPresentUiTiming(
+	std::uint64_t frameIndex,
+	double durationMs) noexcept
+{
+	presentUiMs.store(durationMs, std::memory_order_relaxed);
+	presentUiFrameIndex.store(frameIndex, std::memory_order_release);
+}
+
+EditorProfilerFrameTiming EditorProfilerService::GetEditorFrameTiming() const noexcept
+{
+	EditorProfilerFrameTiming result;
+	result.frameIndex = editorFrameIndex.load(std::memory_order_acquire);
+	result.frameTimeMs = editorFrameTimeMs.load(std::memory_order_relaxed);
+	result.valid = result.frameIndex != 0u && std::isfinite(result.frameTimeMs)
+		&& result.frameTimeMs > 0.0;
+	result.profilerWindowDrawFrameIndex = profilerWindowDrawFrameIndex.load(std::memory_order_acquire);
+	result.profilerWindowDrawMs = profilerWindowDrawMs.load(std::memory_order_relaxed);
+	result.profilerWindowDrawValid = result.profilerWindowDrawFrameIndex != 0u
+		&& std::isfinite(result.profilerWindowDrawMs) && result.profilerWindowDrawMs >= 0.0;
+	result.imguiRenderFrameIndex = imguiRenderFrameIndex.load(std::memory_order_acquire);
+	result.imguiRenderMs = imguiRenderMs.load(std::memory_order_relaxed);
+	result.imguiRenderValid = result.imguiRenderFrameIndex != 0u
+		&& std::isfinite(result.imguiRenderMs) && result.imguiRenderMs >= 0.0;
+	result.presentUiFrameIndex = presentUiFrameIndex.load(std::memory_order_acquire);
+	result.presentUiMs = presentUiMs.load(std::memory_order_relaxed);
+	result.presentUiValid = result.presentUiFrameIndex != 0u
+		&& std::isfinite(result.presentUiMs) && result.presentUiMs >= 0.0;
+	return result;
 }
 
 // EditorProfilerService::FinishCapture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void EditorProfilerService::FinishCapture()
+bool EditorProfilerService::FinishCapture()
 {
 	if (!HasActiveProject())
 	{
-		return;
+		return false;
 	}
 
 	ProfilerCaptureDocument document = Profiler::Instance().FinishRecording();
@@ -292,7 +365,8 @@ void EditorProfilerService::FinishCapture()
 		std::lock_guard<std::mutex> lock(mutex);
 		lastError = "No frames were captured.";
 		statusText = lastError;
-		return;
+		MarkPresentationChanged();
+		return false;
 	}
 
 	std::uint64_t generation = 0u;
@@ -308,6 +382,7 @@ void EditorProfilerService::FinishCapture()
 		statusText = "Saving profiler capture";
 		lastError.clear();
 	}
+	MarkPresentationChanged();
 
 	std::weak_ptr<EditorProfilerService> weakSelf = weak_from_this();
 	// FinishRecording transfers ownership of a potentially large bounded capture.
@@ -341,6 +416,7 @@ void EditorProfilerService::FinishCapture()
 				self->busy = false;
 				self->lastError = error;
 				self->statusText = "Failed to save capture";
+				self->MarkPresentationChanged();
 			}
 			return;
 		}
@@ -406,9 +482,11 @@ void EditorProfilerService::FinishCapture()
 			self->busy = false;
 			self->lastError = error;
 			self->statusText = "Saved and opened capture";
+			self->MarkPresentationChanged();
 		}
 	});
 	ThreadPool::instance().enqueue(task);
+	return true;
 }
 
 // EditorProfilerService::Clear is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -419,6 +497,7 @@ void EditorProfilerService::Clear()
 	std::lock_guard<std::mutex> lock(mutex);
 	statusText = hasProject ? "Profiler ready" : "No project open";
 	lastError.clear();
+	MarkPresentationChanged();
 }
 
 // EditorProfilerService::RefreshCaptureList is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -440,6 +519,7 @@ void EditorProfilerService::RefreshCaptureList()
 		busy = true;
 		statusText = "Refreshing capture list";
 	}
+	MarkPresentationChanged();
 
 	std::weak_ptr<EditorProfilerService> weakSelf = weak_from_this();
 	auto task = ThreadPool::instance().createTask([weakSelf, storeSnapshot, cancelToken, generation]() {
@@ -464,6 +544,7 @@ void EditorProfilerService::RefreshCaptureList()
 			self->lastError = error;
 			self->statusText = error.empty() ? "Capture list refreshed" : error;
 			self->busy = false;
+			self->MarkPresentationChanged();
 		}
 	});
 	ThreadPool::instance().enqueue(task);
@@ -489,6 +570,7 @@ void EditorProfilerService::LoadCapture(const std::filesystem::path& capturePath
 		statusText = "Opening profiler capture";
 		lastError.clear();
 	}
+	MarkPresentationChanged();
 
 	std::weak_ptr<EditorProfilerService> weakSelf = weak_from_this();
 	auto task = ThreadPool::instance().createTask([weakSelf, storeSnapshot, cancelToken, generation, capturePath]() {
@@ -513,6 +595,7 @@ void EditorProfilerService::LoadCapture(const std::filesystem::path& capturePath
 				self->lastError = error;
 				self->statusText = "Failed to open capture";
 				self->busy = false;
+				self->MarkPresentationChanged();
 			}
 			return;
 		}
@@ -534,6 +617,7 @@ void EditorProfilerService::LoadCapture(const std::filesystem::path& capturePath
 			self->statusText = "Loaded capture";
 			self->lastError.clear();
 			self->busy = false;
+			self->MarkPresentationChanged();
 		}
 	});
 	ThreadPool::instance().enqueue(task);
@@ -543,6 +627,11 @@ void EditorProfilerService::LoadCapture(const std::filesystem::path& capturePath
 ProfilerSessionState EditorProfilerService::GetState() const
 {
 	return Profiler::Instance().GetState();
+}
+
+std::uint64_t EditorProfilerService::GetPresentationRevision() const noexcept
+{
+	return presentationRevision.load(std::memory_order_acquire);
 }
 
 // EditorProfilerService::GetStatusText is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -711,6 +800,69 @@ EditorProfilerCaptureSummary EditorProfilerService::SummarizeDocument(
 		else
 			++summary.incompleteFrameCount;
 
+		if (frame.animationOptimization.has_value() && frame.animationOptimization->valid)
+		{
+			const TerraEngine::Profiling::ProfilerAnimationOptimizationEvidence& source =
+				*frame.animationOptimization;
+			EditorProfilerAnimationOptimizationSummary& target = summary.animationOptimization;
+			++target.measuredFrameCount;
+			target.maximumActiveAnimators = std::max(target.maximumActiveAnimators, source.activeAnimators);
+			target.maximumCompactProcessed = std::max(target.maximumCompactProcessed,
+				source.compactProcessedAnimators);
+			target.maximumCompleteProcessed = std::max(target.maximumCompleteProcessed,
+				source.completeProcessedAnimators);
+			target.compactToCompleteTransitions += source.compactToCompleteTransitions;
+			target.completeToCompactTransitions += source.completeToCompactTransitions;
+			target.retainedTopologyHits += source.retainedTopologyHits;
+			target.retainedTopologyMisses += source.retainedTopologyMisses;
+			target.compactPlanGroups += source.compactPlanGroups;
+			target.compactDispatches += source.compactDispatches;
+			target.rejectedCandidates += source.rejectedCandidateCount;
+			target.fallbackReasons += std::accumulate(source.fallbackReasonCounts.begin(),
+				source.fallbackReasonCounts.end(), std::uint64_t{0U});
+			for (std::size_t timingIndex = 0U;
+				timingIndex < target.totalTimingNanoseconds.size(); ++timingIndex)
+			{
+				target.totalTimingNanoseconds[timingIndex] += source.timingNanoseconds[timingIndex];
+			}
+		}
+
+		if (frame.renderOptimization.has_value())
+		{
+			for (std::size_t viewIndex = 0U;
+				viewIndex < frame.renderOptimization->views.size(); ++viewIndex)
+			{
+				const TerraEngine::Profiling::ProfilerRenderOptimizationViewSummary& source =
+					frame.renderOptimization->views[viewIndex];
+				EditorProfilerRenderOptimizationSummary& target = summary.renderOptimization[viewIndex];
+				target.viewType = source.viewType;
+				if (!source.valid)
+				{
+					continue;
+				}
+				++target.measuredFrameCount;
+				target.maximumVisibleInstances = std::max<std::uint64_t>(target.maximumVisibleInstances, source.visibleInstanceCount);
+				target.maximumGroupedInstances = std::max<std::uint64_t>(target.maximumGroupedInstances, source.groupedInstanceCount);
+				target.maximumFallbackInstances = std::max<std::uint64_t>(target.maximumFallbackInstances, source.fallbackInstanceCount);
+				target.groupedSubmissions += source.groupedSubmissionCount;
+				target.fallbackSubmissions += source.fallbackSubmissionCount;
+				target.avoidedSubmissions += source.avoidedSubmissionCount;
+				target.topologyReuseHits += source.topologyReuseHits;
+				target.topologyInvalidations += source.topologyInvalidations;
+				target.viewEvidenceReuseHits += source.viewEvidenceReuseHits;
+				target.viewEvidenceInvalidations += source.viewEvidenceInvalidations;
+				target.rejectedCandidates += source.rejectedIncompleteKeyCount
+					+ source.rejectedUnsupportedVariantCount + source.rejectedOutOfRangeCount
+					+ source.rejectedStaleGenerationCount;
+				target.optimizationFallbacks += source.fallbackAllocationFailureCount
+					+ source.fallbackRecoveryCount;
+				target.topologyBuildNanoseconds += source.topologyBuildNanoseconds;
+				target.dynamicMaterializationNanoseconds += source.dynamicMaterializationNanoseconds;
+				target.instanceStreamUploadNanoseconds += source.instanceStreamUploadNanoseconds;
+				target.groupedCommandRecordingNanoseconds += source.groupedCommandRecordingNanoseconds;
+			}
+		}
+
 		for (const TerraEngine::Profiling::PerformanceStageRecord& stage : frame.performanceStages)
 		{
 			const char* domain = stage.domain == TerraEngine::Profiling::PerformanceStageDomain::Physics
@@ -833,6 +985,11 @@ std::optional<std::filesystem::path> EditorProfilerService::FindCapturePathLocke
 			return capture.absolutePath;
 	}
 	return std::nullopt;
+}
+
+void EditorProfilerService::MarkPresentationChanged() noexcept
+{
+	presentationRevision.fetch_add(1u, std::memory_order_release);
 }
 
 // EditorProfilerService::HasActiveProject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

@@ -62,6 +62,65 @@ namespace TerraEngine::Animation {
 		GetAnimationRuntimeLimit(AnimationLimit::SkeletonJoints).hardMaximum);
 	inline constexpr std::size_t kMaximumAnimationExecutionModeBatchSize = 65536U;
 
+	// Processing classes describe frame work ownership, rather than authored asset
+	// state. Compact records are permitted only for a completely proven visual
+	// packet; every unknown or authoritative case remains on the established path.
+	enum class AnimationProcessingClass : std::uint8_t {
+		Complete = 0U,
+		CompactGpuVisual = 1U
+	};
+
+	// These identities are copied at protected capture and compared exactly before
+	// publication. They intentionally remain runtime-only so no asset format needs
+	// migration when a renderer, resource, or scene lifetime changes.
+	struct AnimationCompactGenerationKey {
+		std::uint64_t membershipGeneration = 0U;
+		std::uint64_t capabilityGeneration = 0U;
+		std::uint64_t bindingGeneration = 0U;
+		std::uint64_t resourceGeneration = 0U;
+		std::uint64_t sceneGeneration = 0U;
+		std::uint64_t rendererGeneration = 0U;
+		std::uint64_t authorityGeneration = 0U;
+
+		[[nodiscard]] bool IsComplete() const noexcept;
+		auto operator<=>(const AnimationCompactGenerationKey&) const = default;
+	};
+
+	// Compact GPU work deliberately carries only the data required to sample and
+	// present one visual pose. Controller, event, root-motion, and pose-authority
+	// state are represented by exclusion bits so an omitted fact fails closed.
+	struct CompactGpuVisualInput {
+		std::uint64_t stableInstanceId = 0U;
+		std::uint32_t stableSubmissionOrdinal = 0U;
+		AnimationFixedTick playbackTick = 0;
+		AnimationGeneration sourcePoseGeneration = 0U;
+		AnimationCompactGenerationKey generations{};
+		AnimationExecutionModeReason eligibilityReason =
+			AnimationExecutionModeReason::Uninitialized;
+		bool gpuLoweringComplete = false;
+		bool hasAuthoritativeConsumer = true;
+		bool hasControllerOrTransition = true;
+		bool hasAdvancedFeature = true;
+		bool hasContinuitySource = false;
+
+		[[nodiscard]] bool IsComplete() const noexcept;
+	};
+
+	struct CompactGpuVisualResult {
+		std::uint64_t stableInstanceId = 0U;
+		std::uint32_t stableSubmissionOrdinal = 0U;
+		AnimationGeneration sourcePoseGeneration = 0U;
+		AnimationGeneration presentationPoseGeneration = 0U;
+		AnimationCompactGenerationKey generations{};
+		AnimationExecutionModeReason reason = AnimationExecutionModeReason::Uninitialized;
+		bool complete = false;
+
+		[[nodiscard]] bool IsPublishableFor(const CompactGpuVisualInput& input) const noexcept;
+	};
+
+	[[nodiscard]] TERRAENGINE_API AnimationProcessingClass ClassifyAnimationProcessing(
+		const CompactGpuVisualInput& input) noexcept;
+
 	// Producers declare only the CPU-authoritative data they actually consume.
 	// Spans are borrowed for the duration of one resolver call; the returned
 	// closure owns a sorted copy and can safely outlive the frame-input vectors.
@@ -194,6 +253,20 @@ namespace TerraEngine::Animation {
 		AnimationModeContinuityToken continuity;
 
 		auto operator<=>(const AnimationExecutionModeTransition&) const = default;
+	};
+
+	// A transition retains opaque continuity tokens because this policy module must
+	// never interpret mutable controller or gameplay state. The caller validates the
+	// generation pair before replacing either complete or compact ownership.
+	struct AnimationClassTransition {
+		AnimationProcessingClass from = AnimationProcessingClass::Complete;
+		AnimationProcessingClass to = AnimationProcessingClass::Complete;
+		AnimationCompactGenerationKey sourceGenerations{};
+		AnimationCompactGenerationKey destinationGenerations{};
+		AnimationModeContinuityToken continuity{};
+		bool occurred = false;
+
+		[[nodiscard]] bool IsContinuous() const noexcept;
 	};
 
 	struct AnimationExecutionModeDecision {

@@ -6,6 +6,7 @@
 
 #include "ProfilerCaptureStore.h"
 
+#include <array>
 #include <atomic>
 #include <filesystem>
 #include <memory>
@@ -16,6 +17,31 @@
 #include <vector>
 
 struct EditorContext;
+
+// EditorProfilerFrameTiming is the previous completed host-frame delta used to
+// compare profiler-window presentation cost while recording is intentionally
+// idle. It is runtime-only evidence and is never persisted into a capture.
+struct EditorProfilerFrameTiming
+{
+	std::uint64_t frameIndex = 0u;
+	double frameTimeMs = 0.0;
+	bool valid = false;
+	// This is only ProfilerWindow::OnGui CPU work. It intentionally excludes
+	// ImGui draw-data generation, Vulkan UI presentation, and scheduler work so
+	// automation can attribute an open-idle delta to the correct boundary.
+	std::uint64_t profilerWindowDrawFrameIndex = 0u;
+	double profilerWindowDrawMs = 0.0;
+	bool profilerWindowDrawValid = false;
+	// These post-window stages isolate CPU draw-data construction from the UI
+	// submission/presentation boundary. They are diagnostic scalars only and do
+	// not enable capture recording or alter renderer scheduling.
+	std::uint64_t imguiRenderFrameIndex = 0u;
+	double imguiRenderMs = 0.0;
+	bool imguiRenderValid = false;
+	std::uint64_t presentUiFrameIndex = 0u;
+	double presentUiMs = 0.0;
+	bool presentUiValid = false;
+};
 
 // EditorProfilerCaptureArtifact pairs project-contained capture metadata with
 // an opaque identifier. Automation clients never receive or submit an
@@ -74,6 +100,51 @@ struct EditorProfilerWorkVolumeSummary
 	std::uint64_t publishedBodies = 0u;
 };
 
+// EditorProfilerRenderOptimizationSummary is a bounded whole-capture reduction
+// of the typed per-frame renderer evidence. Maxima describe scene scale while
+// totals explain whether grouping and reuse remained active throughout the run.
+struct EditorProfilerRenderOptimizationSummary
+{
+	std::uint32_t viewType = 0U;
+	std::uint64_t measuredFrameCount = 0U;
+	std::uint64_t maximumVisibleInstances = 0U;
+	std::uint64_t maximumGroupedInstances = 0U;
+	std::uint64_t maximumFallbackInstances = 0U;
+	std::uint64_t groupedSubmissions = 0U;
+	std::uint64_t fallbackSubmissions = 0U;
+	std::uint64_t avoidedSubmissions = 0U;
+	std::uint64_t topologyReuseHits = 0U;
+	std::uint64_t topologyInvalidations = 0U;
+	std::uint64_t viewEvidenceReuseHits = 0U;
+	std::uint64_t viewEvidenceInvalidations = 0U;
+	std::uint64_t rejectedCandidates = 0U;
+	std::uint64_t optimizationFallbacks = 0U;
+	std::uint64_t topologyBuildNanoseconds = 0U;
+	std::uint64_t dynamicMaterializationNanoseconds = 0U;
+	std::uint64_t instanceStreamUploadNanoseconds = 0U;
+	std::uint64_t groupedCommandRecordingNanoseconds = 0U;
+};
+
+// Capture-wide animation evidence stays bounded regardless of recording length.
+// Peak population values and summed work/reuse counters are intentionally kept
+// separate so a developer can distinguish scale from repeated per-frame cost.
+struct EditorProfilerAnimationOptimizationSummary
+{
+	std::uint64_t measuredFrameCount = 0U;
+	std::uint64_t maximumActiveAnimators = 0U;
+	std::uint64_t maximumCompactProcessed = 0U;
+	std::uint64_t maximumCompleteProcessed = 0U;
+	std::uint64_t compactToCompleteTransitions = 0U;
+	std::uint64_t completeToCompactTransitions = 0U;
+	std::uint64_t retainedTopologyHits = 0U;
+	std::uint64_t retainedTopologyMisses = 0U;
+	std::uint64_t compactPlanGroups = 0U;
+	std::uint64_t compactDispatches = 0U;
+	std::uint64_t rejectedCandidates = 0U;
+	std::uint64_t fallbackReasons = 0U;
+	std::array<std::uint64_t, 8U> totalTimingNanoseconds{};
+};
+
 // EditorProfilerCaptureSummary is intentionally bounded: it exposes aggregate
 // frame and timing-stream evidence without returning every recorded sample.
 struct EditorProfilerCaptureSummary
@@ -104,6 +175,8 @@ struct EditorProfilerCaptureSummary
 	std::vector<EditorProfilerMetricSummary> responsivenessTimings;
 	std::vector<EditorProfilerWorkerSummary> workerHistories;
 	EditorProfilerWorkVolumeSummary workVolumes;
+	EditorProfilerAnimationOptimizationSummary animationOptimization;
+	std::array<EditorProfilerRenderOptimizationSummary, 2U> renderOptimization{};
 };
 
 // class EditorProfilerService groups related state and operations so callers have one documented contract.
@@ -115,17 +188,31 @@ public:
 	void OnProjectOpened();
 	void OnProjectClosed();
 	void Update(float deltaTime);
+	void PublishEditorFrameTiming(std::uint64_t frameIndex, double frameTimeMs) noexcept;
+	void PublishProfilerWindowDrawTiming(std::uint64_t frameIndex, double drawDurationMs) noexcept;
+	void ClearProfilerWindowDrawTiming() noexcept;
+	void PublishImGuiRenderTiming(std::uint64_t frameIndex, double durationMs) noexcept;
+	void PublishPresentUiTiming(std::uint64_t frameIndex, double durationMs) noexcept;
+	[[nodiscard]] EditorProfilerFrameTiming GetEditorFrameTiming() const noexcept;
 
 	void StartRecording();
 	void StartRecording(const TerraEngine::Profiling::ProfilerCaptureSettings& settings);
 	void PauseRecording();
 	void ResumeRecording();
-	void FinishCapture();
+	// Returns true only when a non-empty document was handed to background
+	// persistence. Callers can therefore fail an empty stopped-mode request
+	// immediately instead of leaving a durable job waiting forever.
+	bool FinishCapture();
 	void Clear();
 	void RefreshCaptureList();
 	void LoadCapture(const std::filesystem::path& capturePath);
 
 	TerraEngine::Profiling::ProfilerSessionState GetState() const;
+	// This revision changes only when a user-visible profiler document, capture
+	// list, or status changes.  It deliberately does not follow the engine's
+	// per-frame profiling revision, so idle editor windows can avoid copying the
+	// same completed document on every host frame.
+	[[nodiscard]] std::uint64_t GetPresentationRevision() const noexcept;
 	std::string GetStatusText() const;
 	std::string GetLastError() const;
 	std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> GetCaptureList() const;
@@ -151,6 +238,10 @@ public:
 private:
 	TerraEngine::Profiling::ProfilerCaptureMetadata MakeMetadata() const;
 	void SetBusyStatus(bool busy, std::string status);
+	// Publication is lock-free because callers already protect the associated
+	// presentation data with mutex.  Release ordering makes completed updates
+	// visible before the window observes the new revision.
+	void MarkPresentationChanged() noexcept;
 	[[nodiscard]] static std::string MakeArtifactId(std::string_view fileName);
 	[[nodiscard]] std::optional<std::filesystem::path> FindCapturePathLocked(std::string_view artifactId) const;
 
@@ -168,4 +259,13 @@ private:
 	std::string statusText = "Idle";
 	std::string lastError;
 	std::uint64_t projectGeneration = 0u;
+	std::atomic_uint64_t presentationRevision = 1u;
+	std::atomic_uint64_t editorFrameIndex = 0u;
+	std::atomic<double> editorFrameTimeMs = 0.0;
+	std::atomic_uint64_t profilerWindowDrawFrameIndex = 0u;
+	std::atomic<double> profilerWindowDrawMs = 0.0;
+	std::atomic_uint64_t imguiRenderFrameIndex = 0u;
+	std::atomic<double> imguiRenderMs = 0.0;
+	std::atomic_uint64_t presentUiFrameIndex = 0u;
+	std::atomic<double> presentUiMs = 0.0;
 };

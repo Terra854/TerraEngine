@@ -45,6 +45,7 @@
 #define GLM_FORCE_RADIANS
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
 #include <algorithm>
+#include <chrono>
 #include <array>
 #include <cctype>
 #include <cmath>
@@ -467,23 +468,22 @@ namespace
 		// binding during materialization without a separate hash lookup/copy pass.
 		std::vector<std::uint32_t> renderableIndices;
 		// Cached direct-route commands never contribute a VG view draw. Retaining
-		// only the exact contributing command indices prevents a 4,000-member direct
+		// only the exact contributing command indices prevents a large direct
 		// crowd from being rescanned merely to republish an empty VG selection.
 		std::vector<std::uint32_t> virtualGeometryCommandIndices;
-		std::vector<TerraEngine::Renderer::VirtualGeometrySelectedClusterRecord> selectedClusters;
-		std::vector<TerraEngine::Renderer::VirtualGeometryPageNeedRecord> pageNeeds;
-		std::vector<VirtualGeometryClusterPacket> clusterPackets;
-		std::vector<ClusterWorkBatch> clusterBatches;
-		std::vector<GpuVirtualGeometryPacketRecord> gpuPacketRecords;
-		std::vector<GpuVirtualGeometryBatchDescriptor> gpuBatchDescriptors;
-		std::vector<GpuVirtualGeometryPacketFrameSet> gpuPacketFrameSets;
-		std::vector<GpuPacketCompactionDispatch> gpuCompactionDispatches;
-		std::vector<GeneratedVirtualGeometrySubmissionRecord> generatedSubmissions;
-		std::vector<VirtualGeometryCounterReadbackRecord> gpuCounterReadbacks;
-		std::vector<VirtualGeometryGpuFallbackRecord> gpuFallbackRecords;
-		std::vector<CompactedVisibilitySet> compactionResults;
-		std::vector<FallbackCoverageChain> fallbackCoverage;
-		std::vector<VirtualGeometryLODTransitionState> lodTransitionStates;
+		std::shared_ptr<const TerraEngine::Renderer::
+			VirtualGeometryRetainedSelectionEvidence> retainedSelectionEvidence;
+		std::shared_ptr<const VirtualGeometryRetainedGpuEvidence>
+			retainedGpuEvidence;
+		// View draw ranges are derived entirely from this revision-validated cut.
+		// Retaining them avoids reconstructing the same per-command range records on
+		// every cache hit, including valid direct-only cuts whose vector is empty.
+		std::shared_ptr<const std::vector<
+			TerraEngine::Renderer::VirtualGeometryViewDrawRecord>> viewDraws;
+		bool hasViewDrawEvidence = false;
+		// Page evidence depends only on selection and residency inputs already
+		// covered by this record's signature. Cache it with the cut so stable views
+		// do not rebuild hashes and diagnostic strings every frame.
 		TerraEngine::Renderer::VisibleStreamingTouchSet streamingTouchSet;
 		TerraEngine::Renderer::VisibleCommandReuseTelemetry reuseTelemetry;
 		TerraEngine::Scene::SpatialDiagnosticsSnapshot diagnostics;
@@ -512,6 +512,7 @@ namespace
 
 	struct VisibleCommandBuildResult
 	{
+		std::uint64_t packetEvidenceSignature = 0u;
 		std::vector<DrawCommand> commands;
 		std::vector<TerraEngine::Renderer::VirtualGeometrySelectedClusterRecord> selectedClusters;
 		std::vector<TerraEngine::Renderer::VirtualGeometryPageNeedRecord> pageNeeds;
@@ -543,18 +544,44 @@ namespace
 			const RenderableContainer& currentRenderables,
 			std::vector<std::uint8_t>* visibleAnimatedFlags,
 			const std::unordered_map<TerraEngine::UUID, std::size_t>*
-				currentRenderableIndices) const
+				currentRenderableIndices,
+			std::uint64_t* groupingCompatibilitySignature) const
 		{
+			std::uint64_t animationCompatibilitySignature = 1469598103934665603ULL;
+			const auto appendAnimationCompatibility =
+				[&animationCompatibilitySignature](const DrawCommand& command)
+			{
+				const std::uint64_t authorityLane =
+					static_cast<std::uint32_t>(command.animationBinding.source)
+					| (static_cast<std::uint64_t>(
+						command.animationBinding.RequiresConservativeCoarseVisibility()) << 32U)
+					| (static_cast<std::uint64_t>(
+						command.animationBinding.status) << 40U);
+				animationCompatibilitySignature ^= authorityLane + 0x9e3779b97f4a7c15ULL
+					+ (animationCompatibilitySignature << 6U)
+					+ (animationCompatibilitySignature >> 2U);
+				// Visibility setup resolves deformation bridge offsets by stable owner.
+				// Fold that owner into the proof while the refreshed binding is hot.
+				const std::uint64_t stableInstanceId =
+					command.animationBinding.gpu.IsComplete()
+					? command.animationBinding.gpu.stableInstanceId
+					: (static_cast<std::uint64_t>(
+						command.animationBinding.animatorSlotIndex) << 32U)
+						| command.animationBinding.animatorGeneration;
+				animationCompatibilitySignature ^= stableInstanceId
+					+ 0x9e3779b97f4a7c15ULL
+					+ (animationCompatibilitySignature << 6U)
+					+ (animationCompatibilitySignature >> 2U);
+			};
 			if(cachedRecord == nullptr)
 			{
 				destination = commands;
-				if(visibleAnimatedFlags == nullptr || currentRenderableIndices == nullptr)
-				{
-					return;
-				}
 				for(const DrawCommand& command : destination)
 				{
-					if(command.animationBinding.status
+					appendAnimationCompatibility(command);
+					if(visibleAnimatedFlags == nullptr
+						|| currentRenderableIndices == nullptr
+						|| command.animationBinding.status
 						!= TerraEngine::Renderer::AnimationRenderBindingStatus::Ready)
 					{
 						continue;
@@ -566,56 +593,107 @@ namespace
 						(*visibleAnimatedFlags)[current->second] = 1u;
 					}
 				}
-				return;
 			}
-			destination = cachedRecord->commands;
-			const std::size_t bindingCount = std::min(
-				destination.size(), cachedRecord->renderableIndices.size());
-			for(std::size_t index = 0U; index < bindingCount; ++index)
+			else
 			{
-				const std::uint32_t renderableIndex =
-					cachedRecord->renderableIndices[index];
-				if(renderableIndex < currentRenderables.size()) {
-					destination[index].animationBinding =
-						currentRenderables[renderableIndex].animationBinding;
-					if(visibleAnimatedFlags != nullptr
-						&& renderableIndex < visibleAnimatedFlags->size()
-						&& destination[index].animationBinding.status
-							== TerraEngine::Renderer::AnimationRenderBindingStatus::Ready)
-					{
-						(*visibleAnimatedFlags)[renderableIndex] = 1u;
+				destination = cachedRecord->commands;
+				const std::size_t bindingCount = std::min(
+					destination.size(), cachedRecord->renderableIndices.size());
+				for(std::size_t index = 0U; index < bindingCount; ++index)
+				{
+					const std::uint32_t renderableIndex =
+						cachedRecord->renderableIndices[index];
+					if(renderableIndex < currentRenderables.size()) {
+						destination[index].animationBinding =
+							currentRenderables[renderableIndex].animationBinding;
+						if(visibleAnimatedFlags != nullptr
+							&& renderableIndex < visibleAnimatedFlags->size()
+							&& destination[index].animationBinding.status
+								== TerraEngine::Renderer::AnimationRenderBindingStatus::Ready)
+						{
+							(*visibleAnimatedFlags)[renderableIndex] = 1u;
+						}
 					}
+					appendAnimationCompatibility(destination[index]);
+				}
+				if(bindingCount != destination.size())
+				{
+					// A partial cache-to-renderable mapping cannot prove the omitted
+					// commands. Disable downstream reuse so the complete validation path
+					// remains authoritative for malformed or stale cache records.
+					animationCompatibilitySignature = 0u;
+				}
+			}
+			if(groupingCompatibilitySignature != nullptr)
+			{
+				// Visibility evidence already covers every static grouping lane. Add
+				// only the current animation authority classes while bindings are hot,
+				// avoiding a second full command scan in grouped submission planning.
+				*groupingCompatibilitySignature = packetEvidenceSignature;
+				if(animationCompatibilitySignature == 0u)
+				{
+					*groupingCompatibilitySignature = 0u;
+				}
+				else
+				{
+					*groupingCompatibilitySignature ^= animationCompatibilitySignature
+						+ 0x9e3779b97f4a7c15ULL
+						+ (*groupingCompatibilitySignature << 6U)
+						+ (*groupingCompatibilitySignature >> 2U);
 				}
 			}
 		}
 		[[nodiscard]] const std::vector<GpuVirtualGeometryPacketRecord>& GpuPacketRecords() const noexcept
 		{
-			return cachedRecord ? cachedRecord->gpuPacketRecords : gpuPacketRecords;
+			return cachedRecord ? cachedRecord->retainedGpuEvidence->packetRecords : gpuPacketRecords;
 		}
 		[[nodiscard]] const std::vector<GpuVirtualGeometryBatchDescriptor>& GpuBatchDescriptors() const noexcept
 		{
-			return cachedRecord ? cachedRecord->gpuBatchDescriptors : gpuBatchDescriptors;
+			return cachedRecord ? cachedRecord->retainedGpuEvidence->batchDescriptors : gpuBatchDescriptors;
 		}
 		[[nodiscard]] const std::vector<GpuVirtualGeometryPacketFrameSet>& GpuPacketFrameSets() const noexcept
 		{
-			return cachedRecord ? cachedRecord->gpuPacketFrameSets : gpuPacketFrameSets;
+			return cachedRecord ? cachedRecord->retainedGpuEvidence->packetFrameSets : gpuPacketFrameSets;
 		}
 		[[nodiscard]] const std::vector<GpuPacketCompactionDispatch>& GpuCompactionDispatches() const noexcept
 		{
-			return cachedRecord ? cachedRecord->gpuCompactionDispatches : gpuCompactionDispatches;
+			return cachedRecord ? cachedRecord->retainedGpuEvidence->compactionDispatches : gpuCompactionDispatches;
 		}
 		[[nodiscard]] const std::vector<GeneratedVirtualGeometrySubmissionRecord>& GeneratedSubmissions() const noexcept
 		{
-			return cachedRecord ? cachedRecord->generatedSubmissions : generatedSubmissions;
+			return cachedRecord ? cachedRecord->retainedGpuEvidence->generatedSubmissions : generatedSubmissions;
 		}
 		[[nodiscard]] const std::vector<VirtualGeometryCounterReadbackRecord>& GpuCounterReadbacks() const noexcept
 		{
-			return cachedRecord ? cachedRecord->gpuCounterReadbacks : gpuCounterReadbacks;
+			return cachedRecord ? cachedRecord->retainedGpuEvidence->counterReadbacks : gpuCounterReadbacks;
 		}
 		[[nodiscard]] const std::vector<VirtualGeometryGpuFallbackRecord>& GpuFallbackRecords() const noexcept
 		{
-			return cachedRecord ? cachedRecord->gpuFallbackRecords : gpuFallbackRecords;
+			return cachedRecord ? cachedRecord->retainedGpuEvidence->fallbackRecords : gpuFallbackRecords;
 		}
+	};
+
+	struct GroupedCompatibilityBucket
+	{
+		std::uint32_t topologyTemplateIndex =
+			PersistentRenderTopologyRecord::kInvalidGroupTemplateIndex;
+		std::uint32_t representative = 0u;
+		std::vector<std::uint32_t> members;
+	};
+
+	struct GroupedSubmissionMembershipCacheRecord
+	{
+		bool valid = false;
+		std::uint64_t compatibilitySignature = 0U;
+		std::uint64_t lastTouchedFrameId = 0U;
+		std::vector<GroupedCompatibilityBucket> buckets;
+	};
+
+	struct GroupedSubmissionMembershipCacheState
+	{
+		const RenderSystem* owner = nullptr;
+		std::unordered_map<std::uint64_t, GroupedSubmissionMembershipCacheRecord>
+			recordsByView;
 	};
 
 	struct VirtualGeometryViewSelectionPacket
@@ -1514,10 +1592,12 @@ namespace
 		std::uint64_t renderableWorldSignature,
 		const glm::mat4& viewProjection,
 		const glm::uvec2& targetSize,
+		RenderOutputKind outputKind,
 		RenderViewType viewType,
 		std::uint32_t outputId,
 		std::uint64_t transitionStateSignature,
-		std::uint64_t virtualGeometryResidencyGeneration)
+		std::uint64_t virtualGeometryResidencyGeneration,
+		std::uint64_t rendererGeneration)
 	{
 		std::uint64_t seed = kRenderHashOffset;
 		HashCombine(seed, sceneRevision);
@@ -1525,6 +1605,9 @@ namespace
 		HashCombine(seed, renderableWorldSignature);
 		HashMat4(seed, viewProjection);
 		HashUVec2(seed, targetSize);
+		// Output kind separates Scene, Game, runtime, shadow, and capture frame
+		// identities even when a caller happens to reuse a view type and output id.
+		HashCombine(seed, static_cast<std::uint64_t>(outputKind));
 		HashCombine(seed, static_cast<std::uint64_t>(viewType));
 		HashCombine(seed, outputId);
 		HashCombine(seed, transitionStateSignature);
@@ -1532,6 +1615,9 @@ namespace
 		// physical residency snapshot that produced them. Publication changes the
 		// generation at a protected boundary and forces one deterministic rebuild.
 		HashCombine(seed, virtualGeometryResidencyGeneration);
+		// Device recovery publishes a new render-session generation. Cached packets
+		// and selection evidence must never cross that protected lifetime boundary.
+		HashCombine(seed, rendererGeneration);
 		return seed;
 	}
 
@@ -2279,6 +2365,7 @@ std::vector<GpuVirtualGeometryPacketRecord> RenderSystem::BuildGpuVirtualGeometr
 		record.viewType = packet.viewType;
 		record.frameId = frameId;
 		record.objectId = packet.objectId;
+		record.renderableIndex = packet.renderableIndex;
 		record.meshId = packet.meshId;
 		record.materialId = packet.materialId;
 		record.selectedLod = packet.selectedLod;
@@ -2399,33 +2486,58 @@ RenderSystem::PickVirtualGeometryVisibilityRecord(
 }
 
 bool RenderSystem::RequestConventionalVisibilityIdentityPick(
-	RenderViewType viewType, const glm::uvec2& pixel)
+	RenderViewType viewType, const glm::uvec2& pixel,
+	bool dedicatedCaptureTarget)
 {
 	if (!rhi) return false;
 	TerraEngine::Renderer::ConventionalVisibilityIdentityReadbackRequest request{};
 	request.viewType = viewType;
 	request.pixel = pixel;
+	request.dedicatedCaptureTarget = dedicatedCaptureTarget;
 	{
 		std::lock_guard<std::mutex> lock(statsMutex);
-		const std::vector<GpuVirtualGeometryPacketRecord>& records =
+		// Conventional typed identity is valid for direct meshes as well as VG
+		// packets. A dedicated capture target can outlive ordinary Scene/Game
+		// frames, so select its own retained immutable table instead of asking the
+		// Vulkan target to match a newer normal-frame id.
+		const CaptureConventionalVisibilityIdentitySnapshot* captureSnapshot =
 			viewType == RenderViewType::Scene
-			? latestSceneVirtualGeometryVisibilityRecords
-			: latestGameVirtualGeometryVisibilityRecords;
-		if (records.empty() || records.front().frameId == 0u) return false;
-		request.frameId = records.front().frameId;
-		request.rendererGeneration = latestRendererRecoverySnapshot.renderSessionGeneration;
+				? &latestSceneCaptureIdentitySnapshot : &latestGameCaptureIdentitySnapshot;
+		const std::uint64_t snapshotFrameId = dedicatedCaptureTarget
+			? captureSnapshot->frameId : latestRenderFrameSnapshot.frameId;
+		const bool snapshotUsable = dedicatedCaptureTarget
+			? captureSnapshot->IsUsable()
+			: !latestRenderFrameSnapshot.conventionalVisibilityIdentityTable.empty();
+		if (snapshotFrameId == 0u || !snapshotUsable) {
+			return false;
+		}
+		request.frameId = snapshotFrameId;
+		request.rendererGeneration = dedicatedCaptureTarget
+			? captureSnapshot->rendererGeneration
+			: latestRendererRecoverySnapshot.renderSessionGeneration;
 	}
-	if (!rhi->QueueConventionalVisibilityIdentityReadback(request)) return false;
+	if (!rhi->QueueConventionalVisibilityIdentityReadback(request)) {
+		std::lock_guard<std::mutex> lock(statsMutex);
+		std::string& failureReason = viewType == RenderViewType::Scene
+			? latestSceneAuthoritativeIdentityFailureReason
+			: latestGameAuthoritativeIdentityFailureReason;
+		failureReason = dedicatedCaptureTarget
+			? "Vulkan rejected the dedicated capture identity request; the retained capture frame no longer matches its target."
+			: "Vulkan rejected the viewport identity request; the rendered frame no longer matches its target.";
+		return false;
+	}
 	{
 		std::lock_guard<std::mutex> lock(statsMutex);
 		// A fresh GPU request invalidates any older value for this view. The
 		// replacement is visible only when DrainConventional... observes its fence.
 		if (viewType == RenderViewType::Scene) {
 			pendingSceneAuthoritativeIdentityPixel = pixel;
+			pendingSceneAuthoritativeIdentityFromCapture = dedicatedCaptureTarget;
 			latestSceneAuthoritativeIdentityPick.reset();
 			latestSceneAuthoritativeIdentityFailureReason.clear();
 		} else {
 			pendingGameAuthoritativeIdentityPixel = pixel;
+			pendingGameAuthoritativeIdentityFromCapture = dedicatedCaptureTarget;
 			latestGameAuthoritativeIdentityPick.reset();
 			latestGameAuthoritativeIdentityFailureReason.clear();
 		}
@@ -2449,26 +2561,34 @@ RenderSystem::GetLatestAuthoritativeConventionalVisibilityIdentityPick(
 
 TerraEngine::Renderer::AuthoritativeVisibilityPickState
 RenderSystem::GetConventionalVisibilityIdentityPickState(
-	RenderViewType viewType, const glm::uvec2& pixel) const
+	RenderViewType viewType, const glm::uvec2& pixel,
+	bool dedicatedCaptureTarget) const
 {
 	std::lock_guard<std::mutex> lock(statsMutex);
 	TerraEngine::Renderer::AuthoritativeVisibilityPickState state{};
 	state.pixel = pixel;
+	state.dedicatedCaptureTarget = dedicatedCaptureTarget;
 	const std::optional<VirtualGeometryVisibilityPick>& completed =
 		viewType == RenderViewType::Scene
 		? latestSceneAuthoritativeIdentityPick : latestGameAuthoritativeIdentityPick;
 	const glm::uvec2 completedPixel = viewType == RenderViewType::Scene
 		? latestSceneAuthoritativeIdentityPixel : latestGameAuthoritativeIdentityPixel;
+	const bool completedFromCapture = viewType == RenderViewType::Scene
+		? latestSceneAuthoritativeIdentityFromCapture : latestGameAuthoritativeIdentityFromCapture;
 	const std::optional<glm::uvec2>& pending = viewType == RenderViewType::Scene
 		? pendingSceneAuthoritativeIdentityPixel : pendingGameAuthoritativeIdentityPixel;
+	const bool pendingFromCapture = viewType == RenderViewType::Scene
+		? pendingSceneAuthoritativeIdentityFromCapture : pendingGameAuthoritativeIdentityFromCapture;
 	const std::string& failureReason = viewType == RenderViewType::Scene
 		? latestSceneAuthoritativeIdentityFailureReason : latestGameAuthoritativeIdentityFailureReason;
-	if (completedPixel == pixel && completed && completed->IsValid()) {
+	if (completedPixel == pixel && completed && completed->IsValid()
+		&& completedFromCapture == dedicatedCaptureTarget) {
 		state.status = TerraEngine::Renderer::AuthoritativeVisibilityPickStatus::Ready;
 		state.pick = completed;
+		state.dedicatedCaptureTarget = completedFromCapture;
 		return state;
 	}
-	if (pending && *pending == pixel) {
+	if (pending && *pending == pixel && pendingFromCapture == dedicatedCaptureTarget) {
 		state.status = TerraEngine::Renderer::AuthoritativeVisibilityPickStatus::Pending;
 		state.reason = "The typed Vulkan identity copy is waiting for its frame fence.";
 		return state;
@@ -4023,7 +4143,12 @@ void RenderSystem::Update(float deltaTime)
 	std::unordered_set<TerraEngine::UUID> aliveCompatibleAnimationObjects;
 	std::unordered_map<TerraEngine::UUID,
 		std::shared_ptr<const TerraEngine::Animation::PublishedAnimatorPose>> animatorPosePublications;
-	aliveCompatibleAnimationObjects.reserve(expectedRenderableCount);
+	// GPU-visual crowds do not retain CPU poses. Avoid allocating a large
+	// retirement set on their common frame; an existing or newly created CPU-pose
+	// cache grows this set on demand without affecting GPU-only collection.
+	if(!compatibleAnimationPoseCache.empty()) {
+		aliveCompatibleAnimationObjects.reserve(compatibleAnimationPoseCache.size());
+	}
 	animatorPosePublications.reserve(expectedRenderableCount);
 	{
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Snapshot Published Animation Poses",
@@ -4055,7 +4180,8 @@ void RenderSystem::Update(float deltaTime)
 	// checks below remain identical while ordinary lookups become constant-time.
 	const auto findUniqueGpuAnimationIdentity = [&immutableGpuAnimationPlan, &gpuPresentation,
 		protectedRendererGeneration, protectedSceneGeneration](
-		const TerraEngine::Renderer::AnimationRenderBindingRequest& request)
+		const TerraEngine::Renderer::AnimationRenderBindingRequest& request,
+		std::size_t& ownerMappingHint)
 		-> std::optional<TerraEngine::Renderer::AnimationGpuRenderBinding>
 	{
 		if(immutableGpuAnimationPlan == nullptr || gpuPresentation == nullptr
@@ -4070,11 +4196,24 @@ void RenderSystem::Update(float deltaTime)
 		}
 
 		std::optional<TerraEngine::Animation::GpuAnimationOwnerObjectMapping> ownerMapping;
-		const TerraEngine::Animation::GpuAnimationOwnerObjectMapping* ownerBegin =
-			gpuPresentation->FindFirstOwnerObjectMapping(request.animatorObjectId);
+		const auto& ownerMappings = gpuPresentation->ownerObjectMappings;
+		const TerraEngine::Animation::GpuAnimationOwnerObjectMapping* ownerBegin = nullptr;
+		if(ownerMappingHint < ownerMappings.size()
+			&& ownerMappings[ownerMappingHint].ownerObjectId
+				== request.animatorObjectId)
+		{
+			ownerBegin = ownerMappings.data() + ownerMappingHint;
+		}
+		else
+		{
+			ownerBegin = gpuPresentation->FindFirstOwnerObjectMapping(
+				request.animatorObjectId);
+			ownerMappingHint = ownerBegin != nullptr
+				? static_cast<std::size_t>(ownerBegin - ownerMappings.data())
+				: std::numeric_limits<std::size_t>::max();
+		}
 		const TerraEngine::Animation::GpuAnimationOwnerObjectMapping* ownerEnd =
-			gpuPresentation->ownerObjectMappings.data()
-				+ gpuPresentation->ownerObjectMappings.size();
+			ownerMappings.data() + ownerMappings.size();
 		for(const TerraEngine::Animation::GpuAnimationOwnerObjectMapping* ownerIt =
 				ownerBegin;
 			ownerIt != nullptr && ownerIt != ownerEnd
@@ -4243,6 +4382,7 @@ void RenderSystem::Update(float deltaTime)
 							cached.materialIdentity = std::max<std::uint64_t>(1U,
 								static_cast<std::uint64_t>(
 									std::hash<TerraEngine::UUID>{}(meshComp.materialId)));
+							cached.objectStatic = objManager.isObjectStatic(object);
 							std::optional<Object> hierarchyObject = object;
 							for(std::size_t depth = 0U;
 								hierarchyObject.has_value() && depth < 1024U; ++depth) {
@@ -4305,7 +4445,7 @@ void RenderSystem::Update(float deltaTime)
 				bool lastRuntimeMeshDeformable = false;
 				TerraEngine::Animation::AnimationCompatibilityFingerprint
 					lastRuntimeMeshSkeletonFingerprint = 0U;
-				for(const RenderableMembershipCacheRecord& cached
+				for(RenderableMembershipCacheRecord& cached
 					: renderableMembershipCache) {
 						const Object& object = cached.object;
 						const MeshRenderComponent& meshComp = cached.mesh;
@@ -4428,13 +4568,14 @@ void RenderSystem::Update(float deltaTime)
 									gpuVisualRequest.invalidation.residency =
 										runtimeMesh->deformablePayloadGeneration;
 									gpuVisualRequest.gpuVisualIdentity =
-										findUniqueGpuAnimationIdentity(gpuVisualRequest);
+										findUniqueGpuAnimationIdentity(
+											gpuVisualRequest, cached.gpuOwnerMappingHint);
 									const bool hasDirectGpuVisualBinding =
 										gpuVisualRequest.gpuVisualIdentity.has_value()
 										&& !gpuVisualRequest.gpuVisualIdentity->hybridCpuAuthority;
-									if(hasDirectGpuVisualBinding) {
-										animationBinding = ResolveAnimationRenderBinding(
-											gpuVisualRequest);
+					if(hasDirectGpuVisualBinding) {
+						animationBinding = ResolveAnimationRenderBinding(
+							gpuVisualRequest);
 									} else {
 
 									std::shared_ptr<const TerraEngine::Animation::PublishedAnimatorPose> currentPose;
@@ -4527,7 +4668,8 @@ void RenderSystem::Update(float deltaTime)
 									// Visual GPU and Hybrid. Resolve it while all mesh identity is
 									// already hot instead of rescanning every binding in a later pass.
 									request.gpuVisualIdentity =
-										findUniqueGpuAnimationIdentity(request);
+										findUniqueGpuAnimationIdentity(
+											request, cached.gpuOwnerMappingHint);
 
 									animationBinding = ResolveAnimationRenderBinding(request);
 									if(currentPose != nullptr
@@ -4563,7 +4705,7 @@ void RenderSystem::Update(float deltaTime)
 						renderables.push_back({
 							object.EntityId(), objectId, cached.objectIdentity,
 							cached.meshIdentity, cached.materialIdentity,
-							objManager.isObjectStatic(object), reflectedMesh, runtimeMesh,
+							cached.objectStatic, reflectedMesh, runtimeMesh,
 							std::move(animationBinding) });
 					}
 			}));
@@ -4898,7 +5040,34 @@ void RenderSystem::Update(float deltaTime)
 			}
 		}
 	}
-	TerraEngine::Renderer::RenderFrameSnapshot renderFrameSnapshot;
+	TerraEngine::Renderer::RenderFrameSnapshot renderFrameSnapshot =
+		std::move(recycledRenderFrameSnapshot);
+	// Reuse top-level vector capacity from the prior published frame. Clearing the
+	// non-visible owner here avoids allocating and later destroying another large
+	// crowd snapshot while the concurrently readable latest snapshot stays intact.
+	renderFrameSnapshot.viewRequests.clear();
+	renderFrameSnapshot.renderables.clear();
+	renderFrameSnapshot.conventionalVisibilityIdentityTable.clear();
+	renderFrameSnapshot.lights.clear();
+	renderFrameSnapshot.materials.clear();
+	renderFrameSnapshot.meshes.clear();
+	renderFrameSnapshot.textures.clear();
+	renderFrameSnapshot.virtualGeometryViewSelections.clear();
+	renderFrameSnapshot.virtualGeometryVisibilitySnapshots.clear();
+	renderFrameSnapshot.geometryRouteDecisions.clear();
+	// Direct-batch contents are rebuilt below, but their instance vectors retain
+	// useful crowd-sized allocations through the recycled snapshot owner.
+	for(TerraEngine::Renderer::DirectMeshletBatch& batch :
+		renderFrameSnapshot.directMeshletBatches)
+	{
+		batch.instanceIdentities.clear();
+	}
+	renderFrameSnapshot.animatedGeometryPageDemands.clear();
+	renderFrameSnapshot.animatedGeometryPageDemandCount = 0u;
+	renderFrameSnapshot.resourceRevision = 0u;
+	renderFrameSnapshot.sceneRevision = 0u;
+	renderFrameSnapshot.valid = true;
+	renderFrameSnapshot.containsLiveMutableState = false;
 	renderFrameSnapshot.frameId = activeRenderFrameId;
 	renderFrameSnapshot.renderSettings = SanitizeRenderSettings(currentSettings);
 	// Resource publications are monotonic and include decoded mesh changes. Backend
@@ -4977,11 +5146,16 @@ void RenderSystem::Update(float deltaTime)
 			std::move(emptyVisibility));
 		{
 			std::lock_guard<std::mutex> lock(statsMutex);
-			latestRenderFrameSnapshot = renderFrameSnapshot;
+			std::swap(latestRenderFrameSnapshot, renderFrameSnapshot);
+			recycledRenderFrameSnapshot = std::move(renderFrameSnapshot);
 			latestRendererRecoverySnapshot = finalRecoverySnapshot;
 			latestRenderGraphDiagnostics = noViewDiagnostics;
 			latestGameVirtualGeometryVisibilityRecords.clear();
 			latestSceneVirtualGeometryVisibilityRecords.clear();
+			latestGameCaptureVisibilityRecords.clear();
+			latestSceneCaptureVisibilityRecords.clear();
+			latestGameCaptureIdentitySnapshot = {};
+			latestSceneCaptureIdentitySnapshot = {};
 		}
 		// Even when no view submits GPU work, streaming visibility needs still
 		// have to age out. Without this cleanup pass, assets that were visible
@@ -4993,6 +5167,20 @@ void RenderSystem::Update(float deltaTime)
 		ClearOverrideCameras();
 		return;
 	}
+	struct GeometryRouteStatsAggregate
+	{
+		std::uint32_t directCount = 0U;
+		std::uint32_t virtualCount = 0U;
+		std::uint32_t sharedInstances = 0U;
+		std::uint64_t policyIdentity = 0U;
+		std::uint64_t calibrationIdentity = 0U;
+		std::uint32_t hysteresisFrames = 0U;
+		std::string fallbackReason;
+		TerraEngine::Renderer::GeometryRouteSelectionSource source =
+			TerraEngine::Renderer::GeometryRouteSelectionSource::Automatic;
+	};
+	GeometryRouteStatsAggregate geometryRouteStats;
+	std::uint64_t geometryRouteSelectionSignature = 1469598103934665603ULL;
 	{
 	TERRAENGINE_PROFILE_SCOPE("RenderSystem: Assemble Render Snapshot",
 		TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
@@ -5071,10 +5259,37 @@ void RenderSystem::Update(float deltaTime)
 	CachedGeometryRouteDecision* preparedRouteDecision = nullptr;
 	TerraEngine::UUID lastSnapshotMeshId = TerraEngine::EMPTY_UUID;
 	TerraEngine::UUID lastSnapshotMaterialId = TerraEngine::EMPTY_UUID;
-	for (const RenderableEntry& entry : renderables)
+	const std::uint64_t modelMatrixSceneGeneration = objManager.GetSceneGeneration();
+	const std::uint64_t modelMatrixSpatialRevision = objManager.GetSpatialRevision();
+	const std::uint64_t modelMatrixComponentRevision =
+		objManager.GetComponentMutationRevision();
+	const std::uint64_t modelMatrixHierarchyRevision = objManager.GetHierarchyRevision();
+	const bool reuseModelMatrices = renderableModelMatrixCache.size() == renderables.size()
+		&& renderableModelMatrixSceneGeneration == modelMatrixSceneGeneration
+		&& renderableModelMatrixSpatialRevision == modelMatrixSpatialRevision
+		&& renderableModelMatrixComponentRevision == modelMatrixComponentRevision
+		&& renderableModelMatrixHierarchyRevision == modelMatrixHierarchyRevision;
+	if(!reuseModelMatrices)
 	{
-		const auto transformIt = worldTransforms->find(entry.entity);
-		const Transform* transform = transformIt != worldTransforms->end() ? &transformIt->second : nullptr;
+		TERRAENGINE_PROFILE_SCOPE(
+			"RenderSystem: Refresh Renderable Model Matrices",
+			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		renderableModelMatrixCache.resize(renderables.size(), glm::mat4(1.0f));
+		for(std::size_t index = 0U; index < renderables.size(); ++index)
+		{
+			const auto transformIt = worldTransforms->find(renderables[index].entity);
+			renderableModelMatrixCache[index] = transformIt != worldTransforms->end()
+				? makeModelMatrix(transformIt->second) : glm::mat4(1.0f);
+		}
+		renderableModelMatrixSceneGeneration = modelMatrixSceneGeneration;
+		renderableModelMatrixSpatialRevision = modelMatrixSpatialRevision;
+		renderableModelMatrixComponentRevision = modelMatrixComponentRevision;
+		renderableModelMatrixHierarchyRevision = modelMatrixHierarchyRevision;
+	}
+	for (std::size_t renderableIndex = 0U;
+		renderableIndex < renderables.size(); ++renderableIndex)
+	{
+		const RenderableEntry& entry = renderables[renderableIndex];
 		if(preparedMeshId != entry.mesh.meshId) {
 			// Most crowds contain long runs of one mesh. Retain only the immediately
 			// preceding lookup results so identical adjacent instances avoid four
@@ -5114,7 +5329,7 @@ void RenderSystem::Update(float deltaTime)
 			entry.objectId,
 			entry.mesh.meshId,
 			entry.mesh.materialId,
-			transform ? makeModelMatrix(*transform) : glm::mat4(1.0f),
+			renderableModelMatrixCache[renderableIndex],
 			virtualRange,
 			entry.mesh.taskShaderCullingEnabled,
 			false
@@ -5216,6 +5431,20 @@ void RenderSystem::Update(float deltaTime)
 		routeSelection.stableFrameCount = preparedRoute.stableFrameCount;
 		routeSelection.fallbackReason = preparedRoute.fallbackReason;
 		routeSelection.routeGeneration = snapshotRendererGeneration;
+		geometryRouteStats.directCount += routeSelection.selected
+			== TerraEngine::Renderer::GeometryRoute::DirectMeshlet ? 1U : 0U;
+		geometryRouteStats.virtualCount += (routeSelection.selected
+			== TerraEngine::Renderer::GeometryRoute::VirtualGeometryHardware
+			|| routeSelection.selected
+				== TerraEngine::Renderer::GeometryRoute::VirtualGeometryCompute) ? 1U : 0U;
+		geometryRouteStats.policyIdentity = routeSelection.policyIdentity;
+		geometryRouteStats.calibrationIdentity = routeSelection.calibrationIdentity;
+		geometryRouteStats.hysteresisFrames = std::max(
+			geometryRouteStats.hysteresisFrames, routeSelection.stableFrameCount);
+		geometryRouteStats.source = routeSelection.source;
+		geometryRouteSelectionSignature ^=
+			static_cast<std::uint64_t>(routeSelection.selected) + 1U;
+		geometryRouteSelectionSignature *= 1099511628211ULL;
 		snapshotRenderable.geometryRouteInput.sourceTriangleCount =
 			routeFacts.sourceTriangleCount;
 		snapshotRenderable.geometryRouteInput.packedMeshletCount =
@@ -5322,47 +5551,69 @@ void RenderSystem::Update(float deltaTime)
 	{
 	TERRAENGINE_PROFILE_SCOPE("RenderSystem: Build Direct Meshlet Batches",
 		TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-	for(const TerraEngine::Renderer::RenderFrameRenderableRecord& renderable : renderFrameSnapshot.renderables)
+	std::size_t activeDirectBatchCount = 0U;
+	for(const TerraEngine::Renderer::RenderFrameRenderableRecord& renderable :
+		renderFrameSnapshot.renderables)
 	{
-		if(renderable.geometryRouteDecision.selected != TerraEngine::Renderer::GeometryRoute::DirectMeshlet)
+		if(renderable.geometryRouteDecision.selected
+			!= TerraEngine::Renderer::GeometryRoute::DirectMeshlet)
 		{
 			continue;
 		}
-		const std::uint64_t geometryIdentity = renderable.geometryRouteDecision.meshIdentity;
-		const std::uint64_t materialIdentity = static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(renderable.materialId));
+		const std::uint64_t geometryIdentity =
+			renderable.geometryRouteDecision.meshIdentity;
+		const std::uint64_t materialIdentity = static_cast<std::uint64_t>(
+			std::hash<TerraEngine::UUID>{}(renderable.materialId));
+		auto activeBatchEnd = renderFrameSnapshot.directMeshletBatches.begin()
+			+ static_cast<std::ptrdiff_t>(activeDirectBatchCount);
 		auto batch = std::find_if(renderFrameSnapshot.directMeshletBatches.begin(),
-			renderFrameSnapshot.directMeshletBatches.end(),
-			[geometryIdentity, materialIdentity](const TerraEngine::Renderer::DirectMeshletBatch& value) {
-				return value.geometryIdentity == geometryIdentity && value.materialIdentity == materialIdentity;
+			activeBatchEnd,
+			[geometryIdentity, materialIdentity](
+				const TerraEngine::Renderer::DirectMeshletBatch& value)
+			{
+				return value.geometryIdentity == geometryIdentity
+					&& value.materialIdentity == materialIdentity;
 			});
-		if(batch == renderFrameSnapshot.directMeshletBatches.end())
+		if(batch == activeBatchEnd)
 		{
-			TerraEngine::Renderer::DirectMeshletBatch value{};
-			value.geometryIdentity = geometryIdentity;
-			value.geometryGeneration = snapshotRendererGeneration;
-			value.materialIdentity = materialIdentity;
+			if(activeDirectBatchCount == renderFrameSnapshot.directMeshletBatches.size())
+			{
+				renderFrameSnapshot.directMeshletBatches.emplace_back();
+			}
+			batch = renderFrameSnapshot.directMeshletBatches.begin()
+				+ static_cast<std::ptrdiff_t>(activeDirectBatchCount++);
+			batch->geometryIdentity = geometryIdentity;
+			batch->geometryGeneration = snapshotRendererGeneration;
+			batch->materialIdentity = materialIdentity;
+			batch->firstMeshlet = 0U;
+			batch->meshletCount = 0U;
 			const auto cachedDirectMesh = frameMeshResources.find(renderable.meshId);
 			const Mesh* directMesh = cachedDirectMesh != frameMeshResources.end()
 				? cachedDirectMesh->second : nullptr;
-			if (directMesh != nullptr && !directMesh->virtualGeometryDetailLevels.empty())
+			if(directMesh != nullptr
+				&& !directMesh->virtualGeometryDetailLevels.empty())
 			{
 				const VirtualGeometryDetailLevelRecord& baseDetail =
 					directMesh->virtualGeometryDetailLevels.front();
-				value.firstMeshlet = baseDetail.meshletOffset;
-				value.meshletCount = baseDetail.meshletCount;
+				batch->firstMeshlet = baseDetail.meshletOffset;
+				batch->meshletCount = baseDetail.meshletCount;
 			}
 			else
 			{
-				value.meshletCount = renderable.geometryRouteInput.packedMeshletCount;
+				batch->meshletCount =
+					renderable.geometryRouteInput.packedMeshletCount;
 			}
-			renderFrameSnapshot.directMeshletBatches.push_back(std::move(value));
-			batch = std::prev(renderFrameSnapshot.directMeshletBatches.end());
 		}
-		// Object identity is stable across all views, so a direct batch shares one
-		// packed meshlet allocation rather than duplicating geometry per camera.
-		batch->instanceIdentities.push_back(renderable.geometryRouteDecision.objectIdentity);
+		// A batch shares one immutable geometry allocation across every matching
+		// object, while retaining stable identities for per-instance state.
+		batch->instanceIdentities.push_back(
+			renderable.geometryRouteDecision.objectIdentity);
+		++geometryRouteStats.sharedInstances;
 	}
+	renderFrameSnapshot.directMeshletBatches.resize(activeDirectBatchCount);
 	}
+	geometryRouteSelectionSignature ^=
+		static_cast<std::uint64_t>(renderFrameSnapshot.renderables.size());
 	renderFrameSnapshot.lights.reserve(lights.size());
 	for (const LightEntry& light : lights)
 	{
@@ -5376,116 +5627,505 @@ void RenderSystem::Update(float deltaTime)
 	// Candidate construction is deferred until every view has resolved visibility.
 	// The callable captures immutable frame records, but performs no work here;
 	// this prevents offscreen crowds from allocating and scanning every cooked page.
-	const auto buildAnimatedGeometryCandidates = [&renderFrameSnapshot,
-		&snapshotRendererGeneration, &protectedSceneGeneration](
-		const std::unordered_set<TerraEngine::UUID>& visibleAnimatedObjects)
+	struct AnimatedGeometryBuildResult
 	{
-		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Build Animated Deformation Candidates",
-								  TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		std::vector<TerraEngine::Renderer::DeformationPageDemand> candidates;
-		const std::size_t deformationViewCount =
-			std::min<std::size_t>(renderFrameSnapshot.viewRequests.size(), 64u);
-		const std::uint64_t deformationViewMask =
-			deformationViewCount == 64u ? std::numeric_limits<std::uint64_t>::max()
-										: ((std::uint64_t{1u} << deformationViewCount) - 1u);
-		for (const TerraEngine::Renderer::RenderFrameRenderableRecord& renderable :
-			 renderFrameSnapshot.renderables)
+		std::shared_ptr<const TerraEngine::Renderer::GpuDeformationPlan> immutablePlan;
+		std::size_t demandCount = 0u;
+	};
+	const auto buildAnimatedGeometryPlan = [&renderFrameSnapshot,
+		&snapshotRendererGeneration, &protectedSceneGeneration](
+		std::span<const std::uint8_t> visibleAnimatedRenderables,
+		const std::unordered_map<TerraEngine::UUID, std::size_t>&
+			renderableIndicesByObjectId)
+	{
+		struct DeformablePageShape
 		{
-			if (!visibleAnimatedObjects.contains(renderable.objectId)
-				|| !TerraEngine::Renderer::
-					CanScheduleGpuAnimatedPageDeformation(renderable.animation)
-				|| deformationViewMask == 0u)
+			std::uint32_t pageId = 0u;
+			std::uint64_t contentGeneration = 0u;
+			std::uint32_t vertexCount = 0u;
+			std::uint32_t meshletCount = 0u;
+		};
+		struct DeformablePageFamily
+		{
+			TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+			std::vector<DeformablePageShape> pages;
+		};
+		struct AnimatedPageDemandSource
+		{
+			std::size_t renderableIndex = 0u;
+			std::size_t pageFamilyIndex = 0u;
+			std::size_t exactPageMaskOffset = 0u;
+			std::uint64_t fallbackViewMask = 0u;
+		};
+		AnimatedGeometryBuildResult result;
+		// A heterogeneous crowd still contains only a small number of exact mesh
+		// families. Parse each immutable demanded-page directory once per frame,
+		// then stamp the instance-specific generations onto the retained shape.
+		std::vector<DeformablePageFamily> pageFamilies;
+		pageFamilies.reserve(16u);
+		thread_local std::vector<AnimatedPageDemandSource> demandSources;
+		thread_local std::vector<std::size_t> sourceIndicesByRenderable;
+		thread_local std::vector<std::uint64_t> resolvedExactPageMasks;
+		demandSources.clear();
+		demandSources.reserve(renderFrameSnapshot.renderables.size());
+		sourceIndicesByRenderable.assign(renderFrameSnapshot.renderables.size(),
+			std::numeric_limits<std::size_t>::max());
+		resolvedExactPageMasks.clear();
+		resolvedExactPageMasks.reserve(renderFrameSnapshot.renderables.size() * 3u);
+		{
+			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Gather Animated Page Sources",
+				TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			for(std::size_t renderableIndex = 0u;
+				renderableIndex < renderFrameSnapshot.renderables.size(); ++renderableIndex)
 			{
-				continue;
-			}
-			const Mesh* mesh = ResourceManager::Instance().GetMesh(renderable.meshId);
-			if (mesh == nullptr || !mesh->hasDeformableDemandedPages ||
-				mesh->deformableDemandedPageEntries.size() !=
-					mesh->deformableDemandedPageSections.size())
-			{
-				continue;
-			}
-			for (std::size_t pageIndex = 0u; pageIndex < mesh->deformableDemandedPageEntries.size();
-				 ++pageIndex)
-			{
-				const TemfDeformableDemandedPageEntry& page =
-					mesh->deformableDemandedPageEntries[pageIndex];
-				std::uint32_t vertexCount = 0u;
-				std::uint32_t meshletCount = 0u;
-				for (const TemfDeformablePageSection& section :
-					 mesh->deformableDemandedPageSections[pageIndex])
-				{
-					if (section.kind == TemfDeformablePageSectionKind::PackedVertices)
-					{
-						vertexCount = section.elementCount;
-					}
-					else if (section.kind == TemfDeformablePageSectionKind::Meshlets)
-					{
-						meshletCount = section.elementCount;
-					}
-				}
-				if (vertexCount == 0u || meshletCount == 0u)
+				const TerraEngine::Renderer::RenderFrameRenderableRecord& renderable =
+					renderFrameSnapshot.renderables[renderableIndex];
+				if(renderableIndex >= visibleAnimatedRenderables.size()
+					|| visibleAnimatedRenderables[renderableIndex] == 0u
+					|| !TerraEngine::Renderer::
+						CanScheduleGpuAnimatedPageDeformation(renderable.animation))
 				{
 					continue;
 				}
-				TerraEngine::Renderer::DeformationPageDemand demand;
-				demand.key.page.meshId = renderable.meshId;
-				demand.key.page.meshPayloadGeneration =
-					renderable.animation.deformablePayloadGeneration;
-				demand.key.page.pageId = page.pageId;
-				demand.key.page.pageContentGeneration = page.contentGeneration;
-				demand.key.page.residencyGeneration = page.contentGeneration;
-				demand.key.page.layoutVersion = TerraEngine::Renderer::kAnimatedGeometryAbiVersion;
-				// The current runtime page is the expanded v1 profile. Compact
-				// profiles publish different values and cannot alias cached
-				// output.
-				demand.key.page.codecProfile = 1u;
-				demand.key.page.codecVersion = 1u;
-				demand.key.deformation.stableInstanceId = renderable.animation.stableInstanceId;
-				demand.key.deformation.objectGeneration =
-					std::max<std::uint64_t>(1u, renderable.invalidation.asset);
-				demand.key.deformation.animationPublicationGeneration =
-					renderable.animation.poseGeneration;
-				demand.key.deformation.skeletonGeneration =
-					std::max<std::uint64_t>(1u, renderable.animation.programGeneration);
-				demand.key.deformation.morphGeneration = renderable.animation.morphGeneration;
-				demand.key.deformation.meshPayloadGeneration =
-					renderable.animation.deformablePayloadGeneration;
-				demand.key.deformation.rendererGeneration = snapshotRendererGeneration;
-				demand.key.deformation.sceneGeneration =
-					std::max<std::uint64_t>(1u, protectedSceneGeneration);
-				demand.key.deformation.contentIdLow = renderable.animation.deformationContentIdLow;
-				demand.key.deformation.contentIdHigh =
-					renderable.animation.deformationContentIdHigh;
-				demand.key.inputLayoutVersion = TerraEngine::Renderer::kAnimatedGeometryAbiVersion;
-				demand.key.animationLod = 0u;
-				demand.key.animationLodVersion = TerraEngine::Renderer::kAnimatedGeometryAbiVersion;
-				demand.sourceRecordIndex =
-					renderable.animation.firstGpuWorkPacket;
-				demand.ownerStableInstanceId = renderable.animation.stableInstanceId;
-				demand.sourceStableInstanceId = renderable.animation.stableInstanceId;
-				demand.vertexCount = vertexCount;
-				demand.meshletCount = meshletCount;
-				// Each canonical demanded-page entry owns exactly one cluster.
-				demand.clusterCount = 1u;
-				demand.requestedViewMask = deformationViewMask;
-				demand.priorHistoryCompatible =
-					renderable.invalidation.pose == renderable.animation.poseGeneration &&
-					renderable.invalidation.morph == renderable.animation.morphGeneration;
-				candidates.push_back(std::move(demand));
+				auto family = std::find_if(pageFamilies.begin(), pageFamilies.end(),
+					[&renderable](const DeformablePageFamily& candidate)
+					{
+						return candidate.meshId == renderable.meshId;
+					});
+				if(family == pageFamilies.end())
+				{
+					DeformablePageFamily candidate;
+					candidate.meshId = renderable.meshId;
+					const Mesh* mesh = ResourceManager::Instance().GetMesh(renderable.meshId);
+					if(mesh != nullptr && mesh->hasDeformableDemandedPages
+						&& mesh->deformableDemandedPageEntries.size()
+							== mesh->deformableDemandedPageSections.size())
+					{
+						candidate.pages.reserve(mesh->deformableDemandedPageEntries.size());
+						for(std::size_t pageIndex = 0u;
+							pageIndex < mesh->deformableDemandedPageEntries.size(); ++pageIndex)
+						{
+							DeformablePageShape pageShape{};
+							pageShape.pageId = mesh->deformableDemandedPageEntries[pageIndex].pageId;
+							pageShape.contentGeneration =
+								mesh->deformableDemandedPageEntries[pageIndex].contentGeneration;
+							for(const TemfDeformablePageSection& section :
+								mesh->deformableDemandedPageSections[pageIndex])
+							{
+								if(section.kind == TemfDeformablePageSectionKind::PackedVertices)
+								{
+									pageShape.vertexCount = section.elementCount;
+								}
+								else if(section.kind == TemfDeformablePageSectionKind::Meshlets)
+								{
+									pageShape.meshletCount = section.elementCount;
+								}
+							}
+							if(pageShape.vertexCount != 0u && pageShape.meshletCount != 0u)
+							{
+								candidate.pages.push_back(pageShape);
+							}
+						}
+					}
+					pageFamilies.push_back(std::move(candidate));
+					family = std::prev(pageFamilies.end());
+				}
+				const std::size_t sourceIndex = demandSources.size();
+				const std::size_t exactPageMaskOffset = resolvedExactPageMasks.size();
+				sourceIndicesByRenderable[renderableIndex] = sourceIndex;
+				demandSources.push_back({
+					renderableIndex,
+					static_cast<std::size_t>(family - pageFamilies.begin()),
+					exactPageMaskOffset,
+					0u
+				});
+				resolvedExactPageMasks.resize(exactPageMaskOffset + family->pages.size(), 0u);
 			}
 		}
-		return candidates;
+		thread_local std::vector<std::uint64_t> fallbackViewMasks;
+		fallbackViewMasks.assign(renderFrameSnapshot.renderables.size(), 0U);
+		const auto findExactPageMask = [&](std::size_t renderableIndex,
+			std::uint32_t pageId) -> std::uint64_t*
+		{
+			if(renderableIndex >= sourceIndicesByRenderable.size())
+			{
+				return nullptr;
+			}
+			const std::size_t sourceIndex = sourceIndicesByRenderable[renderableIndex];
+			if(sourceIndex >= demandSources.size())
+			{
+				return nullptr;
+			}
+			const AnimatedPageDemandSource& source = demandSources[sourceIndex];
+			const std::vector<DeformablePageShape>& pages =
+				pageFamilies[source.pageFamilyIndex].pages;
+			for(std::size_t pageIndex = 0u; pageIndex < pages.size(); ++pageIndex)
+			{
+				if(pages[pageIndex].pageId == pageId)
+				{
+					return &resolvedExactPageMasks[source.exactPageMaskOffset + pageIndex];
+				}
+			}
+			return nullptr;
+		};
+		{
+			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Accumulate Deformation View Masks",
+				TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			// The canonical renderable index addresses a compact per-family mask range.
+			// Exact cluster or packet pages win per view, while unmatched visible draws
+			// safely retain every validated page owned by that animator.
+			for(std::size_t viewIndex = 0u;
+				viewIndex < renderFrameSnapshot.virtualGeometryViewSelections.size(); ++viewIndex)
+			{
+				const std::uint64_t viewMask = std::uint64_t{1u}
+					<< std::min<std::size_t>(viewIndex, 63u);
+				const TerraEngine::Renderer::VirtualGeometryViewSelectionState& view =
+					renderFrameSnapshot.virtualGeometryViewSelections[viewIndex];
+				for(const TerraEngine::Renderer::VirtualGeometryViewDrawRecord& draw :
+					view.DrawRecords())
+				{
+					std::size_t renderableIndex = draw.renderableIndex;
+					if(renderableIndex >= renderFrameSnapshot.renderables.size())
+					{
+						const auto renderable = renderableIndicesByObjectId.find(draw.objectId);
+						if(renderable == renderableIndicesByObjectId.end())
+						{
+							continue;
+						}
+						renderableIndex = renderable->second;
+					}
+					if(renderableIndex < sourceIndicesByRenderable.size()
+						&& sourceIndicesByRenderable[renderableIndex] < demandSources.size()
+						&& draw.range.meshletCount != 0u
+						&& (draw.range.virtualGeometryActive || draw.range.failOpen))
+					{
+						fallbackViewMasks[renderableIndex] |= viewMask;
+					}
+					const std::size_t firstCluster = std::min<std::size_t>(
+						draw.range.selectedClusterOffset, view.SelectedClusters().size());
+					const std::size_t clusterCount = std::min<std::size_t>(
+						draw.range.selectedClusterCount,
+						view.SelectedClusters().size() - firstCluster);
+					for(std::size_t clusterIndex = firstCluster;
+						clusterIndex < firstCluster + clusterCount; ++clusterIndex)
+					{
+						const TerraEngine::Renderer::VirtualGeometrySelectedClusterRecord& cluster =
+							view.SelectedClusters()[clusterIndex];
+						if(cluster.objectId == draw.objectId)
+						{
+							if(std::uint64_t* exactMask = findExactPageMask(
+								renderableIndex, cluster.pageId))
+							{
+								*exactMask |= viewMask;
+							}
+						}
+					}
+				}
+				for(const GpuVirtualGeometryPacketRecord& packet : view.GpuPacketRecords())
+				{
+					const bool exactPage = packet.payloadSource
+						== VirtualGeometryPagePayloadSource::ResidentPagePayload
+						|| packet.payloadSource
+						== VirtualGeometryPagePayloadSource::ResidentFallbackPayload
+						|| packet.payloadSource
+						== VirtualGeometryPagePayloadSource::EmbeddedMeshPayload
+						|| packet.payloadSource
+						== VirtualGeometryPagePayloadSource::ConservativeEmbeddedFallback;
+					if(exactPage)
+					{
+						std::size_t renderableIndex = packet.renderableIndex;
+						if(renderableIndex >= renderFrameSnapshot.renderables.size()
+							|| renderFrameSnapshot.renderables[renderableIndex].objectId
+								!= packet.objectId)
+						{
+							const auto renderable = renderableIndicesByObjectId.find(
+								packet.objectId);
+							if(renderable == renderableIndicesByObjectId.end())
+							{
+								continue;
+							}
+							renderableIndex = renderable->second;
+						}
+						if(std::uint64_t* exactMask = findExactPageMask(
+							renderableIndex, packet.pageId))
+						{
+							*exactMask |= viewMask;
+						}
+					}
+				}
+			}
+			for(AnimatedPageDemandSource& source : demandSources)
+			{
+				const std::vector<DeformablePageShape>& pages =
+					pageFamilies[source.pageFamilyIndex].pages;
+				std::uint64_t matchedViewMask = 0u;
+				for(std::size_t pageIndex = 0u; pageIndex < pages.size(); ++pageIndex)
+				{
+					matchedViewMask |= resolvedExactPageMasks[
+						source.exactPageMaskOffset + pageIndex];
+				}
+				source.fallbackViewMask = fallbackViewMasks[source.renderableIndex]
+					& ~matchedViewMask;
+			}
+		}
+		TerraEngine::Renderer::GpuDeformationPlanAccumulator accumulator(
+			renderFrameSnapshot.frameId,
+			snapshotRendererGeneration,
+			std::min(visibleAnimatedRenderables.size(),
+				renderFrameSnapshot.renderables.size()));
+		{
+			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Accumulate Animated Page Demands",
+				TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			for(const AnimatedPageDemandSource& source : demandSources)
+			{
+				const TerraEngine::Renderer::RenderFrameRenderableRecord& renderable =
+					renderFrameSnapshot.renderables[source.renderableIndex];
+				const std::vector<DeformablePageShape>& pages =
+					pageFamilies[source.pageFamilyIndex].pages;
+				for(std::size_t pageIndex = 0u; pageIndex < pages.size(); ++pageIndex)
+				{
+					const DeformablePageShape& page = pages[pageIndex];
+					const std::uint64_t exactViewMask = resolvedExactPageMasks[
+						source.exactPageMaskOffset + pageIndex];
+					const std::uint64_t requestedViewMask =
+						source.fallbackViewMask | exactViewMask;
+					if(requestedViewMask == 0u)
+					{
+						continue;
+					}
+					TerraEngine::Renderer::DeformationPageDemand demand;
+					demand.key.page.meshId = renderable.meshId;
+					demand.key.page.meshPayloadGeneration =
+						renderable.animation.deformablePayloadGeneration;
+					demand.key.page.pageId = page.pageId;
+					demand.key.page.pageContentGeneration = page.contentGeneration;
+					demand.key.page.residencyGeneration = page.contentGeneration;
+					demand.key.page.layoutVersion =
+						TerraEngine::Renderer::kAnimatedGeometryAbiVersion;
+					// The runtime page currently uses the expanded production profile.
+					// Other profiles publish distinct values and cannot alias this output.
+					demand.key.page.codecProfile = 1u;
+					demand.key.page.codecVersion = 1u;
+					demand.key.deformation.stableInstanceId =
+						renderable.animation.stableInstanceId;
+					demand.key.deformation.objectGeneration =
+						std::max<std::uint64_t>(1u, renderable.invalidation.asset);
+					demand.key.deformation.animationPublicationGeneration =
+						renderable.animation.poseGeneration;
+					demand.key.deformation.skeletonGeneration =
+						std::max<std::uint64_t>(1u, renderable.animation.programGeneration);
+					demand.key.deformation.morphGeneration =
+						renderable.animation.morphGeneration;
+					demand.key.deformation.meshPayloadGeneration =
+						renderable.animation.deformablePayloadGeneration;
+					demand.key.deformation.rendererGeneration = snapshotRendererGeneration;
+					demand.key.deformation.sceneGeneration =
+						std::max<std::uint64_t>(1u, protectedSceneGeneration);
+					demand.key.deformation.contentIdLow =
+						renderable.animation.deformationContentIdLow;
+					demand.key.deformation.contentIdHigh =
+						renderable.animation.deformationContentIdHigh;
+					demand.key.inputLayoutVersion =
+						TerraEngine::Renderer::kAnimatedGeometryAbiVersion;
+					demand.key.animationLod = 0u;
+					demand.key.animationLodVersion =
+						TerraEngine::Renderer::kAnimatedGeometryAbiVersion;
+					demand.sourceRecordIndex = renderable.animation.firstGpuWorkPacket;
+					demand.ownerStableInstanceId = renderable.animation.stableInstanceId;
+					demand.sourceStableInstanceId = renderable.animation.stableInstanceId;
+					demand.vertexCount = page.vertexCount;
+					demand.meshletCount = page.meshletCount;
+					// Each canonical demanded-page entry owns exactly one cluster.
+					demand.clusterCount = 1u;
+					demand.requestedViewMask = requestedViewMask;
+					demand.priorHistoryCompatible =
+						renderable.invalidation.pose == renderable.animation.poseGeneration
+						&& renderable.invalidation.morph
+							== renderable.animation.morphGeneration;
+					++result.demandCount;
+					(void)accumulator.Add(demand);
+				}
+			}
+		}
+		if(result.demandCount != 0u)
+		{
+			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Finalize Deformation Plan",
+				TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			result.immutablePlan =
+				std::make_shared<const TerraEngine::Renderer::GpuDeformationPlan>(
+					std::move(accumulator).Finish());
+		}
+		return result;
 	};
 	std::vector<TerraEngine::Renderer::RenderPassNode> renderGraphPasses;
 	TerraEngine::Renderer::RenderWorkPacketPlan renderPacketPlan;
+	struct RetainedRenderTopologyState
+	{
+		std::uint64_t stableSignature = 0u;
+		PersistentRenderTopology topology{};
+		// Stable crowds preserve their canonical order and readback identity table.
+		// The frame still receives an owned table copy before workers run, so a
+		// capture can outlive this coordinator cache without observing later edits.
+		std::vector<TerraEngine::UUID> orderedObjectIds;
+		std::vector<TerraEngine::Renderer::ConventionalVisibilityIdentityRecord>
+			conventionalVisibilityIdentityTable;
+		std::unordered_map<TerraEngine::UUID, std::uint32_t>
+			conventionalVisibilityIdentityIndices;
+		// These protected revisions make reuse fail closed when producer
+		// membership, mesh-component values, hierarchy ownership, or resources
+		// change. Transform/animation values remain dynamic sidecars by design.
+		std::uint64_t sceneGeneration = 0u;
+		std::uint64_t componentMutationRevision = 0u;
+		std::uint64_t meshComponentRevision = 0u;
+		std::uint64_t hierarchyRevision = 0u;
+		std::uint64_t resourceRevision = 0u;
+		std::uint64_t rendererGeneration = 0u;
+		const RenderSystem* owner = nullptr;
+	};
+	static RetainedRenderTopologyState retainedRenderTopology;
+	static GroupedSubmissionMembershipCacheState groupedSubmissionMembershipCache;
+	if(groupedSubmissionMembershipCache.owner != this) {
+		groupedSubmissionMembershipCache = {};
+		groupedSubmissionMembershipCache.owner = this;
+	}
+	bool renderTopologyRebuilt = false;
 	{
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Lower Render Snapshot",
 			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		TerraEngine::Renderer::SortSnapshotDeterministically(renderFrameSnapshot);
+		const auto matchesRetainedOrder = [&]() {
+			if (retainedRenderTopology.orderedObjectIds.size()
+				!= renderFrameSnapshot.renderables.size())
+			{
+				return false;
+			}
+			for (std::size_t index = 0u;
+				index < renderFrameSnapshot.renderables.size(); ++index)
+			{
+				if (retainedRenderTopology.orderedObjectIds[index]
+					!= renderFrameSnapshot.renderables[index].objectId)
+				{
+					return false;
+				}
+			}
+			return true;
+		};
+		// Collectors normally preserve their canonical object order. Verify that
+		// proof first and skip an O(n log n) sort for a stable crowd; any change
+		// falls back to the existing deterministic sort before publication.
+		const bool retainedOrderMatches = matchesRetainedOrder();
+		if (!retainedOrderMatches)
+		{
+			TerraEngine::Renderer::SortSnapshotDeterministically(renderFrameSnapshot);
+		}
+		const std::uint64_t topologySceneGeneration = objManager.GetSceneGeneration();
+		const std::uint64_t topologyComponentMutationRevision =
+			objManager.GetComponentMutationRevision();
+		const std::uint64_t topologyMeshComponentRevision =
+			objManager.GetComponentValueMutationRevision(MeshRenderComponent::kComponentName);
+		const std::uint64_t topologyHierarchyRevision = objManager.GetHierarchyRevision();
+		// Exact monotonic producers prove whether any immutable input can have
+		// changed. On a warm frame, this constant-time gate avoids hashing every
+		// mesh/material/group key again. Object order is still checked above because
+		// it is the index contract shared with frame-owned dynamic sidecars.
+		const bool topologyObservationUnchanged = retainedRenderTopology.topology.valid
+			&& retainedRenderTopology.owner == this
+			&& retainedOrderMatches
+			&& retainedRenderTopology.sceneGeneration == topologySceneGeneration
+			&& retainedRenderTopology.componentMutationRevision
+				== topologyComponentMutationRevision
+			&& retainedRenderTopology.meshComponentRevision == topologyMeshComponentRevision
+			&& retainedRenderTopology.hierarchyRevision == topologyHierarchyRevision
+			&& retainedRenderTopology.resourceRevision == renderFrameSnapshot.resourceRevision
+			&& retainedRenderTopology.rendererGeneration == snapshotRendererGeneration;
+		bool topologyInputsChanged = !topologyObservationUnchanged;
+		std::uint64_t stableTopologySignature = retainedRenderTopology.stableSignature;
+		if (topologyInputsChanged)
+		{
+			// Fold only membership and immutable compatibility inputs after a producer
+			// revision changed. Dynamic transforms, animation samples, visibility, LOD,
+			// and page selection remain frame-owned sidecars and never enter this key.
+			stableTopologySignature = kRenderHashOffset;
+			for (const TerraEngine::Renderer::RenderFrameRenderableRecord& renderable
+				: renderFrameSnapshot.renderables)
+			{
+				const SharedRenderGroupKey key =
+					TerraEngine::Renderer::BuildSharedRenderGroupKey(renderable, {});
+				HashCombine(stableTopologySignature,
+					static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(renderable.objectId)));
+				HashCombine(stableTopologySignature,
+					static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(key.meshId)));
+				HashCombine(stableTopologySignature,
+					static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(key.materialId)));
+				HashCombine(stableTopologySignature, key.meshGeneration);
+				HashCombine(stableTopologySignature, key.materialGeneration);
+				HashCombine(stableTopologySignature, key.pipelineGeneration);
+				HashCombine(stableTopologySignature, key.residencyGeneration);
+				HashCombine(stableTopologySignature, key.rendererGeneration);
+				HashCombine(stableTopologySignature, key.qualityVariant);
+			}
+		}
+		if (topologyInputsChanged)
+		{
+			retainedRenderTopology.topology =
+				TerraEngine::Renderer::BuildPersistentRenderTopology(
+					renderFrameSnapshot, stableTopologySignature);
+			retainedRenderTopology.stableSignature = stableTopologySignature;
+			retainedRenderTopology.orderedObjectIds.clear();
+			retainedRenderTopology.conventionalVisibilityIdentityTable.clear();
+			retainedRenderTopology.conventionalVisibilityIdentityIndices.clear();
+			retainedRenderTopology.orderedObjectIds.reserve(
+				renderFrameSnapshot.renderables.size());
+			retainedRenderTopology.conventionalVisibilityIdentityTable.reserve(
+				renderFrameSnapshot.renderables.size());
+			retainedRenderTopology.conventionalVisibilityIdentityIndices.reserve(
+				renderFrameSnapshot.renderables.size());
+			for (std::size_t index = 0u;
+				index < renderFrameSnapshot.renderables.size(); ++index)
+			{
+				// Zero remains the typed attachment's clear/no-producer sentinel.
+				const std::uint32_t identityIndex = static_cast<std::uint32_t>(index + 1u);
+				TerraEngine::Renderer::RenderFrameRenderableRecord& renderable =
+					renderFrameSnapshot.renderables[index];
+				renderable.conventionalVisibilityIdentityIndex = identityIndex;
+				retainedRenderTopology.orderedObjectIds.push_back(renderable.objectId);
+				retainedRenderTopology.conventionalVisibilityIdentityTable.push_back({
+					identityIndex, renderable.objectId, renderable.meshId,
+					renderable.materialId });
+				retainedRenderTopology.conventionalVisibilityIdentityIndices.emplace(
+					renderable.objectId, identityIndex);
+			}
+			retainedRenderTopology.sceneGeneration = topologySceneGeneration;
+			retainedRenderTopology.componentMutationRevision =
+				topologyComponentMutationRevision;
+			retainedRenderTopology.meshComponentRevision = topologyMeshComponentRevision;
+			retainedRenderTopology.hierarchyRevision = topologyHierarchyRevision;
+			retainedRenderTopology.resourceRevision = renderFrameSnapshot.resourceRevision;
+			retainedRenderTopology.rendererGeneration = snapshotRendererGeneration;
+			retainedRenderTopology.owner = this;
+			renderTopologyRebuilt = true;
+		}
+		else
+		{
+			// The static identity records are already canonical. Only restore the
+			// one-based attachment for this independent dynamic snapshot; copying the
+			// compact table is intentionally cheaper than rehashing every object ID.
+			for (std::size_t index = 0u;
+				index < renderFrameSnapshot.renderables.size(); ++index)
+			{
+				renderFrameSnapshot.renderables[index]
+					.conventionalVisibilityIdentityIndex = static_cast<std::uint32_t>(index + 1u);
+			}
+		}
+		renderFrameSnapshot.conventionalVisibilityIdentityTable =
+			retainedRenderTopology.conventionalVisibilityIdentityTable;
 		renderGraphPasses = TerraEngine::Renderer::BuildDefaultRenderPasses(renderFrameSnapshot, backendCapabilities);
 		renderPacketPlan = TerraEngine::Renderer::BuildRenderWorkPacketPlan(renderFrameSnapshot, renderGraphPasses, backendCapabilities);
 	}
+	// Draw-list materialization consults the retained map instead of reconstructing
+	// a UUID lookup for every stable frame. The map contains only static snapshot
+	// identities and is replaced atomically at this protected coordinator point.
+	const auto& conventionalVisibilityIdentityIndices =
+		retainedRenderTopology.conventionalVisibilityIdentityIndices;
 	static TerraEngine::Renderer::Vulkan::VulkanRendererPreparationCache rendererPreparationCache;
 	TerraEngine::Renderer::Vulkan::VulkanRendererPreparationSummary rendererPreparationSummary;
 	{
@@ -5964,6 +6604,11 @@ void RenderSystem::Update(float deltaTime)
 			commands.push_back(renderableDrawCommands[candidateIndex]);
 			commands.back().animationBinding =
 				renderables[candidateIndex].animationBinding;
+			const auto identity = conventionalVisibilityIdentityIndices.find(
+				commands.back().objectId);
+			commands.back().conventionalVisibilityIdentityIndex =
+				identity != conventionalVisibilityIdentityIndices.end()
+					? identity->second : 0u;
 		}
 		return commands;
 	};
@@ -6006,7 +6651,10 @@ void RenderSystem::Update(float deltaTime)
 		std::uint32_t outputId,
 		bool shadowPass,
 		bool exportRuntime,
-		const std::vector<std::uint32_t>* virtualGeometryCommandIndices = nullptr) {
+		const std::vector<std::uint32_t>* virtualGeometryCommandIndices = nullptr,
+		bool reuseValidatedSelection = false,
+		const VirtualGeometryViewSelectionPacket* preparedSelection = nullptr,
+		const VisibleCommandCacheRecord* cachedSelectionEvidence = nullptr) {
 		TerraEngine::Renderer::VirtualGeometryViewSelectionState state;
 		state.outputKind = outputKind;
 		state.viewType = viewType;
@@ -6071,13 +6719,52 @@ void RenderSystem::Update(float deltaTime)
 		{
 			state.hiZInactiveReason = "View-owned virtual-geometry history is not reusable; visibility remains conservative.";
 		}
-		state.selectedClusters = selectedClusters;
-		state.pageNeeds = pageNeeds;
-		state.clusterPackets = clusterPackets;
-		state.clusterBatches = clusterBatches;
-		state.compactionResults = compactionResults;
-		state.fallbackCoverage = fallbackCoverage;
-		state.lodTransitionStates = lodTransitionStates;
+		{
+			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Copy VG Selection Inputs",
+				TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			if(cachedSelectionEvidence != nullptr
+				&& cachedSelectionEvidence->retainedSelectionEvidence)
+			{
+				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Reference Cached VG Selection Evidence",
+					TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+				state.retainedSelectionEvidence =
+					cachedSelectionEvidence->retainedSelectionEvidence;
+			}
+			else
+			{
+				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Copy Unretained VG Selection Evidence",
+					TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+				state.selectedClusters = selectedClusters;
+				state.pageNeeds = pageNeeds;
+				state.clusterPackets = clusterPackets;
+				state.clusterBatches = clusterBatches;
+				state.compactionResults = compactionResults;
+				state.fallbackCoverage = fallbackCoverage;
+				state.lodTransitionStates = lodTransitionStates;
+			}
+			if(preparedSelection != nullptr)
+			{
+				// Fresh selection already built and validated these current-frame
+				// records. The view snapshot needs its own immutable copies, but must not
+				// rebuild and revalidate the same packet graph a second time.
+				state.gpuPacketRecords = preparedSelection->gpuPacketRecords;
+				state.gpuBatchDescriptors = preparedSelection->gpuBatchDescriptors;
+				state.gpuPacketFrameSets = preparedSelection->gpuPacketFrameSets;
+				state.gpuCompactionDispatches = preparedSelection->gpuCompactionDispatches;
+				state.generatedSubmissions = preparedSelection->generatedSubmissions;
+				state.gpuCounterReadbacks = preparedSelection->gpuCounterReadbacks;
+				state.gpuFallbackRecords = preparedSelection->gpuFallbackRecords;
+			}
+			else if(cachedSelectionEvidence != nullptr)
+			{
+				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Reference Cached VG GPU Evidence",
+					TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+				// The cache signature validates every input that shapes these immutable
+				// tables. The enclosing view carries the current publication identity,
+				// so retaining the table owner avoids two diagnostic-only deep copies.
+				state.retainedGpuEvidence = cachedSelectionEvidence->retainedGpuEvidence;
+			}
+		}
 		const auto appendVirtualGeometryDraw = [&](const DrawCommand& command) {
 			TerraEngine::Renderer::VirtualGeometryDrawRange range{};
 			range.selectedLodIndex = command.selectedVirtualLod;
@@ -6121,18 +6808,39 @@ void RenderSystem::Update(float deltaTime)
 				command.objectId,
 				command.meshId,
 				std::move(range),
-				command.taskShaderCullingEnabled
+				command.taskShaderCullingEnabled,
+				command.conventionalVisibilityIdentityIndex == 0u
+					? 0xffffffffu
+					: command.conventionalVisibilityIdentityIndex - 1u
 			});
 		};
-		if(virtualGeometryCommandIndices != nullptr) {
-			for(const std::uint32_t commandIndex : *virtualGeometryCommandIndices) {
-				if(commandIndex < commands.size()) {
-					appendVirtualGeometryDraw(commands[commandIndex]);
-				}
+		{
+			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Build VG View Draw Records",
+				TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			if(cachedSelectionEvidence != nullptr
+				&& cachedSelectionEvidence->hasViewDrawEvidence
+				&& cachedSelectionEvidence->viewDraws)
+			{
+				state.retainedDraws = cachedSelectionEvidence->viewDraws;
 			}
-		} else {
-			for(const DrawCommand& command : commands) {
-				appendVirtualGeometryDraw(command);
+			else
+			{
+				// A cache hit already owns the exact contributing command indices. Reserve
+				// their upper bound once so dense crowds do not repeatedly relocate records
+				// while rebuilding the current frame's immutable view publication.
+				state.draws.reserve(virtualGeometryCommandIndices != nullptr
+					? virtualGeometryCommandIndices->size() : commands.size());
+				if(virtualGeometryCommandIndices != nullptr) {
+					for(const std::uint32_t commandIndex : *virtualGeometryCommandIndices) {
+						if(commandIndex < commands.size()) {
+							appendVirtualGeometryDraw(commands[commandIndex]);
+						}
+					}
+				} else {
+					for(const DrawCommand& command : commands) {
+						appendVirtualGeometryDraw(command);
+					}
+				}
 			}
 		}
 		state.hasHiZValidationState = true;
@@ -6140,7 +6848,7 @@ void RenderSystem::Update(float deltaTime)
 		state.hiZValidationState.renderSize = targetSize;
 		state.hiZValidationState.depthSceneSignature = static_cast<std::uint64_t>(selectedClusters.size())
 			^ (static_cast<std::uint64_t>(pageNeeds.size()) << 32u)
-			^ static_cast<std::uint64_t>(state.draws.size());
+			^ static_cast<std::uint64_t>(state.DrawRecords().size());
 		if (shadowPass || viewType == RenderViewType::Shadow)
 		{
 			state.hiZValidationState.state = VirtualGeometryHiZState::Unsupported;
@@ -6169,9 +6877,11 @@ void RenderSystem::Update(float deltaTime)
 			state.hiZValidationState.warmupFrames = 1u;
 			state.hiZValidationState.failOpen = false;
 		}
-		if ((shadowPass || viewType == RenderViewType::Shadow) && state.clusterPackets.empty())
+		if ((shadowPass || viewType == RenderViewType::Shadow)
+			&& state.ClusterPackets().empty())
 		{
-			for (const TerraEngine::Renderer::VirtualGeometryViewDrawRecord& draw : state.draws)
+			for (const TerraEngine::Renderer::VirtualGeometryViewDrawRecord& draw :
+				state.DrawRecords())
 			{
 				if (!draw.range.virtualGeometryActive || draw.range.meshletCount == 0u)
 				{
@@ -6182,6 +6892,7 @@ void RenderSystem::Update(float deltaTime)
 				packet.viewId = outputId;
 				packet.viewType = RenderViewType::Shadow;
 				packet.objectId = draw.objectId;
+				packet.renderableIndex = draw.renderableIndex;
 				packet.meshId = draw.meshId;
 				packet.selectedLod = draw.range.selectedLodIndex;
 				packet.clusterId = draw.range.selectedClusterOffset;
@@ -6200,10 +6911,10 @@ void RenderSystem::Update(float deltaTime)
 			}
 			state.clusterBatches = BuildVirtualGeometryClusterBatches(state.clusterPackets);
 		}
-		{
+		if(preparedSelection == nullptr && cachedSelectionEvidence == nullptr) {
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: VG Packet Upload Planning", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 			state.gpuPacketRecords = BuildGpuVirtualGeometryPacketRecords(
-				state.clusterPackets,
+				state.ClusterPackets(),
 				activeRenderFrameId,
 				state.debugVisualizationMode);
 			state.gpuBatchDescriptors = BuildGpuVirtualGeometryBatchDescriptors(
@@ -6212,14 +6923,26 @@ void RenderSystem::Update(float deltaTime)
 				state.debugVisualizationMode);
 		}
 		std::string gpuPacketValidationReason;
-		const bool gpuPacketRecordsValid = ValidateGpuVirtualGeometryPacketRecords(
-			state.clusterPackets,
-			state.selectedClusters,
-			state.gpuPacketRecords,
-			activeRenderFrameId,
-			state.debugVisualizationMode,
-			&gpuPacketValidationReason);
-		if (!state.clusterPackets.empty() || !state.gpuBatchDescriptors.empty())
+		bool gpuPacketRecordsValid = true;
+		// A visible-command cache hit reuses selection inputs that passed these
+		// exact CPU-oracle checks when the cache record was created. The signature
+		// includes view, geometry, residency, settings, and renderer generations;
+		// current-frame packet builders only restamp the frame identity. Repeating
+		// the same linear validation would add work proportional to every visible
+		// packet without discovering a new mutable input.
+		if(preparedSelection == nullptr && !reuseValidatedSelection) {
+			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Validate VG Packet Records",
+				TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			gpuPacketRecordsValid = ValidateGpuVirtualGeometryPacketRecords(
+				state.ClusterPackets(),
+				state.SelectedClusters(),
+				state.gpuPacketRecords,
+				activeRenderFrameId,
+				state.debugVisualizationMode,
+				&gpuPacketValidationReason);
+		}
+		if (preparedSelection == nullptr && cachedSelectionEvidence == nullptr
+			&& (!state.ClusterPackets().empty() || !state.gpuBatchDescriptors.empty()))
 		{
 			GpuVirtualGeometryPacketFrameSet frameSet = BuildGpuVirtualGeometryPacketFrameSet(
 				state.viewType,
@@ -6253,21 +6976,23 @@ void RenderSystem::Update(float deltaTime)
 			}
 			state.gpuPacketFrameSets.push_back(std::move(frameSet));
 		}
-		{
+		if(preparedSelection == nullptr && cachedSelectionEvidence == nullptr) {
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: VG Generated Submission Validation", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 			state.generatedSubmissions = BuildGeneratedVirtualGeometrySubmissionRecords(
 				state.gpuBatchDescriptors,
 				state.gpuPacketRecords,
 				activeRenderFrameId);
 			std::string generatedSubmissionValidationReason;
-			if (!ValidateGeneratedVirtualGeometrySubmissionRecords(
-				state.generatedSubmissions,
-				state.gpuBatchDescriptors,
-				activeRenderFrameId,
-				state.viewType,
-				state.outputId,
-				static_cast<std::uint32_t>(state.gpuPacketRecords.size()),
-				&generatedSubmissionValidationReason))
+			const bool generatedSubmissionsValid = reuseValidatedSelection
+				|| ValidateGeneratedVirtualGeometrySubmissionRecords(
+					state.generatedSubmissions,
+					state.gpuBatchDescriptors,
+					activeRenderFrameId,
+					state.viewType,
+					state.outputId,
+					static_cast<std::uint32_t>(state.gpuPacketRecords.size()),
+					&generatedSubmissionValidationReason);
+			if (!generatedSubmissionsValid)
 			{
 				TERRAENGINE_PROFILE_SCOPE("RenderSystem: VG Fallback Submission", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 				state.gpuFallbackRecords.push_back(BuildVirtualGeometryGpuFallbackRecord(
@@ -6285,13 +7010,13 @@ void RenderSystem::Update(float deltaTime)
 				}
 			}
 		}
-		{
+		if(preparedSelection == nullptr && cachedSelectionEvidence == nullptr) {
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: VG Compaction Dispatch Planning", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 			state.gpuCompactionDispatches = BuildGpuPacketCompactionDispatches(
 				state.gpuPacketFrameSets,
 				state.hiZValidationState,
 				state.debugVisualizationMode);
-			for (const CompactedVisibilitySet& compaction : state.compactionResults)
+			for (const CompactedVisibilitySet& compaction : state.CompactionResults())
 			{
 				state.gpuCounterReadbacks.push_back(BuildVirtualGeometryCounterReadbackRecord(
 					compaction,
@@ -6306,9 +7031,12 @@ void RenderSystem::Update(float deltaTime)
 			ShadowVisibilitySelection shadowSelection{};
 			shadowSelection.shadowViewId = outputId;
 			shadowSelection.frameIndex = activeRenderFrameId;
-			shadowSelection.candidatePackets = static_cast<std::uint32_t>(state.clusterPackets.size());
-			shadowSelection.selectedPackets = static_cast<std::uint32_t>(state.clusterPackets.size());
-			for (const TerraEngine::Renderer::VirtualGeometryViewDrawRecord& draw : state.draws)
+			shadowSelection.candidatePackets = static_cast<std::uint32_t>(
+				state.ClusterPackets().size());
+			shadowSelection.selectedPackets = static_cast<std::uint32_t>(
+				state.ClusterPackets().size());
+			for (const TerraEngine::Renderer::VirtualGeometryViewDrawRecord& draw :
+				state.DrawRecords())
 			{
 				if (!draw.range.virtualGeometryActive)
 				{
@@ -6325,41 +7053,59 @@ void RenderSystem::Update(float deltaTime)
 			}
 			state.shadowVisibilitySelections.push_back(std::move(shadowSelection));
 		}
-		HiZRegressionSnapshot hiZRegression{};
-		hiZRegression.viewId = outputId;
-		hiZRegression.viewType = viewType;
-		hiZRegression.frameIndex = activeRenderFrameId;
-		hiZRegression.state = state.hiZValidationState.state;
-		hiZRegression.reason = state.hiZValidationState.reason;
-		hiZRegression.recoveryFrames = state.hiZValidationState.warmupFrames;
-		for (const TerraEngine::Renderer::VirtualGeometryViewDrawRecord& draw : state.draws)
-		{
-			// This snapshot is a prepared, view-local copy of the current Hi-Z
-			// contract. GPU readback still owns exact culled counts; prepared
-			// counters only prove that the new batched path did not introduce a
-			// new hard-disable or false-occlusion policy before submission.
-			if (!draw.range.virtualGeometryActive)
 			{
-				continue;
+				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Build VG HiZ Evidence",
+					TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+				HiZRegressionSnapshot hiZRegression{};
+				hiZRegression.viewId = outputId;
+				hiZRegression.viewType = viewType;
+				hiZRegression.frameIndex = activeRenderFrameId;
+				hiZRegression.state = state.hiZValidationState.state;
+				hiZRegression.reason = state.hiZValidationState.reason;
+				hiZRegression.recoveryFrames = state.hiZValidationState.warmupFrames;
+				for (const TerraEngine::Renderer::VirtualGeometryViewDrawRecord& draw :
+					state.DrawRecords())
+				{
+					// This snapshot is a prepared, view-local copy of the current Hi-Z
+					// contract. GPU readback still owns exact culled counts; prepared
+					// counters only prove that the new batched path did not introduce a
+					// new hard-disable or false-occlusion policy before submission.
+					if (!draw.range.virtualGeometryActive)
+					{
+						continue;
+					}
+					hiZRegression.visibleMeshlets += draw.range.meshletCount;
+					if (draw.range.failOpen)
+					{
+						hiZRegression.failOpenMeshlets += draw.range.meshletCount;
+						hiZRegression.invalidDepthSamples += draw.range.meshletCount;
+					}
+					else if (state.hiZValidationState.state == VirtualGeometryHiZState::Active)
+					{
+						hiZRegression.testedMeshlets += draw.range.meshletCount;
+					}
+				}
+				hiZRegression.baselineMatched =
+					state.hiZValidationState.state == VirtualGeometryHiZState::Active
+					|| state.hiZValidationState.state == VirtualGeometryHiZState::Unsupported
+					|| state.hiZValidationState.failOpen;
+				state.hiZRegressionSnapshots.push_back(std::move(hiZRegression));
 			}
-			hiZRegression.visibleMeshlets += draw.range.meshletCount;
-			if (draw.range.failOpen)
 			{
-				hiZRegression.failOpenMeshlets += draw.range.meshletCount;
-				hiZRegression.invalidDepthSamples += draw.range.meshletCount;
+				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Build VG Page Evidence",
+					TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+				if(cachedSelectionEvidence != nullptr)
+				{
+					// Requests and payloads are already shared by the retained selection
+					// owner. The view state carries the current frame identity; individual
+					// source rows describe signature-stable selection evidence.
+				}
+				else
+				{
+					PopulateVirtualGeometryPageRequestRecords(state);
+					PopulateVirtualGeometryPageSourceRecords(state, activeRenderFrameId);
+				}
 			}
-			else if (state.hiZValidationState.state == VirtualGeometryHiZState::Active)
-			{
-				hiZRegression.testedMeshlets += draw.range.meshletCount;
-			}
-		}
-			hiZRegression.baselineMatched =
-				state.hiZValidationState.state == VirtualGeometryHiZState::Active
-				|| state.hiZValidationState.state == VirtualGeometryHiZState::Unsupported
-				|| state.hiZValidationState.failOpen;
-			state.hiZRegressionSnapshots.push_back(std::move(hiZRegression));
-			PopulateVirtualGeometryPageRequestRecords(state);
-			PopulateVirtualGeometryPageSourceRecords(state, activeRenderFrameId);
 			renderFrameSnapshot.virtualGeometryViewSelections.push_back(std::move(state));
 		};
 
@@ -6547,6 +7293,10 @@ void RenderSystem::Update(float deltaTime)
 				viewProjection * command.modelMatrix;
 			for(VirtualGeometryClusterPacket& localPacket : localPackets)
 			{
+				localPacket.renderableIndex =
+					command.conventionalVisibilityIdentityIndex == 0u
+						? std::numeric_limits<std::uint32_t>::max()
+						: command.conventionalVisibilityIdentityIndex - 1u;
 				glm::vec2 minimumUv(
 					std::numeric_limits<float>::max());
 				glm::vec2 maximumUv(
@@ -7203,10 +7953,12 @@ void RenderSystem::Update(float deltaTime)
 			renderableWorldSignature,
 			viewProjection,
 			targetSize,
+			outputKind,
 			viewType,
 			outputId,
 			BuildVirtualGeometryTransitionStateSignature(virtualGeometryTransitionCache, outputKind, viewType, outputId),
-			virtualGeometryResidencyGeneration);
+			virtualGeometryResidencyGeneration,
+			snapshotRendererGeneration);
 		if (const auto existing = visibleCommandCache.recordsBySignature.find(signature); existing != visibleCommandCache.recordsBySignature.end())
 		{
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Reuse Visible Draw Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
@@ -7220,7 +7972,17 @@ void RenderSystem::Update(float deltaTime)
 			const RenderViewType diagnosticsViewType = outputKind == RenderOutputKind::MainRuntimeView ? RenderViewType::ExportRuntime : viewType;
 			{
 				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Reuse Visible VG Selection Stats", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-				recordVirtualGeometryViewSelection(existing->second.commands, existing->second.selectedClusters, existing->second.pageNeeds, existing->second.clusterPackets, existing->second.clusterBatches, existing->second.compactionResults, existing->second.fallbackCoverage, existing->second.lodTransitionStates, viewVirtualGeometryQuality.debugVisualizationMode, outputKind, diagnosticsViewType, targetSize, outputId, false, outputKind == RenderOutputKind::MainRuntimeView, &existing->second.virtualGeometryCommandIndices);
+				const auto& retained = *existing->second.retainedSelectionEvidence;
+				recordVirtualGeometryViewSelection(existing->second.commands,
+					retained.selectedClusters, retained.pageNeeds,
+					retained.clusterPackets, retained.clusterBatches,
+					retained.compactionResults, retained.fallbackCoverage,
+					retained.lodTransitionStates,
+					viewVirtualGeometryQuality.debugVisualizationMode, outputKind,
+					diagnosticsViewType, targetSize, outputId, false,
+					outputKind == RenderOutputKind::MainRuntimeView,
+					&existing->second.virtualGeometryCommandIndices, true, nullptr,
+					&existing->second);
 			}
 			{
 				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Reuse Visible Streaming Touch Set", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
@@ -7240,8 +8002,9 @@ void RenderSystem::Update(float deltaTime)
 				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Reference Cached Visible Draw Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 				// Binding refresh is fused into the mandatory command materialization below.
 				// The cache's revision-validated indices avoid both this former full loop
-				// and a second 4,000-entry overlay allocation on every hit.
+				// and a second crowd-sized overlay allocation on every hit.
 				cachedResult.cachedRecord = &existing->second;
+				cachedResult.packetEvidenceSignature = existing->second.signature;
 				cachedResult.streamingTouchSet = existing->second.streamingTouchSet;
 				cachedResult.reuseTelemetry = buildVisibleCommandReuseTelemetry(viewType, outputId, true, true, existing->second.streamingTouchSet);
 				if (existing->second.reuseTelemetry.conservativeRefresh)
@@ -7262,8 +8025,11 @@ void RenderSystem::Update(float deltaTime)
 		filter.collectDiagnostics = TerraEngine::Renderer::RenderDiagnosticsRequested();
 		const TerraEngine::Scene::SpatialQueryResult query = spatialIndex.QueryFrustum(frustum, filter);
 		VisibleCommandBuildResult result;
+		result.packetEvidenceSignature = signature;
 		result.commands = buildDrawCommandsFromCandidateIndices(collectCandidateIndices(query));
 		VirtualGeometryViewSelectionPacket selectionPacket = applyVirtualGeometrySelection(result.commands, viewProjection, outputKind, viewType, outputId, cameraPosition, targetSize, viewVirtualGeometryQuality);
+		const RenderViewType diagnosticsViewType = outputKind == RenderOutputKind::MainRuntimeView ? RenderViewType::ExportRuntime : viewType;
+		recordVirtualGeometryViewSelection(result.commands, selectionPacket.selectedClusters, selectionPacket.pageNeeds, selectionPacket.clusterPackets, selectionPacket.clusterBatches, selectionPacket.compactionResults, selectionPacket.fallbackCoverage, selectionPacket.lodTransitionStates, viewVirtualGeometryQuality.debugVisualizationMode, outputKind, diagnosticsViewType, targetSize, outputId, false, outputKind == RenderOutputKind::MainRuntimeView, nullptr, true, &selectionPacket);
 		result.selectedClusters = std::move(selectionPacket.selectedClusters);
 		result.pageNeeds = std::move(selectionPacket.pageNeeds);
 		result.clusterPackets = std::move(selectionPacket.clusterPackets);
@@ -7278,8 +8044,6 @@ void RenderSystem::Update(float deltaTime)
 		result.compactionResults = std::move(selectionPacket.compactionResults);
 		result.fallbackCoverage = std::move(selectionPacket.fallbackCoverage);
 		result.lodTransitionStates = std::move(selectionPacket.lodTransitionStates);
-		const RenderViewType diagnosticsViewType = outputKind == RenderOutputKind::MainRuntimeView ? RenderViewType::ExportRuntime : viewType;
-		recordVirtualGeometryViewSelection(result.commands, result.selectedClusters, result.pageNeeds, result.clusterPackets, result.clusterBatches, result.compactionResults, result.fallbackCoverage, result.lodTransitionStates, viewVirtualGeometryQuality.debugVisualizationMode, outputKind, diagnosticsViewType, targetSize, outputId, false, outputKind == RenderOutputKind::MainRuntimeView);
 		result.diagnostics = latestSpatialRefreshDiagnostics;
 		const TerraEngine::Scene::SpatialDiagnosticsSnapshot queryDiagnostics = spatialIndex.GetDiagnosticsSnapshot();
 		result.diagnostics.visibleCandidateCount = queryDiagnostics.visibleCandidateCount;
@@ -7323,20 +8087,43 @@ void RenderSystem::Update(float deltaTime)
 			// older publication. Geometry selection never needs the pose pointer.
 			command.animationBinding = {};
 		}
-		record.selectedClusters = result.selectedClusters;
-		record.pageNeeds = result.pageNeeds;
-		record.clusterPackets = result.clusterPackets;
-		record.clusterBatches = result.clusterBatches;
-		record.gpuPacketRecords = result.gpuPacketRecords;
-		record.gpuBatchDescriptors = result.gpuBatchDescriptors;
-		record.gpuPacketFrameSets = result.gpuPacketFrameSets;
-		record.gpuCompactionDispatches = result.gpuCompactionDispatches;
-		record.generatedSubmissions = result.generatedSubmissions;
-		record.gpuCounterReadbacks = result.gpuCounterReadbacks;
-		record.gpuFallbackRecords = result.gpuFallbackRecords;
-		record.compactionResults = result.compactionResults;
-		record.fallbackCoverage = result.fallbackCoverage;
-		record.lodTransitionStates = result.lodTransitionStates;
+		auto retainedSelectionEvidence = std::make_shared<TerraEngine::Renderer::
+			VirtualGeometryRetainedSelectionEvidence>();
+		retainedSelectionEvidence->selectedClusters = result.selectedClusters;
+		retainedSelectionEvidence->pageNeeds = result.pageNeeds;
+		retainedSelectionEvidence->clusterPackets = result.clusterPackets;
+		retainedSelectionEvidence->clusterBatches = result.clusterBatches;
+		auto retainedGpuEvidence =
+			std::make_shared<VirtualGeometryRetainedGpuEvidence>();
+		retainedGpuEvidence->packetRecords = result.gpuPacketRecords;
+		retainedGpuEvidence->batchDescriptors = result.gpuBatchDescriptors;
+		retainedGpuEvidence->packetFrameSets = result.gpuPacketFrameSets;
+		retainedGpuEvidence->compactionDispatches = result.gpuCompactionDispatches;
+		retainedGpuEvidence->generatedSubmissions = result.generatedSubmissions;
+		retainedGpuEvidence->counterReadbacks = result.gpuCounterReadbacks;
+		retainedGpuEvidence->fallbackRecords = result.gpuFallbackRecords;
+		record.retainedGpuEvidence = std::move(retainedGpuEvidence);
+		retainedSelectionEvidence->compactionResults =
+			result.compactionResults;
+		retainedSelectionEvidence->fallbackCoverage =
+			result.fallbackCoverage;
+		retainedSelectionEvidence->lodTransitionStates =
+			result.lodTransitionStates;
+		if(!renderFrameSnapshot.virtualGeometryViewSelections.empty())
+		{
+			const TerraEngine::Renderer::VirtualGeometryViewSelectionState& viewEvidence =
+				renderFrameSnapshot.virtualGeometryViewSelections.back();
+			retainedSelectionEvidence->pageRequests = viewEvidence.PageRequests();
+			retainedSelectionEvidence->residentPagePayloads =
+				viewEvidence.ResidentPagePayloads();
+			retainedSelectionEvidence->emittedPageSources =
+				viewEvidence.EmittedPageSources();
+			record.viewDraws = std::make_shared<const std::vector<
+				TerraEngine::Renderer::VirtualGeometryViewDrawRecord>>(
+					viewEvidence.DrawRecords());
+			record.hasViewDrawEvidence = true;
+		}
+		record.retainedSelectionEvidence = std::move(retainedSelectionEvidence);
 		record.streamingTouchSet = result.streamingTouchSet;
 		record.reuseTelemetry = result.reuseTelemetry;
 		record.diagnostics = result.diagnostics;
@@ -7764,6 +8551,7 @@ void RenderSystem::Update(float deltaTime)
 	}
 
 	FrameRenderData frameData;
+	frameData.frameId = activeRenderFrameId;
 	frameData.deltaTimeSeconds = deltaTime;
 	frameData.globalTaskShaderCullingEnabled = taskShaderCullingEnabled;
 	frameData.cullingEpsilon = 0.001f;
@@ -7867,9 +8655,33 @@ void RenderSystem::Update(float deltaTime)
 	std::vector<std::uint8_t> visibleAnimatedRenderableFlags(
 		renderables.size(), 0u);
 	auto copyVirtualGeometryFramePayload = [](FrameRenderData& target, const VisibleCommandBuildResult& source) {
-		target.virtualGeometryGpuPackets = source.GpuPacketRecords();
-		target.virtualGeometryGpuBatches = source.GpuBatchDescriptors();
-		target.virtualGeometryGpuFrameSets = source.GpuPacketFrameSets();
+		target.virtualGeometryPacketEvidenceSignature = source.packetEvidenceSignature;
+		if(source.cachedRecord != nullptr) {
+			// The cache owns immutable evidence for at least this prepared view's
+			// lifetime. Share it through backend submission instead of cloning several
+			// packet tables that no stage is permitted to mutate.
+			target.retainedVirtualGeometryGpuEvidence =
+				source.cachedRecord->retainedGpuEvidence;
+			target.virtualGeometryGpuPackets.clear();
+			target.virtualGeometryGpuBatches.clear();
+			target.virtualGeometryGpuFrameSets.clear();
+			target.virtualGeometryGpuCompactionDispatches.clear();
+			target.virtualGeometryGeneratedSubmissions.clear();
+			target.virtualGeometryCounterReadbacks.clear();
+			target.virtualGeometryGpuFallbackRecords.clear();
+		}
+		else {
+			target.retainedVirtualGeometryGpuEvidence.reset();
+			target.virtualGeometryGpuPackets = source.GpuPacketRecords();
+			target.virtualGeometryGpuBatches = source.GpuBatchDescriptors();
+			target.virtualGeometryGpuFrameSets = source.GpuPacketFrameSets();
+			target.virtualGeometryGpuCompactionDispatches =
+				source.GpuCompactionDispatches();
+			target.virtualGeometryGeneratedSubmissions =
+				source.GeneratedSubmissions();
+			target.virtualGeometryCounterReadbacks = source.GpuCounterReadbacks();
+			target.virtualGeometryGpuFallbackRecords = source.GpuFallbackRecords();
+		}
 		// The compute visibility mirror is intentionally opt-in. Ordinary dense VG
 		// already renders through mesh tasks, so rebuilding CPU triangles and full
 		// pixel buffers without a diagnostics consumer only duplicates frame work.
@@ -7881,12 +8693,8 @@ void RenderSystem::Update(float deltaTime)
 					return frameSet.debugMode
 						!= VirtualGeometryDebugVisualizationMode::None;
 				});
-		target.virtualGeometryGpuCompactionDispatches = source.GpuCompactionDispatches();
-		target.virtualGeometryGeneratedSubmissions = source.GeneratedSubmissions();
-		target.virtualGeometryCounterReadbacks = source.GpuCounterReadbacks();
-		target.virtualGeometryGpuFallbackRecords = source.GpuFallbackRecords();
 	};
-	auto applySceneViewContextTint = [&]() {
+	auto applySceneViewContextTint = [&](FrameRenderData& target) {
 		if (!sceneViewContextTintEnabled || sceneViewContextFocusedObjectIds.empty())
 		{
 			return;
@@ -7896,13 +8704,330 @@ void RenderSystem::Update(float deltaTime)
 		// color and gently washes every surrounding scene command toward white.
 		// This runs only on the Scene View command list before submission.
 		const glm::vec4 contextTint(1.0f, 1.0f, 1.0f, 0.25f);
-		frameData.editorContextTint = contextTint;
-		for (DrawCommand& command : frameData.commands)
+		target.editorContextTint = contextTint;
+		// Focus membership is editor state outside immutable scene visibility
+		// evidence. Force compute-raster setup to rebuild when context tint is active.
+		target.virtualGeometryVisibilitySetupSignature = 0u;
+		for (DrawCommand& command : target.commands)
 		{
 			command.editorTint = sceneViewContextFocusedObjectIds.contains(command.objectId)
 				? glm::vec4(0.0f)
 				: contextTint;
 		}
+	};
+	auto buildGroupedSubmissions = [&](FrameRenderData& target,
+		RenderOutputKind outputKind, RenderViewType viewType,
+		std::uint64_t viewGeneration,
+		std::uint64_t materializedCompatibilitySignature) {
+		// This view-local sidecar is built after visibility and editor tint are
+		// final, while the original commands remain complete fallback coverage.
+		target.groupedInstanceRecords.clear();
+		target.groupedSubmissions.clear();
+		target.drawResourcePreparationCommandIndices.clear();
+		target.renderOptimization = {};
+		target.renderOptimization.frameGeneration = activeRenderFrameId;
+		target.renderOptimization.topologyGeneration =
+			retainedRenderTopology.topology.generation;
+		target.renderOptimization.viewGeneration = viewGeneration;
+		target.renderOptimization.rendererGeneration = snapshotRendererGeneration;
+		target.renderOptimization.visibleInstanceCount = static_cast<std::uint32_t>(
+			std::min<std::size_t>(target.commands.size(),
+				std::numeric_limits<std::uint32_t>::max()));
+		target.renderOptimization.topologyInvalidations = renderTopologyRebuilt ? 1u : 0u;
+		target.renderOptimization.topologyReuseHits = renderTopologyRebuilt ? 0u : 1u;
+		// Measure immutable compatibility discovery separately from dynamic record
+		// materialization. Keeping these phases distinct makes profiler evidence
+		// actionable when a large crowd regresses in only one part of preparation.
+		const auto topologyBuildBegin = std::chrono::steady_clock::now();
+		// Stable mesh/material/pipeline membership lives in retainedRenderTopology.
+		// This per-view map hashes only values that still come from the one shared
+		// push packet. Packet descriptors, page IDs, page byte ranges, meshlet
+		// offsets, and animation records are intentionally absent: RenderInstanceRecord
+		// carries them to the task/mesh stages for each crowd member. Keeping those
+		// per-instance selectors in the key would recreate one draw per page and
+		// defeat device-authored page-local grouping.
+		const auto compatible = [&](std::uint32_t left, std::uint32_t right) {
+			const DrawCommand& a = target.commands[left]; const DrawCommand& b = target.commands[right];
+			return a.meshId == b.meshId && a.materialId == b.materialId
+				&& a.materialIndex == b.materialIndex
+				&& a.textureIndex == b.textureIndex
+				&& a.geometryRoute == b.geometryRoute
+				&& a.virtualMeshletCount == b.virtualMeshletCount
+				&& a.selectedVirtualLod == b.selectedVirtualLod
+				&& a.virtualGeometryFlags == b.virtualGeometryFlags
+				&& a.virtualGeometryPayloadSource == b.virtualGeometryPayloadSource
+				&& a.taskShaderCullingEnabled == b.taskShaderCullingEnabled
+				&& a.animationBinding.source == b.animationBinding.source
+				&& a.animationBinding.RequiresConservativeCoarseVisibility()
+					== b.animationBinding.RequiresConservativeCoarseVisibility();
+		};
+		const auto dynamicCompatibilityHash = [](const DrawCommand& command,
+			std::uint32_t topologyTemplateIndex) {
+			std::size_t hash = std::hash<std::uint32_t>{}(topologyTemplateIndex);
+			const auto combine = [&hash](std::uint64_t value) {
+				hash ^= std::hash<std::uint64_t>{}(value) + 0x9e3779b97f4a7c15ULL
+					+ (hash << 6u) + (hash >> 2u);
+			};
+			combine(command.virtualMeshletCount);
+			combine(command.materialIndex); combine(command.textureIndex);
+			combine(static_cast<std::uint32_t>(command.geometryRoute));
+			combine(command.selectedVirtualLod); combine(command.virtualGeometryFlags);
+			combine(static_cast<std::uint32_t>(command.virtualGeometryPayloadSource));
+			combine(command.taskShaderCullingEnabled ? 1u : 0u);
+			combine(static_cast<std::uint32_t>(command.animationBinding.source));
+			combine(command.animationBinding.RequiresConservativeCoarseVisibility()
+				? 1u : 0u);
+			return hash;
+		};
+		// Materialization folds the dynamic animation authority lanes into the
+		// visibility evidence while commands are already hot. Untinted views can use
+		// that proof directly; context-tinted editor views take the complete scan
+		// because focus membership can change independently of visibility evidence.
+		std::uint64_t compatibilitySignature = 1469598103934665603ULL;
+		const auto combineCompatibilitySignature = [&compatibilitySignature](
+			std::uint64_t value) {
+			compatibilitySignature ^= value + 0x9e3779b97f4a7c15ULL
+				+ (compatibilitySignature << 6U) + (compatibilitySignature >> 2U);
+		};
+		combineCompatibilitySignature(target.renderOptimization.topologyGeneration);
+		combineCompatibilitySignature(static_cast<std::uint32_t>(outputKind));
+		combineCompatibilitySignature(static_cast<std::uint32_t>(viewType));
+		if(materializedCompatibilitySignature != 0U
+			&& target.editorContextTint == glm::vec4(0.0f))
+		{
+			combineCompatibilitySignature(materializedCompatibilitySignature);
+		}
+		else
+		{
+			for(std::uint32_t index = 0u; index < target.commands.size(); ++index) {
+				const DrawCommand& command = target.commands[index];
+				// Visible commands carry a one-based canonical snapshot index. Use that
+				// index to reach the retained immutable membership instead of rebuilding
+				// a mesh/material/pipeline key for every object in every rendered view.
+				const std::uint32_t identityIndex = command.conventionalVisibilityIdentityIndex;
+				const std::size_t topologyRecordIndex = identityIndex == 0u
+					? retainedRenderTopology.topology.records.size()
+					: static_cast<std::size_t>(identityIndex - 1u);
+				if(topologyRecordIndex >= retainedRenderTopology.topology.records.size()) {
+					combineCompatibilitySignature(index);
+					continue;
+				}
+				const PersistentRenderTopologyRecord& topologyRecord =
+					retainedRenderTopology.topology.records[topologyRecordIndex];
+				combineCompatibilitySignature(dynamicCompatibilityHash(
+					command, topologyRecord.groupTemplateIndex));
+				combineCompatibilitySignature(
+					static_cast<std::uint64_t>(std::bit_cast<std::uint32_t>(command.editorTint.x))
+						| (static_cast<std::uint64_t>(
+							std::bit_cast<std::uint32_t>(command.editorTint.y)) << 32U));
+				combineCompatibilitySignature(
+					static_cast<std::uint64_t>(std::bit_cast<std::uint32_t>(command.editorTint.z))
+						| (static_cast<std::uint64_t>(
+							std::bit_cast<std::uint32_t>(command.editorTint.w)) << 32U));
+			}
+		}
+		std::uint64_t viewCacheKey = static_cast<std::uint64_t>(outputKind);
+		viewCacheKey ^= static_cast<std::uint64_t>(viewType) << 8U;
+		// View generation advances with frame publication, while compatible member
+		// ordering depends only on this output/view lane and the signature above.
+		// Keeping it out of the key turns this into a bounded persistent cache instead
+		// of allocating a dead entry for every frame of a long editor session.
+		GroupedSubmissionMembershipCacheRecord& membershipCache =
+			groupedSubmissionMembershipCache.recordsByView[viewCacheKey];
+		const bool membershipCacheHit = membershipCache.valid
+			&& membershipCache.compatibilitySignature == compatibilitySignature;
+		if(!membershipCacheHit) {
+			std::vector<GroupedCompatibilityBucket> rebuiltBuckets;
+			rebuiltBuckets.reserve(target.commands.size());
+			std::unordered_map<std::size_t, std::vector<std::size_t>> bucketsByDynamicHash;
+			bucketsByDynamicHash.reserve(target.commands.size());
+			for(std::uint32_t index = 0u; index < target.commands.size(); ++index) {
+				const DrawCommand& command = target.commands[index];
+				const std::uint32_t identityIndex =
+					command.conventionalVisibilityIdentityIndex;
+				const std::size_t topologyRecordIndex = identityIndex == 0u
+					? retainedRenderTopology.topology.records.size()
+					: static_cast<std::size_t>(identityIndex - 1u);
+				if(topologyRecordIndex >= retainedRenderTopology.topology.records.size()) {
+					continue;
+				}
+				const PersistentRenderTopologyRecord& topologyRecord =
+					retainedRenderTopology.topology.records[topologyRecordIndex];
+				if(!((command.geometryRoute == TerraEngine::Renderer::GeometryRoute::DirectMeshlet
+					|| command.UsesVirtualGeometryRoute())
+					&& (command.animationBinding.source == TerraEngine::Renderer::AnimationRenderPoseSource::BindPose
+						|| command.animationBinding.gpu.IsComplete())
+					&& command.editorTint == glm::vec4(0.0f)
+					&& topologyRecord.groupTemplateIndex
+						!= PersistentRenderTopologyRecord::kInvalidGroupTemplateIndex)) {
+					continue;
+				}
+				const std::size_t hash = dynamicCompatibilityHash(
+					command, topologyRecord.groupTemplateIndex);
+				auto& collisionCandidates = bucketsByDynamicHash[hash];
+				auto existing = std::find_if(collisionCandidates.begin(),
+					collisionCandidates.end(), [&](std::size_t bucketIndex) {
+						return rebuiltBuckets[bucketIndex].topologyTemplateIndex
+							== topologyRecord.groupTemplateIndex
+							&& compatible(rebuiltBuckets[bucketIndex].representative, index);
+					});
+				if(existing == collisionCandidates.end()) {
+					const std::size_t bucketIndex = rebuiltBuckets.size();
+					GroupedCompatibilityBucket bucket{};
+					bucket.topologyTemplateIndex = topologyRecord.groupTemplateIndex;
+					bucket.representative = index;
+					bucket.members.push_back(index);
+					rebuiltBuckets.push_back(std::move(bucket));
+					collisionCandidates.push_back(bucketIndex);
+				}
+				else {
+					rebuiltBuckets[*existing].members.push_back(index);
+				}
+			}
+			membershipCache.valid = true;
+			membershipCache.compatibilitySignature = compatibilitySignature;
+			membershipCache.buckets = std::move(rebuiltBuckets);
+		}
+		membershipCache.lastTouchedFrameId = activeRenderFrameId;
+		const std::vector<GroupedCompatibilityBucket>& buckets = membershipCache.buckets;
+		target.groupedInstanceRecords.reserve(target.commands.size());
+		target.groupedSubmissions.reserve(buckets.size());
+		target.drawResourcePreparationCommandIndices.reserve(target.commands.size());
+		std::vector<std::uint8_t> groupedCommandCoverage(
+			target.commands.size(), 0u);
+		target.renderOptimization.topologyBuildNanoseconds =
+			static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+				std::chrono::steady_clock::now() - topologyBuildBegin).count());
+		const auto dynamicMaterializationBegin = std::chrono::steady_clock::now();
+		for(const GroupedCompatibilityBucket& bucket : buckets) {
+			if(bucket.members.size() > 1u) {
+				const DrawCommand& representative = target.commands[bucket.representative];
+				target.drawResourcePreparationCommandIndices.push_back(
+					bucket.representative);
+				GroupedRenderSubmission submission{};
+				submission.representativeCommandIndex = bucket.representative;
+				submission.group.firstInstance = static_cast<std::uint32_t>(target.groupedInstanceRecords.size());
+				submission.group.instanceCount = static_cast<std::uint32_t>(bucket.members.size());
+				submission.group.topologyGeneration = target.renderOptimization.topologyGeneration;
+				submission.group.viewGeneration = viewGeneration;
+				submission.group.key.meshId = representative.meshId;
+				submission.group.key.materialId = representative.materialId;
+				submission.group.key.meshGeneration = target.renderOptimization.topologyGeneration;
+				submission.group.key.materialGeneration = target.renderOptimization.topologyGeneration;
+				submission.group.key.pipelineGeneration = target.renderOptimization.topologyGeneration;
+				submission.group.key.residencyGeneration = target.renderOptimization.topologyGeneration;
+				submission.group.key.rendererGeneration = target.renderOptimization.rendererGeneration;
+				submission.group.key.geometryRoute = static_cast<std::uint32_t>(representative.geometryRoute);
+				submission.group.key.renderPassVariant = static_cast<std::uint32_t>(outputKind);
+				submission.group.key.viewVariant = static_cast<std::uint32_t>(viewType);
+				submission.group.executable = submission.group.key.IsComplete();
+				for(const std::uint32_t commandIndex : bucket.members) {
+					if(commandIndex < groupedCommandCoverage.size())
+					{
+						groupedCommandCoverage[commandIndex] = 1u;
+					}
+					const DrawCommand& command = target.commands[commandIndex];
+					RenderInstanceRecord record{}; record.modelMatrix = command.modelMatrix;
+					// The identity key resolves through this frame's immutable table;
+					// keeping it in the stream means every grouped member, rather than
+					// only the representative push constants, can prove its owner.
+					record.objectIdentity = glm::uvec4(
+						command.conventionalVisibilityIdentityIndex, 0u, 0u, 0u);
+					record.materialAndTexture = glm::uvec4(command.materialIndex,
+						command.textureIndex, commandIndex,
+						command.conventionalVisibilityIdentityIndex);
+					record.animationSelectors = glm::uvec4(
+						command.animationBinding.gpu.workPacketIndex,
+						command.animationBinding.gpu.planGeneration,
+						command.animationBinding.gpu.rendererGeneration,
+						command.animationBinding.gpu.programGeneration);
+					record.geometrySelectors = glm::uvec4(command.selectedVirtualLod, command.virtualGeometryPacketDescriptorIndex,
+						command.virtualMeshletOffset, command.virtualMeshletCount);
+					record.virtualGeometrySelectors = glm::uvec4(
+						command.selectedVirtualClusterOffset, command.selectedVirtualClusterCount,
+						command.selectedVirtualPageNeedOffset, command.selectedVirtualPageNeedCount);
+					record.virtualGeometryPayloadSelectors = glm::uvec4(
+						static_cast<std::uint32_t>(command.virtualGeometryPayloadSource),
+						static_cast<std::uint32_t>(command.virtualGeometryEmittedSource),
+						static_cast<std::uint32_t>(command.virtualGeometryPagePayloadByteOffset),
+						static_cast<std::uint32_t>(command.virtualGeometryPagePayloadByteSize));
+					target.groupedInstanceRecords.push_back(record);
+				}
+				target.groupedSubmissions.push_back(std::move(submission));
+			}
+		}
+		for(std::uint32_t commandIndex = 0u;
+			commandIndex < groupedCommandCoverage.size(); ++commandIndex)
+		{
+			if(groupedCommandCoverage[commandIndex] == 0u)
+			{
+				target.drawResourcePreparationCommandIndices.push_back(commandIndex);
+			}
+		}
+		target.renderOptimization.groupedInstanceCount = static_cast<std::uint32_t>(target.groupedInstanceRecords.size());
+		target.renderOptimization.groupedSubmissionCount = static_cast<std::uint32_t>(target.groupedSubmissions.size());
+		target.renderOptimization.fallbackInstanceCount = target.renderOptimization.visibleInstanceCount - target.renderOptimization.groupedInstanceCount;
+		target.renderOptimization.fallbackSubmissionCount = target.renderOptimization.fallbackInstanceCount;
+		target.renderOptimization.avoidedSubmissionCount = target.renderOptimization.groupedInstanceCount - target.renderOptimization.groupedSubmissionCount;
+		target.renderOptimization.instanceStreamBytes = static_cast<std::uint32_t>(std::min<std::size_t>(
+			target.groupedInstanceRecords.size() * sizeof(RenderInstanceRecord), std::numeric_limits<std::uint32_t>::max()));
+		target.renderOptimization.dynamicMaterializationNanoseconds =
+			static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+				std::chrono::steady_clock::now() - dynamicMaterializationBegin).count());
+		// Validate the exact executable ranges through the production Vulkan work
+		// cache contract before the backend is allowed to suppress fallback draws.
+		// Group validation reads only instance counts and executable group ranges.
+		// Keep one small contiguous group array, but validate the already-owned instance
+		// stream directly instead of copying all instances and fallback draw commands.
+		std::vector<SharedRenderGroup> dynamicGroups;
+		dynamicGroups.reserve(target.groupedSubmissions.size());
+		for (const GroupedRenderSubmission& submission
+			: target.groupedSubmissions)
+		{
+			dynamicGroups.push_back(submission.group);
+		}
+		const TerraEngine::Renderer::Vulkan::GroupedInstanceStreamPlan groupedPlan =
+			TerraEngine::Renderer::Vulkan::BuildGroupedInstanceStreamPlan(
+				target.groupedInstanceRecords,
+				dynamicGroups,
+				activeRenderFrameId,
+				snapshotRendererGeneration,
+				retainedRenderTopology.topology.valid,
+				std::numeric_limits<std::uint32_t>::max() / sizeof(RenderInstanceRecord),
+				snapshotRendererGeneration);
+		if (!groupedPlan.valid && !target.groupedSubmissions.empty())
+		{
+			// Atomic fallback keeps the complete per-model command list authoritative.
+			target.groupedInstanceRecords.clear();
+			target.groupedSubmissions.clear();
+			target.renderOptimization.groupedInstanceCount = 0u;
+			target.renderOptimization.groupedSubmissionCount = 0u;
+			target.renderOptimization.fallbackInstanceCount =
+				target.renderOptimization.visibleInstanceCount;
+			target.renderOptimization.fallbackSubmissionCount =
+				target.renderOptimization.visibleInstanceCount;
+			target.renderOptimization.avoidedSubmissionCount = 0u;
+			target.renderOptimization.instanceStreamBytes = 0u;
+			switch (groupedPlan.rejectionReason)
+			{
+			case RenderGroupRejectionReason::IncompleteKey:
+				++target.renderOptimization.rejectedIncompleteKeyCount;
+				break;
+			case RenderGroupRejectionReason::InstanceRange:
+				++target.renderOptimization.rejectedOutOfRangeCount;
+				break;
+			case RenderGroupRejectionReason::StaleGeneration:
+				++target.renderOptimization.rejectedStaleGenerationCount;
+				break;
+			case RenderGroupRejectionReason::InstanceStreamAllocation:
+				++target.renderOptimization.fallbackAllocationFailureCount;
+				break;
+			default:
+				++target.renderOptimization.rejectedUnsupportedVariantCount;
+				break;
+			}
+		}
+		target.renderOptimization.valid = 1u;
 	};
 	const bool sceneViewTargetReady = !editorModeEnabled || (sceneViewTargetSize.x > 0u && sceneViewTargetSize.y > 0u);
 	const bool gameViewTargetReady = !editorModeEnabled || (gameViewTargetSize.x > 0u && gameViewTargetSize.y > 0u);
@@ -7911,30 +9036,57 @@ void RenderSystem::Update(float deltaTime)
 	if (hasSceneViewCamera && sceneViewTargetReady)
 	{
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Submit Scene View", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		frameData.viewMatrix = sceneViewCamera.view;
-		frameData.projectionMatrix = sceneViewCamera.proj;
-		frameData.cameraWorldPosition = sceneViewCamera.pos;
-		frameData.sceneViewGridVisible = sceneViewGridVisible;
-		frameData.sceneViewOrthographic = sceneViewCamera.orthographic;
+		// Start from the small common frame header, then build this view in its own
+		// owner. Copying the shared header before materialization avoids deep-copying
+		// thousands of completed command and page records when the view is queued.
+		FrameRenderData sceneFrameData = frameData;
+		sceneFrameData.viewMatrix = sceneViewCamera.view;
+		sceneFrameData.projectionMatrix = sceneViewCamera.proj;
+		sceneFrameData.cameraWorldPosition = sceneViewCamera.pos;
+		sceneFrameData.sceneViewGridVisible = sceneViewGridVisible;
+		sceneFrameData.sceneViewOrthographic = sceneViewCamera.orthographic;
 		VisibleCommandBuildResult visibleCommands;
+		std::uint64_t sceneGroupingCompatibilitySignature = 0U;
 		{
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Scene View Visible Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-			visibleCommands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix, sceneViewTargetSize, RenderOutputKind::SceneView, RenderViewType::Scene, 1u, frameData.cameraWorldPosition);
+			visibleCommands = buildVisibleDrawCommands(sceneFrameData.projectionMatrix * sceneFrameData.viewMatrix, sceneViewTargetSize, RenderOutputKind::SceneView, RenderViewType::Scene, 1u, sceneFrameData.cameraWorldPosition);
 		}
-		visibleCommands.MaterializeCommands(frameData.commands, renderables,
-			&visibleAnimatedRenderableFlags, &renderableCommandIndices);
-		copyVirtualGeometryFramePayload(frameData, visibleCommands);
+		{
+			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Materialize Scene View Commands",
+				TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			visibleCommands.MaterializeCommands(sceneFrameData.commands, renderables,
+				&visibleAnimatedRenderableFlags, &renderableCommandIndices,
+				&sceneGroupingCompatibilitySignature);
+			sceneFrameData.virtualGeometryVisibilitySetupSignature =
+				sceneGroupingCompatibilitySignature;
+		}
+		{
+			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Bind Scene View Geometry Evidence",
+				TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			copyVirtualGeometryFramePayload(sceneFrameData, visibleCommands);
+		}
 		sceneSpatialDiagnostics = visibleCommands.diagnostics;
 		sceneVisibleCommandTelemetry = visibleCommands.reuseTelemetry;
-		applySceneViewContextTint();
+		{
+			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Apply Scene View Context",
+				TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			applySceneViewContextTint(sceneFrameData);
+		}
+		{
+			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Build Scene View Groups",
+				TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			buildGroupedSubmissions(sceneFrameData, RenderOutputKind::SceneView,
+				RenderViewType::Scene, 1u,
+				sceneGroupingCompatibilitySignature);
+		}
 		{
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Scene View Shadow Draw Lists", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-			frameData.shadowDrawLists = buildShadowDrawLists(frameData.cameraWorldPosition);
+			sceneFrameData.shadowDrawLists = buildShadowDrawLists(sceneFrameData.cameraWorldPosition);
 		}
 		{
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Queue Scene View Submission", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 			preparedRenderSubmissions.push_back({
-				frameData,
+				std::move(sceneFrameData),
 				makeOutputRequest(RenderOutputKind::SceneView, RenderViewType::Scene, 1u)
 			});
 		}
@@ -7956,29 +9108,36 @@ void RenderSystem::Update(float deltaTime)
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const auto& cam : gameViewCameras)
 		{
-			frameData.editorContextTint = glm::vec4(0.0f);
-			frameData.viewMatrix = cam.view;
-			frameData.projectionMatrix = cam.proj;
-			frameData.cameraWorldPosition = cam.pos;
+			FrameRenderData gameFrameData = frameData;
+			gameFrameData.editorContextTint = glm::vec4(0.0f);
+			gameFrameData.viewMatrix = cam.view;
+			gameFrameData.projectionMatrix = cam.proj;
+			gameFrameData.cameraWorldPosition = cam.pos;
 			VisibleCommandBuildResult visibleCommands;
+			std::uint64_t gameGroupingCompatibilitySignature = 0U;
 			{
 				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Game View Visible Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-				visibleCommands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix, gameViewTargetSize, RenderOutputKind::GameView, RenderViewType::Game, 2u, frameData.cameraWorldPosition);
+				visibleCommands = buildVisibleDrawCommands(gameFrameData.projectionMatrix * gameFrameData.viewMatrix, gameViewTargetSize, RenderOutputKind::GameView, RenderViewType::Game, 2u, gameFrameData.cameraWorldPosition);
 			}
-			visibleCommands.MaterializeCommands(frameData.commands, renderables,
-				&visibleAnimatedRenderableFlags, &renderableCommandIndices);
-			copyVirtualGeometryFramePayload(frameData, visibleCommands);
+			visibleCommands.MaterializeCommands(gameFrameData.commands, renderables,
+				&visibleAnimatedRenderableFlags, &renderableCommandIndices,
+				&gameGroupingCompatibilitySignature);
+			gameFrameData.virtualGeometryVisibilitySetupSignature =
+				gameGroupingCompatibilitySignature;
+			copyVirtualGeometryFramePayload(gameFrameData, visibleCommands);
 			gameSpatialDiagnostics = visibleCommands.diagnostics;
 			gameVisibleCommandTelemetry = visibleCommands.reuseTelemetry;
-			gameVisibleCommandTelemetry = visibleCommands.reuseTelemetry;
+			buildGroupedSubmissions(gameFrameData, RenderOutputKind::GameView,
+				RenderViewType::Game, 2u,
+				gameGroupingCompatibilitySignature);
 			{
 				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Game View Shadow Draw Lists", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-				frameData.shadowDrawLists = buildShadowDrawLists(frameData.cameraWorldPosition);
+				gameFrameData.shadowDrawLists = buildShadowDrawLists(gameFrameData.cameraWorldPosition);
 			}
 			{
 				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Queue Game View Submission", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 				preparedRenderSubmissions.push_back({
-					frameData,
+					std::move(gameFrameData),
 					makeOutputRequest(RenderOutputKind::GameView, RenderViewType::Game, 2u)
 				});
 			}
@@ -7990,6 +9149,7 @@ void RenderSystem::Update(float deltaTime)
 	{
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Submit Blank Game View", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		FrameRenderData blankData{};
+		blankData.frameId = activeRenderFrameId;
 		blankData.viewMatrix = glm::mat4(1.0f);
 		blankData.projectionMatrix = glm::mat4(1.0f);
 		blankData.cameraWorldPosition = glm::vec3(0.0f);
@@ -8023,6 +9183,7 @@ void RenderSystem::Update(float deltaTime)
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (size_t cameraIndex = 0; cameraIndex < cameras.size(); ++cameraIndex)
 		{
+			FrameRenderData runtimeFrameData = frameData;
 			const entt::entity cameraEntity = cameras[cameraIndex].entity;
 			const auto& camera = cameras[cameraIndex].camera;
 			const auto propagatedCameraTransform = worldTransforms->find(cameraEntity);
@@ -8045,35 +9206,42 @@ void RenderSystem::Update(float deltaTime)
 			const float safeAspect = camera.aspectRatio > 0.0f ? camera.aspectRatio : 1.0f;
 			const float nearPlane = std::max(0.0001f, camera.nearPlane);
 			const float farPlane = std::max(nearPlane + 0.001f, camera.farPlane);
-			frameData.viewMatrix = glm::lookAt(cameraTransform.position, cameraTransform.position + forward, glm::normalize(up));
+			runtimeFrameData.viewMatrix = glm::lookAt(cameraTransform.position, cameraTransform.position + forward, glm::normalize(up));
 			// Use an explicit Vulkan depth projection. Relying on GLM's global
 			// depth macro is fragile because this file includes engine headers
 			// before local GLM configuration defines are visible.
-			frameData.projectionMatrix = glm::perspectiveRH_ZO(glm::radians(clampedFov), safeAspect, nearPlane, farPlane);
-			frameData.projectionMatrix[1][1] *= -1;
-			frameData.cameraWorldPosition = cameraTransform.position;
+			runtimeFrameData.projectionMatrix = glm::perspectiveRH_ZO(glm::radians(clampedFov), safeAspect, nearPlane, farPlane);
+			runtimeFrameData.projectionMatrix[1][1] *= -1;
+			runtimeFrameData.cameraWorldPosition = cameraTransform.position;
 			// The editor publishes this descriptor through GameViewWindow. A
 			// packaged runtime has no dock, so publish the exact authored camera
 			// used for MainRuntimeView here as read-only capture metadata. This
 			// lets exported-runtime validation request a real Vulkan readback
 			// without inventing an editor-only camera owner.
 			latestGameViewCamera = {
-				frameData.viewMatrix,
-				frameData.projectionMatrix,
-				frameData.cameraWorldPosition,
+				runtimeFrameData.viewMatrix,
+				runtimeFrameData.projectionMatrix,
+				runtimeFrameData.cameraWorldPosition,
 				false
 			};
 			hasLatestGameViewCamera = true;
-			frameData.editorContextTint = glm::vec4(0.0f);
-			const VisibleCommandBuildResult visibleCommands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix, gameViewTargetSize, RenderOutputKind::MainRuntimeView, RenderViewType::Game, 2u, frameData.cameraWorldPosition);
-			visibleCommands.MaterializeCommands(frameData.commands, renderables,
-				&visibleAnimatedRenderableFlags, &renderableCommandIndices);
-			copyVirtualGeometryFramePayload(frameData, visibleCommands);
+			runtimeFrameData.editorContextTint = glm::vec4(0.0f);
+			const VisibleCommandBuildResult visibleCommands = buildVisibleDrawCommands(runtimeFrameData.projectionMatrix * runtimeFrameData.viewMatrix, gameViewTargetSize, RenderOutputKind::MainRuntimeView, RenderViewType::Game, 2u, runtimeFrameData.cameraWorldPosition);
+			std::uint64_t runtimeGroupingCompatibilitySignature = 0U;
+			visibleCommands.MaterializeCommands(runtimeFrameData.commands, renderables,
+				&visibleAnimatedRenderableFlags, &renderableCommandIndices,
+				&runtimeGroupingCompatibilitySignature);
+			runtimeFrameData.virtualGeometryVisibilitySetupSignature =
+				runtimeGroupingCompatibilitySignature;
+			copyVirtualGeometryFramePayload(runtimeFrameData, visibleCommands);
 			gameSpatialDiagnostics = visibleCommands.diagnostics;
-			frameData.shadowDrawLists = buildShadowDrawLists(frameData.cameraWorldPosition);
+			buildGroupedSubmissions(runtimeFrameData, RenderOutputKind::MainRuntimeView,
+				RenderViewType::Game, 2u,
+				runtimeGroupingCompatibilitySignature);
+			runtimeFrameData.shadowDrawLists = buildShadowDrawLists(runtimeFrameData.cameraWorldPosition);
 
 			preparedRenderSubmissions.push_back({
-				frameData,
+				std::move(runtimeFrameData),
 				makeOutputRequest(RenderOutputKind::MainRuntimeView, RenderViewType::Game, 2u)
 			});
 			latestGameViewFrameId = activeRenderFrameId;
@@ -8125,15 +9293,25 @@ void RenderSystem::Update(float deltaTime)
 			captureFrameData.projectionMatrix * captureFrameData.viewMatrix,
 			captureRequest.targetSize,
 			RenderOutputKind::OffscreenTexture,
-			RenderViewType::Game,
-			9000u,
+			captureRequest.viewType,
+			captureRequest.viewType == RenderViewType::Scene ? 9001u : 9000u,
 		captureFrameData.cameraWorldPosition);
+		std::uint64_t captureGroupingCompatibilitySignature = 0U;
 		visibleCommands.MaterializeCommands(captureFrameData.commands, renderables,
-			&visibleAnimatedRenderableFlags, &renderableCommandIndices);
+			&visibleAnimatedRenderableFlags, &renderableCommandIndices,
+			&captureGroupingCompatibilitySignature);
+		captureFrameData.virtualGeometryVisibilitySetupSignature =
+			captureGroupingCompatibilitySignature;
 		copyVirtualGeometryFramePayload(captureFrameData, visibleCommands);
+		buildGroupedSubmissions(captureFrameData, RenderOutputKind::OffscreenTexture,
+			captureRequest.viewType,
+			captureRequest.viewType == RenderViewType::Scene ? 9001u : 9000u,
+			captureGroupingCompatibilitySignature);
 		captureFrameData.shadowDrawLists = buildShadowDrawLists(captureFrameData.cameraWorldPosition);
 
-		RenderOutputRequest captureOutputRequest = makeOutputRequest(RenderOutputKind::OffscreenTexture, RenderViewType::Game, 9000u);
+		RenderOutputRequest captureOutputRequest = makeOutputRequest(
+			RenderOutputKind::OffscreenTexture, captureRequest.viewType,
+			captureRequest.viewType == RenderViewType::Scene ? 9001u : 9000u);
 		captureOutputRequest.targetSize = captureRequest.targetSize;
 		preparedRenderSubmissions.push_back({
 			std::move(captureFrameData),
@@ -8185,11 +9363,16 @@ void RenderSystem::Update(float deltaTime)
 			std::move(visibility));
 	}
 
-	// Retain only ordinary Scene/Game records for editor interaction. Dedicated
-	// capture outputs have independent cameras and must never replace the records
-	// used to resolve a click in the visible Scene View.
+	// Visible and dedicated-capture records are published separately. This lets
+	// automation inspect a custom camera without changing visible viewport picks.
 	std::vector<GpuVirtualGeometryPacketRecord> completedSceneVisibilityRecords;
 	std::vector<GpuVirtualGeometryPacketRecord> completedGameVisibilityRecords;
+	std::vector<GpuVirtualGeometryPacketRecord> completedSceneCaptureVisibilityRecords;
+	std::vector<GpuVirtualGeometryPacketRecord> completedGameCaptureVisibilityRecords;
+	CaptureConventionalVisibilityIdentitySnapshot completedSceneCaptureIdentitySnapshot;
+	CaptureConventionalVisibilityIdentitySnapshot completedGameCaptureIdentitySnapshot;
+	bool sceneCaptureProcessed = false;
+	bool gameCaptureProcessed = false;
 	for(const PreparedRenderSubmission& prepared : preparedRenderSubmissions)
 	{
 		if(prepared.output.kind == RenderOutputKind::SceneView)
@@ -8201,44 +9384,45 @@ void RenderSystem::Update(float deltaTime)
 		{
 			completedGameVisibilityRecords = prepared.frame.virtualGeometryGpuPackets;
 		}
-	}
-
-	// Every camera, shadow set, and dedicated capture has now published its
-	// immutable page selection. Seal deformation from that union so animation
-	// runs once per visible physical page/instance generation rather than once
-	// for every page contained by an animated asset.
-	std::unordered_set<TerraEngine::UUID> visibleAnimatedObjects;
-	for(const TerraEngine::Renderer::VirtualGeometryViewSelectionState& view :
-		renderFrameSnapshot.virtualGeometryViewSelections)
-	{
-		for(const TerraEngine::Renderer::VirtualGeometryViewDrawRecord& draw :
-			view.draws)
+		else if(prepared.output.kind == RenderOutputKind::OffscreenTexture)
 		{
-			if(draw.range.meshletCount != 0u
-				&& (draw.range.virtualGeometryActive || draw.range.failOpen))
+			if(prepared.output.diagnosticsView == RenderViewType::Scene) {
+				completedSceneCaptureVisibilityRecords = prepared.frame.virtualGeometryGpuPackets;
+				completedSceneCaptureIdentitySnapshot.frameId = prepared.frame.frameId;
+				completedSceneCaptureIdentitySnapshot.rendererGeneration = snapshotRendererGeneration;
+				completedSceneCaptureIdentitySnapshot.table =
+					renderFrameSnapshot.conventionalVisibilityIdentityTable;
+				sceneCaptureProcessed = true;
+			}
+			else
 			{
-				visibleAnimatedObjects.insert(draw.objectId);
+				completedGameCaptureVisibilityRecords = prepared.frame.virtualGeometryGpuPackets;
+				completedGameCaptureIdentitySnapshot.frameId = prepared.frame.frameId;
+				completedGameCaptureIdentitySnapshot.rendererGeneration = snapshotRendererGeneration;
+				completedGameCaptureIdentitySnapshot.table =
+					renderFrameSnapshot.conventionalVisibilityIdentityTable;
+				gameCaptureProcessed = true;
 			}
 		}
-		for(const TerraEngine::Renderer::VirtualGeometrySelectedClusterRecord& cluster :
-			view.selectedClusters)
-		{
-			visibleAnimatedObjects.insert(cluster.objectId);
-		}
-		for(const GpuVirtualGeometryPacketRecord& packet :
-			view.gpuPacketRecords)
-		{
-			visibleAnimatedObjects.insert(packet.objectId);
-		}
 	}
-	renderFrameSnapshot.animatedGeometryPageDemands =
-		buildAnimatedGeometryCandidates(visibleAnimatedObjects);
-	renderFrameSnapshot.animatedGeometryPageDemands =
-		TerraEngine::Renderer::SelectAnimatedGeometryPageDemands(
-			renderFrameSnapshot);
-	const TerraEngine::Renderer::DeformationBackendWorkPlan selectedDeformation =
-		TerraEngine::Renderer::BuildDeformationBackendWorkPlan(
-			renderFrameSnapshot);
+
+	// Materialization already merged every camera, shadow set, and dedicated
+	// capture into this canonical renderable-index bitset. Reuse it directly;
+	// rescanning draw, cluster, and packet streams would hash the same object
+	// identity up to three times before deformation selection even begins.
+	const AnimatedGeometryBuildResult animatedGeometry =
+		buildAnimatedGeometryPlan(
+			visibleAnimatedRenderableFlags,
+			renderableCommandIndices);
+	renderFrameSnapshot.animatedGeometryPageDemandCount =
+		animatedGeometry.demandCount;
+	TerraEngine::Renderer::DeformationBackendWorkPlan selectedDeformation;
+	{
+		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Build Deformation Backend Plan",
+			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		selectedDeformation = TerraEngine::Renderer::BuildDeformationBackendWorkPlan(
+			renderFrameSnapshot, animatedGeometry.immutablePlan);
+	}
 	renderSubmissionPlan.deformationWork = selectedDeformation.immutablePlan;
 	// Seal one immutable virtual-geometry envelope only after every view has
 	// produced its own visibility packet list. The oracle normalizes this union
@@ -8401,12 +9585,17 @@ void RenderSystem::Update(float deltaTime)
 		// The stats overlay only needs live frame-selection counters. Full asset
 		// inventory diagnostics scan every cooked VG asset and allocate warning
 		// strings, so keep that work behind the explicit diagnostics request.
-		virtualGeometryViewSnapshots =
-			TerraEngine::Renderer::BuildVirtualGeometryViewDiagnosticsFromSnapshot(
-				renderFrameSnapshot,
-				virtualGeometryQuality,
-				GetVirtualGeometryInactiveReason(),
-				selectedDeformation.immutablePlan.get());
+		{
+			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Build Compact Render Diagnostics",
+				TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			virtualGeometryViewSnapshots =
+				TerraEngine::Renderer::BuildVirtualGeometryViewDiagnosticsFromSnapshot(
+					renderFrameSnapshot,
+					virtualGeometryQuality,
+					GetVirtualGeometryInactiveReason(),
+					selectedDeformation.immutablePlan.get(),
+					detailedRenderDiagnosticsRequested);
+		}
 		if (detailedRenderDiagnosticsRequested)
 		{
 			std::vector<TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot> detailedVirtualGeometryViewSnapshots;
@@ -8574,9 +9763,18 @@ void RenderSystem::Update(float deltaTime)
 			// but avoid publishing or enriching detailed diagnostics while closed.
 			renderGraphDiagnostics.virtualGeometryViews = std::move(virtualGeometryViewSnapshots);
 		}
-		std::lock_guard<std::mutex> lock(statsMutex);
-		latestGameStats = rhi->GetLatestRenderStats(RenderViewType::Game);
-		latestSceneStats = rhi->GetLatestRenderStats(RenderViewType::Scene);
+		std::unique_lock<std::mutex> lock(statsMutex, std::defer_lock);
+		{
+			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Acquire Stats Publication Lock",
+				TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			lock.lock();
+		}
+		{
+			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Read Backend Render Stats",
+				TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			latestGameStats = rhi->GetLatestRenderStats(RenderViewType::Game);
+			latestSceneStats = rhi->GetLatestRenderStats(RenderViewType::Scene);
+		}
 		const auto applyVirtualGeometryStats = [](RenderStatsSnapshot& stats, const TerraEngine::Renderer::RenderDiagnosticsSummary& diagnostics) {
 			for (const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& view : diagnostics.virtualGeometryViews)
 			{
@@ -8674,49 +9872,6 @@ void RenderSystem::Update(float deltaTime)
 		};
 		applyVirtualGeometryStats(latestGameStats, renderGraphDiagnostics);
 		applyVirtualGeometryStats(latestSceneStats, renderGraphDiagnostics);
-		struct GeometryRouteStatsAggregate
-		{
-			std::uint32_t directCount = 0U;
-			std::uint32_t virtualCount = 0U;
-			std::uint32_t sharedInstances = 0U;
-			std::uint64_t policyIdentity = 0U;
-			std::uint64_t calibrationIdentity = 0U;
-			std::uint32_t hysteresisFrames = 0U;
-			std::string fallbackReason;
-			std::string source;
-		};
-		GeometryRouteStatsAggregate geometryRouteStats;
-		std::uint64_t geometryRouteSelectionSignature = 1469598103934665603ULL;
-		for(const TerraEngine::Renderer::DirectMeshletBatch& batch :
-			renderFrameSnapshot.directMeshletBatches) {
-			geometryRouteStats.sharedInstances +=
-				static_cast<std::uint32_t>(batch.instanceIdentities.size());
-		}
-		for(const TerraEngine::Renderer::RenderFrameRenderableRecord& renderable :
-			renderFrameSnapshot.renderables) {
-			const TerraEngine::Renderer::GeometryRouteSelectionRecord& decision =
-				renderable.geometryRouteDecision;
-			geometryRouteStats.directCount += decision.selected
-				== TerraEngine::Renderer::GeometryRoute::DirectMeshlet ? 1U : 0U;
-			geometryRouteStats.virtualCount += (decision.selected
-				== TerraEngine::Renderer::GeometryRoute::VirtualGeometryHardware
-				|| decision.selected
-					== TerraEngine::Renderer::GeometryRoute::VirtualGeometryCompute) ? 1U : 0U;
-			geometryRouteStats.policyIdentity = decision.policyIdentity;
-			geometryRouteStats.calibrationIdentity = decision.calibrationIdentity;
-			geometryRouteStats.hysteresisFrames = std::max(
-				geometryRouteStats.hysteresisFrames, decision.stableFrameCount);
-			geometryRouteStats.source = decision.source
-				== TerraEngine::Renderer::GeometryRouteSelectionSource::AuthorOverride
-				? "author_override" : decision.source
-					== TerraEngine::Renderer::GeometryRouteSelectionSource::CapabilityFallback
-				? "capability_fallback" : decision.source
-					== TerraEngine::Renderer::GeometryRouteSelectionSource::CorrectnessFallback
-				? "correctness_fallback" : "automatic";
-			geometryRouteSelectionSignature ^=
-				static_cast<std::uint64_t>(decision.selected) + 1U;
-			geometryRouteSelectionSignature *= 1099511628211ULL;
-		}
 		// Full explanations exist only while diagnostics are requested. They are
 		// not needed to count routes, but preserve the most useful fallback string
 		// for the overlay when a diagnostic consumer explicitly asked for it.
@@ -8728,8 +9883,6 @@ void RenderSystem::Update(float deltaTime)
 				geometryRouteStats.fallbackReason = decision.fallbackDiagnostic;
 			}
 		}
-		geometryRouteSelectionSignature ^=
-			static_cast<std::uint64_t>(renderFrameSnapshot.renderables.size());
 		latestGeometryRouteSelectionSignature = geometryRouteSelectionSignature;
 		latestGeometryRouteSelectionCount =
 			renderFrameSnapshot.renderables.size();
@@ -8741,7 +9894,13 @@ void RenderSystem::Update(float deltaTime)
 				stats.geometryRouteHysteresisFrames,
 				geometryRouteStats.hysteresisFrames);
 			stats.geometryRouteFallbackReason = geometryRouteStats.fallbackReason;
-			stats.geometryRouteSource = geometryRouteStats.source;
+			stats.geometryRouteSource = geometryRouteStats.source
+				== TerraEngine::Renderer::GeometryRouteSelectionSource::AuthorOverride
+				? "author_override" : geometryRouteStats.source
+					== TerraEngine::Renderer::GeometryRouteSelectionSource::CapabilityFallback
+				? "capability_fallback" : geometryRouteStats.source
+					== TerraEngine::Renderer::GeometryRouteSelectionSource::CorrectnessFallback
+				? "correctness_fallback" : "automatic";
 			stats.geometryRouteDirectBatchCount = static_cast<std::uint32_t>(renderFrameSnapshot.directMeshletBatches.size());
 			stats.geometryRouteSharedInstanceCount = geometryRouteStats.sharedInstances;
 			stats.geometryRouteSuppressedPageRequests = geometryRouteStats.directCount;
@@ -8803,27 +9962,47 @@ void RenderSystem::Update(float deltaTime)
 		latestSceneStats.visibleCommandReuseFallbackReason = sceneVisibleCommandTelemetry.fallbackReason;
 		latestGameSpatialDiagnostics = gameSpatialDiagnostics;
 		latestSceneSpatialDiagnostics = sceneSpatialDiagnostics;
-		latestGameBudgetDiagnostics = rhi->GetLatestFrameBudgetDiagnostics(RenderViewType::Game);
-		latestSceneBudgetDiagnostics = rhi->GetLatestFrameBudgetDiagnostics(RenderViewType::Scene);
-		latestGameLightingDiagnostics = rhi->GetLatestLightingDiagnostics(RenderViewType::Game);
-		latestSceneLightingDiagnostics = rhi->GetLatestLightingDiagnostics(RenderViewType::Scene);
-		latestRenderSnapshotDiagnostics = rhi->GetLatestRenderSnapshotDiagnostics();
-		latestRendererRecoverySnapshot = rhi ? rhi->GetLatestRendererRecoverySnapshot() : recoverySnapshot;
-		latestAnimationGpuBackendExecution = rhi
-			? rhi->GetLatestAnimationGpuBackendExecution()
-			: TerraEngine::Renderer::AnimationGpuBackendExecutionSnapshot{};
-		latestRenderGraphDiagnostics = renderGraphDiagnostics;
+		{
+			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Read Backend Diagnostic Snapshots",
+				TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			latestGameBudgetDiagnostics = rhi->GetLatestFrameBudgetDiagnostics(RenderViewType::Game);
+			latestSceneBudgetDiagnostics = rhi->GetLatestFrameBudgetDiagnostics(RenderViewType::Scene);
+			latestGameLightingDiagnostics = rhi->GetLatestLightingDiagnostics(RenderViewType::Game);
+			latestSceneLightingDiagnostics = rhi->GetLatestLightingDiagnostics(RenderViewType::Scene);
+			latestRenderSnapshotDiagnostics = rhi->GetLatestRenderSnapshotDiagnostics();
+			latestRendererRecoverySnapshot = rhi ? rhi->GetLatestRendererRecoverySnapshot() : recoverySnapshot;
+			latestAnimationGpuBackendExecution = rhi
+				? rhi->GetLatestAnimationGpuBackendExecution()
+				: TerraEngine::Renderer::AnimationGpuBackendExecutionSnapshot{};
+			latestRenderGraphDiagnostics = renderGraphDiagnostics;
+		}
 		// The renderer has finished every backend and statistics read of the local
 		// snapshot. Transfer its owned vectors into the protected publication instead
 		// of deep-copying thousands of renderables, route decisions, and batch members.
 		// The feedback pass below only reads this completed publication.
-		latestRenderFrameSnapshot = std::move(renderFrameSnapshot);
+		std::swap(latestRenderFrameSnapshot, renderFrameSnapshot);
+		recycledRenderFrameSnapshot = std::move(renderFrameSnapshot);
 		latestSceneVirtualGeometryVisibilityRecords =
 			std::move(completedSceneVisibilityRecords);
 		latestGameVirtualGeometryVisibilityRecords =
 			std::move(completedGameVisibilityRecords);
+		// An ordinary frame must not erase valid custom-capture proof before its
+		// explicit identity query reaches the fence-owned Vulkan capture target.
+		if(sceneCaptureProcessed)
+			latestSceneCaptureVisibilityRecords = std::move(completedSceneCaptureVisibilityRecords);
+		if(gameCaptureProcessed)
+			latestGameCaptureVisibilityRecords = std::move(completedGameCaptureVisibilityRecords);
+		if(sceneCaptureProcessed)
+			latestSceneCaptureIdentitySnapshot = std::move(completedSceneCaptureIdentitySnapshot);
+		if(gameCaptureProcessed)
+			latestGameCaptureIdentitySnapshot = std::move(completedGameCaptureIdentitySnapshot);
 		latestSkyRuntimeState = skyRuntimeState;
-		TerraEngine::Profiling::Profiler::Instance().RecordRenderStats(latestGameStats, latestSceneStats);
+		{
+			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Record Profiler Render Evidence",
+				TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			TerraEngine::Profiling::Profiler::Instance().RecordRenderStats(
+				latestGameStats, latestSceneStats);
+		}
 	}
 
 	skyStateDirty = false;
@@ -8835,13 +10014,13 @@ void RenderSystem::Update(float deltaTime)
 		TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 	std::size_t streamingFeedbackCount = 0U;
 	for(const auto& view : latestRenderFrameSnapshot.virtualGeometryViewSelections) {
-		streamingFeedbackCount += view.pageRequests.size();
+		streamingFeedbackCount += view.PageRequests().size();
 	}
 	std::vector<TerraEngine::Resource::VirtualGeometryStreamingFeedback> streamingFeedback;
 	streamingFeedback.reserve(streamingFeedbackCount);
 	std::set<std::pair<TerraEngine::UUID, std::uint32_t>> pagesWithCanonicalMetadata;
 	for(const auto& view : latestRenderFrameSnapshot.virtualGeometryViewSelections) {
-		for(const auto& request : view.pageRequests) {
+		for(const auto& request : view.PageRequests()) {
 			TerraEngine::Resource::VirtualGeometryStreamingFeedback feedback{};
 			feedback.assetId = request.meshId; feedback.pageId = request.pageId;
 			feedback.fallbackPageId = request.fallbackPageId; feedback.clusterId = request.clusterId;
@@ -9013,6 +10192,11 @@ void RenderSystem::Shutdown()
 	renderableMembershipSceneGeneration = 0U;
 	renderableMembershipComponentRevision = 0U;
 	renderableMembershipHierarchyRevision = 0U;
+	renderableModelMatrixCache.clear();
+	renderableModelMatrixSceneGeneration = 0U;
+	renderableModelMatrixSpatialRevision = 0U;
+	renderableModelMatrixComponentRevision = 0U;
+	renderableModelMatrixHierarchyRevision = 0U;
 	virtualGeometryViewPolicies.clear();
 	virtualGeometryReplayReadbacks.Clear();
 	latestVirtualGeometryReplayArtifacts.clear();
@@ -9071,6 +10255,12 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 	};
 	declaration.writes = {
 		"Renderer",
+		TerraEngine::Scheduling::kResourcePersistentRenderTopology,
+		TerraEngine::Scheduling::kResourceDynamicRenderInstanceCandidates,
+		TerraEngine::Scheduling::kResourceRenderCompatibilityGroups,
+		TerraEngine::Scheduling::kResourceRenderInstanceStreamPublication,
+		TerraEngine::Scheduling::kResourceCachedRenderViewEvidence,
+		TerraEngine::Scheduling::kResourceRenderOptimizationEvidence,
 		"PresentationState",
 		"PresentationGeneration",
 		"EditorSubmissionCompletion",
@@ -9179,7 +10369,8 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 	routePrepare.stableDescriptorId = "RenderSystem/Render/GeometryRoutePrepare";
 	routePrepare.activationPredicateKey = snapshot.activationPredicateKey;
 	routePrepare.reads = { kResourceRenderFrameSnapshot, kResourceVirtualGeometryQualityProfile };
-	routePrepare.writes = { "GeometryRouteDecisions", "DirectMeshletBatches" };
+	routePrepare.writes = { "GeometryRouteDecisions", "DirectMeshletBatches",
+		"PersistentRenderTopology", "RenderCompatibilityGroups" };
 	routePrepare.explicitDependencies = { snapshot.stableDescriptorId };
 	routePrepare.workerEligible = true;
 	routePrepare.mainThreadRequired = false;
@@ -9203,6 +10394,8 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 		kResourceAnimatedGeometryOutputs, "GeometryRouteDecisions", "DirectMeshletBatches"
 	};
 	prepare.writes = {
+		kResourceDynamicRenderInstanceCandidates, kResourceCachedRenderViewEvidence,
+		"RenderGroupingEvidence",
 		kResourceVirtualGeometryClusterPackets, kResourceVirtualGeometryBatchPlans,
 		kResourceVirtualGeometryPageNeedPackets, kResourceAnimatedGeometryDeformationPlans
 	};
@@ -9227,6 +10420,7 @@ std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> RenderSystem::Dec
 		kResourceVirtualGeometryPageNeedPackets, kResourceAnimatedGeometryDeformationPlans
 	};
 	commit.writes = {
+		"RenderInstanceStream",
 		kResourceVirtualGeometryGpuPacketFrameSets, kResourceVirtualGeometryGeneratedSubmissions,
 		kResourceVirtualGeometryCounterReadbacks, kResourceVirtualGeometryVisibilitySnapshots
 	};
@@ -10079,8 +11273,21 @@ void RenderSystem::Clear()
 		latestAnimationGpuBackendExecution = {};
 		latestRenderGraphDiagnostics = {};
 		latestRenderFrameSnapshot = {};
+		recycledRenderFrameSnapshot = {};
 		latestGameVirtualGeometryVisibilityRecords.clear();
 		latestSceneVirtualGeometryVisibilityRecords.clear();
+		latestGameCaptureVisibilityRecords.clear();
+		latestSceneCaptureVisibilityRecords.clear();
+		latestGameCaptureIdentitySnapshot = {};
+		latestSceneCaptureIdentitySnapshot = {};
+		latestSceneAuthoritativeIdentityPick.reset();
+		latestGameAuthoritativeIdentityPick.reset();
+		pendingSceneAuthoritativeIdentityPixel.reset();
+		pendingGameAuthoritativeIdentityPixel.reset();
+		latestSceneAuthoritativeIdentityFromCapture = false;
+		latestGameAuthoritativeIdentityFromCapture = false;
+		pendingSceneAuthoritativeIdentityFromCapture = false;
+		pendingGameAuthoritativeIdentityFromCapture = false;
 		latestGameStats.viewType = RenderViewType::Game;
 		latestSceneStats.viewType = RenderViewType::Scene;
 		latestGameBudgetDiagnostics.viewType = RenderViewType::Game;
@@ -10112,6 +11319,11 @@ void RenderSystem::Clear()
 	renderableMembershipSceneGeneration = 0U;
 	renderableMembershipComponentRevision = 0U;
 	renderableMembershipHierarchyRevision = 0U;
+	renderableModelMatrixCache.clear();
+	renderableModelMatrixSceneGeneration = 0U;
+	renderableModelMatrixSpatialRevision = 0U;
+	renderableModelMatrixComponentRevision = 0U;
+	renderableModelMatrixHierarchyRevision = 0U;
 	worldTransformCache.Clear();
 	latestTransformCacheDiagnostics = {};
 	skyStateDirty = true;
@@ -10217,7 +11429,8 @@ std::size_t RenderSystem::GetLatestAnimatedGeometryPageDemandCount() const
 	// Read the same immutable frame publication as renderable diagnostics so the
 	// count cannot be paired with a newer or partially prepared demand list.
 	std::lock_guard<std::mutex> lock(statsMutex);
-	return latestRenderFrameSnapshot.animatedGeometryPageDemands.size();
+	return std::max(latestRenderFrameSnapshot.animatedGeometryPageDemandCount,
+		latestRenderFrameSnapshot.animatedGeometryPageDemands.size());
 }
 
 std::vector<GpuVirtualGeometryPacketRecord>
@@ -10543,11 +11756,15 @@ void RenderSystem::DrainConventionalVisibilityIdentityReadbacks()
 		std::lock_guard<std::mutex> lock(statsMutex);
 		std::optional<glm::uvec2>& pendingPixel = result.viewType == RenderViewType::Scene
 			? pendingSceneAuthoritativeIdentityPixel : pendingGameAuthoritativeIdentityPixel;
+		bool& pendingFromCapture = result.viewType == RenderViewType::Scene
+			? pendingSceneAuthoritativeIdentityFromCapture : pendingGameAuthoritativeIdentityFromCapture;
 		std::string& failureReason = result.viewType == RenderViewType::Scene
 			? latestSceneAuthoritativeIdentityFailureReason : latestGameAuthoritativeIdentityFailureReason;
-		if (pendingPixel && *pendingPixel == result.pixel) {
-			pendingPixel.reset();
-		}
+		// A later request may replace this pixel on the other target. Ignore that
+		// stale completion instead of letting it satisfy the newer target selector.
+		if (!pendingPixel || *pendingPixel != result.pixel
+			|| pendingFromCapture != result.dedicatedCaptureTarget) continue;
+		pendingPixel.reset();
 		if (!result.completed || !result.authoritative
 			|| result.frameId == 0u || result.identity == glm::uvec4(0u)) {
 			failureReason = "The Vulkan identity copy completed without an authoritative nonzero uint4 result.";
@@ -10558,38 +11775,68 @@ void RenderSystem::DrainConventionalVisibilityIdentityReadbacks()
 			failureReason = "The Vulkan identity copy belonged to a stale renderer generation.";
 			continue;
 		}
-		const std::vector<GpuVirtualGeometryPacketRecord>& records =
+		const CaptureConventionalVisibilityIdentitySnapshot* captureSnapshot =
 			result.viewType == RenderViewType::Scene
-			? latestSceneVirtualGeometryVisibilityRecords
-			: latestGameVirtualGeometryVisibilityRecords;
-		const auto record = std::find_if(records.begin(), records.end(), [&result](const GpuVirtualGeometryPacketRecord& candidate) {
-			return candidate.frameId == result.frameId
-				&& candidate.payloadDescriptorIndex == result.identity.z
-				&& candidate.objectId != TerraEngine::EMPTY_UUID
-				&& candidate.meshId != TerraEngine::EMPTY_UUID;
-		});
-		if (record == records.end()) {
-			failureReason = "The completed Vulkan identity did not match a published virtual-geometry packet.";
+				? &latestSceneCaptureIdentitySnapshot : &latestGameCaptureIdentitySnapshot;
+		const std::uint64_t expectedFrameId = result.dedicatedCaptureTarget
+			? captureSnapshot->frameId : latestRenderFrameSnapshot.frameId;
+		const std::vector<TerraEngine::Renderer::ConventionalVisibilityIdentityRecord>& identityTable =
+			result.dedicatedCaptureTarget
+				? captureSnapshot->table : latestRenderFrameSnapshot.conventionalVisibilityIdentityTable;
+		if (expectedFrameId != result.frameId || identityTable.empty()) {
+			failureReason = "The completed Vulkan identity belonged to an expired immutable frame snapshot.";
+			continue;
+		}
+		const auto identityRecord = std::find_if(
+			identityTable.begin(),
+			identityTable.end(),
+			[&result](const TerraEngine::Renderer::ConventionalVisibilityIdentityRecord& candidate) {
+				return candidate.index == result.identity.y
+					&& candidate.objectId != TerraEngine::EMPTY_UUID
+					&& candidate.meshId != TerraEngine::EMPTY_UUID;
+			});
+		if (identityRecord == identityTable.end()) {
+			failureReason = "The completed Vulkan identity did not match the immutable frame object table.";
 			continue;
 		}
 		VirtualGeometryVisibilityPick pick{};
-		pick.objectId = record->objectId;
-		pick.meshId = record->meshId;
-		pick.materialId = record->materialId;
-		pick.frameId = record->frameId;
-		pick.packetId = record->packetId;
-		pick.clusterId = record->clusterId;
+		pick.objectId = identityRecord->objectId;
+		pick.meshId = identityRecord->meshId;
+		pick.materialId = identityRecord->materialId;
+		pick.frameId = result.frameId;
 		pick.meshletId = result.identity.x;
-		pick.selectedLod = record->selectedLod;
-		pick.debugIdentity = record->debugIdentity;
-		pick.fallback = (record->flags & 0x1u) != 0u;
+		// VG packet metadata remains useful when it agrees with the same snapshot
+		// object. Direct meshes intentionally leave these fields at their neutral
+		// values rather than being rejected for lacking a packet.
+		const std::vector<GpuVirtualGeometryPacketRecord>& records =
+			result.dedicatedCaptureTarget
+				? (result.viewType == RenderViewType::Scene
+					? latestSceneCaptureVisibilityRecords : latestGameCaptureVisibilityRecords)
+				: (result.viewType == RenderViewType::Scene
+					? latestSceneVirtualGeometryVisibilityRecords : latestGameVirtualGeometryVisibilityRecords);
+		const auto packet = std::find_if(records.begin(), records.end(),
+			[&result, &pick](const GpuVirtualGeometryPacketRecord& candidate) {
+				return candidate.frameId == result.frameId
+					&& candidate.payloadDescriptorIndex == result.identity.z
+					&& candidate.objectId == pick.objectId
+					&& candidate.meshId == pick.meshId;
+			});
+		if (packet != records.end()) {
+			pick.packetId = packet->packetId;
+			pick.clusterId = packet->clusterId;
+			pick.selectedLod = packet->selectedLod;
+			pick.debugIdentity = packet->debugIdentity;
+			pick.fallback = (packet->flags & 0x1u) != 0u;
+		}
 		if (result.viewType == RenderViewType::Scene) {
 			latestSceneAuthoritativeIdentityPick = pick;
 			latestSceneAuthoritativeIdentityPixel = result.pixel;
+			latestSceneAuthoritativeIdentityFromCapture = result.dedicatedCaptureTarget;
 			latestSceneAuthoritativeIdentityFailureReason.clear();
 		} else {
 			latestGameAuthoritativeIdentityPick = pick;
 			latestGameAuthoritativeIdentityPixel = result.pixel;
+			latestGameAuthoritativeIdentityFromCapture = result.dedicatedCaptureTarget;
 			latestGameAuthoritativeIdentityFailureReason.clear();
 		}
 	}

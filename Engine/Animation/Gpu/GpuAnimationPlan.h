@@ -22,8 +22,8 @@
 
 namespace TerraEngine::Animation {
 	// Descriptor set zero remains owned by the renderer's global bindless data.
-	// Animation has a dedicated set so this ABI stays independent of Vulkan,
-	// Direct3D, Metal, and renderer-owned descriptor object lifetimes.
+	// Animation has a dedicated set so this ABI stays independent of the active
+	// graphics API and renderer-owned descriptor object lifetimes.
 	inline constexpr std::uint32_t kGpuAnimationGlobalBindlessDescriptorSet = 0U;
 	inline constexpr std::uint32_t kGpuAnimationDescriptorSet = 1U;
 	inline constexpr std::uint32_t kGpuAnimationDescriptorLayoutVersion = 1U;
@@ -668,6 +668,7 @@ namespace TerraEngine::Animation {
 		std::uint64_t stableInstanceId = 0U;
 		std::uint64_t inputPoseOffsetBytes = 0U;
 		std::uint32_t stableSubmissionOrdinal = 0U;
+		std::uint64_t evaluationParameterFingerprint = 0U;
 		std::uint32_t clipResourceIndex = kGpuAnimationInvalidResourceIndex;
 		std::uint32_t programResourceIndex = kGpuAnimationInvalidResourceIndex;
 		std::uint32_t skeletonResourceIndex = kGpuAnimationInvalidResourceIndex;
@@ -733,6 +734,11 @@ namespace TerraEngine::Animation {
 		std::shared_ptr<const GpuAnimationResidentPayloads> sharedResidentPayloads;
 		std::vector<GpuAnimationGenerationRecord> generationRecords;
 		std::vector<GpuAnimationWorkPacket> workPackets;
+		// Every owner keeps a packet and generation record, but identical visual
+		// evaluation inputs can point at one earlier packet's scratch/palette output.
+		// The dispatch builder emits work only for source packets, avoiding duplicate
+		// joint and palette evaluation without aliasing owner identity.
+		std::vector<std::uint32_t> evaluationSourcePacketIndices;
 		// Entries are appended beside their sorted work packet, preserving an exact
 		// CPU-only render identity without expanding the frozen 144-byte packet.
 		std::vector<GpuAnimationRenderIdentity> renderIdentities;
@@ -749,6 +755,80 @@ namespace TerraEngine::Animation {
 
 		void Clear() noexcept;
 	};
+
+	// The retained topology contains only stable packet ownership and dispatch
+	// structure. Playback ticks, output offsets, and frame generations live in the
+	// sidecar below, which prevents a warmed crowd from rebuilding immutable plans.
+	struct GpuAnimationTopologyGenerationKey {
+		std::uint64_t membershipGeneration = 0U;
+		std::uint64_t resourceGeneration = 0U;
+		std::uint64_t programGeneration = 0U;
+		std::uint64_t sceneGeneration = 0U;
+		std::uint64_t rendererGeneration = 0U;
+
+		[[nodiscard]] bool IsComplete() const noexcept
+		{
+			return membershipGeneration != 0U && resourceGeneration != 0U
+				&& programGeneration != 0U && sceneGeneration != 0U
+				&& rendererGeneration != 0U;
+		}
+		auto operator<=>(const GpuAnimationTopologyGenerationKey&) const = default;
+	};
+
+	struct GpuAnimationTopologyOwner {
+		std::uint64_t stableInstanceId = 0U;
+		std::uint32_t stableSubmissionOrdinal = 0U;
+		std::uint32_t workPacketIndex = kGpuAnimationInvalidResourceIndex;
+
+		[[nodiscard]] bool IsComplete() const noexcept
+		{
+			return stableInstanceId != 0U
+				&& workPacketIndex != kGpuAnimationInvalidResourceIndex;
+		}
+		auto operator<=>(const GpuAnimationTopologyOwner&) const = default;
+	};
+
+	struct GpuAnimationDispatchTemplate {
+		std::uint32_t firstDispatchRecord = 0U;
+		std::uint32_t dispatchRecordCount = 0U;
+		std::uint32_t stage = 0U;
+		std::uint32_t flags = 0U;
+
+		[[nodiscard]] bool IsComplete() const noexcept { return dispatchRecordCount != 0U; }
+		auto operator<=>(const GpuAnimationDispatchTemplate&) const = default;
+	};
+
+	struct GpuAnimationTopology {
+		GpuAnimationTopologyGenerationKey generations{};
+		std::uint64_t topologyGeneration = 0U;
+		std::vector<GpuAnimationTopologyOwner> owners;
+		std::vector<GpuAnimationDispatchTemplate> dispatchTemplates;
+
+		[[nodiscard]] bool IsComplete() const noexcept;
+	};
+
+	// Dynamic data is frame-owned. Publishing it with the topology key makes a
+	// stale compact candidate reject as one whole envelope rather than exposing a
+	// mixture of old owner mappings and new playback samples.
+	struct GpuAnimationTopologyDynamicState {
+		std::uint64_t frameGeneration = 0U;
+		GpuAnimationTopologyGenerationKey topologyGenerations{};
+		std::vector<std::uint32_t> sampleTicks;
+		std::vector<std::uint64_t> outputOffsets;
+
+		[[nodiscard]] bool IsCompleteFor(const GpuAnimationTopology& topology) const noexcept;
+	};
+
+	[[nodiscard]] TERRAENGINE_API bool BuildGpuAnimationTopology(
+		const GpuAnimationPlan& plan,
+		const GpuAnimationTopologyGenerationKey& generations,
+		std::uint64_t topologyGeneration,
+		GpuAnimationTopology& output) noexcept;
+	[[nodiscard]] TERRAENGINE_API bool BuildGpuAnimationTopologyDynamicState(
+		const GpuAnimationPlan& plan,
+		const GpuAnimationTopology& topology,
+		std::uint64_t frameGeneration,
+		GpuAnimationTopologyDynamicState& output) noexcept;
 
 	// Prefix sums are public because scratch layouts and stage plans share the
 	// same overflow rule. On failure offsets and total retain their input values.
@@ -826,7 +906,9 @@ namespace TerraEngine::Animation {
 	static_assert(sizeof(GpuAnimationPlanRejectionDetail) == 32U);
 	static_assert(sizeof(GpuAnimationPlanBuildDiagnostics) == 64U);
 	static_assert(sizeof(GpuAnimationRenderIdentity) == 56U);
-	static_assert(sizeof(GpuAnimationWorkRequest) == 240U);
+// This CPU-only request carries the exact parameter fingerprint used for
+// shared-evaluation admission. Shader ABI remains GpuAnimationWorkPacket.
+static_assert(sizeof(GpuAnimationWorkRequest) == 240U);
 
 	template<typename Record>
 	inline constexpr bool kGpuAnimationAbiRecord = std::is_standard_layout_v<Record>

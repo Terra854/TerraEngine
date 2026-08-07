@@ -45,6 +45,7 @@
 #include <bit>
 #include <cassert>
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <cstring>
@@ -55,6 +56,7 @@
 #include <optional>
 #include <thread>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
 
 #include <nlohmann/json.hpp>
@@ -62,7 +64,7 @@
 namespace TerraEngine::Animation {
 	namespace {
 		constexpr std::size_t kInlineAnimatorThreshold = 16U;
-		// A 128-animator partition keeps a 4,000-instance crowd at roughly one
+		// A 128-animator partition keeps a large crowd at roughly one
 		// planning/evaluation job per worker on the production 32-worker pool. The
 		// former 64-item grain created two dispatch waves and paid queue, profiler,
 		// and dependency bookkeeping twice without exposing more useful parallelism.
@@ -618,6 +620,10 @@ namespace TerraEngine::Animation {
 			AnimatorInstanceHandle handle;
 			AnimatorInstanceDescriptor descriptor;
 			AnimatorPlaybackBinding binding;
+			// A newly allocated runtime slot has no published pose, attachment, rollback,
+			// or advanced-command state to retire. Remember the first successful bind so
+			// crowd creation can avoid thousands of empty cross-subsystem retire calls.
+			bool bindingInitialized = false;
 			AnimatorPlayback playback;
 			AnimationClipView clipView;
 			AnimationEventStream eventStream;
@@ -656,6 +662,10 @@ namespace TerraEngine::Animation {
 			// next animation-to-physics handoff. It lets activation preserve motion
 			// without keeping an unbounded pose history outside rollback storage.
 			std::shared_ptr<const PublishedAnimatorPose> previousPublishedPose;
+			// GPU visual publication may replace rendering only after a separate
+			// protected envelope validates. Retain the last usable CPU pose privately
+			// so a rejected/stale GPU candidate never leaves the animator pose-less.
+			std::shared_ptr<const PublishedAnimatorPose> retainedCpuSafePose;
 			AnimationFallbackPublicationLatch<PublishedAnimatorPose> fallbackPublication;
 			// Fallback publications are never cleared during a live record's lifetime.
 			// Remember whether one was ever published so empty latches need no atomic load.
@@ -718,7 +728,25 @@ namespace TerraEngine::Animation {
 		// and evaluation never append to shared storage, so scheduler partitions are
 		// disjoint even when many jobs complete out of order.
 		struct FrameWorkItem {
+			// Original capture position remains stable after complete records are packed
+			// around the separate compact SoA column for deterministic publication.
+			std::size_t capturedInputIndex = 0U;
 			AnimationFrameInput input;
+			// Compact captures keep this authority slot only for deterministic commit
+			// order. Their broad evaluator state below is never populated; the tagged
+			// payload owns the only data a visual-only GPU packet may observe.
+			struct CompactCapture {
+				std::shared_ptr<const EvaluationProgram> program;
+				std::shared_ptr<const AnimatorPlaybackBinding::GpuFastBinding> fastBinding;
+				AnimationGpuExecutionInputs gpuExecution{};
+				AnimationExecutionPolicy requestedPolicy = AnimationExecutionPolicy::Auto;
+				AnimatorUpdatePolicy updatePolicy = AnimatorUpdatePolicy::EveryFrame;
+				AnimationGeneration programGeneration = 0U;
+				AnimationGeneration clipGeneration = 0U;
+				AnimationGeneration skeletonGeneration = 0U;
+				std::uint32_t jointCount = 0U;
+			} compactCapture{};
+			bool compactCaptureOnly = false;
 			AnimatorPlaybackBinding binding;
 			// The two frame-work arrays alternate ownership. Remember which immutable
 			// binding generation each slot already contains so an unchanged animator
@@ -827,6 +855,10 @@ namespace TerraEngine::Animation {
 			std::shared_ptr<const PoseFallbackPublication> fallbackCandidate;
 			std::shared_ptr<const PublishedAnimatorPose> selectedPublication;
 			std::optional<GpuAnimationLoweringInput> gpuLowering;
+			// This record is the compact-path admission proof copied from protected
+			// capture. Workers classify it without reopening scene/component storage.
+			CompactGpuVisualInput compactGpuVisualInput{};
+			AnimationProcessingClass processingClass = AnimationProcessingClass::Complete;
 			// Preserve the checked request mask produced during preflight. Detailed
 			// diagnostics must report the stages that will actually be dispatched,
 			// rather than a hard-coded legacy bit pattern.
@@ -888,6 +920,10 @@ namespace TerraEngine::Animation {
 				fallbackCandidate.reset();
 				selectedPublication.reset();
 				gpuLowering.reset();
+				compactGpuVisualInput = {};
+				compactCapture = {};
+				compactCaptureOnly = false;
+				processingClass = AnimationProcessingClass::Complete;
 				gpuStageMask = 0U;
 				cacheEligible = false;
 				cacheReused = false;
@@ -897,6 +933,278 @@ namespace TerraEngine::Animation {
 				planned = false;
 				evaluated = false;
 				runtimeStateCaptureCommitted = false;
+			}
+		};
+
+		// Compact workers intentionally receive indexed SoA storage instead of a
+		// FrameWorkItem. The complete record remains protected-publication authority,
+		// while tightly packed identity and packet columns are the only data a
+		// visual-only GPU evaluator may read. This keeps crowd packets cache-friendly
+		// and prevents dormant complete-evaluator members from entering worker cache.
+		struct CompactGpuVisualWorkItems {
+			std::vector<std::size_t> frameWorkIndices;
+			std::vector<AnimatorInstanceHandle> animators;
+			std::vector<std::uint64_t> sourceGenerations;
+			std::vector<CompactGpuVisualInput> inputs;
+
+			[[nodiscard]] std::size_t size() const noexcept { return inputs.size(); }
+			[[nodiscard]] bool empty() const noexcept { return inputs.empty(); }
+			void clear() noexcept {
+				frameWorkIndices.clear();
+				animators.clear();
+				sourceGenerations.clear();
+				inputs.clear();
+			}
+			void reserve(std::size_t capacity) {
+				frameWorkIndices.reserve(capacity);
+				animators.reserve(capacity);
+				sourceGenerations.reserve(capacity);
+				inputs.reserve(capacity);
+			}
+			void append(
+				std::size_t frameWorkIndex,
+				AnimatorInstanceHandle animator,
+				std::uint64_t sourceGeneration,
+				CompactGpuVisualInput input) {
+				frameWorkIndices.push_back(frameWorkIndex);
+				animators.push_back(animator);
+				sourceGenerations.push_back(sourceGeneration);
+				inputs.push_back(std::move(input));
+			}
+			[[nodiscard]] bool IsConsistent() const noexcept {
+				return frameWorkIndices.size() == inputs.size()
+					&& animators.size() == inputs.size()
+					&& sourceGenerations.size() == inputs.size();
+			}
+		};
+
+		// Completion columns mirror compact work by index. Every worker owns a
+		// disjoint index stride, and protected publication validates all columns as
+		// one atomic batch before it mutates a live runtime record.
+		struct CompactGpuVisualCompletions {
+			std::vector<std::size_t> compactItemIndices;
+			std::vector<AnimatorInstanceHandle> animators;
+			std::vector<std::uint64_t> sourceGenerations;
+			std::vector<CompactGpuVisualResult> results;
+			std::vector<AnimationStatus> statuses;
+
+			[[nodiscard]] std::size_t size() const noexcept { return statuses.size(); }
+			void clear() noexcept {
+				compactItemIndices.clear();
+				animators.clear();
+				sourceGenerations.clear();
+				results.clear();
+				statuses.clear();
+			}
+			void resize(std::size_t count) {
+				compactItemIndices.resize(count);
+				animators.resize(count);
+				sourceGenerations.resize(count);
+				results.resize(count);
+				statuses.assign(count, AnimationStatus::NotReady);
+			}
+			[[nodiscard]] bool IsConsistent() const noexcept {
+				return compactItemIndices.size() == statuses.size()
+					&& animators.size() == statuses.size()
+					&& sourceGenerations.size() == statuses.size()
+					&& results.size() == statuses.size();
+			}
+		};
+
+		// Thousands of eventless direct-clip animators commonly share the exact same
+		// immutable program, resident payload, execution policy, and asset generations.
+		// Store those facts once per cohort instead of incrementing two shared pointers
+		// and appending nine identical scalar columns for every crowd member. The frame
+		// lookup below also reunites interleaved instances, which is important when a
+		// crowd intentionally mixes clips or playback phases instead of arriving sorted
+		// by animation asset.
+		// Dynamic playback and authority generations remain per-instance below.
+		struct CompactGpuVisualCohort {
+			std::shared_ptr<const EvaluationProgram> program;
+			std::shared_ptr<const AnimatorPlaybackBinding::GpuFastBinding> fastBinding;
+			AnimationGpuExecutionInputs gpuExecution{};
+			AnimationExecutionPolicy requestedPolicy = AnimationExecutionPolicy::Auto;
+			AnimatorUpdatePolicy updatePolicy = AnimatorUpdatePolicy::EveryFrame;
+			AnimationGeneration programGeneration = 0U;
+			AnimationGeneration clipGeneration = 0U;
+			AnimationGeneration skeletonGeneration = 0U;
+			std::uint32_t jointCount = 0U;
+
+			[[nodiscard]] bool Matches(const RuntimeRecord& record) const noexcept {
+				const AnimationGpuExecutionInputs& candidate = record.binding.gpuExecution;
+				return program == record.binding.evaluationProgram
+					&& fastBinding == record.binding.gpuFastBinding
+					&& gpuExecution.rendererAvailable == candidate.rendererAvailable
+					&& gpuExecution.animationCapabilityAvailable
+						== candidate.animationCapabilityAvailable
+					&& gpuExecution.resourcesResident == candidate.resourcesResident
+					&& gpuExecution.evaluationHealthy == candidate.evaluationHealthy
+					&& gpuExecution.requiredBudget == candidate.requiredBudget
+					&& gpuExecution.availableBudget == candidate.availableBudget
+					&& requestedPolicy == record.binding.requestedExecutionPolicy
+					&& updatePolicy == record.binding.updatePolicy
+					&& programGeneration == record.binding.programGeneration
+					&& clipGeneration == record.binding.clipGeneration
+					&& skeletonGeneration == record.binding.skeletonGeneration
+					&& jointCount == record.binding.jointStableIds.size();
+			}
+		};
+
+		// Protected capture keeps simple GPU-visual animators out of FrameWorkItem
+		// entirely. Parallel columns retain only the scalar authority advances and
+		// immutable bindings that compact planning, evaluation, and publication need.
+		// inputIndices preserve the deterministic full-frame order when complete and
+		// compact records are later validated as one atomic publication batch.
+		struct CompactGpuVisualCaptures {
+			// The 64-bit value is only a lookup accelerator. Equal-hash candidates still
+			// pass CompactGpuVisualCohort::Matches, so a collision cannot merge animation
+			// programs, clips, skeleton generations, or execution policies incorrectly.
+			std::unordered_multimap<std::uint64_t, std::size_t> cohortLookup;
+			std::vector<std::size_t> inputIndices;
+			std::vector<AnimationFrameInput> inputs;
+			std::vector<AnimatorPlayback> playbacks;
+			std::vector<AnimationExecutionModeState> previousExecutionModes;
+			std::vector<std::size_t> cohortIndices;
+			std::vector<CompactGpuVisualCohort> cohorts;
+			// Visibility is previous-frame immutable renderer evidence. Hidden compact
+			// animators still advance scalar playback authority, but do not enter the
+			// render-facing GPU presentation frame until visible again.
+			std::vector<std::uint8_t> presentationVisible;
+			std::vector<AnimationGeneration> candidatePoseGenerations;
+			std::vector<std::uint64_t> candidateAuthorityGenerations;
+			std::vector<std::uint64_t> stateGenerations;
+			std::vector<std::uint64_t> parameterGenerations;
+			std::vector<std::uint64_t> executionModeGenerations;
+			// Planning output remains in compact columns until it becomes a compact
+			// work packet. No generic evaluator-owned state is constructed for it.
+			std::vector<AnimatorPlaybackAdvanceResult> advances;
+			std::vector<AnimationExecutionModeDecision> executionDecisions;
+			std::vector<AnimationStatus> evaluationStatuses;
+			std::vector<AnimationPlanRejectionReason> planningFailures;
+			std::vector<AnimationProcessingClass> processingClasses;
+			std::vector<std::uint32_t> stageMasks;
+			std::vector<GpuAnimationLoweringInput> gpuLowerings;
+			std::vector<CompactGpuVisualInput> compactInputs;
+
+			[[nodiscard]] std::size_t size() const noexcept { return inputs.size(); }
+			[[nodiscard]] bool empty() const noexcept { return inputs.empty(); }
+			[[nodiscard]] static std::uint64_t CohortFingerprint(
+				const RuntimeRecord& record) noexcept {
+				std::uint64_t hash = 1469598103934665603ULL;
+				const auto mix = [&hash](std::uint64_t value) noexcept {
+					hash ^= value + 0x9e3779b97f4a7c15ULL + (hash << 6U) + (hash >> 2U);
+				};
+				const AnimationGpuExecutionInputs& gpu = record.binding.gpuExecution;
+				mix(static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(
+					record.binding.evaluationProgram.get())));
+				mix(static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(
+					record.binding.gpuFastBinding.get())));
+				mix(gpu.rendererAvailable ? 1U : 0U);
+				mix(gpu.animationCapabilityAvailable ? 1U : 0U);
+				mix(gpu.resourcesResident ? 1U : 0U);
+				mix(gpu.evaluationHealthy ? 1U : 0U);
+				mix(std::bit_cast<std::uint64_t>(gpu.requiredBudget));
+				mix(std::bit_cast<std::uint64_t>(gpu.availableBudget));
+				mix(static_cast<std::uint64_t>(record.binding.requestedExecutionPolicy));
+				mix(static_cast<std::uint64_t>(record.binding.updatePolicy));
+				mix(record.binding.programGeneration);
+				mix(record.binding.clipGeneration);
+				mix(record.binding.skeletonGeneration);
+				mix(record.binding.jointStableIds.size());
+				return hash;
+			}
+			void clear() noexcept {
+				cohortLookup.clear();
+				inputIndices.clear(); inputs.clear(); playbacks.clear(); previousExecutionModes.clear();
+				cohortIndices.clear(); cohorts.clear(); presentationVisible.clear();
+				candidatePoseGenerations.clear(); candidateAuthorityGenerations.clear();
+				stateGenerations.clear(); parameterGenerations.clear(); executionModeGenerations.clear();
+				advances.clear(); executionDecisions.clear();
+				evaluationStatuses.clear(); planningFailures.clear(); processingClasses.clear(); stageMasks.clear();
+				gpuLowerings.clear(); compactInputs.clear();
+			}
+			void reserve(std::size_t capacity) {
+				cohortLookup.reserve(capacity);
+				inputIndices.reserve(capacity); inputs.reserve(capacity); playbacks.reserve(capacity);
+				previousExecutionModes.reserve(capacity); cohortIndices.reserve(capacity);
+				presentationVisible.reserve(capacity); candidatePoseGenerations.reserve(capacity);
+				candidateAuthorityGenerations.reserve(capacity); stateGenerations.reserve(capacity);
+				parameterGenerations.reserve(capacity); executionModeGenerations.reserve(capacity);
+				advances.reserve(capacity);
+				executionDecisions.reserve(capacity); evaluationStatuses.reserve(capacity);
+				planningFailures.reserve(capacity);
+				processingClasses.reserve(capacity); stageMasks.reserve(capacity); gpuLowerings.reserve(capacity);
+				compactInputs.reserve(capacity);
+			}
+			void swap(CompactGpuVisualCaptures& other) noexcept {
+				// Keep both frame buffers allocated. The candidate for frame N+1 receives
+				// frame N-1's storage, so a stable crowd performs no column reallocations.
+				using std::swap;
+				swap(cohortLookup, other.cohortLookup);
+				swap(inputIndices, other.inputIndices); swap(inputs, other.inputs);
+				swap(playbacks, other.playbacks); swap(previousExecutionModes, other.previousExecutionModes);
+				swap(cohortIndices, other.cohortIndices); swap(cohorts, other.cohorts);
+				swap(presentationVisible, other.presentationVisible);
+				swap(candidatePoseGenerations, other.candidatePoseGenerations);
+				swap(candidateAuthorityGenerations, other.candidateAuthorityGenerations);
+				swap(stateGenerations, other.stateGenerations); swap(parameterGenerations, other.parameterGenerations);
+				swap(executionModeGenerations, other.executionModeGenerations);
+				swap(advances, other.advances); swap(executionDecisions, other.executionDecisions);
+				swap(evaluationStatuses, other.evaluationStatuses); swap(planningFailures, other.planningFailures);
+				swap(processingClasses, other.processingClasses); swap(stageMasks, other.stageMasks);
+				swap(gpuLowerings, other.gpuLowerings); swap(compactInputs, other.compactInputs);
+			}
+			void append(std::size_t inputIndex, const AnimationFrameInput& input,
+				const RuntimeRecord& record, bool visible) {
+				inputIndices.push_back(inputIndex); inputs.push_back(input); playbacks.push_back(record.playback);
+				previousExecutionModes.push_back(record.executionModeState);
+				std::size_t cohortIndex = cohorts.size();
+				if(!cohorts.empty() && cohorts.back().Matches(record)) {
+					// Sorted homogeneous crowds retain the former single comparison fast path.
+					cohortIndex = cohorts.size() - 1U;
+				} else {
+					const std::uint64_t fingerprint = CohortFingerprint(record);
+					const auto [first, last] = cohortLookup.equal_range(fingerprint);
+					for(auto candidate = first; candidate != last; ++candidate) {
+						if(candidate->second < cohorts.size()
+							&& cohorts[candidate->second].Matches(record)) {
+							cohortIndex = candidate->second;
+							break;
+						}
+					}
+					if(cohortIndex == cohorts.size()) {
+						CompactGpuVisualCohort cohort;
+						cohort.program = record.binding.evaluationProgram;
+						cohort.fastBinding = record.binding.gpuFastBinding;
+						cohort.gpuExecution = record.binding.gpuExecution;
+						cohort.requestedPolicy = record.binding.requestedExecutionPolicy;
+						cohort.updatePolicy = record.binding.updatePolicy;
+						cohort.programGeneration = record.binding.programGeneration;
+						cohort.clipGeneration = record.binding.clipGeneration;
+						cohort.skeletonGeneration = record.binding.skeletonGeneration;
+						cohort.jointCount = static_cast<std::uint32_t>(
+							record.binding.jointStableIds.size());
+						cohorts.push_back(std::move(cohort));
+						cohortIndex = cohorts.size() - 1U;
+						cohortLookup.emplace(fingerprint, cohortIndex);
+					}
+				}
+				cohortIndices.push_back(cohortIndex);
+				presentationVisible.push_back(visible ? 1U : 0U);
+				candidatePoseGenerations.push_back(record.poseGeneration + 1U);
+				candidateAuthorityGenerations.push_back(0U); stateGenerations.push_back(record.stateGeneration);
+				parameterGenerations.push_back(record.parameterGeneration);
+				executionModeGenerations.push_back(record.executionModeGeneration);
+				advances.emplace_back(); executionDecisions.emplace_back();
+				evaluationStatuses.push_back(AnimationStatus::NotReady);
+				planningFailures.push_back(AnimationPlanRejectionReason::None);
+				processingClasses.push_back(AnimationProcessingClass::Complete);
+				stageMasks.push_back(0U); gpuLowerings.emplace_back(); compactInputs.emplace_back();
+			}
+
+			[[nodiscard]] const CompactGpuVisualCohort& cohort(std::size_t index) const noexcept {
+				assert(index < cohortIndices.size() && cohortIndices[index] < cohorts.size());
+				return cohorts[cohortIndices[index]];
 			}
 		};
 
@@ -949,12 +1257,34 @@ namespace TerraEngine::Animation {
 		// success preserves the previous allocation for the next frame, avoiding a
 		// fresh FrameWorkItem allocation while a failed capture stays invisible.
 		std::vector<FrameWorkItem> candidateFrameWork;
+		// Every captured input resolves to exactly one compact or complete slot. This
+		// explicit mapping preserves full-frame deterministic order while compact
+		// crowds avoid constructing heavyweight FrameWorkItem records.
+		struct CapturedInputWorkIndex {
+			std::size_t storageIndex = 0U;
+			bool compact = false;
+		};
+		std::vector<CapturedInputWorkIndex> capturedInputWorkIndices;
+		std::vector<CapturedInputWorkIndex> candidateInputWorkIndices;
+		CompactGpuVisualCaptures compactGpuVisualCaptures;
+		CompactGpuVisualCaptures candidateCompactGpuVisualCaptures;
+		// Presentation consumes immutable shared frames asynchronously. Three retained
+		// slots let frame N reuse N-2 storage once all readers release it, while a slow
+		// reader safely forces a temporary fallback allocation instead of mutation.
+		std::array<std::shared_ptr<GpuAnimationPresentationFrame>, 3U>
+			gpuPresentationFramePool{};
+		std::size_t gpuPresentationFramePoolCursor = 0U;
 		AnimationWorkScheduler workScheduler{MakeAnimationWorkSchedulerConfiguration()};
 		AnimationWorkCancellationSource workCancellationSource;
 		AnimationWorkPlan workPlan;
+		AnimationPlanRejectionReason workPlanRejectionReason =
+			AnimationPlanRejectionReason::None;
+		std::size_t workPlanRejectionItemIndex = std::numeric_limits<std::size_t>::max();
 		std::unique_ptr<AnimationWorkRangeLedger> workRangeLedger;
 		std::vector<AnimationWorkItem> capturedWorkItems;
 		std::vector<AnimationWorkCompletion> workCompletions;
+		CompactGpuVisualWorkItems compactGpuVisualWorkItems;
+		CompactGpuVisualCompletions compactGpuVisualCompletions;
 		std::vector<std::size_t> deterministicPublicationOrder;
 		std::vector<std::byte> frameScratch;
 		AnimationMemoryController memoryController;
@@ -970,7 +1300,7 @@ namespace TerraEngine::Animation {
 		AnimationLifecycleGenerationSnapshot frameLifecycleGenerations{};
 		std::uint64_t frameSceneGeneration = 0U;
 		// Consumer declarations are immutable for one captured frame. Remembering the
-		// empty common case avoids 4,000 contended atomic shared_ptr loads while still
+		// empty common case avoids thousands of contended atomic shared_ptr loads while still
 		// making a declaration published mid-frame visible at the next boundary.
 		bool frameHasConsumerDeclarations = false;
 		AnimationConsumerRegistry::ReadView frameConsumerReadView;
@@ -985,6 +1315,15 @@ namespace TerraEngine::Animation {
 		// latter retains the exact prior publication pointer.
 		std::atomic_size_t sharedPoseAnimatorCount = 0U;
 		std::atomic_size_t fallbackAnimatorCount = 0U;
+		std::atomic_size_t compactGpuVisualCompletedCount = 0U;
+		// Timings accumulate owned worker elapsed time in nanoseconds. They measure
+		// real work even when sibling compact and complete branches overlap, instead
+		// of attributing wall-clock queue delay to one processing class.
+		std::atomic_uint64_t compactPlanningNanoseconds = 0U;
+		std::atomic_uint64_t compactPreCopyCaptureCount = 0U;
+		std::atomic_uint64_t completePlanningNanoseconds = 0U;
+		std::atomic_uint64_t compactEvaluationNanoseconds = 0U;
+		std::atomic_uint64_t completeEvaluationNanoseconds = 0U;
 		std::atomic_bool frameCancellationRequested = false;
 		bool deterministicPublicationValidated = false;
 		// BuildPlan validates the immutable work plan once. Worker partitions and
@@ -1023,6 +1362,20 @@ namespace TerraEngine::Animation {
 			(void)memoryController.Configure(MakeAnimationMemoryConfiguration());
 		}
 
+		[[nodiscard]] FrameWorkItem* CompleteWorkForInputIndex(std::size_t inputIndex) noexcept
+		{
+			if(inputIndex >= capturedInputWorkIndices.size()) return nullptr;
+			const CapturedInputWorkIndex& captured = capturedInputWorkIndices[inputIndex];
+			return !captured.compact && captured.storageIndex < frameWork.size()
+				? &frameWork[captured.storageIndex] : nullptr;
+		}
+
+		[[nodiscard]] const FrameWorkItem* CompleteWorkForInputIndex(
+			std::size_t inputIndex) const noexcept
+		{
+			return const_cast<Impl*>(this)->CompleteWorkForInputIndex(inputIndex);
+		}
+
 		void ResetFrameIntegrationStateLocked() noexcept
 		{
 			workCancellationSource.RequestCancellation();
@@ -1031,6 +1384,8 @@ namespace TerraEngine::Animation {
 			evaluationCancellationSource = AnimationCancellationSource{};
 			evaluationCancellation = {};
 			workPlan = {};
+			workPlanRejectionReason = AnimationPlanRejectionReason::None;
+			workPlanRejectionItemIndex = std::numeric_limits<std::size_t>::max();
 			workRangeLedger.reset();
 			// Move the last complete frame into candidate ownership before clearing the
 			// active view. CaptureFrameLocked can now reuse each animator's validated
@@ -1038,6 +1393,10 @@ namespace TerraEngine::Animation {
 			// frameWork empty so later phases cannot evaluate stale work.
 			candidateFrameWork.swap(frameWork);
 			frameWork.clear();
+			candidateCompactGpuVisualCaptures = std::move(compactGpuVisualCaptures);
+			compactGpuVisualCaptures.clear();
+			candidateInputWorkIndices.swap(capturedInputWorkIndices);
+			capturedInputWorkIndices.clear();
 			capturedRetargetRequests.clear();
 			capturedMotionMatchRequests.clear();
 			capturedMotionMatchQueriesV2.clear();
@@ -1046,6 +1405,8 @@ namespace TerraEngine::Animation {
 			determinismRequestCompletions.clear();
 			capturedWorkItems.clear();
 			workCompletions.clear();
+			compactGpuVisualWorkItems.clear();
+			compactGpuVisualCompletions.clear();
 			deterministicPublicationOrder.clear();
 			frameScratch.clear();
 			frameScratchLease.Release();
@@ -1061,6 +1422,12 @@ namespace TerraEngine::Animation {
 			cacheReusedAnimatorCount.store(0U, std::memory_order_release);
 			sharedPoseAnimatorCount.store(0U, std::memory_order_release);
 			fallbackAnimatorCount.store(0U, std::memory_order_release);
+			compactGpuVisualCompletedCount.store(0U, std::memory_order_release);
+			compactPlanningNanoseconds.store(0U, std::memory_order_release);
+			compactPreCopyCaptureCount.store(0U, std::memory_order_release);
+			completePlanningNanoseconds.store(0U, std::memory_order_release);
+			compactEvaluationNanoseconds.store(0U, std::memory_order_release);
+			completeEvaluationNanoseconds.store(0U, std::memory_order_release);
 			{
 				std::scoped_lock finalizeLock(workPlanFinalizeMutex);
 				workPlanFinalizeState = WorkPlanFinalizeState::Pending;
@@ -2229,7 +2596,21 @@ namespace TerraEngine::Animation {
 						visibility = TerraEngine::Renderer::LoadAnimatedObjectVisibilitySnapshot();
 					const bool visibilityUsable = visibility && visibility->valid
 						&& visibility->sceneGeneration == frameSceneGeneration;
-					candidateFrameWork.resize(capturedFrameInputs.size());
+					// candidateFrameWork is the retired frame buffer after the previous swap.
+					// Reuse each existing record in place so its nested binding, parameter,
+					// controller, and event allocations survive stable complete-mode frames.
+					std::size_t candidateCompleteCount = 0U;
+					candidateFrameWork.reserve(capturedFrameInputs.size());
+					candidateCompactGpuVisualCaptures.clear();
+					candidateCompactGpuVisualCaptures.reserve(capturedFrameInputs.size());
+					candidateInputWorkIndices.clear();
+					candidateInputWorkIndices.reserve(capturedFrameInputs.size());
+					const bool compactFrameHasAdvancedRequests =
+						!capturedMotionMatchRequests.empty()
+						|| !capturedMotionMatchQueriesV2.empty()
+						|| !capturedProceduralGoals.empty();
+					const bool visibleForPresentation = !visibilityUsable
+						|| visibility->hasActiveView;
 					std::size_t proceduralRangeIndex = 0U;
 					for(std::size_t inputIndex = 0U; inputIndex < capturedFrameInputs.size();
 						++inputIndex) {
@@ -2240,7 +2621,120 @@ namespace TerraEngine::Animation {
 							   std::numeric_limits<AnimationGeneration>::max()) {
 							return false;
 						}
-						FrameWorkItem &item = candidateFrameWork[inputIndex];
+						const AnimatorPlaybackBinding& liveBinding = record->binding;
+						const bool hasTargetedCommand = std::any_of(
+							capturedCommands.begin(), capturedCommands.end(), [&input](const AnimationCommand& command) {
+								return command.target == input.handle;
+							});
+						// A registry publication can contain a gameplay declaration for one
+						// animator while a large render-only crowd has no consumers at all.
+						// Resolve only this immutable animator range before deciding whether its
+						// direct clip may bypass the complete capture record. Any matching
+						// declaration (even one with no current joint fields) remains a
+						// fail-closed authoritative observation and therefore uses Complete.
+						const AnimationResolvedConsumerRequirements compactConsumers =
+							frameHasConsumerDeclarations
+								? frameConsumerReadView.Resolve(
+									input.handle, liveBinding.jointParents, input.tick)
+								: AnimationResolvedConsumerRequirements{};
+						const bool compactConsumerClosureProven =
+							compactConsumers.status == AnimationStatus::Ok
+							&& compactConsumers.attribution.empty();
+						// The prior renderer snapshot is complete for views that already existed,
+						// but an automation/custom capture may introduce another camera later in
+						// this same frame. Do not use per-owner absence as a hard publication gate:
+						// that would leave a newly visible compact crowd in bind pose. A valid
+						// no-view snapshot may still suspend all visual work; any active output
+						// conservatively retains presentation and lets GPU culling discard owners.
+						// A root-motion track is not itself CPU authority. Ignore explicitly
+						// suppresses extraction, while Extract/Apply policies and declared readers
+						// still require the complete capture path. Reuse the execution-mode rule so
+						// the early SoA gate cannot disagree with the later policy decision.
+						const bool compactRootMotionRequiresCpuAuthority =
+							RequiresCpuRootMotionAuthority(
+								liveBinding.rootMotionPolicy,
+								liveBinding.clip != nullptr
+									&& liveBinding.clip->rootMotion.enabled,
+								false,
+								false,
+								compactConsumers.closure.rootMotion);
+						// Capture needs only a fail-closed admission proof; the worker still runs
+						// the full execution-mode resolver before publication. Checking the exact
+						// stable GPU state here avoids building and hashing a duplicate empty
+						// consumer closure for every crowd member on the coordinator thread.
+						const AnimationGpuExecutionInputs& gpu = liveBinding.gpuExecution;
+						const AnimationExecutionModeState& modeState =
+							record->executionModeState;
+						const bool compactPolicyEligible =
+							liveBinding.requestedExecutionPolicy == AnimationExecutionPolicy::Auto
+							|| liveBinding.requestedExecutionPolicy
+								== AnimationExecutionPolicy::ForceGpuVisual;
+						const bool compactModeProven = input.tick >= 0
+							&& !headlessExecutionRequired
+							&& compactPolicyEligible
+							&& gpu.rendererAvailable
+							&& gpu.animationCapabilityAvailable
+							&& gpu.resourcesResident
+							&& gpu.evaluationHealthy
+							&& std::isfinite(gpu.requiredBudget)
+							&& std::isfinite(gpu.availableBudget)
+							&& gpu.requiredBudget >= 0.0
+							&& gpu.requiredBudget <= gpu.availableBudget
+							&& modeState.initialized
+							&& modeState.effectiveMode
+								== AnimationEffectiveExecutionMode::GpuVisual
+							&& (modeState.effectiveReason
+									== AnimationExecutionModeReason::GpuVisualEligible
+								|| modeState.effectiveReason
+									== AnimationExecutionModeReason::ForceGpuRequested)
+							&& modeState.modeEnteredTick >= 0
+							&& modeState.modeEnteredTick <= input.tick
+							&& !modeState.promotionPending;
+						const bool compactCaptureProven = compactConsumerClosureProven
+							&& !hasTargetedCommand && !compactFrameHasAdvancedRequests
+							&& liveBinding.clip && liveBinding.clip->events.empty()
+							&& !compactRootMotionRequiresCpuAuthority
+							&& !liveBinding.controllerProgramRequired
+							&& !liveBinding.retargetProfile && !liveBinding.motionDatabase
+							&& !liveBinding.ragdollProfile && liveBinding.evaluationProgram
+							&& liveBinding.gpuFastBinding && liveBinding.gpuFastBinding->IsComplete()
+							&& liveBinding.clipGeneration != 0U && liveBinding.skeletonGeneration != 0U
+							&& liveBinding.programGeneration != 0U
+							&& liveBinding.evaluationGenerations.residencyGeneration != 0U
+							// A direct compact capture omits the broad CPU fallback state. Admit it
+							// only after a protected complete frame has committed GpuVisual mode;
+							// first-frame promotion and any hysteresis demotion must retain that
+							// state so planning can safely choose the complete evaluator instead.
+							&& record->executionModeState.initialized
+							&& record->executionModeState.effectiveMode
+								== AnimationEffectiveExecutionMode::GpuVisual
+							&& compactModeProven
+							// Renderer and deterministic external generations are cache-reuse
+							// domains. Direct authored clips intentionally leave them unset until
+							// a producer opts into reuse, and the compact packet never reads them.
+							// Its copied render identity below is the authoritative renderer-lifetime
+							// proof for GPU presentation.
+							&& frameSceneGeneration != 0U
+							&& liveBinding.gpuFastBinding->visual.renderIdentity.rendererGeneration != 0U
+							&& record->dependencyStatus == AnimationStatus::Ok
+							&& record->ragdollLifecycle == RagdollLifecycleState::Inactive;
+						if(compactCaptureProven) {
+							candidateCompactGpuVisualCaptures.append(
+								inputIndex, input, *record, visibleForPresentation);
+							candidateCompactGpuVisualCaptures.candidateAuthorityGenerations.back() =
+								candidateAuthorityGeneration;
+							candidateInputWorkIndices.push_back({
+								candidateCompactGpuVisualCaptures.size() - 1U, true});
+							compactPreCopyCaptureCount.fetch_add(1U, std::memory_order_acq_rel);
+							continue;
+						}
+						if(candidateCompleteCount == candidateFrameWork.size()) {
+							candidateFrameWork.emplace_back();
+						}
+						FrameWorkItem& item = candidateFrameWork[candidateCompleteCount];
+						item.capturedInputIndex = inputIndex;
+						candidateInputWorkIndices.push_back({candidateCompleteCount, false});
+						++candidateCompleteCount;
 						const bool sameAnimator = item.bindingCaptureHandle == input.handle;
 						const bool bindingStorageReusable =
 							sameAnimator && item.runtimeStateCaptureCommitted &&
@@ -2266,8 +2760,7 @@ namespace TerraEngine::Animation {
 						}
 						// Missing, first-frame, or stale renderer data fails open. Only an
 						// exact scene-generation publication may suppress visual evaluation.
-						item.visibleForVisualEvaluation = !visibilityUsable
-							|| visibility->Contains(input.descriptor.ownerObjectId);
+						item.visibleForVisualEvaluation = visibleForPresentation;
 						if(!bindingStorageReusable) {
 							// Rebind and hot-reload advance contentGeneration, so
 							// this is the only steady-state path that copies the
@@ -2311,6 +2804,7 @@ namespace TerraEngine::Animation {
 						// could otherwise consume a command without ever publishing it.
 						item.playback = record->playback;
 						item.eventStateCaptured = item.binding.clip
+							&& item.binding.eventPolicy != AnimatorEventPolicy::Suppress
 							&& !item.binding.clip->events.empty();
 						if(item.eventStateCaptured) {
 							item.eventStream = record->eventStream;
@@ -2464,6 +2958,7 @@ namespace TerraEngine::Animation {
 						item.candidatePoseGeneration = record->poseGeneration + 1U;
 						item.candidateAuthorityPublicationGeneration = candidateAuthorityGeneration;
 					}
+					candidateFrameWork.resize(candidateCompleteCount);
 				}
 				{
 					// Scene access stays in one protected pass. This sample
@@ -2472,10 +2967,8 @@ namespace TerraEngine::Animation {
 					TERRAENGINE_PROFILE_SCOPE("Animation: Capture Object Transforms",
 											  TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 					ObjectManager &objects = ObjectManager::instance();
-					for(std::size_t inputIndex = 0U; inputIndex < capturedFrameInputs.size();
-						++inputIndex) {
-						const AnimationFrameInput &input = capturedFrameInputs[inputIndex];
-						FrameWorkItem &item = candidateFrameWork[inputIndex];
+					for(FrameWorkItem& item : candidateFrameWork) {
+						const AnimationFrameInput& input = item.input;
 						if(item.sourceObjectWorldTransformCaptured) continue;
 						if(const std::optional<Object> object =
 							   objects.getObject(input.descriptor.ownerObjectId)) {
@@ -2563,6 +3056,8 @@ namespace TerraEngine::Animation {
 					}
 				}
 				frameWork.swap(candidateFrameWork);
+				compactGpuVisualCaptures.swap(candidateCompactGpuVisualCaptures);
+				capturedInputWorkIndices.swap(candidateInputWorkIndices);
 				frameTick = captureTick;
 				return true;
 			} catch(const std::bad_alloc &) {
@@ -3432,14 +3927,328 @@ namespace TerraEngine::Animation {
 			}
 		}
 
+		// GPU visual bindings are long-lived asset records, while renderer, scene, and
+		// playback identities belong to exactly one captured frame. Keep this stamp in
+		// one helper so complete and compact lowering cannot disagree about a packet's
+		// shader-visible 32-bit lanes or its exact 64-bit render identity.
+		[[nodiscard]] bool StampGpuVisualFrameIdentity(
+			GpuAnimationVisualInput& visual,
+			AnimationFixedTick resolvedTick,
+			AnimationFixedTick frameTick) const noexcept
+		{
+			const GpuAnimationRenderIdentity& renderIdentity = visual.renderIdentity;
+			if(!IsGpuAnimationRenderIdentityValid(renderIdentity)
+				|| renderIdentity.meshHeaderVersion > std::numeric_limits<std::uint32_t>::max()
+				|| renderIdentity.rendererGeneration > std::numeric_limits<std::uint32_t>::max()
+				|| frameSceneGeneration == 0U
+				|| frameSceneGeneration > std::numeric_limits<std::uint32_t>::max()
+				|| resolvedTick < 0
+				|| static_cast<std::uint64_t>(resolvedTick)
+					> std::numeric_limits<std::uint32_t>::max()) {
+				return false;
+			}
+			visual.generations.meshGeneration = renderIdentity.meshHeaderVersion;
+			visual.generations.rendererGeneration = static_cast<std::uint32_t>(
+				renderIdentity.rendererGeneration);
+			visual.generations.sceneGeneration = static_cast<std::uint32_t>(
+				frameSceneGeneration);
+			visual.sampleTick = static_cast<std::uint32_t>(resolvedTick);
+			// The renderer validates this full-width value beside the narrowed shader ABI.
+			visual.renderIdentity.sceneGeneration = frameSceneGeneration;
+			visual.generations.frameIdLow = static_cast<std::uint32_t>(frameTick);
+			visual.generations.frameIdHigh = static_cast<std::uint32_t>(
+				static_cast<std::uint64_t>(frameTick) >> 32U);
+			return true;
+		}
+
+		void PlanCompactCapture(FrameWorkItem& item, const AnimatorPlaybackTimeInput& timeInput) noexcept
+		{
+			// This branch intentionally touches only CompactCapture and scalar authority
+			// fields. It is the worker half of the protected early classification above.
+			AnimatorPlaybackTimeInput effectiveTime = timeInput;
+			if(item.compactCapture.updatePolicy == AnimatorUpdatePolicy::Manual) effectiveTime = {};
+			const AnimationStatus advanceStatus = item.playback.Advance(effectiveTime, item.advance);
+			item.evaluationStatus = advanceStatus;
+			const AnimatorPlaybackStateSnapshot playback = item.playback.Snapshot();
+			if(!TryAdvanceGeneration(item.capturedStateGeneration,
+				playback.resolvedTick != item.previousExecutionModeState.continuity.stateTimeTick,
+				item.candidateStateGeneration)) {
+				item.evaluationStatus = AnimationStatus::RangeOverflow;
+			}
+			AnimationExecutionModeRequest request;
+			request.fixedTick = item.input.tick;
+			request.requestedPolicy = item.compactCapture.requestedPolicy;
+			request.headless = headlessExecutionRequired;
+			request.gpu = item.compactCapture.gpuExecution;
+			request.continuity.transitionBoundaryTick = item.input.tick;
+			request.continuity.stateTimeTick = item.playback.AbsoluteTick();
+			request.continuity.normalizedControllerTime = static_cast<float>(playback.resolvedTick);
+			request.continuity.controllerState = 1U;
+			request.continuity.parameterSnapshot = item.candidateParameterGeneration;
+			request.continuity.synchronizationState = item.candidateStateGeneration;
+			request.continuity.synchronizationPhaseTick = playback.resolvedTick;
+			request.continuity.pose = item.candidatePoseGeneration;
+			item.executionDecision = ResolveAnimationExecutionMode(request, item.previousExecutionModeState);
+			if(!TryAdvanceGeneration(item.capturedExecutionModeGeneration,
+				item.executionDecision.nextState.effectiveMode
+					!= item.previousExecutionModeState.effectiveMode
+					|| item.executionDecision.nextState.effectiveReason
+						!= item.previousExecutionModeState.effectiveReason,
+				item.candidateExecutionModeGeneration)) {
+				item.evaluationStatus = AnimationStatus::RangeOverflow;
+			}
+			if(item.evaluationStatus != AnimationStatus::Ok
+				|| item.executionDecision.effectiveMode != AnimationEffectiveExecutionMode::GpuVisual) {
+				item.processingClass = AnimationProcessingClass::Complete;
+				item.planned = true;
+				return;
+			}
+			GpuAnimationLoweringInput lowering;
+			lowering.program.program = item.compactCapture.program;
+			lowering.program.programContentId = item.compactCapture.program->stableHash;
+			lowering.program.programResourceIndex = item.compactCapture.fastBinding->programResourceIndex;
+			lowering.visual = item.compactCapture.fastBinding->visual;
+			lowering.visual.stableInstanceId = (static_cast<std::uint64_t>(item.input.handle.slotIndex) << 32U)
+				| item.input.handle.generation;
+			lowering.visual.stableSubmissionOrdinal = item.input.handle.slotIndex;
+			lowering.visual.jointCount = item.compactCapture.jointCount;
+			lowering.visual.evaluationParameterFingerprint = MixWorkFingerprint(
+				item.candidateParameterGeneration, item.candidateStateGeneration);
+			lowering.visual.sampleTick = static_cast<std::uint32_t>(std::max<AnimationFixedTick>(0, playback.resolvedTick));
+			lowering.visual.generations.instanceSlot = item.input.handle.slotIndex;
+			lowering.visual.generations.instanceGeneration = item.input.handle.generation;
+			lowering.visual.generations.componentGeneration = item.input.descriptor.componentGeneration;
+			lowering.visual.generations.workGeneration = item.candidatePoseGeneration;
+			lowering.visual.generations.programGeneration = item.compactCapture.programGeneration;
+			lowering.visual.generations.controllerGeneration = item.compactCapture.programGeneration;
+			lowering.visual.generations.clipGeneration = item.compactCapture.clipGeneration;
+			lowering.visual.generations.skeletonGeneration = item.compactCapture.skeletonGeneration;
+			if(!StampGpuVisualFrameIdentity(
+				lowering.visual, playback.resolvedTick, item.input.tick)) {
+				item.processingClass = AnimationProcessingClass::Complete;
+				item.planned = true;
+				return;
+			}
+			lowering.execution = item.executionDecision;
+			lowering.allowSharedVisualEvaluation = true;
+			lowering.residentPayloads = item.compactCapture.fastBinding->residentPayloads;
+			GpuAnimationWorkRequest probe{};
+			if(LowerGpuAnimationWorkRequest(lowering, probe) != GpuAnimationLoweringStatus::Ok
+				|| !ValidateGpuAnimationResidentPayloads(probe, *lowering.residentPayloads)) {
+				item.processingClass = AnimationProcessingClass::Complete;
+				item.planned = true;
+				return;
+			}
+			lowering.residentPayloadsValidated = true;
+			lowering.prevalidatedStageMask = probe.batchKey.stageMask;
+			item.gpuStageMask = probe.batchKey.stageMask;
+			item.gpuLowering = std::move(lowering);
+			CompactGpuVisualInput input{};
+			input.stableInstanceId = item.gpuLowering->visual.stableInstanceId;
+			input.stableSubmissionOrdinal = item.gpuLowering->visual.stableSubmissionOrdinal;
+			input.playbackTick = item.playback.AbsoluteTick();
+			input.sourcePoseGeneration = item.candidatePoseGeneration;
+			input.generations = {input.stableInstanceId, item.input.descriptor.componentGeneration,
+				item.compactCapture.programGeneration, item.compactCapture.clipGeneration,
+				frameSceneGeneration, item.gpuLowering->visual.renderIdentity.rendererGeneration,
+				item.candidateAuthorityPublicationGeneration};
+			input.eligibilityReason = item.executionDecision.reason;
+			input.gpuLoweringComplete = true;
+			// CompactCapture admission positively excludes authority consumers,
+			// controller transitions, and advanced animation features. Record that
+			// proof explicitly because CompactGpuVisualInput defaults these bits to
+			// fail-closed true for every caller that has not performed the capture gate.
+			input.hasAuthoritativeConsumer = false;
+			input.hasControllerOrTransition = false;
+			input.hasAdvancedFeature = false;
+			input.hasContinuitySource = item.previousExecutionModeState.initialized;
+			item.compactGpuVisualInput = input;
+			item.processingClass = ClassifyAnimationProcessing(input);
+			item.planned = true;
+		}
+
+		void PlanCompactCapture(
+			std::size_t compactIndex,
+			const AnimatorPlaybackTimeInput& timeInput,
+			const CompactGpuVisualCohort*& validatedCohort,
+			std::uint32_t& validatedStageMask) noexcept
+		{
+			if(compactIndex >= compactGpuVisualCaptures.size()) return;
+			CompactGpuVisualCaptures& compact = compactGpuVisualCaptures;
+			const CompactGpuVisualCohort& cohort = compact.cohort(compactIndex);
+			// This is intentionally a direct SoA evaluator. It copies no generic
+			// FrameWorkItem and reads only the protected compact capture columns.
+			AnimatorPlaybackTimeInput effectiveTime = timeInput;
+			if(cohort.updatePolicy == AnimatorUpdatePolicy::Manual) effectiveTime = {};
+			AnimationStatus& status = compact.evaluationStatuses[compactIndex];
+			AnimationPlanRejectionReason& planningFailure =
+				compact.planningFailures[compactIndex];
+			planningFailure = AnimationPlanRejectionReason::None;
+			status = compact.playbacks[compactIndex].Advance(
+				effectiveTime, compact.advances[compactIndex]);
+			if(status != AnimationStatus::Ok) {
+				planningFailure = AnimationPlanRejectionReason::PlaybackAdvance;
+			}
+			const AnimatorPlaybackStateSnapshot playback = compact.playbacks[compactIndex].Snapshot();
+			const AnimationExecutionModeState& previous = compact.previousExecutionModes[compactIndex];
+			if(!TryAdvanceGeneration(compact.stateGenerations[compactIndex],
+				playback.resolvedTick != previous.continuity.stateTimeTick,
+				compact.stateGenerations[compactIndex])) {
+				status = AnimationStatus::RangeOverflow;
+				planningFailure = AnimationPlanRejectionReason::GenerationOverflow;
+			}
+			AnimationExecutionModeRequest request;
+			request.fixedTick = compact.inputs[compactIndex].tick;
+			request.requestedPolicy = cohort.requestedPolicy;
+			request.headless = headlessExecutionRequired;
+			request.gpu = cohort.gpuExecution;
+			request.continuity.transitionBoundaryTick = compact.inputs[compactIndex].tick;
+			request.continuity.stateTimeTick = compact.playbacks[compactIndex].AbsoluteTick();
+			request.continuity.normalizedControllerTime = static_cast<float>(playback.resolvedTick);
+			request.continuity.controllerState = 1U;
+			request.continuity.parameterSnapshot = compact.parameterGenerations[compactIndex];
+			request.continuity.synchronizationState = compact.stateGenerations[compactIndex];
+			request.continuity.synchronizationPhaseTick = playback.resolvedTick;
+			request.continuity.pose = compact.candidatePoseGenerations[compactIndex];
+			compact.executionDecisions[compactIndex] = ResolveAnimationExecutionMode(request, previous);
+			if(!TryAdvanceGeneration(compact.executionModeGenerations[compactIndex],
+				compact.executionDecisions[compactIndex].nextState.effectiveMode
+					!= previous.effectiveMode
+				|| compact.executionDecisions[compactIndex].nextState.effectiveReason
+					!= previous.effectiveReason,
+				compact.executionModeGenerations[compactIndex])) {
+				status = AnimationStatus::RangeOverflow;
+				planningFailure = AnimationPlanRejectionReason::GenerationOverflow;
+			}
+			if(status != AnimationStatus::Ok) {
+				compact.processingClasses[compactIndex] = AnimationProcessingClass::Complete;
+				return;
+			}
+			if(compact.executionDecisions[compactIndex].effectiveMode
+				!= AnimationEffectiveExecutionMode::GpuVisual) {
+				planningFailure = AnimationPlanRejectionReason::ExecutionModeNotGpuVisual;
+				compact.processingClasses[compactIndex] = AnimationProcessingClass::Complete;
+				return;
+			}
+			GpuAnimationLoweringInput lowering;
+			lowering.program.program = cohort.program;
+			lowering.program.programContentId = cohort.program->stableHash;
+			lowering.program.programResourceIndex = cohort.fastBinding->programResourceIndex;
+			lowering.visual = cohort.fastBinding->visual;
+			const AnimationFrameInput& input = compact.inputs[compactIndex];
+			lowering.visual.stableInstanceId = (static_cast<std::uint64_t>(input.handle.slotIndex) << 32U)
+				| input.handle.generation;
+			lowering.visual.stableSubmissionOrdinal = input.handle.slotIndex;
+			lowering.visual.jointCount = cohort.jointCount;
+			lowering.visual.evaluationParameterFingerprint = MixWorkFingerprint(
+				compact.parameterGenerations[compactIndex], compact.stateGenerations[compactIndex]);
+			lowering.visual.sampleTick = static_cast<std::uint32_t>(std::max<AnimationFixedTick>(0, playback.resolvedTick));
+			lowering.visual.generations.instanceSlot = input.handle.slotIndex;
+			lowering.visual.generations.instanceGeneration = input.handle.generation;
+			lowering.visual.generations.componentGeneration = input.descriptor.componentGeneration;
+			lowering.visual.generations.workGeneration = compact.candidatePoseGenerations[compactIndex];
+			lowering.visual.generations.programGeneration = cohort.programGeneration;
+			lowering.visual.generations.controllerGeneration = cohort.programGeneration;
+			lowering.visual.generations.clipGeneration = cohort.clipGeneration;
+			lowering.visual.generations.skeletonGeneration = cohort.skeletonGeneration;
+			if(!StampGpuVisualFrameIdentity(
+				lowering.visual, playback.resolvedTick, input.tick)) {
+				planningFailure = AnimationPlanRejectionReason::FrameIdentityInvalid;
+				compact.processingClasses[compactIndex] = AnimationProcessingClass::Complete;
+				return;
+			}
+			lowering.execution = compact.executionDecisions[compactIndex];
+			lowering.allowSharedVisualEvaluation = true;
+			lowering.residentPayloads = cohort.fastBinding->residentPayloads;
+			// A worker range commonly contains many members of one immutable cohort.
+			// Once one member proves the shared program shape and resident tables, later
+			// members still lower their own identity and generation fields but avoid
+			// rescanning the same immutable program and payload vectors.
+			const bool sharedInputsValidated = validatedCohort == &cohort
+				&& validatedStageMask != 0U;
+			lowering.programValidated = sharedInputsValidated;
+			lowering.prevalidatedStageMask = sharedInputsValidated
+				? validatedStageMask : 0U;
+			GpuAnimationWorkRequest probe{};
+			// Shared validation already proved all cohort-owned program, resource, and
+			// layout fields. Keep the inexpensive per-instance identity/generation proof,
+			// then let presentation lower the complete immutable input once at its normal
+			// boundary. A one-member cohort still takes the full validation path below.
+			const bool instanceIdentityValid = lowering.visual.stableInstanceId != 0U
+				&& IsGpuAnimationRenderIdentityValid(lowering.visual.renderIdentity)
+				&& IsGpuAnimationGenerationRecordValid(lowering.visual.generations);
+			const GpuAnimationLoweringStatus loweringStatus = sharedInputsValidated
+				? (instanceIdentityValid
+					? GpuAnimationLoweringStatus::Ok
+					: GpuAnimationLoweringStatus::StaleGeneration)
+				: LowerGpuAnimationWorkRequest(lowering, probe);
+			if(sharedInputsValidated) {
+				probe.batchKey.stageMask = validatedStageMask;
+			}
+			if(loweringStatus != GpuAnimationLoweringStatus::Ok) {
+				planningFailure = AnimationPlanRejectionReason::GpuLoweringRejected;
+				compact.processingClasses[compactIndex] = AnimationProcessingClass::Complete;
+				return;
+			}
+			if(!sharedInputsValidated
+				&& !ValidateGpuAnimationResidentPayloads(probe, *lowering.residentPayloads)) {
+				planningFailure = AnimationPlanRejectionReason::ResidentPayloadInvalid;
+				compact.processingClasses[compactIndex] = AnimationProcessingClass::Complete;
+				return;
+			}
+			if(!sharedInputsValidated) {
+				validatedCohort = &cohort;
+				validatedStageMask = probe.batchKey.stageMask;
+			}
+			lowering.residentPayloadsValidated = true;
+			lowering.prevalidatedStageMask = probe.batchKey.stageMask;
+			compact.stageMasks[compactIndex] = probe.batchKey.stageMask;
+			compact.gpuLowerings[compactIndex] = std::move(lowering);
+			CompactGpuVisualInput compactInput{};
+			compactInput.stableInstanceId = compact.gpuLowerings[compactIndex].visual.stableInstanceId;
+			compactInput.stableSubmissionOrdinal = compact.gpuLowerings[compactIndex].visual.stableSubmissionOrdinal;
+			compactInput.playbackTick = compact.playbacks[compactIndex].AbsoluteTick();
+			compactInput.sourcePoseGeneration = compact.candidatePoseGenerations[compactIndex];
+			compactInput.generations = {compactInput.stableInstanceId, input.descriptor.componentGeneration,
+				cohort.programGeneration, cohort.clipGeneration,
+				frameSceneGeneration, compact.gpuLowerings[compactIndex].visual.renderIdentity.rendererGeneration,
+				compact.candidateAuthorityGenerations[compactIndex]};
+			compactInput.eligibilityReason = compact.executionDecisions[compactIndex].reason;
+			compactInput.gpuLoweringComplete = true;
+			// The protected SoA admission gate already proved these exclusion facts.
+			// Copy them into the fail-closed value record so classification consumes
+			// the captured proof instead of mistaking safe direct clips for unknown work.
+			compactInput.hasAuthoritativeConsumer = false;
+			compactInput.hasControllerOrTransition = false;
+			compactInput.hasAdvancedFeature = false;
+			// Direct clips have an explicit, immutable bind-pose origin. They do not
+			// need to wait one CPU frame merely to manufacture a previous execution
+			// mode: the copied playback and proven direct binding fully determine the
+			// first GPU packet. This avoids alternating complete/compact updates when
+			// Play Mode begins or presentation completes one scheduler frame later.
+			compactInput.hasContinuitySource = previous.initialized
+				|| (cohort.program != nullptr && cohort.fastBinding != nullptr);
+			compact.compactInputs[compactIndex] = compactInput;
+			compact.processingClasses[compactIndex] = ClassifyAnimationProcessing(compactInput);
+			if(compact.processingClasses[compactIndex]
+				!= AnimationProcessingClass::CompactGpuVisual) {
+				planningFailure = AnimationPlanRejectionReason::CompactClassificationRejected;
+			}
+		}
+
 		void PlanRange(
 			std::size_t begin,
 			std::size_t end,
 			const AnimatorPlaybackTimeInput& timeInput) noexcept
 		{
 			if(PollFrameCancellation()) return;
-			const std::size_t boundedEnd = std::min(end, frameWork.size());
+			const auto rangePlanningStart = std::chrono::steady_clock::now();
+			const std::size_t boundedEnd = std::min(end, capturedInputWorkIndices.size());
 			std::size_t locallyPlanned = 0U;
+			std::size_t locallyCompactPlanned = 0U;
+			std::size_t locallyCompletePlanned = 0U;
+			const CompactGpuVisualCohort* validatedCompactCohort = nullptr;
+			std::uint32_t validatedCompactStageMask = 0U;
 			// Identical prefab instances share their immutable program and resident
 			// payload objects. Validate each exact shape once per worker range instead of
 			// reparsing the same program and morph tables for every crowd member.
@@ -3472,7 +4281,19 @@ namespace TerraEngine::Animation {
 				// batches instead of reading the complete multi-boundary latch once per
 				// animator; cancellation still stops within at most sixteen items.
 				if(((index - begin) & 15U) == 0U && PollFrameCancellation()) return;
-				FrameWorkItem& item = frameWork[index];
+				const CapturedInputWorkIndex& captured = capturedInputWorkIndices[index];
+				if(captured.compact) {
+					PlanCompactCapture(
+						captured.storageIndex,
+						timeInput,
+						validatedCompactCohort,
+						validatedCompactStageMask);
+					++locallyCompactPlanned;
+					++locallyPlanned;
+					continue;
+				}
+				if(captured.storageIndex >= frameWork.size()) return;
+				FrameWorkItem& item = frameWork[captured.storageIndex];
 				AnimationStatus commandStatus = AnimationStatus::Ok;
 				bool stateCommandApplied = false;
 				bool parameterCommandApplied = false;
@@ -3707,9 +4528,36 @@ namespace TerraEngine::Animation {
 					|| item.retargetActive
 					|| declaredConsumers.status != AnimationStatus::Ok;
 				modeRequest.gpu = item.binding.gpuExecution;
+				// Do not require the published GPU envelope to equal the immediately
+				// preceding authority generation. Animation presentation and rendering are
+				// pipelined, so a complete immutable envelope may legitimately be one
+				// generation ahead or behind this capture. RenderSystem validates the exact
+				// scene, mesh, component, skeleton, resource, and renderer identities before
+				// accepting that envelope; an unavailable or incompatible envelope therefore
+				// remains a safe render fallback without forcing thousands of otherwise
+				// eligible visual animators back through complete CPU evaluation.
 				modeRequest.continuity.transitionBoundaryTick = item.input.tick;
 				modeRequest.continuity.stateTimeTick = item.playback.AbsoluteTick();
+				modeRequest.continuity.normalizedControllerTime = static_cast<float>(
+					currentPlaybackState.resolvedTick);
 				modeRequest.continuity.controllerState = item.binding.stateId;
+				modeRequest.continuity.parameterSnapshot = item.candidateParameterGeneration;
+				modeRequest.continuity.transition =
+					item.candidateGraphState.activeTransitionStableId;
+				modeRequest.continuity.synchronizationState = item.candidateStateGeneration;
+				modeRequest.continuity.synchronizationPhaseTick =
+					currentPlaybackState.resolvedTick;
+				const AnimationEventStreamDiagnostics& eventDiagnostics =
+					item.eventStream.Diagnostics();
+				modeRequest.continuity.eventWatermark = eventDiagnostics.emittedEvents
+					^ (eventDiagnostics.duplicateEventsSuppressed << 1U)
+					^ (eventDiagnostics.retainedEventEvictions << 2U);
+				modeRequest.continuity.rootMotion = item.candidatePoseGeneration
+					^ static_cast<std::uint64_t>(item.playback.AbsoluteTick());
+				modeRequest.continuity.motionMatch = item.appliedMotionQueryId;
+				modeRequest.continuity.ragdollBlend =
+					static_cast<std::uint64_t>(item.ragdollGeneration.publicationGeneration)
+					^ static_cast<std::uint64_t>(item.ragdollLifecycle);
 				modeRequest.continuity.pose = item.candidatePoseGeneration;
 				item.executionDecision = ResolveAnimationExecutionMode(
 					modeRequest, item.previousExecutionModeState);
@@ -3768,11 +4616,15 @@ namespace TerraEngine::Animation {
 					|| item.executionDecision.effectiveMode
 					== AnimationEffectiveExecutionMode::HybridAuthoritative)) {
 					GpuAnimationLoweringInput gpuInput;
+					const std::shared_ptr<const AnimatorPlaybackBinding::GpuFastBinding>&
+						fastBinding = item.binding.gpuFastBinding;
 					gpuInput.program.program = item.binding.evaluationProgram;
 					gpuInput.program.programContentId = item.binding.evaluationProgram
 						? item.binding.evaluationProgram->stableHash : 0U;
-					gpuInput.program.programResourceIndex = item.binding.gpuProgramResourceIndex;
-					gpuInput.visual = item.binding.gpuVisual;
+					gpuInput.program.programResourceIndex = fastBinding && fastBinding->IsComplete()
+						? fastBinding->programResourceIndex : kGpuAnimationInvalidResourceIndex;
+					gpuInput.visual = fastBinding && fastBinding->IsComplete()
+						? fastBinding->visual : GpuAnimationVisualInput{};
 					if(item.visualEvaluationSuspended) {
 						// Keep packet/output offsets stable but ask every GPU stage to leave
 						// the last complete pose untouched until the object is visible again.
@@ -3797,44 +4649,12 @@ namespace TerraEngine::Animation {
 					gpuInput.visual.generations.controllerGeneration = item.binding.programGeneration;
 					gpuInput.visual.generations.skeletonGeneration = item.binding.skeletonGeneration;
 					gpuInput.visual.generations.clipGeneration = item.binding.clipGeneration;
-					// Shader-visible generation lanes are intentionally only 32-bit.
-					// Stamp the representable renderer/scene/mesh values here, while the
-					// exact UUID and 64-bit lifetimes remain in renderIdentity beside the
-					// packet. A value that cannot be represented forces the CPU path.
-					const GpuAnimationRenderIdentity& renderIdentity =
-						gpuInput.visual.renderIdentity;
-					const bool gpuFrameIdentityRepresentable =
-						IsGpuAnimationRenderIdentityValid(renderIdentity)
-						&& renderIdentity.meshHeaderVersion
-							<= std::numeric_limits<std::uint32_t>::max()
-						&& renderIdentity.rendererGeneration
-							<= std::numeric_limits<std::uint32_t>::max()
-						&& frameSceneGeneration != 0U
-						&& frameSceneGeneration
-							<= std::numeric_limits<std::uint32_t>::max()
-						&& currentPlaybackState.resolvedTick >= 0
-						&& static_cast<std::uint64_t>(currentPlaybackState.resolvedTick)
-							<= std::numeric_limits<std::uint32_t>::max();
-					if(gpuFrameIdentityRepresentable) {
-						gpuInput.visual.generations.meshGeneration =
-							renderIdentity.meshHeaderVersion;
-						gpuInput.visual.generations.rendererGeneration =
-							static_cast<std::uint32_t>(
-								renderIdentity.rendererGeneration);
-						gpuInput.visual.generations.sceneGeneration =
-							static_cast<std::uint32_t>(frameSceneGeneration);
-						gpuInput.visual.sampleTick = static_cast<std::uint32_t>(
-							currentPlaybackState.resolvedTick);
-						// The frame capture, not the long-lived asset binding, owns the
-						// scene publication identity used by this immutable packet.
-						gpuInput.visual.renderIdentity.sceneGeneration =
-							frameSceneGeneration;
-					}
-					gpuInput.visual.generations.frameIdLow = static_cast<std::uint32_t>(item.input.tick);
-					gpuInput.visual.generations.frameIdHigh = static_cast<std::uint32_t>(
-						static_cast<std::uint64_t>(item.input.tick) >> 32U);
+					const bool gpuFrameIdentityRepresentable = StampGpuVisualFrameIdentity(
+						gpuInput.visual, currentPlaybackState.resolvedTick, item.input.tick);
 					gpuInput.execution = item.executionDecision;
-					gpuInput.residentPayloads = item.binding.gpuResidentPayloads;
+					gpuInput.residentPayloads = fastBinding && fastBinding->IsComplete()
+						? fastBinding->residentPayloads
+						: std::shared_ptr<const GpuAnimationResidentPayloads>{};
 					gpuInput.programValidated = validatedProgram != nullptr
 						&& validatedProgram == gpuInput.program.program.get();
 					const bool stageShapeMatches = gpuInput.programValidated
@@ -3918,8 +4738,66 @@ namespace TerraEngine::Animation {
 					item.candidateExecutionModeGeneration)) {
 					item.evaluationStatus = AnimationStatus::RangeOverflow;
 				}
+				CompactGpuVisualInput compactInput;
+				compactInput.stableInstanceId =
+					(static_cast<std::uint64_t>(item.input.handle.slotIndex) << 32U)
+					| static_cast<std::uint64_t>(item.input.handle.generation);
+				compactInput.stableSubmissionOrdinal = item.input.handle.slotIndex;
+				compactInput.playbackTick = item.playback.AbsoluteTick();
+				compactInput.sourcePoseGeneration = item.candidatePoseGeneration;
+				compactInput.generations.membershipGeneration = compactInput.stableInstanceId;
+				compactInput.generations.capabilityGeneration =
+					item.input.descriptor.componentGeneration;
+				compactInput.generations.bindingGeneration = item.binding.programGeneration;
+				compactInput.generations.resourceGeneration = item.binding.clipGeneration;
+				compactInput.generations.sceneGeneration = frameSceneGeneration;
+				compactInput.generations.rendererGeneration = item.gpuLowering
+					? item.gpuLowering->visual.renderIdentity.rendererGeneration : 0U;
+				compactInput.generations.authorityGeneration =
+					item.candidateAuthorityPublicationGeneration;
+				compactInput.eligibilityReason = item.executionDecision.reason;
+				compactInput.gpuLoweringComplete = item.gpuLowering.has_value();
+				compactInput.hasAuthoritativeConsumer =
+					item.executionDecision.consumerClosure.HasAuthoritativeSubset();
+				compactInput.hasControllerOrTransition = item.binding.controllerProgramRequired
+					|| item.candidateGraphState.activeTransitionStableId != 0U;
+				compactInput.hasAdvancedFeature = item.retargetActive
+					|| item.hasMotionCandidate || !item.activeProceduralGoals.empty()
+					|| item.ragdollLifecycle != RagdollLifecycleState::Inactive;
+				compactInput.hasContinuitySource =
+					item.previousExecutionModeState.initialized;
+				item.compactGpuVisualInput = compactInput;
+				item.processingClass = ClassifyAnimationProcessing(compactInput);
 				ResolveUnchangedCacheReuse(item);
+				if(item.processingClass == AnimationProcessingClass::CompactGpuVisual) {
+					++locallyCompactPlanned;
+				} else {
+					++locallyCompletePlanned;
+				}
 				++locallyPlanned;
+			}
+			if(locallyPlanned != 0U) {
+				const std::uint64_t rangePlanningNanoseconds = static_cast<std::uint64_t>(
+					std::chrono::duration_cast<std::chrono::nanoseconds>(
+						std::chrono::steady_clock::now() - rangePlanningStart).count());
+				// Planning telemetry describes worker-owned CPU time; it must not change
+				// the cost being measured. Attribute one range timer proportionally when
+				// a partition contains both classes, replacing two clock reads and one
+				// contended atomic operation for every animator with at most two atomics.
+				const std::uint64_t compactRangeNanoseconds = static_cast<std::uint64_t>(
+					static_cast<long double>(rangePlanningNanoseconds)
+						* static_cast<long double>(locallyCompactPlanned)
+						/ static_cast<long double>(locallyPlanned));
+				const std::uint64_t completeRangeNanoseconds =
+					rangePlanningNanoseconds - compactRangeNanoseconds;
+				if(compactRangeNanoseconds != 0U) {
+					compactPlanningNanoseconds.fetch_add(
+						compactRangeNanoseconds, std::memory_order_relaxed);
+				}
+				if(completeRangeNanoseconds != 0U) {
+					completePlanningNanoseconds.fetch_add(
+						completeRangeNanoseconds, std::memory_order_relaxed);
+				}
 			}
 			// One partition owns this complete contiguous range, so a single atomic
 			// publication replaces cache-line contention from every animator.
@@ -3931,16 +4809,52 @@ namespace TerraEngine::Animation {
 
 		bool FinalizeAnimationWorkPlan() noexcept
 		{
-			if(frameWork.empty() || PollFrameCancellation()
-				|| plannedAnimatorCount.load(std::memory_order_acquire) != frameWork.size()) {
+			workPlanRejectionReason = AnimationPlanRejectionReason::None;
+			workPlanRejectionItemIndex = std::numeric_limits<std::size_t>::max();
+			if(capturedInputWorkIndices.empty() || PollFrameCancellation()
+				|| plannedAnimatorCount.load(std::memory_order_acquire)
+					!= capturedInputWorkIndices.size()) {
+				workPlanRejectionReason = AnimationPlanRejectionReason::PlanningIncomplete;
 				return false;
 			}
 			std::size_t estimatedPoseBytes = 0U;
 			try {
 				capturedWorkItems.clear();
+				compactGpuVisualWorkItems.clear();
 				capturedWorkItems.reserve(frameWork.size());
+				compactGpuVisualWorkItems.reserve(frameWork.size());
 				for(std::size_t originalIndex = 0U; originalIndex < frameWork.size(); ++originalIndex) {
 					const FrameWorkItem& item = frameWork[originalIndex];
+					if(item.compactCaptureOnly
+						&& item.processingClass != AnimationProcessingClass::CompactGpuVisual) {
+						workPlanRejectionReason =
+							AnimationPlanRejectionReason::CompactClassificationRejected;
+						workPlanRejectionItemIndex = originalIndex;
+						workPlan = {};
+						workPlan.status = AnimationStatus::Rejected;
+						workPlan.executionPolicy = AnimationWorkExecutionPolicy::Rejected;
+						return false;
+					}
+					if(item.processingClass == AnimationProcessingClass::CompactGpuVisual) {
+						// Classification is a complete immutable proof. Recheck the two facts
+						// that bind it to this publication record before omitting the general
+						// evaluator; any inconsistency fails closed into the complete path.
+						if(!item.gpuLowering || !item.compactGpuVisualInput.IsComplete()) {
+							workPlanRejectionReason =
+								AnimationPlanRejectionReason::CompactInputIncomplete;
+							workPlanRejectionItemIndex = originalIndex;
+							workPlan = {};
+							workPlan.status = AnimationStatus::Rejected;
+							workPlan.executionPolicy = AnimationWorkExecutionPolicy::Rejected;
+							return false;
+						}
+						compactGpuVisualWorkItems.append(
+							item.capturedInputIndex,
+							item.input.handle,
+							item.candidateAuthorityPublicationGeneration,
+							item.compactGpuVisualInput);
+						continue;
+					}
 					AnimationWorkItem workItem;
 					workItem.animator = item.input.handle;
 					workItem.compatibility.programGeneration = item.binding.programGeneration;
@@ -3955,7 +4869,7 @@ namespace TerraEngine::Animation {
 							item.bindingResourceLayoutFingerprint,
 							item.retargetActive ? 1U : 0U);
 					workItem.compatibility.effectiveMode = item.executionDecision.effectiveMode;
-					workItem.stablePublicationOrder = originalIndex;
+					workItem.stablePublicationOrder = item.capturedInputIndex;
 					workItem.sourceGeneration = item.candidateAuthorityPublicationGeneration;
 					workItem.scratchBytes = sizeof(AnimationFrameScratchRecord);
 					capturedWorkItems.push_back(workItem);
@@ -3971,7 +4885,32 @@ namespace TerraEngine::Animation {
 						return false;
 					}
 				}
+				for(std::size_t compactIndex = 0U;
+					compactIndex < compactGpuVisualCaptures.size(); ++compactIndex) {
+					if(compactGpuVisualCaptures.processingClasses[compactIndex]
+						!= AnimationProcessingClass::CompactGpuVisual
+						|| !compactGpuVisualCaptures.compactInputs[compactIndex].IsComplete()) {
+						workPlanRejectionReason =
+							compactGpuVisualCaptures.planningFailures[compactIndex];
+						if(workPlanRejectionReason == AnimationPlanRejectionReason::None) {
+							workPlanRejectionReason =
+								AnimationPlanRejectionReason::CompactInputIncomplete;
+						}
+						workPlanRejectionItemIndex =
+							compactGpuVisualCaptures.inputIndices[compactIndex];
+						workPlan = {};
+						workPlan.status = AnimationStatus::Rejected;
+						workPlan.executionPolicy = AnimationWorkExecutionPolicy::Rejected;
+						return false;
+					}
+					compactGpuVisualWorkItems.append(
+						compactGpuVisualCaptures.inputIndices[compactIndex],
+						compactGpuVisualCaptures.inputs[compactIndex].handle,
+						compactGpuVisualCaptures.candidateAuthorityGenerations[compactIndex],
+						compactGpuVisualCaptures.compactInputs[compactIndex]);
+				}
 			} catch(const std::bad_alloc&) {
+				workPlanRejectionReason = AnimationPlanRejectionReason::AllocationFailure;
 				workPlan = {};
 				workPlan.status = AnimationStatus::InternalError;
 				workPlan.executionPolicy = AnimationWorkExecutionPolicy::Rejected;
@@ -3984,6 +4923,7 @@ namespace TerraEngine::Animation {
 				availableWorkerCount,
 				workCancellationSource.CaptureToken());
 			if(workPlan.status != AnimationStatus::Ok || PollFrameCancellation()) {
+				workPlanRejectionReason = AnimationPlanRejectionReason::SchedulerRejected;
 				return false;
 			}
 			// AnimationWorkScheduler::BuildPlan already validates the complete plan.
@@ -3993,32 +4933,47 @@ namespace TerraEngine::Animation {
 
 			AnimationMemoryLease stagedLease;
 			AnimationMemoryLease stagedPoseLease;
-			const AnimationMemoryReservationRequest memoryRequest{
-				AnimationMemoryClass::ScratchPool,
-				workPlan.totalScratchBytes,
-				frameWork.front().candidateAuthorityPublicationGeneration,
-				AnimationMemoryRetention::Required,
-				0U};
-			const AnimationMemoryStatus memoryStatus = memoryController.TryReserve(
-				memoryRequest, stagedLease);
-			if(memoryStatus != AnimationMemoryStatus::Reserved) {
-				workPlan.status = memoryStatus == AnimationMemoryStatus::BudgetExceeded
-					|| memoryStatus == AnimationMemoryStatus::ReservationTableFull
-					? AnimationStatus::HardLimitExceeded
-					: AnimationStatus::InternalError;
-				workPlan.executionPolicy = AnimationWorkExecutionPolicy::Rejected;
-				return false;
+			const std::uint64_t planAuthorityGeneration = !compactGpuVisualCaptures.empty()
+				? compactGpuVisualCaptures.candidateAuthorityGenerations.front()
+				: frameWork.front().candidateAuthorityPublicationGeneration;
+			if(workPlan.totalScratchBytes != 0U) {
+				// A frame made entirely of CompactGpuVisual records has no generic
+				// evaluator, ranges, or scratch storage. The scheduler deliberately
+				// represents that as a valid Omitted plan, while the memory controller
+				// correctly rejects zero-byte reservations. Reserve only when generic
+				// work actually owns scratch bytes so compact packets can publish their
+				// current playback tick through the separate compact completion path.
+				const AnimationMemoryReservationRequest memoryRequest{
+					AnimationMemoryClass::ScratchPool,
+					workPlan.totalScratchBytes,
+					planAuthorityGeneration,
+					AnimationMemoryRetention::Required,
+					0U};
+				const AnimationMemoryStatus memoryStatus = memoryController.TryReserve(
+					memoryRequest, stagedLease);
+				if(memoryStatus != AnimationMemoryStatus::Reserved) {
+					workPlanRejectionReason =
+						AnimationPlanRejectionReason::MemoryReservationRejected;
+					workPlan.status = memoryStatus == AnimationMemoryStatus::BudgetExceeded
+						|| memoryStatus == AnimationMemoryStatus::ReservationTableFull
+						? AnimationStatus::HardLimitExceeded
+						: AnimationStatus::InternalError;
+					workPlan.executionPolicy = AnimationWorkExecutionPolicy::Rejected;
+					return false;
+				}
 			}
 			if(estimatedPoseBytes != 0U) {
 				const AnimationMemoryReservationRequest poseMemoryRequest{
 					AnimationMemoryClass::PosePool,
 					estimatedPoseBytes,
-					frameWork.front().candidateAuthorityPublicationGeneration,
+					planAuthorityGeneration,
 					AnimationMemoryRetention::Required,
 					0U};
 				const AnimationMemoryStatus poseMemoryStatus = memoryController.TryReserve(
 					poseMemoryRequest, stagedPoseLease);
 				if(poseMemoryStatus != AnimationMemoryStatus::Reserved) {
+					workPlanRejectionReason =
+						AnimationPlanRejectionReason::MemoryReservationRejected;
 					workPlan.status = poseMemoryStatus == AnimationMemoryStatus::BudgetExceeded
 						|| poseMemoryStatus == AnimationMemoryStatus::ReservationTableFull
 						? AnimationStatus::HardLimitExceeded
@@ -4036,6 +4991,8 @@ namespace TerraEngine::Animation {
 				frameScratch.resize(workPlan.totalScratchBytes);
 				workCompletions.clear();
 				workCompletions.resize(workPlan.items.size());
+				compactGpuVisualCompletions.clear();
+				compactGpuVisualCompletions.resize(compactGpuVisualWorkItems.size());
 				auto stagedRangeLedger = std::make_unique<AnimationWorkRangeLedger>(workPlan);
 				std::shared_ptr<const AnimationMemoryLease> stagedPoseReservation;
 				if(stagedPoseLease.IsActive()) {
@@ -5485,6 +6442,7 @@ namespace TerraEngine::Animation {
 				item.evaluated = true;
 				PrepareFallbackSelection(item);
 			} catch(const std::bad_alloc&) {
+				workPlanRejectionReason = AnimationPlanRejectionReason::AllocationFailure;
 				item.evaluationStatus = AnimationStatus::InternalError;
 				item.evaluated = true;
 				PrepareFallbackSelection(item);
@@ -6029,10 +6987,6 @@ namespace TerraEngine::Animation {
 			if(!CanShareCpuVisualPose(source, destination)) return false;
 			try {
 				auto pose = std::make_shared<PoseBuffer>();
-				PoseBufferLayout layout = source.pose->Layout();
-				// Eligible source poses contain no instance-addressed event or root
-				// motion records. Do not reserve event storage in the clone.
-				layout.eventCapacity = 0U;
 				AnimationPoseGeneration generation;
 				generation.animator = destination.input.handle;
 				generation.poseGeneration = destination.candidatePoseGeneration;
@@ -6042,18 +6996,12 @@ namespace TerraEngine::Animation {
 				generation.programGeneration =
 					destination.binding.programGeneration;
 				generation.tick = frameTick;
-				if(pose->BeginWrite(layout, generation) != AnimationStatus::Ok) {
-					return false;
-				}
-				std::ranges::copy(
-					source.pose->LocalTransforms(), pose->MutableLocalTransforms().begin());
-				std::ranges::copy(
-					source.pose->ModelTransforms(), pose->MutableModelTransforms().begin());
-				std::ranges::copy(
-					source.pose->MorphValues(), pose->MutableMorphValues().begin());
-				std::ranges::copy(
-					source.pose->CurveValues(), pose->MutableCurveValues().begin());
-				if(pose->Seal() != AnimationStatus::Ok) return false;
+				// The PoseBuffer owns the per-animator generation but aliases only the
+				// leader's already-sealed visual payload. This removes both repeated
+				// evaluation and the former local/model/palette memcpy for synchronized
+				// crowds while retaining a distinct publication identity per animator.
+				if(pose->ShareSealedVisualPayloadFrom(*source.pose, generation)
+					!= AnimationStatus::Ok) return false;
 
 				destination.pose = std::move(pose);
 				destination.visualPoseContentIdLow = source.visualPoseContentIdLow;
@@ -6081,6 +7029,7 @@ namespace TerraEngine::Animation {
 				|| partitionIndex >= std::numeric_limits<std::uint32_t>::max()
 				|| workPlan.status != AnimationStatus::Ok || !workPlanValidated
 				|| workRangeLedger == nullptr) return;
+			const auto evaluationStart = std::chrono::steady_clock::now();
 			// FinalizeAnimationWorkPlan is a single worker dependency between planning
 			// and evaluation. Every range therefore observes one completed immutable
 			// plan and never blocks a worker on the former shared finalization mutex.
@@ -6113,12 +7062,18 @@ namespace TerraEngine::Animation {
 						completion.status = AnimationStatus::Cancelled;
 						continue;
 					}
-					if(scheduled.originalInputIndex >= frameWork.size()) {
+					if(scheduled.item.stablePublicationOrder >= capturedInputWorkIndices.size()) {
+						completion.status = AnimationStatus::Rejected;
+						continue;
+					}
+					const CapturedInputWorkIndex& captured = capturedInputWorkIndices[
+						static_cast<std::size_t>(scheduled.item.stablePublicationOrder)];
+					if(captured.compact || captured.storageIndex >= frameWork.size()) {
 						completion.status = AnimationStatus::Rejected;
 						continue;
 					}
 
-					FrameWorkItem& item = frameWork[scheduled.originalInputIndex];
+					FrameWorkItem& item = frameWork[captured.storageIndex];
 					if(item.candidateAuthorityPublicationGeneration
 						!= scheduled.item.sourceGeneration) {
 						completion.status = AnimationStatus::Rejected;
@@ -6140,9 +7095,13 @@ namespace TerraEngine::Animation {
 							++sourceIndex) {
 							const AnimationScheduledWorkItem& sourceScheduled =
 								workPlan.items[sourceIndex];
-							if(sourceScheduled.originalInputIndex >= frameWork.size()) continue;
+							if(sourceScheduled.item.stablePublicationOrder
+								>= capturedInputWorkIndices.size()) continue;
+							const CapturedInputWorkIndex& sourceCaptured = capturedInputWorkIndices[
+								static_cast<std::size_t>(sourceScheduled.item.stablePublicationOrder)];
+							if(sourceCaptured.compact || sourceCaptured.storageIndex >= frameWork.size()) continue;
 							sharedPose = TryShareCpuVisualPose(
-								frameWork[sourceScheduled.originalInputIndex], item);
+								frameWork[sourceCaptured.storageIndex], item);
 						}
 					}
 					if(!sharedPose && !item.cacheReused
@@ -6171,6 +7130,79 @@ namespace TerraEngine::Animation {
 				}
 			}
 			publishLocalCount();
+			completeEvaluationNanoseconds.fetch_add(static_cast<std::uint64_t>(
+				std::chrono::duration_cast<std::chrono::nanoseconds>(
+					std::chrono::steady_clock::now() - evaluationStart).count()),
+				std::memory_order_acq_rel);
+		}
+
+		void EvaluateCompactGpuVisualPartition(
+			std::size_t itemBegin,
+			std::size_t itemEnd) noexcept
+		{
+			if(itemBegin > itemEnd || !compactGpuVisualWorkItems.IsConsistent()
+				|| !compactGpuVisualCompletions.IsConsistent()
+				|| compactGpuVisualCompletions.size() != compactGpuVisualWorkItems.size()) {
+				return;
+			}
+			const auto evaluationStart = std::chrono::steady_clock::now();
+			std::size_t locallyCompleted = 0U;
+			const std::size_t boundedBegin = std::min(
+				itemBegin, compactGpuVisualWorkItems.size());
+			const std::size_t boundedEnd = std::min(
+				itemEnd, compactGpuVisualWorkItems.size());
+			// Scheduler partitions are contiguous. Adjacent completion records therefore
+			// stay on one worker instead of being interleaved across cache lines by every
+			// worker, which removes false sharing in large compact crowds.
+			bool cancellationObserved = false;
+			for(std::size_t compactIndex = boundedBegin;
+				compactIndex < boundedEnd; ++compactIndex) {
+				compactGpuVisualCompletions.compactItemIndices[compactIndex] = compactIndex;
+				compactGpuVisualCompletions.animators[compactIndex] =
+					compactGpuVisualWorkItems.animators[compactIndex];
+				compactGpuVisualCompletions.sourceGenerations[compactIndex] =
+					compactGpuVisualWorkItems.sourceGenerations[compactIndex];
+				// The cancellation state is monotonic for this frame. Poll once per
+				// sixteen compact packets and latch the result, matching the complete
+				// evaluator's bounded response without repeated shared-state reads.
+				if(!cancellationObserved
+					&& ((compactIndex - boundedBegin) & 15U) == 0U) {
+					cancellationObserved = PollFrameCancellation();
+				}
+				if(cancellationObserved) {
+					compactGpuVisualCompletions.statuses[compactIndex] =
+						AnimationStatus::Cancelled;
+					continue;
+				}
+				// The compact packet has no CPU pose, event, graph, or mutation storage.
+				// Its identity is self-contained; protected publication performs the one
+				// live-record check before committing the corresponding authority state.
+				CompactGpuVisualResult result;
+				const CompactGpuVisualInput& input = compactGpuVisualWorkItems.inputs[compactIndex];
+				result.stableInstanceId = input.stableInstanceId;
+				result.stableSubmissionOrdinal = input.stableSubmissionOrdinal;
+				result.sourcePoseGeneration = input.sourcePoseGeneration;
+				result.presentationPoseGeneration = input.sourcePoseGeneration;
+				result.generations = input.generations;
+				result.reason = input.eligibilityReason;
+				result.complete = true;
+				if(!result.IsPublishableFor(input)) {
+					compactGpuVisualCompletions.statuses[compactIndex] = AnimationStatus::Rejected;
+					continue;
+				}
+				compactGpuVisualCompletions.results[compactIndex] = result;
+				compactGpuVisualCompletions.statuses[compactIndex] = AnimationStatus::Ok;
+				++locallyCompleted;
+			}
+			if(locallyCompleted != 0U) {
+				compactGpuVisualCompletedCount.fetch_add(locallyCompleted,
+					std::memory_order_acq_rel);
+				evaluatedAnimatorCount.fetch_add(locallyCompleted, std::memory_order_acq_rel);
+			}
+			compactEvaluationNanoseconds.fetch_add(static_cast<std::uint64_t>(
+				std::chrono::duration_cast<std::chrono::nanoseconds>(
+					std::chrono::steady_clock::now() - evaluationStart).count()),
+				std::memory_order_acq_rel);
 		}
 
 		bool PublishFrameLocked(
@@ -6178,20 +7210,20 @@ namespace TerraEngine::Animation {
 			std::uint64_t frameEpoch,
 			std::uint64_t authorityGeneration) noexcept
 		{
-			if(authorityGeneration == 0U || frameWork.size() != animatorCount
+			if(authorityGeneration == 0U || capturedInputWorkIndices.size() != animatorCount
 				|| plannedAnimatorCount.load(std::memory_order_acquire) != animatorCount
 				|| evaluatedAnimatorCount.load(std::memory_order_acquire) != animatorCount
+				|| compactGpuVisualCompletedCount.load(std::memory_order_acquire)
+					!= compactGpuVisualWorkItems.size()
 				|| PollFrameCancellation()
 				|| workRangeLedger == nullptr || !workRangeLedger->AllCompleted()
 				|| !workPlanValidated
 				|| workCompletions.size() != workPlan.items.size()) {
 				return false;
 			}
-			// Workers write completions directly into their scheduled index. The work
-			// plan was already validated once during finalization, so publication only
-			// needs to prove that every indexed completion matches that frozen item.
-			// This avoids rebuilding a duplicate bitset and revalidating the complete
-			// scheduler plan for every steady 4,000-instance frame.
+			// Complete workers write scheduler completions while compact workers write
+			// their own minimal results. Both sets must validate before the shared
+			// protected commit can make either class visible.
 			{
 				TERRAENGINE_PROFILE_SCOPE("Animation: Validate Work Completions",
 					TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
@@ -6201,7 +7233,49 @@ namespace TerraEngine::Animation {
 					if(completion.status != AnimationStatus::Ok
 						|| completion.scheduledItemIndex != index
 						|| completion.animator != expected.animator
-						|| completion.sourceGeneration != expected.sourceGeneration) {
+						|| completion.sourceGeneration != expected.sourceGeneration
+						|| expected.stablePublicationOrder >= capturedInputWorkIndices.size()) {
+						return false;
+					}
+					const CapturedInputWorkIndex& captured = capturedInputWorkIndices[
+						static_cast<std::size_t>(expected.stablePublicationOrder)];
+					if(captured.compact || captured.storageIndex >= frameWork.size()
+						|| frameWork[captured.storageIndex].processingClass
+							!= AnimationProcessingClass::Complete) {
+						return false;
+					}
+				}
+				for(std::size_t index = 0U; index < compactGpuVisualCompletions.size(); ++index) {
+					if(compactGpuVisualCompletions.statuses[index] != AnimationStatus::Ok
+						|| compactGpuVisualCompletions.compactItemIndices[index] != index
+						|| compactGpuVisualCompletions.animators[index]
+							!= compactGpuVisualWorkItems.animators[index]
+						|| compactGpuVisualCompletions.sourceGenerations[index]
+							!= compactGpuVisualWorkItems.sourceGenerations[index]
+						|| !compactGpuVisualCompletions.results[index].IsPublishableFor(
+							compactGpuVisualWorkItems.inputs[index])) {
+						return false;
+					}
+					const std::size_t inputIndex = compactGpuVisualWorkItems.frameWorkIndices[index];
+					if(inputIndex >= capturedInputWorkIndices.size()) return false;
+					const CapturedInputWorkIndex& captured = capturedInputWorkIndices[inputIndex];
+					if(!captured.compact) {
+						if(captured.storageIndex >= frameWork.size()
+							|| frameWork[captured.storageIndex].input.handle
+								!= compactGpuVisualWorkItems.animators[index]
+							|| frameWork[captured.storageIndex].candidateAuthorityPublicationGeneration
+								!= compactGpuVisualWorkItems.sourceGenerations[index]
+							|| frameWork[captured.storageIndex].processingClass
+								!= AnimationProcessingClass::CompactGpuVisual) return false;
+						continue;
+					}
+					if(captured.storageIndex >= compactGpuVisualCaptures.size()
+						|| compactGpuVisualCaptures.inputs[captured.storageIndex].handle
+							!= compactGpuVisualWorkItems.animators[index]
+						|| compactGpuVisualCaptures.candidateAuthorityGenerations[captured.storageIndex]
+							!= compactGpuVisualWorkItems.sourceGenerations[index]
+						|| compactGpuVisualCaptures.processingClasses[captured.storageIndex]
+							!= AnimationProcessingClass::CompactGpuVisual) {
 						return false;
 					}
 				}
@@ -6210,8 +7284,9 @@ namespace TerraEngine::Animation {
 			try {
 				// assign reuses the retained capacity on stable frames. No live runtime
 				// record has changed yet, so allocation failure remains an atomic reject.
-				deterministicPublicationOrder.assign(
-					workPlan.publicationOrder.begin(), workPlan.publicationOrder.end());
+				deterministicPublicationOrder.resize(capturedInputWorkIndices.size());
+				std::iota(deterministicPublicationOrder.begin(),
+					deterministicPublicationOrder.end(), 0U);
 			} catch(const std::bad_alloc&) {
 				return false;
 			}
@@ -6229,10 +7304,27 @@ namespace TerraEngine::Animation {
 			TERRAENGINE_PROFILE_SCOPE("Animation: Preflight Authority Publication",
 				TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 			for(const std::size_t scheduledIndex : deterministicPublicationOrder) {
-				if(scheduledIndex >= workPlan.items.size()) return false;
-				const AnimationScheduledWorkItem& scheduled = workPlan.items[scheduledIndex];
-				if(scheduled.originalInputIndex >= frameWork.size()) return false;
-				FrameWorkItem& item = frameWork[scheduled.originalInputIndex];
+				if(scheduledIndex >= capturedInputWorkIndices.size()) return false;
+				const CapturedInputWorkIndex& captured = capturedInputWorkIndices[scheduledIndex];
+				if(captured.compact) {
+					if(captured.storageIndex >= compactGpuVisualCaptures.size()) return false;
+					const CompactGpuVisualCaptures& compact = compactGpuVisualCaptures;
+					const RuntimeRecord* record = FindRuntimeRecordLocked(
+						compact.inputs[captured.storageIndex].handle);
+					if(record == nullptr
+						|| record->descriptor.componentGeneration
+							!= compact.inputs[captured.storageIndex].descriptor.componentGeneration
+						|| compact.candidatePoseGenerations[captured.storageIndex]
+							!= record->poseGeneration + 1U
+						|| compact.candidateAuthorityGenerations[captured.storageIndex]
+							!= authorityGeneration
+						|| compact.evaluationStatuses[captured.storageIndex] != AnimationStatus::Ok
+						|| compact.processingClasses[captured.storageIndex]
+							!= AnimationProcessingClass::CompactGpuVisual) return false;
+					continue;
+				}
+				if(captured.storageIndex >= frameWork.size()) return false;
+				FrameWorkItem& item = frameWork[captured.storageIndex];
 				const RuntimeRecord* record = FindRuntimeRecordLocked(item.input.handle);
 				const bool preservesPrior = item.cacheReused
 					|| item.fallbackDecision.source == AnimationFallbackSource::HeldPriorGeneration;
@@ -6318,9 +7410,54 @@ namespace TerraEngine::Animation {
 			TERRAENGINE_PROFILE_SCOPE("Animation: Commit Runtime Records",
 				TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 			for(const std::size_t scheduledIndex : deterministicPublicationOrder) {
-				const AnimationScheduledWorkItem& scheduled = workPlan.items[scheduledIndex];
-				FrameWorkItem& item = frameWork[scheduled.originalInputIndex];
+				const CapturedInputWorkIndex& captured = capturedInputWorkIndices[scheduledIndex];
+				if(captured.compact) {
+					CompactGpuVisualCaptures& compact = compactGpuVisualCaptures;
+					const std::size_t compactIndex = captured.storageIndex;
+					RuntimeRecord* record = FindRuntimeRecordLocked(compact.inputs[compactIndex].handle);
+					// Preflight proved record validity before the first mutation, so this
+					// direct compact commit remains part of the same atomic batch.
+					assert(record != nullptr);
+					record->playback = compact.playbacks[compactIndex];
+					record->poseGeneration = compact.candidatePoseGenerations[compactIndex];
+					record->stateGeneration = compact.stateGenerations[compactIndex];
+					record->executionModeGeneration = compact.executionModeGenerations[compactIndex];
+					record->executionModeState = compact.executionDecisions[compactIndex].nextState;
+					// A stable GPU-only animator already has no CPU pose. Avoid an atomic
+					// shared-pointer publication on every subsequent frame; the presence bit
+					// is committed under this same protected ownership boundary.
+					if(record->publishedPosePresent) {
+						std::atomic_store_explicit(&record->publishedPose,
+							std::shared_ptr<const PublishedAnimatorPose>{},
+							std::memory_order_release);
+					}
+					record->publishedPosePresent = false;
+					continue;
+				}
+				FrameWorkItem& item = frameWork[captured.storageIndex];
 				RuntimeRecord* record = FindRuntimeRecordLocked(item.input.handle);
+				if(item.compactCaptureOnly) {
+					// Compact capture never copied mutable binding/controller/event state.
+					// Commit only the scalar authority advances proven by its immutable GPU
+					// packet, then hide CPU presentation until the exact GPU envelope lands.
+					record->playback = item.playback;
+					record->poseGeneration = item.candidatePoseGeneration;
+					record->stateGeneration = item.candidateStateGeneration;
+					record->executionModeGeneration = item.candidateExecutionModeGeneration;
+					record->executionModeState = item.executionDecision.nextState;
+					if(record->publishedPosePresent) {
+						const auto prior = std::atomic_load_explicit(
+							&record->publishedPose, std::memory_order_acquire);
+						if(prior && prior->snapshot && prior->snapshot->pose
+							&& prior->snapshot->pose->ValidateForPublication() == AnimationStatus::Ok) {
+							record->retainedCpuSafePose = prior;
+						}
+						std::atomic_store_explicit(&record->publishedPose,
+							std::shared_ptr<const PublishedAnimatorPose>{}, std::memory_order_release);
+					}
+					record->publishedPosePresent = false;
+					continue;
+				}
 				if(item.fallbackCandidate) {
 					const AnimationFallbackPublishStatus fallbackStatus =
 						record->fallbackPublication.TryPublish(
@@ -6401,19 +7538,25 @@ namespace TerraEngine::Animation {
 					// later motor or recovery request therefore cannot target an old tick.
 					record->ragdollGeneration = item.ragdollGeneration;
 				}
-				// GPU Visual has no CPU pose by contract. Clearing an earlier CPU
-				// publication prevents render collection from preferring it over the
-				// same frame's owner-mapped immutable GPU packet.
+				// GPU Visual does not expose a CPU pose to render collection, but its last
+				// valid CPU pose remains privately retained until an exact GPU envelope is
+				// published. This preserves a safe source for a fail-closed transition.
 				const bool publishesCpuPose = item.executionDecision.effectiveMode
 						!= AnimationEffectiveExecutionMode::GpuVisual
 					|| !item.gpuLowering.has_value();
 				if(!publishesCpuPose) {
-					// The first GPU transition clears a prior CPU publication. Stable GPU
-					// frames leave the already-null atomic untouched.
+					// The first GPU transition hides the prior CPU publication from ordinary
+					// rendering while retaining a verified immutable safe pose for recovery.
 					if(record->publishedPosePresent) {
 						const std::shared_ptr<const PublishedAnimatorPose> priorPublication =
 							std::atomic_load_explicit(
 								&record->publishedPose, std::memory_order_acquire);
+						if(priorPublication && priorPublication->snapshot
+							&& priorPublication->snapshot->pose
+							&& priorPublication->snapshot->pose->ValidateForPublication()
+								== AnimationStatus::Ok) {
+							record->retainedCpuSafePose = priorPublication;
+						}
 						if(priorPublication && priorPublication->snapshot
 							&& item.selectedPublication && item.selectedPublication->snapshot
 							&& priorPublication != item.selectedPublication
@@ -6444,6 +7587,12 @@ namespace TerraEngine::Animation {
 							item.selectedPublication, std::memory_order_release);
 					}
 					record->publishedPosePresent = item.selectedPublication != nullptr;
+					if(item.selectedPublication && item.selectedPublication->snapshot
+						&& item.selectedPublication->snapshot->pose
+						&& item.selectedPublication->snapshot->pose->ValidateForPublication()
+							== AnimationStatus::Ok) {
+						record->retainedCpuSafePose = item.selectedPublication;
+					}
 				}
 
 				if(item.cacheEligible && item.fallbackDecision.source == AnimationFallbackSource::Current
@@ -6465,8 +7614,9 @@ namespace TerraEngine::Animation {
 			// PhysicsCommandCommit owns provider mutation, preserving one Jolt authority.
 			if(hasRagdollPublicationWork) {
 			for(const std::size_t scheduledIndex : deterministicPublicationOrder) {
-				const AnimationScheduledWorkItem& scheduled = workPlan.items[scheduledIndex];
-				FrameWorkItem& item = frameWork[scheduled.originalInputIndex];
+				FrameWorkItem* itemPointer = CompleteWorkForInputIndex(scheduledIndex);
+				if(itemPointer == nullptr) continue;
+				FrameWorkItem& item = *itemPointer;
 				RuntimeRecord* record = FindRuntimeRecordLocked(item.input.handle);
 				if(record == nullptr || !item.ragdollGeneration.IsValid()
 					|| (item.ragdollLifecycle != RagdollLifecycleState::Active
@@ -6534,8 +7684,9 @@ namespace TerraEngine::Animation {
 			// never advertise a generation whose pose was rejected during preflight.
 			if(hasProceduralPublicationWork) {
 			for(const std::size_t scheduledIndex : deterministicPublicationOrder) {
-				const AnimationScheduledWorkItem& scheduled = workPlan.items[scheduledIndex];
-				const FrameWorkItem& item = frameWork[scheduled.originalInputIndex];
+				const FrameWorkItem* itemPointer = CompleteWorkForInputIndex(scheduledIndex);
+				if(itemPointer == nullptr) continue;
+				const FrameWorkItem& item = *itemPointer;
 				if(!item.proceduralStateObserved) continue;
 				(void)proceduralCommands->PublishResults(
 					{item.input.handle.slotIndex, item.input.handle.generation},
@@ -6548,8 +7699,9 @@ namespace TerraEngine::Animation {
 			// committed pose and is therefore safe for managed/editor observations.
 			if(advancedCommands != nullptr && hasRetargetPublicationWork) {
 				for(const std::size_t scheduledIndex : deterministicPublicationOrder) {
-					const AnimationScheduledWorkItem& scheduled = workPlan.items[scheduledIndex];
-					const FrameWorkItem& item = frameWork[scheduled.originalInputIndex];
+					const FrameWorkItem* itemPointer = CompleteWorkForInputIndex(scheduledIndex);
+					if(itemPointer == nullptr) continue;
+					const FrameWorkItem& item = *itemPointer;
 					if(!item.retargetActive || !item.sampledSourceSkeleton) continue;
 					NativeAnimationRetargetSnapshot snapshot{};
 					snapshot.header = MakeNativeHeader(
@@ -6580,8 +7732,9 @@ namespace TerraEngine::Animation {
 				AnimationAttachmentSnapshotPublisher::Instance();
 			if(attachmentPublisher.HasPublicationRequests()) {
 			for(const std::size_t scheduledIndex : deterministicPublicationOrder) {
-				const AnimationScheduledWorkItem& scheduled = workPlan.items[scheduledIndex];
-				const FrameWorkItem& item = frameWork[scheduled.originalInputIndex];
+				const FrameWorkItem* itemPointer = CompleteWorkForInputIndex(scheduledIndex);
+				if(itemPointer == nullptr) continue;
+				const FrameWorkItem& item = *itemPointer;
 				if(!attachmentPublisher.IsPublicationRequested(item.input.handle)) continue;
 				if(item.cacheReused
 					|| item.fallbackDecision.source == AnimationFallbackSource::HeldPriorGeneration) {
@@ -6638,8 +7791,9 @@ namespace TerraEngine::Animation {
 			constexpr std::uint32_t kAutomaticRootMotionProducerId = 0xA11A0001U;
 			if(hasAutomaticRootMotionWork) {
 			for(const std::size_t scheduledIndex : deterministicPublicationOrder) {
-				const AnimationScheduledWorkItem& scheduled = workPlan.items[scheduledIndex];
-				const FrameWorkItem& item = frameWork[scheduled.originalInputIndex];
+				const FrameWorkItem* itemPointer = CompleteWorkForInputIndex(scheduledIndex);
+				if(itemPointer == nullptr) continue;
+				const FrameWorkItem& item = *itemPointer;
 				if(item.cacheReused
 					|| item.fallbackDecision.source == AnimationFallbackSource::HeldPriorGeneration
 					|| !item.selectedPublication || !item.selectedPublication->snapshot
@@ -6745,6 +7899,11 @@ namespace TerraEngine::Animation {
 		{
 			AnimationDiagnosticsSnapshot snapshot;
 			snapshot.frameIndex = publicationGeneration;
+			snapshot.candidateGeneration = publicationGeneration;
+			snapshot.acceptedGeneration = publicationGeneration;
+			snapshot.presentationGeneration =
+				AnimationPresentationSystem::Instance().PresentationPublicationGeneration();
+			snapshot.sceneGeneration = frameSceneGeneration;
 			snapshot.fixedTick = frameTick;
 			// Summary counters remain cheap on every active frame. Only the detail
 			// level and bounded record count reflect a separately requested copied
@@ -6754,7 +7913,37 @@ namespace TerraEngine::Animation {
 				: AnimationDiagnosticsDetailLevel::Detailed;
 			snapshot.dormant = false;
 			AnimationDiagnosticsCounters& counters = snapshot.counters;
-			counters.activeAnimators = frameWork.size();
+			// The indexed capture mapping is the authoritative full-frame population:
+			// early compact records intentionally never construct FrameWorkItem entries.
+			counters.activeAnimators = capturedInputWorkIndices.size();
+			// This is the protected pre-copy admission count. It proves compact
+			// candidates bypassed broad runtime-state capture even if a later immutable
+			// lowering proof rejects the complete frame.
+			counters.compactEligibleAnimators = compactPreCopyCaptureCount.load(
+				std::memory_order_acquire);
+			counters.compactProcessedAnimators =
+				compactGpuVisualCompletedCount.load(std::memory_order_acquire);
+			// FrameWorkItem is constructed only for the complete-capture branch, so its
+			// count cannot be derived by subtracting compact packets (which also include
+			// direct SoA entries and would underflow for an all-compact crowd).
+			counters.completeCapturedAnimators = frameWork.size();
+			counters.completeProcessedAnimators = workCompletions.size();
+			// Finalization creates exactly one compact plan envelope for all proven
+			// packets. This is a real plan-group count, not a per-animator estimate.
+			counters.compactPlanGroups = compactGpuVisualWorkItems.empty() ? 0U : 1U;
+			constexpr double kNanosecondsPerMillisecond = 1'000'000.0;
+			snapshot.timings.compactCaptureMs = static_cast<double>(
+				compactPlanningNanoseconds.load(std::memory_order_acquire))
+				/ kNanosecondsPerMillisecond;
+			snapshot.timings.completeCaptureMs = static_cast<double>(
+				completePlanningNanoseconds.load(std::memory_order_acquire))
+				/ kNanosecondsPerMillisecond;
+			snapshot.timings.compactEvaluationMs = static_cast<double>(
+				compactEvaluationNanoseconds.load(std::memory_order_acquire))
+				/ kNanosecondsPerMillisecond;
+			snapshot.timings.completeEvaluationMs = static_cast<double>(
+				completeEvaluationNanoseconds.load(std::memory_order_acquire))
+				/ kNanosecondsPerMillisecond;
 			counters.schedulerMembershipChecks = 1U;
 			counters.workerJobs = workPlan.executionPolicy
 				== AnimationWorkExecutionPolicy::WorkerTasks
@@ -6777,6 +7966,15 @@ namespace TerraEngine::Animation {
 					&& item.gpuLowering.has_value()
 					&& item.evaluationStatus == AnimationStatus::Ok
 					&& !item.safePose;
+				if(item.executionDecision.transition.occurred) {
+					if(item.executionDecision.transition.from
+						== AnimationEffectiveExecutionMode::GpuVisual) {
+						++counters.compactToCompleteTransitions;
+					} else if(item.executionDecision.transition.to
+						== AnimationEffectiveExecutionMode::GpuVisual) {
+						++counters.completeToCompactTransitions;
+					}
+				}
 				if(item.evaluationStatus != AnimationStatus::Ok || item.safePose
 					|| (!successfulGpuVisual
 						&& item.fallbackDecision.source
@@ -6812,10 +8010,9 @@ namespace TerraEngine::Animation {
 					}
 					break;
 				}
-				if(item.gpuLowering.has_value()) {
-					++counters.gpuDispatches;
-					++counters.gpuBatches;
-				}
+				// GPU work is counted from the protected presentation envelope below.
+				// A lowering attempt is not necessarily accepted, batched, or recorded by
+				// the active graphics backend, so it cannot inflate observable plan counters.
 				if(item.ragdollLifecycle == RagdollLifecycleState::Active
 					|| item.ragdollLifecycle == RagdollLifecycleState::Recovering) {
 					++counters.physicsHandoffs;
@@ -6827,6 +8024,76 @@ namespace TerraEngine::Animation {
 					counters.managedCallbacks += pose.Events().size();
 					if(pose.RootMotionDelta().has_value()) ++counters.rootMotionQueueDepth;
 				}
+				const std::size_t fallbackReason = static_cast<std::size_t>(
+					item.fallbackDecision.reason);
+				if(fallbackReason < counters.fallbackReasonCounts.size()
+					&& item.fallbackDecision.source != AnimationFallbackSource::Current) {
+					++counters.fallbackReasonCounts[fallbackReason];
+				}
+			}
+			std::uint32_t compactStageMask = 0U;
+			for(std::size_t compactIndex = 0U;
+				compactIndex < compactGpuVisualWorkItems.size(); ++compactIndex) {
+				const std::size_t inputIndex =
+					compactGpuVisualWorkItems.frameWorkIndices[compactIndex];
+				if(inputIndex >= capturedInputWorkIndices.size()) continue;
+				const CapturedInputWorkIndex& captured = capturedInputWorkIndices[inputIndex];
+				if(captured.compact) {
+					// Early compact records own no FrameWorkItem; their validated stage
+					// mask remains in the compact SoA column through publication.
+					if(captured.storageIndex < compactGpuVisualCaptures.size()) {
+						compactStageMask |= compactGpuVisualCaptures.stageMasks[captured.storageIndex];
+					}
+				} else if(captured.storageIndex < frameWork.size()) {
+					compactStageMask |= frameWork[captured.storageIndex].gpuStageMask;
+				}
+			}
+			while(compactStageMask != 0U) {
+				++counters.compactDispatches;
+				compactStageMask &= compactStageMask - 1U;
+			}
+			const std::shared_ptr<const PublishedGpuAnimationPresentationPlan> presentation =
+				AnimationPresentationSystem::Instance().LoadPublishedGpuAnimationPresentationPlan();
+			if(presentation && presentation->topology.IsComplete()) {
+				snapshot.topologyGeneration = presentation->topology.topologyGeneration;
+				// Compact-only crowds do not own FrameWorkItem lowering records. The
+				// accepted retained topology is therefore the authoritative renderer
+				// generation for the same immutable presentation envelope.
+				snapshot.rendererGeneration =
+					presentation->topology.generations.rendererGeneration;
+				snapshot.timings.topologyBuildMs = presentation->topologyBuildMs;
+				snapshot.timings.topologyRefreshMs = presentation->topologyRefreshMs;
+				if(presentation->topologyReused) ++counters.retainedTopologyHits;
+				else ++counters.retainedTopologyMisses;
+			}
+			if(presentation && !presentation->safeFallback
+				&& presentation->loweringStatus == GpuAnimationLoweringStatus::Ok
+				&& presentation->planStatus == GpuAnimationPlanStatus::Ok
+				&& presentation->sourceGeneration == publicationGeneration) {
+				// Command recording copies each dispatchCommands entry into the backend
+				// plan and emits one compute dispatch. Shader payload records may outnumber
+				// those actual dispatch calls, so report the executable plan instead.
+				counters.gpuBatches = presentation->plan.batches.size();
+				counters.gpuDispatches = presentation->plan.dispatchCommands.size();
+			}
+			for(const FrameWorkItem& item : frameWork) {
+				if(item.gpuLowering && item.gpuLowering->visual.generations.rendererGeneration != 0U) {
+					const std::uint64_t candidateRendererGeneration =
+						item.gpuLowering->visual.generations.rendererGeneration;
+					if(snapshot.rendererGeneration == 0U) {
+						snapshot.rendererGeneration = candidateRendererGeneration;
+					} else if(snapshot.rendererGeneration != candidateRendererGeneration) {
+						// Mixed renderer generations cannot name one retained topology.
+						snapshot.rendererGeneration = 0U;
+						break;
+					}
+				}
+				if(item.evaluationStatus != AnimationStatus::Ok || !item.evaluated) {
+					++counters.rejectedCandidateCount;
+				}
+			}
+			if(counters.rejectedCandidateCount != 0U) {
+				snapshot.rejectedGeneration = publicationGeneration;
 			}
 			for(const AnimationCommand& command : capturedCommands) {
 				if(command.kind == AnimationCommandKind::SetParameter
@@ -7817,18 +9084,35 @@ namespace TerraEngine::Animation {
 		{
 			if(sourceGeneration == 0U) return {};
 			try {
-				auto frame = std::make_shared<GpuAnimationPresentationFrame>();
+				std::shared_ptr<GpuAnimationPresentationFrame> frame;
+				for(std::size_t attempt = 0U;
+					attempt < gpuPresentationFramePool.size(); ++attempt) {
+					const std::size_t slot = (gpuPresentationFramePoolCursor + attempt)
+						% gpuPresentationFramePool.size();
+					std::shared_ptr<GpuAnimationPresentationFrame>& candidate =
+						gpuPresentationFramePool[slot];
+					if(!candidate) candidate = std::make_shared<GpuAnimationPresentationFrame>();
+					if(candidate.use_count() == 1U) {
+						frame = candidate;
+						gpuPresentationFramePoolCursor = (slot + 1U)
+							% gpuPresentationFramePool.size();
+						break;
+					}
+				}
+				if(!frame) frame = std::make_shared<GpuAnimationPresentationFrame>();
+				frame->inputs.clear();
+				frame->ownerObjectMappings.clear();
 				frame->sourceGeneration = sourceGeneration;
 				frame->planGeneration = static_cast<std::uint32_t>(sourceGeneration);
 				if(frame->planGeneration == 0U) frame->planGeneration = 1U;
-				frame->inputs.reserve(frameWork.size());
-				frame->ownerObjectMappings.reserve(frameWork.size());
+				frame->inputs.reserve(frameWork.size() + compactGpuVisualCaptures.size());
+				frame->ownerObjectMappings.reserve(frameWork.size() + compactGpuVisualCaptures.size());
 				for(FrameWorkItem& item : frameWork) {
 					if(!item.gpuLowering) continue;
 					// Diagnostics have already consumed the frame-local decision by the time
-					// this handoff runs. Transfer its immutable owners into presentation
-					// instead of incrementing several shared owners for every animator.
-					frame->inputs.push_back(std::move(*item.gpuLowering));
+					// this handoff runs. Capture the owner key before moving the lowering
+					// input: a failed mapping must not depend on an unspecified moved-from
+					// value and accidentally discard the entire presentation frame.
 					GpuAnimationOwnerObjectMapping mapping{};
 					mapping.ownerObjectId = item.input.descriptor.ownerObjectId;
 					mapping.stableInstanceId = item.gpuLowering->visual.stableInstanceId;
@@ -7836,6 +9120,30 @@ namespace TerraEngine::Animation {
 					mapping.instanceGeneration = item.input.handle.generation;
 					mapping.componentGeneration = item.input.descriptor.componentGeneration;
 					if(!mapping.IsComplete()) return {};
+					// Transfer immutable owners only after the complete mapping proof. This
+					// lets presentation distinguish a valid empty GPU source from a rejected
+					// owner identity without exposing partially moved frame contents.
+					frame->inputs.push_back(std::move(*item.gpuLowering));
+					frame->ownerObjectMappings.push_back(mapping);
+				}
+				for(std::size_t compactIndex = 0U;
+					compactIndex < compactGpuVisualCaptures.size(); ++compactIndex) {
+					CompactGpuVisualCaptures& compact = compactGpuVisualCaptures;
+					if(compact.processingClasses[compactIndex]
+						!= AnimationProcessingClass::CompactGpuVisual
+						|| compactIndex >= compact.presentationVisible.size()
+						|| compact.presentationVisible[compactIndex] == 0U) continue;
+					GpuAnimationOwnerObjectMapping mapping{};
+					mapping.ownerObjectId = compact.inputs[compactIndex].descriptor.ownerObjectId;
+					mapping.stableInstanceId = compact.gpuLowerings[compactIndex].visual.stableInstanceId;
+					mapping.instanceSlot = compact.inputs[compactIndex].handle.slotIndex;
+					mapping.instanceGeneration = compact.inputs[compactIndex].handle.generation;
+					mapping.componentGeneration = compact.inputs[compactIndex].descriptor.componentGeneration;
+					if(!mapping.IsComplete()) return {};
+					// Compact lowerings contain shared immutable GPU resources. Presentation is
+					// their sole remaining consumer after diagnostics, so move them instead of
+					// performing thousands of avoidable shared-ownership increments per frame.
+					frame->inputs.push_back(std::move(compact.gpuLowerings[compactIndex]));
 					frame->ownerObjectMappings.push_back(mapping);
 				}
 				return frame;
@@ -7896,6 +9204,8 @@ namespace TerraEngine::Animation {
 			impl_->pendingRootMotionApplications.clear();
 			impl_->frameWork.clear();
 			impl_->candidateFrameWork.clear();
+			impl_->gpuPresentationFramePool = {};
+			impl_->gpuPresentationFramePoolCursor = 0U;
 			impl_->runtimeRecords.clear();
 			impl_->rollbackHistory.ClearAll();
 			impl_->frameTick = 0;
@@ -8007,9 +9317,12 @@ namespace TerraEngine::Animation {
 		declaration.writes = {
 			kResourceAnimationFrameInputs,
 			kResourceAnimationExecutionModes,
+			kResourceAnimationProcessingClasses,
 			kResourceAnimationConsumerMasks,
 			kResourceAnimationWorkPackets,
 			kResourceAnimationVisualPackets,
+			kResourceAnimationGpuVisualFastPackets,
+			kResourceAnimationGpuVisualFastPrepared,
 			kResourceAnimationAuthoritativeOutputs,
 			kResourceAnimationRuntimeState,
 			kResourceAnimationPhysicsHandoffQueue,
@@ -8147,7 +9460,7 @@ namespace TerraEngine::Animation {
 			timeInput.unscaledDeltaSeconds = runtimeTime.unscaledDeltaTime;
 		}
 
-		std::array<FrameWorkloadDeclaration, 5> descriptors;
+		std::array<FrameWorkloadDeclaration, 6> descriptors;
 		ConfigureProtectedWorkload(
 			descriptors[0],
 			"CaptureAnimationInputs",
@@ -8161,15 +9474,18 @@ namespace TerraEngine::Animation {
 			descriptors[1],
 			"PlanAnimationEvaluation",
 			{kResourceAnimationFrameInputs, kResourceAnimationEvaluationPrograms, kResourceAnimationResidencyCapabilities},
-			{kResourceAnimationExecutionModes, kResourceAnimationConsumerMasks, kResourceAnimationWorkPackets, kResourceAnimationVisualPackets},
+			{kResourceAnimationExecutionModes, kResourceAnimationProcessingClasses,
+				kResourceAnimationConsumerMasks, kResourceAnimationWorkPackets,
+				kResourceAnimationVisualPackets, kResourceAnimationGpuVisualFastPackets},
 			"Reads immutable frame/program/capability views and writes only deterministic owned plan ranges.");
 		ConfigureWorkerWorkload(
 			descriptors[2],
 			"FinalizeAnimationWorkPlan",
-			{kResourceAnimationExecutionModes, kResourceAnimationConsumerMasks,
-				kResourceAnimationWorkPackets, kResourceAnimationVisualPackets},
-			{kResourceAnimationWorkPackets},
-			"Builds and validates one immutable scheduler plan after every planning range has completed.");
+			{kResourceAnimationExecutionModes, kResourceAnimationProcessingClasses,
+				kResourceAnimationConsumerMasks, kResourceAnimationWorkPackets,
+				kResourceAnimationVisualPackets, kResourceAnimationGpuVisualFastPackets},
+			{kResourceAnimationWorkPackets, kResourceAnimationGpuVisualFastPackets},
+			"Builds the complete scheduler plan and frozen compact packets after every planning range has completed.");
 		// Finalization is a single atomic plan build. It must never be partitioned,
 		// because evaluation ranges consume one shared ordering and scratch layout.
 		descriptors[2].partitionPolicy = FrameWorkloadPartitionPolicy::Single;
@@ -8177,29 +9493,39 @@ namespace TerraEngine::Animation {
 		descriptors[2].inlineWorkItemThreshold = 0U;
 		ConfigureWorkerWorkload(
 			descriptors[3],
-			"EvaluateAuthoritativeAnimation",
+			"EvaluateCompleteAnimation",
 			{kResourceAnimationWorkPackets, kResourceAnimationClipSegments, kResourceAnimationRollbackState},
 			{kResourceAnimationAuthoritativeOutputs},
-			"Reads immutable typed packets and writes range-disjoint authoritative output without live scene or component mutation.");
-		ConfigureProtectedWorkload(
+			"Reads immutable complete packets and writes range-disjoint authoritative output without live scene or component mutation.");
+		ConfigureWorkerWorkload(
 			descriptors[4],
+			"EvaluateCompactGpuVisualAnimation",
+			{kResourceAnimationGpuVisualFastPackets},
+			{kResourceAnimationGpuVisualFastPrepared},
+			"Reads minimal visual-only packets and writes disjoint compact completions without entering the complete evaluator.");
+		ConfigureProtectedWorkload(
+			descriptors[5],
 			"PublishAnimationAuthority",
 			WorkerSystemPhaseKind::ProtectedCommit,
-			{kResourceAnimationAuthoritativeOutputs, "SceneGraph", "ObjectManager"},
+			{kResourceAnimationAuthoritativeOutputs, kResourceAnimationGpuVisualFastPrepared,
+				"SceneGraph", "ObjectManager"},
 			{kResourceAnimationRuntimeState, kResourceAnimationPhysicsHandoffQueue,
 				kResourceAnimationManagedCallbackBatches, "SceneMutationQueue", "SceneGraph", "ObjectManager"},
 			"Complete generation-validated outputs are swapped and typed physics/copied managed handoffs are published once before Physics.");
 
-		for(std::size_t index = 1U; index < descriptors.size(); ++index) {
-			descriptors[index].explicitDependencies = {descriptors[index - 1U].stableDescriptorId};
-		}
+		descriptors[1].explicitDependencies = {descriptors[0].stableDescriptorId};
+		descriptors[2].explicitDependencies = {descriptors[1].stableDescriptorId};
+		descriptors[3].explicitDependencies = {descriptors[2].stableDescriptorId};
+		descriptors[4].explicitDependencies = {descriptors[2].stableDescriptorId};
+		descriptors[5].explicitDependencies = {
+			descriptors[3].stableDescriptorId, descriptors[4].stableDescriptorId};
 		for(FrameWorkloadDeclaration& descriptor : descriptors) {
 			descriptor.active = animatorCount != 0U;
 			descriptor.ready = true;
 			descriptor.estimatedWorkItemCount = animatorCount;
 		}
 		descriptors[2].estimatedWorkItemCount = 1U;
-		descriptors[4].sameFrameVisibilityRequired = animatorCount != 0U;
+		descriptors[5].sameFrameVisibilityRequired = animatorCount != 0U;
 
 		descriptors[0].work = [this, runtimeSessionEpoch, frameDeclarationEpoch](JobGraphContext& context) {
 			if(context.IsCancellationRequested()) {
@@ -8249,7 +9575,7 @@ namespace TerraEngine::Animation {
 			(void)impl_->EnsureAnimationWorkPlanFinalized();
 		};
 		descriptors[3].rangeWork = [this, runtimeSessionEpoch, frameDeclarationEpoch](const FrameWorkloadPartition& partition, JobGraphContext& context) {
-			TERRAENGINE_PROFILE_SCOPE("Animation: Evaluate Authoritative Range",
+			TERRAENGINE_PROFILE_SCOPE("Animation: Evaluate Complete Range",
 				TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 			if(context.IsCancellationRequested()) {
 				impl_->RequestFrameCancellation();
@@ -8260,7 +9586,20 @@ namespace TerraEngine::Animation {
 				|| impl_->frameDeclarationEpoch.load(std::memory_order_acquire) != frameDeclarationEpoch) return;
 			impl_->EvaluatePartition(partition.partitionIndex, partition.partitionCount);
 		};
-		descriptors[4].work = [this, animatorCount, runtimeSessionEpoch, frameDeclarationEpoch](JobGraphContext& context) {
+			descriptors[4].rangeWork = [this, runtimeSessionEpoch, frameDeclarationEpoch](const FrameWorkloadPartition& partition, JobGraphContext& context) {
+			TERRAENGINE_PROFILE_SCOPE("Animation: Evaluate Compact GPU Visual Range",
+				TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			if(context.IsCancellationRequested()) {
+				impl_->RequestFrameCancellation();
+				return;
+			}
+			if(!impl_->runtimeActive.load(std::memory_order_acquire)
+				|| impl_->runtimeSessionEpoch.load(std::memory_order_acquire) != runtimeSessionEpoch
+				|| impl_->frameDeclarationEpoch.load(std::memory_order_acquire) != frameDeclarationEpoch) return;
+				impl_->EvaluateCompactGpuVisualPartition(
+					partition.itemBegin, partition.itemEnd);
+		};
+		descriptors[5].work = [this, animatorCount, runtimeSessionEpoch, frameDeclarationEpoch](JobGraphContext& context) {
 			TERRAENGINE_PROFILE_SCOPE("Animation: Publish Animation Authority",
 				TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 			if(context.IsCancellationRequested()) {
@@ -8527,13 +9866,14 @@ namespace TerraEngine::Animation {
 		std::scoped_lock lock(impl_->runtimeOwnershipMutex);
 		bool mutated = false;
 		return BindAnimatorPlaybackLocked(
-			handle, std::move(binding), nullptr, false, false, true, mutated);
+			handle, std::move(binding), nullptr, nullptr, false, false, true, mutated);
 	}
 
 	AnimationStatus AnimationSystem::BindAnimatorPlaybackLocked(
 		AnimatorInstanceHandle handle,
 		AnimatorPlaybackBinding binding,
 		const AnimationClipView* sharedValidatedClipView,
+		ImmutableBindPreparation* sharedPreparation,
 		bool immutableBindingValidated,
 		bool deferEvaluationCacheInvalidation,
 		bool publishGlobalInvalidation,
@@ -8583,14 +9923,22 @@ namespace TerraEngine::Animation {
 			|| record->executionModeGeneration == std::numeric_limits<std::uint64_t>::max()) {
 			return AnimationStatus::RangeOverflow;
 		}
-		std::vector<AnimationParameterSnapshot> initialParameters;
-		if(const AnimationStatus status = ParseInitialParameters(
-			binding.initialParametersJson, initialParameters); status != AnimationStatus::Ok) {
-			return status;
+		std::vector<AnimationParameterSnapshot> localInitialParameters;
+		std::vector<float> localInitialLayerWeights;
+		std::vector<AnimationParameterSnapshot>& initialParameters = sharedPreparation
+			? sharedPreparation->initialParameters : localInitialParameters;
+		std::vector<float>& initialLayerWeights = sharedPreparation
+			? sharedPreparation->initialLayerWeights : localInitialLayerWeights;
+		if(!immutableBindingValidated) {
+			initialParameters.clear();
+			if(const AnimationStatus status = ParseInitialParameters(
+				binding.initialParametersJson, initialParameters); status != AnimationStatus::Ok) {
+				return status;
+			}
+			initialLayerWeights.clear();
 		}
-		std::vector<float> initialLayerWeights;
 		try {
-			if(binding.evaluationProgram) {
+			if(!immutableBindingValidated && binding.evaluationProgram) {
 				initialLayerWeights.reserve(binding.evaluationProgram->layers.size());
 				for(const EvaluationLayer& layer : binding.evaluationProgram->layers) {
 					if(!std::isfinite(layer.defaultWeight)
@@ -8756,6 +10104,7 @@ namespace TerraEngine::Animation {
 			if(fingerprintStatus != AnimationStatus::Ok) return fingerprintStatus;
 		}
 
+		const bool replacingExistingBinding = record->bindingInitialized;
 		AnimationClipView clipView;
 		AnimationEventStream eventStream;
 		if(dependencyStatus == AnimationStatus::Ok) {
@@ -8776,7 +10125,8 @@ namespace TerraEngine::Animation {
 					std::span<const std::uint8_t>(binding.residentSegments),
 					binding.clipGeneration,
 					binding.streamedSegmentPayloads);
-			if(dependencyStatus == AnimationStatus::Ok) {
+			if(dependencyStatus == AnimationStatus::Ok
+				&& binding.eventPolicy != AnimatorEventPolicy::Suppress) {
 				const AnimationAssetHandle clipHandle{binding.clip->assetId, binding.clipGeneration};
 				dependencyStatus = eventStream.Configure(
 					clipHandle, binding.clip->durationTicks, binding.clip->events);
@@ -8816,10 +10166,11 @@ namespace TerraEngine::Animation {
 			(void)AnimationPresentationSystem::Instance().NotifyLifecycleInvalidation(
 				AnimationLifecycleBoundary::Asset);
 		}
-		if(!deferEvaluationCacheInvalidation) {
+		if(replacingExistingBinding && !deferEvaluationCacheInvalidation) {
 			(void)impl_->evaluationCache.InvalidateAnimator(handle);
 		}
 		record->binding = std::move(binding);
+		record->bindingInitialized = true;
 		if(record->descriptor.controller.IsValid()
 			&& record->binding.evaluationProgram) {
 			record->descriptor.controller.generation = record->binding.programGeneration;
@@ -8827,8 +10178,15 @@ namespace TerraEngine::Animation {
 		record->clipView = std::move(clipView);
 		record->eventStream = std::move(eventStream);
 		record->playback = playback;
-		record->parameters = std::move(initialParameters);
-		record->layerWeights = std::move(initialLayerWeights);
+		if(sharedPreparation != nullptr) {
+			// Retain each record's capacity across rebinds while reusing the one parsed
+			// cohort template. This removes per-instance JSON parsing and layer walks.
+			record->parameters.assign(initialParameters.begin(), initialParameters.end());
+			record->layerWeights.assign(initialLayerWeights.begin(), initialLayerWeights.end());
+		} else {
+			record->parameters = std::move(localInitialParameters);
+			record->layerWeights = std::move(localInitialLayerWeights);
+		}
 		record->graphState = {};
 		record->transition = {};
 		record->dependencyStatus = dependencyStatus;
@@ -8843,29 +10201,35 @@ namespace TerraEngine::Animation {
 		// A hot-rebind immediately retires the old generation bundle. Consumers may
 		// use their previously copied pointer, but a fresh lookup cannot mix it with
 		// the new dependency identity before the next complete publication.
-		std::atomic_store_explicit(
-			&record->publishedPose,
-			std::shared_ptr<const PublishedAnimatorPose>{},
-			std::memory_order_release);
-		record->previousPublishedPose.reset();
-		// Socket/bone attachment copies belong to the retired pose generation too.
-		// Remove them in the same protected rebind operation so a fresh ABI read can
-		// never pair an old transform set with the new resource identity.
-		AnimationAttachmentSnapshotPublisher::Instance().Retire(handle);
-		if(impl_->advancedCommands != nullptr) {
-			impl_->advancedCommands->RetireAnimator({handle.slotIndex, handle.generation});
-		}
-		if(record->ragdollGeneration.IsValid()
-			&& record->ragdollLifecycle != RagdollLifecycleState::Inactive) {
-			RagdollPhysicsRequest teardown;
-			teardown.kind = RagdollPhysicsRequestKind::Teardown;
-			teardown.ragdollId = record->ragdollId;
-			teardown.generation = record->ragdollGeneration;
-			teardown.expectedCurrentGeneration = record->ragdollGeneration;
-			teardown.correlationId = record->ragdollId;
-			teardown.producerOrder = record->ragdollId;
-			(void)TerraEngine::Physics::PhysicsSystem::Instance()
-				.SubmitRagdollPhysicsRequest(std::move(teardown));
+		if(replacingExistingBinding) {
+			std::atomic_store_explicit(
+				&record->publishedPose,
+				std::shared_ptr<const PublishedAnimatorPose>{},
+				std::memory_order_release);
+			record->publishedPosePresent = false;
+			record->previousPublishedPose.reset();
+			// Socket/bone attachment copies belong to the retired pose generation too.
+			// Remove them in the same protected rebind operation so a fresh ABI read can
+			// never pair an old transform set with the new resource identity.
+			if(!deferEvaluationCacheInvalidation) {
+				AnimationAttachmentSnapshotPublisher::Instance().Retire(handle);
+				if(impl_->advancedCommands != nullptr) {
+					impl_->advancedCommands->RetireAnimator(
+						{handle.slotIndex, handle.generation});
+				}
+			}
+			if(record->ragdollGeneration.IsValid()
+				&& record->ragdollLifecycle != RagdollLifecycleState::Inactive) {
+				RagdollPhysicsRequest teardown;
+				teardown.kind = RagdollPhysicsRequestKind::Teardown;
+				teardown.ragdollId = record->ragdollId;
+				teardown.generation = record->ragdollGeneration;
+				teardown.expectedCurrentGeneration = record->ragdollGeneration;
+				teardown.correlationId = record->ragdollId;
+				teardown.producerOrder = record->ragdollId;
+				(void)TerraEngine::Physics::PhysicsSystem::Instance()
+					.SubmitRagdollPhysicsRequest(std::move(teardown));
+			}
 		}
 		record->activeRetargetProfileId = {};
 		record->activeRetargetProfileGeneration = 0U;
@@ -8891,11 +10255,14 @@ namespace TerraEngine::Animation {
 		record->ragdollMotorStatus = AnimationStatus::NotReady;
 		record->pendingRagdollCorrelationId = 0U;
 		record->pendingRagdollPreviousGeneration = {};
-		std::erase_if(impl_->pendingRootMotionApplications, [handle](const AnimationRootMotionApplicationRequest& value) {
-			return value.delta.animator == handle;
-		});
-		AnimationRootMotionResultPublisher::Instance().Retire(handle);
-		impl_->rollbackHistory.Clear(handle);
+		if(replacingExistingBinding && !deferEvaluationCacheInvalidation) {
+			std::erase_if(impl_->pendingRootMotionApplications,
+				[handle](const AnimationRootMotionApplicationRequest& value) {
+					return value.delta.animator == handle;
+				});
+			AnimationRootMotionResultPublisher::Instance().Retire(handle);
+			impl_->rollbackHistory.Clear(handle);
+		}
 		if(publishGlobalInvalidation) {
 			impl_->frameDeclarationEpoch.fetch_add(1U, std::memory_order_acq_rel);
 		}
@@ -8914,11 +10281,17 @@ namespace TerraEngine::Animation {
 		}
 		std::scoped_lock lock(impl_->runtimeOwnershipMutex);
 		bool globalInvalidationPublished = false;
-		std::vector<const AnimatorPlaybackBinding*> validatedBindings;
+		struct PreparedBinding {
+			const AnimatorPlaybackBinding* source = nullptr;
+			ImmutableBindPreparation immutable;
+		};
+		std::vector<PreparedBinding> preparedBindings;
 		std::vector<AnimatorInstanceHandle> mutatedHandles;
+		std::vector<AnimatorInstanceHandle> retiredHandles;
 		try {
-			validatedBindings.reserve(requests.size());
+			preparedBindings.reserve(requests.size());
 			mutatedHandles.reserve(requests.size());
+			retiredHandles.reserve(requests.size());
 		} catch(const std::bad_alloc&) {
 			std::fill(statuses.begin(), statuses.end(), AnimationStatus::InternalError);
 			return;
@@ -8931,14 +10304,26 @@ namespace TerraEngine::Animation {
 			}
 			AnimatorPlaybackBinding binding = *request.binding;
 			binding.playOnBind = request.playOnBind;
-			const bool immutableBindingValidated = std::find(
-				validatedBindings.begin(), validatedBindings.end(), request.binding)
-				!= validatedBindings.end();
+			const Impl::RuntimeRecord* priorRecord =
+				impl_->FindRuntimeRecordLocked(request.handle);
+			const bool replacingExistingBinding = priorRecord != nullptr
+				&& priorRecord->bindingInitialized;
+			auto prepared = std::find_if(
+				preparedBindings.begin(), preparedBindings.end(),
+				[request](const PreparedBinding& value) {
+					return value.source == request.binding;
+				});
+			const bool immutableBindingValidated = prepared != preparedBindings.end();
+			if(!immutableBindingValidated) {
+				preparedBindings.push_back({request.binding, {}});
+				prepared = std::prev(preparedBindings.end());
+			}
 			bool mutated = false;
 			statuses[index] = BindAnimatorPlaybackLocked(
 				request.handle,
 				std::move(binding),
 				request.sharedValidatedClipView,
+				&prepared->immutable,
 				immutableBindingValidated,
 				true,
 				!globalInvalidationPublished,
@@ -8946,10 +10331,34 @@ namespace TerraEngine::Animation {
 			globalInvalidationPublished = globalInvalidationPublished || mutated;
 			if(mutated) {
 				mutatedHandles.push_back(request.handle);
-				if(!immutableBindingValidated) {
-					validatedBindings.push_back(request.binding);
+				if(replacingExistingBinding) {
+					retiredHandles.push_back(request.handle);
 				}
+			} else if(!immutableBindingValidated) {
+				// Failed first-use preparation must not make the next request skip
+				// validation or consume an incomplete authored-default template.
+				preparedBindings.erase(prepared);
 			}
+		}
+		if(!retiredHandles.empty()) {
+			std::sort(retiredHandles.begin(), retiredHandles.end());
+			retiredHandles.erase(
+				std::unique(retiredHandles.begin(), retiredHandles.end()),
+				retiredHandles.end());
+			// Every per-record replacement above already cleared its local runtime state.
+			// Retire cross-subsystem publications once for the sorted crowd so attachment
+			// and root-motion vectors are compacted linearly rather than once per owner.
+			AnimationAttachmentSnapshotPublisher::Instance().RetireMany(retiredHandles);
+			if(impl_->advancedCommands != nullptr) {
+				impl_->advancedCommands->RetireAnimators(retiredHandles);
+			}
+			std::erase_if(impl_->pendingRootMotionApplications,
+				[&retiredHandles](const AnimationRootMotionApplicationRequest& value) {
+					return std::binary_search(retiredHandles.begin(), retiredHandles.end(),
+						value.delta.animator);
+				});
+			AnimationRootMotionResultPublisher::Instance().RetireMany(retiredHandles);
+			impl_->rollbackHistory.ClearMany(retiredHandles);
 		}
 		if(!mutatedHandles.empty()) {
 			// Evaluation cache keys are animator-contiguous. One bulk operation keeps
@@ -8970,7 +10379,8 @@ namespace TerraEngine::Animation {
 		bool replacedClipPublication = false;
 		const AnimationStatus status = RefreshAnimatorDirectClipStreamingLocked(
 			handle, streamedBinding, sharedValidatedClipView,
-			EMPTY_UUID, false, false, 0U, changed, replacedClipPublication);
+			EMPTY_UUID, false, false, 0U, nullptr, nullptr, nullptr,
+			changed, replacedClipPublication);
 		if(changed) {
 			(void)impl_->evaluationCache.InvalidateAnimator(handle);
 			impl_->frameDeclarationEpoch.fetch_add(1U, std::memory_order_acq_rel);
@@ -8986,6 +10396,9 @@ namespace TerraEngine::Animation {
 		bool allowClipPublicationReplacement,
 		bool playOnBind,
 		std::uint64_t replacementClipFingerprint,
+		const AnimationEventStream* preparedReplacementEventStream,
+		const AnimatorPlayback* preparedReplacementPlayback,
+		const AnimatorPlaybackConfiguration* preparedReplacementConfiguration,
 		bool& outChanged,
 		bool& outReplacedClipPublication)
 	{
@@ -9060,6 +10473,7 @@ namespace TerraEngine::Animation {
 			&& current.streamedSegmentPayloads
 				== streamedBinding.streamedSegmentPayloads
 			&& current.gpuResidentPayloads == streamedBinding.gpuResidentPayloads
+			&& current.gpuFastBinding == streamedBinding.gpuFastBinding
 			&& current.gpuProgramResourceIndex
 				== streamedBinding.gpuProgramResourceIndex
 			&& current.evaluationGenerations.residencyGeneration
@@ -9141,7 +10555,9 @@ namespace TerraEngine::Animation {
 		std::vector<std::uint64_t> replacementMorphStableIds;
 		std::vector<std::uint64_t> replacementCurveStableIds;
 		AnimatorPlaybackConfiguration replacementPlaybackConfiguration =
-			streamedBinding.playback;
+			preparedReplacementConfiguration != nullptr
+				? *preparedReplacementConfiguration
+				: streamedBinding.playback;
 		if(publishingClip) {
 			try {
 				// The direct program and named-output directories are derived from the
@@ -9153,48 +10569,52 @@ namespace TerraEngine::Animation {
 			} catch(const std::bad_alloc&) {
 				return AnimationStatus::InternalError;
 			}
-			const AnimationAssetHandle clipHandle{
-				streamedBinding.clip->assetId,
-				streamedBinding.clipGeneration};
-			if(const AnimationStatus eventStatus = replacementEventStream.Configure(
-				clipHandle,
-				streamedBinding.clip->durationTicks,
-				streamedBinding.clip->events);
-				eventStatus != AnimationStatus::Ok) {
-				return eventStatus;
+			if(preparedReplacementEventStream != nullptr) {
+				// Batch preparation performs invariant clip-event sorting and playback
+				// setup once per direct-clip cohort before runtime ownership is locked.
+				// Copies retain independent cursors while sharing immutable event arrays.
+				replacementEventStream = *preparedReplacementEventStream;
 			}
-			replacementPlaybackConfiguration.durationTicks =
-				streamedBinding.clip->durationTicks;
-			if(streamedBinding.updatePolicy == AnimatorUpdatePolicy::FixedStep) {
-				replacementPlaybackConfiguration.timePolicy = AnimatorTimePolicy::Fixed;
+			else if(streamedBinding.eventPolicy != AnimatorEventPolicy::Suppress) {
+				const AnimationAssetHandle clipHandle{
+					streamedBinding.clip->assetId,
+					streamedBinding.clipGeneration};
+				if(const AnimationStatus eventStatus = replacementEventStream.Configure(
+					clipHandle,
+					streamedBinding.clip->durationTicks,
+					streamedBinding.clip->events);
+					eventStatus != AnimationStatus::Ok) {
+					return eventStatus;
+				}
 			}
-			if(const AnimationStatus playbackStatus = replacementPlayback.Configure(
-				replacementPlaybackConfiguration);
-				playbackStatus != AnimationStatus::Ok) {
-				return playbackStatus;
+			if(preparedReplacementPlayback != nullptr) {
+				replacementPlayback = *preparedReplacementPlayback;
 			}
-			if(const AnimationStatus seekStatus = replacementPlayback.Seek(
-				streamedBinding.initialPlaybackTick);
-				seekStatus != AnimationStatus::Ok) {
-				return seekStatus;
-			}
-			if(playOnBind) {
-				if(const AnimationStatus playStatus = replacementPlayback.Play();
-					playStatus != AnimationStatus::Ok) {
-					return playStatus;
+			else {
+				replacementPlaybackConfiguration.durationTicks =
+					streamedBinding.clip->durationTicks;
+				if(streamedBinding.updatePolicy == AnimatorUpdatePolicy::FixedStep) {
+					replacementPlaybackConfiguration.timePolicy = AnimatorTimePolicy::Fixed;
+				}
+				if(const AnimationStatus playbackStatus = replacementPlayback.Configure(
+					replacementPlaybackConfiguration);
+					playbackStatus != AnimationStatus::Ok) {
+					return playbackStatus;
+				}
+				if(const AnimationStatus seekStatus = replacementPlayback.Seek(
+					streamedBinding.initialPlaybackTick);
+					seekStatus != AnimationStatus::Ok) {
+					return seekStatus;
+				}
+				if(playOnBind) {
+					if(const AnimationStatus playStatus = replacementPlayback.Play();
+						playStatus != AnimationStatus::Ok) {
+						return playStatus;
+					}
 				}
 			}
 		}
 
-		try {
-			// Reserve before changing either the binding or its validated clip view.
-			// Direct-clip generations retain a fixed segment count, so steady stream
-			// promotions reuse the allocation already owned by each runtime record.
-			record->binding.residentSegments.reserve(
-				streamedBinding.residentSegments.size());
-		} catch(const std::bad_alloc&) {
-			return AnimationStatus::InternalError;
-		}
 		viewStatus = publishingClip
 			? record->clipView.AdoptValidatedPublicationFrom(*validatedView)
 			: record->clipView.CopyStreamingStateFrom(*validatedView);
@@ -9234,11 +10654,9 @@ namespace TerraEngine::Animation {
 			AnimationAttachmentSnapshotPublisher::Instance().Retire(handle);
 			impl_->rollbackHistory.Clear(handle);
 		}
-		// Capacity is now proven and uint8_t assignment cannot throw. This commit
-		// remains atomic with the already prepared immutable view publication.
-		record->binding.residentSegments.assign(
-			streamedBinding.residentSegments.begin(),
-			streamedBinding.residentSegments.end());
+		// The cohort-prepared binding owns an immutable copy-on-write bitmap. Share it
+		// across runtime records rather than detaching and copying it once per member.
+		record->binding.residentSegments = streamedBinding.residentSegments;
 		record->binding.streamedSegmentPayloads =
 			streamedBinding.streamedSegmentPayloads;
 		record->binding.gpuExecution = streamedBinding.gpuExecution;
@@ -9247,6 +10665,7 @@ namespace TerraEngine::Animation {
 		record->binding.gpuVisual = streamedBinding.gpuVisual;
 		record->binding.gpuResidentPayloads =
 			streamedBinding.gpuResidentPayloads;
+		record->binding.gpuFastBinding = streamedBinding.gpuFastBinding;
 		if(publishingClip) {
 			record->binding.evaluationGenerations =
 				streamedBinding.evaluationGenerations;
@@ -9272,11 +10691,90 @@ namespace TerraEngine::Animation {
 			std::fill(statuses.begin(), statuses.end(), AnimationStatus::InvalidArgument);
 			return;
 		}
+		struct PreparedDirectClipReplacement
+		{
+			const AnimatorPlaybackBinding* binding = nullptr;
+			UUID expectedClipAssetId = EMPTY_UUID;
+			bool playOnBind = false;
+			bool hasEventStream = false;
+			AnimationEventStream eventStream;
+			AnimatorPlayback playback;
+			AnimatorPlaybackConfiguration playbackConfiguration{};
+			AnimationStatus status = AnimationStatus::NotReady;
+		};
+		std::vector<PreparedDirectClipReplacement> preparedReplacements;
+		std::vector<std::uint32_t> preparedReplacementIndices;
 		std::vector<AnimatorInstanceHandle> changedAnimators;
 		try {
-			// Reserve before publishing any record changes. A failed allocation then
-			// leaves the entire batch untouched and reports a bounded error per item.
+			// Reserve and prepare every cohort-invariant replacement before publishing
+			// record changes. Allocation or validation failure then leaves the complete
+			// protected batch untouched and reports a bounded error per item.
+			preparedReplacements.reserve(refreshes.size());
+			preparedReplacementIndices.assign(refreshes.size(),
+				std::numeric_limits<std::uint32_t>::max());
 			changedAnimators.reserve(refreshes.size());
+			for(std::size_t index = 0U; index < refreshes.size(); ++index) {
+				const AnimatorDirectClipStreamingRefresh& refresh = refreshes[index];
+				if(!refresh.allowClipPublicationReplacement
+					|| refresh.streamedBinding == nullptr) {
+					continue;
+				}
+				if(!preparedReplacements.empty()) {
+					const PreparedDirectClipReplacement& prior = preparedReplacements.back();
+					if(prior.binding == refresh.streamedBinding
+						&& prior.expectedClipAssetId == refresh.expectedClipAssetId
+						&& prior.playOnBind == refresh.playOnBind) {
+						preparedReplacementIndices[index] = static_cast<std::uint32_t>(
+							preparedReplacements.size() - 1U);
+						continue;
+					}
+				}
+				PreparedDirectClipReplacement prepared{};
+				prepared.binding = refresh.streamedBinding;
+				prepared.expectedClipAssetId = refresh.expectedClipAssetId;
+				prepared.playOnBind = refresh.playOnBind;
+				if(!refresh.streamedBinding->clip) {
+					prepared.status = AnimationStatus::MissingAsset;
+				}
+				else if(refresh.expectedClipAssetId == EMPTY_UUID
+					|| refresh.streamedBinding->clip->assetId.value
+						!= refresh.expectedClipAssetId) {
+					prepared.status = AnimationStatus::InvalidArgument;
+				}
+				else {
+					prepared.playbackConfiguration = refresh.streamedBinding->playback;
+					prepared.playbackConfiguration.durationTicks =
+						refresh.streamedBinding->clip->durationTicks;
+					if(refresh.streamedBinding->updatePolicy
+						== AnimatorUpdatePolicy::FixedStep) {
+						prepared.playbackConfiguration.timePolicy = AnimatorTimePolicy::Fixed;
+					}
+					prepared.status = prepared.playback.Configure(
+						prepared.playbackConfiguration);
+					if(prepared.status == AnimationStatus::Ok) {
+						prepared.status = prepared.playback.Seek(
+							refresh.streamedBinding->initialPlaybackTick);
+					}
+					if(prepared.status == AnimationStatus::Ok && refresh.playOnBind) {
+						prepared.status = prepared.playback.Play();
+					}
+					if(prepared.status == AnimationStatus::Ok
+						&& refresh.streamedBinding->eventPolicy
+							!= AnimatorEventPolicy::Suppress) {
+						const AnimationAssetHandle clipHandle{
+							refresh.streamedBinding->clip->assetId,
+							refresh.streamedBinding->clipGeneration};
+						prepared.status = prepared.eventStream.Configure(
+							clipHandle,
+							refresh.streamedBinding->clip->durationTicks,
+							refresh.streamedBinding->clip->events);
+						prepared.hasEventStream = prepared.status == AnimationStatus::Ok;
+					}
+				}
+				preparedReplacements.push_back(std::move(prepared));
+				preparedReplacementIndices[index] = static_cast<std::uint32_t>(
+					preparedReplacements.size() - 1U);
+			}
 		} catch(const std::bad_alloc&) {
 			std::fill(statuses.begin(), statuses.end(), AnimationStatus::InternalError);
 			return;
@@ -9303,6 +10801,15 @@ namespace TerraEngine::Animation {
 				const AnimatorDirectClipStreamingRefresh& refresh = refreshes[index];
 				if(refresh.streamedBinding == nullptr) {
 					statuses[index] = AnimationStatus::InvalidArgument;
+					continue;
+				}
+				const std::uint32_t preparedIndex = preparedReplacementIndices[index];
+				const PreparedDirectClipReplacement* prepared = preparedIndex
+					< preparedReplacements.size()
+						? &preparedReplacements[preparedIndex]
+						: nullptr;
+				if(prepared != nullptr && prepared->status != AnimationStatus::Ok) {
+					statuses[index] = prepared->status;
 					continue;
 				}
 				std::uint64_t replacementClipFingerprint = 0U;
@@ -9373,6 +10880,10 @@ namespace TerraEngine::Animation {
 					refresh.allowClipPublicationReplacement,
 					refresh.playOnBind,
 					replacementClipFingerprint,
+					prepared != nullptr && prepared->hasEventStream
+						? &prepared->eventStream : nullptr,
+					prepared != nullptr ? &prepared->playback : nullptr,
+					prepared != nullptr ? &prepared->playbackConfiguration : nullptr,
 					changed,
 					replacedThisClipPublication);
 				if(changed) {
@@ -9979,6 +11490,8 @@ namespace TerraEngine::Animation {
 		std::scoped_lock finalizeLock(impl_->workPlanFinalizeMutex);
 		AnimationProductionIntegrationSnapshot snapshot;
 		snapshot.planStatus = impl_->workPlan.status;
+		snapshot.rejectionReason = impl_->workPlanRejectionReason;
+		snapshot.rejectionItemIndex = impl_->workPlanRejectionItemIndex;
 		snapshot.executionPolicy = impl_->workPlan.executionPolicy;
 		snapshot.availableWorkerCount = impl_->availableWorkerCount;
 		snapshot.selectedWorkerCount = impl_->workPlan.selectedWorkerCount;
@@ -9997,5 +11510,25 @@ namespace TerraEngine::Animation {
 		snapshot.cancellationRequested =
 			impl_->frameCancellationRequested.load(std::memory_order_acquire);
 		return snapshot;
+	}
+
+	std::string_view ToString(AnimationPlanRejectionReason reason) noexcept
+	{
+		switch(reason) {
+		case AnimationPlanRejectionReason::None: return "None";
+		case AnimationPlanRejectionReason::PlanningIncomplete: return "PlanningIncomplete";
+		case AnimationPlanRejectionReason::PlaybackAdvance: return "PlaybackAdvance";
+		case AnimationPlanRejectionReason::GenerationOverflow: return "GenerationOverflow";
+		case AnimationPlanRejectionReason::ExecutionModeNotGpuVisual: return "ExecutionModeNotGpuVisual";
+		case AnimationPlanRejectionReason::FrameIdentityInvalid: return "FrameIdentityInvalid";
+		case AnimationPlanRejectionReason::GpuLoweringRejected: return "GpuLoweringRejected";
+		case AnimationPlanRejectionReason::ResidentPayloadInvalid: return "ResidentPayloadInvalid";
+		case AnimationPlanRejectionReason::CompactClassificationRejected: return "CompactClassificationRejected";
+		case AnimationPlanRejectionReason::CompactInputIncomplete: return "CompactInputIncomplete";
+		case AnimationPlanRejectionReason::SchedulerRejected: return "SchedulerRejected";
+		case AnimationPlanRejectionReason::MemoryReservationRejected: return "MemoryReservationRejected";
+		case AnimationPlanRejectionReason::AllocationFailure: return "AllocationFailure";
+		}
+		return "Unknown";
 	}
 }

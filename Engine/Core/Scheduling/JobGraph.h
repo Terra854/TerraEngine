@@ -230,7 +230,18 @@ namespace TerraEngine::Scheduling {
 		JobGraph& operator=(const JobGraph&) = delete;
 
 		void Reset(std::string graphId, std::string label);
+		// Rearm keeps the validated node/edge topology but clears all frame-local
+		// execution state. It is valid only after the prior Execute call returned;
+		// callers update each job callback before executing the next frame.
+		void Rearm(std::string graphId);
 		DependencyHandle AddJob(JobGraphJobDeclaration declaration);
+		// Stable scheduler descriptors change their captured frame inputs without
+		// changing graph topology. Updating only the callback lets Execute reuse the
+		// previously validated dependency graph and avoids rebuilding it every frame.
+		bool UpdateJobWork(
+			const DependencyHandle& handle,
+			JobGraphWork work,
+			std::string profilingLabel = {});
 		// AddPartitionedJobs creates one independently schedulable node per stable
 		// range. Callers supply ranges in deterministic publication order; worker
 		// completion order never changes the returned handle order.

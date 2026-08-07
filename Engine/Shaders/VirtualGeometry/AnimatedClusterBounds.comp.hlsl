@@ -45,15 +45,18 @@ void PublishFailOpenBounds(uint workRecordIndex)
 }
 
 [numthreads(64, 1, 1)]
-void main(uint lane : SV_GroupThreadID)
+void main(uint lane : SV_GroupThreadID, uint3 groupId : SV_GroupID)
 {
+	// Each X workgroup owns one page. The push constant supplies the first record
+	// when a very large generation is split into portable dispatch-sized chunks.
+	const uint workRecordIndex = boundsPush.workRecordIndex + groupId.x;
 	if(boundsPush.abiVersion != TE_ANIMATED_GEOMETRY_ABI_VERSION
-		|| boundsPush.workRecordIndex >= boundsPush.workRecordCount)
+		|| workRecordIndex >= boundsPush.workRecordCount)
 	{
 		return;
 	}
 	const TeAnimatedDeformationWorkRecord work =
-		deformationWork[boundsPush.workRecordIndex];
+		deformationWork[workRecordIndex];
 	float3 minimum = float3(3.402823466e+38F, 3.402823466e+38F, 3.402823466e+38F);
 	float3 maximum = -minimum;
 	uint valid = 1u;
@@ -92,7 +95,7 @@ void main(uint lane : SV_GroupThreadID)
 	}
 	if(sharedValid[0] == 0u || work.vertexCount == 0u)
 	{
-		PublishFailOpenBounds(boundsPush.workRecordIndex);
+		PublishFailOpenBounds(workRecordIndex);
 		InterlockedOr(diagnostics[0],
 			TE_ANIMATED_GEOMETRY_DIAGNOSTIC_NONFINITE_OUTPUT);
 		return;
@@ -110,14 +113,14 @@ void main(uint lane : SV_GroupThreadID)
 	output.maximum = float4(sharedMaximum[0], 0.0F);
 	output.sphere = float4(center, radius);
 	output.identity = uint4(
-		boundsPush.identity,
-		boundsPush.workRecordIndex,
+		work.reserved.x,
+		workRecordIndex,
 		TE_ANIMATED_GEOMETRY_ABI_VERSION,
 		TE_ANIMATED_GEOMETRY_VALID_CURRENT
 			| TE_ANIMATED_GEOMETRY_VALID_BOUNDS
 			| TE_ANIMATED_GEOMETRY_VALID_HIZ_PROOF);
 	// Version one publishes one conservative page bound to both tables. Later
 	// meshlet range metadata can subdivide it without weakening correctness.
-	meshletBounds[boundsPush.workRecordIndex] = output;
-	clusterBounds[boundsPush.workRecordIndex] = output;
+	meshletBounds[workRecordIndex] = output;
+	clusterBounds[workRecordIndex] = output;
 }

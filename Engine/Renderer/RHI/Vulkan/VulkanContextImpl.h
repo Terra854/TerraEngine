@@ -168,6 +168,9 @@ struct VulkanPipeline {
 	bool supportsDefaultPushConstants = false;
 	VkShaderStageFlags defaultPushConstantStages = 0;
 	bool hasTaskStage = false;
+	// Records the actual two-target fragment/color-mask pipeline choice. Command
+	// recording uses it as a bounded invariant before trusting typed picking.
+	bool usesConventionalVisibilityIdentity = false;
 };
 
 // Must match shader definition
@@ -587,6 +590,12 @@ struct VulkanContext::Impl {
 		std::vector<VulkanBuffer> clusterDepthSSBOs;
 	std::vector<VulkanBuffer> lightAnalysisSSBOs;
 				std::vector<VulkanBuffer> indirectDrawBuffers;
+				// Each reusable frame slot owns its uploaded crowd records.  A single
+				// bindless index is republished only for the fence-proven idle slot,
+				// which keeps one view's instance stream from racing another in flight.
+				std::array<VulkanBuffer, MAX_FRAMES_IN_FLIGHT> groupedInstanceBuffers{};
+				std::array<VkDeviceSize, MAX_FRAMES_IN_FLIGHT> groupedInstanceCapacities{};
+				std::uint32_t groupedInstanceBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 				// GPU virtual geometry packet buffers are owned per frame slot
 				// and per view. The public frame snapshot stores value records;
 				// this private resource record owns the Vulkan handles and the
@@ -659,7 +668,7 @@ struct VulkanContext::Impl {
 					std::size_t batchCapacity = 0u;
 					std::size_t compactedPacketCapacity = 0u;
 					std::size_t generatedSubmissionCapacity = 0u;
-					bool generatedSubmissionSupportsIndirect = false;
+					bool generatedSubmissionSupportsIndirectAndTransferClear = false;
 					std::size_t counterReadbackCapacity = 0u;
 					std::size_t visibilityTriangleCapacity = 0u;
 					std::size_t visibilitySetupPacketCapacity = 0u;
@@ -678,7 +687,23 @@ struct VulkanContext::Impl {
 					// the signature of the bytes already stored in its Vulkan buffer so
 					// an unchanged camera cut can reuse them on the next slot rotation.
 					std::uint64_t pagePayloadReuseSignature = 0u;
+					std::uint64_t pagePayloadEvidenceSignature = 0u;
 					bool pagePayloadCacheValid = false;
+					// Stable view cuts can retain their already-uploaded packet, batch, and
+					// traversal input tables when this frame slot rotates back into use.
+					std::uint64_t packetInputReuseSignature = 0u;
+					bool packetInputCacheValid = false;
+					// Raster-route classification is part of the retained packet evidence.
+					// Cache its aggregate so unchanged views do not rescan every packet only
+					// to decide whether the optional compute-raster setup is needed.
+					bool productionComputeRasterRequested = false;
+					// Compute-raster setup depends on immutable view evidence plus the
+					// frame-local deformation group layout. Retain the completed upload
+					// proof so a returning frame slot can reuse unchanged input buffers.
+					std::uint64_t visibilityInputReuseSignature = 0u;
+					std::size_t visibilityInputTriangleCount = 0u;
+					std::size_t visibilityInputMeshletCount = 0u;
+					bool visibilityInputCacheValid = false;
 					std::uint64_t retireAfterFrameId = 0u;
 					bool live = false;
 				};
@@ -1084,6 +1109,7 @@ struct VulkanContext::Impl {
 		void GenerateVRSImage(VkCommandBuffer cmd, VkImageView colorView);
 	
 		void PublishVirtualGeometryGpuPacketResources(
+			VkCommandBuffer commandBuffer,
 			const FrameRenderData& frameData,
 			RenderViewType viewType,
 			std::uint32_t viewId,
@@ -1385,6 +1411,15 @@ struct VulkanContext::Impl {
 			// The bridge stores each owner/mesh slice contiguously. Draw push
 			// constants carry this word offset so shaders never scan other owners.
 			std::uint32_t headerWordOffset = 0u;
+
+			bool operator==(const GraphicsGroup&) const noexcept = default;
+		};
+		struct GraphicsGroupBuildRange
+		{
+			std::uint64_t stableInstanceId = 0u;
+			TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+			std::size_t begin = 0u;
+			std::size_t count = 0u;
 		};
 		struct GraphicsGroupKey
 		{
@@ -1428,8 +1463,27 @@ struct VulkanContext::Impl {
 			std::array<float, 4u> positionScale{};
 		};
 		std::vector<GraphicsGroup> graphicsGroups;
+		// Frame-slot scratch retains capacity after its fence completes. Crowd group
+		// membership is rebuilt from the immutable plan, but allocator traffic and
+		// stable lookup rehashing are avoided on unchanged frames.
+		std::vector<GraphicsGroupBuildRange> graphicsGroupBuildScratch;
+		std::vector<GraphicsGroup> graphicsGroupsScratch;
+		std::vector<std::uint32_t> graphicsBridgeScratch;
 		std::unordered_map<GraphicsGroupKey, std::uint32_t,
 			GraphicsGroupKeyHash> graphicsGroupOffsets;
+		struct GraphicsGroupSlotHint
+		{
+			std::uint64_t stableInstanceId = 0u;
+			TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+			std::uint32_t headerWordOffset = 0u;
+			bool ambiguous = false;
+		};
+		// Dense animator slots use direct validated hints. Sparse or multi-mesh
+		// owners fall back to the exact owner/mesh hash map above.
+		std::vector<GraphicsGroupSlotHint> graphicsGroupSlotHints;
+		// This value changes whenever owner/mesh-to-bridge offsets change. Render
+		// setup caches combine it with view evidence instead of rescanning the map.
+		std::uint64_t graphicsGroupSignature = 0u;
 		std::vector<TerraEngine::Renderer::DeformedPageKey> workKeys;
 		std::vector<StaticPageUploadRecord> staticPageUploads;
 		VkDeviceSize staticPageByteCount = 0u;

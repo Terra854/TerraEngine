@@ -1,5 +1,7 @@
 #include "RenderFrameSnapshot.h"
 #include "RenderDiagnostics.h"
+#include "Profiling/Profiler.h"
+#include "Profiling/ProfilerScope.h"
 
 #include <algorithm>
 #include <atomic>
@@ -702,47 +704,47 @@ namespace TerraEngine::Renderer {
 		template<typename State>
 		void HashVirtualGeometryScalingRecords(std::uint64_t& hash, const State& state)
 		{
-			for (const VirtualGeometryClusterPacket& packet : state.clusterPackets)
+			for (const VirtualGeometryClusterPacket& packet : state.ClusterPackets())
 			{
 				HashVirtualGeometryClusterPacket(hash, packet);
 			}
-			for (const ClusterWorkBatch& batch : state.clusterBatches)
+			for (const ClusterWorkBatch& batch : state.ClusterBatches())
 			{
 				HashClusterWorkBatch(hash, batch);
 			}
-			for (const CompactedVisibilitySet& compaction : state.compactionResults)
+			for (const CompactedVisibilitySet& compaction : state.CompactionResults())
 			{
 				HashCompactedVisibilitySet(hash, compaction);
 			}
-			for (const GpuVirtualGeometryPacketRecord& packet : state.gpuPacketRecords)
+			for (const GpuVirtualGeometryPacketRecord& packet : state.GpuPacketRecords())
 			{
 				HashGpuVirtualGeometryPacketRecord(hash, packet);
 			}
-			for (const GpuVirtualGeometryBatchDescriptor& batch : state.gpuBatchDescriptors)
+			for (const GpuVirtualGeometryBatchDescriptor& batch : state.GpuBatchDescriptors())
 			{
 				HashGpuVirtualGeometryBatchDescriptor(hash, batch);
 			}
-			for (const GpuVirtualGeometryPacketFrameSet& frameSet : state.gpuPacketFrameSets)
+			for (const GpuVirtualGeometryPacketFrameSet& frameSet : state.GpuPacketFrameSets())
 			{
 				HashGpuVirtualGeometryPacketFrameSet(hash, frameSet);
 			}
-			for (const GpuPacketCompactionDispatch& dispatch : state.gpuCompactionDispatches)
+			for (const GpuPacketCompactionDispatch& dispatch : state.GpuCompactionDispatches())
 			{
 				HashGpuPacketCompactionDispatch(hash, dispatch);
 			}
-			for (const GeneratedVirtualGeometrySubmissionRecord& submission : state.generatedSubmissions)
+			for (const GeneratedVirtualGeometrySubmissionRecord& submission : state.GeneratedSubmissions())
 			{
 				HashGeneratedVirtualGeometrySubmissionRecord(hash, submission);
 			}
-			for (const VirtualGeometryCounterReadbackRecord& readback : state.gpuCounterReadbacks)
+			for (const VirtualGeometryCounterReadbackRecord& readback : state.GpuCounterReadbacks())
 			{
 				HashVirtualGeometryCounterReadbackRecord(hash, readback);
 			}
-			for (const VirtualGeometryGpuFallbackRecord& fallback : state.gpuFallbackRecords)
+			for (const VirtualGeometryGpuFallbackRecord& fallback : state.GpuFallbackRecords())
 			{
 				HashVirtualGeometryGpuFallbackRecord(hash, fallback);
 			}
-			for (const VirtualGeometryPageRequestRecord& request : state.pageRequests)
+			for (const VirtualGeometryPageRequestRecord& request : state.PageRequests())
 			{
 				HashVirtualGeometryPageRequestRecord(hash, request);
 			}
@@ -750,11 +752,12 @@ namespace TerraEngine::Renderer {
 			{
 				HashVirtualGeometryResidentPageSetRecord(hash, set);
 			}
-			for (const VirtualGeometryPagePayloadRecord& payload : state.residentPagePayloads)
+			for (const VirtualGeometryPagePayloadRecord& payload : state.ResidentPagePayloads())
 			{
 				HashVirtualGeometryPagePayloadRecord(hash, payload);
 			}
-			for (const VirtualGeometryEmittedPageSourceRecord& emitted : state.emittedPageSources)
+			for (const VirtualGeometryEmittedPageSourceRecord& emitted :
+				state.EmittedPageSources())
 			{
 				HashVirtualGeometryEmittedPageSourceRecord(hash, emitted);
 			}
@@ -766,7 +769,7 @@ namespace TerraEngine::Renderer {
 			{
 				HashPageResidencyRecord(hash, page);
 			}
-			for (const FallbackCoverageChain& chain : state.fallbackCoverage)
+			for (const FallbackCoverageChain& chain : state.FallbackCoverage())
 			{
 				HashFallbackCoverageChain(hash, chain);
 			}
@@ -1209,6 +1212,7 @@ namespace TerraEngine::Renderer {
 			HashCombine(hash, demand.meshletCount);
 			HashCombine(hash, demand.clusterCount);
 		}
+		HashCombine(hash, snapshot.animatedGeometryPageDemandCount);
 		for (const VirtualGeometryViewSelectionState& state : snapshot.virtualGeometryViewSelections)
 		{
 			HashCombine(hash, state.outputId);
@@ -1229,14 +1233,14 @@ namespace TerraEngine::Renderer {
 			{
 				HashVirtualGeometryHiZState(hash, state.hiZValidationState);
 			}
-			for (const VirtualGeometryViewDrawRecord& draw : state.draws)
+			for (const VirtualGeometryViewDrawRecord& draw : state.DrawRecords())
 			{
 				HashCombine(hash, HashUuid(draw.objectId));
 				HashCombine(hash, HashUuid(draw.meshId));
 				HashVirtualGeometryRange(hash, draw.range);
 				HashCombine(hash, draw.taskShaderCullingEnabled ? 1u : 0u);
 			}
-			for (const VirtualGeometrySelectedClusterRecord& cluster : state.selectedClusters)
+			for (const VirtualGeometrySelectedClusterRecord& cluster : state.SelectedClusters())
 			{
 				HashCombine(hash, HashUuid(cluster.objectId));
 				HashCombine(hash, HashUuid(cluster.meshId));
@@ -1247,7 +1251,7 @@ namespace TerraEngine::Renderer {
 				HashCombine(hash, cluster.usingFallback ? 1u : 0u);
 			}
 			HashVirtualGeometryScalingRecords(hash, state);
-			for (const VirtualGeometryPageNeedRecord& need : state.pageNeeds)
+			for (const VirtualGeometryPageNeedRecord& need : state.PageNeeds())
 			{
 				HashCombine(hash, HashUuid(need.objectId));
 				HashCombine(hash, HashUuid(need.meshId));
@@ -1264,7 +1268,8 @@ namespace TerraEngine::Renderer {
 				HashCombine(hash, need.packetOffset);
 				HashCombine(hash, need.packetCount);
 			}
-			for (const VirtualGeometryLODTransitionState& transitionState : state.lodTransitionStates)
+			for (const VirtualGeometryLODTransitionState& transitionState :
+				state.lodTransitionStates)
 			{
 				HashVirtualGeometryLODTransitionState(hash, transitionState);
 			}
@@ -1288,7 +1293,8 @@ namespace TerraEngine::Renderer {
 			{
 				HashVirtualGeometryOcclusionSample(hash, sample);
 			}
-			for (const VirtualGeometryLODTransitionState& transitionState : state.lodTransitionStates)
+			for (const VirtualGeometryLODTransitionState& transitionState :
+				state.lodTransitionStates)
 			{
 				HashVirtualGeometryLODTransitionState(hash, transitionState);
 			}
@@ -1344,30 +1350,30 @@ namespace TerraEngine::Renderer {
 		for (const VirtualGeometryViewSelectionState& state : snapshot.virtualGeometryViewSelections)
 		{
 			virtualGeometryClusterWork += static_cast<std::uint64_t>(
-				state.selectedClusters.size()
-				+ state.clusterPackets.size()
-				+ state.clusterBatches.size()
-				+ state.gpuPacketRecords.size()
-				+ state.gpuBatchDescriptors.size()
-				+ state.gpuPacketFrameSets.size()
-				+ state.gpuCompactionDispatches.size()
-				+ state.generatedSubmissions.size()
-				+ state.gpuCounterReadbacks.size()
-				+ state.gpuFallbackRecords.size()
-				+ state.compactionResults.size()
-				+ state.pageNeeds.size()
-				+ state.pageRequests.size()
+				state.SelectedClusters().size()
+				+ state.ClusterPackets().size()
+				+ state.ClusterBatches().size()
+				+ state.GpuPacketRecords().size()
+				+ state.GpuBatchDescriptors().size()
+				+ state.GpuPacketFrameSets().size()
+				+ state.GpuCompactionDispatches().size()
+				+ state.GeneratedSubmissions().size()
+				+ state.GpuCounterReadbacks().size()
+				+ state.GpuFallbackRecords().size()
+				+ state.CompactionResults().size()
+				+ state.PageNeeds().size()
+				+ state.PageRequests().size()
 				+ state.residentPageSets.size()
-				+ state.residentPagePayloads.size()
-				+ state.emittedPageSources.size()
+				+ state.ResidentPagePayloads().size()
+				+ state.EmittedPageSources().size()
 				+ state.pageRetirements.size()
 				+ state.pageResidency.size()
-				+ state.fallbackCoverage.size()
+				+ state.FallbackCoverage().size()
 				+ state.hiZRegressionSnapshots.size()
 				+ state.coneSafetyMetadata.size()
 				+ state.shadowVisibilitySelections.size()
 				+ state.performanceGates.size()
-				+ state.lodTransitionStates.size());
+				+ state.LodTransitionStates().size());
 		}
 		for (const VirtualGeometryViewVisibilitySnapshot& state : snapshot.virtualGeometryVisibilitySnapshots)
 		{
@@ -1376,13 +1382,13 @@ namespace TerraEngine::Renderer {
 				+ state.selectedClusters.size()
 				+ state.clusterPackets.size()
 				+ state.clusterBatches.size()
-				+ state.gpuPacketRecords.size()
-				+ state.gpuBatchDescriptors.size()
-				+ state.gpuPacketFrameSets.size()
-				+ state.gpuCompactionDispatches.size()
-				+ state.generatedSubmissions.size()
-				+ state.gpuCounterReadbacks.size()
-				+ state.gpuFallbackRecords.size()
+				+ state.GpuPacketRecords().size()
+				+ state.GpuBatchDescriptors().size()
+				+ state.GpuPacketFrameSets().size()
+				+ state.GpuCompactionDispatches().size()
+				+ state.GeneratedSubmissions().size()
+				+ state.GpuCounterReadbacks().size()
+				+ state.GpuFallbackRecords().size()
 				+ state.compactionResults.size()
 				+ state.pageNeeds.size()
 				+ state.pageRequests.size()
@@ -1424,20 +1430,38 @@ namespace TerraEngine::Renderer {
 			}
 		}
 
-		using SelectedPageKey = std::pair<std::uint64_t, std::uint32_t>;
-		std::map<SelectedPageKey, std::uint64_t> selectedViewMasks;
-		std::unordered_map<std::uint64_t, std::unordered_set<std::uint32_t>>
-			demandPagesByOwner;
-		demandPagesByOwner.reserve(
-			snapshot.animatedGeometryPageDemands.size());
+		struct SelectedPageKey
+		{
+			std::uint64_t owner = 0u;
+			std::uint32_t page = 0u;
+
+			bool operator==(const SelectedPageKey&) const noexcept = default;
+		};
+		struct SelectedPageKeyHasher
+		{
+			std::size_t operator()(const SelectedPageKey& key) const noexcept
+			{
+				std::uint64_t value = key.owner;
+				value ^= static_cast<std::uint64_t>(key.page)
+					+ 0x9e3779b97f4a7c15ull + (value << 6u) + (value >> 2u);
+				return static_cast<std::size_t>(value ^ (value >> 32u));
+			}
+		};
+		// One flat typed key replaces one heap-backed unordered_set per owner.
+		// Large crowds commonly contribute one page each, where thousands of tiny
+		// containers cost more than the membership query they were created for.
+		std::unordered_set<SelectedPageKey, SelectedPageKeyHasher> demandedPages;
+		demandedPages.reserve(snapshot.animatedGeometryPageDemands.size());
+		std::unordered_map<SelectedPageKey, std::uint64_t, SelectedPageKeyHasher>
+			selectedViewMasks;
+		selectedViewMasks.reserve(snapshot.animatedGeometryPageDemands.size());
 		for(const DeformationPageDemand& demand :
 			snapshot.animatedGeometryPageDemands)
 		{
 			const std::uint64_t owner = demand.ownerStableInstanceId != 0u
 				? demand.ownerStableInstanceId
 				: demand.key.deformation.stableInstanceId;
-			demandPagesByOwner[owner].insert(
-				demand.key.page.pageId);
+			demandedPages.insert({owner, demand.key.page.pageId});
 		}
 
 		// A page-local GPU packet is the preferred visibility proof. Some
@@ -1461,10 +1485,10 @@ namespace TerraEngine::Renderer {
 			const VirtualGeometryViewSelectionState& view =
 				snapshot.virtualGeometryViewSelections[viewIndex];
 			std::unordered_set<std::uint64_t> visibleOwners;
-			visibleOwners.reserve(view.draws.size());
+			visibleOwners.reserve(view.DrawRecords().size());
 			std::unordered_set<std::uint64_t> ownersWithMatchingPagePackets;
-			ownersWithMatchingPagePackets.reserve(view.gpuPacketRecords.size());
-			for(const VirtualGeometryViewDrawRecord& draw : view.draws)
+			ownersWithMatchingPagePackets.reserve(view.GpuPacketRecords().size());
+			for(const VirtualGeometryViewDrawRecord& draw : view.DrawRecords())
 			{
 				const auto stableInstance =
 					stableInstances.find(draw.objectId);
@@ -1482,7 +1506,7 @@ namespace TerraEngine::Renderer {
 			// considering the expensive whole-owner fallback; otherwise a low LOD
 			// draw needlessly deforms every page contained by the source asset.
 			for(const VirtualGeometrySelectedClusterRecord& cluster :
-				view.selectedClusters)
+				view.SelectedClusters())
 			{
 				const auto stableInstance =
 					stableInstances.find(cluster.objectId);
@@ -1490,10 +1514,7 @@ namespace TerraEngine::Renderer {
 				{
 					continue;
 				}
-				const auto demandedPages =
-					demandPagesByOwner.find(stableInstance->second);
-				if(demandedPages == demandPagesByOwner.end()
-					|| !demandedPages->second.contains(cluster.pageId))
+				if(!demandedPages.contains({stableInstance->second, cluster.pageId}))
 				{
 					continue;
 				}
@@ -1505,7 +1526,7 @@ namespace TerraEngine::Renderer {
 					stableInstance->second);
 			}
 			for(const GpuVirtualGeometryPacketRecord& packet :
-				view.gpuPacketRecords)
+				view.GpuPacketRecords())
 			{
 				const bool residentPage =
 					packet.payloadSource
@@ -1518,16 +1539,13 @@ namespace TerraEngine::Renderer {
 				{
 					continue;
 				}
-				const auto demandedPages =
-					demandPagesByOwner.find(stableInstance->second);
 				const bool exactEmbeddedPage = packet.payloadSource
 						== VirtualGeometryPagePayloadSource::EmbeddedMeshPayload
 					|| packet.payloadSource
 						== VirtualGeometryPagePayloadSource::
 							ConservativeEmbeddedFallback;
 				if((!residentPage && !exactEmbeddedPage)
-					|| demandedPages == demandPagesByOwner.end()
-					|| !demandedPages->second.contains(packet.pageId))
+					|| !demandedPages.contains({stableInstance->second, packet.pageId}))
 				{
 					continue;
 				}
@@ -1556,9 +1574,9 @@ namespace TerraEngine::Renderer {
 		}
 
 		std::vector<DeformationPageDemand> selectedDemands;
-		selectedDemands.reserve(std::min(
-			snapshot.animatedGeometryPageDemands.size(),
-			selectedViewMasks.size()));
+		// Owner-wide fail-open selections may retain every candidate even when no
+		// exact page key exists, so the candidate count is the only safe upper bound.
+		selectedDemands.reserve(snapshot.animatedGeometryPageDemands.size());
 		for(const DeformationPageDemand& demand :
 			snapshot.animatedGeometryPageDemands)
 		{
@@ -1615,7 +1633,10 @@ namespace TerraEngine::Renderer {
 				renderable.objectId,
 				renderable.meshId,
 				renderable.virtualGeometry,
-				renderable.taskShaderCullingEnabled
+				renderable.taskShaderCullingEnabled,
+				renderable.conventionalVisibilityIdentityIndex == 0u
+					? 0xffffffffu
+					: renderable.conventionalVisibilityIdentityIndex - 1u
 			});
 		}
 		return state;
@@ -1664,15 +1685,15 @@ namespace TerraEngine::Renderer {
 			counters.unavailableReason = "virtual geometry counters are unavailable for this view";
 			break;
 		}
-		if (!state.gpuCounterReadbacks.empty())
+		if (!state.GpuCounterReadbacks().empty())
 		{
 			// Backend readback packets are already copied into the immutable
 			// frame snapshot. Aggregating them here gives lightweight stats a
 			// truthful source label without touching live GPU buffers.
-			counters.source = state.gpuCounterReadbacks.front().source;
+			counters.source = state.GpuCounterReadbacks().front().source;
 			counters.authoritative = false;
 			counters.unavailableReason.clear();
-			for (const VirtualGeometryCounterReadbackRecord& readback : state.gpuCounterReadbacks)
+			for (const VirtualGeometryCounterReadbackRecord& readback : state.GpuCounterReadbacks())
 			{
 				counters.authoritative = counters.authoritative || readback.source == VirtualGeometryCounterSource::GPUReadback;
 				counters.readbackFrameId = std::max(counters.readbackFrameId, readback.frameId);
@@ -1693,9 +1714,9 @@ namespace TerraEngine::Renderer {
 				counters.unavailableReason = "GPU virtual geometry counter readback is not authoritative for this frame";
 			}
 		}
-		else if (!state.clusterPackets.empty())
+		else if (!state.ClusterPackets().empty())
 		{
-			for (const VirtualGeometryClusterPacket& packet : state.clusterPackets)
+			for (const VirtualGeometryClusterPacket& packet : state.ClusterPackets())
 			{
 				counters.sourceMeshlets += packet.meshletCount;
 				counters.selectedMeshlets += packet.meshletCount;
@@ -1709,7 +1730,7 @@ namespace TerraEngine::Renderer {
 		}
 		else
 		{
-			for (const VirtualGeometryViewDrawRecord& draw : state.draws)
+			for (const VirtualGeometryViewDrawRecord& draw : state.DrawRecords())
 			{
 				counters.sourceMeshlets += draw.range.meshletCount;
 				counters.selectedMeshlets += draw.range.meshletCount;
@@ -1729,7 +1750,8 @@ namespace TerraEngine::Renderer {
 				++counters.residentPages;
 			}
 		}
-		for (const VirtualGeometryPagePayloadRecord& payload : state.residentPagePayloads)
+		for (const VirtualGeometryPagePayloadRecord& payload :
+			state.ResidentPagePayloads())
 		{
 			if (!payload.resident && payload.source != VirtualGeometryPagePayloadSource::ConservativeEmbeddedFallback)
 			{
@@ -1745,7 +1767,8 @@ namespace TerraEngine::Renderer {
 				++counters.embeddedFallbackPayloads;
 			}
 		}
-		for (const VirtualGeometryEmittedPageSourceRecord& emitted : state.emittedPageSources)
+		for (const VirtualGeometryEmittedPageSourceRecord& emitted :
+			state.EmittedPageSources())
 		{
 			++counters.emittedPageSources;
 			if (emitted.emittedSource == VirtualGeometryEmittedPageSource::FallbackPage || emitted.fallbackSubstitution)
@@ -1757,14 +1780,15 @@ namespace TerraEngine::Renderer {
 				++counters.embeddedFallbackPayloads;
 			}
 		}
-		for (const VirtualGeometrySelectedClusterRecord& cluster : state.selectedClusters)
+		for (const VirtualGeometrySelectedClusterRecord& cluster :
+			state.SelectedClusters())
 		{
 			if (cluster.usingFallback)
 			{
 				++counters.fallbackSubstitutions;
 			}
 		}
-		counters.requestedPages = static_cast<std::uint32_t>(state.pageNeeds.size());
+		counters.requestedPages = static_cast<std::uint32_t>(state.PageNeeds().size());
 		counters.missingPages = counters.requestedPages;
 		return counters;
 	}
@@ -1772,8 +1796,9 @@ namespace TerraEngine::Renderer {
 	std::vector<OcclusionDebugSample> BuildVirtualGeometryOcclusionDebugSamples(const VirtualGeometryViewSelectionState& state)
 	{
 		std::vector<OcclusionDebugSample> samples;
-		samples.reserve(std::min<std::size_t>(state.draws.size(), kVirtualGeometryOcclusionDebugSampleCapacity));
-		for (const VirtualGeometryViewDrawRecord& draw : state.draws)
+		samples.reserve(std::min<std::size_t>(state.DrawRecords().size(),
+			kVirtualGeometryOcclusionDebugSampleCapacity));
+		for (const VirtualGeometryViewDrawRecord& draw : state.DrawRecords())
 		{
 			if (samples.size() >= kVirtualGeometryOcclusionDebugSampleCapacity)
 			{
@@ -1789,9 +1814,10 @@ namespace TerraEngine::Renderer {
 			sample.meshId = draw.meshId;
 			sample.meshletId = draw.range.meshletOffset;
 			if (draw.range.selectedClusterCount > 0u
-				&& draw.range.selectedClusterOffset < state.selectedClusters.size())
+				&& draw.range.selectedClusterOffset < state.SelectedClusters().size())
 			{
-				const VirtualGeometrySelectedClusterRecord& cluster = state.selectedClusters[draw.range.selectedClusterOffset];
+				const VirtualGeometrySelectedClusterRecord& cluster =
+					state.SelectedClusters()[draw.range.selectedClusterOffset];
 				sample.clusterId = cluster.clusterId;
 			}
 			sample.outcome = draw.range.failOpen
@@ -1881,31 +1907,38 @@ namespace TerraEngine::Renderer {
 		{
 			visibility.hiZValidationState.renderSize = state.targetSize;
 		}
-		visibility.drawRanges = state.draws;
-		visibility.selectedClusters = state.selectedClusters;
-		visibility.clusterPackets = state.clusterPackets;
-		visibility.clusterBatches = state.clusterBatches;
-		visibility.gpuPacketRecords = state.gpuPacketRecords;
-		visibility.gpuBatchDescriptors = state.gpuBatchDescriptors;
-		visibility.gpuPacketFrameSets = state.gpuPacketFrameSets;
-		visibility.gpuCompactionDispatches = state.gpuCompactionDispatches;
-		visibility.generatedSubmissions = state.generatedSubmissions;
-		visibility.gpuCounterReadbacks = state.gpuCounterReadbacks;
-		visibility.gpuFallbackRecords = state.gpuFallbackRecords;
-		visibility.compactionResults = state.compactionResults;
-		visibility.pageNeeds = state.pageNeeds;
-		visibility.pageRequests = state.pageRequests;
+		visibility.drawRanges = state.DrawRecords();
+		visibility.selectedClusters = state.SelectedClusters();
+		visibility.clusterPackets = state.ClusterPackets();
+		visibility.clusterBatches = state.ClusterBatches();
+		if(state.retainedGpuEvidence)
+		{
+			visibility.retainedGpuEvidence = state.retainedGpuEvidence;
+		}
+		else
+		{
+			visibility.gpuPacketRecords = state.gpuPacketRecords;
+			visibility.gpuBatchDescriptors = state.gpuBatchDescriptors;
+			visibility.gpuPacketFrameSets = state.gpuPacketFrameSets;
+			visibility.gpuCompactionDispatches = state.gpuCompactionDispatches;
+			visibility.generatedSubmissions = state.generatedSubmissions;
+			visibility.gpuCounterReadbacks = state.gpuCounterReadbacks;
+			visibility.gpuFallbackRecords = state.gpuFallbackRecords;
+		}
+		visibility.compactionResults = state.CompactionResults();
+		visibility.pageNeeds = state.PageNeeds();
+		visibility.pageRequests = state.PageRequests();
 		visibility.residentPageSets = state.residentPageSets;
-		visibility.residentPagePayloads = state.residentPagePayloads;
-		visibility.emittedPageSources = state.emittedPageSources;
+		visibility.residentPagePayloads = state.ResidentPagePayloads();
+		visibility.emittedPageSources = state.EmittedPageSources();
 		visibility.pageRetirements = state.pageRetirements;
 		visibility.pageResidency = state.pageResidency;
-		visibility.fallbackCoverage = state.fallbackCoverage;
+		visibility.fallbackCoverage = state.FallbackCoverage();
 		visibility.hiZRegressionSnapshots = state.hiZRegressionSnapshots;
 		visibility.coneSafetyMetadata = state.coneSafetyMetadata;
 		visibility.shadowVisibilitySelections = state.shadowVisibilitySelections;
 		visibility.performanceGates = state.performanceGates;
-		visibility.lodTransitionStates = state.lodTransitionStates;
+		visibility.lodTransitionStates = state.LodTransitionStates();
 		visibility.occlusionDebugSamples = BuildVirtualGeometryOcclusionDebugSamples(state);
 		visibility.source = source;
 		visibility.valid = snapshot.valid;
@@ -1936,7 +1969,8 @@ namespace TerraEngine::Renderer {
 		const RenderFrameSnapshot& snapshot,
 		const VirtualGeometryQualityProfile& qualityProfile,
 		VirtualGeometryInactiveReason inactiveReason,
-		const GpuDeformationPlan* completedDeformationPlan)
+		const GpuDeformationPlan* completedDeformationPlan,
+		bool includeDetailedEvidence)
 	{
 		const VirtualGeometryQualityProfile quality = SanitizeVirtualGeometryQualityProfile(qualityProfile);
 		std::optional<GpuDeformationPlan> fallbackDeformationPlan;
@@ -1953,14 +1987,19 @@ namespace TerraEngine::Renderer {
 		const auto ApplyAnimatedGeometryDiagnostics =
 			[&snapshot, completedDeformationPlan](VirtualGeometryViewDiagnosticsSnapshot& viewDiagnostics)
 		{
+			TERRAENGINE_PROFILE_SCOPE("Render Diagnostics: Summarize Animated Geometry",
+				TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 			// Visibility snapshots are the preferred live path, while prepared
 			// selection states are the fallback path. Both must be enriched from
 			// the same frame-wide deformation demand list or MCP/editor views can
 			// incorrectly report zero work after compute deformation was accepted.
-			viewDiagnostics.animatedPageDemandCount =
-				static_cast<std::uint32_t>(
-					snapshot.animatedGeometryPageDemands.size());
-			if(snapshot.animatedGeometryPageDemands.empty())
+			const std::size_t demandCount = std::max(
+				snapshot.animatedGeometryPageDemandCount,
+				snapshot.animatedGeometryPageDemands.size());
+			viewDiagnostics.animatedPageDemandCount = static_cast<std::uint32_t>(
+				std::min<std::size_t>(demandCount,
+					std::numeric_limits<std::uint32_t>::max()));
+			if(demandCount == 0u)
 			{
 				viewDiagnostics.animatedBoundsSource = "NoAnimatedPageWork";
 				return;
@@ -2029,10 +2068,10 @@ namespace TerraEngine::Renderer {
 			viewDiagnostics.animatedFallbackReason =
 				deformation.rejectionReason;
 		};
+		std::vector<VirtualGeometryViewDiagnosticsSnapshot> backendVisibilityDiagnostics;
 		if (!snapshot.virtualGeometryVisibilitySnapshots.empty())
 		{
-			std::vector<VirtualGeometryViewDiagnosticsSnapshot> diagnostics;
-			diagnostics.reserve(snapshot.virtualGeometryVisibilitySnapshots.size());
+			backendVisibilityDiagnostics.reserve(snapshot.virtualGeometryVisibilitySnapshots.size());
 			for (const VirtualGeometryViewVisibilitySnapshot& visibility : snapshot.virtualGeometryVisibilitySnapshots)
 			{
 				VirtualGeometryViewDiagnosticsSnapshot viewDiagnostics =
@@ -2044,9 +2083,8 @@ namespace TerraEngine::Renderer {
 					viewDiagnostics.inactiveReason = inactiveReason;
 					viewDiagnostics.warnings.push_back("Virtual geometry counters are unavailable because the view is inactive: " + std::string(ToString(inactiveReason)));
 				}
-				diagnostics.push_back(std::move(viewDiagnostics));
+				backendVisibilityDiagnostics.push_back(std::move(viewDiagnostics));
 			}
-			return diagnostics;
 		}
 
 		// Live RenderSystem snapshots already own the prepared view states. Calling
@@ -2062,10 +2100,27 @@ namespace TerraEngine::Renderer {
 			fallbackStates = BuildVirtualGeometryViewSelectionStates(snapshot);
 			states = &fallbackStates;
 		}
-		std::vector<VirtualGeometryViewDiagnosticsSnapshot> diagnostics;
-		diagnostics.reserve(states->size());
+		// Backend visibility evidence is authoritative for views that completed a
+		// readback. Auxiliary views, including shadows, are prepared on the CPU and
+		// intentionally have no backend visibility copy; retain their current-frame
+		// selection diagnostics instead of allowing Game/Scene evidence to hide them.
+		std::vector<VirtualGeometryViewDiagnosticsSnapshot> diagnostics =
+			std::move(backendVisibilityDiagnostics);
+		diagnostics.reserve(diagnostics.size() + states->size());
 		for (const VirtualGeometryViewSelectionState& state : *states)
 		{
+			TERRAENGINE_PROFILE_SCOPE("Render Diagnostics: Summarize View Selection",
+				TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			const bool backendAlreadyPublished = std::any_of(
+				diagnostics.begin(), diagnostics.end(), [&state](
+					const VirtualGeometryViewDiagnosticsSnapshot& published) {
+					return published.viewType == state.viewType
+						&& published.viewId == state.outputId;
+				});
+			if (backendAlreadyPublished)
+			{
+				continue;
+			}
 			VirtualGeometryViewDiagnosticsSnapshot viewDiagnostics;
 			viewDiagnostics.viewType = state.viewType;
 			viewDiagnostics.viewId = state.outputId;
@@ -2102,12 +2157,14 @@ namespace TerraEngine::Renderer {
 			viewDiagnostics.lodTransitionStableFrames = quality.lodTransitionStableFrames;
 			viewDiagnostics.geometryBudgetBytes = quality.geometryBudgetBytes;
 			ApplyAnimatedGeometryDiagnostics(viewDiagnostics);
-			viewDiagnostics.clusterSelection.selectedClusters = static_cast<std::uint32_t>(state.selectedClusters.size());
-			viewDiagnostics.clusterPacketCount = static_cast<std::uint32_t>(state.clusterPackets.size());
+			viewDiagnostics.clusterSelection.selectedClusters =
+				static_cast<std::uint32_t>(state.SelectedClusters().size());
+			viewDiagnostics.clusterPacketCount =
+				static_cast<std::uint32_t>(state.ClusterPackets().size());
 			// Lightweight frame stats must expose the same packet and batch
 			// counters as full diagnostics, but without scanning every cooked
 			// asset or generating performance-gate strings on normal frames.
-			for (const ClusterWorkBatch& batch : state.clusterBatches)
+			for (const ClusterWorkBatch& batch : state.ClusterBatches())
 			{
 				++viewDiagnostics.submittedBatchCount;
 				viewDiagnostics.submittedMeshlets += batch.submittedMeshlets;
@@ -2116,7 +2173,7 @@ namespace TerraEngine::Renderer {
 					++viewDiagnostics.singlePacketFallbackBatchCount;
 				}
 			}
-			for (const CompactedVisibilitySet& compaction : state.compactionResults)
+			for (const CompactedVisibilitySet& compaction : state.CompactionResults())
 			{
 				viewDiagnostics.candidateClusterCount += compaction.candidatePackets;
 				viewDiagnostics.compactedClusterCount += compaction.visiblePackets;
@@ -2131,14 +2188,14 @@ namespace TerraEngine::Renderer {
 				viewDiagnostics.culledByResidency += compaction.rejectedByResidency;
 				viewDiagnostics.submittedBatchCount = std::max(viewDiagnostics.submittedBatchCount, compaction.submittedBatches);
 			}
-			viewDiagnostics.gpuPacketRecordCount = static_cast<std::uint32_t>(state.gpuPacketRecords.size());
-			viewDiagnostics.gpuBatchDescriptorCount = static_cast<std::uint32_t>(state.gpuBatchDescriptors.size());
-			viewDiagnostics.gpuPacketFrameSetCount = static_cast<std::uint32_t>(state.gpuPacketFrameSets.size());
-			viewDiagnostics.gpuCompactionDispatchCount = static_cast<std::uint32_t>(state.gpuCompactionDispatches.size());
-			viewDiagnostics.generatedSubmissionCount = static_cast<std::uint32_t>(state.generatedSubmissions.size());
-			viewDiagnostics.gpuCounterReadbackCount = static_cast<std::uint32_t>(state.gpuCounterReadbacks.size());
-			viewDiagnostics.gpuFallbackRecordCount = static_cast<std::uint32_t>(state.gpuFallbackRecords.size());
-			for (const GpuVirtualGeometryPacketFrameSet& frameSet : state.gpuPacketFrameSets)
+			viewDiagnostics.gpuPacketRecordCount = static_cast<std::uint32_t>(state.GpuPacketRecords().size());
+			viewDiagnostics.gpuBatchDescriptorCount = static_cast<std::uint32_t>(state.GpuBatchDescriptors().size());
+			viewDiagnostics.gpuPacketFrameSetCount = static_cast<std::uint32_t>(state.GpuPacketFrameSets().size());
+			viewDiagnostics.gpuCompactionDispatchCount = static_cast<std::uint32_t>(state.GpuCompactionDispatches().size());
+			viewDiagnostics.generatedSubmissionCount = static_cast<std::uint32_t>(state.GeneratedSubmissions().size());
+			viewDiagnostics.gpuCounterReadbackCount = static_cast<std::uint32_t>(state.GpuCounterReadbacks().size());
+			viewDiagnostics.gpuFallbackRecordCount = static_cast<std::uint32_t>(state.GpuFallbackRecords().size());
+			for (const GpuVirtualGeometryPacketFrameSet& frameSet : state.GpuPacketFrameSets())
 			{
 				switch (frameSet.validity)
 				{
@@ -2161,7 +2218,7 @@ namespace TerraEngine::Renderer {
 					viewDiagnostics.gpuFallbackReason = frameSet.fallbackReason;
 				}
 			}
-			for (const GeneratedVirtualGeometrySubmissionRecord& submission : state.generatedSubmissions)
+			for (const GeneratedVirtualGeometrySubmissionRecord& submission : state.GeneratedSubmissions())
 			{
 				switch (submission.validationState)
 				{
@@ -2183,7 +2240,7 @@ namespace TerraEngine::Renderer {
 					viewDiagnostics.gpuFallbackReason = submission.fallbackReason;
 				}
 			}
-			for (const VirtualGeometryCounterReadbackRecord& readback : state.gpuCounterReadbacks)
+			for (const VirtualGeometryCounterReadbackRecord& readback : state.GpuCounterReadbacks())
 			{
 				viewDiagnostics.gpuCounterReadbackLatencyFrames = std::max(viewDiagnostics.gpuCounterReadbackLatencyFrames, readback.latencyFrames);
 				if (!readback.unavailableReason.empty() && viewDiagnostics.counterUnavailableReason.empty())
@@ -2191,7 +2248,7 @@ namespace TerraEngine::Renderer {
 					viewDiagnostics.counterUnavailableReason = readback.unavailableReason;
 				}
 			}
-			for (const VirtualGeometryGpuFallbackRecord& fallback : state.gpuFallbackRecords)
+			for (const VirtualGeometryGpuFallbackRecord& fallback : state.GpuFallbackRecords())
 			{
 				viewDiagnostics.gpuFallbackAffectedPackets += fallback.affectedPackets;
 				viewDiagnostics.gpuFallbackAffectedBatches += fallback.affectedBatches;
@@ -2251,72 +2308,318 @@ namespace TerraEngine::Renderer {
 			}
 			else
 			{
-				viewDiagnostics.requestedPages = static_cast<std::uint32_t>(state.pageNeeds.size());
-				viewDiagnostics.missingPages = static_cast<std::uint32_t>(state.pageNeeds.size());
+				viewDiagnostics.requestedPages =
+					static_cast<std::uint32_t>(state.PageNeeds().size());
+				viewDiagnostics.missingPages =
+					static_cast<std::uint32_t>(state.PageNeeds().size());
 			}
-			viewDiagnostics.lodTransitionStates = static_cast<std::uint32_t>(state.lodTransitionStates.size());
-			for (const VirtualGeometryLODTransitionState& transitionState : state.lodTransitionStates)
-			{
-				if (transitionState.heldPreviousSelection)
-				{
-					++viewDiagnostics.lodTransitionHeldSelections;
-				}
-				if (!transitionState.heldPreviousSelection && transitionState.valid)
-				{
-					++viewDiagnostics.lodTransitionAcceptedSelections;
-				}
-				if (transitionState.resetThisFrame)
-				{
-					++viewDiagnostics.lodTransitionResets;
-				}
-				viewDiagnostics.lodTransitionHysteresisPixels = transitionState.hysteresisBandPixels;
-			}
-			for (const VirtualGeometrySelectedClusterRecord& cluster : state.selectedClusters)
-			{
-				if (cluster.usingFallback)
-				{
-					++viewDiagnostics.clusterSelection.fallbackClusters;
-				}
-			}
-			if (!state.pageNeeds.empty())
-			{
-				viewDiagnostics.warnings.push_back("Virtual geometry selected resident fallback clusters while requesting missing high-detail pages.");
-			}
+			viewDiagnostics.lodTransitionStates = static_cast<std::uint32_t>(
+				state.LodTransitionStates().size());
 			viewDiagnostics.hiZValidation.ownerViewType = state.viewType;
 			viewDiagnostics.hiZValidation.sameViewHistory = state.hiZOcclusionAllowed;
 			viewDiagnostics.hiZValidation.sameTargetHistory = state.hiZOcclusionAllowed;
 			viewDiagnostics.hiZValidation.projectionMatches = viewDiagnostics.hiZActive;
 			viewDiagnostics.hiZValidation.failOpen = hiZState.failOpen || hiZState.state != VirtualGeometryHiZState::Active;
 			viewDiagnostics.hiZValidation.inactiveReason = viewDiagnostics.hiZInvalidReason;
-			viewDiagnostics.occlusionDebugSamples = BuildVirtualGeometryOcclusionDebugSamples(state);
-			for (const VirtualGeometryViewDrawRecord& draw : state.draws)
+			// The always-on stats path consumes compact packet, residency, and Hi-Z
+			// counters above. Per-draw histograms, samples, and repeated warning strings
+			// are useful only while diagnostics are being inspected, so avoid rebuilding
+			// them for every member of a large stable crowd on ordinary frames.
+			if(includeDetailedEvidence)
 			{
-				viewDiagnostics.selectedMeshlets += draw.range.meshletCount;
-				viewDiagnostics.dispatchedMeshlets += draw.range.meshletCount;
-				if (viewDiagnostics.selectedLodHistogram.size() <= draw.range.selectedLodIndex)
+				TERRAENGINE_PROFILE_SCOPE("Render Diagnostics: Build Detailed View Evidence",
+					TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			for (const VirtualGeometryLODTransitionState& transitionState :
+				state.lodTransitionStates)
 				{
-					viewDiagnostics.selectedLodHistogram.resize(static_cast<std::size_t>(draw.range.selectedLodIndex) + 1u, 0u);
+					if (transitionState.heldPreviousSelection)
+					{
+						++viewDiagnostics.lodTransitionHeldSelections;
+					}
+					if (!transitionState.heldPreviousSelection && transitionState.valid)
+					{
+						++viewDiagnostics.lodTransitionAcceptedSelections;
+					}
+					if (transitionState.resetThisFrame)
+					{
+						++viewDiagnostics.lodTransitionResets;
+					}
+					viewDiagnostics.lodTransitionHysteresisPixels = transitionState.hysteresisBandPixels;
 				}
-				viewDiagnostics.selectedLodHistogram[draw.range.selectedLodIndex] += 1u;
-				if (draw.range.failOpen)
+				for (const VirtualGeometrySelectedClusterRecord& cluster :
+					state.SelectedClusters())
 				{
-					viewDiagnostics.warnings.push_back(draw.range.fallbackReason.empty()
-						? "Virtual geometry failed open to preserve visibility."
-						: draw.range.fallbackReason);
+					if (cluster.usingFallback)
+					{
+						++viewDiagnostics.clusterSelection.fallbackClusters;
+					}
 				}
-			}
-			viewDiagnostics.sourceMeshlets = std::max(viewDiagnostics.sourceMeshlets, viewDiagnostics.selectedMeshlets);
-			if (state.shadowPass)
-			{
-				viewDiagnostics.warnings.push_back("Shadow virtual geometry uses conservative LOD; camera Hi-Z ownership is diagnostic-only.");
-			}
-			if (state.exportRuntime)
-			{
-				viewDiagnostics.warnings.push_back("Export runtime virtual geometry state is isolated from editor Scene View diagnostics.");
+				if (!state.PageNeeds().empty())
+				{
+					viewDiagnostics.warnings.push_back("Virtual geometry selected resident fallback clusters while requesting missing high-detail pages.");
+				}
+				viewDiagnostics.occlusionDebugSamples = BuildVirtualGeometryOcclusionDebugSamples(state);
+				for (const VirtualGeometryViewDrawRecord& draw : state.DrawRecords())
+				{
+					viewDiagnostics.selectedMeshlets += draw.range.meshletCount;
+					viewDiagnostics.dispatchedMeshlets += draw.range.meshletCount;
+					if (viewDiagnostics.selectedLodHistogram.size() <= draw.range.selectedLodIndex)
+					{
+						viewDiagnostics.selectedLodHistogram.resize(static_cast<std::size_t>(draw.range.selectedLodIndex) + 1u, 0u);
+					}
+					viewDiagnostics.selectedLodHistogram[draw.range.selectedLodIndex] += 1u;
+					if (draw.range.failOpen)
+					{
+						viewDiagnostics.warnings.push_back(draw.range.fallbackReason.empty()
+							? "Virtual geometry failed open to preserve visibility."
+							: draw.range.fallbackReason);
+					}
+				}
+				viewDiagnostics.sourceMeshlets = std::max(viewDiagnostics.sourceMeshlets, viewDiagnostics.selectedMeshlets);
+				if (state.shadowPass)
+				{
+					viewDiagnostics.warnings.push_back("Shadow virtual geometry uses conservative LOD; camera Hi-Z ownership is diagnostic-only.");
+				}
+				if (state.exportRuntime)
+				{
+					viewDiagnostics.warnings.push_back("Export runtime virtual geometry state is isolated from editor Scene View diagnostics.");
+				}
 			}
 			diagnostics.push_back(std::move(viewDiagnostics));
 		}
 		return diagnostics;
+	}
+
+	SharedRenderGroupKey BuildSharedRenderGroupKey(
+		const RenderFrameRenderableRecord& renderable,
+		const RenderFrameViewRequest& view) noexcept
+	{
+		SharedRenderGroupKey key{};
+		key.meshId = renderable.meshId;
+		key.materialId = renderable.materialId;
+		key.meshGeneration = renderable.invalidation.asset;
+		key.materialGeneration = renderable.invalidation.material;
+		// Static models do not own an animation program. Their renderer generation
+		// is still an exact pipeline lifetime, which keeps repeated static meshes
+		// eligible without pretending that they have animation bridge data.
+		key.pipelineGeneration = renderable.animation.programGeneration != 0u
+			? renderable.animation.programGeneration
+			: renderable.invalidation.renderer;
+		key.residencyGeneration = renderable.invalidation.residency;
+		key.rendererGeneration = renderable.invalidation.renderer;
+		key.geometryRoute = static_cast<std::uint32_t>(renderable.geometryRouteDecision.selected);
+		key.animationExecutionClass = static_cast<std::uint32_t>(renderable.animation.source);
+		key.renderPassVariant = static_cast<std::uint32_t>(view.outputKind);
+		key.viewVariant = static_cast<std::uint32_t>(view.viewType);
+		key.qualityVariant = renderable.taskShaderCullingEnabled ? 1u : 0u;
+		key.debugVariant = renderable.virtualGeometry.virtualGeometryActive ? 1u : 0u;
+		key.pipelineFlags = (renderable.usingFallback ? 1u : 0u)
+			| (renderable.virtualGeometry.failOpen ? 2u : 0u);
+		return key;
+	}
+
+	PersistentRenderTopology BuildPersistentRenderTopology(
+		const RenderFrameSnapshot& snapshot,
+		std::uint64_t topologyGeneration)
+	{
+		PersistentRenderTopology topology{};
+		if (!snapshot.valid || snapshot.containsLiveMutableState)
+		{
+			return topology;
+		}
+
+		topology.generation = topologyGeneration != 0u
+			? topologyGeneration
+			: BuildSnapshotDeterministicHash(snapshot);
+		topology.records.reserve(snapshot.renderables.size());
+		for (std::uint32_t ordinal = 0u;
+			ordinal < snapshot.renderables.size();
+			++ordinal)
+		{
+			const RenderFrameRenderableRecord& renderable = snapshot.renderables[ordinal];
+			PersistentRenderTopologyRecord record{};
+			record.objectId = renderable.objectId;
+			// View, route, animation class, fallback, and debug decisions can change
+			// every frame without changing authored mesh/material membership. Clear
+			// them from the retained template; the frame-owned grouping sidecar checks
+			// their exact current values before it emits an executable group.
+			record.groupKey = BuildSharedRenderGroupKey(renderable, {});
+			record.groupKey.geometryRoute = 0u;
+			record.groupKey.animationExecutionClass = 0u;
+			record.groupKey.renderPassVariant = 0u;
+			record.groupKey.viewVariant = 0u;
+			record.groupKey.debugVariant = 0u;
+			record.groupKey.pipelineFlags = 0u;
+			record.stableOrdinal = ordinal;
+			topology.records.push_back(record);
+		}
+
+		std::vector<SharedRenderGroupKey> orderedKeys;
+		orderedKeys.reserve(topology.records.size());
+		for (const PersistentRenderTopologyRecord& record : topology.records)
+		{
+			if (record.groupKey.IsComplete())
+			{
+				orderedKeys.push_back(record.groupKey);
+			}
+		}
+		std::sort(orderedKeys.begin(), orderedKeys.end());
+		orderedKeys.erase(std::unique(orderedKeys.begin(), orderedKeys.end()), orderedKeys.end());
+		topology.groupTemplates = std::move(orderedKeys);
+		for (PersistentRenderTopologyRecord& record : topology.records)
+		{
+			if (!record.groupKey.IsComplete())
+			{
+				continue;
+			}
+
+			// The sorted template list is deterministic, so this compact index stays
+			// valid for every dynamic sidecar until a stable generation invalidates
+			// the retained topology. Dynamic transforms, animation samples, LODs,
+			// and page selections deliberately do not participate in this lookup.
+			const auto templateIt = std::lower_bound(
+				topology.groupTemplates.begin(), topology.groupTemplates.end(),
+				record.groupKey);
+			if (templateIt != topology.groupTemplates.end()
+				&& *templateIt == record.groupKey)
+			{
+				record.groupTemplateIndex = static_cast<std::uint32_t>(
+					std::distance(topology.groupTemplates.begin(), templateIt));
+			}
+		}
+		topology.valid = true;
+		return topology;
+	}
+
+	DynamicRenderFrameState BuildDynamicRenderFrameState(
+		const RenderFrameSnapshot& snapshot,
+		const PersistentRenderTopology& topology,
+		const RenderFrameViewRequest& view,
+		std::uint64_t frameGeneration)
+	{
+		DynamicRenderFrameState result{};
+		result.frameGeneration = frameGeneration != 0u ? frameGeneration : snapshot.frameId;
+		result.viewGeneration = view.viewGeneration;
+		result.rendererGeneration = snapshot.renderables.empty()
+			? 0u
+			: snapshot.renderables.front().invalidation.renderer;
+		if (!snapshot.valid || !topology.valid
+			|| topology.records.size() != snapshot.renderables.size()
+			|| result.frameGeneration == 0u)
+		{
+			return result;
+		}
+
+		struct Candidate
+		{
+			SharedRenderGroupKey key{};
+			RenderInstanceRecord instance{};
+			DrawCommand fallback{};
+			std::uint32_t stableOrdinal = 0u;
+			bool canGroup = false;
+		};
+		std::vector<Candidate> candidates;
+		candidates.reserve(snapshot.renderables.size());
+		const auto packUuid = [](const TerraEngine::UUID& id) {
+			glm::uvec4 words(0u);
+			for (std::uint32_t word = 0u; word < 4u; ++word)
+			{
+				for (std::uint32_t byte = 0u; byte < 4u; ++byte)
+				{
+					words[word] |= static_cast<std::uint32_t>(id[word * 4u + byte]) << (byte * 8u);
+				}
+			}
+			return words;
+		};
+
+		for (std::uint32_t ordinal = 0u; ordinal < snapshot.renderables.size(); ++ordinal)
+		{
+			const RenderFrameRenderableRecord& renderable = snapshot.renderables[ordinal];
+			Candidate candidate{};
+			candidate.key = BuildSharedRenderGroupKey(renderable, view);
+			candidate.stableOrdinal = topology.records[ordinal].stableOrdinal;
+			candidate.instance.modelMatrix = renderable.modelMatrix;
+			candidate.instance.objectIdentity = packUuid(renderable.objectId);
+			candidate.instance.animationSelectors = glm::uvec4(
+				static_cast<std::uint32_t>(renderable.animation.stableInstanceId),
+				static_cast<std::uint32_t>(renderable.animation.animationPlanGeneration),
+				renderable.animation.firstGpuWorkPacket,
+				renderable.animation.gpuStageMask);
+			candidate.instance.geometrySelectors = glm::uvec4(
+				renderable.virtualGeometry.selectedLodIndex,
+				renderable.virtualGeometry.payloadDescriptorIndex,
+				renderable.virtualGeometry.meshletOffset,
+				renderable.virtualGeometry.meshletCount);
+			candidate.instance.materialAndTexture[RenderInstanceRecord::kInstanceFlagsWord] =
+				(renderable.usingFallback ? 1u : 0u)
+				| (renderable.virtualGeometry.failOpen ? 2u : 0u);
+			candidate.fallback.meshId = renderable.meshId;
+			candidate.fallback.materialId = renderable.materialId;
+			candidate.fallback.objectId = renderable.objectId;
+			candidate.fallback.modelMatrix = renderable.modelMatrix;
+			candidate.fallback.geometryRoute = renderable.geometryRouteDecision.selected;
+			candidate.fallback.selectedVirtualLod = renderable.virtualGeometry.selectedLodIndex;
+			candidate.fallback.virtualMeshletOffset = renderable.virtualGeometry.meshletOffset;
+			candidate.fallback.virtualMeshletCount = renderable.virtualGeometry.meshletCount;
+			candidate.fallback.virtualGeometryPageId = renderable.virtualGeometry.pageId;
+			candidate.fallback.virtualGeometryFallbackPageId = renderable.virtualGeometry.fallbackPageId;
+			candidate.fallback.virtualGeometryPayloadSource = renderable.virtualGeometry.payloadSource;
+			candidate.fallback.virtualGeometryEmittedSource = renderable.virtualGeometry.emittedSource;
+			candidate.fallback.virtualGeometryPagePayloadByteOffset = renderable.virtualGeometry.pagePayloadByteOffset;
+			candidate.fallback.virtualGeometryPagePayloadByteSize = renderable.virtualGeometry.pagePayloadByteSize;
+			candidate.fallback.virtualGeometryPayloadBufferIndex = renderable.virtualGeometry.payloadBufferIndex;
+			candidate.fallback.virtualGeometryPayloadDescriptorIndex = renderable.virtualGeometry.payloadDescriptorIndex;
+			candidate.canGroup = candidate.key.IsComplete()
+				&& !renderable.usingFallback
+				&& !renderable.virtualGeometry.failOpen;
+			candidates.push_back(candidate);
+		}
+
+		// Sorting the sidecar by complete keys makes every executable group one
+		// contiguous instance range. Stable ordinal breaks exact-key ties, so worker
+		// completion order never changes instance-buffer layout or picking identity.
+		std::sort(candidates.begin(), candidates.end(), [](const Candidate& left, const Candidate& right) {
+			if (const auto comparison = left.key <=> right.key; comparison != 0)
+			{
+				return comparison < 0;
+			}
+			return left.stableOrdinal < right.stableOrdinal;
+		});
+
+		for (std::size_t begin = 0u; begin < candidates.size();)
+		{
+			std::size_t end = begin + 1u;
+			while (end < candidates.size() && candidates[begin].key == candidates[end].key
+				&& candidates[begin].canGroup && candidates[end].canGroup)
+			{
+				++end;
+			}
+			const bool executable = candidates[begin].canGroup && (end - begin) > 1u;
+			if (executable)
+			{
+				SharedRenderGroup group{};
+				group.key = candidates[begin].key;
+				group.firstInstance = static_cast<std::uint32_t>(result.instances.size());
+				group.instanceCount = static_cast<std::uint32_t>(end - begin);
+				group.topologyGeneration = topology.generation;
+				group.viewGeneration = view.viewGeneration;
+				group.executable = true;
+				for (std::size_t index = begin; index < end; ++index)
+				{
+					result.instances.push_back(candidates[index].instance);
+				}
+				result.groups.push_back(group);
+			}
+			else
+			{
+				// A failed key is isolated. It never shares an instance range with a
+				// neighbouring compatible group and continues through DrawCommand.
+				result.fallbackCommands.push_back(candidates[begin].fallback);
+			}
+			begin = executable ? end : begin + 1u;
+		}
+		result.valid = true;
+		return result;
 	}
 
 }

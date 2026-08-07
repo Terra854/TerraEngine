@@ -459,6 +459,12 @@ namespace TerraEngine::Tests {
 			const std::vector<TerraEngine::Scheduling::SchedulerResourceDefinition> resources =
 				TerraEngine::Scheduling::DefaultSchedulerResources();
 			const std::vector<std::string> requiredVirtualGeometryResources = {
+				TerraEngine::Scheduling::kResourcePersistentRenderTopology,
+				TerraEngine::Scheduling::kResourceDynamicRenderInstanceCandidates,
+				TerraEngine::Scheduling::kResourceRenderCompatibilityGroups,
+				TerraEngine::Scheduling::kResourceRenderInstanceStreamPublication,
+				TerraEngine::Scheduling::kResourceCachedRenderViewEvidence,
+				TerraEngine::Scheduling::kResourceRenderOptimizationEvidence,
 				TerraEngine::Scheduling::kResourceVirtualGeometryQualityProfile,
 				TerraEngine::Scheduling::kResourceVirtualGeometryResidencySnapshots,
 				TerraEngine::Scheduling::kResourceVirtualGeometryPageResidencySnapshots,
@@ -549,6 +555,26 @@ namespace TerraEngine::Tests {
 			context.Expect(declaration.safeSubwork.find("page request planning") != std::string::npos, "RenderSystem worker-safe declaration should explain page request planning.");
 			context.Expect(declaration.protectedCommit.find("page payload publication") != std::string::npos, "RenderSystem protected boundary should explain page payload publication.");
 			context.Expect(declaration.protectedCommit.find("page retirement draining") != std::string::npos, "RenderSystem protected boundary should explain page retirement draining.");
+		});
+
+		registry.Add("Engine.SystemScheduler.DefinesAnimationProcessingAndRetainedTopologyResources", [](TestContext& context) {
+			const std::vector<TerraEngine::Scheduling::SchedulerResourceDefinition> resources =
+				TerraEngine::Scheduling::DefaultSchedulerResources();
+			const std::vector<std::string> requiredAnimationResources = {
+				TerraEngine::Scheduling::kResourceAnimationProcessingClasses,
+				TerraEngine::Scheduling::kResourceAnimationGpuVisualFastPackets,
+				TerraEngine::Scheduling::kResourceAnimationGpuVisualFastPrepared,
+				TerraEngine::Scheduling::kResourceAnimationGpuTopology,
+				TerraEngine::Scheduling::kResourceAnimationOptimizationEvidence
+			};
+
+			// Each handoff has distinct ownership so compact and complete worker
+			// branches can run concurrently without hiding a resource conflict.
+			for (const std::string& resourceName : requiredAnimationResources)
+			{
+				context.Expect(ContainsSchedulerResource(resources, resourceName),
+					"Default scheduler resources should define animation optimization resource: " + resourceName);
+			}
 		});
 
 		registry.Add("Engine.SystemScheduler.FrameWorkloadsConvertProtectedAndWorkerSystems", [](TestContext& context) {

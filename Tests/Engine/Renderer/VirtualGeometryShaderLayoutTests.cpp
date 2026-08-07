@@ -488,8 +488,10 @@ namespace TerraEngine::Tests
 				"Validated multi-owner demanded-page deformation must publish each owner's bridge header instead of rejecting the entire compute plan.");
 			context.Expect(
 				ShaderContains(vulkanSource,
-					"&& !multiOwnerCanonicalFallback"),
-				"Multi-owner canonical fallback draws must use the mesh-only collection so task payloads cannot consume an unproven page bridge.");
+					"&& (!multiOwnerCanonicalFallback")
+					&& ShaderContains(vulkanSource,
+						"|| groupedPerInstanceAnimationBridgeAvailable"),
+				"Multi-owner canonical fallback draws must stay mesh-only unless a validated grouped stream supplies every member's independent page bridge.");
 			context.Expect(
 				!ShaderContains(vulkanSource, "const bool wholeOwnerDeformationFallback =")
 					&& ShaderContains(vulkanSource,

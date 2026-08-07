@@ -2,8 +2,7 @@
 //
 // This layer stores only immutable plan data and stable identifiers. It does
 // not own VkDevice, VkDescriptorSet, VkCommandBuffer, or fence handles, so the
-// same scheduling ideas can be mirrored by a future DX12 backend without
-// inheriting Vulkan object lifetime rules.
+// cache entries cannot accidentally inherit Vulkan object lifetime rules.
 
 #pragma once
 
@@ -17,6 +16,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -79,6 +79,23 @@ namespace TerraEngine::Renderer::Vulkan {
 		bool gpuCompactionEligible = false;
 		bool generatedSubmissionEligible = false;
 		bool counterReadbackEligible = false;
+	};
+
+	// The protected Vulkan owner validates this value-only plan before allocating
+	// a frame-slot buffer. A rejected plan publishes no partial grouped range;
+	// its callers retain the pre-existing per-model DrawCommand route.
+	struct GroupedInstanceStreamPlan
+	{
+		std::uint64_t frameGeneration = 0u;
+		std::uint64_t topologyGeneration = 0u;
+		std::uint64_t rendererGeneration = 0u;
+		std::vector<SharedRenderGroup> groups;
+		std::size_t instanceCount = 0u;
+		std::size_t instanceBytes = 0u;
+		std::size_t avoidedSubmissionCount = 0u;
+		RenderGroupRejectionReason rejectionReason = RenderGroupRejectionReason::None;
+		bool valid = false;
+		bool requiresCompleteFallback = false;
 	};
 
 	struct ShadowRecordingPreparationPlan
@@ -172,6 +189,21 @@ namespace TerraEngine::Renderer::Vulkan {
 	TERRAENGINE_API IndirectDrawPreparationPlan BuildIndirectDrawPreparationPlan(
 		const RenderFrameSnapshot& snapshot,
 		const BackendCapabilityProfile& capabilities);
+	TERRAENGINE_API GroupedInstanceStreamPlan BuildGroupedInstanceStreamPlan(
+		const DynamicRenderFrameState& dynamicState,
+		std::size_t maximumInstanceCapacity,
+		std::uint64_t currentRendererGeneration);
+	// The renderer already owns the dynamic instance and group arrays. This view
+	// overload validates them in place so a large crowd is not copied into a second
+	// temporary DynamicRenderFrameState merely to inspect counts and ranges.
+	TERRAENGINE_API GroupedInstanceStreamPlan BuildGroupedInstanceStreamPlan(
+		std::span<const RenderInstanceRecord> instances,
+		std::span<const SharedRenderGroup> groups,
+		std::uint64_t frameGeneration,
+		std::uint64_t rendererGeneration,
+		bool valid,
+		std::size_t maximumInstanceCapacity,
+		std::uint64_t currentRendererGeneration);
 	TERRAENGINE_API ShadowRecordingPreparationPlan BuildShadowRecordingPreparationPlan(
 		const RenderFrameSnapshot& snapshot,
 		const BackendCapabilityProfile& capabilities);

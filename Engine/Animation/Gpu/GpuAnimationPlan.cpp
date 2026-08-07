@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <map>
 #include <new>
 #include <numeric>
 #include <tuple>
@@ -27,6 +28,55 @@ namespace TerraEngine::Animation {
 			std::uint64_t modelPoseOffsetBytes = 0U;
 			std::uint64_t morphOutputOffsetBytes = 0U;
 		};
+
+		// This excludes owner identity and per-owner work/component generations on
+		// purpose: followers retain those records while consuming the same immutable
+		// clip/program/skeleton evaluation. Every value that can change sampled
+		// joints, masks, morphs, scratch layout, or palette contents remains exact.
+		struct GpuAnimationEvaluationKey {
+			GpuAnimationBatchKey batchKey{};
+			std::uint32_t programGeneration = 0U;
+			std::uint32_t controllerGeneration = 0U;
+			std::uint32_t skeletonGeneration = 0U;
+			std::uint32_t clipGeneration = 0U;
+			std::uint32_t meshGeneration = 0U;
+			std::uint32_t resourceGeneration = 0U;
+			std::uint32_t rendererGeneration = 0U;
+			std::uint32_t sceneGeneration = 0U;
+			std::uint64_t inputPoseOffsetBytes = 0U;
+			std::uint64_t evaluationParameterFingerprint = 0U;
+			std::uint32_t clipResourceIndex = 0U;
+			std::uint32_t programResourceIndex = 0U;
+			std::uint32_t skeletonResourceIndex = 0U;
+			std::uint32_t maskResourceIndex = 0U;
+			std::uint32_t morphResourceIndex = 0U;
+			std::uint32_t jointCount = 0U;
+			std::uint32_t morphCount = 0U;
+			std::uint32_t scratchSizeBytes = 0U;
+			std::uint32_t scratchAlignmentBytes = 0U;
+			std::uint32_t paletteEntryCount = 0U;
+			std::uint32_t palettePartitionCount = 0U;
+			std::uint32_t flags = 0U;
+			std::uint32_t sampleTick = 0U;
+
+			auto operator<=>(const GpuAnimationEvaluationKey&) const = default;
+		};
+
+		[[nodiscard]] GpuAnimationEvaluationKey MakeGpuAnimationEvaluationKey(
+			const GpuAnimationWorkRequest& request) noexcept
+		{
+			return {request.batchKey, request.generations.programGeneration,
+				request.generations.controllerGeneration, request.generations.skeletonGeneration,
+				request.generations.clipGeneration, request.generations.meshGeneration,
+				request.generations.resourceGeneration, request.generations.rendererGeneration,
+				request.generations.sceneGeneration, request.inputPoseOffsetBytes,
+				request.evaluationParameterFingerprint,
+				request.clipResourceIndex, request.programResourceIndex, request.skeletonResourceIndex,
+				request.maskResourceIndex, request.morphResourceIndex, request.jointCount,
+				request.morphCount, request.scratchSizeBytes, request.scratchAlignmentBytes,
+				request.paletteEntryCount, request.palettePartitionCount, request.flags,
+				request.sampleTick};
+		}
 
 		[[nodiscard]] constexpr bool IsPowerOfTwo(std::uint32_t value) noexcept
 		{
@@ -451,6 +501,7 @@ namespace TerraEngine::Animation {
 		sharedResidentPayloads.reset();
 		generationRecords.clear();
 		workPackets.clear();
+		evaluationSourcePacketIndices.clear();
 		renderIdentities.clear();
 		dispatchRecords.clear();
 		dispatchCommands.clear();
@@ -583,7 +634,7 @@ namespace TerraEngine::Animation {
 		// Optional stages may be absent from a valid program. The next active
 		// stage still consumes writes made by the producer: for example, a simple
 		// clip runs Sample -> Hierarchy without a Blend stage. Preserve the
-		// producer's ordinary visibility boundary so Vulkan cannot let the
+		// producer's ordinary visibility boundary so the graphics backend cannot let the
 		// consumer observe the frame buffer before those writes are available.
 		return GpuAnimationBarrierAfterStage(producer);
 	}
@@ -723,11 +774,18 @@ namespace TerraEngine::Animation {
 
 			temporaryPlan.generationRecords.reserve(requests.size());
 			temporaryPlan.workPackets.reserve(requests.size());
+			temporaryPlan.evaluationSourcePacketIndices.reserve(requests.size());
 			temporaryPlan.renderIdentities.reserve(requests.size());
 			temporaryPlan.batches.reserve(std::min<std::size_t>(requests.size(), limits.maximumBatches));
+			std::map<GpuAnimationEvaluationKey, std::uint32_t> evaluationSources;
 
 			for(std::size_t sortedIndex = 0U; sortedIndex < sortedRequestIndices.size(); ++sortedIndex) {
 				const GpuAnimationWorkRequest& request = requests[sortedRequestIndices[sortedIndex]];
+				const GpuAnimationEvaluationKey evaluationKey = MakeGpuAnimationEvaluationKey(request);
+				const auto existingEvaluation = evaluationSources.find(evaluationKey);
+				const bool allowsSharedEvaluation = (request.diagnosticIndex & 0x80000000U) != 0U;
+				const bool sharesEvaluation = allowsSharedEvaluation
+					&& existingEvaluation != evaluationSources.end();
 				ScratchLayout scratchLayout{};
 				if(!BuildScratchLayout(request, scratchLayout)) {
 					return reject(GpuAnimationPlanStatus::ArithmeticOverflow,
@@ -740,33 +798,41 @@ namespace TerraEngine::Animation {
 					limits.scratchAlignmentBytes,
 					request.scratchAlignmentBytes});
 				GpuAnimationArenaAllocation scratchAllocation{};
-				const GpuAnimationPlanStatus scratchStatus = temporaryScratchArena.Allocate(
-					scratchLayout.totalSizeBytes,
-					scratchAlignment,
-					scratchAllocation);
-				if(scratchStatus != GpuAnimationPlanStatus::Ok) {
-					return reject(scratchStatus, GpuAnimationDiagnosticFlag::ScratchOverflow,
-						static_cast<std::uint32_t>(sortedRequestIndices[sortedIndex]), &request);
-				}
-
 				GpuAnimationArenaAllocation paletteAllocation{};
-				if(request.paletteEntryCount != 0U) {
-					std::uint64_t paletteSizeBytes = 0U;
-					if(!CheckedGpuMultiply(
-						request.paletteEntryCount,
-						kGpuAnimationPaletteStride,
-						paletteSizeBytes)) {
-						return reject(GpuAnimationPlanStatus::ArithmeticOverflow,
-							GpuAnimationDiagnosticFlag::PaletteOverflow,
+				if(sharesEvaluation) {
+					const GpuAnimationWorkPacket& sourcePacket = temporaryPlan.workPackets[
+						existingEvaluation->second];
+					// The shared key includes every layout field. Reuse only the checked
+					// offsets; no arena allocation or dispatch is required for this owner.
+					scratchAllocation.offsetBytes = sourcePacket.scratchOffsetBytes;
+					paletteAllocation.offsetBytes = sourcePacket.paletteOffsetBytes;
+				} else {
+					const GpuAnimationPlanStatus scratchStatus = temporaryScratchArena.Allocate(
+						scratchLayout.totalSizeBytes,
+						scratchAlignment,
+						scratchAllocation);
+					if(scratchStatus != GpuAnimationPlanStatus::Ok) {
+						return reject(scratchStatus, GpuAnimationDiagnosticFlag::ScratchOverflow,
 							static_cast<std::uint32_t>(sortedRequestIndices[sortedIndex]), &request);
 					}
-					const GpuAnimationPlanStatus paletteStatus = temporaryPaletteArena.Allocate(
-						paletteSizeBytes,
-						kGpuAnimationArenaAlignment,
-						paletteAllocation);
-					if(paletteStatus != GpuAnimationPlanStatus::Ok) {
-						return reject(paletteStatus, GpuAnimationDiagnosticFlag::PaletteOverflow,
-							static_cast<std::uint32_t>(sortedRequestIndices[sortedIndex]), &request);
+					if(request.paletteEntryCount != 0U) {
+						std::uint64_t paletteSizeBytes = 0U;
+						if(!CheckedGpuMultiply(
+							request.paletteEntryCount,
+							kGpuAnimationPaletteStride,
+							paletteSizeBytes)) {
+							return reject(GpuAnimationPlanStatus::ArithmeticOverflow,
+								GpuAnimationDiagnosticFlag::PaletteOverflow,
+								static_cast<std::uint32_t>(sortedRequestIndices[sortedIndex]), &request);
+						}
+						const GpuAnimationPlanStatus paletteStatus = temporaryPaletteArena.Allocate(
+							paletteSizeBytes,
+							kGpuAnimationArenaAlignment,
+							paletteAllocation);
+						if(paletteStatus != GpuAnimationPlanStatus::Ok) {
+							return reject(paletteStatus, GpuAnimationDiagnosticFlag::PaletteOverflow,
+								static_cast<std::uint32_t>(sortedRequestIndices[sortedIndex]), &request);
+						}
 					}
 				}
 
@@ -797,13 +863,20 @@ namespace TerraEngine::Animation {
 				packet.scratchSizeBytes = static_cast<std::uint32_t>(scratchLayout.totalSizeBytes);
 				packet.stageMask = request.batchKey.stageMask;
 				packet.flags = request.flags;
-				packet.diagnosticIndex = request.diagnosticIndex;
+				packet.diagnosticIndex = request.diagnosticIndex & 0x7fffffffU;
 				packet.resourceLayoutId = request.batchKey.resourceLayoutId;
 				packet.boundsOutputIndex = workPacketIndex;
 				packet.stableSubmissionOrdinal = request.stableSubmissionOrdinal;
 				packet.sampleTick = request.sampleTick;
 				temporaryPlan.generationRecords.push_back(request.generations);
 				temporaryPlan.workPackets.push_back(packet);
+				const std::uint32_t evaluationSourcePacketIndex = sharesEvaluation
+					? existingEvaluation->second : workPacketIndex;
+				temporaryPlan.evaluationSourcePacketIndices.push_back(
+					evaluationSourcePacketIndex);
+				if(allowsSharedEvaluation && !sharesEvaluation) {
+					evaluationSources.emplace(evaluationKey, workPacketIndex);
+				}
 				temporaryPlan.renderIdentities.push_back(request.renderIdentity);
 
 				if(HasGpuAnimationFlag(packet.flags, GpuAnimationWorkFlag::UseBindPoseFallback)
@@ -856,7 +929,10 @@ namespace TerraEngine::Animation {
 				const GpuAnimationStage stage = static_cast<GpuAnimationStage>(stageValue);
 				for(std::size_t packetIndex = 0U; packetIndex < temporaryPlan.workPackets.size(); ++packetIndex) {
 					const GpuAnimationWorkPacket& packet = temporaryPlan.workPackets[packetIndex];
-					counts[packetIndex] = (packet.stageMask & GpuAnimationStageMask(stage)) == 0U
+					const bool isEvaluationSource = temporaryPlan.evaluationSourcePacketIndices[packetIndex]
+						== packetIndex;
+					counts[packetIndex] = !isEvaluationSource
+						|| (packet.stageMask & GpuAnimationStageMask(stage)) == 0U
 						? 0U
 						: GpuAnimationStageElementCount(stage, packet);
 				}
@@ -1042,6 +1118,7 @@ namespace TerraEngine::Animation {
 			|| paletteArena.Kind() != GpuAnimationArenaKind::Palette
 			|| !IsPlanLimitConfigurationValid(limits)
 			|| requests.size() != previous.workPackets.size()
+			|| previous.evaluationSourcePacketIndices.size() != previous.workPackets.size()
 			|| requests.size() != previous.generationRecords.size()
 			|| requests.size() != previous.renderIdentities.size()
 			|| requests.size() > limits.maximumPackets) {
@@ -1092,7 +1169,8 @@ namespace TerraEngine::Animation {
 					|| request.paletteEntryCount != packet.paletteEntryCount
 					|| request.palettePartitionCount != packet.palettePartitionCount
 					|| request.flags != packet.flags
-					|| request.diagnosticIndex != packet.diagnosticIndex) {
+					|| (request.diagnosticIndex & 0x7fffffffU) != packet.diagnosticIndex
+					|| previous.evaluationSourcePacketIndices[packetIndex] > packetIndex) {
 					return false;
 				}
 
@@ -1153,6 +1231,107 @@ namespace TerraEngine::Animation {
 			output = std::move(refreshed);
 			scratchArena = refreshedScratch;
 			paletteArena = refreshedPalette;
+			return true;
+		} catch(const std::bad_alloc&) {
+			return false;
+		} catch(...) {
+			return false;
+		}
+	}
+
+	bool GpuAnimationTopology::IsComplete() const noexcept
+	{
+		if(!generations.IsComplete() || topologyGeneration == 0U
+			|| owners.empty() || dispatchTemplates.empty()) {
+			return false;
+		}
+		for(std::size_t index = 0U; index < owners.size(); ++index) {
+			if(!owners[index].IsComplete()
+				|| (index != 0U && !(owners[index - 1U] < owners[index]))) {
+				// Strict owner order rejects duplicate or non-deterministic mappings.
+				return false;
+			}
+		}
+		for(const GpuAnimationDispatchTemplate& dispatch : dispatchTemplates) {
+			if(!dispatch.IsComplete()) return false;
+		}
+		return true;
+	}
+
+	bool GpuAnimationTopologyDynamicState::IsCompleteFor(
+		const GpuAnimationTopology& topology) const noexcept
+	{
+		return frameGeneration != 0U && topology.IsComplete()
+			&& topologyGenerations == topology.generations
+			&& sampleTicks.size() == topology.owners.size()
+			&& outputOffsets.size() == topology.owners.size();
+	}
+
+	bool BuildGpuAnimationTopology(
+		const GpuAnimationPlan& plan,
+		const GpuAnimationTopologyGenerationKey& generations,
+		std::uint64_t topologyGeneration,
+		GpuAnimationTopology& output) noexcept
+	{
+		if(!generations.IsComplete() || topologyGeneration == 0U
+			|| plan.workPackets.empty() || plan.dispatchCommands.empty()) {
+			return false;
+		}
+		try {
+			GpuAnimationTopology candidate;
+			candidate.generations = generations;
+			candidate.topologyGeneration = topologyGeneration;
+			candidate.owners.reserve(plan.workPackets.size());
+			for(std::uint32_t index = 0U; index < plan.workPackets.size(); ++index) {
+				const GpuAnimationWorkPacket& packet = plan.workPackets[index];
+				candidate.owners.push_back({packet.stableInstanceId,
+					packet.stableSubmissionOrdinal, index});
+			}
+			std::sort(candidate.owners.begin(), candidate.owners.end());
+			candidate.dispatchTemplates.reserve(plan.stageSpans.size());
+			for(const GpuAnimationStageSpan& span : plan.stageSpans) {
+				if(span.dispatchRecordCount == 0U) continue;
+				candidate.dispatchTemplates.push_back({span.firstDispatchRecord,
+					span.dispatchRecordCount, span.stage, span.barrierFlags});
+			}
+			if(!candidate.IsComplete()) return false;
+			output = std::move(candidate);
+			return true;
+		} catch(const std::bad_alloc&) {
+			return false;
+		} catch(...) {
+			return false;
+		}
+	}
+
+	bool BuildGpuAnimationTopologyDynamicState(
+		const GpuAnimationPlan& plan,
+		const GpuAnimationTopology& topology,
+		std::uint64_t frameGeneration,
+		GpuAnimationTopologyDynamicState& output) noexcept
+	{
+		if(frameGeneration == 0U || !topology.IsComplete()
+			|| plan.workPackets.size() != topology.owners.size()) {
+			return false;
+		}
+		try {
+			GpuAnimationTopologyDynamicState candidate;
+			candidate.frameGeneration = frameGeneration;
+			candidate.topologyGenerations = topology.generations;
+			candidate.sampleTicks.reserve(topology.owners.size());
+			candidate.outputOffsets.reserve(topology.owners.size());
+			for(const GpuAnimationTopologyOwner& owner : topology.owners) {
+				if(owner.workPacketIndex >= plan.workPackets.size()) return false;
+				const GpuAnimationWorkPacket& packet = plan.workPackets[owner.workPacketIndex];
+				if(packet.stableInstanceId != owner.stableInstanceId
+					|| packet.stableSubmissionOrdinal != owner.stableSubmissionOrdinal) {
+					return false;
+				}
+				candidate.sampleTicks.push_back(packet.sampleTick);
+				candidate.outputOffsets.push_back(packet.paletteOffsetBytes);
+			}
+			if(!candidate.IsCompleteFor(topology)) return false;
+			output = std::move(candidate);
 			return true;
 		} catch(const std::bad_alloc&) {
 			return false;

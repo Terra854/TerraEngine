@@ -133,6 +133,37 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(first.formatted, second.formatted, "Repeated graph execution should keep summary text deterministic.");
 		});
 
+		registry.Add("Engine.JobGraph.RearmReusesValidatedTopologyWithFreshCallbacks", [](TestContext& context) {
+			std::vector<std::string> firstLog;
+			std::vector<std::string> secondLog;
+			TerraEngine::Scheduling::JobGraph graph("rearm-first", "Reusable Graph");
+			auto first = graph.AddJob(MakeJob(
+				"First", TerraEngine::Scheduling::JobGraphExecutionPolicy::Protected,
+				&firstLog));
+			auto second = graph.AddJob(MakeJob(
+				"Second", TerraEngine::Scheduling::JobGraphExecutionPolicy::Protected,
+				&firstLog));
+			graph.AddDependency(first, second);
+			const TerraEngine::Scheduling::JobGraphSummary initial = graph.Execute();
+
+			graph.Rearm("rearm-second");
+			context.Expect(graph.UpdateJobWork(first,
+				[&secondLog](TerraEngine::Scheduling::JobGraphContext&) {
+					secondLog.push_back("First");
+				}), "A retained job handle should accept the next frame callback.");
+			context.Expect(graph.UpdateJobWork(second,
+				[&secondLog](TerraEngine::Scheduling::JobGraphContext&) {
+					secondLog.push_back("Second");
+				}), "Every retained job should refresh its frame-local callback.");
+			const TerraEngine::Scheduling::JobGraphSummary reused = graph.Execute();
+
+			context.Expect(initial.valid && initial.completed && reused.valid && reused.completed,
+				"Both the initial and retained topology executions should complete.");
+			context.Expect(firstLog == std::vector<std::string>({ "First", "Second" })
+				&& secondLog == std::vector<std::string>({ "First", "Second" }),
+				"Rearming must preserve dependency order while replacing every callback.");
+		});
+
 		registry.Add("Engine.JobGraph.MissingHandleAndCycleAreRejected", [](TestContext& context) {
 			TerraEngine::Scheduling::JobGraph missing("missing", "Missing Handle");
 			auto job = MakeJob("UsesMissing", TerraEngine::Scheduling::JobGraphExecutionPolicy::Protected);

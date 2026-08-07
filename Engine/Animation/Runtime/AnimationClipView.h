@@ -9,6 +9,7 @@
 #include "Animation/Assets/AnimationClipAsset.h"
 #include "Animation/Assets/SkeletonAsset.h"
 #include "Animation/Codec/AnimationCodec.h"
+#include "Animation/Runtime/SharedCopyVector.h"
 
 #include <cstdint>
 #include <limits>
@@ -129,7 +130,10 @@ namespace TerraEngine::Animation {
 		const AnimationClipAsset* asset_ = nullptr;
 		const SkeletonAsset* referenceSkeleton_ = nullptr;
 		AnimationCodecView codec_{};
-		std::vector<std::uint8_t> residentSegments_;
+		// Direct-clip prefab cohorts validate one immutable residency bitmap. Sharing
+		// that checked array keeps a crowd-wide stream promotion constant-time per
+		// view while a later writer still receives an isolated copy on mutation.
+		SharedCopyVector<std::uint8_t> residentSegments_;
 		AnimationGeneration streamedGeneration_ = 0U;
 		std::shared_ptr<const AnimationClipSegmentPayloadSet> streamedPayloads_;
 	};

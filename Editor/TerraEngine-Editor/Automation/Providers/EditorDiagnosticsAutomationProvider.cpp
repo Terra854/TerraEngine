@@ -78,6 +78,17 @@ namespace TerraEngine::Editor::Automation
 				}}};
 				descriptor.execution.preparationReads.insert(descriptor.execution.preparationReads.end(), {"FrameExecutionPlan", "SystemScheduler", "ThreadPoolTelemetry"});
 			}
+			if (descriptor.name == "renderer.virtualGeometry.stats")
+			{
+				// Shadow uses renderer-published selection diagnostics instead of the
+				// fence-delayed Game/Scene timing store. Advertise every accepted
+				// selector so discovery clients can request the supported evidence.
+				descriptor.description = "Read virtual-geometry statistics and diagnostics for Game, Scene, or Shadow views.";
+				descriptor.inputSchema = {{"type", "object"}, {"properties", {
+					{"viewType", {{"type", "string"}, {"enum", {"Game", "Scene", "Shadow"}},
+						{"description", "Render view whose current virtual-geometry diagnostics are requested."}}}
+				}}, {"additionalProperties", true}};
+			}
 			if (descriptor.name == "route.lock")
 			{
 				descriptor.description = "Read or set a transient representation-route lock for validation captures.";

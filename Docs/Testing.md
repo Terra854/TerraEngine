@@ -1113,6 +1113,9 @@ released their handles.
 ## Renderer Performance Baseline
 
 Renderer threading fixtures live at `Tests/Fixtures/RendererPerformanceBaseline`.
+The downloaded dense animated validation model uses a separate validation scene
+and must never modify, reimport, recook, or rewrite
+`C:/Users/benti/Desktop/TerraEngine-Projects/New Animated Project/Assets/Scenes/Scene.tescene`.
 The `workloads.json` manifest describes the small, medium, large, streaming,
 UI-heavy, shadow-heavy, scene-game-submit, and randomized-stress scenes used by
 the renderer graph tests and by manual profiling runs. Keep this fixture
@@ -1127,6 +1130,47 @@ the visible-frame timings against queued background work before accepting a
 renderer-threading change. A regression should be fixed or recorded in the
 feature quickstart with the machine, scene, and backend context that reproduced
 it.
+
+For the installed dense animated-VG visual soak, use a disposable scene and a
+fixed MCP port. The tool samples presented frames while orbiting and dollying a
+custom camera; it never writes the authored benchmark camera. It records PNG
+hashes, sampled luminance/non-black ratios, VG statistics, and errors beneath
+the requested result directory, then removes the disposable scene.
+
+```powershell
+& .\Tools\VirtualGeometry\CaptureVirtualGeometryLiveVisual.ps1 `
+	-InstalledEditor 'out/build/RelWithDebInfo/Build/Editor/TerraEngine-Editor.exe' `
+	-Project 'C:\Users\benti\Desktop\TerraEngine-Projects\New Animated Project' `
+	-Asset 'Assets/ValidationModels/DenseAnimatedVG/CesiumMan.glb' `
+	-Prefab 'Assets/ValidationModels/DenseAnimatedVG/CesiumMan_Generated/CesiumMan.teprefab' `
+	-CreateValidationScene -CleanupValidationScene `
+	-ValidationScenePath 'Assets/Scenes/.terra-validation/DenseAnimatedVGSoak5m.tescene' `
+	-OutputDirectory 'Tests/Fixtures/RendererPerformanceBaseline/results/soak/dense-animated-vg-5m' `
+	-ValidationCameraPosition 0.0,0.5,1.0 -ValidationCameraTarget 0.0,0.5,0.0 `
+	-SoakDurationSeconds 300 -SoakSampleIntervalSeconds 10 -McpPort 43129 `
+	-ValidationRoute hardware -RepresentationRoute virtual-hardware `
+	-PrefabRequestedAnimationMode 1 -EnterPlayMode -ExpectAnimatedChange
+```
+
+The Profiler idle-overhead gate uses the same installed editor, project,
+disposable dense-animation scene, and fixed port for both sides of every pair.
+It alternates closed/open-idle order, records unlimited frame history, and
+requires each pair's median frame-time delta to remain within two percent. Run
+five 60-second pairs and retain the generated summaries and manifest:
+
+```powershell
+& .\Tools\Profiling\MeasureProfilerIdleOverhead.ps1 `
+	-InstalledEditor 'out/build/RelWithDebInfo/Build/Editor/TerraEngine-Editor.exe' `
+	-Project 'C:\Users\benti\Desktop\TerraEngine-Projects\New Animated Project' `
+	-OutputDirectory 'Tests/Fixtures/RendererPerformanceBaseline/results/profiler' `
+	-PairCount 5 -CaptureDurationSeconds 60 -McpPort 43129
+```
+
+For a standalone long-capture coherence check, run the visual harness with
+`-ProfilerMaxFrames 0 -ProfilerCaptureDurationSeconds 60`. A zero maximum means
+unlimited history. The saved capture, reopened summary, timing distribution,
+frame list, hierarchy, and typed evidence must report the same completed-frame
+count; unavailable evidence remains distinct from measured zero.
 
 ### Install After Code Changes
 
@@ -1333,3 +1377,18 @@ Remove-Item Env:TERRAENGINE_TEST_FILTER
 The skinned cook must load a final deformable TEMF with more than one detail
 level and an animated physical page outside LOD0. The package test proves that
 two generated child meshes retain independent percentage thresholds.
+
+### Current-format compatibility gate
+
+This check reads the external validation project without importing, recooking,
+or writing authored assets:
+
+```powershell
+$env:TERRAENGINE_CURRENT_PROJECT_ROOT = 'C:/Users/benti/Desktop/TerraEngine-Projects/New Animated Project'
+ctest --test-dir out/build/RelWithDebInfo -C RelWithDebInfo -R 'Editor\.CurrentProjectCompatibility' --output-on-failure
+Remove-Item Env:TERRAENGINE_CURRENT_PROJECT_ROOT
+```
+
+`Assets/Scenes/Scene.tescene` must retain SHA-256
+`C15F9DCC784BA4ACF027D7C01D22DE8D65A20C3B4044931E7C9488FDF3AFD673`; the dense
+animated validation scene is authored separately.

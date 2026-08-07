@@ -436,6 +436,47 @@ ProfilerTimingStreamSample MakeTimingSample(
 	return sample;
 }
 
+ProfilerRenderOptimizationViewSummary MakeProfilerRenderOptimizationViewSummary(
+	const RenderStatsSnapshot& stats)
+{
+	ProfilerRenderOptimizationViewSummary result;
+	result.viewType = static_cast<std::uint32_t>(stats.viewType);
+	if (!stats.valid || stats.optimization.valid == 0U)
+	{
+		return result;
+	}
+
+	const RenderOptimizationSummary& source = stats.optimization;
+	result.frameGeneration = source.frameGeneration;
+	result.topologyGeneration = source.topologyGeneration;
+	result.viewGeneration = source.viewGeneration;
+	result.rendererGeneration = source.rendererGeneration;
+	result.topologyBuildNanoseconds = source.topologyBuildNanoseconds;
+	result.dynamicMaterializationNanoseconds = source.dynamicMaterializationNanoseconds;
+	result.instanceStreamUploadNanoseconds = source.instanceStreamUploadNanoseconds;
+	result.groupedCommandRecordingNanoseconds = source.groupedCommandRecordingNanoseconds;
+	result.visibleInstanceCount = source.visibleInstanceCount;
+	result.groupedInstanceCount = source.groupedInstanceCount;
+	result.fallbackInstanceCount = source.fallbackInstanceCount;
+	result.groupedSubmissionCount = source.groupedSubmissionCount;
+	result.fallbackSubmissionCount = source.fallbackSubmissionCount;
+	result.avoidedSubmissionCount = source.avoidedSubmissionCount;
+	result.instanceStreamBytes = source.instanceStreamBytes;
+	result.instanceStreamCapacityBytes = source.instanceStreamCapacityBytes;
+	result.topologyReuseHits = source.topologyReuseHits;
+	result.topologyInvalidations = source.topologyInvalidations;
+	result.viewEvidenceReuseHits = source.viewEvidenceReuseHits;
+	result.viewEvidenceInvalidations = source.viewEvidenceInvalidations;
+	result.rejectedIncompleteKeyCount = source.rejectedIncompleteKeyCount;
+	result.rejectedUnsupportedVariantCount = source.rejectedUnsupportedVariantCount;
+	result.rejectedOutOfRangeCount = source.rejectedOutOfRangeCount;
+	result.rejectedStaleGenerationCount = source.rejectedStaleGenerationCount;
+	result.fallbackAllocationFailureCount = source.fallbackAllocationFailureCount;
+	result.fallbackRecoveryCount = source.fallbackRecoveryCount;
+	result.valid = true;
+	return result;
+}
+
 TelemetryDuration AvailableTelemetryDuration(std::uint64_t nanoseconds)
 {
 	return {TelemetryAvailability::Available, nanoseconds, {}};
@@ -501,6 +542,48 @@ ProfilerAnimationFrameTelemetry MakeAnimationTelemetry(
 	SetAnimationStage(summary, ProfilerAnimationStage::ProtectedPublication, snapshot.timings.publicationMs);
 	SetAnimationStage(summary, ProfilerAnimationStage::Presentation, snapshot.timings.presentationMs);
 	return telemetry;
+}
+
+ProfilerAnimationOptimizationEvidence MakeAnimationOptimizationEvidence(
+	const TerraEngine::Animation::AnimationDiagnosticsSnapshot& snapshot)
+{
+	const TerraEngine::Animation::AnimationDiagnosticsCounters& counters = snapshot.counters;
+	ProfilerAnimationOptimizationEvidence evidence;
+	evidence.frameIndex = snapshot.frameIndex;
+	evidence.candidateGeneration = snapshot.candidateGeneration;
+	evidence.acceptedGeneration = snapshot.acceptedGeneration;
+	evidence.rejectedGeneration = snapshot.rejectedGeneration;
+	evidence.topologyGeneration = snapshot.topologyGeneration;
+	evidence.presentationGeneration = snapshot.presentationGeneration;
+	evidence.rendererGeneration = snapshot.rendererGeneration;
+	evidence.sceneGeneration = snapshot.sceneGeneration;
+	evidence.activeAnimators = counters.activeAnimators;
+	evidence.suspendedAnimators = counters.suspendedAnimators;
+	evidence.compactEligibleAnimators = counters.compactEligibleAnimators;
+	evidence.compactProcessedAnimators = counters.compactProcessedAnimators;
+	evidence.completeCapturedAnimators = counters.completeCapturedAnimators;
+	evidence.completeProcessedAnimators = counters.completeProcessedAnimators;
+	evidence.compactToCompleteTransitions = counters.compactToCompleteTransitions;
+	evidence.completeToCompactTransitions = counters.completeToCompactTransitions;
+	evidence.retainedTopologyHits = counters.retainedTopologyHits;
+	evidence.retainedTopologyMisses = counters.retainedTopologyMisses;
+	evidence.compactPlanGroups = counters.compactPlanGroups;
+	evidence.compactDispatches = counters.compactDispatches;
+	evidence.rejectedCandidateCount = counters.rejectedCandidateCount;
+	static_assert(evidence.fallbackReasonCounts.size() == counters.fallbackReasonCounts.size());
+	std::copy(counters.fallbackReasonCounts.begin(), counters.fallbackReasonCounts.end(),
+		evidence.fallbackReasonCounts.begin());
+	evidence.timingNanoseconds = {
+		MillisecondsToNanoseconds(snapshot.timings.compactCaptureMs),
+		MillisecondsToNanoseconds(snapshot.timings.compactEvaluationMs),
+		MillisecondsToNanoseconds(snapshot.timings.compactPublicationMs),
+		MillisecondsToNanoseconds(snapshot.timings.completeCaptureMs),
+		MillisecondsToNanoseconds(snapshot.timings.completeEvaluationMs),
+		MillisecondsToNanoseconds(snapshot.timings.completePublicationMs),
+		MillisecondsToNanoseconds(snapshot.timings.topologyBuildMs),
+		MillisecondsToNanoseconds(snapshot.timings.topologyRefreshMs)};
+	evidence.valid = true;
+	return evidence;
 }
 
 bool ShouldRetainAnimationDetails(
@@ -1134,6 +1217,15 @@ void Profiler::RecordAnimationDiagnostics(const TerraEngine::Animation::Animatio
 	{
 		return;
 	}
+	ProfilerAnimationOptimizationEvidence optimization =
+		MakeAnimationOptimizationEvidence(snapshot);
+	if (ValidateProfilerAnimationOptimizationEvidence(optimization))
+	{
+		currentFrame->animationOptimization = std::move(optimization);
+	}
+	// Never mix a valid timing frame with partial or stale optimization counts.
+	// Ordinary animation telemetry remains useful when a producer has not yet
+	// published the complete generation-coherent optimization envelope.
 	// The diagnostics adapter contains aggregate evidence only. A producer that
 	// has opt-in per-instance rows uses RecordAnimationTelemetry at the same
 	// protected boundary instead.
@@ -1472,6 +1564,17 @@ void Profiler::RecordRenderStats(const RenderStatsSnapshot& gameStats, const Ren
 	AddOrReplaceMetric(*engineCpu, "Scene draw calls", static_cast<double>(sceneStats.drawCalls), "count");
 	AddOrReplaceMetric(*engineCpu, "Game triangles", static_cast<double>(gameStats.triangleCount), "count");
 	AddOrReplaceMetric(*engineCpu, "Scene triangles", static_cast<double>(sceneStats.triangleCount), "count");
+
+	ProfilerRenderOptimizationEvidence renderEvidence;
+	renderEvidence.views[0] = MakeProfilerRenderOptimizationViewSummary(gameStats);
+	renderEvidence.views[1] = MakeProfilerRenderOptimizationViewSummary(sceneStats);
+	// Do not publish half-coherent renderer counters. A malformed producer leaves
+	// this frame without optimization evidence instead of presenting plausible
+	// zeroes or mixing generations from different views.
+	if (ValidateProfilerRenderOptimizationEvidence(renderEvidence))
+	{
+		currentFrame->renderOptimization = renderEvidence;
+	}
 
 	const bool gameGpuValid = gameStats.valid && gameStats.gpuTimestampValid;
 	const bool sceneGpuValid = sceneStats.valid && sceneStats.gpuTimestampValid;

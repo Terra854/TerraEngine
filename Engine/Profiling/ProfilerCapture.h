@@ -215,6 +215,85 @@ struct ProfilerAnimationDiagnosticsFacts
 	bool baselineIdentityMatched = false;
 };
 
+// ProfilerAnimationOptimizationEvidence is the bounded, frame-coherent proof
+// for the compact and complete animation paths. The profiler owns this copy so
+// reopening a capture never depends on live animator storage or diagnostic
+// strings. Timing values use nanoseconds to avoid locale and precision drift.
+struct ProfilerAnimationOptimizationEvidence
+{
+	static constexpr std::size_t kFallbackReasonCount = 13U;
+	static constexpr std::size_t kTimingCount = 8U;
+
+	std::uint64_t frameIndex = 0U;
+	std::uint64_t candidateGeneration = 0U;
+	std::uint64_t acceptedGeneration = 0U;
+	std::uint64_t rejectedGeneration = 0U;
+	std::uint64_t topologyGeneration = 0U;
+	std::uint64_t presentationGeneration = 0U;
+	std::uint64_t rendererGeneration = 0U;
+	std::uint64_t sceneGeneration = 0U;
+	std::uint64_t activeAnimators = 0U;
+	std::uint64_t suspendedAnimators = 0U;
+	std::uint64_t compactEligibleAnimators = 0U;
+	std::uint64_t compactProcessedAnimators = 0U;
+	std::uint64_t completeCapturedAnimators = 0U;
+	std::uint64_t completeProcessedAnimators = 0U;
+	std::uint64_t compactToCompleteTransitions = 0U;
+	std::uint64_t completeToCompactTransitions = 0U;
+	std::uint64_t retainedTopologyHits = 0U;
+	std::uint64_t retainedTopologyMisses = 0U;
+	std::uint64_t compactPlanGroups = 0U;
+	std::uint64_t compactDispatches = 0U;
+	std::uint64_t rejectedCandidateCount = 0U;
+	std::array<std::uint64_t, kFallbackReasonCount> fallbackReasonCounts{};
+	std::array<std::uint64_t, kTimingCount> timingNanoseconds{};
+	bool valid = false;
+};
+
+// ProfilerRenderOptimizationViewSummary is a fixed-size copy of the renderer's
+// accepted optimization evidence for one view. The profiler owns these values;
+// saved captures never retain renderer objects, Vulkan handles, or hot-path
+// diagnostic strings.
+struct ProfilerRenderOptimizationViewSummary
+{
+	std::uint32_t viewType = 0U;
+	std::uint64_t frameGeneration = 0U;
+	std::uint64_t topologyGeneration = 0U;
+	std::uint64_t viewGeneration = 0U;
+	std::uint64_t rendererGeneration = 0U;
+	std::uint64_t topologyBuildNanoseconds = 0U;
+	std::uint64_t dynamicMaterializationNanoseconds = 0U;
+	std::uint64_t instanceStreamUploadNanoseconds = 0U;
+	std::uint64_t groupedCommandRecordingNanoseconds = 0U;
+	std::uint32_t visibleInstanceCount = 0U;
+	std::uint32_t groupedInstanceCount = 0U;
+	std::uint32_t fallbackInstanceCount = 0U;
+	std::uint32_t groupedSubmissionCount = 0U;
+	std::uint32_t fallbackSubmissionCount = 0U;
+	std::uint32_t avoidedSubmissionCount = 0U;
+	std::uint32_t instanceStreamBytes = 0U;
+	std::uint32_t instanceStreamCapacityBytes = 0U;
+	std::uint32_t topologyReuseHits = 0U;
+	std::uint32_t topologyInvalidations = 0U;
+	std::uint32_t viewEvidenceReuseHits = 0U;
+	std::uint32_t viewEvidenceInvalidations = 0U;
+	std::uint32_t rejectedIncompleteKeyCount = 0U;
+	std::uint32_t rejectedUnsupportedVariantCount = 0U;
+	std::uint32_t rejectedOutOfRangeCount = 0U;
+	std::uint32_t rejectedStaleGenerationCount = 0U;
+	std::uint32_t fallbackAllocationFailureCount = 0U;
+	std::uint32_t fallbackRecoveryCount = 0U;
+	bool valid = false;
+};
+
+// Game and Scene are recorded together at the profiler frame boundary. Keeping
+// the pair typed lets the UI compare evidence with the same frame's timing
+// streams without rebuilding string-keyed metric tables.
+struct ProfilerRenderOptimizationEvidence
+{
+	std::array<ProfilerRenderOptimizationViewSummary, 2U> views{};
+};
+
 // ProfilerAnimationStage is append-only because saved capture files store these
 // values numerically. The names split CPU planning/authority work from GPU work
 // and protected publication so a slow frame cannot hide behind one aggregate.
@@ -348,9 +427,11 @@ struct ProfilerFrameRecord
 	// Retained frames keep common dormant-animation evidence as values. Snapshot
 	// helpers add the legacy public metric strings to their copied frame only.
 	std::optional<ProfilerAnimationDiagnosticsFacts> animationDiagnostics;
+	std::optional<ProfilerAnimationOptimizationEvidence> animationOptimization;
 	// Only active opted-in captures allocate this immutable record. Dormant frames
 	// leave it null so disabled/collapsed projects retain structurally minimal data.
 	std::shared_ptr<const ProfilerAnimationFrameTelemetry> animationTelemetry;
+	std::optional<ProfilerRenderOptimizationEvidence> renderOptimization;
 	// Typed streams are value snapshots. They make native/editor telemetry
 	// available after loading a capture without retaining a live subsystem.
 	std::vector<PerformanceStageRecord> performanceStages;
@@ -423,6 +504,9 @@ const char* ToString(ProfilerAnimationStage stage);
 // Validation is fail-closed before a record enters a live frame or a loaded
 // capture. Rejected records never replace prior complete telemetry.
 bool ValidateProfilerAnimationFrameTelemetry(const ProfilerAnimationFrameTelemetry& telemetry) noexcept;
+bool ValidateProfilerAnimationOptimizationEvidence(
+	const ProfilerAnimationOptimizationEvidence& evidence) noexcept;
+bool ValidateProfilerRenderOptimizationEvidence(const ProfilerRenderOptimizationEvidence& evidence) noexcept;
 std::string MakeTimestampForFileName();
 std::string MakeReadableTimestamp();
 bool AnyModuleEnabled(const ProfilerCaptureSettings& settings);

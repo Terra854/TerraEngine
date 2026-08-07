@@ -539,6 +539,7 @@ namespace TerraEngine::Animation {
 			? input.visual.ragdollTableOffsetBytes : 0U;
 		staged.stableInstanceId = input.visual.stableInstanceId;
 		staged.inputPoseOffsetBytes = input.visual.inputPoseOffsetBytes;
+		staged.evaluationParameterFingerprint = input.visual.evaluationParameterFingerprint;
 		staged.stableSubmissionOrdinal = input.visual.stableSubmissionOrdinal;
 		staged.clipResourceIndex = input.visual.clipResourceIndex;
 		staged.programResourceIndex = input.program.programResourceIndex;
@@ -551,7 +552,10 @@ namespace TerraEngine::Animation {
 		staged.scratchAlignmentBytes = program.scratchPlan.alignmentBytes;
 		staged.paletteEntryCount = input.visual.paletteEntryCount;
 		staged.palettePartitionCount = input.visual.palettePartitionCount;
-		staged.diagnosticIndex = input.visual.diagnosticIndex;
+		// diagnosticIndex is bounded below the high bit by plan limits. Retain the
+		// opt-in in that private request lane, then strip it before shader packets.
+		staged.diagnosticIndex = input.visual.diagnosticIndex
+			| (input.allowSharedVisualEvaluation ? 0x80000000U : 0U);
 		staged.sampleTick = input.visual.sampleTick;
 		staged.renderIdentity = input.visual.renderIdentity;
 		if(input.visual.looping) staged.flags |= static_cast<std::uint32_t>(GpuAnimationWorkFlag::Looping);

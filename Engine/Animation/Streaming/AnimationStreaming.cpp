@@ -449,32 +449,70 @@ namespace TerraEngine::Animation
 	bool AnimationStreamingCoordinator::PublishReadResult(
 		const AnimationStreamReadResult& result)
 	{
-		if (result.status == AnimationStreamReadStatus::Cancelled
-			|| result.status == AnimationStreamReadStatus::Rejected)
+		const AnimationStreamReadResult* resultPointer = &result;
+		return PublishReadResults(
+			std::span<const AnimationStreamReadResult* const>(&resultPointer, 1U)) == 1U;
+	}
+
+	std::size_t AnimationStreamingCoordinator::PublishReadResults(
+		std::span<const AnimationStreamReadResult* const> results)
+	{
+		struct PreparedPublication final
 		{
-			return false;
-		}
-		const bool sizeMatches = result.Succeeded()
-			&& result.bytes.size() == result.request.byteSize;
-		const bool fingerprintMatches = sizeMatches
-			&& (result.request.expectedContentFingerprint == 0U
-				|| ComputeAnimationStreamContentFingerprint(result.bytes)
-					== result.request.expectedContentFingerprint);
-		std::shared_ptr<const std::vector<std::uint8_t>> payload;
-		if(fingerprintMatches) {
-			try {
-				payload = std::make_shared<const std::vector<std::uint8_t>>(result.bytes);
-			} catch(const std::bad_alloc&) {
-				payload.reset();
+			const AnimationStreamRequest* request = nullptr;
+			bool complete = false;
+			std::shared_ptr<const std::vector<std::uint8_t>> payload;
+		};
+
+		// Validate and allocate immutable payload storage before taking the
+		// coordinator lock. Only the short deterministic state transition and one
+		// final snapshot rebuild remain inside the protected boundary.
+		std::vector<PreparedPublication> prepared;
+		prepared.reserve(results.size());
+		for(const AnimationStreamReadResult* result : results) {
+			if(result == nullptr
+				|| result->status == AnimationStreamReadStatus::Cancelled
+				|| result->status == AnimationStreamReadStatus::Rejected) {
+				continue;
 			}
+			const bool sizeMatches = result->Succeeded()
+				&& result->bytes.size() == result->request.byteSize;
+			const bool fingerprintMatches = sizeMatches
+				&& (result->request.expectedContentFingerprint == 0U
+					|| ComputeAnimationStreamContentFingerprint(result->bytes)
+						== result->request.expectedContentFingerprint);
+			PreparedPublication publication;
+			publication.request = &result->request;
+			if(fingerprintMatches) {
+				try {
+					publication.payload =
+						std::make_shared<const std::vector<std::uint8_t>>(result->bytes);
+				} catch(const std::bad_alloc&) {
+					publication.payload.reset();
+				}
+			}
+			publication.complete = fingerprintMatches && publication.payload != nullptr;
+			prepared.push_back(std::move(publication));
 		}
 
-		const bool complete = fingerprintMatches && payload != nullptr;
+		std::size_t successfulPublications = 0U;
+		bool residencyChanged = false;
 		std::scoped_lock lock(m_mutex);
-		const bool published = CompleteLocked(
-			result.request, complete, std::move(payload));
-		if(published) m_cancellationTokens.erase(MakeGenerationKey(result.request));
-		return published && complete;
+		for(PreparedPublication& publication : prepared) {
+			const bool published = CompleteLocked(
+				*publication.request,
+				publication.complete,
+				std::move(publication.payload),
+				false);
+			if(!published) continue;
+			m_cancellationTokens.erase(MakeGenerationKey(*publication.request));
+			if(publication.complete) {
+				++successfulPublications;
+				residencyChanged = true;
+			}
+		}
+		if(residencyChanged) RebuildResidencySnapshotLocked();
+		return successfulPublications;
 	}
 
 	std::vector<AnimationStreamDecision> AnimationStreamingCoordinator::RequestBatch(
@@ -560,7 +598,8 @@ namespace TerraEngine::Animation
 	bool AnimationStreamingCoordinator::CompleteLocked(
 		const AnimationStreamRequest& request,
 		bool success,
-		std::shared_ptr<const std::vector<std::uint8_t>> payload)
+		std::shared_ptr<const std::vector<std::uint8_t>> payload,
+		bool rebuildResidencySnapshot)
 	{
 		const std::string payloadKey = MakePayloadKey(request);
 		const std::string generationKey = MakeGenerationKey(request);
@@ -604,7 +643,7 @@ namespace TerraEngine::Animation
 		found->reason = "Complete block published at the protected animation streaming boundary.";
 		if(payload) {
 			m_residentPayloads[generationKey] = std::move(payload);
-			RebuildResidencySnapshotLocked();
+			if(rebuildResidencySnapshot) RebuildResidencySnapshotLocked();
 		}
 		return true;
 	}
@@ -753,7 +792,6 @@ namespace TerraEngine::Animation
 	{
 		std::scoped_lock lock(m_mutex);
 		std::uint64_t residentBytes = 0u;
-		std::vector<AnimationStreamDecision*> candidates;
 		for (AnimationStreamDecision& decision : m_decisions)
 		{
 			if (decision.state != AnimationStreamState::Resident)
@@ -761,8 +799,16 @@ namespace TerraEngine::Animation
 				continue;
 			}
 			residentBytes = AddSaturated(residentBytes, decision.request.byteSize);
-			if (!decision.request.gameplayCritical && decision.retainCount == 0u)
-			{
+		}
+		// A settled crowd normally remains below its fixed residency budget. Do not
+		// allocate and sort the complete eviction-candidate list unless pressure is
+		// actually present; this path runs on the protected animation boundary.
+		if(residentBytes <= residentBudgetBytes) return {};
+		std::vector<AnimationStreamDecision*> candidates;
+		candidates.reserve(m_decisions.size());
+		for(AnimationStreamDecision& decision : m_decisions) {
+			if(decision.state == AnimationStreamState::Resident
+				&& !decision.request.gameplayCritical && decision.retainCount == 0U) {
 				candidates.push_back(&decision);
 			}
 		}
@@ -836,6 +882,7 @@ namespace TerraEngine::Animation
 		diagnostics.fallbackUses = m_fallbackUses;
 		for (const AnimationStreamDecision& decision : m_decisions)
 		{
+			diagnostics.retainedPayloads += decision.retainCount != 0U ? 1U : 0U;
 			switch (decision.state)
 			{
 			case AnimationStreamState::Requested:

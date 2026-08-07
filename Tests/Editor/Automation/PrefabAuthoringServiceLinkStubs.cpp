@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
@@ -145,6 +146,33 @@ namespace
 		{
 			for (nlohmann::json& child : *children)
 				modified += SetStubAnimationMode(child, requestedMode);
+		}
+		return modified;
+	}
+
+	std::size_t SetStubAnimationDefaults(
+		nlohmann::json& object,
+		const std::optional<TerraEngine::UUID>& clipAssetId,
+		const std::optional<std::uint32_t>& startFrame)
+	{
+		if (!object.is_object()) return 0u;
+		std::size_t modified = 0u;
+		if (auto components = object.find("components");
+			components != object.end() && components->is_object())
+		{
+			if (auto animator = components->find("AnimatorComponent");
+				animator != components->end() && animator->is_object())
+			{
+				if (clipAssetId) (*animator)["defaultClipAssetId"] = TerraEngine::ToHexString(*clipAssetId);
+				if (startFrame) (*animator)["defaultClipStartFrame"] = *startFrame;
+				++modified;
+			}
+		}
+		if (auto children = object.find("children");
+			children != object.end() && children->is_array())
+		{
+			for (nlohmann::json& child : *children)
+				modified += SetStubAnimationDefaults(child, clipAssetId, startFrame);
 		}
 		return modified;
 	}
@@ -387,7 +415,10 @@ PrefabAuthoringService::Result PrefabAuthoringService::InstantiateMany(
 	if (request.count == 0u || request.count > kMaximumBulkPrefabInstances
 		|| !std::isfinite(request.spacing) || request.spacing < 0.0f
 		|| !std::isfinite(request.origin.x) || !std::isfinite(request.origin.y)
-		|| !std::isfinite(request.origin.z) || request.columns > request.count)
+		|| !std::isfinite(request.origin.z) || request.columns > request.count
+		|| request.defaultClipAssetIds.size() > kMaximumBulkPrefabInstances
+		|| (request.count > 1u && request.defaultClipStartFrameStep
+			> std::numeric_limits<std::uint32_t>::max() / (request.count - 1u)))
 	{
 		return {false, "validation", "Bulk prefab request is outside the supported range.",
 			{{"rolledBack", true}, {"maximumCount", kMaximumBulkPrefabInstances}}};
@@ -410,6 +441,7 @@ PrefabAuthoringService::Result PrefabAuthoringService::InstantiateMany(
 	std::size_t rootsPerInstance = 1u;
 	std::size_t totalObjectCount = request.count;
 	std::size_t animationModeOverrideCount = 0u;
+	std::size_t animationDefaultsOverrideCount = 0u;
 	const bool sceneWasDirty = SceneManager::Instance().IsActiveSceneDirty();
 	bool publicationActive = false;
 	auto rollback = [&]() {
@@ -436,6 +468,13 @@ PrefabAuthoringService::Result PrefabAuthoringService::InstantiateMany(
 		document["objects"] = nlohmann::json::array();
 		for (std::uint32_t instanceIndex = 0u; instanceIndex < request.count; ++instanceIndex)
 		{
+			const std::optional<TerraEngine::UUID> clipAssetId = request.defaultClipAssetIds.empty()
+				? std::nullopt
+				: std::optional<TerraEngine::UUID>(request.defaultClipAssetIds[
+					instanceIndex % request.defaultClipAssetIds.size()]);
+			const std::optional<std::uint32_t> startFrame = request.defaultClipStartFrameStep == 0u
+				? std::nullopt
+				: std::optional<std::uint32_t>(instanceIndex * request.defaultClipStartFrameStep);
 			for (std::size_t rootIndex = 0u; rootIndex < rootsPerInstance; ++rootIndex)
 			{
 				nlohmann::json root = prefab.serializedDocument["objects"][rootIndex];
@@ -449,6 +488,11 @@ PrefabAuthoringService::Result PrefabAuthoringService::InstantiateMany(
 				{
 					animationModeOverrideCount += SetStubAnimationMode(
 						root, *request.requestedAnimationMode);
+				}
+				if (clipAssetId || startFrame)
+				{
+					animationDefaultsOverrideCount += SetStubAnimationDefaults(
+						root, clipAssetId, startFrame);
 				}
 				document["objects"].push_back(std::move(root));
 			}
@@ -568,6 +612,9 @@ PrefabAuthoringService::Result PrefabAuthoringService::InstantiateMany(
 			? nlohmann::json(static_cast<std::uint8_t>(*request.requestedAnimationMode))
 			: nlohmann::json(nullptr)},
 		{"animationModeOverrideCount", animationModeOverrideCount},
+		{"animationDefaultsOverrideCount", animationDefaultsOverrideCount},
+		{"defaultClipVariantCount", request.defaultClipAssetIds.size()},
+		{"defaultClipStartFrameStep", request.defaultClipStartFrameStep},
 		{"visibilityBoundary", "prefab_bulk_publication"},
 		{"rolledBack", false}
 	}};

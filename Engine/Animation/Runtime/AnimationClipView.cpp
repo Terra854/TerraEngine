@@ -198,16 +198,10 @@ namespace TerraEngine::Animation {
 			&& residentSegments_ == validated.residentSegments_) {
 			return AnimationStatus::Ok;
 		}
-		try {
-			// reserve provides the strong exception guarantee. Once it succeeds, all
-			// following value and shared-ownership copies are non-throwing.
-			residentSegments_.reserve(validated.residentSegments_.size());
-		} catch(const std::bad_alloc&) {
-			return AnimationStatus::InternalError;
-		}
-		residentSegments_.assign(
-			validated.residentSegments_.begin(),
-			validated.residentSegments_.end());
+		// The validated view owns immutable copy-on-write storage. Sharing it avoids
+		// duplicating the same segment bitmap for every prefab instance; neither view
+		// can observe a later mutation because SharedCopyVector detaches on write.
+		residentSegments_ = validated.residentSegments_;
 		codec_ = validated.codec_;
 		streamedGeneration_ = validated.streamedGeneration_;
 		streamedPayloads_ = validated.streamedPayloads_;
@@ -220,16 +214,9 @@ namespace TerraEngine::Animation {
 		if(!validated.IsOpen()) {
 			return AnimationStatus::InvalidArgument;
 		}
-		try {
-			// Prove storage before changing the pointer pair. All assignments after this
-			// reserve are non-allocating, so a failed promotion leaves the old view intact.
-			residentSegments_.reserve(validated.residentSegments_.size());
-		} catch(const std::bad_alloc&) {
-			return AnimationStatus::InternalError;
-		}
-		residentSegments_.assign(
-			validated.residentSegments_.begin(),
-			validated.residentSegments_.end());
+		// A validated publication is immutable. Adopt the same copy-on-write bitmap
+		// instead of allocating and copying an identical vector for every animator.
+		residentSegments_ = validated.residentSegments_;
 		asset_ = validated.asset_;
 		referenceSkeleton_ = validated.referenceSkeleton_;
 		codec_ = validated.codec_;

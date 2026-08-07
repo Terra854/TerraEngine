@@ -250,15 +250,24 @@ else
 }
 
 $isAnimatedWorkload = $workload -in @('animated-hero', 'animated-crowd')
+$isAuthoredSceneWorkload = $workload -in @('existing-4000-animated', 'dense-animated-vg', 'mixed-animation')
+$isRawStaticWorkload = $workload -in @('repeated-static', 'ten-renderable')
+if($workload -eq 'heterogeneous-static')
+{
+	throw 'heterogeneous-static requires 4000 distinct material identities; no disposable material-corpus adapter is available.'
+}
 $animatedProjectProfile = $null
 $animatedWorkloadProfile = $null
+$rawStaticWorkloadProfile = $null
+$rawStaticScenarioProfile = $null
 $projectAnimatorCount = [UInt64]0
 $expectedAnimatorCount = [UInt64]0
+$capturedAnimatorCount = [UInt64]0
 $minimumUniqueDeformationDispatches = [UInt64]0
 $runtimePrefabInstanceCount = [UInt64]1
 $runtimePrefabSpacing = 0.0
 $animatedConfigurationReason = ''
-if($isAnimatedWorkload)
+if($isAnimatedWorkload -or $isAuthoredSceneWorkload -or $isRawStaticWorkload)
 {
 	$profilePath = Resolve-InputPath (
 		Get-EnvironmentOverride 'TERRA_VG_RUNTIME_ANIMATED_PROJECT_PROFILE' (
@@ -272,35 +281,109 @@ if($isAnimatedWorkload)
 	{
 		throw 'Animated workload profile must use schemaVersion 1.'
 	}
-	$profileMember = if($workload -eq 'animated-hero') { 'hero' } else { 'crowd' }
-	$animatedWorkloadProfile = Get-OptionalProperty $animatedProjectProfile $profileMember
-	if($null -eq $animatedWorkloadProfile)
+	if($isAnimatedWorkload -or $isAuthoredSceneWorkload)
 	{
-		throw "Animated workload profile omitted '$profileMember'."
-	}
-	$expectedAnimatorCount = Get-RequiredProfilePositiveInteger `
-		$animatedWorkloadProfile 'minimumAnimatorInstances'
-	$minimumUniqueDeformationDispatches = Get-RequiredProfilePositiveInteger `
-		$animatedWorkloadProfile 'minimumUniqueDeformationDispatches'
-	$runtimePrefabSpacing = [double](Get-OptionalProperty `
-		$animatedWorkloadProfile 'prefabSpacing')
-	$runtimeCameraPosition = @(
-		Get-OptionalProperty $animatedWorkloadProfile 'cameraPosition')
-	if($runtimeCameraPosition.Count -ne 3)
-	{
-		throw "Animated workload '$profileMember' requires exactly three cameraPosition values."
-	}
-	foreach($cameraCoordinate in $runtimeCameraPosition)
-	{
-		$cameraValue = [double]$cameraCoordinate
-		# Windows PowerShell uses .NET Framework, which predates
-		# Double.IsFinite. The two legacy predicates express the same check.
-		if([double]::IsNaN($cameraValue) -or
-			[double]::IsInfinity($cameraValue))
+		# Authored-scene workloads need their own scene path and thresholds. Only the
+		# disposable animated-crowd fixture reuses the generic crowd profile.
+		$profileMember = if($workload -eq 'animated-hero') { 'hero' } elseif($workload -eq 'animated-crowd') { 'crowd' } else { $workload }
+		$animatedWorkloadProfile = Get-OptionalProperty $animatedProjectProfile $profileMember
+		if($null -eq $animatedWorkloadProfile -and -not $isAuthoredSceneWorkload)
 		{
-			throw "Animated workload '$profileMember' contains a non-finite cameraPosition value."
+			throw "Animated workload profile omitted '$profileMember'."
+		}
+		if($isAuthoredSceneWorkload) { $expectedAnimatorCount = [UInt64](Get-OptionalProperty $animatedWorkloadProfile 'minimumAnimatorInstances') }
+		else { $expectedAnimatorCount = Get-RequiredProfilePositiveInteger `
+			$animatedWorkloadProfile 'minimumAnimatorInstances'
+		}
+		$minimumUniqueDeformationDispatches = Get-RequiredProfilePositiveInteger `
+			$animatedWorkloadProfile 'minimumUniqueDeformationDispatches'
+		$runtimePrefabSpacing = [double](Get-OptionalProperty `
+			$animatedWorkloadProfile 'prefabSpacing')
+		$runtimeCameraPosition = @(
+			Get-OptionalProperty $animatedWorkloadProfile 'cameraPosition')
+		if($runtimeCameraPosition.Count -ne 3)
+		{
+			throw "Animated workload '$profileMember' requires exactly three cameraPosition values."
+		}
+		foreach($cameraCoordinate in $runtimeCameraPosition)
+		{
+			$cameraValue = [double]$cameraCoordinate
+			# Windows PowerShell uses .NET Framework, which predates
+			# Double.IsFinite. The two legacy predicates express the same check.
+			if([double]::IsNaN($cameraValue) -or
+				[double]::IsInfinity($cameraValue))
+			{
+				throw "Animated workload '$profileMember' contains a non-finite cameraPosition value."
+			}
 		}
 	}
+	if($isRawStaticWorkload)
+	{
+		# Keep the raw direct fixture versioned beside the animated-project
+		# profiles so script defaults, workload metadata, and review notes cannot
+		# quietly drift to different mesh or material identities.
+		$rawStaticWorkloadProfile = Get-OptionalProperty $animatedProjectProfile 'raw-static'
+		if($null -eq $rawStaticWorkloadProfile)
+		{
+			throw "Animated workload profile omitted 'raw-static'."
+		}
+		foreach($requiredRawStaticField in @('asset', 'meshAssetId', 'materialAssetId'))
+		{
+			[void](Get-RequiredProfileString $rawStaticWorkloadProfile $requiredRawStaticField)
+		}
+		$rawStaticMaterialIds = @(
+			Get-OptionalProperty $rawStaticWorkloadProfile 'materialAssetIds' |
+				ForEach-Object { [string]$_ })
+		if($rawStaticMaterialIds.Count -ne 3)
+		{
+			throw "Animated workload profile 'raw-static' requires exactly three materialAssetIds."
+		}
+		if([double](Get-OptionalProperty $rawStaticWorkloadProfile 'rawInstanceScale') -le 0.0)
+		{
+			throw "Animated workload profile 'raw-static' requires a positive rawInstanceScale."
+		}
+		$rawStaticScenarioProfile = $rawStaticWorkloadProfile
+		if($workload -eq 'repeated-static')
+		{
+			$rawStaticScenarioProfile = Get-OptionalProperty `
+				$animatedProjectProfile 'repeated-static'
+			if($null -eq $rawStaticScenarioProfile)
+			{
+				throw "Animated workload profile omitted 'repeated-static'."
+			}
+			$rawStaticGridSpacing = [double](Get-OptionalProperty `
+				$rawStaticScenarioProfile 'gridSpacing')
+			if($rawStaticGridSpacing -le 0.0)
+			{
+				throw "Animated workload profile 'repeated-static' requires a positive gridSpacing."
+			}
+		}
+		foreach($cameraProfileField in @('cameraPosition', 'cameraTarget'))
+		{
+			$cameraProfileValue = @(Get-OptionalProperty `
+				$rawStaticScenarioProfile $cameraProfileField)
+			if($cameraProfileValue.Count -ne 3)
+			{
+				throw "Raw-static profile requires exactly three $cameraProfileField values."
+			}
+		}
+	}
+}
+if($isAuthoredSceneWorkload)
+{
+	# Authored-scene aliases measure the scene's existing population exactly.
+	# A zero transient count prevents the live harness from adding a validation
+	# prefab on top of the workload named by the manifest.
+	$runtimePrefabInstanceCount = [UInt64]0
+}
+if($isRawStaticWorkload)
+{
+	# The raw path creates transient MeshRenderComponents only; no Animator
+	# component or authored Scene.tescene write is involved. Its identities select
+	# Viking Room, a 3,828-triangle OBJ MeshImporter fixture with no generated
+	# virtual-geometry payload. The live capture must still prove the direct route
+	# and zero streaming; this profile never treats metadata as runtime evidence.
+	$runtimePrefabInstanceCount = if($workload -eq 'repeated-static') { [UInt64]4000 } else { [UInt64]10 }
 }
 
 $outputPath = Resolve-InputPath $outputArgument (Get-Location).Path
@@ -309,7 +392,7 @@ $artifactRoot = "$outputPath.artifacts"
 
 $editorDefault = Join-Path $installedRoot 'Editor/TerraEngine-Editor.exe'
 $projectDefault = Join-Path $installedRoot 'Tests/Fixtures/Animation/ImportValidation'
-if($isAnimatedWorkload)
+if($isAnimatedWorkload -or $isAuthoredSceneWorkload -or $isRawStaticWorkload)
 {
 	# Source-tree runs discover the user-provided project beside the repository.
 	# Installed trees cannot assume that layout, so callers retain the explicit
@@ -322,8 +405,15 @@ $editorPath = Resolve-InputPath (
 	Get-EnvironmentOverride 'TERRA_VG_RUNTIME_EDITOR' $editorDefault) $workingRoot
 $projectPath = Resolve-InputPath (
 	Get-EnvironmentOverride 'TERRA_VG_RUNTIME_PROJECT' $projectDefault) $workingRoot
-$assetDefault = 'Assets/Models/ImportHero.gltf'
-$prefabDefault = 'Assets/Models/ImportHero_Generated/ImportHero.teprefab'
+$assetDefault = if($isRawStaticWorkload)
+{
+	Get-RequiredProfileString $rawStaticWorkloadProfile 'asset'
+}
+else
+{
+	'Assets/Models/ImportedHero.gltf'
+}
+$prefabDefault = 'Assets/Models/ImportedHero_Generated/ImportedHero.teprefab'
 $prefabChildDefault = ''
 $prefabScaleDefault = '1'
 if($isAnimatedWorkload)
@@ -339,6 +429,19 @@ $prefabChild = Get-EnvironmentOverride 'TERRA_VG_RUNTIME_PREFAB_CHILD' $prefabCh
 $prefabScale = [double](Get-EnvironmentOverride 'TERRA_VG_RUNTIME_PREFAB_SCALE' $prefabScaleDefault)
 $meshAssetId = (Get-EnvironmentOverride 'TERRA_VG_RUNTIME_MESH_ID' '').Trim().ToLowerInvariant()
 $materialAssetId = (Get-EnvironmentOverride 'TERRA_VG_RUNTIME_MATERIAL_ID' '').Trim().ToLowerInvariant()
+$materialAssetIds = @((Get-EnvironmentOverride 'TERRA_VG_RUNTIME_MATERIAL_IDS' '') -split ',' | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ })
+$meshAssetId = if($isRawStaticWorkload -and [string]::IsNullOrWhiteSpace($meshAssetId)) { Get-RequiredProfileString $rawStaticWorkloadProfile 'meshAssetId' } else { $meshAssetId }
+$materialAssetId = if($isRawStaticWorkload -and [string]::IsNullOrWhiteSpace($materialAssetId)) { Get-RequiredProfileString $rawStaticWorkloadProfile 'materialAssetId' } else { $materialAssetId }
+if($isRawStaticWorkload -and $workload -eq 'ten-renderable' -and $materialAssetIds.Count -eq 0)
+{
+	# Assign only in the three-material case. Returning an empty array through a
+	# PowerShell `if` expression emits no pipeline object and becomes `$null`,
+	# which would make the repeated-static path fail before launching the editor.
+	$materialAssetIds = @($rawStaticMaterialIds | ForEach-Object {
+		$_.Trim().ToLowerInvariant()
+	})
+}
+if($materialAssetIds.Count -gt 0) { $materialAssetId = '' }
 $useRawMesh = -not [string]::IsNullOrWhiteSpace($meshAssetId)
 if($useRawMesh -and $meshAssetId -notmatch '^[0-9a-f]{32}$')
 {
@@ -368,15 +471,23 @@ if(-not (Test-Path -LiteralPath $projectPath -PathType Container))
 {
 	throw "Runtime adapter project is missing: $projectPath"
 }
-if($isAnimatedWorkload)
+if($isAnimatedWorkload -or $isAuthoredSceneWorkload)
 {
-	$startupScene = Join-Path $projectPath (
-		Get-RequiredProfileString $animatedProjectProfile 'startupScene')
+	$startupSceneRelative = if($isAuthoredSceneWorkload) {
+		Get-RequiredProfileString $animatedWorkloadProfile 'scene'
+	} else {
+		Get-RequiredProfileString $animatedProjectProfile 'startupScene'
+	}
+	$startupScene = Join-Path $projectPath $startupSceneRelative
 	if(-not (Test-Path -LiteralPath $startupScene -PathType Leaf))
 	{
 		throw "Animated-project startup scene is missing: $startupScene"
 	}
-	foreach($requiredAsset in @($asset, $prefab))
+	# Authored-scene captures deliberately do not instantiate an asset or prefab.
+	# Checking the raw-static defaults here would reject a valid authored scene
+	# before the live harness has a chance to select and measure it.
+	$requiredRuntimeAssets = if($isAnimatedWorkload) { @($asset, $prefab) } else { @() }
+	foreach($requiredAsset in $requiredRuntimeAssets)
 	{
 		if(-not (Test-Path -LiteralPath (Join-Path $projectPath $requiredAsset) -PathType Leaf))
 		{
@@ -385,8 +496,11 @@ if($isAnimatedWorkload)
 	}
 	$scene = Get-Content -Raw -LiteralPath $startupScene | ConvertFrom-Json
 	$projectAnimatorCount = Get-SceneComponentCount (Get-OptionalProperty $scene 'objects') 'AnimatorComponent'
-	$minimumProjectAnimatorCount = Get-RequiredProfilePositiveInteger `
-		$animatedProjectProfile 'minimumProjectAnimatorCount'
+	$minimumProjectAnimatorCount = if($isAuthoredSceneWorkload) {
+		$expectedAnimatorCount
+	} else {
+		Get-RequiredProfilePositiveInteger $animatedProjectProfile 'minimumProjectAnimatorCount'
+	}
 	if($projectAnimatorCount -lt $minimumProjectAnimatorCount)
 	{
 		throw "Animated-project scene exposes $projectAnimatorCount animators; profile requires at least $minimumProjectAnimatorCount."
@@ -395,8 +509,15 @@ if($isAnimatedWorkload)
 	# assigned its own stable animation-instance identity by the engine, so a
 	# crowd capture measures distinct deformation work without modifying or
 	# saving the user's project scene.
-	$runtimePrefabInstanceCount = $expectedAnimatorCount
-	$capturedAnimatorCount = $runtimePrefabInstanceCount
+	if($isAnimatedWorkload)
+	{
+		$runtimePrefabInstanceCount = $expectedAnimatorCount
+		$capturedAnimatorCount = $runtimePrefabInstanceCount
+	}
+	else
+	{
+		$capturedAnimatorCount = $projectAnimatorCount
+	}
 	if($capturedAnimatorCount -lt $expectedAnimatorCount)
 	{
 		$animatedConfigurationReason = "Animated workload requires $expectedAnimatorCount animator instances, but the prepared live scene exposes only $capturedAnimatorCount."
@@ -426,19 +547,42 @@ $liveArguments = @{
 	PrefabName = $prefabName
 	PrefabChildObject = $prefabChild
 	PrefabScale = $prefabScale
+	# Viking Room has reviewable one-unit bounds, so use the unscaled source
+	# geometry rather than altering its transient representation for the camera.
+	RawMeshInstanceScale = if($isRawStaticWorkload) {
+		[double](Get-OptionalProperty $rawStaticWorkloadProfile 'rawInstanceScale')
+	} else { 1.0 }
+	RawMeshGridSpacing = if($isRawStaticWorkload -and $workload -eq 'repeated-static') {
+		[double](Get-OptionalProperty $rawStaticScenarioProfile 'gridSpacing')
+	} else { 1.0 }
 	PrefabInstanceCount = [int]$runtimePrefabInstanceCount
 	PrefabSpacing = $runtimePrefabSpacing
 	MeshAssetId = $meshAssetId
 	MaterialAssetId = $materialAssetId
+	MaterialAssetIds = $materialAssetIds
 	StreamingSettleMilliseconds = $streamingSettleMilliseconds
 	McpPort = $mcpPort
 	StartupTimeoutSeconds = 90
+}
+if($isAuthoredSceneWorkload)
+{
+	$liveArguments['Asset'] = ''
+	$liveArguments['Prefab'] = ''
+	$sceneProfile = Get-OptionalProperty $animatedProjectProfile $workload
+	$liveArguments['ScenePath'] = [string](Get-RequiredProfileString $sceneProfile 'scene')
+	$liveArguments['ValidationCameraPosition'] = @([double]$runtimeCameraPosition[0], [double]$runtimeCameraPosition[1], [double]$runtimeCameraPosition[2])
+	$liveArguments['DiagnosticsViewType'] = 'Scene'
+	$liveArguments['ExpectAnimatedChange'] = $true
 }
 if($useRawMesh)
 {
 	# Raw mesh samples always use a disposable scene. This keeps the benchmark
 	# isolated from authored hierarchies while still exercising the installed
 	# asset database, renderer, streaming workers, and Vulkan backend.
+	# The mesh/material IDs are applied directly to the transient components.
+	# Do not inspect a separate virtual-geometry asset: direct workloads have no
+	# such asset and their typed route/counter evidence is the authority instead.
+	$liveArguments['Asset'] = ''
 	$liveArguments['CreateValidationScene'] = $true
 	$liveArguments['CleanupValidationScene'] = $true
 	$liveArguments['ValidationScenePath'] =
@@ -454,7 +598,10 @@ if($useRawMesh)
 	}
 	else
 	{
-		$liveArguments['ValidationCameraPosition'] = @(0.0, 0.3, 3.0)
+		$liveArguments['ValidationCameraPosition'] = @(
+			Get-OptionalProperty $rawStaticScenarioProfile 'cameraPosition')
+		$liveArguments['ValidationCameraTarget'] = @(
+			Get-OptionalProperty $rawStaticScenarioProfile 'cameraTarget')
 	}
 }
 
@@ -463,6 +610,8 @@ if($useRawMesh)
 # changing the project or persisting an editor preference.
 $representationRoute = switch($workload)
 {
+	'repeated-static' { 'direct' }
+	'ten-renderable' { 'direct' }
 	'low-poly-unique-direct' { 'direct' }
 	'low-poly-repeated-direct' { 'direct' }
 	'low-poly-forced-virtual-geometry' { 'virtual-hardware' }
@@ -539,11 +688,48 @@ if($useRawMesh)
 		Get-OptionalProperty $instantiatedGeometry 'objectNames')
 	$publishedMeshId = [string](Get-OptionalProperty $instantiatedGeometry 'meshAssetId')
 	$publishedMaterialId = [string](Get-OptionalProperty $instantiatedGeometry 'materialAssetId')
+	# PowerShell represents an empty JSON array as an empty custom object in
+	# some hosts. Normalize through strings so one-material captures retain an
+	# intentionally empty array rather than acquiring a phantom identity.
+	$publishedMaterialIds = @(
+		(Get-OptionalProperty $instantiatedGeometry 'materialAssetIds') |
+		ForEach-Object { [string]$_ } |
+		Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+	$expectedMaterialIdentitySet = @($materialAssetIds | Sort-Object -Unique)
+	$publishedMaterialIdentitySet = @($publishedMaterialIds | Sort-Object -Unique)
+	$materialEvidenceMatches = if($expectedMaterialIdentitySet.Count -gt 0)
+	{
+		($publishedMaterialIdentitySet -join ',') -eq
+			($expectedMaterialIdentitySet -join ',')
+	}
+	else
+	{
+		$publishedMaterialId -eq $materialAssetId
+	}
+	# Multi-instance raw workloads intentionally suffix every generated name.
+	# Validate the exact count plus deterministic first/last names rather than
+	# looking for an unsuffixed prefix that is present only in one-instance runs.
+	$expectedFirstObjectName = if($runtimePrefabInstanceCount -gt 1) {
+		"$prefabName 1"
+	} else {
+		$prefabName
+	}
+	$expectedLastObjectName = if($runtimePrefabInstanceCount -gt 1) {
+		"$prefabName $runtimePrefabInstanceCount"
+	} else {
+		$prefabName
+	}
+	$objectNameEvidenceMatches =
+		$publishedObjectNames.Count -eq $runtimePrefabInstanceCount -and
+		$publishedObjectNames[0] -eq $expectedFirstObjectName -and
+		$publishedObjectNames[-1] -eq $expectedLastObjectName -and
+		@($publishedObjectNames | Sort-Object -Unique).Count -eq
+			$runtimePrefabInstanceCount
 	$rawGeometryEvidenceValid =
 		[string](Get-OptionalProperty $instantiatedGeometry 'source') -eq 'raw-mesh' -and
 		$publishedMeshId -eq $meshAssetId -and
-		($publishedMaterialId -eq $materialAssetId) -and
-		$publishedObjectNames -contains $prefabName
+		$materialEvidenceMatches -and
+		$objectNameEvidenceMatches
 	if($rawPressureGeometryRequired)
 	{
 		# This confirms the scale operation addressed the dynamically generated
@@ -558,25 +744,64 @@ if($useRawMesh)
 
 $capabilityEnvelope = Get-OptionalProperty $summary 'postCaptureCapabilityEvidence'
 $capabilityData = Get-OptionalProperty $capabilityEnvelope 'data'
-$measurements = @(
-	(Get-OptionalProperty $capabilityData 'measurements') |
-		Where-Object {
-			[string](Get-OptionalProperty $_ 'availability') -eq 'measured' -and
-			-not [string]::IsNullOrWhiteSpace(
-				[string](Get-OptionalProperty $_ 'executionEvidenceId')) -and
-			[double](Get-OptionalProperty $_ 'durationNanoseconds') -gt 0.0
-		})
-$validatedStages = @(
-	(Get-OptionalProperty $capabilityData 'capabilities') |
-		Where-Object {
-			[bool](Get-OptionalProperty $_ 'executed') -and
-			[bool](Get-OptionalProperty $_ 'validated')
-		} |
-		ForEach-Object { [string](Get-OptionalProperty $_ 'stage') })
+# The live harness takes repeated next-frame presents and reads the capability
+# receipt after each one. Preserve a stage row for each unique backend
+# execution/stage pair; a final snapshot may repeat the last pair but cannot
+# manufacture a sample or suppress a different stage from that execution.
+$capabilityEvidenceEnvelopes = @(
+	(Get-OptionalProperty $summary 'postPresentCapabilityEvidence')) + @(
+	$capabilityEnvelope)
+$measurements = [Collections.Generic.List[object]]::new()
+$measuredExecutionStageKeys = [Collections.Generic.HashSet[string]]::new(
+	[StringComparer]::Ordinal)
+$validatedStages = [Collections.Generic.HashSet[string]]::new(
+	[StringComparer]::Ordinal)
+foreach($evidenceEnvelope in $capabilityEvidenceEnvelopes)
+{
+	$evidenceData = Get-OptionalProperty $evidenceEnvelope 'data'
+	foreach($measurement in @(Get-OptionalProperty $evidenceData 'measurements'))
+	{
+		$executionEvidenceId = [string](
+			Get-OptionalProperty $measurement 'executionEvidenceId')
+		$measurementStage = [string](Get-OptionalProperty $measurement 'stage')
+		$measurementEvidenceKey = "$executionEvidenceId|$measurementStage"
+		if([string](Get-OptionalProperty $measurement 'availability') -eq 'measured' -and
+			-not [string]::IsNullOrWhiteSpace($executionEvidenceId) -and
+			[double](Get-OptionalProperty $measurement 'durationNanoseconds') -gt 0.0 -and
+			$measuredExecutionStageKeys.Add($measurementEvidenceKey))
+		{
+			$measurements.Add($measurement)
+		}
+	}
+	foreach($capability in @(Get-OptionalProperty $evidenceData 'capabilities'))
+	{
+		if([bool](Get-OptionalProperty $capability 'executed') -and
+			[bool](Get-OptionalProperty $capability 'validated'))
+		{
+			$null = $validatedStages.Add([string](Get-OptionalProperty $capability 'stage'))
+		}
+	}
+}
+$measurements = @($measurements)
+$validatedStages = @($validatedStages)
+$postPresentCaptures = @(
+	Get-OptionalProperty $summary 'postPresentCaptures')
+$postPresentFrameIds = [Collections.Generic.HashSet[UInt64]]::new()
+$postPresentFramesValid = $postPresentCaptures.Count -ge 6
+foreach($postPresentCapture in $postPresentCaptures)
+{
+	$frameId = [UInt64](Get-OptionalProperty $postPresentCapture 'frameId')
+	if($frameId -eq 0 -or -not $postPresentFrameIds.Add($frameId))
+	{
+		$postPresentFramesValid = $false
+	}
+}
 $directRouteWorkload = $workload -in @(
 	'low-poly-unique-direct',
 	'low-poly-repeated-direct',
-	'low-poly-automatic-routing')
+	'low-poly-automatic-routing',
+	'repeated-static',
+	'ten-renderable')
 $directRouteMeasured =
 	[string](Get-OptionalProperty $summary 'route') -eq 'direct-indexed'
 $requiredStages = if($directRouteWorkload)
@@ -634,6 +859,29 @@ $captureFilesValid = $captureRows.Count -eq 2 -and @(
 		-not (Test-Path -LiteralPath (
 			[string](Get-OptionalProperty $_ 'path')) -PathType Leaf)
 	}).Count -eq 0
+# The live harness publishes sampled PNG metrics for both graded captures.
+# Require visible content from each frame so a successful file write, static
+# byte identity, or nonzero GPU timestamp can never accept an all-black image.
+$minimumSampledNonBlackPixels = [UInt64]8
+$minimumMeanLuminance = 2.0
+$finalCaptureVisualContentValid = $captureFilesValid
+foreach($captureRow in $captureRows)
+{
+	$metrics = Get-OptionalProperty $captureRow 'metrics'
+	$metricSampleCount = [UInt64](Get-OptionalProperty $metrics 'samples')
+	$metricNonBlackRatio = [double](Get-OptionalProperty $metrics 'nonBlackRatio')
+	$metricNonBlackPixels = [UInt64][Math]::Floor(
+		$metricSampleCount * $metricNonBlackRatio)
+	$metricMeanLuminance = [double](Get-OptionalProperty $metrics 'meanLuminance')
+	if($null -eq $metrics -or
+		[bool](Get-OptionalProperty $metrics 'blackFrame') -or
+		$metricSampleCount -eq 0 -or
+		$metricNonBlackPixels -lt $minimumSampledNonBlackPixels -or
+		$metricMeanLuminance -le $minimumMeanLuminance)
+	{
+		$finalCaptureVisualContentValid = $false
+	}
+}
 $streamingActivityValid = $true
 if($workload -eq 'page-residency-pressure')
 {
@@ -656,12 +904,24 @@ $pageEvidence.counters = $streamingCounters
 $pageEvidence.activityValid = $streamingActivityValid
 $animationActivityValid = $true
 $observedUniqueDeformationDispatches = [UInt64]0
+$perViewUniqueDeformationDispatches = [UInt64]0
+$completedBackendRecordedDispatches = [UInt64]0
+$deformationExecutionSource = 'not-applicable'
+$completedBackendGenerationComplete = $false
 $observedAnimationOwnerMappings = [UInt64]0
 $observedAnimationWorkPackets = [UInt64]0
 $observedAnimatedRenderables = [UInt64]0
+$observedActiveAnimators = [UInt64]0
+$observedEvaluatedAnimators = [UInt64]0
+$observedCpuFallbackAnimators = [UInt64]0
+$observedDegradedAnimators = [UInt64]0
+$observedAnimationFallbacks = [UInt64]0
+$observedRejectedAnimationBatches = [UInt64]0
+$requiredGpuOwnedAnimators = [UInt64]0
 $ownerExecutionEvidenceValid = $true
+$animationAccountingValid = $true
 $deformationDiagnosticsValid = $true
-if($workload -in @('animated-hero', 'animated-crowd'))
+if($isAnimatedWorkload -or $isAuthoredSceneWorkload)
 {
 	$postCaptureAssetEnvelope = Get-OptionalProperty $summary 'postCaptureAsset'
 	$postCaptureAssetData = Get-OptionalProperty $postCaptureAssetEnvelope 'data'
@@ -669,12 +929,15 @@ if($workload -in @('animated-hero', 'animated-crowd'))
 		$postCaptureAssetData) 'runtimeDiagnostics'
 	$runtimeViews = @(
 		Get-OptionalProperty $runtimeDiagnostics 'views')
+	# A renderer may omit per-view deformation counters while still publishing a
+	# completed backend receipt. Exclude those null view records so they are not
+	# misclassified as invalid deformation evidence before the receipt fallback.
 	$animatedRows = @($runtimeViews | ForEach-Object {
 		Get-OptionalProperty $_ 'animatedVirtualGeometry'
-	})
+	} | Where-Object { $null -ne $_ })
 	# Project numeric values before summing. Measure-Object -Property treats a
 	# script block as a literal property name and silently reported zero.
-	$observedUniqueDeformationDispatches = [UInt64](($animatedRows |
+	$perViewUniqueDeformationDispatches = [UInt64](($animatedRows |
 		ForEach-Object {
 			[UInt64](Get-OptionalProperty $_ 'uniqueDispatches')
 		} |
@@ -683,19 +946,58 @@ if($workload -in @('animated-hero', 'animated-crowd'))
 	$animationDiagnosticsData = Get-OptionalProperty $animationDiagnosticsEnvelope 'data'
 	$gpuPresentation = Get-OptionalProperty $animationDiagnosticsData 'gpuPresentation'
 	$renderableBindings = Get-OptionalProperty $animationDiagnosticsData 'renderableBindings'
+	$animationSummary = Get-OptionalProperty $animationDiagnosticsData 'summary'
+	$animationCounters = Get-OptionalProperty $animationSummary 'counters'
+	$gpuBackendExecution = Get-OptionalProperty $animationDiagnosticsData 'gpuBackendExecution'
+	$latestCompletedBackendExecution = Get-OptionalProperty $gpuBackendExecution 'latestCompleted'
 	$observedAnimationOwnerMappings =
 		[UInt64](Get-OptionalProperty $gpuPresentation 'ownerMappingCount')
 	$observedAnimationWorkPackets =
 		[UInt64](Get-OptionalProperty $gpuPresentation 'workPacketCount')
 	$observedAnimatedRenderables =
 		[UInt64](Get-OptionalProperty $renderableBindings 'totalAnimatedRenderables')
+	$observedActiveAnimators = [UInt64](Get-OptionalProperty $animationCounters 'activeAnimators')
+	$observedEvaluatedAnimators = [UInt64](Get-OptionalProperty $animationCounters 'evaluatedAnimators')
+	$observedCpuFallbackAnimators = [UInt64](Get-OptionalProperty $animationCounters 'cpuFallbackAnimators')
+	$observedDegradedAnimators = [UInt64](Get-OptionalProperty $animationCounters 'degradedAnimators')
+	$observedAnimationFallbacks = [UInt64](Get-OptionalProperty $animationCounters 'fallbackCount')
+	$observedRejectedAnimationBatches = [UInt64](Get-OptionalProperty $animationCounters 'rejectedBatches')
+	$completedBackendRecordedDispatches = [UInt64](Get-OptionalProperty `
+		$latestCompletedBackendExecution 'recordedDispatchCount')
+	# A completed receipt must identify a real renderer generation and submission.
+	# Planned/submitted work is deliberately insufficient because it may never run.
+	$completedBackendGenerationComplete =
+		[bool](Get-OptionalProperty $gpuBackendExecution 'completed') -and
+		[UInt64](Get-OptionalProperty $latestCompletedBackendExecution 'frameId') -gt 0 -and
+		[UInt64](Get-OptionalProperty $latestCompletedBackendExecution 'planGeneration') -gt 0 -and
+		[UInt64](Get-OptionalProperty $latestCompletedBackendExecution 'rendererGeneration') -gt 0 -and
+		[UInt64](Get-OptionalProperty $latestCompletedBackendExecution 'submissionSerial') -gt 0
+	# CPU fallback is explicit runtime accounting, not an excuse to lower the
+	# workload threshold. Require enough GPU-owned entries after subtracting only
+	# the reported CPU fallback population from both active and evaluated totals.
+	$cpuFallbackWithinTotals = $observedCpuFallbackAnimators -le $observedActiveAnimators -and
+		$observedCpuFallbackAnimators -le $observedEvaluatedAnimators
+	if($cpuFallbackWithinTotals)
+	{
+		$requiredGpuOwnedAnimators = [Math]::Max(
+			$observedActiveAnimators - $observedCpuFallbackAnimators,
+			$observedEvaluatedAnimators - $observedCpuFallbackAnimators)
+	}
 	# Requested clone counts are not execution evidence. Bind acceptance to the
-	# immutable animation presentation's owner/work counts and the renderer's
-	# independently published deformation dispatch count.
+	# immutable animation presentation, require complete total coverage, and keep
+	# degradation, unreported fallback, and rejected publication paths at zero.
 	$ownerExecutionEvidenceValid =
-		$observedAnimationOwnerMappings -ge $expectedAnimatorCount -and
-		$observedAnimationWorkPackets -ge $expectedAnimatorCount -and
+		$observedAnimationOwnerMappings -ge $requiredGpuOwnedAnimators -and
+		$observedAnimationWorkPackets -ge $requiredGpuOwnedAnimators -and
 		$observedAnimatedRenderables -ge $expectedAnimatorCount
+	$animationAccountingValid = $cpuFallbackWithinTotals -and
+		$observedActiveAnimators -ge $expectedAnimatorCount -and
+		$observedEvaluatedAnimators -ge $expectedAnimatorCount -and
+		$observedCpuFallbackAnimators + $observedAnimationOwnerMappings -ge $expectedAnimatorCount -and
+		$observedCpuFallbackAnimators + $observedAnimationWorkPackets -ge $expectedAnimatorCount -and
+		$observedDegradedAnimators -eq 0 -and
+		$observedAnimationFallbacks -eq 0 -and
+		$observedRejectedAnimationBatches -eq 0
 	# Deformation is renderer-neutral compute work and may not own a distinct
 	# Vulkan timestamp query. Validate it from the immutable per-view plan:
 	# accepted shader contract, dynamic bounds, no fallback, and actual work.
@@ -705,11 +1007,21 @@ if($workload -in @('animated-hero', 'animated-crowd'))
 		-not ([string](Get-OptionalProperty $_ 'boundsSource')).StartsWith(
 			'Planned', [StringComparison]::Ordinal)
 	})
-	$deformationDiagnosticsValid =
-		$animatedRows.Count -gt 0 -and
-		$invalidDeformationRows.Count -eq 0 -and
-		$observedUniqueDeformationDispatches -ge
-			$minimumUniqueDeformationDispatches
+	if($perViewUniqueDeformationDispatches -gt 0)
+	{
+		$observedUniqueDeformationDispatches = $perViewUniqueDeformationDispatches
+		$deformationExecutionSource = 'renderer-per-view-uniqueDispatches'
+		$deformationDiagnosticsValid = $invalidDeformationRows.Count -eq 0 -and
+			$perViewUniqueDeformationDispatches -ge $minimumUniqueDeformationDispatches
+	}
+	else
+	{
+		$observedUniqueDeformationDispatches = $completedBackendRecordedDispatches
+		$deformationExecutionSource = 'completed-backend-recordedDispatchCount'
+		$deformationDiagnosticsValid = $invalidDeformationRows.Count -eq 0 -and
+			$completedBackendGenerationComplete -and
+			$completedBackendRecordedDispatches -ge $minimumUniqueDeformationDispatches
+	}
 	if($deformationDiagnosticsValid -and
 		$validatedStages -notcontains 'deformation')
 	{
@@ -717,10 +1029,11 @@ if($workload -in @('animated-hero', 'animated-crowd'))
 	}
 	$animationActivityValid = [string]::IsNullOrWhiteSpace($animatedConfigurationReason) -and
 		$ownerExecutionEvidenceValid -and
+		$animationAccountingValid -and
 		$validatedStages -contains 'deformation' -and
 		$deformationDiagnosticsValid
 }
-$frameIdentityValid = if($isAnimatedWorkload)
+$frameIdentityValid = if($isAnimatedWorkload -or $isAuthoredSceneWorkload)
 {
 	-not [bool](Get-OptionalProperty $summary 'unchangedByteIdentity')
 }
@@ -745,10 +1058,13 @@ else
 $boundedCounters = $frameIdentityValid -and
 	$routeExecutionValid -and
 	$measurements.Count -gt 0 -and
+	$postPresentFramesValid -and
 	$missingStages.Count -eq 0 -and
 	$validationErrors.Count -eq 0 -and
 	$captureFilesValid -and
+	$finalCaptureVisualContentValid -and
 	$streamingActivityValid -and
+	$streamingCounters.rejectedPublications -eq 0 -and
 	$animationActivityValid -and
 	$rawGeometryEvidenceValid -and
 	[bool](Get-OptionalProperty $statsEnvelope 'ok')
@@ -788,13 +1104,25 @@ else
 	$null
 }
 
-$identityAssetFile = if($useRawMesh)
+$identityAssetFile = if($isAuthoredSceneWorkload)
+{
+	# Authored-scene workloads deliberately have no disposable prefab. Bind the
+	# benchmark identity to the exact .tescene bytes already validated and opened
+	# by the live harness, rather than emitting an invented unavailable token.
+	$startupScene
+}
+elseif($useRawMesh)
 {
 	Join-Path $projectPath $asset
 }
 else
 {
 	Join-Path $projectPath $prefab
+}
+$identityAssetHash = Get-FileSha256OrUnavailable $identityAssetFile
+if($isAuthoredSceneWorkload -and $identityAssetHash -notmatch '^[0-9a-f]{64}$')
+{
+	throw "Authored-scene identity must be the SHA-256 of the validated scene file: $identityAssetFile"
 }
 $shaderDirectory = Join-Path $installedRoot 'Editor/Shaders/VirtualGeometry'
 $capture = [ordered]@{
@@ -814,7 +1142,7 @@ $capture = [ordered]@{
 			"installed-tree|" + (Get-FileSha256OrUnavailable $editorPath))
 		executableHash = Get-FileSha256OrUnavailable $editorPath
 		shaderHash = Get-DirectoryInventoryHash $shaderDirectory
-		assetHash = Get-FileSha256OrUnavailable $identityAssetFile
+		assetHash = $identityAssetHash
 		buildRecipeHash = Get-Sha256Text (
 			"$workload|$asset|$prefab|$prefabScale|$meshAssetId|$materialAssetId")
 	}
@@ -860,6 +1188,10 @@ $capture = [ordered]@{
 			{
 				"Missing validated stages: $($missingStages -join ', ')"
 			}
+			if(-not $postPresentFramesValid)
+			{
+				'Post-present sampling did not publish at least six distinct nonzero frame IDs.'
+			}
 			if($validationErrors.Count -gt 0)
 			{
 				'Vulkan validation or device-loss diagnostics were present.'
@@ -867,6 +1199,10 @@ $capture = [ordered]@{
 			if(-not $captureFilesValid)
 			{
 				'Live PNG capture artifacts were incomplete.'
+			}
+			if(-not $finalCaptureVisualContentValid)
+			{
+				'Live PNG captures were black or lacked meaningful sampled luminance.'
 			}
 			if(-not $streamingActivityValid)
 			{
@@ -884,11 +1220,15 @@ $capture = [ordered]@{
 				}
 				elseif(-not $ownerExecutionEvidenceValid)
 				{
-					"Animated workload requires $expectedAnimatorCount published owner mappings, work packets, and renderables; observed $observedAnimationOwnerMappings/$observedAnimationWorkPackets/$observedAnimatedRenderables."
+					"Animated workload requires $requiredGpuOwnedAnimators GPU-owned mappings/work packets after explicit CPU fallback accounting; observed $observedAnimationOwnerMappings/$observedAnimationWorkPackets with $observedAnimatedRenderables renderables."
+				}
+				elseif(-not $animationAccountingValid)
+				{
+					"Animated workload accounting rejected active/evaluated/CPU-fallback coverage or observed degradation, fallback, or rejected batches."
 				}
 				else
 				{
-					"Animated workload requires $minimumUniqueDeformationDispatches validated unique deformation dispatches."
+					"Animated workload requires $minimumUniqueDeformationDispatches validated deformation executions from $deformationExecutionSource."
 				}
 			}
 		)
@@ -910,11 +1250,15 @@ $capture = [ordered]@{
 	}
 	visibilityAndShading = [ordered]@{
 		visualGatePassed = $captureFilesValid -and
+			$finalCaptureVisualContentValid -and
 			$frameIdentityValid -and
 			$validationErrors.Count -eq 0
+		contentMetricsPassed = $finalCaptureVisualContentValid
+		minimumSampledNonBlackPixels = $minimumSampledNonBlackPixels
+		minimumMeanLuminance = $minimumMeanLuminance
 		unchangedByteIdentity = [bool](
 			Get-OptionalProperty $summary 'unchangedByteIdentity')
-		expectedFrameIdentity = if($isAnimatedWorkload) {
+		expectedFrameIdentity = if($isAnimatedWorkload -or $isAuthoredSceneWorkload) {
 			'animated-change'
 		} else {
 			'static-repeat'
@@ -924,14 +1268,28 @@ $capture = [ordered]@{
 	deformation = [ordered]@{
 		projectAnimatorCount = $projectAnimatorCount
 		runtimePrefabInstanceCount = $runtimePrefabInstanceCount
-		capturedAnimatorCount = $runtimePrefabInstanceCount
+		capturedAnimatorCount = $capturedAnimatorCount
 		requiredAnimatorInstances = $expectedAnimatorCount
 		minimumUniqueDeformationDispatches = $minimumUniqueDeformationDispatches
 		observedUniqueDeformationDispatches =
 			$observedUniqueDeformationDispatches
+		perViewUniqueDeformationDispatches =
+			$perViewUniqueDeformationDispatches
+		completedBackendRecordedDispatches =
+			$completedBackendRecordedDispatches
+		deformationExecutionSource = $deformationExecutionSource
+		completedBackendGenerationComplete = $completedBackendGenerationComplete
 		observedAnimationOwnerMappings = $observedAnimationOwnerMappings
 		observedAnimationWorkPackets = $observedAnimationWorkPackets
 		observedAnimatedRenderables = $observedAnimatedRenderables
+		observedActiveAnimators = $observedActiveAnimators
+		observedEvaluatedAnimators = $observedEvaluatedAnimators
+		observedCpuFallbackAnimators = $observedCpuFallbackAnimators
+		requiredGpuOwnedAnimators = $requiredGpuOwnedAnimators
+		observedDegradedAnimators = $observedDegradedAnimators
+		observedAnimationFallbacks = $observedAnimationFallbacks
+		observedRejectedAnimationBatches = $observedRejectedAnimationBatches
+		accountingValidated = $animationAccountingValid
 		diagnosticsValidated = $deformationDiagnosticsValid
 		validationSource = 'immutable-renderer-deformation-plan'
 		configurationReason = $animatedConfigurationReason

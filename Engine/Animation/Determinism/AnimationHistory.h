@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <mutex>
+#include <span>
 #include <unordered_map>
 #include <vector>
 
@@ -72,6 +73,9 @@ namespace TerraEngine::Animation {
 			AnimationRollbackSnapshot& output) const noexcept;
 
 		void Clear(AnimatorInstanceHandle animator) noexcept;
+		// Bulk retirement increments the history revision once after one protected map
+		// pass, avoiding a mutex round trip for every member of a rebound crowd.
+		void ClearMany(std::span<const AnimatorInstanceHandle> animators) noexcept;
 		void ClearAll() noexcept;
 
 		[[nodiscard]] std::uint64_t Revision() const noexcept

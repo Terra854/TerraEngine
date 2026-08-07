@@ -145,6 +145,12 @@ namespace TerraEngine::Scheduling {
 		JobGraphCancellationRequest cancellation;
 		std::atomic<bool> cancellationRequested = false;
 		JobGraphSummary latestSummary;
+		// Topology validation is immutable until a node or edge is added. Frame
+		// callback replacement deliberately leaves this cache intact.
+		std::vector<JobGraphDependencyEdge> validatedEdges;
+		std::vector<JobGraphDiagnostic> validatedDiagnostics;
+		bool validatedTopologyValid = false;
+		bool topologyDirty = true;
 
 		DependencyHandle MakeHandle(JobGraphNodeKind kind, const std::string& nodeLabel)
 		{
@@ -639,10 +645,31 @@ namespace TerraEngine::Scheduling {
 		impl->cancellation = {};
 		impl->cancellationRequested.store(false, std::memory_order_release);
 		impl->latestSummary = {};
+		impl->validatedEdges.clear();
+		impl->validatedDiagnostics.clear();
+		impl->validatedTopologyValid = false;
+		impl->topologyDirty = true;
+	}
+
+	void JobGraph::Rearm(std::string graphId)
+	{
+		impl->graphId = std::move(graphId);
+		impl->cancellation = {};
+		impl->cancellationRequested.store(false, std::memory_order_release);
+		impl->latestSummary = {};
+		for (Impl::Node& node : impl->nodes)
+		{
+			node.state = JobGraphNodeState::Pending;
+			node.dispatchCount = 0u;
+			node.queueDurationNs = 0u;
+			node.runDurationNs = 0u;
+			node.coordinatorWaitDurationNs = 0u;
+		}
 	}
 
 	DependencyHandle JobGraph::AddJob(JobGraphJobDeclaration declaration)
 	{
+		impl->topologyDirty = true;
 		Impl::Node node;
 		node.kind = JobGraphNodeKind::Job;
 		node.name = NormalizeLabel(declaration.name, "Job " + std::to_string(impl->nextHandleId));
@@ -671,6 +698,24 @@ namespace TerraEngine::Scheduling {
 		return handle;
 	}
 
+	bool JobGraph::UpdateJobWork(
+		const DependencyHandle& handle,
+		JobGraphWork work,
+		std::string profilingLabel)
+	{
+		Impl::Node* node = impl->FindNode(handle);
+		if (node == nullptr || node->kind != JobGraphNodeKind::Job)
+		{
+			return false;
+		}
+		node->work = std::move(work);
+		if (!profilingLabel.empty())
+		{
+			node->profilingLabel = std::move(profilingLabel);
+		}
+		return true;
+	}
+
 	std::vector<DependencyHandle> JobGraph::AddPartitionedJobs(std::vector<JobGraphJobDeclaration> declarations)
 	{
 		std::vector<DependencyHandle> handles;
@@ -684,6 +729,7 @@ namespace TerraEngine::Scheduling {
 
 	DependencyHandle JobGraph::AddTaskGroup(JobGraphTaskGroupDeclaration declaration)
 	{
+		impl->topologyDirty = true;
 		Impl::Node node;
 		node.kind = JobGraphNodeKind::TaskGroup;
 		node.name = NormalizeLabel(declaration.name, "Task Group " + std::to_string(impl->nextHandleId));
@@ -699,6 +745,7 @@ namespace TerraEngine::Scheduling {
 
 	DependencyHandle JobGraph::AddBarrier(JobGraphBarrierDeclaration declaration)
 	{
+		impl->topologyDirty = true;
 		Impl::Node node;
 		node.kind = JobGraphNodeKind::Barrier;
 		node.name = NormalizeLabel(declaration.name, "Barrier " + std::to_string(impl->nextHandleId));
@@ -717,6 +764,7 @@ namespace TerraEngine::Scheduling {
 
 	void JobGraph::AddDependency(DependencyHandle before, DependencyHandle after)
 	{
+		impl->topologyDirty = true;
 		impl->explicitEdges.push_back({ std::move(before), std::move(after) });
 	}
 
@@ -811,20 +859,30 @@ namespace TerraEngine::Scheduling {
 		{
 			node.state = JobGraphNodeState::Pending;
 		}
+		impl->validatedEdges = edges;
+		impl->validatedDiagnostics = diagnostics;
+		impl->validatedTopologyValid = std::none_of(
+			diagnostics.begin(), diagnostics.end(), IsError);
+		impl->topologyDirty = false;
 		impl->latestSummary = impl->BuildSummary(edges, std::move(diagnostics), formatSummary);
 		return impl->latestSummary;
 	}
 
 	const JobGraphSummary& JobGraph::Execute(const JobGraphExecuteOptions& options)
 	{
-		const JobGraphSummary& validation = Validate(options.formatSummary);
-		if (!validation.valid)
+		if (impl->topologyDirty)
+		{
+			Validate(options.formatSummary);
+		}
+		if (!impl->validatedTopologyValid)
 		{
 			return impl->latestSummary;
 		}
 
-		std::vector<JobGraphDiagnostic> diagnostics = validation.diagnostics;
-		std::vector<JobGraphDependencyEdge> edges = validation.dependencies;
+		// Reused graphs retain only topology diagnostics and edges. Execution
+		// diagnostics from the prior frame never leak into this frame's summary.
+		std::vector<JobGraphDiagnostic> diagnostics = impl->validatedDiagnostics;
+		std::vector<JobGraphDependencyEdge> edges = impl->validatedEdges;
 		std::unordered_map<std::uint32_t, std::size_t> indexById;
 		for (std::size_t index = 0; index < impl->nodes.size(); ++index)
 		{
@@ -1028,24 +1086,31 @@ namespace TerraEngine::Scheduling {
 				++terminalCount;
 			}
 
-			for (RunningWorker& worker : runningWorkers)
 			{
-				Impl::Node& node = impl->nodes[worker.index];
-				try
+				// Keep coordinator stalls distinct from graph dispatch and protected
+				// work. A single scope per dependency wave avoids per-job profiler
+				// overhead while still exposing the actual synchronization cost.
+				TERRAENGINE_PROFILE_SCOPE("JobGraph: Coordinator Wait",
+					TerraEngine::Profiling::ProfilerModuleId::TaskExecution);
+				for (RunningWorker& worker : runningWorkers)
 				{
-					const auto start = std::chrono::steady_clock::now();
-					worker.future.get();
-					const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
-					node.coordinatorWaitDurationNs = static_cast<std::uint64_t>(elapsed);
-					coordinatorWaitTimeNs += node.coordinatorWaitDurationNs;
-					completeNode(worker.index, JobGraphNodeState::Completed);
+					Impl::Node& node = impl->nodes[worker.index];
+					try
+					{
+						const auto start = std::chrono::steady_clock::now();
+						worker.future.get();
+						const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+						node.coordinatorWaitDurationNs = static_cast<std::uint64_t>(elapsed);
+						coordinatorWaitTimeNs += node.coordinatorWaitDurationNs;
+						completeNode(worker.index, JobGraphNodeState::Completed);
+					}
+					catch (...)
+					{
+						completeNode(worker.index, JobGraphNodeState::Failed);
+						impl->AddDiagnostic(diagnostics, JobGraphDiagnosticSeverity::Error, JobGraphDiagnosticCategory::Execution, node.name, "Job threw during worker execution: " + ExceptionMessage() + ".", "Fix the job body or catch expected failures inside the job.");
+					}
+					++terminalCount;
 				}
-				catch (...)
-				{
-					completeNode(worker.index, JobGraphNodeState::Failed);
-					impl->AddDiagnostic(diagnostics, JobGraphDiagnosticSeverity::Error, JobGraphDiagnosticCategory::Execution, node.name, "Job threw during worker execution: " + ExceptionMessage() + ".", "Fix the job body or catch expected failures inside the job.");
-				}
-				++terminalCount;
 			}
 		}
 

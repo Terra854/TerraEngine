@@ -81,6 +81,7 @@ struct ClusterData
 [[vk::binding(6, 0)]] StructuredBuffer<uint> lightIndices;
 [[vk::binding(8, 0)]] SamplerState pointShadowSampler;
 [[vk::binding(9, 0)]] StructuredBuffer<uint> globalBuffers[];
+#include "RenderInstanceAbi.hlsli"
 [[vk::binding(19, 0)]] Texture2D<float> ambientOcclusionTexture;
 [[vk::binding(20, 0)]] TextureCube pointShadowCubes[32];
 
@@ -801,21 +802,31 @@ struct ConventionalVisibilityOutput
 	uint4 identity : SV_Target1;
 };
 
-ConventionalVisibilityOutput MakeConventionalVisibilityOutput(float4 color, uint stablePrimitiveId)
+ConventionalVisibilityOutput MakeConventionalVisibilityOutput(float4 color,
+	uint stablePrimitiveId, uint4 objectIdentity)
 {
 	ConventionalVisibilityOutput output;
 	output.color = color;
-	output.identity = uint4(
-		stablePrimitiveId,
-		SceneUniforms.meshDataIndex,
+	// Lane y is a one-based immutable RenderFrameSnapshot table key. Grouped
+	// mesh work forwards it from its own stream record; ordinary direct and VG
+	// draws receive it through the page-need-offset ABI lane. Task/mesh shaders
+	// never consume that offset, while indirectDrawOffset remains reserved for
+	// the Vulkan indirect-command buffer base. Lane z remains the optional VG
+	// descriptor refinement, never direct-object proof.
+	const uint identityIndex = objectIdentity.x != 0u
+		? objectIdentity.x : SceneUniforms.selectedVirtualPageNeedOffset;
+	output.identity = uint4(stablePrimitiveId, identityIndex,
 		SceneUniforms.virtualGeometryPacketDescriptorIndex,
-		SceneUniforms.statsSlotIndex);
+		// Zero uint4 is the attachment's clear/no-fragment sentinel. The first
+		// primitive/key/packet values can all legitimately be zero, so preserve a
+		// one-based diagnostic lane even if a bad producer omitted its table key.
+		SceneUniforms.statsSlotIndex + 1u);
 	return output;
 }
 
 #define TERRAENGINE_CONVENTIONAL_OUTPUT ConventionalVisibilityOutput
 #define TERRAENGINE_CONVENTIONAL_SEMANTIC
-#define TERRAENGINE_CONVENTIONAL_RETURN(colorValue, primitiveId) return MakeConventionalVisibilityOutput(colorValue, primitiveId)
+#define TERRAENGINE_CONVENTIONAL_RETURN(colorValue, primitiveId) return MakeConventionalVisibilityOutput(colorValue, primitiveId, input.objectIdentity)
 #else
 #define TERRAENGINE_CONVENTIONAL_OUTPUT float4
 #define TERRAENGINE_CONVENTIONAL_SEMANTIC : SV_Target0

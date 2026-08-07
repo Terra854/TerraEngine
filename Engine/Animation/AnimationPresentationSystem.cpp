@@ -9,6 +9,7 @@
 #include <array>
 #include <atomic>
 #include <cassert>
+#include <chrono>
 #include <functional>
 #include <mutex>
 #include <new>
@@ -178,6 +179,11 @@ namespace TerraEngine::Animation {
 		std::shared_ptr<const GpuAnimationPresentationFrame> source;
 		GpuAnimationPlan plan{};
 		GpuAnimationLoweredPlanResult result{};
+		GpuAnimationTopology topology{};
+		GpuAnimationTopologyDynamicState topologyDynamicState{};
+		bool topologyReused = false;
+		double topologyBuildMs = 0.0;
+		double topologyRefreshMs = 0.0;
 		std::uint64_t sourceGeneration = 0U;
 		std::uint32_t planGeneration = 0U;
 		std::atomic_bool complete = false;
@@ -225,6 +231,56 @@ namespace TerraEngine::Animation {
 	{
 		return {mapping.stableInstanceId, mapping.instanceSlot,
 			mapping.instanceGeneration, mapping.componentGeneration};
+	}
+
+	[[nodiscard]] std::uint64_t MixTopologyGeneration(
+		std::uint64_t hash, std::uint64_t value) noexcept
+	{
+		// Fixed arithmetic makes retained-topology keys stable across platforms;
+		// the value is an invalidation identity, never a security hash.
+		hash ^= value + 0x9e3779b97f4a7c15ULL + (hash << 6U) + (hash >> 2U);
+		return hash;
+	}
+
+	[[nodiscard]] bool BuildTopologyGenerationKey(
+		const GpuAnimationPlan& plan,
+		GpuAnimationTopologyGenerationKey& output) noexcept
+	{
+		if(plan.workPackets.empty() || plan.generationRecords.empty()) return false;
+		GpuAnimationTopologyGenerationKey candidate{};
+		candidate.membershipGeneration = 0x6a09e667f3bcc909ULL;
+		candidate.resourceGeneration = 0xbb67ae8584caa73bULL;
+		candidate.programGeneration = 0x3c6ef372fe94f82bULL;
+		candidate.sceneGeneration = 0xa54ff53a5f1d36f1ULL;
+		candidate.rendererGeneration = 0x510e527fade682d1ULL;
+		for(const GpuAnimationWorkPacket& packet : plan.workPackets) {
+			if(packet.generationRecordIndex >= plan.generationRecords.size()) return false;
+			const GpuAnimationGenerationRecord& generation =
+				plan.generationRecords[packet.generationRecordIndex];
+			if(!IsGpuAnimationGenerationRecordValid(generation)
+				|| packet.stableInstanceId == 0U) return false;
+			candidate.membershipGeneration = MixTopologyGeneration(
+				candidate.membershipGeneration, packet.stableInstanceId);
+			candidate.membershipGeneration = MixTopologyGeneration(
+				candidate.membershipGeneration,
+				(static_cast<std::uint64_t>(generation.instanceSlot) << 32U)
+					| generation.instanceGeneration);
+			candidate.resourceGeneration = MixTopologyGeneration(
+				candidate.resourceGeneration,
+				(static_cast<std::uint64_t>(generation.resourceGeneration) << 32U)
+					| generation.skeletonGeneration);
+			candidate.programGeneration = MixTopologyGeneration(
+				candidate.programGeneration,
+				(static_cast<std::uint64_t>(generation.programGeneration) << 32U)
+					| generation.controllerGeneration);
+			candidate.sceneGeneration = MixTopologyGeneration(
+				candidate.sceneGeneration, generation.sceneGeneration);
+			candidate.rendererGeneration = MixTopologyGeneration(
+				candidate.rendererGeneration, generation.rendererGeneration);
+		}
+		if(!candidate.IsComplete()) return false;
+		output = candidate;
+		return true;
 	}
 
 	AnimationPresentationSystem& AnimationPresentationSystem::Instance()
@@ -473,6 +529,40 @@ namespace TerraEngine::Animation {
 					prepared->plan, prepared->result, prepared->source->planLimits,
 					&impl_->atlasCache, previous ? &previous->plan : nullptr);
 			}
+			if(prepared->result.status == GpuAnimationLoweringStatus::Ok
+				&& !prepared->plan.dispatchCommands.empty()) {
+				const auto topologyStart = std::chrono::steady_clock::now();
+				GpuAnimationTopologyGenerationKey topologyKey;
+				const bool hasExactTopologyKey = BuildTopologyGenerationKey(
+					prepared->plan, topologyKey);
+				if(hasExactTopologyKey && previous && previous->topology.IsComplete()
+					&& previous->topology.generations == topologyKey) {
+					// The prior immutable envelope is the sole retained compact topology
+					// source. Dynamic samples are rebuilt below; no worker reopens a
+					// previous mutable plan or partially refreshes owner mappings.
+					prepared->topology = previous->topology;
+					prepared->topologyReused = true;
+				} else if(hasExactTopologyKey) {
+					(void)BuildGpuAnimationTopology(prepared->plan, topologyKey,
+						prepared->planGeneration, prepared->topology);
+				}
+				if(!prepared->topology.IsComplete()
+					|| !BuildGpuAnimationTopologyDynamicState(prepared->plan,
+						prepared->topology, prepared->sourceGeneration,
+						prepared->topologyDynamicState)) {
+					// A malformed cache key or failed dynamic refresh never falls back to
+					// an older topology. Reject the whole candidate so the next capture
+					// routes every affected animator through the complete safe path.
+					prepared->plan = {};
+					prepared->result.status = GpuAnimationLoweringStatus::PlanBuildFailed;
+					prepared->result.planStatus = GpuAnimationPlanStatus::InvalidArgument;
+				}
+				const double topologyMilliseconds = static_cast<double>(
+					std::chrono::duration_cast<std::chrono::nanoseconds>(
+						std::chrono::steady_clock::now() - topologyStart).count()) / 1'000'000.0;
+				if(prepared->topologyReused) prepared->topologyRefreshMs = topologyMilliseconds;
+				else prepared->topologyBuildMs = topologyMilliseconds;
+			}
 			if(gpuCancellation.IsCancellationRequested(*impl_->lifecycleLatch)) {
 				prepared->plan = {};
 				prepared->cancelled.store(true, std::memory_order_release);
@@ -522,12 +612,19 @@ namespace TerraEngine::Animation {
 			publication->sourceGeneration = prepared->sourceGeneration;
 			publication->loweringStatus = prepared->result.status;
 			publication->planStatus = prepared->result.planStatus;
+			publication->topologyReused = prepared->topologyReused;
+			publication->topologyBuildMs = prepared->topologyBuildMs;
+			publication->topologyRefreshMs = prepared->topologyRefreshMs;
 			// Empty work is the explicit CPU/no-GPU result for missing capability or
 			// residency input. It must retire an older GPU plan instead of leaving it
 			// visible under a newer source generation.
-			publication->safeFallback = !buildSucceeded || prepared->plan.dispatchCommands.empty();
-			if(buildSucceeded) {
+			publication->safeFallback = !buildSucceeded || prepared->plan.dispatchCommands.empty()
+				|| !prepared->topology.IsComplete()
+				|| !prepared->topologyDynamicState.IsCompleteFor(prepared->topology);
+			if(!publication->safeFallback) {
 				publication->plan = std::move(prepared->plan);
+				publication->topology = std::move(prepared->topology);
+				publication->topologyDynamicState = std::move(prepared->topologyDynamicState);
 				try {
 					std::unordered_map<LoweredOwnerKey, std::uint32_t,
 						LoweredOwnerKeyHash> loweredOwners;
@@ -633,6 +730,17 @@ namespace TerraEngine::Animation {
 			(void)impl_->gpuCancellationSource.Cancel(
 				CancellationReasonForBoundary(boundary, currentGeneration));
 			impl_->frameDeclarationEpoch.fetch_add(1U, std::memory_order_acq_rel);
+			// Every lifecycle invalidation names a new scene, resource, renderer, or
+			// authority epoch. Retire both topology and owner mappings as one atomic
+			// envelope so neither a hot reload nor device recovery can reuse a stale
+			// compact presentation while the next capture falls back to complete work.
+			{
+				std::scoped_lock lock(impl_->frameMutex);
+				impl_->submittedFrame.reset();
+				std::atomic_store_explicit(&impl_->publishedPlan,
+					std::shared_ptr<const PublishedGpuAnimationPresentationPlan>{},
+					std::memory_order_release);
+			}
 		}
 		return status;
 	}
@@ -642,4 +750,5 @@ namespace TerraEngine::Animation {
 	{
 		return std::atomic_load_explicit(&impl_->publishedPlan, std::memory_order_acquire);
 	}
+
 }

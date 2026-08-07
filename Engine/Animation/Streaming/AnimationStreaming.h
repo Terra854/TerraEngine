@@ -190,6 +190,10 @@ namespace TerraEngine::Animation
 		std::uint32_t requestedPayloads = 0u;
 		std::uint32_t residentPayloads = 0u;
 		std::uint32_t pendingPrefetchPayloads = 0u;
+		// Retain ownership is independent from gameplay criticality. Keeping the
+		// count in the bounded aggregate avoids copying and sorting every decision
+		// merely to publish one protected synchronization summary.
+		std::uint32_t retainedPayloads = 0u;
 		std::uint32_t retainedGameplayPayloads = 0u;
 		std::uint32_t cancelledPayloads = 0u;
 		std::uint32_t failedPayloads = 0u;
@@ -222,6 +226,11 @@ namespace TerraEngine::Animation
 		// Call only at the declared animation streaming publication boundary.
 		// A stale/cancelled generation is rejected without exposing its bytes.
 		bool PublishReadResult(const AnimationStreamReadResult& result);
+		// Publish one completed worker wave under a single coordinator lock and
+		// rebuild the immutable residency snapshot at most once. The pointed-to
+		// results must remain alive for the duration of this protected call.
+		[[nodiscard]] std::size_t PublishReadResults(
+			std::span<const AnimationStreamReadResult* const> results);
 		// A prefetch window either queues every new block or queues none of them.
 		// This avoids a partially advanced look-ahead horizon when the bounded
 		// request/byte budget is exhausted halfway through a worker plan.
@@ -266,7 +275,8 @@ namespace TerraEngine::Animation
 		bool CompleteLocked(
 			const AnimationStreamRequest& request,
 			bool success,
-			std::shared_ptr<const std::vector<std::uint8_t>> payload);
+			std::shared_ptr<const std::vector<std::uint8_t>> payload,
+			bool rebuildResidencySnapshot = true);
 		void RebuildResidencySnapshotLocked();
 		std::uint32_t m_maximumPrefetchRequests = 8u;
 		std::uint32_t m_maximumPendingRequests = 64u;

@@ -112,6 +112,7 @@ add_executable(TerraEngine-EngineTests
 	Runtime/PhysicsExportRuntimeTests.cpp
 	Profiling/ProfilerCaptureTests.cpp
 	Profiling/ProfilerCaptureV2Tests.cpp
+	Profiling/ProfilerOptimizationEvidenceTests.cpp
 	Profiling/ProfilerCaptureLevelTests.cpp
 	Profiling/ProfilerCapturePerformanceTests.cpp
 	Profiling/ProfilerPerformanceSummaryTests.cpp
@@ -167,6 +168,7 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderPassValidationStressTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderPerformanceGateTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderPreparationCacheTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderInstanceAbiTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderQueueReadinessTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderRandomizedSchedulingTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderResourceCancellationTests.cpp
@@ -222,6 +224,13 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryTraversalOverflowTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryTwoPassOcclusionTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryViewOwnershipTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderRouteParityTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryViewEvidenceTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RendererViewLifecycleTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/PersistentRenderTopologyTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/SharedRenderSubmissionTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanGroupedSubmissionTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RendererScalePerformanceTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryProductionSoakTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryHardwareVisibilityTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryComputeRasterTests.cpp
@@ -447,6 +456,18 @@ add_test(NAME Engine.VirtualGeometryProductionContracts COMMAND $<TARGET_FILE:Te
 set_tests_properties(Engine.VirtualGeometryProductionContracts PROPERTIES
 	LABELS "Engine;VirtualGeometry;Production;Contract"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry.Capability;VirtualGeometry.GpuTiming;Renderer.VulkanVirtualGeometryTiming;VirtualGeometry.Evidence;VirtualGeometry.Scheduler;VirtualGeometry.Publication;VirtualGeometry.Visibility;VirtualGeometry.Backend;AnimatedVirtualGeometry"
+)
+
+add_test(NAME Engine.RenderRouteParity COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.RenderRouteParity PROPERTIES
+	LABELS "Engine;Renderer;VirtualGeometry;Parity"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Renderer.RouteParity,VirtualGeometry.ViewEvidence,Renderer.ViewLifecycle"
+)
+
+add_test(NAME Engine.RendererScaleAndGrouping COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.RendererScaleAndGrouping PROPERTIES
+	LABELS "Engine;Renderer;Performance;Grouping"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Renderer.PersistentTopology,Renderer.SharedSubmission,Renderer.VulkanGroupedSubmission,Renderer.ScalePerformance"
 )
 
 add_test(NAME Engine.VirtualGeometryHardening COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)

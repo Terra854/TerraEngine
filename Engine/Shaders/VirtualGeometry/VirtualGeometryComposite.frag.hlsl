@@ -120,7 +120,9 @@ CompositeOutput main(float4 pixelPosition : SV_Position)
 		source.identity.x,
 		source.debugState.y,
 		source.debugState.z,
-		source.shadingOffsets.y);
+		// Keep a valid first triangle distinct from the cleared attachment.
+		// Readback matching uses the packet lane; this final lane is diagnostic.
+		source.shadingOffsets.y + 1u);
 	output.depth = depth;
 	return output;
 }

@@ -1,10 +1,27 @@
 {
 	"schemaVersion": 1,
 	"id": "new-animated-project",
-	"description": "Vulkan-only installed-runtime inputs for the external New Animated Project fixture.",
+	"description": "Installed-runtime inputs for the external New Animated Project fixture.",
 	"projectDirectoryRelativeToRepositoryParent": "TerraEngine-Projects/New Animated Project",
 	"startupScene": "Assets/Scenes/Scene.tescene",
 	"minimumProjectAnimatorCount": 4,
+	"raw-static": {
+		"asset": "Assets/viking_room.obj",
+		"meshAssetId": "87f68c2d68360cb2318f0a77fa3eaf0b",
+		"materialAssetId": "fa653ebd8b3742d77f6b2386ca8a4694",
+		"materialAssetIds": ["fa653ebd8b3742d77f6b2386ca8a4694", "60c9af18ea51c6ee9ac8f3e1da50557e", "81139f23f318c10dc998212f5b92814b"],
+		"sourceTriangles": 3828,
+		"bounds": { "dimensions": [1.33, 1.46, 1.03] },
+		"rawInstanceScale": 1.0,
+		"cameraPosition": [0.0, 0.3, 3.0],
+		"cameraTarget": [0.0, 0.5, 0.0],
+		"virtualGeometry": "not-generated-mesh-importer"
+	},
+	"repeated-static": {
+		"cameraPosition": [0.0, 43.4, 85.0],
+		"cameraTarget": [0.0, 43.4, 0.0],
+		"gridSpacing": 1.4
+	},
 	"hero": {
 		"asset": "Assets/ValidationModels/m03/BaseCharacter.fbx",
 		"prefab": "Assets/ValidationModels/m03/BaseCharacter_Generated/BaseCharacter.teprefab",
@@ -24,5 +41,23 @@
 		"cameraPosition": [0.0, 25.0, 50.0],
 		"minimumAnimatorInstances": 1000,
 		"minimumUniqueDeformationDispatches": 1000
+	},
+	"existing-4000-animated": {
+		"scene": "Assets/Scenes/Scene.tescene",
+		"cameraPosition": [0.0, 25.0, 50.0],
+		"minimumAnimatorInstances": 4015,
+		"minimumUniqueDeformationDispatches": 1
+	},
+	"dense-animated-vg": {
+		"scene": "Assets/Scenes/DenseAnimatedVGBenchmark.tescene",
+		"cameraPosition": [0.0, 1.0, 4.0],
+		"minimumAnimatorInstances": 1,
+		"minimumUniqueDeformationDispatches": 1
+	},
+	"mixed-animation": {
+		"scene": "Assets/Scenes/MixedBenchmark.tescene",
+		"cameraPosition": [0.0, 1.0, 4.0],
+		"minimumAnimatorInstances": 10,
+		"minimumUniqueDeformationDispatches": 1
 	}
 }

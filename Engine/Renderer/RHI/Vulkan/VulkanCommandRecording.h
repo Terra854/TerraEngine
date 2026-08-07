@@ -131,7 +131,11 @@ namespace TerraEngine::Renderer::Vulkan {
 
 	struct VulkanDeformationDispatch
 	{
-		std::uint32_t workRecordIndex = 0u;
+		// One rectangular dispatch covers a contiguous range of work records.
+		// The shader uses its second dispatch dimension to select the record and
+		// rejects X lanes beyond that record's exact vertex count.
+		std::uint32_t firstWorkRecordIndex = 0u;
+		std::uint32_t workRecordCount = 0u;
 		std::uint32_t groupCountX = 0u;
 	};
 

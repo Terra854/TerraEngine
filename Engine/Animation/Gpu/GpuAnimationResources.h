@@ -2,7 +2,7 @@
 //
 // The controller owns only logical allocation ids, byte budgets, generations, and
 // completion proof. Backend code owns actual buffers and fences. Keeping that
-// boundary explicit prevents worker preparation from retaining Vulkan objects or
+// boundary explicit prevents worker preparation from retaining graphics-API objects or
 // touching live scene state.
 
 #pragma once

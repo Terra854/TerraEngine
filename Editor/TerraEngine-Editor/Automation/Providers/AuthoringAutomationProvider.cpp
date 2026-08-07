@@ -219,6 +219,7 @@ namespace TerraEngine::Editor::Automation
 		result.push_back(Make(resolveHandler, "scene_view.snapping.set", "scene_view", {"enabled"}, {"state"}, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, true, true, true));
 		result.push_back(Make(resolveHandler, "scene_view.visualization.set", "scene_view", {"mode"}, {"state"}, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, true, true, true));
 
+		result.push_back(Make(resolveHandler, "profiler.window.visibility.set", "profiler", {"visible"}, {"visible", "editorFrameIndex", "editorFrameTimeMs", "profilerWindowDrawFrameIndex", "profilerWindowDrawMs", "profilerWindowDrawValid", "imguiRenderFrameIndex", "imguiRenderMs", "imguiRenderValid", "presentUiFrameIndex", "presentUiMs", "presentUiValid"}, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, true));
 		result.push_back(MakeProfilerCaptureStart(resolveHandler));
 		result.push_back(Make(resolveHandler, "profiler.capture.stop", "profiler", {}, {"jobId", "state"}, AutomationPermission::ProjectWrite, AutomationApprovalPolicy::None, true));
 		result.push_back(Make(resolveHandler, "profiler.capture.list", "profiler", {}, {"artifacts"}, AutomationPermission::Read, AutomationApprovalPolicy::None, true));

@@ -140,7 +140,7 @@ namespace TerraEngine::Animation {
 		auto operator<=>(const MotionMatchGpuBackendTicket&) const = default;
 	};
 
-	// Vulkan command recording, buffers, and fences remain renderer-owned. This
+	// Graphics command recording, buffers, and fences remain renderer-owned. This
 	// interface freezes what the animation side may ask for: a copied submission,
 	// a bounded readback, and a poll that must return without waiting on the fence.
 	class TERRAENGINE_API MotionMatchGpuBackend {
@@ -184,7 +184,7 @@ namespace TerraEngine::Animation {
 		MotionMatchGpuDispatchPlan& output) noexcept;
 
 	// Queue methods are intended for renderer protected boundaries. Worker jobs may
-	// prepare query/database snapshots, but they never call a Vulkan backend or
+	// prepare query/database snapshots, but they never call a graphics backend or
 	// mutate live animation state through this class.
 	class TERRAENGINE_API MotionMatchGpuQueue {
 	public:

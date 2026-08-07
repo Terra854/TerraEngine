@@ -1107,6 +1107,32 @@ namespace TerraEngine::Animation {
 		RebuildLookupIndexesLocked();
 	}
 
+	void AnimationRootMotionResultPublisher::RetireMany(
+		std::span<const AnimatorInstanceHandle> animators)
+	{
+		if(animators.empty()) return;
+		const auto contains = [animators](AnimatorInstanceHandle animator) {
+			return std::binary_search(animators.begin(), animators.end(), animator);
+		};
+		std::scoped_lock lock(mutex_);
+		std::erase_if(pendingScene_, [&contains](const PendingScene& value) {
+			return contains(value.result.animator);
+		});
+		std::erase_if(pendingPhysics_, [&contains](const PendingPhysics& value) {
+			return contains(value.result.animator);
+		});
+		std::erase_if(applications_, [&contains](const ApplicationRecord& value) {
+			return contains(value.request.delta.animator);
+		});
+		std::erase_if(appliedMutations_, [&contains](const AppliedMutationRecord& value) {
+			return contains(value.animator);
+		});
+		std::erase_if(results_, [&contains](const AnimationRootMotionApplicationResult& value) {
+			return contains(value.animator);
+		});
+		RebuildLookupIndexesLocked();
+	}
+
 	void AnimationRootMotionResultPublisher::CopyForAnimator(
 		AnimatorInstanceHandle animator,
 		std::vector<AnimationRootMotionApplicationResult>& output) const

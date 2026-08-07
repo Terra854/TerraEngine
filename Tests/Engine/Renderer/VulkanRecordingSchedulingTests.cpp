@@ -208,6 +208,62 @@ namespace TerraEngine::Tests {
 				"RenderSystem must map a completed identity only to its immutable packet descriptor record.");
 		});
 
+		registry.Add("Renderer.VulkanRecording.CleanupDestroysGroupedInstanceStreams", [](TestContext& context) {
+			const std::filesystem::path initializationSource = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContextInit.cpp";
+			std::ifstream initializationStream(initializationSource, std::ios::binary);
+			const std::string initialization{ std::istreambuf_iterator<char>(initializationStream), {} };
+
+			// The reusable streams are allocated once per frame slot. This source
+			// contract prevents shutdown from reaching vkDestroyDevice with those
+			// VMA allocations still alive after repeated static-scene submissions.
+			const std::size_t cleanup = initialization.find("void VulkanContext::Impl::Cleanup(bool skipDeviceIdle)");
+			const std::size_t groupedStreams = initialization.find("for (VulkanBuffer& buffer : groupedInstanceBuffers)", cleanup);
+			const std::size_t vmaTeardown = initialization.find("vmaDestroyAllocator", cleanup);
+			context.Expect(cleanup != std::string::npos
+				&& groupedStreams != std::string::npos
+				&& groupedStreams < vmaTeardown
+				&& initialization.find("DestroyBufferImmediate(buffer);", groupedStreams) != std::string::npos
+				&& initialization.find("groupedInstanceCapacities.fill(0u);", groupedStreams) != std::string::npos
+				&& initialization.find("groupedInstanceBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;", groupedStreams) != std::string::npos,
+				"Vulkan cleanup must release every grouped instance stream before VMA/device teardown.");
+		});
+
+		registry.Add("Renderer.VulkanRecording.CaptureIdentityExcludesShadowOffscreenOutputs", [](TestContext& context) {
+			const std::filesystem::path vulkanContextSource = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContext.cpp";
+			std::ifstream vulkanContextStream(vulkanContextSource, std::ios::binary);
+			const std::string vulkanContext{
+				std::istreambuf_iterator<char>(vulkanContextStream), {}};
+
+			// Shadow diagnostics share the OffscreenTexture classification, but they
+			// do not own the dedicated MCP capture framebuffer or its identity image.
+			const std::size_t captureSelection = vulkanContext.find(
+				"const bool renderingDedicatedCaptureTarget =");
+			const std::size_t captureSelectionEnd = vulkanContext.find(
+				"// Normal runtime views require an acquired swapchain image.",
+				captureSelection);
+			const std::string capturePredicate = captureSelection != std::string::npos
+				&& captureSelectionEnd != std::string::npos
+				? vulkanContext.substr(captureSelection,
+					captureSelectionEnd - captureSelection)
+				: std::string{};
+			context.Expect(
+				capturePredicate.find(
+					"outputRequest.kind == RenderOutputKind::OffscreenTexture")
+					!= std::string::npos
+				&& capturePredicate.find(
+					"outputRequest.diagnosticsView == RenderViewType::Game")
+					!= std::string::npos
+				&& capturePredicate.find(
+					"outputRequest.diagnosticsView == RenderViewType::Scene")
+					!= std::string::npos
+				&& vulkanContext.find(
+					"const VkImageView vrsColorView = renderingDedicatedCaptureTarget")
+					!= std::string::npos,
+				"Only Game/Scene offscreen outputs may select captureView; Shadow offscreen outputs must not clear capture identity.");
+		});
+
 		registry.Add("Renderer.VulkanRecording.ConventionalIdentityBlendRequiresIndependentBlend", [](TestContext& context) {
 			const std::filesystem::path vulkanContextSource = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
 				/ "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContext.cpp";
@@ -321,6 +377,85 @@ namespace TerraEngine::Tests {
 				"Compact preparation should retain the packet population count.");
 			context.ExpectEqual(static_cast<std::size_t>(0u), compact.renderPacketCache.cacheHits,
 				"Compact preparation must skip diagnostic-only persistent packet scans.");
+		});
+
+		registry.Add("Renderer.VulkanRecording.GroupedInstancesUseWholeStreamBoundsAndSnapshotIdentity", [](TestContext& context) {
+			const std::filesystem::path taskShaderPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Engine" / "Shaders" / "Default" / "Default.task.hlsl";
+			const std::filesystem::path meshShaderPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Engine" / "Shaders" / "Default" / "Default.mesh.hlsl";
+			const std::filesystem::path fragmentShaderPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Engine" / "Shaders" / "Default" / "Default.frag.hlsl";
+			const std::filesystem::path renderSystemPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Engine" / "Renderer" / "RenderSystem.cpp";
+			const std::filesystem::path resourcePath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContextResources.cpp";
+			const std::filesystem::path vulkanPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContext.cpp";
+			std::ifstream taskStream(taskShaderPath, std::ios::binary);
+			std::ifstream meshStream(meshShaderPath, std::ios::binary);
+			std::ifstream fragmentStream(fragmentShaderPath, std::ios::binary);
+			std::ifstream renderSystemStream(renderSystemPath, std::ios::binary);
+			std::ifstream resourceStream(resourcePath, std::ios::binary);
+			std::ifstream vulkanStream(vulkanPath, std::ios::binary);
+			const std::string taskShader{ std::istreambuf_iterator<char>(taskStream), {} };
+			const std::string meshShader{ std::istreambuf_iterator<char>(meshStream), {} };
+			const std::string fragmentShader{ std::istreambuf_iterator<char>(fragmentStream), {} };
+			const std::string renderSystem{ std::istreambuf_iterator<char>(renderSystemStream), {} };
+			const std::string resources{ std::istreambuf_iterator<char>(resourceStream), {} };
+			const std::string vulkan{ std::istreambuf_iterator<char>(vulkanStream), {} };
+
+			// Later groups have a nonzero firstInstance. Their task payload must be
+			// validated against the complete stream, not only the local group count,
+			// or every rejected load reuses the representative transform. The same
+			// loaded record must also carry its owner key through mesh output and the
+			// dedicated identity fragment; otherwise an apparently valid capture
+			// could report a neighbouring representative instead of the hit owner.
+			context.Expect(taskShader.find("groupedStreamRecordCount") != std::string::npos
+				&& taskShader.find("groupedFirstInstance + groupedInstanceRelative") != std::string::npos
+				&& taskShader.find("SceneUniforms.model[1].w") != std::string::npos
+				&& taskShader.find("SceneUniforms.model[2].w") != std::string::npos
+				&& taskShader.find("SceneUniforms.model[3].y") == std::string::npos
+				&& taskShader.find("SceneUniforms.model[3].z") == std::string::npos
+				&& meshShader.find("asuint(SceneUniforms.model[0].w)") != std::string::npos
+				&& meshShader.find("asuint(SceneUniforms.model[3].w), instanceRecord") != std::string::npos
+				&& meshShader.find("gMeshShaderObjectIdentity = instanceRecord.objectIdentity;")
+					!= std::string::npos
+				&& meshShader.find("outVertex.objectIdentity = gMeshShaderObjectIdentity;")
+					!= std::string::npos
+				&& vulkan.find("push.model[3] = glm::vec4(") != std::string::npos
+				&& fragmentShader.find("const uint identityIndex = objectIdentity.x != 0u") != std::string::npos
+				&& fragmentShader.find("MakeConventionalVisibilityOutput(colorValue, primitiveId, input.objectIdentity)")
+					!= std::string::npos
+				&& fragmentShader.find("SceneUniforms.selectedVirtualPageNeedOffset") != std::string::npos
+				&& vulkan.find("push.indirectDrawOffset = renderSnapshot.indirectDrawOffset;") != std::string::npos
+				&& vulkan.find("push.selectedVirtualPageNeedOffset = command.conventionalVisibilityIdentityIndex;") != std::string::npos
+				&& renderSystem.find("conventionalVisibilityIdentityTable") != std::string::npos
+				&& renderSystem.find("latestRenderFrameSnapshot.frameId") != std::string::npos
+				&& resources.find("pipeline.usesConventionalVisibilityIdentity = useConventionalIdentityVariant")
+					!= std::string::npos,
+				"Grouped transforms and direct typed picks must resolve through whole-stream bounds and the immutable frame identity table.");
+		});
+
+		registry.Add("Renderer.VulkanRecording.DedicatedCaptureIdentityUsesRetainedSnapshot", [](TestContext& context) {
+			const std::filesystem::path renderSystemPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Engine" / "Renderer" / "RenderSystem.cpp";
+			const std::filesystem::path vulkanPath = std::filesystem::path(TERRAENGINE_SOURCE_DIR)
+				/ "Engine" / "Renderer" / "RHI" / "Vulkan" / "VulkanContext.cpp";
+			std::ifstream renderSystemStream(renderSystemPath, std::ios::binary);
+			std::ifstream vulkanStream(vulkanPath, std::ios::binary);
+			const std::string renderSystem{ std::istreambuf_iterator<char>(renderSystemStream), {} };
+			const std::string vulkan{ std::istreambuf_iterator<char>(vulkanStream), {} };
+
+			// A capture image is intentionally long-lived relative to ordinary editor
+			// frames. Its typed pick must retain its own table/frame rather than fail
+			// merely because the latest Game frame advanced before automation polled.
+			context.Expect(renderSystem.find("latestGameCaptureIdentitySnapshot") != std::string::npos
+				&& renderSystem.find("completedGameCaptureIdentitySnapshot.frameId = prepared.frame.frameId") != std::string::npos
+				&& renderSystem.find("result.dedicatedCaptureTarget") != std::string::npos
+				&& renderSystem.find("identityTable.begin()") != std::string::npos
+				&& vulkan.find("rendered target metadata does not match the request") != std::string::npos,
+				"Dedicated capture identity picks must retain matching immutable frame data and diagnose target metadata rejection.");
 		});
 
 		registry.Add("Renderer.VulkanRecording.InvalidatesUploadPlansAndRetiresResourcesDeterministically", [](TestContext& context) {

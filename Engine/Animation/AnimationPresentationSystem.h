@@ -25,7 +25,7 @@ namespace TerraEngine::Animation {
 		std::uint32_t componentGeneration = 0U;
 		// The producer leaves this lane invalid because packet order is decided by
 		// deterministic presentation lowering. The published mapping fills it with
-		// the exact packet index so RenderSystem does not rebuild a 4,000-entry
+		// the exact packet index so RenderSystem does not rebuild a crowd-sized
 		// stable-instance hash table every frame.
 		std::uint32_t workPacketIndex = std::numeric_limits<std::uint32_t>::max();
 
@@ -69,7 +69,15 @@ namespace TerraEngine::Animation {
 		GpuAnimationLoweringStatus loweringStatus = GpuAnimationLoweringStatus::InvalidArgument;
 		GpuAnimationPlanStatus planStatus = GpuAnimationPlanStatus::InvalidArgument;
 		bool safeFallback = true;
+		bool topologyReused = false;
+		double topologyBuildMs = 0.0;
+		double topologyRefreshMs = 0.0;
 		GpuAnimationPlan plan{};
+		// Compact visual presentation consumes this retained topology instead of
+		// rebuilding owner and dispatch structure from a previous frame plan.
+		// The dynamic sidecar is frame-owned and must match every topology key.
+		GpuAnimationTopology topology{};
+		GpuAnimationTopologyDynamicState topologyDynamicState{};
 		// This contains only mappings whose stable packet survived lowering. Keeping
 		// it in the envelope makes packet/object matching one atomic publication.
 		std::vector<GpuAnimationOwnerObjectMapping> ownerObjectMappings;
@@ -115,6 +123,9 @@ namespace TerraEngine::Animation {
 			AnimationLifecycleBoundary boundary) noexcept;
 		[[nodiscard]] std::shared_ptr<const PublishedGpuAnimationPresentationPlan>
 			LoadPublishedGpuAnimationPresentationPlan() const noexcept;
+		// The next protected capture uses this exact source-generation check to
+		// force complete processing after a failed, stale, or incomplete GPU handoff.
+		// It reads only an immutable published envelope and never waits for a fence.
 
 		[[nodiscard]] std::size_t PublishedAnimatorCount() const noexcept;
 		[[nodiscard]] std::uint64_t PresentationPublicationGeneration() const noexcept;

@@ -68,6 +68,46 @@ add_executable(TerraEngineVirtualGeometryBenchmark
 	TerraEngineVirtualGeometryBenchmark.cpp
 )
 
+# This companion benchmark calls the renderer's public topology/grouping API
+# directly.  It is kept separate from the Vulkan runtime adapter because it
+# measures worker-safe CPU preparation and must never claim a submitted GPU
+# frame when no renderer process owns one.
+add_executable(TerraEngineRendererTopologyBenchmark
+	RendererHeterogeneousStaticBenchmark.cpp
+)
+target_compile_features(TerraEngineRendererTopologyBenchmark PRIVATE cxx_std_20)
+target_include_directories(TerraEngineRendererTopologyBenchmark
+	PRIVATE
+		"${CMAKE_SOURCE_DIR}/External/json/single_include"
+)
+target_link_libraries(TerraEngineRendererTopologyBenchmark
+	PRIVATE
+		TerraEngine-Engine
+)
+set_target_properties(TerraEngineRendererTopologyBenchmark PROPERTIES
+	CXX_SCAN_FOR_MODULES OFF
+)
+if(MSVC)
+	target_compile_options(TerraEngineRendererTopologyBenchmark PRIVATE /FS)
+endif()
+if(NOT WIN32)
+	# The installed executable lives in Build/Tools while the shared engine
+	# library lives in Build/Engine, so keep the runtime lookup relative to the
+	# executable instead of requiring a host-wide loader configuration.
+	set_target_properties(TerraEngineRendererTopologyBenchmark PROPERTIES
+		BUILD_RPATH "${TERRAENGINE_LOCAL_RPATH}"
+		INSTALL_RPATH "${TERRAENGINE_LOCAL_RPATH}/../Engine"
+	)
+endif()
+if(WIN32)
+	add_custom_command(TARGET TerraEngineRendererTopologyBenchmark POST_BUILD
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different
+			$<TARGET_RUNTIME_DLLS:TerraEngineRendererTopologyBenchmark>
+			$<TARGET_FILE_DIR:TerraEngineRendererTopologyBenchmark>
+		COMMAND_EXPAND_LISTS
+	)
+endif()
+
 target_compile_features(TerraEngineVirtualGeometryBenchmark PRIVATE cxx_std_20)
 target_include_directories(TerraEngineVirtualGeometryBenchmark
 	PRIVATE
@@ -126,9 +166,19 @@ endif()
 # its source/scripts/manifests are copied by the repository-level install rule.
 install(TARGETS
 	TerraEngineVirtualGeometryBenchmark
+	TerraEngineRendererTopologyBenchmark
 	TerraEngineVirtualGeometryCodecExperiment
 	# This subdirectory is configured before the repository-level
 	# ENGINE_INSTALL_DESTINATION variable is assigned. Use the same concrete
 	# build-tree contract here so an empty variable cannot install to C:/Tools.
 	RUNTIME DESTINATION "${CMAKE_BINARY_DIR}/Build/Tools"
 )
+if(WIN32)
+	# The benchmark links the engine DLL, so install CMake's complete known DLL
+	# closure beside it. This keeps the documented PowerShell wrapper independent
+	# from a developer PATH or a vendor-specific runtime installation.
+	install(FILES $<TARGET_RUNTIME_DLLS:TerraEngineRendererTopologyBenchmark>
+		DESTINATION "${CMAKE_BINARY_DIR}/Build/Tools"
+		OPTIONAL
+	)
+endif()

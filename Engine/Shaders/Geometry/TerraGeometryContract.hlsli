@@ -22,6 +22,10 @@ struct TerraSurfaceInput
 	nointerpolation float meshletBoundsRadius : TEXCOORD3;
 	nointerpolation uint meshletCullFlags : TEXCOORD4;
 	nointerpolation uint virtualGeometryDebugData : TEXCOORD5;
+	// Grouped direct draws preserve object-level picking by forwarding the
+	// immutable record identity with every generated vertex. Legacy per-draw
+	// paths leave this zero and keep their original visibility encoding.
+	nointerpolation uint4 objectIdentity : TEXCOORD7;
 };
 
 #endif

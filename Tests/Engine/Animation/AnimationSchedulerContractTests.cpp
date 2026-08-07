@@ -359,23 +359,24 @@ namespace TerraEngine::Tests {
 			const std::vector<FrameWorkloadDeclaration> animationWorkloads = animationSystem.DeclareFrameWorkloads(1.0F / 60.0F);
 			const std::vector<FrameWorkloadDeclaration> presentationWorkloads = presentationSystem.DeclareFrameWorkloads(1.0F / 60.0F);
 
-			context.ExpectEqual(static_cast<std::size_t>(5U), animationWorkloads.size(),
-				"AnimationSystem must expose capture, planning, single-plan finalization, authoritative evaluation, and publication.");
+			context.ExpectEqual(static_cast<std::size_t>(6U), animationWorkloads.size(),
+				"AnimationSystem must expose capture, planning, single-plan finalization, sibling complete/compact evaluation, and publication.");
 			context.ExpectEqual(static_cast<std::size_t>(2U), presentationWorkloads.size(),
 				"AnimationPresentationSystem must expose worker preparation and protected publication.");
 			const FrameWorkloadDeclaration* capture = FindWorkload(animationWorkloads, "CaptureAnimationInputs");
 			const FrameWorkloadDeclaration* plan = FindWorkload(animationWorkloads, "PlanAnimationEvaluation");
 			const FrameWorkloadDeclaration* finalize = FindWorkload(animationWorkloads, "FinalizeAnimationWorkPlan");
-			const FrameWorkloadDeclaration* evaluate = FindWorkload(animationWorkloads, "EvaluateAuthoritativeAnimation");
+			const FrameWorkloadDeclaration* evaluate = FindWorkload(animationWorkloads, "EvaluateCompleteAnimation");
+			const FrameWorkloadDeclaration* evaluateCompact = FindWorkload(animationWorkloads, "EvaluateCompactGpuVisualAnimation");
 			const FrameWorkloadDeclaration* publish = FindWorkload(animationWorkloads, "PublishAnimationAuthority");
 			const FrameWorkloadDeclaration* preparePresentation = FindWorkload(presentationWorkloads, "PrepareAnimationPresentation");
 			const FrameWorkloadDeclaration* publishPresentation = FindWorkload(presentationWorkloads, "PublishAnimationPresentation");
 			context.Expect(capture != nullptr && plan != nullptr && finalize != nullptr
-				&& evaluate != nullptr && publish != nullptr
+				&& evaluate != nullptr && evaluateCompact != nullptr && publish != nullptr
 				&& preparePresentation != nullptr && publishPresentation != nullptr,
 				"Every frozen animation workload name must be declared.");
 			if(capture == nullptr || plan == nullptr || finalize == nullptr
-				|| evaluate == nullptr || publish == nullptr
+				|| evaluate == nullptr || evaluateCompact == nullptr || publish == nullptr
 				|| preparePresentation == nullptr || publishPresentation == nullptr) {
 				return;
 			}
@@ -391,11 +392,13 @@ namespace TerraEngine::Tests {
 				"Live component/command capture must be identified as a protected snapshot.");
 			ExpectWorkerWorkload(context, *plan);
 			context.Expect(plan->partitionWorkItemCount == 128U
-				&& evaluate->partitionWorkItemCount == 128U,
+				&& evaluate->partitionWorkItemCount == 128U
+				&& evaluateCompact->partitionWorkItemCount == 128U,
 				"Full-rate crowd planning and evaluation should use one practical worker-pool wave instead of dispatching 64-item microtasks.");
 			ExpectWorkerWorkload(context, *finalize,
 				TerraEngine::Scheduling::FrameWorkloadPartitionPolicy::Single);
 			ExpectWorkerWorkload(context, *evaluate);
+			ExpectWorkerWorkload(context, *evaluateCompact);
 			ExpectProtectedWorkload(context, *publish);
 			context.Expect(publish->phaseKind == TerraEngine::Scheduling::WorkerSystemPhaseKind::ProtectedCommit
 				&& publish->sameFrameVisibilityRequired,
@@ -493,6 +496,36 @@ namespace TerraEngine::Tests {
 				"A cancelled frame must not publish after a newer frame has replaced its declaration token.");
 			context.ExpectEqual(static_cast<std::size_t>(32U), presentationSystem.PublishedAnimatorCount(),
 				"Rejected late publication must preserve the newer complete presentation plan.");
+		});
+
+		registry.Add("Animation.Scheduler.RetainedTopologyRefreshesAnimationEpochEveryFrame", [](TestContext& context) {
+			TerraEngine::Animation::AnimationSystem& animationSystem = TerraEngine::Animation::AnimationSystem::Instance();
+			animationSystem.Initialize();
+			{
+				AnimatorMembershipGuard membership(animationSystem, 1U);
+				TerraEngine::Scheduling::SystemScheduler scheduler;
+				TerraEngine::Scheduling::SystemDeclaration declaration = animationSystem.SchedulerDeclaration();
+				// Isolate callback rearming from the full engine dependency graph; this
+				// fixture is specifically proving that one retained topology still asks
+				// AnimationSystem for fresh frame-epoch closures on every execution.
+				declaration.after.clear();
+				declaration.before.clear();
+				declaration.requiresFlushedSceneMutations = false;
+				scheduler.RegisterSystem(animationSystem, std::move(declaration));
+
+				std::uint64_t previousGeneration = animationSystem.AuthorityPublicationGeneration();
+				for(std::uint32_t frame = 0U; frame < 3U; ++frame)
+				{
+					const TerraEngine::Scheduling::FrameExecutionPlan plan =
+						scheduler.ExecuteFrameWorkloads(1.0F / 60.0F);
+					const std::uint64_t currentGeneration = animationSystem.AuthorityPublicationGeneration();
+					context.Expect(plan.valid && plan.completed,
+						"A retained scheduler topology must complete each animation frame.");
+					context.Expect(currentGeneration > previousGeneration,
+						"Refreshing retained JobGraph callbacks must advance animation authority publication every frame.");
+					previousGeneration = currentGeneration;
+				}
+			}
 		});
 
 		registry.Add("Animation.Scheduler.PresentationCapturesSameFrameSubmissionAndRejectsStaleGeneration", [](TestContext& context) {

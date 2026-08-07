@@ -12,6 +12,7 @@
 #include <array>
 #include <compare>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <string>
 #include <vector>
@@ -95,7 +96,11 @@ namespace TerraEngine::Renderer {
 	{
 		DeformedPageKey key;
 		std::uint64_t sourceStableInstanceId = 0u;
-		std::vector<std::uint64_t> consumerStableInstanceIds;
+		// Ordinary heterogeneous work has exactly one graphics owner. Keep that
+		// owner inline so thousands of independent pages do not each allocate a
+		// one-element vector; verified clone sharing uses the overflow vector.
+		std::uint64_t primaryConsumerStableInstanceId = 0u;
+		std::vector<std::uint64_t> additionalConsumerStableInstanceIds;
 		std::uint32_t sourceRecordIndex = kInvalidDeformationRecordIndex;
 		std::uint32_t vertexOffset = 0u;
 		std::uint32_t vertexCount = 0u;
@@ -105,6 +110,12 @@ namespace TerraEngine::Renderer {
 		std::uint32_t clusterCount = 0u;
 		std::uint64_t requestedViewMask = 0u;
 		bool historyValid = false;
+
+		[[nodiscard]] std::size_t ConsumerCount() const noexcept
+		{
+			return (primaryConsumerStableInstanceId != 0u ? 1u : 0u)
+				+ additionalConsumerStableInstanceIds.size();
+		}
 	};
 
 	// Four float4 values give every graphics pass a stable, naturally aligned
@@ -126,7 +137,7 @@ namespace TerraEngine::Renderer {
 	};
 
 	// These upload records mirror AnimatedVirtualGeometryAbi.hlsli exactly.
-	// Full-width generations are split by SPIR-V into uint2 lanes without
+	// Shader backends split full-width generations into two 32-bit lanes without
 	// narrowing renderer, scene, residency, or content identities.
 	struct alignas(16) GpuDeformationGenerationRecord
 	{
@@ -161,19 +172,59 @@ namespace TerraEngine::Renderer {
 		std::array<float, 4> positionScale{};
 	};
 
+	struct DeformationConsumerWorkRecord
+	{
+		std::uint64_t stableInstanceId = 0u;
+		std::uint32_t workIndex = 0u;
+	};
+
 	struct GpuDeformationPlan
 	{
 		std::uint64_t frameId = 0u;
 		std::uint64_t rendererGeneration = 0u;
 		std::vector<DeformationWorkRecord> work;
+		// Consumers are ordered once by instance, mesh, and page while the immutable
+		// plan is built. Backends use this table to publish grouped draw ownership
+		// without reconstructing and sorting the same crowd-sized relation.
+		std::vector<DeformationConsumerWorkRecord> orderedConsumers;
 		std::uint32_t totalVertexCount = 0u;
 		std::uint32_t totalMeshletBoundsCount = 0u;
 		std::uint32_t totalClusterBoundsCount = 0u;
 		std::uint32_t reusedDemandCount = 0u;
 		bool valid = true;
+		// Builders validate every demand before publishing the immutable plan. Once
+		// sealed, downstream boundaries can reuse that proof instead of rescanning
+		// the same records. Manually assembled plans leave this false and use the
+		// full validation path in IsComplete().
+		bool sealedComplete = false;
 		std::string rejectionReason;
 
 		[[nodiscard]] bool IsComplete() const noexcept;
+	};
+
+	// Accepts page demands as visibility discovers them and folds compatible
+	// consumers directly into the immutable work plan. This avoids requiring a
+	// second full-size demand array on live crowd frames; callers that already own
+	// an array can continue using BuildGpuDeformationPlan below.
+	class TERRAENGINE_API GpuDeformationPlanAccumulator
+	{
+	public:
+		GpuDeformationPlanAccumulator(
+			std::uint64_t frameId,
+			std::uint64_t rendererGeneration,
+			std::size_t expectedDemandCount = 0u);
+		~GpuDeformationPlanAccumulator();
+		GpuDeformationPlanAccumulator(GpuDeformationPlanAccumulator&&) noexcept;
+		GpuDeformationPlanAccumulator& operator=(GpuDeformationPlanAccumulator&&) noexcept;
+		GpuDeformationPlanAccumulator(const GpuDeformationPlanAccumulator&) = delete;
+		GpuDeformationPlanAccumulator& operator=(const GpuDeformationPlanAccumulator&) = delete;
+
+		[[nodiscard]] bool Add(const DeformationPageDemand& demand);
+		[[nodiscard]] GpuDeformationPlan Finish() &&;
+
+	private:
+		struct Impl;
+		std::unique_ptr<Impl> impl;
 	};
 
 	TERRAENGINE_API GpuDeformationPlan BuildGpuDeformationPlan(

@@ -1010,6 +1010,20 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 	}
 	meshCache.clear();
 
+	// Grouped render-instance streams are frame-slot scratch buffers rather than
+	// mesh-owned resources. Cleanup runs after the device-idle boundary, so each
+	// live slot can be released directly before VMA and the Vulkan device vanish.
+	for (VulkanBuffer& buffer : groupedInstanceBuffers)
+	{
+		DestroyBufferImmediate(buffer);
+	}
+	groupedInstanceCapacities.fill(0u);
+	if (groupedInstanceBufferIndex != INVALID_BINDLESS_BUFFER_INDEX)
+	{
+		freeBufferIndices.push_back(groupedInstanceBufferIndex);
+		groupedInstanceBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
+	}
+
 	// Virtual geometry packet resources are per-view, per-frame scratch buffers
 	// published through the bindless table. They are not owned by meshCache, so
 	// shutdown must drain them explicitly after the device is idle and before

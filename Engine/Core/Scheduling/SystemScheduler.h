@@ -64,9 +64,16 @@ namespace TerraEngine::Scheduling {
 	inline constexpr const char kResourceAnimationEvaluationPrograms[] = "AnimationEvaluationPrograms";
 	inline constexpr const char kResourceAnimationResidencyCapabilities[] = "AnimationResidencyCapabilities";
 	inline constexpr const char kResourceAnimationExecutionModes[] = "AnimationExecutionModes";
+	// Processing classes are separate from execution modes: a GPU visual model
+	// can still require complete CPU work when an authoritative consumer exists.
+	inline constexpr const char kResourceAnimationProcessingClasses[] = "AnimationProcessingClasses";
 	inline constexpr const char kResourceAnimationConsumerMasks[] = "AnimationConsumerMasks";
 	inline constexpr const char kResourceAnimationWorkPackets[] = "AnimationWorkPackets";
 	inline constexpr const char kResourceAnimationVisualPackets[] = "AnimationVisualPackets";
+	inline constexpr const char kResourceAnimationGpuVisualFastPackets[] = "AnimationGpuVisualFastPackets";
+	inline constexpr const char kResourceAnimationGpuVisualFastPrepared[] = "AnimationGpuVisualFastPrepared";
+	inline constexpr const char kResourceAnimationGpuTopology[] = "AnimationGpuTopology";
+	inline constexpr const char kResourceAnimationOptimizationEvidence[] = "AnimationOptimizationEvidence";
 	inline constexpr const char kResourceAnimationClipSegments[] = "AnimationClipSegments";
 	inline constexpr const char kResourceAnimationRollbackState[] = "AnimationRollbackState";
 	inline constexpr const char kResourceAnimationAuthoritativeOutputs[] = "AnimationAuthoritativeOutputs";
@@ -84,6 +91,14 @@ namespace TerraEngine::Scheduling {
 	// renderer-specific type system is available during startup.
 	inline constexpr const char kResourceVirtualGeometryQualityProfile[] = "VirtualGeometryQualityProfile";
 	inline constexpr const char kResourceRenderFrameSnapshot[] = "RenderFrameSnapshot";
+	// Retained topology is immutable across compatible generations. Workers write
+	// only frame-owned sidecars and groups before protected backend publication.
+	inline constexpr const char kResourcePersistentRenderTopology[] = "PersistentRenderTopology";
+	inline constexpr const char kResourceDynamicRenderInstanceCandidates[] = "DynamicRenderInstanceCandidates";
+	inline constexpr const char kResourceRenderCompatibilityGroups[] = "RenderCompatibilityGroups";
+	inline constexpr const char kResourceRenderInstanceStreamPublication[] = "RenderInstanceStreamPublication";
+	inline constexpr const char kResourceCachedRenderViewEvidence[] = "CachedRenderViewEvidence";
+	inline constexpr const char kResourceRenderOptimizationEvidence[] = "RenderOptimizationEvidence";
 	inline constexpr const char kResourceAnimatedObjectVisibilitySnapshot[] = "AnimatedObjectVisibilitySnapshot";
 	inline constexpr const char kResourceVirtualGeometryResidencySnapshots[] = "VirtualGeometryResidencySnapshots";
 	inline constexpr const char kResourceVirtualGeometryPageResidencySnapshots[] = "VirtualGeometryPageResidencySnapshots";

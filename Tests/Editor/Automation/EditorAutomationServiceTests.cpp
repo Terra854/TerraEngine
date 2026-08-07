@@ -23,6 +23,7 @@
 namespace TerraEngine::EditorTests
 {
 	using TerraEngine::Editor::Automation::EditorAutomationService;
+	using TerraEngine::Editor::Automation::AssistantCapability;
 	using TerraEngine::Editor::Automation::ErrorCategory;
 	using TerraEngine::Editor::Automation::WriteMode;
 
@@ -107,18 +108,28 @@ namespace TerraEngine::EditorTests
 			context.Expect(service.FindCapability("game_view.capture") != nullptr, "Game View capture should be registered.");
 			context.Expect(service.FindCapability("camera.capture_object") != nullptr, "Camera object capture should be registered.");
 			context.Expect(service.FindCapability("camera.capture_custom") != nullptr, "Custom camera capture should be registered.");
-			context.Expect(service.FindCapability("renderer.virtualGeometry.stats") != nullptr, "Virtual geometry renderer stats should be registered.");
+			const AssistantCapability* virtualGeometryStats = service.FindCapability("renderer.virtualGeometry.stats");
+			context.Expect(virtualGeometryStats != nullptr, "Virtual geometry renderer stats should be registered.");
+			if (virtualGeometryStats != nullptr)
+			{
+				// Tool discovery must advertise the supported Shadow selector so
+				// capture automation can request real shadow diagnostics directly.
+				context.Expect(virtualGeometryStats->inputSummary.find("Shadow") != std::string::npos,
+					"Virtual geometry stats discovery should advertise Shadow diagnostics.");
+			}
 		});
 
 		registry.Add("Editor.Automation.Service.VirtualGeometryStatsEndpointValidatesContract", [](TestContext& context) {
 			EditorAutomationService service;
-			const nlohmann::json invalidView = service.HandleTool(
+			const nlohmann::json shadowWithoutRenderer = service.HandleTool(
 				"renderer.virtualGeometry.stats",
 				{{"viewType", "Shadow"}},
 				WriteMode::ReadOnly,
-				"vg-stats-invalid-view");
-			context.Expect(!invalidView.value("ok", true), "Virtual geometry stats should reject unsupported view types.");
-			context.ExpectEqual(invalidView["error"].value("category", std::string()), std::string("validation"), "Unsupported view type should be a validation error.");
+				"vg-stats-shadow-missing-renderer");
+			// Shadow is a supported diagnostic selector. Without a renderer it must
+			// still fail as a missing target rather than being rejected as syntax.
+			context.Expect(!shadowWithoutRenderer.value("ok", true), "Shadow virtual geometry stats should require a live renderer.");
+			context.ExpectEqual(shadowWithoutRenderer["error"].value("category", std::string()), std::string("missing_target"), "A supported Shadow selector should fail as a missing target when no renderer exists.");
 
 			const nlohmann::json missingRenderer = service.HandleTool(
 				"renderer.virtualGeometry.stats",

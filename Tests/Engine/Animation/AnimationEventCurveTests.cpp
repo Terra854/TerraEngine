@@ -251,6 +251,29 @@ namespace TerraEngine::Tests {
 				"A non-finite morph/curve value must reject the entire candidate without publication.");
 		});
 
+		registry.Add("Animation.Snapshot.SharesExactVisualPayloadWithDistinctGeneration", [](TestContext& context) {
+			const AnimatorInstanceHandle leader{81U, 2U};
+			const AnimatorInstanceHandle follower{82U, 2U};
+			PoseBuffer leaderPose;
+			context.Expect(leaderPose.BeginWrite({1U, 0U, 0U, 0U, 8U},
+				{leader, 5U, {}, 3U, 42}) == AnimationStatus::Ok
+				&& leaderPose.Seal() == AnimationStatus::Ok,
+				"A sealed visual leader should provide a checked immutable payload.");
+			PoseBuffer followerPose;
+			context.Expect(followerPose.ShareSealedVisualPayloadFrom(
+				leaderPose, {follower, 9U, {}, 3U, 42}) == AnimationStatus::Ok
+				&& followerPose.Generation().animator == follower
+				&& followerPose.Generation().poseGeneration == 9U
+				&& followerPose.LocalTransforms().data() == leaderPose.LocalTransforms().data()
+				&& followerPose.ModelTransforms().data() == leaderPose.ModelTransforms().data()
+				&& followerPose.MutableLocalTransforms().empty(),
+				"Exact visual followers must alias sealed transform/palette input while retaining their own generation.");
+			PoseBuffer rejectedFollower;
+			context.Expect(rejectedFollower.ShareSealedVisualPayloadFrom(
+				leaderPose, {{}, 1U, {}, 3U, 42}) == AnimationStatus::InvalidArgument,
+				"A shared payload must reject an invalid follower identity before publication.");
+		});
+
 		registry.Add("Animation.RootMotion.ExtractsForwardReverseAndMultiLoopIntervals", [](TestContext& context) {
 			AnimationRootMotionExtractionRequest request;
 			request.animator = {9U, 1U};

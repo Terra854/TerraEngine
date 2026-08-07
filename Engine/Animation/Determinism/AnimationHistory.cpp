@@ -330,6 +330,20 @@ namespace TerraEngine::Animation {
 		}
 	}
 
+	void AnimationHistory::ClearMany(
+		std::span<const AnimatorInstanceHandle> animators) noexcept
+	{
+		if(animators.empty()) return;
+		std::scoped_lock lock(mutex_);
+		bool changed = false;
+		for(const AnimatorInstanceHandle animator : animators) {
+			changed = records_.erase(animator) != 0U || changed;
+		}
+		if(changed) {
+			revision_.fetch_add(1U, std::memory_order_acq_rel);
+		}
+	}
+
 	void AnimationHistory::ClearAll() noexcept
 	{
 		std::scoped_lock lock(mutex_);

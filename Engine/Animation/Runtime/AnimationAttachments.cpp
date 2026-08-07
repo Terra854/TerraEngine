@@ -184,6 +184,20 @@ namespace TerraEngine::Animation {
 		snapshots_.erase(snapshot, snapshots_.end());
 	}
 
+	void AnimationAttachmentSnapshotPublisher::RetireMany(
+		std::span<const AnimatorInstanceHandle> animators)
+	{
+		if(animators.empty()) return;
+		std::scoped_lock lock(mutex_);
+		for(const AnimatorInstanceHandle animator : animators) {
+			publicationRequests_.erase(animator);
+		}
+		std::erase_if(snapshots_, [animators](const AnimationBoneSocketSnapshot& value) {
+			return std::binary_search(
+				animators.begin(), animators.end(), value.animator);
+		});
+	}
+
 	void AnimationAttachmentSnapshotPublisher::Clear()
 	{
 		std::scoped_lock lock(mutex_);

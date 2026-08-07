@@ -26,6 +26,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -287,6 +288,24 @@ namespace
 	static_assert(sizeof(VirtualGeometryRasterMeshletSetupUpload) == 16u,
 		"Compute-raster meshlet work must remain one uint4.");
 
+	struct VirtualGeometryMeshPageKey
+	{
+		TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+		std::uint32_t pageId = 0u;
+
+		bool operator==(const VirtualGeometryMeshPageKey&) const = default;
+	};
+
+	struct VirtualGeometryMeshPageKeyHash
+	{
+		std::size_t operator()(const VirtualGeometryMeshPageKey& key) const noexcept
+		{
+			const std::size_t meshHash = std::hash<TerraEngine::UUID>{}(key.meshId);
+			return meshHash ^ (static_cast<std::size_t>(key.pageId)
+				+ 0x9e3779b9u + (meshHash << 6u) + (meshHash >> 2u));
+		}
+	};
+
 	std::uint64_t BuildVirtualGeometryPagePayloadResourceSignature(
 		const std::vector<GpuVirtualGeometryPacketRecord>& packets)
 	{
@@ -296,8 +315,21 @@ namespace
 			// identity that the pure upload planner cannot see.
 			signature ^= value + 0x9e3779b97f4a7c15ull + (signature << 6u) + (signature >> 2u);
 		};
+		// A crowd can contain thousands of packets that reference the same mesh
+		// page. Resource identity is page-owned, so resolve and hash each distinct
+		// mesh/page pair once while the packet signature above still covers every
+		// per-instance meshlet range and binding.
+		thread_local std::unordered_set<VirtualGeometryMeshPageKey,
+			VirtualGeometryMeshPageKeyHash> visitedPages;
+		visitedPages.clear();
+		visitedPages.reserve(std::min<std::size_t>(packets.size(), 256u));
 		for (const GpuVirtualGeometryPacketRecord& packet : packets)
 		{
+			if(!visitedPages.emplace(
+				VirtualGeometryMeshPageKey{ packet.meshId, packet.pageId }).second)
+			{
+				continue;
+			}
 			const Mesh* mesh = ResourceManager::Instance().GetMesh(packet.meshId);
 			// ResourceManager replaces a loaded Mesh instance on reload. Including
 			// both object and backing-storage identity invalidates cached page bytes
@@ -1692,7 +1724,12 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 		RetireVulkanDeformationFrameResources(resources);
 	}
 
-	std::vector<TerraEngine::Renderer::StaticPageKey> requestedStaticPages;
+	// Resource publication is serialized on the protected render thread. Retain
+	// scratch capacity across frames so a stable crowd does not repeatedly allocate
+	// and release the same page-key list before comparing the frame-slot cache.
+	thread_local std::vector<TerraEngine::Renderer::StaticPageKey>
+		requestedStaticPages;
+	requestedStaticPages.clear();
 	{
 		TERRAENGINE_PROFILE_SCOPE(
 			"Vulkan: Deformation Resolve Static Page Cache",
@@ -1744,14 +1781,6 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 	VkDeviceSize paletteBytes = 0u;
 	VkBuffer morphBuffer = VK_NULL_HANDLE;
 	VkDeviceSize morphBytes = 0u;
-	std::vector<TerraEngine::Renderer::
-		GpuDeformationGenerationRecord> generations;
-	std::vector<TerraEngine::Renderer::
-		GpuDeformationShaderWorkRecord> shaderWork;
-	std::vector<std::uint8_t> staticPageBytes;
-	std::vector<TerraEngine::Renderer::DeformedPageKey> workKeys;
-	std::vector<VulkanDeformationFrameResources::StaticPageUploadRecord>
-		rebuiltStaticPages;
 	struct RefinementRecord
 	{
 		std::uint32_t parentWorkIndex = 0u;
@@ -1767,7 +1796,22 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 		std::array<std::uint32_t, 2u> reserved{};
 	};
 	static_assert(sizeof(RefinementRecord) == 48u);
-	std::vector<RefinementRecord> refinement;
+	thread_local std::vector<TerraEngine::Renderer::
+		GpuDeformationGenerationRecord> generations;
+	thread_local std::vector<TerraEngine::Renderer::
+		GpuDeformationShaderWorkRecord> shaderWork;
+	thread_local std::vector<std::uint8_t> staticPageBytes;
+	thread_local std::vector<TerraEngine::Renderer::DeformedPageKey> workKeys;
+	thread_local std::vector<
+		VulkanDeformationFrameResources::StaticPageUploadRecord>
+		rebuiltStaticPages;
+	thread_local std::vector<RefinementRecord> refinement;
+	generations.clear();
+	shaderWork.clear();
+	staticPageBytes.clear();
+	workKeys.clear();
+	rebuiltStaticPages.clear();
+	refinement.clear();
 	try
 	{
 		generations.reserve(plan.work.size());
@@ -1804,7 +1848,9 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 		std::uint64_t paletteBytes = 0u;
 		std::uint64_t morphBytes = 0u;
 	};
-	std::unordered_map<std::uint64_t, CpuPaletteOffsets> cpuPaletteOffsets;
+	thread_local std::unordered_map<std::uint64_t, CpuPaletteOffsets>
+		cpuPaletteOffsets;
+	cpuPaletteOffsets.clear();
 	try
 	{
 		if(pendingCpuAnimationPlan != nullptr)
@@ -2057,6 +2103,10 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 		work.currentOutputOffset = source.vertexOffset;
 		work.previousOutputOffset = source.vertexOffset;
 		work.jointPaletteByteOffset = staticPage.jointPaletteByteOffset;
+		// Bounds validation needs the exact page identity, but batching removes the
+		// former per-page push constant. Reuse the reserved ABI lane so each workgroup
+		// reads its own identity without changing the frozen record layout.
+		work.reserved[0] = source.key.page.pageId;
 		work.positionOffset = staticPage.positionOffset;
 		work.positionScale = staticPage.positionScale;
 			shaderWork.push_back(work);
@@ -2385,83 +2435,56 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 		return false;
 	}
 
-	struct GraphicsGroupMember
+	const std::vector<TerraEngine::Renderer::DeformationConsumerWorkRecord>&
+		orderedWork = plan.orderedConsumers;
+	if(orderedWork.empty())
 	{
-		std::uint64_t stableInstanceId = 0u;
-		std::uint32_t workIndex = 0u;
-	};
-	std::vector<GraphicsGroupMember> orderedWork;
-	for(std::uint32_t workIndex = 0u; workIndex < plan.work.size(); ++workIndex)
-	{
-		const auto& work = plan.work[workIndex];
-		for(const std::uint64_t consumer : work.consumerStableInstanceIds)
-		{
-			orderedWork.push_back({consumer, workIndex});
-		}
+		return false;
 	}
-	std::sort(
-		orderedWork.begin(),
-		orderedWork.end(),
-		[&plan](const GraphicsGroupMember& left, const GraphicsGroupMember& right)
-		{
-			const auto& leftWork = plan.work[left.workIndex];
-			const auto& rightWork = plan.work[right.workIndex];
-			if(left.stableInstanceId != right.stableInstanceId)
-			{
-				return left.stableInstanceId < right.stableInstanceId;
-			}
-			if(leftWork.key.page.meshId
-				!= rightWork.key.page.meshId)
-			{
-				return leftWork.key.page.meshId
-					< rightWork.key.page.meshId;
-			}
-			return leftWork.key.page.pageId
-				< rightWork.key.page.pageId;
-		});
-	struct GroupRange
+	auto& groups = resources.graphicsGroupBuildScratch;
+	groups.clear();
+	groups.reserve(orderedWork.size());
 	{
-		std::uint64_t stableInstanceId = 0u;
-		TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
-		std::size_t begin = 0u;
-		std::size_t count = 0u;
-	};
-	std::vector<GroupRange> groups;
-	for(std::size_t orderedIndex = 0u;
-		orderedIndex < orderedWork.size();
-		++orderedIndex)
-	{
-		const GraphicsGroupMember& member = orderedWork[orderedIndex];
-		const auto& work = plan.work[member.workIndex];
-		if(groups.empty()
-			|| groups.back().stableInstanceId
-				!= member.stableInstanceId
-			|| groups.back().meshId != work.key.page.meshId)
+		TERRAENGINE_PROFILE_SCOPE(
+			"Vulkan: Deformation Build Graphics Groups",
+			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		for(std::size_t orderedIndex = 0u;
+			orderedIndex < orderedWork.size();
+			++orderedIndex)
 		{
-			groups.push_back({
-				member.stableInstanceId,
-				work.key.page.meshId,
-				orderedIndex,
-				0u });
+			const TerraEngine::Renderer::DeformationConsumerWorkRecord& member =
+				orderedWork[orderedIndex];
+			const auto& work = plan.work[member.workIndex];
+			if(groups.empty()
+				|| groups.back().stableInstanceId != member.stableInstanceId
+				|| groups.back().meshId != work.key.page.meshId)
+			{
+				groups.push_back({
+					member.stableInstanceId,
+					work.key.page.meshId,
+					orderedIndex,
+					0u });
+			}
+			++groups.back().count;
 		}
-		++groups.back().count;
 	}
 	constexpr std::uint32_t kBridgeHeaderWords = 16u;
 	constexpr std::uint32_t kBridgeRecordWords = 4u;
 	constexpr std::uint32_t kBridgeMarker = 0x4445464du;
-	std::vector<std::uint32_t> bridgeWords;
+	auto& bridgeWords = resources.graphicsBridgeScratch;
+	bridgeWords.clear();
 	bridgeWords.reserve(
 		groups.size() * kBridgeHeaderWords
 			+ orderedWork.size() * kBridgeRecordWords);
-	resources.graphicsGroups.clear();
-	resources.graphicsGroups.reserve(groups.size());
-	resources.graphicsGroupOffsets.clear();
-	resources.graphicsGroupOffsets.reserve(groups.size());
+	auto& publishedGroups = resources.graphicsGroupsScratch;
+	publishedGroups.clear();
+	publishedGroups.reserve(groups.size());
 	for(std::uint32_t groupIndex = 0u;
 		groupIndex < groups.size();
 		++groupIndex)
 	{
-		const GroupRange& group = groups[groupIndex];
+		const VulkanDeformationFrameResources::GraphicsGroupBuildRange& group =
+			groups[groupIndex];
 		const std::size_t headerOffset =
 			bridgeWords.size();
 		if(headerOffset
@@ -2519,14 +2542,10 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 			plan.totalVertexCount;
 		bridgeWords[headerOffset + 14u] = groupIndex;
 		bridgeWords[headerOffset + 15u] = kBridgeMarker;
-		resources.graphicsGroups.push_back({
+		publishedGroups.push_back({
 			group.stableInstanceId,
 			group.meshId,
 			static_cast<std::uint32_t>(headerOffset) });
-		resources.graphicsGroupOffsets.emplace(
-			VulkanDeformationFrameResources::GraphicsGroupKey{
-				group.stableInstanceId, group.meshId},
-			static_cast<std::uint32_t>(headerOffset));
 		for(std::size_t localRecord = 0u;
 			localRecord < group.count;
 			++localRecord)
@@ -2548,6 +2567,73 @@ bool VulkanContext::Impl::PublishVulkanDeformationResources(
 					? 0x02u
 					: 0u);
 		}
+	}
+	if(publishedGroups != resources.graphicsGroups)
+	{
+		TERRAENGINE_PROFILE_SCOPE(
+			"Vulkan: Deformation Publish Graphics Group Index",
+			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		resources.graphicsGroups.swap(publishedGroups);
+		resources.graphicsGroupOffsets.clear();
+		resources.graphicsGroupOffsets.reserve(resources.graphicsGroups.size());
+		std::uint32_t largestDenseSlot = 0u;
+		bool denseSlotsRepresentable = !resources.graphicsGroups.empty();
+		const std::uint64_t denseSlotLimit =
+			static_cast<std::uint64_t>(resources.graphicsGroups.size()) * 2u + 1024u;
+		for(const VulkanDeformationFrameResources::GraphicsGroup& group :
+			resources.graphicsGroups)
+		{
+			const std::uint64_t slot = group.stableInstanceId >> 32u;
+			if(slot > denseSlotLimit
+				|| slot > std::numeric_limits<std::uint32_t>::max())
+			{
+				denseSlotsRepresentable = false;
+				break;
+			}
+			largestDenseSlot = std::max(largestDenseSlot,
+				static_cast<std::uint32_t>(slot));
+		}
+		resources.graphicsGroupSlotHints.assign(
+			denseSlotsRepresentable
+				? static_cast<std::size_t>(largestDenseSlot) + 1u
+				: 0u,
+			{});
+		std::uint64_t groupSignature = 1469598103934665603ULL;
+		for(const VulkanDeformationFrameResources::GraphicsGroup& group :
+			resources.graphicsGroups)
+		{
+			resources.graphicsGroupOffsets.emplace(
+				VulkanDeformationFrameResources::GraphicsGroupKey{
+					group.stableInstanceId, group.meshId},
+				group.headerWordOffset);
+			const std::uint64_t slot = group.stableInstanceId >> 32u;
+			if(slot < resources.graphicsGroupSlotHints.size())
+			{
+				auto& hint = resources.graphicsGroupSlotHints[
+					static_cast<std::size_t>(slot)];
+				if(hint.stableInstanceId == 0u)
+				{
+					hint.stableInstanceId = group.stableInstanceId;
+					hint.meshId = group.meshId;
+					hint.headerWordOffset = group.headerWordOffset;
+				}
+				else if(hint.stableInstanceId != group.stableInstanceId
+					|| hint.meshId != group.meshId)
+				{
+					hint.ambiguous = true;
+				}
+			}
+			const auto combineGroupLane = [&groupSignature](std::uint64_t value)
+			{
+				groupSignature ^= value + 0x9e3779b97f4a7c15ULL
+					+ (groupSignature << 6U) + (groupSignature >> 2U);
+			};
+			combineGroupLane(group.stableInstanceId);
+			combineGroupLane(static_cast<std::uint64_t>(
+				std::hash<TerraEngine::UUID>{}(group.meshId)));
+			combineGroupLane(group.headerWordOffset);
+		}
+		resources.graphicsGroupSignature = groupSignature;
 	}
 	const VkDeviceSize bridgeBytes =
 		bridgeWords.size() * sizeof(std::uint32_t);
@@ -2660,7 +2746,7 @@ bool VulkanContext::Impl::PublishVulkanAnimationResources(
 				return false;
 			}
 			// Fold this dynamic fallback fact into the mandatory packet validation.
-			// Frames without hold-last work can then skip building a 4,000-entry pose
+			// Frames without hold-last work can then skip building a crowd-sized pose
 			// history identity vector that no shader will read.
 			requestsHoldLast = requestsHoldLast
 				|| TerraEngine::Animation::HasGpuAnimationFlag(
@@ -3437,6 +3523,7 @@ void VulkanContext::Impl::CompleteVulkanVirtualGeometryProductionDecode(std::uin
 }
 
 void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
+	VkCommandBuffer commandBuffer,
 	const FrameRenderData& frameData,
 	RenderViewType viewType,
 	std::uint32_t viewId,
@@ -3489,11 +3576,28 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 	}
 
 	VirtualGeometryGpuPacketFrameResources& resources = *resourceIt;
+	// Scene-view snapshots can borrow immutable packet evidence from the retained
+	// frame cache. Resolve that ownership detail once so the backend consumes the
+	// same value-oriented interface for borrowed and independently owned data.
+	const auto& gpuPackets = frameData.VirtualGeometryGpuPackets();
+	const auto& gpuBatches = frameData.VirtualGeometryGpuBatches();
+	const auto& gpuFrameSets = frameData.VirtualGeometryGpuFrameSets();
+	const auto& gpuCompactionDispatches =
+		frameData.VirtualGeometryGpuCompactionDispatches();
+	const auto& generatedSubmissions =
+		frameData.VirtualGeometryGeneratedSubmissions();
 	resources.frameId = frameId;
 	resources.viewType = viewType;
 	resources.viewId = viewId;
-	resources.live = !frameData.virtualGeometryGpuPackets.empty() || !frameData.virtualGeometryGpuBatches.empty();
+	resources.live = !gpuPackets.empty() || !gpuBatches.empty();
 	resources.retireAfterFrameId = frameId + static_cast<std::uint64_t>(MAX_FRAMES_IN_FLIGHT);
+	const bool reusePacketInputs = frameData.virtualGeometryPacketEvidenceSignature != 0u
+		&& resources.packetInputCacheValid
+		&& resources.packetInputReuseSignature
+			== frameData.virtualGeometryPacketEvidenceSignature
+		&& resources.packetBuffer.buffer != VK_NULL_HANDLE
+		&& resources.batchBuffer.buffer != VK_NULL_HANDLE
+		&& resources.traversalInstanceBuffer.buffer != VK_NULL_HANDLE;
 	// Capture, reflection, Scene, and Game command buffers may share a frame
 	// slot, but never a packet generation. Validate every immutable producer
 	// record against this output before allocating or binding Vulkan buffers so a
@@ -3503,20 +3607,26 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 			&& record.viewId == viewId;
 	};
 	const bool hasCanonicalFrameSet = std::any_of(
-		frameData.virtualGeometryGpuFrameSets.begin(),
-		frameData.virtualGeometryGpuFrameSets.end(),
+		gpuFrameSets.begin(),
+		gpuFrameSets.end(),
 		[&belongsToCurrentPublication](const GpuVirtualGeometryPacketFrameSet& frameSet) {
 			return belongsToCurrentPublication(frameSet);
 		});
+	// The retained signature was produced from the same immutable packet evidence
+	// that populated these frame-slot buffers. On a cache hit, validating every
+	// packet and batch again cannot discover a newer identity; validate the small
+	// frame-set header and reserve the full scans for changed evidence.
 	const bool canonicalPacketPublication = hasCanonicalFrameSet
-		&& std::all_of(frameData.virtualGeometryGpuPackets.begin(),
-			frameData.virtualGeometryGpuPackets.end(), belongsToCurrentPublication)
-		&& std::all_of(frameData.virtualGeometryGpuBatches.begin(),
-			frameData.virtualGeometryGpuBatches.end(), belongsToCurrentPublication)
-		&& std::all_of(frameData.virtualGeometryGpuCompactionDispatches.begin(),
-			frameData.virtualGeometryGpuCompactionDispatches.end(), belongsToCurrentPublication)
-		&& std::all_of(frameData.virtualGeometryGeneratedSubmissions.begin(),
-			frameData.virtualGeometryGeneratedSubmissions.end(), belongsToCurrentPublication);
+		&& (reusePacketInputs
+			|| (std::all_of(gpuPackets.begin(),
+			gpuPackets.end(), belongsToCurrentPublication)
+		&& std::all_of(gpuBatches.begin(),
+			gpuBatches.end(), belongsToCurrentPublication)
+		&& std::all_of(gpuCompactionDispatches.begin(),
+			gpuCompactionDispatches.end(), belongsToCurrentPublication)
+		&& std::all_of(generatedSubmissions.begin(),
+			generatedSubmissions.end(),
+			belongsToCurrentPublication)));
 	if(resources.live && !canonicalPacketPublication)
 	{
 		resources.live = false;
@@ -3588,142 +3698,221 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 		WriteMappedBuffer(allocator, buffer, source, requiredBytes);
 	};
 
-	std::vector<TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryPacketUploadRecord>
+	// Resource publication runs serially on the protected render thread. Retain
+	// its large transient arrays per thread so stable crowds reuse capacity instead
+	// of allocating and freeing several megabytes for every view and frame.
+	thread_local std::vector<TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryPacketUploadRecord>
 		packetUploadRecords;
-	packetUploadRecords.reserve(frameData.virtualGeometryGpuPackets.size());
-	for (const GpuVirtualGeometryPacketRecord& packet : frameData.virtualGeometryGpuPackets)
+	if(!reusePacketInputs)
 	{
-		packetUploadRecords.push_back(BuildVirtualGeometryPacketUploadRecord(packet));
-	}
-	for (const GpuVirtualGeometryBatchDescriptor& batch : frameData.virtualGeometryGpuBatches)
-	{
-		const std::size_t batchBegin = batch.packetOffset;
-		const std::size_t batchEnd = batchBegin + batch.packetCount;
-		if (batch.packetCount == 0u
-			|| batchBegin >= packetUploadRecords.size()
-			|| batchEnd > packetUploadRecords.size())
+		TERRAENGINE_PROFILE_SCOPE(
+			"Vulkan: Build Virtual Geometry Packet Upload",
+			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		packetUploadRecords.clear();
+		packetUploadRecords.reserve(gpuPackets.size());
+		for (const GpuVirtualGeometryPacketRecord& packet : gpuPackets)
 		{
-			continue;
+			packetUploadRecords.push_back(BuildVirtualGeometryPacketUploadRecord(packet));
 		}
-		// Graphics records the compatible batch at its first packet descriptor.
-		// Carry that same stable slot through compaction so the device can
-		// aggregate every surviving packet without relying on compacted order.
-		const std::uint32_t generatedCommandIndex =
-			packetUploadRecords[batchBegin].packetId;
-		const std::uint32_t generatedCommandTaskGroupCount =
-			(std::max(batch.submittedMeshlets, 1u) + 31u) / 32u;
-		for (std::size_t packetIndex = batchBegin; packetIndex < batchEnd; ++packetIndex)
+		for (const GpuVirtualGeometryBatchDescriptor& batch : gpuBatches)
 		{
-			packetUploadRecords[packetIndex].generatedCommandIndex =
-				generatedCommandIndex;
-			packetUploadRecords[packetIndex].generatedCommandTaskGroupCount =
-				generatedCommandTaskGroupCount;
+			const std::size_t batchBegin = batch.packetOffset;
+			const std::size_t batchEnd = batchBegin + batch.packetCount;
+			if (batch.packetCount == 0u
+				|| batchBegin >= packetUploadRecords.size()
+				|| batchEnd > packetUploadRecords.size())
+			{
+				continue;
+			}
+			// Graphics records the compatible batch at its first packet descriptor.
+			// Carry that same stable slot through compaction so the device can
+			// aggregate every surviving packet without relying on compacted order.
+			const std::uint32_t generatedCommandIndex =
+				packetUploadRecords[batchBegin].packetId;
+			const std::uint32_t generatedCommandTaskGroupCount =
+				(std::max(batch.submittedMeshlets, 1u) + 31u) / 32u;
+			for (std::size_t packetIndex = batchBegin; packetIndex < batchEnd; ++packetIndex)
+			{
+				packetUploadRecords[packetIndex].generatedCommandIndex =
+					generatedCommandIndex;
+				packetUploadRecords[packetIndex].generatedCommandTaskGroupCount =
+					generatedCommandTaskGroupCount;
+			}
+		}
+		{
+			TERRAENGINE_PROFILE_SCOPE(
+				"Vulkan: Upload Virtual Geometry Packets",
+				TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			ensureAndWriteBuffer(
+				resources.packetBuffer,
+				resources.packetCapacity,
+				packetUploadRecords.size(),
+				sizeof(TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryPacketUploadRecord),
+				packetUploadRecords.data(),
+				"Virtual Geometry GPU Packet Buffer");
 		}
 	}
-	ensureAndWriteBuffer(
-		resources.packetBuffer,
-		resources.packetCapacity,
-		packetUploadRecords.size(),
-		sizeof(TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryPacketUploadRecord),
-		packetUploadRecords.data(),
-		"Virtual Geometry GPU Packet Buffer");
 	// Traversal consumes a compact, fixed-stride instance table rather than the
 	// larger packet record. Every entry carries this frame resource generation so
 	// a stale table fail-opens to a bounded fallback request in the shader.
 	struct TraversalInstanceWords { std::uint32_t root, generation, flags, reserved; };
-	std::vector<TraversalInstanceWords> traversalInstances;
-	traversalInstances.reserve(frameData.virtualGeometryGpuPackets.size());
-	for(const GpuVirtualGeometryPacketRecord& packet : frameData.virtualGeometryGpuPackets) {
-		traversalInstances.push_back({ packet.clusterId, static_cast<std::uint32_t>(resources.resourceSerial), packet.flags, 0u });
+	thread_local std::vector<TraversalInstanceWords> traversalInstances;
+	if(!reusePacketInputs)
+	{
+		TERRAENGINE_PROFILE_SCOPE(
+			"Vulkan: Publish Virtual Geometry Traversal Inputs",
+			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		traversalInstances.clear();
+		traversalInstances.reserve(gpuPackets.size());
+		for(const GpuVirtualGeometryPacketRecord& packet : gpuPackets) {
+			traversalInstances.push_back({ packet.clusterId, static_cast<std::uint32_t>(resources.resourceSerial), packet.flags, 0u });
+		}
+		ensureAndWriteBuffer(resources.traversalInstanceBuffer, resources.traversalInstanceCapacity,
+			traversalInstances.size(), sizeof(TraversalInstanceWords), traversalInstances.data(), "Virtual Geometry Traversal Instance Buffer");
+		ensureAndWriteBuffer(
+			resources.batchBuffer,
+			resources.batchCapacity,
+			gpuBatches.size(),
+			sizeof(GpuVirtualGeometryBatchDescriptor),
+			gpuBatches.data(),
+			"Virtual Geometry GPU Batch Descriptor Buffer");
+		resources.packetInputReuseSignature =
+			frameData.virtualGeometryPacketEvidenceSignature;
+		resources.packetInputCacheValid = resources.packetBuffer.buffer != VK_NULL_HANDLE
+			&& resources.batchBuffer.buffer != VK_NULL_HANDLE
+			&& resources.traversalInstanceBuffer.buffer != VK_NULL_HANDLE;
 	}
-	std::vector<std::uint32_t> traversalRequests(std::max<std::size_t>(3u, traversalInstances.size() * 3u), 0u);
-	std::array<std::uint32_t, 4> traversalCounters{};
-	ensureAndWriteBuffer(resources.traversalInstanceBuffer, resources.traversalInstanceCapacity,
-		traversalInstances.size(), sizeof(TraversalInstanceWords), traversalInstances.data(), "Virtual Geometry Traversal Instance Buffer");
-	ensureAndWriteBuffer(resources.traversalRequestBuffer, resources.traversalRequestCapacity,
-		traversalRequests.size(), sizeof(std::uint32_t), traversalRequests.data(), "Virtual Geometry Traversal Request Buffer");
+	{
+		TERRAENGINE_PROFILE_SCOPE(
+			"Vulkan: Prepare Virtual Geometry Device Outputs",
+			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+	const std::size_t traversalRequestCount =
+		std::max<std::size_t>(
+			3u, gpuPackets.size() * 3u);
+	ensureBuffer(resources.traversalRequestBuffer, resources.traversalRequestCapacity,
+		traversalRequestCount, sizeof(std::uint32_t), "Virtual Geometry Traversal Request Buffer",
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
 	std::size_t traversalCounterCapacity = 4u;
-	ensureAndWriteBuffer(resources.traversalCounterBuffer, traversalCounterCapacity,
-		traversalCounters.size(), sizeof(std::uint32_t), traversalCounters.data(), "Virtual Geometry Traversal Counter Buffer");
-	ensureAndWriteBuffer(
-		resources.batchBuffer,
-		resources.batchCapacity,
-		frameData.virtualGeometryGpuBatches.size(),
-		sizeof(GpuVirtualGeometryBatchDescriptor),
-		frameData.virtualGeometryGpuBatches.data(),
-		"Virtual Geometry GPU Batch Descriptor Buffer");
-	// Compaction is the only producer of this output. Starting from zero makes
-	// every rejected or unused slot explicit zero work for indirect generation.
-	std::vector<TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryPacketUploadRecord>
-		compactedPacketUploadRecords(packetUploadRecords.size());
-	ensureAndWriteBuffer(
+	ensureBuffer(resources.traversalCounterBuffer, traversalCounterCapacity,
+		4u, sizeof(std::uint32_t), "Virtual Geometry Traversal Counter Buffer",
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+	// Compaction is the only producer of this output. The command buffer clears
+	// the retained allocation below, avoiding a large temporary zero array and a
+	// host-to-device copy for data that the device immediately overwrites.
+	ensureBuffer(
 		resources.compactedPacketBuffer,
 		resources.compactedPacketCapacity,
-		compactedPacketUploadRecords.size(),
+		gpuPackets.size(),
 		sizeof(TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryPacketUploadRecord),
-		compactedPacketUploadRecords.data(),
-		"Virtual Geometry GPU Compacted Packet Buffer");
-	// The compute shader owns these output ranges. Clear their CPU-mapped memory
-	// before recording so counters cannot inherit a prior frame's values; the
-	// existing CPU draw records remain the independent fail-open authority.
-	std::vector<std::uint32_t> generatedSubmissionWords(
-		std::max<std::size_t>(4u, frameData.virtualGeometryGpuPackets.size() * 4u), 0u);
-	std::vector<std::uint32_t> counterReadbackWords(4u, 0u);
-	ensureAndWriteBuffer(
+		"Virtual Geometry GPU Compacted Packet Buffer",
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+	// The compute shader owns these output ranges. Clear them in device command
+	// order so counters cannot inherit a prior frame's values;
+	// the existing CPU draw records remain the independent fail-open authority.
+	const std::size_t generatedSubmissionWordCount =
+		std::max<std::size_t>(4u, gpuPackets.size() * 4u);
+	ensureBuffer(
 		resources.generatedSubmissionBuffer,
 		resources.generatedSubmissionCapacity,
-		generatedSubmissionWords.size(),
+		generatedSubmissionWordCount,
 		sizeof(std::uint32_t),
-		generatedSubmissionWords.data(),
 		"Virtual Geometry Generated Submission Buffer",
-		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT
+			| VK_BUFFER_USAGE_TRANSFER_DST_BIT);
 	// Older frame-slot resources predate indirect usage. Recreate before any
 	// generated command can be consumed so Vulkan validation never sees a
-	// storage-only buffer at an indirect boundary.
-	if(!resources.generatedSubmissionSupportsIndirect && resources.generatedSubmissionBuffer.buffer != VK_NULL_HANDLE) {
+	// storage-only buffer at an indirect or transfer-clear boundary.
+	if(!resources.generatedSubmissionSupportsIndirectAndTransferClear
+		&& resources.generatedSubmissionBuffer.buffer != VK_NULL_HANDLE) {
 		RetireBuffer(resources.generatedSubmissionBuffer);
 		resources.generatedSubmissionBuffer = CreateBuffer(
-			static_cast<VkDeviceSize>(generatedSubmissionWords.size() * sizeof(std::uint32_t)),
-			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+			static_cast<VkDeviceSize>(generatedSubmissionWordCount * sizeof(std::uint32_t)),
+			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT
+				| VK_BUFFER_USAGE_TRANSFER_DST_BIT,
 			VMA_MEMORY_USAGE_CPU_TO_GPU, "Virtual Geometry Generated Submission Buffer");
-		resources.generatedSubmissionCapacity = generatedSubmissionWords.size();
-		WriteMappedBuffer(allocator, resources.generatedSubmissionBuffer, generatedSubmissionWords.data(),
-			static_cast<VkDeviceSize>(generatedSubmissionWords.size() * sizeof(std::uint32_t)));
-		resources.generatedSubmissionSupportsIndirect = true;
+		resources.generatedSubmissionCapacity = generatedSubmissionWordCount;
+		resources.generatedSubmissionSupportsIndirectAndTransferClear = true;
 	}
-	ensureAndWriteBuffer(
+	ensureBuffer(
 		resources.counterReadbackBuffer,
 		resources.counterReadbackCapacity,
-		counterReadbackWords.size(),
+		4u,
 		sizeof(std::uint32_t),
-		counterReadbackWords.data(),
-		"Virtual Geometry Counter Readback Buffer");
+		"Virtual Geometry Counter Readback Buffer",
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
 	std::array<std::uint32_t, 3> zeroWorkIndirect{};
 	std::size_t zeroWorkIndirectCapacity = 3u;
 	if(resources.zeroWorkIndirectBuffer.buffer == VK_NULL_HANDLE) {
 		resources.zeroWorkIndirectBuffer = CreateBuffer(sizeof(zeroWorkIndirect),
 			VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
 			VMA_MEMORY_USAGE_CPU_TO_GPU, "Virtual Geometry Zero Work Indirect Buffer");
+		// The fallback command is immutable zero work. Initialize a new allocation
+		// once instead of remapping and rewriting the same three words every frame.
+		WriteMappedBuffer(allocator, resources.zeroWorkIndirectBuffer,
+			zeroWorkIndirect.data(), sizeof(zeroWorkIndirect));
 	}
-	WriteMappedBuffer(allocator, resources.zeroWorkIndirectBuffer, zeroWorkIndirect.data(), sizeof(zeroWorkIndirect));
+
+	if(commandBuffer != VK_NULL_HANDLE)
+	{
+		// These ranges are produced by the traversal, compaction, and indirect
+		// stages. Clearing them on the device removes multi-megabyte CPU writes
+		// while preserving the same explicit zero-before-use contract.
+		const std::array<const VulkanBuffer*, 5u> deviceClearedBuffers{
+			&resources.traversalRequestBuffer,
+			&resources.traversalCounterBuffer,
+			&resources.compactedPacketBuffer,
+			&resources.generatedSubmissionBuffer,
+			&resources.counterReadbackBuffer };
+		for(const VulkanBuffer* buffer : deviceClearedBuffers)
+		{
+			if(buffer->buffer != VK_NULL_HANDLE && buffer->size != 0u)
+			{
+				vkCmdFillBuffer(commandBuffer, buffer->buffer, 0u, buffer->size, 0u);
+			}
+		}
+		VkMemoryBarrier clearBarrier{};
+		clearBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+		clearBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		clearBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT
+			| VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+		vkCmdPipelineBarrier(commandBuffer,
+			VK_PIPELINE_STAGE_TRANSFER_BIT,
+			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+				| VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+			0u, 1u, &clearBarrier, 0u, nullptr, 0u, nullptr);
+	}
+	}
 
 	// The page-local virtual geometry payload appends a shader-decodable stream
 	// after the packet descriptor table. Building that stream performs remapping
 	// and temporary allocations, so keep the result in this frame slot when
 	// the packet cut and loaded mesh instances are unchanged.
-	const std::uint64_t pagePayloadSignature =
-		BuildVirtualGeometryPagePayloadResourceSignature(frameData.virtualGeometryGpuPackets);
-	const bool reusePagePayload = TerraEngine::Renderer::Vulkan::CanReuseVirtualGeometryPagePayload(
-		resources.pagePayloadReuseSignature,
-		pagePayloadSignature,
-		resources.pagePayloadCacheValid,
-		resources.pagePayloadBuffer.buffer != VK_NULL_HANDLE);
+	const bool reusePagePayloadEvidence =
+		frameData.virtualGeometryPacketEvidenceSignature != 0u
+		&& resources.pagePayloadCacheValid
+		&& resources.pagePayloadEvidenceSignature
+			== frameData.virtualGeometryPacketEvidenceSignature;
+	std::uint64_t pagePayloadSignature = resources.pagePayloadReuseSignature;
+	if(!reusePagePayloadEvidence)
+	{
+		TERRAENGINE_PROFILE_SCOPE(
+			"Vulkan: Build Virtual Geometry Page Payload Signature",
+			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		pagePayloadSignature = BuildVirtualGeometryPagePayloadResourceSignature(
+			gpuPackets);
+	}
+	const bool reusePagePayload = reusePagePayloadEvidence
+		|| TerraEngine::Renderer::Vulkan::CanReuseVirtualGeometryPagePayload(
+			resources.pagePayloadReuseSignature,
+			pagePayloadSignature,
+			resources.pagePayloadCacheValid,
+			resources.pagePayloadBuffer.buffer != VK_NULL_HANDLE);
 	if (!reusePagePayload)
 	{
 		VirtualGeometryPageLocalPayloadBuildResult pagePayloadBuild;
 		{
 			TERRAENGINE_PROFILE_SCOPE("Vulkan: Build Virtual Geometry Page Payload", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-			pagePayloadBuild = BuildVirtualGeometryPageLocalPayloadWords(frameData.virtualGeometryGpuPackets);
+			pagePayloadBuild = BuildVirtualGeometryPageLocalPayloadWords(gpuPackets);
 		}
 		resources.pagePayloadBytesByMesh = std::move(pagePayloadBuild.bytesByMesh);
 		{
@@ -3739,6 +3928,11 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 		resources.pagePayloadReuseSignature = pagePayloadSignature;
 		resources.pagePayloadCacheValid = resources.pagePayloadBuffer.buffer != VK_NULL_HANDLE
 			&& !pagePayloadBuild.words.empty();
+	}
+	if(resources.pagePayloadCacheValid)
+	{
+		resources.pagePayloadEvidenceSignature =
+			frameData.virtualGeometryPacketEvidenceSignature;
 	}
 
 	auto publishBindlessBufferForCurrentFrame = [&](
@@ -3855,7 +4049,7 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 		std::min<std::size_t>(resources.packetCapacity, std::numeric_limits<std::uint32_t>::max()));
 	latestVirtualGeometryExecutorPlan =
 		TerraEngine::Renderer::Vulkan::BuildVulkanVirtualGeometryExecutorPlan(
-			static_cast<std::uint32_t>(std::min<std::size_t>(frameData.virtualGeometryGpuPackets.size(), std::numeric_limits<std::uint32_t>::max())),
+			static_cast<std::uint32_t>(std::min<std::size_t>(gpuPackets.size(), std::numeric_limits<std::uint32_t>::max())),
 			boundedCapacity,
 			false,
 			executorResources,
@@ -3878,17 +4072,22 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 				TerraEngine::Renderer::VirtualGeometryBackendStage::Compaction);
 	}
 
-	const bool productionComputeRasterRequested = std::any_of(
-		frameData.virtualGeometryGpuPackets.begin(),
-		frameData.virtualGeometryGpuPackets.end(),
-		[](const GpuVirtualGeometryPacketRecord& packet)
-		{
-			const std::uint32_t route =
-				(packet.flags >> kVirtualGeometryRasterRouteShift)
-				& kVirtualGeometryRasterRouteMask;
-			return route == static_cast<std::uint32_t>(
-				TerraEngine::Renderer::VirtualGeometryRasterRoute::Compute);
-		});
+	if(!reusePacketInputs)
+	{
+		resources.productionComputeRasterRequested = std::any_of(
+			gpuPackets.begin(),
+			gpuPackets.end(),
+			[](const GpuVirtualGeometryPacketRecord& packet)
+			{
+				const std::uint32_t route =
+					(packet.flags >> kVirtualGeometryRasterRouteShift)
+						& kVirtualGeometryRasterRouteMask;
+				return route == static_cast<std::uint32_t>(
+					TerraEngine::Renderer::VirtualGeometryRasterRoute::Compute);
+			});
+	}
+	const bool productionComputeRasterRequested =
+		resources.productionComputeRasterRequested;
 	if(!frameData.virtualGeometryVisibilityDiagnosticsRequested
 		&& !productionComputeRasterRequested)
 	{
@@ -3906,16 +4105,6 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 	constexpr std::size_t kMaximumVisibilityPrimitiveCount = 1u << 20u;
 	constexpr std::uint64_t kMaximumVisibilityPixelCount = 1u << 24u;
 	constexpr std::uint32_t kRasterDoubleSidedFlag = 1u << 31u;
-	std::vector<VirtualGeometryRasterPacketSetupUpload> visibilityPackets;
-	std::vector<VirtualGeometryRasterMeshletSetupUpload> visibilityMeshlets;
-	visibilityPackets.reserve(frameData.virtualGeometryGpuPackets.size());
-	std::unordered_multimap<TerraEngine::UUID, const DrawCommand*>
-		commandsByObject;
-	commandsByObject.reserve(frameData.commands.size());
-	for(const DrawCommand& command : frameData.commands)
-	{
-		commandsByObject.emplace(command.objectId, std::addressof(command));
-	}
 	const VulkanDeformationFrameResources* currentDeformationResources = nullptr;
 	if(deformationComputeRecordedForCurrentFrame
 		&& pendingDeformationImmutablePlan != nullptr
@@ -3930,31 +4119,72 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 			currentDeformationResources = std::addressof(resources);
 		}
 	}
-	std::size_t visibilityTriangleCount = 0u;
-	for(const GpuVirtualGeometryPacketRecord& packet :
-		frameData.virtualGeometryGpuPackets)
+	std::uint64_t visibilityInputSignature =
+		frameData.virtualGeometryVisibilitySetupSignature;
+	const auto combineVisibilityLane = [&visibilityInputSignature](
+		std::uint64_t value)
 	{
-		if(visibilityTriangleCount >= kMaximumVisibilityPrimitiveCount)
+		visibilityInputSignature ^= value + 0x9e3779b97f4a7c15ULL
+			+ (visibilityInputSignature << 6U)
+			+ (visibilityInputSignature >> 2U);
+	};
+	combineVisibilityLane(statsSlotIndex);
+	combineVisibilityLane(lightDataOffset);
+	combineVisibilityLane(clusterDataOffset);
+	combineVisibilityLane(lightIndexOffset);
+	combineVisibilityLane(activeDeformationGraphicsBufferIndex);
+	combineVisibilityLane(currentDeformationResources != nullptr
+		? currentDeformationResources->graphicsGroupSignature
+		: 0u);
+	const bool reuseVisibilityInputs =
+		frameData.virtualGeometryVisibilitySetupSignature != 0u
+		&& resources.visibilityInputCacheValid
+		&& resources.visibilityInputReuseSignature == visibilityInputSignature;
+	std::size_t visibilityTriangleCount =
+		reuseVisibilityInputs ? resources.visibilityInputTriangleCount : 0u;
+	std::size_t visibilityMeshletCount =
+		reuseVisibilityInputs ? resources.visibilityInputMeshletCount : 0u;
+	if(!reuseVisibilityInputs)
+	{
+		thread_local std::vector<VirtualGeometryRasterPacketSetupUpload>
+			visibilityPackets;
+		thread_local std::vector<VirtualGeometryRasterMeshletSetupUpload>
+			visibilityMeshlets;
+		visibilityPackets.clear();
+		visibilityMeshlets.clear();
+		visibilityPackets.reserve(gpuPackets.size());
+		visibilityMeshlets.reserve(gpuPackets.size());
+		thread_local std::unordered_multimap<TerraEngine::UUID, const DrawCommand*>
+			commandsByObject;
+		commandsByObject.clear();
+		commandsByObject.reserve(frameData.commands.size());
+		for(const DrawCommand& command : frameData.commands)
 		{
-			break;
+			commandsByObject.emplace(command.objectId, std::addressof(command));
 		}
-		const std::uint32_t packetRoute =
-			(packet.flags >> kVirtualGeometryRasterRouteShift)
-			& kVirtualGeometryRasterRouteMask;
-		if(productionComputeRasterRequested
-			&& packetRoute != static_cast<std::uint32_t>(
-				TerraEngine::Renderer::VirtualGeometryRasterRoute::Compute))
+		for(const GpuVirtualGeometryPacketRecord& packet : gpuPackets)
 		{
-			continue;
-		}
-		const Mesh* mesh = ResourceManager::Instance().GetMesh(packet.meshId);
-		const DrawCommand* commandIt = nullptr;
-		const auto [commandBegin, commandRangeEnd] =
-			commandsByObject.equal_range(packet.objectId);
-		for(auto candidate = commandBegin;
-			candidate != commandRangeEnd && commandIt == nullptr; ++candidate)
-		{
-			const DrawCommand& command = *candidate->second;
+			if(visibilityTriangleCount >= kMaximumVisibilityPrimitiveCount)
+			{
+				break;
+			}
+			const std::uint32_t packetRoute =
+				(packet.flags >> kVirtualGeometryRasterRouteShift)
+				& kVirtualGeometryRasterRouteMask;
+			if(productionComputeRasterRequested
+				&& packetRoute != static_cast<std::uint32_t>(
+					TerraEngine::Renderer::VirtualGeometryRasterRoute::Compute))
+			{
+				continue;
+			}
+			const Mesh* mesh = ResourceManager::Instance().GetMesh(packet.meshId);
+			const DrawCommand* commandIt = nullptr;
+			const auto [commandBegin, commandRangeEnd] =
+				commandsByObject.equal_range(packet.objectId);
+			for(auto candidate = commandBegin;
+				candidate != commandRangeEnd && commandIt == nullptr; ++candidate)
+			{
+				const DrawCommand& command = *candidate->second;
 				const std::uint64_t commandEnd =
 					static_cast<std::uint64_t>(command.virtualMeshletOffset)
 					+ command.virtualMeshletCount;
@@ -3968,11 +4198,11 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 				{
 					commandIt = candidate->second;
 				}
-		}
-		if(mesh == nullptr || commandIt == nullptr)
-		{
-			continue;
-		}
+			}
+			if(mesh == nullptr || commandIt == nullptr)
+			{
+				continue;
+			}
 		const glm::mat4 worldTransform = commandIt->modelMatrix;
 		const std::uint32_t materialIndex = materialIndexMap.contains(
 			packet.materialId)
@@ -4102,6 +4332,7 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 		resources.visibilitySetupMeshletCapacity, visibilityMeshlets.size(),
 		sizeof(VirtualGeometryRasterMeshletSetupUpload), visibilityMeshlets.data(),
 		"Virtual Geometry Compute Raster Meshlet Setup Buffer");
+	visibilityMeshletCount = visibilityMeshlets.size();
 	if(visibilityTriangleCount != 0u)
 	{
 		const VkDeviceSize requiredTriangleBytes = static_cast<VkDeviceSize>(
@@ -4119,13 +4350,22 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 			resources.visibilityTriangleCapacity = visibilityTriangleCount;
 		}
 	}
+	resources.visibilityInputReuseSignature = visibilityInputSignature;
+	resources.visibilityInputTriangleCount = visibilityTriangleCount;
+	resources.visibilityInputMeshletCount = visibilityMeshletCount;
+	resources.visibilityInputCacheValid =
+		frameData.virtualGeometryVisibilitySetupSignature != 0u
+		&& resources.visibilitySetupPacketBuffer.buffer != VK_NULL_HANDLE
+		&& resources.visibilitySetupMeshletBuffer.buffer != VK_NULL_HANDLE
+		&& resources.visibilityTriangleBuffer.buffer != VK_NULL_HANDLE;
+	}
 
 	// Visibility records are pixel-addressed, not primitive-addressed. Preserve
 	// the view's real aspect ratio and fail closed instead of allocating an
 	// unbounded target supplied by malformed automation input.
 	glm::uvec2 visibilityTargetSize(0u);
 	for(const GpuVirtualGeometryPacketFrameSet& frameSet :
-		frameData.virtualGeometryGpuFrameSets)
+		gpuFrameSets)
 	{
 		if(frameSet.viewType == viewType && frameSet.viewId == viewId)
 		{
@@ -4289,7 +4529,7 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 			std::numeric_limits<std::uint32_t>::max())),
 		boundedVisibilityCapacity,
 		static_cast<std::uint32_t>(std::min<std::size_t>(
-			visibilityMeshlets.size(),
+			visibilityMeshletCount,
 			std::numeric_limits<std::uint32_t>::max())),
 		boundedVisibilityTargetSize.x,
 		boundedVisibilityTargetSize.y,
@@ -6391,6 +6631,7 @@ void VulkanContext::Impl::EnsurePipeline(
 	pipeline.supportsDefaultPushConstants = supportsDefaultPushConstants;
 	pipeline.defaultPushConstantStages = defaultPushConstantStages;
 	pipeline.hasTaskStage = hasTaskStage;
+	pipeline.usesConventionalVisibilityIdentity = useConventionalIdentityVariant;
 
 	pipelineCache[renderPass][*key] = std::move(pipeline);
 }

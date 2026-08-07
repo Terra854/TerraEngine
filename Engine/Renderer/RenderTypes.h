@@ -9,11 +9,13 @@
 #include <algorithm>
 #include <array>
 #include <compare>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <optional>
 #include <vector>
 #include <cmath>
@@ -1120,6 +1122,10 @@ struct VirtualGeometryClusterPacket
 	std::uint32_t viewId = 0u;
 	RenderViewType viewType = RenderViewType::Game;
 	TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+	// The canonical snapshot slot avoids recovering the same object through a
+	// UUID lookup in later per-view passes. Producers without snapshot context
+	// leave the sentinel in place so consumers can safely use their fallback.
+	std::uint32_t renderableIndex = std::numeric_limits<std::uint32_t>::max();
 	TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
 	TerraEngine::UUID materialId = TerraEngine::EMPTY_UUID;
 	std::uint32_t selectedLod = 0u;
@@ -1214,6 +1220,8 @@ struct GpuVirtualGeometryPacketRecord
 	RenderViewType viewType = RenderViewType::Game;
 	std::uint64_t frameId = 0u;
 	TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+	// This CPU-only routing hint is not part of the shader packet ABI.
+	std::uint32_t renderableIndex = std::numeric_limits<std::uint32_t>::max();
 	TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
 	TerraEngine::UUID materialId = TerraEngine::EMPTY_UUID;
 	std::uint32_t selectedLod = 0u;
@@ -1291,6 +1299,9 @@ namespace TerraEngine::Renderer {
 		AuthoritativeVisibilityPickStatus status = AuthoritativeVisibilityPickStatus::Unavailable;
 		glm::uvec2 pixel = glm::uvec2(0u);
 		std::optional<::VirtualGeometryVisibilityPick> pick;
+		// Identifies whether the fence-proven result came from the dedicated capture
+		// target rather than the visible Scene/Game editor target.
+		bool dedicatedCaptureTarget = false;
 		std::string reason;
 	};
 
@@ -2418,6 +2429,10 @@ struct DrawCommand
 	std::uint32_t meshDataIndex = 0u;
 	std::uint32_t textureIndex = 0u;
 	TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+	// One-based key into the immutable frame snapshot's conventional visibility
+	// table. The GPU writes this key to the typed identity target; it is never a
+	// pointer or a live ObjectManager lookup.
+	std::uint32_t conventionalVisibilityIdentityIndex = 0u;
 	// Route preparation copies the selected representation onto every cached
 	// draw command. View selection must consult this value so a page-less,
 	// direct-resident TEMF never enters hierarchy, page, or VG raster work.
@@ -2622,6 +2637,198 @@ struct ClusterValidationSnapshot
 	bool valid = false;
 };
 
+// RenderGroupRejectionReason is intentionally numeric: the frame hot path
+// accumulates these values without allocating diagnostic strings. Editor and
+// profiler presentation may translate the code after the frame is complete.
+enum class RenderGroupRejectionReason : std::uint32_t
+{
+	None = 0u,
+	IncompleteKey = 1u,
+	Singleton = 2u,
+	UnsupportedPipeline = 3u,
+	MissingAnimationBridge = 4u,
+	StaleGeneration = 5u,
+	InstanceRange = 6u,
+	InstanceStreamAllocation = 7u,
+	RendererRecovery = 8u
+};
+
+// SharedRenderGroupKey contains every outcome-affecting value that is shared
+// by a grouped submission. Per-instance differences deliberately live in
+// RenderInstanceRecord, so they cannot accidentally select another owner's
+// transform, animation bridge, LOD, picking identity, or debug state.
+struct SharedRenderGroupKey
+{
+	TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+	TerraEngine::UUID materialId = TerraEngine::EMPTY_UUID;
+	std::uint64_t meshGeneration = 0u;
+	std::uint64_t materialGeneration = 0u;
+	std::uint64_t pipelineGeneration = 0u;
+	std::uint64_t residencyGeneration = 0u;
+	std::uint64_t rendererGeneration = 0u;
+	std::uint32_t geometryRoute = 0u;
+	std::uint32_t animationExecutionClass = 0u;
+	std::uint32_t renderPassVariant = 0u;
+	std::uint32_t viewVariant = 0u;
+	std::uint32_t qualityVariant = 0u;
+	std::uint32_t debugVariant = 0u;
+	std::uint32_t pipelineFlags = 0u;
+	std::uint32_t reserved = 0u;
+
+	[[nodiscard]] bool IsComplete() const noexcept
+	{
+		return meshId != TerraEngine::EMPTY_UUID
+			&& materialId != TerraEngine::EMPTY_UUID
+			&& meshGeneration != 0u
+			&& materialGeneration != 0u
+			&& pipelineGeneration != 0u
+			&& residencyGeneration != 0u
+			&& rendererGeneration != 0u;
+	}
+
+	auto operator<=>(const SharedRenderGroupKey&) const = default;
+};
+
+// This ABI record is copied as one contiguous initialized range into a
+// frame-slot-owned storage buffer. Keep it made solely of C++/HLSL compatible
+// scalar and GLM vector values; both sides assert its offsets explicitly.
+struct alignas(16) RenderInstanceRecord
+{
+	glm::mat4 modelMatrix = glm::mat4(1.0f);
+	glm::vec4 editorTint = glm::vec4(0.0f);
+	glm::uvec4 objectIdentity = glm::uvec4(0u);
+	glm::uvec4 materialAndTexture = glm::uvec4(0u);
+	glm::uvec4 animationSelectors = glm::uvec4(0u);
+	glm::uvec4 geometrySelectors = glm::uvec4(0u);
+	// Dense-VG groups retain every selected packet/page outcome per owner. These
+	// fields are runtime ABI data, never a persisted asset representation.
+	glm::uvec4 virtualGeometrySelectors = glm::uvec4(0u);
+	glm::uvec4 virtualGeometryPayloadSelectors = glm::uvec4(0u);
+
+	// ABI words used by materialAndTexture.
+	static constexpr std::uint32_t kMaterialSelectorWord = 0u;
+	static constexpr std::uint32_t kTextureSelectorWord = 1u;
+	static constexpr std::uint32_t kPickingIdentityWord = 2u;
+	static constexpr std::uint32_t kInstanceFlagsWord = 3u;
+	// ABI words used by geometrySelectors.
+	static constexpr std::uint32_t kSelectedLodWord = 0u;
+	static constexpr std::uint32_t kPacketDescriptorWord = 1u;
+	static constexpr std::uint32_t kMeshletOffsetWord = 2u;
+	static constexpr std::uint32_t kMeshletCountWord = 3u;
+};
+static_assert(sizeof(RenderInstanceRecord) == 176u,
+	"The CPU instance record must stay byte-compatible with RenderInstanceAbi.hlsli.");
+static_assert(alignof(RenderInstanceRecord) == 16u,
+	"Instance records must remain aligned for StructuredBuffer loads.");
+static_assert(offsetof(RenderInstanceRecord, modelMatrix) == 0u);
+static_assert(offsetof(RenderInstanceRecord, editorTint) == 64u);
+static_assert(offsetof(RenderInstanceRecord, objectIdentity) == 80u);
+static_assert(offsetof(RenderInstanceRecord, materialAndTexture) == 96u);
+static_assert(offsetof(RenderInstanceRecord, animationSelectors) == 112u);
+static_assert(offsetof(RenderInstanceRecord, geometrySelectors) == 128u);
+static_assert(offsetof(RenderInstanceRecord, virtualGeometrySelectors) == 144u);
+static_assert(offsetof(RenderInstanceRecord, virtualGeometryPayloadSelectors) == 160u);
+
+// A group is executable only after its entire contiguous instance range was
+// initialized and generation-checked by the protected Vulkan boundary.
+struct SharedRenderGroup
+{
+	SharedRenderGroupKey key{};
+	std::uint32_t firstInstance = 0u;
+	std::uint32_t instanceCount = 0u;
+	std::uint32_t firstFallbackCommand = 0u;
+	std::uint32_t fallbackCommandCount = 0u;
+	std::uint64_t topologyGeneration = 0u;
+	std::uint64_t viewGeneration = 0u;
+	RenderGroupRejectionReason rejectionReason = RenderGroupRejectionReason::None;
+	bool executable = false;
+};
+
+// One live submission points back at its representative DrawCommand while the
+// contiguous record range supplies the values that must remain per instance.
+// Keeping this bridge in the immutable frame payload lets the Vulkan boundary
+// validate all records before it suppresses any ordinary draw commands.
+struct GroupedRenderSubmission
+{
+	SharedRenderGroup group{};
+	std::uint32_t representativeCommandIndex = 0u;
+};
+
+// PersistentRenderTopology owns only stable renderable and compatibility
+// inputs. It intentionally contains no transform, animation sample, view LOD,
+// Vulkan handle, or pointer into mutable component storage.
+struct PersistentRenderTopologyRecord
+{
+	// This index is assigned once when stable mesh/material/pipeline membership is
+	// rebuilt. Per-frame visibility and page/LOD selections use it as a cheap
+	// starting bucket, so they never need to rediscover immutable compatibility.
+	static constexpr std::uint32_t kInvalidGroupTemplateIndex = 0xffffffffu;
+	TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+	SharedRenderGroupKey groupKey{};
+	std::uint32_t stableOrdinal = 0u;
+	std::uint32_t groupTemplateIndex = kInvalidGroupTemplateIndex;
+};
+
+struct PersistentRenderTopology
+{
+	std::uint64_t generation = 0u;
+	std::vector<PersistentRenderTopologyRecord> records;
+	std::vector<SharedRenderGroupKey> groupTemplates;
+	bool valid = false;
+};
+
+// DynamicRenderFrameState is the frame-owned companion to retained topology.
+// Its instance records can change every frame without invalidating a stable
+// mesh/material/pipeline compatibility template.
+struct DynamicRenderFrameState
+{
+	std::uint64_t frameGeneration = 0u;
+	std::uint64_t viewGeneration = 0u;
+	std::uint64_t rendererGeneration = 0u;
+	std::vector<RenderInstanceRecord> instances;
+	std::vector<SharedRenderGroup> groups;
+	std::vector<DrawCommand> fallbackCommands;
+	bool valid = false;
+};
+
+// This compact publication is embedded in RenderStatsSnapshot so profiler
+// collection can copy one fixed-size payload without visiting render groups or
+// retaining any hot-path diagnostic strings.
+struct RenderOptimizationSummary
+{
+	std::uint64_t frameGeneration;
+	std::uint64_t topologyGeneration;
+	std::uint64_t viewGeneration;
+	std::uint64_t rendererGeneration;
+	// Fixed timing evidence is nanoseconds measured at the protected producer
+	// boundaries. Zero means the producer did not execute that optional path.
+	std::uint64_t topologyBuildNanoseconds;
+	std::uint64_t dynamicMaterializationNanoseconds;
+	std::uint64_t instanceStreamUploadNanoseconds;
+	std::uint64_t groupedCommandRecordingNanoseconds;
+	std::uint32_t visibleInstanceCount;
+	std::uint32_t groupedInstanceCount;
+	std::uint32_t fallbackInstanceCount;
+	std::uint32_t groupedSubmissionCount;
+	std::uint32_t fallbackSubmissionCount;
+	std::uint32_t avoidedSubmissionCount;
+	std::uint32_t instanceStreamBytes;
+	std::uint32_t instanceStreamCapacityBytes;
+	std::uint32_t topologyReuseHits;
+	std::uint32_t topologyInvalidations;
+	std::uint32_t viewEvidenceReuseHits;
+	std::uint32_t viewEvidenceInvalidations;
+	std::uint32_t rejectedIncompleteKeyCount;
+	std::uint32_t rejectedUnsupportedVariantCount;
+	std::uint32_t rejectedOutOfRangeCount;
+	std::uint32_t rejectedStaleGenerationCount;
+	std::uint32_t fallbackAllocationFailureCount;
+	std::uint32_t fallbackRecoveryCount;
+	std::uint32_t valid;
+};
+static_assert(std::is_trivially_copyable_v<RenderOptimizationSummary>,
+	"Render optimization evidence must remain a fixed-size copy-only payload.");
+
 // Lightweight per-frame budgeting summary returned without GPU readback so the
 // editor, QA tools, and validation scripts can verify preset behavior during
 // ordinary runtime sessions.
@@ -2812,9 +3019,27 @@ struct VirtualGeometryDecodedPageUploadRecord
 	std::vector<std::uint8_t> decodedBytes;
 };
 
+// GPU packet tables become immutable after selection validation. A stable view
+// can retain one owner through submission instead of copying every table into
+// each intermediate frame value.
+struct VirtualGeometryRetainedGpuEvidence
+{
+	std::vector<GpuVirtualGeometryPacketRecord> packetRecords;
+	std::vector<GpuVirtualGeometryBatchDescriptor> batchDescriptors;
+	std::vector<GpuVirtualGeometryPacketFrameSet> packetFrameSets;
+	std::vector<GpuPacketCompactionDispatch> compactionDispatches;
+	std::vector<GeneratedVirtualGeometrySubmissionRecord> generatedSubmissions;
+	std::vector<VirtualGeometryCounterReadbackRecord> counterReadbacks;
+	std::vector<VirtualGeometryGpuFallbackRecord> fallbackRecords;
+};
+
 // struct FrameRenderData groups related state and operations so callers have one documented contract.
 struct FrameRenderData
 {
+	// Every view submitted from this value shares one immutable frame identity.
+	// Vulkan stamps it beside the typed visibility attachment so direct meshes
+	// can be picked without depending on virtual-geometry packet publication.
+	std::uint64_t frameId = 0u;
 	glm::mat4 viewMatrix;
 	glm::mat4 projectionMatrix;
 	glm::vec3 cameraWorldPosition = glm::vec3(0.0f);
@@ -2827,9 +3052,27 @@ struct FrameRenderData
 	FrameSkyData sky;
 	std::vector<FrameLightCandidate> lightCandidates;
 	std::vector<DrawCommand> commands;
+	// The ordinary command vector remains the authoritative fallback path. A
+	// grouped submission references one representative command plus these
+	// complete per-instance records, so an upload/validation failure can render
+	// every original command without reconstructing scene data.
+	std::vector<RenderInstanceRecord> groupedInstanceRecords;
+	std::vector<GroupedRenderSubmission> groupedSubmissions;
+	// Resource preparation needs one command per compatible group plus every
+	// ungrouped fallback. The complete command vector remains draw authority; this
+	// sidecar only avoids resolving identical mesh/material resources per instance.
+	std::vector<std::uint32_t> drawResourcePreparationCommandIndices;
+	RenderOptimizationSummary renderOptimization{};
 	// These vectors are immutable per-view mirrors of selected virtual geometry
 	// work. Vulkan may upload them into GPU packet buffers during the protected
 	// render boundary; it must not reach back into RenderSystem caches.
+	// A nonzero signature proves that the packet, batch, and traversal inputs were
+	// produced from the same immutable view cut as a prior frame-slot publication.
+	std::uint64_t virtualGeometryPacketEvidenceSignature = 0u;
+	// This signature extends immutable packet evidence with the current animation
+	// ownership lanes used by compute-raster setup. Backends may reuse setup input
+	// buffers only when this proof and their frame-local resource layout both match.
+	std::uint64_t virtualGeometryVisibilitySetupSignature = 0u;
 	std::vector<GpuVirtualGeometryPacketRecord> virtualGeometryGpuPackets;
 	std::vector<GpuVirtualGeometryBatchDescriptor> virtualGeometryGpuBatches;
 	std::vector<GpuVirtualGeometryPacketFrameSet> virtualGeometryGpuFrameSets;
@@ -2839,8 +3082,60 @@ struct FrameRenderData
 	bool virtualGeometryVisibilityDiagnosticsRequested = false;
 	std::vector<GpuPacketCompactionDispatch> virtualGeometryGpuCompactionDispatches;
 		std::vector<GeneratedVirtualGeometrySubmissionRecord> virtualGeometryGeneratedSubmissions;
-		std::vector<VirtualGeometryCounterReadbackRecord> virtualGeometryCounterReadbacks;
-		std::vector<VirtualGeometryGpuFallbackRecord> virtualGeometryGpuFallbackRecords;
+	std::vector<VirtualGeometryCounterReadbackRecord> virtualGeometryCounterReadbacks;
+	std::vector<VirtualGeometryGpuFallbackRecord> virtualGeometryGpuFallbackRecords;
+	std::shared_ptr<const VirtualGeometryRetainedGpuEvidence>
+		retainedVirtualGeometryGpuEvidence;
+
+	[[nodiscard]] const std::vector<GpuVirtualGeometryPacketRecord>&
+		VirtualGeometryGpuPackets() const noexcept
+	{
+		return retainedVirtualGeometryGpuEvidence
+			? retainedVirtualGeometryGpuEvidence->packetRecords
+			: virtualGeometryGpuPackets;
+	}
+	[[nodiscard]] const std::vector<GpuVirtualGeometryBatchDescriptor>&
+		VirtualGeometryGpuBatches() const noexcept
+	{
+		return retainedVirtualGeometryGpuEvidence
+			? retainedVirtualGeometryGpuEvidence->batchDescriptors
+			: virtualGeometryGpuBatches;
+	}
+	[[nodiscard]] const std::vector<GpuVirtualGeometryPacketFrameSet>&
+		VirtualGeometryGpuFrameSets() const noexcept
+	{
+		return retainedVirtualGeometryGpuEvidence
+			? retainedVirtualGeometryGpuEvidence->packetFrameSets
+			: virtualGeometryGpuFrameSets;
+	}
+	[[nodiscard]] const std::vector<GpuPacketCompactionDispatch>&
+		VirtualGeometryGpuCompactionDispatches() const noexcept
+	{
+		return retainedVirtualGeometryGpuEvidence
+			? retainedVirtualGeometryGpuEvidence->compactionDispatches
+			: virtualGeometryGpuCompactionDispatches;
+	}
+	[[nodiscard]] const std::vector<GeneratedVirtualGeometrySubmissionRecord>&
+		VirtualGeometryGeneratedSubmissions() const noexcept
+	{
+		return retainedVirtualGeometryGpuEvidence
+			? retainedVirtualGeometryGpuEvidence->generatedSubmissions
+			: virtualGeometryGeneratedSubmissions;
+	}
+	[[nodiscard]] const std::vector<VirtualGeometryCounterReadbackRecord>&
+		VirtualGeometryCounterReadbacks() const noexcept
+	{
+		return retainedVirtualGeometryGpuEvidence
+			? retainedVirtualGeometryGpuEvidence->counterReadbacks
+			: virtualGeometryCounterReadbacks;
+	}
+	[[nodiscard]] const std::vector<VirtualGeometryGpuFallbackRecord>&
+		VirtualGeometryGpuFallbackRecords() const noexcept
+	{
+		return retainedVirtualGeometryGpuEvidence
+			? retainedVirtualGeometryGpuEvidence->fallbackRecords
+			: virtualGeometryGpuFallbackRecords;
+	}
 		std::vector<VirtualGeometryPageRetirementRecord> virtualGeometryPageRetirements;
 		// A decoded page remains non-resident until the backend uploads this
 		// record and the owning frame-slot fence completes.
@@ -2994,6 +3289,9 @@ static_assert(sizeof(MeshletCullingCountersGPU) == 48, "Meshlet counter payload 
 struct RenderStatsSnapshot
 {
 	RenderViewType viewType = RenderViewType::Game;
+	// The renderer writes this aggregate only after the complete frame candidate
+	// is accepted. Its fixed-size layout keeps profiler sampling allocation-free.
+	RenderOptimizationSummary optimization{};
 	// Completed view size lets lightweight UI stats validate backend-owned
 	// resources, such as Hi-Z pyramids, without reaching back into live Vulkan
 	// render targets.

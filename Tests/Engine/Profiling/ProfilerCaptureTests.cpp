@@ -359,8 +359,22 @@ namespace TerraEngine::Tests {
 			gameStats.frameTimeMs = 4.0f;
 			gameStats.gpuTimestampValid = true;
 			gameStats.gpuTimestampMs = 2.5f;
+			gameStats.optimization.frameGeneration = 8U;
+			gameStats.optimization.topologyGeneration = 3U;
+			gameStats.optimization.viewGeneration = 4U;
+			gameStats.optimization.rendererGeneration = 2U;
+			gameStats.optimization.visibleInstanceCount = 100U;
+			gameStats.optimization.groupedInstanceCount = 80U;
+			gameStats.optimization.fallbackInstanceCount = 20U;
+			gameStats.optimization.groupedSubmissionCount = 1U;
+			gameStats.optimization.fallbackSubmissionCount = 20U;
+			gameStats.optimization.avoidedSubmissionCount = 79U;
+			gameStats.optimization.instanceStreamBytes = 6400U;
+			gameStats.optimization.instanceStreamCapacityBytes = 8192U;
+			gameStats.optimization.valid = 1U;
 
 			RenderStatsSnapshot sceneStats;
+			sceneStats.viewType = RenderViewType::Scene;
 			sceneStats.valid = true;
 			sceneStats.frameTimeMs = 6.0f;
 			sceneStats.gpuTimestampValid = false;
@@ -380,6 +394,18 @@ namespace TerraEngine::Tests {
 				context.Expect(gameGpu != frames.front().timingStreams.end(), "Consolidated Viewport GPU timing stream should be present.");
 				context.Expect(gameGpu != frames.front().timingStreams.end() && gameGpu->source == ProfilerTimingStreamSource::BackendGpuTimestamp, "Valid renderer GPU timestamps should be marked as backend GPU timestamp samples.");
 				context.Expect(gameGpu != frames.front().timingStreams.end() && gameGpu->status == ProfilerTimingStreamStatus::Valid && gameGpu->milliseconds == 2.5, "Valid renderer GPU timestamps should preserve the measured duration.");
+				context.Expect(frames.front().renderOptimization.has_value(),
+					"Render stats should publish fixed renderer optimization evidence with the same completed frame.");
+				if (frames.front().renderOptimization.has_value())
+				{
+					const ProfilerRenderOptimizationViewSummary& evidence =
+						frames.front().renderOptimization->views[0];
+					context.Expect(evidence.valid && evidence.frameGeneration == 8U
+						&& evidence.groupedInstanceCount == 80U
+						&& evidence.fallbackInstanceCount == 20U
+						&& evidence.avoidedSubmissionCount == 79U,
+						"Captured renderer evidence must preserve valid generations and conserved group counters.");
+				}
 
 				const ProfilerModuleSummary* cpuModule = FindModule(frames.front().moduleSummaries, ProfilerModuleId::CpuEngine);
 				context.Expect(cpuModule != nullptr, "Render statistics should retain the CPU/Pipeline diagnostic module.");

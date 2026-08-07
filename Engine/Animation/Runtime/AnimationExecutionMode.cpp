@@ -420,6 +420,62 @@ namespace TerraEngine::Animation {
 			|| completePose;
 	}
 
+	bool AnimationCompactGenerationKey::IsComplete() const noexcept
+	{
+		// Zero is reserved for an uncaptured producer identity. Requiring every
+		// domain prevents a partially refreshed binding from borrowing a valid
+		// compact packet that belonged to an earlier scene or renderer lifetime.
+		return membershipGeneration != 0U && capabilityGeneration != 0U
+			&& bindingGeneration != 0U && resourceGeneration != 0U
+			&& sceneGeneration != 0U && rendererGeneration != 0U
+			&& authorityGeneration != 0U;
+	}
+
+	bool CompactGpuVisualInput::IsComplete() const noexcept
+	{
+		return stableInstanceId != 0U && playbackTick >= 0
+			&& sourcePoseGeneration != 0U && generations.IsComplete();
+	}
+
+	AnimationProcessingClass ClassifyAnimationProcessing(
+		const CompactGpuVisualInput& input) noexcept
+	{
+		// This deliberately uses a positive proof instead of a permissive default.
+		// New animation capabilities start in Complete until their capture and
+		// continuity requirements are explicitly represented in this value record.
+		return input.IsComplete() && input.gpuLoweringComplete
+			&& !input.hasAuthoritativeConsumer && !input.hasControllerOrTransition
+			&& !input.hasAdvancedFeature && input.hasContinuitySource
+			&& (input.eligibilityReason == AnimationExecutionModeReason::GpuVisualEligible
+				|| input.eligibilityReason == AnimationExecutionModeReason::ForceGpuRequested)
+			? AnimationProcessingClass::CompactGpuVisual
+			: AnimationProcessingClass::Complete;
+	}
+
+	bool CompactGpuVisualResult::IsPublishableFor(
+		const CompactGpuVisualInput& input) const noexcept
+	{
+		return complete && input.IsComplete()
+			&& stableInstanceId == input.stableInstanceId
+			&& stableSubmissionOrdinal == input.stableSubmissionOrdinal
+			&& sourcePoseGeneration == input.sourcePoseGeneration
+			&& presentationPoseGeneration != 0U
+			&& generations == input.generations
+			&& (reason == AnimationExecutionModeReason::GpuVisualEligible
+				|| reason == AnimationExecutionModeReason::ForceGpuRequested);
+	}
+
+	bool AnimationClassTransition::IsContinuous() const noexcept
+	{
+		// A no-op requires no continuity transfer. A real transition must carry one
+		// exact generation identity across both classes and a non-default boundary.
+		return !occurred || (from != to && sourceGenerations.IsComplete()
+			&& destinationGenerations.IsComplete()
+			&& sourceGenerations.membershipGeneration
+				== destinationGenerations.membershipGeneration
+			&& continuity.transitionBoundaryTick >= 0);
+	}
+
 	bool RequiresCpuRootMotionAuthority(
 		AnimatorRootMotionPolicy policy,
 		bool currentClipHasRootMotion,

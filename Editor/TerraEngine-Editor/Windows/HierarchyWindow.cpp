@@ -16,6 +16,7 @@
 #include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <nlohmann/json.hpp>
 #include <unordered_map>
 #include <unordered_set>
@@ -140,7 +141,9 @@ HierarchyWindow::HierarchyWindow(MainEditorSubsystem* owner)
 void HierarchyWindow::RefreshRootEntityCache(ObjectManager& objectManager, bool prefabEditingMode)
 {
 	const std::uint64_t hierarchyRevision = objectManager.GetHierarchyRevision();
-	bool cacheIsUsable = hierarchyRevision == m_CachedHierarchyRevision
+	const std::uint64_t sceneGeneration = objectManager.GetSceneGeneration();
+	bool cacheIsUsable = sceneGeneration == m_CachedSceneGeneration
+		&& hierarchyRevision == m_CachedHierarchyRevision
 		&& prefabEditingMode == m_CachedPrefabEditingMode;
 	if (cacheIsUsable)
 	{
@@ -160,102 +163,133 @@ void HierarchyWindow::RefreshRootEntityCache(ObjectManager& objectManager, bool 
 	}
 
 	m_CachedRootEntities.clear();
-	m_CachedRootLeafFlags.clear();
-	std::unordered_map<std::string, std::uint8_t> priorExpandedFlags;
-	priorExpandedFlags.reserve(m_CachedRootTreeNodeIds.size());
-	for(std::size_t index = 0U;
-		index < m_CachedRootTreeNodeIds.size()
-			&& index < m_CachedRootExpandedFlags.size();
-		++index) {
-		priorExpandedFlags.emplace(
-			m_CachedRootTreeNodeIds[index], m_CachedRootExpandedFlags[index]);
-	}
-	m_CachedRootTreeNodeIds.clear();
-	m_CachedRootExpandedFlags.clear();
 	std::vector<Object> roots = objectManager.getRootObjects();
 	m_CachedRootEntities.reserve(roots.size());
-	m_CachedRootLeafFlags.reserve(roots.size());
-	m_CachedRootTreeNodeIds.reserve(roots.size());
-	m_CachedRootExpandedFlags.reserve(roots.size());
 	for (const Object& root : roots)
 	{
 		m_CachedRootEntities.push_back(root.EntityId());
-		// Cache the structural fact once per hierarchy revision. Names, selection,
-		// and prefab presentation remain live row data, while child discovery is
-		// avoided for roots the snapshot already proved are leaves.
-		m_CachedRootLeafFlags.push_back(objectManager.getChildren(root).empty() ? 1u : 0u);
-		std::string treeNodeId = TerraEngine::ToHexString(objectManager.getUUID(root));
-		const auto priorExpansion = priorExpandedFlags.find(treeNodeId);
-		m_CachedRootExpandedFlags.push_back(
-			priorExpansion == priorExpandedFlags.end() ? 0U : priorExpansion->second);
-		m_CachedRootTreeNodeIds.push_back(std::move(treeNodeId));
 	}
 
 	m_CachedHierarchyRevision = hierarchyRevision;
+	m_CachedSceneGeneration = sceneGeneration;
 	m_CachedPrefabEditingMode = prefabEditingMode;
 }
 
 void HierarchyWindow::DrawCachedRootNodes()
 {
-	// Search must inspect every authored name, and expanded branch roots have
-	// variable height. The ordinary unfiltered view can still clip each contiguous
-	// run of collapsed roots independently. ImGui stores tree openness by the same
-	// stable UUID string used in DrawEntityNode, so only genuinely expanded roots
-	// leave the clipped path and recurse through their children.
-	if (!m_SearchFilter.empty()
-		|| m_CachedRootLeafFlags.size() != m_CachedRootEntities.size()
-		|| m_CachedRootTreeNodeIds.size() != m_CachedRootEntities.size()
-		|| m_CachedRootExpandedFlags.size() != m_CachedRootEntities.size())
+	RebuildVisibleRowCache(ObjectManager::instance(), m_CachedPrefabEditingMode);
+	ImGuiListClipper clipper;
+	// Supply the fixed tree-row height instead of asking ImGui to infer it from
+	// the first cached object. This remains safe if a scene swap lands precisely
+	// between cache preparation and drawing and makes that object unavailable.
+	clipper.Begin(
+		static_cast<int>(m_CachedVisibleRows.size()),
+		ImGui::GetFrameHeightWithSpacing());
+	while (clipper.Step())
 	{
-		for (const entt::entity root : m_CachedRootEntities)
+		for (int index = clipper.DisplayStart; index < clipper.DisplayEnd; ++index)
 		{
-			DrawEntityNode(root);
+			DrawVisibleRow(m_CachedVisibleRows[static_cast<std::size_t>(index)]);
 		}
+	}
+}
+
+void HierarchyWindow::RebuildVisibleRowCache(ObjectManager& objectManager, bool prefabEditingMode)
+{
+	const std::uint64_t hierarchyRevision = objectManager.GetHierarchyRevision();
+	const std::uint64_t sceneGeneration = objectManager.GetSceneGeneration();
+	if (m_CachedVisibleSceneGeneration == sceneGeneration
+		&& m_CachedVisibleHierarchyRevision == hierarchyRevision
+		&& m_CachedVisiblePrefabEditingMode == prefabEditingMode
+		&& m_CachedSearchFilter == m_SearchFilter
+		&& m_CachedExpansionRevision == m_ExpansionRevision)
+	{
 		return;
 	}
 
-	const auto rootIsExpanded = [&](std::size_t index) {
-		return m_CachedRootLeafFlags[index] == 0u
-			&& m_CachedRootExpandedFlags[index] != 0u;
+	m_CachedVisibleRows.clear();
+	m_CachedVisibleSceneGeneration = sceneGeneration;
+	m_CachedVisibleHierarchyRevision = hierarchyRevision;
+	m_CachedVisiblePrefabEditingMode = prefabEditingMode;
+	m_CachedSearchFilter = m_SearchFilter;
+	m_CachedExpansionRevision = m_ExpansionRevision;
+	const std::string filter = m_SearchFilter;
+	std::string loweredFilter = filter;
+	std::transform(loweredFilter.begin(), loweredFilter.end(), loweredFilter.begin(), [](unsigned char c) {
+		return static_cast<char>(std::tolower(c));
+	});
+	const auto matches = [&](const Object& object) {
+		if (filter.empty()) return true;
+		std::string name = objectManager.getObjectName(object);
+		std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) {
+			return static_cast<char>(std::tolower(c));
+		});
+		return name.find(loweredFilter) != std::string::npos;
 	};
 
-	std::size_t rootIndex = 0u;
-	while (rootIndex < m_CachedRootEntities.size())
-	{
-		if (rootIsExpanded(rootIndex))
-		{
-			DrawEntityNode(
-				m_CachedRootEntities[rootIndex],
-				nullptr,
-				false,
-				&m_CachedRootExpandedFlags[rootIndex]);
-			++rootIndex;
-			continue;
-		}
-
-		const std::size_t runStart = rootIndex;
-		while (rootIndex < m_CachedRootEntities.size()
-			&& !rootIsExpanded(rootIndex))
-		{
-			++rootIndex;
-		}
-		const std::size_t runLength = rootIndex - runStart;
-		ImGuiListClipper clipper;
-		clipper.Begin(static_cast<int>(runLength));
-		while (clipper.Step())
-		{
-			for (int visibleIndex = clipper.DisplayStart;
-				visibleIndex < clipper.DisplayEnd;
-				++visibleIndex)
+	// Build a depth-first list. Search expands ancestors without changing the
+	// user's persisted expansion map; ordinary views only descend expanded nodes.
+	std::function<bool(entt::entity, std::uint32_t,
+		const std::unordered_set<TerraEngine::UUID>*)> appendVisible =
+		[&](entt::entity entity, std::uint32_t depth,
+			const std::unordered_set<TerraEngine::UUID>* prefabSourceObjectIds) {
+			const std::optional<Object> object = objectManager.getObject(entity);
+			if (!object) return false;
+			const PrefabLinkComponent* prefabLink = objectManager.GetComponent<PrefabLinkComponent>(*object);
+			std::unordered_set<TerraEngine::UUID> localPrefabSourceObjectIds;
+			const std::unordered_set<TerraEngine::UUID>* activePrefabSourceObjectIds =
+				prefabSourceObjectIds;
+			if (prefabLink != nullptr)
 			{
-				const std::size_t cachedIndex = runStart + static_cast<std::size_t>(visibleIndex);
-				DrawEntityNode(
-					m_CachedRootEntities[cachedIndex],
-					nullptr,
-					m_CachedRootLeafFlags[cachedIndex] != 0u,
-					&m_CachedRootExpandedFlags[cachedIndex]);
+				localPrefabSourceObjectIds = LoadPrefabSourceObjectIds(*prefabLink);
+				activePrefabSourceObjectIds = &localPrefabSourceObjectIds;
 			}
-		}
+			const bool prefabAuthored = prefabLink != nullptr
+				|| (activePrefabSourceObjectIds != nullptr
+					&& activePrefabSourceObjectIds->contains(objectManager.getUUID(*object)));
+			const std::vector<Object> children = objectManager.getChildren(*object);
+			const std::string uuid = TerraEngine::ToHexString(objectManager.getUUID(*object));
+			const bool expanded = filter.empty() ? m_ExpandedByUuid[uuid] : true;
+			const bool selfMatch = matches(*object);
+			std::vector<VisibleHierarchyRow> descendants;
+			const std::size_t before = m_CachedVisibleRows.size();
+			if (expanded)
+			{
+				for (const Object& child : children)
+					appendVisible(child.EntityId(), depth + 1u, activePrefabSourceObjectIds);
+				descendants.assign(m_CachedVisibleRows.begin() + static_cast<std::ptrdiff_t>(before), m_CachedVisibleRows.end());
+				m_CachedVisibleRows.resize(before);
+			}
+			const bool childMatch = !descendants.empty();
+			if (!filter.empty() && !selfMatch && !childMatch) return false;
+			m_CachedVisibleRows.push_back({entity, depth, children.empty(), prefabAuthored});
+			m_CachedVisibleRows.insert(m_CachedVisibleRows.end(), descendants.begin(), descendants.end());
+			return selfMatch || childMatch;
+		};
+
+	// The cache is intentionally rebuilt with a simple recursive walk. Rendering
+	// remains bounded by the clipper, while hierarchy and search state stay stable.
+	m_CachedVisibleRows.clear();
+	for (const entt::entity root : m_CachedRootEntities)
+	{
+		appendVisible(root, 0u, nullptr);
+	}
+}
+
+void HierarchyWindow::DrawVisibleRow(const VisibleHierarchyRow& row)
+{
+	// A flattened list no longer inherits ImGui's recursive indentation stack.
+	// Apply the cached depth only around the visible row so clipped descendants
+	// retain the same hierarchy presentation without drawing their ancestors.
+	const float indentation = static_cast<float>(row.depth) * ImGui::GetTreeNodeToLabelSpacing();
+	if (indentation > 0.0f)
+	{
+		ImGui::Indent(indentation);
+	}
+	DrawEntityNode(row.entity, nullptr, row.knownLeaf, nullptr, false, row.prefabAuthored);
+	if (indentation > 0.0f)
+	{
+		ImGui::Unindent(indentation);
 	}
 }
 
@@ -497,7 +531,9 @@ void HierarchyWindow::DrawEntityNode(
 	entt::entity obj,
 	const std::unordered_set<TerraEngine::UUID>* prefabSourceObjectIds,
 	bool knownLeaf,
-	std::uint8_t* cachedExpandedFlag) {
+	std::uint8_t* cachedExpandedFlag,
+	bool drawChildren,
+	std::optional<bool> prefabAuthoredOverride) {
 	auto& objManager = ObjectManager::instance();
 	std::optional<Object> object = objManager.getObject(obj);
 	if (!object)
@@ -560,8 +596,10 @@ void HierarchyWindow::DrawEntityNode(
 		activePrefabSourceObjectIds = &localPrefabSourceObjectIds;
 	}
 
-	const bool isPrefabAuthoredObject = prefabLink != nullptr
-		|| (activePrefabSourceObjectIds != nullptr && activePrefabSourceObjectIds->find(ObjectManager::instance().getUUID(*object)) != activePrefabSourceObjectIds->end());
+	const bool isPrefabAuthoredObject = prefabAuthoredOverride.value_or(
+		prefabLink != nullptr
+		|| (activePrefabSourceObjectIds != nullptr
+			&& activePrefabSourceObjectIds->find(ObjectManager::instance().getUUID(*object)) != activePrefabSourceObjectIds->end()));
 	if (isPrefabAuthoredObject) {
 		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.72f, 1.0f, 1.0f));
 	}
@@ -576,6 +614,15 @@ void HierarchyWindow::DrawEntityNode(
 		// row. Store the result once so off-screen siblings require no state lookup.
 		*cachedExpandedFlag = opened && (flags & ImGuiTreeNodeFlags_Leaf) == 0
 			? 1U : 0U;
+	}
+	if (!drawChildren && (flags & ImGuiTreeNodeFlags_Leaf) == 0)
+	{
+		const bool previous = m_ExpandedByUuid[treeNodeId];
+		if (previous != opened)
+		{
+			m_ExpandedByUuid[treeNodeId] = opened;
+			++m_ExpansionRevision;
+		}
 	}
 	if (isPrefabAuthoredObject) {
 		ImGui::PopStyleColor();
@@ -633,8 +680,10 @@ void HierarchyWindow::DrawEntityNode(
 	
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (opened) {
-		for (Object child : children) {
-			DrawEntityNode(child.EntityId(), activePrefabSourceObjectIds);
+		if (drawChildren) {
+			for (Object child : children) {
+				DrawEntityNode(child.EntityId(), activePrefabSourceObjectIds);
+			}
 		}
 		ImGui::TreePop();
 	}

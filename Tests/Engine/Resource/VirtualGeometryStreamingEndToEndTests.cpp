@@ -178,6 +178,72 @@ namespace TerraEngine::Tests
 				system.Shutdown();
 			});
 
+		registry.Add("VirtualGeometry.Streaming.DuplicatePageCandidatesCoalesceBeforeProtectedPublication",
+			[](TestContext& context)
+			{
+				auto& system = Resource::VirtualGeometryStreamingSystem::Instance();
+				system.Initialize();
+				const auto asset = TerraEngine::GenerateUUID();
+				auto earlier = MakeCompletedCandidate(asset, 1u);
+				auto latest = earlier;
+				latest.candidateId = earlier.candidateId + 1u;
+
+				// The copied candidates deliberately share both their page identity and
+				// descriptor allocation. Worker preparation must coalesce them before
+				// the protected batch validator runs, rather than hiding a rejection.
+				system.SubmitCompletedPublicationCandidates({ earlier, latest });
+				auto workloads = system.DeclareFrameWorkloads(0.0f);
+				TerraEngine::Scheduling::JobGraphContext graphContext;
+				workloads.front().work(graphContext);
+				workloads.back().work(graphContext);
+
+				const auto pages = system.PublishedPages();
+				const auto diagnostics = system.DiagnosticsSnapshot();
+				context.ExpectEqual(static_cast<std::size_t>(1u), pages.size(),
+					"Duplicate worker completions must publish one renderer-visible page.");
+				context.ExpectEqual(latest.candidateId, pages.front().candidateId,
+					"Coalescing must deterministically retain the newest candidate identity.");
+				context.ExpectEqual(0u, diagnostics.rejectedPublications,
+					"Duplicate same-page completions must not become a rejected protected batch.");
+				context.ExpectEqual(1u, diagnostics.acceptedPublicationPages,
+					"Only the coalesced page may contribute to accepted publication diagnostics.");
+				system.Shutdown();
+			});
+
+		registry.Add("VirtualGeometry.Streaming.SupersededFenceCompletionIsDiscardedBeforePublication",
+			[](TestContext& context)
+			{
+				auto& system = Resource::VirtualGeometryStreamingSystem::Instance();
+				system.Initialize();
+				const auto asset = TerraEngine::GenerateUUID();
+				TerraEngine::Scheduling::JobGraphContext graphContext;
+
+				// Publish generation two first, modeling a newer frame slot completing
+				// before an older fence. The later generation-one completion is genuine
+				// data, but it can never replace the visible generation-two page.
+				system.SubmitCompletedPublicationCandidates({ MakeCompletedCandidate(asset, 2u) });
+				auto workloads = system.DeclareFrameWorkloads(0.0f);
+				workloads.front().work(graphContext);
+				workloads.back().work(graphContext);
+
+				system.SubmitCompletedPublicationCandidates({ MakeCompletedCandidate(asset, 1u) });
+				workloads = system.DeclareFrameWorkloads(0.0f);
+				workloads.front().work(graphContext);
+				workloads.back().work(graphContext);
+
+				const auto pages = system.PublishedPages();
+				const auto diagnostics = system.DiagnosticsSnapshot();
+				context.ExpectEqual(static_cast<std::size_t>(1u), pages.size(),
+					"An obsolete fence completion must retain the visible newer page.");
+				context.ExpectEqual(2u, pages.front().publicationGeneration,
+					"The newer protected publication must remain visible after stale completion filtering.");
+				context.ExpectEqual(0u, diagnostics.rejectedPublications,
+					"A known superseded completion must not become a rejected publication batch.");
+				context.ExpectEqual(1u, diagnostics.acceptedPublicationPages,
+					"Only the newer page generation may contribute to accepted publication diagnostics.");
+				system.Shutdown();
+			});
+
 		registry.Add("VirtualGeometry.Streaming.ExactRangeReadPublishesPendingUploadThenNextFrameResident",
 			[](TestContext& context)
 			{

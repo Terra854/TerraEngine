@@ -107,14 +107,19 @@ float3 TransformDirection(float3 direction, uint localJoint, TeAnimatedDeformati
 [numthreads(64, 1, 1)]
 void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
+	// Y selects one immutable page record while X covers that page's vertices.
+	// A single rectangular dispatch can therefore process an entire generation;
+	// shorter pages simply reject lanes beyond their exact vertex count.
+	const uint workRecordIndex =
+		deformationPush.workRecordIndex + dispatchThreadId.y;
 	if(deformationPush.abiVersion != TE_ANIMATED_GEOMETRY_ABI_VERSION
-		|| deformationPush.workRecordIndex >= deformationPush.workRecordCount)
+		|| workRecordIndex >= deformationPush.workRecordCount)
 	{
 		return;
 	}
 
 	const TeAnimatedDeformationWorkRecord work =
-		deformationWork[deformationPush.workRecordIndex];
+		deformationWork[workRecordIndex];
 	const uint vertexIndex = dispatchThreadId.x;
 	if(vertexIndex >= work.vertexCount)
 	{

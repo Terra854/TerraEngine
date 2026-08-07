@@ -99,6 +99,7 @@ namespace TerraEngine::Renderer {
 		const RenderFrameSnapshot& snapshot,
 		std::shared_ptr<const TerraEngine::Animation::GpuAnimationPlan> immutablePlan = {});
 	TERRAENGINE_API DeformationBackendWorkPlan BuildDeformationBackendWorkPlan(
-		const RenderFrameSnapshot& snapshot);
+		const RenderFrameSnapshot& snapshot,
+		std::shared_ptr<const GpuDeformationPlan> immutablePlan = {});
 
 }

@@ -38,13 +38,16 @@ namespace TerraEngine::Animation {
 	};
 
 	// Visual values identify already-resident resource-table entries and producer
-	// generations. They never contain Vulkan objects, allocations, or scene data.
+	// generations. They never contain backend objects, allocations, or scene data.
 	struct GpuAnimationVisualInput {
 		GpuAnimationGenerationRecord generations{};
 		std::uint64_t stableInstanceId = 0U;
 		std::uint64_t skeletonTopologyId = 0U;
 		AnimationCompatibilityFingerprint compatibilityFingerprint = 0U;
 		std::uint64_t inputPoseOffsetBytes = 0U;
+		// Hashes every controller parameter value that can alter sampled visual output.
+		// Zero is valid only for a proven parameter-free compact program.
+		std::uint64_t evaluationParameterFingerprint = 0U;
 		std::uint32_t stableSubmissionOrdinal = 0U;
 		std::uint32_t clipResourceIndex = kGpuAnimationInvalidResourceIndex;
 		std::uint32_t skeletonResourceIndex = kGpuAnimationInvalidResourceIndex;
@@ -95,6 +98,9 @@ namespace TerraEngine::Animation {
 		// against the shared immutable payload. Presentation may reuse that proof;
 		// direct callers and tests retain the checked default-false path.
 		bool residentPayloadsValidated = false;
+		// Protected compact capture sets this after proving that no per-owner CPU
+		// authority can observe the GPU evaluation payload.
+		bool allowSharedVisualEvaluation = false;
 	};
 
 	struct GpuAnimationLoweringResult {

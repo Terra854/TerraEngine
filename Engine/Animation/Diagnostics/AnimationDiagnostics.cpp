@@ -2,6 +2,7 @@
 
 #include "Animation/Diagnostics/AnimationDiagnostics.h"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <mutex>
@@ -63,7 +64,22 @@ namespace TerraEngine::Animation {
 				&& counters.residencyHits == 0U
 				&& counters.residencyMisses == 0U
 				&& counters.fallbackCount == 0U
-				&& counters.modeSwitchCount == 0U;
+				&& counters.modeSwitchCount == 0U
+				&& counters.compactEligibleAnimators == 0U
+				&& counters.compactProcessedAnimators == 0U
+				&& counters.completeCapturedAnimators == 0U
+				&& counters.completeProcessedAnimators == 0U
+				&& counters.compactToCompleteTransitions == 0U
+				&& counters.completeToCompactTransitions == 0U
+				&& counters.retainedTopologyHits == 0U
+				&& counters.retainedTopologyMisses == 0U
+				&& counters.compactPlanGroups == 0U
+				&& counters.compactDispatches == 0U
+				&& counters.rejectedCandidateCount == 0U
+				&& std::all_of(counters.fallbackReasonCounts.begin(),
+					counters.fallbackReasonCounts.end(), [](std::uint64_t count) {
+						return count == 0U;
+					});
 		}
 
 		bool HasFiniteNonNegativeTimings(const AnimationDiagnosticsTimings& timings) noexcept {
@@ -74,7 +90,15 @@ namespace TerraEngine::Animation {
 				&& std::isfinite(timings.cpuAuthorityMs) && timings.cpuAuthorityMs >= 0.0
 				&& std::isfinite(timings.gpuPlanningMs) && timings.gpuPlanningMs >= 0.0
 				&& std::isfinite(timings.gpuExecutionMs) && timings.gpuExecutionMs >= 0.0
-				&& std::isfinite(timings.deformationMs) && timings.deformationMs >= 0.0;
+				&& std::isfinite(timings.deformationMs) && timings.deformationMs >= 0.0
+				&& std::isfinite(timings.compactCaptureMs) && timings.compactCaptureMs >= 0.0
+				&& std::isfinite(timings.compactEvaluationMs) && timings.compactEvaluationMs >= 0.0
+				&& std::isfinite(timings.compactPublicationMs) && timings.compactPublicationMs >= 0.0
+				&& std::isfinite(timings.completeCaptureMs) && timings.completeCaptureMs >= 0.0
+				&& std::isfinite(timings.completeEvaluationMs) && timings.completeEvaluationMs >= 0.0
+				&& std::isfinite(timings.completePublicationMs) && timings.completePublicationMs >= 0.0
+				&& std::isfinite(timings.topologyBuildMs) && timings.topologyBuildMs >= 0.0
+				&& std::isfinite(timings.topologyRefreshMs) && timings.topologyRefreshMs >= 0.0;
 		}
 
 		bool IsRequestedPolicyValid(AnimationExecutionPolicy policy) noexcept {
@@ -120,6 +144,14 @@ namespace TerraEngine::Animation {
 			|| snapshot.baseline.workloadsSha256 != kAnimationPerformanceWorkloadsSha256) {
 			return false;
 		}
+		const std::uint64_t processed = snapshot.counters.compactProcessedAnimators
+			+ snapshot.counters.completeProcessedAnimators;
+		if((snapshot.counters.compactProcessedAnimators > 0U
+				|| snapshot.counters.completeProcessedAnimators > 0U)
+			&& (processed < snapshot.counters.compactProcessedAnimators
+				|| processed > snapshot.counters.activeAnimators)) {
+			return false;
+		}
 		if(snapshot.detailLevel > AnimationDiagnosticsDetailLevel::Detailed
 			|| !HasFiniteNonNegativeTimings(snapshot.timings)
 			|| snapshot.counters.detailedRecords > GetAnimationRuntimeLimit(AnimationLimit::DetailedDiagnosticHistoryFrames).hardMaximum
@@ -142,7 +174,15 @@ namespace TerraEngine::Animation {
 				&& snapshot.timings.cpuAuthorityMs == 0.0
 				&& snapshot.timings.gpuPlanningMs == 0.0
 				&& snapshot.timings.gpuExecutionMs == 0.0
-				&& snapshot.timings.deformationMs == 0.0;
+				&& snapshot.timings.deformationMs == 0.0
+				&& snapshot.timings.compactCaptureMs == 0.0
+				&& snapshot.timings.compactEvaluationMs == 0.0
+				&& snapshot.timings.compactPublicationMs == 0.0
+				&& snapshot.timings.completeCaptureMs == 0.0
+				&& snapshot.timings.completeEvaluationMs == 0.0
+				&& snapshot.timings.completePublicationMs == 0.0
+				&& snapshot.timings.topologyBuildMs == 0.0
+				&& snapshot.timings.topologyRefreshMs == 0.0;
 		}
 		return snapshot.counters.activeAnimators > 0U;
 	}

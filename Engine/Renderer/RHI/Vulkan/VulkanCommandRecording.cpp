@@ -6,6 +6,11 @@
 
 namespace TerraEngine::Renderer::Vulkan {
 	namespace {
+		// Vulkan guarantees at least 65,535 compute workgroups in each dispatch
+		// dimension. Chunking at that portable limit keeps the value plan independent
+		// of a particular adapter while collapsing ordinary crowds to one dispatch.
+		constexpr std::uint32_t kMaxDeformationWorkRecordsPerDispatch = 65535u;
+
 		[[nodiscard]] VkAccessFlags AccessMaskForAnimationBarrier(std::uint32_t flags)
 		{
 			// All animation stages write storage buffers. The exact producer bit is
@@ -385,18 +390,39 @@ namespace TerraEngine::Renderer::Vulkan {
 			output.rejectionReason = "Deformation commands require a complete immutable plan.";
 			return output;
 		}
-		output.deformationDispatches.reserve(plan.work.size());
-		for(std::uint32_t index = 0u; index < plan.work.size(); ++index)
+		if(plan.work.size() > std::numeric_limits<std::uint32_t>::max())
 		{
-			const std::uint32_t vertexCount = plan.work[index].vertexCount;
-			const std::uint32_t groups = (vertexCount + 63u) / 64u;
-			if(groups == 0u)
+			output.rejectionReason =
+				"Deformation work exceeds the portable 32-bit shader index range.";
+			return output;
+		}
+		const std::uint32_t totalWorkRecordCount =
+			static_cast<std::uint32_t>(plan.work.size());
+		output.deformationDispatches.reserve(
+			(totalWorkRecordCount + kMaxDeformationWorkRecordsPerDispatch - 1u)
+				/ kMaxDeformationWorkRecordsPerDispatch);
+		for(std::uint32_t first = 0u; first < totalWorkRecordCount;)
+		{
+			const std::uint32_t count = std::min(
+				kMaxDeformationWorkRecordsPerDispatch,
+				totalWorkRecordCount - first);
+			std::uint32_t maximumGroupCountX = 0u;
+			for(std::uint32_t offset = 0u; offset < count; ++offset)
 			{
-				output.deformationDispatches.clear();
-				output.rejectionReason = "Deformation dispatch has no workgroups.";
-				return output;
+				const std::uint32_t vertexCount = plan.work[first + offset].vertexCount;
+				const std::uint32_t groups = (vertexCount + 63u) / 64u;
+				if(groups == 0u || groups > kMaxDeformationWorkRecordsPerDispatch)
+				{
+					output.deformationDispatches.clear();
+					output.rejectionReason =
+						"Deformation dispatch exceeds the portable compute-grid range.";
+					return output;
+				}
+				maximumGroupCountX = std::max(maximumGroupCountX, groups);
 			}
-			output.deformationDispatches.push_back({ index, groups });
+			output.deformationDispatches.push_back({
+				first, count, maximumGroupCountX });
+			first += count;
 		}
 		// The complete frame union is synchronized once, regardless of view count.
 		output.barriers = {
@@ -474,7 +500,7 @@ namespace TerraEngine::Renderer::Vulkan {
 			commandPlan.deformationDispatches)
 		{
 			PushConstants push{
-				dispatch.workRecordIndex,
+				dispatch.firstWorkRecordIndex,
 				static_cast<std::uint32_t>(
 					immutablePlan.work.size()),
 				kAnimatedGeometryAbiVersion,
@@ -489,7 +515,7 @@ namespace TerraEngine::Renderer::Vulkan {
 			vkCmdDispatch(
 				commandBuffer,
 				dispatch.groupCountX,
-				1u,
+				dispatch.workRecordCount,
 				1u);
 			++result.deformationDispatchCount;
 		}
@@ -502,16 +528,15 @@ namespace TerraEngine::Renderer::Vulkan {
 			commandBuffer,
 			VK_PIPELINE_BIND_POINT_COMPUTE,
 			Pipeline(VulkanDeformationPipelineStage::Bounds));
-		for(std::uint32_t workIndex = 0u;
-			workIndex < immutablePlan.work.size();
-			++workIndex)
+		for(const VulkanDeformationDispatch& dispatch :
+			commandPlan.deformationDispatches)
 		{
 			PushConstants push{
-				workIndex,
+				dispatch.firstWorkRecordIndex,
 				static_cast<std::uint32_t>(
 					immutablePlan.work.size()),
 				kAnimatedGeometryAbiVersion,
-				immutablePlan.work[workIndex].key.page.pageId };
+				0u };
 			vkCmdPushConstants(
 				commandBuffer,
 				pipelines.layout,
@@ -519,7 +544,11 @@ namespace TerraEngine::Renderer::Vulkan {
 				0u,
 				sizeof(push),
 				&push);
-			vkCmdDispatch(commandBuffer, 1u, 1u, 1u);
+			vkCmdDispatch(
+				commandBuffer,
+				dispatch.workRecordCount,
+				1u,
+				1u);
 			++result.boundsDispatchCount;
 		}
 
@@ -562,9 +591,9 @@ namespace TerraEngine::Renderer::Vulkan {
 		++result.barrierCount;
 		result.recorded =
 			result.deformationDispatchCount
-				== immutablePlan.work.size()
+				== commandPlan.deformationDispatches.size()
 			&& result.boundsDispatchCount
-				== immutablePlan.work.size();
+				== commandPlan.deformationDispatches.size();
 		return result;
 	}
 

@@ -226,7 +226,7 @@ namespace
 			}
 			// Material depth behavior is shared by every prefab instance. Hash one
 			// exact publication per UUID, then fold that compact value into each draw
-			// instead of locking ResourceManager and revisiting texture bindings 4,000
+			// instead of locking ResourceManager and revisiting texture bindings thousands of
 			// times on an otherwise stable crowd frame.
 			std::uint64_t materialSignature = 1469598103934665603ull;
 			const Material* material =
@@ -3243,8 +3243,14 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		snapshotSlotIndex = 0u;
 	}
 
+	// `OffscreenTexture` is also the diagnostic classification used by shadow
+	// outputs. Only camera-like Game/Scene outputs own captureView: letting a
+	// later shadow submission select that framebuffer would clear its paired
+	// typed identity attachment after an MCP capture has rendered.
 	const bool renderingDedicatedCaptureTarget =
-		outputRequest.kind == RenderOutputKind::OffscreenTexture;
+		outputRequest.kind == RenderOutputKind::OffscreenTexture
+		&& (outputRequest.diagnosticsView == RenderViewType::Game
+			|| outputRequest.diagnosticsView == RenderViewType::Scene);
 	// Normal runtime views require an acquired swapchain image. A dedicated
 	// capture owns a separate offscreen image and can therefore remain valid
 	// independently of the presentation target.
@@ -3481,10 +3487,28 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 
 	{
 		TERRAENGINE_PROFILE_SCOPE("Vulkan: RenderFrame Prepare Draw Resources", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		const auto descriptorStart = BackendClock::now();
-		for (const auto& command : frameData.commands) {
-			PrepareDrawResources(command, currentPass);
+		if(!frameData.commands.empty()
+			&& !frameData.drawResourcePreparationCommandIndices.empty())
+		{
+			for(const std::uint32_t commandIndex :
+				frameData.drawResourcePreparationCommandIndices)
+			{
+				if(commandIndex < frameData.commands.size())
+				{
+					PrepareDrawResources(
+						frameData.commands[commandIndex], currentPass);
+				}
+			}
+		}
+		else
+		{
+			// Hand-built or legacy frame payloads may not publish the compact
+			// sidecar. Their complete command list remains the safe fallback.
+			for(const DrawCommand& command : frameData.commands)
+			{
+				PrepareDrawResources(command, currentPass);
+			}
 		}
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const ShadowDrawList& shadowDrawList : frameData.shadowDrawLists) {
@@ -3591,7 +3615,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 				TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		};
 	beginCommandRecordingPhase(
-		"Vulkan: Primary Record Animation and Deformation");
+		"Vulkan: Primary Record Animation");
 	impl->RecordDiagnosticCheckpoint(
 		cmd,
 		renderingDedicatedCaptureTarget
@@ -3647,6 +3671,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 					INVALID_BINDLESS_BUFFER_INDEX;
 		}
 	}
+	beginCommandRecordingPhase(
+		"Vulkan: Primary Record Deformation");
 	if(useMainCommandBuffer
 		&& !impl->deformationComputeRecordedForCurrentFrame
 		&& impl->pendingDeformationCommandPlan.hasWork
@@ -3685,7 +3711,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		}
 	}
 	beginCommandRecordingPhase(
-		"Vulkan: Primary Record Virtual Geometry Compute");
+		"Vulkan: Primary Prepare Virtual Geometry Resources");
 	if (impl->validationLayersEnabled && vkSetDebugUtilsObjectNameEXT != nullptr) {
 		// Validation messages otherwise print only an opaque command-buffer handle,
 		// which makes a cross-submit fault impossible to associate with Scene, Game,
@@ -3766,40 +3792,62 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	// Publish immutable per-view packet mirrors at the protected Vulkan
 	// boundary. RenderSystem owns the value records; Vulkan owns the backing
 	// buffers and may reuse them only when the frame slot and view identity match.
-	impl->PublishVirtualGeometryDecodedPageResources(frameData);
-	impl->PrepareVulkanVirtualGeometryProductionDecode(frameData);
-	if(impl->currentFrame < impl->virtualGeometryProductionDecodeResourcesByFrame.size()) {
-		auto& decodeResources = impl->virtualGeometryProductionDecodeResourcesByFrame[impl->currentFrame];
-		if(decodeResources.plan.valid && !decodeResources.completionPending) {
-			TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryProductionDecodeResources recordingResources{};
-			recordingResources.requestBuffer = decodeResources.requestBuffer.buffer;
-			recordingResources.encodedBuffer = decodeResources.encodedBuffer.buffer;
-			recordingResources.decodedBuffer = decodeResources.decodedBuffer.buffer;
-			recordingResources.resultReadbackBuffer = decodeResources.resultReadbackBuffer.buffer;
-			recordingResources.descriptorSet = decodeResources.descriptorSet;
-			recordingResources.encodedCapacityBytes = static_cast<std::uint32_t>(decodeResources.encodedBuffer.size);
-			recordingResources.decodedCapacityBytes = static_cast<std::uint32_t>(decodeResources.decodedBuffer.size);
-			recordingResources.resourcesOwnedByFrame = true;
-			const auto decodeRecording = TerraEngine::Renderer::Vulkan::RecordVulkanVirtualGeometryProductionDecode(
-				cmd, decodeResources.plan, recordingResources, impl->virtualGeometryProductionDecodePipelines);
-			if(decodeRecording.recorded) {
-				// Completion is consumed at the next reuse of this exact frame slot.
-				decodeResources.completionPending = true;
-			}
-			else {
-				impl->virtualGeometryProductionDecodeUnavailableReason = decodeRecording.failureReason;
+	{
+		TERRAENGINE_PROFILE_SCOPE(
+			"Vulkan: Publish Virtual Geometry Decoded Pages",
+			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		impl->PublishVirtualGeometryDecodedPageResources(frameData);
+	}
+	{
+		TERRAENGINE_PROFILE_SCOPE(
+			"Vulkan: Prepare Virtual Geometry Production Decode",
+			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		impl->PrepareVulkanVirtualGeometryProductionDecode(frameData);
+		if(impl->currentFrame < impl->virtualGeometryProductionDecodeResourcesByFrame.size()) {
+			auto& decodeResources = impl->virtualGeometryProductionDecodeResourcesByFrame[impl->currentFrame];
+			if(decodeResources.plan.valid && !decodeResources.completionPending) {
+				TerraEngine::Renderer::Vulkan::VulkanVirtualGeometryProductionDecodeResources recordingResources{};
+				recordingResources.requestBuffer = decodeResources.requestBuffer.buffer;
+				recordingResources.encodedBuffer = decodeResources.encodedBuffer.buffer;
+				recordingResources.decodedBuffer = decodeResources.decodedBuffer.buffer;
+				recordingResources.resultReadbackBuffer = decodeResources.resultReadbackBuffer.buffer;
+				recordingResources.descriptorSet = decodeResources.descriptorSet;
+				recordingResources.encodedCapacityBytes = static_cast<std::uint32_t>(decodeResources.encodedBuffer.size);
+				recordingResources.decodedCapacityBytes = static_cast<std::uint32_t>(decodeResources.decodedBuffer.size);
+				recordingResources.resourcesOwnedByFrame = true;
+				const auto decodeRecording = TerraEngine::Renderer::Vulkan::RecordVulkanVirtualGeometryProductionDecode(
+					cmd, decodeResources.plan, recordingResources, impl->virtualGeometryProductionDecodePipelines);
+				if(decodeRecording.recorded) {
+					// Completion is consumed at the next reuse of this exact frame slot.
+					decodeResources.completionPending = true;
+				}
+				else {
+					impl->virtualGeometryProductionDecodeUnavailableReason = decodeRecording.failureReason;
+				}
 			}
 		}
 	}
-	impl->PublishVirtualGeometryGpuPacketResources(
-		frameData,
-		renderViewType,
-		diagnosticViewId,
-		impl->backendFrameSerial,
-		statsSlotIndex,
-		renderSnapshot.lightDataOffset,
-		renderSnapshot.clusterDataOffset,
-		renderSnapshot.lightIndexOffset);
+	{
+		TERRAENGINE_PROFILE_SCOPE(
+			"Vulkan: Publish Virtual Geometry Packet Resources",
+			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		impl->PublishVirtualGeometryGpuPacketResources(
+			cmd,
+			frameData,
+			renderViewType,
+			diagnosticViewId,
+			impl->backendFrameSerial,
+			statsSlotIndex,
+			renderSnapshot.lightDataOffset,
+			renderSnapshot.clusterDataOffset,
+			renderSnapshot.lightIndexOffset);
+	}
+	beginCommandRecordingPhase(
+		"Vulkan: Primary Record Virtual Geometry Compute");
+	const auto& virtualGeometryGpuPackets = frameData.VirtualGeometryGpuPackets();
+	const auto& virtualGeometryGpuBatches = frameData.VirtualGeometryGpuBatches();
+	const auto& virtualGeometryGeneratedSubmissions =
+		frameData.VirtualGeometryGeneratedSubmissions();
 	const bool hasDirectGeometryCommands = std::any_of(
 		frameData.commands.begin(),
 		frameData.commands.end(),
@@ -3807,9 +3855,9 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		{
 			return command.geometryRoute == TerraEngine::Renderer::GeometryRoute::DirectMeshlet;
 		});
-	const bool hasVirtualGeometryTimestampWork = !frameData.virtualGeometryGpuPackets.empty()
-		|| !frameData.virtualGeometryGpuBatches.empty()
-		|| !frameData.virtualGeometryGeneratedSubmissions.empty();
+	const bool hasVirtualGeometryTimestampWork = !virtualGeometryGpuPackets.empty()
+		|| !virtualGeometryGpuBatches.empty()
+		|| !virtualGeometryGeneratedSubmissions.empty();
 	if(hasVirtualGeometryTimestampWork || hasDirectGeometryCommands)
 	{
 		// A direct-only frame still owns a real indexed raster timestamp below.
@@ -3920,15 +3968,15 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	}
 	beginCommandRecordingPhase(
 		"Vulkan: Primary Prepare Lighting Resources");
-	const std::uint64_t generatedSubmissionFrameId = frameData.virtualGeometryGpuPackets.empty()
+	const std::uint64_t generatedSubmissionFrameId = virtualGeometryGpuPackets.empty()
 		? impl->backendFrameSerial
-		: frameData.virtualGeometryGpuPackets.front().frameId;
-	bool generatedVirtualGeometrySubmissionsUsable = !frameData.virtualGeometryGeneratedSubmissions.empty();
-	for (const GeneratedVirtualGeometrySubmissionRecord& submission : frameData.virtualGeometryGeneratedSubmissions)
+		: virtualGeometryGpuPackets.front().frameId;
+	bool generatedVirtualGeometrySubmissionsUsable = !virtualGeometryGeneratedSubmissions.empty();
+	for (const GeneratedVirtualGeometrySubmissionRecord& submission : virtualGeometryGeneratedSubmissions)
 	{
 		const bool rangeValid = submission.packetCount > 0u
-			&& submission.packetOffset <= frameData.virtualGeometryGpuPackets.size()
-			&& static_cast<std::size_t>(submission.packetOffset) + static_cast<std::size_t>(submission.packetCount) <= frameData.virtualGeometryGpuPackets.size();
+			&& submission.packetOffset <= virtualGeometryGpuPackets.size()
+			&& static_cast<std::size_t>(submission.packetOffset) + static_cast<std::size_t>(submission.packetCount) <= virtualGeometryGpuPackets.size();
 		generatedVirtualGeometrySubmissionsUsable = generatedVirtualGeometrySubmissionsUsable
 			&& submission.frameId == generatedSubmissionFrameId
 			&& submission.viewType == renderViewType
@@ -4771,6 +4819,70 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	thread_local std::vector<PreparedDraw> prepared;
 	prepared.clear();
 	prepared.reserve(frameData.commands.size());
+	// Validate and publish the whole crowd stream before any grouped command is
+	// suppressed. A malformed range, capacity overflow, allocation failure, or
+	// descriptor publication failure leaves every original command available for
+	// ordinary per-object recording in this same frame.
+	thread_local std::vector<std::int32_t> groupedSubmissionByCommand;
+	groupedSubmissionByCommand.assign(frameData.commands.size(), -1);
+	thread_local std::vector<std::uint8_t> groupedCommandSuppressed;
+	groupedCommandSuppressed.assign(frameData.commands.size(), 0u);
+	bool groupedInstanceStreamReady = false;
+	if(frameData.renderOptimization.valid != 0u
+		&& !frameData.groupedSubmissions.empty()
+		&& !frameData.groupedInstanceRecords.empty()) {
+		bool complete = true;
+		for(std::size_t submissionIndex = 0u;
+			submissionIndex < frameData.groupedSubmissions.size(); ++submissionIndex) {
+			const GroupedRenderSubmission& submission =
+				frameData.groupedSubmissions[submissionIndex];
+			const SharedRenderGroup& group = submission.group;
+			if(!group.executable || !group.key.IsComplete()
+				|| submission.representativeCommandIndex >= frameData.commands.size()
+				|| group.instanceCount < 2u || group.firstInstance
+					> frameData.groupedInstanceRecords.size()
+				|| group.instanceCount > frameData.groupedInstanceRecords.size()
+					- group.firstInstance) {
+				complete = false;
+				break;
+			}
+			groupedSubmissionByCommand[submission.representativeCommandIndex] =
+				static_cast<std::int32_t>(submissionIndex);
+		}
+		const std::size_t recordCount = frameData.groupedInstanceRecords.size();
+		const bool sizeRepresentable = recordCount <=
+			std::numeric_limits<VkDeviceSize>::max() / sizeof(RenderInstanceRecord);
+		const VkDeviceSize requiredBytes = sizeRepresentable
+			? static_cast<VkDeviceSize>(recordCount * sizeof(RenderInstanceRecord)) : 0u;
+		if(complete && requiredBytes != 0u) {
+			try {
+				VulkanBuffer& instanceBuffer = impl->groupedInstanceBuffers[currentFrame];
+				VkDeviceSize& capacity = impl->groupedInstanceCapacities[currentFrame];
+				if(instanceBuffer.buffer == VK_NULL_HANDLE || capacity < requiredBytes) {
+					const VkDeviceSize growth = std::max(requiredBytes,
+						capacity + capacity / 2u + sizeof(RenderInstanceRecord));
+					impl->RetireBuffer(instanceBuffer);
+					instanceBuffer = impl->CreateBuffer(growth,
+						VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+						VMA_MEMORY_USAGE_CPU_TO_GPU, "Grouped Render Instance Stream");
+					capacity = growth;
+				}
+				if(impl->groupedInstanceBufferIndex
+					== VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX) {
+					impl->groupedInstanceBufferIndex = impl->AllocateBufferIndex();
+				}
+				// Do not publish bytes yet. Animated records receive their exact
+				// bridge selectors below; one final map/copy/descriptor update then
+				// makes the complete stream visible atomically to grouped draws.
+				groupedInstanceStreamReady = true;
+			}
+			catch(const std::exception&) {
+				// The fallback loop below remains complete; resource pressure is not
+				// allowed to make a partially uploaded crowd visible.
+				groupedInstanceStreamReady = false;
+			}
+		}
+	}
 	std::uint32_t cameraVisibleShadowCasterCount = 0U;
 	struct PreparedShadowList {
 		TerraEngine::UUID lightId = TerraEngine::EMPTY_UUID;
@@ -4833,11 +4945,21 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	};
 
 	RenderStatsSnapshot pendingStats{};
+	const auto groupedRecordingBegin = std::chrono::steady_clock::now();
 	pendingStats.viewType = (view == ViewType::Scene) ? RenderViewType::Scene : RenderViewType::Game;
 	pendingStats.renderSize = glm::uvec2(hiZTargetWidth, hiZTargetHeight);
 	pendingStats.frameTimeMs = SafeFrameTimeMs(frameData.deltaTimeSeconds);
 	pendingStats.fps = pendingStats.frameTimeMs > 0.0f ? (1000.0f / pendingStats.frameTimeMs) : 0.0f;
 	pendingStats.valid = true;
+	pendingStats.optimization = frameData.renderOptimization;
+	pendingStats.optimization.instanceStreamCapacityBytes = static_cast<std::uint32_t>(
+		std::min<VkDeviceSize>(impl->groupedInstanceCapacities[currentFrame],
+			std::numeric_limits<std::uint32_t>::max()));
+	if(!groupedInstanceStreamReady && !frameData.groupedSubmissions.empty()) {
+		pendingStats.optimization.fallbackAllocationFailureCount = 1u;
+	}
+	std::uint32_t recordedGroupedInstanceCount = 0u;
+	std::uint32_t recordedGroupedSubmissionCount = 0u;
 
 	const auto ResolvePipeline = [&](const TerraEngine::UUID& shaderCollectionId, VkRenderPass currentPass, uint32_t materialFlags) -> VulkanPipeline* {
 		if (currentPass == VK_NULL_HANDLE) {
@@ -4868,6 +4990,15 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		if (pipelineIt == passIt->second.end()
 			|| pipelineIt->second.pipeline == VK_NULL_HANDLE
 			|| pipelineIt->second.layout == VK_NULL_HANDLE) {
+			return nullptr;
+		}
+		if (pipelineUsesConventionalVisibilityIdentity
+			&& !pipelineIt->second.usesConventionalVisibilityIdentity) {
+			// A visible mesh drawn through target0-only SPIR-V would leave the
+			// integer attachment clear and turn an object hit into false zero data.
+			// Reject that command rather than letting automation misreport it.
+			TERRAENGINE_LOG(LogLevel::Warning,
+				"Skipping conventional draw because its active material pipeline does not write the typed identity attachment.");
 			return nullptr;
 		}
 
@@ -4943,6 +5074,18 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 				!= impl->activeDeformationGraphicsBufferIndex)
 		{
 			return std::nullopt;
+		}
+		const std::uint64_t slot = stableInstanceId >> 32u;
+		if(slot < resources.graphicsGroupSlotHints.size())
+		{
+			const auto& hint = resources.graphicsGroupSlotHints[
+				static_cast<std::size_t>(slot)];
+			if(!hint.ambiguous
+				&& hint.stableInstanceId == stableInstanceId
+				&& hint.meshId == command.meshId)
+			{
+				return hint.headerWordOffset;
+			}
 		}
 		const auto group = resources.graphicsGroupOffsets.find(
 			VulkanContext::Impl::VulkanDeformationFrameResources::
@@ -5095,6 +5238,104 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		push.meshDataIndex = impl->activeAnimationGraphicsBufferIndex;
 		push.textureIndex = gpu.workPacketIndex;
 	};
+	// Resolve the exact animation bridge for every grouped owner before the
+	// second (authoritative) stream publication. The first allocation/upload
+	// above only reserves a frame-slot buffer; this pass is the all-or-nothing
+	// boundary that prevents one animator from borrowing its representative's
+	// palette record.
+	const auto instanceStreamUploadBegin = std::chrono::steady_clock::now();
+	{
+		TERRAENGINE_PROFILE_SCOPE(
+			"Vulkan: Prepare Grouped Instance Stream",
+			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		if(groupedInstanceStreamReady) {
+			// Validate the backend-owned selectors in compact ordinary memory first.
+			// Once every record succeeds, upload the authoritative stream once and patch
+			// only the two words that cannot be known before backend publication.
+			thread_local std::vector<glm::uvec2> resolvedAnimationSelectors;
+			try {
+				resolvedAnimationSelectors.resize(
+					frameData.groupedInstanceRecords.size());
+			} catch(const std::bad_alloc&) {
+				groupedInstanceStreamReady = false;
+			}
+			bool resolvedEveryAnimatedRecord = groupedInstanceStreamReady;
+			for(std::size_t recordIndex = 0U;
+				resolvedEveryAnimatedRecord
+					&& recordIndex < frameData.groupedInstanceRecords.size(); ++recordIndex) {
+				const RenderInstanceRecord& record =
+					frameData.groupedInstanceRecords[recordIndex];
+				const uint32_t sourceCommandIndex = record.materialAndTexture[
+					RenderInstanceRecord::kPickingIdentityWord];
+				if(sourceCommandIndex >= frameData.commands.size()) {
+					resolvedEveryAnimatedRecord = false;
+					break;
+				}
+				const DrawCommand& source = frameData.commands[sourceCommandIndex];
+				if(!source.animationBinding.gpu.IsComplete()) {
+					resolvedAnimationSelectors[recordIndex] = glm::uvec2(
+						VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX);
+					continue;
+				}
+				const std::optional<std::uint32_t> canonicalGroup =
+					ResolveCanonicalGraphicsGroup(source);
+				PushConstants animationPush{};
+				ApplyAnimationGraphicsBridge(source, animationPush,
+					RequiresConservativeDeformableVisibility(source, canonicalGroup),
+					canonicalGroup);
+				if(animationPush.meshDataIndex
+					== VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX
+					|| animationPush.textureIndex
+					== VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX) {
+					resolvedEveryAnimatedRecord = false;
+					break;
+				}
+				resolvedAnimationSelectors[recordIndex] = glm::uvec2(
+					animationPush.meshDataIndex, animationPush.textureIndex);
+			}
+			VulkanBuffer& instanceBuffer = impl->groupedInstanceBuffers[currentFrame];
+			void* mapped = nullptr;
+			const VkDeviceSize bytes = static_cast<VkDeviceSize>(
+				frameData.groupedInstanceRecords.size() * sizeof(RenderInstanceRecord));
+			if(resolvedEveryAnimatedRecord) {
+				if(vmaMapMemory(impl->allocator, instanceBuffer.allocation, &mapped)
+					!= VK_SUCCESS || mapped == nullptr) {
+					resolvedEveryAnimatedRecord = false;
+				}
+				else {
+					std::memcpy(mapped, frameData.groupedInstanceRecords.data(),
+						static_cast<std::size_t>(bytes));
+					RenderInstanceRecord* uploadedRecords =
+						static_cast<RenderInstanceRecord*>(mapped);
+					for(std::size_t recordIndex = 0u;
+						recordIndex < resolvedAnimationSelectors.size(); ++recordIndex)
+					{
+						uploadedRecords[recordIndex].animationSelectors.x =
+							resolvedAnimationSelectors[recordIndex].x;
+						uploadedRecords[recordIndex].animationSelectors.y =
+							resolvedAnimationSelectors[recordIndex].y;
+					}
+					vmaFlushAllocation(impl->allocator, instanceBuffer.allocation, 0u, bytes);
+					vmaUnmapMemory(impl->allocator, instanceBuffer.allocation);
+				}
+			}
+			if(resolvedEveryAnimatedRecord) {
+				impl->UpdateGlobalBufferForFrame(currentFrame,
+					impl->groupedInstanceBufferIndex, instanceBuffer.buffer, 0u,
+					bytes, true);
+			}
+			else {
+				groupedInstanceStreamReady = false;
+			}
+		}
+	}
+	if(pendingStats.optimization.valid != 0u) {
+		// This covers selector resolution plus the single authoritative map/copy/
+		// flush/publication boundary. It deliberately excludes command recording.
+		pendingStats.optimization.instanceStreamUploadNanoseconds =
+			static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+				std::chrono::steady_clock::now() - instanceStreamUploadBegin).count());
+	}
 	struct StaticDrawPreparationKey
 	{
 		TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
@@ -5241,7 +5482,12 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	};
 
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (const auto& command : frameData.commands) {
+	for (std::uint32_t commandIndex = 0u;
+		commandIndex < frameData.commands.size(); ++commandIndex) {
+		if(groupedCommandSuppressed[commandIndex] != 0u) {
+			continue;
+		}
+		const DrawCommand& command = frameData.commands[commandIndex];
 		Material* material = ResolveMaterial(command.materialId);
 		if (!material) continue;
 
@@ -5258,6 +5504,9 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		const std::optional<std::uint32_t> canonicalGraphicsGroup =
 			ResolveCanonicalGraphicsGroup(command);
 		const bool canonicalGraphicsAvailable = canonicalGraphicsGroup.has_value();
+		const bool groupedPerInstanceAnimationBridgeAvailable =
+			groupedInstanceStreamReady
+			&& groupedSubmissionByCommand[commandIndex] >= 0;
 		const bool multiOwnerCanonicalFallback =
 			impl->pendingAnimationImmutablePlan != nullptr
 			&& impl->pendingAnimationImmutablePlan->workPackets.size() > 1u
@@ -5268,13 +5517,18 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (collectionId == defaultMeshCollectionId
 			&& defaultTaskPipelineAvailable
-			&& (canonicalGraphicsAvailable
+			&& (groupedPerInstanceAnimationBridgeAvailable
+				|| canonicalGraphicsAvailable
 				|| !command.animationBinding.
 					RequiresOwnerMeshDeformationFallback())
-			&& !multiOwnerCanonicalFallback) {
+			&& (!multiOwnerCanonicalFallback
+				|| groupedPerInstanceAnimationBridgeAvailable)) {
 			// Canonical page deformation requires the task stage to initialize
 			// packet-local payload identity. Legacy owner deformation stays on
 			// the complete owner-mesh route until it publishes that same proof.
+			// A validated grouped stream is the one safe exception: every member
+			// carries its own generation-checked animation buffer and record index,
+			// so the task/mesh stages never borrow the representative's palette.
 			collectionId = defaultTaskCollectionId;
 		}
 
@@ -5323,7 +5577,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 
 		PushConstants push{};
 		// Every draw in this immutable view uses the same camera transform.
-		// Reusing the matrix avoids 4,000 identical 4x4 multiplies for a crowd.
+		// Reusing the matrix avoids repeated identical 4x4 multiplies for a shared crowd.
 		push.viewProj = currentViewProjection;
 		push.model = command.modelMatrix;
 		push.materialIndex = 0;
@@ -5341,7 +5595,17 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		push.lightDataOffset = renderSnapshot.lightDataOffset;
 		push.clusterDataOffset = renderSnapshot.clusterDataOffset;
 		push.lightIndexOffset = renderSnapshot.lightIndexOffset;
+		// Indirect recording and upload both address the frame-slot command buffer
+		// through this base. It must remain the snapshot offset: replacing it with
+		// per-object metadata makes vkCmdDrawMeshTasksIndirectEXT read an
+		// uninitialised zero-command slot and silently dispatch no mesh work.
 		push.indirectDrawOffset = renderSnapshot.indirectDrawOffset;
+		// The default task and mesh shaders do not consume the page-need offset;
+		// page-need count remains available for their diagnostics. Reuse this ABI
+		// lane only for the conventional identity fragment's one-based immutable
+		// snapshot-table key. This avoids increasing the 256-byte push-constant
+		// contract while keeping the indirect-command addressing channel intact.
+		push.selectedVirtualPageNeedOffset = command.conventionalVisibilityIdentityIndex;
 		// RenderSystem has already selected the packet/cluster meshlet range.
 		// Owner-mesh draws use the baked global meshlet offset. Resident page and
 		// fallback draws may use a compact page-local stream, but the original
@@ -5369,6 +5633,56 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		const uint32_t selectedMeshletCount = pageLocalGeometry
 			? command.virtualMeshletCount
 			: ownerMeshletCount;
+		const GroupedRenderSubmission* groupedSubmission = nullptr;
+		const auto memberMatchesRepresentative = [&](const DrawCommand& member) {
+			// Compare only data that the shared push packet still reads. The instance
+			// stream carries each member's packet descriptor, page identity/bytes,
+			// meshlet offset, and exact animation bridge, so requiring those values
+			// here would reject a valid page-local crowd before its per-instance task
+			// shader can consume them. Meshlet count remains shared because it sets
+			// the fixed task-group stride used to address every member safely.
+			return member.meshId == command.meshId
+				&& member.materialId == command.materialId
+				&& member.materialIndex == command.materialIndex
+				&& member.textureIndex == command.textureIndex
+				&& member.geometryRoute == command.geometryRoute
+				&& member.virtualMeshletCount == command.virtualMeshletCount
+				&& member.selectedVirtualLod == command.selectedVirtualLod
+				&& member.virtualGeometryFlags == command.virtualGeometryFlags
+				&& member.virtualGeometryPayloadSource == command.virtualGeometryPayloadSource
+				&& member.taskShaderCullingEnabled == command.taskShaderCullingEnabled
+				&& member.animationBinding.source == command.animationBinding.source
+				&& member.animationBinding.RequiresConservativeCoarseVisibility()
+					== command.animationBinding.RequiresConservativeCoarseVisibility()
+				&& member.editorTint == glm::vec4(0.0f);
+		};
+		if(groupedInstanceStreamReady
+			&& groupedSubmissionByCommand[commandIndex] >= 0
+			&& (command.geometryRoute
+				== TerraEngine::Renderer::GeometryRoute::DirectMeshlet
+				|| command.UsesVirtualGeometryRoute())
+			&& staticPreparation->hasTaskStage) {
+			const GroupedRenderSubmission& candidate = frameData.groupedSubmissions[
+				static_cast<std::size_t>(groupedSubmissionByCommand[commandIndex])];
+			const SharedRenderGroup& group = candidate.group;
+			const uint32_t baseTaskGroups = (selectedMeshletCount + 31u) / 32u;
+			const bool taskCountFits = baseTaskGroups != 0u
+				&& group.instanceCount <= std::numeric_limits<uint32_t>::max()
+					/ baseTaskGroups;
+			bool membersMatch = taskCountFits;
+			for(uint32_t instance = 0u; membersMatch && instance < group.instanceCount;
+				++instance) {
+				const RenderInstanceRecord& record = frameData.groupedInstanceRecords[
+					group.firstInstance + instance];
+				const uint32_t memberCommandIndex =
+					record.materialAndTexture[RenderInstanceRecord::kPickingIdentityWord];
+				membersMatch = memberCommandIndex < frameData.commands.size()
+					&& memberMatchesRepresentative(frameData.commands[memberCommandIndex]);
+			}
+			if(membersMatch) {
+				groupedSubmission = &candidate;
+			}
+		}
 		// Always push the owner-mesh offset. Task/mesh shaders ignore it when a
 		// page-local descriptor validates, but they need the original range when
 		// a descriptor is missing or rejected and the draw falls back to the
@@ -5403,7 +5717,6 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		}
 		push.selectedVirtualClusterOffset = command.selectedVirtualClusterOffset;
 		push.selectedVirtualClusterCount = command.selectedVirtualClusterCount;
-		push.selectedVirtualPageNeedOffset = command.selectedVirtualPageNeedOffset;
 		push.selectedVirtualPageNeedCount = command.selectedVirtualPageNeedCount;
 		push.virtualGeometryPacketBufferIndex = impl->activeVirtualGeometryPacketBufferIndex;
 		push.virtualGeometryBatchBufferIndex = impl->activeVirtualGeometryBatchBufferIndex;
@@ -5414,6 +5727,22 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		push.virtualGeometryPagePayloadByteSize = static_cast<std::uint32_t>(command.virtualGeometryPagePayloadByteSize & 0xffffffffull);
 		push.virtualGeometryPacketDescriptorIndex = command.virtualGeometryPacketDescriptorIndex;
 		push.editorTint = command.editorTint;
+		if(groupedSubmission != nullptr) {
+			// The tint lane is zero for every eligible group and is therefore a
+			// bounded runtime-only selector channel. This retains each proven VG
+			// packet/page selector in its existing push fields.
+			push.virtualGeometryFlags |= 0x80000000u;
+			// Grouped mesh work never consumes the representative model transform;
+			// retain tint/VG fields and carry the transient stream locator in GLM
+			// column 3. The HLSL ABI reads it as model[0..3].w because HLSL's
+			// first matrix index is a row, even for column_major storage.
+			push.model[3] = glm::vec4(
+				std::bit_cast<float>(impl->groupedInstanceBufferIndex),
+				std::bit_cast<float>(groupedSubmission->group.firstInstance),
+				std::bit_cast<float>(groupedSubmission->group.instanceCount),
+				std::bit_cast<float>(static_cast<std::uint32_t>(
+					frameData.groupedInstanceRecords.size())));
+		}
 
 		PreparedDraw draw{};
 		draw.pipeline = staticPreparation->pipeline;
@@ -5437,16 +5766,43 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 				(command.virtualGeometryFlags
 					>> kVirtualGeometryRasterRouteShift)
 				& kVirtualGeometryRasterRouteMask);
+		// Generated packet commands encode one selected packet's dispatch count.
+		// A validated crowd range instead needs the normal frame-slot indirect
+		// command with its count multiplied by members. Retaining the
+		// representative's device-authored/page-local selectors in push constants
+		// gives grouped work the same geometry source without a vendor-specific
+		// execution path.
+		// Preserve the canonical device-authored decision for ordinary packets.
+		// A validated grouped stream instead uses the standard frame-slot task
+		// indirect range, whose instance records select each member's exact packet.
 		draw.useGeneratedVirtualGeometryIndirect = deviceAuthoredCommand;
+		if (groupedSubmission != nullptr)
+		{
+			draw.useGeneratedVirtualGeometryIndirect = false;
+		}
 		
 		// RenderSystem has already collapsed compatible contiguous virtual
 		// geometry cluster packets into this selected meshlet range. Vulkan
 		// submits that prepared packet batch as one indirect task draw instead
 		// of exploding back into one command per cluster.
 		const uint32_t kTaskBatchSize = 32u;
-		const uint32_t taskGroupCount = staticPreparation->hasTaskStage
+		uint32_t taskGroupCount = staticPreparation->hasTaskStage
 			? ((selectedMeshletCount + (kTaskBatchSize - 1u)) / kTaskBatchSize)
 			: selectedMeshletCount;
+		if(groupedSubmission != nullptr) {
+			taskGroupCount *= groupedSubmission->group.instanceCount;
+			for(uint32_t instance = 0u;
+				instance < groupedSubmission->group.instanceCount; ++instance) {
+				const uint32_t memberCommandIndex = frameData.groupedInstanceRecords[
+					groupedSubmission->group.firstInstance + instance]
+					.materialAndTexture[RenderInstanceRecord::kPickingIdentityWord];
+				if(memberCommandIndex != commandIndex) {
+					groupedCommandSuppressed[memberCommandIndex] = 1u;
+				}
+			}
+			recordedGroupedInstanceCount += groupedSubmission->group.instanceCount;
+			++recordedGroupedSubmissionCount;
+		}
 
 		VkDrawMeshTasksIndirectCommandEXT indirectCmd{};
 		indirectCmd.groupCountX = taskGroupCount;
@@ -5469,12 +5825,14 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		}
 
 		pendingStats.drawCalls += 1u;
-		pendingStats.triangleCount += estimateSelectedPrimitives(
+		const uint32_t groupedInstanceCount = groupedSubmission != nullptr
+			? groupedSubmission->group.instanceCount : 1u;
+		pendingStats.triangleCount += groupedInstanceCount * estimateSelectedPrimitives(
 			command,
 			staticPreparation->indexCount / 3u,
 			ownerMeshletOffset,
 			selectedMeshletCount);
-		pendingStats.meshletsTotal += selectedMeshletCount;
+		pendingStats.meshletsTotal += groupedInstanceCount * selectedMeshletCount;
 		pendingStats.taskCullingActive = pendingStats.taskCullingActive || activeTaskCulling;
 		pendingStats.hiZActive = pendingStats.hiZActive || hiZOcclusionActive;
 		pendingStats.vrsActive = pendingStats.vrsActive || impl->UsesVrsAttachment();
@@ -5482,7 +5840,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		// Mesh-only and pass-through fallback paths keep conservative CPU estimates.
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!staticPreparation->hasTaskStage || !activeTaskCulling) {
-			pendingStats.meshletsDispatched += selectedMeshletCount;
+			pendingStats.meshletsDispatched += groupedInstanceCount * selectedMeshletCount;
 		}
 	}
 
@@ -5631,6 +5989,26 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		pendingBudgetDiagnostics.lightVisibleShadowCasterCount += static_cast<std::uint32_t>(preparedList.draws.size());
 	}
 
+	if(pendingStats.optimization.valid != 0u) {
+		pendingStats.optimization.groupedCommandRecordingNanoseconds =
+			static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+				std::chrono::steady_clock::now() - groupedRecordingBegin).count());
+		pendingStats.optimization.groupedInstanceCount = recordedGroupedInstanceCount;
+		pendingStats.optimization.groupedSubmissionCount = recordedGroupedSubmissionCount;
+		pendingStats.optimization.fallbackInstanceCount =
+			pendingStats.optimization.visibleInstanceCount - recordedGroupedInstanceCount;
+		pendingStats.optimization.fallbackSubmissionCount =
+			pendingStats.optimization.fallbackInstanceCount;
+		pendingStats.optimization.avoidedSubmissionCount = recordedGroupedInstanceCount
+			- recordedGroupedSubmissionCount;
+		if(recordedGroupedSubmissionCount == 0u && !frameData.groupedSubmissions.empty()
+			&& groupedInstanceStreamReady) {
+			pendingStats.optimization.rejectedUnsupportedVariantCount =
+				static_cast<std::uint32_t>(std::min<std::size_t>(
+					frameData.groupedSubmissions.size(),
+					std::numeric_limits<std::uint32_t>::max()));
+		}
+	}
 	impl->RecordPendingStats(statsSlotIndex, pendingStats);
 
 	// Shadow-map rendering and the main scene pass both consume the same
@@ -6531,8 +6909,11 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			: (view == ViewType::Scene ? impl->sceneView : impl->gameView);
 		// This metadata is CPU-side only, but it binds a later fence-completed
 		// uint4 to the immutable frame/session that rendered the attachment.
-		identityTarget.identityFrameId = frameData.virtualGeometryGpuPackets.empty()
-			? impl->backendFrameSerial : frameData.virtualGeometryGpuPackets.front().frameId;
+		// Direct meshes may legitimately publish no VG packets. The renderer still
+		// owns one immutable frame snapshot, so always stamp its explicit frame id
+		// instead of substituting a backend-only serial that automation cannot map.
+		identityTarget.identityFrameId = frameData.frameId != 0u
+			? frameData.frameId : impl->backendFrameSerial;
 		identityTarget.identityRendererGeneration = impl->renderSessionGeneration;
 	}
 	impl->RecordDiagnosticCheckpoint(cmd, view == ViewType::Scene ? "scene.mainpass.end" : "game.mainpass.end");
@@ -6540,7 +6921,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	// VRS Generation for next frame
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (impl->UsesVrsAttachment()) {
-		const VkImageView vrsColorView = (outputRequest.kind == RenderOutputKind::OffscreenTexture)
+		const VkImageView vrsColorView = renderingDedicatedCaptureTarget
 			? impl->captureView.view
 			: ((view == ViewType::Scene) ? impl->sceneView.view : impl->gameView.view);
 		impl->GenerateVRSImage(cmd, vrsColorView);
@@ -8737,22 +9118,32 @@ bool VulkanContext::QueueConventionalVisibilityIdentityReadback(
 		|| impl->deviceLost || request.frameId == 0u) {
 		return false;
 	}
-	// Identity picking currently targets the editor Scene/Game textures. Runtime
-	// presentation has an identity attachment too, but exposes no public readback
-	// policy in this slice.
-	const Impl::OffscreenResources& target = request.viewType == RenderViewType::Scene
-		? impl->sceneView : impl->gameView;
+	// Dedicated capture proof is selected only by an explicit typed request, so it
+	// cannot replace normal Scene/Game viewport identity data.
+	const Impl::OffscreenResources& target = request.dedicatedCaptureTarget
+		? impl->captureView
+		: (request.viewType == RenderViewType::Scene ? impl->sceneView : impl->gameView);
 	if (target.visibilityIdentity.image == VK_NULL_HANDLE
 		|| target.visibilityIdentity.view == VK_NULL_HANDLE
 		|| request.pixel.x >= target.extent.width || request.pixel.y >= target.extent.height) {
+		TERRAENGINE_LOG(LogLevel::Warning,
+			"Rejecting Vulkan conventional identity readback because the requested target or pixel is unavailable.");
 		return false;
 	}
 	if (request.targetGeneration != 0u && request.targetGeneration != target.generation) {
+		TERRAENGINE_LOG(LogLevel::Warning,
+			"Rejecting Vulkan conventional identity readback because its target generation is stale.");
 		return false;
 	}
 	if (target.identityFrameId != request.frameId
 		|| (request.rendererGeneration != 0u
 			&& target.identityRendererGeneration != request.rendererGeneration)) {
+		TERRAENGINE_LOG(LogLevel::Warning,
+			"Rejecting Vulkan conventional identity readback because rendered target metadata does not match the request. "
+				<< "requestFrame=" << request.frameId << " targetFrame=" << target.identityFrameId
+				<< " requestGeneration=" << request.rendererGeneration
+				<< " targetGeneration=" << target.identityRendererGeneration
+				<< " dedicatedCapture=" << request.dedicatedCaptureTarget);
 		return false;
 	}
 
@@ -8823,6 +9214,7 @@ bool VulkanContext::QueueConventionalVisibilityIdentityReadback(
 	pending.completion.rendererGeneration = request.rendererGeneration != 0u
 		? request.rendererGeneration : impl->renderSessionGeneration;
 	pending.completion.targetGeneration = target.generation;
+	pending.completion.dedicatedCaptureTarget = request.dedicatedCaptureTarget;
 	pending.sourceImage = target.visibilityIdentity.image;
 	pending.stagingBuffer = staging.buffer;
 	pending.stagingAllocation = staging.allocation;
@@ -8855,8 +9247,9 @@ void VulkanContext::Impl::ProcessConventionalVisibilityIdentityReadbacks()
 		if (status != VK_SUCCESS) {
 			it->completion.rejectionReason = "Vulkan identity readback fence did not complete successfully.";
 		} else {
-			const OffscreenResources& currentTarget =
-				it->completion.viewType == RenderViewType::Scene ? sceneView : gameView;
+			const OffscreenResources& currentTarget = it->completion.dedicatedCaptureTarget
+				? captureView
+				: (it->completion.viewType == RenderViewType::Scene ? sceneView : gameView);
 			if (it->sourceImage != currentTarget.visibilityIdentity.image
 				|| it->completion.targetGeneration != currentTarget.generation
 				|| it->completion.frameId != currentTarget.identityFrameId
@@ -10094,6 +10487,18 @@ void VulkanContext::Impl::ClearResources() {
 		vmaDestroyBuffer(allocator, mesh.meshletBoundsBuffer.buffer, mesh.meshletBoundsBuffer.allocation);
 	}
 	meshCache.clear();
+
+	// Crowd instance streams are ordinary frame-slot buffers. Device-idle
+	// recovery may destroy them directly; normal growth instead retires a slot
+	// buffer and waits for that slot's existing fence before reuse.
+	for(VulkanBuffer& buffer : groupedInstanceBuffers) {
+		DestroyBufferImmediate(buffer);
+	}
+	groupedInstanceCapacities.fill(0u);
+	if(groupedInstanceBufferIndex != INVALID_BINDLESS_BUFFER_INDEX) {
+		freeBufferIndices.push_back(groupedInstanceBufferIndex);
+		groupedInstanceBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
+	}
 
 	// View-owned virtual geometry packet buffers are renderer-side scratch
 	// resources. Clear them while the device is idle so old packet, batch,

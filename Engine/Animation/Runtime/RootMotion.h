@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -231,6 +232,10 @@ namespace TerraEngine::Animation {
 			AnimatorInstanceHandle animator,
 			std::vector<AnimationRootMotionApplicationResult>& output) const;
 		void Retire(AnimatorInstanceHandle animator);
+		// A rebound crowd is removed from every receipt vector with one lock and one
+		// index rebuild instead of repeating five vector scans per animator. The input
+		// is sorted and unique so protected retirement performs no temporary allocation.
+		void RetireMany(std::span<const AnimatorInstanceHandle> animators);
 		void Clear();
 
 	private:

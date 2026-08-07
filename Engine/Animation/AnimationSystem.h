@@ -25,12 +25,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <limits>
 #include <span>
 #include <string>
 #include <vector>
 
 namespace TerraEngine::Animation {
 	class AnimationClipView;
+	class AnimationEventStream;
 	struct MotionDatabaseAsset;
 	struct RagdollProfileAsset;
 	struct RetargetCompiledProfile;
@@ -118,6 +120,27 @@ namespace TerraEngine::Animation {
 		SharedCopyVector<std::uint32_t> authoritativeJointIndices;
 		SharedCopyVector<std::int32_t> jointParents;
 		AnimationGpuExecutionInputs gpuExecution{};
+		// The coordinator builds this one immutable visual binding at protected
+		// bind/residency refresh. Compact workers copy only playback/continuity
+		// values into packets and share this resident program/payload proof.
+		struct GpuFastBinding {
+			std::uint32_t programResourceIndex = kGpuAnimationInvalidResourceIndex;
+			GpuAnimationVisualInput visual{};
+			std::shared_ptr<const GpuAnimationResidentPayloads> residentPayloads;
+			// The coordinator computes this once from the immutable resident buffers.
+			// Sharing it with the binding prevents a cache hit from re-walking every
+			// payload vector merely to restore the scheduler budget declaration.
+			std::size_t residentByteCount = 0U;
+
+			[[nodiscard]] bool IsComplete() const noexcept
+			{
+				return programResourceIndex != kGpuAnimationInvalidResourceIndex
+					&& residentPayloads != nullptr && residentByteCount != 0U;
+			}
+		};
+		std::shared_ptr<const GpuFastBinding> gpuFastBinding;
+		// Legacy value fields remain copied for complete-path compatibility and are
+		// kept equal to gpuFastBinding whenever a compact binding is admitted.
 		std::uint32_t gpuProgramResourceIndex = kGpuAnimationInvalidResourceIndex;
 		GpuAnimationVisualInput gpuVisual{};
 		std::shared_ptr<const GpuAnimationResidentPayloads> gpuResidentPayloads;
@@ -194,10 +217,34 @@ namespace TerraEngine::Animation {
 		bool playOnBind = false;
 	};
 
+	// A rejected frame remains atomic, but diagnostics still need to explain which
+	// positive proof failed. The values are deliberately coarse and allocation-free
+	// so production captures can expose the first failed compact record cheaply.
+	enum class AnimationPlanRejectionReason : std::uint8_t {
+		None = 0U,
+		PlanningIncomplete,
+		PlaybackAdvance,
+		GenerationOverflow,
+		ExecutionModeNotGpuVisual,
+		FrameIdentityInvalid,
+		GpuLoweringRejected,
+		ResidentPayloadInvalid,
+		CompactClassificationRejected,
+		CompactInputIncomplete,
+		SchedulerRejected,
+		MemoryReservationRejected,
+		AllocationFailure
+	};
+
+	[[nodiscard]] TERRAENGINE_API std::string_view ToString(
+		AnimationPlanRejectionReason reason) noexcept;
+
 	// This copied diagnostic snapshot exposes the selected task granularity and
 	// bounded-memory/cancellation outcome without exposing mutable runtime storage.
 	struct AnimationProductionIntegrationSnapshot {
 		AnimationStatus planStatus = AnimationStatus::NotReady;
+		AnimationPlanRejectionReason rejectionReason = AnimationPlanRejectionReason::None;
+		std::size_t rejectionItemIndex = std::numeric_limits<std::size_t>::max();
 		AnimationWorkExecutionPolicy executionPolicy = AnimationWorkExecutionPolicy::Omitted;
 		std::size_t availableWorkerCount = 0U;
 		std::size_t selectedWorkerCount = 0U;
@@ -426,10 +473,18 @@ namespace TerraEngine::Animation {
 	private:
 		AnimationSystem();
 		~AnimationSystem() override;
+		// A prefab cohort shares immutable authored defaults. Batch binding parses
+		// and validates those defaults once, then copies only the small mutable
+		// per-instance state into each protected runtime record.
+		struct ImmutableBindPreparation {
+			std::vector<AnimationParameterSnapshot> initialParameters;
+			std::vector<float> initialLayerWeights;
+		};
 		[[nodiscard]] AnimationStatus BindAnimatorPlaybackLocked(
 			AnimatorInstanceHandle handle,
 			AnimatorPlaybackBinding binding,
 			const AnimationClipView* sharedValidatedClipView,
+			ImmutableBindPreparation* sharedPreparation,
 			bool immutableBindingValidated,
 			bool deferEvaluationCacheInvalidation,
 			bool publishGlobalInvalidation,
@@ -442,6 +497,9 @@ namespace TerraEngine::Animation {
 			bool allowClipPublicationReplacement,
 			bool playOnBind,
 			std::uint64_t replacementClipFingerprint,
+			const AnimationEventStream* preparedReplacementEventStream,
+			const AnimatorPlayback* preparedReplacementPlayback,
+			const AnimatorPlaybackConfiguration* preparedReplacementConfiguration,
 			bool& outChanged,
 			bool& outReplacedClipPublication);
 

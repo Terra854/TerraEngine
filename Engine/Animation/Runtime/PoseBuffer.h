@@ -9,6 +9,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -105,6 +106,17 @@ namespace TerraEngine::Animation {
 		auto operator<=>(const PoseBufferLayout&) const = default;
 	};
 
+	// Visual-only crowd followers retain their own animator generation while
+	// sharing this sealed transform/channel payload with an exact-state leader.
+	// Events, root motion, and write scratch remain per PoseBuffer because they
+	// can carry instance authority and therefore must never be aliased.
+	struct PoseBufferVisualPayload {
+		std::vector<AnimationTransform> localTransforms;
+		std::vector<AnimationTransform> modelTransforms;
+		std::vector<AnimationNamedFloatValue> morphValues;
+		std::vector<AnimationNamedFloatValue> curveValues;
+	};
+
 	// A PoseBuffer has a short worker-owned write phase followed by a permanent
 	// sealed phase. Public readers receive only const spans, and every mutating
 	// accessor returns an empty span once Seal succeeds.
@@ -119,25 +131,28 @@ namespace TerraEngine::Animation {
 		AnimationStatus AppendEvent(AnimationEventRecord event);
 		AnimationStatus SetRootMotion(AnimationRootMotionDelta rootMotion);
 		AnimationStatus Seal() noexcept;
+		// Creates a sealed visual-only follower without copying local/model/palette
+		// inputs. The caller must first prove that no events or root motion are
+		// present and supplies the follower's distinct publication generation.
+		[[nodiscard]] AnimationStatus ShareSealedVisualPayloadFrom(
+			const PoseBuffer& source,
+			AnimationPoseGeneration generation) noexcept;
 
 		[[nodiscard]] bool IsSealed() const noexcept { return sealed_; }
 		[[nodiscard]] AnimationStatus ValidateForPublication() const noexcept;
 		[[nodiscard]] const PoseBufferLayout& Layout() const noexcept { return layout_; }
 		[[nodiscard]] const AnimationPoseGeneration& Generation() const noexcept { return generation_; }
-		[[nodiscard]] std::span<const AnimationTransform> LocalTransforms() const noexcept { return localTransforms_; }
-		[[nodiscard]] std::span<const AnimationTransform> ModelTransforms() const noexcept { return modelTransforms_; }
-		[[nodiscard]] std::span<const AnimationNamedFloatValue> MorphValues() const noexcept { return morphValues_; }
-		[[nodiscard]] std::span<const AnimationNamedFloatValue> CurveValues() const noexcept { return curveValues_; }
+		[[nodiscard]] std::span<const AnimationTransform> LocalTransforms() const noexcept;
+		[[nodiscard]] std::span<const AnimationTransform> ModelTransforms() const noexcept;
+		[[nodiscard]] std::span<const AnimationNamedFloatValue> MorphValues() const noexcept;
+		[[nodiscard]] std::span<const AnimationNamedFloatValue> CurveValues() const noexcept;
 		[[nodiscard]] std::span<const AnimationEventRecord> Events() const noexcept { return events_; }
 		[[nodiscard]] const std::optional<AnimationRootMotionDelta>& RootMotionDelta() const noexcept { return rootMotion_; }
 
 	private:
 		PoseBufferLayout layout_{};
 		AnimationPoseGeneration generation_{};
-		std::vector<AnimationTransform> localTransforms_;
-		std::vector<AnimationTransform> modelTransforms_;
-		std::vector<AnimationNamedFloatValue> morphValues_;
-		std::vector<AnimationNamedFloatValue> curveValues_;
+		std::shared_ptr<PoseBufferVisualPayload> visualPayload_;
 		std::vector<AnimationEventRecord> events_;
 		std::vector<std::byte> scratch_;
 		std::optional<AnimationRootMotionDelta> rootMotion_;

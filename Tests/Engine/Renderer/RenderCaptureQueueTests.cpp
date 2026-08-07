@@ -86,6 +86,23 @@ namespace TerraEngine::Tests {
 			}
 			renderer.Clear();
 		});
+
+		registry.Add("Renderer.CaptureQueue.CaptureIdentityStateRetainsRequestedTarget", [](TestContext& context) {
+			RenderSystem& renderer = RenderSystem::Instance();
+			renderer.Clear();
+			// No backend is required here: unavailable states must still identify the
+			// target that automation asked to inspect.
+			const glm::uvec2 pixel(3u, 5u);
+			const auto captureState = renderer.GetConventionalVisibilityIdentityPickState(
+				RenderViewType::Game, pixel, true);
+			const auto viewportState = renderer.GetConventionalVisibilityIdentityPickState(
+				RenderViewType::Game, pixel, false);
+			context.Expect(captureState.dedicatedCaptureTarget,
+				"Unavailable capture identity state must retain the requested capture selector.");
+			context.Expect(!viewportState.dedicatedCaptureTarget,
+				"Unavailable viewport identity state must not claim capture-target proof.");
+			renderer.Clear();
+		});
 	}
 
 }

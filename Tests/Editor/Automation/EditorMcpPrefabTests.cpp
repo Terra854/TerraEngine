@@ -218,10 +218,16 @@ namespace TerraEngine::EditorTests
 
 			ObjectManager& objects = ObjectManager::instance();
 			const std::uint64_t hierarchyBefore = objects.GetHierarchyRevision();
+			const std::array<TerraEngine::UUID, 2> clipIds = {
+				TerraEngine::GenerateUUID(), TerraEngine::GenerateUUID()
+			};
 			const nlohmann::json result = fixture.service.HandleTool(
 				"prefab.instantiate_many",
 				{{"prefab", registeredGuid}, {"count", 4u}, {"namePrefix", "Gate Character"},
-					{"spacing", 2.0f}, {"requestedAnimationMode", 3}},
+					{"spacing", 2.0f}, {"requestedAnimationMode", 3},
+					{"defaultClipAssetIds", {
+						TerraEngine::ToHexString(clipIds[0]), TerraEngine::ToHexString(clipIds[1])}},
+					{"defaultClipStartFrameStep", 7u}},
 				WriteMode::WritesEnabled,
 				"prefab-instantiate-many-grid");
 			context.Expect(result.value("ok", false), "A registered prefab grid should publish atomically.");
@@ -237,6 +243,10 @@ namespace TerraEngine::EditorTests
 			context.ExpectEqual(static_cast<std::size_t>(4u),
 				data.value("animationModeOverrideCount", static_cast<std::size_t>(0u)),
 				"Every cloned AnimatorComponent should receive the policy before publication.");
+			context.ExpectEqual(static_cast<std::size_t>(4u),
+				data.value("animationDefaultsOverrideCount", static_cast<std::size_t>(0u)),
+				"Every cloned AnimatorComponent should receive clip and phase defaults before publication: "
+					+ data.dump());
 
 			const std::array<glm::vec3, 4> expectedPositions = {
 				glm::vec3(-1.0f, 0.0f, -1.0f),
@@ -264,6 +274,10 @@ namespace TerraEngine::EditorTests
 							== TerraEngine::Animation::AnimationExecutionPolicy::
 								ForceCpuDeterministicFallback,
 					"The requested animation policy should be visible in the same bulk generation.");
+				context.Expect(animator != nullptr
+					&& animator->defaultClipAssetId == clipIds[index % clipIds.size()]
+					&& animator->defaultClipStartFrame == index * 7u,
+					"Round-robin clips and deterministic phase offsets should share the bulk visibility boundary.");
 				context.ExpectEqual("Gate Character " + std::to_string(index + 1u),
 					objects.getObjectName(*root),
 					"Bulk root names should be deterministic and one-based.");

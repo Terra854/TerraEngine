@@ -104,6 +104,23 @@ namespace TerraEngine::EditorTests
 			}
 		});
 
+		registry.Add("Editor.MCP.Profiler.VisibilityReportsWindowCpuTiming", [](TestContext& context) {
+			EditorAutomationService service;
+			const auto capability = FindProfilerCapability(service, "profiler.window.visibility.set");
+			context.Expect(capability.has_value(), "Profiler visibility control should remain discoverable for installed idle-overhead measurements.");
+			if (capability.has_value())
+			{
+				context.Expect(SchemaHasProperty(capability->descriptor.resultSchema, "editorFrameTimeMs"),
+					"Visibility control should retain the host-frame delta used by the existing A/B gate.");
+				context.Expect(SchemaHasProperty(capability->descriptor.resultSchema, "profilerWindowDrawMs")
+					&& SchemaHasProperty(capability->descriptor.resultSchema, "profilerWindowDrawValid"),
+					"Visibility control should report ProfilerWindow CPU timing separately from frame-level presentation cost.");
+				context.Expect(SchemaHasProperty(capability->descriptor.resultSchema, "imguiRenderMs")
+					&& SchemaHasProperty(capability->descriptor.resultSchema, "presentUiMs"),
+					"Visibility control should identify draw-data construction separately from the Vulkan UI presentation boundary.");
+			}
+		});
+
 		registry.Add("Editor.MCP.Profiler.StartStopReturnDurableJobs", [](TestContext& context) {
 			EditorAutomationService service;
 			for (const std::string_view operation : {"profiler.capture.start", "profiler.capture.stop"})

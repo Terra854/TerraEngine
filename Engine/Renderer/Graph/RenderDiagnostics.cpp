@@ -887,18 +887,18 @@ namespace TerraEngine::Renderer {
 			snapshot.culledByResidency += compaction.rejectedByResidency;
 			snapshot.submittedBatchCount = std::max(snapshot.submittedBatchCount, compaction.submittedBatches);
 		}
-		snapshot.gpuPacketRecordCount = static_cast<std::uint32_t>(visibility.gpuPacketRecords.size());
-		snapshot.gpuBatchDescriptorCount = static_cast<std::uint32_t>(visibility.gpuBatchDescriptors.size());
-		snapshot.gpuPacketFrameSetCount = static_cast<std::uint32_t>(visibility.gpuPacketFrameSets.size());
-		snapshot.gpuCompactionDispatchCount = static_cast<std::uint32_t>(visibility.gpuCompactionDispatches.size());
-		snapshot.generatedSubmissionCount = static_cast<std::uint32_t>(visibility.generatedSubmissions.size());
-		snapshot.gpuCounterReadbackCount = static_cast<std::uint32_t>(visibility.gpuCounterReadbacks.size());
-		snapshot.gpuFallbackRecordCount = static_cast<std::uint32_t>(visibility.gpuFallbackRecords.size());
+		snapshot.gpuPacketRecordCount = static_cast<std::uint32_t>(visibility.GpuPacketRecords().size());
+		snapshot.gpuBatchDescriptorCount = static_cast<std::uint32_t>(visibility.GpuBatchDescriptors().size());
+		snapshot.gpuPacketFrameSetCount = static_cast<std::uint32_t>(visibility.GpuPacketFrameSets().size());
+		snapshot.gpuCompactionDispatchCount = static_cast<std::uint32_t>(visibility.GpuCompactionDispatches().size());
+		snapshot.generatedSubmissionCount = static_cast<std::uint32_t>(visibility.GeneratedSubmissions().size());
+		snapshot.gpuCounterReadbackCount = static_cast<std::uint32_t>(visibility.GpuCounterReadbacks().size());
+		snapshot.gpuFallbackRecordCount = static_cast<std::uint32_t>(visibility.GpuFallbackRecords().size());
 		snapshot.residentPagePayloadCount = static_cast<std::uint32_t>(visibility.residentPagePayloads.size());
 		snapshot.emittedPageSourceCount = static_cast<std::uint32_t>(visibility.emittedPageSources.size());
 		snapshot.pageRequestCount = static_cast<std::uint32_t>(visibility.pageRequests.size());
 		snapshot.pageRetirementCount = static_cast<std::uint32_t>(visibility.pageRetirements.size());
-		for (const GpuVirtualGeometryPacketFrameSet& frameSet : visibility.gpuPacketFrameSets)
+		for (const GpuVirtualGeometryPacketFrameSet& frameSet : visibility.GpuPacketFrameSets())
 		{
 			switch (frameSet.validity)
 			{
@@ -921,7 +921,7 @@ namespace TerraEngine::Renderer {
 				snapshot.gpuFallbackReason = frameSet.fallbackReason;
 			}
 		}
-		for (const GeneratedVirtualGeometrySubmissionRecord& submission : visibility.generatedSubmissions)
+		for (const GeneratedVirtualGeometrySubmissionRecord& submission : visibility.GeneratedSubmissions())
 		{
 			switch (submission.validationState)
 			{
@@ -943,7 +943,7 @@ namespace TerraEngine::Renderer {
 				snapshot.gpuFallbackReason = submission.fallbackReason;
 			}
 		}
-		for (const VirtualGeometryCounterReadbackRecord& readback : visibility.gpuCounterReadbacks)
+		for (const VirtualGeometryCounterReadbackRecord& readback : visibility.GpuCounterReadbacks())
 		{
 			snapshot.gpuCounterReadbackLatencyFrames = std::max(snapshot.gpuCounterReadbackLatencyFrames, readback.latencyFrames);
 			if (!readback.unavailableReason.empty() && snapshot.counterUnavailableReason.empty())
@@ -951,7 +951,7 @@ namespace TerraEngine::Renderer {
 				snapshot.counterUnavailableReason = readback.unavailableReason;
 			}
 		}
-		for (const VirtualGeometryGpuFallbackRecord& fallback : visibility.gpuFallbackRecords)
+		for (const VirtualGeometryGpuFallbackRecord& fallback : visibility.GpuFallbackRecords())
 		{
 			snapshot.gpuFallbackAffectedPackets += fallback.affectedPackets;
 			snapshot.gpuFallbackAffectedBatches += fallback.affectedBatches;

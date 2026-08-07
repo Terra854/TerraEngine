@@ -91,3 +91,33 @@ the aggregate `production-gate.json` and `release-gates.json` beside them.
 Missing runner hardware is recorded as `unavailable`; it is never converted to
 a parity pass. `-DryRun` validates the
 Vulkan-only orchestration without launching tests, tools, or the editor.
+
+For the heterogeneous-static 4,000/4,000 material-shape workload, run the
+installed typed renderer-topology benchmark. It measures CPU time in
+`BuildPersistentRenderTopology` and `BuildDynamicRenderFrameState` using
+exactly 4,000 deterministic material identities. Because this headless tool
+does not submit a live frame, its GPU timing field remains explicitly
+unavailable rather than inventing a GPU number:
+
+```powershell
+powershell -File Tools/VirtualGeometry/CaptureHeterogeneousStaticNative.ps1 `
+  -DurationSeconds 60 `
+  -Output Tests/Fixtures/RendererPerformanceBaseline/results/final/heterogeneous-static-native-60s.json
+```
+
+The six-workload final matrix uses `CaptureVirtualGeometryPerformance.ps1` for
+`existing-4000-animated`, `repeated-static`, `ten-renderable`, and the
+installed-editor scene summaries, while `CaptureHeterogeneousStaticNative.ps1`
+uses the engine topology benchmark and reports its headless GPU state. For each installed-editor row,
+run five times with distinct `-Output` paths and MCP ports; never pass
+`-CreateValidationScene` against the authored `Scene.tescene`.
+
+The raw direct-static rows use the external project's `Assets/viking_room.obj`
+fixture (mesh `87f68c2d68360cb2318f0a77fa3eaf0b`): 3,828 source triangles,
+approximately 1.33 x 1.46 x 1.03 units, and transient scale 1.0. The repeated
+row uses material `fa653ebd8b3742d77f6b2386ca8a4694`; the ten-renderable row
+cycles that key with `60c9af18ea51c6ee9ac8f3e1da50557e` and
+`81139f23f318c10dc998212f5b92814b`. It is a MeshImporter source without a
+generated virtual-geometry payload, but the accepted live capture still must
+prove an authoritative direct route, zero streaming counters, a nonblack frame,
+and authoritative picking before a 4,000-instance run is allowed.

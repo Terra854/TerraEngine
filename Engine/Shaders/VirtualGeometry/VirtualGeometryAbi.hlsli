@@ -7,6 +7,11 @@
 #ifndef TERRAENGINE_VIRTUAL_GEOMETRY_ABI_HLSLI
 #define TERRAENGINE_VIRTUAL_GEOMETRY_ABI_HLSLI
 
+// Virtual-geometry packet selectors are per-instance when a shared submission
+// is used. Reuse the single checked record layout rather than deriving packet
+// ownership from a group-local index.
+#include "../Default/RenderInstanceAbi.hlsli"
+
 #define TE_VIRTUAL_GEOMETRY_ABI_VERSION 1u
 #define TE_VIRTUAL_GEOMETRY_INVALID_INDEX 0xffffffffu
 

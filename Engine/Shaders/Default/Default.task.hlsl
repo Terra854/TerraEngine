@@ -106,6 +106,14 @@ struct TaskPayload
 	// Carry the matching descriptor beside every visible meshlet so the mesh
 	// stage never has to infer page ownership from a compacted output index.
 	uint packetDescriptorIndices[kTaskBatchSize];
+	// Direct grouped draws carry one validated stream record selector beside
+	// every emitted meshlet. Non-grouped paths leave this at zero and retain the
+	// push-constant model transform.
+	uint instanceIndices[kTaskBatchSize];
+	// LOD is diagnostic payload rather than a shared push-constant decision for
+	// grouped work. The mesh shader forwards the exact member value with the
+	// selected packet-local meshlet.
+	uint selectedVirtualLods[kTaskBatchSize];
 };
 
 [[vk::binding(0, 0)]] Texture2D globalTextures[];
@@ -121,6 +129,7 @@ struct TaskPayload
 [[vk::binding(9, 0)]] StructuredBuffer<uint> globalBuffers[];
 [[vk::binding(10, 0)]] Texture2D<float> hiZPyramids[2];
 [[vk::binding(11, 0)]] SamplerState hiZSampler;
+#include "RenderInstanceAbi.hlsli"
 #include "../VirtualGeometry/AnimatedDeformedGeometry.hlsli"
 
 void FlushMeshletCullingCounters(const uint statsIndex, const MeshletCullingCounters counters)
@@ -188,6 +197,7 @@ static const uint kMaxStatsSlots = 16u;
 static const uint kHiZViewCount = 2u;
 static const uint kVirtualGeometryFlagConeCullingSafe = 0x20u;
 static const uint kVirtualGeometryFlagOwnerPaletteDeformation = 0x80u;
+static const uint kRenderInstanceGroupedFlag = 0x80000000u;
 static const uint kVirtualGeometryDebugModeShift = 8u;
 static const uint kVirtualGeometryDebugModeMask = 0xFFu;
 static const uint kInvalidVirtualGeometryBufferIndex = 0xFFFFFFFFu;
@@ -212,50 +222,57 @@ static const uint kVirtualGeometryPayloadDescriptorLocalVertexCount = 29u;
 static const uint kVirtualGeometryPayloadDescriptorLocalPrimitiveByteCount = 30u;
 static const uint kVirtualGeometryPayloadDescriptorLocalRemapEncoding = 31u;
 
-bool TryLoadGpuAnimationGraphicsRecord(out DefaultGpuAnimationGraphicsRecord record)
+bool TryLoadGpuAnimationGraphicsRecordAt(uint graphicsBufferIndex,
+	uint graphicsRecordIndex, out DefaultGpuAnimationGraphicsRecord record)
 {
 	record = (DefaultGpuAnimationGraphicsRecord)0;
-	if (SceneUniforms.meshDataIndex == kInvalidAnimationGraphicsBufferIndex
-		|| SceneUniforms.textureIndex == kInvalidAnimationGraphicsBufferIndex)
+	if (graphicsBufferIndex == kInvalidAnimationGraphicsBufferIndex
+		|| graphicsRecordIndex == kInvalidAnimationGraphicsBufferIndex)
 	{
 		return false;
 	}
 
 	uint elementCount;
 	uint stride;
-	globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)].GetDimensions(elementCount, stride);
+	globalBuffers[NonUniformResourceIndex(graphicsBufferIndex)].GetDimensions(elementCount, stride);
 	if (elementCount > 0x3FFFFFFFu
-		|| SceneUniforms.textureIndex > (0xFFFFFFFFu - kAnimationGraphicsRecordBytes) / kAnimationGraphicsRecordBytes)
+		|| graphicsRecordIndex > (0xFFFFFFFFu - kAnimationGraphicsRecordBytes) / kAnimationGraphicsRecordBytes)
 	{
 		return false;
 	}
 	const uint byteCount = elementCount * 4u;
-	const uint byteOffset = SceneUniforms.textureIndex * kAnimationGraphicsRecordBytes;
+	const uint byteOffset = graphicsRecordIndex * kAnimationGraphicsRecordBytes;
 	if (byteOffset > byteCount || kAnimationGraphicsRecordBytes > byteCount - byteOffset)
 	{
 		return false;
 	}
 
 	const uint wordOffset = byteOffset >> 2u;
-	record.planGeneration = globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)][wordOffset + 0u];
-	record.rendererGeneration = globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)][wordOffset + 1u];
-	record.workPacketIndex = globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)][wordOffset + 2u];
-	record.generationRecordIndex = globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)][wordOffset + 3u];
-	record.paletteBufferIndex = globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)][wordOffset + 4u];
-	record.morphWeightBufferIndex = globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)][wordOffset + 5u];
+	record.planGeneration = globalBuffers[NonUniformResourceIndex(graphicsBufferIndex)][wordOffset + 0u];
+	record.rendererGeneration = globalBuffers[NonUniformResourceIndex(graphicsBufferIndex)][wordOffset + 1u];
+	record.workPacketIndex = globalBuffers[NonUniformResourceIndex(graphicsBufferIndex)][wordOffset + 2u];
+	record.generationRecordIndex = globalBuffers[NonUniformResourceIndex(graphicsBufferIndex)][wordOffset + 3u];
+	record.paletteBufferIndex = globalBuffers[NonUniformResourceIndex(graphicsBufferIndex)][wordOffset + 4u];
+	record.morphWeightBufferIndex = globalBuffers[NonUniformResourceIndex(graphicsBufferIndex)][wordOffset + 5u];
 	record.paletteOffsetBytes = uint2(
-		globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)][wordOffset + 6u],
-		globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)][wordOffset + 7u]);
+		globalBuffers[NonUniformResourceIndex(graphicsBufferIndex)][wordOffset + 6u],
+		globalBuffers[NonUniformResourceIndex(graphicsBufferIndex)][wordOffset + 7u]);
 	record.morphWeightOffsetBytes = uint2(
-		globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)][wordOffset + 8u],
-		globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)][wordOffset + 9u]);
-	record.jointCount = globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)][wordOffset + 10u];
-	record.morphCount = globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)][wordOffset + 11u];
-	record.paletteEntryCount = globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)][wordOffset + 12u];
-	record.workFlags = globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)][wordOffset + 13u];
-	record.stageMask = globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)][wordOffset + 14u];
-	record.validMarker = globalBuffers[NonUniformResourceIndex(SceneUniforms.meshDataIndex)][wordOffset + 15u];
-	return DefaultGpuAnimationRecordHeaderIsValid(record, SceneUniforms.textureIndex);
+		globalBuffers[NonUniformResourceIndex(graphicsBufferIndex)][wordOffset + 8u],
+		globalBuffers[NonUniformResourceIndex(graphicsBufferIndex)][wordOffset + 9u]);
+	record.jointCount = globalBuffers[NonUniformResourceIndex(graphicsBufferIndex)][wordOffset + 10u];
+	record.morphCount = globalBuffers[NonUniformResourceIndex(graphicsBufferIndex)][wordOffset + 11u];
+	record.paletteEntryCount = globalBuffers[NonUniformResourceIndex(graphicsBufferIndex)][wordOffset + 12u];
+	record.workFlags = globalBuffers[NonUniformResourceIndex(graphicsBufferIndex)][wordOffset + 13u];
+	record.stageMask = globalBuffers[NonUniformResourceIndex(graphicsBufferIndex)][wordOffset + 14u];
+	record.validMarker = globalBuffers[NonUniformResourceIndex(graphicsBufferIndex)][wordOffset + 15u];
+	return DefaultGpuAnimationRecordHeaderIsValid(record, graphicsRecordIndex);
+}
+
+bool TryLoadGpuAnimationGraphicsRecord(out DefaultGpuAnimationGraphicsRecord record)
+{
+	return TryLoadGpuAnimationGraphicsRecordAt(SceneUniforms.meshDataIndex,
+		SceneUniforms.textureIndex, record);
 }
 static const uint kVirtualGeometrySourceResidentPagePayload = 1u;
 static const uint kVirtualGeometrySourceResidentFallbackPayload = 2u;
@@ -340,7 +357,8 @@ uint LoadPageLocalPayloadWord(uint wordOffset, uint fallbackValue)
 		fallbackValue);
 }
 
-bool TryLoadPageLocalPayloadDescriptorAt(uint packetDescriptorIndex, out PageLocalPayloadDescriptor descriptor)
+bool TryLoadPageLocalPayloadDescriptorForSourceAt(uint packetDescriptorIndex,
+	uint payloadSource, out PageLocalPayloadDescriptor descriptor)
 {
 	descriptor.vertexWordOffset = 0u;
 	descriptor.vertexWordSize = 0u;
@@ -359,7 +377,7 @@ bool TryLoadPageLocalPayloadDescriptorAt(uint packetDescriptorIndex, out PageLoc
 	descriptor.localPrimitiveByteCount = 0u;
 	descriptor.localRemapEncoding = 0u;
 	if (SceneUniforms.virtualGeometryPagePayloadBufferIndex == kInvalidVirtualGeometryBufferIndex
-		|| !IsVirtualGeometryPageLocalSource(SceneUniforms.virtualGeometryPayloadSource))
+		|| !IsVirtualGeometryPageLocalSource(payloadSource))
 	{
 		return false;
 	}
@@ -388,6 +406,13 @@ bool TryLoadPageLocalPayloadDescriptorAt(uint packetDescriptorIndex, out PageLoc
 		&& descriptor.localVertexCount != 0u;
 }
 
+bool TryLoadPageLocalPayloadDescriptorAt(uint packetDescriptorIndex,
+	out PageLocalPayloadDescriptor descriptor)
+{
+	return TryLoadPageLocalPayloadDescriptorForSourceAt(packetDescriptorIndex,
+		SceneUniforms.virtualGeometryPayloadSource, descriptor);
+}
+
 bool TryLoadPageLocalPayloadDescriptor(out PageLocalPayloadDescriptor descriptor)
 {
 	const uint packetDescriptorIndex = SceneUniforms.virtualGeometryPacketDescriptorIndex == kInvalidVirtualGeometryBufferIndex
@@ -401,25 +426,32 @@ bool TryUsePageLocalGeometry(out PageLocalPayloadDescriptor descriptor)
 	return TryLoadPageLocalPayloadDescriptor(descriptor);
 }
 
+bool TryUsePageLocalGeometryForSource(uint packetDescriptorIndex,
+	uint payloadSource, out PageLocalPayloadDescriptor descriptor)
+{
+	return TryLoadPageLocalPayloadDescriptorForSourceAt(packetDescriptorIndex,
+		payloadSource, descriptor);
+}
+
 uint ResolvePageLocalMeshletIndex(uint selectedMeshletOffset, uint groupMeshletOffset, uint localIndex, bool pageLocal)
 {
 	return pageLocal ? groupMeshletOffset + localIndex : selectedMeshletOffset + groupMeshletOffset + localIndex;
 }
 
-bool TryResolvePageLocalMeshlet(
-	uint selectedMeshletIndex,
+bool TryResolvePageLocalMeshletForSource(uint selectedMeshletIndex,
+	uint firstPacketDescriptorIndex, uint packetCount, uint payloadSource,
 	out uint packetDescriptorIndex,
 	out uint localMeshletIndex,
 	out PageLocalPayloadDescriptor descriptor)
 {
-	packetDescriptorIndex = SceneUniforms.virtualGeometryPacketDescriptorIndex;
+	packetDescriptorIndex = firstPacketDescriptorIndex;
 	localMeshletIndex = selectedMeshletIndex;
 	// Packet ids are required to be consecutive before RenderSystem merges a
 	// run. Walking the small descriptor table here replaces an entire CPU draw
 	// per cluster while retaining each packet's exact local stream boundaries.
-	for (uint packetIndex = 0u; packetIndex < SceneUniforms.selectedVirtualClusterCount; ++packetIndex)
+	for (uint packetIndex = 0u; packetIndex < packetCount; ++packetIndex)
 	{
-		packetDescriptorIndex = SceneUniforms.virtualGeometryPacketDescriptorIndex + packetIndex;
+		packetDescriptorIndex = firstPacketDescriptorIndex + packetIndex;
 		const uint packetMeshletCount = LoadVirtualGeometryPagePayloadDescriptorWordAt(
 			packetDescriptorIndex,
 			kVirtualGeometryPayloadDescriptorMeshletCount,
@@ -432,7 +464,8 @@ bool TryResolvePageLocalMeshlet(
 		{
 			// Load the remaining stream offsets only for the packet that owns this
 			// meshlet. Earlier packets need a single count word during the search.
-			return TryLoadPageLocalPayloadDescriptorAt(packetDescriptorIndex, descriptor);
+			return TryLoadPageLocalPayloadDescriptorForSourceAt(
+				packetDescriptorIndex, payloadSource, descriptor);
 		}
 		localMeshletIndex -= packetMeshletCount;
 	}
@@ -1193,13 +1226,75 @@ bool IsOccluded(const uint meshletIndex, const uint meshletCount, const MeshDeco
 [numthreads(1, 1, 1)]
 void main(uint3 groupId : SV_GroupID)
 {
+	const bool groupedInstances =
+		(SceneUniforms.virtualGeometryFlags & kRenderInstanceGroupedFlag) != 0u;
+	// GLM stores the transient locator in column 3. HLSL matrix indexing returns
+	// a row even for column_major storage, so read the fourth element of rows
+	// 0/1/2 rather than model[3].x/y/z. Mixing those conventions turns a valid
+	// group count into the representative transform's homogeneous-row zeros.
+	const uint groupedFirstInstance = asuint(SceneUniforms.model[1].w);
+	const uint groupedInstanceCount = asuint(SceneUniforms.model[2].w);
+	const uint groupedStreamRecordCount = asuint(SceneUniforms.model[3].w);
+	const uint taskGroupsPerInstance = groupedInstances
+		? max((SceneUniforms.virtualMeshletCount + kTaskBatchSize - 1u)
+			/ kTaskBatchSize, 1u) : 1u;
+	const uint groupedInstanceRelative = groupedInstances
+		? groupId.x / taskGroupsPerInstance : 0u;
+	const uint taskGroupWithinInstance = groupedInstances
+		? groupId.x % taskGroupsPerInstance : groupId.x;
+	// Group task payloads use global stream indices. Validate the complete range
+	// before emitting any mesh work so an invalid locator cannot silently render
+	// the representative transform for every failed member.
+	const bool groupedRangeValid = !groupedInstances
+		|| (groupedInstanceCount != 0u
+			&& groupedFirstInstance <= groupedStreamRecordCount
+			&& groupedInstanceCount <= groupedStreamRecordCount - groupedFirstInstance
+			&& groupedInstanceRelative < groupedInstanceCount);
+	const uint groupedInstanceIndex = groupedFirstInstance + groupedInstanceRelative;
+	RenderInstanceRecord groupedInstanceRecord;
+	const bool groupedInstanceRecordValid = !groupedInstances
+		|| (groupedRangeValid && TryLoadRenderInstance(
+			globalBuffers[NonUniformResourceIndex(asuint(SceneUniforms.model[0].w))],
+			groupedInstanceIndex,
+			groupedStreamRecordCount,
+			groupedInstanceRecord));
+	// A valid grouped record replaces every dynamic selector used by task-stage
+	// bounds and page resolution. The representative push packet remains only a
+	// fail-open fallback for an impossible/stale stream; it is never culling proof
+	// for another crowd member.
+	const uint animationBufferIndex = groupedInstances && groupedInstanceRecordValid
+		? groupedInstanceRecord.animationSelectors.x : SceneUniforms.meshDataIndex;
+	const uint animationRecordIndex = groupedInstances && groupedInstanceRecordValid
+		? groupedInstanceRecord.animationSelectors.y : SceneUniforms.textureIndex;
+	const uint packetDescriptorIndexForInstance = groupedInstances && groupedInstanceRecordValid
+		? groupedInstanceRecord.geometrySelectors.y
+		: SceneUniforms.virtualGeometryPacketDescriptorIndex;
+	const uint selectedMeshletOffsetForInstance = groupedInstances && groupedInstanceRecordValid
+		? groupedInstanceRecord.geometrySelectors.z : SceneUniforms.virtualMeshletOffset;
+	const uint selectedMeshletCountForInstance = groupedInstances && groupedInstanceRecordValid
+		? groupedInstanceRecord.geometrySelectors.w : SceneUniforms.virtualMeshletCount;
+	const uint selectedVirtualLodForInstance = groupedInstances && groupedInstanceRecordValid
+		? groupedInstanceRecord.geometrySelectors.x : SceneUniforms.selectedVirtualLod;
+	const uint selectedPacketCountForInstance = groupedInstances && groupedInstanceRecordValid
+		? groupedInstanceRecord.virtualGeometrySelectors.y
+		: SceneUniforms.selectedVirtualClusterCount;
+	const uint payloadSourceForInstance = groupedInstances && groupedInstanceRecordValid
+		? groupedInstanceRecord.virtualGeometryPayloadSelectors.x
+		: SceneUniforms.virtualGeometryPayloadSource;
+	const column_major float4x4 cullingModelMatrix = groupedInstances
+		&& groupedInstanceRecordValid ? groupedInstanceRecord.modelMatrix : SceneUniforms.model;
+	// Vulkan validates this selector and the whole record range before it emits
+	// the grouped indirect command. The shader repeats the same bound in the
+	// payload decode below, so a future indirect producer cannot read beyond the
+	// published stream even if it supplies an overlarge group count.
 	DefaultGpuAnimationGraphicsRecord animationRecord;
-	const bool gpuDeformationAvailable = TryLoadGpuAnimationGraphicsRecord(animationRecord);
+	const bool gpuDeformationAvailable = TryLoadGpuAnimationGraphicsRecordAt(
+		animationBufferIndex, animationRecordIndex, animationRecord);
 	TeAnimatedGraphicsBridge canonicalDeformation;
 	const bool canonicalDeformationAvailable =
 		TeTryLoadAnimatedGraphicsBridge(
-			SceneUniforms.meshDataIndex,
-			SceneUniforms.textureIndex,
+			animationBufferIndex,
+			animationRecordIndex,
 			canonicalDeformation);
 	PageLocalPayloadDescriptor pageDescriptor;
 	// The compute bridge makes animated pages self-contained. Legacy owner
@@ -1209,7 +1304,8 @@ void main(uint3 groupId : SV_GroupID)
 		(SceneUniforms.virtualGeometryFlags
 			& kVirtualGeometryFlagOwnerPaletteDeformation) == 0u
 		&& (canonicalDeformationAvailable || !gpuDeformationAvailable)
-		&& TryUsePageLocalGeometry(pageDescriptor);
+		&& TryUsePageLocalGeometryForSource(packetDescriptorIndexForInstance,
+			payloadSourceForInstance, pageDescriptor);
 	// Do not touch the owner decode buffer for resident page packets. Page-local
 	// descriptors carry a complete decode record and must remain independently
 	// usable when the full owner geometry allocation is intentionally skipped.
@@ -1226,15 +1322,15 @@ void main(uint3 groupId : SV_GroupID)
 		decode = meshDecodeInfo[0];
 	}
 	const uint meshletCount = pageLocalGeometry
-		? SceneUniforms.virtualMeshletCount
+		? selectedMeshletCountForInstance
 		: (decode.counts.w & 0x7FFFFFFFu);
 	const uint packetRunSeed = LoadVirtualGeometryPacketRunSeed();
 	const uint selectedMeshletOffset = pageLocalGeometry
 		? 0u
-		: min(SceneUniforms.virtualMeshletOffset + (packetRunSeed & 0u), meshletCount);
-	const uint selectedMeshletCount = SceneUniforms.virtualMeshletCount == 0u
+		: min(selectedMeshletOffsetForInstance + (packetRunSeed & 0u), meshletCount);
+	const uint selectedMeshletCount = selectedMeshletCountForInstance == 0u
 		? (meshletCount - selectedMeshletOffset)
-		: min(SceneUniforms.virtualMeshletCount, meshletCount - selectedMeshletOffset);
+		: min(selectedMeshletCountForInstance, meshletCount - selectedMeshletOffset);
 	const uint statsIndex = min(SceneUniforms.statsSlotIndex, kMaxStatsSlots - 1u);
 	const FrameCullingData frameData = frameCullingData[statsIndex];
 	const float epsilon = max(SceneUniforms.cullingEpsilon, frameData.cameraPositionAndEpsilon.w);
@@ -1248,7 +1344,8 @@ void main(uint3 groupId : SV_GroupID)
 	uint visibleCount = 0u;
 	MeshletCullingCounters localCounters = MakeEmptyMeshletCullingCounters();
 
-	const bool cullingEnabled = (SceneUniforms.taskCullingEnabled != 0u)
+	const bool cullingEnabled = (!groupedInstances || groupedInstanceRecordValid)
+		&& (SceneUniforms.taskCullingEnabled != 0u)
 		&& (frameData.globalTaskCullingEnabled != 0u)
 		&& (frameData.taskShaderSupported != 0u)
 		// Canonical animated pages publish current dynamic cluster bounds. The
@@ -1256,18 +1353,22 @@ void main(uint3 groupId : SV_GroupID)
 		// stale, or corrupt; only legacy owner deformation disables culling.
 		&& (!gpuDeformationAvailable || canonicalDeformationAvailable);
 
-	for (uint localIndex = 0u; localIndex < kTaskBatchSize; ++localIndex)
+	for (uint localIndex = 0u;
+		groupedRangeValid && localIndex < kTaskBatchSize; ++localIndex)
 	{
-		const uint selectedLocalIndex = groupId.x * kTaskBatchSize + localIndex;
-		uint meshletIndex = ResolvePageLocalMeshletIndex(selectedMeshletOffset, groupId.x * kTaskBatchSize, localIndex, pageLocalGeometry);
-		uint packetDescriptorIndex = SceneUniforms.virtualGeometryPacketDescriptorIndex;
+		const uint selectedLocalIndex = taskGroupWithinInstance * kTaskBatchSize + localIndex;
+		uint meshletIndex = ResolvePageLocalMeshletIndex(selectedMeshletOffset, taskGroupWithinInstance * kTaskBatchSize, localIndex, pageLocalGeometry);
+		uint packetDescriptorIndex = packetDescriptorIndexForInstance;
 		PageLocalPayloadDescriptor activePageDescriptor = pageDescriptor;
 		if (selectedLocalIndex >= selectedMeshletCount)
 		{
 			break;
 		}
 		if (pageLocalGeometry
-			&& !TryResolvePageLocalMeshlet(selectedLocalIndex, packetDescriptorIndex, meshletIndex, activePageDescriptor))
+			&& !TryResolvePageLocalMeshletForSource(selectedLocalIndex,
+				packetDescriptorIndexForInstance, selectedPacketCountForInstance,
+				payloadSourceForInstance, packetDescriptorIndex, meshletIndex,
+				activePageDescriptor))
 		{
 			// A missing descriptor means the run publication is incomplete. Stop at
 			// the last fully owned packet instead of reading another page's bytes.
@@ -1302,7 +1403,7 @@ void main(uint3 groupId : SV_GroupID)
 					TeAnimatedDynamicBounds animatedBounds;
 					currentDynamicProof =
 						TeTryResolveAnimatedGraphicsPage(
-							SceneUniforms.meshDataIndex,
+							animationBufferIndex,
 							canonicalDeformation,
 							pageId,
 							animatedPage)
@@ -1321,10 +1422,10 @@ void main(uint3 groupId : SV_GroupID)
 			{
 				bounds = meshletBounds[meshletIndex];
 			}
-			const float3 worldCenter = mul(SceneUniforms.model, float4(bounds.center, 1.0f)).xyz;
-			const float3 worldAxisX = mul((float3x3)SceneUniforms.model, float3(1.0f, 0.0f, 0.0f));
-			const float3 worldAxisY = mul((float3x3)SceneUniforms.model, float3(0.0f, 1.0f, 0.0f));
-			const float3 worldAxisZ = mul((float3x3)SceneUniforms.model, float3(0.0f, 0.0f, 1.0f));
+			const float3 worldCenter = mul(cullingModelMatrix, float4(bounds.center, 1.0f)).xyz;
+			const float3 worldAxisX = mul((float3x3)cullingModelMatrix, float3(1.0f, 0.0f, 0.0f));
+			const float3 worldAxisY = mul((float3x3)cullingModelMatrix, float3(0.0f, 1.0f, 0.0f));
+			const float3 worldAxisZ = mul((float3x3)cullingModelMatrix, float3(0.0f, 0.0f, 1.0f));
 			const float maxScale = max(length(worldAxisX), max(length(worldAxisY), length(worldAxisZ)));
 			const float worldRadius = bounds.radius * max(maxScale, 1e-6f);
 
@@ -1346,8 +1447,8 @@ void main(uint3 groupId : SV_GroupID)
 			if (!culled && coneCullingSafe
 				&& !canonicalDeformationAvailable)
 			{
-				const float3 worldConeApex = mul(SceneUniforms.model, float4(bounds.coneApex, 1.0f)).xyz;
-				const float3 worldConeAxis = mul((float3x3)SceneUniforms.model, bounds.coneAxis);
+				const float3 worldConeApex = mul(cullingModelMatrix, float4(bounds.coneApex, 1.0f)).xyz;
+				const float3 worldConeAxis = mul((float3x3)cullingModelMatrix, bounds.coneAxis);
 				culled = IsConeBackfacing(worldConeApex, worldConeAxis, bounds.coneCutoff, worldRadius, cameraPosition, epsilon);
 			}
 			// The validated renderer contract preserves this single current-pyramid decision path:
@@ -1395,6 +1496,9 @@ void main(uint3 groupId : SV_GroupID)
 
 		gTaskPayload.meshletIndices[visibleCount] = meshletIndex;
 		gTaskPayload.packetDescriptorIndices[visibleCount] = packetDescriptorIndex;
+		gTaskPayload.instanceIndices[visibleCount] = groupedInstances
+			? groupedFirstInstance + groupedInstanceRelative : 0u;
+		gTaskPayload.selectedVirtualLods[visibleCount] = selectedVirtualLodForInstance;
 		visibleCount++;
 		localCounters.meshletsDispatched += 1u;
 	}

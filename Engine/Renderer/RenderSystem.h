@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <deque>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -160,7 +161,8 @@ public:
 	// Queue one non-blocking GPU identity copy. Returning false means callers
 	// must use the explicit CPU-projection fallback and must not claim GPU proof.
 	bool RequestConventionalVisibilityIdentityPick(
-		RenderViewType viewType, const glm::uvec2& pixel);
+		RenderViewType viewType, const glm::uvec2& pixel,
+		bool dedicatedCaptureTarget = false);
 	std::optional<VirtualGeometryVisibilityPick>
 		GetLatestAuthoritativeConventionalVisibilityIdentityPick(
 			RenderViewType viewType, const glm::uvec2& pixel) const;
@@ -168,7 +170,8 @@ public:
 	// poll this copied value but must never infer readiness from CPU projection.
 	TerraEngine::Renderer::AuthoritativeVisibilityPickState
 		GetConventionalVisibilityIdentityPickState(
-			RenderViewType viewType, const glm::uvec2& pixel) const;
+			RenderViewType viewType, const glm::uvec2& pixel,
+			bool dedicatedCaptureTarget = false) const;
 	// These validation controls are transient editor state. Hardware, Compute,
 	// and Indexed are real packet routes; hybrid deliberately keeps no fourth
 	// route and instead requests a mixed packet/material validation scene.
@@ -421,6 +424,10 @@ private:
 	TerraEngine::Renderer::RendererRecoveryPolicy rendererRecoveryPolicy = TerraEngine::Renderer::MakeEditorRendererRecoveryPolicy();
 	TerraEngine::Renderer::RenderDiagnosticsSummary latestRenderGraphDiagnostics{};
 	TerraEngine::Renderer::RenderFrameSnapshot latestRenderFrameSnapshot{};
+	// The protected publisher keeps one non-visible snapshot owner for capacity
+	// reuse. Readers continue to observe latestRenderFrameSnapshot atomically;
+	// only the renderer coordinator can access this recycled construction buffer.
+	TerraEngine::Renderer::RenderFrameSnapshot recycledRenderFrameSnapshot{};
 	// Worker route preparation publishes only copied counters here. Protected
 	// backend/publication stages consume a snapshot of these records, never a
 	// live mesh or resource-manager object.
@@ -436,15 +443,41 @@ private:
 	std::size_t latestGeometryRouteSelectionCount = 0u;
 	std::vector<GpuVirtualGeometryPacketRecord> latestGameVirtualGeometryVisibilityRecords;
 	std::vector<GpuVirtualGeometryPacketRecord> latestSceneVirtualGeometryVisibilityRecords;
+	// Dedicated capture proof is isolated from normal editor-viewport picking.
+	std::vector<GpuVirtualGeometryPacketRecord> latestGameCaptureVisibilityRecords;
+	std::vector<GpuVirtualGeometryPacketRecord> latestSceneCaptureVisibilityRecords;
+	// The capture target is rendered only when a capture request is processed,
+	// while ordinary Scene/Game frames may advance before automation asks for a
+	// pixel. Retain the exact immutable table that authored the capture target so
+	// a fence-completed uint4 never resolves against a newer unrelated frame.
+	struct CaptureConventionalVisibilityIdentitySnapshot
+	{
+		std::uint64_t frameId = 0u;
+		std::uint64_t rendererGeneration = 0u;
+		std::vector<TerraEngine::Renderer::ConventionalVisibilityIdentityRecord> table;
+
+		[[nodiscard]] bool IsUsable() const noexcept
+		{
+			return frameId != 0u && !table.empty();
+		}
+	};
+	CaptureConventionalVisibilityIdentitySnapshot latestGameCaptureIdentitySnapshot;
+	CaptureConventionalVisibilityIdentitySnapshot latestSceneCaptureIdentitySnapshot;
 	std::optional<VirtualGeometryVisibilityPick> latestSceneAuthoritativeIdentityPick;
 	std::optional<VirtualGeometryVisibilityPick> latestGameAuthoritativeIdentityPick;
 	glm::uvec2 latestSceneAuthoritativeIdentityPixel = glm::uvec2(0u);
 	glm::uvec2 latestGameAuthoritativeIdentityPixel = glm::uvec2(0u);
+	bool latestSceneAuthoritativeIdentityFromCapture = false;
+	bool latestGameAuthoritativeIdentityFromCapture = false;
 	// At most one identity copy per view is tracked as pending. A later request
 	// replaces the earlier one so automation cannot accidentally read stale GPU
 	// proof after changing its requested pixel.
 	std::optional<glm::uvec2> pendingSceneAuthoritativeIdentityPixel;
 	std::optional<glm::uvec2> pendingGameAuthoritativeIdentityPixel;
+	// This selector prevents a visible-view completion from satisfying a newer
+	// dedicated-capture request for the same logical view and pixel.
+	bool pendingSceneAuthoritativeIdentityFromCapture = false;
+	bool pendingGameAuthoritativeIdentityFromCapture = false;
 	std::string latestSceneAuthoritativeIdentityFailureReason;
 	std::string latestGameAuthoritativeIdentityFailureReason;
 	mutable std::mutex virtualGeometryValidationMutex;
@@ -495,6 +528,11 @@ private:
 		TerraEngine::UUID skeletonOverrideAssetId = TerraEngine::EMPTY_UUID;
 		std::uint64_t animatorObjectLifetime = 0U;
 		std::uint32_t animatorComponentGeneration = 0U;
+		// The presentation remains sorted by owner identity. A validated position
+		// avoids repeating a binary search while membership is stable; any reorder
+		// fails the owner check and falls back to the general lookup.
+		std::size_t gpuOwnerMappingHint = std::numeric_limits<std::size_t>::max();
+		bool objectStatic = false;
 	};
 	// Static render membership is reused until a scene, component, or hierarchy
 	// publication changes. This removes repeated hierarchy walks for large prefab
@@ -503,6 +541,14 @@ private:
 	std::uint64_t renderableMembershipSceneGeneration = 0U;
 	std::uint64_t renderableMembershipComponentRevision = 0U;
 	std::uint64_t renderableMembershipHierarchyRevision = 0U;
+	// World matrices are index-aligned with the stable membership order above.
+	// Skinning changes vertex data without changing object transforms, so a static
+	// crowd can reuse these matrices until the protected spatial revision changes.
+	std::vector<glm::mat4> renderableModelMatrixCache;
+	std::uint64_t renderableModelMatrixSceneGeneration = 0U;
+	std::uint64_t renderableModelMatrixSpatialRevision = 0U;
+	std::uint64_t renderableModelMatrixComponentRevision = 0U;
+	std::uint64_t renderableModelMatrixHierarchyRevision = 0U;
 	// Visualizer modes are view-local runtime preferences. Project settings keep
 	// only the default, while each editor view can request a different mode for
 	// the next prepared frame without mutating global quality state.

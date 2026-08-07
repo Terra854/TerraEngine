@@ -183,5 +183,123 @@ namespace TerraEngine::Tests
 			std::error_code ignored;
 			std::filesystem::remove_all(root, ignored);
 		});
+
+		registry.Add("Engine.ProfilerCaptureV2.RenderOptimizationEvidenceRoundTripsAndRejectsBrokenConservation", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+			const std::filesystem::path root = std::filesystem::temp_directory_path()
+				/ "TerraEngineEngineTests" / "ProfilerCaptureV2RenderOptimization";
+			std::filesystem::create_directories(root);
+			const std::filesystem::path path = root / "render-optimization.teprof";
+
+			ProfilerRenderOptimizationEvidence evidence;
+			ProfilerRenderOptimizationViewSummary& game = evidence.views[0];
+			game.viewType = 0U;
+			game.frameGeneration = 41U;
+			game.topologyGeneration = 17U;
+			game.viewGeneration = 23U;
+			game.rendererGeneration = 5U;
+			game.topologyBuildNanoseconds = 1500U;
+			game.dynamicMaterializationNanoseconds = 2400U;
+			game.instanceStreamUploadNanoseconds = 800U;
+			game.groupedCommandRecordingNanoseconds = 600U;
+			game.visibleInstanceCount = 100U;
+			game.groupedInstanceCount = 80U;
+			game.fallbackInstanceCount = 20U;
+			game.groupedSubmissionCount = 1U;
+			game.fallbackSubmissionCount = 20U;
+			game.avoidedSubmissionCount = 79U;
+			game.instanceStreamBytes = 6400U;
+			game.instanceStreamCapacityBytes = 8192U;
+			game.topologyReuseHits = 1U;
+			game.viewEvidenceReuseHits = 1U;
+			game.valid = true;
+			evidence.views[1].viewType = 1U;
+			context.Expect(ValidateProfilerRenderOptimizationEvidence(evidence),
+				"A conserved grouped/fallback view and an explicitly unavailable peer view should validate.");
+
+			ProfilerCaptureDocument document;
+			document.metadata.settings.detailLevel = ProfilerCaptureDetailLevel::Aggregate;
+			ProfilerFrameRecord frame;
+			frame.frameIndex = 9U;
+			frame.complete = true;
+			frame.renderOptimization = evidence;
+			document.frames.push_back(frame);
+			std::string error;
+			context.Expect(SaveCaptureDocument(document, path, error),
+				"Renderer optimization evidence must save at aggregate detail: " + error);
+
+			ProfilerCaptureDocument loaded;
+			context.Expect(LoadCaptureDocument(path, loaded, error),
+				"Renderer optimization evidence must load from the compact capture: " + error);
+			context.Expect(loaded.frames.size() == 1U && loaded.frames[0].renderOptimization.has_value(),
+				"The accepted frame must retain typed renderer evidence without module metrics.");
+			if (loaded.frames.size() == 1U && loaded.frames[0].renderOptimization.has_value())
+			{
+				const ProfilerRenderOptimizationViewSummary& loadedGame =
+					loaded.frames[0].renderOptimization->views[0];
+				context.Expect(loadedGame.frameGeneration == 41U
+					&& loadedGame.groupedInstanceCount == 80U
+					&& loadedGame.fallbackInstanceCount == 20U
+					&& loadedGame.avoidedSubmissionCount == 79U
+					&& loadedGame.dynamicMaterializationNanoseconds == 2400U
+					&& loadedGame.groupedCommandRecordingNanoseconds == 600U,
+					"Round-tripped renderer evidence must preserve generations and conservation counters.");
+			}
+
+			document.frames[0].renderOptimization->views[0].fallbackInstanceCount = 19U;
+			context.Expect(!ValidateProfilerRenderOptimizationEvidence(*document.frames[0].renderOptimization),
+				"A visible/grouped/fallback mismatch must fail closed before publication.");
+			context.Expect(!SaveCaptureDocument(document, path, error),
+				"Capture persistence must reject inconsistent renderer evidence rather than save it.");
+
+			std::error_code ignored;
+			std::filesystem::remove_all(root, ignored);
+		});
+
+		registry.Add("Engine.ProfilerCaptureV2.AnimationOptimizationEvidenceRoundTripsAtAggregateDetail", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+			const std::filesystem::path root = std::filesystem::temp_directory_path()
+				/ "TerraEngineEngineTests" / "ProfilerCaptureV2AnimationOptimization";
+			std::filesystem::create_directories(root);
+			const std::filesystem::path path = root / "animation-optimization.teprof";
+			ProfilerAnimationOptimizationEvidence evidence;
+			evidence.frameIndex = 15U;
+			evidence.candidateGeneration = 6U;
+			evidence.acceptedGeneration = 6U;
+			evidence.topologyGeneration = 2U;
+			evidence.presentationGeneration = 6U;
+			evidence.rendererGeneration = 3U;
+			evidence.sceneGeneration = 4U;
+			evidence.activeAnimators = 20U;
+			evidence.compactEligibleAnimators = 18U;
+			evidence.compactProcessedAnimators = 18U;
+			evidence.completeCapturedAnimators = 2U;
+			evidence.completeProcessedAnimators = 2U;
+			evidence.compactPlanGroups = 2U;
+			evidence.compactDispatches = 2U;
+			evidence.retainedTopologyHits = 1U;
+			evidence.timingNanoseconds[0] = 1200U;
+			evidence.valid = true;
+
+			ProfilerCaptureDocument document;
+			document.metadata.settings.detailLevel = ProfilerCaptureDetailLevel::Aggregate;
+			ProfilerFrameRecord frame;
+			frame.frameIndex = 15U;
+			frame.animationOptimization = evidence;
+			document.frames.push_back(frame);
+			std::string error;
+			context.Expect(SaveCaptureDocument(document, path, error),
+				"Animation optimization evidence must save at aggregate detail: " + error);
+			ProfilerCaptureDocument loaded;
+			context.Expect(LoadCaptureDocument(path, loaded, error),
+				"Animation optimization evidence must load from the compact capture: " + error);
+			context.Expect(loaded.frames.size() == 1U
+				&& loaded.frames.front().animationOptimization.has_value()
+				&& loaded.frames.front().animationOptimization->compactProcessedAnimators == 18U
+				&& loaded.frames.front().animationOptimization->timingNanoseconds[0] == 1200U,
+				"Round-tripped evidence must preserve compact counts and stage timing.");
+			std::error_code ignored;
+			std::filesystem::remove_all(root, ignored);
+		});
 	}
 }

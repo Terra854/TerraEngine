@@ -415,11 +415,12 @@ namespace TerraEngine::Renderer::Vulkan {
 				records.push_back(std::move(record));
 			};
 
-			for (const VirtualGeometryPagePayloadRecord& payload : state.residentPagePayloads)
+			for (const VirtualGeometryPagePayloadRecord& payload :
+				state.ResidentPagePayloads())
 			{
 				appendRecord(payload);
 			}
-			if (!state.residentPagePayloads.empty())
+			if (!state.ResidentPagePayloads().empty())
 			{
 				continue;
 			}
@@ -428,7 +429,7 @@ namespace TerraEngine::Renderer::Vulkan {
 			// packet records. Convert those packet labels into the same upload
 			// contract so backend planning never has to infer source identity
 			// from draw commands or live mesh state.
-			for (const VirtualGeometryClusterPacket& packet : state.clusterPackets)
+			for (const VirtualGeometryClusterPacket& packet : state.ClusterPackets())
 			{
 				VirtualGeometryPagePayloadRecord payload;
 				payload.meshId = packet.meshId;

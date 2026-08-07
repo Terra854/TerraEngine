@@ -23,6 +23,10 @@ namespace TerraEngine::Animation {
 		// This is the number of authored records actually inspected by the binding
 		// reconciler. Zero distinguishes a cheap pending poll from a full pass.
 		std::size_t reconciledBindingCount = 0U;
+		// Residency-only publications are processed through persistent direct-clip
+		// cohorts. These counters distinguish that narrow path from an authored scan.
+		std::size_t refreshedStreamingCohortCount = 0U;
+		std::size_t refreshedStreamingAnimatorCount = 0U;
 		std::size_t createdCount = 0U;
 		std::size_t reboundCount = 0U;
 		std::size_t invalidatedCount = 0U;

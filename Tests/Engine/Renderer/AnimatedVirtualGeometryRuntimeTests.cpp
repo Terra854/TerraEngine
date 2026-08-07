@@ -89,6 +89,50 @@ namespace TerraEngine::Tests {
 
 	void RegisterAnimatedVirtualGeometryRuntimeTests(TestRegistry& registry)
 	{
+		registry.Add("AnimatedVirtualGeometry.Runtime.StreamingPlannerMatchesBatchPlanner", [](TestContext& context)
+		{
+			using namespace TerraEngine::Renderer;
+			std::vector<DeformationPageDemand> demands;
+			DeformationPageDemand first = MakeRuntimeDemand(2u, 1u);
+			first.key.deformation.contentIdLow = 91u;
+			first.key.deformation.contentIdHigh = 92u;
+			first.ownerStableInstanceId = 20u;
+			first.sourceStableInstanceId = 20u;
+			demands.push_back(first);
+			DeformationPageDemand clone = first;
+			clone.key.deformation.stableInstanceId = 77u;
+			clone.key.deformation.objectGeneration = 78u;
+			clone.ownerStableInstanceId = 77u;
+			clone.requestedViewMask = 2u;
+			demands.push_back(clone);
+
+			const GpuDeformationPlan batch = BuildGpuDeformationPlan(30u, 25u, demands);
+			GpuDeformationPlanAccumulator accumulator(30u, 25u, demands.size());
+			for(const DeformationPageDemand& demand : demands)
+			{
+				context.Expect(accumulator.Add(demand),
+					"The streaming planner must accept every demand accepted by the batch planner.");
+			}
+			const GpuDeformationPlan streamed = std::move(accumulator).Finish();
+			context.Expect(batch.IsComplete() && streamed.IsComplete(),
+				"Both planner entry points must publish complete immutable work.");
+			context.Expect(batch.work.size() == streamed.work.size()
+					&& batch.reusedDemandCount == streamed.reusedDemandCount
+					&& batch.totalVertexCount == streamed.totalVertexCount
+					&& batch.totalMeshletBoundsCount == streamed.totalMeshletBoundsCount
+					&& batch.totalClusterBoundsCount == streamed.totalClusterBoundsCount,
+				"Streaming accumulation must preserve batch deduplication and prefix sums.");
+			if(!batch.work.empty() && !streamed.work.empty())
+			{
+				context.Expect(batch.work.front().key == streamed.work.front().key
+						&& batch.work.front().requestedViewMask
+							== streamed.work.front().requestedViewMask
+						&& batch.work.front().ConsumerCount()
+							== streamed.work.front().ConsumerCount(),
+					"Streaming accumulation must preserve the reusable key, view union, and consumers.");
+			}
+		});
+
 		registry.Add("AnimatedVirtualGeometry.Runtime.CpuAuthorityNeverAliasesGpuPacketZero", [](TestContext& context)
 		{
 			using namespace TerraEngine::Renderer;
@@ -212,7 +256,10 @@ namespace TerraEngine::Tests {
 			context.Expect(descriptors.valid && descriptors.hasWork,
 				"A complete page union should have a bounded descriptor plan.");
 			context.ExpectEqual<std::size_t>(1u, commands.deformationDispatches.size(),
-				"Compatible view demands must dispatch once per exact key.");
+				"A complete frame union must batch compatible page work into one dispatch.");
+			context.ExpectEqual<std::uint32_t>(1u,
+				commands.deformationDispatches.front().workRecordCount,
+				"The batched dispatch must retain the exact deduplicated work count.");
 			context.ExpectEqual<std::size_t>(4u, commands.barriers.size(),
 				"Palette/upload, bounds, refinement, and graphics boundaries occur once per frame union.");
 		});

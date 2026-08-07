@@ -213,6 +213,48 @@ namespace TerraEngine::Tests
 			context.Expect(sceneIt->countersAuthoritative, "GPU Scene View counters should be authoritative.");
 		});
 
+		registry.Add("VirtualGeometry.Render.MultiView.PreservesPreparedShadowWhenBackendViewsExist", [](TestContext& context) {
+			using namespace TerraEngine::Renderer;
+			RenderFrameSnapshot snapshot;
+			snapshot.frameId = 890u;
+
+			VirtualGeometryViewSelectionState game{};
+			game.outputKind = RenderOutputKind::GameView;
+			game.viewType = RenderViewType::Game;
+			game.outputId = 4u;
+			game.targetSize = glm::uvec2(1280u, 720u);
+			game.draws.push_back({ TerraEngine::GenerateUUID(), TerraEngine::GenerateUUID(), { 0u, 0u, 6u, true, false, {}, true }, true });
+
+			VirtualGeometryViewSelectionState shadow = game;
+			shadow.outputKind = RenderOutputKind::OffscreenTexture;
+			shadow.viewType = RenderViewType::Shadow;
+			shadow.outputId = 1000u;
+			shadow.shadowPass = true;
+			shadow.draws.front().range.meshletCount = 9u;
+			snapshot.virtualGeometryViewSelections = { game, shadow };
+			// Only the camera view has backend evidence. Shadow selection remains
+			// current-frame prepared evidence and must stay visible beside it.
+			snapshot.virtualGeometryVisibilitySnapshots.push_back(
+				BuildVirtualGeometryViewVisibilitySnapshot(
+					snapshot, game, VirtualGeometryCounterSource::GPUReadback));
+
+			const auto diagnostics = BuildVirtualGeometryViewDiagnosticsFromSnapshot(
+				snapshot, MakeDefaultVirtualGeometryQualityProfile(),
+				VirtualGeometryInactiveReason::None);
+			const auto shadowIt = std::find_if(diagnostics.begin(), diagnostics.end(), [](const auto& view) {
+				return view.viewType == RenderViewType::Shadow && view.viewId == 1000u;
+			});
+			context.Expect(shadowIt != diagnostics.end(),
+				"Prepared Shadow diagnostics must not disappear when Game View has backend visibility evidence.");
+			if (shadowIt != diagnostics.end())
+			{
+				context.ExpectEqual(9u, shadowIt->selectedMeshlets,
+					"Shadow diagnostics should retain their own prepared selection counters.");
+				context.Expect(shadowIt->counterSource == VirtualGeometryCounterSource::Prepared,
+					"Shadow diagnostics should identify their prepared current-frame counter source.");
+			}
+		});
+
 		registry.Add("VirtualGeometry.Render.MultiView.KeepsDebugModesPerView", [](TestContext& context) {
 			TerraEngine::Renderer::RenderFrameSnapshot snapshot;
 			snapshot.frameId = 889u;

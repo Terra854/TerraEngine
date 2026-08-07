@@ -10,6 +10,7 @@
 #include "AssetDatabase.h"
 #include "../Subsystems/ScriptCompilationSubsystem.h"
 #include "../Automation/EditorMcpBridge.h"
+#include "../Profiling/EditorProfilerService.h"
 #include "Engine/Scripting/ScriptingSystem.h"
 #include "Engine/Scene/SceneManager.h"
 #include "Engine/Core/MainEngine.h"
@@ -778,6 +779,15 @@ void EditorSystem::Update(float deltaTime) {
 		ImGui_ImplGlfw_NewFrame();
 		ImGui::NewFrame();
 	});
+	if(context.editorProfiler)
+	{
+		// ImGui's GLFW backend has just published the host wall-clock delta for
+		// this editor frame. Store one typed scalar snapshot so open-idle profiler
+		// overhead can be measured without enabling profiler recording.
+		context.editorProfiler->PublishEditorFrameTiming(
+			static_cast<std::uint64_t>(std::max(0, ImGui::GetFrameCount())),
+			static_cast<double>(ImGui::GetIO().DeltaTime) * 1000.0);
+	}
 	
 	// MCP must keep processing while the project hub is visible so clients can
 	// read status and finish retained jobs after a native project close. The
@@ -837,8 +847,18 @@ void EditorSystem::Update(float deltaTime) {
 
 	{
 		TERRAENGINE_PROFILE_SCOPE("EditorSystem: ImGui Build Draw Data", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		editorStages.Measure("Editor.ImGuiRender", []() {
+		editorStages.Measure("Editor.ImGuiRender", [&]() {
+			const auto startedAt = std::chrono::steady_clock::now();
 			ImGui::Render();
+			if (context.editorProfiler)
+			{
+				// Keep draw-data construction distinct from the profiler window's
+				// own OnGui work and the later Vulkan presentation wait/submit.
+				context.editorProfiler->PublishImGuiRenderTiming(
+					static_cast<std::uint64_t>(std::max(0, ImGui::GetFrameCount())),
+					std::chrono::duration<double, std::milli>(
+						std::chrono::steady_clock::now() - startedAt).count());
+			}
 		});
 	}
 	
@@ -846,7 +866,8 @@ void EditorSystem::Update(float deltaTime) {
 	if (vulkan) {
 		TERRAENGINE_PROFILE_SCOPE("EditorSystem: Present Editor UI", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		const auto presentResult = editorStages.Measure("Editor.PresentUi", [&]() {
-			return vulkan->PresentEditor([&](){
+			const auto startedAt = std::chrono::steady_clock::now();
+			auto result = vulkan->PresentEditor([&](){
 			const auto bridgeResult = TerraEngine::Editor::CheckedImGuiVulkanBridge::Execute(
 				TerraEngine::Renderer::Vulkan::EditorUiFrameStage::RecordDrawData,
 				[&]() {
@@ -884,6 +905,17 @@ void EditorSystem::Update(float deltaTime) {
 					+ std::to_string(bridgeResult.nativeResult));
 			}
 			});
+			if (context.editorProfiler)
+			{
+				// PresentEditor includes the UI fence/acquire, command recording,
+				// queue submit, and compositor handoff. Publishing it separately
+				// identifies post-OnGui stalls without changing renderer behavior.
+				context.editorProfiler->PublishPresentUiTiming(
+					static_cast<std::uint64_t>(std::max(0, ImGui::GetFrameCount())),
+					std::chrono::duration<double, std::milli>(
+						std::chrono::steady_clock::now() - startedAt).count());
+			}
+			return result;
 		});
 		if (presentResult.outcome == TerraEngine::Renderer::Vulkan::EditorPresentOutcome::RecoverableFailure) {
 			TERRAENGINE_LOG(LogLevel::Error, "Editor UI presentation stopped safely at "
@@ -954,7 +986,7 @@ TerraEngine::Scheduling::SystemDeclaration EditorSystem::SchedulerDeclaration() 
 	declaration.writes = {
 		"EditorUiPresentation", "ViewportTextureRegistry", "EditorSubmissionCompletion",
 		"EditorDiagnostics", "EditorAutomationState", "EditorAutomationSession",
-		"SceneMutationQueue"
+		"SceneMutationQueue", "EditorProfilerTiming"
 	};
 	declaration.mainThread = true;
 	declaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::ProtectedCommit;

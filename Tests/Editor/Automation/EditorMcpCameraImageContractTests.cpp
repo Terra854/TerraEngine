@@ -210,6 +210,15 @@ namespace TerraEngine::EditorTests
 			context.Expect(valid.value("ok", false), "Custom camera capture should accept valid orthographic ad-hoc settings.");
 			context.ExpectEqual(std::string("customCamera"), valid["data"]["source"].value("kind", std::string()), "Custom camera capture should report customCamera source kind.");
 
+			const nlohmann::json sceneCapture = service.HandleTool(
+				"camera.capture_custom",
+				{{"position", nlohmann::json::array({0.0f, 1.0f, 5.0f})}, {"target", nlohmann::json::array({0.0f, 0.0f, 0.0f})}, {"viewType", "Scene"}, {"width", 64u}, {"height", 64u}},
+				WriteMode::ReadOnly,
+				"custom-scene-capture");
+			context.Expect(sceneCapture.value("ok", false)
+				&& sceneCapture["data"]["camera"].value("viewType", std::string()) == "Scene",
+				"A valid custom capture must retain its requested Scene identity for capture-only diagnostics and picking.");
+
 			const nlohmann::json invalidClip = service.HandleTool(
 				"camera.capture_custom",
 				{{"position", nlohmann::json::array({0.0f, 0.0f, 5.0f})}, {"nearPlane", 10.0f}, {"farPlane", 1.0f}, {"width", 64u}, {"height", 64u}},

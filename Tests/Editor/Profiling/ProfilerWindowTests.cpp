@@ -234,7 +234,13 @@ namespace TerraEngine::EditorTests
 			context.Expect(source.find("Physics, Scene View, and Editor Stages") != std::string::npos, "Profiler Window should distinguish native physics, Scene View, and Editor stages.");
 			context.Expect(source.find("Protected Boundary Breakdown") != std::string::npos, "Profiler Window should break protected queue, ownership, flush, and publication waits apart.");
 			context.Expect(source.find("Worker Timeline Summary") != std::string::npos, "Profiler Window should present bounded worker history summaries.");
+			context.Expect(source.find("Renderer Optimization Summary") != std::string::npos,
+				"Whole-capture evidence should aggregate grouped submissions, reuse, invalidation, rejection, and fallbacks.");
 			context.Expect(source.find("Physics Work Volumes") != std::string::npos, "Profiler Window should present processed-versus-published body volumes.");
+			context.Expect(source.find("Renderer Optimization Evidence") != std::string::npos
+				&& source.find("grouped + %u fallback") != std::string::npos
+				&& source.find("Counts are captured with this frame") != std::string::npos,
+				"A selected frame should expose conserved grouped/fallback renderer evidence rather than live renderer state.");
 			context.Expect(source.find("unavailable") != std::string::npos, "Unavailable typed streams should be labelled instead of shown as zero.");
 		});
 
@@ -313,9 +319,52 @@ namespace TerraEngine::EditorTests
 				"Primary diagnostic disclosures and every nested sample parent should open immediately.");
 			context.Expect(source.find("ImGui::TreeNode(") == std::string::npos
 				&& source.find("TreeNodeEx(\"Physics Counters\", ImGuiTreeNodeFlags_DefaultOpen)") != std::string::npos
+				&& source.find("TreeNodeEx(\"Renderer Optimization Evidence\", ImGuiTreeNodeFlags_DefaultOpen)") != std::string::npos
 				&& source.find("TreeNodeEx(\"Scripting Dispatch Counters\", ImGuiTreeNodeFlags_DefaultOpen)") != std::string::npos
 				&& source.find("TreeNodeEx(\"Backend Submit Path\", ImGuiTreeNodeFlags_DefaultOpen)") != std::string::npos,
 				"Every profiler disclosure should default open when a capture session is presented.");
+		});
+
+		registry.Add("ProfilerWindow.IdlePresentation.SkipsEngineRevisionChurnAndEmptyDiagnosticTables", [](TestContext& context) {
+			const std::string source = ReadProfilerWindowSource();
+			const std::string serviceSource = ReadEditorProfilerServiceSource();
+			const std::size_t idleRevisionGuard = source.find("!presentationChanged && !stateChanged && !liveDataChanged");
+			const std::size_t frameListCopy = source.find("GetFrameListSnapshot()", idleRevisionGuard);
+			const std::size_t emptyFrameGuard = source.find("if (frames.empty())");
+			const std::size_t emptyFrameReturn = source.find("return;", emptyFrameGuard);
+			const std::size_t frameRowsTable = source.find("BeginTable(\"ProfilerFrameRows\"");
+			const std::size_t frameDetails = source.find("void ProfilerWindow::DrawFrameDetails()");
+			const std::size_t selectionGuard = source.find("if (!selectedFrame.has_value())", frameDetails);
+			const std::size_t rendererSummary = source.find("DrawRendererRecoverySummary();", frameDetails);
+
+			context.Expect(serviceSource.find("GetPresentationRevision") != std::string::npos
+				&& serviceSource.find("presentationRevision.fetch_add") != std::string::npos,
+				"The profiler service should publish a semantic presentation revision separate from engine frame activity.");
+			context.Expect(idleRevisionGuard != std::string::npos
+				&& frameListCopy != std::string::npos && idleRevisionGuard < frameListCopy,
+				"Idle engine revisions should update the cheap cache marker without copying completed frame history.");
+			context.Expect(source.find("cache->captures = service->GetCaptureList()") != std::string::npos
+				&& source.find("ImGuiListClipper captureClipper") != std::string::npos
+				&& source.find("const auto& capture = cache->captures[") != std::string::npos
+				&& source.find("service->LoadCapture(capture.absolutePath)") != std::string::npos,
+				"Capture navigation should reuse revision-cached metadata, virtualize saved-session rows, and keep sessions loadable without per-frame copies.");
+			context.Expect(emptyFrameGuard != std::string::npos && emptyFrameReturn != std::string::npos
+				&& frameRowsTable != std::string::npos && emptyFrameGuard < emptyFrameReturn
+				&& emptyFrameReturn < frameRowsTable,
+				"An empty idle history should leave its child immediately instead of building an empty sortable table.");
+			context.Expect(frameDetails != std::string::npos && selectionGuard != std::string::npos
+				&& rendererSummary != std::string::npos && selectionGuard < rendererSummary,
+				"Renderer diagnostic tables should be deferred until a completed profiler frame is selected.");
+		});
+
+		registry.Add("ProfilerWindow.IdlePresentation.UsesOpaqueDockedBackground", [](TestContext& context) {
+			const std::string source = ReadProfilerWindowSource();
+			const std::size_t beforeBegin = source.find("void ProfilerWindow::OnBeforeBegin()");
+			const std::size_t opaqueBackground = source.find("ImGui::SetNextWindowBgAlpha(1.0f)", beforeBegin);
+
+			context.Expect(beforeBegin != std::string::npos && opaqueBackground != std::string::npos
+				&& beforeBegin < opaqueBackground,
+				"The large docked Profiler background should be opaque before Begin so idle content does not blend over a dense viewport.");
 		});
 
 		registry.Add("ProfilerWindow.Diagnostics.ExposesActionableViews", [](TestContext& context) {

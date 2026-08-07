@@ -80,6 +80,93 @@ namespace TerraEngine::EditorTests
 				"Cross-route comparisons must preserve candidate route provenance.");
 		});
 
+		registry.Add("VirtualGeometry.Editor.Production.LiveHarnessUsesCaptureForegroundForIdentityPick", [](TestContext& context)
+		{
+			const std::string harnessSource = ReadProductionFile(
+				"Tools/VirtualGeometry/CaptureVirtualGeometryLiveVisual.ps1");
+			const std::string runtimeSampleSource = ReadProductionFile(
+				"Tools/VirtualGeometry/CaptureVirtualGeometryRuntimeSample.ps1");
+			// This source-contract test keeps pixel selection coupled to the actual
+			// dedicated capture instead of a stale fixed viewport coordinate.
+			ExpectContains(context, harnessSource,
+				"function Get-CaptureForegroundPickCandidates",
+				"The live harness must derive bounded identity-pick candidates from the capture.");
+			ExpectContains(context, harnessSource,
+				"$pickCandidates = @(Get-CaptureForegroundPickCandidates $firstPath)",
+				"Authoritative picking must use the first graded Vulkan capture.");
+			ExpectContains(context, harnessSource,
+				"$minimumPickInteriorCoverage = 0.90",
+				"The picker must require substantial model coverage instead of accepting a floor grid line.");
+			ExpectContains(context, harnessSource,
+				"$maximumPickCandidates = 6",
+				"The picker must keep retries bounded and deterministic.");
+			ExpectContains(context, harnessSource,
+				"$foregroundIntegral = New-Object 'int[,]'",
+				"The picker must rank large interiors with bounded summed-area queries.");
+			ExpectContains(context, harnessSource,
+				"$rejectedPublicationCount -ne [UInt64]0",
+				"The live Vulkan gate must fail when any historical publication was rejected.");
+			ExpectContains(context, runtimeSampleSource,
+				"$streamingCounters.rejectedPublications -eq 0",
+				"The runtime gate must preserve rejected publication history even after a later success.");
+			context.Expect(
+				harnessSource.find("@(120, 180), @(360, 180)") == std::string::npos,
+				"The live harness must not fall back to fixed grid coordinates outside visible geometry.");
+			ExpectContains(context, harnessSource,
+				"$positionY = ($row - (($rawGridRowCount - 1) / 2.0)) *",
+				"Dense raw-static rows must occupy world Y so the review camera sees a grid.");
+			ExpectContains(context, harnessSource,
+				"value = @($positionX, $positionY, $positionZ)",
+				"Raw-mesh publication must preserve the independently computed Y placement.");
+		});
+
+		registry.Add("VirtualGeometry.Editor.Production.RuntimeSampleAccountsForExplicitCpuAnimationFallback", [](TestContext& context)
+		{
+			const std::string runtimeSampleSource = ReadProductionFile(
+				"Tools/VirtualGeometry/CaptureVirtualGeometryRuntimeSample.ps1");
+			// GPU ownership may be lower than the evaluated total only when the
+			// renderer reports the remainder as CPU fallback. Keep the accounting
+			// and completed-execution fallback visible in the source contract.
+			ExpectContains(context, runtimeSampleSource,
+				"$requiredGpuOwnedAnimators",
+				"Animated runtime captures must derive GPU ownership after CPU fallback accounting.");
+			ExpectContains(context, runtimeSampleSource,
+				"cpuFallbackAnimators",
+				"Animated runtime captures must retain the explicit CPU fallback counter.");
+			ExpectContains(context, runtimeSampleSource,
+				"completed-backend-recordedDispatchCount",
+				"Animated runtime captures must fall back to completed backend execution evidence.");
+			ExpectContains(context, runtimeSampleSource,
+				"completedBackendGenerationComplete",
+				"Completed backend deformation evidence must prove a complete generation.");
+			ExpectContains(context, runtimeSampleSource,
+				"accountingValidated",
+				"Capture output must preserve the animation-accounting decision.");
+		});
+
+		registry.Add("VirtualGeometry.Editor.Production.RuntimeSampleHashesAuthoredSceneIdentity", [](TestContext& context)
+		{
+			const std::string runtimeSampleSource = ReadProductionFile(
+				"Tools/VirtualGeometry/CaptureVirtualGeometryRuntimeSample.ps1");
+			// Authored workloads intentionally clear their transient prefab path. Keep
+			// the adapter tied to the validated scene bytes that it actually opens.
+			ExpectContains(context, runtimeSampleSource,
+				"$identityAssetFile = if($isAuthoredSceneWorkload)",
+				"Authored-scene captures must select a real scene file for asset identity.");
+			ExpectContains(context, runtimeSampleSource,
+				"$startupScene",
+				"The runtime identity must reuse the already validated authored scene path.");
+			ExpectContains(context, runtimeSampleSource,
+				"$identityAssetHash = Get-FileSha256OrUnavailable $identityAssetFile",
+				"The authored scene identity must use the adapter's SHA-256 file hash helper.");
+			ExpectContains(context, runtimeSampleSource,
+				"$identityAssetHash -notmatch '^[0-9a-f]{64}$'",
+				"Authored-scene captures must fail before publishing a non-SHA-256 identity.");
+			ExpectContains(context, runtimeSampleSource,
+				"assetHash = $identityAssetHash",
+				"Published runtime identity must use the validated authored-scene digest.");
+		});
+
 		registry.Add("VirtualGeometry.Editor.Production.LiveHarnessUsesDurableProfilerArtifactIdentity", [](TestContext& context)
 		{
 			const std::string harnessSource = ReadProductionFile(

@@ -265,6 +265,19 @@ namespace TerraEngine::Editor::Automation
 					{"maximum", 3},
 					{"description", "Atomic AnimatorComponent execution policy override."}
 				}},
+				{"defaultClipAssetIds", {
+					{"type", "array"},
+					{"minItems", 1},
+					{"maxItems", 4096},
+					{"items", {{"type", "string"}, {"minLength", 32}, {"maxLength", 32}}},
+					{"description", "Direct animation clips assigned round-robin before publication."}
+				}},
+				{"defaultClipStartFrameStep", {
+					{"type", "integer"},
+					{"minimum", 0},
+					{"maximum", 1048576},
+					{"description", "Deterministic fixed-timeline phase step between instances."}
+				}},
 				{"origin", {
 					{"type", "array"},
 					{"minItems", 3},

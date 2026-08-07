@@ -265,6 +265,7 @@ namespace {
 			packet.viewId = 3u;
 			packet.viewType = RenderViewType::Game;
 			packet.objectId = objectId;
+			packet.renderableIndex = 27u;
 			packet.meshId = meshId;
 			packet.materialId = materialId;
 			packet.selectedLod = 2u;
@@ -295,6 +296,7 @@ namespace {
 			context.ExpectEqual(static_cast<std::size_t>(1u), records.size(), "One CPU packet should produce one GPU packet mirror.");
 			context.ExpectEqual(packet.packetId, records.front().packetId, "GPU packet ids should preserve the CPU packet id used by page-local descriptors.");
 			context.ExpectEqual(5000ull, records.front().frameId, "GPU packet records should carry frame ownership.");
+			context.ExpectEqual(packet.renderableIndex, records.front().renderableIndex, "GPU packet mirrors should preserve the validated snapshot routing hint.");
 			context.ExpectEqual(packet.clusterId, records.front().clusterId, "GPU packets should preserve selected cluster identity.");
 			context.ExpectEqual(packet.meshletOffset, records.front().meshletOffset, "GPU packets should preserve meshlet offset.");
 			context.ExpectEqual(packet.meshletCount, records.front().meshletCount, "GPU packets should preserve meshlet count.");

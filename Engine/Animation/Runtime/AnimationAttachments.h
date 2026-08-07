@@ -123,6 +123,10 @@ namespace TerraEngine::Animation {
 		[[nodiscard]] std::size_t PublishedSocketCount(AnimatorInstanceHandle animator) const;
 		void RetireSnapshot(AnimatorInstanceHandle animator);
 		void Retire(AnimatorInstanceHandle animator);
+		// Crowd lifecycle changes hold the publisher lock once and compact snapshots
+		// once. The caller supplies sorted unique handles so membership checks remain
+		// allocation-free while calling Retire repeatedly would rescan every snapshot.
+		void RetireMany(std::span<const AnimatorInstanceHandle> animators);
 		void Clear();
 
 	private:

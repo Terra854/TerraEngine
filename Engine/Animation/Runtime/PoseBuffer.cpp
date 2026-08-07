@@ -56,20 +56,18 @@ namespace TerraEngine::Animation {
 		// Allocate and initialize a complete replacement before touching this
 		// buffer. An allocation failure therefore preserves the last sealed output.
 		try {
-			std::vector<AnimationTransform> local(layout.jointCount);
-			std::vector<AnimationTransform> model(layout.jointCount);
-			std::vector<AnimationNamedFloatValue> morph(layout.morphCount);
-			std::vector<AnimationNamedFloatValue> curve(layout.curveCount);
+			auto visualPayload = std::make_shared<PoseBufferVisualPayload>();
+			visualPayload->localTransforms.resize(layout.jointCount);
+			visualPayload->modelTransforms.resize(layout.jointCount);
+			visualPayload->morphValues.resize(layout.morphCount);
+			visualPayload->curveValues.resize(layout.curveCount);
 			std::vector<AnimationEventRecord> events;
 			events.reserve(layout.eventCapacity);
 			std::vector<std::byte> scratch(layout.scratchBytes, std::byte{0});
 
 			layout_ = layout;
 			generation_ = generation;
-			localTransforms_ = std::move(local);
-			modelTransforms_ = std::move(model);
-			morphValues_ = std::move(morph);
-			curveValues_ = std::move(curve);
+			visualPayload_ = std::move(visualPayload);
 			events_ = std::move(events);
 			scratch_ = std::move(scratch);
 			rootMotion_.reset();
@@ -81,19 +79,23 @@ namespace TerraEngine::Animation {
 	}
 
 	std::span<AnimationTransform> PoseBuffer::MutableLocalTransforms() noexcept {
-		return sealed_ ? std::span<AnimationTransform>{} : std::span<AnimationTransform>{localTransforms_};
+		return sealed_ || !visualPayload_ ? std::span<AnimationTransform>{}
+			: std::span<AnimationTransform>{visualPayload_->localTransforms};
 	}
 
 	std::span<AnimationTransform> PoseBuffer::MutableModelTransforms() noexcept {
-		return sealed_ ? std::span<AnimationTransform>{} : std::span<AnimationTransform>{modelTransforms_};
+		return sealed_ || !visualPayload_ ? std::span<AnimationTransform>{}
+			: std::span<AnimationTransform>{visualPayload_->modelTransforms};
 	}
 
 	std::span<AnimationNamedFloatValue> PoseBuffer::MutableMorphValues() noexcept {
-		return sealed_ ? std::span<AnimationNamedFloatValue>{} : std::span<AnimationNamedFloatValue>{morphValues_};
+		return sealed_ || !visualPayload_ ? std::span<AnimationNamedFloatValue>{}
+			: std::span<AnimationNamedFloatValue>{visualPayload_->morphValues};
 	}
 
 	std::span<AnimationNamedFloatValue> PoseBuffer::MutableCurveValues() noexcept {
-		return sealed_ ? std::span<AnimationNamedFloatValue>{} : std::span<AnimationNamedFloatValue>{curveValues_};
+		return sealed_ || !visualPayload_ ? std::span<AnimationNamedFloatValue>{}
+			: std::span<AnimationNamedFloatValue>{visualPayload_->curveValues};
 	}
 
 	std::span<std::byte> PoseBuffer::MutableScratch() noexcept {
@@ -127,23 +129,24 @@ namespace TerraEngine::Animation {
 
 		// Stable IDs make named lookup deterministic. Sort before checking for
 		// duplicates so input packet order cannot alter the accepted result.
-		std::sort(morphValues_.begin(), morphValues_.end(), [](const auto& left, const auto& right) {
+		if(!visualPayload_) return AnimationStatus::InvalidArgument;
+		std::sort(visualPayload_->morphValues.begin(), visualPayload_->morphValues.end(), [](const auto& left, const auto& right) {
 			return left.stableId < right.stableId;
 		});
-		std::sort(curveValues_.begin(), curveValues_.end(), [](const auto& left, const auto& right) {
+		std::sort(visualPayload_->curveValues.begin(), visualPayload_->curveValues.end(), [](const auto& left, const auto& right) {
 			return left.stableId < right.stableId;
 		});
 
-		for(const AnimationTransform& transform : localTransforms_) {
+		for(const AnimationTransform& transform : visualPayload_->localTransforms) {
 			if(!IsFinite(transform) || !IsNormalized(transform.rotation)) return AnimationStatus::InvalidArgument;
 		}
-		for(const AnimationTransform& transform : modelTransforms_) {
+		for(const AnimationTransform& transform : visualPayload_->modelTransforms) {
 			if(!IsFinite(transform) || !IsNormalized(transform.rotation)) return AnimationStatus::InvalidArgument;
 		}
-		if(!std::all_of(morphValues_.begin(), morphValues_.end(), IsFiniteNamedValue)
-			|| !std::all_of(curveValues_.begin(), curveValues_.end(), IsFiniteNamedValue)
-			|| HasDuplicateStableIds<AnimationNamedFloatValue>(morphValues_)
-			|| HasDuplicateStableIds<AnimationNamedFloatValue>(curveValues_)) {
+		if(!std::all_of(visualPayload_->morphValues.begin(), visualPayload_->morphValues.end(), IsFiniteNamedValue)
+			|| !std::all_of(visualPayload_->curveValues.begin(), visualPayload_->curveValues.end(), IsFiniteNamedValue)
+			|| HasDuplicateStableIds<AnimationNamedFloatValue>(visualPayload_->morphValues)
+			|| HasDuplicateStableIds<AnimationNamedFloatValue>(visualPayload_->curveValues)) {
 			return AnimationStatus::InvalidArgument;
 		}
 		for(const AnimationEventRecord& event : events_) {
@@ -159,15 +162,59 @@ namespace TerraEngine::Animation {
 		return AnimationStatus::Ok;
 	}
 
+	AnimationStatus PoseBuffer::ShareSealedVisualPayloadFrom(
+		const PoseBuffer& source,
+		AnimationPoseGeneration generation) noexcept
+	{
+		// The sharing caller already applies the broader animator-state proof. These
+		// local checks defend PoseBuffer when it is used directly by a future system.
+		if(!source.sealed_ || !source.visualPayload_ || !source.events_.empty()
+			|| source.rootMotion_.has_value() || !generation.animator.IsValid()
+			|| generation.poseGeneration == 0U
+			|| source.ValidateForPublication() != AnimationStatus::Ok) {
+			return AnimationStatus::InvalidArgument;
+		}
+		layout_ = source.layout_;
+		layout_.eventCapacity = 0U;
+		layout_.scratchBytes = 0U;
+		generation_ = generation;
+		visualPayload_ = source.visualPayload_;
+		events_.clear();
+		scratch_.clear();
+		rootMotion_.reset();
+		sealed_ = true;
+		return ValidateForPublication();
+	}
+
+	std::span<const AnimationTransform> PoseBuffer::LocalTransforms() const noexcept {
+		return visualPayload_ ? std::span<const AnimationTransform>{visualPayload_->localTransforms}
+			: std::span<const AnimationTransform>{};
+	}
+
+	std::span<const AnimationTransform> PoseBuffer::ModelTransforms() const noexcept {
+		return visualPayload_ ? std::span<const AnimationTransform>{visualPayload_->modelTransforms}
+			: std::span<const AnimationTransform>{};
+	}
+
+	std::span<const AnimationNamedFloatValue> PoseBuffer::MorphValues() const noexcept {
+		return visualPayload_ ? std::span<const AnimationNamedFloatValue>{visualPayload_->morphValues}
+			: std::span<const AnimationNamedFloatValue>{};
+	}
+
+	std::span<const AnimationNamedFloatValue> PoseBuffer::CurveValues() const noexcept {
+		return visualPayload_ ? std::span<const AnimationNamedFloatValue>{visualPayload_->curveValues}
+			: std::span<const AnimationNamedFloatValue>{};
+	}
+
 	AnimationStatus PoseBuffer::ValidateForPublication() const noexcept {
 		if(!sealed_) return AnimationStatus::NotReady;
 		if(!generation_.animator.IsValid() || generation_.poseGeneration == 0U) {
 			return AnimationStatus::InvalidArgument;
 		}
-		if(localTransforms_.size() != layout_.jointCount
-			|| modelTransforms_.size() != layout_.jointCount
-			|| morphValues_.size() != layout_.morphCount
-			|| curveValues_.size() != layout_.curveCount
+		if(!visualPayload_ || visualPayload_->localTransforms.size() != layout_.jointCount
+			|| visualPayload_->modelTransforms.size() != layout_.jointCount
+			|| visualPayload_->morphValues.size() != layout_.morphCount
+			|| visualPayload_->curveValues.size() != layout_.curveCount
 			|| events_.size() > layout_.eventCapacity
 			|| scratch_.size() != layout_.scratchBytes) {
 			return AnimationStatus::InvalidArgument;

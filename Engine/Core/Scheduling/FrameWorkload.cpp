@@ -1154,103 +1154,187 @@ namespace TerraEngine::Scheduling {
 			return plan;
 		}
 
-		TERRAENGINE_PROFILE_SCOPE("FrameWorkload: Build and Execute Job Graph",
-			TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		// Frame topology is rebuilt because callbacks and activation can change, but
-		// the coordinator thread can retain all graph/vector capacity across frames.
-		// Reset advances handle generations and clears logical contents, so no stale
-		// callback or dependency remains observable through this allocation reuse.
+		// The graph topology changes only when descriptor identity, activation,
+		// partition ranges, policy, generation, or dependency edges change. Callback
+		// captures are refreshed every frame without invalidating that topology.
 		thread_local JobGraph graph("frame-workload", "Architecture Hardened Frame");
-		graph.Reset(plan.frameId, "Architecture Hardened Frame");
 		thread_local std::vector<std::vector<DependencyHandle>> handlesByResult;
-		for(std::vector<DependencyHandle>& handles : handlesByResult) {
+		thread_local std::vector<ScheduledPartition> scheduledPartitions;
+		struct PreparedFrameJob
+		{
+			std::size_t resultIndex = 0u;
+			FrameWorkloadPartition partition{};
+			std::uint64_t descriptorGeneration = 0u;
+			JobGraphJobDeclaration declaration{};
+		};
+		struct CachedJobTopology
+		{
+			std::string name;
+			std::size_t resultIndex = 0u;
+			std::uint64_t descriptorGeneration = 0u;
+			JobGraphExecutionPolicy executionPolicy = JobGraphExecutionPolicy::Protected;
+			bool mayMutateSceneStructure = false;
+			std::size_t partitionIndex = 0u;
+			std::size_t partitionCount = 0u;
+			std::size_t itemBegin = 0u;
+			std::size_t itemEnd = 0u;
+
+			bool operator==(const CachedJobTopology&) const = default;
+		};
+		thread_local std::vector<PreparedFrameJob> preparedJobs;
+		thread_local std::vector<CachedJobTopology> cachedTopology;
+		thread_local std::vector<std::pair<std::size_t, std::size_t>> cachedDependencyEdges;
+		thread_local std::vector<DependencyHandle> cachedHandles;
+		preparedJobs.clear();
+		scheduledPartitions.clear();
+		for (std::vector<DependencyHandle>& handles : handlesByResult)
+		{
 			handles.clear();
 		}
 		handlesByResult.resize(plan.results.size());
-		thread_local std::vector<ScheduledPartition> scheduledPartitions;
-		scheduledPartitions.clear();
-		for (std::size_t resultIndex = 0; resultIndex < plan.results.size(); ++resultIndex)
+
 		{
-			FrameWorkloadResult& result = plan.results[resultIndex];
-			if (result.executionPolicy == FrameWorkloadExecutionPolicy::Omitted || result.executionPolicy == FrameWorkloadExecutionPolicy::Rejected)
+			TERRAENGINE_PROFILE_SCOPE("FrameWorkload: Build Job Graph",
+				TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			for (std::size_t resultIndex = 0; resultIndex < plan.results.size(); ++resultIndex)
 			{
-				// Omitted descriptors deliberately produce no graph node, task, or edge.
-				continue;
+				FrameWorkloadResult& result = plan.results[resultIndex];
+				if (result.executionPolicy == FrameWorkloadExecutionPolicy::Omitted
+					|| result.executionPolicy == FrameWorkloadExecutionPolicy::Rejected)
+				{
+					continue;
+				}
+
+				std::vector<FrameWorkloadPartition> partitions;
+				if (result.executionPolicy == FrameWorkloadExecutionPolicy::WorkerSafe
+					&& result.declaration.partitionPolicy == FrameWorkloadPartitionPolicy::DeterministicRanges
+					&& result.declaration.estimatedWorkItemCount > 0u
+					&& result.declaration.rangeWork)
+				{
+					partitions = BuildDeterministicWorkloadPartitions(
+						result.declaration.estimatedWorkItemCount,
+						result.declaration.partitionWorkItemCount,
+						result.declaration.maximumPartitionCount);
+				}
+				if (partitions.empty())
+				{
+					partitions.push_back({ 0u, 1u, 0u, result.declaration.estimatedWorkItemCount });
+				}
+				result.partitionCount = partitions.size();
+				for (const FrameWorkloadPartition& partition : partitions)
+				{
+					PreparedFrameJob prepared{};
+					prepared.resultIndex = resultIndex;
+					prepared.partition = partition;
+					prepared.descriptorGeneration = result.declaration.stableDescriptorGeneration;
+					JobGraphJobDeclaration& job = prepared.declaration;
+					job.name = result.declaration.stableDescriptorId + "#"
+						+ std::to_string(partition.partitionIndex);
+					job.executionPolicy = result.executionPolicy == FrameWorkloadExecutionPolicy::WorkerSafe
+						? JobGraphExecutionPolicy::WorkerEligible
+						: result.executionPolicy == FrameWorkloadExecutionPolicy::Inline
+						? JobGraphExecutionPolicy::MainThread
+						: JobGraphExecutionPolicy::Protected;
+					job.cancellable = true;
+					job.requiresSuccessfulDependencies = true;
+					job.mayMutateSceneStructure = result.declaration.mutationPolicy
+						== FrameWorkloadMutationPolicy::DeferredOnly;
+					job.profilingLabel = result.declaration.profilingLabel.empty()
+						? result.declaration.workloadName : result.declaration.profilingLabel;
+					job.partitionIndex = partition.partitionIndex;
+					job.partitionCount = partition.partitionCount;
+					job.itemBegin = partition.itemBegin;
+					job.itemEnd = partition.itemEnd;
+					job.usefulWorkItemCount = partition.itemEnd - partition.itemBegin;
+					if (result.declaration.rangeWork)
+					{
+						job.work = [rangeWork = result.declaration.rangeWork, partition](JobGraphContext& context) {
+							rangeWork(partition, context);
+						};
+					}
+					else
+					{
+						job.work = result.declaration.work;
+					}
+					preparedJobs.push_back(std::move(prepared));
+					scheduledPartitions.push_back({ resultIndex, partition,
+						preparedJobs.back().declaration.name });
+				}
 			}
 
-			std::vector<FrameWorkloadPartition> partitions;
-			if (result.executionPolicy == FrameWorkloadExecutionPolicy::WorkerSafe
-				&& result.declaration.partitionPolicy == FrameWorkloadPartitionPolicy::DeterministicRanges
-				&& result.declaration.estimatedWorkItemCount > 0u
-				&& result.declaration.rangeWork)
+			std::vector<CachedJobTopology> topology;
+			topology.reserve(preparedJobs.size());
+			for (const PreparedFrameJob& prepared : preparedJobs)
 			{
-				partitions = BuildDeterministicWorkloadPartitions(
-					result.declaration.estimatedWorkItemCount,
-					result.declaration.partitionWorkItemCount,
-					result.declaration.maximumPartitionCount);
+				const JobGraphJobDeclaration& job = prepared.declaration;
+				topology.push_back({ job.name, prepared.resultIndex,
+					prepared.descriptorGeneration, job.executionPolicy,
+					job.mayMutateSceneStructure, job.partitionIndex,
+					job.partitionCount, job.itemBegin, job.itemEnd });
 			}
-			if (partitions.empty())
+			std::vector<std::pair<std::size_t, std::size_t>> dependencyEdges;
+			dependencyEdges.reserve(plan.dependencyEdges.size());
+			for (const FrameWorkloadDependencyEdge& edge : plan.dependencyEdges)
 			{
-				// A callback without a range contract executes once. This avoids silently
-				// replaying legacy whole-workload callbacks for every partition.
-				partitions.push_back({ 0u, 1u, 0u, result.declaration.estimatedWorkItemCount });
+				dependencyEdges.emplace_back(edge.prerequisiteIndex, edge.dependentIndex);
 			}
-			result.partitionCount = partitions.size();
-			for (const FrameWorkloadPartition& partition : partitions)
-			{
-				JobGraphJobDeclaration job;
-				job.name = result.declaration.stableDescriptorId + "#" + std::to_string(partition.partitionIndex);
-				job.executionPolicy = result.executionPolicy == FrameWorkloadExecutionPolicy::WorkerSafe
-					? JobGraphExecutionPolicy::WorkerEligible
-					: result.executionPolicy == FrameWorkloadExecutionPolicy::Inline
-					? JobGraphExecutionPolicy::MainThread
-					: JobGraphExecutionPolicy::Protected;
-				job.cancellable = true;
-				job.requiresSuccessfulDependencies = true;
-				job.mayMutateSceneStructure = result.declaration.mutationPolicy == FrameWorkloadMutationPolicy::DeferredOnly;
-				job.profilingLabel = result.declaration.profilingLabel.empty() ? result.declaration.workloadName : result.declaration.profilingLabel;
-				job.partitionIndex = partition.partitionIndex;
-				job.partitionCount = partition.partitionCount;
-				job.itemBegin = partition.itemBegin;
-				job.itemEnd = partition.itemEnd;
-				job.usefulWorkItemCount = partition.itemEnd - partition.itemBegin;
-				if (result.declaration.rangeWork)
-				{
-					job.work = [rangeWork = result.declaration.rangeWork, partition](JobGraphContext& context) {
-						rangeWork(partition, context);
-					};
-				}
-				else
-				{
-					job.work = result.declaration.work;
-				}
-				const DependencyHandle handle = graph.AddJob(std::move(job));
-				handlesByResult[resultIndex].push_back(handle);
-				scheduledPartitions.push_back({ resultIndex, partition, result.declaration.stableDescriptorId + "#" + std::to_string(partition.partitionIndex) });
-			}
-		}
 
-		auto addAllDependencies = [](const std::vector<DependencyHandle>& before, const std::vector<DependencyHandle>& after) {
-			for (const DependencyHandle& beforeHandle : before)
+			const bool reuseTopology = topology == cachedTopology
+				&& dependencyEdges == cachedDependencyEdges
+				&& cachedHandles.size() == preparedJobs.size();
+			if (reuseTopology)
 			{
-				for (const DependencyHandle& afterHandle : after)
+				graph.Rearm(plan.frameId);
+				for (std::size_t index = 0u; index < preparedJobs.size(); ++index)
 				{
-					graph.AddDependency(beforeHandle, afterHandle);
+					const PreparedFrameJob& prepared = preparedJobs[index];
+					graph.UpdateJobWork(cachedHandles[index],
+						prepared.declaration.work,
+						prepared.declaration.profilingLabel);
+					handlesByResult[prepared.resultIndex].push_back(cachedHandles[index]);
 				}
 			}
-		};
-		for (const FrameWorkloadDependencyEdge& edge : plan.dependencyEdges)
-		{
-			if (edge.prerequisiteIndex < handlesByResult.size()
-				&& edge.dependentIndex < handlesByResult.size())
+			else
 			{
-				addAllDependencies(handlesByResult[edge.prerequisiteIndex], handlesByResult[edge.dependentIndex]);
+				graph.Reset(plan.frameId, "Architecture Hardened Frame");
+				cachedHandles.clear();
+				cachedHandles.reserve(preparedJobs.size());
+				for (PreparedFrameJob& prepared : preparedJobs)
+				{
+					const DependencyHandle handle = graph.AddJob(
+						std::move(prepared.declaration));
+					cachedHandles.push_back(handle);
+					handlesByResult[prepared.resultIndex].push_back(handle);
+				}
+				for (const FrameWorkloadDependencyEdge& edge : plan.dependencyEdges)
+				{
+					if (edge.prerequisiteIndex >= handlesByResult.size()
+						|| edge.dependentIndex >= handlesByResult.size())
+					{
+						continue;
+					}
+					for (const DependencyHandle& before : handlesByResult[edge.prerequisiteIndex])
+					{
+						for (const DependencyHandle& after : handlesByResult[edge.dependentIndex])
+						{
+							graph.AddDependency(before, after);
+						}
+					}
+				}
+				cachedTopology = std::move(topology);
+				cachedDependencyEdges = std::move(dependencyEdges);
 			}
 		}
 
 		JobGraphExecuteOptions executeOptions;
 		executeOptions.formatSummary = false;
-		const JobGraphSummary& summary = graph.Execute(executeOptions);
+		const JobGraphSummary* summaryPointer = nullptr;
+		{
+			TERRAENGINE_PROFILE_SCOPE("FrameWorkload: Execute Job Graph",
+				TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			summaryPointer = &graph.Execute(executeOptions);
+		}
+		const JobGraphSummary& summary = *summaryPointer;
 		plan.valid = summary.valid;
 		for (FrameWorkloadResult& result : plan.results)
 		{

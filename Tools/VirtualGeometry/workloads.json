@@ -149,6 +149,57 @@
 			"fixtureIds": ["new-animated-project", "base-character-crowd", "full-reference-required", "million-decision-required"],
 			"qualityProfile": "reference-default",
 			"status": "planned-capture"
+		},
+		{
+			"id": "existing-4000-animated",
+			"route": "vulkan-installed-animated",
+			"purpose": "Unchanged external New Animated Project crowd scene",
+			"scene": "Assets/Scenes/Scene.tescene",
+			"qualityProfile": "reference-default",
+			"status": "planned-capture"
+		},
+		{
+			"id": "repeated-static",
+			"route": "direct",
+			"purpose": "4000 transient Viking Room raw-mesh instances sharing one material key",
+			"renderables": 4000,
+			"materials": 1,
+			"qualityProfile": "reference-default",
+			"status": "planned-capture"
+		},
+		{
+			"id": "heterogeneous-static",
+			"route": "native-cpu-typed-synthetic",
+			"purpose": "4000 transient owners with distinct material keys; GPU unavailable in fallback",
+			"renderables": 4000,
+			"materials": 4000,
+			"qualityProfile": "reference-default",
+			"status": "planned-capture"
+		},
+		{
+			"id": "dense-animated-vg",
+			"route": "vulkan-installed-animated",
+			"purpose": "Separate downloaded dense animated VG scene",
+			"scene": "Assets/Scenes/DenseAnimatedVGBenchmark.tescene",
+			"qualityProfile": "reference-default",
+			"status": "planned-capture"
+		},
+		{
+			"id": "mixed-animation",
+			"route": "vulkan-installed-animated",
+			"purpose": "Mixed-feature animation scene",
+			"scene": "Assets/Scenes/MixedBenchmark.tescene",
+			"qualityProfile": "reference-default",
+			"status": "planned-capture"
+		},
+		{
+			"id": "ten-renderable",
+			"route": "direct",
+			"purpose": "Ten transient Viking Room raw-mesh instances cycling three material keys",
+			"renderables": 10,
+			"materials": 3,
+			"qualityProfile": "reference-default",
+			"status": "planned-capture"
 		}
 	]
 }

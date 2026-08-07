@@ -31,6 +31,7 @@
 #include "../Subsystems/ScriptCompilationSubsystem.h"
 #include "../Windows/SceneViewWindow.h"
 #include "../Windows/SceneViewOverlayTypes.h"
+#include "../Windows/ProfilerWindow.h"
 #include "../Profiling/EditorProfilerService.h"
 #include "../../Export/BuildProfile.h"
 #include "../../Export/ExportPipeline.h"
@@ -1351,6 +1352,7 @@ namespace TerraEngine::Editor::Automation
 			nlohmann::json data = {
 				{"status", ToString(state.status)},
 				{"pixel", nlohmann::json::array({state.pixel.x, state.pixel.y})},
+				{"captureTarget", state.dedicatedCaptureTarget},
 				{"reason", state.reason},
 				{"pick", nullptr}
 			};
@@ -2479,7 +2481,7 @@ namespace TerraEngine::Editor::Automation
 		add("prefab.create", "prefab", MutationMode::AssetMutation, true, true, false, "object, path");
 		add("prefab.instantiate", "prefab", MutationMode::SceneMutation, true, true, false, "prefab, name?");
 		add("prefab.instantiate_many", "prefab", MutationMode::SceneMutation, true, true, false,
-			"prefab, count, namePrefix?, spacing?, columns?, origin?, requestedAnimationMode?");
+			"prefab, count, namePrefix?, spacing?, columns?, origin?, requestedAnimationMode?, defaultClipAssetIds?, defaultClipStartFrameStep?");
 		add("prefab.overrides.inspect", "prefab", MutationMode::ReadOnly, true, true, false, "instance");
 		add("prefab.overrides.apply", "prefab", MutationMode::AssetMutation, true, true, false, "instance, expectedPrefabGeneration");
 		add("prefab.overrides.revert", "prefab", MutationMode::SceneMutation, true, true, false, "instance");
@@ -2505,6 +2507,7 @@ namespace TerraEngine::Editor::Automation
 			add(name, "scene_view", name == "scene_view.state" ? MutationMode::ReadOnly : MutationMode::EditorSelection, false, false, false, "semantic Scene View arguments");
 		add("scene_view.settings.get", "scene_view", MutationMode::ReadOnly, false, false, false, "no arguments");
 		add("scene_view.settings.set", "scene_view", MutationMode::EditorSelection, false, false, true, "settings: complete validated Scene View performance document");
+		add("profiler.window.visibility.set", "profiler", MutationMode::EditorSelection, false, false, false, "visible: bool");
 		for (const std::string& name : {"profiler.capture.start", "profiler.capture.stop", "profiler.capture.list", "profiler.capture.load", "profiler.capture.summary"})
 			add(name, "profiler", name.ends_with("list") || name.ends_with("summary") ? MutationMode::ReadOnly : MutationMode::ProjectMutation, true, false, false, "artifactId?");
 		add("editor.commands.list", "editor_commands", MutationMode::ReadOnly, false, false, false, "no arguments");
@@ -2545,11 +2548,11 @@ namespace TerraEngine::Editor::Automation
 		add("game_view.capture", "capture", MutationMode::ReadOnly, false, false, false, "width?: integer, height?: integer, format?: image/png, freshness?: latestCompleted|nextFrame, includeOverlays?: bool, transparentBackground?: bool");
 		add("camera.capture_object", "capture", MutationMode::ReadOnly, false, true, false, "object|camera|target: uuid|entity|name, includeDisabled?: bool, width?: integer, height?: integer, format?: image/png");
 		add("camera.capture_custom", "capture", MutationMode::ReadOnly, false, false, false, "position: [x,y,z], target?: [x,y,z], forward?: [x,y,z], up?: [x,y,z], projection?: perspective|orthographic, width?: integer, height?: integer");
-		add("renderer.virtualGeometry.stats", "renderer", MutationMode::ReadOnly, false, false, false, "viewType?: Game|Scene");
+		add("renderer.virtualGeometry.stats", "renderer", MutationMode::ReadOnly, false, false, false, "viewType?: Game|Scene|Shadow");
 		add("renderer.virtualGeometry.capabilityEvidence", "renderer", MutationMode::ReadOnly, false, false, false, "viewType?: Game|Scene");
 		add("renderer.virtualGeometry.validationRoute.set", "renderer", MutationMode::EditorSelection, false, false, false, "route: Hardware|Compute|Indexed|Hybrid");
 		add("renderer.virtualGeometry.validationRoute.reset", "renderer", MutationMode::EditorSelection, false, false, false, "no arguments");
-		add("renderer.virtualGeometry.authoritativePick", "renderer", MutationMode::ReadOnly, false, false, false, "viewType?: Game|Scene, pixel: [x,y], request?: bool");
+		add("renderer.virtualGeometry.authoritativePick", "renderer", MutationMode::ReadOnly, false, false, false, "viewType?: Game|Scene, pixel: [x,y], request?: bool, capture?: bool");
 		add("renderer.recovery.safe_save_project", "renderer", MutationMode::ProjectMutation, true, false, false, "reason?: string");
 		add("diagnostics.get_summary", "diagnostics", MutationMode::ReadOnly, false, false, false, "includeDetails?: bool, surface?: string");
 	}
@@ -3747,6 +3750,17 @@ namespace TerraEngine::Editor::Automation
 						{"cpuSampledJoints", counters.cpuSampledJoints},
 						{"gpuEvaluatedJoints", counters.gpuEvaluatedJoints},
 						{"gpuBatches", counters.gpuBatches},
+						{"compactEligibleAnimators", counters.compactEligibleAnimators},
+						{"compactProcessedAnimators", counters.compactProcessedAnimators},
+						{"completeCapturedAnimators", counters.completeCapturedAnimators},
+						{"completeProcessedAnimators", counters.completeProcessedAnimators},
+						{"compactToCompleteTransitions", counters.compactToCompleteTransitions},
+						{"completeToCompactTransitions", counters.completeToCompactTransitions},
+						{"retainedTopologyHits", counters.retainedTopologyHits},
+						{"retainedTopologyMisses", counters.retainedTopologyMisses},
+						{"compactPlanGroups", counters.compactPlanGroups},
+						{"compactDispatches", counters.compactDispatches},
+						{"rejectedCandidateCount", counters.rejectedCandidateCount},
 						{"gpuTransferBytes", counters.gpuTransferBytes},
 						{"gpuReadbackBytes", counters.gpuReadbackBytes},
 						{"completePoseReadbackBytes", counters.completePoseReadbackBytes},
@@ -3764,7 +3778,13 @@ namespace TerraEngine::Editor::Automation
 						{"cpuAuthorityMs", timings.cpuAuthorityMs},
 						{"gpuPlanningMs", timings.gpuPlanningMs},
 						{"gpuExecutionMs", timings.gpuExecutionMs},
-						{"deformationMs", timings.deformationMs}
+						{"deformationMs", timings.deformationMs},
+						{"compactCaptureMs", timings.compactCaptureMs},
+						{"completeCaptureMs", timings.completeCaptureMs},
+						{"compactEvaluationMs", timings.compactEvaluationMs},
+						{"completeEvaluationMs", timings.completeEvaluationMs},
+						{"topologyBuildMs", timings.topologyBuildMs},
+						{"topologyRefreshMs", timings.topologyRefreshMs}
 					}}
 				};
 			}
@@ -3869,6 +3889,11 @@ namespace TerraEngine::Editor::Automation
 				}},
 				{"integration", {
 					{"planStatus", std::string(ToString(integration.planStatus))},
+					{"rejectionReason", std::string(ToString(integration.rejectionReason))},
+					{"rejectionItemIndex",
+						integration.rejectionItemIndex == std::numeric_limits<std::size_t>::max()
+							? nlohmann::json(nullptr)
+							: nlohmann::json(integration.rejectionItemIndex)},
 					{"executionPolicy", static_cast<std::uint32_t>(integration.executionPolicy)},
 					{"availableWorkerCount", integration.availableWorkerCount},
 					{"selectedWorkerCount", integration.selectedWorkerCount},
@@ -5280,6 +5305,46 @@ namespace TerraEngine::Editor::Automation
 			if (!result.ok) return BuildError(requestId, ErrorCategory::Validation, result.message);
 			return BuildSuccess(requestId, result.message, result.data);
 		}
+		if(operation == AutomationOperation("profiler.window.visibility.set"))
+		{
+			if(!arguments.contains("visible") || !arguments["visible"].is_boolean())
+				return BuildError(requestId, ErrorCategory::Validation,
+					"Profiler window visibility requires a Boolean visible value.");
+			const std::shared_ptr<ProfilerWindow> window = mainEditor != nullptr
+				? mainEditor->GetWindow<ProfilerWindow>() : nullptr;
+			if(!window)
+				return BuildError(requestId, ErrorCategory::Unavailable,
+					"Profiler window is unavailable.");
+			const bool visible = arguments["visible"].get<bool>();
+			window->SetVisible(visible);
+			if (!visible && editorContext != nullptr && editorContext->editorProfiler != nullptr)
+			{
+				// A hidden window must not leak its last open-frame CPU sample into
+				// the closed side of the installed idle-overhead A/B measurement.
+				editorContext->editorProfiler->ClearProfilerWindowDrawTiming();
+			}
+			// EditorSystem publishes this timing immediately after its GLFW/ImGui
+			// frame boundary. The profiler service owns the typed atomic snapshot so
+			// this automation layer does not depend directly on the ImGui runtime.
+			const EditorProfilerFrameTiming frameTiming = editorContext != nullptr
+				&& editorContext->editorProfiler != nullptr
+				? editorContext->editorProfiler->GetEditorFrameTiming()
+				: EditorProfilerFrameTiming{};
+			return BuildSuccess(requestId, "Updated profiler window visibility.", {
+				{"visible", window->IsVisible()},
+				{"editorFrameIndex", frameTiming.frameIndex},
+				{"editorFrameTimeMs", frameTiming.frameTimeMs},
+				{"profilerWindowDrawFrameIndex", frameTiming.profilerWindowDrawFrameIndex},
+				{"profilerWindowDrawMs", frameTiming.profilerWindowDrawMs},
+				{"profilerWindowDrawValid", frameTiming.profilerWindowDrawValid},
+				{"imguiRenderFrameIndex", frameTiming.imguiRenderFrameIndex},
+				{"imguiRenderMs", frameTiming.imguiRenderMs},
+				{"imguiRenderValid", frameTiming.imguiRenderValid},
+				{"presentUiFrameIndex", frameTiming.presentUiFrameIndex},
+				{"presentUiMs", frameTiming.presentUiMs},
+				{"presentUiValid", frameTiming.presentUiValid}
+			});
+		}
 		if (IsOperationOneOf(operation, {
 			AutomationOperation("prefab.instantiate"), AutomationOperation("prefab.instantiate_many"),
 			AutomationOperation("prefab.overrides.inspect"),
@@ -5326,6 +5391,53 @@ namespace TerraEngine::Editor::Automation
 						bulkRequest.requestedAnimationMode =
 							static_cast<TerraEngine::Animation::AnimationExecutionPolicy>(
 								requestedMode);
+					}
+					if (arguments.contains("defaultClipAssetIds"))
+					{
+						const nlohmann::json& clipIds = arguments["defaultClipAssetIds"];
+						if (!clipIds.is_array() || clipIds.empty()
+							|| clipIds.size() > static_cast<std::size_t>(requestedCount))
+						{
+							return BuildError(requestId, ErrorCategory::Validation,
+								"prefab.instantiate_many defaultClipAssetIds must contain between 1 and count UUIDs.");
+						}
+						for (const nlohmann::json& value : clipIds)
+						{
+							if (!value.is_string())
+							{
+								return BuildError(requestId, ErrorCategory::Validation,
+									"prefab.instantiate_many defaultClipAssetIds must contain UUID strings.");
+							}
+							const std::optional<TerraEngine::UUID> parsed =
+								TerraEngine::ParseUUID(value.get<std::string>());
+							if (!parsed.has_value() || *parsed == TerraEngine::EMPTY_UUID)
+							{
+								return BuildError(requestId, ErrorCategory::Validation,
+									"prefab.instantiate_many defaultClipAssetIds contains an invalid UUID.");
+							}
+							bulkRequest.defaultClipAssetIds.push_back(*parsed);
+						}
+					}
+					if (arguments.contains("defaultClipStartFrameStep"))
+					{
+						if (!arguments["defaultClipStartFrameStep"].is_number_integer())
+						{
+							return BuildError(requestId, ErrorCategory::Validation,
+								"prefab.instantiate_many defaultClipStartFrameStep must be an integer.");
+						}
+						const std::int64_t requestedStep =
+							arguments["defaultClipStartFrameStep"].get<std::int64_t>();
+						const std::uint64_t maximumStep = requestedCount > 1
+							? std::numeric_limits<std::uint32_t>::max()
+								/ static_cast<std::uint64_t>(requestedCount - 1)
+							: std::numeric_limits<std::uint32_t>::max();
+						if (requestedStep < 0 || static_cast<std::uint64_t>(requestedStep) > maximumStep)
+						{
+							return BuildError(requestId, ErrorCategory::Validation,
+								"prefab.instantiate_many defaultClipStartFrameStep exceeds the safe range for count.");
+						}
+						bulkRequest.defaultClipStartFrameStep =
+							static_cast<std::uint32_t>(requestedStep);
 					}
 					if (arguments.contains("columns"))
 					{
@@ -5915,7 +6027,14 @@ namespace TerraEngine::Editor::Automation
 				const AutomationJobSnapshot job = jobService.Create({"profiler", std::string(operationName), requestId, arguments.value("correlationId", requestId), {}, false});
 				if (job.jobId.empty()) return BuildError(requestId, ErrorCategory::QueueFull, "Profiler job queue is full.");
 				activeProfilerCaptureJobId = job.jobId;
-				editorContext->editorProfiler->FinishCapture();
+				if (!editorContext->editorProfiler->FinishCapture())
+				{
+					const std::string error = editorContext->editorProfiler->GetLastError();
+					(void)jobService.CompleteFailed(job.jobId, {{"error", error}});
+					activeProfilerCaptureJobId.clear();
+					return BuildSuccess(requestId, "Profiler capture contained no runtime frames.",
+						{{"jobId", job.jobId}, {"state", "failed"}, {"error", error}});
+				}
 				return BuildSuccess(requestId, "Accepted profiler capture persistence.", {{"jobId", job.jobId}, {"state", "queued"}, {"pollTool", "jobs.get"}});
 			}
 			return BuildError(requestId, ErrorCategory::UnsupportedCapability, "Profiler operation is not registered.");
@@ -8058,6 +8177,16 @@ namespace TerraEngine::Editor::Automation
 		}
 
 		const glm::uvec2 size(validation["width"].get<std::uint32_t>(), validation["height"].get<std::uint32_t>());
+		RenderViewType captureViewType = RenderViewType::Game;
+		if (arguments.contains("viewType"))
+		{
+			const std::optional<RenderViewType> parsed = ParseAutomationRenderViewType(arguments["viewType"]);
+			if (!parsed || (*parsed != RenderViewType::Game && *parsed != RenderViewType::Scene))
+			{
+				return BuildError(requestId, ErrorCategory::Validation, "viewType must be Game or Scene.");
+			}
+			captureViewType = *parsed;
+		}
 		std::string projection = "perspective";
 		float fov = 45.0f;
 		float aspect = static_cast<float>(size.x) / static_cast<float>(size.y);
@@ -8097,6 +8226,7 @@ namespace TerraEngine::Editor::Automation
 		TerraEngine::Renderer::RenderCaptureRequest request;
 		request.requestId = requestId;
 		request.sourceKind = TerraEngine::Renderer::RenderCaptureSourceKind::CustomCamera;
+		request.viewType = captureViewType;
 		request.sourceName = arguments.value("name", std::string("Custom Camera"));
 		request.targetSize = size;
 		request.format = validation["format"].get<std::string>();
@@ -8134,7 +8264,8 @@ namespace TerraEngine::Editor::Automation
 			{"orthographicHeight", orthographicHeight},
 			{"aspectRatio", aspect},
 			{"nearPlane", nearPlane},
-			{"farPlane", farPlane}
+			{"farPlane", farPlane},
+			{"viewType", ToString(captureViewType)}
 		};
 		return result;
 	}
@@ -8153,9 +8284,11 @@ namespace TerraEngine::Editor::Automation
 			{
 				return BuildError(requestId, ErrorCategory::Validation, "viewType must be Game or Scene.");
 			}
-			if (*parsedViewType != RenderViewType::Game && *parsedViewType != RenderViewType::Scene)
+			if (*parsedViewType != RenderViewType::Game && *parsedViewType != RenderViewType::Scene
+				&& *parsedViewType != RenderViewType::Shadow)
 			{
-				return BuildError(requestId, ErrorCategory::Validation, "Virtual geometry stats are only exposed for Game and Scene views.");
+				return BuildError(requestId, ErrorCategory::Validation,
+					"viewType must be Game, Scene, or Shadow.");
 			}
 			viewType = *parsedViewType;
 		}
@@ -8171,10 +8304,24 @@ namespace TerraEngine::Editor::Automation
 			return BuildError(requestId, ErrorCategory::MissingTarget, "RenderSystem is not registered.");
 		}
 
-		const RenderStatsSnapshot stats = renderSystem->GetLatestRenderStats(viewType);
-		if (!stats.valid)
+		// Vulkan's fence-delayed RenderStatsSnapshot storage owns Game and Scene
+		// timing slots only. Shadow selection is nevertheless published as an
+		// immutable RenderSystem diagnostic snapshot, so never ask the two-view
+		// stats store for Shadow and accidentally return Game data as proof.
+		RenderStatsSnapshot stats{};
+		const bool shadowDiagnosticsOnly = viewType == RenderViewType::Shadow;
+		if (!shadowDiagnosticsOnly)
 		{
-			return BuildError(requestId, ErrorCategory::MissingTarget, "No render stats have been produced for the requested view.", ToString(viewType));
+			stats = renderSystem->GetLatestRenderStats(viewType);
+			if (!stats.valid)
+			{
+				return BuildError(requestId, ErrorCategory::MissingTarget,
+					"No render stats have been produced for the requested view.", ToString(viewType));
+			}
+		}
+		else
+		{
+			stats.viewType = RenderViewType::Shadow;
 		}
 
 		// Return both the raw meshlet counters and their provenance. The same
@@ -8207,12 +8354,53 @@ namespace TerraEngine::Editor::Automation
 		std::uint32_t computeRasterPackets = 0u;
 		std::uint32_t indexedRasterPackets = 0u;
 		nlohmann::json selectedLodHistogram = nlohmann::json::array();
+		bool foundRequestedViewDiagnostics = false;
+		std::uint64_t requestedViewDiagnosticsFrameId = 0u;
 		const TerraEngine::Renderer::RenderDiagnosticsSummary diagnostics = renderSystem->GetLatestRenderGraphDiagnostics();
 		for (const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& view : diagnostics.virtualGeometryViews)
 		{
 			if (view.viewType != viewType)
 			{
 				continue;
+			}
+			foundRequestedViewDiagnostics = true;
+			requestedViewDiagnosticsFrameId = view.frameId;
+			if (shadowDiagnosticsOnly)
+			{
+				// Shadow work has no per-view Vulkan timestamp slot. Copy only the
+				// renderer-published selection data, preserving its counter source so
+				// MCP clients cannot confuse CPU preparation with completed GPU work.
+				stats.valid = view.frameId != 0u;
+				stats.viewType = RenderViewType::Shadow;
+				stats.renderSize = view.hiZRenderSize;
+				stats.meshletsTotal = view.selectedMeshlets;
+				stats.meshletsDispatched = view.dispatchedMeshlets;
+				stats.meshletsCulled = view.culledMeshlets;
+				stats.meshletsCulledHiZ = view.culledByHiZ;
+				stats.virtualGeometryClusterPackets = view.clusterPacketCount;
+				stats.virtualGeometrySubmittedBatches = view.submittedBatchCount;
+				stats.virtualGeometrySinglePacketFallbackBatches = view.singlePacketFallbackBatchCount;
+				stats.virtualGeometryCandidatePackets = view.candidateClusterCount;
+				stats.virtualGeometryCompactedPackets = view.compactedClusterCount;
+				stats.virtualGeometryRejectedPackets = view.rejectedClusterCount;
+				stats.virtualGeometryFailOpenPackets = view.failOpenClusterCount;
+				stats.virtualGeometryResidentPages = view.residentPages;
+				stats.virtualGeometryRequestedPages = view.requestedPages;
+				stats.virtualGeometryMissingPages = view.missingPages;
+				stats.virtualGeometryFailedPages = view.failedPages;
+				stats.virtualGeometryEvictedPages = view.evictedPages;
+				stats.virtualGeometryPinnedFallbackPages = view.pinnedFallbackPages;
+				stats.meshletCounterSource = view.counterSource;
+				stats.meshletCounterFrameId = view.counterReadbackFrameId != 0u
+					? view.counterReadbackFrameId : view.counterPreparedFrameId;
+				stats.meshletCounterLatencyFrames = view.counterReadbackLatencyFrames;
+				stats.meshletCounterReason = view.counterUnavailableReason;
+				stats.hiZActive = false;
+				stats.hiZState = view.hiZState;
+				stats.hiZStatusReason = view.hiZInvalidReason;
+				stats.hiZWarmupFrames = view.hiZWarmupFrames;
+				stats.hiZBaselineMatched = view.hiZBaselineMatched;
+				stats.hiZFalseOcclusionRiskWarnings = view.hiZFalseOcclusionRiskWarnings;
 			}
 			for (const PerformanceGateResult& gate : view.virtualGeometryPerformanceGates)
 			{
@@ -8266,6 +8454,12 @@ namespace TerraEngine::Editor::Automation
 				selectedLodHistogram.push_back(selectedCount);
 			}
 			break;
+		}
+		if (shadowDiagnosticsOnly && (!foundRequestedViewDiagnostics || !stats.valid))
+		{
+			return BuildError(requestId, ErrorCategory::MissingTarget,
+				"No current Shadow virtual-geometry diagnostics have been published.",
+				ToString(viewType));
 		}
 		for (const PerformanceGateResult& gate : TerraEngine::Renderer::BuildVisibleCommandReusePerformanceGates(stats))
 		{
@@ -8384,6 +8578,14 @@ namespace TerraEngine::Editor::Automation
 		nlohmann::json data = {
 			{"viewType", ToString(stats.viewType)},
 			{"valid", stats.valid},
+			// Shadow selection has current immutable diagnostics but intentionally
+			// no per-view GPU timestamp/readback slot. Make that boundary explicit
+			// instead of presenting default zero timing values as a measurement.
+			{"statsAvailability", shadowDiagnosticsOnly
+				? "current_shadow_selection_diagnostics"
+				: "fence_delayed_render_stats"},
+			{"diagnosticsFrameId", shadowDiagnosticsOnly
+				? requestedViewDiagnosticsFrameId : 0u},
 			{"frameTimeMs", stats.frameTimeMs},
 			{"fps", stats.fps},
 			{"drawCalls", stats.drawCalls},
@@ -8609,17 +8811,19 @@ namespace TerraEngine::Editor::Automation
 		}
 
 		const bool request = arguments.value("request", false);
+		const bool captureTarget = arguments.value("capture", false);
 		if (request)
 		{
 			// Queueing is non-blocking. A false return is represented below as an
 			// unavailable state, never as a fabricated CPU-projection pick.
-			(void)renderSystem->RequestConventionalVisibilityIdentityPick(viewType, *pixel);
+			(void)renderSystem->RequestConventionalVisibilityIdentityPick(viewType, *pixel, captureTarget);
 		}
 		const TerraEngine::Renderer::AuthoritativeVisibilityPickState state =
-			renderSystem->GetConventionalVisibilityIdentityPickState(viewType, *pixel);
+			renderSystem->GetConventionalVisibilityIdentityPickState(viewType, *pixel, captureTarget);
 		return BuildSuccess(requestId, "Read asynchronous Vulkan authoritative identity-pick state.", {
 			{"viewType", ToString(viewType)},
 			{"requested", request},
+			{"captureTarget", captureTarget},
 			{"authoritative", SerializeAuthoritativeVisibilityPick(state)}
 		});
 	}

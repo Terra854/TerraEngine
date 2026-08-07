@@ -83,6 +83,10 @@ namespace TerraEngine::Animation {
 			std::uint32_t& requiredCount) const;
 
 		void RetireAnimator(NativeAnimationAnimatorHandle animator) noexcept;
+		// Shared asset publications may rebound thousands of visual animators at once.
+		// Remove any matching advanced state with one lock and one pass per container;
+		// the protected caller provides sorted unique generation-safe handles.
+		void RetireAnimators(std::span<const AnimatorInstanceHandle> animators) noexcept;
 		void Clear() noexcept;
 		[[nodiscard]] std::size_t PendingCount() const noexcept;
 

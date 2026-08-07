@@ -578,6 +578,30 @@ namespace TerraEngine::Animation {
 		});
 	}
 
+	void AdvancedAnimationCommandStore::RetireAnimators(
+		std::span<const AnimatorInstanceHandle> animators) noexcept
+	{
+		if(animators.empty()) return;
+		const auto contains = [animators](NativeAnimationAnimatorHandle animator) {
+			return std::binary_search(animators.begin(), animators.end(),
+				AnimatorInstanceHandle{animator.slotIndex, animator.generation});
+		};
+		std::scoped_lock lock(mutex_);
+		auto removeRequests = [&contains](auto& requests) {
+			std::erase_if(requests, [&contains](const auto& request) {
+				return contains(request.animator);
+			});
+		};
+		removeRequests(pendingRetarget_);
+		removeRequests(pendingMotionMatch_);
+		removeRequests(pendingMotionMatchV2_);
+		removeRequests(pendingRagdoll_);
+		removeRequests(pendingDeterminism_);
+		std::erase_if(states_, [&contains](const AnimatorState& state) {
+			return contains(state.animator);
+		});
+	}
+
 	void AdvancedAnimationCommandStore::Clear() noexcept
 	{
 		std::scoped_lock lock(mutex_);

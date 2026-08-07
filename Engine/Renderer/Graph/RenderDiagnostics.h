@@ -429,7 +429,8 @@ namespace TerraEngine::Renderer {
 		const RenderFrameSnapshot& snapshot,
 		const VirtualGeometryQualityProfile& qualityProfile,
 		VirtualGeometryInactiveReason inactiveReason,
-		const GpuDeformationPlan* completedDeformationPlan = nullptr);
+		const GpuDeformationPlan* completedDeformationPlan = nullptr,
+		bool includeDetailedEvidence = true);
 	TERRAENGINE_API VirtualGeometryViewDiagnosticsSnapshot BuildVirtualGeometryHiZDiagnostics(const VirtualGeometryHiZDiagnosticsInput& input);
 	TERRAENGINE_API void AddVirtualGeometryFailOpenDiagnostic(RenderDiagnosticsSummary& summary, const TerraEngine::UUID& meshId, const VirtualGeometryDrawRange& range);
 	TERRAENGINE_API VirtualGeometrySchedulerDiagnostics BuildVirtualGeometrySchedulerDiagnostics(std::string owningSystem, std::string schedulerPhase, std::vector<std::string> readResources, std::vector<std::string> writeResources, std::string workerSafePreparation, std::string protectedBoundary, std::string visibilityBoundary);
