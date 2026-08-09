@@ -1,0 +1,23 @@
+# Benchmark captures, profiler transcripts, screenshots, and soak output are
+# generated evidence. Keep them local so multi-gigabyte runs cannot be staged.
+/RendererPerformanceBaseline/results/
+
+# These renderer snapshots describe one workstation or an unavailable historic
+# capture. They are not portable source fixtures and currently have no consumer.
+/RendererPerformanceBaseline/capture-manifest.schema.json
+/RendererPerformanceBaseline/crowd-animated-baseline.json
+/RendererPerformanceBaseline/frame-publication-baseline-validation.json
+/RendererPerformanceBaseline/frame-publication-baseline.json
+
+# Animation evidence is produced by test and capture workflows. Source inputs
+# belong beside their manifests; generated pass/fail reports do not.
+/Animation/Results/
+/Animation/RecordingOutputRoot/
+
+# Import-validation Library state is rebuilt by the editor. Keeping it local
+# preserves convenient startup caches without committing session state.
+/Animation/ImportValidation/Library/
+
+# Legacy profiler documents are retained locally for ad-hoc compatibility
+# inspection, but no current test or tool consumes them.
+/Profiling/

@@ -227,10 +227,11 @@ set(ENGINE_SOURCES
 	Engine/Renderer/RenderSystem.cpp
 	Engine/Renderer/Graph/RenderDiagnostics.cpp
 	Engine/Renderer/Graph/RenderFrameBreakdown.cpp
+	Engine/Renderer/Graph/RenderFramePublication.cpp
 	Engine/Renderer/Graph/RenderFrameSnapshot.cpp
 	Engine/Renderer/Graph/RenderGraph.cpp
-	Engine/Renderer/Graph/RenderSubmissionPlan.cpp
 	Engine/Renderer/Graph/RenderWorkerTaskGroup.cpp
+	Engine/Renderer/Backend/RenderBackendWork.cpp
 	Engine/Renderer/Graph/RenderWorkPacket.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanContext.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanPresentationLifecycle.cpp
@@ -357,9 +358,10 @@ set(ENGINE_HEADERS
 	Engine/Renderer/RenderTypes.h
 	Engine/Renderer/Graph/RenderDiagnostics.h
 	Engine/Renderer/Graph/RenderFrameBreakdown.h
+	Engine/Renderer/Graph/RenderFramePublication.h
 	Engine/Renderer/Graph/RenderFrameSnapshot.h
 	Engine/Renderer/Graph/RenderGraph.h
-	Engine/Renderer/Graph/RenderSubmissionPlan.h
+	Engine/Renderer/Backend/RenderBackendWork.h
 	Engine/Renderer/Graph/RenderWorkerTaskGroup.h
 	Engine/Renderer/Graph/RenderWorkPacket.h
 	Engine/Renderer/RHI/RHIDefinitions.h
@@ -654,6 +656,7 @@ set_target_properties(simdjson PROPERTIES CXX_SCAN_FOR_MODULES OFF)
 # Benchmark/test schema validation is kept in its feature tool directory and
 # relies only on TerraEngine's already vendored JSON implementation.
 add_subdirectory(Tools/VirtualGeometry)
+add_subdirectory(Tools/FramePublication)
 
 set(FASTGLTF_ENABLE_TESTS OFF CACHE BOOL "Disable fastgltf tests" FORCE)
 set(FASTGLTF_ENABLE_EXAMPLES OFF CACHE BOOL "Disable fastgltf examples" FORCE)

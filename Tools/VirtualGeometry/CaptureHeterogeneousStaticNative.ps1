@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
 	[string]$Output = 'Tests/Fixtures/RendererPerformanceBaseline/results/final/heterogeneous-static-native-60s.json',
-	[string]$BenchmarkExecutable = 'out/build/RelWithDebInfo/Build/Tools/TerraEngineRendererTopologyBenchmark.exe',
+	[string]$BenchmarkExecutable = 'out/build/RelWithDebInfo/Tools/VirtualGeometry/TerraEngineRendererTopologyBenchmark.exe',
 	[ValidateRange(1,86400)][int]$DurationSeconds = 60,
 	[ValidateRange(1,600000)][int]$SampleIntervalMilliseconds = 1000
 )
@@ -43,7 +43,7 @@ foreach($sample in @($capture.rawSamples))
 {
 	if($sample.availability -ne 'measured' -or
 		[UInt64]$sample.distinctMaterialGroupCount -ne 4000 -or
-		[UInt64]$sample.fallbackCommandCount -ne 4000 -or
+		[UInt64]$sample.singletonOrdinalCount -ne 4000 -or
 		[UInt64]$sample.durationNanoseconds -eq 0)
 	{
 		throw 'Renderer topology capture contains a sample without complete unique-material fallback evidence.'

@@ -1,7 +1,7 @@
 # Measures installed-editor frame timing with the Profiler window closed and
-# open-idle in alternating order. Each sample launches a clean editor process,
-# opens the unchanged authored crowd scene without saving it, records unlimited
-# profiler history, and retains the source summary used for the paired calculation.
+# open-idle in alternating order. Each pair shares one clean editor process so
+# startup, asset residency, and shader warmup cannot be mistaken for profiler
+# overhead. The authored crowd scene is opened without saving it.
 [CmdletBinding()]
 param(
 	[string]$InstalledEditor = 'out/build/RelWithDebInfo/Build/Editor/TerraEngine-Editor.exe',
@@ -11,7 +11,7 @@ param(
 	[int]$PairCount = 5,
 	[ValidateRange(1, 300)]
 	[int]$CaptureDurationSeconds = 60,
-	[int]$McpPort = 43129,
+	[int]$McpPort = 43155,
 	[switch]$ReuseExistingRuns
 )
 
@@ -47,55 +47,65 @@ if(-not (Test-Path -LiteralPath $crowdScenePath -PathType Leaf)) {
 	throw "The profiler crowd scene does not exist: $crowdScenePath"
 }
 $crowdSceneHashBefore = (Get-FileHash -LiteralPath $crowdScenePath -Algorithm SHA256).Hash.ToLowerInvariant()
+$initialEditors = @(Get-Process -Name 'TerraEngine-Editor' -ErrorAction SilentlyContinue)
+if($initialEditors.Count -ne 0) {
+	throw 'Profiler idle-overhead measurement starts and owns exactly one editor per pair.'
+}
 
 $measurements = [Collections.Generic.List[object]]::new()
-for($pair = 1; $pair -le $PairCount; ++$pair)
+$runDirectory = Join-Path $outputRoot 'paired-session'
+$summaryPath = Join-Path $runDirectory 'live-visual-summary.json'
+if(-not $ReuseExistingRuns -or -not (Test-Path -LiteralPath $summaryPath -PathType Leaf))
 {
-	# AB/BA alternation reduces order, temperature, and residency bias.
-	$order = if(($pair % 2) -eq 1) { @('closed', 'open-idle') } else { @('open-idle', 'closed') }
+	$arguments = @{
+		InstalledEditor = $InstalledEditor
+		Project = $Project
+		Asset = 'Assets/ValidationModels/DenseAnimatedVG/CesiumMan.glb'
+		Prefab = 'Assets/ValidationModels/DenseAnimatedVG/CesiumMan_Generated/CesiumMan.teprefab'
+		# Scene.tescene is the project's startup scene. The adapter never saves it.
+		OutputDirectory = $runDirectory
+		# This harness renders one validation character, so use the close side view
+		# proven by the dense-animation visual smoke. The wide crowd camera leaves
+		# a single character below the meaningful-luminance evidence threshold even
+		# though rendering and animation are both healthy.
+		ValidationCameraPosition = @(3.0, 0.0, 0.75)
+		ValidationCameraTarget = @(0.0, 0.0, 0.75)
+		SoakDurationSeconds = 1
+		SoakSampleIntervalSeconds = 1
+		McpPort = $McpPort
+		ValidationRoute = 'hardware'
+		RepresentationRoute = 'virtual-hardware'
+		DiagnosticsViewType = 'Game'
+		PrefabRequestedAnimationMode = 1
+		ProfilerMaxFrames = 0
+		ProfilerCaptureDurationSeconds = 1
+		SkipProfilerCapture = $true
+		# All five AB/BA pairs run in one Play Mode session. This isolates window
+		# visibility from project reload, asset residency, and listener restarts.
+		ProfilerIdlePairedMeasurement = $true
+		ProfilerIdlePairCount = $PairCount
+		ProfilerIdleMeasurementDurationSeconds = $CaptureDurationSeconds
+		ProfilerIdleMeasurementIntervalMilliseconds = 100
+		EnterPlayMode = $true
+		ExpectAnimatedChange = $true
+	}
+	& $captureScript @arguments
+	if(-not $?) { throw 'Profiler paired session failed.' }
+}
+$summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+$pairedTiming = $summary.profilerIdleEvidence
+if($pairedTiming.status -ne 'measured' -or [int]$pairedTiming.pairCount -ne $PairCount) {
+	throw 'Profiler paired session did not publish every requested condition pair.'
+}
+foreach($pairEvidence in @($pairedTiming.pairs))
+{
+	$pair = [int]$pairEvidence.pair
+	$order = @($pairEvidence.order)
 	foreach($state in $order)
 	{
-		$runDirectory = Join-Path $outputRoot ("pair-{0:D2}-{1}" -f $pair, $state)
-		$summaryPath = Join-Path $runDirectory 'live-visual-summary.json'
-		if(-not $ReuseExistingRuns -or -not (Test-Path -LiteralPath $summaryPath -PathType Leaf))
-		{
-			$arguments = @{
-			InstalledEditor = $InstalledEditor
-			Project = $Project
-			Asset = 'Assets/ValidationModels/DenseAnimatedVG/CesiumMan.glb'
-			Prefab = 'Assets/ValidationModels/DenseAnimatedVG/CesiumMan_Generated/CesiumMan.teprefab'
-			# Scene.tescene is the project's recorded startup scene. Avoid a redundant
-			# scene.open mutation; this runner verifies its bytes after every pair.
-			OutputDirectory = $runDirectory
-			ValidationCameraPosition = @(0.0, 0.5, 1.0)
-			ValidationCameraTarget = @(0.0, 0.5, 0.0)
-			SoakDurationSeconds = 1
-			SoakSampleIntervalSeconds = 1
-			McpPort = $McpPort
-			ValidationRoute = 'hardware'
-			RepresentationRoute = 'virtual-hardware'
-			DiagnosticsViewType = 'Game'
-			PrefabRequestedAnimationMode = 1
-			ProfilerMaxFrames = 0
-			# Capture coherence is verified separately from the idle-window phase.
-			# Keep this per-run artifact short; the timing gate below samples frame
-			# deltas only while the profiler state is idle.
-			ProfilerCaptureDurationSeconds = 1
-			ProfilerIdleMeasurementDurationSeconds = $CaptureDurationSeconds
-			ProfilerIdleMeasurementIntervalMilliseconds = 100
-			EnterPlayMode = $true
-			ExpectAnimatedChange = $true
-			}
-			if($state -eq 'open-idle') { $arguments.ProfilerIdleMeasurementWindowVisible = $true }
-			& $captureScript @arguments
-			# Invoking another PowerShell script does not reliably populate
-			# $LASTEXITCODE. The automatic success flag is the authoritative status
-			# for this script-to-script boundary and remains compatible with strict
-			# mode when the child succeeds without launching a native executable.
-			if(-not $?) { throw "Profiler pair $pair/$state failed." }
-		}
-		$summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
-		$timing = $summary.profilerIdleEvidence
+		$timing = if($state -eq 'open-idle') {
+			$pairEvidence.conditions.openIdle
+		} else { $pairEvidence.conditions.closed }
 		if($timing.status -ne 'measured' -or [uint64]$timing.sampleCount -eq 0) {
 			throw "Profiler pair $pair/$state did not publish a measured idle sample set."
 		}
@@ -126,30 +136,45 @@ for($pair = 1; $pair -le $PairCount; ++$pair)
 	$deltaPercent = if($closed.medianMs -gt 0.0) {
 		(($open.medianMs - $closed.medianMs) / $closed.medianMs) * 100.0
 	} else { 0.0 }
+	$p95DeltaPercent = if($closed.p95Ms -gt 0.0) {
+		(($open.p95Ms - $closed.p95Ms) / $closed.p95Ms) * 100.0
+	} else { 0.0 }
 	$pairs.Add([ordered]@{
 		pair = $pair
 		closedMedianMs = $closed.medianMs
 		openIdleMedianMs = $open.medianMs
-		deltaPercent = $deltaPercent
-		passed = [Math]::Abs($deltaPercent) -le 2.0
+		medianDeltaPercent = $deltaPercent
+		closedP95Ms = $closed.p95Ms
+		openIdleP95Ms = $open.p95Ms
+		p95DeltaPercent = $p95DeltaPercent
+		passed = [Math]::Abs($deltaPercent) -le 2.0 -and
+			[Math]::Abs($p95DeltaPercent) -le 2.0
 	})
 }
 
-# Compare the median editor frame time for the two conditions. Retain each pair
-# and its local delta for outlier diagnosis, but decide the gate from the
-# medians across every AB/BA pair so one cold-launch sample cannot replace the
-# aggregate with an unintended "every launch must pass" rule.
+# Retain the raw condition medians and p95s for diagnosis, but evaluate the
+# matched AB/BA experiment from the median of its paired percentage deltas. A
+# ratio of independently aggregated condition values can pair samples from
+# different workload phases and report a direction that no median pair saw.
 $aggregateClosedMedianMs = Get-Median @($pairs | ForEach-Object { [double]$_.closedMedianMs })
 $aggregateOpenIdleMedianMs = Get-Median @($pairs | ForEach-Object { [double]$_.openIdleMedianMs })
-$aggregateDeltaPercent = if($aggregateClosedMedianMs -gt 0.0) {
-	(($aggregateOpenIdleMedianMs - $aggregateClosedMedianMs) / $aggregateClosedMedianMs) * 100.0
-} else { 0.0 }
-$aggregatePassed = [Math]::Abs($aggregateDeltaPercent) -le 2.0
+$aggregateDeltaPercent = Get-Median @($pairs | ForEach-Object {
+	[double]$_.medianDeltaPercent
+})
+$aggregateClosedP95Ms = Get-Median @($pairs | ForEach-Object { [double]$_.closedP95Ms })
+$aggregateOpenIdleP95Ms = Get-Median @($pairs | ForEach-Object { [double]$_.openIdleP95Ms })
+$aggregateP95DeltaPercent = Get-Median @($pairs | ForEach-Object {
+	[double]$_.p95DeltaPercent
+})
+# Both central tendency and the high-percentile responsiveness gate must pass.
+# This prevents a low median from hiding regular profiler-window stalls.
+$aggregatePassed = [Math]::Abs($aggregateDeltaPercent) -le 2.0 -and
+	[Math]::Abs($aggregateP95DeltaPercent) -le 2.0
 
 $manifest = [ordered]@{
 	schemaVersion = 2
 	capturedAt = [DateTime]::UtcNow.ToString('o')
-	method = 'installed-editor-ab-ba-unlimited-history'
+	method = 'installed-editor-same-process-paired-ab-ba-unlimited-history'
 	pairCount = $PairCount
 	captureDurationSeconds = $CaptureDurationSeconds
 	thresholdPercent = 2.0
@@ -162,10 +187,13 @@ $manifest = [ordered]@{
 	measurements = $measurements
 	pairs = $pairs
 	aggregate = [ordered]@{
-		criterion = 'median-of-paired-condition-medians'
+		criterion = 'median-of-paired-median-and-p95-deltas'
 		closedMedianMs = $aggregateClosedMedianMs
 		openIdleMedianMs = $aggregateOpenIdleMedianMs
-		deltaPercent = $aggregateDeltaPercent
+		medianDeltaPercent = $aggregateDeltaPercent
+		closedP95Ms = $aggregateClosedP95Ms
+		openIdleP95Ms = $aggregateOpenIdleP95Ms
+		p95DeltaPercent = $aggregateP95DeltaPercent
 		passed = $aggregatePassed
 	}
 	passed = $aggregatePassed

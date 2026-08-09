@@ -18,6 +18,10 @@ param(
 	[int]$PrefabInstanceCount = 1,
 	[int]$PrefabRequestedAnimationMode = -1,
 	[string[]]$PrefabDefaultClipAssetIds = @(),
+	# Each entry is a comma-separated clip UUID list for the prefab variant at the
+	# same index. This keeps mixed-skeleton crowds heterogeneous without applying a
+	# clip from one skeleton to an incompatible variant.
+	[string[]]$PrefabVariantDefaultClipAssetIds = @(),
 	[ValidateRange(0, 1048576)]
 	[int]$PrefabDefaultClipStartFrameStep = 0,
 	[double]$PrefabSpacing = 0.0,
@@ -27,6 +31,8 @@ param(
 	[string]$ValidationScenePath = 'Assets/Scenes/VirtualGeometryLive.tescene',
 	[double[]]$ValidationCameraPosition = @(0.0, 0.5, 1.0),
 	[double[]]$ValidationCameraTarget = @(0.0, 0.5, 0.0),
+	[ValidateRange(1.0, 179.0)]
+	[double]$ValidationCameraVerticalFovDegrees = 60.0,
 	[int]$StreamingSettleMilliseconds = 250,
 	[int]$SoakDurationSeconds = 0,
 	[int]$SoakSampleIntervalSeconds = 10,
@@ -39,12 +45,23 @@ param(
 	[int]$ProfilerMaxFrames = 16,
 	[ValidateRange(1, 3600)]
 	[int]$ProfilerCaptureDurationSeconds = 1,
+	# Specialized overhead runners can measure the profiler's idle window without
+	# creating and selecting a capture between paired conditions.
+	[switch]$SkipProfilerCapture,
+	[ValidateRange(0, 3600)]
+	[int]$WarmupSeconds = 0,
 	[switch]$ProfilerWindowVisibleDuringCapture,
 	[ValidateRange(0, 3600)]
 	[int]$ProfilerIdleMeasurementDurationSeconds = 0,
 	[ValidateRange(10, 1000)]
 	[int]$ProfilerIdleMeasurementIntervalMilliseconds = 100,
 	[switch]$ProfilerIdleMeasurementWindowVisible,
+	# A paired run measures both closed and open-idle states inside one Play Mode
+	# session. OpenFirst reverses the order for AB/BA bias control.
+	[switch]$ProfilerIdlePairedMeasurement,
+	[switch]$ProfilerIdleOpenFirst,
+	[ValidateRange(1, 20)]
+	[int]$ProfilerIdlePairCount = 1,
 	[string]$ValidationRoute = '',
 	[ValidateSet('', 'automatic', 'direct', 'virtual-hardware', 'virtual-compute')]
 	[string]$RepresentationRoute = '',
@@ -53,7 +70,12 @@ param(
 	[ValidateSet('', 'off', 'lod', 'cluster', 'meshlet_id', 'bounds', 'culling', 'residency', 'hiz', 'error')]
 	[string]$SceneViewVisualization = '',
 	[switch]$EnterPlayMode,
+	[switch]$UseExistingEditor,
+	[switch]$KeepEditorOpen,
 	[switch]$ExpectAnimatedChange
+	,[switch]$SparseTransformMutation
+	,[ValidateRange(0.01, 100.0)]
+	[double]$SparseTransformPercentPerFrame = 1.0
 )
 
 Set-StrictMode -Version Latest
@@ -106,6 +128,33 @@ if(-not (Test-Path -LiteralPath $projectPath -PathType Container))
 {
 	throw "Required live-test project is missing: $projectPath"
 }
+if($CreateValidationScene -and $CleanupValidationScene)
+{
+	# Interrupted runs can leave their disposable scene behind. Before creating a
+	# replacement, remove only an exact FramePublication-* scene under the
+	# project's Assets/Scenes directory; authored scenes are never candidates.
+	$scenesBoundary = [IO.Path]::GetFullPath(
+		(Join-Path $projectPath 'Assets/Scenes')).TrimEnd('\', '/') +
+		[IO.Path]::DirectorySeparatorChar
+	$validationCandidate = [IO.Path]::GetFullPath((Join-Path $projectPath $ValidationScenePath))
+	if(-not $validationCandidate.StartsWith($scenesBoundary, [StringComparison]::OrdinalIgnoreCase))
+	{
+		throw 'Refusing to clean a validation scene outside Assets/Scenes.'
+	}
+	$relativeCandidate = $validationCandidate.Substring(
+		$projectPath.Length + 1).Replace('\', '/')
+	if($relativeCandidate -notmatch '^Assets/Scenes/FramePublication-[^/]+\.tescene$')
+	{
+		throw 'ValidationScenePath must be an exact disposable Assets/Scenes/FramePublication-*.tescene path.'
+	}
+	foreach($stalePath in @($validationCandidate, "$validationCandidate.meta"))
+	{
+		if(Test-Path -LiteralPath $stalePath -PathType Leaf)
+		{
+			Remove-Item -LiteralPath $stalePath -Force
+		}
+	}
+}
 if([string]::IsNullOrWhiteSpace($ScenePath) -and $PrefabInstanceCount -lt 1)
 {
 	# Disposable raw/prefab captures must create at least one object. Authored
@@ -134,12 +183,22 @@ $materialAssetIdentities = @($MaterialAssetIds | ForEach-Object { ([string]$_).T
 $prefabDefaultClipAssetIdentities = @($PrefabDefaultClipAssetIds | ForEach-Object {
 	([string]$_).Trim().ToLowerInvariant()
 } | Where-Object { $_ })
+$prefabVariantDefaultClipAssetIdentities = [Collections.Generic.List[object]]::new()
+foreach($variantClipList in $PrefabVariantDefaultClipAssetIds)
+{
+	$variantClips = @(([string]$variantClipList).Split(',',
+		[StringSplitOptions]::RemoveEmptyEntries) |
+		ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ })
+	$prefabVariantDefaultClipAssetIdentities.Add($variantClips) | Out-Null
+}
 $prefabVariantIdentities = @($PrefabVariants | ForEach-Object {
 	([string]$_).Trim()
 } | Where-Object { $_ })
 if($prefabVariantIdentities.Count -eq 0)
 {
-	$prefabVariantIdentities = @($Prefab)
+	# Authored-scene validation can intentionally add no objects. In that mode the
+	# existing scene is the workload and the default prefab must not be inferred.
+	$prefabVariantIdentities = @(if($PrefabInstanceCount -gt 0) { $Prefab })
 }
 if($prefabVariantIdentities.Count -gt $PrefabInstanceCount)
 {
@@ -148,6 +207,20 @@ if($prefabVariantIdentities.Count -gt $PrefabInstanceCount)
 if($prefabVariantIdentities.Count -gt 1 -and $prefabDefaultClipAssetIdentities.Count -gt 0)
 {
 	throw 'PrefabDefaultClipAssetIds can only override a single prefab/skeleton workload.'
+}
+if($prefabVariantDefaultClipAssetIdentities.Count -gt $prefabVariantIdentities.Count)
+{
+	throw 'PrefabVariantDefaultClipAssetIds cannot contain more entries than PrefabVariants.'
+}
+foreach($variantClips in $prefabVariantDefaultClipAssetIdentities)
+{
+	foreach($clipAssetIdentity in @($variantClips))
+	{
+		if($clipAssetIdentity -notmatch '^[0-9a-f]{32}$')
+		{
+			throw 'PrefabVariantDefaultClipAssetIds entries must contain comma-separated 32-character hexadecimal UUIDs.'
+		}
+	}
 }
 foreach($clipAssetIdentity in $prefabDefaultClipAssetIdentities)
 {
@@ -706,6 +779,7 @@ function New-UnavailableEvidence([string]$Kind, [string]$Reason)
 }
 
 $editor = $null
+$ownsEditor = $false
 $stdoutTask = $null
 $stderrTask = $null
 $createdValidationScenePath = $null
@@ -746,37 +820,62 @@ $validationRouteOverrideActive = $false
 $representationRouteSet = $null
 $representationRouteReset = $null
 $representationRouteOverrideActive = $false
+$sparseTransformOperationActive = $false
+$sparseTransformOperationId = ''
+$sparseTransformEvidence = New-UnavailableEvidence 'sparse-transform-mutation' 'Sparse transform mutation was not requested.'
+$warmupEvidence = New-UnavailableEvidence 'capture-warmup' 'No capture warmup was requested.'
 try
 {
-	$start = [Diagnostics.ProcessStartInfo]::new()
-	$start.FileName = $editorPath
-	$start.Arguments = "--project `"$projectPath`""
-	$start.WorkingDirectory = Split-Path -Parent $editorPath
-	$start.UseShellExecute = $false
-	$start.RedirectStandardOutput = $true
-	$start.RedirectStandardError = $true
-	$start.EnvironmentVariables['TERRAENGINE_EDITOR_PREFS_SESSION_PATH'] =
-		$preferencesPath
-	$start.EnvironmentVariables['TERRAENGINE_SUPPRESS_PROJECT_RECENTS'] = '1'
-	if(-not $EnterPlayMode)
+	if($UseExistingEditor)
 	{
-		# Static capture does not need project simulation readiness, so avoid
-		# briefly rendering the developer's last scene before the disposable
-		# validation scene becomes active.
-		$start.EnvironmentVariables['TERRAENGINE_SUPPRESS_AUTOMATIC_SCENE_OPEN'] = '1'
+		$runningEditors = @(Get-Process -Name 'TerraEngine-Editor' -ErrorAction SilentlyContinue)
+		if($runningEditors.Count -ne 1)
+		{
+			throw 'UseExistingEditor requires exactly one running TerraEngine editor.'
+		}
+		$editor = $runningEditors[0]
 	}
-	# Play Mode readiness is established while the project opens its configured
-	# authored scene. The harness replaces that scene with a disposable one after
-	# MCP becomes ready, but suppressing the startup open would leave the project
-	# readiness gate intentionally false for the entire run.
-	$editor = [Diagnostics.Process]::Start($start)
-	if($null -eq $editor)
+	else
 	{
-		throw 'Installed editor failed to start.'
+		$start = [Diagnostics.ProcessStartInfo]::new()
+		$start.FileName = $editorPath
+		$start.Arguments = "--project `"$projectPath`""
+		$start.WorkingDirectory = Split-Path -Parent $editorPath
+		$start.UseShellExecute = $false
+		# A retained editor outlives this PowerShell invocation. Do not attach its
+		# stdout/stderr to invocation-owned pipes: once the reader tasks go out of
+		# scope, a busy editor can fill a pipe and stall its main thread (including
+		# the MCP listener). Short owned runs retain their diagnostic log capture.
+		$redirectEditorOutput = -not $KeepEditorOpen
+		$start.RedirectStandardOutput = $redirectEditorOutput
+		$start.RedirectStandardError = $redirectEditorOutput
+		$start.EnvironmentVariables['TERRAENGINE_EDITOR_PREFS_SESSION_PATH'] =
+			$preferencesPath
+		$start.EnvironmentVariables['TERRAENGINE_SUPPRESS_PROJECT_RECENTS'] = '1'
+		if(-not $EnterPlayMode -and [string]::IsNullOrWhiteSpace($ScenePath))
+		{
+			# A disposable static capture does not need project simulation readiness,
+			# so avoid briefly rendering the developer's last scene before the
+			# validation scene becomes active. An explicitly requested authored scene
+			# must still open normally so its scene-dependent MCP tools can register.
+			$start.EnvironmentVariables['TERRAENGINE_SUPPRESS_AUTOMATIC_SCENE_OPEN'] = '1'
+		}
+		# Play Mode readiness is established while the project opens its configured
+		# authored scene. The harness replaces that scene with a disposable one after
+		# MCP becomes ready, but suppressing the startup open would leave the project
+		# readiness gate intentionally false for the entire run.
+		$editor = [Diagnostics.Process]::Start($start)
+		if($null -eq $editor)
+		{
+			throw 'Installed editor failed to start.'
+		}
+		$ownsEditor = $true
+		if($redirectEditorOutput)
+		{
+			$stdoutTask = $editor.StandardOutput.ReadToEndAsync()
+			$stderrTask = $editor.StandardError.ReadToEndAsync()
+		}
 	}
-
-	$stdoutTask = $editor.StandardOutput.ReadToEndAsync()
-	$stderrTask = $editor.StandardError.ReadToEndAsync()
 	$deadline = [DateTime]::UtcNow.AddSeconds($StartupTimeoutSeconds)
 	$tools = @()
 	while([DateTime]::UtcNow -lt $deadline)
@@ -819,7 +918,11 @@ try
 						($tools -contains 'renderer.virtualGeometry.validationRoute.set' -and
 							$tools -contains 'renderer.virtualGeometry.validationRoute.reset')) -and
 					(-not $CreateValidationScene -or
-						$tools -contains 'scene.create'))
+						$tools -contains 'scene.create') -and
+					(-not $SparseTransformMutation -or
+						($tools -contains 'renderer.validation.sparseTransform.start' -and
+						 $tools -contains 'renderer.validation.sparseTransform.status' -and
+						 $tools -contains 'renderer.validation.sparseTransform.stop')))
 				{
 					break
 				}
@@ -1088,6 +1191,9 @@ try
 					kind = 'object.create'; localId = $localId; name = $instanceName
 				})
 				$operations.Add([ordered]@{
+					kind = 'object.set_metadata'; target = $target; static = $true
+				})
+				$operations.Add([ordered]@{
 					kind = 'component.set_property'; target = $target
 					component = 'Transform'; property = 'Position'
 					value = @($positionX, $positionY, $positionZ)
@@ -1196,11 +1302,24 @@ try
 				# publication, so no automatic evaluation frame can race a later mutation.
 				$bulkArguments.requestedAnimationMode = $PrefabRequestedAnimationMode
 			}
-			if($prefabDefaultClipAssetIdentities.Count -gt 0)
+			# PowerShell 5 unwraps a single pipeline result into a scalar. Keep the
+			# complete conditional inside an array subexpression so a one-clip prefab
+			# still exposes Count and serializes defaultClipAssetIds as a JSON array.
+			$variantClipIdentities = @(
+				if($variantIndex -lt $prefabVariantDefaultClipAssetIdentities.Count)
+				{
+					$prefabVariantDefaultClipAssetIdentities[$variantIndex]
+				}
+				else
+				{
+					$prefabDefaultClipAssetIdentities
+				}
+			)
+			if($variantClipIdentities.Count -gt 0)
 			{
 				# Clip identities are applied round-robin to private prefab clones. This
 				# produces a heterogeneous workload without per-object live mutations.
-				$bulkArguments.defaultClipAssetIds = $prefabDefaultClipAssetIdentities
+				$bulkArguments.defaultClipAssetIds = $variantClipIdentities
 			}
 			if($PrefabDefaultClipStartFrameStep -gt 0)
 			{
@@ -1308,7 +1427,7 @@ try
 				target = @($ValidationCameraTarget)
 				up = @(0.0, 1.0, 0.0)
 				projection = 'perspective'
-				verticalFovDegrees = 60.0
+				verticalFovDegrees = $ValidationCameraVerticalFovDegrees
 				nearPlane = 0.1
 				farPlane = 100.0
 				width = 480
@@ -1390,8 +1509,44 @@ try
 	$capabilities = Invoke-McpTool `
 		'renderer.virtualGeometry.capabilityEvidence' `
 		([ordered]@{ view = 'Game' })
+	# Warmup begins only after the exact scene, population, routes, and Play state
+	# are active, but it must finish before visual readback as well as profiler
+	# recording. Large crowds can render a safe static fallback while their first
+	# animation/GPU publication settles; grading that transition as the measured
+	# frame would produce a false black-capture failure.
+	if($WarmupSeconds -gt 0)
+	{
+		if($tools -notcontains 'profiler.window.visibility.set')
+		{
+			throw 'Warmup frame evidence requires profiler.window.visibility.set.'
+		}
+		$warmupBegin = Invoke-McpTool 'profiler.window.visibility.set' `
+			([ordered]@{ visible = $false })
+		$warmupStartFrame = [UInt64]$warmupBegin.data.editorFrameIndex
+		$warmupWatch = [Diagnostics.Stopwatch]::StartNew()
+		$warmupEnd = $warmupBegin
+		do
+		{
+			Start-Sleep -Seconds 1
+			$warmupEnd = Invoke-McpTool 'profiler.window.visibility.set' `
+				([ordered]@{ visible = $false })
+			$warmupCompletedFrames = [UInt64]$warmupEnd.data.editorFrameIndex -
+				$warmupStartFrame
+		}
+		while($warmupWatch.Elapsed.TotalSeconds -lt $WarmupSeconds -or
+			$warmupCompletedFrames -lt 120)
+		$warmupWatch.Stop()
+		$warmupEvidence = [ordered]@{
+			status = 'measured'
+			kind = 'capture-warmup'
+			seconds = $warmupWatch.Elapsed.TotalSeconds
+			completedFrames = $warmupCompletedFrames
+			startFrameIndex = $warmupStartFrame
+			endFrameIndex = [UInt64]$warmupEnd.data.editorFrameIndex
+		}
+	}
 	$cameraArguments = [ordered]@{
-		name = 'Virtual Geometry Static Baseline'
+		name = 'Virtual Geometry Validation Capture'
 		# Keep capture-only evidence associated with the logical surface under
 		# test without mutating either viewport's authored camera.
 		viewType = $DiagnosticsViewType
@@ -1399,7 +1554,7 @@ try
 		target = @($ValidationCameraTarget)
 		up = @(0.0, 1.0, 0.0)
 		projection = 'perspective'
-		verticalFovDegrees = 60.0
+		verticalFovDegrees = $ValidationCameraVerticalFovDegrees
 		nearPlane = 0.1
 		farPlane = 100.0
 		width = 480
@@ -1458,6 +1613,54 @@ try
 		'camera.capture_custom' `
 		$cameraArguments `
 		$secondPath
+	# A looping animation can legitimately return to the same pose at the two
+	# ordinary capture instants. Preserve that pair, then sample a few bounded,
+	# deliberately non-uniform offsets before declaring the rendered animation
+	# frozen. Static validation never enters this retry path and therefore keeps
+	# its strict two-frame byte-identity contract.
+	$animatedRetryCaptures = @()
+	if($ExpectAnimatedChange)
+	{
+		$gradedHashes = @(
+			(Get-FileHash -LiteralPath $firstPath -Algorithm SHA256).Hash.ToLowerInvariant(),
+			(Get-FileHash -LiteralPath $secondPath -Algorithm SHA256).Hash.ToLowerInvariant())
+		$retryDelaysMilliseconds = @(113, 197, 307)
+		for($retryIndex = 0;
+			$retryIndex -lt $retryDelaysMilliseconds.Count -and
+			@($gradedHashes | Sort-Object -Unique).Count -lt 2;
+			++$retryIndex)
+		{
+			Start-Sleep -Milliseconds $retryDelaysMilliseconds[$retryIndex]
+			$retryPath = Join-Path $outputRoot (
+				"live-vulkan-retry-{0:d2}.png" -f ($retryIndex + 1))
+			$retryEnvelope = Invoke-McpPngCapture `
+				'camera.capture_custom' `
+				$cameraArguments `
+				$retryPath
+			$retryHash = (Get-FileHash -LiteralPath $retryPath -Algorithm SHA256).
+				Hash.ToLowerInvariant()
+			$animatedRetryCaptures += [ordered]@{
+				path = $retryPath
+				sha256 = $retryHash
+				delayMilliseconds = $retryDelaysMilliseconds[$retryIndex]
+				envelope = $retryEnvelope
+			}
+			$gradedHashes += $retryHash
+		}
+	}
+	$postCaptureAnimationDiagnostics = $null
+	if($tools -contains 'animation.runtime.diagnostics')
+	{
+		# Read the same immutable summary after both images. Comparing its
+		# generation with the pre-warmup snapshot distinguishes a renderer/capture
+		# freeze from an animation authority that never advanced.
+		$postCaptureAnimationDiagnostics = Invoke-McpTool `
+			'animation.runtime.diagnostics' `
+			([ordered]@{
+				includeDetails = $false
+				maximumItems = 256
+			})
+	}
 	$soakEvidence = [ordered]@{
 		status = if($SoakDurationSeconds -gt 0) { 'measured' } else { 'not-requested' }
 		durationSeconds = $SoakDurationSeconds
@@ -1588,6 +1791,11 @@ try
 		}
 		$postPresentCapabilityEvidence += $postPresentCapabilities
 	}
+	$postPresentHashes = @($postPresentCaptures | ForEach-Object { $_.sha256 } | Sort-Object -Unique)
+	$gpuPresentation = Get-PropertyValue (Get-PropertyValue $postCaptureAnimationDiagnostics 'data') 'gpuPresentation'
+	$presentationPackets = @((Get-PropertyValue $gpuPresentation 'packets'))
+	$unsafePresentationPackets = @($presentationPackets | Where-Object { [bool](Get-PropertyValue $_ 'safeFallback') })
+	$healthyAnimatedPresentation = $null -ne $gpuPresentation -and [UInt64](Get-PropertyValue $gpuPresentation 'ownerMappingCount') -gt 0 -and [UInt64](Get-PropertyValue $gpuPresentation 'dispatchCommandCount') -gt 0 -and $presentationPackets.Count -gt 0 -and $unsafePresentationPackets.Count -eq 0
 	# Query once more after the final present for the canonical final snapshot.
 	# The sequence above is retained alongside it for runtime-row provenance.
 	$postCaptureCapabilities = Invoke-McpTool `
@@ -1772,13 +1980,25 @@ try
 		}
 		else
 		{
+			$idlePairEvidence = [Collections.Generic.List[object]]::new()
+			$idlePairTotal = if($ProfilerIdlePairedMeasurement) { $ProfilerIdlePairCount } else { 1 }
+			for($idlePairIndex = 1; $idlePairIndex -le $idlePairTotal; ++$idlePairIndex)
+			{
+				$pairOpenFirst = [bool]$ProfilerIdleOpenFirst
+				if(($idlePairIndex % 2) -eq 0) { $pairOpenFirst = -not $pairOpenFirst }
+				$idleMeasurementStates = if($ProfilerIdlePairedMeasurement) {
+					if($pairOpenFirst) { @($true, $false) } else { @($false, $true) }
+				} else { @([bool]$ProfilerIdleMeasurementWindowVisible) }
+				$idleConditionEvidence = [ordered]@{}
+			foreach($idleWindowVisible in $idleMeasurementStates)
+			{
 			try
 			{
 				# This phase intentionally runs while the Profiler is idle. Recording
 				# would measure capture instrumentation as well as window presentation
 				# and would therefore not answer the open-idle performance question.
 				Invoke-McpTool 'profiler.window.visibility.set' ([ordered]@{
-					visible = [bool]$ProfilerIdleMeasurementWindowVisible
+					visible = [bool]$idleWindowVisible
 				}) | Out-Null
 				Start-Sleep -Milliseconds 250
 				$idleWatch = [Diagnostics.Stopwatch]::StartNew()
@@ -1786,8 +2006,13 @@ try
 				while($idleWatch.Elapsed.TotalSeconds -lt $ProfilerIdleMeasurementDurationSeconds)
 				{
 					$timingSample = Invoke-McpTool 'profiler.window.visibility.set' ([ordered]@{
-						visible = [bool]$ProfilerIdleMeasurementWindowVisible
+						visible = [bool]$idleWindowVisible
 					})
+					$engineCpuTimeMs = [double](Get-PropertyValue $timingSample.data 'engineCpuTimeMs')
+					$engineCpuTimeValid = [bool](Get-PropertyValue $timingSample.data 'engineCpuTimeValid')
+					$finiteEngineCpuTime = $engineCpuTimeValid -and
+						-not [double]::IsNaN($engineCpuTimeMs) -and
+						-not [double]::IsInfinity($engineCpuTimeMs) -and $engineCpuTimeMs -ge 0.0
 					$frameTimeMs = [double](Get-PropertyValue $timingSample.data 'editorFrameTimeMs')
 					$finiteFrameTime = -not [double]::IsNaN($frameTimeMs) -and -not [double]::IsInfinity($frameTimeMs)
 					$profilerWindowDrawMs = [double](Get-PropertyValue $timingSample.data 'profilerWindowDrawMs')
@@ -1799,11 +2024,14 @@ try
 					$presentUiMs = [double](Get-PropertyValue $timingSample.data 'presentUiMs')
 					$presentUiValid = [bool](Get-PropertyValue $timingSample.data 'presentUiValid')
 					$finitePresentUi = $presentUiValid -and -not [double]::IsNaN($presentUiMs) -and -not [double]::IsInfinity($presentUiMs) -and $presentUiMs -ge 0.0
-					if($finiteFrameTime -and $frameTimeMs -gt 0.0)
+					if($finiteEngineCpuTime)
 					{
 						$idleSamples.Add([ordered]@{
 							elapsedMilliseconds = $idleWatch.Elapsed.TotalMilliseconds
+							engineFrameIndex = [UInt64](Get-PropertyValue $timingSample.data 'engineFrameIndex')
+							engineCpuTimeMs = $engineCpuTimeMs
 							frameTimeMs = $frameTimeMs
+							editorFrameTimeValid = $finiteFrameTime -and $frameTimeMs -gt 0.0
 							editorFrameIndex = [UInt64](Get-PropertyValue $timingSample.data 'editorFrameIndex')
 							profilerWindowDrawFrameIndex = [UInt64](Get-PropertyValue $timingSample.data 'profilerWindowDrawFrameIndex')
 							profilerWindowDrawMs = $profilerWindowDrawMs
@@ -1824,7 +2052,7 @@ try
 					throw 'Profiler idle measurement produced no valid completed frame-delta samples.'
 				}
 				$sortedIdleFrameTimes = @($idleSamples | ForEach-Object {
-					[double]$_.frameTimeMs
+					[double]$_.engineCpuTimeMs
 				} | Sort-Object)
 				$medianIndex = [int][Math]::Floor(($sortedIdleFrameTimes.Count - 1) * 0.50)
 				$p95Index = [int][Math]::Min($sortedIdleFrameTimes.Count - 1,
@@ -1878,13 +2106,14 @@ try
 				}
 				$imguiRenderTiming = & $getStageTimingSummary 'imguiRenderMs' 'imguiRenderValid' 'ImGui::Render CPU duration'
 				$presentUiTiming = & $getStageTimingSummary 'presentUiMs' 'presentUiValid' 'VulkanContext::PresentEditor CPU duration'
+				$hostFrameTiming = & $getStageTimingSummary 'frameTimeMs' 'editorFrameTimeValid' 'Editor host frame delta'
 				$profilerIdleEvidence = [ordered]@{
 					status = 'measured'
 					kind = 'profiler-open-idle-overhead'
-					windowVisible = [bool]$ProfilerIdleMeasurementWindowVisible
+					windowVisible = [bool]$idleWindowVisible
 					profilerState = 'idle'
-					metric = 'editor-host-frame-delta'
-					timingSource = 'ImGuiIO.DeltaTime'
+					metric = 'engine-cpu-time'
+					timingSource = 'Engine::Update editor-excluded wall duration'
 					durationSeconds = $idleWatch.Elapsed.TotalSeconds
 					sampleIntervalMilliseconds = $ProfilerIdleMeasurementIntervalMilliseconds
 					sampleCount = $idleSamples.Count
@@ -1894,6 +2123,7 @@ try
 					minimumMs = $sortedIdleFrameTimes[0]
 					maximumMs = $sortedIdleFrameTimes[-1]
 					profilerWindowDrawTiming = $profilerWindowDrawTiming
+					hostFrameTiming = $hostFrameTiming
 					imguiRenderTiming = $imguiRenderTiming
 					presentUiTiming = $presentUiTiming
 					samples = $idleSamples
@@ -1911,9 +2141,35 @@ try
 				}
 				catch { }
 			}
+				$idleConditionName = if($idleWindowVisible) { 'openIdle' } else { 'closed' }
+				$idleConditionEvidence[$idleConditionName] = $profilerIdleEvidence
+			}
+				if($ProfilerIdlePairedMeasurement)
+				{
+					$idlePairEvidence.Add([ordered]@{
+						pair = $idlePairIndex
+						order = @($idleMeasurementStates | ForEach-Object { if($_) { 'open-idle' } else { 'closed' } })
+						conditions = $idleConditionEvidence
+					})
+				}
+			}
+			if($ProfilerIdlePairedMeasurement)
+			{
+				$pairedConditionsMeasured = @($idlePairEvidence | Where-Object {
+					[string]$_.conditions.closed.status -ne 'measured' -or
+					[string]$_.conditions.openIdle.status -ne 'measured'
+				}).Count -eq 0
+				$profilerIdleEvidence = [ordered]@{
+					status = if($pairedConditionsMeasured) { 'measured' } else { 'unavailable' }
+					kind = 'profiler-open-idle-paired-overhead'
+					pairCount = $idlePairEvidence.Count
+					pairs = $idlePairEvidence
+				}
+			}
 		}
 	}
-	if($tools -contains 'profiler.capture.start' -and
+	if(-not $SkipProfilerCapture -and
+		$tools -contains 'profiler.capture.start' -and
 		$tools -contains 'profiler.capture.stop')
 	{
 		$profilerWatch = [Diagnostics.Stopwatch]::StartNew()
@@ -1921,6 +2177,20 @@ try
 		$profilerStopRequested = $false
 	try
 	{
+		if($SparseTransformMutation)
+		{
+			$sparseStart = Invoke-McpTool 'renderer.validation.sparseTransform.start' ([ordered]@{
+				expectedObjectCount = $PrefabInstanceCount
+				percentPerFrame = $SparseTransformPercentPerFrame
+				displacement = 0.01
+			})
+			$sparseTransformOperationId = [string]$sparseStart.data.operationId
+			if([string]::IsNullOrWhiteSpace($sparseTransformOperationId))
+			{
+				throw 'Sparse transform start returned no operation identity.'
+			}
+			$sparseTransformOperationActive = $true
+		}
 		if($tools -contains 'profiler.window.visibility.set')
 		{
 			Invoke-McpTool 'profiler.window.visibility.set' ([ordered]@{
@@ -1942,6 +2212,36 @@ try
 				$ProfilerCaptureDurationSeconds * 1000,
 				$StreamingSettleMilliseconds))
 			$profilerStop = Invoke-McpTool 'profiler.capture.stop'
+			if($sparseTransformOperationActive)
+			{
+				$sparseStop = Invoke-McpTool 'renderer.validation.sparseTransform.stop' ([ordered]@{
+					operationId = $sparseTransformOperationId
+				})
+				$sparseTransformOperationActive = $false
+				# Stop prevents new batches, while the last already-enqueued batch may
+				# still need one protected scene-mutation flush. Poll its exact status
+				# instead of weakening the evidence gate or racing that boundary.
+				$sparseFinal = $sparseStop
+				$sparseDeadline = [DateTime]::UtcNow.AddSeconds(30)
+				while(-not [bool]$sparseFinal.data.failed -and
+					[UInt64]$sparseFinal.data.pendingMutationCount -ne 0 -and
+					[DateTime]::UtcNow -lt $sparseDeadline)
+				{
+					Start-Sleep -Milliseconds 100
+					$sparseFinal = Invoke-McpTool 'renderer.validation.sparseTransform.status' ([ordered]@{
+						operationId = $sparseTransformOperationId
+					})
+				}
+				$sparseTransformEvidence = [ordered]@{
+					status = 'measured'
+					kind = 'sparse-transform-mutation'
+					data = $sparseFinal.data
+				}
+				if([bool]$sparseFinal.data.failed -or [UInt64]$sparseFinal.data.pendingMutationCount -ne 0)
+				{
+					throw 'Sparse transform mutation did not finish with complete protected-commit evidence.'
+				}
+			}
 			# Once stop is accepted, persistence owns this recording. Never issue a
 			# second stop from error cleanup because that could save the finalized
 			# document again under a second timestamp.
@@ -2068,6 +2368,17 @@ try
 		}
 		catch
 		{
+			if($sparseTransformOperationActive)
+			{
+				try
+				{
+					$sparseTransformEvidence = Invoke-McpTool 'renderer.validation.sparseTransform.stop' ([ordered]@{
+						operationId = $sparseTransformOperationId
+					})
+				}
+				catch { }
+				$sparseTransformOperationActive = $false
+			}
 			if($profilerStarted -and -not $profilerStopRequested)
 			{
 				# Stop only a recording that never reached the persistence request.
@@ -2152,6 +2463,20 @@ try
 		throw 'Live Vulkan capture omitted the streaming rejectedPublications counter.'
 	}
 	$rejectedPublicationCount = [UInt64]$rejectedPublicationValue
+	# Keep diagnostic provenance explicit: virtualGeometry.stats is a renderer
+	# diagnostic readback, while the PNGs come from dedicated offscreen camera
+	# targets.  They are sampled in the same post-present window but are not the
+	# same output and must never be interpreted as one frame's counters.
+	$diagnosticProvenance = [ordered]@{
+		statsOperation = 'renderer.virtualGeometry.stats'
+		statsViewType = $DiagnosticsViewType
+		statsOutput = 'renderer-diagnostic-readback'
+		captureOperation = 'camera.capture_custom'
+		captureOutput = 'dedicated-offscreen-png-readback'
+		postPresentFrameIds = @($postPresentCaptures | ForEach-Object { $_.frameId })
+		statsCounterFrameId = Get-PropertyValue (Get-PropertyValue $postCaptureStats 'data') 'counterFrameId'
+		statsDiagnosticsFrameId = Get-PropertyValue (Get-PropertyValue $postCaptureStats 'data') 'diagnosticsFrameId'
+	}
 	$firstHash = (Get-FileHash -LiteralPath $firstPath -Algorithm SHA256).Hash.ToLowerInvariant()
 	$secondHash = (Get-FileHash -LiteralPath $secondPath -Algorithm SHA256).Hash.ToLowerInvariant()
 	# Store coarse image-content metrics with every graded frame. A valid PNG and
@@ -2163,6 +2488,39 @@ try
 	$warmupVisualContentValid = Test-MeaningfulPngMetrics $warmupMetrics
 	$firstVisualContentValid = Test-MeaningfulPngMetrics $firstMetrics
 	$secondVisualContentValid = Test-MeaningfulPngMetrics $secondMetrics
+	$captureEvidence = @(
+		[ordered]@{
+			path = $firstPath
+			sha256 = $firstHash
+			bytes = [UInt64](Get-Item -LiteralPath $firstPath).Length
+			metrics = $firstMetrics
+			envelope = $first
+		},
+		[ordered]@{
+			path = $secondPath
+			sha256 = $secondHash
+			bytes = [UInt64](Get-Item -LiteralPath $secondPath).Length
+			metrics = $secondMetrics
+			envelope = $second
+		}
+	)
+	foreach($retryCapture in $animatedRetryCaptures)
+	{
+		$retryMetrics = Get-PngFrameMetrics $retryCapture.path
+		$captureEvidence += [ordered]@{
+			path = $retryCapture.path
+			sha256 = $retryCapture.sha256
+			bytes = [UInt64](Get-Item -LiteralPath $retryCapture.path).Length
+			metrics = $retryMetrics
+			delayMilliseconds = $retryCapture.delayMilliseconds
+			envelope = $retryCapture.envelope
+		}
+	}
+	$allCaptureVisualContentValid = @($captureEvidence | Where-Object {
+		-not (Test-MeaningfulPngMetrics $_.metrics)
+	}).Count -eq 0
+	$uniqueCaptureHashCount = @(
+		$captureEvidence.sha256 | Sort-Object -Unique).Count
 	$summary = [ordered]@{
 		schemaVersion = 1
 		product = 'virtual-geometry-production'
@@ -2186,7 +2544,7 @@ try
 		validationCameraConfiguration = [ordered]@{
 			position = @($ValidationCameraPosition)
 			target = @($ValidationCameraTarget)
-			verticalFovDegrees = 60.0
+			verticalFovDegrees = $ValidationCameraVerticalFovDegrees
 		}
 		validationLight = $validationLight
 		playSceneSave = $playSceneSave
@@ -2222,6 +2580,8 @@ try
 			objects = $instances
 			prefabVariants = @($prefabVariantIdentities)
 			defaultClipAssetIds = @($prefabDefaultClipAssetIdentities)
+			variantDefaultClipAssetIds = @($prefabVariantDefaultClipAssetIdentities |
+				ForEach-Object { @($_) })
 			defaultClipStartFrameStep = $PrefabDefaultClipStartFrameStep
 			bulkTransactionalPublication = $usedBulkRawPublication
 			objectNames = $instanceNames
@@ -2240,15 +2600,26 @@ try
 			}
 		}
 		animationDiagnostics = $animationDiagnostics
+		postCaptureAnimationDiagnostics = $postCaptureAnimationDiagnostics
 		capabilityEvidence = $capabilities
 		postCaptureCapabilityEvidence = $postCaptureCapabilities
 		postPresentCaptures = $postPresentCaptures
+		postPresentIdentity = [ordered]@{
+			captureCount = $postPresentCaptures.Count
+			uniqueCaptureHashCount = $postPresentHashes.Count
+			changingCaptureHashes = $postPresentHashes.Count -gt 1
+			healthyAnimatedPresentation = $healthyAnimatedPresentation
+			ownerMappingCount = [UInt64](Get-PropertyValue $gpuPresentation 'ownerMappingCount')
+			dispatchCommandCount = [UInt64](Get-PropertyValue $gpuPresentation 'dispatchCommandCount')
+			safeFallbackPacketCount = $unsafePresentationPackets.Count
+		}
 		postPresentCapabilityEvidence = $postPresentCapabilityEvidence
 		postWarmupCaptureStats = $postWarmupCaptureStats
 		postWarmupCaptureAsset = $postWarmupCaptureAsset
 		postFirstCaptureStats = $postFirstCaptureStats
 		postFirstCaptureAsset = $postFirstCaptureAsset
 		postCaptureStats = $postCaptureStats
+		diagnosticProvenance = $diagnosticProvenance
 		postCaptureAsset = $postCaptureAsset
 		streamingPublicationEvidence = [ordered]@{
 			rejectedPublications = $rejectedPublicationCount
@@ -2260,11 +2631,14 @@ try
 			warmupPassed = $warmupVisualContentValid
 			firstPassed = $firstVisualContentValid
 			secondPassed = $secondVisualContentValid
+			allCapturesPassed = $allCaptureVisualContentValid
 		}
 		pickingEvidence = $pickingEvidence
 		shadowEvidence = $shadowEvidence
 		editorWindowEvidence = $editorWindowEvidence
 		profilerEvidence = $profilerEvidence
+		warmupEvidence = $warmupEvidence
+		sparseTransformEvidence = $sparseTransformEvidence
 		profilerIdleEvidence = $profilerIdleEvidence
 		soakEvidence = $soakEvidence
 		cameraReview = [ordered]@{
@@ -2285,23 +2659,9 @@ try
 			metrics = $warmupMetrics
 			envelope = $warmup
 		}
-		captures = @(
-			[ordered]@{
-				path = $firstPath
-				sha256 = $firstHash
-				bytes = [UInt64](Get-Item -LiteralPath $firstPath).Length
-				metrics = $firstMetrics
-				envelope = $first
-			},
-			[ordered]@{
-				path = $secondPath
-				sha256 = $secondHash
-				bytes = [UInt64](Get-Item -LiteralPath $secondPath).Length
-				metrics = $secondMetrics
-				envelope = $second
-			}
-		)
-		unchangedByteIdentity = $firstHash -eq $secondHash
+		captures = $captureEvidence
+		uniqueCaptureHashCount = $uniqueCaptureHashCount
+		unchangedByteIdentity = $uniqueCaptureHashCount -eq 1
 		expectedFrameIdentity = if($ExpectAnimatedChange) {
 			'animated-change'
 		} else {
@@ -2324,12 +2684,15 @@ try
 	{
 		throw 'Repeated animated live Vulkan captures were byte-identical.'
 	}
+	if($ExpectAnimatedChange -and (-not [bool]$summary.postPresentIdentity.changingCaptureHashes -or -not [bool]$summary.postPresentIdentity.healthyAnimatedPresentation))
+	{
+		throw 'Animated live capture lacked changing post-present hashes or healthy animation presentation evidence.'
+	}
 	if(-not $ExpectAnimatedChange -and -not $summary.unchangedByteIdentity)
 	{
 		throw 'Repeated static live Vulkan captures were not byte-identical.'
 	}
-	if(-not $warmupVisualContentValid -or -not $firstVisualContentValid -or
-		-not $secondVisualContentValid)
+	if(-not $warmupVisualContentValid -or -not $allCaptureVisualContentValid)
 	{
 		# The summary and every PNG remain on disk for diagnosis. Only the process
 		# status changes, preventing standalone black captures from being
@@ -2363,6 +2726,17 @@ finally
 				# renderer failure prevents the transient override reset.
 			}
 		}
+		if($sparseTransformOperationActive -and -not $editor.HasExited)
+		{
+			try
+			{
+				Invoke-McpTool 'renderer.validation.sparseTransform.stop' ([ordered]@{
+					operationId = $sparseTransformOperationId
+				}) | Out-Null
+				$sparseTransformOperationActive = $false
+			}
+			catch { }
+		}
 		if($playEntered -and -not $editor.HasExited)
 		{
 			try
@@ -2379,7 +2753,7 @@ finally
 				# or listener shutdown prevents a final restoration response.
 			}
 		}
-		if(-not $editor.HasExited)
+		if($ownsEditor -and -not $KeepEditorOpen -and -not $editor.HasExited)
 		{
 			[void]$editor.CloseMainWindow()
 			if(-not $editor.WaitForExit(5000))
@@ -2404,6 +2778,10 @@ finally
 				}
 			}
 		}
+		# Once the owned editor has exited, both redirected pipes are closed and
+		# ReadToEndAsync must complete. Drain them here instead of sampling
+		# IsCompleted: the task completion notification can lag process exit by a
+		# scheduler turn, which previously omitted otherwise valid GPU provenance.
 		if($null -ne $stdoutTask)
 		{
 			[IO.File]::WriteAllText(

@@ -174,7 +174,7 @@ namespace
 			if(!topology.valid || topology.records.size() != kRenderableCount
 				|| topology.groupTemplates.size() != kRenderableCount
 				|| !dynamic.valid || !dynamic.groups.empty()
-				|| dynamic.fallbackCommands.size() != kRenderableCount
+				|| dynamic.singletonOrdinals.size() != kRenderableCount
 				|| !dynamic.instances.empty())
 			{
 				throw std::runtime_error(
@@ -192,7 +192,7 @@ namespace
 				{ "groupingNanoseconds", groupingNanoseconds },
 				{ "topologyRecordCount", topology.records.size() },
 				{ "distinctMaterialGroupCount", topology.groupTemplates.size() },
-				{ "fallbackCommandCount", dynamic.fallbackCommands.size() }
+				{ "singletonOrdinalCount", dynamic.singletonOrdinals.size() }
 			});
 			++sampleOrdinal;
 

@@ -1,5 +1,6 @@
 {
-	"version": 1,
+	"version": 2,
+	"comparisonFields": ["sceneHash", "targetIdentities", "cameraUuid", "cameraTransform", "viewport", "quality", "adapter", "driver", "workers", "powerState", "warmupFrames", "timingSources"],
 	"thresholds": {
 		"smallSceneMaxRegressionPercent": 5,
 		"largeSceneMinImprovementPercent": 30,
@@ -43,6 +44,12 @@
 		"Visible-command reuse workloads should refresh streaming from unique visible resources instead of repeated draw-command references."
 	],
 	"workloads": [
+		{ "name": "repeated-static", "renderables": 4000, "materials": 1, "lights": 2, "ui": false, "streamingResources": 0, "immutable": true, "route": "direct", "capture": { "mode": "installed-editor-transient-raw-mesh", "scene": "Assets/Scenes/Scene.tescene", "asset": "Assets/viking_room.obj", "meshAssetId": "87f68c2d68360cb2318f0a77fa3eaf0b", "materialAssetId": "fa653ebd8b3742d77f6b2386ca8a4694", "sourceTriangles": 3828, "bounds": [1.33, 1.46, 1.03], "virtualGeometry": "not-generated-mesh-importer", "rawInstanceScale": 1.0, "prefabInstanceCount": 4000, "materialKeyPolicy": "single-immutable-key", "persistAuthoredScene": false, "status": "ready" } },
+		{ "name": "heterogeneous-static", "renderables": 4000, "materials": 4000, "lights": 2, "ui": false, "streamingResources": 0, "immutable": true, "route": "mixed", "capture": { "mode": "engine-renderer-topology", "scene": "deterministic-in-memory-topology", "materialKeyPolicy": "unique-deterministic-material-identity-per-renderable", "persistAuthoredScene": false, "status": "ready-headless-cpu", "runner": "Tools/VirtualGeometry/CaptureHeterogeneousStaticNative.ps1", "gpuFields": "unavailable-without-live-submission" } },
+		{ "name": "existing-4000-animated", "renderables": 4027, "animators": 4015, "scene": "Scene.tescene", "immutable": true, "route": "mixed" },
+		{ "name": "dense-animated-vg", "renderables": 1, "animators": 1, "scene": "DenseAnimatedVGBenchmark.tescene", "immutable": true, "route": "virtual-geometry" },
+		{ "name": "mixed-animation", "renderables": 10, "animators": 10, "scene": "MixedBenchmark.tescene", "immutable": true, "route": "mixed" },
+		{ "name": "ten-renderable", "renderables": 10, "materials": 3, "lights": 1, "ui": true, "streamingResources": 0, "immutable": true, "route": "direct", "capture": { "mode": "installed-editor-transient-raw-mesh", "scene": "Assets/Scenes/Scene.tescene", "asset": "Assets/viking_room.obj", "meshAssetId": "87f68c2d68360cb2318f0a77fa3eaf0b", "materialAssetIds": ["fa653ebd8b3742d77f6b2386ca8a4694", "60c9af18ea51c6ee9ac8f3e1da50557e", "81139f23f318c10dc998212f5b92814b"], "sourceTriangles": 3828, "bounds": [1.33, 1.46, 1.03], "virtualGeometry": "not-generated-mesh-importer", "rawInstanceScale": 1.0, "prefabInstanceCount": 10, "materialKeyPolicy": "three-immutable-keys-cycled-by-instance-index", "persistAuthoredScene": false, "status": "ready" } },
 		{ "name": "small", "renderables": 10, "materials": 3, "lights": 1, "ui": true, "streamingResources": 0 },
 		{ "name": "medium", "renderables": 250, "materials": 12, "lights": 4, "ui": true, "streamingResources": 16 },
 		{ "name": "large", "renderables": 1000, "materials": 20, "lights": 10, "ui": true, "streamingResources": 0 },

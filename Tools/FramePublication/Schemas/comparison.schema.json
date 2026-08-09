@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["comparable","identity","distributions"],"properties":{"comparable":{"type":"boolean"},"identity":{"type":"object"},"distributions":{"type":"object"},"reason":{"type":"string"}}}

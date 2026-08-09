@@ -854,7 +854,7 @@ $validationErrors = @(
 		ForEach-Object { $_.Value } |
 		Select-Object -Unique)
 $captureRows = @((Get-OptionalProperty $summary 'captures'))
-$captureFilesValid = $captureRows.Count -eq 2 -and @(
+$captureFilesValid = $captureRows.Count -ge 2 -and @(
 	$captureRows | Where-Object {
 		-not (Test-Path -LiteralPath (
 			[string](Get-OptionalProperty $_ 'path')) -PathType Leaf)
@@ -1033,13 +1033,30 @@ if($isAnimatedWorkload -or $isAuthoredSceneWorkload)
 		$validatedStages -contains 'deformation' -and
 		$deformationDiagnosticsValid
 }
-$frameIdentityValid = if($isAnimatedWorkload -or $isAuthoredSceneWorkload)
+$captureHashCount = @($captureRows | ForEach-Object {
+	[string](Get-OptionalProperty $_ 'sha256')
+} | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+	Sort-Object -Unique).Count
+$publishedUniqueCaptureHashCount = Get-OptionalProperty $summary 'uniqueCaptureHashCount'
+$uniqueCaptureHashCount = if($null -ne $publishedUniqueCaptureHashCount)
 {
-	-not [bool](Get-OptionalProperty $summary 'unchangedByteIdentity')
+	[int]$publishedUniqueCaptureHashCount
 }
 else
 {
-	[bool](Get-OptionalProperty $summary 'unchangedByteIdentity')
+	# Older evidence predates the explicit count. Deriving it from retained raw
+	# hashes keeps those artifacts inspectable without weakening new captures.
+	$captureHashCount
+}
+$frameIdentityValid = if($isAnimatedWorkload -or $isAuthoredSceneWorkload)
+{
+	$uniqueCaptureHashCount -ge 2 -and
+		-not [bool](Get-OptionalProperty $summary 'unchangedByteIdentity')
+}
+else
+{
+	$uniqueCaptureHashCount -eq 1 -and
+		[bool](Get-OptionalProperty $summary 'unchangedByteIdentity')
 }
 $routeExecutionValid = if($directRouteWorkload)
 {
@@ -1258,6 +1275,7 @@ $capture = [ordered]@{
 		minimumMeanLuminance = $minimumMeanLuminance
 		unchangedByteIdentity = [bool](
 			Get-OptionalProperty $summary 'unchangedByteIdentity')
+		uniqueCaptureHashCount = $uniqueCaptureHashCount
 		expectedFrameIdentity = if($isAnimatedWorkload -or $isAuthoredSceneWorkload) {
 			'animated-change'
 		} else {

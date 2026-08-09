@@ -1,0 +1,15 @@
+{
+	"schemaVersion": 1,
+	"timingSources": ["engineCpu", "rendererCpu", "animationCpu", "gpuTimestamp"],
+	"warmup": {"minimumSeconds": 30, "minimumFrames": 120},
+	"measuredRuns": 5,
+	"durationSeconds": 60,
+	"scenarios": [
+		{"id":"framepub-4000-shared","population":4000,"routeMix":{"direct":2000,"denseVirtualGeometry":2000},"animationPolicy":"shared","specialistMask":"none","seed":4011},
+		{"id":"framepub-4000-phase-offset","population":4000,"routeMix":{"direct":2000,"denseVirtualGeometry":2000},"animationPolicy":"phase-offset","specialistMask":"none","seed":4012},
+		{"id":"framepub-4000-mixed-clip","population":4000,"routeMix":{"direct":2000,"denseVirtualGeometry":2000},"animationPolicy":"mixed-clip","specialistMask":"none","seed":4013},
+		{"id":"framepub-4000-heterogeneous","population":4000,"routeMix":{"direct":2000,"denseVirtualGeometry":2000},"animationPolicy":"fully-heterogeneous","specialistMask":"none","seed":4014},
+		{"id":"framepub-4000-sparse-specialist","population":4000,"routeMix":{"direct":2000,"denseVirtualGeometry":2000},"animationPolicy":"sparse-specialist","specialistMask":"events,root-motion,attachments,procedural,physics","seed":4015},
+		{"id":"framepub-10000-static-reuse","population":10000,"routeMix":{"direct":10000,"denseVirtualGeometry":0},"animationPolicy":"static-sparse-change","specialistMask":"none","sparseChangePolicy":"one-percent-per-frame","sparseMutationOperation":{"start":"renderer.validation.sparseTransform.start","status":"renderer.validation.sparseTransform.status","stop":"renderer.validation.sparseTransform.stop","percentPerFrame":1.0},"seed":10016}
+	]
+}
